@@ -169,9 +169,9 @@ func TestBacktestCorrelatedPairsConstantColumnNeverCorrelates(t *testing.T) {
 func TestBacktestVerdictTruthTable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name                         string
-		moved, replicated, sloanActs Answer
-		want                         string
+		name                        string
+		moved, replicated, wouldAct Answer
+		want                        string
 	}{
 		{"a move keeps", answer(true), nil, nil, BacktestKeep},
 		{"a replicated box keeps", answer(false), answer(true), nil, BacktestKeep},
@@ -184,7 +184,7 @@ func TestBacktestVerdictTruthTable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := BacktestVerdict(tc.moved, tc.replicated, tc.sloanActs); got != tc.want {
+			if got := BacktestVerdict(tc.moved, tc.replicated, tc.wouldAct); got != tc.want {
 				t.Errorf("BacktestVerdict = %q, want %q", got, tc.want)
 			}
 		})
@@ -366,7 +366,7 @@ func TestBacktestReadInputs(t *testing.T) {
 	files := map[string][]byte{
 		"/docs/regime-events.json": []byte(`[{"date": "2026-10-21", "what": "gate raised", "source": "log", "confirmed": true},
 			{"date": "2026-10-01", "what": "host moved"}]`),
-		"/docs/sloan-answers.json": []byte(`{"rework depth": true, "rho": false, "handoff size": null}`),
+		"/docs/" + answersFileName: []byte(`{"rework depth": true, "rho": false, "handoff size": null}`),
 	}
 	env := Env{ReadFile: func(path string) ([]byte, error) {
 		data, ok := files[path]
@@ -375,18 +375,18 @@ func TestBacktestReadInputs(t *testing.T) {
 		}
 		return data, nil
 	}}
-	events, sloan := ReadBacktestInputs(env, "/docs")
+	events, answers := ReadBacktestInputs(env, "/docs")
 	if len(events) != 2 {
 		t.Fatalf("events = %v, want 2", events)
 	}
 	if !events[0].Confirmed || events[1].Confirmed || events[1].What != "host moved" {
 		t.Errorf("events = %v, want the file's dates, what and confirmed flags", events)
 	}
-	if !isTrue(sloan["rework depth"]) || !isFalse(sloan["rho"]) || sloan["handoff size"] != nil {
-		t.Errorf("sloan = %v, want true, false and unknown", sloan)
+	if !isTrue(answers["rework depth"]) || !isFalse(answers["rho"]) || answers["handoff size"] != nil {
+		t.Errorf("answers = %v, want true, false and unknown", answers)
 	}
-	if _, ok := sloan["mode shift"]; ok {
-		t.Errorf("sloan has an answer for a metric the file does not name")
+	if _, ok := answers["mode shift"]; ok {
+		t.Errorf("answers has an answer for a metric the file does not name")
 	}
 }
 
@@ -398,8 +398,8 @@ func TestBacktestReadInputsMissingOrUnparseableFileIsEmpty(t *testing.T) {
 		}
 		return nil, errors.New("no such file")
 	}}
-	events, sloan := ReadBacktestInputs(env, "/docs")
-	if len(events) != 0 || len(sloan) != 0 {
-		t.Errorf("ReadBacktestInputs = %v, %v; want nothing", events, sloan)
+	events, answers := ReadBacktestInputs(env, "/docs")
+	if len(events) != 0 || len(answers) != 0 {
+		t.Errorf("ReadBacktestInputs = %v, %v; want nothing", events, answers)
 	}
 }

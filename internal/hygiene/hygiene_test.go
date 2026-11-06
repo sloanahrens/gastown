@@ -61,7 +61,7 @@ func blockedFrom(t *testing.T, words ...string) map[string]struct{} {
 
 func scanFS(t *testing.T, fsys fstest.MapFS, allow []Allow) []Finding {
 	t.Helper()
-	findings, err := Scan(fsys, sortedPaths(fsys), DefaultRules(), shippedBlocked(t), allow)
+	findings, _, err := Scan(fsys, sortedPaths(fsys), DefaultRules(), shippedBlocked(t), allow)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -219,16 +219,46 @@ func TestNonPersonalHomeNamesAreExemptByWholeName(t *testing.T) {
 	})
 }
 
-func TestIdentifierShapedDomainIsNotAnEmail(t *testing.T) {
+func TestTitleCaseTopLevelLabelIsStillAnAddress(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{"title-case top label", planted("jane.doe@", "gmail.Com")},
+		{"title-case second label", planted("jane.doe@", "Gmail.Com")},
+		{"upper-case top label", planted("jane.doe@", "gmail.COM")},
+		{"title-case two-letter top label", planted("jane.doe@", "acme.Io")},
+		{"title-case top label outside any list", planted("jane.doe@", "acme.Club")},
+		{"title-case short top label outside any list", planted("jane.doe@", "x.Shop")},
+		// Func and List are shaped like Shop: a Title-case label is a domain
+		// whatever it spells, so these identifier-looking tails are findings.
+		{"title-case identifier-looking top label", planted("jane.doe@", "pkg.Func")},
+		{"title-case method chain tail", planted("jane.doe@", "landworker.RetryBeads.List")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.addr + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != 1 || findings[0].Rule != RuleEmail {
+				t.Fatalf("got %v, want one %q finding", findings, RuleEmail)
+			}
+		})
+	}
+}
+
+func TestIdentifierShapedDomainIsNoAddress(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
 		addr string
 		want int
 	}{
-		{"metric column", planted("x@", "metrics.queueLandingColumn"), 0},
-		{"method chain", planted("show@", "landworker.RetryBeads.List"), 0},
-		{"short identifier", planted("a@", "pkg.Func"), 0},
+		// The reverted-rule row: a camel-case last label is no address (gt-qq01cp).
+		{"metric column, camel-case last label", planted("x@", "metrics.queueLandingColumn"), 0},
+		{"bare identifier top label, camel-case", planted("x@", "metrics.landingColumn"), 0},
+		{"capitalised identifier with a digit", planted("x@", "caller.Retry2"), 0},
+		{"capitalised identifier with an underscore", planted("x@", "caller.Do_thing"), 0},
 		{"upper-case top label is a host", planted("a@", "host.COM"), 1},
 		{"lower-case top label is a host", planted("a@", "host.com"), 1},
 		{"mixed-case host with a lower-case top label", planted("a@", "Host.com"), 1},
@@ -236,6 +266,40 @@ func TestIdentifierShapedDomainIsNotAnEmail(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			line := "contact " + tc.addr + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != tc.want {
+				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
+			}
+			if tc.want == 1 && findings[0].Rule != RuleEmail {
+				t.Errorf("rule = %q, want %q", findings[0].Rule, RuleEmail)
+			}
+		})
+	}
+}
+
+func TestEmailNeedsADottedDomain(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		text string
+		want int
+	}{
+		{"workflow action pin", "actions/checkout@" + "v4", 0},
+		{"image digest", "image@" + "sha256:9e79b8", 0},
+		{"tool tag", "bd@" + "latest", 0},
+		{"source ref", "gt-source@" + "abc", 0},
+		{"short branch", "main@" + "a", 0},
+		{"shell prompt", "user@" + "host:~$", 0},
+		{"one-label domain", "a@" + "host", 0},
+		{"plain address", "a@" + "host.com", 1},
+		{"address in a subdomain", "a@" + "sub.host.co.uk", 1},
+		{"dotted internal host", "a@" + "db.internal", 1},
+		{"one-letter last label", "a@" + "b.c", 0},
+		{"digit last label", "a@" + "x.1", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.text + " please"
 			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
 			if len(findings) != tc.want {
 				t.Fatalf("got %d findings %v, want %d", len(findings), findings, tc.want)
@@ -261,7 +325,7 @@ func TestBlockedWordIsFoundInContentAndInPathsAndNeverEchoed(t *testing.T) {
 		path:             {Data: []byte("nothing here\n")},
 	}
 
-	findings, err := Scan(fsys, sortedPaths(fsys), nil, blocked, nil)
+	findings, _, err := Scan(fsys, sortedPaths(fsys), nil, blocked, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -293,7 +357,7 @@ func TestBlockedWordMatchesWholeWordsOnly(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			findings, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -316,7 +380,7 @@ func TestBlockedWordMatchesWholeWordsOnly(t *testing.T) {
 			{word + "2", 0},
 			{"x" + word, 0},
 		} {
-			findings, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -340,7 +404,7 @@ func TestWordBoundaryIsLettersAndDigitsNotUnderscoreOnly(t *testing.T) {
 		{"zebra2", 0},
 		{"2zebra", 0},
 	} {
-		findings, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
+		findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, nil, blocked, nil)
 		if err != nil {
 			t.Fatalf("Scan: %v", err)
 		}
@@ -496,6 +560,89 @@ func TestForbiddenDirectory(t *testing.T) {
 	}
 }
 
+func TestForbiddenDirectoryContentsAreNotScanned(t *testing.T) {
+	t.Parallel()
+	word := planted("ahr", "ens")
+	body := strings.Join([]string{
+		"intro",
+		"contact " + planted("alice", "@github.com") + " please",
+		"mentions " + word + " in prose",
+		"opened " + planted("/Users/", "zephyr", "/project/file.go"),
+		"wrote " + planted("/private/", "tmp", "/note.txt"),
+		"recorded " + planted("session", "_id: ", "1234abcd", "-", "5678"),
+		"",
+	}, "\n")
+
+	for _, dir := range ForbiddenDirs {
+		t.Run(dir, func(t *testing.T) {
+			path := dir + "/notes.md"
+			assertFindings(t, scanFS(t, singleFile(path, body), nil),
+				Finding{Path: path, Rule: RuleForbiddenDir})
+		})
+	}
+
+	t.Run("a file outside those directories is still scanned", func(t *testing.T) {
+		findings := scanFS(t, singleFile("docs/notes.md", body), nil)
+		for _, rule := range []string{
+			RuleEmail, RuleBlockedWord, RuleHomePath, RulePrivateTemp, RuleAgentSession,
+		} {
+			var found bool
+			for _, finding := range findings {
+				if finding.Rule == rule && finding.Line > 0 {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("rule %q found no line finding outside the forbidden directories", rule)
+			}
+		}
+	})
+}
+
+func TestExcusedForbiddenPathIsReportedAndNotScanned(t *testing.T) {
+	t.Parallel()
+	word := planted("ahr", "ens")
+	body := strings.Join([]string{
+		"contact " + planted("alice", "@github.com") + " please",
+		"mentions " + word + " in prose",
+		"",
+	}, "\n")
+	path := ".beads/backup/events.jsonl"
+	allow := []Allow{{Path: path, Rule: RuleForbiddenDir, Reason: "upstream bead export"}}
+
+	t.Run("excused path is reported and its contents are not scanned", func(t *testing.T) {
+		findings, excused, err := Scan(singleFile(path, body), []string{path}, DefaultRules(), shippedBlocked(t), allow)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		if len(findings) != 0 {
+			t.Errorf("an excused forbidden file produced %d findings %v, want none", len(findings), findings)
+		}
+		want := []ExcusedForbiddenPath{{Path: path, Reason: "upstream bead export"}}
+		if !reflect.DeepEqual(excused, want) {
+			t.Errorf("excused = %v, want %v", excused, want)
+		}
+	})
+
+	t.Run("the row still validates", func(t *testing.T) {
+		if err := validate(t, singleFile(path, body), allow); err != nil {
+			t.Fatalf("ValidateAllow refused an excused forbidden path: %v", err)
+		}
+	})
+
+	t.Run("an unexcused forbidden file still reports its path finding", func(t *testing.T) {
+		other := ".beads/backup/issues.jsonl"
+		findings, excused, err := Scan(singleFile(other, body), []string{other}, DefaultRules(), shippedBlocked(t), allow)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		assertFindings(t, findings, Finding{Path: other, Rule: RuleForbiddenDir})
+		if len(excused) != 0 {
+			t.Errorf("excused = %v, want none", excused)
+		}
+	})
+}
+
 func TestCleanTreeHasNoFindings(t *testing.T) {
 	t.Parallel()
 	fsys := fstest.MapFS{
@@ -537,6 +684,8 @@ func TestAnAddressFollowedByAColonInProseIsAFinding(t *testing.T) {
 		{"xgit user", planted("xgit", "@github.com:org/repo"), 1},
 		{"writer ssh lookalike", planted("writer", "@github.com:org/repo"), 1},
 		{"ssh remote followed by prose", planted("git@", "host: prose"), 1},
+		{"dotless host followed by prose", planted("writer", "@host: prose"), 1},
+		{"dotless host with a path", planted("bob", "@host:/srv/x"), 0},
 		{"address followed by a colon", planted("writer", "@example.com:"), 1},
 	}
 	for _, tc := range cases {
@@ -616,7 +765,7 @@ func TestBlockedFileHoldsOnlyHashes(t *testing.T) {
 
 func TestScanRefusesAMissingFile(t *testing.T) {
 	t.Parallel()
-	if _, err := Scan(fstest.MapFS{}, []string{"docs/missing.md"}, DefaultRules(), nil, nil); err == nil {
+	if _, _, err := Scan(fstest.MapFS{}, []string{"docs/missing.md"}, DefaultRules(), nil, nil); err == nil {
 		t.Fatal("Scan reported a missing file as clean")
 	}
 }
@@ -654,7 +803,7 @@ func TestUnreadableAndMalformedInputsAreErrors(t *testing.T) {
 			{Match: func(string) bool { return false }},
 			{Name: "no matcher"},
 		} {
-			if _, err := Scan(fsys, []string{"docs/a.md"}, []Rule{rule}, nil, nil); err == nil {
+			if _, _, err := Scan(fsys, []string{"docs/a.md"}, []Rule{rule}, nil, nil); err == nil {
 				t.Errorf("Scan accepted rule %q", rule.Name)
 			}
 		}
@@ -662,7 +811,7 @@ func TestUnreadableAndMalformedInputsAreErrors(t *testing.T) {
 
 	t.Run("invalid path", func(t *testing.T) {
 		t.Parallel()
-		if _, err := Scan(singleFile("docs/a.md", "plain text\n"), []string{"../escape"}, DefaultRules(), nil, nil); err == nil {
+		if _, _, err := Scan(singleFile("docs/a.md", "plain text\n"), []string{"../escape"}, DefaultRules(), nil, nil); err == nil {
 			t.Fatal("Scan accepted a path outside its filesystem")
 		}
 	})
@@ -690,7 +839,7 @@ func TestTheScannerDoesNotFlagItsOwnFiles(t *testing.T) {
 	t.Parallel()
 	blocked := shippedBlocked(t)
 	paths := []string{"blocked.sha256", "hygiene.go", "hygiene_test.go"}
-	findings, err := Scan(os.DirFS("."), paths, DefaultRules(), blocked, nil)
+	findings, _, err := Scan(os.DirFS("."), paths, DefaultRules(), blocked, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}

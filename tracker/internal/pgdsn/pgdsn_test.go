@@ -36,13 +36,13 @@ func TestWithoutPassword(t *testing.T) {
 		},
 		{
 			name: "URI form",
-			dsn:  "postgres://tracker:uripw@db.internal/tracker?sslmode=verify-full",
-			want: []string{"postgres://tracker@db.internal/tracker", "sslmode=verify-full"},
+			dsn:  "postgres://tracker:uripw@db.example.test/tracker?sslmode=verify-full",
+			want: []string{"postgres://tracker@db.example.test/tracker", "sslmode=verify-full"},
 			gone: []string{"uripw"},
 		},
 		{
 			name: "URI form with a password in the query",
-			dsn:  "postgres://tracker@db.internal/tracker?sslmode=require&password=qpw",
+			dsn:  "postgres://tracker@db.example.test/tracker?sslmode=require&password=qpw",
 			want: []string{"sslmode=require"},
 			gone: []string{"qpw"},
 		},
@@ -79,9 +79,9 @@ func TestPassword(t *testing.T) {
 		{name: "keyword form", dsn: "host=db password='s3cr t' dbname=tracker", want: "s3cr t"},
 		{name: "keyword form with an escaped quote", dsn: `host=db password='pa\'ss'`, want: "pa'ss"},
 		{name: "keyword form with no password", dsn: "host=db dbname=tracker"},
-		{name: "URI form", dsn: "postgres://tracker:uripw@db.internal/tracker?sslmode=require", want: "uripw"},
-		{name: "URI form with a password in the query", dsn: "postgres://tracker@db.internal/tracker?password=qpw", want: "qpw"},
-		{name: "URI form with no password", dsn: "postgres://tracker@db.internal/tracker"},
+		{name: "URI form", dsn: "postgres://tracker:uripw@db.example.test/tracker?sslmode=require", want: "uripw"},
+		{name: "URI form with a password in the query", dsn: "postgres://tracker@db.example.test/tracker?password=qpw", want: "qpw"},
+		{name: "URI form with no password", dsn: "postgres://tracker@db.example.test/tracker"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -121,15 +121,15 @@ func TestWithDatabase(t *testing.T) {
 		},
 		{
 			name: "URI form",
-			dsn:  "postgres://tracker@db.internal/tracker?sslmode=verify-full",
+			dsn:  "postgres://tracker@db.example.test/tracker?sslmode=verify-full",
 			db:   "restorecheck_probe",
-			want: "postgres://tracker@db.internal/restorecheck_probe?sslmode=verify-full",
+			want: "postgres://tracker@db.example.test/restorecheck_probe?sslmode=verify-full",
 		},
 		{
 			name: "URI form with a dbname in the query",
-			dsn:  "postgres://tracker@db.internal/tracker?dbname=tracker&sslmode=require",
+			dsn:  "postgres://tracker@db.example.test/tracker?dbname=tracker&sslmode=require",
 			db:   "probe",
-			want: "postgres://tracker@db.internal/probe?sslmode=require",
+			want: "postgres://tracker@db.example.test/probe?sslmode=require",
 		},
 	}
 	for _, c := range cases {
@@ -150,7 +150,7 @@ func TestWithDatabase(t *testing.T) {
 // ride in it (gt-p85pw.72).
 func TestErrorsDoNotQuoteTheDSN(t *testing.T) {
 	t.Parallel()
-	const dsn = "postgres://tracker:s3cr3t@db.internal:%zz/tracker"
+	const dsn = "postgres://tracker:s3cr3t@db.example.test:%zz/tracker"
 	for name, f := range map[string]func() (string, error){
 		"WithoutPassword": func() (string, error) { return WithoutPassword(dsn) },
 		"Password":        func() (string, error) { return Password(dsn) },

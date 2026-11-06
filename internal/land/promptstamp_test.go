@@ -20,6 +20,11 @@ func TestPromptStampSHATable(t *testing.T) {
 	const stored = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	seat := promptstamp.Author(polecat.Rig, "opal")
 	stamp := promptstamp.Format(stored, 4096)
+	// crewSeat is the seat the crew branch names and the author its comment
+	// carries: one constant, so a rename cannot leave the comment under a name
+	// the branch does not name, which would make the row pass for the wrong
+	// reason.
+	const crewSeat = "operator"
 	for _, tc := range []struct {
 		name     string
 		work     Work
@@ -40,10 +45,10 @@ func TestPromptStampSHATable(t *testing.T) {
 		{"a comment that is not a stamp", polecat,
 			[]beads.Comment{{Author: seat, Text: "Submitted for landing: " + polecat.Branch}}, ""},
 		{"a bead with no comments", polecat, nil, ""},
-		{"a crew branch has no stored prompt", Work{Rig: "gastown", Branch: "crew/sloan/gt-abc"},
-			[]beads.Comment{{Author: promptstamp.Author(polecat.Rig, "sloan"), Text: stamp}}, ""},
-		{"a branch that names no seat", Work{Rig: "gastown", Branch: "sloan/gt-abc"},
-			[]beads.Comment{{Author: promptstamp.Author(polecat.Rig, "sloan"), Text: stamp}}, ""},
+		{"a crew branch has no stored prompt", Work{Rig: "gastown", Branch: "crew/" + crewSeat + "/gt-abc"},
+			[]beads.Comment{{Author: promptstamp.Author(polecat.Rig, crewSeat), Text: stamp}}, ""},
+		{"a branch that names no seat", Work{Rig: "gastown", Branch: "owner/gt-abc"},
+			[]beads.Comment{{Author: promptstamp.Author(polecat.Rig, crewSeat), Text: stamp}}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

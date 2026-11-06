@@ -248,7 +248,7 @@ func TestOpenShellPrepareRecordsTheRigsWorkspace(t *testing.T) {
 	}{
 		{
 			name:      "the map is keyed by the rig's beads prefix",
-			rigsJSON:  `{"version":1,"rigs":{"` + openshellTestRig + `":{"git_url":"http://host.docker.internal:3000/sloan/gastown.git","beads":{"repo":"","prefix":"gst-"}}}}`,
+			rigsJSON:  `{"version":1,"rigs":{"` + openshellTestRig + `":{"git_url":"http://host.docker.internal:3000/owner/gastown.git","beads":{"repo":"","prefix":"gst-"}}}}`,
 			workspace: `{"default":"customer-zero","rigs":{"gst":"acme"}}`,
 			want:      "acme",
 		},
@@ -631,21 +631,21 @@ func TestOpenShellPrepareRefusesAnUnreadableWorkspaceMap(t *testing.T) {
 			name: "a rig registry with no entry for the rig",
 			prepare: func(t *testing.T, town string) {
 				writeOpenshellFile(t, filepath.Join(town, "settings", "workspaces.json"), `{"default":"customer-zero","rigs":{"gt":"acme"}}`)
-				writeOpenshellFile(t, filepath.Join(town, "mayor", "rigs.json"), `{"version":1,"rigs":{"other":{"git_url":"http://host.docker.internal:3000/sloan/other.git","beads":{"repo":"","prefix":"ot-"}}}}`)
+				writeOpenshellFile(t, filepath.Join(town, "mayor", "rigs.json"), `{"version":1,"rigs":{"other":{"git_url":"http://host.docker.internal:3000/owner/other.git","beads":{"repo":"","prefix":"ot-"}}}}`)
 			},
 		},
 		{
 			name: "a rig entry with no beads prefix",
 			prepare: func(t *testing.T, town string) {
 				writeOpenshellFile(t, filepath.Join(town, "settings", "workspaces.json"), `{"default":"customer-zero","rigs":{"gt":"acme"}}`)
-				writeOpenshellFile(t, filepath.Join(town, "mayor", "rigs.json"), `{"version":1,"rigs":{"`+openshellTestRig+`":{"git_url":"http://host.docker.internal:3000/sloan/gastown.git","beads":{"repo":""}}}}`)
+				writeOpenshellFile(t, filepath.Join(town, "mayor", "rigs.json"), `{"version":1,"rigs":{"`+openshellTestRig+`":{"git_url":"http://host.docker.internal:3000/owner/gastown.git","beads":{"repo":""}}}}`)
 			},
 		},
 		{
 			name: "a rig entry with no beads config",
 			prepare: func(t *testing.T, town string) {
 				writeOpenshellFile(t, filepath.Join(town, "settings", "workspaces.json"), `{"default":"customer-zero","rigs":{"gt":"acme"}}`)
-				writeOpenshellFile(t, filepath.Join(town, "mayor", "rigs.json"), `{"version":1,"rigs":{"`+openshellTestRig+`":{"git_url":"http://host.docker.internal:3000/sloan/gastown.git"}}}`)
+				writeOpenshellFile(t, filepath.Join(town, "mayor", "rigs.json"), `{"version":1,"rigs":{"`+openshellTestRig+`":{"git_url":"http://host.docker.internal:3000/owner/gastown.git"}}}`)
 			},
 		},
 	} {

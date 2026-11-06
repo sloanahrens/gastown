@@ -309,7 +309,7 @@ func TestWorktreeGitdirCheck_RelocatedWorktree(t *testing.T) {
 
 	// Create .git file with OLD prefix path (simulating rsync from another machine)
 	gitFile := filepath.Join(rigDir, "polecats", "nux", rigName, ".git")
-	oldPath := "/Users/olduser/gt/" + rigName + "/.repo.git/worktrees/rig"
+	oldPath := "/Users/user/gt/" + rigName + "/.repo.git/worktrees/rig"
 	if err := os.WriteFile(gitFile, []byte("gitdir: "+oldPath+"\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestWorktreeGitdirCheck_FixReportsIndexPopulateFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitFile := filepath.Join(wtPath, ".git")
-	if err := os.WriteFile(gitFile, []byte("gitdir: /Users/olduser/gt/"+rigName+"/.repo.git/worktrees/rig\n"), 0644); err != nil {
+	if err := os.WriteFile(gitFile, []byte("gitdir: /Users/user/gt/"+rigName+"/.repo.git/worktrees/rig\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 

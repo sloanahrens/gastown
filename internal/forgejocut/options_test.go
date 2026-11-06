@@ -56,6 +56,10 @@ func isTownFile(p string) bool {
 	return false
 }
 
+// githubOrigin is both the origin the fake git reports and the GitHub URL that
+// baseOptions expects a parse to derive from it.
+const githubOrigin = "https://example.com/acme/gastown.git"
+
 // testEnv is the seam set a parse sees: vars as the environment, the test towns
 // as the filesystem, and an origin of the GitHub repository acme/gastown. Town
 // reads as "" unless a test sets it.
@@ -66,7 +70,7 @@ func testEnv(vars map[string]string) Env {
 		IsFile:     isTownFile,
 		Town:       func() string { return "" },
 		Executable: func() (string, error) { return testBinary, nil },
-		Git:        fakeGit{origin: "https://github.com/acme/gastown.git"},
+		Git:        fakeGit{origin: githubOrigin},
 	}
 }
 
@@ -93,11 +97,11 @@ func baseOptions() Options {
 		RigRoot:       "/home/test/gt/gastown",
 		BareRepo:      "/home/test/gt/gastown/.repo.git",
 		Repo:          "acme/gastown",
-		GitHubURL:     "https://github.com/acme/gastown.git",
+		GitHubURL:     githubOrigin,
 		GitHubSlug:    "acme/gastown",
 		ForgejoURL:    "http://127.0.0.1:3000/acme/gastown.git",
 		AdminGitURL:   "http://127.0.0.1:3000/acme/gastown.git",
-		PromoteTarget: "git@github.com:acme/gastown.git",
+		PromoteTarget: "git@example.com:acme/gastown.git",
 		PromoteKey:    "/home/test/.config/gt/promote-gastown.key",
 		MainBranch:    "main",
 		GateWorkflow:  "gate",
@@ -436,8 +440,8 @@ func TestParseNeverEchoesCredentials(t *testing.T) {
 		{name: "an opaque API root with a password", flag: "--api-url", url: "https:user:" + secret + "@forgejo.test"},
 		{name: "a web root with a password", flag: "--web-url", url: "https://user:" + secret + "@web.test"},
 		{name: "a scheme-less web root with a password", flag: "--web-url", url: "user:" + secret + "@web.test"},
-		{name: "a GitHub URL with a password", flag: "--github-url", url: "https://user:" + secret + "@github.com/acme/gastown.git"},
-		{name: "a GitHub ssh URL with a password", flag: "--github-url", url: "ssh://git:" + secret + "@github.com/acme/gastown.git"},
+		{name: "a GitHub URL with a password", flag: "--github-url", url: "https://user:" + secret + "@example.com/acme/gastown.git"},
+		{name: "a GitHub ssh URL with a password", flag: "--github-url", url: "ssh://git:" + secret + "@example.com/acme/gastown.git"},
 		{name: "a Forgejo URL with a password", flag: "--forgejo-url", url: "https://user:" + secret + "@forge.test/acme/gastown.git"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -499,11 +503,11 @@ func TestParseRejectsBadValues(t *testing.T) {
 		"api-url with only a port":            {args: withRig("--api-url", "http://:3000/api/v1"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
 		"api-url with an empty user and pass": {args: withRig("--api-url", "https://:pw@forgejo.test/api/v1"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
 		"web-url with no host":                {args: withRig("--web-url", "http:///x"), message: "--web-url must be an http:// or https:// URL with a host and no credentials"},
-		"github-url with a password":          {args: withRig("--github-url", "https://user:hunter2@github.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
-		"github-url with an ssh password":     {args: withRig("--github-url", "ssh://git:hunter2@github.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
-		"github-url with an https user":       {args: withRig("--github-url", "https://token@github.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"github-url with a password":          {args: withRig("--github-url", "https://user:hunter2@example.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"github-url with an ssh password":     {args: withRig("--github-url", "ssh://git:hunter2@example.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"github-url with an https user":       {args: withRig("--github-url", "https://token@example.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
 		"github-url with no host":             {args: withRig("--github-url", "https:///acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
-		"github-url with ftp":                 {args: withRig("--github-url", "ftp://github.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
+		"github-url with ftp":                 {args: withRig("--github-url", "ftp://example.com/acme/gastown.git"), message: "--github-url must be an http(s) or ssh git URL"},
 		"forgejo-url with a password":         {args: withRig("--forgejo-url", "https://user:hunter2@forge.test/acme/gastown.git"), message: "--forgejo-url must be an http(s) or ssh git URL"},
 		"api-url with no value":               {args: []string{"gastown", "--repo", "acme/gastown", "--api-url"}, message: "--api-url needs a value"},
 		"api-url with a scheme-less password": {args: withRig("--api-url", "user:hunter2@forgejo.test/api/v1"), message: "--api-url must be an http:// or https:// URL with a host and no credentials"},
@@ -524,8 +528,8 @@ func TestParseRejectsBadValues(t *testing.T) {
 		"a bare dash is an unknown option":    {args: []string{"-", "gastown", "--repo", "acme/gastown"}, message: "unknown option: -"},
 		"a value flag at the end":             {args: []string{"gastown", "--repo"}, message: "--repo needs a value"},
 		"forgejo-url with a quote":            {args: withRig("--forgejo-url", `https://x"y/acme/gastown.git`), message: "--forgejo-url may not be empty or hold a newline, quote or backslash"},
-		"github-url with a backslash":         {args: withRig("--github-url", `https://github.com\acme/gastown.git`), message: "--github-url may not be empty or hold a newline, quote or backslash"},
-		"github-url that names no OWNER/NAME": {args: withRig("--github-url", "https://github.com/gastown.git"), message: "--github-url does not name OWNER/NAME"},
+		"github-url with a backslash":         {args: withRig("--github-url", `https://example.com\acme/gastown.git`), message: "--github-url may not be empty or hold a newline, quote or backslash"},
+		"github-url that names no OWNER/NAME": {args: withRig("--github-url", "https://example.com/gastown.git"), message: "--github-url does not name OWNER/NAME"},
 		"XDG_CONFIG_HOME with a quote":        {args: withRig(), vars: map[string]string{"XDG_CONFIG_HOME": `/x"y`}, message: "the promote key path may not be empty or hold a newline, quote or backslash"},
 	}
 	for name, tc := range cases {
@@ -659,11 +663,11 @@ func TestSSHFormTable(t *testing.T) {
 		url  string
 		want string
 	}{
-		"https URL":                 {url: "https://github.com/acme/gastown.git", want: "git@github.com:acme/gastown.git"},
-		"http URL without .git":     {url: "http://github.com/acme/gastown", want: "git@github.com:acme/gastown"},
-		"ssh URL with a user":       {url: "ssh://git@github.com/acme/gastown.git", want: "git@github.com:acme/gastown.git"},
-		"ssh URL without a user":    {url: "ssh://github.com/acme/gastown.git", want: "git@github.com:acme/gastown.git"},
-		"scp-like URL is unchanged": {url: "git@github.com:acme/gastown.git", want: "git@github.com:acme/gastown.git"},
+		"https URL":                 {url: "https://example.com/acme/gastown.git", want: "git@example.com:acme/gastown.git"},
+		"http URL without .git":     {url: "http://example.com/acme/gastown", want: "git@example.com:acme/gastown"},
+		"ssh URL with a user":       {url: "ssh://git@example.com/acme/gastown.git", want: "git@example.com:acme/gastown.git"},
+		"ssh URL without a user":    {url: "ssh://example.com/acme/gastown.git", want: "git@example.com:acme/gastown.git"},
+		"scp-like URL is unchanged": {url: "git@example.com:acme/gastown.git", want: "git@example.com:acme/gastown.git"},
 		"a local path is unchanged": {url: "/srv/repos/gastown.git", want: "/srv/repos/gastown.git"},
 	}
 	for name, tc := range cases {
@@ -684,11 +688,11 @@ func TestSlugTable(t *testing.T) {
 		url  string
 		want string
 	}{
-		"https URL":              {url: "https://github.com/acme/gastown.git", want: "acme/gastown"},
-		"https URL without .git": {url: "https://github.com/acme/gastown", want: "acme/gastown"},
-		"scp-like URL":           {url: "git@github.com:acme/gastown.git", want: "acme/gastown"},
-		"ssh URL with a user":    {url: "ssh://git@github.com/acme/gastown.git", want: "acme/gastown"},
-		"ssh URL with a port":    {url: "ssh://git@github.com:2222/acme/gastown", want: "acme/gastown"},
+		"https URL":              {url: "https://example.com/acme/gastown.git", want: "acme/gastown"},
+		"https URL without .git": {url: "https://example.com/acme/gastown", want: "acme/gastown"},
+		"scp-like URL":           {url: "git@example.com:acme/gastown.git", want: "acme/gastown"},
+		"ssh URL with a user":    {url: "ssh://git@example.com/acme/gastown.git", want: "acme/gastown"},
+		"ssh URL with a port":    {url: "ssh://git@example.com:2222/acme/gastown", want: "acme/gastown"},
 		"a bare OWNER/NAME":      {url: "acme/gastown", want: "acme/gastown"},
 	}
 	for name, tc := range cases {

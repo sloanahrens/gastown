@@ -932,8 +932,9 @@ type runnerCluster struct {
 	statusReads int
 	jobs        string
 	jobsErr     bool
-	// capacity answers the capacity preflight; empty is runnerRoomyCapacity, so
-	// a test about the launch itself is not declined for want of room.
+	// capacity answers the capacity preflight; empty is runnerGoldenCapacity,
+	// the live listing with a node enlarged to hold the default block, so a
+	// test about the launch itself is not declined for want of room.
 	capacity       string
 	result         *sweeprunner.Result
 	skipWrite      bool
@@ -947,21 +948,70 @@ type runnerCluster struct {
 	priority       []byte
 }
 
-// runnerPriorityListing is what the priority preflight's kubectl call answers:
-// the sweep's own class, the control plane's, and the three control-plane pods
-// the table records at their classes, so a run with nothing to shed passes.
-const runnerPriorityListing = `{"kind":"List","items":[
-{"kind":"PriorityClass","metadata":{"name":"gt-ci"},"value":100},
-{"kind":"PriorityClass","metadata":{"name":"gt-ci-gate"},"value":200},
-{"kind":"PriorityClass","metadata":{"name":"gt-control-plane"},"value":1000000},
-{"kind":"Pod","metadata":{"name":"forgejo-57658978cf-5nzvk","namespace":"forgejo"},"spec":{"priority":1000000,"ownerReferences":[{"kind":"ReplicaSet","name":"forgejo-57658978cf"}]}},
-{"kind":"Pod","metadata":{"name":"forgejo-runner-df77dd979-g25pq","namespace":"forgejo"},"spec":{"priority":200,"ownerReferences":[{"kind":"ReplicaSet","name":"forgejo-runner-df77dd979"}]}},
-{"kind":"Pod","metadata":{"name":"forgejo-6884fd5d78-6mqpl","namespace":"forgejo-trial"},"spec":{"priority":1000000,"ownerReferences":[{"kind":"ReplicaSet","name":"forgejo-6884fd5d78"}]}}
-]}`
+// goldenListing reads a live-cluster fixture the sweep's guards were captured
+// against: what the API printed on the control cluster, not a shape a test
+// wrote.
+func goldenListing(t *testing.T, name string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "sweeprunner", "testdata", "live-cluster", name))
+	if err != nil {
+		t.Fatalf("reading the live-cluster listing %s: %v", name, err)
+	}
+	return data
+}
 
-// runnerRoomyCapacity is a node with room for the default runner block's Job
-// (8 CPU, 24 GiB with dind) and the control plane's headroom.
-const runnerRoomyCapacity = `{"items": [{"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "16", "memory": "64Gi"}}}]}`
+// withNodeAllocatable returns a capacity listing with every node's allocatable
+// cpu and memory replaced (an empty value leaves the field as the listing
+// printed it), so a test reaches a capacity branch from the live listing's real
+// pods rather than from a node shape no API printed.
+func withNodeAllocatable(t *testing.T, listing []byte, cpu, memory string) []byte {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(listing))
+	dec.UseNumber()
+	var document map[string]any
+	if err := dec.Decode(&document); err != nil {
+		t.Fatalf("decoding the capacity listing: %v", err)
+	}
+	items, _ := document["items"].([]any)
+	nodes := 0
+	for _, item := range items {
+		object, _ := item.(map[string]any)
+		if object["kind"] != "Node" {
+			continue
+		}
+		status, _ := object["status"].(map[string]any)
+		allocatable, _ := status["allocatable"].(map[string]any)
+		if allocatable == nil {
+			continue
+		}
+		if cpu != "" {
+			allocatable["cpu"] = cpu
+		}
+		if memory != "" {
+			allocatable["memory"] = memory
+		}
+		nodes++
+	}
+	if nodes == 0 {
+		t.Fatal("the capacity listing names no node with an allocatable")
+	}
+	out, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("encoding the capacity listing: %v", err)
+	}
+	return out
+}
+
+// runnerGoldenCapacity is the live cluster's own capacity listing, its node
+// enlarged so the default runner block's Job (8 CPU, 24 GiB with dind) and the
+// control plane's headroom fit: the pods, their quantities and every other
+// field stay what the API printed. The captured node (5790m and 9488Mi free
+// once its pods count) is too small for the default block, so a test about the
+// launch itself needs the room.
+func runnerGoldenCapacity(t *testing.T) []byte {
+	t.Helper()
+	return withNodeAllocatable(t, goldenListing(t, "capacity-listing.json"), "18", "64Gi")
+}
 
 func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 	switch {
@@ -969,7 +1019,7 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 		if c.priority != nil {
 			return c.priority, nil, nil
 		}
-		return []byte(runnerPriorityListing), nil, nil
+		return goldenListing(c.t, "priority-listing.json"), nil, nil
 	case slices.Contains(argv, "get") && slices.Contains(argv, "jobs"):
 		if c.jobsErr {
 			return nil, []byte("Error from server (Forbidden): jobs.batch is forbidden\n"), errors.New("exit status 1")
@@ -979,7 +1029,7 @@ func (c *runnerCluster) answer(argv []string) ([]byte, []byte, error) {
 		if c.capacity != "" {
 			return []byte(c.capacity), nil, nil
 		}
-		return []byte(runnerRoomyCapacity), nil, nil
+		return runnerGoldenCapacity(c.t), nil, nil
 	case slices.Contains(argv, "get"):
 		c.statusReads++
 		if c.statusErr || c.statusReads <= c.flakyStatus {
@@ -1228,21 +1278,23 @@ func TestTierSweepRunnerGuardsRefuseAMalformedGuard(t *testing.T) {
 
 // TestSyncRefusesWhileASweepJobReadsTheClaim drives the guard through a fake
 // kubectl: a rig sweep Job still active refuses the run, naming it, and nothing
-// is applied; a listing that cannot be read refuses too. A Job whose listing
-// holds three true condition types ending in Complete is ended, not refused, so
-// the run goes on in its order.
+// is applied; a listing that cannot be read defers the run instead, since a
+// read that did not answer is no verdict on the sweep Job (gt-gg9hv.56). A Job
+// whose listing holds three true condition types ending in Complete is ended,
+// not refused, so the run goes on in its order.
 func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 	t.Parallel()
 	const activeJob = "gt-sweep-gastown-deadbeef-otherrun"
 	for _, tc := range []struct {
-		name string
-		jobs string
-		err  bool
-		want string
+		name     string
+		jobs     string
+		err      bool
+		want     string
+		deferred bool
 	}{
 		{name: "an unlabelled active Job", jobs: activeJob + "\n", want: activeJob},
 		{name: "a true condition neither ended type", jobs: activeJob + " Suspended\n", want: activeJob},
-		{name: "a listing that cannot be read", err: true, want: "the run's guard did not pass"},
+		{name: "a listing that cannot be read", err: true, want: "the guard's read failed", deferred: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1255,14 +1307,24 @@ func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 
 			stage := d.tierSweepRunRunner(context.Background(), st, spec)
 
-			if stage.reason != tierSweepRunnerNoResult {
-				t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
-			}
-			if stage.exitCode == 0 {
-				t.Error("exit code 0 for a run the guard refused")
-			}
-			if !strings.Contains(stage.output, tc.want) {
-				t.Errorf("stage output does not name %q:\n%s", tc.want, stage.output)
+			if tc.deferred {
+				var unreadable *sweeprunner.GuardUnreadable
+				if stage.ran || !errors.As(stage.err, &unreadable) {
+					t.Fatalf("stage = %+v, want the run deferred on the guard's unreadable listing", stage)
+				}
+				if !strings.Contains(unreadable.Line(), tc.want) {
+					t.Errorf("deferral line %q does not say %q", unreadable.Line(), tc.want)
+				}
+			} else {
+				if stage.reason != tierSweepRunnerNoResult {
+					t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
+				}
+				if stage.exitCode == 0 {
+					t.Error("exit code 0 for a run the guard refused")
+				}
+				if !strings.Contains(stage.output, tc.want) {
+					t.Errorf("stage output does not name %q:\n%s", tc.want, stage.output)
+				}
 			}
 			for _, argv := range cmds.ran {
 				if slices.Contains(strings.Fields(argv), "apply") || slices.Contains(strings.Fields(argv), "create") {

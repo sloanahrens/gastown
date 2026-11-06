@@ -15,6 +15,12 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
+// crewSeat is the crew member whose agent bead the unlistable-path tests
+// seed. The bead's ID, its title and the detail a stale report would carry are
+// all built from it: one constant, so a rename cannot turn the "not stale"
+// assertion into a positive case.
+const crewSeat = "operator"
+
 // TestStaleAgentBeadsCheckRunDocComment reads the check's own source and
 // asserts the doc comment describing the check sits on Run, and not on the
 // helper agentWispsFromStore above which a stray copy of it used to sit.
@@ -234,8 +240,8 @@ func TestStaleAgentBeadsUnlistableCrewPath(t *testing.T) {
 
 	town := newDoctorTown()
 	town.db(filepath.Join(tmpDir, "gastown", "mayor", "rig")).Seed(beads.Issue{
-		ID:     "gt-gastown-crew-sloan",
-		Title:  "sloan",
+		ID:     "gt-gastown-crew-" + crewSeat,
+		Title:  crewSeat,
 		Type:   "agent",
 		Labels: []string{"gt:agent"},
 	})
@@ -245,7 +251,7 @@ func TestStaleAgentBeadsUnlistableCrewPath(t *testing.T) {
 
 	result := check.Run(ctx)
 	for _, detail := range result.Details {
-		if detail == "gt-gastown-crew-sloan" {
+		if detail == "gt-gastown-crew-"+crewSeat {
 			t.Fatalf("unreadable crew directory marked live crew member stale; details: %v", result.Details)
 		}
 	}
@@ -674,7 +680,7 @@ func TestStaleAgentBeadsCheck_Phase2_UnlistableWorkerPath(t *testing.T) {
 		beadID string
 		title  string
 	}{
-		{name: "crew", dir: "crew", beadID: "gt-gastown-crew-sloan", title: "sloan"},
+		{name: "crew", dir: "crew", beadID: "gt-gastown-crew-" + crewSeat, title: crewSeat},
 		{name: "polecat", dir: "polecats", beadID: "gt-gastown-polecat-nux", title: "nux"},
 	}
 	for _, tt := range tests {

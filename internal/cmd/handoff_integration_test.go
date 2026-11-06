@@ -39,7 +39,7 @@ func TestIntegrationHandoffGitState(t *testing.T) {
 		t.Helper()
 		dir := t.TempDir()
 		git(t, dir, "init")
-		git(t, dir, "config", "user.email", "test@test.com")
+		git(t, dir, "config", "user.email", "test@example.com")
 		git(t, dir, "config", "user.name", "Test")
 		write(t, filepath.Join(dir, "tracked.txt"), "original")
 		git(t, dir, "add", ".")

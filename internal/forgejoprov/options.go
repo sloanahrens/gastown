@@ -1,7 +1,8 @@
 // Package forgejoprov is the command line of scripts/forgejo-provision.sh as a
 // Go type: its flags, defaults, validation and role table. Run (run.go) spends
 // them. The shell script stays in place, and green, until the port's last bead
-// deletes it (gt-tpg0p.52).
+// deletes it (gt-tpg0p.52). Client.MintToken and Client.RevokeToken (scopedtoken.go)
+// mint and revoke one account's scoped token for callers outside that run.
 package forgejoprov
 
 import (

@@ -42,7 +42,7 @@ type Templates struct {
 type RoleData struct {
 	Role          string // polecat, crew
 	RigName       string // e.g., "greenplace"
-	TownRoot      string // e.g., "/Users/steve/ai"
+	TownRoot      string // e.g., "/Users/user/ai"
 	TownName      string // e.g., "ai" - the town identifier for session names
 	WorkDir       string // current working directory
 	DefaultBranch string // default branch for merges (e.g., "main", "develop")

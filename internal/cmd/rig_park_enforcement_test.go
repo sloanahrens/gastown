@@ -27,7 +27,7 @@ func TestParkAndUnparkRigs(t *testing.T) {
 	t.Parallel()
 	town := parkTown(t)
 	var out bytes.Buffer
-	rec := config.RigParked{Since: time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC), By: "sloan", Reason: "rework"}
+	rec := config.RigParked{Since: time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC), By: "operator", Reason: "rework"}
 	if err := parkRigs(&out, town, []string{"testrig"}, rec); err != nil {
 		t.Fatalf("parkRigs = %v\n%s", err, out.String())
 	}

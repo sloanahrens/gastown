@@ -17,7 +17,7 @@ func TestGitEnvDropsTheScrubbedVars(t *testing.T) {
 	t.Parallel()
 	environ := []string{
 		"PATH=/usr/bin:/bin",
-		"HOME=/home/furiosa",
+		"HOME=/home/user",
 		"GT_AUTH_FORGEJO_TOKEN=broker-token",
 		"FORGEJO_ADMIN_TOKEN=admin-token",
 		"FOO_TOKEN=foo-token",
@@ -26,15 +26,15 @@ func TestGitEnvDropsTheScrubbedVars(t *testing.T) {
 		"GIT_DIR=/elsewhere/.git",
 		"GIT_INDEX_FILE=/elsewhere/index",
 		"GIT_WORK_TREE=/elsewhere/tree",
-		"GIT_SSH_COMMAND=ssh -i /home/furiosa/.ssh/id",
+		"GIT_SSH_COMMAND=ssh -i /home/user/.ssh/id",
 		"GIT_TERMINAL_PROMPT=0",
 	}
 	want := []string{
 		"PATH=/usr/bin:/bin",
-		"HOME=/home/furiosa",
+		"HOME=/home/user",
 		"FORGEJO_ADMIN_ENV=/etc/forgejo/admin.env",
 		"FORGEJO_ADMIN_TOKEN_FILE=/run/token",
-		"GIT_SSH_COMMAND=ssh -i /home/furiosa/.ssh/id",
+		"GIT_SSH_COMMAND=ssh -i /home/user/.ssh/id",
 		"GIT_TERMINAL_PROMPT=0",
 	}
 	if got := gitEnv(environ); !reflect.DeepEqual(got, want) {

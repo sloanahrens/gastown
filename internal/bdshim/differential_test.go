@@ -483,9 +483,9 @@ func TestDifferentialNamesADifferingExit(t *testing.T) {
 func TestDifferentialMismatchPrintsTheShimStderr(t *testing.T) {
 	t.Parallel()
 	const (
-		goldenLine = "✓ Comment added to fx-1 — fixture bead one\n"
-		shimStderr = "bdshim: tracker answered 403 for comment on fx-1"
-		shimError  = "comment: the tracker refused the request"
+		goldenLine = "fixture answer for fx-1\n"
+		shimStderr = "bdshim: tracker answered 403 for unclaim on fx-1"
+		shimError  = "unclaim: the tracker refused the request"
 	)
 	tests := []struct {
 		name  string
@@ -511,11 +511,11 @@ func TestDifferentialMismatchPrintsTheShimStderr(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			writeGolden(t, dir, "comment", goldenLine, 0)
+			writeGolden(t, dir, "unclaim", goldenLine, 0)
 			c := differentialCase{
 				dir:      dir,
-				rows:     []differentialRow{{stem: "comment", argv: []string{"comment", "fx-1", "fixture note"}}},
-				handlers: map[string]Handler{"comment": func(Env, Decision) int { return 1 }},
+				rows:     []differentialRow{{stem: "unclaim", argv: []string{"unclaim", "fx-1"}}},
+				handlers: map[string]Handler{"unclaim": func(Env, Decision) int { return 1 }},
 				known:    map[string]bool{},
 				run:      tc.run,
 			}

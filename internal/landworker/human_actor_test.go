@@ -105,7 +105,16 @@ func TestPassRefusesASubmissionWithNoRecordedActor(t *testing.T) {
 // its submission lands (gt-2ge3z).
 func TestPassAcceptsAnAgentWhoseNameContainsTheHumanName(t *testing.T) {
 	t.Parallel()
-	for _, author := range []string{"sloan-runner", humanActor + " (agent)", "sloan"} {
+	// agentActor is a bare identity that shares a word with the human's name
+	// but is not it: the worker compares the whole identity, not a substring.
+	// It is defined apart from humanActor and the two are checked apart, so a
+	// rename of the configured name cannot turn this accepted agent into the
+	// human's own identity that the worker refuses.
+	const agentActor = "operator"
+	if agentActor == humanActor {
+		t.Fatalf("agent identity %q is the configured human %q; this case would test a refusal", agentActor, humanActor)
+	}
+	for _, author := range []string{humanActor + "-runner", humanActor + " (agent)", agentActor} {
 		t.Run(author, func(t *testing.T) {
 			t.Parallel()
 			h := newHarness(t)

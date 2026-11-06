@@ -140,7 +140,7 @@ The `@gastown` npm organization must exist and be linked to this repo:
 ### Current status (as of 2026-03-06)
 
 The `@gastown` npm org was secured by a community member (Ivan Casco Valero,
-ivan@ivancasco.com) to prevent scope squatting. Ownership transfer is pending.
+ivan@example.com) to prevent scope squatting. Ownership transfer is pending.
 Until the org is transferred, npm publish will fail gracefully without blocking
 the release (`continue-on-error: true` in the workflow).
 

@@ -44,8 +44,8 @@ func TestHooksPathAllRigs_FlatPolecatCloneIsChecked(t *testing.T) {
 func TestHooksPathChecks_AgreeOnCrewWorktree(t *testing.T) {
 	t.Parallel()
 	const rigName = "testrig"
-	crew := filepath.Join("crew", "sloan")
-	topic := filepath.Join("crew", "sloan-topic")
+	crew := filepath.Join("crew", "operator")
+	topic := filepath.Join("crew", "operator-topic")
 	ctx := hooksPathRig(t, rigName, crew, topic)
 	// A linked worktree's .git is a file, not a directory.
 	topicGit := filepath.Join(ctx.RigPath(), topic, ".git")

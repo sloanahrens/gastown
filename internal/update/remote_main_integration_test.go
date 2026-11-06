@@ -15,7 +15,7 @@ import (
 // command stops the test.
 func gitIn(t *testing.T, dir string, args ...string) string {
 	t.Helper()
-	full := append([]string{"-c", "user.name=test", "-c", "user.email=test@test.com"}, args...)
+	full := append([]string{"-c", "user.name=test", "-c", "user.email=test@example.com"}, args...)
 	cmd := exec.Command("git", full...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()

@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -247,9 +249,9 @@ func WriteBacktest(env Env, outDir, docsDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	events, sloan := ReadBacktestInputs(env, docsDir)
+	events, answers := ReadBacktestInputs(env, docsDir)
 	summary := readMangoSummary(env, filepath.Join(outDir, mangoSummaryName))
-	text, err := BacktestSection(backtestRows(result.Weekly), events, ReplicatedFromSummary(summary), sloan)
+	text, err := BacktestSection(backtestRows(result.Weekly), events, ReplicatedFromSummary(summary), answers)
 	if err != nil {
 		return "", err
 	}
@@ -314,21 +316,27 @@ func readMangoSummary(env Env, path string) map[string]MangoSummary {
 	return summary
 }
 
-// MangoLookup is FindMango's environment: the override, the built binary's
-// existence test and the PATH search, so a case answers without the host's.
+// MangoLookup is FindMango's environment: the override, the binaries the town
+// and PATH hold, and the platform the binary has to run on, so a case answers
+// without the host's.
 type MangoLookup struct {
 	// Getenv reads MANGO_BIN; nil is the process's environment.
 	Getenv func(string) string
-	// Exists reports whether the town's built binary is there; nil is the
-	// host's filesystem.
+	// Exists reports whether a binary is at path; nil is the host's filesystem.
 	Exists func(string) bool
 	// LookPath finds mango on PATH; nil is the host's PATH.
 	LookPath func(string) (string, error)
+	// ReadHead reads the first bytes of the file at path, enough for its format
+	// magic; nil reads the host's file.
+	ReadHead func(path string) ([]byte, error)
+	// GOOS and GOARCH name the platform the binary runs on; empty is the host's.
+	GOOS   string
+	GOARCH string
 }
 
-// OSMangoLookup is MangoLookup over the process's environment and PATH.
+// OSMangoLookup is MangoLookup over the process's environment, PATH and files.
 func OSMangoLookup() MangoLookup {
-	return MangoLookup{Getenv: os.Getenv, Exists: hostExists, LookPath: exec.LookPath}
+	return MangoLookup{Getenv: os.Getenv, Exists: hostExists, LookPath: exec.LookPath, ReadHead: hostReadHead}
 }
 
 // withDefaults fills each seam the lookup left unset with the host's, so a
@@ -344,31 +352,113 @@ func (l MangoLookup) withDefaults() MangoLookup {
 	if l.LookPath == nil {
 		l.LookPath = host.LookPath
 	}
+	if l.ReadHead == nil {
+		l.ReadHead = host.ReadHead
+	}
+	if l.GOOS == "" {
+		l.GOOS = runtime.GOOS
+	}
+	if l.GOARCH == "" {
+		l.GOARCH = runtime.GOARCH
+	}
 	return l
 }
 
-// FindMango resolves the mango binary: MANGO_BIN, else the binary built into
-// the town's runtime, else mango on PATH, and "" when there is none.
+// FindMango resolves the mango binary, in order: MANGO_BIN as given; the binary
+// built for the platform in the town's runtime; the legacy binary a town built
+// before the per-platform directories; mango on PATH. The legacy and PATH hits
+// are skipped when their header is a binary of another OS, since a Mac binary
+// in a linux container fails to start. "" when there is none.
 func FindMango(town string, lookup MangoLookup) string {
 	lookup = lookup.withDefaults()
 	if bin := lookup.Getenv(mangoBinEnv); bin != "" {
 		return bin
 	}
-	built := filepath.Join(town, ".runtime", "metrics", "bin", "mango")
-	if lookup.Exists(built) {
-		return built
+	if platform := mangoPlatformBin(town, lookup.GOOS, lookup.GOARCH); lookup.Exists(platform) {
+		return platform
+	}
+	legacy := filepath.Join(town, ".runtime", "metrics", "bin", "mango")
+	if lookup.Exists(legacy) && lookup.runsHere(legacy) {
+		return legacy
 	}
 	path, err := lookup.LookPath("mango")
-	if err != nil {
+	if err != nil || !lookup.runsHere(path) {
 		return ""
 	}
 	return path
+}
+
+// runsHere reports whether the binary at path can run on the lookup's
+// platform: false only when its header is a known format of another OS. A
+// header that cannot be read or is in no known format is returned, so the
+// binary's own exec error is the one that surfaces.
+func (l MangoLookup) runsHere(path string) bool {
+	head, err := l.ReadHead(path)
+	if err != nil {
+		return true
+	}
+	owner, known := binaryOwner(head)
+	return !known || owner == l.GOOS
+}
+
+// machOMagic is the first four bytes of a Mach-O binary, in either byte order,
+// and of a universal (fat) Mach-O file. The fat magic is also the Java class
+// magic, so a file that starts with it is read as Mach-O.
+var machOMagic = [][]byte{
+	{0xfe, 0xed, 0xfa, 0xce},
+	{0xfe, 0xed, 0xfa, 0xcf},
+	{0xce, 0xfa, 0xed, 0xfe},
+	{0xcf, 0xfa, 0xed, 0xfe},
+	{0xca, 0xfe, 0xba, 0xbe},
+}
+
+// binaryOwner names the OS a binary's header belongs to: ELF is linux and
+// Mach-O is darwin. known is false for any other header.
+func binaryOwner(head []byte) (goos string, known bool) {
+	if bytes.HasPrefix(head, []byte("\x7fELF")) {
+		return "linux", true
+	}
+	for _, magic := range machOMagic {
+		if bytes.HasPrefix(head, magic) {
+			return "darwin", true
+		}
+	}
+	return "", false
+}
+
+// mangoPlatformBin is the binary built for goos and goarch in the town's runtime.
+func mangoPlatformBin(town, goos, goarch string) string {
+	return filepath.Join(town, ".runtime", "metrics", "bin", goos+"-"+goarch, "mango")
+}
+
+// PlatformMangoBin is the binary this process builds and runs: the town's
+// runtime directory for the host's platform.
+func PlatformMangoBin(town string) string {
+	return mangoPlatformBin(town, runtime.GOOS, runtime.GOARCH)
 }
 
 // hostExists reports whether path exists.
 func hostExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// hostReadHead reads the first four bytes of path, the length of every magic
+// binaryOwner knows. A file shorter than that returns what it holds.
+func hostReadHead(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	head := make([]byte, 4)
+	n, err := io.ReadFull(f, head)
+	if cerr := f.Close(); cerr != nil && err == nil {
+		return nil, cerr
+	}
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return head[:n], nil
 }
 
 // firstLine is s up to its first newline.

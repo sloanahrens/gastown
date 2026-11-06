@@ -29,7 +29,6 @@ var handlers = map[string]Handler{
 	"undefer":  undeferHandler,
 	"unclaim":  unclaimHandler,
 	"comments": commentsHandler,
-	"comment":  commentHandler,
 	"label":    labelHandler,
 	"kv":       kvHandler,
 	"dep":      depHandler,

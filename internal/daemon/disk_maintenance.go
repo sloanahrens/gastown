@@ -116,6 +116,9 @@ type diskMaintSeams struct {
 	sandboxes func() (map[string]agentconfig.SandboxProfile, error)
 	// homeDir locates the colima docker socket's home.
 	homeDir func() (string, error)
+	// trim runs the cache trim a due tick asks for in the given mode and
+	// reports whether it reached a verdict; nil is d.cacheTrim.
+	trim func(ctx context.Context, mode string) bool
 	// dispatch runs a pass off the calling goroutine, so a slow registry does
 	// not hold the heartbeat. Nil means one goroutine per pass.
 	dispatch func(fn func())
@@ -156,6 +159,9 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.homeDir == nil {
 		s.homeDir = os.UserHomeDir
+	}
+	if s.trim == nil {
+		s.trim = d.cacheTrim
 	}
 	if s.dispatch == nil {
 		s.dispatch = func(fn func()) { go fn() }
@@ -269,10 +275,17 @@ func (s *diskMaintSchedule) retryAtOf(name string) time.Time {
 // cacheTrimDue reports whether the cache trim is due at now: a failed run's
 // retry comes first, and otherwise the interval runs from the last verdict.
 func (s *diskMaintSchedule) cacheTrimDue(now time.Time, every time.Duration) bool {
-	if retry := s.retryAtOf(diskMaintCacheTrimName); !retry.IsZero() {
+	return s.trimDue(diskMaintCacheTrimName, now, every)
+}
+
+// trimDue reports whether the trim named name is due at now, under the rule the
+// cache trim uses: a failed run's retry comes first, and otherwise the interval
+// runs from the last verdict (gt-gg9hv.57).
+func (s *diskMaintSchedule) trimDue(name string, now time.Time, every time.Duration) bool {
+	if retry := s.retryAtOf(name); !retry.IsZero() {
 		return !now.Before(retry)
 	}
-	last := s.lastRunAt(diskMaintCacheTrimName)
+	last := s.lastRunAt(name)
 	return last.IsZero() || now.Sub(last) >= every
 }
 
@@ -435,6 +448,9 @@ func (d *Daemon) runDiskMaintenance() {
 	}
 	s := d.diskMaintenanceSeams()
 	now := s.now()
+	// The CI cache trim is due on its own interval whatever the town is doing, so
+	// it is ticked before the quiet guard that holds the targets back (gt-gg9hv.57).
+	d.runCICacheTrimTick()
 
 	due, errs := d.diskMaintenanceDue(now)
 	for _, err := range errs {
@@ -455,7 +471,7 @@ func (d *Daemon) runDiskMaintenance() {
 
 	quiet, why := d.maintenance().quiet(d)
 	if !quiet {
-		d.logger.Printf("disk_maintenance: skipped: %s", why)
+		d.runDiskMaintenanceTrim(mode, due, why)
 		return
 	}
 	if !d.diskMaintRunning.CompareAndSwap(false, true) {
@@ -465,6 +481,100 @@ func (d *Daemon) runDiskMaintenance() {
 		defer d.diskMaintRunning.Store(false)
 		d.diskMaintenancePass(now, mode, due)
 	})
+}
+
+// runDiskMaintenanceTrim is the tick's busy case: the cache trim may run, the
+// targets may not. The trim is off the Dolt window's quiet guard so continuous
+// landing passes cannot starve it (gt-gg9hv.48; docs/guides/disk-maintenance.md).
+// Everything else the tick found keeps the guard: it stays due, and the next
+// quiet tick runs it.
+func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why string) {
+	if !due.cacheTrim {
+		d.logger.Printf("disk_maintenance: skipped: %s", why)
+		return
+	}
+	if due.daily || len(due.interval) > 0 {
+		// The targets the tick found are what this line is about, so their
+		// deferral is not read as the tick doing nothing; it is logged whether
+		// or not a trim pass is already in flight.
+		d.logger.Printf("disk_maintenance: targets skipped: %s", why)
+	}
+	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
+		return // a trim pass is still running
+	}
+	// The guard is handed back by the trim pass itself the moment its trim ends,
+	// and here as well in case the pass never gets that far; once, so a later
+	// pass's guard is never cleared by this one.
+	release := sync.OnceFunc(func() { d.diskMaintTrimRunning.Store(false) })
+	d.diskMaintenanceSeams().dispatch(func() {
+		defer release()
+		d.runCacheTrimPass(mode, release)
+	})
+}
+
+// runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
+// disk readings and their alerts, and the trim, side by side. Neither holds the
+// other: the trim's guard is handed back as soon as the trim ends, before the
+// alerts have, so a notifier that does not answer keeps no later trim off. Its
+// caller holds the trim's guard and passes the release that returns it.
+func (d *Daemon) runCacheTrimPass(mode string, releaseTrim func()) {
+	ctx, cancel := d.diskMaintenanceContext()
+	defer cancel()
+	if !d.cacheTrimStillDue() {
+		releaseTrim() // another pass trimmed between the tick and this run
+		return
+	}
+	var alerts sync.WaitGroup
+	alerts.Add(1)
+	go func() {
+		defer alerts.Done()
+		d.readAndApplyDiskAlerts(ctx, d.diskMaintenanceSeams().now())
+	}()
+	d.diskMaintenanceTrim(ctx, mode)
+	releaseTrim()
+	alerts.Wait()
+}
+
+// cacheTrimStillDue reads the schedule again at run time: a pass carries the
+// due set its tick found, and a trim that concluded after that tick (the other
+// pass's) has spent the interval, so the trim must not run a second time in it.
+func (d *Daemon) cacheTrimStillDue() bool {
+	every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig)
+	if err != nil {
+		d.refuseDiskMaintenance(err) // said once, as the tick does
+		return false
+	}
+	return d.diskMaintSchedule.cacheTrimDue(d.diskMaintenanceSeams().now(), every)
+}
+
+// runCacheTrimInPass is the trim inside the combined pass: it tries the trim's
+// single-flight guard and, when it wins, runs the trim under it. It reports
+// whether this call ran the trim: one already in flight is left to finish, and
+// two trim passes never overlap.
+func (d *Daemon) runCacheTrimInPass(ctx context.Context, mode string) bool {
+	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
+		return false
+	}
+	defer d.diskMaintTrimRunning.Store(false)
+	if !d.cacheTrimStillDue() {
+		return false
+	}
+	d.diskMaintenanceTrim(ctx, mode)
+	return true
+}
+
+// diskMaintenanceTrim is the trim and its schedule record: the full interval
+// once it reached a verdict, the short retry when it could not start or
+// conclude. The caller holds the trim's guard.
+func (d *Daemon) diskMaintenanceTrim(ctx context.Context, mode string) {
+	s := d.diskMaintenanceSeams()
+	verdict := s.trim(ctx, mode)
+	concluded := s.now()
+	if verdict {
+		d.diskMaintSchedule.record(diskMaintCacheTrimName, concluded)
+	} else {
+		d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, concluded.Add(cacheTrimRetryInterval))
+	}
 }
 
 // refuseDiskMaintenance says why a setting the patrol cannot schedule runs
@@ -495,6 +605,13 @@ func (d *Daemon) diskMaintenanceSettledAt() time.Time {
 // conclusion about — a kept plan, a refused one, a failed read — and left due
 // when an apply deferred, so the next tick retries once the push holding the
 // lock is done.
+//
+// The pass reads two clocks and keeps them apart. now is the tick's instant,
+// when the due decision was taken: the policy and the alerts are read at it.
+// Every instant the pass stores — the trim's next due, a target's last run,
+// the window's settle — is a clock read taken when the run it reports was
+// reached, because a run that takes minutes must not shorten the wait before
+// the next one (gt-ummt9). The tick's now is never stored as a conclusion.
 func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDue) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
@@ -503,23 +620,23 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// The disk alerts are an alarm rather than a change, so they are read and
 	// raised before anything that can refuse the plan: a disk too full to keep
 	// pruning, or a keep the patrol cannot decide, must not silence them.
-	readings := s.readDisks(ctx)
-	d.applyDiskAlerts(readings, now)
-
-	// The cache trim is independent of the targets: it trims the claim the
-	// sandbox profiles mount, so it runs when its interval is due whether or not
-	// a maintenance target publishes here (gt-rm4am, gt-gg9hv.24.2). A run that
-	// reached a verdict -- trimmed, or nothing to trim -- spends the full
-	// interval; a run that could not start or conclude records a retry instead,
-	// so a cluster that was briefly unreachable does not leave the disk growing
-	// for two hours (gt-gg9hv.24.6).
+	// The cache trim is independent of the targets and of the alerts: it runs
+	// beside the alert application, so a notifier that takes its time holds the
+	// trim off nothing and the trim holds no alert off (gt-gg9hv.48).
+	var trimmed sync.WaitGroup
 	if due.cacheTrim {
-		if d.cacheTrim(ctx, mode) {
-			d.diskMaintSchedule.record(diskMaintCacheTrimName, s.now())
-		} else {
-			d.diskMaintSchedule.recordRetry(diskMaintCacheTrimName, s.now().Add(cacheTrimRetryInterval))
-		}
+		trimmed.Add(1)
+		go func() {
+			defer trimmed.Done()
+			d.runCacheTrimInPass(ctx, mode)
+		}()
 	}
+	readings, ok := d.readAndApplyDiskAlerts(ctx, now)
+	trimmed.Wait()
+	if !ok {
+		return // the pass ended before its turn; the targets stay due
+	}
+
 	if !due.daily && len(due.interval) == 0 {
 		return // only the cache trim was due, and it has run
 	}
@@ -527,18 +644,18 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	keep, err := diskMaintenanceKeep(s.getenv, readings)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: not running: %v", err)
-		d.concludeDiskMaintenance(now, due)
+		d.concludeDiskMaintenance(s.now(), due)
 		return
 	}
 	targets, err := s.targets(ctx, d, mode)
 	if err != nil {
 		d.logger.Printf("disk_maintenance: the targets could not be built: %v", err)
-		d.concludeDiskMaintenance(now, due)
+		d.concludeDiskMaintenance(s.now(), due)
 		return
 	}
 	if len(targets) == 0 {
 		d.logger.Printf("disk_maintenance: no maintenance target publishes here; nothing to do")
-		d.concludeDiskMaintenance(now, due)
+		d.concludeDiskMaintenance(s.now(), due)
 		return
 	}
 	for _, name := range due.interval {
@@ -572,19 +689,21 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 		return
 	}
 	if due.daily {
-		d.settleDiskMaintenanceWindow(now)
+		d.settleDiskMaintenanceWindow(s.now())
 	}
 }
 
 // concludeDiskMaintenance settles the targets due this tick without running
 // them, for a pass that refused whole: a failed read concludes a run as a plan
 // does, and retrying it on every tick would be a line and a build apiece.
-func (d *Daemon) concludeDiskMaintenance(now time.Time, due diskMaintDue) {
+// concluded is the instant the pass reached its refusal, and the window's
+// settle and every record it writes name that one instant.
+func (d *Daemon) concludeDiskMaintenance(concluded time.Time, due diskMaintDue) {
 	if due.daily {
-		d.settleDiskMaintenanceWindow(now)
+		d.settleDiskMaintenanceWindow(concluded)
 	}
 	for _, name := range due.interval {
-		d.diskMaintSchedule.record(name, d.diskMaintenanceSeams().now())
+		d.diskMaintSchedule.record(name, concluded)
 	}
 }
 
@@ -744,29 +863,19 @@ func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, h
 // the garbage collect runs from the Mac's registry-collect job instead.
 const diskMaintCollectUnavailable = "the garbage collect runs from the Mac's registry-collect job, which this container cannot reach"
 
-const (
-	// diskMaintHostKubeconfig is the town's sandbox kubeconfig, relative to the
-	// town root: the file the host reads the sandbox cluster through.
-	diskMaintHostKubeconfig = ".runtime/sbx-k8s/kubeconfig"
-
-	// diskMaintContainerKubeconfig is the kubeconfig the container derives for
-	// the same cluster, relative to the town root. The host's file names
-	// 127.0.0.1, which inside the container is the container's own loopback, so
-	// kubectl is refused there. The writer is containerKubeconfigRP in
-	// internal/cmd; that package cannot be imported here, so the path is kept
-	// in step by hand.
-	diskMaintContainerKubeconfig = ".runtime/container/kubeconfig.yaml"
-)
+// diskMaintHostKubeconfig is the town's sandbox kubeconfig, relative to the
+// town root: the file the host reads the sandbox cluster through. The container
+// reads the file agentconfig.ContainerKubeconfigFile derives instead.
+const diskMaintHostKubeconfig = ".runtime/sbx-k8s/kubeconfig"
 
 // diskMaintKubeconfig is the kubeconfig the patrol reads the sandbox cluster
 // through, under townRoot. In container mode (see containerMode) that is the
 // container's derived file; anywhere else it is the host's.
 func diskMaintKubeconfig(townRoot string, getenv func(string) string) string {
-	rel := diskMaintHostKubeconfig
 	if containerMode(getenv) {
-		rel = diskMaintContainerKubeconfig
+		return agentconfig.ContainerKubeconfigFile(townRoot)
 	}
-	return filepath.Join(townRoot, filepath.FromSlash(rel))
+	return filepath.Join(townRoot, filepath.FromSlash(diskMaintHostKubeconfig))
 }
 
 // diskMaintenanceOut is where the plugin lock's log lines go.

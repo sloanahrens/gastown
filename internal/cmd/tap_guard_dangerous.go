@@ -17,6 +17,7 @@ import (
 	"github.com/google/shlex"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/hoststat"
+	"github.com/steveyegge/gastown/internal/shellparse"
 )
 
 var tapGuardDangerousCmd = &cobra.Command{
@@ -179,6 +180,26 @@ const maxDangerousNestDepth = 3
 // deliberately stays opaque — that is where this guard's real false
 // positives have come from (gt-5ihs attempt 2, gt-wisp-db27 finding 4).
 func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
+	reason, alternative = judgeDangerousText(command, depth, sess)
+	if reason != "" || depth != 0 {
+		return reason, alternative
+	}
+	// The lenient read found no dangerous operation, but a command the shell
+	// cannot parse was not read in full: something the token checks cannot see
+	// may run, so the command the hook received is refused (gt-m6x4py). A
+	// dangerous operation the lenient read did find is refused above with its
+	// own reason. Nested payloads are not gated: the lenient scan cuts them, and
+	// it can cut a fragment a real shell would never run.
+	if _, err := shellparse.Parse(command); err != nil {
+		return dangerousUnreadable(err), ""
+	}
+	return "", ""
+}
+
+// judgeDangerousText is the lenient judgment behind evaluateDangerousCommand:
+// the token checks and the nested-command recursion, read off the command text
+// as the guard has always read it.
+func judgeDangerousText(command string, depth int, sess guardSession) (reason, alternative string) {
 	// Read the shell-fed bodies off the untouched command: stripHeredocBodies
 	// removes them from the text scanned below, and they come back in as
 	// nested commands of their own (gt-9g0y).
@@ -269,6 +290,20 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 		}
 	}
 	return "", ""
+}
+
+// dangerousUnreadable is the refusal for a command shellparse could not read,
+// naming the construct. Every session is refused: tapGuardDangerous judges
+// every command, so there is no role the guard leaves unbound. The parser's
+// own text is not echoed; an error that is not an *shellparse.UnparseableError
+// keeps the generic construct name.
+func dangerousUnreadable(err error) string {
+	construct := "shell syntax"
+	var unparseable *shellparse.UnparseableError
+	if errors.As(err, &unparseable) && unparseable.Construct != "" {
+		construct = unparseable.Construct
+	}
+	return fmt.Sprintf("command cannot be read (%s), so it cannot be checked for dangerous operations", construct)
 }
 
 // shellInvokers are commands whose "-c" argument is itself a nested shell

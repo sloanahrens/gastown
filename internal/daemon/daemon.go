@@ -312,6 +312,10 @@ type Daemon struct {
 	diskMaint diskMaintSeams
 	// diskMaintRunning is that patrol's single-flight guard.
 	diskMaintRunning atomic.Bool
+	// diskMaintTrimRunning is the single-flight guard of the cache trim's own
+	// pass, which runs on a tick whose targets are deferred to a quiet one
+	// (gt-gg9hv.48).
+	diskMaintTrimRunning atomic.Bool
 	// diskMaintSettled is when it last settled a window, as UnixNano: the
 	// pass runs off the loop goroutine, so the marker it writes is atomic and
 	// the loop only reads it.
@@ -327,6 +331,10 @@ type Daemon struct {
 	// cap, which the attention queue raises until a later trim's reading finds
 	// them under it (gt-gg9hv.46).
 	cacheTrimNoOp cacheTrimNoOp
+	// ciCacheTrimRunning is the single-flight guard of the CI build-cache trim's
+	// pass, which runs on its own interval and off the quiet guard
+	// (gt-gg9hv.57).
+	ciCacheTrimRunning atomic.Bool
 
 	// hmSync replaces the hm_sync patrol's clock and run seam in tests (see
 	// hmSyncSeams); the zero value is production.
@@ -474,9 +482,12 @@ type Daemon struct {
 	// no test can reach the operator's marker through that variable (gt-vc34c).
 	rebuildGTPendingFn func() installpending.Store
 	// rebuildGTRigSyncTimeoutFn answers how long one rig checkout's sync may
-	// run; nil is rebuildGTRigSyncTimeout. Tests set a short bound to drive the
-	// timeout path without waiting out the real one (gt-f91o8).
-	rebuildGTRigSyncTimeoutFn func() time.Duration
+	// run, asked with the rig it is about to sync; nil is
+	// rebuildGTRigSyncTimeout for every rig. It takes the rig so a test can
+	// give one rig a short bound and the others a bound no loaded machine can
+	// cross, making the timeout path depend on the rig and not on speed
+	// (gt-f91o8, gt-gg9hv.51).
+	rebuildGTRigSyncTimeoutFn func(rig string) time.Duration
 	// rebuildGTRigSyncBudgetFn answers how long the whole rig sweep may run;
 	// nil is rebuildGTRigSyncBudget. Tests set a spent budget to drive the
 	// branch that counts the rigs the sweep never reached (gt-f91o8).
@@ -1149,6 +1160,12 @@ type Daemon struct {
 	// most once an hour: a cycle runs every few minutes, and the same cause in
 	// every one of them would fill the log (gt-gg9hv.39).
 	tierSweepPriorityLog sweeprunner.DeclineLog
+	// tierSweepGuardLog reports a standing failed guard read at most once an
+	// hour, the same rule as the priority decline (gt-gg9hv.56).
+	tierSweepGuardLog sweeprunner.DeclineLog
+	// tierSweepGuardReads is the failed guard read per rig, which the attention
+	// tick raises an item from (gt-gg9hv.56).
+	tierSweepGuardReads tierSweepGuardReads
 
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.

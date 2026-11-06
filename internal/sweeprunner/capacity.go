@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strconv"
 	"strings"
 )
 
@@ -149,11 +150,13 @@ func capacityRead(job *Job, syncPod, reader *Pod, tolerations []Toleration) func
 // reports its allocatable amounts, whether its Ready condition is True, whether
 // it is cordoned, and its NoSchedule and NoExecute taints; it carries the sum of the requests
 // of the pods placed on it whose phase is not Succeeded or Failed. A pod's
-// request is what the scheduler adds to a node for it: the pod's overhead, plus,
-// per resource, the larger of the sum over its containers and the largest
-// request of a single init container. A pod the scheduler has not placed asks
-// no node for anything and is not counted. Anything else that cannot be read is
-// an error: a request missed is a node that reads freer than it is.
+// request is what the scheduler adds to a node for it (schedulerRequest): the
+// pod's overhead, plus, per resource, the larger of the sum over its containers
+// and the largest request of a single init container, with the pod's own
+// spec.resources.requests replacing that arithmetic for each resource it names.
+// A pod the scheduler has not placed asks no node for anything and is not
+// counted. Anything else that cannot be read is an error: a request missed is a
+// node that reads freer than it is.
 func ParseCapacity(stdout []byte) ([]NodeCapacity, error) {
 	var listing clusterListing
 	if err := json.Unmarshal(stdout, &listing); err != nil {
@@ -350,7 +353,8 @@ func allocatableAmount(item listingItem) (Amount, error) {
 }
 
 // podsRequest is the amount the scheduler adds to a node for one pod. It is
-// schedulerRequest over the listing's containers: see there for the rule.
+// schedulerRequest over the listing's containers and the pod's own
+// spec.resources.requests: see there for the rule.
 func podsRequest(pod listingItem) (Amount, error) {
 	overhead, err := resourceAmount(pod.Spec.Overhead)
 	if err != nil {
@@ -372,7 +376,7 @@ func podsRequest(pod listingItem) (Amount, error) {
 		}
 		containers = append(containers, amount)
 	}
-	return schedulerRequest(overhead, inits, containers), nil
+	return schedulerRequest(overhead, inits, containers, pod.Spec.Resources.Requests)
 }
 
 // requestedInit is one init container's request and whether it is a native
@@ -393,7 +397,13 @@ type requestedInit struct {
 // rule is the scheduler's own for any number of sidecars, in the order the
 // containers are listed; a native sidecar keeps its request for the pod's
 // whole life, so it also adds to the sum beside the containers.
-func schedulerRequest(overhead Amount, inits []requestedInit, containers []Amount) Amount {
+//
+// It follows the scheduler for pod-level resources too: for each resource the
+// pod's own spec.resources.requests names, that figure plus the pod's overhead
+// replaces the container arithmetic above; a resource it does not name is
+// counted as the containers ask. An unreadable pod-level quantity is an error,
+// never a zero.
+func schedulerRequest(overhead Amount, inits []requestedInit, containers []Amount, podLevel map[string]string) (Amount, error) {
 	sum := Amount{}
 	for _, c := range containers {
 		sum = sum.Add(c)
@@ -408,7 +418,22 @@ func schedulerRequest(overhead Amount, inits []requestedInit, containers []Amoun
 		}
 		peak = maxAmount(peak, init.amount.Add(sidecars))
 	}
-	return overhead.Add(maxAmount(sum, peak))
+	request := overhead.Add(maxAmount(sum, peak))
+	if value, ok := podLevel["cpu"]; ok {
+		cpu, err := parseQuantity(value, cpuMilli)
+		if err != nil {
+			return Amount{}, fmt.Errorf("pod-level cpu: %w", err)
+		}
+		request.CPU = overhead.CPU + cpu
+	}
+	if value, ok := podLevel["memory"]; ok {
+		memory, err := parseQuantity(value, memoryBytes)
+		if err != nil {
+			return Amount{}, fmt.Errorf("pod-level memory: %w", err)
+		}
+		request.Memory = overhead.Memory + memory
+	}
+	return request, nil
 }
 
 // maxAmount is the larger of two amounts, per resource.
@@ -488,7 +513,7 @@ func PodRequestTotal(pod PodSpec) (Amount, error) {
 		}
 		containers = append(containers, amount)
 	}
-	return schedulerRequest(Amount{}, inits, containers), nil
+	return schedulerRequest(Amount{}, inits, containers, nil)
 }
 
 // amountOf reads a rendered container's two request quantities into an Amount.
@@ -507,9 +532,13 @@ func amountOf(cpu, memory string) (Amount, error) {
 }
 
 // parseQuantity reads a Kubernetes resource quantity as the preflight accepts
-// it: a plain integer or decimal, or one of the suffixes m (milli), Mi and Gi.
-// The forms are the ones a node and pod listing uses; any other suffix, a
-// fraction, an exponent, a sign, or anything else is refused with the input in
+// it: a plain integer or decimal, optionally in the exponent form the API
+// prints when no suffix fits, with any suffix it prints for CPU and memory —
+// the milli suffix m, the micro and nano suffixes u and n (rounded up to a
+// whole milli-unit), the binary suffixes Ki Mi Gi Ti Pi Ei, and the decimal
+// suffixes k M G T P E. A fraction, a sign, an empty value, an exponent with no
+// digits or a sign, a Go base prefix or underscore, a second decimal point, an
+// unknown suffix, and a value too large for int64 are refused with the input in
 // the error, because a request read wrong is a node read freer than it is. A
 // quantity that is not a whole unit rounds up, so a request never reads lower
 // than it is.
@@ -524,22 +553,26 @@ func parseQuantity(value string, scale int64) (int64, error) {
 	if strings.ContainsAny(number, "+-") {
 		return 0, fmt.Errorf("%q has a sign, which no quantity the preflight reads uses", value)
 	}
-	if strings.ContainsAny(number, "eE") {
-		return 0, fmt.Errorf("%q is an exponent, which the preflight does not read", value)
+	mantissa, exponent, err := splitExponent(number, value)
+	if err != nil {
+		return 0, err
 	}
-	if !plainDecimal(number) {
+	if !plainDecimal(mantissa) {
 		return 0, fmt.Errorf("%q is not a plain integer or decimal (base prefixes and underscores are refused)", value)
 	}
 	// plainDecimal admitted only digits and one point, which SetString always
 	// reads, so its ok result carries no information here.
-	mantissa, _ := new(big.Rat).SetString(number)
+	amount, _ := new(big.Rat).SetString(mantissa)
 	multiplier, ok := quantityMultiplier(suffix)
 	if !ok {
 		return 0, fmt.Errorf("%q has a suffix the preflight does not read", value)
 	}
-	scaled := new(big.Rat).Mul(mantissa, multiplier)
-	scaled.Mul(scaled, new(big.Rat).SetInt64(scale))
-	whole, remainder := new(big.Int).QuoRem(scaled.Num(), scaled.Denom(), new(big.Int))
+	amount.Mul(amount, multiplier)
+	amount.Mul(amount, new(big.Rat).SetInt64(scale))
+	if exponent != 0 {
+		amount.Mul(amount, new(big.Rat).SetInt(new(big.Int).Exp(big.NewInt(10), big.NewInt(exponent), nil)))
+	}
+	whole, remainder := new(big.Int).QuoRem(amount.Num(), amount.Denom(), new(big.Int))
 	if remainder.Sign() != 0 {
 		whole.Add(whole, big.NewInt(1))
 	}
@@ -547,6 +580,49 @@ func parseQuantity(value string, scale int64) (int64, error) {
 		return 0, fmt.Errorf("%q is too large to read", value)
 	}
 	return whole.Int64(), nil
+}
+
+// splitExponent splits a quantity's number into its mantissa and a non-negative
+// decimal exponent: the exponent form the API prints when a value has no suffix
+// form. The exponent is a run of digits; a missing run, a sign, or a second
+// exponent is refused. A number with no exponent keeps a zero exponent, and a
+// zero mantissa stays zero whatever the exponent says, so no power is computed
+// for it.
+func splitExponent(number, value string) (string, int64, error) {
+	i := strings.IndexAny(number, "eE")
+	if i < 0 {
+		return number, 0, nil
+	}
+	if strings.IndexAny(number[i+1:], "eE") >= 0 {
+		return "", 0, fmt.Errorf("%q is not a quantity: it has more than one exponent", value)
+	}
+	mantissa, digits := number[:i], number[i+1:]
+	if digits == "" {
+		return "", 0, fmt.Errorf("%q is not a quantity: its exponent has no digits", value)
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return "", 0, fmt.Errorf("%q is not a quantity: its exponent is not a run of digits", value)
+		}
+	}
+	// A zero mantissa stays zero whatever the exponent says, so no power is
+	// computed for it.
+	if strings.Trim(mantissa, "0.") == "" {
+		return mantissa, 0, nil
+	}
+	exponent, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return "", 0, fmt.Errorf("%q is too large to read", value)
+	}
+	// The mantissa has at most len(mantissa) fractional digits, so it is at
+	// least 10^-len(mantissa); the smallest accepted multiplier is 1e-9 (n) and
+	// the smallest scale is 1. An exponent past this bound therefore multiplies
+	// the value beyond int64, whatever the suffix, and no power is computed for
+	// it.
+	if exponent > int64(len(mantissa))+28 {
+		return "", 0, fmt.Errorf("%q is too large to read", value)
+	}
+	return mantissa, exponent, nil
 }
 
 // plainDecimal reports whether number is digits with at most one decimal point
@@ -584,17 +660,42 @@ func splitQuantity(value string) (number, suffix string) {
 }
 
 // quantityMultiplier is the factor an accepted quantity suffix multiplies its
-// number by.
+// number by: the milli, micro and nano fractions, the binary suffixes the node
+// listing prints for memory, and the decimal suffixes the API prints.
 func quantityMultiplier(suffix string) (*big.Rat, bool) {
 	switch suffix {
 	case "":
 		return big.NewRat(1, 1), true
+	case "n":
+		return big.NewRat(1, 1_000_000_000), true
+	case "u":
+		return big.NewRat(1, 1_000_000), true
 	case "m":
 		return big.NewRat(1, 1_000), true
+	case "k":
+		return big.NewRat(1_000, 1), true
+	case "M":
+		return big.NewRat(1_000_000, 1), true
+	case "G":
+		return big.NewRat(1_000_000_000, 1), true
+	case "T":
+		return big.NewRat(1_000_000_000_000, 1), true
+	case "P":
+		return big.NewRat(1_000_000_000_000_000, 1), true
+	case "E":
+		return big.NewRat(1_000_000_000_000_000_000, 1), true
+	case "Ki":
+		return big.NewRat(1<<10, 1), true
 	case "Mi":
 		return big.NewRat(1<<20, 1), true
 	case "Gi":
 		return big.NewRat(1<<30, 1), true
+	case "Ti":
+		return big.NewRat(1<<40, 1), true
+	case "Pi":
+		return big.NewRat(1<<50, 1), true
+	case "Ei":
+		return big.NewRat(1<<60, 1), true
 	}
 	return nil, false
 }
@@ -619,6 +720,12 @@ type listingItem struct {
 		Overhead       map[string]string `json:"overhead"`
 		InitContainers []podContainer    `json:"initContainers"`
 		Containers     []podContainer    `json:"containers"`
+		// Resources is the pod's own resource request (Kubernetes pod-level
+		// resources), which the scheduler reads in place of the container
+		// arithmetic for each resource it names.
+		Resources struct {
+			Requests map[string]string `json:"requests"`
+		} `json:"resources"`
 	} `json:"spec"`
 	Status struct {
 		Phase       string            `json:"phase"`

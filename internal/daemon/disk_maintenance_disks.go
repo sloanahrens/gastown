@@ -1,9 +1,10 @@
 package daemon
 
-// disk_maintenance_disks is the disk half of the patrol: it reads the three
-// disks the town writes to, raises the 80/70 usage alerts and the unreadable
-// alert, and tightens the registry keep while a disk is nearly full
-// (gt-dl4nv.16).
+// disk_maintenance_disks is the disk half of the patrol: it reads the disks the
+// town writes to, raises the 80/70 usage alerts and the unreadable alert, and
+// tightens the registry keep while a disk is nearly full (gt-dl4nv.16). The
+// control cluster's disk raises the same alerts but never tightens the keep
+// (gt-gg9hv.58).
 //
 // A disk the patrol cannot measure is not a quiet disk: a failed read or
 // output it cannot parse raises diskmaint:<disk>:unreadable and refuses the
@@ -24,6 +25,8 @@ import (
 	"sync"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
 	"github.com/steveyegge/gastown/internal/hostprobe"
 )
@@ -39,6 +42,9 @@ const (
 	diskMaintDiskMac           = "mac"
 	diskMaintDiskColima        = "colima"
 	diskMaintDiskDockerDesktop = "docker-desktop"
+	// diskMaintDiskControl is the control cluster's node disk. Renaming it
+	// orphans an open diskmaint:control alert, like the others.
+	diskMaintDiskControl = "control"
 
 	// diskMaintStillUnreadableInterval is how often the patrol logs that an
 	// open unreadable alert's disk still cannot be read. The alert itself
@@ -62,12 +68,28 @@ type diskMaintDisk struct {
 	// parse turns the reader's output into the disk's used share; nil is
 	// disks.ParseDF. It applies only to a df reading.
 	parse func(string) (float64, error)
+	// detail names the biggest consumers in the same output; nil names none. A
+	// detail that cannot be read makes the reading an error.
+	detail func(string) (string, error)
+	// alertOnly marks a reading that alerts but neither tightens the keep nor
+	// refuses a plan (see disks.Reading.AlertOnly).
+	alertOnly bool
 	// probe names the reading in the host agent's probe file, for the disks a
 	// container daemon cannot reach from inside the container.
 	probe func(hostprobe.Probes) hostprobe.Field[hostprobe.Disk]
 }
 
-// diskMaintDisks returns the disks the patrol reads, in report order: the Mac
+// diskMaintDisks returns the disks the patrol reads: the town's own disks, then
+// the control cluster's when a context is configured for it.
+func (d *Daemon) diskMaintDisks(kubeconfig string) []diskMaintDisk {
+	watched := d.diskMaintTownDisks(kubeconfig)
+	if control, ok := d.diskMaintControl(kubeconfig); ok {
+		watched = append(watched, control)
+	}
+	return watched
+}
+
+// diskMaintTownDisks returns the town's own disks, in report order: the Mac
 // volume, the sandbox cluster's data disk, and the Docker Desktop disk the CI
 // runner writes to.
 //
@@ -79,7 +101,7 @@ type diskMaintDisk struct {
 // container's own root, and the runner container the patrol used to exec into
 // is gone (gt-gg9hv.24). The sandbox disk is read the same way in both modes,
 // through the town's kubeconfig (gt-gg9hv.24.3).
-func (d *Daemon) diskMaintDisks(kubeconfig string) []diskMaintDisk {
+func (d *Daemon) diskMaintTownDisks(kubeconfig string) []diskMaintDisk {
 	colima := diskMaintDisk{name: diskMaintDiskColima, df: d.diskMaintSandboxDisk(kubeconfig), parse: disks.ParseNodeStats}
 	if d.containerMode {
 		return []diskMaintDisk{
@@ -107,13 +129,20 @@ func (d *Daemon) diskMaintDisks(kubeconfig string) []diskMaintDisk {
 // cannot be read makes the read an error naming every such node, never a lower
 // number.
 func (d *Daemon) diskMaintSandboxDisk(kubeconfig string) DFReader {
+	return d.diskMaintClusterDisk([]string{"--kubeconfig", kubeconfig})
+}
+
+// diskMaintClusterDisk reads a cluster's node disk the way the sandbox disk is
+// read. kubectl is the flags every call to the cluster starts with, so a caller
+// that needs a context names it there.
+func (d *Daemon) diskMaintClusterDisk(kubectl []string) DFReader {
 	return func(ctx context.Context) ([]byte, error) {
-		nodes, err := d.diskMaintSandboxNodes(ctx, kubeconfig)
+		nodes, err := d.diskMaintClusterNodes(ctx, kubectl)
 		if err != nil {
 			return nil, err
 		}
 		if len(nodes) == 0 {
-			return nil, errors.New("the sandbox cluster lists no nodes")
+			return nil, errors.New("the cluster lists no nodes")
 		}
 		var (
 			worst    []byte
@@ -121,8 +150,8 @@ func (d *Daemon) diskMaintSandboxDisk(kubeconfig string) DFReader {
 			failures []error
 		)
 		for _, node := range nodes {
-			summary, err := d.diskMaintRunner(ctx, nil, "kubectl", "--kubeconfig", kubeconfig,
-				"get", "--raw", "/api/v1/nodes/"+node+"/proxy/stats/summary")
+			summary, err := d.diskMaintRunner(ctx, nil, "kubectl",
+				diskMaintKubectl(kubectl, "get", "--raw", "/api/v1/nodes/"+node+"/proxy/stats/summary")...)
 			if err != nil {
 				failures = append(failures, fmt.Errorf("node %s: %w", node, err))
 				continue
@@ -143,12 +172,42 @@ func (d *Daemon) diskMaintSandboxDisk(kubeconfig string) DFReader {
 	}
 }
 
-// diskMaintSandboxNodes names the nodes the sandbox cluster lists, which are
-// the nodes that hold its work.
-func (d *Daemon) diskMaintSandboxNodes(ctx context.Context, kubeconfig string) ([]string, error) {
-	out, err := d.diskMaintRunner(ctx, nil, "kubectl", "--kubeconfig", kubeconfig, "get", "nodes", "-o", "name")
+// diskMaintKubectl is the argv of one kubectl call: the cluster's flags, then
+// the call's own arguments. It returns a fresh slice, so the flags are never
+// shared between calls.
+func diskMaintKubectl(kubectl []string, args ...string) []string {
+	return append(append(make([]string, 0, len(kubectl)+len(args)), kubectl...), args...)
+}
+
+// diskMaintControl returns the control cluster's node disk, read the way the
+// sandbox disk is, through the kubeconfig and the context tier_sweep.runner
+// names. The town may run without a control cluster: an empty context, or a
+// runner on a backend that is not kubernetes, reads nothing and logs once. The
+// reading is alert-only: its unreadable or full state neither tightens the keep
+// nor refuses a plan.
+func (d *Daemon) diskMaintControl(kubeconfig string) (diskMaintDisk, bool) {
+	runner := tierSweepRunnerConfig(d.patrolConfig)
+	if runner == nil || runner.Backend != agentconfig.TierSweepRunnerKubernetes || runner.Context == "" {
+		if d.diskMaintSchedule.firstRefusal("control:unconfigured") {
+			d.logger.Printf("disk_maintenance: control disk not read: patrols.tier_sweep.runner names no kubernetes context")
+		}
+		return diskMaintDisk{}, false
+	}
+	return diskMaintDisk{
+		name:      diskMaintDiskControl,
+		df:        d.diskMaintClusterDisk(diskmaint.KubectlArgs(kubeconfig, runner.Context)),
+		parse:     disks.ParseNodeStats,
+		detail:    disks.TopConsumers,
+		alertOnly: true,
+	}, true
+}
+
+// diskMaintClusterNodes names the nodes a cluster lists, which are the nodes
+// that hold its work.
+func (d *Daemon) diskMaintClusterNodes(ctx context.Context, kubectl []string) ([]string, error) {
+	out, err := d.diskMaintRunner(ctx, nil, "kubectl", diskMaintKubectl(kubectl, "get", "nodes", "-o", "name")...)
 	if err != nil {
-		return nil, fmt.Errorf("listing the sandbox cluster's nodes: %w", err)
+		return nil, fmt.Errorf("listing the cluster's nodes: %w", err)
 	}
 	var nodes []string
 	for _, line := range strings.Split(string(out), "\n") {
@@ -213,7 +272,7 @@ func (d *Daemon) diskMaintenanceReadings(ctx context.Context, now time.Time, inj
 	readings := make([]disks.Reading, 0, len(watched))
 	for _, disk := range watched {
 		if fn, ok := injected[disk.name]; ok {
-			readings = append(readings, readDF(ctx, disk.name, fn, disk.parse))
+			readings = append(readings, readDF(ctx, disk, fn))
 			continue
 		}
 		if disk.probe != nil {
@@ -222,25 +281,40 @@ func (d *Daemon) diskMaintenanceReadings(ctx context.Context, now time.Time, inj
 			}
 			continue
 		}
-		readings = append(readings, readDF(ctx, disk.name, disk.df, disk.parse))
+		readings = append(readings, readDF(ctx, disk, disk.df))
 	}
 	return readings
 }
 
-// readDF runs one disk's reader and parses its used share.
-func readDF(ctx context.Context, name string, df DFReader, parse func(string) (float64, error)) disks.Reading {
+// readDF runs one disk's reader and parses its used share and, when the disk
+// names them, its biggest consumers from the same output. A failure in either
+// is that disk's reading error.
+func readDF(ctx context.Context, disk diskMaintDisk, df DFReader) disks.Reading {
+	r := disks.Reading{Name: disk.name, AlertOnly: disk.alertOnly}
+	parse := disk.parse
 	if parse == nil {
 		parse = disks.ParseDF
 	}
 	out, err := df(ctx)
 	if err != nil {
-		return disks.Reading{Name: name, Err: err}
+		r.Err = err
+		return r
 	}
 	pct, err := parse(string(out))
 	if err != nil {
-		return disks.Reading{Name: name, Err: err}
+		r.Err = err
+		return r
 	}
-	return disks.Reading{Name: name, UsedPct: pct}
+	r.UsedPct = pct
+	if disk.detail != nil {
+		detail, err := disk.detail(string(out))
+		if err != nil {
+			r.Err = fmt.Errorf("biggest consumers: %w", err)
+			return r
+		}
+		r.Detail = detail
+	}
+	return r
 }
 
 // diskMaintHostReadings reads the probe-backed disks from the host agent's
@@ -277,17 +351,81 @@ func (d *Daemon) diskMaintHostReadings(watched []diskMaintDisk, injected map[str
 	return readings, nil
 }
 
+// diskMaintAlertTurnWait is how long a pass waits for its turn to apply the
+// alerts before it reads the disks for itself and goes on: long enough for an
+// ordinary application, short of the pass's own bound, so a notifier that does
+// not answer cannot hold another pass's targets off for minutes.
+const diskMaintAlertTurnWait = 30 * time.Second
+
 // diskMaintAlerts is the patrol's memory of the disk alert keys it has open,
 // and of when it last logged that each open unreadable key is still unreadable.
-// A pass writes it and the next pass reads it, one pass at a time, but the
-// mutex keeps the read off a pass that has not settled yet.
+// A pass writes it and the next pass reads it. Whole applications -- the
+// reading, the decisions and the sends -- run one after another across passes
+// (see readAndApplyDiskAlerts), and the mutex keeps a single accessor safe on
+// its own.
 type diskMaintAlerts struct {
-	mu     sync.Mutex
-	active map[string]bool
+	// turn is the gate that makes applications run one after another: a buffered
+	// channel of one, so a pass waiting for its turn can give up with its
+	// context. acquireTurn, when set, replaces it (a test seam, so the ordering
+	// test can be shown red without the gate).
+	turn        chan struct{}
+	turnOnce    sync.Once
+	acquireTurn func(ctx context.Context) (release func(), err error)
+	mu          sync.Mutex
+	active      map[string]bool
 	// stillLogged is the pass time of the last "still unreadable" line for a
 	// key, or of the pass that first saw its disk unreadable. The clear forgets
 	// it, so a new outage starts its own hour.
 	stillLogged map[string]time.Time
+}
+
+// takeTurn waits for this pass's turn to apply the alerts. A pass whose context
+// ends while it waits gives up, and nothing it was to decide is recorded.
+func (a *diskMaintAlerts) takeTurn(ctx context.Context) (release func(), err error) {
+	if a.acquireTurn != nil {
+		return a.acquireTurn(ctx)
+	}
+	return a.takeGate(ctx)
+}
+
+// takeGate is the production wait for a turn.
+func (a *diskMaintAlerts) takeGate(ctx context.Context) (release func(), err error) {
+	a.turnOnce.Do(func() { a.turn = make(chan struct{}, 1) })
+	select {
+	case a.turn <- struct{}{}:
+		return func() { <-a.turn }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// readAndApplyDiskAlerts reads the disks and applies the alerts they call for,
+// as one application that no other pass's overlaps: the later of two passes
+// waits for the earlier, then reads and decides from the state the earlier one
+// left, so a reading is never older than the state it is applied over and a
+// raise and a clear for one key reach the notifier in the order they were
+// decided (gt-gg9hv.48). The reading is returned for the combined pass's keep
+// decision; false means the pass's context ended before its turn came and
+// nothing was read.
+func (d *Daemon) readAndApplyDiskAlerts(ctx context.Context, now time.Time) ([]disks.Reading, bool) {
+	waitCtx, cancelWait := context.WithTimeout(ctx, diskMaintAlertTurnWait)
+	release, err := d.diskMaintAlerts.takeTurn(waitCtx)
+	cancelWait()
+	if err != nil {
+		if ctx.Err() != nil {
+			d.logger.Printf("disk_maintenance: the disk alerts were not applied: %v", err)
+			return nil, false // the pass itself is over
+		}
+		// Another pass has held the turn for the whole wait, a notifier that
+		// is slow to answer: this pass reads the disks for its own decisions and
+		// leaves the alerts to that one, so its targets are not held off.
+		d.logger.Printf("disk_maintenance: another pass is applying the disk alerts; this pass reads the disks only: %v", err)
+		return d.diskMaintenanceSeams().readDisks(ctx), true
+	}
+	defer release()
+	readings := d.diskMaintenanceSeams().readDisks(ctx)
+	d.applyDiskAlerts(ctx, readings, now)
+	return readings, true
 }
 
 // snapshot returns a copy of the open keys, which is what disks.Evaluate
@@ -360,12 +498,14 @@ func (a *diskMaintAlerts) recordUnreadableRaised(key string, now time.Time) (aga
 // open the pass logs the still-unreadable line at most once an hour, so an
 // outage that lasts is visible without a repeat alert. A raise the notifier
 // refused is retried on the next pass, and each retry restarts the hour; the
-// retry gets its own line so those restarts are not silent.
-func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
+// retry gets its own line so those restarts are not silent. Every send runs
+// under the pass's context, so a notifier that never answers is abandoned when
+// the pass ends and its alert is decided again by the next one.
+func (d *Daemon) applyDiskAlerts(ctx context.Context, readings []disks.Reading, now time.Time) {
 	for _, alert := range disks.Evaluate(readings, d.diskMaintAlerts.snapshot()) {
 		switch {
 		case alert.Raise:
-			err := d.escalateAlertErr(alert.Key, diskMaintAlertSource, alert.Detail)
+			err := d.escalateAlertCtx(ctx, alert.Key, diskMaintAlertSource, alert.Detail)
 			if err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not delivered: %v", alert.Key, err)
 			} else {
@@ -375,7 +515,7 @@ func (d *Daemon) applyDiskAlerts(readings []disks.Reading, now time.Time) {
 				d.logger.Printf("disk_maintenance: disk %s still unreadable, alert raised again", alert.Name)
 			}
 		case alert.Clear:
-			if err := d.clearAlertsErr(alert.Detail, alert.Key); err != nil {
+			if err := d.clearAlertsCtx(ctx, alert.Detail, alert.Key); err != nil {
 				d.logger.Printf("disk_maintenance: alert %s was not cleared: %v", alert.Key, err)
 				continue // still open, and the next pass clears it again
 			}

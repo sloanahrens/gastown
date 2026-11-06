@@ -226,6 +226,58 @@ func TestRenderDeploymentRecreates(t *testing.T) {
 	}
 }
 
+// TestRunnerDoesNotTolerateDiskPressure keeps the runner out of the disk-pressure
+// toleration the two Forgejo Deployments carry. The runner's store is the writer
+// that filled the disk, so a runner held Pending under pressure stops the filling
+// (gt-gg9hv.59, deploy/k8s/forgejo-tolerations.yaml). It reads the rendered object
+// an operator applies, not a struct field, so a toleration added to the builder
+// later still fails here.
+func TestRunnerDoesNotTolerateDiskPressure(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues())
+	var buf bytes.Buffer
+	if err := YAML(&buf, m.Deployment); err != nil {
+		t.Fatalf("YAML: %v", err)
+	}
+	var rendered map[string]any
+	if err := yaml.Unmarshal(buf.Bytes(), &rendered); err != nil {
+		t.Fatalf("decoding the rendered Deployment: %v", err)
+	}
+	podSpec := renderedPodSpec(t, rendered)
+	raw, has := podSpec["tolerations"]
+	if !has {
+		return
+	}
+	tols, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("rendered tolerations = %v (%T), want a list", raw, raw)
+	}
+	for _, entry := range tols {
+		tol, ok := entry.(map[string]any)
+		if !ok {
+			t.Fatalf("rendered toleration = %v (%T), want a map", entry, entry)
+		}
+		if tol["key"] == "node.kubernetes.io/disk-pressure" {
+			t.Errorf("the runner tolerates node.kubernetes.io/disk-pressure (%v); it must stay Pending under disk pressure", tol)
+		}
+	}
+}
+
+// renderedPodSpec walks a decoded Deployment to its pod template spec and fails
+// the test when a step is missing or is not a map.
+func renderedPodSpec(t *testing.T, doc map[string]any) map[string]any {
+	t.Helper()
+	cur := doc
+	for _, k := range []string{"spec", "template", "spec"} {
+		next, ok := cur[k].(map[string]any)
+		if !ok {
+			t.Fatalf("rendered Deployment has no map at %q", k)
+		}
+		cur = next
+	}
+	return cur
+}
+
 func TestRenderConfigMapGolden(t *testing.T) {
 	t.Parallel()
 	v := goldenValues()

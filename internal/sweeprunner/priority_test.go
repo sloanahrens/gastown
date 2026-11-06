@@ -33,17 +33,19 @@ func priorityListingJSON(sweep int, pods ...string) []byte {
 }
 
 // priorityPod is one pod in the guard's listing, at priority (nil leaves the
-// field out) and owned by an object named owner (empty names no owner).
+// field out) and owned by an object named owner (empty names no owner). The
+// owner references sit in metadata, where the API puts them.
 func priorityPod(namespace, name string, priority *int, owner string) string {
 	var fields []string
 	if priority != nil {
 		fields = append(fields, fmt.Sprintf(`"priority":%d`, *priority))
 	}
+	metadata := fmt.Sprintf(`"name":%q,"namespace":%q`, name, namespace)
 	if owner != "" {
-		fields = append(fields, fmt.Sprintf(`"ownerReferences":[{"kind":"ReplicaSet","name":%q}]`, owner))
+		metadata += fmt.Sprintf(`,"ownerReferences":[{"kind":"ReplicaSet","name":%q}]`, owner)
 	}
-	return fmt.Sprintf(`{"kind":"Pod","metadata":{"name":%q,"namespace":%q},"spec":{%s}}`,
-		name, namespace, strings.Join(fields, ","))
+	return fmt.Sprintf(`{"kind":"Pod","metadata":{%s},"spec":{%s}}`,
+		metadata, strings.Join(fields, ","))
 }
 
 // priorityDeclineOf returns the refusal err carries, or fails the test.
@@ -205,6 +207,30 @@ func TestPriorityTerminatingPodIsIgnored(t *testing.T) {
 	}
 }
 
+// A Succeeded or Failed pod holds nothing and cannot be displaced, so a
+// protected namespace's completed pod at priority 0 does not refuse a launch;
+// the live cluster holds two such restore pods. A Running pod at priority 0
+// still does (gt-gg9hv.49).
+func TestPriorityEndedPodIsIgnored(t *testing.T) {
+	t.Parallel()
+	guard := PriorityGuard(goldenSpec(), []string{"forgejo"})
+	zero := 0
+	running := priorityPod("forgejo", "forgejo-live", &zero, "")
+	for _, phase := range []string{"Succeeded", "Failed"} {
+		t.Run(phase, func(t *testing.T) {
+			t.Parallel()
+			ended := `{"kind":"Pod","metadata":{"name":"restore-abc","namespace":"forgejo"},"spec":{"priority":0},"status":{"phase":"` + phase + `"}}`
+			if err := guard.Refuse(priorityListingJSON(100, ended)); err != nil {
+				t.Errorf("a %s pod at priority 0 refused the launch: %v", phase, err)
+			}
+			decline := priorityDeclineOf(t, guard.Refuse(priorityListingJSON(100, ended, running)))
+			if !strings.Contains(decline.Line(), "pod forgejo/forgejo-live") {
+				t.Errorf("the decline = %q, want the live pod, not the %s one", decline.Line(), phase)
+			}
+		})
+	}
+}
+
 // A pod belongs to a table row only when a ReplicaSet named for exactly that
 // Deployment owns it: a Deployment whose name only starts the same way is not
 // the row, and an owner of another kind is not a Deployment's ReplicaSet
@@ -233,7 +259,7 @@ func TestPriorityOwnerMatchIsExact(t *testing.T) {
 		},
 		"an owner that is not a ReplicaSet is not the Deployment": {
 			listing: priorityListingJSON(100,
-				`{"kind":"Pod","metadata":{"name":"forgejo-abc","namespace":"forgejo"},"spec":{"priority":200,"ownerReferences":[{"kind":"Job","name":"forgejo-57658978cf"}]}}`),
+				`{"kind":"Pod","metadata":{"name":"forgejo-abc","namespace":"forgejo","ownerReferences":[{"kind":"Job","name":"forgejo-57658978cf"}]},"spec":{"priority":200}}`),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

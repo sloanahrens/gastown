@@ -24,7 +24,7 @@ var fixedNow = time.Date(2026, 10, 21, 17, 30, 0, 0, time.UTC)
 var pushTranscript = []string{
 	`{"type":"assistant","timestamp":"2026-10-21T17:00:01Z","message":{"content":[{"type":"text","text":"Pushing the branch now."}]}}`,
 	`{"type":"assistant","timestamp":"2026-10-21T17:00:02Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git push origin main"}}]}}`,
-	`{"type":"user","timestamp":"2026-10-21T17:00:03Z","message":{"content":[{"type":"tool_result","content":"To forgejo:sloan/gastown.git main -> main","is_error":false}]}}`,
+	`{"type":"user","timestamp":"2026-10-21T17:00:03Z","message":{"content":[{"type":"tool_result","content":"To forgejo:owner/gastown.git main -> main","is_error":false}]}}`,
 }
 
 // cleanTranscript is a session that only ran its own tests.

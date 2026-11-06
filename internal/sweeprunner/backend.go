@@ -1,6 +1,12 @@
 package sweeprunner
 
-import "strings"
+import (
+	"bytes"
+	"fmt"
+	"path/filepath"
+	"strings"
+	"unicode"
+)
 
 // The sidecar engine's address and port, which both backends hand the runner
 // (DOCKER_HOST) and the sidecar (--host).
@@ -72,6 +78,94 @@ type Guard struct {
 	// output it cannot read is an error too: a check that cannot run is not a
 	// pass.
 	Refuse func(stdout []byte) error
+}
+
+// guardFirstLineRunes caps the first line of a failed read's stderr, the only
+// output of the read that reaches a log line or an attention item.
+const guardFirstLineRunes = 200
+
+// GuardUnreadable is a guard whose read did not run or exited non-zero: the
+// check did not answer, so the run is neither refused for an object it could
+// not see nor started. The cycle defers and says why; it is not a verdict on
+// the tree (gt-gg9hv.56).
+type GuardUnreadable struct {
+	// Argv0Verb names the read by its program, verb and resource, the argv's
+	// words before its first flag: "kubectl get pods,priorityclasses".
+	Argv0Verb string
+	// ExitCode is the read's exit status, -1 when it did not run.
+	ExitCode int
+	// FirstLine is the first non-blank line of the read's stderr, sanitized by
+	// guardFirstLine. The rest of the output is not quoted: it can carry more
+	// than a refusal names.
+	FirstLine string
+}
+
+// NewGuardUnreadable is the failed read of argv, with the stderr it printed.
+func NewGuardUnreadable(argv []string, exitCode int, stderr []byte) *GuardUnreadable {
+	return &GuardUnreadable{
+		Argv0Verb: readWords(argv),
+		ExitCode:  exitCode,
+		FirstLine: guardFirstLine(stderr),
+	}
+}
+
+// Error is the failed read as the launch reports it.
+func (e *GuardUnreadable) Error() string {
+	return fmt.Sprintf("the guard's read failed (exit %d): %s", e.ExitCode, e.FirstLine)
+}
+
+// Line is the failed read as the daemon logs it: the sentence says the cycle is
+// deferred, and the first line of stderr is the only text of the read it shows.
+func (e *GuardUnreadable) Line() string {
+	return fmt.Sprintf("tier_sweep: not launching: the guard's read failed (exit %d): %s; the cycle is deferred", e.ExitCode, e.FirstLine)
+}
+
+// readWords is the program and the words of argv before its first flag, with
+// a --context pair dropped: the read's verb and resource, not its flags or the
+// values they carry.
+func readWords(argv []string) string {
+	if len(argv) == 0 {
+		return ""
+	}
+	words := []string{filepath.Base(argv[0])}
+	for i := 1; i < len(argv); i++ {
+		switch {
+		case argv[i] == "--context":
+			i++
+		case strings.HasPrefix(argv[i], "-"):
+			return strings.Join(words, " ")
+		default:
+			words = append(words, argv[i])
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+// guardFirstLine is the first non-blank line of stderr, cut to
+// guardFirstLineRunes runes with every control character (ANSI escapes, tabs,
+// carriage returns) turned to a space, and trimmed. The result is one line with
+// no control character in it.
+func guardFirstLine(stderr []byte) string {
+	line := stderr
+	for _, l := range bytes.Split(stderr, []byte("\n")) {
+		if len(bytes.TrimSpace(l)) > 0 {
+			line = l
+			break
+		}
+	}
+	var b strings.Builder
+	n := 0
+	for _, r := range string(line) {
+		if n == guardFirstLineRunes {
+			break
+		}
+		if unicode.IsControl(r) {
+			r = ' '
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // Poll is how a caller learns that a run has ended and brings its result out.

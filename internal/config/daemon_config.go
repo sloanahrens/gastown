@@ -1132,6 +1132,15 @@ type DiskMaintenanceConfig struct {
 	// CacheTrimInterval is how often the shared Go cache is trimmed, in any
 	// window. Empty means DiskMaintenanceDefaultCacheTrimInterval.
 	CacheTrimInterval string `json:"cache_trim_interval,omitempty"` // Go duration such as "2h"
+	// CICacheTrimInterval is how often the CI runner's Go build cache is
+	// trimmed, in any window. Empty means DiskMaintenanceDefaultCICacheTrimInterval.
+	CICacheTrimInterval string `json:"ci_cache_trim_interval,omitempty"` // Go duration such as "1h"
+	// CICacheMaxAge is how long an entry of that cache may go unwritten before
+	// the trim removes it. Empty means DiskMaintenanceDefaultCICacheMaxAge.
+	CICacheMaxAge string `json:"ci_cache_max_age,omitempty"` // Go duration such as "12h"
+	// CICacheWarnBytes is the size above which a trim that removed nothing is an
+	// attention item. Empty means DiskMaintenanceDefaultCICacheWarnBytes.
+	CICacheWarnBytes string `json:"ci_cache_warn_bytes,omitempty"` // size such as "30GB"
 	// Targets holds the targets with a cadence of their own. A target absent
 	// here keeps the daily window.
 	Targets map[string]DiskMaintenanceTarget `json:"targets,omitempty"`
@@ -1150,6 +1159,84 @@ func (c DiskMaintenanceConfig) CacheTrimEvery() (time.Duration, error) {
 		return 0, fmt.Errorf("patrols.disk_maintenance.cache_trim_interval: %w", err)
 	}
 	return every, nil
+}
+
+// CICacheTrimEvery returns the cadence the CI build-cache trim runs on: the
+// default when the setting is empty, and an error naming the setting for a value
+// the patrol cannot schedule. It never falls back to the default on an error
+// (gt-gg9hv.57).
+func (c DiskMaintenanceConfig) CICacheTrimEvery() (time.Duration, error) {
+	raw := c.CICacheTrimInterval
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCICacheTrimInterval
+	}
+	every, err := parseDiskMaintenanceCadence(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_cache_trim_interval: %w", err)
+	}
+	return every, nil
+}
+
+// CICacheMaxAgeDuration returns how old an entry must be before the CI cache
+// trim removes it: the default when the setting is empty, and an error naming
+// the setting otherwise, zero and negative values included.
+func (c DiskMaintenanceConfig) CICacheMaxAgeDuration() (time.Duration, error) {
+	raw := c.CICacheMaxAge
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCICacheMaxAge
+	}
+	age, err := parseDiskMaintenanceCadence(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_cache_max_age: %w", err)
+	}
+	return age, nil
+}
+
+// CICacheWarnLimit returns the size above which a CI cache trim that removed
+// nothing raises its attention item: the default when the setting is empty, and
+// an error naming the setting for a value that is not a positive size.
+func (c DiskMaintenanceConfig) CICacheWarnLimit() (int64, error) {
+	raw := c.CICacheWarnBytes
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCICacheWarnBytes
+	}
+	limit, err := parseDiskMaintenanceSize(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_cache_warn_bytes: %w", err)
+	}
+	return limit, nil
+}
+
+// diskMaintenanceSizeRE is a byte count: digits and an optional binary unit.
+var diskMaintenanceSizeRE = regexp.MustCompile(`^([0-9]+)(B|KB|MB|GB|TB)?$`)
+
+// diskMaintenanceSizeUnits maps each unit diskMaintenanceSizeRE accepts to its
+// multiple of a byte.
+var diskMaintenanceSizeUnits = map[string]int64{
+	"": 1, "B": 1, "KB": 1 << 10, "MB": 1 << 20, "GB": 1 << 30, "TB": 1 << 40,
+}
+
+// parseDiskMaintenanceSize reads a size such as "30GB" as a byte count. Zero is
+// refused, as a negative one is by the form, so a setting never reads as a
+// limit the patrol cannot act on. A count too large for an int64 is refused
+// rather than wrapped.
+func parseDiskMaintenanceSize(raw string) (int64, error) {
+	m := diskMaintenanceSizeRE.FindStringSubmatch(strings.ToUpper(strings.TrimSpace(raw)))
+	if m == nil {
+		return 0, fmt.Errorf("%q is not a size such as \"30GB\"", raw)
+	}
+	n, err := strconv.ParseInt(m[1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%q is not a size such as \"30GB\"", raw)
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("%q is zero; want a size above zero", raw)
+	}
+	mult := diskMaintenanceSizeUnits[m[2]]
+	if n > math.MaxInt64/mult {
+		return 0, fmt.Errorf("%q is too large to read as bytes", raw)
+	}
+	return n * mult, nil
 }
 
 // DiskMaintenanceTarget is one target's own cadence: a set Interval runs that
@@ -1238,6 +1325,17 @@ const (
 	// it grows about 3 GB an hour, so one trim a day cannot hold the 10 GB cap
 	// (gt-gg9hv.24.2).
 	DiskMaintenanceDefaultCacheTrimInterval = "2h"
+	// DiskMaintenanceDefaultCICacheTrimInterval is the CI build-cache trim's
+	// cadence: the gate jobs fill that cache faster than a daily pass can hold it
+	// (gt-gg9hv.57).
+	DiskMaintenanceDefaultCICacheTrimInterval = "1h"
+	// DiskMaintenanceDefaultCICacheMaxAge is how long a CI build-cache entry may
+	// go unwritten before the trim removes it. An entry the build still uses is
+	// rewritten, so only cold entries age past it (gt-gg9hv.57).
+	DiskMaintenanceDefaultCICacheMaxAge = "12h"
+	// DiskMaintenanceDefaultCICacheWarnBytes is the size above which a CI cache
+	// trim that removed nothing raises its attention item (gt-gg9hv.57).
+	DiskMaintenanceDefaultCICacheWarnBytes = "30GB"
 )
 
 // UnmarshalJSON decodes the patrol's block strictly, refusing a value the
@@ -1272,6 +1370,15 @@ func (c *DiskMaintenanceConfig) UnmarshalJSON(data []byte) error {
 	}
 	cfg := DiskMaintenanceConfig(p)
 	if _, err := cfg.CacheTrimEvery(); err != nil {
+		return err
+	}
+	if _, err := cfg.CICacheTrimEvery(); err != nil {
+		return err
+	}
+	if _, err := cfg.CICacheMaxAgeDuration(); err != nil {
+		return err
+	}
+	if _, err := cfg.CICacheWarnLimit(); err != nil {
 		return err
 	}
 	for _, name := range slices.Sorted(maps.Keys(cfg.Targets)) {
@@ -2515,6 +2622,13 @@ func (p *PatrolsConfig) Count() int {
 // when the town is set up, and the file its container supervisor drives.
 func ContainerComposeFile(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", "container", "compose.yml")
+}
+
+// ContainerKubeconfigFile is where the compose render writes the sandbox
+// cluster's kubeconfig the container reads, derived because the host's file
+// names 127.0.0.1, which inside the container is its own loopback.
+func ContainerKubeconfigFile(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "container", "kubeconfig.yaml")
 }
 
 // MayBeContainerTown reports whether the town carries the compose file only a

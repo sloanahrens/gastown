@@ -60,7 +60,7 @@ func TestRequeueRejectedLandingRestoresTheQueue(t *testing.T) {
 	var out bytes.Buffer
 
 	townRoot := t.TempDir()
-	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "runner fault, not the diff", "sloan", townRoot, "gastown", &out); err != nil {
+	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "runner fault, not the diff", "operator", townRoot, "gastown", &out); err != nil {
 		t.Fatalf("requeue: %v", err)
 	}
 	stamp, err := land.ReadyStamp(townRoot, "gastown")
@@ -89,7 +89,7 @@ func TestRequeueRejectedLandingRestoresTheQueue(t *testing.T) {
 	if len(comments) != 1 {
 		t.Fatalf("wrote %d comments, want 1: %+v", len(comments), comments)
 	}
-	for _, want := range []string{"sloan", "runner fault, not the diff", requeueHead, requeueBranch} {
+	for _, want := range []string{"operator", "runner fault, not the diff", requeueHead, requeueBranch} {
 		if !strings.Contains(comments[0].Text, want) {
 			t.Errorf("comment %q does not record %q", comments[0].Text, want)
 		}
@@ -116,7 +116,7 @@ func TestRequeueRejectedLandingRecordsTheAttempt(t *testing.T) {
 	}))
 	remote := &fakeRequeueRemote{tip: requeueHead}
 
-	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{}); err != nil {
+	if err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "operator", t.TempDir(), "gastown", &bytes.Buffer{}); err != nil {
 		t.Fatalf("requeue: %v", err)
 	}
 	comments, err := bd.Comments("gt-3e1z4")
@@ -137,7 +137,7 @@ func TestRequeueRejectedLandingRefusesChangedHead(t *testing.T) {
 	seedReworkBead(bd, []string{land.LabelRework}, requeueRejectionNote(requeueBranch, requeueHead))
 	remote := &fakeRequeueRemote{tip: "2222222222222222222222222222222222222222"}
 
-	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{})
+	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "operator", t.TempDir(), "gastown", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "the head changed since the rejection") {
 		t.Fatalf("changed head: err = %v, want a refusal naming the change", err)
 	}
@@ -150,7 +150,7 @@ func TestRequeueRejectedLandingRefusesMissingBranch(t *testing.T) {
 	seedReworkBead(bd, []string{land.LabelRework}, requeueRejectionNote(requeueBranch, requeueHead))
 	remote := &fakeRequeueRemote{} // no tip: the branch is gone from the remote
 
-	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{})
+	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "operator", t.TempDir(), "gastown", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "is not on origin") {
 		t.Fatalf("missing branch: err = %v, want a refusal naming the remote", err)
 	}
@@ -176,7 +176,7 @@ func TestRequeueRejectedLandingRefusesNotRejected(t *testing.T) {
 			bd := beadsfake.New(beadsfake.WithPrefix("gt"))
 			seedReworkBead(bd, tc.labels, tc.notes)
 			remote := &fakeRequeueRemote{tip: requeueHead}
-			err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{})
+			err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "operator", t.TempDir(), "gastown", &bytes.Buffer{})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want a refusal containing %q", err, tc.want)
 			}
@@ -194,7 +194,7 @@ func TestRequeueRejectedLandingRefusesAlreadyQueued(t *testing.T) {
 	remote := &fakeRequeueRemote{tip: requeueHead}
 
 	townRoot := t.TempDir()
-	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", townRoot, "gastown", &bytes.Buffer{})
+	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "operator", townRoot, "gastown", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "already carries gt:ready-to-land") {
 		t.Fatalf("already queued: err = %v, want a refusal naming the label", err)
 	}
@@ -213,7 +213,7 @@ func TestRequeueRejectedLandingSurfacesARemoteReadError(t *testing.T) {
 	seedReworkBead(bd, []string{land.LabelRework}, requeueRejectionNote(requeueBranch, requeueHead))
 	remote := &fakeRequeueRemote{err: errors.New("no such remote")}
 
-	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "sloan", t.TempDir(), "gastown", &bytes.Buffer{})
+	err := requeueRejectedLanding(bd, remote, "origin", "gt-3e1z4", "x", "operator", t.TempDir(), "gastown", &bytes.Buffer{})
 	if err == nil || !strings.Contains(err.Error(), "reading refs/heads/"+requeueBranch+" from origin") {
 		t.Fatalf("remote read error: err = %v, want it surfaced", err)
 	}
@@ -260,7 +260,7 @@ func TestRequeueActor(t *testing.T) {
 		{"BEADS_ACTOR is the session's own identity",
 			map[string]string{"BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
 		{"BEADS_ACTOR leads BD_ACTOR and a crew GT_ROLE",
-			map[string]string{"BEADS_ACTOR": "town/crew/overseer", "BD_ACTOR": "gastown/crew/sloan", "GT_ROLE": "gastown/crew/dunlin"},
+			map[string]string{"BEADS_ACTOR": "town/crew/overseer", "BD_ACTOR": "gastown/crew/operator", "GT_ROLE": "gastown/crew/dunlin"},
 			"town/crew/overseer"},
 		{"BD_ACTOR leads a crew GT_ROLE",
 			map[string]string{"BD_ACTOR": "town/crew/dunlin", "GT_ROLE": "gastown/crew/dunlin"},
@@ -274,11 +274,11 @@ func TestRequeueActor(t *testing.T) {
 		{"no agent named is the placeholder",
 			map[string]string{}, "unnamed-agent"},
 		{"the host user is never the actor",
-			map[string]string{"USER": "sloan"}, "unnamed-agent"},
+			map[string]string{"USER": "operator"}, "unnamed-agent"},
 		{"the host user does not override a crew identity",
-			map[string]string{"USER": "sloan", "BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
+			map[string]string{"USER": "operator", "BEADS_ACTOR": "town/crew/overseer"}, "town/crew/overseer"},
 		{"a blank GT_POLECAT names no one",
-			map[string]string{"GT_POLECAT": "  ", "USER": "sloan"}, "unnamed-agent"},
+			map[string]string{"GT_POLECAT": "  ", "USER": "operator"}, "unnamed-agent"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -397,12 +397,12 @@ func TestAuthorKindTable(t *testing.T) {
 	}{
 		{"a polecat branch", "polecat/corpus/gt-1+mv1", AuthorKindPolecat},
 		{"a polecat seat named overseer is still a polecat's", "polecat/overseer/gt-1+mv1", AuthorKindPolecat},
-		{"a crew branch", "crew/sloan/gt-1", AuthorKindCrew},
+		{"a crew branch", "crew/operator/gt-1", AuthorKindCrew},
 		{"the overseer's own crew branch", "crew/overseer/gt-1", AuthorKindOverseer},
-		{"a branch prefix the town does not use", "sloan/post-land-shell-scope", AuthorKindUnknown},
+		{"a branch prefix the town does not use", "owner/post-land-shell-scope", AuthorKindUnknown},
 		{"no branch", "", AuthorKindUnknown},
 		{"a branch that names no seat", "polecat/corpus", AuthorKindUnknown},
-		{"a crew branch that names no seat", "crew/sloan", AuthorKindUnknown},
+		{"a crew branch that names no seat", "crew/operator", AuthorKindUnknown},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -422,10 +422,10 @@ func TestAuthorSeatTable(t *testing.T) {
 		want   string
 	}{
 		{"a polecat branch", "polecat/corpus/gt-1+mv1", "corpus"},
-		{"a crew branch", "crew/sloan/gt-1", "sloan"},
+		{"a crew branch", "crew/operator/gt-1", "operator"},
 		{"a crew branch the overseer wrote", "crew/overseer/gt-1", "overseer"},
 		{"a branch with no third segment", "polecat/corpus", ""},
-		{"a branch prefix the town does not use", "sloan/post-land-shell-scope", ""},
+		{"a branch prefix the town does not use", "owner/post-land-shell-scope", ""},
 		{"no branch", "", ""},
 	}
 	for _, tc := range tests {
@@ -445,11 +445,11 @@ func TestAuthorKindNamesASeatExactlyWhenAuthorSeatDoes(t *testing.T) {
 	t.Parallel()
 	branches := []string{
 		"polecat/corpus/gt-1+mv1",
-		"crew/sloan/gt-1",
+		"crew/operator/gt-1",
 		"crew/overseer/gt-1",
 		"polecat/corpus",
-		"crew/sloan",
-		"sloan/post-land-shell-scope",
+		"crew/operator",
+		"owner/post-land-shell-scope",
 		"",
 	}
 	for _, branch := range branches {
@@ -479,13 +479,13 @@ func TestBranchLineTable(t *testing.T) {
 		},
 		{
 			name:  "a quoted gate tail cannot name a branch",
-			notes: "MERGE REJECTION (attempt 1): gate - red\nBranch: crew/sloan/gt-2\nGate tail:\n  | Branch: evil/branch\n",
-			want:  "crew/sloan/gt-2",
+			notes: "MERGE REJECTION (attempt 1): gate - red\nBranch: crew/operator/gt-2\nGate tail:\n  | Branch: evil/branch\n",
+			want:  "crew/operator/gt-2",
 		},
 		{"a Branch line inside prose is not a line", "see the Branch: polecat/opal/gt-3 note\n", ""},
 		{"a note with no Branch line", "READY TO LAND\nHead: abc\n", ""},
 		{"an empty Branch line names nothing", "Branch: \n", ""},
-		{"a trailing space and a CRLF", "Branch: crew/sloan/gt-4 \r\n", "crew/sloan/gt-4"},
+		{"a trailing space and a CRLF", "Branch: crew/operator/gt-4 \r\n", "crew/operator/gt-4"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -106,7 +106,7 @@ labels:
   - priority:normal
 ```
 
-These beads sync via git, so all clones of the rig see the same state.
+These beads live in the rig's database, so all clones of the rig see the same state.
 
 ## Rig Control
 
@@ -254,12 +254,8 @@ gt rig unpark gastown
 # Major refactor in progress, all clones should pause
 gt rig dock gastown
 
-# Syncs via git - other towns see the rig as docked
-bd sync
-
 # When done:
 gt rig undock gastown
-bd sync
 ```
 
 ### Block Auto-Restart Locally

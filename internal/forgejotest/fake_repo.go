@@ -8,11 +8,13 @@ import (
 	"slices"
 )
 
-// fakeRepo is a repository the fake holds: the access each user has on it, and its
-// branch protection rules by name. A rule is the JSON object the provisioning run reads.
+// fakeRepo is a repository the fake holds: the access each user has on it, its
+// branch protection rules by name, and its Actions secrets by name. A rule is the JSON
+// object the provisioning run reads.
 type fakeRepo struct {
 	collaborators map[string]string
 	rules         map[string]map[string]any
+	secrets       map[string]string
 }
 
 // fakeLandBranch is the rule ProtectedLandBranch seeds on each repository the fake adds.
@@ -23,7 +25,7 @@ const fakeLandBranch = "land/*"
 func (f *Fake) AddRepo(repo string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := &fakeRepo{collaborators: map[string]string{}, rules: map[string]map[string]any{}}
+	r := &fakeRepo{collaborators: map[string]string{}, rules: map[string]map[string]any{}, secrets: map[string]string{}}
 	if f.ProtectedLandBranch {
 		r.rules[fakeLandBranch] = map[string]any{"rule_name": fakeLandBranch}
 	}
@@ -62,6 +64,8 @@ func (f *Fake) serveRepo(method string, parts []string, body []byte) (int, strin
 		return refusal(http.StatusNotFound, "the repository does not exist, or the token cannot see it")
 	}
 	switch {
+	case len(segs) == 5 && segs[2] == "actions" && segs[3] == "secrets" && method == http.MethodPut:
+		return r.setSecret(segs[4], body, f.SecretRefusal)
 	case len(segs) == 4 && segs[2] == "collaborators":
 		return r.collaborator(method, segs[3], body)
 	case len(segs) == 5 && segs[2] == "collaborators" && segs[4] == "permission":
@@ -117,6 +121,42 @@ func (r *fakeRepo) permissionOf(method, user string) (int, string) {
 		level = "none"
 	}
 	return reply(http.StatusOK, map[string]any{"permission": level})
+}
+
+// setSecret stores the Actions secret the body's data field carries: 201 when the
+// repository did not hold the name, 204 when it replaces one, and 422 for a body with
+// no data, which stores nothing. A refusalStatus the test set answers that status
+// instead, and its refusal echoes the value the request carried, as a server that
+// quotes the request back in its error does.
+func (r *fakeRepo) setSecret(name string, body []byte, refusalStatus int) (int, string) {
+	var in struct {
+		Data *string `json:"data"`
+	}
+	if err := json.Unmarshal(body, &in); err != nil || in.Data == nil {
+		return refusal(http.StatusUnprocessableEntity, "the body must carry data")
+	}
+	if refusalStatus != 0 {
+		return refusal(refusalStatus, "the fake refused the value "+*in.Data)
+	}
+	_, held := r.secrets[name]
+	r.secrets[name] = *in.Data
+	if held {
+		return http.StatusNoContent, ""
+	}
+	return http.StatusCreated, ""
+}
+
+// Secret returns the value the repository holds for the named Actions secret, and
+// whether it holds one.
+func (f *Fake) Secret(repo, name string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, ok := f.repos[repo]
+	if !ok {
+		return "", false
+	}
+	value, ok := r.secrets[name]
+	return value, ok
 }
 
 // listRules answers every rule the repository holds, sorted by name. The array is empty

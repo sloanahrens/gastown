@@ -90,11 +90,11 @@ func TestApplyDryRunRunsNothing(t *testing.T) {
 func TestApplyRefusesPathsOutsideACrewDir(t *testing.T) {
 	t.Parallel()
 	for name, bad := range map[string]string{
-		"outside crew":       "rig-a/other/sloan-x",
-		"an owner's clone":   "rig-a/crew/sloan",
+		"outside crew":       "rig-a/other/operator-x",
+		"an owner's clone":   "rig-a/crew/operator",
 		"an overseer clone":  "rig-a/crew/overseer",
 		"empty owner":        "rig-a/crew/-topic",
-		"empty topic":        "rig-a/crew/sloan-",
+		"empty topic":        "rig-a/crew/operator-",
 		"rig not configured": "rig-z/crew/overseer-z",
 		"nested below crew":  "rig-a/crew/sub/overseer-x",
 		"parent traversal":   "rig-a/crew/../../overseer-x",
@@ -260,10 +260,10 @@ func TestApplyRemovesWorktreeThenItsBranch(t *testing.T) {
 func TestApplyRemovesAnotherOwnersLandedWorktree(t *testing.T) {
 	t.Parallel()
 	root := townRoot(t)
-	path := filepath.Join(root, "rig-a", "crew", "sloan-x")
-	const branch = "polecat/sloan-x/y"
-	clone := filepath.Join(root, "rig-a", "crew", "sloan")
-	outside := filepath.Join(root, "rig-a", "other", "sloan-y")
+	path := filepath.Join(root, "rig-a", "crew", "operator-x")
+	const branch = "polecat/operator-x/y"
+	clone := filepath.Join(root, "rig-a", "crew", "operator")
+	outside := filepath.Join(root, "rig-a", "other", "operator-y")
 	f := newFakeGit(t)
 	answerRemove(f, root, path, nil)
 	answerBranch(f, root, branch)

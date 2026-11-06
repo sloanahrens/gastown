@@ -36,7 +36,7 @@ func createTrackedBeadsRepoWithIssues(t *testing.T, path, prefix string, numIssu
 	// Initialize git repo with explicit main branch
 	cmds := [][]string{
 		{"git", "init", "--initial-branch=main"},
-		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.email", "test@example.com"},
 		{"git", "config", "user.name", "Test User"},
 	}
 	for _, args := range cmds {
@@ -389,7 +389,7 @@ func createTrackedBeadsRepoWithNoIssues(t *testing.T, path, prefix string, env [
 	// Initialize git repo with explicit main branch
 	cmds := [][]string{
 		{"git", "init", "--initial-branch=main"},
-		{"git", "config", "user.email", "test@test.com"},
+		{"git", "config", "user.email", "test@example.com"},
 		{"git", "config", "user.name", "Test User"},
 	}
 	for _, args := range cmds {

@@ -357,7 +357,8 @@ func unparsedShare(in Input) float64 {
 }
 
 // reasonWith joins a verdict's reason with a note about the row, "; " between.
-// An empty note leaves the reason as it is.
+// An empty note leaves the reason as it is, with no trailing "; ". A battery
+// that is not continuous, or whose last-run record reads, has an empty note.
 func reasonWith(reason, note string) string {
 	switch {
 	case note == "":

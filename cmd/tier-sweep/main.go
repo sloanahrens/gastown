@@ -12,6 +12,11 @@
 //
 // `tier-sweep prune [--older-than 48h] [--dir DIR] [--apply]` lists the old
 // log directories and deletes them only with --apply (prune.go).
+//
+// `tier-sweep post-land [--window "2 hours"]` is the post-landing check: it runs
+// the shell tier only when main changed one of its inputs in the window, and
+// prints the skip otherwise (internal/shelltier/postland.go). It runs from the
+// repository root.
 package main
 
 import (
@@ -19,6 +24,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/shelltier"
 	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
@@ -26,11 +32,19 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, processDeps()))
 }
 
-// run sends the prune command line to its subcommand and every other one to the
-// sweep unchanged (gt-g6xz7).
+// postLandCommand is the first argument that selects the post-land check.
+const postLandCommand = "post-land"
+
+// run sends the prune and post-land command lines to their subcommands and every
+// other one to the sweep unchanged (gt-g6xz7).
 func run(args []string, stdout, stderr io.Writer, d tiersweep.Deps) int {
 	if len(args) > 0 && args[0] == pruneCommand {
 		return runPrune(args[1:], stdout, stderr, d)
+	}
+	if len(args) > 0 && args[0] == postLandCommand {
+		git := func(argv []string, out io.Writer) int { return d.Exec(".", d.Environ, argv, out) }
+		tier := func() int { return tiersweep.Run([]string{tiersweep.TierShell}, stdout, stderr, d) }
+		return shelltier.PostLand(args[1:], stdout, stderr, git, tier)
 	}
 	return tiersweep.Run(args, stdout, stderr, d)
 }

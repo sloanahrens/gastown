@@ -85,7 +85,7 @@ GET /formulas
       - name: mol-polecat-work
         version: 4.0.0
         description: "Full polecat work lifecycle..."
-        author: steve@gastown.io
+        author: steve@example.com
         downloads: 12543
         capabilities: [go, testing, code-review]
 
@@ -95,7 +95,7 @@ GET /formulas/{name}
     name: mol-polecat-work
     versions: [4.0.0, 3.2.1, 3.2.0, ...]
     latest: 4.0.0
-    author: steve@gastown.io
+    author: steve@example.com
     repository: https://github.com/steveyegge/gastown
     license: MIT
     capabilities:
@@ -180,7 +180,7 @@ $ gt formula install mol-polecat-code-review
 Resolving mol-polecat-code-review...
   Registry: molmall.gastown.io
   Version:  1.2.0 (latest)
-  Author:   steve@gastown.io
+  Author:   steve@example.com
   Skills:   code-review, security
 
 Downloading... ████████████████████ 100%
@@ -261,7 +261,7 @@ Setting up Mol Mall publishing...
 
 $ gt formula login
 Token: ********
-Logged in as: steve@gastown.io
+Logged in as: steve@example.com
 ```
 
 ### Publishing

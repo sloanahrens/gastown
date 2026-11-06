@@ -1992,7 +1992,7 @@ func commitAll(t *testing.T, d *Daemon, dir, msg string) {
 	if err := g.Add("-A"); err != nil {
 		t.Fatalf("git add: %v", err)
 	}
-	if err := g.CommitWithAuthor(msg, "Test <test@test.com>"); err != nil {
+	if err := g.CommitWithAuthor(msg, "Test <test@example.com>"); err != nil {
 		t.Fatalf("git commit: %v", err)
 	}
 }

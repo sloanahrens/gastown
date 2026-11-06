@@ -1,0 +1,40 @@
+# The disk-pressure toleration the two Forgejo Deployments carry, recorded as
+# strategic-merge patch text (gt-gg9hv.59). The decision and its reasons are in
+# docs/guides/control-cluster-disk.md.
+#
+# Applied by the overseer, not by this repo. Each document targets one live
+# Deployment: forgejo in namespace forgejo, and forgejo in namespace forgejo-trial.
+# The live apply is a brief Recreate outage for each.
+#
+# Caution: tolerations has no merge key, so a strategic-merge patch replaces the
+# pod's whole toleration list. Read the live list first; if it holds any
+# toleration besides this one, the patch must carry those too.
+#
+# TestForgejoTolerationsPatch holds this file to the two Deployments, the one
+# key, the effect, and no other taint.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forgejo
+  namespace: forgejo
+spec:
+  template:
+    spec:
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forgejo
+  namespace: forgejo-trial
+spec:
+  template:
+    spec:
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule

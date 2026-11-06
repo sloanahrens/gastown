@@ -87,7 +87,6 @@ var differentialRows = []differentialRow{
 	{stem: "unclaim", argv: []string{"unclaim", "fx-1"}},
 	{stem: "dep-add", argv: []string{"dep", "add", "fx-1", "fx-2"}},
 	{stem: "label-add", argv: []string{"label", "add", "fx-1", "fixture-label"}},
-	{stem: "comment", argv: []string{"comment", "fx-1", "fixture note"}},
 	{stem: "kv-set", argv: []string{"kv", "set", "fixture-key", "fixture-value"}},
 	{stem: "config-set", argv: []string{"config", "set", "export.auto", "false"}},
 }

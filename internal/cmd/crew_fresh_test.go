@@ -46,8 +46,8 @@ func TestCrewCloneRoot(t *testing.T) {
 		},
 		{
 			name: "another rig's clone",
-			cwd:  filepath.Join(town, "devops", "crew", "sloan"),
-			want: filepath.Join(town, "devops", "crew", "sloan"),
+			cwd:  filepath.Join(town, "devops", "crew", "operator"),
+			want: filepath.Join(town, "devops", "crew", "operator"),
 		},
 		{
 			name:    "mayor/rig",
@@ -129,7 +129,7 @@ func TestCrewCloneRoot(t *testing.T) {
 			name: "a crew entry that resolves to another crew entry",
 			cwd:  filepath.Join(town, "gastown", "crew", "dunlin"),
 			eval: crewSymlinks(map[string]string{
-				filepath.Join(town, "gastown", "crew", "dunlin"): filepath.Join(town, "gastown", "crew", "sloan"),
+				filepath.Join(town, "gastown", "crew", "dunlin"): filepath.Join(town, "gastown", "crew", "operator"),
 			}),
 			want: filepath.Join(town, "gastown", "crew", "dunlin"),
 		},

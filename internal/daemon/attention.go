@@ -637,6 +637,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// so one entry cannot preserve two kinds (gt-hkldq).
 		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
 		{kind: attention.KindTierSweepStuck, collect: s.collectTierSweepStuck},
+		{kind: attention.KindTierSweepGuardUnreadable, collect: s.collectTierSweepGuardUnreadable},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped, owns: overrunStoppedItem},
 		// A second entry of the same kind: a stop that handed its bead back
 		// and one that never released its seat are the guard's two outcomes,
@@ -1774,6 +1775,35 @@ func (s *attentionSources) collectTierSweepStuck(context.Context) ([]attention.I
 		Severity: attention.SeverityHigh,
 		Summary:  fmt.Sprintf("tier sweep cycle running %s, step %s", age.Round(time.Minute), step),
 	}}, nil
+}
+
+// collectTierSweepGuardUnreadable raises one item per rig whose tier-sweep
+// guard read failed at its last launch (gt-gg9hv.56). The cycle deferred
+// without a verdict, so no RED item stands for it: the item names the read and
+// the first line of its stderr, and it clears when a cycle's guards answer.
+func (s *attentionSources) collectTierSweepGuardUnreadable(ctx context.Context) ([]attention.Item, error) {
+	if s.d == nil {
+		return nil, nil
+	}
+	var out []attention.Item
+	for _, rig := range s.tierSweepRigs() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		u := s.d.tierSweepGuardReads.get(rig)
+		if u == nil {
+			continue
+		}
+		out = append(out, attention.Item{
+			Key:      "tier-sweep-guard-unreadable:" + rig,
+			Kind:     attention.KindTierSweepGuardUnreadable,
+			Severity: attention.SeverityLow,
+			Rig:      rig,
+			Summary: fmt.Sprintf("tier sweep %s: %s failed (exit %d): %s; the cycle is deferred, and the cluster access it needs is recorded in deploy/k8s/sweep-rbac.yaml",
+				rig, u.Argv0Verb, u.ExitCode, u.FirstLine),
+		})
+	}
+	return out, nil
 }
 
 // tierSweepStarvedVerdict is the verdict a starved tier is still carrying, for

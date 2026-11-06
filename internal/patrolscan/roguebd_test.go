@@ -31,7 +31,7 @@ func TestRogueBDNeutralizesFindingsAndSparesBuildOutput(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	rogue := filepath.Join(town, "gastown", "polecats", "ruby", "gastown", "bd")
-	built := filepath.Join(town, "beads", "crew", "sloan", "bd")
+	built := filepath.Join(town, "beads", "crew", "operator", "bd")
 	inert := filepath.Join(town, "gastown", "polecats", "onyx", "bd")
 	tooDeep := filepath.Join(town, "gastown", "polecats", "a", "b", "c", "d", "bd")
 	shared := filepath.Join(town, "shared-bd")
@@ -80,7 +80,7 @@ func TestRogueBDNeutralizesFindingsAndSparesBuildOutput(t *testing.T) {
 func TestRogueBDOnPathIsAlwaysAFinding(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	bd := filepath.Join(town, "beads", "crew", "sloan", "bd")
+	bd := filepath.Join(town, "beads", "crew", "operator", "bd")
 	writeExec(t, bd, 0o755)
 	r := CheckRogueBD(RogueBDAggregates(town), RogueBDOptions{
 		PathDirs:      []string{filepath.Dir(bd)},

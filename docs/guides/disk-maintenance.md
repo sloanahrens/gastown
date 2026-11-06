@@ -106,8 +106,14 @@ that it did what the plan said.
 The patrol reads three disks: `mac` (the machine's root filesystem, `df -P /`),
 `colima` (the sandbox data disk, the worst node's used share from the kubelet
 node stats, so the read works inside the town's container where there is no
-colima binary), and `docker-desktop` (the CI runner container's root
-filesystem, through `docker exec`).
+colima binary), and `docker-desktop` (the root filesystem of the `gt-dolt`
+container, read through `docker exec`).
+
+When `patrols.tier_sweep.runner` names a kubernetes context, the patrol reads a
+fourth, `control`: the control cluster's node disk (`/var/lib/rancher`), read the
+way `colima` is, through the same kubeconfig and that context. With no context
+the disk is not read and the patrol logs one line, since the town may run without
+a control cluster.
 
 - At 80% used a disk raises `diskmaint:<disk>`; the alert clears only below
   70%, so a disk at the line does not flap.
@@ -116,10 +122,24 @@ filesystem, through `docker exec`).
   cannot be measured is not a quiet disk.
 - Alerts fire in `dry_run` mode too. They are raised before the plan, so a run
   that goes on to refuse still sounds the alarm.
+- `control` is alert-only. Its alerts raise and clear like the others, but an
+  unreadable or full `control` disk never tightens the keep and never refuses a
+  plan: the keep and the plans are decided by the town's own three disks alone.
+- A `control` raise names the three biggest consumers on the disk, from the same
+  kubelet summary: per pod, the larger of its ephemeral-storage usage and the sum
+  of its claim-backed volumes, as `namespace/pod 61 GB`. Cluster names are cut to
+  200 characters and stripped of line breaks before they reach the alert.
+- Kubelet eviction starts at about 85% to 90% used on this node (the 91% of
+  2026-11-05), so the 80% alert leaves five to ten points. A busy town applies
+  the alerts once per `cache_trim_interval` until the busy-tick alert pass
+  (gt-gg9hv.53) lands, which is too slow for this disk.
+- The disk name is the middle part of the alert key, `diskmaint:<disk>`. Renaming
+  a disk orphans any open alert under the old name.
 
-While any readable disk is at or above 80%, the pass keeps 3 of the newest
-candidate tags instead of the configured keep; a keep already at or below 3
-stays where it is. A disk that could not be read refuses that day's pass
+While any readable keep disk (`mac`, `colima`, `docker-desktop`) is at or above
+80%, the pass keeps 3 of the newest candidate tags instead of the configured
+keep; a keep already at or below 3 stays where it is. A keep disk that could not
+be read refuses that day's pass
 outright — a keep decided without it would be a guess — and the window counts
 as settled, so the next pass is the next day's. A deferred apply is the one
 conclusion that leaves the window open, because the push holding the lock is
@@ -128,8 +148,17 @@ what to wait for.
 ## The shared cache claim
 
 The patrol also trims the shared cache claim a kubernetes sandbox profile
-mounts, on its own interval (`cache_trim_interval`, `2h` by default) in any
-window, and behind the same mode:
+mounts, on its own interval (`cache_trim_interval`) in any window, and behind
+the same mode. The trim runs on a pass of its own and does not wait for the town
+to be quiet: it applies ConfigMaps and a Job on the sandbox cluster and reads
+neither the landing worker nor Dolt, so a landing pass in flight cannot starve
+it while the sandbox disk fills. That pass reads the disks and applies their
+alerts beside the trim, so a notifier that does not answer delays the end of
+the alerts and not the trim. Alert applications from different passes take
+turns, so a later reading is never applied over an earlier one's state, and
+every other target still waits for a quiet tick. A tick that finds no trim due
+reads no disk: while the town is busy the alerts are applied each time the trim
+comes due (`cache_trim_interval`), and on every quiet pass.
 
 - A claim's namespace comes from the claim itself, and every pod read, listing
   exec and apply, delete or wait names it. A claim of the same name in another
@@ -158,6 +187,40 @@ window, and behind the same mode:
 - The pass trims nothing when two profiles mount one claim with different
   images, or when two claims are mounted in one namespace: a trim's labels
   cannot tell one claim's objects from the other's.
+
+## The CI runner's Go build cache
+
+The patrol also trims the Go build cache the CI gate jobs fill on the control
+cluster. The cache is the named volume `ci-gocache`, under `/var/lib/docker` in
+the `dind` container of the `forgejo-runner` deployment in the `forgejo`
+namespace. The trim runs on its own interval (`ci_cache_trim_interval`) in any
+window and does not wait for the town to be quiet, as the shared cache claim's
+trim does, so a landing pass in flight does not hold it off.
+
+- The three settings sit under `patrols.disk_maintenance`: `ci_cache_trim_interval`
+  (default `1h`), `ci_cache_max_age` (default `12h`) and `ci_cache_warn_bytes`
+  (default `30GB`). An empty setting is the default. Zero or less is refused, and
+  the error names the setting.
+- The exec goes to the control cluster, which is the context
+  `patrols.tier_sweep.runner.context` names. The runner must be on the kubernetes
+  backend with that context set; otherwise the trim runs nothing and says why.
+- Each run is one exec into the `dind` container. It removes the files under the
+  volume's data directory whose last write is older than `ci_cache_max_age`, then
+  the directories that removal left empty. The volume's top level, where Go keeps
+  its `trim.txt` bookkeeping, is left to Go. `ci-gomod` and `ci-npm` are not
+  touched.
+- The mode applies as it does to the rest of the patrol. `dry_run` lists what
+  would be removed and removes nothing; `apply` removes. An applied run logs one
+  line, `disk_maintenance: ci cache trim: removed N files, X to Y (older than 12h)`,
+  naming the sizes before and after and the max age.
+- A run that cannot tell what the volume holds is a failed run, never a volume
+  with nothing to trim. A missing volume path, a `dind` container that is not
+  running, a failed exec and an unreadable reply each log their own line, at most
+  once an hour, and the trim is retried in 15 minutes.
+- An applied trim that removes no file while the volume is over
+  `ci_cache_warn_bytes` raises one low attention item, keyed `ci-cache-trim-noop`.
+  The item means the trim is not reaching what is there, or that nothing is yet
+  older than the max age. A later reading under the figure clears it.
 
 ## Rollback
 

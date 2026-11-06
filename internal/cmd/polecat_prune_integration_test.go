@@ -401,7 +401,7 @@ func initPolecatPruneTestRepoAt(t *testing.T, localDir string) string {
 	}
 	runGit(t, tmp, "init", "--bare", "--initial-branch", mainBranch, remoteDir)
 	runGit(t, tmp, "clone", remoteDir, localDir)
-	runGit(t, localDir, "config", "user.email", "test@test.com")
+	runGit(t, localDir, "config", "user.email", "test@example.com")
 	runGit(t, localDir, "config", "user.name", "Test User")
 	writePolecatPruneTestFile(t, filepath.Join(localDir, "README.md"), "test\n")
 	runGit(t, localDir, "add", "README.md")
@@ -422,7 +422,7 @@ func initPolecatPruneOriginForkRepo(t *testing.T) (string, string) {
 	runGit(t, tmp, "init", "--bare", "--initial-branch", mainBranch, upstreamDir)
 	runGit(t, tmp, "init", "--bare", "--initial-branch", mainBranch, forkDir)
 	runGit(t, tmp, "clone", upstreamDir, localDir)
-	runGit(t, localDir, "config", "user.email", "test@test.com")
+	runGit(t, localDir, "config", "user.email", "test@example.com")
 	runGit(t, localDir, "config", "user.name", "Test User")
 	writePolecatPruneTestFile(t, filepath.Join(localDir, "README.md"), "test\n")
 	runGit(t, localDir, "add", "README.md")

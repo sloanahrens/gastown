@@ -39,11 +39,11 @@ place.`,
 }
 
 // analysisOptions is the town's own mango repository and the binary built from
-// it, for the two callers that wire the real environment.
+// it for this platform, for the two callers that wire the real environment.
 func analysisOptions(town string) metrics.AnalysisOptions {
 	return metrics.AnalysisOptions{
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
-		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
+		MangoBin:    metrics.PlatformMangoBin(town),
 	}
 }
 

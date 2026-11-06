@@ -46,7 +46,7 @@ func registeredRigTown(t *testing.T) string {
 	rigsConfig := &config.RigsConfig{
 		Version: 1,
 		Rigs: map[string]config.RigEntry{
-			"testrig": {GitURL: "git@github.com:test/testrig.git", AddedAt: time.Now().Truncate(time.Second)},
+			"testrig": {GitURL: "git@example.com:test/testrig.git", AddedAt: time.Now().Truncate(time.Second)},
 		},
 	}
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
@@ -160,12 +160,12 @@ func TestIsGitRemoteURL(t *testing.T) {
 		want  bool
 	}{
 		// Remote URLs — should return true
-		{"https://github.com/org/repo.git", true},
-		{"http://github.com/org/repo.git", true},
-		{"git@github.com:org/repo.git", true},
-		{"ssh://git@github.com/org/repo.git", true},
-		{"git://github.com/org/repo.git", true},
-		{"deploy@private-host.internal:repos/app.git", true},
+		{"https://example.com/org/repo.git", true},
+		{"http://example.com/org/repo.git", true},
+		{"git@example.com:org/repo.git", true},
+		{"ssh://git@example.com/org/repo.git", true},
+		{"git://example.com/org/repo.git", true},
+		{"deploy@private-host.example.test:repos/app.git", true},
 
 		// Custom git remote helper schemes — should return true
 		{"s3://my-bucket/rigs/my-project", true},
@@ -173,20 +173,20 @@ func TestIsGitRemoteURL(t *testing.T) {
 		{"gs://my-bucket/repos/foo", true},
 
 		// Local paths — should return false
-		{"/Users/scott/projects/foo", false},
+		{"/Users/user/projects/foo", false},
 		{"/tmp/repo", false},
 		{"./foo", false},
 		{"../foo", false},
 		{"~/projects/foo", false},
-		{"C:\\Users\\scott\\projects\\foo", false},
-		{"C:/Users/scott/projects/foo", false},
+		{"C:\\Users\\user\\projects\\foo", false},
+		{"C:/Users/user/projects/foo", false},
 
 		// Bare directory name — should return false
 		{"foo", false},
 
 		// file:// URIs — explicit local git remotes are allowed
 		{"file:///tmp/local-repo.git", true},
-		{"file:///Users/scott/projects/foo", true},
+		{"file:///Users/user/projects/foo", true},
 		{"file://user@localhost:/tmp/local-repo.git", true},
 
 		// Argument injection — should return false
@@ -297,7 +297,7 @@ func TestMigrateParkedRigsNamesTheRegistryItWroteTo(t *testing.T) {
 		".beads-wisp/config/testrig.json": `{"rig":"testrig","values":{"status":"parked"}}`,
 	})
 	var out bytes.Buffer
-	if err := migrateParkedRigs(&out, town, "sloan"); err != nil {
+	if err := migrateParkedRigs(&out, town, "operator"); err != nil {
 		t.Fatalf("migrateParkedRigs = %v\n%s", err, out.String())
 	}
 	got := out.String()

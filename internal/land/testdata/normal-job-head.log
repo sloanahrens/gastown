@@ -3,7 +3,7 @@
 2026-10-04T23:48:19.9279611Z 🚀  Start image=ci-base:latest
 2026-10-04T23:48:19.9575481Z   🐳  docker create image=ci-base:latest platform=linux/arm64 entrypoint=["tail" "-f" "/dev/null"] cmd=[] network="host"
 2026-10-04T23:48:19.9981872Z   🐳  docker run image=ci-base:latest platform=linux/arm64 entrypoint=["tail" "-f" "/dev/null"] cmd=[] network="host"
-2026-10-04T23:48:20.1297479Z   🐳  docker exec cmd=[chown -R 1000:1000 /workspace/sloan/beads] user=0 workdir=
+2026-10-04T23:48:20.1297479Z   🐳  docker exec cmd=[chown -R 1000:1000 /workspace/user/beads] user=0 workdir=
 2026-10-04T23:48:20.1931992Z   ☁️  git fetch 'https://data.forgejo.org/actions/checkout' # ref=v4
 2026-10-04T23:48:21.0485371Z ⭐ Run Main actions/checkout@v4
 2026-10-04T23:48:21.0511246Z   🐳  docker cp src=/data/.cache/act/67/47d7532e83660f6f9d631ccb6781690050b0ded077a2ad3639bfadd78856e4/ dst=/var/run/act/actions/67/47d7532e83660f6f9d631ccb6781690050b0ded077a2ad3639bfadd78856e4/

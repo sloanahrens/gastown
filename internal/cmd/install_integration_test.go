@@ -795,7 +795,7 @@ func configureGitIdentity(t *testing.T, env []string) {
 	t.Helper()
 	for _, args := range [][]string{
 		{"config", "--global", "user.name", "Test User"},
-		{"config", "--global", "user.email", "test@test.com"},
+		{"config", "--global", "user.email", "test@example.com"},
 	} {
 		cmd := exec.Command("git", args...)
 		cmd.Env = env
