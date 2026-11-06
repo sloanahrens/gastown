@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -91,6 +92,10 @@ type AnalysisOptions struct {
 	// BuildTarget is the package go build compiles inside BuildModuleDir; empty
 	// is mangoBuildTarget.
 	BuildTarget string
+	// LookPath finds go on PATH: the build runs only when it is found, so a
+	// daemon image with no toolchain uses the binary it carries. Nil is the
+	// host's PATH.
+	LookPath func(string) (string, error)
 	// Every is the stamp's interval; zero is DailyEvery.
 	Every time.Duration
 	// MaxAge is the oldest snapshot the join accepts; zero is JoinMaxAge.
@@ -108,6 +113,9 @@ func (o AnalysisOptions) withDefaults() AnalysisOptions {
 	}
 	if o.BuildTarget == "" {
 		o.BuildTarget = mangoBuildTarget
+	}
+	if o.LookPath == nil {
+		o.LookPath = exec.LookPath
 	}
 	if o.Every == 0 {
 		o.Every = DailyEvery
@@ -408,8 +416,12 @@ func panelEvents(env Env, reportf func(format string, args ...any)) []PanelEvent
 
 // ensureMango rebuilds the mango binary when origin/main moved since the build
 // that made it, and records the new head in <MangoBin>.sha only after the build
-// succeeds, so a failed build leaves the old head to be retried.
+// succeeds, so a failed build leaves the old head to be retried. With no go on
+// PATH nothing is built: the binary at <MangoBin> is used as it is.
 func ensureMango(ctx context.Context, env Env, o AnalysisOptions) error {
+	if _, err := o.LookPath("go"); err != nil {
+		return noBuildMango(o.MangoBin)
+	}
 	out, err := runEnv(ctx, env, []string{"git", "--git-dir", o.MangoGitDir, "rev-parse", "origin/main"})
 	if err != nil {
 		return fmt.Errorf("mango head: %w", err)
@@ -452,6 +464,22 @@ func ensureMango(ctx context.Context, env Env, o AnalysisOptions) error {
 		return fmt.Errorf("mango build: %w", err)
 	}
 	return PublishAtomic(filepath.Dir(o.MangoBin), mangoShaName, []byte(head+"\n"))
+}
+
+// noBuildMango is ensureMango's answer when go is not on PATH: the binary at
+// bin is used as it is, and a missing one is an error that names its path and
+// says the daemon image carries the binary. A stat that fails for any other
+// reason is returned as it is, not read as a missing binary.
+func noBuildMango(bin string) error {
+	_, err := os.Stat(bin)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("mango: no go on PATH to build it, and no binary at %s: the daemon image carries the binary there", bin)
+	default:
+		return fmt.Errorf("mango: %w", err)
+	}
 }
 
 // extractTar writes an archive's regular files below dir. Link entries are

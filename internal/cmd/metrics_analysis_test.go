@@ -247,6 +247,7 @@ func analysisPaths(town string) metrics.AnalysisOptions {
 		MangoGitDir: filepath.Join(town, "mango", ".repo.git"),
 		MangoBin:    filepath.Join(town, ".runtime", "metrics", "bin", "mango"),
 		Extract:     func(context.Context, string, string) (string, error) { return day, nil },
+		LookPath:    func(name string) (string, error) { return "/usr/local/go/bin/" + name, nil },
 	}
 }
 
