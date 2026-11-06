@@ -374,35 +374,58 @@ func TestK8sPreflightJobMatchesTheRenderedPods(t *testing.T) {
 	}
 }
 
-// TestParseQuantity holds the parser to the forms a quantity takes: a plain
-// integer or decimal, milli-CPU, and MiB or GiB. Every other form (a fraction
-// such as 1/2, Ki, an exponent, a sign, emptiness, trailing junk) is refused
-// with the input in the error, so a request the preflight cannot read never
-// counts as a node with room.
+// TestParseQuantity holds the parser to every form the API prints for CPU and
+// memory: plain integers and decimals, the milli, micro and nano suffixes, the
+// binary suffixes Ki to Ei, the decimal suffixes k to E, and the exponent form
+// a value takes when no suffix fits. Every other form (a fraction such as 1/2,
+// a sign, a base prefix, an underscore, a second decimal point, an exponent
+// with no digits, a value too large for int64) is refused with the input in the
+// error, so a request the preflight cannot read never counts as a node with
+// room (gt-gg9hv.49).
 func TestParseQuantity(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
+		name  string
 		value string
 		scale int64
 		want  int64
 	}{
-		{value: "4", scale: cpuMilli, want: 4_000},
-		{value: "6210m", scale: cpuMilli, want: 6_210},
-		{value: "0.5", scale: cpuMilli, want: 500},
-		{value: "1.5", scale: cpuMilli, want: 1_500},
-		{value: "14492Mi", scale: memoryBytes, want: 14_492 << 20},
-		{value: "1.5Gi", scale: memoryBytes, want: 3 << 29},
+		// The live node's memory is 24556112Ki; a listing that cannot read it
+		// declines every launch.
+		{name: "the live node's memory", value: "24556112Ki", scale: memoryBytes, want: 24_556_112 << 10},
+		{name: "whole cores", value: "12", scale: cpuMilli, want: 12_000},
+		{name: "mebibytes", value: "14492Mi", scale: memoryBytes, want: 14_492 << 20},
+		{name: "milli", value: "500m", scale: cpuMilli, want: 500},
+		{name: "gibibytes", value: "1Gi", scale: memoryBytes, want: 1 << 30},
+		{name: "milli cores", value: "6210m", scale: cpuMilli, want: 6_210},
+		{name: "exponent", value: "2e9", scale: memoryBytes, want: 2_000_000_000},
+		{name: "kibibytes", value: "64Ki", scale: memoryBytes, want: 64 << 10},
+		// A nano-unit request is a fraction of a milli-unit and rounds up to
+		// one, so the request never reads lower than the API printed.
+		{name: "nano rounds up", value: "100n", scale: cpuMilli, want: 1},
+		{name: "micro rounds up", value: "100u", scale: cpuMilli, want: 1},
+		{name: "tebibytes", value: "1Ti", scale: memoryBytes, want: 1 << 40},
+		{name: "kilo", value: "3k", scale: memoryBytes, want: 3_000},
+		{name: "mega", value: "2M", scale: memoryBytes, want: 2_000_000},
+		{name: "fractional gibibytes", value: "1.5Gi", scale: memoryBytes, want: 3 << 29},
+		{name: "plain decimal", value: "0.5", scale: cpuMilli, want: 500},
 	} {
-		got, err := parseQuantity(tc.value, tc.scale)
-		if err != nil {
-			t.Errorf("parseQuantity(%q, %d): %v", tc.value, tc.scale, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("parseQuantity(%q, %d) = %d, want %d", tc.value, tc.scale, got, tc.want)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := parseQuantity(tc.value, tc.scale)
+			if err != nil {
+				t.Fatalf("parseQuantity(%q, %d): %v", tc.value, tc.scale, err)
+			}
+			if got != tc.want {
+				t.Errorf("parseQuantity(%q, %d) = %d, want %d", tc.value, tc.scale, got, tc.want)
+			}
+		})
 	}
-	for _, value := range []string{"", "abc", "4x", "1/2", "1/2Gi", "-1", "+1", "1e3", "1Ei2", "10Ei", "14492Ki", "4 Mi", "4m ", "999999999999999999999999999999", "0x10", "0b101", "0o7", "1_000", "1.2.3", ".", "0x10Mi"} {
+	for _, value := range []string{
+		"", "abc", "4x", "1/2", "1/2Gi", "-1", "+1", "1e+3", "1Ei2", "10Ei",
+		"4 Mi", "4m ", "9999999999999999999999999999999999999999",
+		"0x10", "0b101", "0o7", "1_000", "1.2.3", ".", "0x10Mi", "1e", "e3", "1e3x",
+	} {
 		got, err := parseQuantity(value, cpuMilli)
 		if err == nil {
 			t.Errorf("parseQuantity(%q) = %d, want it refused", value, got)
@@ -416,6 +439,11 @@ func TestParseQuantity(t *testing.T) {
 	// lower than it is.
 	if got, err := parseQuantity("0.0004", cpuMilli); err != nil || got != 1 {
 		t.Errorf("parseQuantity(0.0004) = %d, %v; want 1 milli-unit", got, err)
+	}
+	// A zero exponent value is zero whatever the exponent says, and no power is
+	// computed for it.
+	if got, err := parseQuantity("0e999999999999999999999", cpuMilli); err != nil || got != 0 {
+		t.Errorf("parseQuantity(0e<huge>) = %d, %v; want 0", got, err)
 	}
 }
 

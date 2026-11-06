@@ -329,6 +329,23 @@ func TestDiskMaintenanceCadenceCountsFromTheConclusion(t *testing.T) {
 	}
 }
 
+// TestDiskMaintenanceWindowSettlesAtTheConclusion: the once-a-day gap counts
+// from when the pass concluded, not the tick that found it due, so a pass that
+// takes minutes does not shorten the wait before the next day's pass.
+func TestDiskMaintenanceWindowSettlesAtTheConclusion(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	now := diskMaintNow // 04:45, in the window
+	d.diskMaint.now = func() time.Time { return now }
+	f.target.during = func() { now = now.Add(3 * time.Minute) } // the plan takes three minutes
+
+	d.runDiskMaintenance()
+
+	if got, want := d.diskMaintenanceSettledAt(), diskMaintNow.Add(3*time.Minute); !got.Equal(want) {
+		t.Errorf("window settled at %v, want %v: the daily gap counts from the pass's conclusion", got, want)
+	}
+}
+
 // TestDiskMaintenanceCadenceLeavesTheDailyWindowToTheOthers: giving one target
 // a cadence does not move the others onto it, and a cadence set for a target
 // this build does not produce is said once and looked for per interval, not
@@ -428,13 +445,14 @@ func TestDiskMaintenanceCadenceAppliesAndRetriesADeferral(t *testing.T) {
 	}
 }
 
-// countCacheTrims counts the trims a pass runs. A cache trim reads the sandbox
-// profiles before anything else, so each read is one trim.
+// countCacheTrims counts the trims a pass runs: each call to the seam the pass
+// runs the trim through is one trim, and the trim reaches a verdict. A tick
+// that only reads what the trim reads is not a trim.
 func countCacheTrims(d *Daemon) *int {
 	trims := new(int)
-	d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+	d.diskMaint.trim = func(context.Context, string) bool {
 		*trims++
-		return nil, nil
+		return true
 	}
 	return trims
 }

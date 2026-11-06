@@ -2,16 +2,16 @@
   {
     "id": 12,
     "name": "beads",
-    "full_name": "sloan/beads",
-    "owner": {"id": 1, "login": "sloan"},
+    "full_name": "owner/beads",
+    "owner": {"id": 1, "login": "operator"},
     "private": true,
     "permissions": {"admin": false, "push": false, "pull": true}
   },
   {
     "id": 7,
     "name": "mango",
-    "full_name": "sloan/mango",
-    "owner": {"id": 1, "login": "sloan"},
+    "full_name": "owner/mango",
+    "owner": {"id": 1, "login": "operator"},
     "private": true,
     "permissions": {"admin": false, "push": false, "pull": true}
   }

@@ -1,0 +1,385 @@
+{
+ "apiVersion": "v1",
+ "items": [
+  {
+   "apiVersion": "v1",
+   "kind": "Node",
+   "metadata": {
+    "name": "colima-gt-control"
+   },
+   "spec": {},
+   "status": {
+    "allocatable": {
+     "cpu": "12",
+     "ephemeral-storage": "18698430040",
+     "hugepages-1Gi": "0",
+     "hugepages-2Mi": "0",
+     "hugepages-32Mi": "0",
+     "hugepages-64Ki": "0",
+     "memory": "24556112Ki",
+     "pods": "110"
+    },
+    "conditions": [
+     {
+      "status": "False",
+      "type": "MemoryPressure"
+     },
+     {
+      "status": "False",
+      "type": "DiskPressure"
+     },
+     {
+      "status": "False",
+      "type": "PIDPressure"
+     },
+     {
+      "status": "True",
+      "type": "Ready"
+     }
+    ]
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "forgejo-6884fd5d78-6mqpl",
+    "namespace": "forgejo-trial",
+    "ownerReferences": [
+     {
+      "kind": "ReplicaSet",
+      "name": "forgejo-6884fd5d78"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "forgejo",
+      "resources": {
+       "limits": {
+        "memory": "2Gi"
+       },
+       "requests": {
+        "cpu": "500m",
+        "memory": "512Mi"
+       }
+      }
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 1000000,
+    "priorityClassName": "gt-control-plane"
+   },
+   "status": {
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "restore-wz95b",
+    "namespace": "forgejo-trial",
+    "ownerReferences": [
+     {
+      "kind": "Job",
+      "name": "restore"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "untar",
+      "resources": {}
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 0
+   },
+   "status": {
+    "phase": "Succeeded"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "forgejo-57658978cf-5nzvk",
+    "namespace": "forgejo",
+    "ownerReferences": [
+     {
+      "kind": "ReplicaSet",
+      "name": "forgejo-57658978cf"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "forgejo",
+      "resources": {
+       "limits": {
+        "memory": "2Gi"
+       },
+       "requests": {
+        "cpu": "500m",
+        "memory": "512Mi"
+       }
+      }
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 1000000,
+    "priorityClassName": "gt-control-plane"
+   },
+   "status": {
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "forgejo-runner-df77dd979-g25pq",
+    "namespace": "forgejo",
+    "ownerReferences": [
+     {
+      "kind": "ReplicaSet",
+      "name": "forgejo-runner-df77dd979"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "runner",
+      "resources": {
+       "limits": {
+        "cpu": "1",
+        "memory": "1Gi"
+       },
+       "requests": {
+        "cpu": "1",
+        "memory": "1Gi"
+       }
+      }
+     },
+     {
+      "name": "dind",
+      "resources": {
+       "limits": {
+        "cpu": "4",
+        "memory": "12Gi"
+       },
+       "requests": {
+        "cpu": "4",
+        "memory": "12Gi"
+       }
+      }
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 200,
+    "priorityClassName": "gt-ci-gate"
+   },
+   "status": {
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "restore-598rl",
+    "namespace": "forgejo",
+    "ownerReferences": [
+     {
+      "kind": "Job",
+      "name": "restore"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "untar",
+      "resources": {}
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 0
+   },
+   "status": {
+    "phase": "Succeeded"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "coredns-54bf7cdff9-pf42b",
+    "namespace": "kube-system",
+    "ownerReferences": [
+     {
+      "kind": "ReplicaSet",
+      "name": "coredns-54bf7cdff9"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "coredns",
+      "resources": {
+       "limits": {
+        "memory": "170Mi"
+       },
+       "requests": {
+        "cpu": "100m",
+        "memory": "70Mi"
+       }
+      }
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 2000000000,
+    "priorityClassName": "system-cluster-critical"
+   },
+   "status": {
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "local-path-provisioner-69879d7dd7-fvv54",
+    "namespace": "kube-system",
+    "ownerReferences": [
+     {
+      "kind": "ReplicaSet",
+      "name": "local-path-provisioner-69879d7dd7"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "local-path-provisioner",
+      "resources": {}
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 2000001000,
+    "priorityClassName": "system-node-critical"
+   },
+   "status": {
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "metrics-server-77dbbf84b-lbr95",
+    "namespace": "kube-system",
+    "ownerReferences": [
+     {
+      "kind": "ReplicaSet",
+      "name": "metrics-server-77dbbf84b"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "metrics-server",
+      "resources": {
+       "requests": {
+        "cpu": "100m",
+        "memory": "70Mi"
+       }
+      }
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 2000001000,
+    "priorityClassName": "system-node-critical"
+   },
+   "status": {
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "svclb-forgejo-be673050-bsvqr",
+    "namespace": "kube-system",
+    "ownerReferences": [
+     {
+      "kind": "DaemonSet",
+      "name": "svclb-forgejo-be673050"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "lb-tcp-3000",
+      "resources": {}
+     },
+     {
+      "name": "lb-tcp-2222",
+      "resources": {}
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 2000001000,
+    "priorityClassName": "system-node-critical"
+   },
+   "status": {
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "v1",
+   "kind": "Pod",
+   "metadata": {
+    "name": "registry-forward-hgv75",
+    "namespace": "sweep-registry-forward",
+    "ownerReferences": [
+     {
+      "kind": "DaemonSet",
+      "name": "registry-forward"
+     }
+    ]
+   },
+   "spec": {
+    "containers": [
+     {
+      "name": "socat",
+      "resources": {
+       "limits": {
+        "memory": "64Mi"
+       },
+       "requests": {
+        "cpu": "10m",
+        "memory": "16Mi"
+       }
+      }
+     }
+    ],
+    "nodeName": "colima-gt-control",
+    "priority": 1000000,
+    "priorityClassName": "gt-control-plane"
+   },
+   "status": {
+    "phase": "Running"
+   }
+  }
+ ],
+ "kind": "List"
+}

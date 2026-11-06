@@ -5,7 +5,7 @@
   "merge_queue": {
     "test_command": "make gate",
     "forgejo": {
-      "remote_url": "http://forgejo:3000/sloan/gastown.git",
+      "remote_url": "http://forgejo:3000/owner/gastown.git",
       "landing_branch": "main"
     }
   },

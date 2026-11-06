@@ -17,10 +17,10 @@ func TestCompareCommits_ReadsTheCommitCount(t *testing.T) {
 	rec := &recorder{body: []byte(`{"total_commits":2,"commits":[{"sha":"aa"},{"sha":"bb"}],"files":[]}`)}
 	c := newTestClient(t, rec)
 
-	got, err := c.CompareCommits(context.Background(), "sloan", "fractals-nextjs", "3ad82c15dd", "23d2048323")
+	got, err := c.CompareCommits(context.Background(), "owner", "fractals-nextjs", "3ad82c15dd", "23d2048323")
 	require.NoError(t, err)
 	assert.Equal(t, http.MethodGet, rec.req.Method)
-	assert.Equal(t, "/api/v1/repos/sloan/fractals-nextjs/compare/3ad82c15dd...23d2048323", rec.req.URL.Path)
+	assert.Equal(t, "/api/v1/repos/owner/fractals-nextjs/compare/3ad82c15dd...23d2048323", rec.req.URL.Path)
 	assert.Equal(t, 2, got.TotalCommits)
 }
 
@@ -32,7 +32,7 @@ func TestCompareCommits_EqualCommitsAreZero(t *testing.T) {
 	rec := &recorder{body: []byte(`{"total_commits":0,"commits":[],"files":[]}`)}
 	c := newTestClient(t, rec)
 
-	got, err := c.CompareCommits(context.Background(), "sloan", "fractals-nextjs", "aa", "aa")
+	got, err := c.CompareCommits(context.Background(), "owner", "fractals-nextjs", "aa", "aa")
 	require.NoError(t, err)
 	assert.Equal(t, 0, got.TotalCommits)
 }
@@ -44,6 +44,6 @@ func TestCompareCommits_RefusesAServerError(t *testing.T) {
 	rec := &recorder{status: http.StatusNotFound, body: []byte(`{"message":"Not Found"}`)}
 	c := newTestClient(t, rec)
 
-	_, err := c.CompareCommits(context.Background(), "sloan", "devops", "aa", "bb")
+	_, err := c.CompareCommits(context.Background(), "owner", "devops", "aa", "bb")
 	require.Error(t, err)
 }
