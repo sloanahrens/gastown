@@ -1,6 +1,8 @@
 package doltserver
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -14,9 +16,9 @@ func validContainerSpec() ContainerSpec {
 		DataDir:       "/town/.dolt-data",
 		BackupDir:     "/home/u/gt-backups/dolt",
 		ConfigPath:    "/town/.dolt-data/config.yaml",
-		MemoryGiB:     12,
+		MemoryGiB:     8,
 		HostPort:      3307,
-		ContainerPort: 3307,
+		ContainerPort: 3306,
 		Restart:       "unless-stopped",
 	}
 }
@@ -31,16 +33,16 @@ func TestContainerPlanArgv(t *testing.T) {
 	want := []string{
 		"docker", "create",
 		"--name", "gt-dolt",
-		"--memory", "12g",
-		"--memory-swap", "12g",
+		"--memory", "8g",
+		"--memory-swap", "8g",
 		"--restart", "unless-stopped",
-		"-p", "127.0.0.1:3307:3307",
+		"-p", "127.0.0.1:3307:3306",
 		"-v", "/town/.dolt-data:/town/.dolt-data",
 		"-v", "/home/u/gt-backups/dolt:/home/u/gt-backups/dolt",
 		"-v", "/town/.dolt-data/config.yaml:/town/.dolt-data/config.yaml:ro",
 		"--label", "org.gastown.keep=true",
 		"dolt:test",
-		"dolt", "sql-server", "--config", "/town/.dolt-data/config.yaml",
+		"--config", "/town/.dolt-data/config.yaml",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("argv = %#v\nwant %#v", got, want)
@@ -230,5 +232,98 @@ func TestContainerPlanNeverEmitsAPrivilegedOption(t *testing.T) {
 				t.Errorf("%q: published port %q is not on 127.0.0.1", s.Name, argv[i+1])
 			}
 		}
+	}
+}
+
+func TestContainerPortFromConfig(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		content string
+		want    int
+		wantErr bool
+	}{
+		{name: "listener port", content: "listener:\n  port: 3306\n", want: 3306},
+		{
+			name:    "the managed config layout",
+			content: "log_level: warning\n\nlistener:\n  host: 127.0.0.1\n  port: 5507\n  max_connections: 100\n\ndata_dir: \"/town/.dolt-data\"\n",
+			want:    5507,
+		},
+		{name: "no listener block", content: "log_level: warning\n", wantErr: true},
+		{name: "listener without a port", content: "listener:\n  max_connections: 100\n", wantErr: true},
+		{name: "port zero", content: "listener:\n  port: 0\n", wantErr: true},
+		{name: "port above the range", content: "listener:\n  port: 70000\n", wantErr: true},
+		{name: "port not a number", content: "listener:\n  port: tcp\n", wantErr: true},
+		{name: "unparsable file", content: "listener: [\n", wantErr: true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(tt.content), 0600); err != nil {
+				t.Fatalf("write the config: %v", err)
+			}
+			got, err := ContainerPortFromConfig(path)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("ContainerPortFromConfig(%q) = %d, want an error", tt.content, got)
+				}
+				if !strings.Contains(err.Error(), path) {
+					t.Fatalf("error %q does not name the config file %s", err, path)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ContainerPortFromConfig(%q): %v", tt.content, err)
+			}
+			if got != tt.want {
+				t.Fatalf("port = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestContainerPortFromConfigNamesAMissingFile(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "absent.yaml")
+	got, err := ContainerPortFromConfig(path)
+	if err == nil {
+		t.Fatalf("ContainerPortFromConfig of a missing file = %d, want an error", got)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error %q does not name the config file %s", err, path)
+	}
+}
+
+func TestContainerPortFromConfigRefusesARelativePath(t *testing.T) {
+	t.Parallel()
+
+	// The file is never written: the path rule is what refuses it, and it
+	// must refuse before the plan reads anything.
+	got, err := ContainerPortFromConfig(filepath.Join("data", "config.yaml"))
+	if err == nil {
+		t.Fatalf("ContainerPortFromConfig of a relative path = %d, want an error", got)
+	}
+	if !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("error %q does not say the path must be absolute", err)
+	}
+}
+
+func TestContainerPortFromConfigSaysThePortIsMissing(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("listener:\n  max_connections: 100\n"), 0600); err != nil {
+		t.Fatalf("write the config: %v", err)
+	}
+	_, err := ContainerPortFromConfig(path)
+	if err == nil {
+		t.Fatal("ContainerPortFromConfig accepted a listener with no port")
+	}
+	if !strings.Contains(err.Error(), "no listener.port") {
+		t.Fatalf("error %q does not say the port is missing", err)
 	}
 }

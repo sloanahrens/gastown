@@ -64,10 +64,9 @@ file. The plan is one shell-quoted line, or the argv as a JSON array with
 
 The data and backup directories are mounted at the same absolute path inside
 and outside the container, so host tools that read .dolt-data and the backups
-the server writes keep working. The Dolt port is published on 127.0.0.1 only.
-
-The image and its entrypoint are confirmed in the rehearsal that bead C2
-records.`,
+the server writes keep working. The Dolt port is published on 127.0.0.1 only:
+the host port maps to the port the config file's listener names, which
+--container-port overrides.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if dataDir == "" {
@@ -83,6 +82,16 @@ records.`,
 					return fmt.Errorf("backup directory: %w (or pass --backup-dir)", err)
 				}
 				backupDir = root
+			}
+			// The config's listener port is the default; an explicit
+			// --container-port overrides it, even when it is 0, which
+			// ContainerPlan then refuses.
+			if !cmd.Flags().Changed("container-port") {
+				port, err := doltserver.ContainerPortFromConfig(configPath)
+				if err != nil {
+					return fmt.Errorf("%w (or pass --container-port)", err)
+				}
+				contPort = port
 			}
 			argv, err := doltserver.ContainerPlan(doltserver.ContainerSpec{
 				Name:          name,
@@ -120,9 +129,9 @@ records.`,
 	cmd.Flags().StringVar(&configPath, "config", "", "Absolute path to the Dolt config.yaml, mounted read-only (required)")
 	cmd.Flags().StringVar(&dataDir, "data-dir", "", "Absolute data directory to mount at the same path (default: the town's .dolt-data)")
 	cmd.Flags().StringVar(&backupDir, "backup-dir", "", "Absolute backup directory to mount at the same path (default: the daemon's backup root)")
-	cmd.Flags().IntVar(&memoryGiB, "memory-gib", 12, "Memory cap in GiB, set on both --memory and --memory-swap")
+	cmd.Flags().IntVar(&memoryGiB, "memory-gib", 8, "Memory cap in GiB, set on both --memory and --memory-swap")
 	cmd.Flags().IntVar(&hostPort, "host-port", 3307, "Host port to publish on 127.0.0.1")
-	cmd.Flags().IntVar(&contPort, "container-port", 3307, "Port the server listens on inside the container")
+	cmd.Flags().IntVar(&contPort, "container-port", 0, "Port the server listens on inside the container (default: the config's listener.port)")
 	cmd.Flags().StringVar(&restart, "restart", "unless-stopped", "Restart policy: no, on-failure, always or unless-stopped")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "Print the argv as a JSON array")
 	_ = cmd.MarkFlagRequired("name")

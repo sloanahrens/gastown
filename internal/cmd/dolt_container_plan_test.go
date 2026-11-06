@@ -7,6 +7,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -17,10 +18,25 @@ import (
 )
 
 const (
-	planTestConfig = "/town dir/.dolt-data/config.yaml"
 	planTestData   = "/town dir/.dolt-data"
 	planTestBackup = "/backup dir/dolt"
+
+	// planTestListenerPort is the listener.port in the config file
+	// writePlanTestConfig writes.
+	planTestListenerPort = 3306
 )
+
+// writePlanTestConfig writes a Dolt config.yaml whose listener names
+// planTestListenerPort in a temporary directory and returns its path.
+func writePlanTestConfig(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "listener:\n  port: " + strconv.Itoa(planTestListenerPort) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+		t.Fatalf("write the test config: %v", err)
+	}
+	return path
+}
 
 // planTestDeps fails the test when the command asks for a default path: every
 // test that does not exercise the defaults passes both --data-dir and
@@ -59,28 +75,29 @@ type failingPlanWriter struct{}
 func (failingPlanWriter) Write([]byte) (int, error) { return 0, errors.New("closed pipe") }
 
 // planTestArgs are the flags every command test passes when it is not testing
-// a missing flag.
-func planTestArgs() []string {
+// a missing flag; config is the path of the config file the plan reads.
+func planTestArgs(config string) []string {
 	return []string{
 		"--name", "gt-dolt",
 		"--image", "dolt:test",
-		"--config", planTestConfig,
+		"--config", config,
 		"--data-dir", planTestData,
 		"--backup-dir", planTestBackup,
 	}
 }
 
-// planTestSpec is the ContainerSpec the command builds from planTestArgs.
-func planTestSpec() doltserver.ContainerSpec {
+// planTestSpec is the ContainerSpec the command builds from planTestArgs for
+// the config file at config, whose listener names planTestListenerPort.
+func planTestSpec(config string) doltserver.ContainerSpec {
 	return doltserver.ContainerSpec{
 		Name:          "gt-dolt",
 		Image:         "dolt:test",
 		DataDir:       planTestData,
 		BackupDir:     planTestBackup,
-		ConfigPath:    planTestConfig,
-		MemoryGiB:     12,
+		ConfigPath:    config,
+		MemoryGiB:     8,
 		HostPort:      3307,
-		ContainerPort: 3307,
+		ContainerPort: planTestListenerPort,
 		Restart:       "unless-stopped",
 	}
 }
@@ -104,17 +121,20 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 
 	t.Run("one shell-quoted line", func(t *testing.T) {
 		t.Parallel()
-		out, err := executeDoltContainerPlan(t, planTestDeps(t), planTestArgs()...)
+		config := writePlanTestConfig(t)
+		out, err := executeDoltContainerPlan(t, planTestDeps(t), planTestArgs(config)...)
 		if err != nil {
 			t.Fatalf("execute: %v", err)
 		}
-		want := "docker create --name gt-dolt --memory 12g --memory-swap 12g --restart unless-stopped " +
-			"-p 127.0.0.1:3307:3307 " +
+		// The data and backup paths hold spaces, so they are quoted; a
+		// t.TempDir path holds no character that needs quoting.
+		want := "docker create --name gt-dolt --memory 8g --memory-swap 8g --restart unless-stopped " +
+			"-p 127.0.0.1:3307:" + strconv.Itoa(planTestListenerPort) + " " +
 			"-v '" + planTestData + ":" + planTestData + "' " +
 			"-v '" + planTestBackup + ":" + planTestBackup + "' " +
-			"-v '" + planTestConfig + ":" + planTestConfig + ":ro' " +
+			"-v " + config + ":" + config + ":ro " +
 			"--label org.gastown.keep=true " +
-			"dolt:test dolt sql-server --config '" + planTestConfig + "'\n"
+			"dolt:test --config " + config + "\n"
 		if out != want {
 			t.Fatalf("output =\n%s\nwant\n%s", out, want)
 		}
@@ -122,7 +142,8 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 
 	t.Run("json array", func(t *testing.T) {
 		t.Parallel()
-		out, err := executeDoltContainerPlan(t, planTestDeps(t), append(planTestArgs(), "--json")...)
+		config := writePlanTestConfig(t)
+		out, err := executeDoltContainerPlan(t, planTestDeps(t), append(planTestArgs(config), "--json")...)
 		if err != nil {
 			t.Fatalf("execute: %v", err)
 		}
@@ -130,7 +151,7 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 		if err := json.Unmarshal([]byte(out), &got); err != nil {
 			t.Fatalf("output is not a JSON array: %v\n%s", err, out)
 		}
-		want, err := doltserver.ContainerPlan(planTestSpec())
+		want, err := doltserver.ContainerPlan(planTestSpec(config))
 		if err != nil {
 			t.Fatalf("ContainerPlan: %v", err)
 		}
@@ -141,7 +162,7 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 
 	t.Run("flags are required", func(t *testing.T) {
 		t.Parallel()
-		all := planTestArgs()
+		all := planTestArgs("/config/config.yaml")
 		for _, required := range []string{"name", "image", "config"} {
 			required := required
 			t.Run(required, func(t *testing.T) {
@@ -165,7 +186,7 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 
 	t.Run("a refused plan is an error", func(t *testing.T) {
 		t.Parallel()
-		args := planTestArgs()
+		args := planTestArgs(writePlanTestConfig(t))
 		args[1] = "-bad"
 		_, err := executeDoltContainerPlan(t, planTestDeps(t), args...)
 		if err == nil {
@@ -178,7 +199,8 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 
 	t.Run("no positional arguments", func(t *testing.T) {
 		t.Parallel()
-		_, err := executeDoltContainerPlan(t, planTestDeps(t), append(planTestArgs(), "extra")...)
+		args := append(planTestArgs(writePlanTestConfig(t)), "extra")
+		_, err := executeDoltContainerPlan(t, planTestDeps(t), args...)
 		if err == nil {
 			t.Fatal("the command accepted a positional argument")
 		}
@@ -186,11 +208,12 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 
 	t.Run("a failed write is an error", func(t *testing.T) {
 		t.Parallel()
+		config := writePlanTestConfig(t)
 		deps := planTestDeps(t)
-		if err := runDoltContainerPlan(deps, failingPlanWriter{}, planTestArgs()...); err == nil {
+		if err := runDoltContainerPlan(deps, failingPlanWriter{}, planTestArgs(config)...); err == nil {
 			t.Fatal("the shell-quoted line ignored a failed write")
 		}
-		if err := runDoltContainerPlan(deps, failingPlanWriter{}, append(planTestArgs(), "--json")...); err == nil {
+		if err := runDoltContainerPlan(deps, failingPlanWriter{}, append(planTestArgs(config), "--json")...); err == nil {
 			t.Fatal("the JSON form ignored a failed write")
 		}
 	})
@@ -199,7 +222,7 @@ func TestDoltContainerPlanCommand(t *testing.T) {
 func TestDoltContainerPlanHasKeepLabel(t *testing.T) {
 	t.Parallel()
 
-	argv := planTestJSON(t, planTestArgs()...)
+	argv := planTestJSON(t, planTestArgs(writePlanTestConfig(t))...)
 	labelAt := slices.Index(argv, "--label")
 	if labelAt < 0 || labelAt+1 >= len(argv) {
 		t.Fatalf("argv %#v holds no --label pair", argv)
@@ -219,8 +242,9 @@ func TestDoltContainerPlanHasKeepLabel(t *testing.T) {
 func TestDoltContainerPlanKeepsExistingFlags(t *testing.T) {
 	t.Parallel()
 
-	got := planTestJSON(t, planTestArgs()...)
-	want, err := doltserver.ContainerPlan(planTestSpec())
+	config := writePlanTestConfig(t)
+	got := planTestJSON(t, planTestArgs(config)...)
+	want, err := doltserver.ContainerPlan(planTestSpec(config))
 	if err != nil {
 		t.Fatalf("ContainerPlan: %v", err)
 	}
@@ -256,7 +280,7 @@ func TestDoltContainerPlanDefaults(t *testing.T) {
 		backupRoot: func() (string, error) { return backupRoot, nil },
 	}
 	out, err := executeDoltContainerPlan(t, deps,
-		"--json", "--name", "gt-dolt", "--image", "dolt:test", "--config", "/config/config.yaml")
+		"--json", "--name", "gt-dolt", "--image", "dolt:test", "--config", writePlanTestConfig(t))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -270,6 +294,138 @@ func TestDoltContainerPlanDefaults(t *testing.T) {
 			t.Errorf("argv %#v does not hold the default mount %q", argv, want)
 		}
 	}
+}
+
+// publishFlag returns the value of the -p pair in argv.
+func publishFlag(t *testing.T, argv []string) string {
+	t.Helper()
+	at := slices.Index(argv, "-p")
+	if at < 0 || at+1 >= len(argv) {
+		t.Fatalf("argv %#v holds no -p pair", argv)
+	}
+	return argv[at+1]
+}
+
+func TestDoltContainerPlanReadsTheListenerPort(t *testing.T) {
+	t.Parallel()
+
+	argv := planTestJSON(t, planTestArgs(writePlanTestConfig(t))...)
+	want := "127.0.0.1:3307:" + strconv.Itoa(planTestListenerPort)
+	if got := publishFlag(t, argv); got != want {
+		t.Fatalf("published port = %q, want the config's listener port %q", got, want)
+	}
+}
+
+func TestDoltContainerPlanTrailingArguments(t *testing.T) {
+	t.Parallel()
+
+	config := writePlanTestConfig(t)
+	argv := planTestJSON(t, planTestArgs(config)...)
+	imageAt := slices.Index(argv, "dolt:test")
+	if imageAt < 0 {
+		t.Fatalf("argv %#v holds no image reference", argv)
+	}
+	want := []string{"dolt:test", "--config", config}
+	if got := argv[imageAt:]; !slices.Equal(got, want) {
+		t.Fatalf("argv after the flags = %#v, want %#v", got, want)
+	}
+}
+
+func TestDoltContainerPlanContainerPortOverride(t *testing.T) {
+	t.Parallel()
+
+	config := writePlanTestConfig(t)
+	argv := planTestJSON(t, append(planTestArgs(config), "--container-port", "3317")...)
+	if got, want := publishFlag(t, argv), "127.0.0.1:3307:3317"; got != want {
+		t.Fatalf("published port = %q, want the override %q", got, want)
+	}
+}
+
+func TestDoltContainerPlanContainerPortOverrideReadsNoConfig(t *testing.T) {
+	t.Parallel()
+
+	// An explicit --container-port is the operator's port, so the plan takes
+	// it without reading the config for one.
+	missing := filepath.Join(t.TempDir(), "absent.yaml")
+	argv := planTestJSON(t, append(planTestArgs(missing), "--container-port", "3317")...)
+	if got, want := publishFlag(t, argv), "127.0.0.1:3307:3317"; got != want {
+		t.Fatalf("published port = %q, want the override %q", got, want)
+	}
+}
+
+func TestDoltContainerPlanExplicitZeroContainerPortIsRefused(t *testing.T) {
+	t.Parallel()
+
+	config := writePlanTestConfig(t)
+	_, err := executeDoltContainerPlan(t, planTestDeps(t),
+		append(planTestArgs(config), "--container-port", "0")...)
+	if err == nil {
+		t.Fatal("the plan accepted --container-port 0")
+	}
+	if !strings.Contains(err.Error(), "container port") {
+		t.Fatalf("error %q does not name the container port", err)
+	}
+}
+
+func TestDoltContainerPlanDefaultMemory(t *testing.T) {
+	t.Parallel()
+
+	argv := planTestJSON(t, planTestArgs(writePlanTestConfig(t))...)
+	for _, flag := range []string{"--memory", "--memory-swap"} {
+		at := slices.Index(argv, flag)
+		if at < 0 || at+1 >= len(argv) {
+			t.Fatalf("argv %#v holds no %s pair", argv, flag)
+		}
+		if got := argv[at+1]; got != "8g" {
+			t.Fatalf("%s = %q, want 8g", flag, got)
+		}
+	}
+}
+
+func TestDoltContainerPlanConfigWithoutAListenerPort(t *testing.T) {
+	t.Parallel()
+
+	writeConfig := func(t *testing.T, content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatalf("write the config: %v", err)
+		}
+		return path
+	}
+
+	t.Run("the plan is refused", func(t *testing.T) {
+		t.Parallel()
+		config := writeConfig(t, "log_level: warning\n")
+		_, err := executeDoltContainerPlan(t, planTestDeps(t), planTestArgs(config)...)
+		if err == nil {
+			t.Fatal("the plan guessed a container port for a config that names none")
+		}
+	})
+
+	t.Run("the error names the config file", func(t *testing.T) {
+		t.Parallel()
+		config := writeConfig(t, "log_level: warning\n")
+		_, err := executeDoltContainerPlan(t, planTestDeps(t), planTestArgs(config)...)
+		if err == nil {
+			t.Fatal("the plan guessed a container port for a config that names none")
+		}
+		if !strings.Contains(err.Error(), config) {
+			t.Fatalf("error %q does not name the config file %s", err, config)
+		}
+	})
+
+	t.Run("the error points at the override", func(t *testing.T) {
+		t.Parallel()
+		config := writeConfig(t, "listener:\n  max_connections: 100\n")
+		_, err := executeDoltContainerPlan(t, planTestDeps(t), planTestArgs(config)...)
+		if err == nil {
+			t.Fatal("the plan guessed a container port for a config that names none")
+		}
+		if !strings.Contains(err.Error(), "--container-port") {
+			t.Fatalf("error %q does not point at --container-port", err)
+		}
+	})
 }
 
 func TestDoltContainerPlanDefaultLookupErrors(t *testing.T) {
@@ -302,7 +458,7 @@ func TestDoltContainerPlanDefaultLookupErrors(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			_, err := executeDoltContainerPlan(t, tt.deps,
-				"--name", "gt-dolt", "--image", "dolt:test", "--config", "/config/config.yaml")
+				"--name", "gt-dolt", "--image", "dolt:test", "--config", writePlanTestConfig(t))
 			if err == nil {
 				t.Fatal("the command ignored a failed default lookup")
 			}
