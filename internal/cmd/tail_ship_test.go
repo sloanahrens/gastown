@@ -239,13 +239,13 @@ func TestRigShipReposReadsEachRigsOwnConfig(t *testing.T) {
 	writeTownFile(t, filepath.Join(town, "mayor", "rigs.json"),
 		`{"version":1,"rigs":{"fractals":{},"devops":{},"half":{}}}`)
 	writeTownFile(t, filepath.Join(town, "fractals", "config.json"),
-		`{"type":"rig","version":1,"name":"fractals","git_url":"http://forgejo:3000/sloan/fractals-nextjs.git"}`)
+		`{"type":"rig","version":1,"name":"fractals","git_url":"http://forgejo:3000/owner/fractals-nextjs.git"}`)
 	writeTownFile(t, filepath.Join(town, "devops", "config.json"),
-		`{"type":"rig","version":1,"name":"devops","git_url":"http://forgejo:3000/sloan/devops.git"}`)
+		`{"type":"rig","version":1,"name":"devops","git_url":"http://forgejo:3000/owner/devops.git"}`)
 	// "half" is registered but has no config, so it names no repository.
 
 	got := rigShipRepos(town)
-	want := map[string]string{"fractals": "sloan/fractals-nextjs", "devops": "sloan/devops"}
+	want := map[string]string{"fractals": "owner/fractals-nextjs", "devops": "owner/devops"}
 	if len(got) != len(want) {
 		t.Fatalf("repos = %v, want %v", got, want)
 	}

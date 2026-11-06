@@ -116,7 +116,7 @@ func newLaunchRig(t *testing.T) *launchRig {
 	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := `{"type":"rig-settings","version":1,"merge_queue":{"forgejo":{"remote_url":"http://forgejo:3000/sloan/gastown.git"}}}`
+	cfg := `{"type":"rig-settings","version":1,"merge_queue":{"forgejo":{"remote_url":"http://forgejo:3000/owner/gastown.git"}}}`
 	if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}

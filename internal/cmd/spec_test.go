@@ -2633,7 +2633,7 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 			// The label-less half of the same window: the READY TO LAND block
 			// is written first, so an answer that lags the label still carries
 			// the block and the bead stays off the board (gt-kr5xv).
-			{ID: "gt-mid", Type: "task", Status: "open", Priority: 1, Notes: readyBlock("sloan/x", "abc1234", "main")},
+			{ID: "gt-mid", Type: "task", Status: "open", Priority: 1, Notes: readyBlock("operator/x", "abc1234", "main")},
 			{ID: "gt-human", Type: "task", Status: "open", Priority: 1, Labels: []string{"needs-human"}},
 			{ID: "gt-deferred", Type: "task", Status: "deferred", Priority: 1},
 			{ID: "gt-epic", Type: "epic", Status: "open", Priority: 1},

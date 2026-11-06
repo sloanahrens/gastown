@@ -801,29 +801,19 @@ func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, h
 // the garbage collect runs from the Mac's registry-collect job instead.
 const diskMaintCollectUnavailable = "the garbage collect runs from the Mac's registry-collect job, which this container cannot reach"
 
-const (
-	// diskMaintHostKubeconfig is the town's sandbox kubeconfig, relative to the
-	// town root: the file the host reads the sandbox cluster through.
-	diskMaintHostKubeconfig = ".runtime/sbx-k8s/kubeconfig"
-
-	// diskMaintContainerKubeconfig is the kubeconfig the container derives for
-	// the same cluster, relative to the town root. The host's file names
-	// 127.0.0.1, which inside the container is the container's own loopback, so
-	// kubectl is refused there. The writer is containerKubeconfigRP in
-	// internal/cmd; that package cannot be imported here, so the path is kept
-	// in step by hand.
-	diskMaintContainerKubeconfig = ".runtime/container/kubeconfig.yaml"
-)
+// diskMaintHostKubeconfig is the town's sandbox kubeconfig, relative to the
+// town root: the file the host reads the sandbox cluster through. The container
+// reads the file agentconfig.ContainerKubeconfigFile derives instead.
+const diskMaintHostKubeconfig = ".runtime/sbx-k8s/kubeconfig"
 
 // diskMaintKubeconfig is the kubeconfig the patrol reads the sandbox cluster
 // through, under townRoot. In container mode (see containerMode) that is the
 // container's derived file; anywhere else it is the host's.
 func diskMaintKubeconfig(townRoot string, getenv func(string) string) string {
-	rel := diskMaintHostKubeconfig
 	if containerMode(getenv) {
-		rel = diskMaintContainerKubeconfig
+		return agentconfig.ContainerKubeconfigFile(townRoot)
 	}
-	return filepath.Join(townRoot, filepath.FromSlash(rel))
+	return filepath.Join(townRoot, filepath.FromSlash(diskMaintHostKubeconfig))
 }
 
 // diskMaintenanceOut is where the plugin lock's log lines go.

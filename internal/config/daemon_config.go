@@ -2514,6 +2514,13 @@ func ContainerComposeFile(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", "container", "compose.yml")
 }
 
+// ContainerKubeconfigFile is where the compose render writes the sandbox
+// cluster's kubeconfig the container reads, derived because the host's file
+// names 127.0.0.1, which inside the container is its own loopback.
+func ContainerKubeconfigFile(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "container", "kubeconfig.yaml")
+}
+
 // MayBeContainerTown reports whether the town carries the compose file only a
 // container town has. It reads no settings, so it answers when they cannot be
 // read: a caller that cannot tell how the daemon is supervised asks it whether

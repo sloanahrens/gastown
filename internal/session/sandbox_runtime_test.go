@@ -342,7 +342,7 @@ func TestGitHelperScriptAnswersOnlyForTheForgejoHost(t *testing.T) {
 
 func TestRepoHostIsTheCloneURLsHostAndPort(t *testing.T) {
 	t.Parallel()
-	if got, err := SandboxRepoHost("http://host.docker.internal:3000/sloan/gastown.git"); err != nil || got != "host.docker.internal:3000" {
+	if got, err := SandboxRepoHost("http://host.docker.internal:3000/owner/gastown.git"); err != nil || got != "host.docker.internal:3000" {
 		t.Errorf("SandboxRepoHost = %q, %v; want host.docker.internal:3000", got, err)
 	}
 	for _, bad := range []string{"", "not a url", "http:///no-host", `http://evil"; rm -rf /;:3000/x`, "http://a b:3000/x", "http://host:3000:1/x", "http://ho$(id)st:3000/x", "http://host:99999999/x", "http://-host:3000/x", "http://a..b:3000/x", "http://[fd00::1]:3000/x"} {
