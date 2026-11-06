@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -212,14 +213,13 @@ func (l *hostAgentLoop) run(ctx context.Context) error {
 // runHostAgent is `gt host agent run` over the real host: the real clock, the
 // real collectors, and hostprobe.Write under the town's probe path.
 func runHostAgent(ctx context.Context, townRoot string) error {
+	dockerDisk := newHostAgentDockerDisk()
 	loop := &hostAgentLoop{
 		clock:    clockwork.NewRealClock(),
 		interval: hostAgentInterval,
 		path:     hostprobe.Path(townRoot),
 		collect: func(ctx context.Context, now time.Time) hostprobe.Probes {
-			p := hostprobe.Collect(ctx, hostAgentRunner, townRoot, now)
-			p = hostAgentWithDockerDisk(ctx, p, hostAgentRunner)
-			return hostAgentWithLaunchd(ctx, p, templates.SupervisorJobState)
+			return hostAgentCollect(ctx, hostAgentRunner, townRoot, now, dockerDisk, templates.SupervisorJobState)
 		},
 		write: hostAgentWrite,
 		logf: func(format string, args ...any) {
@@ -291,6 +291,53 @@ func hostAgentWithDockerDisk(ctx context.Context, p hostprobe.Probes, run hostpr
 	}
 	p.DockerDisk = hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: pct}}
 	return p
+}
+
+// hostAgentDockerDisk is the Docker Desktop disk's latest finished reading. The
+// tick does not wait for docker exec: a read runs beside the ticks and each tick
+// publishes the last one that finished. So a docker that hangs cannot extend the
+// write cycle, and its read ends at hostAgentDockerDiskTimeout with the error set.
+// The published reading is one tick behind the disk; before the first read
+// finishes it is hostprobe.DockerDiskNotCollected, never 0% used.
+type hostAgentDockerDisk struct {
+	mu       sync.Mutex
+	inFlight bool
+	reads    int // reads started, counted when a tick starts one
+	latest   hostprobe.Field[hostprobe.Disk]
+}
+
+func newHostAgentDockerDisk() *hostAgentDockerDisk {
+	return &hostAgentDockerDisk{latest: hostprobe.Field[hostprobe.Disk]{Err: hostprobe.DockerDiskNotCollected}}
+}
+
+// reading returns the latest finished reading and starts the next read unless
+// one is still running, so a hung docker holds one goroutine, not one per tick.
+func (d *hostAgentDockerDisk) reading(ctx context.Context, run hostprobe.Runner) hostprobe.Field[hostprobe.Disk] {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.inFlight {
+		d.inFlight = true
+		d.reads++
+		go d.refresh(ctx, run)
+	}
+	return d.latest
+}
+
+// refresh runs one read and publishes it, clearing inFlight for the next tick.
+func (d *hostAgentDockerDisk) refresh(ctx context.Context, run hostprobe.Runner) {
+	got := hostAgentWithDockerDisk(ctx, hostprobe.Probes{}, run).DockerDisk
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.latest = got
+	d.inFlight = false
+}
+
+// hostAgentCollect is one tick's reading: the probes Collect reads, the Docker
+// Desktop disk from dockerDisk, and the launchd job from read.
+func hostAgentCollect(ctx context.Context, run hostprobe.Runner, townRoot string, now time.Time, dockerDisk *hostAgentDockerDisk, read templates.SupervisorReader) hostprobe.Probes {
+	p := hostprobe.Collect(ctx, run, townRoot, now)
+	p.DockerDisk = dockerDisk.reading(ctx, run)
+	return hostAgentWithLaunchd(ctx, p, read)
 }
 
 // hostAgentRunner is hostprobe.Runner over the real host: it runs the argv and
