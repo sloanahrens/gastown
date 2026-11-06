@@ -114,6 +114,21 @@ func TestJevSubmissionSettingsWithNoPatrolConfig(t *testing.T) {
 	}
 }
 
+// A capped pass keeps the other-rig count and drops the skipped count, so a
+// reader can tell why the pass stopped and still see the entries passed over
+// (gt-0d7hi).
+func TestJevSubmissionSummaryCapReached(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	writeSubmissionSummary(&out, submission.Summary{
+		Asked: 2, Skipped: 1, Repeated: 3, OtherRig: 4, CapReached: true,
+	})
+	want := "jev submission: asked 2 submissions, repeated 3, other rig 4; the daily cap was reached, the rest wait for the next pass\n"
+	if out.String() != want {
+		t.Errorf("summary line = %q, want %q", out.String(), want)
+	}
+}
+
 // The pass summary line prints the other-rig count beside the asked, skipped
 // and repeated counts, so an entry passed over for its rig is visible (gt-uy19f).
 func TestJevSubmissionSummary(t *testing.T) {
