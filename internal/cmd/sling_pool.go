@@ -475,7 +475,7 @@ type polecatDispositionFunc func(rigName, polecatName string) (poolSeatState, er
 // polecatHookHeldFunc reports whether one polecat's seat still holds live
 // work, read from its beads alone: the same agent, assignment and hook reads
 // polecatDispositionFunc makes, stopped before the worktree probe. A nil func
-// is a pool that cannot read any polecat's hook.
+// is an error for the dead-hooked walk, never an empty one.
 //
 // The roster's dead-hooked walk asks this first and the full seat read only
 // for a seat that holds a hook: a polecat with no hook is skipped whatever its

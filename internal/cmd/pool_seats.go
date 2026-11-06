@@ -982,6 +982,13 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 			}
 			state, err := disposition(rigName, name)
 			if err != nil {
+				// The hook read proved the seat held, so a failed state read
+				// does not prove it free: it stays counted, and the error goes
+				// back beside the seats like the hook read's.
+				if holdErr == nil {
+					holdErr = fmt.Errorf("reading the state of %s/%s: %w", rigName, name, err)
+				}
+				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), now))
 				continue
 			}
 			probed++

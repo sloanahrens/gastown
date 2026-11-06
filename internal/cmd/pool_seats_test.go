@@ -1620,6 +1620,24 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		}
 	})
 
+	t.Run("a state read that fails on a held seat keeps the seat counted and returns the error", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		disposition := func(string, string) (poolSeatState, error) {
+			return poolSeatState{}, errors.New("worktree unreadable")
+		}
+		got, probed, err := poolDeadHookedSessions(town, pool, disposition, heldHook, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "worktree unreadable") {
+			t.Fatalf("an unreadable state = %v, want the read's error", err)
+		}
+		if len(got) != 1 || got[0].polecat != "ember" || !got[0].deadHooked {
+			t.Fatalf("an unreadable state counted %+v, want the held seat counted as dead-hooked", got)
+		}
+		if probed != 0 {
+			t.Fatalf("an unreadable state counted %d probes, want none", probed)
+		}
+	})
+
 	t.Run("a nil hook read is an error, not an empty walk", func(t *testing.T) {
 		t.Parallel()
 		town, pool := deadHookedWalkTestTown(t, "ember")
