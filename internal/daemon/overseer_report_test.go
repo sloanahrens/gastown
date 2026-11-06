@@ -159,11 +159,17 @@ func (w *overseerWorld) seams() *overseerReportSeams {
 	}
 }
 
-// seedReport plants an earlier report file, as a previous run would have left.
+// overseerSeededReport is the text of a report a run left at a slot's name:
+// the four sections the digest renders, so the daily files can be built from
+// it the way they are from a report this run wrote.
+const overseerSeededReport = "overseer report (seeded)\n\nDONE\n  (none)\n\nIN PROGRESS\n  (none)\n\n" +
+	"LEFT\n  (none)\n\nOPEN QUESTIONS\n  (none)\n\nhealth: GREEN\n"
+
+// seedReport plants a report file at stamp, as a previous run would have left.
 func (w *overseerWorld) seedReport(t *testing.T, stamp string) string {
 	t.Helper()
 	path := filepath.Join(townreport.ReportsDir(w.town), stamp+".md")
-	writeOverseerFile(t, path, "earlier report\n")
+	writeOverseerFile(t, path, overseerSeededReport)
 	return path
 }
 
@@ -297,7 +303,7 @@ func TestOverseerReportNeverReplacesAnExistingFile(t *testing.T) {
 	if path := w.run(t); path != "" {
 		t.Errorf("wrote %s over the slot's existing report", path)
 	}
-	if got := readOverseerFile(t, slotFile); got != "earlier report\n" {
+	if got := readOverseerFile(t, slotFile); got != overseerSeededReport {
 		t.Errorf("existing report now reads %q", got)
 	}
 
@@ -322,7 +328,7 @@ func TestWriteOverseerReportFutureFileStillWrites(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "20261014T230000Z") || !strings.Contains(err.Error(), "dated after now") {
 		t.Errorf("err = %v, want it to name the future-dated report", err)
 	}
-	if got := readOverseerFile(t, future); got != "earlier report\n" {
+	if got := readOverseerFile(t, future); got != overseerSeededReport {
 		t.Errorf("the future-dated report was changed to %q", got)
 	}
 
@@ -520,11 +526,11 @@ func TestOverseerReportTakenNameKeepsTheLatestCopy(t *testing.T) {
 	var logs []string
 	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
 
-	path, err := writeOverseerReportFile(dir, overseerAt("2026-10-14T20:15:00Z"), "the slot's text\n", logf)
+	path, err := writeOverseerReportFile(w.town, dir, overseerAt("2026-10-14T20:15:00Z"), "the slot's text\n", logf)
 	if path != "" || err != nil {
 		t.Fatalf("writeOverseerReportFile over a taken report name = %q, %v; want nothing and no error", path, err)
 	}
-	if got := readOverseerFile(t, slotFile); got != "earlier report\n" {
+	if got := readOverseerFile(t, slotFile); got != overseerSeededReport {
 		t.Errorf("the report in place now reads %q", got)
 	}
 	if got := readOverseerFile(t, copyPath); got != "the 10-15 copy\n" {
@@ -1199,39 +1205,193 @@ func TestOverseerReportDailyWriteRefusesSymlinkedTarget(t *testing.T) {
 	}
 }
 
-// A symlinked bird directory is refused too: the dashboard reads the reports
-// only below a real directory, so anything written through the link is a page
-// no row shows.
-func TestOverseerReportRefusesASymlinkedBirdDirectory(t *testing.T) {
+// A symlinked level between the town root and the reports directory is
+// refused, and nothing at all is created inside the link's target: the
+// dashboard reads the reports only below real directories, so a page written
+// through a link is one no row shows. A create that ran before the check would
+// leave the reports directory in the target first (gt-ag7u0c rework).
+func TestOverseerReportRefusesASymlinkedDirectory(t *testing.T) {
 	t.Parallel()
-	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
-	runtimeDir := filepath.Join(w.town, ".runtime")
-	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	target := t.TempDir()
-	if err := os.Symlink(target, filepath.Join(runtimeDir, "overseer")); err != nil {
-		t.Fatal(err)
-	}
+	for _, level := range []string{".runtime", filepath.Join(".runtime", "overseer")} {
+		t.Run(filepath.Base(level), func(t *testing.T) {
+			t.Parallel()
+			w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+			target := t.TempDir()
+			link := filepath.Join(w.town, level)
+			if err := os.RemoveAll(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
 
-	_, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
-	if err == nil || !strings.Contains(err.Error(), "not a real directory") || !strings.Contains(err.Error(), "symlink") {
-		t.Fatalf("write = %v, want a refusal naming the symlinked bird directory", err)
-	}
-	if entries, err := os.ReadDir(filepath.Join(target, "reports")); err == nil && len(entries) != 0 {
-		t.Errorf("the symlink's target holds %d entries, want no report written through it", len(entries))
+			_, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
+			if err == nil || !strings.Contains(err.Error(), "not a real directory") || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("write = %v, want a refusal naming the symlinked %s", err, level)
+			}
+			if entries, rerr := os.ReadDir(target); rerr != nil || len(entries) != 0 {
+				t.Errorf("the symlink's target holds %d entries (%v), want nothing created through the link", len(entries), rerr)
+			}
+		})
 	}
 }
 
-// A sidecar over the dashboard's cap is refused rather than written, since the
-// reader would show the row as an error.
-func TestOverseerReportDailySidecarRefusesOversizeText(t *testing.T) {
+// A long open-questions list is cut to what the dashboard shows, and the
+// sidecar says its list is shorter than its count, rather than pushing
+// daily.json past the reader's cap: an oversize sidecar is refused there,
+// which leaves the Birds row on the last summary instead of current
+// (gt-ag7u0c rework).
+func TestOverseerReportDailySidecarCutsALongQuestionList(t *testing.T) {
 	t.Parallel()
-	text := "overseer report 2026-10-14T20:15:00Z\n\nOPEN QUESTIONS\n  hq-q1  " +
-		strings.Repeat("held: ", 4000) + "\n\nhealth: GREEN\n"
-	err := writeOverseerDaily(t.TempDir(), overseerAt("2026-10-14T20:15:00Z"), text)
+	slot := overseerAt("2026-10-14T20:15:00Z")
+	var b strings.Builder
+	b.WriteString("overseer report 2026-10-14T20:15:00Z\n\nDONE\n  (none)\n\nIN PROGRESS\n  (none)\n\n" +
+		"LEFT\n  (none)\n\nOPEN QUESTIONS\n")
+	for i := 0; i < 500; i++ {
+		fmt.Fprintf(&b, "  hq-q%d  %s\n", i, strings.Repeat("held: work ", 30))
+	}
+	b.WriteString("\nhealth: GREEN\n")
+	dir := filepath.Join(t.TempDir(), "overseer", "reports")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeOverseerDaily(dir, slot, b.String()); err != nil {
+		t.Fatalf("writeOverseerDaily with 500 open questions = %v, want a sidecar cut to fit", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, overseerSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > overseerSidecarMaxBytes {
+		t.Fatalf("daily.json is %d bytes, over the %d the dashboard reads", len(raw), overseerSidecarMaxBytes)
+	}
+	var side struct {
+		Decisions     int                     `json:"decisions"`
+		Truncated     bool                    `json:"truncated"`
+		DecisionItems []overseerDailyDecision `json:"decision_items"`
+	}
+	if err := json.Unmarshal(raw, &side); err != nil {
+		t.Fatalf("daily.json: %v", err)
+	}
+	if side.Decisions != 500 {
+		t.Errorf("decisions = %d, want the 500 open questions", side.Decisions)
+	}
+	if !side.Truncated {
+		t.Error("truncated = false, want true: the list is shorter than the count")
+	}
+	if len(side.DecisionItems) != overseerSidecarDecisionItems {
+		t.Errorf("decision_items = %d, want the cap of %d", len(side.DecisionItems), overseerSidecarDecisionItems)
+	}
+	for _, item := range side.DecisionItems {
+		if n := len([]rune(item.Question)); n > overseerSidecarDecisionRunes {
+			t.Errorf("an item is %d runes, over the cap of %d: %q", n, overseerSidecarDecisionRunes, item.Question)
+		}
+	}
+	// The reader takes the sidecar it would have refused before, and the row
+	// is the report's rather than an error.
+	var row *dashboard.BirdReport
+	rows := dashboard.NewBirdReportsReader(filepath.Dir(filepath.Dir(dir))).Read(slot)
+	for i := range rows {
+		if rows[i].Bird == "overseer" {
+			row = &rows[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("the dashboard reads %d rows and none is the overseer", len(rows))
+	}
+	if row.State != dashboard.BirdReportFresh {
+		t.Fatalf("overseer row state = %q (%s), want fresh", row.State, row.Note)
+	}
+	if row.Decisions != 500 {
+		t.Errorf("row decisions = %d, want the sidecar's 500", row.Decisions)
+	}
+}
+
+// A health line longer than the row shows is cut in the sidecar and said so,
+// the same as the list: the summary is the fixed part of the file, and left
+// whole it could push the sidecar over the cap on its own (gt-ag7u0c rework).
+func TestOverseerReportDailySidecarCutsALongSummary(t *testing.T) {
+	t.Parallel()
+	slot := overseerAt("2026-10-14T20:15:00Z")
+	text := "overseer report 2026-10-14T20:15:00Z\n\nDONE\n  (none)\n\nIN PROGRESS\n  (none)\n\n" +
+		"LEFT\n  (none)\n\nOPEN QUESTIONS\n  (none)\n\nhealth: " + strings.Repeat("x", 3000) + "\n"
+	dir := t.TempDir()
+	if err := writeOverseerDaily(dir, slot, text); err != nil {
+		t.Fatalf("writeOverseerDaily with a long health line = %v, want a sidecar cut to fit", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, overseerSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var side struct {
+		Summary   string `json:"summary"`
+		Truncated bool   `json:"truncated"`
+	}
+	if err := json.Unmarshal(raw, &side); err != nil {
+		t.Fatalf("daily.json: %v", err)
+	}
+	if n := len([]rune(side.Summary)); n > overseerSidecarSummaryRunes {
+		t.Errorf("summary is %d runes, over the cap of %d", n, overseerSidecarSummaryRunes)
+	}
+	if !side.Truncated {
+		t.Error("truncated = false, want true: the summary was cut")
+	}
+}
+
+// The caps bound runes, not bytes: text of characters JSON escapes is longer
+// than its rune count, so items are dropped until the file fits rather than
+// the run failing and the row going stale (gt-ag7u0c rework).
+func TestOverseerReportDailySidecarDropsItemsWhenEscapingOverflowsTheCap(t *testing.T) {
+	t.Parallel()
+	slot := overseerAt("2026-10-14T20:15:00Z")
+	escaped := strings.Repeat("<", 2*overseerSidecarDecisionRunes)
+	var b strings.Builder
+	b.WriteString("overseer report 2026-10-14T20:15:00Z\n\nDONE\n  (none)\n\nIN PROGRESS\n  (none)\n\n" +
+		"LEFT\n  (none)\n\nOPEN QUESTIONS\n")
+	for i := 0; i < overseerSidecarDecisionItems; i++ {
+		fmt.Fprintf(&b, "  hq-q%d  %s\n", i, escaped)
+	}
+	b.WriteString("\nhealth: " + strings.Repeat("<", 2*overseerSidecarSummaryRunes) + "\n")
+	dir := t.TempDir()
+	if err := writeOverseerDaily(dir, slot, b.String()); err != nil {
+		t.Fatalf("writeOverseerDaily with escaped text = %v, want a sidecar that still fits", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, overseerSidecarName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > overseerSidecarMaxBytes {
+		t.Fatalf("daily.json is %d bytes, over the %d the dashboard reads", len(raw), overseerSidecarMaxBytes)
+	}
+	var side struct {
+		Truncated     bool                    `json:"truncated"`
+		DecisionItems []overseerDailyDecision `json:"decision_items"`
+	}
+	if err := json.Unmarshal(raw, &side); err != nil {
+		t.Fatalf("daily.json: %v", err)
+	}
+	if len(side.DecisionItems) >= overseerSidecarDecisionItems {
+		t.Errorf("kept %d items, want fewer than %d: the escaped text alone is over the cap",
+			len(side.DecisionItems), overseerSidecarDecisionItems)
+	}
+	if !side.Truncated {
+		t.Error("truncated = false, want true: items were dropped")
+	}
+}
+
+// The last-resort refusal: when the fixed text alone is over the cap there is
+// no list left to cut, so the sidecar is refused rather than written for a
+// reader that would not show it. Only a bird name far longer than any
+// directory name can reach it.
+func TestOverseerReportDailySidecarRefusesTextWithNoRoomForIt(t *testing.T) {
+	t.Parallel()
+	_, _, err := overseerDailyFiles(strings.Repeat("b", overseerSidecarMaxBytes),
+		overseerAt("2026-10-14T20:15:00Z"), "overseer report\n\nhealth: GREEN\n")
 	if err == nil || !strings.Contains(err.Error(), overseerSidecarName) || !strings.Contains(err.Error(), "KiB") {
-		t.Fatalf("writeOverseerDaily over the cap = %v, want a refusal naming %s", err, overseerSidecarName)
+		t.Fatalf("overseerDailyFiles with no room for the fixed text = %v, want a refusal naming %s", err, overseerSidecarName)
 	}
 }
 
@@ -1259,6 +1419,132 @@ func TestOverseerReportDailyWriteReportsFailures(t *testing.T) {
 			t.Fatalf("write = %v, want an error naming the unlinkable %s", err, overseerPageName)
 		}
 	})
+}
+
+// A covered slot rebuilds the daily files only when their sidecar is not for
+// the slot's report: one written for it is left alone, and one for another
+// instant — older, or from a clock that ran ahead — is replaced from the
+// report, so the row never sits at a sidecar the report does not describe
+// (gt-ag7u0c rework).
+func TestOverseerReportCoveredSlotKeepsOnlyTheReportsSidecar(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		writtenAt string
+		kept      bool
+	}{
+		{"written for the report", "2026-10-14T20:15:00Z", true},
+		{"older than the report", "2026-10-14T20:00:00Z", false},
+		{"ahead of the report", "2026-10-14T20:30:00Z", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+			dir := townreport.ReportsDir(w.town)
+			w.seedReport(t, "20261014T201500Z")
+			path := filepath.Join(dir, overseerSidecarName)
+			before := fmt.Sprintf(`{"bird":"overseer","written_at":%q,"title":"kept"}`, tc.writtenAt)
+			writeOverseerFile(t, path, before)
+
+			if p, err := writeOverseerReport(w.town, 15*time.Minute, w.seams()); p != "" || err != nil {
+				t.Fatalf("run = %q, %v; want no report and no error", p, err)
+			}
+			after := readOverseerFile(t, path)
+			if tc.kept {
+				if after != before {
+					t.Errorf("daily.json now reads %q, want the sidecar for the report left alone", after)
+				}
+				return
+			}
+			var side struct {
+				WrittenAt string `json:"written_at"`
+			}
+			if err := json.Unmarshal([]byte(after), &side); err != nil {
+				t.Fatalf("daily.json: %v", err)
+			}
+			if want := "2026-10-14T20:15:00Z"; side.WrittenAt != want {
+				t.Errorf("written_at = %q, want the report's slot %q", side.WrittenAt, want)
+			}
+		})
+	}
+}
+
+// A run whose report was published but whose daily write then failed is
+// repaired by the next run in the same slot, from the report's own text:
+// otherwise the Birds row stays on the last sidecar until the next slot
+// (gt-ag7u0c rework).
+func TestOverseerReportRetryInTheSlotWritesTheDailyFiles(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	dir := townreport.ReportsDir(w.town)
+	// A directory where the page goes fails the daily write after the report
+	// is linked: the page is published first, and a rename onto a directory
+	// is refused.
+	if err := os.MkdirAll(filepath.Join(dir, overseerPageName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeOverseerReport(w.town, 15*time.Minute, w.seams()); err == nil {
+		t.Fatal("the first run = nil, want the daily write failure the page directory causes")
+	}
+	report := filepath.Join(dir, "20261014T201500Z.md")
+	if _, err := os.Stat(report); err != nil {
+		t.Fatalf("the report was not published before the daily write failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, overseerSidecarName)); !os.IsNotExist(err) {
+		t.Fatalf("daily.json is there after the failed run: %v", err)
+	}
+	if err := os.Remove(filepath.Join(dir, overseerPageName)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The retry lands in the same slot, so it writes no report of its own.
+	w.now = overseerAt("2026-10-14T20:20:00Z")
+	if path, err := writeOverseerReport(w.town, 15*time.Minute, w.seams()); path != "" || err != nil {
+		t.Fatalf("the retry = %q, %v; want no report and no error", path, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, overseerSidecarName))
+	if err != nil {
+		t.Fatalf("the retry did not rebuild %s: %v", overseerSidecarName, err)
+	}
+	var side struct {
+		WrittenAt string `json:"written_at"`
+		Decisions int    `json:"decisions"`
+	}
+	if err := json.Unmarshal(raw, &side); err != nil {
+		t.Fatalf("daily.json: %v", err)
+	}
+	if want := "2026-10-14T20:15:00Z"; side.WrittenAt != want {
+		t.Errorf("written_at = %q, want the slot %q", side.WrittenAt, want)
+	}
+	// Two open questions are in the published report, so a sidecar that has
+	// them was built from the report file and not from a fresh digest.
+	if side.Decisions != 2 {
+		t.Errorf("decisions = %d, want the published report's 2 open questions", side.Decisions)
+	}
+	if _, err := os.Stat(filepath.Join(dir, overseerPageName)); err != nil {
+		t.Errorf("the retry did not write %s: %v", overseerPageName, err)
+	}
+}
+
+// A report at the slot's name that the patrol did not write is not summarized
+// into a clean-looking Birds row: the run refuses it and writes no daily
+// files, so the operator sees the failure rather than a report of no work.
+func TestOverseerReportRefusesToSummarizeAForeignReport(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	dir := townreport.ReportsDir(w.town)
+	writeOverseerFile(t, filepath.Join(dir, "20261014T201500Z.md"), "a note a human left\n")
+
+	path, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
+	if path != "" {
+		t.Errorf("wrote %s although the slot has a report", path)
+	}
+	if err == nil || !strings.Contains(err.Error(), "20261014T201500Z.md") || !strings.Contains(err.Error(), "none of the sections") {
+		t.Fatalf("write = %v, want a refusal naming the report and the sections it lacks", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, overseerSidecarName)); !os.IsNotExist(err) {
+		t.Errorf("daily.json is there after the refusal: %v", err)
+	}
 }
 
 // A question section the digest could not read is not a clean zero: the

@@ -69,6 +69,16 @@ const (
 	// error.
 	overseerSidecarMaxBytes = 16 << 10
 
+	// overseerSidecarDecisionItems, overseerSidecarDecisionRunes and
+	// overseerSidecarSummaryRunes bound what the sidecar carries to what the
+	// dashboard shows: birdDecisionItemsMax items of birdDecisionItemRunes
+	// each and a birdSummaryRunes summary. A longer list is cut there anyway,
+	// and an unbounded one pushed the whole sidecar past the cap, which left
+	// the Birds card stale instead of current (gt-ag7u0c rework).
+	overseerSidecarDecisionItems = 8
+	overseerSidecarDecisionRunes = 240
+	overseerSidecarSummaryRunes  = 1200
+
 	// overseerStaleCrewAge is how long a crew clone may go unfetched before the
 	// stale crew section lists it. It matches gt crew stale's day (gt-f1qng).
 	overseerStaleCrewAge = 24 * time.Hour
@@ -186,6 +196,14 @@ func writeOverseerReport(townRoot string, interval time.Duration, s *overseerRep
 			return "", fmt.Errorf("newest report %s is dated after now (%s), so no report is written until the clock reaches it",
 				newest.UTC().Format(overseerReportLayout), now.UTC().Format(overseerReportLayout))
 		}
+		// The slot already has a report, so this run writes none. Its daily
+		// files may still be missing: the run that published the report can
+		// have failed after the link and before the sidecar. Repair them from
+		// that report's own text, or the Birds card stays on the last sidecar
+		// it got until the next slot (gt-ag7u0c rework).
+		if err := refreshOverseerDaily(dir, newest); err != nil {
+			return "", err
+		}
 		return "", nil
 	}
 	since := prev
@@ -209,7 +227,7 @@ func writeOverseerReport(townRoot string, interval time.Duration, s *overseerRep
 	}
 	text = overseerReportClamp(text)
 
-	return writeOverseerReportFile(dir, slot, text, s.logf)
+	return writeOverseerReportFile(townRoot, dir, slot, text, s.logf)
 }
 
 // overseerReportPrevious reads the report files in dir: prev is the newest
@@ -262,19 +280,17 @@ func overseerReportClamp(text string) string {
 // a report the patrol did not write is never replaced, where the copy and the
 // two daily files are replaced by every run that writes a report. A latest.md
 // refresh that fails is logged and leaves the report write alone: the copy is a
-// convenience, the slot's report is the record. logf may be nil, and the
-// message is then dropped.
-func writeOverseerReportFile(dir string, slot time.Time, text string, logf func(string, ...any)) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("creating %s: %w", dir, err)
-	}
+// convenience, the slot's report is the record. base is the town root, the
+// directory the run may create levels below and the one above which symlinked
+// ancestors are the operator's own (macOS /var is one). logf may be nil, and
+// the message is then dropped.
+func writeOverseerReportFile(base, dir string, slot time.Time, text string, logf func(string, ...any)) (string, error) {
 	// The dashboard reads the bird directory and its reports directory only
 	// when both are real directories, so a page published through a symlink
-	// here would be one no row shows.
-	for _, real := range []string{filepath.Dir(dir), dir} {
-		if fi, err := os.Lstat(real); err != nil || !fi.IsDir() {
-			return "", fmt.Errorf("%s is not a real directory, and the dashboard reads no symlink", real)
-		}
+	// here would be one no row shows. The levels are created one at a time
+	// below base, each checked before anything is written under it.
+	if err := ensureOverseerDirectories(base, dir); err != nil {
+		return "", err
 	}
 	name := slot.UTC().Format(overseerReportLayout) + overseerReportExt
 	final := filepath.Join(dir, name)
@@ -301,6 +317,115 @@ func writeOverseerReportFile(dir string, slot time.Time, text string, logf func(
 		return "", err
 	}
 	return final, nil
+}
+
+// ensureOverseerDirectories creates dir and the levels below base that are
+// missing, one at a time, refusing any level that exists but is not a real
+// directory. os.MkdirAll is not used because it follows a symlinked level: a
+// symlinked bird directory would get its reports directory created inside the
+// link's target before any check could refuse the write.
+func ensureOverseerDirectories(base, dir string) error {
+	rel, err := filepath.Rel(base, dir)
+	if err != nil {
+		return fmt.Errorf("locating %s under %s: %w", dir, base, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("%s is not below the town root %s, so no report is written there", dir, base)
+	}
+	path := base
+	for _, level := range strings.Split(rel, string(filepath.Separator)) {
+		if level == "" || level == "." {
+			continue
+		}
+		path = filepath.Join(path, level)
+		// The parent was created or checked in the pass before, so a level is
+		// only ever made under a directory this loop has seen as real.
+		if err := ensureOverseerDirectory(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensureOverseerDirectory creates path when it is missing and leaves it alone
+// when it is a real directory. A name that exists as anything else is refused:
+// the dashboard reads the bird directory and its reports directory only when
+// both are real, so a file or a symlink there would hold a page no row shows.
+func ensureOverseerDirectory(path string) error {
+	err := os.Mkdir(path, 0o755)
+	if err == nil {
+		return nil
+	}
+	if !os.IsExist(err) {
+		return fmt.Errorf("creating %s: %w", path, err)
+	}
+	fi, lerr := os.Lstat(path)
+	if lerr != nil {
+		return fmt.Errorf("reading %s: %w", path, lerr)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%s is not a real directory, and the dashboard reads no symlink", path)
+	}
+	return nil
+}
+
+// refreshOverseerDaily writes the daily files for the report at the instant at
+// when the sidecar beside them is not for it, so a run in a slot whose daily
+// write failed repairs the pair rather than leaving the Birds card at the last
+// sidecar it got. The text is the report file's own, never the text a later
+// run would render, so the row and the page never describe different reads. A
+// file without any section the digest renders is refused: summarizing it would
+// publish a clean-looking row built from text no run read.
+func refreshOverseerDaily(dir string, at time.Time) error {
+	if overseerDailyIsCurrent(dir, at) {
+		return nil
+	}
+	name := at.UTC().Format(overseerReportLayout) + overseerReportExt
+	raw, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", name, err)
+	}
+	if !overseerIsDigest(string(raw)) {
+		return fmt.Errorf("%s carries none of the sections the digest writes, so no daily files are built from it", name)
+	}
+	return writeOverseerDaily(dir, at, string(raw))
+}
+
+// overseerDailyIsCurrent reports whether dir's daily.json is the sidecar for
+// the report at at: one whose written_at is that instant. A sidecar that is
+// missing, unreadable, not a valid instant, or written for another instant —
+// older, or from a clock that ran ahead — is not current: the caller writes one
+// from the report, which either repairs it or fails with the write's own error.
+func overseerDailyIsCurrent(dir string, at time.Time) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, overseerSidecarName))
+	if err != nil {
+		return false
+	}
+	var side struct {
+		WrittenAt string `json:"written_at"`
+	}
+	if err := json.Unmarshal(raw, &side); err != nil {
+		return false
+	}
+	written, err := time.Parse(time.RFC3339, side.WrittenAt)
+	if err != nil {
+		return false
+	}
+	return written.Equal(at)
+}
+
+// overseerIsDigest reports whether text carries a section the digest renders,
+// so a note at a slot's name that this patrol did not write is told apart from
+// a report whose daily files need rebuilding. One section is enough: a report
+// the size clamp cut short keeps the DONE it starts with.
+func overseerIsDigest(text string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		switch line {
+		case "DONE", "IN PROGRESS", "LEFT", "OPEN QUESTIONS":
+			return true
+		}
+	}
+	return false
 }
 
 // writeOverseerDaily writes the two files the dashboard's Birds card reads:
@@ -367,6 +492,10 @@ type overseerDailySidecar struct {
 	NeedsOperator bool                    `json:"needs_operator"`
 	Decisions     int                     `json:"decisions"`
 	DecisionItems []overseerDailyDecision `json:"decision_items,omitempty"`
+	// Truncated says part of what this file holds was cut to fit: the list is
+	// shorter than Decisions, a question was shortened, or the summary was.
+	// The count and the page beside it carry the rest.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // overseerDailyDecision is one open question as the sidecar carries it: the row
@@ -385,26 +514,61 @@ func overseerDailyFiles(bird string, slot time.Time, text string) (sidecar, page
 	counts := overseerDigestSectionCounts(text)
 	written := slot.UTC().Format(time.RFC3339)
 	title := "Overseer report " + written
+	summary, summaryCut := overseerCutRunes(overseerDailySummary(counts), overseerSidecarSummaryRunes)
+	items, itemsCut := overseerDailyDecisionItems(counts.questions)
 	side := overseerDailySidecar{
 		Bird:      bird,
 		WrittenAt: written,
 		Title:     title,
-		Summary:   overseerDailySummary(counts),
+		Summary:   summary,
 		// An open question is a decision waiting on the operator, and a
 		// question section the digest could not read is not an empty queue.
 		NeedsOperator: len(counts.questions) > 0 || counts.questionsUnavailable != "",
 		Decisions:     len(counts.questions),
+		DecisionItems: items,
+		Truncated:     summaryCut || itemsCut,
 	}
-	for _, q := range counts.questions {
-		side.DecisionItems = append(side.DecisionItems, overseerDailyDecision{Question: q})
-	}
-	// The sidecar is strings, a bool, an int and string slices, whose JSON
+	// The sidecar is strings, booleans, an int and string slices, whose JSON
 	// encoding cannot fail, so the error is dropped.
 	raw, _ := json.Marshal(side)
+	// The caps above bound runes, and JSON escaping can make the bytes longer
+	// than the runes. When the file is still over, the list is what gives: a
+	// row with fewer decisions is a smaller loss than a sidecar the dashboard
+	// refuses.
+	for len(raw) > overseerSidecarMaxBytes && len(side.DecisionItems) > 0 {
+		side.DecisionItems = side.DecisionItems[:len(side.DecisionItems)-1]
+		side.Truncated = true
+		raw, _ = json.Marshal(side)
+	}
 	if len(raw) > overseerSidecarMaxBytes {
 		return nil, nil, fmt.Errorf("%s is over the %d KiB the dashboard reads", overseerSidecarName, overseerSidecarMaxBytes>>10)
 	}
 	return raw, overseerDailyPage(title, text), nil
+}
+
+// overseerDailyDecisionItems cuts the digest's open questions to what the
+// dashboard's row shows and says whether anything was left out: at most
+// overseerSidecarDecisionItems questions of overseerSidecarDecisionRunes runes
+// each. The whole list stays in the report text and on the page beside the
+// sidecar.
+func overseerDailyDecisionItems(questions []string) (items []overseerDailyDecision, cut bool) {
+	for i, q := range questions {
+		if i == overseerSidecarDecisionItems {
+			return items, true
+		}
+		question, wasCut := overseerCutRunes(q, overseerSidecarDecisionRunes)
+		cut = cut || wasCut
+		items = append(items, overseerDailyDecision{Question: question})
+	}
+	return items, cut
+}
+
+// overseerCutRunes returns s cut to at most n runes and whether it was cut.
+func overseerCutRunes(s string, n int) (string, bool) {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n]), true
+	}
+	return s, false
 }
 
 // overseerDigestCounts is what the daily sidecar says about a report: the rows
