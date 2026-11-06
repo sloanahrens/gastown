@@ -377,10 +377,11 @@ func trimSelects(o TrimObject) bool {
 // stays the one string the shard gave; the helper decides whether a path may be removed.
 func removeContainer(image string, shards int, mounts []VolumeMount) Container {
 	return Container{
-		Name:    "trim",
-		Image:   image,
-		Command: []string{HelperPath, "trim-paths"},
-		Args:    []string{"--root", SeedCacheRoot, "--list", TrimListRoot, "--shards", strconv.Itoa(shards)},
+		Name:            "trim",
+		Image:           image,
+		ImagePullPolicy: PullPolicyFor(image),
+		Command:         []string{HelperPath, "trim-paths"},
+		Args:            []string{"--root", SeedCacheRoot, "--list", TrimListRoot, "--shards", strconv.Itoa(shards)},
 		// The shards are the whole input: a mount a pod cannot make leaves it waiting rather than
 		// trimming the part of the list that did arrive.
 		VolumeMounts: mounts,
@@ -393,9 +394,10 @@ func removeContainer(image string, shards int, mounts []VolumeMount) Container {
 // rather than a second set of rules the Job invents.
 func claimWriteContainer(image string, mounts []VolumeMount, capBytes int64, sandboxes int) Container {
 	return Container{
-		Name:    "plan",
-		Image:   image,
-		Command: []string{HelperPath, "trim-list-write"},
+		Name:            "plan",
+		Image:           image,
+		ImagePullPolicy: PullPolicyFor(image),
+		Command:         []string{HelperPath, "trim-list-write"},
 		Args: []string{
 			"--root", SeedCacheRoot,
 			"--cap-bytes", strconv.FormatInt(capBytes, 10),
@@ -411,9 +413,10 @@ func claimWriteContainer(image string, mounts []VolumeMount, capBytes int64, san
 // not there fails the run rather than trimming nothing.
 func claimRemoveContainer(image string, mounts []VolumeMount) Container {
 	return Container{
-		Name:    "trim",
-		Image:   image,
-		Command: []string{HelperPath, "trim-paths"},
+		Name:            "trim",
+		Image:           image,
+		ImagePullPolicy: PullPolicyFor(image),
+		Command:         []string{HelperPath, "trim-paths"},
 		Args: []string{
 			"--root", SeedCacheRoot,
 			"--list-file", TrimClaimListPath,

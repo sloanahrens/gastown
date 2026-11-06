@@ -1,8 +1,7 @@
 # Disk maintenance
 
 The town's sandbox registry holds a ~2 GiB polecat image per commit, and
-nothing deleted a tag from it until slice 1 of the disk-maintenance plan
-(`docs/plans/2026-10-28-disk-maintenance-design.md`, historical) shipped a Go
+nothing deleted a tag from it until the disk-maintenance work shipped a Go
 pruner for it. `internal/diskmaint` measures, plans and applies the deletions,
 writes a ledger line per apply, and refuses a plan it cannot justify from what
 it read.
@@ -139,6 +138,15 @@ window, and behind the same mode:
   polecat image's `trim-list` helper. Every pod that mounts the claim and has
   not finished counts as a sandbox; with no running one there is no listing,
   and the pass logs that it trims nothing rather than guessing one.
+- A removal list past the shard ceiling is carried in the claim itself, by one
+  Job whose init container plans the list and writes it there. The applied line
+  names the route: `route=claim`, or `route=shards n=<count>` for the ConfigMap
+  route. For that route the pass reads the claim's free space with `df -Pk` in
+  the same pod the listing came from. A list larger than that room is refused
+  before anything is applied, counts as a failed run, and is retried fifteen
+  minutes later. A `df` that cannot answer leaves the room unknown: the trim
+  still runs, and the pass logs `free space unknown: <reason>` at most once an
+  hour.
 - `dry_run` logs the Job and its shard ConfigMaps; `apply` deletes what an
   earlier run left behind, applies the shards before the Job that mounts them,
   and deletes the shards once the Job has finished. An earlier Job that is

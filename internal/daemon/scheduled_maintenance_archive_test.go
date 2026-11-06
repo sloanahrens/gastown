@@ -2746,7 +2746,8 @@ func TestArchiveEventsRefusesAnUndateableArchivedPage(t *testing.T) {
 // TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch: one deadline
 // bounds every database's extra batches. Once the first database's second
 // batch ends past the budget it takes no third one, and the next database still
-// takes its first (gt-o4sk8.1).
+// takes its first. Both stop with history behind, so both are marked unarchived
+// and their gc is skipped (gt-o4sk8.1, gt-s5edka).
 func TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
@@ -2781,8 +2782,8 @@ func TestArchiveLoopStopsAtTheBudgetButEveryDatabaseGetsABatch(t *testing.T) {
 
 	out, unarchived, _ := d.maintenanceArchive([]string{"gt", "hq"})
 
-	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
-		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	if out.outcome != gcOutcomeCompleted || !unarchived["gt"] || !unarchived["hq"] || len(unarchived) != 2 {
+		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with both databases marked: both stopped behind", out, unarchived)
 	}
 	if reads["gt"] != 2 {
 		t.Errorf("gt read %d time(s), want 2: the deadline ends its loop after the second batch", reads["gt"])
@@ -2921,7 +2922,8 @@ func TestArchiveLoopStopsWhenABatchFailsMidLoop(t *testing.T) {
 
 // TestArchiveLoopHasAnIterationBound: a read that never runs dry ends at the
 // per-cycle batch bound even when the injected clock never reaches the
-// deadline, and says so (gt-o4sk8.1).
+// deadline, says so, and marks the database unarchived so its gc is skipped
+// (gt-o4sk8.1, gt-s5edka).
 func TestArchiveLoopHasAnIterationBound(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
@@ -2945,8 +2947,8 @@ func TestArchiveLoopHasAnIterationBound(t *testing.T) {
 
 	out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
 
-	if out.outcome != gcOutcomeCompleted || len(unarchived) != 0 {
-		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with none", out, unarchived)
+	if out.outcome != gcOutcomeCompleted || !unarchived["gt"] || len(unarchived) != 1 {
+		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with gt marked: it stopped behind", out, unarchived)
 	}
 	if reads != maintenanceArchiveMaxBatchesPerExport {
 		t.Errorf("dolt_log read %d time(s), want the %d-batch per-cycle bound", reads, maintenanceArchiveMaxBatchesPerExport)
@@ -2954,6 +2956,281 @@ func TestArchiveLoopHasAnIterationBound(t *testing.T) {
 	if !strings.Contains(logs.String(), "per-cycle bound") {
 		t.Errorf("log does not report the per-cycle bound:\n%s", logs.String())
 	}
+}
+
+// TestMaintenanceArchiveBudgetStopSkipsGcOfThatDatabase: a database whose
+// commit export stops at the archive_budget after a full batch may still be
+// behind, so it is marked unarchived, its gc is skipped, and the stop line
+// names the export and says why. A database that finished in the same run
+// still gets its gc (gt-s5edka).
+func TestMaintenanceArchiveBudgetStopSkipsGcOfThatDatabase(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}, "hq": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 5
+	sm := d.patrolConfig.Patrols.ScheduledMaintenance
+	sm.ArchiveCommitLimit = &limit
+	sm.ArchiveBudget = "10m"
+	clock := gcTestNow
+	d.maint.now = func() time.Time { return clock }
+	withEventsFake(d, nil, nil, nil)
+	open := archiveFakeOpener(t, &archiveFakeServer{
+		columns: []string{"commit_hash", "committer", "date", "message"},
+		rows:    archiveCommitRows(20, gcTestNow),
+	})
+	reads := map[string]int{}
+	d.maint.archiveRead = func(ctx context.Context, dm *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+		reads[db]++
+		if db == "hq" {
+			return nil, nil // caught up: a short batch
+		}
+		commits, err := dm.doltArchiveLog(ctx, db, archived)
+		if err != nil {
+			return nil, err
+		}
+		if reads[db] == 1 {
+			// The first batch was full and the budget has run out, so no
+			// second batch starts.
+			clock = gcTestNow.Add(11 * time.Minute)
+		}
+		return commits, nil
+	}
+	d.maint.archiveOpenDB = open
+
+	d.runScheduledMaintenance()
+
+	if reads["gt"] != 1 {
+		t.Errorf("gt dolt_log read %d time(s), want 1: the budget ends its loop after the first batch", reads["gt"])
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %v, want only hq: gt's archive is still behind", f.gcCalls)
+	}
+	want := "gt dolt_log: stopped at the cycle's 10m0s archive_budget, still behind — its gc is skipped this cycle because the archive did not finish"
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("log does not report the budget stop and its skipped gc %q:\n%s", want, logs.String())
+	}
+	if len(f.escalations) != 0 {
+		t.Errorf("escalations = %v, want none: a budget stop is not a failure", f.escalations)
+	}
+}
+
+// TestMaintenanceArchiveBatchCapSkipsGcOfThatDatabase: a database whose export
+// ends at maintenanceArchiveMaxBatchesPerExport is marked unarchived, its gc is
+// skipped, and the stop line names the export and says why (gt-s5edka).
+func TestMaintenanceArchiveBatchCapSkipsGcOfThatDatabase(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}, "hq": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 1
+	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
+	d.maint.now = func() time.Time { return gcTestNow } // never reaches the deadline
+	withEventsFake(d, nil, nil, nil)
+	// A no-op append keeps every batch on the loop: the archive file never
+	// grows, so each read serves a fresh commit.
+	d.maint.archiveAppend = func(string, []string, [][]string) error { return nil }
+	reads := map[string]int{}
+	d.maint.archiveRead = func(_ context.Context, _ *Daemon, db string, _ map[string]struct{}) ([]archiveCommit, error) {
+		reads[db]++
+		if db == "hq" {
+			return nil, nil // caught up: a short batch
+		}
+		return []archiveCommit{{
+			Hash: fmt.Sprintf("h%06d", reads[db]), Committer: "c", Date: gcTestNow.Add(time.Duration(reads[db]) * time.Second), Message: "m",
+		}}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	if reads["gt"] != maintenanceArchiveMaxBatchesPerExport {
+		t.Errorf("gt dolt_log read %d time(s), want the %d-batch per-cycle bound", reads["gt"], maintenanceArchiveMaxBatchesPerExport)
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %v, want only hq: gt stopped at the batch bound", f.gcCalls)
+	}
+	want := fmt.Sprintf("gt dolt_log: stopped at the %d-batch per-cycle bound, still behind — its gc is skipped this cycle because the archive did not finish", maintenanceArchiveMaxBatchesPerExport)
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("log does not report the batch-cap stop and its skipped gc %q:\n%s", want, logs.String())
+	}
+	if len(f.escalations) != 0 {
+		t.Errorf("escalations = %v, want none: a batch-cap stop is not a failure", f.escalations)
+	}
+}
+
+// TestMaintenanceArchiveEventsStopSkipsGcOfThatDatabase: an events export that
+// stops at the archive_budget counts the same as a commit export's — the
+// database is marked unarchived and its gc is skipped (gt-s5edka).
+func TestMaintenanceArchiveEventsStopSkipsGcOfThatDatabase(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}, "hq": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	limit := 5
+	sm := d.patrolConfig.Patrols.ScheduledMaintenance
+	sm.ArchiveCommitLimit = &limit
+	sm.ArchiveEventsLimit = &limit
+	sm.ArchiveBudget = "10m"
+	clock := gcTestNow
+	d.maint.now = func() time.Time { return clock }
+	// Commits are caught up, so only the events export can stop.
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		return nil, nil
+	}
+	columns := []string{"id", "created_at"}
+	reads := 0
+	d.maint.archiveEventsRead = func(_ context.Context, _ *Daemon, db, _ string) (archiveEvents, error) {
+		if db == "hq" {
+			return archiveEvents{}, nil // caught up
+		}
+		reads++
+		rows := make([][]string, 0, limit)
+		for i := 0; i < limit; i++ {
+			n := reads*limit + i
+			rows = append(rows, []string{fmt.Sprintf("e%06d", n), gcTestNow.Add(time.Duration(n) * time.Second).Format("2006-01-02 15:04:05")})
+		}
+		if reads == 1 {
+			// The first page was full and the budget has run out, so no
+			// second page is read.
+			clock = gcTestNow.Add(11 * time.Minute)
+		}
+		return archiveEvents{Columns: columns, Rows: rows}, nil
+	}
+
+	d.runScheduledMaintenance()
+
+	if reads != 1 {
+		t.Errorf("gt events read %d time(s), want 1: the budget ends its loop after the first page", reads)
+	}
+	if got := strings.Join(f.gcCalls, ","); got != "hq" {
+		t.Errorf("gc calls = %v, want only hq: gt's events archive is still behind", f.gcCalls)
+	}
+	want := "gt events: stopped at the cycle's 10m0s archive_budget, still behind — its gc is skipped this cycle because the archive did not finish"
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("log does not report the events budget stop and its skipped gc %q:\n%s", want, logs.String())
+	}
+	if len(f.escalations) != 0 {
+		t.Errorf("escalations = %v, want none: an events budget stop is not a failure", f.escalations)
+	}
+}
+
+// TestMaintenanceArchiveCaughtUpDatabasesStillGc: a database whose batch came
+// back short finished, so it is not marked unarchived and its gc runs in the
+// same cycle (gt-s5edka).
+func TestMaintenanceArchiveCaughtUpDatabasesStillGc(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+
+	commits := []archiveCommit{
+		{Hash: "h1", Committer: "c", Date: gcTestNow.Add(-time.Hour), Message: "first"},
+		{Hash: "h2", Committer: "c", Date: gcTestNow.Add(-time.Minute), Message: "second"},
+	}
+	withArchiveFakes(d, f, map[string][]archiveCommit{"gt": commits}, nil)
+
+	d.runScheduledMaintenance()
+
+	if got := strings.Join(f.gcCalls, ","); got != "gt" {
+		t.Errorf("gc calls = %v, want gt: its short batch means it is not marked unarchived", f.gcCalls)
+	}
+	if len(f.escalations) != 0 {
+		t.Errorf("escalations = %v, want none", f.escalations)
+	}
+}
+
+// TestMaintenanceArchiveStopRaisesNoAttentionItem: a stop leaves the cycle's
+// outcome as a clean run's and raises no attention item, while an export that
+// fails still raises exactly one item and keeps its watermark (gt-s5edka).
+func TestMaintenanceArchiveStopRaisesNoAttentionItem(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a stop raises nothing", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		f := withGCFakes(t, d)
+		dir := t.TempDir()
+		d.patrolConfig = archiveConfig(dir)
+		limit := 5
+		sm := d.patrolConfig.Patrols.ScheduledMaintenance
+		sm.ArchiveCommitLimit = &limit
+		sm.ArchiveBudget = "10m"
+		clock := gcTestNow
+		d.maint.now = func() time.Time { return clock }
+		withEventsFake(d, nil, nil, nil)
+		open := archiveFakeOpener(t, &archiveFakeServer{
+			columns: []string{"commit_hash", "committer", "date", "message"},
+			rows:    archiveCommitRows(20, gcTestNow),
+		})
+		d.maint.archiveOpenDB = open
+		reads := 0
+		d.maint.archiveRead = func(ctx context.Context, dm *Daemon, db string, archived map[string]struct{}) ([]archiveCommit, error) {
+			reads++
+			commits, err := dm.doltArchiveLog(ctx, db, archived)
+			if err != nil {
+				return nil, err
+			}
+			if reads == 1 {
+				clock = gcTestNow.Add(11 * time.Minute)
+			}
+			return commits, nil
+		}
+
+		out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+
+		if out.outcome != gcOutcomeCompleted {
+			t.Errorf("outcome = %v, want completed: a stop is not a failure", out.outcome)
+		}
+		if !unarchived["gt"] {
+			t.Errorf("unarchived = %v, want gt marked: it stopped behind", unarchived)
+		}
+		if len(f.escalations) != 0 {
+			t.Errorf("escalations = %v, want none: a stop raises no attention item", f.escalations)
+		}
+	})
+
+	t.Run("a failure still raises one", func(t *testing.T) {
+		t.Parallel()
+		d, _ := gcTestDaemon(t)
+		f := withGCFakes(t, d)
+		dir := t.TempDir()
+		d.patrolConfig = archiveConfig(dir)
+		withEventsFake(d, nil, nil, nil)
+		wm := ArchiveWatermark{Date: gcTestNow.Add(-time.Hour), Hashes: []string{"kept"}}
+		if err := recordArchiveWatermark(d.config.TownRoot, "gt", wm); err != nil {
+			t.Fatalf("seeding the watermark: %v", err)
+		}
+		d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+			return nil, errors.New("the server went away")
+		}
+
+		out, unarchived, _ := d.maintenanceArchive([]string{"gt"})
+
+		if out.outcome != gcOutcomeCompleted {
+			t.Errorf("outcome = %v, want completed: an export failure does not turn the cycle failed", out.outcome)
+		}
+		if !unarchived["gt"] {
+			t.Errorf("unarchived = %v, want gt marked: its export failed", unarchived)
+		}
+		if len(f.escalations) != 1 {
+			t.Errorf("escalations = %v, want exactly one item for the failed export", f.escalations)
+		}
+		st, err := loadMaintenanceGCState(d.config.TownRoot)
+		if err != nil {
+			t.Fatalf("loading state: %v", err)
+		}
+		if got := st.ArchiveWatermarks["gt"]; !got.Date.Equal(wm.Date) || !slices.Equal(got.Hashes, wm.Hashes) {
+			t.Errorf("watermark = %+v, want the seeded one kept", got)
+		}
+	})
 }
 
 // TestArchiveBudgetSetting: archive_budget unset reads ten minutes and "10m"

@@ -1475,3 +1475,49 @@ func TestLivePolecatNameIsEmptyWhenNoOneNamesTheBead(t *testing.T) {
 		t.Errorf("By = %q, want empty", got)
 	}
 }
+
+// TestDashboardLandingsNoRowAfterNow builds the Landings table from a log
+// holding the container's UTC region: read as local time those rejections are
+// six hours in the future, so the table would sort them above the true newest
+// event. The parser follows the container cutover, and the guard catches what
+// a tail read could not see.
+func TestDashboardLandingsNoRowAfterNow(t *testing.T) {
+	t.Parallel()
+	cst := time.FixedZone("CST", -6*3600)
+	now := time.Date(2026, 11, 5, 22, 46, 0, 0, time.UTC) // 16:46 CST
+	logPath := omTestLogFile(t,
+		// The container cutover: these lines are UTC, and the owner line makes
+		// the start sequence and every line after it UTC.
+		"2026/11/04 18:08:19 Loaded patrol config from /gt/settings/config.json",
+		"2026/11/04 18:09:20 Loaded patrol config from /gt/settings/config.json",
+		"2026/11/04 18:10:02 Daemon starting (PID 1)",
+		"2026/11/04 18:10:02 Daemon owner: container \"gt-daemon-1\"",
+		// Older than the 24 hour window at its true instant, but inside it if
+		// read as local time: the guard cannot fix this one.
+		"2026/11/04 22:34:05 landing_worker: [land] gt-old: rejected (review): om requested changes (score 0.50, 3 finding(s))",
+		"2026/11/05 22:34:05 landing_worker: [land] gt-new: rejected (review): om requested changes (score 0.40, 2 finding(s))",
+	)
+	r := &omReader{logPath: logPath, loc: cst, now: func() time.Time { return now }}
+	if err := r.scanLog(); err != nil {
+		t.Fatalf("scanLog: %v", err)
+	}
+	recs := []omRecord{{Record: landings.Record{
+		Bead: "gt-l", Rig: "gastown", Branch: "polecat/coma/gt-l+abc", LandedCommit: "0123456789abcdef",
+		OMVerdict: "approve", LandedAt: time.Date(2026, 11, 5, 22, 40, 0, 0, time.UTC),
+	}}}
+	rows := buildRecentLandings(now, recs, nil, r.rejects, nil, nil, nil, nil, nil, nil, nil, 30)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %+v, want the landed record and the rejection inside the day", rows)
+	}
+	if rows[0].Bead != "gt-l" || rows[0].Outcome != "landed" {
+		t.Errorf("rows[0] = %+v, want the newest event (the landing at 22:40)", rows[0])
+	}
+	if rows[1].Bead != "gt-new" || rows[1].Outcome != "rejected" {
+		t.Errorf("rows[1] = %+v, want gt-new rejected at 22:34:05", rows[1])
+	}
+	for _, row := range rows {
+		if row.At.After(now) {
+			t.Errorf("%s at %v is after now %v", row.Bead, row.At.UTC(), now)
+		}
+	}
+}

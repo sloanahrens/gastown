@@ -9,14 +9,13 @@
 # decides it (gt-0f305).
 #
 # The routes are the seat's own: issue reads and writes, comments, dependencies,
-# the board reads, claim, release, batch, events and whoami
-# (docs/research/tracker/K1b-seat-token-as-provider-placeholder.md, question 3).
+# the board reads, claim, release, batch, events and whoami.
 # Delete and transfer are left out too (gt-zbpf0): a bead delete is town-side,
 # and no production seat calls transfer. Reassignment is holder-only on the
 # server, and a rule matches method and path, not the body, so no line here can
-# refuse it. The reassignment paragraph in the K1b doc and the store
-# (tracker/store/postgres_update.go) hold the rule and what stays open.
-# The admin routes, and the four routes the doc marks not verified, are left out
+# refuse it. The store (tracker/store/postgres_update.go) holds the rule and
+# what stays open.
+# The admin routes, and the four routes the research marks not verified, are left out
 # so a seat token that was ever minted with admin scope still could not reach
 # them from a sandbox. A grep of the four found no polecat caller: stats and
 # config get are town-side (gt tracker status, the events journal check, bd admin

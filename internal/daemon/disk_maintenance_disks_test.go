@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -348,7 +349,7 @@ func TestDiskMaintenanceProductionDFVectors(t *testing.T) {
 		{"df", "-P", "/"},
 		{"kubectl", "--kubeconfig", kubeconfig, "get", "nodes", "-o", "name"},
 		{"kubectl", "--kubeconfig", kubeconfig, "get", "--raw", "/api/v1/nodes/kind-worker/proxy/stats/summary"},
-		{"docker", "exec", "forgejo-runner-daemon-1", "df", "-P", "/"},
+		{"docker", "exec", hostprobe.DockerDiskContainer, "df", "-P", "/"},
 	}
 	if len(ran) != len(want) {
 		t.Fatalf("ran %v, want the %d disks' df commands", ran, len(want))
@@ -665,5 +666,284 @@ func TestDiskMaintHostDisksUnknownIsNotAnError(t *testing.T) {
 				t.Fatalf("planned %d times, want the pass to plan without the host disks", len(f.target.policies))
 			}
 		})
+	}
+}
+
+// TestDiskMaintContainerModeRunsNoHostEngineCommand: a reading pass in
+// container mode never asks the host's container engine client or its VM tool
+// for a disk. The Mac and Docker Desktop disks come from the host agent's probe
+// file and the sandbox disk from the cluster's node stats, so a fresh probe and
+// a fake kubectl alone read all three.
+func TestDiskMaintContainerModeRunsNoHostEngineCommand(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	d.containerMode = true
+	d.diskMaint.readDisks = nil // the production read
+	d.diskMaint.dfReaders = nil
+	writeDiskMaintProbe(t, d.config.TownRoot, hostprobe.Probes{
+		At:         diskMaintNow,
+		Disk:       hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 62}},
+		DockerDisk: hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 71}},
+	})
+
+	var ran []string
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		program := filepath.Base(cmd.Args[0])
+		ran = append(ran, program)
+		switch program {
+		case "docker", "colima", "limactl":
+			return nil, []byte(program + " is not available in the town's container"),
+				fmt.Errorf("%s must not run in container mode", program)
+		case "kubectl":
+			switch {
+			case len(cmd.Args) > 4 && cmd.Args[3] == "get" && cmd.Args[4] == "nodes":
+				return []byte("node/kind-worker\n"), nil, nil
+			case len(cmd.Args) > 4 && cmd.Args[3] == "get" && cmd.Args[4] == "--raw":
+				return []byte(diskMaintNodeStats(120000)), nil, nil
+			}
+		}
+		return nil, []byte("unexpected command"), fmt.Errorf("unexpected command %q", cmd.Args)
+	}
+
+	readings := d.diskMaintenanceSeams().readDisks(context.Background())
+
+	want := map[string]float64{"mac": 62, "colima": 75, "docker-desktop": 71}
+	if len(readings) != len(want) {
+		t.Fatalf("read %d disks (%+v), want %d", len(readings), readings, len(want))
+	}
+	for _, r := range readings {
+		pct, ok := want[r.Name]
+		if !ok {
+			t.Errorf("read an unexpected disk %q", r.Name)
+			continue
+		}
+		if r.Err != nil {
+			t.Errorf("disk %s = error %v, want %.0f%%", r.Name, r.Err, pct)
+			continue
+		}
+		if r.UsedPct != pct {
+			t.Errorf("disk %s = %.0f%%, want %.0f%%", r.Name, r.UsedPct, pct)
+		}
+	}
+	for _, program := range ran {
+		if program != "kubectl" {
+			t.Errorf("the reading pass ran %s; in container mode only the cluster's kubectl reads a disk", program)
+		}
+	}
+}
+
+// TestDiskMaintHostModeEngineDiskUsesTheProbeContainer: outside container mode
+// the engine's disk is read by exec'ing into the container the host agent's
+// probe measures, named once in hostprobe.
+func TestDiskMaintHostModeEngineDiskUsesTheProbeContainer(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	d.diskMaint.readDisks = nil // the production read
+	d.diskMaint.dfReaders = nil
+
+	var dockerArgv []string
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		switch filepath.Base(cmd.Args[0]) {
+		case "docker":
+			dockerArgv = slices.Clone(cmd.Args)
+			return []byte(diskMaintHealthyDF), nil, nil
+		case "kubectl":
+			if len(cmd.Args) > 4 && cmd.Args[3] == "get" && cmd.Args[4] == "nodes" {
+				return []byte("node/kind-worker\n"), nil, nil
+			}
+			return []byte(diskMaintNodeStats(16000)), nil, nil
+		}
+		return []byte(diskMaintHealthyDF), nil, nil
+	}
+
+	d.diskMaintenanceSeams().readDisks(context.Background())
+
+	want := []string{"docker", "exec", hostprobe.DockerDiskContainer, "df", "-P", "/"}
+	if !slices.Equal(dockerArgv, want) {
+		t.Fatalf("the engine disk read ran %q, want %q", dockerArgv, want)
+	}
+}
+
+// TestRunnerDefaultNamesTheProbeContainer: the patrol's non-container reading
+// of the Docker Desktop disk execs into the container the host agent's probe
+// measures, named once in hostprobe. It runs the reader diskMaintDisks builds,
+// so a default changed at the call site is caught.
+func TestRunnerDefaultNamesTheProbeContainer(t *testing.T) {
+	t.Parallel()
+	d, _, _ := diskMaintTestDaemon(t)
+	var ran []string
+	d.execCmd = func(cmd *exec.Cmd) ([]byte, []byte, error) {
+		ran = slices.Clone(cmd.Args)
+		return []byte(diskMaintHealthyDF), nil, nil
+	}
+
+	for _, disk := range d.diskMaintDisks(filepath.Join("scratch", "kubeconfig")) {
+		if disk.name != diskMaintDiskDockerDesktop {
+			continue
+		}
+		if _, err := disk.df(context.Background()); err != nil {
+			t.Fatalf("read the Docker Desktop disk: %v", err)
+		}
+		want := []string{"docker", "exec", hostprobe.DockerDiskContainer, "df", "-P", "/"}
+		if !slices.Equal(ran, want) {
+			t.Fatalf("the Docker Desktop read ran %q, want %q", ran, want)
+		}
+		if hostprobe.DockerDiskContainer == "forgejo-runner-daemon-1" {
+			t.Fatal("hostprobe.DockerDiskContainer is the retired runner container")
+		}
+		return
+	}
+	t.Fatal("the patrol has no Docker Desktop disk")
+}
+
+// TestRetiredRunnerNameIsGoneFromCode: the retired Docker Forgejo runner is
+// named in no production file under internal, cmd, deploy or docs, so a default
+// added outside the files this bead edited cannot hide. The whole tree is
+// walked; docs/plans keeps the plan history and is exempt by name.
+func TestRetiredRunnerNameIsGoneFromCode(t *testing.T) {
+	t.Parallel()
+	const retired = "forgejo-runner-daemon-1"
+	root := filepath.Join("..", "..")
+	exempt := filepath.Join(root, "docs", "plans")
+	scanned := 0
+	for _, dir := range []string{"internal", "cmd", "deploy", "docs"} {
+		base := filepath.Join(root, dir)
+		err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if entry.IsDir() {
+				if path == exempt {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			scanned++
+			if strings.Contains(string(data), retired) {
+				t.Errorf("%s names the retired container %s", path, retired)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", base, err)
+		}
+	}
+	if scanned < 100 {
+		t.Fatalf("scanned %d files; the walk is not rooted at the repository", scanned)
+	}
+}
+
+// diskMaintEscalationsFor counts the escalations the patrol raised under key,
+// so a test can tell one firing from a repeat under the same fingerprint.
+func diskMaintEscalationsFor(rec *notifyfake.Recorder, key string) int {
+	n := 0
+	for _, c := range rec.Escalations() {
+		if c.Escalation.Fingerprint == key {
+			n++
+		}
+	}
+	return n
+}
+
+// TestDiskMaintUnreadableIsRaisedOncePerOutage: a disk that stays unreadable
+// raises one alert, repeats it in the log at most once an hour, and clears on
+// the first pass that reads it; a later outage raises again.
+func TestDiskMaintUnreadableIsRaisedOncePerOutage(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	// A target with its own cadence makes every pass due, so the outage is
+	// observed pass by pass rather than once a day.
+	d.patrolConfig = diskMaintCadence("registry", "5m")
+	now := diskMaintNow
+	d.diskMaint.now = func() time.Time { return now }
+	unreadable := func() []disks.Reading {
+		return []disks.Reading{
+			{Name: "mac", UsedPct: 40},
+			{Name: "colima", Err: errors.New("the sandbox cluster cannot be reached")},
+			{Name: "docker-desktop", UsedPct: 40},
+		}
+	}
+	f.readings = unreadable()
+
+	// Five passes inside the first hour: the alert opens once and the log says
+	// nothing more, because the raise is the notice.
+	for i := 0; i < 5; i++ {
+		d.runDiskMaintenance()
+		now = now.Add(5 * time.Minute)
+	}
+	if got := diskMaintEscalationsFor(f.notify, "diskmaint:colima:unreadable"); got != 1 {
+		t.Fatalf("raised the unreadable alert %d times in the first hour, want 1", got)
+	}
+	if got := strings.Count(logs.String(), "is still unreadable"); got != 0 {
+		t.Errorf("logged the still-unreadable line %d times inside the first hour, want none: %q", got, logs.String())
+	}
+
+	// An hour after the raise, one reminder line; five minutes later, none.
+	now = diskMaintNow.Add(diskMaintStillUnreadableInterval)
+	d.runDiskMaintenance()
+	if got := strings.Count(logs.String(), "is still unreadable"); got != 1 {
+		t.Fatalf("logged the still-unreadable line %d times an hour into the outage, want 1: %q", got, logs.String())
+	}
+	now = now.Add(5 * time.Minute)
+	d.runDiskMaintenance()
+	if got := strings.Count(logs.String(), "is still unreadable"); got != 1 {
+		t.Fatalf("logged the still-unreadable line %d times five minutes later, want the hourly line once: %q", got, logs.String())
+	}
+	if got := diskMaintEscalationsFor(f.notify, "diskmaint:colima:unreadable"); got != 1 {
+		t.Fatalf("raised the unreadable alert %d times while it stayed open, want 1", got)
+	}
+
+	// The first pass that reads the disk clears the alert.
+	now = now.Add(5 * time.Minute)
+	f.readings = []disks.Reading{
+		{Name: "mac", UsedPct: 40},
+		{Name: "colima", UsedPct: 40},
+		{Name: "docker-desktop", UsedPct: 40},
+	}
+	d.runDiskMaintenance()
+	if diskMaintAlertIsOpen(f.notify, "diskmaint:colima:unreadable") {
+		t.Error("the unreadable alert is still open after a pass read the disk")
+	}
+
+	// A second outage is a new outage, so it raises the alert again.
+	now = now.Add(5 * time.Minute)
+	f.readings = unreadable()
+	d.runDiskMaintenance()
+	if got := diskMaintEscalationsFor(f.notify, "diskmaint:colima:unreadable"); got != 2 {
+		t.Errorf("raised the unreadable alert %d times across two outages, want 2", got)
+	}
+}
+
+// TestDiskMaintUnreadableFailedRaiseLogsTheReset: when the notifier refuses an
+// unreadable alert's raise, the next pass retries it and restarts the hourly
+// clock. That reset pushes the reminder out, so it gets its own line rather
+// than making the outage quieter each time the raise fails.
+func TestDiskMaintUnreadableFailedRaiseLogsTheReset(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	clk := newFixedClock()
+	d.clock = clk // the refused raise retries on this clock, so the test drives it
+	d.patrolConfig = diskMaintCadence("registry", "5m")
+	now := diskMaintNow
+	d.diskMaint.now = func() time.Time { return now }
+	f.readings = []disks.Reading{{Name: "colima", Err: errors.New("ssh: i/o timeout")}}
+	f.notify.Fail(notifyfake.KindEscalate, errors.New("the notifier is down"))
+
+	runOnClock(t, clk, time.Second, d.runDiskMaintenance)
+	if got := strings.Count(logs.String(), "alert raised again"); got != 0 {
+		t.Fatalf("logged the reset %d times on the first attempt, want none: %q", got, logs.String())
+	}
+
+	now = now.Add(5 * time.Minute)
+	runOnClock(t, clk, time.Second, d.runDiskMaintenance)
+	if got := strings.Count(logs.String(), "alert raised again"); got != 1 {
+		t.Fatalf("logged the reset %d times after the refused raise was retried, want 1: %q", got, logs.String())
 	}
 }

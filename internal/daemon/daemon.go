@@ -237,6 +237,10 @@ type Daemon struct {
 	// hostProbes replaces the production reads of the attention host
 	// collectors (attention_host.go); nil is production.
 	hostProbes hostProbes
+	// forgejoBaseURL replaces the production townForgejoBaseURL source of the
+	// attention host collectors; nil is production. Tests set it so an
+	// attentionSources built over a daemon never reads a rig's settings.
+	forgejoBaseURL func() (string, error)
 
 	// deployW is the deploy watch (deploy_watch.go), stored once it starts.
 	// Its collector runs on the heartbeat goroutine and the watch itself on
@@ -319,6 +323,10 @@ type Daemon struct {
 	// diskMaintAlerts is the set of disk alert keys the patrol has open: it
 	// alerts a disk once, and a clear needs a reading that says so.
 	diskMaintAlerts diskMaintAlerts
+	// cacheTrimNoOp is the claims a completed cache trim left over twice the
+	// cap, which the attention queue raises until a later trim's reading finds
+	// them under it (gt-gg9hv.46).
+	cacheTrimNoOp cacheTrimNoOp
 
 	// hmSync replaces the hm_sync patrol's clock and run seam in tests (see
 	// hmSyncSeams); the zero value is production.
@@ -1124,6 +1132,14 @@ type Daemon struct {
 	// tierSweepStuckLoggedAt is the UnixNano time the stuck line last ran, 0
 	// before the first, so the line repeats at most once an hour.
 	tierSweepStuckLoggedAt atomic.Int64
+	// tierSweepDeclineKey names the capacity decline the job last logged, and
+	// tierSweepDeclineAt when: a reason that stands is one line an hour while
+	// the deferred cycle retries on every heartbeat, and the key ignores the
+	// figures, which move as the node's pods come and go
+	// (tier_sweep.go, gt-gg9hv.38). Only the job's single-flight cycle writes
+	// them.
+	tierSweepDeclineKey string
+	tierSweepDeclineAt  time.Time
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams

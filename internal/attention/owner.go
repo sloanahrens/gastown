@@ -40,12 +40,15 @@ var ruleOwners = map[string]Owner{
 	RuleQuestionNew:      OwnerOperator,
 	RuleQuestionStale:    OwnerOperator,
 	RuleQuestionAnswered: OwnerOverseer,
-	// The physical machine: no agent frees disk or memory.
-	RuleHostDiskWarn:   OwnerOperator,
-	RuleHostDiskCrit:   OwnerOperator,
-	RuleHostMemLow:     OwnerOperator,
-	RuleHostDockerDown: OwnerOperator,
-	RuleHostProbe:      OwnerOperator,
+	// The physical machine, and the services outside the town that run on it:
+	// no agent frees disk or memory, or restarts the stack containers or the
+	// Forgejo instance every landing waits on.
+	RuleHostDiskWarn:    OwnerOperator,
+	RuleHostDiskCrit:    OwnerOperator,
+	RuleHostMemLow:      OwnerOperator,
+	RuleHostDockerDown:  OwnerOperator,
+	RuleHostForgejoDown: OwnerOperator,
+	RuleHostProbe:       OwnerOperator,
 	// A silent overseer cannot wake itself; the daemon pushes to the human
 	// instead (gt-3a6h6).
 	RuleOverseerSilent: OwnerOperator,
@@ -91,6 +94,10 @@ var ruleOwners = map[string]Owner{
 	// name: the overseer looks at the workflow before a person is woken
 	// (gt-gg9hv.7.1).
 	RulePostLandUnknown: OwnerOverseer,
+	// A trim that left its claim over the cap is the town's own maintenance to
+	// look at: the overseer chases the image or the Job, and the person hears
+	// about it only if the disk itself fills.
+	RuleCacheTrimNoOp: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

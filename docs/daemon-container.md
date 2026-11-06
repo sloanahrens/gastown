@@ -1,13 +1,10 @@
 # Daemon in a container: runbooks
 
 The town's daemon can run in a container on Docker Desktop instead of under
-launchd. The design is in
-[plans/2026-10-28-daemon-container-design.md](plans/2026-10-28-daemon-container-design.md)
-and the tasks in
-[plans/2026-10-28-daemon-container-plan.md](plans/2026-10-28-daemon-container-plan.md).
+launchd. The design and plan notes are in git history (see CHANGELOG).
 This page is the operator's side: the ladder of live checks, one section per
 rung. Run a rung only after the one before it is recorded green. The list
-below is a summary; the design doc is authoritative.
+below is a summary.
 
 - L1, below: a scratch town's daemon starts in a container and stays healthy for
   30 minutes. Nothing in it touches the live daemon.
@@ -86,46 +83,56 @@ put nothing else here.
 ```
 cd <scratch-parent>
 gt daemon image --rev <rev> --out <scratch-parent>/build --gt-src <gt checkout> \
-  --bd-src <beads checkout> --bd-commit <beads commit> --om-src <om checkout> \
-  --hm-src <hm checkout> --hm-commit <hm commit> \
-  --devops-src <devops checkout> --devops-commit <devops commit>
+  --bd-src <beads checkout> --om-src <om checkout> \
+  --hm-src <hm checkout> --devops-src <devops checkout> \
+  --mango-src <mango checkout> --mango-commit <mango commit> \
+  --pins <gt checkout>/deploy/daemon/image-pins
 ```
 
 Run it with a `gt` built by `make build` in a checkout of `main`: a binary built
-with plain `go build` refuses to run ("use 'make build' instead"). The five
+with plain `go build` refuses to run ("use 'make build' instead"). The six
 source paths are checkouts, not the canonical `mayor/rig` clones, which the
 command refuses: make each with a local clone of the canonical repo's objects
 (`git clone --no-checkout <canonical> <new dir>`, which reads the canonical clone
-and never fetches in it) and check out the commit to build. `--om-src` has no
-commit flag: om is built at the checkout's `HEAD`. Observed: in the L1 run the
-running `bd` and `om` commits were not in those clones, so the clones' `HEAD`
-commits were built instead. That is a provenance mismatch, and it is not a
-pass. The image's `bd` is stamped with the commit it was built from
-(`main.Commit`), so compare that stamp with the running `bd`'s commit before the
-image is used. `om` has no commit stamp to compare, so record the `om` commit
-the build used (the clone's `HEAD`) and treat it as unverified against the
-running `om`.
+and never fetches in it) and fetch the commit to build. The bd, om, hm and
+devops commits come from `--pins`, the committed `deploy/daemon/image-pins`
+(one `<name> <url> <commit>` line each), not from flags: om is built at its
+pinned commit, never at the checkout's `HEAD`. The mango commit comes from
+`--mango-commit`, which must be a commit in `--mango-src`; mango is not one of
+the pinned sources. Every source checkout must hold the commit it is built at,
+and `--hm-src` and `--devops-src` must be at it with no uncommitted changes.
+The image's `bd` is stamped with the commit it was built from (`main.Commit`),
+so compare that stamp with the running `bd`'s commit before the image is used.
+`om` carries no commit stamp; compare it with its pin. The mango commit is in
+`/usr/local/lib/gt/mango/mango.sha`.
 
-Every flag is required. Each path must be absolute and an existing directory;
-`--rev`, `--bd-commit`, `--hm-commit` and `--devops-commit` are 7 or more hex
-characters. `--hm-src` and `--devops-src` are pinned like `--bd-commit`: each
-checkout must be at its commit with no uncommitted changes, or the build is
-refused. Without `--apply` it
-validates the flags, prints the commands it would run, ends with
+Every flag is required. Each path must be absolute and an existing directory (and
+`--pins` an absolute existing file), `--rev` is 7 or more hex characters, and
+each commit in the pins file is a full 40-character lowercase hex sha. Without
+`--apply` it
+validates the flags, prints the pins and the commands it would run, ends with
 `dry run: nothing was run. Pass --apply to build.`, and writes nothing. Read
-that output, then run the same command with `--apply`. With `--apply` it builds
-gt, bd and om for linux/arm64 in clean worktrees of the commits named, builds hm
+that output, then run the same command with `--apply`. With `--apply` the
+pin-drift guard first reads each source checkout's `origin/main` and refuses a
+pin that is not an ancestor of it, more than 40 commits behind it, or more than
+7 days older than its tip, naming the pin and the line to edit. It then builds
+gt, bd and om for linux/arm64 in clean worktrees of the pins, builds hm
 and the two devops reporters (devops-reporter, release-reporter) the same way from
-their pinned checkouts. release-reporter's version is the one the go command stamps
-from that checkout (a pseudo-version past its last tag); the build reads it back with
-`go version -m` and refuses it unless it is vMAJOR.MINOR.PATCH[-pre]. It downloads
-the pinned claude CLI and the pinned client tools (`templates.DaemonClientTools`;
-each is checked against its sha256), and builds the image with the `desktop-linux`
-context. The Dockerfile is read from `--gt-src`'s working tree. Expected: the last line it
+their pinned checkouts. mango is compiled for linux/arm64 inside a container of
+the builder image, from a clean worktree of `--mango-src` at `--mango-commit`,
+because its `go-api` module links DuckDB through cgo and cannot be
+cross-compiled on the host. release-reporter's version is the one the go command
+stamps from that checkout (a pseudo-version past its last tag); the build reads
+it back with `go version -m` and refuses it unless it is
+vMAJOR.MINOR.PATCH[-pre]. It downloads the pinned claude CLI and the pinned
+client tools (`templates.DaemonClientTools`; each is checked against its
+sha256), and builds the image with the `desktop-linux` context. The Dockerfile is
+read from `--gt-src`'s working tree. Expected: the last line it
 prints is the tag `gt-daemon:<rev>`, and
 `docker --context desktop-linux image inspect gt-daemon:<rev> --format '{{.Id}}'`
 prints an image id. Never point `--gt-src`, `--bd-src`, `--om-src`, `--hm-src`,
-`--devops-src` or `--out` at a canonical `mayor/rig` clone: the command refuses one.
+`--devops-src`, `--mango-src` or `--out` at a canonical `mayor/rig` clone: the
+command refuses one.
 
 **Before any L3 window: the container-config rehearsal.** From `~/gt`, run
 `gt daemon rehearse --live-root ~/gt --image gt-daemon:<rev>`; `--help` says what it
@@ -1103,8 +1110,8 @@ day.
       internal network that the daemon waits on. The compose names its image by
       digest (`templates.DindImage`, `data.forgejo.org/oci/docker@sha256:...`);
       that digest must still be served by the engine the daemon will use
-      (`gt daemon rehearse` pulls it). Reasons:
-      `docs/plans/2026-10-28-daemon-container-design.md`.
+      (`gt daemon rehearse` pulls it). The design notes that chose the paired
+      engines are in git history (see CHANGELOG).
 - [ ] **A recorded baseline.** Before starting, keep the output of
       `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
       (it shows neither container yet),

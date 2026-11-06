@@ -41,5 +41,6 @@ Consequence: `gt` requires the nested `tracker/` module through a `replace` dire
 this fork; it installs from a checkout (`make install`), which is what the town already does. `flake.nix`'s
 `vendorHash` must be recomputed at the next release (`scripts/update-nix-flake.sh`).
 
-Design: `docs/plans/2026-10-25-town-tracker-design.md`. Plan: `docs/plans/2026-10-25-town-tracker-plan.md`.
-Program: epic gt-p85pw; handoff bead claude-pwu; decision record claude-477.
+The 2026-10-25 town-tracker design and plan notes were retired to git history
+(see CHANGELOG). Program: epic gt-p85pw; handoff bead claude-pwu; decision
+record claude-477.

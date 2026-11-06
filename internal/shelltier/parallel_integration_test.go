@@ -15,7 +15,7 @@ import (
 )
 
 // proofRuns is how many consecutive green concurrent runs the flip needs: the
-// design's proof is three (docs/plans/2026-10-28-shell-tier-to-go-design.md).
+// design's proof is three.
 const proofRuns = 3
 
 // proofJobs is the pool width the proof runs with.

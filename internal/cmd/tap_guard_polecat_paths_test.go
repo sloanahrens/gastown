@@ -28,7 +28,7 @@ import (
 // Every path the guard sees (the payload cwd, GT_POLECAT_PATH, HOME) is under
 // the test's own temp root, so the block cases below hold on a clean machine
 // and never touch the operator's live tree — the previous attempt's tests
-// hardcoded /Users/sloan/gt and only "passed" by accident of that box's layout.
+// hardcoded /Users/user/gt and only "passed" by accident of that box's layout.
 type polecatTestTown struct {
 	root     string
 	town     string
@@ -1328,7 +1328,7 @@ func TestIsWithinPath(t *testing.T) {
 		{"", "/worktree", false},
 		{"/worktree", "", false},
 		// macOS folds case; a differently-cased twin must not slip through.
-		{"/Users/Sloan/gt/x", "/users/sloan/gt", true},
+		{"/Users/User/gt/x", "/users/user/gt", true},
 	}
 	for _, tc := range cases {
 		if got := isWithinPath(tc.target, tc.root); got != tc.want {

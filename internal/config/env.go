@@ -47,11 +47,20 @@ func seatGoParallelism(cpus, seats int) int {
 
 // seatEnvGOFLAGS caps a polecat seat's go parallelism in current, the
 // operator's GOFLAGS for this spawn, at parallelism (seatGoParallelism's
-// result). An operator value that already names -p is returned unchanged; any
-// other value keeps its flags and gains the cap.
-func seatEnvGOFLAGS(current string, parallelism int) string {
+// result). seatFlags, the seat's own go_flags, are appended after current and
+// before the cap, so an operator -p still wins over the computed cap. A value
+// that already names -p is returned unchanged; any other value keeps its
+// flags and gains the cap.
+func seatEnvGOFLAGS(current, seatFlags string, parallelism int) string {
 	capFlag := "-p=" + strconv.Itoa(parallelism)
 	current = strings.TrimSpace(current)
+	if f := strings.TrimSpace(seatFlags); f != "" {
+		if current == "" {
+			current = f
+		} else {
+			current += " " + f
+		}
+	}
 	if current == "" {
 		return capFlag
 	}
@@ -173,6 +182,12 @@ type AgentEnvConfig struct {
 	// without this value would silently replace the agent's own -p.
 	AgentGOFLAGS string
 
+	// SeatGoFlags is the polecat's seat config's extra go flags
+	// (polecat_pool.seats.<agent>.go_flags), already validated by Seats or
+	// SeatGoFlags. They follow the agent/operator value and the -p cap is
+	// computed after them, so an operator -p still wins (gt-gg9hv.42).
+	SeatGoFlags string
+
 	// SeatCPUs and SeatCount are the sandbox pool a polecat seat shares: its
 	// CPU count (polecat_pool.cpus) and its seat total. seatGoParallelism
 	// sizes the seat's -p from them, and a town that sets neither reads as it
@@ -223,7 +238,7 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		if strings.TrimSpace(cfg.AgentGOFLAGS) != "" {
 			operatorGOFLAGS = cfg.AgentGOFLAGS
 		}
-		env["GOFLAGS"] = seatEnvGOFLAGS(operatorGOFLAGS, seatGoParallelism(cfg.SeatCPUs, cfg.SeatCount))
+		env["GOFLAGS"] = seatEnvGOFLAGS(operatorGOFLAGS, cfg.SeatGoFlags, seatGoParallelism(cfg.SeatCPUs, cfg.SeatCount))
 
 	case constants.RoleCrew:
 		env["GT_ROLE"] = fmt.Sprintf("%s/crew/%s", cfg.Rig, cfg.AgentName)

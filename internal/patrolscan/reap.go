@@ -9,7 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 )
 
-// Reap defaults (design: docs/plans/2026-10-03-polecat-worktree-cleanup-design.md).
+// Reap defaults.
 const (
 	DefaultReapGrace       = 30 * time.Minute
 	DefaultReapParkedGrace = 24 * time.Hour

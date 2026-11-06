@@ -68,6 +68,13 @@ COPY --chmod=0755 release-reporter /usr/local/bin/release-reporter
 COPY --chmod=0755 plugins/app-promote/app-promote /usr/local/lib/gt/plugins/app-promote/app-promote
 COPY --chmod=0755 plugins/town-metrics/town-metrics /usr/local/lib/gt/plugins/town-metrics/town-metrics
 
+# mango and the commit it was built from. mango's go-api links DuckDB through
+# cgo, so BuildMango compiles it for linux/arm64 in a golang:1.27-bookworm
+# container rather than cross-compiling it on the host. Its place in the town's
+# runtime is gt-eijn2z's; this image only carries the two files here.
+COPY --chmod=0755 mango/mango /usr/local/lib/gt/mango/mango
+COPY --chmod=0755 mango/mango.sha /usr/local/lib/gt/mango/mango.sha
+
 # The claude CLI om's reviewer runs, at the version templates.ClaudeCLIVersion
 # names. The deployer's FetchClaudeCLI downloads it, verifies its sha256 against
 # templates.ClaudeCLISHA256, and places it in the build context; nothing here

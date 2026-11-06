@@ -438,7 +438,7 @@ NESTED_MODULES := $(patsubst %/go.mod,%,$(shell find plugins tracker -name go.mo
 
 # Nested modules whose vet and tests the gate and presubmit run, and whose lint
 # `make lint` runs: the root module's `go test ./...` and golangci-lint do not
-# reach them. tracker/ is the town tracker (docs/plans/2026-10-25-town-tracker-design.md).
+# reach them. tracker/ is the town tracker (ADR 0006).
 TESTED_MODULES := $(patsubst %/go.mod,%,$(wildcard tracker/go.mod))
 
 # The shell tests, run by test-slow after the gate: the shelltier Go runner runs
@@ -686,7 +686,7 @@ test-integration-wall:
 
 # test-timing measures the unit tier in a tmux server started by launchd, which
 # macOS does not exempt from its first-run scan of new executables. It is the
-# acceptance measurement for docs/plans/2026-09-27-test-rewrite-design.md.
+# acceptance measurement for the test-rewrite work.
 # PKGS narrows the run, e.g. make test-timing PKGS=./internal/tmux/...
 test-timing:
 	go run ./internal/testpolicy/cmd/testtiming -- $(PKGS)

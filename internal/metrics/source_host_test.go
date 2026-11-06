@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/hostprobe"
 )
 
 // The fixtures are the shapes the commands print on the operator's Mac, with
@@ -494,6 +495,31 @@ func TestSourceHostDockerArgvNamesTheContext(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no docker probe to check")
+	}
+}
+
+// TestRunnerDefaultNamesTheProbeContainer: the docker column newHostSource
+// builds execs into the container hostprobe names for the Docker Desktop disk,
+// not the runner container retired with the Docker Forgejo stack. It reads the
+// production probes, so a default changed at the call site is caught.
+func TestRunnerDefaultNamesTheProbeContainer(t *testing.T) {
+	t.Parallel()
+	checked := 0
+	for _, probe := range newHostSource().probes() {
+		if probe.column != "docker_disk_pct" {
+			continue
+		}
+		checked++
+		argv := strings.Join(probe.argv, " ")
+		if !strings.Contains(argv, hostprobe.DockerDiskContainer) {
+			t.Errorf("docker argv = %q, want it to name %s", argv, hostprobe.DockerDiskContainer)
+		}
+		if strings.Contains(argv, "forgejo-runner-daemon-1") {
+			t.Errorf("docker argv = %q names the retired runner container", argv)
+		}
+	}
+	if checked != 1 {
+		t.Fatalf("checked %d docker probes, want 1", checked)
 	}
 }
 

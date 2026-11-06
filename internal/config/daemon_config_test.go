@@ -857,6 +857,63 @@ func TestTierSweepRunnerConfigStrict(t *testing.T) {
 	}
 }
 
+// TestSweepRunnerPodTotalMinimum holds the Kubernetes runner block's floor to
+// the whole pod: with dind the setting must hold the sidecar's fixed share and
+// still leave the runner its minimum, so 3 CPUs and 6 GB is the smallest block
+// that loads, a smaller figure is refused naming the setting and the minimum,
+// and without dind the runner's own minimum applies (gt-gg9hv.38).
+func TestSweepRunnerPodTotalMinimum(t *testing.T) {
+	t.Parallel()
+	const base = `"image":"i","jobs":4,"output_root":"/out","context":"gt-control","backend":"kubernetes"`
+	for _, tc := range []struct {
+		name  string
+		block string
+		// want is the error a refused block must hold; empty loads.
+		want string
+	}{
+		{
+			name:  "the minimum with dind loads",
+			block: `{` + base + `,"cpus":3,"memory":6,"dind":true}`,
+		},
+		{
+			name:  "one CPU below the minimum with dind",
+			block: `{` + base + `,"cpus":2,"memory":6,"dind":true}`,
+			want:  "runner.cpus = 2: want at least 3",
+		},
+		{
+			name:  "one GB below the minimum with dind",
+			block: `{` + base + `,"cpus":3,"memory":5,"dind":true}`,
+			want:  "runner.memory = 5: want at least 6 GB",
+		},
+		{
+			name:  "the runner minimum without dind loads",
+			block: `{` + base + `,"cpus":1,"memory":2}`,
+		},
+		{
+			name:  "the dind floor does not apply without dind",
+			block: `{` + base + `,"cpus":1,"memory":2,"dind":false}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var p PatrolsConfig
+			err := json.Unmarshal([]byte(`{"tier_sweep":{"runner":`+tc.block+`}}`), &p)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("a block at the minimum does not load: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("decoded a pod total below the dind minimum: %+v", p.TierSweep.Runner)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to hold %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // TestTierSweepConfigRunnerShellDefaultsFalse: runner.shell is the opt-in that
 // sends the shell stage to the runner. A block that omits it keeps the shell
 // stage on the host, and one that sets it decodes true through both the plain
@@ -988,8 +1045,8 @@ func TestDiskMaintenanceTargetEvery(t *testing.T) {
 }
 
 // The daemon.supervisor setting selects the service manager a provisioned
-// daemon runs under (docs/plans/2026-10-28-daemon-container-design.md §5): the
-// three kinds, and unset keeps the host's own detection.
+// daemon runs under: the three kinds, and unset keeps the host's own
+// detection.
 func TestDaemonPatrolConfig_SupervisorKind(t *testing.T) {
 	t.Parallel()
 

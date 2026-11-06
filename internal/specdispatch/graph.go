@@ -9,8 +9,8 @@ import (
 )
 
 // interfacesSection is the "## " heading, lower-cased as Sections keys it,
-// whose lines say which names a bead defines and uses (design decision 3,
-// docs/plans/2026-11-03-bead-lint-v2-design.md).
+// whose lines say which names a bead defines and uses (bead-lint design
+// decision 3).
 const interfacesSection = "interfaces"
 
 // InterfacesBlock is a bead's parsed "## Interfaces" section: the identifiers
@@ -96,9 +96,8 @@ type GraphBead struct {
 }
 
 // The kinds of finding CheckGraph reports. The first four refuse the epic;
-// KindDuplicateTest is only an advisory (design decision 3,
-// docs/plans/2026-11-03-bead-lint-v2-design.md), so the Kind itself is what
-// tells a caller not to fail the epic over it.
+// KindDuplicateTest is only an advisory (bead-lint design decision 3), so the
+// Kind itself is what tells a caller not to fail the epic over it.
 const (
 	KindDuplicateDefine = "duplicate-define"
 	KindUnmetUse        = "unmet-use"

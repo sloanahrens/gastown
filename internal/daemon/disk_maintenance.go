@@ -3,7 +3,7 @@ package daemon
 // disk_maintenance is the town's registry prune: in the configured quiet window
 // it plans every maintenance target and, when the mode is apply, applies the
 // plan under the polecat-image lock so a delete never races an image push
-// (gt-dl4nv.15, docs/plans/2026-10-28-disk-maintenance-design.md).
+// (gt-dl4nv.15).
 //
 // A target may set a cadence of its own, and the CI cache volumes do: they grow
 // faster than a daily window can hold, so civol runs on its interval
@@ -504,7 +504,7 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// raised before anything that can refuse the plan: a disk too full to keep
 	// pruning, or a keep the patrol cannot decide, must not silence them.
 	readings := s.readDisks(ctx)
-	d.applyDiskAlerts(readings)
+	d.applyDiskAlerts(readings, now)
 
 	// The cache trim is independent of the targets: it trims the claim the
 	// sandbox profiles mount, so it runs when its interval is due whether or not

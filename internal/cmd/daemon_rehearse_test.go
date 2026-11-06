@@ -1079,11 +1079,11 @@ func TestContainerRehearsalListsAcceptedPaths(t *testing.T) {
 	t.Run("the landing path is not accepted", func(t *testing.T) {
 		t.Parallel()
 		h := newRehearseHost()
-		h.files[rehearseLive+"/settings/config.json"] = []byte(`{"landing":"/Users/sloan/gt-landing.noindex","daemon":{"container_off":` + offJSON() + `}}`)
-		h.failing = []string{"test -e /Users/sloan/gt-landing.noindex"}
+		h.files[rehearseLive+"/settings/config.json"] = []byte(`{"landing":"/Users/user/gt-landing.noindex","daemon":{"container_off":` + offJSON() + `}}`)
+		h.failing = []string{"test -e /Users/user/gt-landing.noindex"}
 		var out bytes.Buffer
 		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
-		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), "/Users/sloan/gt-landing.noindex: named by a setting") {
+		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), "/Users/user/gt-landing.noindex: named by a setting") {
 			t.Fatalf("err=%v\n%s", err, out.String())
 		}
 	})

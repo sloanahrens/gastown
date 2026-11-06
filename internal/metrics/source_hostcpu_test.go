@@ -35,8 +35,8 @@ var hostCPUSampleOne = hostCPUSample{
   701   0:20.00 Sat Oct 24 09:00:00 2026 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
 `,
 	args: `  200 /Applications/Docker.app/Contents/MacOS/com.docker.virtualization --vmm virtualization
-  300 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine --disk /Users/sloan/.colima/gt-sbx/_lima/colima/diffdisk
-  400 /opt/homebrew/bin/dolt sql-server --config /Users/sloan/.dolt/config.json
+  300 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine --disk /Users/user/.colima/gt-sbx/_lima/colima/diffdisk
+  400 /opt/homebrew/bin/dolt sql-server --config /Users/user/.dolt/config.json
   500 /opt/homebrew/bin/gt status --json
   700 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
   701 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=renderer
@@ -54,8 +54,8 @@ var hostCPUSampleTwo = hostCPUSample{
   702   0:00.25 Mon Oct 26 17:07:00 2026 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper
 `,
 	args: `  200 /Applications/Docker.app/Contents/MacOS/com.docker.virtualization --vmm virtualization
-  300 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine --disk /Users/sloan/.colima/gt-sbx/_lima/colima/diffdisk
-  400 /opt/homebrew/bin/dolt sql-server --config /Users/sloan/.dolt/config.json
+  300 /System/Library/Frameworks/Virtualization.framework/Virtualization.VirtualMachine --disk /Users/user/.colima/gt-sbx/_lima/colima/diffdisk
+  400 /opt/homebrew/bin/dolt sql-server --config /Users/user/.dolt/config.json
   501 /opt/homebrew/bin/gt mail inbox
   700 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
   701 /Applications/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper --type=renderer

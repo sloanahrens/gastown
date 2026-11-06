@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -650,5 +651,55 @@ func TestReadOMRecordsReadsPastALongLine(t *testing.T) {
 	}
 	if len(beads) != 2 || beads[0] != "gt-first" || beads[1] != "gt-last" {
 		t.Fatalf("records = %v; a long line must not hide the records after it", beads)
+	}
+}
+
+// TestDashboardOmPrefilterSkipsLinesThatCannotBeEvents holds that a line is
+// dated only when it can matter: the substring prefilter runs before the
+// parser, so a line with no rule and no zone change costs no time calls, and
+// the rows are the ones an unfiltered read produces.
+func TestDashboardOmPrefilterSkipsLinesThatCannotBeEvents(t *testing.T) {
+	t.Parallel()
+	cst := time.FixedZone("CST", -6*3600)
+	lines := []string{
+		"2026/11/05 12:00:00 daemon: heartbeat ok",
+		"2026/11/05 12:00:01 compactor: nothing to do",
+		`2026/11/05 12:00:02 Daemon owner: container "gt-daemon-1"`,
+		"2026/11/05 12:00:03 landing_worker: [land] gt-r: rejected (review): om requested changes (score 0.40, 2 finding(s))",
+		"2026/11/05 12:00:04 watcher: scanned 3 rigs",
+		"2026/11/05 12:00:05 landing_worker: [land] gt-r: landed abc on main",
+		"2026/11/05 12:00:06 noise: another line",
+	}
+	read := func(r *omReader) {
+		t.Helper()
+		for _, line := range lines {
+			r.parseLogLine(line)
+		}
+	}
+
+	calls := 0
+	filtered := &omReader{loc: cst}
+	filtered.stamp = func(line string) (time.Time, string) {
+		calls++
+		return filtered.logParser().Parse(line)
+	}
+	read(filtered)
+
+	// Only three lines reach the parser: the owner line, which switches the
+	// zone to UTC, and the two [land] lines. The other four never do.
+	if calls != 3 {
+		t.Errorf("the parser dated %d lines, want 3 (the owner line and the two land lines)", calls)
+	}
+	if len(filtered.rejects) != 1 {
+		t.Fatalf("rejects = %+v, want the one rejection", filtered.rejects)
+	}
+	if want := time.Date(2026, 11, 5, 12, 0, 3, 0, time.UTC); !filtered.rejects[0].At.Equal(want) {
+		t.Errorf("rejection at %v, want %v: the prefilter must keep the zone line", filtered.rejects[0].At.UTC(), want)
+	}
+
+	unfiltered := &omReader{loc: cst, filter: func(string) bool { return true }}
+	read(unfiltered)
+	if !reflect.DeepEqual(filtered.rejects, unfiltered.rejects) {
+		t.Errorf("the prefilter changed the rows:\nfiltered   %+v\nunfiltered %+v", filtered.rejects, unfiltered.rejects)
 	}
 }

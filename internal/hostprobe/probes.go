@@ -59,6 +59,14 @@ const LaunchdNotCollected = "launchd job not collected by this reader"
 // until the host agent fills it from the Docker Desktop container's df.
 const DockerDiskNotCollected = "docker desktop disk not collected by this reader"
 
+// DockerDiskContainer is the Docker Desktop container whose root filesystem is
+// the disk the town writes to. It is the town's Dolt container: the town cannot
+// run without it, so it is running whenever the town is. The host agent measures
+// the disk through it, and so does the daemon's non-container patrol, so the
+// name lives here rather than at either call site (gt-gg9hv.24.4,
+// gt-gg9hv.35).
+const DockerDiskContainer = "gt-dolt"
+
 // Probes is one reading of the host: what the host agent writes to
 // .runtime/host/probes.json and what the container daemon reads, since a
 // container cannot run memory_pressure or ps against the host.

@@ -21,6 +21,15 @@ package daemon
 // the registry target's in-use provider reads pods -- counts the ones holding
 // it as PlanTrim's sandbox count, and asks a running one of them to print the
 // listing with the image's trim-list helper.
+//
+// A removal list past the shard ceiling is carried in the claim itself, and the
+// applied line names the route that carried it. That route writes the list into
+// the claim before its Job runs, so a list the claim cannot hold is refused
+// before the apply: the pass reads the room from df in the pod the listing ran
+// in, not from the image's helper, whose dispatcher runs a plugin run for any
+// first argument it does not know. A room df cannot read leaves the fit check
+// unknown and the trim still runs, deliberately: the writer refuses a list that
+// will not fit (gt-gg9hv.41).
 
 import (
 	"bytes"
@@ -31,13 +40,16 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"os/exec"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
@@ -84,6 +96,17 @@ const (
 	// kubeconfig and context prefix: it asks the file whether it names the
 	// sandbox context at all.
 	cacheTrimPreflightVerb = "config get-contexts " + diskMaintSandboxContext + " -o name"
+
+	// cacheTrimNoOpFactor is how many times the cap a claim may still hold
+	// after a completed trim before the trim is an attention item: a trim
+	// that leaves it over this trimmed nothing, the trace a Job that ran the
+	// wrong helper leaves (gt-gg9hv.46).
+	cacheTrimNoOpFactor = 2
+
+	// cacheTrimNoOpKeyPrefix is the item key's prefix; the claim's namespace
+	// and name follow it, so one claim has one item however often it is
+	// measured.
+	cacheTrimNoOpKeyPrefix = "cache-trim-noop:"
 )
 
 // errCacheTrimNoContext is the preflight's refusal for a kubeconfig that parses
@@ -333,6 +356,77 @@ func (d *Daemon) cacheTrimLogf(format string, args ...any) {
 	}
 }
 
+// cacheTrimLogKeyed logs one cache trim line at most once an hour for its own
+// key. The fit refusal and the free-space-unknown line each have a key of their
+// own (claim and namespace included), so one being held back never hides the
+// other, and a changed figure in the text does not slip past the hold.
+func (d *Daemon) cacheTrimLogKeyed(key, format string, args ...any) {
+	if d.diskMaintSchedule.allowLog(key, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
+		d.logger.Printf(format, args...)
+	}
+}
+
+// cacheTrimNoOpKey is the attention item key of one claim a completed trim left
+// over the cap: the claim's namespace and name, since pods of the same claim
+// name in two namespaces are two claims.
+func cacheTrimNoOpKey(namespace, claim string) string {
+	return cacheTrimNoOpKeyPrefix + namespace + "/" + claim
+}
+
+// cacheTrimNoOp is the claims a completed trim left over cacheTrimNoOpFactor
+// times the cap, with the item each raises. The pass writes it on the goroutine
+// a pass is dispatched to and the attention tick reads it on the heartbeat
+// goroutine, so a mutex guards it; it is memory only, and the next pass's
+// reading re-derives it after a restart.
+type cacheTrimNoOp struct {
+	mu    sync.Mutex
+	items map[string]attention.Item
+}
+
+// raise stores it under its key, replacing an earlier measurement of the same
+// claim: one claim is one item however often it is measured.
+func (s *cacheTrimNoOp) raise(it attention.Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.items == nil {
+		s.items = map[string]attention.Item{}
+	}
+	s.items[it.Key] = it
+}
+
+// clear drops key's item: the claim was measured at or under the threshold.
+func (s *cacheTrimNoOp) clear(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.items, key)
+}
+
+// observed returns the items, copied for a reader and ordered by key so the
+// collector's output does not depend on map order.
+func (s *cacheTrimNoOp) observed() []attention.Item {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]attention.Item, 0, len(s.items))
+	for _, it := range s.items {
+		out = append(out, it)
+	}
+	slices.SortFunc(out, func(a, b attention.Item) int { return strings.Compare(a.Key, b.Key) })
+	return out
+}
+
+// cacheTrimOverTheCap reports whether used is more than cacheTrimNoOpFactor
+// times capBytes. It divides rather than multiplying: a cap close to MaxInt64
+// makes the product wrap negative, and `used > negative` would put every claim
+// over the cap. The half-and-remainder pair is exact -- used == 2*cap is at the
+// cap, not over it -- and no product is formed, so no cap can be too large.
+func cacheTrimOverTheCap(used, capBytes int64) bool {
+	half := used / cacheTrimNoOpFactor
+	if half != capBytes {
+		return half > capBytes
+	}
+	return used%cacheTrimNoOpFactor != 0
+}
+
 // cacheTrimClaim trims one claim in one namespace: it reads the listing through
 // a pod that mounts the claim there, builds the trim, and in apply mode applies
 // it. trimmed is the namespace each claim this pass already trims in, which the
@@ -381,16 +475,123 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
 		return false
 	}
+	// A claim-carried list is written into the claim before the Job runs, so a
+	// list the claim has no room for is refused here rather than part way
+	// through the write (gt-gg9hv.41). The shard route carries no list in the
+	// claim and is not judged by its room.
+	//
+	// The room is read with df, not with a helper subcommand: the image's
+	// helper dispatches only its known subcommands, and an older image answers
+	// any other first argument with a full plugin run. A df that cannot answer
+	// leaves the room unknown and the trim still runs -- a DELIBERATE fail-open:
+	// the Job's writer measures the free space again and refuses a list that
+	// will not fit, so skipping this early check loses the clearer refusal, not
+	// the guard. The unknown line is held to one an hour like a refusal.
+	if m.Route() == cachevol.TrimRouteClaim {
+		reading, err := d.cacheTrimDf(ctx, kubeconfig, sources[0])
+		if err != nil {
+			d.cacheTrimLogKeyed("cache_trim_free_unknown:"+namespace+"/"+claim.ClaimName,
+				"disk_maintenance: cache trim %s in %s: free space unknown: %v; trimming the claim route without the fit check", claim.ClaimName, namespace, err)
+		} else if err := cacheTrimClaimFits(listing, capBytes, sandboxes, reading.Available); err != nil {
+			d.cacheTrimLogKeyed("cache_trim_no_fit:"+namespace+"/"+claim.ClaimName,
+				"disk_maintenance: cache trim %s in %s: %v; nothing trimmed", claim.ClaimName, namespace, err)
+			return false
+		}
+	}
 	if !apply {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s dry_run: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
 		return true
 	}
-	if err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m); err != nil {
+	finished, err := d.cacheTrimApply(ctx, kubeconfig, namespace, jobName, m)
+	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the apply failed: %v", claim.ClaimName, namespace, err)
 		return false
 	}
-	d.cacheTrimLogf("disk_maintenance: cache trim %s in %s applied: %s", claim.ClaimName, namespace, cacheTrimManifestLine(jobName, m))
+	d.cacheTrimLogf("disk_maintenance: cache trim %s in %s applied: %s %s", claim.ClaimName, namespace, cacheTrimRouteLine(m), cacheTrimManifestLine(jobName, m))
+	// A trim is judged by what it left behind, not by its apply having been
+	// accepted, and only once its Job has finished: a reading taken while the
+	// Job runs is the usage the trim is about to remove (gt-gg9hv.46).
+	if finished {
+		d.cacheTrimMeasure(ctx, kubeconfig, sources[0], claim.ClaimName, capBytes)
+	}
 	return true
+}
+
+// cacheTrimMeasure reads the claim after a completed trim and raises or clears
+// its attention item: while the claim holds more than cacheTrimNoOpFactor times
+// the cap the trim left it there, and the Job may have run the wrong helper.
+// A reading at or under the threshold drops the item: the trim did its work.
+//
+// A df that cannot be read logs once an hour under a key of its own and raises
+// nothing. This check never fails the trim: the trim reached a verdict, and a
+// claim nobody could measure is not a claim that stayed full.
+func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source cacheTrimSource, claim string, capBytes int64) {
+	reading, err := d.cacheTrimDf(ctx, kubeconfig, source)
+	if err != nil {
+		d.cacheTrimLogKeyed("cache_trim_noop_unknown:"+source.Namespace+"/"+claim,
+			"disk_maintenance: cache trim %s in %s: the claim could not be measured after the trim: %v; no attention item is raised", claim, source.Namespace, err)
+		return
+	}
+	key := cacheTrimNoOpKey(source.Namespace, claim)
+	if !cacheTrimOverTheCap(reading.Used, capBytes) {
+		d.cacheTrimNoOp.clear(key)
+		return
+	}
+	d.cacheTrimNoOp.raise(attention.Item{
+		Key:      key,
+		Kind:     attention.KindCacheTrimNoOp,
+		Severity: attention.SeverityLow,
+		Summary: fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: the Job may have run the wrong helper",
+			claim, polecatimage.Human(reading.Used), polecatimage.Human(capBytes)),
+	})
+}
+
+// collectCacheTrimNoOp returns the claims a completed trim left over twice the
+// cap. The trim pass writes the records and the heartbeat only reads them, so
+// an item appears or clears at a trim and the queue holds the last trim's
+// measurement in between.
+func (s *attentionSources) collectCacheTrimNoOp(context.Context) ([]attention.Item, error) {
+	if s.cacheTrimNoOp == nil {
+		return nil, nil
+	}
+	return s.cacheTrimNoOp(), nil
+}
+
+// cacheTrimClaimFits refuses a claim-carried trim whose removal list the claim
+// has no room for: the Job's init container writes the list into the claim, so a
+// claim with less room than the WRITER needs would fail it. The writer needs
+// polecatimage.TrimListRoom of the encoded list (the list and its digest, each on
+// disk twice while the second is renamed), and that same function is compared
+// here, not the list's length alone.
+//
+// The list's size is PlanTrim's removals encoded as the writer encodes them --
+// json.Marshal of the path slice, internal/polecatimage/trimlist.go WriteTrimList
+// -- measured from the listing this pass already has; the writer plans the same
+// list again when the Job runs, so a claim that changed in between can still end
+// under its cap. The writer's rule has no further margin: the filesystem's block
+// rounding is the writer's own measurement to make, and it refuses again if the
+// room shrank.
+func cacheTrimClaimFits(listing []cachevol.Entry, capBytes int64, sandboxes int, free int64) error {
+	plan := cachevol.PlanTrim(listing, capBytes, sandboxes > 0)
+	paths := make([]string, 0, len(plan.Removals))
+	for _, removal := range plan.Removals {
+		paths = append(paths, removal.Path)
+	}
+	// A string slice's JSON encoding cannot fail, so the error is dropped.
+	data, _ := json.Marshal(paths)
+	if need := polecatimage.TrimListRoom(len(data)); need > free {
+		return fmt.Errorf("the removal list (%d bytes) needs %d bytes of room to be written with its digest and does not fit the claim's free space (%d)", len(data), need, free)
+	}
+	return nil
+}
+
+// cacheTrimRouteLine names how the trim's removal list reached its Job: the
+// shard ConfigMaps it mounts, or the claim its init container writes.
+func cacheTrimRouteLine(m *cachevol.TrimManifest) string {
+	if m.Route() == cachevol.TrimRouteClaim {
+		return "route=claim"
+	}
+	return fmt.Sprintf("route=shards n=%d", len(m.Shards()))
 }
 
 // cacheTrimManifestLine names what a trim applies: the shard ConfigMaps the
@@ -408,15 +609,20 @@ func cacheTrimManifestLine(jobName string, m *cachevol.TrimManifest) string {
 
 // cacheTrimApply applies the manifest: it deletes what an earlier run left
 // behind, applies the documents in order -- the shards before the Job that
-// mounts them -- and, once the Job has finished, deletes the shards it read.
+// mounts them -- waits for the Job, and deletes the shards it read.
+//
+// It reports whether the Job finished within the wait. The shards a finished
+// Job read are deleted and the claim is measured only then: a Job still
+// running is still reading its shards, and its claim still holds what the trim
+// is removing.
 //
 // The deletions are the applier's alone: nothing else may create or delete a
 // shard, so a trim's leftovers go only through the selector the trim's own
 // objects carry (gt-ej1yz).
-func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobName string, m *cachevol.TrimManifest) error {
+func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobName string, m *cachevol.TrimManifest) (bool, error) {
 	existing, running, err := d.cacheTrimExisting(ctx, kubeconfig, namespace)
 	if err != nil {
-		return err
+		return false, err
 	}
 	stale := cachevol.TrimStale(m, existing)
 	// An earlier Job that still runs is left alone, and this trim waits for the
@@ -424,7 +630,7 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 	// of, and applying over it is refused because its template is immutable.
 	for _, o := range stale {
 		if o.Kind == "Job" && running[o.Name] {
-			return fmt.Errorf("the earlier trim Job %s is still running; its pods mount the claim, so it is left to finish", o.Name)
+			return false, fmt.Errorf("the earlier trim Job %s is still running; its pods mount the claim, so it is left to finish", o.Name)
 		}
 	}
 	for _, object := range stale {
@@ -438,7 +644,7 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 			args = append(args, "--wait=true", "--timeout="+timeout)
 		}
 		if _, err := d.cacheTrimKubectl(ctx, kubeconfig, args...); err != nil {
-			return fmt.Errorf("deleting the stale %s %s: %w", object.Kind, object.Name, err)
+			return false, fmt.Errorf("deleting the stale %s %s: %w", object.Kind, object.Name, err)
 		}
 		d.cacheTrimLogf("disk_maintenance: cache trim %s: deleted the stale %s %s", jobName, object.Kind, object.Name)
 	}
@@ -452,11 +658,32 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 			// The first line of stderr is the API server's reason; the lines
 			// after it can repeat the object, and a shard's object holds a
 			// file list.
-			return fmt.Errorf("applying document %d of %d%s: %w: %s",
+			return false, fmt.Errorf("applying document %d of %d%s: %w: %s",
 				i+1, len(docs), cacheTrimDocumentLabel(doc), err, cacheTrimFirstLine(string(stderr)))
 		}
 	}
-	return d.cacheTrimCleanShards(ctx, kubeconfig, namespace, jobName, m)
+	if !d.cacheTrimWaitJob(ctx, kubeconfig, namespace, jobName) {
+		return false, nil
+	}
+	if err := d.cacheTrimCleanShards(ctx, kubeconfig, namespace, m); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// cacheTrimWaitJob waits for the trim Job to complete, and reports whether it
+// did. The wait is the pass's one bound on a Job: a Job still running when it
+// ends is reported with why, and the pass carries on, leaving the shards for
+// the next run and the claim unmeasured, since neither can be judged while the
+// Job works.
+func (d *Daemon) cacheTrimWaitJob(ctx context.Context, kubeconfig, namespace, jobName string) bool {
+	timeout := strconv.Itoa(int(cacheTrimWaitTimeout.Seconds())) + "s"
+	_, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, "wait", "--for=condition=complete", "job/"+jobName, "-n", namespace, "--timeout="+timeout)
+	if err == nil {
+		return true
+	}
+	d.cacheTrimLogf("disk_maintenance: cache trim %s: %s; the trim is left for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, stderr))
+	return false
 }
 
 // cacheTrimFieldManager is the field manager every document of a trim is
@@ -504,23 +731,18 @@ func cacheTrimFirstLine(stderr string) string {
 	return strings.TrimSpace(strings.Split(strings.TrimSpace(stderr), "\n")[0])
 }
 
-// cacheTrimCleanShards deletes the shard ConfigMaps a trim applied once its Job
-// has finished. A Job a trim applies folds in the claim within the pass, and the
-// shards are its input alone; the next run would leave them behind otherwise,
-// since a rerun of the same trim names the same shards and updates them rather
-// than deleting them.
+// cacheTrimCleanShards deletes the shard ConfigMaps a finished trim applied. A
+// Job a trim applies folds in the claim within the pass, and the shards are its
+// input alone; the next run would leave them behind otherwise, since a rerun of
+// the same trim names the same shards and updates them rather than deleting
+// them.
 //
-// A Job that has not finished by the wait keeps its shards: deleting a mount a
-// running pod reads would fail the trim it is part of. The next run deletes the
-// Job, and its pods with it, before it applies.
-func (d *Daemon) cacheTrimCleanShards(ctx context.Context, kubeconfig, namespace, jobName string, m *cachevol.TrimManifest) error {
+// The caller reaches this only once the Job has finished: deleting a mount a
+// running pod reads would fail the trim it is part of. A Job that did not
+// finish keeps its shards, and the next run deletes the Job, and its pods with
+// it, before it applies.
+func (d *Daemon) cacheTrimCleanShards(ctx context.Context, kubeconfig, namespace string, m *cachevol.TrimManifest) error {
 	if len(m.Shards()) == 0 {
-		return nil
-	}
-	timeout := strconv.Itoa(int(cacheTrimWaitTimeout.Seconds())) + "s"
-	_, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, "wait", "--for=condition=complete", "job/"+jobName, "-n", namespace, "--timeout="+timeout)
-	if err != nil {
-		d.cacheTrimLogf("disk_maintenance: cache trim %s: %s; its shards stay for the next run", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, stderr))
 		return nil
 	}
 	if _, err := d.cacheTrimKubectl(ctx, kubeconfig, "delete", "configmap", "-n", namespace, "-l", cachevol.TrimSelector()); err != nil {
@@ -806,6 +1028,87 @@ func (d *Daemon) cacheTrimListing(ctx context.Context, kubeconfig string, source
 	return cacheTrimParseListing(out)
 }
 
+// cacheTrimDfHeader is the columns df -Pk prints above its one data row.
+var cacheTrimDfHeader = []string{"Filesystem", "1024-blocks", "Used", "Available", "Capacity", "Mounted", "on"}
+
+// cacheTrimDfReading is what df -Pk says about the claim, in bytes: the space
+// it holds, and the space left. The fit check reads Available; the reading
+// taken after a trim reads Used (gt-gg9hv.46).
+type cacheTrimDfReading struct {
+	Used      int64
+	Available int64
+}
+
+// cacheTrimDf reads the claim's used and free space, in bytes, with df in the
+// pod that mounts it: df is a separate command, not a helper subcommand,
+// because the image's runProgram dispatches only its known subcommands and
+// sends any other first argument to a full plugin run
+// (internal/polecatimage/program.go). The daemon must never ask an older image
+// for one (gt-gg9hv.41).
+//
+// A df that fails, is absent, prints anything but the expected header and one
+// data row, or whose columns are not whole numbers of KiB returns an error.
+// The caller reads that as an unknown reading, names the error, and carries on
+// rather than failing the trim.
+func (d *Daemon) cacheTrimDf(ctx context.Context, kubeconfig string, source cacheTrimSource) (cacheTrimDfReading, error) {
+	out, err := d.cacheTrimKubectl(ctx, kubeconfig, "exec", "-n", source.Namespace, source.Pod, "-c", source.Container,
+		"--", "df", "-Pk", source.Root)
+	if err != nil {
+		return cacheTrimDfReading{}, err
+	}
+	return cacheTrimParseDf(out)
+}
+
+// cacheTrimParseDf turns df -Pk's reply into the claim's used and free bytes:
+// the Used and Available columns are in KiB, and the reply must be the header
+// and one data row and nothing else. A reply that is not that shape is an
+// error naming the rule, never a zero figure, since a zero would refuse every
+// claim-carried trim.
+func cacheTrimParseDf(out []byte) (cacheTrimDfReading, error) {
+	var lines []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 2 {
+		return cacheTrimDfReading{}, fmt.Errorf("df printed %d non-empty line(s), want the header and one data row", len(lines))
+	}
+	if header := strings.Fields(lines[0]); !slices.Equal(header, cacheTrimDfHeader) {
+		return cacheTrimDfReading{}, errors.New("df printed an unexpected header")
+	}
+	row := strings.Fields(lines[1])
+	if len(row) < 4 {
+		return cacheTrimDfReading{}, errors.New("df's data row names no Available column")
+	}
+	available, err := cacheTrimDfKiB(row[3], "Available")
+	if err != nil {
+		return cacheTrimDfReading{}, err
+	}
+	// Used sits before Available, so a row with an Available column has one.
+	used, err := cacheTrimDfKiB(row[2], "Used")
+	if err != nil {
+		return cacheTrimDfReading{}, err
+	}
+	return cacheTrimDfReading{Used: used, Available: available}, nil
+}
+
+// cacheTrimDfKiB reads one df -Pk column as bytes: the figure is whole KiB,
+// never negative, and small enough that its byte count fits an int64.
+func cacheTrimDfKiB(field, column string) (int64, error) {
+	kib, err := strconv.ParseInt(field, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("df's %s column is not a whole number of KiB", column)
+	}
+	if kib < 0 {
+		return 0, fmt.Errorf("df names %d KiB %s", kib, strings.ToLower(column))
+	}
+	if kib > math.MaxInt64/1024 {
+		return 0, fmt.Errorf("df's %s column is too large to read as bytes", column)
+	}
+	return kib * 1024, nil
+}
+
 // cacheTrimListingEntry is one entry of the JSON `polecat-image trim-list`
 // prints.
 type cacheTrimListingEntry struct {
@@ -816,10 +1119,13 @@ type cacheTrimListingEntry struct {
 	Mtime time.Time `json:"mtime"`
 }
 
-// cacheTrimParseListing turns the helper's JSON into PlanTrim's entries. A
-// cache name it does not know refuses the listing: PlanTrim chooses what to
-// remove by the cache, and a name read as the wrong one would admit a module
-// file to a trim while a sandbox builds.
+// cacheTrimParseListing turns the helper's JSON into PlanTrim's entries. The
+// reply is the bare array trim-list has always printed; a document is refused,
+// because that is the reply an older daemon cannot parse and the room this one
+// needs is read with df, not carried here. A cache name it does not know
+// refuses the listing: PlanTrim chooses what to remove by the cache, and a name
+// read as the wrong one would admit a module file to a trim while a sandbox
+// builds.
 func cacheTrimParseListing(out []byte) ([]cachevol.Entry, error) {
 	var entries []cacheTrimListingEntry
 	if err := json.Unmarshal(out, &entries); err != nil {

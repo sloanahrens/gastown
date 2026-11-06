@@ -24,6 +24,10 @@ const (
 	KindRiskPath Kind = "risk-path"
 	// KindRedMain: the tier sweep found main red.
 	KindRedMain Kind = "red-main"
+	// KindCacheTrimNoOp: a shared cache trim completed and its claim still
+	// holds more than twice the cap, so the Job may have run the wrong
+	// helper (gt-gg9hv.46).
+	KindCacheTrimNoOp Kind = "cache-trim-noop"
 	// KindRejectedTwice: a bead was rejected by landing twice.
 	KindRejectedTwice Kind = "rejected-twice"
 	// KindEscalation: an open escalation awaits the overseer.
@@ -64,10 +68,14 @@ const (
 	KindHostDisk Kind = "host-disk"
 	// KindHostMem: the host's free memory is low.
 	KindHostMem Kind = "host-mem"
-	// KindHostDocker: a container of the Forgejo or hm stack is not running.
+	// KindHostDocker: a Docker Desktop container the town cannot run without
+	// is not running.
 	KindHostDocker Kind = "host-docker"
-	// KindHostProbe: a host probe (disk, memory or docker) failed, so its rule
-	// could not be judged this tick.
+	// KindHostForgejo: the town's Forgejo has not answered its health endpoint
+	// for several heartbeats in a row (gt-gg9hv.36).
+	KindHostForgejo Kind = "host-forgejo"
+	// KindHostProbe: a host probe (disk, memory, docker or Forgejo health)
+	// failed, so its rule could not be judged this tick.
 	KindHostProbe Kind = "host-probe"
 	// KindQuestionNew: an overseer question has been filed and nobody has
 	// commented on it yet.
@@ -103,12 +111,12 @@ const (
 // that must know the full set.
 func Kinds() []Kind {
 	return []Kind{
-		KindRiskPath, KindRedMain, KindRejectedTwice, KindEscalation,
+		KindRiskPath, KindRedMain, KindCacheTrimNoOp, KindRejectedTwice, KindEscalation,
 		KindPolecatStall, KindLandingStuck, KindQueueStuck, KindDirectPush,
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindTierSweepStarved, KindTierSweepStuck,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
-		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
+		KindHostDisk, KindHostMem, KindHostDocker, KindHostForgejo, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown,

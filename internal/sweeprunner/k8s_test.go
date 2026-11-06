@@ -151,10 +151,15 @@ func TestK8sRenderPriorityAndSafety(t *testing.T) {
 	if requests, limits := runner.Resources.Requests, runner.Resources.Limits; requests != limits {
 		t.Errorf("the runner's requests %+v differ from its limits %+v: the share must be promised, not burst", requests, limits)
 	}
+	// The Spec's cpus and memory are the pod's total; the dind sidecar's fixed
+	// share comes out of it, and the runner gets the rest.
 	spec := goldenSpec()
-	share := ResourceList{CPU: strconv.Itoa(spec.CPUs), Memory: strconv.Itoa(spec.MemoryGB) + "Gi"}
-	if got := runner.Resources.Requests; got != share {
-		t.Errorf("the runner's requests are %+v, want the Spec's share %+v", got, share)
+	total, err := PodRequestTotal(pod)
+	if err != nil {
+		t.Fatalf("the Job's pod request: %v", err)
+	}
+	if want := (Amount{CPU: int64(spec.CPUs) * 1000, Memory: int64(spec.MemoryGB) << 30}); total != want {
+		t.Errorf("the pod asks for %s, want the Spec's pod total %s", total, want)
 	}
 	if document := string(plan.Job.JSON()); strings.Contains(document, "hostPath") {
 		t.Errorf("the Job mounts a host path, which ties the run to one node:\n%s", document)
@@ -1121,4 +1126,49 @@ func applyDocumentIndex(plan Plan, kind, name string) int {
 		}
 	}
 	return -1
+}
+
+// TestSweepJobPullPolicyFollowsTheImageReference holds the Job's containers to the pull policy the
+// runner image reference implies: a moving tag pulls, since the node's cached copy is whatever it
+// pulled last, and a commit tag leaves the cluster's default. The dind sidecar is pinned by digest,
+// so it renders no policy either way.
+func TestSweepJobPullPolicyFollowsTheImageReference(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{"moving tag", "gastown-polecat:dev", "Always"},
+		{"commit tag", "gastown-polecat:0123456789abcdef", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec := goldenSpec()
+			spec.Image = tc.image
+			plan, err := Kubernetes{}.Render(spec)
+			if err != nil {
+				t.Fatalf("rendering the spec: %v", err)
+			}
+			runner, ok := containerNamed(plan.Job, runnerContainerName)
+			if !ok {
+				t.Fatalf("the Job renders no %q container", runnerContainerName)
+			}
+			if runner.ImagePullPolicy != tc.want {
+				t.Errorf("runner imagePullPolicy = %q, want %q for image %q", runner.ImagePullPolicy, tc.want, tc.image)
+			}
+			dind, ok := containerNamed(plan.Job, dindContainerName)
+			if !ok {
+				t.Fatalf("the Job renders no %q sidecar", dindContainerName)
+			}
+			if dind.ImagePullPolicy != "" {
+				t.Errorf("dind imagePullPolicy = %q, want none: %q is a digest", dind.ImagePullPolicy, dind.Image)
+			}
+			// The policy has to reach the document kubectl applies, not only the struct.
+			if got, want := strings.Contains(string(plan.Job.JSON()), `"imagePullPolicy"`), tc.want != ""; got != want {
+				t.Errorf("the Job document carries imagePullPolicy = %v, want %v for image %q", got, want, tc.image)
+			}
+		})
+	}
 }

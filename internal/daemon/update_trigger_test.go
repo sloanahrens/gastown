@@ -353,10 +353,16 @@ type updateRemoteFake struct {
 	output string
 	exit   int
 	err    error
+	// deadline is how much of the call's context bound was left when the runner
+	// saw it, so a test can check the bound the hold puts on the read.
+	deadline time.Duration
 }
 
-func (f *updateRemoteFake) run(_ context.Context, _ string, _ []string, _ string, _ ...string) (string, int, error) {
+func (f *updateRemoteFake) run(ctx context.Context, _ string, _ []string, _ string, _ ...string) (string, int, error) {
 	f.calls++
+	if deadline, ok := ctx.Deadline(); ok {
+		f.deadline = time.Until(deadline)
+	}
 	return f.output, f.exit, f.err
 }
 
@@ -497,6 +503,154 @@ func TestUpdateFactsHoldsWhenTheRemoteTipIsUnreadable(t *testing.T) {
 	}
 	if !strings.Contains(reason, "run gt update by hand") {
 		t.Errorf("updateDue() reason = %q, want the by-hand hold named", reason)
+	}
+}
+
+// newFailedUpdateRunTriggerDaemon builds a daemon whose town has a source
+// checkout and an installed build lagging behind main, and whose last update
+// run failed on the build's commit, so the failed-run hold reads main's tip
+// from origin.
+func newFailedUpdateRunTriggerDaemon(t *testing.T) (*Daemon, *clockwork.FakeClock, *bytes.Buffer, *updateRemoteFake) {
+	t.Helper()
+
+	const lagging = "1111111111111111111111111111111111111111"
+	d, logs, _, _ := newUpdateTriggerTestDaemon(t, &config.UpdateConfig{
+		Enabled: true,
+		Window:  "03:00",
+	})
+	createUpdateSource(t, d.config.TownRoot)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		return &version.StaleBinaryInfo{RepoCommit: lagging}
+	}
+	remote := &updateRemoteFake{exit: 128}
+	d.updateRemoteRun = remote.run
+	store := update.Store{Dir: update.Dir(d.config.TownRoot)}
+	ended := updateTriggerTestTime.Add(-24 * time.Hour)
+	if err := store.Write(update.State{
+		RunID:     "run-1",
+		StartedAt: ended.Add(-time.Minute),
+		EndedAt:   ended,
+		Outcome:   update.OutcomeFailed,
+		Target:    update.Target{SHA: lagging},
+	}); err != nil {
+		t.Fatalf("write state: %v", err)
+	}
+	return d, d.clock.(*clockwork.FakeClock), logs, remote
+}
+
+// The failed-run hold's ls-remote is bounded by updateRemoteTimeout, so an
+// origin that does not answer cannot hold the update check past that bound
+// (gt-jhep9).
+func TestUpdateFactsRemoteTimeout(t *testing.T) {
+	t.Parallel()
+
+	d, _, _, remote := newFailedUpdateRunTriggerDaemon(t)
+	if _, err := d.updateFacts(d.clk().Now()); err != nil {
+		t.Fatalf("updateFacts: %v", err)
+	}
+	if remote.calls != 1 {
+		t.Fatalf("ls-remote calls = %d, want one failed read", remote.calls)
+	}
+	if updateRemoteTimeout != 10*time.Second {
+		t.Errorf("updateRemoteTimeout = %v, want the named 10s bound", updateRemoteTimeout)
+	}
+	if remote.deadline <= 0 || remote.deadline > 10*time.Second {
+		t.Errorf("ls-remote context had %v left, want a deadline of at most 10s", remote.deadline)
+	}
+}
+
+// A failed main-tip read starts updateRemoteBackoff: reads inside it make no
+// ls-remote call and leave main unknown, and the first read at the end asks
+// origin again (gt-jhep9).
+func TestUpdateFactsRemoteBackoff(t *testing.T) {
+	t.Parallel()
+
+	d, clk, _, remote := newFailedUpdateRunTriggerDaemon(t)
+	facts, err := d.updateFacts(d.clk().Now())
+	if err != nil {
+		t.Fatalf("updateFacts: %v", err)
+	}
+	if remote.calls != 1 || facts.MainSHA != "" {
+		t.Fatalf("after the first read: calls = %d, MainSHA = %q, want one failed read and an unknown main", remote.calls, facts.MainSHA)
+	}
+
+	clk.Advance(updateRemoteBackoff - time.Minute)
+	facts, err = d.updateFacts(d.clk().Now())
+	if err != nil {
+		t.Fatalf("updateFacts inside the backoff: %v", err)
+	}
+	if remote.calls != 1 {
+		t.Errorf("ls-remote calls = %d inside the backoff, want the remembered failure", remote.calls)
+	}
+	if facts.MainSHA != "" {
+		t.Errorf("MainSHA = %q inside the backoff, want the cached unknown main", facts.MainSHA)
+	}
+
+	clk.Advance(2 * time.Minute)
+	if _, err := d.updateFacts(d.clk().Now()); err != nil {
+		t.Fatalf("updateFacts past the backoff: %v", err)
+	}
+	if remote.calls != 2 {
+		t.Errorf("ls-remote calls = %d past the backoff, want a new read", remote.calls)
+	}
+}
+
+// An unreachable origin logs once when the outage starts and once when a read
+// recovers it, not on every heartbeat (gt-jhep9).
+func TestUpdateFactsRemoteFailureLogsOnTransitions(t *testing.T) {
+	t.Parallel()
+
+	const tip = "2222222222222222222222222222222222222222"
+	d, clk, logs, remote := newFailedUpdateRunTriggerDaemon(t)
+
+	for range 3 {
+		if _, err := d.updateFacts(d.clk().Now()); err != nil {
+			t.Fatalf("updateFacts: %v", err)
+		}
+	}
+	if remote.calls != 1 {
+		t.Fatalf("ls-remote calls = %d, want the first failure only inside the backoff", remote.calls)
+	}
+	if got := strings.Count(logs.String(), "cannot read main's tip"); got != 1 {
+		t.Fatalf("outage-start lines = %d, want one; log = %q", got, logs.String())
+	}
+
+	// The backoff ends and origin still fails: a read is made, and the
+	// continuing outage stays quiet.
+	clk.Advance(updateRemoteBackoff + time.Minute)
+	if _, err := d.updateFacts(d.clk().Now()); err != nil {
+		t.Fatalf("updateFacts after the backoff: %v", err)
+	}
+	if remote.calls != 2 {
+		t.Fatalf("ls-remote calls = %d after the backoff, want a new read", remote.calls)
+	}
+	if got := strings.Count(logs.String(), "cannot read main's tip"); got != 1 {
+		t.Errorf("outage-start lines = %d, want the continuing outage quiet; log = %q", got, logs.String())
+	}
+
+	// Origin answers at the next read: the recovery is logged once.
+	remote.exit = 0
+	remote.output = tip + "\trefs/heads/main\n"
+	clk.Advance(updateRemoteBackoff + time.Minute)
+	facts, err := d.updateFacts(d.clk().Now())
+	if err != nil {
+		t.Fatalf("updateFacts after the read recovered: %v", err)
+	}
+	if facts.MainSHA != tip {
+		t.Fatalf("MainSHA = %q after the read recovered, want %q", facts.MainSHA, tip)
+	}
+	if got := strings.Count(logs.String(), "main's tip reads from origin again"); got != 1 {
+		t.Errorf("recovery lines = %d, want one; log = %q", got, logs.String())
+	}
+
+	// A later failure is a new outage, logged when it starts.
+	remote.exit = 128
+	remote.output = ""
+	if _, err := d.updateFacts(d.clk().Now()); err != nil {
+		t.Fatalf("updateFacts on the new outage: %v", err)
+	}
+	if got := strings.Count(logs.String(), "cannot read main's tip"); got != 2 {
+		t.Errorf("outage-start lines = %d, want the new outage logged; log = %q", got, logs.String())
 	}
 }
 

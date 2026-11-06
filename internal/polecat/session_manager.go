@@ -117,6 +117,9 @@ type SessionManager struct {
 	hostSeatIssuer func(townRoot string) (seattoken.Issuer, error)
 	// seatPool reads the pool a seat shares; nil reads the town settings.
 	seatPool func(townRoot string) (*config.PolecatPool, error)
+	// logf reports a launch line; nil writes it to stderr. A test supplies
+	// one to read the line without capturing the process's stderr.
+	logf func(format string, args ...any)
 }
 
 // The two variables a seat on a tracker rig carries. The tracker client reads
@@ -724,6 +727,19 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	if err != nil {
 		return fmt.Errorf("sizing %s's go parallelism: %w", polecat, err)
 	}
+	// The seat this polecat fills is the resolved agent's, and its go_flags
+	// join the session's GOFLAGS (gt-gg9hv.42). SeatGoFlags validates them
+	// here because the spawn reads the pool without the loader's Seats()
+	// pass, so an unaccepted flag must fail the launch rather than reach a
+	// GOFLAGS.
+	seatAgent := runtimeConfig.ResolvedAgent
+	if seatAgent == "" {
+		seatAgent = opts.Agent
+	}
+	seatGoFlags, err := pool.SeatGoFlags(seatAgent)
+	if err != nil {
+		return err
+	}
 
 	// Prepare the workspace (settings, folder trust) before the session starts.
 	if err := m.ensureRuntimeWorkspace(polecat, workDir, opts.RuntimeConfigDir, runtimeConfig); err != nil {
@@ -759,7 +775,9 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		}
 		polecatGitBranch = branch
 	}
-	envVars := config.AgentEnv(polecatAgentEnvConfig(m.rig.Name, polecat, townRoot, sessionID, opts, runtimeConfig, pool))
+	envCfg := polecatAgentEnvConfig(m.rig.Name, polecat, townRoot, sessionID, opts, runtimeConfig, pool)
+	envCfg.SeatGoFlags = seatGoFlags
+	envVars := config.AgentEnv(envCfg)
 	// AgentEnv already sets GT_ROLE, GT_RIG, GT_POLECAT, BD_ACTOR,
 	// BD_DOLT_AUTO_COMMIT, etc. Layer in polecat-session-specific vars.
 	envVars["GT_POLECAT_PATH"] = workDir
@@ -803,16 +821,18 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	// session's commands into the sandbox (session.sandbox_routing).
 	sessionWorkDir := workDir
 	var hostTownRoot, sandboxRoot string // set when a backend moves the session into a sandbox
-	envCfg := config.AgentEnvConfig{
+	envCfg = config.AgentEnvConfig{
 		Role:        "polecat",
 		Rig:         m.rig.Name,
 		AgentName:   polecat,
 		TownRoot:    townRoot,
 		SessionName: sessionID,
 		// The startup command exports GOFLAGS into the pane, after the session
-		// environment is set, so it carries the same pool-sized cap.
-		SeatCPUs:  pool.GetCPUs(),
-		SeatCount: pool.SeatTotal(),
+		// environment is set, so it carries the same pool-sized cap and the
+		// seat's own go flags.
+		SeatCPUs:    pool.GetCPUs(),
+		SeatCount:   pool.SeatTotal(),
+		SeatGoFlags: seatGoFlags,
 	}
 	if b := opts.Backend; b != nil && b.Name() != session.BackendTmux {
 		fh, ok := b.(forgejoHoster)
@@ -907,6 +927,14 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		}
 		command = session.RewriteTownRoot(command, hostTownRoot, sandboxRoot)
 	}
+
+	// One line per spawn so an operator can read the seat's final GOFLAGS
+	// while a flag is on trial on that one seat (gt-gg9hv.42).
+	seatName := seatAgent
+	if seatName == "" {
+		seatName = polecat
+	}
+	m.logLine("seat %s: GOFLAGS=%s", seatName, envVars["GOFLAGS"])
 
 	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, sessionWorkDir, command, envVars); err != nil {
 		return fmt.Errorf("creating session: %w", err)
@@ -1206,6 +1234,16 @@ func (m *SessionManager) warnSpan(format string, args ...any) {
 		return
 	}
 	style.PrintWarning(format, args...)
+}
+
+// logLine reports a launch line; nil logf writes it to stderr so a spawn run
+// from a daemon still leaves the line in the daemon's log.
+func (m *SessionManager) logLine(format string, args ...any) {
+	if m.logf != nil {
+		m.logf(format, args...)
+		return
+	}
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
 // clock is the clock a stopped seat's span end is stamped with; nil is the

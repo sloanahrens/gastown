@@ -53,10 +53,15 @@ const (
 	RuleHostDiskCrit     = "host.disk_crit"
 	RuleHostMemLow       = "host.mem_low"
 	RuleHostDockerDown   = "host.docker_stack_down"
+	RuleHostForgejoDown  = "host.forgejo_down"
 	RuleHostProbe        = "host.probe_failed"
 	// RuleTierSweepStuck is the tier sweep's own key: the guard's cycle, not a
 	// tier's verdict (gt-gg9hv.37).
 	RuleTierSweepStuck = "tier_sweep.stuck"
+
+	// RuleCacheTrimNoOp is a completed cache trim whose claim is still over
+	// twice the cap, so the Job may have trimmed nothing (gt-gg9hv.46).
+	RuleCacheTrimNoOp = "cache.trim_noop"
 
 	// The overseer-question rules (gt-47rea).
 	RuleQuestionNew      = "question.new"
@@ -114,9 +119,16 @@ var ruleFlags = map[string]RuleFlags{
 	RuleHostDiskCrit:     flagsWake,
 	RuleHostMemLow:       flagsWake,
 	RuleHostDockerDown:   flagsWake,
+	// A Forgejo that does not answer its health endpoint is every landing
+	// stopped: the candidate gate waits on a CI verdict that cannot come.
+	RuleHostForgejoDown: flagsWake,
 	// A cycle the guard holds past its bound blocks every later cycle: the
 	// tiers the sweep alone gates go unmeasured until someone looks.
 	RuleTierSweepStuck: flagsWake,
+	// A trim that left the claim over twice the cap is a measurement of a
+	// Job that did not do its work: the queue has it for the next overseer
+	// look, and a claim that really grows already wakes host.disk_crit.
+	RuleCacheTrimNoOp: flagsAsk,
 	// Free seats and dispatchable beads with nothing started is work that is
 	// not happening, which no rule over existing work can see.
 	RuleDispatchIdle: flagsWake,
@@ -208,12 +220,14 @@ var kindRules = map[Kind]string{
 	KindTierSweepRed:     RuleTierSweepRed,
 	KindTierSweepStarved: RuleTierSweepStarved,
 	KindTierSweepStuck:   RuleTierSweepStuck,
+	KindCacheTrimNoOp:    RuleCacheTrimNoOp,
 	KindRevertRefused:    RuleRevertRefused,
 	KindBlockedMail:      RuleBlockedMail,
 	KindOverrunStopped:   RuleOverrunStopped,
 	KindScheduledGate:    RuleScheduledGate,
 	KindHostMem:          RuleHostMemLow,
 	KindHostDocker:       RuleHostDockerDown,
+	KindHostForgejo:      RuleHostForgejoDown,
 	KindHostProbe:        RuleHostProbe,
 	KindQuestionNew:      RuleQuestionNew,
 	KindQuestionAnswered: RuleQuestionAnswered,

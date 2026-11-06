@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -742,6 +743,99 @@ func TestLaunchSizesTheSeatFromThePool(t *testing.T) {
 	want := "-mod=mod -p=2"
 	if got["GOFLAGS"] != want {
 		t.Errorf("session GOFLAGS = %q, want %q (12 cpus over 6 seats)", got["GOFLAGS"], want)
+	}
+}
+
+// A spawn for the seat whose go_flags name -trimpath carries them in the
+// session's GOFLAGS and logs the one seat line; a spawn for another seat keeps
+// today's value (gt-gg9hv.42).
+//
+//testpolicy:allow parallel — sets the spawning environment through t.Setenv, which a parallel test must not do
+func TestSeatGoFlagsReachTheSpawnEnv(t *testing.T) {
+	// The spawning environment names no flags, so the seat's are the only
+	// difference between the two spawns below.
+	//testpolicy:allow no-env — the spawning GOFLAGS is part of the value under test: AgentEnv reads it from the process environment, and a host value would change the expected result
+	t.Setenv("GOFLAGS", "")
+
+	town, rigPath, workDir, w := launchTown(t)
+	ts := config.NewTownSettings()
+	ts.Agents = map[string]*config.RuntimeConfig{
+		"seat-a": {Command: "claude", Args: []string{"--dangerously-skip-permissions"}},
+		"seat-b": {Command: "claude", Args: []string{"--dangerously-skip-permissions"}},
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
+		t.Fatal(err)
+	}
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"seat-a": {Cap: 1, GoFlags: "-trimpath"},
+		"seat-b": {Cap: 1},
+	}}
+
+	tests := []struct {
+		agent string
+		want  string
+	}{
+		{"seat-a", "-trimpath -p=8"},
+		{"seat-b", "-p=8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.agent, func(t *testing.T) {
+			var got map[string]string
+			var lines []string
+			m := &SessionManager{
+				tmux:     envCapturingTmux{newFakeSessionTmux(), &got},
+				rig:      &rig.Rig{Name: "gastown", Path: rigPath},
+				gits:     w.opener(),
+				seatPool: func(string) (*config.PolecatPool, error) { return pool, nil },
+				logf:     func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) },
+			}
+
+			err := m.launch("box", m.SessionName("box"), SessionStartOptions{WorkDir: workDir, Agent: tt.agent})
+			if err == nil || !strings.Contains(err.Error(), "captured") {
+				t.Fatalf("launch error = %v, want the capturing tmux's refusal", err)
+			}
+			if got["GOFLAGS"] != tt.want {
+				t.Errorf("session GOFLAGS = %q, want %q", got["GOFLAGS"], tt.want)
+			}
+			wantLine := "seat " + tt.agent + ": GOFLAGS=" + tt.want
+			if len(lines) != 1 || lines[0] != wantLine {
+				t.Errorf("spawn lines = %q, want exactly %q", lines, wantLine)
+			}
+		})
+	}
+}
+
+// A seat whose go_flags the loader would refuse fails the spawn instead of
+// reaching a GOFLAGS: the spawn reads the pool without the loader's Seats()
+// pass (gt-gg9hv.42).
+func TestLaunchRefusesUnacceptedSeatGoFlags(t *testing.T) {
+	t.Parallel()
+
+	town, rigPath, workDir, w := launchTown(t)
+	ts := config.NewTownSettings()
+	ts.Agents = map[string]*config.RuntimeConfig{
+		"seat-a": {Command: "claude", Args: []string{"--dangerously-skip-permissions"}},
+	}
+	if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
+		t.Fatal(err)
+	}
+	created := false
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"seat-a": {Cap: 1, GoFlags: "-toolexec=sneaky"},
+	}}
+	m := &SessionManager{
+		tmux:     recordingCreateTmux{newFakeSessionTmux(), &created},
+		rig:      &rig.Rig{Name: "gastown", Path: rigPath},
+		gits:     w.opener(),
+		seatPool: func(string) (*config.PolecatPool, error) { return pool, nil },
+	}
+
+	err := m.launch("box", m.SessionName("box"), SessionStartOptions{WorkDir: workDir, Agent: "seat-a"})
+	if err == nil || !strings.Contains(err.Error(), "-toolexec=sneaky") {
+		t.Fatalf("launch error = %v, want the refused flag named", err)
+	}
+	if created {
+		t.Error("a refused go flag still created a session")
 	}
 }
 

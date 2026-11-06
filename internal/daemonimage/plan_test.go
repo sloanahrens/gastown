@@ -13,6 +13,17 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
+// planPins and planPinsPath are the four pins planBuilder is given: the same
+// shape the committed file has, with the test commits.
+var planPins = []Pin{
+	{Name: "bd", URL: "http://forgejo:3000/sloan/beads.git", Commit: testBDCommit},
+	{Name: "om", URL: "http://forgejo:3000/sloan/organic-mechanic.git", Commit: testOMCommit},
+	{Name: "hm", URL: "http://forgejo:3000/sloan/history-man.git", Commit: testHMCommit},
+	{Name: "devops", URL: "http://forgejo:3000/sloan/devops.git", Commit: testDevopsCommit},
+}
+
+const planPinsPath = "/repo/deploy/daemon/image-pins"
+
 // planBuilder is a Builder whose every seam fails the test if it is used: Plan
 // runs nothing, so it needs none of them.
 func planBuilder(t *testing.T) Builder {
@@ -44,21 +55,27 @@ func planBuilder(t *testing.T) Builder {
 		BDSrc:        "/src/beads",
 		BDCommit:     testBDCommit,
 		OMSrc:        "/src/om",
+		OMCommit:     testOMCommit,
 		HMSrc:        "/src/hm",
 		HMCommit:     testHMCommit,
 		DevopsSrc:    "/src/devops",
 		DevopsCommit: testDevopsCommit,
+		MangoSrc:     "/src/mango",
+		MangoCommit:  testMangoCommit,
+		Pins:         planPins,
+		PinsPath:     planPinsPath,
 		Dockerfile:   dockerfile,
 	}
 }
 
-// Plan names each step a full build runs, in order, with the argv the build runs,
-// and runs, writes and fetches nothing. The claude step names the URL that
-// FetchClaudeCLI requests, taken from the fetch itself. The gt line stamps the
-// first nine characters of the named commit, the cut the build stamps. The bd
-// line prints planBuildID for main.Build, the argv value only the worktree a
-// build makes can answer: Plan makes none, and the Git seam above fails the test
-// if it reads one from anywhere.
+// Plan names the pins file and each pin first, then each step a full build runs,
+// in order, with the argv the build runs, and runs, writes and fetches nothing.
+// The claude step names the URL that FetchClaudeCLI requests, taken from the
+// fetch itself. The gt line stamps the first nine characters of the named
+// commit, the cut the build stamps. The bd line prints planBuildID for
+// main.Build, the argv value only the worktree a build makes can answer: Plan
+// makes none, and the Git seam above fails the test if it reads one from
+// anywhere. The om line names its pin, never HEAD.
 func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	b := planBuilder(t)
@@ -80,15 +97,21 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 	}
 
 	steps := []struct{ label, names string }{
+		{"pins: ", planPinsPath},
+		{"pin bd: ", "http://forgejo:3000/sloan/beads.git at " + testBDCommit},
+		{"pin om: ", "http://forgejo:3000/sloan/organic-mechanic.git at " + testOMCommit},
+		{"pin hm: ", "http://forgejo:3000/sloan/history-man.git at " + testHMCommit},
+		{"pin devops: ", "http://forgejo:3000/sloan/devops.git at " + testDevopsCommit},
 		{"build gt: ", "go build -trimpath -ldflags " + gtCommitFlag + testRev[:buildstamp.Len] + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
-		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at HEAD)"},
+		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
 		{"build app-promote: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "app-promote", "app-promote") + " ./plugins/app-promote   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build town-metrics: ", "go build -trimpath -o " + filepath.Join(b.Out, "plugins", "town-metrics", "town-metrics") + " ./plugins/town-metrics   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build hm: ", "go build -trimpath -o " + filepath.Join(b.Out, "hm") + " " + HMPackage + "   (clean worktree of /src/hm at " + testHMCommit + ")"},
 		{"build devops-reporter: ", "go build -trimpath -o " + filepath.Join(b.Out, "devops-reporter") + " " + DevopsReporterPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
 		{"build release-reporter: ", "go build -trimpath -o " + filepath.Join(b.Out, "release-reporter") + " " + ReleaseReporterPackage + "   (clean worktree of /src/devops at " + testDevopsCommit + ")"},
 		{"check release-reporter: ", "go version -m " + filepath.Join(b.Out, "release-reporter") + "   (refused unless vMAJOR.MINOR.PATCH[-pre])"},
+		{"build mango: ", "docker --context " + DockerContext + " run --rm --platform linux/arm64 -v " + planMangoWorktree + ":/src -v " + planMangoStage + ":/out -w /src/go-api golang:1.27-bookworm sh -c apt-get update && apt-get install -y --no-install-recommends gcc g++ && CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false -ldflags=\"-w -s\" -o /out/mango ./cmd/mango   (clean worktree of /src/mango at " + testMangoCommit + ")"},
 		{"fetch claude: ", "GET " + fetched + " -> " + filepath.Join(b.Out, claudeCLIName) + "   (sha256 " + templates.ClaudeCLISHA256 + ")"},
 		{"fetch openshell: ", "GET " + templates.DaemonClientTools[0].URL + " -> " + filepath.Join(b.Out, "openshell") + "   (sha256 " + templates.DaemonClientTools[0].SHA256 + ")"},
 		{"fetch docker: ", "GET " + templates.DaemonClientTools[1].URL + " -> " + filepath.Join(b.Out, "docker") + "   (sha256 " + templates.DaemonClientTools[1].SHA256 + ")"},
@@ -229,9 +252,17 @@ func TestPlanRefusesWhatABuildRefuses(t *testing.T) {
 		{"no bd source", func(b *Builder) { b.BDSrc = "" }, testRev, "no bd source"},
 		{"no om source", func(b *Builder) { b.OMSrc = "" }, testRev, "no om source"},
 		{"no bd commit", func(b *Builder) { b.BDCommit = "" }, testRev, "no bd commit"},
+		{"no om commit", func(b *Builder) { b.OMCommit = "" }, testRev, "no om commit"},
 		{"no hm source", func(b *Builder) { b.HMSrc = "" }, testRev, "--hm-src is required"},
-		{"no devops commit", func(b *Builder) { b.DevopsCommit = "" }, testRev, "--devops-commit is required"},
+		{"no mango source", func(b *Builder) { b.MangoSrc = "" }, testRev, "--mango-src is required"},
+		{"no mango commit", func(b *Builder) { b.MangoCommit = "" }, testRev, "no mango commit"},
+		{"a mango commit that is not hex", func(b *Builder) { b.MangoCommit = "main" }, testRev, "is not a 7+ character hex commit"},
+		{"a canonical mango source", func(b *Builder) { b.MangoSrc = "/town/gastown/mayor/rig/mango" }, testRev, "canonical clone"},
+		{"no devops commit", func(b *Builder) { b.DevopsCommit = "" }, testRev, "no devops pin"},
 		{"a bd commit that is not hex", func(b *Builder) { b.BDCommit = "main" }, testRev, "is not a 7+ character hex commit"},
+		{"an om commit that is not hex", func(b *Builder) { b.OMCommit = "main" }, testRev, "is not a 7+ character hex commit"},
+		{"no pins file", func(b *Builder) { b.PinsPath = "" }, testRev, "no pins file named"},
+		{"three pins", func(b *Builder) { b.Pins = planPins[:3] }, testRev, "3 pins named, want the four"},
 		{"no Dockerfile", func(b *Builder) { b.Dockerfile = "" }, testRev, "no Dockerfile"},
 		{"a relative Dockerfile", func(b *Builder) { b.Dockerfile = "Dockerfile" }, testRev, "Dockerfile \"Dockerfile\" is not absolute"},
 		{"a Dockerfile that is not a file", func(b *Builder) { b.Dockerfile = filepath.Join(b.Out, "absent") }, testRev, "is not a file"},

@@ -8,7 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 )
@@ -135,28 +137,97 @@ func Main(args []string) int {
 	return runProgram(args, os.Stdout, os.Stderr, os.Getenv)
 }
 
-// runProgram answers Main: no arguments runs one plugin run, and "trim-cache",
-// "trim-paths", "trim-list", "trim-list-write", "seed-clone" and "seed-cache" are the
-// helpers a container of the image runs: in the seed and trim Jobs, or through a kubectl
-// exec into a pod that mounts the claim.
+// runProgram answers Main: no arguments, or the verb "run", runs one plugin run,
+// and "trim-cache", "trim-paths", "trim-list", "trim-list-write", "seed-clone"
+// and "seed-cache" are the helpers a container of the image runs: in the seed
+// and trim Jobs, or through a kubectl exec into a pod that mounts the claim.
+//
+// Any other first argument is refused with exit 2 and the verbs this program
+// knows, rather than run as a plugin run: a plugin run builds, publishes and
+// trims, so a Job whose image predates the subcommand it names would print a
+// deferral, complete, and trim nothing (gt-gg9hv.47). The refusal protects an
+// image built since this change only: one built before it still falls through
+// to the plugin run, so the Jobs pull a moving tag (gt-gg9hv.45).
 func runProgram(args []string, stdout, stderr io.Writer, get func(string) string) int {
-	if len(args) > 0 {
-		switch args[0] {
-		case "trim-cache":
-			return trimCacheMain(args[1:], stdout, stderr)
-		case "trim-paths":
-			return trimPathsMain(args[1:], stdout, stderr)
-		case "trim-list":
-			return trimListMain(args[1:], stdout, stderr)
-		case "trim-list-write":
-			return trimListWriteMain(args[1:], stdout, stderr)
-		case "seed-clone":
-			return seedCloneMain(args[1:], stdout, stderr)
-		case "seed-cache":
-			return seedCacheMain(args[1:], stdout, stderr)
+	return runProgramWith(args, stdout, stderr, get, runMain)
+}
+
+// pluginRun starts one plugin run: runMain, or a test's counter, which is how a
+// test shows that a refusal started none.
+type pluginRun func(out io.Writer, get func(string) string) int
+
+// helperCall is one helper run: the arguments after the verb, the writers, and
+// the plugin run the verb "run" starts. "run" ignores the arguments after it,
+// as the program ignored every argument before it had verbs.
+type helperCall struct {
+	args   []string
+	stdout io.Writer
+	stderr io.Writer
+	get    func(string) string
+	plugin pluginRun
+}
+
+// helperRun is one first argument runProgram dispatches: the verb, and the
+// helper it runs with the arguments after it.
+type helperRun struct {
+	verb string
+	help func(helperCall) int
+}
+
+// helperRuns are the first arguments this program knows, in the order the
+// refusal names them. The table is the only list: a verb added here is
+// dispatched and named in the refusal together, so the two cannot disagree.
+var helperRuns = []helperRun{
+	{"run", func(c helperCall) int { return c.plugin(c.stdout, c.get) }},
+	{"trim-cache", func(c helperCall) int { return trimCacheMain(c.args, c.stdout, c.stderr) }},
+	{"trim-paths", func(c helperCall) int { return trimPathsMain(c.args, c.stdout, c.stderr) }},
+	{"trim-list", func(c helperCall) int { return trimListMain(c.args, c.stdout, c.stderr) }},
+	{"trim-list-write", func(c helperCall) int { return trimListWriteMain(c.args, c.stdout, c.stderr) }},
+	{"seed-clone", func(c helperCall) int { return seedCloneMain(c.args, c.stdout, c.stderr) }},
+	{"seed-cache", func(c helperCall) int { return seedCacheMain(c.args, c.stdout, c.stderr) }},
+}
+
+// runProgramWith answers runProgram over entry, the plugin run it starts.
+func runProgramWith(args []string, stdout, stderr io.Writer, get func(string) string, entry pluginRun) int {
+	if len(args) == 0 {
+		return entry(stdout, get)
+	}
+	if h, ok := helperRunFor(args[0]); ok {
+		return h.help(helperCall{args: args[1:], stdout: stdout, stderr: stderr, get: get, plugin: entry})
+	}
+	fmt.Fprintf(stderr, "polecat-image: unknown subcommand %q: known are %s\n", oneLineArgument(args[0]), helperVerbNames())
+	return 2
+}
+
+// helperRunFor is the helper the verb names, and whether this program knows it.
+func helperRunFor(verb string) (helperRun, bool) {
+	for _, h := range helperRuns {
+		if h.verb == verb {
+			return h, true
 		}
 	}
-	return runMain(stdout, get)
+	return helperRun{}, false
+}
+
+// helperVerbNames is the known verbs as the refusal lists them.
+func helperVerbNames() string {
+	verbs := make([]string, len(helperRuns))
+	for i, h := range helperRuns {
+		verbs[i] = h.verb
+	}
+	return strings.Join(verbs, ", ")
+}
+
+// oneLineArgument is arg as the refusal prints it: a newline, a terminal escape
+// or any other character that is not printable becomes '?', so an argument
+// cannot forge a second log line or drive the terminal the Job's log is read in.
+func oneLineArgument(arg string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return '?'
+	}, arg)
 }
 
 // runMain configures and runs one plugin run, and answers the process exit

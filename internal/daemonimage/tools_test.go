@@ -191,8 +191,8 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 	}
 }
 
-// TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources: each refusal names the flag
-// the operator must fix, and runs nothing and writes nothing.
+// TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources: each refusal names the pin
+// or the checkout the operator must fix, and runs nothing and writes nothing.
 func TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -200,36 +200,36 @@ func TestDeployRefusesUnpinnedOrDirtyHMAndDevopsSources(t *testing.T) {
 		breakIt func(*Builder, *toolsGit)
 		want    string
 	}{
-		{"no --hm-commit", func(b *Builder, _ *toolsGit) { b.HMCommit = "" }, "--hm-commit is required"},
-		{"no --devops-commit", func(b *Builder, _ *toolsGit) { b.DevopsCommit = "" }, "--devops-commit is required"},
+		{"no hm pin", func(b *Builder, _ *toolsGit) { b.HMCommit = "" }, "no hm pin"},
+		{"no devops pin", func(b *Builder, _ *toolsGit) { b.DevopsCommit = "" }, "no devops pin"},
 		{"no --hm-src", func(b *Builder, _ *toolsGit) { b.HMSrc = "" }, "--hm-src is required"},
 		{"no --devops-src", func(b *Builder, _ *toolsGit) { b.DevopsSrc = "" }, "--devops-src is required"},
-		{"an --hm-commit that is not hex", func(b *Builder, _ *toolsGit) { b.HMCommit = "main" }, "--hm-commit \"main\" is not a 7+ character hex commit"},
-		{"an --hm-commit the checkout does not hold", func(b *Builder, g *toolsGit) {
+		{"a hm pin that is not hex", func(b *Builder, _ *toolsGit) { b.HMCommit = "main" }, "hm pin \"main\" is not a 7+ character hex commit"},
+		{"a hm pin the checkout does not hold", func(b *Builder, g *toolsGit) {
 			co := g.checkouts["/src/hm"]
 			co.holds = nil
 			g.checkouts["/src/hm"] = co
-		}, "--hm-commit " + testHMCommit + " is not a commit of /src/hm"},
-		{"an hm checkout not at --hm-commit", func(_ *Builder, g *toolsGit) {
+		}, "hm pin " + testHMCommit + " is not a commit of /src/hm"},
+		{"an hm checkout not at its pin", func(_ *Builder, g *toolsGit) {
 			co := g.checkouts["/src/hm"]
 			co.head = testOtherCommit
 			g.checkouts["/src/hm"] = co
-		}, "--hm-commit"},
-		{"a devops checkout not at --devops-commit", func(_ *Builder, g *toolsGit) {
+		}, "not its pin"},
+		{"a devops checkout not at its pin", func(_ *Builder, g *toolsGit) {
 			co := g.checkouts["/src/devops"]
 			co.head = testOtherCommit
 			g.checkouts["/src/devops"] = co
-		}, "--devops-commit"},
+		}, "not its pin"},
 		{"a dirty hm checkout", func(_ *Builder, g *toolsGit) {
 			co := g.checkouts["/src/hm"]
 			co.dirty = true
 			g.checkouts["/src/hm"] = co
-		}, "--hm-src"},
+		}, "uncommitted changes"},
 		{"a dirty devops checkout", func(_ *Builder, g *toolsGit) {
 			co := g.checkouts["/src/devops"]
 			co.dirty = true
 			g.checkouts["/src/devops"] = co
-		}, "--devops-src"},
+		}, "uncommitted changes"},
 		{"the canonical clone as --devops-src", func(b *Builder, _ *toolsGit) { b.DevopsSrc = "/town/rig/mayor/rig" }, "canonical clone"},
 		{"no runner", func(b *Builder, _ *toolsGit) { b.Run = nil }, "no runner"},
 		{"no git", func(b *Builder, _ *toolsGit) { b.Git = nil }, "no git to resolve"},

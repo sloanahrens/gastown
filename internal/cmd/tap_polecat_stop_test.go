@@ -231,7 +231,7 @@ func TestCommitWithinGrace(t *testing.T) {
 // suite): a snapshot preamble, then the command as a quoted eval argument, then
 // a trailing cwd write. The command is the only part that matters to the pane
 // scan, and it is the part a plain tokenization of the wrapper cannot see.
-const polecatStopWrapperArgv = `/bin/zsh -c source /Users/sloan/gt/.claude-town/shell-snapshots/snapshot-zsh-1790075016638-nti8n3.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'gt slot run --role gastown/diamond -- GOFLAGS=-p=8 make test' < /dev/null && pwd -P >| /tmp/claude-fac2-cwd`
+const polecatStopWrapperArgv = `/bin/zsh -c source /Users/user/gt/.claude-town/shell-snapshots/snapshot-zsh-1790075016638-nti8n3.sh 2>/dev/null || true && setopt NO_EXTENDED_GLOB NO_BARE_GLOB_QUAL 2>/dev/null || true && { \builtin unalias -- 'unsetenv'; \builtin unset -f -- 'unsetenv'; } >/dev/null 2>&1 || true && eval 'gt slot run --role gastown/diamond -- GOFLAGS=-p=8 make test' < /dev/null && pwd -P >| /tmp/claude-fac2-cwd`
 
 // TestPolecatStopVerificationArgv guards the gt-78n0 pane scan: the commands
 // that mean "this polecat is still verifying" must be recognized wherever the
@@ -316,7 +316,7 @@ func TestPolecatStopVerificationArgv(t *testing.T) {
 		},
 		{
 			name:   "gt done inside a background wrapper",
-			argv:   `/bin/zsh -c source /Users/sloan/gt/.claude-town/shell-snapshots/snapshot-zsh-1790075016638-nti8n3.sh 2>/dev/null || true && eval 'gt done' < /dev/null && pwd -P >| /tmp/claude-fac2-cwd`,
+			argv:   `/bin/zsh -c source /Users/user/gt/.claude-town/shell-snapshots/snapshot-zsh-1790075016638-nti8n3.sh 2>/dev/null || true && eval 'gt done' < /dev/null && pwd -P >| /tmp/claude-fac2-cwd`,
 			want:   "gt done",
 			expect: true,
 		},

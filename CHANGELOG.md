@@ -28,6 +28,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The historical design notes are retired** (gt-tlcfg9) — `docs/plans/`
+  (70 files) and `docs/research/` (16 files) are gone from the tree; the
+  2026-11-05 decision keeps them in git history only. They are in
+  `746d968873147fce1925cc2570c520d6a6cde874`:
+  `git show <commit>:docs/plans/<file>` still reads any note, and
+  `git ls-tree -r --name-only <commit> docs/plans docs/research` lists all 86.
+  Live docs and code comments that pointed at a note now state its substance
+  without the path. `docs/reviews/` stays: the landing worker writes it and
+  `internal/jev/scorecard` reads it.
+
 - **The two-seat polecat keys** (gt-mukgk) — `polecat_pool.agent`, `max_seats`,
   `overflow_agent`, `max_overflow`, `pro_agent`, `pro_max` and `pro_label`,
   `daemon.patrols.spec_dispatch.hooked_agent`, `max_hooked` and `prefer_hooked`,
@@ -488,7 +498,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly not a test failure, and slot wait is never counted against the
   run budget.
 - **Dangerous-command guard now covers the town tree** (gt-6e2l) — a dog
-  session's `grep -R "record-run" -n /Users/sloan/gt` ran unblocked and
+  session's `grep -R "record-run" -n /Users/user/gt` ran unblocked and
   walked every rig, every `.repo.git`, and every worktree in the town (>64 MB
   of output, 15-minute load average 17). The unbounded-scan rule
   (`scanRootDenylist`) covered `/` and `$HOME` but not the town, which is the

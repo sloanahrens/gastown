@@ -159,8 +159,12 @@ func TestEvaluateUnreadableDiskRaisesItsOwnAlert(t *testing.T) {
 func TestEvaluateDoesNotRaiseUnreadableTwice(t *testing.T) {
 	t.Parallel()
 	active := activeKeys("diskmaint:colima:unreadable")
-	if alerts := Evaluate([]Reading{{Name: "colima", Err: errors.New("ssh: i/o timeout")}}, active); len(alerts) != 0 {
-		t.Fatalf("Evaluate with the unreadable alert active = %+v, want no alert", alerts)
+	a := oneAlert(t, Evaluate([]Reading{{Name: "colima", Err: errors.New("ssh: i/o timeout")}}, active))
+	if a.Key != "diskmaint:colima:unreadable" || a.Raise || a.Clear || !a.Still || !a.Unreadable {
+		t.Fatalf("alert = %+v, want Key diskmaint:colima:unreadable with Still only", a)
+	}
+	if !strings.Contains(a.Detail, "still unreadable") {
+		t.Fatalf("Detail %q does not say the disk is still unreadable", a.Detail)
 	}
 }
 

@@ -141,6 +141,6 @@ the bead's Gate selects what this diff's boxes need.
 
 ## Where the lessons come from
 
-Read [Bead linting: how it works and what it taught](../research/2026-11-bead-linting.md)
-for the session record: the gt update beads, the refusals the lint made, and the
-defects that only hand reading found.
+The bead-linting session record — the gt update beads, the refusals the lint
+made, and the defects only hand reading found — is in git history (see
+CHANGELOG).
