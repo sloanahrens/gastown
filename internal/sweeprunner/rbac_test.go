@@ -28,6 +28,26 @@ const (
 	sweepRunnerRole   = "sweep-runner"
 )
 
+// sweepRoleGrant is what the namespaced Role may grant one resource: the API
+// group it belongs to and the verbs the sweep needs on it.
+type sweepRoleGrant struct {
+	group string
+	verbs []string
+}
+
+// sweepRoleAllowed is the exact set the namespaced Role may grant, written out
+// here so a widening needs a deliberate edit of this table as well as the
+// manifest. The resources are the ones the golden's namespaced lines name, and
+// pods/log, which the Job's own log read needs; the verbs are what the manifest
+// grants on each today.
+var sweepRoleAllowed = map[string]sweepRoleGrant{
+	"jobs":                   {"batch", []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+	"pods":                   {"", []string{"get", "list", "watch", "create", "patch", "delete", "deletecollection"}},
+	"pods/exec":              {"", []string{"create"}},
+	"pods/log":               {"", []string{"get"}},
+	"persistentvolumeclaims": {"", []string{"get", "list", "watch", "create", "update", "patch", "delete"}},
+}
+
 // rbacResourceGroup is the API group each resource the sweep's kubectl calls
 // touch belongs to. A resource missing here is an error: the check does not
 // guess a group for a call it has not been taught.
@@ -280,6 +300,43 @@ func rbacAllows(rules []rbacRule, group, resource, verb string) bool {
 	return false
 }
 
+// sweepRoleWidenings reports every grant in a namespaced Role that
+// sweepRoleAllowed does not hold: a wildcard in any of a rule's apiGroups,
+// resources or verbs, and each granted group, resource or verb outside the set.
+// Every rule is read, so a rule with several problems reports each of them.
+func sweepRoleWidenings(rules []rbacRule) []string {
+	var widened []string
+	for i, rule := range rules {
+		if slices.Contains(rule.APIGroups, "*") {
+			widened = append(widened, fmt.Sprintf("rule %d grants every API group with a wildcard", i+1))
+		}
+		if slices.Contains(rule.Resources, "*") {
+			widened = append(widened, fmt.Sprintf("rule %d grants every resource with a wildcard", i+1))
+		}
+		if slices.Contains(rule.Verbs, "*") {
+			widened = append(widened, fmt.Sprintf("rule %d grants every verb with a wildcard", i+1))
+		}
+		for _, resource := range rule.Resources {
+			grant, allowed := sweepRoleAllowed[resource]
+			if !allowed {
+				widened = append(widened, fmt.Sprintf("rule %d grants resource %q, which the sweep does not read", i+1, resource))
+				continue
+			}
+			for _, group := range rule.APIGroups {
+				if group != "*" && group != grant.group {
+					widened = append(widened, fmt.Sprintf("rule %d grants %q in API group %q, not %q", i+1, resource, group, grant.group))
+				}
+			}
+			for _, verb := range rule.Verbs {
+				if verb != "*" && !slices.Contains(grant.verbs, verb) {
+					widened = append(widened, fmt.Sprintf("rule %d grants %q on %q", i+1, verb, resource))
+				}
+			}
+		}
+	}
+	return widened
+}
+
 // TestSweepRBACManifestParses holds the manifest to a parseable set of the
 // objects the sweep runs with: the namespace, the runner's service account,
 // the token Secret, the namespaced Role and its binding, and the read-only
@@ -405,5 +462,105 @@ func TestSweepRBACClusterGrantIsReadOnly(t *testing.T) {
 				t.Errorf("ClusterRole %s grants %q in %q, want group %q", sweepReaderRole, res, rule.APIGroups, group)
 			}
 		}
+	}
+}
+
+// TestSweepRBACRoleGrantsOnlyWhatTheSweepNeeds holds the namespaced Role to
+// sweepRoleAllowed, so the Role cannot gain a resource, API group or verb no
+// golden line names. A Role the manifest does not hold fails too: a renamed
+// Role must not pass unchecked.
+func TestSweepRBACRoleGrantsOnlyWhatTheSweepNeeds(t *testing.T) {
+	t.Parallel()
+	role := findRBAC(loadSweepRBAC(t), "Role", sweepRunnerRole, sweepRunnerNS)
+	if role == nil {
+		t.Fatalf("%s has no Role %q in namespace %q", sweepRBACManifest, sweepRunnerRole, sweepRunnerNS)
+	}
+	for _, widened := range sweepRoleWidenings(role.Rules) {
+		t.Errorf("Role %s in %s grants more than the sweep uses: %s", sweepRunnerRole, sweepRunnerNS, widened)
+	}
+}
+
+// TestSweepRBACRoleCheckRejectsWidening drives each refusal sweepRoleWidenings
+// makes against a clone of the Role the manifest holds, so a check that stopped
+// noticing a widened rule fails here rather than on a future manifest edit.
+func TestSweepRBACRoleCheckRejectsWidening(t *testing.T) {
+	t.Parallel()
+	role := findRBAC(loadSweepRBAC(t), "Role", sweepRunnerRole, sweepRunnerNS)
+	if role == nil {
+		t.Fatalf("%s has no Role %q in namespace %q", sweepRBACManifest, sweepRunnerRole, sweepRunnerNS)
+	}
+	// withResource returns a clone of the Role's rules with edit applied to the
+	// first rule that grants resource, leaving the Role itself untouched.
+	withResource := func(resource string, edit func(*rbacRule)) []rbacRule {
+		t.Helper()
+		rules := slices.Clone(role.Rules)
+		for i := range rules {
+			if !slices.Contains(rules[i].Resources, resource) {
+				continue
+			}
+			rules[i] = rbacRule{
+				APIGroups: slices.Clone(rules[i].APIGroups),
+				Resources: slices.Clone(rules[i].Resources),
+				Verbs:     slices.Clone(rules[i].Verbs),
+			}
+			edit(&rules[i])
+			return rules
+		}
+		t.Fatalf("the Role has no rule granting %q", resource)
+		return nil
+	}
+	rows := []struct {
+		name  string
+		rules []rbacRule
+		want  string
+	}{
+		{
+			name:  "secrets added to the claim rule",
+			rules: withResource("persistentvolumeclaims", func(r *rbacRule) { r.Resources = append(r.Resources, "secrets") }),
+			want:  `resource "secrets"`,
+		},
+		{
+			name: "secrets in a rule of their own",
+			rules: append(slices.Clone(role.Rules), rbacRule{
+				APIGroups: []string{""},
+				Resources: []string{"secrets"},
+				Verbs:     []string{"get"},
+			}),
+			want: `resource "secrets"`,
+		},
+		{
+			name:  "wildcard resource",
+			rules: withResource("pods", func(r *rbacRule) { r.Resources = []string{"*"} }),
+			want:  "wildcard",
+		},
+		{
+			name:  "wildcard verb",
+			rules: withResource("pods", func(r *rbacRule) { r.Verbs = []string{"*"} }),
+			want:  "wildcard",
+		},
+		{
+			name:  "wildcard API group",
+			rules: withResource("pods", func(r *rbacRule) { r.APIGroups = []string{"*"} }),
+			want:  "wildcard",
+		},
+		{
+			name:  "verb outside the set",
+			rules: withResource("pods", func(r *rbacRule) { r.Verbs = append(r.Verbs, "impersonate") }),
+			want:  "impersonate",
+		},
+		{
+			name:  "resource in the wrong API group",
+			rules: withResource("pods", func(r *rbacRule) { r.APIGroups = []string{"apps"} }),
+			want:  "apps",
+		},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			widened := sweepRoleWidenings(row.rules)
+			if !slices.ContainsFunc(widened, func(w string) bool { return strings.Contains(w, row.want) }) {
+				t.Fatalf("widening by %s reports %q, want a complaint naming %q", row.name, widened, row.want)
+			}
+		})
 	}
 }
