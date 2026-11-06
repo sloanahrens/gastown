@@ -60,6 +60,13 @@ func blockedFrom(t *testing.T, words ...string) map[string]struct{} {
 	return blocked
 }
 
+// rulesThatNeverMatch is a valid rule set with nothing to report, so a test
+// that exercises only the blocklist is not widened by a default rule that
+// could add findings.
+func rulesThatNeverMatch() []Rule {
+	return []Rule{{Name: "test-never-matches", Match: func(string) bool { return false }}}
+}
+
 func scanFS(t *testing.T, fsys fstest.MapFS, allow []Allow) []Finding {
 	t.Helper()
 	findings, _, err := Scan(fsys, sortedPaths(fsys), DefaultRules(), shippedBlocked(t), allow)
@@ -326,7 +333,7 @@ func TestBlockedWordIsFoundInContentAndInPathsAndNeverEchoed(t *testing.T) {
 		path:             {Data: []byte("nothing here\n")},
 	}
 
-	findings, _, err := Scan(fsys, sortedPaths(fsys), DefaultRules(), blocked, nil)
+	findings, _, err := Scan(fsys, sortedPaths(fsys), rulesThatNeverMatch(), blocked, nil)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
@@ -358,7 +365,7 @@ func TestBlockedWordMatchesWholeWordsOnly(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, DefaultRules(), blocked, nil)
+			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, rulesThatNeverMatch(), blocked, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -381,7 +388,7 @@ func TestBlockedWordMatchesWholeWordsOnly(t *testing.T) {
 			{word + "2", 0},
 			{"x" + word, 0},
 		} {
-			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, DefaultRules(), blocked, nil)
+			findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, rulesThatNeverMatch(), blocked, nil)
 			if err != nil {
 				t.Fatalf("Scan: %v", err)
 			}
@@ -405,7 +412,7 @@ func TestWordBoundaryIsLettersAndDigitsNotUnderscoreOnly(t *testing.T) {
 		{"zebra2", 0},
 		{"2zebra", 0},
 	} {
-		findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, DefaultRules(), blocked, nil)
+		findings, _, err := Scan(singleFile("docs/a.md", tc.line+"\n"), []string{"docs/a.md"}, rulesThatNeverMatch(), blocked, nil)
 		if err != nil {
 			t.Fatalf("Scan: %v", err)
 		}
@@ -774,7 +781,42 @@ func TestScanRefusesAMissingFile(t *testing.T) {
 func TestScanRefusesAnEmptyRuleSetOrBlocklist(t *testing.T) {
 	t.Parallel()
 	fsys := singleFile("docs/note.md", "clean text\n")
-	paths := []string{"docs/note.md"}
+	path := "docs/note.md"
+	cases := []struct {
+		name    string
+		paths   []string
+		rules   []Rule
+		blocked map[string]struct{}
+		want    string
+	}{
+		{"no rules", []string{path}, nil, shippedBlocked(t), "no rules"},
+		{"empty rule set", []string{path}, []Rule{}, shippedBlocked(t), "no rules"},
+		{"no blocklist", []string{path}, DefaultRules(), nil, "no blocklist"},
+		{"empty blocklist", []string{path}, DefaultRules(), map[string]struct{}{}, "no blocklist"},
+		{"no rules and no paths", nil, nil, shippedBlocked(t), "no rules"},
+		{"no blocklist and no paths", nil, DefaultRules(), nil, "no blocklist"},
+		{"no rules and an empty path slice", []string{}, nil, shippedBlocked(t), "no rules"},
+		{"no blocklist and an empty path slice", []string{}, DefaultRules(), map[string]struct{}{}, "no blocklist"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			findings, excused, err := Scan(fsys, tc.paths, tc.rules, tc.blocked, nil)
+			if err == nil {
+				t.Fatalf("Scan reported %d findings and %d excused as clean", len(findings), len(excused))
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not say %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestValidateAllowRefusesAnEmptyRuleSetOrBlocklist passes no allow rows, so
+// the scanner never runs on a path: the inputs must be refused before the row
+// loop, or the call reports every row (and a scan with nothing to apply) valid.
+func TestValidateAllowRefusesAnEmptyRuleSetOrBlocklist(t *testing.T) {
+	t.Parallel()
+	fsys := singleFile("docs/note.md", "clean text\n")
 	cases := []struct {
 		name    string
 		rules   []Rule
@@ -788,9 +830,9 @@ func TestScanRefusesAnEmptyRuleSetOrBlocklist(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			findings, excused, err := Scan(fsys, paths, tc.rules, tc.blocked, nil)
+			err := ValidateAllow(fsys, nil, tc.rules, tc.blocked, nil)
 			if err == nil {
-				t.Fatalf("Scan reported %d findings and %d excused as clean", len(findings), len(excused))
+				t.Fatal("ValidateAllow reported an empty rule set or blocklist as valid")
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Errorf("error %q does not say %q", err, tc.want)

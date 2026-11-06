@@ -226,6 +226,9 @@ func SaveAllow(w io.Writer, rows []Allow) error {
 // returned in excused: the file's contents are not scanned, so that record is
 // how a report still names the file and the reason it is allowed.
 func Scan(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, []ExcusedForbiddenPath, error) {
+	if err := validateScanInputs(rules, blocked); err != nil {
+		return nil, nil, err
+	}
 	var findings []Finding
 	var excused []ExcusedForbiddenPath
 	for _, path := range paths {
@@ -241,20 +244,27 @@ func Scan(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{},
 	return findings, excused, nil
 }
 
-// scanPath reports the findings in one file and returns the bytes it read, plus
-// the forbidden-path record when an allow row excuses that path's finding.
-func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, *ExcusedForbiddenPath, []byte, error) {
+// validateScanInputs refuses a rule set or blocklist that would report every
+// path clean: a scan with nothing to apply is an error, never a result. It
+// runs once per scan, before any path is read.
+func validateScanInputs(rules []Rule, blocked map[string]struct{}) error {
 	if len(rules) == 0 {
-		return nil, nil, nil, fmt.Errorf("hygiene: scan has no rules")
+		return fmt.Errorf("hygiene: scan has no rules")
 	}
 	for _, rule := range rules {
 		if rule.Name == "" || rule.Match == nil {
-			return nil, nil, nil, fmt.Errorf("hygiene: rule with an empty name or no matcher")
+			return fmt.Errorf("hygiene: rule with an empty name or no matcher")
 		}
 	}
 	if len(blocked) == 0 {
-		return nil, nil, nil, fmt.Errorf("hygiene: scan has no blocklist")
+		return fmt.Errorf("hygiene: scan has no blocklist")
 	}
+	return nil
+}
+
+// scanPath reports the findings in one file and returns the bytes it read, plus
+// the forbidden-path record when an allow row excuses that path's finding.
+func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}, allow []Allow) ([]Finding, *ExcusedForbiddenPath, []byte, error) {
 	if !fs.ValidPath(path) {
 		return nil, nil, nil, fmt.Errorf("hygiene: invalid path %q", path)
 	}
@@ -307,6 +317,9 @@ func scanPath(fsys fs.FS, path string, rules []Rule, blocked map[string]struct{}
 // ValidateAllow refuses a row that names no path or reason, a row for an
 // untracked path, and a row whose rule no longer fires where it says it does.
 func ValidateAllow(fsys fs.FS, paths []string, rules []Rule, blocked map[string]struct{}, allow []Allow) error {
+	if err := validateScanInputs(rules, blocked); err != nil {
+		return err
+	}
 	tracked := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		tracked[path] = struct{}{}
