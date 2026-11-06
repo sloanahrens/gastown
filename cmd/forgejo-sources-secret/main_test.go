@@ -578,6 +578,7 @@ func TestSourcesSecretRefusesBadCommandLines(t *testing.T) {
 		"no admin token file": {"--api-url", forgejotest.APIRoot + forgejotest.APIPath},
 		"a positional":        {"--admin-token-file", adminFile, "extra"},
 		"an unknown flag":     {"--admin-token-file", adminFile, "--nope"},
+		"check with dry run":  {"--admin-token-file", adminFile, "--check", "--dry-run"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -592,6 +593,414 @@ func TestSourcesSecretRefusesBadCommandLines(t *testing.T) {
 				t.Fatalf("a refused command line made %d request(s)", n)
 			}
 		})
+	}
+}
+
+// checkNetwork is the network a --check run meets. Every request reaches the fake, except
+// that the one GET whose path ends in failSuffix is answered by failErr when it is set, or
+// else by failStatus and failBody. It records the method of every request, so a test can
+// see a write that was sent.
+type checkNetwork struct {
+	fake       *forgejotest.Fake
+	methods    []string
+	failSuffix string
+	failStatus int
+	failBody   string
+	failErr    error
+}
+
+func (c *checkNetwork) RoundTrip(req *http.Request) (*http.Response, error) {
+	c.methods = append(c.methods, req.Method)
+	if c.failSuffix != "" && req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, c.failSuffix) {
+		if c.failErr != nil {
+			return nil, c.failErr
+		}
+		return &http.Response{
+			StatusCode: c.failStatus,
+			Status:     http.StatusText(c.failStatus),
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(c.failBody)),
+			Request:    req,
+		}, nil
+	}
+	return c.fake.RoundTrip(req)
+}
+
+// checkResult is what one --check run printed and the code it exited with.
+type checkResult struct {
+	code   int
+	stdout string
+	stderr string
+}
+
+// runCheckNetwork runs the command with --check against net, with extra arguments after it.
+func runCheckNetwork(t *testing.T, net http.RoundTripper, extra ...string) checkResult {
+	t.Helper()
+	args := append([]string{"--api-url", forgejotest.APIRoot + forgejotest.APIPath, "--admin-token-file", adminFile, "--check"}, extra...)
+	var stdout, stderr bytes.Buffer
+	code := run(t.Context(), args, env{Now: testClock, ReadFile: adminReader(t), HTTP: &http.Client{Transport: net}}, &stdout, &stderr)
+	return checkResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
+}
+
+// newCheckFake returns the fake a check reads: the viewer account, the four read repositories
+// and the target, with bot-viewer a collaborator on every read repository except ungranted.
+func newCheckFake(t *testing.T, ungranted string) *forgejotest.Fake {
+	t.Helper()
+	f := forgejotest.New()
+	f.ViewerExists = true
+	for _, repo := range readRepos {
+		f.AddRepo(secretOwner + "/" + repo)
+		if repo != ungranted {
+			grant(t, f, secretOwner+"/"+repo)
+		}
+	}
+	f.AddRepo(secretOwner + "/" + secretRepo)
+	return f
+}
+
+// mintTokenNamed gives bot-viewer a token of that name on the fake, as an earlier run would
+// have left it.
+func mintTokenNamed(t *testing.T, f *forgejotest.Fake, name string) {
+	t.Helper()
+	status, body := f.Call(t, http.MethodPost, "/admin/users/"+viewerAccount+"/tokens",
+		forgejotest.JSONBody(map[string]any{"name": name, "scopes": []string{tokenScope}}))
+	if status != http.StatusCreated {
+		t.Fatalf("mint %s: HTTP %d %s", name, status, body)
+	}
+}
+
+// TestSourcesSecretCheckReportsTheState checks a --check run against a fake holding the
+// secret, the four read grants and two sources-token- tokens. It prints the secret as listed,
+// each repository as readable, and the two token names, exits 0, and sends only GETs: it
+// mints, revokes and stores nothing.
+func TestSourcesSecretCheckReportsTheState(t *testing.T) {
+	t.Parallel()
+	f := newCheckFake(t, "")
+	f.Call(t, http.MethodPut, "/repos/"+secretOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
+		forgejotest.JSONBody(map[string]string{"data": "stored-value-0a1b"}))
+	mintTokenNamed(t, f, testName)
+	mintTokenNamed(t, f, "sources-token-20261106-210000")
+	mintTokenNamed(t, f, "manual-token")
+	valueBefore := f.Token(viewerAccount, testName)
+	f.ClearCalls()
+	net := &checkNetwork{fake: f}
+
+	res := runCheckNetwork(t, net)
+
+	if res.code != forgejoprov.ExitOK {
+		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
+	}
+	for _, want := range []string{
+		"sloan/gastown secret SOURCES_TOKEN: listed\n",
+		"sloan/beads: readable by bot-viewer (HTTP 204)\n",
+		"sloan/om: readable by bot-viewer (HTTP 204)\n",
+		"sloan/hm: readable by bot-viewer (HTTP 204)\n",
+		"sloan/devops: readable by bot-viewer (HTTP 204)\n",
+		"bot-viewer token: " + testName + "\n",
+		"bot-viewer token: sources-token-20261106-210000\n",
+	} {
+		if !strings.Contains(res.stdout, want) {
+			t.Fatalf("stdout lacks %q:\n%s", want, res.stdout)
+		}
+	}
+	if strings.Contains(res.stdout, "manual-token") {
+		t.Fatalf("stdout names a token outside the sources-token- prefix:\n%s", res.stdout)
+	}
+	for _, m := range net.methods {
+		if m != http.MethodGet {
+			t.Fatalf("the check sent a %s, want GET only; methods: %v", m, net.methods)
+		}
+	}
+	if n := len(f.Writes()); n != 0 {
+		t.Fatalf("the fake saw %d write(s), want none", n)
+	}
+	if got := f.Token(viewerAccount, testName); got != valueBefore {
+		t.Fatal("the check changed the token it read")
+	}
+	if n := len(f.Violations()); n != 0 {
+		t.Fatalf("the check made %d request(s) the fake refused, want none", n)
+	}
+}
+
+// storeCheckSecret stores SOURCES_TOKEN on the target repository of a check fake, as an
+// earlier real run would have.
+func storeCheckSecret(t *testing.T, f *forgejotest.Fake) {
+	t.Helper()
+	f.Call(t, http.MethodPut, "/repos/"+secretOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
+		forgejotest.JSONBody(map[string]string{"data": "stored-value-0a1b"}))
+}
+
+// TestSourcesSecretCheckUnreadableRepositoryExitsOne checks a required repository that answers
+// 404 for bot-viewer makes the check name it as not readable and exit 1, with the secret listed
+// and the token list fine. The same check with all four readable exits 0.
+func TestSourcesSecretCheckUnreadableRepositoryExitsOne(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		ungranted string
+		wantCode  int
+	}{
+		{name: "one repository answers 404", ungranted: "om", wantCode: forgejoprov.ExitFailure},
+		{name: "all four answer 204", ungranted: "", wantCode: forgejoprov.ExitOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCheckFake(t, tc.ungranted)
+			storeCheckSecret(t, f)
+			mintTokenNamed(t, f, testName)
+			f.ClearCalls()
+
+			res := runCheckNetwork(t, &checkNetwork{fake: f})
+
+			if res.code != tc.wantCode {
+				t.Fatalf("exit %d, want %d; stderr: %s", res.code, tc.wantCode, res.stderr)
+			}
+			if tc.ungranted == "" {
+				return
+			}
+			if !strings.Contains(res.stdout, "sloan/om: not readable by bot-viewer (HTTP 404)\n") {
+				t.Fatalf("stdout does not name sloan/om as not readable:\n%s", res.stdout)
+			}
+			if !strings.Contains(res.stderr, "sloan/om is not readable by bot-viewer") {
+				t.Fatalf("stderr does not name sloan/om as not readable:\n%s", res.stderr)
+			}
+			if !strings.Contains(res.stdout, "sloan/beads: readable by bot-viewer (HTTP 204)\n") {
+				t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
+			}
+			if n := len(f.Writes()); n != 0 {
+				t.Fatalf("the fake saw %d write(s), want none", n)
+			}
+		})
+	}
+}
+
+// TestSourcesSecretCheckUnlistedSecretIsReportedAndExitsZero checks that with the secret absent
+// and every other read fine, the check prints that SOURCES_TOKEN is not listed and exits 0. That
+// is the state before the first real run, so it is reported, not failed.
+func TestSourcesSecretCheckUnlistedSecretIsReportedAndExitsZero(t *testing.T) {
+	t.Parallel()
+	f := newCheckFake(t, "")
+	mintTokenNamed(t, f, testName)
+	f.ClearCalls()
+
+	res := runCheckNetwork(t, &checkNetwork{fake: f})
+
+	if res.code != forgejoprov.ExitOK {
+		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
+	}
+	if !strings.Contains(res.stdout, "sloan/gastown secret SOURCES_TOKEN: not listed\n") {
+		t.Fatalf("stdout does not say the secret is not listed:\n%s", res.stdout)
+	}
+	if res.stderr != "" {
+		t.Fatalf("stderr is not empty for an unlisted secret:\n%s", res.stderr)
+	}
+}
+
+// TestSourcesSecretCheckReportsWhatIsMissing checks a failing token list alone, with the secret
+// listed and the four repositories readable, is reported and exits 1. No other read fails, so
+// the exit code rides on the token list alone.
+func TestSourcesSecretCheckReportsWhatIsMissing(t *testing.T) {
+	t.Parallel()
+	f := newCheckFake(t, "")
+	storeCheckSecret(t, f)
+	f.ClearCalls()
+	net := &checkNetwork{
+		fake:       f,
+		failSuffix: "/admin/users/" + viewerAccount + "/tokens",
+		failStatus: http.StatusInternalServerError,
+		failBody:   `{"message":"internal error"}`,
+	}
+
+	res := runCheckNetwork(t, net)
+
+	if res.code != forgejoprov.ExitFailure {
+		t.Fatalf("exit %d, want %d; stdout: %s", res.code, forgejoprov.ExitFailure, res.stdout)
+	}
+	if !strings.Contains(res.stdout, "sloan/gastown secret SOURCES_TOKEN: listed\n") {
+		t.Fatalf("stdout does not say the secret is listed:\n%s", res.stdout)
+	}
+	if !strings.Contains(res.stdout, "sloan/om: readable by bot-viewer (HTTP 204)\n") {
+		t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
+	}
+	if !strings.Contains(res.stderr, "could not list the tokens of bot-viewer") || !strings.Contains(res.stderr, "HTTP 500") {
+		t.Fatalf("stderr does not say the token list failed with HTTP 500:\n%s", res.stderr)
+	}
+	if n := len(f.Writes()); n != 0 {
+		t.Fatalf("the fake saw %d write(s), want none", n)
+	}
+}
+
+// TestSourcesSecretCheckRefusesANullListReply checks a 200 reply that is JSON null, or any
+// other non-array body, for the secret list or the token list is a failed read: the check
+// reports it and exits 1, and never prints the malformed reply as a state (the secret as
+// "not listed", or the tokens as none listed).
+func TestSourcesSecretCheckRefusesANullListReply(t *testing.T) {
+	t.Parallel()
+	tokenPath := "/admin/users/" + viewerAccount + "/tokens"
+	cases := []struct {
+		name       string
+		failSuffix string
+		body       string
+		wantErr    string
+		wantAbsent string
+	}{
+		{
+			name:       "the secret list replies null",
+			failSuffix: "/sloan/gastown/actions/secrets",
+			body:       `null`,
+			wantErr:    "could not list the Actions secrets of sloan/gastown",
+			wantAbsent: "secret SOURCES_TOKEN: not listed",
+		},
+		{
+			name:       "the secret list replies an object",
+			failSuffix: "/sloan/gastown/actions/secrets",
+			body:       `{"data":[]}`,
+			wantErr:    "could not list the Actions secrets of sloan/gastown",
+			wantAbsent: "secret SOURCES_TOKEN: not listed",
+		},
+		{
+			name:       "the token list replies null",
+			failSuffix: tokenPath,
+			body:       `null`,
+			wantErr:    "could not list the tokens of bot-viewer",
+			wantAbsent: "tokens listed",
+		},
+		{
+			name:       "the token list replies an object",
+			failSuffix: tokenPath,
+			body:       `{"tokens":[]}`,
+			wantErr:    "could not list the tokens of bot-viewer",
+			wantAbsent: "tokens listed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCheckFake(t, "")
+			storeCheckSecret(t, f)
+			mintTokenNamed(t, f, testName)
+			net := &checkNetwork{fake: f, failSuffix: tc.failSuffix, failStatus: http.StatusOK, failBody: tc.body}
+
+			res := runCheckNetwork(t, net)
+
+			if res.code != forgejoprov.ExitFailure {
+				t.Fatalf("exit %d, want %d; stdout: %s stderr: %s", res.code, forgejoprov.ExitFailure, res.stdout, res.stderr)
+			}
+			if !strings.Contains(res.stderr, tc.wantErr) || !strings.Contains(res.stderr, "not a JSON array") {
+				t.Fatalf("stderr lacks %q and the refusal reason:\n%s", tc.wantErr, res.stderr)
+			}
+			if strings.Contains(res.stdout, tc.wantAbsent) {
+				t.Fatalf("stdout prints a malformed reply as a state (%q):\n%s", tc.wantAbsent, res.stdout)
+			}
+		})
+	}
+}
+
+// TestSourcesSecretCheckReportsATransportFailure checks a collaborator check that gets no
+// HTTP reply at all is reported as such and exits 1, not read as a repository state.
+func TestSourcesSecretCheckReportsATransportFailure(t *testing.T) {
+	t.Parallel()
+	f := newCheckFake(t, "")
+	storeCheckSecret(t, f)
+	mintTokenNamed(t, f, testName)
+	net := &checkNetwork{
+		fake:       f,
+		failSuffix: "/sloan/hm/collaborators/" + viewerAccount,
+		failErr:    errNoReply,
+	}
+
+	res := runCheckNetwork(t, net)
+
+	if res.code != forgejoprov.ExitFailure {
+		t.Fatalf("exit %d, want %d; stdout: %s", res.code, forgejoprov.ExitFailure, res.stdout)
+	}
+	if !strings.Contains(res.stderr, "the collaborator check on sloan/hm got no HTTP reply") {
+		t.Fatalf("stderr does not name the transport failure:\n%s", res.stderr)
+	}
+	if strings.Contains(res.stdout, "sloan/hm: ") {
+		t.Fatalf("stdout reports a state for a repository whose check got no reply:\n%s", res.stdout)
+	}
+	if !strings.Contains(res.stdout, "sloan/om: readable by bot-viewer (HTTP 204)") {
+		t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
+	}
+}
+
+// TestSourcesSecretCheckNeverPrintsAReply checks no output line carries a reply body. A
+// faulted reply carries the escaped leaky value and a secret-like value; a success reply
+// carries the stored secret value. Neither the raw value nor its escaped form appears in
+// stdout or stderr, while the repository names and statuses still print.
+func TestSourcesSecretCheckNeverPrintsAReply(t *testing.T) {
+	t.Parallel()
+	escaped, err := json.Marshal(leakyValue)
+	if err != nil {
+		t.Fatalf("encode the fixture value: %v", err)
+	}
+	escapedInner := string(escaped[1 : len(escaped)-1])
+	const sha1Like = "0123456789abcdef0123456789abcdef01234567"
+	faultBody := `{"message":"` + escapedInner + `","sha1":"` + sha1Like + `"}`
+	forms := []string{leakyValue, escapedInner, sha1Like}
+
+	cases := []struct {
+		name       string
+		failSuffix string
+		failStatus int
+		wantCode   int
+	}{
+		{name: "success", wantCode: forgejoprov.ExitOK},
+		{name: "secret list fails", failSuffix: "/sloan/gastown/actions/secrets", failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
+		{name: "collaborator check fails", failSuffix: "/sloan/om/collaborators/" + viewerAccount, failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
+		{name: "token list fails", failSuffix: "/admin/users/" + viewerAccount + "/tokens", failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCheckFake(t, "")
+			f.Call(t, http.MethodPut, "/repos/"+secretOwner+"/"+secretRepo+"/actions/secrets/"+secretName,
+				forgejotest.JSONBody(map[string]string{"data": leakyValue}))
+			mintTokenNamed(t, f, testName)
+			net := &checkNetwork{fake: f, failSuffix: tc.failSuffix, failStatus: tc.failStatus, failBody: faultBody}
+
+			res := runCheckNetwork(t, net)
+
+			if res.code != tc.wantCode {
+				t.Fatalf("exit %d, want %d; stderr: %s", res.code, tc.wantCode, res.stderr)
+			}
+			output := res.stdout + res.stderr
+			for _, form := range forms {
+				if strings.Contains(output, form) {
+					t.Fatalf("the output carries a reply body value %q:\n%s", form, output)
+				}
+			}
+			if !strings.Contains(res.stdout, "sloan/beads: ") {
+				t.Fatalf("stdout lacks the repository line for sloan/beads:\n%s", res.stdout)
+			}
+		})
+	}
+}
+
+// TestSourcesSecretCheckPrintsOnlyMintedNames checks a token whose name is not the shape this
+// command mints is counted and not printed: its name, which the server sent, reaches no output.
+func TestSourcesSecretCheckPrintsOnlyMintedNames(t *testing.T) {
+	t.Parallel()
+	f := newCheckFake(t, "")
+	mintTokenNamed(t, f, testName)
+	mintTokenNamed(t, f, "sources-token-by-hand")
+	f.ClearCalls()
+
+	res := runCheckNetwork(t, &checkNetwork{fake: f})
+
+	if res.code != forgejoprov.ExitOK {
+		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
+	}
+	if strings.Contains(res.stdout, "by-hand") {
+		t.Fatalf("stdout prints a token name outside the minted shape:\n%s", res.stdout)
+	}
+	if !strings.Contains(res.stdout, "bot-viewer token: "+testName+"\n") {
+		t.Fatalf("stdout lacks the minted-shape token name:\n%s", res.stdout)
+	}
+	if !strings.Contains(res.stdout, "1 more sources-token- token(s) do not have a name this command mints") {
+		t.Fatalf("stdout does not count the other token:\n%s", res.stdout)
 	}
 }
 

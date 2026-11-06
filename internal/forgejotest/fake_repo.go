@@ -64,6 +64,8 @@ func (f *Fake) serveRepo(method string, parts []string, body []byte) (int, strin
 		return refusal(http.StatusNotFound, "the repository does not exist, or the token cannot see it")
 	}
 	switch {
+	case len(segs) == 4 && segs[2] == "actions" && segs[3] == "secrets" && method == http.MethodGet:
+		return r.listSecrets()
 	case len(segs) == 5 && segs[2] == "actions" && segs[3] == "secrets" && method == http.MethodPut:
 		return r.setSecret(segs[4], body, f.SecretRefusal)
 	case len(segs) == 4 && segs[2] == "collaborators":
@@ -144,6 +146,16 @@ func (r *fakeRepo) setSecret(name string, body []byte, refusalStatus int) (int, 
 		return http.StatusNoContent, ""
 	}
 	return http.StatusCreated, ""
+}
+
+// listSecrets answers the Actions secrets the repository holds as a JSON array of objects
+// with a name, sorted by name, as the live server lists them. No value is listed.
+func (r *fakeRepo) listSecrets() (int, string) {
+	out := []map[string]any{}
+	for _, name := range slices.Sorted(maps.Keys(r.secrets)) {
+		out = append(out, map[string]any{"name": name})
+	}
+	return reply(http.StatusOK, out)
 }
 
 // Secret returns the value the repository holds for the named Actions secret, and
