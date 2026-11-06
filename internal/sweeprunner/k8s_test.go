@@ -1052,12 +1052,12 @@ func TestK8sRunnerMountsTheCacheAndSetsTheGoCacheEnv(t *testing.T) {
 	var mount VolumeMount
 	found := false
 	for _, m := range runner.VolumeMounts {
-		if m.MountPath == "/var/cache/gt-sweep" {
+		if m.MountPath == cacheMount {
 			mount, found = m, true
 		}
 	}
 	if !found {
-		t.Fatalf("the runner mounts nothing at /var/cache/gt-sweep: %+v", runner.VolumeMounts)
+		t.Fatalf("the runner mounts nothing at %s: %+v", cacheMount, runner.VolumeMounts)
 	}
 	if mount.ReadOnly {
 		t.Error("the runner mounts the cache read-only: the Go tools write their caches to it")
@@ -1072,8 +1072,8 @@ func TestK8sRunnerMountsTheCacheAndSetsTheGoCacheEnv(t *testing.T) {
 		t.Errorf("the cache mount is backed by claim %q, want %q", claim, CacheClaimName(goldenSpec().Rig))
 	}
 	for _, want := range []EnvVar{
-		{Name: "GOCACHE", Value: "/var/cache/gt-sweep/gocache"},
-		{Name: "GOMODCACHE", Value: "/var/cache/gt-sweep/gomodcache"},
+		{Name: "GOCACHE", Value: cacheMount + "/gocache"},
+		{Name: "GOMODCACHE", Value: cacheMount + "/gomodcache"},
 	} {
 		if !slices.Contains(runner.Env, want) {
 			t.Errorf("runner env %v does not set %s=%s", runner.Env, want.Name, want.Value)
