@@ -274,14 +274,14 @@ func TestSourcesSecretRefusesAndRevokesOnAnUnreadableRepo(t *testing.T) {
 	}
 }
 
-// TestSourcesSecretRevokesAfterInterrupt covers a run cancelled after the mint and a read
+// TestSourcesSecretRevokesAfterInterrupt covers a run canceled after the mint and a read
 // that fails in transport. The fake refuses a request whose context is done, so a revoke
-// made on the run's cancelled context never reaches it: the token is gone only when the
+// made on the run's canceled context never reaches it: the token is gone only when the
 // revoke runs on a context detached from the run's. Either way nothing is stored and the
 // run exits 1.
 func TestSourcesSecretRevokesAfterInterrupt(t *testing.T) {
 	t.Parallel()
-	t.Run("the run is cancelled after the mint", func(t *testing.T) {
+	t.Run("the run is canceled after the mint", func(t *testing.T) {
 		t.Parallel()
 		f := newSourcesFake(t, "")
 		ctx, cancel := context.WithCancel(context.Background())

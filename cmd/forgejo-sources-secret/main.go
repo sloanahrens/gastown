@@ -211,7 +211,7 @@ func readRepoStatus(reader *forgejoprov.Client, repo string) (int, error) {
 }
 
 // revokeMinted revokes the token the run minted. The revoke runs on a context detached
-// from the run's, with its own timeout, so a signal that cancelled the run cannot stop
+// from the run's, with its own timeout, so a signal that canceled the run cannot stop
 // it and leave the token live. A revoke that fails is reported by name, since that
 // token is then still live and the operator must remove it.
 func revokeMinted(ctx context.Context, admin *forgejoprov.Client, name string, stderr io.Writer) {
