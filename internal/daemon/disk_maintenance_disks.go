@@ -373,10 +373,35 @@ type diskMaintAlerts struct {
 	acquireTurn func(ctx context.Context) (release func(), err error)
 	mu          sync.Mutex
 	active      map[string]bool
-	// stillLogged is the pass time of the last "still unreadable" line for a
-	// key, or of the pass that first saw its disk unreadable. The clear forgets
-	// it, so a new outage starts its own hour.
+	// stillLogged is the pass time of the last once-an-hour line for a key: the
+	// "still unreadable" line of an open unreadable alert, the pass that first
+	// saw its disk unreadable, or the busy tick's alert-only fallback line,
+	// which is keyed apart from every alert. The clear forgets an alert's entry,
+	// so a new outage starts its own hour.
 	stillLogged map[string]time.Time
+	// appliedAt is when an application last read the disks and decided, by the
+	// pass clock. The busy tick's alert-only pass spaces its reads from it, so
+	// it never repeats a reading a trim or a full pass just took (gt-gg9hv.53).
+	appliedAt time.Time
+}
+
+// alertOnlyDue reports whether a busy tick's alert-only pass may read the disks
+// at now: the last application, by any pass, was at least every ago, or there
+// has been none.
+func (a *diskMaintAlerts) alertOnlyDue(now time.Time, every time.Duration) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.appliedAt.IsZero() || now.Sub(a.appliedAt) >= every
+}
+
+// recordApplied keeps when an application last read the disks and applied the
+// alerts. Only readAndApplyDiskAlerts writes it, and only after it applied, so a
+// pass that never took its turn, or whose context ended first, restarts no
+// spacing (gt-gg9hv.53).
+func (a *diskMaintAlerts) recordApplied(at time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.appliedAt = at.Round(0)
 }
 
 // takeTurn waits for this pass's turn to apply the alerts. A pass whose context
@@ -408,6 +433,14 @@ func (a *diskMaintAlerts) takeGate(ctx context.Context) (release func(), err err
 // decision; false means the pass's context ended before its turn came and
 // nothing was read.
 func (d *Daemon) readAndApplyDiskAlerts(ctx context.Context, now time.Time) ([]disks.Reading, bool) {
+	return d.readAndApplyDiskAlertsLogging(ctx, now, d.logAlertFallback)
+}
+
+// readAndApplyDiskAlertsLogging is readAndApplyDiskAlerts with the line a pass
+// prints when another pass holds the turn routed through fallbackLog, which is
+// how the busy tick's alert-only pass holds that line to once an hour
+// (gt-gg9hv.53). fallbackLog is never nil.
+func (d *Daemon) readAndApplyDiskAlertsLogging(ctx context.Context, now time.Time, fallbackLog func(error)) ([]disks.Reading, bool) {
 	waitCtx, cancelWait := context.WithTimeout(ctx, diskMaintAlertTurnWait)
 	release, err := d.diskMaintAlerts.takeTurn(waitCtx)
 	cancelWait()
@@ -419,13 +452,21 @@ func (d *Daemon) readAndApplyDiskAlerts(ctx context.Context, now time.Time) ([]d
 		// Another pass has held the turn for the whole wait, a notifier that
 		// is slow to answer: this pass reads the disks for its own decisions and
 		// leaves the alerts to that one, so its targets are not held off.
-		d.logger.Printf("disk_maintenance: another pass is applying the disk alerts; this pass reads the disks only: %v", err)
+		fallbackLog(err)
 		return d.diskMaintenanceSeams().readDisks(ctx), true
 	}
 	defer release()
 	readings := d.diskMaintenanceSeams().readDisks(ctx)
 	d.applyDiskAlerts(ctx, readings, now)
+	d.diskMaintAlerts.recordApplied(now)
 	return readings, true
+}
+
+// logAlertFallback prints the line a pass prints when another pass held the
+// alert turn for the whole wait: it reads the disks for its own decisions and
+// leaves the alerts to that pass.
+func (d *Daemon) logAlertFallback(err error) {
+	d.logger.Printf("disk_maintenance: another pass is applying the disk alerts; this pass reads the disks only: %v", err)
 }
 
 // snapshot returns a copy of the open keys, which is what disks.Evaluate
@@ -470,6 +511,14 @@ func (a *diskMaintAlerts) stillUnreadableDue(key string, now time.Time) bool {
 	}
 	a.stillLogged[key] = now
 	return true
+}
+
+// allowHourlyLog reports whether the patrol may print the line keyed key at
+// now, recording now when it may. It is the stillUnreadableDue rule for a line
+// that repeats a standing condition, such as the alert-only pass's fallback
+// (gt-gg9hv.53).
+func (a *diskMaintAlerts) allowHourlyLog(key string, now time.Time) bool {
+	return a.stillUnreadableDue(key, now)
 }
 
 // recordUnreadableRaised starts the repeat clock at the pass that tried to

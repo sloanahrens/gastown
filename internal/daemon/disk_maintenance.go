@@ -87,6 +87,17 @@ const (
 	// interval, so a transient refusal costs the next few five-minute ticks
 	// instead of two hours (gt-gg9hv.24.6).
 	cacheTrimRetryInterval = 15 * time.Minute
+
+	// diskMaintBusyAlertEvery is how often a busy tick with nothing else due
+	// re-reads the disks to apply the alerts. The trim's interval can be hours,
+	// and a disk that fills in that time raises its alert too late to leave
+	// room above the kubelet's eviction line (gt-gg9hv.53).
+	diskMaintBusyAlertEvery = 10 * time.Minute
+
+	// diskMaintAlertOnlyFallbackKey is the key the alert-only pass holds its
+	// "another pass holds the turn" line under, at the still-unreadable line's
+	// once-an-hour rate. It is not an alert key, so no alert shares its state.
+	diskMaintAlertOnlyFallbackKey = "alert_only:fallback"
 )
 
 // diskMaintSeams are the patrol's outside reads and side effects, replaceable
@@ -437,7 +448,9 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 }
 
 // runDiskMaintenance is the tick: it finds the targets due, refuses quietly
-// while the town is busy, and then runs them off the loop goroutine.
+// while the town is busy, and then runs them off the loop goroutine. A busy
+// tick with nothing due still reads the disks for the alerts
+// (runDiskMaintenanceAlertOnlyTick).
 //
 // It runs on the loop goroutine and only reads the schedule: the pass writes
 // it when it concludes a target, and a pass that deferred leaves that target
@@ -456,16 +469,18 @@ func (d *Daemon) runDiskMaintenance() {
 	for _, err := range errs {
 		d.refuseDiskMaintenance(err)
 	}
-	if due.empty() {
-		return
-	}
 
 	mode, err := diskMaintenanceMode(d.patrolConfig)
 	if err != nil {
-		// A mode the patrol cannot act on runs nothing. The mode is checked again
-		// on every tick that has work due; the refusal is reported once rather
-		// than on each of them, and the schedule stands.
+		// A mode the patrol cannot act on runs nothing, and that holds for the
+		// alert-only pass a tick with nothing due runs: the refusal is reported
+		// once rather than on each tick, and the schedule stands.
 		d.refuseDiskMaintenance(err)
+		return
+	}
+
+	if due.empty() {
+		d.runDiskMaintenanceAlertOnlyTick(now)
 		return
 	}
 
@@ -480,6 +495,47 @@ func (d *Daemon) runDiskMaintenance() {
 	s.dispatch(func() {
 		defer d.diskMaintRunning.Store(false)
 		d.diskMaintenancePass(now, mode, due)
+	})
+}
+
+// runDiskMaintenanceAlertOnlyTick is the tick's last case: nothing due, so no
+// pass this tick dispatches would read the disks. A busy town can stay busy for
+// hours, and the alerts must not wait that long for a reading, so the tick
+// reads them through a pass of their own (gt-gg9hv.53).
+//
+// The spacing is checked before the quiet guard, so a tick inside it costs no
+// quiet call, and it is measured from the last application any pass made, so
+// this pass never repeats a reading a trim or a full pass just took.
+func (d *Daemon) runDiskMaintenanceAlertOnlyTick(now time.Time) {
+	if !d.diskMaintAlerts.alertOnlyDue(now, diskMaintBusyAlertEvery) {
+		return
+	}
+	if quiet, _ := d.maintenance().quiet(d); quiet {
+		return // a quiet tick with nothing due has nothing to do
+	}
+	if !d.diskMaintAlertOnlyRunning.CompareAndSwap(false, true) {
+		return // the alert-only pass is still running
+	}
+	d.diskMaintenanceSeams().dispatch(func() {
+		defer d.diskMaintAlertOnlyRunning.Store(false)
+		d.diskMaintenanceAlertOnlyPass()
+	})
+}
+
+// diskMaintenanceAlertOnlyPass reads the disks and applies the alerts, and
+// nothing else: it writes no schedule record, so it can neither spend the
+// trim's interval nor delay a target. It waits for the alert turn like a full
+// pass; a wait that runs out leaves it reading the disks alone and the alerts
+// with the pass that holds the turn, a result it reports once an hour rather
+// than on every pass the spacing allows (gt-gg9hv.53).
+func (d *Daemon) diskMaintenanceAlertOnlyPass() {
+	ctx, cancel := d.diskMaintenanceContext()
+	defer cancel()
+	now := d.diskMaintenanceSeams().now()
+	d.readAndApplyDiskAlertsLogging(ctx, now, func(err error) {
+		if d.diskMaintAlerts.allowHourlyLog(diskMaintAlertOnlyFallbackKey, now) {
+			d.logAlertFallback(err)
+		}
 	})
 }
 
