@@ -106,17 +106,28 @@ MR: "gt-wisp-1"`,
 			notes: "MERGE REJECTION (attempt 1): lint - unaddressed\nBranch: polecat/zircon/gt-test",
 			want:  nil,
 		},
+		{
+			name:  "the target tip a gate rejection recorded is read",
+			notes: rejectionNoteAt("gate", "abc123"),
+			want: []rejectedAttempt{{
+				branch:    rejectedBranch,
+				mrID:      "gt-wisp-v8j9",
+				summary:   "(attempt 1): gate - gate refused the merged tree",
+				kind:      "gate",
+				targetTip: "abc123",
+			}},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rejectedAttemptsFromNotes(tc.notes)
+			got := distinctAttempts(rejectionBlocksFromNotes(tc.notes))
 			if len(got) != len(tc.want) {
-				t.Fatalf("rejectedAttemptsFromNotes = %+v, want %+v", got, tc.want)
+				t.Fatalf("distinctAttempts = %+v, want %+v", got, tc.want)
 			}
 			for i := range got {
 				if got[i] != tc.want[i] {
-					t.Fatalf("rejectedAttemptsFromNotes[%d] = %+v, want %+v", i, got[i], tc.want[i])
+					t.Fatalf("distinctAttempts[%d] = %+v, want %+v", i, got[i], tc.want[i])
 				}
 			}
 		})
@@ -131,13 +142,19 @@ MR: "gt-wisp-1"`,
 type fakeReworkGit struct {
 	head     string
 	patchIDs map[string]string // tip sha -> patch-id against the target
+	// targetTip is what the target ref resolves to now; empty is a target the
+	// clone cannot read.
+	targetTip string
 }
 
 func (g fakeReworkGit) Rev(ref string) (string, error) {
-	if ref != "HEAD" || g.head == "" {
-		return "", fmt.Errorf("fatal: ambiguous argument %q", ref)
+	switch {
+	case ref == "HEAD" && g.head != "":
+		return g.head, nil
+	case ref == "origin/main" && g.targetTip != "":
+		return g.targetTip, nil
 	}
-	return g.head, nil
+	return "", fmt.Errorf("fatal: ambiguous argument %q", ref)
 }
 
 func (g fakeReworkGit) MergeBase(target, sha string) (string, error) {
@@ -343,5 +360,70 @@ func TestRejectionKindFromSummary(t *testing.T) {
 		if got := rejectionKindFromSummary(summary); got != want {
 			t.Errorf("rejectionKindFromSummary(%q) = %q, want %q", summary, got, want)
 		}
+	}
+}
+
+// rejectionNoteAt is the note Land() writes for a refusal of the given class
+// whose merged tree was built on targetTip, through the same formatter.
+func rejectionNoteAt(kind, targetTip string) string {
+	return land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 1, Kind: kind, Reason: kind + " refused the merged tree", Branch: rejectedBranch,
+		Target: "main", MR: "gt-wisp-v8j9", TargetTip: targetTip,
+	})
+}
+
+// TestRejectionUnchanged_GateRejectionLiftsOnMovedTarget: an identical diff that
+// a gate rejected is resubmittable once the target has moved past the tip the
+// gate ran on, because the gate judges the merged tree (gt-xzu8hp). Every other
+// shape of the same diff still refuses.
+func TestRejectionUnchanged_GateRejectionLiftsOnMovedTarget(t *testing.T) {
+	t.Parallel()
+	const recorded, moved = "target-then", "target-now"
+	cases := []struct {
+		name   string
+		notes  string
+		target string
+		refuse bool
+	}{
+		{"gate rejection, target moved", rejectionNoteAt("gate", recorded), moved, false},
+		{"gate rejection, target not moved", rejectionNoteAt("gate", recorded), recorded, true},
+		{"gate rejection with no recorded target tip, target moved", rejectionNoteAt("gate", ""), moved, true},
+		{"review rejection, target moved", rejectionNoteAt("review", recorded), moved, true},
+		{"review rejection, target not moved", rejectionNoteAt("review", recorded), recorded, true},
+		{"a later review of the same MR, target moved", rejectionNoteAt("gate", recorded) + "\n" + rejectionNoteAt("review", recorded), moved, true},
+		{"a review of the same MR, then a later gate of it, target moved", rejectionNoteAt("review", recorded) + "\n" + rejectionNoteAt("gate", recorded), moved, true},
+		{"a gate of the same MR, then a later review of another diff, target moved", rejectionNoteAt("gate", recorded) + "\n" +
+			"MERGE REJECTION (attempt 2): review - review refused\nBranch: polecat/zircon/gt-other\nTarget: main\nMR: gt-wisp-2\n", moved, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := reworkWith(rejectedDiff)
+			g.targetTip = tc.target
+			err := reportUnchangedSinceRejection(g, tc.notes, "gt-0jzd5", "origin/main", rejectedMR)
+			if !tc.refuse {
+				if err != nil {
+					t.Fatalf("an identical diff rejected by a gate was refused after the target moved: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "no change since the rejection") {
+				t.Fatalf("an identical diff was not refused: %v", err)
+			}
+		})
+	}
+}
+
+// TestRejectionUnchanged_UnreadableTargetRefuses: when the lift could apply but
+// the target cannot be read, the guard returns an error and never an allow.
+func TestRejectionUnchanged_UnreadableTargetRefuses(t *testing.T) {
+	t.Parallel()
+	g := reworkWith(rejectedDiff) // targetTip empty: origin/main does not resolve
+	err := reportUnchangedSinceRejection(g, rejectionNoteAt("gate", "target-then"), "gt-0jzd5", "origin/main", rejectedMR)
+	if err == nil {
+		t.Fatal("an unreadable target let an identical diff through")
+	}
+	if !strings.Contains(err.Error(), "could not read origin/main") {
+		t.Errorf("refusal does not name the unreadable target: %v", err)
 	}
 }

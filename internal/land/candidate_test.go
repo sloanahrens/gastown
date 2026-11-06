@@ -1275,6 +1275,23 @@ func TestLandLandsThroughTheCandidateGate(t *testing.T) {
 	}
 }
 
+// TestLandCandidateRedNoteRecordsTheTargetItBuiltOn: a red gate's rejection note
+// names the target tip the merged tree was built on, so gt done can tell later
+// whether the target has moved past the tip the gate ran on (gt-xzu8hp).
+func TestLandCandidateRedNoteRecordsTheTargetItBuiltOn(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	l := f.lander()
+	l.Candidate = &fakeCandidate{res: CandidateResult{
+		State: CandidateFailed, Context: "ci / gate (push)", Tail: "--- FAIL: TestThing\n", Pushed: true}}
+
+	_, err := l.Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectGate, LabelRework)
+	if want := "\nTarget tip: " + f.originMain(); !strings.Contains(f.bead().Notes, want) {
+		t.Fatalf("the rejection note does not record the target tip the gate ran on (want %q):\n%s", want, f.bead().Notes)
+	}
+}
+
 // TestLandCandidateRedIsReworkWithTheLogTail: a red CI verdict comes back as
 // a gate rework the polecat resumes from, carrying the job log, and the
 // candidate branch it pushed is deleted: the landing ended without merging it

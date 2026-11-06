@@ -52,6 +52,31 @@ func TestFormatRejectionNoteLandAdditions(t *testing.T) {
 	}
 }
 
+// TestRejectionNoteTargetTipRoundTrips: the tip a gate rejection was built on is
+// written as a Target tip: line and read back, and a note without one writes
+// no such line (gt-xzu8hp).
+func TestRejectionNoteTargetTipRoundTrips(t *testing.T) {
+	t.Parallel()
+	const tip = "0123456789abcdef0123456789abcdef01234567"
+	note := FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: "gate", Reason: "make test exit 2", Branch: "b", Target: "main", MR: "gt-x", TargetTip: tip,
+	})
+	if !strings.Contains(note, "\nTarget tip: "+tip) {
+		t.Fatalf("note lacks the target tip it was built on:\n%s", note)
+	}
+	parsed, ok := ParseRejectionNote(note)
+	if !ok {
+		t.Fatalf("ParseRejectionNote did not read the note back:\n%s", note)
+	}
+	if parsed.TargetTip != tip {
+		t.Fatalf("parsed TargetTip = %q, want %q", parsed.TargetTip, tip)
+	}
+	untipped := FormatRejectionNote(RejectionNote{Kind: "gate", Reason: "r", Branch: "b", Target: "main", MR: "gt-x"})
+	if strings.Contains(untipped, "Target tip:") {
+		t.Fatalf("a note with no target tip wrote one:\n%s", untipped)
+	}
+}
+
 // TestCountRejectionsIgnoresQuotedMarkers: the counter and the parser use the
 // same anchored header, so marker text quoted inside a reason or a finding
 // line — anywhere but the start of a line — is content and does not inflate

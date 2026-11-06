@@ -47,6 +47,10 @@ type rejectedAttempt struct {
 	// head is the rejected tip when the rejection names it (Land's Head:
 	// line, ADR 0004); it is the content to compare, with no MR to look up.
 	head string
+	// targetTip is the target tip the rejected merged tree was built on, from
+	// the note's Target tip: line. Empty when the note carries none, which
+	// every rejection written before the line existed does.
+	targetTip string
 }
 
 // rejectionKindsNotCausedByDiff are the rejection classes that say nothing
@@ -85,17 +89,17 @@ func rejectionKindFromSummary(summary string) string {
 	return class
 }
 
-// rejectedAttemptsFromNotes returns the rejections recorded in a bead's notes.
-// An attempt that names neither a rejected Head: nor an MR id is dropped:
-// one of them is what says which content was rejected. Only the first
-// Branch:/MR:/Head: line in a block is read — the block runs to the next
-// marker, so later appended prose belongs to no rejection.
-func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
+// rejectionBlocksFromNotes returns every rejection block in a bead's notes, in
+// the order they were written, including ones that name no content. The last
+// block is the most recent rejection, whatever its content, so the caller
+// needs the blocks before any are dropped. Only the first Branch:/MR:/Head:/
+// Target tip: line in a block is read — the block runs to the next marker, so
+// later appended prose belongs to no rejection.
+func rejectionBlocksFromNotes(notes string) []rejectedAttempt {
 	if !strings.Contains(notes, dispatch.MergeRejectionNoteMarker) {
 		return nil
 	}
 	var out []rejectedAttempt
-	seen := make(map[string]bool)
 	for _, block := range strings.Split(notes, dispatch.MergeRejectionNoteMarker)[1:] {
 		var a rejectedAttempt
 		lines := strings.Split(block, "\n")
@@ -114,11 +118,25 @@ func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
 				a.mrID = value
 			case a.head == "" && strings.EqualFold(strings.TrimSpace(key), "head"):
 				a.head = value
+			case a.targetTip == "" && strings.EqualFold(strings.TrimSpace(key), "target tip"):
+				a.targetTip = value
 			}
 		}
-		// One MR (or one rejected head) is one attempt, however many times its
-		// rejection was recorded: the second record adds a line to the refusal
-		// and a Dolt read, not evidence.
+		out = append(out, a)
+	}
+	return out
+}
+
+// distinctAttempts keeps one attempt per rejected content: an MR (or a rejected
+// head) is one attempt, however many times its rejection was recorded. An
+// attempt that names neither a rejected Head: nor an MR id is dropped: one of
+// them is what says which content was rejected.
+func distinctAttempts(blocks []rejectedAttempt) []rejectedAttempt {
+	var out []rejectedAttempt
+	seen := make(map[string]bool)
+	for _, a := range blocks {
+		// The second record of an MR adds a line to the refusal and a Dolt
+		// read, not evidence.
 		key := a.mrID
 		if a.head != "" {
 			key = a.head
@@ -136,6 +154,10 @@ func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
 // attempt rejected for a reason the diff did not cause
 // (rejectionKindsNotCausedByDiff) is not compared at all.
 //
+// The one lift is a gate rejection the target has since moved past: the gate
+// runs on the merged tree, so a new target tip is new evidence
+// (gateRejectionOfTheseAttempts).
+//
 // tipOf resolves an MR bead id to the tip that MR was submitted with. Every
 // way of not knowing passes: a rejection without an MR record, an MR whose
 // commit_sha is missing, a tip that is no longer an object in this repository.
@@ -144,10 +166,11 @@ func rejectedAttemptsFromNotes(notes string) []rejectedAttempt {
 // only the wasted gate run this guard exists to prevent — the state we are
 // already in, not a new one.
 func reportUnchangedSinceRejection(g rejectedReworkGit, notes, issueID, target string, tipOf func(mrID string) (string, bool)) error {
-	attempts := rejectedAttemptsFromNotes(notes)
-	if len(attempts) == 0 {
+	blocks := rejectionBlocksFromNotes(notes)
+	if len(blocks) == 0 {
 		return nil
 	}
+	attempts := distinctAttempts(blocks)
 
 	localSHA, err := g.Rev("HEAD")
 	if err != nil {
@@ -183,7 +206,36 @@ func reportUnchangedSinceRejection(g rejectedReworkGit, notes, issueID, target s
 	if len(unchanged) == 0 {
 		return nil
 	}
+	if last := blocks[len(blocks)-1]; gateRejectionOfTheseAttempts(last, unchanged) {
+		// The target is read only here, when the lift could apply: every other
+		// refusal is decided without a git call.
+		tip, err := g.Rev(target)
+		if err != nil {
+			return fmt.Errorf("refusing to submit: could not read %s to check whether it moved since the gate rejection: %w", target, err)
+		}
+		if tip != last.targetTip {
+			return nil
+		}
+	}
 	return unchangedSinceRejectionRefusal(issueID, target, localPatchID, unchanged)
+}
+
+// gateRejectionOfTheseAttempts reports whether the most recent rejection is a
+// gate rejection that recorded the target tip it was built on, and every
+// identical attempt is a gate rejection too. A review rejection of the same
+// diff stays a refusal whatever the target did: a reviewer judged that content,
+// and the target moving does not change the verdict. A record with no target
+// tip stays a refusal, since there is nothing to show the target moved.
+func gateRejectionOfTheseAttempts(last rejectedAttempt, identical []unchangedRejection) bool {
+	if last.kind != "gate" || last.targetTip == "" {
+		return false
+	}
+	for _, u := range identical {
+		if u.attempt.kind != "gate" {
+			return false
+		}
+	}
+	return true
 }
 
 // patchIDAgainst is the patch-id of the diff a tip carries against its own
