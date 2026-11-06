@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"math"
-	"reflect"
-	"sort"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -191,300 +191,216 @@ func TestDashboardJevSpendEmptyCommandIsNoReader(t *testing.T) {
 	}
 }
 
-func TestDashboardJevScorecardCmdFlagDefault(t *testing.T) {
-	t.Parallel()
-
-	f := dashboardCmd.Flags().Lookup("jev-scorecard-cmd")
-	if f == nil {
-		t.Fatal("gt dashboard has no --jev-scorecard-cmd flag")
-	}
-	const want = "gt jev scorecard --json --since 7d"
-	if f.DefValue != want {
-		t.Errorf("--jev-scorecard-cmd defaults to %q, want %q", f.DefValue, want)
-	}
-	if !strings.Contains(dashboardCmd.Long, want) {
-		t.Errorf("the help does not document the default command %q", want)
+// writeJevCache writes a cache document to the town's cache path through the
+// production writer.
+func writeJevCache(t *testing.T, town string, doc scorecard.CacheDoc) {
+	t.Helper()
+	if err := (scorecard.Cache{}).Write(scorecard.CachePath(town), doc); err != nil {
+		t.Fatalf("writing the scorecard cache: %v", err)
 	}
 }
 
-func TestJevScorecardArgv(t *testing.T) {
+// The panel reads the cache the refresh wrote: each block becomes its line,
+// with the report's counts and questions, its scored_at, and whether the
+// refresh failed and kept a previous block. It starts no process: the reader
+// takes a town root, not a command.
+func TestDashboardJevScorecardReadsTheCachedScorecard(t *testing.T) {
 	t.Parallel()
 
-	got, err := jevScorecardArgv(`"/opt/my tools/gt" jev scorecard --json`)
-	if err != nil || strings.Join(got, "|") != "/opt/my tools/gt|jev|scorecard|--json" {
-		t.Errorf("argv = %q, err = %v", got, err)
-	}
-	if got, err := jevScorecardArgv("  "); err != nil || got != nil {
-		t.Errorf("a blank command: argv = %q, err = %v, want neither", got, err)
-	}
-	if got, err := jevScorecardArgv(`"gt jev`); err == nil {
-		t.Errorf("an unbalanced quote gave argv %q, want an error", got)
-	}
-}
+	town := t.TempDir()
+	scored := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	base, precision := 0.25, 0.625
+	doc := scorecard.CacheDoc{ScoredAt: scored.Add(5 * time.Hour), Since: "7d", Batteries: []scorecard.BatteryBlock{
+		{Name: "finding", ScoredAt: scored, Report: &scorecard.Report{
+			Battery: "finding", Items: 212, Labeled: 140, LinesSkipped: 3,
+			Questions: []scorecard.QuestionReport{
+				{ID: "fix_worthy", Verdict: "earning", Labeled: 140, BaseRate: &base, Precision: &precision},
+				{ID: "any_duplicate", Verdict: "not-yet", Labeled: 40},
+			},
+		}},
+		{Name: "testsel", ScoredAt: scored, Report: &scorecard.Report{
+			Battery: "testsel", Items: 39858, Labeled: 30000,
+			Questions: []scorecard.QuestionReport{{ID: "affects_tests", Verdict: "earning"}},
+		}},
+	}}
+	writeJevCache(t, town, doc)
 
-// fakeJevScorecardRun answers each battery's run with its own report, keyed by
-// the --battery value, and records the argv it saw.
-func fakeJevScorecardRun(reports map[string]string, failOn string, ran *[][]string) func(context.Context, []string) ([]byte, error) {
-	var mu sync.Mutex
-	return func(_ context.Context, argv []string) ([]byte, error) {
-		if ran != nil {
-			mu.Lock()
-			*ran = append(*ran, argv)
-			mu.Unlock()
-		}
-		name := argv[len(argv)-1]
-		if name == failOn {
-			return nil, errors.New("exit status 1")
-		}
-		return []byte(reports[name]), nil
-	}
-}
-
-func TestDashboardJevScorecardRunsOncePerBattery(t *testing.T) {
-	t.Parallel()
-
-	reports := map[string]string{
-		"finding": `{"battery":"finding","items":2,"questions":[{"id":"fix_worthy","verdict":"earning"}],"lines":[{"id":"a","labeled":true},{"id":"b","labeled":false}]}`,
-		"landing": `{"battery":"landing","items":0,"questions":[]}`,
-	}
-	var ran [][]string
-	read := dashboardJevScorecardWith(strings.Fields("gt jev scorecard --json --since 7d"), []string{"finding", "landing"}, time.Minute, fakeJevScorecardRun(reports, "", &ran))
-	if read == nil {
-		t.Fatal("a configured command has no reader")
-	}
-	sc := read()
+	sc := dashboardJevScorecard(town)()
 	if sc == nil {
-		t.Fatal("the reports read as a failure")
+		t.Fatal("the cache read as a failure")
 	}
-	if sc.Window != "7d" || len(sc.Batteries) != 2 {
+	if sc.NoScorecard || sc.Window != "7d" || len(sc.Batteries) != 2 {
 		t.Fatalf("scorecard = %+v", *sc)
 	}
-	if b := sc.Batteries[0]; b.Name != "finding" || b.Items != 2 || b.Labeled != 1 || len(b.Questions) != 1 {
+	b := sc.Batteries[0]
+	if b.Name != "finding" || b.Items != 212 || b.Labeled != 140 || b.Unanswered != 3 ||
+		b.Failed || b.Kept || b.ScoredAt == nil || !b.ScoredAt.Equal(scored) {
 		t.Errorf("finding line = %+v", b)
 	}
-	if b := sc.Batteries[1]; b.Name != "landing" || b.Items != 0 {
-		t.Errorf("landing line = %+v", b)
+	if len(b.Questions) != 2 || b.Questions[0].ID != "fix_worthy" || b.Questions[0].Verdict != "earning" ||
+		b.Questions[0].Labeled != 140 || b.Questions[0].BaseRate == nil || *b.Questions[0].BaseRate != base ||
+		b.Questions[0].Precision == nil || *b.Questions[0].Precision != precision || b.Questions[1].BaseRate != nil {
+		t.Errorf("finding questions = %+v", b.Questions)
 	}
-	var lines []string
-	for _, argv := range ran {
-		lines = append(lines, strings.Join(argv, " "))
+	if tsel := sc.Batteries[1]; tsel.Unit != "packages" || tsel.Items != 39858 {
+		t.Errorf("testsel line = %+v, want a package count", tsel)
 	}
-	sort.Strings(lines)
-	if want := []string{"gt jev scorecard --json --since 7d --battery finding", "gt jev scorecard --json --since 7d --battery landing"}; !reflect.DeepEqual(lines, want) {
-		t.Errorf("ran %q, want %q", lines, want)
-	}
-	if want := (dashboard.JevTotals{Batteries: 2, Items: 2, Labeled: 1, Earning: 1}); sc.Totals != want {
+	if want := (dashboard.JevTotals{Batteries: 1, Items: 212, Labeled: 140, Earning: 2, NotYet: 1}); sc.Totals != want {
 		t.Errorf("Totals = %+v, want %+v", sc.Totals, want)
 	}
 }
 
-// The reader keeps each question's figures so the panel's chip can say what the
-// scorecard scored, and a figure the report leaves null stays absent.
-func TestDashboardJevScorecardKeepsTheQuestionsFigures(t *testing.T) {
+// The reader's only input is the town's cache file: it reads that one path, so
+// there is no command to start.
+func TestDashboardJevScorecardReadsOnlyTheCachePath(t *testing.T) {
 	t.Parallel()
 
-	report := `{"battery":"finding","items":9,"labeled":7,"questions":[{"id":"fix_worthy","kind":"noul","logged":9,"labeled":7,"base_rate":0.25,"precision":0.625,"verdict":"earning"},{"id":"noise","kind":"noul","logged":9,"labeled":2,"base_rate":null,"precision":null,"verdict":"not-yet"}]}`
-	read := dashboardJevScorecardWith(strings.Fields("gt jev scorecard --json"), []string{"finding"}, time.Minute, fakeJevScorecardRun(map[string]string{"finding": report}, "", nil))
-	sc := read()
+	town := t.TempDir()
+	scored := time.Date(2026, 11, 6, 7, 0, 0, 0, time.UTC)
+	writeJevCache(t, town, scorecard.CacheDoc{ScoredAt: scored, Since: "7d", Batteries: []scorecard.BatteryBlock{
+		{Name: "finding", ScoredAt: scored, Report: &scorecard.Report{Battery: "finding", Items: 2}},
+	}})
+	var read []string
+	cache := scorecard.Cache{ReadFile: func(path string) ([]byte, error) {
+		read = append(read, path)
+		return os.ReadFile(path)
+	}}
+	if sc := dashboardJevScorecardWith(town, cache)(); sc == nil {
+		t.Fatal("the cache read as a failure")
+	}
+	if want := []string{scorecard.CachePath(town)}; len(read) != 1 || read[0] != want[0] {
+		t.Errorf("read %q, want only %q", read, want)
+	}
+}
+
+// No refresh has run yet: the cache is missing, and the panel says how to make
+// one rather than reading as a failed read.
+func TestDashboardJevScorecardMissingCacheSaysNoScorecard(t *testing.T) {
+	t.Parallel()
+
+	sc := dashboardJevScorecard(t.TempDir())()
+	if sc == nil || !sc.NoScorecard || len(sc.Batteries) != 0 {
+		t.Fatalf("an empty town read %+v, want the no-scorecard value", sc)
+	}
+}
+
+// A cache that cannot be read, or does not parse, is a failed read: the hub
+// keeps the last good panel over it.
+func TestDashboardJevScorecardUnreadableCacheIsAFailedRead(t *testing.T) {
+	t.Parallel()
+
+	boom := errors.New("permission denied")
+	cache := scorecard.Cache{ReadFile: func(string) ([]byte, error) { return nil, boom }}
+	if got := dashboardJevScorecardWith(t.TempDir(), cache)(); got != nil {
+		t.Errorf("an unreadable cache read %+v, want a failed read", *got)
+	}
+
+	town := t.TempDir()
+	path := scorecard.CachePath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("making the cache directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("not a scorecard"), 0o644); err != nil {
+		t.Fatalf("writing the corrupt cache: %v", err)
+	}
+	if got := dashboardJevScorecard(town)(); got != nil {
+		t.Errorf("a corrupt cache read %+v, want a failed read", *got)
+	}
+}
+
+// A block a failed refresh kept draws its report, marked kept, with the time it
+// was scored. A battery that never scored has a placeholder with no age.
+func TestDashboardJevScorecardKeepsTheKeptBlockAndLeavesTheRest(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	good := time.Date(2026, 11, 5, 4, 30, 0, 0, time.UTC)
+	keptSince := good
+	doc := scorecard.CacheDoc{ScoredAt: good.Add(24 * time.Hour), Since: "7d", Batteries: []scorecard.BatteryBlock{
+		{Name: "finding", ScoredAt: good, Failed: true, Kept: true, KeptSince: &keptSince, Error: "bd: refused",
+			Report: &scorecard.Report{Battery: "finding", Items: 5, Labeled: 4}},
+		{Name: "landing", ScoredAt: good.Add(24 * time.Hour), Failed: true, Error: "bd: refused"},
+	}}
+	writeJevCache(t, town, doc)
+
+	sc := dashboardJevScorecard(town)()
 	if sc == nil {
-		t.Fatal("the report read as a failure")
+		t.Fatal("the cache read as a failure")
 	}
-	qs := sc.Batteries[0].Questions
-	if len(qs) != 2 {
-		t.Fatalf("questions = %+v, want two", qs)
+	kept := sc.Batteries[0]
+	if !kept.Failed || !kept.Kept || kept.Items != 5 || kept.Labeled != 4 || kept.ScoredAt == nil || !kept.ScoredAt.Equal(good) {
+		t.Errorf("finding = %+v, want its kept block with the last good score time", kept)
 	}
-	if q := qs[0]; q.Labeled != 7 || q.BaseRate == nil || *q.BaseRate != 0.25 || q.Precision == nil || *q.Precision != 0.625 {
-		t.Errorf("fix_worthy = %+v, want the report's figures", q)
+	lost := sc.Batteries[1]
+	if !lost.Failed || lost.Kept || lost.Items != 0 || lost.ScoredAt != nil {
+		t.Errorf("landing = %+v, want a placeholder with no score", lost)
 	}
-	if q := qs[1]; q.Labeled != 2 || q.BaseRate != nil || q.Precision != nil {
-		t.Errorf("noise = %+v, want a null base rate and precision left absent", q)
+	if want := []string{"finding", "landing"}; strings.Join(sc.Unavailable, ",") != strings.Join(want, ",") {
+		t.Errorf("Unavailable = %q, want %q", sc.Unavailable, want)
 	}
-}
-
-// A run that fails, prints text, or reports another battery drops only its own
-// line: the other battery still draws and the lost one is named. The spend
-// reader is not involved.
-func TestDashboardJevScorecardFailureDropsOnlyThatBattery(t *testing.T) {
-	t.Parallel()
-
-	good := `{"battery":"finding","items":1,"questions":[]}`
-	cases := map[string]func(context.Context, []string) ([]byte, error){
-		"exits non-zero": fakeJevScorecardRun(map[string]string{"finding": good}, "landing", nil),
-		"prints text":    fakeJevScorecardRun(map[string]string{"finding": good, "landing": "gt: unknown battery"}, "", nil),
-		"prints another": fakeJevScorecardRun(map[string]string{"finding": good, "landing": good}, "", nil),
-		"prints nothing": fakeJevScorecardRun(map[string]string{"finding": good}, "", nil),
-		"times out": func(_ context.Context, argv []string) ([]byte, error) {
-			if argv[len(argv)-1] == "landing" {
-				return nil, context.DeadlineExceeded
-			}
-			return []byte(good), nil
-		},
-	}
-	for name, run := range cases {
-		got := dashboardJevScorecardWith([]string{"gt", "jev", "scorecard"}, []string{"finding", "landing"}, time.Minute, run)()
-		if got == nil {
-			t.Errorf("%s: one good battery read as a failed read", name)
-			continue
-		}
-		if !reflect.DeepEqual(got.Unavailable, []string{"landing"}) || len(got.Batteries) != 2 ||
-			got.Batteries[0].Failed || !got.Batteries[1].Failed || got.Batteries[1].Kept {
-			t.Errorf("%s: scorecard = %+v, want finding drawn and landing a placeholder", name, *got)
-		}
-		if got.Totals.Batteries != 1 || got.Totals.Items != 1 {
-			t.Errorf("%s: Totals = %+v, want only finding counted", name, got.Totals)
-		}
+	if want := (dashboard.JevTotals{Batteries: 1, Items: 5, Labeled: 4}); sc.Totals != want {
+		t.Errorf("Totals = %+v, want the kept line counted", sc.Totals)
 	}
 }
 
-// With five batteries, one that fails and one that times out leave the other
-// three lines and name the two.
-func TestDashboardJevScorecardOneFailingOneTimingOutAmongFive(t *testing.T) {
-	t.Parallel()
-
-	report := func(name string) string {
-		return `{"battery":"` + name + `","items":3,"questions":[]}`
+// sourceFunc returns the source of the named function, from its func line to
+// the next top-level one.
+func sourceFunc(t *testing.T, src, name string) string {
+	t.Helper()
+	start := strings.Index(src, "func "+name+"(")
+	if start < 0 {
+		t.Fatalf("the source has no func %s", name)
 	}
-	run := func(ctx context.Context, argv []string) ([]byte, error) {
-		switch name := argv[len(argv)-1]; name {
-		case "dispatch":
-			return nil, errors.New("exit status 1")
-		case "drift":
-			<-ctx.Done()
-			return nil, ctx.Err()
-		default:
-			return []byte(report(name)), nil
-		}
+	rest := src[start:]
+	if end := strings.Index(rest[1:], "\nfunc "); end >= 0 {
+		return rest[:end+1]
 	}
-	batteries := []string{"finding", "dispatch", "submission", "drift", "testsel"}
-	got := dashboardJevScorecardWith([]string{"gt", "jev", "scorecard"}, batteries, 20*time.Millisecond, run)()
-	if got == nil {
-		t.Fatal("three good batteries read as a failed read")
-	}
-	var drawn []string
-	for _, b := range got.Batteries {
-		if !b.Failed {
-			drawn = append(drawn, b.Name)
-		}
-	}
-	if want := []string{"finding", "submission", "testsel"}; !reflect.DeepEqual(drawn, want) {
-		t.Errorf("drawn batteries = %q, want %q", drawn, want)
-	}
-	if want := []string{"dispatch", "drift"}; !reflect.DeepEqual(got.Unavailable, want) {
-		t.Errorf("Unavailable = %q, want %q", got.Unavailable, want)
-	}
-	// testsel's row is drawn with the others, but its packages are no part of
-	// the title line's batteries and items.
-	if got.Totals.Batteries != 2 || got.Totals.Items != 6 {
-		t.Errorf("Totals = %+v, want the two good batteries that count items", got.Totals)
-	}
+	return rest
 }
 
-// When every battery fails there is nothing to draw, so the read fails whole
-// and the hub shows the scorecard unavailable.
-func TestDashboardJevScorecardEveryBatteryFailingReadsAsNil(t *testing.T) {
+// The scorecard comes from the cache, and nothing that builds the panel starts
+// a process: the dashboard package has no exec at all, and the reader here has
+// none. The flag and argv seams that ran gt jev scorecard per battery are gone.
+func TestDashboardJevScorecardWiringStartsNoProcess(t *testing.T) {
 	t.Parallel()
 
-	run := func(context.Context, []string) ([]byte, error) { return nil, context.DeadlineExceeded }
-	if got := dashboardJevScorecardWith([]string{"gt"}, []string{"finding", "landing"}, time.Minute, run)(); got != nil {
-		t.Errorf("read %+v, want a failed read", *got)
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
 	}
-}
-
-// The scorecard read has its own timeout: the slowest battery answers in about
-// 32s, past the spend command's 25s, and each run is bounded by that timeout.
-func TestDashboardJevScorecardTimeoutIsApartFromTheSpendTimeout(t *testing.T) {
-	t.Parallel()
-
-	if dashboardJevScorecardTimeout != 60*time.Second {
-		t.Errorf("dashboardJevScorecardTimeout = %v, want 60s", dashboardJevScorecardTimeout)
+	dir := filepath.Dir(file)
+	self, err := os.ReadFile(filepath.Join(dir, "dashboard.go"))
+	if err != nil {
+		t.Fatalf("reading dashboard.go: %v", err)
 	}
-	if dashboardJevScorecardTimeout <= dashboardSpendTimeout {
-		t.Errorf("the scorecard timeout %v is not above the spend timeout %v", dashboardJevScorecardTimeout, dashboardSpendTimeout)
+	reader := sourceFunc(t, string(self), "dashboardJevScorecardWith")
+	if strings.Contains(reader, "exec.") {
+		t.Errorf("dashboardJevScorecardWith starts a process:\n%s", reader)
 	}
-	var left time.Duration
-	run := func(ctx context.Context, argv []string) ([]byte, error) {
-		d, ok := ctx.Deadline()
-		if !ok {
-			t.Error("a scorecard run has no deadline")
-		}
-		left = time.Until(d)
-		return nil, errors.New("stop")
+	if !strings.Contains(reader, "scorecard.CachePath(") || !strings.Contains(reader, "cache.Read(") {
+		t.Error("the scorecard reader does not read the cache file")
 	}
-	dashboardJevScorecardWith([]string{"gt"}, []string{"finding"}, dashboardJevScorecardTimeout, run)()
-	if left <= dashboardSpendTimeout || left > dashboardJevScorecardTimeout {
-		t.Errorf("a run had %v left, want between the spend timeout and %v", left, dashboardJevScorecardTimeout)
-	}
-}
-
-func TestDashboardJevScorecardEmptyCommandIsNoReader(t *testing.T) {
-	t.Parallel()
-
-	if dashboardJevScorecard(nil) != nil {
-		t.Error("an empty --jev-scorecard-cmd still has a reader")
-	}
-}
-
-// The reader asks for every registered battery, so a new adapter appears on the
-// dashboard without a change here.
-func TestDashboardJevScorecardAsksForEveryRegisteredBattery(t *testing.T) {
-	t.Parallel()
-
-	var mu sync.Mutex
-	var asked []string
-	run := func(_ context.Context, argv []string) ([]byte, error) {
-		mu.Lock()
-		asked = append(asked, argv[len(argv)-1])
-		mu.Unlock()
-		return nil, errors.New("stop")
-	}
-	dashboardJevScorecardWith([]string{"gt"}, scorecard.Registered(), time.Minute, run)()
-	sort.Strings(asked)
-	if want := scorecard.Registered(); !reflect.DeepEqual(asked, want) {
-		t.Errorf("asked %q, want the registered batteries %q", asked, want)
-	}
-	for _, name := range asked {
-		if name == scorecard.FixtureBattery {
-			t.Errorf("the dashboard asked for the test-only %q battery: %q", name, asked)
+	for _, banned := range []string{"--jev-scorecard-cmd", "jevScorecardArgv", "readJevBattery", "dashboardJevScorecardTimeout", `"gt jev scorecard --json`} {
+		if strings.Contains(string(self), banned) {
+			t.Errorf("dashboard.go still carries %q, the per-battery run the cache replaced", banned)
 		}
 	}
-}
 
-// The runs go out together: each one waits until every battery has started, so
-// a read that ran them one after another would stall and time the battery out.
-func TestDashboardJevScorecardRunsBatteriesTogether(t *testing.T) {
-	t.Parallel()
-
-	batteries := []string{"dispatch", "drift", "finding", "landing"}
-	var started sync.WaitGroup
-	started.Add(len(batteries))
-	allStarted := make(chan struct{})
-	go func() {
-		started.Wait()
-		close(allStarted)
-	}()
-	run := func(ctx context.Context, argv []string) ([]byte, error) {
-		name := argv[len(argv)-1]
-		started.Done()
-		select {
-		case <-allStarted:
-		case <-ctx.Done():
-			return nil, ctx.Err()
+	files, err := filepath.Glob(filepath.Join(dir, "..", "dashboard", "*.go"))
+	if err != nil {
+		t.Fatalf("listing the dashboard package: %v", err)
+	}
+	if len(files) == 0 {
+		t.Fatal("found no dashboard package files")
+	}
+	for _, f := range files {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("reading %s: %v", f, err)
 		}
-		return []byte(`{"battery":"` + name + `","items":1,"questions":[]}`), nil
-	}
-	got := dashboardJevScorecardWith([]string{"gt", "jev", "scorecard"}, batteries, 5*time.Second, run)()
-	if got == nil {
-		t.Fatal("the batteries read as a failed read")
-	}
-	if len(got.Unavailable) != 0 {
-		t.Errorf("Unavailable = %q, want none: the batteries did not run together", got.Unavailable)
-	}
-	var names []string
-	for _, b := range got.Batteries {
-		names = append(names, b.Name)
-	}
-	if !reflect.DeepEqual(names, batteries) {
-		t.Errorf("battery order = %q, want %q", names, batteries)
+		if strings.Contains(string(src), "os/exec") {
+			t.Errorf("%s imports os/exec: the dashboard package starts no process", f)
+		}
 	}
 }
 

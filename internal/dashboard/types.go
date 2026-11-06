@@ -790,8 +790,9 @@ type State struct {
 	// reports; a failed read keeps the last good value and says so in Reads.
 	JevSpend *JevSpend `json:"jev_spend,omitempty"`
 	// JevScorecard is each Jev battery's lines, labeled count and question
-	// verdicts, read beside the spend row. It is nil until the reader first
-	// reports; a failed read keeps the last good value and says so in Reads.
+	// verdicts, read from the scorecard cache the refresh writes. It is nil
+	// until the reader first reports; a failed read keeps the last good value
+	// and says so in Reads.
 	JevScorecard *JevScorecard `json:"jev_scorecard,omitempty"`
 	OM           *OM           `json:"om,omitempty"`
 	TierSweep    *TierSweep    `json:"tiersweep,omitempty"`
@@ -863,8 +864,8 @@ type Config struct {
 	SpendHours func() SpendRead
 	// JevSpend returns the Jev spend row, nil when the read failed.
 	JevSpend func() *JevSpend
-	// JevScorecard returns the Jev batteries' scorecard lines, nil when the
-	// read failed.
+	// JevScorecard reads the cached scorecard, nil when the cache could not be
+	// read. A missing cache is a value with NoScorecard set, not a failed read.
 	JevScorecard func() *JevScorecard
 	// OM reads the reviewer's record from disk.
 	OM func() *OM
@@ -1006,9 +1007,9 @@ func (c *Config) defaults() {
 	def(&c.MangoEvery, 5*time.Minute)
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.JevSpendEvery, 5*time.Minute)
-	// A scorecard run reads each battery's log and, for some, its beads, so it
-	// is asked less often than the spend row.
-	def(&c.JevScorecardEvery, 15*time.Minute)
+	// The scorecard is a file read of the cache a refresh writes, so the panel
+	// picks up a new score within a minute of it being written.
+	def(&c.JevScorecardEvery, time.Minute)
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)
 	// The update job rewrites its record at every step, and a step that
