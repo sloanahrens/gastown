@@ -19,34 +19,30 @@ import (
 // records while the container stage is declined.
 const preflightShellSummary = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
 
-// preflightTightListing is a control node with 6 CPU and 24 GiB allocatable and
-// no pod on it. The incident's runner block (cpus 4, memory 5, dind) asks
-// 4200m/5376Mi with its sync and reader pods, so the free amount less the job
-// is 1800m: 200m short of the 2000m headroom.
-const preflightTightListing = `{
-  "kind": "List",
-  "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "6", "memory": "24Gi"}}}
-  ]
-}`
+// preflightTightListing is the live cluster's own capacity listing: the node
+// allocates 12 CPU and its pods request 6210m, so 5790m is free. The incident's
+// runner block (cpus 4, memory 5, dind) asks 4200m/5376Mi with its sync and
+// reader pods, so the free amount less the job is 1590m: 410m short of the
+// 2000m headroom.
+func preflightTightListing(t *testing.T) []byte {
+	t.Helper()
+	return goldenListing(t, "capacity-listing.json")
+}
 
-// preflightShorterListing is the same node with 5 CPU: the reason stands, but
-// the figures have moved, as they do while the node's pods come and go.
-const preflightShorterListing = `{
-  "kind": "List",
-  "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "5", "memory": "24Gi"}}}
-  ]
-}`
+// preflightShorterListing is the live listing with the node at 12200m: the
+// reason stands, but the figures have moved, as they do while the node's pods
+// come and go.
+func preflightShorterListing(t *testing.T) []byte {
+	t.Helper()
+	return withNodeAllocatable(t, preflightTightListing(t), "12200m", "")
+}
 
-// preflightRoomyListing is the same node with 7 CPU: the run fits with 2800m to
-// spare, which is over the headroom.
-const preflightRoomyListing = `{
-  "kind": "List",
-  "items": [
-    {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "7", "memory": "24Gi"}}}
-  ]
-}`
+// preflightRoomyListing is the live listing with the node at 14 CPU: the run
+// fits with 3590m to spare, which is over the headroom.
+func preflightRoomyListing(t *testing.T) []byte {
+	t.Helper()
+	return withNodeAllocatable(t, preflightTightListing(t), "14", "")
+}
 
 // preflightDaemon is a sweep daemon whose runner block launches the Kubernetes
 // Job the capacity preflight guards, with every command answered by cmds
@@ -92,9 +88,9 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	now := atHour(time.Now(), 15)
 	cmds := &runnerFakeCmds{answer: func(argv []string) ([]byte, []byte, error) {
 		if slices.Contains(argv, "nodes,pods") {
-			return []byte(preflightTightListing), nil, nil
+			return preflightTightListing(t), nil, nil
 		}
-		return preflightElse(argv)
+		return preflightElse(t, argv)
 	}}
 	d, spec, st, bd, logs := preflightDaemon(t, now, cmds)
 
@@ -116,7 +112,7 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	if _, found, _, err := latestPatrolLastRun(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last()); err != nil || found {
 		t.Errorf("patrol clock found = %v, err = %v; want it not advanced", found, err)
 	}
-	wantDecline := "tier_sweep: not launching on gt-ctl: node gt-control: free 6000m/24576Mi, job needs 4200m/5376Mi, headroom 2000m/2048Mi"
+	wantDecline := "tier_sweep: not launching on gt-ctl: node colima-gt-control: free 5790m/9488Mi, job needs 4200m/5376Mi, headroom 2000m/2048Mi"
 	if got := strings.Count(logs.String(), "tier_sweep: not launching on gt-ctl:"); got != 1 {
 		t.Fatalf("decline lines = %d after one cycle, want 1:\n%s", got, logs.String())
 	}
@@ -130,9 +126,9 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	clk.Advance(30 * time.Minute)
 	cmds.answer = func(argv []string) ([]byte, []byte, error) {
 		if slices.Contains(argv, "nodes,pods") {
-			return []byte(preflightShorterListing), nil, nil
+			return preflightShorterListing(t), nil, nil
 		}
-		return preflightElse(argv)
+		return preflightElse(t, argv)
 	}
 	if started := d.tierSweepLaunchRunner(context.Background(), st, spec); !started.declined {
 		t.Fatalf("launch = %+v, want it declined again", started)
@@ -143,9 +139,9 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	clk.Advance(31 * time.Minute)
 	cmds.answer = func(argv []string) ([]byte, []byte, error) {
 		if slices.Contains(argv, "nodes,pods") {
-			return []byte(preflightTightListing), nil, nil
+			return preflightTightListing(t), nil, nil
 		}
-		return preflightElse(argv)
+		return preflightElse(t, argv)
 	}
 	d.tierSweepLaunchRunner(context.Background(), st, spec)
 	if got := strings.Count(logs.String(), "tier_sweep: not launching on gt-ctl:"); got != 2 {
@@ -158,11 +154,11 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	cmds.answer = func(argv []string) ([]byte, []byte, error) {
 		switch {
 		case slices.Contains(argv, "nodes,pods"):
-			return []byte(preflightRoomyListing), nil, nil
+			return preflightRoomyListing(t), nil, nil
 		case slices.Contains(argv, "pods,priorityclasses"):
-			return []byte(runnerPriorityListing), nil, nil
+			return goldenListing(t, "priority-listing.json"), nil, nil
 		}
-		return preflightElse(argv)
+		return preflightElse(t, argv)
 	}
 	started := d.tierSweepLaunchRunner(context.Background(), st, spec)
 	if started.declined || started.err != nil {
@@ -171,7 +167,7 @@ func TestTierSweepPreflightDeclinesWithoutHeadroom(t *testing.T) {
 	if !appliedJobDocument(cmds.stdin) {
 		t.Fatalf("the launch applied no Job document; steps run: %q", cmds.ran)
 	}
-	wantLaunch := "tier_sweep: preflight on gt-ctl: node gt-control: allocatable 7000m/24576Mi, requested 0m/0Mi, job 4200m/5376Mi"
+	wantLaunch := "tier_sweep: preflight on gt-ctl: node colima-gt-control: allocatable 14000m/23980Mi, requested 6210m/14492Mi, job 4200m/5376Mi"
 	if !strings.Contains(logs.String(), wantLaunch) {
 		t.Errorf("the launch line is missing %q:\n%s", wantLaunch, logs.String())
 	}
@@ -194,7 +190,7 @@ func TestTierSweepPreflightRefusesWhenTheNodeCannotBeRead(t *testing.T) {
 				if slices.Contains(argv, "nodes,pods") {
 					return nil, nil, errors.New("exit status 1")
 				}
-				return preflightElse(argv)
+				return preflightElse(t, argv)
 			},
 			want: "tier_sweep: not launching on gt-ctl: cannot read the node's capacity: exit status 1",
 		},
@@ -204,7 +200,7 @@ func TestTierSweepPreflightRefusesWhenTheNodeCannotBeRead(t *testing.T) {
 				if slices.Contains(argv, "nodes,pods") {
 					return []byte("Error from server (Forbidden)"), nil, nil
 				}
-				return preflightElse(argv)
+				return preflightElse(t, argv)
 			},
 			want: "tier_sweep: not launching on gt-ctl: cannot read the node's capacity: reading the node and pod listing",
 		},
@@ -267,9 +263,9 @@ func TestTierSweepPreflightDeclineDefersTheStage(t *testing.T) {
 	t.Parallel()
 	cmds := &runnerFakeCmds{answer: func(argv []string) ([]byte, []byte, error) {
 		if slices.Contains(argv, "nodes,pods") {
-			return []byte(preflightTightListing), nil, nil
+			return preflightTightListing(t), nil, nil
 		}
-		return preflightElse(argv)
+		return preflightElse(t, argv)
 	}}
 	d, _, st, _, _ := preflightDaemon(t, atHour(time.Now(), 15), cmds)
 
@@ -312,11 +308,12 @@ func appliedJobDocument(stdins [][]byte) bool {
 }
 
 // preflightElse answers the commands these tests do not script: the priority
-// guard's listing, which runs before the capacity preflight, gets the healthy
-// one, and anything else gets an empty answer.
-func preflightElse(argv []string) ([]byte, []byte, error) {
+// guard's listing, which runs before the capacity preflight, gets the live
+// cluster's pods and classes, and anything else gets an empty answer.
+func preflightElse(t *testing.T, argv []string) ([]byte, []byte, error) {
+	t.Helper()
 	if slices.Contains(argv, "pods,priorityclasses") {
-		return []byte(runnerPriorityListing), nil, nil
+		return goldenListing(t, "priority-listing.json"), nil, nil
 	}
 	return nil, nil, nil
 }
