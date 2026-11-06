@@ -293,6 +293,17 @@ func MayorTownPath(townRoot string) string {
 	return townRoot + "/" + DirMayor + "/" + FileTownJSON
 }
 
+// DirRepoGit is the rig's shared bare repository directory name. The landing
+// worker, the promoter and the tier sweep run git in it; the town-state
+// manifest (internal/townstate) names it as daemon-owned, and a test holds the
+// manifest and this constant to one spelling (gt-gg9hv.67).
+const DirRepoGit = ".repo.git"
+
+// RigBareRepoPath returns the path to the rig's shared bare repository.
+func RigBareRepoPath(rigPath string) string {
+	return rigPath + "/" + DirRepoGit
+}
+
 // RigMayorPath returns the path to mayor/rig within a rig.
 func RigMayorPath(rigPath string) string {
 	return rigPath + "/" + DirMayor + "/" + DirRig

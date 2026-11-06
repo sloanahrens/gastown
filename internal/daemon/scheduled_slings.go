@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/constants"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -305,7 +306,7 @@ func (r *execScheduledSlingRunner) appendNote(_ context.Context, rig, beadID, no
 
 // originHasBranch asks the rig's bare repo whether origin carries branch.
 func (r *execScheduledSlingRunner) originHasBranch(_ context.Context, rig, branch string) (bool, error) {
-	return git.NewGit(filepath.Join(r.townRoot, rig, ".repo.git")).RemoteBranchExists("origin", branch)
+	return git.NewGit(constants.RigBareRepoPath(filepath.Join(r.townRoot, rig))).RemoteBranchExists("origin", branch)
 }
 
 func (r *execScheduledSlingRunner) createBead(_ context.Context, rig string, run scheduledRunBead) (string, error) {

@@ -1,0 +1,112 @@
+# The town root's ownership split (gt-gg9hv.67).
+# internal/townstate holds this list as Go data; TestManifestMirrorMatches
+# fails when this mirror and the Go data differ. Do not edit one without the other.
+entries:
+  - path: daemon
+    owner: daemon
+    why: the daemon's own state, settings and patrol records
+  - path: logs
+    owner: daemon
+    why: daemon and session logs the daemon rotates
+  - path: events
+    owner: daemon
+    why: the town event store the daemon appends
+  - path: .events.jsonl
+    owner: daemon
+    why: the town event feed the daemon appends
+  - path: .feed.jsonl
+    owner: daemon
+    why: the feed the daemon appends
+  - path: mayor
+    owner: daemon
+    why: town config and the pool and roster records it writes
+  - path: .beads
+    owner: daemon
+    why: workspace metadata the daemon reads and writes
+  - path: plugins
+    owner: daemon
+    why: installed plugins the daemon loads
+  - path: .claude-town
+    owner: daemon
+    why: the daemon's liveness probe reads session transcripts under it (internal/liveness)
+  - path: settings
+    owner: shared
+    why: edited by gt config daemon, read by the daemon (gt-yjzepk.4)
+  - path: <rig>/config.json
+    owner: daemon
+    why: the rig's registry record the daemon and landing worker read
+  - path: <rig>/.repo.git
+    owner: daemon
+    why: the rig's bare repository the landing worker fetches and merges into; the name is constants.DirRepoGit, which internal/rig and the daemon build the path from
+  - path: <rig>/mayor/rig
+    owner: daemon
+    why: the rig's canonical clone the landing worker and promoter land on; the name is constants.DirMayor and constants.DirRig, which rig.RepoPath resolves (all nine rigs of this town have it, read 2026-11-06)
+  - path: .runtime/jev
+    owner: daemon
+    why: jev's dataset the daemon writes
+  - path: .runtime/polecat-spans
+    owner: daemon
+    why: polecat span records the daemon writes
+  - path: .runtime/agents
+    owner: daemon
+    why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy. Until then gt commands run on the Mac also write it directly, which is a cutover prerequisite (gt-yjzepk.10)"
+  - path: .runtime/landings
+    owner: daemon
+    why: landing ledgers the daemon writes
+  - path: .runtime/usage
+    owner: daemon
+    why: usage records the daemon writes
+  - path: .runtime/sweep-runs
+    owner: daemon
+    why: tier sweep output the daemon writes
+  - path: .runtime/overrun-guard
+    owner: daemon
+    why: overrun guard state the daemon writes
+  - path: .runtime/metrics
+    owner: daemon
+    why: resource samples the daemon writes
+  - path: .runtime/landing-om
+    owner: daemon
+    why: landing om evidence the daemon writes
+  - path: .runtime/spec_dispatch
+    owner: daemon
+    why: spec dispatcher state the daemon writes
+  - path: .runtime/heartbeats
+    owner: daemon
+    why: daemon heartbeats
+  - path: .runtime/sandboxes
+    owner: daemon
+    why: sandbox records the daemon writes
+  - path: .runtime/landing-logs
+    owner: daemon
+    why: landing stage logs the daemon writes
+  - path: .runtime/attention
+    owner: daemon
+    why: the attention queue the daemon writes
+  - path: .runtime/red-main
+    owner: daemon
+    why: red-main status the landing worker writes
+  - path: .runtime/locks
+    owner: daemon
+    why: town lock files the daemon takes
+  - path: .runtime/container
+    owner: daemon
+    why: the container's kubeconfig and state the daemon writes
+  - path: .runtime/daemon-image
+    owner: daemon
+    why: the daemon image build record
+  - path: <rig>/crew
+    owner: session
+    why: each crew worker's persistent workspace
+  - path: <rig>/polecats
+    owner: session
+    why: each polecat's worktree
+  - path: <rig>/witness
+    owner: session
+    why: the witness session's own tree
+  - path: <rig>/refinery
+    owner: session
+    why: the refinery session's own tree
+  - path: .runtime/<bird>
+    owner: session
+    why: each bird session's own directory; its reports subtree is published by gt report publish (gt-yjzepk.3)

@@ -553,7 +553,7 @@ func (s *healthSources) promoteBehind(rigName, promoted, green string) (int, err
 	if s.behind != nil {
 		return s.behind(rigName, promoted, green)
 	}
-	return git.NewGit(filepath.Join(s.townRoot(), rigName, ".repo.git")).CommitsAhead(promoted, green)
+	return git.NewGit(constants.RigBareRepoPath(filepath.Join(s.townRoot(), rigName))).CommitsAhead(promoted, green)
 }
 
 // Validate loads the town config kernel and resolves the health block.
