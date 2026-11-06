@@ -25,7 +25,9 @@ type fakeFiles struct {
 	files map[string]*fakeFile
 	dirs  map[string]bool
 	ops   []string
-	next  int
+	// replaced is each path a rename replaced, in order.
+	replaced []string
+	next     int
 	// errFor makes an operation fail: op is "stat", "read", "create",
 	// "rename", "remove", "write", "chmod" or "close", and path is what it
 	// names, with a rename naming "old -> new". nil fails nothing.
@@ -90,6 +92,10 @@ func (f *fakeFiles) CreateTemp(dir, pattern string) (TempFile, error) {
 	return &fakeTemp{files: f, name: name, mode: 0o600}, nil
 }
 
+// Rename replaces an existing destination, as os.Rename does on POSIX, and
+// records each replacement in replaced. A test asserts which paths a run replaced:
+// install replaces none while it places a tool, and the undo replaces only the
+// wrappers it put back.
 func (f *fakeFiles) Rename(oldpath, newpath string) error {
 	if err := f.err("rename", oldpath+" -> "+newpath); err != nil {
 		return err
@@ -100,7 +106,7 @@ func (f *fakeFiles) Rename(oldpath, newpath string) error {
 		return &fs.PathError{Op: "rename", Path: oldpath, Err: fs.ErrNotExist}
 	}
 	if _, exists := f.files[newpath]; exists {
-		return fmt.Errorf("rename %s over the existing %s", oldpath, newpath)
+		f.replaced = append(f.replaced, newpath)
 	}
 	delete(f.files, oldpath)
 	f.files[newpath] = file
@@ -268,25 +274,31 @@ func TestInstallRenamesAsideThenPlacesANewInode(t *testing.T) {
 		t.Errorf("the source wrapper changed to %q", got)
 	}
 
-	// The new file is created in the target's own directory and renamed into
-	// place after the old file is renamed aside. The fake refuses a rename
-	// onto an existing path, so a pass also proves no step overwrote one.
+	// Every tool is staged before any is touched: a new file in each target's own
+	// directory, then for each tool its old file renamed aside and its staged file
+	// renamed into the emptied path. A placement replaces nothing.
 	if len(files.ops) != len(targets)*3 {
 		t.Fatalf("install ran %d file operations, want three per tool: %q", len(files.ops), files.ops)
 	}
+	created := make([]string, len(targets))
 	for i, target := range targets {
-		create := files.ops[i*3]
+		create := files.ops[i]
 		dir := filepath.Dir(target.Path)
 		if !strings.HasPrefix(create, "create "+dir+string(filepath.Separator)) {
 			t.Errorf("%s was written to %q, want a new file in %s", target.Name, create, dir)
 		}
-		created := strings.TrimPrefix(create, "create ")
-		if got, want := files.ops[i*3+1], "rename "+target.Path+" "+dated(target, testStamp); got != want {
-			t.Errorf("operation %d = %q, want the old file renamed aside as %q", i*3+1, got, want)
+		created[i] = strings.TrimPrefix(create, "create ")
+	}
+	for i, target := range targets {
+		if got, want := files.ops[len(targets)+2*i], "rename "+target.Path+" "+dated(target, testStamp); got != want {
+			t.Errorf("operation %d = %q, want the old file renamed aside as %q", len(targets)+2*i, got, want)
 		}
-		if got, want := files.ops[i*3+2], "rename "+created+" "+target.Path; got != want {
-			t.Errorf("operation %d = %q, want the new file renamed into place as %q", i*3+2, got, want)
+		if got, want := files.ops[len(targets)+2*i+1], "rename "+created[i]+" "+target.Path; got != want {
+			t.Errorf("operation %d = %q, want the staged file renamed into place as %q", len(targets)+2*i+1, got, want)
 		}
+	}
+	if len(files.replaced) != 0 {
+		t.Errorf("placing the tools replaced %q, want no path replaced", files.replaced)
 	}
 
 	if want := "rollback: gt-wrap rollback --stamp '" + testStamp + "' --target 'gt=" + targets[0].Path + "' --target 'bd=" + targets[1].Path + "'"; !strings.Contains(out.String(), want) {
@@ -297,91 +309,6 @@ func TestInstallRenamesAsideThenPlacesANewInode(t *testing.T) {
 			t.Errorf("install did not list the dated file %s:\n%s", dated(target, testStamp), out.String())
 		}
 	}
-}
-
-func TestInstallStopsAndUndoesOnADoctorFailure(t *testing.T) {
-	t.Parallel()
-
-	t.Run("a failing doctor undoes its tool and stops", func(t *testing.T) {
-		t.Parallel()
-		targets := fourTargets()
-		files := cutoverFiles(targets)
-		doctor := &fakeDoctor{installed: map[string]error{"om": errors.New("exit status 1")}}
-		var out bytes.Buffer
-		err := Install(installConfig(files, doctor, &out, targets))
-		if err == nil {
-			t.Fatalf("Install returned no error; output:\n%s", out.String())
-		}
-		for _, want := range []string{"om", "undone", "still installed: gt, bd"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not name %q", err, want)
-			}
-		}
-		for _, name := range []string{"gt", "bd"} {
-			target := named(targets, name)
-			if got := files.data(target.Path); got != wrapperData {
-				t.Errorf("%s holds %q, want the wrapper it was placed with", target.Path, got)
-			}
-			if !files.has(dated(target, testStamp)) {
-				t.Errorf("%s has no dated file, so the tool it replaced is gone", target.Path)
-			}
-		}
-		om := targets[2]
-		if got := files.data(om.Path); got != "old om" {
-			t.Errorf("om holds %q, want the file it replaced back", got)
-		}
-		if files.has(dated(om, testStamp)) {
-			t.Errorf("om's dated file was left behind after the undo")
-		}
-		if got := files.data(aside(om, testStamp)); got != wrapperData {
-			t.Errorf("om's failed wrapper is at %q, want the wrapper kept aside", got)
-		}
-		hm := targets[3]
-		if got := files.data(hm.Path); got != "old hm" {
-			t.Errorf("hm holds %q, want the file it had before the run", got)
-		}
-		if files.has(dated(hm, testStamp)) {
-			t.Errorf("hm was changed after the failure")
-		}
-		want := "installed gt at " + targets[0].Path
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("output does not list the tool left installed:\n%s", out.String())
-		}
-		if !strings.Contains(out.String(), "rollback: gt-wrap rollback --stamp '"+testStamp+"'") {
-			t.Errorf("output does not print the rollback command for the tools left installed:\n%s", out.String())
-		}
-		if !strings.Contains(err.Error(), "gt-wrap rollback --stamp") {
-			t.Errorf("error %q does not name the rollback command", err)
-		}
-		if strings.Contains(out.String(), "installed om at ") {
-			t.Errorf("output lists om as installed after its doctor failed:\n%s", out.String())
-		}
-	})
-
-	t.Run("an unusable rung refuses before any change", func(t *testing.T) {
-		t.Parallel()
-		targets := fourTargets()
-		files := cutoverFiles(targets)
-		doctor := &fakeDoctor{inImage: map[string]error{"bd": errors.New("Docker is down")}}
-		var out bytes.Buffer
-		err := Install(installConfig(files, doctor, &out, targets))
-		if err == nil {
-			t.Fatalf("Install returned no error; output:\n%s", out.String())
-		}
-		for _, want := range []string{"bd", "Docker is down"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("error %q does not name %q", err, want)
-			}
-		}
-		if len(files.ops) != 0 {
-			t.Errorf("a refused run changed files: %q", files.ops)
-		}
-		for _, target := range targets {
-			if got := files.data(target.Path); got != "old "+target.Name {
-				t.Errorf("%s holds %q, want the file it had before the run", target.Path, got)
-			}
-		}
-	})
 }
 
 func TestRollbackRestoresTheDatedFiles(t *testing.T) {
@@ -889,7 +816,7 @@ func TestInstallReportsAPlacementStepThatFails(t *testing.T) {
 			fail: func(op, path string) bool {
 				return op == "rename" && (path == placeRename || path == backRename)
 			},
-			want:  "putting",
+			want:  "could not be put back",
 			holds: "",
 		},
 	}
@@ -1126,68 +1053,6 @@ func TestRollbackRefusesWhenAFileCannotBeRead(t *testing.T) {
 	}
 }
 
-func TestInstallStopsWhenTheUndoItselfFails(t *testing.T) {
-	t.Parallel()
-	targets := fourTargets()[:2]
-	files := cutoverFiles(targets)
-	undo := targets[0].Path + " -> " + aside(targets[0], testStamp)
-	files.errFor = func(op, path string) error {
-		if op == "rename" && path == undo {
-			return permission(path)
-		}
-		return nil
-	}
-	doctor := &fakeDoctor{installed: map[string]error{"gt": errors.New("exit status 1")}}
-	err := Install(installConfig(files, doctor, &bytes.Buffer{}, targets))
-	if err == nil || !strings.Contains(err.Error(), "undoing it also failed") {
-		t.Fatalf("Install = %v, want the failed undo named", err)
-	}
-}
-
-// TestInstallListsTheToolsItLeftInstalledWhenALaterPlacementFails: a placement
-// that fails after earlier tools were placed prints the rollback command and
-// the dated files for those tools, and names the command in the error.
-func TestInstallListsTheToolsItLeftInstalledWhenALaterPlacementFails(t *testing.T) {
-	t.Parallel()
-	targets := fourTargets()
-	om := named(targets, "om")
-	files := cutoverFiles(targets)
-	files.errFor = func(op, path string) error {
-		if op == "rename" && strings.Contains(path, ".gt-wrap-") && strings.HasSuffix(path, " -> "+om.Path) {
-			return permission(path)
-		}
-		return nil
-	}
-	var out bytes.Buffer
-	err := Install(installConfig(files, &fakeDoctor{}, &out, targets))
-	if err == nil || !strings.Contains(err.Error(), "rename the wrapper into place at "+om.Path) {
-		t.Fatalf("Install = %v, want the failed placement of om named", err)
-	}
-	command := "gt-wrap rollback --stamp '" + testStamp + "'"
-	for _, name := range []string{"gt", "bd"} {
-		target := named(targets, name)
-		command += " --target '" + name + "=" + target.Path + "'"
-	}
-	if !strings.Contains(out.String(), "rollback: "+command+"\n") {
-		t.Errorf("output does not print the rollback command for gt and bd:\n%s", out.String())
-	}
-	if !strings.Contains(err.Error(), command) {
-		t.Errorf("error %q does not name the rollback command %q", err, command)
-	}
-	for _, name := range []string{"gt", "bd"} {
-		target := named(targets, name)
-		if want := "\n  " + dated(target, testStamp) + "\n"; !strings.Contains(out.String(), want) {
-			t.Errorf("output does not list the dated file of %s:\n%s", name, out.String())
-		}
-	}
-	if got := files.data(om.Path); got != "old om" {
-		t.Errorf("om holds %q, want the file it replaced back", got)
-	}
-	if got := files.data(named(targets, "hm").Path); got != "old hm" {
-		t.Errorf("hm holds %q, want it untouched after the failure", got)
-	}
-}
-
 // TestInstallNamesATemporaryFileItCannotRemove: when a placement step fails and
 // the temporary file cannot be removed either, the error names both, so the
 // file left beside the tool is not silent.
@@ -1232,16 +1097,308 @@ func TestInstallNamesATemporaryFileItCannotRemove(t *testing.T) {
 	}
 }
 
-func TestInstallNamesNoToolWhenTheFirstFails(t *testing.T) {
-	t.Parallel()
-	targets := fourTargets()[:1]
-	files := cutoverFiles(targets)
-	doctor := &fakeDoctor{installed: map[string]error{"gt": errors.New("exit status 1")}}
-	err := Install(installConfig(files, doctor, &bytes.Buffer{}, targets))
-	if err == nil || !strings.Contains(err.Error(), "no tool was cut over") {
-		t.Fatalf("Install = %v, want it to say no tool was cut over", err)
+// stagedNames are the files install staged beside a target and left behind.
+func stagedNames(files *fakeFiles) []string {
+	var names []string
+	for path := range files.files {
+		if strings.Contains(filepath.Base(path), ".gt-wrap-") {
+			names = append(names, path)
+		}
 	}
-	if got := files.data(targets[0].Path); got != "old gt" {
-		t.Errorf("gt holds %q, want the file it replaced back", got)
+	slices.Sort(names)
+	return names
+}
+
+// TestInstallIsTransactional: a placement or doctor failure at tool N puts back
+// every tool install changed, in reverse order, so each tool holds its original
+// bytes, nothing stays staged, and the output says what became of each tool. The
+// tool whose placement failed had its old file moved aside only if the failure
+// came after that rename, so it is put back only then.
+func TestInstallIsTransactional(t *testing.T) {
+	t.Parallel()
+	for _, placement := range []bool{true, false} {
+		for at := range fourTargets() {
+			kind := "a doctor failure"
+			if placement {
+				kind = "a placement failure"
+			}
+			name := fmt.Sprintf("%s at tool %d", kind, at+1)
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				targets := fourTargets()
+				failing := targets[at]
+				files := cutoverFiles(targets)
+				doctor := &fakeDoctor{}
+				if placement {
+					files.errFor = func(op, path string) error {
+						if op == "rename" && strings.Contains(path, ".gt-wrap-") && strings.HasSuffix(path, " -> "+failing.Path) {
+							return permission(path)
+						}
+						return nil
+					}
+				} else {
+					doctor.installed = map[string]error{failing.Name: errors.New("exit status 1")}
+				}
+				var out bytes.Buffer
+				err := Install(installConfig(files, doctor, &out, targets))
+				if err == nil || !strings.Contains(err.Error(), "install stopped at "+failing.Name) || !strings.Contains(err.Error(), "every tool it changed was put back") {
+					t.Fatalf("Install = %v, want a stop at %s with every changed tool put back", err, failing.Name)
+				}
+
+				for i, target := range targets {
+					if got := files.data(target.Path); got != "old "+target.Name {
+						t.Errorf("%s holds %q, want its original bytes", target.Path, got)
+					}
+					if files.has(dated(target, testStamp)) {
+						t.Errorf("%s was left behind after the undo", dated(target, testStamp))
+					}
+					var want string
+					switch {
+					case i < at:
+						want = "restored " + target.Name + " at " + target.Path + " from " + dated(target, testStamp)
+					case i == at:
+						want = "failed " + target.Name + " at " + target.Path + ": "
+					default:
+						want = "untouched " + target.Name + " at " + target.Path
+					}
+					if !strings.Contains(out.String(), want) {
+						t.Errorf("output does not say %q:\n%s", want, out.String())
+					}
+				}
+				if got := stagedNames(files); len(got) != 0 {
+					t.Errorf("staged files were left behind: %q", got)
+				}
+
+				// The undo replaces the wrappers it puts back, last placed first, and
+				// nothing else: the placement itself replaces no path.
+				last := at - 1
+				if !placement {
+					last = at
+				}
+				var wantReplaced []string
+				for i := last; i >= 0; i-- {
+					wantReplaced = append(wantReplaced, targets[i].Path)
+				}
+				if !slices.Equal(files.replaced, wantReplaced) {
+					t.Errorf("the run replaced %q, want %q", files.replaced, wantReplaced)
+				}
+			})
+		}
+	}
+}
+
+// TestInstallRefusesAnUnusableRungBeforeAnyChange: a tool that does not answer
+// in the image refuses the whole run before any target is touched.
+func TestInstallRefusesAnUnusableRungBeforeAnyChange(t *testing.T) {
+	t.Parallel()
+	targets := fourTargets()
+	files := cutoverFiles(targets)
+	doctor := &fakeDoctor{inImage: map[string]error{"bd": errors.New("Docker is down")}}
+	var out bytes.Buffer
+	err := Install(installConfig(files, doctor, &out, targets))
+	if err == nil {
+		t.Fatalf("Install returned no error; output:\n%s", out.String())
+	}
+	for _, want := range []string{"bd", "Docker is down"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	if len(files.ops) != 0 {
+		t.Errorf("a refused run changed files: %q", files.ops)
+	}
+	for _, target := range targets {
+		if got := files.data(target.Path); got != "old "+target.Name {
+			t.Errorf("%s holds %q, want the file it had before the run", target.Path, got)
+		}
+	}
+}
+
+// TestInstallStagesEverythingBeforeTouchingATarget: every tool is checked and
+// staged before any target is renamed, so a staging failure, or a refusal found
+// while checking, changes no target and leaves no staged file behind.
+func TestInstallStagesEverythingBeforeTouchingATarget(t *testing.T) {
+	t.Parallel()
+	targets := fourTargets()
+	om := named(targets, "om")
+	tests := []struct {
+		name  string
+		build func(*fakeFiles)
+		// want is the error install returns.
+		want string
+	}{
+		{
+			name: "a directory cannot take a staged file",
+			build: func(files *fakeFiles) {
+				files.errFor = func(op, path string) error {
+					if op == "create" && path == filepath.Dir(om.Path) {
+						return permission(path)
+					}
+					return nil
+				}
+			},
+			want: "make a temporary file beside " + om.Path,
+		},
+		{
+			name: "a dated name is taken",
+			build: func(files *fakeFiles) {
+				files.add(dated(named(targets, "hm"), testStamp), "an earlier backup", 0o755)
+			},
+			want: dated(named(targets, "hm"), testStamp) + " already exists",
+		},
+		{
+			name: "a target is a directory",
+			build: func(files *fakeFiles) {
+				delete(files.files, named(targets, "hm").Path)
+				files.addDir(named(targets, "hm").Path)
+			},
+			want: named(targets, "hm").Path + " is a directory",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			files := cutoverFiles(targets)
+			tt.build(files)
+			var out bytes.Buffer
+			err := Install(installConfig(files, &fakeDoctor{}, &out, targets))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Install = %v, want it to name %q", err, tt.want)
+			}
+			for _, op := range files.ops {
+				if strings.HasPrefix(op, "rename ") {
+					t.Errorf("a refused run renamed a file: %q", op)
+				}
+			}
+			if got := stagedNames(files); len(got) != 0 {
+				t.Errorf("staged files were left behind: %q", got)
+			}
+			for _, target := range targets {
+				if target.Name == "hm" && tt.name == "a target is a directory" {
+					continue
+				}
+				if got := files.data(target.Path); got != "old "+target.Name {
+					t.Errorf("%s holds %q, want the file it had before the run", target.Path, got)
+				}
+			}
+		})
+	}
+}
+
+// TestInstallRestoreFailurePrintsTheManualCommand: when a tool cannot be put
+// back, install names it, prints the command that puts its original file back by
+// hand and the rollback command for it, and returns an error. The other tools are
+// still put back.
+func TestInstallRestoreFailurePrintsTheManualCommand(t *testing.T) {
+	t.Parallel()
+	targets := fourTargets()
+	gt, bd := targets[0], targets[1]
+	files := cutoverFiles(targets)
+	files.errFor = func(op, path string) error {
+		if op == "rename" && path == dated(gt, testStamp)+" -> "+gt.Path {
+			return permission(path)
+		}
+		return nil
+	}
+	doctor := &fakeDoctor{installed: map[string]error{bd.Name: errors.New("exit status 1")}}
+	var out bytes.Buffer
+	err := Install(installConfig(files, doctor, &out, targets))
+	if err == nil || !strings.Contains(err.Error(), "gt could not be put back") {
+		t.Fatalf("Install = %v, want gt named as not put back", err)
+	}
+	manual := "mv -f '" + dated(gt, testStamp) + "' '" + gt.Path + "'"
+	if !strings.Contains(out.String(), "could not restore gt at "+gt.Path) || !strings.Contains(out.String(), manual) {
+		t.Errorf("output does not print the manual command %q:\n%s", manual, out.String())
+	}
+	if want := "rollback: gt-wrap rollback --stamp '" + testStamp + "' --target 'gt=" + gt.Path + "'"; !strings.Contains(out.String(), want) {
+		t.Errorf("output does not print the rollback command for gt %q:\n%s", want, out.String())
+	}
+	if got := files.data(bd.Path); got != "old bd" {
+		t.Errorf("bd holds %q, want it put back", got)
+	}
+	if got := files.data(gt.Path); got != wrapperData {
+		t.Errorf("gt holds %q, want the wrapper it still holds", got)
+	}
+	if got := files.data(dated(gt, testStamp)); got != "old gt" {
+		t.Errorf("%s holds %q, want the original file kept for the manual restore", dated(gt, testStamp), got)
+	}
+}
+
+// TestRollbackChecksThePathType: a wrapper path that is not a regular file is
+// refused, naming the path and the type found, and changes nothing for that tool.
+// A regular file is rolled back. os.Stat follows a symlink, so a symlink to a
+// regular file is judged as that file and is rolled back too.
+func TestRollbackChecksThePathType(t *testing.T) {
+	t.Parallel()
+	target := Target{Name: "gt", Path: "/Users/operator/.local/bin/gt"}
+	kept := dated(target, testStamp)
+	tests := []struct {
+		name  string
+		build func(*fakeFiles)
+		// want names the type or the missing file the refusal reports; "" when
+		// the tool is rolled back.
+		want string
+	}{
+		{
+			name: "the wrapper is a directory",
+			build: func(f *fakeFiles) {
+				f.addDir(target.Path)
+				f.add(kept, "old gt", 0o755)
+			},
+			want: "is a directory",
+		},
+		{
+			name: "the wrapper is a socket",
+			build: func(f *fakeFiles) {
+				f.add(target.Path, wrapperData, fs.ModeSocket|0o755)
+				f.add(kept, "old gt", 0o755)
+			},
+			want: "is a socket",
+		},
+		{
+			name: "the wrapper is missing",
+			build: func(f *fakeFiles) {
+				f.add(kept, "old gt", 0o755)
+			},
+			want: "is missing",
+		},
+		{
+			name: "the dated file is missing",
+			build: func(f *fakeFiles) {
+				f.add(target.Path, wrapperData, 0o755)
+			},
+			want: kept + " does not exist",
+		},
+		{
+			name: "the wrapper is a regular file",
+			build: func(f *fakeFiles) {
+				f.add(target.Path, wrapperData, 0o755)
+				f.add(kept, "old gt", 0o755)
+			},
+			want: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			files := newFakeFiles()
+			tt.build(files)
+			err := Rollback(RollbackConfig{Stamp: testStamp, Targets: []Target{target}, Files: files, Out: &bytes.Buffer{}})
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Rollback: %v", err)
+				}
+				if got := files.data(target.Path); got != "old gt" {
+					t.Errorf("%s holds %q, want the restored file", target.Path, got)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Rollback = %v, want a refusal naming %q", err, tt.want)
+			}
+			if len(files.ops) != 0 {
+				t.Errorf("a refused run changed files: %q", files.ops)
+			}
+		})
 	}
 }

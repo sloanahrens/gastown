@@ -35,15 +35,18 @@ gt-wrap install --stamp 20261106-1430 \
 `--dir` names one directory holding all four instead. The command refuses
 before changing anything when Docker, the daemon image or a tool in it does not
 answer, when a file it would replace is not a regular file, or when a file
-dated with the same stamp already exists. It replaces each tool by renaming the
-old file to `<name>.pre-wrap-<stamp>` and renaming a new copy into place, so a
-running binary is never written through. When a placed tool fails `--doctor`,
-or a later step fails after a tool was placed, install undoes the tool that
-failed, stops, and prints the rollback command and the dated files for the
-tools it left installed.
+dated with the same stamp already exists. It stages a new copy beside every
+tool before it touches any tool, so a failure while staging changes nothing. It
+then replaces each tool by renaming the old file to `<name>.pre-wrap-<stamp>`
+and renaming the staged copy into place, so a running binary is never written
+through. When a tool fails `--doctor`, or a step fails after a tool was placed,
+install puts every tool it changed back from its dated file, in reverse order,
+stops, and prints one line per tool. A tool it cannot put back is named, with
+the command that puts its original file back by hand and the rollback command
+for it.
 
-The last lines install prints are the exact rollback command and the dated
-files it kept, on success or on a stop. Keep them.
+On success the last lines install prints are the exact rollback command and the
+dated files it kept. Keep them.
 
 ## The watch hour
 

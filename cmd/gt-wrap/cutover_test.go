@@ -132,7 +132,7 @@ func (i memInfo) ModTime() time.Time { return time.Time{} }
 func (i memInfo) IsDir() bool        { return i.mode.IsDir() }
 func (i memInfo) Sys() any           { return nil }
 
-func TestRunInstallPlacesTheWrapperOverTheNamedTools(t *testing.T) {
+func TestCLIRunInstallPlacesTheWrapperOverTheNamedTools(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	targets := map[string]string{}
@@ -168,7 +168,7 @@ func TestRunInstallPlacesTheWrapperOverTheNamedTools(t *testing.T) {
 	}
 }
 
-func TestRunRollbackRestoresTheFilesWithoutATown(t *testing.T) {
+func TestCLIRunRollbackRestoresTheFilesWithoutATown(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.surface.getwd = func() (string, error) { return "", errors.New("no working directory") }
@@ -192,7 +192,7 @@ func TestRunRollbackRestoresTheFilesWithoutATown(t *testing.T) {
 	}
 }
 
-func TestRunRefusesACutoverCommandItDoesNotKnow(t *testing.T) {
+func TestCLIRunRefusesACutoverCommandItDoesNotKnow(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	if exit := h.run("gt-wrap", "upgrade"); exit != 1 {
@@ -205,7 +205,7 @@ func TestRunRefusesACutoverCommandItDoesNotKnow(t *testing.T) {
 	}
 }
 
-func TestRunSendsInstallToTheToolWhenInvokedAsOne(t *testing.T) {
+func TestCLIRunSendsInstallToTheToolWhenInvokedAsOne(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	if exit := h.run("gt", "install"); exit != 0 {
@@ -219,7 +219,7 @@ func TestRunSendsInstallToTheToolWhenInvokedAsOne(t *testing.T) {
 	}
 }
 
-func TestRunInstallRefusesWithoutAStampBeforeChangingFiles(t *testing.T) {
+func TestCLIRunInstallRefusesWithoutAStampBeforeChangingFiles(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	path := "/tools/gt"
@@ -238,7 +238,7 @@ func TestRunInstallRefusesWithoutAStampBeforeChangingFiles(t *testing.T) {
 	}
 }
 
-func TestRunRefusesBothADirectoryAndTargets(t *testing.T) {
+func TestCLIRunRefusesBothADirectoryAndTargets(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--dir", "/tools", "--target", "gt=/bin/gt")
@@ -250,7 +250,7 @@ func TestRunRefusesBothADirectoryAndTargets(t *testing.T) {
 	}
 }
 
-func TestRunInstallRefusesAToolTheWrapperDoesNotAnswerAs(t *testing.T) {
+func TestCLIRunInstallRefusesAToolTheWrapperDoesNotAnswerAs(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	path := "/tools/bash"
@@ -270,7 +270,7 @@ func TestRunInstallRefusesAToolTheWrapperDoesNotAnswerAs(t *testing.T) {
 	}
 }
 
-func TestRunInstallRefusesWithoutATown(t *testing.T) {
+func TestCLIRunInstallRefusesWithoutATown(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.surface.getwd = func() (string, error) { return t.TempDir(), nil }
@@ -286,9 +286,9 @@ func TestRunInstallRefusesWithoutATown(t *testing.T) {
 	}
 }
 
-// TestRunDoctorAnswersThroughTheWrapperName: gt-wrap --doctor is the check
+// TestCLIRunDoctorAnswersThroughTheWrapperName: gt-wrap --doctor is the check
 // install makes before the cutover, so the operator can run it first.
-func TestRunDoctorAnswersThroughTheWrapperName(t *testing.T) {
+func TestCLIRunDoctorAnswersThroughTheWrapperName(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.fake.diag = gtwrap.Diagnosis{
@@ -332,7 +332,7 @@ func (s *cutoverShell) Capture(ctx context.Context, argv []string) (string, int,
 	return "", 1, nil
 }
 
-func TestCutoverDoctorChecksTheImageOfItsTown(t *testing.T) {
+func TestCLICutoverDoctorChecksTheImageOfItsTown(t *testing.T) {
 	t.Parallel()
 	const compose = "services:\n  daemon:\n    image: \"gt-daemon:7f3e9a1\"\n    container_name: \"gt-daemon\"\n"
 	shell := &cutoverShell{}
@@ -355,9 +355,9 @@ func TestCutoverDoctorChecksTheImageOfItsTown(t *testing.T) {
 	}
 }
 
-// TestCutoverDoctorRunsThePlacedFileWithDoctor: install's doctor runs the file
+// TestCLICutoverDoctorRunsThePlacedFileWithDoctor: install's doctor runs the file
 // it placed with --doctor, so the check is the placed tool's own answer.
-func TestCutoverDoctorRunsThePlacedFileWithDoctor(t *testing.T) {
+func TestCLICutoverDoctorRunsThePlacedFileWithDoctor(t *testing.T) {
 	t.Parallel()
 	const path = "/Users/operator/.local/bin/gt"
 	var ran []string
@@ -373,7 +373,7 @@ func TestCutoverDoctorRunsThePlacedFileWithDoctor(t *testing.T) {
 	}
 }
 
-func TestCutoverDoctorReportsAFailedInstalledFile(t *testing.T) {
+func TestCLICutoverDoctorReportsAFailedInstalledFile(t *testing.T) {
 	t.Parallel()
 	const path = "/Users/operator/.local/bin/gt"
 	doctor := cutoverDoctor{run: func(...string) error { return errors.New("exit status 1") }}
@@ -383,7 +383,7 @@ func TestCutoverDoctorReportsAFailedInstalledFile(t *testing.T) {
 	}
 }
 
-func TestRunRefusesACutoverFlagItDoesNotKnow(t *testing.T) {
+func TestCLIRunRefusesACutoverFlagItDoesNotKnow(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	if exit := h.run("gt-wrap", "install", "--no-such-flag"); exit != 1 {
@@ -394,7 +394,7 @@ func TestRunRefusesACutoverFlagItDoesNotKnow(t *testing.T) {
 	}
 }
 
-func TestRunRefusesAnArgumentAfterTheFlags(t *testing.T) {
+func TestCLIRunRefusesAnArgumentAfterTheFlags(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	if exit := h.run("gt-wrap", "rollback", "extra"); exit != 1 {
@@ -405,7 +405,7 @@ func TestRunRefusesAnArgumentAfterTheFlags(t *testing.T) {
 	}
 }
 
-func TestRunRefusesATargetThatIsNotNameEqualsPath(t *testing.T) {
+func TestCLIRunRefusesATargetThatIsNotNameEqualsPath(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	if exit := h.run("gt-wrap", "install", "--stamp", cutoverStamp, "--target", "gt"); exit != 1 {
@@ -416,7 +416,7 @@ func TestRunRefusesATargetThatIsNotNameEqualsPath(t *testing.T) {
 	}
 }
 
-func TestRunInstallRefusesWhenTheWrapperCannotBeLocated(t *testing.T) {
+func TestCLIRunInstallRefusesWhenTheWrapperCannotBeLocated(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.surface.executable = func() (string, error) { return "", errors.New("no executable") }
@@ -428,7 +428,7 @@ func TestRunInstallRefusesWhenTheWrapperCannotBeLocated(t *testing.T) {
 	}
 }
 
-func TestRunRefusesAnEmptyCutoverCommand(t *testing.T) {
+func TestCLIRunRefusesAnEmptyCutoverCommand(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	if exit := h.run("gt-wrap"); exit != 1 {
@@ -441,7 +441,7 @@ func TestRunRefusesAnEmptyCutoverCommand(t *testing.T) {
 	}
 }
 
-func TestRunRollbackReportsWhatItCouldNotRestore(t *testing.T) {
+func TestCLIRunRollbackReportsWhatItCouldNotRestore(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	path := "/tools/gt"
