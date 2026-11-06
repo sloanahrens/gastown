@@ -482,7 +482,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		return nil, fmt.Errorf("rig %q: the gate log directory is empty because the town root %q is unset or the rig name is not one path element, so a rejected gate would keep no job log", rigName, townRoot)
 	}
 	rigPath := filepath.Join(townRoot, rigName)
-	repo := filepath.Join(rigPath, ".repo.git")
+	repo := constants.RigBareRepoPath(rigPath)
 	if _, err := os.Stat(repo); err != nil {
 		return nil, fmt.Errorf("rig repository %s: %w", repo, err)
 	}

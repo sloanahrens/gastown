@@ -767,7 +767,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 			// so there is no tip to read (gt-v4r0x).
 			return "", fmt.Errorf("%s: %w", filepath.Join(rigPath, "config.json"), err)
 		}
-		return git.NewGit(filepath.Join(rigPath, ".repo.git")).
+		return git.NewGit(constants.RigBareRepoPath(rigPath)).
 			RemoteBranchTip("origin", branch)
 	}
 	s.landedCommit = d.attentionLandedCommit
@@ -958,7 +958,7 @@ func (d *Daemon) attentionLandedCommit(rig, sha string) (bool, error) {
 // author and subject.
 func (d *Daemon) attentionCommitInfo(rig, sha string) (string, string) {
 	rigPath := filepath.Join(d.config.TownRoot, rig)
-	author, subject, err := git.NewGit(filepath.Join(rigPath, ".repo.git")).CommitAuthorSubject(sha)
+	author, subject, err := git.NewGit(constants.RigBareRepoPath(rigPath)).CommitAuthorSubject(sha)
 	if err != nil {
 		return "", ""
 	}

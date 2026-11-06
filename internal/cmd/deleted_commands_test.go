@@ -45,7 +45,6 @@ var deletedCommands = [][]string{
 	{"resume"},
 	{"synthesis"},
 	{"worktree"},
-	{"town"},
 	{"namepool"},
 	{"role"},
 	{"remember"},

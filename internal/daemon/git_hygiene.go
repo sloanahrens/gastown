@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"github.com/steveyegge/gastown/internal/constants"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -121,7 +122,7 @@ func (d *Daemon) runGitHygiene() {
 	// No repository to clean is the failure the script guarded against
 	// (gt-chqi): a run over nothing must not read as a clean run.
 	if len(repos) == 0 {
-		cycle.failStep("repos", "no rig has a repository (mayor/rigs.json lists none, or none has a .repo.git or a working clone)")
+		cycle.failStep("repos", "no rig has a repository (mayor/rigs.json lists none, or none has a "+constants.DirRepoGit+" or a working clone)")
 		return
 	}
 

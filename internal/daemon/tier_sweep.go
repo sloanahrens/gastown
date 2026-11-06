@@ -901,7 +901,7 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		if open {
 			continue
 		}
-		repo := filepath.Join(d.config.TownRoot, rig, ".repo.git")
+		repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rig))
 		if _, err := os.Stat(repo); err != nil {
 			continue
 		}
@@ -1064,7 +1064,7 @@ func (d *Daemon) tierSweepLocalMain(rig string) (string, error) {
 	if read == nil {
 		read = tierSweepLocalMainSHA
 	}
-	return read(filepath.Join(d.config.TownRoot, rig, ".repo.git"))
+	return read(constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rig)))
 }
 
 // tierSweepStampOwed records when rig's owed interval began, leaving a record
@@ -1127,7 +1127,7 @@ func (d *Daemon) runTierSweep() bool {
 // on the next heartbeat.
 func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig string, now time.Time) bool {
 	seams := d.tierSweepSeams
-	repo := filepath.Join(d.config.TownRoot, rig, ".repo.git")
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rig))
 	if _, err := os.Stat(repo); err != nil {
 		cycle.skipStep(rig, "no repository at "+repo)
 		d.logger.Printf("tier_sweep: %s: no repository at %s; nothing to sweep", rig, repo)
@@ -1895,7 +1895,7 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		Tiers:    append([]string(nil), st.tiers...),
 		Jobs:     cfg.Jobs,
 		OutDir:   filepath.Join(cfg.OutputRoot, st.rig, runID),
-		RepoDir:  filepath.Join(d.config.TownRoot, st.rig, ".repo.git"),
+		RepoDir:  constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, st.rig)),
 		Dind:     cfg.Dind,
 		RunID:    runID,
 		Context:  cfg.Context,

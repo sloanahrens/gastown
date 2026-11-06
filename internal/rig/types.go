@@ -2,6 +2,7 @@
 package rig
 
 import (
+	"github.com/steveyegge/gastown/internal/constants"
 	"os"
 	"path/filepath"
 
@@ -117,7 +118,7 @@ func (r *Rig) DefaultBranch() string {
 func (r *Rig) RepoPath() string {
 	candidates := []string{
 		r.Path,
-		filepath.Join(r.Path, "mayor", "rig"),
+		constants.RigMayorPath(r.Path),
 		filepath.Join(r.Path, "refinery", "rig"),
 	}
 	for _, candidate := range candidates {
@@ -135,7 +136,7 @@ func (r *Rig) RepoPath() string {
 // HEAD is the test rather than the directory name, which a rig usually has with
 // nothing behind it.
 func (r *Rig) BareRepoPath() string {
-	dir := filepath.Join(r.Path, ".repo.git")
+	dir := constants.RigBareRepoPath(r.Path)
 	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
 		return ""
 	}
