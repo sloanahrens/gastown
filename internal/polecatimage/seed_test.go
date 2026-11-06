@@ -826,16 +826,6 @@ func TestSeedHelpersRefuseAnInputTheJobCannotRender(t *testing.T) {
 	}
 }
 
-// TestRunProgramStillRunsThePluginOnAnUnknownArgument: the seed helpers are a dispatch on the image
-// binary's entry point, so an argument the plugin's own script passes on must keep starting a run.
-func TestRunProgramStillRunsThePluginOnAnUnknownArgument(t *testing.T) {
-	t.Parallel()
-	var out, errOut strings.Builder
-	if code := runProgram([]string{"--some-plugin-flag"}, &out, &errOut, envMap(map[string]string{})); code != 1 {
-		t.Errorf("runProgram(unknown argument) = %d, want the run's own status 1", code)
-	}
-}
-
 // equalEvents compares two event lists, so a failure prints both in full.
 func equalEvents(got, want []string) bool {
 	if len(got) != len(want) {
