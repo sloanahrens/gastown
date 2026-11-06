@@ -219,7 +219,29 @@ func TestNonPersonalHomeNamesAreExemptByWholeName(t *testing.T) {
 	})
 }
 
-func TestIdentifierShapedDomainIsNotAnEmail(t *testing.T) {
+func TestTitleCaseTopLevelLabelIsStillAnAddress(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		addr string
+	}{
+		{"title-case top label", planted("jane.doe@", "gmail.Com")},
+		{"title-case second label", planted("jane.doe@", "Gmail.Com")},
+		{"upper-case top label", planted("jane.doe@", "gmail.COM")},
+		{"title-case two-letter top label", planted("jane.doe@", "acme.Io")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "contact " + tc.addr + " please"
+			findings := scanFS(t, singleFile("docs/note.md", line+"\n"), nil)
+			if len(findings) != 1 || findings[0].Rule != RuleEmail {
+				t.Fatalf("got %v, want one %q finding", findings, RuleEmail)
+			}
+		})
+	}
+}
+
+func TestIdentifierShapedDomainIsNoAddress(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name string
@@ -227,6 +249,7 @@ func TestIdentifierShapedDomainIsNotAnEmail(t *testing.T) {
 		want int
 	}{
 		{"metric column", planted("x@", "metrics.queueLandingColumn"), 0},
+		{"bare identifier top label", planted("x@", "metrics.landingColumn"), 0},
 		{"method chain", planted("show@", "landworker.RetryBeads.List"), 0},
 		{"short identifier", planted("a@", "pkg.Func"), 0},
 		{"upper-case top label is a host", planted("a@", "host.COM"), 1},

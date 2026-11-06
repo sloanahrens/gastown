@@ -468,9 +468,9 @@ func colonThenProse(rest string) bool {
 
 // addressDomain reports whether domain has the shape of an address: at least
 // one dot, and a last label that starts with a letter, is two or more letters
-// long and does not mix lower and upper case. Without a dot the match is a
-// version pin or an id (checkout@v4, image@sha256, main@a); a one-letter or
-// all-digit last label (a@b.c, 127.0.0.1) is not a host name; and a case-mixing
+// long and is not an identifier (see identifierShaped). Without a dot the match
+// is a version pin or an id (checkout@v4, image@sha256, main@a); a one-letter or
+// all-digit last label (a@b.c, 127.0.0.1) is not a host name; and a camel-case
 // label is a Go identifier such as queueLandingColumn.
 func addressDomain(domain string) bool {
 	dot := strings.LastIndex(domain, ".")
@@ -481,23 +481,51 @@ func addressDomain(domain string) bool {
 	if len(last) < 2 || !isASCIILetter(last[0]) {
 		return false
 	}
-	return !mixedCase(last)
+	return !identifierShaped(last)
 }
 
-func mixedCase(s string) bool {
-	var upper, lower bool
+// identifierShaped reports whether a last label is a Go identifier rather than a
+// top-level domain. A lower-case letter followed later by an upper-case one is
+// the camel-case shape (queueLandingColumn). A capitalised label is shaped the
+// same as a top-level domain (Com, Io), so it is an identifier only when it is
+// not a known top-level domain (Func, List). A label that is one case throughout
+// (com, COM) is a domain label.
+func identifierShaped(s string) bool {
+	var lower bool
 	for _, r := range s {
-		if unicode.IsUpper(r) {
-			upper = true
-		}
 		if unicode.IsLower(r) {
 			lower = true
-		}
-		if upper && lower {
+		} else if unicode.IsUpper(r) && lower {
 			return true
 		}
 	}
-	return false
+	return titleCase(s) && !topLevelDomains[strings.ToLower(s)]
+}
+
+// titleCase reports whether s is one capital letter followed by lower-case
+// letters only.
+func titleCase(s string) bool {
+	for i, r := range s {
+		if i == 0 && !unicode.IsUpper(r) || i > 0 && !unicode.IsLower(r) {
+			return false
+		}
+	}
+	return len(s) > 0
+}
+
+// topLevelDomains lists the top-level domains an address is written with in
+// the capitalised form. It only decides between a capitalised domain label and
+// a capitalised identifier, so it is not a full registry.
+var topLevelDomains = map[string]bool{
+	"com": true, "net": true, "org": true, "edu": true, "gov": true, "mil": true,
+	"int": true, "info": true, "biz": true, "name": true, "pro": true, "mobi": true,
+	"app": true, "dev": true, "io": true, "ai": true, "me": true, "co": true,
+	"tv": true, "cc": true, "xyz": true, "tech": true, "online": true, "site": true,
+	"store": true, "email": true, "cloud": true, "uk": true, "us": true, "ca": true,
+	"au": true, "nz": true, "de": true, "fr": true, "nl": true, "se": true, "ch": true,
+	"es": true, "it": true, "jp": true, "cn": true, "in": true, "ru": true, "br": true,
+	"mx": true, "ie": true, "eu": true, "kr": true, "za": true, "pl": true, "be": true,
+	"at": true, "dk": true, "no": true, "fi": true,
 }
 
 func emailIsFinding(local, domain, rest string) bool {
