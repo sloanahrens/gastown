@@ -275,10 +275,17 @@ func (s *diskMaintSchedule) retryAtOf(name string) time.Time {
 // cacheTrimDue reports whether the cache trim is due at now: a failed run's
 // retry comes first, and otherwise the interval runs from the last verdict.
 func (s *diskMaintSchedule) cacheTrimDue(now time.Time, every time.Duration) bool {
-	if retry := s.retryAtOf(diskMaintCacheTrimName); !retry.IsZero() {
+	return s.trimDue(diskMaintCacheTrimName, now, every)
+}
+
+// trimDue reports whether the trim named name is due at now, under the rule the
+// cache trim uses: a failed run's retry comes first, and otherwise the interval
+// runs from the last verdict (gt-gg9hv.57).
+func (s *diskMaintSchedule) trimDue(name string, now time.Time, every time.Duration) bool {
+	if retry := s.retryAtOf(name); !retry.IsZero() {
 		return !now.Before(retry)
 	}
-	last := s.lastRunAt(diskMaintCacheTrimName)
+	last := s.lastRunAt(name)
 	return last.IsZero() || now.Sub(last) >= every
 }
 
@@ -441,6 +448,9 @@ func (d *Daemon) runDiskMaintenance() {
 	}
 	s := d.diskMaintenanceSeams()
 	now := s.now()
+	// The CI cache trim is due on its own interval whatever the town is doing, so
+	// it is ticked before the quiet guard that holds the targets back (gt-gg9hv.57).
+	d.runCICacheTrimTick()
 
 	due, errs := d.diskMaintenanceDue(now)
 	for _, err := range errs {

@@ -168,6 +168,40 @@ comes due (`cache_trim_interval`), and on every quiet pass.
   images, or when two claims are mounted in one namespace: a trim's labels
   cannot tell one claim's objects from the other's.
 
+## The CI runner's Go build cache
+
+The patrol also trims the Go build cache the CI gate jobs fill on the control
+cluster. The cache is the named volume `ci-gocache`, under `/var/lib/docker` in
+the `dind` container of the `forgejo-runner` deployment in the `forgejo`
+namespace. The trim runs on its own interval (`ci_cache_trim_interval`) in any
+window and does not wait for the town to be quiet, as the shared cache claim's
+trim does, so a landing pass in flight does not hold it off.
+
+- The three settings sit under `patrols.disk_maintenance`: `ci_cache_trim_interval`
+  (default `1h`), `ci_cache_max_age` (default `12h`) and `ci_cache_warn_bytes`
+  (default `30GB`). An empty setting is the default. Zero or less is refused, and
+  the error names the setting.
+- The exec goes to the control cluster, which is the context
+  `patrols.tier_sweep.runner.context` names. The runner must be on the kubernetes
+  backend with that context set; otherwise the trim runs nothing and says why.
+- Each run is one exec into the `dind` container. It removes the files under the
+  volume's data directory whose last write is older than `ci_cache_max_age`, then
+  the directories that removal left empty. The volume's top level, where Go keeps
+  its `trim.txt` bookkeeping, is left to Go. `ci-gomod` and `ci-npm` are not
+  touched.
+- The mode applies as it does to the rest of the patrol. `dry_run` lists what
+  would be removed and removes nothing; `apply` removes. An applied run logs one
+  line, `disk_maintenance: ci cache trim: removed N files, X to Y (older than 12h)`,
+  naming the sizes before and after and the max age.
+- A run that cannot tell what the volume holds is a failed run, never a volume
+  with nothing to trim. A missing volume path, a `dind` container that is not
+  running, a failed exec and an unreadable reply each log their own line, at most
+  once an hour, and the trim is retried in 15 minutes.
+- An applied trim that removes no file while the volume is over
+  `ci_cache_warn_bytes` raises one low attention item, keyed `ci-cache-trim-noop`.
+  The item means the trim is not reaching what is there, or that nothing is yet
+  older than the max age. A later reading under the figure clears it.
+
 ## Rollback
 
 A wrong delete costs a rebuild, not data: any per-commit image is rebuilt from
