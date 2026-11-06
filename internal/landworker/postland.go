@@ -40,6 +40,11 @@ type PostLandResult struct {
 	// LogPath is the run's full output on disk, "" when none was kept.
 	LogPath string
 	Err     error
+	// NoRevert, when set, says why this red verdict must not build a revert
+	// whatever the diff shows: status mode's red carries no failing unit, and
+	// a red status alone never reverts (gt-gg9hv.7.1). RedMain files or
+	// comments the red-main bead as always and states the reason in its line.
+	NoRevert string
 }
 
 // PostLandTrigger starts the post-landing verdict for a landing, and reads the
@@ -98,6 +103,11 @@ type PostLandRunner struct {
 	// State holds the pending status-mode verdicts, so a restarted daemon
 	// resumes them; nil disables status mode.
 	State MainStateStore
+	// IsAncestor reports whether ancestor is an ancestor of descendant in the
+	// rig's repository. Status mode uses it to refuse a verdict for a commit
+	// older than the newest verdict the rig holds: such a verdict moves
+	// nothing. nil, or an error, reads as "not older" and the verdict fires.
+	IsAncestor func(ancestor, descendant string) (bool, error)
 	// readTimeoutOverride bounds one status read in place of
 	// PostLandStatusReadTimeout, which production uses. A test shortens it so
 	// a stalled read is cut off without waiting out the real bound.
@@ -146,6 +156,11 @@ type PostLandRunner struct {
 	// passBudgetOverride bounds a pass's reads in place of
 	// PostLandStatusPassBudget; a test sets it.
 	passBudgetOverride time.Duration
+	// handling holds the landed commits whose red verdict is being rerun on a
+	// goroutine of its own. Their entries stay in the store until the handler
+	// finishes, so a daemon that stops mid-rerun reads the status again and
+	// decides the commit on restart. Guarded by statusMu.
+	handling map[string]bool
 }
 
 var _ PostLandTrigger = (*PostLandRunner)(nil)

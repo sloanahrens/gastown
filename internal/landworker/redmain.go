@@ -154,7 +154,11 @@ func (r *RedMain) Red(ctx context.Context, cmd string, pl PostLand, res PostLand
 		line += "; flaky (passed on rerun): " + strings.Join(flaky, ", ")
 	}
 	if len(filed) > 0 {
-		if did := r.maybeRevert(ctx, pl, redBlame(stillRed, res.ShellFailures)); did != "" {
+		if res.NoRevert != "" {
+			// A verdict that names no failing unit and that no rerun confirmed
+			// is a bead, never a revert (gt-gg9hv.7.1).
+			line += "; no revert: " + res.NoRevert
+		} else if did := r.maybeRevert(ctx, pl, redBlame(stillRed, res.ShellFailures)); did != "" {
 			line += "; " + did
 		}
 	}
@@ -291,7 +295,12 @@ func fileOrComment(bd interface {
 func (r *RedMain) fileOrComment(open map[string]string, cmd, pkg string, pl PostLand, res PostLandResult, tail string) string {
 	detail := fmt.Sprintf("%s at %s (%s) via %q; failed again on a rerun of the package. Last lines:\n%s",
 		pkg, pl.Commit, pl.by(), cmd, lastLines(tail, postLandTailLines))
-	if pkg == redMainNoPackage {
+	if pkg == redMainNoPackage && res.NoRevert != "" {
+		// A red CI status, not a command run: it names no package, and nothing
+		// is reverted on it alone (gt-gg9hv.7.1).
+		detail = fmt.Sprintf("The post-land status %q was red at %s (%s): %s. A red status names no failing Go package; no revert follows from it: %s. Last lines:\n%s",
+			cmd, pl.Commit, pl.by(), lastLines(tail, 1), res.NoRevert, lastLines(tail, postLandTailLines))
+	} else if pkg == redMainNoPackage {
 		detail = fmt.Sprintf("%q exited %d at %s (%s) without naming a failing Go package (a build or shell-test failure, a timeout or a kill), so nothing was rerun. Last lines:\n%s",
 			cmd, res.ExitCode, pl.Commit, pl.by(), lastLines(tail, postLandTailLines))
 	}

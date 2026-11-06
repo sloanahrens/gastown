@@ -45,6 +45,12 @@ const PostLandStatusPassBudget = 20 * time.Second
 // entry is dropped when the window ends.
 const PostLandAlarmWindow = 7 * 24 * time.Hour
 
+// PostLandLateReadInterval is the least time between two reads of a landed
+// commit whose verdict timed out: CI may still report late, and a late verdict
+// is logged and clears the timeout item, but the entry is no longer polled at
+// the live rate. Entries stay readable for PostLandAlarmWindow.
+const PostLandLateReadInterval = 10 * time.Minute
+
 // postLandPendingLimit is how many pending entries a rig keeps. An entry past it
 // is dropped oldest first, and the drop is recorded in the same state
 // (MainState.PostLandDropped), so the attention queue says entries were lost
@@ -168,6 +174,10 @@ func postLandStatusRead(cs *forgejo.CombinedStatus, err error, name, sha string)
 		Description: fmt.Sprintf("the %q status on %s is %q, which is not a verdict", name, short(sha), statuses[0].Status),
 	}
 }
+
+// SanitizeStatusText is sanitizeStatusText for callers outside the package
+// that put untrusted text on one line (the daemon's attention items).
+func SanitizeStatusText(s string) string { return sanitizeStatusText(s) }
 
 // sanitizeStatusText makes untrusted status text safe for one line: control
 // characters and newlines become a space, the text is cut to
@@ -399,10 +409,16 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 	// The reads: due entries, least recently read first, inside one budget.
 	order := make([]int, 0, len(entries))
 	for i, e := range entries {
-		if p.done[e.Land.Commit] || p.timedOut(e, now, timeout) {
+		if p.done[e.Land.Commit] || p.handling[e.Land.Commit] {
 			continue
 		}
-		if p.Status != nil && (e.LastRead.IsZero() || now.Sub(e.LastRead) >= PostLandStatusPollInterval) {
+		// A timed-out entry is read at the slow rate: CI may still report, and
+		// a late verdict is logged and clears the item.
+		every := PostLandStatusPollInterval
+		if p.timedOut(e, now, timeout) {
+			every = PostLandLateReadInterval
+		}
+		if p.Status != nil && (e.LastRead.IsZero() || now.Sub(e.LastRead) >= every) {
 			order = append(order, i)
 		}
 	}
@@ -422,6 +438,29 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 			break // the read was cut off by the budget or a stop: nothing learned
 		}
 		changed = true
+		if res.Verdict != PostLandStatusUnknown && p.timedOut(e, now, timeout) {
+			// CI reported after post_land_timeout. Later landings sit on top of
+			// this commit by now, so the verdict is not acted on; it is said,
+			// and the entry (with its timeout item) goes.
+			p.logf("LATE verdict at %s (%s): status %q is %s, %s after post_land_timeout (%s); not acted on: a verdict that late no longer describes the tip",
+				short(pl.Commit), pl.by(), name, res.State, now.Sub(e.Since.Add(timeout)).Round(time.Second), timeout)
+			p.markDone(pl.Commit)
+			decided = append(decided, pl.Commit)
+			removed[i] = true
+			continue
+		}
+		if res.Verdict == PostLandStatusRed && p.needsRerun() {
+			// The rerun can take as long as the check does, so it runs on a
+			// goroutine of its own and the entry stays in the store until it
+			// ends: this pass does not wait, and a restart decides it again.
+			if p.handling == nil {
+				p.handling = map[string]bool{}
+			}
+			p.handling[pl.Commit] = true
+			entries[i].LastRead, entries[i].LastState, entries[i].LastDescription = now, res.State, res.Description
+			fires = append(fires, func() { p.startRedHandler(ctx, pl, name, res) })
+			continue
+		}
 		if res.Verdict != PostLandStatusUnknown {
 			p.markDone(pl.Commit)
 			decided = append(decided, pl.Commit)
@@ -438,6 +477,10 @@ func (p *PostLandRunner) PollPending(ctx context.Context) {
 	keep := make([]PendingPostLand, 0, len(entries))
 	for i, e := range entries {
 		if removed[i] {
+			continue
+		}
+		if p.handling[e.Land.Commit] {
+			keep = append(keep, e)
 			continue
 		}
 		if p.done[e.Land.Commit] {
@@ -602,9 +645,51 @@ func (p *PostLandRunner) readTimeout() time.Duration {
 	return PostLandStatusReadTimeout
 }
 
+// olderThanNewest reports whether pl is an ancestor of the newest commit the
+// rig holds a verdict for (MainState.LastRun). Verdicts are decided as CI reports
+// them, not in landing order, so a late verdict for an older commit must not move
+// LastGreen, promote, or file a red-main bead after a newer verdict stands. A
+// state or ancestry that cannot be read reads as "not older": the verdict fires,
+// as it would without the check.
+func (p *PostLandRunner) olderThanNewest(pl PostLand) bool {
+	if p.IsAncestor == nil || p.State == nil {
+		return false
+	}
+	st, err := p.State.Load()
+	if err != nil {
+		p.logf("ordering %s (%s): reading the main state: %v; the verdict fires", short(pl.Commit), pl.by(), err)
+		return false
+	}
+	if st.LastRun == "" || st.LastRun == pl.Commit {
+		return false
+	}
+	older, err := p.IsAncestor(pl.Commit, st.LastRun)
+	if err != nil {
+		p.logf("ordering %s (%s) against %s: %v; the verdict fires", short(pl.Commit), pl.by(), short(st.LastRun), err)
+		return false
+	}
+	return older
+}
+
+// ignoredOlder says a verdict was dropped for being older than the newest one.
+func (p *PostLandRunner) ignoredOlder(pl PostLand, state string) {
+	p.logf("%s verdict at %s (%s) ignored: a verdict for a newer commit stands, so this older one moves nothing", state, short(pl.Commit), pl.by())
+}
+
+// needsRerun reports whether a red status is rerun before anything is filed or
+// reverted: there is a post_land_command and a way to run it.
+func (p *PostLandRunner) needsRerun() bool {
+	return p.Run != nil && p.command() != ""
+}
+
 // fire hands a decided read to the runner's callback: OnGreen for green, and
-// for red a bead comment and OnRed. An UNKNOWN calls neither.
+// for red a bead comment and OnRed. An UNKNOWN calls neither. A verdict for a
+// commit older than the newest verdict moves nothing.
 func (p *PostLandRunner) fire(ctx context.Context, pl PostLand, name string, res PostLandStatusResult) {
+	if res.Verdict != PostLandStatusUnknown && p.olderThanNewest(pl) {
+		p.ignoredOlder(pl, res.State)
+		return
+	}
 	switch res.Verdict {
 	case PostLandStatusGreen:
 		p.logf("green at %s (%s): status %q is success", short(pl.Commit), pl.by(), name)
@@ -613,14 +698,102 @@ func (p *PostLandRunner) fire(ctx context.Context, pl PostLand, name string, res
 		}
 	case PostLandStatusRed:
 		p.logf("RED at %s (%s): status %q is %s: %s", short(pl.Commit), pl.by(), name, res.State, res.Description)
-		if p.Beads != nil && pl.BeadID != "" {
-			msg := fmt.Sprintf("post-landing status RED at %s: status %q is %s: %s", pl.Commit, name, res.State, res.Description)
-			if err := p.Beads.AddComment(pl.BeadID, msg); err != nil {
-				p.logf("commenting on %s: %v", pl.BeadID, err)
-			}
-		}
+		p.commentRed(pl, name, res)
 		if p.OnRed != nil {
-			p.OnRed(ctx, name, pl, PostLandResult{ExitCode: 1, Tail: res.Description})
+			p.OnRed(ctx, name, pl, statusRedResult(res, "no post_land_command is configured to rerun the check, and a red status names no failing unit"))
 		}
+	}
+}
+
+// statusRedResult is the PostLandResult for a red status that no rerun
+// confirmed. It names no package, and it carries the reason no revert follows:
+// a red status alone never reverts, since CI can fail on a commit that is
+// innocent (a docs-only landing, a runner restart or eviction).
+func statusRedResult(res PostLandStatusResult, noRevert string) PostLandResult {
+	return PostLandResult{ExitCode: 1, Tail: res.Description, NoRevert: noRevert}
+}
+
+// commentRed puts a red status on the landed bead.
+func (p *PostLandRunner) commentRed(pl PostLand, name string, res PostLandStatusResult) {
+	if p.Beads == nil || pl.BeadID == "" {
+		return
+	}
+	msg := fmt.Sprintf("post-landing status RED at %s: status %q is %s: %s", pl.Commit, name, res.State, res.Description)
+	if err := p.Beads.AddComment(pl.BeadID, msg); err != nil {
+		p.logf("commenting on %s: %v", pl.BeadID, err)
+	}
+}
+
+// startRedHandler runs a red status's rerun on a goroutine of its own and holds
+// an upgrade restart for it. The caller holds statusMu.
+func (p *PostLandRunner) startRedHandler(ctx context.Context, pl PostLand, name string, res PostLandStatusResult) {
+	if p.olderThanNewest(pl) {
+		p.ignoredOlder(pl, res.State)
+		delete(p.handling, pl.Commit)
+		p.markDone(pl.Commit)
+		return
+	}
+	p.logf("RED at %s (%s): status %q is %s: %s; rerunning %q at the landed commit before anything is filed or reverted", short(pl.Commit), pl.by(), name, res.State, res.Description, p.command())
+	p.commentRed(pl, name, res)
+	p.wg.Add(1)
+	if p.Busy != nil {
+		p.Busy(true)
+	}
+	go func() {
+		defer p.wg.Done()
+		if p.Busy != nil {
+			defer p.Busy(false)
+		}
+		p.rerunRed(ctx, pl, name, res)
+	}()
+}
+
+// rerunRed reruns the post-land check at the landed commit for a red status. A
+// check that fails again hands its own result, with the packages and scripts it
+// names, to OnRed: the rerun-and-attribute path a command-mode red takes. A check
+// that passes or cannot run hands OnRed a result with no revert. A stop that cuts
+// the rerun short hands nothing: the entry stays and the restarted runner reads
+// the status again.
+func (p *PostLandRunner) rerunRed(ctx context.Context, pl PostLand, name string, res PostLandStatusResult) {
+	cmd := p.command()
+	rr := p.Run(ctx, cmd, pl)
+	if ctx.Err() != nil {
+		p.logf("RED status at %s (%s): the daemon stopped during the rerun; the restarted worker reads the status again", short(pl.Commit), pl.by())
+		p.finishRedHandler(pl, true)
+		return
+	}
+	result := rr
+	onRedCmd := cmd
+	switch {
+	case rr.Err != nil:
+		p.logf("RED status at %s (%s): the rerun could not run: %v; filing the red-main bead without a revert", short(pl.Commit), pl.by(), rr.Err)
+		result, onRedCmd = statusRedResult(res, "the rerun of the post-land check could not run"), name
+	case rr.ExitCode == 0:
+		p.logf("RED status at %s (%s): the rerun of %q passed at the landed commit; filing the red-main bead without a revert", short(pl.Commit), pl.by(), cmd)
+		result, onRedCmd = statusRedResult(res, "the rerun of the post-land check passed at the landed commit"), name
+	default:
+		p.logf("RED status at %s (%s): the rerun of %q failed again (exit %d)", short(pl.Commit), pl.by(), cmd, rr.ExitCode)
+		if result.Tail == "" {
+			result.Tail = res.Description
+		}
+	}
+	// Verdicts moved on while the rerun ran: check the order again before filing.
+	if p.olderThanNewest(pl) {
+		p.ignoredOlder(pl, res.State)
+	} else if p.OnRed != nil {
+		p.OnRed(ctx, onRedCmd, pl, result)
+	}
+	p.finishRedHandler(pl, false)
+}
+
+// finishRedHandler ends a red status's handling. The next pass finishes the
+// entry through the done marker; when a stop cut the rerun short the marker is
+// not set, so the restarted runner reads the entry and decides it again.
+func (p *PostLandRunner) finishRedHandler(pl PostLand, stopped bool) {
+	p.statusMu.Lock()
+	defer p.statusMu.Unlock()
+	delete(p.handling, pl.Commit)
+	if !stopped {
+		p.markDone(pl.Commit)
 	}
 }
