@@ -33,7 +33,7 @@ func TestBeadsDirFromConfigPath(t *testing.T) {
 		},
 		{
 			name:       "the town's own server",
-			configPath: "/Users/sloan/gt/.dolt-data/config.yaml",
+			configPath: "/Users/user/gt/.dolt-data/config.yaml",
 			wantOK:     false,
 		},
 		{

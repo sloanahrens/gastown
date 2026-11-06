@@ -15,18 +15,18 @@ import (
 // the real output and must not confuse the parser.
 const launchdPrintRunning = "gui/501/com.gastown.daemon = {\n" +
 	"\tactive count = 1\n" +
-	"\tpath = /Users/sloan/Library/LaunchAgents/com.gastown.daemon.plist\n" +
+	"\tpath = /Users/user/Library/LaunchAgents/com.gastown.daemon.plist\n" +
 	"\ttype = LaunchAgent\n" +
 	"\tstate = running\n" +
 	"\n" +
-	"\tprogram = /Users/sloan/.local/bin/gt\n" +
+	"\tprogram = /Users/user/.local/bin/gt\n" +
 	"\targuments = {\n" +
-	"\t\t/Users/sloan/.local/bin/gt\n" +
+	"\t\t/Users/user/.local/bin/gt\n" +
 	"\t\tdaemon\n" +
 	"\t\trun\n" +
 	"\t}\n" +
 	"\n" +
-	"\tworking directory = /Users/sloan/gt\n" +
+	"\tworking directory = /Users/user/gt\n" +
 	"\tminimum runtime = 10\n" +
 	"\truns = 53\n" +
 	"\tpid = 64604\n" +

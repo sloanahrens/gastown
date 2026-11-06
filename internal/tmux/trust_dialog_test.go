@@ -10,7 +10,7 @@ import (
 // trailing spaces the capture carries have been trimmed). The TrustDialog
 // component mounts its select list with cancelFirst and focus:"cancel", so
 // "No, exit" is the focused option and a blind Enter quits Claude.
-const claudeTrustDialogCancelFirst = ` Accessing workspace: /Users/sloan/gt/gastown/polecats/onyx/gastown
+const claudeTrustDialogCancelFirst = ` Accessing workspace: /Users/user/gt/gastown/polecats/onyx/gastown
  Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first.
  Claude Code'll be able to read, edit, and execute files here.
 
@@ -23,7 +23,7 @@ const claudeTrustDialogCancelFirst = ` Accessing workspace: /Users/sloan/gt/gast
 // which the trust option is both first and focused. The navigation logic has to
 // handle both, which is the reason it reads the pane instead of pressing Down a
 // fixed number of times.
-const claudeTrustDialogYesFirst = ` Accessing workspace: /Users/sloan/gt/gastown/polecats/onyx/gastown
+const claudeTrustDialogYesFirst = ` Accessing workspace: /Users/user/gt/gastown/polecats/onyx/gastown
  Quick safety check: Is this a project you created or one you trust?
 
  ❯ Yes, I trust this folder
@@ -35,7 +35,7 @@ const claudeTrustDialogYesFirst = ` Accessing workspace: /Users/sloan/gt/gastown
 // that pre-approves tool permissions, which is what a Gas Town worktree looks
 // like. The warning block contains a line beginning "not ", and the closing
 // prose mentions trust: neither may be read as an option.
-const claudeTrustDialogWarning = ` Accessing workspace: /Users/sloan/gt/gastown/polecats/onyx/gastown
+const claudeTrustDialogWarning = ` Accessing workspace: /Users/user/gt/gastown/polecats/onyx/gastown
  Quick safety check: Is this a project you created or one you trust?
 
  ⚠ This folder pre-approves 3 tool permissions in .claude/settings.json, .mcp.json:
