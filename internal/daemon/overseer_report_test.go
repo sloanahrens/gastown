@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -274,8 +275,8 @@ func TestOverseerReportSecondRunInASlotWritesNothing(t *testing.T) {
 	if second := w.run(t); second != "" {
 		t.Fatalf("a second run in the slot wrote %s", second)
 	}
-	if got := overseerEntries(t, townreport.ReportsDir(w.town)); !slices.Equal(got, []string{"20261014T201500Z.md", overseerLatestName}) {
-		t.Errorf("reports dir holds %q, want the one report, the latest.md copy and no leftover temp file", got)
+	if got := overseerEntries(t, townreport.ReportsDir(w.town)); !slices.Equal(got, []string{"20261014T201500Z.md", overseerPageName, overseerSidecarName, overseerLatestName}) {
+		t.Errorf("reports dir holds %q, want the one report, the daily files, the latest.md copy and no leftover temp file", got)
 	}
 	if readOverseerFile(t, first) != body {
 		t.Error("the slot's report was rewritten")
@@ -439,8 +440,8 @@ func TestOverseerReportDigestRefreshesLatestCopy(t *testing.T) {
 	if os.SameFile(before, now) {
 		t.Error("latest.md was written in place, so a reader can catch it half-written")
 	}
-	if got := overseerEntries(t, dir); !slices.Equal(got, []string{"20261014T200000Z.md", "20261014T201500Z.md", overseerLatestName}) {
-		t.Errorf("reports dir holds %q, want the two reports, the copy and no leftover temp file", got)
+	if got := overseerEntries(t, dir); !slices.Equal(got, []string{"20261014T200000Z.md", "20261014T201500Z.md", overseerPageName, overseerSidecarName, overseerLatestName}) {
+		t.Errorf("reports dir holds %q, want the two reports, the daily files, the copy and no leftover temp file", got)
 	}
 }
 
@@ -500,8 +501,8 @@ func TestOverseerReportLatestCopyFailureIsLogged(t *testing.T) {
 	if fi, err := os.Stat(filepath.Join(dir, overseerLatestName)); err != nil || !fi.IsDir() {
 		t.Errorf("stat of the copy = %v, %v; want the directory the run could not replace", fi, err)
 	}
-	if got := overseerEntries(t, dir); !slices.Equal(got, []string{"20261014T200000Z.md", "20261014T201500Z.md", overseerLatestName}) {
-		t.Errorf("reports dir holds %q, want the reports, the directory and no leftover temp file", got)
+	if got := overseerEntries(t, dir); !slices.Equal(got, []string{"20261014T200000Z.md", "20261014T201500Z.md", overseerPageName, overseerSidecarName, overseerLatestName}) {
+		t.Errorf("reports dir holds %q, want the reports, the daily files, the directory and no leftover temp file", got)
 	}
 }
 
@@ -1056,5 +1057,242 @@ func TestOverseerReportStaleCrewOptionReachesTheSeam(t *testing.T) {
 				t.Errorf("staleCrew() = %v, %v; want no clones and no error for an empty town", clones, err)
 			}
 		})
+	}
+}
+
+// A run publishes the daily.json and daily.html the dashboard's Birds card
+// reads, and the reader shows the overseer's row as fresh with the digest's
+// open questions in it (gt-ag7u0c).
+func TestOverseerReportWritesTheDailyFilesTheDashboardReads(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.seedReport(t, "20261014T200000Z")
+	w.run(t)
+
+	runtimeDir := filepath.Join(w.town, ".runtime")
+	reader := dashboard.NewBirdReportsReader(runtimeDir)
+	var got *dashboard.BirdReport
+	rows := reader.Read(w.now)
+	for i := range rows {
+		if rows[i].Bird == "overseer" {
+			got = &rows[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("the dashboard reads %d rows and none is the overseer", len(rows))
+	}
+	if got.State != dashboard.BirdReportFresh {
+		t.Fatalf("overseer row state = %q (%s), want fresh", got.State, got.Note)
+	}
+	if want := overseerAt("2026-10-14T20:15:00Z"); !got.Written.Equal(want) {
+		t.Errorf("overseer written = %v, want the slot %v", got.Written, want)
+	}
+	if !got.NeedsOperator {
+		t.Error("needs_operator = false, want true: the digest lists open questions")
+	}
+	if got.Decisions != 2 || len(got.DecisionItems) != 2 {
+		t.Fatalf("overseer row has decisions=%d items=%d, want 2 and 2", got.Decisions, len(got.DecisionItems))
+	}
+	if q := got.DecisionItems[0].Question; !strings.Contains(q, "hq-q1") || !strings.Contains(q, "gt-hold1") {
+		t.Errorf("first decision item = %q, want the digest's hq-q1 row with the work it holds", q)
+	}
+	for _, want := range []string{"2 done", "2 open questions", "Health: GREEN tick 12s ago"} {
+		if !strings.Contains(got.Summary, want) {
+			t.Errorf("summary = %q, want it to carry %q", got.Summary, want)
+		}
+	}
+	if !got.HasPage {
+		t.Error("has_page = false, want the daily.html the run wrote")
+	}
+
+	page, err := reader.ReadPage("overseer", overseerPageName)
+	if err != nil {
+		t.Fatalf("reading the daily page: %v", err)
+	}
+	for _, want := range []string{"<title>Overseer report 2026-10-14T20:15:00Z</title>", "OPEN QUESTIONS", "hq-q1"} {
+		if !strings.Contains(string(page), want) {
+			t.Errorf("daily.html is missing %q:\n%s", want, page)
+		}
+	}
+}
+
+// The daily files are replaced by a rename, so a reader holding the old one
+// keeps it whole and the new one is a different file.
+func TestOverseerReportDailyFilesAreReplacedAtomically(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	dir := townreport.ReportsDir(w.town)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldText := map[string]string{
+		overseerSidecarName: `{"bird":"overseer","written_at":"2026-10-14T20:00:00Z"}`,
+		overseerPageName:    "<!doctype html><title>the previous page</title>\n",
+	}
+	held := map[string]*os.File{}
+	before := map[string]os.FileInfo{}
+	for name, body := range oldText {
+		path := filepath.Join(dir, name)
+		writeOverseerFile(t, path, body)
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		held[name], before[name] = f, fi
+	}
+
+	w.run(t)
+
+	for name := range oldText {
+		raw, err := io.ReadAll(held[name])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != oldText[name] {
+			t.Errorf("a reader holding the old %s now sees %q, want the text it opened", name, raw)
+		}
+		fi, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if os.SameFile(before[name], fi) {
+			t.Errorf("%s was written in place, so a reader can catch it half-written", name)
+		}
+	}
+}
+
+// A symlinked daily.json or daily.html is refused, never followed or replaced:
+// the dashboard reads no symlink, so the run says what is wrong instead of
+// publishing a row no reader shows.
+func TestOverseerReportDailyWriteRefusesSymlinkedTarget(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{overseerSidecarName, overseerPageName} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+			dir := townreport.ReportsDir(w.town)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			outside := filepath.Join(t.TempDir(), "outside")
+			writeOverseerFile(t, outside, "kept\n")
+			if err := os.Symlink(outside, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
+			if err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "symlink") {
+				t.Fatalf("write = %v, want a refusal naming the symlinked %s", err, name)
+			}
+			if got := readOverseerFile(t, outside); got != "kept\n" {
+				t.Errorf("the symlink's target now reads %q, want it untouched", got)
+			}
+			if fi, err := os.Lstat(filepath.Join(dir, name)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("lstat = %v, %v; want the symlink left in place", fi, err)
+			}
+		})
+	}
+}
+
+// A symlinked bird directory is refused too: the dashboard reads the reports
+// only below a real directory, so anything written through the link is a page
+// no row shows.
+func TestOverseerReportRefusesASymlinkedBirdDirectory(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	runtimeDir := filepath.Join(w.town, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(runtimeDir, "overseer")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := writeOverseerReport(w.town, 15*time.Minute, w.seams())
+	if err == nil || !strings.Contains(err.Error(), "not a real directory") || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("write = %v, want a refusal naming the symlinked bird directory", err)
+	}
+	if entries, err := os.ReadDir(filepath.Join(target, "reports")); err == nil && len(entries) != 0 {
+		t.Errorf("the symlink's target holds %d entries, want no report written through it", len(entries))
+	}
+}
+
+// A sidecar over the dashboard's cap is refused rather than written, since the
+// reader would show the row as an error.
+func TestOverseerReportDailySidecarRefusesOversizeText(t *testing.T) {
+	t.Parallel()
+	text := "overseer report 2026-10-14T20:15:00Z\n\nOPEN QUESTIONS\n  hq-q1  " +
+		strings.Repeat("held: ", 4000) + "\n\nhealth: GREEN\n"
+	err := writeOverseerDaily(t.TempDir(), overseerAt("2026-10-14T20:15:00Z"), text)
+	if err == nil || !strings.Contains(err.Error(), overseerSidecarName) || !strings.Contains(err.Error(), "KiB") {
+		t.Fatalf("writeOverseerDaily over the cap = %v, want a refusal naming %s", err, overseerSidecarName)
+	}
+}
+
+// The daily writer reports what it could not put in place, so a run fails
+// rather than leaving the dashboard on the previous files without a word.
+func TestOverseerReportDailyWriteReportsFailures(t *testing.T) {
+	t.Parallel()
+	slot := overseerAt("2026-10-14T20:15:00Z")
+	healthy := "overseer report 2026-10-14T20:15:00Z\n\nDONE\n  (none)\n\nhealth: GREEN\n"
+
+	t.Run("missing directory", func(t *testing.T) {
+		t.Parallel()
+		if err := writeOverseerDaily(filepath.Join(t.TempDir(), "missing"), slot, healthy); err == nil {
+			t.Fatal("write = nil, want an error for a directory that is not there")
+		}
+	})
+	t.Run("page name taken by a directory", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.Mkdir(filepath.Join(dir, overseerPageName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := writeOverseerDaily(dir, slot, healthy)
+		if err == nil || !strings.Contains(err.Error(), overseerPageName) {
+			t.Fatalf("write = %v, want an error naming the unlinkable %s", err, overseerPageName)
+		}
+	})
+}
+
+// A question section the digest could not read is not a clean zero: the
+// sidecar says the section was unavailable and asks for the operator, so a
+// failed read never drains the row's decision list silently.
+func TestOverseerReportDailySidecarMarksUnreadableQuestions(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	delete(w.stores, "hq")
+	if path := w.run(t); path == "" {
+		t.Fatal("no report was written although only the question source failed")
+	}
+
+	var side struct {
+		NeedsOperator bool   `json:"needs_operator"`
+		Decisions     int    `json:"decisions"`
+		Summary       string `json:"summary"`
+	}
+	path := filepath.Join(townreport.ReportsDir(w.town), overseerSidecarName)
+	if err := json.Unmarshal([]byte(readOverseerFile(t, path)), &side); err != nil {
+		t.Fatalf("daily.json: %v", err)
+	}
+	if !side.NeedsOperator {
+		t.Error("needs_operator = false, want true: the questions could not be read")
+	}
+	if side.Decisions != 0 {
+		t.Errorf("decisions = %d, want 0: no question was read", side.Decisions)
+	}
+	for _, want := range []string{
+		"open questions unavailable (no beads directory for hq)",
+		"partly unreadable: DONE",
+	} {
+		if !strings.Contains(side.Summary, want) {
+			t.Errorf("summary = %q, want it to name %q", side.Summary, want)
+		}
 	}
 }
