@@ -704,17 +704,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	} else {
 		redMain.Promote = d.newPromoter(rigName, repo, forgejoCfg)
 	}
-	postLand := d.newPostLandRunner(rigName, rigPath, postLandWiring{
-		Status: func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error) {
-			return merger.Client.CombinedStatus(ctx, merger.Owner, merger.RepoName, pl.Commit)
-		},
-		State:   mainState,
-		Timeout: postLandTimeout,
-		Run:     run,
-		Beads:   bd,
-		OnRed:   redMain.Red,
-		OnGreen: redMain.Green,
-	})
+	postLand := d.newPostLandRunner(rigName, rigPath, newPostLandWiring(
+		merger.Client, merger.Owner, merger.RepoName, mainState, postLandTimeout, run, bd, redMain,
+		git.NewGit(repo).IsAncestor))
 	// The human's recorded identity is what the worker refuses a submission
 	// under, so a town whose overseer identity cannot be read gets no worker:
 	// without the name no submission can be checked, and landing one would
@@ -1177,12 +1169,43 @@ type postLandWiring struct {
 	Status  func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error)
 	State   landworker.MainStateStore
 	Timeout time.Duration
-	Run     func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult
-	Beads   interface {
+	// IsAncestor orders status verdicts: an older commit's verdict moves nothing
+	// once a newer one stands.
+	IsAncestor func(ancestor, descendant string) (bool, error)
+	Run        func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult
+	Beads      interface {
 		AddComment(id, text string) error
 	}
 	OnRed   func(ctx context.Context, cmd string, pl landworker.PostLand, res landworker.PostLandResult)
 	OnGreen func(ctx context.Context, cmd string, pl landworker.PostLand, res landworker.PostLandResult)
+}
+
+// postLandStatusClient is the Forgejo read the status closure makes.
+type postLandStatusClient interface {
+	CombinedStatus(ctx context.Context, owner, repo, ref string) (*forgejo.CombinedStatus, error)
+}
+
+// newPostLandWiring is the one place newRigLandingWorker's collaborators become
+// the post-land runner's wiring, so a test drives the same assembly production
+// does. The status it reads is the LANDED commit's (a landing's verdict is never
+// the verdict of whatever main is by then). Every parameter is positional, so a
+// piece left out of the call does not compile.
+func newPostLandWiring(client postLandStatusClient, owner, repo string, state landworker.MainStateStore, timeout time.Duration,
+	run func(ctx context.Context, cmd string, pl landworker.PostLand) landworker.PostLandResult,
+	beads interface{ AddComment(id, text string) error }, redMain *landworker.RedMain,
+	isAncestor func(ancestor, descendant string) (bool, error)) postLandWiring {
+	return postLandWiring{
+		Status: func(ctx context.Context, pl landworker.PostLand) (*forgejo.CombinedStatus, error) {
+			return client.CombinedStatus(ctx, owner, repo, pl.Commit)
+		},
+		State:      state,
+		Timeout:    timeout,
+		IsAncestor: isAncestor,
+		Run:        run,
+		Beads:      beads,
+		OnRed:      redMain.Red,
+		OnGreen:    redMain.Green,
+	}
 }
 
 // newPostLandRunner builds a rig's post-land runner. The command and the
@@ -1200,15 +1223,16 @@ func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *l
 			}
 			return name
 		},
-		Status:  w.Status,
-		State:   w.State,
-		Clock:   d.clk(),
-		Timeout: w.Timeout,
-		Run:     w.Run,
-		Beads:   w.Beads,
-		Logf:    d.logger.Printf,
-		OnRed:   w.OnRed,
-		OnGreen: w.OnGreen,
+		Status:     w.Status,
+		State:      w.State,
+		IsAncestor: w.IsAncestor,
+		Clock:      d.clk(),
+		Timeout:    w.Timeout,
+		Run:        w.Run,
+		Beads:      w.Beads,
+		Logf:       d.logger.Printf,
+		OnRed:      w.OnRed,
+		OnGreen:    w.OnGreen,
 		Busy: func(busy bool) {
 			if busy {
 				d.postLandRuns.Add(1)
@@ -1218,6 +1242,7 @@ func (d *Daemon) newPostLandRunner(rigName, rigPath string, w postLandWiring) *l
 		},
 	}
 	d.postLandRunners.set(rigName, runner)
+	d.postLandRunners.setSettingsPath(rigName, rigPath)
 	return runner
 }
 

@@ -17,6 +17,25 @@ import (
 type postLandRunnerSet struct {
 	mu      sync.Mutex
 	runners map[string]*landworker.PostLandRunner
+	// paths is each rig's checkout, where its own settings file lives.
+	paths map[string]string
+}
+
+// setSettingsPath records where the rig's settings file is, so the collector can
+// say when it cannot be read.
+func (s *postLandRunnerSet) setSettingsPath(rig, path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.paths == nil {
+		s.paths = map[string]string{}
+	}
+	s.paths[rig] = path
+}
+
+func (s *postLandRunnerSet) settingsPath(rig string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.paths[rig]
 }
 
 // set registers the rig's runner, replacing an earlier one of the same name.
@@ -62,6 +81,19 @@ func (s *attentionSources) collectPostLandUnknown(context.Context) ([]attention.
 	var out []attention.Item
 	for i, runner := range runners {
 		rig := rigs[i]
+		// A settings file that cannot be read turns status mode off: a landing
+		// then records no pending verdict and none is ever reached. That is an
+		// item at once, not only a log line (gt-gg9hv.7.1).
+		if path := s.d.postLandRunners.settingsPath(rig); path != "" {
+			if _, serr := rigPostLandStatusContextErr(path); serr != nil {
+				out = append(out, attention.Item{
+					Key: "post-land-settings-unreadable:" + rig, Kind: attention.KindPostLandUnknown, Severity: attention.SeverityLow,
+					Rig: rig,
+					Summary: fmt.Sprintf("the settings file of %s cannot be read, so post-land status mode is off and landings record no verdict until it can be: %s",
+						rig, landworker.SanitizeStatusText(serr.Error())),
+				})
+			}
+		}
 		alarms, err := runner.Alarms(s.now)
 		if err != nil {
 			// An unreadable store is an item at once, never zero alarms; it is
