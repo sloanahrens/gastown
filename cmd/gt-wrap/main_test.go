@@ -471,6 +471,29 @@ func TestDoctorReportsEachRung(t *testing.T) {
 	}
 }
 
+// TestDoctorReportsDownWhenNoTownIsFound: a wrapper that cannot find a town
+// still answers --doctor, with down and the town error as the reason, rather
+// than refusing with no report at all.
+func TestDoctorReportsDownWhenNoTownIsFound(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	cwd := t.TempDir()
+	h.surface.getwd = func() (string, error) { return cwd, nil }
+	if exit := h.run("gt", doctorFlag); exit != 1 {
+		t.Fatalf("run(%s) = %d, want 1", doctorFlag, exit)
+	}
+	want := "rung: down\ncontainer: unknown\nimage: unknown\nreason: gtwrap: no town root above " + cwd
+	if got := h.stdout.String(); !strings.HasPrefix(got, want) {
+		t.Fatalf("report = %q, want it to start with %q", got, want)
+	}
+	if h.targetSet || h.fake.doctored {
+		t.Fatal("--doctor built a target with no town to reach")
+	}
+	if h.stderr.Len() != 0 {
+		t.Fatalf("the down report wrote %q to stderr", h.stderr)
+	}
+}
+
 func TestDoctorRefusesWhenTheDiagnosisCannotBeMade(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

@@ -26,7 +26,7 @@ const doltHostGateway = "host.docker.internal"
 const composeService = "daemon"
 
 // composeProject is the compose project the town's daemon runs under. It appears
-// only in the start command downError names.
+// only in the start command downText names.
 const composeProject = "gt-live"
 
 // probeTimeout is the bound on each probe when Docker.ProbeTimeout is unset. A

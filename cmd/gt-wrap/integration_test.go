@@ -12,19 +12,19 @@ import (
 
 // TestIntegrationWrapperRunsGTInTheDaemon builds the wrapper as gt and runs
 // `gt status --line` through it against the live container: the one place the
-// docker target is real. The wrapper's doctor runs first, and a ladder with no
-// rung skips the test with the doctor's report, since there is then no
-// container to run the tool in.
+// docker target is real.
+//
+// Docker being down is the only reason to skip. Every other refusal, the
+// wrapper's doctor included, is a failure of this checkout and must not read as
+// "no Docker here".
 func TestIntegrationWrapperRunsGTInTheDaemon(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "gt")
-	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
-	build.Env = append(os.Environ(), "CGO_ENABLED=0")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the wrapper: %v\n%s", err, out)
-	}
+	bin := buildWrapper(t)
 	env := wrapperEnv(t)
+	if out, err := dockerInfo(t, env); err != nil {
+		t.Skipf("Docker is down, so the live daemon container cannot be reached: %v\n%s", err, out)
+	}
 	if out, err := runWrapper(bin, env, doctorFlag); err != nil {
-		t.Skipf("the wrapper's doctor reports no usable rung, so there is no container to run the tool in: %v\n%s", err, out)
+		t.Fatalf("the wrapper's doctor = %v\n%s", err, out)
 	}
 	out, err := runWrapper(bin, env, "status", "--line")
 	if err != nil {
@@ -37,6 +37,32 @@ func TestIntegrationWrapperRunsGTInTheDaemon(t *testing.T) {
 	if strings.Contains(line, "\n") {
 		t.Fatalf("gt status --line printed more than one line:\n%s", line)
 	}
+}
+
+// buildWrapper builds the wrapper the test runs. CGO_ENABLED=0 keeps it static
+// and keeps the build off the cgo path: the wrapper's dependency graph holds no
+// cgo package, so the icu4c headers AGENTS.md warns about for a bare `go build`
+// are not on its way (they reach cmd/gt through its dolt dependencies).
+func buildWrapper(t *testing.T) string {
+	t.Helper()
+	bin := filepath.Join(t.TempDir(), "gt")
+	build := exec.Command("go", "build", "-trimpath", "-o", bin, ".")
+	build.Env = append(os.Environ(), "CGO_ENABLED=0")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build the wrapper: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// dockerInfo asks the engine the wrapper reaches whether it answers. It is the
+// test's only skip condition: the wrapper's own doctor is then a check on this
+// checkout, not the judge of whether to run the test.
+func dockerInfo(t *testing.T, env []string) (string, error) {
+	t.Helper()
+	cmd := exec.CommandContext(t.Context(), "docker", "info")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // wrapperEnv is the environment the wrapper runs with: the live town named so

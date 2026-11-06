@@ -86,16 +86,22 @@ func run(argv []string, s surface) int {
 	if err != nil {
 		return fail(s.stderr, err)
 	}
+	args := argv[1:]
+	diagnose := len(args) > 0 && args[0] == doctorFlag
 	town, err := findTown(s)
 	if err != nil {
+		// --doctor still answers when there is no town: a diagnosis of down with
+		// the town error as its reason, rather than a refusal with no report.
+		if diagnose {
+			return reportMissingTown(s.stdout, err)
+		}
 		return fail(s.stderr, err)
 	}
 	t, err := openTarget(targetName, town, s)
 	if err != nil {
 		return fail(s.stderr, err)
 	}
-	args := argv[1:]
-	if len(args) > 0 && args[0] == doctorFlag {
+	if diagnose {
 		return doctor(t, s.stdout, s.stderr)
 	}
 	dir, err := s.getwd()
@@ -226,6 +232,24 @@ func doctor(t target, stdout, stderr io.Writer) int {
 		// given rather than wrapped a second time.
 		return fail(stderr, err)
 	}
+	return report(stdout, diag)
+}
+
+// reportMissingTown is --doctor's answer when no town root is found: down, with
+// the town error as the reason. The container and the image are read from the
+// compose file under the town, so with no town there is neither to name.
+func reportMissingTown(stdout io.Writer, err error) int {
+	return report(stdout, gtwrap.Diagnosis{
+		Rung:      gtwrap.RungDown,
+		Container: "unknown",
+		Image:     "unknown",
+		Reason:    err.Error(),
+	})
+}
+
+// report prints a diagnosis in the doctor's four-line form and returns the
+// doctor's status for it.
+func report(stdout io.Writer, diag gtwrap.Diagnosis) int {
 	fmt.Fprintf(stdout, "rung: %s\ncontainer: %s\nimage: %s\nreason: %s\n", diag.Rung, diag.Container, diag.Image, diag.Reason)
 	if diag.Rung == gtwrap.RungDown {
 		return exitFailure
