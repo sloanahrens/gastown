@@ -178,7 +178,7 @@ func TestDiskMaintControlDiskReadsTheWorstNode(t *testing.T) {
 	}
 }
 
-// TestDiskMaintControlDiskAlertNamesTheConsumers: at 81% the control alert names
+// TestDiskMaintControlDiskAlertNamesTheConsumers: at 91% the control alert names
 // the three biggest consumers by name and size, a claim-backed pod included; it
 // clears below 70%; and a cluster name with newlines or 5,000 characters reaches
 // the alert as one bounded line.
@@ -191,7 +191,7 @@ func TestDiskMaintControlDiskAlertNamesTheConsumers(t *testing.T) {
 
 	t.Run("the golden names the three biggest and clears below seventy", func(t *testing.T) {
 		t.Parallel()
-		k := &controlKubectl{nodes: "node/gt-ctl-1\n", summaries: map[string]string{"gt-ctl-1": string(golden)}}
+		k := &controlKubectl{nodes: "node/colima-gt-control\n", summaries: map[string]string{"colima-gt-control": string(golden)}}
 		d, _, f := diskMaintControlDaemon(t, diskMaintControlConfig(diskMaintControlContext), k)
 
 		d.runDiskMaintenance()
@@ -200,13 +200,18 @@ func TestDiskMaintControlDiskAlertNamesTheConsumers(t *testing.T) {
 		if len(raised) != 1 || raised[0].Escalation.Fingerprint != "diskmaint:control" {
 			t.Fatalf("escalations = %+v, want one diskmaint:control raise", raised)
 		}
-		const consumers = "biggest consumers: forgejo/forgejo-runner-6c8f9 61 GB, forgejo/forgejo-0 12 GB, forgejo-trial/forgejo-trial-0 9 GB"
-		if desc := raised[0].Escalation.Description; !strings.Contains(desc, "81% used") || !strings.Contains(desc, consumers) {
-			t.Fatalf("description = %q, want 81%% and %q", desc, consumers)
+		// The escalation's title carries the reading and as much of the consumer
+		// list as its 200-rune bound leaves; the reason carries the whole list.
+		const consumers = "biggest consumers: forgejo/forgejo-runner-df77dd979-g25pq 61 GB, forgejo/forgejo-57658978cf-5nzvk 12 GB, forgejo-trial/forgejo-6884fd5d78-6mqpl 9 GB"
+		if desc := raised[0].Escalation.Description; !strings.Contains(desc, "91% used") || !strings.Contains(desc, "forgejo/forgejo-runner-df77dd979-g25pq 61 GB") {
+			t.Fatalf("description = %q, want the reading and the biggest consumer", desc)
+		}
+		if reason := raised[0].Escalation.Reason; !strings.Contains(reason, consumers) {
+			t.Fatalf("reason = %q, want %q", reason, consumers)
 		}
 
 		diskMaintNextDay(d, 1)
-		k.summaries["gt-ctl-1"] = controlSummary(65000000000, 100000000000)
+		k.summaries["colima-gt-control"] = controlSummary(65000000000, 100000000000)
 		d.runDiskMaintenance()
 
 		clears := f.notify.Clears()
