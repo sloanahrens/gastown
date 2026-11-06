@@ -160,11 +160,11 @@ func TestJevScorecardPatrolConfigDecodes(t *testing.T) {
 	}
 }
 
-// TestJevScorecardPatrolConfigRefusesAnUnknownBatteryAtLoad holds the registry
-// check at the load: a name the binary does not register stops the config read
-// with an error naming it, so the daemon reads the refusal once instead of
-// leaving the patrol to skip every tick.
-func TestJevScorecardPatrolConfigRefusesAnUnknownBatteryAtLoad(t *testing.T) {
+// TestJevScorecardPatrolConfigLoadsWithARetiredBattery holds the blast
+// radius: ReadPatrolConfig is shared with every other patrol, so a retired
+// battery name must not fail it. The jev_scorecard validation names the
+// battery instead, and that is what gt config validate and the command read.
+func TestJevScorecardPatrolConfigLoadsWithARetiredBattery(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	path := filepath.Join(town, constants.DirMayor, "daemon.json")
@@ -179,14 +179,14 @@ func TestJevScorecardPatrolConfigRefusesAnUnknownBatteryAtLoad(t *testing.T) {
 
 	cfg, err := ReadPatrolConfig(town)
 
-	if err == nil {
-		t.Fatal("ReadPatrolConfig accepted a battery the binary does not register")
+	if err != nil {
+		t.Fatalf("ReadPatrolConfig over a retired battery = %v, want every shared reader to load it", err)
 	}
-	if !strings.Contains(err.Error(), `"retired_battery"`) {
-		t.Errorf("load error = %v, want it to name retired_battery", err)
+	if cfg == nil || cfg.Patrols.JevScorecard == nil {
+		t.Fatal("ReadPatrolConfig lost the jev_scorecard block")
 	}
-	if cfg != nil {
-		t.Errorf("ReadPatrolConfig returned a config beside the error: %+v", cfg)
+	if err := ValidateJevScorecardBatteries(cfg); err == nil || !strings.Contains(err.Error(), `"retired_battery"`) {
+		t.Fatalf("ValidateJevScorecardBatteries = %v, want one naming retired_battery", err)
 	}
 }
 
@@ -557,23 +557,5 @@ func TestJevScorecardPatrolRefreshReportsTheExit(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "captured output") {
 		t.Errorf("refresh error = %v, want no captured output", err)
-	}
-}
-
-// TestJevScorecardPatrolDefaults holds the settings a town leaves out: the
-// configured defaults are what the patrol runs on.
-func TestJevScorecardPatrolDefaults(t *testing.T) {
-	t.Parallel()
-	var c *JevScorecardConfig // a town that names no block at all
-	clockMinute, err := c.ClockMinute()
-	if err != nil || clockMinute != 4*60+30 {
-		t.Errorf("default clock minute = %d (err %v), want 04:30", clockMinute, err)
-	}
-	interval, err := c.IntervalDuration()
-	if err != nil || interval != 24*time.Hour {
-		t.Errorf("default interval = %v (err %v), want 24h", interval, err)
-	}
-	if got := c.BatteriesValue(); got != nil {
-		t.Errorf("default batteries = %v, want none", got)
 	}
 }

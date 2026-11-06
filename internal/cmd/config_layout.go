@@ -6,6 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
@@ -138,6 +139,9 @@ func configValidate(e configCmdEnv) error {
 	if err := townconfig.Check(townRoot); err != nil {
 		return err
 	}
+	if err := validateJevScorecardBlock(townRoot); err != nil {
+		return err
+	}
 	r, err := config.DetectLayout(townRoot)
 	if err != nil {
 		return err
@@ -148,6 +152,25 @@ func configValidate(e configCmdEnv) error {
 		fmt.Fprintf(e.out, "Move it to two files with: gt config migrate --dry-run\n")
 	case config.LayoutPartial:
 		fmt.Fprintf(e.out, "Old files still on disk: %v; finish with: gt config migrate\n", r.Left)
+	}
+	return nil
+}
+
+// validateJevScorecardBlock reports a patrols.jev_scorecard.batteries name the
+// binary does not register, naming the file and the block. The check sits
+// here rather than in the shared patrol-config loader, which every unrelated
+// patrol also reads: one retired battery must not fail those reads
+// (gt-jk0162).
+func validateJevScorecardBlock(townRoot string) error {
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return fmt.Errorf("%s: %w", daemon.PatrolConfigSource(townRoot), err)
+	}
+	if cfg == nil {
+		return nil
+	}
+	if err := daemon.ValidateJevScorecardBatteries(cfg); err != nil {
+		return fmt.Errorf("%s: %w", daemon.PatrolConfigSource(townRoot), err)
 	}
 	return nil
 }

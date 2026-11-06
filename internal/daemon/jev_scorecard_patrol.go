@@ -10,7 +10,8 @@ package daemon
 //
 // The refresh scores every registered battery, so the patrol runs only when
 // patrols.jev_scorecard.batteries names at least one. A name the binary does
-// not register is refused when the daemon loads its config (ReadPatrolConfig),
+// not register is refused by gt config validate and gt jev scorecard
+// (ValidateJevScorecardBatteries) and by the patrol's own settings read,
 // naming it: a battery dropped from the binary after the 2026-11-20 review
 // would otherwise cost nothing and say nothing.
 //
@@ -91,11 +92,12 @@ type jevScorecardSettings struct {
 	batteries   []string
 }
 
-// jevScorecardBatteriesRefusal returns an error naming the first declared
-// battery the binary does not register, or nil. ReadPatrolConfig runs it when
-// the daemon loads the file; jevScorecardSettingsOf runs it again for a config
-// built in code, which never passed the loader.
-func jevScorecardBatteriesRefusal(cfg *DaemonPatrolConfig) error {
+// ValidateJevScorecardBatteries returns an error naming the first battery
+// patrols.jev_scorecard.batteries lists that the binary does not register, or
+// nil. gt config validate and gt jev scorecard call it for the block they
+// own, and jevScorecardSettingsOf calls it so a config built in code is
+// refused too.
+func ValidateJevScorecardBatteries(cfg *DaemonPatrolConfig) error {
 	var c *JevScorecardConfig
 	if cfg != nil && cfg.Patrols != nil {
 		c = cfg.Patrols.JevScorecard
@@ -126,7 +128,7 @@ func jevScorecardSettingsOf(cfg *DaemonPatrolConfig) (jevScorecardSettings, erro
 	if err != nil {
 		return jevScorecardSettings{}, err
 	}
-	if err := jevScorecardBatteriesRefusal(cfg); err != nil {
+	if err := ValidateJevScorecardBatteries(cfg); err != nil {
 		return jevScorecardSettings{}, err
 	}
 	return jevScorecardSettings{clockMinute: clockMinute, interval: interval, batteries: c.BatteriesValue()}, nil

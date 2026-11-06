@@ -118,6 +118,12 @@ func jevScorecardRun(ctx context.Context, w io.Writer, townRoot string, o jevSco
 	if o.JSON || o.Lines {
 		return fmt.Errorf("--refresh writes the scorecard cache; --json and --lines apply only to --battery")
 	}
+	// The declared list is what the patrol checks against this command's
+	// registry; a name the binary does not register is refused here, naming
+	// it, rather than read as a battery that costs nothing (gt-jk0162).
+	if err := validateJevScorecardBlock(townRoot); err != nil {
+		return err
+	}
 	return jevScorecardRefreshWith(ctx, w, townRoot, o.Since, now, score, cache)
 }
 

@@ -80,6 +80,30 @@ func TestConfigMigrateDryRunThenOnce(t *testing.T) {
 	}
 }
 
+// A jev_scorecard battery the binary does not register is a validation
+// finding for that block: gt config validate names it while the shared patrol
+// config still loads for the other readers (gt-jk0162).
+func TestConfigValidateNamesARetiredScorecardBattery(t *testing.T) {
+	t.Parallel()
+	town := fiveFileCmdTown(t)
+	var out bytes.Buffer
+	e := townConfigCmdEnv(town, &out)
+	body := `{"type":"daemon-patrol-config","version":1,"patrols":{"jev_scorecard":{` +
+		`"enabled":true,"batteries":["attention","retired_battery"]}}}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "daemon.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := configValidate(e)
+
+	if err == nil || !strings.Contains(err.Error(), `"retired_battery"`) {
+		t.Fatalf("validate over a retired battery = %v, want one naming retired_battery", err)
+	}
+	if !strings.Contains(err.Error(), "patrols.jev_scorecard.batteries") {
+		t.Errorf("validate error = %v, want the block named", err)
+	}
+}
+
 func TestConfigValidateNamesTheBrokenFile(t *testing.T) {
 	t.Parallel()
 	town := fiveFileCmdTown(t)

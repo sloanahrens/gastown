@@ -2219,9 +2219,11 @@ corrupt, the failure line names the file and the remedy above.
 
 `batteries` is the set the town expects the refresh to score; an empty list
 refreshes nothing. A name the binary does not register — a battery the
-2026-11-20 review retired, say — is refused when the daemon loads its patrol
-config, with an error naming the battery, rather than skipped silently. The
-refresh itself scores every registered battery.
+2026-11-20 review retired, say — is refused by `gt config validate`, by
+`gt jev scorecard --refresh`, and by the patrol's own tick (which logs it once
+an hour and refreshes nothing), each naming the battery. The check stays off
+the shared patrol-config load, so a retired name never fails an unrelated
+patrol's read. The refresh itself scores every registered battery.
 
 ### Conflict battery (`jev_conflict`)
 

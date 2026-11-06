@@ -1705,9 +1705,10 @@ func (c *JevScorecardConfig) BatteriesValue() []string {
 // UnmarshalJSON decodes the patrol's block strictly, refusing a value the
 // patrol cannot act on: an hour that is not HH:MM, an interval it cannot
 // schedule, or an empty or repeated battery name. Whether a name is one the
-// binary registers is checked when the daemon loads the patrol config
-// (daemon.ReadPatrolConfig): the scorecard package imports this one, so the
-// registry cannot be read here without a cycle.
+// binary registers is checked where the block has a reader: gt config
+// validate, gt jev scorecard and the daemon patrol (daemon
+// ValidateJevScorecardBatteries). The scorecard package imports this one, so
+// the registry cannot be read here without a cycle.
 //
 // The unknown-field check is repeated here because a type that decodes itself
 // is decoded by the config kernel's strict decoder opaquely.

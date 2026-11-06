@@ -216,9 +216,6 @@ func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
 // declares: the check is for a broken file, not for the strict schema the town
 // otherwise enforces, so an undeclared key stays the non-error it was here
 // before.
-//
-// A jev_scorecard battery the binary does not register is refused too, with an
-// error naming it (jevScorecardBatteriesRefusal).
 func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	cfg, err := agentconfig.LoadDaemonPatrolConfig(PatrolConfigFile(townRoot))
 	if hostErr := checkOperatorSettingsReadable(townRoot); hostErr != nil {
@@ -227,17 +224,7 @@ func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	if errors.Is(err, agentconfig.ErrNotFound) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, err
-	}
-	// The scorecard's registry lives in internal/jev/scorecard, which imports
-	// internal/config, so the decode there cannot check a battery name without
-	// a cycle. This loader can, and a name the binary does not register stops
-	// the load here instead of surfacing on a heartbeat tick.
-	if err := jevScorecardBatteriesRefusal(cfg); err != nil {
-		return nil, err
-	}
-	return cfg, nil
+	return cfg, err
 }
 
 // checkOperatorSettingsReadable reports a settings/config.json that cannot be
