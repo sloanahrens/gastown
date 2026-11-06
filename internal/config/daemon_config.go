@@ -367,6 +367,10 @@ type PatrolsConfig struct {
 	// JevDedupe.
 	JevNotes *JevNotesConfig `json:"jev_notes,omitempty"`
 
+	// JevScorecard refreshes the cached scorecard on a schedule
+	// (internal/daemon/jev_scorecard_patrol.go).
+	JevScorecard *JevScorecardConfig `json:"jev_scorecard,omitempty"`
+
 	// JevLogtriage asks Jev about each group of the daemon log's warning and
 	// error lines, every fifteen minutes, and logs every answer
 	// (internal/jev/logtriage). It acts on nothing. Opt-in, like JevDedupe.
@@ -1622,6 +1626,119 @@ type JevNotesConfig struct {
 	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
 
 	JevScrub
+}
+
+// JevScorecardConfig configures the jev_scorecard patrol (gt-jk0162): once a
+// day at Hour the daemon runs `gt jev scorecard --refresh` for the town, and
+// at start it runs once when the cached scorecard is older than Interval. The
+// command scores every registered battery, so Batteries names the batteries
+// the town expects it to score; the daemon refuses a name the binary does not
+// register, and an empty list makes the patrol refresh nothing.
+//
+// Off unless enabled: a refresh reads every battery's logs and label sources,
+// so a town that has not asked for it must not get it from a default.
+type JevScorecardConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// Hour is the local time of day the refresh is due, "HH:MM". Empty means
+	// JevScorecardDefaultHour; midnight is "00:00", not an unset value.
+	Hour string `json:"hour,omitempty"`
+
+	// IntervalStr is how old the cache may be at start before the patrol
+	// refreshes at once. Empty means JevScorecardDefaultInterval.
+	IntervalStr string `json:"interval,omitempty"`
+
+	// Batteries names the batteries the refresh is expected to score. Empty
+	// refreshes nothing.
+	Batteries []string `json:"batteries,omitempty"`
+}
+
+// The jev_scorecard defaults. JevScorecardDefaultHour is the hour the daemon
+// already owns for its nightly upkeep, so the review spends nothing while the
+// town is busy.
+const (
+	JevScorecardDefaultHour     = "04:30"
+	JevScorecardDefaultInterval = 24 * time.Hour
+)
+
+// ClockMinute returns the local time of day a refresh is due as minutes after
+// midnight. An empty setting is the default; a value the patrol cannot read as
+// HH:MM is an error naming the key rather than a fallback to the default, so a
+// typo cannot move the run to an hour the town never asked for.
+func (c *JevScorecardConfig) ClockMinute() (int, error) {
+	raw := JevScorecardDefaultHour
+	if c != nil && c.Hour != "" {
+		raw = c.Hour
+	}
+	minute, err := parseClock(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.jev_scorecard.hour: %w", err)
+	}
+	return minute, nil
+}
+
+// IntervalDuration returns how old the cache may be at start before the patrol
+// refreshes at once. An empty setting is the default; a value that is not a
+// positive Go duration is an error naming the key, never the default.
+func (c *JevScorecardConfig) IntervalDuration() (time.Duration, error) {
+	if c == nil || c.IntervalStr == "" {
+		return JevScorecardDefaultInterval, nil
+	}
+	d, err := time.ParseDuration(c.IntervalStr)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("patrols.jev_scorecard.interval = %q: want a positive Go duration such as %q",
+			c.IntervalStr, "24h")
+	}
+	return d, nil
+}
+
+// BatteriesValue returns the batteries the town declares, copied so a caller
+// cannot change the config through the slice. An empty list means the patrol
+// refreshes nothing.
+func (c *JevScorecardConfig) BatteriesValue() []string {
+	if c == nil {
+		return nil
+	}
+	return slices.Clone(c.Batteries)
+}
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing a value the
+// patrol cannot act on: an hour that is not HH:MM, an interval it cannot
+// schedule, or an empty or repeated battery name. Whether a name is one the
+// binary registers is checked where the block has a reader: gt config
+// validate, gt jev scorecard and the daemon patrol (daemon
+// ValidateJevScorecardBatteries). The scorecard package imports this one, so
+// the registry cannot be read here without a cycle.
+//
+// The unknown-field check is repeated here because a type that decodes itself
+// is decoded by the config kernel's strict decoder opaquely.
+func (c *JevScorecardConfig) UnmarshalJSON(data []byte) error {
+	type plain JevScorecardConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.jev_scorecard: %w", err)
+	}
+	cfg := JevScorecardConfig(p)
+	if _, err := cfg.ClockMinute(); err != nil {
+		return err
+	}
+	if _, err := cfg.IntervalDuration(); err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(cfg.Batteries))
+	for _, name := range cfg.Batteries {
+		if strings.TrimSpace(name) == "" {
+			return errors.New("patrols.jev_scorecard.batteries: a battery name is empty")
+		}
+		if seen[name] {
+			return fmt.Errorf("patrols.jev_scorecard.batteries: %q is listed twice", name)
+		}
+		seen[name] = true
+	}
+	*c = cfg
+	return nil
 }
 
 // JevReworkConfig switches on the refused-review cause battery and prices its

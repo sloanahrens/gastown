@@ -1399,3 +1399,77 @@ func TestSpecDispatchInFlightCapDefaults(t *testing.T) {
 		t.Errorf("nil block: InFlightCap = %d, want the default %d", got, DefaultSpecMaxInFlight)
 	}
 }
+
+// The jev_scorecard patrol's block decodes its four keys, and a value the
+// patrol cannot act on is refused at decode rather than read as a default.
+func TestJevScorecardConfigDecodes(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"jev_scorecard":{"enabled":true,"hour":"03:15",` +
+		`"interval":"12h","batteries":["attention","drift"]}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("decoding jev_scorecard = %v", err)
+	}
+	c := cfg.Patrols.JevScorecard
+	if c == nil || !c.Enabled || c.Hour != "03:15" || c.IntervalStr != "12h" {
+		t.Fatalf("jev_scorecard = %+v, want enabled at 03:15 every 12h", c)
+	}
+	if got := c.BatteriesValue(); !slices.Equal(got, []string{"attention", "drift"}) {
+		t.Errorf("batteries = %v, want [attention drift]", got)
+	}
+	if minute, err := c.ClockMinute(); err != nil || minute != 3*60+15 {
+		t.Errorf("ClockMinute = %d (%v), want 03:15", minute, err)
+	}
+	if interval, err := c.IntervalDuration(); err != nil || interval != 12*time.Hour {
+		t.Errorf("IntervalDuration = %v (%v), want 12h", interval, err)
+	}
+}
+
+// A block that leaves the settings out runs on the patrol's defaults; an empty
+// battery list means the patrol refreshes nothing, not that it scores every
+// registered battery.
+func TestJevScorecardConfigDefaults(t *testing.T) {
+	t.Parallel()
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"jev_scorecard":{"enabled":true}}}`), &cfg); err != nil {
+		t.Fatalf("decoding jev_scorecard = %v", err)
+	}
+	c := cfg.Patrols.JevScorecard
+	if minute, err := c.ClockMinute(); err != nil || minute != 4*60+30 {
+		t.Errorf("default clock minute = %d (%v), want 04:30", minute, err)
+	}
+	if interval, err := c.IntervalDuration(); err != nil || interval != JevScorecardDefaultInterval {
+		t.Errorf("default interval = %v (%v), want %v", interval, err, JevScorecardDefaultInterval)
+	}
+	if got := c.BatteriesValue(); len(got) != 0 {
+		t.Errorf("default batteries = %v, want none", got)
+	}
+}
+
+// TestJevScorecardConfigRefusesBadValues names the key for each value the
+// patrol cannot act on: a typo must not quietly read as the default.
+func TestJevScorecardConfigRefusesBadValues(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"hour not a clock", `{"hour":"4am"}`, "jev_scorecard.hour"},
+		{"interval not a duration", `{"interval":"daily"}`, "jev_scorecard.interval"},
+		{"interval zero", `{"interval":"0h"}`, "jev_scorecard.interval"},
+		{"empty battery name", `{"batteries":[""]}`, "battery name is empty"},
+		{"repeated battery", `{"batteries":["attention","attention"]}`, "listed twice"},
+		{"unknown key", `{"hours":"04:30"}`, "unknown field"},
+	} {
+		var cfg DaemonPatrolConfig
+		err := DecodeJSONFile("daemon.json", []byte(`{"patrols":{"jev_scorecard":`+tc.body+`}}`), &cfg)
+		if err == nil {
+			t.Errorf("%s: decoded, want an error naming %s", tc.name, tc.want)
+			continue
+		}
+		if !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: error = %v, want it to name %s", tc.name, err, tc.want)
+		}
+	}
+}

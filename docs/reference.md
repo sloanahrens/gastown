@@ -2186,6 +2186,45 @@ The daemon patrol `jev_dispatch` (heartbeat step `jev-dispatch`) is off unless
 the town-wide cap above, so the dedupe and dispatch batteries draw on one day's
 room. `gt jev dispatch` reads the same keys whether or not the patrol is on.
 
+### Scorecard cache and its daemon patrol (`jev_scorecard`)
+
+`gt jev scorecard --refresh` scores every registered battery over the last 7
+days (`--since` overrides the window) and writes
+`<town>/.runtime/jev/scorecard.json` by temp file and rename, so a failed write
+leaves the previous file as it was. A battery whose scoring fails keeps its
+last good block in the file; the command names the failed batteries and exits
+non-zero. A missing cache starts fresh. A corrupt cache stops the refresh before
+it scores anything — the error names the file, and the remedy is to delete it
+and run `gt jev scorecard --refresh` again. The dashboard's JEV panel reads this
+cache and starts no process (gt-0kw0a0).
+
+The daemon patrol `jev_scorecard` (heartbeat step `jev-scorecard`) keeps the
+cache fresh. It is off unless `daemon.json` enables it:
+
+```json
+{"patrols": {"jev_scorecard": {
+  "enabled": true, "hour": "04:30", "interval": "24h",
+  "batteries": ["attention", "landing", "submission"]}}}
+```
+
+`hour` is the local time of day the refresh runs, default `04:30`. `interval`
+is how old the cache may be when the daemon starts, default `24h`: an older
+cache is refreshed at once, a newer one waits for the hour. With no recorded
+run the daily clock is counted from the daemon's start, so an hour that passed
+while the daemon was down does not refresh at startup. A refresh runs on its own
+goroutine; a tick that finds one in flight is skipped, and the skip is logged
+once an hour. A refresh that exits non-zero is logged, raises no attention item,
+and is not retried until the next scheduled run; when the cache itself is
+corrupt, the failure line names the file and the remedy above.
+
+`batteries` is the set the town expects the refresh to score; an empty list
+refreshes nothing. A name the binary does not register — a battery the
+2026-11-20 review retired, say — is refused by `gt config validate`, by
+`gt jev scorecard --refresh`, and by the patrol's own tick (which logs it once
+an hour and refreshes nothing), each naming the battery. The check stays off
+the shared patrol-config load, so a retired name never fails an unrelated
+patrol's read. The refresh itself scores every registered battery.
+
 ### Conflict battery (`jev_conflict`)
 
 The daemon patrol `jev_conflict` (heartbeat step `jev-conflict`) is off unless

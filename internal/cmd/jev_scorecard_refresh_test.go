@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 )
 
@@ -387,6 +388,56 @@ func TestJevScorecardRefreshRefusesACorruptCache(t *testing.T) {
 	}
 	if string(body) != "not a scorecard" {
 		t.Errorf("refused refresh rewrote the cache file: %q", body)
+	}
+}
+
+// A declared battery the binary does not register stops the refresh at the
+// block's own load, naming it, before anything is scored.
+func TestJevScorecardRefreshRefusesARetiredBattery(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(town, constants.DirMayor, "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"daemon-patrol-config","version":1,"patrols":{"jev_scorecard":{` +
+		`"enabled":true,"batteries":["retired_battery"]}}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scorer := &jevRefreshScorer{}
+
+	err := jevScorecardRun(context.Background(), io.Discard, town,
+		jevScorecardOptions{Refresh: true}, time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC), scorer.score, scorecard.Cache{})
+	if err == nil || !strings.Contains(err.Error(), `"retired_battery"`) {
+		t.Fatalf("refresh error = %v, want one naming retired_battery", err)
+	}
+	if len(scorer.calls) != 0 {
+		t.Errorf("refused refresh still scored %v", scorer.calls)
+	}
+}
+
+// A patrol config that does not load stops the refresh rather than reading as
+// no block: what the town declares cannot be checked otherwise.
+func TestJevScorecardRefreshRefusesAnUnreadablePatrolConfig(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(town, constants.DirMayor, "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"daemon-patrol-config","patrols":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scorer := &jevRefreshScorer{}
+
+	err := jevScorecardRun(context.Background(), io.Discard, town,
+		jevScorecardOptions{Refresh: true}, time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC), scorer.score, scorecard.Cache{})
+	if err == nil || !strings.Contains(err.Error(), "daemon.json") {
+		t.Fatalf("refresh error = %v, want one naming daemon.json", err)
+	}
+	if len(scorer.calls) != 0 {
+		t.Errorf("refused refresh still scored %v", scorer.calls)
 	}
 }
 
