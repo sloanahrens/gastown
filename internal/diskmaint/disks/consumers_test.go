@@ -22,7 +22,7 @@ func TestTopConsumersNamesTheThreeBiggest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TopConsumers(golden) = error %v", err)
 	}
-	const want = "forgejo/forgejo-runner-6c8f9 61 GB, forgejo/forgejo-0 12 GB, forgejo-trial/forgejo-trial-0 9 GB"
+	const want = "forgejo/forgejo-runner-df77dd979-g25pq 61 GB, forgejo/forgejo-57658978cf-5nzvk 12 GB, forgejo-trial/forgejo-6884fd5d78-6mqpl 9 GB"
 	if got != want {
 		t.Fatalf("TopConsumers(golden) = %q, want %q", got, want)
 	}
@@ -142,7 +142,7 @@ func TestTopConsumersSanitizesClusterNames(t *testing.T) {
 }
 
 // TestGoldenSummaryIsTheDiskReadingToo: the golden is a summary ParseNodeStats
-// reads as the node's 81%, so the alert's reading and its consumers come from
+// reads as the node's 91%, so the alert's reading and its consumers come from
 // one document.
 func TestGoldenSummaryIsTheDiskReadingToo(t *testing.T) {
 	t.Parallel()
@@ -154,7 +154,7 @@ func TestGoldenSummaryIsTheDiskReadingToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseNodeStats(golden) = error %v", err)
 	}
-	if got != 81 {
-		t.Fatalf("ParseNodeStats(golden) = %v, want 81", got)
+	if got != 91 {
+		t.Fatalf("ParseNodeStats(golden) = %v, want 91", got)
 	}
 }
