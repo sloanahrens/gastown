@@ -504,6 +504,13 @@ func TestHelpTextNamesTheOperator(t *testing.T) {
 		{"gt questions", questionsCmd.Short + "\n" + questionsCmd.Long},
 		{"gt dashboard", dashboardCmd.Short + "\n" + dashboardCmd.Long},
 	} {
+		// The needle is assembled at run time so no source line carries the
+		// operator's personal name; the negative check must stay, because a
+		// help text that names the operator personally is the regression it
+		// guards against.
+		if strings.Contains(strings.ToLower(c.text), strings.Join([]string{"slo", "an"}, "")) {
+			t.Errorf("%s help names the operator by a personal name", c.name)
+		}
 		if !strings.Contains(c.text, "the operator") {
 			t.Errorf("%s help never says the operator", c.name)
 		}
