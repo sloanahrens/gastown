@@ -87,8 +87,11 @@ echo "after_kib=$before"
 `
 
 // ciCacheTrimScript is the apply's program: the same listing as the dry run's,
-// with the removal, then the empty directories the removal left, and the size
-// after. Its arguments are the volume root and the age in minutes.
+// with the removal, then the empty directories the removal left below the top
+// level, and the size after. Its arguments are the volume root and the age in
+// minutes. The top level's own directories are the cache's 256 two-hex-digit
+// shards, which Go creates once and does not recreate: removing an emptied one
+// loses every write that hashes into it (gt-qaqvf4).
 const ciCacheTrimScript = `set -eu
 root=$1; age=$2
 [ -d "$root" ] || { echo "volume path not found" >&2; exit 3; }
@@ -96,7 +99,7 @@ list=$(mktemp)
 trap 'rm -f "$list"' EXIT
 before=$(du -sk "$root" | cut -f1)
 find "$root" -mindepth 2 -type f -mmin +"$age" -print -delete > "$list"
-find "$root" -mindepth 1 -type d -empty -delete
+find "$root" -mindepth 2 -type d -empty -delete
 removed=$(wc -l < "$list" | tr -d ' ')
 after=$(du -sk "$root" | cut -f1)
 echo "before_kib=$before"
