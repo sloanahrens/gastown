@@ -56,7 +56,8 @@ Some are great at Go. Some have never touched it. Some are flaky. How do you
 choose?
 
 **The solution:** Every agent accumulates a work history, read from the beads it
-has closed. Each closed bead records who was assigned the work and how it landed:
+has closed. Each closed bead records who was assigned the work. A bead that landed
+also records the landing commit in its close reason:
 
 ```bash
 # What has this agent done? Closed work assigned to it
