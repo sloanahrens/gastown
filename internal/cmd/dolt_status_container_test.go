@@ -580,3 +580,140 @@ func TestDoltHistoryDocPlansAfterAWindow(t *testing.T) {
 		}
 	}
 }
+
+// TestDoltHistoryDocChecksArchiveLevelZero: the flatten runbook checks the
+// server's archive_level before the town is parked, names the line that
+// passes, stops on anything else, and says the overseer owns the restart that
+// rewrites the config, so the operator does not edit it (gt-dqdcj5).
+func TestDoltHistoryDocChecksArchiveLevelZero(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Before any rewrite")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"grep -n -B1 'archive_level' ~/gt/.dolt-data/config.yaml",
+		"`archive_level: 0`",
+		"`enable: true`",
+		"Anything else means stop",
+		"The overseer owns the restart window that rewrites that file",
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("\"Before any rewrite\" does not carry %q:\n%s", want, section)
+		}
+	}
+
+	check := strings.Index(prose, "grep -n -B1 'archive_level'")
+	park := strings.Index(prose, "Park the town")
+	if check < 0 || park < 0 || check > park {
+		t.Errorf("\"Before any rewrite\" does not run the archive_level check before it parks the town:\n%s", section)
+	}
+}
+
+// TestDoltHistoryDocStartsTheServerAfterTheCopy: after the backup stops the
+// server, the runbook starts it again and reads gt dolt status until every
+// database is listed, before the row counts and the flatten SQL run against
+// the live server (gt-dqdcj5).
+func TestDoltHistoryDocStartsTheServerAfterTheCopy(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Before any rewrite")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	copyAt := strings.Index(prose, "copy the database directory while the server is stopped")
+	if copyAt < 0 {
+		t.Fatalf("\"Before any rewrite\" does not carry the backup copy taken while the server is stopped:\n%s", section)
+	}
+	// Step 2 already reads gt dolt status, so search for the restart only
+	// after the copy.
+	after := prose[copyAt:]
+	start := strings.Index(after, "`gt dolt start`")
+	status := strings.Index(after, "read `gt dolt status`")
+	rows := strings.Index(after, "Record row counts")
+	if start < 0 || status < 0 || rows < 0 {
+		t.Fatalf("\"Before any rewrite\" does not start the server, read status and count rows after the copy:\n%s", section)
+	}
+	if status < start || rows < status {
+		t.Errorf("\"Before any rewrite\" does not start the server and read status after the copy, before the row counts:\n%s", section)
+	}
+	if !strings.Contains(after[status:rows], "every database") {
+		t.Errorf("the status read after `gt dolt start` does not name every database:\n%s", after[status:rows])
+	}
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "docs", "dolt-history-offline.md"))
+	if err != nil {
+		t.Fatalf("reading docs/dolt-history-offline.md: %v", err)
+	}
+	doc := string(body)
+	flatten := strings.Index(doc, "CALL DOLT_RESET")
+	if flatten < 0 {
+		t.Fatal("docs/dolt-history-offline.md has no CALL DOLT_RESET flatten SQL")
+	}
+	if strings.Index(doc, "`gt dolt start`") > flatten {
+		t.Errorf("the flatten SQL runs before the runbook starts the server again")
+	}
+}
+
+// TestDoltHistoryDocVerifiesAfterTheFlatten: after the flatten the runbook
+// reads each database's 1-commit-behind archive state, runs archive-now again
+// and re-reads status until every database is 0 behind, then re-counts the
+// tables against the counts recorded before the flatten (gt-dqdcj5).
+func TestDoltHistoryDocVerifiesAfterTheFlatten(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Flatten:")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"`1 commits behind`",
+		"`gt dolt archive-now`",
+		"until every database reads `0 commits behind`",
+		"Re-count every table against the counts recorded in step 4",
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("the flatten section does not carry %q:\n%s", want, section)
+		}
+	}
+
+	behind := strings.Index(prose, "`1 commits behind`")
+	archive := strings.Index(prose, "`gt dolt archive-now`")
+	recount := strings.Index(prose, "Re-count every table")
+	if behind < 0 || archive < 0 || recount < 0 || behind > archive || archive > recount {
+		t.Errorf("the flatten section does not verify in order: archive state, archive-now, then re-count:\n%s", section)
+	}
+}
+
+// TestDoltHistoryDocNamesTheRestoreSection: the flatten runbook's stop-and-restore
+// rule points at docs/dolt-restore.md section 3, and that section heading is
+// the one the restore doc really carries, so the pointer cannot go stale
+// (gt-dqdcj5).
+func TestDoltHistoryDocNamesTheRestoreSection(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Flatten:")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	const rule = "A table that lost rows or disappeared means stop"
+	at := strings.Index(prose, rule)
+	if at < 0 {
+		t.Fatalf("the flatten section does not carry the lost-rows stop rule:\n%s", section)
+	}
+	paragraph := prose[at:]
+	if end := strings.Index(paragraph, "A table that gained rows"); end >= 0 {
+		paragraph = paragraph[:end]
+	}
+
+	for _, want := range []string{
+		"docs/dolt-restore.md",
+		"section 3",
+		"\"Replace a live database (operator only)\"",
+	} {
+		if !strings.Contains(paragraph, want) {
+			t.Errorf("the lost-rows stop rule does not carry %q:\n%s", want, paragraph)
+		}
+	}
+
+	restore, err := os.ReadFile(filepath.Join("..", "..", "docs", "dolt-restore.md"))
+	if err != nil {
+		t.Fatalf("reading docs/dolt-restore.md: %v", err)
+	}
+	if !strings.Contains(string(restore), "## 3. Replace a live database (operator only)") {
+		t.Errorf("docs/dolt-restore.md no longer has the section 3 heading the runbook names")
+	}
+}

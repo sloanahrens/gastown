@@ -78,6 +78,19 @@ gc — before parking the town.
 
 ## Before any rewrite
 
+Before step 1, check the archive level the server is configured with. The
+daemon writes level 0, and the design doc records the gc peak measured at each
+level (see [Dolt storage](design/dolt-storage.md), "Dolt GC"):
+
+```bash
+grep -n -B1 'archive_level' ~/gt/.dolt-data/config.yaml
+```
+
+The matching line must read `archive_level: 0`, and the line before it must
+read `enable: true`. Anything else means stop. The overseer owns the restart
+window that rewrites that file; neither the operator nor a bird edits it. Come
+back to this runbook once the overseer's restart has run and the check passes.
+
 1. Park the town, or at least every rig that writes to the database. A
    rebase fails on a concurrent commit, and a flatten is only safe against
    concurrent writes because Dolt merges the in-flight transaction.
@@ -108,6 +121,10 @@ gc — before parking the town.
    `0 commits behind` and `0 events behind` in step 2, so the copy and the
    archive describe the same moment. The nightly backups under
    `~/gt-backups/dolt` are the other copy, see `docs/dolt-restore.md`.
+
+   Then start the server again with `gt dolt start`, and read `gt dolt status`
+   until it shows the server running and lists every database. The flatten
+   runs on the live server, so do not run it until that status shows them all.
 4. Record row counts for every table so you can verify afterwards:
 
    ```sql
@@ -130,9 +147,17 @@ CALL DOLT_COMMIT('-Am', 'flatten: squash history');
 SELECT COUNT(*) FROM dolt_log;                                   -- after
 ```
 
-Re-count every table. A table that lost rows or disappeared means stop and
-restore the backup. A table that gained rows took a concurrent write, which
-is safe.
+Each flattened database now reads `1 commits behind` in `gt dolt status`,
+because its new root commit is not archived yet. Run `gt dolt archive-now`
+again, with the dispatch hold still set and the town still parked, and read its
+exit codes as step 2 does. Then re-read `gt dolt status` and repeat until every
+database reads `0 commits behind`.
+
+Re-count every table against the counts recorded in step 4 of "Before any
+rewrite". A table that lost rows or disappeared means stop. See
+[docs/dolt-restore.md](dolt-restore.md), section 3, "Replace a live database
+(operator only)", for the restore. A table that gained rows took a concurrent
+write, which is safe.
 
 ## Surgical rebase: squash old history, keep recent commits
 
