@@ -477,13 +477,14 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 		d.logger.Printf("disk_maintenance: skipped: %s", why)
 		return
 	}
-	if due.daily || len(due.interval) > 0 {
-		// The trim runs on this tick; the targets it found are what this line
-		// is about, so their deferral is not read as the tick doing nothing.
-		d.logger.Printf("disk_maintenance: targets skipped: %s; the cache trim runs on its own pass", why)
-	}
 	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
 		return // a trim pass is still running
+	}
+	if due.daily || len(due.interval) > 0 {
+		// The trim pass is dispatched below; the targets the tick found are
+		// what this line is about, so their deferral is not read as the tick
+		// doing nothing.
+		d.logger.Printf("disk_maintenance: targets skipped: %s; the cache trim runs on its own pass", why)
 	}
 	d.diskMaintenanceSeams().dispatch(func() {
 		defer d.diskMaintTrimRunning.Store(false)
