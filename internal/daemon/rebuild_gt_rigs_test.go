@@ -213,20 +213,16 @@ func TestRebuildGTRigCheckoutSyncFailureNeverFailsTheInstall(t *testing.T) {
 }
 
 // TestRebuildGTRigCheckoutSlowRigThatAnswersIsNotATimeout holds the bound to
-// its part: with the same per-rig bounds as the failure case, a slow rig whose
-// git answers promptly is reported by its real result, never as a timeout, so
-// nothing but the bound expiring can make a rig time out (gt-gg9hv.51).
+// its part: every rig, the slow one included, gets the generous ten-minute
+// bound, and a slow rig whose git answers promptly is reported by its real
+// result, never as a timeout. No speed-dependent bound is left in the test
+// (gt-gg9hv.51).
 func TestRebuildGTRigCheckoutSlowRigThatAnswersIsNotATimeout(t *testing.T) {
 	t.Parallel()
 	d, _ := rebuildGTTown(t)
 	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
 	d.rebuildGTGateFn = func() (string, bool) { return "", false }
-	d.rebuildGTRigSyncTimeoutFn = func(rig string) time.Duration {
-		if rig == "slow" {
-			return time.Millisecond
-		}
-		return 10 * time.Minute
-	}
+	d.rebuildGTRigSyncTimeoutFn = func(string) time.Duration { return 10 * time.Minute }
 	d.rebuildGTRigSyncBudgetFn = func() time.Duration { return 10 * time.Minute }
 	broken := rigCheckout(t, d, "broken")
 	slow := rigCheckout(t, d, "slow")
