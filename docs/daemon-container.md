@@ -113,8 +113,8 @@ caller's environment answering for authentication. The fetch is: an empty
 directory under `--out`, then `git init`, `git fetch --depth 1 <url> <commit>`,
 and a detached checkout of `FETCH_HEAD`; the fetched tree is refused unless it is
 at the pinned commit. For the drift check it then runs
-`git fetch --depth 41 <url> main:refs/remotes/origin/main` in that directory: the
-guard's 40-commit bound plus the tip, so a pin exactly at the bound is in the
+`git fetch --depth 41 <url> main:refs/remotes/origin/main` in that directory: one
+more than the guard's commit bound, so a pin exactly at the bound is in the
 fetched history. The fetched tree is removed once the binaries are built.
 Each path must be absolute and an existing directory (and `--pins` an absolute
 existing file), `--rev` is 7 or more hex characters, and each commit in the pins
@@ -124,7 +124,8 @@ flags, prints the pins and the commands it would run, ends with
 that output, then run the same command with `--apply`. With `--apply` the
 pin-drift guard compares each pin with its source's `origin/main` and refuses a
 pin that is not an ancestor of it, more than 40 commits behind it, or more than
-7 days older than its tip, naming the pin and the line to edit. A source that
+7 days older than its tip (the `MaxPinBehind` and `MaxPinAge` constants in
+`internal/daemonimage/pins.go`), naming the pin and the line to edit. A source that
 has a checkout is read from it; a fetched source's main tip is the one fetched
 from its pin URL above, and a tip that cannot be fetched or read is a refusal.
 It then builds
