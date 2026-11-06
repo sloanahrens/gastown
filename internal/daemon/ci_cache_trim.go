@@ -266,18 +266,22 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
 	_, maxAge, warn, err := ciCacheTrimSettings(d.patrolConfig)
 	if err != nil {
-		d.cacheTrimLogf("disk_maintenance: ci cache trim: %v; nothing trimmed", err)
+		d.ciCacheTrimLogf("settings", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		return false
 	}
 	kubeContext, _, err := ciCacheTrimContext(d.patrolConfig)
 	if err != nil {
-		d.cacheTrimLogf("disk_maintenance: ci cache trim: %v; nothing trimmed", err)
+		d.ciCacheTrimLogf("context", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		return false
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
 	pod, err := d.ciCacheTrimPod(ctx, kubeconfig, kubeContext)
 	if err != nil {
-		d.cacheTrimLogf("disk_maintenance: ci cache trim: %v; nothing trimmed", err)
+		kind := "pod listing"
+		if errors.Is(err, errCICacheTrimNotRunning) {
+			kind = "pod not running"
+		}
+		d.ciCacheTrimLogf(kind, "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		return false
 	}
 
@@ -292,16 +296,16 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	if err != nil {
 		var status interface{ ExitCode() int }
 		if errors.As(err, &status) && status.ExitCode() == ciCacheMissingPathExit {
-			d.cacheTrimLogf("disk_maintenance: ci cache trim: the volume path %s is not in the %s container; nothing trimmed", ciCacheRoot, ciCacheContainer)
+			d.ciCacheTrimLogf("volume path missing", "disk_maintenance: ci cache trim: the volume path %s is not in the %s container; nothing trimmed", ciCacheRoot, ciCacheContainer)
 			return false
 		}
-		d.cacheTrimLogf("disk_maintenance: ci cache trim: the exec into the %s container failed: %v: %s; nothing trimmed",
+		d.ciCacheTrimLogf("exec failed", "disk_maintenance: ci cache trim: the exec into the %s container failed: %v: %s; nothing trimmed",
 			ciCacheContainer, err, lastLine(string(stderr)))
 		return false
 	}
 	reply, err := parseCICacheTrimReply(stdout)
 	if err != nil {
-		d.cacheTrimLogf("disk_maintenance: ci cache trim: the volume's reply could not be read: %v; nothing trimmed", err)
+		d.ciCacheTrimLogf("reply unreadable", "disk_maintenance: ci cache trim: the volume's reply could not be read: %v; nothing trimmed", err)
 		return false
 	}
 
@@ -343,6 +347,18 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, reply ciCacheTrimReply, warn in
 		Summary: fmt.Sprintf("CI cache trim removed no file while the Go build cache holds %s, over the warn figure of %s: nothing there is older than the max age, or the trim is not reaching it",
 			polecatimage.Human(after), polecatimage.Human(warn)),
 	})
+}
+
+// ciCacheTrimLogf logs one refusal or failure line of the CI trim, at most once an
+// hour for the same kind of fault. The hold keys on kind, not the expanded line: a
+// failure carries the failing command's own output, which differs from one retry
+// to the next, so a key on the expanded line would let every retry through. A
+// key on the format would merge distinct faults that share a format, so each call
+// names its kind.
+func (d *Daemon) ciCacheTrimLogf(kind, format string, args ...any) {
+	if d.diskMaintSchedule.allowLog("ci-cache-trim "+kind, d.diskMaintenanceSeams().now(), cacheTrimRefusalLogInterval) {
+		d.logger.Printf("%s", fmt.Sprintf(format, args...))
+	}
 }
 
 // ciCacheTrimPod names a runner pod whose dind container is running, the one the
