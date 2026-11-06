@@ -1422,27 +1422,6 @@ func TestPoolDeadHookedEquivalentToTheOldWalk(t *testing.T) {
 			}
 		})
 	}
-
-	// A hook read that fails is a seat that is not proven held: the walk skips
-	// it without probing its worktree, as the old walk skipped a state it could
-	// not read.
-	t.Run("a hook read that fails skips the seat before the probe", func(t *testing.T) {
-		t.Parallel()
-		town, pool := deadHookedWalkTestTown(t, "ember")
-		probes := 0
-		disposition := func(string, string) (poolSeatState, error) {
-			probes++
-			return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: true}, nil
-		}
-		hookHeld := func(string, string) (bool, error) { return false, fmt.Errorf("beads unavailable") }
-		got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, now)
-		if err != nil {
-			t.Fatalf("poolDeadHookedSessions: %v", err)
-		}
-		if len(got) != 0 || probes != 0 || probed != 0 {
-			t.Fatalf("an unreadable hook returned %+v with %d probes for %d seats, want none", got, probes, probed)
-		}
-	})
 }
 
 // TestPoolDeadHookedProbesOnlyHeldHooks is gt-gg9hv.73's cost proof: the
@@ -1604,6 +1583,38 @@ func TestPoolDeadHookedReadFailuresAreReturned(t *testing.T) {
 		}}
 		if held, err := poolPolecatHookHeldWith(t.TempDir(), "gastown", "ember", reads); err == nil {
 			t.Fatalf("a failing agent-bead read answered held=%v", held)
+		}
+	})
+
+	t.Run("a hook read that fails keeps the seat counted and returns the error", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		probes := 0
+		disposition := func(string, string) (poolSeatState, error) {
+			probes++
+			return poolSeatState{Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true}, HookHeld: true}, nil
+		}
+		hookHeld := func(string, string) (bool, error) { return false, errors.New("beads unavailable") }
+		got, probed, err := poolDeadHookedSessions(town, pool, disposition, hookHeld, nil, now)
+		if err == nil || !strings.Contains(err.Error(), "beads unavailable") {
+			t.Fatalf("an unreadable hook = %v, want the read's error", err)
+		}
+		if len(got) != 1 || got[0].polecat != "ember" || !got[0].deadHooked {
+			t.Fatalf("an unreadable hook counted %+v, want the seat counted as dead-hooked", got)
+		}
+		if probes != 0 || probed != 0 {
+			t.Fatalf("an unreadable hook ran %d probes (probed %d), want none", probes, probed)
+		}
+	})
+
+	t.Run("a missing hook read or disposition is an error, not an empty walk", func(t *testing.T) {
+		t.Parallel()
+		town, pool := deadHookedWalkTestTown(t, "ember")
+		if _, _, err := poolDeadHookedSessions(town, pool, heldDisposition, nil, nil, now); err == nil {
+			t.Fatal("a nil hook read walked to an empty result without an error")
+		}
+		if _, _, err := poolDeadHookedSessions(town, pool, nil, heldHook, nil, now); err == nil {
+			t.Fatal("a nil disposition walked to an empty result without an error")
 		}
 	})
 }

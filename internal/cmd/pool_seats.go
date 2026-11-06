@@ -903,9 +903,9 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 // (gt-bc9b6) — is not counted here any more than it is by a live session
 // (gt-b9ud0).
 //
-// A seat whose state cannot be read is skipped: it is not proven held, the live
-// seats are already counted, and counting every unreadable directory would let
-// a bead-database hiccup fill every seat and refuse every sling.
+// A seat whose full state cannot be read is skipped, as it always was: the
+// live seats are already counted, and counting every unreadable directory would
+// let a bead-database hiccup fill every seat and refuse every sling.
 //
 // The hook-held question is asked first, from the seat's beads alone, and the
 // full seat state (with its worktree probe) only for a seat that holds a hook.
@@ -913,6 +913,10 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 // that worktree was work no answer used; the probe is the expensive half of
 // this read (gt-gg9hv.73). The count returned beside the seats is how many
 // seats ran the full read, which the roster logs.
+//
+// A seat whose hook cannot be read is not proven free, so it stays counted,
+// and the first such read error is returned beside the seats: a sling that
+// counted the seat free on a failed read would take an occupied seat.
 //
 // The seat is rendered on the agent it was slung on, read from the seat's
 // intent record (intent.MarkSlung) — a dead seat's tmux session is what carried
@@ -933,8 +937,11 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 // it comes back as a parkedStale session instead of a dead-hooked one, which the
 // roster lists apart from Live and poolHeldCount does not count (gt-t7k92).
 func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, live []poolSession, now time.Time) ([]poolSession, int, error) {
-	if townRoot == "" || !poolOwnsSeats(pool) || disposition == nil || hookHeld == nil {
+	if townRoot == "" || !poolOwnsSeats(pool) {
 		return nil, 0, nil
+	}
+	if disposition == nil || hookHeld == nil {
+		return nil, 0, errors.New("the dead-hooked walk needs a seat disposition and a hook read")
 	}
 	fallback := unrecordedSeatAgent(townRoot, pool)
 	liveSeats := liveSeatKeys(live)
@@ -943,6 +950,7 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 		return nil, 0, err
 	}
 	var out []poolSession
+	var holdErr error
 	probed := 0
 	for _, rigName := range rigs {
 		names, err := listPolecatDirectoryNames(filepath.Join(townRoot, rigName))
@@ -954,7 +962,16 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 				continue
 			}
 			held, err := hookHeld(rigName, name)
-			if err != nil || !held {
+			if err != nil {
+				// A seat whose hold cannot be read is not proven free, so it
+				// stays counted; the read error goes back beside the seats.
+				if holdErr == nil {
+					holdErr = fmt.Errorf("reading the hook of %s/%s: %w", rigName, name, err)
+				}
+				out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), now))
+				continue
+			}
+			if !held {
 				continue
 			}
 			// The seat holds a hook, so the rest of its state is worth the
@@ -967,22 +984,27 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 			if !state.Disposition.CountsTowardCapacity {
 				continue
 			}
-			// The seat's own record, read after the seat is known to hold
-			// one: only an occupant's agent is worth a read.
-			rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
-			stale := parkedStale(townRoot, rigName, name, now)
-			out = append(out, poolSession{
-				name:        "dead/" + rigName + "/" + name,
-				agent:       slungAgent(rec, fallback(rigName)),
-				rig:         rigName,
-				polecat:     name,
-				deadHooked:  !stale,
-				parkedStale: stale,
-			})
+			out = append(out, deadHookedSeat(townRoot, rigName, name, fallback(rigName), now))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
-	return out, probed, nil
+	return out, probed, holdErr
+}
+
+// deadHookedSeat is the dead-hooked session a seat counts as. The seat's own
+// record is read here, once the seat is counted: only an occupant's agent is
+// worth a read.
+func deadHookedSeat(townRoot, rigName, name, fallbackAgent string, now time.Time) poolSession {
+	rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
+	stale := parkedStale(townRoot, rigName, name, now)
+	return poolSession{
+		name:        "dead/" + rigName + "/" + name,
+		agent:       slungAgent(rec, fallbackAgent),
+		rig:         rigName,
+		polecat:     name,
+		deadHooked:  !stale,
+		parkedStale: stale,
+	}
 }
 
 // parkedStale reports whether the seat was parked more than

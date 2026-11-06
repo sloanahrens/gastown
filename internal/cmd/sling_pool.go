@@ -1488,12 +1488,12 @@ type poolRouter struct {
 	pool        func() *config.PolecatPool
 	sessions    func() sessionLister
 	disposition polecatDispositionFunc
+	work        poolSeatWorkFunc
+	seats       *poolSeatLedger
+	now         func() time.Time
 	// hookHeld is the cheap hold read the dead-hooked walk asks before the
 	// full seat state (gt-gg9hv.73).
 	hookHeld polecatHookHeldFunc
-	work     poolSeatWorkFunc
-	seats    *poolSeatLedger
-	now      func() time.Time
 }
 
 // poolRouterFor wires the pool decision to the town on disk, the tmux server,

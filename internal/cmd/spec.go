@@ -1448,16 +1448,16 @@ type specDispatchReport struct {
 	// The bd reads each phase made, counted by the tick's ledger; the daemon
 	// logs them on its 'tick took' line beside the phase times, so a slow
 	// phase is also known by how many calls it cost (gt-139dp).
-	RosterCalls     int `json:"roster_calls,omitempty"`
-	BoardCalls      int `json:"board_calls,omitempty"`
-	CandidatesCalls int `json:"candidates_calls,omitempty"`
+	RosterCalls     int      `json:"roster_calls,omitempty"`
+	BoardCalls      int      `json:"board_calls,omitempty"`
+	CandidatesCalls int      `json:"candidates_calls,omitempty"`
+	Errors          []string `json:"errors,omitempty"`
 	// ProbedWorktrees is how many polecat worktrees the roster's dead-hooked
 	// walk probed: the seats it ran the full seat read for. The daemon logs it
 	// beside the tick's timing, so the probe's cost is visible (gt-gg9hv.73).
 	// Nil is a tick that read no roster — a held tick, or one whose roster read
 	// failed — which is not the same as a roster that probed none.
-	ProbedWorktrees *int     `json:"probed_worktrees,omitempty"`
-	Errors          []string `json:"errors,omitempty"`
+	ProbedWorktrees *int `json:"probed_worktrees,omitempty"`
 }
 
 type specDispatchEntry struct {
