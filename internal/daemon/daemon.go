@@ -316,6 +316,10 @@ type Daemon struct {
 	// pass, which runs on a tick whose targets are deferred to a quiet one
 	// (gt-gg9hv.48).
 	diskMaintTrimRunning atomic.Bool
+	// diskMaintAlertOnlyRunning is the single-flight guard of the busy tick's
+	// alert-only pass, which reads the disks and applies their alerts when
+	// nothing else due would read them (gt-gg9hv.53).
+	diskMaintAlertOnlyRunning atomic.Bool
 	// diskMaintSettled is when it last settled a window, as UnixNano: the
 	// pass runs off the loop goroutine, so the marker it writes is atomic and
 	// the loop only reads it.
@@ -328,8 +332,8 @@ type Daemon struct {
 	// alerts a disk once, and a clear needs a reading that says so.
 	diskMaintAlerts diskMaintAlerts
 	// cacheTrimNoOp is the claims a completed cache trim left over twice the
-	// cap, which the attention queue raises until a later trim's reading finds
-	// them under it (gt-gg9hv.46).
+	// cap, which the attention queue raises until a later pass reads one under
+	// it or finds the claim gone (gt-gg9hv.46, gt-gg9hv.50).
 	cacheTrimNoOp cacheTrimNoOp
 	// ciCacheTrimRunning is the single-flight guard of the CI build-cache trim's
 	// pass, which runs on its own interval and off the quiet guard

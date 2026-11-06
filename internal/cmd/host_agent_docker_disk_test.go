@@ -97,6 +97,11 @@ func TestHostAgentDockerDiskDoesNotHoldTheWriteCycle(t *testing.T) {
 	defer releaseHeld()
 	started := make(chan struct{})
 	var startOnce sync.Once
+	// stored is closed by the agent's own hook after the held read's result is
+	// stored, so the test waits for the store itself rather than hoping a tick
+	// lands after it under whatever load the machine is under.
+	stored := make(chan struct{})
+	var storedOnce sync.Once
 	var calls atomic.Int32
 	run := func(ctx context.Context, argv []string) ([]byte, error) {
 		if !slices.Contains(argv, "exec") {
@@ -113,6 +118,7 @@ func TestHostAgentDockerDiskDoesNotHoldTheWriteCycle(t *testing.T) {
 	}
 
 	dockerDisk := newHostAgentDockerDisk()
+	dockerDisk.onStored = func() { storedOnce.Do(func() { close(stored) }) }
 	town := t.TempDir()
 	read := func(string) templates.SupervisorState { return templates.SupervisorState{Loaded: true} }
 	writes := make(chan hostprobe.Probes, 16)
@@ -154,21 +160,24 @@ func TestHostAgentDockerDiskDoesNotHoldTheWriteCycle(t *testing.T) {
 	}
 
 	releaseHeld()
-	// The first finished read is published by a later tick; the bound is in ticks,
-	// not wall time, and each tick waits for its own write.
-	for range 10 {
-		awaitNextTick(t, clock)
-		clock.Advance(hostAgentInterval)
-		got := awaitProbes(t, writes, done)
-		if got.DockerDisk.Err == "" && got.DockerDisk.Value.UsedPct == 72 {
-			cancel()
-			if err := awaitExit(t, done); err != nil {
-				t.Errorf("loop after cancel = %v, want nil", err)
-			}
-			return
-		}
+	// Wait for the held read's result to be stored, bounded: the tick that
+	// publishes it must come after the store, and a tick count would only sample
+	// the scheduler's luck.
+	select {
+	case <-stored:
+	case <-bound.Done():
+		t.Fatal("the held docker read's result was not stored within the test's bound")
 	}
-	t.Fatal("no tick published the finished docker reading within 10 ticks")
+	awaitNextTick(t, clock)
+	clock.Advance(hostAgentInterval)
+	got := awaitProbes(t, writes, done)
+	if got.DockerDisk.Err != "" || got.DockerDisk.Value.UsedPct != 72 {
+		t.Fatalf("the tick after the read finished published %+v, want the finished reading", got.DockerDisk)
+	}
+	cancel()
+	if err := awaitExit(t, done); err != nil {
+		t.Errorf("loop after cancel = %v, want nil", err)
+	}
 }
 
 // TestHostAgentDockerDiskStuckReadPublishesAnError pins that a docker exec which

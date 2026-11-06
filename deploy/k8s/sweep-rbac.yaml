@@ -1,0 +1,94 @@
+# The cluster access the tier sweep runs with (gt-gg9hv.55): the gt-sweeps
+# namespace, the sweep-runner service account the Kubernetes backend's Job runs
+# as, its namespaced Role and binding, the token Secret, and the read-only
+# gt-sweep-reader ClusterRole the capacity and priority guards read through.
+#
+# This file is not applied by the daemon. An operator applies it to the control
+# cluster with:
+#   kubectl --context colima-gt-control apply -f deploy/k8s/sweep-rbac.yaml
+# (docs/reference.md, Tier sweep runner). TestSweepRBACManifestParses,
+# TestSweepRBACCoversEveryRead and TestSweepRBACClusterGrantIsReadOnly hold it to
+# the reads in internal/sweeprunner/testdata/rbac-reads.golden.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gt-sweeps
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sweep-runner
+  namespace: gt-sweeps
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: sweep-runner
+  namespace: gt-sweeps
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sweep-runner
+  namespace: gt-sweeps
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: sweep-runner
+subjects:
+  - kind: ServiceAccount
+    name: sweep-runner
+    namespace: gt-sweeps
+---
+# The token Secret is declared here for its annotations only: the control
+# cluster fills in the token, and the file carries no data.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sweep-runner-token
+  namespace: gt-sweeps
+  annotations:
+    kubernetes.io/service-account.name: sweep-runner
+    kubernetes.io/service-account.uid: ad62749c-5263-484e-a42c-3602cf0dfb6e
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gt-sweep-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gt-sweep-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gt-sweep-reader
+subjects:
+  - kind: ServiceAccount
+    name: sweep-runner
+    namespace: gt-sweeps

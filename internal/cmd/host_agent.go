@@ -305,6 +305,11 @@ type hostAgentDockerDisk struct {
 	inFlight bool
 	started  time.Time // the tick that started the read in flight
 	latest   hostprobe.Field[hostprobe.Disk]
+
+	// onStored, when set, is called after a read's result is stored and the
+	// mutex released, so a test waits on the store itself rather than sampling
+	// the fields. It is nil in the agent (gt-qjzsjs).
+	onStored func()
 }
 
 func newHostAgentDockerDisk() *hostAgentDockerDisk {
@@ -333,9 +338,13 @@ func (d *hostAgentDockerDisk) reading(ctx context.Context, run hostprobe.Runner,
 func (d *hostAgentDockerDisk) refresh(ctx context.Context, run hostprobe.Runner) {
 	got := hostAgentWithDockerDisk(ctx, hostprobe.Probes{}, run).DockerDisk
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.latest = got
 	d.inFlight = false
+	stored := d.onStored
+	d.mu.Unlock()
+	if stored != nil {
+		stored()
+	}
 }
 
 // hostAgentCollect is one tick's reading: the probes Collect reads, the Docker

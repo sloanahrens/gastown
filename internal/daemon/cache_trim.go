@@ -107,6 +107,12 @@ const (
 	// and name follow it, so one claim has one item however often it is
 	// measured.
 	cacheTrimNoOpKeyPrefix = "cache-trim-noop:"
+
+	// cacheTrimNoOpOpenSandboxes is the item's closing sentence: the reading is
+	// df's Used for the whole claim, not only what the trim left, so a sandbox
+	// that is open while the trim runs can explain a claim still over the
+	// threshold without the Job having failed to remove anything.
+	cacheTrimNoOpOpenSandboxes = "open sandbox paths can explain this; the claim is read whole, not just what the trim left"
 )
 
 // errCacheTrimNoContext is the preflight's refusal for a kubeconfig that parses
@@ -317,6 +323,11 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	for _, claim := range claims {
 		found := namespaces[claim.ClaimName]
 		if len(found) == 0 {
+			// The listing names no claim of this name anywhere, so the claim a
+			// completed trim measured was deleted, and its item describes
+			// nothing this pass can judge. The collector reads the store
+			// itself, so the next collection stops raising it.
+			d.cacheTrimNoOp.clearClaim(claim.ClaimName)
 			d.cacheTrimLogf("disk_maintenance: cache trim %s: no claim of that name is in the cluster; nothing trimmed", claim.ClaimName)
 			continue
 		}
@@ -403,6 +414,24 @@ func (s *cacheTrimNoOp) clear(key string) {
 	delete(s.items, key)
 }
 
+// clearClaim drops every item of a claim, in every namespace: the claim listing
+// names no claim of that name, so each stored reading belongs to a claim that is
+// gone -- deleted, or re-created with its pods gone -- and says nothing about
+// whatever claim the name belongs to now.
+//
+// The key ends with the claim's name, so the suffix is the claim itself; the
+// prefix keeps the CI cache trim's key out of the match.
+func (s *cacheTrimNoOp) clearClaim(claim string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	suffix := "/" + claim
+	for key := range s.items {
+		if strings.HasPrefix(key, cacheTrimNoOpKeyPrefix) && strings.HasSuffix(key, suffix) {
+			delete(s.items, key)
+		}
+	}
+}
+
 // observed returns the items, copied for a reader and ordered by key so the
 // collector's output does not depend on map order.
 func (s *cacheTrimNoOp) observed() []attention.Item {
@@ -446,6 +475,15 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 		return false
 	}
 	if len(sources) == 0 {
+		// No pod holds the claim, so nothing mounts the claim the completed
+		// trim measured: it was re-created with its pods gone, or no sandbox
+		// uses it now, and the item it raised describes nothing this pass can
+		// judge. Pods that hold the claim without one running are a different
+		// case: the claim is there, and a later trim can measure it, so its
+		// item stays.
+		if sandboxes == 0 {
+			d.cacheTrimNoOp.clear(cacheTrimNoOpKey(namespace, claim.ClaimName))
+		}
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: no running pod mounts it, so its listing cannot be read (%d pod(s) hold it); nothing trimmed", claim.ClaimName, namespace, sandboxes)
 		return false
 	}
@@ -536,7 +574,9 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 // cacheTrimMeasure reads the claim after a completed trim and raises or clears
 // its attention item: while the claim holds more than cacheTrimNoOpFactor times
 // the cap the trim left it there, and the Job may have run the wrong helper.
-// A reading at or under the threshold drops the item: the trim did its work.
+// The reading is df's Used for the whole claim, so the item names open sandbox
+// paths as another explanation. A reading at or under the threshold drops the
+// item: the trim did its work.
 //
 // A df that cannot be read logs once an hour under a key of its own and raises
 // nothing. This check never fails the trim: the trim reached a verdict, and a
@@ -557,15 +597,16 @@ func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source
 		Key:      key,
 		Kind:     attention.KindCacheTrimNoOp,
 		Severity: attention.SeverityLow,
-		Summary: fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: the Job may have run the wrong helper",
-			claim, polecatimage.Human(reading.Used), polecatimage.Human(capBytes)),
+		Summary: fmt.Sprintf("cache trim of %s completed but the claim still holds %s against a cap of %s: the Job may have run the wrong helper. %s",
+			claim, polecatimage.Human(reading.Used), polecatimage.Human(capBytes), cacheTrimNoOpOpenSandboxes),
 	})
 }
 
 // collectCacheTrimNoOp returns the claims a completed trim left over twice the
-// cap. The trim pass writes the records and the heartbeat only reads them, so
-// an item appears or clears at a trim and the queue holds the last trim's
-// measurement in between.
+// cap. The trim pass writes the records and the heartbeat only reads them, so an
+// item appears at a trim and clears at a later pass that reads the claim under
+// the threshold or finds it gone, and the queue holds the last reading in
+// between.
 func (s *attentionSources) collectCacheTrimNoOp(context.Context) ([]attention.Item, error) {
 	if s.cacheTrimNoOp == nil {
 		return nil, nil

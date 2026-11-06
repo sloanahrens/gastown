@@ -471,6 +471,15 @@ clock untouched — and one line an hour names the best-fitting eligible node an
 its figures; a capacity read that fails declines the launch with the error in
 that line.
 
+The sweep's cluster access is in `deploy/k8s/sweep-rbac.yaml`: the `gt-sweeps`
+namespace, the `sweep-runner` service account the Job runs as, its namespaced
+Role, and the read-only `gt-sweep-reader` ClusterRole the capacity and priority
+reads need. The daemon does not apply it. An operator applies it to the control
+cluster with `kubectl --context colima-gt-control apply -f deploy/k8s/sweep-rbac.yaml`.
+`TestSweepRBACCoversEveryRead` holds the manifest to the reads listed in
+`internal/sweeprunner/testdata/rbac-reads.golden`, so a read the plan gains
+without a grant fails the unit test rather than the first live sweep.
+
 ### Bird Reports
 
 The `bird_reports` patrol (gt-cbsat) raises one attention item per expected

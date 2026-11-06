@@ -17,7 +17,7 @@ All three run the same `registry` target and share the plugin's lock.
 |---|---|
 | the `polecat-image` plugin | plans after its own image, cache and volume trims, and applies in `apply` mode, in the run that holds the lock |
 | `gt maint` | plans by hand, or applies the plan it just printed because it was typed; a target name it does not know is listed back |
-| the `disk_maintenance` patrol | plans every target in a quiet daily window, and any target with an interval of its own on that interval; trims the shared cache claim on its own interval; applies in `apply` mode |
+| the `disk_maintenance` patrol | plans every target in a quiet daily window, and any target with an interval of its own on that interval; trims the shared cache claim on its own interval; applies the disk alerts on busy ticks through the alert-only pass; applies in `apply` mode |
 
 `registry` is the only target in slice 1. `plan` is the dry run, so it creates
 neither the ledger directory nor anything else; both `plan` and `apply` exit
@@ -130,9 +130,8 @@ a control cluster.
   of its claim-backed volumes, as `namespace/pod 61 GB`. Cluster names are cut to
   200 characters and stripped of line breaks before they reach the alert.
 - Kubelet eviction starts at about 85% to 90% used on this node (the 91% of
-  2026-11-05), so the 80% alert leaves five to ten points. A busy town applies
-  the alerts once per `cache_trim_interval` until the busy-tick alert pass
-  (gt-gg9hv.53) lands, which is too slow for this disk.
+  2026-11-05), so the 80% alert leaves five to ten points. The alert-only pass
+  (below) keeps that margin watched while the town stays busy.
 - The disk name is the middle part of the alert key, `diskmaint:<disk>`. Renaming
   a disk orphans any open alert under the old name.
 
@@ -145,6 +144,23 @@ as settled, so the next pass is the next day's. A deferred apply is the one
 conclusion that leaves the window open, because the push holding the lock is
 what to wait for.
 
+### The alert-only pass
+
+A busy tick whose trim is not due runs the alert-only pass, whether or not a
+target is due: it reads the disks and applies their alerts through the same
+application a trim or a full pass uses, and it does nothing else. A target the
+tick found still waits for a quiet tick. Its spacing is ten minutes
+(`diskMaintBusyAlertEvery`), measured from the last application any pass made,
+so a trim or a full pass that applies the alerts restarts it, and the pass never
+repeats a reading another pass just took. Its own fallback read, the one it
+makes when another pass holds the turn, spends that spacing too, so a turn held
+by a slow notifier does not put it back on the disks every tick. It has a
+single-flight guard of its own, and it waits for the alert turn like any other
+application: when the wait runs out it reads the disks alone, leaves the alerts
+to the pass that holds the turn, and says so at most once an hour. It writes
+nothing to the schedule, so it can neither spend the trim's interval nor delay
+a target.
+
 ## The shared cache claim
 
 The patrol also trims the shared cache claim a kubernetes sandbox profile
@@ -156,9 +172,12 @@ it while the sandbox disk fills. That pass reads the disks and applies their
 alerts beside the trim, so a notifier that does not answer delays the end of
 the alerts and not the trim. Alert applications from different passes take
 turns, so a later reading is never applied over an earlier one's state, and
-every other target still waits for a quiet tick. A tick that finds no trim due
-reads no disk: while the town is busy the alerts are applied each time the trim
-comes due (`cache_trim_interval`), and on every quiet pass.
+every other target still waits for a quiet tick. A notifier that does not
+answer holds the alert turn for up to three attempts of the 60-second escalation
+timeout for each alert; another pass waits 30 seconds for the turn, then reads
+the disks for its own decisions and goes on, and the alerts of that time stay
+with the holder. A tick that finds no trim due runs no trim: a busy one applies
+the alerts through the alert-only pass (above).
 
 - A claim's namespace comes from the claim itself, and every pod read, listing
   exec and apply, delete or wait names it. A claim of the same name in another
