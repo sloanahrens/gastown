@@ -29,6 +29,11 @@ const (
 	// exitFailure is the wrapper's own refusal: the tool never ran, so there is
 	// no tool status to pass through.
 	exitFailure = 1
+	// cutoverName is the name the binary runs its own commands under. The four
+	// tool names are taken, so the operator runs gt-wrap install.
+	cutoverName = "gt-wrap"
+	installCmd  = "install"
+	rollbackCmd = "rollback"
 )
 
 // target is what the wrapper needs from a target: the ladder that runs a call
@@ -55,6 +60,12 @@ type surface struct {
 	stdout, stderr io.Writer
 	// newDocker builds the docker target for a town.
 	newDocker func(town string) target
+	// executable is the wrapper binary install copies into each tool's place.
+	executable func() (string, error)
+	// files is the filesystem the cutover changes; nil uses the system's.
+	files gtwrap.Files
+	// newDoctor builds install's doctor for a town.
+	newDoctor func(town string) gtwrap.Doctor
 }
 
 func main() {
@@ -75,19 +86,27 @@ func osSurface() surface {
 		newDocker: func(town string) target {
 			return gtwrap.Docker{Town: town, Shell: gtwrap.OSShell{}, ReadFile: os.ReadFile}
 		},
+		executable: os.Executable,
+		newDoctor: func(town string) gtwrap.Doctor {
+			return cutoverDoctor{town: town, shell: gtwrap.OSShell{}, read: os.ReadFile, report: os.Stderr}
+		},
 	}
 }
 
-// run is main with its process injected. argv[0] is the installed name, which
-// selects the tool.
+// run is main with its process injected. argv[0] is the installed name: the
+// four tools run the tool, gt-wrap runs the cutover commands, and --doctor asks
+// either for the ladder a call would take.
 func run(argv []string, s surface) int {
 	name := filepath.Base(argv[0])
+	diagnose := len(argv) > 1 && argv[1] == doctorFlag
+	if name == cutoverName && !diagnose {
+		return cutover(argv[1:], s)
+	}
 	targetName, err := configTarget(s)
 	if err != nil {
 		return fail(s.stderr, err)
 	}
 	args := argv[1:]
-	diagnose := len(args) > 0 && args[0] == doctorFlag
 	town, err := findTown(s)
 	if err != nil {
 		// --doctor still answers when there is no town: a diagnosis of down with
