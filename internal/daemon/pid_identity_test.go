@@ -46,21 +46,38 @@ func fixedProcess(argv []string, cwd string) processInfo {
 	}
 }
 
+// otherPID is a PID that is never this test process's own. The verifiers
+// refuse os.Getpid() by design, so a literal standing in for "another
+// process" fails every case the day the test binary happens to hold it:
+// the landing gate failed exactly that way when its binary held the literal
+// (gt-jwb9ja). Deriving the value from this process keeps it out of reach.
+func otherPID() int {
+	return os.Getpid() + 1
+}
+
+func TestOtherPIDIsNeverThisProcess(t *testing.T) {
+	t.Parallel()
+	if got := otherPID(); got == os.Getpid() {
+		t.Fatalf("otherPID() = %d = os.Getpid(): the identity verifiers refuse it", got)
+	}
+}
+
 func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
+	other := otherPID()
 	verify := func(argv []string, pid int) error {
 		return verifyGTDaemonPIDOn("darwin", fixedProcess(argv, townRoot), townRoot, pid)
 	}
 
-	if err := verify(nil, 4242); err == nil {
+	if err := verify(nil, other); err == nil {
 		t.Error("an unreadable command line was accepted as the daemon")
 	}
-	if err := verify([]string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend"}, 4242); err == nil || !strings.Contains(err.Error(), "not the gt daemon") {
+	if err := verify([]string{"/Applications/Docker.app/Contents/MacOS/com.docker.backend"}, other); err == nil || !strings.Contains(err.Error(), "not the gt daemon") {
 		t.Errorf("Docker's backend accepted as the daemon: %v", err)
 	}
 	daemon := []string{"gt", "daemon", "run"}
-	if err := verify(daemon, 4242); err != nil {
+	if err := verify(daemon, other); err != nil {
 		t.Errorf("gt daemon run rejected: %v", err)
 	}
 	if err := verify(daemon, os.Getpid()); err == nil {
@@ -70,7 +87,7 @@ func TestVerifyGTDaemonPIDRefusesWhatItCannotRead(t *testing.T) {
 		t.Error("PID 0 accepted")
 	}
 	// Windows has no ps(1): the daemon.lock flock is the guard there.
-	if err := verifyGTDaemonPIDOn("windows", fixedProcess(nil, ""), townRoot, 4242); err != nil {
+	if err := verifyGTDaemonPIDOn("windows", fixedProcess(nil, ""), townRoot, other); err != nil {
 		t.Errorf("windows refused a PID it cannot inspect: %v", err)
 	}
 }
@@ -110,8 +127,9 @@ func TestVerifyGTDaemonPIDIsTownScoped(t *testing.T) {
 		{"parent of the town", townRoot, parent, "another town"},
 		{"cwd unreadable", townRoot, "", "unreadable"},
 	}
+	other := otherPID()
 	for _, c := range cases {
-		err := verifyGTDaemonPIDOn("darwin", fixedProcess([]string{"gt", "daemon", "run"}, c.cwd), c.townRoot, 4242)
+		err := verifyGTDaemonPIDOn("darwin", fixedProcess([]string{"gt", "daemon", "run"}, c.cwd), c.townRoot, other)
 		switch {
 		case c.wantErr == "" && err != nil:
 			t.Errorf("%s: rejected: %v", c.name, err)
