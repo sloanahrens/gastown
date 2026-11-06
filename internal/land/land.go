@@ -328,10 +328,12 @@ type Rejection struct {
 	// MaxReworkAttempts refusals of its kind, whatever that kind is: the loop,
 	// not the refusal, is what the ceiling stops (gt-phftg).
 	Rework bool
-	// TargetTip is the target commit the merge was built on, set on a conflict.
-	// The rejection line carries it because a conflicted merge writes no merge
-	// line, and the conflict scorecard reads a rejection's target from that
-	// line (gt-0nvhe).
+	// TargetTip is the target commit the merge was built on, set on a conflict
+	// and on a gate refusal. The rejection line carries it for a conflict only:
+	// a conflicted merge writes no merge line, and the conflict scorecard reads
+	// a conflict's target from that line (gt-0nvhe). The rejection note carries
+	// it too, so gt done can tell whether the target moved since a gate
+	// rejection (gt-xzu8hp).
 	TargetTip string
 	RecordErr error
 }
@@ -1629,8 +1631,10 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// approval is marked too, so a clean approve still answers its round
 		// and the walk does not reach an older review (gt-xal5q). A waived
 		// head and a review that reached no verdict leave both empty.
+		// base is the target tip the merged tree was built on: the gate judged
+		// that tree, so a later target tip is what lifts a resubmission.
 		rej := &Rejection{Kind: RejectGate, Rework: true, Reason: reason, GateTail: tail, GateLog: candRes.GateLog,
-			Findings: verdict.Findings, Approved: verdict.Verdict == VerdictApprove}
+			Findings: verdict.Findings, Approved: verdict.Verdict == VerdictApprove, TargetTip: base}
 		return Result{}, l.reject(issue, w, rej, nil)
 	}
 
@@ -2380,6 +2384,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		Target:      w.Target,
 		MR:          w.BeadID,
 		Head:        w.Head,
+		TargetTip:   rej.TargetTip,
 		Conflicting: rej.Conflicting,
 		GateTail:    rej.GateTail,
 		GateLog:     rej.GateLog,
@@ -2396,11 +2401,11 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	// (gt-g8otg). A refusal that carries none writes none.
 	note.Findings = rej.Findings
 	note.Approved = rej.Approved
-	// The target tip rides the rejection line itself: a conflicted merge writes
-	// no merge line, so this is the only record of what the conflict was built
-	// on (gt-0nvhe).
+	// The target tip rides the rejection line of a conflict: a conflicted merge
+	// writes no merge line, so this is the only record of what the conflict was
+	// built on (gt-0nvhe). A gate's tip is on the note alone.
 	line := fmt.Sprintf("%s: rejected (%s): %s", w.BeadID, rej.Kind, reason)
-	if rej.TargetTip != "" {
+	if rej.TargetTip != "" && rej.Kind == RejectConflict {
 		line += fmt.Sprintf(" (target tip %s)", rej.TargetTip)
 	}
 	l.logf("%s", line)

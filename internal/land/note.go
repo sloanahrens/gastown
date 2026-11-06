@@ -56,7 +56,11 @@ type RejectionNote struct {
 	// Head is the exact tip that was rejected. gt done compares a resubmission
 	// against it (unchanged-since-rejection), so a rejection with no MR bead
 	// still names its content.
-	Head        string
+	Head string
+	// TargetTip is the target tip the rejected merged tree was built on. gt
+	// done lifts a refusal of an identical gate rejection once the target has
+	// moved past it. Empty on a note written before the line existed.
+	TargetTip   string
 	Conflicting []string
 	GateTail    string
 	// GateLog is where the rejected gate's whole job log is kept, for reading
@@ -94,6 +98,9 @@ func FormatRejectionNote(n RejectionNote) string {
 	}
 	if head := NoteField(n.Head); head != "" {
 		note += "\nHead: " + head
+	}
+	if tip := NoteField(n.TargetTip); tip != "" {
+		note += "\nTarget tip: " + tip
 	}
 	if len(n.Conflicting) > 0 {
 		files := make([]string, len(n.Conflicting))
@@ -314,6 +321,8 @@ func parseRejectionBlock(block string) (RejectionNote, bool) {
 			n.MR, seen[key] = value, true
 		case "head":
 			n.Head, seen[key] = value, true
+		case "target tip":
+			n.TargetTip, seen[key] = value, true
 		case "approved":
 			n.Approved, seen[key] = value == approvedBy, true
 		case "score":

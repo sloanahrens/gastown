@@ -69,9 +69,23 @@ func newRejectedReworkFixture(t *testing.T) rejectedReworkFixture {
 // fix changing it. The unit tests cover the guard's logic over a fake.
 func TestIntegrationReportUnchangedSinceRejection(t *testing.T) {
 	t.Parallel()
-	check := func(f rejectedReworkFixture) error {
+	checkNotes := func(f rejectedReworkFixture, notes string) error {
 		tips := func(mrID string) (string, bool) { return f.rejectedSHA, mrID == "gt-wisp-v8j9" }
-		return reportUnchangedSinceRejection(git.NewGit(f.polecat), rejectionNotes(f.branch, "gt-wisp-v8j9"), "gt-0jzd5", "origin/main", tips)
+		return reportUnchangedSinceRejection(git.NewGit(f.polecat), notes, "gt-0jzd5", "origin/main", tips)
+	}
+	check := func(f rejectedReworkFixture) error {
+		return checkNotes(f, rejectionNotes(f.branch, "gt-wisp-v8j9"))
+	}
+	// moveTarget merges other work to origin/main and rebases the polecat onto
+	// it: the target has moved, and the branch's diff is still the rejected one.
+	moveTarget := func(t *testing.T, f rejectedReworkFixture) {
+		t.Helper()
+		writeTestFile(t, filepath.Join(f.seed, "keep.txt"), "keep\nmain touch\n")
+		runGitCmd(t, f.seed, "add", "-A")
+		runGitCmd(t, f.seed, "commit", "-m", "merged: other work")
+		runGitCmd(t, f.seed, "push", "origin", "main")
+		runGitCmd(t, f.polecat, "fetch", "origin")
+		runGitCmd(t, f.polecat, "rebase", "origin/main")
 	}
 
 	t.Run("no commit since the rejection is refused", func(t *testing.T) {
@@ -86,14 +100,48 @@ func TestIntegrationReportUnchangedSinceRejection(t *testing.T) {
 	t.Run("a rebase that changed no content is refused", func(t *testing.T) {
 		t.Parallel()
 		f := newRejectedReworkFixture(t)
-		writeTestFile(t, filepath.Join(f.seed, "keep.txt"), "keep\nmain touch\n")
-		runGitCmd(t, f.seed, "add", "-A")
-		runGitCmd(t, f.seed, "commit", "-m", "merged: other work")
-		runGitCmd(t, f.seed, "push", "origin", "main")
-		runGitCmd(t, f.polecat, "fetch", "origin")
-		runGitCmd(t, f.polecat, "rebase", "origin/main")
+		moveTarget(t, f)
 		if err := check(f); err == nil {
 			t.Fatal("a rebase that changed no content was accepted; the diff is still the rejected one")
+		}
+	})
+
+	t.Run("a gate rejection is accepted once the target has moved past the tip it ran on", func(t *testing.T) {
+		t.Parallel()
+		f := newRejectedReworkFixture(t)
+		tipAt := revParse(t, f.polecat, "origin/main")
+		moveTarget(t, f)
+		if err := checkNotes(f, rejectionNoteAt("gate", tipAt)); err != nil {
+			t.Fatalf("an identical diff a gate rejected was refused after the target moved: %v", err)
+		}
+	})
+
+	t.Run("a gate rejection is refused while the target has not moved", func(t *testing.T) {
+		t.Parallel()
+		f := newRejectedReworkFixture(t)
+		tipAt := revParse(t, f.polecat, "origin/main")
+		err := checkNotes(f, rejectionNoteAt("gate", tipAt))
+		if err == nil || !strings.Contains(err.Error(), "no change since the rejection") {
+			t.Fatalf("an identical diff was accepted with the target where the gate ran: %v", err)
+		}
+	})
+
+	t.Run("a review rejection is refused after the target has moved", func(t *testing.T) {
+		t.Parallel()
+		f := newRejectedReworkFixture(t)
+		tipAt := revParse(t, f.polecat, "origin/main")
+		moveTarget(t, f)
+		if err := checkNotes(f, rejectionNoteAt("review", tipAt)); err == nil {
+			t.Fatal("an identical diff a reviewer rejected was accepted after the target moved")
+		}
+	})
+
+	t.Run("a gate rejection with no recorded tip is refused after the target has moved", func(t *testing.T) {
+		t.Parallel()
+		f := newRejectedReworkFixture(t)
+		moveTarget(t, f)
+		if err := checkNotes(f, rejectionNoteAt("gate", "")); err == nil {
+			t.Fatal("an identical diff was accepted with no record of the target it ran on")
 		}
 	})
 
