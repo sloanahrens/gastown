@@ -19,10 +19,12 @@ guard	context	command	verdict	reason_key	bead	stamp
 #
 # A container_suite or test_scope refusal is recorded under the polecat context
 # the hook consults the rule in: those classifiers are role-blind, but the hook
-# only calls them for a polecat (tapGuardContainerSuite returns without a
-# refusal for every other role), so a refusal recorded under another role would
-# describe a session the rule never judges. Their allow rows also appear under
-# the other contexts, where the hook lets the same command through.
+# calls test_scope only for a polecat, and calls container_suite for a polecat or
+# a refinery (tapGuardContainerSuite returns without a refusal for crew and the
+# other roles). A test_scope refusal recorded under another role would describe
+# a session the rule never judges. Allow rows also appear under the other
+# contexts; a container_suite allow under refinery is one the hook judges and
+# lets through.
 #
 # --- container_suite: refusals ---
 container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	seed
