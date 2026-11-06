@@ -779,6 +779,79 @@ func TestNestedShellCommands(t *testing.T) {
 	}
 }
 
+// TestDangerousNestedPayloadsUseTheParsedScript pins gt-7ydceb: every command
+// line the guard judges one level down comes from the parsed Script — a -c
+// payload's own text, an eval string, a substitution's parsed segments, a
+// here-document body a shell reads — and each is judged with the rules the
+// top-level command gets.
+//
+// The allow rows are the shapes the parsed read must never cut: both commands
+// parse whole, so nothing cut out of them may be refused. The gate those rows
+// do not exercise — a payload the parser cannot read, refused naming the
+// construct — is TestDangerousNestedUnreadableNamesTheConstruct's.
+func TestDangerousNestedPayloadsUseTheParsedScript(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		// reason is the text the refusal must hold; "" means the command is
+		// allowed.
+		reason string
+	}{
+		{"a -c payload is judged", `bash -c 'git reset --hard'`, "Hard reset"},
+		{"an eval string is judged", `eval 'git clean -fd'`, "git clean -f/--force"},
+		{"a command substitution is judged", `x=$(git push --force origin main)`, "Force push"},
+		{"a backtick substitution is judged", "x=`go clean -modcache`", "wipes the Go build cache"},
+		{"a process substitution is judged", `diff <(sudo ls) f`, "must never use sudo"},
+		{"a here-document body a shell reads is judged", "bash <<'EOF'\ngit reset --hard\nEOF", "Hard reset"},
+		{"a substitution inside a -c payload is judged", `bash -c 'x=$(git reset --hard)'`, "Hard reset"},
+
+		{"a substitution holding a quoted paren is allowed", `x=$(echo ")" ; bash -c "echo hi")`, ""},
+		{"a -c payload keeps its quotes", `bash -c 'echo ")"'`, ""},
+		{"a substitution holding a quoted paren and a real command is judged",
+			`x=$(echo ")" ; git reset --hard)`, "Hard reset"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.reason == "" {
+				if reason != "" {
+					t.Errorf("evaluateDangerousCommand(%q) blocked (reason %q), want allowed", tt.command, reason)
+				}
+				return
+			}
+			if !strings.Contains(reason, tt.reason) {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to hold %q", tt.command, reason, tt.reason)
+			}
+		})
+	}
+}
+
+// TestDangerousNestedUnreadableNamesTheConstruct drives the refusal branch the
+// parsed read added: a nested payload the parser cannot read is refused with
+// the construct named, and the reason is the NESTED wording so the operator can
+// tell it from a command the hook could not read as a whole.
+func TestDangerousNestedUnreadableNamesTheConstruct(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		command   string
+		construct string
+	}{
+		{"an unbalanced parenthesis in a -c payload", `bash -c 'echo )'`, "unbalanced parenthesis"},
+		{"an unterminated quote in an eval string", `eval 'echo "x>'`, "unterminated quote"},
+		{"an unbalanced parenthesis in a here-document body", "bash <<'EOF'\necho )\nEOF", "unbalanced parenthesis"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			want := "nested command cannot be read (" + tt.construct + ")"
+			if !strings.Contains(reason, want) {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to hold %q", tt.command, reason, want)
+			}
+		})
+	}
+}
+
 // TestQuotedSQLStaysOpaque pins mayor scope for gt-5ihs attempt 2: "SQL DDL
 // inside quotes is not a shell hazard; do not flag it." A quoted SQL
 // payload (dolt sql -q "...", psql -c "...", mysql -e '...') must NOT be
