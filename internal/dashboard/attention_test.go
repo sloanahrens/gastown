@@ -1,6 +1,8 @@
 package dashboard
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -476,11 +478,21 @@ func TestTheServedAttentionNamesTheOperator(t *testing.T) {
 	if want := `"owner":"operator"`; !strings.Contains(string(raw), want) {
 		t.Errorf("the served attention carries no %s: %s", want, raw)
 	}
-	// The old owner tag carried the operator's name. The word is split so this
-	// file does not carry it, while the assertion still names what must not
-	// appear.
-	if strings.Contains(string(raw), "sl"+"oan") {
-		t.Errorf("the served attention still names the old owner: %s", raw)
+	// The old owner tag carried the operator's name, which this file must not
+	// carry as text. The constant is the SHA-256 of that name; the loop hashes
+	// every lowercased 5-byte window of the served JSON, the name's length, and
+	// compares each to it, so a copy of the name in any field — owner, text, id,
+	// key — or inside a longer string fails the test.
+	const (
+		oldOwnerNameSHA256 = "be034c581744e2d11ae7547f0ab239dd53e4b99b1aee041d98f4ace02cf38c5a"
+		oldOwnerNameBytes  = 5
+	)
+	lowered := strings.ToLower(string(raw))
+	for i := 0; i+oldOwnerNameBytes <= len(lowered); i++ {
+		sum := sha256.Sum256([]byte(lowered[i : i+oldOwnerNameBytes]))
+		if hex.EncodeToString(sum[:]) == oldOwnerNameSHA256 {
+			t.Errorf("the served attention still names the old owner, in the window at byte %d: %s", i, raw)
+		}
 	}
 }
 
