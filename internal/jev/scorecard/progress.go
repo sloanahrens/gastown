@@ -71,6 +71,50 @@ type progressAdapter struct {
 	// and nudge time.
 	lines map[string]progress.Line
 	now   func() time.Time
+	// batched holds the notes Prefetch read in one batch per rig, by rig and
+	// bead. Label reads a bead missing from it the one-at-a-time way.
+	batched map[string]string
+	// warn tells the operator about a failed batch read; nil means stderr
+	// through warnf. A test sets it to see the warning without swapping
+	// os.Stderr.
+	warn func(format string, args ...any)
+}
+
+// Prefetch reads the notes of every settled line's bead in one batch per rig,
+// the beads Label will read. A bead the batch omits, or a rig whose batch fails,
+// is read by Label one bead at a time, as it always was.
+func (a *progressAdapter) Prefetch(_ context.Context, items []Item) {
+	a.batched = nil
+	all, ok := a.notes.(rigShowAller)
+	if !ok {
+		return
+	}
+	byRig := map[string][]string{}
+	for _, it := range items {
+		line, ok := a.lines[it.ID]
+		// Label leaves a line younger than the settle window unlabeled without
+		// reading its bead, so Prefetch does not read it either.
+		if !ok || a.now().Sub(it.Time) < progressSettle {
+			continue
+		}
+		byRig[line.Rig] = append(byRig[line.Rig], line.Bead)
+	}
+	warn := a.warn
+	if warn == nil {
+		warn = warnf
+	}
+	a.batched = map[string]string{}
+	for rig, ids := range byRig {
+		got, err := all.ShowAll(rig, ids)
+		if err != nil {
+			warn("reading %s's progress notes in a batch: %v", rig, err)
+		}
+		for id, issue := range got {
+			if issue != nil {
+				a.batched[rig+"/"+id] = issue.Notes
+			}
+		}
+	}
 }
 
 func (a *progressAdapter) Battery() string { return ProgressBattery }
@@ -144,13 +188,18 @@ func (a *progressAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 	if a.now().Sub(item.Time) < progressSettle {
 		return Labeling{}, nil
 	}
-	notes, err := a.notes.Notes(line.Rig, line.Bead)
-	missing := errors.Is(err, beads.ErrNotFound)
-	if missing {
-		notes, err = "", nil
-	}
-	if err != nil {
-		return Labeling{}, fmt.Errorf("reading the notes of %s: %w", line.Bead, err)
+	notes, batched := a.batched[line.Rig+"/"+line.Bead]
+	missing := false
+	if !batched {
+		var err error
+		notes, err = a.notes.Notes(line.Rig, line.Bead)
+		missing = errors.Is(err, beads.ErrNotFound)
+		if missing {
+			notes, err = "", nil
+		}
+		if err != nil {
+			return Labeling{}, fmt.Errorf("reading the notes of %s: %w", line.Bead, err)
+		}
 	}
 	stop, err := readOverrunStop(a.town, line.Bead)
 	if err != nil {
