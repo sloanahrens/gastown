@@ -468,11 +468,10 @@ func (d *Daemon) runDiskMaintenance() {
 }
 
 // runDiskMaintenanceTrim is the tick's busy case: the cache trim may run, the
-// targets may not. The trim applies ConfigMaps and a Job on the sandbox cluster
-// and reads neither the landing worker nor Dolt, so the Dolt window's quiet
-// guard has no claim on it; with landing passes nearly continuous that guard
-// starved the trim while the sandbox disk grew (gt-gg9hv.48). Everything else
-// the tick found keeps the guard: it stays due, and the next quiet tick runs it.
+// targets may not. The trim is off the Dolt window's quiet guard so continuous
+// landing passes cannot starve it (gt-gg9hv.48; docs/guides/disk-maintenance.md).
+// Everything else the tick found keeps the guard: it stays due, and the next
+// quiet tick runs it.
 func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why string) {
 	if !due.cacheTrim {
 		d.logger.Printf("disk_maintenance: skipped: %s", why)
@@ -501,7 +500,7 @@ func (d *Daemon) runCacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	s := d.diskMaintenanceSeams()
-	d.applyDiskAlerts(s.readDisks(ctx), s.now())
+	d.applyDiskAlerts(ctx, s.readDisks, s.now())
 	d.diskMaintenanceTrim(ctx, mode)
 }
 
@@ -566,8 +565,7 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// The disk alerts are an alarm rather than a change, so they are read and
 	// raised before anything that can refuse the plan: a disk too full to keep
 	// pruning, or a keep the patrol cannot decide, must not silence them.
-	readings := s.readDisks(ctx)
-	d.applyDiskAlerts(readings, now)
+	readings := d.applyDiskAlerts(ctx, s.readDisks, now)
 
 	// The cache trim is independent of the targets: it trims the claim the
 	// sandbox profiles mount, so it runs when its interval is due whether or not

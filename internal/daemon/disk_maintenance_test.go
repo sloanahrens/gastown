@@ -490,11 +490,10 @@ func TestCacheTrimRunsOncePerDueTick(t *testing.T) {
 	}
 }
 
-// TestDiskMaintCacheTrimRunsWhileALandingPassIsInFlight: the trim applies
-// ConfigMaps and a Job on the sandbox cluster and reads neither the landing
-// worker nor Dolt, so the Dolt window's quiet guard does not hold it off. A busy
-// town with only the trim due reads the disks, raises their alerts, trims, and
-// logs no skipped line for it (gt-gg9hv.48).
+// TestDiskMaintCacheTrimRunsWhileALandingPassIsInFlight: a busy town with only
+// the trim due reads the disks, raises their alerts, trims, and logs no skipped
+// line for it: the trim is off the quiet guard, which is why continuous landing
+// passes cannot starve it (gt-gg9hv.48; docs/guides/disk-maintenance.md).
 func TestDiskMaintCacheTrimRunsWhileALandingPassIsInFlight(t *testing.T) {
 	t.Parallel()
 	d, logs, f := diskMaintTestDaemon(t)
@@ -624,23 +623,97 @@ func TestDiskMaintTrimPassIsSingleFlight(t *testing.T) {
 	}
 }
 
-// TestDiskMaintAlertApplicationIsSerialised: the trim pass and the combined
-// pass both apply the disk alerts, and they may run at the same time. One
-// application at a time is what keeps the two from deciding from state the
-// other is halfway through changing: a target pass that starts while the trim
-// pass holds the alert application waits, and neither raise is lost
-// (gt-gg9hv.48).
-func TestDiskMaintAlertApplicationIsSerialised(t *testing.T) {
-	t.Parallel()
+// The alert concurrency tests wait through the package's awaitOrFail
+// (tier_sweep_trigger_test.go): a signal that never comes fails the test by
+// name, within its bound.
+
+// freeLock is a lock that excludes nothing, standing in for the alert lock in
+// the test that shows a missing lock is detected.
+type freeLock struct{}
+
+func (freeLock) Lock()   {}
+func (freeLock) Unlock() {}
+
+// observedLock is the alert lock a test watches, wrapped around the inner lock
+// the alert application really serializes on. It signals when the first pass
+// has taken it (inside), when a later pass arrives at it (reached), and holds
+// the first pass's release until the test lets go (hold), so the second pass
+// waits at the inner lock while the test looks. held counts the passes inside
+// at once and max the most that ever were: with a real inner lock max stays
+// one, and with freeLock the same passes overlap.
+type observedLock struct {
+	inner      sync.Locker
+	hold       chan struct{}
+	inside     chan struct{}
+	reached    chan struct{}
+	firstHold  atomic.Bool
+	firstIn    atomic.Bool
+	firstReach atomic.Bool
+	held       atomic.Int32
+	max        atomic.Int32
+	calls      atomic.Int32
+}
+
+func newObservedLock(inner sync.Locker) *observedLock {
+	l := &observedLock{
+		inner:   inner,
+		hold:    make(chan struct{}),
+		inside:  make(chan struct{}),
+		reached: make(chan struct{}),
+	}
+	l.firstHold.Store(true)
+	l.firstIn.Store(true)
+	l.firstReach.Store(true)
+	return l
+}
+
+func (l *observedLock) Lock() {
+	if l.calls.Add(1) > 1 && l.firstReach.CompareAndSwap(true, false) {
+		close(l.reached)
+	}
+	l.inner.Lock()
+	n := l.held.Add(1)
+	for {
+		if m := l.max.Load(); n <= m || l.max.CompareAndSwap(m, n) {
+			break
+		}
+	}
+}
+
+func (l *observedLock) Unlock() {
+	if l.firstIn.CompareAndSwap(true, false) {
+		close(l.inside)
+	}
+	if l.firstHold.CompareAndSwap(true, false) {
+		<-l.hold
+	}
+	l.held.Add(-1)
+	l.inner.Unlock()
+}
+
+// alertOverlap drives a trim pass and a combined pass into their alert
+// applications at once, through the ticks that dispatch each of them, and
+// returns the recorder and what the alert lock saw. With noLock the lock is a
+// no-op, so the two applications run at once; with the real lock the second
+// waits for the first.
+func alertOverlap(t *testing.T, noLock bool) (*notifyfake.Recorder, int32) {
+	t.Helper()
 	d, _, f := diskMaintTestDaemon(t)
-	gate := newGatedAlertNotifier(f.notify)
-	d.notifier = gate
+	inner := sync.Locker(&sync.Mutex{})
+	if noLock {
+		inner = freeLock{}
+	}
+	lock := newObservedLock(inner)
+	d.diskMaintAlerts.applyLock = lock
+	// A test that fails before releasing the first pass would leave its
+	// goroutines and the second pass behind: the cleanup completes them.
+	release := sync.OnceFunc(func() { close(lock.hold) })
+	t.Cleanup(release)
 	// The trim itself reaches no claim, so the passes under test are their
 	// alert applications and the decisions that follow.
 	d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) { return nil, nil }
 
-	// The town is busy for the trim's tick and quiet for the target's, so the
-	// test drives both passes through the tick that dispatches each of them.
+	// The town is busy for the trim's tick and quiet for the target's.
 	var quiet atomic.Bool
 	d.maint.quiet = func(*Daemon) (bool, string) {
 		if quiet.Load() {
@@ -652,16 +725,12 @@ func TestDiskMaintAlertApplicationIsSerialised(t *testing.T) {
 	d.diskMaint.dispatch = func(fn func()) { passes = append(passes, fn) }
 
 	var reads atomic.Int32
-	targetRead := make(chan struct{})
 	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
 		switch reads.Add(1) {
 		case 1:
 			return []disks.Reading{{Name: "mac", UsedPct: 85}}
-		case 2:
-			close(targetRead)
-			return []disks.Reading{{Name: "colima", UsedPct: 88}}
 		default:
-			return nil
+			return []disks.Reading{{Name: "colima", UsedPct: 88}}
 		}
 	}
 
@@ -669,75 +738,281 @@ func TestDiskMaintAlertApplicationIsSerialised(t *testing.T) {
 	if len(passes) != 1 {
 		t.Fatalf("dispatched %d passes, want 1: the busy tick's trim pass", len(passes))
 	}
-	trimPass := passes[0]
 	trimDone := make(chan struct{})
 	go func() {
 		defer close(trimDone)
-		trimPass()
+		passes[0]()
 	}()
-	<-gate.entered // the trim pass is inside its alert application, holding it
+	awaitOrFail(t, lock.inside, "the trim pass to reach its alert application")
 
 	quiet.Store(true)
 	d.runDiskMaintenance() // 04:45, quiet: dispatches the combined pass
 	if len(passes) != 2 {
 		t.Fatalf("dispatched %d passes, want 2: the quiet tick's combined pass", len(passes))
 	}
-	targetPass := passes[1]
 	targetDone := make(chan struct{})
 	go func() {
 		defer close(targetDone)
-		targetPass()
+		passes[1]()
 	}()
-	<-targetRead // the combined pass has read the disks and is at the same application
-	close(gate.release)
+	awaitOrFail(t, lock.reached, "the target pass to reach the alert lock")
 
-	<-trimDone
-	<-targetDone
+	if noLock {
+		// Nothing holds the target pass back, so it enters while the trim pass
+		// is held. Waiting for it to finish first is what makes the overlap
+		// certain rather than a race the test might lose.
+		awaitOrFail(t, targetDone, "the target pass to run alongside the trim pass")
+	}
+	release()
+	awaitOrFail(t, trimDone, "the trim pass to release the alert lock")
+	awaitOrFail(t, targetDone, "the target pass to finish")
+	return f.notify, lock.max.Load()
+}
 
-	if got := gate.max.Load(); got != 1 {
-		t.Errorf("%d alert applications ran at once, want 1: the trim pass and the target pass applied the alerts concurrently", got)
+// TestDiskMaintAlertApplicationIsSerialised: the trim pass and the combined
+// pass both apply the disk alerts, and they may run at the same time. One
+// application at a time is what keeps the two from deciding from state the
+// other is halfway through changing: a target pass that starts while the trim
+// pass holds the alert application waits, and neither raise is lost
+// (gt-gg9hv.48).
+func TestDiskMaintAlertApplicationIsSerialised(t *testing.T) {
+	t.Parallel()
+	rec, max := alertOverlap(t, false)
+	if max != 1 {
+		t.Errorf("%d alert applications ran at once, want 1: the trim pass and the target pass applied the alerts concurrently", max)
 	}
 	for _, key := range []string{"diskmaint:mac", "diskmaint:colima"} {
-		if !diskMaintAlertIsOpen(f.notify, key) {
+		if !diskMaintAlertIsOpen(rec, key) {
 			t.Errorf("alert %s is not open: a raise was lost", key)
 		}
 	}
 }
 
-// gatedAlertNotifier holds the first escalation inside its delivery, so a test
-// can keep one pass in the middle of its alert application, and counts the
-// escalations inside at once: their applications were serialized if that never
-// exceeds one.
-type gatedAlertNotifier struct {
-	notify.Notifier
-	entered  chan struct{}
-	release  chan struct{}
-	once     sync.Once
-	inFlight atomic.Int32
-	max      atomic.Int32
-}
-
-func newGatedAlertNotifier(inner notify.Notifier) *gatedAlertNotifier {
-	return &gatedAlertNotifier{
-		Notifier: inner,
-		entered:  make(chan struct{}),
-		release:  make(chan struct{}),
+// TestDiskMaintSerialisationTestDetectsAMissingLock: the serialisation test is
+// only worth its name if it goes red when the lock goes. This runs the same
+// body with the alert lock a no-op, and requires it to see the two applications
+// overlap (gt-gg9hv.48).
+func TestDiskMaintSerialisationTestDetectsAMissingLock(t *testing.T) {
+	t.Parallel()
+	if _, max := alertOverlap(t, true); max <= 1 {
+		t.Fatalf("%d alert applications held the alert lock at once with the lock a no-op; the serialization test cannot detect a missing lock", max)
 	}
 }
 
-func (n *gatedAlertNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
-	cur := n.inFlight.Add(1)
-	defer n.inFlight.Add(-1)
-	for {
-		if m := n.max.Load(); cur <= m || n.max.CompareAndSwap(m, cur) {
-			break
+// TestDiskMaintAlertReadingIsNotStale: a pass waiting at the alert lock must
+// not hold a reading from before the pass ahead of it applied its own, or it
+// could apply that older reading over the newer state. The reading is taken
+// under the lock, so the waiting pass has not read anything yet
+// (gt-gg9hv.48).
+func TestDiskMaintAlertReadingIsNotStale(t *testing.T) {
+	t.Parallel()
+	d, _, f := diskMaintTestDaemon(t)
+	lock := newObservedLock(&sync.Mutex{})
+	d.diskMaintAlerts.applyLock = lock
+	release := sync.OnceFunc(func() { close(lock.hold) })
+	t.Cleanup(release)
+	d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) { return nil, nil }
+	var quiet atomic.Bool
+	d.maint.quiet = func(*Daemon) (bool, string) {
+		if quiet.Load() {
+			return true, ""
+		}
+		return false, "daemon has work in flight (landing pass dv-x)"
+	}
+	var passes []func()
+	d.diskMaint.dispatch = func(fn func()) { passes = append(passes, fn) }
+
+	var reads atomic.Int32
+	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+		if reads.Add(1) == 1 {
+			return []disks.Reading{{Name: "colima", UsedPct: 40}}
+		}
+		return []disks.Reading{{Name: "colima", UsedPct: 88}}
+	}
+
+	// The quiet tick's combined pass reads 40% and holds the lock.
+	quiet.Store(true)
+	d.runDiskMaintenance()
+	if len(passes) != 1 {
+		t.Fatalf("dispatched %d passes, want 1: the quiet tick's combined pass", len(passes))
+	}
+	aheadDone := make(chan struct{})
+	go func() {
+		defer close(aheadDone)
+		passes[0]()
+	}()
+	awaitOrFail(t, lock.inside, "the combined pass to reach its alert application")
+
+	// The busy tick's trim pass arrives at the lock while that is still held.
+	quiet.Store(false)
+	d.runDiskMaintenance()
+	if len(passes) != 2 {
+		t.Fatalf("dispatched %d passes, want 2: the busy tick's trim pass", len(passes))
+	}
+	behindDone := make(chan struct{})
+	go func() {
+		defer close(behindDone)
+		passes[1]()
+	}()
+	awaitOrFail(t, lock.reached, "the trim pass to reach the alert lock")
+
+	if got := reads.Load(); got != 1 {
+		t.Errorf("%d disk readings taken with a pass waiting at the alert lock, want 1: the waiting pass read before it could see the state the other left", got)
+	}
+
+	release()
+	awaitOrFail(t, aheadDone, "the combined pass to finish")
+	awaitOrFail(t, behindDone, "the trim pass to finish")
+
+	if got := reads.Load(); got != 2 {
+		t.Errorf("%d disk readings taken, want 2: the trim pass reads once it holds the lock", got)
+	}
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:colima") {
+		t.Error("no alert open for the trim pass's 88% reading: the later pass must decide from the state the earlier one left")
+	}
+}
+
+// stuckNotifier blocks its first escalation until the pass context ends, then
+// delivers the rest, so a test can hold a pass in the notifier and see what the
+// alert lock does meanwhile.
+type stuckNotifier struct {
+	notify.Notifier
+	entered chan struct{}
+	once    sync.Once
+	calls   atomic.Int32
+}
+
+func (n *stuckNotifier) Escalate(ctx context.Context, e notify.Escalation) error {
+	if n.calls.Add(1) == 1 {
+		n.once.Do(func() { close(n.entered) })
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return n.Notifier.Escalate(ctx, e)
+}
+
+// TestDiskMaintNotifierRunsOutsideTheLock: the notifier is called after the
+// alert lock is released and under the pass's context, so a notifier stuck on
+// one alert holds neither the lock nor the next pass off, and is abandoned when
+// the pass ends. The raise it abandoned is unmarked, so the next pass retries
+// it once (gt-gg9hv.48).
+func TestDiskMaintNotifierRunsOutsideTheLock(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	passCtx, cancelPass := context.WithCancel(context.Background())
+	defer cancelPass()
+	d.ctx = passCtx
+	stuck := &stuckNotifier{Notifier: f.notify, entered: make(chan struct{})}
+	d.notifier = stuck
+	d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) { return nil, nil }
+	var quiet atomic.Bool
+	d.maint.quiet = func(*Daemon) (bool, string) {
+		if quiet.Load() {
+			return true, ""
+		}
+		return false, "daemon has work in flight (landing pass dv-x)"
+	}
+	var passes []func()
+	d.diskMaint.dispatch = func(fn func()) { passes = append(passes, fn) }
+	now := diskMaintNow
+	d.diskMaint.now = func() time.Time { return now }
+
+	var reads atomic.Int32
+	d.diskMaint.readDisks = func(context.Context) []disks.Reading {
+		switch reads.Add(1) {
+		case 2:
+			return []disks.Reading{{Name: "colima", UsedPct: 40}}
+		default:
+			return []disks.Reading{{Name: "mac", UsedPct: 85}}
 		}
 	}
-	n.once.Do(func() {
-		close(n.entered)
-		<-n.release
-	})
-	return n.Notifier.Escalate(ctx, e)
+
+	// The busy tick's trim pass raises the mac alert and is caught in the
+	// notifier, outside the alert lock.
+	d.runDiskMaintenance()
+	if len(passes) != 1 {
+		t.Fatalf("dispatched %d passes, want 1: the busy tick's trim pass", len(passes))
+	}
+	stuckDone := make(chan struct{})
+	go func() {
+		defer close(stuckDone)
+		passes[0]()
+	}()
+	awaitOrFail(t, stuck.entered, "the trim pass to reach the notifier")
+
+	// A second pass runs to completion while that one is stuck.
+	quiet.Store(true)
+	d.runDiskMaintenance()
+	if len(passes) != 2 {
+		t.Fatalf("dispatched %d passes, want 2: the quiet tick's combined pass", len(passes))
+	}
+	otherDone := make(chan struct{})
+	go func() {
+		defer close(otherDone)
+		passes[1]()
+	}()
+	awaitOrFail(t, otherDone, "the second pass to run while the notifier is stuck")
+
+	// Ending the pass abandons the send: the raise is unmarked and logged.
+	cancelPass()
+	awaitOrFail(t, stuckDone, "the stuck trim pass to abandon its send")
+	if !strings.Contains(logs.String(), "was not delivered") {
+		t.Errorf("log = %q, want the abandoned raise named", logs.String())
+	}
+
+	// The next pass, on a live context, raises the same alert again: one retry,
+	// and it lands. The abandoned pass's trim ran, so the trim is due again a
+	// full interval on.
+	d.ctx = context.Background()
+	now = now.Add(2 * time.Hour)
+	quiet.Store(false)
+	d.runDiskMaintenance()
+	if len(passes) != 3 {
+		t.Fatalf("dispatched %d passes, want 3: the retry tick's trim pass", len(passes))
+	}
+	passes[2]()
+	if got := stuck.calls.Load(); got != 2 {
+		t.Errorf("the notifier was called %d times, want 2: one abandoned raise and one retry", got)
+	}
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:mac") {
+		t.Error("the retried alert is not open: the abandoned raise was not retried")
+	}
+}
+
+// TestDiskMaintStuckPassAbandonsItsClear: a clear is sent under the pass's
+// context, as a raise is, so a pass that has ended clears nothing. The alert it
+// left open is cleared by the next pass, and the abandoned attempt is said in
+// the log rather than read as a clear that landed (gt-gg9hv.48).
+func TestDiskMaintStuckPassAbandonsItsClear(t *testing.T) {
+	t.Parallel()
+	d, logs, f := diskMaintTestDaemon(t)
+	f.readings = []disks.Reading{{Name: "mac", UsedPct: 85}}
+	d.runDiskMaintenance()
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:mac") {
+		t.Fatal("no alert open after a disk read at 85%, want diskmaint:mac")
+	}
+
+	// The pass that would clear it runs on a context that has already ended.
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.ctx = ended
+	diskMaintNextDay(d, 1)
+	f.readings = []disks.Reading{{Name: "mac", UsedPct: 65}}
+	d.runDiskMaintenance()
+	if !diskMaintAlertIsOpen(f.notify, "diskmaint:mac") {
+		t.Fatal("an abandoned clear closed the alert: the pass that sent it had ended")
+	}
+	if !strings.Contains(logs.String(), "alert diskmaint:mac was not cleared") {
+		t.Errorf("log = %q, want the abandoned clear named with its key", logs.String())
+	}
+
+	// The next pass, on a live context, clears it.
+	d.ctx = context.Background()
+	diskMaintNextDay(d, 2)
+	d.runDiskMaintenance()
+	if diskMaintAlertIsOpen(f.notify, "diskmaint:mac") {
+		t.Error("the alert is still open after a pass that could clear it")
+	}
 }
 
 // TestDiskMaintBusyTrimFailureIsLoggedOnceAndTargetsWait: a trim that fails on

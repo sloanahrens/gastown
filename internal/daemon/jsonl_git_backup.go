@@ -1821,14 +1821,32 @@ func (d *Daemon) escalateAlertErr(key, source, message string) error {
 	return d.escalateAlertSeverity("HIGH", key, source, message)
 }
 
+// escalateAlertCtx is escalateAlertErr under a caller's context: the delivery
+// ends with the pass that asked for it, so a notifier stuck on this alert holds
+// nothing else off (gt-gg9hv.48).
+func (d *Daemon) escalateAlertCtx(ctx context.Context, key, source, message string) error {
+	return d.escalateAlertSeverityCtx(ctx, "HIGH", key, source, message)
+}
+
 // escalateAlertSeverity is escalateAlertErr at a chosen severity, for an alert
 // that informs rather than pages (a slow landing is "low", gt-lcu5p).
 func (d *Daemon) escalateAlertSeverity(severity, key, source, message string) error {
+	return d.escalateAlertSeverityCtx(context.Background(), severity, key, source, message)
+}
+
+// escalateAlertSeverityCtx is escalateAlertSeverity under a caller's context.
+func (d *Daemon) escalateAlertSeverityCtx(base context.Context, severity, key, source, message string) error {
 	title := escalationTitle(source, message)
 
 	var lastErr error
 	for attempt := 0; attempt < maxEscalationRetries; attempt++ {
-		ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
+		if err := base.Err(); err != nil {
+			// The pass that owns this send has ended. Abandoning it leaves the
+			// alert's state for the next pass to decide again, rather than
+			// spending the retries on a send nobody is waiting for (gt-gg9hv.48).
+			return err
+		}
+		ctx, cancel := context.WithTimeout(base, defaultEscalationTimeout)
 		err := d.notify().Escalate(ctx, notify.Escalation{
 			Severity:    severity,
 			Description: title,
@@ -1921,11 +1939,21 @@ func (d *Daemon) clearAlerts(reason string, keys ...string) {
 // clearAlertsErr is clearAlerts for a caller that skips its next clear once
 // this one lands, and so must learn when it did not.
 func (d *Daemon) clearAlertsErr(reason string, keys ...string) error {
+	return d.clearAlertsCtx(context.Background(), reason, keys...)
+}
+
+// clearAlertsCtx is clearAlertsErr under a caller's context: a clear abandoned
+// with the pass that asked for it leaves the alert open, and the next pass
+// clears it again (gt-gg9hv.48).
+func (d *Daemon) clearAlertsCtx(ctx context.Context, reason string, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaultEscalationTimeout)
+	ctx, cancel := context.WithTimeout(ctx, defaultEscalationTimeout)
 	defer cancel()
 	if err := d.notify().ClearEscalations(ctx, reason, keys...); err != nil {
 		d.logger.Printf("clearAlerts(%s): %v", strings.Join(keys, ","), err)
