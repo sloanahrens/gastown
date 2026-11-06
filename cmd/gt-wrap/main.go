@@ -48,6 +48,8 @@ type surface struct {
 	environ  func() []string
 	getwd    func() (string, error)
 	readFile func(string) ([]byte, error)
+	// stat reports whether a town marker exists, and refuses an unreadable one.
+	stat func(string) (os.FileInfo, error)
 	// stdinTTY says stdin is a terminal, so the container gets a terminal.
 	stdinTTY       bool
 	stdout, stderr io.Writer
@@ -66,6 +68,7 @@ func osSurface() surface {
 		environ:  os.Environ,
 		getwd:    os.Getwd,
 		readFile: os.ReadFile,
+		stat:     os.Stat,
 		stdinTTY: term.IsTerminal(int(os.Stdin.Fd())),
 		stdout:   os.Stdout,
 		stderr:   os.Stderr,
@@ -159,7 +162,7 @@ func openTarget(name, town string, s surface) (target, error) {
 // resolve a different town.
 func findTown(s surface) (string, error) {
 	if root := s.getenv("GT_TOWN_ROOT"); root != "" {
-		ok, err := hasTownMarker(root)
+		ok, err := s.hasTownMarker(root)
 		if err != nil {
 			return "", fmt.Errorf("gtwrap: look for %s under GT_TOWN_ROOT %s: %w", townMarker, root, err)
 		}
@@ -174,7 +177,7 @@ func findTown(s surface) (string, error) {
 	}
 	start := dir
 	for {
-		ok, err := hasTownMarker(dir)
+		ok, err := s.hasTownMarker(dir)
 		if err != nil {
 			return "", fmt.Errorf("gtwrap: look for %s under %s: %w", townMarker, dir, err)
 		}
@@ -189,7 +192,7 @@ func findTown(s surface) (string, error) {
 	}
 	if home := s.getenv("HOME"); home != "" {
 		root := filepath.Join(home, "gt")
-		ok, err := hasTownMarker(root)
+		ok, err := s.hasTownMarker(root)
 		if err != nil {
 			return "", fmt.Errorf("gtwrap: look for %s under %s: %w", townMarker, root, err)
 		}
@@ -201,8 +204,8 @@ func findTown(s surface) (string, error) {
 }
 
 // hasTownMarker reports whether dir is a town root.
-func hasTownMarker(dir string) (bool, error) {
-	_, err := os.Stat(filepath.Join(dir, townMarker))
+func (s surface) hasTownMarker(dir string) (bool, error) {
+	_, err := s.stat(filepath.Join(dir, townMarker))
 	switch {
 	case err == nil:
 		return true, nil

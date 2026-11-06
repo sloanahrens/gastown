@@ -74,6 +74,7 @@ func newHarness(t *testing.T) *harness {
 		environ:  func() []string { return []string{"GT_TOWN_ROOT=" + h.town} },
 		getwd:    func() (string, error) { return h.town, nil },
 		readFile: os.ReadFile,
+		stat:     os.Stat,
 		stdout:   h.stdout,
 		stderr:   h.stderr,
 		newDocker: func(town string) target {
@@ -335,6 +336,75 @@ func TestRunRefusesWhenNoTownIsFound(t *testing.T) {
 	}
 	if h.fake.launched {
 		t.Fatal("the wrapper launched with no town root")
+	}
+}
+
+func TestRunRefusesWhenTheWorkingDirectoryCannotBeRead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.surface.getwd = func() (string, error) { return "", errors.New("getwd: no such file or directory") }
+	if exit := h.run("gt", "status"); exit != 1 {
+		t.Fatalf("run = %d, want 1", exit)
+	}
+	if !strings.Contains(h.stderr.String(), "working directory") {
+		t.Fatalf("stderr %q does not name the working directory", h.stderr)
+	}
+	if h.fake.launched {
+		t.Fatal("the wrapper launched without a working directory to find the town from")
+	}
+}
+
+func TestRunRefusesWhenTheGTTownRootMarkerCannotBeRead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.surface.getenv = func(name string) string {
+		switch name {
+		case "HOME":
+			return h.home
+		case "GT_TOWN_ROOT":
+			return h.town
+		}
+		return ""
+	}
+	h.surface.stat = func(string) (os.FileInfo, error) { return nil, fs.ErrPermission }
+	if exit := h.run("gt", "status"); exit != 1 {
+		t.Fatalf("run = %d, want 1", exit)
+	}
+	if !strings.Contains(h.stderr.String(), "GT_TOWN_ROOT") {
+		t.Fatalf("stderr %q does not name GT_TOWN_ROOT", h.stderr)
+	}
+}
+
+func TestRunRefusesWhenAMarkerAboveTheWorkingDirectoryCannotBeRead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	cwd := t.TempDir()
+	h.surface.getwd = func() (string, error) { return cwd, nil }
+	h.surface.stat = func(string) (os.FileInfo, error) { return nil, fs.ErrPermission }
+	if exit := h.run("gt", "status"); exit != 1 {
+		t.Fatalf("run = %d, want 1", exit)
+	}
+	if !strings.Contains(h.stderr.String(), cwd) {
+		t.Fatalf("stderr %q does not name the directory whose marker could not be read", h.stderr)
+	}
+}
+
+func TestRunRefusesWhenTheHomeTownMarkerCannotBeRead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.surface.getwd = func() (string, error) { return t.TempDir(), nil }
+	homeTown := filepath.Join(h.home, "gt")
+	h.surface.stat = func(path string) (os.FileInfo, error) {
+		if path == filepath.Join(homeTown, townMarker) {
+			return nil, fs.ErrPermission
+		}
+		return nil, fs.ErrNotExist
+	}
+	if exit := h.run("gt", "status"); exit != 1 {
+		t.Fatalf("run = %d, want 1", exit)
+	}
+	if !strings.Contains(h.stderr.String(), homeTown) {
+		t.Fatalf("stderr %q does not name the home town whose marker could not be read", h.stderr)
 	}
 }
 
