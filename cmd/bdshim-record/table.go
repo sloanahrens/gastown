@@ -70,8 +70,7 @@ func sanitize(tok string) string {
 }
 
 // Table is the verb and flag set bd is recorded for, in the order the goldens are written. The
-// read rows come from the bd read verbs gt calls (docs/research/tracker/R6-agent-bd-commands.md)
-// and the core verbs in docs/plans/2026-10-25-town-tracker-design.md section 6.
+// read rows come from the bd read verbs gt calls and the core verbs the tracker serves.
 func Table() []Row {
 	return []Row{
 		// Read rows: share one copy of the fixture.

@@ -501,7 +501,7 @@ const (
 	UpdateMaxRuntimeKey  = "patrols.update.max_runtime"
 )
 
-// The update block's defaults and bounds (docs/plans/2026-11-03-gt-update-design.md).
+// The update block's defaults and bounds.
 const (
 	DefaultUpdateWindow      = "03:00"
 	DefaultUpdateMinInterval = 3 * time.Hour

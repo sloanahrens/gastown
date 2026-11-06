@@ -3,8 +3,8 @@
 //
 // Nothing calls this package yet. Its callers are the seat start and seat end
 // paths and the reaper, which arrive in the third build bead and the wiring
-// after it (design: docs/research/tracker/K1b-seat-token-as-provider-placeholder.md,
-// question 1, option A). Every call runs against openshell's active gateway.
+// after it (seat-token design question 1, option A). Every call runs against
+// openshell's active gateway.
 //
 // The token reaches the gateway only through the environment of the child
 // process that runs "openshell provider create"; it is never in argv. A process

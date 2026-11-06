@@ -147,9 +147,9 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 		return Decision{}, fmt.Errorf("%s selects a store this shim cannot route while a tracker rig exists: run bd from the rig's own directory", flag)
 	}
 
-	// cook and the formula verbs read formula files and need no store
-	// (docs/research/tracker/R1-cook-port.md), so bd.real answers them from a
-	// tracker rig directory. They are decided before any bead id routes them
+	// cook and the formula verbs read formula files and need no store, so
+	// bd.real answers them from a tracker rig directory. They are decided
+	// before any bead id routes them
 	// because neither acts on a bead: a cook's formula file or --var value can
 	// open with a rig prefix without naming one, and a formula subcommand's
 	// operand is a formula name or a path. Routing such an operand would send a
@@ -212,7 +212,7 @@ func Decide(getenv func(string) string, getwd func() (string, error), args []str
 // passThroughVerbs are the commands a tracker rig hands to bd.real instead of
 // answering or refusing: cook and the formula verbs read formula files and the
 // town overlay, and cook opens a store only with --persist, which the store
-// guard above refuses (docs/research/tracker/R1-cook-port.md). mol, wisp and
+// guard above refuses. mol, wisp and
 // gate are not here: their handlers wait on recorded goldens, so those verbs
 // stay refused until then (gt-p85pw.101).
 var passThroughVerbs = map[string]bool{

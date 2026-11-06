@@ -3,7 +3,7 @@ package daemon
 // disk_maintenance is the town's registry prune: in the configured quiet window
 // it plans every maintenance target and, when the mode is apply, applies the
 // plan under the polecat-image lock so a delete never races an image push
-// (gt-dl4nv.15, docs/plans/2026-10-28-disk-maintenance-design.md).
+// (gt-dl4nv.15).
 //
 // A target may set a cadence of its own, and the CI cache volumes do: they grow
 // faster than a daily window can hold, so civol runs on its interval

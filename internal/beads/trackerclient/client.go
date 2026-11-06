@@ -271,8 +271,8 @@ func (c *Client) AppendNotes(id, note string) error {
 }
 
 // GateCheck reports nothing: the tracker keeps no gates to evaluate, so no
-// gate of any type can be resolved. Read task Mo5 of
-// docs/plans/2026-10-25-town-tracker-plan.md before adding gate polling here.
+// gate of any type can be resolved. Add gate polling here only when the
+// tracker stores a gate.
 func (c *Client) GateCheck(types ...string) (string, error) { return "", nil }
 
 // ShowText returns one issue as a short terminal line: its id, title, priority

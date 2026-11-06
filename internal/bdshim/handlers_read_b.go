@@ -551,9 +551,9 @@ func countHandler(env Env, d Decision) int {
 	return 0
 }
 
-// parseQuery reads the query expression gt sends (docs/research/tracker/
-// R4-aggregates.md §4): predicates over ephemeral, status, assignee, label,
-// parent, priority and created>=, joined with AND, and a parenthesised OR group
+// parseQuery reads the query expression gt sends: predicates over ephemeral,
+// status, assignee, label, parent, priority and created>=, joined with AND, and
+// a parenthesised OR group
 // over status values. A key, operator or layout outside that set is the
 // service's invalid error, so a caller never reads a wider answer than the
 // expression asked for.

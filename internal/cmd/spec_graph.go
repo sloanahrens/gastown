@@ -12,8 +12,8 @@ import (
 )
 
 // specLintGraph is the --graph flag of gt spec lint: read an epic's children
-// as a graph instead of linting one bead's shape (gt-hgt9j.16, design decision
-// 3 in docs/plans/2026-11-03-bead-lint-v2-design.md).
+// as a graph instead of linting one bead's shape (gt-hgt9j.16, bead-lint
+// design decision 3).
 var specLintGraph bool
 
 // specGraphReads is the bead reads the graph command works over. show is the

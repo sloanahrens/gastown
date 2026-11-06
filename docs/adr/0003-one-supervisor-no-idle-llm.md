@@ -40,5 +40,5 @@ spawned without its hooks.
   is undone by the tool that hosts the process.
 
 Decision record: wayfinder map claude-1ey, ticket claude-1ey.4; evidence in
-`~/.claude/docs/research/deep-review/gastown-control-plane.md`. Absorbs the host-supervision map
+the deep-review notes on the control plane. Absorbs the host-supervision map
 claude-41j.

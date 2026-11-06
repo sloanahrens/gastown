@@ -23,8 +23,7 @@ const (
 	//
 	// Commit count is not the disk cost, which is why the size line below is a
 	// separate alarm: this one keeps history-query latency visible and the town
-	// sets it near 20000 (measurements:
-	// docs/plans/2026-09-25-dolt-gc-maintenance-design.md, Problem).
+	// sets it near 20000.
 	// scheduled_maintenance's gc is what actually reclaims disk.
 	// Configurable via the "daemon" section of settings/config.json
 	// (patrols.compactor_dog.threshold).

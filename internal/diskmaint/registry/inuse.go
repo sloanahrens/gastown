@@ -133,8 +133,7 @@ func registryHostPort(host string) bool {
 
 // ReadInUse collects the images running pods and sandbox records use. An
 // unreadable input or a name failing validation returns an error, never an
-// empty set: a plan that reads "nothing is running" deletes what is
-// (docs/plans/2026-10-28-disk-maintenance-design.md, rule 4).
+// empty set: a plan that reads "nothing is running" deletes what is.
 //
 // The pod read names kubeContext, so it never depends on the kubeconfig's
 // current-context. An empty context refuses the read rather than letting

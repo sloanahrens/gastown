@@ -45,9 +45,9 @@ opened or grepped before it was classified; the per-file list is the
 [appendix](#appendix-full-inventory). `mayor/town.json`, `<rig>/mayor/rig` and
 the `testdata/livetown` fixtures are KEEP by construction.
 
-`docs/plans/` and `docs/research/` are historical and out of scope; `docs/`
-files generally are edited only where they describe the live role, in the
-slice that changes the code they describe.
+`docs/plans/` and `docs/research/` were retired to git history and are out of
+scope; `docs/` files generally are edited only where they describe the live
+role, in the slice that changes the code they describe.
 
 No source file changes in this bead. The gate is `make gate`.
 

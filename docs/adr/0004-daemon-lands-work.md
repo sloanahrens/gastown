@@ -68,5 +68,5 @@ without it gets no landing worker and fails closed. `gt done`'s presubmit gate i
   traffic to protect, and a flag is a third landing route.
 
 Decision record: wayfinder map claude-1ey, ticket claude-1ey.2; evidence in
-`~/.claude/docs/research/deep-review/gastown-landing-path.md` and
-`d2-landing-evidence.md`. Build epic gt-v4ssj; beads counterpart be-u20.
+the deep-review notes on the landing path and `d2-landing-evidence.md`. Build
+epic gt-v4ssj; beads counterpart be-u20.

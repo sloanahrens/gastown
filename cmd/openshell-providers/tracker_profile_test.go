@@ -252,8 +252,8 @@ func profileAllows(p profileFile, method, route string) bool {
 	return false
 }
 
-// refusedRoutes are the nine routes the research doc's refuse list names
-// (docs/research/tracker/K1b-seat-token-as-provider-placeholder.md, question 3):
+// refusedRoutes are the nine routes the seat-token research's refuse list
+// names:
 // the admin-gated ones, and the four no seat has been shown to call. The
 // profile leaves them out so a seat token minted with admin scope still cannot
 // reach them from a sandbox. POST /v1/issues:delete is the tenth: no seat may

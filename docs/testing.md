@@ -1,6 +1,6 @@
 # Testing
 
-Before you write or convert a test in this repository, read this page. It covers the rules that `internal/testpolicy` enforces, the seams that let unit tests avoid real processes and real time, and the procedure for converting a package. The worked examples come from the two packages converted first: `internal/tmux` and `internal/slot`. The design behind the rules is in [the test-rewrite design](plans/2026-09-27-test-rewrite-design.md).
+Before you write or convert a test in this repository, read this page. It covers the rules that `internal/testpolicy` enforces, the seams that let unit tests avoid real processes and real time, and the procedure for converting a package. The worked examples come from the two packages converted first: `internal/tmux` and `internal/slot`.
 
 ## The gate
 

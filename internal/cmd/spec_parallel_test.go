@@ -33,8 +33,8 @@ func assertNoSlingStarts(t *testing.T, starts <-chan string) {
 }
 
 // The tick slings its candidates concurrently, bounded by the free seats
-// (design: docs/plans/2026-10-21-dispatcher-throughput-design.md section 2).
-// Before this a tick slung at most max_per_tick candidates one after another,
+// (dispatcher design section 2). Before this a tick slung at most max_per_tick
+// candidates one after another,
 // 45-70 s each, which is what kept 2-4 of 9 seats live.
 
 // nineSeatTown is three seats of three with twelve clean candidates.

@@ -1045,8 +1045,8 @@ func TestDiskMaintenanceTargetEvery(t *testing.T) {
 }
 
 // The daemon.supervisor setting selects the service manager a provisioned
-// daemon runs under (docs/plans/2026-10-28-daemon-container-design.md §5): the
-// three kinds, and unset keeps the host's own detection.
+// daemon runs under: the three kinds, and unset keeps the host's own
+// detection.
 func TestDaemonPatrolConfig_SupervisorKind(t *testing.T) {
 	t.Parallel()
 
