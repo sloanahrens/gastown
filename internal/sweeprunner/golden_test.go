@@ -7,17 +7,18 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
 // The live-cluster golden listings are what the API printed on the control
 // cluster, captured before the guards had a test that read them: the node's
 // memory is 24556112Ki, the owners sit in metadata, and the protected
-// namespaces hold two Succeeded restore pods at priority 0. Each fixture is named
-// by one constant below, used both by the test that reads it and by
-// goldenFixtures, so the two cannot drift apart (gt-gg9hv.49).
+// namespaces hold two Succeeded restore pods at priority 0. Each fixture is
+// named by one constant below and opened through loadGoldenFixture, which
+// records it: TestMain fails the run for a file in the directory that no test
+// opened (gt-gg9hv.52).
 const goldenDir = "testdata/live-cluster"
 
 const (
@@ -25,10 +26,14 @@ const (
 	priorityGolden = "priority-listing.json"
 )
 
-// goldenFixtures is every listing a golden test reads. A .json file in
-// testdata/live-cluster that is not named here is one no golden test reads, and
-// TestGoldenFixturesAreAllRead fails it.
-var goldenFixtures = []string{capacityGolden, priorityGolden}
+// openedGoldenFixtures holds every name loadGoldenFixture opened in this run,
+// which TestMain's coverage check reads once the tests returned. The mutex
+// guards the writes the parallel golden tests make while they run
+// (gt-gg9hv.52).
+var (
+	openedGoldenFixturesMu sync.Mutex
+	openedGoldenFixtures   = map[string]bool{}
+)
 
 // loadGoldenFixture reads a live-cluster listing a golden test consumes.
 func loadGoldenFixture(t *testing.T, name string) []byte {
@@ -37,7 +42,23 @@ func loadGoldenFixture(t *testing.T, name string) []byte {
 	if err != nil {
 		t.Fatalf("reading the live-cluster fixture %s: %v", name, err)
 	}
+	recordGoldenFixtureOpened(name)
 	return data
+}
+
+// recordGoldenFixtureOpened notes a listing a test opened, for TestMain's
+// coverage check.
+func recordGoldenFixtureOpened(name string) {
+	openedGoldenFixturesMu.Lock()
+	defer openedGoldenFixturesMu.Unlock()
+	openedGoldenFixtures[name] = true
+}
+
+// goldenFixtureWasOpened reports whether loadGoldenFixture read name.
+func goldenFixtureWasOpened(name string) bool {
+	openedGoldenFixturesMu.Lock()
+	defer openedGoldenFixturesMu.Unlock()
+	return openedGoldenFixtures[name]
 }
 
 // TestGoldenCapacityListing reads the node and pod listing the live cluster
@@ -214,29 +235,126 @@ func TestPodRequestRefusesAnUnreadablePodLevelQuantity(t *testing.T) {
 	}
 }
 
-// TestGoldenFixturesAreAllRead fails a listing in testdata/live-cluster that no
-// golden test reads: a fixture nothing consumes is one that can drift from the
-// code it was captured for (gt-gg9hv.49).
-func TestGoldenFixturesAreAllRead(t *testing.T) {
+// TestGoldenSucceededPodWithRequestsIsNotCounted holds the Succeeded-pod skip to
+// the live listing: one real Running pod's requests copied onto the Succeeded
+// restore pod leave the node's requested amount at the golden figures. Without
+// the skip the copy lands on colima-gt-control and the figures grow by it, so
+// the row is red for the guard rather than for the copy (gt-gg9hv.52).
+func TestGoldenSucceededPodWithRequestsIsNotCounted(t *testing.T) {
 	t.Parallel()
-	entries, err := os.ReadDir(goldenDir)
+	altered := goldenListingWithEndedPodRequests(t, loadGoldenFixture(t, capacityGolden),
+		"forgejo", "forgejo-57658978cf-5nzvk",
+		"forgejo-trial", "restore-wz95b")
+	nodes, err := ParseCapacity(altered)
 	if err != nil {
-		t.Fatalf("reading %s: %v", goldenDir, err)
+		t.Fatalf("ParseCapacity on the listing with requests on an ended pod: %v", err)
 	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".json") {
-			continue
-		}
-		if !slices.Contains(goldenFixtures, name) {
-			t.Errorf("%s/%s is not read by any golden test", goldenDir, name)
+	if len(nodes) != 1 {
+		t.Fatalf("the listing names %d nodes, want the one the live cluster printed: %+v", len(nodes), nodes)
+	}
+	if nodes[0].Node != "colima-gt-control" {
+		t.Fatalf("the node = %q, want the node the restore pod is placed on", nodes[0].Node)
+	}
+	want := Amount{CPU: 6_210, Memory: 14_492 << 20}
+	if got := nodes[0].Requested; got != want {
+		t.Errorf("requested = %s, want the unmodified golden %s: the requests on the Succeeded pod forgejo-trial/restore-wz95b counted", got, want)
+	}
+}
+
+// goldenListingWithEndedPodRequests returns the live listing with one Running
+// pod's container requests copied onto one Succeeded pod's container, both
+// found by namespace and name. The copy is a json round trip with UseNumber, so
+// no shape is hand-written and every other value is written back as printed. A
+// pod whose phase the listing has changed, or a source that asks for no cpu and
+// memory, fails the test rather than leaving the row vacuous (gt-gg9hv.52).
+func goldenListingWithEndedPodRequests(t *testing.T, listing []byte, runningNamespace, runningName, endedNamespace, endedName string) []byte {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(listing))
+	dec.UseNumber()
+	var document map[string]any
+	if err := dec.Decode(&document); err != nil {
+		t.Fatalf("decoding the live listing: %v", err)
+	}
+	source := listingPodObject(t, document, runningNamespace, runningName)
+	if phase := listingPodPhase(source); phase != "Running" {
+		t.Fatalf("pod %s/%s is %q in the live listing, want the Running pod whose requests are copied", runningNamespace, runningName, phase)
+	}
+	target := listingPodObject(t, document, endedNamespace, endedName)
+	if phase := listingPodPhase(target); phase != "Succeeded" {
+		t.Fatalf("pod %s/%s is %q in the live listing, want the ended pod the requests are copied onto", endedNamespace, endedName, phase)
+	}
+	sourceContainers := listingPodContainers(t, source, runningNamespace+"/"+runningName)
+	sourceResources, _ := sourceContainers[0]["resources"].(map[string]any)
+	requests, _ := sourceResources["requests"].(map[string]any)
+	if _, ok := requests["cpu"]; !ok {
+		t.Fatalf("pod %s/%s names no cpu request the copy could make count", runningNamespace, runningName)
+	}
+	if _, ok := requests["memory"]; !ok {
+		t.Fatalf("pod %s/%s names no memory request the copy could make count", runningNamespace, runningName)
+	}
+	targetContainers := listingPodContainers(t, target, endedNamespace+"/"+endedName)
+	if len(targetContainers) != 1 {
+		t.Fatalf("pod %s/%s names %d containers, want the one the copy is written into", endedNamespace, endedName, len(targetContainers))
+	}
+	resources, ok := targetContainers[0]["resources"].(map[string]any)
+	if !ok {
+		resources = map[string]any{}
+		targetContainers[0]["resources"] = resources
+	}
+	copied := make(map[string]any, len(requests))
+	for resource, quantity := range requests {
+		copied[resource] = quantity
+	}
+	resources["requests"] = copied
+	altered, err := json.Marshal(document)
+	if err != nil {
+		t.Fatalf("encoding the altered listing: %v", err)
+	}
+	return altered
+}
+
+// listingPodObject returns the pod the listing names, failing the test when the
+// listing names none: a helper that silently picked nothing would let the row
+// pass without a copy.
+func listingPodObject(t *testing.T, document map[string]any, namespace, name string) map[string]any {
+	t.Helper()
+	items, _ := document["items"].([]any)
+	for _, item := range items {
+		object, _ := item.(map[string]any)
+		metadata, _ := object["metadata"].(map[string]any)
+		if metadata["namespace"] == namespace && metadata["name"] == name {
+			return object
 		}
 	}
-	for _, name := range goldenFixtures {
-		if _, err := os.Stat(filepath.Join(goldenDir, name)); err != nil {
-			t.Errorf("a golden test reads %s, which the directory does not hold: %v", name, err)
-		}
+	t.Fatalf("the live listing holds no pod %s/%s", namespace, name)
+	return nil
+}
+
+// listingPodPhase is the phase the listing prints for a pod: "" when it prints
+// none, which is no phase a test's guard accepts.
+func listingPodPhase(pod map[string]any) string {
+	status, _ := pod["status"].(map[string]any)
+	phase, _ := status["phase"].(string)
+	return phase
+}
+
+// listingPodContainers returns a pod's containers from the listing.
+func listingPodContainers(t *testing.T, pod map[string]any, podName string) []map[string]any {
+	t.Helper()
+	spec, _ := pod["spec"].(map[string]any)
+	listed, _ := spec["containers"].([]any)
+	if len(listed) == 0 {
+		t.Fatalf("pod %s names no container", podName)
 	}
+	containers := make([]map[string]any, len(listed))
+	for i, container := range listed {
+		object, ok := container.(map[string]any)
+		if !ok {
+			t.Fatalf("pod %s container %d is not an object", podName, i)
+		}
+		containers[i] = object
+	}
+	return containers
 }
 
 // goldenListingWithPodPriority returns a live-cluster listing with one pod's
