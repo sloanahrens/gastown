@@ -132,11 +132,11 @@ mounts, on its own interval (`cache_trim_interval`) in any window, and behind
 the same mode. The trim runs on a pass of its own and does not wait for the town
 to be quiet: it applies ConfigMaps and a Job on the sandbox cluster and reads
 neither the landing worker nor Dolt, so a landing pass in flight cannot starve
-it while the sandbox disk fills. That pass only trims: the disk readings and
-their alerts stay with the combined pass, which every other target still waits
-for a quiet tick to join. Applying the alerts from two passes would need them
-serialized, and a stuck notifier would then hold the trim; while the town is
-busy the alerts wait for the next quiet tick, as they did before.
+it while the sandbox disk fills. That pass reads the disks and applies their
+alerts beside the trim, so a notifier that does not answer delays the end of
+the alerts and not the trim. Alert applications from different passes take
+turns, so a later reading is never applied over an earlier one's state, and
+every other target still waits for a quiet tick.
 
 - A claim's namespace comes from the claim itself, and every pod read, listing
   exec and apply, delete or wait names it. A claim of the same name in another

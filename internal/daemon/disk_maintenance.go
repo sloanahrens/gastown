@@ -483,14 +483,14 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 		d.logger.Printf("disk_maintenance: skipped: %s", why)
 		return
 	}
+	if due.daily || len(due.interval) > 0 {
+		// The targets the tick found are what this line is about, so their
+		// deferral is not read as the tick doing nothing; it is logged whether
+		// or not a trim pass is already in flight.
+		d.logger.Printf("disk_maintenance: targets skipped: %s", why)
+	}
 	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
 		return // a trim pass is still running
-	}
-	if due.daily || len(due.interval) > 0 {
-		// The trim pass is dispatched below; the targets the tick found are
-		// what this line is about, so their deferral is not read as the tick
-		// doing nothing.
-		d.logger.Printf("disk_maintenance: targets skipped: %s; the cache trim runs on its own pass", why)
 	}
 	d.diskMaintenanceSeams().dispatch(func() {
 		defer d.diskMaintTrimRunning.Store(false)
@@ -499,17 +499,24 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 }
 
 // runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
-// trim and nothing else. The disk alerts stay with the combined pass: a second
-// pass applying them beside it would have to be serialized against it, and a
-// stuck notifier would then hold the trim (gt-gg9hv.48). Its caller holds the
-// trim's own guard (see runDiskMaintenanceTrim).
+// disk readings and their alerts, and the trim, side by side. Neither holds the
+// other: a notifier that takes its time delays the alerts' end, not the trim's
+// start, and the alerts take their turn behind any other pass's. Its caller
+// holds the trim's own guard (see runDiskMaintenanceTrim).
 func (d *Daemon) runCacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	if !d.cacheTrimStillDue() {
 		return // another pass trimmed between the tick and this run
 	}
+	var alerts sync.WaitGroup
+	alerts.Add(1)
+	go func() {
+		defer alerts.Done()
+		d.readAndApplyDiskAlerts(ctx, d.diskMaintenanceSeams().now())
+	}()
 	d.diskMaintenanceTrim(ctx, mode)
+	alerts.Wait()
 }
 
 // cacheTrimStillDue reads the schedule again at run time: a pass carries the
@@ -518,7 +525,7 @@ func (d *Daemon) runCacheTrimPass(mode string) {
 func (d *Daemon) cacheTrimStillDue() bool {
 	every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig)
 	if err != nil {
-		return false
+		return false // the tick refused a malformed setting and said so
 	}
 	return d.diskMaintSchedule.cacheTrimDue(d.diskMaintenanceSeams().now(), every)
 }
@@ -596,18 +603,23 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 	// The disk alerts are an alarm rather than a change, so they are read and
 	// raised before anything that can refuse the plan: a disk too full to keep
 	// pruning, or a keep the patrol cannot decide, must not silence them.
-	readings := s.readDisks(ctx)
-	d.applyDiskAlerts(readings, now)
-
-	// The cache trim is independent of the targets: it trims the claim the
-	// sandbox profiles mount, so it runs when its interval is due whether or not
-	// a maintenance target publishes here (gt-rm4am, gt-gg9hv.24.2). It holds
-	// its own guard, so a trim pass already in flight is left to finish rather
-	// than trimmed twice, and this pass's targets do not keep the next trim
-	// waiting (gt-gg9hv.48).
+	// The cache trim is independent of the targets and of the alerts: it runs
+	// beside the alert application, so a notifier that takes its time holds the
+	// trim off nothing and the trim holds no alert off (gt-gg9hv.48).
+	var trimmed sync.WaitGroup
 	if due.cacheTrim {
-		d.runCacheTrimInPass(ctx, mode)
+		trimmed.Add(1)
+		go func() {
+			defer trimmed.Done()
+			d.runCacheTrimInPass(ctx, mode)
+		}()
 	}
+	readings, ok := d.readAndApplyDiskAlerts(ctx, now)
+	trimmed.Wait()
+	if !ok {
+		return // the pass ended before its turn; the targets stay due
+	}
+
 	if !due.daily && len(due.interval) == 0 {
 		return // only the cache trim was due, and it has run
 	}
