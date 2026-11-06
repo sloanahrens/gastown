@@ -852,6 +852,39 @@ func TestDangerousNestedUnreadableNamesTheConstruct(t *testing.T) {
 	}
 }
 
+// TestDangerousNestDepthFailsClosed pins gt-7ydceb: maxDangerousNestDepth fails
+// closed. A payload nested past the cap is refused with the cap named, while
+// one exactly at the cap is judged on its own words.
+func TestDangerousNestDepthFailsClosed(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		// reason is the text the refusal must hold; "" means the command is
+		// allowed.
+		reason string
+	}{
+		{"a harmless text payload at the cap is judged", `eval eval eval 'echo hi'`, ""},
+		{"a dangerous substitution at the cap is judged", `x=$(x=$(x=$(git reset --hard)))`, "Hard reset"},
+		{"a text payload past the cap is refused", `eval eval eval eval 'echo hi'`, "deeper than maxDangerousNestDepth"},
+		{"a substitution past the cap is refused", `x=$(x=$(x=$(x=$(echo hi))))`, "deeper than maxDangerousNestDepth"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.reason == "" {
+				if reason != "" {
+					t.Errorf("evaluateDangerousCommand(%q) blocked (reason %q), want allowed", tt.command, reason)
+				}
+				return
+			}
+			if !strings.Contains(reason, tt.reason) {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to hold %q", tt.command, reason, tt.reason)
+			}
+		})
+	}
+}
+
 // TestQuotedSQLStaysOpaque pins mayor scope for gt-5ihs attempt 2: "SQL DDL
 // inside quotes is not a shell hazard; do not flag it." A quoted SQL
 // payload (dolt sql -q "...", psql -c "...", mysql -e '...') must NOT be

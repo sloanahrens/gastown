@@ -166,7 +166,8 @@ func evaluateIdleGate(proc guardProcess, command string, hostCPUIdle func() (flo
 
 // maxDangerousNestDepth bounds the nested-payload recursion in
 // evaluateDangerousCommand so a pathological input (e.g. deeply chained
-// "eval eval eval ...") can't loop unboundedly.
+// "eval eval eval ...") can't loop unboundedly. The bound fails closed: a
+// payload nested past it is refused rather than allowed unjudged (gt-7ydceb).
 const maxDangerousNestDepth = 3
 
 // evaluateDangerousCommand runs every dangerous-pattern check against
@@ -184,13 +185,10 @@ const maxDangerousNestDepth = 3
 // 2, gt-wisp-db27 finding 4).
 //
 // The nested command lines come from the parsed Script — its Segments, Subs
-// and Heredocs, the way the container-suite guard reads them — not from a
-// lenient scan of the text. A lenient scan cuts fragments a real shell never
-// runs, so a nested refusal could not be gated on one: `x=$(echo ")" ; bash -c
-// "echo hi")` parses whole, yet a fragment cut from it was refused "unbalanced
-// parenthesis" (gt-m6x4py, gt-7ydceb). Now every payload is parsed itself, and
-// one the parser cannot read is refused with the construct named: nothing can
-// say what it runs.
+// and Heredocs, the way the container-suite guard reads them. Every payload is
+// parsed before it is judged, so a fragment the shell never runs is never
+// judged; one the parser cannot read is refused with the construct named,
+// because nothing can say what it runs (gt-7ydceb).
 func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
 	reason, alternative = judgeDangerousText(command, depth, sess)
 	if reason != "" {
@@ -228,8 +226,7 @@ func judgeDangerousText(command string, depth int, sess guardSession) (reason, a
 // judgeDangerousTokens is the dangerous rules read over one token line.
 // rawCommand is the text the tokens came from, read by the checks that need
 // more than tokens (the done/slot rule's heredoc-written retry scripts); a
-// parsed Script passes "" there, because the text it was parsed from was
-// judged where it existed.
+// substitution script passes "" because it keeps no raw text (gt-7ydceb).
 func judgeDangerousTokens(rawCommand string, tokens, lowerTokens []string, sess guardSession) (reason, alternative string) {
 	// Check privilege escalation and package manager commands first
 	if r := matchesSudo(lowerTokens); r != "" {
@@ -292,24 +289,32 @@ func judgeDangerousTokens(rawCommand string, tokens, lowerTokens []string, sess 
 }
 
 // evaluateDangerousScriptNested judges the command lines one parsed script runs
-// through another shell, up to maxDangerousNestDepth. The text payloads are
-// judged as text — each is a command line of its own, parsed and gated by
+// through another shell, up to maxDangerousNestDepth; a script that nests past
+// that depth is refused, never allowed unjudged (gt-7ydceb). The text payloads
+// are judged as text — each is a command line of its own, parsed and gated by
 // evaluateDangerousCommand — and every substitution the shell expands is judged
 // as the already-parsed script it is. text is the source the script was parsed
 // from, or "" for a substitution script, whose text is not kept; it feeds the
 // here-document scanner at dangerousHeredocBodies.
 func evaluateDangerousScriptNested(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
-	if depth >= maxDangerousNestDepth {
-		return "", ""
-	}
 	payloads := nestedCommands(script)
 	payloads = append(payloads, dangerousHeredocBodies(script, text)...)
+	subs := dangerousScriptSubs(script)
+	// A script that nests nothing is judged in full: its own words are the
+	// whole of what it runs. One that nests something at the cap has reached
+	// an unjudged payload, so the cap refuses it (gt-7ydceb).
+	if depth >= maxDangerousNestDepth {
+		if len(payloads) > 0 || len(subs) > 0 {
+			return dangerousNestTooDeep(), ""
+		}
+		return "", ""
+	}
 	for _, payload := range payloads {
 		if r, alt := evaluateDangerousCommand(payload, depth+1, sess); r != "" {
 			return r, alt
 		}
 	}
-	for _, sub := range dangerousScriptSubs(script) {
+	for _, sub := range subs {
 		if r, alt := evaluateDangerousScript(sub, depth+1, sess); r != "" {
 			return r, alt
 		}
@@ -324,7 +329,10 @@ func evaluateDangerousScriptNested(script shellparse.Script, text string, depth 
 // parser read.
 func evaluateDangerousScript(script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
 	// The script is judged on the token line rebuilt from its segments, so the
-	// matchers read the same shapes they read on the lenient path.
+	// matchers read the same shapes they read on the lenient path. The raw text
+	// is "" here: a substitution keeps none, so the done/slot rule cannot see a
+	// retry script the substitution writes to a file in its here-document
+	// (gt-7ydceb).
 	tokens, _ := containerSuiteWalkLine(script)
 	if reason, alternative = judgeDangerousTokens("", tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
@@ -398,10 +406,10 @@ func dangerousScriptSubs(script shellparse.Script) []shellparse.Script {
 // segments of their own ("for i in 1 2; do gt done; done" flattens to one "gt
 // done" segment). The rule is a shape of the text — a block that CLOSES around
 // a gt done or gt slot, a repeat or an xargs beside one (gt-7dxw) — so its
-// bodies keep the lenient substitution scan the rest of the guard no longer
-// uses. It only ever answers that rule: a body it cannot read is never refused
-// here, and every other nested judgment and every unreadable-payload refusal
-// comes from the parsed Script (gt-7ydceb).
+// bodies keep the lenient substitution scan rather than the parsed Script. It
+// only ever answers that rule: a body it cannot read is never refused here,
+// and every other nested judgment and every unreadable-payload refusal comes
+// from the parsed Script (gt-7ydceb).
 func dangerousSubstitutionLoop(command string, depth int) (reason, alternative string) {
 	if depth >= maxDangerousNestDepth {
 		return "", ""
@@ -433,6 +441,13 @@ func dangerousUnreadable(err error) string {
 // operator can see what was rejected.
 func dangerousNestedUnreadable(err error) string {
 	return "nested command cannot be read (" + dangerousConstruct(err) + "), so it cannot be checked for dangerous operations"
+}
+
+// dangerousNestTooDeep is the refusal for a payload nested past
+// maxDangerousNestDepth (gt-7ydceb). It names the cap so the operator can tell
+// it from a payload the parser could not read.
+func dangerousNestTooDeep() string {
+	return fmt.Sprintf("nested command is deeper than maxDangerousNestDepth (%d), so it cannot be checked for dangerous operations", maxDangerousNestDepth)
 }
 
 // dangerousConstruct is the shellparse name of the construct that made a
