@@ -273,3 +273,64 @@ func goldenListingWithPodPriority(t *testing.T, listing []byte, namespace, name 
 	t.Fatalf("the live listing holds no pod %s/%s", namespace, name)
 	return nil
 }
+
+// TestPodRequestRefusesAnUnreadablePodLevelMemory is the memory twin of the
+// cpu test above: the pod-level memory is read by its own branch, and a
+// quantity it cannot read is an error that names the pod-level memory
+// (gt-gg9hv.49).
+func TestPodRequestRefusesAnUnreadablePodLevelMemory(t *testing.T) {
+	t.Parallel()
+	const listing = `{"items": [
+	  {"kind": "Node", "metadata": {"name": "gt-control"}, "status": {"conditions": [{"type": "Ready", "status": "True"}], "allocatable": {"cpu": "16", "memory": "64Gi"}}},
+	  {"kind": "Pod", "metadata": {"name": "bad"}, "spec": {
+	    "nodeName": "gt-control",
+	    "resources": {"requests": {"memory": "6x"}},
+	    "containers": [{"resources": {"requests": {"memory": "2Gi"}}}]
+	  }, "status": {"phase": "Running"}}
+	]}`
+	_, err := ParseCapacity([]byte(listing))
+	if err == nil || !strings.Contains(err.Error(), "pod-level memory") {
+		t.Errorf("ParseCapacity with an unreadable pod-level memory = %v, want an error naming the pod-level memory", err)
+	}
+}
+
+// TestParseQuantityRefusesAMalformedOrOversizedExponent drives the exponent
+// refusals one at a time: each names the value it refused and the reason, so a
+// reader of the preflight's decline can tell a typo from an overflow
+// (gt-gg9hv.49).
+func TestParseQuantityRefusesAMalformedOrOversizedExponent(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "two exponents", value: "1e2e3", want: "more than one exponent"},
+		{name: "an exponent that does not fit an int64", value: "1e99999999999999999999", want: "too large to read"},
+		{name: "an exponent past the int64 bound", value: "1e100", want: "too large to read"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseQuantity(c.value, memoryBytes)
+			if err == nil {
+				t.Fatalf("parseQuantity(%q) read a value, want a refusal naming %q", c.value, c.want)
+			}
+			if !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), c.value) {
+				t.Errorf("parseQuantity(%q) error = %v, want it to name the value and %q", c.value, err, c.want)
+			}
+		})
+	}
+}
+
+// TestSplitExponentRefusesAnExponentWithNoDigits drives the empty-exponent
+// refusal directly: parseQuantity reads a trailing e as the exa suffix before
+// the exponent split sees it, so the split's own guard is reached only here
+// (gt-gg9hv.49).
+func TestSplitExponentRefusesAnExponentWithNoDigits(t *testing.T) {
+	t.Parallel()
+	_, _, err := splitExponent("1e", "1e")
+	if err == nil || !strings.Contains(err.Error(), "no digits") || !strings.Contains(err.Error(), `"1e"`) {
+		t.Errorf("splitExponent(1e) = %v, want a refusal naming the value and that the exponent has no digits", err)
+	}
+}
