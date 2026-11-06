@@ -103,17 +103,18 @@ back to this runbook once the overseer's restart has run and the check passes.
    ```
 
    Stop if it exits 1, 2 or 3, and read the exit code as what happened to the
-   pass: 1 is a failed pass; 2 is still pending, so run `gt dolt archive-now`
-   again; 3 is a refusal, either for want of the dispatch hold or because an
+   pass: 1 is a failed pass: the daemon answered failed and printed why, so the
+   archive is not caught up. Fix the cause that reason names before you run it
+   again. 2 is still pending, so run `gt dolt archive-now` again.
+   3 is a refusal, either for want of the dispatch hold or because an
    archive request is already pending. Then read `gt dolt status` again until
    every database's commit line and events line read `0 commits behind` and
    `0 events behind`.
 
-   Check that every database's archive line in
-   `gt dolt status` reads `0 commits behind` before you continue: the archive
-   is the copy of `dolt_log` that outlives a flatten. Stop if the status
-   prints any `ARCHIVE CHECK UNAVAILABLE` line: it could not check the
-   archive, so it has checked nothing.
+   Check that every database's archive line in `gt dolt status` is the line
+   you just read: the archive is the copy of `dolt_log` that outlives a
+   flatten. Stop if the status prints any `ARCHIVE CHECK UNAVAILABLE` line: it
+   could not check the archive, so it has checked nothing.
    Stop too when no database line shows an archive line, and when any
    database line says `archive state unreadable`.
 3. Stop the server, then take the backup: copy the database directory while
