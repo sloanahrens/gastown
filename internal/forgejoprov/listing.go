@@ -38,8 +38,9 @@ func (c *Client) ListTokenNames(user string) ([]string, error) {
 
 // listNames reads every page of the JSON array at base and returns the name of each
 // item. A status other than 200, a reply that is not a JSON array (JSON null included), an
-// item with no string name, or a list that runs past listMaxPages is an error. The error
-// names the path and a fixed phrase; it never quotes the reply, which can hold a value.
+// item that is not a JSON object or carries no string name, or a list that runs past
+// listMaxPages is an error. The error names the path and a fixed phrase; it never quotes
+// the reply, which can hold a value.
 func (c *Client) listNames(base string) ([]string, error) {
 	var names []string
 	for page := 1; page <= listMaxPages; page++ {
@@ -57,7 +58,7 @@ func (c *Client) listNames(base string) ([]string, error) {
 		}
 		var items []map[string]any
 		if err := json.Unmarshal(raw, &items); err != nil {
-			return nil, fmt.Errorf("GET %s: the reply is not a JSON array", base)
+			return nil, fmt.Errorf("GET %s: an item is not a JSON object", base)
 		}
 		for _, item := range items {
 			name, ok := item["name"].(string)
