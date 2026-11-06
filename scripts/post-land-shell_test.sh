@@ -17,6 +17,10 @@ printf '#!/usr/bin/env bash\necho TIER-RAN "${@: -1}"\n' > "$FAKE_BIN/go"
 chmod +x "$FAKE_BIN/go"
 export PATH="$FAKE_BIN:$PATH"
 
+# The CI runner exports GITHUB_ACTIONS, which makes the script always run the
+# tier (gt-phsp89), so the skip cases below run in daemon command mode.
+unset GITHUB_ACTIONS
+
 # new_repo prints a repo with the script under test and one base commit dated
 # well outside any window.
 new_repo() {
@@ -102,6 +106,40 @@ commit_at "$R" scripts/a.sh "2020-06-01T00:00:00Z"
 commit_at "$R" docs/x.md ""
 out=$(bash "$R/scripts/post-land-shell.sh" 2>&1)
 ! grep -q TIER-RAN <<<"$out" && pass "old input: skipped" || fail "old input: $out"
+rm -rf "$R"
+
+# --- In CI the tier always runs: a skip's exit 0 is the pushed green status ---
+R=$(new_repo)
+commit_at "$R" docs/x.md ""
+out=$(GITHUB_ACTIONS=true bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
+calls=$(grep -c 'TIER-RAN shell' <<<"$out" || true)
+if [ "$rc" = 0 ] && [ "$calls" = 1 ] && grep -q "post-land-shell: CI run, no skip" <<<"$out"; then
+  pass "GITHUB_ACTIONS=true: no skip, tier runs once"
+else
+  fail "GITHUB_ACTIONS=true: rc=$rc calls=$calls out=$out"
+fi
+rm -rf "$R"
+
+# --- Without GITHUB_ACTIONS the daemon's command mode still skips ---
+R=$(new_repo)
+commit_at "$R" docs/x.md ""
+out=$(env -u GITHUB_ACTIONS bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
+if [ "$rc" = 0 ] && ! grep -q TIER-RAN <<<"$out" && grep -q "shell tier skipped" <<<"$out"; then
+  pass "no GITHUB_ACTIONS: skipped"
+else
+  fail "no GITHUB_ACTIONS: rc=$rc out=$out"
+fi
+rm -rf "$R"
+
+# --- GITHUB_ACTIONS=false is not a CI run: skip as before ---
+R=$(new_repo)
+commit_at "$R" docs/x.md ""
+out=$(GITHUB_ACTIONS=false bash "$R/scripts/post-land-shell.sh" 2>&1); rc=$?
+if [ "$rc" = 0 ] && ! grep -q TIER-RAN <<<"$out" && grep -q "shell tier skipped" <<<"$out"; then
+  pass "GITHUB_ACTIONS=false: skipped"
+else
+  fail "GITHUB_ACTIONS=false: rc=$rc out=$out"
+fi
 rm -rf "$R"
 
 # --- The tier's exit code is the script's ---

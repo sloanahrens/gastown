@@ -7,8 +7,9 @@
 # stubs; no Go change can move their verdict. Running them after every
 # landing cost 3-8 minutes a time, and a pending upgrade restart waits for
 # the run while starting no landing pass (gt-8p8h7). So this runs the shell
-# tier only when main changed one of its inputs recently, and otherwise
-# reports the skip and exits 0.
+# tier when main changed one of its inputs recently, and otherwise reports the
+# skip and exits 0 — unless the CI workflow runs it, where the exit code is the
+# status pushed for main and a skip would read as a passed check (gt-phsp89).
 #
 # "Recently" is every first-parent commit on main inside the window, not
 # just the landed commit: the landing worker coalesces landings that finish
@@ -30,6 +31,15 @@ cd "$(dirname "$0")/.." || exit 2
 
 WINDOW=${POST_LAND_SHELL_WINDOW:-2 hours}
 INPUTS='^(scripts/|plugins/|\.githooks/|deploy/|Makefile$|go\.mod$|go\.sum$|internal/|cmd/)'
+
+# The post-land workflow posts this run's exit code as its status on main, so a
+# skip's 0 would say the shell tier is green when it was never run (gt-phsp89).
+# The runner sets GITHUB_ACTIONS; the daemon's own command mode sets no such
+# variable and keeps the skip.
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  echo "post-land-shell: CI run, no skip"
+  exec go run ./cmd/tier-sweep shell
+fi
 
 if ! changed=$(git log --first-parent --since="$WINDOW" --name-only --format= HEAD 2>/dev/null); then
   echo "post-land-shell: cannot read main's history; running the shell tier"
