@@ -3443,6 +3443,14 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 			tierSweepCloseGreen(d, bd, rig, tier, sha, existing)
 			continue
 		}
+		if tierSweepNoRunResult(ts) {
+			// No run reported on this tier, so there is no failing unit for a
+			// polecat to fix. The record keeps the tier RED and raises its
+			// attention item; the next sweep re-runs the tip and files a bead
+			// only if a run actually fails (gt-856oaq).
+			d.logger.Printf("tier_sweep: %s: %s %s: no run result, no bead filed; the attention item stands until the next sweep", rig, tier, tierSweepRed)
+			continue
+		}
 		names := ts.FailedNames
 		if len(names) == 0 {
 			names = []string{tierSweepNoName}
@@ -3451,6 +3459,15 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 			tierSweepFileRed(d, bd, rig, tier, name, sha, ts, existing[name])
 		}
 	}
+}
+
+// tierSweepNoRunResult reports whether a RED tier's only failure is that its
+// run never produced a result (tierSweepRunnerNoResult): the run never started,
+// was cut off, or wrote a result the daemon could not read. No unit failed, so
+// there is nothing to file a bead for. A list naming anything else is a real
+// failure and files as before.
+func tierSweepNoRunResult(ts tierSweepTierResult) bool {
+	return len(ts.FailedNames) == 1 && ts.FailedNames[0] == tierSweepRunnerNoResult
 }
 
 // tierSweepUnitBead is the sweep bead standing for one failing unit.

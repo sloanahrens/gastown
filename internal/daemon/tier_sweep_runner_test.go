@@ -353,8 +353,8 @@ func TestTierSweepRunnerMissingResultIsRed(t *testing.T) {
 				filed++
 			}
 		}
-		if filed != 2 {
-			t.Errorf("beads naming the runner reason = %d, want one per unjudged tier (2)", filed)
+		if filed != 0 {
+			t.Errorf("beads naming the runner reason = %d, want none: a result the sweep never read names no failing unit (gt-856oaq)", filed)
 		}
 	})
 }

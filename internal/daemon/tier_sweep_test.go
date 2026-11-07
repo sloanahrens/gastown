@@ -1368,6 +1368,94 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 	}
 }
 
+// A run that never started, or never wrote a result the daemon could read, files
+// no bead: no unit failed, so there is nothing for a polecat to fix. The tiers
+// stay RED in the record, the record's attention items name the reason, and the
+// next sweep runs the unchanged tip again (gt-856oaq).
+func TestRunTierSweep_RunnerNoResultFilesNoBeadAndRaisesAnAttention(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, bd, _ := newTierSweepDaemon(t, now, "gastown")
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		return tierSweepStageResult{output: "sweep-run: kubectl cp: context deadline exceeded\n", exitCode: -1, ran: true, reason: tierSweepRunnerNoResult}
+	}
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	sweep := func() {
+		if !d.runTierSweep() {
+			t.Fatal("the cycle did not judge every rig")
+		}
+		if err := savePatrolLastRun(d.config.TownRoot, "tier_sweep", now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sweep()
+
+	if len(bd.created) != 0 {
+		t.Errorf("created = %+v, want no bead for a run that produced no result", bd.created)
+	}
+	st := tierSweepTestState(t, d, "gastown")
+	for _, tier := range []string{"shell", "integration", "race"} {
+		ts, ok := st.Tiers[tier]
+		if !ok {
+			t.Fatalf("tiers = %+v, want %s judged", st.Tiers, tier)
+		}
+		if ts.Verdict != tierSweepRed {
+			t.Errorf("%s verdict = %q, want RED: a run with no result is never GREEN", tier, ts.Verdict)
+		}
+		if !slices.Equal(ts.FailedNames, []string{tierSweepRunnerNoResult}) {
+			t.Errorf("%s failed names = %q, want [%q]", tier, ts.FailedNames, tierSweepRunnerNoResult)
+		}
+	}
+
+	items := tierSweepItems(t, d, now, "gastown")
+	if len(items) != 3 {
+		t.Fatalf("attention items = %+v, want one RED item per tier", items)
+	}
+	for _, item := range items {
+		if item.Kind != attention.KindTierSweepRed {
+			t.Errorf("item %q kind = %q, want %q", item.Key, item.Kind, attention.KindTierSweepRed)
+		}
+		if !strings.Contains(item.Summary, tierSweepRunnerNoResult) {
+			t.Errorf("item %q summary = %q, want it to name the reason %q", item.Key, item.Summary, tierSweepRunnerNoResult)
+		}
+	}
+
+	// The tip is re-run by the next sweep, not held until main moves.
+	before := len(rec.stages)
+	sweep()
+	if len(rec.stages) == before {
+		t.Errorf("stages run = %d after the next sweep, want the unchanged tip re-run", len(rec.stages))
+	}
+}
+
+// A failing package still files its bead when another tier in the same cycle
+// has no run result: the no-result tier files nothing, the failed package files
+// exactly the bead it did before (gt-856oaq).
+func TestRunTierSweep_FailedPackageStillFilesBesideANoResultTier(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, bd, _ := newTierSweepDaemon(t, now, "gastown")
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.tiers[0] == "shell" {
+			return tierSweepStageResult{output: "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: ./internal/daemon\n", exitCode: 1, ran: true}
+		}
+		return tierSweepStageResult{output: "sweep-run: kubectl cp: context deadline exceeded\n", exitCode: -1, ran: true, reason: tierSweepRunnerNoResult}
+	}
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+	d.runTierSweep()
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want exactly the failed package's bead", bd.created)
+	}
+	if want := "tier sweep (gastown): shell: ./internal/daemon"; bd.created[0].Title != want {
+		t.Errorf("bead title = %q, want %q", bd.created[0].Title, want)
+	}
+}
+
 // A polecat that claims a red-tier bead moves it to in_progress or hooked; the
 // next red sweep still comments on it instead of filing a second P1 bead, and
 // a green sweep closes an open bead but leaves a claimed one to its polecat
