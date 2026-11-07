@@ -15,6 +15,10 @@ internal/guard/**
 internal/cmd/tap_guard*.go
 scripts/guards/**
 .githooks/**
+# gate.yml decides the landing gate and post-land.yml decides a rig's post-land
+# verdict, so a change to either changes that verdict itself: hand review, as
+# for any other verdict-deciding path.
+.forgejo/workflows/**
 internal/slot/**
 internal/cmd/slot*.go
 internal/sling/**
