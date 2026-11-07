@@ -14,7 +14,8 @@ import "strings"
 // of command while command has a backslash before a newline: the comments past
 // the stop are not blanked, so Parse must refuse the command even though
 // mvdan.cc/sh may read it. It is also non-nil when a comment on a heredoc
-// operator line ends in a backslash, which is not blanked either.
+// operator line ends in a backslash, which is not blanked either, and when a
+// comment ends in a backslash before a carriage return and line feed (gt-s9ogqg).
 func blankCommentBackslashes(command string) (string, error) {
 	ends, err := commentLineBackslashes(command)
 	if len(ends) == 0 {
@@ -49,6 +50,11 @@ type commentScan struct {
 	// heredocLine is set when a comment on a heredoc operator line ends in a
 	// backslash. Such a comment is not blanked, so Parse refuses the command.
 	heredocLine bool
+
+	// crlfLine is set when a comment ends in a backslash before a carriage
+	// return and line feed. Its backslash is blanked like one before a bare
+	// line feed, and Parse refuses the command (gt-s9ogqg).
+	crlfLine bool
 }
 
 // commentLineBackslashes returns the offsets of the backslashes that end a
@@ -57,16 +63,47 @@ type commentScan struct {
 // before a newline, so a walk that stops hides nothing when src has none: mvdan
 // reads that text as bash does. Only then is the stop an error, returned with
 // the offsets the walk found before it. A comment on a heredoc operator line
-// that ends in a backslash is an error too, whatever follows it.
+// that ends in a backslash is an error too, whatever follows it, and so is a
+// comment that ends in a backslash before a carriage return and line feed.
 func commentLineBackslashes(src string) ([]int, error) {
 	s := &commentScan{src: src}
-	if _, ok := s.code(0, 0); !ok && strings.Contains(src, "\\\n") {
+	if _, ok := s.code(0, 0); !ok && hasBackslashLineEnd(src) {
 		return s.ends, &UnparseableError{Construct: "construct too deeply nested or unclosed to read"}
 	}
 	if s.heredocLine {
 		return s.ends, &UnparseableError{Construct: "comment ending in a backslash on a heredoc operator line"}
 	}
+	if s.crlfLine {
+		return s.ends, &UnparseableError{Construct: "comment ending in a backslash before a CR LF line end"}
+	}
 	return s.ends, nil
+}
+
+// hasBackslashLineEnd reports whether src has a backslash before a line feed,
+// with or without a carriage return between them.
+func hasBackslashLineEnd(src string) bool {
+	return strings.Contains(src, "\\\n") || strings.Contains(src, "\\\r\n")
+}
+
+// commentEndBackslash returns the offset of the backslash that ends the comment
+// whose text runs from p to nl, and whether a carriage return sits before the
+// line feed. nl is the offset of the line feed, or len(src) when there is none.
+// It returns -1 when no backslash ends the comment.
+//
+// A carriage return before the line feed is not a line end for bash: bash ends
+// the comment at the line feed and reads the backslash as no continuation, while
+// mvdan.cc/sh reads the carriage return and line feed as text in the comment. So
+// the scan takes the backslash exactly as it takes one before a bare line feed,
+// and the command is refused rather than read one way (gt-s9ogqg). No other line
+// ending is taken this way.
+func commentEndBackslash(src string, p, nl int) (int, bool) {
+	if b := nl - 1; b > p && src[b] == '\\' {
+		return b, false
+	}
+	if nl < len(src) && nl-2 > p && src[nl-1] == '\r' && src[nl-2] == '\\' {
+		return nl - 2, true
+	}
+	return -1, false
 }
 
 // code walks shell text from p up to closer and returns the offset after it,
@@ -154,12 +191,13 @@ func (s *commentScan) code(p int, closer byte) (int, bool) {
 			// so the scan records it and Parse refuses the command. The pending
 			// heredoc belongs to the body on the next line, not to this comment
 			// (gt-4otugt).
-			if b := nl - 1; b > p && src[b] == '\\' {
+			if b, crlf := commentEndBackslash(src, p, nl); b >= 0 {
 				if len(s.heredocs) == 0 {
 					s.ends = append(s.ends, b)
 				} else {
 					s.heredocLine = true
 				}
+				s.crlfLine = s.crlfLine || crlf
 			}
 			p = nl
 		case c == '\n':

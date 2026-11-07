@@ -497,6 +497,8 @@ func TestParseUnparseableNamesConstruct(t *testing.T) {
 		{name: "stray closing parenthesis", command: "echo )", want: "unbalanced parenthesis"},
 		{name: "unterminated single quote", command: "echo 'oops", want: "unterminated quote"},
 		{name: "unterminated double quote", command: `echo "oops`, want: "unterminated quote"},
+		{name: "unterminated single quote after a CR LF comment line", command: "echo 'x # n \\\r\nls", want: "unterminated quote"},
+		{name: "comment backslash before CR LF", command: "bash -c 'git reset --hard' # n \\\r\nls", want: "comment ending in a backslash before a CR LF line end"},
 		{name: "unterminated command substitution", command: "echo $(echo", want: "unterminated command substitution"},
 		{name: "unterminated parameter expansion", command: "echo ${x", want: "unterminated parameter expansion"},
 		{name: "unterminated process substitution", command: "echo <(x", want: "unterminated process substitution"},
@@ -873,6 +875,14 @@ func TestParseCommentLineBackslash(t *testing.T) {
 			},
 		},
 		{
+			name:    "carriage return not before a line feed is comment text",
+			command: "echo a # n \\\r x\nls",
+			want: []segmentView{
+				{Words: []string{"echo", "a"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
 			name:    "backslash outside a comment continues the line",
 			command: "echo a\\\nb",
 			want:    []segmentView{{Words: []string{"echo", "ab"}}},
@@ -991,6 +1001,7 @@ func TestParseCommentLineBackslashDeepNesting(t *testing.T) {
 	}{
 		{"comment backslash after a nest past the bound", strings.Repeat("$(", 1000) + "true" + strings.Repeat(")", 1000) + " # n \\\nls"},
 		{"comment backslash after a nest of 300", strings.Repeat("$(", 300) + "true" + strings.Repeat(")", 300) + " # n \\\nls"},
+		{"comment backslash before CR LF after a nest past the bound", strings.Repeat("$(", 1000) + "true" + strings.Repeat(")", 1000) + " # n \\\r\nls"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1026,6 +1037,12 @@ func TestParseCommentLineBackslashUnreadable(t *testing.T) {
 		command string
 	}{
 		{"unterminated quote on the comment line", "echo 'x # n \\\nls"},
+		// bash ends the comment at the LF and runs ls; mvdan joins the CR LF into
+		// the comment. The scan refuses the shape instead of reading it one way.
+		{"comment backslash before CR LF", "bash -c 'git reset --hard' # n \\\r\nls"},
+		{"comment backslash before CR LF in a piped shell", "echo 'go test ./internal/beads/...' | sh # n \\\r\nls"},
+		{"comment backslash before CR LF on a heredoc operator line", "cat <<'EOF' # n \\\r\nEOF\ngit reset --hard\nEOF"},
+		{"unterminated quote on a CR LF comment line", "echo 'x # n \\\r\nls"},
 		{"comment backslash on a heredoc operator line", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF"},
 		// bash ends the <<- body at the tab-indented terminator on the next line
 		// and runs git reset --hard. mvdan reads the joined text as a body that
