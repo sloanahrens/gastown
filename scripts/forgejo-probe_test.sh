@@ -513,9 +513,9 @@ out=$(STUB_NO_RUN=1 run_probe rig --repo acme/rig --timeout 2 --poll-interval 1)
 if [ "$rc" != 0 ]; then pass "a silent gate exits non-zero"; else fail "a silent gate exits non-zero (rc=$rc)" "$out"; fi
 check "the timeout is reported" contains "reported nothing" "$out"
 check "a silent gate reports there is no run to read" contains "no workflow run tested" "$out"
-# The stub clock advances one second per status read, so a two-second timeout is
-# exactly two polls, whatever the host's load; the wait between them is recorded
-# by the stub sleep, which is the seam that keeps real time out of the case.
+# The stub clock advances one second per status read, so --timeout 2 with
+# --poll-interval 1 is exactly two polls; the stub sleep records each wait
+# instead of taking it.
 check "the wait is bounded by the timeout" test "$(count_calls GET /commits/)" = 2
 check "the wait between the polls is one interval" test "$(cat "$STATE/sleeps" 2>/dev/null)" = 1
 check "the probe branch is deleted after a timeout" test "$(deleted)" = "land/probe-rig"
