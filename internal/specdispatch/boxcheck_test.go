@@ -162,3 +162,54 @@ func TestBoxCheckPassesNestedItemsAndFencedExamples(t *testing.T) {
 		t.Fatalf("nested or fenced item refused: %s", v.Line("gt-good"))
 	}
 }
+
+// A finding's title and a source path are not steps the polecat runs, so a tool
+// name inside either lints OK: the item is the finding's quotation, not an
+// instruction (gt-7c84xe).
+func TestBoxCheckPassesFindingTitleAndPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		item string
+	}{
+		{"title names kubectl", "Finding resolved: Claim route now blocks on a kubectl wait (internal/land/claim.go:88)"},
+		{"path names docker", "Finding resolved: name the error (internal/gtwrap/docker.go:267)"},
+		{"title and path name tools", "Finding resolved: the docker and kubectl error (internal/gtwrap/docker.go)"},
+		{"plain path names docker", "the fix in internal/gtwrap/docker.go is covered by a test"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := lintAcceptance("- [ ] " + tc.item + "\n- [ ] a named test passes")
+			if !v.Clean() {
+				t.Fatalf("quoted title or path refused: %s", v.Line("gt-good"))
+			}
+		})
+	}
+}
+
+// An item that tells the worker to run a tool is still refused, even when a
+// source path sits beside the command (gt-7c84xe).
+func TestBoxCheckRefusesRunInstruction(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		item string
+		want string
+	}{
+		{"run kubectl", "Run: kubectl apply -f deploy.yaml", "kubectl"},
+		{"run docker beside a path", "Run: docker build internal/gtwrap/docker.go", "docker"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := lintAcceptance("- [ ] " + tc.item)
+			if v.Route != RouteRefuse || v.Field != acceptanceBoxField {
+				t.Fatalf("Lint = %+v, want a refusal on %s", v, acceptanceBoxField)
+			}
+			if !strings.Contains(v.Reason, `"`+tc.want+`"`) {
+				t.Errorf("reason %q does not name the phrase %q", v.Reason, tc.want)
+			}
+		})
+	}
+}

@@ -37,19 +37,41 @@ var acceptanceBoxPhrases = []boxPhrase{
 	{text: "the live"},
 }
 
-// matches reports whether item names the phrase.
-func (p boxPhrase) matches(item string) bool {
-	if p.re != nil {
-		return p.re.MatchString(item)
+// findingResolvedPrefix opens an acceptance item that names a finding. It is
+// the prefix internal/land writes (findingResolved there); specdispatch cannot
+// import land, so the text is repeated here.
+const findingResolvedPrefix = "Finding resolved: "
+
+// boxPathRe is a source path inside an item: a token with a directory separator,
+// or a file name with an extension and an optional line number.
+var boxPathRe = regexp.MustCompile(`[\w.-]*/[\w./-]*|[\w-]+\.[A-Za-z]\w*(?::\d+)?`)
+
+// boxSubject is the part of item a phrase is searched in. An item opening with
+// the finding prefix is read whole as the finding's title, which runs to the
+// end of the item, so nothing in it is searched. Elsewhere, source paths are
+// blanked and the rest is searched, so a command the item tells the worker to
+// run is still refused (gt-7c84xe).
+func boxSubject(item string) string {
+	if strings.HasPrefix(item, findingResolvedPrefix) {
+		return ""
 	}
-	return strings.Contains(strings.ToLower(item), p.text)
+	return boxPathRe.ReplaceAllString(item, " ")
 }
 
-// acceptanceBoxPhrase returns the first phrase item names, and "" when it
-// names none.
+// matches reports whether subject names the phrase.
+func (p boxPhrase) matches(subject string) bool {
+	if p.re != nil {
+		return p.re.MatchString(subject)
+	}
+	return strings.Contains(strings.ToLower(subject), p.text)
+}
+
+// acceptanceBoxPhrase returns the first phrase item names outside its finding
+// title and source paths, and "" when it names none.
 func acceptanceBoxPhrase(item string) string {
+	subject := boxSubject(item)
 	for _, phrase := range acceptanceBoxPhrases {
-		if phrase.matches(item) {
+		if phrase.matches(subject) {
 			return phrase.text
 		}
 	}
