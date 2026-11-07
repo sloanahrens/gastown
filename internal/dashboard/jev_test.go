@@ -401,7 +401,7 @@ func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("JEV rows = %q, want %q", got, want)
 	}
-	if wantNote := "2 batteries · 216 items · 141 labeled · last 7d · oldest score 5h00m ago 0 earning 0 no-signal 0 not-yet · 2 unavailable: dispatch, drift"; note.Text != wantNote {
+	if wantNote := "2 batteries · 216 items · 141 labeled · last 7d · score age unknown 0 earning 0 no-signal 0 not-yet · 2 unavailable: dispatch, drift"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
 	}
 	if note.Class != "r warnc" {
@@ -747,6 +747,25 @@ func TestJevTitleLineLeavesAnUnreadableScoreStampUnknown(t *testing.T) {
 	_, note, _ := drawJevAt(t, now, s)
 	if !strings.Contains(note.Text, "score age unknown") {
 		t.Errorf("the title line %q states an age though it cannot read one score stamp", note.Text)
+	}
+}
+
+// A battery carrying no score stamp is not dropped from the age: the line
+// cannot date it, so it says unknown rather than reading younger than that
+// battery's score.
+func TestJevTitleLineLeavesAMissingScoreStampUnknown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	s := jevScorecardState(now, nil)
+	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
+		map[string]any{"name": "finding", "scored_at": now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)},
+		map[string]any{"name": "landing"},
+	}
+
+	_, note, _ := drawJevAt(t, now, s)
+	if !strings.Contains(note.Text, "score age unknown") {
+		t.Errorf("the title line %q states an age though one battery carries no score stamp", note.Text)
 	}
 }
 

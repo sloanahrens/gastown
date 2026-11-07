@@ -3780,11 +3780,12 @@ function renderJev(s) {
   if (sc.window) parts.push("last " + sc.window);
   // The title line dates the scores it sums, not the read that carried them: a
   // battery's score can be days old while the read is a minute old, so the line
-  // states its oldest score and says the age cannot be known when none carries
-  // one, rather than passing the read's age off as the scores'. A stamp the
-  // page cannot read makes the age unknown rather than leaving that battery
-  // out, which would read younger than a score the line cannot date.
-  const stamps = (sc.batteries || []).filter(b => b.scored_at).map(b => new Date(b.scored_at).getTime());
+  // states its oldest score and says the age cannot be known when any battery
+  // carries none, rather than passing the read's age off as the scores'. A
+  // battery with no stamp, or one whose stamp the page cannot read, makes the
+  // age unknown rather than leaving that battery out, which would read younger
+  // than a score the line cannot date.
+  const stamps = (sc.batteries || []).map(b => b.scored_at ? new Date(b.scored_at).getTime() : NaN);
   const oldest = stamps.length && stamps.every(t => !isNaN(t)) ? (Date.now() - Math.min(...stamps)) / 1000 : null;
   parts.push(oldest != null ? "oldest score " + fmtDur(oldest) + " ago" : "score age unknown");
   note.append(document.createTextNode(parts.join(" · ")));
