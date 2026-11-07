@@ -80,8 +80,13 @@ rules:
     verbs: ["get", "list"]
   # get on nodes/proxy is path-unbounded: RBAC cannot name a proxy path, so this
   # rule reaches every kubelet endpoint a GET reaches on every node, the stats
-  # summary, logs and the rest (gt-11e5gm). The control-disk alert issues one GET
-  # per node, and the path is the one thing RBAC cannot narrow.
+  # summary, logs and the rest (gt-11e5gm). It also reaches exec: the kubelet
+  # authorizes a websocket connection to its exec endpoint on the initial GET, so
+  # this grant can exec in pods on a reachable node through the kubelet websocket
+  # (H3-2026-0002). Kubernetes calls that working as intended. The control-disk
+  # read needs stats only. nodes/stats replaces nodes/proxy once the control
+  # cluster is on Kubernetes 1.36 or later. It runs v1.35.0 (k3s), so this rule
+  # stays until then.
   - apiGroups: [""]
     resources: ["nodes/proxy"]
     verbs: ["get"]
