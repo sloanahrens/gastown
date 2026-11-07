@@ -4,9 +4,20 @@
 # in the rig's own settings). Changing this file is a human step.
 #
 # The workflow's name and its one job key are the status context; renaming
-# either orphans the setting that names it. No concurrency block on purpose:
-# a cancelled or replaced run would leave a failure or no status on a commit
-# that did nothing wrong.
+# either orphans the setting that names it. That setting is read from the rig's
+# own settings/config.json and nothing in this repo can derive it, so
+# TestPostLandWorkflowContextIsTheRigSetting holds both halves to the context it
+# must name (gt-gg9hv.7.1).
+#
+# The checkout keeps its default depth and no step fetches another ref. Under
+# GITHUB_ACTIONS post-land-shell.sh runs the shell tier without reading main's
+# first-parent window (gt-phsp89), and nothing the shell tier runs reads a tag.
+# The fetch-depth: 0 this file used to carry bought every head for a history
+# read this run does not perform, and the tags step bought tags nothing reads;
+# both are gone (gt-ebco0).
+#
+# No concurrency block on purpose: a cancelled or replaced run would leave a
+# failure or no status on a commit that did nothing wrong.
 name: post-land
 on:
   push:
@@ -17,8 +28,4 @@ jobs:
     runs-on: ci-base
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # post-land-shell.sh reads history only outside CI (GITHUB_ACTIONS); this run takes the CI path
-      - name: fetch the tags
-        run: git fetch --no-tags --prune origin "+refs/tags/*:refs/tags/*"
       - run: GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh
