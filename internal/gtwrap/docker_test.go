@@ -413,6 +413,18 @@ func TestProbeResultReportsAProbeThatDidNotRun(t *testing.T) {
 	}
 }
 
+// TestOSShellCaptureReportsAProbeThatDidNotStart runs a path that does not exist, so
+// the start fails before any process runs. Capture must return the error, not read
+// a refusal from an exit status.
+func TestOSShellCaptureReportsAProbeThatDidNotStart(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "docker")
+	out, exit, err := OSShell{}.Capture(context.Background(), []string{missing})
+	if err == nil || exit == 0 {
+		t.Fatalf("Capture = %q, %d, %v; want an error and a non-zero exit", out, exit, err)
+	}
+}
+
 func TestLadderBoundsEveryProbe(t *testing.T) {
 	t.Parallel()
 	shell := &fakeShell{psOut: "5c1e0a7f\n"}

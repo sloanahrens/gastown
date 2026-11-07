@@ -1,6 +1,7 @@
 package gtwrap
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -375,10 +376,10 @@ func (OSShell) Attach(argv []string, env []string) (int, error) {
 func (OSShell) Capture(ctx context.Context, argv []string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", exitDown, err
+	if err == nil {
+		err = cmd.Start()
 	}
-	if err := cmd.Start(); err != nil {
+	if err != nil {
 		return "", exitDown, err
 	}
 	// Reading to EOF waits for every holder of stdout, and a child the engine left
@@ -397,10 +398,9 @@ func (OSShell) Capture(ctx context.Context, argv []string) (string, int, error) 
 		}
 		return probeResult(out, waitErr)
 	}
-	if readErr != nil {
-		return "", exitDown, readErr
-	}
-	return probeResult(out, waitErr)
+	// A read error with no stop is an error, and a non-zero exit is a refusal either
+	// way: cmp.Or keeps whichever of the two failed first.
+	return probeResult(out, cmp.Or(waitErr, readErr))
 }
 
 // probeResult reads a finished probe: its stdout and exit status, or an error when
