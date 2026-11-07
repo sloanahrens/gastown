@@ -3045,7 +3045,7 @@ func TestContainerSuiteFailsClosedOnUnparseable(t *testing.T) {
 		"GT_ROLE":    "gastown/polecats/bullet",
 		"GT_POLECAT": "bullet",
 	}, goTree)
-	crew := fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/crew/sloan"}, goTree)
+	crew := fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/crew/operator"}, goTree)
 	tests := []struct {
 		name      string
 		command   string

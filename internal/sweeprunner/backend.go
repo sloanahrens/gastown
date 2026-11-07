@@ -143,8 +143,9 @@ func readWords(argv []string) string {
 
 // guardFirstLine is the first non-blank line of stderr, cut to
 // guardFirstLineRunes runes with every control character (ANSI escapes, tabs,
-// carriage returns) turned to a space, and trimmed. The result is one line with
-// no control character in it.
+// carriage returns), format character (bidi overrides, zero-width spaces, byte
+// order marks) and line or paragraph separator turned to a space, and trimmed.
+// The result is one line with none of them in it.
 func guardFirstLine(stderr []byte) string {
 	line := stderr
 	for _, l := range bytes.Split(stderr, []byte("\n")) {
@@ -159,7 +160,7 @@ func guardFirstLine(stderr []byte) string {
 		if n == guardFirstLineRunes {
 			break
 		}
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) {
 			r = ' '
 		}
 		b.WriteRune(r)

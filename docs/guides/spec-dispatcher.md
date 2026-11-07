@@ -349,6 +349,14 @@ map; the built-in presets stand in for a name the town does not define. Every
 agent runs the claude CLI with the town's managed settings and guard hooks, so
 no seat is less guarded than another.
 
+A seat's `go_flags` adds space-separated go flags to its polecats' `GOFLAGS`,
+appended to the value the spawn already has (the agent's own, else the spawning
+environment's) and ahead of the seat's computed `-p` parallelism, which is left
+off when either value names a `-p`. Only `-trimpath`, `-mod=readonly`, `-race`
+and `-p=<n>` load; the loader refuses any other flag by name, so a settings file
+cannot retarget the toolchain, linker or compiler with `-toolexec` or `-ldflags`
+(gt-gg9hv.42).
+
 `polecat_pool.max_total`, when set, caps live polecats across every seat: a
 seat's cap is per agent, so seats each inside their own cap can still run more
 polecats than the town wants. A town at its total is skipped whatever room the

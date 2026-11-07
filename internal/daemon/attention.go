@@ -347,6 +347,9 @@ type attentionSources struct {
 	// cacheTrimNoOp is the claims a completed cache trim left over twice the
 	// cap (cache_trim.go); nil when the trim pass is not wired.
 	cacheTrimNoOp func() []attention.Item
+	// doltImage is the Dolt image check's held item, or nil when none is held
+	// (dolt_version_check.go).
+	doltImage func() []attention.Item
 	// repeatedAt is when each repeating item was last said, carried across
 	// ticks by the daemon. attentionTick updates it.
 	repeatedAt map[string]time.Time
@@ -638,6 +641,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindTierSweepStarved, collect: s.collectTierSweepStarved},
 		{kind: attention.KindTierSweepStuck, collect: s.collectTierSweepStuck},
 		{kind: attention.KindTierSweepGuardUnreadable, collect: s.collectTierSweepGuardUnreadable},
+		{kind: attention.KindGreenRef, collect: s.collectGreenRef},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped, owns: overrunStoppedItem},
 		// A second entry of the same kind: a stop that handed its bead back
 		// and one that never released its seat are the guard's two outcomes,
@@ -654,6 +658,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindBirdReportStale, collect: s.collectBirdReports},
 		{kind: attention.KindPostLandUnknown, collect: s.collectPostLandUnknown},
 		{kind: attention.KindCacheTrimNoOp, collect: s.collectCacheTrimNoOp},
+		{kind: attention.KindDoltImageBehind, collect: s.collectDoltImage},
 	}, s.questionCollectors()...)
 }
 
@@ -688,6 +693,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		s.birdReports = d.birdReportStale.observed
 	}
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
+	s.doltImage = d.doltImage.observed
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		return d.rigWorkBeads(rig).List(beads.ListOptions{
 			Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,

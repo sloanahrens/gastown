@@ -118,10 +118,9 @@ back to this runbook once the overseer's restart has run and the check passes.
    Stop too when no database line shows an archive line, and when any
    database line says `archive state unreadable`.
 3. Stop the server, then take the backup: copy the database directory while
-   the server is stopped. Take the copy only after every database reads
-   `0 commits behind` and `0 events behind` in step 2, so the copy and the
-   archive describe the same moment. The nightly backups under
-   `~/gt-backups/dolt` are the other copy, see `docs/dolt-restore.md`.
+   the server is stopped. Take the copy only after step 2's checks pass, so
+   the copy and the archive describe the same moment. The nightly backups
+   under `~/gt-backups/dolt` are the other copy, see `docs/dolt-restore.md`.
 
    Then start the server again with `gt dolt start`, and read `gt dolt status`
    until it shows the server running and lists every database. The flatten
@@ -150,9 +149,13 @@ SELECT COUNT(*) FROM dolt_log;                                   -- after
 
 Each flattened database now reads `1 commits behind` in `gt dolt status`,
 because its new root commit is not archived yet. Run `gt dolt archive-now`
-again, with the dispatch hold still set and the town still parked, and read its
-exit codes as step 2 does. Then re-read `gt dolt status` and repeat until every
-database reads `0 commits behind`.
+again, with the dispatch hold still set and the town still parked. Read its
+exit code and the status the way step 2 does: exit 1, exit 3 and a status step
+2 would refuse all stop the flatten here too. Run the pass again only while it
+exits 2, re-reading `gt dolt status` after each pass until every database reads
+`0 commits behind` as step 2 checks it. Stop after three passes that all exited
+2: a fourth asks the daemon for work three passes did not finish, so report the
+databases still behind to the overseer instead.
 
 Re-count every table against the counts recorded in step 4 of "Before any
 rewrite". A table that lost rows or disappeared means stop. See

@@ -157,12 +157,14 @@ const submissionNameRows = 500
 // dashSubmitters answers who submitted a bead's landing, for the Landings rows
 // whose own record carries no branch: a rejected landing, and one the worker is
 // retrying. The name comes from the first-sight submission log's branch
-// (gt-l7ciu), and never from the bead, because a rejection reassigns the bead
-// or resets it to open, so its current holder is not who submitted it
-// (gt-gclus). It does not come from the om review log either: that record's
-// agent field is the model the seat ran on ("claude-haiku"), not the polecat or
-// crew member the By column says built the landing, so a row with no branch
-// draws the dash rather than a model name.
+// (gt-l7ciu), and never from the bead's assignee, because a rejection reassigns
+// the bead or resets it to open, so its current holder is not who submitted it
+// (gt-gclus). The one bead read is the author of the bead's newest "Submitted
+// for landing" comment, which resolves a reserved ops branch's builder
+// (gt-6ua0sn). The name does not come from the om review log either: that
+// record's agent field is the model the seat ran on ("claude-haiku"), not the
+// polecat or crew member the By column says built the landing, so a row with
+// no branch draws the dash rather than a model name.
 type dashSubmitters struct {
 	townRoot string
 	// logf reports a read that failed. The operator has no other sight of it:
@@ -178,6 +180,11 @@ type dashSubmitters struct {
 	// branch, read from the same records the names are: a crew landing has no
 	// polecat seat, and its row says so rather than drawing a dash (gt-kmp7c).
 	crew func(rig, bead string) bool
+	// submittedBy names the actor who submitted a bead, read from its newest
+	// "Submitted for landing" comment. It resolves a reserved ops branch's
+	// builder, which names the operator's workflow convention rather than an
+	// agent (gt-6ua0sn); nil answers "operator", never "ops".
+	submittedBy func(rig, bead string) string
 	// failed is the read failure already reported, so a log that stays
 	// unreadable reports once rather than on every poll (gt-72xqp).
 	failed readFailure
@@ -195,6 +202,14 @@ func newDashSubmitters(townRoot string, logf func(format string, args ...any)) *
 		logf = func(string, ...any) {}
 	}
 	return &dashSubmitters{townRoot: townRoot, logf: logf}
+}
+
+// withSubmittedBy gives the reader the bead lookup that names a reserved ops
+// branch's submitter. Without one an ops branch reads "operator" rather than
+// "ops" (gt-6ua0sn).
+func (s *dashSubmitters) withSubmittedBy(fn func(rig, bead string) string) *dashSubmitters {
+	s.submittedBy = fn
+	return s
 }
 
 // unreadableSubmitters is the lookup while the submission log cannot be read:
@@ -228,7 +243,8 @@ func (s *dashSubmitters) get() func(rig, bead string) string {
 		return unreadableSubmitters
 	}
 	s.failed = readFailure{}
-	s.names, s.crew, s.stamp, s.read = landingNameLookup(subs), crewLandingLookup(subs), st, true
+	names := landingNames{submitter: s.submittedBy}.withSubmissions(subs)
+	s.names, s.crew, s.stamp, s.read = names.who, crewLandingLookup(subs), st, true
 	return s.names
 }
 
@@ -249,12 +265,26 @@ func (s *dashSubmitters) crewLookup() func(rig, bead string) bool {
 	return s.crew
 }
 
-// landingNameLookup builds the lookup the Landings rows ask: the polecat or
-// crew member the bead's newest submission names in its branch
+// landingNames are the two reads that name who built a Landings row: who names
+// the builder the bead's newest submitted branch carries, and submitter names
+// the actor who wrote the bead's newest submission comment, the builder of a
+// landing on the reserved ops branch (gt-6ua0sn). They travel together because
+// both fill the row's By and Polecat cells, so a read added for those cells is
+// a named field rather than one more positional argument at call sites that
+// already pass a dozen (gt-f1fc2f).
+type landingNames struct {
+	who       func(rig, bead string) string
+	submitter func(rig, bead string) string
+}
+
+// withSubmissions returns n with who filled from the submission log: the
+// polecat or crew member the bead's newest submission names in its branch
 // ("polecat/<name>/..." or "crew/<name>/..."), else "" — the page draws that as
 // a dash. A resubmission supersedes an earlier branch, so the name is the one
-// on the last submitted branch.
-func landingNameLookup(subs []land.SubmissionRecord) func(rig, bead string) string {
+// on the last submitted branch. A reserved ops branch has no agent name to
+// give (gt-6ua0sn), so it is resolved through landingBuilder with the bead's
+// submitter.
+func (n landingNames) withSubmissions(subs []land.SubmissionRecord) landingNames {
 	type beadKey struct{ rig, bead string }
 	branches := make(map[beadKey]string, len(subs))
 	for _, s := range subs {
@@ -264,9 +294,10 @@ func landingNameLookup(subs []land.SubmissionRecord) func(rig, bead string) stri
 			branches[beadKey{s.Rig, s.Bead}] = s.Branch
 		}
 	}
-	return func(rig, bead string) string {
-		return polecatOfBranch(branches[beadKey{rig, bead}])
+	n.who = func(rig, bead string) string {
+		return landingBuilder(branches[beadKey{rig, bead}], rig, bead, n.submitter)
 	}
+	return n
 }
 
 // crewLandingLookup builds the lookup that says whether a bead's newest
@@ -305,27 +336,31 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // the rig; a rejection never carries one, and ship is asked for every landed
 // record in the window as its row is built, before the bound. The polecat
 // time a landing's record carries — the spans-log reading the worker writes
-// (gt-yxl22) — comes with it, for the pane's Polecat column (gt-90wi1). who
-// names who submitted a row whose record carries no branch: a rejection keeps
-// its branch on the bead's rejection note, which a row does not read, so the
-// name comes from the first-sight submission log instead (gt-gclus). crew is
+// (gt-yxl22) — comes with it, for the pane's Polecat column (gt-90wi1).
+// names.who names who submitted a row whose record carries no branch: a
+// rejection keeps its branch on the bead's rejection note, which a row does not
+// read, so the name comes from the first-sight submission log instead
+// (gt-gclus). crew is
 // that same log's branch: a rejected or running row built on a crew session's
 // branch is marked crew, which the page draws in place of a dash, and a landed
 // row is marked from the branch its own record carries. A crew row also carries
-// the branch's agent segment in CrewAgent — from who for a rejected or running
-// row, from the branch for a landed one — so its By cell names the builder
-// rather than the bead's assignee (gt-830fd). polecat reads a bead's
+// the branch's agent segment in CrewAgent — from names.who for a rejected or
+// running row, from the branch for a landed one — so its By cell names the
+// builder rather than the bead's assignee (gt-830fd). polecat reads a bead's
 // polecat time from the spans log: a rejected row takes the reading a landed
 // record would carry (asOf zero), and a running row takes the time so far (asOf
 // now). crew and polecat are asked only for the rows the table keeps — the
 // rejections the bound left, and the live rows above it — so their reads are
-// bounded like the title's. who is asked for every rejection in the window as
-// its row is built, before the bound, and once more for each kept crew row to
-// name its builder. A rejected row takes its rig from the landed record
-// of its bead when there is one; a bead with no landed record has only its id,
-// so rigOfBead names the rig its prefix routes to through the town's routes
-// table (gt-a64mi). An empty answer falls back to gastown.
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, who func(rig, bead string) string, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), rigOfBead func(bead string) string, limit int) []dashboard.LandingRow {
+// bounded like the title's. names.who is asked for every rejection in the
+// window as its row is built, before the bound, and once more for each kept
+// crew row to name its builder. A rejected row takes its rig from the landed
+// record of its bead when there is one; a bead with no landed record has only
+// its id, so rigOfBead names the rig its prefix routes to through the town's
+// routes table (gt-a64mi). An empty answer falls back to gastown. names fills
+// the By and Polecat cells: who names a row whose record carries no branch,
+// and submitter names a landing on the reserved ops branch (gt-6ua0sn), asked
+// only when the branch naming the row is that reserved one.
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, names landingNames, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), rigOfBead func(bead string) string, limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -343,7 +378,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			continue
 		}
 		row := dashboard.LandingRow{
-			At: rec.LandedAt, Bead: rec.Bead, Rig: rec.Rig, Polecat: polecatOfBranch(rec.Branch),
+			At: rec.LandedAt, Bead: rec.Bead, Rig: rec.Rig, Polecat: landingBuilder(rec.Branch, rec.Rig, rec.Bead, names.submitter),
 			Outcome: "landed", Verdict: omOutcome(rec.OMVerdict), Commit: shortSHA(rec.LandedCommit),
 			Route: rec.Route, Risk: len(rec.RiskPaths) > 0, Crew: isCrewLandingBranch(rec.Branch),
 		}
@@ -386,7 +421,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		if rig == "" {
 			rig = "gastown" // the only rig with a landing worker running
 		}
-		row := dashboard.LandingRow{At: rj.At, Bead: rj.Bead, Rig: rig, Polecat: landingName(who, rig, rj.Bead), Outcome: "rejected", Kind: rj.Kind, Score: rj.Score, Detail: truncateRunes(rj.Detail, 160)}
+		row := dashboard.LandingRow{At: rj.At, Bead: rj.Bead, Rig: rig, Polecat: landingName(names.who, rig, rj.Bead), Outcome: "rejected", Kind: rj.Kind, Score: rj.Score, Detail: truncateRunes(rj.Detail, 160)}
 		timing(&row, omStageFor(stages, rj.Bead, rj.At))
 		rows = append(rows, row)
 	}
@@ -415,7 +450,7 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 			// the name the submission log reads off the newest crew branch,
 			// the same name the Polecat cell shows.
 			rows[i].Crew = true
-			rows[i].CrewAgent = landingName(who, rows[i].Rig, rows[i].Bead)
+			rows[i].CrewAgent = landingName(names.who, rows[i].Rig, rows[i].Bead)
 		}
 		if polecat != nil {
 			secs, attempts, lower := polecat(rows[i].Bead, asOf)
@@ -523,6 +558,49 @@ func polecatOfBranch(branch string) string {
 		return parts[0]
 	}
 	return ""
+}
+
+// opsBranchBuilder is the branch segment an operator-pushed workflow branch
+// carries where an agent's name goes ("crew/ops/gastown-post-land"): the
+// convention for a branch the operator introduced, not an agent called ops
+// (the fr-hhtn precedent).
+const opsBranchBuilder = "ops"
+
+// opsNoSubmitter is the builder a reserved ops branch shows when a successful
+// comments read names no submission: never the empty string, and never the
+// branch's "ops".
+const opsNoSubmitter = "operator"
+
+// landingBuilder names who built a landing from its branch. A branch whose
+// builder segment is the reserved "ops" is the operator's own work submitted
+// through the town path, so its builder is the actor who submitted the bead:
+// the author of the bead's newest "Submitted for landing" comment, read by
+// submittedBy. It is "operator" when that read names no submission, and
+// submitterUnknown when the comments cannot be read (gt-f1fc2f). Every other
+// branch keeps polecatOfBranch's answer, and submittedBy is not asked for it,
+// so only a landing that needs the bead read pays for it.
+func landingBuilder(branch, rig, bead string, submittedBy func(rig, bead string) string) string {
+	name := polecatOfBranch(branch)
+	if name != opsBranchBuilder {
+		return name
+	}
+	if submittedBy != nil {
+		if s := submittedName(submittedBy(rig, bead)); s != "" {
+			return s
+		}
+	}
+	return opsNoSubmitter
+}
+
+// submittedName reduces a submission comment's author address to the name the
+// Landings cells show: "town/crew/overseer" is "overseer", and a bare name is
+// itself. An empty address names no one.
+func submittedName(actor string) string {
+	actor = strings.TrimSpace(actor)
+	if i := strings.LastIndex(actor, "/"); i >= 0 {
+		actor = actor[i+1:]
+	}
+	return strings.TrimSpace(actor)
 }
 
 // isCrewLandingBranch reports whether a landing's branch is a crew session's

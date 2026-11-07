@@ -714,7 +714,7 @@ func TestPRWorkflowSubstitutionCommentAndANSIQuote(t *testing.T) {
 func TestPRWorkflowGuard_SwitchAbbreviatedCreate(t *testing.T) {
 	t.Parallel()
 	town := newPolecatTestTown(t)
-	town = town.withEnv("GT_ROLE", "gastown/crew/sloan")
+	town = town.withEnv("GT_ROLE", "gastown/crew/operator")
 
 	tests := []struct {
 		name    string

@@ -1,14 +1,14 @@
 # The cluster access the tier sweep runs with (gt-gg9hv.55): the gt-sweeps
 # namespace, the sweep-runner service account the Kubernetes backend's Job runs
-# as, its namespaced Role and binding, the token Secret, the read-only
-# gt-sweep-reader ClusterRole the capacity, priority and control-disk guards read
-# through, and the gt-ci-cache-trim Role and binding in the forgejo namespace the
-# CI cache trim execs through.
+# as, its namespaced Role and binding, the token Secret, the gt-sweep-reader
+# ClusterRole the capacity, priority and control-disk guards read through, and
+# the gt-ci-cache-trim Role and binding in the forgejo namespace the CI cache
+# trim execs through. Two of the grants reach wider than the one call that needs
+# each, because a rule cannot name the path or the container that would bound
+# them; each rule says how far.
 #
-# This file is not applied by the daemon. An operator applies it to the control
-# cluster with:
-#   kubectl --context colima-gt-control apply -f deploy/k8s/sweep-rbac.yaml
-# (docs/reference.md, Tier sweep runner). TestSweepRBACManifestParses,
+# This file is not applied by the daemon. The operator's apply step is in
+# docs/reference.md, Tier sweep runner. TestSweepRBACManifestParses,
 # TestSweepRBACCoversEveryRead and TestSweepRBACClusterGrantIsReadOnly hold it to
 # the reads in internal/sweeprunner/testdata/rbac-reads.golden.
 apiVersion: v1
@@ -78,6 +78,10 @@ rules:
   - apiGroups: [""]
     resources: ["nodes", "pods"]
     verbs: ["get", "list"]
+  # get on nodes/proxy is path-unbounded: RBAC cannot name a proxy path, so this
+  # rule reaches every kubelet endpoint a GET reaches on every node, the stats
+  # summary, logs and the rest (gt-11e5gm). The control-disk alert issues one GET
+  # per node, and the path is the one thing RBAC cannot narrow.
   - apiGroups: [""]
     resources: ["nodes/proxy"]
     verbs: ["get"]
@@ -100,7 +104,13 @@ subjects:
 ---
 # The CI cache trim (gt-gg9hv.57) runs as the sweep-runner service account and
 # execs into the forgejo-runner's dind container in the forgejo namespace. Its
-# grant lives in that namespace, not in gt-sweeps.
+# grant lives in that namespace, not in gt-sweeps. pods/exec create is not
+# bounded to that container: RBAC can name only a fixed pod and has no field for
+# a container, while the forgejo-runner Deployment names each pod when its
+# ReplicaSet creates it, so the rule reaches every pod in forgejo, Forgejo itself
+# included (gt-11e5gm). The trim selects the runner pod by label and execs into
+# its dind container (internal/daemon/ci_cache_trim.go); RBAC does not enforce
+# that selection.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

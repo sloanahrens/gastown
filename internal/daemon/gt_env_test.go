@@ -24,7 +24,7 @@ import (
 func pollutedEnv() []string {
 	env := []string{"PATH=/usr/bin"}
 	for _, k := range agentconfig.IdentityEnvVars {
-		env = append(env, k+"=gastown/crew/sloan")
+		env = append(env, k+"=gastown/crew/operator")
 	}
 	return env
 }

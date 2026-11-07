@@ -413,7 +413,7 @@ func TestRestoreRollbackRawWorkflowFieldsRestoresOriginalValues(t *testing.T) {
 	current := strings.Join([]string{
 		"no_merge: true",
 		"review_only: true",
-		"dispatched_by: gastown/crew/sloan",
+		"dispatched_by: " + slingTestSeat,
 		"",
 		"Keep this body.",
 	}, "\n")
@@ -437,7 +437,7 @@ func TestRestoreRollbackRawWorkflowFieldsRestoresOriginalValues(t *testing.T) {
 	if fields == nil || !fields.NoMerge || fields.ReviewOnly {
 		t.Fatalf("rollback did not restore original workflow values: %+v\n%s", fields, desc)
 	}
-	if !strings.Contains(desc, "dispatched_by: gastown/crew/sloan") || !strings.Contains(desc, "Keep this body.") {
+	if !strings.Contains(desc, "dispatched_by: "+slingTestSeat) || !strings.Contains(desc, "Keep this body.") {
 		t.Fatalf("rollback did not preserve current metadata/body:\n%s", desc)
 	}
 }
@@ -467,7 +467,7 @@ func TestSlingFormulaRollsBackSpawnedPolecatOnWispFailure(t *testing.T) {
 func TestRunSlingFormulaPersistsVarContext(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
-	h.run.resolveSelf = func() (string, string, string, error) { return "gastown/crew/sloan", "", slingTestTown, nil }
+	h.run.resolveSelf = func() (string, string, string, error) { return slingTestSeat, "", slingTestTown, nil }
 	h.run.opts.vars = []string{"version=1.2.3", "channel=stable"}
 	h.run.opts.ralph = true
 
@@ -475,8 +475,8 @@ func TestRunSlingFormulaPersistsVarContext(t *testing.T) {
 		t.Fatalf("runFormula: %v", err)
 	}
 	h.wantCalls("create wisp", "create wisp mol-anything vars=version=1.2.3,channel=stable")
-	h.wantCalls("hook", "hook gt-wisp-new gastown/crew/sloan")
-	h.wantCalls("agent mode", "agent mode gastown/crew/sloan ralph")
+	h.wantCalls("hook", "hook gt-wisp-new "+slingTestSeat)
+	h.wantCalls("agent mode", "agent mode "+slingTestSeat+" ralph")
 
 	stored := h.stored["gt-wisp-new"]
 	if len(stored) != 1 {
@@ -500,8 +500,8 @@ func TestRunSlingFormulaPersistsVarContext(t *testing.T) {
 func TestRunSlingFormulaNoOpWhenSameFormulaAlreadyHooked(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
-	h.run.resolveSelf = func() (string, string, string, error) { return "gastown/crew/sloan", "", slingTestTown, nil }
-	h.hookedFormulas["gastown/crew/sloan"] = &beads.Issue{ID: "gt-wisp-existing"}
+	h.run.resolveSelf = func() (string, string, string, error) { return slingTestSeat, "", slingTestTown, nil }
+	h.hookedFormulas[slingTestSeat] = &beads.Issue{ID: "gt-wisp-existing"}
 
 	if err := h.run.runFormula(context.Background(), []string{"mol-anything"}); err != nil {
 		t.Fatalf("runFormula: %v", err)
@@ -517,8 +517,8 @@ func TestRunSlingFormulaNoOpWhenSameFormulaAlreadyHooked(t *testing.T) {
 func TestRunSlingFormulaUpdatesModeWhenSameFormulaAlreadyHooked(t *testing.T) {
 	t.Parallel()
 	h := newSlingHarness(t)
-	h.run.resolveSelf = func() (string, string, string, error) { return "gastown/crew/sloan", "", slingTestTown, nil }
-	h.hookedFormulas["gastown/crew/sloan"] = &beads.Issue{ID: "gt-wisp-existing", Description: "attached_formula: mol-anything\nmode: ralph"}
+	h.run.resolveSelf = func() (string, string, string, error) { return slingTestSeat, "", slingTestTown, nil }
+	h.hookedFormulas[slingTestSeat] = &beads.Issue{ID: "gt-wisp-existing", Description: "attached_formula: mol-anything\nmode: ralph"}
 
 	if err := h.run.runFormula(context.Background(), []string{"mol-anything"}); err != nil {
 		t.Fatalf("runFormula: %v", err)
@@ -527,7 +527,7 @@ func TestRunSlingFormulaUpdatesModeWhenSameFormulaAlreadyHooked(t *testing.T) {
 	if len(stored) != 1 || stored[0].Mode == nil || *stored[0].Mode != "" {
 		t.Fatalf("stored field updates = %+v, want one clearing the mode", stored)
 	}
-	h.wantCalls("agent mode", "agent mode gastown/crew/sloan ")
+	h.wantCalls("agent mode", "agent mode "+slingTestSeat+" ")
 	h.wantNo("create wisp")
 }
 
@@ -845,7 +845,7 @@ func TestHookWithRetryWithoutFieldsLeavesTheDescription(t *testing.T) {
 func TestBuildSlingFieldUpdates(t *testing.T) {
 	t.Parallel()
 	got := buildSlingFieldUpdates(
-		"gastown/crew/sloan",
+		"gastown/crew/operator",
 		"review this",
 		[]string{"feature=test"},
 		"gt-wisp-test",
@@ -856,7 +856,7 @@ func TestBuildSlingFieldUpdates(t *testing.T) {
 		"feature=test",
 	)
 
-	if got.Dispatcher != "gastown/crew/sloan" || got.Args != "review this" {
+	if got.Dispatcher != "gastown/crew/operator" || got.Args != "review this" {
 		t.Fatalf("updates = %+v", got)
 	}
 	if got.AttachedMolecule != "gt-wisp-test" || got.AttachedFormula != "mol-polecat-work" {
@@ -872,7 +872,7 @@ func TestBuildSlingFieldUpdates(t *testing.T) {
 func TestStoreFieldsInBeadWritesNoConvoyFields(t *testing.T) {
 	t.Parallel()
 	text := applyBeadFieldUpdates(&beads.Issue{}, beadFieldUpdates{
-		Dispatcher: "gastown/crew/sloan",
+		Dispatcher: "gastown/crew/operator",
 		NoMerge:    true,
 	})
 

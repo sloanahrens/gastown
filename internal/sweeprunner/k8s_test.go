@@ -2,6 +2,7 @@ package sweeprunner
 
 import (
 	"encoding/json"
+	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/templates"
 	"os"
 	"path/filepath"
@@ -1134,13 +1135,20 @@ func applyDocumentIndex(plan Plan, kind, name string) int {
 // so it renders no policy either way.
 func TestSweepJobPullPolicyFollowsTheImageReference(t *testing.T) {
 	t.Parallel()
+	// The installed runner names its image with the commit's buildstamp, appended to the repository
+	// inside the registry when one is set. Derive the tag through the producer, so a copied width
+	// cannot keep passing here after buildstamp changes.
+	stamp, err := buildstamp.Short("0123456789abcdef0123456789abcdef01234567")
+	if err != nil {
+		t.Fatalf("buildstamp.Short: %v", err)
+	}
 	tests := []struct {
 		name  string
 		image string
 		want  string
 	}{
 		{"moving tag", "gastown-polecat:dev", "Always"},
-		{"commit tag", "gastown-polecat:0123456789abcdef", ""},
+		{"commit tag", "localhost:5001/gastown-polecat:" + stamp, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

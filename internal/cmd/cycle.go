@@ -58,7 +58,7 @@ appropriate group.
 
 Examples:
   gt cycle next
-  gt cycle next --session gt-crew-sloan  # Explicit session context`,
+  gt cycle next --session gt-crew-<name>  # Explicit session context`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cycleToSession(1, cycleSession, cycleClient)
 	},
@@ -75,7 +75,7 @@ appropriate group.
 
 Examples:
   gt cycle prev
-  gt cycle prev --session gt-crew-sloan  # Explicit session context`,
+  gt cycle prev --session gt-crew-<name>  # Explicit session context`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cycleToSession(-1, cycleSession, cycleClient)
 	},

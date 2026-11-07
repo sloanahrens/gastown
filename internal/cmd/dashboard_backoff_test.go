@@ -94,10 +94,10 @@ func TestWithBackoffRowsNamesTheSubmitter(t *testing.T) {
 		{At: now, Bead: "gt-crew", Rig: "gastown", Outcome: "backoff"},
 		{At: now, Bead: "gt-quiet", Rig: "gastown", Outcome: "backoff"},
 	}
-	who := landingNameLookup([]land.SubmissionRecord{
+	who := landingNames{}.withSubmissions([]land.SubmissionRecord{
 		{Rig: "gastown", Bead: "gt-polecat", Branch: "polecat/agate/gt-polecat+1", SeenAt: now.Add(-time.Hour)},
 		{Rig: "gastown", Bead: "gt-crew", Branch: "crew/heron/gt-crew", SeenAt: now.Add(-time.Hour)},
-	})
+	}).who
 
 	got := withBackoffRows(nil, backoff, nil, who)
 	for bead, want := range map[string]string{"gt-polecat": "agate", "gt-crew": "heron", "gt-quiet": ""} {
@@ -133,10 +133,10 @@ func TestWithBackoffRowsKeepsASubmitterTheRowCarries(t *testing.T) {
 		{At: now, Bead: "gt-known", Rig: "gastown", Outcome: "backoff", Polecat: "heron"},
 		{At: now, Bead: "gt-looked-up", Rig: "gastown", Outcome: "backoff"},
 	}
-	who := landingNameLookup([]land.SubmissionRecord{
+	who := landingNames{}.withSubmissions([]land.SubmissionRecord{
 		{Rig: "gastown", Bead: "gt-known", Branch: "polecat/agate/gt-known+1", SeenAt: now.Add(-time.Hour)},
 		{Rig: "gastown", Bead: "gt-looked-up", Branch: "polecat/agate/gt-looked-up+1", SeenAt: now.Add(-time.Hour)},
-	})
+	}).who
 
 	got := withBackoffRows(nil, backoff, nil, who)
 	byBead := map[string]string{}

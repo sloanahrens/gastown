@@ -443,6 +443,53 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 	}
 }
 
+// TestCICacheTrimHoldsAFailureWhoseTextVaries: a failure that carries the failing
+// command's own output is logged once in the hour, though each retry's output
+// differs. Keyed on the expanded line, every retry would be a new line and go
+// through the hold.
+func TestCICacheTrimHoldsAFailureWhoseTextVaries(t *testing.T) {
+	t.Parallel()
+	const want = "the exec into the dind container failed"
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.exec = cliReply{stderr: "error: container not found: 1a2b3c\n", code: 1}
+	f.tick()
+	f.drain()
+
+	f.exec = cliReply{stderr: "error: container not found: 9f8e7d\n", code: 1}
+	f.at(cacheTrimRetryInterval)
+	f.tick()
+	f.drain()
+
+	if n := len(f.execs()); n != 2 {
+		t.Fatalf("ran %d execs, want 2: the retry must run", n)
+	}
+	if n := strings.Count(f.logs.String(), want); n != 1 {
+		t.Errorf("the failure was logged %d times across two attempts with different output, want once an hour:\n%s", n, f.logs.String())
+	}
+}
+
+// TestCICacheTrimHoldsEachFaultKindApart: two different faults that share a log
+// line's shape are each logged within the hour. A held fault must not hide a new
+// one of another kind.
+func TestCICacheTrimHoldsEachFaultKindApart(t *testing.T) {
+	t.Parallel()
+	f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+	f.pods = cliReply{stdout: ciCachePodsDindWaitingJSON}
+	f.tick()
+	f.drain()
+
+	f.pods = cliReply{stderr: "error: the server is unavailable\n", code: 1}
+	f.at(cacheTrimRetryInterval)
+	f.tick()
+	f.drain()
+
+	for _, want := range []string{"is not running in forgejo", "the runner's pods could not be read"} {
+		if n := strings.Count(f.logs.String(), want); n != 1 {
+			t.Errorf("logged %q %d times, want once: a different fault was hidden:\n%s", want, n, f.logs.String())
+		}
+	}
+}
+
 // TestCICacheTrimRefusesASettingItCannotActOn: a setting the patrol cannot act
 // on, or a runner that names no control cluster, runs nothing and says why.
 func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {

@@ -780,7 +780,7 @@ func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *confi
 }
 
 // downStopResult is the outcome of stopping one session; name is what the
-// report prints after the rig, such as "nux" or "crew/sloan".
+// report prints after the rig, such as "nux" or "crew/<name>".
 type downStopResult struct {
 	rigName string
 	name    string

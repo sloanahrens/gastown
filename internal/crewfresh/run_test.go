@@ -232,10 +232,10 @@ func TestRunUnreadableReadBlocksTheMoveAndNamesTheBlocker(t *testing.T) {
 		{
 			name: "changes unreadable on another branch keeps the branch line",
 			g: &fakeGit{
-				branch: "crew/sloan/gt-9", cleanErr: errors.New("status failed"),
+				branch: "crew/operator/gt-9", cleanErr: errors.New("status failed"),
 				behind: 3, ancestor: true,
 			},
-			wantMessage: "behind 3 but on branch crew/sloan/gt-9 so main is left alone",
+			wantMessage: "behind 3 but on branch crew/operator/gt-9 so main is left alone",
 		},
 		{
 			name: "dirty clone keeps the changes line when ancestry is unreadable",

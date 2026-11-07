@@ -288,6 +288,11 @@ func installedBuildIDFor(commit, installedBuildID, installedCommit string) (stri
 	if installedCommit == "" || !strings.HasPrefix(commit, installedCommit) {
 		return "", false
 	}
+	// The id must have the commit-shape buildID checks git's abbreviation for,
+	// or a short id that prefixes the commit is stamped unchecked.
+	if !isCommit(installedBuildID) {
+		return "", false
+	}
 	if !isHex(installedBuildID) || !strings.HasPrefix(commit, installedBuildID) {
 		return "", false
 	}

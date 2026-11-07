@@ -40,14 +40,15 @@ func writePlanTestConfig(t *testing.T) string {
 
 // planTestDeps fails the test when the command asks for a default path: every
 // test that does not exercise the defaults passes both --data-dir and
-// --backup-dir.
+// --backup-dir. The config read is real, over the file writePlanTestConfig
+// writes under t.TempDir.
 func planTestDeps(t *testing.T) doltContainerPlanDeps {
 	t.Helper()
 	refuse := func() (string, error) {
 		t.Error("the command resolved a default path although both directories were given")
 		return "", errors.New("unexpected default path lookup")
 	}
-	return doltContainerPlanDeps{townRoot: refuse, backupRoot: refuse}
+	return doltContainerPlanDeps{townRoot: refuse, backupRoot: refuse, readFile: os.ReadFile}
 }
 
 // runDoltContainerPlan runs `gt dolt container plan` the way the shell does,
@@ -105,7 +106,13 @@ func planTestSpec(config string) doltserver.ContainerSpec {
 // planTestJSON runs the command with --json and returns the argv it printed.
 func planTestJSON(t *testing.T, args ...string) []string {
 	t.Helper()
-	out, err := executeDoltContainerPlan(t, planTestDeps(t), append(args, "--json")...)
+	return planTestJSONWith(t, planTestDeps(t), args...)
+}
+
+// planTestJSONWith is planTestJSON with the command's deps given.
+func planTestJSONWith(t *testing.T, deps doltContainerPlanDeps, args ...string) []string {
+	t.Helper()
+	out, err := executeDoltContainerPlan(t, deps, append(args, "--json")...)
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -278,6 +285,7 @@ func TestDoltContainerPlanDefaults(t *testing.T) {
 	deps := doltContainerPlanDeps{
 		townRoot:   func() (string, error) { return townRoot, nil },
 		backupRoot: func() (string, error) { return backupRoot, nil },
+		readFile:   os.ReadFile,
 	}
 	out, err := executeDoltContainerPlan(t, deps,
 		"--json", "--name", "gt-dolt", "--image", "dolt:test", "--config", writePlanTestConfig(t))
@@ -313,6 +321,44 @@ func TestDoltContainerPlanReadsTheListenerPort(t *testing.T) {
 	want := "127.0.0.1:3307:" + strconv.Itoa(planTestListenerPort)
 	if got := publishFlag(t, argv); got != want {
 		t.Fatalf("published port = %q, want the config's listener port %q", got, want)
+	}
+}
+
+func TestDoltContainerPlanReadsTheConfigThroughTheInjectedReader(t *testing.T) {
+	t.Parallel()
+
+	// The config file is never written: the plan takes the listener port from
+	// the bytes deps.readFile returns, so a command that read the live file
+	// would fail on the absent path.
+	config := filepath.Join(t.TempDir(), "config.yaml")
+	var read []string
+	deps := planTestDeps(t)
+	deps.readFile = func(path string) ([]byte, error) {
+		read = append(read, path)
+		return []byte("listener:\n  port: 3311\n"), nil
+	}
+	argv := planTestJSONWith(t, deps, planTestArgs(config)...)
+	if got, want := publishFlag(t, argv), "127.0.0.1:3307:3311"; got != want {
+		t.Fatalf("published port = %q, want the injected reader's port %q", got, want)
+	}
+	if !slices.Equal(read, []string{config}) {
+		t.Fatalf("the injected reader got %v, want just the config path %q", read, config)
+	}
+}
+
+func TestDoltContainerPlanRefusesWithoutAReader(t *testing.T) {
+	t.Parallel()
+
+	// A deps with no reader is refused rather than served by a read of the
+	// live config file, which the path this test passes would parse.
+	deps := planTestDeps(t)
+	deps.readFile = nil
+	_, err := executeDoltContainerPlan(t, deps, planTestArgs(writePlanTestConfig(t))...)
+	if err == nil {
+		t.Fatal("the command read the live config although the deps injected no reader")
+	}
+	if !strings.Contains(err.Error(), "--container-port") {
+		t.Fatalf("error %q does not point at --container-port", err)
 	}
 }
 

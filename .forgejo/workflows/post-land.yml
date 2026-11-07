@@ -4,9 +4,20 @@
 # in the rig's own settings). Changing this file is a human step.
 #
 # The workflow's name and its one job key are the status context; renaming
-# either orphans the setting that names it. No concurrency block on purpose:
-# a cancelled or replaced run would leave a failure or no status on a commit
-# that did nothing wrong.
+# either orphans the setting that names it. That setting is read from the rig's
+# own settings/config.json and nothing in this repo can derive it, so
+# TestPostLandWorkflowContextIsTheRigSetting holds both halves to the context it
+# must name (gt-gg9hv.7.1).
+#
+# The checkout takes the full history and the tags. Under GITHUB_ACTIONS
+# post-land-shell.sh skips its first-parent window (gt-phsp89), but the shell
+# tier still stamps versions with git describe, and scripts/makefile-gate_test.sh
+# fails without the history and the tags: removing them turned every post-land
+# check on main red from 7ae99ed7 (gt-b14yam). TestPostLandWorkflowKeepsHistoryAndTags
+# pins both.
+#
+# No concurrency block on purpose: a cancelled or replaced run would leave a
+# failure or no status on a commit that did nothing wrong.
 name: post-land
 on:
   push:
@@ -18,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # post-land-shell.sh reads the last two hours of first-parent history
+          fetch-depth: 0   # the shell tier's version stamp (git describe) reads the history
       - name: fetch the tags
         run: git fetch --no-tags --prune origin "+refs/tags/*:refs/tags/*"
       - run: GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh

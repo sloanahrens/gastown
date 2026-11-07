@@ -1160,6 +1160,12 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 		// may still be outstanding: retrying it here is the only place a quiet
 		// rig would ever retry it (gt-fn9e6.52).
 		d.tierSweepRetryOwedPromotion(rig, repo, state.LastGreenSHA)
+		// The green ref is retried here for the same reason: a push that
+		// failed, or that a previous process never made, would otherwise wait
+		// for main to move before the image build saw the commit
+		// (gt-gg9hv.61). The publish lists the ref first, so a ref already at
+		// the commit costs no push.
+		d.tierSweepPublishGreenRef(rig, state.LastGreenSHA)
 		cycle.skipStep(rig, "origin/main "+shortSHA(sha)+" unchanged since the last green sweep")
 		d.logger.Printf("tier_sweep: %s: origin/main %s unchanged since the last green sweep; skipping", rig, shortSHA(sha))
 		return true
@@ -1503,6 +1509,10 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// tier at this commit. A red or partial cycle promotes nothing.
 	if green {
 		d.tierSweepPromote(rig, repo, sha)
+		// The image build's ref is not part of the promotion: a rig that
+		// promotes nowhere still publishes its green commits when
+		// tier_sweep.image_rigs names it (gt-gg9hv.61).
+		d.tierSweepPublishGreenRef(rig, sha)
 	}
 	cycle.closeStep(rig)
 	d.logger.Print(tierSweepSweptLine(rig, sha, results, stages, d.clk().Now().Sub(now)))
@@ -3433,6 +3443,15 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 			tierSweepCloseGreen(d, bd, rig, tier, sha, existing)
 			continue
 		}
+		if tierSweepNoRunResult(ts) {
+			// No run reported on this tier, so there is no failing unit for a
+			// polecat to fix. The record keeps the tier RED and raises its
+			// attention item; the next sweep re-runs the tip and files a bead
+			// only if a run actually fails (gt-856oaq).
+			tierSweepCloseNoRunBead(d, bd, rig, tier, sha, existing)
+			d.logger.Printf("tier_sweep: %s: %s %s: no run result, no bead filed; the attention item stands until the next sweep", rig, tier, tierSweepRed)
+			continue
+		}
 		names := ts.FailedNames
 		if len(names) == 0 {
 			names = []string{tierSweepNoName}
@@ -3440,6 +3459,30 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 		for _, name := range names {
 			tierSweepFileRed(d, bd, rig, tier, name, sha, ts, existing[name])
 		}
+	}
+}
+
+// tierSweepNoRunResult reports whether a RED tier's only failure is that its
+// run never produced a result (tierSweepRunnerNoResult): the run never started,
+// was cut off, or wrote a result the daemon could not read. No unit failed, so
+// there is nothing to file a bead for. A list naming anything else is a real
+// failure and files as before.
+func tierSweepNoRunResult(ts tierSweepTierResult) bool {
+	return len(ts.FailedNames) == 1 && ts.FailedNames[0] == tierSweepRunnerNoResult
+}
+
+// tierSweepCloseNoRunBead closes the open bead an earlier sweep filed under the
+// runner's no-result reason, before tierSweepNoRunResult stopped filing one. That
+// bead names no failing unit, so it would send a polecat after nothing. A bead a
+// polecat has claimed is left to its owner, as tierSweepCloseGreen leaves it.
+func tierSweepCloseNoRunBead(d *Daemon, bd tierSweepBeadStore, rig, tier, sha string, byUnit map[string]tierSweepUnitBead) {
+	b, ok := byUnit[tierSweepRunnerNoResult]
+	if !ok || b.claimed {
+		return
+	}
+	reason := fmt.Sprintf("%s run produced no result at %s, so no unit failed (tier sweep)", tier, shortSHA(sha))
+	if err := bd.CloseWithReason(reason, b.id); err != nil {
+		d.logger.Printf("tier_sweep: %s: closing %s (%s %s): %v", rig, b.id, tier, tierSweepRunnerNoResult, err)
 	}
 }
 

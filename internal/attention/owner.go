@@ -102,6 +102,12 @@ var ruleOwners = map[string]Owner{
 	// look at: the overseer chases the image or the Job, and the person hears
 	// about it only if the disk itself fills.
 	RuleCacheTrimNoOp: OwnerOverseer,
+	// A green ref the image build cannot read is the sweeper's own repository
+	// and remote to look at before it reaches a person (gt-gg9hv.61).
+	RuleGreenRef: OwnerOverseer,
+	// A Dolt image behind the newest release is the town's own container to
+	// pull, which the overseer chases before a person is woken (gt-goda5m).
+	RuleDoltImageBehind: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

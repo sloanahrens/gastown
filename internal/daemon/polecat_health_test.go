@@ -416,7 +416,7 @@ func TestCheckPolecatHealth_HoldsASeatWaitingOnItsEscalation(t *testing.T) {
 	}{
 		{"open escalation", "myr/polecats/mycat", true, "hq-wisp-1 is still open for gt-xyz"},
 		{"closed escalation", "myr/polecats/mycat", false, "hq-wisp-1 for gt-xyz is closed; patrol_scan resumes the seat"},
-		{"another role's escalation for the bead", "myr/crew/sloan", false, "no escalation of the seat's names gt-xyz"},
+		{"another role's escalation for the bead", "myr/crew/operator", false, "no escalation of the seat's names gt-xyz"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

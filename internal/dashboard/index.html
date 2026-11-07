@@ -1186,11 +1186,18 @@ function seatName(agent) {
   return seatShortNames.get(agent) || agent;
 }
 
-// shortAgent is the Agent cell's name: a sandbox seat by its short name, else the
-// agent without its provider prefix, so the cell reads flash for deepseek-flash.
-// Any other name shows unchanged.
+// modelWords are the model families the town runs, the short word an operator
+// asks for: the cell reads flash for deepseek-flash.
+const modelWords = new Set(["sonnet", "opus", "haiku", "flash", "pro", "fable"]);
+
+// shortAgent is the Agent cell's name: a sandbox seat by its short name, else a
+// model family without its provider prefix. A name that is not one of the model
+// words is a seat's own name rather than a model, and shows whole (gt-a12ozf).
 function shortAgent(agent) {
-  return seatShortNames.get(agent) || agent.replace(/^(claude|deepseek)-/, "");
+  const seat = seatShortNames.get(agent);
+  if (seat) return seat;
+  const model = /^(?:claude|deepseek)-(.+)$/.exec(agent);
+  return model && modelWords.has(model[1]) ? model[1] : agent;
 }
 
 // workRow is one seat. Every cell clips with an ellipsis and carries its whole
@@ -3643,18 +3650,19 @@ function costGCP(box, c) {
 }
 
 // The JEV panel, under the Tier sweeps and folded until opened. The title line
-// carries the totals, the scorecard window with the read's age, and a chip per
-// verdict; each battery is a table row, its score's age under its name and its
-// not-yet questions folded behind their count. The scorecard is the cache a
-// refresh writes, so the title's age is the file read's and each row's is its
-// own score's. A failed or stale read says unavailable on the title line and
-// draws no rows, since the last window's verdicts would pass as current. A
-// battery whose refresh failed draws the last good block the cache kept and
-// says so, or its name alone when there was none. No value and no status means
-// the panel is left out; a value with no_scorecard means no refresh has run,
-// and the title says how to make one. The chips take the tokens every other
-// panel colours with, so both themes read them; the title's tooltip gives each
-// verdict's meaning.
+// carries the totals, the scorecard window with the oldest score's age, and a
+// chip per verdict; each battery is a table row, its score's age under its name
+// and its not-yet questions folded behind their count. The scorecard is the
+// cache a refresh writes, so both ages come from the score blocks' scored_at
+// and never from the read: the file is re-read every minute however old the
+// scores it carries are. A failed or stale read says unavailable on the title
+// line and draws no rows, since the last window's verdicts would pass as
+// current. A battery whose refresh failed draws the last good block the cache
+// kept and says so, or its name alone when there was none. No value and no
+// status means the panel is left out; a value with no_scorecard means no
+// refresh has run, and the title says how to make one. The chips take the
+// tokens every other panel colours with, so both themes read them; the title's
+// tooltip gives each verdict's meaning.
 const JV_VERDICTS = ["earning", "no-signal", "not-yet"];
 const JV_CLASS = {earning: "jv-earning", "no-signal": "jv-nosignal", "not-yet": "jv-notyet"};
 const JV_MEANING = {
@@ -3742,12 +3750,12 @@ function jevRow(b) {
 }
 
 // renderJev draws the JEV panel: the totals as the title line with the
-// scorecard's window and the read's age (or that the age cannot be known),
-// three verdict counts as chips beside them, then one table row per battery in
-// name order, its score's age under its name, its earning and no-signal
-// questions as chips and the not-yet ones folded. A cache no refresh has
-// written yet says how to make one. The counts come from the server's Tally, so
-// the page never adds them up.
+// scorecard's window and the oldest score's age (or that the age cannot be
+// known), three verdict counts as chips beside them, then one table row per
+// battery in name order, its score's age under its name, its earning and
+// no-signal questions as chips and the not-yet ones folded. A cache no refresh
+// has written yet says how to make one. The counts come from the server's
+// Tally, so the page never adds them up.
 function renderJev(s) {
   if (pushSkip("jev", s)) return;
   const sec = $("jevsec"), box = $("jev"), note = $("jevnote");
@@ -3770,9 +3778,16 @@ function renderJev(s) {
   const lost = sc.unavailable || [];
   const parts = [(t.batteries || 0) + (t.batteries === 1 ? " battery" : " batteries"), (t.items || 0) + " items", (t.labeled || 0) + " labeled"];
   if (sc.window) parts.push("last " + sc.window);
-  // The title line always dates its reading: a scorecard whose read carries no
-  // stamp says the age cannot be known rather than leaving it out.
-  parts.push(r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : "read age unknown");
+  // The title line dates the scores it sums, not the read that carried them: a
+  // battery's score can be days old while the read is a minute old, so the line
+  // states its oldest score and says the age cannot be known when any battery
+  // carries none, rather than passing the read's age off as the scores'. A
+  // battery with no stamp, or one whose stamp the page cannot read, makes the
+  // age unknown rather than leaving that battery out, which would read younger
+  // than a score the line cannot date.
+  const stamps = (sc.batteries || []).map(b => b.scored_at ? new Date(b.scored_at).getTime() : NaN);
+  const oldest = stamps.length && stamps.every(t => !isNaN(t)) ? (Date.now() - Math.min(...stamps)) / 1000 : null;
+  parts.push(oldest != null ? "oldest score " + fmtDur(oldest) + " ago" : "score age unknown");
   note.append(document.createTextNode(parts.join(" · ")));
   const counts = {earning: t.earning || 0, "no-signal": t.no_signal || 0, "not-yet": t.not_yet || 0};
   for (const v of JV_VERDICTS) note.append(document.createTextNode(" "), jevChip(v, counts[v] + " " + v, JV_MEANING[v]));

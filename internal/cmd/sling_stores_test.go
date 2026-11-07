@@ -50,7 +50,7 @@ func TestRecordBlockerOverrideWritesTheComment(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	err = fakeSlingStores(db).recordBlockerOverride("/town", issue.ID, "gastown/crew/sloan",
+	err = fakeSlingStores(db).recordBlockerOverride("/town", issue.ID, "gastown/crew/operator",
 		[]string{"gt-block (open)", "gt-later (deferred)"})
 	if err != nil {
 		t.Fatalf("recordBlockerOverride: %v", err)
@@ -63,10 +63,10 @@ func TestRecordBlockerOverrideWritesTheComment(t *testing.T) {
 		t.Fatalf("comments = %v, want exactly the override record", comments)
 	}
 	got := comments[0]
-	if got.Author != "gastown/crew/sloan" {
+	if got.Author != "gastown/crew/operator" {
 		t.Errorf("author = %q, want the actor", got.Author)
 	}
-	for _, want := range []string{"--ignore-blockers", "gastown/crew/sloan", "gt-block (open)", "gt-later (deferred)"} {
+	for _, want := range []string{"--ignore-blockers", "gastown/crew/operator", "gt-block (open)", "gt-later (deferred)"} {
 		if !strings.Contains(got.Text, want) {
 			t.Errorf("comment %q does not name %q", got.Text, want)
 		}
@@ -78,7 +78,7 @@ func TestRecordBlockerOverrideWritesTheComment(t *testing.T) {
 // never a silent dispatch (the caller refuses the sling on it).
 func TestRecordBlockerOverrideReturnsAWriteFailure(t *testing.T) {
 	t.Parallel()
-	err := fakeSlingStores(beadsfake.New()).recordBlockerOverride("/town", "gt-gone", "gastown/crew/sloan",
+	err := fakeSlingStores(beadsfake.New()).recordBlockerOverride("/town", "gt-gone", "gastown/crew/operator",
 		[]string{"gt-block (open)"})
 	if err == nil {
 		t.Fatal("recordBlockerOverride = nil error for a bead the store does not hold")

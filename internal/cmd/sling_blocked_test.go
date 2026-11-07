@@ -39,7 +39,7 @@ func TestSlingRefusesABeadWithAnUnresolvedBlocker(t *testing.T) {
 		mover  string // the first side effect the refused path must not reach
 	}{
 		{name: "rig target", target: "gastown", mover: "spawn"},
-		{name: "agent target", target: "gastown/crew/sloan", mover: "resolve target"},
+		{name: "agent target", target: "gastown/crew/operator", mover: "resolve target"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestSlingRefusesABeadWithAnUnresolvedBlocker(t *testing.T) {
 // --ignore-blockers does, and it names itself in the record it leaves.
 func TestSlingForceStillRefusesABlockedBead(t *testing.T) {
 	t.Parallel()
-	for _, target := range []string{"gastown", "gastown/crew/sloan"} {
+	for _, target := range []string{"gastown", "gastown/crew/operator"} {
 		target := target
 		t.Run(target, func(t *testing.T) {
 			t.Parallel()
@@ -100,7 +100,7 @@ func TestSlingIgnoreBlockersSlingsAndRecordsTheOverride(t *testing.T) {
 		applied string // the call that proves the dispatch went through
 	}{
 		{name: "rig target", target: "gastown", applied: "spawn"},
-		{name: "agent target", target: "gastown/crew/sloan", applied: "hook " + slingBead + " gastown/crew/sloan"},
+		{name: "agent target", target: "gastown/crew/operator", applied: "hook " + slingBead + " gastown/crew/operator"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -116,7 +116,7 @@ func TestSlingIgnoreBlockersSlingsAndRecordsTheOverride(t *testing.T) {
 				t.Fatalf("--ignore-blockers did not sling the bead: %v", err)
 			}
 			h.wantCalls("blocker override",
-				"blocker override "+slingBead+" by gastown/crew/sloan: gt-block (open), gt-later (deferred)")
+				"blocker override "+slingBead+" by "+slingTestSeat+": gt-block (open), gt-later (deferred)")
 			if len(h.matching(tc.applied)) == 0 {
 				t.Fatalf("the dispatch did not reach %q\nfull log:\n  %s", tc.applied, strings.Join(h.log(), "\n  "))
 			}
@@ -129,7 +129,7 @@ func TestSlingIgnoreBlockersSlingsAndRecordsTheOverride(t *testing.T) {
 // refuses the sling instead of dispatching work over blockers unrecorded.
 func TestSlingIgnoresBlockersOnlyWhenTheRecordIsWritten(t *testing.T) {
 	t.Parallel()
-	for _, target := range []string{"gastown", "gastown/crew/sloan"} {
+	for _, target := range []string{"gastown", "gastown/crew/operator"} {
 		target := target
 		t.Run(target, func(t *testing.T) {
 			t.Parallel()
@@ -315,7 +315,7 @@ func TestScheduleBeadCarriesTheBlockersOverride(t *testing.T) {
 	// The queue dispatches as the daemon, so the context carries the operator
 	// who took the override, or the comment the dispatch leaves would name the
 	// wrong actor (gt-e3hl2).
-	if fields.BlockerOverrideActor != "gastown/crew/sloan" {
+	if fields.BlockerOverrideActor != slingTestSeat {
 		t.Errorf("sling context BlockerOverrideActor = %q, want the slinging actor", fields.BlockerOverrideActor)
 	}
 }

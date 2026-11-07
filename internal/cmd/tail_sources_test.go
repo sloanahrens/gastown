@@ -1668,6 +1668,180 @@ func TestTailBeads_NotFoundIsAskedAgainAfterTheWindow(t *testing.T) {
 	}
 }
 
+// TestTailBeadsSubmittedBy: the actor of a bead's newest "Submitted for
+// landing" comment is its submitter, and a comment written after it (om's
+// verdict, a follow-up) does not hide it. A successful read that names no
+// submission, and a reader with no comment source, name no one, so the page
+// reads the landing as the operator's; a read that fails names the page's
+// unreadable-source mark, never the operator (gt-6ua0sn, gt-f1fc2f).
+func TestTailBeadsSubmittedBy(t *testing.T) {
+	t.Parallel()
+	comments := []beads.Comment{
+		{Author: "gastown/polecats/keeper", Text: "Submitted for landing: polecat/keeper/gt-1+old @ 1111 onto main"},
+		{Author: "town/crew/overseer", Text: "Submitted for landing: crew/ops/gt-1 @ 2222 onto main"},
+		{Author: "daemon", Text: "om approve 0.88"},
+	}
+	for name, tc := range map[string]struct {
+		read func(rig, id string) ([]beads.Comment, error)
+		want string
+	}{
+		"newest submission wins": {func(string, string) ([]beads.Comment, error) { return comments, nil }, "town/crew/overseer"},
+		"no submission comment": {func(string, string) ([]beads.Comment, error) {
+			return []beads.Comment{{Author: "daemon", Text: "om approve 0.88"}}, nil
+		}, ""},
+		"unreadable comments": {func(string, string) ([]beads.Comment, error) { return nil, fmt.Errorf("bd failed") }, submitterUnknown},
+		"no comments source":  {nil, ""},
+	} {
+		b := newTailBeads(nil)
+		b.comments = tc.read
+		if got := b.submittedBy("gastown", "gt-1"); got != tc.want {
+			t.Errorf("%s: submittedBy = %q, want %q", name, got, tc.want)
+		}
+	}
+	var nilReader *tailBeads
+	if got := nilReader.submittedBy("gastown", "gt-1"); got != "" {
+		t.Errorf("nil reader submittedBy = %q, want none", got)
+	}
+
+	read := false
+	b := newTailBeads(nil)
+	b.comments = func(string, string) ([]beads.Comment, error) { read = true; return comments, nil }
+	if got := b.submittedBy("gastown", "-danger"); got != "" {
+		t.Errorf("flag-shaped id submittedBy = %q, want none", got)
+	}
+	if read {
+		t.Error("a flag-shaped bead id reached the comments read")
+	}
+}
+
+// TestTailBeadsSubmittedByIsCached: a successful answer is reused inside
+// tailSubmitterTTL and read again once it passes. The dashboard asks each ops
+// row on every poll, and each ask was a bd comments subprocess (gt-f1fc2f).
+func TestTailBeadsSubmittedByIsCached(t *testing.T) {
+	t.Parallel()
+	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
+	reads := 0
+	b := newTailBeads(nil)
+	b.now = func() time.Time { return clock }
+	b.comments = func(string, string) ([]beads.Comment, error) {
+		reads++
+		return []beads.Comment{{Author: "town/crew/overseer", Text: "Submitted for landing: crew/ops/gt-1 @ 2222 onto main"}}, nil
+	}
+	for i := 0; i < 2; i++ {
+		if got := b.submittedBy("gastown", "gt-1"); got != "town/crew/overseer" {
+			t.Fatalf("ask %d: submittedBy = %q, want the submitter", i, got)
+		}
+	}
+	if reads != 1 {
+		t.Fatalf("read %d times inside the window, want once", reads)
+	}
+	clock = clock.Add(tailSubmitterTTL)
+	if got := b.submittedBy("gastown", "gt-1"); got != "town/crew/overseer" {
+		t.Fatalf("submittedBy after the window = %q, want the submitter", got)
+	}
+	if reads != 2 {
+		t.Fatalf("read %d times after the window, want a second read", reads)
+	}
+}
+
+// TestTailBeadsSubmittedByFailureIsNotCached: a read that failed answers the
+// unreadable mark and is retried on the next ask, so a transient failure does
+// not hold the page's "?" for the whole window (gt-f1fc2f).
+func TestTailBeadsSubmittedByFailureIsNotCached(t *testing.T) {
+	t.Parallel()
+	failing := true
+	reads := 0
+	b := newTailBeads(nil)
+	b.comments = func(string, string) ([]beads.Comment, error) {
+		reads++
+		if failing {
+			return nil, fmt.Errorf("bd failed")
+		}
+		return []beads.Comment{{Author: "town/crew/overseer", Text: "Submitted for landing: crew/ops/gt-1 @ 2222 onto main"}}, nil
+	}
+	if got := b.submittedBy("gastown", "gt-1"); got != submitterUnknown {
+		t.Fatalf("submittedBy on a failed read = %q, want %q", got, submitterUnknown)
+	}
+	failing = false
+	if got := b.submittedBy("gastown", "gt-1"); got != "town/crew/overseer" {
+		t.Fatalf("submittedBy after the read recovers = %q, want the submitter", got)
+	}
+	if reads != 2 {
+		t.Fatalf("read %d times, want the failed read retried", reads)
+	}
+}
+
+// fakeCommentStore is a rig's bead store for the production comments path: it
+// records the reads the real store would send to bd.
+type fakeCommentStore struct {
+	comments []beads.Comment
+	err      error
+	shows    int
+	comment  int
+}
+
+func (s *fakeCommentStore) Show(id string) (*beads.Issue, error) {
+	s.shows++
+	return &beads.Issue{ID: id, Title: "title of " + id}, nil
+}
+
+func (s *fakeCommentStore) Comments(string) ([]beads.Comment, error) {
+	s.comment++
+	return s.comments, s.err
+}
+
+// TestTailBeadsFromStoreReadsComments: the production reader's comments
+// closure asks the same store the titles come from and returns its read, so a
+// landing's submitter is read through the wiring the dashboard uses
+// (gt-f1fc2f). A store that cannot be opened answers the same way a failed
+// comments read does.
+func TestTailBeadsFromStoreReadsComments(t *testing.T) {
+	t.Parallel()
+	store := &fakeCommentStore{comments: []beads.Comment{
+		{Author: "town/crew/overseer", Text: "Submitted for landing: crew/ops/gt-1 @ 2222 onto main"},
+	}}
+	var opened []string
+	b := newTailBeadsFromStore(func(rig string) (tailStore, error) {
+		opened = append(opened, rig)
+		return store, nil
+	})
+	if got := b.title("gastown", "gt-1"); got != "title of gt-1" {
+		t.Fatalf("title = %q, want the store's title", got)
+	}
+	if got := b.submittedBy("gastown", "gt-1"); got != "town/crew/overseer" {
+		t.Fatalf("submittedBy = %q, want the store's submitter", got)
+	}
+	if store.shows != 1 || store.comment != 1 {
+		t.Fatalf("store reads = %d shows, %d comments, want one of each", store.shows, store.comment)
+	}
+	if len(opened) != 2 || opened[0] != "gastown" || opened[1] != "gastown" {
+		t.Fatalf("opened %v, want the same rig's store for both reads", opened)
+	}
+
+	b = newTailBeadsFromStore(func(string) (tailStore, error) { return nil, fmt.Errorf("no store") })
+	if got := b.submittedBy("gastown", "gt-1"); got != submitterUnknown {
+		t.Fatalf("submittedBy with no store = %q, want %q", got, submitterUnknown)
+	}
+}
+
+// TestOpenTailBeadsWithoutATown: a reader with no town to resolve a rig's beads
+// directory from names no title rather than reaching bd, and its comments read
+// reports the missing store instead of an empty answer. A submitter read then
+// answers the unreadable mark, never the operator (gt-f1fc2f).
+func TestOpenTailBeadsWithoutATown(t *testing.T) {
+	t.Parallel()
+	b := openTailBeads("")
+	if got := b.title("gastown", "gt-1"); got != "" {
+		t.Errorf("title = %q with no beads directory, want none", got)
+	}
+	if got := b.submittedBy("gastown", "gt-1"); got != submitterUnknown {
+		t.Errorf("submittedBy = %q with no beads directory, want %q", got, submitterUnknown)
+	}
+	if _, err := b.comments("gastown", "gt-1"); err == nil {
+		t.Error("comments read with no beads directory answered no error")
+	}
+}
+
 // TestEventsSource_NotFoundBeadIsReadOnceAcrossPolls: a journal that keeps
 // naming a bead bd reports as not found makes one bd show for it in the whole
 // run. pollIssue's per-poll map is cleared every poll, so it is the not-found

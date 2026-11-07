@@ -252,12 +252,11 @@ func profileAllows(p profileFile, method, route string) bool {
 	return false
 }
 
-// refusedRoutes are the nine routes the seat-token research's refuse list
-// names:
-// the admin-gated ones, and the four no seat has been shown to call. The
-// profile leaves them out so a seat token minted with admin scope still cannot
-// reach them from a sandbox. POST /v1/issues:delete is the tenth: no seat may
-// delete a bead, and the server does not check ownership (gt-zbpf0).
+// refusedRoutes are the nine routes the profile refuses because they are
+// admin-gated or no seat has been shown to call them. The profile leaves them
+// out so a seat token minted with admin scope still cannot reach them from a
+// sandbox. POST /v1/issues:delete is the tenth: no seat may delete a bead, and
+// the server does not check ownership (gt-zbpf0).
 var refusedRoutes = []struct{ method, path string }{
 	{"POST", "/v1/tokens"},
 	{"POST", "/v1/tokens:revoke"},

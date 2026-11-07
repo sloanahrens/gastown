@@ -22,7 +22,7 @@ func TestTopConsumersNamesTheThreeBiggest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TopConsumers(golden) = error %v", err)
 	}
-	const want = "forgejo/forgejo-runner-6c8f9 61 GB, forgejo/forgejo-0 12 GB, forgejo-trial/forgejo-trial-0 9 GB"
+	const want = "forgejo/forgejo-runner-df77dd979-g25pq 61 GB, forgejo/forgejo-57658978cf-5nzvk 12 GB, forgejo-trial/forgejo-6884fd5d78-6mqpl 9 GB"
 	if got != want {
 		t.Fatalf("TopConsumers(golden) = %q, want %q", got, want)
 	}
@@ -96,22 +96,25 @@ func TestTopConsumersRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
-// TestTopConsumersSanitizesClusterNames: a name with control characters or a
-// line separator reads as one line, and a name is cut at consumerNameRunes runes
-// however long the cluster made it.
+// TestTopConsumersSanitizesClusterNames: a name with control characters, a line
+// separator or a format character (a bidi override, a zero-width mark) reads as
+// one plain line, and a name is cut at consumerNameRunes runes however long the
+// cluster made it.
 func TestTopConsumersSanitizesClusterNames(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("a", 5000)
-	lineBreak := func(r rune) bool {
-		return unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
+	unsafeRune := func(r rune) bool {
+		return unicode.IsControl(r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) || unicode.Is(unicode.Cf, r)
 	}
 	cases := map[string]struct {
 		namespace, pod string
 	}{
-		"a newline in the pod name":         {namespace: "ns", pod: "evil\nname\r\x00end"},
-		"a line separator in the namespace": {namespace: "ns\u2028x", pod: "pod"},
-		"5000 characters in the pod name":   {namespace: "ns", pod: long},
-		"5000 characters in the namespace":  {namespace: long, pod: "pod"},
+		"a newline in the pod name":          {namespace: "ns", pod: "evil\nname\r\x00end"},
+		"a line separator in the namespace":  {namespace: "ns\u2028x", pod: "pod"},
+		"a bidi override in the pod name":    {namespace: "ns", pod: "evil\u202egnp\u2069end"},
+		"a zero-width mark in the namespace": {namespace: "ns\u200bx\ufeff", pod: "pod"},
+		"5000 characters in the pod name":    {namespace: "ns", pod: long},
+		"5000 characters in the namespace":   {namespace: long, pod: "pod"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -127,8 +130,8 @@ func TestTopConsumersSanitizesClusterNames(t *testing.T) {
 			if err != nil {
 				t.Fatalf("TopConsumers = error %v", err)
 			}
-			if strings.ContainsFunc(got, lineBreak) {
-				t.Fatalf("TopConsumers = %q, want one line with no control character", got)
+			if strings.ContainsFunc(got, unsafeRune) {
+				t.Fatalf("TopConsumers = %q, want one plain line with no control or format character", got)
 			}
 			name, _, ok := strings.Cut(got, " 1 GB")
 			if !ok {
@@ -142,7 +145,7 @@ func TestTopConsumersSanitizesClusterNames(t *testing.T) {
 }
 
 // TestGoldenSummaryIsTheDiskReadingToo: the golden is a summary ParseNodeStats
-// reads as the node's 81%, so the alert's reading and its consumers come from
+// reads as the node's 91%, so the alert's reading and its consumers come from
 // one document.
 func TestGoldenSummaryIsTheDiskReadingToo(t *testing.T) {
 	t.Parallel()
@@ -154,7 +157,7 @@ func TestGoldenSummaryIsTheDiskReadingToo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseNodeStats(golden) = error %v", err)
 	}
-	if got != 81 {
-		t.Fatalf("ParseNodeStats(golden) = %v, want 81", got)
+	if got != 91 {
+		t.Fatalf("ParseNodeStats(golden) = %v, want 91", got)
 	}
 }

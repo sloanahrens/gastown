@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -1773,6 +1774,47 @@ func cacheTrimCheckFitCase(t *testing.T, listing string, need int64, tc cacheTri
 	}
 }
 
+// TestCacheTrimDfReadingIgnoresTheUsedColumn pins what the df reading takes
+// from its row: the Available column only. A Used column that is not a whole
+// number is not read and does not fail the reading, so the room-versus-list
+// cases behave as with a whole-KiB Used -- a too-large list is refused and one
+// that fits applies. While Used was still parsed (gt-hilhxl), such a row left
+// the room unknown and the trim ran without the fit check.
+func TestCacheTrimDfReadingIgnoresTheUsedColumn(t *testing.T) {
+	t.Parallel()
+	listing, need := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	for _, tc := range cacheTrimFitCases(need) {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reply := cliReply{stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
+				fmt.Sprintf("overlay 1000000 not-a-number %d 1%% /", tc.free/1024)}
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+				cacheTrimListVerb: {stdout: listing},
+				cacheTrimFreeVerb: reply,
+			})
+			f.d.runDiskMaintenance()
+
+			applies := len(f.applyCalls())
+			if tc.applies {
+				if applies != 1 {
+					t.Errorf("the pass applied %d documents for a list the claim has room for, want the one Job: %s", applies, f.log.String())
+				}
+				if logged := f.log.String(); strings.Contains(logged, "free space unknown") {
+					t.Errorf("a df Used column that is not a number left the room unknown: %s", logged)
+				}
+				return
+			}
+			if applies != 0 {
+				t.Errorf("the pass applied %d documents for a list the claim cannot hold", applies)
+			}
+			want := fmt.Sprintf("does not fit the claim's free space (%d); nothing trimmed", tc.free)
+			if logged := f.log.String(); !strings.Contains(logged, want) {
+				t.Errorf("the log does not carry the refusal %q: %s", want, logged)
+			}
+		})
+	}
+}
+
 // TestCacheTrimOldImageFreeSpace pins the rollout case the df read exists for.
 // The listing is the bare array the cycle-2 image prints; df runs in the pod,
 // never through the helper, whose dispatcher sends any first argument it does
@@ -2774,6 +2816,70 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 				t.Errorf("the failed pass does not say %q: %s", tc.survive, logged)
 			}
 		})
+	}
+}
+
+// TestCacheTrimNoOpClearsWhenNoProfileMountsTheClaim pins the claim a profile
+// drops: no pass reaches a claim no profile mounts, so its item is cleared from
+// the profiles the pass read. A profile read that fails clears nothing.
+func TestCacheTrimNoOpClearsWhenNoProfileMountsTheClaim(t *testing.T) {
+	t.Parallel()
+	raised := func(t *testing.T) *cacheTrimFixture {
+		t.Helper()
+		f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 1 {
+			t.Fatalf("the first pass yielded %d items, want the one it raised: %+v\nlog: %s", len(got), got, f.log.String())
+		}
+		return f
+	}
+
+	t.Run("the profiles no longer mount the claim", func(t *testing.T) {
+		t.Parallel()
+		f := raised(t)
+		f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+			return map[string]agentconfig.SandboxProfile{}, nil
+		}
+		f.trimDue()
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 0 {
+			t.Errorf("a pass whose profiles drop the claim yielded %+v, want no item", got)
+		}
+	})
+
+	t.Run("the profiles cannot be read", func(t *testing.T) {
+		t.Parallel()
+		f := raised(t)
+		f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+			return nil, errors.New("profiles unavailable")
+		}
+		f.trimDue()
+		f.d.runDiskMaintenance()
+		if got := f.noOpItems(t); len(got) != 1 {
+			t.Errorf("a pass that could not read the profiles yielded %+v, want the item left as it was", got)
+		}
+	})
+}
+
+// TestCacheTrimNoOpKeepsItemWhileAPodHoldsTheClaimWithoutRunning pins the branch
+// that keeps an item: a pod holds the claim but none is running, so the claim is
+// still there and a later trim can measure it.
+func TestCacheTrimNoOpKeepsItemWhileAPodHoldsTheClaimWithoutRunning(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
+	f.d.runDiskMaintenance()
+	if got := f.noOpItems(t); len(got) != 1 {
+		t.Fatalf("the first pass yielded %d items, want the one it raised: %+v\nlog: %s", len(got), got, f.log.String())
+	}
+
+	f.answerFrom("get pods ", cliReply{stdout: `{"items":[` + cacheTrimPodJSON("sbx-b", "Pending", cacheTrimClaimName) + `]}`})
+	f.trimDue()
+	f.d.runDiskMaintenance()
+	if got := f.noOpItems(t); len(got) != 1 {
+		t.Errorf("a pass whose only holder is pending yielded %+v, want the item kept", got)
+	}
+	if logged := f.log.String(); !strings.Contains(logged, "no running pod mounts it") {
+		t.Errorf("the pass does not say why nothing was trimmed: %s", logged)
 	}
 }
 

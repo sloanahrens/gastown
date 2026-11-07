@@ -538,9 +538,25 @@ func TestDoltHistoryDocArchivesBeforeTheBackup(t *testing.T) {
 		t.Errorf("\"Before any rewrite\" stops the server and takes the backup before the 0-commits-behind check:\n%s", section)
 	}
 
-	const sequenced = "Take the copy only after every database reads"
+	const sequenced = "Take the copy only after step 2's checks pass"
 	if !strings.Contains(section, sequenced) {
-		t.Errorf("\"Before any rewrite\" does not say the copy is taken only after every database reads 0 behind; it does not carry %q:\n%s", sequenced, section)
+		t.Errorf("\"Before any rewrite\" does not say the copy is taken only after step 2's checks pass; it does not carry %q:\n%s", sequenced, section)
+	}
+}
+
+// TestDoltHistoryDocStep3PointsAtStep2: step 2 states the 0-commits-behind
+// check, so step 3 points back at it rather than restating it — a second copy
+// drifts, and the reader who finds the stale one cannot tell which is live
+// (gt-mlmkxz).
+func TestDoltHistoryDocStep3PointsAtStep2(t *testing.T) {
+	t.Parallel()
+	step3 := historyDocStep(t, "## Before any rewrite", "\n3. ", "\n4. ")
+
+	if n := strings.Count(step3, "0 commits behind"); n != 0 {
+		t.Errorf("step 3 of \"Before any rewrite\" restates the 0-commits-behind reading %d times, want a pointer to step 2:\n%s", n, step3)
+	}
+	if !strings.Contains(step3, "step 2's checks pass") {
+		t.Errorf("step 3 of \"Before any rewrite\" does not point at step 2's checks:\n%s", step3)
 	}
 }
 
@@ -555,8 +571,8 @@ func TestDoltHistoryDocBackupNamesTheStoppedServer(t *testing.T) {
 
 	// The runbook wraps its lines, so match the unwrapped prose.
 	prose := strings.Join(strings.Fields(section), " ")
-	const copy = "copy the database directory while the server is stopped"
-	at := strings.Index(prose, copy)
+	const backupCopy = "copy the database directory while the server is stopped"
+	at := strings.Index(prose, backupCopy)
 	if at < 0 {
 		t.Fatalf("\"Before any rewrite\" does not carry the backup copy taken while the server is stopped:\n%s", section)
 	}
@@ -566,7 +582,7 @@ func TestDoltHistoryDocBackupNamesTheStoppedServer(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		copy,
+		backupCopy,
 		"nightly backups under",
 		"~/gt-backups/dolt",
 		"docs/dolt-restore.md",
@@ -694,6 +710,9 @@ func TestDoltHistoryDocStartsTheServerAfterTheCopy(t *testing.T) {
 	if strings.Index(doc, "`gt dolt start`") > flatten {
 		t.Errorf("the flatten SQL runs before the runbook starts the server again")
 	}
+	if strings.Index(doc, "`gt dolt start`") < 0 {
+		t.Fatal("docs/dolt-history-offline.md has no `gt dolt start` step, so the flatten order cannot be checked")
+	}
 }
 
 // TestDoltHistoryDocVerifiesAfterTheFlatten: after the flatten the runbook
@@ -721,6 +740,37 @@ func TestDoltHistoryDocVerifiesAfterTheFlatten(t *testing.T) {
 	recount := strings.Index(prose, "Re-count every table")
 	if behind < 0 || archive < 0 || recount < 0 || behind > archive || archive > recount {
 		t.Errorf("the flatten section does not verify in order: archive state, archive-now, then re-count:\n%s", section)
+	}
+}
+
+// TestDoltHistoryDocBoundsThePostFlattenLoop: the post-flatten paragraph applies
+// step 2's exit-code and archive-line reading rather than its own, runs the
+// pass again only while it exits 2, and stops after three such passes with the
+// databases still behind reported to the overseer, so the repeat cannot run
+// without end and cannot read a step 2 refusal as caught up (gt-f6oeei).
+func TestDoltHistoryDocBoundsThePostFlattenLoop(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Flatten:")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"exit code and the status the way step 2 does",
+		"Run the pass again only while it exits 2",
+		"Stop after three passes that all exited 2",
+		"report the databases still behind to the overseer",
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("the flatten section does not carry %q:\n%s", want, section)
+		}
+	}
+
+	// The bound follows the pass it bounds, so a reader meets the loop and its
+	// stop rule before the row re-count that closes the verification.
+	pass := strings.Index(prose, "Run the pass again only while it exits 2")
+	bound := strings.Index(prose, "Stop after three passes that all exited 2")
+	recount := strings.Index(prose, "Re-count every table")
+	if pass < 0 || bound < 0 || recount < 0 || pass > bound || bound > recount {
+		t.Errorf("the flatten section does not bound the pass between the rerun rule and the re-count:\n%s", section)
 	}
 }
 

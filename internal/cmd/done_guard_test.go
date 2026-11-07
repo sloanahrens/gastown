@@ -22,10 +22,10 @@ func TestDoneNeedsPolecatWorktree(t *testing.T) {
 	root.AddCommand(done)
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 	const (
-		crewDir    = "/town/gastown/crew/sloan"
+		crewDir    = "/town/gastown/crew/operator"
 		polecatDir = "/town/gastown/polecats/refuge/gastown"
 	)
-	if doneNeedsPolecatWorktree(done, env(map[string]string{"BD_ACTOR": "gastown/crew/sloan"}), crewDir) {
+	if doneNeedsPolecatWorktree(done, env(map[string]string{"BD_ACTOR": "gastown/crew/operator"}), crewDir) {
 		t.Error("crew gt done hit the polecat worktree guard")
 	}
 	if doneNeedsPolecatWorktree(done, env(map[string]string{}), crewDir) {

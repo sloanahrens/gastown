@@ -108,6 +108,14 @@ const (
 	// pending verdicts cannot be read or written, so the post-land safety net
 	// is silent (gt-gg9hv.7.1).
 	KindPostLandUnknown Kind = "post-land-unknown"
+	// KindGreenRef: the sweep could not publish a fully green commit's
+	// green/<sha12> ref for the image build, or the remote holds that ref at
+	// another commit (gt-gg9hv.61).
+	KindGreenRef Kind = "green-ref"
+	// KindDoltImageBehind: the town's Dolt container runs a dolt-sql-server
+	// image more than one patch release behind the newest stable release on
+	// Docker Hub (gt-goda5m).
+	KindDoltImageBehind Kind = "dolt-image-behind"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -122,7 +130,7 @@ func Kinds() []Kind {
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostForgejo, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
-		KindBirdReportStale, KindPostLandUnknown,
+		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 	}
 }
 

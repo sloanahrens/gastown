@@ -80,7 +80,6 @@ func (c *ContainerCapacityCheck) Run(_ *CheckContext) *CheckResult {
 			Message: msg + " — too small for concurrent container suites",
 			Details: append([]string{
 				"Two concurrent full suites exceed a smaller VM and Dolt-backed tests time out.",
-				"See the 2026-09 test-suite concurrency notes in git history (CHANGELOG).",
 			}, details...),
 			FixHint: "Raise Docker Desktop memory to at least 16 GiB (Settings → Resources)",
 		}

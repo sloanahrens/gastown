@@ -135,7 +135,7 @@ path named for the retired mayor role) under:
 |-------|------|---------|-------------|
 | `news.enabled` | `*bool` | `true` | The Hacker News pane above the dashboard's Machine panel. The hub reads the top five stories from the public Hacker News API into a snapshot it holds for five minutes, so Hacker News is read about that often and the page never calls it; a refresh that fails shows what it last read, dimmed. `false` leaves out both the pane and the fetcher. `gt dashboard` reads the key when it starts, so a change needs a restart. |
 
-**Dashboard Jev lines.** The Cost panel keeps only the Jev spend row; the per-battery lines sit in their own JEV panel, folded until opened. Its title line totals the batteries, items and labeled items, states the scorecard's window and the read's age, and counts the questions earning, no-signal and not-yet. A battery whose report skipped lines says how many went unanswered, and each row says how long ago its score was computed. The panel reads the cache `gt jev scorecard --refresh` writes and starts no process. Before changing what a battery line shows or how the scorecard is read, run `gt dashboard --help` and read `internal/jev/scorecard/cache.go`. The test-only `fixture` battery is left out of the listing and the dashboard's reads.
+**Dashboard Jev lines.** The Cost panel keeps only the Jev spend row; the per-battery lines sit in their own JEV panel, folded until opened. Its title line totals the batteries, items and labeled items, states the scorecard's window and the read's age, and counts the questions earning, no-signal and not-yet. A battery whose report skipped lines says how many went unanswered, and each row says how long ago its score was computed. The panel reads the scorecard cache and starts no process. Before changing what a battery line shows or how the scorecard is read, read the *Scorecard cache and its daemon patrol (`jev_scorecard`)* section below and `internal/jev/scorecard/cache.go`. The test-only `fixture` battery is left out of the listing and the dashboard's reads.
 
 **Landing and gate fields:**
 
@@ -480,6 +480,21 @@ cluster with `kubectl --context colima-gt-control apply -f deploy/k8s/sweep-rbac
 `TestSweepRBACCoversEveryRead` holds the manifest to the reads listed in
 `internal/sweeprunner/testdata/rbac-reads.golden`, so a read the plan gains
 without a grant fails the unit test rather than the first live sweep.
+
+### Tier sweep image rigs
+
+`daemon.patrols.tier_sweep.image_rigs` names the rigs whose fully green sweep
+publishes a `green/<sha12>` ref for the image build to build from. The default
+is empty, and a town publishes nothing until the overseer names a rig.
+
+After a fully green sweep of a named rig, the daemon pushes `green/<sha12>` for
+the swept tip to the rig's `merge_queue.forgejo` remote. The push never changes
+the sweep's verdict. A name the town does not register refuses the publish for
+every rig and nothing is pushed, so a typo is logged rather than read as a rig
+that publishes nothing. A named rig with no Forgejo remote is refused the same
+way. If the remote already holds `green/<sha12>` at another commit, the ref is
+not moved and the conflict is logged. A failed push is retried on the next
+cycle. Older green refs are pruned once the newest one is published.
 
 ### Bird Reports
 

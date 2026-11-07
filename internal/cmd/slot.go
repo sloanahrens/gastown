@@ -74,7 +74,7 @@ behind another is visible in 'gt slot status' rather than looking like a hang.
 
 Run this wrapped around any suite that spins Docker/testcontainers, e.g.:
 
-  gt slot run --role gastown/crew/sloan -- make test`,
+  gt slot run --role gastown/crew/<name> -- make test`,
 	Args:               cobra.MinimumNArgs(1),
 	DisableFlagParsing: false,
 	RunE:               runSlotRun,

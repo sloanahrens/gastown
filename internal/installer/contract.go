@@ -27,7 +27,7 @@ type Contract struct {
 	Stderr io.Writer
 	// Receipts is the file receipts are appended to: <daemon>/install-receipts.jsonl.
 	// Empty means the run does not know its daemon directory yet and writes
-	// none, as the script's igt_receipt cannot on the paths before DAEMON_DIR
+	// none, as Contract.Receipt cannot on the paths before the daemon directory
 	// resolves.
 	Receipts string
 	// Source is the --source value, written to every receipt.

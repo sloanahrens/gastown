@@ -511,7 +511,7 @@ func TestInheritedRole(t *testing.T) {
 
 // staleMarkerRole is the role every stale-marker case's marker names and its
 // caller acts as, so that before gt-dfuxn the marker granted the fast path.
-const staleMarkerRole = "gastown/crew/sloan"
+const staleMarkerRole = "gastown/crew/operator"
 
 // staleMarkerCases build, in a fresh town, a process whose inherited marker
 // names an ancestor hold that is not in force (gt-dfuxn): holders cannot clear

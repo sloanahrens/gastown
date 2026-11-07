@@ -401,7 +401,7 @@ func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("JEV rows = %q, want %q", got, want)
 	}
-	if wantNote := "2 batteries · 216 items · 141 labeled · last 7d · read 2m ago 0 earning 0 no-signal 0 not-yet · 2 unavailable: dispatch, drift"; note.Text != wantNote {
+	if wantNote := "2 batteries · 216 items · 141 labeled · last 7d · score age unknown 0 earning 0 no-signal 0 not-yet · 2 unavailable: dispatch, drift"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
 	}
 	if note.Class != "r warnc" {
@@ -409,9 +409,9 @@ func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	}
 }
 
-// A scorecard the state carries without a read record has no age to state, and
-// the title line says so rather than leaving the question open.
-func TestJevPanelSaysWhenTheReadsAgeIsUnknown(t *testing.T) {
+// A scorecard the state carries without a read record still dates its scores:
+// the title line's age comes from the battery blocks, not the read.
+func TestJevPanelDatesTheScoresWithoutAReadRecord(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -419,7 +419,7 @@ func TestJevPanelSaysWhenTheReadsAgeIsUnknown(t *testing.T) {
 	delete(s["reads"].(map[string]any), "jev_scorecard")
 
 	_, note, _ := drawJevAt(t, now, s)
-	if want := "3 batteries · 221 items · 140 labeled · last 7d · read age unknown 1 earning 1 no-signal 1 not-yet"; note.Text != want {
+	if want := "3 batteries · 221 items · 140 labeled · last 7d · oldest score 5h00m ago 1 earning 1 no-signal 1 not-yet"; note.Text != want {
 		t.Errorf("JEV title line = %q, want %q", note.Text, want)
 	}
 }
@@ -652,7 +652,7 @@ func TestJevPanelDrawsOneRowPerBatteryInNameOrder(t *testing.T) {
 	if got, want := (jevRowTexts(rows))[2], "targets90needs_review"; got != want {
 		t.Errorf("targets' row = %q, want %q", got, want)
 	}
-	if wantNote := "3 batteries · 221 items · 140 labeled · last 7d · read 2m ago 1 earning 1 no-signal 1 not-yet"; note.Text != wantNote {
+	if wantNote := "3 batteries · 221 items · 140 labeled · last 7d · score age unknown 1 earning 1 no-signal 1 not-yet"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
 	}
 }
@@ -681,7 +681,7 @@ func TestJevPanelSaysThePackagesBatteryInItsOwnRow(t *testing.T) {
 	if got, want := jevHeadCells(t, dom), []string{"battery", "items", "labeled", "questions"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("the table's headings = %q, want %q", got, want)
 	}
-	if wantNote := "1 battery · 212 items · 140 labeled · last 7d · read 2m ago 1 earning 0 no-signal 0 not-yet"; note.Text != wantNote {
+	if wantNote := "1 battery · 212 items · 140 labeled · last 7d · score age unknown 1 earning 0 no-signal 0 not-yet"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
 	}
 	if strings.Contains(note.Text, "39858") {
@@ -689,9 +689,10 @@ func TestJevPanelSaysThePackagesBatteryInItsOwnRow(t *testing.T) {
 	}
 }
 
-// The title line says which window the scorecard read and how old that read is,
-// both off the data: a 36h scorecard says 36h, and nothing says 7d on its own.
-func TestJevTitleLineStatesTheWindowAndReadAge(t *testing.T) {
+// The title line says which window the scorecard scored and how old its oldest
+// score is, both off the data: a 36h scorecard says 36h, and nothing says 7d on
+// its own.
+func TestJevTitleLineStatesTheWindowAndScoreAge(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -699,13 +700,72 @@ func TestJevTitleLineStatesTheWindowAndReadAge(t *testing.T) {
 	s["jev_scorecard"].(map[string]any)["window"] = "36h"
 
 	_, note, _ := drawJevAt(t, now, s)
-	for _, want := range []string{"last 36h", "read 2m ago"} {
+	for _, want := range []string{"last 36h", "oldest score 5h00m ago"} {
 		if !strings.Contains(note.Text, want) {
 			t.Errorf("the title line %q does not say %q", note.Text, want)
 		}
 	}
 	if strings.Contains(note.Text, "7d") {
 		t.Errorf("the title line %q states a window the scorecard was not read over", note.Text)
+	}
+}
+
+// The title line dates the oldest score among the batteries it sums, not the
+// newest and not the read: a battery's score can be hours older than the read
+// that carried it, and the line must not read fresher than its oldest number.
+func TestJevTitleLineDatesTheOldestScoreNotTheRead(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	s := jevScorecardState(now, nil)
+	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
+		map[string]any{"name": "finding", "scored_at": now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)},
+		map[string]any{"name": "landing", "scored_at": now.Add(-time.Hour).UTC().Format(time.RFC3339)},
+	}
+
+	_, note, _ := drawJevAt(t, now, s)
+	if !strings.Contains(note.Text, "oldest score 5h00m ago") {
+		t.Errorf("the title line %q does not date the oldest score", note.Text)
+	}
+	if strings.Contains(note.Text, "read ") {
+		t.Errorf("the title line %q dates the read instead of the scores", note.Text)
+	}
+}
+
+// A score stamp the page cannot read leaves the title line's age unknown: the
+// line must not read younger than a battery it cannot date.
+func TestJevTitleLineLeavesAnUnreadableScoreStampUnknown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	s := jevScorecardState(now, nil)
+	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
+		map[string]any{"name": "finding", "scored_at": now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)},
+		map[string]any{"name": "landing", "scored_at": "not a time"},
+	}
+
+	_, note, _ := drawJevAt(t, now, s)
+	if !strings.Contains(note.Text, "score age unknown") {
+		t.Errorf("the title line %q states an age though it cannot read one score stamp", note.Text)
+	}
+}
+
+// A battery carrying no score stamp is not dropped from the age: the line
+// cannot date it, so it says unknown rather than reading younger than that
+// battery's score.
+func TestJevTitleLineLeavesAMissingScoreStampUnknown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	s := jevScorecardState(now, nil)
+	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
+		map[string]any{"name": "finding", "scored_at": now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)},
+		map[string]any{"name": "landing"},
+	}
+
+	_, note, _ := drawJevAt(t, now, s)
+	if !strings.Contains(note.Text, "score age unknown") {
+		t.Errorf("the title line %q states an age though one battery carries no score stamp", note.Text)
 	}
 }
 

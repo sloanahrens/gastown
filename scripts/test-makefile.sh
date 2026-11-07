@@ -10,7 +10,6 @@ cd "$(dirname "$0")/.."
 bash scripts/check-install-path_test.sh
 bash -n deploy/polecat/go-floor.sh
 bash scripts/polecat-go-floor_test.sh
-bash -n scripts/lib/install-gt-lib.sh
 bash scripts/install-local_test.sh
 bash -n scripts/deep-review.sh
 bash scripts/deep-review_test.sh

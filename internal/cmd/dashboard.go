@@ -364,6 +364,10 @@ func dashboardClaudePlanPath(townRoot string) string {
 func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
+	// Who submitted a bead, for a landing on the operator's reserved ops branch:
+	// gt done records it as the author of the bead's newest "Submitted for
+	// landing" comment, asked of the bead reader the rows already use (gt-6ua0sn).
+	submittedBy := func(rig, id string) string { return beadReads.submittedBy(rig, id) }
 	// The deploy block reads the same repos through the same viewer client as
 	// the Forgejo panel, so the two are wired together from one token read;
 	// the staging ship reader dates the app rigs' landings off the same runs.
@@ -406,9 +410,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	}
 	recs := newDashLandings(townRoot)
 	// Who submitted a landing, for the rows whose own record names no branch:
-	// read from the landing worker's submission record, never from the bead,
-	// which a rejection reassigns (gt-gclus).
-	submitters := newDashSubmitters(townRoot, dashboardLogf(out))
+	// read from the landing worker's submission record, never from the bead's
+	// holder, which a rejection reassigns (gt-gclus). The reserved ops branch
+	// reads the bead's submission comment through the same lookup (gt-6ua0sn).
+	submitters := newDashSubmitters(townRoot, dashboardLogf(out)).withSubmittedBy(submittedBy)
 	seatCache := newDashSeatCache()
 	// The dispatch clock the Age column reads and the overrun guard judges, one
 	// reader for the panel's whole life so each poll reads only the log's
@@ -508,12 +513,12 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))
 			tr := buildTrend(now, recs.get(), stages, rejects, loads.points())
-			who := submitters.get()
+			names := landingNames{who: submitters.get(), submitter: submittedBy}
 			crew := submitters.crewLookup()
-			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, livePolecatName(polecatFor, who))
+			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, livePolecatName(polecatFor, names.who))
 			title := func(rig, id string) string { return beadReads.title(rig, id) }
-			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, who, crew, polecatTimes, rigOfBead, recentLandingRows)
-			tr.Recent = withBackoffRows(recent, backoff.get(), title, who)
+			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, names, crew, polecatTimes, rigOfBead, recentLandingRows)
+			tr.Recent = withBackoffRows(recent, backoff.get(), title, names.who)
 			return tr
 		},
 		LoadSample: loads.append,

@@ -877,11 +877,12 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 }
 
 // TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover drives the panel
-// over seats whose agents carry each provider prefix and one that carries none,
+// over seats whose agents carry each provider prefix and names that carry none,
 // and reads the Agent cell back against the polecat in its row. A claude- or
-// deepseek- prefix goes from the cell; the two sandbox seats show their short
-// names; any other name shows as it is; the tooltip keeps the whole name every
-// time (gt-dp6u3, gt-2mnrl).
+// deepseek- prefix goes from the cell when the rest is one of the model words;
+// the two sandbox seats show their short names; any other name shows as it is,
+// the retired seat names included; the tooltip keeps the whole name every time
+// (gt-dp6u3, gt-2mnrl, gt-a12ozf).
 func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 	t.Parallel()
 
@@ -893,12 +894,15 @@ func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 		seat("gastown", "delta", "working", "gt-a4", "sandboxed k8s", "sbx-flash", time.Minute),
 		seat("gastown", "echo", "working", "gt-a5", "sonnet", "claude-sonnet", time.Minute),
 		seat("gastown", "foxtrot", "working", "gt-a6", "flash", "deepseek-flash", time.Minute),
+		seat("gastown", "golf", "working", "gt-a7", "retired sandbox", "deepseek-flash-sandbox", time.Minute),
+		seat("gastown", "hotel", "working", "gt-a8", "retired sandbox k8s", "deepseek-flash-sandbox-k8s", time.Minute),
+		seat("gastown", "india", "working", "gt-a9", "a seat variant", "claude-opus-cycle", time.Minute),
 	}, workQueueReading(0, 0, 0, 0)))
 
 	names := workCells(t, dom, "wname")
 	agents := workCells(t, dom, "wagent")
-	if len(names) != 6 || len(agents) != 6 {
-		t.Fatalf("the panel drew %d polecat cells and %d agent cells, want 6 of each", len(names), len(agents))
+	if len(names) != 9 || len(agents) != 9 {
+		t.Fatalf("the panel drew %d polecat cells and %d agent cells, want 9 of each", len(names), len(agents))
 	}
 	byPolecat := map[string]drawn{}
 	for i, n := range names {
@@ -911,6 +915,9 @@ func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
 		{"echo", "sonnet", "claude-sonnet"},
 		{"foxtrot", "flash", "deepseek-flash"},
 		{"charlie", "gemini-pro", "gemini-pro"},
+		{"golf", "deepseek-flash-sandbox", "deepseek-flash-sandbox"},
+		{"hotel", "deepseek-flash-sandbox-k8s", "deepseek-flash-sandbox-k8s"},
+		{"india", "claude-opus-cycle", "claude-opus-cycle"},
 	} {
 		got, ok := byPolecat[c.polecat]
 		if !ok {

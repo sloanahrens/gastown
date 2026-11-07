@@ -9,6 +9,11 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
+// crewTestActor is the crew seat that acks and closes an escalation: it is
+// passed to the helper and then read back from the bead's fields, so one
+// constant keeps the argument and the expectation from drifting apart.
+const crewTestActor = "gastown/crew/operator"
+
 // The escalation helpers are free functions over beads.Client, so they run
 // against beadsfake the way they run against *Beads. These tests drive the
 // fake: they cover the Client path (what any non-*Beads store executes), while
@@ -173,21 +178,21 @@ func TestEscalationHelpersOverClientBumpRecordsRepeatOnTheOneBead(t *testing.T) 
 func TestEscalationHelpersOverClientAckThenClose(t *testing.T) {
 	f, issue := escalationOnFake(t, "escalation-fp:abc123")
 
-	if err := beads.AckEscalation(f, issue.ID, "gastown/crew/sloan"); err != nil {
+	if err := beads.AckEscalation(f, issue.ID, crewTestActor); err != nil {
 		t.Fatalf("AckEscalation: %v", err)
 	}
 	got, fields, err := beads.GetEscalationBead(f, issue.ID)
 	if err != nil {
 		t.Fatalf("GetEscalationBead: %v", err)
 	}
-	if fields.AckedBy != "gastown/crew/sloan" || fields.AckedAt == "" {
+	if fields.AckedBy != crewTestActor || fields.AckedAt == "" {
 		t.Errorf("acked fields = %+v, want the acking agent and a timestamp", fields)
 	}
 	if !beads.HasLabel(got, "acked") {
 		t.Errorf("acked escalation lacks the acked label; got %v", got.Labels)
 	}
 
-	if err := beads.CloseEscalation(f, issue.ID, "gastown/crew/sloan", "tests are green"); err != nil {
+	if err := beads.CloseEscalation(f, issue.ID, crewTestActor, "tests are green"); err != nil {
 		t.Fatalf("CloseEscalation: %v", err)
 	}
 	closed, fields, err := beads.GetEscalationBead(f, issue.ID)
@@ -197,10 +202,10 @@ func TestEscalationHelpersOverClientAckThenClose(t *testing.T) {
 	if closed.Status != "closed" {
 		t.Errorf("status = %q, want closed", closed.Status)
 	}
-	if fields.ClosedBy != "gastown/crew/sloan" || fields.ClosedReason != "tests are green" {
+	if fields.ClosedBy != crewTestActor || fields.ClosedReason != "tests are green" {
 		t.Errorf("closed fields = %+v, want the closer and the reason", fields)
 	}
-	if fields.AckedBy != "gastown/crew/sloan" {
+	if fields.AckedBy != crewTestActor {
 		t.Errorf("close dropped the ack: %+v", fields)
 	}
 
@@ -286,7 +291,7 @@ func TestEscalationHelpersOverClientListStaleEscalations(t *testing.T) {
 		t.Fatalf("stale = %v, want %s", escalationIDs(stale), issue.ID)
 	}
 
-	if err := beads.AckEscalation(f, issue.ID, "gastown/crew/sloan"); err != nil {
+	if err := beads.AckEscalation(f, issue.ID, crewTestActor); err != nil {
 		t.Fatalf("AckEscalation: %v", err)
 	}
 	stale, err = beads.ListStaleEscalations(f, time.Hour)

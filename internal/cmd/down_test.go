@@ -42,14 +42,14 @@ func TestReportStopResultsCountsFailures(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	stopped, failed := reportStopResults(&out, []downStopResult{
-		{rigName: "gastown", name: "crew/sloan", err: errors.New("kill-session: no server running")},
+		{rigName: "gastown", name: "crew/operator", err: errors.New("kill-session: no server running")},
 		{rigName: "gastown", name: "nux"},
 	})
 
 	if stopped != 1 || failed != 1 {
 		t.Errorf("stopped, failed = %d, %d; want 1, 1", stopped, failed)
 	}
-	for _, want := range []string{"crew/sloan: kill-session: no server running", "nux stopped"} {
+	for _, want := range []string{"crew/operator: kill-session: no server running", "nux stopped"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("report missing %q:\n%s", want, out.String())
 		}

@@ -32,7 +32,6 @@ internal/installpending/**
 internal/imagebuild/**
 cmd/install-lock/**
 cmd/image-supervisor/**
-scripts/lib/install-gt-lib.sh
 internal/binaryinstall/**
 cmd/install-binary/**
 internal/uninstallgt/**

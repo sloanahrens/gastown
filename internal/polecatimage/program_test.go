@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -637,8 +638,9 @@ func TestRunProgramKeepsTheKnownEntries(t *testing.T) {
 
 // TestEveryHelperCallerNamesAKnownVerb pins the callers the refusal exists for:
 // every argv the tree builds for the helper starts with a verb runProgram
-// dispatches. The callers are the rendered trim and seed Jobs and the plugin
-// definition, and the verbs are the dispatcher's own table, so a Job that names
+// dispatches. The callers are the rendered trim and seed Jobs, the container run
+// TrimCacheVolume starts, and the plugin definition, and the verbs are the
+// dispatcher's own table, so a Job that names
 // a verb no handler carries fails here before an image runs it (gt-gg9hv.47).
 func TestEveryHelperCallerNamesAKnownVerb(t *testing.T) {
 	t.Parallel()
@@ -667,6 +669,26 @@ func TestEveryHelperCallerNamesAKnownVerb(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no container ran the helper, so the pin checked nothing")
+	}
+
+	// The container-run route builds its own argv in TrimCacheVolume, so the
+	// rendered Jobs above never reach it. Drive it and read the verb after the
+	// helper path: a verb renamed there or a dropped helper path turns this red.
+	tr := newTestRun(t)
+	tr.reply = volumeReply{run: result{stdout: "under 1024\n"}}.answer
+	tr.TrimCacheVolume("gt-cache-gastown", 1024)
+	var ran []string
+	for _, c := range tr.callsTo("docker") {
+		if len(c.args) > 0 && c.args[0] == "run" {
+			ran = c.args
+		}
+	}
+	at := slices.Index(ran, cachevol.HelperPath)
+	if at < 0 || at+1 >= len(ran) {
+		t.Fatalf("the trim's container runs %v, want the image's helper %q then a verb", ran, cachevol.HelperPath)
+	}
+	if _, known := helperRunFor(ran[at+1]); !known {
+		t.Errorf("the trim's container names %q after the helper, which runProgram does not know", ran[at+1])
 	}
 
 	// The plugin definition starts the same binary with no arguments, which is

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -296,23 +295,24 @@ func (f *fakeDiskReader) read(path string) (*util.DiskSpaceInfo, error) {
 }
 
 // TestHostAgentLoopDefaultsToTheRealDiskReader pins the disk reader a loop's
-// tick reads the town volume with: a loop with no reader set reads through the
-// production reader, and a loop given a fake reads through the fake and never
-// the production reader.
+// tick reads the town volume with: a loop with no reader set leaves the read to
+// production, and a loop given a fake reads through the fake and never the
+// production reader.
 //
 // The loop with no reader is given a town root that does not exist, so the
-// production reader fails its statfs there and returns before the APFS branch
-// that runs diskutil: this test reads through the real reader without starting
-// an external tool, on macOS as on Linux (gt-yjzepk.15).
+// production reader fails there before the APFS branch that runs diskutil: this
+// test exercises the real reader without starting an external tool, on macOS as
+// on Linux (gt-yjzepk.15). It asserts that the read's failure is published, not
+// how the operating system words it.
 func TestHostAgentLoopDefaultsToTheRealDiskReader(t *testing.T) {
 	t.Parallel()
 	missingTown := filepath.Join(t.TempDir(), "no-such-town")
 
-	// No reader set: the production reader's statfs fails on the missing root,
-	// and that failure is the published reading.
+	// No reader set: the read of the missing root fails, and that failure is
+	// the published reading rather than an empty disk that reads as healthy.
 	got := firstHostAgentReading(t, missingTown, nil)
-	if !strings.Contains(got.Disk.Err, "statfs") {
-		t.Errorf("a loop with no disk reader published Disk = %+v, want the production reader's statfs error", got.Disk)
+	if got.Disk.Err == "" {
+		t.Errorf("a loop with no disk reader published Disk = %+v, want the failed read's error", got.Disk)
 	}
 	if got.Disk.Value != (hostprobe.Disk{}) {
 		t.Errorf("a failed disk read left Value = %+v, want it zero", got.Disk.Value)

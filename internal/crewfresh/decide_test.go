@@ -29,10 +29,10 @@ var decideCases = []decideCase{
 	},
 	{
 		name:        "on another branch",
-		state:       State{FetchOK: true, Branch: "crew/sloan/gt-9", Clean: true, Behind: 3, HeadIsAncestor: true},
+		state:       State{FetchOK: true, Branch: "crew/operator/gt-9", Clean: true, Behind: 3, HeadIsAncestor: true},
 		wantAction:  ActionNone,
 		wantBehind:  3,
-		wantMessage: "behind 3 but on branch crew/sloan/gt-9 so main is left alone",
+		wantMessage: "behind 3 but on branch crew/operator/gt-9 so main is left alone",
 	},
 	{
 		name:        "detached head",
@@ -64,10 +64,10 @@ var decideCases = []decideCase{
 	},
 	{
 		name:        "on another branch and dirty",
-		state:       State{FetchOK: true, Branch: "crew/sloan/gt-9", Clean: false, Behind: 6, HeadIsAncestor: true},
+		state:       State{FetchOK: true, Branch: "crew/operator/gt-9", Clean: false, Behind: 6, HeadIsAncestor: true},
 		wantAction:  ActionNone,
 		wantBehind:  6,
-		wantMessage: "behind 6 but on branch crew/sloan/gt-9 so main is left alone",
+		wantMessage: "behind 6 but on branch crew/operator/gt-9 so main is left alone",
 	},
 	{
 		name:        "changes unreadable",
@@ -85,10 +85,10 @@ var decideCases = []decideCase{
 	},
 	{
 		name:        "changes unreadable on another branch keeps the branch line",
-		state:       State{FetchOK: true, Branch: "crew/sloan/gt-9", CleanUnreadable: true, Behind: 3, HeadIsAncestor: true},
+		state:       State{FetchOK: true, Branch: "crew/operator/gt-9", CleanUnreadable: true, Behind: 3, HeadIsAncestor: true},
 		wantAction:  ActionNone,
 		wantBehind:  3,
-		wantMessage: "behind 3 but on branch crew/sloan/gt-9 so main is left alone",
+		wantMessage: "behind 3 but on branch crew/operator/gt-9 so main is left alone",
 	},
 	{
 		name:        "dirty clone keeps the changes line when ancestry is unreadable",

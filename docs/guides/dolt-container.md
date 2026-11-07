@@ -141,8 +141,8 @@ dolt version | grep -q " $TAG" || { echo "host dolt is not $TAG; stop the rehear
 
 Print the plan. The rehearsal container mounts its own empty backup directory,
 so the live backup root never enters a throwaway container, and it keeps the
-plan's default 12 GiB cap. The cutover starts with that same default unless it
-passes `--memory-gib`; the live gt-dolt container runs 8 GiB.
+plan's default 8 GiB cap, the same cap the live gt-dolt container runs. The
+cutover starts with that same default unless it passes `--memory-gib`.
 
 ```bash
 gt dolt container plan --name gt-dolt-rehearsal --image "$IMAGE" \
@@ -259,12 +259,12 @@ dolt --host 127.0.0.1 --port 3317 --user root --password "" --no-tls sql -q 'SEL
 `wait $BURST` waits for the burst's jobs only: a bare `wait` would also wait on
 the host copy's server, which never exits.
 
-Record the highest memory reading against the plan's default 12 GiB cap, which
-this container keeps; the live gt-dolt container runs 8 GiB. The cap stands only
-if that reading stays under 80 percent of 12 GiB, 9.6 GiB; otherwise the cutover
-plan takes a higher `--memory-gib` and this rehearsal repeats with the same
-value. A container killed at its cap fails the last check, which stops the
-procedure.
+Record the highest memory reading against the plan's default 8 GiB cap, which
+this container keeps; the live gt-dolt container runs the same 8 GiB. The cap
+stands only if that reading stays under 80 percent of 8 GiB, 6.4 GiB; otherwise
+the cutover plan takes a higher `--memory-gib` and this rehearsal repeats with
+the same value. A container killed at its cap fails the last check, which stops
+the procedure.
 
 ### 1.8 Remove the rehearsal and return the town to service
 
@@ -347,7 +347,7 @@ docker start gt-dolt
 ```
 
 The defaults are the town's `~/gt/.dolt-data`, the daemon's backup root, the
-plan's 12 GiB memory cap and port 3307; the live gt-dolt container runs 8 GiB.
+plan's 8 GiB memory cap and port 3307; the live gt-dolt container runs 8 GiB.
 Raise the memory only to the value step 1.7 chose, with `--memory-gib`.
 
 ```bash

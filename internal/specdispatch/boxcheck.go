@@ -37,19 +37,68 @@ var acceptanceBoxPhrases = []boxPhrase{
 	{text: "the live"},
 }
 
-// matches reports whether item names the phrase.
-func (p boxPhrase) matches(item string) bool {
-	if p.re != nil {
-		return p.re.MatchString(item)
+// findingResolvedPrefix opens an acceptance item that names a finding. It is
+// the prefix internal/land writes (findingResolved there); specdispatch cannot
+// import land, so the text is repeated here.
+const findingResolvedPrefix = "Finding resolved: "
+
+// boxPathPattern is a source path inside an item: a separator token ending in a
+// file extension with an optional line number, or a directory with a trailing
+// slash, or a bare file name with an extension. A separator token with no
+// extension, such as /usr/bin/kubectl, is a command and stays for the phrase
+// search.
+const boxPathPattern = `[\w.-]*/[\w./-]*(?:\.[A-Za-z]\w*(?::\d+)?|/)|[\w-]+\.[A-Za-z]\w*(?::\d+)?`
+
+// boxTrailingPathRe is the "(path)" group that ends a finding item, where the
+// finding names its source location.
+var boxTrailingPathRe = regexp.MustCompile(`\s*\((?:` + boxPathPattern + `)\)$`)
+
+// findingClauseBreaks are the characters that make a finding title more than one
+// clause: a sentence or list stop, a clause separator, a shell marker, or a line
+// break.
+const findingClauseBreaks = ".;:`$\n"
+
+// boxSubject is the part of item a phrase is searched in. An item opening with
+// the finding prefix quotes the finding's title: when the title is one plain
+// clause (no findingClauseBreaks character), a tool name in it or in the
+// trailing "(path)" group is not an instruction, so the subject is empty. Any
+// other finding item is searched whole, less its trailing group, so an
+// instruction written as a second clause is refused, with or without a run
+// verb. An item without the prefix is searched whole, paths included: it is
+// written by a person, so a tool named anywhere in it, even inside a wrapper
+// path such as ./bin/kubectl.sh, is an instruction and is refused.
+//
+// Accepted residual: an instruction written with no punctuation after the
+// prefix reads as a plain title and is not detected. The title is free text
+// from the finding, so no word list can tell it from an instruction (gt-7c84xe).
+func boxSubject(item string) string {
+	if !strings.HasPrefix(item, findingResolvedPrefix) {
+		return item
 	}
-	return strings.Contains(strings.ToLower(item), p.text)
+	title := item[len(findingResolvedPrefix):]
+	if loc := boxTrailingPathRe.FindStringIndex(title); loc != nil {
+		title = title[:loc[0]]
+	}
+	if !strings.ContainsAny(title, findingClauseBreaks) {
+		return ""
+	}
+	return findingResolvedPrefix + title
 }
 
-// acceptanceBoxPhrase returns the first phrase item names, and "" when it
-// names none.
+// matches reports whether subject names the phrase.
+func (p boxPhrase) matches(subject string) bool {
+	if p.re != nil {
+		return p.re.MatchString(subject)
+	}
+	return strings.Contains(strings.ToLower(subject), p.text)
+}
+
+// acceptanceBoxPhrase returns the first phrase in the item's subject (see
+// boxSubject), and "" when the subject names none.
 func acceptanceBoxPhrase(item string) string {
+	subject := boxSubject(item)
 	for _, phrase := range acceptanceBoxPhrases {
-		if phrase.matches(item) {
+		if phrase.matches(subject) {
 			return phrase.text
 		}
 	}
