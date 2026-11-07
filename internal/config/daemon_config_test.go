@@ -1506,6 +1506,8 @@ func TestJevScorecardConfigRefusesBadValues(t *testing.T) {
 		{"hour not a clock", `{"hour":"4am"}`, "jev_scorecard.hour"},
 		{"interval not a duration", `{"interval":"daily"}`, "jev_scorecard.interval"},
 		{"interval zero", `{"interval":"0h"}`, "jev_scorecard.interval"},
+		{"interval zero seconds", `{"interval":"0s"}`, "jev_scorecard.interval"},
+		{"interval negative", `{"interval":"-1h"}`, "jev_scorecard.interval"},
 		{"empty battery name", `{"batteries":[""]}`, "battery name is empty"},
 		{"repeated battery", `{"batteries":["attention","attention"]}`, "listed twice"},
 		{"unknown key", `{"hours":"04:30"}`, "unknown field"},
