@@ -829,8 +829,8 @@ func TestBirdsPreviousLinkCarriesItsAge(t *testing.T) {
 	if !ok {
 		t.Fatalf("the row with a previous page drew no link: %+v", rows[0].Head)
 	}
-	if aged.Text != "previous" || !strings.HasPrefix(aged.Title, "written ") || !strings.HasSuffix(aged.Title, " ago") {
-		t.Errorf("the previous link reads %q with hover %q, want \"previous\" and its written age", aged.Text, aged.Title)
+	if aged.Text != "previous" || aged.Title != "written 2d ago" {
+		t.Errorf("the previous link reads %q with hover %q, want \"previous\" and \"written 2d ago\" for a page 50 hours old", aged.Text, aged.Title)
 	}
 	plain, ok := previous(rows[1])
 	if !ok {
