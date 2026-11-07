@@ -125,6 +125,7 @@ func TestMachineExemptIsBdSQLAndHelp(t *testing.T) {
 		"dolt -h":                        true,
 		"--help":                         true,
 		"show gt-1 --helpful":            false,
+		"backup -h":                      true,
 	} {
 		if got := machineExempt(strings.Fields(args)); got != want {
 			t.Errorf("machineExempt(%q) = %v, want %v", args, got, want)
@@ -141,6 +142,31 @@ func TestMachineExemptIsBdSQLAndHelp(t *testing.T) {
 	env = machineEnvForCall("", []string{"A=1"}, []string{"show", "gt-1"})
 	if v, _ := lastEnvValue(env, "BD_MACHINE"); v != "1" {
 		t.Errorf("bd show env %v must carry BD_MACHINE=1", env)
+	}
+}
+
+func TestMachineExemptHelpOnlyAsTheLastWordOfACommandPath(t *testing.T) {
+	t.Parallel()
+	for args, want := range map[string]bool{
+		"mail --help":               true,
+		"backup -h":                 true,
+		"--help":                    true,
+		"mol wisp --help":           true,
+		"create --title --help":     false,
+		"update x --description -h": false,
+		"mail --help x":             false,
+		"create -- --help":          false,
+		"--json backup --help":      false,
+		"create x --help":           true,
+		"create --help --title":     false,
+		"":                          false,
+	} {
+		if got := machineExempt(strings.Fields(args)); got != want {
+			t.Errorf("machineExempt(%q) = %v, want %v", args, got, want)
+		}
+	}
+	if machineExempt([]string{"create", "", "--help"}) {
+		t.Error("an empty word before --help must not be exempt")
 	}
 }
 
