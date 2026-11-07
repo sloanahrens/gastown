@@ -638,6 +638,13 @@ func TestInstallRefusesBadConfigurationBeforeAnyChange(t *testing.T) {
 			name: "one tool named twice at two paths",
 			build: func(files *fakeFiles) InstallConfig {
 				targets := fourTargets()
+				// Every path exists, so the name check is the only refusal left.
+				for _, t := range targets[1:] {
+					files.addDir(filepath.Dir(t.Path))
+					files.add(t.Path, "old "+t.Name, 0o755)
+				}
+				files.addDir("/Users/operator/go/bin")
+				files.add("/Users/operator/go/bin/gt", "old gt", 0o755)
 				return installConfig(files, &fakeDoctor{}, &bytes.Buffer{}, append(targets, Target{Name: "gt", Path: "/Users/operator/go/bin/gt"}))
 			},
 			want: "gt is named twice",
