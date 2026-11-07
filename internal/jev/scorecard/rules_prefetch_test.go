@@ -547,10 +547,11 @@ func TestRulesRegisteredAdapterHasBatchReader(t *testing.T) {
 }
 
 // TestRulesPrefetchChunksEachCommentsQuery checks the registered adapter's batch
-// reader never gets more than commentChunk ids in one query, and that every bead
-// is asked for exactly once. The town has no rig beads, so each read fails at
-// the store's directory check and no bd process starts. The recorder sees each
-// query's ids before the read fails.
+// reader is never handed more than commentChunk ids in one query, and that every
+// bead is asked for exactly once. The recorder replaces the production batch
+// reader and answers each id from a fake, so no store is opened and no bd
+// process starts. A per-bead read fails the test: every bead is answered by the
+// batch, so none should be read one at a time.
 func TestRulesPrefetchChunksEachCommentsQuery(t *testing.T) {
 	t.Parallel()
 	const n = 250
@@ -560,10 +561,17 @@ func TestRulesPrefetchChunksEachCommentsQuery(t *testing.T) {
 	}
 	ra := a.(*rulesAdapter)
 	ra.now = prefetchFixtureNow
-	ra.warn = func(string, ...any) {}
-	production := ra.commentsBatch
-	if production == nil {
-		t.Fatal("the registered rules adapter has no batch reader to record")
+	ra.warn = func(format string, args ...any) { t.Errorf("unexpected warning: "+format, args...) }
+	ra.comments = func(rig, bead string) ([]beads.Comment, error) {
+		t.Errorf("per-bead read of %s/%s, want every bead answered by the batch", rig, bead)
+		return nil, nil
+	}
+	answered := &fakeBatchReader{comments: map[beadRef][]beads.Comment{}}
+	var lines [][]byte
+	for i := range n {
+		bead := fmt.Sprintf("gt-%03d", i)
+		answered.comments[beadRef{"gastown", bead}] = []beads.Comment{}
+		lines = append(lines, prefetchLine(t, "gastown", bead, "furiosa", prefetchFixtureDoneAt))
 	}
 	var sizes []int
 	asked := map[string]int{}
@@ -572,11 +580,7 @@ func TestRulesPrefetchChunksEachCommentsQuery(t *testing.T) {
 		for _, id := range ids {
 			asked[id]++
 		}
-		return production(rig, ids)
-	}
-	var lines [][]byte
-	for i := range n {
-		lines = append(lines, prefetchLine(t, "gastown", fmt.Sprintf("gt-%03d", i), "furiosa", prefetchFixtureDoneAt))
+		return answered.read(rig, ids)
 	}
 	items := parseRulesLines(t, ra, lines...)
 
