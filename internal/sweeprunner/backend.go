@@ -206,6 +206,11 @@ type Step struct {
 	// Teardown marks a step that removes what an earlier step made; it runs
 	// even when an earlier step failed.
 	Teardown bool
+	// Retry marks a step that is attempted a second time, after a pause, when
+	// its first attempt fails: a copy whose source a live writer may change
+	// under it. Only the repo copy sets it. A step that creates an object is
+	// never retried, since its second attempt would fail AlreadyExists.
+	Retry bool
 	// MissingSourcePath names the source whose absence is not a failure: a
 	// run that wrote no logs leaves /out/logs absent, and the copy of it then
 	// fails. Empty for a step that tolerates no absence. The caller tolerates
