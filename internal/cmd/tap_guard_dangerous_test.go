@@ -3976,8 +3976,8 @@ func TestHeredocANSICQuotesFollowBash(t *testing.T) {
 		{"a << inside an ANSI-C string opened across a continuation is not a heredoc", "echo $\\\n'a\\'\n<<EOF\n'\nrm -rf /\nEOF", true},
 		// gt-9xutc: the operator line's own ANSI-C string opens across a
 		// continuation and closes before the newline, so the line ends there
-		// and the rm is body text, read as data. The continued form is one
-		// shellparse cannot read (see TestDangerousRefusesWhatTheParserCannotRead).
+		// and the rm is body text, read as data. The continued form is refused
+		// by the parse gate (gt-wnblap).
 		{"the same string without the continuation ends the line", "cat <<EOF $'a\\''\nrm -rf /\nEOF", false},
 		// "$$" is the PID, so 'a\' is a plain quote and <<EOF is a redirection
 		// whose body is data.
@@ -4377,22 +4377,18 @@ func TestDangerousFailsClosedOnUnparseable(t *testing.T) {
 	})
 }
 
-// TestDangerousRefusesWhatTheParserCannotRead pins the commands the parser
-// refuses today, each with the construct it names. The first three are valid
-// bash that shellparse (mvdan.cc/sh) rejects, so the guard over-refuses them
-// until the parser reads them; a fix to the parser flips these rows. The last
-// one bash rejects too: its line "}" is a syntax error, so the refusal is right.
-// Their bodies were judged as data before the parse gate (gt-m6x4py).
-func TestDangerousRefusesWhatTheParserCannotRead(t *testing.T) {
+// TestDangerousRefusesUnreadableCommands pins the parse gate's refusal on
+// commands bash rejects too: nothing in such a command runs, and the guard
+// names the construct it could not read. Bash-valid inputs the parser misreads
+// are not rows here: their refusal exists only because the parser rejects
+// them, and the decision to keep refusing them is gt-wnblap.
+func TestDangerousRefusesUnreadableCommands(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name      string
 		command   string
 		construct string
 	}{
-		{"a backslash ending a comment on the operator line", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF", "unterminated here-document"},
-		{"an ANSI-C string on the operator line opened across a continuation", "cat <<EOF $\\\n'a\\''\nrm -rf /\nEOF", "unterminated quote"},
-		{"a close paren in backtick text", "x=`echo )`; cat <<EOF\ngit reset --hard\nEOF", "unbalanced parenthesis"},
 		{"a brace group after an assignment with a substitution", "y=$(echo a) { cat <<'EOF'\nit's a note: sudo rm -rf /tmp\nEOF\n}", "unrecognized shell syntax"},
 		// Moved from TestCommandSubstitutionRecursion (gt-m6x4py): bash rejects
 		// each of these too, so none of them runs and the guard refuses them.
@@ -4404,6 +4400,31 @@ func TestDangerousRefusesWhatTheParserCannotRead(t *testing.T) {
 			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
 			if !strings.Contains(reason, "cannot be read ("+tt.construct+")") {
 				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to name %q", tt.command, reason, tt.construct)
+			}
+		})
+	}
+}
+
+// TestDangerousRefusesBashValidShapesByDecision pins the parse gate's refusal
+// of three shapes bash accepts and shellparse rejects. The refusal is the
+// recorded decision in gt-wnblap: a local pre-parse correction could let a
+// dangerous payload past the guard. This row flips if the parser or that
+// decision changes, so the change must be made deliberately.
+func TestDangerousRefusesBashValidShapesByDecision(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		command   string
+		construct string
+	}{
+		{"a backslash ending a comment on a heredoc operator line", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF", "unterminated here-document"},
+		{"an ANSI-C string opened across a line continuation", "cat <<EOF $\\\n'a\\''\nrm -rf /\nEOF", "unterminated quote"},
+		{"a close paren in backtick text", "x=`echo )`; cat <<EOF\ngit reset --hard\nEOF", "unbalanced parenthesis"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if !strings.Contains(reason, "cannot be read ("+tt.construct+")") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to name %q (gt-wnblap)", tt.command, reason, tt.construct)
 			}
 		})
 	}
