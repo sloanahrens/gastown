@@ -10,7 +10,10 @@ package daemon
 // (agentconfig.DiskMaintenanceDefaultCivolInterval by default) in any window
 // while the rest keep the daily pass (gt-z6qre.17). The shared Go cache trim is
 // on the same footing: it runs on cache_trim_interval (2h by default) in any
-// window, not in the daily pass (gt-gg9hv.24.2).
+// window, not in the daily pass (gt-gg9hv.24.2). Between those runs, a tick
+// reads the disks and trims early when the sandbox disk is at or over
+// cache_trim_early_percent, no sooner than fifteen minutes after the last trim
+// began (gt-gg9hv.43).
 //
 // The patrol is opt-in twice over. It runs only when
 // daemon.patrols.disk_maintenance.enabled is true, and it changes nothing
@@ -87,6 +90,11 @@ const (
 	// interval, so a transient refusal costs the next few five-minute ticks
 	// instead of two hours (gt-gg9hv.24.6).
 	cacheTrimRetryInterval = 15 * time.Minute
+
+	// cacheTrimEarlyMinGap is how long after a trim began before the early check
+	// may run another. It counts from the start, so a trim that ran long does not
+	// make the next one due the moment it ends (gt-gg9hv.43).
+	cacheTrimEarlyMinGap = 15 * time.Minute
 
 	// diskMaintBusyAlertEvery is how often a busy tick with no trim due re-reads
 	// the disks to apply the alerts. The trim's interval can be hours, and a
@@ -210,6 +218,17 @@ func diskMaintenanceCacheTrimEvery(cfg *DaemonPatrolConfig) (time.Duration, erro
 	return settings.CacheTrimEvery()
 }
 
+// diskMaintenanceCacheTrimEarlyPercent returns the sandbox disk usage at which
+// the cache trim runs early: the default when the block or its setting is
+// absent, and the refusal for a percent outside the range.
+func diskMaintenanceCacheTrimEarlyPercent(cfg *DaemonPatrolConfig) (int, error) {
+	var settings agentconfig.DiskMaintenanceConfig
+	if c := diskMaintenanceSettings(cfg); c != nil {
+		settings = *c
+	}
+	return settings.CacheTrimEarlyPercentValue()
+}
+
 // diskMaintenanceMode returns the pass mode, or the refusal for a mode the
 // patrol cannot act on. Decoding refuses one too; this catches a config built
 // in code, where the default must not silently become an apply.
@@ -248,6 +267,9 @@ type diskMaintSchedule struct {
 	mu      sync.Mutex
 	lastRun map[string]time.Time
 	retryAt map[string]time.Time
+	// started is when each trim last began, which the early check's gap counts
+	// from (gt-gg9hv.43).
+	started map[string]time.Time
 	logged  map[string]time.Time
 	refused map[string]bool
 }
@@ -298,6 +320,32 @@ func (s *diskMaintSchedule) trimDue(name string, now time.Time, every time.Durat
 	}
 	last := s.lastRunAt(name)
 	return last.IsZero() || now.Sub(last) >= every
+}
+
+// recordStart keeps the time the named trim began. It is written before the
+// trim runs, so a run that never concludes still counts from its start.
+func (s *diskMaintSchedule) recordStart(name string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.started == nil {
+		s.started = make(map[string]time.Time)
+	}
+	s.started[name] = at.Round(0)
+}
+
+// earlyTrimDue reports whether the named trim may run early at now: no failed
+// run's retry is pending, and a run began more than gap ago. A pending retry is
+// the trim's own next run, and a run that has not concluded may still have its
+// Job running, so neither is pre-empted. A trim with no recorded start has no
+// run to be early against, and its interval decides (gt-gg9hv.43).
+func (s *diskMaintSchedule) earlyTrimDue(name string, now time.Time, gap time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.retryAt[name].IsZero() {
+		return false
+	}
+	start := s.started[name]
+	return !start.IsZero() && now.Sub(start) > gap
 }
 
 // recordRetry keeps the time a failed run asks to be tried again. The last
@@ -479,6 +527,10 @@ func (d *Daemon) runDiskMaintenance() {
 		return
 	}
 
+	if !due.cacheTrim {
+		d.runCacheTrimEarlyTick(mode, now)
+	}
+
 	if due.empty() {
 		d.runDiskMaintenanceAlertOnlyTick(now)
 		return
@@ -584,19 +636,82 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 	release := sync.OnceFunc(func() { d.diskMaintTrimRunning.Store(false) })
 	d.diskMaintenanceSeams().dispatch(func() {
 		defer release()
-		d.runCacheTrimPass(mode, release)
+		d.runCacheTrimPass(mode, release, false)
 	})
+}
+
+// runCacheTrimEarlyTick is the early check a tick makes when the cache trim is
+// not due: it starts a read of the disks, off the loop goroutine, and the
+// sandbox disk's reading in it decides whether the trim runs now
+// (gt-gg9hv.43). The tick only asks whether a read is worth making, from the
+// schedule and the trim guard, so a tick inside the gap costs no disk read. A
+// setting the patrol cannot act on is refused once, and runs nothing early; the
+// interval trim is unaffected.
+func (d *Daemon) runCacheTrimEarlyTick(mode string, now time.Time) {
+	percent, err := diskMaintenanceCacheTrimEarlyPercent(d.patrolConfig)
+	if err != nil {
+		d.refuseDiskMaintenance(err)
+		return
+	}
+	if d.diskMaintTrimRunning.Load() || !d.diskMaintSchedule.earlyTrimDue(diskMaintCacheTrimName, now, cacheTrimEarlyMinGap) {
+		return
+	}
+	if !d.diskMaintEarlyRunning.CompareAndSwap(false, true) {
+		return // a read for an earlier tick is still running
+	}
+	d.diskMaintenanceSeams().dispatch(func() {
+		defer d.diskMaintEarlyRunning.Store(false)
+		d.cacheTrimEarly(mode, percent)
+	})
+}
+
+// cacheTrimEarly reads the sandbox disk and runs the cache trim when the disk is
+// at or over percent and the gap has passed. The trim guard is taken before the
+// gap is judged again, so a run that began after the tick's read is not
+// followed by a second one. A reading that failed is not over the percent: the
+// alerts raise it, and the interval trim still runs when it is due.
+func (d *Daemon) cacheTrimEarly(mode string, percent int) {
+	ctx, cancel := d.diskMaintenanceContext()
+	defer cancel()
+	used, readable := d.sandboxDiskUsedPct(ctx)
+	if !readable || used < float64(percent) {
+		return
+	}
+	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
+		return // a trim pass is still running
+	}
+	release := sync.OnceFunc(func() { d.diskMaintTrimRunning.Store(false) })
+	defer release()
+	s := d.diskMaintenanceSeams()
+	if !d.diskMaintSchedule.earlyTrimDue(diskMaintCacheTrimName, s.now(), cacheTrimEarlyMinGap) {
+		return
+	}
+	d.logger.Printf("disk_maintenance: cache trim early: sandbox disk %.0f%% >= %d%%", used, percent)
+	d.runCacheTrimPass(mode, release, true)
+}
+
+// sandboxDiskUsedPct returns the sandbox disk's used share from the disks the
+// patrol reads, and false when that reading failed or is absent.
+func (d *Daemon) sandboxDiskUsedPct(ctx context.Context) (float64, bool) {
+	for _, r := range d.diskMaintenanceSeams().readDisks(ctx) {
+		if r.Name == diskMaintDiskColima {
+			return r.UsedPct, r.Err == nil
+		}
+	}
+	return 0, false
 }
 
 // runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the
 // disk readings and their alerts, and the trim, side by side. Neither holds the
 // other: the trim's guard is handed back as soon as the trim ends, before the
 // alerts have, so a notifier that does not answer keeps no later trim off. Its
-// caller holds the trim's guard and passes the release that returns it.
-func (d *Daemon) runCacheTrimPass(mode string, releaseTrim func()) {
+// caller holds the trim's guard and passes the release that returns it. early
+// marks a run the caller has already judged due under that guard, so the
+// interval is not checked again.
+func (d *Daemon) runCacheTrimPass(mode string, releaseTrim func(), early bool) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
-	if !d.cacheTrimStillDue() {
+	if !early && !d.cacheTrimStillDue() {
 		releaseTrim() // another pass trimmed between the tick and this run
 		return
 	}
@@ -639,11 +754,13 @@ func (d *Daemon) runCacheTrimInPass(ctx context.Context, mode string) bool {
 	return true
 }
 
-// diskMaintenanceTrim is the trim and its schedule record: the full interval
-// once it reached a verdict, the short retry when it could not start or
-// conclude. The caller holds the trim's guard.
+// diskMaintenanceTrim is the trim and its schedule record: the start the early
+// check's gap counts from, then the full interval once it reached a verdict, or
+// the short retry when it could not start or conclude. The caller holds the
+// trim's guard.
 func (d *Daemon) diskMaintenanceTrim(ctx context.Context, mode string) {
 	s := d.diskMaintenanceSeams()
+	d.diskMaintSchedule.recordStart(diskMaintCacheTrimName, s.now())
 	verdict := s.trim(ctx, mode)
 	concluded := s.now()
 	if verdict {

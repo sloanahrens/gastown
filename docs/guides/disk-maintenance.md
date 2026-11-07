@@ -179,6 +179,15 @@ the disks for its own decisions and goes on, and the alerts of that time stay
 with the holder. A tick that finds no trim due runs no trim: a busy one applies
 the alerts through the alert-only pass (above).
 
+Between those runs the trim also runs early. On a five-minute tick that finds
+the trim not due, the patrol reads the disks, and when the sandbox disk is at or
+over `cache_trim_early_percent` (default 75, from 50 to 95) it runs the trim
+now, provided the last trim began more than fifteen minutes earlier. An early
+run does not start while a trim holds its guard or while a failed run's retry
+is pending. Its one log line is `disk_maintenance: cache trim early: sandbox
+disk <n>% >= <m>%`. A disk read that fails does not run it; the alerts raise
+that failure.
+
 - A claim's namespace comes from the claim itself, and every pod read, listing
   exec and apply, delete or wait names it. A claim of the same name in another
   namespace is another claim, read and counted from its own namespace's pods.

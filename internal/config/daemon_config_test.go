@@ -1055,6 +1055,69 @@ func TestDiskMaintenanceCacheTrimInterval(t *testing.T) {
 	}
 }
 
+// TestCacheTrimEarlyPercent: the early cache trim's percent defaults to 75, a
+// value from 50 to 95 is read, and a value outside that range is refused with
+// an error naming the setting, at decode and from code alike.
+func TestCacheTrimEarlyPercent(t *testing.T) {
+	t.Parallel()
+	pct := func(p int) *int { return &p }
+	cases := []struct {
+		name    string
+		percent *int
+		want    int
+		wantErr bool
+	}{
+		{name: "absent is the 75 default", want: 75},
+		{name: "the lower bound is read", percent: pct(50), want: 50},
+		{name: "the upper bound is read", percent: pct(95), want: 95},
+		{name: "49 is refused", percent: pct(49), wantErr: true},
+		{name: "96 is refused", percent: pct(96), wantErr: true},
+		{name: "zero is refused, not the default", percent: pct(0), wantErr: true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := DiskMaintenanceConfig{CacheTrimEarlyPercent: tt.percent}.CacheTrimEarlyPercentValue()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "patrols.disk_maintenance.cache_trim_early_percent") {
+					t.Fatalf("CacheTrimEarlyPercentValue() = %v, %v; want an error naming the setting", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CacheTrimEarlyPercentValue() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("CacheTrimEarlyPercentValue() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+
+	var cfg PatrolsConfig
+	if err := json.Unmarshal([]byte(`{"disk_maintenance": {"cache_trim_early_percent": 80}}`), &cfg); err != nil {
+		t.Fatalf("a valid cache_trim_early_percent does not decode: %v", err)
+	}
+	if cfg.DiskMaintenance.CacheTrimEarlyPercent == nil || *cfg.DiskMaintenance.CacheTrimEarlyPercent != 80 {
+		t.Fatalf("cache_trim_early_percent decoded as %v, want 80", cfg.DiskMaintenance.CacheTrimEarlyPercent)
+	}
+	encoded, err := json.Marshal(cfg.DiskMaintenance)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(encoded), `"cache_trim_early_percent":80`) {
+		t.Errorf("encoded %s does not carry the setting back out", encoded)
+	}
+	for name, doc := range map[string]string{
+		"below the range": `{"disk_maintenance": {"cache_trim_early_percent": 49}}`,
+		"above the range": `{"disk_maintenance": {"cache_trim_early_percent": 96}}`,
+	} {
+		var p PatrolsConfig
+		if err := json.Unmarshal([]byte(doc), &p); err == nil {
+			t.Errorf("%s cache_trim_early_percent decoded without an error: %+v", name, p.DiskMaintenance)
+		}
+	}
+}
+
 // TestDiskMaintenanceCICacheSettings: the CI build-cache trim's three settings
 // default to 1h, 12h and 30GB, and a value the patrol cannot act on is refused
 // naming its own key, zero and negative values included, never read as the
