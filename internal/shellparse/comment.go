@@ -11,8 +11,9 @@ import "strings"
 // comment to `ls` and the parser never sees the command bash runs (gt-4otugt).
 // The blank keeps every byte offset, so the positions Parse records still index
 // the source it read. The error is non-nil when the walk stopped before the end
-// of command: the comments past the stop are not blanked, so Parse must refuse
-// the command even though mvdan.cc/sh may read it.
+// of command while command has a backslash before a newline: the comments past
+// the stop are not blanked, so Parse must refuse the command even though
+// mvdan.cc/sh may read it.
 func blankCommentBackslashes(command string) (string, error) {
 	ends, err := commentLineBackslashes(command)
 	if len(ends) == 0 {
@@ -47,11 +48,13 @@ type commentScan struct {
 
 // commentLineBackslashes returns the offsets of the backslashes that end a
 // comment line in src. The walk stops at the first construct it cannot close,
-// or at the nesting bound. A walk that stops has not seen every comment: it
-// returns the offsets it found and an *UnparseableError.
+// or at the nesting bound. A comment that ends in a backslash needs a backslash
+// before a newline, so a walk that stops hides nothing when src has none: mvdan
+// reads that text as bash does. Only then is the stop an error, returned with
+// the offsets the walk found before it.
 func commentLineBackslashes(src string) ([]int, error) {
 	s := &commentScan{src: src}
-	if _, ok := s.code(0, 0); !ok {
+	if _, ok := s.code(0, 0); !ok && strings.Contains(src, "\\\n") {
 		return s.ends, &UnparseableError{Construct: "construct too deeply nested or unclosed to read"}
 	}
 	return s.ends, nil

@@ -1004,6 +1004,17 @@ func TestParseCommentLineBackslashDeepNesting(t *testing.T) {
 	}
 }
 
+// TestParseDeepNestingWithoutCommentBackslash checks that the scan's bound
+// refuses only a command that can hide a comment: the same nest with no
+// backslash before a newline is read as it was before the comment scan.
+func TestParseDeepNestingWithoutCommentBackslash(t *testing.T) {
+	t.Parallel()
+	command := strings.Repeat("$(", 300) + "true" + strings.Repeat(")", 300) + "\nls"
+	if _, err := shellparse.Parse(command); err != nil {
+		t.Fatalf("Parse(deep nesting, no comment backslash) error = %v, want nil", err)
+	}
+}
+
 // TestParseCommentLineBackslashUnreadable checks that the rewrite does not turn
 // a command the parser cannot read into one it can. A quote the comment's line
 // leaves open is still refused, and so is a comment ending in a backslash on a
