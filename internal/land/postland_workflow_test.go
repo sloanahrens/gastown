@@ -64,35 +64,30 @@ func TestPostLandWorkflowContextIsTheRigSetting(t *testing.T) {
 	}
 }
 
-// TestPostLandWorkflowFetchesNoRef holds the committed post-land workflow to
-// fetching no ref beyond the checkout. Under GITHUB_ACTIONS post-land-shell.sh
-// takes its CI path and runs the shell tier without reading main's first-parent
-// window (gt-phsp89), so a deepened fetch pays a full-history transfer per push
-// for a read this run does not perform, and fetch-depth: 0 pays for every head
-// on the way (gt-ebco0).
-func TestPostLandWorkflowFetchesNoRef(t *testing.T) {
+// TestPostLandWorkflowKeepsHistoryAndTags holds the committed post-land
+// workflow to the full-history checkout and a tags fetch. The shell tier stamps
+// versions with git describe and scripts/makefile-gate_test.sh fails without
+// both; dropping them (gt-2okhxy) turned every post-land check on main red
+// (gt-b14yam).
+func TestPostLandWorkflowKeepsHistoryAndTags(t *testing.T) {
 	t.Parallel()
 	steps := postLandWorkflowSteps(t)
-	problems, deepensMain := gateFetchProblems(steps)
-	for _, p := range problems {
-		t.Error(p)
-	}
-	if deepensMain {
-		t.Error("a step deepens origin/main, but this run reads no history: post-land-shell.sh runs the shell tier under GITHUB_ACTIONS without one")
-	}
+	fullHistory, tagsFetched := false, false
 	for _, step := range steps {
-		if fetches := gitFetchWords(step.Run); len(fetches) > 0 {
-			t.Errorf("a step runs git fetch %q, but this run reads no history and no tag", fetches)
+		if strings.HasPrefix(step.Uses, "actions/checkout") && fmt.Sprint(step.With["fetch-depth"]) == "0" {
+			fullHistory = true
+		}
+		for _, words := range gitFetchWords(step.Run) {
+			if fetchesTags(words) {
+				tagsFetched = true
+			}
 		}
 	}
-}
-
-// TestPostLandWorkflowFetchesNoTags holds the committed post-land workflow to
-// fetching no tag: nothing the shell tier runs reads one.
-func TestPostLandWorkflowFetchesNoTags(t *testing.T) {
-	t.Parallel()
-	for _, p := range gateTagFetchProblems(postLandWorkflowSteps(t)) {
-		t.Error(p)
+	if !fullHistory {
+		t.Error("the checkout does not set fetch-depth: 0, so the shell tier has no history for git describe")
+	}
+	if !tagsFetched {
+		t.Error("no step fetches the tags, so git describe finds none and makefile-gate_test.sh fails")
 	}
 }
 
