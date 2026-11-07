@@ -1100,10 +1100,23 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 	}
 
 	tokens, starts := containerSuiteWalkLine(script)
+	// A relative cd is placed only against a directory the walk knows.
+	base := cwd
+	if !cwdKnown {
+		base = ""
+	}
+	tokens, walkFrom, unplacedFrom := containerSuiteCarry(proc, tokens, starts, base)
 	vars := shellVarAssignments(tokens)
 	dirs := make([]containerSuiteDir, len(script.Segments))
 	for i := range script.Segments {
-		dir, known := segmentWalkRoot(proc, tokens, starts[i], cwd, vars)
+		from := starts[i]
+		if at, ok := walkFrom[from]; ok {
+			from = at
+		}
+		dir, known := segmentWalkRoot(proc, tokens, from, cwd, vars)
+		// A segment after a directory change that may not run is judged in a
+		// directory the walk cannot name, whatever the walk says (gt-zz1t7g).
+		known = known && starts[i] <= unplacedFrom
 		dirs[i] = containerSuiteDir{dir: dir, known: known && cwdKnown}
 	}
 	payloadDir := func(i int) (string, bool) {
@@ -1121,6 +1134,11 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 		}
 		if slotRunWrapped(words) {
 			continue
+		}
+		if dockerOn && isPolecatOrRefineryContext(proc) {
+			if r := containerSuiteNonLiteralRefusal(seg); r != "" {
+				return r, nil
+			}
 		}
 		payloads := containerSuitePayloads(script, i)
 		if depth >= maxTestGuardNestDepth {
@@ -1304,6 +1322,156 @@ func containerSuiteWalkLine(script shellparse.Script) (tokens []string, starts [
 		shells = shells[:len(shells)-1]
 	}
 	return tokens, starts
+}
+
+// containerSuiteCarry rewrites the walk line for the directory changes the walk
+// (segmentWalkRoot) does not read the way the shell makes them (gt-zz1t7g). It
+// returns the rewritten line, walkFrom (a segment's start token mapped to the
+// token its directory is walked up to) and unplacedFrom, the index of the first
+// directory change a chain element may skip: the segments after it are unknown,
+// and the guard refuses them (fail closed). Every token keeps its index, so the
+// segment starts still index the line.
+//
+// Why: "cd A || cd B; go test" runs go in A when the first cd succeeds, and the
+// shell skips the right-hand side. A cd that follows "||" or "|", one that "||"
+// follows, and a builtin or command cd after a chain element are changes the
+// shell may or may not make, so they are not carried.
+//
+// ACCEPTED RESIDUAL (overseer decision, gt-zz1t7g): a plain cd after "&&" with
+// no "||" after it is read as the walk reads any "&&" list. In a pure "&&"
+// chain the command after the cd runs only when every cd ran, which the walk
+// reads right. The one shape that differs, "X && cd A; go test" with X failing,
+// runs go in the old directory; it is accepted because this is an opt-in check
+// for the polecat and refinery contexts and saying "skipped" needs the dead-list
+// analysis the walk does not have.
+func containerSuiteCarry(proc guardProcess, tokens []string, starts []int, base string) (carried []string, walkFrom map[int]int, unplacedFrom int) {
+	carried = append([]string(nil), tokens...)
+	vars := shellVarAssignments(tokens)
+	walkFrom = map[int]int{}
+	unplacedFrom = len(carried)
+	// One pass in line order: a skipped right-hand side is rewritten before the
+	// walk reaches it, so only a directory change that is still a change here
+	// is one the shell may run after a chain element.
+	for i := 0; i < len(carried); i++ {
+		if containerSuiteChainBefore(carried, i) {
+			cd := i
+			builtin := false
+			if (carried[i] == "builtin" || carried[i] == "command") && i+1 < len(carried) && carried[i+1] == "cd" {
+				cd = i + 1
+				builtin = true
+			} else if !dirChangeCommands[carried[i]] {
+				continue
+			}
+			sep := cd + 1 + len(commandArgs(carried, cd))
+			orFollows := sep < len(carried) && carried[sep] == "||"
+			orBefore := carried[i-1] == "||" || carried[i-1] == "|"
+			if !builtin && !orFollows && !orBefore {
+				continue
+			}
+			root, _ := cdWalkRoot(proc, carried, cd, base, vars)
+			if _, status := dirChangeTarget(proc, carried[cd], commandArgs(carried, cd), root, vars); status != cdRefused && i < unplacedFrom {
+				unplacedFrom = i
+			}
+			continue
+		}
+		if (carried[i] == "builtin" || carried[i] == "command") && i+1 < len(carried) && carried[i+1] == "cd" && shellCommandStart(carried, i) {
+			carried[i] = ";"
+			continue
+		}
+		if !dirChangeCommands[carried[i]] || !shellCommandStart(carried, i) {
+			continue
+		}
+		args := commandArgs(carried, i)
+		sep := i + 1 + len(args)
+		if sep >= len(carried) || carried[sep] != "||" {
+			continue
+		}
+		// An unplaced prefix gives an empty root: a relative cd does not resolve
+		// here and is left for the walk, which refuses it as unplaced. An
+		// absolute cd resolves whatever the prefix, so it carries.
+		root, _ := cdWalkRoot(proc, carried, i, base, vars)
+		if _, status := dirChangeTarget(proc, carried[i], args, root, vars); status != cdResolved {
+			continue
+		}
+		end := containerSuiteChainEnd(carried, sep+1)
+		if end < len(carried) && carried[end] == "&" {
+			continue
+		}
+		carried[sep] = "&&"
+		for j := sep + 1; j < end; j++ {
+			if carried[j] != "||" && carried[j] != "|" && carried[j] != "(" {
+				carried[j] = "true"
+			}
+		}
+		for _, start := range starts {
+			if start > sep && start < end {
+				walkFrom[start] = i
+			}
+		}
+	}
+	return carried, walkFrom, unplacedFrom
+}
+
+// containerSuiteChainBefore reports whether the token at i follows "&&", "||"
+// or "|": a command there may not run, or runs in a pipeline's subshell.
+func containerSuiteChainBefore(tokens []string, i int) bool {
+	return i > 0 && (tokens[i-1] == "&&" || tokens[i-1] == "||" || tokens[i-1] == "|")
+}
+
+// containerSuiteChainEnd returns the index of the token that ends the
+// right-hand side of a "||" whose right-hand side starts at start: the next
+// ";", "&&", "&" or ")", or len(tokens). A "|" or a further "||" stays inside
+// the right-hand side.
+func containerSuiteChainEnd(tokens []string, start int) int {
+	for i := start; i < len(tokens); i++ {
+		switch tokens[i] {
+		case ";", "&&", "&", ")":
+			return i
+		}
+	}
+	return len(tokens)
+}
+
+// containerSuiteNonLiteralRefusal refuses a segment whose command word, or
+// whose -c or eval payload, is a word the shell does not pass through as the
+// text the guard reads (shellparse's Literal is false). The command the segment
+// runs is then one the guard cannot name, so it cannot be read for a test run.
+// The reason names the word as written. The caller applies the container
+// opt-in and the polecat or refinery gate.
+//
+// The command word is the first word after the shell keywords trimShellKeywords
+// steps over, and the -c payload is the word shellCPayloadIndex picks, the same
+// words the payload readers read. Redirections are not among seg.Words, so a
+// redirection ahead of the command does not hide a non-literal word.
+func containerSuiteNonLiteralRefusal(seg shellparse.Segment) string {
+	words := containerSuiteWords(seg)
+	skip := len(words) - len(trimShellKeywords(words))
+	if skip < len(seg.Words) && !seg.Words[skip].Literal {
+		return fmt.Sprintf("command word %s is not a literal, so the command it runs cannot be inspected for a test run", seg.Words[skip].Raw)
+	}
+	lower := toLowerTokens(words)
+	for i, word := range lower {
+		if !shellInvokers[filepath.Base(word)] {
+			continue
+		}
+		if idx := shellCPayloadIndex(lower[i+1:]); idx >= 0 && !seg.Words[i+1+idx].Literal {
+			return containerSuiteNonLiteralPayload(seg.Words[i+1+idx])
+		}
+	}
+	if skip < len(seg.Words) && strings.ToLower(seg.Words[skip].Text) == "eval" {
+		for _, w := range seg.Words[skip+1:] {
+			if !w.Literal {
+				return containerSuiteNonLiteralPayload(w)
+			}
+		}
+	}
+	return ""
+}
+
+// containerSuiteNonLiteralPayload is the refusal for a -c or eval payload word
+// the shell expands before it runs.
+func containerSuiteNonLiteralPayload(w shellparse.Word) string {
+	return fmt.Sprintf("shell payload %s is not a literal, so the command it runs cannot be inspected for a test run", w.Raw)
 }
 
 // containerSuiteCommonShells is the length of the prefix two subshell stacks
