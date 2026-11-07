@@ -311,6 +311,7 @@ func TestCompileKeepsGitsAbbreviationWhenTheInstalledBDDoesNotNameTheCommit(t *t
 	}{
 		{"another commit", hostBuildID, hostCommit},
 		{"a build id that is not a prefix", "fffffff", fullCommit},
+		{"a build id shorter than a commit abbreviation", "3b90ab", fullCommit},
 		{"a branch-stamped build id", "dev", fullCommit},
 		{"no build id", "", fullCommit},
 		{"no reported commit", hostBuildID, ""},
