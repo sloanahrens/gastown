@@ -1100,10 +1100,20 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 	}
 
 	tokens, starts := containerSuiteWalkLine(script)
+	// A relative cd is placed only against a directory the walk knows.
+	base := cwd
+	if !cwdKnown {
+		base = ""
+	}
+	tokens, walkFrom := containerSuiteCarry(proc, tokens, starts, base)
 	vars := shellVarAssignments(tokens)
 	dirs := make([]containerSuiteDir, len(script.Segments))
 	for i := range script.Segments {
-		dir, known := segmentWalkRoot(proc, tokens, starts[i], cwd, vars)
+		from := starts[i]
+		if at, ok := walkFrom[from]; ok {
+			from = at
+		}
+		dir, known := segmentWalkRoot(proc, tokens, from, cwd, vars)
 		dirs[i] = containerSuiteDir{dir: dir, known: known && cwdKnown}
 	}
 	payloadDir := func(i int) (string, bool) {
@@ -1121,6 +1131,11 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 		}
 		if slotRunWrapped(words) {
 			continue
+		}
+		if dockerOn && isPolecatOrRefineryContext(proc) {
+			if r := containerSuiteNonLiteralRefusal(seg); r != "" {
+				return r, nil
+			}
 		}
 		payloads := containerSuitePayloads(script, i)
 		if depth >= maxTestGuardNestDepth {
@@ -1304,6 +1319,129 @@ func containerSuiteWalkLine(script shellparse.Script) (tokens []string, starts [
 		shells = shells[:len(shells)-1]
 	}
 	return tokens, starts
+}
+
+// containerSuiteCarry rewrites the walk line for the two directory changes the
+// walk (segmentWalkRoot) does not read the way the shell makes them, and
+// returns the rewritten line with walkFrom, which maps a segment's start token
+// to the token its directory is walked up to.
+//
+// A cd followed by "||" changes the directory only when it succeeds, and then
+// the right-hand side is skipped: "cd A || cd B; go test" runs go in A. The
+// walk drops that change, so the "||" becomes "&&" and the skipped right-hand
+// side's tokens become "true", which the walk does not read as a change. A cd
+// that fails is left for the walk, which already takes the "||" branch. A
+// chain that ends at "&" is left alone: the shell backgrounds it, so no
+// directory carries out of it. "(" and ")" are kept, so the walk still reads
+// a subshell as a subshell.
+//
+// builtin cd and command cd make the same change as cd, but the walk reads a cd
+// only where a command starts, so builtin or command ahead of it hides the
+// change. Each of those words becomes ";", a separator the walk reads, which
+// leaves the cd starting a command.
+//
+// A segment in a skipped right-hand side runs only when its cd fails, so it is
+// judged in the directory the shell is in just before that cd (walkFrom), not
+// in the one the skipped cd would have carried.
+//
+// Every token keeps its index, so the segment starts still index the line.
+func containerSuiteCarry(proc guardProcess, tokens []string, starts []int, base string) ([]string, map[int]int) {
+	carried := append([]string(nil), tokens...)
+	vars := shellVarAssignments(tokens)
+	walkFrom := map[int]int{}
+	for i := 0; i < len(carried); i++ {
+		if (carried[i] == "builtin" || carried[i] == "command") && i+1 < len(carried) && carried[i+1] == "cd" && shellCommandStart(carried, i) {
+			carried[i] = ";"
+			continue
+		}
+		if !dirChangeCommands[carried[i]] || !shellCommandStart(carried, i) {
+			continue
+		}
+		args := commandArgs(carried, i)
+		sep := i + 1 + len(args)
+		if sep >= len(carried) || carried[sep] != "||" {
+			continue
+		}
+		// An unplaced prefix gives an empty root: a relative cd does not resolve
+		// here and is left for the walk, which refuses it as unplaced. An
+		// absolute cd resolves whatever the prefix, so it carries.
+		root, _ := cdWalkRoot(proc, carried, i, base, vars)
+		if _, status := dirChangeTarget(proc, carried[i], args, root, vars); status != cdResolved {
+			continue
+		}
+		end := containerSuiteChainEnd(carried, sep+1)
+		if end < len(carried) && carried[end] == "&" {
+			continue
+		}
+		carried[sep] = "&&"
+		for j := sep + 1; j < end; j++ {
+			if carried[j] != "||" && carried[j] != "|" && carried[j] != "(" {
+				carried[j] = "true"
+			}
+		}
+		for _, start := range starts {
+			if start > sep && start < end {
+				walkFrom[start] = i
+			}
+		}
+	}
+	return carried, walkFrom
+}
+
+// containerSuiteChainEnd returns the index of the token that ends the
+// right-hand side of a "||" whose right-hand side starts at start: the next
+// ";", "&&", "&" or ")", or len(tokens). A "|" or a further "||" stays inside
+// the right-hand side.
+func containerSuiteChainEnd(tokens []string, start int) int {
+	for i := start; i < len(tokens); i++ {
+		switch tokens[i] {
+		case ";", "&&", "&", ")":
+			return i
+		}
+	}
+	return len(tokens)
+}
+
+// containerSuiteNonLiteralRefusal refuses a segment whose command word, or
+// whose -c or eval payload, is a word the shell does not pass through as the
+// text the guard reads (shellparse's Literal is false). The command the segment
+// runs is then one the guard cannot name, so it cannot be read for a test run.
+// The reason names the word as written. The caller applies the container
+// opt-in and the polecat or refinery gate.
+//
+// The command word is the first word after the shell keywords trimShellKeywords
+// steps over, and the -c payload is the word shellCPayloadIndex picks, the same
+// words the payload readers read. Redirections are not among seg.Words, so a
+// redirection ahead of the command does not hide a non-literal word.
+func containerSuiteNonLiteralRefusal(seg shellparse.Segment) string {
+	words := containerSuiteWords(seg)
+	skip := len(words) - len(trimShellKeywords(words))
+	if skip < len(seg.Words) && !seg.Words[skip].Literal {
+		return fmt.Sprintf("command word %s is not a literal, so the command it runs cannot be inspected for a test run", seg.Words[skip].Raw)
+	}
+	lower := toLowerTokens(words)
+	for i, word := range lower {
+		if !shellInvokers[filepath.Base(word)] {
+			continue
+		}
+		if idx := shellCPayloadIndex(lower[i+1:]); idx >= 0 && !seg.Words[i+1+idx].Literal {
+			return containerSuiteNonLiteralPayload(seg.Words[i+1+idx])
+		}
+	}
+	if skip < len(seg.Words) && strings.ToLower(seg.Words[skip].Text) == "eval" {
+		for _, w := range seg.Words[skip+1:] {
+			if !w.Literal {
+				return containerSuiteNonLiteralPayload(w)
+			}
+		}
+	}
+	return ""
+}
+
+// containerSuiteNonLiteralPayload is the refusal for a -c or eval payload word
+// the shell expands before it runs.
+func containerSuiteNonLiteralPayload(w shellparse.Word) string {
+	return fmt.Sprintf("shell payload %s is not a literal, so the command it runs cannot be inspected for a test run", w.Raw)
 }
 
 // containerSuiteCommonShells is the length of the prefix two subshell stacks
