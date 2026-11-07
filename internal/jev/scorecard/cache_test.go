@@ -135,6 +135,9 @@ func TestReusableBlock(t *testing.T) {
 		{"just under ReuseAge", prev(func(b *BatteryBlock) { b.ScoredAt = now.Add(-ReuseAge + time.Minute) }), fp, "7d", true},
 		{"log gained a line", prev(nil), LogFingerprint{Lines: 4, Bytes: 31}, "7d", false},
 		{"log gained a byte", prev(nil), LogFingerprint{Lines: 3, Bytes: 31}, "7d", false},
+		// The log rows above also change the byte size, so this is the only row
+		// where the line count alone differs.
+		{"log has the same bytes and a new line", prev(nil), LogFingerprint{Lines: 4, Bytes: 30}, "7d", false},
 		{"log cannot be measured", prev(nil), LogFingerprint{}, "7d", false},
 		{"block is ReuseAge old", prev(func(b *BatteryBlock) { b.ScoredAt = now.Add(-ReuseAge) }), fp, "7d", false},
 		{"block is past ReuseAge", prev(func(b *BatteryBlock) { b.ScoredAt = now.Add(-4 * 24 * time.Hour) }), fp, "7d", false},

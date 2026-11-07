@@ -528,6 +528,79 @@ func TestRulesPrefetchFailedBatchLabelsAsThePerBeadReads(t *testing.T) {
 	}
 }
 
+// TestRulesRegisteredAdapterHasBatchReader checks the factory the registry
+// builds wires a batch reader, so Prefetch's batches reach the store in
+// production. Open touches no store until a read, so no bd process starts.
+func TestRulesRegisteredAdapterHasBatchReader(t *testing.T) {
+	t.Parallel()
+	a, err := Open(RulesBattery, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ra, ok := a.(*rulesAdapter)
+	if !ok {
+		t.Fatalf("Open(%q) built %T, want *rulesAdapter", RulesBattery, a)
+	}
+	if ra.commentsBatch == nil {
+		t.Error("the registered rules adapter has no batch reader, so every bead is read one at a time")
+	}
+}
+
+// TestRulesPrefetchChunksEachCommentsQuery checks the registered adapter's batch
+// reader is never handed more than commentChunk ids in one query, and that every
+// bead is asked for exactly once. The recorder replaces the production batch
+// reader and answers each id from a fake, so no store is opened and no bd
+// process starts. A per-bead read fails the test: every bead is answered by the
+// batch, so none should be read one at a time.
+func TestRulesPrefetchChunksEachCommentsQuery(t *testing.T) {
+	t.Parallel()
+	const n = 250
+	a, err := Open(RulesBattery, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ra := a.(*rulesAdapter)
+	ra.now = prefetchFixtureNow
+	ra.warn = func(format string, args ...any) { t.Errorf("unexpected warning: "+format, args...) }
+	ra.comments = func(rig, bead string) ([]beads.Comment, error) {
+		t.Errorf("per-bead read of %s/%s, want every bead answered by the batch", rig, bead)
+		return nil, nil
+	}
+	answered := &fakeBatchReader{comments: map[beadRef][]beads.Comment{}}
+	var lines [][]byte
+	for i := range n {
+		bead := fmt.Sprintf("gt-%03d", i)
+		answered.comments[beadRef{"gastown", bead}] = []beads.Comment{}
+		lines = append(lines, prefetchLine(t, "gastown", bead, "furiosa", prefetchFixtureDoneAt))
+	}
+	var sizes []int
+	asked := map[string]int{}
+	ra.commentsBatch = func(rig string, ids []string) (map[string][]beads.Comment, error) {
+		sizes = append(sizes, len(ids))
+		for _, id := range ids {
+			asked[id]++
+		}
+		return answered.read(rig, ids)
+	}
+	items := parseRulesLines(t, ra, lines...)
+
+	ra.Prefetch(context.Background(), items)
+
+	for i, size := range sizes {
+		if size > commentChunk {
+			t.Errorf("query %d carries %d ids, want at most %d", i, size, commentChunk)
+		}
+	}
+	if len(asked) != n {
+		t.Errorf("queries asked for %d distinct beads, want %d", len(asked), n)
+	}
+	for id, count := range asked {
+		if count != 1 {
+			t.Errorf("bead %s was asked for %d times, want once", id, count)
+		}
+	}
+}
+
 // TestRulesPrefetchCommentKeyNeedsSlashFreeBead checks the guard commentKey
 // relies on: Parse rejects a bead id with a slash, so a key's bead is the part
 // after its last slash.

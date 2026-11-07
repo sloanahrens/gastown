@@ -1192,3 +1192,15 @@ func TestJevScorecardServesTheCountUnderItsOldNameToo(t *testing.T) {
 		}
 	}
 }
+
+// The scorecard panel picks up a new score within a minute of its cache being
+// written, so the default poll is a minute.
+func TestJevScorecardEveryDefaultsToAMinute(t *testing.T) {
+	t.Parallel()
+
+	var c Config
+	c.defaults()
+	if c.JevScorecardEvery != time.Minute {
+		t.Errorf("JevScorecardEvery defaults to %v, want 1m", c.JevScorecardEvery)
+	}
+}

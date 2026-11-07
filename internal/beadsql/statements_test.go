@@ -3,8 +3,15 @@ package beadsql
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
+
+	sqle "github.com/dolthub/go-mysql-server"
+	"github.com/dolthub/go-mysql-server/memory"
+	gmssql "github.com/dolthub/go-mysql-server/sql"
+	"github.com/dolthub/go-mysql-server/sql/types"
 )
 
 // TestDeclaredQueriesAreReadOnlyBdReads: every declared statement passes
@@ -97,6 +104,95 @@ func TestCommentsOfQuotesItsIDs(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("CommentsOf lacks %q:\n%s", want, s)
 		}
+	}
+}
+
+// TestCommentsOfOrdersACommentsByCreatedAt runs CommentsOf's statement through
+// an in-process MySQL-compatible engine, so the order is the engine's and not a
+// reading of the SQL text. A bead's comments come back oldest first, so Label
+// reads a stand-down or a refusal in the order it was written. The comments are
+// written out of created_at order and interleaved across two beads: a read
+// without the sort returns them in write order and fails.
+func TestCommentsOfOrdersACommentsByCreatedAt(t *testing.T) {
+	t.Parallel()
+	ctx, engine := newCommentsTestEngine(t)
+	mustExecComments(t, ctx, engine, "INSERT INTO issues (id) VALUES ('gt-1'), ('gt-2')")
+	for _, c := range []struct{ id, issue, at, text string }{
+		{"z9", "gt-1", "2026-11-07 12:03:00", "gt-1 second"},
+		{"a1", "gt-2", "2026-11-07 12:04:00", "gt-2 second"},
+		{"m5", "gt-1", "2026-11-07 12:01:00", "gt-1 first"},
+		{"b2", "gt-2", "2026-11-07 12:02:00", "gt-2 first"},
+	} {
+		mustExecComments(t, ctx, engine, fmt.Sprintf(
+			"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES ('%s', '%s', 'furiosa', '%s', '%s')",
+			c.id, c.issue, c.text, c.at))
+	}
+	s, err := CommentsOf([]string{"gt-1", "gt-2"}).Inline()
+	if err != nil {
+		t.Fatalf("Inline: %v", err)
+	}
+	_, iter, _, err := engine.Query(ctx, s)
+	if err != nil {
+		t.Fatalf("query %s: %v", s, err)
+	}
+	rows, err := gmssql.RowIterToRows(ctx, iter)
+	if err != nil {
+		t.Fatalf("draining: %v", err)
+	}
+	var got []string
+	for _, row := range rows {
+		got = append(got, fmt.Sprintf("%v:%v", row[0], row[4]))
+	}
+	want := []string{
+		"gt-1:2026-11-07T12:01:00.000000Z",
+		"gt-1:2026-11-07T12:03:00.000000Z",
+		"gt-2:2026-11-07T12:02:00.000000Z",
+		"gt-2:2026-11-07T12:04:00.000000Z",
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("comments by bead, oldest first:\n got %q\nwant %q", got, want)
+	}
+}
+
+// newCommentsTestEngine builds an in-memory engine with the issues and comments
+// tables CommentsOf reads.
+func newCommentsTestEngine(t *testing.T) (*gmssql.Context, *sqle.Engine) {
+	t.Helper()
+	db := memory.NewDatabase("commentstest")
+	pro := memory.NewDBProvider(db)
+	session := memory.NewSession(gmssql.NewBaseSession(), pro)
+	ctx := gmssql.NewContext(context.Background(), gmssql.WithSession(session))
+	ctx.SetCurrentDatabase("commentstest")
+
+	db.AddTable("issues", memory.NewTable(ctx, db, "issues", gmssql.NewPrimaryKeySchema(gmssql.Schema{
+		{Name: "id", Type: types.Text, Nullable: false, Source: "issues"},
+	}), db.GetForeignKeyCollection()))
+
+	db.AddTable("comments", memory.NewTable(ctx, db, "comments", gmssql.NewPrimaryKeySchema(gmssql.Schema{
+		{Name: "id", Type: types.Text, Nullable: false, Source: "comments"},
+		{Name: "issue_id", Type: types.Text, Nullable: false, Source: "comments"},
+		{Name: "author", Type: types.Text, Nullable: true, Source: "comments"},
+		{Name: "text", Type: types.Text, Nullable: true, Source: "comments"},
+		{Name: "created_at", Type: types.Datetime, Nullable: false, Source: "comments"},
+	}), db.GetForeignKeyCollection()))
+
+	engine := sqle.NewDefault(pro)
+	t.Cleanup(func() {
+		if err := engine.Close(); err != nil {
+			t.Errorf("closing test engine: %v", err)
+		}
+	})
+	return ctx, engine
+}
+
+func mustExecComments(t *testing.T, ctx *gmssql.Context, engine *sqle.Engine, query string) {
+	t.Helper()
+	_, iter, _, err := engine.Query(ctx, query)
+	if err != nil {
+		t.Fatalf("exec %q: %v", query, err)
+	}
+	if _, err := gmssql.RowIterToRows(ctx, iter); err != nil {
+		t.Fatalf("draining %q: %v", query, err)
 	}
 }
 
