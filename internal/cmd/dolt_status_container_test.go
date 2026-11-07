@@ -710,6 +710,9 @@ func TestDoltHistoryDocStartsTheServerAfterTheCopy(t *testing.T) {
 	if strings.Index(doc, "`gt dolt start`") > flatten {
 		t.Errorf("the flatten SQL runs before the runbook starts the server again")
 	}
+	if strings.Index(doc, "`gt dolt start`") < 0 {
+		t.Fatal("docs/dolt-history-offline.md has no `gt dolt start` step, so the flatten order cannot be checked")
+	}
 }
 
 // TestDoltHistoryDocVerifiesAfterTheFlatten: after the flatten the runbook
