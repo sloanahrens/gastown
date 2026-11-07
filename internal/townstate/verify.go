@@ -1,13 +1,18 @@
 package townstate
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"path"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // RecentWindow is how recently a session-classed path under a daemon subsystem
@@ -49,7 +54,9 @@ func Failures(problems []Problem) int {
 }
 
 // Verify checks the town root under fsys against the split, reading metadata
-// only, and returns the problems it found sorted by path.
+// only (plus the rig names the registry holds), and returns the problems it
+// found sorted by path. A path under no entry is reported once, at the
+// topmost unclassified directory, never once per descendant.
 //
 // A path FAILS when no entry covers it, or when two entries overlap with
 // different owners; both are facts about the manifest and the tree, not about
@@ -97,6 +104,11 @@ func Verify(fsys fs.FS, m *Manifest, now time.Time) ([]Problem, error) {
 				Path:   p,
 				Reason: "no manifest entry; classify it daemon, session or shared",
 			})
+			if d.IsDir() {
+				// No entry names p or an ancestor, and none lies below it, so
+				// nothing under p can be classified either: p is one problem.
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if entry.Owner != OwnerSession {
@@ -140,23 +152,51 @@ func Verify(fsys fs.FS, m *Manifest, now time.Time) ([]Problem, error) {
 	return sortedProblems(problems), nil
 }
 
-// townInputs names the rigs and birds the town has, from directory metadata.
-// A rig is a top-level directory with a config.json that the manifest does not
-// name itself: a town-level directory such as settings/ carries a config.json
-// too, and the manifest is what tells the two apart.
+// The rig registry is mayor/rigs.json on the five-file layout, and the
+// "registry" section of machineFile on the two-file layout (internal/config
+// layout.go). A host that carries the section wins over a leftover file.
+const (
+	machineFile     = config.MachineConfigFile
+	rigsFile        = "mayor/" + constants.FileRigsJSON
+	registrySection = "registry"
+)
+
+// rigMarkers are the paths whose presence marks a top-level directory as a
+// rig: its registry record, its bare repository and its canonical clone.
+var rigMarkers = []string{
+	"config.json",
+	constants.DirRepoGit,
+	constants.DirMayor + "/" + constants.DirRig,
+}
+
+// townInputs names the rigs and birds the town has, from the rig registry and
+// directory metadata. A rig is a top-level directory the registry names, or one
+// that holds a rig marker; a name the manifest gives itself is never a rig,
+// since a town-level directory such as settings/ can carry a config.json too.
+// A registry or marker that cannot be read is an error, never an empty rig
+// list: that would classify every rig's tree as unclassified.
 func townInputs(fsys fs.FS, m *Manifest) (rigs, birds []string, err error) {
+	registered, err := registryRigs(fsys)
+	if err != nil {
+		return nil, nil, err
+	}
 	tops, err := fs.ReadDir(fsys, ".")
 	if err != nil {
 		return nil, nil, fmt.Errorf("reading the town root: %w", err)
 	}
 	for _, d := range tops {
-		if !d.IsDir() {
+		if !d.IsDir() || m.names(d.Name()) {
 			continue
 		}
-		if m.names(d.Name()) {
+		if slices.Contains(registered, d.Name()) {
+			rigs = append(rigs, d.Name())
 			continue
 		}
-		if _, err := fs.Stat(fsys, path.Join(d.Name(), "config.json")); err == nil {
+		marked, err := hasRigMarker(fsys, d.Name())
+		if err != nil {
+			return nil, nil, err
+		}
+		if marked {
 			rigs = append(rigs, d.Name())
 		}
 	}
@@ -174,6 +214,73 @@ func townInputs(fsys fs.FS, m *Manifest) (rigs, birds []string, err error) {
 		}
 	}
 	return rigs, birds, nil
+}
+
+// registryRigs returns the rig names the town's registry holds, read the way
+// the daemon reads it: the "registry" section of mayor/town.json when the file
+// carries one, else mayor/rigs.json. A town with neither has no rigs yet, the
+// same as config.LoadRigsConfigOrEmpty. A registry that cannot be read or
+// decoded is an error. Only the names are kept.
+func registryRigs(fsys fs.FS) ([]string, error) {
+	top, err := readMachineTopLevel(fsys)
+	if err != nil {
+		return nil, err
+	}
+	var cfg config.RigsConfig
+	if raw, ok := top[registrySection]; ok {
+		if err := config.DecodeJSONFile(machineFile+` (section "`+registrySection+`")`, raw, &cfg); err != nil {
+			return nil, err
+		}
+		return slices.Sorted(maps.Keys(cfg.Rigs)), nil
+	}
+	data, err := fs.ReadFile(fsys, rigsFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", rigsFile, err)
+	}
+	if err := config.DecodeJSONFile(rigsFile, data, &cfg); err != nil {
+		return nil, err
+	}
+	return slices.Sorted(maps.Keys(cfg.Rigs)), nil
+}
+
+// readMachineTopLevel returns the top-level keys of mayor/town.json, nil when
+// the file is absent. A file that is not a JSON object is an error: verify
+// cannot tell whether it carries the registry.
+func readMachineTopLevel(fsys fs.FS) (map[string]json.RawMessage, error) {
+	data, err := fs.ReadFile(fsys, machineFile)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", machineFile, err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		// The decoder's message quotes the file's bytes, so it is not kept.
+		return nil, fmt.Errorf("reading %s: not a JSON object", machineFile)
+	}
+	return top, nil
+}
+
+// hasRigMarker reports whether the top-level directory top holds one of the
+// rig markers. A marker that cannot be stat'd for a reason other than its
+// absence is an error, never a missing rig.
+func hasRigMarker(fsys fs.FS, top string) (bool, error) {
+	for _, marker := range rigMarkers {
+		p := path.Join(top, marker)
+		_, err := fs.Stat(fsys, p)
+		switch {
+		case err == nil:
+			return true, nil
+		case errors.Is(err, fs.ErrNotExist):
+		default:
+			return false, fmt.Errorf("stat %s: %w", p, err)
+		}
+	}
+	return false, nil
 }
 
 // skipped reports whether p is a subtree verify never reads: a Dolt data

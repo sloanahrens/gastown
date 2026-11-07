@@ -33,6 +33,17 @@ func writeTownStateFile(t *testing.T, town, rel string) string {
 	return p
 }
 
+// writeTownStateRegistry writes mayor/town.json as an empty registry. verify
+// reads that file for the rig names, so it must be a JSON object.
+func writeTownStateRegistry(t *testing.T, town string) string {
+	t.Helper()
+	p := writeTownStateFile(t, town, "mayor/town.json")
+	if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // ageTownStatePath sets p's mtime outside the recent window, so an old session write
 // does not read as the daemon's.
 func ageTownStatePath(t *testing.T, p string, old time.Time) {
@@ -63,7 +74,7 @@ func TestTownStateVerifyNamesStrayPaths(t *testing.T) {
 	old := now.Add(-48 * time.Hour)
 
 	town := t.TempDir()
-	writeTownStateFile(t, town, "mayor/town.json")
+	writeTownStateRegistry(t, town)
 	writeTownStateFile(t, town, "settings/config.json")
 	writeTownStateFile(t, town, ".runtime/jev/run.json")
 	for _, p := range []string{
@@ -107,7 +118,7 @@ func TestTownStateVerifyNamesStrayPaths(t *testing.T) {
 	}
 	printed := out.String()
 	for _, want := range []struct{ path, reason, what string }{
-		{"stray/unlisted.txt", "no manifest entry", "a path under no manifest entry"},
+		{"stray", "no manifest entry", "the directory under no manifest entry, named once"},
 		{recentWrite, "below the session entry", "the recently written path under a daemon subsystem name, as information"},
 		{"logs/keep", "overlaps logs", "the entry overlapping another with a different owner"},
 	} {
@@ -127,7 +138,7 @@ func TestTownStateVerifyNamesStrayPaths(t *testing.T) {
 	// A clean town passes: every path covered, no recent session write, no
 	// entry overlap.
 	clean := t.TempDir()
-	writeTownStateFile(t, clean, "mayor/town.json")
+	writeTownStateRegistry(t, clean)
 	writeTownStateFile(t, clean, "gastown/crew/eagle/notes.md")
 	ageTownStatePath(t, filepath.Join(clean, "gastown", "crew", "eagle", "notes.md"), old)
 	for _, dir := range []string{"gastown", "gastown/crew", "gastown/crew/eagle"} {
@@ -152,7 +163,7 @@ func TestTownStateVerifyCommandFindsTheTownRoot(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	town := t.TempDir()
-	writeTownStateFile(t, town, "mayor/town.json")
+	writeTownStateRegistry(t, town)
 	writeTownStateFile(t, town, "stray/unlisted.txt")
 
 	var out bytes.Buffer
@@ -197,18 +208,29 @@ func TestTownStateVerifyCommandFindsTheTownRoot(t *testing.T) {
 // townStateFake is an in-memory town root that records every Open, so a test can
 // prove verify reads no file contents.
 type townStateFake struct {
-	dirs   map[string]time.Time
-	files  map[string]time.Time
-	opened []string
+	dirs     map[string]time.Time
+	files    map[string]time.Time
+	contents map[string]string
+	opened   []string
 }
 
 func newTownStateFake() *townStateFake {
-	return &townStateFake{dirs: map[string]time.Time{".": time.Now()}, files: map[string]time.Time{}}
+	return &townStateFake{
+		dirs:     map[string]time.Time{".": time.Now()},
+		files:    map[string]time.Time{},
+		contents: map[string]string{},
+	}
 }
 
 func (f *townStateFake) addDir(name string, mtime time.Time) { f.dirs[name] = mtime }
 
 func (f *townStateFake) addFile(name string, mtime time.Time) { f.files[name] = mtime }
+
+// addFileWithContent adds a file whose bytes verify may read: the registry.
+func (f *townStateFake) addFileWithContent(name string, mtime time.Time, body string) {
+	f.files[name] = mtime
+	f.contents[name] = body
+}
 
 func (f *townStateFake) Open(name string) (fs.File, error) {
 	f.opened = append(f.opened, name)
@@ -216,7 +238,11 @@ func (f *townStateFake) Open(name string) (fs.File, error) {
 		return &townStateDir{f: f, name: name, mtime: mtime}, nil
 	}
 	if mtime, ok := f.files[name]; ok {
-		return &townStateFile{name: name, mtime: mtime}, nil
+		file := &townStateFile{name: name, mtime: mtime}
+		if body, ok := f.contents[name]; ok {
+			file.r = strings.NewReader(body)
+		}
+		return file, nil
 	}
 	return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
 }
@@ -317,13 +343,19 @@ func (d *townStateDir) ReadDir(n int) ([]fs.DirEntry, error) {
 type townStateFile struct {
 	name  string
 	mtime time.Time
+	// r holds the bytes of a file whose contents verify may read; nil for any
+	// other file, which refuses every read.
+	r *strings.Reader
 }
 
 func (f *townStateFile) Stat() (fs.FileInfo, error) {
 	return townStateInfo{name: f.name, mtime: f.mtime}, nil
 }
-func (f *townStateFile) Read([]byte) (int, error) {
-	return 0, errors.New("a file has no content to read here")
+func (f *townStateFile) Read(b []byte) (int, error) {
+	if f.r == nil {
+		return 0, errors.New("a file has no content to read here")
+	}
+	return f.r.Read(b)
 }
 func (f *townStateFile) Close() error { return nil }
 
@@ -333,7 +365,9 @@ func sortTownStateEntries(entries []fs.DirEntry) {
 }
 
 // TestTownStateVerifyReadsNoContents proves verify looks at metadata only and
-// never descends into .dolt-data* or a .git tree.
+// never descends into .dolt-data* or a .git tree. The one file it reads is the
+// rig registry, for the rig names; the registry paths are the only ones it may
+// open as a regular file.
 func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
@@ -346,7 +380,7 @@ func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	} {
 		f.addDir(dir, old)
 	}
-	f.addFile("mayor/town.json", old)
+	f.addFileWithContent("mayor/town.json", old, "{}\n")
 	f.addFile("settings/config.json", old)
 	f.addFile("gastown/config.json", old)
 	f.addFile(".runtime/jev/run.json", now)
@@ -361,8 +395,9 @@ func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	if err := verifyTownState(&out, f, townstate.Default(), now); err != nil {
 		t.Fatalf("verifyTownState error = %v\n%s", err, out.String())
 	}
+	registry := map[string]bool{"mayor/town.json": true, "mayor/rigs.json": true}
 	for _, name := range f.opened {
-		if _, ok := f.files[name]; ok {
+		if _, ok := f.files[name]; ok && !registry[name] {
 			t.Errorf("verify opened the regular file %s; it must read metadata only", name)
 		}
 		if name == ".dolt-data" || strings.HasPrefix(name, ".dolt-data/") || strings.Contains(name, "/.dolt-data") ||
