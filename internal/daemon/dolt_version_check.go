@@ -21,8 +21,9 @@ import (
 // The Dolt image check (gt-goda5m): the town runs the newest stable
 // dolthub/dolt-sql-server image, so once an hour the daemon reads the image of
 // the town's Dolt container and asks Docker Hub for the newest release. A
-// container more than one release behind raises one low attention item
-// that names both versions, and the item clears when they match. The check
+// container on an earlier minor than the newest release, or more than one patch
+// release behind on the same minor, raises one low attention item that names
+// both versions, and the item clears when they match. The check
 // never pulls an image and never restarts a container.
 const (
 	// doltImageCheckEvery is how often the check asks: releases are a few a
@@ -85,45 +86,36 @@ func (v doltVersion) less(o doltVersion) bool {
 	return v.patch < o.patch
 }
 
-// doltImageBehind reports whether a container on running is behind the
-// releases listed. The gap is counted in releases, not in patch numbers, so a
-// minor boundary is crossed like any other: one release newer is not behind,
-// since a release published a moment ago is not a lapse. Two or more newer
-// releases are.
-func doltImageBehind(running doltVersion, releases []doltVersion) bool {
-	newer := 0
-	for _, r := range releases {
-		if running.less(r) {
-			newer++
-		}
+// doltImageBehind reports whether a container on running is behind newest.
+// One patch release is not behind: a release published a moment ago is not a
+// lapse. A different minor, or a gap of more than one patch within the same
+// minor, is.
+func doltImageBehind(running, newest doltVersion) bool {
+	if !running.less(newest) {
+		return false
 	}
-	return newer > 1
+	sameLine := running.major == newest.major && running.minor == newest.minor
+	return !sameLine || newest.patch-running.patch > 1
 }
 
-// doltReleases is every plain release among tags. A listing with no plain
-// release is an error: nothing to compare against is not a release.
-func doltReleases(tags []string) ([]doltVersion, error) {
-	var releases []doltVersion
+// newestDoltRelease is the highest plain release among tags. A listing with no
+// plain release is an error: nothing to compare against is not a release.
+func newestDoltRelease(tags []string) (doltVersion, error) {
+	var newest doltVersion
+	found := false
 	for _, tag := range tags {
-		if v, ok := parseDoltVersion(tag); ok {
-			releases = append(releases, v)
+		v, ok := parseDoltVersion(tag)
+		if !ok {
+			continue
+		}
+		if !found || newest.less(v) {
+			newest, found = v, true
 		}
 	}
-	if len(releases) == 0 {
-		return nil, errors.New("the registry listed no plain major.minor.patch tag")
+	if !found {
+		return doltVersion{}, errors.New("the registry listed no plain major.minor.patch tag")
 	}
-	return releases, nil
-}
-
-// doltNewest is the highest release in releases, which must not be empty.
-func doltNewest(releases []doltVersion) doltVersion {
-	newest := releases[0]
-	for _, r := range releases[1:] {
-		if newest.less(r) {
-			newest = r
-		}
-	}
-	return newest
+	return newest, nil
 }
 
 // doltImageTag is the tag of an image reference: the text after the last colon
@@ -190,13 +182,12 @@ func (c *doltImageCheck) run(ctx context.Context, townRoot string, now time.Time
 		logf("dolt image check: reading the image of container %s: %v", container, err)
 		return
 	}
-	releases, err := c.newestRelease(ctx)
+	newest, err := c.newestRelease(ctx)
 	if err != nil {
 		logf("dolt image check: reading the newest release from the registry: %v", err)
 		return
 	}
-	newest := doltNewest(releases)
-	if !doltImageBehind(running, releases) {
+	if !doltImageBehind(running, newest) {
 		c.set(nil)
 		return
 	}
@@ -262,17 +253,17 @@ func (c *doltImageCheck) runningVersion(ctx context.Context, container string) (
 	return v, nil
 }
 
-// newestRelease reads every page of the registry's tag listing and returns
-// every plain release in it.
-func (c *doltImageCheck) newestRelease(ctx context.Context) ([]doltVersion, error) {
+// newestRelease reads every page of the registry's tag listing and returns the
+// newest plain release.
+func (c *doltImageCheck) newestRelease(ctx context.Context) (doltVersion, error) {
 	var tags []string
 	for page := 1; ; page++ {
 		if page > doltImageTagsMaxPages {
-			return nil, fmt.Errorf("the tag listing runs past %d pages", doltImageTagsMaxPages)
+			return doltVersion{}, fmt.Errorf("the tag listing runs past %d pages", doltImageTagsMaxPages)
 		}
 		p, err := c.tagsPage(ctx, page)
 		if err != nil {
-			return nil, err
+			return doltVersion{}, err
 		}
 		for _, r := range p.Results {
 			tags = append(tags, r.Name)
@@ -281,7 +272,7 @@ func (c *doltImageCheck) newestRelease(ctx context.Context) ([]doltVersion, erro
 			break
 		}
 	}
-	return doltReleases(tags)
+	return newestDoltRelease(tags)
 }
 
 // doltTagsPage is one page of the registry's tag listing. Next is empty on the
