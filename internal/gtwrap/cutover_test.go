@@ -633,6 +633,16 @@ func TestInstallRefusesBadConfigurationBeforeAnyChange(t *testing.T) {
 			want: "named twice",
 		},
 		{
+			// The same path would be caught by the path check, so only a second
+			// path for gt reaches the name check (gt-xmomer).
+			name: "one tool named twice at two paths",
+			build: func(files *fakeFiles) InstallConfig {
+				targets := fourTargets()
+				return installConfig(files, &fakeDoctor{}, &bytes.Buffer{}, append(targets, Target{Name: "gt", Path: "/Users/operator/go/bin/gt"}))
+			},
+			want: "gt is named twice",
+		},
+		{
 			name: "one path twice",
 			build: func(files *fakeFiles) InstallConfig {
 				targets := fourTargets()

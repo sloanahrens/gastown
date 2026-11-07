@@ -488,6 +488,66 @@ func TestGreenRefIsIdempotentAndNeverForced(t *testing.T) {
 	})
 }
 
+// The ref is named by the first twelve characters of its commit, and the
+// remote is asked about that exact name. ls-remote matches its pattern as a
+// path suffix, so a remote that holds refs/heads/x/green/<sha12> at another
+// commit must not read as the green ref held: the green ref is pushed, not
+// refused (gt-xmomer).
+func TestGreenRefNamesTheTwelveCharacterPrefixAndMatchesTheExactRef(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+
+	t.Run("the ref is named by the first twelve characters of the commit", func(t *testing.T) {
+		t.Parallel()
+		fx := newGreenRefFixture(t, now)
+		sha := fx.commit(t, "main")
+		if len(sha) != 40 {
+			t.Fatalf("commit %q is %d characters, want a full 40-character sha", sha, len(sha))
+		}
+		fx.rec.green()
+		if !fx.runCycle(t, sha) {
+			t.Fatal("the cycle deferred")
+		}
+		want := sha + ":refs/heads/green/" + sha[:12]
+		if len(fx.git.pushes) != 1 || fx.git.pushes[0].refspec != want {
+			t.Fatalf("pushes = %+v, want the one push %q", fx.git.pushes, want)
+		}
+		if got := fx.f.Ref(fx.remote, "refs/heads/green/"+sha[:12]); got != sha {
+			t.Errorf("remote green/%s = %q, want %q", sha[:12], got, sha)
+		}
+	})
+
+	t.Run("a listing that holds the name as a path suffix is not the ref held", func(t *testing.T) {
+		t.Parallel()
+		fx := newGreenRefFixture(t, now)
+		sha := fx.commit(t, "main")
+		if len(sha) != 40 {
+			t.Fatalf("commit %q is %d characters, want a full 40-character sha", sha, len(sha))
+		}
+		name := "green/" + sha[:12]
+		other := fx.f.Commit(t, fx.remote, "someone-else", "another commit", map[string]string{"o.txt": "other\n"})
+		// The pattern refs/heads/green/<sha12> comes back with this ref under
+		// its suffix match; it is not the exact ref the publish names.
+		fx.git.injectRef = func(prefix string) []git.RemoteRef {
+			if prefix != "refs/heads/"+name {
+				return nil
+			}
+			return []git.RemoteRef{{Hash: other, Name: "refs/heads/x/" + name}}
+		}
+		fx.rec.green()
+		if !fx.runCycle(t, sha) {
+			t.Fatal("the cycle deferred")
+		}
+		want := sha + ":refs/heads/" + name
+		if len(fx.git.pushes) != 1 || fx.git.pushes[0].refspec != want {
+			t.Fatalf("pushes = %+v, want the publish %q: a suffix match is not the ref held", fx.git.pushes, want)
+		}
+		if items := greenRefItems(t, fx.d); len(items) != 0 {
+			t.Errorf("items = %+v, want none: the exact ref was never held at another commit", items)
+		}
+	})
+}
+
 // A push that fails leaves the cycle's verdict alone: the sweep is green, the
 // failure is logged once an hour, retried on the next cycle for the same
 // commit, and the third consecutive failure raises one low item that the next
@@ -613,6 +673,26 @@ func TestGreenRefPushFailureReasonIsAClassTheRemoteSpokeNot(t *testing.T) {
 				t.Errorf("logs = %q, want the error's text kept out", fx.logs.String())
 			}
 		})
+	}
+}
+
+// A remote's message is cut to 200 runes in the log line, so one long message
+// cannot make an hourly line unbounded. The cut counts runes: the message is
+// multi-byte, so a byte cut would keep only 100 of them (gt-xmomer).
+func TestGreenRefPushFailureReasonIsCutToTwoHundredRunes(t *testing.T) {
+	t.Parallel()
+	fx := newGreenRefFixture(t, atHour(time.Now(), 15))
+	sha := fx.commit(t, "main")
+	fx.git.pushErr = errors.New("rejected\nremote: " + strings.Repeat("é", 200) + "TAIL")
+	fx.rec.green()
+	fx.runCycle(t, sha)
+
+	lines := greenRefLogLines(fx.logs)
+	if len(lines) != 1 || !strings.Contains(lines[0], strings.Repeat("é", 200)) {
+		t.Fatalf("green ref log = %q, want one line holding the first 200 runes of the remote's message", lines)
+	}
+	if strings.Contains(lines[0], strings.Repeat("é", 201)) || strings.Contains(lines[0], "TAIL") {
+		t.Errorf("green ref log = %q, want the remote's message cut at 200 runes", lines)
 	}
 }
 
