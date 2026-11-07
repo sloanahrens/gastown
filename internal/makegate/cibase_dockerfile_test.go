@@ -124,10 +124,11 @@ const (
 // checkCIBaseJQ reports why the jq layer of a ci-base Dockerfile does not keep
 // its integrity control. The layer is the one RUN that writes
 // /usr/local/bin/jq: it downloads jq, runs sha256sum -c against JQ_SHA256,
-// chmods the binary 0755 and runs the version test, in that order. Each step
-// must be exactly the line the Dockerfile ships, so a fallback such as
-// `|| true` on the sha256sum step fails the match. It returns nil when all of
-// that holds and JQ_SHA256 is a 64-character hex digest.
+// chmods the binary 0755 and runs the version test, in that order. The RUN must
+// be exactly those four `&&` segments, each the line the Dockerfile ships, so
+// an extra segment or a `|| true` fallback anywhere in the layer fails the
+// match. It returns nil when all of that holds and JQ_SHA256 is a 64-character
+// hex digest.
 func checkCIBaseJQ(text string) error {
 	ins := parseDockerfile(text)
 	digest := dockerArgDefault(ins, "JQ_SHA256")
@@ -155,15 +156,13 @@ func checkCIBaseJQ(text string) error {
 		{"chmod", jqChmodStep},
 		{"version test", jqVersionStep},
 	}
-	next := 0
-	for _, w := range want {
-		for next < len(steps) && strings.TrimSpace(steps[next]) != w.line {
-			next++
+	if len(steps) != len(want) {
+		return fmt.Errorf("the jq layer has %d && steps, want the %d it ships: download, sha256sum check, chmod, version test; an extra step or a || fallback is refused", len(steps), len(want))
+	}
+	for i, w := range want {
+		if got := strings.TrimSpace(steps[i]); got != w.line {
+			return fmt.Errorf("the jq layer step %d is %q, want the %s step %q; a || fallback or a reordered step is refused", i+1, got, w.name, w.line)
 		}
-		if next == len(steps) {
-			return fmt.Errorf("the jq layer has no %s step %q after the steps before it, with no fallback", w.name, w.line)
-		}
-		next++
 	}
 	return nil
 }
@@ -234,6 +233,30 @@ func TestCIBaseDockerfileUsers(t *testing.T) {
 	}
 }
 
+// TestParseDockerfileJoinsContinuations pins how a continued instruction is
+// joined, since the jq layer is matched one `&&` segment at a time on that join.
+func TestParseDockerfileJoinsContinuations(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, text, wantArgs string
+	}{
+		{name: "space before the backslash joins to one space", text: "RUN a \\\n  && b\n", wantArgs: "a && b"},
+		{name: "comment line inside a continuation is dropped", text: "RUN a \\\n# note\n  && b\n", wantArgs: "a && b"},
+		{name: "blank line inside a continuation is dropped", text: "RUN a \\\n\n  && b\n", wantArgs: "a && b"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ins := parseDockerfile(tc.text)
+			if len(ins) != 1 {
+				t.Fatalf("parseDockerfile found %d instructions, want 1", len(ins))
+			}
+			if ins[0].args != tc.wantArgs {
+				t.Fatalf("parseDockerfile args = %q, want %q", ins[0].args, tc.wantArgs)
+			}
+		})
+	}
+}
+
 // jqLayerDockerfile wraps one RUN of the jq layer in the ARGs the layer reads,
 // so a row can reorder or drop its steps.
 func jqLayerDockerfile(run string) string {
@@ -263,6 +286,10 @@ func TestCIBaseDockerfileJQDigest(t *testing.T) {
 		{name: "version test removed", old: " \\\n && test \"$(jq --version)\" = \"jq-${JQ_VERSION}\"", wantErr: true},
 		{name: "download dropped", text: jqLayerDockerfile(jqDigestStep + " && " + jqChmodStep + " && " + jqVersionStep), wantErr: true},
 		{name: "chmod runs before the digest check", text: jqLayerDockerfile(jqDownloadStep + " && " + jqChmodStep + " && " + jqDigestStep + " && " + jqVersionStep), wantErr: true},
+		{name: "extra || true segment between sha256sum and chmod", text: jqLayerDockerfile(jqDownloadStep + " && " + jqDigestStep + " && true || true && " + jqChmodStep + " && " + jqVersionStep), wantErr: true},
+		{name: "extra segment between download and sha256sum", text: jqLayerDockerfile(jqDownloadStep + " && true && " + jqDigestStep + " && " + jqChmodStep + " && " + jqVersionStep), wantErr: true},
+		{name: "extra segment after the version test", text: jqLayerDockerfile(jqDownloadStep + " && " + jqDigestStep + " && " + jqChmodStep + " && " + jqVersionStep + " && true"), wantErr: true},
+		{name: "four steps in order, no extra segment", text: jqLayerDockerfile(jqDownloadStep + " && " + jqDigestStep + " && " + jqChmodStep + " && " + jqVersionStep)},
 		{name: "no jq layer", text: "FROM base\nARG JQ_SHA256=" + shippedJQSHA256 + "\nRUN true\n", wantErr: true},
 		{name: "unchecked RUN writes jq before the layer", old: "ARG JQ_VERSION=1.7.1\n", new: "ARG JQ_VERSION=1.7.1\nRUN curl -fsSL -o /usr/local/bin/jq https://example.com/jq\n", wantErr: true},
 		{name: "JQ_SHA256 ARG removed", old: "ARG JQ_SHA256=" + shippedJQSHA256 + "\n", wantErr: true},
