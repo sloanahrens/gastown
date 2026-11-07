@@ -325,6 +325,37 @@ func TestJevHealthWeeklyReadsPatrolRecord(t *testing.T) {
 	assert.WithinDuration(t, now.Add(-24*time.Hour), *notes.LastPass, time.Second)
 }
 
+// TestJevHealthWeeklyUnreadablePatrolRecord judges a weekly battery when the
+// daemon's last-run record cannot be read: the command hands notes the read
+// error, so notes falls back to its log, reads unknown rather than ok, names the
+// file, and the command exits 1. The record is a directory, so the read fails
+// without being mistaken for a missing record.
+func TestJevHealthWeeklyUnreadablePatrolRecord(t *testing.T) {
+	t.Parallel()
+	now := jevHealthFixedNow()
+	town := newJevHealthTown(t, now, 5*time.Minute)
+	cfg := `{"daemon":{"patrols":{"jev_dedupe":{"enabled":true,"max_usd_per_day":1,"usd_per_billion_tokens":42},"jev_notes":{"enabled":true}}}}`
+	require.NoError(t, os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte(cfg), 0o644))
+	line := fmt.Sprintf(`{"ts":%q,"answers":{"q":"a"}}`, now.Add(-24*time.Hour).UTC().Format(time.RFC3339))
+	require.NoError(t, os.WriteFile(filepath.Join(town, ".runtime", "jev", "notes.jsonl"), []byte(line+"\n"), 0o600))
+	record := filepath.Join(town, "daemon", patrolLastRunFile)
+	require.NoError(t, os.Remove(record))
+	require.NoError(t, os.MkdirAll(record, 0o755))
+
+	out, err := runJevHealthCommand(t, town, now, true)
+	code, ok := IsSilentExit(err)
+	require.True(t, ok, "want a silent coded exit, got %v", err)
+	assert.Equal(t, 1, code)
+
+	var doc jevHealthDoc
+	require.NoError(t, json.Unmarshal([]byte(out), &doc))
+	notes := jevHealthRow(t, doc.Batteries, "notes")
+	assert.Equal(t, health.Unknown, notes.Status, "reason %q", notes.Reason)
+	assert.Contains(t, notes.Reason, "last-run file unreadable: reading patrol_last_run.json")
+	require.NotNil(t, notes.LastPass)
+	assert.WithinDuration(t, now.Add(-24*time.Hour), *notes.LastPass, time.Second)
+}
+
 // TestJevHealthMissingPatrolRecordIsNotOK removes the daemon's last-run record
 // from an otherwise healthy town: dedupe reads unknown, not ok, and the command
 // exits 1.
