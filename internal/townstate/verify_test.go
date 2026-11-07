@@ -182,6 +182,39 @@ func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 			m:    Default(),
 			want: "stat gastown/config.json",
 		},
+		{
+			name: "rig marker bare repository unreadable",
+			fsys: failingFS{FS: rigTreeWithMarker(), statErr: map[string]error{"tango/.repo.git": boom}},
+			m:    Default(),
+			want: "stat tango/.repo.git",
+		},
+		{
+			name: "rig marker canonical clone unreadable",
+			fsys: failingFS{
+				FS: fstest.MapFS{
+					"mayor/town.json":        {Data: []byte("{}")},
+					"tango/mayor/rig/go.mod": {Data: []byte("x")},
+				},
+				statErr: map[string]error{"tango/mayor/rig": boom},
+			},
+			m:    Default(),
+			want: "stat tango/mayor/rig",
+		},
+		{
+			name: "machine file is null",
+			fsys: fstest.MapFS{"mayor/town.json": {Data: []byte("null")}},
+			m:    Default(),
+			want: "not a JSON object",
+		},
+		{
+			name: "registry section is null beside a five-file registry",
+			fsys: fstest.MapFS{
+				"mayor/town.json": {Data: []byte(`{"registry":null}`)},
+				"mayor/rigs.json": {Data: []byte(`{"version":1,"rigs":{"hm":{"git_url":"x"}}}`)},
+			},
+			m:    Default(),
+			want: `section "registry" is null`,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,6 +241,12 @@ func TestVerifyNamesEveryRig(t *testing.T) {
 	}{
 		{name: "rig named by the registry, no config.json", fsys: registryTown()},
 		{name: "rig marked by a bare repository, not in the registry", fsys: rigTreeWithMarker()},
+		{name: "rig named only by mayor/rigs.json on the five-file layout", fsys: fstest.MapFS{
+			"mayor/town.json":              {Data: []byte("{}")},
+			"mayor/rigs.json":              {Data: []byte(`{"version":1,"rigs":{"hm":{"git_url":"file:///srv/hm"}}}`)},
+			"hm/crew/eagle/notes.md":       {Data: []byte("x")},
+			"hm/polecats/rust/worktree.go": {Data: []byte("x")},
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
