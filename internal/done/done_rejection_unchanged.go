@@ -127,6 +127,15 @@ func rejectionBlocksFromNotes(notes string) []rejectedAttempt {
 	return out
 }
 
+// attemptKey names the content a rejection is about: its rejected Head: when
+// the note carries one, else its MR id. A block naming neither has no key.
+func attemptKey(a rejectedAttempt) string {
+	if a.head != "" {
+		return a.head
+	}
+	return a.mrID
+}
+
 // distinctAttempts keeps one attempt per rejected content: an MR (or a rejected
 // head) is one attempt, however many times its rejection was recorded. An
 // attempt that names neither a rejected Head: nor an MR id is dropped: one of
@@ -137,10 +146,7 @@ func distinctAttempts(blocks []rejectedAttempt) []rejectedAttempt {
 	for _, a := range blocks {
 		// The second record of an MR adds a line to the refusal and a Dolt
 		// read, not evidence.
-		key := a.mrID
-		if a.head != "" {
-			key = a.head
-		}
+		key := attemptKey(a)
 		if key != "" && !seen[key] {
 			seen[key] = true
 			out = append(out, a)
@@ -206,7 +212,7 @@ func reportUnchangedSinceRejection(g rejectedReworkGit, notes, issueID, target s
 	if len(unchanged) == 0 {
 		return nil
 	}
-	if last := blocks[len(blocks)-1]; gateRejectionOfTheseAttempts(last, unchanged) {
+	if last := latestBlockNaming(blocks, unchanged); gateRejectionOfTheseAttempts(last, unchanged) {
 		// The target is read only here, when the lift could apply: every other
 		// refusal is decided without a git call.
 		tip, err := g.Rev(target)
@@ -220,12 +226,32 @@ func reportUnchangedSinceRejection(g rejectedReworkGit, notes, issueID, target s
 	return unchangedSinceRejectionRefusal(issueID, target, localPatchID, unchanged)
 }
 
-// gateRejectionOfTheseAttempts reports whether the most recent rejection is a
-// gate rejection that recorded the target tip it was built on, and every
-// identical attempt is a gate rejection too. A review rejection of the same
-// diff stays a refusal whatever the target did: a reviewer judged that content,
-// and the target moving does not change the verdict. A record with no target
-// tip stays a refusal, since there is nothing to show the target moved.
+// latestBlockNaming returns the most recent rejection block that names the
+// content of one of the identical attempts. A block about other content, or
+// one that names none, says nothing about this diff, so it does not decide the
+// lift. The zero value is returned when no block matches; identical is never
+// empty here, since each of its attempts came from one of these blocks.
+func latestBlockNaming(blocks []rejectedAttempt, identical []unchangedRejection) rejectedAttempt {
+	named := make(map[string]bool, len(identical))
+	for _, u := range identical {
+		named[attemptKey(u.attempt)] = true
+	}
+	var last rejectedAttempt
+	for _, b := range blocks {
+		if key := attemptKey(b); key != "" && named[key] {
+			last = b
+		}
+	}
+	return last
+}
+
+// gateRejectionOfTheseAttempts reports whether the most recent rejection of
+// this content is a gate rejection that recorded the target tip it was built
+// on, and every identical attempt is a gate rejection too. A review rejection
+// of the same diff stays a refusal whatever the target did: a reviewer judged
+// that content, and the target moving does not change the verdict. A record
+// with no target tip stays a refusal, since there is nothing to show the
+// target moved.
 func gateRejectionOfTheseAttempts(last rejectedAttempt, identical []unchangedRejection) bool {
 	if last.kind != "gate" || last.targetTip == "" {
 		return false
@@ -277,12 +303,24 @@ type unchangedRejection struct {
 	sha     string
 }
 
+// unchangedSinceRejectionHeadline names what the identical rejections ask for.
+// A gate rejection has no findings to address: the gate refused the merged
+// diff, so the diff has to pass it.
+func unchangedSinceRejectionHeadline(found []unchangedRejection) string {
+	for _, f := range found {
+		if f.attempt.kind != "gate" {
+			return "refusing to submit: no change since the rejection: address the findings first"
+		}
+	}
+	return "refusing to submit: no change since the rejection: make the gate pass first"
+}
+
 // unchangedSinceRejectionRefusal builds the refusal for a resubmission that
 // changes nothing. The message names no flag: agents read refusals and bypass
 // them, and there is no flag here to reach for — the diff has to change.
 func unchangedSinceRejectionRefusal(issueID, target, patchID string, found []unchangedRejection) error {
 	var b strings.Builder
-	b.WriteString("refusing to submit: no change since the rejection: address the findings first\n\n")
+	b.WriteString(unchangedSinceRejectionHeadline(found) + "\n\n")
 	fmt.Fprintf(&b, "Your branch carries the change-set the refinery already rejected — same patch-id\n"+
 		"%s on both sides. Only the diff decides this: a rebase, an amended\n"+
 		"message and re-split commits all leave it unchanged.\n\n", patchID)

@@ -392,8 +392,14 @@ func TestRejectionUnchanged_GateRejectionLiftsOnMovedTarget(t *testing.T) {
 		{"review rejection, target not moved", rejectionNoteAt("review", recorded), recorded, true},
 		{"a later review of the same MR, target moved", rejectionNoteAt("gate", recorded) + "\n" + rejectionNoteAt("review", recorded), moved, true},
 		{"a review of the same MR, then a later gate of it, target moved", rejectionNoteAt("review", recorded) + "\n" + rejectionNoteAt("gate", recorded), moved, true},
+		// A later rejection of other content says nothing about this diff, so it
+		// does not stop the gate's lift (the lift keys on the block that names it).
 		{"a gate of the same MR, then a later review of another diff, target moved", rejectionNoteAt("gate", recorded) + "\n" +
-			"MERGE REJECTION (attempt 2): review - review refused\nBranch: polecat/zircon/gt-other\nTarget: main\nMR: gt-wisp-2\n", moved, true},
+			"MERGE REJECTION (attempt 2): review - review refused\nBranch: polecat/zircon/gt-other\nTarget: main\nMR: gt-wisp-2\n", moved, false},
+		{"a gate of the same MR, then a later conflict that names no content, target moved", rejectionNoteAt("gate", recorded) + "\n" +
+			"MERGE REJECTION (attempt 2): conflict - rebase conflict\nBranch: polecat/zircon/gt-test\nTarget: main\n", moved, false},
+		{"a gate of the same MR, then a later conflict that names no content, target not moved", rejectionNoteAt("gate", recorded) + "\n" +
+			"MERGE REJECTION (attempt 2): conflict - rebase conflict\nBranch: polecat/zircon/gt-test\nTarget: main\n", recorded, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -411,6 +417,26 @@ func TestRejectionUnchanged_GateRejectionLiftsOnMovedTarget(t *testing.T) {
 				t.Fatalf("an identical diff was not refused: %v", err)
 			}
 		})
+	}
+}
+
+// TestReportUnchangedSinceRejection_GateRefusalAsksForAGreenGate: a gate refused
+// this diff, so the refusal tells the agent to make the gate pass, not to
+// address findings that a gate run never produced.
+func TestReportUnchangedSinceRejection_GateRefusalAsksForAGreenGate(t *testing.T) {
+	t.Parallel()
+	const recorded = "target-then"
+	g := reworkWith(rejectedDiff)
+	g.targetTip = recorded
+	err := reportUnchangedSinceRejection(g, rejectionNoteAt("gate", recorded), "gt-0jzd5", "origin/main", rejectedMR)
+	if err == nil {
+		t.Fatal("an identical diff a gate rejected was accepted with the target where the gate ran")
+	}
+	if !strings.Contains(err.Error(), "make the gate pass first") {
+		t.Errorf("gate refusal does not ask for a green gate: %v", err)
+	}
+	if strings.Contains(err.Error(), "address the findings") {
+		t.Errorf("gate refusal asks to address findings: %v", err)
 	}
 }
 
