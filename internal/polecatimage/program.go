@@ -136,10 +136,10 @@ func Main(args []string) int {
 	return runProgram(args, os.Stdout, os.Stderr, os.Getenv)
 }
 
-// runProgram answers Main: no arguments, or the verb "run", runs one plugin run,
-// and "trim-cache", "trim-paths", "trim-list", "trim-list-write", "seed-clone"
-// and "seed-cache" are the helpers a container of the image runs: in the seed
-// and trim Jobs, or through a kubectl exec into a pod that mounts the claim.
+// runProgram answers Main: no arguments, or the verb "run", runs one plugin run.
+// The other verbs in helperRuns are the helpers a container of the image runs:
+// in the seed and trim Jobs, or through a kubectl exec into a pod that mounts
+// the claim.
 //
 // Any other first argument is refused with exit 2 and the verbs this program
 // knows, rather than run as a plugin run: a plugin run builds, publishes and
