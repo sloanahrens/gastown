@@ -46,31 +46,31 @@ func parseDockerfile(text string) []dockerInstruction {
 }
 
 // checkCIBaseUsers reports why a ci-base Dockerfile does not default BASE_USER
-// to ci, run its first install step into /usr/local/bin as root, and end as the
+// to ci, run every install step into /usr/local/bin as root, and end as the
 // BASE_USER argument. It returns nil when all three hold.
 func checkCIBaseUsers(text string) error {
 	ins := parseDockerfile(text)
 	if !hasDockerInstruction(ins, "ARG", "BASE_USER=ci") {
 		return errors.New("no ARG BASE_USER=ci: the base user must default to ci")
 	}
-	install := -1
-	for i, in := range ins {
-		if in.keyword == "RUN" && strings.Contains(in.args, "/usr/local/bin") {
-			install = i
-			break
+	user := ""
+	installs := 0
+	for _, in := range ins {
+		switch in.keyword {
+		case "USER":
+			user = in.args
+		case "RUN":
+			if !strings.Contains(in.args, "/usr/local/bin") {
+				continue
+			}
+			installs++
+			if user != "root" {
+				return fmt.Errorf("the install step at line %d has USER %q before it, want USER root", in.line, user)
+			}
 		}
 	}
-	if install < 0 {
+	if installs == 0 {
 		return errors.New("no RUN installs into /usr/local/bin, so the root check has no install step to guard")
-	}
-	before := ""
-	for _, in := range ins[:install] {
-		if in.keyword == "USER" {
-			before = in.args
-		}
-	}
-	if before != "root" {
-		return fmt.Errorf("the install step at line %d has USER %q before it, want USER root", ins[install].line, before)
 	}
 	final := ""
 	for _, in := range ins {
@@ -115,10 +115,11 @@ func mutate(t *testing.T, text, old, new string) string {
 }
 
 // TestCIBaseDockerfileUsers checks the user steps the image build depends on:
-// the install steps run as root, and the image ends as BASE_USER, which
+// every install step runs as root, and the image ends as BASE_USER, which
 // defaults to ci. Each mutation removes or breaks one of them, and the check
-// must refuse it. Mutation: drop the USER root line and the install runs as ci,
-// the permission-denied failure the image build hit; drop the restoring line
+// must refuse it. Mutation: drop the USER root line and the installs run as ci,
+// the permission-denied failure the image build hit; put a USER back before the
+// second install and only that one runs unprivileged; drop the restoring line
 // and the image ends as root.
 func TestCIBaseDockerfileUsers(t *testing.T) {
 	t.Parallel()
@@ -131,6 +132,8 @@ func TestCIBaseDockerfileUsers(t *testing.T) {
 	}{
 		{name: "shipped file"},
 		{name: "USER root line removed", old: "USER root\n", wantErr: true},
+		{name: "second install runs as another user", old: "ARG JQ_VERSION=1.7.1\n", new: "ARG JQ_VERSION=1.7.1\nUSER ${BASE_USER}\n", wantErr: true},
+		{name: "second install as another user", text: "FROM base\nARG BASE_USER=ci\nUSER root\nRUN install -o /usr/local/bin/a\nUSER ci\nRUN install -o /usr/local/bin/b\nUSER ${BASE_USER}\n", wantErr: true},
 		{name: "restoring USER line removed", old: "USER ${BASE_USER}\n", wantErr: true},
 		{name: "restore names ci, not the argument", old: "USER ${BASE_USER}\n", new: "USER ci\n", wantErr: true},
 		{name: "BASE_USER argument removed", old: "ARG BASE_USER=ci\n", wantErr: true},
