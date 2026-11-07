@@ -255,9 +255,15 @@ case "$method $path" in
     printf '%s' "$n" > "$STUB_STATE/status-calls"
     # A status read is one poll, and a poll costs one second of the stub clock:
     # the probe's deadline is driven by this script of states, so the poll count
-    # is the same on a quiet host and on a loaded one.
+    # is the same on a quiet host and on a loaded one. A read that does not move
+    # the clock would let the poll run past its deadline, so it fails the call
+    # here; the probe's api dies on a failed curl, which ends the poll.
     clock=$(cat "$STUB_STATE/clock") || exit 1
-    printf '%s' "$((clock + 1))" > "$STUB_STATE/clock"
+    [ -n "${STUB_CLOCK_STUCK:-}" ] || printf '%s' "$((clock + 1))" > "$STUB_STATE/clock"
+    if [ "$(cat "$STUB_STATE/clock")" != "$((clock + 1))" ]; then
+      echo "stub clock stuck at $clock: status read $n did not advance it" >&2
+      exit 1
+    fi
     line=$(sed -n "${n}p" "$STUB_STATE/status-plan")
     [ -n "$line" ] || line=$(tail -1 "$STUB_STATE/status-plan")
     send 200 "$(status_body "$line")"
@@ -529,6 +535,16 @@ out=$(run_probe rig --repo acme/rig --timeout 2 --poll-interval 1); rc=$?
 if [ "$rc" != 0 ]; then pass "a stuck run exits non-zero"; else fail "a stuck run exits non-zero (rc=$rc)" "$out"; fi
 check "the stuck run's job log is printed" contains "the failing package is named here" "$out"
 check "the probe branch is deleted after a stuck run" test "$(deleted)" = "land/probe-rig"
+
+echo "=== a stub clock that stops advancing fails the case instead of hanging ==="
+# STUB_CLOCK_STUCK makes the stub curl skip its clock advance, the way a stub
+# bug would, so the poll's deadline is never reached.
+fresh
+printf 'pending\n' > "$STATE/status-plan"
+out=$(STUB_CLOCK_STUCK=1 run_probe rig --repo acme/rig --timeout 2 --poll-interval 1); rc=$?
+if [ "$rc" != 0 ]; then pass "a stuck stub clock exits non-zero"; else fail "a stuck stub clock exits non-zero (rc=$rc)" "$out"; fi
+check "the stuck stub clock is named" contains "stub clock stuck at" "$out"
+check "the poll ends at the first read that does not advance the clock" test "$(count_calls GET /commits/)" = 1
 
 echo "=== a status that has not appeared is the same as pending ==="
 fresh
