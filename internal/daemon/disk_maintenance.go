@@ -96,6 +96,10 @@ const (
 	// make the next one due the moment it ends (gt-gg9hv.43).
 	cacheTrimEarlyMinGap = 15 * time.Minute
 
+	// cacheTrimEarlyReadFailedKey is the allowLog key of the early check's
+	// read-failed line, said once per gap (gt-gg9hv.43).
+	cacheTrimEarlyReadFailedKey = "cache trim early: sandbox disk read failed"
+
 	// diskMaintBusyAlertEvery is how often a busy tick with no trim due re-reads
 	// the disks to apply the alerts. The trim's interval can be hours, and a
 	// disk that fills in that time raises its alert too late to leave room above
@@ -668,13 +672,21 @@ func (d *Daemon) runCacheTrimEarlyTick(mode string, now time.Time) {
 // cacheTrimEarly reads the sandbox disk and runs the cache trim when the disk is
 // at or over percent and the gap has passed. The trim guard is taken before the
 // gap is judged again, so a run that began after the tick's read is not
-// followed by a second one. A reading that failed is not over the percent: the
-// alerts raise it, and the interval trim still runs when it is due.
+// followed by a second one. A failed or absent reading runs no trim, since the
+// patrol must not trim blind: it logs the failure once per gap, and the interval
+// trim still runs when it is due.
 func (d *Daemon) cacheTrimEarly(mode string, percent int) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
-	used, readable := d.sandboxDiskUsedPct(ctx)
-	if !readable || used < float64(percent) {
+	s := d.diskMaintenanceSeams()
+	used, err := d.sandboxDiskUsedPct(ctx)
+	if err != nil {
+		if d.diskMaintSchedule.allowLog(cacheTrimEarlyReadFailedKey, s.now(), cacheTrimEarlyMinGap) {
+			d.logger.Printf("disk_maintenance: cache trim early: sandbox disk read failed: %v", err)
+		}
+		return
+	}
+	if used < float64(percent) {
 		return
 	}
 	if !d.diskMaintTrimRunning.CompareAndSwap(false, true) {
@@ -682,7 +694,6 @@ func (d *Daemon) cacheTrimEarly(mode string, percent int) {
 	}
 	release := sync.OnceFunc(func() { d.diskMaintTrimRunning.Store(false) })
 	defer release()
-	s := d.diskMaintenanceSeams()
 	if !d.diskMaintSchedule.earlyTrimDue(diskMaintCacheTrimName, s.now(), cacheTrimEarlyMinGap) {
 		return
 	}
@@ -691,14 +702,16 @@ func (d *Daemon) cacheTrimEarly(mode string, percent int) {
 }
 
 // sandboxDiskUsedPct returns the sandbox disk's used share from the disks the
-// patrol reads, and false when that reading failed or is absent.
-func (d *Daemon) sandboxDiskUsedPct(ctx context.Context) (float64, bool) {
+// patrol reads. It returns the reading's error when that reading failed, and an
+// error when the reading is absent: a figure that came with an error is not a
+// share.
+func (d *Daemon) sandboxDiskUsedPct(ctx context.Context) (float64, error) {
 	for _, r := range d.diskMaintenanceSeams().readDisks(ctx) {
 		if r.Name == diskMaintDiskColima {
-			return r.UsedPct, r.Err == nil
+			return r.UsedPct, r.Err
 		}
 	}
-	return 0, false
+	return 0, errors.New("the sandbox disk is absent from the reading")
 }
 
 // runCacheTrimPass is the trim's own pass, the one a busy tick dispatches: the

@@ -249,6 +249,47 @@ func TestCacheTrimEarlyReadsTheSetting(t *testing.T) {
 	})
 }
 
+// TestCacheTrimEarlyLogsAFailedDiskRead: a sandbox disk reading that fails runs no
+// trim, and its line is said once per gap rather than on every tick. A reading
+// that succeeds under the percent runs nothing and logs no early line.
+func TestCacheTrimEarlyLogsAFailedDiskRead(t *testing.T) {
+	t.Parallel()
+	const readFailedLine = "disk_maintenance: cache trim early: sandbox disk read failed: node stats unreadable"
+	d, logs, f := diskMaintTestDaemon(t)
+	trims := countCacheTrims(d)
+	now := diskMaintNow.Add(8 * time.Hour) // 12:45
+	d.diskMaint.now = func() time.Time { return now }
+	sandboxAt(f, 76)
+
+	d.runDiskMaintenance() // 12:45: due by its interval, and it runs
+	now = now.Add(20 * time.Minute)
+	// A figure past the percent that comes with an error is not a reading.
+	f.readings = []disks.Reading{{Name: diskMaintDiskColima, UsedPct: 99, Err: errors.New("node stats unreadable")}}
+	d.runDiskMaintenance() // 13:05: the gap is open, and the read fails
+	if *trims != 1 {
+		t.Fatalf("trimmed %d times on a failed disk read, want 1: a blind patrol does not trim early", *trims)
+	}
+	if got := strings.Count(logs.String(), readFailedLine); got != 1 {
+		t.Fatalf("read-failed line logged %d times at 13:05, want 1; log = %q", got, logs.String())
+	}
+
+	now = now.Add(5 * time.Minute)
+	d.runDiskMaintenance() // 13:10: inside the gap, the read fails again and says nothing new
+	if got := strings.Count(logs.String(), readFailedLine); got != 1 {
+		t.Errorf("read-failed line logged %d times by 13:10, want 1: one line per gap; log = %q", got, logs.String())
+	}
+
+	sandboxAt(f, 74)
+	now = now.Add(20 * time.Minute) // 13:30: the gap is open, and the reading succeeds under the percent
+	d.runDiskMaintenance()
+	if *trims != 1 {
+		t.Errorf("trimmed %d times with the disk at 74%%, want 1: under the percent, the early check does not run", *trims)
+	}
+	if got := strings.Count(logs.String(), "cache trim early:"); got != 1 {
+		t.Errorf("early check logged %d lines, want only the one read-failed line; log = %q", got, logs.String())
+	}
+}
+
 // TestCacheTrimEarlyRefusesAPercentOutsideTheRange: a percent built in code
 // outside 50 to 95 runs nothing early, whatever the disk reads, and is said
 // once rather than on every tick. The interval trim is not affected.

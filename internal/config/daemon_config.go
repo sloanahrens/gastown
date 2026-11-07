@@ -1355,11 +1355,11 @@ const (
 	// which the cache trim runs before its interval is due, so a saturated pool
 	// cannot outrun the trim between its interval runs (gt-gg9hv.43).
 	DiskMaintenanceDefaultCacheTrimEarlyPercent = 75
-	// DiskMaintenanceMinCacheTrimEarlyPercent and
-	// DiskMaintenanceMaxCacheTrimEarlyPercent bound the early percent: below the
-	// minimum the trim would run on a disk with room, above the maximum the disk
-	// would fill before the trim ran (gt-gg9hv.43).
+	// DiskMaintenanceMinCacheTrimEarlyPercent is the lowest accepted early percent:
+	// below it the trim would run on a disk with room (gt-gg9hv.43).
 	DiskMaintenanceMinCacheTrimEarlyPercent = 50
+	// DiskMaintenanceMaxCacheTrimEarlyPercent is the highest accepted early percent:
+	// above it the disk would fill before the trim ran (gt-gg9hv.43).
 	DiskMaintenanceMaxCacheTrimEarlyPercent = 95
 	// DiskMaintenanceDefaultCICacheTrimInterval is the CI build-cache trim's
 	// cadence: the gate jobs fill that cache faster than a daily pass can hold it
