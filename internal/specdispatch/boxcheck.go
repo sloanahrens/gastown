@@ -49,8 +49,6 @@ const findingResolvedPrefix = "Finding resolved: "
 // search.
 const boxPathPattern = `[\w.-]*/[\w./-]*(?:\.[A-Za-z]\w*(?::\d+)?|/)|[\w-]+\.[A-Za-z]\w*(?::\d+)?`
 
-var boxPathRe = regexp.MustCompile(boxPathPattern)
-
 // boxTrailingPathRe is the "(path)" group that ends a finding item, where the
 // finding names its source location.
 var boxTrailingPathRe = regexp.MustCompile(`\s*\((?:` + boxPathPattern + `)\)$`)
@@ -66,16 +64,16 @@ const findingClauseBreaks = ".;:`$\n"
 // trailing "(path)" group is not an instruction, so the subject is empty. Any
 // other finding item is searched whole, less its trailing group, so an
 // instruction written as a second clause is refused, with or without a run
-// verb. Items without the prefix have their source paths blanked wherever they
-// sit, so a tool named in a path is not an instruction, while a command the
-// item tells the worker to run, even by an absolute path, is still refused.
+// verb. An item without the prefix is searched whole, paths included: it is
+// written by a person, so a tool named anywhere in it, even inside a wrapper
+// path such as ./bin/kubectl.sh, is an instruction and is refused.
 //
 // Accepted residual: an instruction written with no punctuation after the
 // prefix reads as a plain title and is not detected. The title is free text
 // from the finding, so no word list can tell it from an instruction (gt-7c84xe).
 func boxSubject(item string) string {
 	if !strings.HasPrefix(item, findingResolvedPrefix) {
-		return boxPathRe.ReplaceAllString(item, " ")
+		return item
 	}
 	title := item[len(findingResolvedPrefix):]
 	if loc := boxTrailingPathRe.FindStringIndex(title); loc != nil {

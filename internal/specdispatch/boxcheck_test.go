@@ -178,8 +178,6 @@ func TestBoxCheckPassesFindingTitleAndPath(t *testing.T) {
 		{"title with the word run names kubectl", "Finding resolved: the kubectl wait blocks the run (internal/land/claim.go:88)"},
 		{"title with a run of a docker build", "Finding resolved: a run of the docker build fails (internal/gtwrap/docker.go:267)"},
 		{"title without a path names docker", "Finding resolved: the docker build fails in CI"},
-		{"plain path names docker", "the fix in internal/gtwrap/docker.go is covered by a test"},
-		{"directory path names docker", "the fix in internal/gtwrap/docker/ is covered by a test"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,6 +219,9 @@ func TestBoxCheckRefusesRunInstruction(t *testing.T) {
 		{"second clause uses kubectl without a run verb", "Finding resolved: the claim route blocks. Then kubectl apply -f y.yaml", "kubectl"},
 		{"second clause uses docker without a run verb", "Finding resolved: x. Apply with docker build", "docker"},
 		{"second clause after a located title", "Finding resolved: the claim route blocks (internal/land/claim.go:88). Then docker build the image", "docker"},
+		{"run a wrapper script named for the tool", "Run: ./bin/kubectl.sh apply -f deploy.yaml", "kubectl"},
+		{"plain item names a tool in a source path", "the fix in internal/gtwrap/docker.go is covered by a test", "docker"},
+		{"finding item with a tool in a path that is not the trailing group", "Finding resolved: x. See kubectl.yaml (internal/a.go:1)", "kubectl"},
 		{"second clause runs kubectl after a run title", "Finding resolved: a run of the claim fails. Run kubectl apply -f y.yaml", "kubectl"},
 	}
 	for _, tc := range tests {
