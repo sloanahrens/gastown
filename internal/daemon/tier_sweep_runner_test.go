@@ -909,21 +909,6 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 	return d, spec, st
 }
 
-// retryPauseClock is a clock whose waits end at once and whose wait lengths are
-// recorded: a copy the daemon retries pauses on it, and the test reads the pause
-// without the wait holding the run.
-type retryPauseClock struct {
-	clockwork.Clock
-	waits []time.Duration
-}
-
-func (c *retryPauseClock) After(d time.Duration) <-chan time.Time {
-	c.waits = append(c.waits, d)
-	ch := make(chan time.Time, 1)
-	ch <- c.Now()
-	return ch
-}
-
 // runnerCluster answers the kubectl commands one Kubernetes run makes. The Job
 // prints status when it is asked: statusErr fails every read, and flakyStatus
 // fails only the first that many. The sync guard's listing of the Jobs answers
@@ -1190,12 +1175,18 @@ func TestRenderPlanSyncStepFailureIsRed(t *testing.T) {
 	cluster := &runnerCluster{t: t, status: "Complete", result: &result, failSyncCopy: true}
 	cmds := &runnerFakeCmds{answer: cluster.answer}
 	d.execCmd = cmds.run
-	// The failed copy is retried after a pause; the pause ends at once here, so
-	// both attempts run without waiting on the daemon's fake clock.
-	pause := &retryPauseClock{Clock: d.clk()}
-	d.clock = pause
-
-	stage := d.tierSweepRunRunner(context.Background(), st, spec)
+	// The failed copy is retried after a 5s pause on the daemon's fake clock.
+	// runOnClock advances that clock each time the retry blocks on it, so both
+	// attempts run without the test replacing the clock.
+	clk, ok := d.clock.(*clockwork.FakeClock)
+	if !ok {
+		t.Fatalf("test clock = %T, want a fake clock to advance", d.clock)
+	}
+	before := clk.Now()
+	var stage tierSweepStageResult
+	runOnClock(t, clk, 5*time.Second, func() {
+		stage = d.tierSweepRunRunner(context.Background(), st, spec)
+	})
 
 	if stage.reason != tierSweepRunnerNoResult {
 		t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
@@ -1206,8 +1197,8 @@ func TestRenderPlanSyncStepFailureIsRed(t *testing.T) {
 	if n := strings.Count(stage.output, "unable to copy into the sync pod"); n != 2 {
 		t.Errorf("stage output carries the failed copy's stderr %d times, want once per attempt:\n%s", n, stage.output)
 	}
-	if !slices.Contains(pause.waits, 5*time.Second) {
-		t.Errorf("waits = %v, want the copy's retry to pause 5s first", pause.waits)
+	if waited := clk.Now().Sub(before); waited < 5*time.Second {
+		t.Errorf("the daemon clock moved %v, want the copy's retry to pause 5s on it", waited)
 	}
 	plan, err := sweeprunner.Kubernetes{}.Render(spec)
 	if err != nil {
