@@ -22,10 +22,19 @@ import (
 )
 
 func main() {
-	// The installed bd, read where this command runs and with the BEADS target
-	// variables stripped: the report names bd, not a database.
-	installed := beads.NewPlain("", beads.StripBDTargetEnv(os.Environ()))
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, installed, compileBD))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, installedBD(os.Environ(), newPlainBD), compileBD))
+}
+
+// installedBD is the bd the host runs, read where this command runs and with the
+// BEADS target variables stripped, since the report names bd, not a database.
+// newPlain builds it: main passes the real one, a test passes a recorder.
+func installedBD(environ []string, newPlain func(dir string, env []string) bdbuild.Versioner) bdbuild.Versioner {
+	return newPlain("", beads.StripBDTargetEnv(environ))
+}
+
+// newPlainBD is the production bd wrapper for installedBD.
+func newPlainBD(dir string, env []string) bdbuild.Versioner {
+	return beads.NewPlain(dir, env)
 }
 
 // compileBD is the production compile: the real git and go.

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -170,6 +171,40 @@ func TestRunRefusesAnInstalledBDItCannotVouchFor(t *testing.T) {
 				t.Errorf("wrote %q on stdout after the refusal", stdout.String())
 			}
 		})
+	}
+}
+
+func TestInstalledBDReadsWhereItRunsWithTheTargetVariablesStripped(t *testing.T) {
+	t.Parallel()
+	want := &fakeInstalled{}
+	var gotDir string
+	var gotEnv []string
+	newPlain := func(dir string, env []string) bdbuild.Versioner {
+		gotDir, gotEnv = dir, env
+		return want
+	}
+	environ := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/polecat",
+		"BEADS_DIR=/town/other/.beads",
+		"BEADS_DOLT_SERVER_DATABASE=other",
+		"BD_DB=other",
+	}
+	if got := installedBD(environ, newPlain); got != want {
+		t.Errorf("installedBD returned %v, want the Versioner the constructor built", got)
+	}
+	if gotDir != "" {
+		t.Errorf("constructor dir = %q, want empty: the bd runs where this command runs", gotDir)
+	}
+	for _, kept := range []string{"PATH=/usr/bin", "HOME=/home/polecat"} {
+		if !slices.Contains(gotEnv, kept) {
+			t.Errorf("env %q lacks %q, want the host environment kept", gotEnv, kept)
+		}
+	}
+	for _, dropped := range []string{"BEADS_DIR=/town/other/.beads", "BEADS_DOLT_SERVER_DATABASE=other", "BD_DB=other"} {
+		if slices.Contains(gotEnv, dropped) {
+			t.Errorf("env still has %q, want the BEADS target variables stripped", dropped)
+		}
 	}
 }
 
