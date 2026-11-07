@@ -14,8 +14,9 @@ import "strings"
 // of command while command has a backslash before a newline: the comments past
 // the stop are not blanked, so Parse must refuse the command even though
 // mvdan.cc/sh may read it. It is also non-nil when a comment on a heredoc
-// operator line ends in a backslash, which is not blanked either, and when a
-// comment ends in a backslash before a carriage return and line feed (gt-s9ogqg).
+// operator line ends in a backslash before a line feed, which is not blanked
+// either, and when a comment ends in a backslash before a carriage return and
+// line feed (gt-s9ogqg).
 func blankCommentBackslashes(command string) (string, error) {
 	ends, err := commentLineBackslashes(command)
 	if len(ends) == 0 {
@@ -48,12 +49,14 @@ type commentScan struct {
 	heredocs []heredocEnd
 
 	// heredocLine is set when a comment on a heredoc operator line ends in a
-	// backslash. Such a comment is not blanked, so Parse refuses the command.
+	// backslash before a bare line feed. Such a comment is not blanked, so Parse
+	// refuses the command.
 	heredocLine bool
 
 	// crlfLine is set when a comment ends in a backslash before a carriage
 	// return and line feed. Its backslash is blanked like one before a bare
-	// line feed, and Parse refuses the command (gt-s9ogqg).
+	// line feed, unless the comment is on a heredoc operator line, where it is
+	// not blanked. Parse refuses the command either way (gt-s9ogqg, gt-wflha1).
 	crlfLine bool
 }
 
@@ -63,8 +66,9 @@ type commentScan struct {
 // before a newline, so a walk that stops hides nothing when src has none: mvdan
 // reads that text as bash does. Only then is the stop an error, returned with
 // the offsets the walk found before it. A comment on a heredoc operator line
-// that ends in a backslash is an error too, whatever follows it, and so is a
-// comment that ends in a backslash before a carriage return and line feed.
+// that ends in a backslash before a bare line feed is an error too, whatever
+// follows it, and so is a comment that ends in a backslash before a carriage
+// return and line feed.
 func commentLineBackslashes(src string) ([]int, error) {
 	s := &commentScan{src: src}
 	if _, ok := s.code(0, 0); !ok && hasBackslashLineEnd(src) {
@@ -190,11 +194,12 @@ func (s *commentScan) code(p int, closer byte) (int, bool) {
 			// reading the heredoc body by hand, which gt-wnblap decided against,
 			// so the scan records it and Parse refuses the command. The pending
 			// heredoc belongs to the body on the next line, not to this comment
-			// (gt-4otugt).
+			// (gt-4otugt). A carriage return before the line feed is recorded
+			// as the CR LF reason, not the heredoc one (gt-wflha1).
 			if b, crlf := commentEndBackslash(src, p, nl); b >= 0 {
 				if len(s.heredocs) == 0 {
 					s.ends = append(s.ends, b)
-				} else {
+				} else if !crlf {
 					s.heredocLine = true
 				}
 				s.crlfLine = s.crlfLine || crlf

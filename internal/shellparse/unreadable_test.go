@@ -117,6 +117,31 @@ func TestParseUnparseableNamesConstructFailClosed(t *testing.T) {
 	}
 }
 
+// TestParseUnparseableNamesConstructCommentScanReason checks the reason the
+// comment scan gives for a comment that ends in a backslash on a heredoc
+// operator line. Parse hands mvdan's own error back first, and mvdan refuses
+// every such command, so the scan's reason is read from blankCommentBackslashes,
+// the call Parse makes. A CR LF line end gives the CR LF reason, not the heredoc
+// one (gt-wflha1).
+func TestParseUnparseableNamesConstructCommentScanReason(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"comment backslash on a heredoc operator line", "cat <<'EOF' # n \\\nEOF\n", "comment ending in a backslash on a heredoc operator line"},
+		{"comment backslash before CR LF on a heredoc operator line", "cat <<'EOF' # n \\\r\nEOF\ngit reset --hard\nEOF", "comment ending in a backslash before a CR LF line end"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := blankCommentBackslashes(tt.command)
+			wantUnparseable(t, err, tt.want)
+		})
+	}
+}
+
 // TestConstructOfUnknownError covers constructOf's last return. The bash parser
 // reports only syntax.ParseError and syntax.LangError, so an error of another
 // type is handed to the classifier directly.
