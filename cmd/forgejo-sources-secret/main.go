@@ -1,9 +1,9 @@
 // Command forgejo-sources-secret stores the SOURCES_TOKEN Actions secret on
 // sloan/gastown without any person seeing the token. It mints a read:repository
-// token for bot-viewer, checks that the token reads four repositories, and
-// stores it only when all four answer 200. With --check it mints, revokes and
-// stores nothing: it reads whether SOURCES_TOKEN is listed, whether bot-viewer
-// is a collaborator on each read repository, and the names of its
+// token for bot-viewer, checks that the token reads every repository the image
+// build fetches, and stores it only when all of them answer 200. With --check it
+// mints, revokes and stores nothing: it reads whether SOURCES_TOKEN is listed,
+// whether bot-viewer is a collaborator on each read repository, and the names of its
 // sources-token- tokens; checkState says what a check reads, prints and judges.
 // The exit codes are 0 when the secret is stored, a dry run finishes or a check
 // reads everything and every read repository is readable; 1 when a step fails, a
@@ -44,8 +44,21 @@ const (
 )
 
 // readRepos are the repositories of the owner that the minted token must read
-// before the secret is stored.
-var readRepos = []string{"beads", "om", "hm", "devops"}
+// before the secret is stored: the names Forgejo gives the sources the image build
+// fetches with it. The first four are the URL names in deploy/daemon/image-pins and
+// deploy/polecat/seed-urls; mango is the MANGO_URL repository of
+// deploy/ci/images.workflow.yml, which no pin file names. A test holds this list
+// to those files.
+var readRepos = []string{
+	"beads",
+	"organic-mechanic",
+	"history-man",
+	"devops",
+	// mango is the MANGO_URL contract: the operator sets that variable to the mango
+	// source's URL. The preflight in deploy/ci/images.workflow.yml checks that URL's
+	// host, not its repository name, so nothing verifies this name.
+	"mango",
+}
 
 // noReply is the status a read records when the request got no HTTP reply at all. No
 // HTTP status is 0, so it marks a transport failure and is never printed as a status.

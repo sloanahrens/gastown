@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -33,6 +35,169 @@ const (
 // testClock is the instant every run takes its token name from.
 func testClock() time.Time { return time.Date(2026, 11, 6, 20, 35, 0, 0, time.UTC) }
 
+// mangoRepo is the repository the image build fetches that no pin or seed file names: the
+// MANGO_URL repository of deploy/ci/images.workflow.yml.
+const mangoRepo = "mango"
+
+// sourceRepoFiles are the files that name the repositories the image build fetches, relative
+// to this package: the pins the daemon image is built from, and the rigs the polecat seed
+// fetches.
+var sourceRepoFiles = []string{"../../deploy/daemon/image-pins", "../../deploy/polecat/seed-urls"}
+
+// sourceRepos returns the repository names one source file names: each non-comment line
+// carries a URL as its second field, and the name is the last path element without .git. A
+// line with no URL, a URL that does not parse, or a URL that is not under the secret owner
+// or has no .git suffix is an error naming the file, since the file no longer says what the
+// check reads.
+func sourceRepos(file, data string) ([]string, error) {
+	var names []string
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return nil, fmt.Errorf("%s: line %q names no URL", file, line)
+		}
+		u, err := url.Parse(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("%s: URL %q: %v", file, fields[1], err)
+		}
+		parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+		if len(parts) != 2 || parts[0] != secretOwner || !strings.HasSuffix(parts[1], ".git") {
+			return nil, fmt.Errorf("%s: URL %q is not %s/<name>.git", file, fields[1], secretOwner)
+		}
+		names = append(names, strings.TrimSuffix(parts[1], ".git"))
+	}
+	return names, nil
+}
+
+// wantRepos returns the sorted, de-duplicated repository names the source files name, with
+// mangoRepo added. read returns the text of one source file.
+func wantRepos(read func(string) (string, error)) ([]string, error) {
+	names := []string{mangoRepo}
+	for _, file := range sourceRepoFiles {
+		data, err := read(file)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", file, err)
+		}
+		fileNames, err := sourceRepos(file, data)
+		if err != nil {
+			return nil, err
+		}
+		names = append(names, fileNames...)
+	}
+	slices.Sort(names)
+	return slices.Compact(names), nil
+}
+
+// diffRepos compares the names the run reads (got) with the names the sources name (want).
+// missing is a name a source names that the run does not read; stray is a name the run
+// reads that no source names.
+func diffRepos(got, want []string) (missing, stray []string) {
+	for _, name := range want {
+		if !slices.Contains(got, name) {
+			missing = append(missing, name)
+		}
+	}
+	for _, name := range got {
+		if !slices.Contains(want, name) {
+			stray = append(stray, name)
+		}
+	}
+	return missing, stray
+}
+
+// readSourceFile reads one source file for wantRepos, relative to this package.
+func readSourceFile(file string) (string, error) {
+	data, err := os.ReadFile(file)
+	return string(data), err
+}
+
+// TestSourcesSecretChecksExactlyTheSourceRepos holds the repositories the run reads to the names
+// the image build fetches: every URL name in the pin and seed files, plus mango. A repository the
+// build fetches that the run does not read, or a name the run reads that no file names, fails it.
+func TestSourcesSecretChecksExactlyTheSourceRepos(t *testing.T) {
+	t.Parallel()
+	want, err := wantRepos(readSourceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, stray := diffRepos(readRepos, want)
+	if len(missing) > 0 || len(stray) > 0 {
+		t.Fatalf("readRepos misses %v that the source files name, and names %v that they do not", missing, stray)
+	}
+}
+
+// TestSourceReposReadsTheNameOfEachLine holds the parser to the shape the pin and seed files
+// use: comments and blank lines are skipped, and each URL's last element without .git is a name.
+func TestSourceReposReadsTheNameOfEachLine(t *testing.T) {
+	t.Parallel()
+	data := "# a comment\n\nbd http://forgejo:3000/sloan/beads.git abc\nom http://forgejo:3000/sloan/organic-mechanic.git def\n"
+	got, err := sourceRepos("pins", data)
+	if err != nil {
+		t.Fatalf("sourceRepos: %v", err)
+	}
+	if want := []string{"beads", "organic-mechanic"}; !slices.Equal(got, want) {
+		t.Fatalf("sourceRepos = %v, want %v", got, want)
+	}
+}
+
+// TestSourceReposRefusesABadLine drives each refusal of the parser: every bad line is an error
+// that names the file, not a panic and not a name taken from the bad line.
+func TestSourceReposRefusesABadLine(t *testing.T) {
+	t.Parallel()
+	const file = "pins"
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"a line with no URL", "beads\n"},
+		{"a URL that does not parse", "bd http://[bad abc\n"},
+		{"a URL not under the owner", "bd http://forgejo:3000/other/beads.git abc\n"},
+		{"a URL without the .git suffix", "bd http://forgejo:3000/sloan/beads abc\n"},
+		{"a URL with an extra path element", "bd http://forgejo:3000/sloan/x/beads.git abc\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			names, err := sourceRepos(file, tc.data)
+			if err == nil {
+				t.Fatalf("sourceRepos(%q) = %v, want an error", tc.data, names)
+			}
+			if !strings.Contains(err.Error(), file) {
+				t.Fatalf("error %q does not name the file %s", err, file)
+			}
+		})
+	}
+}
+
+// TestDiffReposNamesADroppedAndAStrayRepo drives both halves of the comparison: a name the
+// sources name that the run does not read is missing, and a name the run reads that no source
+// names is stray.
+func TestDiffReposNamesADroppedAndAStrayRepo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		got, want []string
+		missing   []string
+		stray     []string
+	}{
+		{"the same names differ in nothing", []string{"beads", "devops"}, []string{"devops", "beads"}, nil, nil},
+		{"a repo the build fetches is dropped", []string{"beads"}, []string{"beads", "mango"}, []string{"mango"}, nil},
+		{"a name no source names is stray", []string{"beads", "foo"}, []string{"beads"}, nil, []string{"foo"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			missing, stray := diffRepos(tc.got, tc.want)
+			if !slices.Equal(missing, tc.missing) || !slices.Equal(stray, tc.stray) {
+				t.Fatalf("diffRepos(%v, %v) = missing %v, stray %v; want missing %v, stray %v",
+					tc.got, tc.want, missing, stray, tc.missing, tc.stray)
+			}
+		})
+	}
+}
+
 // adminReader returns a ReadFile that holds the admin token at adminFile and no
 // other file.
 func adminReader(t *testing.T) func(string) ([]byte, error) {
@@ -45,8 +210,8 @@ func adminReader(t *testing.T) func(string) ([]byte, error) {
 	}
 }
 
-// newSourcesFake returns a fake holding the viewer account, the four repositories the
-// run reads and the target repository, with bot-viewer a collaborator on the four.
+// newSourcesFake returns a fake holding the viewer account, the repositories the
+// run reads and the target repository, with bot-viewer a collaborator on each read one.
 // value is what the fake mints; empty keeps the fake's default.
 func newSourcesFake(t *testing.T, value string) *forgejotest.Fake {
 	t.Helper()
@@ -196,10 +361,10 @@ func runNetwork(t *testing.T, ctx context.Context, net *viewerNetwork, extra ...
 	return runResult{code: code, stdout: stdout.String(), stderr: stderr.String(), net: net}
 }
 
-// TestSourcesSecretStoresAfterFourOKReads runs the command where bot-viewer reads all
-// four repositories. The command mints one token, reads the four with it, stores it on
-// sloan/gastown and prints four status lines and the RESULT line, exiting 0.
-func TestSourcesSecretStoresAfterFourOKReads(t *testing.T) {
+// TestSourcesSecretStoresAfterAllOKReads runs the command where bot-viewer reads every
+// read repository. The command mints one token, reads them all with it, stores it on
+// sloan/gastown and prints one status line each and the RESULT line, exiting 0.
+func TestSourcesSecretStoresAfterAllOKReads(t *testing.T) {
 	t.Parallel()
 	f := newSourcesFake(t, "")
 	res := runCommand(t, f, nil)
@@ -231,8 +396,8 @@ func TestSourcesSecretStoresAfterFourOKReads(t *testing.T) {
 	if scopes, ok := f.TokenScopes(viewerAccount, testName); !ok || !slices.Equal(scopes, []string{tokenScope}) {
 		t.Fatalf("the minted token holds scopes %v (present %v), want exactly [%s]", scopes, ok, tokenScope)
 	}
-	if !slices.Equal(res.net.reads, []string{"sloan/beads", "sloan/om", "sloan/hm", "sloan/devops"}) {
-		t.Fatalf("the reads made with the minted token were %v, want the four repositories in order", res.net.reads)
+	if !slices.Equal(res.net.reads, []string{"sloan/beads", "sloan/organic-mechanic", "sloan/history-man", "sloan/devops", "sloan/mango"}) {
+		t.Fatalf("the reads made with the minted token were %v, want every read repository in order", res.net.reads)
 	}
 	stored, ok := f.Secret(secretOwner+"/"+secretRepo, secretName)
 	if !ok || stored != f.Token(viewerAccount, testName) {
@@ -256,13 +421,13 @@ func TestSourcesSecretRefusesAndRevokesOnAnUnreadableRepo(t *testing.T) {
 	}{
 		{
 			name:     "a repository answers 404",
-			statuses: map[string]int{"sloan/om": http.StatusNotFound},
-			wantErr:  []string{"sloan/om is not readable", "add bot-viewer as a read collaborator on sloan/om", "revoked the minted token " + testName},
+			statuses: map[string]int{"sloan/organic-mechanic": http.StatusNotFound},
+			wantErr:  []string{"sloan/organic-mechanic is not readable", "add bot-viewer as a read collaborator on sloan/organic-mechanic", "revoked the minted token " + testName},
 		},
 		{
 			name:     "a repository answers 403",
-			statuses: map[string]int{"sloan/hm": http.StatusForbidden},
-			wantErr:  []string{"sloan/hm is not readable", "add bot-viewer as a read collaborator on sloan/hm", "revoked the minted token " + testName},
+			statuses: map[string]int{"sloan/history-man": http.StatusForbidden},
+			wantErr:  []string{"sloan/history-man is not readable", "add bot-viewer as a read collaborator on sloan/history-man", "revoked the minted token " + testName},
 		},
 		{
 			name:      "the store fails after the mint",
@@ -371,7 +536,7 @@ func TestSourcesSecretAlarmsWhenTheRevokeFails(t *testing.T) {
 		cancel    bool
 		mintLost  bool
 	}{
-		{name: "after a refusal", statuses: map[string]int{"sloan/om": http.StatusNotFound}},
+		{name: "after a refusal", statuses: map[string]int{"sloan/organic-mechanic": http.StatusNotFound}},
 		{name: "after a failed store", storeFail: http.StatusInternalServerError},
 		{name: "after an interrupt", cancel: true},
 		{name: "after a mint lost in transport", mintLost: true},
@@ -499,8 +664,8 @@ func TestSourcesSecretDryRunMintsNothing(t *testing.T) {
 		"scope: " + tokenScope,
 		"token name: " + testName,
 		"read check: sloan/beads",
-		"read check: sloan/om",
-		"read check: sloan/hm",
+		"read check: sloan/organic-mechanic",
+		"read check: sloan/history-man",
 		"read check: sloan/devops",
 		"target: sloan/gastown secret SOURCES_TOKEN",
 	} {
@@ -530,7 +695,7 @@ func TestSourcesSecretNeverPrintsTheToken(t *testing.T) {
 		wantOut   string
 	}{
 		{name: "success", wantOut: "RESULT: stored SOURCES_TOKEN on sloan/gastown"},
-		{name: "404 refusal", statuses: map[string]int{"sloan/om": http.StatusNotFound}, wantOut: "sloan/om is not readable"},
+		{name: "404 refusal", statuses: map[string]int{"sloan/organic-mechanic": http.StatusNotFound}, wantOut: "sloan/organic-mechanic is not readable"},
 		{name: "403 refusal", statuses: map[string]int{"sloan/devops": http.StatusForbidden}, wantOut: "sloan/devops is not readable"},
 		{name: "store refusal", storeFail: http.StatusInternalServerError, wantOut: "could not store SOURCES_TOKEN on sloan/gastown"},
 	}
@@ -642,7 +807,7 @@ func runCheckNetwork(t *testing.T, net http.RoundTripper, extra ...string) check
 	return checkResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
-// newCheckFake returns the fake a check reads: the viewer account, the four read repositories
+// newCheckFake returns the fake a check reads: the viewer account, the read repositories
 // and the target, with bot-viewer a collaborator on every read repository except ungranted.
 func newCheckFake(t *testing.T, ungranted string) *forgejotest.Fake {
 	t.Helper()
@@ -670,7 +835,7 @@ func mintTokenNamed(t *testing.T, f *forgejotest.Fake, name string) {
 }
 
 // TestSourcesSecretCheckReportsTheState checks a --check run against a fake holding the
-// secret, the four read grants and two sources-token- tokens. It prints the secret as listed,
+// secret, the read grants and two sources-token- tokens. It prints the secret as listed,
 // each repository as readable, and the two token names, exits 0, and sends only GETs: it
 // mints, revokes and stores nothing.
 func TestSourcesSecretCheckReportsTheState(t *testing.T) {
@@ -693,9 +858,10 @@ func TestSourcesSecretCheckReportsTheState(t *testing.T) {
 	for _, want := range []string{
 		"sloan/gastown secret SOURCES_TOKEN: listed\n",
 		"sloan/beads: readable by bot-viewer (HTTP 204)\n",
-		"sloan/om: readable by bot-viewer (HTTP 204)\n",
-		"sloan/hm: readable by bot-viewer (HTTP 204)\n",
+		"sloan/organic-mechanic: readable by bot-viewer (HTTP 204)\n",
+		"sloan/history-man: readable by bot-viewer (HTTP 204)\n",
 		"sloan/devops: readable by bot-viewer (HTTP 204)\n",
+		"sloan/mango: readable by bot-viewer (HTTP 204)\n",
 		"bot-viewer token: " + testName + "\n",
 		"bot-viewer token: sources-token-20261106-210000\n",
 	} {
@@ -732,7 +898,7 @@ func storeCheckSecret(t *testing.T, f *forgejotest.Fake) {
 
 // TestSourcesSecretCheckUnreadableRepositoryExitsOne checks a required repository that answers
 // 404 for bot-viewer makes the check name it as not readable and exit 1, with the secret listed
-// and the token list fine. The same check with all four readable exits 0.
+// and the token list fine. The same check with every read repository readable exits 0.
 func TestSourcesSecretCheckUnreadableRepositoryExitsOne(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -740,8 +906,8 @@ func TestSourcesSecretCheckUnreadableRepositoryExitsOne(t *testing.T) {
 		ungranted string
 		wantCode  int
 	}{
-		{name: "one repository answers 404", ungranted: "om", wantCode: forgejoprov.ExitFailure},
-		{name: "all four answer 204", ungranted: "", wantCode: forgejoprov.ExitOK},
+		{name: "one repository answers 404", ungranted: "organic-mechanic", wantCode: forgejoprov.ExitFailure},
+		{name: "all read repositories answer 204", ungranted: "", wantCode: forgejoprov.ExitOK},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -759,11 +925,11 @@ func TestSourcesSecretCheckUnreadableRepositoryExitsOne(t *testing.T) {
 			if tc.ungranted == "" {
 				return
 			}
-			if !strings.Contains(res.stdout, "sloan/om: not readable by bot-viewer (HTTP 404)\n") {
-				t.Fatalf("stdout does not name sloan/om as not readable:\n%s", res.stdout)
+			if !strings.Contains(res.stdout, "sloan/organic-mechanic: not readable by bot-viewer (HTTP 404)\n") {
+				t.Fatalf("stdout does not name sloan/organic-mechanic as not readable:\n%s", res.stdout)
 			}
-			if !strings.Contains(res.stderr, "sloan/om is not readable by bot-viewer") {
-				t.Fatalf("stderr does not name sloan/om as not readable:\n%s", res.stderr)
+			if !strings.Contains(res.stderr, "sloan/organic-mechanic is not readable by bot-viewer") {
+				t.Fatalf("stderr does not name sloan/organic-mechanic as not readable:\n%s", res.stderr)
 			}
 			if !strings.Contains(res.stdout, "sloan/beads: readable by bot-viewer (HTTP 204)\n") {
 				t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
@@ -798,7 +964,7 @@ func TestSourcesSecretCheckUnlistedSecretIsReportedAndExitsZero(t *testing.T) {
 }
 
 // TestSourcesSecretCheckReportsWhatIsMissing checks a failing token list alone, with the secret
-// listed and the four repositories readable, is reported and exits 1. No other read fails, so
+// listed and the read repositories readable, is reported and exits 1. No other read fails, so
 // the exit code rides on the token list alone.
 func TestSourcesSecretCheckReportsWhatIsMissing(t *testing.T) {
 	t.Parallel()
@@ -820,7 +986,7 @@ func TestSourcesSecretCheckReportsWhatIsMissing(t *testing.T) {
 	if !strings.Contains(res.stdout, "sloan/gastown secret SOURCES_TOKEN: listed\n") {
 		t.Fatalf("stdout does not say the secret is listed:\n%s", res.stdout)
 	}
-	if !strings.Contains(res.stdout, "sloan/om: readable by bot-viewer (HTTP 204)\n") {
+	if !strings.Contains(res.stdout, "sloan/organic-mechanic: readable by bot-viewer (HTTP 204)\n") {
 		t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
 	}
 	if !strings.Contains(res.stderr, "could not list the tokens of bot-viewer") || !strings.Contains(res.stderr, "HTTP 500") {
@@ -906,7 +1072,7 @@ func TestSourcesSecretCheckReportsATransportFailure(t *testing.T) {
 	mintTokenNamed(t, f, testName)
 	net := &checkNetwork{
 		fake:       f,
-		failSuffix: "/sloan/hm/collaborators/" + viewerAccount,
+		failSuffix: "/sloan/history-man/collaborators/" + viewerAccount,
 		failErr:    errNoReply,
 	}
 
@@ -915,13 +1081,13 @@ func TestSourcesSecretCheckReportsATransportFailure(t *testing.T) {
 	if res.code != forgejoprov.ExitFailure {
 		t.Fatalf("exit %d, want %d; stdout: %s", res.code, forgejoprov.ExitFailure, res.stdout)
 	}
-	if !strings.Contains(res.stderr, "the collaborator check on sloan/hm got no HTTP reply") {
+	if !strings.Contains(res.stderr, "the collaborator check on sloan/history-man got no HTTP reply") {
 		t.Fatalf("stderr does not name the transport failure:\n%s", res.stderr)
 	}
-	if strings.Contains(res.stdout, "sloan/hm: ") {
+	if strings.Contains(res.stdout, "sloan/history-man: ") {
 		t.Fatalf("stdout reports a state for a repository whose check got no reply:\n%s", res.stdout)
 	}
-	if !strings.Contains(res.stdout, "sloan/om: readable by bot-viewer (HTTP 204)") {
+	if !strings.Contains(res.stdout, "sloan/organic-mechanic: readable by bot-viewer (HTTP 204)") {
 		t.Fatalf("stdout does not report the readable repositories:\n%s", res.stdout)
 	}
 }
@@ -949,7 +1115,7 @@ func TestSourcesSecretCheckNeverPrintsAReply(t *testing.T) {
 	}{
 		{name: "success", wantCode: forgejoprov.ExitOK},
 		{name: "secret list fails", failSuffix: "/sloan/gastown/actions/secrets", failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
-		{name: "collaborator check fails", failSuffix: "/sloan/om/collaborators/" + viewerAccount, failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
+		{name: "collaborator check fails", failSuffix: "/sloan/organic-mechanic/collaborators/" + viewerAccount, failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
 		{name: "token list fails", failSuffix: "/admin/users/" + viewerAccount + "/tokens", failStatus: http.StatusInternalServerError, wantCode: forgejoprov.ExitFailure},
 	}
 	for _, tc := range cases {
