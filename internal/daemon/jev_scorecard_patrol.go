@@ -83,6 +83,15 @@ func (d *Daemon) jevScorecardSeamsOf() jevScorecardSeams {
 	return s
 }
 
+// jevScorecardBudgetOf returns the budget one refresh runs under: the daemon's
+// jevScorecardBudget when a test set one, else jevScorecardRefreshBudget.
+func (d *Daemon) jevScorecardBudgetOf() time.Duration {
+	if d.jevScorecardBudget <= 0 {
+		return jevScorecardRefreshBudget
+	}
+	return d.jevScorecardBudget
+}
+
 // jevScorecardSettings is the patrol's settings as one tick reads them: the
 // local time of day a run is due, how old the cache may be at start, and the
 // batteries the town declares.
@@ -243,9 +252,10 @@ func (d *Daemon) triggerJevScorecard() {
 		}
 		return
 	}
+	budget := d.jevScorecardBudgetOf()
 	s.dispatch(func() {
 		defer d.jevScorecardRunning.Store(false)
-		ctx, cancel := context.WithTimeout(context.Background(), jevScorecardRefreshBudget)
+		ctx, cancel := context.WithTimeout(context.Background(), budget)
 		defer cancel()
 		townRoot := d.config.TownRoot
 		err := s.refresh(ctx, townRoot)
@@ -254,7 +264,7 @@ func (d *Daemon) triggerJevScorecard() {
 		case err == nil:
 			d.logger.Printf("jev_scorecard: refreshed the scorecard cache")
 		case errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded):
-			d.logger.Printf("jev_scorecard: refresh timed out after %s: %v; the next scheduled run still happens", jevScorecardRefreshBudget, err)
+			d.logger.Printf("jev_scorecard: refresh timed out after %s: %v; the next scheduled run still happens", budget, err)
 		default:
 			// A corrupt cache stops every refresh, so when the cache cannot be
 			// read as a scorecard this line carries the path and the remedy an
