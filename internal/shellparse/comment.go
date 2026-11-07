@@ -10,22 +10,23 @@ import "strings"
 // inside a comment, so in `bash -c 'x' # n \` + newline + `ls` it joins the
 // comment to `ls` and the parser never sees the command bash runs (gt-4otugt).
 // The blank keeps every byte offset, so the positions Parse records still index
-// the source it read.
-func blankCommentBackslashes(command string) string {
-	ends := commentLineBackslashes(command)
+// the source it read. The error is non-nil when the walk stopped before the end
+// of command: the comments past the stop are not blanked, so Parse must refuse
+// the command even though mvdan.cc/sh may read it.
+func blankCommentBackslashes(command string) (string, error) {
+	ends, err := commentLineBackslashes(command)
 	if len(ends) == 0 {
-		return command
+		return command, err
 	}
 	b := []byte(command)
 	for _, i := range ends {
 		b[i] = ' '
 	}
-	return string(b)
+	return string(b), err
 }
 
 // maxCommentScanNest bounds how deeply substitutions nest in the walk. Past it
-// the walk stops, as it does at an unclosed construct, and Parse's parser
-// decides the command.
+// the walk stops and the command is refused.
 const maxCommentScanNest = 256
 
 // commentScan walks a command the way bash lexes it and records the offset of
@@ -45,17 +46,21 @@ type commentScan struct {
 }
 
 // commentLineBackslashes returns the offsets of the backslashes that end a
-// comment line in src. The walk stops at the first construct it cannot close.
-// mvdan.cc/sh refuses the same constructs, so Parse refuses the command; where
-// the two disagree, only the comments found before the stop are blanked.
-func commentLineBackslashes(src string) []int {
+// comment line in src. The walk stops at the first construct it cannot close,
+// or at the nesting bound. A walk that stops has not seen every comment: it
+// returns the offsets it found and an *UnparseableError.
+func commentLineBackslashes(src string) ([]int, error) {
 	s := &commentScan{src: src}
-	s.code(0, 0)
-	return s.ends
+	if _, ok := s.code(0, 0); !ok {
+		return s.ends, &UnparseableError{Construct: "construct too deeply nested or unclosed to read"}
+	}
+	return s.ends, nil
 }
 
 // code walks shell text from p up to closer and returns the offset after it,
-// and whether closer was found. closer 0 is the top of the command, ')' ends a
+// and whether closer was found. A stop anywhere below returns false up through
+// every caller, so the top walk (closer 0) reports whether it read the whole
+// command. closer 0 is the top of the command, ')' ends a
 // "$(", '`' a backquote and '}' a "${". A heredoc whose operator is read here
 // has its body skipped at the next newline, as the shell does.
 func (s *commentScan) code(p int, closer byte) (int, bool) {

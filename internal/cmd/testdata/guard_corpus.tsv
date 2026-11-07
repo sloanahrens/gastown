@@ -248,3 +248,6 @@ dangerous	polecat	"x=1 bash -c 'git reset --hard' # n \\\nls"	refuse	Hard reset	
 dangerous	polecat	"gt slot run -- bash -c 'git reset --hard' # n \\\nls"	refuse	Hard reset	gt-4otugt
 # --- container_suite: a backslash ending a comment line (gt-4otugt) ---
 container_suite	polecat	"GT_TEST_DOCKER=1 echo 'go test ./internal/beads/...' | sh # n \\\nls"	refuse	targets testcontainers-backed package(s)	gt-4otugt
+# --- the payload a shell runs after the comment line: the line break hides it from a parser that joins the comment ---
+dangerous	polecat	"echo ok # n \\\nsh <<< 'git reset --hard'"	refuse	Hard reset	gt-4otugt
+container_suite	polecat	"GT_TEST_DOCKER=1 echo ok # n \\\nsh <<< 'go test ./internal/beads/...'"	refuse	targets testcontainers-backed package(s)	gt-4otugt

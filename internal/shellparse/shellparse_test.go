@@ -979,16 +979,28 @@ func TestParseCommentLineBackslashInSubstitution(t *testing.T) {
 }
 
 // TestParseCommentLineBackslashDeepNesting checks that a command nested past
-// the scanner's bound returns: the walk stops there rather than recursing
-// without end, and any refusal is the named kind.
+// the comment scan's bound is refused, not read: the scan stops there and
+// cannot see a comment past the stop, and mvdan.cc/sh would otherwise read the
+// line after that comment as part of it. The command parses on its own, so the
+// refusal is the scan's doing.
 func TestParseCommentLineBackslashDeepNesting(t *testing.T) {
 	t.Parallel()
-	command := strings.Repeat("$(", 1000) + "true" + strings.Repeat(")", 1000) + " # n \\\nls"
-	if _, err := shellparse.Parse(command); err != nil {
-		var unreadable *shellparse.UnparseableError
-		if !errors.As(err, &unreadable) {
-			t.Fatalf("Parse(deep nesting) error = %v, want *UnparseableError", err)
-		}
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"comment backslash after a nest past the bound", strings.Repeat("$(", 1000) + "true" + strings.Repeat(")", 1000) + " # n \\\nls"},
+		{"comment backslash after a nest of 300", strings.Repeat("$(", 300) + "true" + strings.Repeat(")", 300) + " # n \\\nls"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := shellparse.Parse(tt.command)
+			var unreadable *shellparse.UnparseableError
+			if !errors.As(err, &unreadable) {
+				t.Fatalf("Parse(deep nesting) error = %v, want *UnparseableError", err)
+			}
+		})
 	}
 }
 

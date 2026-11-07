@@ -153,11 +153,16 @@ func Parse(command string) (Script, error) {
 	// continuation, which hides the next line from it. The blank gives it the
 	// line break bash reads and keeps every offset, so the words are still
 	// cut from command, the text the caller wrote (gt-4otugt).
-	src := blankCommentBackslashes(command)
+	src, scanErr := blankCommentBackslashes(command)
 	parser := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.KeepComments(true))
 	file, err := parser.Parse(strings.NewReader(src), "")
 	if err != nil {
 		return Script{}, unparseable(err)
+	}
+	// mvdan's own error names the construct, so it is reported first. A parse
+	// that succeeds over a comment the walk did not reach is refused here.
+	if scanErr != nil {
+		return Script{}, scanErr
 	}
 	return flatten(command, file)
 }
