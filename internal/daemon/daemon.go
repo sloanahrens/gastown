@@ -279,6 +279,11 @@ type Daemon struct {
 	// opens a *git.Git. Tests hand it a gitfake world.
 	openGitFn func(dir string) daemonGit
 
+	// postLandIsAncestor is the ancestry reader a rig's post-land runner orders
+	// its verdicts with (see newRigLandingWorker); nil reads the rig's own
+	// repository. Tests hand it a fake.
+	postLandIsAncestor func(ancestor, descendant string) (bool, error)
+
 	// endSandboxSeat is the step that ends a finished sandbox seat (see
 	// sandboxSeatEnder); nil builds one over the daemon's own seams. Tests
 	// record the seats it was asked to end.

@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/landworker"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
 // statusClientByRef answers a combined-status read from a script keyed by the
@@ -236,5 +237,72 @@ func TestPostLandUnreadableRigSettingsRaisesAnAttentionItem(t *testing.T) {
 	writeRigPostLandStatusContext(t, rigPath, wiringContext)
 	if items := postLandItems(t, f); len(items) != 0 {
 		t.Fatalf("items %+v after the settings read again, want the item cleared", items)
+	}
+}
+
+// TestPostLandWiringRigWorkerOrdersByItsReader: the post-land runner that
+// newRigLandingWorker builds orders verdicts with the ancestry reader it was
+// given. The rig already holds a verdict for newer, so a green for the older
+// commit is ignored through that reader, while a green for newer still fires.
+// The status read and the green callback are the runner's own fields, swapped
+// here, so the test starts no git and calls no forgejo.
+func TestPostLandWiringRigWorkerOrdersByItsReader(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const rigName = "testrig"
+	const older = "1111111111111111111111111111111111111111"
+	const newer = "2222222222222222222222222222222222222222"
+	now := time.Date(2026, 11, 5, 12, 0, 0, 0, time.UTC)
+	townRoot := t.TempDir()
+	forgejoRigConfig(t, townRoot, rigName)
+	writeOverseerIdentity(t, townRoot, overseerTestName)
+	writeRigPostLandStatusContext(t, filepath.Join(townRoot, rigName), wiringContext)
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		clock: clockwork.NewFakeClockAt(now),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+	d.postLandIsAncestor = func(ancestor, descendant string) (bool, error) {
+		return ancestor == older && descendant == newer, nil
+	}
+	forgejoLandingRemote(t, useGitfake(t, d), townRoot, rigName)
+
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	runner, ok := w.PostLand.(*landworker.PostLandRunner)
+	if !ok {
+		t.Fatalf("PostLand = %T, want the *landworker.PostLandRunner the rig builds", w.PostLand)
+	}
+	st, err := w.MainState.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.LastRun = newer
+	if err := w.MainState.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	runner.Status = func(_ context.Context, _ landworker.PostLand) (*forgejo.CombinedStatus, error) {
+		return statusOf(wiringContext, forgejo.StateSuccess), nil
+	}
+	var green []string
+	runner.OnGreen = func(_ context.Context, _ string, pl landworker.PostLand, _ landworker.PostLandResult) {
+		green = append(green, pl.Commit)
+	}
+
+	w.PostLand.Trigger(ctx, landworker.PostLand{BeadID: "gt-old", Commit: older, Target: "main"})
+	w.PostLand.PollPending(ctx)
+	if len(green) != 0 {
+		t.Fatalf("green fired for %v; the older commit's verdict must be ignored through the reader the worker was given", green)
+	}
+
+	w.PostLand.Trigger(ctx, landworker.PostLand{BeadID: "gt-new", Commit: newer, Target: "main"})
+	w.PostLand.PollPending(ctx)
+	if len(green) != 1 || green[0] != newer {
+		t.Fatalf("green fired for %v, want only the newer commit %s", green, newer)
 	}
 }
