@@ -52,6 +52,30 @@ const tailMissingCacheSize = 1024
 // rather than for the life of the process.
 const tailMissingTTL = 5 * time.Minute
 
+// tailSubmitterTTL is how long one bead's submitter answer is reused. The
+// dashboard asks it for every ops row on every poll, and each ask is a bd
+// comments subprocess, while a submission comment is written once and then
+// stays put (gt-f1fc2f). A resubmission by another actor can lag by this
+// window; five minutes mirrors the not-found answer above.
+const tailSubmitterTTL = 5 * time.Minute
+
+// tailSubmitterCacheSize bounds the submitter answers one run keeps. A town
+// with more ops landings than this inside the window keeps the newest answers
+// and re-reads the rest rather than growing without an end.
+const tailSubmitterCacheSize = 256
+
+// submitterUnknown is what a bead's submitter reads when its comments cannot
+// be read: the page's mark for a source that could not be read (gt-72xqp).
+// It is never the operator fallback, which would claim the operator submitted
+// a landing whose submitter was merely unreadable (gt-f1fc2f).
+const submitterUnknown = "?"
+
+// tailSubmitter is one cached submitter answer and when it was read.
+type tailSubmitter struct {
+	at    time.Time
+	actor string
+}
+
 // tailBeads resolves the two bead facts gt tail prints beside an events line:
 // the title of a create, close, status change or dependency line, and the
 // verdict a comment or a note carries. It is the run's one door to bd — a
@@ -94,19 +118,23 @@ type tailBeads struct {
 	// when the set is full. now is the clock those answers age on.
 	missing      map[string]time.Time
 	missingOrder []string
-	now          func() time.Time
+	// submitters is each bead's last successful submitter answer and when it
+	// was read; an answer older than tailSubmitterTTL is asked for again.
+	submitters map[string]tailSubmitter
+	now        func() time.Time
 }
 
 // newTailBeads wraps show with the process-lifetime title cache.
 func newTailBeads(show func(rig, id string) (*beads.Issue, error)) *tailBeads {
 	return &tailBeads{
-		show:     show,
-		max:      tailTitleCacheSize,
-		titles:   map[string]string{},
-		used:     map[string]uint64{},
-		fetching: map[string]bool{},
-		missing:  map[string]time.Time{},
-		now:      time.Now,
+		show:       show,
+		max:        tailTitleCacheSize,
+		titles:     map[string]string{},
+		used:       map[string]uint64{},
+		fetching:   map[string]bool{},
+		missing:    map[string]time.Time{},
+		submitters: map[string]tailSubmitter{},
+		now:        time.Now,
 	}
 }
 
@@ -201,10 +229,14 @@ func (b *tailBeads) title(rig, id string) string {
 
 // submittedBy names the actor of a bead's newest "Submitted for landing"
 // comment, the builder a landing on the reserved ops branch shows: the comment
-// is gt done's own record of who submitted the bead (gt-6ua0sn). It answers ""
-// when the comments cannot be read or name no submission, which the page draws
-// as an operator landing. Nothing is cached: a submission can be written after
-// an earlier read, and the answer is asked for only by an ops row.
+// is gt done's own record of who submitted the bead (gt-6ua0sn). A successful
+// read names "" when the comments name no submission, which the page draws as
+// an operator landing; a read that fails names submitterUnknown, so an
+// unreadable source is never drawn as the operator's own (gt-f1fc2f).
+//
+// A successful answer is reused for tailSubmitterTTL, because the dashboard
+// asks it on every poll and each ask is a bd comments subprocess; a failed
+// read is not cached, so the next ask retries it.
 func (b *tailBeads) submittedBy(rig, id string) string {
 	// The id reaches bd's argv, so it is checked before it can: an id shaped
 	// like a flag would choose bd's behavior instead of naming a bead
@@ -212,16 +244,50 @@ func (b *tailBeads) submittedBy(rig, id string) string {
 	if b == nil || b.comments == nil || !beads.IsBeadIDToken(id) {
 		return ""
 	}
+	b.mu.Lock()
+	if cached, ok := b.submitters[id]; ok && b.now().Sub(cached.at) < tailSubmitterTTL {
+		b.mu.Unlock()
+		return cached.actor
+	}
+	b.mu.Unlock()
+
 	comments, err := b.comments(rig, id)
 	if err != nil {
-		return ""
+		return submitterUnknown
 	}
+	actor := ""
 	for i := len(comments) - 1; i >= 0; i-- {
 		if submissionCommentRE.MatchString(strings.TrimSpace(comments[i].Text)) {
-			return strings.TrimSpace(comments[i].Author)
+			actor = strings.TrimSpace(comments[i].Author)
+			break
 		}
 	}
-	return ""
+	b.mu.Lock()
+	b.rememberSubmitter(id, actor)
+	b.mu.Unlock()
+	return actor
+}
+
+// rememberSubmitter stores one successfully read submitter answer, dropping
+// expired answers and then the oldest one when the cache is full. Caller holds
+// b.mu.
+func (b *tailBeads) rememberSubmitter(id, actor string) {
+	for key, cached := range b.submitters {
+		if b.now().Sub(cached.at) >= tailSubmitterTTL {
+			delete(b.submitters, key)
+		}
+	}
+	if _, ok := b.submitters[id]; !ok && len(b.submitters) >= tailSubmitterCacheSize {
+		oldest := ""
+		var at time.Time
+		for key, cached := range b.submitters {
+			if oldest == "" || cached.at.Before(at) {
+				oldest, at = key, cached.at
+			}
+		}
+		delete(b.submitters, oldest)
+	}
+	b.submitters[id] = tailSubmitter{at: b.now(), actor: actor}
 }
 
 // cache stores one successfully read title, evicting the least recently used
@@ -280,13 +346,41 @@ func tailTitleBeadID(l tailLine) (string, bool) {
 	return "", false
 }
 
+// tailStore is the slice of one rig's bead store the tail reader uses. The
+// production store is *beads.Beads; a test drives the same reads with a fake.
+type tailStore interface {
+	Show(id string) (*beads.Issue, error)
+	Comments(id string) ([]beads.Comment, error)
+}
+
+// newTailBeadsFromStore builds the reader over one store opener. A title and a
+// landing's submitter are asked of the same store, so the opener's own cache
+// opens a rig's store once for both.
+func newTailBeadsFromStore(open func(rig string) (tailStore, error)) *tailBeads {
+	b := newTailBeads(func(rig, id string) (*beads.Issue, error) {
+		s, err := open(rig)
+		if err != nil {
+			return nil, err
+		}
+		return s.Show(id)
+	})
+	b.comments = func(rig, id string) ([]beads.Comment, error) {
+		s, err := open(rig)
+		if err != nil {
+			return nil, err
+		}
+		return s.Comments(id)
+	}
+	return b
+}
+
 // openTailBeads is the production tailBeads.show: the store that owns a rig's
 // beads, opened once per rig. The store is read with bd show, which routes by
 // issue id, so one store answers for any bead the monitor asks about.
 func openTailBeads(townRoot string) *tailBeads {
 	var mu sync.Mutex
-	stores := map[string]*beads.Beads{}
-	store := func(rig string) (*beads.Beads, error) {
+	stores := map[string]tailStore{}
+	open := func(rig string) (tailStore, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if s, ok := stores[rig]; ok {
@@ -300,24 +394,7 @@ func openTailBeads(townRoot string) *tailBeads {
 		stores[rig] = s
 		return s, nil
 	}
-	b := newTailBeads(func(rig, id string) (*beads.Issue, error) {
-		s, err := store(rig)
-		if err != nil {
-			return nil, err
-		}
-		return s.Show(id)
-	})
-	// The comments read shares the store map: a landing's submitter is asked
-	// of the same reader the bead's title is, so the town's stores are opened
-	// once for both.
-	b.comments = func(rig, id string) ([]beads.Comment, error) {
-		s, err := store(rig)
-		if err != nil {
-			return nil, err
-		}
-		return s.Comments(id)
-	}
-	return b
+	return newTailBeadsFromStore(open)
 }
 
 func (o *tailOnce) first(msg string) bool {
