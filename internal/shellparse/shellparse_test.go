@@ -1027,6 +1027,10 @@ func TestParseCommentLineBackslashUnreadable(t *testing.T) {
 	}{
 		{"unterminated quote on the comment line", "echo 'x # n \\\nls"},
 		{"comment backslash on a heredoc operator line", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF"},
+		// bash ends the <<- body at the tab-indented terminator on the next line
+		// and runs git reset --hard. mvdan reads the joined text as a body that
+		// hides the command and parses it, so only the scan's refusal stops it.
+		{"comment backslash on a heredoc operator line before a dash terminator", "cat <<-EOF # n \\\n\tEOF\ngit reset --hard\nEOF"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

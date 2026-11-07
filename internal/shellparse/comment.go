@@ -13,7 +13,8 @@ import "strings"
 // the source it read. The error is non-nil when the walk stopped before the end
 // of command while command has a backslash before a newline: the comments past
 // the stop are not blanked, so Parse must refuse the command even though
-// mvdan.cc/sh may read it.
+// mvdan.cc/sh may read it. It is also non-nil when a comment on a heredoc
+// operator line ends in a backslash, which is not blanked either.
 func blankCommentBackslashes(command string) (string, error) {
 	ends, err := commentLineBackslashes(command)
 	if len(ends) == 0 {
@@ -44,6 +45,10 @@ type commentScan struct {
 	// started. The shell reads each body at the next newline, even one inside
 	// a substitution the operator sits in, so the list is shared by every walk.
 	heredocs []heredocEnd
+
+	// heredocLine is set when a comment on a heredoc operator line ends in a
+	// backslash. Such a comment is not blanked, so Parse refuses the command.
+	heredocLine bool
 }
 
 // commentLineBackslashes returns the offsets of the backslashes that end a
@@ -51,11 +56,15 @@ type commentScan struct {
 // or at the nesting bound. A comment that ends in a backslash needs a backslash
 // before a newline, so a walk that stops hides nothing when src has none: mvdan
 // reads that text as bash does. Only then is the stop an error, returned with
-// the offsets the walk found before it.
+// the offsets the walk found before it. A comment on a heredoc operator line
+// that ends in a backslash is an error too, whatever follows it.
 func commentLineBackslashes(src string) ([]int, error) {
 	s := &commentScan{src: src}
 	if _, ok := s.code(0, 0); !ok && strings.Contains(src, "\\\n") {
 		return s.ends, &UnparseableError{Construct: "construct too deeply nested or unclosed to read"}
+	}
+	if s.heredocLine {
+		return s.ends, &UnparseableError{Construct: "comment ending in a backslash on a heredoc operator line"}
 	}
 	return s.ends, nil
 }
@@ -139,12 +148,18 @@ func (s *commentScan) code(p int, closer byte) (int, bool) {
 			} else {
 				nl += p
 			}
-			// A comment on a heredoc operator line is left as written. Blanking
-			// it would mean reading the heredoc body by hand, which gt-wnblap
-			// decided against: the parser refuses the shape it recorded, and
-			// the guard reads that body on its own (gt-3vky2).
-			if b := nl - 1; b > p && src[b] == '\\' && len(s.heredocs) == 0 {
-				s.ends = append(s.ends, b)
+			// A backslash that ends the comment is blanked, unless the comment
+			// is on a heredoc operator line. Blanking that one would mean
+			// reading the heredoc body by hand, which gt-wnblap decided against,
+			// so the scan records it and Parse refuses the command. The pending
+			// heredoc belongs to the body on the next line, not to this comment
+			// (gt-4otugt).
+			if b := nl - 1; b > p && src[b] == '\\' {
+				if len(s.heredocs) == 0 {
+					s.ends = append(s.ends, b)
+				} else {
+					s.heredocLine = true
+				}
 			}
 			p = nl
 		case c == '\n':

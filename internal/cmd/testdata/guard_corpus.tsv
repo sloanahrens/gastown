@@ -251,3 +251,7 @@ container_suite	polecat	"GT_TEST_DOCKER=1 echo 'go test ./internal/beads/...' | 
 # --- the payload a shell runs after the comment line: the line break hides it from a parser that joins the comment ---
 dangerous	polecat	"echo ok # n \\\nsh <<< 'git reset --hard'"	refuse	Hard reset	gt-4otugt
 container_suite	polecat	"GT_TEST_DOCKER=1 echo ok # n \\\nsh <<< 'go test ./internal/beads/...'"	refuse	targets testcontainers-backed package(s)	gt-4otugt
+# --- a comment ending in a backslash on a heredoc operator line: bash runs the line after the terminator (gt-4otugt) ---
+dangerous	polecat	"cat <<'EOF' # n \\\nEOF\ngit reset --hard\nEOF"	refuse	Hard reset	gt-4otugt
+dangerous	polecat	"cat <<-EOF # n \\\n\tEOF\ngit reset --hard\nEOF"	refuse	Hard reset	gt-4otugt
+container_suite	polecat	"GT_TEST_DOCKER=1 cat <<-EOF # n \\\n\tEOF\ngo test ./internal/beads/...\nEOF"	refuse	comment ending in a backslash on a heredoc operator line	gt-4otugt
