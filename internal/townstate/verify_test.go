@@ -2,7 +2,9 @@ package townstate
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -14,6 +16,7 @@ type failingFS struct {
 	fs.FS
 	readDirErr map[string]error
 	statErr    map[string]error
+	openErr    map[string]error
 }
 
 func (f failingFS) ReadDir(name string) ([]fs.DirEntry, error) {
@@ -28,6 +31,46 @@ func (f failingFS) Stat(name string) (fs.FileInfo, error) {
 		return nil, err
 	}
 	return fs.Stat(f.FS, name)
+}
+
+func (f failingFS) Open(name string) (fs.File, error) {
+	if err, ok := f.openErr[name]; ok {
+		return nil, err
+	}
+	return f.FS.Open(name)
+}
+
+// registryTown is a town whose registry names hm, a rig with no config.json and
+// no other marker: only the registry makes it a rig.
+func registryTown() fstest.MapFS {
+	return fstest.MapFS{
+		"mayor/town.json":              {Data: []byte(`{"registry":{"version":1,"rigs":{"hm":{"git_url":"file:///srv/hm"}}}}`)},
+		"hm/crew/eagle/notes.md":       {Data: []byte("x")},
+		"hm/polecats/rust/worktree.go": {Data: []byte("x")},
+	}
+}
+
+// rigTreeWithMarker is a rig the registry does not name, with no config.json.
+// Its bare repository and its canonical clone mark it, and its crew and
+// polecats are covered by the rig's own rows.
+func rigTreeWithMarker() fstest.MapFS {
+	return fstest.MapFS{
+		"mayor/town.json":        {Data: []byte("{}")},
+		"tango/.repo.git/HEAD":   {Data: []byte("ref: refs/heads/main\n")},
+		"tango/mayor/rig/go.mod": {Data: []byte("x")},
+		"tango/crew/echo/a.md":   {Data: []byte("x")},
+		"tango/polecats/bo/b.go": {Data: []byte("x")},
+	}
+}
+
+// unclassifiedTown holds one directory no entry names, with two hundred
+// descendants.
+func unclassifiedTown() fstest.MapFS {
+	town := fstest.MapFS{"mayor/town.json": {Data: []byte("{}")}}
+	for i := range 200 {
+		town[fmt.Sprintf("stray/deep/f%03d.txt", i)] = &fstest.MapFile{Data: []byte("x")}
+	}
+	return town
 }
 
 // sessionTown is a small town root with a rig, a bird directory and the
@@ -103,6 +146,42 @@ func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 			m:    Default(),
 			want: "stat .runtime/wren/usage",
 		},
+		{
+			name: "registry section unreadable",
+			fsys: failingFS{FS: registryTown(), openErr: map[string]error{"mayor/town.json": boom}},
+			m:    Default(),
+			want: "reading mayor/town.json",
+		},
+		{
+			name: "registry file unreadable on the five-file layout",
+			fsys: failingFS{FS: sessionTown(), openErr: map[string]error{"mayor/rigs.json": boom}},
+			m:    Default(),
+			want: "reading mayor/rigs.json",
+		},
+		{
+			name: "machine file is not a JSON object",
+			fsys: fstest.MapFS{"mayor/town.json": {Data: []byte("{")}},
+			m:    Default(),
+			want: "reading mayor/town.json",
+		},
+		{
+			name: "registry section holds a key the registry does not know",
+			fsys: fstest.MapFS{"mayor/town.json": {Data: []byte(`{"registry":{"version":1,"rigs":{"hm":{"git_url":"x","surprise":true}}}}`)}},
+			m:    Default(),
+			want: "surprise",
+		},
+		{
+			name: "five-file registry holds a key the registry does not know",
+			fsys: fstest.MapFS{"mayor/rigs.json": {Data: []byte(`{"version":1,"rigs":{"hm":{"git_url":"x","surprise":true}}}`)}},
+			m:    Default(),
+			want: "surprise",
+		},
+		{
+			name: "rig marker unreadable",
+			fsys: failingFS{FS: sessionTown(), statErr: map[string]error{"gastown/config.json": boom}},
+			m:    Default(),
+			want: "stat gastown/config.json",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,5 +194,49 @@ func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 				t.Errorf("Verify error = %q, want it to name %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestVerifyNamesEveryRig drives a rig the town has but no config.json marks:
+// one the registry names, and one a bare repository marks. Their manifest rows
+// expand and their trees are classified, so verify reports nothing for them.
+func TestVerifyNamesEveryRig(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		fsys fs.FS
+	}{
+		{name: "rig named by the registry, no config.json", fsys: registryTown()},
+		{name: "rig marked by a bare repository, not in the registry", fsys: rigTreeWithMarker()},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			problems, err := Verify(tc.fsys, Default(), time.Now())
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if len(problems) != 0 {
+				t.Errorf("Verify reported a rig's own tree: %v", problems)
+			}
+		})
+	}
+}
+
+// TestVerifyReportsAnUnclassifiedDirectoryOnce: a directory no entry names is
+// one problem at its own path, not one per descendant, so a wrong rule shows as
+// one line.
+func TestVerifyReportsAnUnclassifiedDirectoryOnce(t *testing.T) {
+	t.Parallel()
+	problems, err := Verify(unclassifiedTown(), Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	var paths []string
+	for _, p := range problems {
+		paths = append(paths, p.Path)
+	}
+	if want := []string{"stray"}; !slices.Equal(paths, want) {
+		t.Errorf("Verify reported %v, want exactly %v", paths, want)
 	}
 }
