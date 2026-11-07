@@ -1774,6 +1774,47 @@ func cacheTrimCheckFitCase(t *testing.T, listing string, need int64, tc cacheTri
 	}
 }
 
+// TestCacheTrimDfReadingIgnoresTheUsedColumn pins what the df reading takes
+// from its row: the Available column only. A Used column that is not a whole
+// number is not read and does not fail the reading, so the room-versus-list
+// cases behave as with a whole-KiB Used -- a too-large list is refused and one
+// that fits applies. While Used was still parsed (gt-hilhxl), such a row left
+// the room unknown and the trim ran without the fit check.
+func TestCacheTrimDfReadingIgnoresTheUsedColumn(t *testing.T) {
+	t.Parallel()
+	listing, need := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	for _, tc := range cacheTrimFitCases(need) {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			reply := cliReply{stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\n" +
+				fmt.Sprintf("overlay 1000000 not-a-number %d 1%% /", tc.free/1024)}
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+				cacheTrimListVerb: {stdout: listing},
+				cacheTrimFreeVerb: reply,
+			})
+			f.d.runDiskMaintenance()
+
+			applies := len(f.applyCalls())
+			if tc.applies {
+				if applies != 1 {
+					t.Errorf("the pass applied %d documents for a list the claim has room for, want the one Job: %s", applies, f.log.String())
+				}
+				if logged := f.log.String(); strings.Contains(logged, "free space unknown") {
+					t.Errorf("a df Used column that is not a number left the room unknown: %s", logged)
+				}
+				return
+			}
+			if applies != 0 {
+				t.Errorf("the pass applied %d documents for a list the claim cannot hold", applies)
+			}
+			want := fmt.Sprintf("does not fit the claim's free space (%d); nothing trimmed", tc.free)
+			if logged := f.log.String(); !strings.Contains(logged, want) {
+				t.Errorf("the log does not carry the refusal %q: %s", want, logged)
+			}
+		})
+	}
+}
+
 // TestCacheTrimOldImageFreeSpace pins the rollout case the df read exists for.
 // The listing is the bare array the cycle-2 image prints; df runs in the pod,
 // never through the helper, whose dispatcher sends any first argument it does
