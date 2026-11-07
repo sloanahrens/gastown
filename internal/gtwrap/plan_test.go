@@ -129,6 +129,38 @@ func TestPlanRefusesTheOAuthTokenInTheClaudeFamily(t *testing.T) {
 	}
 }
 
+// The Forgejo broker token and the ring key carry the GT_ prefix that forwarding
+// keeps, so only the list refuses them. GT_DOLT_PASSWORD is the one GT_ credential
+// the container must receive.
+func TestPlanForwardsTheDoltPasswordButNoBrokerOrRingKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		cross bool
+	}{
+		{"GT_AUTH_FORGEJO_TOKEN", false},
+		{"GT_RING_KEY", false},
+		{"GT_DOLT_PASSWORD", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			entry := tt.name + "=secret"
+			call, err := Plan("gt", []string{"status"}, []string{entry}, "/town", false)
+			if err != nil {
+				t.Fatalf("Plan returned an error: %v", err)
+			}
+			var want []string
+			if tt.cross {
+				want = []string{entry}
+			}
+			if !slices.Equal(call.Env, want) {
+				t.Fatalf("Plan forwarded %q, want %q", call.Env, want)
+			}
+		})
+	}
+}
+
 func TestPlanCarriesTheCallersDirectoryAndTerminal(t *testing.T) {
 	t.Parallel()
 	for _, isTTY := range []bool{false, true} {

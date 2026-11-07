@@ -436,6 +436,19 @@ var unforwardedCredentialEnvVars = []string{
 	// A setup-token subscription credential (gt-l0k3s), reached by agents as a
 	// ${VAR} reference to settings/daemon.env like the others above.
 	"CLAUDE_CODE_OAUTH_TOKEN",
+
+	// The Forgejo site-admin broker token and the ring signing key match the
+	// GT_ prefix that forwarding keeps, so they are named here to refuse them.
+	// Each is a credential and must not cross into a wrapped tool's container
+	// environment.
+	"GT_AUTH_FORGEJO_TOKEN",
+	"GT_RING_KEY",
+
+	// GT_DOLT_PASSWORD is deliberately not listed: the container's gt reaches
+	// the host Dolt with it, so it must cross. CLAUDE_CODE_CLIENT_KEY is not
+	// listed either: its value is a path to the mTLS client key file, which the
+	// spawn passthrough carries on purpose, and the wrapper never mounts that
+	// file, so the path alone reaches nothing in the container.
 }
 
 // UnforwardedCredentialEnvVars names the credentials no spawn path takes from
