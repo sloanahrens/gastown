@@ -231,8 +231,8 @@ func TestProgressPrefetchOmittedBeadReadErrorFailsLabel(t *testing.T) {
 func TestProgressPrefetchSkipsNudgesInsideTheSettleWindow(t *testing.T) {
 	t.Parallel()
 	cases := []progressCase{{bead: "gt-fresh", nudge: progressBase}}
-	// The line is logged a minute after its nudge, so at this time it is one
-	// minute short of the settle window.
+	// Label measures from the logged ts, a minute after the nudge, so at this
+	// time the line is two minutes short of the settle window.
 	now := progressBase.Add(progressSettle - time.Minute)
 	reads := &countingProgressNotes{notes: map[string]string{"gt-fresh": ""}}
 	a := newProgressTestAdapter(t.TempDir(), reads, now)
