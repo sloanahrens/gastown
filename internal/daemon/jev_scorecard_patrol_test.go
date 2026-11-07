@@ -595,6 +595,57 @@ func TestJevScorecardPatrolRefreshRunsTheRefreshCommandInTheTown(t *testing.T) {
 	}
 }
 
+// TestJevScorecardPatrolADeadlineKilledRefreshIsATimeout holds the deadline
+// classification through the production runner: a refresh the budget kills
+// exits as "signal: killed", which is not a DeadlineExceeded error, so the
+// timeout is told apart by the context having expired. The budget is one
+// nanosecond and the refresh waits for its context to expire, so the kill is
+// the budget's timer and no wall-clock wait is set.
+func TestJevScorecardPatrolADeadlineKilledRefreshIsATimeout(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
+	logs := &bytes.Buffer{}
+	town := t.TempDir()
+	d := &Daemon{
+		config:             &Config{TownRoot: town},
+		logger:             log.New(logs, "", 0),
+		clock:              clockwork.NewFakeClockAt(start),
+		gtPath:             "/nonexistent/gt",
+		patrolConfig:       &DaemonPatrolConfig{Patrols: &PatrolsConfig{JevScorecard: jevScorecardEnabled(scorecard.AttentionBattery)}},
+		jevScorecardBudget: time.Nanosecond,
+		jevScorecardSeams: jevScorecardSeams{
+			loc:      func() *time.Location { return jevScorecardTestZone },
+			dispatch: func(fn func()) { fn() },
+		},
+		execCmd: func(*exec.Cmd) ([]byte, []byte, error) {
+			return nil, nil, errors.New("signal: killed")
+		},
+	}
+	// The process is killed by the budget, so the refresh runs once the
+	// budget's context has expired, through the production runner. The wait is
+	// bounded by count: if the budget is ignored, the context never expires and
+	// the test fails at the bound rather than waiting out the 30 minute default.
+	d.jevScorecardSeams.refresh = func(ctx context.Context, townRoot string) error {
+		for range 1 << 20 {
+			if ctx.Err() != nil {
+				break
+			}
+			runtime.Gosched()
+		}
+		return d.runJevScorecardRefresh(ctx, townRoot)
+	}
+	jevScorecardTestCache(t, town, start.Add(-25*time.Hour))
+
+	d.triggerJevScorecard()
+
+	if !strings.Contains(logs.String(), "refresh timed out after 1ns") {
+		t.Errorf("log = %q, want the killed refresh reported as a timeout", logs)
+	}
+	if strings.Contains(logs.String(), "refresh failed") {
+		t.Errorf("log = %q, want a timeout, not a plain failure", logs)
+	}
+}
+
 // TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh holds the
 // production dispatch: a due refresh runs on its own goroutine, so the trigger
 // returns while the scoring pass is still going. The refresh waits, bounded by

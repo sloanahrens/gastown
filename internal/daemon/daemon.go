@@ -1085,7 +1085,9 @@ type Daemon struct {
 	// jevScorecardRunning is the jev_scorecard refresh's single-flight guard
 	// (jev_scorecard_patrol.go), and jevScorecardRun is its in-memory last-run
 	// time. jevScorecardSeams replace its clock, zone, runner and dispatch in
-	// tests; the zero value is production. jevScorecardStartMu guards
+	// tests, and jevScorecardBudget replaces the refresh budget (zero or less
+	// means jevScorecardRefreshBudget); the zero value is production.
+	// jevScorecardStartMu guards
 	// jevScorecardStartedAt, the first tick this process evaluated the patrol,
 	// which the daily clock is counted from when the town has no last-run
 	// record. jevScorecardLogs holds back the lines the patrol would otherwise
@@ -1093,6 +1095,7 @@ type Daemon struct {
 	jevScorecardRunning   atomic.Bool
 	jevScorecardRun       patrolLastRunMemory
 	jevScorecardSeams     jevScorecardSeams
+	jevScorecardBudget    time.Duration
 	jevScorecardStartMu   sync.Mutex
 	jevScorecardStartedAt time.Time
 	jevScorecardLogs      jevScorecardThrottle
