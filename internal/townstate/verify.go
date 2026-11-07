@@ -221,6 +221,7 @@ func townInputs(fsys fs.FS, m *Manifest) (rigs, birds []string, err error) {
 // carries one, else mayor/rigs.json. A town with neither has no rigs yet, the
 // same as config.LoadRigsConfigOrEmpty. A registry that cannot be read or
 // decoded is an error. Only the names are kept.
+// A null registry section is an error too: it is not a registry.
 func registryRigs(fsys fs.FS) ([]string, error) {
 	top, err := readMachineTopLevel(fsys)
 	if err != nil {
@@ -228,6 +229,11 @@ func registryRigs(fsys fs.FS) ([]string, error) {
 	}
 	var cfg config.RigsConfig
 	if raw, ok := top[registrySection]; ok {
+		// Decoding null yields zero rigs, which would hide mayor/rigs.json
+		// without a word, so a null section is refused instead.
+		if string(raw) == "null" {
+			return nil, fmt.Errorf("reading %s: section %q is null, not an object", machineFile, registrySection)
+		}
 		if err := config.DecodeJSONFile(machineFile+` (section "`+registrySection+`")`, raw, &cfg); err != nil {
 			return nil, err
 		}
@@ -260,6 +266,10 @@ func readMachineTopLevel(fsys fs.FS) (map[string]json.RawMessage, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(data, &top); err != nil {
 		// The decoder's message quotes the file's bytes, so it is not kept.
+		return nil, fmt.Errorf("reading %s: not a JSON object", machineFile)
+	}
+	// JSON null decodes to a nil map with no error, and it is not an object.
+	if top == nil {
 		return nil, fmt.Errorf("reading %s: not a JSON object", machineFile)
 	}
 	return top, nil
