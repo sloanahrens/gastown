@@ -247,3 +247,82 @@ func TestProgressPrefetchSkipsNudgesInsideTheSettleWindow(t *testing.T) {
 		t.Errorf("Label = %+v, %v; want unlabeled and no error", lab, err)
 	}
 }
+
+// oneAtATimeNotes reads each bead's notes through the counting reader and has
+// no batch read, so a Prefetch through it returns before it fills anything.
+type oneAtATimeNotes struct{ reads *countingProgressNotes }
+
+func (o oneAtATimeNotes) Notes(rig, bead string) (string, error) {
+	return o.reads.Notes(rig, bead)
+}
+
+// TestProgressPrefetchSecondPassDropsTheFirstPassNotes: a Prefetch that returns
+// early keeps whatever the last pass batched, so the reset at its top is what
+// stops the first pass's landing from labeling the second pass's bead. The
+// second pass's notes have no landing, and Label must read those.
+func TestProgressPrefetchSecondPassDropsTheFirstPassNotes(t *testing.T) {
+	t.Parallel()
+	landed := land.LandingRecord{LandedCommit: "abc123", LandedAt: progressBase.Add(10 * time.Minute)}.NoteBlock()
+	cases := []progressCase{{bead: "gt-two", nudge: progressBase}}
+	town := t.TempDir()
+	secondPass := map[string]string{"gt-two": ""}
+	want := progressLabels(t, newProgressTestAdapter(town, &countingProgressNotes{notes: secondPass}, progressNow), cases, false)
+	if !want[0].Labeled {
+		t.Fatal("the second pass's bead is unlabeled, so the comparison proves nothing")
+	}
+
+	a := newProgressTestAdapter(town, &countingProgressNotes{notes: map[string]string{"gt-two": landed}}, progressNow)
+	items := parseProgressNudges(t, a, cases)
+	a.Prefetch(context.Background(), items)
+	a.notes = oneAtATimeNotes{&countingProgressNotes{notes: secondPass}}
+	a.Prefetch(context.Background(), items)
+
+	lab, err := a.Label(context.Background(), items[0])
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	if !reflect.DeepEqual(lab, want[0]) {
+		t.Errorf("second pass labeled = %+v, want %+v: the first pass's notes were kept", lab, want[0])
+	}
+}
+
+// nilIssueNotes answers every batch with a nil issue for each id. Prefetch must
+// not keep one: reading its Notes would dereference nil.
+type nilIssueNotes struct{ reads *countingProgressNotes }
+
+func (n nilIssueNotes) Notes(rig, bead string) (string, error) {
+	return n.reads.Notes(rig, bead)
+}
+
+func (n nilIssueNotes) ShowAll(_ string, ids []string) (map[string]*beads.Issue, error) {
+	out := make(map[string]*beads.Issue, len(ids))
+	for _, id := range ids {
+		out[id] = nil
+	}
+	return out, nil
+}
+
+// TestProgressPrefetchNilIssueIsReadOneAtATime: a batch that answers a bead with
+// a nil issue leaves that bead to Label's one-at-a-time read, which labels it as
+// it does with no Prefetch, and Prefetch does not panic on it.
+func TestProgressPrefetchNilIssueIsReadOneAtATime(t *testing.T) {
+	t.Parallel()
+	landed := land.LandingRecord{LandedCommit: "abc123", LandedAt: progressBase.Add(10 * time.Minute)}.NoteBlock()
+	notes := map[string]string{"gt-nil": landed}
+	cases := []progressCase{{bead: "gt-nil", nudge: progressBase}}
+	town := t.TempDir()
+	want := progressLabels(t, newProgressTestAdapter(town, &countingProgressNotes{notes: notes}, progressNow), cases, false)
+	if !want[0].Labeled {
+		t.Fatal("the bead is unlabeled, so the comparison proves nothing")
+	}
+
+	reads := &countingProgressNotes{notes: notes}
+	got := progressLabels(t, newProgressTestAdapter(town, nilIssueNotes{reads}, progressNow), cases, true)
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("labels with a nil batch answer = %v, want the one-at-a-time labels %v", got, want)
+	}
+	if wantReads := []string{"gt-nil"}; !reflect.DeepEqual(reads.reads, wantReads) {
+		t.Errorf("one-at-a-time reads = %v, want %v", reads.reads, wantReads)
+	}
+}

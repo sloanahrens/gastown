@@ -100,6 +100,20 @@ func TestCommentsOfQuotesItsIDs(t *testing.T) {
 	}
 }
 
+// TestCommentsOfOrdersACommentsByCreatedAt: a bead's comments come back oldest
+// first, so Label reads a stand-down or a refusal in the order it was written.
+// The sort runs after i.id, so each bead's comments stay together, in order.
+func TestCommentsOfOrdersACommentsByCreatedAt(t *testing.T) {
+	t.Parallel()
+	s, err := CommentsOf([]string{"gt-1", "gt-2"}).Inline()
+	if err != nil {
+		t.Fatalf("Inline: %v", err)
+	}
+	if !strings.HasSuffix(s, " ORDER BY i.id, c.created_at") {
+		t.Errorf("CommentsOf does not end by ordering each bead's comments by created_at:\n%s", s)
+	}
+}
+
 func TestQuoteEscapesSQLLiterals(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
