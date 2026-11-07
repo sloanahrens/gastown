@@ -108,6 +108,13 @@ container_suite	polecat	"export GT_TEST_DOCKER=1; cd internal/style || exit 1; g
 container_suite	polecat	"export GT_TEST_DOCKER=1; cd $X || exit 1; cd internal/beads || exit 1; go test"	refuse	names a directory the guard cannot place	gt-zz1t7g
 container_suite	polecat	"cd internal/beads || exit 1; go test"	allow		gt-zz1t7g
 container_suite	polecat	"export GT_TEST_DOCKER=1; cd internal/beads || exit 1 & go test"	allow		gt-zz1t7g
+container_suite	polecat	"export GT_TEST_DOCKER=1; cd nope || cd internal/beads; go test"	refuse	targets testcontainers-backed package(s)	gt-zz1t7g
+container_suite	polecat	"export GT_TEST_DOCKER=1; (cd nope || cd internal/beads; go test)"	refuse	targets testcontainers-backed package(s)	gt-zz1t7g
+container_suite	polecat	"export GT_TEST_DOCKER=1; (cd internal/beads || exit 1; go test)"	refuse	targets testcontainers-backed package(s)	gt-zz1t7g
+container_suite	polecat	"export GT_TEST_DOCKER=1; cd internal/style || cd internal/beads; go test"	allow		gt-zz1t7g
+container_suite	polecat	"export GT_TEST_DOCKER=1; cd internal/style || exit 1; cd ../beads; go test"	refuse	targets testcontainers-backed package(s)	gt-zz1t7g
+container_suite	polecat	"export GT_TEST_DOCKER=1; cd internal/style || cd ../beads; cd ../beads; go test"	refuse	targets testcontainers-backed package(s)	gt-zz1t7g
+container_suite	polecat	"export GT_TEST_DOCKER=1; builtin cd internal/style || exit 1; cd ../beads; go test"	refuse	targets testcontainers-backed package(s)	gt-zz1t7g
 # --- container_suite: a non-literal command word or shell payload is refused
 # under the opt-in for a polecat, and allowed for crew (gt-zz1t7g) ---
 container_suite	polecat	"export GT_TEST_DOCKER=1; x=make; $x test"	refuse	command word $x	gt-zz1t7g
