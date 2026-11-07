@@ -121,16 +121,23 @@ func WithoutMachineEnv(env []string) []string {
 }
 
 // machineExempt reports whether a call runs outside machine mode whatever its
-// caller did. bd sql is the only verb: machine mode prints its rows as JSON
-// objects with the keys sorted, which loses the SELECT order the csv readers
-// in internal/doctor index by.
+// caller did. Two kinds of call are exempt. bd sql: machine mode prints its rows
+// as JSON objects with the keys sorted, which loses the SELECT order the csv
+// readers in internal/doctor index by. A help call (--help or -h): bd answers
+// it with an empty envelope under machine mode, so the Usage section the
+// command-tree generator (internal/cmdtree/gen-bd-tree) reads is gone.
 func machineExempt(args []string) bool {
+	for _, a := range args {
+		if a == "--help" || a == "-h" {
+			return true
+		}
+	}
 	rest, ok := stripBDGlobalFlags(args)
 	return ok && len(rest) > 0 && rest[0] == "sql"
 }
 
 // machineEnvForCall is WithMachineEnvIn for a call with a known argv: the
-// exempt verbs get the environment without machine mode.
+// exempt calls get the environment without machine mode.
 func machineEnvForCall(dir string, env, args []string) []string {
 	env = WithMachineEnvIn(dir, env)
 	if machineExempt(args) {
