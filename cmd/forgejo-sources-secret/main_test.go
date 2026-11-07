@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -43,40 +44,75 @@ const mangoRepo = "mango"
 // fetches.
 var sourceRepoFiles = []string{"../../deploy/daemon/image-pins", "../../deploy/polecat/seed-urls"}
 
-// sourceRepos returns the sorted, de-duplicated repository names the source files name, with
-// mangoRepo added. Each non-comment line carries a URL as its second field; the name is the
-// last path element without .git. A line with no URL, or a URL that is not under the secret
-// owner, fails the test, since the file no longer says what the check reads.
-func sourceRepos(t *testing.T) []string {
-	t.Helper()
+// sourceRepos returns the repository names one source file names: each non-comment line
+// carries a URL as its second field, and the name is the last path element without .git. A
+// line with no URL, a URL that does not parse, or a URL that is not under the secret owner
+// or has no .git suffix is an error naming the file, since the file no longer says what the
+// check reads.
+func sourceRepos(file, data string) ([]string, error) {
+	var names []string
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return nil, fmt.Errorf("%s: line %q names no URL", file, line)
+		}
+		u, err := url.Parse(fields[1])
+		if err != nil {
+			return nil, fmt.Errorf("%s: URL %q: %v", file, fields[1], err)
+		}
+		parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+		if len(parts) != 2 || parts[0] != secretOwner || !strings.HasSuffix(parts[1], ".git") {
+			return nil, fmt.Errorf("%s: URL %q is not %s/<name>.git", file, fields[1], secretOwner)
+		}
+		names = append(names, strings.TrimSuffix(parts[1], ".git"))
+	}
+	return names, nil
+}
+
+// wantRepos returns the sorted, de-duplicated repository names the source files name, with
+// mangoRepo added. read returns the text of one source file.
+func wantRepos(read func(string) (string, error)) ([]string, error) {
 	names := []string{mangoRepo}
 	for _, file := range sourceRepoFiles {
-		data, err := os.ReadFile(file)
+		data, err := read(file)
 		if err != nil {
-			t.Fatalf("read %s: %v", file, err)
+			return nil, fmt.Errorf("read %s: %w", file, err)
 		}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				t.Fatalf("%s: line %q names no URL", file, line)
-			}
-			u, err := url.Parse(fields[1])
-			if err != nil {
-				t.Fatalf("%s: URL %q: %v", file, fields[1], err)
-			}
-			parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
-			if len(parts) != 2 || parts[0] != secretOwner || !strings.HasSuffix(parts[1], ".git") {
-				t.Fatalf("%s: URL %q is not %s/<name>.git", file, fields[1], secretOwner)
-			}
-			names = append(names, strings.TrimSuffix(parts[1], ".git"))
+		fileNames, err := sourceRepos(file, data)
+		if err != nil {
+			return nil, err
 		}
+		names = append(names, fileNames...)
 	}
 	slices.Sort(names)
-	return slices.Compact(names)
+	return slices.Compact(names), nil
+}
+
+// diffRepos compares the names the run reads (got) with the names the sources name (want).
+// missing is a name a source names that the run does not read; stray is a name the run
+// reads that no source names.
+func diffRepos(got, want []string) (missing, stray []string) {
+	for _, name := range want {
+		if !slices.Contains(got, name) {
+			missing = append(missing, name)
+		}
+	}
+	for _, name := range got {
+		if !slices.Contains(want, name) {
+			stray = append(stray, name)
+		}
+	}
+	return missing, stray
+}
+
+// readSourceFile reads one source file for wantRepos, relative to this package.
+func readSourceFile(file string) (string, error) {
+	data, err := os.ReadFile(file)
+	return string(data), err
 }
 
 // TestSourcesSecretChecksExactlyTheSourceRepos holds the repositories the run reads to the names
@@ -84,11 +120,81 @@ func sourceRepos(t *testing.T) []string {
 // build fetches that the run does not read, or a name the run reads that no file names, fails it.
 func TestSourcesSecretChecksExactlyTheSourceRepos(t *testing.T) {
 	t.Parallel()
-	want := sourceRepos(t)
-	got := slices.Clone(readRepos)
-	slices.Sort(got)
-	if !slices.Equal(got, want) {
-		t.Fatalf("readRepos = %v, want the source repositories %v", got, want)
+	want, err := wantRepos(readSourceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing, stray := diffRepos(readRepos, want)
+	if len(missing) > 0 || len(stray) > 0 {
+		t.Fatalf("readRepos misses %v that the source files name, and names %v that they do not", missing, stray)
+	}
+}
+
+// TestSourceReposReadsTheNameOfEachLine holds the parser to the shape the pin and seed files
+// use: comments and blank lines are skipped, and each URL's last element without .git is a name.
+func TestSourceReposReadsTheNameOfEachLine(t *testing.T) {
+	t.Parallel()
+	data := "# a comment\n\nbd http://forgejo:3000/sloan/beads.git abc\nom http://forgejo:3000/sloan/organic-mechanic.git def\n"
+	got, err := sourceRepos("pins", data)
+	if err != nil {
+		t.Fatalf("sourceRepos: %v", err)
+	}
+	if want := []string{"beads", "organic-mechanic"}; !slices.Equal(got, want) {
+		t.Fatalf("sourceRepos = %v, want %v", got, want)
+	}
+}
+
+// TestSourceReposRefusesABadLine drives each refusal of the parser: every bad line is an error
+// that names the file, not a panic and not a name taken from the bad line.
+func TestSourceReposRefusesABadLine(t *testing.T) {
+	t.Parallel()
+	const file = "pins"
+	tests := []struct {
+		name string
+		data string
+	}{
+		{"a line with no URL", "beads\n"},
+		{"a URL that does not parse", "bd http://[bad abc\n"},
+		{"a URL not under the owner", "bd http://forgejo:3000/other/beads.git abc\n"},
+		{"a URL without the .git suffix", "bd http://forgejo:3000/sloan/beads abc\n"},
+		{"a URL with an extra path element", "bd http://forgejo:3000/sloan/x/beads.git abc\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			names, err := sourceRepos(file, tc.data)
+			if err == nil {
+				t.Fatalf("sourceRepos(%q) = %v, want an error", tc.data, names)
+			}
+			if !strings.Contains(err.Error(), file) {
+				t.Fatalf("error %q does not name the file %s", err, file)
+			}
+		})
+	}
+}
+
+// TestDiffReposNamesADroppedAndAStrayRepo drives both halves of the comparison: a name the
+// sources name that the run does not read is missing, and a name the run reads that no source
+// names is stray.
+func TestDiffReposNamesADroppedAndAStrayRepo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		got, want []string
+		missing   []string
+		stray     []string
+	}{
+		{"the same names differ in nothing", []string{"beads", "devops"}, []string{"devops", "beads"}, nil, nil},
+		{"a repo the build fetches is dropped", []string{"beads"}, []string{"beads", "mango"}, []string{"mango"}, nil},
+		{"a name no source names is stray", []string{"beads", "foo"}, []string{"beads"}, nil, []string{"foo"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			missing, stray := diffRepos(tc.got, tc.want)
+			if !slices.Equal(missing, tc.missing) || !slices.Equal(stray, tc.stray) {
+				t.Fatalf("diffRepos(%v, %v) = missing %v, stray %v; want missing %v, stray %v",
+					tc.got, tc.want, missing, stray, tc.missing, tc.stray)
+			}
+		})
 	}
 }
 

@@ -49,7 +49,16 @@ const (
 // deploy/polecat/seed-urls; mango is the MANGO_URL repository of
 // deploy/ci/images.workflow.yml, which no pin file names. A test holds this list
 // to those files.
-var readRepos = []string{"beads", "organic-mechanic", "history-man", "devops", "mango"}
+var readRepos = []string{
+	"beads",
+	"organic-mechanic",
+	"history-man",
+	"devops",
+	// mango is the MANGO_URL contract: the operator sets that variable to the mango
+	// source's URL. The preflight in deploy/ci/images.workflow.yml checks that URL's
+	// host, not its repository name, so nothing verifies this name.
+	"mango",
+}
 
 // noReply is the status a read records when the request got no HTTP reply at all. No
 // HTTP status is 0, so it marks a transport failure and is never printed as a status.
