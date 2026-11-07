@@ -65,13 +65,20 @@ func TestPostLandWorkflowContextIsTheRigSetting(t *testing.T) {
 }
 
 // TestPostLandWorkflowKeepsHistoryAndTags holds the committed post-land
-// workflow to the full-history checkout and a tags fetch. The shell tier stamps
-// versions with git describe and scripts/makefile-gate_test.sh fails without
-// both; dropping them (gt-2okhxy) turned every post-land check on main red
-// (gt-b14yam).
+// workflow to the full-history checkout and a tags fetch, which the shell
+// tier's git describe needs (gt-b14yam).
 func TestPostLandWorkflowKeepsHistoryAndTags(t *testing.T) {
 	t.Parallel()
-	steps := postLandWorkflowSteps(t)
+	for _, p := range postLandHistoryProblems(postLandWorkflowSteps(t)) {
+		t.Error(p)
+	}
+}
+
+// postLandHistoryProblems names each thing the post-land workflow lacks for the
+// shell tier's git describe: a checkout with the full history, and a step that
+// fetches the tags.
+func postLandHistoryProblems(steps []gateStep) []string {
+	var problems []string
 	fullHistory, tagsFetched := false, false
 	for _, step := range steps {
 		if strings.HasPrefix(step.Uses, "actions/checkout") && fmt.Sprint(step.With["fetch-depth"]) == "0" {
@@ -84,68 +91,54 @@ func TestPostLandWorkflowKeepsHistoryAndTags(t *testing.T) {
 		}
 	}
 	if !fullHistory {
-		t.Error("the checkout does not set fetch-depth: 0, so the shell tier has no history for git describe")
+		problems = append(problems, "the checkout does not set fetch-depth: 0, so the shell tier has no history for git describe")
 	}
 	if !tagsFetched {
-		t.Error("no step fetches the tags, so git describe finds none and makefile-gate_test.sh fails")
-	}
-}
-
-// gateTagFetchProblems names each step that fetches a tag, whether the fetch is
-// a run command or actions/checkout's fetch-tags input. An input the guard does
-// not recognize as false counts as a tag fetch: unknown denies.
-func gateTagFetchProblems(steps []gateStep) []string {
-	var problems []string
-	for _, step := range steps {
-		if v, set := step.With["fetch-tags"]; set && fmt.Sprint(v) != "false" {
-			problems = append(problems, fmt.Sprintf("the %s checkout has fetch-tags: %v, so it fetches tags", step.Uses, v))
-		}
-		for _, words := range gitFetchWords(step.Run) {
-			if fetchesTags(words) {
-				problems = append(problems, fmt.Sprintf("the step fetching %q fetches a tag", strings.Join(words, " ")))
-			}
-		}
+		problems = append(problems, "no step fetches the tags, so git describe finds none and makefile-gate_test.sh fails")
 	}
 	return problems
 }
 
-// TestGateTagFetchProblemsNamesTagFetches drives the no-tag guard's refusing
-// branch, which the committed workflow cannot: it fetches no tag, so the guard
-// on it stays quiet either way. Each form of tag fetch is refused here, and a
-// fetch that leaves tags alone is not.
-func TestGateTagFetchProblemsNamesTagFetches(t *testing.T) {
+// TestPostLandHistoryProblemsNamesMissingHistoryAndTags drives each refusal of
+// the history and tags guard, one row per refusal, and the forms it accepts.
+// Each row names the problems it expects, by a phrase each one must contain.
+func TestPostLandHistoryProblemsNamesMissingHistoryAndTags(t *testing.T) {
 	t.Parallel()
+	fullCheckout := gateStep{Uses: "actions/checkout@v4", With: map[string]any{"fetch-depth": 0}}
+	tagGlob := gateStep{Run: `git fetch --no-tags --prune origin "+refs/tags/*:refs/tags/*"`}
 	tests := []struct {
-		name         string
-		steps        []gateStep
-		wantProblems int
+		name  string
+		steps []gateStep
+		want  []string
 	}{
-		{name: "a deepening fetch of main that leaves tags alone",
-			steps: []gateStep{{Run: `git fetch --no-tags --prune --depth=2147483647 origin "+refs/heads/main:refs/remotes/origin/main"`}}},
-		{name: "a --tags fetch takes every tag",
-			steps: []gateStep{{Run: "git fetch --tags origin main"}}, wantProblems: 1},
-		{name: "a tag glob refspec",
-			steps: []gateStep{{Run: `git fetch --no-tags --prune origin "+refs/tags/*:refs/tags/*"`}}, wantProblems: 1},
-		{name: "a single tag refspec",
-			steps: []gateStep{{Run: "git fetch origin refs/tags/v1.0.0"}}, wantProblems: 1},
-		{name: "a tag fetch after a separator",
-			steps: []gateStep{{Run: "make gate && git fetch --tags"}}, wantProblems: 1},
-		{name: "a tag fetch in a subshell",
-			steps: []gateStep{{Run: "(git fetch --tags)"}}, wantProblems: 1},
-		{name: "a tag fetch on a later step",
-			steps: []gateStep{{Run: "make gate"}, {Run: "git fetch origin +refs/tags/*:refs/tags/*"}}, wantProblems: 1},
-		{name: "a checkout that fetches tags",
-			steps: []gateStep{{Uses: "actions/checkout@v4", With: map[string]any{"fetch-tags": true}}}, wantProblems: 1},
-		{name: "a checkout with fetch-tags false",
-			steps: []gateStep{{Uses: "actions/checkout@v4", With: map[string]any{"fetch-tags": false}}}},
-		{name: "a run with no fetch",
-			steps: []gateStep{{Run: "make gate"}}},
+		{name: "a full-history checkout and a tag glob fetch",
+			steps: []gateStep{fullCheckout, tagGlob}},
+		{name: "a --tags fetch takes the tags too",
+			steps: []gateStep{fullCheckout, {Run: "git fetch --tags origin"}}},
+		{name: "a checkout with no fetch-depth",
+			steps: []gateStep{{Uses: "actions/checkout@v4"}, tagGlob}, want: []string{"fetch-depth: 0"}},
+		{name: "a checkout with fetch-depth 1",
+			steps: []gateStep{{Uses: "actions/checkout@v4", With: map[string]any{"fetch-depth": 1}}, tagGlob}, want: []string{"fetch-depth: 0"}},
+		{name: "a fetch-depth 0 on an action that is not a checkout",
+			steps: []gateStep{{Uses: "other/action@v1", With: map[string]any{"fetch-depth": 0}}, tagGlob}, want: []string{"fetch-depth: 0"}},
+		{name: "no step fetches the tags",
+			steps: []gateStep{fullCheckout}, want: []string{"fetches the tags"}},
+		{name: "refs/tags in a run that is not a git fetch",
+			steps: []gateStep{fullCheckout, {Run: "echo refs/tags/v1.0.0"}}, want: []string{"fetches the tags"}},
+		{name: "neither the checkout nor a tag fetch",
+			steps: []gateStep{{Run: "make gate"}}, want: []string{"fetch-depth: 0", "fetches the tags"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := gateTagFetchProblems(tc.steps); len(got) != tc.wantProblems {
-				t.Errorf("gateTagFetchProblems() = %q, want %d problem(s)", got, tc.wantProblems)
+			got := postLandHistoryProblems(tc.steps)
+			if len(got) != len(tc.want) {
+				t.Fatalf("postLandHistoryProblems() = %q, want %d problem(s)", got, len(tc.want))
+			}
+			for i, phrase := range tc.want {
+				if !strings.Contains(got[i], phrase) {
+					t.Errorf("problem %d = %q, want it to contain %q", i, got[i], phrase)
+				}
 			}
 		})
 	}
