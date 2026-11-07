@@ -704,9 +704,15 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	} else {
 		redMain.Promote = d.newPromoter(rigName, repo, forgejoCfg)
 	}
+	// The ancestry reader orders post-land verdicts by landing order. Production
+	// reads the rig's repository; a test replaces it through postLandIsAncestor.
+	isAncestor := git.NewGit(repo).WithConfigReadRetry().IsAncestor
+	if d.postLandIsAncestor != nil {
+		isAncestor = d.postLandIsAncestor
+	}
 	postLand := d.newPostLandRunner(rigName, rigPath, newPostLandWiring(
 		merger.Client, merger.Owner, merger.RepoName, mainState, postLandTimeout, run, bd, redMain,
-		git.NewGit(repo).WithConfigReadRetry().IsAncestor))
+		isAncestor))
 	// The human's recorded identity is what the worker refuses a submission
 	// under, so a town whose overseer identity cannot be read gets no worker:
 	// without the name no submission can be checked, and landing one would
