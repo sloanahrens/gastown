@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # post-land-shell.sh reads the last two hours of first-parent history
+          fetch-depth: 0   # post-land-shell.sh reads history only outside CI (GITHUB_ACTIONS); this run takes the CI path
       - name: fetch the tags
         run: git fetch --no-tags --prune origin "+refs/tags/*:refs/tags/*"
       - run: GT_TEST_DOCKER=0 bash scripts/post-land-shell.sh
