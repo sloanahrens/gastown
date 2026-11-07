@@ -56,7 +56,7 @@ const (
 	OK Status = "ok"
 	// Disabled means the patrol config turns the battery off.
 	Disabled Status = "disabled"
-	// Stale means a continuous battery's last pass is over StaleAfter old.
+	// Stale means a fifteen-minute battery's last pass is over StaleAfter old.
 	Stale Status = "stale"
 	// Late means a weekly battery's last pass is over LateAfter old.
 	Late Status = "late"
