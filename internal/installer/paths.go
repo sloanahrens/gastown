@@ -99,7 +99,8 @@ func resolvePaths(getenv func(string) string, home, start string, isTown func(st
 
 // TownRootAbove returns the outermost ancestor of dir holding the town marker,
 // or "" when none does. A rig can carry a mayor/ of its own, so the outermost
-// marker is the town (lib/install-gt-lib.sh's igt_town_root_above).
+// marker is the town (ported from the deleted install-gt-lib.sh's
+// igt_town_root_above, gt-tpg0p).
 func TownRootAbove(dir string, isTown func(string) bool) string {
 	d, err := filepath.Abs(dir)
 	if err != nil {
