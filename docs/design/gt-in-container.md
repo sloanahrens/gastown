@@ -26,9 +26,14 @@ Ladder, in order:
 2. If the container is not running, `docker run --rm` of the same image tag with the same mounts, so `gt` still answers while the daemon is down.
 3. If Docker itself is down, print what is down (Docker Desktop, a Colima VM, the container) and the command that starts it, and exit non-zero. There is no native fallback binary.
 
+Rung 2 must be an allowlist, because a throwaway container can run beside a daemon the probe missed. The wrapper may run a rung-2 call only when its arguments match a command the allowlist names as read-only: `gt status`, `gt prime`, `gt hook`, `gt mail inbox`, `bd show`, `bd list` and `bd ready`. Every other call must be refused under rung 2 with the rung-3 start command, and the refusal exits non-zero. Commands that start, stop, restart or repair the daemon or Dolt must never be on the list, for example `gt daemon`, `gt dolt`, `gt up`, `gt down`, `gt power`, and the start and stop verbs of rigs, crews and sessions. A command added later is refused under rung 2 until the list names it.
+
+Not yet enforced: `internal/gtwrap` `Launch` still runs any call under rung 2. The allowlist is a separate code change, decided by gt-6dob1b; until it lands, this paragraph is the required behaviour, not the current one.
+
 Behaviour:
 
 - Environment forwarded: `GT_*`, `BEADS_*`, `BD_*`, `CLAUDE_*`, `TERM`, `COLUMNS`, `LINES`. Nothing else crosses.
+- The `CLAUDE_*` family must be screened before it crosses. A variable named in `UnforwardedCredentialEnvVars` (`internal/config`) must be dropped, and so must any `CLAUDE_*` name containing `TOKEN`, `SECRET`, `PASSWORD`, `PASSPHRASE` or `KEY`; the last also drops the mTLS key path, which is the safe side. The screen must run before any `-e` flag is built, because a forwarded value reaches the docker command line and its argv. Not yet enforced: `internal/gtwrap/plan.go` `forwards` still passes every `CLAUDE_*` name, including `CLAUDE_CODE_OAUTH_TOKEN`. The screen is a separate code change, implemented by gt-292swd; until it lands, this bullet is the required behaviour, not the current one.
 - Exit code, stdout and stderr pass through unchanged; stdin is attached.
 - The target is a setting in a small config file (`docker` today; a later `kubectl exec` target is a second runner behind the same interface). The image tag is read from the compose file, never hard-coded.
 - `--doctor` reports which rung would be used and why.
