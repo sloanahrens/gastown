@@ -835,3 +835,184 @@ func TestParseProcessSubstitutions(t *testing.T) {
 		t.Errorf("quoted process substitution collected %d bodies, want 0", len(subs))
 	}
 }
+
+// TestParseCommentLineBackslash checks the line structure bash reads when a "#"
+// comment ends in a backslash: the comment stops at its newline, so the next
+// line is a command of its own. A backslash that is not in a comment still
+// continues the line, and a "#" that is not a comment starts no comment.
+func TestParseCommentLineBackslash(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []segmentView
+	}{
+		{
+			name:    "comment backslash leaves the next line a command",
+			command: "bash -c 'git reset --hard' # n \\\nls",
+			want: []segmentView{
+				{Words: []string{"bash", "-c", "git reset --hard"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "comment backslash ahead of a piped shell",
+			command: "echo 'go test ./...' | sh # n \\\nls",
+			want: []segmentView{
+				{Words: []string{"echo", "go test ./..."}},
+				{Words: []string{"sh"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "comment backslash after a shift in arithmetic",
+			command: "echo $((1<<2)) # n \\\nls",
+			want: []segmentView{
+				{Words: []string{"echo", "$((1<<2))"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "backslash outside a comment continues the line",
+			command: "echo a\\\nb",
+			want:    []segmentView{{Words: []string{"echo", "ab"}}},
+		},
+		{
+			name:    "hash inside a word is not a comment",
+			command: "echo a#b \\\nls",
+			want:    []segmentView{{Words: []string{"echo", "a#b", "ls"}}},
+		},
+		{
+			name:    "here-string is not a heredoc, so its comment line ends at the newline",
+			command: "sh <<< 'git reset --hard' # n \\\nls",
+			want: []segmentView{
+				{Words: []string{"sh"}, Redirs: []string{"<<<git reset --hard"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "arithmetic command shift does not open a heredoc",
+			command: "(( 1<<2 ))\nbash -c 'git reset --hard' # n \\\nls",
+			want: []segmentView{
+				{Words: []string{"bash", "-c", "git reset --hard"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "heredoc opened in a substitution reads its body at the newline",
+			command: "x=$(cat <<EOF)\nit's\nEOF\nbash -c 'git reset --hard' # n \\\nls",
+			want: []segmentView{
+				{Assigns: []string{"x=$(cat <<EOF)"}, Subs: 1},
+				{Words: []string{"bash", "-c", "git reset --hard"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "length expansion is not a comment",
+			command: "echo ${#x} \\\nls",
+			want:    []segmentView{{Words: []string{"echo", "${#x}", "ls"}}},
+		},
+		{
+			name:    "ANSI-C escaped quote does not close the string",
+			command: "echo $'it\\'s' # n \\\nls",
+			want: []segmentView{
+				{Words: []string{"echo", "it's"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "hash inside double quotes is text",
+			command: "echo \"# n \\\nls\"",
+			want:    []segmentView{{Words: []string{"echo", "# n ls"}}},
+		},
+		{
+			name:    "quoted hash is text",
+			command: "echo '# n \\'\nls",
+			want: []segmentView{
+				{Words: []string{"echo", "# n \\"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "heredoc body is data, not a comment",
+			command: "cat <<'EOF'\n# n \\\nls\nEOF",
+			want: []segmentView{{
+				Words:    []string{"cat"},
+				Heredocs: []heredocView{{Delimiter: "EOF", Quoted: true, Body: "# n \\\nls\n"}},
+			}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			if got := summarize(script); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Parse(%q) = %+v, want %+v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestParseCommentLineBackslashInSubstitution checks the same line structure
+// inside a substitution, which runs in a shell of its own: the command after
+// the comment's line is the substitution's second command.
+func TestParseCommentLineBackslashInSubstitution(t *testing.T) {
+	t.Parallel()
+	script, err := shellparse.Parse("x=$(bash -c 'git reset --hard' # n \\\nls)")
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if len(script.Segments) != 1 || len(script.Segments[0].Subs) != 1 {
+		t.Fatalf("Parse: want one segment with one substitution, got %+v", summarize(script))
+	}
+	inner := summarize(script.Segments[0].Subs[0])
+	want := []segmentView{
+		{Words: []string{"bash", "-c", "git reset --hard"}},
+		{Words: []string{"ls"}},
+	}
+	if !reflect.DeepEqual(inner, want) {
+		t.Errorf("substitution = %+v, want %+v", inner, want)
+	}
+}
+
+// TestParseCommentLineBackslashDeepNesting checks that a command nested past
+// the scanner's bound returns: the walk stops there rather than recursing
+// without end, and any refusal is the named kind.
+func TestParseCommentLineBackslashDeepNesting(t *testing.T) {
+	t.Parallel()
+	command := strings.Repeat("$(", 1000) + "true" + strings.Repeat(")", 1000) + " # n \\\nls"
+	if _, err := shellparse.Parse(command); err != nil {
+		var unreadable *shellparse.UnparseableError
+		if !errors.As(err, &unreadable) {
+			t.Fatalf("Parse(deep nesting) error = %v, want *UnparseableError", err)
+		}
+	}
+}
+
+// TestParseCommentLineBackslashUnreadable checks that the rewrite does not turn
+// a command the parser cannot read into one it can. A quote the comment's line
+// leaves open is still refused, and so is a comment ending in a backslash on a
+// heredoc operator line, which gt-wnblap decided to keep refusing.
+func TestParseCommentLineBackslashUnreadable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"unterminated quote on the comment line", "echo 'x # n \\\nls"},
+		{"comment backslash on a heredoc operator line", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := shellparse.Parse(tt.command)
+			var unreadable *shellparse.UnparseableError
+			if !errors.As(err, &unreadable) {
+				t.Fatalf("Parse(%q) error = %v, want *UnparseableError", tt.command, err)
+			}
+		})
+	}
+}

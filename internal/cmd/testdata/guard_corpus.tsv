@@ -239,3 +239,12 @@ dangerous	polecat	"x=$(echo \")\" ; bash -c \"echo hi\")"	allow		gt-7ydceb
 dangerous	crew	"x=$(echo \")\" ; bash -c \"echo hi\")"	allow		gt-7ydceb
 dangerous	polecat	"eval eval eval eval 'echo hi'"	refuse	deeper than maxDangerousNestDepth	gt-7ydceb
 dangerous	crew	"eval eval eval eval 'echo hi'"	refuse	deeper than maxDangerousNestDepth	gt-7ydceb
+# --- dangerous: a backslash ending a comment line (gt-4otugt) ---
+dangerous	polecat	"bash -c 'git reset --hard' # n \\\nls"	refuse	Hard reset	gt-4otugt
+dangerous	polecat	"eval 'git reset --hard' # n \\\nls"	refuse	Hard reset	gt-4otugt
+dangerous	polecat	"echo 'git reset --hard' | sh # n \\\nls"	refuse	Hard reset	gt-4otugt
+dangerous	polecat	"sh <<< 'git reset --hard' # n \\\nls"	refuse	Hard reset	gt-4otugt
+dangerous	polecat	"x=1 bash -c 'git reset --hard' # n \\\nls"	refuse	Hard reset	gt-4otugt
+dangerous	polecat	"gt slot run -- bash -c 'git reset --hard' # n \\\nls"	refuse	Hard reset	gt-4otugt
+# --- container_suite: a backslash ending a comment line (gt-4otugt) ---
+container_suite	polecat	"GT_TEST_DOCKER=1 echo 'go test ./internal/beads/...' | sh # n \\\nls"	refuse	targets testcontainers-backed package(s)	gt-4otugt
