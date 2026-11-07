@@ -909,6 +909,21 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 	return d, spec, st
 }
 
+// retryPauseClock is a clock whose waits end at once and whose wait lengths are
+// recorded: a copy the daemon retries pauses on it, and the test reads the pause
+// without the wait holding the run.
+type retryPauseClock struct {
+	clockwork.Clock
+	waits []time.Duration
+}
+
+func (c *retryPauseClock) After(d time.Duration) <-chan time.Time {
+	c.waits = append(c.waits, d)
+	ch := make(chan time.Time, 1)
+	ch <- c.Now()
+	return ch
+}
+
 // runnerCluster answers the kubectl commands one Kubernetes run makes. The Job
 // prints status when it is asked: statusErr fails every read, and flakyStatus
 // fails only the first that many. The sync guard's listing of the Jobs answers
@@ -1175,6 +1190,10 @@ func TestRenderPlanSyncStepFailureIsRed(t *testing.T) {
 	cluster := &runnerCluster{t: t, status: "Complete", result: &result, failSyncCopy: true}
 	cmds := &runnerFakeCmds{answer: cluster.answer}
 	d.execCmd = cmds.run
+	// The failed copy is retried after a pause; the pause ends at once here, so
+	// both attempts run without waiting on the daemon's fake clock.
+	pause := &retryPauseClock{Clock: d.clk()}
+	d.clock = pause
 
 	stage := d.tierSweepRunRunner(context.Background(), st, spec)
 
@@ -1184,8 +1203,11 @@ func TestRenderPlanSyncStepFailureIsRed(t *testing.T) {
 	if stage.exitCode == 0 {
 		t.Error("exit code 0 for a run whose sync stage never filled the repo claim")
 	}
-	if !strings.Contains(stage.output, "unable to copy into the sync pod") {
-		t.Errorf("stage output does not carry the failed step's stderr:\n%s", stage.output)
+	if n := strings.Count(stage.output, "unable to copy into the sync pod"); n != 2 {
+		t.Errorf("stage output carries the failed copy's stderr %d times, want once per attempt:\n%s", n, stage.output)
+	}
+	if !slices.Contains(pause.waits, 5*time.Second) {
+		t.Errorf("waits = %v, want the copy's retry to pause 5s first", pause.waits)
 	}
 	plan, err := sweeprunner.Kubernetes{}.Render(spec)
 	if err != nil {

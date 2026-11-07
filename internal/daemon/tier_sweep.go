@@ -3010,40 +3010,14 @@ func (d *Daemon) tierSweepRunnerTeardown(ctx context.Context, spec sweeprunner.S
 	}
 }
 
-// tierSweepRunSteps runs a plan's steps in order, stopping at the first that
-// fails, and returns their combined output and that step's status. A step that
-// could not be started at all reports -1: it never ran, which is a different
-// thing to investigate than a command that ran and failed.
+// tierSweepRunSteps runs a plan's steps in order through the daemon's command
+// seam, stopping at the first that fails, and returns their combined output and
+// that step's status. A step that could not be started at all reports -1: it
+// never ran, which is a different thing to investigate than a command that ran
+// and failed. The step loop, its retry and its failure message are
+// sweeprunner.RunSteps's (gt-d6hfcc).
 func tierSweepRunSteps(ctx context.Context, d *Daemon, steps []sweeprunner.Step) (string, int) {
-	var b strings.Builder
-	for _, step := range steps {
-		if len(step.Argv) == 0 {
-			continue
-		}
-		cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
-		if step.Stdin != nil {
-			cmd.Stdin = bytes.NewReader(step.Stdin)
-		}
-		stdout, stderr, err := d.runCmd(cmd)
-		b.Write(stdout)
-		b.Write(stderr)
-		if err != nil && step.MissingSource(slices.Concat(stdout, stderr)) {
-			// The source this step copies is absent, which the step declares
-			// is not a failure: a run that wrote no logs leaves /out/logs
-			// absent (gt-4lj2q). Any other failure still stops the run.
-			continue
-		}
-		if err != nil {
-			code := -1
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				code = exitErr.ExitCode()
-			}
-			fmt.Fprintf(&b, "sweep-run: %s failed (exit %d): %v\n", strings.Join(step.Argv, " "), code, err)
-			return b.String(), code
-		}
-	}
-	return b.String(), 0
+	return sweeprunner.RunSteps(ctx, d.clk(), d.runCmd, steps)
 }
 
 // tierSweepResumeEnableEnv is the daemon environment switch that lets a
