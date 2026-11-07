@@ -9,10 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -600,7 +598,7 @@ func TestJevScorecardPatrolRefreshRunsTheRefreshCommandInTheTown(t *testing.T) {
 // exits as "signal: killed", which is not a DeadlineExceeded error, so the
 // timeout is told apart by the context having expired. The budget is one
 // nanosecond and the refresh waits for its context to expire, so the kill is
-// the budget's timer and no wall-clock wait is set.
+// the budget's timer, not a delay the test sets.
 func TestJevScorecardPatrolADeadlineKilledRefreshIsATimeout(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
@@ -622,15 +620,15 @@ func TestJevScorecardPatrolADeadlineKilledRefreshIsATimeout(t *testing.T) {
 		},
 	}
 	// The process is killed by the budget, so the refresh runs once the
-	// budget's context has expired, through the production runner. The wait is
-	// bounded by count: if the budget is ignored, the context never expires and
-	// the test fails at the bound rather than waiting out the 30 minute default.
+	// budget's context has expired, through the production runner. The refresh
+	// waits on that expiry. A budget that is not applied never expires the
+	// context, so the wait gives up after jevScorecardTestWait and the refresh
+	// fails, which the log check below reports.
 	d.jevScorecardSeams.refresh = func(ctx context.Context, townRoot string) error {
-		for range 1 << 20 {
-			if ctx.Err() != nil {
-				break
-			}
-			runtime.Gosched()
+		select {
+		case <-ctx.Done():
+		case <-time.After(jevScorecardTestWait): //testpolicy:allow no-sleep — a hang guard only: the budget's expiry is the event the refresh waits for, and a budget that is never applied fails here rather than hanging the test
+			return errors.New("the budget never expired: the refresh context has no deadline")
 		}
 		return d.runJevScorecardRefresh(ctx, townRoot)
 	}
@@ -646,17 +644,27 @@ func TestJevScorecardPatrolADeadlineKilledRefreshIsATimeout(t *testing.T) {
 	}
 }
 
+// jevScorecardTestWait bounds every wait a test makes on the refresh. The test
+// refreshes run no command, so they finish in microseconds: the bound is
+// reached only when the code under test is broken. The test then fails naming
+// the signal it did not get, and never waits out the package's go test
+// -timeout.
+const jevScorecardTestWait = 30 * time.Second
+
 // TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh holds the
 // production dispatch: a due refresh runs on its own goroutine, so the trigger
-// returns while the scoring pass is still going. The refresh waits, bounded by
-// a count, to see the trigger return. An inline dispatch never gives it that
-// moment, so the refresh gives up after the bound and the test fails rather
-// than hanging.
+// returns while the refresh is still waiting to run. The refresh waits for the
+// trigger to return and reports whether it did. An inline dispatch cannot
+// return the trigger while the refresh waits on it, so the refresh gives up
+// after jevScorecardTestWait, reports that the trigger had not returned, and
+// the test fails in about 30 seconds rather than hanging. A dispatch that never
+// runs the refresh fails the test at the receive below in the same bound.
 func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
-	var triggerReturned, sawTriggerReturn atomic.Bool
-	logs := &bytes.Buffer{}
+	triggerReturned := make(chan struct{})
+	sawTriggerReturn := make(chan bool, 1)
+	logs := &syncBuffer{}
 	d := &Daemon{
 		config:       &Config{TownRoot: t.TempDir()},
 		logger:       log.New(logs, "", 0),
@@ -665,12 +673,11 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 		jevScorecardSeams: jevScorecardSeams{
 			loc: func() *time.Location { return jevScorecardTestZone },
 			refresh: func(context.Context, string) error {
-				for range 1 << 20 {
-					if triggerReturned.Load() {
-						sawTriggerReturn.Store(true)
-						break
-					}
-					runtime.Gosched()
+				select {
+				case <-triggerReturned:
+					sawTriggerReturn <- true
+				case <-time.After(jevScorecardTestWait): //testpolicy:allow no-sleep — a hang guard only: the trigger's return is the event the refresh waits for, and an inline dispatch fails here rather than hanging the test
+					sawTriggerReturn <- false
 				}
 				return nil
 			},
@@ -678,29 +685,32 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 	}
 
 	d.triggerJevScorecard()
-	triggerReturned.Store(true)
+	close(triggerReturned)
 
-	waitJevScorecardIdle(t, d)
-	if !sawTriggerReturn.Load() {
-		t.Error("the trigger returned only after the refresh finished; the default dispatch must run it off the caller's goroutine")
+	select {
+	case returned := <-sawTriggerReturn:
+		if !returned {
+			t.Error("the trigger returned only after the refresh had started waiting on it; the default dispatch must run the refresh off the caller's goroutine")
+		}
+	case <-time.After(jevScorecardTestWait): //testpolicy:allow no-sleep — a hang guard only: the refresh's start is the event the test waits for, and a dispatch that never runs the refresh fails here rather than hanging the test
+		t.Fatal("the refresh never ran: no signal that the default dispatch started it")
 	}
-	if !strings.Contains(logs.String(), "refreshed the scorecard cache") {
-		t.Errorf("log = %q, want the refresh reported once it finished", logs)
-	}
+	awaitJevScorecardLog(t, logs, "refreshed the scorecard cache")
 }
 
-// waitJevScorecardIdle returns once the refresh a trigger started has cleared
-// its single-flight flag, so the test reads the log only after the goroutine
-// has let go of it. The loop is bounded by count, not by a wall-clock
-// deadline: what runs after the refresh is one log line and one file write,
-// so a flag still set after the bound means the refresh is stuck.
-func waitJevScorecardIdle(t *testing.T, d *Daemon) {
+// awaitJevScorecardLog blocks until the log holds want. Each write wakes the
+// wait; if want does not arrive within jevScorecardTestWait the test fails
+// naming the line it was waiting for, so a refresh that never logs is a
+// failure, not a hang.
+func awaitJevScorecardLog(t *testing.T, logs *syncBuffer, want string) {
 	t.Helper()
-	for range 1 << 20 {
-		if !d.jevScorecardRunning.Load() {
-			return
+	deadline := time.NewTimer(jevScorecardTestWait) //testpolicy:allow no-sleep — a hang guard only: the log line is the event the test waits for, and a refresh that never logs fails here rather than hanging the test
+	defer deadline.Stop()
+	for !strings.Contains(logs.String(), want) {
+		select {
+		case <-logs.changes():
+		case <-deadline.C:
+			t.Fatalf("log never said %q: the refresh did not finish", want)
 		}
-		runtime.Gosched()
 	}
-	t.Fatal("jev_scorecard refresh did not finish")
 }
