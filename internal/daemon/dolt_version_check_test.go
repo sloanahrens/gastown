@@ -162,7 +162,7 @@ func TestDoltVersionCheckRaisesOneItemNamingBoth(t *testing.T) {
 func TestDoltVersionCheckClearsWhenMatched(t *testing.T) {
 	t.Parallel()
 	reg := newDoltFakeRegistry(func(int) (int, string) {
-		return doltTagPage(true, "2.7.2")
+		return doltTagPage(true, "2.7.1", "2.7.2")
 	})
 	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
 	var logs doltLogs
@@ -183,17 +183,19 @@ func TestDoltVersionCheckClearsWhenMatched(t *testing.T) {
 func TestDoltVersionCheckBehindRule(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name            string
-		running, newest string
-		want            bool
+		name     string
+		running  string
+		releases []string
+		want     bool
 	}{
-		{"same release clears", "2.7.2", "2.7.2", false},
-		{"one patch behind raises nothing", "2.7.1", "2.7.2", false},
-		{"two patches behind raises", "2.7.0", "2.7.2", true},
-		{"earlier minor raises", "2.6.9", "2.7.2", true},
-		{"far behind raises", "2.3.2", "2.7.2", true},
-		{"running ahead of the registry is not behind", "2.8.0", "2.7.2", false},
-		{"numeric not lexical: 2.9 is behind 2.10", "2.9.0", "2.10.0", true},
+		{"same release clears", "2.7.2", []string{"2.7.2"}, false},
+		{"one release behind raises nothing", "2.7.1", []string{"2.7.1", "2.7.2"}, false},
+		{"two releases behind raises", "2.7.0", []string{"2.7.0", "2.7.1", "2.7.2"}, true},
+		{"one release across a minor raises nothing", "2.6.9", []string{"2.6.9", "2.7.0"}, false},
+		{"two releases across a minor raise", "2.6.9", []string{"2.6.9", "2.7.0", "2.7.1"}, true},
+		{"far behind raises", "2.3.2", []string{"2.3.2", "2.4.0", "2.5.1", "2.7.2"}, true},
+		{"running ahead of the registry is not behind", "2.8.0", []string{"2.7.2", "2.8.0"}, false},
+		{"numeric not lexical: 2.9 is behind 2.10", "2.9.0", []string{"2.9.0", "2.10.0", "2.10.1"}, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -202,12 +204,16 @@ func TestDoltVersionCheckBehindRule(t *testing.T) {
 			if !ok {
 				t.Fatalf("running %q is not a plain release", tc.running)
 			}
-			newest, ok := parseDoltVersion(tc.newest)
-			if !ok {
-				t.Fatalf("newest %q is not a plain release", tc.newest)
+			var releases []doltVersion
+			for _, tag := range tc.releases {
+				v, ok := parseDoltVersion(tag)
+				if !ok {
+					t.Fatalf("release %q is not a plain release", tag)
+				}
+				releases = append(releases, v)
 			}
-			if got := doltImageBehind(running, newest); got != tc.want {
-				t.Errorf("doltImageBehind(%s, %s) = %v, want %v", tc.running, tc.newest, got, tc.want)
+			if got := doltImageBehind(running, releases); got != tc.want {
+				t.Errorf("doltImageBehind(%s, %v) = %v, want %v", tc.running, tc.releases, got, tc.want)
 			}
 		})
 	}
@@ -215,12 +221,15 @@ func TestDoltVersionCheckBehindRule(t *testing.T) {
 
 func TestDoltVersionCheckIgnoresNonReleaseTags(t *testing.T) {
 	t.Parallel()
-	newest, err := newestDoltRelease([]string{"latest", "2.8.0-rc1", "sha-1a2b3c", "2.7.2", "2.7", "v2.9.0", "2.10.0"})
+	releases, err := doltReleases([]string{"latest", "2.8.0-rc1", "sha-1a2b3c", "2.7.2", "2.7", "v2.9.0", "2.10.0"})
 	if err != nil {
-		t.Fatalf("newestDoltRelease: %v", err)
+		t.Fatalf("doltReleases: %v", err)
 	}
-	if newest.tag != "2.10.0" {
+	if newest := doltNewest(releases); newest.tag != "2.10.0" {
 		t.Errorf("newest = %s, want 2.10.0", newest.tag)
+	}
+	if len(releases) != 2 {
+		t.Errorf("releases = %d, want the two plain ones (2.7.2, 2.10.0)", len(releases))
 	}
 }
 
@@ -239,7 +248,7 @@ func TestDoltVersionCheckRegistryFailureRaisesNothing(t *testing.T) {
 		{
 			name:    "registry address does not parse",
 			tagsURL: "http://[::1",
-			answer:  func(int) (int, string) { return doltTagPage(true, "2.7.2") },
+			answer:  func(int) (int, string) { return doltTagPage(true, "2.7.1", "2.7.2") },
 		},
 		{
 			name:   "registry answers an error status",
@@ -261,12 +270,12 @@ func TestDoltVersionCheckRegistryFailureRaisesNothing(t *testing.T) {
 			name:    "registry request times out",
 			timeout: time.Nanosecond,
 			hang:    true,
-			answer:  func(int) (int, string) { return doltTagPage(true, "2.7.2") },
+			answer:  func(int) (int, string) { return doltTagPage(true, "2.7.1", "2.7.2") },
 		},
 		{
 			name:   "registry request is cancelled",
 			ctx:    cancelled,
-			answer: func(int) (int, string) { return doltTagPage(true, "2.7.2") },
+			answer: func(int) (int, string) { return doltTagPage(true, "2.7.1", "2.7.2") },
 		},
 	}
 	for _, tc := range tests {
@@ -298,18 +307,22 @@ func TestDoltVersionCheckRegistryFailureRaisesNothing(t *testing.T) {
 
 func TestDoltVersionCheckFailedReadKeepsHeldItem(t *testing.T) {
 	t.Parallel()
-	healthy := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	healthy := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.1", "2.7.2") })
 	broken := newDoltFakeRegistry(func(int) (int, string) { return http.StatusBadGateway, "" })
 	check, _ := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", healthy)
 	var logs doltLogs
 	clock := clockwork.NewFakeClockAt(doltCheckStart)
 	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+	held := check.observed()
 
 	check.client = broken.client(0)
 	clock.Advance(time.Hour)
 	check.run(context.Background(), "/town", clock.Now(), logs.logf)
 	if got := check.observed(); len(got) != 1 {
 		t.Errorf("after a failed read, observed = %d items, want the held one kept", len(got))
+	}
+	if got := check.observed(); len(got) != 1 || len(held) != 1 || got[0] != held[0] {
+		t.Errorf("after a failed read, observed = %+v, want the held item %+v unchanged", got, held)
 	}
 	if len(logs) != 1 {
 		t.Errorf("logs = %v, want the failed hourly run logged once", logs)
@@ -355,7 +368,7 @@ func TestDoltVersionCheckDockerAndContainerFailuresRaiseNothing(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+			reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.1", "2.7.2") })
 			check, docker := newDoltImageCheckFor(tc.image, reg)
 			docker.err = tc.dockerErr
 			if tc.container != nil {
@@ -379,7 +392,7 @@ func TestDoltVersionCheckDockerAndContainerFailuresRaiseNothing(t *testing.T) {
 
 func TestDoltVersionCheckHostProcessTownClearsItem(t *testing.T) {
 	t.Parallel()
-	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.1", "2.7.2") })
 	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
 	var logs doltLogs
 	clock := clockwork.NewFakeClockAt(doltCheckStart)
@@ -402,7 +415,7 @@ func TestDoltVersionCheckHostProcessTownClearsItem(t *testing.T) {
 
 func TestDoltVersionCheckHourlySpacing(t *testing.T) {
 	t.Parallel()
-	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.1", "2.7.2") })
 	check, _ := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
 	var logs doltLogs
 	clock := clockwork.NewFakeClockAt(doltCheckStart)
@@ -447,8 +460,8 @@ func TestDoltVersionCheckTagParsing(t *testing.T) {
 
 func TestDoltVersionCheckNoPlainReleaseIsAnError(t *testing.T) {
 	t.Parallel()
-	if _, err := newestDoltRelease([]string{"latest", "2.8.0-rc1"}); err == nil {
-		t.Errorf("newestDoltRelease with no plain tag returned no error")
+	if _, err := doltReleases([]string{"latest", "2.8.0-rc1"}); err == nil {
+		t.Errorf("doltReleases with no plain tag returned no error")
 	}
 }
 
@@ -458,7 +471,7 @@ func TestDoltVersionCheckListingTagsAreRead(t *testing.T) {
 		if page == 1 {
 			return doltTagPage(false, "2.5.0")
 		}
-		return doltTagPage(true, "2.7.2")
+		return doltTagPage(true, "2.7.1", "2.7.2")
 	})
 	check, _ := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
 	var logs doltLogs
