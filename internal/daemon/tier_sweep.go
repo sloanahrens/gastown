@@ -3448,6 +3448,7 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 			// polecat to fix. The record keeps the tier RED and raises its
 			// attention item; the next sweep re-runs the tip and files a bead
 			// only if a run actually fails (gt-856oaq).
+			tierSweepCloseNoRunBead(d, bd, rig, tier, sha, existing)
 			d.logger.Printf("tier_sweep: %s: %s %s: no run result, no bead filed; the attention item stands until the next sweep", rig, tier, tierSweepRed)
 			continue
 		}
@@ -3468,6 +3469,21 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 // failure and files as before.
 func tierSweepNoRunResult(ts tierSweepTierResult) bool {
 	return len(ts.FailedNames) == 1 && ts.FailedNames[0] == tierSweepRunnerNoResult
+}
+
+// tierSweepCloseNoRunBead closes the open bead an earlier sweep filed under the
+// runner's no-result reason, before tierSweepNoRunResult stopped filing one. That
+// bead names no failing unit, so it would send a polecat after nothing. A bead a
+// polecat has claimed is left to its owner, as tierSweepCloseGreen leaves it.
+func tierSweepCloseNoRunBead(d *Daemon, bd tierSweepBeadStore, rig, tier, sha string, byUnit map[string]tierSweepUnitBead) {
+	b, ok := byUnit[tierSweepRunnerNoResult]
+	if !ok || b.claimed {
+		return
+	}
+	reason := fmt.Sprintf("%s run produced no result at %s, so no unit failed (tier sweep)", tier, shortSHA(sha))
+	if err := bd.CloseWithReason(reason, b.id); err != nil {
+		d.logger.Printf("tier_sweep: %s: closing %s (%s %s): %v", rig, b.id, tier, tierSweepRunnerNoResult, err)
+	}
 }
 
 // tierSweepUnitBead is the sweep bead standing for one failing unit.

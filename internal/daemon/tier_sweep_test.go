@@ -1438,7 +1438,7 @@ func TestRunTierSweep_FailedPackageStillFilesBesideANoResultTier(t *testing.T) {
 	now := atHour(time.Now(), 15)
 	d, rec, bd, _ := newTierSweepDaemon(t, now, "gastown")
 	rec.result = func(st tierSweepStage) tierSweepStageResult {
-		if st.tiers[0] == "shell" {
+		if slices.Contains(st.tiers, "shell") {
 			return tierSweepStageResult{output: "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: ./internal/daemon\n", exitCode: 1, ran: true}
 		}
 		return tierSweepStageResult{output: "sweep-run: kubectl cp: context deadline exceeded\n", exitCode: -1, ran: true, reason: tierSweepRunnerNoResult}
@@ -1491,6 +1491,41 @@ func TestTierSweepFileRed_ClaimedBead(t *testing.T) {
 				}
 			} else if len(bd.closed) != 0 {
 				t.Errorf("closed = %v, want the %s bead left to its polecat on green", bd.closed, status)
+			}
+		})
+	}
+}
+
+// A bead an earlier sweep filed under the runner's no-result reason names no
+// failing unit, so a tier whose run produced no result closes it while the tier
+// stays RED. A bead a polecat has claimed is left to its owner, and a bead for a
+// real unit is not the no-result tier's to touch (gt-979nyi).
+func TestTierSweepRecordBeads_NoRunResultClosesStaleRunnerBead(t *testing.T) {
+	t.Parallel()
+	runnerTitle := tierSweepBeadPrefix("gastown", "shell") + tierSweepRunnerNoResult
+	unitTitle := tierSweepBeadPrefix("gastown", "shell") + "./internal/x"
+	for _, status := range []string{"open", "in_progress", "hooked"} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			bd := &byStatusBeads{byStatus: map[string][]*beads.Issue{
+				status: {{ID: "gt-runner", Title: runnerTitle}, {ID: "gt-unit", Title: unitTitle}},
+			}}
+			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+			noRun := map[string]tierSweepTierResult{
+				"shell": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{tierSweepRunnerNoResult}},
+			}
+			d.tierSweepRecordBeads("gastown", "abc123", noRun)
+			if len(bd.created) != 0 || len(bd.comments) != 0 {
+				t.Errorf("created = %+v, comments = %v, want the stale bead closed and nothing else", bd.created, bd.comments)
+			}
+			if status == "open" {
+				if len(bd.closed) != 1 || !strings.HasPrefix(bd.closed[0], "gt-runner ") {
+					t.Errorf("closed = %v, want only the open runner-reason bead closed", bd.closed)
+				}
+			} else if len(bd.closed) != 0 {
+				t.Errorf("closed = %v, want the %s runner-reason bead left to its polecat", bd.closed, status)
 			}
 		})
 	}
