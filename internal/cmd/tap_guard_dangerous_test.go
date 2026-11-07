@@ -4405,6 +4405,31 @@ func TestDangerousRefusesUnreadableCommands(t *testing.T) {
 	}
 }
 
+// TestDangerousRefusesBashValidShapesByDecision pins the parse gate's refusal
+// of three shapes bash accepts and shellparse rejects. The refusal is the
+// recorded decision in gt-wnblap: a local pre-parse correction could let a
+// dangerous payload past the guard. This row flips if the parser or that
+// decision changes, so the change must be made deliberately.
+func TestDangerousRefusesBashValidShapesByDecision(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		command   string
+		construct string
+	}{
+		{"a backslash ending a comment on a heredoc operator line", "cat <<'EOF' # note \\\nsudo rm -rf /tmp\nEOF", "unterminated here-document"},
+		{"an ANSI-C string opened across a line continuation", "cat <<EOF $\\\n'a\\''\nrm -rf /\nEOF", "unterminated quote"},
+		{"a close paren in backtick text", "x=`echo )`; cat <<EOF\ngit reset --hard\nEOF", "unbalanced parenthesis"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if !strings.Contains(reason, "cannot be read ("+tt.construct+")") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to name %q (gt-wnblap)", tt.command, reason, tt.construct)
+			}
+		})
+	}
+}
+
 // dangerousHookInput is the PreToolUse payload the hook reads for one Bash
 // command, with the command JSON-escaped.
 func dangerousHookInput(t *testing.T, command string) string {
