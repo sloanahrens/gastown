@@ -118,10 +118,9 @@ back to this runbook once the overseer's restart has run and the check passes.
    Stop too when no database line shows an archive line, and when any
    database line says `archive state unreadable`.
 3. Stop the server, then take the backup: copy the database directory while
-   the server is stopped. Take the copy only after every database reads
-   `0 commits behind` and `0 events behind` in step 2, so the copy and the
-   archive describe the same moment. The nightly backups under
-   `~/gt-backups/dolt` are the other copy, see `docs/dolt-restore.md`.
+   the server is stopped. Take the copy only after step 2's checks pass, so
+   the copy and the archive describe the same moment. The nightly backups
+   under `~/gt-backups/dolt` are the other copy, see `docs/dolt-restore.md`.
 
    Then start the server again with `gt dolt start`, and read `gt dolt status`
    until it shows the server running and lists every database. The flatten

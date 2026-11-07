@@ -538,9 +538,25 @@ func TestDoltHistoryDocArchivesBeforeTheBackup(t *testing.T) {
 		t.Errorf("\"Before any rewrite\" stops the server and takes the backup before the 0-commits-behind check:\n%s", section)
 	}
 
-	const sequenced = "Take the copy only after every database reads"
+	const sequenced = "Take the copy only after step 2's checks pass"
 	if !strings.Contains(section, sequenced) {
-		t.Errorf("\"Before any rewrite\" does not say the copy is taken only after every database reads 0 behind; it does not carry %q:\n%s", sequenced, section)
+		t.Errorf("\"Before any rewrite\" does not say the copy is taken only after step 2's checks pass; it does not carry %q:\n%s", sequenced, section)
+	}
+}
+
+// TestDoltHistoryDocStep3PointsAtStep2: step 2 states the 0-commits-behind
+// check, so step 3 points back at it rather than restating it — a second copy
+// drifts, and the reader who finds the stale one cannot tell which is live
+// (gt-mlmkxz).
+func TestDoltHistoryDocStep3PointsAtStep2(t *testing.T) {
+	t.Parallel()
+	step3 := historyDocStep(t, "## Before any rewrite", "\n3. ", "\n4. ")
+
+	if n := strings.Count(step3, "0 commits behind"); n != 0 {
+		t.Errorf("step 3 of \"Before any rewrite\" restates the 0-commits-behind reading %d times, want a pointer to step 2:\n%s", n, step3)
+	}
+	if !strings.Contains(step3, "step 2's checks pass") {
+		t.Errorf("step 3 of \"Before any rewrite\" does not point at step 2's checks:\n%s", step3)
 	}
 }
 
