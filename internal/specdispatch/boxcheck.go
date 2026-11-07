@@ -42,33 +42,49 @@ var acceptanceBoxPhrases = []boxPhrase{
 // import land, so the text is repeated here.
 const findingResolvedPrefix = "Finding resolved: "
 
-// boxPathRe is a source path inside an item: a separator token ending in a file
-// extension with an optional line number, or a directory with a trailing slash,
-// or a bare file name with an extension. A separator token with no extension,
-// such as /usr/bin/kubectl, is a command and stays for the phrase search.
-var boxPathRe = regexp.MustCompile(`[\w.-]*/[\w./-]*(?:\.[A-Za-z]\w*(?::\d+)?|/)|[\w-]+\.[A-Za-z]\w*(?::\d+)?`)
+// boxPathPattern is a source path inside an item: a separator token ending in a
+// file extension with an optional line number, or a directory with a trailing
+// slash, or a bare file name with an extension. A separator token with no
+// extension, such as /usr/bin/kubectl, is a command and stays for the phrase
+// search.
+const boxPathPattern = `[\w.-]*/[\w./-]*(?:\.[A-Za-z]\w*(?::\d+)?|/)|[\w-]+\.[A-Za-z]\w*(?::\d+)?`
 
-// findingInstructionRe marks where a finding item may start telling the worker
-// to run something: a run verb or a shell marker.
-var findingInstructionRe = regexp.MustCompile("(?i)\\b(?:run|execute|exec)\\b|[$`]")
+var boxPathRe = regexp.MustCompile(boxPathPattern)
+
+// boxTrailingPathRe is the "(path)" group that ends a finding item, where the
+// finding names its source location.
+var boxTrailingPathRe = regexp.MustCompile(`\s*\((?:` + boxPathPattern + `)\)$`)
+
+// findingClauseBreaks are the characters that make a finding title more than one
+// clause: a sentence or list stop, a clause separator, a shell marker, or a line
+// break.
+const findingClauseBreaks = ".;:`$\n"
 
 // boxSubject is the part of item a phrase is searched in. An item opening with
-// the finding prefix quotes the finding's title, which runs to the end of the
-// item and cannot be told from an instruction written after it, so the title
-// is skipped up to the first instruction marker and the rest is searched. Source
-// paths are blanked wherever they sit, so a tool named inside a file path is not
-// an instruction, while a command the item tells the worker to run, even by an
-// absolute path, is still refused (gt-7c84xe).
+// the finding prefix quotes the finding's title: when the title is one plain
+// clause (no findingClauseBreaks character), a tool name in it or in the
+// trailing "(path)" group is not an instruction, so the subject is empty. Any
+// other finding item is searched whole, less its trailing group, so an
+// instruction written as a second clause is refused, with or without a run
+// verb. Items without the prefix have their source paths blanked wherever they
+// sit, so a tool named in a path is not an instruction, while a command the
+// item tells the worker to run, even by an absolute path, is still refused.
+//
+// Accepted residual: an instruction written with no punctuation after the
+// prefix reads as a plain title and is not detected. The title is free text
+// from the finding, so no word list can tell it from an instruction (gt-7c84xe).
 func boxSubject(item string) string {
-	if strings.HasPrefix(item, findingResolvedPrefix) {
-		title := item[len(findingResolvedPrefix):]
-		at := findingInstructionRe.FindStringIndex(title)
-		if at == nil {
-			return ""
-		}
-		item = title[at[0]:]
+	if !strings.HasPrefix(item, findingResolvedPrefix) {
+		return boxPathRe.ReplaceAllString(item, " ")
 	}
-	return boxPathRe.ReplaceAllString(item, " ")
+	title := item[len(findingResolvedPrefix):]
+	if loc := boxTrailingPathRe.FindStringIndex(title); loc != nil {
+		title = title[:loc[0]]
+	}
+	if !strings.ContainsAny(title, findingClauseBreaks) {
+		return ""
+	}
+	return findingResolvedPrefix + title
 }
 
 // matches reports whether subject names the phrase.
@@ -79,8 +95,8 @@ func (p boxPhrase) matches(subject string) bool {
 	return strings.Contains(strings.ToLower(subject), p.text)
 }
 
-// acceptanceBoxPhrase returns the first phrase item names outside its finding
-// title and source paths, and "" when it names none.
+// acceptanceBoxPhrase returns the first phrase in the item's subject (see
+// boxSubject), and "" when the subject names none.
 func acceptanceBoxPhrase(item string) string {
 	subject := boxSubject(item)
 	for _, phrase := range acceptanceBoxPhrases {

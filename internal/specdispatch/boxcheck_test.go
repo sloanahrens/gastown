@@ -175,7 +175,9 @@ func TestBoxCheckPassesFindingTitleAndPath(t *testing.T) {
 		{"title names kubectl", "Finding resolved: Claim route now blocks on a kubectl wait (internal/land/claim.go:88)"},
 		{"path names docker", "Finding resolved: name the error (internal/gtwrap/docker.go:267)"},
 		{"title and path name tools", "Finding resolved: the docker and kubectl error (internal/gtwrap/docker.go)"},
-		{"title names a tool before a run verb", "Finding resolved: the kubectl wait blocks; the run stays green (internal/land/claim.go:88)"},
+		{"title with the word run names kubectl", "Finding resolved: the kubectl wait blocks the run (internal/land/claim.go:88)"},
+		{"title with a run of a docker build", "Finding resolved: a run of the docker build fails (internal/gtwrap/docker.go:267)"},
+		{"title without a path names docker", "Finding resolved: the docker build fails in CI"},
 		{"plain path names docker", "the fix in internal/gtwrap/docker.go is covered by a test"},
 		{"directory path names docker", "the fix in internal/gtwrap/docker/ is covered by a test"},
 	}
@@ -187,6 +189,17 @@ func TestBoxCheckPassesFindingTitleAndPath(t *testing.T) {
 				t.Fatalf("quoted title or path refused: %s", v.Line("gt-good"))
 			}
 		})
+	}
+}
+
+// A finding item whose title runs over a line break is not one plain clause, so
+// a tool named after the break is refused. The no-list text reaches the check
+// whole, which is the only way a break reaches it (gt-7c84xe).
+func TestBoxCheckRefusesFindingLineBreak(t *testing.T) {
+	t.Parallel()
+	refusal, ok := acceptanceBoxRefusal("Finding resolved: the claim route blocks\nApply with kubectl")
+	if !ok || !strings.Contains(refusal.Reason, `"kubectl"`) {
+		t.Fatalf("line-broken finding item not refused for kubectl: %+v", refusal)
 	}
 }
 
@@ -205,6 +218,10 @@ func TestBoxCheckRefusesRunInstruction(t *testing.T) {
 		{"shell marker after a finding title", "Finding resolved: the claim route blocks (internal/land/claim.go:88). $ kubectl get pods", "kubectl"},
 		{"run an absolute tool path", "Run: /usr/bin/kubectl apply -f deploy.yaml", "kubectl"},
 		{"run an absolute docker path beside a source path", "Run: /usr/local/bin/docker build internal/gtwrap/docker.go", "docker"},
+		{"second clause uses kubectl without a run verb", "Finding resolved: the claim route blocks. Then kubectl apply -f y.yaml", "kubectl"},
+		{"second clause uses docker without a run verb", "Finding resolved: x. Apply with docker build", "docker"},
+		{"second clause after a located title", "Finding resolved: the claim route blocks (internal/land/claim.go:88). Then docker build the image", "docker"},
+		{"second clause runs kubectl after a run title", "Finding resolved: a run of the claim fails. Run kubectl apply -f y.yaml", "kubectl"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
