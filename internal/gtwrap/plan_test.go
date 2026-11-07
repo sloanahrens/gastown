@@ -4,6 +4,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 func TestPlanSelectsTheToolByInvokedName(t *testing.T) {
@@ -85,6 +87,45 @@ func TestPlanForwardsOnlyTheWrapperEnvironment(t *testing.T) {
 	}
 	if !slices.Equal(call.Env, want) {
 		t.Fatalf("Plan forwarded %q, want %q", call.Env, want)
+	}
+}
+
+func TestPlanNeverForwardsACredentialName(t *testing.T) {
+	t.Parallel()
+	credentials := config.UnforwardedCredentialEnvVars()
+	// An empty list would screen nothing and pass every case below, so it is a failure.
+	if len(credentials) == 0 {
+		t.Fatal("config.UnforwardedCredentialEnvVars() names no credential")
+	}
+	env := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
+	for _, name := range credentials {
+		env = append(env, name+"=secret")
+	}
+	call, err := Plan("gt", []string{"status"}, env, "/town", false)
+	if err != nil {
+		t.Fatalf("Plan returned an error: %v", err)
+	}
+	want := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
+	if !slices.Equal(call.Env, want) {
+		t.Fatalf("Plan forwarded %q, want only the ordinary CLAUDE_ name %q", call.Env, want)
+	}
+}
+
+// The OAuth token is in the CLAUDE_ family, so the prefix alone would forward it.
+// This names it directly, so the refusal holds whatever the credential list holds.
+func TestPlanRefusesTheOAuthTokenInTheClaudeFamily(t *testing.T) {
+	t.Parallel()
+	env := []string{
+		"CLAUDE_CODE_OAUTH_TOKEN=secret",
+		"CLAUDE_CONFIG_DIR=/Users/operator/.claude",
+	}
+	call, err := Plan("gt", []string{"status"}, env, "/town", false)
+	if err != nil {
+		t.Fatalf("Plan returned an error: %v", err)
+	}
+	want := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
+	if !slices.Equal(call.Env, want) {
+		t.Fatalf("Plan forwarded %q, want only the ordinary CLAUDE_ name %q", call.Env, want)
 	}
 }
 

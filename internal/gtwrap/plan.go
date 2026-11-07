@@ -2,7 +2,10 @@ package gtwrap
 
 import (
 	"fmt"
+	"slices"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // tools are the names the wrapper is installed under, each running the tool of
@@ -63,7 +66,12 @@ func forwardEnv(env []string) []string {
 }
 
 // forwards reports whether the variable named name crosses into the container.
+// A credential is refused before the prefix match: CLAUDE_CODE_OAUTH_TOKEN is in
+// the CLAUDE_ family, and a forwarded credential would reach the container's argv.
 func forwards(name string) bool {
+	if slices.Contains(config.UnforwardedCredentialEnvVars(), name) {
+		return false
+	}
 	for _, prefix := range envPrefixes {
 		if strings.HasPrefix(name, prefix) {
 			return true
