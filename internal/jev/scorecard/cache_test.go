@@ -261,29 +261,27 @@ func TestCacheWriteReportsAnUncreatableDirectory(t *testing.T) {
 }
 
 // A write that cannot create its temp file leaves the previous file exactly as
-// it was.
+// it was. The target's name is the longest a directory entry can be (NAME_MAX),
+// so the temp name atomicfile builds from it is too long to create and the
+// write fails before the target is touched. Permission bits would not witness
+// this: root ignores them.
 func TestCacheFailedWriteLeavesThePreviousFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "scorecard.json")
+	path := filepath.Join(dir, strings.Repeat("s", 255))
 	at := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	if err := (Cache{}).Write(path, cacheTestDoc(at)); err != nil {
-		t.Fatalf("writing the first scorecard: %v", err)
-	}
-	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	before := []byte(`{"scored_at":"2026-11-06T12:00:00Z","since":"7d"}`)
+	// Seed the previous cache directly: Cache.Write cannot create this name.
+	if err := os.WriteFile(path, before, 0o644); err != nil {
+		t.Fatalf("seeding the previous cache: %v", err)
 	}
 
-	//testpolicy:allow no-exec-files — the target is the cache directory: a directory that cannot be written to keeps its search bit, and the write bit is what this drops
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatal(err)
+	err := (Cache{}).Write(path, cacheTestDoc(at.Add(time.Hour)))
+	if err == nil {
+		t.Fatal("writing a cache whose temp name is too long succeeded")
 	}
-	//testpolicy:allow no-exec-files — the target is the same cache directory: traversal needs its search bit back
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
-	next := cacheTestDoc(at.Add(time.Hour))
-	if err := (Cache{}).Write(path, next); err == nil {
-		t.Fatal("writing the scorecard into a read-only directory succeeded")
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name %s", err, path)
 	}
 
 	after, err := os.ReadFile(path)
@@ -292,6 +290,13 @@ func TestCacheFailedWriteLeavesThePreviousFile(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Errorf("failed write changed the cache file:\nbefore: %s\nafter:  %s", before, after)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		t.Errorf("cache directory holds %v, want only the previous file", entries)
 	}
 }
 
@@ -365,22 +370,20 @@ func TestCacheCorruptFileNamesThePath(t *testing.T) {
 	}
 }
 
-// A file that exists but cannot be read is neither missing nor corrupt: the
-// error says which file failed and carries the read error.
+// A path that exists but cannot be read as a file is neither missing nor
+// corrupt: the error says which path failed and carries the read error. A
+// directory stands at the path, so the refusal needs no permission bits, which
+// root ignores.
 func TestCacheUnreadableFileNamesThePath(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "scorecard.json")
-	if err := os.WriteFile(path, []byte(`{}`), 0o644); err != nil {
+	if err := os.Mkdir(path, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(path, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
 
 	_, err := (Cache{}).Read(path)
 	if err == nil {
-		t.Fatal("reading an unreadable cache succeeded")
+		t.Fatal("reading a directory as the cache succeeded")
 	}
 	if errors.Is(err, ErrNoScorecard) || errors.Is(err, ErrCorruptScorecard) {
 		t.Errorf("an unreadable cache is reported as missing or corrupt: %v", err)
