@@ -42,18 +42,31 @@ var acceptanceBoxPhrases = []boxPhrase{
 // import land, so the text is repeated here.
 const findingResolvedPrefix = "Finding resolved: "
 
-// boxPathRe is a source path inside an item: a token with a directory separator,
-// or a file name with an extension and an optional line number.
-var boxPathRe = regexp.MustCompile(`[\w.-]*/[\w./-]*|[\w-]+\.[A-Za-z]\w*(?::\d+)?`)
+// boxPathRe is a source path inside an item: a separator token ending in a file
+// extension with an optional line number, or a directory with a trailing slash,
+// or a bare file name with an extension. A separator token with no extension,
+// such as /usr/bin/kubectl, is a command and stays for the phrase search.
+var boxPathRe = regexp.MustCompile(`[\w.-]*/[\w./-]*(?:\.[A-Za-z]\w*(?::\d+)?|/)|[\w-]+\.[A-Za-z]\w*(?::\d+)?`)
+
+// findingInstructionRe marks where a finding item may start telling the worker
+// to run something: a run verb or a shell marker.
+var findingInstructionRe = regexp.MustCompile("(?i)\\b(?:run|execute|exec)\\b|[$`]")
 
 // boxSubject is the part of item a phrase is searched in. An item opening with
-// the finding prefix is read whole as the finding's title, which runs to the
-// end of the item, so nothing in it is searched. Elsewhere, source paths are
-// blanked and the rest is searched, so a command the item tells the worker to
-// run is still refused (gt-7c84xe).
+// the finding prefix quotes the finding's title, which runs to the end of the
+// item and cannot be told from an instruction written after it, so the title
+// is skipped up to the first instruction marker and the rest is searched. Source
+// paths are blanked wherever they sit, so a tool named inside a file path is not
+// an instruction, while a command the item tells the worker to run, even by an
+// absolute path, is still refused (gt-7c84xe).
 func boxSubject(item string) string {
 	if strings.HasPrefix(item, findingResolvedPrefix) {
-		return ""
+		title := item[len(findingResolvedPrefix):]
+		at := findingInstructionRe.FindStringIndex(title)
+		if at == nil {
+			return ""
+		}
+		item = title[at[0]:]
 	}
 	return boxPathRe.ReplaceAllString(item, " ")
 }

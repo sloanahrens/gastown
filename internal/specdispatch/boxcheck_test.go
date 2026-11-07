@@ -175,7 +175,9 @@ func TestBoxCheckPassesFindingTitleAndPath(t *testing.T) {
 		{"title names kubectl", "Finding resolved: Claim route now blocks on a kubectl wait (internal/land/claim.go:88)"},
 		{"path names docker", "Finding resolved: name the error (internal/gtwrap/docker.go:267)"},
 		{"title and path name tools", "Finding resolved: the docker and kubectl error (internal/gtwrap/docker.go)"},
+		{"title names a tool before a run verb", "Finding resolved: the kubectl wait blocks; the run stays green (internal/land/claim.go:88)"},
 		{"plain path names docker", "the fix in internal/gtwrap/docker.go is covered by a test"},
+		{"directory path names docker", "the fix in internal/gtwrap/docker/ is covered by a test"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,6 +201,10 @@ func TestBoxCheckRefusesRunInstruction(t *testing.T) {
 	}{
 		{"run kubectl", "Run: kubectl apply -f deploy.yaml", "kubectl"},
 		{"run docker beside a path", "Run: docker build internal/gtwrap/docker.go", "docker"},
+		{"run kubectl after a finding title", "Finding resolved: Claim route blocks on a wait. Run: kubectl apply -f deploy.yaml", "kubectl"},
+		{"shell marker after a finding title", "Finding resolved: the claim route blocks (internal/land/claim.go:88). $ kubectl get pods", "kubectl"},
+		{"run an absolute tool path", "Run: /usr/bin/kubectl apply -f deploy.yaml", "kubectl"},
+		{"run an absolute docker path beside a source path", "Run: /usr/local/bin/docker build internal/gtwrap/docker.go", "docker"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
