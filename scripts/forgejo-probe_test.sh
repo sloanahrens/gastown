@@ -6,6 +6,9 @@
 # from a file the case chooses, which is how a copy without gate.yml is
 # modelled; the stub `curl` answers status reads from a script of states the
 # case sets, which is how pending, success, failure and silence are modelled.
+# The stub `date` and `sleep` put the poll's deadline on a stub clock one second
+# per status read, so a case's poll count comes from that script of states and
+# never from how fast or how loaded the host is; no case waits on real time.
 #
 # The stub `git` also models the two settings that decide whether a hook runs:
 # `worktree add` cuts a worktree of the rig's repository and installs the case's
@@ -250,6 +253,11 @@ case "$method $path" in
     n=$(cat "$STUB_STATE/status-calls" 2>/dev/null || echo 0)
     n=$((n + 1))
     printf '%s' "$n" > "$STUB_STATE/status-calls"
+    # A status read is one poll, and a poll costs one second of the stub clock:
+    # the probe's deadline is driven by this script of states, so the poll count
+    # is the same on a quiet host and on a loaded one.
+    clock=$(cat "$STUB_STATE/clock") || exit 1
+    printf '%s' "$((clock + 1))" > "$STUB_STATE/clock"
     line=$(sed -n "${n}p" "$STUB_STATE/status-plan")
     [ -n "$line" ] || line=$(tail -1 "$STUB_STATE/status-plan")
     send 200 "$(status_body "$line")"
@@ -281,6 +289,30 @@ case "$method $path" in
 esac
 STUB
 chmod +x "$TMP/bin/curl"
+
+# The stub date reads the stub clock a case starts at $STATE/clock, and the stub
+# sleep returns at once, recording the wait. Together they make the poll's
+# deadline depend on the stub's script of states, never on the host's clock.
+# A form either stub does not model fails loudly rather than falling back to
+# real time, so a probe change that adds one is caught here.
+CLOCK_START=1767323045 # 2026-01-02T03:04:05Z, the instant the record stub names
+cat >"$TMP/bin/date" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+case "$*" in
+  "+%s"|"-u +%s") cat "$STUB_STATE/clock" ;;
+  "-u +%Y-%m-%dT%H:%M:%SZ") printf '2026-01-02T03:04:05Z' ;;
+  *) echo "stub date: unhandled form: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/date"
+
+cat >"$TMP/bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+printf '%s\n' "${1:-0}" >> "$STUB_STATE/sleeps"
+STUB
+chmod +x "$TMP/bin/sleep"
 
 printf 'the failing package is named here\nFAIL\tTestGate\t0.01s\n' > "$STATE/job-log"
 
@@ -331,6 +363,7 @@ fresh() {
   rm -rf "$STATE" "$CFG"
   mkdir -p "$STATE" "$BARE" "$CFG"
   : > "$STATE/calls.log"
+  printf '%s' "$CLOCK_START" > "$STATE/clock"
   printf 'success\n' > "$STATE/status-plan"
   printf 'the failing package is named here\nFAIL\tTestGate\t0.01s\n' > "$STATE/job-log"
 }
@@ -480,7 +513,11 @@ out=$(STUB_NO_RUN=1 run_probe rig --repo acme/rig --timeout 2 --poll-interval 1)
 if [ "$rc" != 0 ]; then pass "a silent gate exits non-zero"; else fail "a silent gate exits non-zero (rc=$rc)" "$out"; fi
 check "the timeout is reported" contains "reported nothing" "$out"
 check "a silent gate reports there is no run to read" contains "no workflow run tested" "$out"
-check "the wait is bounded by the timeout" test "$(count_calls GET /commits/)" -le 4
+# The stub clock advances one second per status read, so a two-second timeout is
+# exactly two polls, whatever the host's load; the wait between them is recorded
+# by the stub sleep, which is the seam that keeps real time out of the case.
+check "the wait is bounded by the timeout" test "$(count_calls GET /commits/)" = 2
+check "the wait between the polls is one interval" test "$(cat "$STATE/sleeps" 2>/dev/null)" = 1
 check "the probe branch is deleted after a timeout" test "$(deleted)" = "land/probe-rig"
 check "a timed-out probe writes no record" test ! -e "$CFG/gt/probe-rig.record"
 check "a silent gate reads no job log" test "$(count_calls GET /actions/jobs)" = 0
