@@ -12,7 +12,9 @@ seats); the host seats `claude-haiku`, `claude-sonnet`, `deepseek-flash` and
 The code read is `origin/main` at `65474d9e` (2026-11-06). Each row's callers
 come from a grep of the non-test tree, given in **Evidence**. No live town was
 read; the live facts below are the overseer's comment on gt-slpty4, restated.
-Line numbers are left out because they move; the symbol is the reference.
+Line numbers are left out of the paths table because they move; the symbol is
+the reference. The docs table has no symbol to name, so it keeps the lines the
+grep printed at that commit.
 
 Two senses of a name carry the whole inventory:
 
@@ -69,6 +71,13 @@ profile in the live settings sets `driver: kubernetes`. Then one bead in
 `internal/config` defaults an unset driver to kubernetes and refuses `docker`,
 and one in `internal/session` deletes the Docker-volume path.
 
+Five files the seat-name grep reaches have no path row because no live path
+starts in them: `internal/cmd/polecat_spawn.go` is only a caller (of P2, P5 and
+P12) and its two seat mentions are comments, while `internal/config/env.go`,
+`internal/cmd/dashboard_trend.go`, `internal/daemon/spec_seats.go` and
+`internal/daemon/spec_dispatch.go` name one in a comment only. B4, B5 and B6
+sweep them as text.
+
 ## Deletion beads (delete now)
 
 Each is sized to one package and each needs a test that is red when the path is
@@ -117,16 +126,17 @@ removed.
 
 ## Docs
 
-The exact-name grep at `origin/main` (`grep -rnE '(^|[^a-zA-Z0-9-])<name>([^a-zA-Z0-9-]|$)' docs/`):
+The exact-name grep at `origin/main` (`65474d9e`,
+`grep -rnE '(^|[^a-zA-Z0-9-])<name>([^a-zA-Z0-9-]|$)' docs/`):
 
 | File | Lines | What the line is |
 |---|---|---|
-| `docs/INSTALLING.md` | 3, `claude-haiku` | Install examples: `gt config agent set`, `gt config default-agent`, `gt sling --agent` |
-| `docs/reference.md` | 5: four `claude-haiku`, one `deepseek-flash` | Agent-config examples, a secrets example, and a sling example |
-| `docs/concepts/identity.md` | 3 lines: `claude-sonnet` on each, `claude-haiku` on one | The model-comparison section and its `bd count --label=agent:` examples |
-| `docs/examples/town-settings.example.json` | 2, `deepseek-flash` | An agent entry with `--model deepseek-flash` |
-| `docs/design/k8s-sandboxes.md` | 1, `deepseek-flash-sandbox-k8s` | The first k8s seat in a dated decision; the page also still calls the Docker-driver seat the control, which P6 retires |
-| `README.md` (outside `docs/`) | 2: one `deepseek-flash`, one `claude-sonnet` | Quick-start examples |
+| `docs/INSTALLING.md` | 265, 268, 274: `claude-haiku` on each | Install examples: `gt config agent set`, `gt config default-agent`, `gt sling --agent` |
+| `docs/reference.md` | 996, 1009, 1011, 1076: `claude-haiku`; 618: `deepseek-flash` | Agent-config examples, a secrets example, and a sling example |
+| `docs/concepts/identity.md` | 267: `claude-sonnet` and `claude-haiku`; 279, 280: `claude-sonnet` | The model-comparison section and its `bd count --label=agent:` examples |
+| `docs/examples/town-settings.example.json` | 22, 25: `deepseek-flash` | An agent entry with `--model deepseek-flash` |
+| `docs/design/k8s-sandboxes.md` | 18: `deepseek-flash-sandbox-k8s` | The first k8s seat in a dated decision; the page also still calls the Docker-driver seat the control, which P6 retires |
+| `README.md` (outside `docs/`) | 435: `deepseek-flash`; 462: `claude-sonnet` | Quick-start examples |
 
 `docs/design/model-aware-molecules.md` has ten `claude-sonnet-4-5` hits. That is
 a model ID, not the seat name, and the file is historical (`docs/plans`,
