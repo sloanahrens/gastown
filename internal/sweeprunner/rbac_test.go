@@ -142,15 +142,11 @@ var sweepRoleExtras = []sweepRoleExtra{
 	},
 	{
 		group: "", resource: "pods", verb: "deletecollection",
-		reason: "kubectl delete by label selector, the teardown's `delete pod -l`, is a collection delete; the golden's `delete pods namespace` line cannot tell it from the deletes by name",
+		reason: "the live Role (gt-gg9hv.55) grants it; no rendered call needs it, since the teardown's `delete pod -l` lists the pods it selects and deletes each by name, so it stays only so the manifest matches the cluster",
 	},
 	{
 		group: "", resource: "pods/log", verb: "get",
 		reason: "the Job's own log read, which the bead names beside cp and exec; the host copies logs with kubectl cp from the output claim, so the golden has no log line",
-	},
-	{
-		group: "", resource: "persistentvolumeclaims", verb: "list",
-		reason: "the live Role (gt-gg9hv.55) grants it; no rendered call lists a claim, and it is kept so the manifest matches the cluster",
 	},
 	{
 		group: "", resource: "persistentvolumeclaims", verb: "watch",
@@ -191,17 +187,19 @@ var rbacKindResource = map[string]string{
 }
 
 // rbacVerbsOf is what RBAC verbs each kubectl verb needs on its resource. A get
-// with no object name is a list, so the golden's get needs both verbs; wait
-// lists and then watches the object it waits on; apply reads the object, then
-// patches it or creates it; cp copies through the pod's exec subresource, as
-// kubectl does. raw is `kubectl get --raw`: one GET with no list, so get alone.
+// with no object name is a list, so the golden's get needs both verbs; wait gets
+// the object it waits on, then lists and watches it; delete gets the object it
+// names, or lists the ones a selector matches (delete -l), then deletes each;
+// apply reads the object, then patches it or creates it; cp copies through the
+// pod's exec subresource, as kubectl does. raw is `kubectl get --raw`: one GET
+// with no list, so get alone.
 var rbacVerbsOf = map[string][]string{
 	"get":    {"get", "list"},
 	"raw":    {"get"},
 	"apply":  {"get", "create", "patch"},
 	"create": {"create"},
 	"wait":   {"get", "list", "watch"},
-	"delete": {"delete"},
+	"delete": {"get", "list", "delete"},
 	"exec":   {"create"},
 	"cp":     {"create"},
 }
@@ -276,6 +274,9 @@ func rbacReads(argv []string, stdin []byte) ([]string, error) {
 	case "get":
 		// `get job NAME` names the singular on the command line; `get nodes,pods`
 		// names the plural. Both resolve through the same table.
+		if len(args) == 0 {
+			return nil, fmt.Errorf("%q: get names no resource", argv)
+		}
 		for _, r := range strings.Split(args[0], ",") {
 			if plural, ok := rbacCLIResource[r]; ok {
 				r = plural
@@ -308,6 +309,9 @@ func rbacReads(argv []string, stdin []byte) ([]string, error) {
 			break
 		}
 	case "delete":
+		if len(args) == 0 {
+			return nil, fmt.Errorf("%q: delete names no object", argv)
+		}
 		r, ok := rbacCLIResource[args[0]]
 		if !ok {
 			return nil, fmt.Errorf("%q: no RBAC resource for %q", argv, args[0])
@@ -317,6 +321,9 @@ func rbacReads(argv []string, stdin []byte) ([]string, error) {
 		resources = []string{"pods/exec"}
 	default:
 		return nil, fmt.Errorf("%q: verb %q has no RBAC mapping", argv, verb)
+	}
+	if len(resources) == 0 {
+		return nil, fmt.Errorf("%q: names no resource the RBAC check can read", argv)
 	}
 	lines := make([]string, 0, len(resources))
 	for _, r := range resources {
@@ -686,9 +693,9 @@ func TestSweepRBACCoversEveryRead(t *testing.T) {
 }
 
 // sweepClusterProblems holds the ClusterRole gt-sweep-reader to sweepClusterVerbs:
-// each resource a rule names must be one the table has, in its API group, with
-// only the verbs the table gives it. It returns every way the reader grants more,
-// and nothing when the reader is as bound.
+// each resource a rule names must be one the table has, in its API group and no
+// other, with only the verbs the table gives it. It returns every way the reader
+// grants more, and nothing when the reader is as bound.
 func sweepClusterProblems(docs []rbacDoc) []string {
 	reader := findRBAC(docs, "ClusterRole", sweepReaderRole, "")
 	if reader == nil {
@@ -703,8 +710,8 @@ func sweepClusterProblems(docs []rbacDoc) []string {
 				problems = append(problems, fmt.Sprintf("ClusterRole %s grants resource %q, which the sweep does not read cluster-wide", sweepReaderRole, res))
 				continue
 			}
-			if !slices.Contains(rule.APIGroups, group) {
-				problems = append(problems, fmt.Sprintf("ClusterRole %s grants %q in %q, want group %q", sweepReaderRole, res, rule.APIGroups, group))
+			if !slices.Equal(rule.APIGroups, []string{group}) {
+				problems = append(problems, fmt.Sprintf("ClusterRole %s grants %q in %q, want only group %q", sweepReaderRole, res, rule.APIGroups, group))
 			}
 			for _, v := range rule.Verbs {
 				if !slices.Contains(verbs, v) {
@@ -894,6 +901,14 @@ func TestSweepRBACGuardsRefuseEachWidening(t *testing.T) {
 			name: "wildcard resource on the cluster reader",
 			edit: func(t *testing.T, docs []rbacDoc) []rbacDoc {
 				findClusterRule(t, docs, "nodes/proxy").Resources = []string{"*"}
+				return docs
+			},
+			refuse: true,
+		},
+		{
+			name: "extra API group on the cluster reader's nodes rule",
+			edit: func(t *testing.T, docs []rbacDoc) []rbacDoc {
+				findClusterRule(t, docs, "nodes").APIGroups = []string{"", "batch"}
 				return docs
 			},
 			refuse: true,
@@ -1105,6 +1120,57 @@ func TestSweepRBACRoleCheckRejectsWidening(t *testing.T) {
 					w.Resource == row.want.Resource && w.Verb == row.want.Verb
 			}) {
 				t.Fatalf("widening by %s reports %+v, want %s on %+v", row.name, widened, row.want.Kind, row.want)
+			}
+		})
+	}
+}
+
+// TestSweepRBACVerbsCoverWhatKubectlNeeds holds each kubectl verb's RBAC mapping
+// to the verbs kubectl asks the API server for: delete by name gets the object
+// and then deletes it; delete -l lists the selected objects and then deletes each;
+// wait gets the object and lists and watches it until the condition holds.
+func TestSweepRBACVerbsCoverWhatKubectlNeeds(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name string
+		verb string
+		need []string
+	}{
+		{name: "delete by name", verb: "delete", need: []string{"get", "delete"}},
+		{name: "delete -l", verb: "delete", need: []string{"list", "delete"}},
+		{name: "wait", verb: "wait", need: []string{"get", "list", "watch"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			for _, v := range row.need {
+				if !slices.Contains(rbacVerbsOf[row.verb], v) {
+					t.Errorf("%s needs %q, and rbacVerbsOf[%q] = %v does not grant it", row.name, v, row.verb, rbacVerbsOf[row.verb])
+				}
+			}
+		})
+	}
+}
+
+// TestRBACReadsRefusesAnArgvItCannotRead drives rbacReads with kubectl calls that
+// name no object. Each must be an error: the check fails on the call instead of
+// panicking, or passing with no reads.
+func TestRBACReadsRefusesAnArgvItCannotRead(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name string
+		args []string
+	}{
+		{name: "get with no resource", args: []string{"get"}},
+		{name: "delete with no object", args: []string{"delete"}},
+		{name: "wait with no object", args: []string{"wait", "--for=condition=Ready"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			argv := append([]string{kubectl, "--context", "colima-gt-control"}, row.args...)
+			if lines, err := rbacReads(argv, nil); err == nil {
+				t.Fatalf("rbacReads(%q) = %v, nil; want an error", argv, lines)
 			}
 		})
 	}
