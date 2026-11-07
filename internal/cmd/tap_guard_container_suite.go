@@ -1325,30 +1325,25 @@ func containerSuiteWalkLine(script shellparse.Script) (tokens []string, starts [
 }
 
 // containerSuiteCarry rewrites the walk line for the directory changes the walk
-// (segmentWalkRoot) does not read the way the shell makes them. It returns the
-// rewritten line, walkFrom (a segment's start token mapped to the token its
-// directory is walked up to) and unplacedFrom, the index of the first directory
-// change a chain element may skip: the segments after it are unknown.
+// (segmentWalkRoot) does not read the way the shell makes them (gt-zz1t7g). It
+// returns the rewritten line, walkFrom (a segment's start token mapped to the
+// token its directory is walked up to) and unplacedFrom, the index of the first
+// directory change a chain element may skip: the segments after it are unknown,
+// and the guard refuses them (fail closed). Every token keeps its index, so the
+// segment starts still index the line.
 //
-// A cd that starts its chain and is followed by "||" changes the directory only
-// when it succeeds, and then the right-hand side is skipped: "cd A || cd B; go
-// test" runs go in A. The walk drops that change, so the "||" becomes "&&" and
-// the skipped right-hand side's tokens become "true". A chain that ends at "&"
-// is left alone: the shell backgrounds it. builtin cd and command cd that start
-// a chain become ";", which the walk reads as the start of a command.
+// Why: "cd A || cd B; go test" runs go in A when the first cd succeeds, and the
+// shell skips the right-hand side. A cd that follows "||" or "|", one that "||"
+// follows, and a builtin or command cd after a chain element are changes the
+// shell may or may not make, so they are not carried.
 //
-// A directory change a chain element may skip is not carried: one that follows
-// "||" or "|", one that "||" follows, and any builtin or command cd after a
-// chain element, which the walk does not read there. The shell may run such a
-// change, so it makes the segments after it unknown. A change the shell refuses
-// leaves the directory as it was either way, so the walk reads it as it does.
-// A plain cd after "&&" with no "||" after it is read as the walk reads any
-// "&&" list.
-//
-// A segment in a skipped right-hand side runs only when its cd fails, so it is
-// judged in the directory the shell is in just before that cd (walkFrom).
-//
-// Every token keeps its index, so the segment starts still index the line.
+// ACCEPTED RESIDUAL (overseer decision, gt-zz1t7g): a plain cd after "&&" with
+// no "||" after it is read as the walk reads any "&&" list. In a pure "&&"
+// chain the command after the cd runs only when every cd ran, which the walk
+// reads right. The one shape that differs, "X && cd A; go test" with X failing,
+// runs go in the old directory; it is accepted because this is an opt-in check
+// for the polecat and refinery contexts and saying "skipped" needs the dead-list
+// analysis the walk does not have.
 func containerSuiteCarry(proc guardProcess, tokens []string, starts []int, base string) (carried []string, walkFrom map[int]int, unplacedFrom int) {
 	carried = append([]string(nil), tokens...)
 	vars := shellVarAssignments(tokens)
