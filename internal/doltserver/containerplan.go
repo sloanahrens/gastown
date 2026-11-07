@@ -3,7 +3,6 @@ package doltserver
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -108,18 +107,24 @@ func ContainerPlan(s ContainerSpec) ([]string, error) {
 }
 
 // ContainerPortFromConfig returns the port the Dolt server listens on inside
-// the container, from listener.port in the config file at path.
+// the container, from listener.port in the config file at path. The file is
+// read through readFile, the reader the calling command injects, so a test
+// reads a config without touching the filesystem. A nil reader is refused
+// rather than replaced by a read of the live file.
 //
 // The live container publishes the host's port to this listener port, so the
 // command reads it instead of assuming the host's port. A path ContainerPlan
 // would refuse, a file that cannot be read or does not parse, and a file that
 // names no listener.port or names one outside 1..65535 are all errors naming
 // path: the plan never guesses a port.
-func ContainerPortFromConfig(path string) (int, error) {
+func ContainerPortFromConfig(readFile func(path string) ([]byte, error), path string) (int, error) {
+	if readFile == nil {
+		return 0, errors.New("container port: no file reader")
+	}
 	if err := validateContainerPath("config path", path); err != nil {
 		return 0, fmt.Errorf("container port: %w", err)
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // G304: the config path the operator passes to the plan
+	data, err := readFile(path)
 	if err != nil {
 		return 0, fmt.Errorf("container port: reading the config: %w", err)
 	}

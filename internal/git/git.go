@@ -118,8 +118,9 @@ type Git struct {
 	env     []string      // added to every call's environment (WithEnv)
 	unset   []string      // removed from every call's environment (WithoutEnv)
 
-	configRetry bool                // retry once when git cannot read its config files (WithConfigReadRetry)
-	retryWait   func(time.Duration) // the wait before that retry; nil means time.Sleep
+	configRetry bool                           // retry once when git cannot read its config files (WithConfigReadRetry)
+	retryWait   func(time.Duration)            // the wait before that retry; nil means time.Sleep
+	openConfig  func(string) (*os.File, error) // opens a config file for the report; nil means os.Open
 }
 
 // ErrUnsafeTownRootGitMutation is returned when a mutating git operation would

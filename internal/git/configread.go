@@ -71,11 +71,12 @@ func (g *Git) configReadReport() string {
 		fmt.Fprintf(&b, "\n  %s=%s", key, value)
 	}
 
-	repo := g.gitDir
-	if repo == "" {
-		repo = filepath.Join(g.workDir, ".git")
+	commonDir, gitDir, unresolved := g.repositoryConfigDirs()
+	if unresolved != "" {
+		fmt.Fprintf(&b, "\n  repository config files: not checked, %s", unresolved)
+	} else {
+		fmt.Fprintf(&b, "\n  repository=%s", commonDir)
 	}
-	fmt.Fprintf(&b, "\n  repository=%s", repo)
 
 	home, _ := g.effectiveEnv("HOME")
 	xdg, _ := g.effectiveEnv("XDG_CONFIG_HOME")
@@ -85,20 +86,49 @@ func (g *Git) configReadReport() string {
 		xdgDir = filepath.Join(home, ".config")
 	}
 
-	files := []struct{ path, unchecked string }{
+	type configFile struct{ path, unchecked string }
+	files := []configFile{
 		{homeGitconfig(home), "$HOME/.gitconfig"},
 		{xdgGitConfig(xdgDir), "$XDG_CONFIG_HOME/git/config"},
-		{filepath.Join(repo, "config"), ""},
-		{filepath.Join(repo, "config.worktree"), ""},
+	}
+	if unresolved == "" {
+		files = append(files,
+			configFile{path: filepath.Join(commonDir, "config")},
+			configFile{path: filepath.Join(gitDir, "config.worktree")})
 	}
 	for _, f := range files {
 		if f.path == "" {
 			fmt.Fprintf(&b, "\n  %s: not checked, its base directory is unset", f.unchecked)
 			continue
 		}
-		fmt.Fprintf(&b, "\n  %s: %s", f.path, describeConfigFile(f.path))
+		fmt.Fprintf(&b, "\n  %s: %s", f.path, g.describeConfigFile(f.path))
 	}
 	return b.String()
+}
+
+// repositoryConfigDirs names the directories git reads the repository
+// configuration from: the shared directory holding "config", and the
+// per-worktree directory holding "config.worktree". An explicit git directory
+// is used as git uses it. Otherwise both are resolved from workDir's .git,
+// which is a directory in an ordinary clone and a "gitdir: <path>" file in a
+// linked worktree. When that entry does not resolve to a git directory, the
+// returned reason says so and the report checks neither file, rather than
+// naming a path git never reads.
+func (g *Git) repositoryConfigDirs() (commonDir, gitDir, unresolved string) {
+	if g.gitDir != "" {
+		return g.gitDir, g.gitDir, ""
+	}
+	if g.workDir == "" {
+		return "", "", "neither a git directory nor a working directory is set"
+	}
+	if dir, common, ok := worktreeGitDirs(g.workDir); ok {
+		return common, dir, ""
+	}
+	dotGit := filepath.Join(g.workDir, ".git")
+	if _, err := os.Lstat(dotGit); err != nil {
+		return "", "", fmt.Sprintf("the git directory could not be resolved: %v", err)
+	}
+	return "", "", fmt.Sprintf("%s does not resolve to a git directory", dotGit)
 }
 
 // effectiveEnv is the value of key in the environment a call from g runs with:
@@ -136,8 +166,10 @@ func xdgGitConfig(xdgDir string) string {
 
 // describeConfigFile reports whether path exists, its size, and whether it
 // opens for read now. An error is reported by its text, which names the path
-// and the reason, never the file's contents.
-func describeConfigFile(path string) string {
+// and the reason, never the file's contents. The open goes through
+// g.openConfig so a test can drive the open-error report on a host whose user
+// can open every file.
+func (g *Git) describeConfigFile(path string) string {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -145,7 +177,11 @@ func describeConfigFile(path string) string {
 		}
 		return fmt.Sprintf("stat error: %v", err)
 	}
-	f, err := os.Open(path)
+	open := g.openConfig
+	if open == nil {
+		open = os.Open
+	}
+	f, err := open(path)
 	if err != nil {
 		return fmt.Sprintf("exists, size %d, open error: %v", info.Size(), err)
 	}

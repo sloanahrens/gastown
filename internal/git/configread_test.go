@@ -140,19 +140,6 @@ func TestGitConfigReadReportNamesFiles(t *testing.T) {
 	if err := os.WriteFile(homeConfig, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	unreadable := filepath.Join(xdg, "git", "config")
-	if err := os.MkdirAll(filepath.Dir(unreadable), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(unreadable, []byte(secret), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(unreadable, 0); err != nil {
-		t.Fatal(err)
-	}
-	if f, err := os.Open(unreadable); err == nil {
-		t.Fatalf("precondition: a chmod 000 file opened (close: %v); run this test as a non-root user", f.Close())
-	}
 	repoConfig := filepath.Join(repo, "config")
 	if err := os.WriteFile(repoConfig, []byte(secret), 0o600); err != nil {
 		t.Fatal(err)
@@ -178,7 +165,6 @@ func TestGitConfigReadReportNamesFiles(t *testing.T) {
 		"GIT_CONFIG_SYSTEM=(unset)",
 		"repository=" + repo,
 		homeConfig + ": exists, size " + strconv.Itoa(size) + ", open ok",
-		unreadable + ": exists, size " + strconv.Itoa(size) + ", open error: ",
 		repoConfig + ": exists, size " + strconv.Itoa(size) + ", open ok",
 		filepath.Join(repo, "config.worktree") + ": absent",
 	}
@@ -189,6 +175,163 @@ func TestGitConfigReadReportNamesFiles(t *testing.T) {
 	}
 	if strings.Contains(msg, secret) {
 		t.Errorf("report carries file contents:\n%s", msg)
+	}
+}
+
+// A config file the process cannot open is reported by its path, size and the
+// open error, never its contents. The failure is injected rather than made
+// with chmod 000: root opens a mode-000 file regardless of the mode, so no
+// host can express the precondition for every user (gt-ogfp84).
+func TestGitConfigReadReportNamesUnreadableFile(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	xdg := t.TempDir()
+	repo := t.TempDir()
+	// The contents must never reach the report, so the file holds this text.
+	const secret = "SECRET-BODY-DO-NOT-PRINT"
+	unreadable := filepath.Join(xdg, "git", "config")
+	if err := os.MkdirAll(filepath.Dir(unreadable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unreadable, []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "config"), []byte(secret), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r := failingConfigRead()
+	g := (&Git{gitDir: repo, workDir: t.TempDir(), exec: r.run}).
+		WithEnv([]string{"HOME=" + home, "XDG_CONFIG_HOME=" + xdg}).
+		WithoutEnv("GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM").
+		WithConfigReadRetry()
+	g.retryWait = func(time.Duration) {}
+	denied := errors.New("permission denied")
+	g.openConfig = func(path string) (*os.File, error) {
+		if path == unreadable {
+			return nil, denied
+		}
+		return os.Open(path)
+	}
+
+	_, err := g.run("ls-remote", "origin")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	msg := err.Error()
+	want := unreadable + ": exists, size " + strconv.Itoa(len(secret)) + ", open error: " + denied.Error()
+	if !strings.Contains(msg, want) {
+		t.Errorf("report lacks %q:\n%s", want, msg)
+	}
+	if strings.Contains(msg, secret) {
+		t.Errorf("report carries file contents:\n%s", msg)
+	}
+}
+
+// A linked worktree's .git is a file naming the worktree's git directory, and
+// the repository config belongs to the common directory it shares with the
+// main checkout. The report must name those two, not a config path under the
+// .git file.
+func TestGitConfigReadReportResolvesLinkedWorktree(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	commonDir := filepath.Join(base, ".repo.git")
+	gitDir := filepath.Join(commonDir, "worktrees", "wt")
+	workDir := filepath.Join(base, "wt")
+	const secret = "SECRET-BODY-DO-NOT-PRINT"
+	write(t, filepath.Join(gitDir, "commondir"), "../..\n")
+	write(t, filepath.Join(commonDir, "config"), secret)
+	write(t, filepath.Join(gitDir, "config.worktree"), secret)
+	write(t, filepath.Join(workDir, ".git"), "gitdir: "+gitDir+"\n")
+
+	r := failingConfigRead()
+	g := (&Git{workDir: workDir, exec: r.run}).
+		WithEnv([]string{"HOME=" + t.TempDir()}).
+		WithoutEnv("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM").
+		WithConfigReadRetry()
+	g.retryWait = func(time.Duration) {}
+
+	_, err := g.run("fetch", "origin")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	msg := err.Error()
+	size := strconv.Itoa(len(secret))
+	for _, w := range []string{
+		"repository=" + commonDir,
+		filepath.Join(commonDir, "config") + ": exists, size " + size + ", open ok",
+		filepath.Join(gitDir, "config.worktree") + ": exists, size " + size + ", open ok",
+	} {
+		if !strings.Contains(msg, w) {
+			t.Errorf("report lacks %q:\n%s", w, msg)
+		}
+	}
+	if wrong := filepath.Join(workDir, ".git", "config"); strings.Contains(msg, wrong) {
+		t.Errorf("report names the config path under the .git file (%s):\n%s", wrong, msg)
+	}
+	if strings.Contains(msg, secret) {
+		t.Errorf("report carries file contents:\n%s", msg)
+	}
+}
+
+// When the git directory cannot be resolved, the report must say the
+// repository files were not checked rather than name a path git never reads.
+func TestGitConfigReadReportSaysRepositoryFilesUnchecked(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		workDir bool
+		dotGit  string
+		reason  string
+	}{
+		{
+			name:   "neither directory set",
+			reason: "neither a git directory nor a working directory is set",
+		},
+		{
+			name:    "no .git",
+			workDir: true,
+			reason:  "no such file or directory",
+		},
+		{
+			name:    "malformed .git file",
+			workDir: true,
+			dotGit:  "not a gitdir line\n",
+			reason:  "does not resolve to a git directory",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			workDir := ""
+			if tc.workDir {
+				workDir = t.TempDir()
+				if tc.dotGit != "" {
+					write(t, filepath.Join(workDir, ".git"), tc.dotGit)
+				}
+			}
+			r := failingConfigRead()
+			g := (&Git{workDir: workDir, exec: r.run}).
+				WithEnv([]string{"HOME=" + t.TempDir()}).
+				WithoutEnv("XDG_CONFIG_HOME", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM").
+				WithConfigReadRetry()
+			g.retryWait = func(time.Duration) {}
+
+			_, err := g.run("fetch", "origin")
+			if err == nil {
+				t.Fatal("want an error")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "repository config files: not checked, ") {
+				t.Errorf("report does not mark the repository files unchecked:\n%s", msg)
+			}
+			if !strings.Contains(msg, tc.reason) {
+				t.Errorf("report lacks the reason %q:\n%s", tc.reason, msg)
+			}
+			if strings.Contains(msg, "repository=") {
+				t.Errorf("report names a repository git never reads:\n%s", msg)
+			}
+		})
 	}
 }
 

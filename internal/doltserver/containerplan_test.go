@@ -265,7 +265,7 @@ func TestContainerPortFromConfig(t *testing.T) {
 			if err := os.WriteFile(path, []byte(tt.content), 0600); err != nil {
 				t.Fatalf("write the config: %v", err)
 			}
-			got, err := ContainerPortFromConfig(path)
+			got, err := ContainerPortFromConfig(os.ReadFile, path)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("ContainerPortFromConfig(%q) = %d, want an error", tt.content, got)
@@ -289,7 +289,7 @@ func TestContainerPortFromConfigNamesAMissingFile(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "absent.yaml")
-	got, err := ContainerPortFromConfig(path)
+	got, err := ContainerPortFromConfig(os.ReadFile, path)
 	if err == nil {
 		t.Fatalf("ContainerPortFromConfig of a missing file = %d, want an error", got)
 	}
@@ -303,7 +303,7 @@ func TestContainerPortFromConfigRefusesARelativePath(t *testing.T) {
 
 	// The file is never written: the path rule is what refuses it, and it
 	// must refuse before the plan reads anything.
-	got, err := ContainerPortFromConfig(filepath.Join("data", "config.yaml"))
+	got, err := ContainerPortFromConfig(os.ReadFile, filepath.Join("data", "config.yaml"))
 	if err == nil {
 		t.Fatalf("ContainerPortFromConfig of a relative path = %d, want an error", got)
 	}
@@ -319,11 +319,46 @@ func TestContainerPortFromConfigSaysThePortIsMissing(t *testing.T) {
 	if err := os.WriteFile(path, []byte("listener:\n  max_connections: 100\n"), 0600); err != nil {
 		t.Fatalf("write the config: %v", err)
 	}
-	_, err := ContainerPortFromConfig(path)
+	_, err := ContainerPortFromConfig(os.ReadFile, path)
 	if err == nil {
 		t.Fatal("ContainerPortFromConfig accepted a listener with no port")
 	}
 	if !strings.Contains(err.Error(), "no listener.port") {
 		t.Fatalf("error %q does not say the port is missing", err)
+	}
+}
+
+func TestContainerPortFromConfigReadsThroughTheReader(t *testing.T) {
+	t.Parallel()
+
+	// The path is never written: a port parsed from the reader's bytes proves
+	// the read goes through the caller's reader, not the live file.
+	const path = "/town/.dolt-data/config.yaml"
+	readFile := func(got string) ([]byte, error) {
+		if got != path {
+			t.Errorf("readFile(%q), want %q", got, path)
+		}
+		return []byte("listener:\n  port: 3399\n"), nil
+	}
+	got, err := ContainerPortFromConfig(readFile, path)
+	if err != nil {
+		t.Fatalf("ContainerPortFromConfig: %v", err)
+	}
+	if got != 3399 {
+		t.Fatalf("port = %d, want 3399", got)
+	}
+}
+
+func TestContainerPortFromConfigRefusesANilReader(t *testing.T) {
+	t.Parallel()
+
+	// Falling back to os.ReadFile would read the live config behind a caller
+	// that injected no reader, so a nil reader is refused.
+	got, err := ContainerPortFromConfig(nil, "/town/.dolt-data/config.yaml")
+	if err == nil {
+		t.Fatalf("ContainerPortFromConfig with a nil reader = %d, want an error", got)
+	}
+	if !strings.Contains(err.Error(), "no file reader") {
+		t.Fatalf("error %q does not say the reader is missing", err)
 	}
 }

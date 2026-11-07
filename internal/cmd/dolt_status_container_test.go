@@ -710,6 +710,9 @@ func TestDoltHistoryDocStartsTheServerAfterTheCopy(t *testing.T) {
 	if strings.Index(doc, "`gt dolt start`") > flatten {
 		t.Errorf("the flatten SQL runs before the runbook starts the server again")
 	}
+	if strings.Index(doc, "`gt dolt start`") < 0 {
+		t.Fatal("docs/dolt-history-offline.md has no `gt dolt start` step, so the flatten order cannot be checked")
+	}
 }
 
 // TestDoltHistoryDocVerifiesAfterTheFlatten: after the flatten the runbook
@@ -737,6 +740,37 @@ func TestDoltHistoryDocVerifiesAfterTheFlatten(t *testing.T) {
 	recount := strings.Index(prose, "Re-count every table")
 	if behind < 0 || archive < 0 || recount < 0 || behind > archive || archive > recount {
 		t.Errorf("the flatten section does not verify in order: archive state, archive-now, then re-count:\n%s", section)
+	}
+}
+
+// TestDoltHistoryDocBoundsThePostFlattenLoop: the post-flatten paragraph applies
+// step 2's exit-code and archive-line reading rather than its own, runs the
+// pass again only while it exits 2, and stops after three such passes with the
+// databases still behind reported to the overseer, so the repeat cannot run
+// without end and cannot read a step 2 refusal as caught up (gt-f6oeei).
+func TestDoltHistoryDocBoundsThePostFlattenLoop(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Flatten:")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"exit code and the status the way step 2 does",
+		"Run the pass again only while it exits 2",
+		"Stop after three passes that all exited 2",
+		"report the databases still behind to the overseer",
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("the flatten section does not carry %q:\n%s", want, section)
+		}
+	}
+
+	// The bound follows the pass it bounds, so a reader meets the loop and its
+	// stop rule before the row re-count that closes the verification.
+	pass := strings.Index(prose, "Run the pass again only while it exits 2")
+	bound := strings.Index(prose, "Stop after three passes that all exited 2")
+	recount := strings.Index(prose, "Re-count every table")
+	if pass < 0 || bound < 0 || recount < 0 || pass > bound || bound > recount {
+		t.Errorf("the flatten section does not bound the pass between the rerun rule and the re-count:\n%s", section)
 	}
 }
 

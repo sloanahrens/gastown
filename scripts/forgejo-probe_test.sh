@@ -6,6 +6,9 @@
 # from a file the case chooses, which is how a copy without gate.yml is
 # modelled; the stub `curl` answers status reads from a script of states the
 # case sets, which is how pending, success, failure and silence are modelled.
+# The stub `date` and `sleep` put the poll's deadline on a stub clock one second
+# per status read, so a case's poll count comes from that script of states and
+# never from how fast or how loaded the host is; no case waits on real time.
 #
 # The stub `git` also models the two settings that decide whether a hook runs:
 # `worktree add` cuts a worktree of the rig's repository and installs the case's
@@ -250,6 +253,17 @@ case "$method $path" in
     n=$(cat "$STUB_STATE/status-calls" 2>/dev/null || echo 0)
     n=$((n + 1))
     printf '%s' "$n" > "$STUB_STATE/status-calls"
+    # A status read is one poll, and a poll costs one second of the stub clock:
+    # the probe's deadline is driven by this script of states, so the poll count
+    # is the same on a quiet host and on a loaded one. A read that does not move
+    # the clock would let the poll run past its deadline, so it fails the call
+    # here; the probe's api dies on a failed curl, which ends the poll.
+    clock=$(cat "$STUB_STATE/clock") || exit 1
+    [ -n "${STUB_CLOCK_STUCK:-}" ] || printf '%s' "$((clock + 1))" > "$STUB_STATE/clock"
+    if [ "$(cat "$STUB_STATE/clock")" != "$((clock + 1))" ]; then
+      echo "stub clock stuck at $clock: status read $n did not advance it" >&2
+      exit 1
+    fi
     line=$(sed -n "${n}p" "$STUB_STATE/status-plan")
     [ -n "$line" ] || line=$(tail -1 "$STUB_STATE/status-plan")
     send 200 "$(status_body "$line")"
@@ -282,6 +296,45 @@ esac
 STUB
 chmod +x "$TMP/bin/curl"
 
+# The stub date reads the stub clock a case starts at $STATE/clock, and the stub
+# sleep returns at once, recording the wait. Together they make the poll's
+# deadline depend on the stub's script of states, never on the host's clock.
+# A form either stub does not model fails loudly rather than falling back to
+# real time, so a probe change that adds one is caught here.
+# Each status read moves the clock one second, so a poll whose deadline is
+# reached makes at most STUB_READ_BUDGET reads (the probe's --timeout). Once a
+# read is past that budget, the clock reads and the waits fail: the probe did
+# not stop on its clock, and the case ends at that call instead of polling on.
+CLOCK_START=1767323045 # 2026-01-02T03:04:05Z, the instant the record stub names
+cat >"$TMP/bin/date" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+case "$*" in
+  "+%s"|"-u +%s")
+    n=$(cat "$STUB_STATE/status-calls" 2>/dev/null || echo 0)
+    if [ "$n" -gt "$STUB_READ_BUDGET" ]; then
+      echo "stub clock stuck at $(cat "$STUB_STATE/clock"): status read $n is past the $STUB_READ_BUDGET reads its deadline allows" >&2
+      exit 1
+    fi
+    cat "$STUB_STATE/clock" ;;
+  "-u +%Y-%m-%dT%H:%M:%SZ") printf '2026-01-02T03:04:05Z' ;;
+  *) echo "stub date: unhandled form: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$TMP/bin/date"
+
+cat >"$TMP/bin/sleep" <<'STUB'
+#!/usr/bin/env bash
+set -uo pipefail
+n=$(cat "$STUB_STATE/status-calls" 2>/dev/null || echo 0)
+if [ "$n" -gt "$STUB_READ_BUDGET" ]; then
+  echo "stub clock stuck at $(cat "$STUB_STATE/clock"): status read $n is past the $STUB_READ_BUDGET reads its deadline allows" >&2
+  exit 1
+fi
+printf '%s\n' "${1:-0}" >> "$STUB_STATE/sleeps"
+STUB
+chmod +x "$TMP/bin/sleep"
+
 printf 'the failing package is named here\nFAIL\tTestGate\t0.01s\n' > "$STATE/job-log"
 
 # The rig hooks a case installs. hook-refuse is a pre-push that refuses the
@@ -307,9 +360,15 @@ HOOK
 chmod +x "$TMP/hook-allow"
 
 # run_probe [ARGS...] runs the probe against the stubs, prints its combined
-# output, and returns its exit code (the callers read it from $?).
+# output, and returns its exit code (the callers read it from $?). The read
+# budget is the --timeout the probe is given (its default, 1200, when none is
+# given), unless the case sets STUB_READ_BUDGET itself.
 run_probe() {
-  local out rc
+  local out rc timeout=1200 prev="" arg
+  for arg in "$@"; do
+    [ "$prev" = --timeout ] && timeout=$arg
+    prev=$arg
+  done
   out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN \
     -u FORGEJO_API_URL -u FORGEJO_URL \
     HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
@@ -317,6 +376,7 @@ run_probe() {
     STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_CONTEXT="${STUB_CONTEXT:-ci / gate (push)}" \
     STUB_GATE_YML="${STUB_GATE_YML:-$TMP/gate.yml}" \
     STUB_HOOK="${STUB_HOOK:-}" STUB_REPO_LACKS_SHA="${STUB_REPO_LACKS_SHA:-}" \
+    STUB_READ_BUDGET="${STUB_READ_BUDGET:-$timeout}" \
     bash "$PROBE" --api-url "$API" --web-url "$WEB" --admin-token-file "$TMP/admin.env" \
     --town-root "${STUB_TOWN_ROOT:-$TOWN}" "$@" 2>&1)
   rc=$?
@@ -331,6 +391,7 @@ fresh() {
   rm -rf "$STATE" "$CFG"
   mkdir -p "$STATE" "$BARE" "$CFG"
   : > "$STATE/calls.log"
+  printf '%s' "$CLOCK_START" > "$STATE/clock"
   printf 'success\n' > "$STATE/status-plan"
   printf 'the failing package is named here\nFAIL\tTestGate\t0.01s\n' > "$STATE/job-log"
 }
@@ -480,7 +541,11 @@ out=$(STUB_NO_RUN=1 run_probe rig --repo acme/rig --timeout 2 --poll-interval 1)
 if [ "$rc" != 0 ]; then pass "a silent gate exits non-zero"; else fail "a silent gate exits non-zero (rc=$rc)" "$out"; fi
 check "the timeout is reported" contains "reported nothing" "$out"
 check "a silent gate reports there is no run to read" contains "no workflow run tested" "$out"
-check "the wait is bounded by the timeout" test "$(count_calls GET /commits/)" -le 4
+# The stub clock advances one second per status read, so --timeout 2 with
+# --poll-interval 1 is exactly two polls; the stub sleep records each wait
+# instead of taking it.
+check "the wait is bounded by the timeout" test "$(count_calls GET /commits/)" = 2
+check "the wait between the polls is one interval" test "$(cat "$STATE/sleeps" 2>/dev/null)" = 1
 check "the probe branch is deleted after a timeout" test "$(deleted)" = "land/probe-rig"
 check "a timed-out probe writes no record" test ! -e "$CFG/gt/probe-rig.record"
 check "a silent gate reads no job log" test "$(count_calls GET /actions/jobs)" = 0
@@ -492,6 +557,44 @@ out=$(run_probe rig --repo acme/rig --timeout 2 --poll-interval 1); rc=$?
 if [ "$rc" != 0 ]; then pass "a stuck run exits non-zero"; else fail "a stuck run exits non-zero (rc=$rc)" "$out"; fi
 check "the stuck run's job log is printed" contains "the failing package is named here" "$out"
 check "the probe branch is deleted after a stuck run" test "$(deleted)" = "land/probe-rig"
+
+echo "=== a stub clock that stops advancing fails the case instead of hanging ==="
+# STUB_CLOCK_STUCK makes the stub curl skip its clock advance, the way a stub
+# bug would, so the poll's deadline is never reached.
+fresh
+printf 'pending\n' > "$STATE/status-plan"
+out=$(STUB_CLOCK_STUCK=1 run_probe rig --repo acme/rig --timeout 2 --poll-interval 1); rc=$?
+if [ "$rc" != 0 ]; then pass "a stuck stub clock exits non-zero"; else fail "a stuck stub clock exits non-zero (rc=$rc)" "$out"; fi
+check "the stuck stub clock is named" contains "stub clock stuck at" "$out"
+check "the poll ends at the first read that does not advance the clock" test "$(count_calls GET /commits/)" = 1
+
+echo "=== a poll that reads past its deadline's allowance fails at the stub clock ==="
+# STUB_READ_BUDGET=2 gives the poll two reads, where --timeout 20 would allow
+# twenty. The clock still advances, so only the stub's read budget can stop the
+# poll: the first wait or clock read after the third read fails loudly.
+fresh
+printf 'pending\n' > "$STATE/status-plan"
+out=$(STUB_READ_BUDGET=2 run_probe rig --repo acme/rig --timeout 20 --poll-interval 1); rc=$?
+if [ "$rc" != 0 ]; then pass "a poll past its read budget exits non-zero"; else fail "a poll past its read budget exits non-zero (rc=$rc)" "$out"; fi
+check "the stuck stub clock is named past the budget" contains "stub clock stuck at" "$out"
+check "the poll ends at the first read past the budget" test "$(count_calls GET /commits/)" = 3
+check "the probe branch is deleted after a budget failure" test "$(deleted)" = "land/probe-rig"
+check "a budget failure writes no record" test ! -e "$CFG/gt/probe-rig.record"
+
+echo "=== a stub clock past the read budget fails before it is read or waited on ==="
+# The probe reads the clock before every wait, so in a probe run the stub date
+# guard fires first and the stub sleep guard never does. Run each stub directly
+# with the status count already past its budget: the clock is not read, and
+# no wait is recorded.
+fresh
+printf '3' > "$STATE/status-calls"
+out=$(STUB_STATE="$STATE" STUB_READ_BUDGET=2 "$TMP/bin/date" +%s 2>&1); rc=$?
+if [ "$rc" != 0 ]; then pass "a stub date past the read budget exits non-zero"; else fail "a stub date past the read budget exits non-zero (rc=$rc)" "$out"; fi
+check "the stub date names the stuck clock" contains "stub clock stuck at" "$out"
+out=$(STUB_STATE="$STATE" STUB_READ_BUDGET=2 "$TMP/bin/sleep" 1 2>&1); rc=$?
+if [ "$rc" != 0 ]; then pass "a stub sleep past the read budget exits non-zero"; else fail "a stub sleep past the read budget exits non-zero (rc=$rc)" "$out"; fi
+check "the stub sleep names the stuck clock" contains "stub clock stuck at" "$out"
+check "the stub sleep records no wait" test ! -e "$STATE/sleeps"
 
 echo "=== a status that has not appeared is the same as pending ==="
 fresh
@@ -612,7 +715,7 @@ out=$(cd "$SCRIPT_DIR/.." && env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_ADMIN_ENV \
   HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   STUB_ADMIN_TOKEN="$BROKER_TOKEN" STUB_SECRETS="$BROKER_TOKEN" \
-  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" \
+  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" STUB_READ_BUDGET=20 \
   bash "$PROBE" rig --api-url "$API" --web-url "$WEB" --repo acme/rig \
   --town-root "$TOWN" --timeout 20 --poll-interval 1 2>&1); rc=$?
 if [ "$rc" = 0 ]; then pass "a run under the broker's token exits 0"; else fail "a run under the broker's token exits 0 (rc=$rc)" "$out"; fi
@@ -634,7 +737,7 @@ out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_ENV \
   HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
-  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" \
+  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" STUB_READ_BUDGET=20 \
   bash "$PROBE" rig --api-url "$API" --web-url "$WEB" --repo acme/rig \
   --town-root "$TOWN" --timeout 20 --poll-interval 1 2>&1); rc=$?
 if [ "$rc" = 0 ]; then pass "a run with the override in the environment exits 0"; else fail "a run with the override in the environment exits 0 (rc=$rc)" "$out"; fi
