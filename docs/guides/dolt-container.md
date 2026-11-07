@@ -347,7 +347,7 @@ docker start gt-dolt
 ```
 
 The defaults are the town's `~/gt/.dolt-data`, the daemon's backup root, the
-plan's 12 GiB memory cap and port 3307; the live gt-dolt container runs 8 GiB.
+plan's 8 GiB memory cap and port 3307; the live gt-dolt container runs 8 GiB.
 Raise the memory only to the value step 1.7 chose, with `--memory-gib`.
 
 ```bash
