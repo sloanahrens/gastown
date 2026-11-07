@@ -571,8 +571,8 @@ func TestDoltHistoryDocBackupNamesTheStoppedServer(t *testing.T) {
 
 	// The runbook wraps its lines, so match the unwrapped prose.
 	prose := strings.Join(strings.Fields(section), " ")
-	const copy = "copy the database directory while the server is stopped"
-	at := strings.Index(prose, copy)
+	const backupCopy = "copy the database directory while the server is stopped"
+	at := strings.Index(prose, backupCopy)
 	if at < 0 {
 		t.Fatalf("\"Before any rewrite\" does not carry the backup copy taken while the server is stopped:\n%s", section)
 	}
@@ -582,7 +582,7 @@ func TestDoltHistoryDocBackupNamesTheStoppedServer(t *testing.T) {
 	}
 
 	for _, want := range []string{
-		copy,
+		backupCopy,
 		"nightly backups under",
 		"~/gt-backups/dolt",
 		"docs/dolt-restore.md",
