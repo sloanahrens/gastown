@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -13,11 +14,13 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// doltContainerPlanDeps is the command's two lookups for the default mount
-// paths. A test supplies fakes, so it never reads the live town tree or HOME.
+// doltContainerPlanDeps is the command's three filesystem lookups: the default
+// mount paths and the config read. A test supplies fakes, so it never reads
+// the live town tree or HOME, nor the real config file.
 type doltContainerPlanDeps struct {
 	townRoot   func() (string, error)
 	backupRoot func() (string, error)
+	readFile   func(path string) ([]byte, error)
 }
 
 // doltContainerPlanRealDeps is doltContainerPlanDeps on the real machine.
@@ -25,6 +28,7 @@ func doltContainerPlanRealDeps() doltContainerPlanDeps {
 	return doltContainerPlanDeps{
 		townRoot:   workspace.FindFromCwdOrError,
 		backupRoot: doltbackup.DefaultRoot,
+		readFile:   os.ReadFile,
 	}
 }
 
@@ -87,7 +91,7 @@ the host port maps to the port the config file's listener names, which
 			// --container-port overrides it, even when it is 0, which
 			// ContainerPlan then refuses.
 			if !cmd.Flags().Changed("container-port") {
-				port, err := doltserver.ContainerPortFromConfig(configPath)
+				port, err := doltserver.ContainerPortFromConfig(deps.readFile, configPath)
 				if err != nil {
 					return fmt.Errorf("%w (or pass --container-port)", err)
 				}
