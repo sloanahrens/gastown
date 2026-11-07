@@ -1186,11 +1186,18 @@ function seatName(agent) {
   return seatShortNames.get(agent) || agent;
 }
 
-// shortAgent is the Agent cell's name: a sandbox seat by its short name, else the
-// agent without its provider prefix, so the cell reads flash for deepseek-flash.
-// Any other name shows unchanged.
+// modelWords are the model families the town runs, the short word an operator
+// asks for: the cell reads flash for deepseek-flash.
+const modelWords = new Set(["sonnet", "opus", "haiku", "flash", "pro", "fable"]);
+
+// shortAgent is the Agent cell's name: a sandbox seat by its short name, else a
+// model family without its provider prefix. A name that is not one of the model
+// words is a seat's own name rather than a model, and shows whole (gt-a12ozf).
 function shortAgent(agent) {
-  return seatShortNames.get(agent) || agent.replace(/^(claude|deepseek)-/, "");
+  const seat = seatShortNames.get(agent);
+  if (seat) return seat;
+  const model = /^(?:claude|deepseek)-(.+)$/.exec(agent);
+  return model && modelWords.has(model[1]) ? model[1] : agent;
 }
 
 // workRow is one seat. Every cell clips with an ellipsis and carries its whole
