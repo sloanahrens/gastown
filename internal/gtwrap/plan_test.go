@@ -111,6 +111,24 @@ func TestPlanNeverForwardsACredentialName(t *testing.T) {
 	}
 }
 
+// The OAuth token is in the CLAUDE_ family, so the prefix alone would forward it.
+// This names it directly, so the refusal holds whatever the credential list holds.
+func TestPlanRefusesTheOAuthTokenInTheClaudeFamily(t *testing.T) {
+	t.Parallel()
+	env := []string{
+		"CLAUDE_CODE_OAUTH_TOKEN=secret",
+		"CLAUDE_CONFIG_DIR=/Users/operator/.claude",
+	}
+	call, err := Plan("gt", []string{"status"}, env, "/town", false)
+	if err != nil {
+		t.Fatalf("Plan returned an error: %v", err)
+	}
+	want := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
+	if !slices.Equal(call.Env, want) {
+		t.Fatalf("Plan forwarded %q, want only the ordinary CLAUDE_ name %q", call.Env, want)
+	}
+}
+
 func TestPlanCarriesTheCallersDirectoryAndTerminal(t *testing.T) {
 	t.Parallel()
 	for _, isTTY := range []bool{false, true} {
