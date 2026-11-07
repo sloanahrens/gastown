@@ -7,10 +7,8 @@
 # each, because a rule cannot name the path or the container that would bound
 # them; each rule says how far.
 #
-# This file is not applied by the daemon. An operator applies it to the control
-# cluster with:
-#   kubectl --context colima-gt-control apply -f deploy/k8s/sweep-rbac.yaml
-# (docs/reference.md, Tier sweep runner). TestSweepRBACManifestParses,
+# This file is not applied by the daemon. The operator's apply step is in
+# docs/reference.md, Tier sweep runner. TestSweepRBACManifestParses,
 # TestSweepRBACCoversEveryRead and TestSweepRBACClusterGrantIsReadOnly hold it to
 # the reads in internal/sweeprunner/testdata/rbac-reads.golden.
 apiVersion: v1
