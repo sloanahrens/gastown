@@ -47,9 +47,9 @@ them.
 
 --refresh replaces --battery, --json and --lines: it scores every registered
 battery over --since (7d when empty), except that it reuses a battery's cached
-block when the log has not gained a line or a byte since that block was scored,
-the block is under three days old, and it was scored over the same window. It
-keeps the cached block of a battery whose scoring failed, and writes
+block when the log holds the same number of lines and bytes as when that block
+was scored, the block is under three days old, and it was scored over the same
+window. It keeps the cached block of a battery whose scoring failed, and writes
 <town>/.runtime/jev/scorecard.json by temp file and rename, so a failed write
 leaves the previous file as it was. A refresh that wrote the file exits zero
 only when every battery scored or was reused; otherwise it names the failed
@@ -193,6 +193,14 @@ func jevScorecardRefreshWith(ctx context.Context, w io.Writer, townRoot, since s
 			}
 		}
 		block := scorecard.BatteryBlock{Name: name, ScoredAt: now, LogLines: fp.Lines, LogBytes: fp.Bytes}
+		if fpErr != nil {
+			// A log that cannot be measured is recorded as -1 lines and -1
+			// bytes, which no measurement can equal, rather than as the zero
+			// fingerprint, which is exactly what an empty log measures: a
+			// block scored while the log was unreadable would otherwise be
+			// reused, unmeasured, the first time that log is empty.
+			block.LogLines, block.LogBytes = -1, -1
+		}
 		rep, err := score(ctx, name, townRoot, from)
 		if err != nil {
 			block.Failed, block.Error = true, err.Error()

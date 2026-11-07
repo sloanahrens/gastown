@@ -123,7 +123,7 @@ func TestJevScorecardRefreshReusesAnUnchangedLogsBlock(t *testing.T) {
 
 // A battery whose log grew, whose block is four days old, whose block was
 // scored over another window, or whose log cannot be measured is scored, not
-// reused.
+// reused; an unmeasurable log records a fingerprint no measurement equals.
 func TestJevScorecardRefreshScoresWhenTheBlockIsNotReusable(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
@@ -140,7 +140,7 @@ func TestJevScorecardRefreshScoresWhenTheBlockIsNotReusable(t *testing.T) {
 	}{
 		{"log grew", body, 1, 4, 24 * time.Hour, "7d", 2, 8},
 		{"block is four days old", body, 2, 8, 4 * 24 * time.Hour, "7d", 2, 8},
-		{"log cannot be stat-ed", "", 0, 0, 24 * time.Hour, "7d", 0, 0},
+		{"log cannot be stat-ed", "", 0, 0, 24 * time.Hour, "7d", -1, -1},
 		{"block was scored over another window", body, 2, 8, 24 * time.Hour, "14d", 2, 8},
 	}
 	for _, tc := range cases {
@@ -175,9 +175,55 @@ func TestJevScorecardRefreshScoresWhenTheBlockIsNotReusable(t *testing.T) {
 				t.Errorf("scored_at = %v, want this refresh's %v", b.ScoredAt, now)
 			}
 			if b.LogLines != tc.wantLines || b.LogBytes != tc.wantBytes {
-				t.Errorf("fingerprint = %d lines %d bytes, want the log's %d and %d", b.LogLines, b.LogBytes, tc.wantLines, tc.wantBytes)
+				t.Errorf("fingerprint = %d lines %d bytes, want %d and %d", b.LogLines, b.LogBytes, tc.wantLines, tc.wantBytes)
 			}
 		})
+	}
+}
+
+// A block scored while its log could not be measured is not reused once that
+// log is empty: an unknown fingerprint is not the zero one an empty log
+// measures.
+func TestJevScorecardRefreshDoesNotReuseABlockScoredOverAnUnmeasurableLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	scorer := &jevRefreshScorer{}
+
+	// finding has no log yet, so its fingerprint cannot be measured while the
+	// scorer still produces a report for it.
+	if err := jevScorecardRun(context.Background(), io.Discard, town,
+		jevScorecardOptions{Refresh: true}, now, scorer.score, scorecard.Cache{}); err != nil {
+		t.Fatalf("refreshing with no log: %v", err)
+	}
+	unmeasured := blockFor(t, readJevCache(t, town), "finding")
+	if unmeasured.LogLines >= 0 || unmeasured.LogBytes >= 0 {
+		t.Fatalf("unmeasurable log recorded as %d lines %d bytes, want a fingerprint no measurement can equal",
+			unmeasured.LogLines, unmeasured.LogBytes)
+	}
+
+	// That log now exists and is empty, which measures as no lines and no
+	// bytes.
+	writeBatteryLog(t, town, "finding", "")
+	scorer.calls = nil
+	if err := jevScorecardRun(context.Background(), io.Discard, town,
+		jevScorecardOptions{Refresh: true}, now.Add(time.Hour), scorer.score, scorecard.Cache{}); err != nil {
+		t.Fatalf("refreshing over an empty log: %v", err)
+	}
+	if !scorer.calledFor("finding") {
+		t.Error("finding was not scored, want the block measured over an unreadable log scored over the empty one")
+	}
+}
+
+// The help text states the reuse rule the cache enforces: the line and byte
+// counts must be equal, so a log that shrank is scored again too.
+func TestJevScorecardHelpDescribesTheReuseFingerprint(t *testing.T) {
+	t.Parallel()
+	if strings.Contains(jevScorecardCmd.Long, "has not gained") {
+		t.Error("help text says the log has not gained a line or a byte, but a block is reused only when both counts are equal")
+	}
+	if !strings.Contains(jevScorecardCmd.Long, "the same number of lines and bytes") {
+		t.Error("help text does not state that a reused block needs the same line and byte counts")
 	}
 }
 
