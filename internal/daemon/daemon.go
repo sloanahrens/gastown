@@ -325,6 +325,10 @@ type Daemon struct {
 	// pass, which runs on a tick whose targets are deferred to a quiet one
 	// (gt-gg9hv.48).
 	diskMaintTrimRunning atomic.Bool
+	// diskMaintEarlyRunning is the single-flight guard of the early cache trim's
+	// disk read, which runs off the loop goroutine on a tick the gap allows
+	// (gt-gg9hv.43).
+	diskMaintEarlyRunning atomic.Bool
 	// diskMaintAlertOnlyRunning is the single-flight guard of the busy tick's
 	// alert-only pass, which reads the disks and applies their alerts when
 	// nothing else due would read them (gt-gg9hv.53).

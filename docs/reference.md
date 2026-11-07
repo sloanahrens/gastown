@@ -436,6 +436,12 @@ patrol does not know, is refused when the config is read.
 window; it defaults to `2h` when empty. A value that is not a Go duration of at
 least a minute is refused when the config is read.
 
+`cache_trim_early_percent` runs the shared cache trim before its interval when
+the sandbox disk is at or over that used share; it defaults to `75` and must be
+from `50` to `95`, and a value outside that range is refused when the config is
+read. The early run starts no sooner than fifteen minutes after the last trim
+began, and a sandbox disk reading that fails runs no trim.
+
 The two environment knobs are read from the environment of the run: the
 daemon's for the plugin and the patrol, the shell's for a hand-run `gt maint`.
 None of the three applies anything by default. A value the run cannot act on

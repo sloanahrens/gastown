@@ -207,6 +207,17 @@ the alerts through the alert-only pass (above).
   images, or when two claims are mounted in one namespace: a trim's labels
   cannot tell one claim's objects from the other's.
 
+Between those runs the trim also runs early. On a five-minute tick that finds
+the trim not due, the patrol reads the sandbox disk, and when it is at or over
+`cache_trim_early_percent` it runs the trim now, once the gap since the last
+trim's start has passed; the default, the range and the gap are in the
+[configuration reference](../reference.md#disk-maintenance). An early run does
+not start while a trim holds its guard or while a failed run's retry is pending.
+Its one log line is `disk_maintenance: cache trim early: sandbox disk <n>% >=
+<m>%`. A disk reading that fails runs no trim; the patrol logs
+`disk_maintenance: cache trim early: sandbox disk read failed: <error>` once per
+gap, and the alerts raise the failure.
+
 ## The CI runner's Go build cache
 
 The patrol also trims the Go build cache the CI gate jobs fill on the control

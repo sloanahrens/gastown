@@ -1139,6 +1139,12 @@ type DiskMaintenanceConfig struct {
 	// CICacheTrimInterval is how often the CI runner's Go build cache is
 	// trimmed, in any window. Empty means DiskMaintenanceDefaultCICacheTrimInterval.
 	CICacheTrimInterval string `json:"ci_cache_trim_interval,omitempty"` // Go duration such as "1h"
+	// CacheTrimEarlyPercent is the sandbox disk's used share at or above which
+	// the shared cache trim runs before its interval is due. Nil means
+	// DiskMaintenanceDefaultCacheTrimEarlyPercent; an explicit value outside
+	// DiskMaintenanceMinCacheTrimEarlyPercent to DiskMaintenanceMaxCacheTrimEarlyPercent
+	// is refused, never defaulted.
+	CacheTrimEarlyPercent *int `json:"cache_trim_early_percent,omitempty"` // percent such as 75
 	// CICacheMaxAge is how long an entry of that cache may go unwritten before
 	// the trim removes it. Empty means DiskMaintenanceDefaultCICacheMaxAge.
 	CICacheMaxAge string `json:"ci_cache_max_age,omitempty"` // Go duration such as "12h"
@@ -1163,6 +1169,22 @@ func (c DiskMaintenanceConfig) CacheTrimEvery() (time.Duration, error) {
 		return 0, fmt.Errorf("patrols.disk_maintenance.cache_trim_interval: %w", err)
 	}
 	return every, nil
+}
+
+// CacheTrimEarlyPercentValue returns the sandbox disk usage at which the cache
+// trim runs early: the default when the setting is absent, and an error naming
+// the setting for a percent outside the range, zero included. It never falls
+// back to the default on an error.
+func (c DiskMaintenanceConfig) CacheTrimEarlyPercentValue() (int, error) {
+	if c.CacheTrimEarlyPercent == nil {
+		return DiskMaintenanceDefaultCacheTrimEarlyPercent, nil
+	}
+	p := *c.CacheTrimEarlyPercent
+	if p < DiskMaintenanceMinCacheTrimEarlyPercent || p > DiskMaintenanceMaxCacheTrimEarlyPercent {
+		return 0, fmt.Errorf("patrols.disk_maintenance.cache_trim_early_percent = %d: want a percent from %d to %d",
+			p, DiskMaintenanceMinCacheTrimEarlyPercent, DiskMaintenanceMaxCacheTrimEarlyPercent)
+	}
+	return p, nil
 }
 
 // CICacheTrimEvery returns the cadence the CI build-cache trim runs on: the
@@ -1329,6 +1351,16 @@ const (
 	// it grows about 3 GB an hour, so one trim a day cannot hold the 10 GB cap
 	// (gt-gg9hv.24.2).
 	DiskMaintenanceDefaultCacheTrimInterval = "2h"
+	// DiskMaintenanceDefaultCacheTrimEarlyPercent is the sandbox disk usage at
+	// which the cache trim runs before its interval is due, so a saturated pool
+	// cannot outrun the trim between its interval runs (gt-gg9hv.43).
+	DiskMaintenanceDefaultCacheTrimEarlyPercent = 75
+	// DiskMaintenanceMinCacheTrimEarlyPercent is the lowest accepted early percent:
+	// below it the trim would run on a disk with room (gt-gg9hv.43).
+	DiskMaintenanceMinCacheTrimEarlyPercent = 50
+	// DiskMaintenanceMaxCacheTrimEarlyPercent is the highest accepted early percent:
+	// above it the disk would fill before the trim ran (gt-gg9hv.43).
+	DiskMaintenanceMaxCacheTrimEarlyPercent = 95
 	// DiskMaintenanceDefaultCICacheTrimInterval is the CI build-cache trim's
 	// cadence: the gate jobs fill that cache faster than a daily pass can hold it
 	// (gt-gg9hv.57).
@@ -1374,6 +1406,9 @@ func (c *DiskMaintenanceConfig) UnmarshalJSON(data []byte) error {
 	}
 	cfg := DiskMaintenanceConfig(p)
 	if _, err := cfg.CacheTrimEvery(); err != nil {
+		return err
+	}
+	if _, err := cfg.CacheTrimEarlyPercentValue(); err != nil {
 		return err
 	}
 	if _, err := cfg.CICacheTrimEvery(); err != nil {
