@@ -581,6 +581,21 @@ check "the poll ends at the first read past the budget" test "$(count_calls GET 
 check "the probe branch is deleted after a budget failure" test "$(deleted)" = "land/probe-rig"
 check "a budget failure writes no record" test ! -e "$CFG/gt/probe-rig.record"
 
+echo "=== a stub clock past the read budget fails before it is read or waited on ==="
+# The probe reads the clock before every wait, so in a probe run the stub date
+# guard fires first and the stub sleep guard never does. Run each stub directly
+# with the status count already past its budget: the clock is not read, and
+# no wait is recorded.
+fresh
+printf '3' > "$STATE/status-calls"
+out=$(STUB_STATE="$STATE" STUB_READ_BUDGET=2 "$TMP/bin/date" +%s 2>&1); rc=$?
+if [ "$rc" != 0 ]; then pass "a stub date past the read budget exits non-zero"; else fail "a stub date past the read budget exits non-zero (rc=$rc)" "$out"; fi
+check "the stub date names the stuck clock" contains "stub clock stuck at" "$out"
+out=$(STUB_STATE="$STATE" STUB_READ_BUDGET=2 "$TMP/bin/sleep" 1 2>&1); rc=$?
+if [ "$rc" != 0 ]; then pass "a stub sleep past the read budget exits non-zero"; else fail "a stub sleep past the read budget exits non-zero (rc=$rc)" "$out"; fi
+check "the stub sleep names the stuck clock" contains "stub clock stuck at" "$out"
+check "the stub sleep records no wait" test ! -e "$STATE/sleeps"
+
 echo "=== a status that has not appeared is the same as pending ==="
 fresh
 printf 'absent\nsuccess\n' > "$STATE/status-plan"
