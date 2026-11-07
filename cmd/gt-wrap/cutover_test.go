@@ -314,7 +314,7 @@ type cutoverShell struct {
 	captured [][]string
 }
 
-func (s *cutoverShell) Attach(argv []string) (int, error) { return 0, nil }
+func (s *cutoverShell) Attach(argv []string, env []string) (int, error) { return 0, nil }
 
 func (s *cutoverShell) Capture(ctx context.Context, argv []string) (string, int, error) {
 	s.captured = append(s.captured, argv)

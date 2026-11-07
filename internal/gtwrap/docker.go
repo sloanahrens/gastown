@@ -1,14 +1,17 @@
 package gtwrap
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -54,12 +57,19 @@ const probeTimeout = 10 * time.Second
 // the docker command did not start.
 const exitDown = 1
 
+// signalExitBase is added to a signal's number to give the status of a command
+// that signal killed, as a shell reports it.
+const signalExitBase = 128
+
 // Shell runs the docker command lines the Docker runner plans. The real one runs
 // the docker binary; a test one records the lines. Each argv starts with "docker".
 type Shell interface {
 	// Attach runs argv with the caller's stdin, stdout and stderr attached and
-	// returns the status it exited with. An error means it did not run at all.
-	Attach(argv []string) (exit int, err error)
+	// returns the status it exited with. env holds KEY=VALUE entries for the
+	// docker process itself, so a value forwarded into the container travels
+	// there and not in argv, where a process listing would show it. An error
+	// means it did not run at all.
+	Attach(argv []string, env []string) (exit int, err error)
 	// Capture runs argv and returns its stdout and exit status. ctx bounds the
 	// run: when it ends, the command is stopped. An error means it did not run.
 	Capture(ctx context.Context, argv []string) (stdout string, exit int, err error)
@@ -138,12 +148,13 @@ func (d Docker) Exec(call Call) (int, error) {
 	if err := checkCall(call); err != nil {
 		return exitDown, err
 	}
+	flags, env := callFlags(call)
 	args := []string{"exec"}
 	args = append(args, stdioFlags(call)...)
-	args = append(args, callFlags(call)...)
+	args = append(args, flags...)
 	args = append(args, svc.ContainerName)
 	args = append(args, call.Argv...)
-	return d.Shell.Attach(d.dockerArgv(args...))
+	return d.Shell.Attach(d.dockerArgv(args...), env)
 }
 
 // Run runs call in a throwaway container of the daemon image with the town
@@ -162,9 +173,10 @@ func (d Docker) Run(call Call) (int, error) {
 		return exitDown, err
 	}
 	hmConfig := filepath.Join(d.Town, filepath.FromSlash(hmConfigTownPath))
+	flags, env := callFlags(call)
 	args := []string{"run", "--rm"}
 	args = append(args, stdioFlags(call)...)
-	args = append(args, callFlags(call)...)
+	args = append(args, flags...)
 	args = append(args, "-v", d.Town+":"+d.Town)
 	if call.Argv[0] == "hm" {
 		if err := d.checkHMConfig(hmConfig); err != nil {
@@ -174,7 +186,7 @@ func (d Docker) Run(call Call) (int, error) {
 	}
 	args = append(args, "--entrypoint", call.Argv[0], svc.Image)
 	args = append(args, call.Argv[1:]...)
-	return d.Shell.Attach(d.dockerArgv(args...))
+	return d.Shell.Attach(d.dockerArgv(args...), env)
 }
 
 // toolCheck is the shell command ToolExists runs in the container: command -v is
@@ -321,44 +333,74 @@ func stdioFlags(call Call) []string {
 	return []string{"-i"}
 }
 
-// callFlags carry the caller's directory and environment into the container. The
-// Dolt host is set last, and an hm call also gets hmConfigPath: both name a
-// place inside the container, so neither comes from the caller. hmConfigPath
+// callFlags carry the caller's directory into the container. Each forwarded
+// variable is named by `-e NAME` and its value is returned in env, the docker
+// process's environment, so the value stays out of argv. The Dolt host is set
+// last, and an hm call also gets hmConfigPath: both name a place inside the
+// container, so neither comes from the caller and both stay in argv. hmConfigPath
 // replaces a forwarded HM_CONFIG, which names the Mac's file, so hm reads the
 // container's derived config.
-func callFlags(call Call) []string {
-	flags := []string{"-w", call.Dir}
+func callFlags(call Call) (flags, env []string) {
+	flags = []string{"-w", call.Dir}
 	hm := call.Argv[0] == "hm"
 	for _, entry := range call.Env {
 		name, _, _ := strings.Cut(entry, "=")
 		if name == doltHostVar || name == hmConfigVar {
 			continue
 		}
-		flags = append(flags, "-e", entry)
+		flags = append(flags, "-e", name)
+		env = append(env, entry)
 	}
 	if hm {
 		flags = append(flags, "-e", hmConfigVar+"="+hmConfigPath)
 	}
-	return append(flags, "-e", doltHostVar+"="+doltHostGateway)
+	return append(flags, "-e", doltHostVar+"="+doltHostGateway), env
 }
 
 // OSShell runs docker from the host's PATH: the Shell for a Docker that talks to
 // the real engine, where a test uses a fake.
 type OSShell struct{}
 
-// Attach runs argv with the wrapper's own stdin, stdout and stderr.
-func (OSShell) Attach(argv []string) (int, error) {
+// Attach runs argv with the wrapper's own stdin, stdout and stderr. env is added
+// to the wrapper's environment for the docker process; where a name appears in
+// both, the entry in env wins, since exec keeps the last value of each name.
+func (OSShell) Attach(argv []string, env []string) (int, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
+	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return exitStatus(cmd.Run())
 }
 
-// Capture runs argv and returns its stdout. A probe stopped by ctx exits with a
-// non-zero status, which the caller reads as a refusal.
+// Capture runs argv and returns its stdout. A probe stopped by ctx is a refusal:
+// it exits non-zero, or it returns an error, and its stdout may be cut short.
 func (OSShell) Capture(ctx context.Context, argv []string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	out, err := cmd.Output()
-	return probeResult(out, err)
+	stdout, err := cmd.StdoutPipe()
+	if err == nil {
+		err = cmd.Start()
+	}
+	if err != nil {
+		return "", exitDown, err
+	}
+	// Reading to EOF waits for every holder of stdout, and a child the engine left
+	// running keeps it open. Once ctx ends, closing our end ends the read, so the
+	// probe returns at its bound, and Wait does not block on that child.
+	stop := context.AfterFunc(ctx, func() { _ = stdout.Close() })
+	out, readErr := io.ReadAll(stdout)
+	stop()
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		// The bound stopped the probe, so readErr is the stop closing the pipe and is
+		// not reported. A probe that exited 0 before the stop can still come back from
+		// Wait with no error; it is refused, since its output may be cut short.
+		if waitErr == nil {
+			return string(out), exitDown, nil
+		}
+		return probeResult(out, waitErr)
+	}
+	// A read error with no stop is an error, and a non-zero exit is a refusal either
+	// way: cmp.Or keeps whichever of the two failed first.
+	return probeResult(out, cmp.Or(waitErr, readErr))
 }
 
 // probeResult reads a finished probe: its stdout and exit status, or an error when
@@ -368,14 +410,26 @@ func probeResult(out []byte, err error) (string, int, error) {
 	return string(out), exit, err
 }
 
-// exitStatus turns a finished command's error into its exit status. An error that
-// is not an exit status means the command did not run at all.
+// exitedError is what exitStatus reads from a finished command's error. An
+// *exec.ExitError has both methods; a test stands in with its own.
+type exitedError interface {
+	ExitCode() int
+	Sys() any
+}
+
+// exitStatus turns a finished command's error into its exit status. A command a
+// signal killed reports 128 plus the signal number, the status a shell gives it,
+// not the -1 that ExitCode returns for it. An error that is not an exit status
+// means the command did not run at all.
 func exitStatus(err error) (int, error) {
 	if err == nil {
 		return 0, nil
 	}
-	var failed *exec.ExitError
+	var failed exitedError
 	if errors.As(err, &failed) {
+		if status, ok := failed.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			return signalExitBase + int(status.Signal()), nil
+		}
 		return failed.ExitCode(), nil
 	}
 	return exitDown, err

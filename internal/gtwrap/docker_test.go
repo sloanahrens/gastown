@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -48,18 +49,21 @@ type fakeShell struct {
 	toolErr    error
 	attachExit int
 	attachErr  error
-	// outlast makes each bounded probe run until its context stops it, as a hung
+	// outlastVerb names the probe that runs until its context stops it, as a hung
 	// engine does. A stopped command exits -1, which OSShell reports the same way.
-	outlast bool
+	outlastVerb string
 
 	captured [][]string
 	// unbounded lists the probes that ran with no deadline.
 	unbounded [][]string
 	attached  [][]string
+	// attachedEnv is the environment each attached docker process was given.
+	attachedEnv [][]string
 }
 
-func (f *fakeShell) Attach(argv []string) (int, error) {
+func (f *fakeShell) Attach(argv []string, env []string) (int, error) {
 	f.attached = append(f.attached, argv)
+	f.attachedEnv = append(f.attachedEnv, env)
 	return f.attachExit, f.attachErr
 }
 
@@ -69,7 +73,7 @@ func (f *fakeShell) Capture(ctx context.Context, argv []string) (string, int, er
 	if !bounded {
 		f.unbounded = append(f.unbounded, argv)
 	}
-	if f.outlast && bounded {
+	if bounded && verbOf(argv) == f.outlastVerb {
 		<-ctx.Done()
 		return "", -1, nil
 	}
@@ -162,13 +166,100 @@ func TestLadderExecsIntoTheRunningContainer(t *testing.T) {
 			}
 			want = append(want,
 				"-w", testDir,
-				"-e", "GT_TOWN="+testTown,
-				"-e", "TERM=xterm-256color",
+				"-e", "GT_TOWN",
+				"-e", "TERM",
 				"-e", testDolt,
 				"gt-daemon", "gt", "status", "--line",
 			)
 			if len(shell.attached) != 1 || !slices.Equal(shell.attached[0], want) {
 				t.Fatalf("attached %q, want exactly one exec line %q", shell.attached, want)
+			}
+			if !slices.Contains(shell.attachedEnv[0], "GT_TOWN="+testTown) {
+				t.Fatalf("docker process env %q does not carry the forwarded GT_TOWN", shell.attachedEnv[0])
+			}
+		})
+	}
+}
+
+// TestRunnerKeepsForwardedValuesOutOfArgv pins that a forwarded variable reaches
+// the container by name: its value is in the docker process's environment, and no
+// argv element carries it, where a process listing would show it.
+func TestRunnerKeepsForwardedValuesOutOfArgv(t *testing.T) {
+	t.Parallel()
+	rungs := []struct {
+		name string
+		run  func(Docker, Call) (int, error)
+	}{
+		{"exec", Docker.Exec},
+		{"run", Docker.Run},
+	}
+	for _, rung := range rungs {
+		t.Run(rung.name, func(t *testing.T) {
+			t.Parallel()
+			shell := &fakeShell{}
+			d := Docker{Town: testTown, Shell: shell, ReadFile: readCompose(testCompose)}
+			call := testCall(t, callEnv, false)
+			if _, err := rung.run(d, call); err != nil {
+				t.Fatalf("%s returned an error: %v", rung.name, err)
+			}
+			if len(shell.attached) != 1 {
+				t.Fatalf("%s attached %d lines, want 1", rung.name, len(shell.attached))
+			}
+			if len(call.Env) == 0 {
+				t.Fatal("the call forwards no environment, so the test proves nothing")
+			}
+			argv, env := shell.attached[0], shell.attachedEnv[0]
+			for _, entry := range call.Env {
+				name, _, _ := strings.Cut(entry, "=")
+				if slices.Contains(argv, entry) {
+					t.Fatalf("%s line %q carries the value %q in argv", rung.name, argv, entry)
+				}
+				if !slices.Contains(argv, name) {
+					t.Fatalf("%s line %q does not forward %s by name", rung.name, argv, name)
+				}
+				if !slices.Contains(env, entry) {
+					t.Fatalf("%s docker env %q does not carry %q", rung.name, env, entry)
+				}
+			}
+		})
+	}
+}
+
+// signalledExit stands in for an *exec.ExitError from a command a signal killed:
+// ExitCode is -1 and Sys carries the wait status, as the os package reports them.
+type signalledExit struct {
+	status syscall.WaitStatus
+}
+
+func (signalledExit) Error() string { return "exit status" }
+func (e signalledExit) ExitCode() int {
+	if e.status.Exited() {
+		return e.status.ExitStatus()
+	}
+	return -1
+}
+func (e signalledExit) Sys() any { return e.status }
+
+// TestExitStatusReportsASignalledCommandAsItsShellStatus pins the status a
+// command killed by a signal passes through as: 128 plus the signal, the status a
+// shell reports, and not -1. A command that exited on its own passes its code.
+func TestExitStatusReportsASignalledCommandAsItsShellStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"killed by SIGTERM", signalledExit{status: syscall.WaitStatus(syscall.SIGTERM)}, 143},
+		{"killed by SIGKILL", signalledExit{status: syscall.WaitStatus(syscall.SIGKILL)}, 137},
+		{"exited with status 7", signalledExit{status: syscall.WaitStatus(7 << 8)}, 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := exitStatus(tt.err)
+			if err != nil || got != tt.want {
+				t.Fatalf("exitStatus = %d, %v; want %d, nil", got, err, tt.want)
 			}
 		})
 	}
@@ -191,8 +282,8 @@ func TestLadderRunsAThrowawayContainerWhenTheDaemonIsStopped(t *testing.T) {
 			}
 			want = append(want,
 				"-w", testDir,
-				"-e", "GT_TOWN="+testTown,
-				"-e", "TERM=xterm-256color",
+				"-e", "GT_TOWN",
+				"-e", "TERM",
 				"-e", testDolt,
 				"-v", testTown+":"+testTown,
 				"--entrypoint", "gt",
@@ -200,6 +291,9 @@ func TestLadderRunsAThrowawayContainerWhenTheDaemonIsStopped(t *testing.T) {
 			)
 			if len(shell.attached) != 1 || !slices.Equal(shell.attached[0], want) {
 				t.Fatalf("attached %q, want exactly one run line %q", shell.attached, want)
+			}
+			if !slices.Contains(shell.attachedEnv[0], "GT_TOWN="+testTown) {
+				t.Fatalf("docker process env %q does not carry the forwarded GT_TOWN", shell.attachedEnv[0])
 			}
 		})
 	}
@@ -319,6 +413,18 @@ func TestProbeResultReportsAProbeThatDidNotRun(t *testing.T) {
 	}
 }
 
+// TestOSShellCaptureReportsAProbeThatDidNotStart runs a path that does not exist, so
+// the start fails before any process runs. Capture must return the error, not read
+// a refusal from an exit status.
+func TestOSShellCaptureReportsAProbeThatDidNotStart(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "docker")
+	out, exit, err := OSShell{}.Capture(context.Background(), []string{missing})
+	if err == nil || exit == 0 {
+		t.Fatalf("Capture = %q, %d, %v; want an error and a non-zero exit", out, exit, err)
+	}
+}
+
 func TestLadderBoundsEveryProbe(t *testing.T) {
 	t.Parallel()
 	shell := &fakeShell{psOut: "5c1e0a7f\n"}
@@ -336,14 +442,20 @@ func TestLadderBoundsEveryProbe(t *testing.T) {
 
 func TestLadderRefusesWhenAProbeRunsOutOfTime(t *testing.T) {
 	t.Parallel()
-	shell := &fakeShell{outlast: true}
-	d := Docker{Town: testTown, ProbeTimeout: time.Nanosecond, Shell: shell, ReadFile: readCompose(testCompose)}
-	exit, err := d.Launch(testCall(t, callEnv, false))
-	if err == nil || exit == 0 {
-		t.Fatalf("Launch = %d, %v; want a refusal when the engine does not answer", exit, err)
-	}
-	if len(shell.attached) != 0 {
-		t.Fatalf("the engine did not answer but the call was attached: %q", shell.attached)
+	// Each probe the ladder makes must be bounded: a hang in either one refuses.
+	for _, verb := range []string{"info", "ps"} {
+		t.Run(verb+" hangs", func(t *testing.T) {
+			t.Parallel()
+			shell := &fakeShell{outlastVerb: verb, psOut: "5c1e0a7f\n"}
+			d := Docker{Town: testTown, ProbeTimeout: time.Nanosecond, Shell: shell, ReadFile: readCompose(testCompose)}
+			exit, err := d.Launch(testCall(t, callEnv, false))
+			if err == nil || exit == 0 {
+				t.Fatalf("Launch = %d, %v; want a refusal when the engine does not answer", exit, err)
+			}
+			if len(shell.attached) != 0 {
+				t.Fatalf("the engine did not answer but the call was attached: %q", shell.attached)
+			}
+		})
 	}
 }
 
