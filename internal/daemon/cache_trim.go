@@ -615,6 +615,9 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 func (d *Daemon) cacheTrimMeasure(ctx context.Context, kubeconfig string, source cacheTrimSource, claim string, capBytes int64) {
 	used, err := d.cacheTrimDu(ctx, kubeconfig, source)
 	if err != nil {
+		// An item an earlier trim raised stays in place: an unreadable claim is
+		// not thereby under the cap, and clearing the item would read it as
+		// clean. Failing safe here is what om rule 1 requires.
 		d.cacheTrimLogKeyed("cache_trim_noop_unknown:"+source.Namespace+"/"+claim,
 			"disk_maintenance: cache trim %s in %s: the claim could not be measured after the trim: %v; no attention item is raised", claim, source.Namespace, err)
 		return
@@ -750,6 +753,11 @@ func (d *Daemon) cacheTrimApply(ctx context.Context, kubeconfig, namespace, jobN
 				i+1, len(docs), cacheTrimDocumentLabel(doc), err, cacheTrimFirstLine(string(stderr)))
 		}
 	}
+	// The claim route waits here too (gt-gg9hv.46): cacheTrimMeasure reads the
+	// claim only once its Job has finished, because a claim still being trimmed
+	// holds what the trim is removing. The wait is bounded by
+	// cacheTrimWaitTimeout (2 minutes); a Job still running then is left for the
+	// next run.
 	if !d.cacheTrimWaitJob(ctx, kubeconfig, namespace, jobName) {
 		return false, nil
 	}
