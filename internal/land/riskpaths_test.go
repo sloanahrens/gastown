@@ -2,6 +2,7 @@ package land
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -421,5 +422,40 @@ func TestRiskPathsRenameOutOfRiskDir(t *testing.T) {
 	}
 	if !slices.Equal(got, []string{"internal/daemon/x.go"}) {
 		t.Errorf("RiskPaths = %q, want the moved file's source path", got)
+	}
+}
+
+// liveRiskPaths is the list the repo ships, so the rows below fail when its
+// glob lines change, not only the fixtures' copies of them.
+//
+//go:embed riskpaths.txt
+var liveRiskPaths string
+
+// gate.yml decides the landing gate and post-land.yml decides the post-land
+// verdict, so a change to a file under .forgejo/workflows/ is a risk path. A
+// file beside that directory is not.
+func TestRiskPathsForgejoWorkflows(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		path string
+		want []string
+	}{
+		{"post-land workflow", ".forgejo/workflows/post-land.yml", []string{".forgejo/workflows/post-land.yml"}},
+		{"gate workflow", ".forgejo/workflows/gate.yml", []string{".forgejo/workflows/gate.yml"}},
+		{"file beside the workflows directory", ".forgejo/other.yml", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			f := newRiskFixture(t, liveRiskPaths, map[string]string{c.path: "x\n"})
+			got, err := RiskPaths(f.repo(), f.base, f.head)
+			if err != nil {
+				t.Fatalf("RiskPaths: %v", err)
+			}
+			if !slices.Equal(got, c.want) {
+				t.Errorf("RiskPaths = %q, want %q", got, c.want)
+			}
+		})
 	}
 }
