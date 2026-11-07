@@ -95,6 +95,11 @@ const (
 	// RuleGreenRef is the green ref the image build reads: a push that keeps
 	// failing, or a remote holding the ref at another commit (gt-gg9hv.61).
 	RuleGreenRef = "sweep.green_ref"
+
+	// RuleDoltImageBehind is the Dolt image check's rule: the town's Dolt
+	// container runs an image more than one patch release behind the newest
+	// release (gt-goda5m).
+	RuleDoltImageBehind = "dolt.image_behind"
 )
 
 var (
@@ -160,6 +165,10 @@ var ruleFlags = map[string]RuleFlags{
 	// green commit, but the sweep itself is green: the overseer has it for its
 	// next look, and the fails keep retrying hourly (gt-gg9hv.61).
 	RuleGreenRef: flagsAsk,
+	// A Dolt image behind the newest release is a container the operator can
+	// pull at the next restart: it is for the overseer's next look, not a page
+	// (gt-goda5m).
+	RuleDoltImageBehind: flagsAsk,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -256,6 +265,7 @@ var kindRules = map[Kind]string{
 	KindBirdReportStale:          RuleBirdReportStale,
 	KindPostLandUnknown:          RulePostLandUnknown,
 	KindGreenRef:                 RuleGreenRef,
+	KindDoltImageBehind:          RuleDoltImageBehind,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule

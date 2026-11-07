@@ -339,6 +339,10 @@ type Daemon struct {
 	// cap, which the attention queue raises until a later pass reads one under
 	// it or finds the claim gone (gt-gg9hv.46, gt-gg9hv.50).
 	cacheTrimNoOp cacheTrimNoOp
+	// doltImage is the Dolt image check's item: the town's Dolt container runs
+	// an image more than one patch release behind the newest release, which the
+	// attention queue raises (gt-goda5m).
+	doltImage doltImageCheck
 	// ciCacheTrimRunning is the single-flight guard of the CI build-cache trim's
 	// pass, which runs on its own interval and off the quiet guard
 	// (gt-gg9hv.57).
@@ -2270,6 +2274,11 @@ var heartbeatSteps = []heartbeatStep{
 	// Ensure Dolt server is running (if configured).
 	// This must happen before beads operations that depend on Dolt.
 	{name: "dolt", run: (*Daemon).ensureDoltServerRunning},
+
+	// Compare the Dolt container's image with the newest Dolt release, once an
+	// hour (gt-goda5m). It reads only, so it is not lifecycle: an E-stopped town
+	// still gets the report.
+	{name: "dolt-image", run: (*Daemon).checkDoltImage},
 
 	// Kill ghost sessions left over from stale registry (default "gt" prefix).
 	{name: "ghost-sessions", lifecycle: true, run: (*Daemon).killDefaultPrefixGhosts},

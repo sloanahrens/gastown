@@ -105,6 +105,9 @@ var ruleOwners = map[string]Owner{
 	// A green ref the image build cannot read is the sweeper's own repository
 	// and remote to look at before it reaches a person (gt-gg9hv.61).
 	RuleGreenRef: OwnerOverseer,
+	// A Dolt image behind the newest release is the town's own container to
+	// pull, which the overseer chases before a person is woken (gt-goda5m).
+	RuleDoltImageBehind: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

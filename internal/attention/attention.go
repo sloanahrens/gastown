@@ -112,6 +112,10 @@ const (
 	// green/<sha12> ref for the image build, or the remote holds that ref at
 	// another commit (gt-gg9hv.61).
 	KindGreenRef Kind = "green-ref"
+	// KindDoltImageBehind: the town's Dolt container runs a dolt-sql-server
+	// image more than one patch release behind the newest stable release on
+	// Docker Hub (gt-goda5m).
+	KindDoltImageBehind Kind = "dolt-image-behind"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -126,7 +130,7 @@ func Kinds() []Kind {
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostForgejo, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
-		KindBirdReportStale, KindPostLandUnknown, KindGreenRef,
+		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 	}
 }
 
