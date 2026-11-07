@@ -810,8 +810,11 @@ func (e containerEntrypoint) setForgeCredentialHelper(self string) error {
 // per-platform build carries no mango directory and is not an error; a mango
 // directory without its files is a broken image and is refused rather than
 // leave the town running the Mac binary the shared runtime also holds. Both
-// files are read before either is written, so a broken image writes nothing.
-// The roots are parameters, so a test uses temporary directories.
+// files are read before either is written, so a broken image writes nothing,
+// and the pair already installed is read before it is replaced and put back
+// when either write fails, so a failed install never leaves the image's new
+// binary under the stamp of the build it replaced (gt-50mngy). The roots are
+// parameters, so a test uses temporary directories.
 func installMangoBinary(imageDir, townRoot string) error {
 	if _, err := os.Stat(imageDir); errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -844,11 +847,102 @@ func installMangoBinary(imageDir, townRoot string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create the town's mango directory %s: %w", dir, err)
 	}
+	bin, stamp := files[0], files[1]
+	binDest := filepath.Join(dir, bin.name)
+	stampDest := filepath.Join(dir, stamp.name)
+	previousBin, err := readInstalledMango(binDest)
+	if err != nil {
+		return fmt.Errorf("read the town's mango binary %s: %w", binDest, err)
+	}
+	previousStamp, err := readInstalledMango(stampDest)
+	if err != nil {
+		return fmt.Errorf("read the town's mango stamp %s: %w", stampDest, err)
+	}
+	// The binary is written before its stamp: the stamp is what the metrics
+	// analysis compares with origin/main, so a stamp put in place first would
+	// describe a binary that is not there yet. A failed write puts the pair
+	// back, so the stamp never describes a binary it was not written with.
+	if err := atomicfile.WriteFile(binDest, bin.data, bin.mode); err != nil {
+		return undoInstall(fmt.Errorf("install the image's mango at %s: %w", binDest, err), previousBin)
+	}
+	if err := atomicfile.WriteFile(stampDest, stamp.data, stamp.mode); err != nil {
+		return undoInstall(fmt.Errorf("install the image's mango stamp at %s: %w", stampDest, err), previousBin, previousStamp)
+	}
+	return nil
+}
+
+// undoInstall puts back the files an install replaced after a write failed, and
+// reports the write failure together with any restore failure: a restore that
+// went wrong leaves the town partly installed, and dropping it would report the
+// failure as handled.
+func undoInstall(installErr error, files ...installedMango) error {
+	errs := []error{installErr}
 	for _, file := range files {
-		dest := filepath.Join(dir, file.name)
-		if err := atomicfile.WriteFile(dest, file.data, file.mode); err != nil {
-			return fmt.Errorf("install the image's mango at %s: %w", dest, err)
+		if err := file.putBack(); err != nil {
+			errs = append(errs, err)
 		}
+	}
+	return errors.Join(errs...)
+}
+
+// installedMango is one file of the town's mango directory as it was before an
+// install replaced it, so a failed install can put the pair back.
+type installedMango struct {
+	path    string
+	data    []byte
+	mode    os.FileMode
+	regular bool // a regular file held the path, and its contents are in data
+	present bool // something held the path; only a regular file is put back
+}
+
+// readInstalledMango records path as it is now.
+func readInstalledMango(path string) (installedMango, error) {
+	installed := installedMango{path: path}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return installed, nil
+	}
+	if err != nil {
+		return installedMango{}, err
+	}
+	installed.present = true
+	if !info.Mode().IsRegular() {
+		return installed, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return installedMango{}, err
+	}
+	installed.regular, installed.data, installed.mode = true, data, info.Mode().Perm()
+	return installed, nil
+}
+
+// putBack returns path to the state readInstalledMango found: a regular file is
+// written back, and a path that held nothing is removed if the install created
+// it. A path that held anything else is not put back, because the town's mango
+// files are regular files and the install does not own that occupant.
+func (m installedMango) putBack() error {
+	if m.regular {
+		if err := atomicfile.WriteFile(m.path, m.data, m.mode); err != nil {
+			return fmt.Errorf("put the installed mango back at %s: %w", m.path, err)
+		}
+		return nil
+	}
+	if m.present {
+		return nil
+	}
+	info, err := os.Lstat(m.path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read the path the install wrote at %s: %w", m.path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	if err := os.Remove(m.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove the image's file at %s: %w", m.path, err)
 	}
 	return nil
 }
