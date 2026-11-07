@@ -108,9 +108,11 @@ subjects:
 # execs into the forgejo-runner's dind container in the forgejo namespace. Its
 # grant lives in that namespace, not in gt-sweeps. pods/exec create is not
 # bounded to that container: RBAC can name only a fixed pod and has no field for
-# a container, while each runner pod's name is minted per Job, so the rule
-# reaches every pod in forgejo, Forgejo itself included (gt-11e5gm). The trim's
-# own selection of the runner pod is what keeps its exec there.
+# a container, while the forgejo-runner Deployment names each pod when its
+# ReplicaSet creates it, so the rule reaches every pod in forgejo, Forgejo itself
+# included (gt-11e5gm). The trim selects the runner pod by label and execs into
+# its dind container (internal/daemon/ci_cache_trim.go); RBAC does not enforce
+# that selection.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
