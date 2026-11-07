@@ -301,12 +301,22 @@ chmod +x "$TMP/bin/curl"
 # deadline depend on the stub's script of states, never on the host's clock.
 # A form either stub does not model fails loudly rather than falling back to
 # real time, so a probe change that adds one is caught here.
+# Each status read moves the clock one second, so a poll whose deadline is
+# reached makes at most STUB_READ_BUDGET reads (the probe's --timeout). Once a
+# read is past that budget, the clock reads and the waits fail: the probe did
+# not stop on its clock, and the case ends at that call instead of polling on.
 CLOCK_START=1767323045 # 2026-01-02T03:04:05Z, the instant the record stub names
 cat >"$TMP/bin/date" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
 case "$*" in
-  "+%s"|"-u +%s") cat "$STUB_STATE/clock" ;;
+  "+%s"|"-u +%s")
+    n=$(cat "$STUB_STATE/status-calls" 2>/dev/null || echo 0)
+    if [ "$n" -gt "$STUB_READ_BUDGET" ]; then
+      echo "stub clock stuck at $(cat "$STUB_STATE/clock"): status read $n is past the $STUB_READ_BUDGET reads its deadline allows" >&2
+      exit 1
+    fi
+    cat "$STUB_STATE/clock" ;;
   "-u +%Y-%m-%dT%H:%M:%SZ") printf '2026-01-02T03:04:05Z' ;;
   *) echo "stub date: unhandled form: $*" >&2; exit 1 ;;
 esac
@@ -316,6 +326,11 @@ chmod +x "$TMP/bin/date"
 cat >"$TMP/bin/sleep" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
+n=$(cat "$STUB_STATE/status-calls" 2>/dev/null || echo 0)
+if [ "$n" -gt "$STUB_READ_BUDGET" ]; then
+  echo "stub clock stuck at $(cat "$STUB_STATE/clock"): status read $n is past the $STUB_READ_BUDGET reads its deadline allows" >&2
+  exit 1
+fi
 printf '%s\n' "${1:-0}" >> "$STUB_STATE/sleeps"
 STUB
 chmod +x "$TMP/bin/sleep"
@@ -345,9 +360,15 @@ HOOK
 chmod +x "$TMP/hook-allow"
 
 # run_probe [ARGS...] runs the probe against the stubs, prints its combined
-# output, and returns its exit code (the callers read it from $?).
+# output, and returns its exit code (the callers read it from $?). The read
+# budget is the --timeout the probe is given (its default, 1200, when none is
+# given), unless the case sets STUB_READ_BUDGET itself.
 run_probe() {
-  local out rc
+  local out rc timeout=1200 prev="" arg
+  for arg in "$@"; do
+    [ "$prev" = --timeout ] && timeout=$arg
+    prev=$arg
+  done
   out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN \
     -u FORGEJO_API_URL -u FORGEJO_URL \
     HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
@@ -355,6 +376,7 @@ run_probe() {
     STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_CONTEXT="${STUB_CONTEXT:-ci / gate (push)}" \
     STUB_GATE_YML="${STUB_GATE_YML:-$TMP/gate.yml}" \
     STUB_HOOK="${STUB_HOOK:-}" STUB_REPO_LACKS_SHA="${STUB_REPO_LACKS_SHA:-}" \
+    STUB_READ_BUDGET="${STUB_READ_BUDGET:-$timeout}" \
     bash "$PROBE" --api-url "$API" --web-url "$WEB" --admin-token-file "$TMP/admin.env" \
     --town-root "${STUB_TOWN_ROOT:-$TOWN}" "$@" 2>&1)
   rc=$?
@@ -546,6 +568,19 @@ if [ "$rc" != 0 ]; then pass "a stuck stub clock exits non-zero"; else fail "a s
 check "the stuck stub clock is named" contains "stub clock stuck at" "$out"
 check "the poll ends at the first read that does not advance the clock" test "$(count_calls GET /commits/)" = 1
 
+echo "=== a poll that reads past its deadline's allowance fails at the stub clock ==="
+# STUB_READ_BUDGET=2 gives the poll two reads, where --timeout 20 would allow
+# twenty. The clock still advances, so only the stub's read budget can stop the
+# poll: the first wait or clock read after the third read fails loudly.
+fresh
+printf 'pending\n' > "$STATE/status-plan"
+out=$(STUB_READ_BUDGET=2 run_probe rig --repo acme/rig --timeout 20 --poll-interval 1); rc=$?
+if [ "$rc" != 0 ]; then pass "a poll past its read budget exits non-zero"; else fail "a poll past its read budget exits non-zero (rc=$rc)" "$out"; fi
+check "the stuck stub clock is named past the budget" contains "stub clock stuck at" "$out"
+check "the poll ends at the first read past the budget" test "$(count_calls GET /commits/)" = 3
+check "the probe branch is deleted after a budget failure" test "$(deleted)" = "land/probe-rig"
+check "a budget failure writes no record" test ! -e "$CFG/gt/probe-rig.record"
+
 echo "=== a status that has not appeared is the same as pending ==="
 fresh
 printf 'absent\nsuccess\n' > "$STATE/status-plan"
@@ -665,7 +700,7 @@ out=$(cd "$SCRIPT_DIR/.." && env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_ADMIN_ENV \
   HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   STUB_ADMIN_TOKEN="$BROKER_TOKEN" STUB_SECRETS="$BROKER_TOKEN" \
-  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" \
+  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" STUB_READ_BUDGET=20 \
   bash "$PROBE" rig --api-url "$API" --web-url "$WEB" --repo acme/rig \
   --town-root "$TOWN" --timeout 20 --poll-interval 1 2>&1); rc=$?
 if [ "$rc" = 0 ]; then pass "a run under the broker's token exits 0"; else fail "a run under the broker's token exits 0 (rc=$rc)" "$out"; fi
@@ -687,7 +722,7 @@ out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_ENV \
   HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
-  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" \
+  STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" STUB_READ_BUDGET=20 \
   bash "$PROBE" rig --api-url "$API" --web-url "$WEB" --repo acme/rig \
   --town-root "$TOWN" --timeout 20 --poll-interval 1 2>&1); rc=$?
 if [ "$rc" = 0 ]; then pass "a run with the override in the environment exits 0"; else fail "a run with the override in the environment exits 0 (rc=$rc)" "$out"; fi
