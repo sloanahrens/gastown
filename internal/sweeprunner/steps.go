@@ -38,6 +38,8 @@ type StepRunFunc func(cmd *exec.Cmd) (stdout, stderr []byte, err error)
 // twice, with stepRetryPause on clock between the attempts; a step that fails
 // both times reports both attempts. A failed attempt's message carries the
 // last stepTailLines lines of its output, with token-looking values redacted.
+// A run canceled during that pause stops there with the failed attempt's exit
+// status, and never runs the second attempt (gt-dq6qpq).
 func RunSteps(ctx context.Context, clock clockwork.Clock, run StepRunFunc, steps []Step) (string, int) {
 	var b strings.Builder
 	for _, step := range steps {
@@ -48,11 +50,16 @@ func RunSteps(ctx context.Context, clock clockwork.Clock, run StepRunFunc, steps
 		if step.Retry {
 			attempts = 2
 		}
+		var failedCode int
 		for attempt := 1; attempt <= attempts; attempt++ {
 			if attempt > 1 {
 				select {
 				case <-clock.After(stepRetryPause):
 				case <-ctx.Done():
+				}
+				if ctx.Err() != nil {
+					fmt.Fprintf(&b, "sweep-run: %s not retried: %v\n", strings.Join(step.Argv, " "), ctx.Err())
+					return b.String(), failedCode
 				}
 			}
 			cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...) //nolint:gosec // G204: the argv a Backend rendered from a validated Spec, run directly and never through a shell
@@ -75,6 +82,7 @@ func RunSteps(ctx context.Context, clock clockwork.Clock, run StepRunFunc, steps
 				break
 			}
 			code := exitStatus(err)
+			failedCode = code
 			if step.Retry {
 				fmt.Fprintf(&b, "sweep-run: %s failed on attempt %d of %d (exit %d): %v\n", strings.Join(step.Argv, " "), attempt, attempts, code, err)
 			} else {

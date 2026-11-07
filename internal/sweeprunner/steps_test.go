@@ -164,6 +164,37 @@ func TestSweepSyncCopyRetriesOnce(t *testing.T) {
 	}
 }
 
+// TestSweepSyncCopyCanceledDuringPauseIsNotRetried: a run canceled while a
+// Retry step waits out its pause does not run the second attempt, and reports
+// the failed first attempt rather than a clean exit. The fake clock's pause
+// never ends unless advanced, so only the cancellation can end the wait.
+func TestSweepSyncCopyCanceledDuringPauseIsNotRetried(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	copies := 0
+	fake := &fakeSteps{answer: func(argv []string) stepAnswer {
+		if slices.Contains(argv, "cp") {
+			copies++
+			if copies == 1 {
+				cancel()
+				return stepAnswer{stderr: "error: tar: file changed as we read it\n", err: exitError{code: 1}}
+			}
+		}
+		return stepAnswer{}
+	}}
+	clock := clockwork.NewFakeClockAt(time.Date(2026, time.November, 7, 0, 0, 0, 0, time.UTC))
+
+	out, code := RunSteps(ctx, clock, fake.run, []Step{syncCopyStep(), syncExecStep()})
+
+	if code == 0 {
+		t.Errorf("exit code = 0 for a copy that failed and was cut short by cancellation:\n%s", out)
+	}
+	if copies != 1 {
+		t.Errorf("the copy ran %d times, want once: a canceled run does not retry", copies)
+	}
+}
+
 // TestSweepSyncOtherStepsAreNotRetried is the rest of the sync stage: a create,
 // a wait or an exec that fails is attempted once, and the run stops there.
 func TestSweepSyncOtherStepsAreNotRetried(t *testing.T) {
