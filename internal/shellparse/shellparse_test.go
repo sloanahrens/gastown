@@ -497,6 +497,8 @@ func TestParseUnparseableNamesConstruct(t *testing.T) {
 		{name: "stray closing parenthesis", command: "echo )", want: "unbalanced parenthesis"},
 		{name: "unterminated single quote", command: "echo 'oops", want: "unterminated quote"},
 		{name: "unterminated double quote", command: `echo "oops`, want: "unterminated quote"},
+		{name: "unterminated single quote after a CR LF comment line", command: "echo 'x # n \\\r\nls", want: "unterminated quote"},
+		{name: "comment backslash before CR LF", command: "bash -c 'git reset --hard' # n \\\r\nls", want: "comment ending in a backslash before a CR LF line end"},
 		{name: "unterminated command substitution", command: "echo $(echo", want: "unterminated command substitution"},
 		{name: "unterminated parameter expansion", command: "echo ${x", want: "unterminated parameter expansion"},
 		{name: "unterminated process substitution", command: "echo <(x", want: "unterminated process substitution"},
