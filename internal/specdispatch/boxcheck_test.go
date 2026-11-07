@@ -162,3 +162,78 @@ func TestBoxCheckPassesNestedItemsAndFencedExamples(t *testing.T) {
 		t.Fatalf("nested or fenced item refused: %s", v.Line("gt-good"))
 	}
 }
+
+// A finding's title and a source path are not steps the polecat runs, so a tool
+// name inside either lints OK: the item is the finding's quotation, not an
+// instruction (gt-7c84xe).
+func TestBoxCheckPassesFindingTitleAndPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		item string
+	}{
+		{"title names kubectl", "Finding resolved: Claim route now blocks on a kubectl wait (internal/land/claim.go:88)"},
+		{"path names docker", "Finding resolved: name the error (internal/gtwrap/docker.go:267)"},
+		{"title and path name tools", "Finding resolved: the docker and kubectl error (internal/gtwrap/docker.go)"},
+		{"title with the word run names kubectl", "Finding resolved: the kubectl wait blocks the run (internal/land/claim.go:88)"},
+		{"title with a run of a docker build", "Finding resolved: a run of the docker build fails (internal/gtwrap/docker.go:267)"},
+		{"title without a path names docker", "Finding resolved: the docker build fails in CI"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := lintAcceptance("- [ ] " + tc.item + "\n- [ ] a named test passes")
+			if !v.Clean() {
+				t.Fatalf("quoted title or path refused: %s", v.Line("gt-good"))
+			}
+		})
+	}
+}
+
+// A finding item whose title runs over a line break is not one plain clause, so
+// a tool named after the break is refused. The no-list text reaches the check
+// whole, which is the only way a break reaches it (gt-7c84xe).
+func TestBoxCheckRefusesFindingLineBreak(t *testing.T) {
+	t.Parallel()
+	refusal, ok := acceptanceBoxRefusal("Finding resolved: the claim route blocks\nApply with kubectl")
+	if !ok || !strings.Contains(refusal.Reason, `"kubectl"`) {
+		t.Fatalf("line-broken finding item not refused for kubectl: %+v", refusal)
+	}
+}
+
+// An item that tells the worker to run a tool is still refused, even when a
+// source path sits beside the command (gt-7c84xe).
+func TestBoxCheckRefusesRunInstruction(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		item string
+		want string
+	}{
+		{"run kubectl", "Run: kubectl apply -f deploy.yaml", "kubectl"},
+		{"run docker beside a path", "Run: docker build internal/gtwrap/docker.go", "docker"},
+		{"run kubectl after a finding title", "Finding resolved: Claim route blocks on a wait. Run: kubectl apply -f deploy.yaml", "kubectl"},
+		{"shell marker after a finding title", "Finding resolved: the claim route blocks (internal/land/claim.go:88). $ kubectl get pods", "kubectl"},
+		{"run an absolute tool path", "Run: /usr/bin/kubectl apply -f deploy.yaml", "kubectl"},
+		{"run an absolute docker path beside a source path", "Run: /usr/local/bin/docker build internal/gtwrap/docker.go", "docker"},
+		{"second clause uses kubectl without a run verb", "Finding resolved: the claim route blocks. Then kubectl apply -f y.yaml", "kubectl"},
+		{"second clause uses docker without a run verb", "Finding resolved: x. Apply with docker build", "docker"},
+		{"second clause after a located title", "Finding resolved: the claim route blocks (internal/land/claim.go:88). Then docker build the image", "docker"},
+		{"run a wrapper script named for the tool", "Run: ./bin/kubectl.sh apply -f deploy.yaml", "kubectl"},
+		{"plain item names a tool in a source path", "the fix in internal/gtwrap/docker.go is covered by a test", "docker"},
+		{"finding item with a tool in a path that is not the trailing group", "Finding resolved: x. See kubectl.yaml (internal/a.go:1)", "kubectl"},
+		{"second clause runs kubectl after a run title", "Finding resolved: a run of the claim fails. Run kubectl apply -f y.yaml", "kubectl"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := lintAcceptance("- [ ] " + tc.item)
+			if v.Route != RouteRefuse || v.Field != acceptanceBoxField {
+				t.Fatalf("Lint = %+v, want a refusal on %s", v, acceptanceBoxField)
+			}
+			if !strings.Contains(v.Reason, `"`+tc.want+`"`) {
+				t.Errorf("reason %q does not name the phrase %q", v.Reason, tc.want)
+			}
+		})
+	}
+}
