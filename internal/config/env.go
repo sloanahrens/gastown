@@ -447,8 +447,10 @@ var unforwardedCredentialEnvVars = []string{
 	// GT_DOLT_PASSWORD is deliberately not listed: the container's gt reaches
 	// the host Dolt with it, so it must cross. CLAUDE_CODE_CLIENT_KEY is not
 	// listed either: its value is a path to the mTLS client key file, which the
-	// spawn passthrough carries on purpose, and the wrapper never mounts that
-	// file, so the path alone reaches nothing in the container.
+	// spawn passthrough carries on purpose. The wrapper adds no mount for that
+	// file: it mounts the town root and the derived hm config and nothing else,
+	// so the path reaches a file in the container only when the key sits under
+	// the town root.
 }
 
 // UnforwardedCredentialEnvVars names the credentials no spawn path takes from

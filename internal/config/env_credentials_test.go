@@ -114,3 +114,14 @@ func TestUnforwardedCredentialListHoldsTheOAuthToken(t *testing.T) {
 		t.Errorf("UnforwardedCredentialEnvVars() does not name CLAUDE_CODE_OAUTH_TOKEN")
 	}
 }
+
+// The Forgejo broker token and the ring key match the GT_ prefix that forwarding
+// keeps, so only the guard list refuses them.
+func TestUnforwardedCredentialListHoldsTheBrokerTokenAndRingKey(t *testing.T) {
+	t.Parallel()
+	for _, k := range []string{"GT_AUTH_FORGEJO_TOKEN", "GT_RING_KEY"} {
+		if !slices.Contains(UnforwardedCredentialEnvVars(), k) {
+			t.Errorf("UnforwardedCredentialEnvVars() does not name %s", k)
+		}
+	}
+}
