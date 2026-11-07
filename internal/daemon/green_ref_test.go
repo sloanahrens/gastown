@@ -91,6 +91,8 @@ type greenRefRecordingRepo struct {
 	daemonGit
 	pushes    []greenRefPush
 	deletes   []string
+	lists     []string
+	dated     []string
 	pushErr   error
 	deleteErr func(branch string) error
 	listErr   func(prefix string) error
@@ -99,6 +101,7 @@ type greenRefRecordingRepo struct {
 }
 
 func (g *greenRefRecordingRepo) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
+	g.lists = append(g.lists, prefix)
 	if g.listErr != nil {
 		if err := g.listErr(prefix); err != nil {
 			return nil, err
@@ -115,6 +118,7 @@ func (g *greenRefRecordingRepo) ListRemoteRefsWithHashes(remote, prefix string) 
 }
 
 func (g *greenRefRecordingRepo) CommitTime(rev string) (time.Time, error) {
+	g.dated = append(g.dated, rev)
 	if g.commitErr != nil {
 		if err := g.commitErr(rev); err != nil {
 			return time.Time{}, err
@@ -326,13 +330,16 @@ func TestGreenRefPublishRefusesARigWithNoForgejoRemote(t *testing.T) {
 
 // A remote the daemon cannot resolve is a refusal too: an unreadable rig
 // config and a remote_url that names none of the repository's remotes each
-// publish nothing, and the cycle keeps its verdict (gt-gg9hv.61).
+// publish nothing, and the cycle keeps its verdict. The log and the item name
+// the failure's class, never the resolution error's text, which names the
+// configured URL and can carry its credential (gt-gg9hv.61, gt-atcddq).
 func TestGreenRefPublishRefusesAnUnresolvableRemote(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name    string
-		prepare func(t *testing.T, fx *greenRefFixture)
-		want    string
+		name      string
+		prepare   func(t *testing.T, fx *greenRefFixture)
+		want      string
+		forbidden string
 	}{
 		{
 			name: "a settings tier that does not decode",
@@ -345,15 +352,17 @@ func TestGreenRefPublishRefusesAnUnresolvableRemote(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: "settings/config.json",
+			want:      "the rig's Forgejo settings could not be read",
+			forbidden: "settings/config.json",
 		},
 		{
 			name: "a remote_url matching no remote",
 			prepare: func(t *testing.T, fx *greenRefFixture) {
 				writeDaemonRigConfigFile(t, filepath.Join(fx.d.config.TownRoot, "gastown"),
-					`{"type":"rig","version":1,"name":"gastown","default_branch":"main","merge_queue":{"forgejo":{"remote_url":"https://forgejo.example/other/repo.git","gate_workflow":"gate","bots":{"landing":"gt-landing"}}}}`)
+					`{"type":"rig","version":1,"name":"gastown","default_branch":"main","merge_queue":{"forgejo":{"remote_url":"https://bot:secret-token@forgejo.example/other/repo.git","gate_workflow":"gate","bots":{"landing":"gt-landing"}}}}`)
 			},
-			want: "matches no git remote",
+			want:      "no git remote matches merge_queue.forgejo.remote_url",
+			forbidden: "secret-token",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -362,14 +371,31 @@ func TestGreenRefPublishRefusesAnUnresolvableRemote(t *testing.T) {
 			tc.prepare(t, fx)
 			sha := fx.commit(t, "main")
 			fx.rec.green()
-			if !fx.runCycle(t, sha) {
-				t.Fatal("the refused publish changed the cycle's verdict")
+			// The third refused cycle raises the item whose summary carries
+			// the detail, so the check covers both the line and the item.
+			for i := 0; i < 3; i++ {
+				if !fx.runCycle(t, sha) {
+					t.Fatal("the refused publish changed the cycle's verdict")
+				}
 			}
 			if len(fx.git.pushes) != 0 {
 				t.Errorf("pushes = %+v, want none when the remote cannot be resolved", fx.git.pushes)
 			}
 			if logs := fx.logs.String(); !strings.Contains(logs, tc.want) {
 				t.Errorf("logs = %q, want the refusal naming %q", logs, tc.want)
+			}
+			if logs := fx.logs.String(); strings.Contains(logs, tc.forbidden) {
+				t.Errorf("logs = %q, want the resolution error's text kept out", logs)
+			}
+			items := greenRefItems(t, fx.d)
+			if len(items) != 1 || items[0].Key != "green-ref-push:gastown" {
+				t.Fatalf("items = %+v, want one push item after three refused cycles", items)
+			}
+			if !strings.Contains(items[0].Summary, tc.want) {
+				t.Errorf("summary = %q, want it naming %q", items[0].Summary, tc.want)
+			}
+			if strings.Contains(items[0].Summary, tc.forbidden) {
+				t.Errorf("summary = %q, want the resolution error's text kept out", items[0].Summary)
 			}
 		})
 	}
@@ -427,6 +453,37 @@ func TestGreenRefIsIdempotentAndNeverForced(t *testing.T) {
 		}
 		if items[0].Kind != attention.KindGreenRef || items[0].Severity != attention.SeverityLow {
 			t.Errorf("item = %+v, want a low green-ref item", items[0])
+		}
+	})
+
+	// The conflict is about the tip the sweep could not mark. Once the rig
+	// publishes a different commit the image build is marked, so the old
+	// tip's item must not stand: nothing else would ever clear it, because
+	// the ref is never force-updated (gt-atcddq).
+	t.Run("a conflict clears when the rig publishes a different commit", func(t *testing.T) {
+		t.Parallel()
+		fx := newGreenRefFixture(t, now)
+		first := fx.commit(t, "main")
+		other := fx.f.Commit(t, fx.remote, "someone-else", "another commit", map[string]string{"o.txt": "other\n"})
+		fx.f.SetRef(t, fx.remote, "refs/heads/"+greenRefName(first), other)
+		fx.rec.green()
+		if !fx.runCycle(t, first) {
+			t.Fatal("the cycle deferred")
+		}
+		conflictKey := "green-ref-conflict:gastown:" + greenRefShortSHA(first)
+		if items := greenRefItems(t, fx.d); len(items) != 1 || items[0].Key != conflictKey {
+			t.Fatalf("items = %+v, want the conflict item keyed %q", items, conflictKey)
+		}
+
+		next := fx.commit(t, "main")
+		if !fx.runCycle(t, next) {
+			t.Fatal("the cycle deferred")
+		}
+		if got := fx.f.Ref(fx.remote, "refs/heads/"+greenRefName(next)); got != next {
+			t.Errorf("remote %s = %q, want the newly green tip %q", greenRefName(next), got, next)
+		}
+		if items := greenRefItems(t, fx.d); len(items) != 0 {
+			t.Errorf("items = %+v, want none after the rig published %s", items, shortSHA(next))
 		}
 	})
 }
@@ -711,6 +768,41 @@ func TestGreenRefRetentionKeepsTheNewest20(t *testing.T) {
 			t.Errorf("deletes = %v, want the one green ref past the newest 20", fx.git.deletes)
 		}
 	})
+}
+
+// Retention runs only after a push. The unchanged-main heartbeat retries the
+// publish, and with the ref already at the commit there is no write, so the
+// listing that dates every green ref is not run (gt-atcddq).
+func TestGreenRefUnchangedHeartbeatSkipsRetention(t *testing.T) {
+	t.Parallel()
+	fx := newGreenRefFixture(t, atHour(time.Now(), 15))
+	sha := fx.commit(t, "main")
+	fx.rec.green()
+	if !fx.runCycle(t, sha) {
+		t.Fatal("the cycle deferred")
+	}
+	if len(fx.git.pushes) != 1 {
+		t.Fatalf("pushes = %+v, want the first cycle's push", fx.git.pushes)
+	}
+
+	// The next heartbeat sees the same origin/main: the publish is retried,
+	// finds the ref at the commit, and writes nothing.
+	fx.git.lists = nil
+	fx.git.dated = nil
+	if !fx.runCycle(t, sha) {
+		t.Fatal("the unchanged heartbeat changed the cycle's verdict")
+	}
+	if len(fx.git.pushes) != 1 {
+		t.Errorf("pushes = %d, want the idempotent retry to push nothing", len(fx.git.pushes))
+	}
+	for _, prefix := range fx.git.lists {
+		if prefix == greenRefPrefix {
+			t.Errorf("listed %q on an unchanged heartbeat: no push was made, so retention has nothing to prune", prefix)
+		}
+	}
+	if len(fx.git.dated) != 0 {
+		t.Errorf("dated %v on an unchanged heartbeat, want no retention work", fx.git.dated)
+	}
 }
 
 // seedGreenRefs publishes n older green refs in the rig's repository and on
