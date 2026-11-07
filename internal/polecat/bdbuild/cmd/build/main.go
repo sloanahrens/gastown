@@ -22,10 +22,20 @@ import (
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	// The installed bd, read where this command runs and with the BEADS target
+	// variables stripped: the report names bd, not a database.
+	installed := beads.NewPlain("", beads.StripBDTargetEnv(os.Environ()))
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, installed, compileBD))
 }
 
-func run(args []string, stdout, stderr io.Writer) int {
+// compileBD is the production compile: the real git and go.
+func compileBD(opt bdbuild.Options) (string, error) {
+	return bdbuild.Compile(opt, bdbuild.ExecGit, bdbuild.ExecGo)
+}
+
+// run builds the bd and prints its path. installed is the bd the host runs and
+// compile does the build; main passes the real ones, a test passes fakes.
+func run(args []string, stdout, stderr io.Writer, installed bdbuild.Versioner, compile func(bdbuild.Options) (string, error)) int {
 	fs := flag.NewFlagSet("build", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	src := fs.String("src", "", "the beads checkout the commit is built from")
@@ -40,20 +50,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	// The installed bd, read where this command runs and with the BEADS target
-	// variables stripped: the report names bd, not a database. One read answers
-	// both Commit and the build id Compile stamps, so the image's bd prints the
-	// host's id for the same commit (gt-7qinix).
-	info, versionErr := beads.NewPlain("", beads.StripBDTargetEnv(os.Environ())).Version()
+	// One read of the installed bd answers both Commit and the build id Compile
+	// stamps, so the image's bd prints the host's id for the same commit
+	// (gt-7qinix).
+	info, versionErr := installed.Version()
 	rev, err := bdbuild.Commit(*commit, oneVersion{info: info, err: versionErr})
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1
 	}
-	full, err := bdbuild.Compile(bdbuild.Options{
+	full, err := compile(bdbuild.Options{
 		Src: *src, Out: *out, Commit: rev, BuildDir: *buildDir,
 		InstalledBuildID: info.BuildID, InstalledCommit: info.Commit,
-	}, bdbuild.ExecGit, bdbuild.ExecGo)
+	})
 	if err != nil {
 		fmt.Fprintf(stderr, "polecat-image: %v\n", err)
 		return 1
