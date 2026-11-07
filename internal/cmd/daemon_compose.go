@@ -99,8 +99,11 @@ type daemonComposeDeps struct {
 	// through. Nil is the host's filesystem; a test supplies a fake that records
 	// every call and refuses a content read (gt-gg9hv.66).
 	secretsFS templates.SecretFS
-	files     composeFiles
-	out       io.Writer
+	// hmConfig reads the Mac's hm config the container's copy is derived from.
+	// configDir is --config-dir; empty means the config directory's default.
+	hmConfig func(configDir string) ([]byte, error)
+	files    composeFiles
+	out      io.Writer
 	// errOut is where a warning goes, apart from the compose file on out: the
 	// rendered file must stay the whole of what --print prints.
 	errOut io.Writer
@@ -112,6 +115,9 @@ type daemonComposeDeps struct {
 type composeFiles struct {
 	mkdirAll func(dir string) error
 	write    func(path string, content []byte) error
+	// writePrivate writes a file its owner alone reads, which the derived hm
+	// config needs: its database URL holds the password.
+	writePrivate func(path string, content []byte) error
 }
 
 // doltEndpointResolver resolves a town's Dolt endpoint for a process in or out
@@ -131,7 +137,7 @@ func containerDoltHost(resolve doltEndpointResolver) func(townRoot string) (stri
 
 // realDaemonComposeDeps is the host's.
 func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
-	return daemonComposeDeps{
+	deps := daemonComposeDeps{
 		findTown: workspace.FindFromCwdOrError,
 		// The settings are read through the control the supervisor and the
 		// cutover refuse from, so this command refuses the same towns they do.
@@ -156,12 +162,46 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 			return templates.RenderOMConfig(templates.DefaultOMConfigSettings())
 		},
 		files: composeFiles{
-			mkdirAll: func(dir string) error { return os.MkdirAll(dir, 0o755) },
-			write:    daemonimage.WriteComposeFile,
+			mkdirAll:     func(dir string) error { return os.MkdirAll(dir, 0o755) },
+			write:        daemonimage.WriteComposeFile,
+			writePrivate: templates.WriteHMConfigFile,
 		},
 		out:    out,
 		errOut: os.Stderr,
 	}
+	// The Mac's hm config holds the database password, so it is read through the
+	// same seam the command reads every host file through (gt-gg9hv.66).
+	deps.hmConfig = func(configDir string) ([]byte, error) {
+		path, err := hostHMConfigPath(configDir, os.Getenv, os.UserHomeDir)
+		if err != nil {
+			return nil, err
+		}
+		return deps.readFile(path)
+	}
+	return deps
+}
+
+// hostHMConfigPath is where the Mac's hm config lives: <config-dir>/hm-config.json
+// when the operator names the config directory, else $XDG_CONFIG_HOME/gt's and
+// else ~/.config/gt's, the directory the render mounts at LiveConfigDirPath.
+func hostHMConfigPath(configDir string, getenv func(string) string, homeDir func() (string, error)) (string, error) {
+	var path string
+	switch {
+	case configDir != "":
+		path = filepath.Join(configDir, "hm-config.json")
+	case getenv("XDG_CONFIG_HOME") != "":
+		path = filepath.Join(getenv("XDG_CONFIG_HOME"), "gt", "hm-config.json")
+	default:
+		home, err := homeDir()
+		if err != nil {
+			return "", fmt.Errorf("the hm config directory cannot be found without HOME: %w", err)
+		}
+		path = filepath.Join(home, ".config", "gt", "hm-config.json")
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("the Mac's hm config path %q is not absolute, so it would be read from the working directory", path)
+	}
+	return path, nil
 }
 
 // containerOMConfigRP is where the derived om config is written: under the town's
@@ -174,6 +214,13 @@ func containerOMConfigPath(townRoot string) string {
 	return filepath.Join(townRoot, filepath.FromSlash(containerOMConfigRP))
 }
 
+// containerHMConfigPath is the host path of the derived hm config, beside the om
+// config the same write derives. The town bind carries it into the container,
+// and the render mounts it at the path HM_CONFIG names (gt-yjzepk.13).
+func containerHMConfigPath(townRoot string) string {
+	return filepath.Join(townRoot, filepath.FromSlash(templates.ContainerHMConfigRP))
+}
+
 // writeDaemonComposeFile writes content to path, making the compose file's
 // directory first: it lives under the town's daemon/ directory, which a town
 // that has never rendered it does not have.
@@ -182,6 +229,16 @@ func writeDaemonComposeFile(files composeFiles, path string, content []byte) err
 		return err
 	}
 	return files.write(path, content)
+}
+
+// writeDaemonPrivateFile writes content to path through the owner-only seam,
+// making its directory first: the one file it writes is the hm config, whose
+// database URL carries the password.
+func writeDaemonPrivateFile(files composeFiles, path string, content []byte) error {
+	if err := files.mkdirAll(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return files.writePrivate(path, content)
 }
 
 // newDaemonComposeCmd builds `gt daemon compose` over run, which receives the
@@ -224,6 +281,16 @@ XDG path om reads, so the reviewer runs its backend through the container's
 claude-exec with the token mount, and never a bare claude with no credential.
 The config names the token's container path, not the host's, and carries no
 credential.
+
+Every write derives the container's hm config from the Mac's, which must exist:
+hm has no environment override for its database URL, so a copy still naming
+localhost would reach the container itself. The Mac's file is
+<config-dir>/hm-config.json when --config-dir names the directory, else
+$XDG_CONFIG_HOME/gt's, else ~/.config/gt's. The derived file is
+<town>/.runtime/container/hm-config.json, mode 0600; the render mounts it
+read-only where the container's HM_CONFIG points and sets that variable. A file
+that cannot be read or parsed refuses the write, and its contents never reach
+this command's output or an error; --print derives it and writes nothing.
 
 --forge-host and --forge-token-file give the container's git the Forgejo
 credential helper, so the landing worker's pushes carry the landing bot's token.
@@ -408,6 +475,24 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 			return fmt.Errorf("deriving the om config, and no compose file was written: %w", err)
 		}
 	}
+	// The hm config is derived from the Mac's, whichever directory names it: an
+	// unreadable or unparsable one refuses, since a render that left hm the Mac's
+	// file would send it to the container's own loopback (gt-yjzepk.13).
+	hostHMConfig, err := d.hmConfig(configDir)
+	if err != nil {
+		return fmt.Errorf("reading the Mac's hm config, and no compose file was written: %w", err)
+	}
+	hmConfig, err := templates.RenderHMConfig(hostHMConfig)
+	if err != nil {
+		// Name the file the form came from; the error itself names the form and
+		// never the database password.
+		src, pathErr := hostHMConfigPath(configDir, os.Getenv, os.UserHomeDir)
+		if pathErr != nil {
+			src = "the Mac's hm config"
+		}
+		return fmt.Errorf("deriving the hm config from %s, and no compose file was written: %w", src, err)
+	}
+	hmConfigFile := containerHMConfigPath(townRoot)
 	kubeconfig := strings.TrimSpace(f.kubeconfig)
 	var overlay []byte
 	var kubeconfigFiles []string
@@ -444,6 +529,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		DoltHost:           host,
 		OMTokenFile:        omTokenFile,
 		OMConfigFile:       omConfigFile,
+		HMConfigFile:       hmConfigFile,
 		ForgeHost:          forgeHost,
 		ForgeTokenFile:     forgeTokenFile,
 		ExtraHosts:         f.extraHosts,
@@ -475,6 +561,9 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		if err := writeDaemonComposeFile(d.files, omConfigFile, omConfig); err != nil {
 			return fmt.Errorf("cannot write the om config, and no compose file was written: %w", err)
 		}
+	}
+	if err := writeDaemonPrivateFile(d.files, hmConfigFile, hmConfig); err != nil {
+		return fmt.Errorf("cannot write the hm config %s, and no compose file was written: %w", hmConfigFile, err)
 	}
 	path := config.ContainerComposeFile(townRoot)
 	if err := writeDaemonComposeFile(d.files, path, content); err != nil {

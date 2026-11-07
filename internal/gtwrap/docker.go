@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,21 @@ const doltHostVar = "BEADS_DOLT_SERVER_HOST"
 // name. It replaces any value the caller forwarded, since a forwarded 127.0.0.1
 // would send bd to the wrong place.
 const doltHostGateway = "host.docker.internal"
+
+// hmConfigVar is the variable hm reads its config file's path from, and
+// hmConfigPath is where the live container mounts the config gt derives from
+// the Mac's, templates.LiveHMConfigPath. hm has no environment override for its
+// database URL, so the Mac's own file would send hm to the container's loopback.
+const (
+	hmConfigVar  = "HM_CONFIG"
+	hmConfigPath = "/run/gt/xdg/gt/hm-config.json"
+)
+
+// hmConfigTownPath is the derived hm config's path under the town root, which is
+// where the compose write leaves it (templates.ContainerHMConfigRP; a test pins
+// the two). A throwaway container does not inherit the compose service's mounts,
+// so rung 2 mounts this file at hmConfigPath itself.
+const hmConfigTownPath = ".runtime/container/hm-config.json"
 
 // composeService is the compose service that runs the daemon.
 const composeService = "daemon"
@@ -65,6 +81,9 @@ type Docker struct {
 	// ReadFile reads the compose file. The file is read on every call so an edit
 	// to it takes effect without restarting the wrapper.
 	ReadFile func(path string) ([]byte, error)
+	// Stat reads the derived hm config's kind before a throwaway run binds it. Nil
+	// refuses that run: an unwired check is not a pass.
+	Stat func(path string) (fs.FileInfo, error)
 	// ProbeTimeout bounds each probe. Zero means probeTimeout.
 	ProbeTimeout time.Duration
 }
@@ -129,7 +148,11 @@ func (d Docker) Exec(call Call) (int, error) {
 
 // Run runs call in a throwaway container of the daemon image with the town
 // mounted at its own path: rung 2. The entrypoint is replaced by the tool,
-// because the image's entrypoint is the daemon's, not the tool's.
+// because the image's entrypoint is the daemon's, not the tool's. An hm call
+// also mounts the derived config read-only where HM_CONFIG names it, since a
+// throwaway container does not inherit the compose service's mounts. The derived
+// config must be a regular file first: a bind of a missing path makes the engine
+// create a directory there, which hm would read as its config.
 func (d Docker) Run(call Call) (int, error) {
 	svc, err := d.daemonService()
 	if err != nil {
@@ -138,10 +161,18 @@ func (d Docker) Run(call Call) (int, error) {
 	if err := checkCall(call); err != nil {
 		return exitDown, err
 	}
+	hmConfig := filepath.Join(d.Town, filepath.FromSlash(hmConfigTownPath))
 	args := []string{"run", "--rm"}
 	args = append(args, stdioFlags(call)...)
 	args = append(args, callFlags(call)...)
-	args = append(args, "-v", d.Town+":"+d.Town, "--entrypoint", call.Argv[0], svc.Image)
+	args = append(args, "-v", d.Town+":"+d.Town)
+	if call.Argv[0] == "hm" {
+		if err := d.checkHMConfig(hmConfig); err != nil {
+			return exitDown, err
+		}
+		args = append(args, "-v", hmConfig+":"+hmConfigPath+":ro")
+	}
+	args = append(args, "--entrypoint", call.Argv[0], svc.Image)
 	args = append(args, call.Argv[1:]...)
 	return d.Shell.Attach(d.dockerArgv(args...))
 }
@@ -184,6 +215,23 @@ func (d Docker) checkTool(args []string, name, image string) error {
 	}
 	if exit != 0 || strings.TrimSpace(out) == "" {
 		return fmt.Errorf("gtwrap: %s does not answer in the image %s: the check exited %d", name, image, exit)
+	}
+	return nil
+}
+
+// checkHMConfig refuses a throwaway hm run unless path is a regular file. A stat
+// that fails, a directory, and no Stat at all each refuse, and the error names
+// the path and the command that generates it. It never reads the file's contents.
+func (d Docker) checkHMConfig(path string) error {
+	if d.Stat == nil {
+		return fmt.Errorf("gtwrap: no check is wired for the derived hm config %s, so the throwaway hm run is refused; generate it with `gt daemon compose write`", path)
+	}
+	info, err := d.Stat(path)
+	if err != nil {
+		return fmt.Errorf("gtwrap: the derived hm config %s cannot be read (%v), so the throwaway hm run is refused; generate it with `gt daemon compose write`", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("gtwrap: the derived hm config %s is not a regular file, so the throwaway hm run is refused; generate it with `gt daemon compose write`", path)
 	}
 	return nil
 }
@@ -274,15 +322,22 @@ func stdioFlags(call Call) []string {
 }
 
 // callFlags carry the caller's directory and environment into the container. The
-// Dolt host is set last and replaces any forwarded value of the same name.
+// Dolt host is set last, and an hm call also gets hmConfigPath: both name a
+// place inside the container, so neither comes from the caller. hmConfigPath
+// replaces a forwarded HM_CONFIG, which names the Mac's file, so hm reads the
+// container's derived config.
 func callFlags(call Call) []string {
 	flags := []string{"-w", call.Dir}
+	hm := call.Argv[0] == "hm"
 	for _, entry := range call.Env {
 		name, _, _ := strings.Cut(entry, "=")
-		if name == doltHostVar {
+		if name == doltHostVar || name == hmConfigVar {
 			continue
 		}
 		flags = append(flags, "-e", entry)
+	}
+	if hm {
+		flags = append(flags, "-e", hmConfigVar+"="+hmConfigPath)
 	}
 	return append(flags, "-e", doltHostVar+"="+doltHostGateway)
 }

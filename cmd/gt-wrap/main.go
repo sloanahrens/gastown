@@ -84,7 +84,7 @@ func osSurface() surface {
 		stdout:   os.Stdout,
 		stderr:   os.Stderr,
 		newDocker: func(town string) target {
-			return gtwrap.Docker{Town: town, Shell: gtwrap.OSShell{}, ReadFile: os.ReadFile}
+			return gtwrap.Docker{Town: town, Shell: gtwrap.OSShell{}, ReadFile: os.ReadFile, Stat: os.Stat}
 		},
 		executable: os.Executable,
 		newDoctor: func(town string) gtwrap.Doctor {

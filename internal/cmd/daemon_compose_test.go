@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -46,7 +47,18 @@ type composeRig struct {
 	mkdirErr error
 	writeErr error
 	wrote    []string
+	// privateWrote is each path the owner-only seam was given; the derived hm
+	// config is the only file that goes through it.
+	privateWrote []string
 }
+
+// hostHMConfig is the Mac's hm config the rig derives the container's from. Its
+// database URL is loopback, as the live one's is.
+const hostHMConfig = `{
+  "database_url": "postgres://hm:test-password@localhost:5433/hm?sslmode=disable",
+  "embed_url": "http://host.docker.internal:8080/embed",
+  "rerank_url": "http://host.docker.internal:8080/rerank"
+}`
 
 // newComposeRig is a town that names both container fields and reaches its Dolt
 // through the host the container resolves.
@@ -71,6 +83,7 @@ func newComposeRig(t *testing.T) *composeRig {
 		omConfig: func() ([]byte, error) {
 			return templates.RenderOMConfig(templates.DefaultOMConfigSettings())
 		},
+		hmConfig: func(string) ([]byte, error) { return []byte(hostHMConfig), nil },
 		files: composeFiles{
 			mkdirAll: func(dir string) error {
 				if r.mkdirErr != nil {
@@ -81,6 +94,14 @@ func newComposeRig(t *testing.T) *composeRig {
 			},
 			write: func(path string, content []byte) error {
 				r.wrote = append(r.wrote, path)
+				if r.writeErr != nil {
+					return r.writeErr
+				}
+				r.disk[path] = content
+				return nil
+			},
+			writePrivate: func(path string, content []byte) error {
+				r.privateWrote = append(r.privateWrote, path)
 				if r.writeErr != nil {
 					return r.writeErr
 				}
@@ -107,6 +128,7 @@ func (r *composeRig) render(t *testing.T) []byte {
 		TownRoot:      r.town,
 		StopGrace:     templates.MinimumStopGrace,
 		DoltHost:      composeTestDoltHost,
+		HMConfigFile:  containerHMConfigPath(r.town),
 	})
 	if err != nil {
 		t.Fatalf("render: %v", err)
@@ -125,8 +147,12 @@ func TestDaemonComposeWriteWritesTheRender(t *testing.T) {
 	if len(r.wrote) != 1 || r.wrote[0] != r.composePath() {
 		t.Fatalf("wrote %v, want the live compose file %s once", r.wrote, r.composePath())
 	}
-	if want := filepath.Dir(r.composePath()); len(r.made) != 1 || r.made[0] != want {
-		t.Errorf("made directories %v, want %s once", r.made, want)
+	// The derived hm config is written first, then the compose file, each after
+	// its own directory is made.
+	for _, want := range []string{filepath.Dir(containerHMConfigPath(r.town)), filepath.Dir(r.composePath())} {
+		if !slices.Contains(r.made, want) {
+			t.Errorf("made directories %v, want %s", r.made, want)
+		}
 	}
 	got, ok := r.disk[r.composePath()]
 	if !ok {
@@ -405,6 +431,10 @@ func TestDaemonComposeWritePrint(t *testing.T) {
 		t.Error("--print wrote a file")
 		return nil
 	}
+	r.deps.files.writePrivate = func(string, []byte) error {
+		t.Error("--print wrote the hm config")
+		return nil
+	}
 	if err := runDaemonCompose(r.flags, r.deps); err != nil {
 		t.Fatalf("runDaemonCompose: %v", err)
 	}
@@ -421,11 +451,12 @@ func TestDaemonComposeWritePrint(t *testing.T) {
 func TestDaemonComposeWriteRefusesADirectoryItCannotMake(t *testing.T) {
 	t.Parallel()
 	r := newComposeRig(t)
-	// daemon/ is a regular file, so daemon/container/ cannot be made.
+	// daemon/ is a regular file, so .runtime/ cannot be made for the hm config
+	// the write derives before the compose file.
 	r.mkdirErr = errors.New("not a directory")
 	err := runDaemonCompose(r.flags, r.deps)
-	if err == nil || !strings.Contains(err.Error(), r.composePath()) {
-		t.Fatalf("error = %v, want it to name %s", err, r.composePath())
+	if want := containerHMConfigPath(r.town); err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want it to name %s", err, want)
 	}
 	if len(r.wrote) != 0 {
 		t.Errorf("a directory it cannot make still wrote %v", r.wrote)
@@ -438,6 +469,7 @@ func TestDaemonComposeWriteReportsAWriteFailure(t *testing.T) {
 	t.Parallel()
 	r := newComposeRig(t)
 	failure := errors.New("disk full")
+	r.deps.files.writePrivate = func(string, []byte) error { return nil }
 	r.writeErr = failure
 	err := runDaemonCompose(r.flags, r.deps)
 	if !errors.Is(err, failure) || !strings.Contains(err.Error(), r.composePath()) {
@@ -946,6 +978,202 @@ func TestRealDaemonComposeIsDir(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Errorf("isDir(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// The write derives the container's hm config from the Mac's, writes it under
+// the town through the owner-only seam, and the render mounts it where HM_CONFIG
+// names it. The database password is in neither the compose file nor the output.
+func TestDaemonComposeWriteDerivesTheHMConfig(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	if err := runDaemonCompose(r.flags, r.deps); err != nil {
+		t.Fatalf("runDaemonCompose: %v", err)
+	}
+	path := filepath.Join(r.town, ".runtime", "container", "hm-config.json")
+	if !slices.Equal(r.privateWrote, []string{path}) {
+		t.Fatalf("owner-only writes %v, want the hm config at %s", r.privateWrote, path)
+	}
+	var derived map[string]string
+	if err := json.Unmarshal(r.disk[path], &derived); err != nil {
+		t.Fatalf("the derived hm config does not parse: %v", err)
+	}
+	if want := "postgres://hm:test-password@host.docker.internal:5433/hm?sslmode=disable"; derived["database_url"] != want {
+		t.Errorf("database_url = %q, want the loopback host rewritten: %q", derived["database_url"], want)
+	}
+	if want := "http://host.docker.internal:8080/embed"; derived["embed_url"] != want {
+		t.Errorf("embed_url = %q, want it copied unchanged: %q", derived["embed_url"], want)
+	}
+	compose := string(r.disk[r.composePath()])
+	for _, want := range []string{
+		`source: "` + path + `"`,
+		`target: "` + templates.LiveHMConfigPath + `"`,
+		"read_only: true",
+		`HM_CONFIG: "` + templates.LiveHMConfigPath + `"`,
+	} {
+		if !strings.Contains(compose, want) {
+			t.Errorf("the compose file lacks %q:\n%s", want, compose)
+		}
+	}
+	for _, secret := range []string{"test-password", "localhost:5433"} {
+		if strings.Contains(compose, secret) {
+			t.Errorf("the compose file carries %q:\n%s", secret, compose)
+		}
+		for _, out := range []*bytes.Buffer{r.out, r.errOut} {
+			if strings.Contains(out.String(), secret) {
+				t.Errorf("the output carries %q: %q", secret, out.String())
+			}
+		}
+	}
+}
+
+// An hm config the write cannot produce refuses before the compose file, and the
+// message never repeats the database URL, whose password it holds.
+func TestDaemonComposeWriteRefusesAnUnusableHMConfig(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("no such file")
+	cases := []struct {
+		name   string
+		config func(string) ([]byte, error)
+		want   string
+		secret string
+	}{
+		{
+			name:   "unreadable",
+			config: func(string) ([]byte, error) { return nil, boom },
+			want:   "reading the Mac's hm config",
+		},
+		{
+			name:   "unparsable",
+			config: func(string) ([]byte, error) { return []byte(`{"database_url":`), nil },
+			want:   "deriving the hm config",
+		},
+		{
+			name:   "no database_url",
+			config: func(string) ([]byte, error) { return []byte(`{"embed_url": "http://host.docker.internal/x"}`), nil },
+			want:   "database_url is missing",
+		},
+		{
+			name:   "database_url is not a string",
+			config: func(string) ([]byte, error) { return []byte(`{"database_url": 5433}`), nil },
+			want:   "database_url is not a string",
+		},
+		{
+			name: "database_url (URL form) does not parse",
+			config: func(string) ([]byte, error) {
+				return []byte(`{"database_url": "postgres://hm:s3 cret@localhost:5433/hm"}`), nil
+			},
+			want:   "database_url (URL form) does not parse",
+			secret: "s3 cret",
+		},
+		{
+			// A key=value string with a loopback host is rewritten (the render
+			// case below); one this cannot parse is refused, naming the file it
+			// came from and the form, never copied and never the password.
+			name: "a key=value database_url that does not parse names the file and the form",
+			config: func(string) ([]byte, error) {
+				return []byte(`{"database_url": "host=localhost password='s3cret"}`), nil
+			},
+			want:   "hm-config.json",
+			secret: "s3cret",
+		},
+		{
+			name: "a key=value database_url that cannot be rewritten names the form",
+			config: func(string) ([]byte, error) {
+				return []byte(`{"database_url": "host=/var/run/postgresql password=s3cret"}`), nil
+			},
+			want:   "(key=value form) names a unix-socket host",
+			secret: "s3cret",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newComposeRig(t)
+			r.deps.hmConfig = tc.config
+			err := runDaemonCompose(r.flags, r.deps)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.want)
+			}
+			if tc.secret != "" && strings.Contains(err.Error(), tc.secret) {
+				t.Errorf("the error repeats the database password: %v", err)
+			}
+			if len(r.wrote) != 0 || len(r.privateWrote) != 0 {
+				t.Errorf("a refused hm config wrote %v and %v", r.wrote, r.privateWrote)
+			}
+		})
+	}
+}
+
+// A failed owner-only write is the command's error, names the file, and leaves
+// the compose file unwritten.
+func TestDaemonComposeWriteReportsAnHMConfigWriteFailure(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	failure := errors.New("disk full")
+	r.deps.files.writePrivate = func(string, []byte) error { return failure }
+	err := runDaemonCompose(r.flags, r.deps)
+	path := containerHMConfigPath(r.town)
+	if !errors.Is(err, failure) || !strings.Contains(err.Error(), path) {
+		t.Errorf("error = %v, want it to wrap %v and name %s", err, failure, path)
+	}
+	if len(r.wrote) != 0 {
+		t.Errorf("a failed hm config write still wrote %v", r.wrote)
+	}
+}
+
+// The real deps' hm reader follows the host's path rule: a config directory it
+// cannot turn into an absolute path is refused before any file is opened.
+func TestRealDaemonComposeHMConfigRefusesARelativeConfigDir(t *testing.T) {
+	t.Parallel()
+	if _, err := realDaemonComposeDeps(io.Discard).hmConfig("config/gt"); err == nil {
+		t.Fatal("realDaemonComposeDeps().hmConfig accepted a relative config directory")
+	}
+}
+
+// The Mac's hm config is found in the directory --config-dir names, else the
+// XDG config directory, else the home's config directory; with none of them
+// there is no path to read.
+func TestHostHMConfigPath(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("no home")
+	cases := []struct {
+		name      string
+		configDir string
+		xdg       string
+		home      func() (string, error)
+		want      string
+		wantErr   bool
+	}{
+		{name: "the config directory the flag names", configDir: "/host/.config/gt", xdg: "/xdg",
+			home: func() (string, error) { return "/home/operator", nil }, want: "/host/.config/gt/hm-config.json"},
+		{name: "the XDG directory", xdg: "/host/xdg",
+			home: func() (string, error) { return "/home/operator", nil }, want: "/host/xdg/gt/hm-config.json"},
+		{name: "the home directory", home: func() (string, error) { return "/home/operator", nil },
+			want: "/home/operator/.config/gt/hm-config.json"},
+		{name: "no home", home: func() (string, error) { return "", boom }, wantErr: true},
+		{name: "a relative config directory", configDir: "config/gt",
+			home: func() (string, error) { return "/home/operator", nil }, wantErr: true},
+		{name: "a relative XDG directory", xdg: "xdg",
+			home: func() (string, error) { return "/home/operator", nil }, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(name string) string {
+				if name == "XDG_CONFIG_HOME" {
+					return tc.xdg
+				}
+				return ""
+			}
+			got, err := hostHMConfigPath(tc.configDir, getenv, tc.home)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("hostHMConfigPath error = %v, want an error %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("hostHMConfigPath = %q, want %q", got, tc.want)
 			}
 		})
 	}
