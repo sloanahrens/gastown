@@ -481,6 +481,21 @@ cluster with `kubectl --context colima-gt-control apply -f deploy/k8s/sweep-rbac
 `internal/sweeprunner/testdata/rbac-reads.golden`, so a read the plan gains
 without a grant fails the unit test rather than the first live sweep.
 
+### Tier sweep image rigs
+
+`daemon.patrols.tier_sweep.image_rigs` names the rigs whose fully green sweep
+publishes a `green/<sha12>` ref for the image build to build from. The default
+is empty, and a town publishes nothing until the overseer names a rig.
+
+After a fully green sweep of a named rig, the daemon pushes `green/<sha12>` for
+the swept tip to the rig's `merge_queue.forgejo` remote. The push never changes
+the sweep's verdict. A name the town does not register refuses the publish for
+every rig and nothing is pushed, so a typo is logged rather than read as a rig
+that publishes nothing. A named rig with no Forgejo remote is refused the same
+way. If the remote already holds `green/<sha12>` at another commit, the ref is
+not moved and the conflict is logged. A failed push is retried on the next
+cycle. Older green refs are pruned once the newest one is published.
+
 ### Bird Reports
 
 The `bird_reports` patrol (gt-cbsat) raises one attention item per expected
