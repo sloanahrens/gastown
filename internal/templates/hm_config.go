@@ -165,9 +165,12 @@ func containerHMURLForm(raw string) (string, error) {
 		return "", errors.New("lists several hosts in the authority, which this does not rewrite; use one host")
 	}
 	if h := u.Hostname(); h != "" {
-		nh, err := hmHostElement(h)
-		if err != nil {
-			return "", err
+		// A parsed authority cannot name a unix socket (a path does not parse as a
+		// host), so only the loopback test applies here; the host query parameter
+		// below goes through hmHostElement, which refuses a socket path.
+		nh := h
+		if hmLoopback(h) {
+			nh = hmContainerHost
 		}
 		if nh != h {
 			if port := u.Port(); port != "" {

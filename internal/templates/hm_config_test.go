@@ -311,6 +311,10 @@ func TestHMContainerConfigRewritesBothDSNForms(t *testing.T) {
 			dsn: "postgres://hm:s3cret@/hm?host=/var/run/postgresql", wantReason: "(URL form) names a unix-socket host"},
 		{name: "a scheme that is not postgres",
 			dsn: "mysql://hm:s3cret@localhost:3306/hm", wantReason: "(URL form) has a scheme other than postgres"},
+		{name: "URL, a loopback hostaddr would still point at the container",
+			dsn: "postgres://hm:s3cret@db.example.test:5433/hm?hostaddr=127.0.0.1", wantReason: "(URL form) has a loopback hostaddr"},
+		{name: "key=value, a pair with no key",
+			dsn: "=s3cret host=localhost", wantReason: "(key=value form) has a pair with no key"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
