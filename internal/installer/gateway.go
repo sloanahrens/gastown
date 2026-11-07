@@ -26,11 +26,11 @@ const (
 
 // Gateway is the OpenShell gateway's launchd agent step, ported from the
 // deleted shell gateway agent (gt-tpg0p) and the site that calls it
-// (gt-tpg0p.9). The gateway is
-// independent of the gt binary, so every failure here is one WARNING and the
-// install carries on. The agent is bootstrapped only when launchd has not
-// loaded it and never kickstarted: a kickstart drops every live sandbox session
-// the gateway is serving (docs/openshell-gateway.md).
+// (gt-tpg0p.9). The gateway is independent of the gt binary, so every failure
+// here is one WARNING and the install carries on. The agent is bootstrapped
+// only when launchd has not loaded it and never kickstarted: a kickstart drops
+// every live sandbox session the gateway is serving
+// (docs/openshell-gateway.md).
 type Gateway struct {
 	// C carries the exit contract's writers and its command runner.
 	C *Contract
