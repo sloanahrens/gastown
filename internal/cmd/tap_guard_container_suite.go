@@ -1105,7 +1105,7 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 	if !cwdKnown {
 		base = ""
 	}
-	tokens, walkFrom := containerSuiteCarry(proc, tokens, starts, base)
+	tokens, walkFrom, unplacedFrom := containerSuiteCarry(proc, tokens, starts, base)
 	vars := shellVarAssignments(tokens)
 	dirs := make([]containerSuiteDir, len(script.Segments))
 	for i := range script.Segments {
@@ -1114,6 +1114,9 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 			from = at
 		}
 		dir, known := segmentWalkRoot(proc, tokens, from, cwd, vars)
+		// A segment after a directory change that may not run is judged in a
+		// directory the walk cannot name, whatever the walk says (gt-zz1t7g).
+		known = known && starts[i] <= unplacedFrom
 		dirs[i] = containerSuiteDir{dir: dir, known: known && cwdKnown}
 	}
 	payloadDir := func(i int) (string, bool) {
@@ -1321,35 +1324,61 @@ func containerSuiteWalkLine(script shellparse.Script) (tokens []string, starts [
 	return tokens, starts
 }
 
-// containerSuiteCarry rewrites the walk line for the two directory changes the
-// walk (segmentWalkRoot) does not read the way the shell makes them, and
-// returns the rewritten line with walkFrom, which maps a segment's start token
-// to the token its directory is walked up to.
+// containerSuiteCarry rewrites the walk line for the directory changes the walk
+// (segmentWalkRoot) does not read the way the shell makes them. It returns the
+// rewritten line, walkFrom (a segment's start token mapped to the token its
+// directory is walked up to) and unplacedFrom, the index of the first directory
+// change a chain element may skip: the segments after it are unknown.
 //
-// A cd followed by "||" changes the directory only when it succeeds, and then
-// the right-hand side is skipped: "cd A || cd B; go test" runs go in A. The
-// walk drops that change, so the "||" becomes "&&" and the skipped right-hand
-// side's tokens become "true", which the walk does not read as a change. A cd
-// that fails is left for the walk, which already takes the "||" branch. A
-// chain that ends at "&" is left alone: the shell backgrounds it, so no
-// directory carries out of it. "(" and ")" are kept, so the walk still reads
-// a subshell as a subshell.
+// A cd that starts its chain and is followed by "||" changes the directory only
+// when it succeeds, and then the right-hand side is skipped: "cd A || cd B; go
+// test" runs go in A. The walk drops that change, so the "||" becomes "&&" and
+// the skipped right-hand side's tokens become "true". A chain that ends at "&"
+// is left alone: the shell backgrounds it. builtin cd and command cd that start
+// a chain become ";", which the walk reads as the start of a command.
 //
-// builtin cd and command cd make the same change as cd, but the walk reads a cd
-// only where a command starts, so builtin or command ahead of it hides the
-// change. Each of those words becomes ";", a separator the walk reads, which
-// leaves the cd starting a command.
+// A directory change a chain element may skip is not carried: one that follows
+// "||" or "|", one that "||" follows, and any builtin or command cd after a
+// chain element, which the walk does not read there. The shell may run such a
+// change, so it makes the segments after it unknown. A change the shell refuses
+// leaves the directory as it was either way, so the walk reads it as it does.
+// A plain cd after "&&" with no "||" after it is read as the walk reads any
+// "&&" list.
 //
 // A segment in a skipped right-hand side runs only when its cd fails, so it is
-// judged in the directory the shell is in just before that cd (walkFrom), not
-// in the one the skipped cd would have carried.
+// judged in the directory the shell is in just before that cd (walkFrom).
 //
 // Every token keeps its index, so the segment starts still index the line.
-func containerSuiteCarry(proc guardProcess, tokens []string, starts []int, base string) ([]string, map[int]int) {
-	carried := append([]string(nil), tokens...)
+func containerSuiteCarry(proc guardProcess, tokens []string, starts []int, base string) (carried []string, walkFrom map[int]int, unplacedFrom int) {
+	carried = append([]string(nil), tokens...)
 	vars := shellVarAssignments(tokens)
-	walkFrom := map[int]int{}
+	walkFrom = map[int]int{}
+	unplacedFrom = len(carried)
+	// One pass in line order: a skipped right-hand side is rewritten before the
+	// walk reaches it, so only a directory change that is still a change here
+	// is one the shell may run after a chain element.
 	for i := 0; i < len(carried); i++ {
+		if containerSuiteChainBefore(carried, i) {
+			cd := i
+			builtin := false
+			if (carried[i] == "builtin" || carried[i] == "command") && i+1 < len(carried) && carried[i+1] == "cd" {
+				cd = i + 1
+				builtin = true
+			} else if !dirChangeCommands[carried[i]] {
+				continue
+			}
+			sep := cd + 1 + len(commandArgs(carried, cd))
+			orFollows := sep < len(carried) && carried[sep] == "||"
+			orBefore := carried[i-1] == "||" || carried[i-1] == "|"
+			if !builtin && !orFollows && !orBefore {
+				continue
+			}
+			root, _ := cdWalkRoot(proc, carried, cd, base, vars)
+			if _, status := dirChangeTarget(proc, carried[cd], commandArgs(carried, cd), root, vars); status != cdRefused && i < unplacedFrom {
+				unplacedFrom = i
+			}
+			continue
+		}
 		if (carried[i] == "builtin" || carried[i] == "command") && i+1 < len(carried) && carried[i+1] == "cd" && shellCommandStart(carried, i) {
 			carried[i] = ";"
 			continue
@@ -1385,7 +1414,13 @@ func containerSuiteCarry(proc guardProcess, tokens []string, starts []int, base 
 			}
 		}
 	}
-	return carried, walkFrom
+	return carried, walkFrom, unplacedFrom
+}
+
+// containerSuiteChainBefore reports whether the token at i follows "&&", "||"
+// or "|": a command there may not run, or runs in a pipeline's subshell.
+func containerSuiteChainBefore(tokens []string, i int) bool {
+	return i > 0 && (tokens[i-1] == "&&" || tokens[i-1] == "||" || tokens[i-1] == "|")
 }
 
 // containerSuiteChainEnd returns the index of the token that ends the
