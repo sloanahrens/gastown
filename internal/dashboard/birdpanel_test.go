@@ -384,8 +384,9 @@ type drawnNeeds struct {
 }
 
 type drawnNeedsGroup struct {
-	Class string   `json:"cls"`
-	Parts []string `json:"parts"`
+	Class   string   `json:"cls"`
+	Parts   []string `json:"parts"`
+	Classes []string `json:"classes"`
 }
 
 // needsYouWalk reads every details element the page drew under the Birds
@@ -401,7 +402,8 @@ const needsYouWalk = `JSON.stringify((() => {
           summary: c.children.length ? c.children[0].textContent : "",
           groups: c.children.__arr.slice(1).map(g => ({
             cls: g.className,
-            parts: g.children.__arr.map(x => x.textContent)
+            parts: g.children.__arr.map(x => x.textContent),
+            classes: g.children.__arr.map(x => x.className)
           }))
         });
       }
@@ -540,9 +542,12 @@ func TestBirdsPanelNeedsYouStale(t *testing.T) {
 			t.Errorf("a fresh group reads %q, want its name, question and recommendation only", g.Parts)
 		}
 	}
-	stale := ny.Groups[2].Parts
-	if len(stale) != 4 || !strings.HasPrefix(stale[1], "stale: last report ") || len(stale[1]) <= len("stale: last report ") {
-		t.Fatalf("the stale group reads %q, want its name, a stale line with the report time, then its question", stale)
+	stale := ny.Groups[2]
+	if len(stale.Parts) != 4 || stale.Parts[1] != staleLine(t, recent) {
+		t.Fatalf("the stale group reads %q, want its name, the stale line dated and timed to the report, then its question", stale.Parts)
+	}
+	if stale.Classes[1] != "warnc" {
+		t.Errorf("the stale line is drawn %q, want warnc, the amber an overdue report carries", stale.Classes[1])
 	}
 
 	// Only stale items: the fresh count is 0 and the header still says so.
@@ -556,9 +561,27 @@ func TestBirdsPanelNeedsYouStale(t *testing.T) {
 	held["decision_items"] = nil
 	held["decision_items_withheld"] = []string{"credential-assignment"}
 	got := drawBirdsInDOM(t, map[string]any{"birds": []map[string]any{held, asking("crane", "fresh", old)}})[0]
-	if got.Groups[0].Parts[0] != "crane" || got.Groups[1].Parts[0] != "albatross" || !strings.HasPrefix(got.Groups[1].Parts[1], "stale: last report ") {
+	if got.Groups[0].Parts[0] != "crane" || got.Groups[1].Parts[0] != "albatross" || got.Groups[1].Parts[1] != staleLine(t, recent) {
 		t.Errorf("the groups read %+v, want crane first and albatross's stale withheld group after it", got.Groups)
 	}
+
+	// A stale reporter with no report time says so where the date would be,
+	// and the line is drawn as the stale line it is.
+	undated := drawBirdsInDOM(t, map[string]any{"birds": []map[string]any{asking("egret", "stale", "")}})[0]
+	if group := undated.Groups[0]; len(group.Parts) != 4 || group.Parts[1] != "stale: no report time" || group.Classes[1] != "warnc" {
+		t.Errorf("an undated stale group reads %q in %q, want the stale line saying no report time, drawn warnc", group.Parts, group.Classes)
+	}
+}
+
+// staleLine is the stale line the page draws for a report written at iso: the
+// date and the time the page's own formatting gives that instant. The expected
+// text is read off the page, so it holds in whatever zone the test runs in.
+func staleLine(t *testing.T, iso string) string {
+	t.Helper()
+
+	dom := newPageDOM(t)
+	return "stale: last report " + pageExpr(t, dom,
+		`new Date("`+iso+`").toLocaleDateString([], {month: "short", day: "numeric"}) + " " + clock("`+iso+`").slice(0, 5)`)
 }
 
 // A reporter whose every decision item was withheld still reaches the combined
