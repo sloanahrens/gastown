@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -58,11 +59,6 @@ const exitDown = 1
 // signalExitBase is added to a signal's number to give the status of a command
 // that signal killed, as a shell reports it.
 const signalExitBase = 128
-
-// probeWaitDelay is how long Capture waits, after a probe is stopped, for the
-// probe's stdout to close before it closes the pipe itself. A refusal therefore
-// returns within this delay of the deadline.
-const probeWaitDelay = time.Second
 
 // Shell runs the docker command lines the Docker runner plans. The real one runs
 // the docker binary; a test one records the lines. Each argv starts with "docker".
@@ -374,16 +370,37 @@ func (OSShell) Attach(argv []string, env []string) (int, error) {
 	return exitStatus(cmd.Run())
 }
 
-// Capture runs argv and returns its stdout. A probe stopped by ctx exits with a
-// non-zero status, which the caller reads as a refusal.
+// Capture runs argv and returns its stdout. A probe stopped by ctx is a refusal:
+// it exits non-zero, or it returns an error, and its stdout may be cut short.
 func (OSShell) Capture(ctx context.Context, argv []string) (string, int, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
-	// Wait closes the stdout pipe only when every holder of it exits. A child the
-	// engine left running keeps it open, so once ctx stops the probe, Wait would
-	// block on that child. WaitDelay closes the pipe after probeWaitDelay instead.
-	cmd.WaitDelay = probeWaitDelay
-	out, err := cmd.Output()
-	return probeResult(out, err)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", exitDown, err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", exitDown, err
+	}
+	// Reading to EOF waits for every holder of stdout, and a child the engine left
+	// running keeps it open. Once ctx ends, closing our end ends the read, so the
+	// probe returns at its bound, and Wait does not block on that child.
+	stop := context.AfterFunc(ctx, func() { _ = stdout.Close() })
+	out, readErr := io.ReadAll(stdout)
+	stop()
+	waitErr := cmd.Wait()
+	if ctx.Err() != nil {
+		// The bound stopped the probe, so readErr is the stop closing the pipe and is
+		// not reported. A probe that exited 0 before the stop can still come back from
+		// Wait with no error; it is refused, since its output may be cut short.
+		if waitErr == nil {
+			return string(out), exitDown, nil
+		}
+		return probeResult(out, waitErr)
+	}
+	if readErr != nil {
+		return "", exitDown, readErr
+	}
+	return probeResult(out, waitErr)
 }
 
 // probeResult reads a finished probe: its stdout and exit status, or an error when
