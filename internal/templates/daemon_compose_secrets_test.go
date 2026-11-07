@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"syscall"
@@ -91,6 +92,36 @@ func TestDaemonComposeSecretsMountsOnlyListedFiles(t *testing.T) {
 	}
 	if strings.Contains(out, marker) {
 		t.Error("the rendered compose carries a manifest file's contents")
+	}
+}
+
+// A manifest listed out of name order renders its mounts in name order, each
+// file's host path before its XDG path, so a manifest reordered by hand renders
+// the same file (gt-xmomer).
+func TestDaemonComposeSecretsRendersInNameOrderWhateverTheManifestOrder(t *testing.T) {
+	t.Parallel()
+	const alpha, mu, zeta = "alpha.env", "mu.env", "zeta.env"
+	dir, _ := secretConfigDir(t, alpha, mu, zeta)
+
+	s := liveSpec()
+	s.ConfigDir = dir
+	s.Secrets = []templates.SecretFile{secretEntry(zeta, true), secretEntry(mu, true), secretEntry(alpha, true)}
+	_, f := render(t, s)
+
+	var want, got []composeVolume
+	for _, name := range []string{alpha, mu, zeta} {
+		want = append(want,
+			composeVolume{Type: "bind", Source: filepath.Join(dir, name), Target: filepath.Join(dir, name), ReadOnly: true},
+			composeVolume{Type: "bind", Source: filepath.Join(dir, name), Target: filepath.Join(templates.LiveConfigDirPath, name), ReadOnly: true},
+		)
+	}
+	for _, v := range f.Services["daemon"].Volumes {
+		if inside(dir, v.Source) {
+			got = append(got, v)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("secret mounts = %+v\nwant them in name order = %+v", got, want)
 	}
 }
 
