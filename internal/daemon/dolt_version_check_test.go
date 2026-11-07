@@ -304,12 +304,16 @@ func TestDoltVersionCheckFailedReadKeepsHeldItem(t *testing.T) {
 	var logs doltLogs
 	clock := clockwork.NewFakeClockAt(doltCheckStart)
 	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+	held := check.observed()
+	if len(held) != 1 {
+		t.Fatalf("setup: running 2.3.2 against 2.7.2 raised %d items, want 1", len(held))
+	}
 
 	check.client = broken.client(0)
 	clock.Advance(time.Hour)
 	check.run(context.Background(), "/town", clock.Now(), logs.logf)
-	if got := check.observed(); len(got) != 1 {
-		t.Errorf("after a failed read, observed = %d items, want the held one kept", len(got))
+	if got := check.observed(); len(got) != 1 || got[0] != held[0] {
+		t.Errorf("after a failed read, observed = %+v, want the held item %+v unchanged", got, held)
 	}
 	if len(logs) != 1 {
 		t.Errorf("logs = %v, want the failed hourly run logged once", logs)

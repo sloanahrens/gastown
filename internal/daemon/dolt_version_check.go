@@ -21,8 +21,9 @@ import (
 // The Dolt image check (gt-goda5m): the town runs the newest stable
 // dolthub/dolt-sql-server image, so once an hour the daemon reads the image of
 // the town's Dolt container and asks Docker Hub for the newest release. A
-// container more than one patch release behind raises one low attention item
-// that names both versions, and the item clears when they match. The check
+// container on an earlier minor than the newest release, or more than one patch
+// release behind on the same minor, raises one low attention item that names
+// both versions, and the item clears when they match. The check
 // never pulls an image and never restarts a container.
 const (
 	// doltImageCheckEvery is how often the check asks: releases are a few a
