@@ -71,29 +71,31 @@ type greenRefPusher struct {
 	remote string
 }
 
-// ensure publishes sha as green/<sha12>. It reports a conflict when the remote
-// holds that ref at another commit, which is a refusal: the ref is never
-// force-updated. The push is a plain one otherwise, so an unreachable remote
-// or a refused hook is an error for the caller to record.
-func (p greenRefPusher) ensure(sha string) (conflict bool, err error) {
+// ensure publishes sha as green/<sha12>. pushed reports the push this call
+// made: a ref already at the commit is success with nothing written, and a
+// caller retaining the refs has nothing to prune then. It reports a conflict
+// when the remote holds that ref at another commit, which is a refusal: the ref
+// is never force-updated. The push is a plain one otherwise, so an unreachable
+// remote or a refused hook is an error for the caller to record.
+func (p greenRefPusher) ensure(sha string) (pushed, conflict bool, err error) {
 	ref := "refs/heads/" + greenRefName(sha)
 	held, err := p.tip(ref)
 	if err != nil {
-		return false, fmt.Errorf("reading %s on %s: %w", ref, p.remote, err)
+		return false, false, fmt.Errorf("reading %s on %s: %w", ref, p.remote, err)
 	}
 	switch {
 	case sha != "" && held == sha:
 		// The remote already publishes this commit: no second push. An empty
 		// sha never matches the remote's silence, so a caller that passes none
 		// falls through to a push git refuses rather than reading as success.
-		return false, nil
+		return false, false, nil
 	case held != "":
-		return true, nil
+		return false, true, nil
 	default:
 		if err := p.git.Push(p.remote, sha+":"+ref, false); err != nil {
-			return false, fmt.Errorf("pushing %s to %s: %w", ref, p.remote, err)
+			return false, false, fmt.Errorf("pushing %s to %s: %w", ref, p.remote, err)
 		}
-		return false, nil
+		return true, false, nil
 	}
 }
 
@@ -254,13 +256,17 @@ func (s *greenRefPublishState) conflicted(rigName, sha12 string) {
 	st.conflicts[sha12] = true
 }
 
-// succeeded forgets sha12's conflict and the rig's failed pushes.
-func (s *greenRefPublishState) succeeded(rigName, sha12 string) {
+// succeeded clears the rig's failed pushes and every conflict. A push that
+// landed proves the remote accepts this rig's green refs again, and a conflict
+// recorded for an earlier tip cannot clear by itself: nothing ever
+// force-updates that ref. Keeping it would leave the item standing after the
+// rig published a different commit (gt-atcddq).
+func (s *greenRefPublishState) succeeded(rigName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.rigState(rigName)
 	st.failures, st.detail = 0, ""
-	delete(st.conflicts, sha12)
+	clear(st.conflicts)
 }
 
 // due reports whether reason may be logged now, and records the line so the
@@ -332,13 +338,13 @@ func (d *Daemon) tierSweepPublishGreenRef(rigName, sha string) {
 	if !slices.Contains(rigs, rigName) {
 		return
 	}
-	g, remote, err := d.greenRefRemote(rigName)
-	if err != nil {
-		d.greenRefFailed(rigName, "the rig's landing remote: "+greenRefDetail(err.Error()))
+	g, remote, resolveErr := d.greenRefRemote(rigName)
+	if resolveErr != nil {
+		d.greenRefFailed(rigName, resolveErr.reason)
 		return
 	}
 	p := greenRefPusher{git: g, remote: remote}
-	conflict, err := p.ensure(sha)
+	pushed, conflict, err := p.ensure(sha)
 	switch {
 	case err != nil:
 		d.greenRefFailed(rigName, greenRefReason(err))
@@ -351,7 +357,14 @@ func (d *Daemon) tierSweepPublishGreenRef(rigName, sha string) {
 			sha12, shortSHA(sha)))
 		return
 	}
-	d.greenRefs.succeeded(rigName, greenRefShortSHA(sha))
+	d.greenRefs.succeeded(rigName)
+	if !pushed {
+		// The remote already held the ref at this commit, so no ref was
+		// written and the retention listing has nothing to prune. Running it
+		// every unchanged-main heartbeat dates every ref for no change
+		// (gt-atcddq).
+		return
+	}
 	// A push that reached the remote is where retention runs: the refs are
 	// only pruned once the newest one is published.
 	deleted, failures := p.retain()
@@ -385,23 +398,46 @@ func (d *Daemon) greenRefImageRigs() ([]string, error) {
 	return tierSweepConfig(d.patrolConfig).TierSweepImageRigs(d.getKnownRigs())
 }
 
+// greenRefRemoteError is a landing-remote resolution failure. reason is what a
+// log line and an item summary may carry; the wrapped error is kept as the
+// cause but its text is never printed, because resolution names
+// merge_queue.forgejo.remote_url and a remote URL can carry a credential in
+// its user info (gt-atcddq).
+type greenRefRemoteError struct {
+	reason string
+	err    error // nil when the daemon refused the rig itself, not a wrapped cause
+}
+
+func (e *greenRefRemoteError) Error() string {
+	if e.err == nil {
+		return e.reason
+	}
+	return e.reason + ": " + e.err.Error()
+}
+
+func (e *greenRefRemoteError) Unwrap() error { return e.err }
+
 // greenRefRemote opens the rig's repository at the remote its landing worker
 // pushes land/<bead> branches with, so the green ref uses the same seam and
 // the landing bot's credential. A rig with no Forgejo block has no such
-// remote, and the publish is refused rather than sent to origin.
-func (d *Daemon) greenRefRemote(rigName string) (greenRefGit, string, error) {
+// remote, and the publish is refused rather than sent to origin. The failure
+// carries a safe class for the caller to log, never the resolution error's own
+// text (gt-atcddq).
+func (d *Daemon) greenRefRemote(rigName string) (greenRefGit, string, *greenRefRemoteError) {
 	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, rigName))
 	g := d.gitAt(repo)
 	fc, err := rig.ResolveForgejoConfigWithError(d.repoFileOpener(), d.config.TownRoot, rigName)
 	if err != nil {
-		return nil, "", err
+		return nil, "", &greenRefRemoteError{reason: "the rig's Forgejo settings could not be read", err: err}
 	}
 	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
-		return nil, "", fmt.Errorf("rig %s names no merge_queue.forgejo remote_url, so it has no Forgejo remote to publish the green ref to", rigName)
+		return nil, "", &greenRefRemoteError{
+			reason: fmt.Sprintf("rig %s names no merge_queue.forgejo remote_url, so it has no Forgejo remote to publish the green ref to", rigName),
+		}
 	}
 	remote, err := rig.ResolveLandingRemoteWith(d.repoFileOpener(), g, d.config.TownRoot, rigName)
 	if err != nil {
-		return nil, "", err
+		return nil, "", &greenRefRemoteError{reason: "no git remote matches merge_queue.forgejo.remote_url", err: err}
 	}
 	return g, remote, nil
 }
