@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,9 +57,10 @@ func goldenValues(t *testing.T) Values {
 		// Env is a daemon.env entry the compose writer forwards and no rule
 		// filters: a plain provider setting beside the credentials.
 		Env: map[string]string{"AWS_REGION": "us-east-1"},
-		// CPU and Memory are the share the deploy passes. The renderer has no
-		// default for either, because no source records a figure (see Values.CPU),
-		// so the goldens record an example share rather than a fallback.
+		// CPU and Memory are a shape fixture, not the daemon's share: the goldens
+		// check that requests equal limits and that the units render, and the
+		// amount is the caller's. No source records the daemon's measured use (see
+		// Values.CPU), so these figures cite nothing and are not a default.
 		CPU:                     "2",
 		Memory:                  "4Gi",
 		OMToken:                 true,
@@ -682,6 +684,47 @@ func TestDeploymentGolden(t *testing.T) {
 	}
 }
 
+// daemonDuration returns the duration internal/daemon declares for name in the
+// given source file. It reads the declaration as text, because the import rule
+// keeps internal/daemon out of this package. The right-hand side is a literal
+// `N * time.Unit`, or the name of one other constant in the same file, which is
+// followed once (ShutdownBudget = doltServerStopBudget). Anything else fails the
+// test, so a declaration the test cannot read is never taken as a zero budget.
+func daemonDuration(t *testing.T, file, name string) time.Duration {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "..", "..", "..", "internal", "daemon", file))
+	if err != nil {
+		t.Fatalf("reading internal/daemon/%s: %v", file, err)
+	}
+	rhs := daemonDeclaration(t, data, file, name)
+	if alias := regexp.MustCompile(`^[A-Za-z_]\w*$`); alias.MatchString(rhs) {
+		rhs = daemonDeclaration(t, data, file, rhs)
+	}
+	lit := regexp.MustCompile(`^(\d+)\s*\*\s*time\.(Second|Minute)$`).FindStringSubmatch(rhs)
+	if lit == nil {
+		t.Fatalf("internal/daemon/%s: %s = %q, want a literal N * time.Second or time.Minute", file, name, rhs)
+	}
+	n, err := strconv.Atoi(lit[1])
+	if err != nil {
+		t.Fatalf("internal/daemon/%s: %s = %q: %v", file, name, rhs, err)
+	}
+	if lit[2] == "Minute" {
+		return time.Duration(n) * time.Minute
+	}
+	return time.Duration(n) * time.Second
+}
+
+// daemonDeclaration returns the right-hand side of the top-level declaration of
+// name in data, and fails the test when the file declares no such name.
+func daemonDeclaration(t *testing.T, data []byte, file, name string) string {
+	t.Helper()
+	m := regexp.MustCompile(`(?m)^\s*(?:const\s+)?` + regexp.QuoteMeta(name) + `\s*=\s*(.+?)\s*$`).FindSubmatch(data)
+	if m == nil {
+		t.Fatalf("internal/daemon/%s declares no %s", file, name)
+	}
+	return string(m[1])
+}
+
 // TestPodHasNoPreStopAndGraceCoversTheDrain holds the shutdown contract: the pod
 // carries no preStop hook, so SIGTERM plus the grace period is the drain, and
 // the grace period is at least the drain bound the package computes from the
@@ -693,6 +736,14 @@ func TestPodHasNoPreStopAndGraceCoversTheDrain(t *testing.T) {
 
 	if got, want := DrainBound, daemonShutdownBudget+landingPassDrainBound; got != want {
 		t.Fatalf("DrainBound = %s, want the daemon's shutdown budget plus the landing-pass drain bound = %s", got, want)
+	}
+	// The two budgets are declared in internal/daemon. The copies above must match
+	// those declarations, so a change to either budget there fails this test.
+	if got := daemonDuration(t, "dolt.go", "ShutdownBudget"); got != daemonShutdownBudget {
+		t.Errorf("internal/daemon ShutdownBudget is %s, but daemonShutdownBudget is %s", got, daemonShutdownBudget)
+	}
+	if got := daemonDuration(t, "upgrade_restart.go", "postLandRestartCap"); got != landingPassDrainBound {
+		t.Errorf("internal/daemon postLandRestartCap is %s, but landingPassDrainBound is %s", got, landingPassDrainBound)
 	}
 	if got, want := DefaultTerminationGraceSeconds, int((DrainBound+terminationGraceMargin)/time.Second); got != want {
 		t.Errorf("DefaultTerminationGraceSeconds = %d, want the drain bound plus the margin = %d", got, want)
@@ -857,7 +908,7 @@ func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 		// XDG_CONFIG_HOME, the one render-owned name both services carry. No
 		// Secrets are listed, so the render mounts the directory and reads no host
 		// file.
-		ConfigDir: "/Users/sloan/.config/gt",
+		ConfigDir: t.TempDir(),
 	}
 	rendered, err := templates.RenderDaemonCompose(spec)
 	if err != nil {
