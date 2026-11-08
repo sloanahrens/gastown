@@ -883,6 +883,19 @@ func TestParseCommentLineBackslash(t *testing.T) {
 			},
 		},
 		{
+			name:    "carriage return and line feed without a backslash ends the comment",
+			command: "echo a # n\r\nls",
+			want: []segmentView{
+				{Words: []string{"echo", "a"}},
+				{Words: []string{"ls"}},
+			},
+		},
+		{
+			name:    "carriage return at the end of the text is comment text",
+			command: "echo a # n \\\r",
+			want:    []segmentView{{Words: []string{"echo", "a"}}},
+		},
+		{
 			name:    "backslash outside a comment continues the line",
 			command: "echo a\\\nb",
 			want:    []segmentView{{Words: []string{"echo", "ab"}}},
@@ -1040,6 +1053,10 @@ func TestParseCommentLineBackslashUnreadable(t *testing.T) {
 		// bash ends the comment at the LF and runs ls; mvdan joins the CR LF into
 		// the comment. The scan refuses the shape instead of reading it one way.
 		{"comment backslash before CR LF", "bash -c 'git reset --hard' # n \\\r\nls"},
+		// The backslash is the comment's only byte, so it sits at p+1, the
+		// nearest offset the scan accepts: the refusal must still fire
+		// (gt-q0jecy).
+		{"comment backslash directly after the hash before CR LF", "bash -c 'git reset --hard' #\\\r\nls"},
 		{"comment backslash before CR LF in a piped shell", "echo 'go test ./internal/beads/...' | sh # n \\\r\nls"},
 		{"comment backslash before CR LF on a heredoc operator line", "cat <<'EOF' # n \\\r\nEOF\ngit reset --hard\nEOF"},
 		{"unterminated quote on a CR LF comment line", "echo 'x # n \\\r\nls"},
