@@ -85,7 +85,6 @@ type Options struct {
 	// polecat worktree and crew resolution it feeds decide whether the run may
 	// proceed, so a caller-supplied variable must not place the caller
 	// elsewhere.
-	// which refuses a caller's directory that is not present in this process.
 	Getwd func() (string, error)
 	// Detect resolves the caller's role identity. Nil leaves the identity the
 	// run resolved from the assigned polecat worktree.

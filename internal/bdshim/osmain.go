@@ -7,8 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-
-	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // handlers is the tracker verb registry. A verb absent here is refused rather
@@ -47,7 +45,7 @@ func OsMain(args []string) int {
 
 // osEnv is the process surface a real run reads.
 func osEnv(args []string) Env {
-	return processEnv(args, os.Getenv, callercwd.Getwd, os.Executable, runBdReal, os.Stdout, os.Stderr)
+	return processEnv(args, os.Getenv, os.Getwd, os.Executable, runBdReal, os.Stdout, os.Stderr)
 }
 
 // processEnv wires Main to the process's reads and to the verb registry. The

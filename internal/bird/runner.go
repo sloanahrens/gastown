@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
-
-	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // Runner runs the gt bird operations: starting claude under a bird name,
@@ -34,7 +32,7 @@ type Runner struct {
 	Stat func(string) (fs.FileInfo, error)
 	// PID is the process a start records as the session's; nil means this one.
 	PID func() int
-	// Getwd is the directory a start records; nil means callercwd.Getwd.
+	// Getwd is the directory a start records; nil means os.Getwd.
 	Getwd func() (string, error)
 	// Exec replaces this process with path, as syscall.Exec does; nil means
 	// syscall.Exec.
@@ -332,7 +330,7 @@ func (r *Runner) pid() int {
 func (r *Runner) cwd() string {
 	getwd := r.Getwd
 	if getwd == nil {
-		getwd = callercwd.Getwd
+		getwd = os.Getwd
 	}
 	cwd, err := getwd()
 	if err != nil {

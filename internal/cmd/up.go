@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
@@ -406,7 +405,7 @@ func printStatus(name string, ok bool, detail string) {
 // disableCurrentAgentDND resets DND for the current role context (if muted).
 // Returns true when a change was applied.
 func disableCurrentAgentDND(townRoot string) (bool, error) {
-	cwd, err := callercwd.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return false, fmt.Errorf("getting current directory: %w", err)
 	}

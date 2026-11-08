@@ -19,13 +19,15 @@ import (
 const getwdAllowlistPath = "internal/callercwd/testdata/getwd-allow.txt"
 
 // skippedScanDirs are directories the scan does not descend into: version
-// control, dependencies, fixture trees, and the package's own testdata.
+// control, dependencies and testdata trees, which the Go tool never builds. No
+// directory is skipped by a name a new package could take: a skip by name is a
+// way around the guard, so a source directory called scratch is scanned like
+// any other.
 var skippedScanDirs = map[string]bool{
 	".git":         true,
 	"vendor":       true,
 	"node_modules": true,
 	"testdata":     true,
-	"scratch":      true,
 }
 
 // getwdSite is one non-test os.Getwd use. owner is the enclosing function
@@ -92,6 +94,7 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 
 	cases := []struct {
 		name      string
+		path      string // the fixture file, default pkg/foo.go
 		source    string
 		allowlist string
 		run       func(root, allowlistPath string) error
@@ -104,6 +107,14 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 			allowlist: "# no entries\n",
 			run:       checkNoDirectGetwdAt,
 			want:      "pkg/foo.go:6",
+		},
+		{
+			name:      "a package in a directory named scratch is scanned, not skipped by its name",
+			path:      "scratch/foo.go",
+			source:    plain,
+			allowlist: "# no entries\n",
+			run:       checkNoDirectGetwdAt,
+			want:      "scratch/foo.go:6",
 		},
 		{
 			name:      "an aliased os import is found",
@@ -188,7 +199,11 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := t.TempDir()
-			writeFixture(t, root, "pkg/foo.go", tc.source)
+			path := tc.path
+			if path == "" {
+				path = "pkg/foo.go"
+			}
+			writeFixture(t, root, path, tc.source)
 			allowlistPath := filepath.Join(root, "allow.txt")
 			writeFixture(t, root, "allow.txt", tc.allowlist)
 

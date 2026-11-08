@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -77,7 +76,7 @@ func resolveDirectiveContext(explicitRig string) (townRoot, rigName string, err 
 		return "", "", fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	cwd, _ := callercwd.Getwd() // an unreadable cwd only turns off rig auto-detection
+	cwd, _ := os.Getwd() // an unreadable cwd only turns off rig auto-detection
 	rigName, err = resolveDirectiveRigIn(townRoot, explicitRig, cwd)
 	if err != nil {
 		return "", "", err

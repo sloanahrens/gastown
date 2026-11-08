@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
@@ -72,7 +71,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 
 	debug := crewDebug
 	if debug {
-		cwd, _ := callercwd.Getwd()
+		cwd, _ := os.Getwd()
 		fmt.Printf("[DEBUG] runCrewAt: args=%v, crewRig=%q, cwd=%q\n", args, crewRig, cwd)
 	}
 

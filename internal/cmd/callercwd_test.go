@@ -152,62 +152,23 @@ func TestCommandsRequireTheCallerDirectory(t *testing.T) {
 }
 
 // TestIdentityReadsRefuseAnUnusableCallerDirectory pins that the identity
-// call sites return the variable's refusal instead of falling back to the
-// process directory.
+// call site gt prime keeps returns the variable's refusal instead of falling
+// back to the process directory. The other commands read the process directory
+// (gt-yjzepk.2 decision: only prime, handoff, mail identity and hooks install
+// convert), so they have no refusal to pin.
 //
 //testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
 func TestIdentityReadsRefuseAnUnusableCallerDirectory(t *testing.T) {
 	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
 	t.Setenv(callercwd.EnvCallerCwd, "gastown/crew/eagle")
 
-	// --role is what runAgentsResolve needs before it reads the directory; the
-	// flag is set through its own flag set so the value is the command's.
-	if err := agentsResolveCmd.Flags().Set("role", "crew"); err != nil {
-		t.Fatalf("set --role: %v", err)
+	_, _, err := resolvePrimeWorkspace()
+	if err == nil {
+		t.Fatal("gt prime = nil, want the variable's refusal")
 	}
-	t.Cleanup(func() { _ = agentsResolveCmd.Flags().Set("role", "") })
-
-	cases := []struct {
-		name string
-		run  func() error
-	}{
-		{name: "gt prime", run: func() error { _, _, err := resolvePrimeWorkspace(); return err }},
-		{name: "gt bead", run: func() error {
-			return withBeadVerbs(&cobra.Command{}, func(*beadVerbs) error { return nil })
-		}},
-		{name: "gt agents resolve", run: func() error { return runAgentsResolve(&cobra.Command{}, nil) }},
+	if !strings.Contains(err.Error(), callercwd.EnvCallerCwd) {
+		t.Fatalf("gt prime error = %q, want it to name %s", err, callercwd.EnvCallerCwd)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.run()
-			if err == nil {
-				t.Fatalf("%s = nil, want the variable's refusal", tc.name)
-			}
-			if !strings.Contains(err.Error(), callercwd.EnvCallerCwd) {
-				t.Fatalf("%s error = %q, want it to name %s", tc.name, err, callercwd.EnvCallerCwd)
-			}
-		})
-	}
-}
-
-// TestBeadVerbsRefuseAnUnusableCallerDirectory pins the identity read: a
-// GT_CALLER_CWD that cannot name a directory is an error, not a silent fall
-// back to this process's directory.
-//
-//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
-func TestBeadVerbsRefuseAnUnusableCallerDirectory(t *testing.T) {
-	t.Run("unusable", func(t *testing.T) {
-		//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
-		t.Setenv(callercwd.EnvCallerCwd, "gastown/crew/eagle")
-
-		bv, err := newBeadVerbs(&cobra.Command{})
-		if err == nil {
-			t.Fatalf("newBeadVerbs = %+v, want the variable's refusal", bv)
-		}
-		if !strings.Contains(err.Error(), callercwd.EnvCallerCwd) {
-			t.Fatalf("newBeadVerbs error = %q, want it to name %s", err, callercwd.EnvCallerCwd)
-		}
-	})
 }
 
 // TestPrimeRefusesAnUnreadableCallerDirectory pins the refusal when the caller

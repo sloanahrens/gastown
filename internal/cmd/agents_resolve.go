@@ -3,13 +3,13 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 var (
@@ -69,7 +69,7 @@ func runAgentsResolve(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("--role is required")
 	}
 
-	cwd, err := callercwd.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting the caller's directory: %w", err)
 	}

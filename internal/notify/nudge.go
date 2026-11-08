@@ -6,7 +6,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -78,7 +77,7 @@ func (n *TownNudger) Nudge(ctx context.Context, target, message string, opts ...
 	dir := n.Dir
 	if dir == "" {
 		var err error
-		if dir, err = callercwd.Getwd(); err != nil {
+		if dir, err = os.Getwd(); err != nil {
 			return fmt.Errorf("gt nudge: %w", err)
 		}
 	}

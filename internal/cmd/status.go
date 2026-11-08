@@ -13,7 +13,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -696,7 +695,7 @@ func truncateWithEllipsis(s string, maxLen int) string {
 // detectCurrentDNDStatus returns DND status for the currently resolved role context.
 // Returns nil when role context cannot be determined (e.g. outside agent context).
 func detectCurrentDNDStatus(townRoot string) *townstatus.DNDInfo {
-	cwd, err := callercwd.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return nil
 	}

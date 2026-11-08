@@ -14,7 +14,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -99,7 +98,7 @@ func init() {
 }
 
 func runCompactReport(cmd *cobra.Command, args []string) error {
-	workDir, err := callercwd.Getwd()
+	workDir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working dir: %w", err)
 	}

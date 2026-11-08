@@ -1,9 +1,9 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -135,7 +135,7 @@ func ResolveTintFactor(rig string) float64 {
 // A window_tint block with no enabled key is enabled, matching ResolveWindowTint.
 // A rig block decides before the global one, as it does there.
 func IsWindowTintEnabled(rig string) bool {
-	cwd, err := callercwd.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return false
 	}

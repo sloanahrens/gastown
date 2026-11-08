@@ -17,7 +17,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/formula"
 	"github.com/steveyegge/gastown/internal/style"
@@ -235,7 +234,7 @@ func init() {
 // realFormulaVerbs returns the formula seam at the command's working
 // directory: bd searches formula directories from its cwd.
 func realFormulaVerbs() (beads.FormulaVerbs, error) {
-	cwd, err := callercwd.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}

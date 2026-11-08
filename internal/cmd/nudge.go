@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/nudge/deliver"
 	"github.com/steveyegge/gastown/internal/session"
@@ -247,7 +246,7 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		// through to the sentinel socket and fails to find sessions.
 		_ = session.InitRegistry(townRoot)
 	}
-	cwd, _ := callercwd.Getwd()
+	cwd, _ := os.Getwd()
 	sender := deliver.Sender(cwd, townRoot, os.Getenv)
 
 	skipped := false

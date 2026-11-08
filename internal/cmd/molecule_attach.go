@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -31,7 +30,7 @@ func runMoleculeAttach(cmd *cobra.Command, args []string) error {
 		// Find the agent's pinned handoff bead (same pattern as mol burn/squash)
 		moleculeID = args[0]
 
-		cwd, err := callercwd.Getwd()
+		cwd, err := os.Getwd()
 		if err != nil {
 			return fmt.Errorf("getting current directory: %w", err)
 		}
@@ -184,7 +183,7 @@ func runMoleculeAttachment(cmd *cobra.Command, args []string) error {
 // detectCurrentAgent returns the current agent identity based on GT_ROLE or working directory.
 // Returns empty string if identity cannot be determined.
 func detectCurrentAgent() string {
-	cwd, err := callercwd.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return ""
 	}

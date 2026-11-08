@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -83,7 +82,7 @@ func runMailSend(cmd *cobra.Command, args []string) error {
 func mailSendRecipient(args []string) (string, error) {
 	if mailSendSelf {
 		// Auto-detect identity from cwd
-		cwd, err := callercwd.Getwd()
+		cwd, err := os.Getwd()
 		if err != nil {
 			return "", fmt.Errorf("getting current directory: %w", err)
 		}
