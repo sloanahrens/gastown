@@ -3115,3 +3115,151 @@ func TestContainerSuiteDockerOptInReadsTopLevelSegments(t *testing.T) {
 		})
 	}
 }
+
+// TestEvaluateContainerSuiteCommand_PayloadProbes pins the payload readers the
+// container rule reads and the shared readers do not: a script operand naming
+// stdin, a -c payload behind the option terminator, an env -S string, the
+// escapes printf writes, and the last stdin redirection winning (gt-j2n8y1).
+// Each probe is a refusal row and a bounded control that stays allowed with the
+// opt-in on, so a reader that stopped running is as red as one that refuses
+// too much.
+func TestEvaluateContainerSuiteCommand_PayloadProbes(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "rig")
+	proc := fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/polecats/topaz", "GT_POLECAT": "topaz"}, root)
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+		reason  string
+	}{
+		{"script operand naming stdin", "bash /dev/stdin <<< 'make test'", true, "bare 'make test' runs"},
+		{"script operand naming stdin, bounded", "GT_TEST_DOCKER=1 bash /dev/stdin <<< 'go test ./internal/style/...'", false, ""},
+		{"-c payload behind the option terminator", "bash -c -- 'make test'", true, "bare 'make test' runs"},
+		{"-c payload behind the option terminator, bounded", "GT_TEST_DOCKER=1 bash -c -- 'go test ./internal/style/...'", false, ""},
+		{"-c payload behind an option cluster and the terminator", "bash -o pipefail -c -- 'make test'", true, "bare 'make test' runs"},
+		{"-c payload behind an option cluster and the terminator, bounded", "GT_TEST_DOCKER=1 bash -o pipefail -c -- 'go test ./internal/style/...'", false, ""},
+		{"env split string", "env -S 'make test'", true, "bare 'make test' runs"},
+		{"env split string, bounded", "GT_TEST_DOCKER=1 env -S 'go test ./internal/style/...'", false, ""},
+		{"env split string escape", "env -S 'make\\_test'", true, "bare 'make test' runs"},
+		{"env split string sequence the guard cannot expand", "env -S 'make\\qtest'", true, "env -S payload"},
+		{"printf tab escape", "printf 'make\\ttest' | bash", true, "bare 'make test' runs"},
+		{"printf hex escape", "printf 'make\\x20test' | bash", true, "bare 'make test' runs"},
+		{"printf octal escape", "printf 'make\\040test' | bash", true, "bare 'make test' runs"},
+		{"printf escape the guard cannot expand", "printf 'make\\xgtest' | bash", true, "printf payload"},
+		{"printf payload, bounded", "GT_TEST_DOCKER=1 printf 'go test ./internal/style/...' | bash", false, ""},
+		{"here-string last on a line with a here-document", "bash <<XEOF <<< 'make test'\nhi\nXEOF", true, "bare 'make test' runs"},
+		{"here-document last on a line with a here-string", "bash <<< 'make test' <<XEOF\nhi\nXEOF", true, "bare 'make test' runs"},
+		{"here-string last, bounded", "GT_TEST_DOCKER=1 bash <<XEOF <<< 'go test ./internal/style/...'\nhi\nXEOF", false, ""},
+		{"a stdin file redirect after the here-string wins", "bash <<< 'make test' < /dev/null", false, ""},
+		{"a here-string after the stdin file redirect wins", "bash < /dev/null <<< 'make test'", true, "bare 'make test' runs"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
+			}
+			if tt.blocked && !strings.Contains(reason, tt.reason) {
+				t.Errorf("evaluateContainerSuiteCommand(%q) reason %q does not contain %q", tt.command, reason, tt.reason)
+			}
+		})
+	}
+}
+
+// TestEvaluateContainerSuiteCommand_NestedShellPayloads pins the trap, source
+// and env -S readings: a literal whole-suite payload is refused wherever the
+// guard binds, a non-literal command word or payload is refused on that same
+// gate (the container opt-in does not exempt it), and crew and the other
+// contexts stay unread as they were (gt-j2n8y1).
+func TestEvaluateContainerSuiteCommand_NestedShellPayloads(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "rig")
+	contexts := map[string]map[string]string{
+		"polecat":  {"GT_ROLE": "gastown/polecats/topaz", "GT_POLECAT": "topaz"},
+		"refinery": {"GT_REFINERY": "1", "GT_ROLE": "gastown/refinery"},
+		"crew":     {"GT_ROLE": "gastown/crew/operator"},
+		"other":    {},
+	}
+	tests := []struct {
+		name    string
+		context string
+		command string
+		blocked bool
+		reason  string
+	}{
+		{"trap action", "polecat", "trap 'make test' EXIT", true, "trap payload"},
+		{"trap action in a refinery", "refinery", "trap 'make test' EXIT", true, "trap payload"},
+		{"trap action in crew", "crew", "trap 'make test' EXIT", false, ""},
+		{"trap action outside the town", "other", "trap 'make test' EXIT", false, ""},
+		{"sourced process substitution", "polecat", "source <(echo make test)", true, "source payload"},
+		{"sourced process substitution in a refinery", "refinery", "source <(echo make test)", true, "source payload"},
+		// The nested reader is off for crew, but the pre-existing reading of a
+		// process substitution's body still judges "echo make test" as a
+		// script, so this line is refused for every context at origin/main.
+		{"sourced process substitution in crew", "crew", "source <(echo make test)", true, "bare 'make test' runs"},
+		{"sourced process substitution outside the town", "other", "source <(echo make test)", true, "bare 'make test' runs"},
+		{"trap action without the opt-in", "polecat", `trap "$x" EXIT`, true, "trap action"},
+		{"trap action under the opt-in", "polecat", `export GT_TEST_DOCKER=1; trap "$x" EXIT`, true, "trap action"},
+		{"trap action under the opt-in in a refinery", "refinery", `export GT_TEST_DOCKER=1; trap "$x" EXIT`, true, "trap action"},
+		{"trap action under the opt-in in crew", "crew", `export GT_TEST_DOCKER=1; trap "$x" EXIT`, false, ""},
+		{"env -S payload without the opt-in", "polecat", `env -S "$x"`, true, "env -S payload"},
+		{"env -S payload under the opt-in", "polecat", `export GT_TEST_DOCKER=1; env -S "$x"`, true, "env -S payload"},
+		{"sourced process substitution without the opt-in", "polecat", `source <(echo "$x")`, true, "source payload"},
+		{"sourced process substitution under the opt-in", "polecat", `export GT_TEST_DOCKER=1; source <(echo "$x")`, true, "source payload"},
+		{"sourced process substitution without the opt-in in crew", "crew", `source <(echo "$x")`, false, ""},
+		{"command word without the opt-in", "polecat", `x=make; $x test`, true, "command word $x"},
+		{"command word under the opt-in in a refinery", "refinery", `export GT_TEST_DOCKER=1; x=make; $x test`, true, "command word $x"},
+		{"command word with the inline opt-in prefix", "polecat", `GT_TEST_DOCKER=1 $x test`, true, "command word $x"},
+		{"-c payload without the opt-in", "polecat", `bash -c "$x"`, true, "shell payload"},
+		{"-c payload under the opt-in in a refinery", "refinery", `export GT_TEST_DOCKER=1; bash -c "$x"`, true, "shell payload"},
+		{"-c payload with the inline opt-in prefix", "polecat", `GT_TEST_DOCKER=1 bash -c "$x"`, true, "shell payload"},
+		{"eval payload without the opt-in", "polecat", `eval "$x"`, true, "shell payload"},
+		{"eval payload under the opt-in in a refinery", "refinery", `export GT_TEST_DOCKER=1; eval "$x"`, true, "shell payload"},
+		{"command word under the opt-in outside the town", "other", `export GT_TEST_DOCKER=1; x=make; $x test`, false, ""},
+		{"ordinary non-literal argument", "polecat", `go test $PKG -run TestOne`, false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			env := map[string]string{}
+			for k, v := range contexts[tt.context] {
+				env[k] = v
+			}
+			proc := fakeGuardProcess(env, root)
+			reason, _ := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) in %s blocked = %v (reason %q), want %v", tt.command, tt.context, got, reason, tt.blocked)
+			}
+			if tt.blocked && !strings.Contains(reason, tt.reason) {
+				t.Errorf("evaluateContainerSuiteCommand(%q) in %s reason %q does not contain %q", tt.command, tt.context, reason, tt.reason)
+			}
+		})
+	}
+}
+
+// TestIsPolecatOrRefineryContextRefineryMarker pins the marker a refinery spawn
+// carries, which is the only signal that binds the guard for a refinery: its
+// GT_ROLE parses as an unknown deleted role (gt-j2n8y1).
+func TestIsPolecatOrRefineryContextRefineryMarker(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		env  map[string]string
+		want bool
+	}{
+		{"refinery marker", map[string]string{"GT_REFINERY": "1", "GT_ROLE": "gastown/refinery"}, true},
+		{"refinery role alone", map[string]string{"GT_ROLE": "gastown/refinery"}, false},
+		{"polecat", map[string]string{"GT_ROLE": "gastown/polecats/topaz", "GT_POLECAT": "topaz"}, true},
+		{"crew", map[string]string{"GT_ROLE": "gastown/crew/operator"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isPolecatOrRefineryContext(fakeGuardProcess(tt.env, t.TempDir())); got != tt.want {
+				t.Errorf("isPolecatOrRefineryContext() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

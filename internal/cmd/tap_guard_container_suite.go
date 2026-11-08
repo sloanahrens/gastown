@@ -128,7 +128,15 @@ func tapGuardContainerSuite(stdin io.Reader, stderr io.Writer, proc guardProcess
 // Other agent contexts (crew, witness, deacon) are left unguarded — they
 // don't run scoped test suites as part of their normal work.
 func isPolecatOrRefineryContext(proc guardProcess) bool {
-	// GT_ROLE decides first (see isPolecatContext): a stale GT_POLECAT does not
+	// GT_REFINERY is the marker a refinery spawn sets, and it decides first: a
+	// refinery's GT_ROLE ("gastown/refinery") parses as an unknown role because
+	// the refinery role was deleted (gt-v4ssj.6), so the role-first reading
+	// below answers false for the session this gate exists to cover
+	// (gt-j2n8y1).
+	if proc.getenv("GT_REFINERY") != "" {
+		return true
+	}
+	// GT_ROLE decides next (see isPolecatContext): a stale GT_POLECAT does not
 	// make a refinery or crew session a polecat (gt-pb77k).
 	if role := strings.TrimSpace(proc.getenv("GT_ROLE")); role != "" {
 		return isPolecatContext(proc)
@@ -1135,12 +1143,25 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 		if slotRunWrapped(words) {
 			continue
 		}
-		if dockerOn && isPolecatOrRefineryContext(proc) {
+		// A command word or nested-shell payload the shell does not pass
+		// through as text cannot be read for a test run, so it is refused
+		// wherever the guard binds. The container opt-in does not exempt it: a
+		// literal `make test` is refused without the opt-in too, and a
+		// non-literal word is the same unseen command (gt-j2n8y1).
+		if isPolecatOrRefineryContext(proc) {
 			if r := containerSuiteNonLiteralRefusal(seg); r != "" {
 				return r, nil
 			}
 		}
-		payloads := containerSuitePayloads(script, i)
+		payloads := containerSuiteGuardPayloads(script, i)
+		// A trap action, a sourced process substitution and an env -S string
+		// are nested shells this bead adds. They are read on the same gate as
+		// the non-literal refusal, so crew and the other agent contexts keep
+		// the reading they had: the hook never runs the rule for them
+		// (gt-j2n8y1).
+		if isPolecatOrRefineryContext(proc) {
+			payloads = append(payloads, containerSuiteGuardNestedShellPayloads(seg)...)
+		}
 		if depth >= maxTestGuardNestDepth {
 			if len(payloads) > 0 {
 				return nestedTooDeepRefusal(true)
@@ -1149,8 +1170,11 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 		}
 		dir, known := payloadDir(i)
 		for _, payload := range payloads {
-			if r, m := evaluateContainerSuiteCommandDepth(proc, payload, dir, known, nestedOptIn, depth+1); r != "" {
-				return r, m
+			if payload.refusal != "" {
+				return payload.refusal, nil
+			}
+			if r, m := evaluateContainerSuiteCommandDepth(proc, payload.text, dir, known, nestedOptIn, depth+1); r != "" {
+				return containerSuitePayloadRefusal(payload, r), m
 			}
 		}
 	}
@@ -1436,8 +1460,10 @@ func containerSuiteChainEnd(tokens []string, start int) int {
 // whose -c or eval payload, is a word the shell does not pass through as the
 // text the guard reads (shellparse's Literal is false). The command the segment
 // runs is then one the guard cannot name, so it cannot be read for a test run.
-// The reason names the word as written. The caller applies the container
-// opt-in and the polecat or refinery gate.
+// The reason names the word as written. The caller applies the polecat or
+// refinery gate alone: the container opt-in does not exempt a non-literal
+// word, because the word names a command the guard cannot read whatever the
+// opt-in (gt-j2n8y1).
 //
 // The command word is the first word after the shell keywords trimShellKeywords
 // steps over, and the -c payload is the word shellCPayloadIndex picks, the same
@@ -1454,15 +1480,33 @@ func containerSuiteNonLiteralRefusal(seg shellparse.Segment) string {
 		if !shellInvokers[filepath.Base(word)] {
 			continue
 		}
-		if idx := shellCPayloadIndex(lower[i+1:]); idx >= 0 && !seg.Words[i+1+idx].Literal {
+		if idx := containerSuiteCPayloadIndex(lower[i+1:]); idx >= 0 && !seg.Words[i+1+idx].Literal {
 			return containerSuiteNonLiteralPayload(seg.Words[i+1+idx])
 		}
 	}
-	if skip < len(seg.Words) && strings.ToLower(seg.Words[skip].Text) == "eval" {
+	if skip >= len(seg.Words) {
+		return ""
+	}
+	switch strings.ToLower(filepath.Base(seg.Words[skip].Text)) {
+	case "eval":
 		for _, w := range seg.Words[skip+1:] {
 			if !w.Literal {
 				return containerSuiteNonLiteralPayload(w)
 			}
+		}
+	case "trap":
+		if idx := containerSuiteTrapActionIndex(seg, skip); idx >= 0 && !seg.Words[idx].Literal {
+			return fmt.Sprintf("trap action %s is not a literal, so the command it runs cannot be inspected for a test run", seg.Words[idx].Raw)
+		}
+	case "source", ".":
+		for i := skip + 1; i < len(seg.Words); i++ {
+			if _, ok := containerSuiteSoleProcessSubstitution(seg.Words[i]); ok && !seg.Words[i].Literal {
+				return fmt.Sprintf("source payload %s is not a literal, so the file it reads cannot be inspected for a test run", seg.Words[i].Raw)
+			}
+		}
+	case "env":
+		if idx := containerSuiteEnvSplitIndex(seg, skip); idx >= 0 && !seg.Words[idx].Literal {
+			return fmt.Sprintf("env -S payload %s is not a literal, so the command it runs cannot be inspected for a test run", seg.Words[idx].Raw)
 		}
 	}
 	return ""
@@ -1472,6 +1516,574 @@ func containerSuiteNonLiteralRefusal(seg shellparse.Segment) string {
 // the shell expands before it runs.
 func containerSuiteNonLiteralPayload(w shellparse.Word) string {
 	return fmt.Sprintf("shell payload %s is not a literal, so the command it runs cannot be inspected for a test run", w.Raw)
+}
+
+// containerSuiteGuardPayload is one command line the container rule judges from
+// a construct it reads itself, or the refusal for a payload it knows the shell
+// runs but cannot expand into text.
+type containerSuiteGuardPayload struct {
+	text string
+
+	// refusal is non-empty when the shell is known to run a payload whose text
+	// the guard cannot produce (a printf escape it cannot expand): the rule
+	// refuses rather than judging a payload it does not have.
+	refusal string
+
+	// construct names where the payload came from, when a refusal of the
+	// payload should say so ("trap 'make test' EXIT" is a trap refusal, not a
+	// bare make test).
+	construct string
+}
+
+// containerSuitePayloadRefusal names the construct a payload came from ahead of
+// the refusal its command drew.
+func containerSuitePayloadRefusal(p containerSuiteGuardPayload, reason string) string {
+	if p.construct == "" {
+		return reason
+	}
+	return fmt.Sprintf("%s payload: %s", p.construct, reason)
+}
+
+// containerSuiteGuardPayloads returns the command lines the segment at index
+// runs through another shell, in the container rule's reading: a -c payload, an
+// eval string and a script the shell reads on stdin or from a script operand
+// naming stdin. The dangerous and test-scope guards keep containerSuitePayloads
+// and its readers (gt-j2n8y1).
+func containerSuiteGuardPayloads(script shellparse.Script, index int) []containerSuiteGuardPayload {
+	words := containerSuiteWords(script.Segments[index])
+	payloads := containerSuiteGuardCPayloads(words)
+	payloads = append(payloads, containerSuiteGuardEvalPayloads(words)...)
+	return append(payloads, containerSuiteGuardStdinPayloads(script, index)...)
+}
+
+// containerSuiteGuardCPayloads returns the command strings the shell invokers
+// in segment run with -c, read through containerSuiteCPayloadIndex.
+func containerSuiteGuardCPayloads(segment []string) []containerSuiteGuardPayload {
+	lower := toLowerTokens(segment)
+	var payloads []containerSuiteGuardPayload
+	for i, word := range lower {
+		if !shellInvokers[filepath.Base(word)] {
+			continue
+		}
+		if idx := containerSuiteCPayloadIndex(lower[i+1:]); idx >= 0 {
+			payloads = append(payloads, containerSuiteGuardPayload{text: segment[i+1+idx]})
+		}
+	}
+	return payloads
+}
+
+// containerSuiteGuardEvalPayloads returns the command string the eval a segment
+// opens runs.
+func containerSuiteGuardEvalPayloads(segment []string) []containerSuiteGuardPayload {
+	var payloads []containerSuiteGuardPayload
+	for _, text := range evalPayloads(segment) {
+		payloads = append(payloads, containerSuiteGuardPayload{text: text})
+	}
+	return payloads
+}
+
+// containerSuiteCPayloadIndex is shellCPayloadIndex's reading for the container
+// rule, which knows the option terminator: bash takes the command string its -c
+// flag carries from the first operand after "--", so "bash -c -- 'make test'"
+// runs make test, not the word "--" (gt-j2n8y1). Every other shape matches
+// shellCPayloadIndex, which the other guards keep reading.
+func containerSuiteCPayloadIndex(args []string) int {
+	wantC := false
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			if wantC && i+1 < len(args) {
+				return i + 1
+			}
+			return -1
+		case a == "--rcfile" || a == "--init-file":
+			i++ // the option's separate value
+		case strings.HasPrefix(a, "--"):
+			// a long option such as --norc or --login
+		case len(a) > 1 && a[0] == '+':
+			i += shellClusterValues(a)
+		case len(a) > 1 && a[0] == '-':
+			values := shellClusterValues(a)
+			payload := i + 1 + values
+			i += values
+			if strings.Contains(a[1:], "c") {
+				if payload < len(args) && args[payload] != "--" {
+					return payload
+				}
+				wantC = true
+			}
+		default:
+			// The first operand is the script file; anything after it belongs
+			// to that script, not to the shell.
+			return -1
+		}
+	}
+	return -1
+}
+
+// containerSuiteGuardNestedShellPayloads returns the command lines the segment
+// runs through a construct the guard reads only for a polecat or refinery: a
+// trap action, the file a source (or .) reads from a process substitution, and
+// an env(1) -S/--split-string string. The caller applies the context gate, so
+// crew and the other agent contexts keep the reading they had (gt-j2n8y1).
+func containerSuiteGuardNestedShellPayloads(seg shellparse.Segment) []containerSuiteGuardPayload {
+	words := containerSuiteWords(seg)
+	skip := len(words) - len(trimShellKeywords(words))
+	if skip >= len(seg.Words) {
+		return nil
+	}
+	switch strings.ToLower(filepath.Base(seg.Words[skip].Text)) {
+	case "trap":
+		if idx := containerSuiteTrapActionIndex(seg, skip); idx >= 0 {
+			return []containerSuiteGuardPayload{{text: seg.Words[idx].Text, construct: "trap"}}
+		}
+	case "source", ".":
+		return containerSuiteSourcePayloads(seg, skip)
+	case "env":
+		if idx := containerSuiteEnvSplitIndex(seg, skip); idx >= 0 {
+			text := containerSuiteEnvSplitText(seg.Words[idx].Text)
+			expanded, ok := containerSuiteEnvSplitEscapes(text)
+			if !ok {
+				return []containerSuiteGuardPayload{{
+					refusal: fmt.Sprintf("env -S payload %s holds a sequence the guard cannot expand, so the command it runs cannot be inspected for a test run", text),
+				}}
+			}
+			return []containerSuiteGuardPayload{{text: expanded, construct: "env -S"}}
+		}
+	}
+	return nil
+}
+
+// containerSuiteEnvSplitEscapes expands the escapes env(1) reads in a
+// -S/--split-string value, so the command line env builds is the one judged.
+// ok is false for a sequence this guard does not expand: env accepts a fixed
+// vocabulary and refuses the rest, but a form the guard cannot expand leaves
+// what env would run unread, so it refuses rather than guessing.
+func containerSuiteEnvSplitEscapes(text string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(text); i++ {
+		if text[i] != '\\' || i+1 >= len(text) {
+			b.WriteByte(text[i])
+			continue
+		}
+		i++
+		switch text[i] {
+		case 'c':
+			return b.String(), true // env writes nothing after \c
+		case 'f':
+			b.WriteByte('\f')
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte('\v')
+		case '\\':
+			b.WriteByte('\\')
+		case '_':
+			b.WriteByte(' ')
+		case '"':
+			b.WriteByte('"')
+		case '\'':
+			b.WriteByte('\'')
+		case '$':
+			b.WriteByte('$')
+		default:
+			return "", false
+		}
+	}
+	return b.String(), true
+}
+
+// containerSuiteTrapActionIndex returns the index in seg.Words of the action a
+// trap sets, or -1. The action is the first operand after the options; "-" and
+// an empty action reset the trap, which runs nothing.
+func containerSuiteTrapActionIndex(seg shellparse.Segment, skip int) int {
+	for i := skip + 1; i < len(seg.Words); i++ {
+		text := seg.Words[i].Text
+		if strings.HasPrefix(text, "-") && len(text) > 1 {
+			continue // -p prints, -l lists, -- ends the options
+		}
+		if text == "-" || text == "" {
+			return -1
+		}
+		return i
+	}
+	return -1
+}
+
+// containerSuiteSourcePayloads returns the script a source (or .) builtin runs
+// from each process substitution it names: the substitution is a file the shell
+// fills with the producers' output, and the builtin runs that output as its
+// script.
+func containerSuiteSourcePayloads(seg shellparse.Segment, skip int) []containerSuiteGuardPayload {
+	var payloads []containerSuiteGuardPayload
+	for i := skip + 1; i < len(seg.Words); i++ {
+		sub, ok := containerSuiteSoleProcessSubstitution(seg.Words[i])
+		if !ok {
+			continue
+		}
+		for _, p := range containerSuiteGuardProducerPayloadsIn(sub) {
+			p.construct = "source"
+			payloads = append(payloads, p)
+		}
+	}
+	return payloads
+}
+
+// containerSuiteEnvSplitIndex returns the index in seg.Words of the word the
+// env(1) -S/--split-string option carries, or -1. A value glued to its option
+// ("-S'cmd'", "--split-string=cmd") reports that option word.
+func containerSuiteEnvSplitIndex(seg shellparse.Segment, skip int) int {
+	for i := skip + 1; i < len(seg.Words); i++ {
+		text := seg.Words[i].Text
+		switch {
+		case text == "--":
+			return -1
+		case text == "-u" || text == "--unset" || text == "-C" || text == "--chdir":
+			i++ // the option's value
+		case strings.HasPrefix(text, "--split-string="):
+			return i
+		case text == "-S" || text == "--split-string":
+			if i+1 < len(seg.Words) {
+				return i + 1
+			}
+			return -1
+		case strings.HasPrefix(text, "-S") && !strings.HasPrefix(text, "--"):
+			return i
+		case strings.HasPrefix(text, "-"):
+			// another option: -i, -0, -v, --ignore-environment, --null, ...
+		case strings.Contains(text, "="):
+			// a NAME=value assignment env applies before it runs the command
+		default:
+			return -1
+		}
+	}
+	return -1
+}
+
+// containerSuiteEnvSplitText returns the split string an env -S option word
+// carries, whether the value is glued to the option or followed it.
+func containerSuiteEnvSplitText(text string) string {
+	if value, ok := strings.CutPrefix(text, "--split-string="); ok {
+		return value
+	}
+	if value, ok := strings.CutPrefix(text, "-S"); ok && !strings.HasPrefix(text, "--") {
+		return value
+	}
+	return text
+}
+
+// containerSuiteGuardStdinPayloads returns the script text fed to a shell that
+// reads stdin, the container rule's reading of containerSuiteStdinPayloads. It
+// differs where the shell's own reading differs: a script operand naming stdin
+// ("bash /dev/stdin") is stdin, and the last stdin redirection is the one the
+// shell uses (gt-j2n8y1).
+func containerSuiteGuardStdinPayloads(script shellparse.Script, index int) []containerSuiteGuardPayload {
+	seg := script.Segments[index]
+	word, args := containerSuiteStdinArgs(seg)
+	if !shellInvokers[filepath.Base(strings.ToLower(word))] {
+		return nil
+	}
+	hereStrings, replaced := containerSuiteGuardStdinSources(seg)
+	if replaced {
+		return nil
+	}
+	var payloads []containerSuiteGuardPayload
+	for _, text := range hereStrings {
+		payloads = append(payloads, containerSuiteGuardPayload{text: text})
+	}
+
+	// A word that is one process substitution is the script; one with text
+	// around it is an operand path.
+	var before []string
+	var rest []string
+	var procSubs []containerSuiteProcSub
+	seenSub := false
+	for _, arg := range args {
+		if sub, ok := containerSuiteSoleProcessSubstitution(arg); ok {
+			if !seenSub {
+				before = append([]string(nil), rest...)
+				seenSub = true
+			}
+			procSubs = append(procSubs, containerSuiteProcSub{script: sub})
+			continue
+		}
+		rest = append(rest, arg.Text)
+	}
+	if !seenSub {
+		before = rest
+	}
+	for _, r := range seg.Redirs {
+		if r.N != "" && r.N != "0" || r.Op != "<" {
+			continue
+		}
+		if sub, ok := containerSuiteSoleProcessSubstitution(r.Word); ok {
+			procSubs = append(procSubs, containerSuiteProcSub{script: sub, onStdin: true})
+		}
+	}
+	_, dashS := containerSuiteGuardReadsStdin(toLowerTokens(before))
+	if reads, _ := containerSuiteGuardReadsStdin(toLowerTokens(rest)); !reads {
+		return nil
+	}
+	scripted := false
+	for _, sub := range procSubs {
+		if dashS && !sub.onStdin {
+			continue
+		}
+		scripted = true
+		payloads = append(payloads, containerSuiteGuardProducerPayloadsIn(sub.script)...)
+	}
+	if scripted {
+		return payloads
+	}
+	for j := index - 1; j >= 0 && script.Segments[j].After == "|"; j-- {
+		payloads = append(payloads, containerSuiteGuardProducerPayloads(script.Segments[j])...)
+	}
+	return payloads
+}
+
+// containerSuiteGuardStdinSources returns the text of every here-string on the
+// segment's stdin, and whether the shell reads something else there instead. A
+// here-string, a here-document and a "< file" all replace stdin, and the shell
+// uses the last one written: a "< file" after the here-strings leaves them
+// unused, so their text is not the script. A here-document carries no source
+// offset, so it cannot be ordered against a here-string; when both are on
+// stdin the guard reads the here-string too and the body walk judges the
+// here-document, which refuses either order (accepted fail-closed reading, the
+// heredoc body being the script in the other order, gt-j2n8y1).
+func containerSuiteGuardStdinSources(seg shellparse.Segment) (hereStrings []string, replaced bool) {
+	hasHeredoc := false
+	for _, h := range seg.Heredocs {
+		if h.N == "" || h.N == "0" {
+			hasHeredoc = true
+		}
+	}
+	// The redirections are in source order, so the last one that replaces
+	// stdin is the one the shell reads.
+	lastReplaced := false
+	for _, r := range seg.Redirs {
+		if r.N != "" && r.N != "0" {
+			continue
+		}
+		switch {
+		case r.Op == "<<<":
+			lastReplaced = false
+		case strings.HasPrefix(r.Op, "<"):
+			if _, ok := containerSuiteSoleProcessSubstitution(r.Word); ok {
+				continue
+			}
+			lastReplaced = true
+		}
+	}
+	hereStrings = containerSuiteHereStringPayloads(seg)
+	if hasHeredoc {
+		if len(hereStrings) > 0 {
+			return hereStrings, false
+		}
+		return nil, true
+	}
+	if lastReplaced {
+		return nil, true
+	}
+	return hereStrings, false
+}
+
+// containerSuiteGuardReadsStdin is shellReadsStdin's reading for the container
+// rule: a script operand naming stdin ("bash /dev/stdin", "bash /dev/fd/0")
+// makes the shell read the here-string, here-document or pipe this guard
+// reads, where shellReadsStdin reads any operand as a script file
+// (gt-j2n8y1). The other guards keep shellReadsStdin.
+func containerSuiteGuardReadsStdin(args []string) (reads, dashS bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--" || a == "-" || a == "/dev/stdin" || a == "/dev/fd/0":
+			return true, false
+		case a == "--rcfile" || a == "--init-file":
+			i++
+		case strings.HasPrefix(a, "--"):
+		case len(a) > 1 && a[0] == '+':
+			i += shellClusterValues(a)
+		case len(a) > 1 && a[0] == '-':
+			i += shellClusterValues(a)
+			if strings.Contains(a[1:], "c") {
+				return false, false
+			}
+			if strings.Contains(a[1:], "s") {
+				return true, true
+			}
+		default:
+			redirected, skip, replacesStdin := shellRedirection(a)
+			if !redirected || replacesStdin {
+				return false, false
+			}
+			i += skip
+		}
+	}
+	return true, false
+}
+
+// containerSuiteGuardProducerPayloads returns the script text a producer
+// command line prints, the container rule's reading of
+// containerSuiteProducerPayloads. printf expands every escape it writes, so
+// "printf 'make\ttest' | bash" is read as the make test it runs; an escape the
+// guard cannot expand is refused rather than guessed (gt-j2n8y1).
+func containerSuiteGuardProducerPayloads(seg shellparse.Segment) []containerSuiteGuardPayload {
+	words := containerSuiteWords(seg)
+	producer, printed := segmentCommandWordPastRedirections(trimShellKeywords(words))
+	var payloads []containerSuiteGuardPayload
+	for _, text := range containerSuiteHereStringPayloads(seg) {
+		payloads = append(payloads, containerSuiteGuardPayload{text: text})
+	}
+	switch filepath.Base(strings.ToLower(producer)) {
+	case "printf":
+		for len(printed) > 0 && strings.HasPrefix(printed[0], "-") && len(printed[0]) > 1 {
+			printed = printed[1:]
+		}
+		if len(printed) == 0 {
+			return payloads
+		}
+		for _, word := range append([]string{strings.Join(printed, " ")}, printed...) {
+			text, ok := containerSuitePrintfEscapes(word)
+			if !ok {
+				payloads = append(payloads, containerSuiteGuardPayload{
+					refusal: fmt.Sprintf("printf payload %s holds an escape the guard cannot expand, so the command it writes cannot be inspected for a test run", word),
+				})
+				continue
+			}
+			payloads = append(payloads, containerSuiteGuardPayload{text: text})
+		}
+	case "echo", "yes":
+		for len(printed) > 0 && strings.HasPrefix(printed[0], "-") && len(printed[0]) > 1 {
+			printed = printed[1:]
+		}
+		text := strings.ReplaceAll(strings.Join(printed, " "), `\n`, "\n")
+		payloads = append(payloads, containerSuiteGuardPayload{text: text})
+		for _, arg := range printed {
+			payloads = append(payloads, containerSuiteGuardPayload{text: strings.ReplaceAll(arg, `\n`, "\n")})
+		}
+	}
+	return payloads
+}
+
+// containerSuiteGuardProducerPayloadsIn returns the script text the producers
+// of every command line in a process substitution print.
+func containerSuiteGuardProducerPayloadsIn(script shellparse.Script) []containerSuiteGuardPayload {
+	var payloads []containerSuiteGuardPayload
+	for _, seg := range script.Segments {
+		payloads = append(payloads, containerSuiteGuardProducerPayloads(seg)...)
+	}
+	return payloads
+}
+
+// containerSuitePrintfEscapes expands the escapes bash's printf writes, so the
+// text a producer feeds a shell is judged as the shell receives it. ok is false
+// when the escape form is one the guard cannot expand (a \x, \u or \U with no
+// digit): the caller refuses rather than reading text the shell will not
+// produce. An escape printf does not recognize is written as itself, as printf
+// writes it.
+func containerSuitePrintfEscapes(text string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(text); i++ {
+		if text[i] != '\\' || i+1 >= len(text) {
+			b.WriteByte(text[i])
+			continue
+		}
+		i++
+		switch c := text[i]; c {
+		case 'a':
+			b.WriteByte('\a')
+		case 'b':
+			b.WriteByte('\b')
+		case 'e':
+			b.WriteByte(0x1b)
+		case 'f':
+			b.WriteByte('\f')
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte('\v')
+		case '\\':
+			b.WriteByte('\\')
+		case '\'':
+			b.WriteByte('\'')
+		case '"':
+			b.WriteByte('"')
+		case 'c':
+			return b.String(), true // printf writes nothing after \c
+		case 'x', 'u', 'U':
+			max := 2
+			if c == 'u' {
+				max = 4
+			} else if c == 'U' {
+				max = 8
+			}
+			value, digits := 0, 0
+			for digits < max && i+1 < len(text) {
+				d := containerSuiteHexDigit(text[i+1])
+				if d < 0 {
+					break
+				}
+				value = value*16 + d
+				digits++
+				i++
+			}
+			if digits == 0 {
+				return "", false
+			}
+			if c == 'x' {
+				b.WriteByte(byte(value))
+			} else {
+				b.WriteRune(rune(value))
+			}
+		case '0', '1', '2', '3', '4', '5', '6', '7':
+			value, digits := 0, 0
+			for digits < 3 && i < len(text) {
+				d := containerSuiteOctalDigit(text[i])
+				if d < 0 {
+					break
+				}
+				value = value*8 + d
+				digits++
+				i++
+			}
+			i--
+			b.WriteByte(byte(value))
+		default:
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		}
+	}
+	return b.String(), true
+}
+
+// containerSuiteHexDigit returns the value of a hexadecimal digit, or -1.
+func containerSuiteHexDigit(c byte) int {
+	switch {
+	case c >= '0' && c <= '9':
+		return int(c - '0')
+	case c >= 'a' && c <= 'f':
+		return int(c-'a') + 10
+	case c >= 'A' && c <= 'F':
+		return int(c-'A') + 10
+	}
+	return -1
+}
+
+// containerSuiteOctalDigit returns the value of an octal digit, or -1.
+func containerSuiteOctalDigit(c byte) int {
+	if c >= '0' && c <= '7' {
+		return int(c - '0')
+	}
+	return -1
 }
 
 // containerSuiteCommonShells is the length of the prefix two subshell stacks
