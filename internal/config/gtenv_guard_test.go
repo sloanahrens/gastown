@@ -23,6 +23,11 @@ var gtEnvIdentity = map[string]bool{
 	"GT_DOG_NAME": true, "GT_SESSION": true, EnvAgent: true,
 	EnvAgentOverride: true, "GT_TOWN_ROOT": true, "GT_TMUX_SOCKET": true,
 	"GT_POLECAT_PATH": true,
+	// The refinery session's identity signal, which the pre-push hook
+	// (gt-9tf9) and isGasTownAgentContext already read as one. It names which
+	// process is asking, and the container-suite guard needs it because a
+	// refinery's GT_ROLE parses as a deleted role (gt-j2n8y1).
+	"GT_REFINERY": true,
 	// The rendered compose file is the one spawner of the daemon in the
 	// container, and it exports this member of that one process's environment,
 	// as the session manager exports GT_POLECAT_PATH at spawn (gt-qpeei.17). It
