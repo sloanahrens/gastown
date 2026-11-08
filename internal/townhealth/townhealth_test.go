@@ -124,7 +124,7 @@ func healthy() *fake {
 		ticks:    []Tick{{Name: "wisp_reaper", Interval: 30 * time.Minute, LastFired: ago(10 * time.Minute)}},
 		landings: []RigLandings{{Rig: "gastown", Landed: 7, Pending: 1, Oldest: ago(time.Minute), OldestBead: "gt-x"}},
 		backupAt: ago(12 * time.Hour), backupOK: true,
-		mains:      []RigMain{{Rig: "gastown", LastRun: "abc", LastGreen: "abc"}},
+		mains:      []RigMain{{Rig: "gastown", LastRun: "abc", LastGreen: "abc", LastGreenAt: ago(time.Hour)}},
 		promotions: []RigPromotion{{Rig: "gastown", LastPromoted: "abc", Green: "abc", GreenAt: ago(time.Hour)}},
 		seats:      []Seat{{Rig: "gastown", Name: "polecat/opal", Run: true, Sampled: ago(time.Minute), Changed: ago(5 * time.Minute)}},
 		dispatch: DispatchRecord{Active: true, Ticks: []DispatchTick{
@@ -744,9 +744,9 @@ func TestMains(t *testing.T) {
 	t.Parallel()
 	f := healthy()
 	f.mains = []RigMain{
-		{Rig: "a", LastRun: "1111111111", LastGreen: "1111111111", PostLand: true},
-		{Rig: "b", LastRun: "2222222222", LastGreen: "1111111111", PostLand: true},
-		{Rig: "c", PostLand: true},
+		{Rig: "a", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
+		{Rig: "b", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
+		{Rig: "c", PostLand: PostLandCheck{Context: "ci / post-land"}},
 		{Rig: "d", Err: errors.New("corrupt state")},
 		{Rig: "no-check"},
 	}
@@ -774,6 +774,88 @@ func TestMains(t *testing.T) {
 	g.mains = []RigMain{{Rig: "no-check"}}
 	if line := Line(Compute(context.Background(), inputs(g)), now, DefaultStaleAfter); !strings.HasPrefix(line, "GREEN") {
 		t.Errorf("Line = %q, want green for a town whose only rig has no check", line)
+	}
+}
+
+// With a status context configured (gt-gg9hv.7.1) the verdict is the recorded
+// one: green, red naming the short sha, and UNKNOWN when the context is
+// configured but no verdict has been recorded yet (gt-gg9hv.7.2).
+func TestMainFieldWithAStatusContext(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	check := PostLandCheck{Context: "ci / post-land"}
+	f.mains = []RigMain{
+		{Rig: "green", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: check},
+		{Rig: "red", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: check},
+		{Rig: "unrecorded", PostLand: check},
+	}
+	r := Compute(context.Background(), inputs(f))
+	if got := field(t, r, "main/green"); got.Verdict != Green || got.Tag != Recorded {
+		t.Errorf("main/green = %+v, want the recorded green verdict", got)
+	}
+	if got := field(t, r, "main/red"); got.Verdict != Red || got.Detail != "main red at 22222222" {
+		t.Errorf("main/red = %+v, want red naming the short sha", got)
+	}
+	if got := field(t, r, "main/unrecorded"); got.Verdict != VerdictUnknown || got.Detail != "no post-landing verdict recorded" {
+		t.Errorf("main/unrecorded = %+v, want UNKNOWN naming the missing verdict", got)
+	}
+}
+
+// A rig whose command is exactly the interim placeholder `true` checks
+// nothing, so a green recorded under it is not evidence about main: UNKNOWN
+// with the placeholder named. With no command and no context a rig still
+// reads n/a, and a context beside the placeholder decides (gt-gg9hv.7.2).
+func TestMainFieldPlaceholderCommandIsUnknown(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.mains = []RigMain{
+		// The placeholder recorded its usual green: it is what every rig ran
+		// while the container daemon had no toolchain (gt-gg9hv.7).
+		{Rig: "placeholder", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: PostLandCheck{Command: "true"}},
+		// Both settings: the context wins, so the placeholder text does not
+		// make this rig check nothing.
+		{Rig: "context-wins", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(time.Hour),
+			PostLand: PostLandCheck{Command: "true", Context: "ci / post-land"}},
+		{Rig: "no-check"},
+	}
+	r := Compute(context.Background(), inputs(f))
+	got := field(t, r, "main/placeholder")
+	if got.Verdict != VerdictUnknown || got.Detail != "post-land check is a placeholder" {
+		t.Errorf("main/placeholder = %+v, want UNKNOWN naming the placeholder", got)
+	}
+	if got := field(t, r, "main/context-wins"); got.Verdict != Green {
+		t.Errorf("main/context-wins = %+v, want green from the context that wins over the command", got)
+	}
+	if got := field(t, r, "main/no-check"); got.Tag != Recorded || got.Value != "n/a" {
+		t.Errorf("main/no-check = %+v, want a recorded n/a", got)
+	}
+}
+
+// A green verdict older than PostLandVerdictMaxAge is UNKNOWN rather than a
+// green that never expires, and a green whose record carries no time cannot be
+// vouched for either. A red verdict is a standing fact about its commit and is
+// not aged by that clock (gt-gg9hv.7.2).
+func TestMainFieldStaleVerdictIsUnknown(t *testing.T) {
+	t.Parallel()
+	f := healthy()
+	f.mains = []RigMain{
+		{Rig: "stale", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
+		{Rig: "fresh", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge - time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
+		{Rig: "untimed", LastRun: "1111111111", LastGreen: "1111111111", PostLand: PostLandCheck{Context: "ci / post-land"}},
+		{Rig: "old-red", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
+	}
+	r := Compute(context.Background(), inputs(f))
+	if got := field(t, r, "main/stale"); got.Verdict != VerdictUnknown || !strings.Contains(got.Detail, "24h") {
+		t.Errorf("main/stale = %+v, want UNKNOWN naming the 24h bound", got)
+	}
+	if got := field(t, r, "main/fresh"); got.Verdict != Green {
+		t.Errorf("main/fresh = %+v, want green inside the bound", got)
+	}
+	if got := field(t, r, "main/untimed"); got.Verdict != VerdictUnknown || got.Detail != "green verdict has no recorded time" {
+		t.Errorf("main/untimed = %+v, want UNKNOWN naming the missing time", got)
+	}
+	if got := field(t, r, "main/old-red"); got.Verdict != Red {
+		t.Errorf("main/old-red = %+v, want the red to stand; its age is not judgable by LastGreenAt", got)
 	}
 }
 
