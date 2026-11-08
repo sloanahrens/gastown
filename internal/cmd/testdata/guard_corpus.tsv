@@ -8,8 +8,8 @@ guard	context	command	verdict	reason_key	bead	stamp
 #   verdict    allow or refuse
 #   reason_key a stable substring of the refusal reason; empty for allow
 #   bead       the bead that added the row; seed for the first rows
-#   stamp      empty until the freeze-rule bead fills it; while it is empty a
-#              row may end at the bead column and the missing field reads as ""
+#   stamp      the guard's source stamp (guardSourceHash) the row was added for;
+#              empty on the seed rows, which may end at the bead column
 #
 # {town} and {home} in a command are replaced with the fixture's town root and
 # home directory; see guard_corpus_test.go.
@@ -307,3 +307,7 @@ container_suite	polecat	"GT_TEST_DOCKER=1 echo 'go test ./internal/beads/...' | 
 dangerous	polecat	"echo a # n\r\nls"	allow		gt-q0jecy
 dangerous	polecat	"bash -c 'git reset --hard' #\\\r\nls"	refuse	comment ending in a backslash before a CR LF line end	gt-q0jecy
 dangerous	polecat	"echo a # n \\\r"	allow		gt-q0jecy
+# --- freeze-rule stamps (gt-x1bvnf): one real case per guard, stamped with its current source hash ---
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/git/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-x1bvnf	6266075c32f35d4cffff2f9c6d1f015aeaaea3c1fa7abee4d813b387325e7e47
+dangerous	polecat	"git reset --hard origin/main"	refuse	Reset onto a remote-tracking ref drops merged work	gt-x1bvnf	6266075c32f35d4cffff2f9c6d1f015aeaaea3c1fa7abee4d813b387325e7e47
+test_scope	polecat	"go test -run TestGuard ./internal/cmd"	allow		gt-x1bvnf	6266075c32f35d4cffff2f9c6d1f015aeaaea3c1fa7abee4d813b387325e7e47

@@ -1,7 +1,14 @@
 package cmd
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"hash"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -86,9 +93,9 @@ func loadGuardCorpus(t *testing.T) []guardCorpusRow {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		// The stamp column is empty until the freeze-rule bead fills it, and a
-		// trailing empty field is invisible in an editor, so a row may end at
-		// the bead column and the missing stamp reads as empty.
+		// The stamp column is empty on the seed rows, and a trailing empty field
+		// is invisible in an editor, so a row may end at the bead column and the
+		// missing stamp reads as empty.
 		if len(fields) == len(guardCorpusColumns)-1 {
 			fields = append(fields, "")
 		}
@@ -370,5 +377,378 @@ func TestGuardCorpusShape(t *testing.T) {
 		if c.refuse < minRefuse {
 			t.Errorf("%s has %d refuse rows, want at least %d", guard, c.refuse, minRefuse)
 		}
+	}
+}
+
+// The freeze rule. The command guards share one stamp: the sha256 of the
+// normalized non-test source of every guard file (tap_guard.go and
+// tap_guard_*.go, found by a glob of the guard directory, so a new guard file
+// is covered without a list to update) and of the parser every command guard
+// reads commands through. A change to any of them moves the stamp, and the
+// corpus must then carry a row stamped with the new one. The stamp comes from
+// the source, not from git, so it holds offline and in a clean clone.
+
+const (
+	// guardFreezeDir holds the guard files the stamp covers.
+	guardFreezeDir = "."
+
+	// guardParserDir holds the parser whose non-test sources are part of the
+	// stamp.
+	guardParserDir = "../shellparse"
+)
+
+// guardFreezeGuards are the guards each of which must carry a row with the
+// current stamp.
+var guardFreezeGuards = []string{corpusContainerSuite, corpusDangerous, corpusTestScope}
+
+// isGuardSource reports whether a file name is one of the guard files the stamp
+// covers. Test files are excluded by the caller.
+func isGuardSource(name string) bool {
+	return name == "tap_guard.go" || strings.HasPrefix(name, "tap_guard_")
+}
+
+// freezeSources lists the non-test .go files in dir whose names match, sorted
+// by name. A dir that cannot be read is an error.
+func freezeSources(dir string, match func(name string) bool) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", dir, err)
+	}
+	var paths []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") || !match(name) {
+			continue
+		}
+		paths = append(paths, filepath.Join(dir, name))
+	}
+	return paths, nil
+}
+
+// guardSourceHash is the stamp of the command guards: the sha256 of the
+// normalized source of every guard file in guardDir, then of every non-test
+// .go file in parserDir. A comment or a change of layout leaves it alone; a
+// changed identifier or literal, a new guard file, or a changed parser moves
+// it. A source that cannot be read or parsed is an error, never a stamp.
+func guardSourceHash(guardDir, parserDir string) (string, error) {
+	guards, err := freezeSources(guardDir, isGuardSource)
+	if err != nil {
+		return "", err
+	}
+	if len(guards) == 0 {
+		return "", fmt.Errorf("guard dir %s holds no tap_guard source", guardDir)
+	}
+	parser, err := freezeSources(parserDir, func(string) bool { return true })
+	if err != nil {
+		return "", fmt.Errorf("parser: %w", err)
+	}
+	if len(parser) == 0 {
+		return "", fmt.Errorf("parser dir %s holds no non-test .go source", parserDir)
+	}
+	h := sha256.New()
+	for _, path := range append(guards, parser...) {
+		if err := hashNormalizedGo(h, path); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashNormalizedGo writes the base name of path and its normalized source to h.
+// The source is parsed without comments and printed through an empty FileSet,
+// which resolves no source lines: the printer lays the tree out from its
+// structure, so the layout of the source (and the blank line a removed comment
+// leaves) does not reach the stamp. Printing through the parse's own FileSet
+// would bring that layout back.
+func hashNormalizedGo(h hash.Hash, path string) error {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	file, err := parser.ParseFile(token.NewFileSet(), path, src, parser.SkipObjectResolution)
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	var out bytes.Buffer
+	cfg := printer.Config{Mode: printer.UseSpaces | printer.TabIndent, Tabwidth: 8}
+	if err := cfg.Fprint(&out, token.NewFileSet(), file); err != nil {
+		return fmt.Errorf("print %s: %w", path, err)
+	}
+	fmt.Fprintf(h, "%s\x00", filepath.Base(path))
+	h.Write(out.Bytes())
+	return nil
+}
+
+// guardFreezeFailure returns the freeze-rule failure for guard: empty when a
+// corpus row carries the stamp of the guard files in guardDir, otherwise a
+// message naming the guard, the stamp to add and the file to add the row to.
+// An unknown guard name or an unreadable source is an error.
+func guardFreezeFailure(rows []guardCorpusRow, guard, guardDir, parserDir string) (string, error) {
+	known := false
+	for _, g := range guardFreezeGuards {
+		known = known || g == guard
+	}
+	if !known {
+		return "", fmt.Errorf("unknown guard %q", guard)
+	}
+	stamp, err := guardSourceHash(guardDir, parserDir)
+	if err != nil {
+		return "", fmt.Errorf("stamp %s: %w", guard, err)
+	}
+	for _, row := range rows {
+		if row.guard == guard && row.stamp == stamp {
+			return "", nil
+		}
+	}
+	return fmt.Sprintf("guard %s: no corpus row carries its current stamp %s; a tap_guard file or the parser changed. "+
+		"Add a row for the case you fixed to %s with stamp %s and the bead that made the change in the bead column",
+		guard, stamp, guardCorpusPath, stamp), nil
+}
+
+// TestGuardChangeAddsCorpusRow holds the freeze rule on the tree: each command
+// guard's current stamp is carried by at least one corpus row.
+func TestGuardChangeAddsCorpusRow(t *testing.T) {
+	t.Parallel()
+	rows := loadGuardCorpus(t)
+	for _, guard := range guardFreezeGuards {
+		t.Run(guard, func(t *testing.T) {
+			msg, err := guardFreezeFailure(rows, guard, guardFreezeDir, guardParserDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if msg != "" {
+				t.Error(msg)
+			}
+		})
+	}
+}
+
+// writeFreezeDir writes each synthetic file into a fresh directory and returns
+// it. The freeze tests read nothing from the tree.
+func writeFreezeDir(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for name, src := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	return dir
+}
+
+// TestGuardSourceHashIgnoresCommentsAndFormatting pins what the stamp covers.
+// The sources are synthetic: the test reads nothing from the tree.
+func TestGuardSourceHashIgnoresCommentsAndFormatting(t *testing.T) {
+	t.Parallel()
+	const base = `package cmd
+
+func guardLabel(n int) string {
+	if n > 1 {
+		return "many"
+	}
+	return "one"
+}
+`
+	parserDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(parserDir, "parse.go"), []byte("package shellparse\n\nfunc parse() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stamp := func(src string) string {
+		t.Helper()
+		hash, err := guardSourceHash(writeFreezeDir(t, map[string]string{"tap_guard_fixture.go": src}), parserDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hash
+	}
+	want := stamp(base)
+	tests := []struct {
+		name string
+		src  string
+		same bool
+	}{
+		{name: "comment above the func", src: strings.Replace(base, "func guardLabel", "// guardLabel labels n.\nfunc guardLabel", 1), same: true},
+		{name: "comment inside the body", src: strings.Replace(base, "\treturn \"one\"", "\t// the default label\n\treturn \"one\"", 1), same: true},
+		{name: "comment between statements", src: strings.Replace(base, "\t}\n\treturn", "\t}\n\n\t// fall through\n\treturn", 1), same: true},
+		{name: "extra blank line", src: strings.Replace(base, "\tif n > 1 {", "\n\n\tif n > 1 {", 1), same: true},
+		{name: "one-line layout", src: "package cmd\n\nfunc guardLabel(n int) string{if n>1{return \"many\"};return \"one\"}\n", same: true},
+		{name: "changed string literal", src: strings.Replace(base, `"many"`, `"several"`, 1), same: false},
+		{name: "changed identifier", src: strings.Replace(strings.Replace(base, "n int", "count int", 1), "if n > 1", "if count > 1", 1), same: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := stamp(tt.src) == want; got != tt.same {
+				t.Errorf("stamp unchanged = %v, want %v", got, tt.same)
+			}
+		})
+	}
+}
+
+// TestGuardSourceHashCoversParserSource checks that the parser's non-test
+// sources are part of the stamp, and its test files are not.
+func TestGuardSourceHashCoversParserSource(t *testing.T) {
+	t.Parallel()
+	const guardSrc = "package cmd\n\nfunc guardLabel() string { return \"one\" }\n"
+	tests := []struct {
+		name   string
+		parser string
+		same   bool
+	}{
+		{name: "comment in the parser", parser: "package shellparse\n\n// parse reads a line.\nfunc parse() {}\n", same: true},
+		{name: "changed parser literal", parser: "package shellparse\n\nfunc parse() { _ = \"x\" }\n", same: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			guardDir := writeFreezeDir(t, map[string]string{"tap_guard_fixture.go": guardSrc})
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "parse.go"), []byte("package shellparse\n\nfunc parse() {}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			before, err := guardSourceHash(guardDir, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "parse.go"), []byte(tt.parser), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "parse_test.go"), []byte("package shellparse\n\nfunc TestX() { _ = 1 }\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			after, err := guardSourceHash(guardDir, dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := before == after; got != tt.same {
+				t.Errorf("stamp unchanged = %v, want %v", got, tt.same)
+			}
+		})
+	}
+}
+
+// TestGuardChangeWithoutRowFails is the freeze rule's refusal: a literal
+// changed in a guard's source, with the corpus unchanged, is reported as the
+// guard, with the stamp to add. The source is synthetic, so the test does not
+// depend on any literal in the production guards.
+func TestGuardChangeWithoutRowFails(t *testing.T) {
+	t.Parallel()
+	const src = "package cmd\n\nfunc guardMessage() string { return \"Hard reset discards all uncommitted changes irreversibly\" }\n"
+	const changed = "package cmd\n\nfunc guardMessage() string { return \"Hard reset discards every uncommitted change\" }\n"
+	original, err := guardSourceHash(writeFreezeDir(t, map[string]string{"tap_guard_dangerous.go": src}), guardParserDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardDir := writeFreezeDir(t, map[string]string{"tap_guard_dangerous.go": changed})
+	stamp, err := guardSourceHash(guardDir, guardParserDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stamp == original {
+		t.Fatalf("changed literal left the stamp at %s", stamp)
+	}
+	msg, err := guardFreezeFailure(loadGuardCorpus(t), corpusDangerous, guardDir, guardParserDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg == "" {
+		t.Fatal("changed guard source passed the freeze rule with the corpus unchanged")
+	}
+	for _, want := range []string{corpusDangerous, stamp, guardCorpusPath} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("freeze failure %q does not contain %q", msg, want)
+		}
+	}
+}
+
+// TestGuardSourceHashCoversEveryGuardFile checks that a new tap_guard file
+// moves the stamp, so a guard added to the directory cannot change a verdict
+// without a row, while a test file under the same prefix does not.
+func TestGuardSourceHashCoversEveryGuardFile(t *testing.T) {
+	t.Parallel()
+	const guardSrc = "package cmd\n\nfunc guardLabel() string { return \"one\" }\n"
+	const extra = "package cmd\n\nfunc guardExtra() string { return \"two\" }\n"
+	parserDir := writeFreezeDir(t, map[string]string{"parse.go": "package shellparse\n\nfunc parse() {}\n"})
+	base := map[string]string{"tap_guard_fixture.go": guardSrc}
+	before, err := guardSourceHash(writeFreezeDir(t, base), parserDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		extra string
+		same  bool
+	}{
+		{name: "extra guard file", extra: "tap_guard_extra.go", same: false},
+		{name: "extra guard file at the base name", extra: "tap_guard.go", same: false},
+		{name: "extra guard test file", extra: "tap_guard_extra_test.go", same: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files := map[string]string{tt.extra: extra}
+			for name, src := range base {
+				files[name] = src
+			}
+			after, err := guardSourceHash(writeFreezeDir(t, files), parserDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := before == after; got != tt.same {
+				t.Errorf("stamp unchanged = %v, want %v", got, tt.same)
+			}
+		})
+	}
+}
+
+// TestGuardSourceHashRefusesUnreadableSource checks the refusal branches: a
+// source that cannot be read or parsed, or a parser with no source, is an
+// error, never a stamp.
+func TestGuardSourceHashRefusesUnreadableSource(t *testing.T) {
+	t.Parallel()
+	parserDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(parserDir, "parse.go"), []byte("package shellparse\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testsOnly := t.TempDir()
+	if err := os.WriteFile(filepath.Join(testsOnly, "parse_test.go"), []byte("package shellparse\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	valid := writeFreezeDir(t, map[string]string{"tap_guard_fixture.go": "package cmd\n"})
+	tests := []struct {
+		name      string
+		guardDir  string
+		parserDir string
+	}{
+		{name: "missing guard dir", guardDir: filepath.Join(t.TempDir(), "absent"), parserDir: parserDir},
+		{name: "unparsable guard file", guardDir: writeFreezeDir(t, map[string]string{"tap_guard_fixture.go": "package cmd\nfunc ("}), parserDir: parserDir},
+		{name: "guard dir with no tap_guard file", guardDir: writeFreezeDir(t, map[string]string{"helper.go": "package cmd\n"}), parserDir: parserDir},
+		{name: "missing parser dir", guardDir: valid, parserDir: filepath.Join(t.TempDir(), "absent")},
+		{name: "parser dir with only test files", guardDir: valid, parserDir: testsOnly},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if hash, err := guardSourceHash(tt.guardDir, tt.parserDir); err == nil {
+				t.Errorf("guardSourceHash = %q, want an error", hash)
+			}
+		})
+	}
+}
+
+// TestGuardFreezeFailureRefusesUnreadableSource checks that an unreadable
+// source is an error from the freeze check, not an empty failure that reads as
+// a stamped guard.
+func TestGuardFreezeFailureRefusesUnreadableSource(t *testing.T) {
+	t.Parallel()
+	msg, err := guardFreezeFailure(nil, corpusDangerous, filepath.Join(t.TempDir(), "absent"), guardParserDir)
+	if err == nil {
+		t.Errorf("guardFreezeFailure = %q, want an error", msg)
+	}
+}
+
+// TestGuardFreezeFailureRefusesUnknownGuard checks that a guard name outside
+// the freeze's guard list is an error, not a stamp that no row can carry.
+func TestGuardFreezeFailureRefusesUnknownGuard(t *testing.T) {
+	t.Parallel()
+	msg, err := guardFreezeFailure(nil, "nope", guardFreezeDir, guardParserDir)
+	if err == nil {
+		t.Errorf("guardFreezeFailure(nope) = %q, want an error", msg)
 	}
 }
