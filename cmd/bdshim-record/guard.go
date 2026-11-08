@@ -96,7 +96,8 @@ func guardCheck(getwd func() (string, error), child childBD) (string, error) {
 // holdScratch makes the scratch's workspace and proves that the container's bd resolves it, then
 // returns the release that drops the database and removes the workspace. The caller runs release
 // once the scratch is no longer needed. When it returns an error it returns no release, and a
-// workspace a failed init left behind is not removed here.
+// workspace a failed init left behind is not removed here; a check that refuses the workspace the init
+// made clears the scratch's marker before it returns (abandonScratch).
 func holdScratch(cwd, scratch string, child childBD) (func() error, error) {
 	if scratch == "" {
 		return nil, errors.New("name a scratch directory, not an empty path, so the recorder knows which directory bd runs in")
@@ -127,7 +128,7 @@ func holdScratch(cwd, scratch string, child childBD) (func() error, error) {
 		return nil, fmt.Errorf("give the scratch directory %s a workspace of its own: %w", scratch, err)
 	}
 	if err := scratchMadeWorkspace(scratch); err != nil {
-		return nil, err
+		return nil, errors.Join(err, abandonScratch(scratch, name))
 	}
 	return func() error {
 		// Both parts of the cleanup run, so a failed drop still removes the directory, and either
@@ -137,6 +138,18 @@ func holdScratch(cwd, scratch string, child childBD) (func() error, error) {
 		}
 		return nil
 	}, nil
+}
+
+// abandonScratch clears the scratch after its init ran and scratchMadeWorkspace refused the workspace
+// the init left. The scratch's marker is removed, and the database is named in the error. Nothing is
+// dropped through that marker: the guard just refused it, so bd must not run against it, and with no
+// trusted workspace there is nowhere to run the drop from. The name carries testdb's prefix, which a
+// later `bd dolt clean-databases` removes (gt-vs7a5).
+func abandonScratch(scratch, name string) error {
+	return errors.Join(
+		fmt.Errorf("database %s may remain on the server, since the refused scratch's workspace is not trusted to drop it from", name),
+		os.RemoveAll(beadsDirIn(scratch)),
+	)
 }
 
 // refuseMountCharacter refuses a scratch whose path holds a character a -v source cannot carry: ':'

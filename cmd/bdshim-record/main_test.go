@@ -626,6 +626,57 @@ func TestGuardRunReportsAFailedScratchWorkspace(t *testing.T) {
 	}
 }
 
+// initLeavesUnreadableMarker is a bd whose init exits 0 and leaves a marker the guard cannot read: a
+// self-symlink fails the stat with ELOOP. The check then refuses the scratch after its init ran, and
+// the database name the init was given is written to name.
+func initLeavesUnreadableMarker(name *string) Runner {
+	return func(dir string, args []string) ([]byte, int, error) {
+		if args[0] != "init" {
+			return nil, 0, nil
+		}
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--database" {
+				*name = args[i+1]
+			}
+		}
+		if err := os.Symlink(".beads", filepath.Join(dir, ".beads")); err != nil {
+			return nil, 0, err
+		}
+		return nil, 0, nil
+	}
+}
+
+// TestGuardRunClearsTheMarkerAFailedCheckLeftBehind: a check that refuses the workspace its init left
+// in the scratch removes that marker before it returns, so the refused scratch holds no workspace
+// (gt-l9mqph).
+func TestGuardRunClearsTheMarkerAFailedCheckLeftBehind(t *testing.T) {
+	t.Parallel()
+	scratch := filepath.Join(tempDir(t), "scratch")
+	var name string
+	err := guardRun(safeCwd(t), scratch, testChild(initLeavesUnreadableMarker(&name), atWork))
+	if err == nil {
+		t.Fatalf("guardRun over an init that left an unreadable marker = nil, want the refusal")
+	}
+	if _, statErr := os.Lstat(beadsDirIn(scratch)); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("guardRun left the scratch's marker after refusing it: lstat = %v, want it removed", statErr)
+	}
+}
+
+// TestGuardRunNamesTheDatabaseAFailedCheckLeftBehind: the refusal names the database the init made,
+// so a later clean can find it, since the guard drops nothing from a workspace it refused (gt-l9mqph).
+func TestGuardRunNamesTheDatabaseAFailedCheckLeftBehind(t *testing.T) {
+	t.Parallel()
+	scratch := filepath.Join(tempDir(t), "scratch")
+	var name string
+	err := guardRun(safeCwd(t), scratch, testChild(initLeavesUnreadableMarker(&name), atWork))
+	if name == "" {
+		t.Fatalf("guardRun ran an init with no --database name")
+	}
+	if err == nil || !strings.Contains(err.Error(), name) {
+		t.Fatalf("guardRun over an init that made database %s = %v, want the database named", name, err)
+	}
+}
+
 // TestGuardRunRefusesAScratchItCannotMake: the guard names the scratch directory it cannot make as
 // the failure, rather than reporting a workspace it never asked bd about.
 func TestGuardRunRefusesAScratchItCannotMake(t *testing.T) {
