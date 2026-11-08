@@ -219,6 +219,14 @@ func TestExportDrivesWalkAndFileFailures(t *testing.T) {
 			want: "writing the archive header for daemon/link",
 		},
 		{
+			// The directory and the link headers fit in 1024 bytes; the regular
+			// file's header is the write that fails.
+			name: "a regular file's header",
+			over: func(*townOps) {},
+			w:    &failAfterWriter{n: 1024},
+			want: "writing the archive header for daemon/state.json",
+		},
+		{
 			name: "opening a file",
 			over: func(o *townOps) {
 				o.open = func(string) (io.ReadCloser, error) { return nil, errors.New("open failed") }
@@ -387,6 +395,20 @@ func TestImportDrivesFilesystemFailures(t *testing.T) {
 			},
 			opts: ImportOptions{MergeNewer: true},
 			want: "reading \"daemon/x\" in the destination",
+		},
+		{
+			// The parent is absent, so checkComponents stops before the
+			// directory and importDir's look is the one that fails. Merge mode
+			// skips the occupied-root check, which looks at the same path.
+			name: "a directory that cannot be read when it is created",
+			archive: []archiveEntry{{hdr: &tar.Header{
+				Name: ".runtime/jev/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Unix(1, 0),
+			}}},
+			ops: func(t *testing.T) townOps {
+				return opsWith(func(o *townOps) { o.lstat = lstatFailingOn(t, "/.runtime/jev") })
+			},
+			opts: ImportOptions{MergeNewer: true},
+			want: "reading \".runtime/jev\" in the destination",
 		},
 		{
 			name:    "a path component that cannot be read",
