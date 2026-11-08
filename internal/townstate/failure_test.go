@@ -278,10 +278,15 @@ func TestExportDrivesWalkAndFileFailures(t *testing.T) {
 		locked := t.TempDir()
 		writeStateFile(t, locked, "daemon/sub/inner.txt", "inner\n", 0o644)
 		dir := filepath.Join(locked, "daemon", "sub")
+		info, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mode := info.Mode().Perm()
 		if err := os.Chmod(dir, 0o000); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) }) // so the temp tree can be removed
+		t.Cleanup(func() { _ = os.Chmod(dir, mode) }) // so the temp tree can be removed
 		if _, err := Export(io.Discard, locked, Default(), ExportOptions{}); err == nil || !strings.Contains(err.Error(), "reading daemon/sub") {
 			t.Fatalf("Export over an unreadable directory = %v, want a read refusal", err)
 		}
