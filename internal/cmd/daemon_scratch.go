@@ -33,7 +33,10 @@ type scratchFlags struct {
 	// a flag the operator named is refused rather than read as unset, since it
 	// names no file and the render would carry no token mount.
 	omTokenFileSet bool
-	forge          forgePorts
+	// force replaces a compose file at --compose-file that gt did not write. It
+	// is only on `up`, the one scratch subcommand that writes the file.
+	force bool
+	forge forgePorts
 }
 
 // forgePorts are the scratch forge's two host ports as the flags gave them:
@@ -54,9 +57,10 @@ type scratchDeps struct {
 	out     io.Writer
 	stat    func(path string) (os.FileInfo, error)
 	lstat   func(path string) (os.FileInfo, error)
-	// readFile reads the live town's settings file; readPatrol reads its daemon
-	// settings through the config accessors; evalSymlinks resolves a path. All
-	// three only read, and only the live town's settings.
+	// readFile reads a file the command reads and never writes: the live town's
+	// settings, and the compose file the foreign-file guard checks. readPatrol
+	// reads the live town's daemon settings through the config accessors;
+	// evalSymlinks resolves a path. None of them writes.
 	readFile     func(path string) ([]byte, error)
 	readPatrol   func(townRoot string) (*config.DaemonPatrolConfig, error)
 	evalSymlinks func(path string) (string, error)
@@ -85,7 +89,12 @@ The scratch town has no settings before its first start installs it, so these
 commands take everything from flags. They run from any directory that is neither
 the live town nor the scratch town. --live-root names the live town and is read
 only to refuse a scratch root under or around it; nothing is run or written in
-the live town.`,
+the live town.
+
+up writes the compose file only at an absent path or one whose first line is
+gt's generated-file header. A file gt did not write is left alone unless --force
+is given: an unreadable file cannot be told apart from one the operator wrote,
+so it too needs --force.`,
 		RunE: requireSubcommand,
 	}
 	pf := parent.PersistentFlags()
@@ -116,6 +125,9 @@ the live town.`,
 			sub.Flags().StringVar(&f.omTokenFile, config.OMTokenFileFlag, "", "path of the om token file inside the container, passed to the daemon's command line")
 			sub.Flags().IntVar(&f.forge.httpPort, "forge-http-port", 0, "host port of the scratch forge's http; given with --forge-ssh-port it adds the throwaway forge to the project")
 			sub.Flags().IntVar(&f.forge.sshPort, "forge-ssh-port", 0, "host port of the scratch forge's ssh; given with --forge-http-port it adds the throwaway forge to the project")
+		}
+		if name == "up" {
+			sub.Flags().BoolVar(&f.force, "force", false, "overwrite a compose file at --compose-file that gt did not write; without it such a file is left alone")
 		}
 		parent.AddCommand(sub)
 	}
@@ -152,6 +164,16 @@ func runDaemonScratch(ctx context.Context, action string, f scratchFlags, d scra
 		}
 		if err := checkScratchRoot(f.root, d); err != nil {
 			return err
+		}
+		// up writes its own compose file. One the operator wrote, and one it
+		// cannot read and so cannot tell apart from theirs, is replaced only when
+		// --force says the replacement is wanted. The check is here, before
+		// Deploy writes anything, so a refused run leaves the file as it was and
+		// starts nothing.
+		if !f.force {
+			if err := refuseForeignComposeFile(d.readFile, f.composeFile); err != nil {
+				return err
+			}
 		}
 		start := append([]string{"up", "-d", "daemon"}, templates.ScratchForgeServices(spec)...)
 		sup := containerDeploySupervisor{start: func() ([]string, error) { return scratchComposeArgv(f, start...), nil }, container: f.container}

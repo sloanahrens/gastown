@@ -611,7 +611,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	// --force says the replacement is wanted. The check is here, before any
 	// write, so the refused run leaves every derived file as it was.
 	if !f.force {
-		if err := refuseForeignComposeFile(d.files, path); err != nil {
+		if err := refuseForeignComposeFile(d.files.read, path); err != nil {
 			return err
 		}
 	}
@@ -639,12 +639,14 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	return nil
 }
 
-// refuseForeignComposeFile refuses to replace a compose file this command did
-// not write. The generated-file header at the first line is the mark: a file
-// without it belongs to the operator, and an unreadable file cannot be told
-// apart from theirs, so both need --force. A missing file is written as before.
-func refuseForeignComposeFile(files composeFiles, path string) error {
-	data, err := files.read(path)
+// refuseForeignComposeFile refuses to replace a compose file gt did not write,
+// for every command that writes one: `daemon compose write` and `daemon scratch
+// up` both call it, through their own read seam, before either writes. The
+// generated-file header at the first line is the mark: a file without it belongs
+// to the operator, and an unreadable file cannot be told apart from theirs, so
+// both need --force. A missing file is written as before.
+func refuseForeignComposeFile(read func(path string) ([]byte, error), path string) error {
+	data, err := read(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil
