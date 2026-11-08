@@ -12,7 +12,6 @@ package gatemodel
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +22,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -696,23 +695,12 @@ func percentile(sorted []float64, p float64) float64 {
 // short sha, changed packages, dependents, always-run set, fallback reason,
 // modeled wall and logged wall, then the summary.
 func RenderText(w io.Writer, rep Report) error {
-	var table bytes.Buffer
-	tw := tabwriter.NewWriter(&table, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintf(tw, "SHORT SHA\tCHANGED\tDEPENDENTS\tALWAYS-RUN\tFALLBACK\tMODELED(%d cpus)\tLOGGED\n", rep.CPUS); err != nil {
-		return err
-	}
-	for _, l := range rep.Landings {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			l.Short, list(l.Changed), list(l.Dependents), list(l.AlwaysRun),
-			fallbackCell(l), modeledCell(l), loggedCell(l)); err != nil {
+	rows := tableRows(rep)
+	widths := tableWidths(rows)
+	for _, row := range rows {
+		if _, err := fmt.Fprintln(w, tableLine(row, widths)); err != nil {
 			return err
 		}
-	}
-	if err := tw.Flush(); err != nil {
-		return err
-	}
-	if _, err := w.Write(table.Bytes()); err != nil {
-		return err
 	}
 	hub := "hubs"
 	if rep.Summary.Hubs == 1 {
@@ -737,6 +725,52 @@ func RenderText(w io.Writer, rep Report) error {
 		}
 	}
 	return nil
+}
+
+// tableRows is the report's table: the header row, then one row per landing.
+func tableRows(rep Report) [][]string {
+	rows := [][]string{{
+		"SHORT SHA", "CHANGED", "DEPENDENTS", "ALWAYS-RUN", "FALLBACK",
+		fmt.Sprintf("MODELED(%d cpus)", rep.CPUS), "LOGGED",
+	}}
+	for _, l := range rep.Landings {
+		rows = append(rows, []string{
+			l.Short, list(l.Changed), list(l.Dependents), list(l.AlwaysRun),
+			fallbackCell(l), modeledCell(l), loggedCell(l),
+		})
+	}
+	return rows
+}
+
+// tableWidths is each column's widest cell, in runes, so the table lines up.
+func tableWidths(rows [][]string) []int {
+	widths := make([]int, len(rows[0]))
+	for _, row := range rows {
+		for i, cell := range row {
+			if n := utf8.RuneCountInString(cell); n > widths[i] {
+				widths[i] = n
+			}
+		}
+	}
+	return widths
+}
+
+// tableLine pads row's cells to widths and joins them with two spaces, so a
+// cell's own comma-and-space list stays readable. The last cell takes no
+// trailing padding.
+func tableLine(row []string, widths []int) string {
+	var b strings.Builder
+	for i, cell := range row {
+		if i > 0 {
+			b.WriteString("  ")
+		}
+		if i == len(row)-1 {
+			b.WriteString(cell)
+			continue
+		}
+		fmt.Fprintf(&b, "%-*s", widths[i], cell)
+	}
+	return b.String()
 }
 
 // fallbackCell is the table's fallback column: what forced the full run, or

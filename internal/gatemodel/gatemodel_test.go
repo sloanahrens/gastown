@@ -590,10 +590,11 @@ func fullReport() Report {
 
 // TestGateModelRenderTextReportsAFailedWrite fails the writer at each write the
 // text report makes, so every write error return runs. The full report makes
-// four writes: the table, the summary, the model and the missing-costs note.
+// five writes: the header row, the one landing row, the summary, the model and
+// the missing-costs note.
 func TestGateModelRenderTextReportsAFailedWrite(t *testing.T) {
 	t.Parallel()
-	const writes = 4
+	const writes = 5
 	for n := 1; n <= writes; n++ {
 		t.Run(fmt.Sprintf("write %d", n), func(t *testing.T) {
 			t.Parallel()
