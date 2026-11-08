@@ -28,26 +28,40 @@ type ImportOptions struct {
 type ImportSummary struct {
 	// Entries are the manifest rows the archive wrote into, in first-seen
 	// order. They are top-level entry names, never the files below.
-	Entries   []string
-	Files     int
-	Dirs      int
-	Symlinks  int
-	Bytes     int64
+	Entries  []string
+	Files    int
+	Dirs     int
+	Symlinks int
+	Bytes    int64
+	// KeptNewer counts the existing files a merge left alone because they are
+	// at least as new as the archive's copy.
 	KeptNewer int
 }
 
-// String renders the summary for the import command.
+// String renders the summary for the import command: one line per entry class,
+// so a run names what it wrote and what it kept.
 func (s ImportSummary) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "town state import: %d files (%d bytes), %d directories, %d symlinks",
-		s.Files, s.Bytes, s.Dirs, s.Symlinks)
+	b.WriteString("town state import:")
+	fmt.Fprintf(&b, "\nfiles: %d (%d bytes)", s.Files, s.Bytes)
+	fmt.Fprintf(&b, "\ndirectories: %d", s.Dirs)
+	fmt.Fprintf(&b, "\nsymlinks: %d", s.Symlinks)
 	if s.KeptNewer > 0 {
-		fmt.Fprintf(&b, "; kept %d newer existing files", s.KeptNewer)
+		fmt.Fprintf(&b, "\nskipped: %d existing files newer than the archive", s.KeptNewer)
+	} else {
+		b.WriteString("\nskipped: none")
 	}
 	if len(s.Entries) > 0 {
 		fmt.Fprintf(&b, "\nentries: %s", strings.Join(s.Entries, ", "))
 	}
 	return b.String()
+}
+
+// destTree is the town root an import writes into, and the daemon-owned rows
+// the archive may name, as they stand when an entry is read.
+type destTree struct {
+	root    string
+	entries []Entry
 }
 
 // Import reads a tar stream from r and restores the daemon-owned set into the
@@ -59,12 +73,13 @@ func (s ImportSummary) String() string {
 // the root and must fall under a daemon-owned manifest row; a name that is
 // absolute, contains "..", or resolves through a symlink is refused, as is any
 // entry that is not a regular file, a directory or a symlink, and any symlink
-// whose target leaves the town root. Nothing outside the daemon-owned rows is
+// whose target, followed through the tree as extracted so far, leaves the town
+// root or the daemon-owned rows. Nothing outside the daemon-owned rows is
 // written, and a refused entry writes nothing.
 //
-// A rig whose top-level directory carries a config.json names itself as a rig,
-// so a seed into an empty root covers the <rig> rows before the root has a
-// registry. A rig's write surface is still only its daemon-owned rows.
+// The rigs are the ones the registry names. A seed into an empty root learns
+// them from the registry entry the archive carries; the manifest orders that
+// entry before the <rig> rows, so a rig row that comes first is refused.
 func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSummary, error) {
 	s := ImportSummary{}
 	if m == nil {
@@ -97,7 +112,7 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return s, applyDirTimes(opts.ops, dirs)
+			return s, finishDirs(opts.ops, dirs)
 		}
 		if err != nil {
 			return s, fmt.Errorf("reading the archive: %w", err)
@@ -106,24 +121,38 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 		if err != nil {
 			return s, err
 		}
-		if rig, ok := rigFromMarker(name, m); ok {
-			known[rig] = true
-		}
-		e, ok := Lookup(daemonEntries(m, sortedRigs(known)), name)
+		tree := destTree{root: townRoot, entries: daemonEntries(m, sortedRigs(known))}
+		e, ok := Lookup(tree.entries, name)
 		if !ok {
 			return s, fmt.Errorf("the archive entry %q is not under a daemon-owned path of the manifest; an import writes nothing outside them", name)
 		}
 		if err := checkComponents(opts.ops, townRoot, name); err != nil {
 			return s, err
 		}
-		dest := filepath.Join(townRoot, filepath.FromSlash(name))
-		if err := importEntry(opts.ops, tr, hdr, dest, name, e, opts, &s, &dirs); err != nil {
+		if err := importEntry(opts.ops, tr, hdr, name, e, tree, opts, &s, &dirs); err != nil {
 			return s, err
+		}
+		if isRegistry(name) && hdr.Typeflag == tar.TypeReg {
+			// The registry is on disk now, so the rigs it names are the rows
+			// the entries after it may write.
+			registered, err := registryRigs(os.DirFS(townRoot))
+			if err != nil {
+				return s, fmt.Errorf("reading the rigs the registry in the archive names: %w", err)
+			}
+			for _, rig := range registered {
+				known[rig] = true
+			}
 		}
 		if !slices.Contains(s.Entries, e.Path) {
 			s.Entries = append(s.Entries, e.Path)
 		}
 	}
+}
+
+// isRegistry reports whether name is the rig registry, the file the rigs are
+// read from, on either layout.
+func isRegistry(name string) bool {
+	return name == machineFile || name == rigsFile
 }
 
 // cleanArchiveName refuses a tar name that cannot be a town-root-relative path.
@@ -145,20 +174,6 @@ func cleanArchiveName(raw string) (string, error) {
 		}
 	}
 	return name, nil
-}
-
-// rigFromMarker reports whether name is a top-level directory's config.json,
-// which is how a target root with no registry learns the rigs an archive
-// carries. A town-level directory the manifest names is never a rig.
-func rigFromMarker(name string, m *Manifest) (string, bool) {
-	top, rest, ok := strings.Cut(name, "/")
-	if !ok || rest != "config.json" {
-		return "", false
-	}
-	if top == "" || strings.HasPrefix(top, ".") || m.names(top) {
-		return "", false
-	}
-	return top, true
 }
 
 // checkComponents refuses name when its destination, or any existing prefix of
@@ -198,28 +213,32 @@ func refuseOccupiedRoot(ops townOps, root string, m *Manifest, rigs map[string]b
 
 // importEntry writes one archive entry, after every check that can refuse it
 // has run.
-func importEntry(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, e Entry, opts ImportOptions, s *ImportSummary, dirs *[]dirTime) error {
+func importEntry(ops townOps, tr io.Reader, hdr *tar.Header, name string, e Entry, tree destTree, opts ImportOptions, s *ImportSummary, dirs *[]dirTime) error {
+	dest := filepath.Join(tree.root, filepath.FromSlash(name))
 	switch hdr.Typeflag {
 	case tar.TypeDir:
-		return importDir(ops, dest, name, archiveMode(hdr.Mode, e.Private), hdr.ModTime, s, dirs)
+		return importDir(ops, dest, name, fs.FileMode(hdr.Mode).Perm(), hdr.ModTime, s, dirs)
 	case tar.TypeReg, tar.TypeRegA:
 		return importFile(ops, tr, hdr, dest, name, e.Private, opts, s)
 	case tar.TypeSymlink:
-		return importSymlink(ops, hdr, dest, name, s)
+		return importSymlink(ops, hdr, dest, name, tree, s)
 	default:
 		return fmt.Errorf("the archive entry %q has type %s; an import accepts regular files, directories and symlinks only", name, tarTypeName(hdr.Typeflag))
 	}
 }
 
-// dirTime is a created directory and the mtime its archive entry carries.
+// dirTime is a created directory, the mode and mtime its archive entry carries.
 type dirTime struct {
 	dest, name string
+	mode       fs.FileMode
 	mtime      time.Time
 }
 
 // importDir creates a missing directory. An existing directory is kept, so a
-// replay leaves the tree's mtimes alone where nothing was written. The mtime is
-// queued for applyDirTimes: every child written after this call would move it.
+// replay leaves the tree's mode and mtime alone where nothing was written. The
+// archived mode and mtime are queued for finishDirs: the directory is created
+// owner-writable so the entries after it can be written, and every child
+// written after this call would move its mtime.
 func importDir(ops townOps, dest, name string, mode fs.FileMode, mtime time.Time, s *ImportSummary, dirs *[]dirTime) error {
 	info, err := ops.lstat(dest)
 	switch {
@@ -230,25 +249,33 @@ func importDir(ops townOps, dest, name string, mode fs.FileMode, mtime time.Time
 	case !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("reading %q in the destination: %w", name, err)
 	}
-	if err := ops.mkdirAll(dest, mode); err != nil {
+	// The parents take the town's directory mode, not the directory's own, so
+	// only the entry the archive names carries its archived bits.
+	if err := ops.mkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("creating the parent of %q: %w", name, err)
+	}
+	if err := ops.mkdirAll(dest, 0o700); err != nil {
 		return fmt.Errorf("creating %q: %w", name, err)
 	}
-	if err := ops.chmod(dest, mode); err != nil {
-		return fmt.Errorf("setting the mode of %q: %w", name, err)
-	}
-	if !mtime.IsZero() {
-		*dirs = append(*dirs, dirTime{dest: dest, name: name, mtime: mtime})
-	}
+	*dirs = append(*dirs, dirTime{dest: dest, name: name, mode: mode, mtime: mtime})
 	s.Dirs++
 	return nil
 }
 
-// applyDirTimes sets the queued directory mtimes once the archive has been
-// read in full, so no later write into a directory moves its time.
-func applyDirTimes(ops townOps, dirs []dirTime) error {
+// finishDirs sets the archived mode and mtime of each directory import created,
+// once the archive has been read in full. Setting the mode only now lets a
+// directory the archive marks read-only still take the entries written into it;
+// the mtime follows the mode, so no later write moves it. A refused import
+// leaves its created directories at 0700.
+func finishDirs(ops townOps, dirs []dirTime) error {
 	for _, d := range dirs {
-		if err := ops.chtimes(d.dest, d.mtime, d.mtime); err != nil {
-			return fmt.Errorf("setting the mtime of %q: %w", d.name, err)
+		if err := ops.chmod(d.dest, d.mode); err != nil {
+			return fmt.Errorf("setting the mode of %q: %w", d.name, err)
+		}
+		if !d.mtime.IsZero() {
+			if err := ops.chtimes(d.dest, d.mtime, d.mtime); err != nil {
+				return fmt.Errorf("setting the mtime of %q: %w", d.name, err)
+			}
 		}
 	}
 	return nil
@@ -304,8 +331,8 @@ func importFile(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, p
 //
 // The link's own mtime is not restored: there is no portable call that sets a
 // symlink's time without following it.
-func importSymlink(ops townOps, hdr *tar.Header, dest, name string, s *ImportSummary) error {
-	if err := checkLinkTarget(name, hdr.Linkname); err != nil {
+func importSymlink(ops townOps, hdr *tar.Header, dest, name string, tree destTree, s *ImportSummary) error {
+	if err := checkLinkTarget(ops, tree, name, hdr.Linkname); err != nil {
 		return err
 	}
 	info, err := ops.lstat(dest)
@@ -325,21 +352,92 @@ func importSymlink(ops townOps, hdr *tar.Header, dest, name string, s *ImportSum
 	return nil
 }
 
-// checkLinkTarget refuses a symlink target that leaves the town root. The
-// check is lexical, the same rule the export applies to a link it archives: an
-// absolute target, or one that climbs above the root.
-func checkLinkTarget(name, link string) error {
+// maxLinkHops bounds the symlinks a link target may pass through, the same
+// bound the kernel applies, so a loop of links is refused rather than followed.
+const maxLinkHops = 40
+
+// errEscapesRoot is the refusal for a target that climbs above the town root.
+var errEscapesRoot = errors.New("points outside the town root")
+
+// checkLinkTarget refuses a symlink target that leaves the town root or the
+// daemon-owned rows. The target is followed through the tree as it stands in
+// the destination, so a link the archive wrote earlier counts: a target that is
+// clean on its face can still climb out through one of them.
+func checkLinkTarget(ops townOps, tree destTree, name, link string) error {
 	if link == "" {
 		return fmt.Errorf("the archive symlink %q has an empty target", name)
 	}
 	if path.IsAbs(link) || filepath.IsAbs(link) {
 		return fmt.Errorf("the archive symlink %q points at the absolute path %q; an import accepts only links that stay within the town root", name, link)
 	}
-	resolved := path.Clean(path.Join(path.Dir(name), link))
-	if resolved == ".." || strings.HasPrefix(resolved, "../") {
-		return fmt.Errorf("the archive symlink %q points outside the town root (%q)", name, link)
+	target, err := resolveInTree(ops, tree.root, path.Dir(name), link)
+	if err != nil {
+		return fmt.Errorf("the archive symlink %q %w (%q)", name, err, link)
+	}
+	if _, ok := Lookup(tree.entries, target); !ok {
+		return fmt.Errorf("the archive symlink %q points at %q, which is not under a daemon-owned path of the manifest; an import writes nothing outside them", name, target)
 	}
 	return nil
+}
+
+// resolveInTree follows link, written relative to the directory dir, through the
+// destination tree and returns the town-root-relative path it names. Each
+// symlink on the way is followed in the destination, so one the archive created
+// earlier is followed too. A name that does not exist yet may end the target (a
+// dangling link), but a ".." after one is refused: a later entry could create
+// that name as a link and move where the ".." lands.
+func resolveInTree(ops townOps, root, dir, link string) (string, error) {
+	cur := dir
+	pending := strings.Split(link, "/")
+	hops := 0
+	missing := ""
+	for len(pending) > 0 {
+		seg := pending[0]
+		pending = pending[1:]
+		switch seg {
+		case "", ".":
+			continue
+		case "..":
+			if missing != "" {
+				return "", fmt.Errorf("passes %s, which does not exist yet, and then climbs out of it", missing)
+			}
+			if cur == "." {
+				return "", errEscapesRoot
+			}
+			cur = path.Dir(cur)
+			continue
+		}
+		next := path.Join(cur, seg)
+		full := filepath.Join(root, filepath.FromSlash(next))
+		info, err := ops.lstat(full)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			if missing == "" {
+				missing = next
+			}
+			cur = next
+		case err != nil:
+			return "", fmt.Errorf("reading %s in the destination: %w", next, err)
+		case info.Mode()&fs.ModeSymlink != 0:
+			hops++
+			if hops > maxLinkHops {
+				return "", fmt.Errorf("passes more than %d symlinks, which may loop", maxLinkHops)
+			}
+			inner, err := ops.readlink(full)
+			if err != nil {
+				return "", fmt.Errorf("reading the symlink %s in the destination: %w", next, err)
+			}
+			if path.IsAbs(inner) || filepath.IsAbs(inner) {
+				return "", fmt.Errorf("passes the symlink %s, which points at the absolute path %q", next, inner)
+			}
+			// The inner target is written relative to the directory that holds
+			// the link, which is cur: cur does not move.
+			pending = append(strings.Split(inner, "/"), pending...)
+		default:
+			cur = next
+		}
+	}
+	return cur, nil
 }
 
 // archiveMode masks an archive mode to the town's two file modes (0755 when

@@ -3,6 +3,7 @@ package townstate
 import (
 	"archive/tar"
 	"bytes"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -108,7 +109,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	// The daemon-owned set. Written through the same manifest rows the export
 	// walks, so a change to a row shows up as a missing or extra file.
 	daemonFiles := map[string]string{
-		"mayor/town.json":                    `{"version":1,"rigs":{"gastown":{}}}`,
+		"mayor/town.json":                    `{"registry":{"version":1,"rigs":{"gastown":{}}}}`,
 		"daemon/maintenance_state.json":      `{"db":"main"}`,
 		"logs/daemon.log":                    "daemon log\n",
 		"events/2026-11-06.jsonl":            "{\"type\":\"event\"}\n",
@@ -333,6 +334,22 @@ func TestImportRefusesUnsafeEntries(t *testing.T) {
 			want: []string{`"daemon/x"`, "symlink"},
 		},
 		{
+			name: "a target through a link that points at an absolute path",
+			entries: []archiveEntry{{hdr: &tar.Header{
+				Name: "daemon/b", Typeflag: tar.TypeSymlink, Linkname: "abs", Mode: 0o777, ModTime: time.Unix(0, 0),
+			}}},
+			merge: true,
+			prepare: func(t *testing.T, dest string) {
+				if err := os.MkdirAll(filepath.Join(dest, "daemon"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("/etc", filepath.Join(dest, "daemon", "abs")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: []string{`"daemon/b"`, "absolute"},
+		},
+		{
 			name:    "a file over an existing directory",
 			entries: []archiveEntry{regularEntry("daemon/x", "new")},
 			merge:   true,
@@ -390,6 +407,222 @@ func TestImportRefusesUnsafeEntries(t *testing.T) {
 	}
 }
 
+// TestImportRefusesSymlinksCreatedEarlierInTheArchive drives the links an
+// archive makes earlier in the same stream: a name written through a link, a
+// chain of links, and a target that climbs out through a link. Each is refused
+// naming the entry, because the check follows the links as the tree stands.
+func TestImportRefusesSymlinksCreatedEarlierInTheArchive(t *testing.T) {
+	t.Parallel()
+	dir := func(name string) archiveEntry {
+		return archiveEntry{hdr: &tar.Header{Name: name, Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Unix(0, 0)}}
+	}
+	link := func(name, target string) archiveEntry {
+		return archiveEntry{hdr: &tar.Header{Name: name, Typeflag: tar.TypeSymlink, Linkname: target, Mode: 0o777, ModTime: time.Unix(0, 0)}}
+	}
+	// A chain of links, each dangling when it is written, then one that starts
+	// the walk at the head: the walk meets more links than the bound allows.
+	var chain []archiveEntry
+	for i := range 42 {
+		chain = append(chain, link(fmt.Sprintf("daemon/c%02d", i), fmt.Sprintf("c%02d", i+1)))
+	}
+	chain = append(chain, link("daemon/head", "c00"))
+	cases := []struct {
+		name    string
+		entries []archiveEntry
+		want    []string
+	}{
+		{
+			name:    "a chain longer than the link bound",
+			entries: chain,
+			want:    []string{`"daemon/head"`, "passes more than 40 symlinks"},
+		},
+		{
+			name:    "a file written through a link made earlier",
+			entries: []archiveEntry{dir("daemon/ok/"), link("daemon/a", "ok"), regularEntry("daemon/a/x", "x")},
+			want:    []string{`"daemon/a/x"`, "symlink"},
+		},
+		{
+			name:    "a parent step through a link made earlier",
+			entries: []archiveEntry{dir("daemon/ok/"), link("daemon/a", "ok"), regularEntry("daemon/a/../y", "x")},
+			want:    []string{`"daemon/a/../y"`, "contains .."},
+		},
+		{
+			name:    "a chain of links whose last one climbs to the root",
+			entries: []archiveEntry{link("daemon/l1", "l2"), link("daemon/l2", ".."), regularEntry("daemon/l1/x", "x")},
+			want:    []string{`"daemon/l2"`, "not under a daemon-owned path"},
+		},
+		{
+			name: "a target that climbs out through a link made earlier",
+			entries: []archiveEntry{
+				dir("daemon/s/"),
+				link("daemon/s/A", ".."),
+				link("daemon/s/B", "A/../../x"),
+			},
+			want: []string{`"daemon/s/B"`, "outside the town root"},
+		},
+		{
+			name:    "a target through a name that does not exist yet, then a climb",
+			entries: []archiveEntry{link("daemon/l", "missing/..")},
+			want:    []string{`"daemon/l"`, "does not exist yet"},
+		},
+		{
+			name:    "a target that lands in a directory no daemon row names",
+			entries: []archiveEntry{link("daemon/q", "../settings/config.json")},
+			want:    []string{`"daemon/q"`, "not under a daemon-owned path"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Import(bytes.NewReader(writeArchive(t, tc.entries...)), t.TempDir(), Default(), ImportOptions{})
+			if err == nil {
+				t.Fatalf("Import accepted %s", tc.name)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Import error = %q, want it to hold %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestImportKeepsDirectoryModes restores a directory's permission bits as the
+// archive carries them: a 0700 and a 0755 directory keep theirs, while the
+// files beside them are masked to the town's two file modes.
+func TestImportKeepsDirectoryModes(t *testing.T) {
+	t.Parallel()
+	dest := t.TempDir()
+	at := time.Unix(0, 0)
+	archive := writeArchive(t,
+		archiveEntry{hdr: &tar.Header{Name: "daemon/private/", Typeflag: tar.TypeDir, Mode: 0o700, ModTime: at}},
+		archiveEntry{hdr: &tar.Header{Name: "daemon/public/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: at}},
+		archiveEntry{hdr: &tar.Header{Name: "daemon/private/secret", Typeflag: tar.TypeReg, Mode: 0o600, Size: 1, ModTime: at}, data: []byte("x")},
+		archiveEntry{hdr: &tar.Header{Name: "daemon/public/tool", Typeflag: tar.TypeReg, Mode: 0o751, Size: 1, ModTime: at}, data: []byte("x")},
+	)
+	if _, err := Import(bytes.NewReader(archive), dest, Default(), ImportOptions{}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	want := map[string]os.FileMode{
+		"daemon/private":        0o700,
+		"daemon/public":         0o755,
+		"daemon/private/secret": 0o644,
+		"daemon/public/tool":    0o755,
+	}
+	for rel, mode := range want {
+		info, err := os.Stat(filepath.Join(dest, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("stat %s: %v", rel, err)
+		}
+		if got := info.Mode().Perm(); got != mode {
+			t.Errorf("%s mode = %04o after the import, want %04o", rel, got, mode)
+		}
+	}
+}
+
+// TestImportSummaryBreaksDownByClass holds the import summary to one line per
+// entry class, both for a fresh root and for a merge that keeps a newer file.
+func TestImportSummaryBreaksDownByClass(t *testing.T) {
+	t.Parallel()
+	at := time.Unix(0, 0)
+	archive := func() []byte {
+		return writeArchive(t,
+			archiveEntry{hdr: &tar.Header{Name: "daemon/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: at}},
+			regularEntry("daemon/a.txt", "abc"),
+			archiveEntry{hdr: &tar.Header{Name: "daemon/sub/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: at}},
+			regularEntry("daemon/sub/b.txt", "de"),
+			archiveEntry{hdr: &tar.Header{Name: "daemon/link", Typeflag: tar.TypeSymlink, Linkname: "a.txt", Mode: 0o777, ModTime: at}},
+		)
+	}
+	t.Run("a fresh root", func(t *testing.T) {
+		t.Parallel()
+		sum, err := Import(bytes.NewReader(archive()), t.TempDir(), Default(), ImportOptions{})
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		for _, want := range []string{"files: 2 (5 bytes)", "directories: 2", "symlinks: 1", "skipped: none", "entries: daemon"} {
+			if !strings.Contains(sum.String(), want) {
+				t.Errorf("summary does not carry the line %q:\n%s", want, sum)
+			}
+		}
+	})
+	t.Run("a merge that keeps a newer file", func(t *testing.T) {
+		t.Parallel()
+		dest := t.TempDir()
+		writeStateFile(t, dest, "daemon/a.txt", "newer", 0o644)
+		sum, err := Import(bytes.NewReader(archive()), dest, Default(), ImportOptions{MergeNewer: true})
+		if err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+		for _, want := range []string{"files: 1 (2 bytes)", "skipped: 1 existing files newer than the archive"} {
+			if !strings.Contains(sum.String(), want) {
+				t.Errorf("summary does not carry the line %q:\n%s", want, sum)
+			}
+		}
+	})
+}
+
+// TestRigsComeFromTheSettings holds the rigs to the registry: a top-level
+// directory that holds a config.json the registry does not name is not a rig,
+// so its contents are not daemon-owned and neither the export nor an import
+// writes them. A rig the registry names is learned from the archive's registry,
+// which must come before the rig's rows.
+func TestRigsComeFromTheSettings(t *testing.T) {
+	t.Parallel()
+	const registry = `{"registry":{"version":1,"rigs":{"gastown":{}}}}`
+	town := t.TempDir()
+	writeStateFile(t, town, "mayor/town.json", registry, 0o644)
+	writeStateFile(t, town, "gastown/config.json", `{"name":"gastown"}`, 0o644)
+	writeStateFile(t, town, "tools/config.json", `{"name":"tools"}`, 0o644)
+	writeStateFile(t, town, "tools/notes.txt", "not a rig\n", 0o644)
+
+	var stream bytes.Buffer
+	if _, err := Export(&stream, town, Default(), ExportOptions{}); err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	names := archiveNames(t, stream.Bytes())
+	if !slices.Contains(names, "gastown/config.json") {
+		t.Errorf("the archive lacks the registered rig's config.json: %v", names)
+	}
+	for _, name := range names {
+		if strings.HasPrefix(name, "tools/") {
+			t.Errorf("the archive carries %q, which is not a rig the registry names", name)
+		}
+	}
+
+	t.Run("a rig the archive's registry names is restored", func(t *testing.T) {
+		t.Parallel()
+		archive := writeArchive(t, regularEntry("mayor/town.json", registry), regularEntry("gastown/config.json", "{}"))
+		if _, err := Import(bytes.NewReader(archive), t.TempDir(), Default(), ImportOptions{}); err != nil {
+			t.Fatalf("Import: %v", err)
+		}
+	})
+	t.Run("a config.json the registry does not name is refused", func(t *testing.T) {
+		t.Parallel()
+		archive := writeArchive(t, regularEntry("mayor/town.json", registry), regularEntry("tools/config.json", "{}"))
+		_, err := Import(bytes.NewReader(archive), t.TempDir(), Default(), ImportOptions{})
+		if err == nil || !strings.Contains(err.Error(), `"tools/config.json"`) {
+			t.Fatalf("Import = %v, want a refusal naming tools/config.json", err)
+		}
+	})
+	t.Run("a rig row before the registry is refused", func(t *testing.T) {
+		t.Parallel()
+		archive := writeArchive(t, regularEntry("gastown/config.json", "{}"), regularEntry("mayor/town.json", registry))
+		_, err := Import(bytes.NewReader(archive), t.TempDir(), Default(), ImportOptions{})
+		if err == nil || !strings.Contains(err.Error(), `"gastown/config.json"`) {
+			t.Fatalf("Import = %v, want a refusal naming gastown/config.json", err)
+		}
+	})
+	t.Run("a registry in the archive that does not decode is refused", func(t *testing.T) {
+		t.Parallel()
+		archive := writeArchive(t, regularEntry("mayor/town.json", "{not json"))
+		_, err := Import(bytes.NewReader(archive), t.TempDir(), Default(), ImportOptions{})
+		if err == nil || !strings.Contains(err.Error(), "reading the rigs the registry in the archive names") {
+			t.Fatalf("Import = %v, want a refusal reading the archive's registry", err)
+		}
+	})
+}
+
 // regularFilesIn lists the regular files under root, sorted, relative to it.
 func regularFilesIn(t *testing.T, root string) []string {
 	t.Helper()
@@ -413,9 +646,7 @@ func regularFilesIn(t *testing.T, root string) []string {
 }
 
 // TestExportSinceAndRollbackSet drives the --since filter and holds the
-// rollback tag to the design's one-way list: red-main state, landing records,
-// spec_dispatch state, the events and feed files, and the maintenance and
-// patrol state under daemon/.
+// rollback tag to the one-way set townstate.Default documents.
 func TestExportSinceAndRollbackSet(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)

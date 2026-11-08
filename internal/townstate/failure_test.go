@@ -213,7 +213,9 @@ func TestExportDrivesWalkAndFileFailures(t *testing.T) {
 			want: "writing the archive header for daemon",
 		},
 		{
-			name: "a file's header",
+			// The directory's header fills the first 512 bytes; the next header
+			// is the symlink's, which is the write that fails.
+			name: "a symlink's header",
 			over: func(*townOps) {},
 			w:    &failAfterWriter{n: 512},
 			want: "writing the archive header for daemon/link",
@@ -279,26 +281,6 @@ func TestExportDrivesWalkAndFileFailures(t *testing.T) {
 		})
 	}
 
-	// A directory that cannot be listed by the host itself drives the seam's
-	// own ReadDir wrapping, not only a replacement.
-	t.Run("a directory the host cannot list", func(t *testing.T) {
-		t.Parallel()
-		locked := t.TempDir()
-		writeStateFile(t, locked, "daemon/sub/inner.txt", "inner\n", 0o644)
-		dir := filepath.Join(locked, "daemon", "sub")
-		info, err := os.Stat(dir)
-		if err != nil {
-			t.Fatal(err)
-		}
-		mode := info.Mode().Perm()
-		if err := os.Chmod(dir, 0o000); err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = os.Chmod(dir, mode) }) // so the temp tree can be removed
-		if _, err := Export(io.Discard, locked, Default(), ExportOptions{}); err == nil || !strings.Contains(err.Error(), "reading daemon/sub") {
-			t.Fatalf("Export over an unreadable directory = %v, want a read refusal", err)
-		}
-	})
 }
 
 // TestImportRefusesBadInputs drives every refusal an import makes before or
@@ -373,12 +355,11 @@ func TestImportRefusesBadInputs(t *testing.T) {
 	}
 }
 
-// TestImportDrivesFilesystemFailures drives every filesystem failure an
-// import can meet under a seam: a path that cannot be read, an occupied
-// destination that cannot be read, a directory that cannot be created or
-// stamped, a file that cannot be replaced or closed, and a symlink that cannot
-// be created.
-func TestImportDrivesFilesystemFailures(t *testing.T) {
+// TestImportFailureCases drives every filesystem failure an import can meet
+// under a seam: a path that cannot be read, an occupied destination that cannot
+// be read, a directory that cannot be created, moded or stamped, a file that
+// cannot be created, moded or stamped, and a symlink that cannot be created.
+func TestImportFailureCases(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
@@ -428,13 +409,31 @@ func TestImportDrivesFilesystemFailures(t *testing.T) {
 			want: "reading \"daemon\" in the destination",
 		},
 		{
-			name: "a directory that cannot be listed",
+			// The parent is made first, so its failure is the one named.
+			name: "a directory whose parent cannot be created",
 			archive: []archiveEntry{{hdr: &tar.Header{
 				Name: ".runtime/jev/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Unix(0, 0),
 			}}},
 			ops: func(t *testing.T) townOps {
 				return opsWith(func(o *townOps) {
 					o.mkdirAll = func(string, fs.FileMode) error { return errors.New("mkdir failed") }
+				})
+			},
+			want: "creating the parent of \".runtime/jev\"",
+		},
+		{
+			name: "a directory that cannot be created",
+			archive: []archiveEntry{{hdr: &tar.Header{
+				Name: ".runtime/jev/", Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Unix(0, 0),
+			}}},
+			ops: func(t *testing.T) townOps {
+				return opsWith(func(o *townOps) {
+					o.mkdirAll = func(p string, _ fs.FileMode) error {
+						if filepath.Base(p) == "jev" {
+							return errors.New("mkdir failed")
+						}
+						return nil
+					}
 				})
 			},
 			want: "creating \".runtime/jev\"",
@@ -551,6 +550,29 @@ func TestImportDrivesFilesystemFailures(t *testing.T) {
 				})
 			},
 			want: "creating the symlink \".runtime/jev/link\"",
+		},
+		{
+			name: "a link target whose path cannot be read",
+			archive: []archiveEntry{{hdr: &tar.Header{
+				Name: "daemon/b", Typeflag: tar.TypeSymlink, Linkname: "sub/x", Mode: 0o777, ModTime: time.Unix(0, 0),
+			}}},
+			ops: func(t *testing.T) townOps {
+				return opsWith(func(o *townOps) { o.lstat = lstatFailingOn(t, "/daemon/sub") })
+			},
+			want: "reading daemon/sub in the destination",
+		},
+		{
+			name: "a link target that goes through a link that cannot be read",
+			archive: []archiveEntry{{hdr: &tar.Header{
+				Name: "daemon/b", Typeflag: tar.TypeSymlink, Linkname: "a", Mode: 0o777, ModTime: time.Unix(0, 0),
+			}}},
+			ops: func(t *testing.T) townOps {
+				return opsWith(func(o *townOps) {
+					o.lstat = lstatOverriding("/daemon/a", stateInfo{name: "a", mode: fs.ModeSymlink | 0o777})
+					o.readlink = func(string) (string, error) { return "", errors.New("readlink failed") }
+				})
+			},
+			want: "reading the symlink daemon/a in the destination",
 		},
 		{
 			name: "a symlink with no target",

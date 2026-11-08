@@ -162,9 +162,10 @@ const (
 )
 
 // rigMarkers are the paths whose presence marks a top-level directory as a
-// rig: its registry record, its bare repository and its canonical clone.
+// rig: its bare repository and its canonical clone. A config.json does not
+// mark one: a directory holding only a config.json is not a rig, so its
+// contents are not daemon-owned (gt-gg9hv.68).
 var rigMarkers = []string{
-	"config.json",
 	constants.DirRepoGit,
 	constants.DirMayor + "/" + constants.DirRig,
 }

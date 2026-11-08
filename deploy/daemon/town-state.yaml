@@ -1,26 +1,27 @@
 # The town root's ownership split (gt-gg9hv.67).
 # internal/townstate holds this list as Go data; TestManifestMirrorMatches
 # fails when this mirror and the Go data differ. Do not edit one without the other.
+# The rollback rationale lives on townstate.Default; read it before changing a rollback: true row.
 entries:
   - path: daemon
     owner: daemon
     rollback: true
-    why: the daemon's own state, settings and patrol records; daemon/maintenance_state.json and daemon/patrol_last_run.json are one-way state a rollback replays onto the Mac tree
+    why: the daemon's own state, settings and patrol records; rollback replays it
   - path: logs
     owner: daemon
     why: daemon and session logs the daemon rotates
   - path: events
     owner: daemon
     rollback: true
-    why: the town event store the daemon appends; the events a rollback replays onto the Mac tree
+    why: the town event store the daemon appends; rollback replays it
   - path: .events.jsonl
     owner: daemon
     rollback: true
-    why: the town event feed the daemon appends; a feed a rollback replays onto the Mac tree
+    why: the town event feed the daemon appends; rollback replays it
   - path: .feed.jsonl
     owner: daemon
     rollback: true
-    why: the feed the daemon appends; a feed a rollback replays onto the Mac tree
+    why: the feed the daemon appends; rollback replays it
   - path: mayor
     owner: daemon
     why: town config and the pool and roster records it writes
@@ -57,7 +58,7 @@ entries:
   - path: .runtime/landings
     owner: daemon
     rollback: true
-    why: landing ledgers the daemon writes; landing records a rollback replays onto the Mac tree
+    why: landing ledgers the daemon writes; rollback replays the landing records
   - path: .runtime/usage
     owner: daemon
     why: usage records the daemon writes
@@ -76,7 +77,7 @@ entries:
   - path: .runtime/spec_dispatch
     owner: daemon
     rollback: true
-    why: spec dispatcher state the daemon writes; one-way state a rollback replays onto the Mac tree
+    why: spec dispatcher state the daemon writes; rollback replays it
   - path: .runtime/heartbeats
     owner: daemon
     why: daemon heartbeats
@@ -92,7 +93,7 @@ entries:
   - path: .runtime/red-main
     owner: daemon
     rollback: true
-    why: red-main status the landing worker writes; the statuses a rollback replays onto the Mac tree
+    why: red-main status the landing worker writes; rollback replays the statuses
   - path: .runtime/locks
     owner: daemon
     why: town lock files the daemon takes; export skips the files themselves and keeps the directory
