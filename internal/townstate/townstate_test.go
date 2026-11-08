@@ -1,6 +1,7 @@
 package townstate
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -9,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -90,6 +92,285 @@ func TestManifestMirrorMatches(t *testing.T) {
 			}
 		})
 	}
+}
+
+// newManifestRows are the rows gt-plrm1y adds to the split, with the owner each
+// must carry. TestManifestWhysNameTheirSource holds every one to a source file,
+// and TestManifestHasNoOverlappingRows holds the set to one owner per path.
+var newManifestRows = []manifestRow{
+	// Town-root state.
+	{path: "power-state", owner: OwnerDaemon},
+	{path: ".events.jsonl.lock", owner: OwnerDaemon},
+	{path: ".dolt-archive", owner: OwnerDaemon},
+	{path: ".beads-wisp", owner: OwnerDaemon},
+
+	// Rig-level paths each registered rig carries.
+	{path: "<rig>/.beads", owner: OwnerDaemon},
+	{path: "<rig>/plugins", owner: OwnerDaemon},
+	{path: "<rig>/settings", owner: OwnerShared},
+	{path: "<rig>/directives", owner: OwnerShared},
+	{path: "<rig>/scripts", owner: OwnerShared},
+	{path: "<rig>/.gastown-harness-manifest.json", owner: OwnerShared},
+	{path: "<rig>/.runtime/namepool-state.json", owner: OwnerDaemon},
+	{path: "<rig>/.runtime/locks", owner: OwnerDaemon},
+	{path: "<rig>/.runtime/session_id", owner: OwnerSession},
+	{path: "<rig>/.runtime/session_start_emitted", owner: OwnerSession},
+	{path: "<rig>/.runtime/last_handoff_ts", owner: OwnerSession},
+	{path: "<rig>/.runtime/agent.lock", owner: OwnerSession},
+	{path: "<rig>/.runtime/agent.lock.flock", owner: OwnerSession},
+	{path: "<rig>/.runtime/handoff_to_successor", owner: OwnerSession},
+
+	// The daemon's own .runtime paths.
+	{path: ".runtime/ci-failures.jsonl", owner: OwnerDaemon},
+	{path: ".runtime/cloud-check", owner: OwnerDaemon},
+	{path: ".runtime/deploy-watch.json", owner: OwnerDaemon},
+	{path: ".runtime/diskmaint", owner: OwnerDaemon},
+	{path: ".runtime/gate-logs", owner: OwnerDaemon},
+	{path: ".runtime/hm-src", owner: OwnerDaemon},
+	{path: ".runtime/om-src", owner: OwnerDaemon},
+	{path: ".runtime/host", owner: OwnerDaemon},
+	{path: ".runtime/nudge_poller", owner: OwnerDaemon},
+	{path: ".runtime/openshell", owner: OwnerDaemon},
+	{path: ".runtime/patrol_scan", owner: OwnerDaemon},
+	{path: ".runtime/pids", owner: OwnerDaemon},
+	{path: ".runtime/polecat-image-install.log", owner: OwnerDaemon},
+	{path: ".runtime/polecat-image.lock.flock", owner: OwnerDaemon},
+	{path: ".runtime/polecat-image.published", owner: OwnerDaemon},
+	{path: ".runtime/rigs", owner: OwnerDaemon},
+	{path: ".runtime/sandbox-seat-ends", owner: OwnerDaemon},
+	{path: ".runtime/sbx-k8s", owner: OwnerDaemon},
+	{path: ".runtime/scheduler-dispatch.lock", owner: OwnerDaemon},
+	{path: ".runtime/signing", owner: OwnerDaemon},
+	{path: ".runtime/sling-startup-failures", owner: OwnerDaemon},
+	{path: ".runtime/spec-lint", owner: OwnerDaemon},
+	{path: ".runtime/supervisor", owner: OwnerDaemon},
+	{path: ".runtime/tier-sweep", owner: OwnerDaemon},
+	{path: ".runtime/tiertrigger", owner: OwnerDaemon},
+	{path: ".runtime/town-metrics.lock", owner: OwnerDaemon},
+	{path: ".runtime/townhealth.json", owner: OwnerDaemon},
+	{path: ".runtime/update", owner: OwnerDaemon},
+	{path: ".runtime/daemon-liveness.json", owner: OwnerDaemon},
+	{path: ".runtime/daemon-respawn.json", owner: OwnerDaemon},
+
+	// .runtime paths only gt commands write, daemon-owned after the wrapper
+	// cutover, as the .runtime/agents row states.
+	{path: ".runtime/polecat-admission", owner: OwnerDaemon},
+	{path: ".runtime/polecat-pool-claims", owner: OwnerDaemon},
+	{path: ".runtime/polecat-prompts", owner: OwnerDaemon},
+	{path: ".runtime/rehearsal", owner: OwnerDaemon},
+	{path: ".runtime/hooks", owner: OwnerDaemon},
+	{path: ".runtime/composer_pending", owner: OwnerDaemon},
+	{path: ".runtime/nudge_queue", owner: OwnerDaemon},
+	{path: ".runtime/seat-refill.json", owner: OwnerDaemon},
+	{path: ".runtime/bead-respawn-counts.json", owner: OwnerDaemon},
+	{path: ".runtime/bead-respawn-counts.json.flock", owner: OwnerDaemon},
+	{path: ".runtime/claude-plan", owner: OwnerDaemon},
+	{path: ".runtime/watch", owner: OwnerDaemon},
+	{path: ".runtime/jev-dataset", owner: OwnerDaemon},
+	{path: ".runtime/dashboard-load.jsonl", owner: OwnerDaemon},
+	{path: ".runtime/sling-context-scan", owner: OwnerDaemon},
+
+	// Session state a session writes in its cwd at the town root.
+	{path: ".runtime/session_id", owner: OwnerSession},
+	{path: ".runtime/session_start_emitted", owner: OwnerSession},
+	{path: ".runtime/last_handoff_ts", owner: OwnerSession},
+}
+
+// TestManifestHasNoOverlappingRows fails when two rows cover one path with a
+// different owner, which verify reports as a problem and a volume seed cannot
+// resolve. The rig/.runtime parent is refused outright: its children have a
+// daemon owner and a session owner, so a parent row would overlap both.
+func TestManifestHasNoOverlappingRows(t *testing.T) {
+	t.Parallel()
+	m := Default()
+	if m.names(RigPlaceholder + "/" + constants.DirRuntime) {
+		t.Errorf("the manifest names %s/%s as one row; its children have two owners, so name the children instead",
+			RigPlaceholder, constants.DirRuntime)
+	}
+	entries := m.Expand([]string{"gastown", "beads"}, BirdRuntimeNames())
+	if problems := overlaps(entries); len(problems) != 0 {
+		t.Errorf("the manifest covers a path twice with different owners: %v", problems)
+	}
+}
+
+// manifestRow is a row a test holds to an owner and a why.
+type manifestRow struct {
+	path  string
+	owner Owner
+}
+
+// sourceExtensions are the endings of the source files a why cites.
+var sourceExtensions = []string{".go", ".yaml", ".sh", ".md"}
+
+// whySourceTokens returns the source files why names: every whitespace-separated
+// token that holds a slash and ends in a source extension, once the punctuation
+// around it is trimmed. It fails closed: the token is returned whatever its first
+// segment, so a misspelled directory or a dot-prefixed path is still checked. A
+// token starting with ~ or / is a host path (~/.claude/statusline-command.sh),
+// not a file in this repository, and is skipped.
+func whySourceTokens(why string) []string {
+	var out []string
+	for _, tok := range strings.Fields(why) {
+		tok = strings.TrimRight(strings.Trim(tok, "([{'\"`"), ".,;:)]}'\"`")
+		if !strings.Contains(tok, "/") || strings.HasPrefix(tok, "~") || strings.HasPrefix(tok, "/") {
+			continue
+		}
+		for _, ext := range sourceExtensions {
+			if strings.HasSuffix(tok, ext) {
+				out = append(out, tok)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// checkRowWhys is the row loop TestManifestWhysNameTheirSource runs. Each row
+// must be in m with the owner it names, its why must cite at least one source
+// file, and every file it cites must exist under root.
+func checkRowWhys(t testing.TB, m *Manifest, root string, rows []manifestRow) {
+	t.Helper()
+	for _, want := range rows {
+		e, ok := entryNamed(m, want.path)
+		if !ok {
+			t.Errorf("the manifest has no row %q", want.path)
+			continue
+		}
+		if e.Owner != want.owner {
+			t.Errorf("row %q is %q, want %q", want.path, e.Owner, want.owner)
+		}
+		cited := whySourceTokens(e.Why)
+		if len(cited) == 0 {
+			t.Errorf("row %q's why cites no source file: %q", want.path, e.Why)
+		}
+		for _, src := range cited {
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(src))); err != nil {
+				t.Errorf("row %q's why cites %s, which the repository does not hold", want.path, src)
+			}
+		}
+	}
+}
+
+// recordingTB collects the errors a check reports, so a test can drive the
+// row loop with a fixture manifest and assert what it refuses.
+type recordingTB struct {
+	testing.TB
+	errs []string
+}
+
+func (r *recordingTB) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+// TestManifestWhysNameTheirSource fails when a row gt-plrm1y adds carries the
+// wrong owner, a why that cites no source file, or one that cites a file the
+// repository does not hold.
+func TestManifestWhysNameTheirSource(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join("..", "..")
+
+	t.Run("every new row cites source files the repository holds", func(t *testing.T) {
+		checkRowWhys(t, Default(), root, newManifestRows)
+	})
+
+	t.Run("a bad citation in the row loop is reported", func(t *testing.T) {
+		fixture := &Manifest{Entries: []Entry{
+			{Path: ".runtime/fixture-missing", Owner: OwnerDaemon, Why: "the state internal/townstate/no-such-fixture.go writes"},
+			{Path: ".runtime/fixture-typo", Owner: OwnerDaemon, Why: "the state internal/townstat/townstate.go writes"},
+			{Path: ".runtime/fixture-dot", Owner: OwnerDaemon, Why: "the state .githubb/workflows/ci.yaml writes"},
+			{Path: ".runtime/fixture-cited", Owner: OwnerDaemon, Why: "the state internal/townstate/townstate.go writes"},
+			{Path: ".runtime/fixture-none", Owner: OwnerDaemon, Why: "the state the daemon writes"},
+		}}
+		rows := []manifestRow{
+			{path: ".runtime/fixture-missing", owner: OwnerDaemon},
+			{path: ".runtime/fixture-typo", owner: OwnerDaemon},
+			{path: ".runtime/fixture-dot", owner: OwnerDaemon},
+			{path: ".runtime/fixture-cited", owner: OwnerDaemon},
+			{path: ".runtime/fixture-none", owner: OwnerDaemon},
+		}
+		rec := &recordingTB{TB: t}
+		checkRowWhys(rec, fixture, root, rows)
+		for _, want := range []struct{ row, what string }{
+			{".runtime/fixture-missing", "internal/townstate/no-such-fixture.go"},
+			{".runtime/fixture-typo", "internal/townstat/townstate.go"},
+			{".runtime/fixture-dot", ".githubb/workflows/ci.yaml"},
+			{".runtime/fixture-none", "no source file"},
+		} {
+			if !slices.ContainsFunc(rec.errs, func(e string) bool {
+				return strings.Contains(e, want.row) && strings.Contains(e, want.what)
+			}) {
+				t.Errorf("the row loop did not report row %q with %q; it reported %q", want.row, want.what, rec.errs)
+			}
+		}
+		if slices.ContainsFunc(rec.errs, func(e string) bool { return strings.Contains(e, "fixture-cited") }) {
+			t.Errorf("the row loop refused a row that cites a file the repository holds: %q", rec.errs)
+		}
+	})
+}
+
+// TestManifestPrivateRowsKeepTheirModes names the daemon rows that can hold
+// credential material or a token, which an import must copy with the archive's
+// mode: a kubeconfig, a keychain, a 0600 password file, captured output and
+// clone remote URLs. A row that loses private: true fails here, in the Go data
+// or in the yaml mirror. The list is reviewed by hand, since the test cannot
+// tell a credential path from any other: a new credential row must be added to
+// it.
+func TestManifestPrivateRowsKeepTheirModes(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "daemon", "town-state.yaml"))
+	if err != nil {
+		t.Fatalf("reading the mirror: %v", err)
+	}
+	mirror, err := Parse(data)
+	if err != nil {
+		t.Fatalf("parsing the mirror: %v", err)
+	}
+	for _, src := range []struct {
+		name string
+		m    *Manifest
+	}{{"the Go data", Default()}, {"the yaml mirror", mirror}} {
+		for _, p := range []string{
+			".runtime/container", ".runtime/sbx-k8s", ".runtime/signing",
+			".runtime/gate-logs", ".runtime/openshell", ".runtime/om-src", ".runtime/hm-src",
+		} {
+			e, ok := entryNamed(src.m, p)
+			if !ok {
+				t.Errorf("%s has no row %q", src.name, p)
+				continue
+			}
+			if e.Owner != OwnerDaemon {
+				t.Errorf("%s: row %q is %q; only a daemon row is copied, so only it can be private", src.name, p, e.Owner)
+			}
+			if !e.Private {
+				t.Errorf("%s: row %q can hold a credential but does not set private: true, so an import would mask its modes to 0755/0644", src.name, p)
+			}
+		}
+	}
+}
+
+// TestManifestWhysAreNotPlaceholders is the half Validate and the parser's
+// refusal table miss: an empty why is refused there, a why such as "TODO" is
+// not. Every row's why must say what the path holds.
+func TestManifestWhysAreNotPlaceholders(t *testing.T) {
+	t.Parallel()
+	for _, e := range Default().Entries {
+		low := strings.ToLower(e.Why)
+		for _, placeholder := range []string{"todo", "tbd", "fixme", "xxx", "...", "placeholder"} {
+			if strings.Contains(low, placeholder) {
+				t.Errorf("row %q has a placeholder why %q (holds %q); say what the path holds and who writes it", e.Path, e.Why, placeholder)
+			}
+		}
+	}
+}
+
+// entryNamed returns the entry whose path is exactly p.
+func entryNamed(m *Manifest, p string) (Entry, bool) {
+	for _, e := range m.Entries {
+		if e.Path == p {
+			return e, true
+		}
+	}
+	return Entry{}, false
 }
 
 // TestTownStateRigPathsAreTheProductionNames ties the rig repository and

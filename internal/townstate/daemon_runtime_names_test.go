@@ -15,10 +15,22 @@ import (
 func TestDaemonRuntimeNames(t *testing.T) {
 	t.Parallel()
 	want := []string{
-		"agents", "attention", "container", "daemon-image", "heartbeats", "jev",
-		"landing-logs", "landing-om", "landings", "locks", "metrics",
-		"overrun-guard", "polecat-spans", "red-main", "reports", "sandboxes",
-		"spec_dispatch", "sweep-runs", "usage",
+		"agents", "attention", "bead-respawn-counts.json",
+		"bead-respawn-counts.json.flock", "ci-failures.jsonl", "claude-plan",
+		"cloud-check", "composer_pending", "container", "daemon-image",
+		"daemon-liveness.json", "daemon-respawn.json", "dashboard-load.jsonl",
+		"deploy-watch.json", "diskmaint", "gate-logs", "heartbeats", "hm-src",
+		"hooks", "host", "jev", "jev-dataset", "landing-logs", "landing-om",
+		"landings", "locks", "metrics", "nudge_poller", "nudge_queue", "om-src",
+		"openshell", "overrun-guard", "patrol_scan", "pids", "polecat-admission",
+		"polecat-image-install.log", "polecat-image.lock.flock",
+		"polecat-image.published", "polecat-pool-claims", "polecat-prompts",
+		"polecat-spans", "red-main", "rehearsal", "reports", "rigs",
+		"sandbox-seat-ends", "sandboxes", "sbx-k8s", "scheduler-dispatch.lock",
+		"seat-refill.json", "signing", "sling-context-scan",
+		"sling-startup-failures", "spec-lint", "spec_dispatch", "supervisor",
+		"sweep-runs", "tier-sweep", "tiertrigger", "town-metrics.lock",
+		"townhealth.json", "update", "usage", "watch",
 	}
 
 	mirror, err := os.ReadFile(filepath.Join("..", "..", "deploy", "daemon", "town-state.yaml"))
