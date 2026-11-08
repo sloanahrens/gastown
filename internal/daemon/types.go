@@ -215,7 +215,13 @@ func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
 // (gt-dcxbw). A settings file that parses is accepted whatever keys it
 // declares: the check is for a broken file, not for the strict schema the town
 // otherwise enforces, so an undeclared key stays the non-error it was here
-// before. The document it returns passed config.ValidateDaemonPatrolConfig.
+// before.
+//
+// The read path deliberately runs no more than the load's identity check: the
+// scheduled_slings patrol skips an entry it cannot run and keeps the others, so
+// refusing the whole document here would silently stop a config that ran
+// before. The write paths run config.ValidateDaemonPatrolConfig instead
+// (gt-yjzepk.4).
 func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	cfg, err := agentconfig.LoadDaemonPatrolConfig(PatrolConfigFile(townRoot))
 	if hostErr := checkOperatorSettingsReadable(townRoot); hostErr != nil {
@@ -225,11 +231,6 @@ func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
-	}
-	// The same entry point the settings writer runs, so the daemon and the
-	// writer refuse the same document (gt-yjzepk.4).
-	if err := agentconfig.ValidateDaemonPatrolConfig(cfg); err != nil {
 		return nil, err
 	}
 	return cfg, nil

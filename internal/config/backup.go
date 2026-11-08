@@ -83,6 +83,23 @@ func BackupFileRetained(path, stamp string, r BackupRetention, removed func(stri
 	})
 }
 
+// BackupFileRetainedWithoutPrune copies path like BackupFileRetained and
+// prunes nothing: a caller whose own write can still fail runs PruneBackups
+// after it succeeds, so a failed write deletes no older copy (gt-yjzepk.4).
+func BackupFileRetainedWithoutPrune(path, stamp string) (string, error) {
+	return backupFile(path, stamp, backupRun{
+		now:   time.Now,
+		write: writeBackupCopy,
+		prune: func(string, string, time.Time) error { return nil },
+	})
+}
+
+// PruneBackups removes the copies of path outside r, keeping keep and reporting
+// each copy it deletes to removed (gt-yjzepk.4).
+func PruneBackups(path, keep string, r BackupRetention, removed func(string)) error {
+	return pruneBackupsTo(path, keep, time.Now(), r, os.ReadDir, removed)
+}
+
 // backupFile is BackupFile with its clock, writer and pruner passed in: the
 // retention window needs a fixed clock in a test, a short copy a writer that
 // writes part of the data, and a prune failure a pruner that reports one.

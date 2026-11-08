@@ -4,10 +4,11 @@ import "fmt"
 
 // ValidateDaemonPatrolConfig runs every check the daemon's schema applies to a
 // daemon patrol document: the type and version, the overrun guard's
-// scheduled_stop_after, the container names, the tier_sweep runner, the disk
-// maintenance cadences and percent, and every scheduled_slings entry. The
-// writer paths and the command that edits settings/config.json call it before a
-// document is saved, so neither can save one the other refuses (gt-yjzepk.4).
+// scheduled_stop_after, the container names, the container_off names the step
+// audit does not classify, the tier_sweep runner, the disk maintenance cadences
+// and percent, and every scheduled_slings entry. The writer paths and the
+// command that edits settings/config.json call it before a document is saved,
+// so neither can save one the other refuses (gt-yjzepk.4).
 func ValidateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 	if c == nil {
 		return nil
@@ -17,6 +18,11 @@ func ValidateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
 	}
 	if err := c.ValidateContainerNames(); err != nil {
 		return err
+	}
+	for _, name := range c.ContainerOff() {
+		if !DaemonStepKnown(name) {
+			return fmt.Errorf("%s: in daemon.container_off but unknown to the audit table (a typo, or a step to classify)", name)
+		}
 	}
 	if c.Patrols == nil {
 		return nil

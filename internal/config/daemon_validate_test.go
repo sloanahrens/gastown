@@ -5,9 +5,6 @@ import (
 	"testing"
 )
 
-// ValidateDaemonPatrolConfig accepts a document the daemon can run, and refuses
-// each kind of value the daemon's schema or patrol validators reject, with the
-// validator's own text (gt-yjzepk.4).
 // ValidateScheduledSlingEntry refuses each entry the patrol cannot run, with
 // the patrol's own text (gt-yjzepk.4).
 func TestValidateScheduledSlingEntry(t *testing.T) {
@@ -79,6 +76,9 @@ func TestValidateScheduledSlingEntry(t *testing.T) {
 	}
 }
 
+// ValidateDaemonPatrolConfig accepts a document the daemon can run, and refuses
+// each kind of value the daemon's schema or patrol validators reject, with the
+// validator's own text (gt-yjzepk.4).
 func TestValidateDaemonPatrolConfig(t *testing.T) {
 	t.Parallel()
 
@@ -88,6 +88,7 @@ func TestValidateDaemonPatrolConfig(t *testing.T) {
 			Version:               1,
 			ContainerNameSetting:  "gt-town-daemon",
 			ComposeProjectSetting: "gt-town",
+			ContainerOffSetting:   []string{"landing_worker"},
 			Patrols: &PatrolsConfig{
 				TierSweep: &TierSweepConfig{Runner: &TierSweepRunnerConfig{
 					Backend: "kubernetes", CPUs: 8, Memory: 24, Jobs: 4,
@@ -125,6 +126,11 @@ func TestValidateDaemonPatrolConfig(t *testing.T) {
 				c.Patrols.ScheduledSlings.Entries[0].IntervalStr = "soon"
 			},
 			want: `scheduled_slings[deep-review]: interval "soon" must be a positive Go duration`,
+		},
+		{
+			name:   "a container_off name the audit does not classify",
+			mutate: func(c *DaemonPatrolConfig) { c.ContainerOffSetting = []string{"mystery-step"} },
+			want:   "mystery-step: in daemon.container_off but unknown to the audit table",
 		},
 		{
 			name: "a dind runner under its memory floor",

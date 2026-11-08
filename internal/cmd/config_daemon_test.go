@@ -526,7 +526,7 @@ func TestConfigDaemonRefusesSecrets(t *testing.T) {
 		if strings.Contains(diff, token) {
 			t.Errorf("the diff prints the token:\n%s", diff)
 		}
-		if !strings.Contains(diff, `-        "ANTHROPIC_AUTH_TOKEN": "<redacted>"`) {
+		if !strings.Contains(diff, `-        "ANTHROPIC_AUTH_TOKEN": "<redacted: before>"`) {
 			t.Errorf("the diff does not redact the token:\n%s", diff)
 		}
 		if _, ok := daemonConfigDocument(t, path)["agents"].(map[string]any); !ok {
@@ -572,6 +572,62 @@ func TestConfigDaemonRefusesSecrets(t *testing.T) {
 			t.Errorf("daemon.env = %v, want the value from standard input", daemon["env"])
 		}
 	})
+
+	t.Run("a changed token shows as a change without either value", func(t *testing.T) {
+		t.Parallel()
+		const second = "sk-ant-9876543210fedcba9876"
+		const key = "daemon.env.SOME_SERVICE_TOKEN"
+		townRoot, _ := daemonConfigTown(t, withAgent)
+		env, out, _ := daemonConfigTestEnv(townRoot, time.Now())
+
+		env.in = strings.NewReader(`"` + token + `"`)
+		if err := configDaemonSet(env, key, "-", "first"); err != nil {
+			t.Fatalf("the first set = %v", err)
+		}
+		out.Reset()
+		env.in = strings.NewReader(`"` + second + `"`)
+		if err := configDaemonSet(env, key, "-", "second"); err != nil {
+			t.Fatalf("the second set = %v", err)
+		}
+
+		diff := out.String()
+		for _, secret := range []string{token, second} {
+			if strings.Contains(diff, secret) {
+				t.Errorf("the diff prints a token:\n%s", diff)
+			}
+		}
+		// Each side carries its own marker, so the change is visible even
+		// though neither value is printed.
+		for _, want := range []string{
+			`-      "SOME_SERVICE_TOKEN": "<redacted: before>"`,
+			`+      "SOME_SERVICE_TOKEN": "<redacted: after>"`,
+		} {
+			if !strings.Contains(diff, want) {
+				t.Errorf("the diff does not show the token change as %q:\n%s", want, diff)
+			}
+		}
+	})
+}
+
+// daemonConfigOldBackups writes n copies of path beside it, aged one to n days
+// before now, and returns their names oldest first.
+func daemonConfigOldBackups(t *testing.T, path string, now time.Time, n int) []string {
+	t.Helper()
+	dir := filepath.Dir(path)
+	names := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("config.json.bak-20260101T000000Z-%02d", i)
+		names = append(names, name)
+		full := filepath.Join(dir, name)
+		if err := os.WriteFile(full, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		mod := now.Add(-time.Duration(n-i) * 24 * time.Hour)
+		if err := os.Chtimes(full, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return names
 }
 
 func TestConfigDaemonPrunesOldBackups(t *testing.T) {
@@ -581,24 +637,11 @@ func TestConfigDaemonPrunesOldBackups(t *testing.T) {
 	townRoot, path := daemonConfigTown(t, daemonConfigFixture)
 	env, _, errOut := daemonConfigTestEnv(townRoot, now)
 
-	// Sixty copies, all older than the 30-day window.
+	// Sixty copies aged one to sixty days. The write makes the sixty-first and
+	// newest, so the retention keeps the newest fifty and removes the eleven
+	// oldest; those are also past the 30-day window.
 	dir := filepath.Dir(path)
-	var old []string
-	for i := 0; i < 60; i++ {
-		name := fmt.Sprintf("config.json.bak-202609%02dT120000Z-old", i%30+1)
-		if i >= 30 {
-			name = fmt.Sprintf("config.json.bak-202610%02dT120000Z-old", i-30+1)
-		}
-		old = append(old, name)
-		full := filepath.Join(dir, name)
-		if err := os.WriteFile(full, []byte(name), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		mod := now.Add(-time.Duration(60-i) * 24 * time.Hour)
-		if err := os.Chtimes(full, mod, mod); err != nil {
-			t.Fatal(err)
-		}
-	}
+	old := daemonConfigOldBackups(t, path, now, 60)
 	notes := filepath.Join(dir, "notes.txt")
 	if err := os.WriteFile(notes, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
@@ -637,6 +680,38 @@ func TestConfigDaemonPrunesOldBackups(t *testing.T) {
 	}
 	if data, err := os.ReadFile(otherCopy); err != nil || string(data) != "keep" {
 		t.Errorf("another file's backup = %q, %v; want it untouched", data, err)
+	}
+}
+
+// A write that fails after its backup prunes nothing: no older copy is removed
+// for a change that did not land (gt-yjzepk.4).
+func TestConfigDaemonFailedWritePrunesNothing(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	townRoot, path := daemonConfigTown(t, daemonConfigFixture)
+	env, _, _ := daemonConfigTestEnv(townRoot, now)
+	old := daemonConfigOldBackups(t, path, now, 60)
+	env.update = func(path string, perm os.FileMode, mutate func(*json.RawMessage, bool) error) error {
+		return config.UpdateConfigJSONNoWait(path, perm, func(cur *json.RawMessage, exists bool) error {
+			if err := mutate(cur, exists); err != nil {
+				return err
+			}
+			return errors.New("the write failed")
+		})
+	}
+
+	err := configDaemonSet(env, "cli_theme", `"light"`, "theme")
+	if err == nil || !strings.Contains(err.Error(), "the write failed") {
+		t.Fatalf("set with a failing write = %v, want the write's error", err)
+	}
+	for _, name := range old {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), name)); err != nil {
+			t.Errorf("the failed write removed %s: %v", name, err)
+		}
+	}
+	if backups := daemonConfigBackups(t, path); len(backups) != len(old) {
+		t.Errorf("backups after the failed write = %d, want the %d that were there", len(backups), len(old))
 	}
 }
 

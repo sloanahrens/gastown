@@ -262,8 +262,9 @@ func readDaemonConfig(path string) (map[string]any, error) {
 }
 
 // validateDaemonConfigDocument runs the validators the daemon runs over a
-// settings/config.json document: the kernel load, the one daemon patrol
-// validator, and the container_off step audit the daemon's rehearsal applies.
+// settings/config.json document: the kernel load and the one daemon patrol
+// validator, which includes the container_off step audit. Nothing here is a
+// second copy of a daemon check (gt-yjzepk.4).
 func validateDaemonConfigDocument(path string, data []byte) (*config.TownSettings, error) {
 	settings, _, err := townconfig.ValidateSettingsDocument(path, data)
 	if err != nil {
@@ -273,23 +274,8 @@ func validateDaemonConfigDocument(path string, data []byte) (*config.TownSetting
 		if err := config.ValidateDaemonPatrolConfig(settings.Daemon); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
-		if err := validateDaemonContainerOff(settings.Daemon); err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
-		}
 	}
 	return settings, nil
-}
-
-// validateDaemonContainerOff refuses a container_off name the daemon's step
-// audit does not classify: a typo there silently leaves a step running in a
-// container that cannot run it (gt-1oz0t, gt-yjzepk.4).
-func validateDaemonContainerOff(c *config.DaemonPatrolConfig) error {
-	for _, name := range c.ContainerOff() {
-		if !stepKnown(name) {
-			return fmt.Errorf("%s: in daemon.container_off but unknown to the audit table (a typo, or a step to classify)", name)
-		}
-	}
-	return nil
 }
 
 // applyDaemonConfigChange applies change to the file's document under its lock. A
@@ -334,9 +320,7 @@ func applyDaemonConfigChange(e configDaemonEnv, label string, change func(tree m
 		}
 		if exists {
 			stamp := e.now().UTC().Format(daemonConfigStampFormat) + "-" + label
-			created, err := config.BackupFileRetained(path, stamp, daemonConfigRetention, func(removed string) {
-				fmt.Fprintf(e.errOut, "removed backup %s\n", removed)
-			})
+			created, err := config.BackupFileRetainedWithoutPrune(path, stamp)
 			if err != nil {
 				return err
 			}
@@ -349,6 +333,11 @@ func applyDaemonConfigChange(e configDaemonEnv, label string, change func(tree m
 	if err != nil {
 		return errors.Join(err, removeDaemonConfigBackup(backup))
 	}
+	if backup != "" {
+		// The write landed, so the retention window is pruned now: a write that
+		// failed above deletes no older copy (gt-yjzepk.4).
+		pruneDaemonConfigBackups(e, path, backup)
+	}
 	if before == nil {
 		return nil
 	}
@@ -356,6 +345,19 @@ func applyDaemonConfigChange(e configDaemonEnv, label string, change func(tree m
 	// to do.
 	fmt.Fprintf(e.out, "%s", daemonConfigDiff(rel, before, after))
 	return nil
+}
+
+// pruneDaemonConfigBackups prunes the retention window over the copies beside
+// path after the write that made keep landed. Each copy removed is one line on
+// errOut; a prune that fails is reported there too, because a directory that
+// cannot be pruned must not fail a write that succeeded (gt-yjzepk.4).
+func pruneDaemonConfigBackups(e configDaemonEnv, path, keep string) {
+	err := config.PruneBackups(path, keep, daemonConfigRetention, func(removed string) {
+		fmt.Fprintf(e.errOut, "removed backup %s\n", removed)
+	})
+	if err != nil {
+		fmt.Fprintf(e.errOut, "pruning old backups of %s: %v\n", path, err)
+	}
 }
 
 // removeDaemonConfigBackup deletes the copy a failed write leaves behind, so
@@ -468,10 +470,11 @@ func refuseNewLiteralSecrets(path string, oldTree, newTree map[string]any, setti
 
 // daemonConfigDiff renders the change from oldTree to newTree as a unified
 // diff. Both sides pass through the redaction first, so a token the file
-// already holds is never printed.
+// already holds is never printed, and a token that changed keeps a distinct
+// marker on each side so the change is still visible (gt-yjzepk.4).
 func daemonConfigDiff(rel string, oldTree, newTree map[string]any) string {
-	oldText := indentDaemonConfigJSON(redactDaemonConfigTree(oldTree))
-	newText := indentDaemonConfigJSON(redactDaemonConfigTree(newTree))
+	oldText := indentDaemonConfigJSON(redactDaemonConfigTree(oldTree, newTree, "", "<redacted: before>"))
+	newText := indentDaemonConfigJSON(redactDaemonConfigTree(newTree, oldTree, "", "<redacted: after>"))
 	return unifiedDiff(rel+" (before)", rel+" (after)", oldText, newText)
 }
 
@@ -487,24 +490,39 @@ func indentDaemonConfigJSON(value any) string {
 	return out.String()
 }
 
-func redactDaemonConfigTree(node any) any {
+// redactDaemonConfigTree replaces every string that looks like a token with a
+// marker. key is the map key, or the list's key for an element, that governs
+// the value; changed is the marker when the value differs from the one at the
+// same place in other, so a changed token shows as a change and neither value
+// is printed (gt-yjzepk.4).
+func redactDaemonConfigTree(node, other any, key, changed string) any {
 	switch n := node.(type) {
 	case map[string]any:
+		om, _ := other.(map[string]any)
 		out := make(map[string]any, len(n))
 		for k, v := range n {
-			if s, ok := v.(string); ok && config.LooksLikeSecret(k, s) {
-				out[k] = "<redacted>"
-				continue
-			}
-			out[k] = redactDaemonConfigTree(v)
+			out[k] = redactDaemonConfigTree(v, om[k], k, changed)
 		}
 		return out
 	case []any:
+		oa, _ := other.([]any)
 		out := make([]any, len(n))
 		for i, v := range n {
-			out[i] = redactDaemonConfigTree(v)
+			var ov any
+			if i < len(oa) {
+				ov = oa[i]
+			}
+			out[i] = redactDaemonConfigTree(v, ov, key, changed)
 		}
 		return out
+	case string:
+		if key == "" || !config.LooksLikeSecret(key, n) {
+			return n
+		}
+		if prev, ok := other.(string); ok && prev == n {
+			return "<redacted>"
+		}
+		return changed
 	default:
 		return node
 	}
