@@ -1,7 +1,9 @@
 package ci
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -12,6 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/internal/ci/preflight"
+	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // workflowPath is the images workflow text, relative to this package: the file
@@ -663,6 +667,66 @@ func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 			t.Errorf("the push step types its own docker logic instead of the tested publish: %s", run)
 		}
 	})
+}
+
+// TestImagesWorkflowNamesTheSharedImageConstants holds the one-spelling rule:
+// the workflow's image names are internal/imagevalues' constants, and its
+// Forgejo host and registry owner are the registry gt update images reads from
+// the town's own rig settings. The workflow's env must equal that source, so a
+// build that pushes to one registry and a command that reads another fails
+// here instead of in production.
+func TestImagesWorkflowNamesTheSharedImageConstants(t *testing.T) {
+	t.Parallel()
+	wf := loadWorkflow(t)
+	env := object(t, wf["env"], "env")
+	reg := townImagesRegistry(t)
+	for _, want := range []struct{ key, value string }{
+		{"DAEMON_IMAGE", imagevalues.DaemonImage},
+		{"POLECAT_IMAGE", imagevalues.PolecatImage},
+		{"FORGEJO_HOST", reg.Host},
+		{"REGISTRY_OWNER", reg.Owner},
+	} {
+		if got := text(t, env[want.key], "env "+want.key); got != want.value {
+			t.Errorf("the workflow's %s is %q, but the town's rig settings name %q", want.key, got, want.value)
+		}
+	}
+}
+
+// townImagesRegistry is the registry the fixture town's rig settings name: the
+// source gt update images reads. The fixture is the same one
+// TestUpdateImagesWorkflowNamesTheTownsRegistry resolves through the command in
+// internal/cmd, so the two tests hold the workflow to the registry the command
+// actually reads.
+func townImagesRegistry(t *testing.T) imagevalues.Registry {
+	t.Helper()
+	const path = "../../deploy/ci/testdata/images-town/gastown/config.json"
+	raw, err := os.ReadFile(filepath.FromSlash(path))
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var rigConfig struct {
+		MergeQueue struct {
+			Forgejo struct {
+				RemoteURL string `json:"remote_url"`
+			} `json:"forgejo"`
+		} `json:"merge_queue"`
+	}
+	if err := json.Unmarshal(raw, &rigConfig); err != nil {
+		t.Fatalf("%s is not valid JSON: %v", path, err)
+	}
+	remote := rigConfig.MergeQueue.Forgejo.RemoteURL
+	if remote == "" {
+		t.Fatalf("%s names no merge_queue.forgejo.remote_url", path)
+	}
+	owner, _, err := land.RepoFromRemoteURL(remote)
+	if err != nil {
+		t.Fatalf("reading the owner from %q: %v", remote, err)
+	}
+	u, err := url.Parse(remote)
+	if err != nil || u.Host == "" {
+		t.Fatalf("the town's rig settings name no registry host: %q", remote)
+	}
+	return imagevalues.Registry{Scheme: u.Scheme, Host: u.Host, Owner: owner}
 }
 
 // TestImagesWorkflowRunsOneJobOnCIBase holds the runner rule: one job named

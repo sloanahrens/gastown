@@ -1,0 +1,10 @@
+{
+  "type": "daemon-patrol-config",
+  "version": 1,
+  "patrols": {
+    "tier_sweep": {
+      "enabled": true,
+      "image_rigs": ["gastown"]
+    }
+  }
+}
