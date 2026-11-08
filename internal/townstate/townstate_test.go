@@ -1,6 +1,7 @@
 package townstate
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -9,7 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
-	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -96,15 +97,10 @@ func TestManifestMirrorMatches(t *testing.T) {
 // newManifestRows are the rows gt-plrm1y adds to the split, with the owner each
 // must carry. TestManifestWhysNameTheirSource holds every one to a source file,
 // and TestManifestHasNoOverlappingRows holds the set to one owner per path.
-var newManifestRows = []struct {
-	path  string
-	owner Owner
-}{
+var newManifestRows = []manifestRow{
 	// Town-root state.
 	{path: "power-state", owner: OwnerDaemon},
 	{path: ".events.jsonl.lock", owner: OwnerDaemon},
-	{path: ".feed.jsonl.lock", owner: OwnerDaemon},
-	{path: ".dolt-backup", owner: OwnerDaemon},
 	{path: ".dolt-archive", owner: OwnerDaemon},
 	{path: ".beads-wisp", owner: OwnerDaemon},
 
@@ -197,61 +193,44 @@ func TestManifestHasNoOverlappingRows(t *testing.T) {
 	}
 }
 
-// sourceCitation matches a path-like token in a why: two or more segments and
-// a file extension, as the whys cite a source file inside its package.
-var sourceCitation = regexp.MustCompile(`[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)+\.[A-Za-z0-9]+`)
+// manifestRow is a row a test holds to an owner and a why.
+type manifestRow struct {
+	path  string
+	owner Owner
+}
 
-// citedSources returns the repository paths why cites. A token is a citation
-// only when its first segment is a visible name at the repository root: the
-// whys also name host paths (~/.claude/...), manifest paths under .runtime, and
-// files in the om repo, none of which this repository's sources are.
-func citedSources(why string, rootNames map[string]bool) []string {
+// sourceExtensions are the endings of the source files a why cites.
+var sourceExtensions = []string{".go", ".yaml", ".sh", ".md"}
+
+// whySourceTokens returns the source files why names: every whitespace-separated
+// token that holds a slash and ends in a source extension, once the punctuation
+// around it is trimmed. It fails closed: the token is returned whatever its first
+// segment, so a misspelled directory or a dot-prefixed path is still checked. A
+// token starting with ~ or / is a host path (~/.claude/statusline-command.sh),
+// not a file in this repository, and is skipped.
+func whySourceTokens(why string) []string {
 	var out []string
-	for _, tok := range sourceCitation.FindAllString(why, -1) {
-		first, _, _ := strings.Cut(tok, "/")
-		if strings.HasPrefix(first, ".") || !rootNames[first] {
+	for _, tok := range strings.Fields(why) {
+		tok = strings.TrimRight(strings.Trim(tok, "([{'\"`"), ".,;:)]}'\"`")
+		if !strings.Contains(tok, "/") || strings.HasPrefix(tok, "~") || strings.HasPrefix(tok, "/") {
 			continue
 		}
-		out = append(out, tok)
-	}
-	return out
-}
-
-// missingSources returns the repository paths why cites that root does not hold.
-func missingSources(why, root string, rootNames map[string]bool) []string {
-	var out []string
-	for _, p := range citedSources(why, rootNames) {
-		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err != nil {
-			out = append(out, p)
+		for _, ext := range sourceExtensions {
+			if strings.HasSuffix(tok, ext) {
+				out = append(out, tok)
+				break
+			}
 		}
 	}
 	return out
 }
 
-// repoRootNames returns the names present at the repository root, so a
-// citation in a why is checked only when its first segment names one.
-func repoRootNames(t *testing.T, root string) map[string]bool {
+// checkRowWhys is the row loop TestManifestWhysNameTheirSource runs. Each row
+// must be in m with the owner it names, its why must cite at least one source
+// file, and every file it cites must exist under root.
+func checkRowWhys(t testing.TB, m *Manifest, root string, rows []manifestRow) {
 	t.Helper()
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		t.Fatalf("reading the repository root: %v", err)
-	}
-	names := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		names[e.Name()] = true
-	}
-	return names
-}
-
-// TestManifestWhysNameTheirSource fails when a row gt-plrm1y adds carries the
-// wrong owner, a why that cites no source file, or one that cites a file the
-// repository does not hold.
-func TestManifestWhysNameTheirSource(t *testing.T) {
-	t.Parallel()
-	root := filepath.Join("..", "..")
-	rootNames := repoRootNames(t, root)
-	m := Default()
-	for _, want := range newManifestRows {
+	for _, want := range rows {
 		e, ok := entryNamed(m, want.path)
 		if !ok {
 			t.Errorf("the manifest has no row %q", want.path)
@@ -260,29 +239,82 @@ func TestManifestWhysNameTheirSource(t *testing.T) {
 		if e.Owner != want.owner {
 			t.Errorf("row %q is %q, want %q", want.path, e.Owner, want.owner)
 		}
-		if len(citedSources(e.Why, rootNames)) == 0 {
+		cited := whySourceTokens(e.Why)
+		if len(cited) == 0 {
 			t.Errorf("row %q's why cites no source file: %q", want.path, e.Why)
 		}
-		for _, missing := range missingSources(e.Why, root, rootNames) {
-			t.Errorf("row %q's why cites %s, which the repository does not hold", want.path, missing)
+		for _, src := range cited {
+			if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(src))); err != nil {
+				t.Errorf("row %q's why cites %s, which the repository does not hold", want.path, src)
+			}
 		}
 	}
+}
 
-	t.Run("a why citing a file the repository does not hold is refused", func(t *testing.T) {
-		const why = "the state internal/townstate/no-such-fixture.go writes"
-		missing := missingSources(why, root, rootNames)
-		if len(missing) != 1 || missing[0] != "internal/townstate/no-such-fixture.go" {
-			t.Fatalf("missingSources(%q) = %v, want the cited path reported missing", why, missing)
+// recordingTB collects the errors a check reports, so a test can drive the
+// row loop with a fixture manifest and assert what it refuses.
+type recordingTB struct {
+	testing.TB
+	errs []string
+}
+
+func (r *recordingTB) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+// TestManifestWhysNameTheirSource fails when a row gt-plrm1y adds carries the
+// wrong owner, a why that cites no source file, or one that cites a file the
+// repository does not hold.
+func TestManifestWhysNameTheirSource(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join("..", "..")
+
+	t.Run("every new row cites source files the repository holds", func(t *testing.T) {
+		checkRowWhys(t, Default(), root, newManifestRows)
+	})
+
+	t.Run("a bad citation in the row loop is reported", func(t *testing.T) {
+		fixture := &Manifest{Entries: []Entry{
+			{Path: ".runtime/fixture-missing", Owner: OwnerDaemon, Why: "the state internal/townstate/no-such-fixture.go writes"},
+			{Path: ".runtime/fixture-typo", Owner: OwnerDaemon, Why: "the state internal/townstat/townstate.go writes"},
+			{Path: ".runtime/fixture-dot", Owner: OwnerDaemon, Why: "the state .githubb/workflows/ci.yaml writes"},
+			{Path: ".runtime/fixture-cited", Owner: OwnerDaemon, Why: "the state internal/townstate/townstate.go writes"},
+			{Path: ".runtime/fixture-none", Owner: OwnerDaemon, Why: "the state the daemon writes"},
+		}}
+		rows := []manifestRow{
+			{path: ".runtime/fixture-missing", owner: OwnerDaemon},
+			{path: ".runtime/fixture-typo", owner: OwnerDaemon},
+			{path: ".runtime/fixture-dot", owner: OwnerDaemon},
+			{path: ".runtime/fixture-cited", owner: OwnerDaemon},
+			{path: ".runtime/fixture-none", owner: OwnerDaemon},
+		}
+		rec := &recordingTB{TB: t}
+		checkRowWhys(rec, fixture, root, rows)
+		for _, want := range []struct{ row, what string }{
+			{".runtime/fixture-missing", "internal/townstate/no-such-fixture.go"},
+			{".runtime/fixture-typo", "internal/townstat/townstate.go"},
+			{".runtime/fixture-dot", ".githubb/workflows/ci.yaml"},
+			{".runtime/fixture-none", "no source file"},
+		} {
+			if !slices.ContainsFunc(rec.errs, func(e string) bool {
+				return strings.Contains(e, want.row) && strings.Contains(e, want.what)
+			}) {
+				t.Errorf("the row loop did not report row %q with %q; it reported %q", want.row, want.what, rec.errs)
+			}
+		}
+		if slices.ContainsFunc(rec.errs, func(e string) bool { return strings.Contains(e, "fixture-cited") }) {
+			t.Errorf("the row loop refused a row that cites a file the repository holds: %q", rec.errs)
 		}
 	})
 }
 
-// TestManifestPrivateRowsKeepTheirModes names the daemon rows that hold
-// credential material, which an import must copy with the archive's mode: a
-// kubeconfig, a keychain, a 0600 password file. A row that loses private: true
-// fails here, in the Go data or in the yaml mirror. The list is reviewed by
-// hand, since the test cannot tell a credential path from any other: a new
-// credential row must be added to it.
+// TestManifestPrivateRowsKeepTheirModes names the daemon rows that can hold
+// credential material or a token, which an import must copy with the archive's
+// mode: a kubeconfig, a keychain, a 0600 password file, captured output and
+// clone remote URLs. A row that loses private: true fails here, in the Go data
+// or in the yaml mirror. The list is reviewed by hand, since the test cannot
+// tell a credential path from any other: a new credential row must be added to
+// it.
 func TestManifestPrivateRowsKeepTheirModes(t *testing.T) {
 	t.Parallel()
 	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "daemon", "town-state.yaml"))
@@ -297,7 +329,10 @@ func TestManifestPrivateRowsKeepTheirModes(t *testing.T) {
 		name string
 		m    *Manifest
 	}{{"the Go data", Default()}, {"the yaml mirror", mirror}} {
-		for _, p := range []string{".runtime/container", ".runtime/sbx-k8s", ".runtime/signing"} {
+		for _, p := range []string{
+			".runtime/container", ".runtime/sbx-k8s", ".runtime/signing",
+			".runtime/gate-logs", ".runtime/openshell", ".runtime/om-src", ".runtime/hm-src",
+		} {
 			e, ok := entryNamed(src.m, p)
 			if !ok {
 				t.Errorf("%s has no row %q", src.name, p)

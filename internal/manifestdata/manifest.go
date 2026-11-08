@@ -93,8 +93,6 @@ func Default(dirs DirNames) *Manifest {
 		{Path: "settings", Owner: OwnerShared, Why: "edited by gt config daemon, read by the daemon (gt-yjzepk.4)"},
 		{Path: "power-state", Owner: OwnerDaemon, Why: "the last requested power state gt power writes and the daemon reads (internal/power/power.go StatePath)"},
 		{Path: ".events.jsonl.lock", Owner: OwnerDaemon, Why: "the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave"},
-		{Path: ".feed.jsonl.lock", Owner: OwnerDaemon, Why: "the flock beside the feed the daemon appends (the .feed.jsonl row), held while it writes the way internal/events/events.go locks .events.jsonl"},
-		{Path: ".dolt-backup", Owner: OwnerDaemon, Why: "the backups the retired dolt_backup patrol left; internal/config/daemon_config.go records the retirement, and the nightly backup now writes outside the town"},
 		{Path: ".dolt-archive", Owner: OwnerDaemon, Why: "the JSONL git backup repository internal/daemon/jsonl_git_backup.go pushes each database's history into"},
 		{Path: ".beads-wisp", Owner: OwnerDaemon, Why: "the wisp config layer internal/wisp/config.go writes and internal/rig/config.go reads"},
 
@@ -117,15 +115,12 @@ func Default(dirs DirNames) *Manifest {
 		{Path: "<rig>/.runtime/agent.lock.flock", Owner: OwnerSession, Why: "the flock internal/lock/lock.go takes beside agent.lock so two Acquire calls cannot race"},
 		{Path: "<rig>/.runtime/handoff_to_successor", Owner: OwnerSession, Why: "the marker gt handoff leaves for the successor's gt prime (internal/cmd/handoff.go writeHandoffMarker)"},
 
-		// The daemon's subsystem directories under .runtime and the state only
-		// gt commands write. After the wrapper cutover every gt command runs in
-		// the container, so the volume holds the only copy of what a gt command
-		// writes here; until then a gt command on the Mac writes the host's tree
-		// too, a cutover prerequisite (gt-yjzepk.10). A row a gt command writes
-		// says so and points at this comment.
+		// The daemon's subsystem directories under .runtime, and the state only
+		// gt commands write. The .runtime/agents row states the ownership reason
+		// for the gt-command rows, which name that row.
 		{Path: ".runtime/jev", Owner: OwnerDaemon, Why: "jev's dataset the daemon writes"},
 		{Path: ".runtime/polecat-spans", Owner: OwnerDaemon, Why: "polecat span records the daemon writes"},
-		{Path: ".runtime/agents", Owner: OwnerDaemon, Why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands); a gt command's write follows the cutover rule above"},
+		{Path: ".runtime/agents", Owner: OwnerDaemon, Why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands). Owner daemon because after the wrapper cutover every gt command runs in the container, so the volume holds the only copy of what a gt command writes; until then a gt command on the Mac also writes the host's tree, a cutover prerequisite (gt-yjzepk.10). The gt-command rows below say their owner is as this row says"},
 		{Path: ".runtime/landings", Owner: OwnerDaemon, Rollback: true, Why: "landing ledgers the daemon writes; rollback replays the landing records"},
 		{Path: ".runtime/usage", Owner: OwnerDaemon, Why: "usage records the daemon writes"},
 		{Path: ".runtime/sweep-runs", Owner: OwnerDaemon, Why: "tier sweep output the daemon writes"},
@@ -146,12 +141,12 @@ func Default(dirs DirNames) *Manifest {
 		{Path: ".runtime/cloud-check", Owner: OwnerDaemon, Why: "the cloud-check plugin's status.json, read by internal/cmd/dashboard.go dashboardCloudChecksPath"},
 		{Path: ".runtime/deploy-watch.json", Owner: OwnerDaemon, Why: "the deploy watch's state internal/daemon/deploy_watch.go writes"},
 		{Path: ".runtime/diskmaint", Owner: OwnerDaemon, Why: "the disk maintenance ledger gt maint writes (internal/cmd/maint.go) and internal/polecatimage reads before it prunes a registry"},
-		{Path: ".runtime/gate-logs", Owner: OwnerDaemon, Why: "the landing worker's gate logs, one directory per rig (internal/land/gatelog.go)"},
-		{Path: ".runtime/hm-src", Owner: OwnerDaemon, Why: "the daemon's hm skew monitor's clone (internal/daemon/hm_skew.go hmSkewCloneDir)"},
-		{Path: ".runtime/om-src", Owner: OwnerDaemon, Why: "the om install's checkout, the default internal/ominstaller/resolve.go uses"},
+		{Path: ".runtime/gate-logs", Owner: OwnerDaemon, Private: true, Why: "the landing worker's gate logs, one directory per rig (internal/land/gatelog.go); captured gate output can echo a token"},
+		{Path: ".runtime/hm-src", Owner: OwnerDaemon, Private: true, Why: "the daemon's hm skew monitor's clone (internal/daemon/hm_skew.go hmSkewCloneDir); the clone's .git/config holds the rig's origin URL, which can carry credentials"},
+		{Path: ".runtime/om-src", Owner: OwnerDaemon, Private: true, Why: "the om install's checkout, the default internal/ominstaller/resolve.go uses; the clone's .git/config holds the origin URL rebuild_om.go copies, which can carry credentials"},
 		{Path: ".runtime/host", Owner: OwnerDaemon, Why: "the host agent's probe file, written by gt host agent run (internal/cmd/host_agent.go, internal/hostprobe/probes.go) and read by the daemon (internal/daemon/startup_guard.go, disk_maintenance_disks.go)"},
 		{Path: ".runtime/nudge_poller", Owner: OwnerDaemon, Why: "the nudge poller's PID files, written by internal/nudge/poller.go startPoller and pruned by the daemon (internal/daemon/pollution.go)"},
-		{Path: ".runtime/openshell", Owner: OwnerDaemon, Why: "the OpenShell gateway's log directory, made by the gt-installer gateway step (internal/installer/gateway.go writeUnit)"},
+		{Path: ".runtime/openshell", Owner: OwnerDaemon, Private: true, Why: "the OpenShell gateway's log directory, made by the gt-installer gateway step (internal/installer/gateway.go writeUnit); the gateway holds provider credentials (internal/doctor/openshell_gateway_check.go lists them), so the directory is private"},
 		{Path: ".runtime/patrol_scan", Owner: OwnerDaemon, Why: "the witness patrol's ledger internal/patrolscan/ledger.go writes and the daemon's patrol_scan step reads"},
 		{Path: ".runtime/pids", Owner: OwnerDaemon, Why: "the pid files internal/session/pidtrack.go TrackSessionPID writes when a session starts; internal/doctor/stale_runtime_files_check.go reads them"},
 		{Path: ".runtime/polecat-image-install.log", Owner: OwnerDaemon, Why: "the install log internal/installer/image.go writes when gt-installer installs the polecat image"},
@@ -173,15 +168,15 @@ func Default(dirs DirNames) *Manifest {
 		{Path: ".runtime/daemon-liveness.json", Owner: OwnerDaemon, Why: "the daemon liveness baseline the doctor check writes (internal/doctor/daemon_liveness_check.go), run by the daemon's doctor_dog"},
 		{Path: ".runtime/daemon-respawn.json", Owner: OwnerDaemon, Why: "the daemon respawn baseline the doctor check writes (internal/doctor/daemon_respawn_check.go), run by the daemon's doctor_dog"},
 
-		// .runtime state only gt commands write, daemon-owned by the cutover
-		// rule in the comment above the .runtime rows.
-		{Path: ".runtime/polecat-admission", Owner: OwnerDaemon, Why: "admission reservations gt sling writes (internal/cmd/polecat_capacity.go writePolecatAdmissionReservation); daemon-owned after the wrapper cutover, as the .runtime/agents row says"},
-		{Path: ".runtime/polecat-pool-claims", Owner: OwnerDaemon, Why: "seat claims gt sling writes (internal/cmd/sling_pool.go poolSeatClaimDir); daemon-owned after the wrapper cutover, as the .runtime/agents row says"},
-		{Path: ".runtime/polecat-prompts", Owner: OwnerDaemon, Why: "the polecat system prompts gt sling stores (internal/session/prompt_store.go storePolecatPrompt), read back by the landing worker for a rejection (internal/land/promptstamp.go); daemon-owned after the wrapper cutover, as the .runtime/agents row says"},
+		// .runtime state only gt commands write; each owner is as the
+		// .runtime/agents row says.
+		{Path: ".runtime/polecat-admission", Owner: OwnerDaemon, Why: "admission reservations gt sling writes (internal/cmd/polecat_capacity.go writePolecatAdmissionReservation); owner as the .runtime/agents row says"},
+		{Path: ".runtime/polecat-pool-claims", Owner: OwnerDaemon, Why: "seat claims gt sling writes (internal/cmd/sling_pool.go poolSeatClaimDir); owner as the .runtime/agents row says"},
+		{Path: ".runtime/polecat-prompts", Owner: OwnerDaemon, Why: "the polecat system prompts gt sling stores (internal/session/prompt_store.go storePolecatPrompt), read back by the landing worker for a rejection (internal/land/promptstamp.go); owner as the .runtime/agents row says"},
 		{Path: ".runtime/rehearsal", Owner: OwnerDaemon, Why: "the container rehearsal's run directories, written and deleted by gt daemon rehearse (internal/cmd/daemon_rehearse.go chooseRunDir)"},
 		{Path: ".runtime/hooks", Owner: OwnerDaemon, Why: "the hooks sync report gt hooks sync writes (internal/hooks/sync_report.go) and the hooks-sync doctor check reads"},
 		{Path: ".runtime/composer_pending", Owner: OwnerDaemon, Why: "the composer stall clock the daemon heartbeat and the witness patrol write (internal/tmux/pending_input_clock.go)"},
-		{Path: ".runtime/nudge_queue", Owner: OwnerDaemon, Why: "the queued nudges gt nudge writes (internal/nudge/queue.go Enqueue) and the target session's hook drains; daemon-owned after the wrapper cutover, as the .runtime/agents row says"},
+		{Path: ".runtime/nudge_queue", Owner: OwnerDaemon, Why: "the queued nudges gt nudge writes (internal/nudge/queue.go Enqueue) and the target session's hook drains; owner as the .runtime/agents row says"},
 		{Path: ".runtime/seat-refill.json", Owner: OwnerDaemon, Why: "the seat-refill plugin's episode state, read by internal/report/hour.go refillEpisodes"},
 		{Path: ".runtime/bead-respawn-counts.json", Owner: OwnerDaemon, Why: "the per-bead respawn counts gt sling records (internal/polecat/respawn_count.go RecordBeadRespawnMark), read by the jev scorecard (internal/jev/scorecard/thrash.go)"},
 		{Path: ".runtime/bead-respawn-counts.json.flock", Owner: OwnerDaemon, Why: "the flock internal/polecat/respawn_count.go takes beside bead-respawn-counts.json"},

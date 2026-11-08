@@ -43,12 +43,6 @@ entries:
   - path: .events.jsonl.lock
     owner: daemon
     why: the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave
-  - path: .feed.jsonl.lock
-    owner: daemon
-    why: the flock beside the feed the daemon appends (the .feed.jsonl row), held while it writes the way internal/events/events.go locks .events.jsonl
-  - path: .dolt-backup
-    owner: daemon
-    why: the backups the retired dolt_backup patrol left; internal/config/daemon_config.go records the retirement, and the nightly backup now writes outside the town
   - path: .dolt-archive
     owner: daemon
     why: the JSONL git backup repository internal/daemon/jsonl_git_backup.go pushes each database's history into
@@ -107,11 +101,8 @@ entries:
     owner: session
     why: the marker gt handoff leaves for the successor's gt prime (internal/cmd/handoff.go writeHandoffMarker)
   # The daemon's subsystem directories under .runtime and the state only gt
-  # commands write. After the wrapper cutover every gt command runs in the
-  # container, so the volume holds the only copy of what a gt command writes
-  # here; until then a gt command on the Mac writes the host's tree too, a
-  # cutover prerequisite (gt-yjzepk.10). A row a gt command writes says so and
-  # points at this comment.
+  # commands write. The .runtime/agents row states the ownership reason for the
+  # gt-command rows, which name that row.
   - path: .runtime/jev
     owner: daemon
     why: jev's dataset the daemon writes
@@ -120,7 +111,7 @@ entries:
     why: polecat span records the daemon writes
   - path: .runtime/agents
     owner: daemon
-    why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands); a gt command's write follows the cutover rule above"
+    why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands). Owner daemon because after the wrapper cutover every gt command runs in the container, so the volume holds the only copy of what a gt command writes; until then a gt command on the Mac also writes the host's tree, a cutover prerequisite (gt-yjzepk.10). The gt-command rows below say their owner is as this row says"
   - path: .runtime/landings
     owner: daemon
     rollback: true
@@ -187,13 +178,16 @@ entries:
     why: the disk maintenance ledger gt maint writes (internal/cmd/maint.go) and internal/polecatimage reads before it prunes a registry
   - path: .runtime/gate-logs
     owner: daemon
-    why: the landing worker's gate logs, one directory per rig (internal/land/gatelog.go)
+    private: true
+    why: the landing worker's gate logs, one directory per rig (internal/land/gatelog.go); captured gate output can echo a token
   - path: .runtime/hm-src
     owner: daemon
-    why: the daemon's hm skew monitor's clone (internal/daemon/hm_skew.go hmSkewCloneDir)
+    private: true
+    why: the daemon's hm skew monitor's clone (internal/daemon/hm_skew.go hmSkewCloneDir); the clone's .git/config holds the rig's origin URL, which can carry credentials
   - path: .runtime/om-src
     owner: daemon
-    why: the om install's checkout, the default internal/ominstaller/resolve.go uses
+    private: true
+    why: the om install's checkout, the default internal/ominstaller/resolve.go uses; the clone's .git/config holds the origin URL rebuild_om.go copies, which can carry credentials
   - path: .runtime/host
     owner: daemon
     why: the host agent's probe file, written by gt host agent run (internal/cmd/host_agent.go, internal/hostprobe/probes.go) and read by the daemon (internal/daemon/startup_guard.go, disk_maintenance_disks.go)
@@ -202,7 +196,8 @@ entries:
     why: the nudge poller's PID files, written by internal/nudge/poller.go startPoller and pruned by the daemon (internal/daemon/pollution.go)
   - path: .runtime/openshell
     owner: daemon
-    why: the OpenShell gateway's log directory, made by the gt-installer gateway step (internal/installer/gateway.go writeUnit)
+    private: true
+    why: the OpenShell gateway's log directory, made by the gt-installer gateway step (internal/installer/gateway.go writeUnit); the gateway holds provider credentials (internal/doctor/openshell_gateway_check.go lists them), so the directory is private
   - path: .runtime/patrol_scan
     owner: daemon
     why: the witness patrol's ledger internal/patrolscan/ledger.go writes and the daemon's patrol_scan step reads
@@ -267,13 +262,13 @@ entries:
     why: the daemon respawn baseline the doctor check writes (internal/doctor/daemon_respawn_check.go), run by the daemon's doctor_dog
   - path: .runtime/polecat-admission
     owner: daemon
-    why: admission reservations gt sling writes (internal/cmd/polecat_capacity.go writePolecatAdmissionReservation); daemon-owned after the wrapper cutover, as the .runtime/agents row says
+    why: admission reservations gt sling writes (internal/cmd/polecat_capacity.go writePolecatAdmissionReservation); owner as the .runtime/agents row says
   - path: .runtime/polecat-pool-claims
     owner: daemon
-    why: seat claims gt sling writes (internal/cmd/sling_pool.go poolSeatClaimDir); daemon-owned after the wrapper cutover, as the .runtime/agents row says
+    why: seat claims gt sling writes (internal/cmd/sling_pool.go poolSeatClaimDir); owner as the .runtime/agents row says
   - path: .runtime/polecat-prompts
     owner: daemon
-    why: the polecat system prompts gt sling stores (internal/session/prompt_store.go storePolecatPrompt), read back by the landing worker for a rejection (internal/land/promptstamp.go); daemon-owned after the wrapper cutover, as the .runtime/agents row says
+    why: the polecat system prompts gt sling stores (internal/session/prompt_store.go storePolecatPrompt), read back by the landing worker for a rejection (internal/land/promptstamp.go); owner as the .runtime/agents row says
   - path: .runtime/rehearsal
     owner: daemon
     why: the container rehearsal's run directories, written and deleted by gt daemon rehearse (internal/cmd/daemon_rehearse.go chooseRunDir)
@@ -285,7 +280,7 @@ entries:
     why: the composer stall clock the daemon heartbeat and the witness patrol write (internal/tmux/pending_input_clock.go)
   - path: .runtime/nudge_queue
     owner: daemon
-    why: the queued nudges gt nudge writes (internal/nudge/queue.go Enqueue) and the target session's hook drains; daemon-owned after the wrapper cutover, as the .runtime/agents row says
+    why: the queued nudges gt nudge writes (internal/nudge/queue.go Enqueue) and the target session's hook drains; owner as the .runtime/agents row says
   - path: .runtime/seat-refill.json
     owner: daemon
     why: the seat-refill plugin's episode state, read by internal/report/hour.go refillEpisodes
