@@ -831,10 +831,12 @@ func TestMainFieldPlaceholderCommandIsUnknown(t *testing.T) {
 	}
 }
 
-// A green verdict older than PostLandVerdictMaxAge is UNKNOWN rather than a
-// green that never expires, and a green whose record carries no time cannot be
-// vouched for either. A red verdict is a standing fact about its commit and is
-// not aged by that clock (gt-gg9hv.7.2).
+// A green verdict older than PostLandVerdictMaxAge is UNKNOWN for a rig with a
+// status context, whose verdict can be dropped after post_land_timeout and
+// never arrive, and a green whose record carries no time cannot be aged
+// either. A command-configured rig records its verdict when it runs the check,
+// so neither guard applies to it. A red verdict is a standing fact about its
+// commit and is not aged by that clock (gt-gg9hv.7.2).
 func TestMainFieldStaleVerdictIsUnknown(t *testing.T) {
 	t.Parallel()
 	f := healthy()
@@ -843,10 +845,16 @@ func TestMainFieldStaleVerdictIsUnknown(t *testing.T) {
 		{Rig: "fresh", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge - time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
 		{Rig: "untimed", LastRun: "1111111111", LastGreen: "1111111111", PostLand: PostLandCheck{Context: "ci / post-land"}},
 		{Rig: "old-red", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
+		// Both settings: the context decides the verdict, so the green is aged.
+		{Rig: "context-and-command", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Command: "make test", Context: "ci / post-land"}},
+		// Command-configured rigs record a verdict synchronously, so an old or
+		// untimed green still describes the last check run and is not UNKNOWN.
+		{Rig: "command-old", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Command: "make test"}},
+		{Rig: "command-untimed", LastRun: "1111111111", LastGreen: "1111111111", PostLand: PostLandCheck{Command: "make test"}},
 	}
 	r := Compute(context.Background(), inputs(f))
-	if got := field(t, r, "main/stale"); got.Verdict != VerdictUnknown || !strings.Contains(got.Detail, "24h") {
-		t.Errorf("main/stale = %+v, want UNKNOWN naming the 24h bound", got)
+	if got := field(t, r, "main/stale"); got.Verdict != VerdictUnknown {
+		t.Errorf("main/stale = %+v, want UNKNOWN past the age bound", got)
 	}
 	if got := field(t, r, "main/fresh"); got.Verdict != Green {
 		t.Errorf("main/fresh = %+v, want green inside the bound", got)
@@ -856,6 +864,15 @@ func TestMainFieldStaleVerdictIsUnknown(t *testing.T) {
 	}
 	if got := field(t, r, "main/old-red"); got.Verdict != Red {
 		t.Errorf("main/old-red = %+v, want the red to stand; its age is not judgable by LastGreenAt", got)
+	}
+	if got := field(t, r, "main/context-and-command"); got.Verdict != VerdictUnknown {
+		t.Errorf("main/context-and-command = %+v, want the context's age bound to apply", got)
+	}
+	if got := field(t, r, "main/command-old"); got.Verdict != Green {
+		t.Errorf("main/command-old = %+v, want green; a command rig's verdict is not aged", got)
+	}
+	if got := field(t, r, "main/command-untimed"); got.Verdict != Green {
+		t.Errorf("main/command-untimed = %+v, want green; a command rig's verdict needs no clock", got)
 	}
 }
 
