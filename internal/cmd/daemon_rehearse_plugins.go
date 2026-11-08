@@ -87,7 +87,7 @@ func checkDaemonSteps(ctx context.Context, r *rehearsal) []string {
 	if err := json.Unmarshal(r.config, &st); err != nil {
 		return []string{"the staged config.json does not give daemon.container_off and daemon.patrols the shapes the daemon reads: " + err.Error()}
 	}
-	var fails []string
+	var fails, missingOff []string
 	off := st.Daemon.ContainerOff
 	for _, s := range daemonSteps {
 		if s.Class == stepRuns || slices.Contains(off, s.Name) {
@@ -96,6 +96,7 @@ func checkDaemonSteps(ctx context.Context, r *rehearsal) []string {
 		if p, ok := st.Daemon.Patrols[s.Name]; ok && p.Enabled != nil && !*p.Enabled {
 			continue // already off for every supervisor
 		}
+		missingOff = append(missingOff, s.Name)
 		fails = append(fails, fmt.Sprintf("%s (%s) is not in daemon.container_off: %s", s.Name, s.Class, s.Why))
 	}
 	for _, name := range off {
@@ -127,7 +128,14 @@ func checkDaemonSteps(ctx context.Context, r *rehearsal) []string {
 			fails = append(fails, name+": a patrol the audit table does not classify; add it to daemonSteps")
 		}
 	}
-	return append(fails, r.missingStepPrograms(ctx)...)
+	fails = append(fails, r.missingStepPrograms(ctx)...)
+	if len(missingOff) > 0 {
+		// The last line names the container_off entries to add, so the overseer
+		// applies them in one edit.
+		sort.Strings(missingOff)
+		fails = append(fails, "add these names to daemon.container_off: "+strings.Join(missingOff, ", "))
+	}
+	return fails
 }
 
 // discoverSteps lists the plugins the daemon would find: a directory with a

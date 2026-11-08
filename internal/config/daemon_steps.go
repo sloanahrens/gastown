@@ -40,8 +40,10 @@ type DaemonStep struct {
 }
 
 // daemonSteps is the audit, read from the code and the daemon log on 2026-11-01.
-// A plugin or patrol the town has that this table does not name fails the
-// rehearsal until it is classified.
+// The rows the container daemon's own log shows running on 2026-11-08 are
+// stepRuns, and their reasons cite that log line (gt-0rqae4). A plugin or patrol
+// the town has that this table does not name fails the rehearsal until it is
+// classified.
 //
 // The container daemon cannot run everything the launchd daemon runs: some
 // plugins and patrols need the Mac's toolchain, its Docker Desktop engine, its
@@ -57,19 +59,19 @@ var daemonSteps = []DaemonStep{
 	{"hm-sync", DaemonStepPlugin, DaemonStepHost, nil, "hm, make and go against hm-postgres on Docker Desktop"},
 	{"tool-updater", DaemonStepPlugin, DaemonStepHost, nil, "manual plugin that runs brew"},
 	{"cloud-check", DaemonStepPlugin, DaemonStepHost, nil, "launchctl, the Docker Desktop engine and /Users/Shared/gt-cloud"},
-	{"app-promote", DaemonStepPlugin, DaemonStepSeam, nil, "needs the Forgejo viewer token, the deploy key, outbound ssh to GitHub and the Forgejo API address"},
-	{"devops-reporter", DaemonStepPlugin, DaemonStepSeam, nil, "bd and gt only, but reads /Users/Shared/gt-cloud/reports"},
-	{"release-reporter", DaemonStepPlugin, DaemonStepSeam, nil, "bd and gt only, but reads /Users/Shared/gt-cloud/releases and two files under HOME"},
-	{"town-metrics", DaemonStepPlugin, DaemonStepSeam, nil, "its lsof, ps and desktop-linux docker probes would measure the container, not the host"},
+	{"app-promote", DaemonStepPlugin, DaemonStepRuns, []string{"gt"}, "runs in the container: daemon.log 2026-11-08 12:52:16 'Handler: script plugin app-promote skipped (exit 0 after 0s); nothing to do this run', a clean skip, so the log shows no promotion; its one exec is gt"},
+	{"devops-reporter", DaemonStepPlugin, DaemonStepRuns, []string{"bd", "gt"}, "runs in the container: daemon.log 2026-11-08 12:46:00 'Handler: script plugin devops-reporter ok (exit 0 after 0s)', a clean exit with no work shown; the log does not show its reads of /Users/Shared/gt-cloud/reports, which the live compose does not mount"},
+	{"release-reporter", DaemonStepPlugin, DaemonStepRuns, []string{"bd", "gt"}, "runs in the container: daemon.log 2026-11-08 12:46:00 'Handler: script plugin release-reporter ok (exit 0 after 0s)', a clean exit with no work shown; the log does not show its reads of /Users/Shared/gt-cloud/releases, which the live compose does not mount, or of two files under HOME"},
+	{"town-metrics", DaemonStepPlugin, DaemonStepRuns, []string{"docker", "lsof", "ps"}, "runs in the container: daemon.log 2026-11-08 12:52:20 'Handler: script plugin town-metrics ok (exit 0 after 5s)'; its lsof, ps and docker probes read the container, not the host"},
 
-	{"landing_worker", DaemonStepPatrol, DaemonStepHost, nil, "gates with make gate: go, make and golangci-lint"},
+	{"landing_worker", DaemonStepPatrol, DaemonStepRuns, []string{"make", "go", "golangci-lint", "om"}, "runs in the container: daemon.log 2026-11-08 12:55:40 'landing_worker: Landing of gt-gg9hv.68 ... left for the overseer', 1239 of its lines in the last 20000; gates with make gate (make, go, golangci-lint) and reviews with om when review is on"},
 	{"rebuild_gt", DaemonStepPatrol, DaemonStepHost, nil, "make install and launchctl"},
 	{"update", DaemonStepPatrol, DaemonStepHost, nil, "make install and launchctl install the binary on the host and reload the host's daemon"},
 	{"rebuild_om", DaemonStepPatrol, DaemonStepHost, nil, "go build"},
 	{"rebuild_hm", DaemonStepPatrol, DaemonStepHost, nil, "go build"},
-	{"disk_maintenance", DaemonStepPatrol, DaemonStepHost, nil, "every target is the Mac, Colima or Docker Desktop"},
+	{"disk_maintenance", DaemonStepPatrol, DaemonStepRuns, []string{"kubectl"}, "runs in the container: daemon.log 2026-11-08 12:53:42 'disk_maintenance: cache trim gt-cache in openshell applied: route=shards n=15'; the cache trim execs kubectl (internal/daemon/cache_trim.go)"},
 	{"main_branch_test", DaemonStepPatrol, DaemonStepHost, nil, "go test"},
-	{"doctor_dog", DaemonStepPatrol, DaemonStepSeam, nil, "gt doctor does not finish in the image; Dolt and the backup directory need the same addresses and mounts"},
+	{"doctor_dog", DaemonStepPatrol, DaemonStepRuns, nil, "in process, so it runs in the container: daemon.log 2026-11-08 12:53:18 'doctor_dog: all clear (latency 14ms, connections 22/1000, orphans 0)'; its probes (internal/daemon/doctor_dog.go) exec no program"},
 	{"health_notify", DaemonStepPatrol, DaemonStepSeam, nil, "the macOS notify scripts (deferred by the operator)"},
 
 	{"dolt_server", DaemonStepPatrol, DaemonStepHost, nil, "starts and watches the Dolt server, which runs on the host; the container reaches it over host.docker.internal"},

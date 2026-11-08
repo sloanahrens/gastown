@@ -177,8 +177,8 @@ var rehearsalChecks = []rehearsalCheck{
 type rehearsal struct {
 	f      rehearseFlags
 	d      rehearseDeps
-	config []byte   // the staged config.json, which the plugins check reads
-	values []string // the string values of the staged JSON settings; what the path and address checks scan
+	config []byte         // the staged config.json, which the plugins check reads
+	values []settingValue // the string values of the staged JSON settings, with their key paths; what the path and address checks scan
 	// notes are lines a check reports without failing it (an accepted path). The
 	// run prints them under the check's row, after its failures.
 	notes []string
@@ -334,7 +334,7 @@ func (r *rehearsal) stage() error {
 		if isEnv {
 			data = blankEnvValues(data)
 		} else {
-			var values []string
+			var values []settingValue
 			if data, values, err = redactSettingsJSON(data); err != nil {
 				return fmt.Errorf("the live setting %s: %w", name, err)
 			}
@@ -394,18 +394,25 @@ func blankedJSON(v any) any {
 	return nil
 }
 
+// settingValue is one string value of the staged JSON settings and the key path
+// that holds it: dotted keys down to it, a list index as [i].
+type settingValue struct {
+	key  string
+	text string
+}
+
 // redactSettingsJSON blanks the value of every secret-named key, of whatever
 // type or content, and returns the staged
-// bytes with every string value the staged file holds. A file that is not JSON
-// is refused rather than copied.
-func redactSettingsJSON(data []byte) ([]byte, []string, error) {
+// bytes with every string value the staged file holds, each with its key path. A
+// file that is not JSON is refused rather than copied.
+func redactSettingsJSON(data []byte) ([]byte, []settingValue, error) {
 	var doc any
 	if err := json.Unmarshal(data, &doc); err != nil {
 		return nil, nil, fmt.Errorf("is not JSON, so it cannot be redacted and is not staged: %w", err)
 	}
-	var values []string
-	var walk func(v any) any
-	walk = func(v any) any {
+	var values []settingValue
+	var walk func(v any, key string) any
+	walk = func(v any, key string) any {
 		switch t := v.(type) {
 		case map[string]any:
 			for k, x := range t {
@@ -415,18 +422,22 @@ func redactSettingsJSON(data []byte) ([]byte, []string, error) {
 					t[k] = blankedJSON(x)
 					continue
 				}
-				t[k] = walk(x)
+				child := k
+				if key != "" {
+					child = key + "." + k
+				}
+				t[k] = walk(x, child)
 			}
 		case []any:
 			for i, x := range t {
-				t[i] = walk(x)
+				t[i] = walk(x, key+"["+strconv.Itoa(i)+"]")
 			}
 		case string:
-			values = append(values, t)
+			values = append(values, settingValue{key: key, text: t})
 		}
 		return v
 	}
-	doc = walk(doc)
+	doc = walk(doc, "")
 	// A decoded JSON document always encodes.
 	out, _ := json.MarshalIndent(doc, "", "  ")
 	return out, values, nil
@@ -536,28 +547,49 @@ func rehearseAcceptedPaths(home string) map[string]string {
 	}
 }
 
+// valueTexts is the string value of each staged JSON setting, without its key.
+func (r *rehearsal) valueTexts() []string {
+	texts := make([]string, 0, len(r.values))
+	for _, v := range r.values {
+		texts = append(texts, v.text)
+	}
+	return texts
+}
+
+// settingPath is one file path a setting names, with the sorted key paths that
+// name it.
+type settingPath struct {
+	path string
+	keys []string
+}
+
 // settingPaths returns the distinct file paths the staged settings name, sorted,
 // skipping any under one of binds (the live compose's bind targets, which the
 // container sees as the host does). A value is split on whitespace, commas,
 // colons and equals signs, so a PATH-like list gives each entry; a token is a
 // path when it starts with one slash, which leaves out a URL (its "//host/path"
 // remainder starts with two).
-func (r *rehearsal) settingPaths(binds []string) []string {
-	seen := map[string]bool{}
-	var paths []string
+func (r *rehearsal) settingPaths(binds []string) []settingPath {
+	keys := map[string][]string{}
 	for _, v := range r.values {
-		for _, tok := range strings.FieldsFunc(v, func(c rune) bool { return strings.ContainsRune(" \t\n,:=", c) }) {
-			if !strings.HasPrefix(tok, "/") || strings.HasPrefix(tok, "//") || len(tok) < 2 || seen[tok] {
+		for _, tok := range strings.FieldsFunc(v.text, func(c rune) bool { return strings.ContainsRune(" \t\n,:=", c) }) {
+			if !strings.HasPrefix(tok, "/") || strings.HasPrefix(tok, "//") || len(tok) < 2 {
 				continue
 			}
 			if slices.ContainsFunc(binds, func(b string) bool { return pathWithin(tok, b) }) {
 				continue
 			}
-			seen[tok] = true
-			paths = append(paths, tok)
+			if !slices.Contains(keys[tok], v.key) {
+				keys[tok] = append(keys[tok], v.key)
+			}
 		}
 	}
-	sort.Strings(paths)
+	paths := make([]settingPath, 0, len(keys))
+	for p, ks := range keys {
+		sort.Strings(ks)
+		paths = append(paths, settingPath{path: p, keys: ks})
+	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i].path < paths[j].path })
 	return paths
 }
 
@@ -615,21 +647,34 @@ func checkSettingPaths(ctx context.Context, r *rehearsal) []string {
 		return []string{"the live compose file " + composePath + " " + err.Error()}
 	}
 	var fails []string
-	for _, p := range r.settingPaths(binds) {
-		if reason, ok := accepted[p]; ok {
-			r.notes = append(r.notes, "accepted: "+p+" ("+reason+")")
+	for _, sp := range r.settingPaths(binds) {
+		if reason, ok := accepted[sp.path]; ok {
+			r.notes = append(r.notes, "accepted: "+sp.path+" ("+reason+")")
 			continue
 		}
-		err := r.inImage(ctx, "none", "test", "-e", p)
+		err := r.inImage(ctx, "none", "test", "-e", sp.path)
 		switch {
 		case err == nil:
 		case probeSaidNo(err, 1):
-			fails = append(fails, p+": named by a setting, absent from the image and not under a bind of the live compose")
+			fails = append(fails, fmt.Sprintf("%s: named by %s, absent from the image and not under a bind of the live compose; the row stays red until the image carries it, a bind of the live compose mounts it, or the setting is dropped", sp.path, settingKeyNames(sp.keys)))
 		default:
-			fails = append(fails, p+": the probe did not run: "+err.Error())
+			fails = append(fails, sp.path+": the probe did not run: "+err.Error())
 		}
 	}
 	return fails
+}
+
+// settingKeyNames names the key paths that hold a value; a value at the top of
+// its file has the empty path, which is named as such.
+func settingKeyNames(keys []string) string {
+	names := make([]string, len(keys))
+	for i, k := range keys {
+		names[i] = k
+		if k == "" {
+			names[i] = "(top level)"
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 // townDoltAddress is the Dolt host:port the staged mayor/town.json names, as the
@@ -662,7 +707,7 @@ func (r *rehearsal) townDoltAddress() (string, error) {
 
 func checkSettingAddresses(ctx context.Context, r *rehearsal) []string {
 	var fails []string
-	addrs := rehearseAddr.FindAllString(strings.Join(r.values, "\n"), -1)
+	addrs := rehearseAddr.FindAllString(strings.Join(r.valueTexts(), "\n"), -1)
 	dolt, doltErr := r.townDoltAddress()
 	if doltErr != nil {
 		fails = append(fails, doltErr.Error())

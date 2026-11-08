@@ -188,7 +188,7 @@ func TestContainerRehearsalListsEveryFailingCheck(t *testing.T) {
 	for _, want := range []string{
 		"config-validate  FAIL", "binaries         FAIL", "plugins          FAIL", "paths            FAIL", "addresses        FAIL", "heartbeat        ok",
 		"kubectl: not on the image's PATH", "openshell: not on the image's PATH",
-		"/opt/missing: named by a setting", "host.docker.internal:28443: does not accept a TCP connect",
+		"/opt/missing: named by landing.work_root", "host.docker.internal:28443: does not accept a TCP connect",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the table lacks %q:\n%s", want, got)
@@ -675,7 +675,7 @@ func TestContainerRehearsalRedactionFailsClosedForEveryValueType(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, leak := range []string{"sk-1", "TOKEN_NAME", "12345", "u-leak", "p-leak", "a-leak", "b-leak"} {
-		if strings.Contains(string(out), leak) || slices.ContainsFunc(values, func(v string) bool { return strings.Contains(v, leak) }) {
+		if strings.Contains(string(out), leak) || slices.ContainsFunc(values, func(v settingValue) bool { return strings.Contains(v.text, leak) }) {
 			t.Errorf("%q survived redaction:\n%s", leak, out)
 		}
 	}
@@ -793,6 +793,181 @@ func TestContainerRehearsalClassifiesJevPatrols(t *testing.T) {
 	}
 	if stepNamed("jevish", kindPatrol) || stepNamed("jev_landing", kindPlugin) {
 		t.Error("a name that only resembles the prefix was classified")
+	}
+}
+
+// checkRowOf returns one check's row of the rehearsal table and the indented
+// lines under it, up to the next row.
+func checkRowOf(table, name string) []string {
+	var row []string
+	in := false
+	for _, line := range strings.Split(table, "\n") {
+		if strings.HasPrefix(line, " ") {
+			if in {
+				row = append(row, line)
+			}
+			continue
+		}
+		in = strings.HasPrefix(line, name+" ")
+		if in {
+			row = append(row, line)
+		}
+	}
+	return row
+}
+
+// The seven rows the container daemon's own log shows running on 2026-11-08 are
+// stepRuns, each with the log line that shows it in its reason. The four the log
+// never mentions keep the class they have.
+func TestDaemonRehearsePluginRows(t *testing.T) {
+	t.Parallel()
+	evidence := map[string]string{
+		"app-promote":      "Handler: script plugin app-promote skipped (exit 0 after 0s)",
+		"devops-reporter":  "Handler: script plugin devops-reporter ok (exit 0 after 0s)",
+		"release-reporter": "Handler: script plugin release-reporter ok (exit 0 after 0s)",
+		"town-metrics":     "Handler: script plugin town-metrics ok (exit 0 after 5s)",
+		"landing_worker":   "Landing of gt-gg9hv.68",
+		"disk_maintenance": "cache trim gt-cache in openshell applied",
+		"doctor_dog":       "all clear (latency 14ms, connections 22/1000, orphans 0)",
+	}
+	kept := map[string]stepClass{
+		"dolt_server":      stepHost,
+		"landing_infra":    stepHost,
+		"resource_sampler": stepSeam,
+		"health_notify":    stepSeam,
+	}
+	rows := map[string]daemonStep{}
+	for _, s := range daemonSteps {
+		rows[s.Name] = s
+	}
+	for name, line := range evidence {
+		s, ok := rows[name]
+		if !ok {
+			t.Errorf("%s has no row in the audit table", name)
+			continue
+		}
+		if s.Class != stepRuns {
+			t.Errorf("%s is %s, want %s: the log shows it running in the container", name, s.Class, stepRuns)
+		}
+		if !strings.Contains(s.Why, "2026-11-08") || !strings.Contains(s.Why, line) {
+			t.Errorf("%s reason %q does not cite the 2026-11-08 log line %q", name, s.Why, line)
+		}
+	}
+	for name, class := range kept {
+		s, ok := rows[name]
+		if !ok {
+			t.Errorf("%s has no row in the audit table", name)
+			continue
+		}
+		if s.Class != class {
+			t.Errorf("%s is %s, want %s: the log never mentions it", name, s.Class, class)
+		}
+	}
+}
+
+// With the four names the log never mentions missing from daemon.container_off,
+// the plugins row ends with one line naming exactly those four. A settings file
+// that holds them passes the row.
+func TestDaemonRehearsePluginsFailureListsTheEntriesToAdd(t *testing.T) {
+	t.Parallel()
+	four := []string{"dolt_server", "health_notify", "landing_infra", "resource_sampler"}
+	var keep []string
+	for _, n := range containerOffNames() {
+		if !slices.Contains(four, n) {
+			keep = append(keep, n)
+		}
+	}
+	h := newRehearseHost()
+	h.files[rehearseLive+"/settings/config.json"] = settingsWithOff(keep, "")
+	var out bytes.Buffer
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	row := checkRowOf(out.String(), "plugins")
+	if err == nil || len(row) == 0 || !strings.HasPrefix(row[0], "plugins          FAIL") {
+		t.Fatalf("err=%v\n%s", err, out.String())
+	}
+	const summary = "    add these names to daemon.container_off: dolt_server, health_notify, landing_infra, resource_sampler"
+	if last := row[len(row)-1]; last != summary {
+		t.Errorf("the plugins row ends with %q, want %q:\n%s", last, summary, out.String())
+	}
+	if n := strings.Count(out.String(), "add these names"); n != 1 {
+		t.Errorf("the summary line appears %d times, want once:\n%s", n, out.String())
+	}
+	for _, name := range four {
+		if !strings.Contains(out.String(), name+" (") {
+			t.Errorf("%s is not reported as missing:\n%s", name, out.String())
+		}
+	}
+
+	pass := newRehearseHost()
+	var passOut bytes.Buffer
+	if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), pass.deps(&passOut)); err != nil {
+		t.Fatalf("a settings file holding every name failed: %v\n%s", err, passOut.String())
+	}
+	if row := checkRowOf(passOut.String(), "plugins"); len(row) == 0 || !strings.HasPrefix(row[0], "plugins          ok") {
+		t.Errorf("the plugins row does not pass with the names listed:\n%s", passOut.String())
+	}
+}
+
+// A path a setting names that the image lacks and no bind of the live compose
+// covers fails the paths row with the key that names it and says what clears
+// the row. A compose that binds the path passes the row, and the path is not
+// probed.
+func TestDaemonRehearsePathsNamesTheSettingKey(t *testing.T) {
+	t.Parallel()
+	const claude = "/Users/sloan/.claude"
+	settings := []byte(`{"daemon":{"container_off":` + offJSON() + `,"patrols":{"wisp_reaper":{"extra_beads_roots":["` + claude + `"]}}}}`)
+
+	missing := newRehearseHost()
+	missing.files[rehearseLive+"/settings/config.json"] = settings
+	missing.failing = []string{"-e " + claude}
+	var out bytes.Buffer
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), missing.deps(&out))
+	row := checkRowOf(out.String(), "paths")
+	if err == nil || len(row) == 0 || !strings.HasPrefix(row[0], "paths            FAIL") {
+		t.Fatalf("err=%v\n%s", err, out.String())
+	}
+	for _, want := range []string{
+		claude + ": named by daemon.patrols.wisp_reaper.extra_beads_roots[0], absent from the image",
+		"the row stays red until the image carries it, a bind of the live compose mounts it, or the setting is dropped",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the paths row lacks %q:\n%s", want, out.String())
+		}
+	}
+
+	bound := newRehearseHost()
+	bound.files[rehearseLive+"/settings/config.json"] = settings
+	bound.files[rehearseLive+"/daemon/container/compose.yml"] = []byte("services:\n  daemon:\n    volumes:\n      - type: bind\n        source: " + claude + "\n        target: " + claude + "\n")
+	bound.failing = []string{"-e " + claude}
+	var boundOut bytes.Buffer
+	if err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), bound.deps(&boundOut)); err != nil {
+		t.Fatalf("a compose that binds the path failed the rehearsal: %v\n%s", err, boundOut.String())
+	}
+	if row := checkRowOf(boundOut.String(), "paths"); len(row) == 0 || !strings.HasPrefix(row[0], "paths            ok") {
+		t.Errorf("the paths row does not pass under the bind:\n%s", boundOut.String())
+	}
+}
+
+// A plugin or a patrol the audit table does not name fails the rehearsal until it
+// is classified, whatever the rest of the settings hold.
+func TestDaemonRehearseUnclassifiedStepStillFails(t *testing.T) {
+	t.Parallel()
+	h := newRehearseHost()
+	h.plugins = []string{"mystery-plugin"}
+	h.files[rehearseLive+"/settings/config.json"] = settingsWithOff(containerOffNames(), `"brand_new_patrol":{"enabled":true}`)
+	var out bytes.Buffer
+	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+	row := checkRowOf(out.String(), "plugins")
+	if err == nil || len(row) == 0 || !strings.HasPrefix(row[0], "plugins          FAIL") {
+		t.Fatalf("err=%v\n%s", err, out.String())
+	}
+	for _, want := range []string{
+		"mystery-plugin: a plugin the audit table does not classify",
+		"brand_new_patrol: a patrol the audit table does not classify",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the plugins row lacks %q:\n%s", want, out.String())
+		}
 	}
 }
 
@@ -1083,7 +1258,7 @@ func TestContainerRehearsalListsAcceptedPaths(t *testing.T) {
 		h.failing = []string{"test -e /Users/user/gt-landing.noindex"}
 		var out bytes.Buffer
 		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
-		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), "/Users/user/gt-landing.noindex: named by a setting") {
+		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), "/Users/user/gt-landing.noindex: named by landing,") {
 			t.Fatalf("err=%v\n%s", err, out.String())
 		}
 	})
@@ -1131,7 +1306,7 @@ func TestDaemonRehearseAuditPathsFollowHome(t *testing.T) {
 		h.failing = []string{"test -e " + other}
 		var out bytes.Buffer
 		err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
-		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), other+": named by a setting") {
+		if err == nil || !strings.Contains(out.String(), "paths            FAIL") || !strings.Contains(out.String(), other+": named by paths.imessage,") {
 			t.Fatalf("err=%v\n%s", err, out.String())
 		}
 	})
