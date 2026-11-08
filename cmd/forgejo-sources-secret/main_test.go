@@ -39,6 +39,11 @@ func testClock() time.Time { return time.Date(2026, 11, 6, 20, 35, 0, 0, time.UT
 // MANGO_URL repository of deploy/ci/images.workflow.yml.
 const mangoRepo = "mango"
 
+// testOwner is the neutral Forgejo owner a parser fixture names, the same neutral owner the
+// other packages' fixtures use. The command's own tests take the owner from production
+// secretOwner instead: the run builds every path it prints and requests from that constant.
+const testOwner = "owner"
+
 // sourceRepoFiles are the files that name the repositories the image build fetches, relative
 // to this package: the pins the daemon image is built from, and the rigs the polecat seed
 // fetches.
@@ -46,10 +51,9 @@ var sourceRepoFiles = []string{"../../deploy/daemon/image-pins", "../../deploy/p
 
 // sourceRepos returns the repository names one source file names: each non-comment line
 // carries a URL as its second field, and the name is the last path element without .git. A
-// line with no URL, a URL that does not parse, or a URL that is not under the secret owner
-// or has no .git suffix is an error naming the file, since the file no longer says what the
-// check reads.
-func sourceRepos(file, data string) ([]string, error) {
+// line with no URL, a URL that does not parse, or a URL that is not under owner or has no
+// .git suffix is an error naming the file, since the file no longer says what the check reads.
+func sourceRepos(file, data, owner string) ([]string, error) {
 	var names []string
 	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
@@ -65,8 +69,8 @@ func sourceRepos(file, data string) ([]string, error) {
 			return nil, fmt.Errorf("%s: URL %q: %v", file, fields[1], err)
 		}
 		parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
-		if len(parts) != 2 || parts[0] != secretOwner || !strings.HasSuffix(parts[1], ".git") {
-			return nil, fmt.Errorf("%s: URL %q is not %s/<name>.git", file, fields[1], secretOwner)
+		if len(parts) != 2 || parts[0] != owner || !strings.HasSuffix(parts[1], ".git") {
+			return nil, fmt.Errorf("%s: URL %q is not %s/<name>.git", file, fields[1], owner)
 		}
 		names = append(names, strings.TrimSuffix(parts[1], ".git"))
 	}
@@ -82,7 +86,7 @@ func wantRepos(read func(string) (string, error)) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", file, err)
 		}
-		fileNames, err := sourceRepos(file, data)
+		fileNames, err := sourceRepos(file, data, secretOwner)
 		if err != nil {
 			return nil, err
 		}
@@ -134,8 +138,8 @@ func TestSourcesSecretChecksExactlyTheSourceRepos(t *testing.T) {
 // use: comments and blank lines are skipped, and each URL's last element without .git is a name.
 func TestSourceReposReadsTheNameOfEachLine(t *testing.T) {
 	t.Parallel()
-	data := "# a comment\n\nbd http://forgejo:3000/" + secretOwner + "/beads.git abc\nom http://forgejo:3000/" + secretOwner + "/organic-mechanic.git def\n"
-	got, err := sourceRepos("pins", data)
+	data := "# a comment\n\nbd http://forgejo:3000/" + testOwner + "/beads.git abc\nom http://forgejo:3000/" + testOwner + "/organic-mechanic.git def\n"
+	got, err := sourceRepos("pins", data, testOwner)
 	if err != nil {
 		t.Fatalf("sourceRepos: %v", err)
 	}
@@ -156,12 +160,12 @@ func TestSourceReposRefusesABadLine(t *testing.T) {
 		{"a line with no URL", "beads\n"},
 		{"a URL that does not parse", "bd http://[bad abc\n"},
 		{"a URL not under the owner", "bd http://forgejo:3000/other/beads.git abc\n"},
-		{"a URL without the .git suffix", "bd http://forgejo:3000/" + secretOwner + "/beads abc\n"},
-		{"a URL with an extra path element", "bd http://forgejo:3000/" + secretOwner + "/x/beads.git abc\n"},
+		{"a URL without the .git suffix", "bd http://forgejo:3000/" + testOwner + "/beads abc\n"},
+		{"a URL with an extra path element", "bd http://forgejo:3000/" + testOwner + "/x/beads.git abc\n"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			names, err := sourceRepos(file, tc.data)
+			names, err := sourceRepos(file, tc.data, testOwner)
 			if err == nil {
 				t.Fatalf("sourceRepos(%q) = %v, want an error", tc.data, names)
 			}
