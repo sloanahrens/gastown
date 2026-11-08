@@ -158,10 +158,10 @@ type Values struct {
 	// pair; one empty is refused, since the name is composed from both.
 	ForgejoService   string
 	ForgejoNamespace string
-	// Secrets are the entries of deploy/daemon/secrets.yaml's files list; an
-	// unclaimed entry is mounted nowhere, so it needs no Secret. One Secret is
-	// rendered per entry, holding the entry's name as an empty placeholder: the
-	// renderer never receives a secret's bytes.
+	// Secrets are the entries of deploy/daemon/secrets.yaml's files list. One
+	// Secret is rendered per entry, whether or not the Deployment mounts it: an
+	// unclaimed entry still gets a Secret, holding the entry's name as an empty
+	// placeholder key. The renderer never receives a secret's bytes.
 	Secrets []templates.SecretFile
 }
 

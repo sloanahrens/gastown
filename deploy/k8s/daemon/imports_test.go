@@ -77,12 +77,15 @@ var manifestPackages = []string{
 // standard library, the YAML encoder the renderer writes with (the sibling
 // packages' rule, recorded on gt-gg9hv.69), or a manifest package.
 func allowedImport(path string) bool {
-	if slices.Contains(manifestPackages, path) {
+	if slices.Contains(manifestPackages, path) || path == "gopkg.in/yaml.v3" {
 		return true
 	}
-	if path == "gopkg.in/yaml.v3" {
-		return true
-	}
+	return stdlibImport(path)
+}
+
+// stdlibImport reports whether path is in the standard library. A standard
+// package path has no dot in its first element; a module path has one.
+func stdlibImport(path string) bool {
 	first, _, _ := strings.Cut(path, "/")
 	return !strings.Contains(first, ".")
 }
@@ -125,10 +128,153 @@ func scanImports(t *testing.T, dir string) []string {
 	return findings
 }
 
+// packagePath is this package's import path: the module path plus its
+// directory, and the root record of the captured dependency graph.
+const packagePath = "github.com/steveyegge/gastown/deploy/k8s/daemon"
+
+// dependency is one record of the graph `go list -deps` reports: a package's
+// import path and the paths its non-test files import.
+type dependency struct {
+	Path    string
+	Imports []string
+}
+
+// capturedGraph reads testdata/imports.golist.txt, the dependency graph
+// `go list -deps -f '{{.ImportPath}}|{{join .Imports " "}}' .` reports for
+// this package. The unit tier may not run the go tool (docs/testing.md,
+// no-build), so the graph is a capture; TestImportsAreRestricted refuses the
+// capture as stale when its record of this package no longer matches the
+// package's files, rather than walking an old graph. Regenerate it from this
+// directory with:
+//
+//	go list -deps -f '{{.ImportPath}}|{{join .Imports " "}}' . > testdata/imports.golist.txt
+func capturedGraph(t *testing.T, dir string) []dependency {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(dir, "testdata", "imports.golist.txt"))
+	if err != nil {
+		t.Fatalf("reading the captured dependency graph: %v", err)
+	}
+	var graph []dependency
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		path, imports, ok := strings.Cut(line, "|")
+		if !ok {
+			t.Fatalf("the captured graph's line %d %q has no \"|\" between the package and its imports", i+1, line)
+		}
+		graph = append(graph, dependency{Path: path, Imports: strings.Fields(imports)})
+	}
+	if len(graph) == 0 {
+		t.Fatalf("the captured dependency graph in testdata/imports.golist.txt holds no records, so the walk would pass for the wrong reason")
+	}
+	return graph
+}
+
+// graphStaleness returns why graph cannot stand for the package whose non-test
+// files import fileImports, or "" when it can. It judges the capture's record of
+// this package alone, which is where a change to the renderer appears. A
+// dependency's record (the YAML module's today) moves only with go.mod, so a
+// go.mod change needs the capture regenerated even when this check passes.
+func graphStaleness(root string, graph []dependency, fileImports []string) string {
+	want := slices.Clone(fileImports)
+	sort.Strings(want)
+	for _, dep := range graph {
+		if dep.Path != root {
+			continue
+		}
+		got := slices.Clone(dep.Imports)
+		sort.Strings(got)
+		if slices.Equal(got, want) {
+			return ""
+		}
+		return fmt.Sprintf("testdata/imports.golist.txt is stale: it records %s importing %q, the package's files import %q; regenerate it with `go list -deps -f '{{.ImportPath}}|{{join .Imports \" \"}}' . > testdata/imports.golist.txt`", root, got, want)
+	}
+	return fmt.Sprintf("testdata/imports.golist.txt is stale: it holds no record of %s; regenerate it with `go list -deps -f '{{.ImportPath}}|{{join .Imports \" \"}}' . > testdata/imports.golist.txt`", root)
+}
+
+// packageImports returns the sorted, unique imports of dir's non-test Go files,
+// the imports the captured graph's record of the package must hold.
+func packageImports(t *testing.T, dir string) []string {
+	t.Helper()
+	var imports []string
+	for _, file := range goFiles(t, dir) {
+		imports = append(imports, importsOf(t, filepath.Join(dir, file))...)
+	}
+	sort.Strings(imports)
+	return slices.Compact(imports)
+}
+
+// transitiveFindings walks graph from root and reports every package the
+// renderer reaches, directly or through its dependencies, that is neither the
+// standard library, the YAML encoder nor a manifest package, and every
+// forbidden package it reaches outside the manifest packages.
+//
+// The walk stops at a manifest package: internal/templates and internal/townstate
+// are trusted manifest sources, and their own reach is not the renderer's (each
+// imports os/exec, net or syscall, so a walk through them could never pass). It
+// also stops at a standard-library package, which is trusted as a leaf: fmt
+// alone reaches os, syscall and unsafe, so walking inside the standard library
+// would report every package. Anything else reached outside those is a finding,
+// and so is a non-standard import the graph does not report: an import whose
+// reach is unknown could reach a process or a cluster, so it is refused rather
+// than skipped.
+func transitiveFindings(root string, graph []dependency) []string {
+	byPath := make(map[string]dependency, len(graph))
+	for _, dep := range graph {
+		byPath[dep.Path] = dep
+	}
+	start, ok := byPath[root]
+	if !ok {
+		return []string{fmt.Sprintf("go list -deps reported no package %q, so the renderer's reach is unknown", root)}
+	}
+	var findings []string
+	seen := map[string]bool{root: true}
+	queue := []dependency{start}
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		for _, imp := range node.Imports {
+			if slices.Contains(manifestPackages, imp) {
+				continue
+			}
+			if !allowedImport(imp) {
+				findings = append(findings, fmt.Sprintf("%s imports %q, which is neither the standard library, the YAML encoder nor a manifest package", node.Path, imp))
+				continue
+			}
+			if forbiddenImport(imp) {
+				findings = append(findings, fmt.Sprintf("%s imports %q, which gives the renderer a process, a socket or a cluster client", node.Path, imp))
+				continue
+			}
+			if stdlibImport(imp) || seen[imp] {
+				continue
+			}
+			dep, ok := byPath[imp]
+			if !ok {
+				findings = append(findings, fmt.Sprintf("%s imports %q, which go list -deps did not report, so its reach is unknown", node.Path, imp))
+				continue
+			}
+			seen[imp] = true
+			queue = append(queue, dep)
+		}
+	}
+	sort.Strings(findings)
+	return findings
+}
+
 func TestImportsAreRestricted(t *testing.T) {
 	t.Parallel()
-	for _, finding := range scanImports(t, packageDir(t)) {
+	dir := packageDir(t)
+	for _, finding := range scanImports(t, dir) {
 		t.Errorf("%s: the renderer imports no cluster client, command or third-party package beyond the YAML encoder", finding)
+	}
+	graph := capturedGraph(t, dir)
+	if stale := graphStaleness(packagePath, graph, packageImports(t, dir)); stale != "" {
+		t.Fatal(stale)
+	}
+	for _, finding := range transitiveFindings(packagePath, graph) {
+		t.Errorf("%s: the renderer reaches no cluster client, command or third-party package beyond the YAML encoder", finding)
 	}
 }
 
@@ -180,6 +326,123 @@ import _ "os/exec"
 	}
 	if got := scanImports(t, dir); !slices.Equal(got, want) {
 		t.Errorf("the scan reported %q, want %q", got, want)
+	}
+}
+
+// TestTransitiveFindingsReportsReach drives every branch of the walk against a
+// graph this test owns: each refusal is reported, and the manifest packages'
+// own reach, the standard library's and a clean graph report nothing.
+func TestTransitiveFindingsReportsReach(t *testing.T) {
+	t.Parallel()
+	const root = "example.com/renderer"
+	tests := []struct {
+		name  string
+		graph []dependency
+		want  []string
+	}{
+		{
+			name: "a clean graph",
+			graph: []dependency{
+				{Path: root, Imports: []string{"fmt", "gopkg.in/yaml.v3"}},
+				{Path: "gopkg.in/yaml.v3", Imports: []string{"fmt"}},
+			},
+		},
+		{
+			name: "a package outside the standard library, the YAML encoder and the manifests",
+			graph: []dependency{
+				{Path: root, Imports: []string{"gopkg.in/yaml.v3"}},
+				{Path: "gopkg.in/yaml.v3", Imports: []string{"example.com/apply"}},
+			},
+			want: []string{`gopkg.in/yaml.v3 imports "example.com/apply", which is neither the standard library, the YAML encoder nor a manifest package`},
+		},
+		{
+			name: "a forbidden package reached around the manifest packages",
+			graph: []dependency{
+				{Path: root, Imports: []string{"gopkg.in/yaml.v3"}},
+				{Path: "gopkg.in/yaml.v3", Imports: []string{"net", "os/exec", "syscall"}},
+			},
+			want: []string{
+				`gopkg.in/yaml.v3 imports "net", which gives the renderer a process, a socket or a cluster client`,
+				`gopkg.in/yaml.v3 imports "os/exec", which gives the renderer a process, a socket or a cluster client`,
+				`gopkg.in/yaml.v3 imports "syscall", which gives the renderer a process, a socket or a cluster client`,
+			},
+		},
+		{
+			name: "a forbidden package reached only through a manifest package",
+			graph: []dependency{
+				{Path: root, Imports: []string{"github.com/steveyegge/gastown/internal/templates", "github.com/steveyegge/gastown/internal/townstate"}},
+				{Path: "github.com/steveyegge/gastown/internal/templates", Imports: []string{"net", "os/exec", "syscall"}},
+				{Path: "github.com/steveyegge/gastown/internal/townstate", Imports: []string{"net", "os/exec"}},
+			},
+		},
+		{
+			name: "a forbidden package inside the standard library",
+			graph: []dependency{
+				{Path: root, Imports: []string{"fmt"}},
+				{Path: "fmt", Imports: []string{"os", "reflect"}},
+				{Path: "os", Imports: []string{"syscall"}},
+				{Path: "reflect", Imports: []string{"unsafe"}},
+			},
+		},
+		{
+			name: "a dependency the graph does not report",
+			graph: []dependency{
+				{Path: root, Imports: []string{"gopkg.in/yaml.v3"}},
+			},
+			want: []string{`example.com/renderer imports "gopkg.in/yaml.v3", which go list -deps did not report, so its reach is unknown`},
+		},
+		{
+			name: "a graph without the root",
+			graph: []dependency{
+				{Path: "gopkg.in/yaml.v3", Imports: []string{"fmt"}},
+			},
+			want: []string{`go list -deps reported no package "example.com/renderer", so the renderer's reach is unknown`},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := transitiveFindings(root, tc.graph)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("the walk reported %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCapturedGraphRefusesStaleness drives the guard on the capture: a graph
+// whose record of this package matches the files passes, and one that differs or
+// holds no record is refused with the command that regenerates it.
+func TestCapturedGraphRefusesStaleness(t *testing.T) {
+	t.Parallel()
+	const root = "example.com/renderer"
+	graph := []dependency{{Path: root, Imports: []string{"fmt", "io"}}}
+	tests := []struct {
+		name        string
+		graph       []dependency
+		fileImports []string
+		want        string
+	}{
+		{"a graph that matches the files", graph, []string{"io", "fmt"}, ""},
+		{"an import the files do not have", graph, []string{"fmt"}, `importing ["fmt" "io"]`},
+		{"an import the graph lacks", graph, []string{"fmt", "io", "os"}, `files import ["fmt" "io" "os"]`},
+		{"no record of the package", []dependency{{Path: "gopkg.in/yaml.v3"}}, []string{"fmt"}, "holds no record of example.com/renderer"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := graphStaleness(root, tc.graph, tc.fileImports)
+			if tc.want == "" {
+				if got != "" {
+					t.Errorf("graphStaleness refused a graph that matches the files: %s", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("graphStaleness reported %q, want a finding naming %q", got, tc.want)
+			}
+			if !strings.Contains(got, "regenerate it with") {
+				t.Errorf("graphStaleness reported %q, want the regeneration command", got)
+			}
+		})
 	}
 }
 
