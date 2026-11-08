@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,6 +54,67 @@ func (f *doltFakeServer) read(context.Context) (string, error) {
 		return "", f.err
 	}
 	return f.version, nil
+}
+
+// doltFakeConnector serves the image check's version query. It answers version,
+// or fails with queryErr, and records every statement.
+type doltFakeConnector struct {
+	version  string
+	queryErr error
+	queries  []string
+}
+
+func (c *doltFakeConnector) Connect(context.Context) (driver.Conn, error) {
+	return &doltFakeConn{c}, nil
+}
+func (c *doltFakeConnector) Driver() driver.Driver { return doltFakeDriver{c} }
+
+// doltFakeDriver opens the connector's connection for database/sql.
+type doltFakeDriver struct{ c *doltFakeConnector }
+
+func (d doltFakeDriver) Open(string) (driver.Conn, error) { return &doltFakeConn{d.c}, nil }
+
+// doltFakeConn answers the connector's one query.
+type doltFakeConn struct{ c *doltFakeConnector }
+
+func (c *doltFakeConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("dolt fake: prepare is not used")
+}
+
+func (c *doltFakeConn) Close() error { return nil }
+
+func (c *doltFakeConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("dolt fake: transactions are not used")
+}
+
+func (c *doltFakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	c.c.queries = append(c.c.queries, query)
+	if c.c.queryErr != nil {
+		return nil, c.c.queryErr
+	}
+	return &doltFakeRows{value: c.c.version}, nil
+}
+
+// doltFakeRows is one row of one string value.
+type doltFakeRows struct {
+	value string
+	read  bool
+}
+
+func (r *doltFakeRows) Columns() []string { return []string{"dolt_version()"} }
+func (r *doltFakeRows) Close() error      { return nil }
+func (r *doltFakeRows) Next(dest []driver.Value) error {
+	if r.read {
+		return io.EOF
+	}
+	r.read = true
+	dest[0] = r.value
+	return nil
+}
+
+// doltFakeOpenDB answers database/sql's pool with the fake connection.
+func doltFakeOpenDB(conn *doltFakeConnector) doltImageOpenDB {
+	return func(string, string) (*sql.DB, error) { return sql.OpenDB(conn), nil }
 }
 
 // doltFakeRegistry answers the tag listing in process. answer gives the status
@@ -588,6 +651,53 @@ func TestDoltImageCheckReadsPrefixedAndSuffixedTags(t *testing.T) {
 			}
 			if !strings.Contains(got[0].Summary, "2.3.2") || !strings.Contains(got[0].Summary, "2.7.2") {
 				t.Errorf("summary %q does not name 2.3.2 and 2.7.2", got[0].Summary)
+			}
+		})
+	}
+}
+
+func TestDoltImageCheckServerVersionRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		openErr  error
+		queryErr error
+		version  string
+		want     string
+	}{
+		{name: "answers dolt_version", version: "2.7.2", want: "2.7.2"},
+		{name: "the query fails", queryErr: errors.New("unknown function dolt_version")},
+		{name: "the pool does not open", openErr: errors.New("invalid DSN")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			conn := &doltFakeConnector{version: tc.version, queryErr: tc.queryErr}
+			open := doltFakeOpenDB(conn)
+			if tc.openErr != nil {
+				open = func(string, string) (*sql.DB, error) { return nil, tc.openErr }
+			}
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}, doltImageDB: open}
+
+			got, err := d.doltServerVersion(context.Background())
+
+			if tc.openErr != nil || tc.queryErr != nil {
+				if err == nil {
+					t.Fatalf("doltServerVersion() = %q, want the read to fail", got)
+				}
+				if got != "" {
+					t.Errorf("doltServerVersion() = %q with an error, want no version", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("doltServerVersion() = %v, want %q", err, tc.want)
+			}
+			if got != tc.want {
+				t.Errorf("doltServerVersion() = %q, want %q", got, tc.want)
+			}
+			if len(conn.queries) != 1 || conn.queries[0] != "SELECT dolt_version()" {
+				t.Errorf("queries = %v, want exactly [SELECT dolt_version()]", conn.queries)
 			}
 		})
 	}

@@ -315,15 +315,19 @@ func (c *doltImageCheck) serverRunningVersion(ctx context.Context) (doltVersion,
 // wedged server cannot hold the hourly check for its whole budget.
 const doltImageServerTimeout = 5 * time.Second
 
+// doltImageOpenDB opens a pool for the image check's server read. Nil is
+// sql.Open; a test replaces it so the read's failure paths need no server.
+type doltImageOpenDB func(driverName, dsn string) (*sql.DB, error)
+
 // doltServerVersion reads the version the town's Dolt server reports. It
 // connects the way the daemon's other Dolt connections do, selecting no
 // database: dolt_version() is a server function.
 func (d *Daemon) doltServerVersion(ctx context.Context) (string, error) {
-	dsn := fmt.Sprintf("%s@tcp(%s)/?timeout=%s&readTimeout=%s&writeTimeout=%s",
-		d.doltUserInfo(),
-		net.JoinHostPort(d.doltServerHost(), strconv.Itoa(d.doltServerPort())),
-		doltImageServerTimeout, doltImageServerTimeout, doltImageServerTimeout)
-	db, err := sql.Open("mysql", dsn)
+	open := d.doltImageDB
+	if open == nil {
+		open = sql.Open
+	}
+	db, err := open("mysql", d.doltImageServerDSN())
 	if err != nil {
 		return "", err
 	}
@@ -334,6 +338,16 @@ func (d *Daemon) doltServerVersion(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return version, nil
+}
+
+// doltImageServerDSN is the no-database DSN the image check asks for
+// dolt_version(), built from the endpoint and credentials the daemon's other
+// Dolt connections use.
+func (d *Daemon) doltImageServerDSN() string {
+	return fmt.Sprintf("%s@tcp(%s)/?timeout=%s&readTimeout=%s&writeTimeout=%s",
+		d.doltUserInfo(),
+		net.JoinHostPort(d.doltServerHost(), strconv.Itoa(d.doltServerPort())),
+		doltImageServerTimeout, doltImageServerTimeout, doltImageServerTimeout)
 }
 
 // newestRelease reads every page of the registry's tag listing and returns the

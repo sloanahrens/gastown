@@ -352,6 +352,9 @@ type Daemon struct {
 	// an image more than one patch release behind the newest release, which the
 	// attention queue raises (gt-goda5m).
 	doltImage doltImageCheck
+	// doltImageDB opens the pool the image check's server read uses, replacing
+	// sql.Open in a test so the read's failure paths need no server (gt-w9wdav).
+	doltImageDB doltImageOpenDB
 	// ciCacheTrimRunning is the single-flight guard of the CI build-cache trim's
 	// pass, which runs on its own interval and off the quiet guard
 	// (gt-gg9hv.57).
