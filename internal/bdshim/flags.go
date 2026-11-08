@@ -112,7 +112,7 @@ var persistentValueFlags = map[string]bool{
 // gate create set --parent, --waits-for or --blocks on the bead they write, so
 // routing by that value would send the create to the tracker that holds the
 // related bead (gt-b00kz). A command a flag picks the store for (migrate
-// issues, the admin and audit verbs) has no row either, since a bead id in its
+// issues) has no row either, since a bead id in its
 // flags does not name the store it works on.
 var beadValueFlags = map[string]map[string]bool{
 	"blocked":   {"--parent": true},

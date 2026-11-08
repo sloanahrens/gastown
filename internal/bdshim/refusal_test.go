@@ -21,6 +21,11 @@ import (
 // records, so the next command bd gains fails the suite until this table, the
 // handler registry or passThroughVerbs classifies it. The hand copy is what the
 // coverage check keeps honest, not a claim that no copy exists.
+//
+// The verbs be-xu2.6 deleted from bd are no longer tabled: the doctor flags
+// check compares the installed bd's flags with testdata/bd-flags.txt, so a bd
+// that still had them fails that check, and a row would pin a command that no
+// longer exists.
 var refusedVerbs = []string{
 	"backup",
 	"branch",
