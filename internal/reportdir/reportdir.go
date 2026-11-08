@@ -52,9 +52,12 @@ var (
 	ErrBadPage = errors.New("not a page a bird writes")
 )
 
-// nameShape is the whole name a reporter may carry: lowercase letters, 2 to
-// 24, which is every name the pool hands out.
-const nameShape = `^[a-z]{2,24}$`
+// nameShape is the whole name a reporter may carry: a lowercase letter, then
+// lowercase letters, digits and hyphens, 32 at most. It is the shape the
+// readers accepted before this package existed, so no existing reporter loses
+// its report; it holds no slash, dot or uppercase letter, so a name cannot step
+// out of the runtime directory.
+const nameShape = `^[a-z][a-z0-9-]{0,31}$`
 
 // topicPageShape is the name of a topic page a bird writes beside its daily
 // one: a slug and .html, no dots in the slug, so daily.json, a dot segment and
@@ -140,18 +143,17 @@ func legacyPath(runtimeDir, reporter string) string {
 }
 
 // publishedHoldsReport reports whether dir is a real directory holding a
-// regular daily.json or daily.html. A link at the directory or at either file
-// is not a report this reader will follow.
+// regular daily.json, the sidecar every reader loads. A directory with only a
+// daily.html (a publish interrupted between its two renames) is not a report:
+// the readers would find no sidecar there and report Missing while a legacy
+// daily.json exists, so it falls through to the legacy location. A link at the
+// directory or at the file is not a report this reader will follow.
 func publishedHoldsReport(dir string) bool {
 	if !isRealDir(filepath.Dir(dir)) || !isRealDir(dir) {
 		return false
 	}
-	for _, name := range []string{SidecarName, PageName} {
-		if fi, err := os.Lstat(filepath.Join(dir, name)); err == nil && fi.Mode().IsRegular() {
-			return true
-		}
-	}
-	return false
+	fi, err := os.Lstat(filepath.Join(dir, SidecarName))
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // isRealDir reports whether path is a directory in its own right. The Lstat is

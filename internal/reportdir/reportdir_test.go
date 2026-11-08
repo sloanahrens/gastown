@@ -45,14 +45,17 @@ func TestReadsBothLocations(t *testing.T) {
 		}
 	})
 
-	t.Run("a published page with no sidecar still wins", func(t *testing.T) {
+	t.Run("a published page with no sidecar falls through to the legacy report", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
 		writeReportDir(t, filepath.Join(root, PublishedDirName, reporter), PageName)
 		writeReportDir(t, filepath.Join(root, reporter, ReportsSubdir), SidecarName)
 
-		if got, err := Dir(root, reporter); err != nil || got != filepath.Join(root, PublishedDirName, reporter) {
-			t.Errorf("Dir = %q (%v), want the published directory", got, err)
+		// A publish interrupted between its two renames leaves daily.html alone
+		// in the published directory; the readers load the sidecar, so that
+		// directory must not hide the legacy daily.json that exists.
+		if got, err := Dir(root, reporter); err != nil || got != filepath.Join(root, reporter, ReportsSubdir) {
+			t.Errorf("Dir = %q (%v), want the legacy directory", got, err)
 		}
 	})
 
@@ -112,7 +115,11 @@ func TestReadsBothLocations(t *testing.T) {
 func TestReportDirRefusesBadNames(t *testing.T) {
 	t.Parallel()
 	runtimeDir := t.TempDir()
-	bad := []string{"", "d", "../x", "a/b", "Dunlin", "dun lin", "abcdefghijklmnopqrstuvwxy"}
+	bad := []string{
+		"", "../x", "a/b", "a\\b", "Dunlin", "dun lin", "a.b", "..",
+		"-dunlin", "9dunlin", "dunlin_x",
+		strings.Repeat("a", 33), // one past the 32-character limit
+	}
 	for _, name := range bad {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -127,6 +134,29 @@ func TestReportDirRefusesBadNames(t *testing.T) {
 			}
 			if _, err := PagePath(runtimeDir, name, PageName); !errors.Is(err, ErrBadName) {
 				t.Errorf("PagePath(%q) = %v, want ErrBadName", name, err)
+			}
+		})
+	}
+}
+
+// TestReportDirAcceptsEveryNameTheReadersAccepted pins the contract this
+// package inherited: a lowercase letter, then lowercase letters, digits and
+// hyphens, 32 at most. A reporter named with a hyphen or a digit, or with one
+// letter, keeps its report; narrowing the shape would drop it silently.
+func TestReportDirAcceptsEveryNameTheReadersAccepted(t *testing.T) {
+	t.Parallel()
+	runtimeDir := t.TempDir()
+	for _, name := range []string{"d", "dunlin", "fresh-bird", "bird2", "a-1-b", strings.Repeat("a", 32)} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Dir(runtimeDir, name); err != nil {
+				t.Errorf("Dir(%q) = %v, want the name accepted", name, err)
+			}
+			if _, err := Published(runtimeDir, name); err != nil {
+				t.Errorf("Published(%q) = %v, want the name accepted", name, err)
+			}
+			if _, err := PagePath(runtimeDir, name, PageName); err != nil {
+				t.Errorf("PagePath(%q) = %v, want the name accepted", name, err)
 			}
 		})
 	}
