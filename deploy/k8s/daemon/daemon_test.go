@@ -105,6 +105,7 @@ func document(t *testing.T, v any) []byte {
 }
 
 func TestRenderGolden(t *testing.T) {
+	t.Parallel()
 	v := goldenValues(t)
 	m := mustBuild(t, v)
 	dir := filepath.Join(packageDir(t), "testdata")
@@ -132,6 +133,7 @@ func TestRenderGolden(t *testing.T) {
 // reads: the namespace before what lands in it, and each Secret after the
 // Service.
 func TestRenderWritesTheObjectsInOrder(t *testing.T) {
+	t.Parallel()
 	m := mustBuild(t, goldenValues(t))
 	var out bytes.Buffer
 	if err := Render(&out, m); err != nil {
@@ -170,6 +172,7 @@ func TestRenderWritesTheObjectsInOrder(t *testing.T) {
 }
 
 func TestRenderRefusesBadValues(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		change func(*Values)
@@ -218,6 +221,7 @@ func TestRenderRefusesBadValues(t *testing.T) {
 // TestAnEmptyTargetTakesTheDefaultPair holds the default the package supplies: a
 // caller that names no Forgejo Service renders the default pair.
 func TestAnEmptyTargetTakesTheDefaultPair(t *testing.T) {
+	t.Parallel()
 	v := goldenValues(t)
 	v.ForgejoService, v.ForgejoNamespace = "", ""
 	m := mustBuild(t, v)
@@ -228,6 +232,7 @@ func TestAnEmptyTargetTakesTheDefaultPair(t *testing.T) {
 }
 
 func TestServiceResolvesForgejo(t *testing.T) {
+	t.Parallel()
 	m := mustBuild(t, goldenValues(t))
 	s := m.ForgejoService
 	if s.Metadata.Name != ForgejoName || s.Metadata.Namespace != DefaultNamespace {
@@ -252,6 +257,7 @@ func TestServiceResolvesForgejo(t *testing.T) {
 }
 
 func TestClaimsCarryTheDefaults(t *testing.T) {
+	t.Parallel()
 	m := mustBuild(t, goldenValues(t))
 	for _, tc := range []struct {
 		name  string
@@ -283,6 +289,7 @@ func TestClaimsCarryTheDefaults(t *testing.T) {
 // whose provisioner enforces the size carries no annotation, so the claim does
 // not repeat a warning that does not apply.
 func TestSizeAnnotationOnlyOnTheUnenforcedClass(t *testing.T) {
+	t.Parallel()
 	v := goldenValues(t)
 	v.StorageClass = "standard-rwo"
 	m := mustBuild(t, v)
@@ -297,6 +304,7 @@ func TestSizeAnnotationOnlyOnTheUnenforcedClass(t *testing.T) {
 }
 
 func TestNamespaceIsClusterScoped(t *testing.T) {
+	t.Parallel()
 	n := mustBuild(t, goldenValues(t)).Namespace
 	if n.Metadata.Name != DefaultNamespace {
 		t.Errorf("the Namespace is %q, want %q", n.Metadata.Name, DefaultNamespace)
@@ -313,6 +321,7 @@ func TestNamespaceIsClusterScoped(t *testing.T) {
 // entry, its name and source named, and an empty placeholder where the operator
 // puts the value.
 func TestSecretsHoldNoBytes(t *testing.T) {
+	t.Parallel()
 	v := goldenValues(t)
 	m := mustBuild(t, v)
 	if len(m.Secrets) != len(v.Secrets) {
@@ -444,6 +453,7 @@ type failingWriter struct{}
 func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("the disk is full") }
 
 func TestRenderReportsAWriteError(t *testing.T) {
+	t.Parallel()
 	m := mustBuild(t, goldenValues(t))
 	err := Render(failingWriter{}, m)
 	if err == nil {
@@ -459,13 +469,16 @@ func TestRenderReportsAWriteError(t *testing.T) {
 // must be reported, so a hand-edited golden or a comparison that stopped
 // comparing fails loudly.
 func TestGoldenMismatchIsReported(t *testing.T) {
+	t.Parallel()
+	if updatingGoldens() {
+		// -update rewrites the file and returns before comparing, so this mode
+		// has no mismatch to report; the golden tests exercise the rewrite.
+		return
+	}
 	dir := t.TempDir()
 	const file = "claim.yaml"
 	if err := os.WriteFile(filepath.Join(dir, file), []byte("apiVersion: v1\n"), 0o644); err != nil {
 		t.Fatalf("writing the golden: %v", err)
-	}
-	if updatingGoldens() {
-		t.Skip("-update rewrites the file instead of comparing, so this mode has no mismatch to report")
 	}
 
 	matched := &goldenRecorder{}
