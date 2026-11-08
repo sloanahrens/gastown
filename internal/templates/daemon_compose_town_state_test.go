@@ -274,3 +274,76 @@ func TestDaemonComposeTownStateRefusesASessionLink(t *testing.T) {
 		}
 	})
 }
+
+// A mount that resolves to the town root is refused: the volume is mounted
+// there, so a bind of the same path would mount over it. The check runs on
+// resolved paths, so a link to the town root is refused too (gt-i0h1x6).
+func TestDaemonComposeTownStateRefusesAMountAtTheTownRoot(t *testing.T) {
+	t.Parallel()
+	t.Run("the town root itself", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		s := townStateSpec()
+		s.TownRoot = town
+		s.OMTokenMetaFile = town
+		_, err := templates.RenderDaemonCompose(s)
+		if err == nil || !strings.Contains(err.Error(), town) {
+			t.Fatalf("error = %v, want the mount %s refused", err, town)
+		}
+		if err != nil && !strings.Contains(err.Error(), "town root") {
+			t.Errorf("error = %v, want the town root named", err)
+		}
+	})
+	t.Run("a link to the town root", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		link := filepath.Join(t.TempDir(), "town-link")
+		if err := os.Symlink(town, link); err != nil {
+			t.Fatal(err)
+		}
+		s := townStateSpec()
+		s.TownRoot = town
+		s.OMTokenMetaFile = link
+		_, err := templates.RenderDaemonCompose(s)
+		if err == nil || !strings.Contains(err.Error(), link) {
+			t.Fatalf("error = %v, want the link %s refused", err, link)
+		}
+	})
+}
+
+// A volume name that is a bare YAML number or bool is still written as the
+// string the host's volume has: the file names it quoted, in the mount and in
+// the volumes section, and it reads back as that name (gt-i0h1x6).
+func TestDaemonComposeTownStateQuotesTheVolumeName(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"123", "true"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := townStateSpec()
+			s.TownStateVolume = name
+			out, f := render(t, s)
+			if want := "source: \"" + name + "\"\n"; !strings.Contains(out, want) {
+				t.Errorf("the render does not mount the volume as the string %q:\n%s", name, out)
+			}
+			if want := "  \"" + name + "\":\n    external: true\n"; !strings.Contains(out, want) {
+				t.Errorf("the volumes section does not declare %q as a string:\n%s", name, out)
+			}
+			if decl, ok := f.Volumes[name]; !ok || !decl.External {
+				t.Errorf("volumes = %v, want %q declared external", f.Volumes, name)
+			}
+			var found bool
+			for _, v := range f.Services["daemon"].Volumes {
+				if v.Target != s.TownRoot {
+					continue
+				}
+				found = true
+				if v.Type != "volume" || v.Source != name {
+					t.Errorf("the town root mount = %+v, want the volume %q", v, name)
+				}
+			}
+			if !found {
+				t.Errorf("the daemon mounts nothing at the town root:\n%s", out)
+			}
+		})
+	}
+}

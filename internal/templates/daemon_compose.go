@@ -699,11 +699,12 @@ func (s ComposeSpec) validateTownState() error {
 	return s.checkTownStateMounts()
 }
 
-// checkTownStateMounts refuses a bind whose host path falls under a session-owned
-// town-state entry. The paths are resolved first, because the mount follows a
-// link: a directory that names itself daemon but resolves into a rig's polecats
-// tree is still a session's path. A path that cannot be resolved is refused
-// rather than taken as outside the town.
+// checkTownStateMounts refuses a bind of the town root, which would mount over
+// the volume at its own target, and a bind whose host path falls under a
+// session-owned town-state entry. The paths are resolved first, because the
+// mount follows a link: a directory that names itself daemon but resolves into
+// a rig's polecats tree is still a session's path. A path that cannot be
+// resolved is refused rather than taken as outside the town.
 func (s ComposeSpec) checkTownStateMounts() error {
 	for _, hostPath := range s.liveBindSources() {
 		if hostPath == "" {
@@ -715,6 +716,9 @@ func (s ComposeSpec) checkTownStateMounts() error {
 		}
 		if !inside {
 			continue
+		}
+		if rel == "" {
+			return fmt.Errorf("compose spec: --town-state-volume %q is set, and the mount %q is the town root itself, where the volume is mounted; a bind there would shadow the volume", s.TownStateVolume, hostPath)
 		}
 		if entry, owned := s.SessionOwned(rel); owned {
 			return fmt.Errorf("compose spec: --town-state-volume %q is set, and the mount %q falls under %q, a session-owned town-state entry; the volume carries the daemon's paths, so a session's path is not bound beside it", s.TownStateVolume, hostPath, entry)
@@ -734,10 +738,13 @@ func (s ComposeSpec) liveBindSources() []string {
 }
 
 // townRelative returns hostPath relative to townRoot on resolved paths, and
-// whether it lies under the town at all. A path outside is not a problem here:
-// only a bind beneath the town can shadow the town-state volume. Both paths are
-// cleaned and absolute after resolution, so the town's own prefix, with its one
-// trailing separator, is what says the mount is beneath it.
+// whether it lies at or under the town at all. A path outside is not a problem
+// here: only a bind at or beneath the town can shadow or sit beside the
+// town-state volume. The town root itself is inside with an empty relative
+// path, so the caller can refuse it: a bind there mounts over the volume's own
+// target. Both paths are cleaned and absolute after resolution, so the town's
+// own prefix, with its one trailing separator, is what says the mount is
+// beneath it.
 func townRelative(townRoot, hostPath string) (string, bool, error) {
 	town, err := resolvedHostPath(townRoot)
 	if err != nil {
@@ -747,8 +754,11 @@ func townRelative(townRoot, hostPath string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
+	if real == town {
+		return "", true, nil
+	}
 	prefix := strings.TrimSuffix(town, string(filepath.Separator)) + string(filepath.Separator)
-	if real == town || !strings.HasPrefix(real, prefix) {
+	if !strings.HasPrefix(real, prefix) {
 		return "", false, nil
 	}
 	return filepath.ToSlash(strings.TrimPrefix(real, prefix)), true, nil
@@ -1032,11 +1042,14 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 // townRootMount is the daemon's volume at the town root: the bind of the Mac's
 // directory, which is today's render, or the town-state volume when the spec
 // names one. The volume's target is the town root, so the container finds the
-// town at the same path either way.
+// town at the same path either way. The name is quoted as every other spec
+// value is: a volume name the regexp admits can still be a bare YAML scalar
+// that reads back as a number or a bool ("123", "true"), and the file must
+// name the volume the host has (gt-i0h1x6).
 func townRootMount(s ComposeSpec) string {
 	if s.TownStateVolume != "" {
 		return fmt.Sprintf("      - type: volume\n        source: %s\n        target: %s\n",
-			s.TownStateVolume, strconv.Quote(composeLiteral(s.TownRoot)))
+			strconv.Quote(composeLiteral(s.TownStateVolume)), strconv.Quote(composeLiteral(s.TownRoot)))
 	}
 	q := strconv.Quote(composeLiteral(s.TownRoot))
 	return fmt.Sprintf("      - type: bind\n        source: %s\n        target: %s\n", q, q)
@@ -1045,12 +1058,13 @@ func townRootMount(s ComposeSpec) string {
 // townStateVolumeDecl is the town-state volume's entry in the file's top-level
 // volumes section, or "" without the flag. `external: true` makes compose use a
 // volume it did not create and leave it in place on `down`, which is what keeps
-// the daemon's state across a project teardown.
+// the daemon's state across a project teardown. The key is quoted for the same
+// reason the mount's source is.
 func townStateVolumeDecl(s ComposeSpec) string {
 	if s.TownStateVolume == "" {
 		return ""
 	}
-	return "  " + s.TownStateVolume + ":\n    external: true\n"
+	return "  " + strconv.Quote(composeLiteral(s.TownStateVolume)) + ":\n    external: true\n"
 }
 
 // extraHostsBlock is the daemon service's extra_hosts block, sorted so a spec
