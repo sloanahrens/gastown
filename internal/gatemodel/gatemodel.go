@@ -757,6 +757,17 @@ func RenderText(w io.Writer, rep Report) error {
 	return nil
 }
 
+// RenderJSON writes the machine-readable report, one JSON document and a
+// newline.
+func RenderJSON(w io.Writer, rep Report) error {
+	data, err := JSONReport(rep)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(w, string(data))
+	return err
+}
+
 // JSONReport is the machine-readable report, for -json.
 func JSONReport(rep Report) ([]byte, error) {
 	out := jsonReport{CPUS: rep.CPUS, Model: Model, Summary: jsonSummary{

@@ -516,3 +516,114 @@ func TestGateModelRefusesAnUnusableGraph(t *testing.T) {
 		})
 	}
 }
+
+// TestGateModelReportsAnUnreadableLogFile pins ParseLogs' two error returns: a
+// log entry that cannot be opened, and one that opens but cannot be read. Both
+// are refusals: a log read as empty would leave its packages uncosted.
+func TestGateModelReportsAnUnreadableLogFile(t *testing.T) {
+	t.Parallel()
+	g := fixtureGraph(t, pkg("internal/a"))
+
+	t.Run("entry cannot be opened", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := os.Symlink(filepath.Join(dir, "missing.log"), filepath.Join(dir, "dangling.log")); err != nil {
+			t.Fatalf("creating the dangling link: %v", err)
+		}
+		if _, err := ParseLogs(dir, g); err == nil {
+			t.Fatal("ParseLogs over a dangling log = nil error, want a refusal")
+		}
+	})
+
+	t.Run("entry cannot be read", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// A link to a directory: it is not a directory entry, so it is read as a
+		// log, and the read fails.
+		if err := os.Symlink(t.TempDir(), filepath.Join(dir, "dir.log")); err != nil {
+			t.Fatalf("creating the directory link: %v", err)
+		}
+		if _, err := ParseLogs(dir, g); err == nil {
+			t.Fatal("ParseLogs over a log that cannot be read = nil error, want a refusal")
+		}
+	})
+}
+
+// failAtWriter accepts writes until its nth, which fails.
+type failAtWriter struct {
+	failAt int
+	seen   int
+}
+
+func (w *failAtWriter) Write(p []byte) (int, error) {
+	w.seen++
+	if w.seen == w.failAt {
+		return 0, errors.New("write failed")
+	}
+	return len(p), nil
+}
+
+// fullReport holds every line the text and JSON renderers can print: a fallback,
+// a logged wall, a saving, a hub and a missing cost.
+func fullReport() Report {
+	return Report{
+		CPUS: 2,
+		Landings: []LandingReport{{
+			SHA: strings.Repeat("a", 40), Short: "aaaaaaaaaaaa", Subject: "land: x",
+			Changed:      []string{"internal/a"},
+			Dependents:   []string{"internal/b"},
+			AlwaysRun:    []string{"internal/guardlint"},
+			Packages:     []string{"internal/a", "internal/b", "internal/guardlint"},
+			Fallback:     "go.mod",
+			ModeledKnown: true, ModeledWall: 3 * time.Second,
+			HasLog: true, LoggedWall: 4 * time.Second,
+			HasSaving: true, Saving: 0.5,
+			Hub:          true,
+			MissingCosts: []string{"internal/c"},
+		}},
+		Summary: Summary{
+			Landings: 1, Fallbacks: 1, MedianSaving: 0.5, P90Saving: 0.5, HasSavings: true,
+			Hubs: 1, MissingCosts: []string{"internal/c"},
+		},
+	}
+}
+
+// TestGateModelRenderTextReportsAFailedWrite fails the writer at each write the
+// text report makes, so every write error return runs. The full report makes
+// ten writes: one per printed line.
+func TestGateModelRenderTextReportsAFailedWrite(t *testing.T) {
+	t.Parallel()
+	const writes = 10
+	for n := 1; n <= writes; n++ {
+		t.Run(fmt.Sprintf("write %d", n), func(t *testing.T) {
+			t.Parallel()
+			if err := RenderText(&failAtWriter{failAt: n}, fullReport()); err == nil {
+				t.Fatalf("RenderText with write %d failing = nil error, want the write error", n)
+			}
+		})
+	}
+	var buf bytes.Buffer
+	if err := RenderText(&buf, fullReport()); err != nil {
+		t.Fatalf("RenderText to a healthy writer: %v", err)
+	}
+}
+
+// TestGateModelRenderJSONReportsAFailure pins the two error returns of the JSON
+// report: a value JSON cannot encode, and a failed write.
+func TestGateModelRenderJSONReportsAFailure(t *testing.T) {
+	t.Parallel()
+	t.Run("value JSON cannot encode", func(t *testing.T) {
+		t.Parallel()
+		rep := fullReport()
+		rep.Summary.MedianSaving = math.NaN()
+		if err := RenderJSON(&bytes.Buffer{}, rep); err == nil {
+			t.Fatal("RenderJSON of a NaN saving = nil error, want a refusal")
+		}
+	})
+	t.Run("failed write", func(t *testing.T) {
+		t.Parallel()
+		if err := RenderJSON(&failAtWriter{failAt: 1}, fullReport()); err == nil {
+			t.Fatal("RenderJSON with the write failing = nil error, want the write error")
+		}
+	})
+}

@@ -3,11 +3,12 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -131,21 +132,39 @@ func gateModel(cmd *cobra.Command, opts gateModelOptions) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	src := gateSources{git: gateGit, graph: gateGraph, nested: gateNestedModules}
+	return gateModelRun(ctx, src, opts, cpus, cmd.OutOrStdout())
+}
 
-	root, err := gateRepoRoot(ctx)
+// gateGitRunner runs one git command in dir and returns its stdout.
+type gateGitRunner func(ctx context.Context, dir string, args ...string) (string, error)
+
+// gateSources are the reads gateModelRun makes of the repository. gateModel
+// passes the real ones; a test passes fakes, so no git or go tool runs.
+type gateSources struct {
+	git    gateGitRunner
+	graph  func(ctx context.Context, root string) *gatemodel.Graph
+	nested func(root string) ([]string, error)
+}
+
+// gateModelRun reads the repository through src, the logs in opts.Logs, and
+// prints the report to out. It is gateModel without the flag checks and the
+// real reads.
+func gateModelRun(ctx context.Context, src gateSources, opts gateModelOptions, cpus int, out io.Writer) error {
+	root, err := gateRepoRoot(ctx, src.git)
 	if err != nil {
 		return err
 	}
-	landings, err := gateLandings(ctx, root, opts.Base, opts.Last)
+	landings, err := gateLandings(ctx, src.git, root, opts.Base, opts.Last)
 	if err != nil {
 		return err
 	}
-	g := gateGraph(ctx, root)
+	g := src.graph(ctx, root)
 	logs, err := gatemodel.ParseLogs(opts.Logs, g)
 	if err != nil {
 		return err
 	}
-	nested, err := gateNestedModules(root)
+	nested, err := src.nested(root)
 	if err != nil {
 		return err
 	}
@@ -154,21 +173,15 @@ func gateModel(cmd *cobra.Command, opts gateModelOptions) error {
 	if err != nil {
 		return err
 	}
-
 	if opts.JSON {
-		data, err := gatemodel.JSONReport(rep)
-		if err != nil {
-			return err
-		}
-		_, err = fmt.Fprintln(cmd.OutOrStdout(), string(data))
-		return err
+		return gatemodel.RenderJSON(out, rep)
 	}
-	return gatemodel.RenderText(cmd.OutOrStdout(), rep)
+	return gatemodel.RenderText(out, rep)
 }
 
 // gateRepoRoot is the repository the model reads.
-func gateRepoRoot(ctx context.Context) (string, error) {
-	out, err := gateGit(ctx, ".", "rev-parse", "--show-toplevel")
+func gateRepoRoot(ctx context.Context, git gateGitRunner) (string, error) {
+	out, err := git(ctx, ".", "rev-parse", "--show-toplevel")
 	if err != nil {
 		return "", fmt.Errorf("gt gate model must run in a git work tree: %w", err)
 	}
@@ -178,11 +191,11 @@ func gateRepoRoot(ctx context.Context) (string, error) {
 // gateLandings reads up to last landing commits at base, each with its diff
 // against its parent. A ref beginning with '-' is refused: it would be read by
 // git as an option.
-func gateLandings(ctx context.Context, root, base string, last int) ([]gatemodel.Landing, error) {
+func gateLandings(ctx context.Context, git gateGitRunner, root, base string, last int) ([]gatemodel.Landing, error) {
 	if base == "" || strings.HasPrefix(base, "-") {
 		return nil, fmt.Errorf("refusing --base %q: it must name a ref and not start with -", base)
 	}
-	out, err := gateGit(ctx, root, "log", "--format=%H%x00%h%x00%s%x00",
+	out, err := git(ctx, root, "log", "--format=%H%x00%h%x00%s%x00",
 		"--grep=^land: ", "--max-count="+strconv.Itoa(last), base, "--")
 	if err != nil {
 		return nil, fmt.Errorf("reading the landing commits: %w", err)
@@ -193,7 +206,7 @@ func gateLandings(ctx context.Context, root, base string, last int) ([]gatemodel
 	}
 	for i := range landings {
 		sha := landings[i].SHA
-		diff, err := gateGit(ctx, root, land.NameStatusArgs(sha+"^", sha)...)
+		diff, err := git(ctx, root, land.NameStatusArgs(sha+"^", sha)...)
 		if err != nil {
 			// An unreadable diff makes the model fall back to the full run.
 			landings[i].Unreadable = fmt.Sprintf("git diff %s^ %s: %v", sha, sha, err)
@@ -286,12 +299,18 @@ func parseGateGraph(out []byte, runErr error) *gatemodel.Graph {
 // fails is an error, because a nested module the model missed could select
 // nothing where the gate runs everything.
 func gateNestedModules(root string) ([]string, error) {
+	return nestedModules(os.DirFS(root))
+}
+
+// nestedModules is gateNestedModules over the tree fsys holds, its names
+// slash-separated and relative to the root.
+func nestedModules(fsys fs.FS) ([]string, error) {
 	var dirs []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() || p == root {
+		if !d.IsDir() || p == "." {
 			return nil
 		}
 		switch d.Name() {
@@ -301,19 +320,15 @@ func gateNestedModules(root string) ([]string, error) {
 		if strings.HasPrefix(d.Name(), ".") {
 			return fs.SkipDir
 		}
-		if _, err := os.Stat(filepath.Join(p, "go.mod")); err != nil {
+		if _, err := fs.Stat(fsys, p+"/go.mod"); err != nil {
 			// A stat error that is not "no go.mod" is reported, not read as
 			// one: a missed nested module would select nothing.
-			if os.IsNotExist(err) {
+			if errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
 			return err
 		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return err
-		}
-		dirs = append(dirs, filepath.ToSlash(rel))
+		dirs = append(dirs, p)
 		return fs.SkipDir
 	})
 	if err != nil {
