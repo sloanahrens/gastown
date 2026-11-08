@@ -87,16 +87,23 @@ func (s ExportSummary) String() string {
 	return b.String()
 }
 
+// ExportOptions carries an export's switches.
+type ExportOptions struct {
+	// Since keeps only regular files modified after it; the zero time keeps
+	// every file. Directories are always written.
+	Since time.Time
+	// ops is the filesystem seam a test replaces; the zero value is the host.
+	ops townOps
+}
+
 // Export writes the daemon-owned set of the town at root to w as a tar stream
 // named relative to root, and returns what it wrote. Only manifest rows owned
 // by the daemon are walked; a session-owned path never enters the archive.
 //
 // The walk never follows a symlink: a link whose relative target stays inside
 // the town root is archived as a link, and a link whose target is absolute or
-// leaves the root is skipped and counted, never read. A since time other than
-// zero keeps only regular files modified after it; directories are always
-// written so the archive's shape does not depend on which files changed.
-func Export(w io.Writer, root string, m *Manifest, since time.Time) (ExportSummary, error) {
+// leaves the root is skipped and counted, never read.
+func Export(w io.Writer, root string, m *Manifest, opts ExportOptions) (ExportSummary, error) {
 	s := ExportSummary{Skipped: map[SkipClass]int{}}
 	if m == nil {
 		return s, errors.New("townstate: nil manifest")
@@ -104,11 +111,12 @@ func Export(w io.Writer, root string, m *Manifest, since time.Time) (ExportSumma
 	if err := m.Validate(); err != nil {
 		return s, err
 	}
-	realRoot, err := resolveTownRoot(root)
+	opts.ops = opts.ops.withDefaults()
+	townRoot, err := resolveTownRoot(opts.ops, root)
 	if err != nil {
 		return s, err
 	}
-	rigs, _, err := townInputs(os.DirFS(realRoot), m)
+	rigs, _, err := townInputs(os.DirFS(townRoot), m)
 	if err != nil {
 		return s, fmt.Errorf("reading the town's rigs: %w", err)
 	}
@@ -118,7 +126,7 @@ func Export(w io.Writer, root string, m *Manifest, since time.Time) (ExportSumma
 			continue
 		}
 		s.Entries = append(s.Entries, e.Path)
-		if err := exportEntry(tw, realRoot, e, since, &s); err != nil {
+		if err := exportEntry(tw, townRoot, e, opts, &s); err != nil {
 			return s, err
 		}
 	}
@@ -128,69 +136,99 @@ func Export(w io.Writer, root string, m *Manifest, since time.Time) (ExportSumma
 	return s, nil
 }
 
-// exportEntry walks one daemon-owned row and writes its entries to tw.
-func exportEntry(tw *tar.Writer, root string, e Entry, since time.Time, s *ExportSummary) error {
-	start := filepath.Join(root, filepath.FromSlash(e.Path))
-	return filepath.WalkDir(start, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			if p == start && errors.Is(walkErr, fs.ErrNotExist) {
-				// A young town has not created every daemon path yet; an
-				// absent row is not a failed read.
-				return nil
-			}
-			return fmt.Errorf("walking %s: %w", e.Path, walkErr)
-		}
-		rel, err := filepath.Rel(root, p)
+// exportEntry walks one daemon-owned row and writes it to tw. An absent row
+// is not a failed read: a young town has not created every daemon path yet.
+func exportEntry(tw *tar.Writer, root string, e Entry, opts ExportOptions, s *ExportSummary) error {
+	p := filepath.Join(root, filepath.FromSlash(e.Path))
+	info, err := opts.ops.lstat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", e.Path, err)
+	}
+	return exportPath(tw, p, e.Path, info, opts, s)
+}
+
+// exportPath writes one entry and, for a directory, its children in name
+// order.
+func exportPath(tw *tar.Writer, p, name string, info fs.FileInfo, opts ExportOptions, s *ExportSummary) error {
+	if class, skip := skippedClass(name, info); skip {
+		s.Skipped[class]++
+		return nil
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return exportSymlink(tw, p, name, info, opts, s)
+	}
+	if !info.IsDir() {
+		return exportFile(tw, p, name, info, opts, s)
+	}
+	hdr := &tar.Header{
+		Name:     name + "/",
+		Mode:     int64(info.Mode().Perm()),
+		ModTime:  info.ModTime(),
+		Typeflag: tar.TypeDir,
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return fmt.Errorf("writing the archive header for %s: %w", name, err)
+	}
+	s.Dirs++
+	children, err := opts.ops.readDir(p)
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", name, err)
+	}
+	for _, child := range children {
+		childName := name + "/" + child
+		childPath := filepath.Join(p, child)
+		childInfo, err := opts.ops.lstat(childPath)
 		if err != nil {
-			return fmt.Errorf("naming %s: %w", e.Path, err)
+			return fmt.Errorf("reading %s: %w", childName, err)
 		}
-		name := filepath.ToSlash(rel)
-		info, err := d.Info()
-		if err != nil {
-			return fmt.Errorf("reading %s: %w", name, err)
-		}
-		if class, skip := skippedClass(name, d, info); skip {
-			s.Skipped[class]++
-			if d.IsDir() {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			return exportSymlink(tw, p, name, info, s)
-		}
-		hdr, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return fmt.Errorf("preparing %s for the archive: %w", name, err)
-		}
-		hdr.Name = name
-		hdr.Uid, hdr.Gid = 0, 0
-		hdr.Uname, hdr.Gname = "", ""
-		if d.IsDir() {
-			hdr.Name += "/"
-			s.Dirs++
-			return tw.WriteHeader(hdr)
-		}
-		if !since.IsZero() && !info.ModTime().After(since) {
-			s.Skipped[SkipOlderThan]++
-			return nil
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return fmt.Errorf("writing the archive header for %s: %w", name, err)
-		}
-		if err := copyFile(tw, p, hdr.Size); err != nil {
+		if err := exportPath(tw, childPath, childName, childInfo, opts, s); err != nil {
 			return err
 		}
-		s.Files++
-		s.Bytes += hdr.Size
+	}
+	return nil
+}
+
+// exportFile writes a regular file, or counts it as older than --since.
+func exportFile(tw *tar.Writer, p, name string, info fs.FileInfo, opts ExportOptions, s *ExportSummary) error {
+	if !opts.Since.IsZero() && !info.ModTime().After(opts.Since) {
+		s.Skipped[SkipOlderThan]++
 		return nil
-	})
+	}
+	hdr := &tar.Header{
+		Name:     name,
+		Mode:     int64(info.Mode().Perm()),
+		Size:     info.Size(),
+		ModTime:  info.ModTime(),
+		Typeflag: tar.TypeReg,
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return fmt.Errorf("writing the archive header for %s: %w", name, err)
+	}
+	f, err := opts.ops.open(p)
+	if err != nil {
+		return fmt.Errorf("opening %s for the archive: %w", name, err)
+	}
+	// The size is the one the header carries, so a file the daemon grew while
+	// it was read is copied to a consistent prefix, and a file that shrank is
+	// an error rather than a short entry.
+	if _, err := io.CopyN(tw, f, hdr.Size); err != nil {
+		return fmt.Errorf("copying %s into the archive: %w", name, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing %s after the copy: %w", name, err)
+	}
+	s.Files++
+	s.Bytes += hdr.Size
+	return nil
 }
 
 // exportSymlink writes a symlink entry when its target stays inside the town
 // root, and counts it as skipped otherwise. The target is never opened.
-func exportSymlink(tw *tar.Writer, p, name string, info fs.FileInfo, s *ExportSummary) error {
-	link, err := os.Readlink(p)
+func exportSymlink(tw *tar.Writer, p, name string, info fs.FileInfo, opts ExportOptions, s *ExportSummary) error {
+	link, err := opts.ops.readlink(p)
 	if err != nil {
 		return fmt.Errorf("reading the symlink %s: %w", name, err)
 	}
@@ -198,13 +236,13 @@ func exportSymlink(tw *tar.Writer, p, name string, info fs.FileInfo, s *ExportSu
 		s.Skipped[SkipSymlinkOut]++
 		return nil
 	}
-	hdr, err := tar.FileInfoHeader(info, link)
-	if err != nil {
-		return fmt.Errorf("preparing the symlink %s for the archive: %w", name, err)
+	hdr := &tar.Header{
+		Name:     name,
+		Mode:     int64(info.Mode().Perm()),
+		ModTime:  info.ModTime(),
+		Typeflag: tar.TypeSymlink,
+		Linkname: link,
 	}
-	hdr.Name = name
-	hdr.Uid, hdr.Gid = 0, 0
-	hdr.Uname, hdr.Gname = "", ""
 	if err := tw.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("writing the archive header for %s: %w", name, err)
 	}
@@ -225,23 +263,8 @@ func linkStaysInside(name, link string) bool {
 	return resolved != ".." && !strings.HasPrefix(resolved, "../")
 }
 
-// copyFile writes exactly size bytes of p to tw. The size is the one the
-// header carries, so a file the daemon grew while it was being read is copied
-// to a consistent prefix; a file that shrank is an error, never a short entry.
-func copyFile(tw io.Writer, p string, size int64) error {
-	f, err := os.Open(p) //nolint:gosec // G304: p is a path the walk built under the town root
-	if err != nil {
-		return fmt.Errorf("opening %s for the archive: %w", filepath.Base(p), err)
-	}
-	defer f.Close()
-	if _, err := io.CopyN(tw, f, size); err != nil {
-		return fmt.Errorf("copying %s into the archive: %w", filepath.Base(p), err)
-	}
-	return nil
-}
-
 // skippedClass reports why p does not enter the archive, if it does not.
-func skippedClass(name string, d fs.DirEntry, info fs.FileInfo) (SkipClass, bool) {
+func skippedClass(name string, info fs.FileInfo) (SkipClass, bool) {
 	for _, seg := range strings.Split(name, "/") {
 		switch {
 		case strings.HasPrefix(seg, ".dolt-data"):
@@ -251,41 +274,34 @@ func skippedClass(name string, d fs.DirEntry, info fs.FileInfo) (SkipClass, bool
 		}
 	}
 	switch {
-	case d.Type()&fs.ModeSocket != 0:
+	case info.Mode()&fs.ModeSocket != 0:
 		return SkipSocket, true
-	case !d.IsDir() && strings.HasSuffix(d.Name(), ".lock"):
+	case !info.IsDir() && strings.HasSuffix(name, ".lock"):
 		// Every flock in the town is taken on path+".lock" (internal/lock,
 		// internal/config, internal/events); a copied lock is stale by
 		// definition.
 		return SkipLockFile, true
-	case !d.IsDir() && d.Type()&fs.ModeSymlink == 0 && !info.Mode().IsRegular():
+	case !info.IsDir() && info.Mode()&fs.ModeSymlink == 0 && !info.Mode().IsRegular():
 		return SkipNotRegular, true
 	}
 	return "", false
 }
 
-// resolveTownRoot returns root's real path, insisting that it exists and is a
-// directory. A root that cannot be read is an error, never an empty town.
-func resolveTownRoot(root string) (string, error) {
+// resolveTownRoot returns root cleaned, insisting that it is a directory. It
+// refuses a symlink: a root that is a link would be archived as a link rather
+// than walked. A root that cannot be read is an error, never an empty town.
+func resolveTownRoot(ops townOps, root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		return "", errors.New("townstate: the town root is empty")
 	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return "", fmt.Errorf("resolving the town root %q: %w", root, err)
-	}
-	info, err := os.Stat(abs)
+	info, err := ops.lstat(root)
 	if err != nil {
 		return "", fmt.Errorf("reading the town root %q: %w", root, err)
 	}
 	if !info.IsDir() {
 		return "", fmt.Errorf("the town root %q is not a directory", root)
 	}
-	real, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", fmt.Errorf("resolving the town root %q: %w", root, err)
-	}
-	return real, nil
+	return filepath.Clean(root), nil
 }
 
 // daemonEntries returns the daemon-owned rows expanded for rigs, in manifest

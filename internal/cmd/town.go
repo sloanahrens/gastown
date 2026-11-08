@@ -209,7 +209,7 @@ func runTownStateExportIn(env townStateExportEnv) error {
 	if env.rollback {
 		m = &townstate.Manifest{Entries: m.Rollback()}
 	}
-	s, err := townstate.Export(env.out, env.town, m, since)
+	s, err := townstate.Export(env.out, env.town, m, townstate.ExportOptions{Since: since})
 	fmt.Fprintln(env.summary, s.String())
 	if err != nil {
 		return fmt.Errorf("exporting the town state: %w", err)

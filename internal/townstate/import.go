@@ -20,6 +20,8 @@ type ImportOptions struct {
 	// file is written only when the archive's copy is newer than an existing
 	// regular file, and nothing else is replaced. It is the rollback's mode.
 	MergeNewer bool
+	// ops is the filesystem seam a test replaces; the zero value is the host.
+	ops townOps
 }
 
 // ImportSummary counts what an import wrote and what it left alone.
@@ -71,11 +73,12 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 	if err := m.Validate(); err != nil {
 		return s, err
 	}
-	realRoot, err := resolveTownRoot(root)
+	opts.ops = opts.ops.withDefaults()
+	townRoot, err := resolveTownRoot(opts.ops, root)
 	if err != nil {
 		return s, err
 	}
-	rigs, _, err := townInputs(os.DirFS(realRoot), m)
+	rigs, _, err := townInputs(os.DirFS(townRoot), m)
 	if err != nil {
 		return s, fmt.Errorf("reading the destination's rigs: %w", err)
 	}
@@ -84,7 +87,7 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 		known[rig] = true
 	}
 	if !opts.MergeNewer {
-		if err := refuseOccupiedRoot(realRoot, m, known); err != nil {
+		if err := refuseOccupiedRoot(opts.ops, townRoot, m, known); err != nil {
 			return s, err
 		}
 	}
@@ -109,11 +112,11 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 		if !ok {
 			return s, fmt.Errorf("the archive entry %q is not under a daemon-owned path of the manifest; an import writes nothing outside them", name)
 		}
-		if err := checkComponents(realRoot, name); err != nil {
+		if err := checkComponents(opts.ops, townRoot, name); err != nil {
 			return s, err
 		}
-		dest := filepath.Join(realRoot, filepath.FromSlash(name))
-		if err := importEntry(tr, hdr, dest, name, e, opts, &s); err != nil {
+		dest := filepath.Join(townRoot, filepath.FromSlash(name))
+		if err := importEntry(opts.ops, tr, hdr, dest, name, e, opts, &s); err != nil {
 			return s, err
 		}
 		if !slices.Contains(s.Entries, e.Path) {
@@ -164,12 +167,12 @@ func rigFromMarker(name string, m *Manifest) (string, bool) {
 // checkComponents refuses name when its destination, or any existing prefix of
 // it, is a symlink: writing through one could leave the town root even though
 // the name itself is clean.
-func checkComponents(root, name string) error {
+func checkComponents(ops townOps, root, name string) error {
 	segs := strings.Split(name, "/")
 	cur := root
 	for i, seg := range segs {
 		cur = filepath.Join(cur, seg)
-		info, err := os.Lstat(cur)
+		info, err := ops.lstat(cur)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			return nil
@@ -185,9 +188,9 @@ func checkComponents(root, name string) error {
 // refuseOccupiedRoot refuses an import without MergeNewer when the destination
 // already holds a daemon-owned path. The first one found is named and nothing
 // is read from the archive.
-func refuseOccupiedRoot(root string, m *Manifest, rigs map[string]bool) error {
+func refuseOccupiedRoot(ops townOps, root string, m *Manifest, rigs map[string]bool) error {
 	for _, e := range daemonEntries(m, sortedRigs(rigs)) {
-		if _, err := os.Lstat(filepath.Join(root, filepath.FromSlash(e.Path))); err == nil {
+		if _, err := ops.lstat(filepath.Join(root, filepath.FromSlash(e.Path))); err == nil {
 			return fmt.Errorf("the destination already holds the daemon-owned path %q; an import needs a town root empty of them, or --merge-newer", e.Path)
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("reading %q in the destination: %w", e.Path, err)
@@ -198,14 +201,14 @@ func refuseOccupiedRoot(root string, m *Manifest, rigs map[string]bool) error {
 
 // importEntry writes one archive entry, after every check that can refuse it
 // has run.
-func importEntry(tr io.Reader, hdr *tar.Header, dest, name string, e Entry, opts ImportOptions, s *ImportSummary) error {
+func importEntry(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, e Entry, opts ImportOptions, s *ImportSummary) error {
 	switch hdr.Typeflag {
 	case tar.TypeDir:
-		return importDir(dest, name, archiveMode(hdr.Mode, e.Private), hdr.ModTime, s)
+		return importDir(ops, dest, name, archiveMode(hdr.Mode, e.Private), hdr.ModTime, s)
 	case tar.TypeReg, tar.TypeRegA:
-		return importFile(tr, hdr, dest, name, e.Private, opts, s)
+		return importFile(ops, tr, hdr, dest, name, e.Private, opts, s)
 	case tar.TypeSymlink:
-		return importSymlink(hdr, dest, name, s)
+		return importSymlink(ops, hdr, dest, name, s)
 	default:
 		return fmt.Errorf("the archive entry %q has type %s; an import accepts regular files, directories and symlinks only", name, tarTypeName(hdr.Typeflag))
 	}
@@ -213,8 +216,8 @@ func importEntry(tr io.Reader, hdr *tar.Header, dest, name string, e Entry, opts
 
 // importDir creates a missing directory. An existing directory is kept, so a
 // replay leaves the tree's mtimes alone where nothing was written.
-func importDir(dest, name string, mode fs.FileMode, mtime time.Time, s *ImportSummary) error {
-	info, err := os.Lstat(dest)
+func importDir(ops townOps, dest, name string, mode fs.FileMode, mtime time.Time, s *ImportSummary) error {
+	info, err := ops.lstat(dest)
 	switch {
 	case err == nil && info.IsDir():
 		return nil
@@ -223,14 +226,14 @@ func importDir(dest, name string, mode fs.FileMode, mtime time.Time, s *ImportSu
 	case !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("reading %q in the destination: %w", name, err)
 	}
-	if err := os.MkdirAll(dest, mode); err != nil {
+	if err := ops.mkdirAll(dest, mode); err != nil {
 		return fmt.Errorf("creating %q: %w", name, err)
 	}
-	if err := os.Chmod(dest, mode); err != nil {
+	if err := ops.chmod(dest, mode); err != nil {
 		return fmt.Errorf("setting the mode of %q: %w", name, err)
 	}
 	if !mtime.IsZero() {
-		if err := os.Chtimes(dest, mtime, mtime); err != nil {
+		if err := ops.chtimes(dest, mtime, mtime); err != nil {
 			return fmt.Errorf("setting the mtime of %q: %w", name, err)
 		}
 	}
@@ -241,15 +244,12 @@ func importDir(dest, name string, mode fs.FileMode, mtime time.Time, s *ImportSu
 // importFile writes a regular file, or keeps an existing newer one in merge
 // mode. A failure after the file is created removes it, so a retry never finds
 // a partial copy that reads as newer than the archive.
-func importFile(tr io.Reader, hdr *tar.Header, dest, name string, private bool, opts ImportOptions, s *ImportSummary) error {
-	info, err := os.Lstat(dest)
+func importFile(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, private bool, opts ImportOptions, s *ImportSummary) error {
+	info, err := ops.lstat(dest)
 	switch {
 	case err == nil && !info.Mode().IsRegular():
 		return typeConflict(name, info)
 	case err == nil && !opts.MergeNewer:
-		// Import refuses an occupied root before it reads the archive, so this
-		// guard should never fire; it keeps a broken invariant a refusal
-		// rather than an overwrite.
 		return fmt.Errorf("the archive entry %q already exists in the destination; an import without --merge-newer writes into an empty root", name)
 	case err == nil && !hdr.ModTime.After(info.ModTime()):
 		s.KeptNewer++
@@ -257,11 +257,11 @@ func importFile(tr io.Reader, hdr *tar.Header, dest, name string, private bool, 
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("reading %q in the destination: %w", name, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	if err := ops.mkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("creating the directory for %q: %w", name, err)
 	}
 	mode := archiveMode(hdr.Mode, private)
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode) //nolint:gosec // G304: dest is checked against the manifest under the town root
+	f, err := ops.openFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		return fmt.Errorf("creating %q: %w", name, err)
 	}
@@ -269,16 +269,16 @@ func importFile(tr io.Reader, hdr *tar.Header, dest, name string, private bool, 
 	closeErr := f.Close()
 	switch {
 	case copyErr != nil:
-		return errors.Join(fmt.Errorf("writing %q: %w", name, copyErr), removePartial(dest))
+		return errors.Join(fmt.Errorf("writing %q: %w", name, copyErr), removePartial(ops, dest))
 	case closeErr != nil:
-		return errors.Join(fmt.Errorf("writing %q: %w", name, closeErr), removePartial(dest))
+		return errors.Join(fmt.Errorf("writing %q: %w", name, closeErr), removePartial(ops, dest))
 	}
-	if err := os.Chmod(dest, mode); err != nil {
-		return errors.Join(fmt.Errorf("setting the mode of %q: %w", name, err), removePartial(dest))
+	if err := ops.chmod(dest, mode); err != nil {
+		return errors.Join(fmt.Errorf("setting the mode of %q: %w", name, err), removePartial(ops, dest))
 	}
 	if !hdr.ModTime.IsZero() {
-		if err := os.Chtimes(dest, hdr.ModTime, hdr.ModTime); err != nil {
-			return errors.Join(fmt.Errorf("setting the mtime of %q: %w", name, err), removePartial(dest))
+		if err := ops.chtimes(dest, hdr.ModTime, hdr.ModTime); err != nil {
+			return errors.Join(fmt.Errorf("setting the mtime of %q: %w", name, err), removePartial(ops, dest))
 		}
 	}
 	s.Files++
@@ -291,21 +291,21 @@ func importFile(tr io.Reader, hdr *tar.Header, dest, name string, private bool, 
 //
 // The link's own mtime is not restored: there is no portable call that sets a
 // symlink's time without following it.
-func importSymlink(hdr *tar.Header, dest, name string, s *ImportSummary) error {
+func importSymlink(ops townOps, hdr *tar.Header, dest, name string, s *ImportSummary) error {
 	if err := checkLinkTarget(name, hdr.Linkname); err != nil {
 		return err
 	}
-	info, err := os.Lstat(dest)
+	info, err := ops.lstat(dest)
 	switch {
 	case err == nil:
 		return typeConflict(name, info)
 	case !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("reading %q in the destination: %w", name, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	if err := ops.mkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("creating the directory for %q: %w", name, err)
 	}
-	if err := os.Symlink(hdr.Linkname, dest); err != nil {
+	if err := ops.symlink(hdr.Linkname, dest); err != nil {
 		return fmt.Errorf("creating the symlink %q: %w", name, err)
 	}
 	s.Symlinks++
@@ -365,8 +365,8 @@ func describe(info fs.FileInfo) string {
 
 // removePartial deletes a file an import created but could not finish, so a
 // retry cannot read it as a newer existing copy.
-func removePartial(dest string) error {
-	if err := os.Remove(dest); err != nil && !errors.Is(err, fs.ErrNotExist) {
+func removePartial(ops townOps, dest string) error {
+	if err := ops.remove(dest); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("removing the partial file: %w", err)
 	}
 	return nil

@@ -145,6 +145,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(town, "logs", "pipe"), 0o644); err != nil {
 		t.Fatalf("making the fifo: %v", err)
 	}
+	//testpolicy:allow no-network — a unix socket at rest is the entry the export must skip, and nothing dials or accepts it
 	ln, err := net.Listen("unix", filepath.Join(town, "logs", "daemon.sock"))
 	if err != nil {
 		t.Fatalf("making the socket: %v", err)
@@ -166,7 +167,7 @@ func TestExportImportRoundTrip(t *testing.T) {
 	}
 
 	var stream bytes.Buffer
-	sum, err := Export(&stream, town, Default(), time.Time{})
+	sum, err := Export(&stream, town, Default(), ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -419,7 +420,7 @@ func TestExportSinceAndRollbackSet(t *testing.T) {
 	}
 
 	var stream bytes.Buffer
-	sum, err := Export(&stream, town, Default(), now.Add(-24*time.Hour))
+	sum, err := Export(&stream, town, Default(), ExportOptions{Since: now.Add(-24 * time.Hour)})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -508,7 +509,7 @@ func TestExportNeverFollowsSymlinks(t *testing.T) {
 	}
 
 	var stream bytes.Buffer
-	sum, err := Export(&stream, town, Default(), time.Time{})
+	sum, err := Export(&stream, town, Default(), ExportOptions{})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
