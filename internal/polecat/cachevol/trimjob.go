@@ -167,17 +167,8 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 	if name == "" {
 		name = DefaultTrimJobName
 	}
-	if !validDNS1123Label(name) {
-		return nil, fmt.Errorf("the trim Job name %q: want a DNS-1123 label of at most 63 characters, since Kubernetes names the pod's job-name label after it", name)
-	}
-	if in.Namespace != "" && !validDNS1123Label(in.Namespace) {
-		return nil, fmt.Errorf("the trim Job namespace %q: want a DNS-1123 label of at most 63 characters", in.Namespace)
-	}
-	if !validImage(in.Image) {
-		return nil, fmt.Errorf("the trim Job image %q: want an image reference such as gastown-polecat:dev", in.Image)
-	}
-	if !validDNS1123Label(in.ClaimName) {
-		return nil, fmt.Errorf("the trim Job claim %q: want a DNS-1123 label of at most 63 characters", in.ClaimName)
+	if err := checkJobIdentity(name, in.Namespace, in.Image, in.ClaimName); err != nil {
+		return nil, err
 	}
 	if in.CapBytes < 0 {
 		return nil, fmt.Errorf("the trim Job cap %d bytes: want the size the claim is trimmed under", in.CapBytes)
@@ -217,6 +208,25 @@ func BuildTrimManifest(in TrimJobInput) (*TrimManifest, error) {
 	}
 	shards := trimShards(name, in.Namespace, paths)
 	return &TrimManifest{route: TrimRouteShards, shards: shards, job: trimJob(in, name, annotations, shards)}, nil
+}
+
+// checkJobIdentity refuses the name, namespace, image or claim a cache Job cannot be rendered with.
+// The messages name the trim Job for every cache Job, so the lister Job refuses an input with the
+// same text as the trim: one refusal per input, whichever Job it reaches.
+func checkJobIdentity(name, namespace, image, claim string) error {
+	if !validDNS1123Label(name) {
+		return fmt.Errorf("the trim Job name %q: want a DNS-1123 label of at most 63 characters, since Kubernetes names the pod's job-name label after it", name)
+	}
+	if namespace != "" && !validDNS1123Label(namespace) {
+		return fmt.Errorf("the trim Job namespace %q: want a DNS-1123 label of at most 63 characters", namespace)
+	}
+	if !validImage(image) {
+		return fmt.Errorf("the trim Job image %q: want an image reference such as gastown-polecat:dev", image)
+	}
+	if !validDNS1123Label(claim) {
+		return fmt.Errorf("the trim Job claim %q: want a DNS-1123 label of at most 63 characters", claim)
+	}
+	return nil
 }
 
 // claimTrimManifest is the manifest for a list past one set of ConfigMap shards: one Job that mounts

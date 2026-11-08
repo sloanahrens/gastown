@@ -85,8 +85,9 @@ type ObjectMeta struct {
 
 // JobSpec is the subset of a Job's spec the seed sets.
 type JobSpec struct {
-	BackoffLimit *int32      `json:"backoffLimit,omitempty"`
-	Template     PodTemplate `json:"template"`
+	BackoffLimit            *int32      `json:"backoffLimit,omitempty"`
+	TTLSecondsAfterFinished *int32      `json:"ttlSecondsAfterFinished,omitempty"`
+	Template                PodTemplate `json:"template"`
 }
 
 // PodTemplate is the Job's pod template.
@@ -160,9 +161,11 @@ type Volume struct {
 	Secret                *SecretVolumeSource       `json:"secret,omitempty"`
 }
 
-// PersistentVolumeClaimRef names the claim a volume mounts.
+// PersistentVolumeClaimRef names the claim a volume mounts; ReadOnly makes the volume read-only in
+// the pod, whatever its mounts ask for.
 type PersistentVolumeClaimRef struct {
 	ClaimName string `json:"claimName"`
+	ReadOnly  bool   `json:"readOnly,omitempty"`
 }
 
 // EmptyDirVolumeSource is a scratch directory that lives as long as the pod.
