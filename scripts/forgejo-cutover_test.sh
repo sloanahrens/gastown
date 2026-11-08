@@ -27,8 +27,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CUTOVER="$SCRIPT_DIR/forgejo-cutover.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/forgejo-cutover-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
-PASS=0
-FAIL=0
+PASS=0 FAIL=0
 
 STUB_ADMIN_TOKEN="stub-admin-token"
 BROKER_TOKEN="brokertoken-zqxvjkcd"
@@ -44,9 +43,10 @@ HOSTNAME_GIT_URL="http://forgejo:3000/acme/rig.git"
 GITHUB_URL="git@github.com:acme/rig.git"
 TOWN="$TMP/town"
 RIG_ROOT="$TOWN/acme"
+CREW_CLONE="$RIG_ROOT/crew/operator" # the crew clone the cutover discovers, beside crew/notes
 STATE="$TMP/state"
 CFG="$TMP/config"
-CREW_CLONE="$RIG_ROOT/crew/operator" # the crew clone the cutover discovers, beside crew/notes
+
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); if [ $# -gt 1 ]; then printf '%s\n' "$2" | sed 's/^/    | /'; fi; }
 check() { # check DESCRIPTION COMMAND...
