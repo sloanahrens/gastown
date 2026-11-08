@@ -1,22 +1,27 @@
 # The town root's ownership split (gt-gg9hv.67).
 # internal/townstate holds this list as Go data; TestManifestMirrorMatches
 # fails when this mirror and the Go data differ. Do not edit one without the other.
+# The rollback rationale lives on townstate.Default; read it before changing a rollback: true row.
 entries:
   - path: daemon
     owner: daemon
-    why: the daemon's own state, settings and patrol records
+    rollback: true
+    why: the daemon's own state, settings and patrol records; rollback replays it
   - path: logs
     owner: daemon
     why: daemon and session logs the daemon rotates
   - path: events
     owner: daemon
-    why: the town event store the daemon appends
+    rollback: true
+    why: the town event store the daemon appends; rollback replays it
   - path: .events.jsonl
     owner: daemon
-    why: the town event feed the daemon appends
+    rollback: true
+    why: the town event feed the daemon appends; rollback replays it
   - path: .feed.jsonl
     owner: daemon
-    why: the feed the daemon appends
+    rollback: true
+    why: the feed the daemon appends; rollback replays it
   - path: mayor
     owner: daemon
     why: town config and the pool and roster records it writes
@@ -52,7 +57,8 @@ entries:
     why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy. Until then gt commands run on the Mac also write it directly, which is a cutover prerequisite (gt-yjzepk.10)"
   - path: .runtime/landings
     owner: daemon
-    why: landing ledgers the daemon writes
+    rollback: true
+    why: landing ledgers the daemon writes; rollback replays the landing records
   - path: .runtime/usage
     owner: daemon
     why: usage records the daemon writes
@@ -70,7 +76,8 @@ entries:
     why: landing om evidence the daemon writes
   - path: .runtime/spec_dispatch
     owner: daemon
-    why: spec dispatcher state the daemon writes
+    rollback: true
+    why: spec dispatcher state the daemon writes; rollback replays it
   - path: .runtime/heartbeats
     owner: daemon
     why: daemon heartbeats
@@ -85,13 +92,15 @@ entries:
     why: the attention queue the daemon writes
   - path: .runtime/red-main
     owner: daemon
-    why: red-main status the landing worker writes
+    rollback: true
+    why: red-main status the landing worker writes; rollback replays the statuses
   - path: .runtime/locks
     owner: daemon
-    why: town lock files the daemon takes
+    why: town lock files the daemon takes; export skips the files themselves and keeps the directory
   - path: .runtime/container
     owner: daemon
-    why: the container's kubeconfig and state the daemon writes
+    private: true
+    why: the container's kubeconfig and state the daemon writes; the kubeconfig and the 0600 configs beside it must keep their modes through a copy
   - path: .runtime/daemon-image
     owner: daemon
     why: the daemon image build record

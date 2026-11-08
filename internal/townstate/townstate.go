@@ -42,6 +42,17 @@ type Entry struct {
 	Path  string `yaml:"path" json:"path"`
 	Owner Owner  `yaml:"owner" json:"owner"`
 	Why   string `yaml:"why" json:"why"`
+	// Rollback marks the daemon-owned rows that hold one-way state: what the
+	// daemon writes while it owns the town and the Mac tree cannot rebuild.
+	// `gt town state export --rollback` of this tagged set, imported with
+	// --merge-newer, is the replay half of a rollback (gt-gg9hv.68). Only a
+	// daemon row can carry it, because only the daemon-owned set travels to
+	// the volume.
+	Rollback bool `yaml:"rollback,omitempty" json:"rollback,omitempty"`
+	// Private marks a daemon-owned row whose files carry modes that must
+	// survive a round trip (a kubeconfig, a config an agent may hold): import
+	// keeps the archive's mode instead of masking it to 0755/0644.
+	Private bool `yaml:"private,omitempty" json:"private,omitempty"`
 }
 
 // Manifest is the ordered list of split rows.
@@ -50,14 +61,21 @@ type Manifest struct {
 }
 
 // Default returns the town root's split as this town defines it.
+//
+// The rows tagged rollback: true are the one-way state the pod writes while it
+// owns the town: the red-main statuses, the landing records, the spec dispatcher
+// state, the events and feeds, and the maintenance and patrol state under
+// daemon/. The rollback replays them onto the Mac tree with gt town state export
+// --rollback and import --merge-newer. The tag sits on whole rows, so the replay
+// carries all of daemon/, not only the two files named above (gt-gg9hv.68).
 func Default() *Manifest {
 	return &Manifest{Entries: []Entry{
 		// Town-level state the daemon writes.
-		{Path: "daemon", Owner: OwnerDaemon, Why: "the daemon's own state, settings and patrol records"},
+		{Path: "daemon", Owner: OwnerDaemon, Rollback: true, Why: "the daemon's own state, settings and patrol records; rollback replays it"},
 		{Path: "logs", Owner: OwnerDaemon, Why: "daemon and session logs the daemon rotates"},
-		{Path: "events", Owner: OwnerDaemon, Why: "the town event store the daemon appends"},
-		{Path: ".events.jsonl", Owner: OwnerDaemon, Why: "the town event feed the daemon appends"},
-		{Path: ".feed.jsonl", Owner: OwnerDaemon, Why: "the feed the daemon appends"},
+		{Path: "events", Owner: OwnerDaemon, Rollback: true, Why: "the town event store the daemon appends; rollback replays it"},
+		{Path: ".events.jsonl", Owner: OwnerDaemon, Rollback: true, Why: "the town event feed the daemon appends; rollback replays it"},
+		{Path: ".feed.jsonl", Owner: OwnerDaemon, Rollback: true, Why: "the feed the daemon appends; rollback replays it"},
 		{Path: "mayor", Owner: OwnerDaemon, Why: "town config and the pool and roster records it writes"},
 		{Path: ".beads", Owner: OwnerDaemon, Why: "workspace metadata the daemon reads and writes"},
 		{Path: "plugins", Owner: OwnerDaemon, Why: "installed plugins the daemon loads"},
@@ -73,20 +91,20 @@ func Default() *Manifest {
 		{Path: ".runtime/jev", Owner: OwnerDaemon, Why: "jev's dataset the daemon writes"},
 		{Path: ".runtime/polecat-spans", Owner: OwnerDaemon, Why: "polecat span records the daemon writes"},
 		{Path: ".runtime/agents", Owner: OwnerDaemon, Why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy. Until then gt commands run on the Mac also write it directly, which is a cutover prerequisite (gt-yjzepk.10)"},
-		{Path: ".runtime/landings", Owner: OwnerDaemon, Why: "landing ledgers the daemon writes"},
+		{Path: ".runtime/landings", Owner: OwnerDaemon, Rollback: true, Why: "landing ledgers the daemon writes; rollback replays the landing records"},
 		{Path: ".runtime/usage", Owner: OwnerDaemon, Why: "usage records the daemon writes"},
 		{Path: ".runtime/sweep-runs", Owner: OwnerDaemon, Why: "tier sweep output the daemon writes"},
 		{Path: ".runtime/overrun-guard", Owner: OwnerDaemon, Why: "overrun guard state the daemon writes"},
 		{Path: ".runtime/metrics", Owner: OwnerDaemon, Why: "resource samples the daemon writes"},
 		{Path: ".runtime/landing-om", Owner: OwnerDaemon, Why: "landing om evidence the daemon writes"},
-		{Path: ".runtime/spec_dispatch", Owner: OwnerDaemon, Why: "spec dispatcher state the daemon writes"},
+		{Path: ".runtime/spec_dispatch", Owner: OwnerDaemon, Rollback: true, Why: "spec dispatcher state the daemon writes; rollback replays it"},
 		{Path: ".runtime/heartbeats", Owner: OwnerDaemon, Why: "daemon heartbeats"},
 		{Path: ".runtime/sandboxes", Owner: OwnerDaemon, Why: "sandbox records the daemon writes"},
 		{Path: ".runtime/landing-logs", Owner: OwnerDaemon, Why: "landing stage logs the daemon writes"},
 		{Path: ".runtime/attention", Owner: OwnerDaemon, Why: "the attention queue the daemon writes"},
-		{Path: ".runtime/red-main", Owner: OwnerDaemon, Why: "red-main status the landing worker writes"},
-		{Path: ".runtime/locks", Owner: OwnerDaemon, Why: "town lock files the daemon takes"},
-		{Path: ".runtime/container", Owner: OwnerDaemon, Why: "the container's kubeconfig and state the daemon writes"},
+		{Path: ".runtime/red-main", Owner: OwnerDaemon, Rollback: true, Why: "red-main status the landing worker writes; rollback replays the statuses"},
+		{Path: ".runtime/locks", Owner: OwnerDaemon, Why: "town lock files the daemon takes; export skips the files themselves and keeps the directory"},
+		{Path: ".runtime/container", Owner: OwnerDaemon, Private: true, Why: "the container's kubeconfig and state the daemon writes; the kubeconfig and the 0600 configs beside it must keep their modes through a copy"},
 		{Path: ".runtime/daemon-image", Owner: OwnerDaemon, Why: "the daemon image build record"},
 		{Path: ".runtime/reports", Owner: OwnerDaemon, Why: "the published bird reports gt report publish writes, one directory per bird (gt-yjzepk.3)"},
 
@@ -148,6 +166,12 @@ func (e Entry) Validate() error {
 	if strings.TrimSpace(e.Why) == "" {
 		return fmt.Errorf("town-state entry %q: why is empty; say what the path holds", e.Path)
 	}
+	if e.Rollback && e.Owner != OwnerDaemon {
+		return fmt.Errorf("town-state entry %q: rollback: true needs a daemon owner; only the daemon-owned set travels to the volume and back", e.Path)
+	}
+	if e.Private && e.Owner != OwnerDaemon {
+		return fmt.Errorf("town-state entry %q: private: true needs a daemon owner; only the daemon-owned set is copied", e.Path)
+	}
 	for _, seg := range strings.Split(e.Path, "/") {
 		switch seg {
 		case "":
@@ -171,6 +195,20 @@ func (m *Manifest) Validate() error {
 		}
 	}
 	return nil
+}
+
+// Rollback returns the rows tagged rollback: true, in manifest order. It is the
+// one-way state list a rollback replays from the volume onto the Mac tree;
+// `gt town state export --rollback` takes it from here so seed, rollback and
+// the guard cannot disagree about what it is.
+func (m *Manifest) Rollback() []Entry {
+	var out []Entry
+	for _, e := range m.Entries {
+		if e.Rollback {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // Expand replaces the rig and bird placeholders with the names a town has.

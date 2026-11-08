@@ -262,6 +262,33 @@ func TestVerifyNamesEveryRig(t *testing.T) {
 	}
 }
 
+// TestVerifyKeepsConfigJSONAsARigMarker holds verify's classification apart
+// from the copy's: a directory that holds only a config.json is still a rig to
+// verify, so its session trees are classified, while the rig list export and
+// import take from the settings (settingsRigs) names no rig here.
+func TestVerifyKeepsConfigJSONAsARigMarker(t *testing.T) {
+	t.Parallel()
+	fsys := fstest.MapFS{
+		"mayor/town.json":          {Data: []byte("{}")},
+		"gastown/config.json":      {Data: []byte("{}")},
+		"gastown/crew/eagle/a.txt": {Data: []byte("x")},
+	}
+	problems, err := Verify(fsys, Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(problems) != 0 {
+		t.Errorf("Verify reported a rig marked only by its config.json: %v", problems)
+	}
+	rigs, err := settingsRigs(fsys)
+	if err != nil {
+		t.Fatalf("settingsRigs: %v", err)
+	}
+	if len(rigs) != 0 {
+		t.Errorf("settingsRigs named %v, want no rig: the registry is the copy's only source", rigs)
+	}
+}
+
 // TestVerifyReportsAnUnclassifiedDirectoryOnce: a directory no entry names is
 // one problem at its own path, not one per descendant, so a wrong rule shows as
 // one line.

@@ -252,6 +252,16 @@ func registryRigs(fsys fs.FS) ([]string, error) {
 	return slices.Sorted(maps.Keys(cfg.Rigs)), nil
 }
 
+// settingsRigs names the rigs the town registers, from the settings the landing
+// worker and the daemon read: the registry the copy's rig rows expand to. Export
+// and import use this list and only this list; a top-level directory that merely
+// holds a config.json is not a rig to them, so its contents never become
+// daemon-owned. Verify keeps its own, broader classification through
+// townInputs (gt-gg9hv.68).
+func settingsRigs(fsys fs.FS) ([]string, error) {
+	return registryRigs(fsys)
+}
+
 // readMachineTopLevel returns the top-level keys of mayor/town.json, nil when
 // the file is absent. A file that is not a JSON object is an error: verify
 // cannot tell whether it carries the registry.
