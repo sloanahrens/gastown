@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -60,11 +63,16 @@ unified diff of the old and new documents. A value that looks like a token is
 refused, and the diff redacts values under such keys; 'gt config secrets migrate'
 moves a literal token to settings/daemon.env.
 
+A value passed as an argument is visible in the process list, so a value that
+looks like a token is refused there and must come through standard input with
+'-' instead.
+
 Examples:
   gt config daemon get daemon.patrols.overrun_guard
   gt config daemon get                       # the whole file
   gt config daemon set cli_theme '"dark"' --label theme
   gt config daemon set daemon.env '{"GT_SEAT_REFILL_MAX_PRIORITY": "50"}' --label env
+  gt config daemon set daemon.env - --label env < env.json   # the value from stdin
   gt config daemon unset disabled_patrols.0 --label patrols
   gt config daemon diff                      # what the last write changed`,
 	RunE: requireSubcommand,
@@ -115,6 +123,19 @@ type configDaemonEnv struct {
 	errOut   io.Writer
 	in       io.Reader
 	now      func() time.Time
+	// update is how a write reaches the file. Nil is
+	// config.UpdateConfigJSONNoWait; a test injects a writer that fails after
+	// the mutate (and its backup) ran, so the cleanup has a failure to answer.
+	update func(path string, perm os.FileMode, mutate func(*json.RawMessage, bool) error) error
+}
+
+// updateConfig runs a write through the writer the command shares with the
+// daemon's reload, or the one a test injected.
+func (e configDaemonEnv) updateConfig(path string, perm os.FileMode, mutate func(*json.RawMessage, bool) error) error {
+	if e.update != nil {
+		return e.update(path, perm, mutate)
+	}
+	return config.UpdateConfigJSONNoWait(path, perm, mutate)
 }
 
 func cwdConfigDaemonEnv() configDaemonEnv {
@@ -166,6 +187,11 @@ func configDaemonSet(e configDaemonEnv, pathArg, valueArg, label string) error {
 	value, err := parseDaemonConfigValue(valueArg, e.in)
 	if err != nil {
 		return err
+	}
+	if valueArg != "-" {
+		if err := refuseValueInArgv(pathArg, value); err != nil {
+			return err
+		}
 	}
 	return applyDaemonConfigChange(e, label, func(tree map[string]any) error {
 		return setAtPath(tree, pathArg, value)
@@ -250,7 +276,8 @@ func validateDaemonConfigDocument(path string, data []byte) (*config.TownSetting
 
 // applyDaemonConfigChange applies change to the file's document under its lock. A
 // document the loader refuses, one holding a new literal token, or a held lock
-// leaves the file and the backups as they were.
+// leaves the file and the backups as they were: a write that fails after its
+// backup removes that backup again (gt-yjzepk.4).
 func applyDaemonConfigChange(e configDaemonEnv, label string, change func(tree map[string]any) error) error {
 	if err := validateDaemonConfigLabel(label); err != nil {
 		return err
@@ -261,7 +288,8 @@ func applyDaemonConfigChange(e configDaemonEnv, label string, change func(tree m
 	}
 	rel := config.SourcePathRel(townRoot, path)
 	var before, after map[string]any
-	err = config.UpdateConfigJSONNoWait(path, 0o600, func(cur *json.RawMessage, exists bool) error {
+	backup := ""
+	err = e.updateConfig(path, 0o600, func(cur *json.RawMessage, exists bool) error {
 		oldTree := map[string]any{}
 		if exists {
 			var decodeErr error
@@ -288,18 +316,20 @@ func applyDaemonConfigChange(e configDaemonEnv, label string, change func(tree m
 		}
 		if exists {
 			stamp := e.now().UTC().Format(daemonConfigStampFormat) + "-" + label
-			if _, err := config.BackupFileRetained(path, stamp, daemonConfigRetention, func(removed string) {
+			created, err := config.BackupFileRetained(path, stamp, daemonConfigRetention, func(removed string) {
 				fmt.Fprintf(e.errOut, "removed backup %s\n", removed)
-			}); err != nil {
+			})
+			if err != nil {
 				return err
 			}
+			backup = created
 		}
 		before, after = oldTree, newTree
 		*cur = json.RawMessage(data)
 		return nil
 	})
 	if err != nil {
-		return err
+		return errors.Join(err, removeDaemonConfigBackup(backup))
 	}
 	if before == nil {
 		return nil
@@ -307,6 +337,19 @@ func applyDaemonConfigChange(e configDaemonEnv, label string, change func(tree m
 	// The change is written: the diff reports what it did, not what it meant
 	// to do.
 	fmt.Fprintf(e.out, "%s", daemonConfigDiff(rel, before, after))
+	return nil
+}
+
+// removeDaemonConfigBackup deletes the copy a failed write leaves behind, so
+// the last backup stays the last change's. A deletion that fails is returned,
+// never dropped (gt-yjzepk.4).
+func removeDaemonConfigBackup(path string) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("removing the backup %s after a failed write: %w", path, err)
+	}
 	return nil
 }
 
@@ -320,6 +363,44 @@ func validateDaemonConfigLabel(label string) error {
 		return fmt.Errorf("--label %q: use letters, digits, '.', '_' and '-' only, starting with a letter or digit", label)
 	}
 	return nil
+}
+
+// refuseValueInArgv refuses a value that looks like a literal token when it
+// arrived as an argument: an argument is visible in the process list, so such
+// a value must come through standard input with '-' (gt-yjzepk.4). The key is
+// named and the value never is.
+func refuseValueInArgv(pathArg string, value any) error {
+	leaf := pathArg
+	if segments, err := jsonPathSegments(pathArg); err == nil {
+		leaf = segments[len(segments)-1]
+	}
+	if secretLikeValue(leaf, value) {
+		return fmt.Errorf("the value at %s looks like a literal token: pass it on standard input as 'gt config daemon set %s -', so it is not in the process list",
+			pathArg, pathArg)
+	}
+	return nil
+}
+
+// secretLikeValue reports whether any string in value looks like a token under
+// key, which is the value's own key or, inside a list, the key it was set for.
+func secretLikeValue(key string, value any) bool {
+	switch v := value.(type) {
+	case string:
+		return config.LooksLikeSecret(key, v)
+	case map[string]any:
+		for _, k := range slices.Sorted(maps.Keys(v)) {
+			if secretLikeValue(k, v[k]) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range v {
+			if secretLikeValue(key, item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseDaemonConfigValue parses the JSON value 'set' carries, read from stdin
@@ -412,8 +493,11 @@ func redactDaemonConfigTree(node any) any {
 }
 
 // newestDaemonConfigBackup is the newest config.json.bak-* copy beside path, ""
-// when there is none. The name carries the UTC stamp, so the greatest name is
-// the last write's copy: it holds the document that write replaced.
+// when there is none. It is the last write's copy, which holds the document
+// that write replaced. The stamp in the name has one-second resolution and the
+// label sorts with it, so two writes in one second can put the later copy
+// behind an earlier one: the modification time decides, and the name breaks a
+// tie (gt-yjzepk.4).
 func newestDaemonConfigBackup(path string) (string, error) {
 	dir := filepath.Dir(path)
 	prefix := filepath.Base(path) + ".bak-"
@@ -425,12 +509,23 @@ func newestDaemonConfigBackup(path string) (string, error) {
 		return "", fmt.Errorf("reading %s: %w", dir, err)
 	}
 	newest := ""
+	var newestMod time.Time
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
 			continue
 		}
-		if entry.Name() > newest {
-			newest = entry.Name()
+		info, err := entry.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // removed between the read and the stat
+		}
+		if err != nil {
+			return "", fmt.Errorf("reading %s: %w", filepath.Join(dir, entry.Name()), err)
+		}
+		switch {
+		case newest == "",
+			info.ModTime().After(newestMod),
+			info.ModTime().Equal(newestMod) && entry.Name() > newest:
+			newest, newestMod = entry.Name(), info.ModTime()
 		}
 	}
 	if newest == "" {

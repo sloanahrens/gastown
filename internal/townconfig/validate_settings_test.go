@@ -49,6 +49,24 @@ func TestValidateSettingsDocumentRefusesWhatTheLoadRefuses(t *testing.T) {
 			        "secrets":{"refuse_literals":true}}`,
 			want: "a literal token",
 		},
+		{
+			name: "a scheduled run_agent with no seat",
+			body: `{"type":"town-settings","version":1,
+			        "agents":{"claude-sonnet":{"command":"claude"}},
+			        "polecat_pool":{"seats":{"claude-sonnet":{"cap":1}}},
+			        "daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_slings":{"enabled":true,
+			          "entries":[{"name":"deep-review","rig":"gastown","formula":"mol-deep-review","interval":"1h","dispatch":"spec","run_agent":"claude-opus"}]}}}}`,
+			want: `scheduled_slings[deep-review].run_agent "claude-opus": no seat for that agent in polecat_pool.seats`,
+		},
+		{
+			name: "a scheduled run_agent without dispatch spec",
+			body: `{"type":"town-settings","version":1,
+			        "agents":{"claude-sonnet":{"command":"claude"}},
+			        "polecat_pool":{"seats":{"claude-sonnet":{"cap":1}}},
+			        "daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_slings":{"enabled":true,
+			          "entries":[{"name":"deep-review","rig":"gastown","formula":"mol-deep-review","interval":"1h","run_agent":"claude-sonnet"}]}}}}`,
+			want: `scheduled_slings[deep-review].run_agent: valid only with dispatch "spec"`,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

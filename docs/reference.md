@@ -997,7 +997,14 @@ gt config default-agent [name]    # Get or set town default agent
 gt config get polecat_pool.max_priority     # Effective value: the file's, else
                                             # the default
 gt config set polecat_pool.max_priority 3   # Refused if the value cannot work
+
+# The daemon's settings/config.json, which may live on the daemon's volume
+gt config daemon get|set|unset|diff
 ```
+
+Before editing the daemon's settings file, run `gt config daemon --help`: it states
+the path syntax, the backup each write keeps, and how to pass a value on standard
+input so a token is not in the process list.
 
 **Built-in agents**: `claude`, `groq-compound` (the Claude CLI over Groq). Every
 agent runs the Claude Code CLI or a wrapper that execs it, and gets the town's
