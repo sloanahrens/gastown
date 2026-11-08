@@ -429,17 +429,13 @@ func sha256Digest(body []byte) string {
 // response header and the raw body, because the caller hashes the body to check
 // the digest the registry reported against it.
 func (r registryReader) getJSON(ctx context.Context, rawURL string, limit int64, out any) (http.Header, []byte, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return nil, nil, fmt.Errorf("the registry URL %q is not a URL: %w", rawURL, err)
-	}
-	if err := checkCredentialTransport(u, r.plaintextHost); err != nil {
-		return nil, nil, err
-	}
 	ctx, cancel := context.WithTimeout(ctx, updateImagesTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
+		return nil, nil, fmt.Errorf("the registry URL is not a URL: %w", err)
+	}
+	if err := checkCredentialTransport(req.URL, r.plaintextHost); err != nil {
 		return nil, nil, err
 	}
 	req.Header.Set("Accept", updateImagesAccept)
@@ -491,17 +487,13 @@ func (r registryReader) client() *http.Client {
 // address nor the town's own Forgejo service, because the viewer credential
 // would otherwise cross a network in clear text to whoever answers there.
 func checkCredentialTransport(u *url.URL, plaintextHost string) error {
-	switch u.Scheme {
-	case "https":
+	if u.Scheme == "https" {
 		return nil
-	case "http":
-		if isLoopbackHost(u.Host) || (plaintextHost != "" && u.Host == plaintextHost) {
-			return nil
-		}
-		return fmt.Errorf("refusing to send the registry credential over http to %s: http is allowed only to a loopback address or the town's own Forgejo service, every other registry is read over https", u.Host)
-	default:
-		return fmt.Errorf("the registry URL scheme %q is not http or https", u.Scheme)
 	}
+	if u.Scheme == "http" && (isLoopbackHost(u.Host) || (plaintextHost != "" && u.Host == plaintextHost)) {
+		return nil
+	}
+	return fmt.Errorf("refusing to send the registry credential over %s to %s: http is allowed only to a loopback address or the town's own Forgejo service, every other registry is read over https", u.Scheme, u.Host)
 }
 
 // isLoopbackHost reports whether host, with an optional port, is a loopback

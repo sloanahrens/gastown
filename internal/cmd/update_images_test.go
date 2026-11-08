@@ -1052,6 +1052,48 @@ func TestTownImageRegistryReadsTheTownsForgejo(t *testing.T) {
 			},
 			want: "remote",
 		},
+		{
+			name: "a daemon settings file that does not parse",
+			files: map[string]string{
+				"mayor/rigs.json":   rigsJSON,
+				"mayor/daemon.json": "{not json",
+			},
+			want: "daemon settings",
+		},
+		{
+			name: "a rig registry that cannot be read",
+			files: map[string]string{
+				"mayor/daemon.json": daemon,
+			},
+			want: "rig registry",
+		},
+		{
+			name: "a rig whose settings do not parse",
+			files: map[string]string{
+				"mayor/rigs.json":     rigsJSON,
+				"mayor/daemon.json":   daemon,
+				"gastown/config.json": "{not json",
+			},
+			want: "Forgejo settings",
+		},
+		{
+			name: "a Forgejo remote that names no repository",
+			files: map[string]string{
+				"mayor/rigs.json":     rigsJSON,
+				"mayor/daemon.json":   daemon,
+				"gastown/config.json": rigConfig("https://forgejo.example.com"),
+			},
+			want: "owner and repository",
+		},
+		{
+			name: "a Forgejo remote over another scheme",
+			files: map[string]string{
+				"mayor/rigs.json":     rigsJSON,
+				"mayor/daemon.json":   daemon,
+				"gastown/config.json": rigConfig("ftp://forgejo.example.com/acme/gastown"),
+			},
+			want: "scheme",
+		},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
