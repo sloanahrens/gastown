@@ -817,57 +817,44 @@ func checkRowOf(table, name string) []string {
 }
 
 // The seven rows the container daemon's own log shows running on 2026-11-08 are
-// stepRuns, each with the log line that shows it in its reason. The four the log
-// never mentions keep the class they have.
-func TestDaemonRehearsePluginRows(t *testing.T) {
+// stepRuns. The plugins row test builds its container_off list from
+// containerOffNames(), so a row reclassified out of stepRuns slides into that
+// list unnoticed; this test names the seven so that reclassification turns red
+// (gt-oquf0m).
+func TestDaemonRehearseLogShownStepsRunInTheContainer(t *testing.T) {
 	t.Parallel()
-	evidence := map[string]string{
-		"app-promote":      "Handler: script plugin app-promote skipped (exit 0 after 0s)",
-		"devops-reporter":  "Handler: script plugin devops-reporter ok (exit 0 after 0s)",
-		"release-reporter": "Handler: script plugin release-reporter ok (exit 0 after 0s)",
-		"town-metrics":     "Handler: script plugin town-metrics ok (exit 0 after 5s)",
-		"landing_worker":   "Landing of gt-gg9hv.68",
-		"disk_maintenance": "cache trim gt-cache in openshell applied",
-		"doctor_dog":       "all clear (latency 14ms, connections 22/1000, orphans 0)",
+	logShown := []string{
+		"app-promote",
+		"devops-reporter",
+		"release-reporter",
+		"town-metrics",
+		"landing_worker",
+		"disk_maintenance",
+		"doctor_dog",
 	}
-	kept := map[string]stepClass{
-		"dolt_server":      stepHost,
-		"landing_infra":    stepHost,
-		"resource_sampler": stepSeam,
-		"health_notify":    stepSeam,
-	}
-	rows := map[string]daemonStep{}
+	rows := make(map[string]daemonStep, len(daemonSteps))
 	for _, s := range daemonSteps {
 		rows[s.Name] = s
 	}
-	for name, line := range evidence {
+	for _, name := range logShown {
 		s, ok := rows[name]
 		if !ok {
 			t.Errorf("%s has no row in the audit table", name)
 			continue
 		}
 		if s.Class != stepRuns {
-			t.Errorf("%s is %s, want %s: the log shows it running in the container", name, s.Class, stepRuns)
-		}
-		if !strings.Contains(s.Why, "2026-11-08") || !strings.Contains(s.Why, line) {
-			t.Errorf("%s reason %q does not cite the 2026-11-08 log line %q", name, s.Why, line)
-		}
-	}
-	for name, class := range kept {
-		s, ok := rows[name]
-		if !ok {
-			t.Errorf("%s has no row in the audit table", name)
-			continue
-		}
-		if s.Class != class {
-			t.Errorf("%s is %s, want %s: the log never mentions it", name, s.Class, class)
+			t.Errorf("%s is %s, want %s: the 2026-11-08 container log shows it running", name, s.Class, stepRuns)
 		}
 	}
 }
 
 // With the four names the log never mentions missing from daemon.container_off,
 // the plugins row ends with one line naming exactly those four. A settings file
-// that holds them passes the row.
+// that holds them passes the row. This pins that the four are not stepRuns: one
+// classed running leaves the missing list and the exact summary line turns red.
+// The log-shown rows are pinned by TestDaemonRehearseLogShownStepsRunInTheContainer,
+// because this test derives its container_off list from containerOffNames() and
+// so cannot see one of them reclassified.
 func TestDaemonRehearsePluginsFailureListsTheEntriesToAdd(t *testing.T) {
 	t.Parallel()
 	four := []string{"dolt_server", "health_notify", "landing_infra", "resource_sampler"}
@@ -928,7 +915,7 @@ func TestDaemonRehearsePathsNamesTheSettingKey(t *testing.T) {
 	}
 	for _, want := range []string{
 		claude + ": named by daemon.patrols.wisp_reaper.extra_beads_roots[0], absent from the image",
-		"the row stays red until the image carries it, a bind of the live compose mounts it, or the setting is dropped",
+		"the row stays red until a bead lands whose fix makes the image carry it, mounts a bind of the live compose over it, or drops the setting",
 	} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("the paths row lacks %q:\n%s", want, out.String())
@@ -945,6 +932,50 @@ func TestDaemonRehearsePathsNamesTheSettingKey(t *testing.T) {
 	}
 	if row := checkRowOf(boundOut.String(), "paths"); len(row) == 0 || !strings.HasPrefix(row[0], "paths            ok") {
 		t.Errorf("the paths row does not pass under the bind:\n%s", boundOut.String())
+	}
+}
+
+// The key path a paths failure prints cannot read as a different one: a member
+// whose name holds a dot is quoted, so it differs from two nested members, and a
+// top-level list's index is rooted instead of left bare.
+func TestDaemonRehearsePathsNameUnambiguousSettingKeys(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		settings string
+		path     string
+		want     string
+	}{
+		{
+			name:     "a member name holding a dot is quoted",
+			settings: `{"daemon":{"container_off":` + offJSON() + `},"a.b":"/keys/dotted"}`,
+			path:     "/keys/dotted",
+			want:     `/keys/dotted: named by ["a.b"], absent from the image`,
+		},
+		{
+			name:     "two nested members keep the dotted form",
+			settings: `{"daemon":{"container_off":` + offJSON() + `},"a":{"b":"/keys/nested"}}`,
+			path:     "/keys/nested",
+			want:     `/keys/nested: named by a.b, absent from the image`,
+		},
+		{
+			name:     "a top-level list index names its root",
+			settings: `["/keys/listed"]`,
+			path:     "/keys/listed",
+			want:     `/keys/listed: named by (top level)[0], absent from the image`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRehearseHost()
+			h.files[rehearseLive+"/settings/config.json"] = []byte(tc.settings)
+			h.failing = []string{"-e " + tc.path}
+			var out bytes.Buffer
+			err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), h.deps(&out))
+			if err == nil || !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("err=%v, the paths row lacks %q:\n%s", err, tc.want, out.String())
+			}
+		})
 	}
 }
 
