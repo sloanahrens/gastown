@@ -40,7 +40,7 @@ func TestTownStateExportStreamsTheDaemonSetAndSummarises(t *testing.T) {
 	writeTownStateFile(t, town, "gastown/polecats/toast/work.md")
 
 	var stream, summary bytes.Buffer
-	err := runTownStateExportIn(townStateExportEnv{town: town, out: &stream, summary: &summary})
+	err := runTownStateExportIn(townStateExportEnv{allowNoRigs: true, town: town, out: &stream, summary: &summary})
 	if err != nil {
 		t.Fatalf("runTownStateExportIn: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestTownStateExportDropsFilesBeforeSince(t *testing.T) {
 	writeTownStateFile(t, town, "logs/daemon.log")
 
 	var stream, summary bytes.Buffer
-	if err := runTownStateExportIn(townStateExportEnv{
+	if err := runTownStateExportIn(townStateExportEnv{allowNoRigs: true,
 		town:    town,
 		since:   "2999-01-01T00:00:00Z",
 		out:     &stream,
@@ -103,7 +103,7 @@ func TestTownStateImportRestoresTheArchive(t *testing.T) {
 	writeTownStateFile(t, source, "daemon/maintenance_state.json")
 
 	var stream, summary bytes.Buffer
-	if err := runTownStateExportIn(townStateExportEnv{town: source, out: &stream, summary: &summary}); err != nil {
+	if err := runTownStateExportIn(townStateExportEnv{allowNoRigs: true, town: source, out: &stream, summary: &summary}); err != nil {
 		t.Fatalf("runTownStateExportIn: %v", err)
 	}
 
@@ -166,7 +166,7 @@ func TestTownStateExportRollbackSelectsTheOneWaySet(t *testing.T) {
 	writeTownStateFile(t, town, "gastown/crew/eagle/notes.md")
 
 	var stream, summary bytes.Buffer
-	if err := runTownStateExportIn(townStateExportEnv{
+	if err := runTownStateExportIn(townStateExportEnv{allowNoRigs: true,
 		town:     town,
 		rollback: true,
 		out:      &stream,

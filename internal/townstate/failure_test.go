@@ -280,7 +280,7 @@ func TestExportDrivesWalkAndFileFailures(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, err := Export(tc.w, town, Default(), ExportOptions{ops: opsWith(tc.over)})
+			_, err := Export(tc.w, town, Default(), ExportOptions{AllowNoRigs: true, ops: opsWith(tc.over)})
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Export = %v, want an error holding %q", err, tc.want)
 			}

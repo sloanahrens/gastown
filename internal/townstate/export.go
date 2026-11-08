@@ -63,6 +63,10 @@ type ExportSummary struct {
 	// refuse it: the daemon-owned row that holds it and the reason, never the
 	// link's own name.
 	LinkRefusals []string
+	// RigRowsDropped counts the rig-scoped daemon rows the archive lacks
+	// because the town's registry names no rig. It is zero for a town with
+	// rigs; non-zero only under ExportOptions.AllowNoRigs.
+	RigRowsDropped int
 }
 
 // String renders the summary for the export command's standard error.
@@ -75,6 +79,9 @@ func (s ExportSummary) String() string {
 	}
 	for _, line := range s.LinkRefusals {
 		fmt.Fprintf(&b, "\nskipped link %s", line)
+	}
+	if s.RigRowsDropped > 0 {
+		fmt.Fprintf(&b, "\nWARNING: the town registers no rigs, so %d rig-scoped daemon rows are NOT in this archive", s.RigRowsDropped)
 	}
 	b.WriteString("\nskipped:")
 	printed := false
@@ -99,6 +106,11 @@ type ExportOptions struct {
 	// Since keeps only regular files modified after it; the zero time keeps
 	// every file. Directories are always written.
 	Since time.Time
+	// AllowNoRigs lets an export of a town whose registry names no rig succeed,
+	// without the rig-scoped rows. Without it that export is refused with
+	// ErrNoRigs: an archive that silently lacks every rig row looks complete
+	// and is not.
+	AllowNoRigs bool
 	// ops is the filesystem seam a test replaces; the zero value is the host.
 	ops townOps
 }
@@ -126,6 +138,12 @@ func Export(w io.Writer, root string, m *Manifest, opts ExportOptions) (ExportSu
 	rigs, err := settingsRigs(os.DirFS(townRoot))
 	if err != nil {
 		return s, fmt.Errorf("reading the town's rigs: %w", err)
+	}
+	if len(rigs) == 0 {
+		s.RigRowsDropped = rigScopedDaemonRows(m)
+		if s.RigRowsDropped > 0 && !opts.AllowNoRigs {
+			return s, ErrNoRigs
+		}
 	}
 	walk := &exportWalk{
 		tw:      tar.NewWriter(w),
@@ -386,6 +404,24 @@ func resolveTownRoot(ops townOps, root string) (string, error) {
 		return "", fmt.Errorf("the town root %q is not a directory", root)
 	}
 	return filepath.Clean(root), nil
+}
+
+// ErrNoRigs is the refusal for an export of a town whose registry names no rig
+// while the manifest has rig-scoped daemon rows: both mayor/town.json (its
+// "registry" section) and mayor/rigs.json are absent or empty. Pass
+// ExportOptions.AllowNoRigs (--allow-no-rigs) for a town that really has none.
+var ErrNoRigs = errors.New("the town registers no rigs (no registry in mayor/town.json and no mayor/rigs.json), so every rig-scoped row would be missing from the archive; pass --allow-no-rigs if the town has no rigs")
+
+// rigScopedDaemonRows counts the manifest's daemon-owned rows that carry the
+// rig placeholder.
+func rigScopedDaemonRows(m *Manifest) int {
+	n := 0
+	for _, e := range m.Entries {
+		if e.Owner == OwnerDaemon && strings.Contains(e.Path, RigPlaceholder) {
+			n++
+		}
+	}
+	return n
 }
 
 // daemonEntries returns the daemon-owned rows expanded for rigs, in manifest

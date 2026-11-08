@@ -109,6 +109,7 @@ func init() {
 
 	townStateExportCmd.Flags().String("town", "", "the town root to export (required)")
 	townStateExportCmd.Flags().String("since", "", "keep only regular files modified after this RFC 3339 time (optional)")
+	townStateExportCmd.Flags().Bool("allow-no-rigs", false, "export a town whose registry names no rig (the rig-scoped rows are then missing; the summary says so)")
 	townStateExportCmd.Flags().Bool("rollback", false, "write only the rows tagged rollback: true (the one-way state a rollback replays)")
 	_ = townStateExportCmd.MarkFlagRequired("town")
 	townStateImportCmd.Flags().String("town", "", "the town root to import into (required)")
@@ -164,11 +165,12 @@ func verifyTownState(w io.Writer, fsys fs.FS, m *townstate.Manifest, now time.Ti
 
 // townStateExportEnv is what the export command reads from its session.
 type townStateExportEnv struct {
-	town     string
-	since    string
-	rollback bool
-	out      io.Writer
-	summary  io.Writer
+	town        string
+	since       string
+	rollback    bool
+	allowNoRigs bool
+	out         io.Writer
+	summary     io.Writer
 }
 
 func runTownStateExport(cmd *cobra.Command, _ []string) error {
@@ -184,12 +186,17 @@ func runTownStateExport(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("reading --rollback: %w", err)
 	}
+	allowNoRigs, err := cmd.Flags().GetBool("allow-no-rigs")
+	if err != nil {
+		return fmt.Errorf("reading --allow-no-rigs: %w", err)
+	}
 	return runTownStateExportIn(townStateExportEnv{
-		town:     town,
-		since:    since,
-		rollback: rollback,
-		out:      cmd.OutOrStdout(),
-		summary:  cmd.ErrOrStderr(),
+		town:        town,
+		since:       since,
+		rollback:    rollback,
+		allowNoRigs: allowNoRigs,
+		out:         cmd.OutOrStdout(),
+		summary:     cmd.ErrOrStderr(),
 	})
 }
 
@@ -209,7 +216,7 @@ func runTownStateExportIn(env townStateExportEnv) error {
 	if env.rollback {
 		m = &townstate.Manifest{Entries: m.Rollback()}
 	}
-	s, err := townstate.Export(env.out, env.town, m, townstate.ExportOptions{Since: since})
+	s, err := townstate.Export(env.out, env.town, m, townstate.ExportOptions{Since: since, AllowNoRigs: env.allowNoRigs})
 	fmt.Fprintln(env.summary, s.String())
 	if err != nil {
 		return fmt.Errorf("exporting the town state: %w", err)

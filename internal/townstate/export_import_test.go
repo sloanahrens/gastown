@@ -3,6 +3,7 @@ package townstate
 import (
 	"archive/tar"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -661,7 +662,7 @@ func TestExportSinceAndRollbackSet(t *testing.T) {
 	}
 
 	var stream bytes.Buffer
-	sum, err := Export(&stream, town, Default(), ExportOptions{Since: now.Add(-24 * time.Hour)})
+	sum, err := Export(&stream, town, Default(), ExportOptions{AllowNoRigs: true, Since: now.Add(-24 * time.Hour)})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -750,7 +751,7 @@ func TestExportNeverFollowsSymlinks(t *testing.T) {
 	}
 
 	var stream bytes.Buffer
-	sum, err := Export(&stream, town, Default(), ExportOptions{})
+	sum, err := Export(&stream, town, Default(), ExportOptions{AllowNoRigs: true})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -828,7 +829,7 @@ func TestExportRefusesSymlinkedAncestor(t *testing.T) {
 			tc.bad(t, town)
 
 			var stream bytes.Buffer
-			_, err := Export(&stream, town, Default(), ExportOptions{})
+			_, err := Export(&stream, town, Default(), ExportOptions{AllowNoRigs: true})
 			if err == nil || !strings.Contains(err.Error(), ".runtime") || !strings.Contains(err.Error(), "not a directory") {
 				t.Fatalf("Export over %s = %v, want a refusal naming .runtime", tc.name, err)
 			}
@@ -852,7 +853,7 @@ func TestExportSkipsLinksTheImportRefuses(t *testing.T) {
 	}
 
 	var stream bytes.Buffer
-	sum, err := Export(&stream, town, Default(), ExportOptions{})
+	sum, err := Export(&stream, town, Default(), ExportOptions{AllowNoRigs: true})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -900,7 +901,7 @@ func TestExportJudgesLinksByTheArchiveNotTheSource(t *testing.T) {
 	}
 
 	var stream bytes.Buffer
-	sum, err := Export(&stream, town, Default(), ExportOptions{})
+	sum, err := Export(&stream, town, Default(), ExportOptions{AllowNoRigs: true})
 	if err != nil {
 		t.Fatalf("Export: %v", err)
 	}
@@ -919,4 +920,79 @@ func TestExportJudgesLinksByTheArchiveNotTheSource(t *testing.T) {
 	if _, err := Import(bytes.NewReader(stream.Bytes()), t.TempDir(), Default(), ImportOptions{}); err != nil {
 		t.Fatalf("Import of the rest: %v", err)
 	}
+}
+
+// TestExportRefusesATownWithNoRigRegistry drives the silent-loss case: a town
+// whose registry names no rig (neither a "registry" section in mayor/town.json
+// nor mayor/rigs.json) yields no rig-scoped rows, so an archive of it looks
+// complete and is not. The export refuses with ErrNoRigs and writes nothing;
+// AllowNoRigs lets a town that really has no rigs through, and the summary then
+// says how many rows are missing.
+func TestExportRefusesATownWithNoRigRegistry(t *testing.T) {
+	t.Parallel()
+
+	// A town with daemon state under gastown/ but no registry anywhere.
+	newTown := func(t *testing.T) string {
+		t.Helper()
+		town := t.TempDir()
+		writeStateFile(t, town, "gastown/config.json", `{"name":"gastown"}`, 0o644)
+		writeStateFile(t, town, "logs/daemon.log", "daemon log\n", 0o644)
+		return town
+	}
+
+	t.Run("no registry is refused and writes nothing", func(t *testing.T) {
+		t.Parallel()
+		var stream bytes.Buffer
+		sum, err := Export(&stream, newTown(t), Default(), ExportOptions{})
+		if !errors.Is(err, ErrNoRigs) {
+			t.Fatalf("Export error = %v, want ErrNoRigs", err)
+		}
+		if names := archiveNames(t, stream.Bytes()); len(names) != 0 {
+			t.Errorf("a refused export wrote %v, want an empty archive", names)
+		}
+		if sum.RigRowsDropped == 0 {
+			t.Errorf("summary RigRowsDropped = 0, want the count of rig-scoped rows the archive would lack")
+		}
+	})
+
+	t.Run("an empty registry is refused the same way", func(t *testing.T) {
+		t.Parallel()
+		town := newTown(t)
+		writeStateFile(t, town, "mayor/town.json", `{"registry":{"version":1,"rigs":{}}}`, 0o644)
+		if _, err := Export(&bytes.Buffer{}, town, Default(), ExportOptions{}); !errors.Is(err, ErrNoRigs) {
+			t.Fatalf("Export error = %v, want ErrNoRigs for a registry with no rigs", err)
+		}
+	})
+
+	t.Run("AllowNoRigs exports and the summary says rows are missing", func(t *testing.T) {
+		t.Parallel()
+		var stream bytes.Buffer
+		sum, err := Export(&stream, newTown(t), Default(), ExportOptions{AllowNoRigs: true})
+		if err != nil {
+			t.Fatalf("Export with AllowNoRigs: %v", err)
+		}
+		if names := archiveNames(t, stream.Bytes()); slices.Contains(names, "gastown/config.json") {
+			t.Errorf("a town with no registry archived a rig row: %v", names)
+		}
+		if sum.RigRowsDropped == 0 || !strings.Contains(sum.String(), "WARNING: the town registers no rigs") {
+			t.Errorf("summary = %q (RigRowsDropped %d), want the missing rows named", sum.String(), sum.RigRowsDropped)
+		}
+	})
+
+	t.Run("a town with a registry is not affected", func(t *testing.T) {
+		t.Parallel()
+		town := newTown(t)
+		writeStateFile(t, town, "mayor/town.json", `{"registry":{"version":1,"rigs":{"gastown":{}}}}`, 0o644)
+		var stream bytes.Buffer
+		sum, err := Export(&stream, town, Default(), ExportOptions{})
+		if err != nil {
+			t.Fatalf("Export: %v", err)
+		}
+		if sum.RigRowsDropped != 0 || strings.Contains(sum.String(), "WARNING") {
+			t.Errorf("summary = %q, want no warning for a town with rigs", sum.String())
+		}
+		if names := archiveNames(t, stream.Bytes()); !slices.Contains(names, "gastown/config.json") {
+			t.Errorf("a registered rig's row is missing from the archive: %v", names)
+		}
+	})
 }
