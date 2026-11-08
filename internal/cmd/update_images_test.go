@@ -569,6 +569,46 @@ func TestUpdateImagesCredentialTransport(t *testing.T) {
 		}
 	})
 
+	// The rule's exact table: the one named service and port, case-insensitive
+	// on the host, and a loopback host on any port pass; every look-alike is
+	// refused. The command-level subtests above and below assert that a refusal
+	// makes no request.
+	t.Run("the exact host and port table", func(t *testing.T) {
+		t.Parallel()
+		path := "/v2/town/gastown-daemon/manifests/" + testUpdateImagesTag
+		rows := []struct {
+			url  string
+			want bool
+		}{
+			{"http://forgejo:3001" + path, false},
+			{"http://evil:3000" + path, false},
+			{"http://forgejo.evil.com:3000" + path, false},
+			{"http://forgejo" + path, false},
+			{"http://localhost.evil.com:3000" + path, false},
+			{"http://localhostx:3000" + path, false},
+			{"http://127.0.0.1.evil.com:3000" + path, false},
+			{"http://127.0.0.2:5000" + path, false},
+			{"http://FORGEJO:3000" + path, true},
+			{"http://forgejo:3000" + path, true},
+			{"http://127.0.0.1:45678" + path, true},
+			{"http://[::1]:45678" + path, true},
+			{"http://localhost:45678" + path, true},
+		}
+		for _, row := range rows {
+			u, err := url.Parse(row.url)
+			if err != nil {
+				t.Fatalf("parsing %s: %v", row.url, err)
+			}
+			err = checkCredentialTransport(u, plaintextHostOf(imagevalues.Registry{Scheme: "http", Host: u.Host}))
+			switch {
+			case row.want && err != nil:
+				t.Errorf("checkCredentialTransport(%s) = %v, want the credential allowed", row.url, err)
+			case !row.want && err == nil:
+				t.Errorf("checkCredentialTransport(%s) = nil, want a refusal", row.url)
+			}
+		}
+	})
+
 	t.Run("http to the town's Forgejo sends the credential", func(t *testing.T) {
 		t.Parallel()
 		var seen []fakeCredential
@@ -650,10 +690,19 @@ func TestUpdateImagesCredentialTransport(t *testing.T) {
 		}
 	})
 
-	// The plaintext exception is the one named service and port, not any
-	// dotless name: another service, or forgejo on another port, is read over
-	// https like every other non-loopback host.
-	for _, host := range []string{"registry:3000", "forgejo:8080"} {
+	// The plaintext exception is the exact host and port, not any dotless or
+	// look-alike name: each of these is read over https like every other
+	// non-loopback host, and no request carrying the credential is made.
+	for _, host := range []string{
+		"forgejo:3001",
+		"evil:3000",
+		"forgejo.evil.com:3000",
+		"forgejo",
+		"localhost.evil.com",
+		"localhostx",
+		"127.0.0.1.evil.com",
+		"127.0.0.2",
+	} {
 		t.Run("http to "+host+" is refused before a request", func(t *testing.T) {
 			t.Parallel()
 			requests := 0
@@ -1167,17 +1216,9 @@ func TestTownImageRegistryReadsTheTownsForgejo(t *testing.T) {
 // one the command reads is a failure, not two silent values.
 func TestUpdateImagesWorkflowNamesTheTownsRegistry(t *testing.T) {
 	t.Parallel()
-	const (
-		rigsJSON = `{"version":1,"rigs":{"gastown":{"git_url":"https://github.com/example/gastown.git"}}}`
-		daemon   = `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"enabled":true,"image_rigs":["gastown"]}}}`
-	)
-	townRoot := writeTownFixture(t, map[string]string{
-		"mayor/rigs.json":   rigsJSON,
-		"mayor/daemon.json": daemon,
-		"gastown/config.json": `{"type":"rig","version":1,"name":"gastown",` +
-			`"git_url":"https://github.com/example/gastown.git",` +
-			`"merge_queue":{"forgejo":{"remote_url":"http://forgejo:3000/sloan/gastown"}}}`,
-	})
+	// The fixture is the same town config TestImagesWorkflowNamesTheSharedImageConstants
+	// in internal/ci holds the workflow's env to.
+	townRoot := filepath.FromSlash("../../deploy/ci/testdata/images-town")
 	registry, err := townImageRegistry(townRoot)
 	if err != nil {
 		t.Fatalf("townImageRegistry: %v", err)

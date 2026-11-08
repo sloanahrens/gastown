@@ -1,0 +1,11 @@
+{
+  "type": "rig",
+  "version": 1,
+  "name": "gastown",
+  "git_url": "https://github.com/example/gastown.git",
+  "merge_queue": {
+    "forgejo": {
+      "remote_url": "http://forgejo:3000/sloan/gastown"
+    }
+  }
+}

@@ -282,6 +282,37 @@ func TestImageValuesRegistryRefusesAPartThatWouldNotReachAValue(t *testing.T) {
 	}
 }
 
+// TestImageValuesValidateMatchesTheWriter holds Validate and Write to one
+// answer: every registry Validate accepts can name a pair the writer records,
+// and a host the writer could not emit (a bracketed IPv6 literal, whose ref
+// would start a YAML flow sequence) is refused by Validate with the reason.
+func TestImageValuesValidateMatchesTheWriter(t *testing.T) {
+	t.Parallel()
+	for _, reg := range []imagevalues.Registry{
+		{Scheme: "https", Host: "registry.test", Owner: "town"},
+		{Scheme: "http", Host: "forgejo:3000", Owner: "town"},
+		{Scheme: "https", Host: "registry.test:5000", Owner: "town"},
+	} {
+		if err := reg.Validate(); err != nil {
+			t.Fatalf("Validate(%+v) = %v, want the registry accepted", reg, err)
+		}
+		v := imagevalues.Values{
+			Daemon:  reg.Ref(imagevalues.DaemonImage, testDigest),
+			Polecat: reg.Ref(imagevalues.PolecatImage, testDigest),
+			Commit:  testCommit,
+		}
+		if err := imagevalues.Write(filepath.Join(t.TempDir(), "images.yaml"), v); err != nil {
+			t.Errorf("Write of a pair from accepted registry %+v = %v; Validate accepts a value the writer cannot write", reg, err)
+		}
+	}
+
+	bracketed := imagevalues.Registry{Scheme: "https", Host: "[::1]:5000", Owner: "town"}
+	err := bracketed.Validate()
+	if err == nil || !strings.Contains(err.Error(), "bracketed IPv6") {
+		t.Fatalf("Validate of a bracketed host = %v, want a refusal naming the bracketed literal and why", err)
+	}
+}
+
 // TestImageValuesValidators holds the shapes the command and the reader share.
 func TestImageValuesValidators(t *testing.T) {
 	t.Parallel()

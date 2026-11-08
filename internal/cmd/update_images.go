@@ -245,12 +245,14 @@ const plaintextForgejoHost = "forgejo:3000"
 
 // plaintextHostOf is the one non-loopback host the viewer credential may reach
 // over http: the town's own Forgejo at forgejo:3000, when the town reaches it
-// in plaintext because it has no https endpoint. Any other host, including
-// another dotless service name or forgejo on another port, is refused the
-// credential and must be read over https.
+// in plaintext because it has no https endpoint. The host matches without
+// regard to case, as a host name does, but the port must be 3000: any other
+// host, including another dotless service name, a look-alike such as
+// forgejo.example.com, or forgejo on another port, is refused the credential
+// and must be read over https.
 func plaintextHostOf(r imagevalues.Registry) string {
-	if r.Scheme == "http" && r.Host == plaintextForgejoHost {
-		return r.Host
+	if r.Scheme == "http" && strings.EqualFold(r.Host, plaintextForgejoHost) {
+		return plaintextForgejoHost
 	}
 	return ""
 }
@@ -486,7 +488,7 @@ func checkCredentialTransport(u *url.URL, plaintextHost string) error {
 	if u.Scheme == "https" {
 		return nil
 	}
-	if u.Scheme == "http" && (isLoopbackHost(u.Host) || (plaintextHost != "" && u.Host == plaintextHost)) {
+	if u.Scheme == "http" && (isLoopbackHost(u.Host) || (plaintextHost != "" && strings.EqualFold(u.Host, plaintextHost))) {
 		return nil
 	}
 	return fmt.Errorf("refusing to send the registry credential over %s to %s: http is allowed only to a loopback address or the town's own Forgejo at %s, every other registry is read over https", u.Scheme, u.Host, plaintextForgejoHost)

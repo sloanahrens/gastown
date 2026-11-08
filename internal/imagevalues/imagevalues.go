@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -78,6 +79,9 @@ func (r Registry) Validate() error {
 		return fmt.Errorf("imagevalues: the registry scheme %q is not https or http", r.Scheme)
 	}
 	if !hostPattern.MatchString(r.Host) {
+		if strings.HasPrefix(r.Host, "[") {
+			return fmt.Errorf("imagevalues: the registry host %q is a bracketed IPv6 literal, which a values line cannot hold as a plain scalar", r.Host)
+		}
 		return fmt.Errorf("imagevalues: the registry host %q is not a bare host:port", r.Host)
 	}
 	if !ownerPattern.MatchString(r.Owner) {
