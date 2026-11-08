@@ -1122,6 +1122,25 @@ func TestOverseerReportWritesTheDailyFilesTheDashboardReads(t *testing.T) {
 	}
 }
 
+// A digest line is bead text, and the daily page is the one place it becomes
+// HTML: a script tag, an ampersand and a quote in the text reach daily.html in
+// their escaped forms, so a bead title shows as text and no tag from it runs
+// (gt-0ah143).
+func TestOverseerReportDailyPageEscapesTheDigestText(t *testing.T) {
+	t.Parallel()
+	text := "OPEN QUESTIONS\n  <script>alert(\"hq-q1 & gt-hold1\")</script>\n"
+	page := string(overseerDailyPage("Overseer report 2026-10-14T20:15:00Z", text))
+
+	for _, want := range []string{"&lt;script&gt;", "&lt;/script&gt;", "&amp;", "&#34;"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("daily.html is missing %q, want the digest text escaped:\n%s", want, page)
+		}
+	}
+	if strings.Contains(page, "<script>") || strings.Contains(page, "</script>") {
+		t.Errorf("daily.html carries the digest's script tag unescaped:\n%s", page)
+	}
+}
+
 // The daily files are replaced by a rename, so a reader holding the old one
 // keeps it whole and the new one is a different file.
 func TestOverseerReportDailyFilesAreReplacedAtomically(t *testing.T) {
