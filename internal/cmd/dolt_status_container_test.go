@@ -811,3 +811,106 @@ func TestDoltHistoryDocNamesTheRestoreSection(t *testing.T) {
 		t.Errorf("docs/dolt-restore.md no longer has the section 3 heading the runbook names")
 	}
 }
+
+// TestDoltHistoryDocSaysTheSpaceComesBackAtGC: the flatten section says the
+// database does not shrink at the flatten, names the full GC as what returns the
+// space (the maintenance window's, or the paused manual one), and labels the
+// measured sizes as the rehearsal's, so the runbook does not promise a shrink
+// the flatten cannot deliver (gt-gw4gai).
+func TestDoltHistoryDocSaysTheSpaceComesBackAtGC(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Flatten:")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"The flatten does not shrink the database.",
+		"2026-11-06 rehearsal",
+		"1,664 MB before the flatten",
+		"1,668 MB after",
+		"363 MB after `CALL dolt_gc('--full')`",
+		"The space comes back only at that next full GC",
+		"`scheduled_maintenance` window's",
+		"gt dolt pause --reason \"manual gc\" --until 30m",
+		"`gt dolt unpause`",
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("the flatten section does not carry %q:\n%s", want, section)
+		}
+	}
+}
+
+// TestDoltHistoryDocCountsTwoCommitsAfter: the flatten section says dolt_log
+// holds 2 commits after the flatten and why, so the count after the SQL is not
+// read as a failure (gt-gw4gai).
+func TestDoltHistoryDocCountsTwoCommitsAfter(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Flatten:")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"After the flatten `dolt_log` holds 2 commits, not 1",
+		"the original root and the flatten commit",
+		"`DOLT_RESET('--soft', @root)` keeps the root",
+		"is not a failure",
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("the flatten section does not carry %q:\n%s", want, section)
+		}
+	}
+}
+
+// TestDoltHistoryDocSaysBdHistoryIsOneEntry: the flatten section says bd history
+// shows one entry, authored "Dolt System Account", for every bead afterwards,
+// and says where the history it lost survives (gt-gw4gai).
+func TestDoltHistoryDocSaysBdHistoryIsOneEntry(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Flatten:")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"`bd history <id>` shows one entry for every bead, authored \"Dolt System Account\"",
+		"The history before the flatten is gone from bd",
+		"survives in the archive that step 2 brought to 0 behind",
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("the flatten section does not carry %q:\n%s", want, section)
+		}
+	}
+}
+
+// TestDoltHistoryDocHasARehearsalSection: a "Rehearse on a copy first" section
+// sits before "Before any rewrite" and carries the copy-the-backup-first,
+// memory-cap, DOLT_ROOT_HOST, memory.peak and bd-in-a-container steps, and says
+// what the rehearsal does not cover (gt-gw4gai).
+func TestDoltHistoryDocHasARehearsalSection(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Rehearse on a copy first")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"Copy the backup, then restore from the copy",
+		"never mount the nightly backup itself",
+		"--memory 8g",
+		"DOLT_ROOT_HOST=%",
+		"memory.peak",
+		"Run `bd` only inside a container",
+		"A scratch metadata file on the host does not isolate a `bd` run",
+		"The rehearsal does not cover `gt dolt archive-now`",
+		"does not cover concurrent writes",
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("the rehearsal section does not carry %q:\n%s", want, section)
+		}
+	}
+
+	body, err := os.ReadFile(filepath.Join("..", "..", "docs", "dolt-history-offline.md"))
+	if err != nil {
+		t.Fatalf("reading docs/dolt-history-offline.md: %v", err)
+	}
+	doc := string(body)
+	rehearsal := strings.Index(doc, "## Rehearse on a copy first")
+	before := strings.Index(doc, "## Before any rewrite")
+	if rehearsal < 0 || before < 0 || rehearsal > before {
+		t.Errorf("the rehearsal section does not sit before \"Before any rewrite\"")
+	}
+}
