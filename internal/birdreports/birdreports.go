@@ -1,11 +1,12 @@
 // Package birdreports reads the birds' daily reports under a town's runtime
 // directory and says which are due.
 //
-// A bird writes <runtimeDir>/<bird>/reports/daily.json, the sidecar the
-// dashboard's Birds panel reads (internal/dashboard/birdreports.go). `gt birds
-// due` reads them here; the daemon's bird_reports patrol
-// (internal/daemon/bird_reports.go) reads the same files with its own reader,
-// so the two can judge one sidecar differently: the patrol reads no `bird`
+// Where a report lives is internal/reportdir's rule: this package reads the
+// directory it resolves and judges the sidecar. `gt birds due` reads them
+// here; the daemon's bird_reports patrol (internal/daemon/bird_reports.go) and
+// the dashboard's Birds panel and page route
+// (internal/dashboard/birdreports.go) ask reportdir for the same directory.
+// The patrol's reader can judge one sidecar differently — it reads no `bird`
 // field, applies no size cap, and calls any future written_at late, where Read
 // forgives one within FutureSlack.
 package birdreports
@@ -17,16 +18,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/reportdir"
 )
 
 const (
-	// ReportsSubdir and SidecarName are where a bird writes its report.
-	ReportsSubdir = "reports"
-	SidecarName   = "daily.json"
-
 	// SidecarMaxBytes refuses a larger daily.json before it is read: a sidecar
 	// is a short summary, and anything bigger is not one.
 	SidecarMaxBytes = 16 << 10
@@ -41,13 +39,6 @@ const (
 	// rewrite.
 	MaxAge = 26 * time.Hour
 )
-
-// reporterNameShape is the name a reporter directory may carry, as a whole. The
-// shape is checked before a path is built, so a name that came from a config
-// file and holds a separator or a dot never reaches the filesystem.
-const reporterNameShape = `^[a-z][a-z0-9-]{0,31}$`
-
-var reporterNameRe = regexp.MustCompile(reporterNameShape)
 
 // defaultReporters is the nine birds and the overseer, the reporters every
 // daily report is expected from.
@@ -102,34 +93,40 @@ func (r Report) Due() bool { return r.Status != Fresh }
 var (
 	errNotRegular = errors.New("not a regular file")
 	errOversize   = errors.New("larger than the sidecar cap")
-	oversizeNote  = fmt.Sprintf("%s is larger than %d KiB", SidecarName, SidecarMaxBytes>>10)
+	oversizeNote  = fmt.Sprintf("%s is larger than %d KiB", reportdir.SidecarName, SidecarMaxBytes>>10)
 )
 
 // Read returns the reporter's daily report as it stands at now. maxAge is the
-// age past which a report is stale; a report exactly maxAge old is fresh.
-//
-// It follows no symlink below the reporter name: the reporter directory, its
-// reports directory and the sidecar must each be the thing they name, as the
-// dashboard's reader also requires, so a link cannot put another path's report
-// in this reporter's place.
+// age past which a report is stale; a report exactly maxAge old is fresh. The
+// directory it reads is internal/reportdir's answer.
 func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Report {
+	loc, err := reportdir.Resolve(runtimeDir, reporter)
+	if err != nil {
+		// A name the resolver refuses is a report it cannot read, never one it
+		// reports fresh.
+		return Report{Reporter: reporter, Status: Unreadable, Note: err.Error()}
+	}
 	report := Report{Reporter: reporter}
-	if !reporterNameRe.MatchString(reporter) {
-		report.Status, report.Note = Unreadable, "not a reporter name"
-		return report
+
+	// The words a path that cannot be used is named by: the published layout
+	// keeps a reporter directory inside the published reports directory, the
+	// old one a reports directory inside the reporter's own.
+	dirLabel, parentLabel := "reports directory", "reporter directory"
+	if loc.Published {
+		dirLabel, parentLabel = "reporter directory", "published reports directory"
 	}
 
 	// A path that is not there is Missing, as a missing sidecar is. A link, a
 	// file where a directory belongs, or a path that cannot be read is
 	// Unreadable: only a path the filesystem says is absent is absent.
 	for _, dir := range []struct{ path, label string }{
-		{filepath.Join(runtimeDir, reporter), "reporter directory"},
-		{filepath.Join(runtimeDir, reporter, ReportsSubdir), "reports directory"},
+		{filepath.Dir(loc.Dir), parentLabel},
+		{loc.Dir, dirLabel},
 	} {
 		fi, err := os.Lstat(dir.path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
-			report.Status, report.Note = Missing, "no "+SidecarName
+			report.Status, report.Note = Missing, "no "+reportdir.SidecarName
 			return report
 		case err != nil:
 			report.Status, report.Note = Unreadable, dir.label+" could not be read"
@@ -140,45 +137,26 @@ func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Repo
 		}
 	}
 
-	raw, err := readSidecar(filepath.Join(runtimeDir, reporter, ReportsSubdir, SidecarName))
+	raw, err := readSidecar(filepath.Join(loc.Dir, reportdir.SidecarName))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		report.Status, report.Note = Missing, "no "+SidecarName
+		report.Status, report.Note = Missing, "no "+reportdir.SidecarName
 		return report
 	case errors.Is(err, errOversize):
 		report.Status, report.Note = Unreadable, oversizeNote
 		return report
 	case errors.Is(err, errNotRegular):
-		report.Status, report.Note = Unreadable, SidecarName+" is not a regular file"
+		report.Status, report.Note = Unreadable, reportdir.SidecarName+" is not a regular file"
 		return report
 	case err != nil:
 		// A file that is there and cannot be read is unknown, not absent.
-		report.Status, report.Note = Unreadable, SidecarName+" could not be read"
+		report.Status, report.Note = Unreadable, reportdir.SidecarName+" could not be read"
 		return report
 	}
 
-	var side struct {
-		Bird      string `json:"bird"`
-		WrittenAt string `json:"written_at"`
-	}
-	if err := json.Unmarshal(raw, &side); err != nil {
-		report.Status, report.Note = Unreadable, SidecarName+" is not valid JSON"
-		return report
-	}
-	if side.Bird != reporter {
-		// The sidecar's own claim, checked against the directory it was found
-		// in: one reporter's report never discharges another's day.
-		report.Status, report.Note = Unreadable, SidecarName+" names a different reporter"
-		return report
-	}
-	written, err := time.Parse(time.RFC3339, side.WrittenAt)
+	written, err := ParseSidecar(reporter, raw, now)
 	if err != nil {
-		report.Status, report.Note = Unreadable, "written_at is not an RFC 3339 instant"
-		return report
-	}
-	written = written.UTC()
-	if written.Sub(now) > FutureSlack {
-		report.Status, report.Note = Unreadable, "written_at is in the future"
+		report.Status, report.Note = Unreadable, err.Error()
 		return report
 	}
 
@@ -190,6 +168,34 @@ func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Repo
 		report.Status = Fresh
 	}
 	return report
+}
+
+// ParseSidecar returns the instant raw names, checking it as Read does: valid
+// JSON, the reporter's own bird, an RFC 3339 written_at no more than FutureSlack
+// ahead of now. Each refusal repeats the sentence Read puts in a report's Note,
+// so a publisher cannot write a sidecar the reader would then refuse.
+func ParseSidecar(reporter string, raw []byte, now time.Time) (time.Time, error) {
+	var side struct {
+		Bird      string `json:"bird"`
+		WrittenAt string `json:"written_at"`
+	}
+	if err := json.Unmarshal(raw, &side); err != nil {
+		return time.Time{}, errors.New(reportdir.SidecarName + " is not valid JSON")
+	}
+	if side.Bird != reporter {
+		// The sidecar's own claim, checked against the reporter it is filed
+		// under: one reporter's report never discharges another's day.
+		return time.Time{}, errors.New(reportdir.SidecarName + " names a different reporter")
+	}
+	written, err := time.Parse(time.RFC3339, side.WrittenAt)
+	if err != nil {
+		return time.Time{}, errors.New("written_at is not an RFC 3339 instant")
+	}
+	written = written.UTC()
+	if written.Sub(now) > FutureSlack {
+		return time.Time{}, errors.New("written_at is in the future")
+	}
+	return written, nil
 }
 
 // ReadAll returns one report per reporter, in name order, so the same town

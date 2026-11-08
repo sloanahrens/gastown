@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/reportdir"
 )
 
 // The bird_reports patrol (gt-cbsat): every hour the daemon checks each
@@ -23,9 +24,10 @@ import (
 // cannot run raises bird-report-check-failed instead, so a failed check is not
 // silence.
 //
-// The patrol is opt-in (patrols.bird_reports.enabled). It reads
-// <town>/.runtime/<name>/reports/daily.json and nothing else, and its only
-// write is the in-memory snapshot the attention collector reads.
+// The patrol is opt-in (patrols.bird_reports.enabled). For each reporter it
+// reads the daily.json sidecar in the directory internal/reportdir resolves
+// and nothing else. Its only write is the in-memory snapshot the attention
+// collector reads.
 
 const (
 	// birdReportsKeyPrefix is the item key's prefix; the reporter's name
@@ -36,10 +38,6 @@ const (
 	// reports are daily, so an hourly look notices a missed one the same
 	// morning without turning the check into a busy loop.
 	birdReportsCheckEvery = time.Hour
-
-	// birdReportsFile is the report the Birds panel reads, relative to a
-	// reporter's runtime directory. The patrol reads no other file.
-	birdReportsFile = "daily.json"
 
 	// birdReportsCheckFailedKey is the item a check that could not run raises.
 	// It does not start with birdReportsKeyPrefix and carries no reporter
@@ -104,7 +102,12 @@ func birdReportStaleItem(now time.Time, r birdReportsReads, name string) (attent
 		Kind:     attention.KindBirdReportStale,
 		Severity: attention.SeverityLow,
 	}
-	data, err := os.ReadFile(filepath.Join(r.townRoot, ".runtime", name, "reports", birdReportsFile))
+	dir, err := reportdir.Dir(filepath.Join(r.townRoot, ".runtime"), name)
+	if err != nil {
+		it.Summary = fmt.Sprintf("%s's daily report could not be read (age: unknown): %v; send %s the daily request", name, err, name)
+		return it, true
+	}
+	data, err := os.ReadFile(filepath.Join(dir, reportdir.SidecarName))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		it.Summary = fmt.Sprintf("%s's daily report is missing (age: none); send %s the daily request", name, name)

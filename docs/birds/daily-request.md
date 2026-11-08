@@ -1,4 +1,4 @@
-<NAME>: it is time for your daily report. Write it, write the two files the dashboard reads, and tell the overseer it is in.
+<NAME>: it is time for your daily report. Write it, publish the two files the dashboard reads, and tell the overseer it is in.
 
 Write the report in these eight sections, in this order:
 
@@ -11,15 +11,22 @@ Write the report in these eight sections, in this order:
 7. Filed — beads filed, closed, rejected or reassigned since your last report.
 8. Next — what you will do next, in the order you will do it.
 
-Write the two files the dashboard's Reports page reads:
+Write the page as HTML to daily.html, build the sidecar with jq, and pipe both to the publisher, which writes them under <RUNTIME_DIR>/reports/<NAME>/:
 
-- Write the page to <RUNTIME_DIR>/<NAME>/reports/daily.html and the sidecar <RUNTIME_DIR>/<NAME>/reports/daily.json beside it, with exactly these fields:
+  jq -n --arg bird "<NAME>" --arg written_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg title "<the report's headline>" --arg summary "<the report in three sentences>" \
+    '{bird:$bird,written_at:$written_at,title:$title,summary:$summary,needs_operator:false,decisions:0}' > sidecar.json
+  jq -n --rawfile page daily.html --slurpfile sidecar sidecar.json \
+    '{bird:"<NAME>",page:$page,sidecar:$sidecar[0]}' | gt report publish --bird <NAME>
+
+The publisher writes <RUNTIME_DIR>/reports/<NAME>/daily.html and daily.json, keeps the page it replaced as daily.prev.html, and prints the two paths and their sizes. It refuses a page over 1 MB, a sidecar over 16 KiB or one the reader would not accept, and names the field it refused: fix that field and pipe the document again.
+
+The sidecar's fields, exactly:
   {"bird":"<NAME>","written_at":"<RFC 3339 instant>","title":"<the report's headline>","summary":"<the report in three sentences>","needs_operator":false,"decisions":0}
-  - bird is your name, and must match the directory the files are in.
+  - bird is your name, and must match --bird and the report directory.
   - written_at is when you finished writing, in RFC 3339; the dashboard marks the report stale 26 hours after it.
   - title is the report's headline, short enough for one row.
   - summary is the report in three sentences, for the dashboard row.
   - needs_operator is true when section 5 holds a decision waiting on the operator.
   - decisions is how many decisions section 5 records.
 
-Send the overseer one line when both files are written, saying whether needs_operator is true.
+Send the overseer one line when the publisher has written both files, saying whether needs_operator is true.

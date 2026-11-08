@@ -13,46 +13,36 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/reportdir"
 )
 
 // The Reports page: one row per bird that has left a daily report under the
-// town's runtime directory. A bird writes <runtime>/<bird>/reports/daily.html
-// — the page the /birds route serves — and beside it a daily.json sidecar
-// carrying what the row shows without opening the page.
+// town's runtime directory. A bird publishes a daily.html page — the page the
+// /birds route serves — and beside it a daily.json sidecar carrying what the
+// row shows without opening the page. Where the report lives is
+// internal/reportdir's rule; this reader asks it for the directory and for the
+// bird's topic pages rather than naming the layout.
 //
 // The runtime directory holds one entry per bird and many more that are not
-// birds, so a row exists only for an entry that is a real directory, named like
-// a bird, whose reports directory holds a regular daily.json or daily.html.
-// Every other entry adds no row. The reader opens files for reading and writes
+// birds, and the published location holds one entry per bird under its own
+// directory, so the reader lists both and a row exists only for a name whose
+// resolved report directory is a real directory holding a regular daily.json
+// or daily.html. Every other entry adds no row, and the published reports
+// directory itself is not a bird. The reader opens files for reading and writes
 // nothing, and follows no symlink: a bird directory, its reports directory and
 // the two files must be the real thing, because a symlink there would let
 // whoever wrote it put another path's text on this page.
 
 const (
-	// birdReportsNameShape is the name a bird directory may carry, as a whole:
-	// a lowercase letter, then letters, digits and hyphens. The shape is the
-	// test before any path is built, so a name with a separator or a dot in it
-	// never reaches the filesystem.
-	birdReportsNameShape = `^[a-z][a-z0-9-]{0,31}$`
-
-	// The names a bird writes inside its reports directory. The sidecar is the
-	// page's summary; the two html files are the page itself and the one
-	// before it.
-	birdReportsSubdir = "reports"
-	birdSidecarName   = "daily.json"
-	birdPageName      = "daily.html"
-	birdPrevPageName  = "daily.prev.html"
+	// The names a bird writes inside its resolved report directory are
+	// internal/reportdir's. The sidecar is the page's summary; the two html
+	// files are the page itself and the one before it.
 
 	// birdSidecarMaxBytes refuses a larger daily.json before it is read, so a
 	// file that is not a bird's sidecar cannot be read into memory to be
 	// rejected. A sidecar is a short summary and a handful of counts.
 	birdSidecarMaxBytes = 16 << 10
-
-	// birdTopicPageShape is the name of a topic page a bird writes beside its
-	// daily one: a slug and .html, no dots in the slug, so daily.json, a dot
-	// segment and another extension never match. daily.html fits the shape and is
-	// the daily page, listed apart from the topic pages.
-	birdTopicPageShape = `^[a-z0-9][a-z0-9-]{0,60}\.html$`
 
 	// birdTopicPagesMax is how many topic pages a row lists, newest first.
 	birdTopicPagesMax = 10
@@ -113,22 +103,21 @@ const (
 // is wrong, in the names of the files it is about, so the operator can tell the
 // bird what to fix.
 const (
-	birdRuntimeUnreadable = "the runtime directory could not be read"
-	birdNoSummary         = "no summary"
-	birdSidecarInvalid    = "daily.json is not valid JSON"
-	birdSidecarOtherBird  = "daily.json names a different bird"
-	birdBadWritten        = "written_at is not an RFC 3339 instant"
-	birdFutureWritten     = "written_at is in the future"
-	birdSidecarUnreadable = "daily.json could not be read"
-	birdPageOlder         = "page older than its summary"
+	birdRuntimeUnreadable   = "the runtime directory could not be read"
+	birdPublishedUnreadable = "the published reports directory could not be read"
+	birdNoSummary           = "no summary"
+	birdSidecarInvalid      = "daily.json is not valid JSON"
+	birdSidecarOtherBird    = "daily.json names a different bird"
+	birdBadWritten          = "written_at is not an RFC 3339 instant"
+	birdFutureWritten       = "written_at is in the future"
+	birdSidecarUnreadable   = "daily.json could not be read"
+	birdPageOlder           = "page older than its summary"
 )
 
 // birdSidecarOversize names the size cap the way the row shows it. The number
 // is read out of the cap itself, so the sentence and the reader that enforces
 // it cannot come apart.
 var birdSidecarOversize = fmt.Sprintf("daily.json is larger than %d KiB", birdSidecarMaxBytes>>10)
-
-var birdReportsNameRe = regexp.MustCompile(birdReportsNameShape)
 
 // The errors ReadPage names. A refused name and a page that looks like a secret
 // are the two the route tells apart, answering the first 404 and the second
@@ -256,12 +245,21 @@ func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 	if err != nil {
 		return []BirdReport{{State: BirdReportError, Note: birdRuntimeUnreadable}}
 	}
-	rows := make([]BirdReport, 0, len(entries))
+	names := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		name := e.Name()
-		if !birdReportsNameRe.MatchString(name) {
+		// The published reports directory is a daemon-owned directory, not a
+		// bird: its birds are listed below, one level down.
+		if name == reportdir.PublishedDirName || !reportdir.ValidName(name) {
 			continue
 		}
+		names[name] = true
+	}
+	rows := make([]BirdReport, 0, len(names)+1)
+	if row, bad := r.addPublishedBirdNames(names); bad {
+		rows = append(rows, row)
+	}
+	for name := range names {
 		if row, ok := r.readBird(now, name); ok {
 			rows = append(rows, row)
 		}
@@ -279,27 +277,54 @@ func (r *BirdReportsReader) Read(now time.Time) []BirdReport {
 	return rows
 }
 
+// addPublishedBirdNames adds the names of the birds with a report under the
+// published directory to names. It returns the row the page shows when that
+// directory exists but cannot be read, so a broken location is not drawn as a
+// town with no published reports.
+func (r *BirdReportsReader) addPublishedBirdNames(names map[string]bool) (BirdReport, bool) {
+	dir := reportdir.PublishedReportsDir(r.runtimeDir)
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return BirdReport{}, false
+		}
+		return BirdReport{State: BirdReportError, Note: birdPublishedUnreadable}, true
+	}
+	if !fi.IsDir() {
+		// A link or a file where the published reports belong: following it
+		// would list reports the runtime directory does not own.
+		return BirdReport{State: BirdReportError, Note: birdPublishedUnreadable}, true
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return BirdReport{State: BirdReportError, Note: birdPublishedUnreadable}, true
+	}
+	for _, e := range entries {
+		if reportdir.ValidName(e.Name()) {
+			names[e.Name()] = true
+		}
+	}
+	return BirdReport{}, false
+}
+
 // ReadPage returns the bytes of one of a bird's pages, daily.html,
 // daily.prev.html or a topic page named <slug>.html, for the route that serves
 // it. The bird and the file are checked against the names a bird writes before
-// the path is built from them, so the route never reaches another file: a name
-// of another shape is refused, and the path is joined from the two validated
-// parts, never from a URL. The bird directory and its reports directory must be
+// a path is built from them, so the route never reaches another file: a name
+// of another shape is refused, and the path comes from internal/reportdir,
+// never from a URL. The page's directory and the directory holding it must be
 // real directories, and the page a regular file under birdPageMaxBytes, so a
-// link is refused rather than followed. A page whose text looks like it holds a
-// secret is refused too, and the error names no part of that text.
+// link is refused rather than followed. A page whose text looks like it holds
+// a secret is refused too, and the error names no part of that text.
 func (r *BirdReportsReader) ReadPage(bird, file string) ([]byte, error) {
-	if !birdReportsNameRe.MatchString(bird) {
+	path, err := reportdir.PagePath(r.runtimeDir, bird, file)
+	if err != nil {
 		return nil, errBirdPageRefused
 	}
-	if file != birdPageName && file != birdPrevPageName && !birdTopicPageRe.MatchString(file) {
-		return nil, errBirdPageRefused
-	}
-	reports := filepath.Join(r.runtimeDir, bird, birdReportsSubdir)
-	if !birdRealDir(filepath.Join(r.runtimeDir, bird)) || !birdRealDir(reports) {
+	if !birdRealDir(filepath.Dir(filepath.Dir(path))) || !birdRealDir(filepath.Dir(path)) {
 		return nil, fs.ErrNotExist
 	}
-	raw, err := readReportsFile(filepath.Join(reports, file), birdPageMaxBytes)
+	raw, err := readReportsFile(path, birdPageMaxBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -310,23 +335,27 @@ func (r *BirdReportsReader) ReadPage(bird, file string) ([]byte, error) {
 }
 
 // readBird returns the row for the bird directory name, and whether there is
-// one. A directory that is not a real directory, holds no reports directory, or
-// holds neither a regular daily.json nor a regular daily.html is not a bird with
-// a report and adds no row.
+// one. The directory internal/reportdir resolves, and the directory holding it,
+// must be real directories, and it must hold a regular daily.json or a regular
+// daily.html; anything else is not a bird with a report and adds no row.
 func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bool) {
-	dir := filepath.Join(r.runtimeDir, name)
-	if !birdRealDir(dir) {
+	reports, err := reportdir.Dir(r.runtimeDir, name)
+	if err != nil {
+		// The listing admits only a name the resolver accepts, so a refusal
+		// here is a name no bird is filed under and no row is drawn for it.
 		return BirdReport{}, false
 	}
-	reports := filepath.Join(dir, birdReportsSubdir)
-	if !birdRealDir(reports) {
+	// The resolved directory and the one holding it must be directories in
+	// their own right: a linked bird directory or a linked reports directory is
+	// another path's output, not this bird's.
+	if !birdRealDir(filepath.Dir(reports)) || !birdRealDir(reports) {
 		return BirdReport{}, false
 	}
 
-	pageFi, pageErr := os.Lstat(filepath.Join(reports, birdPageName))
+	pageFi, pageErr := os.Lstat(filepath.Join(reports, reportdir.PageName))
 	pageIsFile := pageErr == nil && pageFi.Mode().IsRegular()
 
-	prevFi, prevErr := os.Lstat(filepath.Join(reports, birdPrevPageName))
+	prevFi, prevErr := os.Lstat(filepath.Join(reports, reportdir.PrevPageName))
 	prevIsFile := prevErr == nil && prevFi.Mode().IsRegular()
 
 	row := BirdReport{
@@ -334,13 +363,13 @@ func (r *BirdReportsReader) readBird(now time.Time, name string) (BirdReport, bo
 		Headline: name == r.headline,
 		HasPage:  pageIsFile && pageFi.Size() < birdPageMaxBytes,
 		HasPrev:  prevIsFile && prevFi.Size() < birdPageMaxBytes,
-		Pages:    birdTopicPages(reports, birdTopicTitle),
+		Pages:    birdTopicPages(r.runtimeDir, name, birdTopicTitle),
 	}
 	if row.HasPrev {
 		row.PrevWritten = prevFi.ModTime().UTC()
 	}
 
-	raw, err := readReportsFile(filepath.Join(reports, birdSidecarName), birdSidecarMaxBytes)
+	raw, err := readReportsFile(filepath.Join(reports, reportdir.SidecarName), birdSidecarMaxBytes)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		// No sidecar: the bird wrote a page and nothing to summarize it. The
@@ -530,48 +559,31 @@ func birdTextCut(s string, n int) string {
 	return s
 }
 
-var (
-	birdTopicPageRe = regexp.MustCompile(birdTopicPageShape)
-	birdTitleRe     = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
-)
+var birdTitleRe = regexp.MustCompile(`(?is)<title[^>]*>(.*?)</title>`)
 
-// birdTopicPages lists a bird's topic pages: regular files directly inside its
-// reports directory whose names match birdTopicPageShape, other than the daily
-// page, under the size cap. Each is listed by its own <title>, read from the
-// first birdTopicTitleScanBytes of the page; a page with no title, or one whose
-// title looks like it holds a secret, is listed by its name. Newest first, the
-// name breaking a tie, at most birdTopicPagesMax. Only the pages kept are read
-// for a title, through title. A directory that cannot be read lists nothing.
-func birdTopicPages(reports string, title func(path, fallback string) string) []BirdPage {
-	entries, err := os.ReadDir(reports)
+// birdTopicPages lists a bird's topic pages from both report locations
+// internal/reportdir resolves, newest first, at most birdTopicPagesMax. Each is
+// listed by its own <title>, read from the first birdTopicTitleScanBytes of the
+// page; a page with no title, or one whose title looks like it holds a secret,
+// is listed by its name. Only the pages kept are read for a title, through
+// title; a reporter name the resolver refuses lists nothing.
+func birdTopicPages(runtimeDir, reporter string, title func(path, fallback string) string) []BirdPage {
+	pages, err := reportdir.TopicPages(runtimeDir, reporter, birdPageMaxBytes)
 	if err != nil {
 		return nil
 	}
-	var pages []BirdPage
-	for _, e := range entries {
-		name := e.Name()
-		if name == birdPageName || !birdTopicPageRe.MatchString(name) {
-			continue
-		}
-		fi, err := os.Lstat(filepath.Join(reports, name))
-		if err != nil || !fi.Mode().IsRegular() || fi.Size() >= birdPageMaxBytes {
-			continue
-		}
-		pages = append(pages, BirdPage{Name: name, MTime: fi.ModTime().UTC()})
-	}
-	sort.SliceStable(pages, func(i, j int) bool {
-		if !pages[i].MTime.Equal(pages[j].MTime) {
-			return pages[i].MTime.After(pages[j].MTime)
-		}
-		return pages[i].Name < pages[j].Name
-	})
 	if len(pages) > birdTopicPagesMax {
 		pages = pages[:birdTopicPagesMax]
 	}
-	for i := range pages {
-		pages[i].Title = title(filepath.Join(reports, pages[i].Name), pages[i].Name)
+	out := make([]BirdPage, 0, len(pages))
+	for _, page := range pages {
+		out = append(out, BirdPage{
+			Name:  page.Name,
+			MTime: page.MTime,
+			Title: title(filepath.Join(page.Dir, page.Name), page.Name),
+		})
 	}
-	return pages
+	return out
 }
 
 // birdTopicTitle is the <title> of the page at path, cleaned like any bird text,

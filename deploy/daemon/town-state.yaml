@@ -95,6 +95,9 @@ entries:
   - path: .runtime/daemon-image
     owner: daemon
     why: the daemon image build record
+  - path: .runtime/reports
+    owner: daemon
+    why: the published bird reports gt report publish writes, one directory per bird (gt-yjzepk.3)
   - path: <rig>/crew
     owner: session
     why: each crew worker's persistent workspace
@@ -109,4 +112,4 @@ entries:
     why: the refinery session's own tree
   - path: .runtime/<bird>
     owner: session
-    why: each bird session's own directory; its reports subtree is published by gt report publish (gt-yjzepk.3)
+    why: each bird session's own directory; gt report publish writes its daily report under .runtime/reports instead (gt-yjzepk.3)

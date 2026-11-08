@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/birdreports"
+	"github.com/steveyegge/gastown/internal/reportdir"
 )
 
 // birdsNow is the clock the birds tests inject.
@@ -22,13 +23,13 @@ var birdsNow = time.Date(2026, 11, 1, 14, 0, 0, 0, time.UTC)
 // bird would, written_at aged before birdsNow.
 func writeBirdReport(t *testing.T, runtimeDir, reporter string, age time.Duration) {
 	t.Helper()
-	reports := filepath.Join(runtimeDir, reporter, birdreports.ReportsSubdir)
+	reports := filepath.Join(runtimeDir, reporter, reportdir.ReportsSubdir)
 	if err := os.MkdirAll(reports, 0o755); err != nil {
 		t.Fatalf("making %s: %v", reports, err)
 	}
 	body := fmt.Sprintf(`{"bird":%q,"written_at":%q,"title":"t","summary":"s"}`,
 		reporter, birdsNow.Add(-age).Format(time.RFC3339))
-	if err := os.WriteFile(filepath.Join(reports, birdreports.SidecarName), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(reports, reportdir.SidecarName), []byte(body), 0o644); err != nil {
 		t.Fatalf("writing the sidecar: %v", err)
 	}
 }
@@ -247,11 +248,11 @@ func TestBirdsDueReportsAFailedAllFreshWrite(t *testing.T) {
 func TestBirdsDueNamesAReportItCannotRead(t *testing.T) {
 	t.Parallel()
 	runtimeDir := t.TempDir()
-	reports := filepath.Join(runtimeDir, "eagle", birdreports.ReportsSubdir)
+	reports := filepath.Join(runtimeDir, "eagle", reportdir.ReportsSubdir)
 	if err := os.MkdirAll(reports, 0o755); err != nil {
 		t.Fatalf("making %s: %v", reports, err)
 	}
-	if err := os.WriteFile(filepath.Join(reports, birdreports.SidecarName), []byte("{"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(reports, reportdir.SidecarName), []byte("{"), 0o644); err != nil {
 		t.Fatalf("writing the sidecar: %v", err)
 	}
 
