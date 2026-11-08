@@ -298,6 +298,16 @@ func sandboxSecretsRunsScriptFile(name string, args []string) bool {
 	return false
 }
 
+// sandboxSecretsUnreadableReason is the refusal for a command the parser cannot
+// read (err), or whose heredoc body it cannot place (err is nil), so nothing
+// can say whether it prints a secret.
+func sandboxSecretsUnreadableReason(err error) string {
+	if err == nil {
+		return "a here-document's body cannot be placed in the command, so it cannot be checked for a secret"
+	}
+	return "the command cannot be read (" + dangerousConstruct(err) + "), so it cannot be checked for a secret"
+}
+
 // sandboxSecretsReason names why the command would print the environment or a
 // secret, or "" when it would not.
 func sandboxSecretsReason(command string) string {
@@ -321,7 +331,21 @@ func sandboxSecretsReason(command string) string {
 // inherited names the variables a shell that runs this command already holds a
 // secret in. The walk starts from them and taints more as it passes each segment,
 // so an argument is judged by the assignments before it.
+//
+// The command the hook judges is refused whole when the parser cannot read it,
+// or cannot place one of its heredoc bodies (gt-a7jzr5). A payload the walk
+// derives from it is refused the same way only when it holds a heredoc and a
+// variable reference, the one shape a secret can reach unseen: the walk cuts
+// those payloads out of the text, so a fragment such as "cat <<'EOF'" is not a
+// command the shell runs on its own.
 func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (reason string, tooDeep bool) {
+	script, err := shellparse.Parse(command)
+	unplaced := err == nil && heredocReadersUnplaced(script)
+	if err != nil || unplaced {
+		if depth == 0 || strings.Contains(command, "<<") && strings.Contains(command, "$") {
+			return sandboxSecretsUnreadableReason(err), false
+		}
+	}
 	tokenText := prWorkflowTokenText(command)
 	tokens := shellTokenize(tokenText)
 	ansiHereStrings := sandboxSecretsANSICHereStrings(tokenText)
@@ -396,7 +420,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	if sandboxSecretsHeredocRefsSecret(command) {
 		return "an unquoted heredoc expands a secret variable", false
 	}
-	if script, err := shellparse.Parse(command); err == nil {
+	if err == nil && !unplaced {
 		var heredocReason string
 		sandboxSecretsEachHeredoc(script, func(script shellparse.Script, i int) {
 			if heredocReason != "" {

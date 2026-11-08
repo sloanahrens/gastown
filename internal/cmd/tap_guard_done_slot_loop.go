@@ -141,7 +141,11 @@ func matchesDoneSlotLoopDepth(raw string, tokens, lowerTokens []string, depth in
 	if depth >= doneSlotLoopMaxBodyDepth {
 		return "", ""
 	}
-	for _, body := range doneSlotLoopFileWrittenBodies(raw) {
+	bodies, err := doneSlotLoopFileWrittenBodies(raw)
+	if err != nil {
+		return doneSlotLoopUnreadableReason(err), ""
+	}
+	for _, body := range bodies {
 		bodyTokens := shellTokenize(body)
 		if r, alt := matchesDoneSlotLoopDepth(body, bodyTokens, doneSlotLoopLower(bodyTokens), depth+1); r != "" {
 			return r, alt
@@ -541,6 +545,13 @@ func doneSlotLoopSlotPollArgs(args []string) bool {
 	return doneSlotLoopSlotPollVerbs[args[0]]
 }
 
+// doneSlotLoopUnreadableReason is the refusal for a file-written heredoc the
+// parser cannot read, naming the construct. The loop rule cannot say whether
+// the body it would write holds a retry loop, so the command is refused.
+func doneSlotLoopUnreadableReason(err error) string {
+	return "a here-document the command writes to a file cannot be read (" + dangerousConstruct(err) + "), so it cannot be checked for a retry loop"
+}
+
 // doneSlotLoopFileWrittenBodies returns the heredoc bodies the command writes
 // to a file. A body fed to a shell on stdin (`bash <<EOF`) is not included
 // here: evaluateDangerousCommand already recurses into those as commands of
@@ -548,13 +559,17 @@ func doneSlotLoopSlotPollArgs(args []string) bool {
 //
 // The parsed script decides where the bodies are: a heredoc is a parsed
 // Heredoc on the segment that reads it, and its reader line is the run of
-// segments the shell joins with |, &&, || or & (heredocLineOperator). A
-// command the parser cannot read has no body this rule can place, and the
-// command is refused as unreadable anyway.
-func doneSlotLoopFileWrittenBodies(raw string) []string {
+// segments the shell joins with |, &&, || or & (heredocLineOperator). A text the
+// parser cannot read that holds a "<<" may hold a file-written body this rule
+// cannot place, so it is an error and the caller refuses it. A text without a
+// "<<" has no here-document to write, and its parse is not needed.
+func doneSlotLoopFileWrittenBodies(raw string) ([]string, error) {
 	script, err := shellparse.Parse(raw)
 	if err != nil {
-		return nil
+		if strings.Contains(raw, "<<") {
+			return nil, err
+		}
+		return nil, nil
 	}
 	var bodies []string
 	for i, seg := range script.Segments {
@@ -568,7 +583,7 @@ func doneSlotLoopFileWrittenBodies(raw string) []string {
 			bodies = append(bodies, h.Body)
 		}
 	}
-	return bodies
+	return bodies, nil
 }
 
 // doneSlotLoopLineWritesFile reports whether the reader line the segment at

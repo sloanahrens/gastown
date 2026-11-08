@@ -13,7 +13,6 @@ import (
 	"sort"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/google/shlex"
 	"github.com/spf13/cobra"
@@ -191,17 +190,14 @@ const maxDangerousNestDepth = 3
 // judged; one the parser cannot read is refused with the construct named,
 // because the parser's reading is the only structured reading the nested
 // checks have (gt-7ydceb). Bash-valid shapes the parser misreads are refused
-// by the same gate; that fail-closed trade is decided in gt-wnblap.
+// by the same gate, except the two judgeDisagreeingShellText reads; that
+// fail-closed trade is decided in gt-wnblap.
 func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
 	script, err := shellparse.Parse(command)
 	if err != nil {
-		// The parser could not read the command, so it is refused below. Its
-		// own words are judged first, leniently, so a dangerous operation the
-		// text spells keeps its own reason — the reading a nuke glued to a
-		// separator got before the parse gate (gt-m6x4py).
-		if reason, alternative = judgeDangerousLenientText(command, depth, sess); reason != "" {
-			return reason, alternative
-		}
+		// The parser could not read the command, so the command is refused whole,
+		// with the construct the parser named. No second reader judges its text
+		// for a dangerous operation to name instead (gt-a7jzr5).
 		if depth > 0 {
 			return dangerousNestedUnreadable(err), ""
 		}
@@ -214,20 +210,21 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 // matchers read the words the shell will pass — quoting resolved, expansions
 // kept as source text, redirections and here-document bodies out of the word
 // list — instead of a second tokenization of the text, so the parser's reading
-// is the only reading (gt-kr5vf). The done/slot loop rule is the exception:
-// a loop's keywords are not segments, so that rule stays on the text
-// (judgeDangerousLoopText).
+// is the reading the matchers take (gt-kr5vf). Two rules stay on the text: the
+// done/slot loop rule, whose loop keywords are not segments
+// (judgeDangerousLoopText), and the two shapes the parser reads differently
+// from the shell (judgeDisagreeingShellText).
 func judgeDangerousScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
 	// A declaration builtin's word spelling "<<" is a here-document to the
 	// shell's lexer, which reads the operator before the builtin sees its
 	// argument: "let y=1<<x" feeds the next lines to the body as data. The
 	// parser reads the word as an arithmetic expression and reports no
-	// Heredoc there, so that line is judged by the lenient reader, which
+	// Heredoc there, so the text is judged by judgeDisagreeingShellText, which
 	// follows the shell, rather than by the parsed words that would judge the
 	// body as live commands. Nested payloads on such a line are not judged;
 	// the shapes it covers are arithmetic declarations, not shell invokers.
 	if dangerousDeclarationHeredoc(script) || dangerousANSICContinuation(text) {
-		return judgeDangerousLenientText(text, depth, sess)
+		return judgeDisagreeingShellText(text, depth, sess)
 	}
 	tokens := dangerousTokenLine(script)
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
@@ -333,8 +330,8 @@ func dangerousDeclarationHeredoc(script shellparse.Script) bool {
 // dangerousANSICContinuation reports whether text opens an ANSI-C string across
 // a backslash-newline ("$\\\n'"). bash deletes the continuation before it reads
 // the quote, so it reads a $'...' string; shellparse reads a parameter
-// expansion and splits the line differently (gt-javvg). The lenient reader
-// follows bash there, so a line with this shape is judged by it.
+// expansion and splits the line differently (gt-javvg). judgeDisagreeingShellText
+// judges a line with this shape on its text, as bash reads it.
 func dangerousANSICContinuation(text string) bool {
 	for i := 0; i+1 < len(text); i++ {
 		if text[i] != '$' {
@@ -348,12 +345,17 @@ func dangerousANSICContinuation(text string) bool {
 	return false
 }
 
-// judgeDangerousLenientText is the judgment of a command the parser could not
-// read — or read differently from the shell — with the token checks on the
-// lenient token line, then the done/slot loop rule. When the caller has
-// already decided the command is unreadable, its verdict only feeds the
-// refusal choice; a command it lets through is still refused by the caller.
-func judgeDangerousLenientText(command string, depth int, sess guardSession) (reason, alternative string) {
+// judgeDisagreeingShellText judges a command the parser reads differently from
+// the shell, with the token checks on the text's own token line, then the
+// done/slot loop rule. It covers exactly two shapes: a declaration builtin's
+// "<<" word, which the shell reads as a here-document operator and the parser
+// does not (declarationHeredocReaders strips its body), and an ANSI-C string
+// opened across a backslash-newline, which the shell joins before it reads the
+// quote and the parser does not (gt-javvg). The parser's tree is not the shell's
+// reading of these lines, so the text is the only reading the matchers have
+// there. Pinned by TestHeredocDoesNotHideRealCommand and
+// TestDangerousGuardANSICLineContinuation.
+func judgeDisagreeingShellText(command string, depth int, sess guardSession) (reason, alternative string) {
 	tokens := shellTokenize(stripHeredocBodies(command))
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
@@ -367,13 +369,12 @@ func judgeDangerousLenientText(command string, depth int, sess guardSession) (re
 // and close around their segments instead of being segments of their own ("for
 // i in 1 2; do gt done; done" flattens to one "gt done" segment). The rule is a
 // shape of the text — a block that CLOSES around a gt done or gt slot, a repeat
-// or an xargs beside one (gt-7dxw) — so its bodies keep the lenient
-// substitution scan rather than the parsed Script. It only ever answers that
-// rule: a body it cannot read is never refused here, and every other nested
-// judgment and every unreadable-payload refusal comes from the parsed Script
-// (gt-7ydceb). The rule reads the unstripped text because a heredoc body the
-// command writes to a FILE can hold the retry script; the heredoc bodies it
-// finds are the parsed ones (doneSlotLoopFileWrittenBodies).
+// or an xargs beside one (gt-7dxw) — so it reads the text, not the parsed
+// Script. It answers only that rule: every other nested judgment comes from the
+// parsed Script (gt-7ydceb), and a file-written body it cannot read is refused,
+// not passed (doneSlotLoopFileWrittenBodies). The rule reads the unstripped text
+// because a heredoc body the command writes to a FILE can hold the retry script;
+// the heredoc bodies it finds are the parsed ones (doneSlotLoopFileWrittenBodies).
 func judgeDangerousLoopText(text string, depth int) (reason, alternative string) {
 	tokens := shellTokenize(stripHeredocBodies(text))
 	if reason, alternative = matchesDoneSlotLoop(text, tokens, toLowerTokens(tokens)); reason != "" {
@@ -477,8 +478,8 @@ func evaluateDangerousScriptNested(script shellparse.Script, depth int, sess gua
 // command that held it, so there is no text left to gate: whatever it runs, the
 // parser read.
 func evaluateDangerousScript(script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
-	// The script is judged on the token line rebuilt from its segments, so the
-	// matchers read the same shapes they read on the lenient path. The done/slot
+	// The script is judged on the token line rebuilt from its segments, as the
+	// top-level script is in judgeDangerousScript. The done/slot
 	// loop rule is not read here: a substitution keeps no text, so that rule
 	// cannot see a loop in its body, and dangerousSubstitutionLoop carries it
 	// from the text of the line that holds the substitution (gt-7ydceb).
@@ -598,10 +599,9 @@ func dangerousScriptSubs(script shellparse.Script) []shellparse.Script {
 // segments of their own ("for i in 1 2; do gt done; done" flattens to one "gt
 // done" segment). The rule is a shape of the text — a block that CLOSES around
 // a gt done or gt slot, a repeat or an xargs beside one (gt-7dxw) — so its
-// bodies keep the lenient substitution scan rather than the parsed Script. It
-// only ever answers that rule: a body it cannot read is never refused here,
-// and every other nested judgment and every unreadable-payload refusal comes
-// from the parsed Script (gt-7ydceb).
+// substitutions come from the text's substitution scan rather than the parsed
+// Script. It answers only that rule: every other nested judgment comes from the
+// parsed Script (gt-7ydceb), and a file-written body it cannot read is refused.
 func dangerousSubstitutionLoop(command string, depth int) (reason, alternative string) {
 	if depth >= maxDangerousNestDepth {
 		return "", ""
@@ -827,8 +827,7 @@ type heredocSpan struct {
 	// that holds the operator ("cat <<EOF | bash"), so the shell runs the body
 	// as a script rather than reading it as data. A shell on another stage of
 	// the same "&&" line does not read this body. It is set from the parsed
-	// script; the lenient reader leaves it false, since text the parser refuses
-	// is refused before its bodies matter.
+	// script.
 	readerPipelineHasShell bool
 }
 
@@ -844,37 +843,93 @@ type heredocReader struct {
 }
 
 // heredocSpans returns the here-document bodies in text, in source order. The
-// parsed Script decides them whenever shellparse can read the text: a "<<" is
-// a redirection only where the shell reads one, so a shift in an arithmetic
-// expression, a "${v%<<x}" pattern, a comment and a quoted string are excluded
-// by the parser rather than by a second reader of the shell's syntax
-// (gt-yza8u, gt-dherr, gt-adt8r, gt-lx8i8). Text the parser refuses falls back
-// to heredocSpansLenient, which reads the shapes a guard still has to act on
-// from a line at a time.
+// parsed Script decides them: a "<<" is a redirection only where the shell reads
+// one, so a shift in an arithmetic expression, a "${v%<<x}" pattern, a comment
+// and a quoted string are excluded by the parser rather than by a second reader
+// of the shell's syntax (gt-yza8u, gt-dherr, gt-adt8r, gt-lx8i8). The one reader
+// the parser does not report is a declaration builtin's "<<" word, which
+// declarationHeredocReaders adds. Text the parser refuses has no spans, so
+// stripHeredocBodies returns it whole.
 func heredocSpans(text string) []heredocSpan {
 	script, err := shellparse.Parse(text)
-	if err != nil || dangerousDeclarationHeredoc(script) {
-		return heredocSpansLenient(text)
+	if err != nil {
+		return nil
 	}
 	return heredocSpansFromScript(text, script)
+}
+
+// declarationHeredocReaders returns the here-documents a declaration builtin
+// reads. The shell's lexer reads a "<<" word of the builtin's arguments as a
+// here-document operator before the builtin sees it, so "let y=1<<x" hands the
+// following lines to the shell as a body; the parser reads the word as an
+// arithmetic expression and reports no Heredoc (dangerousDeclarationHeredoc).
+// Only a plain word is read: one with quotes, expansions or a backslash is not
+// an operator the shell reads whole, and it is left to the parser. The
+// delimiter is the text after the operator, or the next word when the operator
+// ends its word. A reader whose position the parser did not give is reported
+// by heredocReadersUnplaced.
+func declarationHeredocReaders(script shellparse.Script) []heredocReader {
+	var readers []heredocReader
+	for i, seg := range script.Segments {
+		if len(seg.Words) == 0 || !dangerousDeclarationBuiltins[seg.Words[0].Text] {
+			continue
+		}
+		for j := 1; j < len(seg.Words); j++ {
+			raw := seg.Words[j].Raw
+			if strings.ContainsAny(raw, "$'\"`\\") {
+				continue
+			}
+			k := strings.Index(raw, "<<")
+			if k < 0 {
+				continue
+			}
+			tag := strings.TrimPrefix(raw[k+2:], "-")
+			if tag == "" && j+1 < len(seg.Words) {
+				tag = seg.Words[j+1].Raw
+			}
+			if tag == "" || strings.ContainsAny(tag, "$'\"`\\") {
+				continue
+			}
+			doc := shellparse.Heredoc{Delimiter: tag}
+			readers = append(readers, heredocReader{doc: doc, readerEnd: segmentSourceEnd(seg), readerPipelineHasShell: heredocPipelineRunsShell(script, i)})
+		}
+	}
+	return readers
+}
+
+// heredocReadersUnplaced reports whether a here-document of script has a reader
+// whose source position the parser did not give, so its body cannot be placed
+// in the text. A caller that acts on bodies in the text refuses such a command
+// rather than read the body at a guessed offset.
+func heredocReadersUnplaced(script shellparse.Script) bool {
+	var readers []heredocReader
+	collectHeredocReaders(script, &readers)
+	for _, r := range append(readers, declarationHeredocReaders(script)...) {
+		if r.readerEnd < 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // heredocSpansFromScript places the here-documents of a parsed script in text.
 // A body starts after the newline that ends its reader's logical line — a
 // backslash-newline continues that line, so the body only starts past the
 // continuation — and ends past the line that equals the delimiter. Bodies are
-// read in reader order, so a later body starts where the earlier one ended.
-// A here-document whose reader segment has no source position cannot be
-// placed, and the whole text falls back to the line reader rather than
-// stripping at a guessed offset.
+// read in reader order, so a later body starts where the earlier one ended. A
+// reader whose position is unknown has no span here; heredocReadersUnplaced
+// lets the caller refuse the command instead.
 func heredocSpansFromScript(text string, script shellparse.Script) []heredocSpan {
 	var readers []heredocReader
 	collectHeredocReaders(script, &readers)
+	readers = append(readers, declarationHeredocReaders(script)...)
+	var placed []heredocReader
 	for _, r := range readers {
-		if r.readerEnd < 0 {
-			return heredocSpansLenient(text)
+		if r.readerEnd >= 0 {
+			placed = append(placed, r)
 		}
 	}
+	readers = placed
 	sort.SliceStable(readers, func(i, j int) bool { return readers[i].readerEnd < readers[j].readerEnd })
 	var spans []heredocSpan
 	cursor := 0
@@ -924,8 +979,8 @@ func collectHeredocReaders(script shellparse.Script, out *[]heredocReader) {
 // Inherited redirections are left out: they belong to an enclosing compound
 // command, whose redirect may sit after the here-document body the segment
 // reads. Assignment words carry no position in shellparse, so they are left
-// out too; a segment that is only an assignment and a here-document falls back
-// to the line reader.
+// out too; a segment that is only an assignment and a here-document has no
+// position, and its body is reported by heredocReadersUnplaced.
 func segmentSourceEnd(seg shellparse.Segment) int {
 	end := -1
 	for _, w := range seg.Words {
@@ -980,216 +1035,6 @@ func heredocDelimiterEnd(text string, bodyStart int, delimiter string) (int, boo
 		offset = next
 	}
 	return len(text), false
-}
-
-// pendingHeredocTag is one "<<" the line reader has seen on the current logical
-// line and whose body it still has to read.
-type pendingHeredocTag struct {
-	tag    string
-	quoted bool
-}
-
-// heredocSpansLenient reads here-document bodies from text the parser refused,
-// a line at a time. It reads the same "<<" spellings the shell does not: a
-// "<<" behind a backslash, inside a single or double quote, inside a word's
-// "${..}" expansion or an arithmetic expression, or in a word-leading "#"
-// comment opens no body, and a here-string's "<<" is no operator. The body
-// lines are data and are stepped over whole, so a quote or "<<" in one of them
-// counts for nothing. This is not the parsed reading and does not decide a
-// verdict: `evaluateDangerousCommand` refuses the text the parser could not
-// read, and this reader only keeps a dangerous operation written outside an
-// unreadable body visible while that refusal is chosen.
-func heredocSpansLenient(text string) []heredocSpan {
-	runes := []rune(text)
-	offsets := make([]int, len(runes)+1)
-	for i, r := range runes {
-		offsets[i+1] = offsets[i] + utf8.RuneLen(r)
-	}
-	var spans []heredocSpan
-	var pending []pendingHeredocTag
-
-	var quote rune // the open quote: 0, '\'' , '"' or '$' for a $'...' string
-	comment := false
-	escaped := false
-	braces := 0    // "${" expansions open
-	arith := 0     // "$((" expressions open
-	subscript := 0 // "[" array subscripts open
-	prevIdx := -1
-	prevEsc := false
-
-	readBodies := func(from int) int {
-		for _, tag := range pending {
-			start := from
-			var end int
-			ok := false
-			for offset := from; offset <= len(runes); {
-				lineEnd := -1
-				for k := offset; k < len(runes); k++ {
-					if runes[k] == '\n' {
-						lineEnd = k
-						break
-					}
-				}
-				line, next := runes[offset:], len(runes)
-				if lineEnd >= 0 {
-					line, next = runes[offset:lineEnd], lineEnd+1
-				}
-				trimmed := line
-				for len(trimmed) > 0 && trimmed[0] == '\t' {
-					trimmed = trimmed[1:]
-				}
-				if string(line) == tag.tag || string(trimmed) == tag.tag {
-					end, ok = next, true
-					break
-				}
-				if lineEnd < 0 {
-					break
-				}
-				offset = next
-			}
-			if ok {
-				spans = append(spans, heredocSpan{bodyStart: offsets[start], bodyEnd: offsets[end], body: text[offsets[start]:offsets[end]], quoted: tag.quoted})
-				from = end
-				continue
-			}
-			spans = append(spans, heredocSpan{bodyStart: offsets[start], bodyEnd: len(text), body: text[offsets[start]:], quoted: tag.quoted, unterminated: true})
-			from = len(runes)
-		}
-		return from
-	}
-
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		if comment {
-			if r == '\n' {
-				comment = false
-				if len(pending) > 0 {
-					i = readBodies(i+1) - 1
-					pending = nil
-					prevIdx, prevEsc = -1, false
-				}
-			}
-			continue
-		}
-		if escaped {
-			escaped = false
-			prevIdx, prevEsc = i, true
-			continue
-		}
-		switch {
-		case quote == '\'':
-			if r == '\'' {
-				quote = 0
-			}
-		case r == '\\' && quote != '\'':
-			escaped = true
-		case quote == '$':
-			if r == '\'' {
-				quote = 0
-			}
-		case quote == '"':
-			if r == '"' {
-				quote = 0
-			}
-		case r == '\'' || r == '"':
-			quote = r
-		case r == '$' && i+1 < len(runes) && runes[i+1] == '$':
-			// "$$" is the PID, so the second "$" starts no expansion (gt-0vbb2).
-			i++
-		case r == '$':
-			q := skipLineContinuations(runes, i+1)
-			switch {
-			case q < len(runes) && runes[q] == '\'':
-				// A backslash-newline between the "$" and its quote is deleted
-				// before the shell reads the quote, so that quote still opens a
-				// $'...' string (gt-javvg).
-				quote = '$'
-				i = q
-			case q < len(runes) && runes[q] == '{':
-				braces++
-				i = q
-			case q+1 < len(runes) && runes[q] == '(' && runes[q+1] == '(':
-				arith++
-				i = q + 1
-			case q < len(runes) && runes[q] == '[':
-				subscript++
-				i = q
-			}
-		case r == '}' && braces > 0:
-			braces--
-		case r == ')' && arith > 0 && i+1 < len(runes) && runes[i+1] == ')':
-			arith--
-			i++
-		case r == ']' && subscript > 0:
-			subscript--
-		case r == '#' && quote == 0 && braces == 0 && arith == 0 && subscript == 0 && startsShellWord(runes, prevIdx, prevEsc):
-			comment = true
-		case r == '<' && i+1 < len(runes) && runes[i+1] == '<' && braces == 0 && arith == 0 && subscript == 0:
-			j := i + 2
-			if j < len(runes) && runes[j] == '<' {
-				i = j // a here-string's "<<<": no body
-				continue
-			}
-			// A "<<" behind a backslash is a literal "<" and a single redirect;
-			// the escaped case was taken above.
-			if j < len(runes) && runes[j] == '-' {
-				j++
-			}
-			for j < len(runes) && (runes[j] == ' ' || runes[j] == '\t') {
-				j++
-			}
-			quoted := false
-			var tag []rune
-			if j < len(runes) && (runes[j] == '\'' || runes[j] == '"') {
-				q := runes[j]
-				quoted = true
-				j++
-				start := j
-				for j < len(runes) && runes[j] != q {
-					j++
-				}
-				tag = runes[start:j]
-				if j < len(runes) {
-					j++
-				}
-			} else {
-				start := j
-				for j < len(runes) && heredocTagRune(runes[j]) {
-					j++
-				}
-				tag = runes[start:j]
-			}
-			if heredocValidTag(tag) {
-				pending = append(pending, pendingHeredocTag{tag: string(tag), quoted: quoted})
-			}
-			i = j - 1
-			prevIdx, prevEsc = i, false
-			continue
-		case r == '\n' && len(pending) > 0:
-			i = readBodies(i+1) - 1
-			pending = nil
-			prevIdx, prevEsc = -1, false
-			continue
-		}
-		prevIdx, prevEsc = i, false
-	}
-	return spans
-}
-
-// heredocTagRune reports whether r may appear in a here-document delimiter.
-func heredocTagRune(r rune) bool {
-	return r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
-}
-
-// heredocValidTag reports whether tag is a delimiter the line reader accepts:
-// one that starts with a letter or underscore, the shape the shell's own tags
-// take in every guard test.
-func heredocValidTag(tag []rune) bool {
-	if len(tag) == 0 {
-		return false
-	}
-	first := tag[0]
-	return first == '_' || first >= 'a' && first <= 'z' || first >= 'A' && first <= 'Z'
 }
 
 // stripHeredocBodies removes heredoc body text from command before any

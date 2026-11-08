@@ -2064,16 +2064,18 @@ func TestShellFedHeredocInBacktickOrProcessSubstitution(t *testing.T) {
 			wantBlock: false,
 		},
 		{
+			// The parser refuses both texts whole, so the command after the
+			// backtick is refused with them, naming the construct (gt-a7jzr5).
 			name:       "a substitution still open when the backtick closes does not hide the command after it",
 			command:    "x=`echo $(echo`; git reset --hard",
 			wantBlock:  true,
-			wantReason: "Hard reset",
+			wantReason: "cannot be read (unterminated command substitution)",
 		},
 		{
 			name:       "a process substitution still open when the backtick closes does not hide the command after it",
 			command:    "x=`cat <(echo`; git reset --hard",
 			wantBlock:  true,
-			wantReason: "Hard reset",
+			wantReason: "cannot be read (unterminated process substitution)",
 		},
 		{
 			name:      "a close paren in a process substitution's own text ends only that text",
@@ -2403,17 +2405,15 @@ func TestHeredocCommandTextStopsAtTheReaderLine(t *testing.T) {
 	}
 }
 
-// TestHeredocCommandTextClampOnContinuedReaderLines: whether the body of a
-// here-document inside a substitution is a script depends on the reader line,
-// so a line above reaches it only when a backslash joins that line to the
-// reader's. A continuation makes the line above one command line with the
+// TestShellFedHeredocInSubstitutionFollowsReaderLineContinuation pins the
+// verdict on a here-document inside a substitution, which depends on the reader
+// line: a line above reaches the body only when a backslash joins that line to
+// the reader's. A continuation makes the line above one command line with the
 // reader, and its shell invoker reads the body; a continuation inside the
 // reader line leaves the line above out, so its cat reads the body as data.
 // The reader line itself is read whole either way, so a pipe stage continued
-// onto the next physical line still reaches bash (gt-3yhp0). The reader line
-// is the parsed segment now, so the verdict is what the test pins; the old
-// raw-text cmdText assertion went with the scanner it read.
-func TestHeredocCommandTextClampOnContinuedReaderLines(t *testing.T) {
+// onto the next physical line still reaches bash (gt-3yhp0).
+func TestShellFedHeredocInSubstitutionFollowsReaderLineContinuation(t *testing.T) {
 	t.Parallel()
 	const body = "git reset --hard"
 	tests := []struct {
@@ -4272,19 +4272,19 @@ func TestDangerousGuardLenientFallbackKeepsSeparators(t *testing.T) {
 		name    string
 		command string
 		blocked bool
-		// unreadable rows are refused as a command the parser cannot read
-		// (gt-m6x4py); the separator check still holds: the nuke is not read as
-		// a dangerous command, so the reason must not name filesystem destruction.
+		// unreadable rows are refused whole as a command the parser cannot read
+		// (gt-m6x4py, gt-a7jzr5): no second reader names a dangerous operation in
+		// them, so the reason must not name filesystem destruction.
 		unreadable bool
 	}{
-		{"a double-quoted paren on the last line", "echo ok\nrm -rf /\necho \"(", true, false},
-		{"a single-quoted paren on the last line", "echo ok\nrm -rf /\necho '(", true, false},
-		{"a harmless last line behind an unclosed quote and a paren", "echo ok\nrm -rf /\necho \"(x", true, false},
-		{"a semicolon glued to the earlier line", "echo ok; rm -rf /; echo \"(", true, false},
-		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"(", true, false},
-		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"(", true, false},
-		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"(", true, false},
-		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"(", true, false},
+		{"a double-quoted paren on the last line", "echo ok\nrm -rf /\necho \"(", true, true},
+		{"a single-quoted paren on the last line", "echo ok\nrm -rf /\necho '(", true, true},
+		{"a harmless last line behind an unclosed quote and a paren", "echo ok\nrm -rf /\necho \"(x", true, true},
+		{"a semicolon glued to the earlier line", "echo ok; rm -rf /; echo \"(", true, true},
+		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"(", true, true},
+		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"(", true, true},
+		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"(", true, true},
+		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"(", true, true},
 		{"an ampersand redirection keeps the nuke an argument", "echo ok >&rm -rf / \"(", true, true},
 		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"(", true, true},
 	} {
@@ -4442,20 +4442,20 @@ func TestDangerousGuardFieldsFallbackKeepsSeparators(t *testing.T) {
 		name    string
 		command string
 		blocked bool
-		// unreadable rows are refused as a command the parser cannot read
-		// (gt-m6x4py); the separator check still holds: the nuke is not read as
-		// a dangerous command, so the reason must not name filesystem destruction.
+		// unreadable rows are refused whole as a command the parser cannot read
+		// (gt-m6x4py, gt-a7jzr5): no second reader names a dangerous operation in
+		// them, so the reason must not name filesystem destruction.
 		unreadable bool
 	}{
-		{"an unclosed double quote on the last line", "echo ok\nrm -rf /\necho \"", true, false},
-		{"an unclosed double quote with text on the last line", "echo ok\nrm -rf /\necho \"x", true, false},
-		{"a harmless last line behind a closed quote and an unclosed one", "echo ok\nrm -rf /\necho \"x\" \"y", true, false},
-		{"a semicolon glued to the earlier line", "echo ok;rm -rf /;echo \"", true, false},
-		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"", true, false},
-		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"", true, false},
-		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"", true, false},
-		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"", true, false},
-		{"a semicolon glued before an unclosed single quote", "echo ok;rm -rf /;echo 'x", true, false},
+		{"an unclosed double quote on the last line", "echo ok\nrm -rf /\necho \"", true, true},
+		{"an unclosed double quote with text on the last line", "echo ok\nrm -rf /\necho \"x", true, true},
+		{"a harmless last line behind a closed quote and an unclosed one", "echo ok\nrm -rf /\necho \"x\" \"y", true, true},
+		{"a semicolon glued to the earlier line", "echo ok;rm -rf /;echo \"", true, true},
+		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"", true, true},
+		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"", true, true},
+		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"", true, true},
+		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"", true, true},
+		{"a semicolon glued before an unclosed single quote", "echo ok;rm -rf /;echo 'x", true, true},
 		{"a nuke inside a quote glued to a separator is unreadable (gt-m6x4py)", "echo \"a;rm -rf /\" '", true, true},
 		{"a harmless malformed command with glued separators is unreadable (gt-m6x4py)", "echo ok;ls;echo 'x", true, true},
 		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"", true, true},
@@ -4583,5 +4583,16 @@ func TestLenientShellWords(t *testing.T) {
 				t.Errorf("lenientShellWords(%q) = %q, want %q", tt.command, got, tt.want)
 			}
 		})
+	}
+}
+
+// gt-a7jzr5: the declaration reader strips only an operator the shell reads.
+// A "<<" inside quotes is text to the shell, so the command after it is judged.
+func TestDeclarationHeredocReaderNeedsAnUnquotedOperator(t *testing.T) {
+	t.Parallel()
+	command := "let 'y=1<<x'\nrm -rf /\nx"
+	reason, _ := evaluateDangerousCommand(command, 0, noTownSession)
+	if !strings.Contains(reason, "filesystem destruction") {
+		t.Errorf("evaluateDangerousCommand(%q) reason = %q, want filesystem destruction: a quoted << starts no body", command, reason)
 	}
 }

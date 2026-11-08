@@ -881,8 +881,9 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		// quoted sentence after it is text, not a command (gt-lx8i8).
 		"x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; echo \"use rg to search\"",
 		// A quoted heredoc keeps its body literal, and a shell invoker in the
-		// same pipeline runs the body, judged as code (gt-294yz).
-		"cat <<'EOF'\n$FORGEJO_TOKEN\nEOF; bash -c 'true'",
+		// same pipeline runs the body, judged as code (gt-294yz). Its delimiter
+		// line is not alone here, which the parser refuses; that row moved to
+		// TestSandboxSecretsRefusesUnreadableCommands (gt-a7jzr5).
 		"bash -c 'true'; cat <<'EOF'\n$FORGEJO_TOKEN\nEOF",
 		"bash <<EOF\nmake test\nEOF\ncat <<'EOF'\n$FORGEJO_TOKEN\nEOF",
 		"bash -c 'true' | cat <<EOF\nhello $HOME\nEOF",
@@ -1176,5 +1177,56 @@ func TestSandboxSecretsANSICHereStringsAcrossContinuation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// gt-a7jzr5: the command the hook judges is refused whole when the parser cannot
+// read it, naming the construct, instead of being judged on its tokens. A
+// heredoc on a line the parser rejects is one such command: a shell may run its
+// body as a script whatever the tokens say.
+func TestSandboxSecretsRefusesUnreadableCommands(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		command   string
+		construct string
+	}{
+		{"a quoted heredoc whose delimiter line is not alone", "cat <<'EOF'\n$FORGEJO_TOKEN\nEOF; bash -c 'true'", "unterminated here-document"},
+		{"a shell fed a heredoc on a line with an unclosed quote", "bash <<EOF\nmake test\nEOF\necho '", "unterminated quote"},
+		{"a substitution beside an unclosed quote", "echo \"$(cat <<'EOF'\nhello\nEOF\n)\"; echo '", "unterminated quote"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if !strings.Contains(reason, "cannot be read ("+tt.construct+")") {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want the unreadable refusal naming %q", tt.command, reason, tt.construct)
+			}
+		})
+	}
+}
+
+// The substitution heredoc text the walk judges is the body with its delimiter
+// line appended, as the shell read it (gt-a7jzr5). The body excludes that line,
+// so the format is pinned here rather than inferred from the body alone.
+func TestSandboxSecretsSubstitutionHeredocTextFormat(t *testing.T) {
+	t.Parallel()
+	got := sandboxSecretsSubstitutionHeredocs("x=\"$(cat <<'EOF'\nprintenv\nEOF\n)\"")
+	want := []string{"printenv\nEOF\n"}
+	if !slices.Equal(got, want) {
+		t.Errorf("sandboxSecretsSubstitutionHeredocs = %q, want %q", got, want)
+	}
+}
+
+// gt-a7jzr5: a heredoc whose reader the parser gave no source position, as with
+// an assignment-only segment, cannot be placed in the command. The command is
+// refused whole rather than read at a guessed offset.
+func TestSandboxSecretsRefusesUnplacedHeredocBody(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"x=1 <<EOF\n$SECRET\nEOF",
+		"<<EOF\n$SECRET\nEOF",
+	} {
+		if reason := sandboxSecretsReason(command); !strings.Contains(reason, "cannot be placed") {
+			t.Errorf("sandboxSecretsReason(%q) = %q, want the unplaced-body refusal", command, reason)
+		}
 	}
 }

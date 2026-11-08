@@ -317,7 +317,7 @@ dangerous	polecat	"echo $(make test"	refuse	cannot be read (unterminated command
 dangerous	crew	"echo $(make test"	refuse	cannot be read (unterminated command substitution)	gt-m6x4py
 dangerous	polecat	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-m6x4py
 dangerous	crew	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-m6x4py
-dangerous	polecat	"echo ok;rm -rf /;echo \""	refuse	filesystem destruction	gt-m6x4py
+dangerous	polecat	"echo ok;rm -rf /;echo \""	refuse	cannot be read (unterminated quote)	gt-m6x4py
 # --- dangerous: nested payloads judged from the parsed Script (gt-7ydceb) ---
 # A -c payload, an eval string, a command substitution and a process
 # substitution run as command lines of their own, and a payload the parser
@@ -350,8 +350,8 @@ container_suite	polecat	"GT_TEST_DOCKER=1 echo 'go test ./internal/beads/...' | 
 dangerous	polecat	"echo ok # n \\\nsh <<< 'git reset --hard'"	refuse	Hard reset	gt-4otugt
 container_suite	polecat	"GT_TEST_DOCKER=1 echo ok # n \\\nsh <<< 'go test ./internal/beads/...'"	refuse	targets testcontainers-backed package(s)	gt-4otugt
 # --- a comment ending in a backslash on a heredoc operator line: bash runs the line after the terminator (gt-4otugt) ---
-dangerous	polecat	"cat <<'EOF' # n \\\nEOF\ngit reset --hard\nEOF"	refuse	Hard reset	gt-4otugt
-dangerous	polecat	"cat <<-EOF # n \\\n\tEOF\ngit reset --hard\nEOF"	refuse	Hard reset	gt-4otugt
+dangerous	polecat	"cat <<'EOF' # n \\\nEOF\ngit reset --hard\nEOF"	refuse	cannot be read (unterminated here-document)	gt-4otugt
+dangerous	polecat	"cat <<-EOF # n \\\n\tEOF\ngit reset --hard\nEOF"	refuse	cannot be read (comment ending in a backslash on a heredoc operator line)	gt-4otugt
 container_suite	polecat	"GT_TEST_DOCKER=1 cat <<-EOF # n \\\n\tEOF\ngo test ./internal/beads/...\nEOF"	refuse	comment ending in a backslash on a heredoc operator line	gt-4otugt
 container_suite	polecat	"export GT_TEST_DOCKER=1; make x && cd internal/style; go test"	allow		gt-zz1t7g
 # --- a comment ending in a backslash before a CR LF: bash ends the comment at the LF, the parser does not (gt-s9ogqg) ---
@@ -377,3 +377,7 @@ dangerous	polecat	"declare -x BD_ACTOR=Operator"	refuse	polecat may not set a co
 container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/style/... -run TestStyle"	allow		gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
 container_suite	polecat	"GT_TEST_DOCKER=1 cat > note.md <<'EOF'\ngo test ./internal/beads/...\nEOF"	allow		gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
 test_scope	polecat	"go test -run TestDangerous ./internal/cmd"	allow		gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
+# --- gt-a7jzr5 rework: a command the parser cannot read is refused whole, naming the construct; one real case per guard carries the new stamp (freeze rule) ---
+dangerous	polecat	"echo ok\nrm -rf /\necho \""	refuse	cannot be read (unterminated quote)	gt-a7jzr5	2ebbac61230296bdab7003757b9a4a157d28f073c08624b44d6cbf559478d3fa
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-a7jzr5	2ebbac61230296bdab7003757b9a4a157d28f073c08624b44d6cbf559478d3fa
+test_scope	polecat	"go test -run TestGuardCorpus ./internal/cmd"	allow		gt-a7jzr5	2ebbac61230296bdab7003757b9a4a157d28f073c08624b44d6cbf559478d3fa
