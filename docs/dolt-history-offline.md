@@ -76,6 +76,93 @@ line before choosing the morning. Wait until the window has logged
 `cycle completed` — the line comes after that window's archive, backup and
 gc — before parking the town.
 
+## Rehearse on a copy first
+
+Rehearse the flatten on a copy of the database before you run it on the town.
+The 2026-11-06 rehearsal of gt, on a restore of the nightly backup, is the one
+that found the three statements the flatten section now corrects; these steps
+are the procedure it ran. Nothing here touches the live server on port 3307.
+
+1. Copy the backup, then restore from the copy. Dolt writes a `LOCK` file into
+   the backup it restores, so never mount the nightly backup itself. The
+   restore uses the image's own `dolt`, so the rehearsal needs no host install:
+
+   ```bash
+   SCRATCH=$(mktemp -d -t dolt-rehearsal)
+   mkdir -p "$SCRATCH/data"
+   cp -a ~/gt-backups/dolt/<night>/gt "$SCRATCH/backup"
+   docker run --rm --entrypoint sh \
+     -v "$SCRATCH/backup:/backup/gt" -v "$SCRATCH/data:/data" -w /data \
+     dolthub/dolt-sql-server:2.7.2 \
+     -c 'dolt config --global --add user.name <name> && dolt config --global --add user.email <email> && dolt backup restore file:///backup/gt gt'
+   ```
+
+   Expect the restored `gt` to hold 33,010 commits and 30 tables (the 2026-11-06
+   rehearsal's counts).
+
+2. Serve the copy with the town's server config, in a container capped at 8 GiB
+   with `DOLT_ROOT_HOST=%`. Copy `~/gt/.dolt-data/config.yaml` and mount the
+   copy, so auto GC stays on and `archive_level` stays 0 as in the town. Publish
+   a free port on 127.0.0.1, never 3307:
+
+   ```bash
+   cp ~/gt/.dolt-data/config.yaml "$SCRATCH/config.yaml"
+   docker run -d --name gt-rehearsal --memory 8g -e DOLT_ROOT_HOST=% \
+     -p 127.0.0.1:13306:3306 \
+     -v "$SCRATCH/data:/var/lib/dolt" -v "$SCRATCH/config.yaml:/config.yaml" \
+     dolthub/dolt-sql-server:2.7.2 --config /config.yaml
+   ```
+
+3. Count rows for every table, before the flatten, after it and after the full
+   GC. The counts must be identical at all three points; a table that lost rows
+   means the rehearsal failed. Run the queries inside the container:
+
+   ```bash
+   docker exec gt-rehearsal dolt --host 127.0.0.1 --port 3306 --no-tls \
+     -u root -p "" --use-db gt sql -q "SELECT COUNT(*) FROM <table>"
+   ```
+
+4. Run the flatten SQL from the Flatten section below on the copy's `gt`, then
+   `CALL dolt_gc('--full')`. Measure the size and the memory: read the database
+   directory on the host and the container's cgroup `memory.peak` (cgroup v2,
+   `/sys/fs/cgroup/memory.peak` inside the container). The 2026-11-06 rehearsal
+   read a 1,664 MB database before, 1,668 MB after the flatten, 363 MB after the
+   GC, and a `memory.peak` of 1.73 GiB over the whole run:
+
+   ```bash
+   du -sh "$SCRATCH/data/gt"
+   docker exec gt-rehearsal cat /sys/fs/cgroup/memory.peak
+   ```
+
+5. Run `bd` only inside a container that mounts nothing but a scratch metadata
+   file (modelled on `.beads/metadata.json`) and the copy. A scratch metadata
+   file on the host does not isolate a `bd` run: `bd` on the host still reads
+   the live store. Print `bd show` for five beads before the flatten and after
+   it, and compare the bytes; the rehearsal's five matched. Then read
+   `bd history <id>`: the 2026-11-06 rehearsal went from 33,009 entries (3.7 MB
+   of output) to one.
+
+6. Remove the container and the copy when you have the numbers:
+
+   ```bash
+   docker rm -f gt-rehearsal
+   ```
+
+   Then remove the scratch directory you made with `mktemp`.
+
+The rehearsal does not cover `gt dolt archive-now`, which needs the live town
+(the dispatch hold, the daemon and the archive), and it does not cover
+concurrent writes: nothing writes to the copy. The flatten's safety against
+concurrent writes is step 1 of "Before any rewrite".
+
+The live flatten of 2026-11-07 is a second measurement, run under this runbook
+with the town held and drained and the archive brought to 0 behind. It took gt
+from 35,300 commits to 2. The on-disk size was unchanged right after the
+flatten and fell from 1.89 GB to 353 MiB only after the full GC, which ran under
+the pause marker. All 30 tables kept their row counts, and 11 databases were 0
+behind in the archive. That is one day's measurement, not a promise, and it
+agrees with the rehearsal.
+
 ## Before any rewrite
 
 Before step 1, check the archive level the server is configured with. The
@@ -144,11 +231,31 @@ SELECT COUNT(*) FROM dolt_log;                                   -- before
 SET @root = (SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1);
 CALL DOLT_RESET('--soft', @root);   -- moves the parent pointer; data stays staged
 CALL DOLT_COMMIT('-Am', 'flatten: squash history');
-SELECT COUNT(*) FROM dolt_log;                                   -- after
+SELECT COUNT(*) FROM dolt_log;                                   -- after: 2, not 1
 ```
 
+The flatten does not shrink the database. The commits go, but the space they
+held stays on disk until a full GC. The 2026-11-06 rehearsal on gt measured it
+(see "Rehearse on a copy first"): 1,664 MB before the flatten, 1,668 MB after,
+and 363 MB after `CALL dolt_gc('--full')`. The space comes back only at that
+next full GC, and the figures are that rehearsal's, not a promise. The full GC
+is the `scheduled_maintenance` window's (weekly, or when old-gen grew more than
+20%; see "The GC actor"). Run one by hand only under the pause from "The GC
+actor": `gt dolt pause --reason "manual gc" --until 30m`, then
+`gt dolt unpause` after it.
+
+After the flatten `dolt_log` holds 2 commits, not 1: the original root and the
+flatten commit. `DOLT_RESET('--soft', @root)` keeps the root, so the count after
+is 2 and is not a failure. The flatten commit is the one not yet archived, which
+is why the status below reads behind by one.
+
+After the flatten, `bd history <id>` shows one entry for every bead, authored
+"Dolt System Account". The history before the flatten is gone from bd. It
+survives in the archive that step 2 brought to 0 behind, and in the nightly
+backup (see [docs/dolt-restore.md](dolt-restore.md)).
+
 Each flattened database now reads `1 commits behind` in `gt dolt status`,
-because its new root commit is not archived yet. Run `gt dolt archive-now`
+because its flatten commit is not archived yet. Run `gt dolt archive-now`
 again, with the dispatch hold still set and the town still parked. Read its
 exit code and the status the way step 2 does: exit 1, exit 3 and a status step
 2 would refuse all stop the flatten here too. Run the pass again only while it
