@@ -1,0 +1,49 @@
+{
+  "agents": {
+    "polecat": {
+      "env": {
+        "TOKEN": "<&>"
+      }
+    }
+  },
+  "daemon": {
+    "container_name": "gastown-daemon",
+    "patrols": {
+      "disk_maintenance": {
+        "enabled": false,
+        "interval": "1h"
+      },
+      "handler": {
+        "enabled": false,
+        "plugins": [
+          "app-promote",
+          "reporters"
+        ]
+      },
+      "jev_bench": {
+        "enabled": false,
+        "interval": 30
+      },
+      "jev_patrol": {
+        "enabled": false
+      },
+      "landing_worker": {
+        "enabled": false,
+        "max_parallel": 1.50
+      },
+      "spec_dispatch": {
+        "enabled": false
+      },
+      "tier_sweep": {
+        "enabled": false,
+        "runner_idle_wait": "5m"
+      },
+      "wisp_reaper": {
+        "enabled": false
+      }
+    }
+  },
+  "operational": {
+    "threshold": 1e3
+  }
+}
