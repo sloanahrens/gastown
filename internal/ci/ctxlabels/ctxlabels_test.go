@@ -2,10 +2,14 @@ package ctxlabels_test
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/ci/ctxlabels"
+	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
 const (
@@ -14,7 +18,7 @@ const (
 	// other is a commit the context must not be staged at.
 	other = "fedcba9876543210fedcba9876543210fedcba98"
 	// bdPin is the bd commit the polecat image is built from.
-	bdPin = "d0f0010ef037e8de0006f2a4d0e01019120a5d8c"
+	bdPin = "ecf0fc58c789b6d5a158bcf4b485662bc15f296d"
 	// floor is the Go floor the image build takes.
 	floor = "1.10.0"
 )
@@ -171,5 +175,83 @@ func TestEnvRefusesAnEnvironmentItCannotWrite(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "writing BD_COMMIT and GO_FLOOR") {
 		t.Errorf("Env error = %q, want it to name the environment write", err)
+	}
+}
+
+// bdPinMatches is the check TestBDPinMatchesImagePins runs on the image-pins
+// bytes: the file must parse (daemonimage.ParsePins requires a line for each of
+// bd, om, hm and devops, so a file without a bd line fails there) and its bd
+// line must name want. Each failure names the file and, for a mismatch, both
+// commits.
+func bdPinMatches(imagePins []byte, want string) error {
+	pins, err := daemonimage.ParsePins(imagePins)
+	if err != nil {
+		return fmt.Errorf("%s: %w", daemonimage.PinsPath, err)
+	}
+	var bd string
+	for _, p := range pins {
+		if p.Name == "bd" {
+			bd = p.Commit
+		}
+	}
+	if bd != want {
+		return fmt.Errorf("bdPin = %s, but %s names bd at %s", want, daemonimage.PinsPath, bd)
+	}
+	return nil
+}
+
+// TestBDPinMatchesImagePins holds bdPin to the bd commit deploy/daemon/image-pins
+// names, so a bump of the image pin cannot leave the polecat image's bd commit
+// behind.
+func TestBDPinMatchesImagePins(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(daemonimage.PinsPath)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", daemonimage.PinsPath, err)
+	}
+	if err := bdPinMatches(body, bdPin); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestBDPinMatchesRefuses drives each refusal of the drift check with a
+// fixture, so the failing assertion is proven to fire and the real-file run
+// above cannot pass for the wrong reason.
+func TestBDPinMatchesRefuses(t *testing.T) {
+	t.Parallel()
+	const goodBD = "0123456789abcdef0123456789abcdef01234567"
+	const otherBD = "fedcba9876543210fedcba9876543210fedcba98"
+	const others = "om https://example.invalid/om.git " + goodBD + "\nhm https://example.invalid/hm.git " + goodBD + "\ndevops https://example.invalid/devops.git " + goodBD + "\n"
+	const image = "bd https://example.invalid/bd.git " + goodBD + "\n" + others
+	for _, tc := range []struct {
+		name    string
+		image   string
+		want    string
+		wantErr string
+	}{
+		{name: "the bd line names bdPin", image: image, want: goodBD},
+		{name: "the bd line names another commit", image: image, want: otherBD,
+			wantErr: "bdPin = " + otherBD + ", but " + daemonimage.PinsPath + " names bd at " + goodBD},
+		{name: "the file has no bd line", image: others, want: goodBD,
+			wantErr: daemonimage.PinsPath + ": missing pin for bd"},
+		{name: "the file does not parse", image: "bd " + goodBD + "\n", want: goodBD,
+			wantErr: daemonimage.PinsPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := bdPinMatches([]byte(tc.image), tc.want)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("bdPinMatches: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("bdPinMatches accepted the file")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("bdPinMatches error = %q, want it to contain %q", err, tc.wantErr)
+			}
+		})
 	}
 }

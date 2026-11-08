@@ -10,13 +10,14 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat/bdbuild"
+	polecatseed "github.com/steveyegge/gastown/internal/polecat/seed"
 )
 
 const (
-	pinBDCommit     = "d0f0010ef037e8de0006f2a4d0e01019120a5d8c"
-	pinOMCommit     = "3b8ef74f4b6a141be0a37bd2dfb0ba9ad998e439"
-	pinHMCommit     = "d8d2789418ea611dc9c16c109dc4d250e9000abd"
-	pinDevopsCommit = "9a55ea1175c21020a1811314631e899bd8e894f3"
+	pinBDCommit     = "ecf0fc58c789b6d5a158bcf4b485662bc15f296d"
+	pinOMCommit     = "218e13d1f6727a9b343239615c7b5f009c0ddd19"
+	pinHMCommit     = "e207fe9a913a7b3cddbdb631a04bcb81156f1fdf"
+	pinDevopsCommit = "09bcaa41d4720129c4c89779f924c7824fa77dcb"
 )
 
 // testOwner is the Forgejo owner every fixture pin URL names, and testPinURL
@@ -358,5 +359,145 @@ func TestCommittedImagePinsParse(t *testing.T) {
 		if !seen[name] {
 			t.Errorf("%s names no %s pin", path, name)
 		}
+	}
+}
+
+// seedPinsPath is the polecat seed-pins file, relative to the repository root.
+const seedPinsPath = "deploy/polecat/seed-pins"
+
+// seedPinSources pairs each seed-pins rig with the image-pins source it is the
+// same repository as: the seed names beads where the image names bd.
+var seedPinSources = []struct{ rig, pin string }{
+	{"beads", "bd"},
+	{"devops", "devops"},
+}
+
+// agreeingPins is the check TestCommittedPinsAgree runs on the two files'
+// bytes: every seed-pins line for a source the image file also pins must name
+// the same commit, so one file cannot be bumped without the other. A
+// disagreement names both files and the commits they name.
+func agreeingPins(image, seed []byte) error {
+	pins, err := ParsePins(image)
+	if err != nil {
+		return fmt.Errorf("%s: %w", PinsPath, err)
+	}
+	sources, err := polecatseed.Pins(seed)
+	if err != nil {
+		return fmt.Errorf("%s: %w", seedPinsPath, err)
+	}
+	imageCommit := make(map[string]string, len(pins))
+	for _, p := range pins {
+		imageCommit[p.Name] = p.Commit
+	}
+	seedCommit := make(map[string]string, len(sources))
+	for _, s := range sources {
+		seedCommit[s.Rig] = s.Commit
+	}
+	for _, src := range seedPinSources {
+		want := imageCommit[src.pin]
+		got, ok := seedCommit[src.rig]
+		if !ok {
+			return fmt.Errorf("%s names no %s line, but %s pins %s at %s", seedPinsPath, src.rig, PinsPath, src.pin, want)
+		}
+		if got != want {
+			return fmt.Errorf("%s pins %s at %s, but %s pins %s at %s: bump both files to the same commit", seedPinsPath, src.rig, got, PinsPath, src.pin, want)
+		}
+	}
+	return nil
+}
+
+// TestCommittedPinsAgree fails when the shipped seed-pins file names a different
+// beads or devops commit than the shipped image-pins file's bd or devops commit.
+func TestCommittedPinsAgree(t *testing.T) {
+	t.Parallel()
+	image, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(PinsPath)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", PinsPath, err)
+	}
+	seed, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(seedPinsPath)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", seedPinsPath, err)
+	}
+	if err := agreeingPins(image, seed); err != nil {
+		t.Error(err)
+	}
+}
+
+// TestAgreeingPinsRefuses drives each refusal of the agreement check with a
+// fixture: a seed commit the image file does not name, a seed file missing one
+// of the two sources, and a file that does not parse. Each refusal names the
+// file it found the disagreement in.
+func TestAgreeingPinsRefuses(t *testing.T) {
+	t.Parallel()
+	otherSHA := strings.Repeat("a", 40)
+	seedWith := func(beads, devops string) string {
+		return "beads " + beads + "\ndevops " + devops + "\n"
+	}
+	for _, tc := range []struct {
+		name    string
+		image   string
+		seed    string
+		wantErr []string
+	}{
+		{
+			name:  "files that agree",
+			image: validImagePins(),
+			seed:  seedWith(pinBDCommit, pinDevopsCommit),
+		},
+		{
+			name:    "a beads commit the image file does not name",
+			image:   validImagePins(),
+			seed:    seedWith(otherSHA, pinDevopsCommit),
+			wantErr: []string{seedPinsPath + " pins beads at " + otherSHA, PinsPath + " pins bd at " + pinBDCommit},
+		},
+		{
+			name:    "a devops commit the image file does not name",
+			image:   validImagePins(),
+			seed:    seedWith(pinBDCommit, otherSHA),
+			wantErr: []string{seedPinsPath + " pins devops at " + otherSHA, PinsPath + " pins devops at " + pinDevopsCommit},
+		},
+		{
+			name:    "a seed file with no beads line",
+			image:   validImagePins(),
+			seed:    "devops " + pinDevopsCommit + "\n",
+			wantErr: []string{seedPinsPath + " names no beads line, but " + PinsPath + " pins bd at " + pinBDCommit},
+		},
+		{
+			name:    "a seed file with no devops line",
+			image:   validImagePins(),
+			seed:    "beads " + pinBDCommit + "\n",
+			wantErr: []string{seedPinsPath + " names no devops line, but " + PinsPath + " pins devops at " + pinDevopsCommit},
+		},
+		{
+			name:    "a seed file that names no rig",
+			image:   validImagePins(),
+			seed:    "# nothing here\n",
+			wantErr: []string{seedPinsPath, "names no rig"},
+		},
+		{
+			name:    "an image file that does not parse",
+			image:   "bd " + pinBDCommit + "\n",
+			seed:    seedWith(pinBDCommit, pinDevopsCommit),
+			wantErr: []string{PinsPath, "want \"<name> <url> <commit>\""},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := agreeingPins([]byte(tc.image), []byte(tc.seed))
+			if len(tc.wantErr) == 0 {
+				if err != nil {
+					t.Fatalf("agreeingPins: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("agreeingPins accepted the files")
+			}
+			for _, want := range tc.wantErr {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("agreeingPins error = %q, want it to contain %q", err, want)
+				}
+			}
+		})
 	}
 }
