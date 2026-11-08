@@ -816,11 +816,45 @@ func checkRowOf(table, name string) []string {
 	return row
 }
 
+// The seven rows the container daemon's own log shows running on 2026-11-08 are
+// stepRuns. The plugins row test builds its container_off list from
+// containerOffNames(), so a row reclassified out of stepRuns slides into that
+// list unnoticed; this test names the seven so that reclassification turns red
+// (gt-oquf0m).
+func TestDaemonRehearseLogShownStepsRunInTheContainer(t *testing.T) {
+	t.Parallel()
+	logShown := []string{
+		"app-promote",
+		"devops-reporter",
+		"release-reporter",
+		"town-metrics",
+		"landing_worker",
+		"disk_maintenance",
+		"doctor_dog",
+	}
+	rows := make(map[string]daemonStep, len(daemonSteps))
+	for _, s := range daemonSteps {
+		rows[s.Name] = s
+	}
+	for _, name := range logShown {
+		s, ok := rows[name]
+		if !ok {
+			t.Errorf("%s has no row in the audit table", name)
+			continue
+		}
+		if s.Class != stepRuns {
+			t.Errorf("%s is %s, want %s: the 2026-11-08 container log shows it running", name, s.Class, stepRuns)
+		}
+	}
+}
+
 // With the four names the log never mentions missing from daemon.container_off,
 // the plugins row ends with one line naming exactly those four. A settings file
-// that holds them passes the row. This is also the pin on the audit table's
-// classes: a log-shown row classed host or seam joins the four, and one of the
-// four classed running leaves it, so the exact summary line turns red.
+// that holds them passes the row. This pins that the four are not stepRuns: one
+// classed running leaves the missing list and the exact summary line turns red.
+// The log-shown rows are pinned by TestDaemonRehearseLogShownStepsRunInTheContainer,
+// because this test derives its container_off list from containerOffNames() and
+// so cannot see one of them reclassified.
 func TestDaemonRehearsePluginsFailureListsTheEntriesToAdd(t *testing.T) {
 	t.Parallel()
 	four := []string{"dolt_server", "health_notify", "landing_infra", "resource_sampler"}
