@@ -697,7 +697,8 @@ func validForgeHost(host string) error {
 	if m == nil {
 		return errors.New("want a bare host:port (no scheme, path, login, space or leading dash)")
 	}
-	if port, _ := strconv.Atoi(m[1]); port < 1 || port > 65535 {
+	port, err := strconv.Atoi(m[1])
+	if err != nil || port < 1 || port > 65535 {
 		return errors.New("has a port that is not 1 to 65535")
 	}
 	return nil

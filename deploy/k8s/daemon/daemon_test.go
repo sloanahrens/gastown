@@ -786,8 +786,8 @@ func TestForgeHostMatchesConfigPattern(t *testing.T) {
 		m := config.ForgeHostPattern.FindStringSubmatch(host)
 		configOK := m != nil
 		if configOK {
-			port, _ := strconv.Atoi(m[1])
-			configOK = port >= 1 && port <= 65535
+			port, err := strconv.Atoi(m[1])
+			configOK = err == nil && port >= 1 && port <= 65535
 		}
 		if got := validForgeHost(host) == nil; got != configOK {
 			t.Errorf("validForgeHost(%q) = %t, want config.ForgeHostPattern's %t", host, got, configOK)
