@@ -816,7 +816,8 @@ func TestDoltHistoryDocNamesTheRestoreSection(t *testing.T) {
 // database does not shrink at the flatten, names the full GC as what returns the
 // space (the maintenance window's, or the paused manual one), and labels the
 // measured sizes as the rehearsal's, so the runbook does not promise a shrink
-// the flatten cannot deliver (gt-gw4gai).
+// the flatten cannot deliver (gt-gw4gai). The sizes themselves are in the
+// rehearsal section only, and this section points at them (gt-p973x4).
 func TestDoltHistoryDocSaysTheSpaceComesBackAtGC(t *testing.T) {
 	t.Parallel()
 	section := historyDocSection(t, "## Flatten:")
@@ -824,10 +825,7 @@ func TestDoltHistoryDocSaysTheSpaceComesBackAtGC(t *testing.T) {
 
 	for _, want := range []string{
 		"The flatten does not shrink the database.",
-		"2026-11-06 rehearsal",
-		"1,664 MB before the flatten",
-		"1,668 MB after",
-		"363 MB after `CALL dolt_gc('--full')`",
+		"Rehearse on a copy first\", step 4, for the sizes",
 		"The space comes back only at that next full GC",
 		"`scheduled_maintenance` window's",
 		"gt dolt pause --reason \"manual gc\" --until 30m",
@@ -912,5 +910,42 @@ func TestDoltHistoryDocHasARehearsalSection(t *testing.T) {
 	before := strings.Index(doc, "## Before any rewrite")
 	if rehearsal < 0 || before < 0 || rehearsal > before {
 		t.Errorf("the rehearsal section does not sit before \"Before any rewrite\"")
+	}
+}
+
+// TestDoltHistoryDocRehearsalBdReachesTheCopy: step 5 of the rehearsal names how
+// the bd container reaches the copy's server. The copy publishes on the host's
+// loopback only, so bd joins the copy's network namespace and reads the server
+// on its in-namespace port, with the metadata fields bd reads for a server-mode
+// store (gt-p973x4).
+func TestDoltHistoryDocRehearsalBdReachesTheCopy(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Rehearse on a copy first")
+	prose := strings.Join(strings.Fields(section), " ")
+
+	for _, want := range []string{
+		"--network container:gt-rehearsal",
+		`"dolt_server_host": "127.0.0.1"`,
+		`"dolt_server_port": 3306`,
+		`"dolt_database": "gt"`,
+		`"dolt_mode": "server"`,
+	} {
+		if !strings.Contains(prose, want) {
+			t.Errorf("rehearsal step 5 does not carry %q:\n%s", want, section)
+		}
+	}
+}
+
+// TestDoltHistoryDocFlattenRestatesNoSize: the measured sizes live once, in the
+// rehearsal section, and the flatten section points at them rather than
+// repeating them, so the two cannot drift apart (gt-p973x4).
+func TestDoltHistoryDocFlattenRestatesNoSize(t *testing.T) {
+	t.Parallel()
+	section := historyDocSection(t, "## Flatten:")
+
+	for _, unit := range []string{" MB", " GB", " MiB", " GiB"} {
+		if strings.Contains(section, unit) {
+			t.Errorf("the flatten section restates a measured size (%q); point at the rehearsal section instead:\n%s", unit, section)
+		}
 	}
 }
