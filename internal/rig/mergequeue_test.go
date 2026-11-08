@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+// neutralMangoMirror is the mirror target the rig-root configs configure and
+// the resolver's result is compared with: one constant for the input and the
+// expectation, so the two cannot name different accounts.
+const neutralMangoMirror = "git@github.com:example/mango.git"
+
 // TestResolveMergeQueueConfig_Precedence mirrors
 // TestLoadRigCommandVarsPrecedence in internal/cmd/sling_helpers_test.go: rig
 // root config.json is the floor, the repo-committed .gastown/settings.json
@@ -30,7 +35,7 @@ func TestResolveMergeQueueConfig_Precedence(t *testing.T) {
   "type": "rig",
   "version": 1,
   "name": "gastown",
-  "git_url": "https://github.com/sloanahrens/gastown.git",
+  "git_url": "https://github.com/example/gastown.git",
   "default_branch": "main",
   "beads": {"prefix": "gt"},
   "merge_queue": {
@@ -101,7 +106,7 @@ func TestResolveMergeQueueConfig_RigRootAbsent(t *testing.T) {
   "type": "rig",
   "version": 1,
   "name": "gastown",
-  "git_url": "https://github.com/sloanahrens/gastown.git"
+  "git_url": "https://github.com/example/gastown.git"
 }`
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
 		t.Fatalf("write rig config.json: %v", err)
@@ -145,7 +150,7 @@ func TestResolveMergeQueueConfig_Editorial(t *testing.T) {
   "type": "rig",
   "version": 1,
   "name": "gastown",
-  "git_url": "https://github.com/sloanahrens/gastown.git",
+  "git_url": "https://github.com/example/gastown.git",
   "merge_queue": {
     "editorial": {"required": true}
   }
@@ -216,14 +221,14 @@ func TestResolveForgejoConfig_Precedence(t *testing.T) {
   "type": "rig",
   "version": 1,
   "name": "mango",
-  "git_url": "https://github.com/sloanahrens/mango.git",
+  "git_url": "https://github.com/example/mango.git",
   "default_branch": "main",
   "merge_queue": {
     "forgejo": {
       "remote_url": "https://forgejo.example/floor/mango",
       "gate_workflow": "gate",
       "bots": {"polecat": "floor-polecat", "landing": "floor-landing"},
-      "mirror_target": "git@github.com:sloanahrens/mango.git"
+      "mirror_target": "` + neutralMangoMirror + `"
     }
   }
 }`
@@ -252,7 +257,7 @@ func TestResolveForgejoConfig_Precedence(t *testing.T) {
 	if fc.GateWorkflowName() != "local-gate" {
 		t.Errorf("GateWorkflow = %q, want the rig-local override", fc.GateWorkflow)
 	}
-	if fc.MirrorTarget != "git@github.com:sloanahrens/mango.git" {
+	if fc.MirrorTarget != neutralMangoMirror {
 		t.Errorf("MirrorTarget = %q, want the unset-in-local floor value", fc.MirrorTarget)
 	}
 	if got := fc.BotLogin("polecat"); got != "floor-polecat" {
@@ -283,14 +288,14 @@ func TestResolveForgejoConfig_RepoBlockIgnored(t *testing.T) {
   "type": "rig",
   "version": 1,
   "name": "mango",
-  "git_url": "https://github.com/sloanahrens/mango.git",
+  "git_url": "https://github.com/example/mango.git",
   "default_branch": "main",
   "merge_queue": {
     "test_command": "make test-floor",
     "forgejo": {
       "remote_url": "https://forgejo.example/floor/mango",
       "bots": {"landing": "floor-landing"},
-      "mirror_target": "git@github.com:sloanahrens/mango.git"
+      "mirror_target": "` + neutralMangoMirror + `"
     }
   }
 }`
@@ -322,7 +327,7 @@ func TestResolveForgejoConfig_RepoBlockIgnored(t *testing.T) {
 	if fc.RemoteURL != "https://forgejo.example/floor/mango" {
 		t.Errorf("RemoteURL = %q, want the rig-root floor value (repo tier ignored)", fc.RemoteURL)
 	}
-	if fc.MirrorTarget != "git@github.com:sloanahrens/mango.git" {
+	if fc.MirrorTarget != neutralMangoMirror {
 		t.Errorf("MirrorTarget = %q, want the rig-root floor value (repo tier ignored)", fc.MirrorTarget)
 	}
 	if got := fc.BotLogin("landing"); got != "floor-landing" {
@@ -356,7 +361,7 @@ func TestResolveForgejoConfig_RepoBlockOnlyIsNotAForgejoRig(t *testing.T) {
 	}
 
 	rigConfig := `{"type":"rig","version":1,"name":"mango",
-		"git_url":"https://github.com/sloanahrens/mango.git",
+		"git_url":"https://github.com/example/mango.git",
 		"merge_queue":{"test_command":"make test"}}`
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
 		t.Fatalf("write rig config.json: %v", err)
@@ -396,7 +401,7 @@ func TestResolveForgejoConfig_Absent(t *testing.T) {
 
 	// A rig with merge_queue but no forgejo block is not a Forgejo rig.
 	rigConfig := `{"type":"rig","version":1,"name":"mango",
-		"git_url":"https://github.com/sloanahrens/mango.git",
+		"git_url":"https://github.com/example/mango.git",
 		"merge_queue":{"test_command":"make test"}}`
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(rigConfig), 0o644); err != nil {
 		t.Fatalf("write rig config.json: %v", err)

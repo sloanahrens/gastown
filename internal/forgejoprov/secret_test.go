@@ -13,7 +13,7 @@ import (
 
 // The repository, owner and secret the SetRepoSecret tests write.
 const (
-	secretOwner    = "sloan"
+	secretOwner    = "owner"
 	secretRepoName = "gastown"
 	secretRepoPath = secretOwner + "/" + secretRepoName
 	secretName     = "SOURCES_TOKEN"

@@ -601,7 +601,7 @@ func TestLoadRigCommandVarsReadsRigRootMergeQueue(t *testing.T) {
   "type": "rig",
   "version": 1,
   "name": "gastown",
-  "git_url": "https://github.com/sloanahrens/gastown.git",
+  "git_url": "https://github.com/example/gastown.git",
   "default_branch": "main",
   "beads": {"prefix": "gt"},
   "merge_queue": {
@@ -658,7 +658,7 @@ func TestLoadRigCommandVarsPrecedence(t *testing.T) {
   "type": "rig",
   "version": 1,
   "name": "gastown",
-  "git_url": "https://github.com/sloanahrens/gastown.git",
+  "git_url": "https://github.com/example/gastown.git",
   "default_branch": "main",
   "beads": {"prefix": "gt"},
   "merge_queue": {

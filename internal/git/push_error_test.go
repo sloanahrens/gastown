@@ -17,7 +17,7 @@ func TestPushForceWithLeaseErrorCarriesHookStdout(t *testing.T) {
 		branch  = "revert/gt-4k3fj.8.6-69e3bc54"
 		refspec = "refs/heads/" + branch + ":refs/heads/" + branch
 		reason  = "ERROR: Invalid branch for Gas Town agents."
-		summary = "error: failed to push some refs to 'https://github.com/sloanahrens/gastown.git'\n"
+		summary = "error: failed to push some refs to 'https://github.com/example/gastown.git'\n"
 	)
 	s := plainRemotes().on(
 		"push origin "+refspec+" --force-with-lease=refs/heads/"+branch+":",

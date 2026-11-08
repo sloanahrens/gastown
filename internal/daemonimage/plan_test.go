@@ -16,10 +16,10 @@ import (
 // planPins and planPinsPath are the four pins planBuilder is given: the same
 // shape the committed file has, with the test commits.
 var planPins = []Pin{
-	{Name: "bd", URL: "http://forgejo:3000/sloan/beads.git", Commit: testBDCommit},
-	{Name: "om", URL: "http://forgejo:3000/sloan/organic-mechanic.git", Commit: testOMCommit},
-	{Name: "hm", URL: "http://forgejo:3000/sloan/history-man.git", Commit: testHMCommit},
-	{Name: "devops", URL: "http://forgejo:3000/sloan/devops.git", Commit: testDevopsCommit},
+	{Name: "bd", URL: testPinURL("beads"), Commit: testBDCommit},
+	{Name: "om", URL: testPinURL("organic-mechanic"), Commit: testOMCommit},
+	{Name: "hm", URL: testPinURL("history-man"), Commit: testHMCommit},
+	{Name: "devops", URL: testPinURL("devops"), Commit: testDevopsCommit},
 }
 
 const planPinsPath = "/repo/deploy/daemon/image-pins"
@@ -98,10 +98,10 @@ func TestPlanNamesEachStepAndRunsNothing(t *testing.T) {
 
 	steps := []struct{ label, names string }{
 		{"pins: ", planPinsPath},
-		{"pin bd: ", "http://forgejo:3000/sloan/beads.git at " + testBDCommit},
-		{"pin om: ", "http://forgejo:3000/sloan/organic-mechanic.git at " + testOMCommit},
-		{"pin hm: ", "http://forgejo:3000/sloan/history-man.git at " + testHMCommit},
-		{"pin devops: ", "http://forgejo:3000/sloan/devops.git at " + testDevopsCommit},
+		{"pin bd: ", testPinURL("beads") + " at " + testBDCommit},
+		{"pin om: ", testPinURL("organic-mechanic") + " at " + testOMCommit},
+		{"pin hm: ", testPinURL("history-man") + " at " + testHMCommit},
+		{"pin devops: ", testPinURL("devops") + " at " + testDevopsCommit},
 		{"build gt: ", "go build -trimpath -ldflags " + gtLdflags(testRev[:buildstamp.Len]) + " -o " + filepath.Join(b.Out, "gt") + " " + GTPackage + "   (clean worktree of /src/gt at " + testRev + ")"},
 		{"build bd: ", "go build -trimpath -ldflags " + bdBuildFlag + planBuildID + " " + bdCommitFlag + testBDCommit + " -o " + filepath.Join(b.Out, "bd") + " " + BDPackage + "   (clean worktree of /src/beads at " + testBDCommit + ")"},
 		{"build om: ", "go build -trimpath -o " + filepath.Join(b.Out, "om") + " " + OMPackage + "   (clean worktree of /src/om at " + testOMCommit + ")"},
