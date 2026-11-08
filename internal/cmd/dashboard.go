@@ -24,6 +24,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/cloudledger"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -362,6 +363,13 @@ func dashboardClaudePlanPath(townRoot string) string {
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
 func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
+	// The cloud step's source comes from these settings, so a file that does
+	// not parse stops the hub here rather than showing a pane read from a step
+	// the town meant to configure differently.
+	townSettings, err := config.LoadTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return nil, nil, fmt.Errorf("dashboard: reading town settings: %w", err)
+	}
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// Who submitted a bead, for a landing on the operator's reserved ops branch:
@@ -446,9 +454,11 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	escalations := newDashEscalationReader(townRoot)
 	backoff := newDashBackoff(townRoot)
 	queue := newDashQueueReader(townRoot)
-	cloud := dashboard.NewCloudReader(config.CloudReportsDir()).
+	cloudSettings := townSettings.ResolveCloud(os.Getenv)
+	cloudSource := cloudledger.NewSource(cloudSettings)
+	cloud := dashboard.NewCloudReaderFromSource(cloudSource).
 		WithChecks(dashboard.NewCloudChecksReader(dashboardCloudChecksPath(townRoot))).
-		WithApps(dashboard.NewAppPowerReader(config.CloudOffDir(), config.CloudReleasesDir()))
+		WithApps(dashboard.NewAppPowerReaderFromSource(cloudSettings.OffDir, cloudSource))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	birds := dashboard.NewBirdReportsReader(dashboardRuntimeDir(townRoot)).WithHeadline(dashboardHeadlineBird(townRoot))
 	questions := newDashQuestionsReader(townRoot)

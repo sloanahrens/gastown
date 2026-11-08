@@ -235,6 +235,11 @@ type TownSettings struct {
 	// panels' switches; gt dashboard reads them when it starts.
 	Dashboard *DashboardConfig `json:"dashboard,omitempty"`
 
+	// Cloud is the cloud step's block: where the patrol's report, its
+	// heartbeat and the release ledgers are read (cloud.go). Absent keeps the
+	// environment-named directories; present but empty turns the step off.
+	Cloud *CloudConfig `json:"cloud,omitempty"`
+
 	// Operator names the human operator's identities: the author strings a
 	// decision comment may carry, and the handles a bead's assignee may hold
 	// (operator.names, gt-ywuip). Absent, no name is entitled: the setting
