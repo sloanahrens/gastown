@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/crewfresh"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -46,7 +47,7 @@ already exists, and prints the path it created:
 
 func runCrewWorktree(cmd *cobra.Command, args []string) error {
 	return crewWorktree(cmd.OutOrStdout(), args[0], crewWorktreeDeps{
-		getwd:    os.Getwd,
+		getwd:    callercwd.Require,
 		findTown: workspace.FindFromCwdOrError,
 		role:     GetRoleWithContext,
 		repo:     newCrewWorktreeRepo,

@@ -42,7 +42,9 @@ func (h host) systemPromptRenderer() SystemPromptRender {
 	return SystemPromptRenderer
 }
 
-// processHost reads the running process.
+// processHost reads the running process. Its getwd stays os.Getwd: agent
+// resolution locates the town a spawn's config and prompt come from, which is
+// a trust decision, so a caller-supplied variable must not redirect it.
 var processHost = host{getenv: os.Getenv, lookPath: exec.LookPath, getwd: os.Getwd}
 
 // host returns the host r resolves against: processHost unless r was loaded

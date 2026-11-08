@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/style"
@@ -343,7 +342,7 @@ type beadVerbs struct {
 // directory database that routes each ID by its prefix, and the session's
 // actor (BD_ACTOR, else the role gt detects).
 func newBeadVerbs(cmd *cobra.Command) (*beadVerbs, error) {
-	cwd, err := callercwd.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, err
 	}

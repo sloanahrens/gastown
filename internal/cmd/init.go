@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/git"
@@ -39,7 +40,7 @@ func init() {
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Require()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
 	}

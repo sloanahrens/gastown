@@ -104,7 +104,7 @@ func runLandRequeue(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	cwd, err := os.Getwd()
+	cwd, err := landRequeueProcessDir()
 	if err != nil {
 		return fmt.Errorf("resolving the working directory: %w", err)
 	}
@@ -117,6 +117,12 @@ func runLandRequeue(cmd *cobra.Command, args []string) error {
 	}
 	return requeueRejectedLanding(bd, repo, remote, beadID, reason, requeueActor(os.Getenv), townRoot, rigName, cmd.OutOrStdout())
 }
+
+// landRequeueProcessDir is the directory gt land requeue reads the bead store
+// from: the process's own. Re-queueing a rejected landing is a decision about
+// that landing, so a caller-supplied variable must not point it at another
+// store.
+func landRequeueProcessDir() (string, error) { return os.Getwd() }
 
 // requeueActor names the session behind a re-queue for the durable record:
 // the identity gt done would write for the same session (a crew session's

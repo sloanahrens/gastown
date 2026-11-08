@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/callercwd"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/lock"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -151,62 +152,23 @@ func TestCommandsRequireTheCallerDirectory(t *testing.T) {
 }
 
 // TestIdentityReadsRefuseAnUnusableCallerDirectory pins that the identity
-// call sites return the variable's refusal instead of falling back to the
-// process directory.
+// call site gt prime keeps returns the variable's refusal instead of falling
+// back to the process directory. The other commands read the process directory
+// (gt-yjzepk.2 decision: only prime, handoff, mail identity and hooks install
+// convert), so they have no refusal to pin.
 //
 //testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
 func TestIdentityReadsRefuseAnUnusableCallerDirectory(t *testing.T) {
 	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
 	t.Setenv(callercwd.EnvCallerCwd, "gastown/crew/eagle")
 
-	// --role is what runAgentsResolve needs before it reads the directory; the
-	// flag is set through its own flag set so the value is the command's.
-	if err := agentsResolveCmd.Flags().Set("role", "crew"); err != nil {
-		t.Fatalf("set --role: %v", err)
+	_, _, err := resolvePrimeWorkspace()
+	if err == nil {
+		t.Fatal("gt prime = nil, want the variable's refusal")
 	}
-	t.Cleanup(func() { _ = agentsResolveCmd.Flags().Set("role", "") })
-
-	cases := []struct {
-		name string
-		run  func() error
-	}{
-		{name: "gt prime", run: func() error { _, _, err := resolvePrimeWorkspace(); return err }},
-		{name: "gt bead", run: func() error {
-			return withBeadVerbs(&cobra.Command{}, func(*beadVerbs) error { return nil })
-		}},
-		{name: "gt agents resolve", run: func() error { return runAgentsResolve(&cobra.Command{}, nil) }},
+	if !strings.Contains(err.Error(), callercwd.EnvCallerCwd) {
+		t.Fatalf("gt prime error = %q, want it to name %s", err, callercwd.EnvCallerCwd)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.run()
-			if err == nil {
-				t.Fatalf("%s = nil, want the variable's refusal", tc.name)
-			}
-			if !strings.Contains(err.Error(), callercwd.EnvCallerCwd) {
-				t.Fatalf("%s error = %q, want it to name %s", tc.name, err, callercwd.EnvCallerCwd)
-			}
-		})
-	}
-}
-
-// TestBeadVerbsRefuseAnUnusableCallerDirectory pins the identity read: a
-// GT_CALLER_CWD that cannot name a directory is an error, not a silent fall
-// back to this process's directory.
-//
-//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
-func TestBeadVerbsRefuseAnUnusableCallerDirectory(t *testing.T) {
-	t.Run("unusable", func(t *testing.T) {
-		//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
-		t.Setenv(callercwd.EnvCallerCwd, "gastown/crew/eagle")
-
-		bv, err := newBeadVerbs(&cobra.Command{})
-		if err == nil {
-			t.Fatalf("newBeadVerbs = %+v, want the variable's refusal", bv)
-		}
-		if !strings.Contains(err.Error(), callercwd.EnvCallerCwd) {
-			t.Fatalf("newBeadVerbs error = %q, want it to name %s", err, callercwd.EnvCallerCwd)
-		}
-	})
 }
 
 // TestPrimeRefusesAnUnreadableCallerDirectory pins the refusal when the caller
@@ -529,5 +491,184 @@ func TestHookIntegrityReadsTheProcessDirectory(t *testing.T) {
 	t.Setenv(callercwd.EnvCallerCwd, absent)
 	if err := ensureCurrentHookWorktreeIntegrity(); err != nil && strings.Contains(err.Error(), absent) {
 		t.Fatalf("the hook integrity guard named the variable's path %s: %v", absent, err)
+	}
+}
+
+// TestCallerCwdReachesTheConvertedCommands pins the commands whose directory
+// read moved behind internal/callercwd (gt-yjzepk.2): prime, handoff, mail
+// identity and hooks install. With GT_CALLER_CWD unset each acts on this
+// process's directory, as before the seam; with it set each acts on the
+// caller's directory instead. The handoff read runs through a handoffStateSource
+// with a recording git client injected through the struct, so the test builds
+// no repository and starts no process.
+//
+//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
+func TestCallerCwdReachesTheConvertedCommands(t *testing.T) {
+	processDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("process directory: %v", err)
+	}
+	if processDir == "" {
+		t.Fatalf("the process directory is empty; the unset baseline would be vacuous")
+	}
+
+	townRoot, callerPath := writeCallerTown(t)
+	if callerPath == processDir {
+		t.Fatalf("the caller's directory %q equals the process directory; the baseline would be vacuous", callerPath)
+	}
+	if err := os.MkdirAll(callerPath, 0755); err != nil {
+		t.Fatalf("mkdir caller directory: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(callerPath, ".beads"), 0755); err != nil {
+		t.Fatalf("mkdir caller beads: %v", err)
+	}
+	//testpolicy:allow no-env — BEADS_DIR is held empty so the cwd walk is the input under test
+	t.Setenv("BEADS_DIR", "")
+
+	var handoffDir string
+	source := handoffStateSource{
+		getwd: callercwd.Require,
+		gitFor: func(dir string) handoffGit {
+			handoffDir = dir
+			return fakeHandoffGit{notRepo: true}
+		},
+	}
+
+	rigCrew := filepath.Join(townRoot, "gastown", "crew")
+
+	// The hermetic harness leaves GT_CALLER_CWD unset, so the baseline shows
+	// each command on this process's directory, as it was before the seam.
+	cwd, _, err := resolvePrimeWorkspace()
+	if err != nil {
+		t.Fatalf("gt prime with the variable unset: %v", err)
+	}
+	if cwd != processDir {
+		t.Fatalf("gt prime with the variable unset read %q, want the process directory %q", cwd, processDir)
+	}
+
+	// findLocalBeadsDir answers with the nearest .beads ancestor, so the
+	// process directory's own answer is the walk from processDir; requiring
+	// it (or its error) keeps the unset baseline from passing vacuously.
+	processBeads, processBeadsErr := localBeadsWorkDir(processDir, "")
+	got, err := findLocalBeadsDir()
+	if processBeadsErr != nil {
+		if err == nil {
+			t.Fatalf("findLocalBeadsDir with the variable unset = %q, want the process directory's walk error %v", got, processBeadsErr)
+		}
+	} else if err != nil || got != processBeads {
+		t.Fatalf("findLocalBeadsDir with the variable unset = %q, %v; want the process directory's answer %q", got, err, processBeads)
+	}
+
+	if got := source.collect(); got != "" {
+		t.Fatalf("handoff workspace state with the variable unset returned %q for a scripted non-repository", got)
+	}
+	if handoffDir != processDir {
+		t.Fatalf("gt handoff with the variable unset read git in %q, want the process directory %q", handoffDir, processDir)
+	}
+	// The unset baseline is the process directory's own answer, not merely a
+	// non-answer: the process directory is outside the fixture town, so
+	// determineTargets resolves no rig for it. Assert that the process
+	// directory really is outside first, so an inside directory could not make
+	// the empty result vacuous.
+	if rel, err := filepath.Rel(townRoot, processDir); err != nil || !strings.HasPrefix(rel, "..") {
+		t.Fatalf("the process directory %q is not outside the fixture town %q, so the unset baseline cannot show an outside answer", processDir, townRoot)
+	}
+	if targets, err := determineTargets(townRoot, constants.RoleCrew, false, []string{constants.RoleCrew}); err != nil {
+		t.Fatalf("gt hooks install with the variable unset: %v", err)
+	} else if len(targets) != 0 {
+		t.Fatalf("gt hooks install with the variable unset resolved %v for the process directory outside the town; want no targets", targets)
+	}
+
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
+	t.Setenv(callercwd.EnvCallerCwd, callerPath)
+
+	cwd, gotTown, err := resolvePrimeWorkspace()
+	if err != nil || cwd != callerPath || gotTown != townRoot {
+		t.Fatalf("gt prime = (%q, %q, %v), want the caller's seat (%q, %q)", cwd, gotTown, err, callerPath, townRoot)
+	}
+	if got, err := findLocalBeadsDir(); err != nil || got != callerPath {
+		t.Fatalf("findLocalBeadsDir = %q, %v, want the caller's directory %q", got, err, callerPath)
+	}
+	if got := source.collect(); got != "" {
+		t.Fatalf("handoff workspace state returned %q for a scripted non-repository", got)
+	}
+	if handoffDir != callerPath {
+		t.Fatalf("gt handoff read git in %q, want the caller's directory %q", handoffDir, callerPath)
+	}
+	targets, err := determineTargets(townRoot, constants.RoleCrew, false, []string{constants.RoleCrew})
+	if err != nil || len(targets) != 1 || targets[0] != rigCrew {
+		t.Fatalf("gt hooks install targets = %v, %v, want the caller's rig crew settings %q", targets, err, rigCrew)
+	}
+}
+
+// TestConvertedCommandsRefuseAnAbsentCallerDirectory drives the refusal branch
+// each Require added by gt-yjzepk.2 opens: the command reads the caller's
+// directory before the state collection, the mail or the pane, so an absent
+// one is refused rather than replaced by this process's.
+//
+//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
+func TestConvertedCommandsRefuseAnAbsentCallerDirectory(t *testing.T) {
+	callerPath := filepath.Join(t.TempDir(), "crew", "eagle")
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
+	t.Setenv(callercwd.EnvCallerCwd, callerPath)
+
+	cases := []struct {
+		name string
+		run  func() error
+	}{
+		{name: "gt handoff", run: func() error {
+			return handoffSession(sessionHandoff{}, handoffSteps{})
+		}},
+		{name: "gt handoff --auto", run: runHandoffAuto},
+		{name: "gt handoff --cycle", run: runHandoffCycle},
+		{name: "gt hooks install", run: func() error {
+			return runHooksInstall(&cobra.Command{}, []string{"pr-workflow-guard"})
+		}},
+	}
+	want := fmt.Sprintf("the caller's directory %s is not present here", callerPath)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("%s = %v, want the not-present refusal %q", tc.name, err, want)
+			}
+		})
+	}
+}
+
+// TestCallerCwdDoesNotSteer pins the other side of the seam: the gt land
+// commands decide whether to wait, re-queue or report a verdict, so each reads
+// the real process directory. GT_CALLER_CWD naming another directory leaves
+// them there.
+//
+//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
+func TestCallerCwdDoesNotSteer(t *testing.T) {
+	processDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("process directory: %v", err)
+	}
+	if processDir == "" {
+		t.Fatalf("the process directory is empty; the assertion would be vacuous")
+	}
+	callerPath := t.TempDir()
+	if callerPath == processDir {
+		t.Fatalf("the caller's directory %q equals the process directory; the assertion would be vacuous", callerPath)
+	}
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
+	t.Setenv(callercwd.EnvCallerCwd, callerPath)
+
+	cases := []struct {
+		name  string
+		getwd func() (string, error)
+	}{
+		{name: "gt land verdict", getwd: landVerdictProcessDir},
+		{name: "gt land wait", getwd: landWaitProcessHost().getwd},
+		{name: "gt land requeue", getwd: landRequeueProcessDir},
+	}
+	for _, tc := range cases {
+		got, err := tc.getwd()
+		if err != nil || got != processDir {
+			t.Errorf("%s directory = %q, %v; want the process directory %q", tc.name, got, err, processDir)
+		}
 	}
 }

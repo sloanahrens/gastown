@@ -81,7 +81,10 @@ type Options struct {
 
 	// Env reads the process environment. Nil is os.Getenv.
 	Env func(string) string
-	// Getwd returns the process working directory. Nil is os.Getwd.
+	// Getwd resolves the directory the run acts in. Nil is os.Getwd: the
+	// polecat worktree and crew resolution it feeds decide whether the run may
+	// proceed, so a caller-supplied variable must not place the caller
+	// elsewhere.
 	Getwd func() (string, error)
 	// Detect resolves the caller's role identity. Nil leaves the identity the
 	// run resolved from the assigned polecat worktree.

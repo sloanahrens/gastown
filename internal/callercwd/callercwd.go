@@ -9,9 +9,10 @@
 // context to print, which worktree a git command should act in. It is a
 // statement by the caller, so an agent can set it itself; no guard, hook check
 // or enforcement code may read it, and those resolve the real process
-// directory instead. Getwd is called only from the explicit identity sites
-// named on gt-yjzepk.1; workspace.Find and the other generic resolvers keep
-// os.Getwd, and a test in this package pins that.
+// directory instead. TestNoDirectGetwd pins the boundary: a non-test file
+// outside this package that calls os.Getwd must be an allowlisted real site
+// (guard, hook check, permission or trust decision, refusal, throttle or
+// cooldown), and every other call goes through Getwd or Require.
 //
 // Resolution uses Getwd, which trusts the variable without checking the
 // directory exists; commands that run git or write there use Require, which

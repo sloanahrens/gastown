@@ -1,0 +1,76 @@
+# Non-test os.Getwd sites outside internal/callercwd (gt-yjzepk.2).
+#
+# Each line is: path:Receiver.Func<TAB>real<TAB>reason
+#   owner   the enclosing function, "Receiver.Func" for a method, or "package"
+#           for a package-level declaration
+#   class   real only: the site stays on the process directory, and the reason
+#           names the kind: guard, hook check, permission or trust decision,
+#           refusal, throttle or cooldown. A caller-supplied variable must not
+#           steer any of them.
+#
+# There is no deferred or pending class: every site is either converted to
+# internal/callercwd in this landing or listed here as real.
+#
+# The list is a ratchet: it can only shrink. TestGetwdAllowlistCanOnlyShrink
+# fails when an entry no longer calls os.Getwd, and TestNoDirectGetwd fails on
+# any os.Getwd use not listed here. Do not add an entry for new code: convert
+# the call to internal/callercwd instead.
+internal/cmd/handoff.go:enforceHandoffCooldown	real	throttle: the handoff cooldown decides whether to delay or proceed, so the variable must not steer it
+internal/cmd/land.go:landRequeueProcessDir	real	acts on the process's own worktree: a check, not an identity
+internal/cmd/land_verdict.go:landVerdictProcessDir	real	acts on the process's own worktree: a check, not an identity
+internal/cmd/land_wait.go:landWaitProcessHost	real	acts on the process's own worktree: a check, not an identity
+internal/config/host.go:package	real	acts on the process's own worktree: a check, not an identity
+internal/done/options.go:Options.getwd	real	acts on the process's own worktree: a check, not an identity
+internal/cmd/hook.go:package	real	hook check: the hook worktree integrity guard reads the process directory; the variable must not open it
+internal/cmd/role.go:GetRole	real	guard: feeds the stop guard; the variable must not steer the role it resolves
+internal/cmd/root.go:doneCwd	real	guard: the gt done polecat-worktree guard; the variable must not place the caller elsewhere
+internal/cmd/tap_guard.go:isGasTownAgentContext	real	guard: the dangerous-command and pr-workflow guards' agent context
+internal/cmd/tap_guard_bd_init.go:runTapGuardBdInit	real	guard: a command guard; the variable must not steer it
+internal/cmd/tap_guard_mol_patrol.go:runTapGuardMolPatrol	real	guard: a command guard; the variable must not steer it
+internal/cmd/tap_guard_process.go:realGuardProcess	real	guard: the guard process surface; the variable must not steer it
+internal/polecat/manager.go:Manager.CheckShellOutsideWorktree	real	refusal: the shell-safety check refuses; the variable must not steer it
+internal/testutil/harness_host.go:processHost	real	trust decision: the hermetic harness reads the real host directory, never a caller target
+internal/workspace/find.go:package	real	guard: the generic resolver guards call; the variable must not steer it
+internal/worktree/integrity.go:Validate	real	refusal: the worktree integrity check blocks a missing worktree; the variable must not steer it
+cmd/gt-wrap/main.go:osSurface	real	trust decision: the wrapper is the process that sets GT_CALLER_CWD; it reads the real host directory
+cmd/gt-installer/main.go:run	real	trust decision: the installer acts on the host it runs on; the variable names a target, not the host
+cmd/affected/main.go:main	real	trust decision: the dev tool scans the checkout it runs in; the variable must not redirect it
+cmd/bdshim-record/exec.go:provisionFixture	real	trust decision: the recording tool builds its fixture in the checkout it runs in; the variable must not redirect it
+cmd/bdshim-record/main.go:run	real	trust decision: the recording tool reads the checkout it runs in; the variable must not redirect it
+cmd/bump-version/main.go:main	real	trust decision: the release tool reads the checkout it runs in; the variable must not redirect it
+internal/k8spolicy/options.go:package	real	trust decision: the policy CLI reads the checkout it runs on; the variable must not redirect it
+internal/openshellprov/options.go:package	real	trust decision: the openshell CLI reads the checkout it runs on; the variable must not redirect it
+internal/polecat/imagectx/cmd/build/main.go:run	real	trust decision: the build tool reads the checkout it stages an image from; the variable must not redirect it
+internal/slot/cmd/cpuslot/main.go:run	real	throttle: the CPU-slot decision queues or bypasses the command, so the variable must not steer the checkout it reads
+internal/testpolicy/cmd/budget/main.go:execTest	real	trust decision: the test tooling records CPU against the real host directory, never a caller target
+internal/testpolicy/cmd/testtiming/main.go:realHost	real	trust decision: the test tooling reads the real host directory, never a caller target
+internal/testpolicy/cmd/tierwall/main.go:townRoot	real	trust decision: the tier wall reads the real host checkout, never a caller target
+internal/tiertrigger/cmd/tiertrigger/main.go:goDeps	real	trust decision: the sweep tool reads the checkout it runs in; the variable must not redirect it
+internal/bdshim/osmain.go:osEnv	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/bird/runner.go:Runner.cwd	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/agent_tracking_beads.go:findCwdBeadsWorkDir	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/agent_tracking_beads.go:resolveAgentTrackingBeadsDir	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/agents_resolve.go:runAgentsResolve	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/bead.go:newBeadVerbs	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/compact_report.go:runCompactReport	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/compact.go:runCompact	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/crew_at.go:runCrewAt	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/directive_edit.go:runDirectiveEdit	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/directive_show.go:resolveDirectiveContext	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/dolt.go:currentBeadsRuntimeConfig	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/formula.go:realFormulaVerbs	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/mail_send.go:mailSendRecipient	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/molecule_attach_from_mail.go:runMoleculeAttachFromMail	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/molecule_attach.go:detectCurrentAgent	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/molecule_attach.go:runMoleculeAttach	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/molecule_lifecycle.go:realMoleculeLifecycleEnv	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/molecule_status.go:runMoleculeCurrent	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/molecule_status.go:runMoleculeStatus	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/nudge.go:runNudge	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/rig.go:runRigReset	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/show.go:runShow	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/status.go:detectCurrentDNDStatus	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/theme.go:detectCurrentRig	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/cmd/up.go:disableCurrentAgentDND	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/notify/nudge.go:TownNudger.Nudge	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
+internal/session/window_tint.go:IsWindowTintEnabled	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)

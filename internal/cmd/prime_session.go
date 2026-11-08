@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
@@ -77,7 +78,7 @@ func realPrimeHookEnv() primeHookEnv {
 	return primeHookEnv{
 		getenv:   os.Getenv,
 		stdin:    readStdinJSON,
-		getwd:    os.Getwd,
+		getwd:    callercwd.Getwd,
 		findTown: workspace.FindFromCwd,
 		newID:    func() string { return uuid.New().String() },
 	}
