@@ -59,6 +59,10 @@ type ExportSummary struct {
 	Bytes int64
 	// Skipped counts the entries left out, by class.
 	Skipped map[SkipClass]int
+	// LinkRefusals is one line for each link left out because the import would
+	// refuse it: the daemon-owned row that holds it and the reason, never the
+	// link's own name.
+	LinkRefusals []string
 }
 
 // String renders the summary for the export command's standard error.
@@ -68,6 +72,9 @@ func (s ExportSummary) String() string {
 		s.Files, s.Dirs, s.Symlinks, s.Bytes)
 	if len(s.Entries) > 0 {
 		fmt.Fprintf(&b, "\nentries: %s", strings.Join(s.Entries, ", "))
+	}
+	for _, line := range s.LinkRefusals {
+		fmt.Fprintf(&b, "\nskipped link %s", line)
 	}
 	b.WriteString("\nskipped:")
 	printed := false
@@ -116,52 +123,105 @@ func Export(w io.Writer, root string, m *Manifest, opts ExportOptions) (ExportSu
 	if err != nil {
 		return s, err
 	}
-	rigs, _, err := townInputs(os.DirFS(townRoot), m)
+	rigs, err := settingsRigs(os.DirFS(townRoot))
 	if err != nil {
 		return s, fmt.Errorf("reading the town's rigs: %w", err)
 	}
-	tw := tar.NewWriter(w)
-	for _, e := range m.Expand(rigs, nil) {
-		if e.Owner != OwnerDaemon {
-			continue
-		}
+	walk := &exportWalk{
+		tw:      tar.NewWriter(w),
+		root:    townRoot,
+		opts:    opts,
+		sum:     &s,
+		written: map[string]fs.FileInfo{},
+		links:   map[string]string{},
+	}
+	walk.rows = daemonEntries(m, rigs)
+	for _, e := range walk.rows {
 		s.Entries = append(s.Entries, e.Path)
-		if err := exportEntry(tw, townRoot, e, opts, &s); err != nil {
+		walk.entry = e.Path
+		if err := walk.exportEntry(e); err != nil {
 			return s, err
 		}
 	}
-	if err := tw.Close(); err != nil {
+	if err := walk.tw.Close(); err != nil {
 		return s, fmt.Errorf("closing the tar stream: %w", err)
 	}
 	return s, nil
 }
 
-// exportEntry walks one daemon-owned row and writes it to tw. An absent row
-// is not a failed read: a young town has not created every daemon path yet.
-func exportEntry(tw *tar.Writer, root string, e Entry, opts ExportOptions, s *ExportSummary) error {
-	p := filepath.Join(root, filepath.FromSlash(e.Path))
-	info, err := opts.ops.lstat(p)
+// exportWalk is the state one export carries down the tree: the archive, the
+// town root, the daemon-owned rows a link may land in, the names already written
+// (which is the tree an import will see when it reaches this point), the row
+// being walked and the summary.
+type exportWalk struct {
+	tw    *tar.Writer
+	root  string
+	rows  []Entry
+	entry string
+	opts  ExportOptions
+	sum   *ExportSummary
+	// written maps a town-root-relative name to the entry the archive carries
+	// for it; links also keep their target, the way the import will read it.
+	written map[string]fs.FileInfo
+	links   map[string]string
+}
+
+// exportEntry walks one daemon-owned row. Every ancestor below the town root is
+// checked first, so a symlinked ancestor such as .runtime -> /outside is
+// refused before anything under it is read. An absent row is not a failed read:
+// a young town has not created every daemon path yet.
+func (w *exportWalk) exportEntry(e Entry) error {
+	p := filepath.Join(w.root, filepath.FromSlash(e.Path))
+	exists, err := checkAncestors(w.opts.ops, w.root, e.Path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	info, err := w.opts.ops.lstat(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", e.Path, err)
 	}
-	return exportPath(tw, p, e.Path, info, opts, s)
+	return w.path(p, e.Path, info)
 }
 
-// exportPath writes one entry and, for a directory, its children in name
-// order.
-func exportPath(tw *tar.Writer, p, name string, info fs.FileInfo, opts ExportOptions, s *ExportSummary) error {
+// checkAncestors walks every ancestor of rel from the town root with lstat and
+// reports whether the row can exist at all. An ancestor that is not a real
+// directory is refused: a symlink would carry the walk outside the town, and a
+// regular file cannot hold the row. An absent ancestor means the row is absent.
+func checkAncestors(ops townOps, root, rel string) (bool, error) {
+	segs := strings.Split(rel, "/")
+	cur := root
+	for i, seg := range segs[:len(segs)-1] {
+		cur = filepath.Join(cur, seg)
+		info, err := ops.lstat(cur)
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("reading %s, an ancestor of %s: %w", path.Join(segs[:i+1]...), rel, err)
+		case !info.IsDir():
+			return false, fmt.Errorf("the daemon-owned path %q resolves through %s, which is not a directory; an export reads nothing through a symlink or a file", rel, path.Join(segs[:i+1]...))
+		}
+	}
+	return true, nil
+}
+
+// path writes one entry and, for a directory, its children in name order.
+func (w *exportWalk) path(p, name string, info fs.FileInfo) error {
 	if class, skip := skippedClass(name, info); skip {
-		s.Skipped[class]++
+		w.sum.Skipped[class]++
 		return nil
 	}
 	if info.Mode()&fs.ModeSymlink != 0 {
-		return exportSymlink(tw, p, name, info, opts, s)
+		return w.symlink(p, name, info)
 	}
 	if !info.IsDir() {
-		return exportFile(tw, p, name, info, opts, s)
+		return w.file(p, name, info)
 	}
 	hdr := &tar.Header{
 		Name:     name + "/",
@@ -169,32 +229,36 @@ func exportPath(tw *tar.Writer, p, name string, info fs.FileInfo, opts ExportOpt
 		ModTime:  info.ModTime(),
 		Typeflag: tar.TypeDir,
 	}
-	if err := tw.WriteHeader(hdr); err != nil {
+	if err := w.tw.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("writing the archive header for %s: %w", name, err)
 	}
-	s.Dirs++
-	children, err := opts.ops.readDir(p)
+	w.written[name] = info
+	w.sum.Dirs++
+	children, err := w.opts.ops.readDir(p)
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", name, err)
 	}
+	// Each child is a direct child of a directory already reached through real
+	// directories, so its own ancestors are real; a child that is a symlink is
+	// written as a link and never descended into.
 	for _, child := range children {
 		childName := name + "/" + child
 		childPath := filepath.Join(p, child)
-		childInfo, err := opts.ops.lstat(childPath)
+		childInfo, err := w.opts.ops.lstat(childPath)
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", childName, err)
 		}
-		if err := exportPath(tw, childPath, childName, childInfo, opts, s); err != nil {
+		if err := w.path(childPath, childName, childInfo); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// exportFile writes a regular file, or counts it as older than --since.
-func exportFile(tw *tar.Writer, p, name string, info fs.FileInfo, opts ExportOptions, s *ExportSummary) error {
-	if !opts.Since.IsZero() && !info.ModTime().After(opts.Since) {
-		s.Skipped[SkipOlderThan]++
+// file writes a regular file, or counts it as older than --since.
+func (w *exportWalk) file(p, name string, info fs.FileInfo) error {
+	if !w.opts.Since.IsZero() && !info.ModTime().After(w.opts.Since) {
+		w.sum.Skipped[SkipOlderThan]++
 		return nil
 	}
 	hdr := &tar.Header{
@@ -204,36 +268,49 @@ func exportFile(tw *tar.Writer, p, name string, info fs.FileInfo, opts ExportOpt
 		ModTime:  info.ModTime(),
 		Typeflag: tar.TypeReg,
 	}
-	if err := tw.WriteHeader(hdr); err != nil {
+	if err := w.tw.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("writing the archive header for %s: %w", name, err)
 	}
-	f, err := opts.ops.open(p)
+	f, err := w.opts.ops.open(p)
 	if err != nil {
 		return fmt.Errorf("opening %s for the archive: %w", name, err)
 	}
 	// The size is the one the header carries, so a file the daemon grew while
 	// it was read is copied to a consistent prefix, and a file that shrank is
 	// an error rather than a short entry.
-	if _, err := io.CopyN(tw, f, hdr.Size); err != nil {
+	if _, err := io.CopyN(w.tw, f, hdr.Size); err != nil {
 		return fmt.Errorf("copying %s into the archive: %w", name, err)
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("closing %s after the copy: %w", name, err)
 	}
-	s.Files++
-	s.Bytes += hdr.Size
+	w.sum.Files++
+	w.sum.Bytes += hdr.Size
+	w.written[name] = info
 	return nil
 }
 
-// exportSymlink writes a symlink entry when its target stays inside the town
-// root, and counts it as skipped otherwise. The target is never opened.
-func exportSymlink(tw *tar.Writer, p, name string, info fs.FileInfo, opts ExportOptions, s *ExportSummary) error {
-	link, err := opts.ops.readlink(p)
+// symlink writes a link the import would accept, and counts one it would refuse
+// with the reason. The target is judged by the same lookup the import runs,
+// against the same rows and the same tree: the names the archive has written up
+// to this entry, so a link the import would refuse is never archived. The target
+// is never opened.
+func (w *exportWalk) symlink(p, name string, info fs.FileInfo) error {
+	link, err := w.opts.ops.readlink(p)
 	if err != nil {
 		return fmt.Errorf("reading the symlink %s: %w", name, err)
 	}
-	if !linkStaysInside(name, link) {
-		s.Skipped[SkipSymlinkOut]++
+	if err := resolveLinkTarget(exportLinkTree{written: w.written, links: w.links}, path.Dir(name), link, w.rows); err != nil {
+		// The archive tree has no read that can fail, so the error is a
+		// refusal; any other error still leaves the link out rather than
+		// archiving one the import may reject.
+		reason := "a link whose target could not be followed"
+		var refused linkRefusal
+		if errors.As(err, &refused) {
+			reason = refused.class
+		}
+		w.sum.Skipped[SkipSymlinkOut]++
+		w.sum.LinkRefusals = append(w.sum.LinkRefusals, w.entry+": "+reason)
 		return nil
 	}
 	hdr := &tar.Header{
@@ -243,24 +320,31 @@ func exportSymlink(tw *tar.Writer, p, name string, info fs.FileInfo, opts Export
 		Typeflag: tar.TypeSymlink,
 		Linkname: link,
 	}
-	if err := tw.WriteHeader(hdr); err != nil {
+	if err := w.tw.WriteHeader(hdr); err != nil {
 		return fmt.Errorf("writing the archive header for %s: %w", name, err)
 	}
-	s.Symlinks++
+	w.sum.Symlinks++
+	w.written[name] = info
+	w.links[name] = link
 	return nil
 }
 
-// linkStaysInside reports whether a relative link target, resolved from the
-// link's own directory, stays within the town root. It is a lexical check: the
-// export never resolves or reads the target.
-func linkStaysInside(name, link string) bool {
-	if path.IsAbs(link) || filepath.IsAbs(link) {
-		// An absolute target names the source host's layout, which the
-		// destination does not have; the import refuses it too.
-		return false
+// exportLinkTree is the tree the export follows a link target through: the names
+// the archive has written so far, which is exactly what an import holds when it
+// reaches the same entry. A name the archive skipped or has not reached reads as
+// absent, so a component skipped here cannot make a link acceptable that the
+// import would refuse.
+type exportLinkTree struct {
+	written map[string]fs.FileInfo
+	links   map[string]string
+}
+
+func (t exportLinkTree) at(rel string) (fs.FileInfo, string, bool, error) {
+	info, ok := t.written[rel]
+	if !ok {
+		return nil, "", false, nil
 	}
-	resolved := path.Clean(path.Join(path.Dir(name), link))
-	return resolved != ".." && !strings.HasPrefix(resolved, "../")
+	return info, t.links[rel], true, nil
 }
 
 // skippedClass reports why p does not enter the archive, if it does not.

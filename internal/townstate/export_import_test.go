@@ -793,3 +793,130 @@ func TestExportNeverFollowsSymlinks(t *testing.T) {
 		t.Errorf("the import recreated the escaping symlink (err %v)", err)
 	}
 }
+
+// TestExportRefusesSymlinkedAncestor drives the ancestor check: a daemon-owned
+// row reached through an ancestor that is a symlink (.runtime -> an outside
+// tree) or a regular file is refused before anything below it is read, and
+// nothing is archived.
+func TestExportRefusesSymlinkedAncestor(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		bad  func(t *testing.T, town string)
+	}{
+		{
+			name: "a symlinked ancestor",
+			bad: func(t *testing.T, town string) {
+				outside := t.TempDir()
+				writeStateFile(t, outside, "landings/landing1.json", `{"landing":1}`, 0o644)
+				if err := os.Symlink(outside, filepath.Join(town, ".runtime")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "an ancestor that is a regular file",
+			bad: func(t *testing.T, town string) {
+				writeStateFile(t, town, ".runtime", "not a directory\n", 0o644)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			tc.bad(t, town)
+
+			var stream bytes.Buffer
+			_, err := Export(&stream, town, Default(), ExportOptions{})
+			if err == nil || !strings.Contains(err.Error(), ".runtime") || !strings.Contains(err.Error(), "not a directory") {
+				t.Fatalf("Export over %s = %v, want a refusal naming .runtime", tc.name, err)
+			}
+			if stream.Len() != 0 {
+				t.Errorf("the refused export wrote %d bytes; nothing below the ancestor may enter the archive", stream.Len())
+			}
+		})
+	}
+}
+
+// TestExportSkipsLinksTheImportRefuses drives the one lookup Export and Import
+// share: a link that lands in a session-owned directory is left out with the
+// reason in the summary, and the rest of the archive still restores.
+func TestExportSkipsLinksTheImportRefuses(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeStateFile(t, town, "daemon/maintenance_state.json", `{"db":"main"}`, 0o644)
+	writeStateFile(t, town, "gastown/crew/eagle/notes.md", "crew work\n", 0o644)
+	if err := os.Symlink("../gastown/crew/eagle", filepath.Join(town, "daemon", "x")); err != nil {
+		t.Fatal(err)
+	}
+
+	var stream bytes.Buffer
+	sum, err := Export(&stream, town, Default(), ExportOptions{})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if sum.Skipped[SkipSymlinkOut] != 1 {
+		t.Errorf("summary skipped %d symlinks, want 1 (%s)", sum.Skipped[SkipSymlinkOut], sum)
+	}
+	if want := "daemon: a link that lands outside the daemon-owned rows"; !strings.Contains(sum.String(), want) {
+		t.Errorf("the summary does not say why the link was left out (%q):\n%s", want, sum)
+	}
+	if slices.Contains(archiveNames(t, stream.Bytes()), "daemon/x") {
+		t.Errorf("the export archived a link the import would refuse")
+	}
+
+	dest := t.TempDir()
+	if _, err := Import(bytes.NewReader(stream.Bytes()), dest, Default(), ImportOptions{}); err != nil {
+		t.Fatalf("Import of the rest: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "daemon", "maintenance_state.json"))
+	if err != nil || string(got) != `{"db":"main"}` {
+		t.Errorf("the restore of the rest did not complete: %q, %v", got, err)
+	}
+}
+
+// TestExportJudgesLinksByTheArchiveNotTheSource drives the tree the export
+// resolves a target through: the names written so far, as an import holds them
+// at the same entry. A component the archive skips (.dolt-data), or one from a
+// row the archive has not reached yet (.beads), is absent, so a link that climbs
+// out of it is left out even though the source tree holds the name.
+func TestExportJudgesLinksByTheArchiveNotTheSource(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeStateFile(t, town, ".beads/am/meta.json", "{}", 0o644)
+	writeStateFile(t, town, ".beads/.dolt-data/db/config.yaml", "x", 0o644)
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	links := map[string]string{
+		"l": "../.beads/.dolt-data/../am", // through a skipped class
+		"m": "../.beads/am/../meta.json",  // through a row not written yet
+	}
+	for name, target := range links {
+		if err := os.Symlink(target, filepath.Join(town, "daemon", name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stream bytes.Buffer
+	sum, err := Export(&stream, town, Default(), ExportOptions{})
+	if err != nil {
+		t.Fatalf("Export: %v", err)
+	}
+	if sum.Skipped[SkipSymlinkOut] != len(links) {
+		t.Errorf("summary skipped %d symlinks, want %d (%s)", sum.Skipped[SkipSymlinkOut], len(links), sum)
+	}
+	if want := "a link that climbs out of a name that does not exist yet"; !strings.Contains(sum.String(), want) {
+		t.Errorf("the summary does not carry the reason %q:\n%s", want, sum)
+	}
+	names := archiveNames(t, stream.Bytes())
+	for name := range links {
+		if slices.Contains(names, "daemon/"+name) {
+			t.Errorf("the export archived daemon/%s, a link the import would refuse", name)
+		}
+	}
+	if _, err := Import(bytes.NewReader(stream.Bytes()), t.TempDir(), Default(), ImportOptions{}); err != nil {
+		t.Fatalf("Import of the rest: %v", err)
+	}
+}

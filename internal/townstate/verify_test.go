@@ -77,7 +77,7 @@ func unclassifiedTown() fstest.MapFS {
 // runtime subsystems a verify walk reaches.
 func sessionTown() fstest.MapFS {
 	return fstest.MapFS{
-		"mayor/town.json":            {Data: []byte(`{"registry":{"version":1,"rigs":{"gastown":{}}}}`)},
+		"mayor/town.json":            {Data: []byte("{}")},
 		"gastown/config.json":        {Data: []byte("{}")},
 		"gastown/crew/eagle/a.txt":   {Data: []byte("x")},
 		".runtime/jev/run.json":      {Data: []byte("{}")},
@@ -154,7 +154,7 @@ func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 		},
 		{
 			name: "registry file unreadable on the five-file layout",
-			fsys: failingFS{FS: fstest.MapFS{"mayor/town.json": {Data: []byte("{}")}}, openErr: map[string]error{"mayor/rigs.json": boom}},
+			fsys: failingFS{FS: sessionTown(), openErr: map[string]error{"mayor/rigs.json": boom}},
 			m:    Default(),
 			want: "reading mayor/rigs.json",
 		},
@@ -175,6 +175,12 @@ func TestVerifyRefusesWhatItCannotRead(t *testing.T) {
 			fsys: fstest.MapFS{"mayor/rigs.json": {Data: []byte(`{"version":1,"rigs":{"hm":{"git_url":"x","surprise":true}}}`)}},
 			m:    Default(),
 			want: "surprise",
+		},
+		{
+			name: "rig marker unreadable",
+			fsys: failingFS{FS: sessionTown(), statErr: map[string]error{"gastown/config.json": boom}},
+			m:    Default(),
+			want: "stat gastown/config.json",
 		},
 		{
 			name: "rig marker bare repository unreadable",
@@ -253,6 +259,33 @@ func TestVerifyNamesEveryRig(t *testing.T) {
 				t.Errorf("Verify reported a rig's own tree: %v", problems)
 			}
 		})
+	}
+}
+
+// TestVerifyKeepsConfigJSONAsARigMarker holds verify's classification apart
+// from the copy's: a directory that holds only a config.json is still a rig to
+// verify, so its session trees are classified, while the rig list export and
+// import take from the settings (settingsRigs) names no rig here.
+func TestVerifyKeepsConfigJSONAsARigMarker(t *testing.T) {
+	t.Parallel()
+	fsys := fstest.MapFS{
+		"mayor/town.json":          {Data: []byte("{}")},
+		"gastown/config.json":      {Data: []byte("{}")},
+		"gastown/crew/eagle/a.txt": {Data: []byte("x")},
+	}
+	problems, err := Verify(fsys, Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(problems) != 0 {
+		t.Errorf("Verify reported a rig marked only by its config.json: %v", problems)
+	}
+	rigs, err := settingsRigs(fsys)
+	if err != nil {
+		t.Fatalf("settingsRigs: %v", err)
+	}
+	if len(rigs) != 0 {
+		t.Errorf("settingsRigs named %v, want no rig: the registry is the copy's only source", rigs)
 	}
 }
 

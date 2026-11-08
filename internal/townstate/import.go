@@ -93,7 +93,7 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 	if err != nil {
 		return s, err
 	}
-	rigs, _, err := townInputs(os.DirFS(townRoot), m)
+	rigs, err := settingsRigs(os.DirFS(townRoot))
 	if err != nil {
 		return s, fmt.Errorf("reading the destination's rigs: %w", err)
 	}
@@ -352,92 +352,15 @@ func importSymlink(ops townOps, hdr *tar.Header, dest, name string, tree destTre
 	return nil
 }
 
-// maxLinkHops bounds the symlinks a link target may pass through, the same
-// bound the kernel applies, so a loop of links is refused rather than followed.
-const maxLinkHops = 40
-
-// errEscapesRoot is the refusal for a target that climbs above the town root.
-var errEscapesRoot = errors.New("points outside the town root")
-
-// checkLinkTarget refuses a symlink target that leaves the town root or the
-// daemon-owned rows. The target is followed through the tree as it stands in
-// the destination, so a link the archive wrote earlier counts: a target that is
-// clean on its face can still climb out through one of them.
+// checkLinkTarget refuses a symlink target the shared lookup refuses. The
+// target is followed through the tree as it stands in the destination, so a link
+// the archive wrote earlier counts: a target that is clean on its face can still
+// climb out through one of them.
 func checkLinkTarget(ops townOps, tree destTree, name, link string) error {
-	if link == "" {
-		return fmt.Errorf("the archive symlink %q has an empty target", name)
-	}
-	if path.IsAbs(link) || filepath.IsAbs(link) {
-		return fmt.Errorf("the archive symlink %q points at the absolute path %q; an import accepts only links that stay within the town root", name, link)
-	}
-	target, err := resolveInTree(ops, tree.root, path.Dir(name), link)
-	if err != nil {
-		return fmt.Errorf("the archive symlink %q %w (%q)", name, err, link)
-	}
-	if _, ok := Lookup(tree.entries, target); !ok {
-		return fmt.Errorf("the archive symlink %q points at %q, which is not under a daemon-owned path of the manifest; an import writes nothing outside them", name, target)
+	if err := resolveLinkTarget(fsLinkTree{ops: ops, root: tree.root}, path.Dir(name), link, tree.entries); err != nil {
+		return fmt.Errorf("the archive symlink %q %w", name, err)
 	}
 	return nil
-}
-
-// resolveInTree follows link, written relative to the directory dir, through the
-// destination tree and returns the town-root-relative path it names. Each
-// symlink on the way is followed in the destination, so one the archive created
-// earlier is followed too. A name that does not exist yet may end the target (a
-// dangling link), but a ".." after one is refused: a later entry could create
-// that name as a link and move where the ".." lands.
-func resolveInTree(ops townOps, root, dir, link string) (string, error) {
-	cur := dir
-	pending := strings.Split(link, "/")
-	hops := 0
-	missing := ""
-	for len(pending) > 0 {
-		seg := pending[0]
-		pending = pending[1:]
-		switch seg {
-		case "", ".":
-			continue
-		case "..":
-			if missing != "" {
-				return "", fmt.Errorf("passes %s, which does not exist yet, and then climbs out of it", missing)
-			}
-			if cur == "." {
-				return "", errEscapesRoot
-			}
-			cur = path.Dir(cur)
-			continue
-		}
-		next := path.Join(cur, seg)
-		full := filepath.Join(root, filepath.FromSlash(next))
-		info, err := ops.lstat(full)
-		switch {
-		case errors.Is(err, fs.ErrNotExist):
-			if missing == "" {
-				missing = next
-			}
-			cur = next
-		case err != nil:
-			return "", fmt.Errorf("reading %s in the destination: %w", next, err)
-		case info.Mode()&fs.ModeSymlink != 0:
-			hops++
-			if hops > maxLinkHops {
-				return "", fmt.Errorf("passes more than %d symlinks, which may loop", maxLinkHops)
-			}
-			inner, err := ops.readlink(full)
-			if err != nil {
-				return "", fmt.Errorf("reading the symlink %s in the destination: %w", next, err)
-			}
-			if path.IsAbs(inner) || filepath.IsAbs(inner) {
-				return "", fmt.Errorf("passes the symlink %s, which points at the absolute path %q", next, inner)
-			}
-			// The inner target is written relative to the directory that holds
-			// the link, which is cur: cur does not move.
-			pending = append(strings.Split(inner, "/"), pending...)
-		default:
-			cur = next
-		}
-	}
-	return cur, nil
 }
 
 // archiveMode masks an archive mode to the town's two file modes (0755 when

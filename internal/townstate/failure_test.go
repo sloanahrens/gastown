@@ -187,6 +187,12 @@ func TestExportDrivesWalkAndFileFailures(t *testing.T) {
 			want: "reading daemon",
 		},
 		{
+			name: "an ancestor that cannot be read",
+			over: func(o *townOps) { o.lstat = lstatFailingOn(t, "/.runtime") },
+			w:    io.Discard,
+			want: "reading .runtime, an ancestor of .runtime/jev",
+		},
+		{
 			name: "a child that cannot be read",
 			over: func(o *townOps) { o.lstat = lstatFailingOn(t, "/daemon/state.json") },
 			w:    io.Discard,

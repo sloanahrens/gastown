@@ -380,7 +380,7 @@ func TestTownStateVerifyReadsNoContents(t *testing.T) {
 	} {
 		f.addDir(dir, old)
 	}
-	f.addFileWithContent("mayor/town.json", old, "{\"registry\":{\"version\":1,\"rigs\":{\"gastown\":{}}}}\n")
+	f.addFileWithContent("mayor/town.json", old, "{}\n")
 	f.addFile("settings/config.json", old)
 	f.addFile("gastown/config.json", old)
 	f.addFile(".runtime/jev/run.json", now)

@@ -162,10 +162,9 @@ const (
 )
 
 // rigMarkers are the paths whose presence marks a top-level directory as a
-// rig: its bare repository and its canonical clone. A config.json does not
-// mark one: a directory holding only a config.json is not a rig, so its
-// contents are not daemon-owned (gt-gg9hv.68).
+// rig: its registry record, its bare repository and its canonical clone.
 var rigMarkers = []string{
+	"config.json",
 	constants.DirRepoGit,
 	constants.DirMayor + "/" + constants.DirRig,
 }
@@ -251,6 +250,16 @@ func registryRigs(fsys fs.FS) ([]string, error) {
 		return nil, err
 	}
 	return slices.Sorted(maps.Keys(cfg.Rigs)), nil
+}
+
+// settingsRigs names the rigs the town registers, from the settings the landing
+// worker and the daemon read: the registry the copy's rig rows expand to. Export
+// and import use this list and only this list; a top-level directory that merely
+// holds a config.json is not a rig to them, so its contents never become
+// daemon-owned. Verify keeps its own, broader classification through
+// townInputs (gt-gg9hv.68).
+func settingsRigs(fsys fs.FS) ([]string, error) {
+	return registryRigs(fsys)
 }
 
 // readMachineTopLevel returns the top-level keys of mayor/town.json, nil when
