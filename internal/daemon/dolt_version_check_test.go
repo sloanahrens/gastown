@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +38,83 @@ func (f *doltFakeDocker) inspect(_ context.Context, argv []string) ([]byte, erro
 		return nil, f.err
 	}
 	return []byte(f.image + "\n"), nil
+}
+
+// doltFakeServer is the Dolt server seam: it answers version, or err, and
+// counts every read.
+type doltFakeServer struct {
+	version string
+	err     error
+	calls   atomic.Int32
+}
+
+func (f *doltFakeServer) read(context.Context) (string, error) {
+	f.calls.Add(1)
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.version, nil
+}
+
+// doltFakeConnector serves the image check's version query. It answers version,
+// or fails with queryErr, and records every statement.
+type doltFakeConnector struct {
+	version  string
+	queryErr error
+	queries  []string
+}
+
+func (c *doltFakeConnector) Connect(context.Context) (driver.Conn, error) {
+	return &doltFakeConn{c}, nil
+}
+func (c *doltFakeConnector) Driver() driver.Driver { return doltFakeDriver{c} }
+
+// doltFakeDriver opens the connector's connection for database/sql.
+type doltFakeDriver struct{ c *doltFakeConnector }
+
+func (d doltFakeDriver) Open(string) (driver.Conn, error) { return &doltFakeConn{d.c}, nil }
+
+// doltFakeConn answers the connector's one query.
+type doltFakeConn struct{ c *doltFakeConnector }
+
+func (c *doltFakeConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("dolt fake: prepare is not used")
+}
+
+func (c *doltFakeConn) Close() error { return nil }
+
+func (c *doltFakeConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("dolt fake: transactions are not used")
+}
+
+func (c *doltFakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	c.c.queries = append(c.c.queries, query)
+	if c.c.queryErr != nil {
+		return nil, c.c.queryErr
+	}
+	return &doltFakeRows{value: c.c.version}, nil
+}
+
+// doltFakeRows is one row of one string value.
+type doltFakeRows struct {
+	value string
+	read  bool
+}
+
+func (r *doltFakeRows) Columns() []string { return []string{"dolt_version()"} }
+func (r *doltFakeRows) Close() error      { return nil }
+func (r *doltFakeRows) Next(dest []driver.Value) error {
+	if r.read {
+		return io.EOF
+	}
+	r.read = true
+	dest[0] = r.value
+	return nil
+}
+
+// doltFakeOpenDB answers database/sql's pool with the fake connection.
+func doltFakeOpenDB(conn *doltFakeConnector) doltImageOpenDB {
+	return func(string, string) (*sql.DB, error) { return sql.OpenDB(conn), nil }
 }
 
 // doltFakeRegistry answers the tag listing in process. answer gives the status
@@ -131,9 +210,14 @@ func TestDoltVersionCheckRaisesOneItemNamingBoth(t *testing.T) {
 		return doltTagPage(true, "2.7.2", "2.7.1", "2.8.0-rc1", "latest", "sha-1a2b3c")
 	})
 	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2@sha256:38d5e900", reg)
+	server := &doltFakeServer{version: "2.3.2"}
+	check.serverVersion = server.read
 	var logs doltLogs
 	check.run(context.Background(), "/town", doltCheckStart, logs.logf)
 
+	if server.calls.Load() != 0 {
+		t.Errorf("the Dolt server was asked %d times, want 0: docker answered", server.calls.Load())
+	}
 	got := check.observed()
 	if len(got) != 1 {
 		t.Fatalf("observed = %d items, want 1: %+v", len(got), got)
@@ -320,25 +404,43 @@ func TestDoltVersionCheckFailedReadKeepsHeldItem(t *testing.T) {
 	}
 }
 
-func TestDoltVersionCheckDockerAndContainerFailuresRaiseNothing(t *testing.T) {
+func TestDoltImageCheckUnreadableContainerRaisesNothing(t *testing.T) {
+	t.Parallel()
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
+	check.container = func(string) (string, error) {
+		return "", errors.New("dolt.external_container is malformed")
+	}
+	server := &doltFakeServer{version: "2.7.2"}
+	check.serverVersion = server.read
+	var logs doltLogs
+	check.run(context.Background(), "/town", doltCheckStart, logs.logf)
+
+	if got := check.observed(); len(got) != 0 {
+		t.Errorf("observed = %+v, want none", got)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "dolt.external_container") {
+		t.Errorf("logs = %v, want one line naming dolt.external_container", logs)
+	}
+	if len(docker.argv) != 0 || server.calls.Load() != 0 || reg.requests.Load() != 0 {
+		t.Errorf("a container setting that does not parse asked docker %v, the server %d times and the registry %d times, want none",
+			docker.argv, server.calls.Load(), reg.requests.Load())
+	}
+}
+
+func TestDoltImageCheckBothReadsFailRaisesNothing(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
 		container func(string) (string, error)
 		image     string
 		dockerErr error
+		noServer  bool
 	}{
 		{
 			name:      "docker inspect fails",
 			image:     "dolthub/dolt-sql-server:2.3.2",
 			dockerErr: errors.New("exit status 1"),
-		},
-		{
-			name:  "container setting does not parse",
-			image: "dolthub/dolt-sql-server:2.3.2",
-			container: func(string) (string, error) {
-				return "", errors.New("dolt.external_container is malformed")
-			},
 		},
 		{
 			name:  "container name starts with a dash",
@@ -352,8 +454,14 @@ func TestDoltVersionCheckDockerAndContainerFailuresRaiseNothing(t *testing.T) {
 			image: "dolthub/dolt-sql-server",
 		},
 		{
-			name:  "running image is not a plain release",
+			name:  "running image is not a release",
 			image: "dolthub/dolt-sql-server:latest",
+		},
+		{
+			name:      "the server read is not wired",
+			image:     "dolthub/dolt-sql-server:2.3.2",
+			dockerErr: errors.New("exit status 1"),
+			noServer:  true,
 		},
 	}
 	for _, tc := range tests {
@@ -365,19 +473,271 @@ func TestDoltVersionCheckDockerAndContainerFailuresRaiseNothing(t *testing.T) {
 			if tc.container != nil {
 				check.container = tc.container
 			}
+			server := &doltFakeServer{err: errors.New("dial tcp: connection refused")}
+			if !tc.noServer {
+				check.serverVersion = server.read
+			}
 			var logs doltLogs
 			check.run(context.Background(), "/town", doltCheckStart, logs.logf)
 
 			if got := check.observed(); len(got) != 0 {
 				t.Errorf("observed = %+v, want none", got)
 			}
-			if len(logs) != 1 {
-				t.Errorf("logs = %v, want one line", logs)
+			if len(logs) != 2 {
+				t.Fatalf("logs = %v, want one line per failed read", logs)
+			}
+			if !strings.Contains(logs[0], "docker") {
+				t.Errorf("first log line %q does not name docker", logs[0])
+			}
+			if !strings.Contains(logs[1], "Dolt server") {
+				t.Errorf("second log line %q does not name the Dolt server", logs[1])
+			}
+			wantServer := int32(1)
+			if tc.noServer {
+				wantServer = 0
+			}
+			if got := server.calls.Load(); got != wantServer {
+				t.Errorf("the Dolt server was asked %d times, want %d", got, wantServer)
 			}
 			if reg.requests.Load() != 0 {
-				t.Errorf("registry was asked after a failed read of the running image")
+				t.Errorf("registry was asked %d times after both reads failed, want 0", reg.requests.Load())
 			}
 		})
+	}
+}
+
+func TestDoltImageCheckServerAnswersBehind(t *testing.T) {
+	t.Parallel()
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
+	docker.err = errors.New("exit status 1")
+	server := &doltFakeServer{version: "2.6.0"}
+	check.serverVersion = server.read
+	var logs doltLogs
+	check.run(context.Background(), "/town", doltCheckStart, logs.logf)
+
+	got := check.observed()
+	if len(got) != 1 {
+		t.Fatalf("observed = %d items, want 1: %+v", len(got), got)
+	}
+	for _, want := range []string{"2.6.0", "2.7.2"} {
+		if !strings.Contains(got[0].Summary, want) {
+			t.Errorf("summary %q does not name %s", got[0].Summary, want)
+		}
+	}
+	if got := server.calls.Load(); got != 1 {
+		t.Errorf("the Dolt server was asked %d times, want 1", got)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "docker") {
+		t.Errorf("logs = %v, want one line naming the failed docker read", logs)
+	}
+}
+
+func TestDoltImageCheckServerAnswerClears(t *testing.T) {
+	t.Parallel()
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
+	clock := clockwork.NewFakeClockAt(doltCheckStart)
+	var logs doltLogs
+	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+	if len(check.observed()) != 1 {
+		t.Fatalf("setup: docker 2.3.2 against 2.7.2 raised no item")
+	}
+
+	// Docker can no longer see the container; the server says it runs the
+	// newest release.
+	docker.err = errors.New("exit status 1")
+	server := &doltFakeServer{version: "2.7.2"}
+	check.serverVersion = server.read
+	clock.Advance(time.Hour)
+	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+
+	if got := check.observed(); len(got) != 0 {
+		t.Errorf("after the server answered the newest release, observed = %+v, want none", got)
+	}
+	if got := server.calls.Load(); got != 1 {
+		t.Errorf("the Dolt server was asked %d times, want 1", got)
+	}
+}
+
+func TestDoltImageCheckBothReadsFailKeepsHeldItem(t *testing.T) {
+	t.Parallel()
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
+	clock := clockwork.NewFakeClockAt(doltCheckStart)
+	var logs doltLogs
+	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+	held := check.observed()
+	if len(held) != 1 {
+		t.Fatalf("setup: docker 2.3.2 against 2.7.2 raised %d items, want 1", len(held))
+	}
+
+	docker.err = errors.New("exit status 1")
+	check.serverVersion = (&doltFakeServer{err: errors.New("dial tcp: connection refused")}).read
+	clock.Advance(time.Hour)
+	logs = nil
+	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+
+	if got := check.observed(); len(got) != 1 || got[0] != held[0] {
+		t.Errorf("after both reads failed, observed = %+v, want the held item %+v unchanged", got, held)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("logs = %v, want one line per failed read", logs)
+	}
+	if !strings.Contains(logs[0], "docker") || !strings.Contains(logs[1], "Dolt server") {
+		t.Errorf("logs = %v, want one line naming docker and one the Dolt server", logs)
+	}
+}
+
+func TestDoltImageCheckServerReportsNonVersionKeepsItem(t *testing.T) {
+	t.Parallel()
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	check, docker := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
+	clock := clockwork.NewFakeClockAt(doltCheckStart)
+	var logs doltLogs
+	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+	held := check.observed()
+	if len(held) != 1 {
+		t.Fatalf("setup: docker 2.3.2 against 2.7.2 raised %d items, want 1", len(held))
+	}
+
+	docker.err = errors.New("exit status 1")
+	check.serverVersion = (&doltFakeServer{version: "3.0"}).read
+	clock.Advance(time.Hour)
+	logs = nil
+	check.run(context.Background(), "/town", clock.Now(), logs.logf)
+
+	if got := check.observed(); len(got) != 1 || got[0] != held[0] {
+		t.Errorf("after the server answered a non-release, observed = %+v, want the held item %+v unchanged", got, held)
+	}
+	if len(logs) != 2 || !strings.Contains(logs[1], "not a release") {
+		t.Errorf("logs = %v, want a docker failure and a server line naming the non-release", logs)
+	}
+}
+
+func TestDoltImageCheckServerNotAskedWhenDockerAnswers(t *testing.T) {
+	t.Parallel()
+	reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+	check, _ := newDoltImageCheckFor("dolthub/dolt-sql-server:2.3.2", reg)
+	server := &doltFakeServer{err: errors.New("must not be asked")}
+	check.serverVersion = server.read
+	var logs doltLogs
+	check.run(context.Background(), "/town", doltCheckStart, logs.logf)
+
+	if got := server.calls.Load(); got != 0 {
+		t.Errorf("the Dolt server was asked %d times, want 0: docker answered", got)
+	}
+	if len(logs) != 0 {
+		t.Errorf("logs = %v, want none", logs)
+	}
+}
+
+func TestDoltImageCheckReadsPrefixedAndSuffixedTags(t *testing.T) {
+	t.Parallel()
+	for _, image := range []string{
+		"dolthub/dolt-sql-server:v2.3.2",
+		"dolthub/dolt-sql-server:2.3.2-slim",
+	} {
+		t.Run(image, func(t *testing.T) {
+			t.Parallel()
+			reg := newDoltFakeRegistry(func(int) (int, string) { return doltTagPage(true, "2.7.2") })
+			check, _ := newDoltImageCheckFor(image, reg)
+			var logs doltLogs
+			check.run(context.Background(), "/town", doltCheckStart, logs.logf)
+
+			got := check.observed()
+			if len(got) != 1 {
+				t.Fatalf("observed = %d items, want 1: %+v", len(got), got)
+			}
+			if !strings.Contains(got[0].Summary, "2.3.2") || !strings.Contains(got[0].Summary, "2.7.2") {
+				t.Errorf("summary %q does not name 2.3.2 and 2.7.2", got[0].Summary)
+			}
+		})
+	}
+}
+
+func TestDoltImageCheckServerVersionRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		openErr  error
+		queryErr error
+		version  string
+		want     string
+	}{
+		{name: "answers dolt_version", version: "2.7.2", want: "2.7.2"},
+		{name: "the query fails", queryErr: errors.New("unknown function dolt_version")},
+		{name: "the pool does not open", openErr: errors.New("invalid DSN")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			conn := &doltFakeConnector{version: tc.version, queryErr: tc.queryErr}
+			open := doltFakeOpenDB(conn)
+			if tc.openErr != nil {
+				open = func(string, string) (*sql.DB, error) { return nil, tc.openErr }
+			}
+			d := &Daemon{config: &Config{TownRoot: t.TempDir()}, doltImageDB: open}
+
+			got, err := d.doltServerVersion(context.Background())
+
+			if tc.openErr != nil || tc.queryErr != nil {
+				if err == nil {
+					t.Fatalf("doltServerVersion() = %q, want the read to fail", got)
+				}
+				if got != "" {
+					t.Errorf("doltServerVersion() = %q with an error, want no version", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("doltServerVersion() = %v, want %q", err, tc.want)
+			}
+			if got != tc.want {
+				t.Errorf("doltServerVersion() = %q, want %q", got, tc.want)
+			}
+			if len(conn.queries) != 1 || conn.queries[0] != "SELECT dolt_version()" {
+				t.Errorf("queries = %v, want exactly [SELECT dolt_version()]", conn.queries)
+			}
+		})
+	}
+}
+
+func TestDoltImageCheckVersionNormalisation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"2.7.2", "2.7.2", true},
+		{"v2.7.2", "2.7.2", true},
+		{"V2.7.2", "2.7.2", true},
+		{"2.7.2-slim", "2.7.2", true},
+		{"2.7.2+build.7", "2.7.2", true},
+		{"latest", "", false},
+		{"sha-1a2b3c", "", false},
+		{"2.7", "", false},
+		{"2.7.2.1", "", false},
+		{"2.7.2-", "", false},
+		{"", "", false},
+	}
+	for _, tc := range tests {
+		got, ok := normalizeDoltVersion(tc.in)
+		if ok != tc.ok {
+			t.Errorf("normalizeDoltVersion(%q) ok = %v, want %v", tc.in, ok, tc.ok)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		core := fmt.Sprintf("%d.%d.%d", got.major, got.minor, got.patch)
+		if core != tc.want {
+			t.Errorf("normalizeDoltVersion(%q) = %s, want %s", tc.in, core, tc.want)
+		}
+		if got.tag != tc.in {
+			t.Errorf("normalizeDoltVersion(%q).tag = %q, want the input", tc.in, got.tag)
+		}
 	}
 }
 
