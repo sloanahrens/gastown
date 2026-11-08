@@ -664,6 +664,10 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
 	triggerReturned := make(chan struct{})
 	sawTriggerReturn := make(chan bool, 1)
+	// dispatched closes when the dispatch goroutine has finished the whole
+	// refresh, including the last-run record written under the town. The log
+	// line comes before that write, so the log alone is not the end of it.
+	dispatched := make(chan struct{})
 	logs := &syncBuffer{}
 	d := &Daemon{
 		config:       &Config{TownRoot: t.TempDir()},
@@ -672,6 +676,12 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{JevScorecard: jevScorecardEnabled(scorecard.AttentionBattery)}},
 		jevScorecardSeams: jevScorecardSeams{
 			loc: func() *time.Location { return jevScorecardTestZone },
+			dispatch: func(fn func()) {
+				go func() {
+					defer close(dispatched)
+					fn()
+				}()
+			},
 			refresh: func(context.Context, string) error {
 				select {
 				case <-triggerReturned:
@@ -696,6 +706,11 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 		t.Fatal("the refresh never ran: no signal that the default dispatch started it")
 	}
 	awaitJevScorecardLog(t, logs, "refreshed the scorecard cache")
+	select {
+	case <-dispatched:
+	case <-time.After(jevScorecardTestWait): //testpolicy:allow no-sleep — a hang guard only: the dispatch goroutine's end is the event the test waits for, and a goroutine that never finishes fails here rather than hanging the test
+		t.Fatal("the dispatch goroutine never finished the refresh")
+	}
 }
 
 // awaitJevScorecardLog blocks until the log holds want. Each write wakes the
