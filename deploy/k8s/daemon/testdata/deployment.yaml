@@ -39,8 +39,8 @@ spec:
               value: /Users/sloan/gt
             - name: XDG_CONFIG_HOME
               value: /run/gt/xdg
-            - name: TZ
-              value: UTC
+            - name: AWS_REGION
+              value: us-east-1
           resources:
             requests:
               cpu: "2"
@@ -127,13 +127,6 @@ spec:
             periodSeconds: 60
             timeoutSeconds: 15
             failureThreshold: 5
-          lifecycle:
-            preStop:
-              exec:
-                command:
-                  - gt
-                  - daemon
-                  - drain
       volumes:
         - name: town-state
           persistentVolumeClaim:

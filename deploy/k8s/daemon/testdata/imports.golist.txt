@@ -160,4 +160,4 @@ math/rand/v2|errors internal/byteorder internal/chacha8rand math math/bits unsaf
 text/tabwriter|fmt io unicode/utf8
 github.com/steveyegge/gastown/internal/bird|bufio embed encoding/json errors fmt github.com/gofrs/flock github.com/steveyegge/gastown/internal/atomicfile github.com/steveyegge/gastown/internal/procid io io/fs math/rand/v2 os os/exec path/filepath regexp slices strings sync syscall text/tabwriter time unicode
 github.com/steveyegge/gastown/internal/townstate|bytes encoding/json errors fmt github.com/steveyegge/gastown/internal/bird github.com/steveyegge/gastown/internal/config github.com/steveyegge/gastown/internal/constants gopkg.in/yaml.v3 io/fs maps path slices strings time
-github.com/steveyegge/gastown/deploy/k8s/daemon|errors fmt github.com/steveyegge/gastown/internal/templates github.com/steveyegge/gastown/internal/townstate gopkg.in/yaml.v3 io regexp sort strconv strings
+github.com/steveyegge/gastown/deploy/k8s/daemon|errors fmt github.com/steveyegge/gastown/internal/templates github.com/steveyegge/gastown/internal/townstate gopkg.in/yaml.v3 io regexp sort strconv strings time

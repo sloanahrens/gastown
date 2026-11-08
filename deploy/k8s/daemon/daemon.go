@@ -20,8 +20,12 @@
 // never hold the town's volume at once, and its pod template runs as the
 // ServiceAccount daemon. The container's arguments are the live compose file's
 // daemon command (liveDaemonCommand, internal/templates/daemon_compose.go), and
-// its environment is the same map the compose writer renders (ComposeSpec.Env),
-// so the pod cannot drift from the container it replaces.
+// its environment comes from the same map the compose writer renders
+// (ComposeSpec.Env); TestPodCommandEqualsTheComposeCommand and
+// TestPodEnvEqualsTheComposeEnv hold the two services equal, so the pod cannot
+// drift from the container it replaces. The container carries no preStop hook:
+// SIGTERM plus terminationGracePeriodSeconds is the drain, which is DrainBound's
+// sum of the daemon's shutdown budget and the landing-pass drain bound.
 //
 // Values.Image is the digest reference read from deploy/values/images.yaml,
 // which `gt update images` writes (gt-gg9hv.63); the render refuses a tag, so
@@ -49,6 +53,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -81,19 +86,28 @@ const (
 	SweepReaderRole    = "gt-sweep-reader"
 	CacheTrimNamespace = "forgejo"
 	CacheTrimRole      = "gt-ci-cache-trim"
-	// DefaultCPU and DefaultMemory are the daemon container's share when Values
-	// name none. Requests equal limits.
-	DefaultCPU    = "2"
-	DefaultMemory = "4Gi"
+	// daemonShutdownBudget is the daemon's own graceful-shutdown ceiling,
+	// internal/daemon.ShutdownBudget (internal/daemon/dolt.go). It is named here
+	// because the import rule keeps internal/daemon out of the renderer.
+	daemonShutdownBudget = 30 * time.Second
+	// landingPassDrainBound is internal/daemon's postLandRestartCap
+	// (internal/daemon/upgrade_restart.go): how long a pending upgrade restart
+	// waits for a landing pass already in flight.
+	landingPassDrainBound = 2 * time.Minute
+	// terminationGraceMargin keeps the pod alive past the drain, so the kubelet's
+	// SIGKILL lands after the daemon has finished stopping.
+	terminationGraceMargin = 30 * time.Second
+	// DrainBound is the longest a daemon pod needs to stop: the daemon's shutdown
+	// budget plus the landing-pass drain bound, 30s + 2m = 2m30s.
+	DrainBound = daemonShutdownBudget + landingPassDrainBound
 	// MinimumTerminationGraceSeconds is the shortest grace period the render
-	// accepts: the daemon's landing-pass drain bound, postLandRestartCap
-	// (internal/daemon/upgrade_restart.go), which is two minutes. A shorter
-	// grace SIGKILLs the pod while its drain is still running.
-	MinimumTerminationGraceSeconds = 120
-	// DefaultTerminationGraceSeconds is the grace period when Values names one:
-	// the drain bound plus the daemon's own shutdown budget of 30 seconds
-	// (daemon.ShutdownBudget, internal/daemon/dolt.go) and a minute of margin.
-	DefaultTerminationGraceSeconds = 180
+	// accepts: DrainBound in whole seconds, 150. A shorter grace SIGKILLs the
+	// pod while its drain still runs.
+	MinimumTerminationGraceSeconds = int(DrainBound / time.Second)
+	// DefaultTerminationGraceSeconds is the grace period when Values names none:
+	// DrainBound plus terminationGraceMargin, 150 + 30 = 180 seconds, so the
+	// drain finishes before the kubelet's SIGKILL.
+	DefaultTerminationGraceSeconds = int((DrainBound + terminationGraceMargin) / time.Second)
 	// TownStateClaim is the claim carrying the daemon-owned town root, and the
 	// pod volume name it is mounted by.
 	TownStateClaim = "town-state"
@@ -256,8 +270,15 @@ type Values struct {
 	// the ForgeTokenFile Secret and passes --forge-host and
 	// --forge-token-file, as a live compose spec with ForgeHost does.
 	ForgeHost string
-	// CPU and Memory are the container's share; requests equal limits.
-	// DefaultCPU and DefaultMemory when empty.
+	// CPU and Memory are the container's share, and both are required: requests
+	// equal limits. The renderer has no default for either, because no source
+	// records a figure. The live compose file's daemon service
+	// (internal/templates/daemon_compose.go, daemonComposeBody) sets no cpus or
+	// mem_limit, so the container may use the whole host and there is no compose
+	// value to copy; and the daemon's resource sampler file
+	// (<town>/.runtime/metrics/resources, internal/metrics/source_resources.go)
+	// held no rows when this renderer was written, so there is no measured use
+	// either. A default would be a guess: the caller passes the measured share.
 	CPU    string
 	Memory string
 	// TerminationGraceSeconds is the pod's terminationGracePeriodSeconds.
@@ -417,6 +438,11 @@ func deployment(v Values, namespace string) Deployment {
 // daemonContainer is the daemon's container. Its arguments are the live compose
 // file's daemon command, so the entrypoint reads the same flags from the same
 // fixed paths (templates.LiveOMTokenPath and templates.LiveForgeTokenPath).
+//
+// It carries no preStop hook: SIGTERM plus the pod's
+// terminationGracePeriodSeconds is the drain. A hook would have to run a drain
+// command the image does not have; no such daemon subcommand exists, so the
+// manifest names none rather than a command that only logs a failure.
 func daemonContainer(v Values) Container {
 	return Container{
 		Name:       Name,
@@ -431,8 +457,11 @@ func daemonContainer(v Values) Container {
 		VolumeMounts: mounts(v),
 		ReadinessProbe: &Probe{
 			// gt status --line is the health line the update cycle judges a swap
-			// by, and its exit code is green alone: a degraded or red town keeps
-			// the pod out of readiness.
+			// by (internal/cmd/update_verify.go), and its exit code is green
+			// alone: 0 green, 1 degraded, 2 red, 3 unknown
+			// (internal/cmd/status_health.go), so a degraded or red town keeps
+			// the pod out of readiness. Probed 2026-11-08: the command exists,
+			// printed its one UNKNOWN line, and exited 3.
 			Exec:                &ExecAction{Command: []string{"gt", "status", "--line"}},
 			InitialDelaySeconds: 30,
 			PeriodSeconds:       30,
@@ -441,21 +470,17 @@ func daemonContainer(v Values) Container {
 		},
 		LivenessProbe: &Probe{
 			// gt daemon status reports whether the daemon runs, not whether the
-			// town is green, so a degraded town never restarts the pod. The
-			// longer period and the higher failure threshold keep one slow read
-			// from killing it.
+			// town is green (internal/cmd/daemon.go: 0 running, 3 not running),
+			// so a degraded or red town never restarts the pod: liveness is
+			// looser than readiness. Probed 2026-11-08: it exited 3 for a
+			// daemon that is not running. The longer period and the higher
+			// failure threshold keep one slow read from killing the pod.
 			Exec:                &ExecAction{Command: []string{"gt", "daemon", "status"}},
 			InitialDelaySeconds: 60,
 			PeriodSeconds:       60,
 			TimeoutSeconds:      15,
 			FailureThreshold:    5,
 		},
-		// The preStop asks the daemon to drain before the kubelet's SIGTERM, so
-		// the pod finishes its in-flight work inside the grace period. gt daemon
-		// drain is the drain entry point the image must carry for the hook to
-		// have an effect; a binary without it only logs the failed hook before
-		// the daemon shuts down on the signal.
-		Lifecycle: &Lifecycle{PreStop: &LifecycleHandler{Exec: &ExecAction{Command: []string{"gt", "daemon", "drain"}}}},
 	}
 }
 
@@ -477,6 +502,10 @@ func daemonArgs(v Values) []string {
 // containerEnvironment is GT_TOWN_ROOT and XDG_CONFIG_HOME at the mounted
 // paths, then the caller's environment sorted. The daemon resolves its config
 // directory through XDG_CONFIG_HOME, which is where the Secrets are mounted.
+//
+// Values.Env is the same map the compose writer renders as its daemon service's
+// Env, and TestPodEnvEqualsTheComposeEnv holds the two services' environments
+// equal, so an entry that reaches the container reaches the pod.
 func containerEnvironment(v Values) []EnvVar {
 	env := []EnvVar{
 		{Name: TownRootEnv, Value: TownRootPath},
@@ -598,12 +627,6 @@ func (v Values) withDefaults() Values {
 		v.ForgejoService = DefaultForgejoService
 		v.ForgejoNamespace = DefaultForgejoNamespace
 	}
-	if v.CPU == "" {
-		v.CPU = DefaultCPU
-	}
-	if v.Memory == "" {
-		v.Memory = DefaultMemory
-	}
 	if v.TerminationGraceSeconds == 0 {
 		v.TerminationGraceSeconds = DefaultTerminationGraceSeconds
 	}
@@ -649,12 +672,16 @@ func (v Values) validateDaemon() error {
 		return fmt.Errorf("Values.Image %q: want the daemon image by digest (repo@sha256:<64 lowercase hex>) from deploy/values/images.yaml; a tag is refused so the pod runs the commit the values file records", v.Image)
 	case !v.ConfirmContainerStopped:
 		return errors.New("Values.ConfirmContainerStopped is false: the Docker Desktop container owns the town until it is stopped, so the Deployment is not rendered until the operator confirms the container is down")
+	case v.CPU == "":
+		return errors.New("Values.CPU is empty: no source gives the daemon's measured CPU share, so the render carries no default; pass the measured share")
 	case !cpuRE.MatchString(v.CPU):
 		return fmt.Errorf("Values.CPU %q: want a positive whole number of cores or millicores, such as 2 or 500m", v.CPU)
+	case v.Memory == "":
+		return errors.New("Values.Memory is empty: no source gives the daemon's measured memory share, so the render carries no default; pass the measured share")
 	case !storageRE.MatchString(v.Memory):
 		return fmt.Errorf("Values.Memory %q: want a non-zero whole number and one of Ki, Mi, Gi or Ti, such as 4Gi", v.Memory)
 	case v.TerminationGraceSeconds < MinimumTerminationGraceSeconds:
-		return fmt.Errorf("Values.TerminationGraceSeconds %d: want at least %d, the daemon's landing-pass drain bound, or the pod is SIGKILLed mid-drain", v.TerminationGraceSeconds, MinimumTerminationGraceSeconds)
+		return fmt.Errorf("Values.TerminationGraceSeconds %d: want at least %d, the daemon's shutdown budget plus its landing-pass drain bound, or the pod is SIGKILLed mid-drain", v.TerminationGraceSeconds, MinimumTerminationGraceSeconds)
 	}
 	if err := v.validateCredentials(); err != nil {
 		return err
@@ -1057,7 +1084,6 @@ type Container struct {
 	VolumeMounts   []VolumeMount      `yaml:"volumeMounts,omitempty"`
 	ReadinessProbe *Probe             `yaml:"readinessProbe,omitempty"`
 	LivenessProbe  *Probe             `yaml:"livenessProbe,omitempty"`
-	Lifecycle      *Lifecycle         `yaml:"lifecycle,omitempty"`
 }
 
 // EnvVar is one environment entry.
@@ -1112,17 +1138,7 @@ type Probe struct {
 	FailureThreshold    int32       `yaml:"failureThreshold,omitempty"`
 }
 
-// ExecAction is a probe or hook command.
+// ExecAction is a probe command.
 type ExecAction struct {
 	Command []string `yaml:"command"`
-}
-
-// Lifecycle is the pod's lifecycle hooks.
-type Lifecycle struct {
-	PreStop *LifecycleHandler `yaml:"preStop,omitempty"`
-}
-
-// LifecycleHandler is one lifecycle hook.
-type LifecycleHandler struct {
-	Exec *ExecAction `yaml:"exec,omitempty"`
 }

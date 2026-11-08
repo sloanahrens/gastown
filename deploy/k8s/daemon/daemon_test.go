@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -48,11 +49,18 @@ func goldenValues(t *testing.T) Values {
 		t.Fatalf("parsing the secrets manifest: %v", err)
 	}
 	return Values{
-		ForgejoService:          DefaultForgejoService,
-		ForgejoNamespace:        DefaultForgejoNamespace,
-		Secrets:                 manifest.Files,
-		Image:                   testImage,
-		Env:                     map[string]string{"TZ": "UTC"},
+		ForgejoService:   DefaultForgejoService,
+		ForgejoNamespace: DefaultForgejoNamespace,
+		Secrets:          manifest.Files,
+		Image:            testImage,
+		// Env is a daemon.env entry the compose writer forwards and no rule
+		// filters: a plain provider setting beside the credentials.
+		Env: map[string]string{"AWS_REGION": "us-east-1"},
+		// CPU and Memory are the share the deploy passes. The renderer has no
+		// default for either, because no source records a figure (see Values.CPU),
+		// so the goldens record an example share rather than a fallback.
+		CPU:                     "2",
+		Memory:                  "4Gi",
 		OMToken:                 true,
 		ForgeHost:               "forgejo:3000",
 		ConfirmContainerStopped: true,
@@ -238,8 +246,10 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"a forge host with no Secret", func(v *Values) { v.Secrets = withoutSecret(v.Secrets, ForgeTokenFile) }, "Values.ForgeHost", ""},
 		{"a forge host that is a URL", func(v *Values) { v.ForgeHost = "https://forgejo:3000" }, "Values.ForgeHost", ""},
 		{"a forge port outside the range", func(v *Values) { v.ForgeHost = "forgejo:70000" }, "Values.ForgeHost", ""},
+		{"no CPU share", func(v *Values) { v.CPU = "" }, "Values.CPU", "no source gives the daemon's measured CPU share"},
 		{"a malformed CPU share", func(v *Values) { v.CPU = "two" }, "Values.CPU", ""},
 		{"a zero CPU share", func(v *Values) { v.CPU = "0m" }, "Values.CPU", ""},
+		{"no memory share", func(v *Values) { v.Memory = "" }, "Values.Memory", "no source gives the daemon's measured memory share"},
 		{"a memory share with no suffix", func(v *Values) { v.Memory = "4096" }, "Values.Memory", ""},
 		{"a grace period under the drain bound", func(v *Values) { v.TerminationGraceSeconds = MinimumTerminationGraceSeconds - 1 }, "Values.TerminationGraceSeconds", ""},
 		{"an env key that is not a variable name", func(v *Values) { v.Env["A-B"] = "x" }, `Values.Env["A-B"]`, ""},
@@ -642,7 +652,7 @@ func TestDeploymentGolden(t *testing.T) {
 	if got := d.Spec.Template.Spec.ServiceAccountName; got != ServiceAccountName {
 		t.Errorf("the pod runs as service account %q, want %q", got, ServiceAccountName)
 	}
-	if got := d.Spec.Template.Spec.TerminationGracePeriodSeconds; got < MinimumTerminationGraceSeconds {
+	if got := d.Spec.Template.Spec.TerminationGracePeriodSeconds; got < int64(MinimumTerminationGraceSeconds) {
 		t.Errorf("the pod's grace period is %ds, want at least %ds", got, MinimumTerminationGraceSeconds)
 	}
 
@@ -670,11 +680,77 @@ func TestDeploymentGolden(t *testing.T) {
 			c.LivenessProbe.PeriodSeconds, c.LivenessProbe.FailureThreshold,
 			c.ReadinessProbe.PeriodSeconds, c.ReadinessProbe.FailureThreshold)
 	}
-	if c.Lifecycle == nil || c.Lifecycle.PreStop == nil {
-		t.Fatal("the container carries no preStop, want the drain request")
+}
+
+// TestPodHasNoPreStopAndGraceCoversTheDrain holds the shutdown contract: the pod
+// carries no preStop hook, so SIGTERM plus the grace period is the drain, and
+// the grace period is at least the drain bound the package computes from the
+// daemon's two named budgets. It also holds the arithmetic the comments state:
+// the drain bound is the shutdown budget plus the landing-pass drain bound, and
+// the default grace is that sum plus the margin.
+func TestPodHasNoPreStopAndGraceCoversTheDrain(t *testing.T) {
+	t.Parallel()
+
+	if got, want := DrainBound, daemonShutdownBudget+landingPassDrainBound; got != want {
+		t.Fatalf("DrainBound = %s, want the daemon's shutdown budget plus the landing-pass drain bound = %s", got, want)
 	}
-	if got, want := c.Lifecycle.PreStop.Exec.Command, []string{"gt", "daemon", "drain"}; !slices.Equal(got, want) {
-		t.Errorf("the preStop runs %q, want the drain request %q", got, want)
+	if got, want := DefaultTerminationGraceSeconds, int((DrainBound+terminationGraceMargin)/time.Second); got != want {
+		t.Errorf("DefaultTerminationGraceSeconds = %d, want the drain bound plus the margin = %d", got, want)
+	}
+	if MinimumTerminationGraceSeconds < int(DrainBound/time.Second) {
+		t.Errorf("MinimumTerminationGraceSeconds = %d, under the drain bound %s", MinimumTerminationGraceSeconds, DrainBound)
+	}
+	// The sums the constants' comments state, so editing a constant without the
+	// comment it describes fails here: 30s + 2m = 2m30s is the floor, and
+	// 2m30s + 30s is the default.
+	if got, want := int(DrainBound/time.Second), 150; got != want {
+		t.Errorf("the drain bound is %d seconds, want the 30s + 2m = 150 the comments state", got)
+	}
+	if got, want := DefaultTerminationGraceSeconds, 180; got != want {
+		t.Errorf("the default grace is %d seconds, want the 150 + 30 = 180 the comments state", got)
+	}
+
+	m := mustBuild(t, goldenValues(t))
+	pod := m.Deployment.Spec.Template.Spec
+	if got, want := pod.TerminationGracePeriodSeconds, int64(DefaultTerminationGraceSeconds); got != want {
+		t.Errorf("the pod's grace period = %ds, want the default %ds", got, want)
+	}
+	if got := pod.TerminationGracePeriodSeconds; got < int64(MinimumTerminationGraceSeconds) {
+		t.Errorf("the pod's grace period = %ds, under the drain bound %ds", got, MinimumTerminationGraceSeconds)
+	}
+
+	// The emitted Deployment is what an apply reads, so the hook check reads it:
+	// no container may carry a lifecycle block at all.
+	var rendered struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						Name      string         `yaml:"name"`
+						Lifecycle map[string]any `yaml:"lifecycle"`
+					} `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(document(t, m.Deployment), &rendered); err != nil {
+		t.Fatalf("parsing the rendered Deployment: %v", err)
+	}
+	if len(rendered.Spec.Template.Spec.Containers) == 0 {
+		t.Fatal("the rendered Deployment holds no container, so the hook check reads nothing")
+	}
+	for _, c := range rendered.Spec.Template.Spec.Containers {
+		if c.Lifecycle != nil {
+			t.Errorf("container %q carries a lifecycle block %v; SIGTERM plus the grace period is the drain", c.Name, c.Lifecycle)
+		}
+	}
+
+	// A grace period the caller names at the floor is carried unchanged, so the
+	// refusal below the floor is the only bound on the value.
+	v := goldenValues(t)
+	v.TerminationGraceSeconds = MinimumTerminationGraceSeconds
+	if got, want := mustBuild(t, v).Deployment.Spec.Template.Spec.TerminationGracePeriodSeconds, int64(MinimumTerminationGraceSeconds); got != want {
+		t.Errorf("the pod's grace period = %ds for a caller's %ds, want the caller's value", got, want)
 	}
 }
 
@@ -750,6 +826,73 @@ func TestPodCommandEqualsTheComposeCommand(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), secret) {
 		t.Error("the refusal echoes the secret value, and a manifest never carries one")
+	}
+}
+
+// composeOnlyEnv are the names the compose render sets on the daemon service for
+// the docker engine and the container's identity: the engine it reaches, the
+// container's name and supervisor, and the takeover switch. The pod has no
+// engine sidecar and takes its identity from its own pod, so it sets none of
+// them; every other name of the service's environment must match the pod's.
+var composeOnlyEnv = []string{"DOCKER_HOST", "GT_DAEMON_CONTAINER_NAME", "GT_DAEMON_SUPERVISOR", "GT_DAEMON_TAKEOVER"}
+
+// TestPodEnvEqualsTheComposeEnv renders the live compose file with the pod's
+// Values and holds the two environments equal name for name and value for
+// value, after the compose-only names above: the pod's environment and the
+// container's come from the same Values.Env map, so an entry that reaches one
+// reaches the other, and a drift fails here naming both sets.
+func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
+	t.Parallel()
+
+	v := goldenValues(t)
+	spec := templates.ComposeSpec{
+		Project:       "gt-town",
+		ContainerName: "gt-daemon",
+		Image:         "gt-daemon:abc1234",
+		TownRoot:      TownRootPath,
+		StopGrace:     templates.MinimumStopGrace,
+		DoltHost:      "host.docker.internal",
+		Env:           maps.Clone(v.Env),
+		// The config directory is what makes the compose render set
+		// XDG_CONFIG_HOME, the one render-owned name both services carry. No
+		// Secrets are listed, so the render mounts the directory and reads no host
+		// file.
+		ConfigDir: "/Users/sloan/.config/gt",
+	}
+	rendered, err := templates.RenderDaemonCompose(spec)
+	if err != nil {
+		t.Fatalf("RenderDaemonCompose: %v", err)
+	}
+	var composeFile struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(rendered, &composeFile); err != nil {
+		t.Fatalf("the rendered compose file does not parse: %v", err)
+	}
+	composeEnv := maps.Clone(composeFile.Services["daemon"].Environment)
+	if len(composeEnv) == 0 {
+		t.Fatal("the compose daemon service carries no environment, so the equality check reads nothing")
+	}
+	for _, name := range composeOnlyEnv {
+		delete(composeEnv, name)
+	}
+
+	pod := mustBuild(t, v).Deployment.Spec.Template.Spec.Containers[0]
+	podEnv := make(map[string]string, len(pod.Env))
+	for _, e := range pod.Env {
+		podEnv[e.Name] = e.Value
+	}
+
+	if !maps.Equal(podEnv, composeEnv) {
+		t.Errorf("the pod's environment and the compose daemon service's differ: pod names %q, compose names %q (after removing the compose-only names %q)",
+			slices.Sorted(maps.Keys(podEnv)), slices.Sorted(maps.Keys(composeEnv)), composeOnlyEnv)
+		for name, got := range podEnv {
+			if want, ok := composeEnv[name]; ok && want != got {
+				t.Errorf("env %s = %q in the pod, %q in the compose service", name, got, want)
+			}
+		}
 	}
 }
 
