@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
