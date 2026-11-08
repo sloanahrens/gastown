@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -64,24 +65,31 @@ type goldenReporter interface {
 	Fatalf(format string, args ...any)
 }
 
-// compareGolden compares got with the golden file dir/file, or rewrites it when
-// -update is set. The directory is a parameter so a test can drive this function
-// against a file it owns instead of rewriting testdata.
+// compareGolden compares got with the golden file dir/file. Under -update it then
+// rewrites the file, and the comparison has already failed the run if the golden
+// changed, so a rewrite is never a silent pass. The directory is a parameter so a
+// test can drive this function against a file it owns instead of testdata.
 func compareGolden(t goldenReporter, dir, file string, got []byte) {
 	t.Helper()
 	filePath := filepath.Join(dir, file)
+	want, err := os.ReadFile(filePath)
+	switch {
+	case err == nil:
+	case updatingGoldens() && errors.Is(err, fs.ErrNotExist):
+		// A new golden has no old bytes, so the comparison reports it as a change.
+	default:
+		t.Fatalf("reading %s: %v", filePath, err)
+	}
+	if msg := goldenMismatch(filePath, got, want); msg != "" {
+		if updatingGoldens() {
+			msg += "-update rewrites the golden after this comparison; run again without -update to confirm it\n"
+		}
+		t.Error(msg)
+	}
 	if updatingGoldens() {
 		if err := os.WriteFile(filePath, got, 0o644); err != nil {
 			t.Fatalf("writing %s: %v", filePath, err)
 		}
-		return
-	}
-	want, err := os.ReadFile(filePath)
-	if err != nil {
-		t.Fatalf("reading %s: %v", filePath, err)
-	}
-	if msg := goldenMismatch(filePath, got, want); msg != "" {
-		t.Error(msg)
 	}
 }
 
@@ -357,18 +365,45 @@ func mountFor(volume string) (Mount, bool) {
 	return Mount{}, false
 }
 
+// checkMount returns what drifts between mount and the split m: a daemon-owned
+// row the town-state mount lacks or holds out of the split's order, a row the
+// split gives a session, an entry that is absolute or resolves outside the mount,
+// and any row a mount other than the town-state one carries. It returns the
+// findings instead of failing, so a fixture that must drift drives this check.
+func checkMount(mount Mount, m *townstate.Manifest) []string {
+	var want []string
+	if mount.Volume == TownStateClaim {
+		want = ownedBy(m, townstate.OwnerDaemon)
+	}
+	var findings []string
+	if !slices.Equal(mount.Entries, want) {
+		findings = append(findings, fmt.Sprintf("the %s mount carries %q, want %q: the split's daemon-owned rows, in the split's order", mount.Volume, mount.Entries, want))
+	}
+	sessionPaths := ownedBy(m, townstate.OwnerSession)
+	for _, p := range mount.Entries {
+		if slices.Contains(sessionPaths, p) {
+			findings = append(findings, fmt.Sprintf("the %s volume carries the session-owned path %q", mount.Volume, p))
+		}
+		if path.IsAbs(p) {
+			findings = append(findings, fmt.Sprintf("the %s volume carries %q, an absolute path; entries are relative to the town root", mount.Volume, p))
+			continue
+		}
+		if joined := path.Join(mount.Path, p); !strings.HasPrefix(joined, mount.Path+"/") {
+			findings = append(findings, fmt.Sprintf("the %s entry %q resolves to %q, outside the mount %q", mount.Volume, p, joined, mount.Path))
+		}
+	}
+	return findings
+}
+
+// TestMountsMatchTheTownStateManifest holds the pod's real mount table to the
+// town-state split. The town-state claim's contents come from `gt town state
+// export`, which carries the daemon-owned rows and nothing else, so a
+// session-owned tree never lands in the volume even though the mount path is the
+// town root's own prefix.
 func TestMountsMatchTheTownStateManifest(t *testing.T) {
 	t.Parallel()
 	manifest := townstate.Default()
-	var daemonPaths, sessionPaths []string
-	for _, e := range manifest.Entries {
-		switch e.Owner {
-		case townstate.OwnerDaemon:
-			daemonPaths = append(daemonPaths, e.Path)
-		case townstate.OwnerSession:
-			sessionPaths = append(sessionPaths, e.Path)
-		}
-	}
+	daemonPaths, sessionPaths := ownedBy(manifest, townstate.OwnerDaemon), ownedBy(manifest, townstate.OwnerSession)
 	if len(daemonPaths) == 0 || len(sessionPaths) == 0 {
 		t.Fatalf("the manifest split into %d daemon-owned and %d session-owned entries; a check over either empty set would pass for the wrong reason", len(daemonPaths), len(sessionPaths))
 	}
@@ -380,45 +415,9 @@ func TestMountsMatchTheTownStateManifest(t *testing.T) {
 	if townState.Path != TownRootPath {
 		t.Errorf("the %s mount is at %q, want the town root %q", TownStateClaim, townState.Path, TownRootPath)
 	}
-
-	got := slices.Clone(townState.Entries)
-	slices.Sort(got)
-	want := slices.Clone(daemonPaths)
-	slices.Sort(want)
-	if !slices.Equal(got, want) {
-		t.Errorf("the %s mount carries %q, want the manifest's daemon-owned set %q; add or remove the row in Mounts", TownStateClaim, got, want)
-	}
-
-	// The claim's contents come from `gt town state export`, which carries the
-	// rows above and nothing else, so a session-owned tree never lands in the
-	// volume even though the mount path is the town root's own prefix.
 	for _, m := range Mounts {
-		for _, p := range m.Entries {
-			if slices.Contains(sessionPaths, p) {
-				t.Errorf("the %s volume carries the session-owned path %q", m.Volume, p)
-			}
-		}
-	}
-
-	// Every carried path lands under its volume's path. A top-level daemon-owned
-	// entry is a direct child of the town-state mount.
-	for _, m := range Mounts {
-		for _, p := range m.Entries {
-			if path.IsAbs(p) {
-				t.Errorf("the %s volume carries %q, an absolute path; entries are relative to the town root", m.Volume, p)
-				continue
-			}
-			if joined := path.Join(m.Path, p); !strings.HasPrefix(joined, m.Path+"/") {
-				t.Errorf("the %s entry %q resolves to %q, outside the mount %q", m.Volume, p, joined, m.Path)
-			}
-		}
-	}
-	for _, p := range daemonPaths {
-		if strings.Contains(p, "/") {
-			continue
-		}
-		if got, want := path.Join(townState.Path, p), townState.Path+"/"+p; got != want {
-			t.Errorf("the top-level entry %q lands at %q, want a direct child %q", p, got, want)
+		for _, finding := range checkMount(m, manifest) {
+			t.Error(finding)
 		}
 	}
 
@@ -446,6 +445,56 @@ func TestMountsMatchTheTownStateManifest(t *testing.T) {
 	}
 }
 
+// TestMountCheckReportsDrift drives every branch of checkMount against a split
+// this test owns: a mount that matches passes, and each drift is reported under
+// a finding naming it.
+func TestMountCheckReportsDrift(t *testing.T) {
+	t.Parallel()
+	split := &townstate.Manifest{Entries: []townstate.Entry{
+		{Path: "daemon", Owner: townstate.OwnerDaemon, Why: "fixture"},
+		{Path: "logs", Owner: townstate.OwnerDaemon, Why: "fixture"},
+		{Path: "<rig>/polecats", Owner: townstate.OwnerSession, Why: "fixture"},
+	}}
+	escaping := &townstate.Manifest{Entries: []townstate.Entry{
+		{Path: "../escape", Owner: townstate.OwnerDaemon, Why: "fixture"},
+	}}
+	absolute := &townstate.Manifest{Entries: []townstate.Entry{
+		{Path: "/etc/passwd", Owner: townstate.OwnerDaemon, Why: "fixture"},
+	}}
+	town := func(entries ...string) Mount {
+		return Mount{Volume: TownStateClaim, Path: TownRootPath, Entries: entries}
+	}
+	tests := []struct {
+		name  string
+		split *townstate.Manifest
+		mount Mount
+		// want names a finding the check must report; "" means it reports none.
+		want string
+	}{
+		{"a mount that matches the split", split, town("daemon", "logs"), ""},
+		{"a session-owned row carried", split, town("daemon", "logs", "<rig>/polecats"), `the session-owned path "<rig>/polecats"`},
+		{"a daemon-owned row missing", split, town("daemon"), `carries ["daemon"]`},
+		{"a daemon-owned row out of order", split, town("logs", "daemon"), `carries ["logs" "daemon"]`},
+		{"an entry that resolves outside the mount", escaping, town("../escape"), `resolves to "/Users/sloan/escape", outside the mount`},
+		{"an absolute entry", absolute, town("/etc/passwd"), "an absolute path"},
+		{"a row on a volume that holds none", split, Mount{Volume: LandingWorkClaim, Path: LandingWorkPath, Entries: []string{"daemon"}}, `carries ["daemon"], want []`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := checkMount(tc.mount, tc.split)
+			if tc.want == "" {
+				if len(findings) != 0 {
+					t.Errorf("checkMount reported %q for a mount that matches the split", findings)
+				}
+				return
+			}
+			if !slices.ContainsFunc(findings, func(f string) bool { return strings.Contains(f, tc.want) }) {
+				t.Errorf("checkMount reported %q, want a finding naming %q", findings, tc.want)
+			}
+		})
+	}
+}
+
 // failingWriter fails every write, so Render's error path is driven through a
 // writer that cannot accept the stream.
 type failingWriter struct{}
@@ -465,16 +514,11 @@ func TestRenderReportsAWriteError(t *testing.T) {
 }
 
 // TestGoldenMismatchIsReported drives compareGolden, the comparison the golden
-// tests use: a document that matches its golden must pass, and one that differs
-// must be reported, so a hand-edited golden or a comparison that stopped
-// comparing fails loudly.
+// tests use, in whichever mode the run is in: a document that matches its golden
+// must pass, and one that differs must be reported, so a hand-edited golden or a
+// comparison that stopped comparing fails loudly, under -update too.
 func TestGoldenMismatchIsReported(t *testing.T) {
 	t.Parallel()
-	if updatingGoldens() {
-		// -update rewrites the file and returns before comparing, so this mode
-		// has no mismatch to report; the golden tests exercise the rewrite.
-		return
-	}
 	dir := t.TempDir()
 	const file = "claim.yaml"
 	if err := os.WriteFile(filepath.Join(dir, file), []byte("apiVersion: v1\n"), 0o644); err != nil {

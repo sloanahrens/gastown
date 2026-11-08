@@ -73,9 +73,9 @@ var manifestPackages = []string{
 	"github.com/steveyegge/gastown/internal/townstate",
 }
 
-// allowedImport reports whether path is one the renderer may reach: the
-// standard library, the YAML encoder its goldens are written with, or a
-// manifest package.
+// allowedImport reports whether path is one the renderer may import: the
+// standard library, the YAML encoder the renderer writes with (the sibling
+// packages' rule, recorded on gt-gg9hv.69), or a manifest package.
 func allowedImport(path string) bool {
 	if slices.Contains(manifestPackages, path) {
 		return true
@@ -117,7 +117,7 @@ func scanImports(t *testing.T, dir string) []string {
 				continue
 			}
 			if forbiddenImport(imp) {
-				findings = append(findings, fmt.Sprintf("%s imports %q, which reaches a process, a socket or a cluster", file, imp))
+				findings = append(findings, fmt.Sprintf("%s imports %q, which gives the renderer a process, a socket or a cluster client", file, imp))
 			}
 		}
 	}
@@ -128,7 +128,7 @@ func scanImports(t *testing.T, dir string) []string {
 func TestImportsAreRestricted(t *testing.T) {
 	t.Parallel()
 	for _, finding := range scanImports(t, packageDir(t)) {
-		t.Errorf("%s: the renderer reaches no cluster, command or third-party package", finding)
+		t.Errorf("%s: the renderer imports no cluster client, command or third-party package beyond the YAML encoder", finding)
 	}
 }
 
@@ -173,10 +173,10 @@ import _ "os/exec"
 	want := []string{
 		`apply.go imports "example.com/client", which is neither the standard library, the YAML encoder nor a manifest package`,
 		`apply.go imports "k8s.io/client-go/kubernetes", which is neither the standard library, the YAML encoder nor a manifest package`,
-		`apply.go imports "net/http", which reaches a process, a socket or a cluster`,
-		`apply.go imports "os/exec", which reaches a process, a socket or a cluster`,
+		`apply.go imports "net/http", which gives the renderer a process, a socket or a cluster client`,
+		`apply.go imports "os/exec", which gives the renderer a process, a socket or a cluster client`,
 		`apply.go imports "sigs.k8s.io/controller-runtime", which is neither the standard library, the YAML encoder nor a manifest package`,
-		`apply.go imports "unsafe", which reaches a process, a socket or a cluster`,
+		`apply.go imports "unsafe", which gives the renderer a process, a socket or a cluster client`,
 	}
 	if got := scanImports(t, dir); !slices.Equal(got, want) {
 		t.Errorf("the scan reported %q, want %q", got, want)
