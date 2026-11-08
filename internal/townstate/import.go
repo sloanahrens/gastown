@@ -245,9 +245,12 @@ func importFile(tr io.Reader, hdr *tar.Header, dest, name string, private bool, 
 	info, err := os.Lstat(dest)
 	switch {
 	case err == nil && !info.Mode().IsRegular():
-		// A merge never replaces one kind with another. Without MergeNewer the
-		// destination was refused before the archive was read.
 		return typeConflict(name, info)
+	case err == nil && !opts.MergeNewer:
+		// Import refuses an occupied root before it reads the archive, so this
+		// guard should never fire; it keeps a broken invariant a refusal
+		// rather than an overwrite.
+		return fmt.Errorf("the archive entry %q already exists in the destination; an import without --merge-newer writes into an empty root", name)
 	case err == nil && !hdr.ModTime.After(info.ModTime()):
 		s.KeptNewer++
 		return nil
