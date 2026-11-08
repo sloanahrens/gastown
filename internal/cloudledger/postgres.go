@@ -323,22 +323,64 @@ func postgresError(dsn string, err error) error {
 }
 
 // secretsOf returns the text of dsn a driver error could quote: the whole DSN,
-// and the password in each form a URL carries it, raw and percent-encoded. A
+// and the password in each form the DSN carries it. A URL carries it raw and
+// percent-encoded; a keyword-form DSN carries it as a value, quoted or not. A
 // password is redacted on its own so an error that names only it is caught.
 func secretsOf(dsn string) []string {
 	out := []string{dsn}
 	if dsn == "" {
 		return out
 	}
-	u, err := url.Parse(dsn)
-	if err != nil || u.User == nil {
-		return out
+	if u, err := url.Parse(dsn); err == nil && u.User != nil {
+		if pw, ok := u.User.Password(); ok && pw != "" {
+			out = append(out, pw, url.QueryEscape(pw), url.PathEscape(pw))
+		}
 	}
-	pw, ok := u.User.Password()
-	if !ok || pw == "" {
-		return out
+	return append(out, keywordPassword(dsn)...)
+}
+
+// keywordPassword returns the password of a keyword-form DSN ("host=h
+// password=p"), in the form the DSN wrote it and in the form it means. A value
+// with a space or a quote is single-quoted, and a backslash escapes inside the
+// quotes. Each step consumes one key and its value, so the loop ends.
+func keywordPassword(dsn string) []string {
+	var out []string
+	rest := dsn
+	for {
+		rest = strings.TrimLeft(rest, " \t\r\n")
+		eq := strings.IndexByte(rest, '=')
+		if eq < 0 {
+			return out
+		}
+		key := strings.TrimSpace(rest[:eq])
+		var raw, val string
+		raw, val, rest = keywordValue(strings.TrimLeft(rest[eq+1:], " \t\r\n"))
+		if key == "password" {
+			out = append(out, raw, val)
+		}
 	}
-	return append(out, pw, url.QueryEscape(pw), url.PathEscape(pw))
+}
+
+// keywordValue splits the value at the start of s from the text after it,
+// returning the value as written, the value it means, and the rest.
+func keywordValue(s string) (raw, val, rest string) {
+	if !strings.HasPrefix(s, "'") {
+		end := strings.IndexAny(s, " \t\r\n")
+		if end < 0 {
+			end = len(s)
+		}
+		return s[:end], s[:end], s[end:]
+	}
+	var b strings.Builder
+	i := 1
+	for ; i < len(s) && s[i] != '\''; i++ {
+		if s[i] == '\\' && i+1 < len(s) {
+			i++
+		}
+		b.WriteByte(s[i])
+	}
+	end := min(i+1, len(s))
+	return s[:end], b.String(), s[end:]
 }
 
 // redactedError reports err's text with every secret replaced, keeping the

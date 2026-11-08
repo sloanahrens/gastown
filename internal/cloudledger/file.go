@@ -107,20 +107,20 @@ func (f *FileSource) Heartbeat(context.Context) (time.Time, error) {
 	return t, nil
 }
 
-// ReleasesSince returns app's ledger lines later than since, oldest first.
+// ReleasesSince returns app's ledger lines later than since, oldest first. A
+// ledger over LedgerMaxBytes, or one that is not a regular file, is refused
+// before it is read.
 func (f *FileSource) ReleasesSince(_ context.Context, app string, since time.Time) ([]Release, error) {
 	path, err := f.ledgerPath(app)
 	if err != nil {
 		return nil, err
 	}
-	b, err := os.ReadFile(path)
+	b, err := readRegularFileWith(path, LedgerMaxBytes, ErrOversize, os.ReadFile)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, fmt.Errorf("%w: %s", ErrNoRelease, app)
 	case err != nil:
-		return nil, fmt.Errorf("%w: %v", ErrLedgerRead, err)
-	case int64(len(b)) > LedgerMaxBytes:
-		return nil, fmt.Errorf("%s: larger than %d bytes: %w", path, LedgerMaxBytes, ErrLedgerRead)
+		return nil, fmt.Errorf("%w: %w", ErrLedgerRead, err)
 	}
 	var out []Release
 	for _, line := range strings.Split(string(b), "\n") {

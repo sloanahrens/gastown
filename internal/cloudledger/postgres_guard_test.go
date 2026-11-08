@@ -111,6 +111,37 @@ func TestCloudLedgerRedactsAnEncodedPassword(t *testing.T) {
 	}
 }
 
+// A keyword-form DSN keeps its password as a value, quoted with a backslash
+// escape when it has a space or a quote. A driver error that quotes that
+// password, in the written form or the meaning, reaches the caller with
+// neither in it.
+func TestCloudLedgerRedactsAKeywordPassword(t *testing.T) {
+	t.Parallel()
+
+	const (
+		password = `p'ss w`
+		written  = `'p\'ss w'`
+	)
+	dsn := `host=fake user=reader password=` + written + ` dbname=ledger-keyword`
+	l := &ledgertest.Ledger{
+		QueryErr: fmt.Errorf("password authentication failed for %s (%s)", password, written),
+	}
+	_, path := ledgertest.RegisterDSN(t, l, dsn)
+
+	_, err := newPostgres(t, path).LatestPatrolReport(context.Background())
+	if err == nil {
+		t.Fatal("a failed query answered a report")
+	}
+	for _, secret := range []string{password, written, dsn} {
+		if strings.Contains(err.Error(), secret) {
+			t.Errorf("err = %q carries %q", err, secret)
+		}
+	}
+	if !strings.Contains(err.Error(), "<dsn>") {
+		t.Errorf("err = %q, want the redaction marker in place of the secret", err)
+	}
+}
+
 // A binary that does not link the driver fails the read with a named error,
 // before any database is opened.
 func TestCloudLedgerNamesAnUnlinkedDriver(t *testing.T) {

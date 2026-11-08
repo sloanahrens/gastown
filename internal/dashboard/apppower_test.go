@@ -18,6 +18,14 @@ var appNow = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 // directory out altogether.
 func appFixture(t *testing.T, markers, ledgers map[string]string) *AppPowerReader {
 	t.Helper()
+	r, _ := appFixtureDirs(t, markers, ledgers)
+	return r
+}
+
+// appFixtureDirs is appFixture that also returns the releases directory, for a
+// test that writes into it.
+func appFixtureDirs(t *testing.T, markers, ledgers map[string]string) (*AppPowerReader, string) {
+	t.Helper()
 	root := t.TempDir()
 	write := func(dirName, suffix string, files map[string]string) string {
 		dir := filepath.Join(root, dirName)
@@ -34,7 +42,8 @@ func appFixture(t *testing.T, markers, ledgers map[string]string) *AppPowerReade
 		}
 		return dir
 	}
-	return NewAppPowerReader(write("off", appOffSuffix, markers), write("releases", appLedgerSuffix, ledgers))
+	releases := write("releases", appLedgerSuffix, ledgers)
+	return NewAppPowerReader(write("off", appOffSuffix, markers), releases), releases
 }
 
 func appRow(t *testing.T, p *AppPower, app string) AppPowerRow {
@@ -251,12 +260,12 @@ func TestAppPowerUnreadableMarkerFileIsUnknown(t *testing.T) {
 func TestReadSkipsNonRegularMarkerWithoutBlocking(t *testing.T) {
 	t.Parallel()
 
-	r := appFixture(t, map[string]string{}, map[string]string{"y": "\n"})
+	r, releases := appFixtureDirs(t, map[string]string{}, map[string]string{"y": "\n"})
 	if err := syscall.Mkfifo(filepath.Join(r.offDir, "x.off"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// A FIFO in the ledgers directory is skipped the same way.
-	if err := syscall.Mkfifo(filepath.Join(filepath.Dir(r.offDir), "releases", "z.jsonl"), 0o644); err != nil {
+	if err := syscall.Mkfifo(filepath.Join(releases, "z.jsonl"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Without the fix the goroutine sits in open(2) on the FIFO; opening it

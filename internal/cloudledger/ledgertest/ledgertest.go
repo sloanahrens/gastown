@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -140,7 +141,25 @@ func (fakeDriver) Open(dsn string) (driver.Conn, error) {
 	return &fakeConn{l: l}, nil
 }
 
-func init() { sql.Register(cloudledger.PostgresDriver, fakeDriver{}) }
+// registerOnce registers the fake under cloudledger.PostgresDriver the first
+// time a test needs it. It is not done in init: a binary that links the real
+// driver registers the same name, and a second sql.Register panics at start.
+// taken records that the real driver got there first, so a test names the
+// clash instead of reading the real database.
+var (
+	registerOnce sync.Once
+	taken        bool
+)
+
+func registerFake() {
+	registerOnce.Do(func() {
+		if slices.Contains(sql.Drivers(), cloudledger.PostgresDriver) {
+			taken = true
+			return
+		}
+		sql.Register(cloudledger.PostgresDriver, fakeDriver{})
+	})
+}
 
 // dsnSeq numbers the registered DSNs, so two tests running together never
 // register over one another as registrations come and go.
@@ -157,6 +176,10 @@ func Register(t testing.TB, l *Ledger) (dsn, path string) {
 // it. A test that needs a particular password in the DSN passes it here.
 func RegisterDSN(t testing.TB, l *Ledger, dsn string) (string, string) {
 	t.Helper()
+	registerFake()
+	if taken {
+		t.Fatalf("ledgertest: database/sql driver %q is already registered by the real driver; this binary cannot run the fake ledger", cloudledger.PostgresDriver)
+	}
 	fakes.Lock()
 	fakes.byDSN[dsn] = l
 	fakes.Unlock()
