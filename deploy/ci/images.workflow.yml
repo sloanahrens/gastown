@@ -29,9 +29,11 @@ on:
     branches: ["green/**"]
 
 env:
-  # The Forgejo host, the registry owner and the two image names are typed here
-  # only; gt update images (gt-gg9hv.63) types the same values, so the two
-  # spellings are one to keep equal.
+  # The Forgejo host and the registry owner are this town's own: the operator
+  # sets them to the values the town's rig records in
+  # merge_queue.forgejo.remote_url, which gt update images (gt-gg9hv.63) reads
+  # instead of typing them. The two image names are internal/imagevalues'
+  # constants, which TestImagesWorkflowNamesTheSharedImageConstants holds equal.
   FORGEJO_HOST: forgejo:3000
   REGISTRY_OWNER: sloan
   DAEMON_IMAGE: gastown-daemon

@@ -667,20 +667,26 @@ func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 }
 
 // TestImagesWorkflowNamesTheSharedImageConstants holds the one-spelling rule:
-// the workflow's registry environment and internal/imagevalues, which gt update
-// images reads the registry by, name the same host, owner and images.
+// the workflow's image names are internal/imagevalues' constants, which gt
+// update images records. The Forgejo host and the registry owner are the
+// operator's per-town values: gt update images reads them from the town's own
+// Forgejo settings, so this test only holds the workflow's env to a value
+// being set.
 func TestImagesWorkflowNamesTheSharedImageConstants(t *testing.T) {
 	t.Parallel()
 	wf := loadWorkflow(t)
 	env := object(t, wf["env"], "env")
 	for _, want := range []struct{ key, value string }{
-		{"FORGEJO_HOST", imagevalues.RegistryHost},
-		{"REGISTRY_OWNER", imagevalues.RegistryOwner},
 		{"DAEMON_IMAGE", imagevalues.DaemonImage},
 		{"POLECAT_IMAGE", imagevalues.PolecatImage},
 	} {
 		if got := text(t, env[want.key], "env "+want.key); got != want.value {
 			t.Errorf("the workflow's %s is %q, but internal/imagevalues types %q", want.key, got, want.value)
+		}
+	}
+	for _, key := range []string{"FORGEJO_HOST", "REGISTRY_OWNER"} {
+		if got := text(t, env[key], "env "+key); got == "" {
+			t.Errorf("the workflow's %s is empty; the image builds need the town's own value", key)
 		}
 	}
 }

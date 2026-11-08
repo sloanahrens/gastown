@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
@@ -16,12 +18,77 @@ const (
 	testDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
 )
 
+// testRegistry is the registry the fixtures build refs in: a value no fork
+// names, since the command is what supplies a town's own.
+var testRegistry = imagevalues.Registry{Scheme: "https", Host: "registry.test:5000", Owner: "town"}
+
 // testValues is a valid pair at the fixture commit.
 func testValues() imagevalues.Values {
 	return imagevalues.Values{
-		Daemon:  imagevalues.Ref(imagevalues.DaemonImage, testDigest),
-		Polecat: imagevalues.Ref(imagevalues.PolecatImage, testDigest),
+		Daemon:  testRegistry.Ref(imagevalues.DaemonImage, testDigest),
+		Polecat: testRegistry.Ref(imagevalues.PolecatImage, testDigest),
 		Commit:  testCommit,
+	}
+}
+
+// workflowEnv reads the images workflow's env block: the operator's one
+// spelling of the town's Forgejo host and owner and the two image names
+// (deploy/ci/images.workflow.yml).
+func workflowEnv(t *testing.T) map[string]string {
+	t.Helper()
+	const path = "../../deploy/ci/images.workflow.yml"
+	raw, err := os.ReadFile(filepath.FromSlash(path))
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var doc struct {
+		Env map[string]string `yaml:"env"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("%s is not valid YAML: %v", path, err)
+	}
+	return doc.Env
+}
+
+// TestImageValuesHoldsNoForkLocalNames holds the passed-in rule: the registry
+// host and owner are the command's to read from the town, so this package may
+// not repeat the fork's own values. A constant that named either would make
+// the shared package wrong for the next town (gt-gg9hv.63).
+func TestImageValuesHoldsNoForkLocalNames(t *testing.T) {
+	t.Parallel()
+	env := workflowEnv(t)
+	forkNames := map[string]string{
+		"FORGEJO_HOST":   env["FORGEJO_HOST"],
+		"REGISTRY_OWNER": env["REGISTRY_OWNER"],
+	}
+	for key, name := range forkNames {
+		if name == "" {
+			t.Fatalf("the workflow names no %s, so this test cannot tell a fork-local value from an empty one", key)
+		}
+	}
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading the package directory: %v", err)
+	}
+	scanned := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		scanned++
+		for key, forkName := range forkNames {
+			if strings.Contains(string(data), forkName) {
+				t.Errorf("%s holds the fork's %s %q; the command reads it from the town and passes it in", name, key, forkName)
+			}
+		}
+	}
+	if scanned == 0 {
+		t.Fatal("no package source was scanned, so this test proves nothing")
 	}
 }
 
@@ -123,6 +190,42 @@ func TestImageValuesLoadKeepsAMissingFileDistinct(t *testing.T) {
 	t.Parallel()
 	if _, err := imagevalues.Load(filepath.Join(t.TempDir(), "absent.yaml")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Load of a missing file = %v, want fs.ErrNotExist", err)
+	}
+}
+
+// TestImageValuesRegistryRefusesAPartThatWouldNotReachAValue holds the
+// registry's refusals: a scheme, host or owner that a URL path or a values
+// line could not carry as typed is named rather than passed to a request.
+func TestImageValuesRegistryRefusesAPartThatWouldNotReachAValue(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name string
+		reg  imagevalues.Registry
+		want string
+	}{
+		{"no scheme", imagevalues.Registry{Host: "registry.test", Owner: "town"}, "scheme"},
+		{"another scheme", imagevalues.Registry{Scheme: "ssh", Host: "registry.test", Owner: "town"}, "scheme"},
+		{"a host with a path", imagevalues.Registry{Scheme: "https", Host: "registry.test/v2", Owner: "town"}, "host"},
+		{"an uppercase host", imagevalues.Registry{Scheme: "https", Host: "Registry.test", Owner: "town"}, "host"},
+		{"a bracketed IPv6 address with a port", imagevalues.Registry{Scheme: "https", Host: "[::1]:5000", Owner: "town"}, ""},
+		{"no owner", imagevalues.Registry{Scheme: "https", Host: "registry.test", Owner: ""}, "owner"},
+		{"an owner with a path", imagevalues.Registry{Scheme: "https", Host: "registry.test", Owner: "a/b"}, "owner"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			err := row.reg.Validate()
+			switch {
+			case row.want == "":
+				if err != nil {
+					t.Fatalf("Validate = %v, want the registry accepted", err)
+				}
+			case err == nil:
+				t.Fatalf("Validate = nil, want a refusal naming %q", row.want)
+			case !strings.Contains(err.Error(), row.want):
+				t.Errorf("Validate = %q, want it to name %q", err, row.want)
+			}
+		})
 	}
 }
 

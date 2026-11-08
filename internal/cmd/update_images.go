@@ -2,12 +2,16 @@ package cmd
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,7 +19,11 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 const (
@@ -38,21 +46,26 @@ const (
 	updateImagesTimeout = 30 * time.Second
 )
 
-// updateImagesSeams are the subcommand's dependencies: the registry's address,
+// updateImagesSeams are the subcommand's dependencies: the town's registry,
 // the viewer credential, the HTTP client and the values-file write. A test
-// supplies a fake registry and a counting write, so no test reaches the host.
+// supplies a fixed registry and a fake HTTP client, so no test reaches the
+// host.
 type updateImagesSeams struct {
-	RegistryBase string
-	Credentials  func() (user, token string, err error)
-	HTTPClient   *http.Client
-	WriteValues  func(path string, v imagevalues.Values) error
+	// FindTownRoot finds the town whose Forgejo serves the registry.
+	FindTownRoot func() (string, error)
+	// Registry resolves where the town publishes its images.
+	Registry    func(townRoot string) (imagevalues.Registry, error)
+	Credentials func() (user, token string, err error)
+	HTTPClient  *http.Client
+	WriteValues func(path string, v imagevalues.Values) error
 }
 
-// productionUpdateImagesSeams wires the real registry, viewer credential and
-// values writer.
+// productionUpdateImagesSeams wires the real town, registry, viewer credential
+// and values writer.
 func productionUpdateImagesSeams() updateImagesSeams {
 	return updateImagesSeams{
-		RegistryBase: imagevalues.RegistryBase,
+		FindTownRoot: workspace.FindFromCwdOrError,
+		Registry:     townImageRegistry,
 		Credentials:  viewerCredentialReader(forgejo.TokenPath),
 		HTTPClient:   &http.Client{Timeout: updateImagesTimeout},
 		WriteValues:  imagevalues.Write,
@@ -72,6 +85,64 @@ func viewerCredentialReader(tokenPath func(role string) (string, error)) func() 
 	}
 }
 
+// townImageRegistry resolves the registry the town's images live in: the
+// Forgejo host and owner of the first rig patrols.tier_sweep.image_rigs names,
+// the rigs whose fully green sweep publishes a green ref for the image build
+// (gt-gg9hv.61). It reads the rig's Forgejo the way the rest of the town does
+// (rig.ResolveForgejoConfig), so a fork's host and owner stay in its own config
+// and this package types neither.
+func townImageRegistry(townRoot string) (imagevalues.Registry, error) {
+	patrol, err := loadUpdatePatrolConfig(townRoot)
+	if err != nil {
+		return imagevalues.Registry{}, fmt.Errorf("reading the daemon settings: %w", err)
+	}
+	known, err := knownRigNames(townRoot)
+	if err != nil {
+		return imagevalues.Registry{}, err
+	}
+	var sweep *config.TierSweepConfig
+	if patrol != nil && patrol.Patrols != nil {
+		sweep = patrol.Patrols.TierSweep
+	}
+	rigs, err := sweep.TierSweepImageRigs(known)
+	if err != nil {
+		return imagevalues.Registry{}, err
+	}
+	if len(rigs) == 0 {
+		return imagevalues.Registry{}, errors.New("the town names no rig to build images in: set patrols.tier_sweep.image_rigs to the rigs whose green sweep publishes a green ref for the image build")
+	}
+	rigName := rigs[0]
+	fc, err := rig.ResolveForgejoConfigWithError(updateImagesRepoFile, townRoot, rigName)
+	if err != nil {
+		return imagevalues.Registry{}, fmt.Errorf("reading rig %s's Forgejo settings: %w", rigName, err)
+	}
+	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
+		return imagevalues.Registry{}, fmt.Errorf("rig %s names no merge_queue.forgejo.remote_url, so the town has no Forgejo registry to read images from", rigName)
+	}
+	remote := strings.TrimSpace(fc.RemoteURL)
+	u, err := url.Parse(remote)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return imagevalues.Registry{}, fmt.Errorf("rig %s's merge_queue.forgejo.remote_url is not a URL with a scheme and host, so there is no registry to read", rigName)
+	}
+	owner, _, err := land.RepoFromRemoteURL(remote)
+	if err != nil {
+		// The remote URL can carry a credential in its user info, so the
+		// helper's text, which repeats it, stays out of this error (gt-atcddq).
+		// A URL that reached here and names no repository is one.
+		return imagevalues.Registry{}, fmt.Errorf("rig %s's merge_queue.forgejo.remote_url names no owner and repository, so there is no registry to read", rigName)
+	}
+	registry := imagevalues.Registry{Scheme: u.Scheme, Host: u.Host, Owner: owner}
+	if err := registry.Validate(); err != nil {
+		return imagevalues.Registry{}, err
+	}
+	return registry, nil
+}
+
+// updateImagesRepoFile opens a rig's repository to read its repo-committed
+// settings tier: production git, which a test's fixture town never reaches
+// because a rig with no .repo.git has no tier there to read.
+func updateImagesRepoFile(path string) rig.RepoFileReader { return git.NewGit(path) }
+
 // newUpdateImagesCmd builds `gt update images` over seams.
 func newUpdateImagesCmd(seams updateImagesSeams) *cobra.Command {
 	var sha, out string
@@ -80,11 +151,18 @@ func newUpdateImagesCmd(seams updateImagesSeams) *cobra.Command {
 		Short: "Record the daemon and polecat image digests for one green commit",
 		Long: `Record the daemon and polecat image digests for one green commit.
 
-The command reads the registry's manifest and config blob for both images at
-the tag <sha12> and writes them as a values file. It refuses a pair that does
-not belong together: a missing tag, a registry error, a digest that is not
+The command reads the town's Forgejo registry for both images at the tag
+<sha12> and writes them as a values file. It refuses a pair that does not
+belong together: a missing tag, a registry error, a digest that is not
 sha256:<64 lowercase hex>, or commit labels that differ from each other or from
---sha. A refusal writes no values file.
+--sha. Each digest is the hash of the bytes the registry served, and each label
+is read from the config blob those bytes describe. A refusal writes no values
+file.
+
+The viewer credential goes over https. It goes over http only to a loopback
+address or the town's own Forgejo, which has no https endpoint inside the town
+network; a read from any other host over http is refused before a request is
+made.
 
 A second run for the same commit with the same digests changes nothing. A
 recorded commit whose tag now answers another digest is refused, because an
@@ -112,15 +190,28 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 	if err := validateUpdateImagesSeams(seams); err != nil {
 		return err
 	}
+	townRoot, err := seams.FindTownRoot()
+	if err != nil {
+		return fmt.Errorf("gt update images: finding the town root: %w", err)
+	}
+	registry, err := seams.Registry(townRoot)
+	if err != nil {
+		return fmt.Errorf("gt update images: %w", err)
+	}
+	if err := registry.Validate(); err != nil {
+		return fmt.Errorf("gt update images: %w", err)
+	}
 	user, token, err := seams.Credentials()
 	if err != nil {
 		return fmt.Errorf("gt update images: reading the viewer credential: %w", err)
 	}
 	reader := registryReader{
-		base:  seams.RegistryBase,
-		http:  seams.HTTPClient,
-		user:  user,
-		token: token,
+		base:          registry.BaseURL(),
+		registry:      registry,
+		plaintextHost: plaintextHostOf(registry),
+		http:          seams.HTTPClient,
+		user:          user,
+		token:         token,
 	}
 	tag := sha[:updateImagesTagLength]
 	daemon, err := reader.image(cmd.Context(), "daemon", imagevalues.DaemonImage, tag)
@@ -139,11 +230,34 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 		return fmt.Errorf("gt update images: the daemon image %s carries commit %q, not the requested %s", daemon.Repo, daemon.Commit, sha)
 	}
 	next := imagevalues.Values{
-		Daemon:  imagevalues.Ref(imagevalues.DaemonImage, daemon.Digest),
-		Polecat: imagevalues.Ref(imagevalues.PolecatImage, polecat.Digest),
+		Daemon:  registry.Ref(imagevalues.DaemonImage, daemon.Digest),
+		Polecat: registry.Ref(imagevalues.PolecatImage, polecat.Digest),
 		Commit:  sha,
 	}
 	return writeUpdateImagesValues(cmd, seams, out, next)
+}
+
+// plaintextHostOf is the one non-loopback host the viewer credential may reach
+// over http: the town's own Forgejo, when the town reaches it in plaintext
+// because it has no https endpoint inside the town network. Only a service
+// name has none; a dotted host is a public name, where https exists, so it is
+// never allowed in plaintext.
+func plaintextHostOf(r imagevalues.Registry) string {
+	if r.Scheme == "http" && isPlaintextServiceHost(r.Host) {
+		return r.Host
+	}
+	return ""
+}
+
+// isPlaintextServiceHost reports whether host names a service inside the town
+// network: a dotted host is a public name, and a public name has an https
+// endpoint.
+func isPlaintextServiceHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.Trim(host, "[]")
+	return host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":")
 }
 
 // refuseToReplaceARecordedPair answers nil when the file is absent or records
@@ -192,7 +306,9 @@ func writeUpdateImagesValues(cmd *cobra.Command, seams updateImagesSeams, path s
 // never made.
 func validateUpdateImagesSeams(s updateImagesSeams) error {
 	switch {
-	case s.RegistryBase == "":
+	case s.FindTownRoot == nil:
+		return errors.New("gt update images: no town lookup is wired")
+	case s.Registry == nil:
 		return errors.New("gt update images: no registry is wired")
 	case s.Credentials == nil:
 		return errors.New("gt update images: no credential reader is wired")
@@ -213,10 +329,14 @@ type imageRead struct {
 
 // registryReader reads manifests and config blobs from the registry's v2 API.
 type registryReader struct {
-	base  string
-	http  *http.Client
-	user  string
-	token string
+	base     string
+	registry imagevalues.Registry
+	// plaintextHost is the one non-loopback host the credential may reach over
+	// http; empty means https only.
+	plaintextHost string
+	http          *http.Client
+	user          string
+	token         string
 }
 
 // registryManifest is the part of a manifest body the reader reads. It holds
@@ -250,12 +370,14 @@ type registryConfig struct {
 var errRegistryNotFound = errors.New("the registry answered HTTP 404")
 
 // image reads name's digest and commit label at tag, naming the image in every
-// refusal.
+// refusal. Both digests are checked against the bytes they describe, so a
+// registry that answers something other than the pinned content is refused
+// rather than recorded.
 func (r registryReader) image(ctx context.Context, kind, name, tag string) (imageRead, error) {
-	repo := imagevalues.Repo(name)
-	manifestURL := strings.TrimRight(r.base, "/") + "/v2/" + imagevalues.RegistryOwner + "/" + name + "/manifests/" + tag
+	repo := r.registry.Repo(name)
+	manifestURL := r.endpoint("/v2/" + r.registry.Owner + "/" + name + "/manifests/" + tag)
 	var manifest registryManifest
-	header, err := r.getJSON(ctx, manifestURL, updateImagesMaxManifest, &manifest)
+	header, manifestBody, err := r.getJSON(ctx, manifestURL, updateImagesMaxManifest, &manifest)
 	if errors.Is(err, errRegistryNotFound) {
 		return imageRead{}, fmt.Errorf("the %s image %s has no tag %s in the registry", kind, repo, tag)
 	}
@@ -266,16 +388,23 @@ func (r registryReader) image(ctx context.Context, kind, name, tag string) (imag
 	if !imagevalues.ValidDigest(digest) {
 		return imageRead{}, fmt.Errorf("the %s image %s answered digest %q, not sha256:<64 lowercase hex>", kind, repo, digest)
 	}
+	if got := sha256Digest(manifestBody); got != digest {
+		return imageRead{}, fmt.Errorf("the %s image %s answered digest %s, but its manifest bytes hash to %s", kind, repo, digest, got)
+	}
 	if manifest.isIndex() {
 		return imageRead{}, fmt.Errorf("the %s image %s at tag %s is an index, not an image", kind, repo, tag)
 	}
 	if !imagevalues.ValidDigest(manifest.Config.Digest) {
 		return imageRead{}, fmt.Errorf("the %s image %s names config digest %q, not sha256:<64 lowercase hex>", kind, repo, manifest.Config.Digest)
 	}
-	configURL := strings.TrimRight(r.base, "/") + "/v2/" + imagevalues.RegistryOwner + "/" + name + "/blobs/" + manifest.Config.Digest
+	configURL := r.endpoint("/v2/" + r.registry.Owner + "/" + name + "/blobs/" + manifest.Config.Digest)
 	var config registryConfig
-	if _, err := r.getJSON(ctx, configURL, updateImagesMaxConfig, &config); err != nil {
+	_, configBody, err := r.getJSON(ctx, configURL, updateImagesMaxConfig, &config)
+	if err != nil {
 		return imageRead{}, fmt.Errorf("reading the %s image %s config: %w", kind, repo, err)
+	}
+	if got := sha256Digest(configBody); got != manifest.Config.Digest {
+		return imageRead{}, fmt.Errorf("the %s image %s names config digest %s, but its config bytes hash to %s", kind, repo, manifest.Config.Digest, got)
 	}
 	return imageRead{
 		Repo:   repo,
@@ -284,37 +413,106 @@ func (r registryReader) image(ctx context.Context, kind, name, tag string) (imag
 	}, nil
 }
 
+// endpoint is one v2 API path under the reader's base URL.
+func (r registryReader) endpoint(path string) string {
+	return strings.TrimRight(r.base, "/") + path
+}
+
+// sha256Digest is the digest of body, the form a registry reports.
+func sha256Digest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
 // getJSON sends one GET with the viewer's basic credential and decodes a JSON
-// body into out, bounded by updateImagesTimeout and limit bytes.
-func (r registryReader) getJSON(ctx context.Context, rawURL string, limit int64, out any) (http.Header, error) {
+// body into out, bounded by updateImagesTimeout and limit bytes. It returns the
+// response header and the raw body, because the caller hashes the body to check
+// the digest the registry reported against it.
+func (r registryReader) getJSON(ctx context.Context, rawURL string, limit int64, out any) (http.Header, []byte, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("the registry URL %q is not a URL: %w", rawURL, err)
+	}
+	if err := checkCredentialTransport(u, r.plaintextHost); err != nil {
+		return nil, nil, err
+	}
 	ctx, cancel := context.WithTimeout(ctx, updateImagesTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Accept", updateImagesAccept)
 	req.SetBasicAuth(r.user, r.token)
-	resp, err := r.http.Do(req)
+	resp, err := r.client().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, errRegistryNotFound
+		return nil, nil, errRegistryNotFound
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
-		return nil, fmt.Errorf("the registry answered HTTP %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("the registry answered HTTP %d", resp.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, fmt.Errorf("reading the registry's answer: %w", err)
+		return nil, nil, fmt.Errorf("reading the registry's answer: %w", err)
 	}
 	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("the registry's answer is larger than %d bytes", limit)
+		return nil, nil, fmt.Errorf("the registry's answer is larger than %d bytes", limit)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
-		return nil, fmt.Errorf("the registry's answer does not parse: %w", err)
+		return nil, nil, fmt.Errorf("the registry's answer does not parse: %w", err)
 	}
-	return resp.Header, nil
+	return resp.Header, body, nil
+}
+
+// client is the wired client with the redirect rule: a redirect that changes
+// the scheme or the host is refused, so the credential attached to the first
+// request never follows a Location to another endpoint.
+func (r registryReader) client() *http.Client {
+	c := *r.http
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) == 0 {
+			return nil
+		}
+		prev := via[len(via)-1].URL
+		if req.URL.Scheme != prev.Scheme || req.URL.Host != prev.Host {
+			return fmt.Errorf("the registry redirected from %s://%s to %s://%s; a redirect that changes the scheme or the host is refused, so the credential stays with the registry",
+				prev.Scheme, prev.Host, req.URL.Scheme, req.URL.Host)
+		}
+		return nil
+	}
+	return &c
+}
+
+// checkCredentialTransport refuses an http URL whose host is neither a loopback
+// address nor the town's own Forgejo service, because the viewer credential
+// would otherwise cross a network in clear text to whoever answers there.
+func checkCredentialTransport(u *url.URL, plaintextHost string) error {
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Host) || (plaintextHost != "" && u.Host == plaintextHost) {
+			return nil
+		}
+		return fmt.Errorf("refusing to send the registry credential over http to %s: http is allowed only to a loopback address or the town's own Forgejo service, every other registry is read over https", u.Host)
+	default:
+		return fmt.Errorf("the registry URL scheme %q is not http or https", u.Scheme)
+	}
+}
+
+// isLoopbackHost reports whether host, with an optional port, is a loopback
+// address this host answers on.
+func isLoopbackHost(host string) bool {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	switch strings.Trim(host, "[]") {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	return false
 }
