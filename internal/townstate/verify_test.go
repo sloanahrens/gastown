@@ -311,10 +311,10 @@ func TestVerifyReportsAnUnclassifiedDirectoryOnce(t *testing.T) {
 var rigSubsystemRigs = []string{"gastown", "beads"}
 
 // rigSubsystemTown is a town whose registry names two rigs, each holding the
-// rig-level paths the manifest classes: the beads workspace, plugins, settings,
-// directives, harness scripts and manifest, and a name-pool state file under
-// .runtime. One rig also holds a file under .runtime that no row names, so the
-// walk still reports a new writer there once.
+// rig-level paths the manifest gives an owner: the beads workspace, plugins,
+// settings, directives, harness scripts and manifest, and a name-pool state
+// file under .runtime. One rig also holds a file under .runtime that no row
+// names, so the walk still reports a new writer there once.
 func rigSubsystemTown() fstest.MapFS {
 	town := fstest.MapFS{
 		"mayor/town.json": {Data: []byte(`{"registry":{"version":1,"rigs":{"gastown":{"git_url":"file:///srv/gastown"},"beads":{"git_url":"file:///srv/beads"}}}}`)},
