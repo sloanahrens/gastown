@@ -135,10 +135,27 @@ are the procedure it ran. Nothing here touches the live server on port 3307.
    ```
 
 5. Run `bd` only inside a container that mounts nothing but a scratch metadata
-   file (modelled on `.beads/metadata.json`) and the copy. A scratch metadata
-   file on the host does not isolate a `bd` run: `bd` on the host still reads
-   the live store. Print `bd show` for five beads before the flatten and after
-   it, and compare the bytes; the rehearsal's five matched. Then read
+   file, and joins the copy's network namespace so `bd` reaches the copy's
+   server. Step 2 publishes that server on 127.0.0.1 of the host, and a
+   container on the default bridge cannot reach that loopback port, so do not
+   point `bd` at the host's address. `--network container:gt-rehearsal` puts
+   `bd` in the copy's namespace, where the server listens on 3306. Write the
+   metadata file (modelled on `.beads/metadata.json`) with the fields `bd`
+   reads to find a server-mode store:
+
+   ```bash
+   mkdir -p "$SCRATCH/beads"
+   printf '%s\n' '{"backend": "dolt", "dolt_mode": "server", "dolt_database": "gt", "dolt_server_host": "127.0.0.1", "dolt_server_port": 3306}' > "$SCRATCH/beads/metadata.json"
+   docker run --rm --network container:gt-rehearsal \
+     -v "$SCRATCH/beads/metadata.json:/work/.beads/metadata.json:ro" -w /work \
+     <image with bd> bd show <id>
+   ```
+
+   `<image with bd>` is any image that carries the `bd` binary, such as the
+   daemon's image. A scratch metadata file on the host does not isolate a `bd`
+   run: `bd` on the host still reads the live store. Print `bd show` for five
+   beads before the flatten and after it, and compare the bytes; the
+   rehearsal's five matched. Then read
    `bd history <id>`: the 2026-11-06 rehearsal went from 33,009 entries (3.7 MB
    of output) to one.
 
@@ -235,13 +252,12 @@ SELECT COUNT(*) FROM dolt_log;                                   -- after: 2, no
 ```
 
 The flatten does not shrink the database. The commits go, but the space they
-held stays on disk until a full GC. The 2026-11-06 rehearsal on gt measured it
-(see "Rehearse on a copy first"): 1,664 MB before the flatten, 1,668 MB after,
-and 363 MB after `CALL dolt_gc('--full')`. The space comes back only at that
-next full GC, and the figures are that rehearsal's, not a promise. The full GC
-is the `scheduled_maintenance` window's (weekly, or when old-gen grew more than
-20%; see "The GC actor"). Run one by hand only under the pause from "The GC
-actor": `gt dolt pause --reason "manual gc" --until 30m`, then
+held stays on disk until a full GC. The rehearsal on a copy measured this (see
+"Rehearse on a copy first", step 4, for the sizes). The space comes back only
+at that next full GC. The full GC is the `scheduled_maintenance` window's
+(weekly, or when old-gen grew more than 20%; see "The GC actor"). Run one by
+hand only under the pause from "The GC actor": `gt dolt pause --reason "manual
+gc" --until 30m`, then
 `gt dolt unpause` after it.
 
 After the flatten `dolt_log` holds 2 commits, not 1: the original root and the
