@@ -303,3 +303,7 @@ container_suite	polecat	"export GT_TEST_DOCKER=1; make x && cd internal/style; g
 # --- a comment ending in a backslash before a CR LF: bash ends the comment at the LF, the parser does not (gt-s9ogqg) ---
 dangerous	polecat	"bash -c 'git reset --hard' # n \\\r\nls"	refuse	comment ending in a backslash before a CR LF line end	gt-s9ogqg
 container_suite	polecat	"GT_TEST_DOCKER=1 echo 'go test ./internal/beads/...' | sh # n \\\r\nls"	refuse	comment ending in a backslash before a CR LF line end	gt-s9ogqg
+# --- the three shapes the CR LF backslash branch must tell apart (gt-q0jecy) ---
+dangerous	polecat	"echo a # n\r\nls"	allow		gt-q0jecy
+dangerous	polecat	"bash -c 'git reset --hard' #\\\r\nls"	refuse	comment ending in a backslash before a CR LF line end	gt-q0jecy
+dangerous	polecat	"echo a # n \\\r"	allow		gt-q0jecy
