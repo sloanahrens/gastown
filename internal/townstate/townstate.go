@@ -88,14 +88,30 @@ func Default() *Manifest {
 		{Path: ".runtime/locks", Owner: OwnerDaemon, Why: "town lock files the daemon takes"},
 		{Path: ".runtime/container", Owner: OwnerDaemon, Why: "the container's kubeconfig and state the daemon writes"},
 		{Path: ".runtime/daemon-image", Owner: OwnerDaemon, Why: "the daemon image build record"},
+		{Path: ".runtime/reports", Owner: OwnerDaemon, Why: "the published bird reports gt report publish writes, one directory per bird (gt-yjzepk.3)"},
 
 		// Session-owned trees.
 		{Path: "<rig>/crew", Owner: OwnerSession, Why: "each crew worker's persistent workspace"},
 		{Path: "<rig>/polecats", Owner: OwnerSession, Why: "each polecat's worktree"},
 		{Path: "<rig>/witness", Owner: OwnerSession, Why: "the witness session's own tree"},
 		{Path: "<rig>/refinery", Owner: OwnerSession, Why: "the refinery session's own tree"},
-		{Path: ".runtime/<bird>", Owner: OwnerSession, Why: "each bird session's own directory; its reports subtree is published by gt report publish (gt-yjzepk.3)"},
+		{Path: ".runtime/<bird>", Owner: OwnerSession, Why: "each bird session's own directory; gt report publish writes its daily report under .runtime/reports instead (gt-yjzepk.3)"},
 	}}
+}
+
+// DaemonRuntimeNames returns the names of the daemon-owned directories
+// directly under .runtime — jev, landings, usage, agents and the rest — sorted.
+// A bird's published name may not equal one: the split under .runtime is read
+// by name, so a session directory carrying a daemon name would be owned by two
+// (gt-yjzepk.3).
+func (m *Manifest) DaemonRuntimeNames() []string {
+	names := daemonSubsystemNames(m.Entries)
+	out := make([]string, 0, len(names))
+	for name := range names {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // Parse reads a manifest from its YAML mirror and refuses any row that cannot

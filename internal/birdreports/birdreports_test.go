@@ -239,7 +239,7 @@ func TestReadNamesAPathItCannotRead(t *testing.T) {
 	if got.Status != Unreadable {
 		t.Fatalf("status = %q (%s), want unreadable: a runtime path that is a file says nothing about the report", got.Status, got.Note)
 	}
-	if want := "reporter directory could not be read"; got.Note != want {
+	if want := "published reports directory could not be read"; got.Note != want {
 		t.Errorf("note = %q, want %q", got.Note, want)
 	}
 }
@@ -270,6 +270,89 @@ func TestReadAllNamesTheLateReportersInOrder(t *testing.T) {
 			t.Errorf("%s due = %v", got[i].Reporter, got[i].Due())
 		}
 	}
+}
+
+// writePublishedSidecar writes body at root/reports/<reporter>/daily.json, the
+// location gt report publish writes.
+func writePublishedSidecar(t *testing.T, root, reporter, body string) {
+	t.Helper()
+	dir := PublishedReportDir(root, reporter)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("making %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, SidecarName), []byte(body), 0o644); err != nil {
+		t.Fatalf("writing the published sidecar: %v", err)
+	}
+}
+
+// TestReadsBothLocations covers the two layouts a town holds while its birds
+// switch to gt report publish: the published sidecar wins, the old one is read
+// when it is the only one, and a location that holds no sidecar falls through
+// rather than being read as absent.
+func TestReadsBothLocations(t *testing.T) {
+	t.Parallel()
+	const reporter = "dunlin"
+	sidecar := func(age time.Duration) string {
+		return fmt.Sprintf(`{"bird":%q,"written_at":%q,"title":"t","summary":"s"}`,
+			reporter, testNow.Add(-age).Format(time.RFC3339))
+	}
+
+	t.Run("the published location wins when both hold a report", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeSidecar(t, root, reporter, sidecar(30*time.Hour))
+		writePublishedSidecar(t, root, reporter, sidecar(time.Hour))
+
+		got := Read(root, reporter, testNow, MaxAge)
+		if got.Status != Fresh || got.Age != time.Hour {
+			t.Fatalf("Read = %q aged %v, want the published report fresh an hour old", got.Status, got.Age)
+		}
+	})
+
+	t.Run("the old location is read when it is the only one", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeSidecar(t, root, reporter, sidecar(30*time.Hour))
+
+		got := Read(root, reporter, testNow, MaxAge)
+		if got.Status != Stale || got.Age != 30*time.Hour {
+			t.Fatalf("Read = %q aged %v, want the old report stale thirty hours old", got.Status, got.Age)
+		}
+	})
+
+	t.Run("a published directory with no sidecar falls through to the old one", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if err := os.MkdirAll(PublishedReportDir(root, reporter), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeSidecar(t, root, reporter, sidecar(time.Hour))
+
+		got := Read(root, reporter, testNow, MaxAge)
+		if got.Status != Fresh {
+			t.Fatalf("Read = %q (%s), want the old location's fresh report", got.Status, got.Note)
+		}
+	})
+
+	t.Run("a report in neither location is missing", func(t *testing.T) {
+		t.Parallel()
+		got := Read(t.TempDir(), reporter, testNow, MaxAge)
+		if got.Status != Missing || got.Note != "no "+SidecarName {
+			t.Fatalf("Read = %q (%s), want missing", got.Status, got.Note)
+		}
+	})
+
+	t.Run("an unreadable published sidecar is not replaced by the old one", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeSidecar(t, root, reporter, sidecar(time.Hour))
+		writePublishedSidecar(t, root, reporter, "{")
+
+		got := Read(root, reporter, testNow, MaxAge)
+		if got.Status != Unreadable {
+			t.Fatalf("Read = %q, want unreadable: a published sidecar the reader refuses is not absent", got.Status)
+		}
+	})
 }
 
 func TestEmbeddedRequestIsTheDocsCopy(t *testing.T) {

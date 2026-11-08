@@ -1,11 +1,14 @@
 // Package birdreports reads the birds' daily reports under a town's runtime
 // directory and says which are due.
 //
-// A bird writes <runtimeDir>/<bird>/reports/daily.json, the sidecar the
-// dashboard's Birds panel reads (internal/dashboard/birdreports.go). `gt birds
-// due` reads them here; the daemon's bird_reports patrol
-// (internal/daemon/bird_reports.go) reads the same files with its own reader,
-// so the two can judge one sidecar differently: the patrol reads no `bird`
+// A bird publishes <runtimeDir>/reports/<bird>/daily.json with `gt report
+// publish`, the daemon-owned location for its report. Read falls back to
+// <runtimeDir>/<bird>/reports/daily.json, where the birds wrote before the
+// command existed, so a town is readable while its birds switch. `gt birds due`
+// reads them here. The daemon's bird_reports patrol
+// (internal/daemon/bird_reports.go) and the dashboard's Birds panel
+// (internal/dashboard/birdreports.go) read the old path with their own readers;
+// the patrol's reader can judge one sidecar differently — it reads no `bird`
 // field, applies no size cap, and calls any future written_at late, where Read
 // forgives one within FutureSlack.
 package birdreports
@@ -23,9 +26,15 @@ import (
 )
 
 const (
-	// ReportsSubdir and SidecarName are where a bird writes its report.
+	// ReportsSubdir and SidecarName are where a bird wrote its report before
+	// gt report publish: <runtimeDir>/<bird>/reports/daily.json.
 	ReportsSubdir = "reports"
 	SidecarName   = "daily.json"
+
+	// PublishedDirName is the daemon-owned directory, directly under the
+	// runtime directory, that gt report publish writes:
+	// <runtimeDir>/reports/<bird>/daily.html and daily.json.
+	PublishedDirName = "reports"
 
 	// SidecarMaxBytes refuses a larger daily.json before it is read: a sidecar
 	// is a short summary, and anything bigger is not one.
@@ -105,27 +114,88 @@ var (
 	oversizeNote  = fmt.Sprintf("%s is larger than %d KiB", SidecarName, SidecarMaxBytes>>10)
 )
 
-// Read returns the reporter's daily report as it stands at now. maxAge is the
-// age past which a report is stale; a report exactly maxAge old is fresh.
-//
-// It follows no symlink below the reporter name: the reporter directory, its
-// reports directory and the sidecar must each be the thing they name, as the
-// dashboard's reader also requires, so a link cannot put another path's report
-// in this reporter's place.
-func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Report {
-	report := Report{Reporter: reporter}
-	if !reporterNameRe.MatchString(reporter) {
-		report.Status, report.Note = Unreadable, "not a reporter name"
-		return report
+// PublishedReportDir returns the directory a published report lives in,
+// <runtimeDir>/reports/<reporter>, holding daily.html and its sidecar.
+func PublishedReportDir(runtimeDir, reporter string) string {
+	return filepath.Join(runtimeDir, PublishedDirName, reporter)
+}
+
+// legacyReportDir returns the directory a bird wrote before gt report publish,
+// <runtimeDir>/<reporter>/reports.
+func legacyReportDir(runtimeDir, reporter string) string {
+	return filepath.Join(runtimeDir, reporter, ReportsSubdir)
+}
+
+// dirCheck is one directory on the way to a sidecar, and the words Read uses
+// when it is not the directory it should be.
+type dirCheck struct {
+	path  string
+	label string
+}
+
+// reportLocation is one layout a report may be in: the directories Read
+// checks, then the sidecar below them.
+type reportLocation struct {
+	dirs    []dirCheck
+	sidecar string
+}
+
+// reportLocations lists where a reporter's report may be, in the order Read
+// tries them: the location gt report publish writes, then the reporter's own
+// tree, which the birds wrote before the command existed.
+func reportLocations(runtimeDir, reporter string) []reportLocation {
+	published := PublishedReportDir(runtimeDir, reporter)
+	legacy := legacyReportDir(runtimeDir, reporter)
+	return []reportLocation{
+		{
+			dirs: []dirCheck{
+				{filepath.Join(runtimeDir, PublishedDirName), "published reports directory"},
+				{published, "reporter directory"},
+			},
+			sidecar: filepath.Join(published, SidecarName),
+		},
+		{
+			dirs: []dirCheck{
+				{filepath.Join(runtimeDir, reporter), "reporter directory"},
+				{legacy, "reports directory"},
+			},
+			sidecar: filepath.Join(legacy, SidecarName),
+		},
 	}
+}
+
+// Read returns the reporter's daily report as it stands at now. maxAge is the
+// age past which a report is stale; a report exactly maxAge old is fresh. The
+// published location wins when it holds a report; a location that holds none
+// falls through to the next, so a bird that has not switched keeps its status.
+//
+// It follows no symlink below the reporter name: every directory on the way to
+// the sidecar must be the thing it names, as the dashboard's reader also
+// requires, so a link cannot put another path's report in this reporter's
+// place.
+func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Report {
+	if !reporterNameRe.MatchString(reporter) {
+		return Report{Reporter: reporter, Status: Unreadable, Note: "not a reporter name"}
+	}
+	for _, loc := range reportLocations(runtimeDir, reporter) {
+		report := readLocation(loc, reporter, now, maxAge)
+		if report.Status != Missing {
+			return report
+		}
+	}
+	return Report{Reporter: reporter, Status: Missing, Note: "no " + SidecarName}
+}
+
+// readLocation reads one layout's report. Missing means this layout holds no
+// report at all, so the caller may try the next; every other status is this
+// layout's answer, and an unreadable one is never read as absent.
+func readLocation(loc reportLocation, reporter string, now time.Time, maxAge time.Duration) Report {
+	report := Report{Reporter: reporter}
 
 	// A path that is not there is Missing, as a missing sidecar is. A link, a
 	// file where a directory belongs, or a path that cannot be read is
 	// Unreadable: only a path the filesystem says is absent is absent.
-	for _, dir := range []struct{ path, label string }{
-		{filepath.Join(runtimeDir, reporter), "reporter directory"},
-		{filepath.Join(runtimeDir, reporter, ReportsSubdir), "reports directory"},
-	} {
+	for _, dir := range loc.dirs {
 		fi, err := os.Lstat(dir.path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -140,7 +210,7 @@ func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Repo
 		}
 	}
 
-	raw, err := readSidecar(filepath.Join(runtimeDir, reporter, ReportsSubdir, SidecarName))
+	raw, err := readSidecar(loc.sidecar)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		report.Status, report.Note = Missing, "no "+SidecarName
@@ -157,28 +227,9 @@ func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Repo
 		return report
 	}
 
-	var side struct {
-		Bird      string `json:"bird"`
-		WrittenAt string `json:"written_at"`
-	}
-	if err := json.Unmarshal(raw, &side); err != nil {
-		report.Status, report.Note = Unreadable, SidecarName+" is not valid JSON"
-		return report
-	}
-	if side.Bird != reporter {
-		// The sidecar's own claim, checked against the directory it was found
-		// in: one reporter's report never discharges another's day.
-		report.Status, report.Note = Unreadable, SidecarName+" names a different reporter"
-		return report
-	}
-	written, err := time.Parse(time.RFC3339, side.WrittenAt)
+	written, err := ParseSidecar(reporter, raw, now)
 	if err != nil {
-		report.Status, report.Note = Unreadable, "written_at is not an RFC 3339 instant"
-		return report
-	}
-	written = written.UTC()
-	if written.Sub(now) > FutureSlack {
-		report.Status, report.Note = Unreadable, "written_at is in the future"
+		report.Status, report.Note = Unreadable, err.Error()
 		return report
 	}
 
@@ -190,6 +241,34 @@ func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Repo
 		report.Status = Fresh
 	}
 	return report
+}
+
+// ParseSidecar returns the instant raw names, checking it as Read does: valid
+// JSON, the reporter's own bird, an RFC 3339 written_at no more than FutureSlack
+// ahead of now. Each refusal repeats the sentence Read puts in a report's Note,
+// so a publisher cannot write a sidecar the reader would then refuse.
+func ParseSidecar(reporter string, raw []byte, now time.Time) (time.Time, error) {
+	var side struct {
+		Bird      string `json:"bird"`
+		WrittenAt string `json:"written_at"`
+	}
+	if err := json.Unmarshal(raw, &side); err != nil {
+		return time.Time{}, errors.New(SidecarName + " is not valid JSON")
+	}
+	if side.Bird != reporter {
+		// The sidecar's own claim, checked against the reporter it is filed
+		// under: one reporter's report never discharges another's day.
+		return time.Time{}, errors.New(SidecarName + " names a different reporter")
+	}
+	written, err := time.Parse(time.RFC3339, side.WrittenAt)
+	if err != nil {
+		return time.Time{}, errors.New("written_at is not an RFC 3339 instant")
+	}
+	written = written.UTC()
+	if written.Sub(now) > FutureSlack {
+		return time.Time{}, errors.New("written_at is in the future")
+	}
+	return written, nil
 }
 
 // ReadAll returns one report per reporter, in name order, so the same town
