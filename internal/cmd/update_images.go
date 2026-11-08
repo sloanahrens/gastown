@@ -160,9 +160,9 @@ is read from the config blob those bytes describe. A refusal writes no values
 file.
 
 The viewer credential goes over https. It goes over http only to a loopback
-address or the town's own Forgejo, which has no https endpoint inside the town
-network; a read from any other host over http is refused before a request is
-made.
+address or to the town's own Forgejo at forgejo:3000, which has no https
+endpoint inside the town network; a read from any other host over http is
+refused before a request is made.
 
 A second run for the same commit with the same digests changes nothing. A
 recorded commit whose tag now answers another digest is refused, because an
@@ -237,27 +237,22 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 	return writeUpdateImagesValues(cmd, seams, out, next)
 }
 
+// plaintextForgejoHost is the town's own Forgejo service name and port, the one
+// non-loopback case where the viewer credential may cross the network in clear
+// text: inside the town network no https endpoint exists, and the host is a
+// service name this town controls.
+const plaintextForgejoHost = "forgejo:3000"
+
 // plaintextHostOf is the one non-loopback host the viewer credential may reach
-// over http: the town's own Forgejo, when the town reaches it in plaintext
-// because it has no https endpoint inside the town network. Only a service
-// name has none; a dotted host is a public name, where https exists, so it is
-// never allowed in plaintext.
+// over http: the town's own Forgejo at forgejo:3000, when the town reaches it
+// in plaintext because it has no https endpoint. Any other host, including
+// another dotless service name or forgejo on another port, is refused the
+// credential and must be read over https.
 func plaintextHostOf(r imagevalues.Registry) string {
-	if r.Scheme == "http" && isPlaintextServiceHost(r.Host) {
+	if r.Scheme == "http" && r.Host == plaintextForgejoHost {
 		return r.Host
 	}
 	return ""
-}
-
-// isPlaintextServiceHost reports whether host names a service inside the town
-// network: a dotted host is a public name, and a public name has an https
-// endpoint.
-func isPlaintextServiceHost(host string) bool {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	host = strings.Trim(host, "[]")
-	return host != "" && !strings.Contains(host, ".") && !strings.Contains(host, ":")
 }
 
 // refuseToReplaceARecordedPair answers nil when the file is absent or records
@@ -484,8 +479,9 @@ func (r registryReader) client() *http.Client {
 }
 
 // checkCredentialTransport refuses an http URL whose host is neither a loopback
-// address nor the town's own Forgejo service, because the viewer credential
-// would otherwise cross a network in clear text to whoever answers there.
+// address nor the town's own Forgejo at forgejo:3000, because the viewer
+// credential would otherwise cross a network in clear text to whoever answers
+// there.
 func checkCredentialTransport(u *url.URL, plaintextHost string) error {
 	if u.Scheme == "https" {
 		return nil
@@ -493,7 +489,7 @@ func checkCredentialTransport(u *url.URL, plaintextHost string) error {
 	if u.Scheme == "http" && (isLoopbackHost(u.Host) || (plaintextHost != "" && u.Host == plaintextHost)) {
 		return nil
 	}
-	return fmt.Errorf("refusing to send the registry credential over %s to %s: http is allowed only to a loopback address or the town's own Forgejo service, every other registry is read over https", u.Scheme, u.Host)
+	return fmt.Errorf("refusing to send the registry credential over %s to %s: http is allowed only to a loopback address or the town's own Forgejo at %s, every other registry is read over https", u.Scheme, u.Host, plaintextForgejoHost)
 }
 
 // isLoopbackHost reports whether host, with an optional port, is a loopback

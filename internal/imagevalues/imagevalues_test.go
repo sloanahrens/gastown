@@ -2,6 +2,7 @@ package imagevalues_test
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -66,30 +67,82 @@ func TestImageValuesHoldsNoForkLocalNames(t *testing.T) {
 			t.Fatalf("the workflow names no %s, so this test cannot tell a fork-local value from an empty one", key)
 		}
 	}
-	entries, err := os.ReadDir(".")
+
+	t.Run("the package's own sources hold neither name", func(t *testing.T) {
+		hits, scanned := forkLocalHits(t, ".", forkNames)
+		for _, hit := range hits {
+			t.Errorf("%s; the command reads it from the town and passes it in", hit)
+		}
+		if scanned == 0 {
+			t.Fatal("no package source was scanned, so this test proves nothing")
+		}
+	})
+
+	t.Run("a source holding a fork name is reported", func(t *testing.T) {
+		dir := t.TempDir()
+		for key, name := range forkNames {
+			path := filepath.Join(dir, strings.ToLower(key)+".go")
+			if err := os.WriteFile(path, []byte("package fixture\n\nconst here = \""+name+"\"\n"), 0o600); err != nil {
+				t.Fatalf("writing %s: %v", path, err)
+			}
+		}
+		// A clean source and a test source holding the name: the first is not a
+		// hit, and the second is skipped rather than read.
+		for name, body := range map[string]string{
+			"clean.go":      "package fixture\n",
+			"clean_test.go": "package fixture\n\nconst here = \"" + env["FORGEJO_HOST"] + "\"\n",
+		} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+				t.Fatalf("writing %s: %v", name, err)
+			}
+		}
+
+		hits, scanned := forkLocalHits(t, dir, forkNames)
+		if want := len(forkNames) + 1; scanned != want {
+			t.Errorf("scanned %d sources, want %d (test sources are skipped)", scanned, want)
+		}
+		if len(hits) != len(forkNames) {
+			t.Fatalf("hits = %q, want one per fork name", hits)
+		}
+		for key, name := range forkNames {
+			reported := false
+			for _, hit := range hits {
+				if strings.Contains(hit, key) && strings.Contains(hit, name) {
+					reported = true
+				}
+			}
+			if !reported {
+				t.Errorf("the source holding %s %q was not reported; hits = %q", key, name, hits)
+			}
+		}
+	})
+}
+
+// forkLocalHits reads every non-test .go source directly in dir and reports
+// each one that holds a fork name, plus how many sources it read.
+func forkLocalHits(t *testing.T, dir string, forkNames map[string]string) (hits []string, scanned int) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("reading the package directory: %v", err)
+		t.Fatalf("reading %s: %v", dir, err)
 	}
-	scanned := 0
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		data, err := os.ReadFile(name)
+		data, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("reading %s: %v", name, err)
 		}
 		scanned++
 		for key, forkName := range forkNames {
 			if strings.Contains(string(data), forkName) {
-				t.Errorf("%s holds the fork's %s %q; the command reads it from the town and passes it in", name, key, forkName)
+				hits = append(hits, fmt.Sprintf("%s holds the fork's %s %q", name, key, forkName))
 			}
 		}
 	}
-	if scanned == 0 {
-		t.Fatal("no package source was scanned, so this test proves nothing")
-	}
+	return hits, scanned
 }
 
 // TestImageValuesRoundTrips holds the writer and reader together: what Write
@@ -207,7 +260,7 @@ func TestImageValuesRegistryRefusesAPartThatWouldNotReachAValue(t *testing.T) {
 		{"another scheme", imagevalues.Registry{Scheme: "ssh", Host: "registry.test", Owner: "town"}, "scheme"},
 		{"a host with a path", imagevalues.Registry{Scheme: "https", Host: "registry.test/v2", Owner: "town"}, "host"},
 		{"an uppercase host", imagevalues.Registry{Scheme: "https", Host: "Registry.test", Owner: "town"}, "host"},
-		{"a bracketed IPv6 address with a port", imagevalues.Registry{Scheme: "https", Host: "[::1]:5000", Owner: "town"}, ""},
+		{"a bracketed IPv6 address with a port", imagevalues.Registry{Scheme: "https", Host: "[::1]:5000", Owner: "town"}, "host"},
 		{"no owner", imagevalues.Registry{Scheme: "https", Host: "registry.test", Owner: ""}, "owner"},
 		{"an owner with a path", imagevalues.Registry{Scheme: "https", Host: "registry.test", Owner: "a/b"}, "owner"},
 	}

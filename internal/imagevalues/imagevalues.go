@@ -30,10 +30,11 @@ var (
 	digestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	refPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}$`)
 	commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-	// hostPattern is a registry host name and optional port, or a bracketed
-	// IPv6 literal and optional port: what a values line may hold in the
-	// place an image reference names its registry.
-	hostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$|^\[[0-9a-f:.]+\](:[0-9]+)?$`)
+	// hostPattern is a registry host name and optional port: what a values
+	// line may hold in the place an image reference names its registry. A
+	// bracketed IPv6 literal is refused: a ref beginning with '[' is not a
+	// plain YAML scalar, so the writer could not emit it.
+	hostPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]+)?$`)
 	// ownerPattern is a registry account name: one path component, as
 	// distribution references require.
 	ownerPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)

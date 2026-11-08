@@ -670,8 +670,9 @@ func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 // the workflow's image names are internal/imagevalues' constants, which gt
 // update images records. The Forgejo host and the registry owner are the
 // operator's per-town values: gt update images reads them from the town's own
-// Forgejo settings, so this test only holds the workflow's env to a value
-// being set.
+// rig settings, and TestUpdateImagesWorkflowNamesTheTownsRegistry in
+// internal/cmd holds this workflow's env equal to that source, so this test
+// only requires the two to be set.
 func TestImagesWorkflowNamesTheSharedImageConstants(t *testing.T) {
 	t.Parallel()
 	wf := loadWorkflow(t)

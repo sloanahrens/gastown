@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -16,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
@@ -647,6 +650,42 @@ func TestUpdateImagesCredentialTransport(t *testing.T) {
 		}
 	})
 
+	// The plaintext exception is the one named service and port, not any
+	// dotless name: another service, or forgejo on another port, is read over
+	// https like every other non-loopback host.
+	for _, host := range []string{"registry:3000", "forgejo:8080"} {
+		t.Run("http to "+host+" is refused before a request", func(t *testing.T) {
+			t.Parallel()
+			requests := 0
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: http.NoBody}, nil
+			})}
+			seams := updateImagesSeams{
+				FindTownRoot: func() (string, error) { return "/town", nil },
+				Registry: func(string) (imagevalues.Registry, error) {
+					return imagevalues.Registry{Scheme: "http", Host: host, Owner: testUpdateImagesOwner}, nil
+				},
+				Credentials: func() (string, string, error) { return testUpdateImagesUser, testUpdateImagesToken, nil },
+				HTTPClient:  client,
+				WriteValues: func(string, imagevalues.Values) error { return nil },
+			}
+
+			_, _, err := runUpdateImagesCommand(t, seams, "--sha", testUpdateImagesSHA, "--out", filepath.Join(t.TempDir(), "images.yaml"))
+			if err == nil {
+				t.Fatalf("http to %s succeeded, want a refusal", host)
+			}
+			for _, want := range []string{host, "http"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the error %q does not name %q", err, want)
+				}
+			}
+			if requests != 0 {
+				t.Errorf("the refused read made %d requests, want none", requests)
+			}
+		})
+	}
+
 	t.Run("a redirect to another host is refused", func(t *testing.T) {
 		t.Parallel()
 		var targetRequests atomic.Int32
@@ -681,10 +720,13 @@ func TestUpdateImagesCredentialTransport(t *testing.T) {
 		requests := 0
 		client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			requests++
+			// Only the scheme differs from the first request's URL: the host and
+			// port stay the same, so this drives the scheme half of the rule on
+			// its own.
 			if req.URL.Scheme == "https" {
 				return &http.Response{
 					StatusCode: http.StatusTemporaryRedirect,
-					Header:     http.Header{"Location": []string{"http://registry.test/v2/town/gastown-daemon/manifests/" + testUpdateImagesTag}},
+					Header:     http.Header{"Location": []string{"http://registry.test:5000/v2/town/gastown-daemon/manifests/" + testUpdateImagesTag}},
 					Body:       http.NoBody,
 				}, nil
 			}
@@ -905,10 +947,10 @@ func TestUpdateImagesDrivesEveryRegistryFailure(t *testing.T) {
 		want     string
 	}{
 		{
-			name:     "an address that is not a URL",
+			name:     "a host Validate refuses",
 			registry: imagevalues.Registry{Scheme: "https", Host: "[::::]", Owner: testUpdateImagesOwner},
 			http:     http.DefaultClient,
-			want:     "not a URL",
+			want:     "host",
 		},
 		{
 			name: "a server that cannot be reached",
@@ -960,6 +1002,18 @@ func TestUpdateImagesDrivesEveryRegistryFailure(t *testing.T) {
 				t.Errorf("a failed registry read wrote the values file %d times", writes)
 			}
 		})
+	}
+}
+
+// TestUpdateImagesRefusesAMalformedRequestURL holds the guard below Validate: a
+// caller that hands the reader an address it cannot build a request from is
+// refused before a dial, rather than reading an error as an answer.
+func TestUpdateImagesRefusesAMalformedRequestURL(t *testing.T) {
+	t.Parallel()
+	reader := registryReader{http: http.DefaultClient}
+	_, _, err := reader.getJSON(context.Background(), "https://[::::]/v2/town/gastown-daemon/manifests/"+testUpdateImagesTag, updateImagesMaxManifest, &struct{}{})
+	if err == nil || !strings.Contains(err.Error(), "not a URL") {
+		t.Fatalf("getJSON = %v, want a refusal naming the address", err)
 	}
 }
 
@@ -1103,6 +1157,49 @@ func TestTownImageRegistryReadsTheTownsForgejo(t *testing.T) {
 				t.Fatalf("townImageRegistry = %v, want a refusal naming %q", err, row.want)
 			}
 		})
+	}
+}
+
+// TestUpdateImagesWorkflowNamesTheTownsRegistry holds the one-spelling rule
+// across the build and the command: the workflow's FORGEJO_HOST and
+// REGISTRY_OWNER are the host and owner gt update images reads from the town's
+// rig settings. A drift between the registry the image build pushes to and the
+// one the command reads is a failure, not two silent values.
+func TestUpdateImagesWorkflowNamesTheTownsRegistry(t *testing.T) {
+	t.Parallel()
+	const (
+		rigsJSON = `{"version":1,"rigs":{"gastown":{"git_url":"https://github.com/example/gastown.git"}}}`
+		daemon   = `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"enabled":true,"image_rigs":["gastown"]}}}`
+	)
+	townRoot := writeTownFixture(t, map[string]string{
+		"mayor/rigs.json":   rigsJSON,
+		"mayor/daemon.json": daemon,
+		"gastown/config.json": `{"type":"rig","version":1,"name":"gastown",` +
+			`"git_url":"https://github.com/example/gastown.git",` +
+			`"merge_queue":{"forgejo":{"remote_url":"http://forgejo:3000/sloan/gastown"}}}`,
+	})
+	registry, err := townImageRegistry(townRoot)
+	if err != nil {
+		t.Fatalf("townImageRegistry: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.FromSlash("../../deploy/ci/images.workflow.yml"))
+	if err != nil {
+		t.Fatalf("reading the images workflow: %v", err)
+	}
+	var doc struct {
+		Env map[string]string `yaml:"env"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("the images workflow is not valid YAML: %v", err)
+	}
+	for _, want := range []struct{ key, value string }{
+		{"FORGEJO_HOST", registry.Host},
+		{"REGISTRY_OWNER", registry.Owner},
+	} {
+		if got := doc.Env[want.key]; got != want.value {
+			t.Errorf("the workflow's %s is %q, but gt update images reads %q from the town's rig settings", want.key, got, want.value)
+		}
 	}
 }
 
