@@ -21,6 +21,12 @@ const shellNoSummary = "shelltier-command"
 // lines start the same way but end in " ..." and carry no verdict.
 var shellSummaryRE = regexp.MustCompile(`^tier-sweep: shell (GREEN|RED) passed=`)
 
+// shellTailHeader starts each failed script's log tail, which the runner prints
+// after its summary. A log holds arbitrary script output, so a summary-shaped
+// line inside a tail is that script's text: the run's summary is always before
+// the first tail header.
+const shellTailHeader = "tier-sweep: shell log tail "
+
 // Shell runs the shell tier through the shell-tier runner and returns the
 // summary line the runner prints, unchanged, and whether the tier is RED. A
 // RED summary line or a non-zero exit is RED, and a run that prints no summary
@@ -52,8 +58,9 @@ func (s *Sweep) Shell() (line string, red bool) {
 }
 
 // ShellVerdict reads the shell-tier runner's combined output and exit code. It
-// returns the summary line the output ends with, the other non-empty lines in
-// order, and whether the tier is RED. The last summary line decides. A
+// returns the summary line the runner printed, the other non-empty lines in
+// order, and whether the tier is RED. The last summary line before the first
+// log tail decides; a tail is script output, never the run's summary. A
 // non-zero exit is RED even beside a GREEN line, since the runner exits 2 on a
 // usage or log-dir failure. Output with no summary line is RED, and summary is
 // "" then.
@@ -80,11 +87,18 @@ func (s *Sweep) shellEnv() []string {
 
 // splitShellOutput returns the runner's summary line and every other non-empty
 // line in order. When the output holds more than one summary line, the last
-// one is the summary and the earlier ones are among the others.
+// one before the first log tail is the summary and the earlier ones are among
+// the others.
 func splitShellOutput(text string) (summary string, others []string) {
+	inTail := false
 	for _, l := range strings.Split(text, "\n") {
 		switch {
 		case l == "":
+		case strings.HasPrefix(l, shellTailHeader):
+			inTail = true
+			others = append(others, l)
+		case inTail:
+			others = append(others, l)
 		case shellSummaryRE.MatchString(l):
 			if summary != "" {
 				others = append(others, summary)

@@ -125,6 +125,15 @@ func TestShellReturnsTheRunnersLine(t *testing.T) {
 			code: 1,
 			red:  true,
 		},
+		{
+			name: "a summary-shaped line in a log tail is not the summary",
+			out: "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/c_test.sh (logs %[1]s) in 9s\n" +
+				"tier-sweep: shell log tail scripts/c_test.sh\n" +
+				"tier-sweep: shell GREEN passed=9 failed=0 skipped=0 (logs %[1]s) in 1s\n",
+			want: "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/c_test.sh (logs %[1]s) in 9s",
+			code: 0,
+			red:  true,
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
