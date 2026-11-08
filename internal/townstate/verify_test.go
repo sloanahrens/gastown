@@ -262,6 +262,64 @@ func TestVerifyNamesEveryRig(t *testing.T) {
 	}
 }
 
+// TestVerifyNamesARigByItsOnlyMarker drives a rig that one marker alone makes a
+// rig: a bare repository, or a canonical clone. Neither has a config.json or a
+// registry record, so the marker is the only thing that names the rig, and its
+// crew and polecats trees fall under the rig's own rows.
+func TestVerifyNamesARigByItsOnlyMarker(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		fsys fs.FS
+	}{
+		{name: ".repo.git only", fsys: fstest.MapFS{
+			"mayor/town.json":        {Data: []byte("{}")},
+			"tango/.repo.git/HEAD":   {Data: []byte("ref: refs/heads/main\n")},
+			"tango/crew/echo/a.md":   {Data: []byte("x")},
+			"tango/polecats/bo/b.go": {Data: []byte("x")},
+		}},
+		{name: "mayor/rig only", fsys: fstest.MapFS{
+			"mayor/town.json":        {Data: []byte("{}")},
+			"tango/mayor/rig/go.mod": {Data: []byte("x")},
+			"tango/crew/echo/a.md":   {Data: []byte("x")},
+			"tango/polecats/bo/b.go": {Data: []byte("x")},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			problems, err := Verify(tc.fsys, Default(), time.Now())
+			if err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+			if len(problems) != 0 {
+				t.Errorf("Verify reported a rig named by its only marker: %v", problems)
+			}
+		})
+	}
+}
+
+// TestVerifyDoesNotNameAManifestDirectoryAsARig: settings/ is a top-level row
+// the manifest names itself, and it holds a config.json. A directory the
+// manifest names is never a rig, so no rig row expands under it. Were it a rig,
+// the rig rows would put daemon-owned paths under the shared settings row, and
+// verify would report those overlaps.
+func TestVerifyDoesNotNameAManifestDirectoryAsARig(t *testing.T) {
+	t.Parallel()
+	fsys := fstest.MapFS{
+		"mayor/town.json":                 {Data: []byte("{}")},
+		"settings/config.json":            {Data: []byte("{}")},
+		"settings/plugins/tool/plugin.md": {Data: []byte("x")},
+	}
+	problems, err := Verify(fsys, Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if len(problems) != 0 {
+		t.Errorf("Verify reported settings/, a directory the manifest names itself: %v", problems)
+	}
+}
+
 // TestVerifyKeepsConfigJSONAsARigMarker holds verify's classification apart
 // from the copy's: a directory that holds only a config.json is still a rig to
 // verify, so its session trees are classified, while the rig list export and
@@ -303,6 +361,33 @@ func TestVerifyReportsAnUnclassifiedDirectoryOnce(t *testing.T) {
 		paths = append(paths, p.Path)
 	}
 	if want := []string{"stray"}; !slices.Equal(paths, want) {
+		t.Errorf("Verify reported %v, want exactly %v", paths, want)
+	}
+}
+
+// TestVerifyReportsEverySiblingFile: gastown/.runtime is a container, since rig
+// rows lie below it, and it holds three files no row names. Each is its own
+// problem. An unclassified directory is reported once and never entered, so
+// these files are reached only through the container; a SkipDir returned for
+// the first file would skip the other two.
+func TestVerifyReportsEverySiblingFile(t *testing.T) {
+	t.Parallel()
+	fsys := fstest.MapFS{
+		"mayor/town.json":          {Data: []byte(`{"registry":{"version":1,"rigs":{"gastown":{"git_url":"file:///srv/gastown"}}}}`)},
+		"gastown/.runtime/stray-a": {Data: []byte("x")},
+		"gastown/.runtime/stray-b": {Data: []byte("x")},
+		"gastown/.runtime/stray-c": {Data: []byte("x")},
+	}
+	problems, err := Verify(fsys, Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	var paths []string
+	for _, p := range problems {
+		paths = append(paths, p.Path)
+	}
+	want := []string{"gastown/.runtime/stray-a", "gastown/.runtime/stray-b", "gastown/.runtime/stray-c"}
+	if !slices.Equal(paths, want) {
 		t.Errorf("Verify reported %v, want exactly %v", paths, want)
 	}
 }
