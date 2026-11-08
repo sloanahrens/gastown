@@ -27,9 +27,15 @@ import (
 // renderer does not write is nil here, and the acceptance boxes that name a key
 // the file must not contain read the raw text instead.
 type composeFile struct {
-	Services map[string]composeService `yaml:"services"`
-	Volumes  map[string]any            `yaml:"volumes"`
-	Networks map[string]composeNetwork `yaml:"networks"`
+	Services map[string]composeService    `yaml:"services"`
+	Volumes  map[string]composeVolumeDecl `yaml:"volumes"`
+	Networks map[string]composeNetwork    `yaml:"networks"`
+}
+
+// composeVolumeDecl is one entry of the file's top-level volumes section:
+// external marks a volume compose uses as it is and never creates or removes.
+type composeVolumeDecl struct {
+	External bool `yaml:"external"`
 }
 
 type composeNetwork struct {

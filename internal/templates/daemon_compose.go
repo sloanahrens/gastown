@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -35,9 +36,28 @@ type ComposeSpec struct {
 	// Image is the tag the deployer built on this host, gt-daemon:<rev>.
 	Image string
 
-	// TownRoot is the directory bind-mounted at its own absolute path, so the
-	// daemon inside the container reads and writes the town's own files.
+	// TownRoot is the directory mounted at its own absolute path, so the daemon
+	// inside the container reads and writes the town's own files. It is a bind of
+	// the Mac's directory unless TownStateVolume names a volume.
 	TownRoot string
+
+	// TownStateVolume is `gt daemon compose write --town-state-volume`: the name
+	// of an external docker volume mounted at TownRoot in place of the Mac's
+	// directory, so the daemon's state lives in the volume and a compose `down`
+	// never removes it. It is declared external because the volume outlives the
+	// project. Only the live render takes it, and a name that is not a docker
+	// volume name is refused. With it set, no bind may mount a path the
+	// town-state manifest gives a session: the volume carries the daemon's
+	// paths, and a session's path would be a host bind shadowing it
+	// (gt-yjzepk.6).
+	TownStateVolume string
+
+	// SessionOwned is the seam the render reads the town-state manifest through:
+	// it reports whether a town-root-relative path falls under a session-owned
+	// entry and names that entry. It is required when TownStateVolume is set, so
+	// a caller that does not wire the manifest is refused rather than left with
+	// no check at all; the command wires it to townstate.Default().
+	SessionOwned func(rel string) (entry string, ok bool)
 
 	// StopGrace is docker's stop_grace_period: the time between SIGTERM and
 	// SIGKILL on `docker compose stop` and on a restart. It may not be shorter
@@ -650,6 +670,90 @@ func (s ComposeSpec) validateHMConfig() error {
 	return nil
 }
 
+// townStateVolumeName is a docker volume name: a letter or digit, then letters,
+// digits, dots, underscores and hyphens. An external volume is reached by the
+// name the host gives it, so a name docker would refuse is refused here rather
+// than written into a file whose `up` then fails.
+var townStateVolumeName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]+$`)
+
+// validateTownState refuses a town-state volume the file cannot declare and a
+// mount that would bind a session's path beside it. The volume carries the town
+// root's state; every other mount the file writes stays as it is, so only a path
+// the manifest gives a session is refused, and a path it does not class is kept
+// as before. A session-owned path is refused, never silently bound over the
+// volume (gt-yjzepk.6).
+func (s ComposeSpec) validateTownState() error {
+	if s.TownStateVolume == "" {
+		return nil
+	}
+	switch {
+	case s.Scratch:
+		return fmt.Errorf("compose spec: TownStateVolume %q is set on a scratch spec; only the live render replaces the town bind with a volume", s.TownStateVolume)
+	case !townStateVolumeName.MatchString(s.TownStateVolume):
+		return fmt.Errorf("compose spec: --town-state-volume %q is not a valid volume name; a name starts with a letter or digit and holds letters, digits, dots, underscores and hyphens", s.TownStateVolume)
+	case s.TownStateVolume == dindVolume:
+		return fmt.Errorf("compose spec: --town-state-volume %q is the engine's data volume %q; the file declares each volume name once", s.TownStateVolume, dindVolume)
+	case s.SessionOwned == nil:
+		return fmt.Errorf("compose spec: TownStateVolume %q is set without SessionOwned; the town-state manifest is what refuses a session's path, so a render without it would bind one in silence", s.TownStateVolume)
+	}
+	return s.checkTownStateMounts()
+}
+
+// checkTownStateMounts refuses a bind whose host path falls under a session-owned
+// town-state entry. The paths are resolved first, because the mount follows a
+// link: a directory that names itself daemon but resolves into a rig's polecats
+// tree is still a session's path. A path that cannot be resolved is refused
+// rather than taken as outside the town.
+func (s ComposeSpec) checkTownStateMounts() error {
+	for _, hostPath := range s.liveBindSources() {
+		if hostPath == "" {
+			continue
+		}
+		rel, inside, err := townRelative(s.TownRoot, hostPath)
+		if err != nil {
+			return fmt.Errorf("compose spec: --town-state-volume %q is set, and the mount %q cannot be resolved to check it against the town-state manifest: %w", s.TownStateVolume, hostPath, err)
+		}
+		if !inside {
+			continue
+		}
+		if entry, owned := s.SessionOwned(rel); owned {
+			return fmt.Errorf("compose spec: --town-state-volume %q is set, and the mount %q falls under %q, a session-owned town-state entry; the volume carries the daemon's paths, so a session's path is not bound beside it", s.TownStateVolume, hostPath, entry)
+		}
+	}
+	return nil
+}
+
+// liveBindSources are the host paths the live render binds, the paths the
+// town-state check reads. A scratch render binds none of them, and the field
+// validation refuses each on a scratch spec.
+func (s ComposeSpec) liveBindSources() []string {
+	paths := []string{s.OMTokenFile, s.OMConfigFile, s.HMConfigFile, s.ForgeTokenFile,
+		s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile, s.LandingWorkRoot}
+	paths = append(paths, s.KubeconfigFiles...)
+	return append(paths, s.BindRO...)
+}
+
+// townRelative returns hostPath relative to townRoot on resolved paths, and
+// whether it lies under the town at all. A path outside is not a problem here:
+// only a bind beneath the town can shadow the town-state volume. Both paths are
+// cleaned and absolute after resolution, so the town's own prefix, with its one
+// trailing separator, is what says the mount is beneath it.
+func townRelative(townRoot, hostPath string) (string, bool, error) {
+	town, err := resolvedHostPath(townRoot)
+	if err != nil {
+		return "", false, err
+	}
+	real, err := resolvedHostPath(hostPath)
+	if err != nil {
+		return "", false, err
+	}
+	prefix := strings.TrimSuffix(town, string(filepath.Separator)) + string(filepath.Separator)
+	if real == town || !strings.HasPrefix(real, prefix) {
+		return "", false, nil
+	}
+	return filepath.ToSlash(strings.TrimPrefix(real, prefix)), true, nil
+}
+
 // liveTokenMount is one credential file mounted read-only at one path inside the
 // container. Both values are escaped as every other spec value is, so a dollar
 // sign in the host path is the literal the host has.
@@ -720,6 +824,19 @@ func (s ComposeSpec) scratchDoltPort() int {
 	return ScratchDoltPort
 }
 
+// DaemonComposeHeader is the first line of every file RenderDaemonCompose
+// writes, and the mark the command reads to tell its own file from one the
+// operator wrote by hand: it refuses to overwrite a file that does not carry it
+// unless --force is given.
+const DaemonComposeHeader = "# Generated by gt for the container supervisor; every deploy rewrites this file.\n"
+
+// IsDaemonComposeFile reports whether data is a compose file this package
+// renders, which the header at its first line marks. Empty data, and a file
+// whose first line is anything else, are not the package's to overwrite.
+func IsDaemonComposeFile(data []byte) bool {
+	return bytes.HasPrefix(data, []byte(DaemonComposeHeader))
+}
+
 // daemonComposeBody renders the daemon service and the Docker engine its sweep
 // drives. Every spec value takes a %q, quoted so a town root with a space or a
 // colon cannot change the YAML's shape, and passes through composeLiteral so a
@@ -752,9 +869,11 @@ func (s ComposeSpec) scratchDoltPort() int {
 // has no such line and the golden is unchanged. %[19]s is the daemon's
 // extra_hosts block, which sits directly after init so a reader sees the aliases
 // beside the container they belong to; it is the empty string when the spec names
-// no alias, so every other render stays byte-identical.
-const daemonComposeBody = `# Generated by gt for the container supervisor; every deploy rewrites this file.
-services:
+// no alias, so every other render stays byte-identical. %[20]s is the mount at
+// the town root: the bind of the Mac's directory, or the town-state volume when
+// the spec names one. %[21]s declares that volume external, and is the empty
+// string without it, so the bind render keeps every byte it had.
+const daemonComposeBody = DaemonComposeHeader + `services:
   daemon:
     image: %[1]q
     container_name: %[2]q
@@ -772,10 +891,7 @@ services:
       GT_DAEMON_TAKEOVER: "${GT_DAEMON_TAKEOVER:-}"
       GT_TOWN_ROOT: %[4]q
 %[18]s    volumes:
-      - type: bind
-        source: %[4]q
-        target: %[4]q
-%[17]s    networks:
+%[20]s%[17]s    networks:
       - %[11]s
       - %[7]s
   %[5]s:
@@ -803,7 +919,7 @@ services:
     internal: true
 %[16]svolumes:
   %[9]s:
-%[14]s`
+%[14]s%[21]s`
 
 // RenderDaemonCompose renders the compose file the container supervisor
 // starts, stops and inspects: the daemon service and the Docker engine its
@@ -834,6 +950,13 @@ services:
 // host's token file read-only at LiveForgeTokenPath and passes both to the
 // entrypoint, which sets the container's git credential helper from them; with
 // neither, the file carries no mount and no command line, as before (gt-rpx80).
+//
+// A live spec's TownStateVolume replaces the daemon's bind of the Mac's town
+// root with a volume of that name, declared external so compose never creates
+// or removes it, and mounted at the town root path. Every other mount stays as
+// it is, and a bind whose path the town-state manifest gives a session is
+// refused, because that path belongs to a session and the volume does not carry
+// it (gt-yjzepk.6).
 //
 // It refuses a spec whose project or container name is empty rather than
 // falling back to the live town's defaults (gt-ix1kz): a scratch render that
@@ -900,8 +1023,34 @@ func RenderDaemonCompose(s ComposeSpec) ([]byte, error) {
 		tokenMounts,
 		liveClientEnv(s),
 		extraHostsBlock(s.ExtraHosts),
+		townRootMount(s),
+		townStateVolumeDecl(s),
 	)
 	return []byte(out), nil
+}
+
+// townRootMount is the daemon's volume at the town root: the bind of the Mac's
+// directory, which is today's render, or the town-state volume when the spec
+// names one. The volume's target is the town root, so the container finds the
+// town at the same path either way.
+func townRootMount(s ComposeSpec) string {
+	if s.TownStateVolume != "" {
+		return fmt.Sprintf("      - type: volume\n        source: %s\n        target: %s\n",
+			s.TownStateVolume, strconv.Quote(composeLiteral(s.TownRoot)))
+	}
+	q := strconv.Quote(composeLiteral(s.TownRoot))
+	return fmt.Sprintf("      - type: bind\n        source: %s\n        target: %s\n", q, q)
+}
+
+// townStateVolumeDecl is the town-state volume's entry in the file's top-level
+// volumes section, or "" without the flag. `external: true` makes compose use a
+// volume it did not create and leave it in place on `down`, which is what keeps
+// the daemon's state across a project teardown.
+func townStateVolumeDecl(s ComposeSpec) string {
+	if s.TownStateVolume == "" {
+		return ""
+	}
+	return "  " + s.TownStateVolume + ":\n    external: true\n"
 }
 
 // extraHostsBlock is the daemon service's extra_hosts block, sorted so a spec
@@ -974,6 +1123,9 @@ func (s ComposeSpec) validate() error {
 		return err
 	}
 	if err := s.validateHMConfig(); err != nil {
+		return err
+	}
+	if err := s.validateTownState(); err != nil {
 		return err
 	}
 	if err := s.validateExtraHosts(); err != nil {
