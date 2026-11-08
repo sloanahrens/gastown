@@ -7,15 +7,18 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
@@ -26,6 +29,11 @@ func updatingGoldens() bool {
 	f := flag.Lookup("update")
 	return f != nil && f.Value.String() == "true"
 }
+
+// testImage is the digest reference the goldens record, shaped as
+// deploy/values/images.yaml writes one.
+const testImage = "registry.example.com/gt/gastown-daemon@sha256:" +
+	"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 // goldenValues is the configuration the goldens record: the shipped secrets
 // manifest's entries, so a manifest entry with no Secret fails the goldens.
@@ -40,9 +48,14 @@ func goldenValues(t *testing.T) Values {
 		t.Fatalf("parsing the secrets manifest: %v", err)
 	}
 	return Values{
-		ForgejoService:   DefaultForgejoService,
-		ForgejoNamespace: DefaultForgejoNamespace,
-		Secrets:          manifest.Files,
+		ForgejoService:          DefaultForgejoService,
+		ForgejoNamespace:        DefaultForgejoNamespace,
+		Secrets:                 manifest.Files,
+		Image:                   testImage,
+		Env:                     map[string]string{"TZ": "UTC"},
+		OMToken:                 true,
+		ForgeHost:               "forgejo:3000",
+		ConfirmContainerStopped: true,
 	}
 }
 
@@ -123,9 +136,14 @@ func TestRenderGolden(t *testing.T) {
 		value any
 	}{
 		{"namespace.yaml", m.Namespace},
+		{"service-account.yaml", m.ServiceAccount},
 		{"town-state-claim.yaml", m.TownStateClaim},
 		{"landing-work-claim.yaml", m.LandingWorkClaim},
 		{"forgejo-service.yaml", m.ForgejoService},
+		{"deployment.yaml", m.Deployment},
+		{"rolebinding-sweep-runner.yaml", m.SweepRoleBinding},
+		{"rolebinding-ci-cache-trim.yaml", m.CacheTrimRoleBinding},
+		{"clusterrolebinding-sweep-reader.yaml", m.SweepReaderBinding},
 	} {
 		compareGolden(t, dir, doc.file, document(t, doc.value))
 	}
@@ -167,6 +185,7 @@ func TestRenderWritesTheObjectsInOrder(t *testing.T) {
 	}
 	want := []string{
 		"Namespace/" + DefaultNamespace,
+		"ServiceAccount/" + ServiceAccountName,
 		"PersistentVolumeClaim/" + TownStateClaim,
 		"PersistentVolumeClaim/" + LandingWorkClaim,
 		"Service/" + ForgejoName,
@@ -174,6 +193,12 @@ func TestRenderWritesTheObjectsInOrder(t *testing.T) {
 	for _, file := range m.Secrets {
 		want = append(want, "Secret/"+file.Metadata.Name)
 	}
+	want = append(want,
+		"Deployment/"+Name,
+		"RoleBinding/"+m.SweepRoleBinding.Metadata.Name,
+		"RoleBinding/"+m.CacheTrimRoleBinding.Metadata.Name,
+		"ClusterRoleBinding/"+m.SweepReaderBinding.Metadata.Name,
+	)
 	if !slices.Equal(got, want) {
 		t.Errorf("Render wrote %q, want %q", got, want)
 	}
@@ -207,6 +232,22 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"no Secret entries", func(v *Values) { v.Secrets = nil }, "Values.Secrets", ""},
 		{"a malformed namespace", func(v *Values) { v.Namespace = "GT" }, "Values.Namespace", ""},
 		{"a malformed storage class", func(v *Values) { v.StorageClass = "local path" }, "Values.StorageClass", ""},
+		{"an image by tag", func(v *Values) { v.Image = "registry.example.com/gt/gastown-daemon:v1" }, "Values.Image", ""},
+		{"a missing single-owner acknowledgement", func(v *Values) { v.ConfirmContainerStopped = false }, "Values.ConfirmContainerStopped", "the Docker Desktop container owns the town until it is stopped"},
+		{"an om token with no Secret", func(v *Values) { v.Secrets = withoutSecret(v.Secrets, OMTokenFile) }, "Values.OMToken", ""},
+		{"a forge host with no Secret", func(v *Values) { v.Secrets = withoutSecret(v.Secrets, ForgeTokenFile) }, "Values.ForgeHost", ""},
+		{"a forge host that is a URL", func(v *Values) { v.ForgeHost = "https://forgejo:3000" }, "Values.ForgeHost", ""},
+		{"a forge port outside the range", func(v *Values) { v.ForgeHost = "forgejo:70000" }, "Values.ForgeHost", ""},
+		{"a malformed CPU share", func(v *Values) { v.CPU = "two" }, "Values.CPU", ""},
+		{"a zero CPU share", func(v *Values) { v.CPU = "0m" }, "Values.CPU", ""},
+		{"a memory share with no suffix", func(v *Values) { v.Memory = "4096" }, "Values.Memory", ""},
+		{"a grace period under the drain bound", func(v *Values) { v.TerminationGraceSeconds = MinimumTerminationGraceSeconds - 1 }, "Values.TerminationGraceSeconds", ""},
+		{"an env key that is not a variable name", func(v *Values) { v.Env["A-B"] = "x" }, `Values.Env["A-B"]`, ""},
+		{"an env key the render sets itself", func(v *Values) { v.Env[TownRootEnv] = "/elsewhere" }, `Values.Env["GT_TOWN_ROOT"]`, ""},
+		{"an env value that looks like a secret", func(v *Values) { v.Env["SOME_TOKEN"] = "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }, `Values.Env["SOME_TOKEN"]`, ""},
+		{"two Secret files whose volume names collide", func(v *Values) {
+			v.Secrets = append(v.Secrets, templates.SecretFile{Name: "x.y"}, templates.SecretFile{Name: "x-y"})
+		}, "Values.Secrets", ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -535,6 +576,222 @@ func TestGoldenMismatchIsReported(t *testing.T) {
 	compareGolden(mismatched, dir, file, []byte("kind: PersistentVolumeClaim\n"))
 	if len(mismatched.messages) != 1 || !strings.Contains(mismatched.messages[0], file) {
 		t.Errorf("comparing a different document reported %q, want one failure naming %s", mismatched.messages, file)
+	}
+}
+
+// withoutSecret returns files without the entry named name.
+func withoutSecret(files []templates.SecretFile, name string) []templates.SecretFile {
+	out := make([]templates.SecretFile, 0, len(files))
+	for _, file := range files {
+		if file.Name != name {
+			out = append(out, file)
+		}
+	}
+	return out
+}
+
+// TestRefusesATagAndAnUnconfirmedOwner drives the two refusals the Deployment
+// depends on: an image tag (the pod must run the commit the values file
+// records) and a render without the single-owner acknowledgement.
+func TestRefusesATagAndAnUnconfirmedOwner(t *testing.T) {
+	t.Parallel()
+
+	v := goldenValues(t)
+	v.Image = "registry.example.com/gt/gastown-daemon:v1"
+	_, err := Build(v)
+	if err == nil || !strings.Contains(err.Error(), "Values.Image") {
+		t.Fatalf("Build with an image tag = %v, want a refusal naming Values.Image", err)
+	}
+
+	v = goldenValues(t)
+	v.ConfirmContainerStopped = false
+	_, err = Build(v)
+	if err == nil {
+		t.Fatal("Build without ConfirmContainerStopped = a render, want the single-owner refusal")
+	}
+	if !strings.Contains(err.Error(), "the Docker Desktop container owns the town until it is stopped") {
+		t.Errorf("Build without ConfirmContainerStopped refused with %q, want the single-owner reason", err)
+	}
+}
+
+// TestDeploymentGolden holds the Deployment to its golden and to the shape the
+// pod relies on: one replica under Recreate, the digest image, requests equal
+// to limits, the two probes and the single-owner annotation.
+func TestDeploymentGolden(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues(t))
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment.yaml", document(t, m.Deployment))
+
+	d := m.Deployment
+	if d.Spec.Replicas != 1 {
+		t.Errorf("the Deployment runs %d replicas, want 1: two daemons would share the town's volume", d.Spec.Replicas)
+	}
+	if d.Spec.Strategy.Type != "Recreate" {
+		t.Errorf("the Deployment strategy = %q, want Recreate, so a rollout never overlaps two pods", d.Spec.Strategy.Type)
+	}
+	if got := d.Metadata.Annotations[TownOwnerAnnotation]; got != TownOwnerPod {
+		t.Errorf("the Deployment %s annotation = %q, want %q", TownOwnerAnnotation, got, TownOwnerPod)
+	}
+	if got := d.Spec.Template.Spec.ServiceAccountName; got != ServiceAccountName {
+		t.Errorf("the pod runs as service account %q, want %q", got, ServiceAccountName)
+	}
+	if got := d.Spec.Template.Spec.TerminationGracePeriodSeconds; got < MinimumTerminationGraceSeconds {
+		t.Errorf("the pod's grace period is %ds, want at least %ds", got, MinimumTerminationGraceSeconds)
+	}
+
+	c := d.Spec.Template.Spec.Containers[0]
+	if c.Image != testImage {
+		t.Errorf("the container image = %q, want the digest %q", c.Image, testImage)
+	}
+	if !strings.Contains(c.Image, "@sha256:") {
+		t.Errorf("the container image %q is not by digest", c.Image)
+	}
+	if !maps.Equal(c.Resources.Requests, c.Resources.Limits) {
+		t.Errorf("the container requests %v and limits %v; requests equal limits", c.Resources.Requests, c.Resources.Limits)
+	}
+	if c.ReadinessProbe == nil || c.LivenessProbe == nil {
+		t.Fatalf("the container carries readiness %v and liveness %v, want both", c.ReadinessProbe, c.LivenessProbe)
+	}
+	if got, want := c.ReadinessProbe.Exec.Command, []string{"gt", "status", "--line"}; !slices.Equal(got, want) {
+		t.Errorf("the readiness probe runs %q, want the health line %q", got, want)
+	}
+	if got, want := c.LivenessProbe.Exec.Command, []string{"gt", "daemon", "status"}; !slices.Equal(got, want) {
+		t.Errorf("the liveness probe runs %q, want the running check %q", got, want)
+	}
+	if c.LivenessProbe.PeriodSeconds <= c.ReadinessProbe.PeriodSeconds || c.LivenessProbe.FailureThreshold <= c.ReadinessProbe.FailureThreshold {
+		t.Errorf("the liveness probe (%ds period, %d failures) is not looser than readiness (%ds, %d)",
+			c.LivenessProbe.PeriodSeconds, c.LivenessProbe.FailureThreshold,
+			c.ReadinessProbe.PeriodSeconds, c.ReadinessProbe.FailureThreshold)
+	}
+	if c.Lifecycle == nil || c.Lifecycle.PreStop == nil {
+		t.Fatal("the container carries no preStop, want the drain request")
+	}
+	if got, want := c.Lifecycle.PreStop.Exec.Command, []string{"gt", "daemon", "drain"}; !slices.Equal(got, want) {
+		t.Errorf("the preStop runs %q, want the drain request %q", got, want)
+	}
+}
+
+// TestPodCommandEqualsTheComposeCommand renders the live compose file with the
+// same credentials and holds the pod's arguments equal to its daemon command;
+// an environment value that looks like a secret is refused, and the refusal
+// names the key without echoing the value.
+func TestPodCommandEqualsTheComposeCommand(t *testing.T) {
+	t.Parallel()
+
+	spec := templates.ComposeSpec{
+		Project:        "gt-town",
+		ContainerName:  "gt-daemon",
+		Image:          "gt-daemon:abc1234",
+		TownRoot:       TownRootPath,
+		StopGrace:      templates.MinimumStopGrace,
+		DoltHost:       "host.docker.internal",
+		OMTokenFile:    "/host/om-daemon-token",
+		OMConfigFile:   "/host/om-config.json",
+		ForgeHost:      "forgejo:3000",
+		ForgeTokenFile: "/host/forgejo-landing.env",
+	}
+	rendered, err := templates.RenderDaemonCompose(spec)
+	if err != nil {
+		t.Fatalf("RenderDaemonCompose: %v", err)
+	}
+	var composeFile struct {
+		Services map[string]struct {
+			Command []string `yaml:"command"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(rendered, &composeFile); err != nil {
+		t.Fatalf("the rendered compose file does not parse: %v", err)
+	}
+	want := composeFile.Services["daemon"].Command
+	if len(want) == 0 {
+		t.Fatal("the compose daemon service carries no command, so the equality check reads nothing")
+	}
+
+	m := mustBuild(t, goldenValues(t))
+	got := m.Deployment.Spec.Template.Spec.Containers[0].Args
+	if !slices.Equal(got, want) {
+		t.Errorf("the pod's args = %q, want the compose daemon command %q", got, want)
+	}
+
+	// A spec with no credentials renders no command, and the pod passes none.
+	spec.OMTokenFile, spec.OMConfigFile, spec.ForgeHost, spec.ForgeTokenFile = "", "", "", ""
+	rendered, err = templates.RenderDaemonCompose(spec)
+	if err != nil {
+		t.Fatalf("RenderDaemonCompose without credentials: %v", err)
+	}
+	if err := yaml.Unmarshal(rendered, &composeFile); err != nil {
+		t.Fatalf("the rendered compose file does not parse: %v", err)
+	}
+	if want := composeFile.Services["daemon"].Command; len(want) != 0 {
+		t.Fatalf("the compose daemon service carries %q without credentials, want no command", want)
+	}
+	v := goldenValues(t)
+	v.OMToken, v.ForgeHost = false, ""
+	if got := mustBuild(t, v).Deployment.Spec.Template.Spec.Containers[0].Args; len(got) != 0 {
+		t.Errorf("the pod's args are %q without credentials, want none", got)
+	}
+
+	const secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
+	v = goldenValues(t)
+	v.Env["FORGEJO_TOKEN"] = secret
+	_, err = Build(v)
+	if err == nil {
+		t.Fatal("Build with a secret-looking env value = a render, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "FORGEJO_TOKEN") {
+		t.Errorf("Build refused with %q, want the key named", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Error("the refusal echoes the secret value, and a manifest never carries one")
+	}
+}
+
+// TestLooksLikeSecretMatchesConfig holds the renderer's copy of the rule to
+// config.LooksLikeSecret, which the import rule keeps it from calling.
+func TestLooksLikeSecretMatchesConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ key, value string }{
+		{"ANTHROPIC_AUTH_TOKEN", "sk-ant-0123456789abcdef"},
+		{"FORGEJO_TOKEN", "ghp_0123456789abcdefghijklmnopqrstuvwxyz"},
+		{"AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"},
+		{"AWS_SESSION_TOKEN", "ASIAIOSFODNN7EXAMPLE"},
+		{"SOME_PATH", "/Users/sloan/.config/gt/forgejo-landing.env"},
+		{"SOME_URL", "https://forgejo.example:3000/owner/repo"},
+		{"SOME_REFERENCE", "${DEEPSEEK_API_KEY}"},
+		{"SOME_NUMBER", "12345678901234567890"},
+		{"SOME_SHORT_SECRET", "short"},
+		{"TZ", "America/Chicago"},
+		{"GIT_EMAIL", "gt@gastown.local"},
+		{"SOME_TOKEN", "project-gastown-2026-11-08"},
+		{"SOME_VALUE", "0123456789abcdef"},
+		{"NORMAL", "a value with spaces in it"},
+	}
+	for _, tc := range tests {
+		if got, want := looksLikeSecret(tc.key, tc.value), config.LooksLikeSecret(tc.key, tc.value); got != want {
+			t.Errorf("looksLikeSecret(%q, %q) = %t, want config.LooksLikeSecret's %t", tc.key, tc.value, got, want)
+		}
+	}
+}
+
+// TestForgeHostMatchesConfigPattern holds the renderer's host check to
+// config.ForgeHostPattern, which the entrypoint and the compose render read.
+func TestForgeHostMatchesConfigPattern(t *testing.T) {
+	t.Parallel()
+	hosts := []string{
+		"forgejo:3000", "forgejo.example:3000", "Forgejo:80", "f:1",
+		"forgejo", "forgejo:0", "forgejo:70000", "https://forgejo:3000",
+		"-forgejo:3000", "forgejo:3000/path", "forgejo:27a", "forgejo:",
+	}
+	for _, host := range hosts {
+		m := config.ForgeHostPattern.FindStringSubmatch(host)
+		configOK := m != nil
+		if configOK {
+			port, _ := strconv.Atoi(m[1])
+			configOK = port >= 1 && port <= 65535
+		}
+		if got := validForgeHost(host) == nil; got != configOK {
+			t.Errorf("validForgeHost(%q) = %t, want config.ForgeHostPattern's %t", host, got, configOK)
+		}
 	}
 }
 
