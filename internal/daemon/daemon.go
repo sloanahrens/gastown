@@ -1481,6 +1481,9 @@ func New(config *Config) (*Daemon, error) {
 	d.checkpointRevertAlert = d.escalateAlert
 	// Bound rather than the method expression, whose type carries the receiver.
 	d.updateTrigger.launch = d.launchUpdate
+	// The Dolt image check asks the Dolt server itself for its version when
+	// docker cannot see the container's image (gt-w9wdav).
+	d.doltImage.serverVersion = d.doltServerVersion
 
 	// A health-driven Dolt restart waits for an in-flight scheduled gc.
 	if doltServer != nil {
