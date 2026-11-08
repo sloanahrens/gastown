@@ -8,13 +8,13 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/birdreports"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/reportdir"
 	"github.com/steveyegge/gastown/internal/townstate"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -27,24 +27,17 @@ const (
 	// reportPublishPageName and reportPublishPrevPageName are the page this
 	// command writes and the one it keeps in its place. reportPublishPrevSidecarName
 	// is the sidecar kept beside the previous page.
-	reportPublishPageName        = birdreports.PageName
-	reportPublishPrevPageName    = birdreports.PrevPageName
-	reportPublishPrevSidecarName = birdreports.PrevSidecarName
+	reportPublishPageName        = reportdir.PageName
+	reportPublishPrevPageName    = reportdir.PrevPageName
+	reportPublishPrevSidecarName = reportdir.PrevSidecarName
 
 	// reportPublishInputMax bounds the document read from standard input. It
 	// leaves room to decode a page over the cap so the refusal can name the
 	// field rather than the document.
 	reportPublishInputMax = 4*reportPublishPageMax + birdreports.SidecarMaxBytes
-
-	// reportPublishNameShape is the whole name a bird may publish under:
-	// lowercase letters, 2 to 24, which is every name the pool hands out.
-	reportPublishNameShape = `^[a-z]{2,24}$`
 )
 
-var (
-	reportPublishBird   string
-	reportPublishNameRe = regexp.MustCompile(reportPublishNameShape)
-)
+var reportPublishBird string
 
 var reportPublishCmd = &cobra.Command{
 	Use:   "publish",
@@ -159,11 +152,13 @@ func readReportPublishDoc(in io.Reader) (reportPublishDoc, error) {
 // the first byte is written, so a refused document leaves the directory as it
 // was.
 func validateReportPublish(bird string, doc reportPublishDoc, page []byte, now time.Time) error {
-	if !reportPublishNameRe.MatchString(bird) {
+	if !reportdir.ValidName(bird) {
 		return fmt.Errorf("bird: %q is not a bird name (lowercase letters, 2 to 24)", bird)
 	}
 	if doc.Bird != bird {
-		return fmt.Errorf("bird: the document names %q, --bird is %q", doc.Bird, bird)
+		// The document's bird field is the bird's own text, so the refusal
+		// names the field and never repeats its value (gt-yjzepk.3).
+		return errors.New("bird: the document's bird is not the one --bird names")
 	}
 	if reservedRuntimeNames()[bird] {
 		return fmt.Errorf("bird: %q is a daemon subsystem directory under .runtime", bird)
@@ -238,13 +233,16 @@ func osReportPublishFS() reportPublishFS {
 // page is never a symlink the write follows: a destination that is not a
 // regular file is refused, and a rename replaces the name itself.
 func writeReportPublish(fsys reportPublishFS, runtimeDir, bird string, page, sidecar []byte) (reportPublishReceipt, error) {
-	dir := birdreports.PublishedReportDir(runtimeDir, bird)
+	dir, err := reportdir.Published(runtimeDir, bird)
+	if err != nil {
+		return reportPublishReceipt{}, err
+	}
 	if err := ensurePublishedDir(fsys, runtimeDir, dir); err != nil {
 		return reportPublishReceipt{}, err
 	}
 
 	pagePath := filepath.Join(dir, reportPublishPageName)
-	sidecarPath := filepath.Join(dir, birdreports.SidecarName)
+	sidecarPath := filepath.Join(dir, reportdir.SidecarName)
 	prevPath := filepath.Join(dir, reportPublishPrevPageName)
 	prevSidecarPath := filepath.Join(dir, reportPublishPrevSidecarName)
 
@@ -400,7 +398,7 @@ func ensurePublishedDir(fsys reportPublishFS, runtimeDir, dir string) error {
 	if err := requireRealDir(fsys, runtimeDir); err != nil {
 		return err
 	}
-	for _, path := range []string{filepath.Join(runtimeDir, birdreports.PublishedDirName), dir} {
+	for _, path := range []string{reportdir.PublishedReportsDir(runtimeDir), dir} {
 		if err := ensureRealDir(fsys, path); err != nil {
 			return err
 		}

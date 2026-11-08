@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/birdreports"
+	"github.com/steveyegge/gastown/internal/reportdir"
 )
 
 // reportPublishNow is the clock every publish test injects, in the shape a
@@ -22,6 +23,17 @@ var reportPublishNow = time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 
 // reportPublishClock returns the clock the command is handed.
 func reportPublishClock() time.Time { return reportPublishNow }
+
+// reportPublishDir is the directory gt report publish writes for bird, as
+// internal/reportdir resolves it, so the test names no layout itself.
+func reportPublishDir(t *testing.T, runtimeDir, bird string) string {
+	t.Helper()
+	dir, err := reportdir.Published(runtimeDir, bird)
+	if err != nil {
+		t.Fatalf("resolving the published directory for %s: %v", bird, err)
+	}
+	return dir
+}
 
 // reportPublishDocument builds the one JSON document the command reads.
 func reportPublishDocument(t *testing.T, bird, page string, sidecar json.RawMessage) string {
@@ -86,7 +98,7 @@ func assertReportPublishDirHolds(t *testing.T, dir string, want ...string) {
 func TestReportPublishWritesAtomically(t *testing.T) {
 	t.Parallel()
 	runtimeDir := t.TempDir()
-	dir := birdreports.PublishedReportDir(runtimeDir, "dunlin")
+	dir := reportPublishDir(t, runtimeDir, "dunlin")
 
 	firstPage := "<html><body>first report</body></html>"
 	firstSidecar := reportPublishSidecar("dunlin", time.Hour)
@@ -96,7 +108,7 @@ func TestReportPublishWritesAtomically(t *testing.T) {
 		t.Fatalf("the first publish = %v", err)
 	}
 	pagePath := filepath.Join(dir, reportPublishPageName)
-	sidecarPath := filepath.Join(dir, birdreports.SidecarName)
+	sidecarPath := filepath.Join(dir, reportdir.SidecarName)
 	for _, want := range []string{pagePath, sidecarPath, fmt.Sprintf("%d bytes", len(firstPage))} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the receipt does not name %q:\n%s", want, out)
@@ -108,7 +120,7 @@ func TestReportPublishWritesAtomically(t *testing.T) {
 	if got := readReportPublishFile(t, sidecarPath); got != string(firstSidecar) {
 		t.Errorf("daily.json = %q, want the sidecar as given", got)
 	}
-	assertReportPublishDirHolds(t, dir, reportPublishPageName, birdreports.SidecarName)
+	assertReportPublishDirHolds(t, dir, reportPublishPageName, reportdir.SidecarName)
 	for _, path := range []string{pagePath, sidecarPath} {
 		info, err := os.Stat(path)
 		if err != nil {
@@ -139,7 +151,7 @@ func TestReportPublishWritesAtomically(t *testing.T) {
 	if got := readReportPublishFile(t, prevSidecarPath); got != string(firstSidecar) {
 		t.Errorf("daily.prev.json = %q, want the sidecar it replaced", got)
 	}
-	assertReportPublishDirHolds(t, dir, reportPublishPageName, birdreports.SidecarName,
+	assertReportPublishDirHolds(t, dir, reportPublishPageName, reportdir.SidecarName,
 		reportPublishPrevPageName, reportPublishPrevSidecarName)
 }
 
@@ -151,7 +163,7 @@ func TestReportPublishRollsBackAPartialRename(t *testing.T) {
 	t.Parallel()
 	const bird = "dunlin"
 	runtimeDir := t.TempDir()
-	dir := birdreports.PublishedReportDir(runtimeDir, bird)
+	dir := reportPublishDir(t, runtimeDir, bird)
 
 	firstPage := []byte("<html>first report</html>")
 	firstSidecar := reportPublishSidecar(bird, time.Hour)
@@ -159,7 +171,7 @@ func TestReportPublishRollsBackAPartialRename(t *testing.T) {
 		t.Fatalf("the first publish = %v", err)
 	}
 	pagePath := filepath.Join(dir, reportPublishPageName)
-	sidecarPath := filepath.Join(dir, birdreports.SidecarName)
+	sidecarPath := filepath.Join(dir, reportdir.SidecarName)
 
 	fsys := osReportPublishFS()
 	fsys.rename = func(oldpath, newpath string) error {
@@ -182,7 +194,7 @@ func TestReportPublishRollsBackAPartialRename(t *testing.T) {
 	}
 	// The pair had no previous version before this publish, so the rotation the
 	// failed publish began is undone rather than left behind.
-	assertReportPublishDirHolds(t, dir, reportPublishPageName, birdreports.SidecarName)
+	assertReportPublishDirHolds(t, dir, reportPublishPageName, reportdir.SidecarName)
 }
 
 // TestReportPublishRefusesBadInput drives each refusal of a document before
@@ -191,10 +203,11 @@ func TestReportPublishRollsBackAPartialRename(t *testing.T) {
 func TestReportPublishRefusesBadInput(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name string
-		bird string
-		doc  func(t *testing.T) string
-		want string
+		name   string
+		bird   string
+		doc    func(t *testing.T) string
+		want   string
+		absent string
 	}{
 		{
 			name: "a malformed document",
@@ -283,6 +296,15 @@ func TestReportPublishRefusesBadInput(t *testing.T) {
 			want: "bird",
 		},
 		{
+			name: "a document whose bird field is never echoed",
+			bird: "dunlin",
+			doc: func(t *testing.T) string {
+				return reportPublishDocument(t, "MARKER-document-bird", "<html></html>", reportPublishSidecar("dunlin", time.Hour))
+			},
+			want:   "bird",
+			absent: "MARKER-document-bird",
+		},
+		{
 			name: "a bird name equal to a daemon subsystem directory",
 			bird: "agents",
 			doc: func(t *testing.T) string {
@@ -301,6 +323,9 @@ func TestReportPublishRefusesBadInput(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("error = %q, want it to name %s", err, tt.want)
+			}
+			if tt.absent != "" && strings.Contains(err.Error(), tt.absent) {
+				t.Errorf("error = %q, want the document's text absent from it", err)
 			}
 			entries, readErr := os.ReadDir(runtimeDir)
 			if readErr != nil {
@@ -345,7 +370,7 @@ func TestReportPublishRefusesAPathItCannotUse(t *testing.T) {
 	t.Run("a published directory that is a file", func(t *testing.T) {
 		t.Parallel()
 		runtimeDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(runtimeDir, birdreports.PublishedDirName), []byte("x"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(runtimeDir, reportdir.PublishedDirName), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := runPublish(t, runtimeDir, "dunlin", validDoc(t, "dunlin")); err == nil {
@@ -356,7 +381,7 @@ func TestReportPublishRefusesAPathItCannotUse(t *testing.T) {
 	t.Run("a bird directory that is a file", func(t *testing.T) {
 		t.Parallel()
 		runtimeDir := t.TempDir()
-		dir := birdreports.PublishedReportDir(runtimeDir, "dunlin")
+		dir := reportPublishDir(t, runtimeDir, "dunlin")
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -371,8 +396,8 @@ func TestReportPublishRefusesAPathItCannotUse(t *testing.T) {
 	t.Run("a destination that is a directory", func(t *testing.T) {
 		t.Parallel()
 		runtimeDir := t.TempDir()
-		dir := birdreports.PublishedReportDir(runtimeDir, "dunlin")
-		if err := os.MkdirAll(filepath.Join(dir, birdreports.SidecarName), 0o755); err != nil {
+		dir := reportPublishDir(t, runtimeDir, "dunlin")
+		if err := os.MkdirAll(filepath.Join(dir, reportdir.SidecarName), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		out, err := runPublish(t, runtimeDir, "dunlin", validDoc(t, "dunlin"))
@@ -396,7 +421,7 @@ func TestReportPublishNeverFollowsASymlink(t *testing.T) {
 	t.Run("a symlinked page", func(t *testing.T) {
 		t.Parallel()
 		runtimeDir := t.TempDir()
-		dir := birdreports.PublishedReportDir(runtimeDir, "dunlin")
+		dir := reportPublishDir(t, runtimeDir, "dunlin")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -426,7 +451,7 @@ func TestReportPublishNeverFollowsASymlink(t *testing.T) {
 		// The link points at a real directory holding a report for another
 		// bird: a publish through it would write outside the runtime tree.
 		elsewhere := t.TempDir()
-		if err := os.Symlink(elsewhere, filepath.Join(runtimeDir, birdreports.PublishedDirName)); err != nil {
+		if err := os.Symlink(elsewhere, filepath.Join(runtimeDir, reportdir.PublishedDirName)); err != nil {
 			t.Fatal(err)
 		}
 
@@ -642,7 +667,7 @@ func TestReportPublishReportsAFailureOnEveryWritePath(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			runtimeDir := t.TempDir()
-			dir := birdreports.PublishedReportDir(runtimeDir, bird)
+			dir := reportPublishDir(t, runtimeDir, bird)
 			fsys := osReportPublishFS()
 			tt.script(t, &fsys, dir)
 
@@ -684,14 +709,14 @@ func TestReportPublishReportsAFailedRestore(t *testing.T) {
 	t.Parallel()
 	const bird = "dunlin"
 	runtimeDir := t.TempDir()
-	dir := birdreports.PublishedReportDir(runtimeDir, bird)
+	dir := reportPublishDir(t, runtimeDir, bird)
 
 	if _, err := writeReportPublish(osReportPublishFS(), runtimeDir, bird,
 		[]byte("<html>first report</html>"), reportPublishSidecar(bird, time.Hour)); err != nil {
 		t.Fatalf("the first publish = %v", err)
 	}
 	pagePath := filepath.Join(dir, reportPublishPageName)
-	sidecarPath := filepath.Join(dir, birdreports.SidecarName)
+	sidecarPath := filepath.Join(dir, reportdir.SidecarName)
 
 	// The sidecar rename fails after the page is in place, and the page cannot
 	// be renamed back: the first page rename is the publish's, the second is the

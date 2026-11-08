@@ -2,17 +2,14 @@ package birdreports
 
 import (
 	"fmt"
-	"go/ast"
-	"go/parser"
-	"go/token"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/reportdir"
 )
 
 // testNow is the clock every test injects, in the same shape a bird writes.
@@ -30,11 +27,11 @@ func writeReport(t *testing.T, root, reporter, bird string, age time.Duration) {
 // writeSidecar writes body at root/<reporter>/reports/daily.json.
 func writeSidecar(t *testing.T, root, reporter, body string) {
 	t.Helper()
-	reports := filepath.Join(root, reporter, ReportsSubdir)
+	reports := filepath.Join(root, reporter, reportdir.ReportsSubdir)
 	if err := os.MkdirAll(reports, 0o755); err != nil {
 		t.Fatalf("making %s: %v", reports, err)
 	}
-	if err := os.WriteFile(filepath.Join(reports, SidecarName), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(reports, reportdir.SidecarName), []byte(body), 0o644); err != nil {
 		t.Fatalf("writing the sidecar: %v", err)
 	}
 }
@@ -140,11 +137,11 @@ func TestReadRefusesWhatItCannotUse(t *testing.T) {
 				if err := os.WriteFile(real, []byte(good(reporter, time.Hour)), 0o644); err != nil {
 					t.Fatalf("writing the target: %v", err)
 				}
-				reports := filepath.Join(root, reporter, ReportsSubdir)
+				reports := filepath.Join(root, reporter, reportdir.ReportsSubdir)
 				if err := os.MkdirAll(reports, 0o755); err != nil {
 					t.Fatalf("making %s: %v", reports, err)
 				}
-				if err := os.Symlink(real, filepath.Join(reports, SidecarName)); err != nil {
+				if err := os.Symlink(real, filepath.Join(reports, reportdir.SidecarName)); err != nil {
 					t.Fatalf("linking the sidecar: %v", err)
 				}
 			},
@@ -154,8 +151,8 @@ func TestReadRefusesWhatItCannotUse(t *testing.T) {
 			name: "a directory named daily.json",
 			setup: func(t *testing.T, root string) {
 				t.Helper()
-				reports := filepath.Join(root, reporter, ReportsSubdir)
-				if err := os.MkdirAll(filepath.Join(reports, SidecarName), 0o755); err != nil {
+				reports := filepath.Join(root, reporter, reportdir.ReportsSubdir)
+				if err := os.MkdirAll(filepath.Join(reports, reportdir.SidecarName), 0o755); err != nil {
 					t.Fatalf("making the directory: %v", err)
 				}
 			},
@@ -198,8 +195,8 @@ func TestReadRefusesWhatItCannotUse(t *testing.T) {
 				if err := os.MkdirAll(filepath.Join(root, reporter), 0o755); err != nil {
 					t.Fatalf("making the reporter directory: %v", err)
 				}
-				link := filepath.Join(root, reporter, ReportsSubdir)
-				if err := os.Symlink(filepath.Join("..", "elsewhere", ReportsSubdir), link); err != nil {
+				link := filepath.Join(root, reporter, reportdir.ReportsSubdir)
+				if err := os.Symlink(filepath.Join("..", "elsewhere", reportdir.ReportsSubdir), link); err != nil {
 					t.Fatalf("linking the reports directory: %v", err)
 				}
 			},
@@ -241,7 +238,7 @@ func TestReadNamesAPathItCannotRead(t *testing.T) {
 	}
 
 	// The runtime path is a file, so the published directory below it cannot
-	// hold a report and ReportDir falls back to the old location. Read walks
+	// hold a report and the resolver falls back to the old location. Read walks
 	// that location's parent first and names it: what cannot be examined is the
 	// reporter's directory, not an absent report.
 	got := Read(runtimeDir, "dunlin", testNow, MaxAge)
@@ -281,15 +278,26 @@ func TestReadAllNamesTheLateReportersInOrder(t *testing.T) {
 	}
 }
 
+// publishedReportDir is the published directory reportdir resolves for a name
+// the tests use, so this file does not build the layout itself.
+func publishedReportDir(t *testing.T, root, reporter string) string {
+	t.Helper()
+	dir, err := reportdir.Published(root, reporter)
+	if err != nil {
+		t.Fatalf("resolving the published directory for %s: %v", reporter, err)
+	}
+	return dir
+}
+
 // writePublishedSidecar writes body at root/reports/<reporter>/daily.json, the
 // location gt report publish writes.
 func writePublishedSidecar(t *testing.T, root, reporter, body string) {
 	t.Helper()
-	dir := PublishedReportDir(root, reporter)
+	dir := publishedReportDir(t, root, reporter)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("making %s: %v", dir, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, SidecarName), []byte(body), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, reportdir.SidecarName), []byte(body), 0o644); err != nil {
 		t.Fatalf("writing the published sidecar: %v", err)
 	}
 }
@@ -332,7 +340,7 @@ func TestReadsBothLocations(t *testing.T) {
 	t.Run("a published directory with no sidecar falls through to the old one", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		if err := os.MkdirAll(PublishedReportDir(root, reporter), 0o755); err != nil {
+		if err := os.MkdirAll(publishedReportDir(t, root, reporter), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		writeSidecar(t, root, reporter, sidecar(time.Hour))
@@ -346,7 +354,7 @@ func TestReadsBothLocations(t *testing.T) {
 	t.Run("a report in neither location is missing", func(t *testing.T) {
 		t.Parallel()
 		got := Read(t.TempDir(), reporter, testNow, MaxAge)
-		if got.Status != Missing || got.Note != "no "+SidecarName {
+		if got.Status != Missing || got.Note != "no "+reportdir.SidecarName {
 			t.Fatalf("Read = %q (%s), want missing", got.Status, got.Note)
 		}
 	})
@@ -498,153 +506,4 @@ func TestDefaultReportersNamesTheTenReporters(t *testing.T) {
 	if DefaultReporters()[0] == "changed" {
 		t.Error("DefaultReporters() returns a shared slice")
 	}
-}
-
-// publishedNames resolves the names this package exports when they appear in
-// another package as birdreports.<Name>, so the guard below reads a call that
-// names them the same as one that writes the string out.
-var publishedNames = map[string]string{
-	"SidecarName":      SidecarName,
-	"PageName":         PageName,
-	"PrevPageName":     PrevPageName,
-	"PrevSidecarName":  PrevSidecarName,
-	"PublishedDirName": PublishedDirName,
-}
-
-// TestReadersResolveTheReportDirectory is the guard: the reports directory is
-// named in one place, ReportDir, so a reader cannot drift back to building the
-// location itself. It parses every non-test file outside this package and fails
-// when one function both joins the reports directory name and joins a daily
-// report file name, which is a reader laying the path out by hand.
-func TestReadersResolveTheReportDirectory(t *testing.T) {
-	t.Parallel()
-	root := filepath.Join("..", "..")
-	ownPackage := filepath.Join("internal", "birdreports") + string(filepath.Separator)
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		name := d.Name()
-		if d.IsDir() {
-			if path != root && (strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "scratch") {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		if strings.HasPrefix(rel, ownPackage) {
-			return nil
-		}
-		checkReportPathIsResolved(t, rel, path)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking the repository: %v", err)
-	}
-}
-
-// checkReportPathIsResolved flags a function in one file that both joins the
-// reports directory name and joins a daily file name.
-func checkReportPathIsResolved(t *testing.T, rel, path string) {
-	t.Helper()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-	if err != nil {
-		t.Errorf("%s: %v", rel, err)
-		return
-	}
-	consts := stringConsts(file)
-	ast.Inspect(file, func(n ast.Node) bool {
-		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
-			return true
-		}
-		var joinsReports, joinsDaily bool
-		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			call, ok := n.(*ast.CallExpr)
-			if !ok || !isJoinCall(call.Fun) {
-				return true
-			}
-			for _, arg := range call.Args {
-				switch literalString(arg, consts) {
-				case PublishedDirName:
-					joinsReports = true
-				case SidecarName, PageName, PrevPageName, PrevSidecarName:
-					joinsDaily = true
-				}
-			}
-			return true
-		})
-		if joinsReports && joinsDaily {
-			t.Errorf("%s: %s joins the reports directory with a daily file; read the directory through birdreports.ReportDir", rel, fn.Name.Name)
-		}
-		return true
-	})
-}
-
-// isJoinCall reports whether fun is the path package's Join or filepath's.
-func isJoinCall(fun ast.Expr) bool {
-	sel, ok := fun.(*ast.SelectorExpr)
-	if !ok || sel.Sel.Name != "Join" {
-		return false
-	}
-	pkg, ok := sel.X.(*ast.Ident)
-	return ok && (pkg.Name == "path" || pkg.Name == "filepath")
-}
-
-// literalString resolves an expression to the string it names: a literal, a
-// constant declared in the same file, or one of this package's exported names.
-// Anything else is the empty string, which matches no report name.
-func literalString(expr ast.Expr, consts map[string]string) string {
-	switch e := expr.(type) {
-	case *ast.BasicLit:
-		if e.Kind != token.STRING {
-			return ""
-		}
-		s, err := strconv.Unquote(e.Value)
-		if err != nil {
-			return ""
-		}
-		return s
-	case *ast.Ident:
-		return consts[e.Name]
-	case *ast.SelectorExpr:
-		if pkg, ok := e.X.(*ast.Ident); ok && pkg.Name == "birdreports" {
-			return publishedNames[e.Sel.Name]
-		}
-	}
-	return ""
-}
-
-// stringConsts is the file's single-name string constants, so a join written
-// with a named file (birdReportsFile) reads the same as the literal.
-func stringConsts(file *ast.File) map[string]string {
-	out := map[string]string{}
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
-			continue
-		}
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
-				continue
-			}
-			lit, ok := vs.Values[0].(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				continue
-			}
-			s, err := strconv.Unquote(lit.Value)
-			if err == nil {
-				out[vs.Names[0].Name] = s
-			}
-		}
-	}
-	return out
 }

@@ -11,7 +11,7 @@ import (
 	"github.com/jonboulle/clockwork"
 
 	"github.com/steveyegge/gastown/internal/attention"
-	"github.com/steveyegge/gastown/internal/birdreports"
+	"github.com/steveyegge/gastown/internal/reportdir"
 )
 
 // birdReportsTestZone fixes the zone start_hour is read in, so a test's hour
@@ -38,7 +38,7 @@ func birdReportsWriteRaw(t *testing.T, town, name string, data []byte) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, birdreports.SidecarName), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, reportdir.SidecarName), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -47,11 +47,14 @@ func birdReportsWriteRaw(t *testing.T, town, name string, data []byte) {
 // writes, <town>/.runtime/reports/<name>/daily.json.
 func birdReportsWritePublished(t *testing.T, town, name string, data []byte) {
 	t.Helper()
-	dir := birdreports.PublishedReportDir(filepath.Join(town, ".runtime"), name)
+	dir, err := reportdir.Published(filepath.Join(town, ".runtime"), name)
+	if err != nil {
+		t.Fatalf("resolving the published directory for %s: %v", name, err)
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, birdreports.SidecarName), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, reportdir.SidecarName), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -145,7 +148,7 @@ func TestBirdReportsItemShapes(t *testing.T) {
 		{
 			name: "unreadable file",
 			setup: func(t *testing.T, town string) {
-				path := filepath.Join(town, ".runtime", "dunlin", "reports", birdreports.SidecarName)
+				path := filepath.Join(town, ".runtime", "dunlin", "reports", reportdir.SidecarName)
 				if err := os.MkdirAll(path, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -507,5 +510,20 @@ func TestBirdReportsReadsTheVolumeLocation(t *testing.T) {
 				t.Errorf("summary = %q, want the report named missing", got[0].Summary)
 			}
 		})
+	}
+}
+
+// TestBirdReportsRefusesAConfiguredNameTheResolverRefuses drives the resolver's
+// name check through the patrol: a configured reporter name the resolver
+// refuses is an item that says the report could not be read, not a fresh one.
+func TestBirdReportsRefusesAConfiguredNameTheResolverRefuses(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	got := birdReportStaleItems(now, birdReportsTestReads(t.TempDir(), 6, 26*time.Hour, "../dunlin"))
+	if len(got) != 1 {
+		t.Fatalf("items = %+v, want the refused name to be one late report", got)
+	}
+	if !strings.Contains(got[0].Summary, "could not be read") {
+		t.Errorf("summary = %q, want it to say the report could not be read", got[0].Summary)
 	}
 }

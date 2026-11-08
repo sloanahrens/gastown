@@ -107,25 +107,25 @@ func TestBirdReportsReadsFreshAndStale(t *testing.T) {
 	now := birdReportsNow
 	root := t.TempDir()
 
-	writeBird(t, root, "fresh-bird", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("fresh-bird", now.Add(-(25*time.Hour+59*time.Minute)), "fresh title", "fresh summary")),
+	writeBird(t, root, "freshbird", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("freshbird", now.Add(-(25*time.Hour+59*time.Minute)), "fresh title", "fresh summary")),
 	})
-	writeBird(t, root, "edge-bird", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("edge-bird", now.Add(-26*time.Hour), "edge title", "edge summary")),
+	writeBird(t, root, "edgebird", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("edgebird", now.Add(-26*time.Hour), "edge title", "edge summary")),
 	})
-	writeBird(t, root, "old-bird", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("old-bird", now.Add(-(26*time.Hour+time.Minute)), "old title", "old summary")),
+	writeBird(t, root, "oldbird", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("oldbird", now.Add(-(26*time.Hour+time.Minute)), "old title", "old summary")),
 	})
-	opFresh := birdSidecarFor("zzz-op", now.Add(-time.Hour), "op title", "op summary")
+	opFresh := birdSidecarFor("zzzop", now.Add(-time.Hour), "op title", "op summary")
 	opFresh.NeedsOperator, opFresh.Decisions = true, 3
-	writeBird(t, root, "zzz-op", birdWrites{json: birdSidecarJSON(t, opFresh)})
-	opStale := birdSidecarFor("aaa-stale", now.Add(-30*time.Hour), "op title", "op summary")
+	writeBird(t, root, "zzzop", birdWrites{json: birdSidecarJSON(t, opFresh)})
+	opStale := birdSidecarFor("aaastale", now.Add(-30*time.Hour), "op title", "op summary")
 	opStale.NeedsOperator = true
-	writeBird(t, root, "aaa-stale", birdWrites{json: birdSidecarJSON(t, opStale)})
+	writeBird(t, root, "aaastale", birdWrites{json: birdSidecarJSON(t, opStale)})
 
 	rows := NewBirdReportsReader(root).Read(now)
 
-	wantOrder := []string{"aaa-stale", "zzz-op", "old-bird", "edge-bird", "fresh-bird"}
+	wantOrder := []string{"aaastale", "zzzop", "oldbird", "edgebird", "freshbird"}
 	if got := birdNames(rows); !slices.Equal(got, wantOrder) {
 		t.Errorf("rows in order %v, want %v", got, wantOrder)
 	}
@@ -135,32 +135,32 @@ func TestBirdReportsReadsFreshAndStale(t *testing.T) {
 		state string
 		stale bool
 	}{
-		"fresh-bird": {BirdReportFresh, false},
-		"edge-bird":  {BirdReportFresh, false},
-		"old-bird":   {BirdReportStale, true},
-		"zzz-op":     {BirdReportFresh, false},
-		"aaa-stale":  {BirdReportStale, true},
+		"freshbird": {BirdReportFresh, false},
+		"edgebird":  {BirdReportFresh, false},
+		"oldbird":   {BirdReportStale, true},
+		"zzzop":     {BirdReportFresh, false},
+		"aaastale":  {BirdReportStale, true},
 	} {
 		if r := byName[name]; r.State != want.state || r.Stale != want.stale {
 			t.Errorf("%s: state %q stale %v, want %q stale %v", name, r.State, r.Stale, want.state, want.stale)
 		}
 	}
 
-	fresh := byName["fresh-bird"]
+	fresh := byName["freshbird"]
 	if !fresh.Written.Equal(now.Add(-(25*time.Hour + 59*time.Minute))) {
-		t.Errorf("fresh-bird written at %v, want the sidecar's written_at", fresh.Written)
+		t.Errorf("freshbird written at %v, want the sidecar's written_at", fresh.Written)
 	}
 	if fresh.Title != "fresh title" || fresh.Summary != "fresh summary" {
-		t.Errorf("fresh-bird row shows %q / %q, want the sidecar's title and summary", fresh.Title, fresh.Summary)
+		t.Errorf("freshbird row shows %q / %q, want the sidecar's title and summary", fresh.Title, fresh.Summary)
 	}
 	if fresh.HasPage || fresh.HasPrev || fresh.Note != "" {
-		t.Errorf("fresh-bird wrote no page and is readable, yet has_page %v has_prev %v note %q",
+		t.Errorf("freshbird wrote no page and is readable, yet has_page %v has_prev %v note %q",
 			fresh.HasPage, fresh.HasPrev, fresh.Note)
 	}
 
-	op := byName["zzz-op"]
+	op := byName["zzzop"]
 	if !op.NeedsOperator || op.Decisions != 3 {
-		t.Errorf("zzz-op has needs_operator %v decisions %d, want the sidecar's true and 3",
+		t.Errorf("zzzop has needs_operator %v decisions %d, want the sidecar's true and 3",
 			op.NeedsOperator, op.Decisions)
 	}
 }
@@ -241,10 +241,10 @@ func TestBirdReportsSkipsDirsThatAreNotBirdsWithReports(t *testing.T) {
 
 	// A daily.json that is a symlink to another bird's sidecar, with no page of
 	// its own: reading through it would put that bird's summary under this one.
-	writeBird(t, root, "linked-sidecar", birdWrites{})
+	writeBird(t, root, "linkedsidecar", birdWrites{})
 	if err := os.Symlink(
 		filepath.Join(root, "plain", "reports", "daily.json"),
-		filepath.Join(root, "linked-sidecar", "reports", "daily.json"),
+		filepath.Join(root, "linkedsidecar", "reports", "daily.json"),
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -286,39 +286,39 @@ func TestBirdReportsRefusesSymlinkedReportsAndPages(t *testing.T) {
 
 	// A bird with its own sidecar whose two pages are links to plain's: the
 	// summary is this bird's, the pages are not, so neither is a page to serve.
-	writeBird(t, root, "linked-pages", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("linked-pages", now, "title", "summary")),
+	writeBird(t, root, "linkedpages", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("linkedpages", now, "title", "summary")),
 	})
 	for link, target := range map[string]string{
 		"daily.html":      filepath.Join(root, "plain", "reports", "daily.html"),
 		"daily.prev.html": filepath.Join(root, "plain", "reports", "daily.prev.html"),
 	} {
-		if err := os.Symlink(target, filepath.Join(root, "linked-pages", "reports", link)); err != nil {
+		if err := os.Symlink(target, filepath.Join(root, "linkedpages", "reports", link)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// A bird whose only page is a link and that has no sidecar: it names no
 	// report at all, because the page is not one the reader can serve.
-	writeBird(t, root, "linked-page-only", birdWrites{})
+	writeBird(t, root, "linkedpageonly", birdWrites{})
 	if err := os.Symlink(
 		filepath.Join(root, "plain", "reports", "daily.html"),
-		filepath.Join(root, "linked-page-only", "reports", "daily.html"),
+		filepath.Join(root, "linkedpageonly", "reports", "daily.html"),
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	rows := NewBirdReportsReader(root).Read(now)
-	if got, want := birdNames(rows), []string{"linked-pages", "plain"}; !slices.Equal(got, want) {
+	if got, want := birdNames(rows), []string{"linkedpages", "plain"}; !slices.Equal(got, want) {
 		t.Fatalf("rows %v, want %v", got, want)
 	}
 
-	linked := birdByName(rows)["linked-pages"]
+	linked := birdByName(rows)["linkedpages"]
 	if linked.State != BirdReportFresh || linked.Summary != "summary" {
-		t.Errorf("linked-pages: state %q summary %q, want its own fresh summary", linked.State, linked.Summary)
+		t.Errorf("linkedpages: state %q summary %q, want its own fresh summary", linked.State, linked.Summary)
 	}
 	if linked.HasPage || linked.HasPrev {
-		t.Errorf("linked-pages: has_page %v has_prev %v, want neither through a link",
+		t.Errorf("linkedpages: has_page %v has_prev %v, want neither through a link",
 			linked.HasPage, linked.HasPrev)
 	}
 }
@@ -350,32 +350,32 @@ func TestBirdReportsNamesWhatItCouldNotRead(t *testing.T) {
 
 	// A sidecar that is a symlink beside a real page: the page is a report, and
 	// the file named daily.json is refused rather than followed.
-	writeBird(t, root, "linked-sidecar", birdWrites{page: "<html>today</html>"})
-	birdSetMtime(t, filepath.Join(root, "linked-sidecar", "reports", "daily.html"), pageAt)
+	writeBird(t, root, "linkedsidecar", birdWrites{page: "<html>today</html>"})
+	birdSetMtime(t, filepath.Join(root, "linkedsidecar", "reports", "daily.html"), pageAt)
 	if err := os.Symlink(
 		filepath.Join(root, "badjson", "reports", "daily.json"),
-		filepath.Join(root, "linked-sidecar", "reports", "daily.json"),
+		filepath.Join(root, "linkedsidecar", "reports", "daily.json"),
 	); err != nil {
 		t.Fatal(err)
 	}
 
 	// Exactly five minutes ahead is not "in the future": a clock that is
 	// together to the minute is a clock, an hour is a wrong written_at.
-	writeBird(t, root, "edge-ahead", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("edge-ahead", now.Add(5*time.Minute), "title", "summary")),
+	writeBird(t, root, "edgeahead", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("edgeahead", now.Add(5*time.Minute), "title", "summary")),
 	})
 
 	rows := NewBirdReportsReader(root).Read(now)
 	byName := birdByName(rows)
 
 	for name, note := range map[string]string{
-		"oversize":       "daily.json is larger than 16 KiB",
-		"badjson":        "daily.json is not valid JSON",
-		"otherbird":      "daily.json names a different bird",
-		"ahead":          "written_at is in the future",
-		"badtime":        "written_at is not an RFC 3339 instant",
-		"htmlonly":       "no summary",
-		"linked-sidecar": "daily.json could not be read",
+		"oversize":      "daily.json is larger than 16 KiB",
+		"badjson":       "daily.json is not valid JSON",
+		"otherbird":     "daily.json names a different bird",
+		"ahead":         "written_at is in the future",
+		"badtime":       "written_at is not an RFC 3339 instant",
+		"htmlonly":      "no summary",
+		"linkedsidecar": "daily.json could not be read",
 	} {
 		r, ok := byName[name]
 		if !ok {
@@ -399,8 +399,8 @@ func TestBirdReportsNamesWhatItCouldNotRead(t *testing.T) {
 	if ahead := byName["ahead"]; !ahead.Written.IsZero() {
 		t.Errorf("ahead shows written %v, want no instant for a refused sidecar", ahead.Written)
 	}
-	if edge := byName["edge-ahead"]; edge.State != BirdReportFresh || edge.Note != "" {
-		t.Errorf("edge-ahead: state %q note %q, want a fresh row", edge.State, edge.Note)
+	if edge := byName["edgeahead"]; edge.State != BirdReportFresh || edge.Note != "" {
+		t.Errorf("edgeahead: state %q note %q, want a fresh row", edge.State, edge.Note)
 	}
 }
 
@@ -453,8 +453,8 @@ func TestBirdReportsCleansTheSummary(t *testing.T) {
 	writeBird(t, root, "leaky", birdWrites{
 		json: birdSidecarJSON(t, birdSidecarFor("leaky", now, "leaky title", "the bird tried "+secret)),
 	})
-	writeBird(t, root, "leaky-title", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("leaky-title", now, secret, "a clean summary")),
+	writeBird(t, root, "leakytitle", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("leakytitle", now, secret, "a clean summary")),
 	})
 
 	rows := NewBirdReportsReader(root).Read(now)
@@ -497,9 +497,9 @@ func TestBirdReportsCleansTheSummary(t *testing.T) {
 		t.Errorf("leaky: note %q does not name the rule that matched", leak.Note)
 	}
 
-	title := byName["leaky-title"]
+	title := byName["leakytitle"]
 	if title.State != BirdReportWithheld || title.Summary != "" || title.Title != "" {
-		t.Errorf("leaky-title: state %q title %q summary %q, want withheld and empty",
+		t.Errorf("leakytitle: state %q title %q summary %q, want withheld and empty",
 			title.State, title.Title, title.Summary)
 	}
 
@@ -525,14 +525,14 @@ func TestBirdReportsCleansTheTitle(t *testing.T) {
 	root := t.TempDir()
 
 	hostile := "title\x07 bell\x1b[31m red\x00 nul‮here"
-	writeBird(t, root, "hostile-title", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("hostile-title", now, hostile, "clean summary")),
+	writeBird(t, root, "hostiletitle", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("hostiletitle", now, hostile, "clean summary")),
 	})
 
 	rows := NewBirdReportsReader(root).Read(now)
-	row := birdByName(rows)["hostile-title"]
+	row := birdByName(rows)["hostiletitle"]
 	if row.State != BirdReportFresh {
-		t.Fatalf("hostile-title: state %q note %q, want a fresh row", row.State, row.Note)
+		t.Fatalf("hostiletitle: state %q note %q, want a fresh row", row.State, row.Note)
 	}
 	if want := "title bell[31m red nulhere"; row.Title != want {
 		t.Errorf("the title is %q, want %q with the control and format runes gone", row.Title, want)
@@ -553,53 +553,53 @@ func TestBirdReportsSaysWhichPagesAreThere(t *testing.T) {
 	now := birdReportsNow
 	root := t.TempDir()
 
-	writeBird(t, root, "with-page", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("with-page", now.Add(-time.Hour), "title", "summary")),
+	writeBird(t, root, "withpage", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("withpage", now.Add(-time.Hour), "title", "summary")),
 		page: "<html>today</html>",
 		prev: "<html>yesterday</html>",
 	})
-	birdSetMtime(t, filepath.Join(root, "with-page", "reports", "daily.html"), now.Add(-30*time.Minute))
-	birdSetMtime(t, filepath.Join(root, "with-page", "reports", "daily.prev.html"), now.Add(-30*time.Hour))
+	birdSetMtime(t, filepath.Join(root, "withpage", "reports", "daily.html"), now.Add(-30*time.Minute))
+	birdSetMtime(t, filepath.Join(root, "withpage", "reports", "daily.prev.html"), now.Add(-30*time.Hour))
 
-	writeBird(t, root, "late-page", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("late-page", now.Add(-2*time.Hour), "title", "summary")),
+	writeBird(t, root, "latepage", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("latepage", now.Add(-2*time.Hour), "title", "summary")),
 		page: "<html>yesterday</html>",
 	})
-	birdSetMtime(t, filepath.Join(root, "late-page", "reports", "daily.html"), now.Add(-5*time.Hour))
+	birdSetMtime(t, filepath.Join(root, "latepage", "reports", "daily.html"), now.Add(-5*time.Hour))
 
 	// One byte over the cap, and exactly at it: neither is a page to serve.
-	writeBird(t, root, "big-page", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("big-page", now, "title", "summary")),
+	writeBird(t, root, "bigpage", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("bigpage", now, "title", "summary")),
 		page: strings.Repeat("x", 1<<20+1),
 	})
-	writeBird(t, root, "exact-page", birdWrites{
-		json: birdSidecarJSON(t, birdSidecarFor("exact-page", now, "title", "summary")),
+	writeBird(t, root, "exactpage", birdWrites{
+		json: birdSidecarJSON(t, birdSidecarFor("exactpage", now, "title", "summary")),
 		page: strings.Repeat("x", 1<<20),
 	})
 
 	rows := NewBirdReportsReader(root).Read(now)
 	byName := birdByName(rows)
 
-	page := byName["with-page"]
+	page := byName["withpage"]
 	if !page.HasPage || !page.HasPrev || page.Note != "" {
-		t.Errorf("with-page: has_page %v has_prev %v note %q, want both pages and no note",
+		t.Errorf("withpage: has_page %v has_prev %v note %q, want both pages and no note",
 			page.HasPage, page.HasPrev, page.Note)
 	}
 	// The page before this one carries its own written instant, so the row can
 	// age the link rather than call it yesterday's.
 	if want := now.Add(-30 * time.Hour); !page.PrevWritten.Equal(want) {
-		t.Errorf("with-page: prev_written %v, want the previous page's mtime %v", page.PrevWritten, want)
+		t.Errorf("withpage: prev_written %v, want the previous page's mtime %v", page.PrevWritten, want)
 	}
 
-	late := byName["late-page"]
+	late := byName["latepage"]
 	if late.Note != "page older than its summary" {
-		t.Errorf("late-page: note %q, want the page named as older than its summary", late.Note)
+		t.Errorf("latepage: note %q, want the page named as older than its summary", late.Note)
 	}
 	if !late.PrevWritten.IsZero() {
-		t.Errorf("late-page: prev_written %v, want no instant without a previous page", late.PrevWritten)
+		t.Errorf("latepage: prev_written %v, want no instant without a previous page", late.PrevWritten)
 	}
 
-	for _, name := range []string{"big-page", "exact-page"} {
+	for _, name := range []string{"bigpage", "exactpage"} {
 		if r := byName[name]; r.HasPage || r.HasPrev {
 			t.Errorf("%s: has_page %v has_prev %v, want a page only under a megabyte", name, r.HasPage, r.HasPrev)
 		}
@@ -641,26 +641,26 @@ func TestBirdReportsDecisionItems(t *testing.T) {
 	missing := birdSidecarFor("missing", now, "missing title", "missing summary")
 	writeBird(t, root, "missing", birdWrites{json: birdSidecarJSON(t, missing)})
 
-	nullItems := birdSidecarFor("null-items", now, "null title", "null summary")
+	nullItems := birdSidecarFor("nullitems", now, "null title", "null summary")
 	nullItems.DecisionItems = json.RawMessage(`null`)
-	writeBird(t, root, "null-items", birdWrites{json: birdSidecarJSON(t, nullItems)})
+	writeBird(t, root, "nullitems", birdWrites{json: birdSidecarJSON(t, nullItems)})
 
-	notArray := birdSidecarFor("not-array", now, "string title", "string summary")
+	notArray := birdSidecarFor("notarray", now, "string title", "string summary")
 	notArray.DecisionItems = json.RawMessage(`"two questions and an answer"`)
-	writeBird(t, root, "not-array", birdWrites{json: birdSidecarJSON(t, notArray)})
+	writeBird(t, root, "notarray", birdWrites{json: birdSidecarJSON(t, notArray)})
 
-	wrongType := birdSidecarFor("wrong-type", now, "wrong title", "wrong summary")
+	wrongType := birdSidecarFor("wrongtype", now, "wrong title", "wrong summary")
 	wrongType.DecisionItems = json.RawMessage(`[{"question": 7, "recommendation": "rec"}]`)
-	writeBird(t, root, "wrong-type", birdWrites{json: birdSidecarJSON(t, wrongType)})
+	writeBird(t, root, "wrongtype", birdWrites{json: birdSidecarJSON(t, wrongType)})
 
 	// An entry with nothing but control characters after cleaning is not a
 	// question, so it is not an item; the entry beside it is.
-	emptyQuestion := birdSidecarFor("empty-question", now, "empty title", "empty summary")
+	emptyQuestion := birdSidecarFor("emptyquestion", now, "empty title", "empty summary")
 	emptyQuestion.DecisionItems = json.RawMessage(`[
 		{"question": "\u0007\u0000", "recommendation": "orphan answer"},
 		{"question": "kept?", "recommendation": ""}
 	]`)
-	writeBird(t, root, "empty-question", birdWrites{json: birdSidecarJSON(t, emptyQuestion)})
+	writeBird(t, root, "emptyquestion", birdWrites{json: birdSidecarJSON(t, emptyQuestion)})
 
 	// Entries with no question are not decisions, so they do not spend the
 	// cap: eight of them ahead of two real questions still leave both shown.
@@ -710,11 +710,11 @@ func TestBirdReportsDecisionItems(t *testing.T) {
 		t.Errorf("the long question was cut mid-rune: %q", cut[0].Question)
 	}
 
-	for _, name := range []string{"missing", "null-items", "not-array", "wrong-type"} {
+	for _, name := range []string{"missing", "nullitems", "notarray", "wrongtype"} {
 		row := byName[name]
 		// The two malformed shapes say so in the note (gt-tm1fa); the row is
 		// still fresh and keeps its summary.
-		wantNote := map[string]string{"not-array": "decision items could not be read", "wrong-type": "1 decision item could not be read"}[name]
+		wantNote := map[string]string{"notarray": "decision items could not be read", "wrongtype": "1 decision item could not be read"}[name]
 		if row.State != BirdReportFresh || row.Note != wantNote {
 			t.Errorf("%s: state %q note %q, want a fresh row with note %q and no items", name, row.State, row.Note, wantNote)
 		}
@@ -726,9 +726,9 @@ func TestBirdReportsDecisionItems(t *testing.T) {
 		}
 	}
 
-	kept := byName["empty-question"].DecisionItems
+	kept := byName["emptyquestion"].DecisionItems
 	if len(kept) != 1 || kept[0].Question != "kept?" || kept[0].Recommendation != "" {
-		t.Errorf("empty-question carried %+v, want only the item with a question", kept)
+		t.Errorf("emptyquestion carried %+v, want only the item with a question", kept)
 	}
 
 	paddedItems := byName["padded"].DecisionItems
@@ -755,7 +755,7 @@ func TestBirdDecisionItemsUnreadable(t *testing.T) {
 		wantItems int
 		wantNote  string
 	}{
-		{"seven good and one wrong-typed", `[` + seven + `{"q": 5}]`, 7, "1 decision item could not be read"},
+		{"seven good and one wrongtyped", `[` + seven + `{"q": 5}]`, 7, "1 decision item could not be read"},
 		{"a list-valued question", `[` + seven + `{"q": ["x"]}]`, 7, "1 decision item could not be read"},
 		{"two bad elements", `[{"q": 5}, ` + seven + `"text"]`, 7, "2 decision items could not be read"},
 		{"not an array", `{"question": "q?"}`, 0, "decision items could not be read"},
@@ -795,9 +795,9 @@ func TestBirdReportsDecisionItemsWithheld(t *testing.T) {
 
 	// A withheld summary does not take the reporter's clean asks with it: the
 	// items are screened on their own text.
-	leaky := birdSidecarFor("leaky-summary", now, "leaky title", "the bird tried "+secret)
+	leaky := birdSidecarFor("leakysummary", now, "leaky title", "the bird tried "+secret)
 	leaky.DecisionItems = json.RawMessage(`[{"question": "retry the patrol?", "recommendation": "yes"}]`)
-	writeBird(t, root, "leaky-summary", birdWrites{json: birdSidecarJSON(t, leaky)})
+	writeBird(t, root, "leakysummary", birdWrites{json: birdSidecarJSON(t, leaky)})
 
 	rows := NewBirdReportsReader(root).Read(now)
 	byName := birdByName(rows)
@@ -816,12 +816,12 @@ func TestBirdReportsDecisionItemsWithheld(t *testing.T) {
 		t.Errorf("asker withheld %v, want the one rule that matched", row.DecisionItemsWithheld)
 	}
 
-	leakyRow := byName["leaky-summary"]
+	leakyRow := byName["leakysummary"]
 	if leakyRow.State != BirdReportWithheld || leakyRow.Summary != "" {
-		t.Errorf("leaky-summary: state %q summary %q, want the summary withheld", leakyRow.State, leakyRow.Summary)
+		t.Errorf("leakysummary: state %q summary %q, want the summary withheld", leakyRow.State, leakyRow.Summary)
 	}
 	if len(leakyRow.DecisionItems) != 1 || leakyRow.DecisionItems[0].Question != "retry the patrol?" {
-		t.Errorf("leaky-summary carried %+v, want its clean ask", leakyRow.DecisionItems)
+		t.Errorf("leakysummary carried %+v, want its clean ask", leakyRow.DecisionItems)
 	}
 
 	encoded, err := json.Marshal(rows)
@@ -1071,7 +1071,11 @@ func TestBirdTopicPagesReadsTitlesOfKeptPagesOnly(t *testing.T) {
 	t.Parallel()
 
 	now := birdReportsNow
-	reports := t.TempDir()
+	root := t.TempDir()
+	reports := filepath.Join(root, "heron", "reports")
+	if err := os.MkdirAll(reports, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
 	for i := 0; i < 12; i++ {
 		path := filepath.Join(reports, fmt.Sprintf("topic-%02d.html", i))
 		if err := os.WriteFile(path, []byte("<title>Topic</title>"), 0o644); err != nil {
@@ -1081,7 +1085,7 @@ func TestBirdTopicPagesReadsTitlesOfKeptPagesOnly(t *testing.T) {
 	}
 
 	var titled []string
-	pages := birdTopicPages(reports, func(path, fallback string) string {
+	pages := birdTopicPages(root, "heron", func(path, fallback string) string {
 		titled = append(titled, filepath.Base(path))
 		return fallback
 	})
@@ -1222,6 +1226,13 @@ func TestBirdsReadsTheVolumeLocation(t *testing.T) {
 		}
 	})
 
+	t.Run("a name the resolver refuses draws no row", func(t *testing.T) {
+		t.Parallel()
+		if row, ok := NewBirdReportsReader(t.TempDir()).readBird(now, "../dunlin"); ok {
+			t.Errorf("readBird(%q) = %+v, want no row for a refused name", "../dunlin", row)
+		}
+	})
+
 	t.Run("a published reports directory that cannot be listed is an error row", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
@@ -1244,4 +1255,65 @@ func TestBirdsReadsTheVolumeLocation(t *testing.T) {
 			t.Errorf("rows = %+v, want the old report still listed beside the error", rows)
 		}
 	})
+}
+
+// TestBirdsTopicPagesMergeBothLocations keeps the legacy topic pages visible
+// after a bird publishes: the row lists the pages of both locations, one per
+// name, the published page winning a collision, and the route serves the page
+// the merge chose.
+func TestBirdsTopicPagesMergeBothLocations(t *testing.T) {
+	t.Parallel()
+	now := birdReportsNow
+	root := t.TempDir()
+	sidecar := birdSidecarJSON(t, birdSidecarFor("heron", now.Add(-time.Hour), "title", "summary"))
+	writeBird(t, root, "heron", birdWrites{json: sidecar})
+	writePublishedBird(t, root, "heron", birdWrites{json: sidecar})
+	writePage := func(dir, name, body string, age time.Duration) {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		birdSetMtime(t, path, now.Add(-age))
+	}
+	publishedDir := filepath.Join(root, "reports", "heron")
+	legacyDir := filepath.Join(root, "heron", "reports")
+	writePage(publishedDir, "both.html", "<title>published both</title>", 2*time.Hour)
+	writePage(legacyDir, "both.html", "<title>legacy both</title>", 3*time.Hour)
+	writePage(legacyDir, "old-only.html", "<title>old only</title>", 4*time.Hour)
+	writePage(publishedDir, "new-only.html", "<title>new only</title>", 5*time.Hour)
+
+	rows := NewBirdReportsReader(root).Read(now)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want the one bird", rows)
+	}
+	byName := map[string]BirdPage{}
+	for _, page := range rows[0].Pages {
+		byName[page.Name] = page
+	}
+	if len(byName) != 3 {
+		t.Fatalf("pages = %+v, want one page per name from both locations", rows[0].Pages)
+	}
+	for _, name := range []string{"both.html", "old-only.html", "new-only.html"} {
+		if _, ok := byName[name]; !ok {
+			t.Errorf("pages = %+v, want %s listed", rows[0].Pages, name)
+		}
+	}
+	if got := byName["both.html"].Title; got != "published both" {
+		t.Errorf("both.html is listed as %q, want the published page's title", got)
+	}
+
+	for _, c := range []struct{ page, want string }{
+		{"both.html", "<title>published both</title>"},
+		{"old-only.html", "<title>old only</title>"},
+	} {
+		body, err := NewBirdReportsReader(root).ReadPage("heron", c.page)
+		if err != nil {
+			t.Errorf("ReadPage(%s) = %v", c.page, err)
+			continue
+		}
+		if string(body) != c.want {
+			t.Errorf("ReadPage(%s) served %q, want %q", c.page, body, c.want)
+		}
+	}
 }

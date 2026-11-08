@@ -190,8 +190,6 @@ func TestTownStateBirdNamesStayInTheCommandPackages(t *testing.T) {
 		"internal/bird":        "the pool and the bird spawner itself",
 		"internal/birdreports": "the reader of the reports a bird publishes; read-only",
 		"internal/cmd":         "the bird commands and the dashboard reader; they run as the operator's commands, never from the daemon's loops",
-		"internal/daemon":      "the bird_reports patrol resolves and reads the sidecar with the report reader; it opens that path only to read, and the first layer sees its writes",
-		"internal/dashboard":   "the Birds panel and page route resolve and read a bird's reports with the report reader; read-only",
 		"internal/townstate":   "classifies the bird directories as session-owned",
 	}
 	importers := map[string]bool{}
