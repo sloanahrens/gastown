@@ -408,6 +408,17 @@ func TestReportPublishRefusesAPathItCannotUse(t *testing.T) {
 			t.Errorf("a refused publish printed the page:\n%s", out)
 		}
 	})
+
+	t.Run("a bird name the resolver refuses", func(t *testing.T) {
+		t.Parallel()
+		// The writer resolves its own destination, so a name the resolver
+		// refuses is refused there too rather than joined into a path.
+		_, err := writeReportPublish(osReportPublishFS(), t.TempDir(), "../dunlin",
+			[]byte("<html></html>"), []byte(`{"bird":"dunlin","written_at":"2026-11-08T11:00:00Z"}`))
+		if !errors.Is(err, reportdir.ErrBadName) {
+			t.Fatalf("writeReportPublish error = %v, want ErrBadName", err)
+		}
+	})
 }
 
 // TestReportPublishNeverFollowsASymlink drives a publish at a destination that

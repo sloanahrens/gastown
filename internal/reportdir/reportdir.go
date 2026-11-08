@@ -93,11 +93,16 @@ func Resolve(runtimeDir, reporter string) (Location, error) {
 	if !ValidName(reporter) {
 		return Location{}, ErrBadName
 	}
+	return resolveValid(runtimeDir, reporter), nil
+}
+
+// resolveValid is Resolve's answer for a name ValidName has accepted.
+func resolveValid(runtimeDir, reporter string) Location {
 	published := publishedPath(runtimeDir, reporter)
 	if publishedHoldsReport(published) {
-		return Location{Dir: published, Published: true}, nil
+		return Location{Dir: published, Published: true}
 	}
-	return Location{Dir: legacyPath(runtimeDir, reporter)}, nil
+	return Location{Dir: legacyPath(runtimeDir, reporter)}
 }
 
 // Dir returns the directory holding reporter's daily report, as Resolve does.
@@ -231,11 +236,7 @@ func PagePath(runtimeDir, reporter, file string) (string, error) {
 	}
 	switch file {
 	case PageName, PrevPageName:
-		dir, err := Dir(runtimeDir, reporter)
-		if err != nil {
-			return "", err
-		}
-		return filepath.Join(dir, file), nil
+		return filepath.Join(resolveValid(runtimeDir, reporter).Dir, file), nil
 	}
 	if !IsTopicPage(file) {
 		return "", ErrBadPage
