@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/internal/ci/preflight"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
 // workflowPath is the images workflow text, relative to this package: the file
@@ -663,6 +664,25 @@ func TestImagesWorkflowPrintsTheDigestLines(t *testing.T) {
 			t.Errorf("the push step types its own docker logic instead of the tested publish: %s", run)
 		}
 	})
+}
+
+// TestImagesWorkflowNamesTheSharedImageConstants holds the one-spelling rule:
+// the workflow's registry environment and internal/imagevalues, which gt update
+// images reads the registry by, name the same host, owner and images.
+func TestImagesWorkflowNamesTheSharedImageConstants(t *testing.T) {
+	t.Parallel()
+	wf := loadWorkflow(t)
+	env := object(t, wf["env"], "env")
+	for _, want := range []struct{ key, value string }{
+		{"FORGEJO_HOST", imagevalues.RegistryHost},
+		{"REGISTRY_OWNER", imagevalues.RegistryOwner},
+		{"DAEMON_IMAGE", imagevalues.DaemonImage},
+		{"POLECAT_IMAGE", imagevalues.PolecatImage},
+	} {
+		if got := text(t, env[want.key], "env "+want.key); got != want.value {
+			t.Errorf("the workflow's %s is %q, but internal/imagevalues types %q", want.key, got, want.value)
+		}
+	}
 }
 
 // TestImagesWorkflowRunsOneJobOnCIBase holds the runner rule: one job named

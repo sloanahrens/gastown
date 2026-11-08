@@ -81,6 +81,8 @@ type updateSeams struct {
 	FindTownRoot func() (string, error)
 	DepsFactory  func(townRoot string) (update.Deps, error)
 	Run          func(context.Context, update.Deps, update.Options) (update.State, error)
+	// Images wires the images subcommand's registry reads and values write.
+	Images updateImagesSeams
 }
 
 // productionUpdateSeams wires the real town, effects and orchestrator.
@@ -89,6 +91,7 @@ func productionUpdateSeams() updateSeams {
 		FindTownRoot: workspace.FindFromCwdOrError,
 		DepsFactory:  realUpdateDeps,
 		Run:          update.Run,
+		Images:       productionUpdateImagesSeams(),
 	}
 }
 
@@ -136,6 +139,7 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 	// The status reader shares the parent's town lookup, so both commands read
 	// the same town root, and it reads the wall clock for a heartbeat's age.
 	c.AddCommand(newUpdateStatusCmd(updateStatusSeams{FindTownRoot: seams.FindTownRoot, Now: time.Now}))
+	c.AddCommand(newUpdateImagesCmd(seams.Images))
 	return c
 }
 
