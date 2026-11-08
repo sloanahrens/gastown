@@ -19,24 +19,32 @@ const (
 	pinDevopsCommit = "9a55ea1175c21020a1811314631e899bd8e894f3"
 )
 
+// testOwner is the Forgejo owner every fixture pin URL names, and testPinURL
+// builds the URL from it: the pins file a test hands the parser and the Pin it
+// compares with use this one constant, so a rename cannot split the input from
+// the expectation.
+const testOwner = "owner"
+
+func testPinURL(repo string) string { return "http://forgejo:3000/" + testOwner + "/" + repo + ".git" }
+
 // pinsFile is the four pins a valid file holds, and the text the parser is
 // handed for each test.
 func validImagePins() string {
 	return "# the four external sources\n" +
 		"\n" +
-		"bd http://forgejo:3000/sloan/beads.git " + pinBDCommit + "\n" +
-		"om http://forgejo:3000/sloan/organic-mechanic.git " + pinOMCommit + "\n" +
-		"hm http://forgejo:3000/sloan/history-man.git " + pinHMCommit + "\n" +
-		"devops http://forgejo:3000/sloan/devops.git " + pinDevopsCommit + "\n"
+		"bd " + testPinURL("beads") + " " + pinBDCommit + "\n" +
+		"om " + testPinURL("organic-mechanic") + " " + pinOMCommit + "\n" +
+		"hm " + testPinURL("history-man") + " " + pinHMCommit + "\n" +
+		"devops " + testPinURL("devops") + " " + pinDevopsCommit + "\n"
 }
 
 func TestParseImagePins(t *testing.T) {
 	t.Parallel()
 	want := []Pin{
-		{Name: "bd", URL: "http://forgejo:3000/sloan/beads.git", Commit: pinBDCommit},
-		{Name: "om", URL: "http://forgejo:3000/sloan/organic-mechanic.git", Commit: pinOMCommit},
-		{Name: "hm", URL: "http://forgejo:3000/sloan/history-man.git", Commit: pinHMCommit},
-		{Name: "devops", URL: "http://forgejo:3000/sloan/devops.git", Commit: pinDevopsCommit},
+		{Name: "bd", URL: testPinURL("beads"), Commit: pinBDCommit},
+		{Name: "om", URL: testPinURL("organic-mechanic"), Commit: pinOMCommit},
+		{Name: "hm", URL: testPinURL("history-man"), Commit: pinHMCommit},
+		{Name: "devops", URL: testPinURL("devops"), Commit: pinDevopsCommit},
 	}
 	got, err := ParsePins([]byte(validImagePins()))
 	if err != nil {
@@ -53,39 +61,39 @@ func TestParseImagePins(t *testing.T) {
 		want    []string
 		notWant []string
 	}{
-		{"an unknown name", validImagePins() + "tracker http://forgejo:3000/sloan/tracker.git " + pinBDCommit + "\n",
+		{"an unknown name", validImagePins() + "tracker " + testPinURL("tracker") + " " + pinBDCommit + "\n",
 			line(7, `unknown pin name "tracker"`), nil},
-		{"a duplicate name", validImagePins() + "bd http://forgejo:3000/sloan/beads.git " + pinBDCommit + "\n",
+		{"a duplicate name", validImagePins() + "bd " + testPinURL("beads") + " " + pinBDCommit + "\n",
 			line(7, `duplicate pin name "bd"`), nil},
 		{"a short commit", strings.Replace(validImagePins(), pinBDCommit, pinBDCommit[:7], 1),
 			line(3, "bd commit"), nil},
 		{"a non-hex commit", strings.Replace(validImagePins(), pinBDCommit, strings.Repeat("g", 40), 1),
 			line(3, "is not a full 40-character lowercase hex sha"), nil},
 		{name: "a url with a credential",
-			file:    strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://sloan:secret@forgejo:3000/sloan/beads.git", 1),
+			file:    strings.Replace(validImagePins(), testPinURL("beads"), "http://user:secret@forgejo:3000/"+testOwner+"/beads.git", 1),
 			want:    line(3, "carries a credential"),
 			notWant: []string{"secret"}},
 		{name: "a url with a token in its query",
-			file:    strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://forgejo:3000/sloan/beads.git?access_token=tok3n", 1),
+			file:    strings.Replace(validImagePins(), testPinURL("beads"), testPinURL("beads")+"?access_token=tok3n", 1),
 			want:    line(3, "carries a query or fragment"),
 			notWant: []string{"tok3n"}},
 		{name: "a url with a token in its fragment",
-			file:    strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://forgejo:3000/sloan/beads.git#tok3n", 1),
+			file:    strings.Replace(validImagePins(), testPinURL("beads"), testPinURL("beads")+"#tok3n", 1),
 			want:    line(3, "carries a query or fragment"),
 			notWant: []string{"tok3n"}},
-		{"a url that is not http(s)", strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "git://forgejo:3000/sloan/beads.git", 1),
+		{"a url that is not http(s)", strings.Replace(validImagePins(), testPinURL("beads"), "git://forgejo:3000/"+testOwner+"/beads.git", 1),
 			line(3, "is not http:// or https://"), nil},
-		{"a url with no repository path", strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://forgejo:3000", 1),
+		{"a url with no repository path", strings.Replace(validImagePins(), testPinURL("beads"), "http://forgejo:3000", 1),
 			line(3, "names no repository path"), nil},
-		{"a url with no host", strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http:///sloan/beads.git", 1),
+		{"a url with no host", strings.Replace(validImagePins(), testPinURL("beads"), "http:///"+testOwner+"/beads.git", 1),
 			line(3, "names no host"), nil},
-		{"a url that does not parse", strings.Replace(validImagePins(), "http://forgejo:3000/sloan/beads.git", "http://[::1", 1),
+		{"a url that does not parse", strings.Replace(validImagePins(), testPinURL("beads"), "http://[::1", 1),
 			line(3, "url does not parse"), nil},
-		{"a line missing its name", strings.Replace(validImagePins(), "bd http://forgejo:3000/sloan/beads.git", "http://forgejo:3000/sloan/beads.git", 1),
+		{"a line missing its name", strings.Replace(validImagePins(), "bd "+testPinURL("beads"), testPinURL("beads"), 1),
 			line(3, `want "<name> <url> <commit>"`), nil},
 		{"a line missing its commit", strings.Replace(validImagePins(), " "+pinBDCommit, "", 1),
 			line(3, `want "<name> <url> <commit>"`), nil},
-		{"a missing name", strings.Replace(validImagePins(), "devops http://forgejo:3000/sloan/devops.git "+pinDevopsCommit+"\n", "", 1),
+		{"a missing name", strings.Replace(validImagePins(), "devops "+testPinURL("devops")+" "+pinDevopsCommit+"\n", "", 1),
 			[]string{"missing pin for devops"}, nil},
 		{"an empty file", "# nothing here\n", []string{"missing pin for bd, om, hm, devops"}, nil},
 	} {
@@ -165,7 +173,7 @@ func (f *pinsGit) pinTable(pin, main string, behind int, pinAge time.Duration) {
 // pin-drift guard's error naming the rig, pin, main and the line to edit.
 func TestCheckPinsRefusesAStalePin(t *testing.T) {
 	t.Parallel()
-	pin := Pin{Name: "bd", URL: "http://forgejo:3000/sloan/beads.git", Commit: pinsTestPin}
+	pin := Pin{Name: "bd", URL: testPinURL("beads"), Commit: pinsTestPin}
 	mainOf := func(Pin) (string, error) { return pinsTestDir, nil }
 	mainOfFailing := func(Pin) (string, error) { return "", fmt.Errorf("no source checkout named") }
 	edit := "set the bd line in " + pinsTestPath + " to " + pinsTestMain

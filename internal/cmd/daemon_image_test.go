@@ -25,12 +25,22 @@ const (
 	imageTestMangoCommit = "2233445566778899aabbccddeeff001122334455"
 )
 
+// imageTestOwner is the Forgejo owner every fixture pin URL names, and
+// imageTestPinURL builds the URL from it: the pins file the command reads and
+// the plan lines it prints use this one constant, so the input and the
+// expectation cannot name different owners.
+const imageTestOwner = "owner"
+
+func imageTestPinURL(repo string) string {
+	return "http://forgejo:3000/" + imageTestOwner + "/" + repo + ".git"
+}
+
 // imagePinsText is the pins file newImageRig writes, one line per source.
 func imagePinsText() string {
-	return "bd http://forgejo:3000/sloan/beads.git " + imageTestBDCommit + "\n" +
-		"om http://forgejo:3000/sloan/organic-mechanic.git " + imageTestOMCommit + "\n" +
-		"hm http://forgejo:3000/sloan/history-man.git " + imageTestHMCommit + "\n" +
-		"devops http://forgejo:3000/sloan/devops.git " + imageTestDevCommit + "\n"
+	return "bd " + imageTestPinURL("beads") + " " + imageTestBDCommit + "\n" +
+		"om " + imageTestPinURL("organic-mechanic") + " " + imageTestOMCommit + "\n" +
+		"hm " + imageTestPinURL("history-man") + " " + imageTestHMCommit + "\n" +
+		"devops " + imageTestPinURL("devops") + " " + imageTestDevCommit + "\n"
 }
 
 // imageRig is a set of real directories for the command's paths and deps that
@@ -180,10 +190,10 @@ func TestDaemonImageDryRunPrintsThePlanAndRunsNothing(t *testing.T) {
 	out := r.out.String()
 	for _, want := range []string{
 		"pins: " + r.flags.pins,
-		"pin bd: http://forgejo:3000/sloan/beads.git at " + imageTestBDCommit,
-		"pin om: http://forgejo:3000/sloan/organic-mechanic.git at " + imageTestOMCommit,
-		"pin hm: http://forgejo:3000/sloan/history-man.git at " + imageTestHMCommit,
-		"pin devops: http://forgejo:3000/sloan/devops.git at " + imageTestDevCommit,
+		"pin bd: " + imageTestPinURL("beads") + " at " + imageTestBDCommit,
+		"pin om: " + imageTestPinURL("organic-mechanic") + " at " + imageTestOMCommit,
+		"pin hm: " + imageTestPinURL("history-man") + " at " + imageTestHMCommit,
+		"pin devops: " + imageTestPinURL("devops") + " at " + imageTestDevCommit,
 		"build gt: go build -trimpath -ldflags",
 		"-o " + filepath.Join(r.flags.out, "gt") + " ./cmd/gt",
 		"build bd: go build -trimpath",
@@ -425,7 +435,7 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 		{"a directory for --pins", func(t *testing.T, f *daemonImageFlags) { f.pins = t.TempDir() }, "is not an existing file"},
 		{"a pins file the parser refuses", func(t *testing.T, f *daemonImageFlags) {
 			p := filepath.Join(t.TempDir(), "image-pins")
-			if err := os.WriteFile(p, []byte("bd http://forgejo:3000/sloan/beads.git short\n"), 0o600); err != nil {
+			if err := os.WriteFile(p, []byte("bd "+imageTestPinURL("beads")+" short\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			f.pins = p
@@ -691,10 +701,10 @@ func TestDaemonImagePlanNamesThePins(t *testing.T) {
 	out := r.out.String()
 	for _, want := range []string{
 		"pins: " + r.flags.pins,
-		"pin bd: http://forgejo:3000/sloan/beads.git at " + imageTestBDCommit,
-		"pin om: http://forgejo:3000/sloan/organic-mechanic.git at " + imageTestOMCommit,
-		"pin hm: http://forgejo:3000/sloan/history-man.git at " + imageTestHMCommit,
-		"pin devops: http://forgejo:3000/sloan/devops.git at " + imageTestDevCommit,
+		"pin bd: " + imageTestPinURL("beads") + " at " + imageTestBDCommit,
+		"pin om: " + imageTestPinURL("organic-mechanic") + " at " + imageTestOMCommit,
+		"pin hm: " + imageTestPinURL("history-man") + " at " + imageTestHMCommit,
+		"pin devops: " + imageTestPinURL("devops") + " at " + imageTestDevCommit,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output lacks %q:\n%s", want, out)
@@ -722,13 +732,13 @@ func TestReadImagePinsRefusesAnUnreadableFile(t *testing.T) {
 // pin with a malformed URL is refused before any fetch runs.
 func TestOnlyFetchedPinsAreURLValidated(t *testing.T) {
 	t.Parallel()
-	const credentialURL = "http://user:s3cret@forgejo:3000/sloan/beads.git"
+	const credentialURL = "http://user:s3cret@forgejo:3000/" + imageTestOwner + "/beads.git"
 	pins := func(bdURL string) []daemonimage.Pin {
 		return []daemonimage.Pin{
 			{Name: "bd", URL: bdURL, Commit: imageTestBDCommit},
-			{Name: "om", URL: "http://forgejo:3000/sloan/organic-mechanic.git", Commit: imageTestOMCommit},
-			{Name: "hm", URL: "http://forgejo:3000/sloan/history-man.git", Commit: imageTestHMCommit},
-			{Name: "devops", URL: "http://forgejo:3000/sloan/devops.git", Commit: imageTestDevCommit},
+			{Name: "om", URL: imageTestPinURL("organic-mechanic"), Commit: imageTestOMCommit},
+			{Name: "hm", URL: imageTestPinURL("history-man"), Commit: imageTestHMCommit},
+			{Name: "devops", URL: imageTestPinURL("devops"), Commit: imageTestDevCommit},
 		}
 	}
 
@@ -755,7 +765,7 @@ func TestOnlyFetchedPinsAreURLValidated(t *testing.T) {
 
 	t.Run("ParsePins still refuses a malformed pin URL at parse", func(t *testing.T) {
 		t.Parallel()
-		text := strings.Replace(imagePinsText(), "http://forgejo:3000/sloan/beads.git", credentialURL, 1)
+		text := strings.Replace(imagePinsText(), imageTestPinURL("beads"), credentialURL, 1)
 		_, err := daemonimage.ParsePins([]byte(text))
 		if err == nil || !strings.Contains(err.Error(), "credential") {
 			t.Fatalf("ParsePins = %v, want the credential refusal", err)

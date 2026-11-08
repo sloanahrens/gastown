@@ -230,12 +230,16 @@ func TestForgejoConfigAccessors(t *testing.T) {
 // from resolving.
 func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 	t.Parallel()
+	// target is both the configured value the body carries and the value the
+	// result must keep, so the input and the expectation cannot name different
+	// accounts.
+	const target = "git@github.com:example/gastown.git"
 	const body = `{
 		"remote_url": "https://forgejo.example/gastown/gastown",
 		"gate_workflow": "gate",
 		"bots": {"polecat": "gt-polecat", "landing": "gt-landing", "registry": "gt-registry"},
-		"mirror_target": "git@github.com:sloanahrens/gastown.git",
-		"promote_target": "git@github.com:sloanahrens/gastown.git",
+		"mirror_target": "` + target + `",
+		"promote_target": "` + target + `",
 		"promote_key_file": "/home/gt/.config/gt/promote-gastown.key"
 	}`
 	var mq MergeQueueConfig
@@ -254,10 +258,10 @@ func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 	if mq.Forgejo.BotLogin(ForgejoRoleLanding) != "gt-landing" {
 		t.Errorf("landing bot = %q, want gt-landing", mq.Forgejo.BotLogin(ForgejoRoleLanding))
 	}
-	if mq.Forgejo.MirrorTarget != "git@github.com:sloanahrens/gastown.git" {
+	if mq.Forgejo.MirrorTarget != target {
 		t.Errorf("MirrorTarget = %q", mq.Forgejo.MirrorTarget)
 	}
-	if mq.Forgejo.PromoteTarget != "git@github.com:sloanahrens/gastown.git" {
+	if mq.Forgejo.PromoteTarget != target {
 		t.Errorf("PromoteTarget = %q", mq.Forgejo.PromoteTarget)
 	}
 	if mq.Forgejo.PromoteKeyFile != "/home/gt/.config/gt/promote-gastown.key" {

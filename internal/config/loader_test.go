@@ -583,7 +583,7 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 
 	t.Run("a tier that omits the block carries the floor through", func(t *testing.T) {
 		// The target is both the floor's configured value and the one the result must keep.
-		const target = "git@example.com:sloanahrens/gastown.git"
+		const target = "git@example.com:example/gastown.git"
 		t.Parallel()
 		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
 			RemoteURL:      "https://forgejo.example/gastown/gastown",
@@ -714,7 +714,7 @@ func TestStripRepoForgejo(t *testing.T) {
 		Forgejo: &ForgejoConfig{
 			RemoteURL:    "https://forgejo.example/repo/gastown",
 			Bots:         map[string]string{ForgejoRoleLanding: "repo-landing"},
-			MirrorTarget: "git@example.com:sloanahrens/gastown.git",
+			MirrorTarget: "git@example.com:example/gastown.git",
 		},
 	}
 	got, ok := StripRepoForgejo(repo)
