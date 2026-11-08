@@ -723,14 +723,12 @@ func TestSandboxSecretsSubstitutionHeredocBodies(t *testing.T) {
 	}
 }
 
-// Branches a command line cannot reach, because the walk handles them earlier or
-// builds the words itself: the parser's own contract for a group with no operator,
-// and for an env that no launcher loop consumed (gt-80akp).
+// A branch a command line cannot reach, because launchers ahead of the command
+// consume it: an env that no launcher loop consumed prints the environment
+// (gt-80akp). The heredoc-pipeline parser this test also covered is gone with
+// the heredoc scanners: the pipeline now comes from the parsed segments.
 func TestSandboxSecretsParserBranches(t *testing.T) {
 	t.Parallel()
-	if got := sandboxSecretsPipelineArgvs([]string{"cat", "notes"}); got != nil {
-		t.Errorf("a group with no heredoc operator was read as a pipeline: %v", got)
-	}
 	if got := sandboxSecretsInvocation([]string{"env"}, nil, nil); got != "env prints the environment" {
 		t.Errorf("sandboxSecretsInvocation(env) = %q, want the environment rule", got)
 	}

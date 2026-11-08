@@ -562,8 +562,9 @@ type nestedScript struct {
 // line leave the shell in, found by the walk segmentWalkRoot gives a segment.
 // A "$(" the shell leaves literal is skipped: after a backslash, or inside
 // single quotes, where a bead note spelling "$(make gate)" is data. Heredoc
-// bodies are stripped first, as the segment judges do, and the substitutions of
-// an unquoted body are added back (heredocSubstitutionScripts).
+// bodies are stripped first, as the segment judges do. The caller passes text
+// with its heredoc bodies already stripped, so a substitution inside an
+// unquoted body was read when the body's own command line was judged.
 func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) []nestedScript {
 	text := stripHeredocBodies(command)
 	var scripts []nestedScript
@@ -584,38 +585,6 @@ func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) 
 			dir, known = cwd, false
 		}
 		scripts = append(scripts, nestedScript{body: body, dir: dir, known: known})
-	}
-	return append(scripts, heredocSubstitutionScripts(proc, command, cwd, cwdKnown)...)
-}
-
-// heredocSubstitutionScripts returns the substitutions written in the bodies of
-// unquoted heredocs, each with the directory the shell is in when it reads the
-// body. stripHeredocBodies drops those bodies before substitutionScripts scans
-// the line, yet the shell expands "$(make gate)" in "cat > f <<EOF" while
-// reading the body, so the suite runs though no segment word is a make. A quoted
-// tag keeps its body literal, and an unterminated heredoc is not stripped, so
-// substitutionScripts already scanned it (gt-6fkng, gt-x50o8).
-func heredocSubstitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) []nestedScript {
-	var scripts []nestedScript
-	for _, span := range scanHeredocs(command) {
-		if span.bodyStart < 0 || span.quoted || span.unterminated {
-			continue
-		}
-		dir, placed := heredocBodyCwd(proc, command, span, cwd)
-		known := placed && cwdKnown
-		if !known {
-			dir = cwd
-		}
-		for _, sub := range heredocSubstitutionSpans(span.body) {
-			// substitutionBody drops the backslash an escaped nested backtick
-			// pair carries, so the nested command the body's own parse runs is
-			// judged here as it is in substitutionScripts (gt-h3312).
-			body := substitutionBody(span.body, sub)
-			if strings.TrimSpace(body) == "" {
-				continue
-			}
-			scripts = append(scripts, nestedScript{body: body, dir: dir, known: known})
-		}
 	}
 	return scripts
 }
@@ -851,8 +820,8 @@ func closingANSIQuote(text string, from int) int {
 // of the text leaves nothing to close the "(", and -1 is right there too
 // (gt-5wtmz).
 //
-// A heredoc body in the substitution is stepped over whole, as scanHeredocs
-// judges it, so the quote marks and parentheses in it count for nothing
+// A heredoc body in the substitution is stepped over whole, as heredocSpans
+// places it, so the quote marks and parentheses in it count for nothing
 // (gt-lx8i8). bodies is the heredoc spans found in text (heredocBodiesFrom,
 // found once per caller so the substitutions closingDoubleQuote steps into
 // share the scan rather than each rescanning the text); the slice is read, not
@@ -867,7 +836,7 @@ func closingParen(text string, from int, bodies []heredocSpan) int {
 	var subOpens []bool
 	for i := from; i < len(text); i++ {
 		// Skip a body only where this walk arrives at its first byte in plain
-		// text. A span scanHeredocs placed somewhere this walk reads as quoted
+		// text. A span heredocSpans placed somewhere this walk reads as quoted
 		// or commented text — the two reads disagreeing — is dropped instead, so
 		// the skip can never hide text this walk would otherwise have read.
 		for len(bodies) > 0 && i >= bodies[0].bodyStart {
@@ -925,15 +894,15 @@ func closingParen(text string, from int, bodies []heredocSpan) int {
 }
 
 // heredocBodiesFrom returns the heredoc bodies that start at or after from, in
-// order, as scanHeredocs judges the whole text. An unterminated body is left out:
-// it runs to the end of the text, which would hide the ")" that closes the
+// order, as heredocSpans places the whole text. An unterminated body is left
+// out: it runs to the end of the text, which would hide the ")" that closes the
 // substitution (gt-lx8i8).
 func heredocBodiesFrom(text string, from int) []heredocSpan {
 	if !strings.Contains(text[from:], "<<") {
 		return nil
 	}
 	var bodies []heredocSpan
-	for _, span := range scanHeredocs(text) {
+	for _, span := range heredocSpans(text) {
 		if span.bodyStart >= from && !span.unterminated {
 			bodies = append(bodies, span)
 		}

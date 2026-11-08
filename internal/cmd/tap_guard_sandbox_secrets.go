@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/shellparse"
 )
 
 var tapGuardSandboxSecretsCmd = &cobra.Command{
@@ -183,10 +184,13 @@ func sandboxSecretsHereStringRefsSecret(segment []string) bool {
 
 // sandboxSecretsHeredocRefsSecret reports whether a heredoc the shell expands
 // carries a secret-like variable into a command's stdin. A quoted tag keeps its
-// body literal, and a body fed to a shell is judged as code by the walk.
+// body literal, and a body fed to a shell is judged as code by the walk. The
+// source body is the one that matters here, not the shell-processed one: a
+// "\$X" is literal text to the shell (sandboxSecretsBodyRefsSecret reads the
+// backslash), and that escape is gone from the parsed body.
 func sandboxSecretsHeredocRefsSecret(command string) bool {
-	for _, span := range scanHeredocs(command) {
-		if span.bodyStart < 0 || span.quoted || sandboxSecretsHeredocFedToShell(command, span) {
+	for _, span := range heredocSpans(command) {
+		if span.quoted || span.readerPipelineHasShell {
 			continue
 		}
 		if sandboxSecretsBodyRefsSecret(span.body) {
@@ -196,15 +200,11 @@ func sandboxSecretsHeredocRefsSecret(command string) bool {
 	return false
 }
 
-// sandboxSecretsOperatorMark stands in for a heredoc's operator while the line
-// it sits on is tokenized, so the segment that the body is fed to can be found.
-const sandboxSecretsOperatorMark = "sandboxsecretsheredocoperator"
-
 // sandboxSecretsHeredocFedToShell reports whether a shell invoker in the heredoc's
 // own pipeline runs its body: "cat <<EOF | bash". A shell invoker after a ; or &&
 // on the same line reads no body from this heredoc, so it does not exempt it.
-func sandboxSecretsHeredocFedToShell(command string, span heredocSpan) bool {
-	for _, argv := range sandboxSecretsHeredocPipeline(command, span) {
+func sandboxSecretsHeredocFedToShell(script shellparse.Script, index int) bool {
+	for _, argv := range sandboxSecretsHeredocPipeline(script, index) {
 		if shellInvokers[strings.ToLower(filepath.Base(argv[0]))] {
 			return true
 		}
@@ -215,8 +215,8 @@ func sandboxSecretsHeredocFedToShell(command string, span heredocSpan) bool {
 // sandboxSecretsHeredocFedToSource reports whether source or . in the heredoc's own
 // pipeline runs its body: "source /dev/stdin <<EOF". A shell reads the body as a script
 // there, so the guard judges it as one.
-func sandboxSecretsHeredocFedToSource(command string, span heredocSpan) bool {
-	for _, argv := range sandboxSecretsHeredocPipeline(command, span) {
+func sandboxSecretsHeredocFedToSource(script shellparse.Script, index int) bool {
+	for _, argv := range sandboxSecretsHeredocPipeline(script, index) {
 		if name := strings.ToLower(filepath.Base(argv[0])); name == "source" || name == "." {
 			return true
 		}
@@ -228,8 +228,8 @@ func sandboxSecretsHeredocFedToSource(command string, span heredocSpan) bool {
 // own pipeline that runs its body: "python3 <<EOF", "uv run python3 <<EOF", or
 // "cat <<EOF | node". It is "" when no interpreter runs the body, which includes an
 // interpreter that runs a script file: the body is then that file's stdin, not code.
-func sandboxSecretsHeredocInterpreter(command string, span heredocSpan) string {
-	for _, argv := range sandboxSecretsHeredocPipeline(command, span) {
+func sandboxSecretsHeredocInterpreter(script shellparse.Script, index int) string {
+	for _, argv := range sandboxSecretsHeredocPipeline(script, index) {
 		name := strings.ToLower(filepath.Base(argv[0]))
 		if sandboxSecretsIsScriptRunner(name) && !sandboxSecretsRunsScriptFile(name, argv[1:]) {
 			return name
@@ -238,59 +238,22 @@ func sandboxSecretsHeredocInterpreter(command string, span heredocSpan) string {
 	return ""
 }
 
-// sandboxSecretsHeredocPipeline returns the argv of each command in the pipeline that
-// holds the heredoc's operator, so a caller can see what runs the body and with what.
-func sandboxSecretsHeredocPipeline(command string, span heredocSpan) [][]string {
-	lineEnd := len(command)
-	if i := strings.IndexByte(command[span.opEnd:], '\n'); i >= 0 {
-		lineEnd = span.opEnd + i
+// sandboxSecretsHeredocPipeline returns the argv of each command in the pipeline
+// that holds the heredoc's operator, so a caller can see what runs the body and
+// with what. The parsed segment the Heredoc belongs to is the stage the operator
+// stands on; the pipeline is the run of stages joined to it by "|", which is
+// what the shell feeds the body through.
+func sandboxSecretsHeredocPipeline(script shellparse.Script, index int) [][]string {
+	lo, hi := index, index
+	for lo > 0 && script.Segments[lo-1].After == "|" {
+		lo--
 	}
-	line := command[span.readerStart:span.opStart] + " " + sandboxSecretsOperatorMark + " " + command[span.opEnd:lineEnd]
-	return sandboxSecretsPipelineArgvs(shellTokenize(strings.ReplaceAll(line, "\\\n", " ")))
-}
-
-// sandboxSecretsPipelineArgvs returns the argv of each command in the pipeline that
-// holds the operator mark, the run of segments joined by | with it. Each argv starts at
-// the command its segment runs, past the assignments, launchers and package runners
-// ahead of it, so "uv run python3 <<EOF" yields python3. It is nil when the tokens
-// hold no mark.
-func sandboxSecretsPipelineArgvs(tokens []string) [][]string {
-	var (
-		segments [][]string
-		piped    []bool // piped[i]: segments[i] reads the output of the segment before it
-		current  []string
-		joined   bool
-		mark     = -1
-	)
-	for _, tok := range tokens {
-		if shellCommandSeparators[tok] {
-			segments = append(segments, current)
-			piped = append(piped, joined)
-			current = nil
-			joined = tok == "|"
-			continue
-		}
-		if tok == sandboxSecretsOperatorMark {
-			mark = len(segments)
-			continue
-		}
-		current = append(current, tok)
-	}
-	segments = append(segments, current)
-	piped = append(piped, joined)
-	if mark < 0 {
-		return nil
-	}
-	first, last := mark, mark
-	for first > 0 && piped[first] {
-		first--
-	}
-	for last+1 < len(segments) && piped[last+1] {
-		last++
+	for hi+1 < len(script.Segments) && script.Segments[hi].After == "|" {
+		hi++
 	}
 	var argvs [][]string
-	for _, segment := range segments[first : last+1] {
-		if _, _, argv := sandboxSecretsSegment(segment, map[string]bool{}, map[string]bool{}); len(argv) > 0 {
+	for _, seg := range script.Segments[lo : hi+1] {
+		if _, _, argv := sandboxSecretsSegment(containerSuiteWords(seg), map[string]bool{}, map[string]bool{}); len(argv) > 0 {
 			argvs = append(argvs, argv)
 		}
 	}
@@ -427,33 +390,47 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			}
 		}
 	}
+	// The parsed script places every heredoc: a body is data unless its reader
+	// line runs a shell, a source builtin or a script interpreter, in which case
+	// the body is judged as the code it is (gt-ohe8n, gt-1cvqj).
 	if sandboxSecretsHeredocRefsSecret(command) {
 		return "an unquoted heredoc expands a secret variable", false
 	}
-	// A body an interpreter runs is code whatever its tag: the quotes only keep
-	// the shell from expanding it. So it gets the one-liner rules, as a -c string would.
-	for _, span := range scanHeredocs(command) {
-		if span.bodyStart >= 0 && sandboxSecretsHeredocFedToSource(command, span) {
-			// source /dev/stdin <<EOF runs the body as a script, so it is judged as shell text.
-			payloads = append(payloads, span.body)
+	if script, err := shellparse.Parse(command); err == nil {
+		var heredocReason string
+		sandboxSecretsEachHeredoc(script, func(script shellparse.Script, i int) {
+			if heredocReason != "" {
+				return
+			}
+			fedToSource := sandboxSecretsHeredocFedToSource(script, i)
+			fedToShell := sandboxSecretsHeredocFedToShell(script, i)
+			interpreter := sandboxSecretsHeredocInterpreter(script, i)
+			for _, h := range script.Segments[i].Heredocs {
+				body := h.Body
+				if fedToSource {
+					// source /dev/stdin <<EOF runs the body as a script, so it is judged as shell text.
+					payloads = append(payloads, body)
+				}
+				if strings.TrimSpace(body) != "" && fedToShell {
+					// A redirection ahead of the shell hides it from the reader
+					// line's own stages: 2>/dev/null bash <<EOF still runs the
+					// body as a script.
+					payloads = append(payloads, body)
+				}
+				if interpreter == "" {
+					continue
+				}
+				if reason := sandboxSecretsScriptReason(body); reason != "" {
+					heredocReason = interpreter + " heredoc " + reason
+					return
+				}
+				payloads = append(payloads, sandboxSecretsShelledStrings(body)...)
+			}
+		})
+		if heredocReason != "" {
+			return heredocReason, false
 		}
-		if span.bodyStart >= 0 && strings.TrimSpace(span.body) != "" &&
-			!heredocReaderIsShellInvoker(span.reader) && !heredocReaderIsShellInvoker(span.cmdText) &&
-			sandboxSecretsHeredocFedToShell(command, span) {
-			// A redirection ahead of the shell hides it from shellFedHeredocBodies:
-			// 2>/dev/null bash <<EOF still runs the body as a script.
-			payloads = append(payloads, span.body)
-		}
-		interpreter := sandboxSecretsHeredocInterpreter(command, span)
-		if span.bodyStart < 0 || interpreter == "" {
-			continue
-		}
-		if reason := sandboxSecretsScriptReason(span.body); reason != "" {
-			return interpreter + " heredoc " + reason, false
-		}
-		payloads = append(payloads, sandboxSecretsShelledStrings(span.body)...)
 	}
-	payloads = append(payloads, shellFedHeredocBodies(command)...)
 	substitutions := prWorkflowSubstitutions(command)
 	payloads = append(payloads, substitutions...)
 	if shells {
@@ -481,6 +458,23 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	return "", tooDeep
 }
 
+// sandboxSecretsEachHeredoc calls fn for every segment that holds here-documents,
+// in the script and in every substitution it nests: a heredoc inside a "$(...)"
+// is read by the command the substitution runs, and its body is judged there.
+func sandboxSecretsEachHeredoc(script shellparse.Script, fn func(script shellparse.Script, index int)) {
+	for i, seg := range script.Segments {
+		if len(seg.Heredocs) > 0 {
+			fn(script, i)
+		}
+		for _, sub := range seg.Subs {
+			sandboxSecretsEachHeredoc(sub, fn)
+		}
+	}
+	for _, sub := range script.Subs {
+		sandboxSecretsEachHeredoc(sub, fn)
+	}
+}
+
 // sandboxSecretsBodyPassers are the readers that write a heredoc body back to their
 // output, so a substitution's output carries the body it read.
 var sandboxSecretsBodyPassers = map[string]bool{"cat": true, "tee": true}
@@ -488,21 +482,27 @@ var sandboxSecretsBodyPassers = map[string]bool{"cat": true, "tee": true}
 // sandboxSecretsSubstitutionHeredocs returns the bodies of heredocs that a command
 // substitution reads through a body passer such as cat or tee, which writes them back
 // out. The substitution's output is what a shell or a command word runs:
-// printf '%s' "$(cat <<'BEAD' ...)" | sh. The heredoc is found in the substitution's
-// own body, because scanHeredocs does not see an operator written inside double
-// quotes (gt-ynkew).
+// printf '%s' "$(cat <<'BEAD' ...)" | sh. The heredoc is found by parsing the
+// substitution's own body, so an operator written inside double quotes, which
+// starts no heredoc for the outer line, is the heredoc the substitution runs
+// (gt-ynkew). A body whose delimiter never closes is a syntax error, so
+// nothing runs and nothing is judged. The delimiter line is kept at the end of
+// the returned text, as the shell's reading of the body ran to it.
 func sandboxSecretsSubstitutionHeredocs(command string) []string {
 	var bodies []string
 	for _, sub := range substitutionSpansIn(command, true) {
 		text := substitutionBody(command, sub)
-		for _, span := range scanHeredocs(text) {
-			if span.bodyStart < 0 || span.unterminated {
-				continue
-			}
-			for _, argv := range sandboxSecretsHeredocPipeline(text, span) {
-				if sandboxSecretsBodyPassers[strings.ToLower(filepath.Base(argv[0]))] {
-					bodies = append(bodies, span.body)
-					break
+		script, err := shellparse.Parse(text)
+		if err != nil {
+			continue
+		}
+		for i, seg := range script.Segments {
+			for _, h := range seg.Heredocs {
+				for _, argv := range sandboxSecretsHeredocPipeline(script, i) {
+					if sandboxSecretsBodyPassers[strings.ToLower(filepath.Base(argv[0]))] {
+						bodies = append(bodies, h.Body+h.Delimiter+"\n")
+						break
+					}
 				}
 			}
 		}
@@ -1229,63 +1229,42 @@ func sandboxSecretsPipeOutput(argv []string, fed string, ansiHereStrings map[str
 // form has its escapes decoded: bash <<< $'x\nprintenv' hands the shell two lines,
 // while bash <<< 'x\nprintenv' hands it one word with a backslash in it, so
 // decoding every here-string blocks the single word the shell reports as a
-// missing command (gt-9q6sf, gt-3yhp0). shlex drops the $'...' marker, so each
-// word is matched back against the command text. command must be the text the
+// missing command (gt-9q6sf, gt-3yhp0). The parsed redirections say which
+// "<<<" is a here-string (a quoted or commented one is not), and shlex drops
+// the $'...' marker, so the word is matched back by tokenizing it on its own,
+// the spelling the caller's token line carries. command must be the text the
 // caller tokenizes, so the two spellings agree.
 func sandboxSecretsANSICHereStrings(command string) map[string]bool {
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return nil
+	}
 	var texts map[string]bool
-	walk := heredocQuoteWalk{runes: []rune(command), prevIdx: -1}
-	for i := 0; ; {
-		op := strings.Index(command[i:], "<<<")
-		if op < 0 {
-			return texts
-		}
-		op += i
-		if walk.advanceTo(op) != 0 || walk.comment || walk.escaped || walk.readsData() {
-			i = op + len("<<<")
-			continue
-		}
-		word := skipHereStringGap(command, op+len("<<<"))
-		if word >= len(command) || command[word] != '$' {
-			i = op + len("<<<")
-			continue
-		}
-		// bash deletes a backslash-newline between the "$" and the quote before
-		// it reads the quote, so $\<newline>'x' is the same ANSI-C string as $'x'
-		// (gt-javvg, gt-vviaz).
-		quote := skipLineContinuationBytes(command, word+1)
-		if quote >= len(command) || command[quote] != '\'' {
-			i = op + len("<<<")
-			continue
-		}
-		close := closingANSIQuote(command, quote+1)
-		if close < 0 {
-			return texts
-		}
-		if words := shellTokenize(command[word : close+1]); len(words) == 1 {
-			if texts == nil {
-				texts = map[string]bool{}
+	for _, seg := range script.Segments {
+		for _, r := range seg.Redirs {
+			if r.Op != "<<<" {
+				continue
 			}
-			texts[words[0]] = true
+			raw := r.Word.Raw
+			if !strings.HasPrefix(raw, "$") {
+				continue
+			}
+			// bash deletes a backslash-newline between the "$" and the quote
+			// before it reads the quote, so $\<newline>'x' is the same ANSI-C
+			// string as $'x' (gt-javvg, gt-vviaz).
+			quote := skipLineContinuationBytes(raw, 1)
+			if quote >= len(raw) || raw[quote] != '\'' {
+				continue
+			}
+			if words := shellTokenize(raw); len(words) == 1 {
+				if texts == nil {
+					texts = map[string]bool{}
+				}
+				texts[words[0]] = true
+			}
 		}
-		i = close + 1
 	}
-}
-
-// skipHereStringGap returns the index of the here-string word after the "<<<"
-// that ends at i. bash deletes a backslash-newline wherever it sits in that gap,
-// as it does between the blanks, so both are stepped over, in any mix.
-func skipHereStringGap(command string, i int) int {
-	for {
-		next := skipLineContinuationBytes(command, i)
-		for next < len(command) && (command[next] == ' ' || command[next] == '\t') {
-			next++
-		}
-		if next == i {
-			return i
-		}
-		i = next
-	}
+	return texts
 }
 
 // sandboxSecretsHereStrings is splitHereStrings with the text of each ANSI-C

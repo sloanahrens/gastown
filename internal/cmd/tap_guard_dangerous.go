@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -192,44 +193,197 @@ const maxDangerousNestDepth = 3
 // checks have (gt-7ydceb). Bash-valid shapes the parser misreads are refused
 // by the same gate; that fail-closed trade is decided in gt-wnblap.
 func evaluateDangerousCommand(command string, depth int, sess guardSession) (reason, alternative string) {
-	reason, alternative = judgeDangerousText(command, depth, sess)
-	if reason != "" {
-		return reason, alternative
-	}
 	script, err := shellparse.Parse(command)
 	if err != nil {
+		// The parser could not read the command, so it is refused below. Its
+		// own words are judged first, leniently, so a dangerous operation the
+		// text spells keeps its own reason — the reading a nuke glued to a
+		// separator got before the parse gate (gt-m6x4py).
+		if reason, alternative = judgeDangerousLenientText(command, depth, sess); reason != "" {
+			return reason, alternative
+		}
 		if depth > 0 {
 			return dangerousNestedUnreadable(err), ""
 		}
 		return dangerousUnreadable(err), ""
 	}
-	return evaluateDangerousScriptNested(script, command, depth, sess)
+	return judgeDangerousScript(script, command, depth, sess)
 }
 
-// judgeDangerousText is the lenient judgment of one command line's own words:
-// the token checks, read off the command text as the guard has always read it.
-// Nested command lines are not judged here — they come from the parsed Script
-// — except for the done/slot loop rule, whose reading of a substitution body
-// dangerousSubstitutionLoop explains.
-func judgeDangerousText(command string, depth int, sess guardSession) (reason, alternative string) {
-	// Kept for the checks that need the pre-strip text: the done/slot loop
-	// rule reads heredoc bodies the command writes to a FILE, which the
-	// stripping below is exactly what removes from view (gt-7dxw).
-	rawCommand := command
-	command = stripHeredocBodies(command)
-	tokens := shellTokenize(command)
-	lowerTokens := toLowerTokens(tokens)
-	if reason, alternative = judgeDangerousTokens(rawCommand, tokens, lowerTokens, sess); reason != "" {
+// judgeDangerousScript judges one command line the parser read. The token
+// matchers read the words the shell will pass — quoting resolved, expansions
+// kept as source text, redirections and here-document bodies out of the word
+// list — instead of a second tokenization of the text, so the parser's reading
+// is the only reading (gt-kr5vf). The done/slot loop rule is the exception:
+// a loop's keywords are not segments, so that rule stays on the text
+// (judgeDangerousLoopText).
+func judgeDangerousScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
+	// A declaration builtin's word spelling "<<" is a here-document to the
+	// shell's lexer, which reads the operator before the builtin sees its
+	// argument: "let y=1<<x" feeds the next lines to the body as data. The
+	// parser reads the word as an arithmetic expression and reports no
+	// Heredoc there, so that line is judged by the lenient reader, which
+	// follows the shell, rather than by the parsed words that would judge the
+	// body as live commands. Nested payloads on such a line are not judged;
+	// the shapes it covers are arithmetic declarations, not shell invokers.
+	if dangerousDeclarationHeredoc(script) || dangerousANSICContinuation(text) {
+		return judgeDangerousLenientText(text, depth, sess)
+	}
+	tokens := dangerousTokenLine(script)
+	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
 	}
-	return dangerousSubstitutionLoop(rawCommand, depth)
+	if reason, alternative = judgeDangerousLoopText(text, depth); reason != "" {
+		return reason, alternative
+	}
+	return evaluateDangerousScriptNested(script, depth, sess)
+}
+
+// dangerousDeclarationBuiltins are the builtins shellparse reads as a
+// declaration clause: their assignments are arguments of the builtin, after
+// its own name, not the command prefix a plain command carries.
+var dangerousDeclarationBuiltins = map[string]bool{
+	"declare": true, "local": true, "export": true, "readonly": true, "typeset": true, "let": true,
+}
+
+// dangerousTokenLine rebuilds the token line the dangerous matchers read: each
+// segment's words and assignments in the order the shell reads them, the
+// operator that ends the segment, and a "(" / ")" pair around the segments a
+// subshell encloses. It is containerSuiteWalkLine with two corrections the
+// matchers need: a declaration builtin's assignments follow its name (they are
+// arguments to it), and an assignment keeps the "=" shellparse's text drops
+// from a valueless one ("BD_ACTOR=" reads as "BD_ACTOR"), so a matcher that
+// looks for an assignment sees one.
+func dangerousTokenLine(script shellparse.Script) []string {
+	var tokens []string
+	var shells []int
+	for _, seg := range script.Segments {
+		common := containerSuiteCommonShells(shells, seg.Shells)
+		for len(shells) > common {
+			tokens = append(tokens, ")")
+			shells = shells[:len(shells)-1]
+		}
+		for len(shells) < len(seg.Shells) {
+			tokens = append(tokens, "(")
+			shells = append(shells, seg.Shells[len(shells)])
+		}
+		declaration := len(seg.Words) == 1 && dangerousDeclarationBuiltins[seg.Words[0].Text]
+		if !declaration {
+			for _, a := range seg.Assigns {
+				tokens = append(tokens, dangerousAssignToken(a))
+			}
+		}
+		for _, w := range seg.Words {
+			tokens = append(tokens, w.Text)
+		}
+		if declaration {
+			for _, a := range seg.Assigns {
+				tokens = append(tokens, dangerousAssignToken(a))
+			}
+		}
+		if seg.After != "" {
+			tokens = append(tokens, seg.After)
+		}
+	}
+	for len(shells) > 0 {
+		tokens = append(tokens, ")")
+		shells = shells[:len(shells)-1]
+	}
+	return tokens
+}
+
+// dangerousAssignToken is one assignment as the matchers read it. shellparse's
+// text loses the "=" of a valueless assignment ("BD_ACTOR" for "BD_ACTOR="), and
+// a declaration builtin's flags arrive as assignments whose text is "=-x", so
+// the raw source is used for those; every other assignment keeps its decoded
+// text, where a quoted value's quotes are already resolved.
+func dangerousAssignToken(a shellparse.Word) string {
+	if strings.HasPrefix(a.Raw, "-") || !strings.Contains(a.Text, "=") {
+		return a.Raw
+	}
+	return a.Text
+}
+
+// dangerousDeclarationHeredoc reports whether the parsed script holds a
+// declaration builtin whose word spells "<<". The shell's lexer reads that
+// operator before the builtin sees its argument, so bash reads a here-document
+// there while shellparse parses the word as an arithmetic expression and
+// reports no Heredoc: "let y=1<<x" hands the following lines to the body as
+// data. The "a shift in a let argument is a real heredoc" row of
+// TestHeredocDoesNotHideRealCommand pins that reading.
+func dangerousDeclarationHeredoc(script shellparse.Script) bool {
+	for _, seg := range script.Segments {
+		if len(seg.Words) == 0 {
+			continue
+		}
+		switch seg.Words[0].Text {
+		case "declare", "local", "export", "readonly", "typeset", "let":
+		default:
+			continue
+		}
+		for _, w := range seg.Words[1:] {
+			if strings.Contains(w.Text, "<<") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dangerousANSICContinuation reports whether text opens an ANSI-C string across
+// a backslash-newline ("$\\\n'"). bash deletes the continuation before it reads
+// the quote, so it reads a $'...' string; shellparse reads a parameter
+// expansion and splits the line differently (gt-javvg). The lenient reader
+// follows bash there, so a line with this shape is judged by it.
+func dangerousANSICContinuation(text string) bool {
+	for i := 0; i+1 < len(text); i++ {
+		if text[i] != '$' {
+			continue
+		}
+		q := skipLineContinuationBytes(text, i+1)
+		if q > i+1 && q < len(text) && text[q] == '\'' {
+			return true
+		}
+	}
+	return false
+}
+
+// judgeDangerousLenientText is the judgment of a command the parser could not
+// read — or read differently from the shell — with the token checks on the
+// lenient token line, then the done/slot loop rule. When the caller has
+// already decided the command is unreadable, its verdict only feeds the
+// refusal choice; a command it lets through is still refused by the caller.
+func judgeDangerousLenientText(command string, depth int, sess guardSession) (reason, alternative string) {
+	tokens := shellTokenize(stripHeredocBodies(command))
+	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
+		return reason, alternative
+	}
+	return judgeDangerousLoopText(command, depth)
+}
+
+// judgeDangerousLoopText is the done/slot loop rule read from the command text.
+// It is the one nested read the parsed Script cannot feed that rule: the
+// flattener records what a shell runs, and a for or while block's keywords open
+// and close around their segments instead of being segments of their own ("for
+// i in 1 2; do gt done; done" flattens to one "gt done" segment). The rule is a
+// shape of the text — a block that CLOSES around a gt done or gt slot, a repeat
+// or an xargs beside one (gt-7dxw) — so its bodies keep the lenient
+// substitution scan rather than the parsed Script. It only ever answers that
+// rule: a body it cannot read is never refused here, and every other nested
+// judgment and every unreadable-payload refusal comes from the parsed Script
+// (gt-7ydceb). The rule reads the unstripped text because a heredoc body the
+// command writes to a FILE can hold the retry script; the heredoc bodies it
+// finds are the parsed ones (doneSlotLoopFileWrittenBodies).
+func judgeDangerousLoopText(text string, depth int) (reason, alternative string) {
+	tokens := shellTokenize(stripHeredocBodies(text))
+	if reason, alternative = matchesDoneSlotLoop(text, tokens, toLowerTokens(tokens)); reason != "" {
+		return reason, alternative
+	}
+	return dangerousSubstitutionLoop(text, depth)
 }
 
 // judgeDangerousTokens is the dangerous rules read over one token line.
-// rawCommand is the text the tokens came from, read by the checks that need
-// more than tokens (the done/slot rule's heredoc-written retry scripts); a
-// substitution script passes "" because it keeps no raw text (gt-7ydceb).
-func judgeDangerousTokens(rawCommand string, tokens, lowerTokens []string, sess guardSession) (reason, alternative string) {
+func judgeDangerousTokens(tokens, lowerTokens []string, sess guardSession) (reason, alternative string) {
 	// Check privilege escalation and package manager commands first
 	if r := matchesSudo(lowerTokens); r != "" {
 		return r, ""
@@ -268,12 +422,6 @@ func judgeDangerousTokens(rawCommand string, tokens, lowerTokens []string, sess 
 	if r, alt := matchesPolecatFullSuiteUncached(lowerTokens, inPolecatSession(sess.proc)); r != "" {
 		return r, alt
 	}
-	// A loop or watcher around `gt done` / `gt slot` is the improvised retry
-	// the slot ruling forbids (gt-7dxw). Checked against the unstripped
-	// command so a heredoc-written retry script is visible.
-	if r, alt := matchesDoneSlotLoop(rawCommand, tokens, lowerTokens); r != "" {
-		return r, alt
-	}
 	// Unbounded scans need the original-case tokens: ls -R (recursive) and
 	// ls -r (reverse sort) mean different things, and lowercasing would
 	// collapse that distinction.
@@ -295,13 +443,12 @@ func judgeDangerousTokens(rawCommand string, tokens, lowerTokens []string, sess 
 // that depth is refused, never allowed unjudged (gt-7ydceb). The text payloads
 // are judged as text — each is a command line of its own, parsed and gated by
 // evaluateDangerousCommand — and every substitution the shell expands is judged
-// as the already-parsed script it is. text is the source the script was parsed
-// from, or "" for a substitution script, whose text is not kept; it feeds the
-// here-document scanner at dangerousHeredocBodies.
-func evaluateDangerousScriptNested(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
+// as the already-parsed script it is.
+func evaluateDangerousScriptNested(script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
 	payloads := nestedCommands(script)
-	payloads = append(payloads, dangerousHeredocBodies(script, text)...)
+	payloads = append(payloads, dangerousHeredocBodies(script)...)
 	subs := dangerousScriptSubs(script)
+	subs = append(subs, dangerousRecoveredSubs(script)...)
 	// A script that nests nothing is judged in full: its own words are the
 	// whole of what it runs. One that nests something at the cap has reached
 	// an unjudged payload, so the cap refuses it (gt-7ydceb).
@@ -331,15 +478,15 @@ func evaluateDangerousScriptNested(script shellparse.Script, text string, depth 
 // parser read.
 func evaluateDangerousScript(script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
 	// The script is judged on the token line rebuilt from its segments, so the
-	// matchers read the same shapes they read on the lenient path. The raw text
-	// is "" here: a substitution keeps none, so the done/slot rule cannot see a
-	// retry script the substitution writes to a file in its here-document
-	// (gt-7ydceb).
-	tokens, _ := containerSuiteWalkLine(script)
-	if reason, alternative = judgeDangerousTokens("", tokens, toLowerTokens(tokens), sess); reason != "" {
+	// matchers read the same shapes they read on the lenient path. The done/slot
+	// loop rule is not read here: a substitution keeps no text, so that rule
+	// cannot see a loop in its body, and dangerousSubstitutionLoop carries it
+	// from the text of the line that holds the substitution (gt-7ydceb).
+	tokens := dangerousTokenLine(script)
+	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
 	}
-	return evaluateDangerousScriptNested(script, "", depth, sess)
+	return evaluateDangerousScriptNested(script, depth, sess)
 }
 
 // nestedCommands returns the command lines a parsed script hands to another
@@ -360,17 +507,11 @@ func nestedCommands(script shellparse.Script) []string {
 
 // dangerousHeredocBodies returns the here-document bodies a shell runs as a
 // script. A body is data to its reader unless a shell invoker runs on its
-// reader line, and only stdin's body feeds a shell its script (gt-9g0y,
+// reader line — the segment itself or one joined to it by a non-";" operator,
+// so "bash <<EOF" and "cat <<EOF | bash" both count while a bash on a later
+// line does not — and only stdin's body feeds a shell its script (gt-9g0y,
 // gt-ohe8n).
-//
-// The parsed bodies are read first. The scanner's bodies follow, because the
-// parser and the shell disagree on one shape: bash ends a "#" comment at the
-// newline, so `echo hi # note \` ends there and the `bash <<EOF` on the next
-// line reads the body, while the parser joins the two lines through the
-// backslash and reads one `echo hi bash` for which nothing reads the body
-// (gt-3vky2). Reading the body both ways keeps the shell's reading, and the
-// body is judged and gated like every other payload.
-func dangerousHeredocBodies(script shellparse.Script, text string) []string {
+func dangerousHeredocBodies(script shellparse.Script) []string {
 	var bodies []string
 	for i, seg := range script.Segments {
 		if !containerSuiteHeredocReadAsScript(script, i) {
@@ -386,7 +527,56 @@ func dangerousHeredocBodies(script shellparse.Script, text string) []string {
 			bodies = append(bodies, h.Body)
 		}
 	}
-	return append(bodies, shellFedHeredocBodies(text)...)
+	return bodies
+}
+
+// dangerousRecoveredSubs returns the process substitutions the parser could not
+// read. mvdan reads the word of a "${..}" expansion as one literal, so a
+// "<(...)" written inside it ("echo ${v:-<(bash <<EOF...)}") carries no
+// ProcSubst, while the shell runs it all the same: the body of a heredoc there
+// is read by the process substitution's command. The text inside the parens is
+// cut out and parsed as the script it is, and judged like any other
+// substitution. Only an unquoted word is read: a quoted "<(...)" is text the
+// shell passes through (gt-lx8i8).
+func dangerousRecoveredSubs(script shellparse.Script) []shellparse.Script {
+	var subs []shellparse.Script
+	var recover func(s shellparse.Script)
+	recoverWord := func(w shellparse.Word) {
+		if len(w.ProcSubs) > 0 || w.Raw != w.Text {
+			return
+		}
+		for i := 0; i+1 < len(w.Raw); i++ {
+			if (w.Raw[i] != '<' && w.Raw[i] != '>') || w.Raw[i+1] != '(' {
+				continue
+			}
+			end := closingParen(w.Raw, i+2, heredocBodiesFrom(w.Raw, i+2))
+			if end < 0 {
+				continue
+			}
+			if inner, err := shellparse.Parse(w.Raw[i+2 : end]); err == nil {
+				subs = append(subs, inner)
+			}
+			i = end
+		}
+	}
+	recover = func(s shellparse.Script) {
+		for _, seg := range s.Segments {
+			for _, w := range seg.Words {
+				recoverWord(w)
+			}
+			for _, a := range seg.Assigns {
+				recoverWord(a)
+			}
+			for _, sub := range seg.Subs {
+				recover(sub)
+			}
+		}
+		for _, sub := range s.Subs {
+			recover(sub)
+		}
+	}
+	recover(script)
+	return subs
 }
 
 // dangerousScriptSubs returns every substitution a parsed script makes the
@@ -613,614 +803,523 @@ func shellQuoteWord(word string) string {
 
 // heredocStartPattern matches a heredoc redirection operator: "<<TAG",
 // "<<-TAG" (strip-leading-tabs form), or either with the tag quoted
-// ("<<'TAG'", `<<"TAG"`).
+// ("<<'TAG'", `<<"TAG"`). A guard that only needs to know whether a line
+// carries one (polecat_paths) reads it; the body spans come from heredocSpans.
 var heredocStartPattern = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za-z0-9_]*)['"]?`)
 
-// heredocSpan is one heredoc redirection found by scanHeredocs: the reader
-// line that owns it (the operator line with the operator removed), the offset
-// that line starts at, the body text, and the body's byte offsets. bodyStart
-// is -1 when the operator line is the command's last line, so no body follows.
-// readerStart lets a caller reach the text the shell had already run by the
-// time it reads the body, without re-finding the operator (gt-v02wh). quoted
-// is true when the tag is quoted: the shell leaves such a body literal, while
-// an unquoted body gets its $(...) and backticks expanded (gt-x50o8).
-// unterminated is true when no line equals the tag, so the body runs to the
-// end of the text — a span the strippers refuse to act on (gt-79opc).
+// heredocSpan is one here-document body found in a command's text: where the
+// body starts and ends in the source, the body text, and the two states a
+// caller acts on. bodyEnd is past the delimiter line, where the shell resumes
+// reading commands, so stripping [bodyStart,bodyEnd) removes the body and its
+// terminator together. quoted is true when the delimiter is quoted: the shell
+// leaves such a body literal, while an unquoted one gets its $(...) and
+// backticks expanded (gt-x50o8). unterminated is true when no line equals the
+// delimiter, so the body runs to the end of the text — a span the strippers
+// refuse to act on (gt-79opc).
 type heredocSpan struct {
-	reader       string
-	readerStart  int
-	opStart      int // the "<<" operator's offsets in the command, so a caller can
-	opEnd        int // find its place on the reader line without matching it again
-	body         string
 	bodyStart    int
 	bodyEnd      int
+	body         string
 	quoted       bool
 	unterminated bool
-	cmdText      string // the command text of the "$(" the heredoc sits in, or ""
+
+	// readerPipelineHasShell is true when a shell invoker shares the pipeline
+	// that holds the operator ("cat <<EOF | bash"), so the shell runs the body
+	// as a script rather than reading it as data. A shell on another stage of
+	// the same "&&" line does not read this body. It is set from the parsed
+	// script; the lenient reader leaves it false, since text the parser refuses
+	// is refused before its bodies matter.
+	readerPipelineHasShell bool
 }
 
-// scanHeredocs returns every heredoc in command, in source order. A "<<" that
-// appears inside another heredoc's body is that body's data, not a second
-// heredoc, so it is dropped (gt-mkrj). One written inside quotes is a literal
-// the shell never reads as a redirection, unless a "$(...)" inside double quotes
-// reopens command text, where it is a heredoc (gt-lx8i8). One preceded by "<" is
-// the tail of a "<<<" here-string: both are skipped, because a body inferred from
-// either runs to the end of the text and hides the lines after it (gt-79opc).
-// So are the other spellings that look like a heredoc operator but are not
-// (gt-yza8u, gt-dherr, gt-adt8r): a "<" behind a backslash ("\<<EOF" reads as
-// a literal "<" followed by a single-"<" redirect) and a "<<" the shell reads
-// as an expression or as an expansion's word — an arithmetic context (a
-// "$((", a command-position "((" or C-style "for ((", a "$[" or array
-// subscript) or the text of a "${..}", whose "#", "%", "/" and "^" operators
-// take patterns — where it is a shift or a literal. Accepting any of them
-// stripped a body the shell never read, and the live commands standing in for
-// that body went unchecked. A "<<" inside a "#" comment is skipped for the
-// same reason: the shell parses none of the comment, and the lines below it
-// are live.
-func scanHeredocs(command string) []heredocSpan {
-	matches := heredocStartPattern.FindAllStringSubmatchIndex(command, -1)
-	if matches == nil {
-		return nil
-	}
-	var spans []heredocSpan
-	stripped := 0 // end of the last accepted body; nothing before it starts a heredoc
-	anchor := 0   // end of the last accepted body: the line after it starts a logical line
-	walk := heredocQuoteWalk{runes: []rune(command), prevIdx: -1}
-	for _, m := range matches {
-		start, end := m[0], m[1]
-		if start < stripped {
-			continue // inside a previously accepted heredoc body
-		}
-		if walk.advanceTo(start) != 0 || walk.comment || walk.escaped || walk.readsData() {
-			continue
-		}
-		if start > 0 && command[start-1] == '<' {
-			continue
-		}
-		allowIndent := command[m[2]:m[3]] == "-"
-		quoted := m[5] > m[4]
-		tag := command[m[6]:m[7]]
-		reader, readerStart := heredocReaderLine(command, start, end, anchor)
-		cmdText := heredocCmdText(command, &walk, start, end, readerStart)
+// heredocReader is one parsed here-document together with the source offset
+// of the end of the segment that reads it. The body follows the newline that
+// ends that segment's logical line, so the offset is what places the body in
+// the text. readerPipelineHasShell says whether the operator's pipeline runs a
+// shell.
+type heredocReader struct {
+	doc                    shellparse.Heredoc
+	readerEnd              int
+	readerPipelineHasShell bool
+}
 
-		// The body follows the newline that ends the logical line, so a
-		// backslash-newline continuing the operator's line is not the break.
-		lineEnd := heredocLineEnd(command, end)
-		if lineEnd == len(command) {
-			// No body follows on a later line (e.g. the heredoc marker is
-			// the last thing on the line with nothing after it).
-			spans = append(spans, heredocSpan{reader: reader, readerStart: readerStart, opStart: start, opEnd: end, bodyStart: -1, bodyEnd: end, quoted: quoted, cmdText: cmdText})
-			stripped = end
-			walk.skipTo(end)
+// heredocSpans returns the here-document bodies in text, in source order. The
+// parsed Script decides them whenever shellparse can read the text: a "<<" is
+// a redirection only where the shell reads one, so a shift in an arithmetic
+// expression, a "${v%<<x}" pattern, a comment and a quoted string are excluded
+// by the parser rather than by a second reader of the shell's syntax
+// (gt-yza8u, gt-dherr, gt-adt8r, gt-lx8i8). Text the parser refuses falls back
+// to heredocSpansLenient, which reads the shapes a guard still has to act on
+// from a line at a time.
+func heredocSpans(text string) []heredocSpan {
+	script, err := shellparse.Parse(text)
+	if err != nil || dangerousDeclarationHeredoc(script) {
+		return heredocSpansLenient(text)
+	}
+	return heredocSpansFromScript(text, script)
+}
+
+// heredocSpansFromScript places the here-documents of a parsed script in text.
+// A body starts after the newline that ends its reader's logical line — a
+// backslash-newline continues that line, so the body only starts past the
+// continuation — and ends past the line that equals the delimiter. Bodies are
+// read in reader order, so a later body starts where the earlier one ended.
+// A here-document whose reader segment has no source position cannot be
+// placed, and the whole text falls back to the line reader rather than
+// stripping at a guessed offset.
+func heredocSpansFromScript(text string, script shellparse.Script) []heredocSpan {
+	var readers []heredocReader
+	collectHeredocReaders(script, &readers)
+	for _, r := range readers {
+		if r.readerEnd < 0 {
+			return heredocSpansLenient(text)
+		}
+	}
+	sort.SliceStable(readers, func(i, j int) bool { return readers[i].readerEnd < readers[j].readerEnd })
+	var spans []heredocSpan
+	cursor := 0
+	for _, r := range readers {
+		start := heredocLineEndAfter(text, r.readerEnd)
+		if start < cursor {
+			start = cursor
+		}
+		end, ok := heredocDelimiterEnd(text, start, r.doc.Delimiter)
+		if !ok {
+			// No line equals the delimiter: the body is the rest of the text.
+			// The span is recorded, but nothing strips it (gt-79opc).
+			spans = append(spans, heredocSpan{bodyStart: start, bodyEnd: len(text), body: text[start:], quoted: r.doc.Quoted, unterminated: true, readerPipelineHasShell: r.readerPipelineHasShell})
+			cursor = len(text)
 			continue
 		}
-		bodyStart := lineEnd + 1
-		bodyEnd := heredocTerminatorEnd(command, bodyStart, tag, allowIndent)
-		if bodyEnd < 0 {
-			// No line equals the tag, so the shell would read the rest of
-			// the text as the body. The span is still recorded — a reader
-			// that writes the body to a file, or feeds it to a shell, has
-			// to judge it — but nothing is stripped: the tail may just as
-			// well be live commands after a "<<" the shell never took as a
-			// redirection, and dropping it hid them (gt-79opc).
-			spans = append(spans, heredocSpan{
-				reader:       reader,
-				readerStart:  readerStart,
-				opStart:      start,
-				opEnd:        end,
-				body:         command[bodyStart:],
-				bodyStart:    bodyStart,
-				bodyEnd:      len(command),
-				quoted:       quoted,
-				unterminated: true,
-				cmdText:      cmdText,
-			})
-			stripped = len(command)
-			walk.skipTo(len(command))
-			continue
-		}
-		spans = append(spans, heredocSpan{
-			reader:      reader,
-			readerStart: readerStart,
-			opStart:     start,
-			opEnd:       end,
-			body:        command[bodyStart:bodyEnd],
-			bodyStart:   bodyStart,
-			bodyEnd:     bodyEnd,
-			quoted:      quoted,
-			cmdText:     cmdText,
-		})
-		stripped = bodyEnd
-		anchor = bodyEnd
-		walk.skipTo(bodyEnd)
+		spans = append(spans, heredocSpan{bodyStart: start, bodyEnd: end, body: text[start:end], quoted: r.doc.Quoted, readerPipelineHasShell: r.readerPipelineHasShell})
+		cursor = end
 	}
 	return spans
 }
 
-// heredocQuoteWalk is the reading half of spaceOutShellOperators' quoting
-// rules — backslash escapes, single and double quotes, and word-leading "#"
-// comments — walked forward over the text before each "<<" candidate, telling
-// a literal "<<" from a redirection. Comments decide it because a word-leading
-// "#" makes the rest of its line text the shell does not parse at all: read as
-// a quote, the apostrophe in "# don't" left the real heredoc below invisible
-// (gt-79opc). Contexts where the shell reads text as data decide it too: the
-// text of an arithmetic expression, where "<<" shifts (gt-yza8u, gt-dherr),
-// and the text of a "${..}" expansion, where no "<" at all is a redirection
-// (gt-adt8r).
-type heredocQuoteWalk struct {
-	runes   []rune
-	runeIdx int
-	byteIdx int
-	quote   rune            // the quoted stretch being read: 0, '\'' or '"'
-	comment bool            // inside a "#" comment, which runs to the end of its line
-	escaped bool            // the rune at runeIdx is literal text behind a backslash
-	arith   []arithFrame    // contexts open here where "<<" is no operator, innermost last
-	braces  int             // "${" expansions open here, the level a brace frame belongs to
-	substs  []substFrame    // "$(..)" open inside a "${..}" word, where "#" comments again, innermost last
-	ticks   []tickFrame     // backtick command text open, outermost first
-	subs    []cmdSubstFrame // "$(" command text open, innermost last
-	prevIdx int             // the rune the shell read last, for startsShellWord
-	prevEsc bool            // that rune was backslash-escaped
-}
-
-// cmdSubstFrame is one "$(" the walk is reading as command text: an unquoted
-// one, or one written inside double quotes. The shell reads its text as a
-// command line, so a heredoc in it is fed to that command: the reader line
-// alone starts at the assignment ("x=$(bash <<EOF") and does not show it
-// (gt-2am7w). outer is the double quote the substitution interrupts, which the
-// ")" that closes the frame resumes, or 0 when it sits in command text that no
-// quote holds (gt-lx8i8). depth counts the "(" open in the command text, the
-// opener included, so the ")" that returns it to zero closes the frame. open is
-// the offset just past the opening "(".
-//
-// The same frame reads a backtick pair and a "<(" or ">(" process substitution
-// (gt-1f28p): "x=`bash <<EOF" and "cat <(bash <<EOF" feed bash the body too. A
-// tick frame has no opener to count, so tick marks it, and the closing backtick
-// (not a ")") ends it: the quote it resumes and where its text starts live on
-// the tickFrame, which owns them (gt-tzh06).
-type cmdSubstFrame struct {
-	outer rune
-	depth int
-	open  int
-	tick  bool
-}
-
-// arithKind is what opened a context, and so what closes it.
-type arithKind uint8
-
-const (
-	arithParen   arithKind = iota + 1 // "$((" or a command-position "(("
-	arithBracket                      // a "$[" or an array subscript "["
-	arithBrace                        // a "${..}" expansion
-)
-
-// arithFrame is one context the walk is reading where the shell takes no "<"
-// as a redirection: an arithmetic expression, or a "${..}" expansion, whose
-// operators take patterns (gt-adt8r). depth counts the brackets open inside a
-// paren or bracket frame, the opener the walk has already passed included, so
-// the matching closer is what returns it to zero. brace is the "${" nesting
-// depth a brace frame belongs to: the "}" that ends that expansion, and not a
-// "}" of one nested inside it, is what closes the frame (gt-dherr).
-type arithFrame struct {
-	kind  arithKind
-	depth int
-	brace int
-}
-
-// tickFrame is one backtick command text the walk is reading. at is the "${"
-// nesting depth it sits at, so the text is the innermost context only while no
-// "${" has opened inside it. nested marks the text an escaped backtick opened
-// inside another: the shell unescapes the outer text before it parses it, so
-// the escaped backtick in "`echo \`echo }\“" opens a command of its own, and
-// its "}" is that command's. open is the offset just past the opening backtick,
-// and outer the double quote that backtick interrupted, which the closing one
-// resumes: the frame carries both, so ending the text reads nothing from the
-// "$(" stack and does not depend on the two staying in step (gt-tzh06).
-type tickFrame struct {
-	at     int
-	nested bool
-	open   int
-	outer  rune
-}
-
-// substFrame is one "$(..)" the walk is reading inside a "${..}" word. brace is
-// the "${" nesting depth it sits at, so command text is the innermost context
-// only while no "${" has opened inside it. depth counts the "(" open in it, the
-// opener included, so the ")" that returns it to zero ends it (gt-p833d).
-type substFrame struct {
-	brace int
-	depth int
-}
-
-// advanceTo reads up to byte offset to and returns the quote open there.
-func (w *heredocQuoteWalk) advanceTo(to int) rune {
-	for w.byteIdx < to && w.runeIdx < len(w.runes) {
-		r := w.runes[w.runeIdx]
-		escaped := w.escaped
-		w.escaped = false
-		if w.quote == 0 && !w.comment && !escaped && w.inCmdSubstText() &&
-			(r == ')' || r == '(' && w.runeAt(w.runeIdx+1) != '(' && !w.followsUnescapedDollar() && !w.opensProcSubst()) {
-			// Counted before the switch, which may open a frame on this rune;
-			// a "((" is arithmetic and its parentheses are not counted, and a
-			// "$(" or "<(" opens a frame whose own depth stands for its parenthesis.
-			w.countCmdParen(r)
+// collectHeredocReaders appends every here-document in script, its substitutions
+// included, with the source end of the segment that reads it. A substitution
+// keeps its here-documents in the nested Script the parser gives it, and their
+// bodies are in the same source text.
+func collectHeredocReaders(script shellparse.Script, out *[]heredocReader) {
+	for i, seg := range script.Segments {
+		if len(seg.Heredocs) > 0 {
+			end := segmentSourceEnd(seg)
+			shell := heredocPipelineRunsShell(script, i)
+			for _, h := range seg.Heredocs {
+				*out = append(*out, heredocReader{doc: h, readerEnd: end, readerPipelineHasShell: shell})
+			}
 		}
-		switch {
-		case r == '\n':
-			w.comment = false
-		case w.comment:
-			// The shell parses none of a comment's text.
-		case escaped && r == '`' && len(w.ticks) > 0:
-			// An escaped backtick inside backtick text opens a command of its
-			// own, or closes the one it opened.
-			if top := w.ticks[len(w.ticks)-1]; top.nested {
-				w.ticks = w.ticks[:len(w.ticks)-1]
-			} else {
-				w.ticks = append(w.ticks, tickFrame{at: w.braces, nested: true, open: w.byteIdx + 1, outer: w.quote})
-			}
-		case escaped:
-			// Literal text behind a backslash opens nothing.
-		case r == '\\' && w.quote != '\'':
-			w.escaped = true
-		case r == '`' && w.quote != '\'' && w.quote != '$':
-			// Backtick text is command text like "$(..)": a "}" in it is that
-			// command's own, so only the "}" after the closing backtick ends
-			// an expansion it sits in (gt-9udxk). The shell ends the text at
-			// the first backtick no backslash escapes, however many nested
-			// texts are open in it.
-			if len(w.ticks) > 0 {
-				w.closeTickSubst()
-			} else {
-				// The backticks are command text the shell starts quoting
-				// afresh, as "$(" is, so the frame remembers the double quote
-				// they interrupt and the closing backtick resumes it (gt-1f28p).
-				w.ticks = append(w.ticks, tickFrame{at: w.braces, open: w.byteIdx + 1, outer: w.quote})
-				w.subs = append(w.subs, cmdSubstFrame{open: w.byteIdx + 1, tick: true})
-				w.quote = 0
-			}
-		case w.quote == 0 && r == '\'' && isANSICDollar(w.runes, lineContinuationsBefore(w.runes, w.runeIdx)-1):
-			// A "$'" opens an ANSI-C string, where a backslash escapes the
-			// quote, so \' does not end it (gt-0vbb2).
-			w.quote = '$'
-		case w.quote == 0 && (r == '\'' || r == '"'):
-			w.quote = r
-		case w.quote == '"' && w.braces == 0 && r == '(' && w.followsUnescapedDollar() && w.runeAt(w.runeIdx+1) != '(':
-			// A "$(" inside double quotes is command text, where the shell
-			// starts quoting afresh, so the frame remembers the quote its ")"
-			// resumes (countCmdParen). "$((" is arithmetic, which double
-			// quotes already hide from this walk, and a "$(" in the word of a
-			// "${..}" expansion keeps that expansion's own reading.
-			w.subs = append(w.subs, cmdSubstFrame{outer: w.quote, depth: 1, open: w.byteIdx + 1})
-			w.quote = 0
-		case w.quote == '$' && r == '\'':
-			w.quote = 0
-		case (w.quote == '\'' || w.quote == '"') && r == w.quote:
-			w.quote = 0
-		case r == '#' && w.quote == 0 && w.readsComment() && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
-			// A "#" inside any quote is text, not the start of a comment (gt-0vbb2).
-			w.comment = true
-		case w.quote == 0 && r == '$' && w.runeAt(w.runeIdx+1) == '(' && w.runeAt(w.runeIdx+2) == '(':
-			// "$((" opens an arithmetic expansion. The two "(" that follow
-			// are counted, so the matching "))" is what closes it. One met
-			// inside an expansion already open opens its own frame, so its
-			// "))" ends that frame without ending the outer expansion early
-			// and leaving a later "<<" reading as a heredoc (gt-schaa).
-			w.arith = append(w.arith, arithFrame{kind: arithParen})
-		case w.parenArith() && w.quote == 0 && r == '(':
-			w.arith[len(w.arith)-1].depth++
-		case w.parenArith() && w.quote == 0 && r == ')':
-			top := &w.arith[len(w.arith)-1]
-			top.depth--
-			if top.depth <= 0 {
-				w.arith = w.arith[:len(w.arith)-1]
-			}
-		case w.quote == 0 && r == '(' && w.runeAt(w.runeIdx+1) == '(' &&
-			(startsShellWord(w.runes, w.prevIdx, w.prevEsc) || endsCommandReservedWord(w.runes, w.prevIdx, w.prevEsc)):
-			// A "((" in command position — an arithmetic command, and the
-			// header of a C-style "for ((...))" — is an expression too
-			// (gt-dherr). A reserved word that takes a command ("then((",
-			// "do((", "else((", "time((", "!((", "{((") or a case pattern's
-			// ")" ends at the "(", which delimits it, so the "((" after it
-			// is in command position without a space (gt-4jcks).
-			w.arith = append(w.arith, arithFrame{kind: arithParen})
-		case w.quote == 0 && w.inSubstText() && r == '(':
-			// A "(" inside the command text of a "$(..)" nests.
-			w.substs[len(w.substs)-1].depth++
-		case w.quote == 0 && w.braces > 0 && r == '(' && w.followsUnescapedDollar():
-			// The "(" of a "$(..)" nested in a "${..}" word opens command
-			// text, and a "#" there starts a comment again (gt-p833d).
-			w.substs = append(w.substs, substFrame{brace: w.braces, depth: 1})
-		case w.quote == 0 && !w.readsData() && r == '(' && w.followsUnescapedDollar() && w.runeAt(w.runeIdx+1) != '(':
-			// The "(" of an unquoted "$(..)" opens command text, where a
-			// heredoc is fed to the command it sits in (gt-2am7w). A "$((" is
-			// arithmetic and is taken by its case above.
-			w.subs = append(w.subs, cmdSubstFrame{depth: 1, open: w.byteIdx + 1})
-		case r == '(' && w.opensProcSubst():
-			// The "(" of a "<(..)" or ">(..)" process substitution opens command
-			// text the shell feeds a command line, as "$(" does (gt-1f28p).
-			w.subs = append(w.subs, cmdSubstFrame{depth: 1, open: w.byteIdx + 1})
-		case w.quote == 0 && w.inSubstText() && r == ')':
-			top := &w.substs[len(w.substs)-1]
-			top.depth--
-			if top.depth <= 0 {
-				w.substs = w.substs[:len(w.substs)-1]
-			}
-		case w.quote == 0 && r == '[' && w.opensSubscript():
-			// A "[" after a word opens an array subscript, and a "$[" opens
-			// the deprecated arithmetic expansion: their text is an
-			// expression (gt-dherr).
-			w.arith = append(w.arith, arithFrame{kind: arithBracket})
-		case w.bracketArith() && w.quote == 0 && r == '[':
-			w.arith[len(w.arith)-1].depth++
-		case w.bracketArith() && w.quote == 0 && r == ']':
-			top := &w.arith[len(w.arith)-1]
-			top.depth--
-			if top.depth <= 0 {
-				w.arith = w.arith[:len(w.arith)-1]
-			}
-		case w.quote == 0 && r == '$' && w.runeAt(w.runeIdx+1) == '{':
-			// A "${..}" expansion opens a frame: the shell reads its text as
-			// a name, an operator and a word, and a "<" in that word is a
-			// redirection in none of them — the "#" and "%" trims, the "/"
-			// replacement and the "^" case modification take glob patterns,
-			// the ":" offset is arithmetic and a "${v+word}" word is literal.
-			// So the "<<" of "${v%<<x}" is text, and reading it as a heredoc
-			// hid the live command standing where its body would have been
-			// (gt-adt8r). One frame per expansion covers every operator,
-			// including the ":" one gt-dherr framed at the operator; it
-			// carries this brace level, so the "}" that ends the expansion,
-			// and not a "}" nesting inside its word, is what closes it.
-			w.braces++
-			w.arith = append(w.arith, arithFrame{kind: arithBrace, brace: w.braces})
-		case w.quote == 0 && r == '}' && w.braces > 0 && !w.inSubstText() && !w.inTickText():
-			// A "}" in the command text of a "$(..)" or a backtick pair nested
-			// in the word is that command's own text, as in "${v:-$(echo })}":
-			// only the "}" after the substitution closes the expansion
-			// (gt-nwd3k, gt-9udxk).
-			w.braces--
-			w.closeArithBraces()
-		}
-		w.prevIdx, w.prevEsc = w.runeIdx, escaped
-		w.byteIdx += utf8.RuneLen(r)
-		w.runeIdx++
-	}
-	return w.quote
-}
-
-// runeAt returns the rune at index i, or 0 when i is past either end — the
-// lookahead the "$((" case needs to read an operator it has not consumed yet.
-func (w *heredocQuoteWalk) runeAt(i int) rune {
-	if i < 0 || i >= len(w.runes) {
-		return 0
-	}
-	return w.runes[i]
-}
-
-// readsData reports whether the walk sits in text the shell reads as data — an
-// arithmetic expression or a "${..}" expansion — rather than as command
-// syntax, where a "<<" is a shift or a literal and never a heredoc operator
-// (gt-dherr, gt-adt8r).
-func (w *heredocQuoteWalk) readsData() bool { return len(w.arith) > 0 }
-
-// topArith is the innermost frame, or nil when none is open.
-func (w *heredocQuoteWalk) topArith() *arithFrame {
-	if len(w.arith) == 0 {
-		return nil
-	}
-	return &w.arith[len(w.arith)-1]
-}
-
-// parenArith and bracketArith report whether the innermost frame is of that
-// kind, which is what decides how the current rune extends or closes it.
-func (w *heredocQuoteWalk) parenArith() bool {
-	top := w.topArith()
-	return top != nil && top.kind == arithParen
-}
-
-func (w *heredocQuoteWalk) bracketArith() bool {
-	top := w.topArith()
-	return top != nil && top.kind == arithBracket
-}
-
-// readsComment reports whether a word-leading "#" at the current rune starts a
-// comment. The text of a "${..}" expansion is a name, an operator and a word,
-// and bash ends no line inside it: echo "A${v:- # }B" prints "A # B". Reading
-// the "#" as a comment skipped the "}" that closes the expansion and left the
-// frame open over every later "<<". Command text nested in the word, a
-// "$(..)", reads comments as anywhere (gt-p833d).
-func (w *heredocQuoteWalk) readsComment() bool { return w.braces == 0 || w.inSubstText() }
-
-// inSubstText reports whether the innermost context is the command text of a
-// "$(..)" nested in a "${..}" word, rather than a "${..}" expansion opened
-// inside that text.
-func (w *heredocQuoteWalk) inSubstText() bool {
-	return len(w.substs) > 0 && w.substs[len(w.substs)-1].brace == w.braces
-}
-
-// inCmdSubstText reports whether the walk sits in the command text of the
-// innermost "$(..)", with no arithmetic or "${..}" context open since it
-// opened, so the parentheses here are its own (gt-2am7w, gt-lx8i8).
-func (w *heredocQuoteWalk) inCmdSubstText() bool {
-	return len(w.subs) > 0 && !w.readsData()
-}
-
-// cmdSubstOpen returns where the command text the walk is in begins — the text
-// of a "$(" or a "<(", or of a backtick pair — and whether the walk is in one
-// (see inCmdSubstText). The two stacks can both be open, so the innermost text
-// is the one that starts furthest right: a backtick pair an escaped backtick
-// opened inside another command's text is the command the heredoc in it is fed
-// to, and where its reader line starts (gt-tzh06).
-func (w *heredocQuoteWalk) cmdSubstOpen() (int, bool) {
-	if !w.inCmdSubstText() {
-		return 0, false
-	}
-	open := w.subs[len(w.subs)-1].open
-	if len(w.ticks) > 0 {
-		if tick := w.ticks[len(w.ticks)-1].open; tick > open {
-			open = tick
+		for _, sub := range seg.Subs {
+			collectHeredocReaders(sub, out)
 		}
 	}
-	return open, true
-}
-
-// countCmdParen counts a "(" or ")" in the command text of the innermost
-// "$(..)" and closes the frame at the ")" that ends it, resuming the double
-// quote the substitution interrupted when it opened inside one (gt-2am7w,
-// gt-lx8i8).
-func (w *heredocQuoteWalk) countCmdParen(r rune) {
-	top := &w.subs[len(w.subs)-1]
-	if top.tick {
-		// Backtick text has no opener to balance: its ")" is the command's own
-		// text, and the closing backtick ends it (closeTickSubst).
-		return
-	}
-	if r == '(' {
-		top.depth++
-		return
-	}
-	top.depth--
-	if top.depth == 0 {
-		w.quote = top.outer
-		w.subs = w.subs[:len(w.subs)-1]
+	for _, sub := range script.Subs {
+		collectHeredocReaders(sub, out)
 	}
 }
 
-// closeTickSubst ends the backtick command text the walk is reading, with the
-// frame that holds it and anything still open inside it: the shell ends the
-// text at the first backtick no backslash escapes. It resumes the double quote
-// the backticks interrupted (gt-1f28p).
-//
-// The text's own frame carries the quote to resume and where the text starts,
-// so ending it reads nothing from the "$(" stack and needs no tick frame to
-// find there: the frames it drops are the ones that start inside the text,
-// picked by position, so a "$(" or "<(" still open when the backtick closes
-// goes with it and the frames below the backtick stay (gt-tzh06).
-func (w *heredocQuoteWalk) closeTickSubst() {
-	top := w.ticks[0] // the unescaped backtick that opened the text; escaped ones stack above it
-	w.ticks = nil
-	w.quote = top.outer
-	for len(w.subs) > 0 && w.subs[len(w.subs)-1].open >= top.open {
-		w.subs = w.subs[:len(w.subs)-1]
-	}
-}
-
-// opensProcSubst reports whether the "(" at the current rune is the opener of a
-// "<(" or ">(" process substitution: an unquoted, unescaped "(" after a "<" or
-// ">" in text the shell reads as command syntax. A "<((" is not one, and the
-// text of an arithmetic expression is a shift or comparison, not a process
-// substitution (gt-1f28p).
-func (w *heredocQuoteWalk) opensProcSubst() bool {
-	p := w.runeAt(w.prevIdx)
-	return w.quote == 0 && !w.readsData() && (p == '<' || p == '>') && !w.prevEsc &&
-		w.runeAt(w.runeIdx+1) != '('
-}
-
-// inTickText reports whether the innermost context is backtick text opened at
-// this "${" level, rather than a "${..}" expansion opened inside that text.
-func (w *heredocQuoteWalk) inTickText() bool {
-	return len(w.ticks) > 0 && w.ticks[len(w.ticks)-1].at == w.braces
-}
-
-// followsUnescapedDollar reports whether the rune before the current one is a
-// "$" that no backslash escaped, which makes a "(" after it open "$(".
-func (w *heredocQuoteWalk) followsUnescapedDollar() bool {
-	return w.runeAt(w.prevIdx) == '$' && !w.prevEsc
-}
-
-// opensSubscript reports whether the "[" at the current rune follows a word
-// character, "]" or "$" — where it opens an array subscript or the "$["
-// arithmetic expansion, whose text is an expression. A "[" in command position
-// opens the test command instead and a "[a-z]" glob is a filename: neither is an
-// expression, so neither enters arith mode.
-func (w *heredocQuoteWalk) opensSubscript() bool {
-	p := w.runeAt(w.prevIdx)
-	return p == '$' || p == ']' || p == '_' || unicode.IsLetter(p) || unicode.IsDigit(p)
-}
-
-// closeArithBraces drops the brace frames the "}" just closed. A frame belongs
-// to the "${" level it opened at, so a "}" that leaves that level still open —
-// the one ending an expansion nested inside the word of another — leaves the
-// frame in place (gt-dherr).
-func (w *heredocQuoteWalk) closeArithBraces() {
-	for {
-		top := w.topArith()
-		if top == nil || top.kind != arithBrace || top.brace <= w.braces {
-			return
+// segmentSourceEnd returns the offset just past the last word or own
+// redirection of seg, or -1 when the parser gave none of them a position.
+// Inherited redirections are left out: they belong to an enclosing compound
+// command, whose redirect may sit after the here-document body the segment
+// reads. Assignment words carry no position in shellparse, so they are left
+// out too; a segment that is only an assignment and a here-document falls back
+// to the line reader.
+func segmentSourceEnd(seg shellparse.Segment) int {
+	end := -1
+	for _, w := range seg.Words {
+		if w.Src >= 0 && w.Src+len(w.Raw) > end {
+			end = w.Src + len(w.Raw)
 		}
-		w.arith = w.arith[:len(w.arith)-1]
 	}
+	for _, r := range seg.Redirs {
+		if r.Inherited || r.Src < 0 {
+			continue
+		}
+		if e := r.Src + len(r.Word.Raw); e > end {
+			end = e
+		}
+	}
+	return end
 }
 
-// skipTo reads past byte offset to with no quote tracking: the text crossed is
-// a heredoc body, which the shell reads verbatim, so a quote left open in it
-// must not reach the command text after the terminator. A "$(", a backtick pair
-// or a "<(" the heredoc sits in stays open, since its closer comes after the
-// body (gt-lx8i8, gt-1f28p).
-func (w *heredocQuoteWalk) skipTo(to int) {
-	for w.byteIdx < to && w.runeIdx < len(w.runes) {
-		w.byteIdx += utf8.RuneLen(w.runes[w.runeIdx])
-		w.runeIdx++
+// heredocLineEndAfter returns the offset just past the newline that ends the
+// logical line starting at or after from, skipping backslash-newline pairs the
+// shell deletes. At the end of the text it returns its length.
+func heredocLineEndAfter(text string, from int) int {
+	for i := from; i < len(text); i++ {
+		if text[i] == '\n' {
+			return i + 1
+		}
+		if text[i] == '\\' && i+1 < len(text) && text[i+1] == '\n' {
+			i++
+		}
 	}
-	w.quote, w.comment, w.escaped, w.prevIdx, w.prevEsc = 0, false, false, -1, false
-	w.arith, w.braces, w.substs = nil, 0, nil
+	return len(text)
 }
 
-// heredocLineEnd returns the offset of the newline that ends the logical line
-// containing offset from, or len(command) when there is none. The shell reads a
-// heredoc body after that newline, and it ends a line by its own rules for
-// escapes, quotes and comments, so the body is found by the same rules (gt-f1kny,
-// gt-jnomk).
-func heredocLineEnd(command string, from int) int {
-	// The open quote mark, or 0 outside quotes. '$' is a $'...' (ANSI-C)
-	// string, in which a backslash escapes the quote (gt-s3pi5).
-	var quote byte
+// heredocDelimiterEnd returns the offset just past the first line at or after
+// bodyStart whose content is the delimiter, and false when no such line exists.
+// A tab-indented line is accepted for the "<<-" form; the parsed Heredoc does
+// not say whether the operator carried the dash, so the tab-indented spelling
+// is accepted for either, which only differs on a body line equal to the tag.
+func heredocDelimiterEnd(text string, bodyStart int, delimiter string) (int, bool) {
+	for offset := bodyStart; offset <= len(text); {
+		lineEnd := strings.IndexByte(text[offset:], '\n')
+		line, next := text[offset:], len(text)
+		if lineEnd >= 0 {
+			line, next = text[offset:offset+lineEnd], offset+lineEnd+1
+		}
+		if line == delimiter || strings.TrimLeft(line, "\t") == delimiter {
+			return next, true
+		}
+		if lineEnd < 0 {
+			break
+		}
+		offset = next
+	}
+	return len(text), false
+}
+
+// pendingHeredocTag is one "<<" the line reader has seen on the current logical
+// line and whose body it still has to read.
+type pendingHeredocTag struct {
+	tag    string
+	quoted bool
+}
+
+// heredocSpansLenient reads here-document bodies from text the parser refused,
+// a line at a time. It reads the same "<<" spellings the shell does not: a
+// "<<" behind a backslash, inside a single or double quote, inside a word's
+// "${..}" expansion or an arithmetic expression, or in a word-leading "#"
+// comment opens no body, and a here-string's "<<" is no operator. The body
+// lines are data and are stepped over whole, so a quote or "<<" in one of them
+// counts for nothing. This is not the parsed reading and does not decide a
+// verdict: `evaluateDangerousCommand` refuses the text the parser could not
+// read, and this reader only keeps a dangerous operation written outside an
+// unreadable body visible while that refusal is chosen.
+func heredocSpansLenient(text string) []heredocSpan {
+	runes := []rune(text)
+	offsets := make([]int, len(runes)+1)
+	for i, r := range runes {
+		offsets[i+1] = offsets[i] + utf8.RuneLen(r)
+	}
+	var spans []heredocSpan
+	var pending []pendingHeredocTag
+
+	var quote rune // the open quote: 0, '\'' , '"' or '$' for a $'...' string
 	comment := false
-	// The byte before i is an unquoted, unescaped word break. A line start is
-	// one too, so a "#" that opens the line is a comment.
-	wordStart := from == 0 || command[from-1] == '\n'
-	for i := from; i < len(command); i++ {
-		c := command[i]
-		switch {
-		case comment:
-			if c == '\n' {
-				return i
+	escaped := false
+	braces := 0    // "${" expansions open
+	arith := 0     // "$((" expressions open
+	subscript := 0 // "[" array subscripts open
+	prevIdx := -1
+	prevEsc := false
+
+	readBodies := func(from int) int {
+		for _, tag := range pending {
+			start := from
+			var end int
+			ok := false
+			for offset := from; offset <= len(runes); {
+				lineEnd := -1
+				for k := offset; k < len(runes); k++ {
+					if runes[k] == '\n' {
+						lineEnd = k
+						break
+					}
+				}
+				line, next := runes[offset:], len(runes)
+				if lineEnd >= 0 {
+					line, next = runes[offset:lineEnd], lineEnd+1
+				}
+				trimmed := line
+				for len(trimmed) > 0 && trimmed[0] == '\t' {
+					trimmed = trimmed[1:]
+				}
+				if string(line) == tag.tag || string(trimmed) == tag.tag {
+					end, ok = next, true
+					break
+				}
+				if lineEnd < 0 {
+					break
+				}
+				offset = next
 			}
+			if ok {
+				spans = append(spans, heredocSpan{bodyStart: offsets[start], bodyEnd: offsets[end], body: text[offsets[start]:offsets[end]], quoted: tag.quoted})
+				from = end
+				continue
+			}
+			spans = append(spans, heredocSpan{bodyStart: offsets[start], bodyEnd: len(text), body: text[offsets[start]:], quoted: tag.quoted, unterminated: true})
+			from = len(runes)
+		}
+		return from
+	}
+
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if comment {
+			if r == '\n' {
+				comment = false
+				if len(pending) > 0 {
+					i = readBodies(i+1) - 1
+					pending = nil
+					prevIdx, prevEsc = -1, false
+				}
+			}
+			continue
+		}
+		if escaped {
+			escaped = false
+			prevIdx, prevEsc = i, true
+			continue
+		}
+		switch {
 		case quote == '\'':
-			if c == '\'' {
+			if r == '\'' {
 				quote = 0
 			}
-		case c == '\\':
-			i++ // the byte after a backslash is literal, a newline included
+		case r == '\\' && quote != '\'':
+			escaped = true
 		case quote == '$':
-			if c == '\'' {
+			if r == '\'' {
 				quote = 0
 			}
 		case quote == '"':
-			if c == '"' {
+			if r == '"' {
 				quote = 0
 			}
-		case c == '\n':
-			return i
-		case c == '$' && i+1 < len(command) && command[i+1] == '$':
-			// "$$" is the PID, so the second "$" starts no expansion and a
-			// quote after the pair is a plain one (gt-0vbb2).
+		case r == '\'' || r == '"':
+			quote = r
+		case r == '$' && i+1 < len(runes) && runes[i+1] == '$':
+			// "$$" is the PID, so the second "$" starts no expansion (gt-0vbb2).
 			i++
-		case c == '$':
-			// A backslash-newline between the "$" and its quote is deleted
-			// before the shell reads the quote, so that quote still opens a
-			// $'...' string (gt-javvg).
-			if q := skipLineContinuationBytes(command, i+1); q < len(command) && command[q] == '\'' {
+		case r == '$':
+			q := skipLineContinuations(runes, i+1)
+			switch {
+			case q < len(runes) && runes[q] == '\'':
+				// A backslash-newline between the "$" and its quote is deleted
+				// before the shell reads the quote, so that quote still opens a
+				// $'...' string (gt-javvg).
 				quote = '$'
 				i = q
+			case q < len(runes) && runes[q] == '{':
+				braces++
+				i = q
+			case q+1 < len(runes) && runes[q] == '(' && runes[q+1] == '(':
+				arith++
+				i = q + 1
+			case q < len(runes) && runes[q] == '[':
+				subscript++
+				i = q
 			}
-		case c == '\'' || c == '"':
-			quote = c
-		case c == '#' && wordStart:
+		case r == '}' && braces > 0:
+			braces--
+		case r == ')' && arith > 0 && i+1 < len(runes) && runes[i+1] == ')':
+			arith--
+			i++
+		case r == ']' && subscript > 0:
+			subscript--
+		case r == '#' && quote == 0 && braces == 0 && arith == 0 && subscript == 0 && startsShellWord(runes, prevIdx, prevEsc):
 			comment = true
+		case r == '<' && i+1 < len(runes) && runes[i+1] == '<' && braces == 0 && arith == 0 && subscript == 0:
+			j := i + 2
+			if j < len(runes) && runes[j] == '<' {
+				i = j // a here-string's "<<<": no body
+				continue
+			}
+			// A "<<" behind a backslash is a literal "<" and a single redirect;
+			// the escaped case was taken above.
+			if j < len(runes) && runes[j] == '-' {
+				j++
+			}
+			for j < len(runes) && (runes[j] == ' ' || runes[j] == '\t') {
+				j++
+			}
+			quoted := false
+			var tag []rune
+			if j < len(runes) && (runes[j] == '\'' || runes[j] == '"') {
+				q := runes[j]
+				quoted = true
+				j++
+				start := j
+				for j < len(runes) && runes[j] != q {
+					j++
+				}
+				tag = runes[start:j]
+				if j < len(runes) {
+					j++
+				}
+			} else {
+				start := j
+				for j < len(runes) && heredocTagRune(runes[j]) {
+					j++
+				}
+				tag = runes[start:j]
+			}
+			if heredocValidTag(tag) {
+				pending = append(pending, pendingHeredocTag{tag: string(tag), quoted: quoted})
+			}
+			i = j - 1
+			prevIdx, prevEsc = i, false
+			continue
+		case r == '\n' && len(pending) > 0:
+			i = readBodies(i+1) - 1
+			pending = nil
+			prevIdx, prevEsc = -1, false
+			continue
 		}
-		wordStart = quote == 0 && !comment && strings.IndexByte(" \t;&|(", c) >= 0
+		prevIdx, prevEsc = i, false
 	}
-	return len(command)
+	return spans
+}
+
+// heredocTagRune reports whether r may appear in a here-document delimiter.
+func heredocTagRune(r rune) bool {
+	return r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+}
+
+// heredocValidTag reports whether tag is a delimiter the line reader accepts:
+// one that starts with a letter or underscore, the shape the shell's own tags
+// take in every guard test.
+func heredocValidTag(tag []rune) bool {
+	if len(tag) == 0 {
+		return false
+	}
+	first := tag[0]
+	return first == '_' || first >= 'a' && first <= 'z' || first >= 'A' && first <= 'Z'
+}
+
+// stripHeredocBodies removes heredoc body text from command before any
+// tokenization or pattern matching runs. A heredoc body is DATA being
+// written to a file or piped to a command's stdin — the same class of
+// risk as a quoted SQL string or a mail body, not shell syntax to
+// evaluate — so scanning it for dangerous fragments produces false
+// positives: "cat > note.md <<'EOF' ... git push --force ... EOF" blocked
+// an ordinary file write because the DATA it wrote happened to mention a
+// dangerous phrase (gt-mkrj). An unterminated heredoc is left in place: its
+// body is the whole tail of the text, so stripping on a match that may not
+// even be a redirection erased every command after it (gt-79opc).
+func stripHeredocBodies(command string) string {
+	spans := heredocSpans(command)
+	if len(spans) == 0 {
+		return command
+	}
+	var b strings.Builder
+	pos := 0
+	for _, s := range spans {
+		if s.unterminated || s.bodyEnd <= s.bodyStart {
+			continue
+		}
+		if s.bodyStart < pos {
+			continue
+		}
+		b.WriteString(command[pos:s.bodyStart])
+		pos = s.bodyEnd
+	}
+	b.WriteString(command[pos:])
+	return b.String()
+}
+
+// shellFedHeredocBodies returns the bodies of heredocs whose reader line runs a
+// shell, because that shell runs the body as a script rather than reading it as
+// data (gt-9g0y). Stripping those bodies — gt-mkrj's rule, which holds for every
+// other reader — left "bash <<'EOF' ... git reset --hard ... EOF" inspected by
+// nothing at all. The caller evaluates the returned bodies as nested commands.
+// A shell invoker anywhere on the reader line counts: "cat <<EOF | bash" feeds
+// bash the body just as "bash <<EOF" does. The line is the run of segments the
+// shell joins with |, &&, || or &, so a shell on a later line reads no body.
+func shellFedHeredocBodies(command string) []string {
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return nil
+	}
+	var bodies []string
+	for i, seg := range script.Segments {
+		if !heredocReaderLineRunsShell(script, i) {
+			continue
+		}
+		for _, h := range seg.Heredocs {
+			if h.N != "" && h.N != "0" {
+				continue
+			}
+			if strings.TrimSpace(h.Body) == "" {
+				continue
+			}
+			bodies = append(bodies, h.Body)
+		}
+	}
+	return bodies
+}
+
+// heredocPipelineRunsShell reports whether a shell invoker shares the pipeline
+// that holds the segment's here-document operator: "cat <<EOF | bash" feeds bash
+// the body, while a shell joined to the line by "&&" or ";" runs before or after
+// it and reads no body from it.
+func heredocPipelineRunsShell(script shellparse.Script, index int) bool {
+	lo, hi := index, index
+	for lo > 0 && script.Segments[lo-1].After == "|" {
+		lo--
+	}
+	for hi+1 < len(script.Segments) && script.Segments[hi].After == "|" {
+		hi++
+	}
+	for j := lo; j <= hi; j++ {
+		word, _ := segmentCommandWordPastRedirections(containerSuiteWords(script.Segments[j]))
+		if shellInvokers[strings.ToLower(filepath.Base(word))] {
+			return true
+		}
+	}
+	return false
+}
+
+// heredocReaderLineRunsShell reports whether a shell invoker runs on the reader
+// line the segment at index sits on, which is what makes the here-documents on
+// it scripts rather than data.
+func heredocReaderLineRunsShell(script shellparse.Script, index int) bool {
+	lo, hi := index, index
+	for lo > 0 && heredocLineOperator(script.Segments[lo-1].After) {
+		lo--
+	}
+	for hi+1 < len(script.Segments) && heredocLineOperator(script.Segments[hi].After) {
+		hi++
+	}
+	for j := lo; j <= hi; j++ {
+		word, _ := segmentCommandWordPastRedirections(containerSuiteWords(script.Segments[j]))
+		if shellInvokers[strings.ToLower(filepath.Base(word))] {
+			return true
+		}
+	}
+	return false
+}
+
+// heredocLineOperator reports whether op keeps two segments on one reader line.
+// A ";" or a newline starts a new line, and a here-document is read by the line
+// its operator stands on.
+func heredocLineOperator(op string) bool {
+	switch op {
+	case "|", "&&", "||", "&":
+		return true
+	}
+	return false
+}
+
+// heredocBodySubstitutions returns the command substitutions written in the
+// bodies of unquoted heredocs. stripHeredocBodies drops those bodies before
+// commandSubstitutions runs, yet the shell expands "$(git reset --hard)" in
+// "cat > f <<EOF" while reading the body. A quoted tag keeps its body
+// literal, so its substitutions stay inert (gt-x50o8).
+func heredocBodySubstitutions(command string) []string {
+	var subs []string
+	for _, span := range heredocSpans(command) {
+		if span.unterminated || span.quoted {
+			continue
+		}
+		subs = append(subs, heredocSubstitutions(span.body)...)
+	}
+	return subs
 }
 
 // skipLineContinuationBytes is skipLineContinuations for command's bytes: it
@@ -1232,230 +1331,6 @@ func skipLineContinuationBytes(command string, i int) int {
 		i += 2
 	}
 	return i
-}
-
-// logicalLineEndsAt reports whether the newline at nl ends a logical line. It
-// steps from one line end to the next, starting at anchor, a line start where
-// the shell begins a logical line: the start of the text, or the line after the
-// last heredoc body. A scan that began at an arbitrary line start would miss a
-// quote or comment that the lines above opened, and so judge a line the shell
-// still holds open as ended (gt-8nvms).
-func logicalLineEndsAt(command string, anchor, nl int) bool {
-	for p := anchor; ; {
-		end := heredocLineEnd(command, p)
-		if end >= nl {
-			return end == nl
-		}
-		p = end + 1
-	}
-}
-
-// heredocReaderLine returns the text of the line the heredoc operator at
-// [start,end) sits on, with the operator itself removed, and the offset that
-// line starts at. The text after the operator stays: in "cat <<EOF | bash"
-// the pipeline's command words, not the words before the operator, decide who
-// consumes the body. The offset is the start of the whole logical line, so a
-// caller can read the command text preceding it (gt-v02wh). A continued line
-// is part of the logical line, so its pipe stage is in the reader (gt-f1kny).
-// anchor is where the shell starts a logical line, as logicalLineEndsAt needs.
-func heredocReaderLine(command string, start, end, anchor int) (string, int) {
-	lineStart := strings.LastIndexByte(command[:start], '\n') + 1
-	// "bash \" + newline + "<<EOF" still hands the body to bash, so walk back
-	// over line continuations to keep the invoker on the reader line. A line
-	// above joins unless the shell ends it at that newline: an escaped newline
-	// continues the line, and so does one inside a quote an earlier line opened,
-	// while a "#" comment runs to its newline and ends the line there (gt-3vky2,
-	// gt-fke2f). Nothing above the anchor is on the line: it is a heredoc body.
-	for lineStart > anchor && !logicalLineEndsAt(command, anchor, lineStart-1) {
-		lineStart = strings.LastIndexByte(command[:lineStart-1], '\n') + 1
-	}
-	lineEnd := heredocLineEnd(command, end)
-	// Drop the continuations themselves: left in place they glue onto the
-	// preceding word and hide it from the token matchers below.
-	return strings.ReplaceAll(command[lineStart:start]+" "+command[end:lineEnd], "\\\n", " "), lineStart
-}
-
-// heredocCmdText returns the command text, from the start of the heredoc
-// reader's own logical line to the end of the operator's line, of the
-// substitution the heredoc at [start,end) sits in — an unquoted one, or one
-// inside double quotes. The shell feeds that command the body, so "x=$(bash
-// <<EOF" runs bash on it; the reader line alone, which starts at the
-// assignment, does not show that. An earlier line of the substitution is a
-// separate command and must not turn a later "cat <<EOF" body into a script,
-// so the text starts no earlier than readerStart (gt-2am7w, gt-lx8i8,
-// gt-9q6sf). A backslash-newline continues the line, so a pipe stage on the
-// next line is part of it. It is "" outside such a substitution.
-func heredocCmdText(command string, walk *heredocQuoteWalk, start, end, readerStart int) string {
-	open, ok := walk.cmdSubstOpen()
-	if !ok {
-		return ""
-	}
-	if open < readerStart {
-		open = readerStart
-	}
-	lineEnd := heredocLineEnd(command, end)
-	return strings.ReplaceAll(command[open:start]+" "+command[end:lineEnd], "\\\n", " ")
-}
-
-// stripHeredocBodies removes heredoc body text from command before any
-// tokenization or pattern matching runs. A heredoc body is DATA being
-// written to a file or piped to a command's stdin — the same class of
-// risk as a quoted SQL string or a mail body, not shell syntax to
-// evaluate — so scanning it for dangerous fragments produces false
-// positives: "cat > note.md <<'EOF' ... git push --force ... EOF" blocked
-// an ordinary file write because the DATA it wrote happened to mention a
-// dangerous phrase (gt-mkrj). Strips from just after the "<<TAG" line
-// through the line that is exactly TAG (optionally tab-indented, for the
-// "<<-TAG" form); text outside any heredoc span is left untouched. A body
-// fed to a shell invoker is not data — see shellFedHeredocBodies. An
-// unterminated heredoc is left in place: its body is the whole tail of the
-// text, so stripping on a match that may not even be a redirection erased
-// every command after it (gt-79opc).
-func stripHeredocBodies(command string) string {
-	spans := scanHeredocs(command)
-	if len(spans) == 0 {
-		return command
-	}
-	var b strings.Builder
-	pos := 0
-	for _, s := range spans {
-		if s.bodyStart < 0 || s.unterminated {
-			continue
-		}
-		b.WriteString(command[pos:s.bodyStart])
-		pos = s.bodyEnd
-	}
-	b.WriteString(command[pos:])
-	return b.String()
-}
-
-// shellFedHeredocBodies returns the bodies of heredocs whose reader line
-// names a shell invoker, because that shell runs the body as a script rather
-// than reading it as data (gt-9g0y). Stripping those bodies — gt-mkrj's rule,
-// which holds for every other reader — left "bash <<'EOF' ... git reset
-// --hard ... EOF" inspected by nothing at all. The caller evaluates the
-// returned bodies as nested commands; stripHeredocBodies still removes them
-// from the surrounding text, so they are judged once, as code.
-func shellFedHeredocBodies(command string) []string {
-	var bodies []string
-	for _, span := range shellFedHeredocSpans(command) {
-		bodies = append(bodies, span.body)
-	}
-	return bodies
-}
-
-// shellFedHeredocSpans is shellFedHeredocBodies' span-returning sibling: the
-// same shell-fed heredocs in the same order, each keeping the reader line that
-// owns it and where that line starts, so a caller can judge the body in the
-// directory the shell had reached by the time it read the body (gt-1cvqj,
-// gt-v02wh).
-func shellFedHeredocSpans(command string) []heredocSpan {
-	var spans []heredocSpan
-	for _, span := range scanHeredocs(command) {
-		if span.bodyStart < 0 || strings.TrimSpace(span.body) == "" {
-			continue
-		}
-		if heredocReaderIsShellInvoker(span.reader) || heredocReaderIsShellInvoker(span.cmdText) {
-			spans = append(spans, span)
-		}
-	}
-	return spans
-}
-
-// heredocBodySubstitutions returns the command substitutions written in the
-// bodies of unquoted heredocs. stripHeredocBodies drops those bodies before
-// commandSubstitutions runs, yet the shell expands "$(git reset --hard)" in
-// "cat > f <<EOF" while reading the body. A quoted tag keeps its body
-// literal, so its substitutions stay inert (gt-x50o8).
-func heredocBodySubstitutions(command string) []string {
-	var subs []string
-	for _, span := range scanHeredocs(command) {
-		if span.bodyStart < 0 || span.quoted {
-			continue
-		}
-		subs = append(subs, heredocSubstitutions(span.body)...)
-	}
-	return subs
-}
-
-// heredocBodyCwd returns the directory a shell-fed heredoc's body runs in:
-// base — the directory the invocation was in — moved by the cds the shell
-// runs before it hands the body over, and whether the walk could place it.
-// "cd /go/tree && bash <<EOF" runs the body in /go/tree, and judging it in the
-// hook's own directory instead let that cd step around the test guards
-// (gt-1cvqj). A cd the walk cannot place leaves the body's directory unknown,
-// the reading scanWalkRoot gives an unknown walk root: an unplaceable directory
-// is neither evidence that the body runs in a guarded tree nor evidence that it
-// does not, so the callers judge the body as unplaced rather than against base
-// (gt-jj3or). The walk's two unnamed outcomes read the same here: the returned
-// directory is base in both, and the bool is what separates them.
-func heredocBodyCwd(proc guardProcess, command string, span heredocSpan, base string) (string, bool) {
-	tokens := heredocBodyWalkTokens(command, span)
-	dir, status := cdWalkRoot(proc, tokens, len(tokens), base, shellVarAssignments(tokens))
-	return dir, status == cdWalkPlaced
-}
-
-// heredocBodyWalkTokens returns the tokens the shell has run by the time it
-// reads a heredoc body: the command text preceding the reader line — bodies
-// stripped first, so a cd written inside a data body is data and never enters
-// the walk — followed by the reader line's own words up to the shell invoker
-// that reads the body.
-//
-// The preceding text is what makes a cd on its own line count: the shell
-// keeps one working directory from one command to the next, so "cd /go/tree"
-// then "bash <<EOF" on the next line reads the body in /go/tree. Stopping at
-// the invoker is the other half: "bash <<EOF && cd /go/tree" reads the body
-// before the cd runs (gt-v02wh).
-func heredocBodyWalkTokens(command string, span heredocSpan) []string {
-	tokens := shellTokenize(stripHeredocBodies(command[:span.readerStart]))
-	reader := shellTokenize(span.reader)
-	return append(tokens, reader[:shellInvokerIndex(reader)]...)
-}
-
-// shellInvokerIndex returns the index of the first token of the first segment
-// whose command word is a shell invoker — the segment that consumes a heredoc
-// body — or len(tokens) when no segment is one. It marks where in a reader
-// line the body is read, so the cds that decide the body's directory are the
-// ones before it.
-func shellInvokerIndex(tokens []string) int {
-	start := 0
-	for i := 0; i <= len(tokens); i++ {
-		if i < len(tokens) && !shellCommandSeparators[tokens[i]] {
-			continue
-		}
-		if word, _ := segmentCommandWordPastRedirections(tokens[start:i]); word != "" && shellInvokers[strings.ToLower(filepath.Base(word))] {
-			return start
-		}
-		start = i + 1
-	}
-	return len(tokens)
-}
-
-// heredocReaderIsShellInvoker reports whether a shell invoker runs anywhere on
-// the heredoc's line. "cat <<EOF | bash" feeds bash the body just as "bash
-// <<EOF" does, so every pipeline segment counts — judged at command position,
-// so an argument that merely spells "bash" ("echo bash <<EOF") does not.
-func heredocReaderIsShellInvoker(reader string) bool {
-	for _, segment := range splitShellSegments(shellTokenize(reader)) {
-		// The trim drops a case pattern such as `a)`, which opens no construct
-		// for the re-read below to follow (gt-4j5q6).
-		cmdline := trimShellKeywords(segment)
-		word, args := segmentCommandWordPastRedirections(cmdline)
-		// A launcher or an assignment can carry a construct rather than a
-		// command — `time { bash <<EOF`, `y=$(echo a) { bash <<EOF` — so what
-		// it carried is re-read until the word is a command again (gt-q2jgt).
-		for opensConstruct(word) {
-			cmdline = trimShellKeywords(append([]string{word}, args...))
-			word, args = segmentCommandWordPastRedirections(cmdline)
-		}
-		if word == "" {
-			continue
-		}
-		if shellInvokers[strings.ToLower(filepath.Base(word))] {
-			return true
-		}
-	}
-	return false
 }
 
 // segmentCommandWordPastRedirections is segmentCommandWord with the leading

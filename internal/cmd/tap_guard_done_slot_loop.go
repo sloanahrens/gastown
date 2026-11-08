@@ -3,6 +3,8 @@ package cmd
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/shellparse"
 )
 
 // Loops and watchers around `gt done` / `gt slot` (gt-7dxw).
@@ -542,34 +544,51 @@ func doneSlotLoopSlotPollArgs(args []string) bool {
 // doneSlotLoopFileWrittenBodies returns the heredoc bodies the command writes
 // to a file. A body fed to a shell on stdin (`bash <<EOF`) is not included
 // here: evaluateDangerousCommand already recurses into those as commands of
-// their own (shellFedHeredocBodies).
+// their own (dangerousHeredocBodies).
+//
+// The parsed script decides where the bodies are: a heredoc is a parsed
+// Heredoc on the segment that reads it, and its reader line is the run of
+// segments the shell joins with |, &&, || or & (heredocLineOperator). A
+// command the parser cannot read has no body this rule can place, and the
+// command is refused as unreadable anyway.
 func doneSlotLoopFileWrittenBodies(raw string) []string {
+	script, err := shellparse.Parse(raw)
+	if err != nil {
+		return nil
+	}
 	var bodies []string
-	for _, span := range scanHeredocs(raw) {
-		if !doneSlotLoopWritesFile(span.reader) {
+	for i, seg := range script.Segments {
+		if len(seg.Heredocs) == 0 || !doneSlotLoopLineWritesFile(script, i) {
 			continue
 		}
-		if strings.TrimSpace(span.body) == "" {
-			continue
+		for _, h := range seg.Heredocs {
+			if strings.TrimSpace(h.Body) == "" {
+				continue
+			}
+			bodies = append(bodies, h.Body)
 		}
-		bodies = append(bodies, span.body)
 	}
 	return bodies
 }
 
-// doneSlotLoopWritesFile reports whether a heredoc's reader line writes its
-// body to a file rather than handing it to a command as data: a stdout
-// redirect, or a `tee`/`dd` naming a destination. A stderr redirect writes
-// none of the body, and a reader that only copies text (`cat`, `echo`,
-// `printf`) reaches a file through nothing else — reading either as a written
-// script turned `gt mail send --stdin <<EOF 2>/dev/null` and `cat <<EOF | git
-// commit -F -` into retry scripts (gt-7dxw review).
-func doneSlotLoopWritesFile(reader string) bool {
-	if doneSlotLoopRedirectsStdout(reader) {
-		return true
+// doneSlotLoopLineWritesFile reports whether the reader line the segment at
+// index sits on writes a here-document body to a file rather than handing it to
+// a command as data: a stdout redirect on any of its segments, or a `tee`/`dd`
+// naming a destination. A stderr redirect writes none of the body, and a reader
+// that only copies text (`cat`, `echo`, `printf`) reaches a file through
+// nothing else — reading either as a written script turned `gt mail send
+// --stdin <<EOF 2>/dev/null` and `cat <<EOF | git commit -F -` into retry
+// scripts (gt-7dxw review).
+func doneSlotLoopLineWritesFile(script shellparse.Script, index int) bool {
+	lo, hi := index, index
+	for lo > 0 && heredocLineOperator(script.Segments[lo-1].After) {
+		lo--
 	}
-	for _, segment := range splitShellSegments(shellTokenize(reader)) {
-		if doneSlotLoopSegmentWritesFile(segment) {
+	for hi+1 < len(script.Segments) && heredocLineOperator(script.Segments[hi].After) {
+		hi++
+	}
+	for j := lo; j <= hi; j++ {
+		if doneSlotLoopSegmentWritesFile(script.Segments[j]) {
 			return true
 		}
 	}
@@ -577,13 +596,22 @@ func doneSlotLoopWritesFile(reader string) bool {
 }
 
 // doneSlotLoopSegmentWritesFile reports whether one pipeline stage of a heredoc
-// reader line is a `tee FILE` or a `dd of=FILE`. Each stage is judged on its
-// own command word, so `cat <<EOF | tee FILE` counts: the `cat` passes the body
-// through to the `tee` that writes it. A redirection ahead of the stage is
-// stepped over, so `2>/dev/null tee FILE` writes the body just as `tee FILE`
-// does (gt-cwi1q).
-func doneSlotLoopSegmentWritesFile(segment []string) bool {
-	word, args := segmentCommandWordPastRedirections(segment)
+// reader line writes its stdin to a file: a stdout redirect, a `tee FILE` or a
+// `dd of=FILE`. Each stage is judged on its own command word, so
+// `cat <<EOF | tee FILE` counts: the `cat` passes the body through to the
+// `tee` that writes it. A redirection ahead of the stage is stepped over, so
+// `2>/dev/null tee FILE` writes the body just as `tee FILE` does (gt-cwi1q).
+func doneSlotLoopSegmentWritesFile(seg shellparse.Segment) bool {
+	for _, r := range seg.Redirs {
+		if r.N != "" && r.N != "1" {
+			continue
+		}
+		switch r.Op {
+		case ">", ">>", ">|", "&>", "&>>":
+			return true
+		}
+	}
+	word, args := segmentCommandWordPastRedirections(containerSuiteWords(seg))
 	switch strings.ToLower(word) {
 	case "tee":
 		for _, arg := range args {
@@ -596,33 +624,6 @@ func doneSlotLoopSegmentWritesFile(segment []string) bool {
 			if strings.HasPrefix(arg, "of=") {
 				return true
 			}
-		}
-	}
-	return false
-}
-
-// doneSlotLoopRedirectsStdout reports whether the reader line redirects stdout
-// — `> file`, `>> file`, `1> file`, `&> file` — which is the only way the body
-// lands in a file. Scanned on the raw text so a redirect glued to a word
-// (`cat>/tmp/retry.sh`) counts. A numbered descriptor that is not stdout
-// (`2>`, `2>&1`) redirects something else and writes none of the body.
-func doneSlotLoopRedirectsStdout(reader string) bool {
-	for i := 0; i < len(reader); i++ {
-		if reader[i] != '>' {
-			continue
-		}
-		switch {
-		case i == 0, reader[i-1] == '1':
-			return true
-		case reader[i-1] == '&':
-			// `&> file` writes the body; `2>&1` duplicates a descriptor.
-			if !(i > 1 && reader[i-2] >= '0' && reader[i-2] <= '9') {
-				return true
-			}
-		case reader[i-1] >= '0' && reader[i-1] <= '9':
-			continue
-		default:
-			return true
 		}
 	}
 	return false
