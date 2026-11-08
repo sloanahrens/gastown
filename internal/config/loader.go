@@ -623,20 +623,14 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 	return &config, nil
 }
 
-// SaveDaemonPatrolConfig saves a daemon patrol config to a file.
+// SaveDaemonPatrolConfig saves a daemon patrol config to a file after
+// ValidateDaemonPatrolConfig accepts it.
 func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
-	if err := validateDaemonPatrolConfig(config); err != nil {
+	if err := ValidateDaemonPatrolConfig(config); err != nil {
 		return err
 	}
 
 	return WriteConfigJSON(path, config, 0644)
-}
-
-// ValidateDaemonPatrolConfigIdentity is the check LoadDaemonPatrolConfig
-// applies to the document it reads, for a writer that must refuse a daemon
-// section the daemon would refuse before it saves one (gt-yjzepk.4).
-func ValidateDaemonPatrolConfigIdentity(c *DaemonPatrolConfig) error {
-	return validateDaemonPatrolConfigIdentity(c)
 }
 
 // validateDaemonPatrolConfigIdentity checks the type and version: all a load

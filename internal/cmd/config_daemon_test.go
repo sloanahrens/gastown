@@ -200,6 +200,85 @@ func TestConfigDaemonSetValidatesWithTheDaemonsLoader(t *testing.T) {
 			t.Errorf("output after the refused write = %q, want nothing", out.String())
 		}
 	})
+
+	// Each of these is a document the daemon's own validators refuse; the
+	// command must refuse it too, naming the validator's text and the file,
+	// with the file's bytes untouched and no backup left (gt-yjzepk.4).
+	const allPatrols = `{
+  "type": "town-settings",
+  "version": 1,
+  "agents": {"claude-sonnet": {"command": "claude"}},
+  "polecat_pool": {"seats": {"claude-sonnet": {"cap": 1}}},
+  "daemon": {
+    "type": "daemon-patrol-config",
+    "version": 1,
+    "container_off": [],
+    "patrols": {
+      "scheduled_slings": {"enabled": true, "entries": [
+        {"name": "deep-review", "rig": "gastown", "formula": "mol-deep-review", "interval": "1h", "dispatch": "spec"}
+      ]},
+      "tier_sweep": {"enabled": false, "runner": {"backend": "kubernetes", "cpus": 8, "memory": 24, "jobs": 4, "output_root": "/tmp/gt-sweep", "context": "ctx", "dind": true}},
+      "disk_maintenance": {"enabled": false, "interval": "daily", "mode": "dry_run"}
+    }
+  }
+}
+`
+	cases := []struct {
+		name  string
+		path  string
+		value string
+		want  string
+	}{
+		{
+			name:  "an invalid scheduled_slings entry",
+			path:  "daemon.patrols.scheduled_slings.entries.0.interval",
+			value: `"soon"`,
+			want:  `scheduled_slings[deep-review]: interval "soon" must be a positive Go duration`,
+		},
+		{
+			name:  "a tier_sweep runner with dind and memory under 6",
+			path:  "daemon.patrols.tier_sweep.runner.memory",
+			value: `5`,
+			want:  `patrols.tier_sweep.runner.memory = 5: want at least 6 GB with dind`,
+		},
+		{
+			name:  "a cache_trim_early_percent of 20",
+			path:  "daemon.patrols.disk_maintenance.cache_trim_early_percent",
+			value: `20`,
+			want:  `patrols.disk_maintenance.cache_trim_early_percent = 20: want a percent from 50 to 95`,
+		},
+		{
+			name:  "an unknown container_off name",
+			path:  "daemon.container_off",
+			value: `["mystery-step"]`,
+			want:  `mystery-step: in daemon.container_off but unknown to the audit table`,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot, path := daemonConfigTown(t, allPatrols)
+			env, out, _ := daemonConfigTestEnv(townRoot, time.Now())
+			before := daemonConfigMustRead(t, path)
+
+			err := configDaemonSet(env, c.path, c.value, "change")
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("set %s = %s: %v, want %q", c.path, c.value, err, c.want)
+			}
+			if !strings.Contains(err.Error(), "settings/config.json") {
+				t.Errorf("error = %v, want the file named", err)
+			}
+			if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
+				t.Errorf("file after the refused write = %q, want it unchanged", after)
+			}
+			if backups := daemonConfigBackups(t, path); len(backups) != 0 {
+				t.Errorf("backups after the refused write = %v, want none", backups)
+			}
+			if out.Len() != 0 {
+				t.Errorf("output after the refused write = %q, want nothing", out.String())
+			}
+		})
+	}
 }
 
 func TestConfigDaemonBacksUpAndDiffs(t *testing.T) {
@@ -215,7 +294,7 @@ func TestConfigDaemonBacksUpAndDiffs(t *testing.T) {
 			t.Fatalf("set default_agent = %v", err)
 		}
 
-		backup := path + ".bak-20261108T120000Z-switch"
+		backup := path + ".bak-20261108T120000.000000000Z-switch"
 		got, err := os.ReadFile(backup)
 		if err != nil {
 			t.Fatalf("backup = %v", err)
@@ -270,6 +349,67 @@ func TestConfigDaemonBacksUpAndDiffs(t *testing.T) {
 		}
 		if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
 			t.Errorf("file after the refused write = %q, want it unchanged", after)
+		}
+	})
+
+	t.Run("two writes in one second keep distinct copies and the earlier one is the baseline", func(t *testing.T) {
+		t.Parallel()
+		townRoot, path := daemonConfigTown(t, daemonConfigFixture)
+		first := time.Date(2026, 11, 8, 12, 0, 0, 10, time.UTC)
+		second := time.Date(2026, 11, 8, 12, 0, 0, 20, time.UTC)
+		env, _, _ := daemonConfigTestEnv(townRoot, first)
+
+		// The second write's label sorts before the first one's, so a lookup
+		// that ordered by name without the stamp would pick the wrong copy.
+		if err := configDaemonSet(env, "cli_theme", `"first"`, "zzz"); err != nil {
+			t.Fatalf("the first write = %v", err)
+		}
+		env.now = func() time.Time { return second }
+		env.out = new(bytes.Buffer)
+		if err := configDaemonSet(env, "cli_theme", `"second"`, "aaa"); err != nil {
+			t.Fatalf("the second write = %v", err)
+		}
+
+		if backups := daemonConfigBackups(t, path); len(backups) != 2 {
+			t.Errorf("backups after two writes = %v, want two distinct copies", backups)
+		}
+		// The last change's baseline is the document the first write left.
+		env.out.(*bytes.Buffer).Reset()
+		if err := configDaemonDiff(env); err != nil {
+			t.Fatalf("diff = %v", err)
+		}
+		diff := env.out.(*bytes.Buffer).String()
+		if !strings.Contains(diff, `-  "cli_theme": "first",`) || !strings.Contains(diff, `+  "cli_theme": "second",`) {
+			t.Errorf("diff = %q, want the first write's document as the baseline", diff)
+		}
+	})
+
+	t.Run("a write that fails after the backup removes the backup it made", func(t *testing.T) {
+		t.Parallel()
+		townRoot, path := daemonConfigTown(t, daemonConfigFixture)
+		env, out, _ := daemonConfigTestEnv(townRoot, time.Now())
+		env.update = func(path string, perm os.FileMode, mutate func(*json.RawMessage, bool) error) error {
+			return config.UpdateConfigJSONNoWait(path, perm, func(cur *json.RawMessage, exists bool) error {
+				if err := mutate(cur, exists); err != nil {
+					return err
+				}
+				return errors.New("the write failed")
+			})
+		}
+		before := daemonConfigMustRead(t, path)
+
+		err := configDaemonSet(env, "cli_theme", `"light"`, "theme")
+		if err == nil || !strings.Contains(err.Error(), "the write failed") {
+			t.Fatalf("set with a failing write = %v, want the write's error", err)
+		}
+		if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
+			t.Errorf("file after the failed write = %q, want it unchanged", after)
+		}
+		if backups := daemonConfigBackups(t, path); len(backups) != 0 {
+			t.Errorf("backups after the failed write = %v, want the backup removed", backups)
+		}
+		if out.Len() != 0 {
+			t.Errorf("output after the failed write = %q, want nothing", out.String())
 		}
 	})
 }
@@ -347,6 +487,45 @@ func TestConfigDaemonRefusesSecrets(t *testing.T) {
 		}
 		if _, ok := daemonConfigDocument(t, path)["agents"].(map[string]any); !ok {
 			t.Error("the document lost its agents block")
+		}
+	})
+
+	t.Run("a secret-looking value on argv is refused and the same value from stdin is accepted", func(t *testing.T) {
+		t.Parallel()
+		townRoot, path := daemonConfigTown(t, withAgent)
+		env, out, errOut := daemonConfigTestEnv(townRoot, time.Now())
+		before := daemonConfigMustRead(t, path)
+		const key = "daemon.env.SOME_SERVICE_TOKEN"
+
+		err := configDaemonSet(env, key, `"`+token+`"`, "token")
+		if err == nil || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "standard input") {
+			t.Fatalf("set of a token as an argument = %v, want it refused naming %s and standard input", err, key)
+		}
+		for name, text := range map[string]string{"error": err.Error(), "output": out.String(), "stderr": errOut.String()} {
+			if strings.Contains(text, token) {
+				t.Errorf("%s prints the token:\n%s", name, text)
+			}
+		}
+		if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
+			t.Errorf("file after the refused write = %q, want it unchanged", after)
+		}
+		if backups := daemonConfigBackups(t, path); len(backups) != 0 {
+			t.Errorf("backups after the refused write = %v, want none", backups)
+		}
+
+		// The same value through standard input is what the argv rule asks
+		// for; daemon.env is not an agent env block, so it is written.
+		env.in = strings.NewReader(`"` + token + `"`)
+		if err := configDaemonSet(env, key, "-", "token"); err != nil {
+			t.Fatalf("set from standard input = %v", err)
+		}
+		daemon, ok := daemonConfigDocument(t, path)["daemon"].(map[string]any)
+		if !ok {
+			t.Fatal("the document lost its daemon section")
+		}
+		written, ok := daemon["env"].(map[string]any)
+		if !ok || written["SOME_SERVICE_TOKEN"] != token {
+			t.Errorf("daemon.env = %v, want the value from standard input", daemon["env"])
 		}
 	})
 }
@@ -812,13 +991,42 @@ func TestConfigDaemonDiffRefusals(t *testing.T) {
 	})
 }
 
+// The command reference has a gt config daemon section that names every
+// subcommand, the required --label, the lock rule and the argv rule (gt-yjzepk.4).
+func TestReferenceDocsCoverTheConfigDaemonCommand(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(data)
+	const heading = "#### gt config daemon"
+	start := strings.Index(doc, heading)
+	if start < 0 {
+		t.Fatalf("docs/reference.md has no %q section", heading)
+	}
+	section := doc[start:]
+	if end := strings.Index(section, "\n### "); end >= 0 {
+		section = section[:end]
+	}
+	for _, want := range []string{
+		"gt config daemon get", "gt config daemon set", "gt config daemon unset", "gt config daemon diff",
+		"--label", "config.json.lock", "refused, not queued", "argv", "process list",
+	} {
+		if !strings.Contains(section, want) {
+			t.Errorf("the gt config daemon section does not name %q:\n%s", want, section)
+		}
+	}
+}
+
 func TestConfigDaemonRefusesAnExhaustedBackupName(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	townRoot, path := daemonConfigTown(t, daemonConfigFixture)
 	env, _, _ := daemonConfigTestEnv(townRoot, now)
-	base := path + ".bak-20261108T120000Z-theme"
+	base := path + ".bak-20261108T120000.000000000Z-theme"
 	for i := 0; i < 101; i++ {
 		name := base
 		if i > 0 {
@@ -836,104 +1044,5 @@ func TestConfigDaemonRefusesAnExhaustedBackupName(t *testing.T) {
 	}
 	if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
 		t.Errorf("file after the refused write = %q, want it unchanged", after)
-	}
-}
-
-// A write that fails after its backup removes the backup again: nothing
-// changed, so the last backup must stay the last change's (gt-yjzepk.4).
-func TestConfigDaemonRemovesTheBackupOfAFailedWrite(t *testing.T) {
-	t.Parallel()
-
-	townRoot, path := daemonConfigTown(t, daemonConfigFixture)
-	env, out, _ := daemonConfigTestEnv(townRoot, time.Now())
-	env.update = func(path string, perm os.FileMode, mutate func(*json.RawMessage, bool) error) error {
-		return config.UpdateConfigJSONNoWait(path, perm, func(cur *json.RawMessage, exists bool) error {
-			if err := mutate(cur, exists); err != nil {
-				return err
-			}
-			return errors.New("the write failed")
-		})
-	}
-	before := daemonConfigMustRead(t, path)
-
-	err := configDaemonSet(env, "cli_theme", `"light"`, "theme")
-	if err == nil || !strings.Contains(err.Error(), "the write failed") {
-		t.Fatalf("set with a failing write = %v, want the write's error", err)
-	}
-	if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
-		t.Errorf("file after the failed write = %q, want it unchanged", after)
-	}
-	if backups := daemonConfigBackups(t, path); len(backups) != 0 {
-		t.Errorf("backups after the failed write = %v, want the backup removed", backups)
-	}
-	if out.Len() != 0 {
-		t.Errorf("output after the failed write = %q, want nothing", out.String())
-	}
-}
-
-// The last write's copy is found by modification time, not by its name: two
-// writes in one second can put the later copy behind an earlier label
-// (gt-yjzepk.4).
-func TestConfigDaemonDiffUsesTheLastWritesBackup(t *testing.T) {
-	t.Parallel()
-
-	townRoot, path := daemonConfigTown(t, daemonConfigFixture)
-	// The later write's label sorts before the earlier one's.
-	stale := path + ".bak-20261108T120000Z-zzz"
-	last := path + ".bak-20261108T120000Z-aaa"
-	if err := os.WriteFile(stale, []byte(`{"type":"town-settings","version":1,"cli_theme":"stale"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(last, []byte(daemonConfigFixture), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	when := time.Now()
-	if err := os.Chtimes(stale, when.Add(-time.Minute), when.Add(-time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(last, when, when); err != nil {
-		t.Fatal(err)
-	}
-
-	env, out, _ := daemonConfigTestEnv(townRoot, when)
-	if err := configDaemonDiff(env); err != nil {
-		t.Fatalf("diff = %v", err)
-	}
-	if !strings.Contains(out.String(), "is unchanged since "+filepath.Base(last)) {
-		t.Errorf("diff = %q, want the last write's copy, %s", out.String(), filepath.Base(last))
-	}
-}
-
-// A value that looks like a token may not arrive as an argument: it would be
-// in the process list. The command refuses it toward standard input
-// (gt-yjzepk.4).
-func TestConfigDaemonRefusesASecretInArgv(t *testing.T) {
-	t.Parallel()
-
-	const token = "sk-ant-0123456789abcdef0123"
-	const body = `{
-  "type": "town-settings",
-  "version": 1,
-  "agents": {"worker": {"command": "claude", "env": {"API_BASE": "https://example.invalid"}}}
-}
-`
-	townRoot, path := daemonConfigTown(t, body)
-	env, out, errOut := daemonConfigTestEnv(townRoot, time.Now())
-	before := daemonConfigMustRead(t, path)
-
-	err := configDaemonSet(env, "agents.worker.env.ANTHROPIC_AUTH_TOKEN", `"`+token+`"`, "token")
-	if err == nil || !strings.Contains(err.Error(), "standard input") {
-		t.Fatalf("set of a token as an argument = %v, want it refused toward standard input", err)
-	}
-	for name, text := range map[string]string{"error": err.Error(), "output": out.String(), "stderr": errOut.String()} {
-		if strings.Contains(text, token) {
-			t.Errorf("%s prints the token:\n%s", name, text)
-		}
-	}
-	if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
-		t.Errorf("file after the refused write = %q, want it unchanged", after)
-	}
-	if backups := daemonConfigBackups(t, path); len(backups) != 0 {
-		t.Errorf("backups after the refused write = %v, want none", backups)
 	}
 }

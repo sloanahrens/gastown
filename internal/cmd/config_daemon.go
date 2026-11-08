@@ -42,15 +42,18 @@ var daemonConfigRetention = config.BackupRetention{Count: 50, Age: 30 * 24 * tim
 // label is the operator's text and becomes part of the backup's path.
 var daemonConfigLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
-// daemonConfigStampFormat is the UTC timestamp in a backup's name.
-const daemonConfigStampFormat = "20060102T150405Z"
+// daemonConfigStampFormat is the UTC timestamp in a backup's name. It carries
+// nanoseconds so two writes in one second order by their name and never
+// collide (gt-yjzepk.4).
+const daemonConfigStampFormat = "20060102T150405.000000000Z"
 
 var configDaemonCmd = &cobra.Command{
 	Use:   "daemon",
 	Short: "Read and change settings/config.json the way the daemon loads it",
 	Long: `Read and change settings/config.json as a JSON document, in the daemon's own
-terms: the new document is validated by the loader the daemon runs at reload,
-so a change it would refuse is refused here and nothing is written.
+terms: the new document is validated by the loader and the patrol validators
+the daemon runs, so a change it would refuse is refused here and nothing is
+written.
 
 A path addresses objects by key and lists by index: daemon.patrols.overrun_guard
 names the overrun guard's block, and disabled_patrols.0 the first entry. A missing
@@ -259,19 +262,34 @@ func readDaemonConfig(path string) (map[string]any, error) {
 }
 
 // validateDaemonConfigDocument runs the validators the daemon runs over a
-// settings/config.json document: the kernel load, then the identity check the
-// patrol loader applies to the daemon section.
+// settings/config.json document: the kernel load, the one daemon patrol
+// validator, and the container_off step audit the daemon's rehearsal applies.
 func validateDaemonConfigDocument(path string, data []byte) (*config.TownSettings, error) {
 	settings, _, err := townconfig.ValidateSettingsDocument(path, data)
 	if err != nil {
 		return nil, err
 	}
 	if settings.Daemon != nil {
-		if err := config.ValidateDaemonPatrolConfigIdentity(settings.Daemon); err != nil {
+		if err := config.ValidateDaemonPatrolConfig(settings.Daemon); err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		if err := validateDaemonContainerOff(settings.Daemon); err != nil {
 			return nil, fmt.Errorf("%s: %w", path, err)
 		}
 	}
 	return settings, nil
+}
+
+// validateDaemonContainerOff refuses a container_off name the daemon's step
+// audit does not classify: a typo there silently leaves a step running in a
+// container that cannot run it (gt-1oz0t, gt-yjzepk.4).
+func validateDaemonContainerOff(c *config.DaemonPatrolConfig) error {
+	for _, name := range c.ContainerOff() {
+		if !stepKnown(name) {
+			return fmt.Errorf("%s: in daemon.container_off but unknown to the audit table (a typo, or a step to classify)", name)
+		}
+	}
+	return nil
 }
 
 // applyDaemonConfigChange applies change to the file's document under its lock. A
@@ -494,10 +512,9 @@ func redactDaemonConfigTree(node any) any {
 
 // newestDaemonConfigBackup is the newest config.json.bak-* copy beside path, ""
 // when there is none. It is the last write's copy, which holds the document
-// that write replaced. The stamp in the name has one-second resolution and the
-// label sorts with it, so two writes in one second can put the later copy
-// behind an earlier one: the modification time decides, and the name breaks a
-// tie (gt-yjzepk.4).
+// that write replaced. The name carries the UTC stamp with nanoseconds, so the
+// greatest name is the last write's, even for two writes in one second
+// (gt-yjzepk.4).
 func newestDaemonConfigBackup(path string) (string, error) {
 	dir := filepath.Dir(path)
 	prefix := filepath.Base(path) + ".bak-"
@@ -509,23 +526,12 @@ func newestDaemonConfigBackup(path string) (string, error) {
 		return "", fmt.Errorf("reading %s: %w", dir, err)
 	}
 	newest := ""
-	var newestMod time.Time
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
 			continue
 		}
-		info, err := entry.Info()
-		if errors.Is(err, fs.ErrNotExist) {
-			continue // removed between the read and the stat
-		}
-		if err != nil {
-			return "", fmt.Errorf("reading %s: %w", filepath.Join(dir, entry.Name()), err)
-		}
-		switch {
-		case newest == "",
-			info.ModTime().After(newestMod),
-			info.ModTime().Equal(newestMod) && entry.Name() > newest:
-			newest, newestMod = entry.Name(), info.ModTime()
+		if entry.Name() > newest {
+			newest = entry.Name()
 		}
 	}
 	if newest == "" {

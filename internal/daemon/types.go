@@ -215,7 +215,7 @@ func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
 // (gt-dcxbw). A settings file that parses is accepted whatever keys it
 // declares: the check is for a broken file, not for the strict schema the town
 // otherwise enforces, so an undeclared key stays the non-error it was here
-// before.
+// before. The document it returns passed config.ValidateDaemonPatrolConfig.
 func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	cfg, err := agentconfig.LoadDaemonPatrolConfig(PatrolConfigFile(townRoot))
 	if hostErr := checkOperatorSettingsReadable(townRoot); hostErr != nil {
@@ -224,7 +224,15 @@ func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	if errors.Is(err, agentconfig.ErrNotFound) {
 		return nil, nil
 	}
-	return cfg, err
+	if err != nil {
+		return nil, err
+	}
+	// The same entry point the settings writer runs, so the daemon and the
+	// writer refuse the same document (gt-yjzepk.4).
+	if err := agentconfig.ValidateDaemonPatrolConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // checkOperatorSettingsReadable reports a settings/config.json that cannot be
@@ -239,8 +247,12 @@ func checkOperatorSettingsReadable(townRoot string) error {
 }
 
 // SavePatrolConfig writes the patrol config (see PatrolConfigFile) through the config package's
-// locked writer, which refuses to replace a file that does not parse.
+// locked writer, which refuses to replace a file that does not parse, after
+// config.ValidateDaemonPatrolConfig refuses a document the daemon cannot run.
 func SavePatrolConfig(townRoot string, config *DaemonPatrolConfig) error {
+	if err := agentconfig.ValidateDaemonPatrolConfig(config); err != nil {
+		return err
+	}
 	return agentconfig.WriteConfigJSON(PatrolConfigFile(townRoot), config, 0o644)
 }
 

@@ -71,6 +71,32 @@ func TestReadPatrolConfigSeparatesAbsentFromBroken(t *testing.T) {
 	}
 }
 
+// The daemon reads and writes its patrol config through the one exported
+// validator the settings writer uses, so a document one refuses the other
+// refuses too (gt-yjzepk.4).
+func TestPatrolConfigUsesTheSharedValidator(t *testing.T) {
+	t.Parallel()
+
+	const bad = `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_slings":{"enabled":true,"entries":[{"name":"deep-review","rig":"gastown","formula":"mol-deep-review","interval":"soon"}]}}}`
+	town := t.TempDir()
+	path := writeTownFile(t, town, "mayor/daemon.json", bad)
+
+	if cfg, err := ReadPatrolConfig(town); cfg != nil || err == nil || !strings.Contains(err.Error(), `interval "soon" must be a positive Go duration`) {
+		t.Fatalf("ReadPatrolConfig = %v, %v; want the shared validator's interval error", cfg, err)
+	}
+	requireUnchanged(t, path, bad)
+
+	cfg := &config.DaemonPatrolConfig{Type: "daemon-patrol-config", Version: 1, Patrols: &config.PatrolsConfig{
+		ScheduledSlings: &config.ScheduledSlingsConfig{Entries: []config.ScheduledSlingEntry{{
+			Name: "deep-review", Rig: "gastown", Formula: "mol-deep-review", IntervalStr: "soon",
+		}}},
+	}}
+	if err := SavePatrolConfig(town, cfg); err == nil || !strings.Contains(err.Error(), "positive Go duration") {
+		t.Fatalf("SavePatrolConfig = %v, want the shared validator's interval error", err)
+	}
+	requireUnchanged(t, path, bad)
+}
+
 func TestCheckTownConfig(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()

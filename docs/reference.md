@@ -997,14 +997,7 @@ gt config default-agent [name]    # Get or set town default agent
 gt config get polecat_pool.max_priority     # Effective value: the file's, else
                                             # the default
 gt config set polecat_pool.max_priority 3   # Refused if the value cannot work
-
-# The daemon's settings/config.json, which may live on the daemon's volume
-gt config daemon get|set|unset|diff
 ```
-
-Before editing the daemon's settings file, run `gt config daemon --help`: it states
-the path syntax, the backup each write keeps, and how to pass a value on standard
-input so a token is not in the process list.
 
 **Built-in agents**: `claude`, `groq-compound` (the Claude CLI over Groq). Every
 agent runs the Claude Code CLI or a wrapper that execs it, and gets the town's
@@ -1046,6 +1039,29 @@ gt config default-agent claude-glm       # Set default
 ```
 
 **Agent resolution order**: rig-level → town-level → built-in presets.
+
+#### gt config daemon
+
+`gt config daemon` edits the daemon's `settings/config.json`, which may live on
+the daemon's volume. Before writing, it runs the daemon's own validators over the
+new document, so a change the daemon would refuse is refused here and the file is
+left alone.
+
+```bash
+gt config daemon get <path>                 # A value as JSON; no path is the file
+gt config daemon set <path> <json> --label <label>
+gt config daemon unset <path> --label <label>
+gt config daemon diff                       # What the last write changed
+```
+
+Every write copies the file to `config.json.bak-<UTC timestamp>-<label>` first, so
+`--label` is required and names that copy; the newest 50 copies and any younger
+than 30 days are kept. The lock rule is that a write takes `config.json.lock`
+without waiting: a lock another writer holds is refused, not queued behind, and
+nothing is written. The argv rule is that a value that looks like a secret must
+come through standard input (`set <path> -`) or a file the shell redirects; a
+secret-looking value on argv is refused naming the key, because argv is visible in
+the process list and shell history, while other values appear there too.
 
 ### Rig Management
 
