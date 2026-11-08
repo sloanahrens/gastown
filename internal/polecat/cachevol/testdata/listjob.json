@@ -1,0 +1,72 @@
+{
+  "apiVersion": "batch/v1",
+  "kind": "Job",
+  "metadata": {
+    "name": "gt-cache-list",
+    "namespace": "gt",
+    "labels": {
+      "app.kubernetes.io/managed-by": "gt",
+      "app.kubernetes.io/name": "polecat-cache-list"
+    }
+  },
+  "spec": {
+    "backoffLimit": 0,
+    "ttlSecondsAfterFinished": 300,
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/managed-by": "gt",
+          "app.kubernetes.io/name": "polecat-cache-list"
+        }
+      },
+      "spec": {
+        "restartPolicy": "Never",
+        "nodeSelector": {
+          "pool": "sandbox"
+        },
+        "tolerations": [
+          {
+            "key": "sandbox",
+            "operator": "Exists",
+            "effect": "NoSchedule"
+          }
+        ],
+        "securityContext": {
+          "runAsUser": 10001,
+          "runAsGroup": 10001
+        },
+        "containers": [
+          {
+            "name": "list",
+            "image": "gastown-polecat:dev",
+            "imagePullPolicy": "Always",
+            "command": [
+              "/usr/local/bin/polecat-image",
+              "trim-list"
+            ],
+            "args": [
+              "--root",
+              "/cache"
+            ],
+            "volumeMounts": [
+              {
+                "name": "cache",
+                "mountPath": "/cache",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "cache",
+            "persistentVolumeClaim": {
+              "claimName": "gt-cache",
+              "readOnly": true
+            }
+          }
+        ]
+      }
+    }
+  }
+}
