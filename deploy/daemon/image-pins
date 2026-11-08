@@ -1,10 +1,9 @@
 # <name> <url> <commit>: the four external sources `gt daemon image` builds from.
-# Each commit is the commit the live daemon image (gt-daemon:cf0d2c17b, update
-# cycle 2) was built at. Each URL is the rig's Forgejo remote, without a
-# credential. The pin-drift guard refuses a pin that is not an ancestor of the
-# source's origin/main, more than 40 commits behind it, or more than 7 days older
-# than its tip.
-bd http://forgejo:3000/sloan/beads.git d0f0010ef037e8de0006f2a4d0e01019120a5d8c
-om http://forgejo:3000/sloan/organic-mechanic.git 3b8ef74f4b6a141be0a37bd2dfb0ba9ad998e439
-hm http://forgejo:3000/sloan/history-man.git d8d2789418ea611dc9c16c109dc4d250e9000abd
-devops http://forgejo:3000/sloan/devops.git 9a55ea1175c21020a1811314631e899bd8e894f3
+# Each commit is the commit `gt daemon image` builds that source at. Each URL is
+# the rig's Forgejo remote, without a credential. The pin-drift guard refuses a
+# pin that is not an ancestor of the source's origin/main, more than 40 commits
+# behind it, or more than 7 days older than its tip.
+bd http://forgejo:3000/sloan/beads.git ecf0fc58c789b6d5a158bcf4b485662bc15f296d
+om http://forgejo:3000/sloan/organic-mechanic.git 218e13d1f6727a9b343239615c7b5f009c0ddd19
+hm http://forgejo:3000/sloan/history-man.git e207fe9a913a7b3cddbdb631a04bcb81156f1fdf
+devops http://forgejo:3000/sloan/devops.git 09bcaa41d4720129c4c89779f924c7824fa77dcb

@@ -2,5 +2,5 @@
 # Each commit must exist in that rig's canonical checkout under POLE_TOWN; make polecat-seed-pins rewrites this file.
 # gastown is seeded from the commit the image is built at, not from a line here (gt-1rz2r).
 gastown fb1fa4d818410b99cb01538802999480655f5d58
-devops f09a9b0278588802b8c62158c5257d9398b361ab
-beads 9bcbb454c2ba30ed740602e4956a79e8ae8676fd
+devops 09bcaa41d4720129c4c89779f924c7824fa77dcb
+beads ecf0fc58c789b6d5a158bcf4b485662bc15f296d

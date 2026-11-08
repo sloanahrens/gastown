@@ -2,10 +2,13 @@ package ctxlabels_test
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/ci/ctxlabels"
+	"github.com/steveyegge/gastown/internal/daemonimage"
 )
 
 const (
@@ -14,7 +17,7 @@ const (
 	// other is a commit the context must not be staged at.
 	other = "fedcba9876543210fedcba9876543210fedcba98"
 	// bdPin is the bd commit the polecat image is built from.
-	bdPin = "d0f0010ef037e8de0006f2a4d0e01019120a5d8c"
+	bdPin = "ecf0fc58c789b6d5a158bcf4b485662bc15f296d"
 	// floor is the Go floor the image build takes.
 	floor = "1.10.0"
 )
@@ -171,5 +174,29 @@ func TestEnvRefusesAnEnvironmentItCannotWrite(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "writing BD_COMMIT and GO_FLOOR") {
 		t.Errorf("Env error = %q, want it to name the environment write", err)
+	}
+}
+
+// TestBDPinMatchesImagePins holds bdPin to the bd commit deploy/daemon/image-pins
+// names, so a bump of the image pin cannot leave the polecat image's bd commit
+// behind.
+func TestBDPinMatchesImagePins(t *testing.T) {
+	t.Parallel()
+	body, err := os.ReadFile(filepath.Join("..", "..", "..", filepath.FromSlash(daemonimage.PinsPath)))
+	if err != nil {
+		t.Fatalf("reading %s: %v", daemonimage.PinsPath, err)
+	}
+	pins, err := daemonimage.ParsePins(body)
+	if err != nil {
+		t.Fatalf("%s: %v", daemonimage.PinsPath, err)
+	}
+	var bd string
+	for _, p := range pins {
+		if p.Name == "bd" {
+			bd = p.Commit
+		}
+	}
+	if bd != bdPin {
+		t.Errorf("bdPin = %s, but %s names bd at %s", bdPin, daemonimage.PinsPath, bd)
 	}
 }
