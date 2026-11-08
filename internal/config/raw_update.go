@@ -19,6 +19,13 @@ func ReadRawJSON(path string) (map[string]any, error) {
 	return decodeRawObject(path, data)
 }
 
+// DecodeRawJSON decodes data as the untyped object ReadRawJSON reads, so a
+// caller that has already read and validated the bytes reads the same
+// document rather than the file again.
+func DecodeRawJSON(path string, data []byte) (map[string]any, error) {
+	return decodeRawObject(path, data)
+}
+
 func decodeRawObject(path string, data []byte) (map[string]any, error) {
 	tree, err := decodeTree(data)
 	if err != nil {

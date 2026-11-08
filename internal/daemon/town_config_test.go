@@ -71,6 +71,57 @@ func TestReadPatrolConfigSeparatesAbsentFromBroken(t *testing.T) {
 	}
 }
 
+// The daemon's read path tolerates a scheduled entry the patrol skips, while
+// the write path refuses it through the one shared validator. Refusing the
+// whole document on read would silently stop a config that ran before
+// (gt-yjzepk.4).
+func TestPatrolConfigReadToleratesAndWriteRefusesABadEntry(t *testing.T) {
+	t.Parallel()
+
+	const bad = `{"type":"daemon-patrol-config","version":1,"patrols":{"scheduled_slings":{"enabled":true,"entries":[{"name":"deep-review","rig":"gastown","formula":"mol-deep-review","interval":"soon"}]}}}`
+	const good = `{"type":"daemon-patrol-config","version":1}`
+	town := t.TempDir()
+	path := writeTownFile(t, town, "mayor/daemon.json", bad)
+
+	if cfg, err := ReadPatrolConfig(town); err != nil || cfg == nil {
+		t.Fatalf("ReadPatrolConfig = %v, %v; want the document read so the patrol can skip its bad entry", cfg, err)
+	}
+	requireUnchanged(t, path, bad)
+
+	writeTownFile(t, town, "mayor/daemon.json", good)
+	cfg := &config.DaemonPatrolConfig{Type: "daemon-patrol-config", Version: 1, Patrols: &config.PatrolsConfig{
+		ScheduledSlings: &config.ScheduledSlingsConfig{Entries: []config.ScheduledSlingEntry{{
+			Name: "deep-review", Rig: "gastown", Formula: "mol-deep-review", IntervalStr: "soon",
+		}}},
+	}}
+	if err := SavePatrolConfig(town, cfg); err == nil || !strings.Contains(err.Error(), "positive Go duration") {
+		t.Fatalf("SavePatrolConfig = %v, want the shared validator's interval error", err)
+	}
+	requireUnchanged(t, path, good)
+}
+
+// On the two-file layout the daemon reads its patrol config from
+// settings/config.json's "daemon" section, so that is the document a settings
+// writer must validate and the daemon reloads (gt-y3pgh.7, gt-yjzepk.4).
+func TestReadPatrolConfigReadsTheSettingsDaemonSection(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	writeTownFile(t, town, "settings/config.json",
+		`{"type":"town-settings","version":1,"daemon":{"type":"daemon-patrol-config","version":1,"container_off":["landing_worker"]}}`)
+
+	cfg, err := ReadPatrolConfig(town)
+	if err != nil {
+		t.Fatalf("ReadPatrolConfig = %v, want the settings daemon section", err)
+	}
+	if cfg == nil || len(cfg.ContainerOff()) != 1 || cfg.ContainerOff()[0] != "landing_worker" {
+		t.Fatalf("ReadPatrolConfig = %v, want the settings daemon section", cfg)
+	}
+	if _, err := os.Stat(filepath.Join(town, "mayor", "daemon.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mayor/daemon.json stat = %v, want it absent so the section is the only source", err)
+	}
+}
+
 func TestCheckTownConfig(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()

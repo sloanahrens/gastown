@@ -216,6 +216,12 @@ func LoadPatrolConfig(townRoot string) *DaemonPatrolConfig {
 // declares: the check is for a broken file, not for the strict schema the town
 // otherwise enforces, so an undeclared key stays the non-error it was here
 // before.
+//
+// The read path deliberately runs no more than the load's identity check: the
+// scheduled_slings patrol skips an entry it cannot run and keeps the others, so
+// refusing the whole document here would silently stop a config that ran
+// before. The write paths run config.ValidateDaemonPatrolConfig instead
+// (gt-yjzepk.4).
 func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	cfg, err := agentconfig.LoadDaemonPatrolConfig(PatrolConfigFile(townRoot))
 	if hostErr := checkOperatorSettingsReadable(townRoot); hostErr != nil {
@@ -224,7 +230,10 @@ func ReadPatrolConfig(townRoot string) (*DaemonPatrolConfig, error) {
 	if errors.Is(err, agentconfig.ErrNotFound) {
 		return nil, nil
 	}
-	return cfg, err
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
 }
 
 // checkOperatorSettingsReadable reports a settings/config.json that cannot be
@@ -239,8 +248,12 @@ func checkOperatorSettingsReadable(townRoot string) error {
 }
 
 // SavePatrolConfig writes the patrol config (see PatrolConfigFile) through the config package's
-// locked writer, which refuses to replace a file that does not parse.
+// locked writer, which refuses to replace a file that does not parse, after
+// config.ValidateDaemonPatrolConfig refuses a document the daemon cannot run.
 func SavePatrolConfig(townRoot string, config *DaemonPatrolConfig) error {
+	if err := agentconfig.ValidateDaemonPatrolConfig(config); err != nil {
+		return err
+	}
 	return agentconfig.WriteConfigJSON(PatrolConfigFile(townRoot), config, 0o644)
 }
 

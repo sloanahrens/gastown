@@ -1389,43 +1389,53 @@ func (c *DiskMaintenanceConfig) UnmarshalJSON(data []byte) error {
 	if err := dec.Decode(&p); err != nil {
 		return fmt.Errorf("patrols.disk_maintenance: %w", err)
 	}
-	switch p.Interval {
+	cfg := DiskMaintenanceConfig(p)
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+	*c = cfg
+	return nil
+}
+
+// validate refuses a block the patrol cannot act on, with the same checks its
+// decode applies, so a validator over a decoded document names the same errors
+// (gt-yjzepk.4).
+func (c *DiskMaintenanceConfig) validate() error {
+	switch c.Interval {
 	case "", DiskMaintenanceIntervalDaily:
 	default:
-		return fmt.Errorf("patrols.disk_maintenance.interval = %q: only %q is supported", p.Interval, DiskMaintenanceIntervalDaily)
+		return fmt.Errorf("patrols.disk_maintenance.interval = %q: only %q is supported", c.Interval, DiskMaintenanceIntervalDaily)
 	}
-	switch p.Mode {
+	switch c.Mode {
 	case "", DiskMaintenanceModeDryRun, DiskMaintenanceModeApply:
 	default:
-		return fmt.Errorf("patrols.disk_maintenance.mode = %q: use %q or %q", p.Mode, DiskMaintenanceModeDryRun, DiskMaintenanceModeApply)
+		return fmt.Errorf("patrols.disk_maintenance.mode = %q: use %q or %q", c.Mode, DiskMaintenanceModeDryRun, DiskMaintenanceModeApply)
 	}
-	if p.Window != "" {
-		if _, err := parseClock(p.Window); err != nil {
-			return fmt.Errorf("patrols.disk_maintenance.window %q: want HH:MM", p.Window)
+	if c.Window != "" {
+		if _, err := parseClock(c.Window); err != nil {
+			return fmt.Errorf("patrols.disk_maintenance.window %q: want HH:MM", c.Window)
 		}
 	}
-	cfg := DiskMaintenanceConfig(p)
-	if _, err := cfg.CacheTrimEvery(); err != nil {
+	if _, err := c.CacheTrimEvery(); err != nil {
 		return err
 	}
-	if _, err := cfg.CacheTrimEarlyPercentValue(); err != nil {
+	if _, err := c.CacheTrimEarlyPercentValue(); err != nil {
 		return err
 	}
-	if _, err := cfg.CICacheTrimEvery(); err != nil {
+	if _, err := c.CICacheTrimEvery(); err != nil {
 		return err
 	}
-	if _, err := cfg.CICacheMaxAgeDuration(); err != nil {
+	if _, err := c.CICacheMaxAgeDuration(); err != nil {
 		return err
 	}
-	if _, err := cfg.CICacheWarnLimit(); err != nil {
+	if _, err := c.CICacheWarnLimit(); err != nil {
 		return err
 	}
-	for _, name := range slices.Sorted(maps.Keys(cfg.Targets)) {
-		if _, err := cfg.Cadence(name); err != nil {
+	for _, name := range slices.Sorted(maps.Keys(c.Targets)) {
+		if _, err := c.Cadence(name); err != nil {
 			return err
 		}
 	}
-	*c = cfg
 	return nil
 }
 

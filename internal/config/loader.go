@@ -623,9 +623,10 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 	return &config, nil
 }
 
-// SaveDaemonPatrolConfig saves a daemon patrol config to a file.
+// SaveDaemonPatrolConfig saves a daemon patrol config to a file after
+// ValidateDaemonPatrolConfig accepts it.
 func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
-	if err := validateDaemonPatrolConfig(config); err != nil {
+	if err := ValidateDaemonPatrolConfig(config); err != nil {
 		return err
 	}
 

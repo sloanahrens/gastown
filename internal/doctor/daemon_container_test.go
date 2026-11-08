@@ -458,8 +458,11 @@ func TestContainerJobState_TownWithoutItsOwnContainerIsUnknown(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
-			if err := daemon.SavePatrolConfig(townRoot, tc.cfg); err != nil {
-				t.Fatalf("SavePatrolConfig: %v", err)
+			// The cases hold a value the daemon's own writer refuses, because
+			// the point is how the reader treats a file that already holds
+			// it; the file is written without that validation.
+			if err := config.WriteConfigJSON(daemon.PatrolConfigFile(townRoot), tc.cfg, 0o644); err != nil {
+				t.Fatalf("writing the settings file: %v", err)
 			}
 			docker := &fakeDockerInspect{}
 

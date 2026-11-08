@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/deepreview"
 	"github.com/steveyegge/gastown/internal/landings"
 )
@@ -18,7 +19,7 @@ import (
 // appends the plan to the run bead's notes and closes the bead. It slings
 // nothing, and the run bead carries no formula: label, so a spec dispatcher
 // cannot pick it up either (gt-pyxj0).
-const scheduledDispatchShadow = "shadow"
+const scheduledDispatchShadow = agentconfig.ScheduledDispatchShadow
 
 // The shadow run's vars. Only the landings plan is ported from
 // scripts/deep-review.sh, so mode must say landings; landings_rig names the rig

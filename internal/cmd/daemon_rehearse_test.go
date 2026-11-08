@@ -710,12 +710,12 @@ func TestContainerRehearsalPluginsCheckFlagsEveryUnlistedHostSideEntry(t *testin
 		t.Fatalf("err=%v\n%s", err, got)
 	}
 	for _, s := range daemonSteps {
-		listed := s.name == "polecat-image"
-		if s.class != stepRuns && !listed && !strings.Contains(got, s.name+" ("+string(s.class)+") is not in daemon.container_off") {
-			t.Errorf("%s (%s) is not reported:\n%s", s.name, s.class, got)
+		listed := s.Name == "polecat-image"
+		if s.Class != stepRuns && !listed && !strings.Contains(got, s.Name+" ("+string(s.Class)+") is not in daemon.container_off") {
+			t.Errorf("%s (%s) is not reported:\n%s", s.Name, s.Class, got)
 		}
-		if (s.class == stepRuns || listed) && strings.Contains(got, s.name+" (") {
-			t.Errorf("%s was reported although it needs no entry", s.name)
+		if (s.Class == stepRuns || listed) && strings.Contains(got, s.Name+" (") {
+			t.Errorf("%s was reported although it needs no entry", s.Name)
 		}
 	}
 	// A patrol explicitly disabled is off for every supervisor and needs no entry.

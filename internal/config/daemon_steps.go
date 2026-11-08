@@ -1,0 +1,121 @@
+package config
+
+import (
+	"slices"
+	"strings"
+)
+
+// DaemonStepClass is where a daemon step can run.
+type DaemonStepClass string
+
+const (
+	// DaemonStepRuns: the step runs in the container once the parity beads
+	// have landed; Needs lists the programs it execs, which the image must
+	// carry.
+	DaemonStepRuns DaemonStepClass = "runs-in-container"
+	// DaemonStepHost: the step needs the host and runs there.
+	DaemonStepHost DaemonStepClass = "host-side"
+	// DaemonStepSeam: the step could run in the container with a seam that
+	// does not exist yet; until it does it is off in the container.
+	DaemonStepSeam DaemonStepClass = "needs-a-seam"
+)
+
+// DaemonStepKind says which namespace a name is in: a plugin is a directory
+// with a plugin.md, a patrol is a key of daemon.patrols.
+type DaemonStepKind string
+
+const (
+	DaemonStepPlugin DaemonStepKind = "plugin"
+	DaemonStepPatrol DaemonStepKind = "patrol"
+)
+
+// DaemonStep is one row of the audit: a plugin (a directory with plugin.md) or
+// a patrol (a key of daemon.patrols), what it needs, and why it is classed so.
+type DaemonStep struct {
+	Name  string
+	Kind  DaemonStepKind
+	Class DaemonStepClass
+	Needs []string // programs it execs, for DaemonStepRuns
+	Why   string
+}
+
+// daemonSteps is the audit, read from the code and the daemon log on 2026-11-01.
+// A plugin or patrol the town has that this table does not name fails the
+// rehearsal until it is classified.
+//
+// The container daemon cannot run everything the launchd daemon runs: some
+// plugins and patrols need the Mac's toolchain, its Docker Desktop engine, its
+// launchd or its files. The table classifies every one this town has, so a
+// daemon.container_off name can be checked against it (gt-1oz0t). It lives
+// beside the patrol schema because the settings validator and the daemon
+// rehearsal both read it, so a name one knows the other knows (gt-yjzepk.4).
+// The rows and their reasons describe this town (its plugins, its Mac and its
+// Docker Desktop), so a fork that contributes upstream keeps them out of the
+// shared diff.
+var daemonSteps = []DaemonStep{
+	{"polecat-image", DaemonStepPlugin, DaemonStepHost, nil, "go, make, crane and the Docker Desktop engine build and publish the polecat image; a stale image refuses every sandbox sling"},
+	{"hm-sync", DaemonStepPlugin, DaemonStepHost, nil, "hm, make and go against hm-postgres on Docker Desktop"},
+	{"tool-updater", DaemonStepPlugin, DaemonStepHost, nil, "manual plugin that runs brew"},
+	{"cloud-check", DaemonStepPlugin, DaemonStepHost, nil, "launchctl, the Docker Desktop engine and /Users/Shared/gt-cloud"},
+	{"app-promote", DaemonStepPlugin, DaemonStepSeam, nil, "needs the Forgejo viewer token, the deploy key, outbound ssh to GitHub and the Forgejo API address"},
+	{"devops-reporter", DaemonStepPlugin, DaemonStepSeam, nil, "bd and gt only, but reads /Users/Shared/gt-cloud/reports"},
+	{"release-reporter", DaemonStepPlugin, DaemonStepSeam, nil, "bd and gt only, but reads /Users/Shared/gt-cloud/releases and two files under HOME"},
+	{"town-metrics", DaemonStepPlugin, DaemonStepSeam, nil, "its lsof, ps and desktop-linux docker probes would measure the container, not the host"},
+
+	{"landing_worker", DaemonStepPatrol, DaemonStepHost, nil, "gates with make gate: go, make and golangci-lint"},
+	{"rebuild_gt", DaemonStepPatrol, DaemonStepHost, nil, "make install and launchctl"},
+	{"update", DaemonStepPatrol, DaemonStepHost, nil, "make install and launchctl install the binary on the host and reload the host's daemon"},
+	{"rebuild_om", DaemonStepPatrol, DaemonStepHost, nil, "go build"},
+	{"rebuild_hm", DaemonStepPatrol, DaemonStepHost, nil, "go build"},
+	{"disk_maintenance", DaemonStepPatrol, DaemonStepHost, nil, "every target is the Mac, Colima or Docker Desktop"},
+	{"main_branch_test", DaemonStepPatrol, DaemonStepHost, nil, "go test"},
+	{"doctor_dog", DaemonStepPatrol, DaemonStepSeam, nil, "gt doctor does not finish in the image; Dolt and the backup directory need the same addresses and mounts"},
+	{"health_notify", DaemonStepPatrol, DaemonStepSeam, nil, "the macOS notify scripts (deferred by the operator)"},
+
+	{"dolt_server", DaemonStepPatrol, DaemonStepHost, nil, "starts and watches the Dolt server, which runs on the host; the container reaches it over host.docker.internal"},
+	{"hm_sync", DaemonStepPatrol, DaemonStepHost, nil, "hm on the host (the plugin of the same name does the same)"},
+	{"landing_infra", DaemonStepPatrol, DaemonStepHost, nil, "the landing worker's companion: watches Forgejo and its run queue for a landing worker that runs on the host"},
+	{"resource_sampler", DaemonStepPatrol, DaemonStepSeam, nil, "ps rows for the host's components would describe the container"},
+
+	{"handler", DaemonStepPatrol, DaemonStepRuns, []string{"bash"}, "dispatches the plugins that run here"},
+	{"tier_sweep", DaemonStepPatrol, DaemonStepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},
+	{"spec_dispatch", DaemonStepPatrol, DaemonStepRuns, []string{"openshell", "kubectl"}, "gt sling through the gateway and the cluster"},
+	{"jsonl_git_backup", DaemonStepPatrol, DaemonStepRuns, []string{"dolt", "git"}, "dolt and git"},
+	{"patrol_scan", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "git and gt"},
+	{"checkpoint_dog", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "git"},
+	{"overrun_guard", DaemonStepPatrol, DaemonStepRuns, []string{"ps"}, "ps"},
+	{"overseer_report", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
+	{"refinery", DaemonStepPatrol, DaemonStepRuns, nil, "retired and ignored; the key stays in the schema so old files load"},
+	{"bird_reports", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
+	{"findings_filer", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
+	{"events_prune", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
+	{"git_hygiene", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "git and git gc in the rigs' repositories under the town"},
+	{"compactor_dog", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
+	{"scheduled_maintenance", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
+	{"scheduled_slings", DaemonStepPatrol, DaemonStepRuns, nil, "gt sling"},
+	{"wisp_reaper", DaemonStepPatrol, DaemonStepRuns, nil, "in process"},
+}
+
+// daemonPatrolJevPrefix names in-process readers of the town's own files. They
+// are patrols the audit classifies without a row each.
+const daemonPatrolJevPrefix = "jev_"
+
+// DaemonSteps returns the audit's rows.
+func DaemonSteps() []DaemonStep {
+	return append([]DaemonStep(nil), daemonSteps...)
+}
+
+// DaemonStepNamed reports whether the audit table, or the jev_ prefix rule for
+// patrols, classifies name as a step of the given kind.
+func DaemonStepNamed(name string, kind DaemonStepKind) bool {
+	if kind == DaemonStepPatrol && strings.HasPrefix(name, daemonPatrolJevPrefix) {
+		return true
+	}
+	return slices.ContainsFunc(daemonSteps, func(s DaemonStep) bool { return s.Name == name && s.Kind == kind })
+}
+
+// DaemonStepKnown reports whether name is a classified daemon step of either
+// kind, which is what a daemon.container_off entry may name.
+func DaemonStepKnown(name string) bool {
+	return DaemonStepNamed(name, DaemonStepPlugin) || DaemonStepNamed(name, DaemonStepPatrol)
+}

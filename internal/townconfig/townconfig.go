@@ -205,29 +205,49 @@ func (t *Town) loadSettings() error {
 	if err != nil || data == nil {
 		return err
 	}
-	var s config.TownSettings
-	if err := config.DecodeJSONFile(t.path(FileSettings), data, &s); err != nil {
+	s, seats, err := ValidateSettingsDocument(t.path(FileSettings), data)
+	if err != nil {
 		return err
 	}
+	t.settings = s
+	t.seats = seats
+	t.literalSecrets = config.FindLiteralSecrets(s)
+	return nil
+}
+
+// ValidateSettingsDocument validates data as the settings/config.json at path
+// with the checks the kernel load applies to the file: the strict schema, the
+// type and version, the polecat pool and seat rules, the refuse_literals
+// switch, and the scheduled_slings run_agent rule for the daemon section the
+// file carries. It returns the settings and the seats they resolve, and names
+// path in every error. A writer calls it to refuse a document the daemon would
+// refuse before it writes (gt-yjzepk.4).
+func ValidateSettingsDocument(path string, data []byte) (*config.TownSettings, []config.Seat, error) {
+	var s config.TownSettings
+	if err := config.DecodeJSONFile(path, data, &s); err != nil {
+		return nil, nil, err
+	}
 	if s.Type != "town-settings" && s.Type != "" {
-		return fmt.Errorf("%s: %w: expected type 'town-settings', got %q", t.path(FileSettings), config.ErrInvalidType, s.Type)
+		return nil, nil, fmt.Errorf("%s: %w: expected type 'town-settings', got %q", path, config.ErrInvalidType, s.Type)
 	}
 	if s.Version > config.CurrentTownSettingsVersion {
-		return fmt.Errorf("%s: %w: got %d, max supported %d", t.path(FileSettings), config.ErrInvalidVersion, s.Version, config.CurrentTownSettingsVersion)
+		return nil, nil, fmt.Errorf("%s: %w: got %d, max supported %d", path, config.ErrInvalidVersion, s.Version, config.CurrentTownSettingsVersion)
 	}
 	if err := s.PolecatPool.Validate(); err != nil {
-		return oneLine(t.path(FileSettings), err)
+		return nil, nil, oneLine(path, err)
 	}
 	seats, err := config.Seats(&s, config.SeatsKnownTo(&s))
 	if err != nil {
-		return oneLine(t.path(FileSettings), err)
+		return nil, nil, oneLine(path, err)
 	}
-	if err := t.checkLiteralSecrets(&s); err != nil {
-		return err
+	if bad := ScheduledRunAgentProblems(s.Daemon, seats); len(bad) > 0 {
+		return nil, nil, oneLine(path, errors.New(strings.Join(bad, "; ")))
 	}
-	t.settings = &s
-	t.seats = seats
-	return nil
+	if found := config.FindLiteralSecrets(&s); len(found) > 0 && s.RefusesLiteralSecrets() {
+		return nil, nil, fmt.Errorf("%s: secrets.refuse_literals is set and %s %s a literal token; move it to %s with 'gt config secrets migrate'",
+			path, strings.Join(config.LiteralSecretPaths(found), ", "), holdVerb(len(found)), FileDaemonEnv)
+	}
+	return &s, seats, nil
 }
 
 // checkScheduledRunAgents fails the load when a scheduled entry's run_agent
@@ -240,14 +260,26 @@ func (t *Town) loadSettings() error {
 // it fails the seat check the same way; one that is present but did not load
 // already reported its own error.
 func (t *Town) checkScheduledRunAgents() error {
-	if t.daemon == nil || t.daemon.Patrols == nil || t.daemon.Patrols.ScheduledSlings == nil {
-		return nil
-	}
 	if t.settings == nil && t.present[FileSettings] {
 		return nil
 	}
+	if bad := ScheduledRunAgentProblems(t.daemon, t.seats); len(bad) > 0 {
+		return oneLine(t.path(FileDaemon), errors.New(strings.Join(bad, "; ")))
+	}
+	return nil
+}
+
+// ScheduledRunAgentProblems returns one line per scheduled_slings entry the
+// load refuses: run_agent without dispatch "spec", or run_agent naming an
+// agent the seats cannot serve. It is the check behind checkScheduledRunAgents,
+// exported so a writer refuses the same documents the load does (gt-tplg6,
+// gt-nosod, gt-yjzepk.4).
+func ScheduledRunAgentProblems(daemon *config.DaemonPatrolConfig, seats []config.Seat) []string {
+	if daemon == nil || daemon.Patrols == nil || daemon.Patrols.ScheduledSlings == nil {
+		return nil
+	}
 	var bad []string
-	for _, e := range t.daemon.Patrols.ScheduledSlings.Entries {
+	for _, e := range daemon.Patrols.ScheduledSlings.Entries {
 		if e.RunAgent == "" {
 			continue
 		}
@@ -255,14 +287,11 @@ func (t *Town) checkScheduledRunAgents() error {
 			bad = append(bad, fmt.Sprintf(`scheduled_slings[%s].run_agent: valid only with dispatch "spec"`, e.Name))
 			continue
 		}
-		if !config.HasSeat(t.seats, e.RunAgent) {
+		if !config.HasSeat(seats, e.RunAgent) {
 			bad = append(bad, fmt.Sprintf("scheduled_slings[%s].run_agent %q: no seat for that agent in polecat_pool.seats", e.Name, e.RunAgent))
 		}
 	}
-	if len(bad) == 0 {
-		return nil
-	}
-	return oneLine(t.path(FileDaemon), errors.New(strings.Join(bad, "; ")))
+	return bad
 }
 
 func (t *Town) loadDaemon() error {

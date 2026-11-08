@@ -1040,6 +1040,31 @@ gt config default-agent claude-glm       # Set default
 
 **Agent resolution order**: rig-level → town-level → built-in presets.
 
+#### gt config daemon
+
+`gt config daemon` edits the daemon's `settings/config.json`, which may live on
+the daemon's volume. Before writing, it runs the daemon's own validators over the
+new document, so a change the daemon would refuse is refused here and the file is
+left alone.
+
+```bash
+gt config daemon get <path>                 # A value as JSON; no path is the file
+gt config daemon set <path> <json> --label <label>
+gt config daemon unset <path> --label <label>
+gt config daemon diff                       # What the last write changed
+```
+
+Every write copies the file to `config.json.bak-<UTC timestamp>-<label>` first, so
+`--label` is required and names that copy; the newest 50 copies and any younger
+than 30 days are kept. The lock rule is that a write takes `config.json.lock`
+without waiting: a lock another writer holds is refused, not queued behind, and
+nothing is written. The secret rule is that a value that looks like a secret is
+refused on every route, as an argument and from standard input (`set <path> -`)
+alike, naming the key and never the value: `settings/config.json` never holds a
+literal token, and a value on argv would also show in the process list and shell
+history. It belongs in `settings/daemon.env`, referenced as `"${VAR}"`. `get` and
+`diff` show a token the file already holds as `<redacted>`.
+
 ### Rig Management
 
 ```bash

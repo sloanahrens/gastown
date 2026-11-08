@@ -7,12 +7,12 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -22,28 +22,11 @@ import (
 
 const defaultScheduledSlingPriority = 3
 
-var scheduledSlingNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
-
+// scheduledSlingValidate is the patrol's call into the config package's one
+// entry validator, so the patrol and a settings writer refuse the same entries
+// (gt-yjzepk.4).
 func scheduledSlingValidate(e ScheduledSlingEntry) error {
-	if !scheduledSlingNameRe.MatchString(e.Name) {
-		return fmt.Errorf("scheduled_slings: name %q must match %s", e.Name, scheduledSlingNameRe)
-	}
-	if e.Rig == "" || e.Formula == "" {
-		return fmt.Errorf("scheduled_slings[%s]: rig and formula are required", e.Name)
-	}
-	d, err := time.ParseDuration(e.IntervalStr)
-	if err != nil || d <= 0 {
-		return fmt.Errorf("scheduled_slings[%s]: interval %q must be a positive Go duration", e.Name, e.IntervalStr)
-	}
-	if err := scheduledSlingValidateDispatch(e); err != nil {
-		return err
-	}
-	if e.GateTimeoutStr != "" {
-		if gt, err := time.ParseDuration(e.GateTimeoutStr); err != nil || gt <= 0 {
-			return fmt.Errorf("scheduled_slings[%s]: gate_timeout %q must be a positive Go duration", e.Name, e.GateTimeoutStr)
-		}
-	}
-	return nil
+	return agentconfig.ValidateScheduledSlingEntry(e)
 }
 
 func scheduledSlingInterval(e ScheduledSlingEntry) time.Duration {

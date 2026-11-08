@@ -15,7 +15,7 @@ import (
 // the spec dispatcher (gt-z5g3c): the scheduler creates the shaped run bead and
 // stops. Seat choice, queueing and priority are the dispatcher's, so a full
 // pool is a wait and the run bead's open status is the queue.
-const scheduledDispatchSpec = "spec"
+const scheduledDispatchSpec = agentconfig.ScheduledDispatchSpec
 
 // scheduledRunBead is the run bead the scheduler creates. Acceptance is the
 // bead's acceptance field; it is empty for a run the scheduler slings itself.
@@ -37,35 +37,13 @@ func scheduledSpecLabels(e ScheduledSlingEntry) []string {
 	return labels
 }
 
-// scheduledSlingValidateDispatch rejects a dispatch value the patrol does not
-// know, and a var the dispatcher could not read back out of the "## Formula
-// vars" section. A spec entry that still names an agent is not rejected: the
-// patrol skips an invalid entry, so refusing it would silently stop a config
-// that ran before. The agent is ignored and createSpecDispatchedRun says so.
-// A shadow entry's agent is rejected instead: a shadow run slings nothing, so
-// no agent could run, and reading it as one would mislead the operator.
+// scheduledSlingValidateDispatch is the patrol's call into the config
+// package's dispatch validator, which the settings writer runs too. A spec
+// entry that still names an agent is not rejected: the patrol skips an invalid
+// entry, so refusing it would silently stop a config that ran before; that
+// choice lives in the shared validator (gt-yjzepk.4).
 func scheduledSlingValidateDispatch(e ScheduledSlingEntry) error {
-	if e.RunAgent != "" && e.Dispatch != scheduledDispatchSpec {
-		return fmt.Errorf("scheduled_slings[%s]: run_agent is valid only with dispatch %q", e.Name, scheduledDispatchSpec)
-	}
-	if e.Agent != "" && e.Dispatch == scheduledDispatchShadow {
-		return fmt.Errorf("scheduled_slings[%s]: agent is valid only for a slung entry; dispatch %q slings nothing", e.Name, scheduledDispatchShadow)
-	}
-	switch e.Dispatch {
-	case "":
-		return nil
-	case scheduledDispatchSpec, scheduledDispatchShadow:
-	default:
-		return fmt.Errorf("scheduled_slings[%s]: dispatch %q must be empty, %q or %q", e.Name, e.Dispatch, scheduledDispatchSpec, scheduledDispatchShadow)
-	}
-	for k, v := range e.Vars {
-		// One var is one line of the section: a newline would end it early, a
-		// key with "=" or a leading "#" would be read as another key or a comment.
-		if k == "" || k != strings.TrimSpace(k) || strings.ContainsAny(k, "=\n") || strings.HasPrefix(k, "#") || strings.Contains(v, "\n") {
-			return fmt.Errorf("scheduled_slings[%s]: var %q cannot be written as a key=value line", e.Name, k)
-		}
-	}
-	return nil
+	return agentconfig.ValidateScheduledSlingDispatch(e)
 }
 
 // scheduledSpecBody is a spec-dispatched run's description and acceptance. The
