@@ -164,9 +164,21 @@ func TestMainExitsRedWhenAScriptFails(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	want := "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs /logs) in 2m14s"
-	if got := errorLines(f.err.String()); !slices.Contains(got, want) {
-		t.Fatalf("error stream lines = %q, want the summary %q among them", got, want)
+	lines := errorLines(f.err.String())
+	want := []string{
+		"tier-sweep: shell scripts/a_test.sh ...",
+		"tier-sweep: shell scripts/b_test.sh ...",
+		"tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs /logs) in 2m14s",
+		"tier-sweep: shell log tail scripts/b_test.sh",
+	}
+	if len(lines) != len(want)+1 {
+		t.Fatalf("error stream lines = %q, want the two announces, the summary, the header and one unreadable line", lines)
+	}
+	if !slices.Equal(lines[:len(want)], want) {
+		t.Fatalf("error stream lines = %q, want %q first, the summary as the first line after the announces and the tail header after it", lines, want)
+	}
+	if !strings.Contains(lines[len(want)], "cannot read") {
+		t.Fatalf("last line = %q, want it to say the log cannot be read", lines[len(want)])
 	}
 }
 

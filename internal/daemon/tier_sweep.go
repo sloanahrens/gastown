@@ -3317,7 +3317,7 @@ func tierSweepStageReported(st tierSweepStage, res tierSweepStageResult) map[str
 		}
 		return reported
 	}
-	summary, _, red := tiersweep.ShellVerdict(res.output, res.exitCode)
+	summary, _, _, red := tiersweep.ShellVerdict(res.output, res.exitCode)
 	reported := parseTierSweepSummaries(summary)
 	if red {
 		withholdTierSweepGreen(reported)

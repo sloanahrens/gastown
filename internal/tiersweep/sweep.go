@@ -213,10 +213,11 @@ func runTiers(s *Sweep, tiers []string, stdout, stderr io.Writer) int {
 	red := false
 	for _, tier := range tiers {
 		var line string
+		var tails []string
 		var tierRed bool
 		switch tier {
 		case TierShell:
-			line, tierRed = s.Shell()
+			line, tails, tierRed = s.Shell()
 		case TierIntegration:
 			line, tierRed = s.Integration()
 		case TierRace:
@@ -226,6 +227,13 @@ func runTiers(s *Sweep, tiers []string, stdout, stderr io.Writer) int {
 			return UsageExit
 		}
 		fmt.Fprintln(stdout, line)
+		// A RED shell tier's log tails follow its summary, the order the
+		// runner prints them, so the job log reads verdict first and failed
+		// assertion below it. The tails stay on stderr with the other failure
+		// excerpts; the summary line on stdout is what the daemon parses.
+		for _, l := range tails {
+			fmt.Fprintln(stderr, l)
+		}
 		red = red || tierRed
 	}
 	if red {
