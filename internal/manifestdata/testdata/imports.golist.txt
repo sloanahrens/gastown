@@ -1,0 +1,70 @@
+# go1.27.1
+internal/goarch|
+unsafe|
+internal/abi|internal/goarch unsafe
+internal/unsafeheader|unsafe
+internal/cpu|unsafe
+internal/bytealg|internal/cpu unsafe
+internal/byteorder|
+internal/chacha8rand|internal/byteorder internal/cpu internal/goarch unsafe
+internal/coverage/rtcov|unsafe
+internal/godebugs|
+internal/goexperiment|
+internal/goos|
+internal/profilerecord|
+internal/runtime/atomic|internal/cpu internal/goarch unsafe
+internal/runtime/syscall/linux|internal/goarch unsafe
+math/bits|unsafe
+internal/strconv|math/bits unsafe
+internal/runtime/cgroup|internal/bytealg internal/runtime/syscall/linux internal/strconv unsafe
+internal/runtime/exithook|internal/runtime/atomic unsafe
+internal/runtime/gc|internal/goarch
+internal/runtime/sys|internal/cpu internal/goarch internal/goos unsafe
+internal/runtime/gc/scan|internal/goarch internal/runtime/gc internal/runtime/sys unsafe
+internal/asan|unsafe
+internal/msan|unsafe
+internal/race|internal/abi unsafe
+internal/runtime/math|internal/goarch
+internal/runtime/maps|internal/abi internal/asan internal/byteorder internal/cpu internal/goarch internal/goexperiment internal/msan internal/race internal/runtime/math internal/runtime/sys math/bits unsafe
+internal/runtime/pprof/label|
+internal/stringslite|internal/bytealg unsafe
+internal/trace/tracev2|
+runtime|internal/abi internal/bytealg internal/byteorder internal/chacha8rand internal/coverage/rtcov internal/cpu internal/goarch internal/godebugs internal/goexperiment internal/goos internal/profilerecord internal/runtime/atomic internal/runtime/cgroup internal/runtime/exithook internal/runtime/gc internal/runtime/gc/scan internal/runtime/maps internal/runtime/math internal/runtime/pprof/label internal/runtime/sys internal/runtime/syscall/linux internal/strconv internal/stringslite internal/trace/tracev2 math/bits unsafe
+internal/reflectlite|internal/abi internal/goarch internal/unsafeheader runtime unsafe
+errors|internal/reflectlite unsafe
+sync/atomic|unsafe
+internal/sync|internal/abi internal/goarch internal/race sync/atomic unsafe
+internal/synctest|internal/abi unsafe
+sync|internal/race internal/runtime/atomic internal/sync internal/synctest runtime sync/atomic unsafe
+io|errors sync
+iter|internal/race runtime unsafe
+unicode|
+unicode/utf8|
+bytes|errors internal/bytealg io iter math/bits unicode unicode/utf8 unsafe
+cmp|
+math|math/bits unsafe
+strconv|errors internal/bytealg internal/strconv internal/stringslite unicode/utf8
+reflect|errors internal/abi internal/bytealg internal/goarch internal/goexperiment internal/race internal/runtime/maps internal/runtime/sys internal/strconv internal/unsafeheader iter math runtime strconv sync unicode unicode/utf8 unsafe
+slices|cmp iter math/bits unsafe
+internal/fmtsort|cmp reflect slices
+internal/oserror|errors
+path|errors internal/bytealg unicode/utf8
+syscall|errors internal/asan internal/bytealg internal/byteorder internal/goarch internal/msan internal/oserror internal/race internal/runtime/syscall/linux internal/strconv runtime slices sync sync/atomic unsafe
+time|errors internal/bytealg internal/stringslite math/bits runtime sync syscall unsafe
+io/fs|errors internal/bytealg internal/oserror io path slices time unicode/utf8
+internal/filepathlite|errors internal/bytealg internal/stringslite io/fs slices
+internal/syscall/unix|internal/strconv runtime sync/atomic syscall unsafe
+internal/poll|errors internal/strconv internal/syscall/unix io runtime sync sync/atomic syscall time unsafe
+internal/syscall/execenv|syscall
+internal/testlog|sync sync/atomic unsafe
+os|errors internal/bytealg internal/byteorder internal/filepathlite internal/goarch internal/poll internal/strconv internal/stringslite internal/syscall/execenv internal/syscall/unix internal/testlog io io/fs runtime slices sync sync/atomic syscall time unsafe
+fmt|errors internal/fmtsort internal/stringslite io math os reflect slices strconv sync unicode/utf8
+encoding|
+encoding/base64|internal/byteorder io slices strconv
+sort|internal/reflectlite math/bits slices
+strings|errors internal/abi internal/bytealg internal/stringslite io iter math/bits sync unicode unicode/utf8 unsafe
+regexp/syntax|slices sort strconv strings sync unicode unicode/utf8
+regexp|bytes io iter regexp/syntax slices strconv strings sync unicode unicode/utf8
+gopkg.in/yaml.v3|bytes encoding encoding/base64 errors fmt io math reflect regexp sort strconv strings sync time unicode unicode/utf8
+path/filepath|errors internal/bytealg internal/filepathlite io/fs os runtime slices strings syscall unicode/utf8
+github.com/steveyegge/gastown/internal/manifestdata|bytes errors fmt gopkg.in/yaml.v3 io path path/filepath regexp slices strings

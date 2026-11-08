@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // RecentWindow is how recently a session-classed path under a daemon subsystem
@@ -80,7 +81,7 @@ func Verify(fsys fs.FS, m *Manifest, now time.Time) ([]Problem, error) {
 		return nil, err
 	}
 	entries := m.Expand(rigs, birds)
-	daemonNames := daemonSubsystemNames(entries)
+	daemonNames := manifestdata.DaemonSubsystemNames(entries)
 	problems := overlaps(entries)
 	err = fs.WalkDir(fsys, ".", func(p string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -331,21 +332,6 @@ func firstSegmentBelow(base, p string) string {
 	}
 	first, _, _ := strings.Cut(rest, "/")
 	return first
-}
-
-// daemonSubsystemNames returns the names of the daemon-owned directories
-// directly under .runtime, such as usage for .runtime/usage.
-func daemonSubsystemNames(entries []Entry) map[string]bool {
-	names := map[string]bool{}
-	for _, e := range entries {
-		if e.Owner != OwnerDaemon {
-			continue
-		}
-		if name, ok := strings.CutPrefix(e.Path, ".runtime/"); ok && name != "" && !strings.Contains(name, "/") {
-			names[name] = true
-		}
-	}
-	return names
 }
 
 // overlaps reports each pair of entries where one covers the other and they

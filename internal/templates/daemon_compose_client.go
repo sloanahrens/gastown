@@ -11,19 +11,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // LiveOpenShellConfigHome is the XDG_CONFIG_HOME the live container's daemon
 // runs with, and LiveOpenShellConfigPath is where the host's openshell config
-// directory (gateway metadata and the mTLS client certificates) is mounted
-// read-only beneath it, so the container's openshell finds the gateways the way
-// the host's does (gt-yj0vh). LiveConfigDirPath is where the town's config
-// directory is mounted beneath it, so ~/.config/gt resolves inside the
-// container (gt-gg9hv.3).
+// directory is mounted read-only beneath it; LiveConfigDirPath is where the
+// town's config directory is mounted beneath it (gt-yj0vh, gt-gg9hv.3). The
+// paths live in manifestdata, which the cluster renderer may import.
 const (
-	LiveOpenShellConfigHome = "/run/gt/xdg"
-	LiveOpenShellConfigPath = LiveOpenShellConfigHome + "/openshell"
-	LiveConfigDirPath       = LiveOpenShellConfigHome + "/gt"
+	LiveOpenShellConfigHome = manifestdata.LiveOpenShellConfigHome
+	LiveOpenShellConfigPath = manifestdata.LiveOpenShellConfigPath
+	LiveConfigDirPath       = manifestdata.LiveConfigDirPath
 )
 
 // liveBackupRootEnv names the Dolt backup directory the daemon is pointed at, set from

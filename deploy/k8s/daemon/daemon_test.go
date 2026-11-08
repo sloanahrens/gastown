@@ -21,6 +21,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
@@ -430,16 +431,16 @@ func mountFor(volume string) (Mount, bool) {
 // split gives a session, an entry that is absolute or resolves outside the mount,
 // and any row a mount other than the town-state one carries. It returns the
 // findings instead of failing, so a fixture that must drift drives this check.
-func checkMount(mount Mount, m *townstate.Manifest) []string {
+func checkMount(mount Mount, m *manifestdata.Manifest) []string {
 	var want []string
 	if mount.Volume == TownStateClaim {
-		want = ownedBy(m, townstate.OwnerDaemon)
+		want = ownedBy(m, manifestdata.OwnerDaemon)
 	}
 	var findings []string
 	if !slices.Equal(mount.Entries, want) {
 		findings = append(findings, fmt.Sprintf("the %s mount carries %q, want %q: the split's daemon-owned rows, in the split's order", mount.Volume, mount.Entries, want))
 	}
-	sessionPaths := ownedBy(m, townstate.OwnerSession)
+	sessionPaths := ownedBy(m, manifestdata.OwnerSession)
 	for _, p := range mount.Entries {
 		if slices.Contains(sessionPaths, p) {
 			findings = append(findings, fmt.Sprintf("the %s volume carries the session-owned path %q", mount.Volume, p))
@@ -462,8 +463,8 @@ func checkMount(mount Mount, m *townstate.Manifest) []string {
 // town root's own prefix.
 func TestMountsMatchTheTownStateManifest(t *testing.T) {
 	t.Parallel()
-	manifest := townstate.Default()
-	daemonPaths, sessionPaths := ownedBy(manifest, townstate.OwnerDaemon), ownedBy(manifest, townstate.OwnerSession)
+	manifest := (*manifestdata.Manifest)(townstate.Default())
+	daemonPaths, sessionPaths := ownedBy(manifest, manifestdata.OwnerDaemon), ownedBy(manifest, manifestdata.OwnerSession)
 	if len(daemonPaths) == 0 || len(sessionPaths) == 0 {
 		t.Fatalf("the manifest split into %d daemon-owned and %d session-owned entries; a check over either empty set would pass for the wrong reason", len(daemonPaths), len(sessionPaths))
 	}
@@ -541,7 +542,7 @@ func TestMountCheckReportsDrift(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			findings := checkMount(tc.mount, tc.split)
+			findings := checkMount(tc.mount, (*manifestdata.Manifest)(tc.split))
 			if tc.want == "" {
 				if len(findings) != 0 {
 					t.Errorf("checkMount reported %q for a mount that matches the split", findings)

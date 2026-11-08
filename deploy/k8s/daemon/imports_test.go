@@ -66,11 +66,12 @@ func importsOf(t *testing.T, path string) []string {
 	return paths
 }
 
-// manifestPackages are the packages holding the two manifests this builder
-// renders from: the daemon's secrets and the town root's ownership split.
+// manifestPackages is the package holding the manifests this builder renders
+// from: the daemon's secrets and the town root's ownership split. It imports
+// the standard library and the YAML module only, so the walk continues through
+// it and covers every package the renderer reaches.
 var manifestPackages = []string{
-	"github.com/steveyegge/gastown/internal/templates",
-	"github.com/steveyegge/gastown/internal/townstate",
+	"github.com/steveyegge/gastown/internal/manifestdata",
 }
 
 // allowedImport reports whether path is one the renderer may import: the
@@ -228,19 +229,19 @@ func packageImports(t *testing.T, dir string) []string {
 // transitiveFindings walks graph from root and reports every package the
 // renderer reaches, directly or through its dependencies, that is neither the
 // standard library, the YAML encoder nor a manifest package, and every
-// forbidden package it reaches outside the manifest packages.
+// forbidden package it reaches through any path.
 //
-// The walk stops at a manifest package: internal/templates and internal/townstate
-// are trusted manifest sources, and their own reach is not the renderer's (each
-// imports os/exec, net or syscall, so a walk through them could never pass). It
-// does NOT stop at the standard library: a standard package that reaches os/exec
-// or net (reachForbidden) is a finding, so the renderer cannot gain a process or
-// a socket through, say, a standard package that imports one. syscall and
-// unsafe are reachable from fmt alone, so a standard-library node may import
-// them; the renderer and every other package may not (forbiddenImport). Anything else reached outside those is a finding,
-// and so is an import the graph does not report, standard library included: an
-// import whose reach is unknown could reach a process or a cluster, so it is
-// refused rather than skipped.
+// The walk passes through internal/manifestdata like any other dependency: it
+// imports the standard library and the YAML module only, so a forbidden package
+// reached through it is the renderer's too. It does NOT stop at the standard
+// library: a standard package that reaches os/exec or net (reachForbidden) is a
+// finding, so the renderer cannot gain a process or a socket through, say, a
+// standard package that imports one. syscall and unsafe are reachable from fmt
+// alone, so a standard-library node may import them; the renderer and every
+// other package may not (forbiddenImport). Anything else reached outside those
+// is a finding, and so is an import the graph does not report, standard library
+// included: an import whose reach is unknown could reach a process or a
+// cluster, so it is refused rather than skipped.
 func transitiveFindings(root string, graph []dependency) []string {
 	byPath := make(map[string]dependency, len(graph))
 	for _, dep := range graph {
@@ -257,9 +258,6 @@ func transitiveFindings(root string, graph []dependency) []string {
 		node := queue[0]
 		queue = queue[1:]
 		for _, imp := range node.Imports {
-			if slices.Contains(manifestPackages, imp) {
-				continue
-			}
 			if !allowedImport(imp) {
 				findings = append(findings, fmt.Sprintf("%s imports %q, which is neither the standard library, the YAML encoder nor a manifest package", node.Path, imp))
 				continue
@@ -316,13 +314,13 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 var (
 	_ = fmt.Sprint
 	_ = yaml.Marshal
-	_ = templates.SecretFile{Name: "x"}
+	_ = manifestdata.SecretFile{Name: "x"}
 )
 `)
 	writeFixture(t, filepath.Join(dir, "apply.go"), `package fixture
@@ -424,11 +422,15 @@ func TestTransitiveFindingsReportsReach(t *testing.T) {
 			want: []string{`example.com/renderer imports "fmt", which go list -deps did not report, so its reach is unknown`},
 		},
 		{
-			name: "a forbidden package reached only through a manifest package",
+			name: "a forbidden package reached through the manifest package",
 			graph: []dependency{
-				{Path: root, Imports: []string{"github.com/steveyegge/gastown/internal/templates", "github.com/steveyegge/gastown/internal/townstate"}},
-				{Path: "github.com/steveyegge/gastown/internal/templates", Imports: []string{"net", "os/exec", "syscall"}},
-				{Path: "github.com/steveyegge/gastown/internal/townstate", Imports: []string{"net", "os/exec"}},
+				{Path: root, Imports: []string{"github.com/steveyegge/gastown/internal/manifestdata"}},
+				{Path: "github.com/steveyegge/gastown/internal/manifestdata", Imports: []string{"gopkg.in/yaml.v3", "net", "os/exec"}},
+				{Path: "gopkg.in/yaml.v3"},
+			},
+			want: []string{
+				`github.com/steveyegge/gastown/internal/manifestdata imports "net", which gives the renderer a process, a socket or a cluster client`,
+				`github.com/steveyegge/gastown/internal/manifestdata imports "os/exec", which gives the renderer a process, a socket or a cluster client`,
 			},
 		},
 		{

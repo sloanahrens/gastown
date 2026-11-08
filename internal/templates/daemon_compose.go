@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // ComposeSpec is the identity of one town's daemon service, which
@@ -278,26 +279,18 @@ const ScratchDoltService = "scratch-dolt"
 const ScratchDoltPort = 3306
 
 // LiveOMTokenPath is where the live render mounts the om token file inside the
-// container, and the path its command line passes to the entrypoint. It is one
-// fixed path because the host file's own path is the operator's: the mount's
-// target is the only place the container can name it, and the compose file then
-// carries no host path on the walk to the entrypoint. It sits under /run, so the
-// mount never shadows a file the image ships, and the token is on the container's
-// filesystem only for as long as the read-only mount exists.
-const LiveOMTokenPath = "/run/secrets/om-token" //nolint:gosec // a mount path, not a credential
+// container, and the path its command line passes to the entrypoint
+// (gt-rpx80). The path lives in manifestdata, which the cluster renderer may
+// import.
+const LiveOMTokenPath = manifestdata.LiveOMTokenPath //nolint:gosec // a mount path, not a credential
 
 // LiveOMConfigPath is where om reads the derived config beneath the container's
-// XDG home, so its backend is the container's claude-exec and not a bare claude
-// with no credential (gt-gg9hv.13).
-const LiveOMConfigPath = LiveOpenShellConfigHome + "/om/config.json"
+// XDG home (gt-gg9hv.13).
+const LiveOMConfigPath = manifestdata.LiveOMConfigPath
 
-// LiveForgeTokenPath is the same fixed path for the forge token file the live
-// render mounts read-only, and the path its command line passes to the
-// entrypoint as --forge-token-file. One fixed path, so the entrypoint's own
-// check on the path (a shell reads it in git's helper line) passes whatever the
-// host path is, and the host path is never spelled on the command line
-// (gt-rpx80).
-const LiveForgeTokenPath = "/run/secrets/forge-token" //nolint:gosec // a mount path, not a credential
+// LiveForgeTokenPath is the fixed path where the live render mounts the forge
+// token file and names it on the entrypoint's command line.
+const LiveForgeTokenPath = manifestdata.LiveForgeTokenPath //nolint:gosec // a mount path, not a credential
 
 // The scratch project's Dolt server, which only the scratch render has. It
 // joins the internal network alone and publishes no port.
