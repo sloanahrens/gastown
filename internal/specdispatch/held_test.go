@@ -492,7 +492,7 @@ func TestWorksSeat(t *testing.T) {
 		{name: "a seat path inside another directory", assignee: "gastown/crew/polecats/capable", want: true},
 		{name: "a crew session", assignee: "town/crew/overseer", labels: []string{"gt:task"}, want: false},
 		{name: "a crew handoff bead", assignee: "town/crew/overseer", labels: []string{"handoff"}, want: false},
-		{name: "a rig crew session", assignee: "gastown/crew/sloan", labels: []string{"rework"}, want: false},
+		{name: "a rig crew session", assignee: "gastown/crew/operator", labels: []string{"rework"}, want: false},
 		{name: "a polecat's handoff-labeled bead is a handoff note too", assignee: "gastown/polecats/capable", labels: []string{"gt:handoff"}, want: false},
 		{name: "the label's spelling does not matter", assignee: "gastown/polecats/capable", labels: []string{" HANDOFF "}, want: false},
 		{name: "an operator session", assignee: "operator", want: false},

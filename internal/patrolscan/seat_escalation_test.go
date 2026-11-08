@@ -61,7 +61,7 @@ func TestSeatEscalationVerdictAnswers(t *testing.T) {
 			[]Escalation{{ID: "hq-1", EscalatedBy: seat, RelatedBead: "gt-other"}},
 			EscalationUnnamed, ""},
 		{"another role's escalation for the bead",
-			[]Escalation{{ID: "hq-1", EscalatedBy: "gastown/crew/sloan", RelatedBead: tieBead}},
+			[]Escalation{{ID: "hq-1", EscalatedBy: "gastown/crew/operator", RelatedBead: tieBead}},
 			EscalationUnnamed, ""},
 		{"same polecat name in another rig",
 			[]Escalation{{ID: "hq-1", EscalatedBy: "beads/polecats/ruby", RelatedBead: tieBead}},

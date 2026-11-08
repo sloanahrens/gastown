@@ -298,7 +298,7 @@ func TestJevStaleReadsOnlyWorkBeads(t *testing.T) {
 		typed("gt-role", "role"),
 		typed("gt-untyped", ""),
 		wisp,
-		openBead("gt-crew-sloan", 30),
+		openBead("gt-crew-operator", 30),
 		labeled("gt-human", "human-only"),
 		labeled("gt-handoff", "handoff"),
 		labeled("gt-needs", "needs-human"),
@@ -349,14 +349,14 @@ func TestJevStaleReadsOnlyWorkBeads(t *testing.T) {
 func TestJevStaleCrewSeatIDOnlyCountsInSessionPosition(t *testing.T) {
 	t.Parallel()
 	for id, want := range map[string]bool{
-		"gt-crew-sloan":       true,
-		"gt-crew-sloan-topic": true,
-		"hq-crew-max":         true,
-		"gt-crew-":            false,
-		"gt-crewcut":          false,
-		"gt-fix-crew-1":       false,
-		"gt-wisp-crew-x":      false,
-		"gt-6k7ht":            false,
+		"gt-crew-operator":       true,
+		"gt-crew-operator-topic": true,
+		"hq-crew-max":            true,
+		"gt-crew-":               false,
+		"gt-crewcut":             false,
+		"gt-fix-crew-1":          false,
+		"gt-wisp-crew-x":         false,
+		"gt-6k7ht":               false,
 	} {
 		if got := isCrewSeat(id); got != want {
 			t.Errorf("isCrewSeat(%q) = %v, want %v", id, got, want)

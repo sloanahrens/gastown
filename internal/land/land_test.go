@@ -21,6 +21,10 @@ import (
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
+// crewOwner is the crew address the bird-claim fixtures configure and the
+// presentation assertions expect to see, so a rename cannot split the two.
+const crewOwner = "gastown/crew/operator"
+
 // landFixture is an origin with main and one pushed work branch, a clone
 // the Lander adds worktrees from, and a work bead marked ready. The
 // repositories live in a gitfake world; newRealLandFixture builds the same
@@ -364,7 +368,7 @@ func TestRejectKeepsTheHolderOfAnOverseerOrOperatorOnlyBead(t *testing.T) {
 func TestRejectKeepsABirdsClaim(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	const owner = "gastown/crew/sloan"
+	const owner = crewOwner
 	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "in_progress", Type: "task",
 		Assignee: owner, Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
 	f.gate.fn = func(string) GateResult {
@@ -415,7 +419,7 @@ func TestRejectReleasesAPolecatsBead(t *testing.T) {
 	}
 	var alerts []string
 	l := f.lander()
-	l.BirdOwned = func(assignee string) bool { return assignee == "gastown/crew/sloan" }
+	l.BirdOwned = func(assignee string) bool { return assignee == crewOwner }
 	l.RejectionAlert = func(key, message string) error {
 		alerts = append(alerts, key)
 		return nil
@@ -520,7 +524,7 @@ func TestBirdRejectionAlertIsRaisedBeforeTheWrite(t *testing.T) {
 func TestBirdRejectionAlertFailureIsSurfaced(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	const owner = "gastown/crew/sloan"
+	const owner = crewOwner
 	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "in_progress", Type: "task",
 		Assignee: owner, Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
 	f.gate.fn = func(string) GateResult {
@@ -595,7 +599,7 @@ func (b *failFirstUpdate) Update(id string, opts beads.UpdateOptions) error {
 func TestBirdRejectionAlertBoundsTheReason(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	const owner = "gastown/crew/sloan"
+	const owner = crewOwner
 	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "in_progress", Type: "task",
 		Assignee: owner, Labels: []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
 	f.review.fn = func(string) (Verdict, error) {

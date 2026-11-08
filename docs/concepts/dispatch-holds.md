@@ -29,7 +29,7 @@ quotes the wording does not.
 
 `operator` and a human assignee are the operator reservation: work the person
 means to do by hand. Every agent is addressed by a slash-qualified address
-(`gastown/polecats/onyx`, `gastown/crew/sloan`), so any other assignee is a
+(`gastown/polecats/onyx`, `gastown/crew/<name>`), so any other assignee is a
 person. `gt sling` refuses one without `--force` (gt-21pl0), and
 every automatic dispatcher skips it.
 

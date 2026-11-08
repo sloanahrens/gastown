@@ -28,6 +28,9 @@ const (
 	// seededRowAt is the updated_at a seeded bead's list row carries, the key
 	// the worker's outcome memo holds it by (gt-r9pj9).
 	seededRowAt = "2026-09-30T11:30:00Z"
+	// crewSeat is the crew address a landing's bead and its submission
+	// comment are seeded under, one constant so the pair cannot drift.
+	crewSeat = "gastown/crew/operator"
 )
 
 type fakeRemote struct {
@@ -931,7 +934,7 @@ func TestSortByLandingOrderBreaksTiesByID(t *testing.T) {
 
 func TestPolecatFromAssignee(t *testing.T) {
 	t.Parallel()
-	for in, want := range map[string]string{"gastown/polecats/opal": "opal", "gastown/crew/sloan": "", "": "", "opal": ""} {
+	for in, want := range map[string]string{"gastown/polecats/opal": "opal", crewSeat: "", "": "", "opal": ""} {
 		if got := polecatFromAssignee(in); got != want {
 			t.Errorf("polecatFromAssignee(%q) = %q, want %q", in, got, want)
 		}
@@ -1247,11 +1250,11 @@ func TestPassCrewLandingAsksNoSeatForAnAgent(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	w := land.Work{Branch: branch, Head: noteHead, Target: "main"}
-	h.bd.Seed(beads.Issue{ID: "gt-crew", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/crew/sloan",
+	h.bd.Seed(beads.Issue{ID: "gt-crew", Title: "work", Status: "hooked", Type: "task", Assignee: crewSeat,
 		Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(w)})
 	// A crew session's gt done records the submission as a comment under the
 	// identity the session runs as; the note it writes names no worker.
-	if err := h.bd.AddCommentAs("gt-crew", "gastown/crew/sloan", "Submitted for landing: "+branch+" @ "+noteHead+" onto main"); err != nil {
+	if err := h.bd.AddCommentAs("gt-crew", crewSeat, "Submitted for landing: "+branch+" @ "+noteHead+" onto main"); err != nil {
 		t.Fatal(err)
 	}
 	h.w.AgentBeadID = func(polecat string) string {

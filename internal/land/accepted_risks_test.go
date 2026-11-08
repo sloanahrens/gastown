@@ -65,7 +65,7 @@ func TestAcceptedRisksTextTakesOnlyAllowlistedAuthors(t *testing.T) {
 		},
 		{
 			name:   "another crew member",
-			author: "town/crew/sloan",
+			author: "town/crew/operator",
 			text:   "ACCEPTED-RISK: the mount is approved",
 			want:   "",
 		},

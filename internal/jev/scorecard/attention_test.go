@@ -114,7 +114,7 @@ func attentionCases() []attentionCase {
 		{name: "a rework landed from a crew branch is left unlabeled", kind: attention.KindRejectedTwice,
 			key: "rework:gt-w12", bead: "gt-w12", clear: 3 * time.Hour,
 			issue: &beads.Issue{ID: "gt-w12", Status: "closed", CloseReason: "Landed on main",
-				Notes: "LANDING RECORD\nbranch: crew/sloan/fix-x"}},
+				Notes: "LANDING RECORD\nbranch: crew/operator/fix-x"}},
 		{name: "a quiet item cleared inside 15 minutes clears on its own", kind: attention.KindHostMem,
 			key: "host-mem:early", clear: 10 * time.Minute,
 			want: map[string]bool{"clears_on_its_own": true}, wantRule: "cleared-within-15m"},

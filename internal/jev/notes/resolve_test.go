@@ -239,7 +239,7 @@ func TestResolveLabels(t *testing.T) {
 		},
 		{
 			name:  "paths outside the repo's roots are not checked",
-			text:  "Look in `crew/sloan/notes.md`.",
+			text:  "Look in `crew/operator/notes.md`.",
 			label: "",
 		},
 	}
