@@ -106,6 +106,24 @@ func forbiddenImport(path string) bool {
 	return false
 }
 
+// reachForbidden reports whether path, reached through the dependencies of the
+// renderer rather than imported by it, gives a way to run a command, open a
+// socket, load a plugin or talk to a cluster. It is forbiddenImport without
+// syscall and unsafe: the standard library's os, fmt and reflect reach both in
+// every program, so a walk that refused them would refuse everything, while the
+// renderer's own files still may not import them (forbiddenImport).
+func reachForbidden(path string) bool {
+	switch {
+	case path == "os/exec", path == "plugin":
+		return true
+	case path == "net", strings.HasPrefix(path, "net/"):
+		return true
+	case strings.HasPrefix(path, "k8s.io/"), strings.HasPrefix(path, "sigs.k8s.io/"):
+		return true
+	}
+	return false
+}
+
 // scanImports reports every import in dir's non-test Go files that the allow
 // list refuses or the forbidden set names, one finding per import. It returns
 // the findings instead of failing, so a fixture that must produce some drives
@@ -214,12 +232,14 @@ func packageImports(t *testing.T, dir string) []string {
 // The walk stops at a manifest package: internal/templates and internal/townstate
 // are trusted manifest sources, and their own reach is not the renderer's (each
 // imports os/exec, net or syscall, so a walk through them could never pass). It
-// also stops at a standard-library package, which is trusted as a leaf: fmt
-// alone reaches os, syscall and unsafe, so walking inside the standard library
-// would report every package. Anything else reached outside those is a finding,
-// and so is a non-standard import the graph does not report: an import whose
-// reach is unknown could reach a process or a cluster, so it is refused rather
-// than skipped.
+// does NOT stop at the standard library: a standard package that reaches os/exec
+// or net (reachForbidden) is a finding, so the renderer cannot gain a process or
+// a socket through, say, a standard package that imports one. syscall and
+// unsafe are reachable from fmt alone and are checked only on the renderer's own
+// imports (forbiddenImport). Anything else reached outside those is a finding,
+// and so is an import the graph does not report, standard library included: an
+// import whose reach is unknown could reach a process or a cluster, so it is
+// refused rather than skipped.
 func transitiveFindings(root string, graph []dependency) []string {
 	byPath := make(map[string]dependency, len(graph))
 	for _, dep := range graph {
@@ -243,11 +263,15 @@ func transitiveFindings(root string, graph []dependency) []string {
 				findings = append(findings, fmt.Sprintf("%s imports %q, which is neither the standard library, the YAML encoder nor a manifest package", node.Path, imp))
 				continue
 			}
-			if forbiddenImport(imp) {
+			forbidden := reachForbidden
+			if node.Path == root {
+				forbidden = forbiddenImport
+			}
+			if forbidden(imp) {
 				findings = append(findings, fmt.Sprintf("%s imports %q, which gives the renderer a process, a socket or a cluster client", node.Path, imp))
 				continue
 			}
-			if stdlibImport(imp) || seen[imp] {
+			if seen[imp] {
 				continue
 			}
 			dep, ok := byPath[imp]
@@ -345,6 +369,7 @@ func TestTransitiveFindingsReportsReach(t *testing.T) {
 			graph: []dependency{
 				{Path: root, Imports: []string{"fmt", "gopkg.in/yaml.v3"}},
 				{Path: "gopkg.in/yaml.v3", Imports: []string{"fmt"}},
+				{Path: "fmt"},
 			},
 		},
 		{
@@ -360,12 +385,41 @@ func TestTransitiveFindingsReportsReach(t *testing.T) {
 			graph: []dependency{
 				{Path: root, Imports: []string{"gopkg.in/yaml.v3"}},
 				{Path: "gopkg.in/yaml.v3", Imports: []string{"net", "os/exec", "syscall"}},
+				{Path: "syscall"},
 			},
 			want: []string{
 				`gopkg.in/yaml.v3 imports "net", which gives the renderer a process, a socket or a cluster client`,
 				`gopkg.in/yaml.v3 imports "os/exec", which gives the renderer a process, a socket or a cluster client`,
-				`gopkg.in/yaml.v3 imports "syscall", which gives the renderer a process, a socket or a cluster client`,
 			},
+		},
+		{
+			name: "a process or a socket reached through the standard library",
+			graph: []dependency{
+				{Path: root, Imports: []string{"fmt"}},
+				{Path: "fmt", Imports: []string{"text/template"}},
+				{Path: "text/template", Imports: []string{"os/exec", "net/http"}},
+				{Path: "os/exec", Imports: []string{"os"}},
+				{Path: "net/http", Imports: []string{"net"}},
+			},
+			want: []string{
+				`text/template imports "net/http", which gives the renderer a process, a socket or a cluster client`,
+				`text/template imports "os/exec", which gives the renderer a process, a socket or a cluster client`,
+			},
+		},
+		{
+			name: "the renderer's own import of syscall",
+			graph: []dependency{
+				{Path: root, Imports: []string{"syscall"}},
+				{Path: "syscall", Imports: []string{"unsafe"}},
+			},
+			want: []string{`example.com/renderer imports "syscall", which gives the renderer a process, a socket or a cluster client`},
+		},
+		{
+			name: "a standard package the graph does not report",
+			graph: []dependency{
+				{Path: root, Imports: []string{"fmt"}},
+			},
+			want: []string{`example.com/renderer imports "fmt", which go list -deps did not report, so its reach is unknown`},
 		},
 		{
 			name: "a forbidden package reached only through a manifest package",
@@ -376,12 +430,14 @@ func TestTransitiveFindingsReportsReach(t *testing.T) {
 			},
 		},
 		{
-			name: "a forbidden package inside the standard library",
+			name: "syscall and unsafe reached through the standard library",
 			graph: []dependency{
 				{Path: root, Imports: []string{"fmt"}},
 				{Path: "fmt", Imports: []string{"os", "reflect"}},
 				{Path: "os", Imports: []string{"syscall"}},
+				{Path: "syscall", Imports: []string{"unsafe"}},
 				{Path: "reflect", Imports: []string{"unsafe"}},
+				{Path: "unsafe"},
 			},
 		},
 		{
