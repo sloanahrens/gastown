@@ -1032,6 +1032,45 @@ func TestComposeWriteBindROHelpIsWrapped(t *testing.T) {
 	}
 }
 
+// The --claude-beads-dir behaviour lives in one place in the write help: the
+// flag usage states the mount and its refusals, and the Long paragraph points at
+// it while keeping the reaper setting the mount serves (R2; gt-ulsf3k). A second
+// copy of the refusals in the paragraph would drift from the one the flag
+// enforces.
+func TestComposeWriteClaudeBeadsDirHelpStatesTheChecksOnce(t *testing.T) {
+	t.Parallel()
+	write, _, err := newDaemonComposeCmd(func(io.Writer, daemonComposeFlags) error { return nil }).Find([]string{"write"})
+	if err != nil {
+		t.Fatalf("find write: %v", err)
+	}
+	flag := write.Flags().Lookup("claude-beads-dir")
+	if flag == nil {
+		t.Fatal("the write command has no --claude-beads-dir flag")
+	}
+	if !strings.Contains(flag.Usage, "is refused") {
+		t.Errorf("the flag usage does not state what it refuses: %q", flag.Usage)
+	}
+	lines := strings.Split(write.Long, "\n")
+	start := slices.IndexFunc(lines, func(l string) bool { return strings.HasPrefix(l, "--claude-beads-dir") })
+	if start < 0 {
+		t.Fatal("the write help has no --claude-beads-dir paragraph")
+	}
+	var para []string
+	for _, l := range lines[start:] {
+		if l == "" {
+			break
+		}
+		para = append(para, l)
+	}
+	text := strings.Join(para, "\n")
+	if strings.Contains(text, "is refused") {
+		t.Errorf("the paragraph states the flag's refusals a second time; the flag usage owns them:\n%s", text)
+	}
+	if !strings.Contains(text, "extra_beads_roots") {
+		t.Errorf("the paragraph no longer names the reaper setting the mount serves:\n%s", text)
+	}
+}
+
 // The host's isDir is the stat the --bind-ro check reads: a directory is true, a
 // file is false, and a path that is not there is an error the command refuses
 // (gt-vqexg). Every path sits under t.TempDir(), so nothing outside it is read.

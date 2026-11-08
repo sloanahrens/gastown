@@ -362,12 +362,9 @@ is refused, and so is one the render cannot mount read-only (relative, not
 cleaned, under .., inside or containing the town, already mounted, or given
 twice). The mounts are sorted by path. Without the flag the render is unchanged.
 
---claude-beads-dir names the host's ~/.claude/.beads directory, an absolute path.
-The render mounts it read-write at that same path, so the claude beads database is
-writable from the daemon container. The wisp_reaper reads it there when
-patrols.wisp_reaper.extra_beads_roots names the path or its ~/.claude parent. A
-blank value, a relative path, or a path that is not a directory is refused. Without
-the flag the render is unchanged.
+--claude-beads-dir's usage states the mount and what it refuses. For the reaper
+to read the mount, patrols.wisp_reaper.extra_beads_roots must name the mounted
+path or its ~/.claude parent.
 
 --town-state-volume names an external docker volume and mounts it at the town
 root in place of the Mac's bind, so the daemon's state lives in the volume and a
@@ -415,7 +412,7 @@ be told apart from one the operator wrote.
 	write.Flags().StringArrayVar(&f.bindRO, "bind-ro", nil,
 		"a host directory (an absolute path) mounted read-only at that same path in the daemon; repeat for more, and a path that is not a directory is refused")
 	write.Flags().StringVar(&f.claudeBeadsDir, "claude-beads-dir", "",
-		"the host's ~/.claude/.beads directory (an absolute path), mounted read-write at that same path so the wisp_reaper reaches the claude database; a blank value or a path that is not a directory is refused, and unset renders no mount")
+		"the host's ~/.claude/.beads directory (an absolute path), mounted read-write at that same path so the wisp_reaper reaches the claude database; a blank value, a relative path, or a path that is not a directory is refused, and unset renders no mount")
 	write.Flags().StringVar(&f.townStateVolume, "town-state-volume", "",
 		"an external docker volume to mount at the town root in place of the Mac's bind; a name that is not a valid volume name is refused, and unset renders today's bind")
 	write.Flags().BoolVar(&f.force, "force", false,
