@@ -164,10 +164,81 @@ func TestMainExitsRedWhenAScriptFails(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit = %d, want 1", code)
 	}
-	want := "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs /logs) in 2m14s"
-	if got := lastLine(f.err.String()); got != want {
-		t.Fatalf("summary = %q, want %q", got, want)
+	lines := errorLines(f.err.String())
+	want := []string{
+		"tier-sweep: shell scripts/a_test.sh ...",
+		"tier-sweep: shell scripts/b_test.sh ...",
+		"tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs /logs) in 2m14s",
+		"tier-sweep: shell log tail scripts/b_test.sh",
 	}
+	if len(lines) != len(want)+1 {
+		t.Fatalf("error stream lines = %q, want the two announces, the summary, the header and one unreadable line", lines)
+	}
+	if !slices.Equal(lines[:len(want)], want) {
+		t.Fatalf("error stream lines = %q, want %q first, the summary as the first line after the announces and the tail header after it", lines, want)
+	}
+	if !strings.Contains(lines[len(want)], "cannot read") {
+		t.Fatalf("last line = %q, want it to say the log cannot be read", lines[len(want)])
+	}
+}
+
+// TestMainPrintsTheFailedScriptsLogTailAfterTheSummary drives a red run whose
+// failing script wrote a known line to its log and requires the job output to
+// carry it, since the log itself is gone with the runner's temp directory.
+func TestMainPrintsTheFailedScriptsLogTailAfterTheSummary(t *testing.T) {
+	t.Parallel()
+	logDir := t.TempDir()
+	f := newFixture(map[string]int{"scripts/b_test.sh": 1}, twoScripts()...)
+	exec := f.env.Exec
+	f.env.Exec = func(ctx context.Context, c shelltier.Command) (int, error) {
+		if len(c.Argv) > 0 && c.Argv[len(c.Argv)-1] == "scripts/b_test.sh" {
+			if err := os.WriteFile(c.Log, []byte("ok\nboom: the known failure\n"), 0o600); err != nil {
+				t.Errorf("write %s: %v", c.Log, err)
+			}
+		}
+		return exec(ctx, c)
+	}
+	if code := Main([]string{"--all", "--logdir", logDir}, &f.out, f.env); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	want := "tier-sweep: shell scripts/a_test.sh ...\n" +
+		"tier-sweep: shell scripts/b_test.sh ...\n" +
+		"tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs " + logDir + ") in 2m14s\n" +
+		"tier-sweep: shell log tail scripts/b_test.sh\n" +
+		"ok\nboom: the known failure\n"
+	if got := f.err.String(); got != want {
+		t.Fatalf("error stream = %q, want %q", got, want)
+	}
+}
+
+// TestMainNamesAnUnreadableFailedScriptLog requires a red run's log tail to say
+// when the log cannot be read, and to leave the summary and exit status alone.
+func TestMainNamesAnUnreadableFailedScriptLog(t *testing.T) {
+	t.Parallel()
+	logDir := t.TempDir()
+	f := newFixture(map[string]int{"scripts/b_test.sh": 1}, twoScripts()...)
+	if code := Main([]string{"--all", "--logdir", logDir}, &f.out, f.env); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	lines := errorLines(f.err.String())
+	want := "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs " + logDir + ") in 2m14s"
+	if len(lines) != 5 {
+		t.Fatalf("error stream lines = %q, want the two announces, the summary, the header and one unreadable line", lines)
+	}
+	if lines[2] != want {
+		t.Fatalf("summary = %q, want %q", lines[2], want)
+	}
+	if line := "tier-sweep: shell log tail scripts/b_test.sh"; lines[3] != line {
+		t.Fatalf("header = %q, want %q", lines[3], line)
+	}
+	if !strings.Contains(lines[4], "cannot read") {
+		t.Fatalf("last line = %q, want it to say the log cannot be read", lines[4])
+	}
+}
+
+// errorLines is s's lines, without the trailing newline.
+func errorLines(s string) []string {
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
 }
 
 func TestMainWritesHelpToTheOutStream(t *testing.T) {

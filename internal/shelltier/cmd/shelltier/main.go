@@ -5,7 +5,8 @@
 //	go run ./internal/shelltier/cmd/shelltier --since-green --town <dir>
 //
 // Before each script it writes `tier-sweep: shell <path> ...` to stderr, and it
-// writes the summary line there last. It appends each script's wall time to the
+// writes the summary line there as the run ends, followed on a RED run by each
+// failed script's log tail. It appends each script's wall time to the
 // town's timing log (gt-u560q.10) and says on stderr when that log cannot be
 // written. It exits with the tier's verdict: 0 when green, 1 when red, 2 on a
 // usage error or when the log dir cannot be made.
@@ -216,6 +217,12 @@ func Main(args []string, out io.Writer, env Env) int {
 	result.Skipped = plan.Skipped
 	plan.Finish(result, env.Now(), env.Err)
 	fmt.Fprintln(env.Err, shelltier.Summary(result, dir))
+	// A RED run's failing assertion lives in the script's log, and that log is
+	// in a temp directory on the runner that nobody reads, so the job output
+	// carries the tail beside the summary that names the script.
+	if result.Exit() == shelltier.ExitRed {
+		shelltier.WriteFailedLogTails(env.Err, dir, result.FailedNames)
+	}
 	return int(result.Exit())
 }
 

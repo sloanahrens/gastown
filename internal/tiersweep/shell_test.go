@@ -1,9 +1,12 @@
 package tiersweep
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,8 +78,11 @@ func TestShellReturnsTheRunnersLine(t *testing.T) {
 		out string
 		// want is the line Shell returns; %[1]s is the log directory.
 		want string
-		code int
-		red  bool
+		// tails are the lines Shell returns for the caller to print after the
+		// summary; %[1]s is the log directory.
+		tails []string
+		code  int
+		red   bool
 	}{
 		{
 			name: "green",
@@ -113,16 +119,30 @@ func TestShellReturnsTheRunnersLine(t *testing.T) {
 			red:  true,
 		},
 		{
-			name: "output after the summary",
-			out:  "tier-sweep: shell GREEN passed=1 failed=0 skipped=0 (logs %[1]s) in 9s\nshelltier: trailing note\n",
-			want: "tier-sweep: shell GREEN passed=1 failed=0 skipped=0 (logs %[1]s) in 9s",
-			code: 0,
+			name:  "output after the summary",
+			out:   "tier-sweep: shell GREEN passed=1 failed=0 skipped=0 (logs %[1]s) in 9s\nshelltier: trailing note\n",
+			want:  "tier-sweep: shell GREEN passed=1 failed=0 skipped=0 (logs %[1]s) in 9s",
+			tails: []string{"shelltier: trailing note"},
+			code:  0,
 		},
 		{
 			name: "last summary line wins",
 			out:  "tier-sweep: shell GREEN passed=1 failed=0 skipped=0 (logs %[1]s) in 9s\ntier-sweep: shell RED passed=0 failed=1 skipped=0 failed: scripts/c_test.sh (logs %[1]s) in 9s\n",
 			want: "tier-sweep: shell RED passed=0 failed=1 skipped=0 failed: scripts/c_test.sh (logs %[1]s) in 9s",
 			code: 1,
+			red:  true,
+		},
+		{
+			name: "a summary-shaped line in a log tail is not the summary",
+			out: "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/c_test.sh (logs %[1]s) in 9s\n" +
+				"tier-sweep: shell log tail scripts/c_test.sh\n" +
+				"tier-sweep: shell GREEN passed=9 failed=0 skipped=0 (logs %[1]s) in 1s\n",
+			want: "tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/c_test.sh (logs %[1]s) in 9s",
+			tails: []string{
+				"tier-sweep: shell log tail scripts/c_test.sh",
+				"tier-sweep: shell GREEN passed=9 failed=0 skipped=0 (logs %[1]s) in 1s",
+			},
+			code: 0,
 			red:  true,
 		},
 	}
@@ -132,12 +152,50 @@ func TestShellReturnsTheRunnersLine(t *testing.T) {
 			fake := &fakeShell{code: c.code}
 			s := shellSweep(t, fake)
 			fake.out = fmt.Sprintf(c.out, s.Opts.LogDir)
-			line, red := s.Shell()
+			line, tails, red := s.Shell()
 			want := fmt.Sprintf(c.want, s.Opts.LogDir)
 			if line != want || red != c.red {
 				t.Errorf("Shell() = %q, %v; want %q, %v", line, red, want, c.red)
 			}
+			var wantTails []string
+			for _, l := range c.tails {
+				if strings.ContainsRune(l, '%') {
+					l = fmt.Sprintf(l, s.Opts.LogDir)
+				}
+				wantTails = append(wantTails, l)
+			}
+			if !slices.Equal(tails, wantTails) {
+				t.Errorf("Shell() tails = %q, want %q", tails, wantTails)
+			}
 		})
+	}
+}
+
+// TestShellTailsPrintAfterTheSummaryOnTheSweepPath drives runTiers, the path
+// cmd/tier-sweep takes in CI, with one buffer for both streams so the write
+// order is the order the job log reads: the announce lines, then the summary,
+// then the RED run's log tails.
+func TestShellTailsPrintAfterTheSummaryOnTheSweepPath(t *testing.T) {
+	t.Parallel()
+	fake := &fakeShell{
+		code: 1,
+		out: "tier-sweep: shell scripts/b_test.sh ...\n" +
+			"tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs /l) in 2s\n" +
+			"tier-sweep: shell log tail scripts/b_test.sh\n" +
+			"boom: the known failure\n",
+	}
+	s := shellSweep(t, fake)
+	var buf bytes.Buffer
+	s.Stderr = &buf
+	if code := runTiers(s, []string{TierShell}, &buf, &buf); code != 1 {
+		t.Fatalf("runTiers exit = %d, want 1", code)
+	}
+	want := "tier-sweep: shell scripts/b_test.sh ...\n" +
+		"tier-sweep: shell RED passed=1 failed=1 skipped=0 failed: scripts/b_test.sh (logs /l) in 2s\n" +
+		"tier-sweep: shell log tail scripts/b_test.sh\n" +
+		"boom: the known failure\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("job output = %q, want the summary before the tails: %q", got, want)
 	}
 }
 
@@ -174,7 +232,7 @@ func TestShellWithoutSummaryLineIsRed(t *testing.T) {
 			t.Parallel()
 			fake := &fakeShell{out: c.out, code: c.code}
 			s := shellSweep(t, fake)
-			line, red := s.Shell()
+			line, _, red := s.Shell()
 			want := fmt.Sprintf(c.want, s.Opts.LogDir)
 			if line != want || !red {
 				t.Errorf("Shell() = %q, %v; want %q, true", line, red, want)
