@@ -17,6 +17,11 @@ import (
 // packagePath is this package's import path, the root of the captured graph.
 const packagePath = "github.com/steveyegge/gastown/internal/manifestdata"
 
+// regenerateCommand rebuilds testdata/imports.golist.txt from the package
+// directory: the Go toolchain on the first line, then the graph `go list -deps`
+// reports for this package.
+const regenerateCommand = `{ echo "# $(go env GOVERSION)"; go list -deps -f '{{.ImportPath}}|{{join .Imports " "}}' . ; } > testdata/imports.golist.txt`
+
 // packageDir is the directory of this package's source, found from this file
 // rather than from the working directory a test may be run in.
 func packageDir(t *testing.T) string {
@@ -88,37 +93,65 @@ type dependency struct {
 	Imports []string
 }
 
-// capturedGraph reads testdata/imports.golist.txt, the dependency graph
-// `go list -deps -f '{{.ImportPath}}|{{join .Imports " "}}' .` reports for
+// capturedGraph reads testdata/imports.golist.txt and returns the Go toolchain
+// the capture was made with and the dependency graph `go list -deps` reports for
 // this package. The unit tier may not run the go tool (docs/testing.md,
-// no-build), so the graph is a capture; TestLeafHasNoProcessOrSocketReach
-// refuses the capture as stale when its record of this package no longer
-// matches the package's files, rather than walking an old graph. Regenerate it
-// from this directory with:
-//
-//	go list -deps -f '{{.ImportPath}}|{{join .Imports " "}}' . > testdata/imports.golist.txt
-func capturedGraph(t *testing.T, dir string) []dependency {
+// no-build), so the walk reads a capture, not a live `go list`.
+// TestLeafHasNoProcessOrSocketReach refuses the capture when its toolchain is
+// not the running one, or when its record of this package no longer matches the
+// package's files. The capture cannot see a go.mod change to a dependency: a bump
+// of yaml.v3 can change its imports and no check here reads go.mod, so
+// regenerate after any go.mod change. A toolchain change moves the standard
+// library's own reach (os reaches syscall in every program), and the toolchain
+// check is what forces its regeneration.
+func capturedGraph(t *testing.T, dir string) (string, []dependency) {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join(dir, "testdata", "imports.golist.txt"))
 	if err != nil {
 		t.Fatalf("reading the captured dependency graph: %v", err)
 	}
+	toolchain, graph, err := parseCapture(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return toolchain, graph
+}
+
+// parseCapture reads a capture: the Go toolchain on its first line, then one
+// record per line. It refuses a capture with no toolchain header, a record with
+// no "|", or no record at all, since each would let the walk pass for the wrong
+// reason.
+func parseCapture(data string) (string, []dependency, error) {
+	lines := strings.Split(data, "\n")
+	toolchain, ok := strings.CutPrefix(lines[0], "# ")
+	if !ok || toolchain == "" {
+		return "", nil, fmt.Errorf("testdata/imports.golist.txt has no toolchain header on its first line, so it cannot be judged against the running Go; regenerate it with `%s`", regenerateCommand)
+	}
 	var graph []dependency
-	for i, line := range strings.Split(string(data), "\n") {
+	for i, line := range lines[1:] {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
 		path, imports, ok := strings.Cut(line, "|")
 		if !ok {
-			t.Fatalf("the captured graph's line %d %q has no \"|\" between the package and its imports", i+1, line)
+			return "", nil, fmt.Errorf("the captured graph's line %d %q has no \"|\" between the package and its imports", i+2, line)
 		}
 		graph = append(graph, dependency{Path: path, Imports: strings.Fields(imports)})
 	}
 	if len(graph) == 0 {
-		t.Fatalf("the captured dependency graph in testdata/imports.golist.txt holds no records, so the walk would pass for the wrong reason")
+		return "", nil, fmt.Errorf("the captured dependency graph in testdata/imports.golist.txt holds no records, so the walk would pass for the wrong reason")
 	}
-	return graph
+	return toolchain, graph, nil
+}
+
+// toolchainStaleness returns why a capture made with the recorded toolchain
+// cannot stand for the running one, or "" when it can.
+func toolchainStaleness(recorded, running string) string {
+	if recorded == running {
+		return ""
+	}
+	return fmt.Sprintf("testdata/imports.golist.txt was captured with %s but the running toolchain is %s, and a toolchain change moves the standard library's reach; regenerate it with `%s`", recorded, running, regenerateCommand)
 }
 
 // graphStaleness returns why graph cannot stand for the package whose non-test
@@ -138,9 +171,9 @@ func graphStaleness(root string, graph []dependency, fileImports []string) strin
 		if slices.Equal(got, want) {
 			return ""
 		}
-		return fmt.Sprintf("testdata/imports.golist.txt is stale: it records %s importing %q, the package's files import %q; regenerate it with `go list -deps -f '{{.ImportPath}}|{{join .Imports \" \"}}' . > testdata/imports.golist.txt`", root, got, want)
+		return fmt.Sprintf("testdata/imports.golist.txt is stale: it records %s importing %q, the package's files import %q; regenerate it with `%s`", root, got, want, regenerateCommand)
 	}
-	return fmt.Sprintf("testdata/imports.golist.txt is stale: it holds no record of %s; regenerate it with `go list -deps -f '{{.ImportPath}}|{{join .Imports \" \"}}' . > testdata/imports.golist.txt`", root)
+	return fmt.Sprintf("testdata/imports.golist.txt is stale: it holds no record of %s; regenerate it with `%s`", root, regenerateCommand)
 }
 
 // stdlibImport reports whether path is in the standard library. A standard
@@ -219,11 +252,18 @@ func leafFindings(root string, graph []dependency) []string {
 
 // TestLeafHasNoProcessOrSocketReach holds the real package to the import rule:
 // its dependency set holds no process, socket, plugin, os/user or cluster
-// client, and its capture describes the package's current files.
+// client. It walks a captured `go list -deps` graph, not a live go list, so the
+// capture must describe the running toolchain and the package's current files.
+// Regenerate the capture from this directory with:
+//
+//	{ echo "# $(go env GOVERSION)"; go list -deps -f '{{.ImportPath}}|{{join .Imports " "}}' . ; } > testdata/imports.golist.txt
 func TestLeafHasNoProcessOrSocketReach(t *testing.T) {
 	t.Parallel()
 	dir := packageDir(t)
-	graph := capturedGraph(t, dir)
+	recorded, graph := capturedGraph(t, dir)
+	if stale := toolchainStaleness(recorded, runtime.Version()); stale != "" {
+		t.Fatal(stale)
+	}
 	if stale := graphStaleness(packagePath, graph, packageImports(t, dir)); stale != "" {
 		t.Fatal(stale)
 	}
@@ -367,6 +407,81 @@ func TestCapturedGraphRefusesStaleness(t *testing.T) {
 			}
 			if !strings.Contains(got, "regenerate it with") {
 				t.Errorf("graphStaleness reported %q, want the regeneration command", got)
+			}
+		})
+	}
+}
+
+// TestParseCaptureReadsToolchainAndRecords drives the capture's success branch:
+// the toolchain on the first line and each record after it.
+func TestParseCaptureReadsToolchainAndRecords(t *testing.T) {
+	t.Parallel()
+	toolchain, graph, err := parseCapture("# go1.27.1\nexample.com/leaf|fmt gopkg.in/yaml.v3\nfmt|\n")
+	if err != nil {
+		t.Fatalf("parseCapture refused a well-formed capture: %v", err)
+	}
+	if toolchain != "go1.27.1" {
+		t.Errorf("parseCapture read toolchain %q, want %q", toolchain, "go1.27.1")
+	}
+	if len(graph) != 2 || graph[0].Path != "example.com/leaf" || len(graph[0].Imports) != 2 {
+		t.Errorf("parseCapture read graph %+v, want the leaf with two imports and fmt", graph)
+	}
+}
+
+// TestParseCaptureRefusesMalformedCapture drives each refusal of the capture
+// reader: a capture with no toolchain header, a record with no separator, and a
+// capture with no records.
+func TestParseCaptureRefusesMalformedCapture(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		data string
+		want string
+	}{
+		{"no toolchain header", "example.com/leaf|fmt\n", "has no toolchain header on its first line"},
+		{"an empty file", "", "has no toolchain header on its first line"},
+		{"a record with no separator", "# go1.27.1\nexample.com/leaf fmt\n", `line 2 "example.com/leaf fmt" has no "|"`},
+		{"no records", "# go1.27.1\n\n", "holds no records"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := parseCapture(tc.data)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("parseCapture returned %v, want an error naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestToolchainStalenessRefusesOtherVersions drives the toolchain check: a
+// capture made with the running toolchain passes, and one made with any other
+// version is refused with both versions and the regeneration command.
+func TestToolchainStalenessRefusesOtherVersions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		recorded string
+		running  string
+		refused  bool
+	}{
+		{"the running toolchain", "go1.27.1", "go1.27.1", false},
+		{"an older toolchain", "go1.26.4", "go1.27.1", true},
+		{"a newer toolchain", "go1.28.0", "go1.27.1", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := toolchainStaleness(tc.recorded, tc.running)
+			if !tc.refused {
+				if got != "" {
+					t.Errorf("toolchainStaleness refused a capture made with the running toolchain: %s", got)
+				}
+				return
+			}
+			if !strings.Contains(got, tc.recorded) || !strings.Contains(got, tc.running) {
+				t.Errorf("toolchainStaleness reported %q, want both %s and %s", got, tc.recorded, tc.running)
+			}
+			if !strings.Contains(got, "regenerate it with") {
+				t.Errorf("toolchainStaleness reported %q, want the regeneration command", got)
 			}
 		})
 	}

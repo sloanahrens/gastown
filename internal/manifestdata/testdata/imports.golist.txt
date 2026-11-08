@@ -1,3 +1,4 @@
+# go1.27.1
 internal/goarch|
 unsafe|
 internal/abi|internal/goarch unsafe
