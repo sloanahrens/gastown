@@ -534,63 +534,84 @@ func TestConfigDaemonRefusesSecrets(t *testing.T) {
 		}
 	})
 
-	t.Run("a secret-looking value on argv is refused and the same value from stdin is accepted", func(t *testing.T) {
+	t.Run("a secret-looking value is refused on argv and from stdin, and never written", func(t *testing.T) {
 		t.Parallel()
 		townRoot, path := daemonConfigTown(t, withAgent)
 		env, out, errOut := daemonConfigTestEnv(townRoot, time.Now())
 		before := daemonConfigMustRead(t, path)
 		const key = "daemon.env.SOME_SERVICE_TOKEN"
 
-		err := configDaemonSet(env, key, `"`+token+`"`, "token")
-		if err == nil || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "standard input") {
-			t.Fatalf("set of a token as an argument = %v, want it refused naming %s and standard input", err, key)
-		}
-		for name, text := range map[string]string{"error": err.Error(), "output": out.String(), "stderr": errOut.String()} {
-			if strings.Contains(text, token) {
-				t.Errorf("%s prints the token:\n%s", name, text)
+		for name, run := range map[string]func() error{
+			"argv": func() error { return configDaemonSet(env, key, `"`+token+`"`, "token") },
+			"stdin": func() error {
+				env.in = strings.NewReader(`"` + token + `"`)
+				return configDaemonSet(env, key, "-", "token")
+			},
+		} {
+			err := run()
+			if err == nil || !strings.Contains(err.Error(), key) || !strings.Contains(err.Error(), "settings/daemon.env") {
+				t.Fatalf("set of a token from %s = %v, want it refused naming %s and settings/daemon.env", name, err, key)
+			}
+			for what, text := range map[string]string{"error": err.Error(), "output": out.String(), "stderr": errOut.String()} {
+				if strings.Contains(text, token) {
+					t.Errorf("%s: the %s prints the token:\n%s", name, what, text)
+				}
+			}
+			if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
+				t.Errorf("%s: file after the refused write = %q, want it unchanged", name, after)
+			}
+			if backups := daemonConfigBackups(t, path); len(backups) != 0 {
+				t.Errorf("%s: backups after the refused write = %v, want none", name, backups)
 			}
 		}
-		if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
-			t.Errorf("file after the refused write = %q, want it unchanged", after)
-		}
-		if backups := daemonConfigBackups(t, path); len(backups) != 0 {
-			t.Errorf("backups after the refused write = %v, want none", backups)
-		}
+	})
 
-		// The same value through standard input is what the argv rule asks
-		// for; daemon.env is not an agent env block, so it is written.
-		env.in = strings.NewReader(`"` + token + `"`)
-		if err := configDaemonSet(env, key, "-", "token"); err != nil {
-			t.Fatalf("set from standard input = %v", err)
+	t.Run("get never prints a token the file already holds", func(t *testing.T) {
+		t.Parallel()
+		townRoot, path := daemonConfigTown(t, withAgent)
+		// A token placed in the file by hand, the way an older edit left it.
+		doc := daemonConfigDocument(t, path)
+		daemon, _ := doc["daemon"].(map[string]any)
+		if daemon == nil {
+			daemon = map[string]any{}
+			doc["daemon"] = daemon
 		}
-		daemon, ok := daemonConfigDocument(t, path)["daemon"].(map[string]any)
-		if !ok {
-			t.Fatal("the document lost its daemon section")
+		daemon["env"] = map[string]any{"SOME_SERVICE_TOKEN": token, "PLAIN": "1"}
+		data, err := json.MarshalIndent(doc, "", "  ")
+		if err != nil {
+			t.Fatal(err)
 		}
-		written, ok := daemon["env"].(map[string]any)
-		if !ok || written["SOME_SERVICE_TOKEN"] != token {
-			t.Errorf("daemon.env = %v, want the value from standard input", daemon["env"])
+		if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for name, args := range map[string][]string{"the whole document": nil, "the env table": {"daemon.env"}, "the token itself": {"daemon.env.SOME_SERVICE_TOKEN"}} {
+			env, out, errOut := daemonConfigTestEnv(townRoot, time.Now())
+			if err := configDaemonGet(env, args); err != nil {
+				t.Fatalf("get %s = %v", name, err)
+			}
+			if strings.Contains(out.String(), token) || strings.Contains(errOut.String(), token) {
+				t.Errorf("get %s prints the token:\n%s", name, out.String())
+			}
+			if !strings.Contains(out.String(), "<redacted>") {
+				t.Errorf("get %s = %q, want the token shown as <redacted>", name, out.String())
+			}
+		}
+		env, out, _ := daemonConfigTestEnv(townRoot, time.Now())
+		if err := configDaemonGet(env, []string{"daemon.env.PLAIN"}); err != nil || !strings.Contains(out.String(), "1") {
+			t.Errorf("get of a plain value = %q (%v), want it printed", out.String(), err)
 		}
 	})
 
 	t.Run("a changed token shows as a change without either value", func(t *testing.T) {
 		t.Parallel()
 		const second = "sk-ant-9876543210fedcba9876"
-		const key = "daemon.env.SOME_SERVICE_TOKEN"
-		townRoot, _ := daemonConfigTown(t, withAgent)
-		env, out, _ := daemonConfigTestEnv(townRoot, time.Now())
-
-		env.in = strings.NewReader(`"` + token + `"`)
-		if err := configDaemonSet(env, key, "-", "first"); err != nil {
-			t.Fatalf("the first set = %v", err)
-		}
-		out.Reset()
-		env.in = strings.NewReader(`"` + second + `"`)
-		if err := configDaemonSet(env, key, "-", "second"); err != nil {
-			t.Fatalf("the second set = %v", err)
+		// The command no longer writes a literal token, so the two documents the
+		// diff compares are built by hand, the way an older edit left them.
+		tree := func(value string) map[string]any {
+			return map[string]any{"daemon": map[string]any{"env": map[string]any{"SOME_SERVICE_TOKEN": value}}}
 		}
 
-		diff := out.String()
+		diff := daemonConfigDiff("settings/config.json", tree(token), tree(second))
 		for _, secret := range []string{token, second} {
 			if strings.Contains(diff, secret) {
 				t.Errorf("the diff prints a token:\n%s", diff)

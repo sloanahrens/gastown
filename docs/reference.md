@@ -1058,10 +1058,12 @@ Every write copies the file to `config.json.bak-<UTC timestamp>-<label>` first, 
 `--label` is required and names that copy; the newest 50 copies and any younger
 than 30 days are kept. The lock rule is that a write takes `config.json.lock`
 without waiting: a lock another writer holds is refused, not queued behind, and
-nothing is written. The argv rule is that a value that looks like a secret must
-come through standard input (`set <path> -`) or a file the shell redirects; a
-secret-looking value on argv is refused naming the key, because argv is visible in
-the process list and shell history, while other values appear there too.
+nothing is written. The secret rule is that a value that looks like a secret is
+refused on every route, as an argument and from standard input (`set <path> -`)
+alike, naming the key and never the value: `settings/config.json` never holds a
+literal token, and a value on argv would also show in the process list and shell
+history. It belongs in `settings/daemon.env`, referenced as `"${VAR}"`. `get` and
+`diff` show a token the file already holds as `<redacted>`.
 
 ### Rig Management
 

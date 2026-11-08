@@ -66,9 +66,10 @@ unified diff of the old and new documents. A value that looks like a token is
 refused, and the diff redacts values under such keys; 'gt config secrets migrate'
 moves a literal token to settings/daemon.env.
 
-A value passed as an argument is visible in the process list, so a value that
-looks like a token is refused there and must come through standard input with
-'-' instead.
+A value that looks like a token is refused on every route, as an argument and
+from standard input alike: settings/config.json never holds a literal token. Put
+it in settings/daemon.env and reference it here as "${VAR}". 'get' and 'diff' show
+a token already in the file as <redacted>, never its value.
 
 Examples:
   gt config daemon get daemon.patrols.overrun_guard
@@ -177,12 +178,20 @@ func configDaemonGet(e configDaemonEnv, args []string) error {
 		return err
 	}
 	var value any = tree
+	leaf := ""
 	if len(args) == 1 {
 		if value, err = getAtPath(tree, args[0]); err != nil {
 			return err
 		}
+		leaf = args[0]
+		if segments, segErr := jsonPathSegments(args[0]); segErr == nil {
+			leaf = segments[len(segments)-1]
+		}
 	}
-	fmt.Fprintf(e.out, "%s", indentDaemonConfigJSON(value))
+	// A token the file already holds is never printed: it would reach stdout
+	// and any transcript or log that runs this command, the same exposure the
+	// diff redacts (gt-yjzepk.4).
+	fmt.Fprintf(e.out, "%s", indentDaemonConfigJSON(redactDaemonConfigTree(value, nil, leaf, "<redacted>")))
 	return nil
 }
 
@@ -191,10 +200,8 @@ func configDaemonSet(e configDaemonEnv, pathArg, valueArg, label string) error {
 	if err != nil {
 		return err
 	}
-	if valueArg != "-" {
-		if err := refuseValueInArgv(pathArg, value); err != nil {
-			return err
-		}
+	if err := refuseSecretLiteral(pathArg, value); err != nil {
+		return err
 	}
 	return applyDaemonConfigChange(e, label, func(tree map[string]any) error {
 		return setAtPath(tree, pathArg, value)
@@ -385,18 +392,19 @@ func validateDaemonConfigLabel(label string) error {
 	return nil
 }
 
-// refuseValueInArgv refuses a value that looks like a literal token when it
-// arrived as an argument: an argument is visible in the process list, so such
-// a value must come through standard input with '-' (gt-yjzepk.4). The key is
-// named and the value never is.
-func refuseValueInArgv(pathArg string, value any) error {
+// refuseSecretLiteral refuses a value that looks like a literal token, whichever
+// way it arrived: on argv it would show in the process list, and from standard
+// input it would be written as plaintext into settings/config.json, which the
+// town keeps free of literals (gt-y3pgh.5). Neither the value nor any part of it
+// is named. The token belongs in settings/daemon.env, referenced here as
+// "${VAR}".
+func refuseSecretLiteral(pathArg string, value any) error {
 	leaf := pathArg
 	if segments, err := jsonPathSegments(pathArg); err == nil {
 		leaf = segments[len(segments)-1]
 	}
 	if secretLikeValue(leaf, value) {
-		return fmt.Errorf("the value at %s looks like a literal token: pass it on standard input as 'gt config daemon set %s -', so it is not in the process list",
-			pathArg, pathArg)
+		return fmt.Errorf("the value at %s looks like a literal token, which settings/config.json must not hold: put it in settings/daemon.env and reference it here as \"${VAR}\" (gt config secrets migrate)", pathArg)
 	}
 	return nil
 }
