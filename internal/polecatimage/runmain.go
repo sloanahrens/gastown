@@ -1,10 +1,33 @@
 package polecatimage
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+
+	"github.com/steveyegge/gastown/internal/imagevalues"
+)
 
 // maxRounds is how many builds Main makes before it gives up on an install that
 // keeps moving, the script's MAX_ROUNDS.
 const maxRounds = 3
+
+// refuseCIBuilt refuses a local build once the values file exists: the deploy
+// pins the image CI built, and a local build would replace it under the same
+// tag. A values file that cannot be read is refused too. The run cannot tell
+// whether the image is CI-built, so it builds nothing (gt-mwjtgg).
+func (r *Run) refuseCIBuilt() error {
+	if r.Cfg.ValuesDir == "" {
+		return nil
+	}
+	_, ok, err := imagevalues.LoadIn(r.Cfg.ValuesDir)
+	if err != nil {
+		return r.failf("cannot read the values file under %s, so the image cannot be built here: %v", r.Cfg.ValuesDir, err)
+	}
+	if ok {
+		return r.failf("the image %s is CI-built: %s names it, so this run does not build it locally", r.Cfg.Image, filepath.Join(r.Cfg.ValuesDir, imagevalues.DefaultRelPath))
+	}
+	return nil
+}
 
 // Main keeps the image at the installed gt's commit and the installed bd's
 // commit, publishing each build when a registry is named, and answers the
@@ -26,6 +49,9 @@ func (r *Run) Main() error {
 		}
 		r.currentAt(installed, bdUnread)
 		return nil
+	}
+	if err := r.refuseCIBuilt(); err != nil {
+		return err
 	}
 	if reason := r.DeferReason(); reason != "" {
 		return r.Defer("deferred: " + reason)

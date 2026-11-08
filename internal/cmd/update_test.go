@@ -654,6 +654,9 @@ func TestUpdateRealDepsBuildsTheTown(t *testing.T) {
 		if deps.Log == nil {
 			t.Error("Log is nil; the run's plan and notes would be discarded")
 		}
+		if probes, ok := deps.Verify.(*verifyProbes); !ok || probes.env.ValuesDir == nil || probes.env.ValuesDir() != filepath.Join(townRoot, "gastown") {
+			t.Error("Verify does not read the CI-built values file under the town's gastown directory")
+		}
 		if id := deps.NewRunID(); id == "" {
 			t.Error("NewRunID() = \"\", want a run id")
 		}

@@ -1259,3 +1259,48 @@ func writeTownFixture(t *testing.T, files map[string]string) string {
 	}
 	return root
 }
+
+// TestUpdateImagesUsesTheSharedPath holds the one place the values file's path
+// lives: the command's default --out is imagevalues.DefaultRelPath, and no
+// other source in this package names the file, so moving it changes one
+// constant and every consumer follows (gt-mwjtgg).
+func TestUpdateImagesUsesTheSharedPath(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the default output is the shared path", func(t *testing.T) {
+		t.Parallel()
+		flag := newUpdateImagesCmd(updateImagesSeams{}).Flags().Lookup("out")
+		if flag == nil {
+			t.Fatal("gt update images has no --out flag")
+		}
+		if flag.DefValue != imagevalues.DefaultRelPath {
+			t.Errorf("--out defaults to %q, want imagevalues.DefaultRelPath %q", flag.DefValue, imagevalues.DefaultRelPath)
+		}
+	})
+
+	t.Run("no other package source names the file", func(t *testing.T) {
+		t.Parallel()
+		entries, err := os.ReadDir(".")
+		if err != nil {
+			t.Fatalf("reading the package sources: %v", err)
+		}
+		scanned := 0
+		for _, entry := range entries {
+			name := entry.Name()
+			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			data, err := os.ReadFile(name)
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+			scanned++
+			if strings.Contains(string(data), imagevalues.DefaultRelPath) {
+				t.Errorf("%s names %s; the command reads it from imagevalues.DefaultRelPath", name, imagevalues.DefaultRelPath)
+			}
+		}
+		if scanned == 0 {
+			t.Fatal("no package source was scanned, so this test proves nothing")
+		}
+	})
+}

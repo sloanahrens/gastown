@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
 // testBdCommit is the installed bd commit a reply reports, and the bd label its
@@ -736,5 +738,77 @@ func TestMainPublishesNothingWhenNothingNamesARegistry(t *testing.T) {
 	tr.wantLogged(t, "current at abc1234")
 	if anyCallNamed(tr.callsTo("crane"), "push") || anyCallNamed(tr.callsTo("docker"), "save") {
 		t.Errorf("a run with no registry published: %v %v", callLines(tr, "docker"), callLines(tr, "crane"))
+	}
+}
+
+// TestValuesRefusesALocalBuild holds the rebuild refusal: once a values file
+// names the image, a run whose image is not current refuses before it builds
+// anything, and a values file it cannot read refuses too. With no values file
+// the run builds as it did before (gt-mwjtgg).
+func TestValuesRefusesALocalBuild(t *testing.T) {
+	t.Parallel()
+	rows := []struct {
+		name      string
+		setup     func(t *testing.T, dir string)
+		wantErr   bool
+		wantMakes int
+		wantLog   string
+	}{
+		{
+			name:      "no values file builds as before",
+			setup:     func(*testing.T, string) {},
+			wantMakes: 1,
+		},
+		{
+			name: "a values file refuses the local build",
+			setup: func(t *testing.T, dir string) {
+				v := imagevalues.Values{
+					Daemon:  "registry.internal:5000/gastown/gastown-daemon@sha256:" + strings.Repeat("2", 64),
+					Polecat: "registry.internal:5000/gastown/gastown-polecat@sha256:" + strings.Repeat("1", 64),
+					Commit:  "0123456789abcdef0123456789abcdef01234567",
+				}
+				if err := imagevalues.Write(filepath.Join(dir, imagevalues.DefaultRelPath), v); err != nil {
+					t.Fatalf("writing the values file: %v", err)
+				}
+			},
+			wantErr: true,
+			wantLog: "is CI-built",
+		},
+		{
+			name: "an unreadable values file refuses the local build",
+			setup: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, imagevalues.DefaultRelPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: true,
+			wantLog: "cannot read the values file",
+		},
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tr := newTestRun(t)
+			tr.Cfg.Registry = ""
+			tr.Cfg.ValuesDir = t.TempDir()
+			tc.setup(t, tr.Cfg.ValuesDir)
+			reply := newRunReply("abc1234")
+			tr.reply = reply.answer(t, labelFormat(tr))
+			t.Cleanup(tr.Cleanup)
+
+			err := tr.Main()
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Main() = %v, want an error %v", err, tc.wantErr)
+			}
+			if got := len(tr.callsTo("make")); got != tc.wantMakes {
+				t.Errorf("make was called %d times, want %d", got, tc.wantMakes)
+			}
+			if tc.wantErr && len(tr.callsTo("git")) != 0 {
+				t.Errorf("git ran %d times before the refusal, want none: a refused run builds nothing", len(tr.callsTo("git")))
+			}
+			if tc.wantLog != "" {
+				tr.wantLogged(t, tc.wantLog)
+			}
+		})
 	}
 }

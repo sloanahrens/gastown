@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/update"
 )
 
@@ -362,4 +364,111 @@ func TestUpdateVerifyDefaultSeams(t *testing.T) {
 	if got, want := reflect.ValueOf(p.env.DaemonCommit).Pointer(), reflect.ValueOf(daemonStateCommit).Pointer(); got != want {
 		t.Errorf("DaemonCommit seam = %#x, want daemonStateCommit (%#x)", got, want)
 	}
+}
+
+// TestVerifyImageLabelReadsTheValuesFile holds the image the probe inspects: the
+// sandbox image by name when there is no values file, and the image the file
+// names when there is one, whose label must be the file's commit.
+func TestVerifyImageLabelReadsTheValuesFile(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	const (
+		fileCommit  = "0123456789abcdef0123456789abcdef01234567"
+		otherCommit = "fedcba9876543210fedcba9876543210fedcba98"
+		polecatRef  = "registry.internal:5000/gastown/gastown-polecat@sha256:" + "1111111111111111111111111111111111111111111111111111111111111111"
+	)
+	label := `{{index .Config.Labels "org.gastown.gt-commit"}}`
+	writeValues := func(t *testing.T, dir string, v imagevalues.Values) {
+		t.Helper()
+		if err := imagevalues.Write(filepath.Join(dir, imagevalues.DefaultRelPath), v); err != nil {
+			t.Fatalf("writing the values file: %v", err)
+		}
+	}
+	values := imagevalues.Values{
+		Daemon:  "registry.internal:5000/gastown/gastown-daemon@sha256:" + "2222222222222222222222222222222222222222222222222222222222222222",
+		Polecat: polecatRef,
+		Commit:  fileCommit,
+	}
+
+	t.Run("no values file inspects the sandbox image by name", func(t *testing.T) {
+		t.Parallel()
+		run := &verifyProbeRun{output: fileCommit + "\n"}
+		probes := newVerifyProbes(verifyProbeEnv{Run: run.run, ValuesDir: func() string { return t.TempDir() }})
+
+		if _, err := probes.ImageLabel(ctx); err != nil {
+			t.Fatalf("image label: %v", err)
+		}
+		if len(run.calls) != 1 || !slices.Contains(run.calls[0].args, "gastown-polecat:dev") {
+			t.Errorf("ran %+v, want an inspect of gastown-polecat:dev", run.calls)
+		}
+	})
+
+	t.Run("a nil ValuesDir inspects the sandbox image by name", func(t *testing.T) {
+		t.Parallel()
+		run := &verifyProbeRun{output: fileCommit + "\n"}
+		probes := newVerifyProbes(verifyProbeEnv{Run: run.run})
+
+		if _, err := probes.ImageLabel(ctx); err != nil {
+			t.Fatalf("image label: %v", err)
+		}
+		if len(run.calls) != 1 || !slices.Contains(run.calls[0].args, "gastown-polecat:dev") {
+			t.Errorf("ran %+v, want an inspect of gastown-polecat:dev", run.calls)
+		}
+	})
+
+	t.Run("a values file inspects the image it names", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeValues(t, dir, values)
+		run := &verifyProbeRun{output: fileCommit + "\n"}
+		probes := newVerifyProbes(verifyProbeEnv{Run: run.run, ValuesDir: func() string { return dir }})
+
+		got, err := probes.ImageLabel(ctx)
+		if err != nil {
+			t.Fatalf("image label: %v", err)
+		}
+		if got != fileCommit {
+			t.Errorf("label = %q, want the file's commit %q", got, fileCommit)
+		}
+		want := []string{"image", "inspect", polecatRef, "--format", label}
+		if len(run.calls) != 1 || !slices.Equal(run.calls[0].args, want) {
+			t.Errorf("ran %+v, want an inspect of %s", run.calls, polecatRef)
+		}
+	})
+
+	t.Run("a label that differs from the file's commit is an error naming both", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		writeValues(t, dir, values)
+		run := &verifyProbeRun{output: otherCommit + "\n"}
+		probes := newVerifyProbes(verifyProbeEnv{Run: run.run, ValuesDir: func() string { return dir }})
+
+		_, err := probes.ImageLabel(ctx)
+		if err == nil {
+			t.Fatal("a label that differs from the file's commit reported no error")
+		}
+		for _, commit := range []string{otherCommit, fileCommit} {
+			if !strings.Contains(err.Error(), commit) {
+				t.Errorf("error %q does not name commit %s", err, commit)
+			}
+		}
+	})
+
+	t.Run("a values file that cannot be read is an error, not the sandbox image", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// A directory where the file should be: present, but not a values file.
+		if err := os.MkdirAll(filepath.Join(dir, imagevalues.DefaultRelPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		run := &verifyProbeRun{output: fileCommit + "\n"}
+		probes := newVerifyProbes(verifyProbeEnv{Run: run.run, ValuesDir: func() string { return dir }})
+
+		if _, err := probes.ImageLabel(ctx); err == nil {
+			t.Fatal("an unreadable values file reported no error")
+		}
+		if len(run.calls) != 0 {
+			t.Errorf("ran %+v after an unreadable values file, want no inspect", run.calls)
+		}
+	})
 }

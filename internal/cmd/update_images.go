@@ -27,9 +27,6 @@ import (
 )
 
 const (
-	// updateImagesDefaultOut is the deploy's values file, relative to where the
-	// command runs.
-	updateImagesDefaultOut = "deploy/values/images.yaml"
 	// updateImagesTagLength is how much of the commit the images' tag carries.
 	updateImagesTagLength = 12
 	// updateImagesAccept asks for an image manifest first; an index is accepted
@@ -174,7 +171,7 @@ image rebuilt under the same tag is a finding, not a silent replace.`,
 		},
 	}
 	c.Flags().StringVar(&sha, "sha", "", "The full green commit both images carry")
-	c.Flags().StringVar(&out, "out", updateImagesDefaultOut, "The values file to write")
+	c.Flags().StringVar(&out, "out", imagevalues.DefaultRelPath, "The values file to write")
 	return c
 }
 
