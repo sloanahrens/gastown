@@ -504,15 +504,17 @@ func (s *healthSources) Mains() ([]townhealth.RigMain, error) {
 		// Read through the landing worker's own readers, so the field reports
 		// the check that worker would use, settings change and all
 		// (gt-fn9e6.34, gt-gg9hv.7.2).
-		context, configErr := rigPostLandStatusContextErr(rigPath)
+		postLandCtx, configErr := rigPostLandStatusContextErr(rigPath)
 		if configErr != nil {
 			// A settings file that is present but unreadable is not "no
 			// setting": the field cannot say which check decides, so this
-			// rig reads UNKNOWN rather than n/a or green.
-			err = fmt.Errorf("reading merge_queue.post_land_status_context: %w", configErr)
+			// rig reads UNKNOWN rather than n/a or green. Joined with the
+			// state-file error, so a rig whose state file is also unreadable
+			// reports both reasons rather than the config error alone.
+			err = errors.Join(err, fmt.Errorf("reading merge_queue.post_land_status_context: %w", configErr))
 		}
 		postLand := townhealth.PostLandCheck{
-			Context: context,
+			Context: postLandCtx,
 			Command: rigPostLandCommand(rigPath),
 		}
 		out = append(out, townhealth.RigMain{

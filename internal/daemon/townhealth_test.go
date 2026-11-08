@@ -445,6 +445,39 @@ func TestTownHealthPostLandMode(t *testing.T) {
 	}
 }
 
+// A rig whose state file and settings file are both unreadable reports both
+// reasons: the config read error must not overwrite the state-file read error
+// (gt-x560zj).
+func TestTownHealthMainsKeepsBothReadErrors(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	s := &healthSources{d: d}
+
+	statePath := RedMainStatePath(d.config.TownRoot, "gastown")
+	if err := os.WriteFile(statePath, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTownFile(t, d.config.TownRoot, filepath.Join("gastown", "settings", "config.json"), "{not json")
+
+	ms, err := s.Mains()
+	if err != nil {
+		t.Fatalf("Mains(): %v", err)
+	}
+	if len(ms) != 1 || ms[0].Rig != "gastown" {
+		t.Fatalf("Mains() = %+v, want the one landing rig", ms)
+	}
+	if ms[0].Err == nil {
+		t.Fatalf("Mains() Err = nil, want both read errors")
+	}
+	if got := ms[0].Err.Error(); !strings.Contains(got, statePath) {
+		t.Errorf("Mains() Err = %q, want it to keep the state-file read error", got)
+	}
+	if got := ms[0].Err.Error(); !strings.Contains(got, "post_land_status_context") {
+		t.Errorf("Mains() Err = %q, want it to name the config read error", got)
+	}
+}
+
 // A landing the worker keeps failing and backing off from degrades its rig's
 // landing field, which the queue wait alone cannot see, and the field names
 // the bead, the stage, the run of failures and the error (gt-fn9e6.44).
