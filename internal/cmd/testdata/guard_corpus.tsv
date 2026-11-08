@@ -365,3 +365,15 @@ dangerous	polecat	"echo a # n \\\r"	allow		gt-q0jecy
 container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/git/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
 dangerous	polecat	"git reset --hard origin/main"	refuse	Reset onto a remote-tracking ref drops merged work	gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
 test_scope	polecat	"go test -run TestGuard ./internal/cmd"	allow		gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+# --- the heredoc readers and the parsed-word token line (gt-a7jzr5): the
+# declaration-builtin heredoc bash reads, the process substitution recovered
+# from inside an expansion, and assignments the parsed words keep as the shell
+# passes them ---
+dangerous	polecat	"let y=1<<x\nsudo rm -rf /\nx"	allow		gt-a7jzr5	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+dangerous	crew	"let y=1<<x\nsudo rm -rf /\nx"	allow		gt-a7jzr5	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+dangerous	polecat	"echo ${v:-<(bash <<EOF\ngit reset --hard\nEOF\n)}"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+dangerous	polecat	"BD_ACTOR= bd comments add gt-1 hello"	refuse	polecat may not set a comment author or actor	gt-a7jzr5	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+dangerous	polecat	"declare -x BD_ACTOR=Operator"	refuse	polecat may not set a comment author or actor	gt-a7jzr5	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/style/... -run TestStyle"	allow		gt-a7jzr5	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"GT_TEST_DOCKER=1 cat > note.md <<'EOF'\ngo test ./internal/beads/...\nEOF"	allow		gt-a7jzr5	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+test_scope	polecat	"go test -run TestDangerous ./internal/cmd"	allow		gt-a7jzr5	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
