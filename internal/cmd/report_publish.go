@@ -25,16 +25,26 @@ const (
 	reportPublishPageMax = 1 << 20
 
 	// reportPublishPageName and reportPublishPrevPageName are the page this
-	// command writes and the one it keeps in its place. reportPublishPrevSidecarName
-	// is the sidecar kept beside the previous page.
-	reportPublishPageName        = reportdir.PageName
-	reportPublishPrevPageName    = reportdir.PrevPageName
-	reportPublishPrevSidecarName = reportdir.PrevSidecarName
+	// command writes and the one it keeps in its place.
+	reportPublishPageName     = reportdir.PageName
+	reportPublishPrevPageName = reportdir.PrevPageName
 
-	// reportPublishInputMax bounds the document read from standard input. It
-	// leaves room to decode a page over the cap so the refusal can name the
-	// field rather than the document.
-	reportPublishInputMax = 4*reportPublishPageMax + birdreports.SidecarMaxBytes
+	// reportPublishPageWireMax is the most JSON text a page at
+	// reportPublishPageMax takes: an ASCII control character is one byte and is
+	// written as \u00XX, six.
+	reportPublishPageWireMax = 6 * reportPublishPageMax
+
+	// reportPublishInputSlack is room in the document for its keys, the bird's
+	// name and ordinary spacing around them.
+	reportPublishInputSlack = 4 << 10
+
+	// reportPublishInputMax bounds the document read from standard input, so an
+	// unbounded stream is never read into memory. A page at its cap takes up to
+	// six times its length in JSON text and a sidecar its own cap, and this
+	// leaves room for the document's keys and the bird's name, so such a
+	// document is decoded and judged by the page's cap, naming the page, rather
+	// than refused as a document.
+	reportPublishInputMax = reportPublishPageWireMax + birdreports.SidecarMaxBytes + reportPublishInputSlack
 )
 
 var reportPublishBird string
@@ -46,13 +56,14 @@ var reportPublishCmd = &cobra.Command{
 
 Reads one JSON document from standard input:
 
-  {"bird":"<name>","page":"<the daily.html text>","sidecar":{<the daily.json object>}}
+  {"bird":"<name>","page":"<the report page>","sidecar":{<the sidecar object>}}
 
-and writes <town>/.runtime/reports/<bird>/daily.html and daily.json there, each
-as a temp file renamed into place, keeping the pair they replace as
-daily.prev.html and daily.prev.json. A rename that fails puts the previous pair
-back. The document is refused, with the field named and nothing written, when it
-is malformed, the page is over 1 MiB, the sidecar is over 16 KiB or fails the
+The internal/reportdir package comment states where the page and the sidecar are
+written and the names of the pair kept beside them; this command asks that
+package for the directory rather than laying a path out here. Each file is a temp
+file renamed into place, and a rename that fails puts the previous pair back. The
+document is refused, with the field named and nothing written, when it is
+malformed, the page is over 1 MiB, the sidecar is over 16 KiB or fails the
 reader's own validation (internal/birdreports), the document's bird is not
 --bird, or the name is a daemon subsystem directory under .runtime.
 
@@ -62,7 +73,7 @@ The daily request in docs/birds/daily-request.md builds the sidecar with jq and
 pipes the document here.
 
 Examples:
-  jq -n --rawfile page daily.html --slurpfile sidecar sidecar.json \
+  jq -n --rawfile page page.html --slurpfile sidecar sidecar.json \
     '{bird:"dunlin",page:$page,sidecar:$sidecar[0]}' | gt report publish --bird dunlin`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -244,7 +255,7 @@ func writeReportPublish(fsys reportPublishFS, runtimeDir, bird string, page, sid
 	pagePath := filepath.Join(dir, reportPublishPageName)
 	sidecarPath := filepath.Join(dir, reportdir.SidecarName)
 	prevPath := filepath.Join(dir, reportPublishPrevPageName)
-	prevSidecarPath := filepath.Join(dir, reportPublishPrevSidecarName)
+	prevSidecarPath := filepath.Join(dir, reportdir.PrevSidecarName)
 
 	// What each destination holds now, so a failed rename can put it back.
 	pagePrior, hadPage, err := priorFile(fsys, pagePath)

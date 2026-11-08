@@ -26,7 +26,8 @@ var reportdirNames = map[string]string{
 // TestPathGuardFailsOnAFixtureOutsideThePackage is the reports-path guard: no
 // non-test file outside this package may lay a report's path out by hand. The
 // repository is clean, and a fixture outside the package that joins the reports
-// directory with a daily file makes the same scan fail and names the file.
+// directory with a daily file — in one call or across two, through a variable —
+// makes the same scan fail and names the file.
 func TestPathGuardFailsOnAFixtureOutsideThePackage(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join("..", "..")
@@ -44,8 +45,10 @@ func TestPathGuardFailsOnAFixtureOutsideThePackage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walking the fixture: %v", err)
 	}
-	if len(problems) != 1 || !strings.Contains(problems[0], "joins.go") {
-		t.Fatalf("the guard did not fail on a file that builds the path: %v", problems)
+	if len(problems) != 2 ||
+		!strings.Contains(problems[0], "joins.go") ||
+		!strings.Contains(problems[1], "splitjoins.go") {
+		t.Fatalf("the guard did not fail on both files that build the path: %v", problems)
 	}
 }
 
@@ -82,8 +85,10 @@ func reportPathProblems(root, skipPrefix string) ([]string, error) {
 	return problems, err
 }
 
-// functionJoinsReports flags a function in one file that both joins the reports
-// directory name and joins a daily file name.
+// functionJoinsReports flags a function in one file with a join that combines
+// the reports directory with a daily file name, whether the two are in one
+// call, one call nested in another, or two calls linked by a variable the
+// function assigned the reports directory to.
 func functionJoinsReports(path, rel string) []string {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
@@ -97,12 +102,14 @@ func functionJoinsReports(path, rel string) []string {
 		if !ok || fn.Body == nil {
 			return true
 		}
-		var joinsReports, joinsDaily bool
+		assigned := reportsDirAssignments(fn.Body, consts)
+		var flagged bool
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok || !isJoinCall(call.Fun) {
 				return true
 			}
+			var joinsReports, joinsDaily bool
 			for _, arg := range call.Args {
 				switch literalString(arg, consts) {
 				case PublishedDirName: // the same name as ReportsSubdir
@@ -110,15 +117,100 @@ func functionJoinsReports(path, rel string) []string {
 				case SidecarName, PageName, PrevPageName, PrevSidecarName:
 					joinsDaily = true
 				}
+				if joinsReportsDir(arg, consts) {
+					joinsReports = true
+				}
+				if ident, ok := arg.(*ast.Ident); ok && holdsReportsAt(assigned, ident.Name, call.Pos()) {
+					joinsReports = true
+				}
+			}
+			if joinsReports && joinsDaily {
+				flagged = true
 			}
 			return true
 		})
-		if joinsReports && joinsDaily {
+		if flagged {
 			problems = append(problems, rel+": "+fn.Name.Name)
 		}
 		return true
 	})
 	return problems
+}
+
+// joinsReportsDir reports whether expr is a join of the reports directory name,
+// directly or as the base of a nested join.
+func joinsReportsDir(expr ast.Expr, consts map[string]string) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || !isJoinCall(call.Fun) {
+		return false
+	}
+	for _, arg := range call.Args {
+		if literalString(arg, consts) == PublishedDirName {
+			return true
+		}
+		if joinsReportsDir(arg, consts) {
+			return true
+		}
+	}
+	return false
+}
+
+// reportDirAssignment is one assignment a function body makes to a variable:
+// where it is, and whether it puts the reports directory there.
+type reportDirAssignment struct {
+	pos     token.Pos
+	reports bool
+}
+
+// reportsDirAssignments returns, per variable name, the assignments a function
+// body makes to it in source order.
+func reportsDirAssignments(body *ast.BlockStmt, consts map[string]string) map[string][]reportDirAssignment {
+	assigned := map[string][]reportDirAssignment{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch s := n.(type) {
+		case *ast.AssignStmt:
+			for i, lhs := range s.Lhs {
+				if i >= len(s.Rhs) {
+					continue
+				}
+				recordAssignment(assigned, lhs, s.Rhs[i], s.Pos(), consts)
+			}
+		case *ast.ValueSpec:
+			for i, name := range s.Names {
+				if i >= len(s.Values) {
+					continue
+				}
+				recordAssignment(assigned, name, s.Values[i], s.Pos(), consts)
+			}
+		}
+		return true
+	})
+	return assigned
+}
+
+// recordAssignment notes whether one assignment puts the reports directory in
+// name.
+func recordAssignment(assigned map[string][]reportDirAssignment, name, value ast.Expr, pos token.Pos, consts map[string]string) {
+	ident, ok := name.(*ast.Ident)
+	if !ok {
+		return
+	}
+	assigned[ident.Name] = append(assigned[ident.Name],
+		reportDirAssignment{pos: pos, reports: joinsReportsDir(value, consts)})
+}
+
+// holdsReportsAt reports whether the nearest assignment to name before pos put
+// the reports directory there, so a join of the name counts only while it holds
+// that directory.
+func holdsReportsAt(assigned map[string][]reportDirAssignment, name string, pos token.Pos) bool {
+	held := false
+	for _, assignment := range assigned[name] {
+		if assignment.pos >= pos {
+			break
+		}
+		held = assignment.reports
+	}
+	return held
 }
 
 // isJoinCall reports whether fun is the path package's Join or filepath's.

@@ -25,11 +25,10 @@ var birdsCmd = &cobra.Command{
 	Short: "Check the birds' daily reports",
 	Long: `Check the birds' daily reports.
 
-A bird publishes its daily report with gt report publish, which writes
-<town>/.runtime/reports/<bird>/daily.json, the sidecar the dashboard's Birds
-panel reads. The <town>/.runtime/<bird>/reports/daily.json a bird wrote before
-the command existed is read while it is there. gt birds due prints the late
-ones.`,
+A bird publishes its daily report with gt report publish. The internal/reportdir
+package comment states where a report is read from, and the older location it
+falls back to; this command asks that package rather than restating the paths.
+gt birds due prints the late ones.`,
 	RunE: requireSubcommand,
 }
 
@@ -40,12 +39,11 @@ var birdsDueCmd = &cobra.Command{
 then the request to send that reporter, with <NAME> replaced by its name and
 <RUNTIME_DIR> by the runtime directory this command reads.
 
-The reporters are the nine birds and the overseer; their reports are published
-to <town>/.runtime/reports/<reporter>/daily.json by gt report publish, and the
-old <town>/.runtime/<reporter>/reports/daily.json is read when it is the only
-one. The request text is docs/birds/daily-request.md. The command sends
-nothing: the caller sends each request with SendMessage. It exits 1 when a
-report is due and 0 when all are fresh, so a prompt can branch on it.`,
+The reporters are the nine birds and the overseer; each report is read where
+internal/reportdir resolves it, so no location is restated here. The request
+text is docs/birds/daily-request.md. The command sends nothing: the caller sends
+each request with SendMessage. It exits 1 when a report is due and 0 when all
+are fresh, so a prompt can branch on it.`,
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBirdsDueCommand(cmd, args, workspace.FindFromCwdOrError, time.Now)

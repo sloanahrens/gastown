@@ -147,12 +147,67 @@ func TestReportPublishWritesAtomically(t *testing.T) {
 	if got := readReportPublishFile(t, prevPath); got != firstPage {
 		t.Errorf("daily.prev.html = %q, want the page it replaced", got)
 	}
-	prevSidecarPath := filepath.Join(dir, reportPublishPrevSidecarName)
+	prevSidecarPath := filepath.Join(dir, reportdir.PrevSidecarName)
 	if got := readReportPublishFile(t, prevSidecarPath); got != string(firstSidecar) {
 		t.Errorf("daily.prev.json = %q, want the sidecar it replaced", got)
 	}
 	assertReportPublishDirHolds(t, dir, reportPublishPageName, reportdir.SidecarName,
-		reportPublishPrevPageName, reportPublishPrevSidecarName)
+		reportPublishPrevPageName, reportdir.PrevSidecarName)
+}
+
+// TestReportPublishPublishesAControlCharacterPageAtTheCap asserts a page at the
+// page cap is judged by the page, not the document: a control character is one
+// byte in the page and six in the JSON text, so the document is over four times
+// the page and a document cap set from the page's own cap would refuse it as a
+// document (gt-fvleo0).
+func TestReportPublishPublishesAControlCharacterPageAtTheCap(t *testing.T) {
+	t.Parallel()
+	page := strings.Repeat("\x01", reportPublishPageMax)
+	doc := reportPublishDocument(t, "dunlin", page, reportPublishSidecar("dunlin", time.Hour))
+	if len(doc) <= 4*reportPublishPageMax {
+		t.Fatalf("the document is %d bytes, want a page at the cap to take over four times its cap", len(doc))
+	}
+	runtimeDir := t.TempDir()
+	if _, err := runPublish(t, runtimeDir, "dunlin", doc); err != nil {
+		t.Fatalf("publishing a page of control characters at the cap: %v", err)
+	}
+	dir := reportPublishDir(t, runtimeDir, "dunlin")
+	if got := readReportPublishFile(t, filepath.Join(dir, reportPublishPageName)); got != page {
+		t.Errorf("the published page is %d bytes, want the page read", len(got))
+	}
+}
+
+// TestReportHelpLeavesTheLayoutToReportdir asserts the report commands' help
+// points at internal/reportdir for the report's layout instead of restating it:
+// no help names the runtime path or the files a report is written as
+// (gt-fvleo0).
+func TestReportHelpLeavesTheLayoutToReportdir(t *testing.T) {
+	t.Parallel()
+	helps := []struct {
+		name string
+		long string
+	}{
+		{"gt report publish", reportPublishCmd.Long},
+		{"gt birds", birdsCmd.Long},
+		{"gt birds due", birdsDueCmd.Long},
+	}
+	restated := []string{
+		".runtime/",
+		reportdir.PageName,
+		reportdir.SidecarName,
+		reportdir.PrevPageName,
+		reportdir.PrevSidecarName,
+	}
+	for _, help := range helps {
+		if !strings.Contains(help.long, "internal/reportdir") {
+			t.Errorf("%s help does not point at internal/reportdir for the layout:\n%s", help.name, help.long)
+		}
+		for _, layout := range restated {
+			if strings.Contains(help.long, layout) {
+				t.Errorf("%s help restates the layout with %q:\n%s", help.name, layout, help.long)
+			}
+		}
+	}
 }
 
 // TestReportPublishRollsBackAPartialRename fails the rename that puts the new
@@ -629,7 +684,7 @@ func TestReportPublishReportsAFailureOnEveryWritePath(t *testing.T) {
 				if err := os.MkdirAll(dir, 0o755); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(filepath.Join(dir, reportPublishPrevSidecarName), []byte(`{"bird":"dunlin"}`), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, reportdir.PrevSidecarName), []byte(`{"bird":"dunlin"}`), 0o644); err != nil {
 					t.Fatal(err)
 				}
 				fsys.readFile = func(string) ([]byte, error) { return nil, errors.New("scripted read failure") }
