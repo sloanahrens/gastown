@@ -8,7 +8,7 @@
 //
 // The pod mounts each volume at the path the compose container mounts it at, so
 // no setting that names a path changes at the move (gt-gg9hv.30). Mounts holds
-// that table, and the town-state claim's entries are internal/townstate's
+// that table, and the town-state claim's entries are internal/manifestdata's
 // daemon-owned rows, so the volume seed and this package cannot disagree.
 //
 // The local-path provisioner does not enforce a claim's size, so a claim grows
@@ -57,8 +57,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/steveyegge/gastown/internal/templates"
-	"github.com/steveyegge/gastown/internal/townstate"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 const (
@@ -76,7 +75,7 @@ const (
 	TownOwnerPod        = "pod"
 	// OMTokenFile and ForgeTokenFile are the deploy/daemon/secrets.yaml entries
 	// whose Secrets the pod mounts at the paths the entrypoint's arguments name
-	// (templates.LiveOMTokenPath and templates.LiveForgeTokenPath).
+	// (manifestdata.LiveOMTokenPath and manifestdata.LiveForgeTokenPath).
 	OMTokenFile    = "om-daemon-token" //nolint:gosec // a file name, not a credential
 	ForgeTokenFile = "forgejo-landing.env"
 	// The sweep's roles in deploy/k8s/sweep-rbac.yaml. The render binds the
@@ -200,29 +199,40 @@ type Mount struct {
 	// Path is where the pod mounts the volume.
 	Path string
 	// Entries are the town-root-relative paths the volume carries, in
-	// internal/townstate's placeholder form. Only the town-state claim carries
+	// internal/manifestdata's placeholder form. Only the town-state claim carries
 	// any: a work root and a scratch directory hold nothing of the town.
 	Entries []string
 }
 
+// townRootDirs are the directory names the manifest's rig rows are built from.
+// The renderer imports only internal/manifestdata, so it passes the names in
+// itself; TestMountsMatchTheTownStateManifest holds the rendered table equal to
+// townstate.Default(), so a rename in internal/constants fails that test rather
+// than the render.
+var townRootDirs = manifestdata.DirNames{
+	RepoGit: ".repo.git",
+	Mayor:   "mayor",
+	Rig:     "rig",
+}
+
 // Mounts is the daemon pod's mount table, in the order the pod mounts it. Its
-// town-state entries are read from internal/townstate, so the volume seed and
+// town-state entries are read from internal/manifestdata, so the volume seed and
 // the pod cannot disagree; TestMountsMatchTheTownStateManifest reports any drift.
-var Mounts = mountTable(townstate.Default())
+var Mounts = mountTable(manifestdata.Default(townRootDirs))
 
 // mountTable is the pod's mount table for the split m. The town-state claim
 // carries m's daemon-owned rows in m's order; the other two carry nothing of the
 // town.
-func mountTable(m *townstate.Manifest) []Mount {
+func mountTable(m *manifestdata.Manifest) []Mount {
 	return []Mount{
-		{Volume: TownStateClaim, Path: TownRootPath, Entries: ownedBy(m, townstate.OwnerDaemon)},
+		{Volume: TownStateClaim, Path: TownRootPath, Entries: ownedBy(m, manifestdata.OwnerDaemon)},
 		{Volume: LandingWorkClaim, Path: LandingWorkPath},
 		{Volume: TempVolume, Path: TempPath},
 	}
 }
 
 // ownedBy returns the paths of m's rows owned by owner, in m's order.
-func ownedBy(m *townstate.Manifest, owner townstate.Owner) []string {
+func ownedBy(m *manifestdata.Manifest, owner manifestdata.Owner) []string {
 	var paths []string
 	for _, e := range m.Entries {
 		if e.Owner == owner {
@@ -255,7 +265,7 @@ type Values struct {
 	// Secret is rendered per entry, whether or not the Deployment mounts it: an
 	// unclaimed entry still gets a Secret, holding the entry's name as an empty
 	// placeholder key. The renderer never receives a secret's bytes.
-	Secrets []templates.SecretFile
+	Secrets []manifestdata.SecretFile
 	// Image is the daemon reference read from deploy/values/images.yaml
 	// (gt-gg9hv.63): repo@sha256:<64 lowercase hex>. A tag is refused.
 	Image string
@@ -264,7 +274,7 @@ type Values struct {
 	// that looks like a secret is refused rather than written into a manifest.
 	Env map[string]string
 	// OMToken mounts the OMTokenFile Secret and passes --om-token-file at
-	// templates.LiveOMTokenPath, as a live compose spec with OMTokenFile does.
+	// manifestdata.LiveOMTokenPath, as a live compose spec with OMTokenFile does.
 	OMToken bool
 	// ForgeHost is the forge host:port the pod's git asks. Set, the pod mounts
 	// the ForgeTokenFile Secret and passes --forge-host and
@@ -370,7 +380,7 @@ func claim(name, namespace, size, class string) PersistentVolumeClaim {
 // secret is the Secret for one manifest entry: the entry's name as a key whose
 // value is empty, so a deployment mounts the file by the key and the operator
 // has a placeholder to fill.
-func secret(file templates.SecretFile, namespace string) Secret {
+func secret(file manifestdata.SecretFile, namespace string) Secret {
 	return Secret{
 		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Secret"},
 		Metadata: ObjectMeta{
@@ -437,7 +447,7 @@ func deployment(v Values, namespace string) Deployment {
 
 // daemonContainer is the daemon's container. Its arguments are the live compose
 // file's daemon command, so the entrypoint reads the same flags from the same
-// fixed paths (templates.LiveOMTokenPath and templates.LiveForgeTokenPath).
+// fixed paths (manifestdata.LiveOMTokenPath and manifestdata.LiveForgeTokenPath).
 //
 // It carries no preStop hook: SIGTERM plus the pod's
 // terminationGracePeriodSeconds is the drain. A hook would have to run a drain
@@ -491,10 +501,10 @@ func daemonContainer(v Values) Container {
 func daemonArgs(v Values) []string {
 	var args []string
 	if v.OMToken {
-		args = append(args, "--om-token-file", templates.LiveOMTokenPath)
+		args = append(args, "--om-token-file", manifestdata.LiveOMTokenPath)
 	}
 	if v.ForgeHost != "" {
-		args = append(args, "--forge-host", v.ForgeHost, "--forge-token-file", templates.LiveForgeTokenPath)
+		args = append(args, "--forge-host", v.ForgeHost, "--forge-token-file", manifestdata.LiveForgeTokenPath)
 	}
 	return args
 }
@@ -509,7 +519,7 @@ func daemonArgs(v Values) []string {
 func containerEnvironment(v Values) []EnvVar {
 	env := []EnvVar{
 		{Name: TownRootEnv, Value: TownRootPath},
-		{Name: ConfigHomeEnv, Value: templates.LiveOpenShellConfigHome},
+		{Name: ConfigHomeEnv, Value: manifestdata.LiveOpenShellConfigHome},
 	}
 	for _, name := range sortedKeys(v.Env) {
 		env = append(env, EnvVar{Name: name, Value: v.Env[name]})
@@ -553,7 +563,7 @@ func mounts(v Values) []VolumeMount {
 	for _, file := range v.Secrets {
 		m = append(m, VolumeMount{
 			Name:      secretVolumeName(file.Name),
-			MountPath: templates.LiveConfigDirPath + "/" + file.Name,
+			MountPath: manifestdata.LiveConfigDirPath + "/" + file.Name,
 			SubPath:   file.Name,
 			ReadOnly:  true,
 		})
@@ -561,7 +571,7 @@ func mounts(v Values) []VolumeMount {
 	if v.OMToken {
 		m = append(m, VolumeMount{
 			Name:      secretVolumeName(OMTokenFile),
-			MountPath: templates.LiveOMTokenPath,
+			MountPath: manifestdata.LiveOMTokenPath,
 			SubPath:   OMTokenFile,
 			ReadOnly:  true,
 		})
@@ -569,7 +579,7 @@ func mounts(v Values) []VolumeMount {
 	if v.ForgeHost != "" {
 		m = append(m, VolumeMount{
 			Name:      secretVolumeName(ForgeTokenFile),
-			MountPath: templates.LiveForgeTokenPath,
+			MountPath: manifestdata.LiveForgeTokenPath,
 			SubPath:   ForgeTokenFile,
 			ReadOnly:  true,
 		})

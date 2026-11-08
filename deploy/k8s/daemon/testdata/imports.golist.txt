@@ -58,106 +58,13 @@ internal/testlog|sync sync/atomic unsafe
 os|errors internal/bytealg internal/byteorder internal/filepathlite internal/goarch internal/poll internal/strconv internal/stringslite internal/syscall/execenv internal/syscall/unix internal/testlog io io/fs runtime slices sync sync/atomic syscall time unsafe
 fmt|errors internal/fmtsort internal/stringslite io math os reflect slices strconv sync unicode/utf8
 bytes|errors internal/bytealg io iter math/bits unicode unicode/utf8 unsafe
-context|errors internal/reflectlite sync sync/atomic time
-embed|errors internal/bytealg internal/stringslite io io/fs time
 encoding|
-encoding/json/internal|errors
-encoding/json/internal/jsonflags|encoding/json/internal
-encoding/json/internal/jsonopts|encoding/json/internal encoding/json/internal/jsonflags
-strings|errors internal/abi internal/bytealg internal/stringslite io iter math/bits sync unicode unicode/utf8 unsafe
-unicode/utf16|
-encoding/json/internal/jsonwire|cmp encoding/json/internal/jsonflags errors io math slices strconv strings unicode unicode/utf16 unicode/utf8
-encoding/json/jsontext|bytes encoding/json/internal encoding/json/internal/jsonflags encoding/json/internal/jsonopts encoding/json/internal/jsonwire errors io iter math math/bits slices strconv strings sync unicode/utf8
-encoding/base32|io slices strconv
 encoding/base64|internal/byteorder io slices strconv
-encoding/binary|errors io math reflect slices sync
-encoding/hex|errors fmt io slices strings
-encoding/json/v2|bytes cmp encoding encoding/base32 encoding/base64 encoding/binary encoding/hex encoding/json/internal encoding/json/internal/jsonflags encoding/json/internal/jsonopts encoding/json/internal/jsonwire encoding/json/jsontext errors fmt io math math/bits reflect slices strconv strings sync time unicode unicode/utf8
-encoding/json|bytes cmp encoding encoding/json/internal encoding/json/internal/jsonflags encoding/json/internal/jsonopts encoding/json/internal/jsonwire encoding/json/jsontext encoding/json/v2 errors fmt io reflect strconv strings
-bufio|bytes errors io strings unicode/utf8
-encoding/xml|bufio bytes encoding errors fmt io reflect runtime strconv strings sync unicode unicode/utf8
-github.com/steveyegge/gastown/internal/cli|os sync
-github.com/BurntSushi/toml/internal|time
 sort|internal/reflectlite math/bits slices
-github.com/BurntSushi/toml|bufio bytes encoding encoding/json errors fmt github.com/BurntSushi/toml/internal io io/fs math os reflect runtime sort strconv strings sync time unicode unicode/utf8
-github.com/steveyegge/gastown/internal/constants|fmt os sync/atomic time
-path/filepath|errors internal/bytealg internal/filepathlite io/fs os runtime slices strings syscall unicode/utf8
-github.com/steveyegge/gastown/internal/scheduler/capacity|encoding/json errors fmt os path/filepath strings time
-github.com/steveyegge/gastown/internal/atomicfile|encoding/json errors os path/filepath syscall
-github.com/steveyegge/gastown/internal/deadseats|
-github.com/steveyegge/gastown/internal/doltargv|path/filepath
-internal/bisect|runtime sync sync/atomic
-internal/godebug|internal/bisect internal/godebugs sync sync/atomic unsafe
-os/exec|bytes context errors internal/godebug internal/syscall/execenv internal/syscall/unix io io/fs os path/filepath runtime strconv strings sync/atomic syscall time
-github.com/steveyegge/gastown/internal/hoststat|context errors fmt github.com/steveyegge/gastown/internal/doltargv os os/exec runtime slices strconv strings time
-github.com/steveyegge/gastown/internal/townhealth|context encoding/json errors fmt github.com/steveyegge/gastown/internal/atomicfile github.com/steveyegge/gastown/internal/constants github.com/steveyegge/gastown/internal/deadseats github.com/steveyegge/gastown/internal/hoststat math os path/filepath sort strconv strings time
+strings|errors internal/abi internal/bytealg internal/stringslite io iter math/bits sync unicode unicode/utf8 unsafe
 regexp/syntax|slices sort strconv strings sync unicode unicode/utf8
 regexp|bytes io iter regexp/syntax slices strconv strings sync unicode unicode/utf8
 gopkg.in/yaml.v3|bytes encoding encoding/base64 errors fmt io math reflect regexp sort strconv strings sync time unicode unicode/utf8
-log/internal|
-log|fmt io log/internal os runtime sync sync/atomic time
-maps|iter unsafe
-vendor/golang.org/x/net/dns/dnsmessage|errors slices
-internal/nettrace|
-internal/singleflight|sync
-weak|internal/abi runtime unsafe
-unique|internal/abi internal/goarch internal/stringslite internal/sync runtime sync sync/atomic unsafe weak
-net/netip|cmp errors internal/bytealg internal/byteorder math math/bits strconv unique
-runtime/cgo|C internal/runtime/sys sync sync/atomic unsafe
-net|C cmp context errors vendor/golang.org/x/net/dns/dnsmessage internal/bytealg internal/godebug internal/nettrace internal/poll internal/singleflight internal/strconv internal/stringslite internal/syscall/unix io io/fs net/netip os runtime slices sync sync/atomic syscall time unsafe
-net/url|bytes errors fmt internal/godebug net/netip path slices strconv strings unsafe
-github.com/steveyegge/gastown/internal/config|bytes cmp context embed encoding encoding/json errors fmt github.com/BurntSushi/toml github.com/steveyegge/gastown/internal/constants github.com/steveyegge/gastown/internal/scheduler/capacity github.com/steveyegge/gastown/internal/townhealth gopkg.in/yaml.v3 io io/fs log maps math net net/url os os/exec path/filepath reflect regexp runtime slices sort strconv strings sync syscall time unicode
-github.com/steveyegge/gastown/internal/exectax|context fmt os os/exec path/filepath sort time
-github.com/steveyegge/gastown/internal/procid|errors fmt os path/filepath strconv strings syscall
-hash|io
-crypto|hash io strconv
-crypto/internal/fips140deps/godebug|internal/godebug
-crypto/internal/fips140|crypto/internal/fips140deps/godebug errors runtime strings unsafe
-crypto/internal/fips140/alias|unsafe
-crypto/internal/fips140deps/byteorder|internal/byteorder
-crypto/internal/fips140deps/cpu|internal/cpu internal/goarch
-crypto/internal/impl|strings
-crypto/internal/fips140/sha256|bytes crypto/internal/fips140 crypto/internal/fips140deps/byteorder crypto/internal/fips140deps/cpu crypto/internal/impl errors hash math/bits
-crypto/internal/constanttime|
-crypto/internal/fips140/subtle|crypto/internal/constanttime crypto/internal/fips140/alias crypto/internal/fips140deps/byteorder math/bits
-crypto/internal/fips140/sha3|bytes crypto/internal/fips140 crypto/internal/fips140/subtle crypto/internal/fips140deps/byteorder crypto/internal/fips140deps/cpu crypto/internal/impl errors math/bits runtime unsafe
-crypto/internal/fips140/sha512|bytes crypto/internal/fips140 crypto/internal/fips140deps/byteorder crypto/internal/fips140deps/cpu crypto/internal/impl errors hash math/bits
-crypto/internal/fips140/hmac|bytes crypto/internal/fips140 crypto/internal/fips140/sha256 crypto/internal/fips140/sha3 crypto/internal/fips140/sha512 errors hash
-crypto/internal/fips140/check|crypto/internal/fips140 crypto/internal/fips140/hmac crypto/internal/fips140/sha256 crypto/internal/fips140deps/byteorder crypto/internal/fips140deps/godebug io unsafe
-crypto/internal/fips140/aes|bytes crypto/internal/fips140 crypto/internal/fips140/alias crypto/internal/fips140/check crypto/internal/fips140/subtle crypto/internal/fips140deps/byteorder crypto/internal/fips140deps/cpu crypto/internal/fips140deps/godebug crypto/internal/impl errors math/bits strconv
-crypto/internal/fips140deps/time|unsafe
-crypto/internal/entropy/v1.0.0|crypto/internal/fips140deps/time errors math/bits sync/atomic unsafe
-crypto/internal/sysrand|errors internal/syscall/unix math os runtime sync sync/atomic syscall time unsafe
-crypto/internal/fips140/drbg|bytes crypto/internal/entropy/v1.0.0 crypto/internal/fips140 crypto/internal/fips140/aes crypto/internal/fips140/check crypto/internal/fips140/subtle crypto/internal/fips140deps/byteorder crypto/internal/sysrand errors io math/bits sync sync/atomic
-crypto/internal/fips140/aes/gcm|crypto/internal/fips140 crypto/internal/fips140/aes crypto/internal/fips140/alias crypto/internal/fips140/check crypto/internal/fips140/drbg crypto/internal/fips140/subtle crypto/internal/fips140deps/byteorder crypto/internal/fips140deps/cpu crypto/internal/impl errors math
-crypto/fips140|crypto/internal/fips140 crypto/internal/fips140/check internal/godebug unsafe
-crypto/internal/fips140only|crypto/fips140 crypto/internal/fips140/drbg crypto/internal/fips140/sha256 crypto/internal/fips140/sha3 crypto/internal/fips140/sha512 hash io
-crypto/subtle|crypto/internal/constanttime crypto/internal/fips140/subtle internal/runtime/sys unsafe
-crypto/cipher|bytes crypto/internal/fips140/aes crypto/internal/fips140/aes/gcm crypto/internal/fips140/alias crypto/internal/fips140only crypto/subtle errors internal/byteorder io
-crypto/internal/boring/sig|
-crypto/internal/boring|crypto crypto/cipher crypto/internal/boring/sig hash
-crypto/sha256|crypto crypto/internal/boring crypto/internal/fips140/sha256 hash
-github.com/jonboulle/clockwork|context errors fmt slices sync time
-flag|encoding errors fmt io os reflect runtime slices strconv strings time
-internal/sysinfo|bufio bytes internal/cpu io os strings sync
-math/rand|internal/godebug math sync sync/atomic unsafe
-runtime/debug|fmt internal/poll os runtime slices strconv strings time unsafe
-runtime/trace|context errors fmt internal/trace/tracev2 io runtime slices sync sync/atomic time unsafe
-testing|bytes context errors flag fmt internal/race internal/sysinfo io math math/rand os path/filepath reflect runtime runtime/debug runtime/trace slices strconv strings sync sync/atomic time unicode unsafe
-github.com/steveyegge/gastown/internal/workspace|errors fmt github.com/steveyegge/gastown/internal/config os path/filepath strings testing
-hash/fnv|errors hash internal/byteorder math/bits
-github.com/steveyegge/gastown/internal/tmux|bytes context crypto/sha256 encoding/hex encoding/json errors fmt github.com/jonboulle/clockwork github.com/steveyegge/gastown/internal/config github.com/steveyegge/gastown/internal/constants github.com/steveyegge/gastown/internal/workspace hash/fnv net os os/exec path/filepath regexp runtime sort strconv strings sync syscall testing time unicode unicode/utf8
-github.com/steveyegge/gastown/internal/lock|encoding/json errors fmt github.com/steveyegge/gastown/internal/procid github.com/steveyegge/gastown/internal/tmux os os/exec path/filepath syscall time
-github.com/steveyegge/gastown/internal/util|bufio bytes errors fmt github.com/steveyegge/gastown/internal/doltargv github.com/steveyegge/gastown/internal/lock github.com/steveyegge/gastown/internal/tmux github.com/steveyegge/gastown/internal/workspace net/url os os/exec path/filepath strconv strings sync syscall time unicode unicode/utf8
-github.com/steveyegge/gastown/internal/hostprobe|context encoding/json errors fmt github.com/steveyegge/gastown/internal/exectax github.com/steveyegge/gastown/internal/hoststat github.com/steveyegge/gastown/internal/util os path/filepath regexp strconv strings time
-github.com/steveyegge/gastown/internal/templates/commands|embed fmt gopkg.in/yaml.v3 os path/filepath strings
-text/template/parse|bytes fmt runtime strconv strings unicode unicode/utf8
-text/template|errors fmt internal/fmtsort io io/fs maps net/url os path path/filepath reflect runtime strings sync text/template/parse unicode unicode/utf8
-github.com/steveyegge/gastown/internal/templates|bytes context embed encoding/json encoding/xml errors fmt github.com/steveyegge/gastown/internal/cli github.com/steveyegge/gastown/internal/config github.com/steveyegge/gastown/internal/hostprobe github.com/steveyegge/gastown/internal/templates/commands gopkg.in/yaml.v3 io io/fs net net/url os os/exec path/filepath regexp runtime slices sort strconv strings text/template time
-golang.org/x/sys/unix|bytes encoding/binary math/bits runtime slices sort strconv strings sync syscall time unsafe
-github.com/gofrs/flock|context errors golang.org/x/sys/unix io/fs os runtime sync time
-math/rand/v2|errors internal/byteorder internal/chacha8rand math math/bits unsafe
-text/tabwriter|fmt io unicode/utf8
-github.com/steveyegge/gastown/internal/bird|bufio embed encoding/json errors fmt github.com/gofrs/flock github.com/steveyegge/gastown/internal/atomicfile github.com/steveyegge/gastown/internal/procid io io/fs math/rand/v2 os os/exec path/filepath regexp slices strings sync syscall text/tabwriter time unicode
-github.com/steveyegge/gastown/internal/townstate|bytes encoding/json errors fmt github.com/steveyegge/gastown/internal/bird github.com/steveyegge/gastown/internal/config github.com/steveyegge/gastown/internal/constants gopkg.in/yaml.v3 io/fs maps path slices strings time
-github.com/steveyegge/gastown/deploy/k8s/daemon|errors fmt github.com/steveyegge/gastown/internal/templates github.com/steveyegge/gastown/internal/townstate gopkg.in/yaml.v3 io regexp sort strconv strings time
+path/filepath|errors internal/bytealg internal/filepathlite io/fs os runtime slices strings syscall unicode/utf8
+github.com/steveyegge/gastown/internal/manifestdata|bytes errors fmt gopkg.in/yaml.v3 io path path/filepath regexp slices strings
+github.com/steveyegge/gastown/deploy/k8s/daemon|errors fmt github.com/steveyegge/gastown/internal/manifestdata gopkg.in/yaml.v3 io regexp sort strconv strings time
