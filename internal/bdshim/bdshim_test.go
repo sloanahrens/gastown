@@ -731,8 +731,8 @@ func TestOperandTableCoversWhatBdDocuments(t *testing.T) {
 	documented := bdOperands(t)
 	// The check below walks a map, so a recording that parsed to nothing would
 	// pass it and leave the table looking complete.
-	if len(documented) < 100 {
-		t.Fatalf("testdata/bd-flags.txt documents positionals for %d commands, want at least 100 (bd 1.2.2 documents 112)", len(documented))
+	if len(documented) < 90 {
+		t.Fatalf("testdata/bd-flags.txt documents positionals for %d commands, want at least 90 (bd 1.2.2 documents 92 at beads b9f68260)", len(documented))
 	}
 	for command, placeholders := range documented {
 		slots, ok := operandSlots[command]
@@ -848,9 +848,8 @@ var beadNamingFlags = map[string]bool{
 // unroutedBeadFlags are the bead-naming flags bd documents on a command that
 // the shim reads as data rather than a bead: the command writes its bead in the
 // store its working directory names (see beadValueFlags), or a flag picks the
-// store for it (migrate issues, the admin verbs).
+// store for it (migrate issues).
 var unroutedBeadFlags = map[string]map[string]bool{
-	"admin compact":  {"--id": true},
 	"create":         {"--deps": true, "--id": true, "--parent": true, "--waits-for": true},
 	"create-form":    {"--parent": true},
 	"gate create":    {"--blocks": true},
