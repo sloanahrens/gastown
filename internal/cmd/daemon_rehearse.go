@@ -395,10 +395,42 @@ func blankedJSON(v any) any {
 }
 
 // settingValue is one string value of the staged JSON settings and the key path
-// that holds it: dotted keys down to it, a list index as [i].
+// that holds it, rendered so two different paths cannot read alike: a member
+// that starts with a letter or '_' and holds only letters, digits, '_' and '-'
+// joins with a dot, any other member is quoted inside brackets, and a list
+// index is [i]. A value at the top of its file has the empty path, and a
+// top-level list is rooted at rehearseKeyRoot so its indices are not left bare.
 type settingValue struct {
 	key  string
 	text string
+}
+
+// rehearseKeyRoot names the value at the top of its setting file, which no key
+// segment reaches. It prefixes a top-level list's first index.
+const rehearseKeyRoot = "(top level)"
+
+// rehearsePlainMember matches a JSON member name that reads unambiguously as a
+// dotted segment: it starts with a letter or '_' and holds only letters, digits,
+// '_' and '-'.
+var rehearsePlainMember = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
+
+// rehearseMemberKey appends one JSON object member to a key path.
+func rehearseMemberKey(key, member string) string {
+	if rehearsePlainMember.MatchString(member) {
+		if key == "" {
+			return member
+		}
+		return key + "." + member
+	}
+	return key + "[" + strconv.Quote(member) + "]"
+}
+
+// rehearseIndexKey appends one list index to a key path.
+func rehearseIndexKey(key string, i int) string {
+	if key == "" {
+		key = rehearseKeyRoot
+	}
+	return key + "[" + strconv.Itoa(i) + "]"
 }
 
 // redactSettingsJSON blanks the value of every secret-named key, of whatever
@@ -422,15 +454,11 @@ func redactSettingsJSON(data []byte) ([]byte, []settingValue, error) {
 					t[k] = blankedJSON(x)
 					continue
 				}
-				child := k
-				if key != "" {
-					child = key + "." + k
-				}
-				t[k] = walk(x, child)
+				t[k] = walk(x, rehearseMemberKey(key, k))
 			}
 		case []any:
 			for i, x := range t {
-				t[i] = walk(x, key+"["+strconv.Itoa(i)+"]")
+				t[i] = walk(x, rehearseIndexKey(key, i))
 			}
 		case string:
 			values = append(values, settingValue{key: key, text: t})
@@ -656,7 +684,7 @@ func checkSettingPaths(ctx context.Context, r *rehearsal) []string {
 		switch {
 		case err == nil:
 		case probeSaidNo(err, 1):
-			fails = append(fails, fmt.Sprintf("%s: named by %s, absent from the image and not under a bind of the live compose; the row stays red until the image carries it, a bind of the live compose mounts it, or the setting is dropped", sp.path, settingKeyNames(sp.keys)))
+			fails = append(fails, fmt.Sprintf("%s: named by %s, absent from the image and not under a bind of the live compose; the row stays red until a bead lands whose fix makes the image carry it, mounts a bind of the live compose over it, or drops the setting", sp.path, settingKeyNames(sp.keys)))
 		default:
 			fails = append(fails, sp.path+": the probe did not run: "+err.Error())
 		}
@@ -671,7 +699,7 @@ func settingKeyNames(keys []string) string {
 	for i, k := range keys {
 		names[i] = k
 		if k == "" {
-			names[i] = "(top level)"
+			names[i] = rehearseKeyRoot
 		}
 	}
 	return strings.Join(names, ", ")
