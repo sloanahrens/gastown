@@ -77,6 +77,8 @@ var beadsExemptCommands = map[string]bool{
 	"bird":        true, // Starts claude, which must work when bd is missing or outdated (gt-qipl5)
 
 	"git-credential-forgejo": true, // Runs on every git push; reads one file, needs no bd (gt-dhjz6)
+
+	"gate": true, // The gate model reads git, go list and saved logs; no beads (gt-gg9hv.71)
 }
 
 // Commands exempt from the town root branch warning.
