@@ -46,8 +46,9 @@ var composeEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // values the render cannot carry, and any of them on a scratch spec.
 func (s ComposeSpec) validateClient() error {
 	if s.Scratch && (len(s.Env) > 0 || len(s.KubeconfigFiles) > 0 || s.OpenShellConfigDir != "" || s.ConfigDir != "" ||
-		s.OMTokenMetaFile != "" || s.LandingWorkRoot != "" || s.TimeZone != "" || s.BackupDir != "" || len(s.BindRO) > 0) {
-		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, ConfigDir, OMTokenMetaFile, LandingWorkRoot, TimeZone, BackupDir or BindRO is set on a scratch spec; only the live render carries the client configuration")
+		s.OMTokenMetaFile != "" || s.LandingWorkRoot != "" || s.TimeZone != "" || s.BackupDir != "" || len(s.BindRO) > 0 ||
+		s.ClaudeBeadsDir != "") {
+		return fmt.Errorf("compose spec: Env, KubeconfigFiles, OpenShellConfigDir, ConfigDir, OMTokenMetaFile, LandingWorkRoot, TimeZone, BackupDir, BindRO or ClaudeBeadsDir is set on a scratch spec; only the live render carries the client configuration")
 	}
 	if _, set := s.Env[liveBackupRootEnv]; set && s.BackupDir != "" {
 		return fmt.Errorf("compose spec: Env names %s, which the render sets from BackupDir; a daemon.env entry would repeat the key", liveBackupRootEnv)
@@ -77,7 +78,19 @@ func (s ComposeSpec) validateClient() error {
 			return fmt.Errorf("compose spec: LandingWorkRoot %q and OMTokenMetaFile %q overlap, so two mounts would share a target", s.LandingWorkRoot, s.OMTokenMetaFile)
 		}
 	}
-	for _, p := range append([]string{s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile, s.LandingWorkRoot}, s.KubeconfigFiles...) {
+	if s.ClaudeBeadsDir != "" {
+		// The claude beads directory is bound read-write beside the town, as the
+		// backup directory is, so it may not be the filesystem root or overlap the
+		// town. A relative one would resolve against docker's working directory.
+		clean := filepath.Clean(s.ClaudeBeadsDir)
+		switch {
+		case !filepath.IsAbs(s.ClaudeBeadsDir):
+			return fmt.Errorf("compose spec: ClaudeBeadsDir %q is not absolute; it is bound at the same path in the container, and a relative one would resolve against docker's working directory", s.ClaudeBeadsDir)
+		case clean == "/" || pathContains(s.TownRoot, clean) || pathContains(clean, s.TownRoot):
+			return fmt.Errorf("compose spec: ClaudeBeadsDir %q is the filesystem root or overlaps the town root %q; it is bound read-write beside the town, not over it", s.ClaudeBeadsDir, s.TownRoot)
+		}
+	}
+	for _, p := range append([]string{s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile, s.LandingWorkRoot, s.ClaudeBeadsDir}, s.KubeconfigFiles...) {
 		if p == "" {
 			continue
 		}
@@ -132,7 +145,7 @@ func (s ComposeSpec) validateClient() error {
 		// town root is absolute (validate checks it first), so a ConfigDir of "/"
 		// holds it and is refused here too (gt-i7c1b).
 		dir := filepath.Clean(s.ConfigDir)
-		for _, rw := range []struct{ name, path string }{{"TownRoot", s.TownRoot}, {"LandingWorkRoot", s.LandingWorkRoot}, {"BackupDir", s.BackupDir}} {
+		for _, rw := range []struct{ name, path string }{{"TownRoot", s.TownRoot}, {"LandingWorkRoot", s.LandingWorkRoot}, {"BackupDir", s.BackupDir}, {"ClaudeBeadsDir", s.ClaudeBeadsDir}} {
 			if rw.path != "" && pathContains(dir, rw.path) {
 				return fmt.Errorf("compose spec: ConfigDir %q holds %s %q, which is mounted read-write; the config directory is bound read-only with everything under it", s.ConfigDir, rw.name, rw.path)
 			}
@@ -145,7 +158,7 @@ func (s ComposeSpec) validateClient() error {
 // BindRO entry may not repeat one of them.
 func renderedHostPaths(s ComposeSpec) []string {
 	return append([]string{s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile,
-		s.LandingWorkRoot, s.OMTokenFile, s.OMConfigFile, s.HMConfigFile, s.ForgeTokenFile}, s.KubeconfigFiles...)
+		s.LandingWorkRoot, s.ClaudeBeadsDir, s.OMTokenFile, s.OMConfigFile, s.HMConfigFile, s.ForgeTokenFile}, s.KubeconfigFiles...)
 }
 
 func isOwnedEnv(name string) bool {
@@ -234,6 +247,12 @@ func liveClientMounts(s ComposeSpec) (string, error) {
 	}
 	if s.LandingWorkRoot != "" {
 		q := strconv.Quote(composeLiteral(s.LandingWorkRoot))
+		fmt.Fprintf(&b, "      - type: bind\n        source: %s\n        target: %s\n", q, q)
+	}
+	if s.ClaudeBeadsDir != "" {
+		// Read-write, as the backup directory is: the daemon's reaper writes the
+		// claude database's closes and deletes through bd (gt-he92oj).
+		q := strconv.Quote(composeLiteral(s.ClaudeBeadsDir))
 		fmt.Fprintf(&b, "      - type: bind\n        source: %s\n        target: %s\n", q, q)
 	}
 	bindRO := append([]string(nil), s.BindRO...)

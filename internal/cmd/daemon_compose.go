@@ -71,6 +71,13 @@ type daemonComposeFlags struct {
 	// the same path, in the order given. Each is checked to be a directory here;
 	// the render checks the rest (gt-vqexg).
 	bindRO []string
+	// claudeBeadsDir is --claude-beads-dir: the host's ~/.claude/.beads directory,
+	// an absolute path. The render mounts it read-write at that path so the
+	// wisp_reaper can reach the claude database from the container (gt-he92oj).
+	claudeBeadsDir string
+	// claudeBeadsDirSet is whether --claude-beads-dir was given at all, so a blank
+	// value is refused rather than read as unset.
+	claudeBeadsDirSet bool
 	// townStateVolume is --town-state-volume: the name of an external docker
 	// volume mounted at the town root in place of the Mac's bind, so the
 	// daemon's state lives in the volume (gt-yjzepk.6). "" renders today's bind.
@@ -355,6 +362,13 @@ is refused, and so is one the render cannot mount read-only (relative, not
 cleaned, under .., inside or containing the town, already mounted, or given
 twice). The mounts are sorted by path. Without the flag the render is unchanged.
 
+--claude-beads-dir names the host's ~/.claude/.beads directory, an absolute path.
+The render mounts it read-write at that same path, so the claude beads database is
+writable from the daemon container. The wisp_reaper reads it there when
+patrols.wisp_reaper.extra_beads_roots names the path or its ~/.claude parent. A
+blank value, a relative path, or a path that is not a directory is refused. Without
+the flag the render is unchanged.
+
 --town-state-volume names an external docker volume and mounts it at the town
 root in place of the Mac's bind, so the daemon's state lives in the volume and a
 compose down never removes it. The volume is declared external under the file's
@@ -374,6 +388,7 @@ be told apart from one the operator wrote.
 			f.omTokenFileSet = cmd.Flags().Changed(config.OMTokenFileFlag)
 			f.secretsManifestSet = cmd.Flags().Changed("secrets-manifest")
 			f.townStateVolumeSet = cmd.Flags().Changed("town-state-volume")
+			f.claudeBeadsDirSet = cmd.Flags().Changed("claude-beads-dir")
 			return run(cmd.OutOrStdout(), f)
 		},
 	}
@@ -399,6 +414,8 @@ be told apart from one the operator wrote.
 		"the host's Dolt backup directory (an absolute path), mounted read-write at that path and named by GT_DOLT_BACKUP_ROOT; unset renders neither")
 	write.Flags().StringArrayVar(&f.bindRO, "bind-ro", nil,
 		"a host directory (an absolute path) mounted read-only at that same path in the daemon; repeat for more, and a path that is not a directory is refused")
+	write.Flags().StringVar(&f.claudeBeadsDir, "claude-beads-dir", "",
+		"the host's ~/.claude/.beads directory (an absolute path), mounted read-write at that same path so the wisp_reaper reaches the claude database; a blank value or a path that is not a directory is refused, and unset renders no mount")
 	write.Flags().StringVar(&f.townStateVolume, "town-state-volume", "",
 		"an external docker volume to mount at the town root in place of the Mac's bind; a name that is not a valid volume name is refused, and unset renders today's bind")
 	write.Flags().BoolVar(&f.force, "force", false,
@@ -457,6 +474,23 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	secretsManifest := strings.TrimSpace(f.secretsManifest)
 	if f.secretsManifestSet && secretsManifest == "" {
 		return fmt.Errorf("--secrets-manifest was given blank; name the manifest file, or leave the flag out to mount the config directory")
+	}
+	// The claude beads directory is a mount, so a blank value is refused rather
+	// than rendered as no mount, and it must be a directory the command can stat:
+	// a path that is not the database's directory would leave the reaper finding
+	// no database to write.
+	claudeBeadsDir := strings.TrimSpace(f.claudeBeadsDir)
+	if f.claudeBeadsDirSet && claudeBeadsDir == "" {
+		return fmt.Errorf("--claude-beads-dir was given blank; name the host's ~/.claude/.beads directory, or leave the flag out to render no mount")
+	}
+	if claudeBeadsDir != "" {
+		dir, err := d.isDir(claudeBeadsDir)
+		if err != nil {
+			return fmt.Errorf("--claude-beads-dir %s cannot be read, and no compose file was written: %w", claudeBeadsDir, err)
+		}
+		if !dir {
+			return fmt.Errorf("--claude-beads-dir %s is not a directory, and no compose file was written", claudeBeadsDir)
+		}
 	}
 	var secretFiles []templates.SecretFile
 	if secretsManifest != "" {
@@ -572,6 +606,7 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		SecretsFS:          d.secretsFS,
 		BackupDir:          strings.TrimSpace(f.backupDir),
 		BindRO:             bindRO,
+		ClaudeBeadsDir:     claudeBeadsDir,
 		Project:            project,
 		ContainerName:      cfg.ContainerName(),
 		Image:              image,

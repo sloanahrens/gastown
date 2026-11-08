@@ -1,6 +1,7 @@
 package templates_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -194,6 +195,93 @@ func TestComposeBindsTheLandingWorkRootAtTheSamePath(t *testing.T) {
 	s.LandingWorkRoot = "relative/landing"
 	if _, err := templates.RenderDaemonCompose(s); err == nil || !strings.Contains(err.Error(), "LandingWorkRoot") || !strings.Contains(err.Error(), "not absolute") {
 		t.Errorf("a relative work_root: error = %v, want the reason", err)
+	}
+}
+
+// claudeBeadsFixture is the host's ~/.claude/.beads directory, the one the
+// wisp_reaper reads the claude database from. It is mounted at its own path.
+const claudeBeadsFixture = "/host/home/.claude/.beads"
+
+// The claude beads directory is bound read-write at its own path, with no
+// read_only key, so the reaper can write the claude database from the container.
+// A spec that names none renders the file it always has (gt-he92oj).
+func TestComposeBindsTheClaudeBeadsDirReadWrite(t *testing.T) {
+	t.Parallel()
+	s := liveSpec()
+	s.ClaudeBeadsDir = claudeBeadsFixture
+	out, f := render(t, s)
+
+	var mounts []composeVolume
+	for _, v := range f.Services["daemon"].Volumes {
+		if v.Target == claudeBeadsFixture {
+			mounts = append(mounts, v)
+		}
+	}
+	want := composeVolume{Type: "bind", Source: claudeBeadsFixture, Target: claudeBeadsFixture}
+	if len(mounts) != 1 || mounts[0] != want {
+		t.Errorf("mounts at %s = %v, want exactly the read-write bind %+v", claudeBeadsFixture, mounts, want)
+	}
+	target := fmt.Sprintf("target: %q\n", claudeBeadsFixture)
+	i := strings.Index(out, target)
+	if i < 0 {
+		t.Fatalf("rendered file has no mount target %s:\n%s", claudeBeadsFixture, out)
+	}
+	if strings.HasPrefix(out[i+len(target):], "        read_only") {
+		t.Errorf("the claude beads mount carries read_only, want it read-write:\n%s", out)
+	}
+
+	out, _ = render(t, liveSpec())
+	golden, err := os.ReadFile(filepath.Join("testdata", "daemon-compose.golden.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != string(golden) {
+		t.Errorf("a spec with no ClaudeBeadsDir differs from testdata/daemon-compose.golden.yml\ngot:\n%s\nwant:\n%s", out, golden)
+	}
+}
+
+// ClaudeBeadsDir must be a path the daemon can mount at its own path beside the
+// town. Each refusal names what is wrong with it, and a scratch spec refuses the
+// field outright (gt-he92oj).
+func TestComposeSpecValidateClaudeBeadsDir(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		dir, configDir, want string
+		scratch              bool
+	}{
+		"relative path":         {dir: "claude/.beads", want: "not absolute"},
+		"colon in the path":     {dir: "/host/a:b/.beads", want: "without a colon or control character"},
+		"control character":     {dir: "/host/\x01/.beads", want: "without a colon or control character"},
+		"the filesystem root":   {dir: "/", want: "filesystem root"},
+		"inside the town":       {dir: "/towns/live/.beads", want: "overlaps the town root"},
+		"around the town":       {dir: "/towns", want: "overlaps the town root"},
+		"inside the config dir": {dir: "/host/home/.config/gt/.beads", configDir: "/host/home/.config/gt", want: "read-write"},
+		"a scratch spec":        {dir: claudeBeadsFixture, want: "scratch spec", scratch: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := liveSpec()
+			if tc.scratch {
+				s = scratchSpec()
+			}
+			s.ClaudeBeadsDir, s.ConfigDir = tc.dir, tc.configDir
+			if _, err := templates.RenderDaemonCompose(s); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("RenderDaemonCompose with ClaudeBeadsDir %q = %v, want a refusal that says %q", tc.dir, err, tc.want)
+			}
+		})
+	}
+}
+
+// A read-only --bind-ro of the claude beads directory is refused: the render
+// already mounts that path read-write, and a second mount would share its target.
+func TestComposeRefusesABindROOfTheClaudeBeadsDir(t *testing.T) {
+	t.Parallel()
+	s := liveSpec()
+	s.ClaudeBeadsDir = claudeBeadsFixture
+	s.BindRO = []string{claudeBeadsFixture}
+	if _, err := templates.RenderDaemonCompose(s); err == nil || !strings.Contains(err.Error(), "already mounts") {
+		t.Fatalf("RenderDaemonCompose with BindRO of ClaudeBeadsDir = %v, want the already-mounted refusal", err)
 	}
 }
 
