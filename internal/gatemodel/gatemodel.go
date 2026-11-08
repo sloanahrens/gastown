@@ -4,13 +4,15 @@
 // the modeled unit-tier wall with the wall a saved gate job log reports.
 //
 // Its inputs are saved gate job logs, the landing commits' diffs, and the
-// repository's `go list` import graph. It calls no network, writes nothing
-// but a report, and no caller may use it to skip a test: the gate it models is
-// hypothetical until an operator decides otherwise.
+// repository's `go list` import graph. It calls no network and writes no file:
+// the report goes to standard output and warnings go to standard error. No
+// caller may use it to skip a test: the gate it models is hypothetical until
+// an operator decides otherwise.
 package gatemodel
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/land"
@@ -689,48 +692,27 @@ func percentile(sorted []float64, p float64) float64 {
 	return sorted[rank]
 }
 
-// RenderText writes the report: a block per landing and the summary.
+// RenderText writes the report: a header row, one row per landing with the
+// short sha, changed packages, dependents, always-run set, fallback reason,
+// modeled wall and logged wall, then the summary.
 func RenderText(w io.Writer, rep Report) error {
+	var table bytes.Buffer
+	tw := tabwriter.NewWriter(&table, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintf(tw, "SHORT SHA\tCHANGED\tDEPENDENTS\tALWAYS-RUN\tFALLBACK\tMODELED(%d cpus)\tLOGGED\n", rep.CPUS); err != nil {
+		return err
+	}
 	for _, l := range rep.Landings {
-		if _, err := fmt.Fprintf(w, "%s %s\n", l.Short, l.Subject); err != nil {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			l.Short, list(l.Changed), list(l.Dependents), list(l.AlwaysRun),
+			fallbackCell(l), modeledCell(l), loggedCell(l)); err != nil {
 			return err
 		}
-		lines := []struct{ label, value string }{
-			{"changed", list(l.Changed)},
-			{"dependents", list(l.Dependents)},
-			{"always-run", list(l.AlwaysRun)},
-		}
-		for _, ln := range lines {
-			if _, err := fmt.Fprintf(w, "  %-11s %s\n", ln.label+":", ln.value); err != nil {
-				return err
-			}
-		}
-		if l.Fallback != "" {
-			if _, err := fmt.Fprintf(w, "  %-11s %s\n", "fallback:", l.Fallback); err != nil {
-				return err
-			}
-		}
-		modeled := "n/a"
-		if l.ModeledKnown {
-			modeled = secsText(l.ModeledWall)
-			if l.Fallback != "" {
-				modeled += " (full run)"
-			}
-		}
-		logged := "-"
-		if l.HasLog {
-			logged = secsText(l.LoggedWall)
-		}
-		saving := "n/a"
-		if l.HasSaving {
-			saving = fmt.Sprintf("%.1f%%", l.Saving*100)
-		}
-		if _, err := fmt.Fprintf(w, "  %-11s %s at %d cpus; logged: %s; saving %s\n", "modeled:", modeled, rep.CPUS, logged, saving); err != nil {
-			return err
-		}
-		if _, err := fmt.Fprintln(w); err != nil {
-			return err
-		}
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	if _, err := w.Write(table.Bytes()); err != nil {
+		return err
 	}
 	hub := "hubs"
 	if rep.Summary.Hubs == 1 {
@@ -755,6 +737,37 @@ func RenderText(w io.Writer, rep Report) error {
 		}
 	}
 	return nil
+}
+
+// fallbackCell is the table's fallback column: what forced the full run, or
+// "-" when the landing is selective.
+func fallbackCell(l LandingReport) string {
+	if l.Fallback == "" {
+		return "-"
+	}
+	return l.Fallback
+}
+
+// modeledCell is the table's modeled-wall column, marked when the wall is the
+// full run's.
+func modeledCell(l LandingReport) string {
+	if !l.ModeledKnown {
+		return "n/a"
+	}
+	s := secsText(l.ModeledWall)
+	if l.Fallback != "" {
+		s += " (full run)"
+	}
+	return s
+}
+
+// loggedCell is the table's logged-wall column: "-" when the landing has no
+// saved log.
+func loggedCell(l LandingReport) string {
+	if !l.HasLog {
+		return "-"
+	}
+	return secsText(l.LoggedWall)
 }
 
 // RenderJSON writes the machine-readable report, one JSON document and a

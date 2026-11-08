@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -378,3 +379,64 @@ func TestGateModelRunReportsEachFailure(t *testing.T) {
 		}
 	})
 }
+
+// TestGateModelCommandPrintsTheTable drives the command's text report: a
+// header row naming the Output line's columns, then one row per landing with
+// them filled. The table pads columns with two or more spaces; a list inside
+// one cell separates with a comma and one space.
+func TestGateModelCommandPrintsTheTable(t *testing.T) {
+	t.Parallel()
+	sha := strings.Repeat("a", 40)
+	root := t.TempDir()
+	pkgDir := filepath.Join(root, "internal", "a")
+	if err := os.MkdirAll(pkgDir, 0o755); err != nil {
+		t.Fatalf("creating the package: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(pkgDir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatalf("writing the package: %v", err)
+	}
+	git := gateFakeGit(t, map[string]gateFakeAnswer{
+		"rev-parse": {out: root + "\n"},
+		"log":       {out: sha + "\x00aaaaaaaaaaaa\x00land: x\x00\n"},
+		"diff":      {out: "M\x00internal/a/a.go\x00"},
+	})
+	g := gateTestGraph(t)
+	src := gateSources{
+		git:    git,
+		graph:  func(context.Context, string) *gatemodel.Graph { return g },
+		nested: func(string) ([]string, error) { return nil, nil },
+	}
+	var out bytes.Buffer
+	opts := gateModelOptions{Logs: gateTestLogs(t), Base: "HEAD", Last: 1}
+	if err := gateModelRun(context.Background(), src, opts, 2, &out); err != nil {
+		t.Fatalf("gateModelRun: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("report has %d lines, want a header and one landing row:\n%s", len(lines), out.String())
+	}
+	wantHeader := []string{"SHORT SHA", "CHANGED", "DEPENDENTS", "ALWAYS-RUN", "FALLBACK", "MODELED(2 cpus)", "LOGGED"}
+	if got := gateTableCells(lines[0]); !slices.Equal(got, wantHeader) {
+		t.Errorf("header cells = %q, want %q", got, wantHeader)
+	}
+	wantRow := []string{
+		"aaaaaaaaaaaa",
+		"internal/a",
+		"-",
+		"internal/guardlint, internal/makegate, internal/testpolicy",
+		"-",
+		"2.0s",
+		"-",
+	}
+	if got := gateTableCells(lines[1]); !slices.Equal(got, wantRow) {
+		t.Errorf("landing row = %q, want %q", got, wantRow)
+	}
+}
+
+// gateTableCells splits one table line into its cells.
+func gateTableCells(line string) []string {
+	return gateTableCellGap.Split(strings.TrimSpace(line), -1)
+}
+
+var gateTableCellGap = regexp.MustCompile(`\s{2,}`)

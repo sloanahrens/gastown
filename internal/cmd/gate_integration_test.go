@@ -25,7 +25,8 @@ func TestIntegrationGateLandingsReadsLandingCommits(t *testing.T) {
 	gateTestCommit(t, dir, env, "c.txt", "chore: not a landing")
 	gateTestCommit(t, dir, env, "d.txt", "land: polecat/a/gt-2 (ccc) onto main (ddd)")
 
-	landings, err := gateLandings(context.Background(), dir, "HEAD", 10)
+	git := gateTestGitRunner(env)
+	landings, err := gateLandings(context.Background(), git, dir, "HEAD", 10)
 	if err != nil {
 		t.Fatalf("gateLandings: %v", err)
 	}
@@ -45,7 +46,7 @@ func TestIntegrationGateLandingsReadsLandingCommits(t *testing.T) {
 		t.Errorf("gt-2 unreadable = %q, want a readable diff", landings[0].Unreadable)
 	}
 
-	one, err := gateLandings(context.Background(), dir, "HEAD", 1)
+	one, err := gateLandings(context.Background(), git, dir, "HEAD", 1)
 	if err != nil {
 		t.Fatalf("gateLandings --last 1: %v", err)
 	}
@@ -63,7 +64,8 @@ func TestIntegrationGateLandingsMarksAParentlessDiff(t *testing.T) {
 	env := gateTestEnv(t)
 	gateTestCommit(t, dir, env, "a.txt", "land: the root landing")
 
-	landings, err := gateLandings(context.Background(), dir, "HEAD", 1)
+	git := gateTestGitRunner(env)
+	landings, err := gateLandings(context.Background(), git, dir, "HEAD", 1)
 	if err != nil {
 		t.Fatalf("gateLandings: %v", err)
 	}
@@ -78,7 +80,11 @@ func TestIntegrationGateLandingsMarksAParentlessDiff(t *testing.T) {
 // TestIntegrationGateLandingsRefusesAnOptionRef pins the --base guard.
 func TestIntegrationGateLandingsRefusesAnOptionRef(t *testing.T) {
 	t.Parallel()
-	if _, err := gateLandings(context.Background(), t.TempDir(), "--all", 1); err == nil {
+	git := func(context.Context, string, ...string) (string, error) {
+		t.Fatal("git ran before the --base guard")
+		return "", nil
+	}
+	if _, err := gateLandings(context.Background(), git, t.TempDir(), "--all", 1); err == nil {
 		t.Fatal("a --base beginning with - must be refused, not passed to git")
 	}
 }
@@ -87,8 +93,20 @@ func TestIntegrationGateLandingsRefusesAnOptionRef(t *testing.T) {
 // plain directory gets, so the model never reads a repository it did not find.
 func TestIntegrationGateRepoRootRefusesADirectoryWithoutGit(t *testing.T) {
 	t.Chdir(t.TempDir())
-	if _, err := gateRepoRoot(context.Background()); err == nil {
+	git := gateTestGitRunner(gateTestEnv(t))
+	if _, err := gateRepoRoot(context.Background(), git); err == nil {
 		t.Fatal("gateRepoRoot outside a work tree = nil error, want a refusal")
+	}
+}
+
+// gateTestGitRunner is the model's git reads over a throwaway repository. It
+// runs git in env, so the host's config, identity and signing never apply.
+func gateTestGitRunner(env []string) gateGitRunner {
+	return func(ctx context.Context, dir string, args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = env
+		out, err := cmd.Output()
+		return string(out), err
 	}
 }
 
