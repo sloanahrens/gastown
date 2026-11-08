@@ -816,6 +816,87 @@ func TestComposeWriteBackupDirRelativeIsRefused(t *testing.T) {
 	}
 }
 
+// --claude-beads-dir reaches the spec through the real command, and the render
+// mounts the directory read-write at its own path, with no read_only key, so the
+// wisp_reaper can write the claude database from the container (gt-he92oj).
+func TestDaemonComposeClaudeBeadsFlag(t *testing.T) {
+	t.Parallel()
+	r := newComposeRig(t)
+	dir := "/host/home/.claude/.beads"
+	var got daemonComposeFlags
+	c := newDaemonComposeCmd(func(out io.Writer, f daemonComposeFlags) error {
+		got = f
+		return runDaemonCompose(f, r.deps)
+	})
+	c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--claude-beads-dir", dir})
+	c.SilenceUsage, c.SilenceErrors = true, true
+
+	if err := c.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if got.claudeBeadsDir != dir {
+		t.Errorf("the flag reached the spec as %q, want %q", got.claudeBeadsDir, dir)
+	}
+	file, ok := r.disk[r.composePath()]
+	if !ok {
+		t.Fatalf("no compose file written at %s", r.composePath())
+	}
+	target := fmt.Sprintf("source: %q\n        target: %q\n", dir, dir)
+	i := strings.Index(string(file), target)
+	if i < 0 {
+		t.Fatalf("compose file does not carry the mount %q:\n%s", target, file)
+	}
+	if strings.HasPrefix(string(file)[i+len(target):], "        read_only") {
+		t.Errorf("the claude beads mount carries read_only, want it read-write:\n%s", file)
+	}
+}
+
+// A --claude-beads-dir that is blank, relative, or not a directory is refused by
+// the command, so no file is written and the old render is kept (gt-he92oj).
+func TestDaemonComposeClaudeBeadsFlagRefusals(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, value string
+		notDir      bool
+		unreadable  bool
+		want        string
+	}{
+		{name: "blank", value: " ", want: "was given blank"},
+		{name: "relative path", value: "claude/.beads", want: "not absolute"},
+		{name: "not a directory", value: "/host/home/.claude/.beads", notDir: true, want: "is not a directory"},
+		{name: "cannot be stat'd", value: "/host/home/.claude/.beads", unreadable: true, want: "cannot be read"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newComposeRig(t)
+			r.deps.isDir = func(string) (bool, error) {
+				if tc.unreadable {
+					return false, fs.ErrNotExist
+				}
+				return !tc.notDir, nil
+			}
+			old := []byte("old render")
+			r.disk[r.composePath()] = old
+			c := newDaemonComposeCmd(func(_ io.Writer, f daemonComposeFlags) error {
+				return runDaemonCompose(f, r.deps)
+			})
+			c.SetArgs([]string{"write", "--image", daemonimage.ImageTag(composeTestRev), "--claude-beads-dir", tc.value})
+			c.SilenceUsage, c.SilenceErrors = true, true
+
+			if err := c.Execute(); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want a refusal that says %q", err, tc.want)
+			}
+			if len(r.wrote) != 0 {
+				t.Errorf("a refusal wrote %v", r.wrote)
+			}
+			if got := r.disk[r.composePath()]; !bytes.Equal(got, old) {
+				t.Errorf("compose file = %q, want the old render %q kept", got, old)
+			}
+		})
+	}
+}
+
 // --bind-ro reaches the spec through the real command: each directory is mounted
 // read-only at its own path, and the mounts come out sorted by path whatever
 // order the flags were given in (gt-vqexg).

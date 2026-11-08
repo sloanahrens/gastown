@@ -194,6 +194,16 @@ type ComposeSpec struct {
 	// them by path. Unset, the render carries none. A scratch spec sets none.
 	BindRO []string
 
+	// ClaudeBeadsDir is the host's ~/.claude/.beads directory, from `gt daemon
+	// compose write --claude-beads-dir`. The daemon mounts it read-write at the
+	// same path, so the claude beads database is writable from the container.
+	// The wisp_reaper reads it there through patrols.wisp_reaper.extra_beads_roots,
+	// which names the path (or its ~/.claude parent). It is absolute, not the
+	// filesystem root, and does not overlap the town root; it may not lie inside
+	// the config directory, which is mounted read-only with everything under it.
+	// Unset, the render carries no mount. A scratch spec sets none.
+	ClaudeBeadsDir string
+
 	// OMTokenMetaFile is the host path of the om token's expiry sidecar
 	// (daemon.om_token_meta); the render mounts it read-only at the same path, so
 	// the setting reads it unchanged. LandingWorkRoot is the landing worker's work
@@ -725,7 +735,7 @@ func (s ComposeSpec) checkTownStateMounts() error {
 // validation refuses each on a scratch spec.
 func (s ComposeSpec) liveBindSources() []string {
 	paths := []string{s.OMTokenFile, s.OMConfigFile, s.HMConfigFile, s.ForgeTokenFile,
-		s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile, s.LandingWorkRoot}
+		s.OpenShellConfigDir, s.ConfigDir, s.BackupDir, s.OMTokenMetaFile, s.LandingWorkRoot, s.ClaudeBeadsDir}
 	paths = append(paths, s.KubeconfigFiles...)
 	return append(paths, s.BindRO...)
 }
