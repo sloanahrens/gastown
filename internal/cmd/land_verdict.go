@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -56,7 +57,7 @@ func init() {
 }
 
 func runLandVerdict(cmd *cobra.Command, args []string) error {
-	return landVerdictFromCwd(cmd.OutOrStdout(), os.Getwd, realVerdictTown, strings.TrimSpace(args[0]), landVerdictHead, landVerdictJSON)
+	return landVerdictFromCwd(cmd.OutOrStdout(), callercwd.Getwd, realVerdictTown, strings.TrimSpace(args[0]), landVerdictHead, landVerdictJSON)
 }
 
 // verdictTown is how gt land verdict finds the town and names the rig that owns
@@ -70,8 +71,8 @@ type verdictTown struct {
 var realVerdictTown = verdictTown{find: workspace.FindOrError, rigFor: resolveRigForBead}
 
 // landVerdictFromCwd finds the town from the working directory getwd returns,
-// then prints the verdict for beadID. The command passes os.Getwd; a test passes
-// a fake that fails.
+// then prints the verdict for beadID. The command passes callercwd.Getwd; a
+// test passes a fake that fails.
 func landVerdictFromCwd(out io.Writer, getwd func() (string, error), town verdictTown, beadID, head string, asJSON bool) error {
 	cwd, err := getwd()
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -755,7 +756,7 @@ func (e moleculeLifecycleEnv) storeAt(workDir string) moleculeStore {
 
 func realMoleculeLifecycleEnv() moleculeLifecycleEnv {
 	return moleculeLifecycleEnv{
-		getwd:        os.Getwd,
+		getwd:        callercwd.Getwd,
 		findTown:     workspace.FindFromCwd,
 		getenv:       os.Getenv,
 		beadsWorkDir: findLocalBeadsDir,

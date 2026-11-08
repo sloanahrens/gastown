@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+
+	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // Runner runs the gt bird operations: starting claude under a bird name,
@@ -330,7 +332,7 @@ func (r *Runner) pid() int {
 func (r *Runner) cwd() string {
 	getwd := r.Getwd
 	if getwd == nil {
-		getwd = os.Getwd
+		getwd = callercwd.Getwd
 	}
 	cwd, err := getwd()
 	if err != nil {

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -53,7 +54,7 @@ func runDirectiveEdit(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	cwd, _ := os.Getwd() // an unreadable cwd only turns off rig auto-detection
+	cwd, _ := callercwd.Getwd() // an unreadable cwd only turns off rig auto-detection
 
 	return runDirectiveEditIn(cmd.OutOrStdout(), townRoot, cwd, directiveEditRig, role, directiveEditTown, openInEditor)
 }

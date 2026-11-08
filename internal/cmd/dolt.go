@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	gtconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltpause"
@@ -1293,7 +1294,7 @@ func eventsBehindQuery(db string, wm daemon.EventsArchiveWatermark) (string, err
 }
 
 func currentBeadsRuntimeConfig() (doltserver.BeadsRuntimeConfig, bool) {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return doltserver.BeadsRuntimeConfig{}, false
 	}

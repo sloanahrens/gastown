@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -279,7 +280,7 @@ func runCompact(cmd *cobra.Command, args []string) error {
 	now := time.Now().UTC()
 
 	// Resolve working directory and town root
-	workDir, err := os.Getwd()
+	workDir, err := callercwd.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working dir: %w", err)
 	}

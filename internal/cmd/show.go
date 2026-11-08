@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 func init() {
@@ -45,7 +46,7 @@ func runShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("bead ID required\n\nUsage: gt show <bead-id> [flags]")
 	}
 
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
 	}

@@ -537,8 +537,9 @@ func TestHookIntegrityReadsTheProcessDirectory(t *testing.T) {
 // read moved behind internal/callercwd (gt-yjzepk.2): prime, handoff, mail
 // identity and hooks install. With GT_CALLER_CWD unset each acts on this
 // process's directory, as before the seam; with it set each acts on the
-// caller's directory instead. The handoff read runs through its git client
-// seam, so the test builds no repository and starts no process.
+// caller's directory instead. The handoff read runs through a handoffStateSource
+// with a recording git client injected through the struct, so the test builds
+// no repository and starts no process.
 //
 //testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
 func TestCallerCwdReachesTheConvertedCommands(t *testing.T) {
@@ -546,8 +547,14 @@ func TestCallerCwdReachesTheConvertedCommands(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process directory: %v", err)
 	}
+	if processDir == "" {
+		t.Fatalf("the process directory is empty; the unset baseline would be vacuous")
+	}
 
 	townRoot, callerPath := writeCallerTown(t)
+	if callerPath == processDir {
+		t.Fatalf("the caller's directory %q equals the process directory; the baseline would be vacuous", callerPath)
+	}
 	if err := os.MkdirAll(callerPath, 0755); err != nil {
 		t.Fatalf("mkdir caller directory: %v", err)
 	}
@@ -558,27 +565,41 @@ func TestCallerCwdReachesTheConvertedCommands(t *testing.T) {
 	t.Setenv("BEADS_DIR", "")
 
 	var handoffDir string
-	previousGit := handoffGitFor
-	//testpolicy:allow no-global-swap — the git client seam collectGitState reads, restored below
-	handoffGitFor = func(dir string) handoffGit {
-		handoffDir = dir
-		return fakeHandoffGit{notRepo: true}
+	source := handoffStateSource{
+		getwd: callercwd.Require,
+		gitFor: func(dir string) handoffGit {
+			handoffDir = dir
+			return fakeHandoffGit{notRepo: true}
+		},
 	}
-	//testpolicy:allow no-global-swap — restores the seam swapped above
-	t.Cleanup(func() { handoffGitFor = previousGit })
 
 	rigCrew := filepath.Join(townRoot, "gastown", "crew")
 
 	// The hermetic harness leaves GT_CALLER_CWD unset, so the baseline shows
 	// each command on this process's directory, as it was before the seam.
-	if cwd, _, err := resolvePrimeWorkspace(); err == nil && cwd != processDir {
+	cwd, _, err := resolvePrimeWorkspace()
+	if err != nil {
+		t.Fatalf("gt prime with the variable unset: %v", err)
+	}
+	if cwd != processDir {
 		t.Fatalf("gt prime with the variable unset read %q, want the process directory %q", cwd, processDir)
 	}
-	if got, err := findLocalBeadsDir(); err == nil && got == callerPath {
-		t.Fatalf("findLocalBeadsDir with the variable unset read the fixture %q; it must read this process's directory", got)
+
+	// findLocalBeadsDir answers with the nearest .beads ancestor, so the
+	// process directory's own answer is the walk from processDir; requiring
+	// it (or its error) keeps the unset baseline from passing vacuously.
+	processBeads, processBeadsErr := localBeadsWorkDir(processDir, "")
+	got, err := findLocalBeadsDir()
+	if processBeadsErr != nil {
+		if err == nil {
+			t.Fatalf("findLocalBeadsDir with the variable unset = %q, want the process directory's walk error %v", got, processBeadsErr)
+		}
+	} else if err != nil || got != processBeads {
+		t.Fatalf("findLocalBeadsDir with the variable unset = %q, %v; want the process directory's answer %q", got, err, processBeads)
 	}
-	if got := collectGitState(); got != "" {
-		t.Fatalf("collectGitState with the variable unset returned %q for a scripted non-repository", got)
+
+	if got := source.collect(); got != "" {
+		t.Fatalf("handoff workspace state with the variable unset returned %q for a scripted non-repository", got)
 	}
 	if handoffDir != processDir {
 		t.Fatalf("gt handoff with the variable unset read git in %q, want the process directory %q", handoffDir, processDir)
@@ -599,8 +620,8 @@ func TestCallerCwdReachesTheConvertedCommands(t *testing.T) {
 	if got, err := findLocalBeadsDir(); err != nil || got != callerPath {
 		t.Fatalf("findLocalBeadsDir = %q, %v, want the caller's directory %q", got, err, callerPath)
 	}
-	if got := collectGitState(); got != "" {
-		t.Fatalf("collectGitState returned %q for a scripted non-repository", got)
+	if got := source.collect(); got != "" {
+		t.Fatalf("handoff workspace state returned %q for a scripted non-repository", got)
 	}
 	if handoffDir != callerPath {
 		t.Fatalf("gt handoff read git in %q, want the caller's directory %q", handoffDir, callerPath)

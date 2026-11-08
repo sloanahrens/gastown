@@ -1867,21 +1867,38 @@ func issueSummaryLines(issues []*beads.Issue, err error) []string {
 // reliably even when PATH is broken or external commands are unavailable.
 // Returns empty string if git state cannot be read (e.g., not in a git repo). (GH#1996)
 func collectGitState() string {
-	cwd, err := callercwd.Require()
+	return liveHandoffState.collect()
+}
+
+// handoffStateSource reads the handoff's workspace state: getwd resolves the
+// directory and gitFor builds the client for it. Production uses
+// liveHandoffState; a test builds its own, injecting a recording gitFor through
+// the struct rather than swapping a package variable.
+type handoffStateSource struct {
+	getwd  func() (string, error)
+	gitFor func(dir string) handoffGit
+}
+
+// liveHandoffState is the command's source: the caller's directory, through
+// git. Require, because collectGitStateIn runs git there.
+var liveHandoffState = handoffStateSource{
+	getwd:  callercwd.Require,
+	gitFor: func(dir string) handoffGit { return git.NewGit(dir) },
+}
+
+// collect returns the workspace state in the directory getwd names, or "" when
+// the directory cannot be read or is not a repository.
+func (s handoffStateSource) collect() string {
+	cwd, err := s.getwd()
 	if err != nil {
 		return ""
 	}
-	return collectGitStateIn(cwd)
+	return collectGitStateWith(s.gitFor(cwd))
 }
-
-// handoffGitFor builds the git client the handoff's workspace reads use. It is
-// a variable so a test can record the directory handed to it without a real
-// repository; the command path never changes it.
-var handoffGitFor = func(dir string) handoffGit { return git.NewGit(dir) }
 
 // collectGitStateIn is collectGitState for the repository at dir.
 func collectGitStateIn(dir string) string {
-	return collectGitStateWith(handoffGitFor(dir))
+	return collectGitStateWith(git.NewGit(dir))
 }
 
 // collectGitStateWith is collectGitStateIn over g.
@@ -2033,7 +2050,10 @@ func cleanupMoleculeOnHandoff() {
 // Crew is exempt — it hands off on human request,
 // not on patrol loops, so the cooldown just gets in the way.
 func enforceHandoffCooldown() {
-	cwd, err := callercwd.Getwd()
+	// A cooldown decides whether the handoff is delayed or refused, so it is a
+	// check: it reads the real process directory, and GT_CALLER_CWD must not
+	// steer it.
+	cwd, err := os.Getwd()
 	if err != nil {
 		return
 	}

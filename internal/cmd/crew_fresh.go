@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/crewfresh"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -46,7 +46,7 @@ Run it from your own clone:
 }
 
 func runCrewFresh(cmd *cobra.Command, args []string) error {
-	return crewFresh(cmd.OutOrStdout(), os.Getwd, workspace.FindFromCwdOrError, crewFreshRun, filepath.EvalSymlinks)
+	return crewFresh(cmd.OutOrStdout(), callercwd.Require, workspace.FindFromCwdOrError, crewFreshRun, filepath.EvalSymlinks)
 }
 
 // crewFresh runs the freshness check for the clone that holds the caller's

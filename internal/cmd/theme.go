@@ -8,6 +8,7 @@ import (
 
 	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -224,7 +225,7 @@ func detectCurrentRig(reg *session.PrefixRegistry) string {
 	}
 
 	// Try to detect from actual cwd path
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return ""
 	}

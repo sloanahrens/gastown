@@ -4,6 +4,8 @@ import (
 	"io"
 	"os"
 	"os/exec"
+
+	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // host is what agent resolution reads from the running process: its
@@ -43,7 +45,7 @@ func (h host) systemPromptRenderer() SystemPromptRender {
 }
 
 // processHost reads the running process.
-var processHost = host{getenv: os.Getenv, lookPath: exec.LookPath, getwd: os.Getwd}
+var processHost = host{getenv: os.Getenv, lookPath: exec.LookPath, getwd: callercwd.Getwd}
 
 // host returns the host r resolves against: processHost unless r was loaded
 // for another one. A nil registry resolves against the process too.
