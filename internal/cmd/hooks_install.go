@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/style"
@@ -48,7 +49,14 @@ func init() {
 func runHooksInstall(cmd *cobra.Command, args []string) error {
 	hookName := args[0]
 
-	townRoot, err := workspace.FindFromCwd()
+	// The caller's directory decides which seat's worktree settings are
+	// installed: it is identity, and the install writes there, so an absent
+	// directory is refused rather than replaced by this process's.
+	cwd, err := callercwd.Require()
+	if err != nil {
+		return err
+	}
+	townRoot, err := workspace.Find(cwd)
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
@@ -83,13 +91,10 @@ func runHooksInstall(cmd *cobra.Command, args []string) error {
 		if installRole != "" {
 			return fmt.Errorf("no targets found for role %q in workspace", installRole)
 		}
-		// No role specified — resolve CWD to the correct settings directory.
-		// For shared-parent roles (crew, polecats, witness, refinery), the
-		// settings live in the role parent dir, not the individual worktree.
-		cwd, err := os.Getwd()
-		if err != nil {
-			return err
-		}
+		// No role specified — resolve the caller's directory to the correct
+		// settings directory. For shared-parent roles (crew, polecats,
+		// witness, refinery), the settings live in the role parent dir, not
+		// the individual worktree.
 		targets = []string{resolveSettingsTarget(townRoot, cwd)}
 	}
 
@@ -172,8 +177,8 @@ func determineTargets(townRoot, role string, allRigs bool, allowedRoles []string
 			}
 		}
 	} else {
-		// Find current rig from cwd
-		cwd, err := os.Getwd()
+		// Find current rig from the caller's directory.
+		cwd, err := callercwd.Require()
 		if err != nil {
 			return nil, err
 		}

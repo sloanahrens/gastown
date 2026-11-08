@@ -18,6 +18,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
@@ -370,6 +371,14 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 // runRemoteHandoff, or the caller's own after a dry-run preview, the
 // molecule cleanup and the handoff mail.
 func handoffSession(p sessionHandoff, steps handoffSteps) error {
+	// The caller's directory is where the handoff marker and cooldown are
+	// written, so it is read first: an absent one is refused before any mail
+	// is sent or the pane is touched.
+	cwd, err := callercwd.Require()
+	if err != nil {
+		return err
+	}
+
 	reg, t, townTmux, pane := p.reg, p.t, p.townTmux, p.pane
 	currentSession, targetSession := p.currentSession, p.targetSession
 
@@ -460,7 +469,6 @@ func handoffSession(p sessionHandoff, steps handoffSteps) error {
 	// This tells the new session "you're post-handoff, don't re-run /handoff"
 	// Both go under the successor's workDir, which may differ from our cwd.
 	// Record handoff time for cooldown enforcement (gt-058d).
-	cwd, _ := os.Getwd()
 	recordHandoffState(plan, cwd, currentSession, "")
 
 	// NOTE: For self-handoff, we do NOT call KillPaneProcesses here.
@@ -482,6 +490,14 @@ func handoffSession(p sessionHandoff, steps handoffSteps) error {
 // Used by the PreCompact hook to preserve context before compaction.
 // No tmux required — just collects state, sends handoff mail, and writes marker.
 func runHandoffAuto() error {
+	// The marker and cooldown are written under the caller's directory: read it
+	// before the state collection and the mail, so an absent one is refused
+	// rather than replaced by this process's.
+	cwd, err := callercwd.Require()
+	if err != nil {
+		return err
+	}
+
 	// Build subject
 	subject := handoffSubject
 	if subject == "" {
@@ -518,7 +534,6 @@ func runHandoffAuto() error {
 
 	// Write handoff marker so post-compact prime knows it's post-handoff
 	sessionName := "auto-handoff"
-	cwd, _ := os.Getwd()
 	stateDir := cwd
 	if tmux.IsInsideTmux() {
 		if name, err := getCurrentTmuxSession(); err == nil {
@@ -559,6 +574,14 @@ func runHandoffAuto() error {
 // The successor session starts via SessionStart hook (gt prime --hook),
 // finds the hooked work, and continues from where we left off.
 func runHandoffCycle() error {
+	// The cycle records the handoff marker and cooldown under the caller's
+	// directory: read it before any work, so an absent one is refused rather
+	// than replaced by this process's.
+	cwd, err := callercwd.Require()
+	if err != nil {
+		return err
+	}
+
 	reg := townRegistry()
 	// Build subject
 	subject := handoffSubject
@@ -654,7 +677,6 @@ func runHandoffCycle() error {
 		fmt.Fprintf(os.Stderr, "handoff --cycle: could not build restart command: %v\n", err)
 		return err
 	}
-	cwd, _ := os.Getwd()
 	recordHandoffState(plan, cwd, currentSession, handoffReason)
 
 	// Log cycle event AFTER persistence succeeds.
@@ -1615,7 +1637,7 @@ func createHandoffMailIn(db beads.Client, agentID, subject, message string) (str
 // work and prints a warning if found. Non-blocking — handoff continues regardless.
 // Skips .beads/ changes since those are managed by Dolt and not a concern.
 func warnHandoffGitStatus() {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Require()
 	if err != nil {
 		return
 	}
@@ -1845,16 +1867,21 @@ func issueSummaryLines(issues []*beads.Issue, err error) []string {
 // reliably even when PATH is broken or external commands are unavailable.
 // Returns empty string if git state cannot be read (e.g., not in a git repo). (GH#1996)
 func collectGitState() string {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Require()
 	if err != nil {
 		return ""
 	}
 	return collectGitStateIn(cwd)
 }
 
+// handoffGitFor builds the git client the handoff's workspace reads use. It is
+// a variable so a test can record the directory handed to it without a real
+// repository; the command path never changes it.
+var handoffGitFor = func(dir string) handoffGit { return git.NewGit(dir) }
+
 // collectGitStateIn is collectGitState for the repository at dir.
 func collectGitStateIn(dir string) string {
-	return collectGitStateWith(git.NewGit(dir))
+	return collectGitStateWith(handoffGitFor(dir))
 }
 
 // collectGitStateWith is collectGitStateIn over g.
@@ -1917,7 +1944,7 @@ func collectGitStateWith(g handoffGit) string {
 //
 // All errors are non-fatal — handoff must succeed even if cleanup fails.
 func cleanupMoleculeOnHandoff() {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return
 	}
@@ -2006,7 +2033,7 @@ func cleanupMoleculeOnHandoff() {
 // Crew is exempt — it hands off on human request,
 // not on patrol loops, so the cooldown just gets in the way.
 func enforceHandoffCooldown() {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return
 	}

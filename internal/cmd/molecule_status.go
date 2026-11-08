@@ -14,6 +14,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
@@ -271,7 +272,7 @@ func extractMoleculeID(description string) string {
 }
 
 func runMoleculeStatus(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
 	}
@@ -859,7 +860,7 @@ func showRecentTrailSummary() {
 }
 
 func runMoleculeCurrent(cmd *cobra.Command, args []string) error {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting current directory: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -43,7 +44,7 @@ func findMailWorkDir() (string, error) {
 // Polecats use redirect-based beads access, so their worktree doesn't have a full
 // .beads directory. The session manager sets BEADS_DIR to the correct location.
 func findLocalBeadsDir() (string, error) {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return "", err
 	}
@@ -98,7 +99,7 @@ func localBeadsWorkDir(cwd, envBeadsDir string) (string, error) {
 // to the person it paged (gt-bw6ai). BD_ACTOR is checked after GT_POLECAT so
 // the hooks live-fire probe's synthetic polecat still names it.
 func detectSender() string {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		cwd = ""
 	}

@@ -6,13 +6,14 @@ import (
 	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // findCwdBeadsWorkDir finds the nearest .beads directory by walking up from CWD.
 // It intentionally ignores BEADS_DIR for callers whose target is implied by
 // the current rig worktree rather than inherited session environment.
 func findCwdBeadsWorkDir() (string, error) {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return "", err
 	}
@@ -43,7 +44,7 @@ func findBeadsWorkDirFrom(start string) (string, error) {
 // win over an inherited town-level BEADS_DIR. The env-first resolver remains a
 // fallback for contexts that do not have a cwd-local .beads directory.
 func resolveAgentTrackingBeadsDir() (string, error) {
-	cwd, err := os.Getwd()
+	cwd, err := callercwd.Getwd()
 	if err != nil {
 		return "", err
 	}

@@ -1,0 +1,66 @@
+# Non-test os.Getwd sites outside internal/callercwd (gt-yjzepk.2).
+#
+# Each line is: path:owner<TAB>class<TAB>reason
+#   owner   the enclosing function, or "package" for a package-level declaration
+#   class   real      stays on the process directory; the reason says what it
+#                     decides, and a caller-supplied variable must not steer it
+#           deferred  not converted by this bead: the size guard stopped after
+#                     the guard and the identity sites, and the follow-up bead
+#                     classifies and converts what remains
+#
+# The list is a ratchet: it can only shrink. TestGetwdAllowlistCanOnlyShrink
+# fails when an entry no longer calls os.Getwd, and TestNoDirectGetwd fails on
+# any os.Getwd use not listed here. Do not add an entry for new code: convert
+# the call to internal/callercwd instead.
+internal/cmd/hook.go:package	real	the hook worktree integrity guard reads the process directory; the variable must not open it
+internal/cmd/role.go:GetRole	real	feeds the stop guard; the variable must not steer the role it resolves
+internal/cmd/root.go:doneCwd	real	the gt done polecat-worktree guard; the variable must not place the caller elsewhere
+internal/cmd/tap_guard.go:isGasTownAgentContext	real	the dangerous-command and pr-workflow guards' agent context
+internal/cmd/tap_guard_bd_init.go:runTapGuardBdInit	real	a command guard; the variable must not steer it
+internal/cmd/tap_guard_mol_patrol.go:runTapGuardMolPatrol	real	a command guard; the variable must not steer it
+internal/cmd/tap_guard_process.go:realGuardProcess	real	the guard process surface; the variable must not steer it
+internal/polecat/manager.go:CheckShellOutsideWorktree	real	the shell-safety check refuses; the variable must not steer it
+internal/testutil/harness_host.go:processHost	real	the hermetic harness reads the real host directory, not a caller target
+internal/workspace/find.go:package	real	the generic resolver guards call; the variable must not steer it
+internal/worktree/integrity.go:Validate	real	the worktree integrity check; the variable must not steer it
+cmd/gt-wrap/main.go:osSurface	real	the wrapper is the process that sets GT_CALLER_CWD; it reads the real host directory
+cmd/gt-installer/main.go:run	real	the installer acts on the host it runs on; the variable names a target, not the host
+cmd/affected/main.go:main	deferred	dev tool; its process directory is the checkout it scans
+cmd/bdshim-record/exec.go:provisionFixture	deferred	recording tool; the process directory is where the fixture is built
+cmd/bdshim-record/main.go:run	deferred	recording tool reads the process directory
+cmd/bump-version/main.go:main	deferred	release tool reads the process checkout
+internal/bdshim/osmain.go:osEnv	deferred	bd shim identity: which repository the bd call acts on
+internal/bird/runner.go:cwd	deferred	bird status runner identity
+internal/cmd/compact.go:runCompact	deferred	identity: which worktree's context is compacted
+internal/cmd/compact_report.go:runCompactReport	deferred	identity: which worktree's report is read
+internal/cmd/crew_at.go:runCrewAt	deferred	identity: which crew seat the command targets
+internal/cmd/crew_fresh.go:runCrewFresh	deferred	identity: which crew seat the command targets
+internal/cmd/crew_worktree.go:runCrewWorktree	deferred	identity: which crew worktree the command targets
+internal/cmd/directive_edit.go:runDirectiveEdit	deferred	identity: rig auto-detection for directive edits
+internal/cmd/directive_show.go:resolveDirectiveContext	deferred	identity: rig auto-detection for directive display
+internal/cmd/dolt.go:currentBeadsRuntimeConfig	deferred	identity: which rig's dolt runtime config is read
+internal/cmd/formula.go:realFormulaVerbs	deferred	identity: which town's formulas the command reaches
+internal/cmd/init.go:runInit	deferred	identity: the seat being initialized
+internal/cmd/land.go:runLandRequeue	deferred	identity: which rig's landing is requeued
+internal/cmd/land_verdict.go:runLandVerdict	deferred	identity: which town's verdict is printed
+internal/cmd/land_wait.go:runLandWait	deferred	identity: which crew member's branches are watched
+internal/cmd/mail_send.go:mailSendRecipient	deferred	identity: the sender and which town's mail store is written
+internal/cmd/molecule_attach_from_mail.go:runMoleculeAttachFromMail	deferred	identity: which seat's beads the molecule is attached in
+internal/cmd/molecule_lifecycle.go:realMoleculeLifecycleEnv	deferred	identity: which seat's molecule lifecycle is read
+internal/cmd/nudge.go:runNudge	deferred	identity: the sender and which town's nudges are read
+internal/cmd/prime_session.go:realPrimeHookEnv	deferred	identity: the hook session's seat
+internal/cmd/rig.go:runRigReset	deferred	identity: which rig is reset
+internal/cmd/show.go:runShow	deferred	identity: which town's issues are shown
+internal/cmd/status.go:detectCurrentDNDStatus	deferred	identity: which agent's DND state is read
+internal/cmd/theme.go:detectCurrentRig	deferred	identity: which rig's theme applies
+internal/cmd/up.go:disableCurrentAgentDND	deferred	identity: which agent's DND is cleared
+internal/config/host.go:package	deferred	agent-registry host identity: which agent the registry describes
+internal/done/options.go:getwd	deferred	identity: the done run's default directory; gt done itself uses callercwd.Require
+internal/k8spolicy/options.go:package	deferred	policy CLI host surface; classify before converting
+internal/openshellprov/options.go:package	deferred	openshell CLI host surface; classify before converting
+internal/polecat/imagectx/cmd/build/main.go:run	deferred	build tool; its process directory is the checkout it reads
+internal/slot/cmd/cpuslot/main.go:run	deferred	slot tool host surface; classify before converting
+internal/testpolicy/cmd/budget/main.go:execTest	deferred	test tooling reads the real host directory
+internal/testpolicy/cmd/testtiming/main.go:realHost	deferred	test tooling reads the real host directory
+internal/testpolicy/cmd/tierwall/main.go:townRoot	deferred	test tooling reads the real host directory
+internal/tiertrigger/cmd/tiertrigger/main.go:goDeps	deferred	tooling reads the process checkout
