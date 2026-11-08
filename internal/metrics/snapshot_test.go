@@ -439,3 +439,17 @@ func TestTailFile(t *testing.T) {
 		}
 	}
 }
+
+// TestOSEnvHostProbesFollowsContainerMode: the command wiring hands the host
+// group the host agent's file only in container mode, so a launchd snapshot
+// keeps the Mac's own commands.
+func TestOSEnvHostProbesFollowsContainerMode(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if got := osEnv(town, true); got.HostProbes == nil {
+		t.Error("container mode left the host group on the container's own commands")
+	}
+	if got := osEnv(town, false); got.HostProbes != nil {
+		t.Error("launchd mode reads the host agent's probe file")
+	}
+}

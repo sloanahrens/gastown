@@ -3,6 +3,8 @@ package metrics
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -539,5 +541,163 @@ func TestSourceHostProbesUseTheConfiguredPortAndContainer(t *testing.T) {
 	}
 	if got := strings.Join(argv["docker"], " "); !strings.Contains(got, "exec runner-test df") {
 		t.Errorf("docker argv = %q, want it to exec in runner-test", got)
+	}
+}
+
+// hostProbeFileFixture is the probe file the host agent writes at the given
+// time: an idle share and the Docker Desktop disk's use, with no field in error.
+func hostProbeFileFixture(at time.Time) hostprobe.Probes {
+	return hostprobe.Probes{
+		At:         at,
+		CPUIdlePct: hostprobe.Field[float64]{Value: 71.5},
+		DockerDisk: hostprobe.Field[hostprobe.Disk]{Value: hostprobe.Disk{UsedPct: 83}},
+	}
+}
+
+// writeHostProbesFile publishes p under the temp town as the host agent does.
+func writeHostProbesFile(t *testing.T, town string, p hostprobe.Probes) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(hostprobe.Path(town)), 0o755); err != nil {
+		t.Fatalf("creating the probe directory: %v", err)
+	}
+	if err := hostprobe.Write(hostprobe.Path(town), p); err != nil {
+		t.Fatalf("writing the probe file: %v", err)
+	}
+}
+
+// containerEnv is the fixture's env for a snapshot in the town's container: the
+// host facts come from the file under town, and a host command is a failure.
+func containerEnv(t *testing.T, fake *hostFake, town string) Env {
+	t.Helper()
+	env := fake.env()
+	env.Town = town
+	env.HostProbes = hostProbesFromFile(town)
+	env.Run = func(_ context.Context, argv []string) ([]byte, error) {
+		t.Errorf("container mode ran the host command %q", strings.Join(argv, " "))
+		return nil, errors.New("no host command may run in container mode")
+	}
+	return env
+}
+
+// TestSnapshotReadsHostFactsFromProbesInContainerMode: with the town's
+// supervisor set to the container, the host group is the host agent's file and
+// none of the Mac's commands runs there.
+func TestSnapshotReadsHostFactsFromProbesInContainerMode(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+	town := t.TempDir()
+	writeHostProbesFile(t, town, hostProbeFileFixture(at))
+	env := containerEnv(t, hostFixtureEnv(at), town)
+
+	rec := Collect(context.Background(), env, []Source{newHostSource()}, noDeadline)
+	got := rec.Groups["host"]
+	// load1 and dolt_conns have no fact in the file and the container's own
+	// would name the container, so they stay unknown.
+	want := map[string]any{
+		"load1":               nil,
+		"cpu_idle_pct":        71.5,
+		"bd_latency_ms":       float64(37),
+		"dolt_conns":          nil,
+		"docker_disk_pct":     83.0,
+		"host_probe_failures": 0,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("host group = %v, want the probe file's facts %v", got, want)
+	}
+}
+
+// TestSnapshotUnderLaunchdIsUnchanged holds the host group to the expectations
+// TestSourceHostCollectsTheFiveColumns had before container mode existed: with
+// no probe seam the source runs the host's own commands.
+func TestSnapshotUnderLaunchdIsUnchanged(t *testing.T) {
+	t.Parallel()
+	fake := hostFixtureEnv(time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC))
+	env := fake.env()
+	// A town with no probe file: launchd must not look for one.
+	env.Town = t.TempDir()
+
+	rec := Collect(context.Background(), env, []Source{newHostSource()}, noDeadline)
+	got := rec.Groups["host"]
+	want := map[string]any{
+		"load1":               13.77,
+		"cpu_idle_pct":        86.99,
+		"bd_latency_ms":       float64(37),
+		"dolt_conns":          2,
+		"docker_disk_pct":     59.0,
+		"host_probe_failures": 0,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("host group = %v, want the commands' five columns %v", got, want)
+	}
+}
+
+// TestSnapshotProbesMissingIsUnknown: a probe file the reader refuses, and a
+// field the agent recorded as failed, leave the facts unknown rather than the
+// zero each field decodes to.
+func TestSnapshotProbesMissingIsUnknown(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+	cpuFailed := hostProbeFileFixture(at)
+	cpuFailed.CPUIdlePct = hostprobe.Field[float64]{Err: "top printed no CPU usage line"}
+	dockerFailed := hostProbeFileFixture(at)
+	dockerFailed.DockerDisk = hostprobe.Field[hostprobe.Disk]{Err: "df printed no line for the / filesystem"}
+	tests := []struct {
+		name         string
+		write        bool
+		probes       hostprobe.Probes
+		wantCPUIdle  any
+		wantDiskUsed any
+		wantFailures int
+	}{
+		{name: "missing file", wantCPUIdle: nil, wantDiskUsed: nil, wantFailures: 2},
+		{
+			name:         "stale file",
+			write:        true,
+			probes:       hostProbeFileFixture(at.Add(-4 * time.Minute)),
+			wantCPUIdle:  nil,
+			wantDiskUsed: nil,
+			wantFailures: 2,
+		},
+		{
+			name:         "cpu idle field failed",
+			write:        true,
+			probes:       cpuFailed,
+			wantCPUIdle:  nil,
+			wantDiskUsed: 83.0,
+			wantFailures: 1,
+		},
+		{
+			name:         "docker disk field failed",
+			write:        true,
+			probes:       dockerFailed,
+			wantCPUIdle:  71.5,
+			wantDiskUsed: nil,
+			wantFailures: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.write {
+				writeHostProbesFile(t, town, tc.probes)
+			}
+			env := containerEnv(t, hostFixtureEnv(at), town)
+
+			got, err := newHostSource().Collect(context.Background(), env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if got["cpu_idle_pct"] != tc.wantCPUIdle || got["docker_disk_pct"] != tc.wantDiskUsed {
+				t.Errorf("cpu_idle_pct = %v, docker_disk_pct = %v, want %v and %v (nil is unknown, never zero)",
+					got["cpu_idle_pct"], got["docker_disk_pct"], tc.wantCPUIdle, tc.wantDiskUsed)
+			}
+			if got["host_probe_failures"] != tc.wantFailures {
+				t.Errorf("host_probe_failures = %v, want %d", got["host_probe_failures"], tc.wantFailures)
+			}
+			if got["bd_latency_ms"] != 37.0 {
+				t.Errorf("bd_latency_ms = %v, want 37: the store read is the container's own and still runs", got["bd_latency_ms"])
+			}
+		})
 	}
 }
