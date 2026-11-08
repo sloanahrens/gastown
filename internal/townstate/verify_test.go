@@ -306,3 +306,81 @@ func TestVerifyReportsAnUnclassifiedDirectoryOnce(t *testing.T) {
 		t.Errorf("Verify reported %v, want exactly %v", paths, want)
 	}
 }
+
+// rigSubsystemRigs are the two rigs the rig-row test expands.
+var rigSubsystemRigs = []string{"gastown", "beads"}
+
+// rigSubsystemTown is a town whose registry names two rigs, each holding the
+// rig-level paths the manifest classes: the beads workspace, plugins, settings,
+// directives, harness scripts and manifest, and a name-pool state file under
+// .runtime. One rig also holds a file under .runtime that no row names, so the
+// walk still reports a new writer there once.
+func rigSubsystemTown() fstest.MapFS {
+	town := fstest.MapFS{
+		"mayor/town.json": {Data: []byte(`{"registry":{"version":1,"rigs":{"gastown":{"git_url":"file:///srv/gastown"},"beads":{"git_url":"file:///srv/beads"}}}}`)},
+	}
+	for _, rig := range rigSubsystemRigs {
+		for _, p := range []string{
+			".beads/redirect",
+			"plugins/tool/plugin.md",
+			"settings/config.json",
+			"directives/rig.md",
+			"scripts/om-gate.sh",
+			".gastown-harness-manifest.json",
+			".runtime/namepool-state.json",
+		} {
+			town[rig+"/"+p] = &fstest.MapFile{Data: []byte("x")}
+		}
+	}
+	town["gastown/.runtime/some-unlisted-file"] = &fstest.MapFile{Data: []byte("x")}
+	return town
+}
+
+// TestVerifyClassifiesRigSubsystemPaths expands the rig rows against a town of
+// two rigs: each rig-level path the manifest classes has its owner, and a file
+// under a rig's .runtime that no row names is still reported, once, rather than
+// hidden by a parent row for <rig>/.runtime.
+func TestVerifyClassifiesRigSubsystemPaths(t *testing.T) {
+	t.Parallel()
+	m := Default()
+	entries := m.Expand(rigSubsystemRigs, nil)
+	owners := []struct {
+		path  string
+		owner Owner
+	}{
+		{path: ".beads", owner: OwnerDaemon},
+		{path: "plugins", owner: OwnerDaemon},
+		{path: "settings", owner: OwnerShared},
+		{path: "directives", owner: OwnerShared},
+		{path: "scripts", owner: OwnerShared},
+		{path: ".gastown-harness-manifest.json", owner: OwnerShared},
+		{path: ".runtime/namepool-state.json", owner: OwnerDaemon},
+		{path: ".runtime/session_id", owner: OwnerSession},
+		{path: ".runtime/agent.lock", owner: OwnerSession},
+	}
+	for _, rig := range rigSubsystemRigs {
+		for _, o := range owners {
+			p := rig + "/" + o.path
+			e, ok := Lookup(entries, p)
+			if !ok {
+				t.Errorf("no entry covers %s", p)
+				continue
+			}
+			if e.Owner != o.owner {
+				t.Errorf("%s is classed %q, want %q (row %q)", p, e.Owner, o.owner, e.Path)
+			}
+		}
+	}
+
+	problems, err := Verify(rigSubsystemTown(), m, time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	want := []Problem{{
+		Path:   "gastown/.runtime/some-unlisted-file",
+		Reason: "no manifest entry; classify it daemon, session or shared",
+	}}
+	if !slices.Equal(problems, want) {
+		t.Errorf("Verify reported %v, want exactly %v", problems, want)
+	}
+}

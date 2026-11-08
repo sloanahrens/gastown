@@ -37,6 +37,24 @@ entries:
   - path: settings
     owner: shared
     why: edited by gt config daemon, read by the daemon (gt-yjzepk.4)
+  - path: power-state
+    owner: daemon
+    why: the last requested power state gt power writes and the daemon reads (internal/power/power.go StatePath)
+  - path: .events.jsonl.lock
+    owner: daemon
+    why: the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave
+  - path: .feed.jsonl.lock
+    owner: daemon
+    why: the flock beside the feed the daemon appends (the .feed.jsonl row), held while it writes the way internal/events/events.go locks .events.jsonl
+  - path: .dolt-backup
+    owner: daemon
+    why: the backups the retired dolt_backup patrol left; internal/config/daemon_config.go records the retirement, and the nightly backup now writes outside the town
+  - path: .dolt-archive
+    owner: daemon
+    why: the JSONL git backup repository internal/daemon/jsonl_git_backup.go pushes each database's history into
+  - path: .beads-wisp
+    owner: daemon
+    why: the wisp config layer internal/wisp/config.go writes and internal/rig/config.go reads
   - path: <rig>/config.json
     owner: daemon
     why: the rig's registry record the daemon and landing worker read
@@ -46,6 +64,48 @@ entries:
   - path: <rig>/mayor/rig
     owner: daemon
     why: the rig's canonical clone the landing worker and promoter land on; the name is constants.DirMayor and constants.DirRig, which rig.RepoPath resolves (all nine rigs of this town have it, read 2026-11-06)
+  - path: <rig>/.beads
+    owner: daemon
+    why: the rig's beads workspace internal/rig/manager.go InitBeads creates and bd writes, as the town-level .beads row
+  - path: <rig>/plugins
+    owner: daemon
+    why: the plugins the daemon's scanner loads from each rig (internal/plugin/scanner.go DiscoverAll); internal/cmd/daemon_rehearse_plugins.go reads it
+  - path: <rig>/settings
+    owner: shared
+    why: the rig's behavioral settings gt config writes (internal/config/loader.go SaveRigSettings) and the daemon's landing worker reads (internal/daemon/landing_worker.go rigPostLandCommand), as the town-level settings row
+  - path: <rig>/directives
+    owner: shared
+    why: directives a person writes and internal/config/directives.go reads as the rig's layer (two rigs of this town have it)
+  - path: <rig>/scripts
+    owner: shared
+    why: harness scripts the om repo's contrib/gastown/deploy.sh writes, which internal/doctor/harness_drift_check.go hashes; the refinery it deployed to is retired
+  - path: <rig>/.gastown-harness-manifest.json
+    owner: shared
+    why: the deploy-managed file list contrib/gastown/deploy.sh writes and internal/doctor/harness_drift_check.go reads; the refinery it deployed to is retired
+  - path: <rig>/.runtime/namepool-state.json
+    owner: daemon
+    why: the name pool's state internal/polecat/namepool.go writes when a polecat is named
+  - path: <rig>/.runtime/locks
+    owner: daemon
+    why: rig lock files a polecat session takes (internal/polecat/manager.go) as the town-level .runtime/locks row; export skips the files themselves and keeps the directory
+  - path: <rig>/.runtime/session_id
+    owner: session
+    why: the session ID gt prime writes in the cwd of a session started at the rig root (internal/cmd/prime_session.go persistSessionID)
+  - path: <rig>/.runtime/session_start_emitted
+    owner: session
+    why: the ID whose session_start gt prime has emitted, written in that session's cwd (internal/cmd/prime_session.go recordSessionStartEmitted)
+  - path: <rig>/.runtime/last_handoff_ts
+    owner: session
+    why: the handoff cooldown gt handoff writes in the session's cwd (internal/cmd/handoff.go recordHandoffTimeIn)
+  - path: <rig>/.runtime/agent.lock
+    owner: session
+    why: the identity lock gt prime takes for a worker directory (internal/lock/lock.go New)
+  - path: <rig>/.runtime/agent.lock.flock
+    owner: session
+    why: the flock internal/lock/lock.go takes beside agent.lock so two Acquire calls cannot race
+  - path: <rig>/.runtime/handoff_to_successor
+    owner: session
+    why: the marker gt handoff leaves for the successor's gt prime (internal/cmd/handoff.go writeHandoffMarker)
   - path: .runtime/jev
     owner: daemon
     why: jev's dataset the daemon writes
@@ -107,6 +167,150 @@ entries:
   - path: .runtime/reports
     owner: daemon
     why: the published bird reports gt report publish writes, one directory per bird (gt-yjzepk.3)
+  - path: .runtime/ci-failures.jsonl
+    owner: daemon
+    why: the CI failure ledger internal/daemon/cifailures.go writes, one JSON line per failure
+  - path: .runtime/cloud-check
+    owner: daemon
+    why: the cloud-check plugin's status.json, read by internal/cmd/dashboard.go dashboardCloudChecksPath
+  - path: .runtime/deploy-watch.json
+    owner: daemon
+    why: the deploy watch's state internal/daemon/deploy_watch.go writes
+  - path: .runtime/diskmaint
+    owner: daemon
+    why: the disk maintenance ledger gt maint writes (internal/cmd/maint.go) and internal/polecatimage reads before it prunes a registry
+  - path: .runtime/gate-logs
+    owner: daemon
+    why: the landing worker's gate logs, one directory per rig (internal/land/gatelog.go)
+  - path: .runtime/hm-src
+    owner: daemon
+    why: the daemon's hm skew monitor's clone (internal/daemon/hm_skew.go hmSkewCloneDir)
+  - path: .runtime/om-src
+    owner: daemon
+    why: the om install's checkout, the default internal/ominstaller/resolve.go uses
+  - path: .runtime/host
+    owner: daemon
+    why: the host agent's probe file, written by gt host agent run (internal/cmd/host_agent.go, internal/hostprobe/probes.go) and read by the daemon (internal/daemon/startup_guard.go, disk_maintenance_disks.go)
+  - path: .runtime/nudge_poller
+    owner: daemon
+    why: the nudge poller's PID files, written by internal/nudge/poller.go startPoller and pruned by the daemon (internal/daemon/pollution.go)
+  - path: .runtime/openshell
+    owner: daemon
+    why: the OpenShell gateway's log directory, made by the gt-installer gateway step (internal/installer/gateway.go writeUnit)
+  - path: .runtime/patrol_scan
+    owner: daemon
+    why: the witness patrol's ledger internal/patrolscan/ledger.go writes and the daemon's patrol_scan step reads
+  - path: .runtime/pids
+    owner: daemon
+    why: the pid files internal/session/pidtrack.go TrackSessionPID writes when a session starts; internal/doctor/stale_runtime_files_check.go reads them
+  - path: .runtime/polecat-image-install.log
+    owner: daemon
+    why: the install log internal/installer/image.go writes when gt-installer installs the polecat image
+  - path: .runtime/polecat-image.lock.flock
+    owner: daemon
+    why: the flock internal/polecatimage/lock.go takes beside the polecat-image lock directory so two image runs cannot claim it
+  - path: .runtime/polecat-image.published
+    owner: daemon
+    why: the publish record internal/polecatimage/program.go writes and reads, so a push that did not finish is retried
+  - path: .runtime/rigs
+    owner: daemon
+    why: the per-rig ready-to-land stamp internal/land/readystamp.go TouchReadyStamp writes and the dock stamp internal/rig/dockstamp.go writes
+  - path: .runtime/sandbox-seat-ends
+    owner: daemon
+    why: the pending sandbox seat ends internal/daemon/sandbox_seat_end_pending.go writes
+  - path: .runtime/sbx-k8s
+    owner: daemon
+    why: the gt-sbx kind cluster's kubeconfig and manifests, written by deploy/k8s/kind/common.sh and read by internal/diskmaint/kubectl.go and internal/cmd/maint.go
+  - path: .runtime/scheduler-dispatch.lock
+    owner: daemon
+    why: the dispatch lock internal/schedulerrun/schedulerrun.go takes
+  - path: .runtime/signing
+    owner: daemon
+    why: the signing material the gt-installer signing step uses (internal/installer/sign.go); internal/binaryinstall/sign.go reads it
+  - path: .runtime/sling-startup-failures
+    owner: daemon
+    why: the per-bead startup failure records gt sling writes (internal/dispatch/startup_backoff.go), which the daemon's dispatchers read before re-slinging
+  - path: .runtime/spec-lint
+    owner: daemon
+    why: the manual lint ledger gt spec lint appends (internal/specdispatch/lintlog.go)
+  - path: .runtime/supervisor
+    owner: daemon
+    why: the action log internal/supervisor/supervisor.go writes when it restarts a session
+  - path: .runtime/tier-sweep
+    owner: daemon
+    why: the tier sweep's per-rig records internal/daemon/tier_sweep.go writes
+  - path: .runtime/tiertrigger
+    owner: daemon
+    why: the tier trigger's state and per-tier run files cmd/tiertrigger writes through internal/tiertrigger/state.go
+  - path: .runtime/town-metrics.lock
+    owner: daemon
+    why: the lock gt metrics takes while it samples (internal/cmd/metrics_run.go), run by the town-metrics daemon plugin
+  - path: .runtime/townhealth.json
+    owner: daemon
+    why: the town health snapshot internal/townhealth/file.go records, the one file the daemon writes
+  - path: .runtime/update
+    owner: daemon
+    why: the update run's state and history internal/update/state.go writes
+  - path: .runtime/daemon-liveness.json
+    owner: daemon
+    why: the daemon liveness baseline the doctor check writes (internal/doctor/daemon_liveness_check.go), run by the daemon's doctor_dog
+  - path: .runtime/daemon-respawn.json
+    owner: daemon
+    why: the daemon respawn baseline the doctor check writes (internal/doctor/daemon_respawn_check.go), run by the daemon's doctor_dog
+  - path: .runtime/polecat-admission
+    owner: daemon
+    why: admission reservations gt sling writes (internal/cmd/polecat_capacity.go writePolecatAdmissionReservation); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy, as the .runtime/agents row says
+  - path: .runtime/polecat-pool-claims
+    owner: daemon
+    why: seat claims gt sling writes (internal/cmd/sling_pool.go poolSeatClaimDir); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy, as the .runtime/agents row says
+  - path: .runtime/polecat-prompts
+    owner: daemon
+    why: the polecat system prompts gt sling stores (internal/session/prompt_store.go storePolecatPrompt), read back by the landing worker for a rejection (internal/land/promptstamp.go); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy
+  - path: .runtime/rehearsal
+    owner: daemon
+    why: the container rehearsal's run directories, written and deleted by gt daemon rehearse (internal/cmd/daemon_rehearse.go chooseRunDir)
+  - path: .runtime/hooks
+    owner: daemon
+    why: the hooks sync report gt hooks sync writes (internal/hooks/sync_report.go) and the hooks-sync doctor check reads
+  - path: .runtime/composer_pending
+    owner: daemon
+    why: the composer stall clock the daemon heartbeat and the witness patrol write (internal/tmux/pending_input_clock.go)
+  - path: .runtime/nudge_queue
+    owner: daemon
+    why: the queued nudges gt nudge writes (internal/nudge/queue.go Enqueue) and the target session's hook drains; after the wrapper cutover every gt command runs in the container, so the volume holds the only copy
+  - path: .runtime/seat-refill.json
+    owner: daemon
+    why: the seat-refill plugin's episode state, read by internal/report/hour.go refillEpisodes
+  - path: .runtime/bead-respawn-counts.json
+    owner: daemon
+    why: the per-bead respawn counts gt sling records (internal/polecat/respawn_count.go RecordBeadRespawnMark), read by the jev scorecard (internal/jev/scorecard/thrash.go)
+  - path: .runtime/bead-respawn-counts.json.flock
+    owner: daemon
+    why: the flock internal/polecat/respawn_count.go takes beside bead-respawn-counts.json
+  - path: .runtime/claude-plan
+    owner: daemon
+    why: the Claude plan samples ~/.claude/statusline-command.sh appends, with the closeouts and trim gt dashboard writes (internal/dashboard/claude_plan_month.go)
+  - path: .runtime/watch
+    owner: daemon
+    why: the watch feed gt tail and gt report read (internal/cmd/tail_sources.go); gt dashboard rewrites spend.json there while a page is open (internal/cmd/dashboard.go)
+  - path: .runtime/jev-dataset
+    owner: daemon
+    why: the dataset tables gt jev dataset writes (internal/jev/dataset/dataset.go)
+  - path: .runtime/dashboard-load.jsonl
+    owner: daemon
+    why: the dashboard's host load history, appended by internal/cmd/dashboard_trend.go dashLoads.append
+  - path: .runtime/sling-context-scan
+    owner: daemon
+    why: the full sling-context scan's outcome marker, recorded by the heartbeat (internal/schedulerrun/contexts.go) through internal/beads/sling_context_stamp.go RecordSlingContextScan
+  - path: .runtime/session_id
+    owner: session
+    why: the session ID gt prime writes in the cwd of a session started at the town root (internal/cmd/prime_session.go persistSessionID)
+  - path: .runtime/session_start_emitted
+    owner: session
+    why: the ID whose session_start gt prime has emitted, written in that session's cwd (internal/cmd/prime_session.go recordSessionStartEmitted)
+  - path: .runtime/last_handoff_ts
+    owner: session
+    why: the handoff cooldown gt handoff writes in the session's cwd (internal/cmd/handoff.go recordHandoffTimeIn)
   - path: <rig>/crew
     owner: session
     why: each crew worker's persistent workspace

@@ -92,6 +92,155 @@ func TestManifestMirrorMatches(t *testing.T) {
 	}
 }
 
+// newManifestRows are the rows gt-plrm1y adds to the split, with the owner each
+// must carry. TestManifestWhysNameTheirSource holds every one to a source file,
+// and TestManifestHasNoOverlappingRows holds the set to one owner per path.
+var newManifestRows = []struct {
+	path  string
+	owner Owner
+}{
+	// Town-root state.
+	{path: "power-state", owner: OwnerDaemon},
+	{path: ".events.jsonl.lock", owner: OwnerDaemon},
+	{path: ".feed.jsonl.lock", owner: OwnerDaemon},
+	{path: ".dolt-backup", owner: OwnerDaemon},
+	{path: ".dolt-archive", owner: OwnerDaemon},
+	{path: ".beads-wisp", owner: OwnerDaemon},
+
+	// Rig-level paths each registered rig carries.
+	{path: "<rig>/.beads", owner: OwnerDaemon},
+	{path: "<rig>/plugins", owner: OwnerDaemon},
+	{path: "<rig>/settings", owner: OwnerShared},
+	{path: "<rig>/directives", owner: OwnerShared},
+	{path: "<rig>/scripts", owner: OwnerShared},
+	{path: "<rig>/.gastown-harness-manifest.json", owner: OwnerShared},
+	{path: "<rig>/.runtime/namepool-state.json", owner: OwnerDaemon},
+	{path: "<rig>/.runtime/locks", owner: OwnerDaemon},
+	{path: "<rig>/.runtime/session_id", owner: OwnerSession},
+	{path: "<rig>/.runtime/session_start_emitted", owner: OwnerSession},
+	{path: "<rig>/.runtime/last_handoff_ts", owner: OwnerSession},
+	{path: "<rig>/.runtime/agent.lock", owner: OwnerSession},
+	{path: "<rig>/.runtime/agent.lock.flock", owner: OwnerSession},
+	{path: "<rig>/.runtime/handoff_to_successor", owner: OwnerSession},
+
+	// The daemon's own .runtime paths.
+	{path: ".runtime/ci-failures.jsonl", owner: OwnerDaemon},
+	{path: ".runtime/cloud-check", owner: OwnerDaemon},
+	{path: ".runtime/deploy-watch.json", owner: OwnerDaemon},
+	{path: ".runtime/diskmaint", owner: OwnerDaemon},
+	{path: ".runtime/gate-logs", owner: OwnerDaemon},
+	{path: ".runtime/hm-src", owner: OwnerDaemon},
+	{path: ".runtime/om-src", owner: OwnerDaemon},
+	{path: ".runtime/host", owner: OwnerDaemon},
+	{path: ".runtime/nudge_poller", owner: OwnerDaemon},
+	{path: ".runtime/openshell", owner: OwnerDaemon},
+	{path: ".runtime/patrol_scan", owner: OwnerDaemon},
+	{path: ".runtime/pids", owner: OwnerDaemon},
+	{path: ".runtime/polecat-image-install.log", owner: OwnerDaemon},
+	{path: ".runtime/polecat-image.lock.flock", owner: OwnerDaemon},
+	{path: ".runtime/polecat-image.published", owner: OwnerDaemon},
+	{path: ".runtime/rigs", owner: OwnerDaemon},
+	{path: ".runtime/sandbox-seat-ends", owner: OwnerDaemon},
+	{path: ".runtime/sbx-k8s", owner: OwnerDaemon},
+	{path: ".runtime/scheduler-dispatch.lock", owner: OwnerDaemon},
+	{path: ".runtime/signing", owner: OwnerDaemon},
+	{path: ".runtime/sling-startup-failures", owner: OwnerDaemon},
+	{path: ".runtime/spec-lint", owner: OwnerDaemon},
+	{path: ".runtime/supervisor", owner: OwnerDaemon},
+	{path: ".runtime/tier-sweep", owner: OwnerDaemon},
+	{path: ".runtime/tiertrigger", owner: OwnerDaemon},
+	{path: ".runtime/town-metrics.lock", owner: OwnerDaemon},
+	{path: ".runtime/townhealth.json", owner: OwnerDaemon},
+	{path: ".runtime/update", owner: OwnerDaemon},
+	{path: ".runtime/daemon-liveness.json", owner: OwnerDaemon},
+	{path: ".runtime/daemon-respawn.json", owner: OwnerDaemon},
+
+	// .runtime paths only gt commands write, daemon-owned after the wrapper
+	// cutover, as the .runtime/agents row states.
+	{path: ".runtime/polecat-admission", owner: OwnerDaemon},
+	{path: ".runtime/polecat-pool-claims", owner: OwnerDaemon},
+	{path: ".runtime/polecat-prompts", owner: OwnerDaemon},
+	{path: ".runtime/rehearsal", owner: OwnerDaemon},
+	{path: ".runtime/hooks", owner: OwnerDaemon},
+	{path: ".runtime/composer_pending", owner: OwnerDaemon},
+	{path: ".runtime/nudge_queue", owner: OwnerDaemon},
+	{path: ".runtime/seat-refill.json", owner: OwnerDaemon},
+	{path: ".runtime/bead-respawn-counts.json", owner: OwnerDaemon},
+	{path: ".runtime/bead-respawn-counts.json.flock", owner: OwnerDaemon},
+	{path: ".runtime/claude-plan", owner: OwnerDaemon},
+	{path: ".runtime/watch", owner: OwnerDaemon},
+	{path: ".runtime/jev-dataset", owner: OwnerDaemon},
+	{path: ".runtime/dashboard-load.jsonl", owner: OwnerDaemon},
+	{path: ".runtime/sling-context-scan", owner: OwnerDaemon},
+
+	// Session state a session writes in its cwd at the town root.
+	{path: ".runtime/session_id", owner: OwnerSession},
+	{path: ".runtime/session_start_emitted", owner: OwnerSession},
+	{path: ".runtime/last_handoff_ts", owner: OwnerSession},
+}
+
+// TestManifestHasNoOverlappingRows fails when two rows cover one path with a
+// different owner, which verify reports as a problem and a volume seed cannot
+// resolve. The rig/.runtime parent is refused outright: its children have a
+// daemon owner and a session owner, so a parent row would overlap both.
+func TestManifestHasNoOverlappingRows(t *testing.T) {
+	t.Parallel()
+	m := Default()
+	if m.names(RigPlaceholder + "/" + constants.DirRuntime) {
+		t.Errorf("the manifest names %s/%s as one row; its children have two owners, so name the children instead",
+			RigPlaceholder, constants.DirRuntime)
+	}
+	entries := m.Expand([]string{"gastown", "beads"}, BirdRuntimeNames())
+	if problems := overlaps(entries); len(problems) != 0 {
+		t.Errorf("the manifest covers a path twice with different owners: %v", problems)
+	}
+}
+
+// TestManifestWhysNameTheirSource fails when a row gt-plrm1y adds carries the
+// wrong owner or a why that never names the file that writes or reads the path.
+func TestManifestWhysNameTheirSource(t *testing.T) {
+	t.Parallel()
+	m := Default()
+	for _, want := range newManifestRows {
+		e, ok := entryNamed(m, want.path)
+		if !ok {
+			t.Errorf("the manifest has no row %q", want.path)
+			continue
+		}
+		if e.Owner != want.owner {
+			t.Errorf("row %q is %q, want %q", want.path, e.Owner, want.owner)
+		}
+		if !strings.Contains(e.Why, ".go") {
+			t.Errorf("row %q's why does not name a Go source file: %q", want.path, e.Why)
+		}
+	}
+}
+
+// TestManifestWhysAreNotPlaceholders is the half Validate and the parser's
+// refusal table miss: an empty why is refused there, a why such as "TODO" is
+// not. Every row's why must say what the path holds.
+func TestManifestWhysAreNotPlaceholders(t *testing.T) {
+	t.Parallel()
+	for _, e := range Default().Entries {
+		low := strings.ToLower(e.Why)
+		for _, placeholder := range []string{"todo", "tbd", "fixme", "xxx", "...", "placeholder"} {
+			if strings.Contains(low, placeholder) {
+				t.Errorf("row %q has a placeholder why %q (holds %q); say what the path holds and who writes it", e.Path, e.Why, placeholder)
+			}
+		}
+	}
+}
+
+// entryNamed returns the entry whose path is exactly p.
+func entryNamed(m *Manifest, p string) (Entry, bool) {
+	for _, e := range m.Entries {
+		if e.Path == p {
+			return e, true
+		}
+	}
+	return Entry{}, false
+}
+
 // TestTownStateRigPathsAreTheProductionNames ties the rig repository and
 // canonical clone rows to the names the code that uses them is built from, not
 // to a layout this test assumes. Three links: the manifest rows are spelled with
