@@ -412,6 +412,50 @@ func TestConfigDaemonBacksUpAndDiffs(t *testing.T) {
 			t.Errorf("output after the failed write = %q, want nothing", out.String())
 		}
 	})
+
+	t.Run("a failed write whose backup cannot be removed reports both", func(t *testing.T) {
+		t.Parallel()
+		townRoot, path := daemonConfigTown(t, daemonConfigFixture)
+		env, _, _ := daemonConfigTestEnv(townRoot, time.Now())
+		env.update = func(path string, perm os.FileMode, mutate func(*json.RawMessage, bool) error) error {
+			return config.UpdateConfigJSONNoWait(path, perm, func(cur *json.RawMessage, exists bool) error {
+				if err := mutate(cur, exists); err != nil {
+					return err
+				}
+				// A non-empty directory where the copy is cannot be unlinked,
+				// so the cleanup's own failure has to be reported.
+				entries, err := os.ReadDir(filepath.Dir(path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, entry := range entries {
+					if !strings.HasPrefix(entry.Name(), filepath.Base(path)+".bak-") {
+						continue
+					}
+					full := filepath.Join(filepath.Dir(path), entry.Name())
+					if err := os.Remove(full); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(full, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(full, "keep"), []byte("x"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return errors.New("the write failed")
+			})
+		}
+		before := daemonConfigMustRead(t, path)
+
+		err := configDaemonSet(env, "cli_theme", `"light"`, "theme")
+		if err == nil || !strings.Contains(err.Error(), "the write failed") || !strings.Contains(err.Error(), "removing the backup") {
+			t.Fatalf("set = %v, want the write's error and the failed removal", err)
+		}
+		if after := daemonConfigMustRead(t, path); !bytes.Equal(after, before) {
+			t.Errorf("file after the failed write = %q, want it unchanged", after)
+		}
+	})
 }
 
 func TestConfigDaemonRefusesSecrets(t *testing.T) {

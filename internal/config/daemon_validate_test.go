@@ -61,6 +61,11 @@ func TestValidateScheduledSlingEntry(t *testing.T) {
 			mutate: func(e *ScheduledSlingEntry) { e.Dispatch = "sling" },
 			want:   `dispatch "sling"`,
 		},
+		{
+			name:   "a var that cannot be written as a key=value line",
+			mutate: func(e *ScheduledSlingEntry) { e.Vars = map[string]string{"k": "a\nb=c"} },
+			want:   "cannot be written as a key=value line",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
