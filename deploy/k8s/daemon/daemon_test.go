@@ -248,6 +248,13 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"two Secret files whose volume names collide", func(v *Values) {
 			v.Secrets = append(v.Secrets, templates.SecretFile{Name: "x.y"}, templates.SecretFile{Name: "x-y"})
 		}, "Values.Secrets", ""},
+		{"a Secret file whose volume name is too long", func(v *Values) {
+			// Each label of the Secret name fits 63 characters, but the volume
+			// name joins them, so only the volume-name check refuses it.
+			v.Secrets = append(v.Secrets, templates.SecretFile{
+				Name: strings.Repeat("a", 30) + "." + strings.Repeat("b", 30),
+			})
+		}, "Values.Secrets", "longer than 63 characters"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
