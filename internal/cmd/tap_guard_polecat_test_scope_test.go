@@ -762,6 +762,41 @@ func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
 	}
 }
 
+// A command the parser cannot read is left unjudged by the scope hint: the
+// operator ruled it open (11-05, gt-flnd7m), because the container-suite rule
+// that runs after it in the hook fails closed on the same line. The hint
+// answers no reason, and the hook's scope branch therefore prints nothing.
+func TestPolecatTestScopeOpenOnUnparseable(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	proc := fakeGuardProcess(map[string]string{"GT_ROLE": "gastown/polecats/dag", "GT_POLECAT": "dag"}, root)
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"unterminated quote", `go test ./internal/cmd '`},
+		{"unterminated substitution", `echo $(make gate`},
+		{"unterminated here-document", "bash <<'EOF'\ngo test ./internal/cmd\n"},
+		{"unbalanced parenthesis", "(go test ./internal/cmd"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if reason, matched := evaluatePolecatTestScope(proc, tt.command); reason != "" {
+				t.Fatalf("evaluatePolecatTestScope(%q) = %q (matched %v), want no refusal: the hint is open on a command it cannot read", tt.command, reason, matched)
+			}
+			// The same line still reaches the container-suite rule through the
+			// hook, and that rule fails closed by design; the assertion here
+			// is that the scope hint added no block of its own to stderr.
+			input := `{"tool_name":"Bash","tool_input":{"command":` + strconv.Quote(tt.command) + `}}`
+			stderr, _ := runContainerSuiteGuard(input, proc)
+			if strings.Contains(stderr, "TEST SCOPE") {
+				t.Errorf("the scope hint printed a block for %q, a command it cannot read: %s", tt.command, stderr)
+			}
+		})
+	}
+}
+
 // Polecat detection must work from GT_ROLE alone (the signal every spawn
 // carries), from GT_POLECAT, and from a polecats/ cwd — and not fire for
 // other roles.
@@ -1060,8 +1095,13 @@ func TestPolecatTestScope_NestedShapes(t *testing.T) {
 		{"substitution in a later segment", `gofmt -l . && x=$(make gate)`, root, true},
 		{"substitution as an argument of go", `go vet $(go test ./...)`, root, true},
 		{"nested substitution", `echo $(echo $(make gate))`, root, true},
-		{"unterminated substitution", `echo $(make gate`, root, true},
-		{"unterminated backticks", "echo `make gate", root, true},
+		// A line with an unterminated substitution or backtick is a shell
+		// syntax error, so nothing runs. The old lenient tokenizer still read
+		// the body; shellparse refuses the line, and this hint stays silent on
+		// a command it cannot read (gt-flnd7m,
+		// TestPolecatTestScopeOpenOnUnparseable).
+		{"unterminated substitution", `echo $(make gate`, root, false},
+		{"unterminated backticks", "echo `make gate", root, false},
 		{"body holding a nested substitution", `out=$(go test ./internal/cmd 2>&1 | tail -n $(nproc))`, root, true},
 		{"body holding a grep group", `out=$(go test ./internal/cmd 2>&1 | grep -E '(ok|FAIL)')`, root, true},
 		{"body holding an awk field group", `out=$(go test ./internal/cmd 2>&1 | awk '{print $(NF)}')`, root, true},
@@ -1128,6 +1168,38 @@ func TestPolecatTestScope_NestedShapes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, tt.cwd), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// A here-document body a shell reads is a script, and the tag's quoting does
+// not change that: a quoted tag only stops the shell expanding the body while
+// it reads it, not running one. The body is judged in the directory the reader
+// segment runs in, so a cd ahead of the reader still places it.
+func TestPolecatTestScopeJudgesShellFedHeredocBody(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"quoted tag, shell reads it", "bash <<'EOF'\nmake gate\nEOF", true},
+		{"piped into a shell", "cat <<'EOF' | bash\nmake gate\nEOF", true},
+		{"reader after another segment", "gofmt -l . && bash <<'EOF'\nmake gate\nEOF", true},
+		{"cd into a heavy package before the body", "cd internal/cmd && bash <<'EOF'\ngo test\nEOF", true},
+
+		{"quoted tag, data", "cat <<'EOF'\nmake gate\nEOF", false},
+		{"shell runs a light goal", "bash <<'EOF'\nmake lint\nEOF", false},
+		{"shell on a later line", "cat <<'EOF'\nmake gate\nEOF\nbash", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
 			if got := reason != ""; got != tt.blocked {
 				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
 			}

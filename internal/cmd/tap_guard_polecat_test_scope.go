@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/shellparse"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -47,6 +48,12 @@ func isPolecatContext(proc guardProcess) bool {
 // the host's CPU. A -run filter on any number of packages is allowed — the
 // cost of a filtered run is the compile, seconds not minutes.
 //
+// The command is read by shellparse.Parse, the parser the container-suite
+// guard reads through (gt-fs6l3g): a segment, a payload, a substitution and a
+// here-document body come from the shell's own grammar. This guard is a hint,
+// so a command the parser cannot read is left unjudged — no reason, nothing
+// printed — rather than refused (operator ruling 11-05, gt-flnd7m).
+//
 // Segment directories come from segmentWalkRoot, so cd-ing into a heavy
 // package and running it there is judged in that package (gt-5mc21, gt-n7ksl).
 // A directory the walk cannot place is refused rather than read as a light one,
@@ -55,20 +62,19 @@ func isPolecatContext(proc guardProcess) bool {
 // A make goal that runs the whole suite (make test, gate, test-slow,
 // test-integration) is refused on the same ground (gt-gl3jb).
 //
-// A command substitution ($(...) or backticks) and an eval string are command
-// lines of their own, judged like a -c payload: "out=$(go test ./internal/cmd)"
-// and `eval "make gate"` run the suite though no segment word is a go binary
-// (gt-t1pct, substitutionScripts, evalPayloads).
+// A command substitution and an eval string are command lines of their own,
+// judged like a -c payload: "out=$(go test ./internal/cmd)" and
+// `eval "make gate"` run the suite though no segment word is a go binary
+// (gt-t1pct).
 //
-// Heredoc bodies are stripped before tokenizing, so a body that merely spells
-// "make test" — a bead description, a doc, a formula — is data, not a live
-// invocation. A body fed to a shell invoker is the exception and is judged as
-// the nested script it is (gt-ohe8n), in the directory the shell had reached
-// when it read the body (heredocBodyCwd, gt-1cvqj, gt-v02wh); a directory the
-// walk cannot place is carried to the body as unplaced, as a -c payload's is
-// (gt-jj3or). The shell still expands a $(...) or backtick written in an
-// unquoted body, so those substitutions are judged too, in that same directory;
-// a quoted tag keeps its body literal (gt-6fkng, heredocSubstitutionScripts).
+// A here-document body is data, not a live invocation, so a body that merely
+// spells "make test" — a bead description, a doc, a formula — is not judged. A
+// body a shell reads as its script is the exception and is judged as the nested
+// script it is (gt-ohe8n), in the directory the reading segment runs in
+// (gt-1cvqj, gt-v02wh); a directory the walk cannot place is carried to the
+// body as unplaced, as a -c payload's is (gt-jj3or). The shell expands a
+// $(...) written in an unquoted body while reading it, so those substitutions
+// are judged too; a quoted tag keeps its body literal (gt-6fkng).
 func evaluatePolecatTestScope(proc guardProcess, command string) (reason string, matched []string) {
 	cwd, _ := proc.getwd()
 	return evaluatePolecatTestScopeDepth(proc, command, cwd, true, 0)
@@ -79,70 +85,120 @@ func evaluatePolecatTestScope(proc guardProcess, command string) (reason string,
 // runs in, one level down. cwdKnown is false for a -c payload whose segment
 // directory the walk could not place: cwd then only stands in for that
 // directory, and nothing in the payload is judged against it (gt-rws47).
+//
+// A command the parser cannot read returns no reason: the hint stays silent on
+// it (gt-flnd7m).
 func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, cwdKnown bool, depth int) (reason string, matched []string) {
-	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return "", nil
+	}
+	return evaluatePolecatTestScopeScript(proc, script, cwd, cwdKnown, depth)
+}
+
+// polecatTestScopeDir is the directory one parsed segment runs in, and whether
+// the walk could place it.
+type polecatTestScopeDir struct {
+	dir   string
+	known bool
+}
+
+// evaluatePolecatTestScopeScript judges one parsed command: every segment in
+// its directory, the shells it starts, the substitutions the shell expands and
+// the here-document bodies a shell reads as its script. The token line
+// segmentWalkRoot reads is containerSuiteWalkLine's reconstruction of the
+// parsed segments, the same reconstruction the container-suite guard starts
+// from. Unlike that guard, this hint does not apply containerSuiteCarry: its
+// contract is open, and a skipped cd stays the reading segmentWalkRoot gives
+// it rather than a refusal.
+func evaluatePolecatTestScopeScript(proc guardProcess, script shellparse.Script, cwd string, cwdKnown bool, depth int) (reason string, matched []string) {
+	tokens, starts := containerSuiteWalkLine(script)
 	vars := shellVarAssignments(tokens)
-	// judge covers one segment and the -c payloads of the shells it starts. A
-	// payload runs in the segment's directory. When the walk cannot place it
-	// the payload is judged as unplaced, so one that runs the suite is
-	// refused, rather than read against the base, which is no evidence of
-	// where the shell is (gt-y1zks, gt-ofj05, gt-rws47).
-	judge := func(segment []string, start int) (string, []string) {
-		segment = commandSegment(segment)
-		dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
-		known = known && cwdKnown
-		if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
+	dirs := make([]polecatTestScopeDir, len(script.Segments))
+	for i := range script.Segments {
+		dir, known := segmentWalkRoot(proc, tokens, starts[i], cwd, vars)
+		dirs[i] = polecatTestScopeDir{dir: dir, known: known && cwdKnown}
+	}
+	// A shell a segment starts runs in the segment's directory. When the walk
+	// cannot place that directory, the shell is judged as unplaced, so one
+	// that runs the suite is refused rather than read against the base, which
+	// is no evidence of where the shell is (gt-y1zks, gt-ofj05, gt-rws47).
+	nestedDir := func(i int) (string, bool) {
+		if !dirs[i].known {
+			return cwd, false
+		}
+		return dirs[i].dir, true
+	}
+
+	for i, seg := range script.Segments {
+		if r, m := evaluatePolecatTestScopeSegment(containerSuiteWords(seg), dirs[i].dir, dirs[i].known); r != "" {
 			return r, m
 		}
-		payloads := segmentPayloads(tokens, start, segment)
+		payloads := containerSuitePayloads(script, i)
 		if depth >= maxTestGuardNestDepth {
-			return nestedTooDeepRefusal(len(payloads) > 0)
+			if len(payloads) > 0 {
+				return nestedTooDeepRefusal(true)
+			}
+			continue
 		}
-		if !known {
-			dir = cwd
-		}
+		dir, known := nestedDir(i)
 		for _, payload := range payloads {
 			if r, m := evaluatePolecatTestScopeDepth(proc, payload, dir, known, depth+1); r != "" {
 				return r, m
 			}
 		}
-		return "", nil
 	}
 
-	var segment []string
-	start := 0
-	for i, tok := range tokens {
-		if shellCommandSeparators[tok] {
-			if r, m := judge(segment, start); r != "" {
-				return r, m
+	// A substitution written in a word, an assignment or an unquoted
+	// here-document body runs where its segment runs. One written in a
+	// construct header (a for list, a case pattern) runs in the line's own
+	// directory.
+	var subs []containerSuiteNested
+	for i, seg := range script.Segments {
+		for _, sub := range seg.Subs {
+			if containerSuiteScriptEmpty(sub) {
+				continue
 			}
-			segment = nil
-			start = i + 1
+			dir, known := nestedDir(i)
+			subs = append(subs, containerSuiteNested{script: sub, dir: dir, known: known})
+		}
+	}
+	for _, sub := range script.Subs {
+		if containerSuiteScriptEmpty(sub) {
 			continue
 		}
-		segment = append(segment, tok)
-	}
-	if r, m := judge(segment, start); r != "" {
-		return r, m
+		subs = append(subs, containerSuiteNested{script: sub, dir: cwd, known: cwdKnown})
 	}
 
-	spans := shellFedHeredocSpans(command)
-	subs := substitutionScripts(proc, command, cwd, cwdKnown)
+	// A here-document body is judged as a script only when a shell on its
+	// reader line runs it; every other body is data.
+	var bodies []containerSuiteNested
+	for i, seg := range script.Segments {
+		if !containerSuiteHeredocReadAsScript(script, i) {
+			continue
+		}
+		dir, known := nestedDir(i)
+		for _, h := range seg.Heredocs {
+			if h.N != "" && h.N != "0" {
+				continue
+			}
+			if strings.TrimSpace(h.Body) == "" {
+				continue
+			}
+			bodies = append(bodies, containerSuiteNested{body: h.Body, dir: dir, known: known})
+		}
+	}
+
 	if depth >= maxTestGuardNestDepth {
-		return nestedTooDeepRefusal(len(spans) > 0 || len(subs) > 0)
+		return nestedTooDeepRefusal(len(subs) > 0 || len(bodies) > 0)
 	}
 	for _, sub := range subs {
-		if r, m := evaluatePolecatTestScopeDepth(proc, sub.body, sub.dir, sub.known, depth+1); r != "" {
+		if r, m := evaluatePolecatTestScopeScript(proc, sub.script, sub.dir, sub.known, depth+1); r != "" {
 			return r, m
 		}
 	}
-	for _, span := range spans {
-		bodyCwd, placed := heredocBodyCwd(proc, command, span, cwd)
-		known := placed && cwdKnown
-		if !known {
-			bodyCwd = cwd
-		}
-		if r, m := evaluatePolecatTestScopeDepth(proc, span.body, bodyCwd, known, depth+1); r != "" {
+	for _, body := range bodies {
+		if r, m := evaluatePolecatTestScopeDepth(proc, body.body, body.dir, body.known, depth+1); r != "" {
 			return r, m
 		}
 	}
