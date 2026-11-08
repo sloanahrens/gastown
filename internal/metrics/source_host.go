@@ -17,10 +17,17 @@ import (
 // filled.
 const hostCommandTimeout = 5 * time.Second
 
-// hostSource is the host group: the machine the snapshot runs on, read with
+// hostProbeFileMaxAge is how old the host agent's probe file may be and still
+// describe the host now: three of its sixty-second intervals, the age the
+// daemon's attention rules and burst sampler read the same file at.
+const hostProbeFileMaxAge = 3 * time.Minute
+
+// hostSource is the host group: the machine the snapshot describes, read with
 // the macOS commands the operator uses by hand, plus one timed bead read for
-// what bd costs it. A probe that cannot give a reading leaves its column nil
-// rather than inventing a number, and the failure is counted in
+// what bd costs it. In container mode the host facts come from the host agent's
+// probe file instead, because sysctl, top, lsof and docker inside a container
+// read the container (gt-jd1fcj). A probe that cannot give a reading leaves
+// its column nil rather than inventing a number, and the failure is counted in
 // host_probe_failures so a column that is nil because its command failed, hung,
 // printed nothing or printed something the parser could not read is a number in
 // the record and not a silent absence. The other columns are untouched: one
@@ -53,12 +60,17 @@ func newHostSource() hostSource {
 
 func (hostSource) Group() string { return "host" }
 
-// Collect fills the host group. A probe that cannot give a reading is a nil
-// column counted in host_probe_failures; only an Env with no bead store, which
-// is a wiring error rather than a host that could not answer, is an error.
+// Collect fills the host group: from the host agent's file when the Env names
+// one, from the Mac's own commands otherwise. A probe that cannot give a
+// reading is a nil column counted in host_probe_failures; only an Env with no
+// bead store, which is a wiring error rather than a host that could not answer,
+// is an error.
 func (s hostSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
 	if env.Beads == nil {
 		return nil, fmt.Errorf("host: the environment has no bead store")
+	}
+	if env.HostProbes != nil {
+		return s.collectFromFile(ctx, env)
 	}
 	probes := s.probes()
 	cols := make(map[string]any, len(probes)+1)
@@ -82,6 +94,51 @@ func (s hostSource) probeTimeout() time.Duration {
 	return hostCommandTimeout
 }
 
+// collectFromFile fills the group from the host agent's probe file, the host
+// source of a container. None of the macOS commands runs: their answer would
+// describe the container. The bead read stays, because it measures this
+// process's own path to the store, the one its other reads take.
+//
+// load1 and dolt_conns are nil without being failures: the file carries
+// neither a load average nor an established-connection count, and the
+// container's own would name the container, so no probe for them runs and
+// host_probe_failures counts only the file-backed facts. A fact the file could
+// not give is nil and counted, never the zero the field decodes to.
+func (s hostSource) collectFromFile(ctx context.Context, env Env) (map[string]any, error) {
+	p, err := env.HostProbes(env.now())
+	cols := map[string]any{"load1": nil, "dolt_conns": nil}
+	failures := 0
+	if err != nil || p.CPUIdlePct.Err != "" {
+		cols["cpu_idle_pct"] = nil
+		failures++
+	} else {
+		cols["cpu_idle_pct"] = p.CPUIdlePct.Value
+	}
+	if err != nil || p.DockerDisk.Err != "" {
+		cols["docker_disk_pct"] = nil
+		failures++
+	} else {
+		cols["docker_disk_pct"] = p.DockerDisk.Value.UsedPct
+	}
+	value, ok := hostLatencyProbe.read(ctx, env, s.probeTimeout())
+	cols["bd_latency_ms"] = value
+	if !ok {
+		failures++
+	}
+	cols["host_probe_failures"] = failures
+	return cols, nil
+}
+
+// hostProbesFromFile reads the probe file the host agent publishes under town,
+// the host group's source in container mode. A file the reader refuses is an
+// error, so the group reports its facts as unknown rather than as zero.
+func hostProbesFromFile(town string) func(now time.Time) (hostprobe.Probes, error) {
+	path := hostprobe.Path(town)
+	return func(now time.Time) (hostprobe.Probes, error) {
+		return hostprobe.Read(path, now, hostProbeFileMaxAge)
+	}
+}
+
 // hostProbe is one host column: the command that reads it and the parser that
 // turns its stdout into the value. store marks the probe whose read is the
 // issue store rather than a command: its value is the time the read took.
@@ -101,6 +158,14 @@ var hostIdleProbe = hostProbe{
 	parse:  parseCPUIdlePct,
 }
 
+// hostLatencyProbe times one list of one issue in the town's store. Both paths
+// run it: a container's bead reads take it over the network to the store, so
+// the number is the container's own cost, not a reading of the Mac.
+var hostLatencyProbe = hostProbe{
+	column: "bd_latency_ms",
+	store:  true,
+}
+
 // probes are the group's columns, in the order they run. They run one after
 // another, so Collect costs at most one timeout per probe, which stays under
 // the group's own deadline (SourceTimeout) as
@@ -117,12 +182,9 @@ func (s hostSource) probes() []hostProbe {
 			parse:  parseLoadAvg1,
 		},
 		hostIdleProbe,
-		{
-			// One bd list in the town's store, read twice: the first read is
-			// an untimed warm-up of the seam, the second is the timed one.
-			column: "bd_latency_ms",
-			store:  true,
-		},
+		// One bd list in the town's store, read twice: the first read is an
+		// untimed warm-up of the seam, the second is the timed one.
+		hostLatencyProbe,
 		{
 			column: "dolt_conns",
 			argv:   []string{"lsof", "-nP", "-iTCP:" + s.doltPort, "-sTCP:ESTABLISHED"},

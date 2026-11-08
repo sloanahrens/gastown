@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -38,7 +39,16 @@ func RunSnapshot(ctx context.Context, env Env, sources []Source, perSource time.
 // OSRunner(DefaultAllowEnv), the issue store for any directory asked for, the
 // wall clock and the filesystem.
 func OSEnv(town string) Env {
-	return Env{
+	return osEnv(town, config.InContainerMode())
+}
+
+// osEnv is OSEnv for a process known to be the town's container or not, so the
+// host source's wiring is testable without a process environment. In the
+// container the host group reads the host agent's probe file, since the
+// container's own commands would describe the container; on the host the
+// commands are unchanged.
+func osEnv(town string, inContainer bool) Env {
+	env := Env{
 		Town:   town,
 		Run:    OSRunner(DefaultAllowEnv),
 		RunEnv: OSRunnerEnv(DefaultAllowEnv),
@@ -54,6 +64,10 @@ func OSEnv(town string) Env {
 		Tail:     tailFile,
 		Wait:     time.Sleep,
 	}
+	if inContainer {
+		env.HostProbes = hostProbesFromFile(town)
+	}
+	return env
 }
 
 // repoFileAt is Env.RepoFile over the rig package's reader.
