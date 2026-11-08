@@ -28,6 +28,16 @@ const (
 	backupRetentionAge   = 7 * 24 * time.Hour
 )
 
+// BackupRetention is what a prune keeps and never removes: the newest Count
+// copies, and every copy younger than Age.
+type BackupRetention struct {
+	Count int
+	Age   time.Duration
+}
+
+// defaultBackupRetention is the retention BackupFile prunes by.
+var defaultBackupRetention = BackupRetention{Count: backupRetentionCount, Age: backupRetentionAge}
+
 // backupWrite creates dst and writes data to it, and removes its own partial
 // file when it fails. The default fsyncs the file before closing it; a test
 // injects one that writes short, which the size check must catch.
@@ -58,6 +68,19 @@ type backupRun struct {
 // searched forever (gt-jaagc).
 func BackupFile(path, stamp string) (string, error) {
 	return backupFile(path, stamp, backupRun{now: time.Now, write: writeBackupCopy, prune: pruneCopies})
+}
+
+// BackupFileRetained is BackupFile with the retention it prunes by, and a line
+// reported to removed for each copy it deletes, so a caller that must say what
+// it dropped can (gt-yjzepk.4).
+func BackupFileRetained(path, stamp string, r BackupRetention, removed func(string)) (string, error) {
+	return backupFile(path, stamp, backupRun{
+		now:   time.Now,
+		write: writeBackupCopy,
+		prune: func(path, keep string, now time.Time) error {
+			return pruneBackupsTo(path, keep, now, r, os.ReadDir, removed)
+		},
+	})
 }
 
 // backupFile is BackupFile with its clock, writer and pruner passed in: the
@@ -159,13 +182,19 @@ func pruneCopies(path, keep string, now time.Time) error {
 }
 
 // pruneBackups removes the copies of path in its directory that are past the
-// retention window: outside the newest backupRetentionCount and older than
-// backupRetentionAge. keep, the copy just written, is never removed, and no
-// name that is not <path>.bak-* is touched. It returns the errors it met, which
-// the caller logs: a directory that cannot be pruned must not cost the write.
-// readDir is os.ReadDir, so a test can hand it a directory it cannot read or an
-// entry it cannot stat.
+// default retention window. It is pruneCopies with a directory reader a test
+// injects.
 func pruneBackups(path, keep string, now time.Time, readDir func(string) ([]fs.DirEntry, error)) error {
+	return pruneBackupsTo(path, keep, now, defaultBackupRetention, readDir, nil)
+}
+
+// pruneBackupsTo removes the copies of path in its directory that are outside
+// r. keep, the copy just written, is never removed, and no name that is not
+// <path>.bak-* is touched. It returns the errors it met, which the caller logs:
+// a directory that cannot be pruned must not cost the write. readDir is
+// os.ReadDir, so a test can hand it a directory it cannot read or an entry it
+// cannot stat.
+func pruneBackupsTo(path, keep string, now time.Time, r BackupRetention, readDir func(string) ([]fs.DirEntry, error), removed func(string)) error {
 	dir := filepath.Dir(path)
 	prefix := filepath.Base(filepath.Clean(path)) + ".bak-"
 	entries, err := readDir(dir)
@@ -198,14 +227,20 @@ func pruneBackups(path, keep string, now time.Time, readDir func(string) ([]fs.D
 	})
 	var errs []error
 	for i, c := range copies {
-		if i < backupRetentionCount || now.Sub(c.mod) < backupRetentionAge {
+		if i < r.Count || now.Sub(c.mod) < r.Age {
 			continue
 		}
 		if c.path == keep {
 			continue
 		}
-		if err := os.Remove(c.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, err)
+		if err := os.Remove(c.path); err != nil {
+			if !errors.Is(err, fs.ErrNotExist) {
+				errs = append(errs, err)
+			}
+			continue
+		}
+		if removed != nil {
+			removed(c.path)
 		}
 	}
 	return errors.Join(errs...)

@@ -10,6 +10,10 @@ import (
 	"reflect"
 )
 
+// ErrConfigLocked reports a town config file whose lock another writer holds,
+// for a writer that refuses rather than queues behind it (UpdateConfigJSONNoWait).
+var ErrConfigLocked = errors.New("the config file's lock is held by another writer")
+
 // The one writer for town config files (gt-y3pgh.1, D5). Every write:
 //
 //   - holds an exclusive flock on <file>.lock for the whole read-modify-write,
@@ -41,6 +45,18 @@ func WriteConfigJSON[T any](path string, v *T, perm os.FileMode) error {
 // result. When mutate returns an error nothing is written. A file that does
 // not parse is never written.
 func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, exists bool) error) error {
+	return updateConfigJSON(path, perm, mutate, lockConfigFile)
+}
+
+// UpdateConfigJSONNoWait is UpdateConfigJSON whose lock another writer holds
+// is ErrConfigLocked: it refuses instead of waiting, and nothing is written.
+func UpdateConfigJSONNoWait[T any](path string, perm os.FileMode, mutate func(v *T, exists bool) error) error {
+	return updateConfigJSON(path, perm, mutate, lockConfigFileNoWait)
+}
+
+// updateConfigJSON is the writer behind both exported forms: lock is how it
+// takes the file's lock, which decides whether a held one waits.
+func updateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, exists bool) error, lock func(string) (func(), error)) error {
 	// A retired file of the two-file layout is written in its host
 	// (layout.go). The check repeats under the file's lock: gt config
 	// migrate holds that lock while it moves the file, and a writer that
@@ -48,13 +64,13 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 	if host, key, ok, _, err := sectionFor(path); err != nil {
 		return err
 	} else if ok {
-		return updateSection(host, key, mutate)
+		return updateSection(host, key, mutate, lock)
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", dir, err)
 	}
-	unlock, err := lockConfigFile(path)
+	unlock, err := lock(path)
 	if err != nil {
 		return err
 	}
@@ -63,7 +79,7 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 		if err != nil {
 			return err
 		}
-		return updateSection(host, key, mutate)
+		return updateSection(host, key, mutate, lock)
 	}
 	defer unlock()
 

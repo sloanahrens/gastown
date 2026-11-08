@@ -495,3 +495,74 @@ func merge(a, b map[string]time.Duration) map[string]time.Duration {
 	}
 	return out
 }
+
+// BackupFileRetained keeps the copies inside its own retention, removes a copy
+// only when it is both outside the newest Count and older than Age, reports
+// each removal, and leaves every other file alone.
+func TestBackupFileRetainedPrunesByItsRetention(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("current"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	retention := BackupRetention{Count: 5, Age: 30 * 24 * time.Hour}
+
+	// Twelve copies: eight younger than the age, four older. The copy this call
+	// writes is the newest, so the newest five are it and four of the young
+	// copies; the other four young copies are outside the count but kept for
+	// their age, and the four old ones go.
+	var names []string
+	for i := 0; i < 12; i++ {
+		name := fmt.Sprintf("config.json.bak-202601%02dT120000Z-label", i+1)
+		names = append(names, name)
+	}
+	for i, name := range names {
+		mod := now.Add(-time.Duration(11-i) * time.Hour)
+		if i >= 8 {
+			mod = now.Add(-time.Duration(40+i) * 24 * time.Hour)
+		}
+		full := filepath.Join(dir, name)
+		if err := os.WriteFile(full, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(full, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(other, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var removed []string
+	dst, err := BackupFileRetained(path, "20261108T120000Z-test", retention, func(p string) {
+		removed = append(removed, p)
+	})
+	if err != nil {
+		t.Fatalf("BackupFileRetained: %v", err)
+	}
+	if want := path + ".bak-20261108T120000Z-test"; dst != want {
+		t.Errorf("backup = %q, want %q", dst, want)
+	}
+
+	want := names[8:]
+	if len(removed) != len(want) {
+		t.Fatalf("removed %d copies, want %d: %v", len(removed), len(want), removed)
+	}
+	for i, name := range want {
+		if filepath.Base(removed[i]) != name {
+			t.Errorf("removed[%d] = %s, want %s", i, filepath.Base(removed[i]), name)
+		}
+	}
+	for _, name := range names[:8] {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s was removed: %v", name, err)
+		}
+	}
+	if data, err := os.ReadFile(other); err != nil || string(data) != "keep" {
+		t.Errorf("a file that is not a backup = %q, %v; want it untouched", data, err)
+	}
+}

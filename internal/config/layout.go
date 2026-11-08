@@ -260,8 +260,9 @@ func readConfigFile(path string) (data []byte, label string, err error) {
 // updateSection is UpdateConfigJSON for a retired file whose host carries
 // its section: it decodes the section into a T under the host's lock, calls
 // mutate, and writes the host back with only the section's changes applied.
-func updateSection[T any](host, key string, mutate func(v *T, exists bool) error) error {
-	unlock, err := lockConfigFile(host)
+// lock is the caller's lock, so a wait-free write keeps refusing a held lock.
+func updateSection[T any](host, key string, mutate func(v *T, exists bool) error, lock func(string) (func(), error)) error {
+	unlock, err := lock(host)
 	if err != nil {
 		return err
 	}

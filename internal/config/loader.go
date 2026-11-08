@@ -632,6 +632,13 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 	return WriteConfigJSON(path, config, 0644)
 }
 
+// ValidateDaemonPatrolConfigIdentity is the check LoadDaemonPatrolConfig
+// applies to the document it reads, for a writer that must refuse a daemon
+// section the daemon would refuse before it saves one (gt-yjzepk.4).
+func ValidateDaemonPatrolConfigIdentity(c *DaemonPatrolConfig) error {
+	return validateDaemonPatrolConfigIdentity(c)
+}
+
 // validateDaemonPatrolConfigIdentity checks the type and version: all a load
 // requires, since a bad scheduled_stop_after loads with a warning.
 func validateDaemonPatrolConfigIdentity(c *DaemonPatrolConfig) error {
