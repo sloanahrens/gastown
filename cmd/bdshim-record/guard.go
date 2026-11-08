@@ -47,68 +47,96 @@ type Resolver func(dir string, env []string) (string, error)
 // The recorder's own working directory is refused only when it is a workspace root itself; a
 // directory that merely sits under one passes, since work lives under the town (gt-p85pw.116).
 // Every refusal comes before anything is recorded.
+//
+// The scratch's workspace exists for the check alone, so guardRun removes it once the checks pass.
+// A flags recording holds it for its whole walk instead, through guardCheck and holdScratch.
 func guardRun(getwd func() (string, error), scratch string, child childBD) error {
+	cwd, err := guardCheck(getwd, child)
+	if err != nil {
+		return err
+	}
+	release, err := holdScratch(cwd, scratch, child)
+	if err != nil {
+		return err
+	}
+	return release()
+}
+
+// guardCheck proves the parts of the guard that need no scratch: the recorder's working directory
+// is not a workspace root, and the container's bd is the host's build. It returns the working
+// directory, which holdScratch names a relative scratch by.
+func guardCheck(getwd func() (string, error), child childBD) (string, error) {
 	cwd, err := getwd()
 	if err != nil {
-		return fmt.Errorf("name the working directory: %w", err)
+		return "", fmt.Errorf("name the working directory: %w", err)
 	}
 	real, err := realPath(cwd)
 	if err != nil {
-		return fmt.Errorf("resolve %s: %w", cwd, err)
+		return "", fmt.Errorf("resolve %s: %w", cwd, err)
 	}
 	root, err := workspaceRootAt(real)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if root {
 		where := cwd
 		if real != cwd {
 			where = fmt.Sprintf("%s (that is %s)", cwd, real)
 		}
-		return fmt.Errorf("%s is itself a beads workspace root, where bd init would rewrite that workspace's store; run the recorder from a directory that holds no .beads of its own", where)
+		return "", fmt.Errorf("%s is itself a beads workspace root, where bd init would rewrite that workspace's store; run the recorder from a directory that holds no .beads of its own", where)
 	}
 	// The build is proved first: it reads only, so it needs no directory, and every mode records
 	// from the one bd it makes sure the container runs.
 	if err := proveBDBuild(child); err != nil {
-		return err
+		return "", err
 	}
+	return cwd, nil
+}
+
+// holdScratch makes the scratch's workspace and proves that the container's bd resolves it, then
+// returns the release that drops the database and removes the workspace. The caller runs release
+// once the scratch is no longer needed. When it returns an error it returns no release, and a
+// workspace a failed init left behind is not removed here.
+func holdScratch(cwd, scratch string, child childBD) (func() error, error) {
 	if scratch == "" {
-		return nil // a flags recording makes no copies, so it mounts no workspace to prove
+		return nil, errors.New("name a scratch directory, not an empty path, so the recorder knows which directory bd runs in")
 	}
 	if !filepath.IsAbs(scratch) {
 		scratch = filepath.Join(cwd, scratch)
 	}
 	scratch = filepath.Clean(scratch)
 	if err := refuseMountCharacter(scratch); err != nil {
-		return err
+		return nil, err
 	}
 	if link, found, err := symlinkOnPath(scratch); err != nil {
-		return err
+		return nil, err
 	} else if found {
-		return fmt.Errorf("%s is behind the symlink %s; name a scratch directory whose path holds no symlink, since the directory the recorder mounts is then not the one it named", scratch, link)
+		return nil, fmt.Errorf("%s is behind the symlink %s; name a scratch directory whose path holds no symlink, since the directory the recorder mounts is then not the one it named", scratch, link)
 	}
 	if err := refuseTownServer(child.Env(scratch), townDoltPort(cwd)); err != nil {
-		return err
+		return nil, err
 	}
 	if err := os.MkdirAll(scratch, 0o755); err != nil {
-		return fmt.Errorf("make the scratch directory %s: %w", scratch, err)
+		return nil, fmt.Errorf("make the scratch directory %s: %w", scratch, err)
 	}
 	if err := proveWorkspace(scratch, child); err != nil {
-		return err
+		return nil, err
 	}
 	name := newDatabaseName()
 	if err := initDatabase(child.Run, scratch, name); err != nil {
-		return fmt.Errorf("give the scratch directory %s a workspace of its own: %w", scratch, err)
+		return nil, fmt.Errorf("give the scratch directory %s a workspace of its own: %w", scratch, err)
 	}
 	if err := scratchMadeWorkspace(scratch); err != nil {
-		return err
+		return nil, err
 	}
-	// The workspace existed for the check alone. Both parts of its cleanup run, so a failed drop
-	// still removes the directory, and either failure is reported rather than left behind.
-	if err := errors.Join(dropDatabase(child.Run, scratch, name), os.RemoveAll(beadsDirIn(scratch))); err != nil {
-		return fmt.Errorf("clean up the scratch workspace %s: %w", scratch, err)
-	}
-	return nil
+	return func() error {
+		// Both parts of the cleanup run, so a failed drop still removes the directory, and either
+		// failure is reported rather than left behind.
+		if err := errors.Join(dropDatabase(child.Run, scratch, name), os.RemoveAll(beadsDirIn(scratch))); err != nil {
+			return fmt.Errorf("clean up the scratch workspace %s: %w", scratch, err)
+		}
+		return nil
+	}, nil
 }
 
 // refuseMountCharacter refuses a scratch whose path holds a character a -v source cannot carry: ':'

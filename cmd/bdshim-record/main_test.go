@@ -186,6 +186,21 @@ func TestGuardRunRefusesWhatItCannotCheck(t *testing.T) {
 			t.Fatalf("guardRun over an unreadable marker = %v, want the read failure reported", err)
 		}
 	})
+	t.Run("an empty scratch", func(t *testing.T) {
+		t.Parallel()
+		// An empty path joined to the working directory would name the working directory itself, so
+		// the guard refuses it before any scratch workspace is made.
+		bd := &guardBD{}
+		err := guardRun(safeCwd(t), "", testChild(bd.Run, atWork))
+		if err == nil || !strings.Contains(err.Error(), "name a scratch directory") {
+			t.Fatalf("guardRun with an empty scratch = %v, want the empty path refused", err)
+		}
+		for _, args := range bd.args {
+			if args[0] == "init" {
+				t.Errorf("bd ran init for an empty scratch, want no workspace made")
+			}
+		}
+	})
 }
 
 // TestGuardRunPassesAScratchThatOwnsItsWorkspace: bd resolves the workspace under the mounted
