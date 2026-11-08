@@ -1,7 +1,7 @@
 {
-  "source": "sloanahrens/beads da4983e",
+  "source": "sloanahrens/beads b9f68260ed2a494972fe8aa922b6408a91905f0c",
   "version": "1.2.2",
-  "commit": "da4983e24cc92b34df991046e966bd0d39708700",
+  "commit": "b9f68260ed2a494972fe8aa922b6408a91905f0c",
   "contract_version": 1,
   "persistent_flags": [
     "actor",
@@ -23,121 +23,6 @@
     "verbose"
   ],
   "commands": [
-    {
-      "path": "admin",
-      "subcommand_only": true
-    },
-    {
-      "path": "admin cleanup",
-      "flags": [
-        "cascade",
-        "dry-run",
-        "ephemeral",
-        "force",
-        "older-than"
-      ]
-    },
-    {
-      "path": "admin compact",
-      "flags": [
-        "actor",
-        "all",
-        "analyze",
-        "apply",
-        "auto",
-        "batch-size",
-        "dolt",
-        "dry-run",
-        "force",
-        "id",
-        "json",
-        "limit",
-        "stats",
-        "summary",
-        "tier",
-        "workers"
-      ]
-    },
-    {
-      "path": "admin reset",
-      "flags": [
-        "force"
-      ]
-    },
-    {
-      "path": "ado",
-      "subcommand_only": true
-    },
-    {
-      "path": "ado projects"
-    },
-    {
-      "path": "ado pull",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "ado push",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "ado status"
-    },
-    {
-      "path": "ado sync",
-      "flags": [
-        "area-path",
-        "bootstrap-match",
-        "dry-run",
-        "issues",
-        "iteration-path",
-        "no-create",
-        "parent",
-        "prefer-ado",
-        "prefer-local",
-        "prefer-newer",
-        "project",
-        "pull-only",
-        "push-only",
-        "reconcile",
-        "states",
-        "types"
-      ]
-    },
-    {
-      "path": "assign",
-      "flags": [
-        "force"
-      ]
-    },
-    {
-      "path": "audit",
-      "subcommand_only": true
-    },
-    {
-      "path": "audit label",
-      "flags": [
-        "label",
-        "reason"
-      ]
-    },
-    {
-      "path": "audit record",
-      "flags": [
-        "error",
-        "exit-code",
-        "issue-id",
-        "kind",
-        "model",
-        "prompt",
-        "response",
-        "stdin",
-        "tool-name"
-      ]
-    },
     {
       "path": "backup",
       "subcommand_only": true
@@ -165,14 +50,6 @@
     },
     {
       "path": "backup sync"
-    },
-    {
-      "path": "batch",
-      "flags": [
-        "dry-run",
-        "file",
-        "message"
-      ]
     },
     {
       "path": "blocked",
@@ -216,6 +93,8 @@
         "comment",
         "continue",
         "force",
+        "if-assignee",
+        "if-status",
         "message",
         "no-auto",
         "reason",
@@ -223,17 +102,6 @@
         "resolution",
         "session",
         "suggest-next"
-      ]
-    },
-    {
-      "path": "codex-hook",
-      "hidden": true
-    },
-    {
-      "path": "comment",
-      "flags": [
-        "file",
-        "stdin"
       ]
     },
     {
@@ -251,14 +119,6 @@
     },
     {
       "path": "comments list"
-    },
-    {
-      "path": "compact",
-      "flags": [
-        "days",
-        "dry-run",
-        "force"
-      ]
     },
     {
       "path": "completion",
@@ -332,32 +192,6 @@
       "path": "config validate"
     },
     {
-      "path": "conflicts",
-      "subcommand_only": true
-    },
-    {
-      "path": "conflicts list"
-    },
-    {
-      "path": "conflicts resolve",
-      "flags": [
-        "all",
-        "conclude",
-        "no-commit",
-        "ours",
-        "strategy",
-        "table",
-        "theirs"
-      ]
-    },
-    {
-      "path": "conflicts show",
-      "flags": [
-        "all-fields",
-        "table"
-      ]
-    },
-    {
       "path": "context"
     },
     {
@@ -369,6 +203,7 @@
         "persist",
         "prefix",
         "search-path",
+        "strict",
         "var"
       ]
     },
@@ -470,29 +305,6 @@
       ]
     },
     {
-      "path": "cursor-hook",
-      "hidden": true
-    },
-    {
-      "path": "db-proxy-child",
-      "hidden": true,
-      "flags": [
-        "backend",
-        "config",
-        "database",
-        "dolt-bin",
-        "external-host",
-        "external-keep-alive",
-        "external-port",
-        "external-socket-path",
-        "idle-timeout",
-        "logpath",
-        "port",
-        "root",
-        "stop-epoch"
-      ]
-    },
-    {
       "path": "defer",
       "flags": [
         "reason",
@@ -505,7 +317,9 @@
         "cascade",
         "dry-run",
         "force",
-        "from-file"
+        "from-file",
+        "if-assignee",
+        "if-status"
       ]
     },
     {
@@ -536,6 +350,12 @@
       ]
     },
     {
+      "path": "dep prune-orphans",
+      "flags": [
+        "dry-run"
+      ]
+    },
+    {
       "path": "dep relate"
     },
     {
@@ -558,9 +378,6 @@
     },
     {
       "path": "dep unrelate"
-    },
-    {
-      "path": "diff"
     },
     {
       "path": "doctor",
@@ -667,29 +484,6 @@
       "path": "dolt test"
     },
     {
-      "path": "duplicate",
-      "flags": [
-        "of"
-      ]
-    },
-    {
-      "path": "duplicates",
-      "flags": [
-        "auto-merge",
-        "dry-run"
-      ]
-    },
-    {
-      "path": "edit",
-      "flags": [
-        "acceptance",
-        "description",
-        "design",
-        "notes",
-        "title"
-      ]
-    },
-    {
       "path": "epic",
       "subcommand_only": true
     },
@@ -744,51 +538,6 @@
       ]
     },
     {
-      "path": "federation",
-      "subcommand_only": true
-    },
-    {
-      "path": "federation add-peer",
-      "flags": [
-        "password",
-        "sovereignty",
-        "user"
-      ]
-    },
-    {
-      "path": "federation list-peers"
-    },
-    {
-      "path": "federation remove-peer"
-    },
-    {
-      "path": "federation status",
-      "flags": [
-        "peer"
-      ]
-    },
-    {
-      "path": "federation sync",
-      "flags": [
-        "peer",
-        "strategy"
-      ]
-    },
-    {
-      "path": "find-duplicates",
-      "aliases": [
-        "find-dups"
-      ],
-      "flags": [
-        "limit",
-        "max-rows",
-        "method",
-        "model",
-        "status",
-        "threshold"
-      ]
-    },
-    {
       "path": "flatten",
       "flags": [
         "dry-run",
@@ -808,6 +557,12 @@
         "all",
         "delete",
         "stdout"
+      ]
+    },
+    {
+      "path": "formula lint",
+      "flags": [
+        "search-path"
       ]
     },
     {
@@ -882,102 +637,8 @@
       "flags": [
         "dry-run",
         "force",
-        "older-than",
-        "skip-decay",
         "skip-dolt"
       ]
-    },
-    {
-      "path": "github",
-      "subcommand_only": true
-    },
-    {
-      "path": "github pull",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "github push",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "github repos"
-    },
-    {
-      "path": "github status"
-    },
-    {
-      "path": "github sync",
-      "flags": [
-        "dry-run",
-        "issues",
-        "parent",
-        "prefer-github",
-        "prefer-local",
-        "prefer-newer",
-        "pull-only",
-        "push-only"
-      ]
-    },
-    {
-      "path": "gitlab",
-      "subcommand_only": true
-    },
-    {
-      "path": "gitlab projects"
-    },
-    {
-      "path": "gitlab pull",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "gitlab push",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "gitlab status"
-    },
-    {
-      "path": "gitlab sync",
-      "flags": [
-        "assignee",
-        "dry-run",
-        "exclude-type",
-        "issues",
-        "label",
-        "milestone",
-        "no-ephemeral",
-        "parent",
-        "prefer-gitlab",
-        "prefer-local",
-        "prefer-newer",
-        "project",
-        "pull-only",
-        "push-only",
-        "type"
-      ]
-    },
-    {
-      "path": "graph",
-      "flags": [
-        "all",
-        "box",
-        "compact",
-        "dot",
-        "html",
-        "max-rows",
-        "open"
-      ]
-    },
-    {
-      "path": "graph check"
     },
     {
       "path": "heartbeat",
@@ -1063,6 +724,7 @@
         "agents-file",
         "agents-profile",
         "agents-template",
+        "allow-new-database",
         "backend",
         "contributor",
         "debug",
@@ -1079,22 +741,6 @@
         "pg-url",
         "prefix",
         "proxied-server",
-        "proxied-server-config-path",
-        "proxied-server-external-host",
-        "proxied-server-external-keep-alive",
-        "proxied-server-external-port",
-        "proxied-server-external-socket-path",
-        "proxied-server-external-tls",
-        "proxied-server-external-tls-ca-cert-path",
-        "proxied-server-external-tls-cert-path",
-        "proxied-server-external-tls-key-path",
-        "proxied-server-external-tls-server-name",
-        "proxied-server-external-tls-skip-verify",
-        "proxied-server-external-user",
-        "proxied-server-idle-timeout",
-        "proxied-server-log-path",
-        "proxied-server-port",
-        "proxied-server-root-path",
         "quiet",
         "reinit-local",
         "remote",
@@ -1117,40 +763,6 @@
     },
     {
       "path": "init-safety"
-    },
-    {
-      "path": "jira",
-      "subcommand_only": true
-    },
-    {
-      "path": "jira pull",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "jira push",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "jira status"
-    },
-    {
-      "path": "jira sync",
-      "flags": [
-        "create-only",
-        "dry-run",
-        "issues",
-        "parent",
-        "prefer-jira",
-        "prefer-local",
-        "project",
-        "pull",
-        "push",
-        "state"
-      ]
     },
     {
       "path": "kv",
@@ -1188,63 +800,20 @@
       "path": "label remove"
     },
     {
-      "path": "linear",
-      "subcommand_only": true
-    },
-    {
-      "path": "linear pull",
+      "path": "land-record",
       "flags": [
-        "dry-run",
-        "relations"
-      ]
-    },
-    {
-      "path": "linear push",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "linear status"
-    },
-    {
-      "path": "linear sync",
-      "flags": [
-        "create-only",
-        "dry-run",
-        "exclude-type",
-        "include-ephemeral",
-        "issues",
-        "milestones",
-        "no-wait",
-        "parent",
-        "prefer-linear",
-        "prefer-local",
-        "pull",
-        "pull-if-stale",
-        "push",
-        "relations",
-        "state",
-        "team",
-        "threshold",
-        "type",
-        "update-refs"
-      ]
-    },
-    {
-      "path": "linear teams"
-    },
-    {
-      "path": "link",
-      "flags": [
-        "type"
-      ]
-    },
-    {
-      "path": "lint",
-      "flags": [
-        "status",
-        "type"
+        "conflicting-file",
+        "gate-result",
+        "gate-tail",
+        "gate-tail-file",
+        "kind",
+        "landed-commit",
+        "om-findings",
+        "om-score",
+        "om-verdict",
+        "patch-id",
+        "reject",
+        "route"
       ]
     },
     {
@@ -1348,18 +917,6 @@
       ]
     },
     {
-      "path": "metrics"
-    },
-    {
-      "path": "metrics example"
-    },
-    {
-      "path": "metrics off"
-    },
-    {
-      "path": "metrics on"
-    },
-    {
       "path": "migrate",
       "flags": [
         "dry-run",
@@ -1368,32 +925,6 @@
         "json",
         "update-repo-id",
         "yes"
-      ]
-    },
-    {
-      "path": "migrate from-proxied-server-to-server",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "migrate from-proxied-server-to-shared-server",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "migrate from-server-to-proxied-server",
-      "flags": [
-        "dry-run",
-        "idle-timeout"
-      ]
-    },
-    {
-      "path": "migrate from-shared-server-to-proxied-server",
-      "flags": [
-        "dry-run",
-        "idle-timeout"
       ]
     },
     {
@@ -1525,6 +1056,7 @@
         "attach",
         "attach-type",
         "dry-run",
+        "strict",
         "var"
       ]
     },
@@ -1569,7 +1101,7 @@
       "path": "mol wisp",
       "flags": [
         "dry-run",
-        "root-only",
+        "strict",
         "var"
       ]
     },
@@ -1577,7 +1109,6 @@
       "path": "mol wisp create",
       "flags": [
         "dry-run",
-        "root-only",
         "var"
       ]
     },
@@ -1607,74 +1138,7 @@
       ]
     },
     {
-      "path": "notion",
-      "subcommand_only": true
-    },
-    {
-      "path": "notion connect",
-      "flags": [
-        "url"
-      ]
-    },
-    {
-      "path": "notion init",
-      "flags": [
-        "parent",
-        "title"
-      ]
-    },
-    {
-      "path": "notion pull",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "notion push",
-      "flags": [
-        "dry-run"
-      ]
-    },
-    {
-      "path": "notion status"
-    },
-    {
-      "path": "notion sync",
-      "flags": [
-        "create-only",
-        "dry-run",
-        "issues",
-        "parent",
-        "prefer-local",
-        "prefer-notion",
-        "pull",
-        "push",
-        "state"
-      ]
-    },
-    {
       "path": "onboard"
-    },
-    {
-      "path": "orphans",
-      "flags": [
-        "details",
-        "fix",
-        "label",
-        "label-any"
-      ]
-    },
-    {
-      "path": "ping"
-    },
-    {
-      "path": "preflight",
-      "flags": [
-        "check",
-        "fix",
-        "json",
-        "skip-lint"
-      ]
     },
     {
       "path": "prime",
@@ -1692,48 +1156,6 @@
     },
     {
       "path": "priority"
-    },
-    {
-      "path": "promote",
-      "flags": [
-        "reason"
-      ]
-    },
-    {
-      "path": "provenance",
-      "subcommand_only": true
-    },
-    {
-      "path": "provenance by-ref"
-    },
-    {
-      "path": "provenance log",
-      "flags": [
-        "kind"
-      ]
-    },
-    {
-      "path": "provenance record",
-      "flags": [
-        "actor",
-        "at",
-        "issue",
-        "kind",
-        "payload",
-        "ref",
-        "ref-kind",
-        "source"
-      ]
-    },
-    {
-      "path": "prune",
-      "flags": [
-        "dry-run",
-        "force",
-        "ignore-references",
-        "older-than",
-        "pattern"
-      ]
     },
     {
       "path": "purge",
@@ -1818,9 +1240,6 @@
       ]
     },
     {
-      "path": "recompute-blocked"
-    },
-    {
       "path": "remember",
       "flags": [
         "key"
@@ -1832,6 +1251,7 @@
     {
       "path": "rename-prefix",
       "flags": [
+        "config-only",
         "dry-run",
         "repair"
       ]
@@ -1872,33 +1292,6 @@
       ]
     },
     {
-      "path": "restore",
-      "flags": [
-        "apply",
-        "json"
-      ]
-    },
-    {
-      "path": "rules",
-      "subcommand_only": true
-    },
-    {
-      "path": "rules audit",
-      "flags": [
-        "path",
-        "threshold"
-      ]
-    },
-    {
-      "path": "rules compact",
-      "flags": [
-        "auto",
-        "dry-run",
-        "group",
-        "path"
-      ]
-    },
-    {
       "path": "schema"
     },
     {
@@ -1921,6 +1314,7 @@
         "no-assignee",
         "no-labels",
         "notes-contains",
+        "phrase",
         "priority-max",
         "priority-min",
         "query",
@@ -1933,44 +1327,9 @@
       ]
     },
     {
-      "path": "send-metrics",
-      "hidden": true
-    },
-    {
-      "path": "serve",
-      "flags": [
-        "addr",
-        "allow-non-loopback",
-        "allowed-host",
-        "auth-token-file",
-        "insecure-no-auth"
-      ]
-    },
-    {
       "path": "set-state",
       "flags": [
         "reason"
-      ]
-    },
-    {
-      "path": "setup",
-      "flags": [
-        "add",
-        "check",
-        "global",
-        "list",
-        "output",
-        "print",
-        "project",
-        "remove",
-        "stealth"
-      ]
-    },
-    {
-      "path": "ship",
-      "flags": [
-        "dry-run",
-        "force"
       ]
     },
     {
@@ -2001,17 +1360,6 @@
       ]
     },
     {
-      "path": "stale",
-      "flags": [
-        "days",
-        "exclude-label",
-        "label",
-        "label-any",
-        "limit",
-        "status"
-      ]
-    },
-    {
       "path": "state"
     },
     {
@@ -2039,41 +1387,6 @@
       ]
     },
     {
-      "path": "swarm",
-      "subcommand_only": true
-    },
-    {
-      "path": "swarm create",
-      "flags": [
-        "coordinator",
-        "force"
-      ]
-    },
-    {
-      "path": "swarm list"
-    },
-    {
-      "path": "swarm status"
-    },
-    {
-      "path": "swarm validate",
-      "flags": [
-        "verbose"
-      ]
-    },
-    {
-      "path": "sync",
-      "flags": [
-        "attempts",
-        "no-adopt",
-        "remote",
-        "yes"
-      ]
-    },
-    {
-      "path": "tag"
-    },
-    {
       "path": "todo"
     },
     {
@@ -2093,12 +1406,6 @@
       "path": "todo list",
       "flags": [
         "all"
-      ]
-    },
-    {
-      "path": "types",
-      "flags": [
-        "sections"
       ]
     },
     {

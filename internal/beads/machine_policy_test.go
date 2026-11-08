@@ -17,9 +17,9 @@ import (
 // mode instead: convert it to read the envelope's data (LegacyPayload).
 var machineExemptCallers = map[string]string{
 	"internal/beads/exec.go:policyEnv":            "bd sql (machineExempt): machine mode sorts the row keys, losing the SELECT order the csv readers index by",
-	"internal/beads/machine.go:machineEnvForCall": "bd sql (machineExempt)",
-	"internal/beads/beads.go:runWithStdin":        "bd sql (machineExempt)",
-	"internal/beads/beads.go:runWithRouting":      "bd sql (machineExempt)",
+	"internal/beads/machine.go:machineEnvForCall": "bd sql and --help calls (machineExempt)",
+	"internal/beads/beads.go:runWithStdin":        "bd sql and --help calls (machineExempt)",
+	"internal/beads/beads.go:runWithRouting":      "bd sql and --help calls (machineExempt)",
 	"internal/beads/beads.go:runText":             "gt show and gt formula print bd's prose for the operator's terminal",
 }
 

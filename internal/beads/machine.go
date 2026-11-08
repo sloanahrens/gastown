@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 )
 
 // machineEnvelope is the one JSON document bd writes under machine mode
@@ -121,16 +122,41 @@ func WithoutMachineEnv(env []string) []string {
 }
 
 // machineExempt reports whether a call runs outside machine mode whatever its
-// caller did. bd sql is the only verb: machine mode prints its rows as JSON
-// objects with the keys sorted, which loses the SELECT order the csv readers
-// in internal/doctor index by.
+// caller did. Two kinds of call are exempt. bd sql: machine mode prints its rows
+// as JSON objects with the keys sorted, which loses the SELECT order the csv
+// readers in internal/doctor index by. A help call: bd answers it with an empty
+// envelope under machine mode, so the Usage section the command-tree generator
+// (internal/cmdtree/gen-bd-tree) reads is gone. A help call is a command path
+// of plain words ending in --help or -h: a flag before the help flag, a help
+// flag that is not last, or anything after a bare -- is not one, since there the
+// word may be a flag's value (bd create --title --help) or an operand.
 func machineExempt(args []string) bool {
+	if isHelpCall(args) {
+		return true
+	}
 	rest, ok := stripBDGlobalFlags(args)
 	return ok && len(rest) > 0 && rest[0] == "sql"
 }
 
+// isHelpCall reports whether args is plain words followed by a last word that
+// is --help or -h.
+func isHelpCall(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if last := args[len(args)-1]; last != "--help" && last != "-h" {
+		return false
+	}
+	for _, a := range args[:len(args)-1] {
+		if a == "" || strings.HasPrefix(a, "-") {
+			return false
+		}
+	}
+	return true
+}
+
 // machineEnvForCall is WithMachineEnvIn for a call with a known argv: the
-// exempt verbs get the environment without machine mode.
+// exempt calls get the environment without machine mode.
 func machineEnvForCall(dir string, env, args []string) []string {
 	env = WithMachineEnvIn(dir, env)
 	if machineExempt(args) {
