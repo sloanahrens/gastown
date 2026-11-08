@@ -130,12 +130,11 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 // with the entry named.
 func cleanArchiveName(raw string) (string, error) {
 	name := strings.TrimSuffix(raw, "/")
-	if name == "" {
-		return "", fmt.Errorf("the archive entry %q has an empty name", raw)
-	}
 	if path.IsAbs(name) || filepath.IsAbs(name) {
 		return "", fmt.Errorf("the archive entry %q is absolute; an import accepts only paths relative to the town root", name)
 	}
+	// A "..", "." or empty segment is exactly what makes path.Clean change a
+	// name, so the loop is the whole of the check.
 	for _, seg := range strings.Split(name, "/") {
 		switch seg {
 		case "..":
@@ -143,9 +142,6 @@ func cleanArchiveName(raw string) (string, error) {
 		case "", ".":
 			return "", fmt.Errorf("the archive entry %q has an empty or %q segment", name, seg)
 		}
-	}
-	if path.Clean(name) != name {
-		return "", fmt.Errorf("the archive entry %q is not a clean relative path", name)
 	}
 	return name, nil
 }
