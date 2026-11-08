@@ -23,6 +23,7 @@ import (
 const (
 	runTownRoot    = "/town"
 	runRig         = "acme"
+	runCrewName    = "operator"
 	runRepoName    = "acme/rig"
 	runGitHubURL   = "https://github.example/acme/rig.git"
 	runForgejoURL  = "http://forge.example/acme/rig.git"
@@ -381,10 +382,11 @@ type runWorld struct {
 func newRunWorld(t *testing.T, dryRun bool) *runWorld {
 	t.Helper()
 	opts := runOptions(dryRun)
+	crewDir := opts.RigRoot + "/crew/" + runCrewName
 	files := newMemFiles()
 	for _, dir := range []string{
 		runTownRoot, opts.RigRoot, opts.BareRepo,
-		opts.RigRoot + "/mayor/rig", opts.RigRoot + "/crew", opts.RigRoot + "/crew/sloan",
+		opts.RigRoot + "/mayor/rig", opts.RigRoot + "/crew", crewDir,
 		opts.RigRoot + "/crew/notes", opts.RigRoot + "/settings", runTownRoot + "/mayor",
 	} {
 		files.addDir(dir)
@@ -403,14 +405,14 @@ func newRunWorld(t *testing.T, dryRun bool) *runWorld {
 		},
 		scratch: map[string]map[string]string{},
 		origins: map[string]string{
-			opts.BareRepo:                runGitHubURL,
-			opts.RigRoot + "/mayor/rig":  runGitHubURL,
-			opts.RigRoot + "/crew/sloan": runGitHubURL,
+			opts.BareRepo:               runGitHubURL,
+			opts.RigRoot + "/mayor/rig": runGitHubURL,
+			crewDir:                     runGitHubURL,
 		},
 		bare: map[string]bool{opts.BareRepo: true},
 		work: map[string]bool{
-			opts.RigRoot + "/mayor/rig":  true,
-			opts.RigRoot + "/crew/sloan": true,
+			opts.RigRoot + "/mayor/rig": true,
+			crewDir:                     true,
 		},
 		fail:      map[string]error{},
 		ancestors: map[string]bool{},

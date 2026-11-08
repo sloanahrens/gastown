@@ -171,6 +171,9 @@ func TestNoRetryPolicy(t *testing.T) {
 
 func TestReconstructFromContext(t *testing.T) {
 	t.Parallel()
+	// blockerOverrideActor is the configured actor and the value the
+	// reconstructed params must carry, so a rename cannot split the two.
+	const blockerOverrideActor = "gastown/crew/operator"
 	ctx := &SlingContextFields{
 		WorkBeadID:           "bead-123",
 		TargetRig:            "prod-rig",
@@ -185,7 +188,7 @@ func TestReconstructFromContext(t *testing.T) {
 		ReviewOnly:           true,
 		HookRawBead:          true,
 		IgnoreBlockers:       true,
-		BlockerOverrideActor: "gastown/crew/sloan",
+		BlockerOverrideActor: blockerOverrideActor,
 	}
 
 	params := ReconstructFromContext(ctx)
@@ -229,8 +232,8 @@ func TestReconstructFromContext(t *testing.T) {
 	if !params.IgnoreBlockers {
 		t.Error("IgnoreBlockers: expected true")
 	}
-	if params.BlockerOverrideActor != "gastown/crew/sloan" {
-		t.Errorf("BlockerOverrideActor: got %q, want %q", params.BlockerOverrideActor, "gastown/crew/sloan")
+	if params.BlockerOverrideActor != blockerOverrideActor {
+		t.Errorf("BlockerOverrideActor: got %q, want %q", params.BlockerOverrideActor, blockerOverrideActor)
 	}
 }
 

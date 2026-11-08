@@ -46,7 +46,7 @@ TOWN="$TMP/town"
 RIG_ROOT="$TOWN/acme"
 STATE="$TMP/state"
 CFG="$TMP/config"
-
+CREW_CLONE="$RIG_ROOT/crew/operator" # the crew clone the cutover discovers, beside crew/notes
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); if [ $# -gt 1 ]; then printf '%s\n' "$2" | sed 's/^/    | /'; fi; }
 check() { # check DESCRIPTION COMMAND...
@@ -58,7 +58,7 @@ contains() { case "$2" in *"$1"*) return 0 ;; *) return 1 ;; esac; }
 lacks() { ! contains "$1" "$2"; }
 
 mkdir -p "$TMP/bin" "$TMP/home" "$CFG" "$STATE" "$TOWN/mayor" "$RIG_ROOT/settings" \
-  "$RIG_ROOT/.repo.git" "$RIG_ROOT/mayor/rig/.git" "$RIG_ROOT/crew/sloan/.git" "$RIG_ROOT/crew/notes"
+  "$RIG_ROOT/.repo.git" "$RIG_ROOT/mayor/rig/.git" "$CREW_CLONE/.git" "$RIG_ROOT/crew/notes"
 printf 'FORGEJO_ADMIN_TOKEN=%s\n' "$STUB_ADMIN_TOKEN" > "$TMP/admin.env"
 
 # The probe the cutover runs: it records its call and exits with the code in
@@ -389,10 +389,10 @@ fresh() {
   : > "$STATE/commits"
   printf '0\n' > "$STATE/probe-rc"
   printf '%s\n%s\n%s\n' \
-    "$RIG_ROOT/.repo.git" "$RIG_ROOT/mayor/rig" "$RIG_ROOT/crew/sloan" > "$STATE/repos"
+    "$RIG_ROOT/.repo.git" "$RIG_ROOT/mayor/rig" "$CREW_CLONE" > "$STATE/repos"
   printf '%s\n' "$GITHUB_URL" > "$STATE/remote_$(printf '%s' "$RIG_ROOT/.repo.git" | tr '/:@.' '_')"
   printf '%s\n' "$GITHUB_URL" > "$STATE/remote_$(printf '%s' "$RIG_ROOT/mayor/rig" | tr '/:@.' '_')"
-  printf '%s\n' "$GITHUB_URL" > "$STATE/remote_$(printf '%s' "$RIG_ROOT/crew/sloan" | tr '/:@.' '_')"
+  printf '%s\n' "$GITHUB_URL" > "$STATE/remote_$(printf '%s' "$CREW_CLONE" | tr '/:@.' '_')"
   printf 'refs/heads/main abc123\nrefs/heads/feature def456\nrefs/tags/v1 789abc\n' > "$STATE/refs_$(refs_key "$GITHUB_URL")"
   printf 'refs/heads/main abc123\n' > "$STATE/refs_$(refs_key "$FORGEJO_URL")"
   cat > "$RIG_ROOT/settings/config.json" <<'JSON'
@@ -549,7 +549,7 @@ check "the import pushed to the admin base" contains "$ADMIN_GIT_URL" "$(cat "$S
 check "the probe pushed through the admin base" contains "--git-url $ADMIN_GIT_URL" "$(cat "$STATE/probe.log")"
 check "the bare repo is repointed" contains "$RIG_ROOT/.repo.git $FORGEJO_URL" "$(cat "$STATE/set-urls")"
 check "the mayor clone is repointed" contains "$RIG_ROOT/mayor/rig $FORGEJO_URL" "$(cat "$STATE/set-urls")"
-check "the crew clone is repointed" contains "$RIG_ROOT/crew/sloan $FORGEJO_URL" "$(cat "$STATE/set-urls")"
+check "the crew clone is repointed" contains "$CREW_CLONE $FORGEJO_URL" "$(cat "$STATE/set-urls")"
 check "a non-repo crew dir is skipped" contains "skip $RIG_ROOT/crew/notes" "$out"
 check "settings/config.json names the Forgejo remote" contains "$FORGEJO_URL" "$(cat "$RIG_ROOT/settings/config.json")"
 check "settings/config.json names the gate workflow" contains '"gate_workflow": "gate"' "$(cat "$RIG_ROOT/settings/config.json")"
@@ -610,7 +610,7 @@ check "the unreachable hostname never carried a push" lacks "$HOSTNAME_GIT_URL" 
 check "the probe pushed through the admin base" contains "--git-url $ADMIN_GIT_URL" "$(cat "$STATE/probe.log")"
 check "the hostname form is written to the bare remote" contains "$RIG_ROOT/.repo.git $HOSTNAME_GIT_URL" "$(cat "$STATE/set-urls")"
 check "the hostname form is written to the mayor clone" contains "$RIG_ROOT/mayor/rig $HOSTNAME_GIT_URL" "$(cat "$STATE/set-urls")"
-check "the hostname form is written to the crew clone" contains "$RIG_ROOT/crew/sloan $HOSTNAME_GIT_URL" "$(cat "$STATE/set-urls")"
+check "the hostname form is written to the crew clone" contains "$CREW_CLONE $HOSTNAME_GIT_URL" "$(cat "$STATE/set-urls")"
 check "the hostname form is written to town.json" contains "\"git_url\": \"$HOSTNAME_GIT_URL\"" "$(cat "$TOWN/mayor/town.json")"
 check "the hostname form is written to the rig block" contains "\"remote_url\": \"$HOSTNAME_GIT_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"
 check "the promote target is the ssh form of the GitHub URL" contains "\"promote_target\": \"$GITHUB_URL\"" "$(cat "$RIG_ROOT/settings/config.json")"

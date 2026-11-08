@@ -1280,7 +1280,7 @@ func TestEscalatedSeatHoldsWhileItsDecisionStands(t *testing.T) {
 		{"the bead only mentioned in the title, not named",
 			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: seat, Title: "escalating about gt-ruby"}}, nil, OutcomeSkipped},
 		{"another role's escalation for the bead proves nothing about the seat",
-			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: "gastown/crew/sloan", Title: "gt-ruby: a decision"}}, nil, OutcomeSkipped},
+			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: "gastown/crew/operator", Title: "gt-ruby: a decision"}}, nil, OutcomeSkipped},
 		{"another seat's escalation names the bead",
 			[]Escalation{{ID: "hq-wisp-1", EscalatedBy: "gastown/polecats/pearl", Title: "gt-ruby: a decision"}}, nil, OutcomeSkipped},
 		{"no escalation found", nil, nil, OutcomeSkipped},
@@ -1830,7 +1830,7 @@ func TestOrphanMoleculeGuards(t *testing.T) {
 		{"molecule status unreadable", func(env *fakeEnv) { env.molErr["gt-wisp-onyx"] = errors.New("bd") }},
 		{"ready-to-land", func(env *fakeEnv) { env.active[0].Labels = []string{"gt:ready-to-land"} }},
 		{"other rig's polecat", func(env *fakeEnv) { env.active[0].Assignee = "beads/polecats/onyx" }},
-		{"crew assignee", func(env *fakeEnv) { env.active[0].Assignee = "gastown/crew/sloan" }},
+		{"crew assignee", func(env *fakeEnv) { env.active[0].Assignee = "gastown/crew/operator" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2244,7 +2244,7 @@ func TestLeakedWispGuards(t *testing.T) {
 		{"24 hours old exactly", func(env *fakeEnv) { env.wisps[0].CreatedAt = now.Add(-24 * time.Hour) }, false},
 		{"age unknown", func(env *fakeEnv) { env.wisps[0].CreatedAt = time.Time{} }, true},
 		{"no assignee", func(env *fakeEnv) { env.wisps[0].Assignee = "" }, false},
-		{"crew assignee", func(env *fakeEnv) { env.wisps[0].Assignee = "gastown/crew/sloan" }, false},
+		{"crew assignee", func(env *fakeEnv) { env.wisps[0].Assignee = "gastown/crew/operator" }, false},
 		{"other rig's polecat", func(env *fakeEnv) { env.wisps[0].Assignee = "beads/polecats/onyx" }, false},
 		{"nested assignee", func(env *fakeEnv) { env.wisps[0].Assignee = "gastown/polecats/onyx/x" }, false},
 		{"parent still open", func(env *fakeEnv) {

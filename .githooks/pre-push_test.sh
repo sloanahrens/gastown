@@ -425,7 +425,7 @@ remote_sha=$(get_sha HEAD)
 echo "crew change" >> file.txt
 git add file.txt && git commit -m "crew change" >/dev/null 2>&1
 local_sha=$(get_sha HEAD)
-assert_pass "Crew default push allowed" run_hook_env "GT_ROLE=gastown/crew/sloan" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
+assert_pass "Crew default push allowed" run_hook_env "GT_ROLE=gastown/crew/operator" "refs/heads/$DEFAULT_BRANCH" "$local_sha" "refs/heads/$DEFAULT_BRANCH" "$remote_sha"
 cleanup
 
 # ---------------------------------------------------------------------------
@@ -472,7 +472,7 @@ setup_repos
 cd "$WORK_DIR/local"
 echo "crew live work" >> file.txt
 git add file.txt && git commit -m "crew live work" >/dev/null 2>&1
-assert_live_pass "LIVE crew default push allowed" "GT_ROLE=gastown/crew/sloan" "HEAD:$DEFAULT_BRANCH"
+assert_live_pass "LIVE crew default push allowed" "GT_ROLE=gastown/crew/operator" "HEAD:$DEFAULT_BRANCH"
 cleanup
 
 # ---------------------------------------------------------------------------
@@ -593,12 +593,12 @@ cleanup
 echo "Test 36: LIVE push of a crew/<user>/<slug> branch under gt done's lease"
 setup_repos
 cd "$WORK_DIR/local"
-git checkout -b crew/sloan/gt-5tuoe >/dev/null 2>&1
+git checkout -b crew/operator/gt-5tuoe >/dev/null 2>&1
 echo "crew work" >> file.txt
 git add file.txt && git commit -m "crew work" >/dev/null 2>&1
 assert_live_pass "LIVE crew branch push allowed under the lease" "" \
-  "refs/heads/crew/sloan/gt-5tuoe:refs/heads/crew/sloan/gt-5tuoe" \
-  "--force-with-lease=refs/heads/crew/sloan/gt-5tuoe:"
+  "refs/heads/crew/operator/gt-5tuoe:refs/heads/crew/operator/gt-5tuoe" \
+  "--force-with-lease=refs/heads/crew/operator/gt-5tuoe:"
 cleanup
 
 # Test 37: the control for both above — an unrelated branch family is still

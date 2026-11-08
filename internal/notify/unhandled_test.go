@@ -414,7 +414,7 @@ func TestEscalationOwner(t *testing.T) {
 		"overseer":                 attention.OwnerOperator,
 		"gastown/overseer":         attention.OwnerOperator,
 		"gastown/polecats/rictus":  attention.OwnerOverseer,
-		"gastown/crew/sloan":       attention.OwnerOverseer,
+		"gastown/crew/operator":    attention.OwnerOverseer,
 		"daemon":                   attention.OwnerOverseer,
 		"":                         attention.OwnerOverseer,
 		"gastown/overseer/polecat": attention.OwnerOverseer,

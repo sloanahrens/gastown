@@ -253,7 +253,7 @@ class when it ends in `/full-suite`, `/tier-sweep` or `/flake-sweep`, so a sessi
 wrapping its own whole-tree run asks for the cap by naming its role that way:
 
 ```
-gt slot run --role gastown/crew/sloan/full-suite -- make test
+gt slot run --role gastown/crew/<name>/full-suite -- make test
 ```
 
 A second whole-tree start waits for the running one instead of competing for a free
@@ -852,7 +852,7 @@ environment variables. Mismatches are reported as warnings:
 
 ```
 ⚠ env-vars: Found 3 env var mismatch(es) across 1 session(s)
-    gt-crew-sloan: missing GT_TOWN_ROOT (expected "/home/user/gt")
+    gt-crew-<name>: missing GT_TOWN_ROOT (expected "/home/user/gt")
 ```
 
 Fix by restarting sessions: `gt shutdown && gt up`
