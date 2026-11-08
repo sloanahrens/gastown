@@ -220,6 +220,69 @@ func Lookup(entries []Entry, p string) (Entry, bool) {
 	return best, found
 }
 
+// SessionOwned returns the session-owned entry covering rel, a town-root-relative
+// path, and whether one covers it. The rig and bird placeholders stand for any
+// one non-empty segment, so a caller that does not know the town's rigs still
+// finds a path under any rig's session tree. The deepest entry wins, and an
+// entry with no placeholder wins over a placeholder at the same depth, so
+// .runtime/usage stays the daemon's even though .runtime/<bird> also matches it.
+// Letters are folded as the default macOS volume folds them, so the same path in
+// another case is the same directory.
+func (m *Manifest) SessionOwned(rel string) (Entry, bool) {
+	rel = strings.Trim(path.Clean("/"+rel), "/")
+	if rel == "" || rel == "." {
+		return Entry{}, false
+	}
+	var best Entry
+	found := false
+	for _, e := range m.Entries {
+		if !coversEntry(e.Path, rel) {
+			continue
+		}
+		switch {
+		case !found:
+		case entryDepth(e.Path) > entryDepth(best.Path):
+		case entryDepth(e.Path) == entryDepth(best.Path) && hasPlaceholder(best.Path) && !hasPlaceholder(e.Path):
+		default:
+			continue
+		}
+		best, found = e, true
+	}
+	if !found || best.Owner != OwnerSession {
+		return Entry{}, false
+	}
+	return best, true
+}
+
+// coversEntry reports whether rel is pattern or lies under it, with the rig and
+// bird placeholders matching any one non-empty segment.
+func coversEntry(pattern, rel string) bool {
+	ps := strings.Split(strings.ToLower(pattern), "/")
+	rs := strings.Split(strings.ToLower(rel), "/")
+	if len(rs) < len(ps) {
+		return false
+	}
+	for i, seg := range ps {
+		if seg == RigPlaceholder || seg == BirdPlaceholder {
+			continue
+		}
+		if rs[i] != seg {
+			return false
+		}
+	}
+	return true
+}
+
+// entryDepth is how many segments an entry path has.
+func entryDepth(p string) int { return strings.Count(p, "/") }
+
+// hasPlaceholder reports whether an entry path holds the rig or bird placeholder.
+func hasPlaceholder(p string) bool {
+	return slices.ContainsFunc(strings.Split(p, "/"), func(seg string) bool {
+		return seg == RigPlaceholder || seg == BirdPlaceholder
+	})
+}
+
 // names reports whether an entry path is exactly p.
 func (m *Manifest) names(p string) bool {
 	for _, e := range m.Entries {

@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemonimage"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/townstate"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -68,6 +71,16 @@ type daemonComposeFlags struct {
 	// the same path, in the order given. Each is checked to be a directory here;
 	// the render checks the rest (gt-vqexg).
 	bindRO []string
+	// townStateVolume is --town-state-volume: the name of an external docker
+	// volume mounted at the town root in place of the Mac's bind, so the
+	// daemon's state lives in the volume (gt-yjzepk.6). "" renders today's bind.
+	townStateVolume string
+	// townStateVolumeSet is whether --town-state-volume was given at all, so a
+	// blank value is refused rather than read as unset.
+	townStateVolumeSet bool
+	// force is --force: overwrite a compose file gt did not write. Without it
+	// such a file is left alone, because the command only maintains its own.
+	force bool
 }
 
 // daemonComposeDeps is what the command takes from the host: where the town is
@@ -118,6 +131,10 @@ type composeFiles struct {
 	// writePrivate writes a file its owner alone reads, which the derived hm
 	// config needs: its database URL holds the password.
 	writePrivate func(path string, content []byte) error
+	// read reads the file already at a path, so the command can tell its
+	// own compose file from one the operator wrote before replacing it. A
+	// missing file is fs.ErrNotExist; any other error refuses the write.
+	read func(path string) ([]byte, error)
 }
 
 // doltEndpointResolver resolves a town's Dolt endpoint for a process in or out
@@ -165,6 +182,7 @@ func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 			mkdirAll:     func(dir string) error { return os.MkdirAll(dir, 0o755) },
 			write:        daemonimage.WriteComposeFile,
 			writePrivate: templates.WriteHMConfigFile,
+			read:         os.ReadFile,
 		},
 		out:    out,
 		errOut: os.Stderr,
@@ -337,11 +355,25 @@ is refused, and so is one the render cannot mount read-only (relative, not
 cleaned, under .., inside or containing the town, already mounted, or given
 twice). The mounts are sorted by path. Without the flag the render is unchanged.
 
+--town-state-volume names an external docker volume and mounts it at the town
+root in place of the Mac's bind, so the daemon's state lives in the volume and a
+compose down never removes it. The volume is declared external under the file's
+top-level volumes section. Every other mount stays as it was, and a mount under
+a session-owned entry of the town-state manifest is refused, not silently bound.
+A name that is not a valid volume name is refused. After a write the command
+prints the one-line rollback: render again without the flag and recreate the
+service. Without the flag the render is unchanged, and that is the rollback.
+
+A compose file the command did not write is left alone unless --force is given:
+its first line must be gt's generated-file header, and an unreadable file cannot
+be told apart from one the operator wrote.
+
 --print prints the render and writes no file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			f.omTokenFileSet = cmd.Flags().Changed(config.OMTokenFileFlag)
 			f.secretsManifestSet = cmd.Flags().Changed("secrets-manifest")
+			f.townStateVolumeSet = cmd.Flags().Changed("town-state-volume")
 			return run(cmd.OutOrStdout(), f)
 		},
 	}
@@ -367,6 +399,10 @@ twice). The mounts are sorted by path. Without the flag the render is unchanged.
 		"the host's Dolt backup directory (an absolute path), mounted read-write at that path and named by GT_DOLT_BACKUP_ROOT; unset renders neither")
 	write.Flags().StringArrayVar(&f.bindRO, "bind-ro", nil,
 		"a host directory (an absolute path) mounted read-only at that same path in the daemon; repeat for more, and a path that is not a directory is refused")
+	write.Flags().StringVar(&f.townStateVolume, "town-state-volume", "",
+		"an external docker volume to mount at the town root in place of the Mac's bind; a name that is not a valid volume name is refused, and unset renders today's bind")
+	write.Flags().BoolVar(&f.force, "force", false,
+		"overwrite a compose file at the path that gt did not write; without it such a file is left alone")
 	parent.AddCommand(write)
 	return parent
 }
@@ -377,6 +413,14 @@ var daemonComposeCmd = newDaemonComposeCmd(func(out io.Writer, f daemonComposeFl
 
 func init() {
 	daemonCmd.AddCommand(daemonComposeCmd)
+}
+
+// townStateSessionOwned is the render's session-owned seam, read from the town's
+// manifest. It reports the entry's path, which the renderer names in its
+// refusal, so the operator can see which row claims the mount.
+func townStateSessionOwned(rel string) (string, bool) {
+	entry, owned := townstate.Default().SessionOwned(rel)
+	return entry.Path, owned
 }
 
 // runDaemonCompose renders the town's live compose file and, unless --print,
@@ -400,6 +444,13 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	forgeHost := strings.TrimSpace(f.forgeHost)
 	forgeTokenFile := strings.TrimSpace(f.forgeTokenFile)
 	configDir := strings.TrimSpace(f.configDir)
+	// The volume name is the file's top-level key, so it is trimmed like the
+	// others and a blank value on a named flag is refused: it names no volume,
+	// and the render would otherwise keep the Mac's bind in silence.
+	townStateVolume := strings.TrimSpace(f.townStateVolume)
+	if f.townStateVolumeSet && townStateVolume == "" {
+		return fmt.Errorf("--town-state-volume was given blank; name the external volume, or leave the flag out to render the Mac's bind")
+	}
 	// The manifest names files in the config directory, so the two flags are
 	// given together. The manifest file itself is read; none of the files it
 	// lists is, so no contents reach the render or an error.
@@ -533,6 +584,8 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		ForgeHost:          forgeHost,
 		ForgeTokenFile:     forgeTokenFile,
 		ExtraHosts:         f.extraHosts,
+		TownStateVolume:    townStateVolume,
+		SessionOwned:       townStateSessionOwned,
 	}
 	content, err := templates.RenderDaemonCompose(spec)
 	if err != nil {
@@ -552,6 +605,16 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 		_, err = d.out.Write(content)
 		return err
 	}
+	path := config.ContainerComposeFile(townRoot)
+	// The command maintains its own file. One the operator wrote, and one it
+	// cannot read and so cannot tell apart from theirs, is replaced only when
+	// --force says the replacement is wanted. The check is here, before any
+	// write, so the refused run leaves every derived file as it was.
+	if !f.force {
+		if err := refuseForeignComposeFile(d.files, path); err != nil {
+			return err
+		}
+	}
 	if overlay != nil {
 		if err := writeDaemonComposeFile(d.files, containerKubeconfigPath(townRoot), overlay); err != nil {
 			return fmt.Errorf("cannot write the container kubeconfig, and no compose file was written: %w", err)
@@ -565,12 +628,31 @@ func runDaemonCompose(f daemonComposeFlags, d daemonComposeDeps) error {
 	if err := writeDaemonPrivateFile(d.files, hmConfigFile, hmConfig); err != nil {
 		return fmt.Errorf("cannot write the hm config %s, and no compose file was written: %w", hmConfigFile, err)
 	}
-	path := config.ContainerComposeFile(townRoot)
 	if err := writeDaemonComposeFile(d.files, path, content); err != nil {
 		return fmt.Errorf("cannot write %s, and the old file is as it was: %w", path, err)
 	}
 	fmt.Fprintf(d.out, "%s Wrote %s: container %s, compose project %s, image %s.\n",
 		style.Bold.Render("✓"), path, spec.ContainerName, project, spec.Image)
+	if townStateVolume != "" {
+		fmt.Fprintln(d.out, "Rollback: render again without --town-state-volume and recreate the service.")
+	}
+	return nil
+}
+
+// refuseForeignComposeFile refuses to replace a compose file this command did
+// not write. The generated-file header at the first line is the mark: a file
+// without it belongs to the operator, and an unreadable file cannot be told
+// apart from theirs, so both need --force. A missing file is written as before.
+func refuseForeignComposeFile(files composeFiles, path string) error {
+	data, err := files.read(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("cannot read the existing compose file %s, so it cannot be told apart from one gt wrote; pass --force to replace it: %w", path, err)
+	case !templates.IsDaemonComposeFile(data):
+		return fmt.Errorf("%s was not written by gt (its first line is not the generated-file header), so it is left alone; pass --force to replace it", path)
+	}
 	return nil
 }
 

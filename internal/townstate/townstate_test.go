@@ -252,3 +252,47 @@ func importersOf(t *testing.T, target string) []string {
 	}
 	return out
 }
+
+// SessionOwned is the check the compose renderer makes on a mount it would bind
+// beside the town-state volume: a path under a session-owned entry is refused,
+// and the placeholders stand for any rig or bird name because the renderer does
+// not read the rig registry.
+func TestSessionOwned(t *testing.T) {
+	t.Parallel()
+	m := Default()
+	cases := []struct {
+		rel  string
+		want bool
+		path string
+	}{
+		{rel: "gastown/polecats", want: true, path: "<rig>/polecats"},
+		{rel: "gastown/polecats/cheedo/gastown", want: true, path: "<rig>/polecats"},
+		{rel: "gastown/crew/dipper", want: true, path: "<rig>/crew"},
+		{rel: "somerig/witness", want: true, path: "<rig>/witness"},
+		{rel: "somerig/refinery/out", want: true, path: "<rig>/refinery"},
+		{rel: ".runtime/some-bird/reports/2026", want: true, path: ".runtime/<bird>"},
+		// The case fold matches the default macOS volume.
+		{rel: "Gastown/Polecats/Cheedo", want: true, path: "<rig>/polecats"},
+		// A daemon entry at the same depth wins, so a daemon subsystem under
+		// .runtime is not read as a bird's directory.
+		{rel: ".runtime/usage/2026-11-08", want: false},
+		{rel: ".runtime/jev", want: false},
+		// A segment must match whole: polecatsX is not polecats.
+		{rel: "gastown/polecatsX/cheedo", want: false},
+		{rel: "gastown/config.json", want: false},
+		{rel: "settings/daemon.json", want: false},
+		{rel: "unclassified", want: false},
+		{rel: "", want: false},
+		{rel: ".", want: false},
+	}
+	for _, tc := range cases {
+		got, ok := m.SessionOwned(tc.rel)
+		if ok != tc.want {
+			t.Errorf("SessionOwned(%q) = (%+v, %v), want covered %v", tc.rel, got, ok, tc.want)
+			continue
+		}
+		if ok && got.Path != tc.path {
+			t.Errorf("SessionOwned(%q) covered by %q, want %q", tc.rel, got.Path, tc.path)
+		}
+	}
+}

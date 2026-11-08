@@ -108,6 +108,9 @@ func newComposeRig(t *testing.T) *composeRig {
 				r.disk[path] = content
 				return nil
 			},
+			// No file is at the compose path unless a test puts one there, and
+			// then a test replaces this seam with one that reads it.
+			read: func(string) ([]byte, error) { return nil, fs.ErrNotExist },
 		},
 		out:    r.out,
 		errOut: r.errOut,
