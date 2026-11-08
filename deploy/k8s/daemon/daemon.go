@@ -72,7 +72,7 @@ const (
 	// OMTokenFile and ForgeTokenFile are the deploy/daemon/secrets.yaml entries
 	// whose Secrets the pod mounts at the paths the entrypoint's arguments name
 	// (templates.LiveOMTokenPath and templates.LiveForgeTokenPath).
-	OMTokenFile    = "om-daemon-token"
+	OMTokenFile    = "om-daemon-token" //nolint:gosec // a file name, not a credential
 	ForgeTokenFile = "forgejo-landing.env"
 	// The sweep's roles in deploy/k8s/sweep-rbac.yaml. The render binds the
 	// pod's service account to them and copies no rule from them.
@@ -405,7 +405,7 @@ func deployment(v Values, namespace string) Deployment {
 				Metadata: PodTemplateMeta{Labels: labels()},
 				Spec: PodSpec{
 					ServiceAccountName:            ServiceAccountName,
-					TerminationGracePeriodSeconds: int32(v.TerminationGraceSeconds),
+					TerminationGracePeriodSeconds: int64(v.TerminationGraceSeconds),
 					Containers:                    []Container{daemonContainer(v)},
 					Volumes:                       volumes(v),
 				},
@@ -1041,7 +1041,7 @@ type PodTemplateMeta struct {
 // PodSpec is the subset of a pod's spec the builder sets.
 type PodSpec struct {
 	ServiceAccountName            string      `yaml:"serviceAccountName"`
-	TerminationGracePeriodSeconds int32       `yaml:"terminationGracePeriodSeconds"`
+	TerminationGracePeriodSeconds int64       `yaml:"terminationGracePeriodSeconds"`
 	Containers                    []Container `yaml:"containers"`
 	Volumes                       []Volume    `yaml:"volumes,omitempty"`
 }
@@ -1067,7 +1067,7 @@ type EnvVar struct {
 }
 
 // ContainerResources is a container's share. Requests equal limits, so the
-// scheduler promises it the share instead of letting it burst into a neighbour.
+// scheduler promises it the share instead of letting it burst into a neighbor.
 type ContainerResources struct {
 	Requests map[string]string `yaml:"requests"`
 	Limits   map[string]string `yaml:"limits"`
