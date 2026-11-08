@@ -17,11 +17,6 @@ import (
 // filled.
 const hostCommandTimeout = 5 * time.Second
 
-// hostProbeFileMaxAge is how old the host agent's probe file may be and still
-// describe the host now: three of its sixty-second intervals, the age the
-// daemon's attention rules and burst sampler read the same file at.
-const hostProbeFileMaxAge = 3 * time.Minute
-
 // hostSource is the host group: the machine the snapshot describes, read with
 // the macOS commands the operator uses by hand, plus one timed bead read for
 // what bd costs it. In container mode the host facts come from the host agent's
@@ -135,7 +130,7 @@ func (s hostSource) collectFromFile(ctx context.Context, env Env) (map[string]an
 func hostProbesFromFile(town string) func(now time.Time) (hostprobe.Probes, error) {
 	path := hostprobe.Path(town)
 	return func(now time.Time) (hostprobe.Probes, error) {
-		return hostprobe.Read(path, now, hostProbeFileMaxAge)
+		return hostprobe.Read(path, now, hostprobe.ProbeFileMaxAge)
 	}
 }
 

@@ -442,14 +442,49 @@ func TestTailFile(t *testing.T) {
 
 // TestOSEnvHostProbesFollowsContainerMode: the command wiring hands the host
 // group the host agent's file only in container mode, so a launchd snapshot
-// keeps the Mac's own commands.
+// keeps the Mac's own commands. Each half drives the env the group is wired
+// to, so a seam pointing at the wrong file, or past its freshness bound, fails
+// here.
 func TestOSEnvHostProbesFollowsContainerMode(t *testing.T) {
 	t.Parallel()
+	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
 	town := t.TempDir()
-	if got := osEnv(town, true); got.HostProbes == nil {
-		t.Error("container mode left the host group on the container's own commands")
+	writeHostProbesFile(t, town, hostProbeFileFixture(at))
+
+	// Container mode reads the probe file this town published.
+	got, err := osEnv(town, true).HostProbes(at)
+	if err != nil {
+		t.Fatalf("container env reading the probe file: %v", err)
 	}
-	if got := osEnv(town, false); got.HostProbes != nil {
-		t.Error("launchd mode reads the host agent's probe file")
+	if got.CPUIdlePct.Value != 71.5 || got.DockerDisk.Value.UsedPct != 83 {
+		t.Errorf("container env read cpu_idle_pct = %v, docker_disk_pct = %v, want the file's 71.5 and 83",
+			got.CPUIdlePct.Value, got.DockerDisk.Value.UsedPct)
+	}
+
+	// The same seam refuses a file past its freshness bound.
+	if _, err := osEnv(town, true).HostProbes(at.Add(4 * time.Minute)); err == nil {
+		t.Error("container env served a stale probe file")
+	}
+
+	// Launchd mode runs the Mac's commands even though a fresh probe file sits
+	// under the town: the file's numbers must not reach the group.
+	env := osEnv(town, false)
+	env.Now = func() time.Time { return at }
+	env.Beads = func(context.Context, string) BeadStore { return nil }
+	var ran []string
+	env.Run = func(_ context.Context, argv []string) ([]byte, error) {
+		ran = append(ran, strings.Join(argv, " "))
+		return nil, errors.New("this test gives the command no output")
+	}
+	cols, err := newHostSource().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect under launchd: %v", err)
+	}
+	if len(ran) == 0 {
+		t.Error("launchd mode ran none of the Mac's host commands")
+	}
+	if cols["cpu_idle_pct"] != nil || cols["docker_disk_pct"] != nil {
+		t.Errorf("launchd host group = cpu_idle_pct %v, docker_disk_pct %v, want nil from the failed commands rather than the file's readings",
+			cols["cpu_idle_pct"], cols["docker_disk_pct"])
 	}
 }

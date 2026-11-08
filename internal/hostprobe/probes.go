@@ -26,6 +26,11 @@ const SchemaVersion = 3
 // long the file sits unrewritten.
 const futureTolerance = 5 * time.Second
 
+// ProbeFileMaxAge is how old a probe file may be and still describe the host
+// now: three of the host agent's sixty-second intervals, so three missed
+// writes mean it stopped.
+const ProbeFileMaxAge = 3 * time.Minute
+
 // Field is one probe reading. A failed read sets Err and leaves Value at its
 // zero, so one command that failed does not cost the daemon the rest of the
 // file; Err, not Value, says whether the reading happened.
