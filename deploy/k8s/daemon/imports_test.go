@@ -109,9 +109,10 @@ func forbiddenImport(path string) bool {
 // reachForbidden reports whether path, reached through the dependencies of the
 // renderer rather than imported by it, gives a way to run a command, open a
 // socket, load a plugin or talk to a cluster. It is forbiddenImport without
-// syscall and unsafe: the standard library's os, fmt and reflect reach both in
-// every program, so a walk that refused them would refuse everything, while the
-// renderer's own files still may not import them (forbiddenImport).
+// syscall and unsafe, and only a standard-library node may use it: os, fmt and
+// reflect reach both in every program, so refusing them there would refuse
+// everything. The renderer's own files and every non-standard-library package
+// it reaches are held to the full forbiddenImport list.
 func reachForbidden(path string) bool {
 	switch {
 	case path == "os/exec", path == "plugin":
@@ -235,8 +236,8 @@ func packageImports(t *testing.T, dir string) []string {
 // does NOT stop at the standard library: a standard package that reaches os/exec
 // or net (reachForbidden) is a finding, so the renderer cannot gain a process or
 // a socket through, say, a standard package that imports one. syscall and
-// unsafe are reachable from fmt alone and are checked only on the renderer's own
-// imports (forbiddenImport). Anything else reached outside those is a finding,
+// unsafe are reachable from fmt alone, so a standard-library node may import
+// them; the renderer and every other package may not (forbiddenImport). Anything else reached outside those is a finding,
 // and so is an import the graph does not report, standard library included: an
 // import whose reach is unknown could reach a process or a cluster, so it is
 // refused rather than skipped.
@@ -263,9 +264,9 @@ func transitiveFindings(root string, graph []dependency) []string {
 				findings = append(findings, fmt.Sprintf("%s imports %q, which is neither the standard library, the YAML encoder nor a manifest package", node.Path, imp))
 				continue
 			}
-			forbidden := reachForbidden
-			if node.Path == root {
-				forbidden = forbiddenImport
+			forbidden := forbiddenImport
+			if stdlibImport(node.Path) && node.Path != root {
+				forbidden = reachForbidden
 			}
 			if forbidden(imp) {
 				findings = append(findings, fmt.Sprintf("%s imports %q, which gives the renderer a process, a socket or a cluster client", node.Path, imp))
@@ -390,6 +391,7 @@ func TestTransitiveFindingsReportsReach(t *testing.T) {
 			want: []string{
 				`gopkg.in/yaml.v3 imports "net", which gives the renderer a process, a socket or a cluster client`,
 				`gopkg.in/yaml.v3 imports "os/exec", which gives the renderer a process, a socket or a cluster client`,
+				`gopkg.in/yaml.v3 imports "syscall", which gives the renderer a process, a socket or a cluster client`,
 			},
 		},
 		{
