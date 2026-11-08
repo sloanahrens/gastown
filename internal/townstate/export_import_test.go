@@ -165,6 +165,9 @@ func TestExportImportRoundTrip(t *testing.T) {
 	for rel, content := range untouched {
 		writeStateFile(t, town, rel, content, 0o644)
 	}
+	if err := os.Chtimes(filepath.Join(town, "logs"), old, old); err != nil {
+		t.Fatal(err)
+	}
 
 	var stream bytes.Buffer
 	sum, err := Export(&stream, town, Default(), ExportOptions{})
@@ -235,11 +238,18 @@ func TestExportImportRoundTrip(t *testing.T) {
 		t.Errorf("the private kubeconfig mode = %04o after the round trip, want 0600", got)
 	}
 
-	// The mtime comes from the archive.
+	// The mtime comes from the archive, for a file and for the directory that
+	// holds it: writing the file into the directory would move the directory's
+	// mtime if the import set it before writing.
 	if info, err := os.Stat(filepath.Join(dest, "logs", "daemon.log")); err != nil {
 		t.Fatal(err)
 	} else if !info.ModTime().Equal(old) {
 		t.Errorf("logs/daemon.log mtime = %s after the round trip, want %s", info.ModTime(), old)
+	}
+	if info, err := os.Stat(filepath.Join(dest, "logs")); err != nil {
+		t.Fatal(err)
+	} else if !info.ModTime().Equal(old) {
+		t.Errorf("logs mtime = %s after the round trip, want %s", info.ModTime(), old)
 	}
 }
 

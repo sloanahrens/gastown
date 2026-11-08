@@ -93,10 +93,11 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 	}
 
 	tr := tar.NewReader(r)
+	var dirs []dirTime
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return s, nil
+			return s, applyDirTimes(opts.ops, dirs)
 		}
 		if err != nil {
 			return s, fmt.Errorf("reading the archive: %w", err)
@@ -116,7 +117,7 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 			return s, err
 		}
 		dest := filepath.Join(townRoot, filepath.FromSlash(name))
-		if err := importEntry(opts.ops, tr, hdr, dest, name, e, opts, &s); err != nil {
+		if err := importEntry(opts.ops, tr, hdr, dest, name, e, opts, &s, &dirs); err != nil {
 			return s, err
 		}
 		if !slices.Contains(s.Entries, e.Path) {
@@ -197,10 +198,10 @@ func refuseOccupiedRoot(ops townOps, root string, m *Manifest, rigs map[string]b
 
 // importEntry writes one archive entry, after every check that can refuse it
 // has run.
-func importEntry(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, e Entry, opts ImportOptions, s *ImportSummary) error {
+func importEntry(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, e Entry, opts ImportOptions, s *ImportSummary, dirs *[]dirTime) error {
 	switch hdr.Typeflag {
 	case tar.TypeDir:
-		return importDir(ops, dest, name, archiveMode(hdr.Mode, e.Private), hdr.ModTime, s)
+		return importDir(ops, dest, name, archiveMode(hdr.Mode, e.Private), hdr.ModTime, s, dirs)
 	case tar.TypeReg, tar.TypeRegA:
 		return importFile(ops, tr, hdr, dest, name, e.Private, opts, s)
 	case tar.TypeSymlink:
@@ -210,9 +211,16 @@ func importEntry(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, 
 	}
 }
 
+// dirTime is a created directory and the mtime its archive entry carries.
+type dirTime struct {
+	dest, name string
+	mtime      time.Time
+}
+
 // importDir creates a missing directory. An existing directory is kept, so a
-// replay leaves the tree's mtimes alone where nothing was written.
-func importDir(ops townOps, dest, name string, mode fs.FileMode, mtime time.Time, s *ImportSummary) error {
+// replay leaves the tree's mtimes alone where nothing was written. The mtime is
+// queued for applyDirTimes: every child written after this call would move it.
+func importDir(ops townOps, dest, name string, mode fs.FileMode, mtime time.Time, s *ImportSummary, dirs *[]dirTime) error {
 	info, err := ops.lstat(dest)
 	switch {
 	case err == nil && info.IsDir():
@@ -229,11 +237,20 @@ func importDir(ops townOps, dest, name string, mode fs.FileMode, mtime time.Time
 		return fmt.Errorf("setting the mode of %q: %w", name, err)
 	}
 	if !mtime.IsZero() {
-		if err := ops.chtimes(dest, mtime, mtime); err != nil {
-			return fmt.Errorf("setting the mtime of %q: %w", name, err)
-		}
+		*dirs = append(*dirs, dirTime{dest: dest, name: name, mtime: mtime})
 	}
 	s.Dirs++
+	return nil
+}
+
+// applyDirTimes sets the queued directory mtimes once the archive has been
+// read in full, so no later write into a directory moves its time.
+func applyDirTimes(ops townOps, dirs []dirTime) error {
+	for _, d := range dirs {
+		if err := ops.chtimes(d.dest, d.mtime, d.mtime); err != nil {
+			return fmt.Errorf("setting the mtime of %q: %w", d.name, err)
+		}
+	}
 	return nil
 }
 
