@@ -84,15 +84,21 @@ func init() {
 }
 
 func runLandWait(cmd *cobra.Command, _ []string) error {
-	return landWaitCommand(cmd, landWaitAgent, landWaitTimeout, landWaitHost{
-		getenv: os.Getenv,
-		// The bead store the wait polls is the record of a landing's verdict,
-		// so a caller-supplied variable must not point it at another store.
+	return landWaitCommand(cmd, landWaitAgent, landWaitTimeout, landWaitProcessHost())
+}
+
+// landWaitProcessHost is the host gt land wait reads from this process. The
+// bead store the wait polls is the record of a landing's verdict, so its
+// directory is the process's own: a caller-supplied variable must not point it
+// at another store.
+func landWaitProcessHost() landWaitHost {
+	return landWaitHost{
+		getenv:   os.Getenv,
 		getwd:    os.Getwd,
 		findTown: workspace.FindFromCwdOrError,
 		now:      time.Now,
 		sleep:    time.Sleep,
-	})
+	}
 }
 
 // landWaitHost is what the command reads from its host: the environment, the

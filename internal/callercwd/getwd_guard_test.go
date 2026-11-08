@@ -83,6 +83,11 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 	// selector's Sel is not a dot-imported identifier: x.Getwd is a method or
 	// field, and the guard must not report it as os.Getwd.
 	const dottedSelector = "package pkg\n\nimport . \"os\"\n\ntype t struct{}\n\nfunc (t) Getwd() {}\n\nfunc f(x t) {\n\tx.Getwd()\n}\n"
+	// Another package aliased to os is not the standard library.
+	const aliasedOther = "package pkg\n\nimport os \"example.com/other\"\n\nfunc f() {\n\tos.Getwd()\n}\n"
+	// A local variable named os shadows the import: its Getwd method is not
+	// os.Getwd.
+	const shadowedOs = "package pkg\n\nimport \"os\"\n\ntype dir struct{}\n\nfunc (dir) Getwd() {}\n\nfunc f() {\n\tos := dir{}\n\tos.Getwd()\n}\n"
 	const clean = "package pkg\n\nfunc f() {}\n"
 
 	cases := []struct {
@@ -117,6 +122,20 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 		{
 			name:      "a selector named Getwd is not a dot-imported identifier",
 			source:    dottedSelector,
+			allowlist: "# no entries\n",
+			run:       checkNoDirectGetwdAt,
+			wantOK:    true,
+		},
+		{
+			name:      "a package aliased os that is not the standard library is not flagged",
+			source:    aliasedOther,
+			allowlist: "# no entries\n",
+			run:       checkNoDirectGetwdAt,
+			wantOK:    true,
+		},
+		{
+			name:      "a local variable named os is not flagged",
+			source:    shadowedOs,
 			allowlist: "# no entries\n",
 			run:       checkNoDirectGetwdAt,
 			wantOK:    true,
@@ -399,7 +418,9 @@ func getwdSites(root string, skip func(rel string) bool) ([]getwdSite, error) {
 // parseGetwdSitesFile parses one file and returns its os.Getwd selectors with
 // the enclosing function (or "package" for a package-level declaration). It
 // resolves the file's os import, so `import o "os"` and `import . "os"` are
-// found as well as the plain identifier.
+// found as well as the plain identifier, and it skips a name the parser
+// resolves to a local declaration: a variable or another import named os or
+// Getwd is not the standard library.
 func parseGetwdSitesFile(path, rel string) ([]getwdSite, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
@@ -445,11 +466,11 @@ func parseGetwdSitesFile(path, rel string) ([]getwdSite, error) {
 		ast.Inspect(node, func(n ast.Node) bool {
 			switch sel := n.(type) {
 			case *ast.SelectorExpr:
-				if pkg, ok := sel.X.(*ast.Ident); ok && osNames[pkg.Name] && sel.Sel.Name == "Getwd" {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Obj == nil && osNames[pkg.Name] && sel.Sel.Name == "Getwd" {
 					sites = append(sites, getwdSite{file: rel, owner: owner, line: fset.Position(sel.Pos()).Line})
 				}
 			case *ast.Ident:
-				if osNames["."] && sel.Name == "Getwd" && !nonValueIdents[sel.Pos()] {
+				if osNames["."] && sel.Obj == nil && sel.Name == "Getwd" && !nonValueIdents[sel.Pos()] {
 					sites = append(sites, getwdSite{file: rel, owner: owner, line: fset.Position(sel.Pos()).Line})
 				}
 			}

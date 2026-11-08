@@ -56,8 +56,14 @@ func init() {
 }
 
 func runLandVerdict(cmd *cobra.Command, args []string) error {
-	return landVerdictFromCwd(cmd.OutOrStdout(), os.Getwd, realVerdictTown, strings.TrimSpace(args[0]), landVerdictHead, landVerdictJSON)
+	return landVerdictFromCwd(cmd.OutOrStdout(), landVerdictProcessDir, realVerdictTown, strings.TrimSpace(args[0]), landVerdictHead, landVerdictJSON)
 }
+
+// landVerdictProcessDir is the directory gt land verdict resolves the town and
+// the bead store from: the process's own. The verdict is what a landing was
+// decided on, so a caller-supplied variable must not point the command at
+// another store.
+func landVerdictProcessDir() (string, error) { return os.Getwd() }
 
 // verdictTown is how gt land verdict finds the town and names the rig that owns
 // a bead. The command uses the real lookups; a test passes fakes, so the town
@@ -70,9 +76,8 @@ type verdictTown struct {
 var realVerdictTown = verdictTown{find: workspace.FindOrError, rigFor: resolveRigForBead}
 
 // landVerdictFromCwd finds the town from the working directory getwd returns,
-// then prints the verdict for beadID. The command passes os.Getwd: the verdict
-// store is what a landing was decided on, so a caller-supplied variable must
-// not point the command at another store. A test passes a fake that fails.
+// then prints the verdict for beadID. The command passes landVerdictProcessDir;
+// a test passes a fake that fails.
 func landVerdictFromCwd(out io.Writer, getwd func() (string, error), town verdictTown, beadID, head string, asJSON bool) error {
 	cwd, err := getwd()
 	if err != nil {

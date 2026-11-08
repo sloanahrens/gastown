@@ -674,3 +674,40 @@ func TestConvertedCommandsRefuseAnAbsentCallerDirectory(t *testing.T) {
 		})
 	}
 }
+
+// TestCallerCwdDoesNotSteer pins the other side of the seam: the gt land
+// commands decide whether to wait, re-queue or report a verdict, so each reads
+// the real process directory. GT_CALLER_CWD naming another directory leaves
+// them there.
+//
+//testpolicy:allow parallel — GT_CALLER_CWD is the input under test, which t.Setenv shares with the whole process
+func TestCallerCwdDoesNotSteer(t *testing.T) {
+	processDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("process directory: %v", err)
+	}
+	if processDir == "" {
+		t.Fatalf("the process directory is empty; the assertion would be vacuous")
+	}
+	callerPath := t.TempDir()
+	if callerPath == processDir {
+		t.Fatalf("the caller's directory %q equals the process directory; the assertion would be vacuous", callerPath)
+	}
+	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test
+	t.Setenv(callercwd.EnvCallerCwd, callerPath)
+
+	cases := []struct {
+		name  string
+		getwd func() (string, error)
+	}{
+		{name: "gt land verdict", getwd: landVerdictProcessDir},
+		{name: "gt land wait", getwd: landWaitProcessHost().getwd},
+		{name: "gt land requeue", getwd: landRequeueProcessDir},
+	}
+	for _, tc := range cases {
+		got, err := tc.getwd()
+		if err != nil || got != processDir {
+			t.Errorf("%s directory = %q, %v; want the process directory %q", tc.name, got, err, processDir)
+		}
+	}
+}
