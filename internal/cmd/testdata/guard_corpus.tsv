@@ -184,6 +184,10 @@ test_scope	polecat	"make test-timing PKGS=./internal/style"	allow		seed
 test_scope	crew	"go test ./internal/cmd/ -run TestFoo"	allow		seed
 test_scope	other	"go build ./..."	allow		seed
 test_scope	refinery	"go build ./..."	allow		seed
+# An unparseable line is left unjudged: the old lenient tokenizer read this
+# unterminated substitution's body and refused it; shellparse refuses the line
+# itself, and this hint stays silent on it (operator ruling 11-05, gt-flnd7m).
+test_scope	polecat	"echo $(make gate"	allow		gt-flnd7m
 # --- dangerous: refusals ---
 dangerous	polecat	"sudo rm -rf /tmp/x"	refuse	Agents must never use sudo	seed
 dangerous	crew	"sudo apt update"	refuse	Agents must never use sudo	seed
