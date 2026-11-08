@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -651,26 +652,39 @@ func TestJevScorecardPatrolADeadlineKilledRefreshIsATimeout(t *testing.T) {
 // -timeout.
 const jevScorecardTestWait = 30 * time.Second
 
+// awaitJevScorecardIdle waits for the refresh's goroutine to finish. It clears
+// jevScorecardRunning last, after the last-run record is written under the
+// town, so a cleared guard means the goroutine has no writes left. A guard
+// still set after jevScorecardTestWait fails the test naming that state.
+func awaitJevScorecardIdle(t *testing.T, d *Daemon) {
+	t.Helper()
+	deadline := time.NewTimer(jevScorecardTestWait) //testpolicy:allow no-sleep — a hang guard only: the guard's release is the event the test waits for, and a refresh that never releases it fails here rather than hanging the test
+	defer deadline.Stop()
+	for d.jevScorecardRunning.Load() {
+		select {
+		case <-deadline.C:
+			t.Fatal("the refresh is still running: jevScorecardRunning never cleared after the refresh logged")
+		default:
+		}
+		runtime.Gosched()
+	}
+}
+
 // TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh holds the
 // production dispatch: a due refresh runs on its own goroutine, so the trigger
-// returns while the refresh is still waiting to run. It runs the default the
-// daemon fills into an unset dispatch, wrapped only to observe the refresh's
-// end, so a default that ran the refresh on the caller's goroutine fails here.
-// The refresh waits for the trigger to return and reports whether it did. An
-// inline dispatch cannot return the trigger while the refresh waits on it, so
-// the refresh gives up after jevScorecardTestWait, reports that the trigger had
-// not returned, and the test fails in about 30 seconds rather than hanging. A
-// dispatch that never runs the refresh fails the test at the receive below in
-// the same bound.
+// returns while the refresh is still waiting to run. The test leaves dispatch
+// unset, so the daemon fills in the production default, and a default that ran
+// the refresh on the caller's goroutine fails here. The refresh waits for the
+// trigger to return and reports whether it did. An inline dispatch cannot
+// return the trigger while the refresh waits on it, so the refresh gives up
+// after jevScorecardTestWait, reports that the trigger had not returned, and
+// the test fails in about 30 seconds rather than hanging. A dispatch that never
+// runs the refresh fails the test at the receive below in the same bound.
 func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
 	triggerReturned := make(chan struct{})
 	sawTriggerReturn := make(chan bool, 1)
-	// dispatched closes when the dispatch goroutine has finished the whole
-	// refresh, including the last-run record written under the town. The log
-	// line comes before that write, so the log alone is not the end of it.
-	dispatched := make(chan struct{})
 	logs := &syncBuffer{}
 	d := &Daemon{
 		config:       &Config{TownRoot: t.TempDir()},
@@ -690,19 +704,6 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 			},
 		},
 	}
-	// The dispatch under test is the production default the daemon fills in
-	// from jevScorecardSeamsOf, not one the test writes itself. The wrapper
-	// delegates to that default and adds only the completion signal, so a
-	// default that ran the refresh on the caller's goroutine fails the
-	// trigger-return check below instead of being replaced by the test's own.
-	defaultDispatch := d.jevScorecardSeamsOf().dispatch
-	d.jevScorecardSeams.dispatch = func(fn func()) {
-		defaultDispatch(func() {
-			defer close(dispatched)
-			fn()
-		})
-	}
-
 	d.triggerJevScorecard()
 	close(triggerReturned)
 
@@ -715,11 +716,7 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 		t.Fatal("the refresh never ran: no signal that the default dispatch started it")
 	}
 	awaitJevScorecardLog(t, logs, "refreshed the scorecard cache")
-	select {
-	case <-dispatched:
-	case <-time.After(jevScorecardTestWait): //testpolicy:allow no-sleep — a hang guard only: the dispatch goroutine's end is the event the test waits for, and a goroutine that never finishes fails here rather than hanging the test
-		t.Fatal("the dispatch goroutine never finished the refresh")
-	}
+	awaitJevScorecardIdle(t, d)
 }
 
 // awaitJevScorecardLog blocks until the log holds want. Each write wakes the
