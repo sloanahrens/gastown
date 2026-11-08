@@ -574,6 +574,32 @@ func TestReportPublishReportsAFailureOnEveryWritePath(t *testing.T) {
 			},
 		},
 		{
+			name: "a rotated page that cannot be read",
+			script: func(t *testing.T, fsys *reportPublishFS, dir string) {
+				t.Helper()
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, reportPublishPrevPageName), []byte("<html>older</html>"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				fsys.readFile = func(string) ([]byte, error) { return nil, errors.New("scripted read failure") }
+			},
+		},
+		{
+			name: "a rotated sidecar that cannot be read",
+			script: func(t *testing.T, fsys *reportPublishFS, dir string) {
+				t.Helper()
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, reportPublishPrevSidecarName), []byte(`{"bird":"dunlin"}`), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				fsys.readFile = func(string) ([]byte, error) { return nil, errors.New("scripted read failure") }
+			},
+		},
+		{
 			name: "a temp file that cannot be made",
 			script: func(t *testing.T, fsys *reportPublishFS, dir string) {
 				fsys.createTemp = func(string, string) (reportPublishTemp, error) {
