@@ -786,12 +786,19 @@ func TestPolecatTestScopeOpenOnUnparseable(t *testing.T) {
 				t.Fatalf("evaluatePolecatTestScope(%q) = %q (matched %v), want no refusal: the hint is open on a command it cannot read", tt.command, reason, matched)
 			}
 			// The same line still reaches the container-suite rule through the
-			// hook, and that rule fails closed by design; the assertion here
-			// is that the scope hint added no block of its own to stderr.
+			// hook, so "left open by the hint" must not mean "allowed": that
+			// rule fails closed on a line it cannot read, and both halves are
+			// asserted here.
 			input := `{"tool_name":"Bash","tool_input":{"command":` + strconv.Quote(tt.command) + `}}`
-			stderr, _ := runContainerSuiteGuard(input, proc)
+			stderr, err := runContainerSuiteGuard(input, proc)
 			if strings.Contains(stderr, "TEST SCOPE") {
 				t.Errorf("the scope hint printed a block for %q, a command it cannot read: %s", tt.command, stderr)
+			}
+			if err == nil {
+				t.Fatalf("the hook allowed %q: the hint stayed silent and the container-suite rule did not fail closed; stderr: %s", tt.command, stderr)
+			}
+			if !strings.Contains(stderr, "CONTAINER-SUITE COMMAND BLOCKED") || !strings.Contains(stderr, "cannot be read") {
+				t.Errorf("the hook's block for %q must be the container-suite rule's unreadable verdict, got: %s", tt.command, stderr)
 			}
 		})
 	}
@@ -1095,11 +1102,10 @@ func TestPolecatTestScope_NestedShapes(t *testing.T) {
 		{"substitution in a later segment", `gofmt -l . && x=$(make gate)`, root, true},
 		{"substitution as an argument of go", `go vet $(go test ./...)`, root, true},
 		{"nested substitution", `echo $(echo $(make gate))`, root, true},
-		// A line with an unterminated substitution or backtick is a shell
-		// syntax error, so nothing runs. The old lenient tokenizer still read
-		// the body; shellparse refuses the line, and this hint stays silent on
-		// a command it cannot read (gt-flnd7m,
-		// TestPolecatTestScopeOpenOnUnparseable).
+		// The two rows below are the only existing expectations gt-flnd7m
+		// flips (true -> false): shellparse refuses the line, so the hint never
+		// reads the unterminated substitution or backtick and stays silent
+		// (TestPolecatTestScopeOpenOnUnparseable).
 		{"unterminated substitution", `echo $(make gate`, root, false},
 		{"unterminated backticks", "echo `make gate", root, false},
 		{"body holding a nested substitution", `out=$(go test ./internal/cmd 2>&1 | tail -n $(nproc))`, root, true},
