@@ -722,6 +722,10 @@ func bdOperands(t *testing.T) map[string][]string {
 	return operand
 }
 
+// wantDocumentedOperandCommands is how many commands testdata/bd-flags.txt
+// documents a positional for, recorded from beads b9f68260.
+const wantDocumentedOperandCommands = 92
+
 // TestOperandTableCoversWhatBdDocuments checks operandSlots against the recorded
 // usage lines both ways: a command bd documents with a positional placeholder
 // that the table lacks reads its operands with no slot, and a row the table
@@ -730,9 +734,11 @@ func TestOperandTableCoversWhatBdDocuments(t *testing.T) {
 	t.Parallel()
 	documented := bdOperands(t)
 	// The check below walks a map, so a recording that parsed to nothing would
-	// pass it and leave the table looking complete.
-	if len(documented) < 100 {
-		t.Fatalf("testdata/bd-flags.txt documents positionals for %d commands, want at least 100 (bd 1.2.2 documents 112)", len(documented))
+	// pass it and leave the table looking complete. The count is pinned exactly,
+	// in either direction: a re-recording of testdata/bd-flags.txt changes the
+	// file and wantDocumentedOperandCommands together.
+	if len(documented) != wantDocumentedOperandCommands {
+		t.Fatalf("testdata/bd-flags.txt documents positionals for %d commands, want %d (bd 1.2.2 at beads b9f68260): a re-recording changes the file and wantDocumentedOperandCommands together", len(documented), wantDocumentedOperandCommands)
 	}
 	for command, placeholders := range documented {
 		slots, ok := operandSlots[command]
@@ -848,9 +854,8 @@ var beadNamingFlags = map[string]bool{
 // unroutedBeadFlags are the bead-naming flags bd documents on a command that
 // the shim reads as data rather than a bead: the command writes its bead in the
 // store its working directory names (see beadValueFlags), or a flag picks the
-// store for it (migrate issues, the admin verbs).
+// store for it (migrate issues).
 var unroutedBeadFlags = map[string]map[string]bool{
-	"admin compact":  {"--id": true},
 	"create":         {"--deps": true, "--id": true, "--parent": true, "--waits-for": true},
 	"create-form":    {"--parent": true},
 	"gate create":    {"--blocks": true},
