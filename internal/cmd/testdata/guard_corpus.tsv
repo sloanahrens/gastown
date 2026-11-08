@@ -308,6 +308,6 @@ dangerous	polecat	"echo a # n\r\nls"	allow		gt-q0jecy
 dangerous	polecat	"bash -c 'git reset --hard' #\\\r\nls"	refuse	comment ending in a backslash before a CR LF line end	gt-q0jecy
 dangerous	polecat	"echo a # n \\\r"	allow		gt-q0jecy
 # --- freeze-rule stamps (gt-x1bvnf): one real case per guard, stamped with its current source hash ---
-container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/git/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-x1bvnf	1cd97559e6c16d689513553ec4a06201913347ab22489617e0ed0c1f1622859a
-dangerous	polecat	"git reset --hard origin/main"	refuse	Reset onto a remote-tracking ref drops merged work	gt-x1bvnf	fe7fa46d73f88c961f2acd64373c50ccfb51a3d4f0ada5de8f4907f660d19470
-test_scope	polecat	"go test -run TestGuard ./internal/cmd"	allow		gt-x1bvnf	8e8601b146cd0cb17df24027c3f463ed56289936c32dbe6970864dbc67c849c6
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/git/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-x1bvnf	6266075c32f35d4cffff2f9c6d1f015aeaaea3c1fa7abee4d813b387325e7e47
+dangerous	polecat	"git reset --hard origin/main"	refuse	Reset onto a remote-tracking ref drops merged work	gt-x1bvnf	6266075c32f35d4cffff2f9c6d1f015aeaaea3c1fa7abee4d813b387325e7e47
+test_scope	polecat	"go test -run TestGuard ./internal/cmd"	allow		gt-x1bvnf	6266075c32f35d4cffff2f9c6d1f015aeaaea3c1fa7abee4d813b387325e7e47

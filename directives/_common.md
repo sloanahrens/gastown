@@ -41,4 +41,4 @@ Applies to every agent working this rig, whatever formula is running.
   `gt done --status DEFERRED --finding "<test name, full output, how you ran it>"`
   and the town files the Found bead. Do not retry it, and do not add retries,
   sleeps or longer timeouts to make it pass.
-- A fix to a `tap_guard_*.go` file starts with a corpus row in `internal/cmd/testdata/guard_corpus.tsv` (command, context, verdict, bead id, stamp) that fails before the fix; `TestGuardChangeAddsCorpusRow` names the stamp to add.
+- A fix to a `tap_guard_*.go` file starts with a corpus row in `internal/cmd/testdata/guard_corpus.tsv` (command, context, verdict, bead id, stamp) that documents the case and carries the new stamp; `TestGuardChangeAddsCorpusRow` names the stamp to add.
