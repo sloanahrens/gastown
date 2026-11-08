@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/cloudledger"
+	"github.com/steveyegge/gastown/internal/cloudledger/ledgertest"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
@@ -31,7 +32,7 @@ func writeFile(t *testing.T, path, body string) {
 	}
 }
 
-// ledgerReport is one report's bytes, shared by the file fixture and the fake
+// ledgerFixture is one ledger's records, shared by the file fixture and the fake
 // Postgres row so the two sources read the same data.
 type ledgerFixture struct {
 	reportJSON   string
@@ -101,14 +102,14 @@ func fileDirs(t *testing.T, f ledgerFixture) (reports, releases, off string) {
 }
 
 // pgLedger is the same fixture behind the fake driver.
-func pgLedger(t *testing.T, f ledgerFixture) *fakeLedger {
+func pgLedger(t *testing.T, f ledgerFixture) *ledgertest.Ledger {
 	t.Helper()
-	l := &fakeLedger{
-		report: &fakeReport{schema: 1, projects: f.projectsJSON, findings: f.findingsJSON},
+	l := &ledgertest.Ledger{
+		Report: &ledgertest.ReportRow{SchemaVersion: 1, Projects: f.projectsJSON, Findings: f.findingsJSON},
 	}
 	hb := f.heartbeat
-	l.heartbeat = &hb
-	l.releases = map[string][]fakeRelease{}
+	l.Heartbeat = &hb
+	l.Releases = map[string][]ledgertest.ReleaseRow{}
 	for app, lines := range f.releases {
 		for _, line := range lines {
 			var entry struct {
@@ -121,7 +122,7 @@ func pgLedger(t *testing.T, f ledgerFixture) *fakeLedger {
 			if err != nil {
 				t.Fatal(err)
 			}
-			l.releases[app] = append(l.releases[app], fakeRelease{at: at, line: []byte(line)})
+			l.Releases[app] = append(l.Releases[app], ledgertest.ReleaseRow{At: at, Line: []byte(line)})
 		}
 	}
 	return l
@@ -130,11 +131,15 @@ func pgLedger(t *testing.T, f ledgerFixture) *fakeLedger {
 // The file source still answers what the dashboard and the plugin findings read
 // before it existed: the patrol's report, the heartbeat, and one app's last
 // ledger line. A town with no DSN setting opens no database.
+//
+// It is not parallel: the database calls it counts are process-wide, and a
+// parallel test's ledger reads would be counted against this one.
+//
+//testpolicy:allow parallel — it counts database calls process-wide, so no parallel test may run beside it
 func TestCloudLedgerFileSourceIsUnchanged(t *testing.T) {
-	t.Parallel()
-
 	f := newLedgerFixture(t)
 	reports, releases, _ := fileDirs(t, f)
+	calls := ledgertest.Calls()
 	// NewSource is the production selection: with no ledger_dsn_file it returns
 	// the file source, and only a PostgresSource ever opens a database (it is
 	// the only type in the package that imports database/sql).
@@ -174,10 +179,15 @@ func TestCloudLedgerFileSourceIsUnchanged(t *testing.T) {
 	}
 
 	// The same reader the dashboard builds over the directory reads a fresh
-	// report: the file source is the read path, not a copy of it.
+	// Report: the file source is the read path, not a copy of it.
 	c := dashboard.NewCloudReader(reports).Read(ledgerNow)
 	if c.State != dashboard.CloudFresh || c.Total != 2 {
 		t.Errorf("dashboard cloud line = %+v, want fresh with 2 findings", c)
+	}
+
+	// A town with no ledger_dsn_file made no database call at all.
+	if got := ledgertest.Calls(); got != calls {
+		t.Errorf("the file-only reads made %d database calls, want none", got-calls)
 	}
 }
 
@@ -344,17 +354,17 @@ func TestCloudLedgerSourcesAreEquivalent(t *testing.T) {
 	fileSrc := cloudledger.NewFileSource(reports, releases)
 
 	l := pgLedger(t, f)
-	_, dsnPath := registerDSN(t, l)
-	pgSrc := cloudledger.NewPostgresSource(dsnPath)
+	_, dsnPath := ledgertest.Register(t, l)
+	pgSrc := newPostgres(t, dsnPath)
 
 	ctx := context.Background()
 	fileReport, err := fileSrc.LatestPatrolReport(ctx)
 	if err != nil {
-		t.Fatalf("file report: %v", err)
+		t.Fatalf("file Report: %v", err)
 	}
 	pgReport, err := pgSrc.LatestPatrolReport(ctx)
 	if err != nil {
-		t.Fatalf("postgres report: %v", err)
+		t.Fatalf("postgres Report: %v", err)
 	}
 	if !reflect.DeepEqual(fileReport, pgReport) {
 		t.Errorf("reports differ:\nfile:     %+v\npostgres: %+v", fileReport, pgReport)
@@ -418,10 +428,10 @@ func TestCloudLedgerFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	t.Run("an unreadable database", func(t *testing.T) {
 		t.Parallel()
-		l := &fakeLedger{}
-		dsn, path := registerDSN(t, l)
-		l.queryErr = fmt.Errorf("dialing %s: connection refused", dsn)
-		src := cloudledger.NewPostgresSource(path)
+		l := &ledgertest.Ledger{}
+		dsn, path := ledgertest.Register(t, l)
+		l.QueryErr = fmt.Errorf("dialing %s: connection refused", dsn)
+		src := newPostgres(t, path)
 
 		if _, err := src.LatestPatrolReport(ctx); err == nil {
 			t.Fatal("an unreadable database answered a report")
@@ -447,7 +457,7 @@ func TestCloudLedgerFailsClosed(t *testing.T) {
 	t.Run("a missing DSN file", func(t *testing.T) {
 		t.Parallel()
 		path := filepath.Join(t.TempDir(), "gone.dsn")
-		src := cloudledger.NewPostgresSource(path)
+		src := newPostgres(t, path)
 		_, err := src.LatestPatrolReport(ctx)
 		if err == nil || !strings.Contains(err.Error(), path) {
 			t.Fatalf("err = %v, want the missing file named", err)
@@ -460,12 +470,12 @@ func TestCloudLedgerFailsClosed(t *testing.T) {
 
 	t.Run("a DSN file readable by group or others", func(t *testing.T) {
 		t.Parallel()
-		l := &fakeLedger{}
-		dsn, path := registerDSN(t, l)
+		l := &ledgertest.Ledger{}
+		dsn, path := ledgertest.Register(t, l)
 		if err := os.Chmod(path, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		src := cloudledger.NewPostgresSource(path)
+		src := newPostgres(t, path)
 		_, err := src.LatestPatrolReport(ctx)
 		if err == nil || !strings.Contains(err.Error(), "readable by group or others") {
 			t.Fatalf("err = %v, want the mode refusal", err)
@@ -517,7 +527,7 @@ func TestCloudLedgerFailsClosed(t *testing.T) {
 		if err := os.WriteFile(path, []byte("\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := cloudledger.NewPostgresSource(path).LatestPatrolReport(ctx)
+		_, err := newPostgres(t, path).LatestPatrolReport(ctx)
 		if err == nil || !strings.Contains(err.Error(), "is empty") {
 			t.Fatalf("err = %v, want the empty-file refusal", err)
 		}
@@ -529,7 +539,7 @@ func TestCloudLedgerFailsClosed(t *testing.T) {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		_, err := cloudledger.NewPostgresSource(path).LatestPatrolReport(ctx)
+		_, err := newPostgres(t, path).LatestPatrolReport(ctx)
 		if err == nil || !errors.Is(err, cloudledger.ErrNotRegular) {
 			t.Fatalf("err = %v, want ErrNotRegular", err)
 		}
@@ -543,12 +553,12 @@ func TestCloudLedgerRefusesAWriterRole(t *testing.T) {
 
 	ctx := context.Background()
 	for _, table := range []string{cloudledger.PatrolReportTable, cloudledger.PatrolHeartbeatTable, cloudledger.ReleaseTable} {
-		l := &fakeLedger{
-			report:        &fakeReport{schema: 1, projects: []byte(`[]`), findings: []byte(`[]`)},
-			writableTable: table,
+		l := &ledgertest.Ledger{
+			Report:        &ledgertest.ReportRow{SchemaVersion: 1, Projects: []byte(`[]`), Findings: []byte(`[]`)},
+			WritableTable: table,
 		}
-		_, path := registerDSN(t, l)
-		src := cloudledger.NewPostgresSource(path)
+		_, path := ledgertest.Register(t, l)
+		src := newPostgres(t, path)
 
 		_, err := src.LatestPatrolReport(ctx)
 		if !errors.Is(err, cloudledger.ErrWriterRole) {
@@ -557,30 +567,30 @@ func TestCloudLedgerRefusesAWriterRole(t *testing.T) {
 		if !strings.Contains(err.Error(), table) {
 			t.Errorf("%s: err = %q, want the table named", table, err)
 		}
-		if got := l.seen(); len(got) == 0 || !strings.Contains(got[0], "has_table_privilege") {
+		if got := l.Statements(); len(got) == 0 || !strings.Contains(got[0], "has_table_privilege") {
 			t.Errorf("%s: first statement = %v, want the role probe", table, got)
 		}
-		for _, q := range l.seen() {
+		for _, q := range l.Statements() {
 			if strings.Contains(q, "FROM ") {
 				t.Errorf("%s: a ledger read ran before the refusal: %q", table, q)
 			}
 		}
-		if !l.ranReadOnly() {
+		if !l.ReadOnly() {
 			t.Errorf("%s: the probe did not run in a read-only transaction", table)
 		}
 	}
 
 	t.Run("a privilege this reader cannot see is a refusal", func(t *testing.T) {
 		t.Parallel()
-		l := &fakeLedger{
-			report:    &fakeReport{schema: 1, projects: []byte(`[]`), findings: []byte(`[]`)},
-			probeNull: cloudledger.PatrolReportTable,
+		l := &ledgertest.Ledger{
+			Report:    &ledgertest.ReportRow{SchemaVersion: 1, Projects: []byte(`[]`), Findings: []byte(`[]`)},
+			ProbeNull: cloudledger.PatrolReportTable,
 		}
-		_, path := registerDSN(t, l)
-		src := cloudledger.NewPostgresSource(path)
+		_, path := ledgertest.Register(t, l)
+		src := newPostgres(t, path)
 		_, err := src.LatestPatrolReport(ctx)
 		if !errors.Is(err, cloudledger.ErrWriterRole) || !strings.Contains(err.Error(), cloudledger.PatrolReportTable) {
-			t.Fatalf("err = %v, want a refusal naming the table (statements %v)", err, l.seen())
+			t.Fatalf("err = %v, want a refusal naming the table (statements %v)", err, l.Statements())
 		}
 	})
 }

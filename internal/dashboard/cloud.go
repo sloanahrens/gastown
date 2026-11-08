@@ -162,9 +162,9 @@ type CloudReader struct {
 	apps *AppPowerReader
 }
 
-// NewCloudReader returns a reader of the patrol's reports in dir. The command
-// wiring names the directory (config.CloudReportsDir); a reader reads the one
-// it is given.
+// NewCloudReader returns a reader of the patrol's reports in the file directory
+// dir. It is the file-only reader; the command wiring builds its reader from the
+// source the town settings select, with NewCloudReaderFromSource.
 func NewCloudReader(dir string) *CloudReader {
 	return NewCloudReaderFromSource(cloudledger.NewFileSource(dir, ""))
 }

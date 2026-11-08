@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -212,8 +213,9 @@ func (d *Daemon) cloudCheckAlert(p *plugin.Plugin) (key, summary string) {
 	source, err := d.cloudSource()
 	if err != nil {
 		d.logger.Printf("Handler: cloud-check: %v; keying the escalation by the unreadable report", err)
-		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, ""
+		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, cloudUnreadableSummary(err)
 	}
+	defer d.closeCloudSource(source)
 	rep, err := readCloudReportFrom(source)
 	if err != nil {
 		if errors.Is(err, cloudledger.ErrNotConfigured) {
@@ -221,7 +223,7 @@ func (d *Daemon) cloudCheckAlert(p *plugin.Plugin) (key, summary string) {
 			return pluginFailureAlertKey(p.Name) + ":" + cloudNotConfiguredKey, config.CloudNotConfigured
 		}
 		d.logger.Printf("Handler: cloud-check: %v; keying the escalation by the unreadable report", err)
-		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, ""
+		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, cloudUnreadableSummary(err)
 	}
 	ids, kinds := urgentFindingIDs(rep)
 	if len(ids) == 0 {
@@ -249,6 +251,25 @@ func (d *Daemon) cloudSource() (cloudledger.Source, error) {
 		return nil, fmt.Errorf("reading town settings: %w", err)
 	}
 	return cloudledger.NewSource(settings.ResolveCloud(os.Getenv)), nil
+}
+
+// closeCloudSource releases the source's database pool when it holds one. The
+// read it followed has already answered, so a close error is only logged.
+func (d *Daemon) closeCloudSource(s cloudledger.Source) {
+	c, ok := s.(io.Closer)
+	if !ok {
+		return
+	}
+	if err := c.Close(); err != nil {
+		d.logger.Printf("Handler: cloud-check: closing the cloud source: %v", err)
+	}
+}
+
+// cloudUnreadableSummary is the reason an unreadable report is escalated with.
+// The error names the file or the source; a Postgres source has already removed
+// the DSN from it.
+func cloudUnreadableSummary(err error) string {
+	return "cloud report unreadable: " + err.Error()
 }
 
 // The reasons the daemon closes a plugin escalation with itself. A close that

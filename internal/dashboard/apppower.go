@@ -113,17 +113,16 @@ type AppPower struct {
 // AppPowerReader reads the off markers directory and the release ledgers from
 // a source.
 type AppPowerReader struct {
-	offDir, releasesDir string
-	source              cloudledger.Source
+	offDir string
+	source cloudledger.Source
 }
 
-// NewAppPowerReader returns a reader of the markers in offDir and the ledgers
-// in releasesDir. The command wiring names both (config.CloudOffDir and
-// config.CloudReleasesDir); a reader reads the two it is given.
+// NewAppPowerReader returns a reader of the markers in offDir and the file
+// ledgers in releasesDir. It is the file-only reader; the command wiring builds
+// its reader from the source the town settings select, with
+// NewAppPowerReaderFromSource.
 func NewAppPowerReader(offDir, releasesDir string) *AppPowerReader {
-	r := NewAppPowerReaderFromSource(offDir, cloudledger.NewFileSource("", releasesDir))
-	r.releasesDir = releasesDir
-	return r
+	return NewAppPowerReaderFromSource(offDir, cloudledger.NewFileSource("", releasesDir))
 }
 
 // NewAppPowerReaderFromSource returns a reader of the markers in offDir and the
@@ -141,7 +140,7 @@ func (r *AppPowerReader) Read(now time.Time) *AppPower {
 	p := &AppPower{At: now, Apps: []AppPowerRow{}}
 	ctx := context.Background()
 	markers, offErr := listApps(r.offDir, appOffSuffix)
-	ledgerNames, relErr, relMissing := r.listReleases(ctx)
+	ledgerNames, relMissing, relErr := r.listReleases(ctx)
 	if errors.Is(offErr, fs.ErrNotExist) && relMissing {
 		return nil
 	}
@@ -197,26 +196,26 @@ func (r *AppPowerReader) Read(now time.Time) *AppPower {
 // the fallback draws fewer rows rather than none. missing reports a releases
 // directory that is not there, which with no markers directory means the
 // machine has no cloud setup at all.
-func (r *AppPowerReader) listReleases(ctx context.Context) (names map[string]struct{}, err error, missing bool) {
+func (r *AppPowerReader) listReleases(ctx context.Context) (names map[string]struct{}, missing bool, err error) {
 	lister, ok := r.source.(cloudledger.ReleaseLister)
 	if !ok {
-		return nil, nil, false
+		return nil, false, nil
 	}
 	apps, err := lister.Apps(ctx)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, true
+		return nil, true, nil
 	}
 	if errors.Is(err, cloudledger.ErrNotConfigured) {
-		return nil, nil, false // the step is off: there is no ledger to name
+		return nil, false, nil // the step is off: there is no ledger to name
 	}
 	if err != nil {
-		return nil, err, false
+		return nil, false, err
 	}
 	names = make(map[string]struct{}, len(apps))
 	for _, app := range apps {
 		names[app] = struct{}{}
 	}
-	return names, nil, false
+	return names, false, nil
 }
 
 // hasApp reports whether the source's app list holds name.

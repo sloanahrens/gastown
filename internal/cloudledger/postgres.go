@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
+	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,19 +20,66 @@ import (
 // caller imports its own; this package never registers one.
 const PostgresDriver = "pgx"
 
+// PostgresReadTimeout bounds one read of the ledger. A database that does not
+// answer within it fails the read with ErrReadTimeout, which the readers show
+// as UNKNOWN, rather than holding the poll that asked.
+const PostgresReadTimeout = 10 * time.Second
+
+// ErrReadTimeout is a ledger read that the read deadline ended.
+var ErrReadTimeout = errors.New("cloudledger: ledger read timed out")
+
+// ErrNoDriver is a source whose database/sql driver the binary does not link:
+// the program that wires the source must import the driver.
+var ErrNoDriver = errors.New("cloudledger: database/sql driver is not linked into this binary")
+
 // ledgerTables are the tables the reader's role must not be able to write in.
 var ledgerTables = []string{PatrolReportTable, PatrolHeartbeatTable, ReleaseTable}
 
 // PostgresSource reads the ledger tables in the cluster. The DSN comes from the
 // file the setting names on every read, so a file that moved, went missing or
-// loosened its mode fails closed at the next poll rather than at startup.
+// loosened its mode fails closed at the next poll rather than at startup. The
+// pool opened from that DSN is kept for the source's reads, and the reader
+// role is proven once per pool, so a poll that reads every app does not open a
+// connection per app. Close releases the pool.
 type PostgresSource struct {
 	dsnFile string
+	driver  string
+	timeout time.Duration
+
+	// mu serializes reads, so the pool and its role proof change only under it.
+	mu sync.Mutex
+	// dsn is the DSN db was opened with; a DSN file that changed reopens it.
+	dsn    string
+	db     *sql.DB
+	roleOK bool
 }
 
 // NewPostgresSource returns a source that reads the ledger through the DSN in
 // dsnFile.
-func NewPostgresSource(dsnFile string) *PostgresSource { return &PostgresSource{dsnFile: dsnFile} }
+func NewPostgresSource(dsnFile string) *PostgresSource {
+	return &PostgresSource{dsnFile: dsnFile, driver: PostgresDriver, timeout: PostgresReadTimeout}
+}
+
+// Close releases the pool the source holds. A read after Close opens a new one.
+func (p *PostgresSource) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.closeLocked()
+}
+
+// closeLocked closes the held pool, if any, and forgets the role proof with it.
+func (p *PostgresSource) closeLocked() error {
+	if p.db == nil {
+		return nil
+	}
+	err := p.db.Close()
+	dsn := p.dsn
+	p.db, p.dsn, p.roleOK = nil, "", false
+	if err != nil {
+		return postgresError(dsn, err)
+	}
+	return nil
+}
 
 // LatestPatrolReport reads the newest report row.
 func (p *PostgresSource) LatestPatrolReport(ctx context.Context) (Report, error) {
@@ -36,7 +87,7 @@ func (p *PostgresSource) LatestPatrolReport(ctx context.Context) (Report, error)
 		rep               Report
 		projects, finding []byte
 	)
-	err := p.read(ctx, func(tx *sql.Tx) error {
+	err := p.read(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		row := tx.QueryRowContext(ctx,
 			"SELECT schema_version, projects, findings FROM "+PatrolReportTable+" ORDER BY finished_at DESC LIMIT 1")
 		if err := row.Scan(&rep.SchemaVersion, &projects, &finding); err != nil {
@@ -64,7 +115,7 @@ func (p *PostgresSource) LatestPatrolReport(ctx context.Context) (Report, error)
 // would be wrong to date that report with a run that did not write it.
 func (p *PostgresSource) Heartbeat(ctx context.Context) (time.Time, error) {
 	var at time.Time
-	err := p.read(ctx, func(tx *sql.Tx) error {
+	err := p.read(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx,
 			"SELECT at FROM "+PatrolHeartbeatTable+" ORDER BY at DESC LIMIT 1").Scan(&at)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -81,7 +132,7 @@ func (p *PostgresSource) Heartbeat(ctx context.Context) (time.Time, error) {
 // ReleasesSince returns app's release lines later than since, oldest first.
 func (p *PostgresSource) ReleasesSince(ctx context.Context, app string, since time.Time) ([]Release, error) {
 	lines := []Release{}
-	err := p.read(ctx, func(tx *sql.Tx) error {
+	err := p.read(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx,
 			"SELECT line FROM "+ReleaseTable+" WHERE app = $1 AND at > $2 ORDER BY at", app, since)
 		if err != nil {
@@ -110,7 +161,7 @@ func (p *PostgresSource) ReleasesSince(ctx context.Context, app string, since ti
 // LastRelease returns app's newest release line.
 func (p *PostgresSource) LastRelease(ctx context.Context, app string) (Release, error) {
 	var raw []byte
-	err := p.read(ctx, func(tx *sql.Tx) error {
+	err := p.read(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		err := tx.QueryRowContext(ctx,
 			"SELECT line FROM "+ReleaseTable+" WHERE app = $1 ORDER BY at DESC LIMIT 1", app).Scan(&raw)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -127,7 +178,7 @@ func (p *PostgresSource) LastRelease(ctx context.Context, app string) (Release, 
 // Apps lists the app names the release table holds a line for.
 func (p *PostgresSource) Apps(ctx context.Context) ([]string, error) {
 	apps := []string{}
-	err := p.read(ctx, func(tx *sql.Tx) error {
+	err := p.read(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		rows, err := tx.QueryContext(ctx, "SELECT DISTINCT app FROM "+ReleaseTable+" ORDER BY app")
 		if err != nil {
 			return err
@@ -148,42 +199,77 @@ func (p *PostgresSource) Apps(ctx context.Context) ([]string, error) {
 	return apps, nil
 }
 
-// read opens a read-only transaction over the ledger, proves the role cannot
-// write it, and runs fn. It rolls back on every path: a read needs no commit,
-// and a transaction left open by a failed read is one the pool keeps holding.
-func (p *PostgresSource) read(ctx context.Context, fn func(*sql.Tx) error) (err error) {
+// read runs fn in a read-only transaction over the ledger, under the source's
+// read deadline. The DSN file is read and its mode checked on every call; the
+// pool and the role proof are kept while the DSN is unchanged. A read that the
+// deadline ends is ErrReadTimeout, and a read the caller canceled is the
+// caller's error as it stands.
+func (p *PostgresSource) read(parent context.Context, fn func(context.Context, *sql.Tx) error) error {
 	dsn, err := readDSN(p.dsnFile, os.ReadFile)
 	if err != nil {
 		return err
 	}
-	db, err := sql.Open(PostgresDriver, dsn)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.openLocked(dsn); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(parent, p.timeout)
+	defer cancel()
+	err = p.runLocked(ctx, fn)
+	if err != nil && parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return postgresError(dsn, fmt.Errorf("%w after %s", ErrReadTimeout, p.timeout))
+	}
+	return err
+}
+
+// openLocked opens the pool for dsn, reusing the held one when the DSN has not
+// changed. A held pool for another DSN is closed first.
+func (p *PostgresSource) openLocked(dsn string) error {
+	if p.db != nil && p.dsn == dsn {
+		return nil
+	}
+	if err := p.closeLocked(); err != nil {
+		return err
+	}
+	if !slices.Contains(sql.Drivers(), p.driver) {
+		return postgresError(dsn, fmt.Errorf("%w: %q", ErrNoDriver, p.driver))
+	}
+	db, err := sql.Open(p.driver, dsn)
 	if err != nil {
 		return postgresError(dsn, err)
 	}
-	defer func() {
-		if cerr := db.Close(); cerr != nil && err == nil {
-			err = postgresError(dsn, cerr)
-		}
-	}()
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	p.db, p.dsn = db, dsn
+	return nil
+}
+
+// runLocked opens the read-only transaction and, until the role has been
+// proven, checks the role first. The transaction rolls back on every path: a
+// read needs no commit, and one a failed read left open is one the pool keeps
+// holding.
+func (p *PostgresSource) runLocked(ctx context.Context, fn func(context.Context, *sql.Tx) error) (err error) {
+	tx, err := p.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		return postgresError(dsn, err)
+		return postgresError(p.dsn, err)
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) && err == nil {
-			err = postgresError(dsn, rbErr)
+			err = postgresError(p.dsn, rbErr)
 		}
 	}()
-	if err := p.checkReaderRole(ctx, tx); err != nil {
-		return postgresError(dsn, err)
+	if !p.roleOK {
+		if err := checkReaderRole(ctx, tx); err != nil {
+			return postgresError(p.dsn, err)
+		}
+		p.roleOK = true
 	}
-	return postgresError(dsn, fn(tx))
+	return postgresError(p.dsn, fn(ctx, tx))
 }
 
 // checkReaderRole refuses a role that can INSERT into any ledger table, naming
 // the table before a single ledger row is read. A probe that cannot be read is
 // a refusal too: a role the reader cannot prove read-only is not read-only.
-func (p *PostgresSource) checkReaderRole(ctx context.Context, tx *sql.Tx) error {
+func checkReaderRole(ctx context.Context, tx *sql.Tx) error {
 	for _, table := range ledgerTables {
 		var canInsert sql.NullBool
 		err := tx.QueryRowContext(ctx,
@@ -233,21 +319,46 @@ func postgresError(dsn string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return fmt.Errorf("cloudledger: postgres source: %w", redactedError{dsn: dsn, err: err})
+	return fmt.Errorf("cloudledger: postgres source: %w", redactedError{secrets: secretsOf(dsn), err: err})
 }
 
-// redactedError reports err's text with every occurrence of the DSN replaced,
-// keeping the chain so callers can still match a sentinel.
+// secretsOf returns the text of dsn a driver error could quote: the whole DSN,
+// and the password in each form a URL carries it, raw and percent-encoded. A
+// password is redacted on its own so an error that names only it is caught.
+func secretsOf(dsn string) []string {
+	out := []string{dsn}
+	if dsn == "" {
+		return out
+	}
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		return out
+	}
+	pw, ok := u.User.Password()
+	if !ok || pw == "" {
+		return out
+	}
+	return append(out, pw, url.QueryEscape(pw), url.PathEscape(pw))
+}
+
+// redactedError reports err's text with every secret replaced, keeping the
+// chain so callers can still match a sentinel. The longest secret goes first,
+// so a whole DSN is replaced before the password inside it.
 type redactedError struct {
-	dsn string
-	err error
+	secrets []string
+	err     error
 }
 
 func (e redactedError) Error() string {
-	if e.dsn == "" {
-		return e.err.Error()
+	msg := e.err.Error()
+	secrets := slices.Clone(e.secrets)
+	sort.SliceStable(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
+	for _, s := range secrets {
+		if s != "" {
+			msg = strings.ReplaceAll(msg, s, "<dsn>")
+		}
 	}
-	return strings.ReplaceAll(e.err.Error(), e.dsn, "<dsn>")
+	return msg
 }
 
 func (e redactedError) Unwrap() error { return e.err }

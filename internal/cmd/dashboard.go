@@ -351,6 +351,17 @@ func newDashboardClaudePlanReader(townRoot string, usage *dashUsageReader, planU
 		WithUsage(usage.monthRecords)
 }
 
+// closeCloudLedger releases the cloud step's database pool when the source holds
+// one. The hub is stopping, so a close error is reported on stderr, the one
+// place left to report it.
+func closeCloudLedger(s cloudledger.Source) {
+	if c, ok := s.(io.Closer); ok {
+		if err := c.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "dashboard: closing the cloud ledger: %v\n", err)
+		}
+	}
+}
+
 // dashboardClaudePlanPath is where the status line appends its Claude plan
 // samples inside the town: one JSON line per reading. The sampler is
 // ~/.claude/statusline-command.sh, outside the repo; the dashboard's reader
@@ -532,7 +543,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			return tr
 		},
 		LoadSample: loads.append,
-	}), func() { closeTailSources(sources) }, nil
+	}), func() { closeTailSources(sources); closeCloudLedger(cloudSource) }, nil
 }
 
 // dashboardDeploys builds the deploy tracker the Landings pane reads: the

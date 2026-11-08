@@ -256,7 +256,7 @@ func TestReadSkipsNonRegularMarkerWithoutBlocking(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A FIFO in the ledgers directory is skipped the same way.
-	if err := syscall.Mkfifo(filepath.Join(r.releasesDir, "z.jsonl"), 0o644); err != nil {
+	if err := syscall.Mkfifo(filepath.Join(filepath.Dir(r.offDir), "releases", "z.jsonl"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Without the fix the goroutine sits in open(2) on the FIFO; opening it
