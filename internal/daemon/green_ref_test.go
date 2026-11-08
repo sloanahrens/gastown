@@ -683,7 +683,7 @@ func TestGreenRefPushFailureReasonIsCutToTwoHundredRunes(t *testing.T) {
 	t.Parallel()
 	fx := newGreenRefFixture(t, atHour(time.Now(), 15))
 	sha := fx.commit(t, "main")
-	fx.git.pushErr = errors.New("rejected\nremote: " + strings.Repeat("é", 200) + "TAIL")
+	fx.git.pushErr = errors.New("rejected\nremote: " + strings.Repeat("é", 201) + "TAIL")
 	fx.rec.green()
 	fx.runCycle(t, sha)
 
