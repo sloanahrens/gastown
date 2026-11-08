@@ -19,6 +19,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -61,6 +63,9 @@ type updateRequest struct {
 	Force      bool
 	JSON       bool
 	FromDaemon bool
+	// Images is the values file the install takes the daemon image from by
+	// digest; empty runs the install as it always has.
+	Images string
 }
 
 // updateSelectableSteps names the steps --skip and --only accept, in the order
@@ -83,6 +88,11 @@ type updateSeams struct {
 	Run          func(context.Context, update.Deps, update.Options) (update.State, error)
 	// Images wires the images subcommand's registry reads and values write.
 	Images updateImagesSeams
+	// ImageSwap is the daemon's swap a digest install and a rollback put a pair
+	// in force through.
+	ImageSwap func(townRoot string) (update.ImageSwap, error)
+	// Notifier raises the escalation for a daemon that could not be restored.
+	Notifier func(townRoot string) notify.Notifier
 }
 
 // productionUpdateSeams wires the real town, effects and orchestrator.
@@ -92,6 +102,10 @@ func productionUpdateSeams() updateSeams {
 		DepsFactory:  realUpdateDeps,
 		Run:          update.Run,
 		Images:       productionUpdateImagesSeams(),
+		ImageSwap:    realImageSwap,
+		Notifier: func(townRoot string) notify.Notifier {
+			return &notify.CLI{Dir: townRoot}
+		},
 	}
 }
 
@@ -122,6 +136,12 @@ polecats, asks the daemon for its maintenance cycle, builds and installs the
 new binary, waits for the daemon's restart, verifies the town and releases its
 hold. The plan is printed first, and --dry-run stops there.
 
+With --images, the install also moves the container daemon to the daemon and
+polecat image pair the values file names, by digest. The pair the daemon ran
+before is recorded first; a daemon that does not come back on the new pair is
+restored to it, and a restore that fails escalates. gt update rollback puts that
+recorded pair back.
+
 Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 5 when another run holds the lock, 130 when interrupted.`,
 		Args:         cobra.NoArgs,
@@ -136,10 +156,12 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 	c.Flags().BoolVar(&req.Force, "force", false, "Plan an install even when the installed build is main")
 	c.Flags().BoolVar(&req.JSON, "json", false, "Print the final state as JSON instead of the text report")
 	c.Flags().BoolVar(&req.FromDaemon, "from-daemon", false, "Record the run's source as daemon instead of manual")
+	c.Flags().StringVar(&req.Images, "images", "", "Install the daemon image by digest from this values file (gt update images writes it)")
 	// The status reader shares the parent's town lookup, so both commands read
 	// the same town root, and it reads the wall clock for a heartbeat's age.
 	c.AddCommand(newUpdateStatusCmd(updateStatusSeams{FindTownRoot: seams.FindTownRoot, Now: time.Now}))
 	c.AddCommand(newUpdateImagesCmd(seams.Images))
+	c.AddCommand(newUpdateRollbackCmd(seams))
 	return c
 }
 
@@ -165,6 +187,12 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	deps, err := seams.DepsFactory(townRoot)
 	if err != nil {
 		return fmt.Errorf("preparing the update: %w", err)
+	}
+	if req.Images != "" {
+		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images)
+		if err != nil {
+			return fmt.Errorf("preparing the daemon image install: %w", err)
+		}
 	}
 
 	release, err := update.AcquireLock(update.Dir(townRoot))
@@ -465,6 +493,37 @@ func realUpdateInstaller(townRoot string) (update.Installer, error) {
 		return nil, err
 	}
 	return newExecInstaller(townRoot, realRunFunc(), patrol)
+}
+
+// digestInstaller makes the install step a digest install over the values file
+// at path: the host install the cycle always runs, then the daemon moved to the
+// pair the file names. The file is read here as well, so a file that does not
+// parse stops the run before any polecat is drained.
+func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path string) (update.Installer, error) {
+	if _, err := imagevalues.Load(path); err != nil {
+		return nil, fmt.Errorf("the --images values file: %w", err)
+	}
+	if seams.ImageSwap == nil || seams.Notifier == nil {
+		return nil, errors.New("no daemon image swap or escalation sink is wired")
+	}
+	swap, err := seams.ImageSwap(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	return &update.DigestInstaller{
+		Inner: deps.Installer,
+		Path:  path,
+		Images: update.ImageDeps{
+			Ledger: update.FileImageLedger{Dir: update.Dir(townRoot)},
+			Swap:   swap,
+			Verify: deps.Verify,
+			Clock:  deps.Clock,
+			Sleep:  deps.Sleep,
+			Wait:   updateRestartWait,
+			Poll:   updateRestartPoll,
+			Notify: seams.Notifier(townRoot),
+		},
+	}, nil
 }
 
 // loadUpdatePatrolConfig reads the daemon settings the installer's image-trim
