@@ -517,6 +517,7 @@ var publishedNames = map[string]string{
 // when one function both joins the reports directory name and joins a daily
 // report file name, which is a reader laying the path out by hand.
 func TestReadersResolveTheReportDirectory(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join("..", "..")
 	ownPackage := filepath.Join("internal", "birdreports") + string(filepath.Separator)
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
