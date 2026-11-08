@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gt-rehearsal
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon

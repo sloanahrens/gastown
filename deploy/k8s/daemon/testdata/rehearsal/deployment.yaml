@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daemon
+  namespace: gt-rehearsal
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/town-owner: rehearsal
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: daemon
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+    spec:
+      serviceAccountName: daemon
+      terminationGracePeriodSeconds: 180
+      containers:
+        - name: daemon
+          image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          args:
+            - --om-token-file
+            - /run/secrets/om-token
+            - --forge-host
+            - forgejo:3000
+            - --forge-token-file
+            - /run/secrets/forge-token
+          workingDir: /Users/sloan/gt
+          env:
+            - name: GT_TOWN_ROOT
+              value: /Users/sloan/gt
+            - name: XDG_CONFIG_HOME
+              value: /run/gt/xdg
+            - name: AWS_REGION
+              value: us-east-1
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: town-state
+              mountPath: /Users/sloan/gt
+            - name: landing-work
+              mountPath: /Users/sloan/gt-landing.noindex
+            - name: gotmp
+              mountPath: /Users/Shared/gt-gotmp.noindex
+            - name: daemon-forgejo-viewer-env
+              mountPath: /run/gt/xdg/gt/forgejo-viewer.env
+              subPath: forgejo-viewer.env
+              readOnly: true
+            - name: daemon-om-daemon-token
+              mountPath: /run/gt/xdg/gt/om-daemon-token
+              subPath: om-daemon-token
+              readOnly: true
+            - name: daemon-om-daemon-token-meta
+              mountPath: /run/gt/xdg/gt/om-daemon-token.meta
+              subPath: om-daemon-token.meta
+              readOnly: true
+            - name: daemon-om-daemon-token
+              mountPath: /run/secrets/om-token
+              subPath: om-daemon-token
+              readOnly: true
+            - name: daemon-forgejo-viewer-env
+              mountPath: /run/secrets/forge-token
+              subPath: forgejo-viewer.env
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - gt
+                - status
+                - --line
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - gt
+                - daemon
+                - status
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 5
+      volumes:
+        - name: town-state
+          persistentVolumeClaim:
+            claimName: town-state
+        - name: landing-work
+          persistentVolumeClaim:
+            claimName: landing-work
+        - name: gotmp
+          emptyDir: {}
+        - name: daemon-forgejo-viewer-env
+          secret:
+            secretName: daemon-forgejo-viewer.env
+        - name: daemon-om-daemon-token
+          secret:
+            secretName: daemon-om-daemon-token
+        - name: daemon-om-daemon-token-meta
+          secret:
+            secretName: daemon-om-daemon-token.meta
