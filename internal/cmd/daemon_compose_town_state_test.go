@@ -30,8 +30,8 @@ func TestDaemonComposeTownStateWritesTheVolumeAndRollback(t *testing.T) {
 		t.Fatalf("no compose file written at %s", r.composePath())
 	}
 	for _, want := range []string{
-		"      - type: volume\n        source: " + composeTestTownStateVolume + "\n        target: \"" + composeTestTown + "\"\n",
-		"  " + composeTestTownStateVolume + ":\n    external: true\n",
+		"      - type: volume\n        source: \"" + composeTestTownStateVolume + "\"\n        target: \"" + composeTestTown + "\"\n",
+		"  \"" + composeTestTownStateVolume + "\":\n    external: true\n",
 	} {
 		if !bytes.Contains(got, []byte(want)) {
 			t.Errorf("compose file does not carry %q:\n%s", want, got)
@@ -59,7 +59,7 @@ func TestDaemonComposeTownStatePrintCarriesNoRollback(t *testing.T) {
 	if strings.Contains(out, "Rollback:") {
 		t.Errorf("--print output carries the rollback line:\n%s", out)
 	}
-	if !strings.Contains(out, "source: "+composeTestTownStateVolume) {
+	if !strings.Contains(out, "source: \""+composeTestTownStateVolume+"\"") {
 		t.Errorf("--print output does not carry the volume:\n%s", out)
 	}
 	if _, ok := r.disk[r.composePath()]; ok {

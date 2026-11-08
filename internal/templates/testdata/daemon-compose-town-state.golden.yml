@@ -18,7 +18,7 @@ services:
       GT_TOWN_ROOT: "/towns/live"
     volumes:
       - type: volume
-        source: gt-live-town-state
+        source: "gt-live-town-state"
         target: "/towns/live"
     networks:
       - default
@@ -48,5 +48,5 @@ networks:
     internal: true
 volumes:
   sweep_dind_data:
-  gt-live-town-state:
+  "gt-live-town-state":
     external: true
