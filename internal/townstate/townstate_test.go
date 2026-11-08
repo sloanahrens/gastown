@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -196,10 +197,59 @@ func TestManifestHasNoOverlappingRows(t *testing.T) {
 	}
 }
 
+// sourceCitation matches a path-like token in a why: two or more segments and
+// a file extension, as the whys cite a source file inside its package.
+var sourceCitation = regexp.MustCompile(`[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)+\.[A-Za-z0-9]+`)
+
+// citedSources returns the repository paths why cites. A token is a citation
+// only when its first segment is a visible name at the repository root: the
+// whys also name host paths (~/.claude/...), manifest paths under .runtime, and
+// files in the om repo, none of which this repository's sources are.
+func citedSources(why string, rootNames map[string]bool) []string {
+	var out []string
+	for _, tok := range sourceCitation.FindAllString(why, -1) {
+		first, _, _ := strings.Cut(tok, "/")
+		if strings.HasPrefix(first, ".") || !rootNames[first] {
+			continue
+		}
+		out = append(out, tok)
+	}
+	return out
+}
+
+// missingSources returns the repository paths why cites that root does not hold.
+func missingSources(why, root string, rootNames map[string]bool) []string {
+	var out []string
+	for _, p := range citedSources(why, rootNames) {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(p))); err != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// repoRootNames returns the names present at the repository root, so a
+// citation in a why is checked only when its first segment names one.
+func repoRootNames(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("reading the repository root: %v", err)
+	}
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[e.Name()] = true
+	}
+	return names
+}
+
 // TestManifestWhysNameTheirSource fails when a row gt-plrm1y adds carries the
-// wrong owner or a why that never names the file that writes or reads the path.
+// wrong owner, a why that cites no source file, or one that cites a file the
+// repository does not hold.
 func TestManifestWhysNameTheirSource(t *testing.T) {
 	t.Parallel()
+	root := filepath.Join("..", "..")
+	rootNames := repoRootNames(t, root)
 	m := Default()
 	for _, want := range newManifestRows {
 		e, ok := entryNamed(m, want.path)
@@ -210,8 +260,55 @@ func TestManifestWhysNameTheirSource(t *testing.T) {
 		if e.Owner != want.owner {
 			t.Errorf("row %q is %q, want %q", want.path, e.Owner, want.owner)
 		}
-		if !strings.Contains(e.Why, ".go") {
-			t.Errorf("row %q's why does not name a Go source file: %q", want.path, e.Why)
+		if len(citedSources(e.Why, rootNames)) == 0 {
+			t.Errorf("row %q's why cites no source file: %q", want.path, e.Why)
+		}
+		for _, missing := range missingSources(e.Why, root, rootNames) {
+			t.Errorf("row %q's why cites %s, which the repository does not hold", want.path, missing)
+		}
+	}
+
+	t.Run("a why citing a file the repository does not hold is refused", func(t *testing.T) {
+		const why = "the state internal/townstate/no-such-fixture.go writes"
+		missing := missingSources(why, root, rootNames)
+		if len(missing) != 1 || missing[0] != "internal/townstate/no-such-fixture.go" {
+			t.Fatalf("missingSources(%q) = %v, want the cited path reported missing", why, missing)
+		}
+	})
+}
+
+// TestManifestPrivateRowsKeepTheirModes names the daemon rows that hold
+// credential material, which an import must copy with the archive's mode: a
+// kubeconfig, a keychain, a 0600 password file. A row that loses private: true
+// fails here, in the Go data or in the yaml mirror. The list is reviewed by
+// hand, since the test cannot tell a credential path from any other: a new
+// credential row must be added to it.
+func TestManifestPrivateRowsKeepTheirModes(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "daemon", "town-state.yaml"))
+	if err != nil {
+		t.Fatalf("reading the mirror: %v", err)
+	}
+	mirror, err := Parse(data)
+	if err != nil {
+		t.Fatalf("parsing the mirror: %v", err)
+	}
+	for _, src := range []struct {
+		name string
+		m    *Manifest
+	}{{"the Go data", Default()}, {"the yaml mirror", mirror}} {
+		for _, p := range []string{".runtime/container", ".runtime/sbx-k8s", ".runtime/signing"} {
+			e, ok := entryNamed(src.m, p)
+			if !ok {
+				t.Errorf("%s has no row %q", src.name, p)
+				continue
+			}
+			if e.Owner != OwnerDaemon {
+				t.Errorf("%s: row %q is %q; only a daemon row is copied, so only it can be private", src.name, p, e.Owner)
+			}
+			if !e.Private {
+				t.Errorf("%s: row %q can hold a credential but does not set private: true, so an import would mask its modes to 0755/0644", src.name, p)
+			}
 		}
 	}
 }

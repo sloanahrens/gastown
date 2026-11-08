@@ -106,8 +106,8 @@ func Default(dirs DirNames) *Manifest {
 		{Path: "<rig>/plugins", Owner: OwnerDaemon, Why: "the plugins the daemon's scanner loads from each rig (internal/plugin/scanner.go DiscoverAll); internal/cmd/daemon_rehearse_plugins.go reads it"},
 		{Path: "<rig>/settings", Owner: OwnerShared, Why: "the rig's behavioral settings gt config writes (internal/config/loader.go SaveRigSettings) and the daemon's landing worker reads (internal/daemon/landing_worker.go rigPostLandCommand), as the town-level settings row"},
 		{Path: "<rig>/directives", Owner: OwnerShared, Why: "directives a person writes and internal/config/directives.go reads as the rig's layer (two rigs of this town have it)"},
-		{Path: "<rig>/scripts", Owner: OwnerShared, Why: "harness scripts the om repo's contrib/gastown/deploy.sh writes, which internal/doctor/harness_drift_check.go hashes; the refinery it deployed to is retired"},
-		{Path: "<rig>/.gastown-harness-manifest.json", Owner: OwnerShared, Why: "the deploy-managed file list contrib/gastown/deploy.sh writes and internal/doctor/harness_drift_check.go reads; the refinery it deployed to is retired"},
+		{Path: "<rig>/scripts", Owner: OwnerShared, Why: "harness scripts a person writes by running the om repo's deploy.sh (contrib/gastown), which internal/doctor/harness_drift_check.go hashes; the refinery it deployed to is retired"},
+		{Path: "<rig>/.gastown-harness-manifest.json", Owner: OwnerShared, Why: "the deploy-managed file list the om repo's deploy.sh (contrib/gastown) writes and internal/doctor/harness_drift_check.go reads; the refinery it deployed to is retired"},
 		{Path: "<rig>/.runtime/namepool-state.json", Owner: OwnerDaemon, Why: "the name pool's state internal/polecat/namepool.go writes when a polecat is named"},
 		{Path: "<rig>/.runtime/locks", Owner: OwnerDaemon, Why: "rig lock files a polecat session takes (internal/polecat/manager.go) as the town-level .runtime/locks row; export skips the files themselves and keeps the directory"},
 		{Path: "<rig>/.runtime/session_id", Owner: OwnerSession, Why: "the session ID gt prime writes in the cwd of a session started at the rig root (internal/cmd/prime_session.go persistSessionID)"},
@@ -117,10 +117,15 @@ func Default(dirs DirNames) *Manifest {
 		{Path: "<rig>/.runtime/agent.lock.flock", Owner: OwnerSession, Why: "the flock internal/lock/lock.go takes beside agent.lock so two Acquire calls cannot race"},
 		{Path: "<rig>/.runtime/handoff_to_successor", Owner: OwnerSession, Why: "the marker gt handoff leaves for the successor's gt prime (internal/cmd/handoff.go writeHandoffMarker)"},
 
-		// The daemon's subsystem directories under .runtime.
+		// The daemon's subsystem directories under .runtime and the state only
+		// gt commands write. After the wrapper cutover every gt command runs in
+		// the container, so the volume holds the only copy of what a gt command
+		// writes here; until then a gt command on the Mac writes the host's tree
+		// too, a cutover prerequisite (gt-yjzepk.10). A row a gt command writes
+		// says so and points at this comment.
 		{Path: ".runtime/jev", Owner: OwnerDaemon, Why: "jev's dataset the daemon writes"},
 		{Path: ".runtime/polecat-spans", Owner: OwnerDaemon, Why: "polecat span records the daemon writes"},
-		{Path: ".runtime/agents", Owner: OwnerDaemon, Why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy. Until then gt commands run on the Mac also write it directly, which is a cutover prerequisite (gt-yjzepk.10)"},
+		{Path: ".runtime/agents", Owner: OwnerDaemon, Why: "agent intent records and the bird registry. Every writer is the daemon or a gt command (gt done, gt sling, the bird commands); a gt command's write follows the cutover rule above"},
 		{Path: ".runtime/landings", Owner: OwnerDaemon, Rollback: true, Why: "landing ledgers the daemon writes; rollback replays the landing records"},
 		{Path: ".runtime/usage", Owner: OwnerDaemon, Why: "usage records the daemon writes"},
 		{Path: ".runtime/sweep-runs", Owner: OwnerDaemon, Why: "tier sweep output the daemon writes"},
@@ -154,9 +159,9 @@ func Default(dirs DirNames) *Manifest {
 		{Path: ".runtime/polecat-image.published", Owner: OwnerDaemon, Why: "the publish record internal/polecatimage/program.go writes and reads, so a push that did not finish is retried"},
 		{Path: ".runtime/rigs", Owner: OwnerDaemon, Why: "the per-rig ready-to-land stamp internal/land/readystamp.go TouchReadyStamp writes and the dock stamp internal/rig/dockstamp.go writes"},
 		{Path: ".runtime/sandbox-seat-ends", Owner: OwnerDaemon, Why: "the pending sandbox seat ends internal/daemon/sandbox_seat_end_pending.go writes"},
-		{Path: ".runtime/sbx-k8s", Owner: OwnerDaemon, Why: "the gt-sbx kind cluster's kubeconfig and manifests, written by deploy/k8s/kind/common.sh and read by internal/diskmaint/kubectl.go and internal/cmd/maint.go"},
+		{Path: ".runtime/sbx-k8s", Owner: OwnerDaemon, Private: true, Why: "the gt-sbx kind cluster's kubeconfig and manifests, written by deploy/k8s/kind/common.sh and read by internal/diskmaint/kubectl.go and internal/cmd/maint.go; the kubeconfig must keep its mode through a copy"},
 		{Path: ".runtime/scheduler-dispatch.lock", Owner: OwnerDaemon, Why: "the dispatch lock internal/schedulerrun/schedulerrun.go takes"},
-		{Path: ".runtime/signing", Owner: OwnerDaemon, Why: "the signing material the gt-installer signing step uses (internal/installer/sign.go); internal/binaryinstall/sign.go reads it"},
+		{Path: ".runtime/signing", Owner: OwnerDaemon, Private: true, Why: "the keychain, its 0600 password file and the identity gt-installer signs with (internal/installer/sign.go ResolveSigning), which internal/binaryinstall/sign.go reads; the password file must keep its mode through a copy"},
 		{Path: ".runtime/sling-startup-failures", Owner: OwnerDaemon, Why: "the per-bead startup failure records gt sling writes (internal/dispatch/startup_backoff.go), which the daemon's dispatchers read before re-slinging"},
 		{Path: ".runtime/spec-lint", Owner: OwnerDaemon, Why: "the manual lint ledger gt spec lint appends (internal/specdispatch/lintlog.go)"},
 		{Path: ".runtime/supervisor", Owner: OwnerDaemon, Why: "the action log internal/supervisor/supervisor.go writes when it restarts a session"},
@@ -168,17 +173,15 @@ func Default(dirs DirNames) *Manifest {
 		{Path: ".runtime/daemon-liveness.json", Owner: OwnerDaemon, Why: "the daemon liveness baseline the doctor check writes (internal/doctor/daemon_liveness_check.go), run by the daemon's doctor_dog"},
 		{Path: ".runtime/daemon-respawn.json", Owner: OwnerDaemon, Why: "the daemon respawn baseline the doctor check writes (internal/doctor/daemon_respawn_check.go), run by the daemon's doctor_dog"},
 
-		// .runtime state only gt commands write. After the wrapper cutover every
-		// gt command runs in the container, so the volume holds the only copy,
-		// as the .runtime/agents row says. Until then gt commands on the Mac
-		// write the host's tree too, a cutover prerequisite (gt-yjzepk.10).
-		{Path: ".runtime/polecat-admission", Owner: OwnerDaemon, Why: "admission reservations gt sling writes (internal/cmd/polecat_capacity.go writePolecatAdmissionReservation); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy, as the .runtime/agents row says"},
-		{Path: ".runtime/polecat-pool-claims", Owner: OwnerDaemon, Why: "seat claims gt sling writes (internal/cmd/sling_pool.go poolSeatClaimDir); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy, as the .runtime/agents row says"},
-		{Path: ".runtime/polecat-prompts", Owner: OwnerDaemon, Why: "the polecat system prompts gt sling stores (internal/session/prompt_store.go storePolecatPrompt), read back by the landing worker for a rejection (internal/land/promptstamp.go); after the wrapper cutover every gt command runs in the container, so the volume holds the only copy"},
+		// .runtime state only gt commands write, daemon-owned by the cutover
+		// rule in the comment above the .runtime rows.
+		{Path: ".runtime/polecat-admission", Owner: OwnerDaemon, Why: "admission reservations gt sling writes (internal/cmd/polecat_capacity.go writePolecatAdmissionReservation); daemon-owned after the wrapper cutover, as the .runtime/agents row says"},
+		{Path: ".runtime/polecat-pool-claims", Owner: OwnerDaemon, Why: "seat claims gt sling writes (internal/cmd/sling_pool.go poolSeatClaimDir); daemon-owned after the wrapper cutover, as the .runtime/agents row says"},
+		{Path: ".runtime/polecat-prompts", Owner: OwnerDaemon, Why: "the polecat system prompts gt sling stores (internal/session/prompt_store.go storePolecatPrompt), read back by the landing worker for a rejection (internal/land/promptstamp.go); daemon-owned after the wrapper cutover, as the .runtime/agents row says"},
 		{Path: ".runtime/rehearsal", Owner: OwnerDaemon, Why: "the container rehearsal's run directories, written and deleted by gt daemon rehearse (internal/cmd/daemon_rehearse.go chooseRunDir)"},
 		{Path: ".runtime/hooks", Owner: OwnerDaemon, Why: "the hooks sync report gt hooks sync writes (internal/hooks/sync_report.go) and the hooks-sync doctor check reads"},
 		{Path: ".runtime/composer_pending", Owner: OwnerDaemon, Why: "the composer stall clock the daemon heartbeat and the witness patrol write (internal/tmux/pending_input_clock.go)"},
-		{Path: ".runtime/nudge_queue", Owner: OwnerDaemon, Why: "the queued nudges gt nudge writes (internal/nudge/queue.go Enqueue) and the target session's hook drains; after the wrapper cutover every gt command runs in the container, so the volume holds the only copy"},
+		{Path: ".runtime/nudge_queue", Owner: OwnerDaemon, Why: "the queued nudges gt nudge writes (internal/nudge/queue.go Enqueue) and the target session's hook drains; daemon-owned after the wrapper cutover, as the .runtime/agents row says"},
 		{Path: ".runtime/seat-refill.json", Owner: OwnerDaemon, Why: "the seat-refill plugin's episode state, read by internal/report/hour.go refillEpisodes"},
 		{Path: ".runtime/bead-respawn-counts.json", Owner: OwnerDaemon, Why: "the per-bead respawn counts gt sling records (internal/polecat/respawn_count.go RecordBeadRespawnMark), read by the jev scorecard (internal/jev/scorecard/thrash.go)"},
 		{Path: ".runtime/bead-respawn-counts.json.flock", Owner: OwnerDaemon, Why: "the flock internal/polecat/respawn_count.go takes beside bead-respawn-counts.json"},
