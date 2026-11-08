@@ -283,6 +283,16 @@ func TestExportDrivesWalkAndFileFailures(t *testing.T) {
 
 }
 
+// TestHostReadDirRefusesAnAbsentDirectory drives the host listing the export
+// walks through, on a directory that does not exist, so the refusal does not
+// depend on the process user the way an unreadable directory does.
+func TestHostReadDirRefusesAnAbsentDirectory(t *testing.T) {
+	t.Parallel()
+	if _, err := osOps().readDir(filepath.Join(t.TempDir(), "absent")); err == nil {
+		t.Fatal("readDir of an absent directory = nil error, want the listing refused")
+	}
+}
+
 // TestImportRefusesBadInputs drives every refusal an import makes before or
 // while it reads the stream: no manifest, an invalid one, no root, a root that
 // is a file, an unreadable registry, a stream that is not a tar, and each
