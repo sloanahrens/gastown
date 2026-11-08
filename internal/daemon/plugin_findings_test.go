@@ -13,8 +13,10 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/plugin"
 )
 
 // cloudFindingFixture is an urgent finding unless severity says otherwise.
@@ -569,6 +571,57 @@ func TestCloudCheckEscalationForAnUnreadableReport(t *testing.T) {
 	d.scripts.wait()
 	if calls := notes.Escalations(); len(calls) != 1 {
 		t.Errorf("an unreadable report closed minutes ago was raised again: %+v", calls)
+	}
+}
+
+// A town whose cloud block is present but empty keys the failure as the cloud
+// step being off, not as a report that is broken.
+func TestCloudCheckSaysTheCloudStepIsNotConfigured(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"type":"town-settings","version":1,"cloud":{}}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d := cloudCheckDaemon(t, "", nil, newFixedClock(), nil)
+	d.cloudReportsDir = nil
+	d.config.TownRoot = townRoot
+
+	key, summary := d.cloudCheckAlert(&plugin.Plugin{Name: cloudCheckPlugin})
+	want := pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudNotConfiguredKey
+	if key != want || summary != config.CloudNotConfigured {
+		t.Errorf("key %q summary %q, want %q and %q", key, summary, want, config.CloudNotConfigured)
+	}
+}
+
+// A settings file that does not parse fails closed: the failure is keyed as an
+// unreadable report, never read as a town with no cloud block.
+func TestCloudCheckFailsClosedOnUnreadableSettings(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), []byte(`{"cloud":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	d := cloudCheckDaemon(t, "", nil, newFixedClock(), nil)
+	d.cloudReportsDir = nil
+	d.config.TownRoot = townRoot
+
+	key, _ := d.cloudCheckAlert(&plugin.Plugin{Name: cloudCheckPlugin})
+	want := pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudUnreadableKey
+	if key != want {
+		t.Errorf("key %q, want %q", key, want)
 	}
 }
 

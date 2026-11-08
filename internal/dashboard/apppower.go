@@ -2,7 +2,7 @@ package dashboard
 
 import (
 	"bytes"
-	"encoding/json"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/cloudledger"
 )
 
 // The Cloud panel's app power line: for each app, whether it is on, and when it
@@ -108,15 +110,26 @@ type AppPower struct {
 	Note string `json:"note,omitempty"`
 }
 
-// AppPowerReader reads the off markers directory and the release ledgers
-// directory.
-type AppPowerReader struct{ offDir, releasesDir string }
+// AppPowerReader reads the off markers directory and the release ledgers from
+// a source.
+type AppPowerReader struct {
+	offDir string
+	source cloudledger.Source
+}
 
-// NewAppPowerReader returns a reader of the markers in offDir and the ledgers
-// in releasesDir. The command wiring names both (config.CloudOffDir and
-// config.CloudReleasesDir); a reader reads the two it is given.
+// NewAppPowerReader returns a reader of the markers in offDir and the file
+// ledgers in releasesDir. It is the file-only reader; the command wiring builds
+// its reader from the source the town settings select, with
+// NewAppPowerReaderFromSource.
 func NewAppPowerReader(offDir, releasesDir string) *AppPowerReader {
-	return &AppPowerReader{offDir: offDir, releasesDir: releasesDir}
+	return NewAppPowerReaderFromSource(offDir, cloudledger.NewFileSource("", releasesDir))
+}
+
+// NewAppPowerReaderFromSource returns a reader of the markers in offDir and the
+// ledgers the source holds. The markers belong to the wrapper on the machine,
+// so they stay files under every source.
+func NewAppPowerReaderFromSource(offDir string, s cloudledger.Source) *AppPowerReader {
+	return &AppPowerReader{offDir: offDir, source: s}
 }
 
 // Read returns the app power line as it stands at now, or nil when neither
@@ -125,9 +138,10 @@ func NewAppPowerReader(offDir, releasesDir string) *AppPowerReader {
 // the markers directory was read and holds no marker for it.
 func (r *AppPowerReader) Read(now time.Time) *AppPower {
 	p := &AppPower{At: now, Apps: []AppPowerRow{}}
+	ctx := context.Background()
 	markers, offErr := listApps(r.offDir, appOffSuffix)
-	ledgers, relErr := listApps(r.releasesDir, appLedgerSuffix)
-	if errors.Is(offErr, fs.ErrNotExist) && errors.Is(relErr, fs.ErrNotExist) {
+	ledgerNames, relMissing, relErr := r.listReleases(ctx)
+	if errors.Is(offErr, fs.ErrNotExist) && relMissing {
 		return nil
 	}
 
@@ -135,7 +149,7 @@ func (r *AppPowerReader) Read(now time.Time) *AppPower {
 	for n := range markers {
 		names[n] = struct{}{}
 	}
-	for n := range ledgers {
+	for n := range ledgerNames {
 		names[n] = struct{}{}
 	}
 	if offErr != nil && len(names) == 0 {
@@ -164,14 +178,50 @@ func (r *AppPowerReader) Read(now time.Time) *AppPower {
 				row.State = AppOn
 			}
 		}
-		if file, ok := ledgers[name]; ok {
-			readLedger(&row, filepath.Join(r.releasesDir, file))
-		} else if relErr != nil && !errors.Is(relErr, fs.ErrNotExist) {
+		switch {
+		case relErr != nil:
 			row.ReleaseNote = appLedgerReadFailed
+		case ledgerNames != nil && !hasApp(ledgerNames, name):
+			// The source named its apps and this one has no ledger.
+		default:
+			readRelease(ctx, &row, r.source, name)
 		}
 		p.Apps = append(p.Apps, row)
 	}
 	return p
+}
+
+// listReleases names the apps the source holds a ledger for. A source that
+// cannot name them still answers LastRelease for the apps the markers name, so
+// the fallback draws fewer rows rather than none. missing reports a releases
+// directory that is not there, which with no markers directory means the
+// machine has no cloud setup at all.
+func (r *AppPowerReader) listReleases(ctx context.Context) (names map[string]struct{}, missing bool, err error) {
+	lister, ok := r.source.(cloudledger.ReleaseLister)
+	if !ok {
+		return nil, false, nil
+	}
+	apps, err := lister.Apps(ctx)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, true, nil
+	}
+	if errors.Is(err, cloudledger.ErrNotConfigured) {
+		return nil, false, nil // the step is off: there is no ledger to name
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	names = make(map[string]struct{}, len(apps))
+	for _, app := range apps {
+		names[app] = struct{}{}
+	}
+	return names, false, nil
+}
+
+// hasApp reports whether the source's app list holds name.
+func hasApp(names map[string]struct{}, name string) bool {
+	_, ok := names[name]
+	return ok
 }
 
 // listApps maps the app name of each entry in dir ending in suffix to the
@@ -266,49 +316,33 @@ func parseMarker(line string) (appMarker, bool) {
 	return m, haveSince
 }
 
-// readLedger fills row's Release from the last line of the ledger at path.
-func readLedger(row *AppPowerRow, path string) {
-	line, err := readLastLine(path, appLedgerTailBytes)
+// readRelease fills row's Release from the source's newest line for the app.
+func readRelease(ctx context.Context, row *AppPowerRow, source cloudledger.Source, app string) {
+	rel, err := source.LastRelease(ctx, app)
 	switch {
+	case errors.Is(err, cloudledger.ErrNoRelease), errors.Is(err, cloudledger.ErrNotConfigured):
+		return
+	case errors.Is(err, cloudledger.ErrBadRelease):
+		row.ReleaseNote = appLedgerBadLine
+		return
 	case err != nil:
 		row.ReleaseNote = appLedgerReadFailed
 		return
-	case line == "":
-		return
 	}
-	var entry struct {
-		Time   string `json:"time"`
-		Action string `json:"action"`
-		Reason string `json:"reason"`
+	row.Release = &AppRelease{
+		At:     rel.At,
+		Action: cloudText(rel.Action, appActionMax),
+		Reason: cloudText(rel.Reason, appReasonMax),
 	}
-	if err := json.Unmarshal([]byte(line), &entry); err != nil {
-		row.ReleaseNote = appLedgerBadLine
-		return
-	}
-	rel := &AppRelease{
-		Action: cloudText(entry.Action, appActionMax),
-		Reason: cloudText(entry.Reason, appReasonMax),
-	}
-	if at, err := time.Parse(time.RFC3339, strings.TrimSpace(entry.Time)); err == nil {
-		rel.At = at
-	}
-	row.Release = rel
 }
 
-var errNotRegular = errors.New("not a regular file")
+var errNotRegular = cloudledger.ErrNotRegular
 
 // openRegular opens path for reading when it is a regular file, following a
 // symlink to one. A FIFO, socket or device is refused before it is opened, since
 // opening a FIFO blocks until a writer appears and the poll has no timeout.
 func openRegular(path string) (*os.File, error) {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, errNotRegular
-	}
-	return os.Open(path)
+	return cloudledger.OpenRegular(path)
 }
 
 // readFirstLine reads at most max bytes from the start of path and returns the
@@ -325,39 +359,6 @@ func readFirstLine(path string, max int64) (string, error) {
 	}
 	if i := bytes.IndexAny(b, "\r\n"); i >= 0 {
 		b = b[:i]
-	}
-	return string(b), nil
-}
-
-// readLastLine reads at most max bytes from the end of path and returns the last
-// non-blank line of them, "" for a file with none. A last line longer than the
-// tail cannot be told apart from the middle of one, so it is an error rather than
-// a guess. It does not open a file that is not a regular one.
-func readLastLine(path string, max int64) (string, error) {
-	f, err := openRegular(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	start := int64(0)
-	if fi.Size() > max {
-		start = fi.Size() - max
-	}
-	b := make([]byte, fi.Size()-start)
-	n, err := f.ReadAt(b, start)
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	b = bytes.TrimSpace(b[:n])
-	if i := bytes.LastIndexByte(b, '\n'); i >= 0 {
-		return string(bytes.TrimSpace(b[i+1:])), nil
-	}
-	if start > 0 {
-		return "", errors.New("ledger: last line over the read bound")
 	}
 	return string(b), nil
 }

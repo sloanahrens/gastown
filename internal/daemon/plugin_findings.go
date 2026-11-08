@@ -1,17 +1,19 @@
 package daemon
 
 import (
+	"context"
 	"crypto/sha256"
-	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/cloudledger"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/plugin"
@@ -32,13 +34,13 @@ const (
 	// cloud patrol's urgent findings.
 	cloudCheckPlugin = "cloud-check"
 
-	// cloudReportFile is the patrol's report inside config.CloudReportsDir.
+	// cloudReportFile is the patrol's report inside the reports directory.
 	cloudReportFile = "report.json"
 
 	// cloudReportMaxBytes refuses an oversized report before reading it, so a
 	// file that is not the patrol's own cannot be read into memory to be
 	// rejected. The patrol's own reports run a few kilobytes.
-	cloudReportMaxBytes = 256 << 10
+	cloudReportMaxBytes = cloudledger.ReportMaxBytes
 
 	// cloudUrgent is the report's worst severity: the findings at it are the
 	// ones the check fails over.
@@ -55,6 +57,11 @@ const (
 	// report's key: the report was read, and the findings in it are still
 	// named in the escalation's kinds and counts.
 	cloudUnidentifiedKey = "findings-without-identity"
+
+	// cloudNotConfiguredKey keys a failure while the town's cloud block is
+	// present but empty, so an operator reads that the step is off rather than
+	// that its report is broken.
+	cloudNotConfiguredKey = "cloud-step-not-configured"
 
 	// cloudKindMax caps a finding kind in the escalation text, in runes.
 	cloudKindMax = 40
@@ -97,33 +104,29 @@ type cloudReport struct {
 // readCloudReport reads the patrol's report from dir, refusing anything that is
 // not a small regular file.
 func readCloudReport(dir string) (cloudReport, error) {
-	return readCloudReportWith(dir, os.ReadFile)
+	return readCloudReportFrom(cloudledger.NewFileSource(dir, ""))
 }
 
 // readCloudReportWith is readCloudReport with the file read injected, so a
 // test can drive the unreadable-file branch on a file it cannot make
 // unreadable.
 func readCloudReportWith(dir string, readFile func(string) ([]byte, error)) (cloudReport, error) {
-	path := filepath.Join(dir, cloudReportFile)
-	fi, err := os.Lstat(path)
+	return readCloudReportFrom(cloudledger.NewFileSourceWithRead(dir, "", readFile))
+}
+
+// readCloudReportFrom reads the report from the cloud step's source.
+func readCloudReportFrom(s cloudledger.Source) (cloudReport, error) {
+	rep, err := s.LatestPatrolReport(context.Background())
 	if err != nil {
 		return cloudReport{}, err
 	}
-	if !fi.Mode().IsRegular() {
-		return cloudReport{}, fmt.Errorf("%s: not a regular file", path)
+	out := cloudReport{Findings: make([]cloudFinding, 0, len(rep.Findings))}
+	for _, f := range rep.Findings {
+		out.Findings = append(out.Findings, cloudFinding{
+			ID: f.ID, Kind: f.Kind, Project: f.Project, Resource: f.Resource, Severity: f.Severity,
+		})
 	}
-	if fi.Size() > cloudReportMaxBytes {
-		return cloudReport{}, fmt.Errorf("%s: larger than %d bytes", path, cloudReportMaxBytes)
-	}
-	raw, err := readFile(path)
-	if err != nil {
-		return cloudReport{}, err
-	}
-	var rep cloudReport
-	if err := json.Unmarshal(raw, &rep); err != nil {
-		return cloudReport{}, fmt.Errorf("%s: %w", path, err)
-	}
-	return rep, nil
+	return out, nil
 }
 
 // urgentFindingIDs returns the sorted, deduplicated identities of the report's
@@ -207,10 +210,20 @@ func (d *Daemon) cloudCheckAlert(p *plugin.Plugin) (key, summary string) {
 	if p == nil || p.Name != cloudCheckPlugin {
 		return "", ""
 	}
-	rep, err := readCloudReport(d.cloudReportDir())
+	source, err := d.cloudSource()
 	if err != nil {
 		d.logger.Printf("Handler: cloud-check: %v; keying the escalation by the unreadable report", err)
-		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, ""
+		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, cloudUnreadableSummary(err)
+	}
+	defer d.closeCloudSource(source)
+	rep, err := readCloudReportFrom(source)
+	if err != nil {
+		if errors.Is(err, cloudledger.ErrNotConfigured) {
+			d.logger.Printf("Handler: cloud-check: %s", config.CloudNotConfigured)
+			return pluginFailureAlertKey(p.Name) + ":" + cloudNotConfiguredKey, config.CloudNotConfigured
+		}
+		d.logger.Printf("Handler: cloud-check: %v; keying the escalation by the unreadable report", err)
+		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, cloudUnreadableSummary(err)
 	}
 	ids, kinds := urgentFindingIDs(rep)
 	if len(ids) == 0 {
@@ -225,13 +238,38 @@ func (d *Daemon) cloudCheckAlert(p *plugin.Plugin) (key, summary string) {
 	return findingSetKey(p.Name, ids), findingSummary(kinds)
 }
 
-// cloudReportDir is the patrol's reports directory: the test's own when one is
-// injected, the directory config.CloudReportsDir names otherwise.
-func (d *Daemon) cloudReportDir() string {
+// cloudSource is the cloud step's reader: the test's file directory when one is
+// injected, the source the town settings select otherwise. A settings file that
+// cannot be read is an error: reading the default directories instead would
+// read a step the town may have turned off.
+func (d *Daemon) cloudSource() (cloudledger.Source, error) {
 	if d.cloudReportsDir != nil {
-		return d.cloudReportsDir()
+		return cloudledger.NewFileSource(d.cloudReportsDir(), ""), nil
 	}
-	return config.CloudReportsDir()
+	settings, err := config.LoadTownSettings(config.TownSettingsPath(d.config.TownRoot))
+	if err != nil {
+		return nil, fmt.Errorf("reading town settings: %w", err)
+	}
+	return cloudledger.NewSource(settings.ResolveCloud(os.Getenv)), nil
+}
+
+// closeCloudSource releases the source's database pool when it holds one. The
+// read it followed has already answered, so a close error is only logged.
+func (d *Daemon) closeCloudSource(s cloudledger.Source) {
+	c, ok := s.(io.Closer)
+	if !ok {
+		return
+	}
+	if err := c.Close(); err != nil {
+		d.logger.Printf("Handler: cloud-check: closing the cloud source: %v", err)
+	}
+}
+
+// cloudUnreadableSummary is the reason an unreadable report is escalated with.
+// The error names the file or the source; a Postgres source has already removed
+// the DSN from it.
+func cloudUnreadableSummary(err error) string {
+	return "cloud report unreadable: " + err.Error()
 }
 
 // The reasons the daemon closes a plugin escalation with itself. A close that

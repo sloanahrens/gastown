@@ -1,16 +1,16 @@
 package dashboard
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/steveyegge/gastown/internal/cloudledger"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // The Cloud panel: the cloud patrol's latest report. The report comes from
@@ -32,11 +32,11 @@ const (
 	// cloudReportMaxBytes refuses a larger report before reading it, so a file
 	// that is not one of the patrol's own cannot be read into memory to be
 	// rejected. The patrol's own reports run a few kilobytes.
-	cloudReportMaxBytes = 256 << 10
+	cloudReportMaxBytes = cloudledger.ReportMaxBytes
 
 	// cloudHeartbeatMaxBytes refuses a larger heartbeat before reading it: the
 	// file is one RFC3339 timestamp, so anything longer is not one.
-	cloudHeartbeatMaxBytes = 64
+	cloudHeartbeatMaxBytes = cloudledger.HeartbeatMaxBytes
 
 	// cloudMaxFindings is how many finding rows the page draws; the rest are
 	// counted in More, and in Counts and Total over the whole report.
@@ -88,31 +88,12 @@ const (
 	cloudLow    = "low"
 )
 
+// The errors the cloud line names. They are the source's own sentinels, so a
+// state here and a state the daemon reports cannot come apart.
 var (
-	errCloudOversize  = errors.New("cloud: report over the size cap")
-	errCloudHeartbeat = errors.New("cloud: heartbeat is not a timestamp")
+	errCloudOversize  = cloudledger.ErrOversize
+	errCloudHeartbeat = cloudledger.ErrBadHeartbeat
 )
-
-// cloudReport is the shape of the file the patrol writes. Its RunID and its
-// run's start and finish times are in the file too; the panel shows none of
-// them, so they are not parsed here.
-type cloudReport struct {
-	SchemaVersion int            `json:"SchemaVersion"`
-	Projects      []string       `json:"Projects"`
-	Findings      []cloudFinding `json:"Findings"`
-}
-
-// cloudFinding is one finding as the file writes it. ObservedAt stays a string:
-// a time one finding cannot parse is a missing observation, not a report the
-// whole panel should lose.
-type cloudFinding struct {
-	Kind       string `json:"Kind"`
-	Severity   string `json:"Severity"`
-	Project    string `json:"Project"`
-	Resource   string `json:"Resource"`
-	Detail     string `json:"Detail"`
-	ObservedAt string `json:"ObservedAt"`
-}
 
 // CloudFinding is one finding as the panel draws it, every string stripped and
 // capped.
@@ -170,9 +151,9 @@ type Cloud struct {
 	Apps *AppPower `json:"apps,omitempty"`
 }
 
-// CloudReader reads one reports directory.
+// CloudReader reads the patrol's report and heartbeat from one source.
 type CloudReader struct {
-	dir string
+	source cloudledger.Source
 	// checks reads the cloud-check plugin's status, when one is wired (see
 	// WithChecks). Nil leaves Cloud.Checks nil.
 	checks *CloudChecksReader
@@ -181,10 +162,18 @@ type CloudReader struct {
 	apps *AppPowerReader
 }
 
-// NewCloudReader returns a reader of the patrol's reports in dir. The command
-// wiring names the directory (config.CloudReportsDir); a reader reads the one
-// it is given.
-func NewCloudReader(dir string) *CloudReader { return &CloudReader{dir: dir} }
+// NewCloudReader returns a reader of the patrol's reports in the file directory
+// dir. It is the file-only reader; the command wiring builds its reader from the
+// source the town settings select, with NewCloudReaderFromSource.
+func NewCloudReader(dir string) *CloudReader {
+	return NewCloudReaderFromSource(cloudledger.NewFileSource(dir, ""))
+}
+
+// NewCloudReaderFromSource returns a reader of the source's report and
+// heartbeat, which the town settings select.
+func NewCloudReaderFromSource(s cloudledger.Source) *CloudReader {
+	return &CloudReader{source: s}
+}
 
 // WithChecks attaches the cloud-check status reader, so Read fills the pane's
 // checks line from the same poll as the patrol's report. A reader with none
@@ -219,25 +208,24 @@ func (r *CloudReader) Read(now time.Time) *Cloud {
 // power lines to Read so no path out of it forgets to fill them.
 func (r *CloudReader) read(now time.Time) *Cloud {
 	c := &Cloud{At: now, Projects: []string{}, Findings: []CloudFinding{}}
-	if fi, err := os.Stat(r.dir); err != nil || !fi.IsDir() {
-		c.State, c.Note, c.NoPatrol = CloudMissing, cloudNoPatrol, true
-		return c
-	}
-	raw, err := readCloudFile(filepath.Join(r.dir, cloudReportFile), cloudReportMaxBytes)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		c.State, c.Note = CloudMissing, cloudNoReport
-		return c
-	case errors.Is(err, errCloudOversize):
-		c.State, c.Note = CloudError, cloudOversize
-		return c
-	case err != nil:
-		c.State, c.Note = CloudError, "the report could not be read"
-		return c
-	}
-	var rep cloudReport
-	if err := json.Unmarshal(raw, &rep); err != nil {
-		c.State, c.Note = CloudError, "the report is not valid JSON"
+	rep, err := r.source.LatestPatrolReport(context.Background())
+	if err != nil {
+		switch {
+		case errors.Is(err, cloudledger.ErrNoPatrolDir):
+			c.State, c.Note, c.NoPatrol = CloudMissing, cloudNoPatrol, true
+		case errors.Is(err, cloudledger.ErrNoReport):
+			c.State, c.Note = CloudMissing, cloudNoReport
+		case errors.Is(err, cloudledger.ErrNotConfigured):
+			c.State, c.Note = CloudError, config.CloudNotConfigured
+		case errors.Is(err, cloudledger.ErrOversize):
+			c.State, c.Note = CloudError, cloudOversize
+		case errors.Is(err, cloudledger.ErrInvalidReport):
+			c.State, c.Note = CloudError, "the report is not valid JSON"
+		default:
+			// The reason rides the line: an unreadable Postgres source must
+			// say why, and its own errors keep the DSN out of their text.
+			c.State, c.Note = CloudError, "the report could not be read: "+err.Error()
+		}
 		return c
 	}
 	if rep.SchemaVersion != cloudSchema {
@@ -248,14 +236,14 @@ func (r *CloudReader) read(now time.Time) *Cloud {
 	c.addFindings(rep.Findings)
 	run, err := r.readHeartbeat()
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	case errors.Is(err, cloudledger.ErrNoHeartbeat):
 		c.State, c.Note = CloudError, "the patrol's heartbeat is missing"
 		return c
 	case errors.Is(err, errCloudHeartbeat):
 		c.State, c.Note = CloudError, cloudBadHeartbeat
 		return c
 	case err != nil:
-		c.State, c.Note = CloudError, "the heartbeat could not be read"
+		c.State, c.Note = CloudError, "the heartbeat could not be read: "+err.Error()
 		return c
 	}
 	c.LastRun = &run
@@ -271,7 +259,7 @@ func (r *CloudReader) read(now time.Time) *Cloud {
 // stripped and capped, the rows most severe first, and the list kept to
 // cloudMaxFindings with the rest counted in More. The counts and the total
 // cover the whole report, so a capped list still says how much there was.
-func (c *Cloud) addFindings(in []cloudFinding) {
+func (c *Cloud) addFindings(in []cloudledger.Finding) {
 	rows := make([]CloudFinding, 0, len(in))
 	var counts CloudCounts
 	for _, f := range in {
@@ -359,41 +347,15 @@ func readCloudFile(path string, max int64) ([]byte, error) {
 }
 
 // readRegularCloudFile reads path when it is a regular file no larger than max,
-// reporting a larger one as oversize. The stat is a Lstat, so a symlink named
-// like one of the pane's files is refused rather than followed: the writer's own
-// output is the only thing at these paths. A FIFO, socket or device is refused
-// before it is read, since a read-only open of a FIFO with no writer blocks
-// until one appears and nothing here waits on a writer (gt-u3eb1).
+// reporting a larger one as oversize, through the source's shared guard: a
+// symlink named like one of the pane's files is refused rather than followed,
+// and a FIFO, socket or device is refused before the read (gt-u3eb1).
 func readRegularCloudFile(path string, max int64, oversize error) ([]byte, error) {
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, errNotRegular
-	}
-	if fi.Size() > max {
-		return nil, oversize
-	}
-	return os.ReadFile(path)
+	return cloudledger.ReadRegularFile(path, max, oversize)
 }
 
 // readHeartbeat reads the patrol's heartbeat: the RFC3339 timestamp it writes
-// beside the report each time it finishes a run. It goes through the report's
-// guard, so a FIFO or an oversize file beside the report cannot stall the poll
-// either — a file that is not one timestamp is errCloudHeartbeat.
+// beside the report each time it finishes a run.
 func (r *CloudReader) readHeartbeat() (time.Time, error) {
-	b, err := readRegularCloudFile(filepath.Join(r.dir, cloudHeartbeatFile), cloudHeartbeatMaxBytes, errCloudHeartbeat)
-	if err != nil {
-		return time.Time{}, err
-	}
-	line := strings.TrimSpace(string(b))
-	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
-		line = line[:i]
-	}
-	t, err := time.Parse(time.RFC3339, line)
-	if err != nil {
-		return time.Time{}, errCloudHeartbeat
-	}
-	return t, nil
+	return r.source.Heartbeat(context.Background())
 }
