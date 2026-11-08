@@ -653,12 +653,15 @@ const jevScorecardTestWait = 30 * time.Second
 
 // TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh holds the
 // production dispatch: a due refresh runs on its own goroutine, so the trigger
-// returns while the refresh is still waiting to run. The refresh waits for the
-// trigger to return and reports whether it did. An inline dispatch cannot
-// return the trigger while the refresh waits on it, so the refresh gives up
-// after jevScorecardTestWait, reports that the trigger had not returned, and
-// the test fails in about 30 seconds rather than hanging. A dispatch that never
-// runs the refresh fails the test at the receive below in the same bound.
+// returns while the refresh is still waiting to run. It runs the default the
+// daemon fills into an unset dispatch, wrapped only to observe the refresh's
+// end, so a default that ran the refresh on the caller's goroutine fails here.
+// The refresh waits for the trigger to return and reports whether it did. An
+// inline dispatch cannot return the trigger while the refresh waits on it, so
+// the refresh gives up after jevScorecardTestWait, reports that the trigger had
+// not returned, and the test fails in about 30 seconds rather than hanging. A
+// dispatch that never runs the refresh fails the test at the receive below in
+// the same bound.
 func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 11, 2, 10, 0, 0, 0, jevScorecardTestZone)
@@ -676,12 +679,6 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{JevScorecard: jevScorecardEnabled(scorecard.AttentionBattery)}},
 		jevScorecardSeams: jevScorecardSeams{
 			loc: func() *time.Location { return jevScorecardTestZone },
-			dispatch: func(fn func()) {
-				go func() {
-					defer close(dispatched)
-					fn()
-				}()
-			},
 			refresh: func(context.Context, string) error {
 				select {
 				case <-triggerReturned:
@@ -692,6 +689,18 @@ func TestJevScorecardPatrolDefaultDispatchReturnsBeforeTheRefresh(t *testing.T) 
 				return nil
 			},
 		},
+	}
+	// The dispatch under test is the production default the daemon fills in
+	// from jevScorecardSeamsOf, not one the test writes itself. The wrapper
+	// delegates to that default and adds only the completion signal, so a
+	// default that ran the refresh on the caller's goroutine fails the
+	// trigger-return check below instead of being replaced by the test's own.
+	defaultDispatch := d.jevScorecardSeamsOf().dispatch
+	d.jevScorecardSeams.dispatch = func(fn func()) {
+		defaultDispatch(func() {
+			defer close(dispatched)
+			fn()
+		})
 	}
 
 	d.triggerJevScorecard()
