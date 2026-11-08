@@ -3170,7 +3170,8 @@ func TestEvaluateContainerSuiteCommand_PayloadProbes(t *testing.T) {
 
 // TestEvaluateContainerSuiteCommand_NestedShellPayloads pins the trap, source
 // and env -S readings: a literal whole-suite payload is refused wherever the
-// guard binds, a non-literal one under the opt-in, and crew and the other
+// guard binds, a non-literal command word or payload is refused on that same
+// gate (the container opt-in does not exempt it), and crew and the other
 // contexts stay unread as they were (gt-j2n8y1).
 func TestEvaluateContainerSuiteCommand_NestedShellPayloads(t *testing.T) {
 	t.Parallel()
@@ -3199,16 +3200,22 @@ func TestEvaluateContainerSuiteCommand_NestedShellPayloads(t *testing.T) {
 		// script, so this line is refused for every context at origin/main.
 		{"sourced process substitution in crew", "crew", "source <(echo make test)", true, "bare 'make test' runs"},
 		{"sourced process substitution outside the town", "other", "source <(echo make test)", true, "bare 'make test' runs"},
-		{"trap action without the opt-in", "polecat", `trap "$x" EXIT`, false, ""},
+		{"trap action without the opt-in", "polecat", `trap "$x" EXIT`, true, "trap action"},
 		{"trap action under the opt-in", "polecat", `export GT_TEST_DOCKER=1; trap "$x" EXIT`, true, "trap action"},
 		{"trap action under the opt-in in a refinery", "refinery", `export GT_TEST_DOCKER=1; trap "$x" EXIT`, true, "trap action"},
 		{"trap action under the opt-in in crew", "crew", `export GT_TEST_DOCKER=1; trap "$x" EXIT`, false, ""},
-		{"env -S payload without the opt-in", "polecat", `env -S "$x"`, false, ""},
+		{"env -S payload without the opt-in", "polecat", `env -S "$x"`, true, "env -S payload"},
 		{"env -S payload under the opt-in", "polecat", `export GT_TEST_DOCKER=1; env -S "$x"`, true, "env -S payload"},
+		{"sourced process substitution without the opt-in", "polecat", `source <(echo "$x")`, true, "source payload"},
 		{"sourced process substitution under the opt-in", "polecat", `export GT_TEST_DOCKER=1; source <(echo "$x")`, true, "source payload"},
 		{"sourced process substitution without the opt-in in crew", "crew", `source <(echo "$x")`, false, ""},
+		{"command word without the opt-in", "polecat", `x=make; $x test`, true, "command word $x"},
 		{"command word under the opt-in in a refinery", "refinery", `export GT_TEST_DOCKER=1; x=make; $x test`, true, "command word $x"},
+		{"command word with the inline opt-in prefix", "polecat", `GT_TEST_DOCKER=1 $x test`, true, "command word $x"},
+		{"-c payload without the opt-in", "polecat", `bash -c "$x"`, true, "shell payload"},
 		{"-c payload under the opt-in in a refinery", "refinery", `export GT_TEST_DOCKER=1; bash -c "$x"`, true, "shell payload"},
+		{"-c payload with the inline opt-in prefix", "polecat", `GT_TEST_DOCKER=1 bash -c "$x"`, true, "shell payload"},
+		{"eval payload without the opt-in", "polecat", `eval "$x"`, true, "shell payload"},
 		{"eval payload under the opt-in in a refinery", "refinery", `export GT_TEST_DOCKER=1; eval "$x"`, true, "shell payload"},
 		{"command word under the opt-in outside the town", "other", `export GT_TEST_DOCKER=1; x=make; $x test`, false, ""},
 		{"ordinary non-literal argument", "polecat", `go test $PKG -run TestOne`, false, ""},

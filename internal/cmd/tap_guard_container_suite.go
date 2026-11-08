@@ -1143,16 +1143,22 @@ func evaluateContainerSuiteScript(proc guardProcess, script shellparse.Script, c
 		if slotRunWrapped(words) {
 			continue
 		}
-		if dockerOn && isPolecatOrRefineryContext(proc) {
+		// A command word or nested-shell payload the shell does not pass
+		// through as text cannot be read for a test run, so it is refused
+		// wherever the guard binds. The container opt-in does not exempt it: a
+		// literal `make test` is refused without the opt-in too, and a
+		// non-literal word is the same unseen command (gt-j2n8y1).
+		if isPolecatOrRefineryContext(proc) {
 			if r := containerSuiteNonLiteralRefusal(seg); r != "" {
 				return r, nil
 			}
 		}
 		payloads := containerSuiteGuardPayloads(script, i)
 		// A trap action, a sourced process substitution and an env -S string
-		// are nested shells this bead adds. They are read only where the guard
-		// binds, so crew and the other agent contexts keep the reading they
-		// had: the hook never runs the rule for them (gt-j2n8y1).
+		// are nested shells this bead adds. They are read on the same gate as
+		// the non-literal refusal, so crew and the other agent contexts keep
+		// the reading they had: the hook never runs the rule for them
+		// (gt-j2n8y1).
 		if isPolecatOrRefineryContext(proc) {
 			payloads = append(payloads, containerSuiteGuardNestedShellPayloads(seg)...)
 		}
@@ -1454,8 +1460,10 @@ func containerSuiteChainEnd(tokens []string, start int) int {
 // whose -c or eval payload, is a word the shell does not pass through as the
 // text the guard reads (shellparse's Literal is false). The command the segment
 // runs is then one the guard cannot name, so it cannot be read for a test run.
-// The reason names the word as written. The caller applies the container
-// opt-in and the polecat or refinery gate.
+// The reason names the word as written. The caller applies the polecat or
+// refinery gate alone: the container opt-in does not exempt a non-literal
+// word, because the word names a command the guard cannot read whatever the
+// opt-in (gt-j2n8y1).
 //
 // The command word is the first word after the shell keywords trimShellKeywords
 // steps over, and the -c payload is the word shellCPayloadIndex picks, the same

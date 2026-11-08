@@ -124,10 +124,11 @@ container_suite	polecat	"export GT_TEST_DOCKER=1; make x && builtin cd internal/
 container_suite	polecat	"export GT_TEST_DOCKER=1; make x && command cd internal/beads; go test"	refuse	names a directory the guard cannot place	gt-zz1t7g
 container_suite	polecat	"export GT_TEST_DOCKER=1; make x | cd internal/beads; go test"	refuse	names a directory the guard cannot place	gt-zz1t7g
 # --- container_suite: a non-literal command word or shell payload is refused
-# under the opt-in for a polecat, and allowed for crew (gt-zz1t7g) ---
+# for a polecat whether or not the opt-in is set, and allowed for crew
+# (gt-zz1t7g; the unopted polecat row moved with gt-j2n8y1) ---
 container_suite	polecat	"export GT_TEST_DOCKER=1; x=make; $x test"	refuse	command word $x	gt-zz1t7g
 container_suite	crew	"export GT_TEST_DOCKER=1; x=make; $x test"	allow		gt-zz1t7g
-container_suite	polecat	"x=make; $x test"	allow		gt-zz1t7g
+container_suite	polecat	"x=make; $x test"	refuse	command word $x	gt-zz1t7g
 container_suite	polecat	"export GT_TEST_DOCKER=1; bash -c \"$x\""	refuse	shell payload	gt-zz1t7g
 container_suite	crew	"export GT_TEST_DOCKER=1; bash -c \"$x\""	allow		gt-zz1t7g
 container_suite	polecat	"export GT_TEST_DOCKER=1; eval \"$x\""	refuse	shell payload	gt-zz1t7g
@@ -139,52 +140,55 @@ container_suite	polecat	"export GT_TEST_DOCKER=1; bash -c 'echo hi'"	allow		gt-z
 # segment judge cannot see: a script operand naming stdin, a -c payload behind
 # the option terminator, env -S, the escapes printf writes, and the last stdin
 # redirection winning (gt-j2n8y1) ---
-container_suite	polecat	"bash /dev/stdin <<< 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"GT_TEST_DOCKER=1 bash /dev/stdin <<< 'go test ./internal/style/...'"	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"bash -c -- 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"GT_TEST_DOCKER=1 bash -c -- 'go test ./internal/style/...'"	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"bash -o pipefail -c -- 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"GT_TEST_DOCKER=1 bash -o pipefail -c -- 'go test ./internal/style/...'"	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"env -S 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"GT_TEST_DOCKER=1 env -S 'go test ./internal/style/...'"	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"env -S 'make\\_test'"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"env -S 'make\\qtest'"	refuse	env -S payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"printf 'make\\ttest' | bash"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"printf 'make\\x20test' | bash"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"printf 'make\\040test' | bash"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"printf 'make\\xgtest' | bash"	refuse	printf payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"GT_TEST_DOCKER=1 printf 'go test ./internal/style/...' | bash"	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"bash <<XEOF <<< 'make test'\nhi\nXEOF"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"bash <<< 'make test' <<XEOF\nhi\nXEOF"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"GT_TEST_DOCKER=1 bash <<XEOF <<< 'go test ./internal/style/...'\nhi\nXEOF"	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	refinery	"bash /dev/stdin <<< 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
+container_suite	polecat	"bash /dev/stdin <<< 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"GT_TEST_DOCKER=1 bash /dev/stdin <<< 'go test ./internal/style/...'"	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"bash -c -- 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"GT_TEST_DOCKER=1 bash -c -- 'go test ./internal/style/...'"	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"bash -o pipefail -c -- 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"GT_TEST_DOCKER=1 bash -o pipefail -c -- 'go test ./internal/style/...'"	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"env -S 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"GT_TEST_DOCKER=1 env -S 'go test ./internal/style/...'"	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"env -S 'make\\_test'"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"env -S 'make\\qtest'"	refuse	env -S payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"printf 'make\\ttest' | bash"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"printf 'make\\x20test' | bash"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"printf 'make\\040test' | bash"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"printf 'make\\xgtest' | bash"	refuse	printf payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"GT_TEST_DOCKER=1 printf 'go test ./internal/style/...' | bash"	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"bash <<XEOF <<< 'make test'\nhi\nXEOF"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"bash <<< 'make test' <<XEOF\nhi\nXEOF"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"GT_TEST_DOCKER=1 bash <<XEOF <<< 'go test ./internal/style/...'\nhi\nXEOF"	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	refinery	"bash /dev/stdin <<< 'make test'"	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
 # --- container_suite: a trap action, a sourced process substitution and an
 # env -S string are nested shells the guard reads where it binds: a literal
-# whole-suite payload is refused, a non-literal one under the opt-in, and crew
-# and other contexts stay unread (gt-j2n8y1) ---
-container_suite	polecat	"trap 'make test' EXIT"	refuse	trap payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	refinery	"trap 'make test' EXIT"	refuse	trap payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	crew	"trap 'make test' EXIT"	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	other	"trap 'make test' EXIT"	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	"source <(echo make test)"	refuse	source payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	refinery	"source <(echo make test)"	refuse	source payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	`source <(echo "$x")`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	crew	`source <(echo "$x")`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	other	`source <(echo "$x")`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	`export GT_TEST_DOCKER=1; trap "$x" EXIT`	refuse	trap action	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	refinery	`export GT_TEST_DOCKER=1; trap "$x" EXIT`	refuse	trap action	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	crew	`export GT_TEST_DOCKER=1; trap "$x" EXIT`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	`trap "$x" EXIT`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	`export GT_TEST_DOCKER=1; env -S "$x"`	refuse	env -S payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	`env -S "$x"`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	`export GT_TEST_DOCKER=1; source <(echo "$x")`	refuse	source payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	refinery	`export GT_TEST_DOCKER=1; x=make; $x test`	refuse	command word $x	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	refinery	`export GT_TEST_DOCKER=1; bash -c "$x"`	refuse	shell payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	refinery	`export GT_TEST_DOCKER=1; eval "$x"`	refuse	shell payload	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	other	`export GT_TEST_DOCKER=1; x=make; $x test`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	other	`export GT_TEST_DOCKER=1; bash -c "$x"`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	polecat	`go test $PKG -run TestOne`	allow		gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-container_suite	refinery	`make test`	refuse	bare 'make test' runs	gt-j2n8y1	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
+# whole-suite payload is refused, a non-literal one on the same gate (the
+# container opt-in does not exempt it), and crew and other contexts stay
+# unread (gt-j2n8y1) ---
+container_suite	polecat	"trap 'make test' EXIT"	refuse	trap payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	refinery	"trap 'make test' EXIT"	refuse	trap payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	crew	"trap 'make test' EXIT"	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	other	"trap 'make test' EXIT"	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	"source <(echo make test)"	refuse	source payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	refinery	"source <(echo make test)"	refuse	source payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`source <(echo "$x")`	refuse	source payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	crew	`source <(echo "$x")`	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	other	`source <(echo "$x")`	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`export GT_TEST_DOCKER=1; trap "$x" EXIT`	refuse	trap action	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	refinery	`export GT_TEST_DOCKER=1; trap "$x" EXIT`	refuse	trap action	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	crew	`export GT_TEST_DOCKER=1; trap "$x" EXIT`	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`trap "$x" EXIT`	refuse	trap action	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`export GT_TEST_DOCKER=1; env -S "$x"`	refuse	env -S payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`env -S "$x"`	refuse	env -S payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`GT_TEST_DOCKER=1 $x test`	refuse	command word $x	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`GT_TEST_DOCKER=1 bash -c "$x"`	refuse	shell payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`export GT_TEST_DOCKER=1; source <(echo "$x")`	refuse	source payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	refinery	`export GT_TEST_DOCKER=1; x=make; $x test`	refuse	command word $x	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	refinery	`export GT_TEST_DOCKER=1; bash -c "$x"`	refuse	shell payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	refinery	`export GT_TEST_DOCKER=1; eval "$x"`	refuse	shell payload	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	other	`export GT_TEST_DOCKER=1; x=make; $x test`	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	other	`export GT_TEST_DOCKER=1; bash -c "$x"`	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	polecat	`go test $PKG -run TestOne`	allow		gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+container_suite	refinery	`make test`	refuse	bare 'make test' runs	gt-j2n8y1	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
 # --- test_scope: refusals ---
 test_scope	polecat	"go test ./..."	refuse	polecat 'go test' of the whole repo	seed
 test_scope	polecat	"go test -count=1 ./..."	refuse	polecat 'go test' of the whole repo	seed
@@ -358,6 +362,6 @@ dangerous	polecat	"echo a # n\r\nls"	allow		gt-q0jecy
 dangerous	polecat	"bash -c 'git reset --hard' #\\\r\nls"	refuse	comment ending in a backslash before a CR LF line end	gt-q0jecy
 dangerous	polecat	"echo a # n \\\r"	allow		gt-q0jecy
 # --- freeze-rule stamps (gt-x1bvnf): one real case per guard, stamped with its current source hash ---
-container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/git/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-x1bvnf	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-dangerous	polecat	"git reset --hard origin/main"	refuse	Reset onto a remote-tracking ref drops merged work	gt-x1bvnf	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
-test_scope	polecat	"go test -run TestGuard ./internal/cmd"	allow		gt-x1bvnf	a8426ed35769d6b41df47c5697572502ae625f0508f4e07eac92ef5f40a4b4f9
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/git/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+dangerous	polecat	"git reset --hard origin/main"	refuse	Reset onto a remote-tracking ref drops merged work	gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+test_scope	polecat	"go test -run TestGuard ./internal/cmd"	allow		gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
