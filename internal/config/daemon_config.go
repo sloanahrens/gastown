@@ -1907,8 +1907,10 @@ type OverseerReportConfig struct {
 }
 
 // BirdReportsConfig configures the bird_reports patrol (gt-cbsat): every hour
-// the daemon checks each reporter's <town>/.runtime/<name>/reports/daily.json
-// and, from StartHour on, raises one attention item, bird-report-stale:<name>,
+// the daemon checks the daily.json in the directory birdreports.ReportDir
+// resolves for each reporter (the published <town>/.runtime/reports/<name>
+// when it holds a report, else the old <town>/.runtime/<name>/reports) and,
+// from StartHour on, raises one attention item, bird-report-stale:<name>,
 // while that report is missing, unreadable or older than MaxAge.
 //
 // Off unless enabled: a town that keeps no birds must not get ten items for

@@ -2,7 +2,9 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1094,4 +1096,152 @@ func TestBirdTopicPagesReadsTitlesOfKeptPagesOnly(t *testing.T) {
 			t.Errorf("listed page %s was not read for its title", p.Name)
 		}
 	}
+}
+
+// writePublishedBird writes <root>/reports/<name> and the files in w, the
+// location gt report publish writes. The report names are spelled out for the
+// same reason writeBird's are.
+func writePublishedBird(t *testing.T, root, name string, w birdWrites) {
+	t.Helper()
+
+	dir := filepath.Join(root, "reports", name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir for published %s: %v", name, err)
+	}
+	for file, content := range map[string]string{
+		"daily.json":      w.json,
+		"daily.html":      w.page,
+		"daily.prev.html": w.prev,
+	} {
+		if content == "" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0o644); err != nil {
+			t.Fatalf("write published %s of %s: %v", file, name, err)
+		}
+	}
+}
+
+// TestBirdsReadsTheVolumeLocation drives the report resolver through the Birds
+// panel and the page route: a report published under <runtime>/reports wins
+// when both locations hold one, the old <runtime>/<bird>/reports is read when
+// it is the only one, and a bird in neither is missing.
+func TestBirdsReadsTheVolumeLocation(t *testing.T) {
+	t.Parallel()
+	now := birdReportsNow
+	sidecar := func(name string, at time.Time, summary string) string {
+		return birdSidecarJSON(t, birdSidecarFor(name, at, "title", summary))
+	}
+
+	t.Run("the published report wins when both locations hold one", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeBird(t, root, "dunlin", birdWrites{
+			json: sidecar("dunlin", now.Add(-30*time.Hour), "old summary"),
+			page: "<html>old page</html>",
+		})
+		writePublishedBird(t, root, "dunlin", birdWrites{
+			json: sidecar("dunlin", now.Add(-time.Hour), "published summary"),
+			page: "<html>published page</html>",
+		})
+
+		rows := NewBirdReportsReader(root).Read(now)
+		if len(rows) != 1 {
+			t.Fatalf("rows = %+v, want the one bird", rows)
+		}
+		if rows[0].State != BirdReportFresh || rows[0].Summary != "published summary" || !rows[0].HasPage {
+			t.Errorf("row = %+v, want the published fresh report and its page", rows[0])
+		}
+		page, err := NewBirdReportsReader(root).ReadPage("dunlin", "daily.html")
+		if err != nil {
+			t.Fatalf("ReadPage = %v", err)
+		}
+		if got := string(page); got != "<html>published page</html>" {
+			t.Errorf("ReadPage served %q, want the published page", got)
+		}
+	})
+
+	t.Run("a published report with no old directory is a row", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		// No top-level bird directory at all: the published directory is the
+		// only place this bird exists, so the panel must list it from there.
+		writePublishedBird(t, root, "dunlin", birdWrites{
+			json: sidecar("dunlin", now.Add(-time.Hour), "published summary"),
+			page: "<html>published page</html>",
+		})
+
+		rows := NewBirdReportsReader(root).Read(now)
+		if len(rows) != 1 {
+			t.Fatalf("rows = %+v, want the published bird", rows)
+		}
+		if rows[0].Bird != "dunlin" || rows[0].State != BirdReportFresh || rows[0].Summary != "published summary" {
+			t.Errorf("row = %+v, want the published fresh report", rows[0])
+		}
+		page, err := NewBirdReportsReader(root).ReadPage("dunlin", "daily.html")
+		if err != nil {
+			t.Fatalf("ReadPage = %v", err)
+		}
+		if got := string(page); got != "<html>published page</html>" {
+			t.Errorf("ReadPage served %q, want the published page", got)
+		}
+	})
+
+	t.Run("the old report is read when it is the only one", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		writeBird(t, root, "dunlin", birdWrites{
+			json: sidecar("dunlin", now.Add(-time.Hour), "old summary"),
+			page: "<html>old page</html>",
+		})
+
+		rows := NewBirdReportsReader(root).Read(now)
+		if len(rows) != 1 {
+			t.Fatalf("rows = %+v, want the one bird", rows)
+		}
+		if rows[0].State != BirdReportFresh || rows[0].Summary != "old summary" || !rows[0].HasPage {
+			t.Errorf("row = %+v, want the old fresh report and its page", rows[0])
+		}
+		page, err := NewBirdReportsReader(root).ReadPage("dunlin", "daily.html")
+		if err != nil {
+			t.Fatalf("ReadPage = %v", err)
+		}
+		if got := string(page); got != "<html>old page</html>" {
+			t.Errorf("ReadPage served %q, want the old page", got)
+		}
+	})
+
+	t.Run("a bird in neither location is missing", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		if rows := NewBirdReportsReader(root).Read(now); len(rows) != 0 {
+			t.Errorf("rows = %+v, want none for a bird that never reported", rows)
+		}
+		if _, err := NewBirdReportsReader(root).ReadPage("dunlin", "daily.html"); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("ReadPage = %v, want fs.ErrNotExist", err)
+		}
+	})
+
+	t.Run("a published reports directory that cannot be listed is an error row", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		// A file where the published reports directory belongs: the reader
+		// cannot list it, and must say so rather than draw the town as one with
+		// no published reports.
+		if err := os.WriteFile(filepath.Join(root, "reports"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		writeBird(t, root, "dunlin", birdWrites{
+			json: sidecar("dunlin", now.Add(-time.Hour), "old summary"),
+		})
+
+		rows := NewBirdReportsReader(root).Read(now)
+		byName := birdByName(rows)
+		if got := byName[""]; got.State != BirdReportError || got.Note != birdPublishedUnreadable {
+			t.Errorf("error row = %+v, want note %q", got, birdPublishedUnreadable)
+		}
+		if got, ok := byName["dunlin"]; !ok || got.Summary != "old summary" {
+			t.Errorf("rows = %+v, want the old report still listed beside the error", rows)
+		}
+	})
 }

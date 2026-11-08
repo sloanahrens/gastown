@@ -2,9 +2,14 @@ package birdreports
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -235,11 +240,15 @@ func TestReadNamesAPathItCannotRead(t *testing.T) {
 		t.Fatalf("writing the runtime path: %v", err)
 	}
 
+	// The runtime path is a file, so the published directory below it cannot
+	// hold a report and ReportDir falls back to the old location. Read walks
+	// that location's parent first and names it: what cannot be examined is the
+	// reporter's directory, not an absent report.
 	got := Read(runtimeDir, "dunlin", testNow, MaxAge)
 	if got.Status != Unreadable {
 		t.Fatalf("status = %q (%s), want unreadable: a runtime path that is a file says nothing about the report", got.Status, got.Note)
 	}
-	if want := "published reports directory could not be read"; got.Note != want {
+	if want := "reporter directory could not be read"; got.Note != want {
 		t.Errorf("note = %q, want %q", got.Note, want)
 	}
 }
@@ -489,4 +498,152 @@ func TestDefaultReportersNamesTheTenReporters(t *testing.T) {
 	if DefaultReporters()[0] == "changed" {
 		t.Error("DefaultReporters() returns a shared slice")
 	}
+}
+
+// publishedNames resolves the names this package exports when they appear in
+// another package as birdreports.<Name>, so the guard below reads a call that
+// names them the same as one that writes the string out.
+var publishedNames = map[string]string{
+	"SidecarName":      SidecarName,
+	"PageName":         PageName,
+	"PrevPageName":     PrevPageName,
+	"PrevSidecarName":  PrevSidecarName,
+	"PublishedDirName": PublishedDirName,
+}
+
+// TestReadersResolveTheReportDirectory is the guard: the reports directory is
+// named in one place, ReportDir, so a reader cannot drift back to building the
+// location itself. It parses every non-test file outside this package and fails
+// when one function both joins the reports directory name and joins a daily
+// report file name, which is a reader laying the path out by hand.
+func TestReadersResolveTheReportDirectory(t *testing.T) {
+	root := filepath.Join("..", "..")
+	ownPackage := filepath.Join("internal", "birdreports") + string(filepath.Separator)
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if path != root && (strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "scratch") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(rel, ownPackage) {
+			return nil
+		}
+		checkReportPathIsResolved(t, rel, path)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the repository: %v", err)
+	}
+}
+
+// checkReportPathIsResolved flags a function in one file that both joins the
+// reports directory name and joins a daily file name.
+func checkReportPathIsResolved(t *testing.T, rel, path string) {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Errorf("%s: %v", rel, err)
+		return
+	}
+	consts := stringConsts(file)
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			return true
+		}
+		var joinsReports, joinsDaily bool
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || !isJoinCall(call.Fun) {
+				return true
+			}
+			for _, arg := range call.Args {
+				switch literalString(arg, consts) {
+				case PublishedDirName:
+					joinsReports = true
+				case SidecarName, PageName, PrevPageName, PrevSidecarName:
+					joinsDaily = true
+				}
+			}
+			return true
+		})
+		if joinsReports && joinsDaily {
+			t.Errorf("%s: %s joins the reports directory with a daily file; read the directory through birdreports.ReportDir", rel, fn.Name.Name)
+		}
+		return true
+	})
+}
+
+// isJoinCall reports whether fun is the path package's Join or filepath's.
+func isJoinCall(fun ast.Expr) bool {
+	sel, ok := fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Join" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && (pkg.Name == "path" || pkg.Name == "filepath")
+}
+
+// literalString resolves an expression to the string it names: a literal, a
+// constant declared in the same file, or one of this package's exported names.
+// Anything else is the empty string, which matches no report name.
+func literalString(expr ast.Expr, consts map[string]string) string {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.STRING {
+			return ""
+		}
+		s, err := strconv.Unquote(e.Value)
+		if err != nil {
+			return ""
+		}
+		return s
+	case *ast.Ident:
+		return consts[e.Name]
+	case *ast.SelectorExpr:
+		if pkg, ok := e.X.(*ast.Ident); ok && pkg.Name == "birdreports" {
+			return publishedNames[e.Sel.Name]
+		}
+	}
+	return ""
+}
+
+// stringConsts is the file's single-name string constants, so a join written
+// with a named file (birdReportsFile) reads the same as the literal.
+func stringConsts(file *ast.File) map[string]string {
+	out := map[string]string{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || len(vs.Names) != 1 || len(vs.Values) != 1 {
+				continue
+			}
+			lit, ok := vs.Values[0].(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				continue
+			}
+			s, err := strconv.Unquote(lit.Value)
+			if err == nil {
+				out[vs.Names[0].Name] = s
+			}
+		}
+	}
+	return out
 }

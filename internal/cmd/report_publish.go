@@ -25,9 +25,11 @@ const (
 	reportPublishPageMax = 1 << 20
 
 	// reportPublishPageName and reportPublishPrevPageName are the page this
-	// command writes and the one it keeps in its place.
-	reportPublishPageName     = "daily.html"
-	reportPublishPrevPageName = "daily.prev.html"
+	// command writes and the one it keeps in its place. reportPublishPrevSidecarName
+	// is the sidecar kept beside the previous page.
+	reportPublishPageName        = birdreports.PageName
+	reportPublishPrevPageName    = birdreports.PrevPageName
+	reportPublishPrevSidecarName = birdreports.PrevSidecarName
 
 	// reportPublishInputMax bounds the document read from standard input. It
 	// leaves room to decode a page over the cap so the refusal can name the
@@ -54,11 +56,12 @@ Reads one JSON document from standard input:
   {"bird":"<name>","page":"<the daily.html text>","sidecar":{<the daily.json object>}}
 
 and writes <town>/.runtime/reports/<bird>/daily.html and daily.json there, each
-as a temp file renamed into place, keeping the page it replaces as
-daily.prev.html. The document is refused, with the field named and nothing
-written, when it is malformed, the page is over 1 MiB, the sidecar is over 16
-KiB or fails the reader's own validation (internal/birdreports), the document's
-bird is not --bird, or the name is a daemon subsystem directory under .runtime.
+as a temp file renamed into place, keeping the pair they replace as
+daily.prev.html and daily.prev.json. A rename that fails puts the previous pair
+back. The document is refused, with the field named and nothing written, when it
+is malformed, the page is over 1 MiB, the sidecar is over 16 KiB or fails the
+reader's own validation (internal/birdreports), the document's bird is not
+--bird, or the name is a daemon subsystem directory under .runtime.
 
 The command prints the two paths and their sizes, and never prints the page.
 
@@ -227,11 +230,13 @@ func osReportPublishFS() reportPublishFS {
 }
 
 // writeReportPublish writes the page and sidecar into the bird's published
-// directory, keeping the page it replaces as daily.prev.html. Every file is
-// staged as a temp file and renamed only after all of them are written, so a
-// write that fails leaves the files the directory held untouched. The renamed
-// page is never a symlink the write follows: the destination is refused when it
-// is not a regular file, and a rename replaces the name itself.
+// directory, rotating the pair it replaces to daily.prev.html and
+// daily.prev.json. Every file is staged as a temp file and renamed only after
+// all of them are written. If a rename fails, every file already renamed is put
+// back as it was and the temp files are removed, so a failed publish leaves the
+// old daily.html and daily.json intact rather than a torn pair. The renamed
+// page is never a symlink the write follows: a destination that is not a
+// regular file is refused, and a rename replaces the name itself.
 func writeReportPublish(fsys reportPublishFS, runtimeDir, bird string, page, sidecar []byte) (reportPublishReceipt, error) {
 	dir := birdreports.PublishedReportDir(runtimeDir, bird)
 	if err := ensurePublishedDir(fsys, runtimeDir, dir); err != nil {
@@ -241,45 +246,60 @@ func writeReportPublish(fsys reportPublishFS, runtimeDir, bird string, page, sid
 	pagePath := filepath.Join(dir, reportPublishPageName)
 	sidecarPath := filepath.Join(dir, birdreports.SidecarName)
 	prevPath := filepath.Join(dir, reportPublishPrevPageName)
-	for _, path := range []string{pagePath, sidecarPath, prevPath} {
-		if err := refuseNonRegular(fsys, path); err != nil {
-			return reportPublishReceipt{}, err
-		}
+	prevSidecarPath := filepath.Join(dir, reportPublishPrevSidecarName)
+
+	// What each destination holds now, so a failed rename can put it back.
+	pagePrior, hadPage, err := priorFile(fsys, pagePath)
+	if err != nil {
+		return reportPublishReceipt{}, err
 	}
-	prev, havePrev, err := previousPage(fsys, pagePath)
+	sidecarPrior, hadSidecar, err := priorFile(fsys, sidecarPath)
+	if err != nil {
+		return reportPublishReceipt{}, err
+	}
+	prevPrior, hadPrev, err := priorFile(fsys, prevPath)
+	if err != nil {
+		return reportPublishReceipt{}, err
+	}
+	prevSidecarPrior, hadPrevSidecar, err := priorFile(fsys, prevSidecarPath)
 	if err != nil {
 		return reportPublishReceipt{}, err
 	}
 
-	// The previous page is renamed first, so it is in its place before the
-	// page it came from is replaced; the sidecar lands last, after both pages.
-	files := make([]reportFile, 0, 3)
-	if havePrev {
-		files = append(files, reportFile{path: prevPath, data: prev})
+	// The previous pair is renamed first, so it is in place before the files it
+	// came from are replaced; the new page and sidecar land last.
+	files := make([]reportFile, 0, 4)
+	if hadPage {
+		files = append(files, reportFile{path: prevPath, data: pagePrior, prior: prevPrior, hadPrior: hadPrev})
+	}
+	if hadSidecar {
+		files = append(files, reportFile{path: prevSidecarPath, data: sidecarPrior, prior: prevSidecarPrior, hadPrior: hadPrevSidecar})
 	}
 	files = append(files,
-		reportFile{path: pagePath, data: page},
-		reportFile{path: sidecarPath, data: sidecar})
+		reportFile{path: pagePath, data: page, prior: pagePrior, hadPrior: hadPage},
+		reportFile{path: sidecarPath, data: sidecar, prior: sidecarPrior, hadPrior: hadSidecar})
 
 	staged := make([]stagedReportFile, 0, len(files))
-	discard := func() {
-		for _, s := range staged {
-			_ = os.Remove(s.tmp)
-		}
-	}
 	for _, f := range files {
-		s, err := stageReportFile(fsys, f.path, f.data)
+		s, err := stageReportFile(fsys, f)
 		if err != nil {
-			discard()
+			discardStaged(staged)
 			return reportPublishReceipt{}, err
 		}
 		staged = append(staged, s)
 	}
-	for _, s := range staged {
+
+	renamed := make([]stagedReportFile, 0, len(staged))
+	for i, s := range staged {
 		if err := fsys.rename(s.tmp, s.path); err != nil {
-			discard()
+			restoreErr := restoreStagedReport(fsys, renamed)
+			discardStaged(staged[i:])
+			if restoreErr != nil {
+				return reportPublishReceipt{}, fmt.Errorf("renaming %s into place: %w (restoring the previous report also failed: %v)", s.path, err, restoreErr)
+			}
 			return reportPublishReceipt{}, fmt.Errorf("renaming %s into place: %w", s.path, err)
 		}
+		renamed = append(renamed, s)
 	}
 	return reportPublishReceipt{
 		pagePath:     pagePath,
@@ -289,46 +309,88 @@ func writeReportPublish(fsys reportPublishFS, runtimeDir, bird string, page, sid
 	}, nil
 }
 
-// reportFile is one file of a report and the bytes it is written from.
+// reportFile is one file of a report: the bytes this publish writes to it, and
+// the bytes it replaces so a failure can put them back.
 type reportFile struct {
-	path string
-	data []byte
+	path     string
+	data     []byte
+	prior    []byte
+	hadPrior bool
 }
 
-// stagedReportFile is a temp file waiting for its rename.
+// stagedReportFile is a temp file waiting for its rename, with what the
+// destination held before it.
 type stagedReportFile struct {
-	tmp  string
-	path string
+	tmp      string
+	path     string
+	prior    []byte
+	hadPrior bool
 }
 
-// stageReportFile writes data to a temp file beside path, at the mode the
-// report's reader expects. It is renamed into place only once every file of
-// the report is written.
-func stageReportFile(fsys reportPublishFS, path string, data []byte) (stagedReportFile, error) {
-	f, err := fsys.createTemp(filepath.Dir(path), filepath.Base(path)+".tmp.*")
+// stageReportFile writes f.data to a temp file beside f.path, at the mode the
+// report's reader expects. It is renamed into place only once every file of the
+// report is written.
+func stageReportFile(fsys reportPublishFS, f reportFile) (stagedReportFile, error) {
+	file, err := fsys.createTemp(filepath.Dir(f.path), filepath.Base(f.path)+".tmp.*")
 	if err != nil {
-		return stagedReportFile{}, fmt.Errorf("writing %s: %w", path, err)
+		return stagedReportFile{}, fmt.Errorf("writing %s: %w", f.path, err)
 	}
-	tmp := f.Name()
+	tmp := file.Name()
 	fail := func(err error) (stagedReportFile, error) {
-		_ = f.Close()
+		_ = file.Close()
 		_ = os.Remove(tmp)
-		return stagedReportFile{}, fmt.Errorf("writing %s: %w", path, err)
+		return stagedReportFile{}, fmt.Errorf("writing %s: %w", f.path, err)
 	}
-	if _, err := f.Write(data); err != nil {
+	if _, err := file.Write(f.data); err != nil {
 		return fail(err)
 	}
-	if err := f.Chmod(0o644); err != nil {
+	if err := file.Chmod(0o644); err != nil {
 		return fail(err)
 	}
-	if err := f.Sync(); err != nil {
+	if err := file.Sync(); err != nil {
 		return fail(err)
 	}
-	if err := f.Close(); err != nil {
+	if err := file.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return stagedReportFile{}, fmt.Errorf("writing %s: %w", path, err)
+		return stagedReportFile{}, fmt.Errorf("writing %s: %w", f.path, err)
 	}
-	return stagedReportFile{tmp: tmp, path: path}, nil
+	return stagedReportFile{tmp: tmp, path: f.path, prior: f.prior, hadPrior: f.hadPrior}, nil
+}
+
+// discardStaged removes the temp files that were never renamed.
+func discardStaged(staged []stagedReportFile) {
+	for _, s := range staged {
+		_ = os.Remove(s.tmp)
+	}
+}
+
+// restoreStagedReport puts the files a failed publish already renamed back as
+// they were, newest first. A destination that did not exist before is removed;
+// one that did is written to a temp file and renamed back, so a reader never
+// sees a half-written file. Every destination is tried; the failures are
+// returned together, so a restore that could not finish is not reported as a
+// clean rollback.
+func restoreStagedReport(fsys reportPublishFS, renamed []stagedReportFile) error {
+	var errs []error
+	for i := len(renamed) - 1; i >= 0; i-- {
+		s := renamed[i]
+		if !s.hadPrior {
+			if err := os.Remove(s.path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", s.path, err))
+			}
+			continue
+		}
+		restored, err := stageReportFile(fsys, reportFile{path: s.path, data: s.prior})
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := fsys.rename(restored.tmp, s.path); err != nil {
+			_ = os.Remove(restored.tmp)
+			errs = append(errs, fmt.Errorf("restoring %s: %w", s.path, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ensurePublishedDir makes the directory the bird's report is published in,
@@ -382,31 +444,23 @@ func ensureRealDir(fsys reportPublishFS, path string) error {
 	return nil
 }
 
-// refuseNonRegular refuses a destination that exists as something other than a
-// regular file, so a link or a directory where a report belongs is reported
+// priorFile returns the bytes path holds now, so a failed publish can put them
+// back, and whether it held a regular file. A destination that exists as
+// anything else — a link or a directory where a report belongs — is refused
 // rather than replaced.
-func refuseNonRegular(fsys reportPublishFS, path string) error {
+func priorFile(fsys reportPublishFS, path string) ([]byte, bool, error) {
 	fi, err := fsys.lstat(path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil
-	case err != nil:
-		return err
-	case fi.Mode().IsRegular():
-		return nil
-	}
-	return fmt.Errorf("%s exists and is not a regular file", path)
-}
-
-// previousPage returns the page the directory holds now, which the publish
-// keeps as daily.prev.html, and whether there was one.
-func previousPage(fsys reportPublishFS, path string) ([]byte, bool, error) {
-	data, err := fsys.readFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		return nil, false, nil
 	case err != nil:
-		return nil, false, fmt.Errorf("reading the previous page: %w", err)
+		return nil, false, err
+	case !fi.Mode().IsRegular():
+		return nil, false, fmt.Errorf("%s exists and is not a regular file", path)
+	}
+	data, err := fsys.readFile(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
 	}
 	return data, true, nil
 }

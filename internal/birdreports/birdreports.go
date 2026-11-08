@@ -2,15 +2,17 @@
 // directory and says which are due.
 //
 // A bird publishes <runtimeDir>/reports/<bird>/daily.json with `gt report
-// publish`, the daemon-owned location for its report. Read falls back to
-// <runtimeDir>/<bird>/reports/daily.json, where the birds wrote before the
-// command existed, so a town is readable while its birds switch. `gt birds due`
-// reads them here. The daemon's bird_reports patrol
-// (internal/daemon/bird_reports.go) and the dashboard's Birds panel
-// (internal/dashboard/birdreports.go) read the old path with their own readers;
-// the patrol's reader can judge one sidecar differently — it reads no `bird`
-// field, applies no size cap, and calls any future written_at late, where Read
-// forgives one within FutureSlack.
+// publish`, the daemon-owned location for its report. ReportDir is the one
+// resolver of where a reporter's report lives: the published directory when it
+// holds a regular daily.json or daily.html, else the old
+// <runtimeDir>/<bird>/reports/daily.json the birds wrote before the command
+// existed, so a town is readable while its birds switch. `gt birds due` reads
+// them here; the daemon's bird_reports patrol
+// (internal/daemon/bird_reports.go) and the dashboard's Birds panel and page
+// route (internal/dashboard/birdreports.go) call ReportDir rather than build
+// the path themselves. The patrol's reader can judge one sidecar differently —
+// it reads no `bird` field, applies no size cap, and calls any future
+// written_at late, where Read forgives one within FutureSlack.
 package birdreports
 
 import (
@@ -35,6 +37,13 @@ const (
 	// runtime directory, that gt report publish writes:
 	// <runtimeDir>/reports/<bird>/daily.html and daily.json.
 	PublishedDirName = "reports"
+
+	// PageName and PrevPageName are the report page and the page before it,
+	// beside SidecarName in the resolved report directory. PrevSidecarName is
+	// the sidecar before the current one, kept beside them.
+	PageName        = "daily.html"
+	PrevPageName    = "daily.prev.html"
+	PrevSidecarName = "daily.prev.json"
 
 	// SidecarMaxBytes refuses a larger daily.json before it is read: a sidecar
 	// is a short summary, and anything bigger is not one.
@@ -126,76 +135,88 @@ func legacyReportDir(runtimeDir, reporter string) string {
 	return filepath.Join(runtimeDir, reporter, ReportsSubdir)
 }
 
-// dirCheck is one directory on the way to a sidecar, and the words Read uses
-// when it is not the directory it should be.
-type dirCheck struct {
-	path  string
-	label string
-}
-
-// reportLocation is one layout a report may be in: the directories Read
-// checks, then the sidecar below them.
+// reportLocation is where a reporter's report is: the directory, and the words
+// Read uses when that directory, or the one above it, is not what it should be.
 type reportLocation struct {
-	dirs    []dirCheck
-	sidecar string
+	dir         string
+	dirLabel    string
+	parentLabel string
 }
 
-// reportLocations lists where a reporter's report may be, in the order Read
-// tries them: the location gt report publish writes, then the reporter's own
-// tree, which the birds wrote before the command existed.
-func reportLocations(runtimeDir, reporter string) []reportLocation {
-	published := PublishedReportDir(runtimeDir, reporter)
-	legacy := legacyReportDir(runtimeDir, reporter)
-	return []reportLocation{
-		{
-			dirs: []dirCheck{
-				{filepath.Join(runtimeDir, PublishedDirName), "published reports directory"},
-				{published, "reporter directory"},
-			},
-			sidecar: filepath.Join(published, SidecarName),
-		},
-		{
-			dirs: []dirCheck{
-				{filepath.Join(runtimeDir, reporter), "reporter directory"},
-				{legacy, "reports directory"},
-			},
-			sidecar: filepath.Join(legacy, SidecarName),
-		},
+// ReportDir returns the directory holding reporter's daily report: the
+// published directory <runtimeDir>/reports/<reporter> when it holds a regular
+// daily.json or daily.html, else the reporter's own
+// <runtimeDir>/<reporter>/reports. Every reader resolves the path here rather
+// than building it. No symlink is followed: a linked directory or a linked
+// daily file holds nothing, so the report falls back to the old location and a
+// link cannot put another path's report in this reporter's place.
+func ReportDir(runtimeDir, reporter string) string {
+	return reportLocationFor(runtimeDir, reporter).dir
+}
+
+// reportLocationFor chooses the one layout a reporter's report is read from.
+// The published directory wins when it holds a regular daily.json or daily.html;
+// anything else falls back to the old location, so a bird that has not switched
+// keeps its status.
+func reportLocationFor(runtimeDir, reporter string) reportLocation {
+	if publishedHoldsReport(runtimeDir, reporter) {
+		return reportLocation{
+			dir:         PublishedReportDir(runtimeDir, reporter),
+			dirLabel:    "reporter directory",
+			parentLabel: "published reports directory",
+		}
+	}
+	return reportLocation{
+		dir:         legacyReportDir(runtimeDir, reporter),
+		dirLabel:    "reports directory",
+		parentLabel: "reporter directory",
 	}
 }
 
+// publishedHoldsReport reports whether the published directory is a real
+// directory holding a regular daily.json or daily.html. A link at the directory
+// or at either file is not a report this reader will follow.
+func publishedHoldsReport(runtimeDir, reporter string) bool {
+	if !isRealDir(filepath.Join(runtimeDir, PublishedDirName)) {
+		return false
+	}
+	dir := PublishedReportDir(runtimeDir, reporter)
+	if !isRealDir(dir) {
+		return false
+	}
+	for _, name := range []string{SidecarName, PageName} {
+		if fi, err := os.Lstat(filepath.Join(dir, name)); err == nil && fi.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
+// isRealDir reports whether path is a directory in its own right. The Lstat is
+// what refuses a symlink: a linked directory is not the directory it names.
+func isRealDir(path string) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.IsDir()
+}
+
 // Read returns the reporter's daily report as it stands at now. maxAge is the
-// age past which a report is stale; a report exactly maxAge old is fresh. The
-// published location wins when it holds a report; a location that holds none
-// falls through to the next, so a bird that has not switched keeps its status.
-//
-// It follows no symlink below the reporter name: every directory on the way to
-// the sidecar must be the thing it names, as the dashboard's reader also
-// requires, so a link cannot put another path's report in this reporter's
-// place.
+// age past which a report is stale; a report exactly maxAge old is fresh. It
+// reads the directory ReportDir resolves, so a report published with
+// `gt report publish` wins and a bird that has not switched keeps its status.
 func Read(runtimeDir, reporter string, now time.Time, maxAge time.Duration) Report {
 	if !reporterNameRe.MatchString(reporter) {
 		return Report{Reporter: reporter, Status: Unreadable, Note: "not a reporter name"}
 	}
-	for _, loc := range reportLocations(runtimeDir, reporter) {
-		report := readLocation(loc, reporter, now, maxAge)
-		if report.Status != Missing {
-			return report
-		}
-	}
-	return Report{Reporter: reporter, Status: Missing, Note: "no " + SidecarName}
-}
-
-// readLocation reads one layout's report. Missing means this layout holds no
-// report at all, so the caller may try the next; every other status is this
-// layout's answer, and an unreadable one is never read as absent.
-func readLocation(loc reportLocation, reporter string, now time.Time, maxAge time.Duration) Report {
+	loc := reportLocationFor(runtimeDir, reporter)
 	report := Report{Reporter: reporter}
 
 	// A path that is not there is Missing, as a missing sidecar is. A link, a
 	// file where a directory belongs, or a path that cannot be read is
 	// Unreadable: only a path the filesystem says is absent is absent.
-	for _, dir := range loc.dirs {
+	for _, dir := range []struct{ path, label string }{
+		{filepath.Dir(loc.dir), loc.parentLabel},
+		{loc.dir, loc.dirLabel},
+	} {
 		fi, err := os.Lstat(dir.path)
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
@@ -210,7 +231,7 @@ func readLocation(loc reportLocation, reporter string, now time.Time, maxAge tim
 		}
 	}
 
-	raw, err := readSidecar(loc.sidecar)
+	raw, err := readSidecar(filepath.Join(loc.dir, SidecarName))
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		report.Status, report.Note = Missing, "no "+SidecarName

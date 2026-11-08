@@ -11,6 +11,7 @@ import (
 	"github.com/jonboulle/clockwork"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/birdreports"
 )
 
 // birdReportsTestZone fixes the zone start_hour is read in, so a test's hour
@@ -37,7 +38,20 @@ func birdReportsWriteRaw(t *testing.T, town, name string, data []byte) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, birdReportsFile), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, birdreports.SidecarName), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// birdReportsWritePublished writes bytes at the sidecar gt report publish
+// writes, <town>/.runtime/reports/<name>/daily.json.
+func birdReportsWritePublished(t *testing.T, town, name string, data []byte) {
+	t.Helper()
+	dir := birdreports.PublishedReportDir(filepath.Join(town, ".runtime"), name)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, birdreports.SidecarName), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -131,7 +145,7 @@ func TestBirdReportsItemShapes(t *testing.T) {
 		{
 			name: "unreadable file",
 			setup: func(t *testing.T, town string) {
-				path := filepath.Join(town, ".runtime", "dunlin", "reports", birdReportsFile)
+				path := filepath.Join(town, ".runtime", "dunlin", "reports", birdreports.SidecarName)
 				if err := os.MkdirAll(path, 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -426,5 +440,72 @@ func TestBirdReportsIgnoresFieldsBesideWrittenAt(t *testing.T) {
 	birdReportsWriteRaw(t, town, "dunlin", []byte(`{"written_at":"`+now.Add(-time.Minute).UTC().Format(time.RFC3339)+`","rest":{"ignored":true}}`))
 	if got := birdReportStaleItems(now, birdReportsTestReads(town, 6, 26*time.Hour, "dunlin")); len(got) != 0 {
 		t.Errorf("items = %+v, want a fresh report whatever else the file holds", got)
+	}
+}
+
+// TestBirdReportsReadsTheVolumeLocation drives the report resolver through the
+// patrol: the published sidecar wins when both locations hold one, the old
+// location is read when it is the only one, and a reporter in neither is
+// missing.
+func TestBirdReportsReadsTheVolumeLocation(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	const maxAge = 26 * time.Hour
+	sidecar := func(age time.Duration) []byte {
+		return []byte(`{"written_at":"` + now.Add(-age).UTC().Format(time.RFC3339) + `"}`)
+	}
+
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, town string)
+		late  bool
+	}{
+		{
+			name: "the published location wins when both hold a fresh report",
+			setup: func(t *testing.T, town string) {
+				birdReportsWriteRaw(t, town, "dunlin", sidecar(27*time.Hour))
+				birdReportsWritePublished(t, town, "dunlin", sidecar(time.Hour))
+			},
+		},
+		{
+			name: "the published location wins even when it is the late one",
+			setup: func(t *testing.T, town string) {
+				birdReportsWriteRaw(t, town, "dunlin", sidecar(time.Hour))
+				birdReportsWritePublished(t, town, "dunlin", sidecar(27*time.Hour))
+			},
+			late: true,
+		},
+		{
+			name: "the old location is read when it is the only one",
+			setup: func(t *testing.T, town string) {
+				birdReportsWriteRaw(t, town, "dunlin", sidecar(time.Hour))
+			},
+		},
+		{
+			name: "a reporter in neither location is missing",
+			late: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.setup != nil {
+				tc.setup(t, town)
+			}
+			got := birdReportStaleItems(now, birdReportsTestReads(town, 6, maxAge, "dunlin"))
+			if !tc.late {
+				if len(got) != 0 {
+					t.Fatalf("items = %+v, want the report to read as fresh", got)
+				}
+				return
+			}
+			if len(got) != 1 {
+				t.Fatalf("items = %+v, want exactly one late report", got)
+			}
+			if tc.name == "a reporter in neither location is missing" && !strings.Contains(got[0].Summary, "missing") {
+				t.Errorf("summary = %q, want the report named missing", got[0].Summary)
+			}
+		})
 	}
 }

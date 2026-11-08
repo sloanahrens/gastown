@@ -80,25 +80,9 @@ func assertReportPublishDirHolds(t *testing.T, dir string, want ...string) {
 	}
 }
 
-// makeReadOnly drops a directory's write bit, so a new file cannot be created
-// in it, and restores the mode before the test's cleanup walks the tree.
-func makeReadOnly(t *testing.T, dir string) {
-	t.Helper()
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("stat %s: %v", dir, err)
-	}
-	//testpolicy:allow no-exec-files — a directory must keep its search bit to be entered, so the 0500 mode is the fixture's read-only state: the write bit is what it drops
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("making %s read-only: %v", dir, err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, info.Mode().Perm()) })
-}
-
 // TestReportPublishWritesAtomically drives a publish, then a second one over
-// it, then one whose write fails: the page, the sidecar and the previous page
-// are each written by rename, and the files a published report held are
-// untouched by a write that fails.
+// it: the page, the sidecar and the previous pair are each written by rename,
+// and the pair the second publish replaces is kept beside the new one.
 func TestReportPublishWritesAtomically(t *testing.T) {
 	t.Parallel()
 	runtimeDir := t.TempDir()
@@ -151,24 +135,54 @@ func TestReportPublishWritesAtomically(t *testing.T) {
 	if got := readReportPublishFile(t, prevPath); got != firstPage {
 		t.Errorf("daily.prev.html = %q, want the page it replaced", got)
 	}
-	assertReportPublishDirHolds(t, dir, reportPublishPageName, birdreports.SidecarName, reportPublishPrevPageName)
+	prevSidecarPath := filepath.Join(dir, reportPublishPrevSidecarName)
+	if got := readReportPublishFile(t, prevSidecarPath); got != string(firstSidecar) {
+		t.Errorf("daily.prev.json = %q, want the sidecar it replaced", got)
+	}
+	assertReportPublishDirHolds(t, dir, reportPublishPageName, birdreports.SidecarName,
+		reportPublishPrevPageName, reportPublishPrevSidecarName)
+}
 
-	// A write that fails leaves the report the directory already held.
-	makeReadOnly(t, dir)
-	if _, err := runPublish(t, runtimeDir, "dunlin",
-		reportPublishDocument(t, "dunlin", "<html>third report</html>", reportPublishSidecar("dunlin", 0))); err == nil {
-		t.Fatal("a write into a read-only directory did not fail the command")
+// TestReportPublishRollsBackAPartialRename fails the rename that puts the new
+// sidecar in place, after the new page and the previous pair have been renamed:
+// the publish fails, the old daily.html and daily.json are exactly as they
+// were, and no temp file is left behind.
+func TestReportPublishRollsBackAPartialRename(t *testing.T) {
+	t.Parallel()
+	const bird = "dunlin"
+	runtimeDir := t.TempDir()
+	dir := birdreports.PublishedReportDir(runtimeDir, bird)
+
+	firstPage := []byte("<html>first report</html>")
+	firstSidecar := reportPublishSidecar(bird, time.Hour)
+	if _, err := writeReportPublish(osReportPublishFS(), runtimeDir, bird, firstPage, firstSidecar); err != nil {
+		t.Fatalf("the first publish = %v", err)
 	}
-	if got := readReportPublishFile(t, pagePath); got != secondPage {
-		t.Errorf("daily.html = %q after a failed write, want the second page untouched", got)
+	pagePath := filepath.Join(dir, reportPublishPageName)
+	sidecarPath := filepath.Join(dir, birdreports.SidecarName)
+
+	fsys := osReportPublishFS()
+	fsys.rename = func(oldpath, newpath string) error {
+		// The sidecar lands last; failing it leaves the page already replaced.
+		if newpath == sidecarPath {
+			return errors.New("scripted rename failure")
+		}
+		return os.Rename(oldpath, newpath)
 	}
-	if got := readReportPublishFile(t, sidecarPath); got != string(secondSidecar) {
-		t.Errorf("daily.json = %q after a failed write, want the second sidecar untouched", got)
+	secondPage := []byte("<html>second report</html>")
+	if _, err := writeReportPublish(fsys, runtimeDir, bird, secondPage, reportPublishSidecar(bird, 0)); err == nil {
+		t.Fatal("the publish succeeded with the sidecar rename failing")
 	}
-	if got := readReportPublishFile(t, prevPath); got != firstPage {
-		t.Errorf("daily.prev.html = %q after a failed write, want it untouched", got)
+
+	if got := readReportPublishFile(t, pagePath); got != string(firstPage) {
+		t.Errorf("daily.html = %q after a failed rename, want the first page back", got)
 	}
-	assertReportPublishDirHolds(t, dir, reportPublishPageName, birdreports.SidecarName, reportPublishPrevPageName)
+	if got := readReportPublishFile(t, sidecarPath); got != string(firstSidecar) {
+		t.Errorf("daily.json = %q after a failed rename, want the first sidecar", got)
+	}
+	// The pair had no previous version before this publish, so the rotation the
+	// failed publish began is undone rather than left behind.
+	assertReportPublishDirHolds(t, dir, reportPublishPageName, birdreports.SidecarName)
 }
 
 // TestReportPublishRefusesBadInput drives each refusal of a document before
@@ -549,6 +563,13 @@ func TestReportPublishReportsAFailureOnEveryWritePath(t *testing.T) {
 		{
 			name: "a previous page that cannot be read",
 			script: func(t *testing.T, fsys *reportPublishFS, dir string) {
+				t.Helper()
+				if err := os.MkdirAll(dir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, reportPublishPageName), []byte("<html>yesterday</html>"), 0o644); err != nil {
+					t.Fatal(err)
+				}
 				fsys.readFile = func(string) ([]byte, error) { return nil, errors.New("scripted read failure") }
 			},
 		},
@@ -628,3 +649,47 @@ func (reportPublishFailReader) Read([]byte) (int, error) { return 0, errors.New(
 type reportPublishFailWriter struct{}
 
 func (reportPublishFailWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// TestReportPublishReportsAFailedRestore drives a rollback that cannot finish:
+// the sidecar rename fails after the page was replaced, and the page cannot be
+// put back. The command must fail and say the previous report was not restored,
+// rather than report a rollback it did not make.
+func TestReportPublishReportsAFailedRestore(t *testing.T) {
+	t.Parallel()
+	const bird = "dunlin"
+	runtimeDir := t.TempDir()
+	dir := birdreports.PublishedReportDir(runtimeDir, bird)
+
+	if _, err := writeReportPublish(osReportPublishFS(), runtimeDir, bird,
+		[]byte("<html>first report</html>"), reportPublishSidecar(bird, time.Hour)); err != nil {
+		t.Fatalf("the first publish = %v", err)
+	}
+	pagePath := filepath.Join(dir, reportPublishPageName)
+	sidecarPath := filepath.Join(dir, birdreports.SidecarName)
+
+	// The sidecar rename fails after the page is in place, and the page cannot
+	// be renamed back: the first page rename is the publish's, the second is the
+	// restore's.
+	pageRenames := 0
+	fsys := osReportPublishFS()
+	fsys.rename = func(oldpath, newpath string) error {
+		if newpath == sidecarPath {
+			return errors.New("scripted rename failure")
+		}
+		if newpath == pagePath {
+			pageRenames++
+			if pageRenames > 1 {
+				return errors.New("scripted restore failure")
+			}
+		}
+		return os.Rename(oldpath, newpath)
+	}
+	_, err := writeReportPublish(fsys, runtimeDir, bird,
+		[]byte("<html>second report</html>"), reportPublishSidecar(bird, 0))
+	if err == nil {
+		t.Fatal("the publish succeeded with both the sidecar and the page rename failing")
+	}
+	if !strings.Contains(err.Error(), "restoring the previous report also failed") {
+		t.Errorf("error = %q, want the failed restore named", err)
+	}
+}
