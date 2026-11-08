@@ -385,6 +385,66 @@ func TestWriteTownHealth_NoPostLandCommandIsNotApplicable(t *testing.T) {
 	}
 }
 
+// The daemon fills a rig's post-land check from the two settings the landing
+// worker reads, in the same file the worker reads them from, and carries the
+// green verdict's time so the field can judge its age. Neither setting is no
+// check; a settings file that is present but unreadable is an error on the rig
+// rather than no setting (gt-gg9hv.7.2).
+func TestTownHealthPostLandMode(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	s := &healthSources{d: d}
+	settings := filepath.Join(d.config.TownRoot, "gastown", "settings", "config.json")
+	writeJSONFile(t, RedMainStatePath(d.config.TownRoot, "gastown"), landworker.MainState{
+		LastGreen: "aaaa", LastRun: "aaaa", LastGreenAt: now.Add(-time.Hour),
+	})
+
+	read := func() townhealth.RigMain {
+		t.Helper()
+		ms, err := s.Mains()
+		if err != nil {
+			t.Fatalf("Mains(): %v", err)
+		}
+		if len(ms) != 1 || ms[0].Rig != "gastown" {
+			t.Fatalf("Mains() = %+v, want the one landing rig", ms)
+		}
+		return ms[0]
+	}
+
+	if got := read(); got.PostLand != (townhealth.PostLandCheck{}) {
+		t.Errorf("PostLand with no settings = %+v, want neither setting", got.PostLand)
+	}
+	if got := read(); !got.LastGreenAt.Equal(now.Add(-time.Hour)) {
+		t.Errorf("LastGreenAt = %v, want the main state's green time", got.LastGreenAt)
+	}
+
+	writeJSONFile(t, settings, map[string]any{"type": "rig-settings", "version": 1,
+		"merge_queue": map[string]any{"post_land_command": "make test-slow"}})
+	if got := read().PostLand; got != (townhealth.PostLandCheck{Command: "make test-slow"}) {
+		t.Errorf("PostLand with a command = %+v, want the command alone", got)
+	}
+
+	writeJSONFile(t, settings, map[string]any{"type": "rig-settings", "version": 1,
+		"merge_queue": map[string]any{"post_land_status_context": "ci / post-land"}})
+	if got := read().PostLand; got != (townhealth.PostLandCheck{Context: "ci / post-land"}) {
+		t.Errorf("PostLand with a context = %+v, want the context alone", got)
+	}
+
+	writeJSONFile(t, settings, map[string]any{"type": "rig-settings", "version": 1,
+		"merge_queue": map[string]any{"post_land_command": "true", "post_land_status_context": "ci / post-land"}})
+	if got := read().PostLand; got != (townhealth.PostLandCheck{Command: "true", Context: "ci / post-land"}) {
+		t.Errorf("PostLand with both = %+v, want both, the context deciding", got)
+	}
+
+	if err := os.WriteFile(settings, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got.Err == nil {
+		t.Errorf("PostLand with an unreadable settings file = %+v, want the read error rather than no setting", got)
+	}
+}
+
 // A landing the worker keeps failing and backing off from degrades its rig's
 // landing field, which the queue wait alone cannot see, and the field names
 // the bead, the stage, the run of failures and the error (gt-fn9e6.44).

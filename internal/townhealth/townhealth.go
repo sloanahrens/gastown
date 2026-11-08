@@ -433,16 +433,53 @@ type Backups interface {
 	NewestBackup() (finished time.Time, ok bool, err error)
 }
 
+// PostLandCheck is the rig's configured post-land check as town health reads
+// it: a status context, a command, or neither. It replaces the PostLand bool
+// (gt-gg9hv.7.2) so the field can tell a check that decides nothing — the
+// interim placeholder `true` — from a real one and from no check at all. A
+// context decides the verdict when both are set, as it does in the landing
+// worker (gt-gg9hv.7.1).
+type PostLandCheck struct {
+	// Context is merge_queue.post_land_status_context, trimmed.
+	Context string
+	// Command is merge_queue.post_land_command, trimmed.
+	Command string
+}
+
+// Configured reports whether the rig configures a post-land check at all.
+func (c PostLandCheck) Configured() bool { return c.Context != "" || c.Command != "" }
+
+// postLandPlaceholderCommand is the interim command (gt-gg9hv.7) every rig
+// was set to when the container daemon had no toolchain to run its real check.
+// It exits 0 without testing anything, so a verdict recorded under it says the
+// rig has no post-land check, not that main is green.
+const postLandPlaceholderCommand = "true"
+
+// PostLandVerdictMaxAge bounds how old the newest recorded green verdict may
+// be before the main field reads UNKNOWN instead of green: a rig that lands at
+// least once a day keeps a fresh verdict, and a check that stopped reporting
+// after the last landing surfaces within a day instead of reading green
+// forever. It is the backstop for a post-land status verdict that never came —
+// the pending entry timed out and was dropped (gt-gg9hv.7.1) — so
+// post_land_timeout has long passed by the time it fires. A constant rather
+// than a GT_ environment read: the dashboard has one town-wide value.
+const PostLandVerdictMaxAge = 24 * time.Hour
+
 // RigMain is one rig's post-landing main state: the newest commit a run
 // reached a verdict at and the newest one that passed.
 type RigMain struct {
 	Rig       string
 	LastRun   string
 	LastGreen string
-	// PostLand is whether the rig configures a merge_queue.post_land_command.
-	// A rig without one never runs a post-landing check, so having no verdict
+	// LastGreenAt is when the newest green verdict was recorded; zero when
+	// the record carries no time. A green verdict is judged by it: a green
+	// older than PostLandVerdictMaxAge, or one with no recorded time, reads
+	// UNKNOWN rather than green (gt-gg9hv.7.2).
+	LastGreenAt time.Time
+	// PostLand is what the rig configures to decide a post-land verdict. A
+	// rig without one never runs a post-landing check, so having no verdict
 	// is its normal state rather than an open question (gt-fn9e6.34).
-	PostLand bool
+	PostLand PostLandCheck
 	Err      error
 }
 
@@ -1095,10 +1132,16 @@ func mains(in Inputs) []Field {
 	}
 	fs := make([]Field, 0, len(ms))
 	for _, m := range ms {
+		check := m.PostLand
 		switch {
 		case m.Err != nil:
 			fs = append(fs, unknown(FieldMain, m.Rig, "", m.Err))
-		case m.LastRun == "" && !m.PostLand:
+		case check.Context == "" && check.Command == postLandPlaceholderCommand:
+			// The interim placeholder exits 0 without testing anything, so a
+			// green recorded under it is not evidence about main. Say so
+			// rather than reading the command as a check (gt-gg9hv.7.2).
+			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("post-land check is a placeholder")))
+		case m.LastRun == "" && !check.Configured():
 			// No check is configured, so there is nothing to have a verdict
 			// about: n/a rather than UNKNOWN, which would read as a check
 			// that should have run (gt-fn9e6.34). A rig that once ran a check
@@ -1107,7 +1150,15 @@ func mains(in Inputs) []Field {
 		case m.LastRun == "":
 			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("no post-landing verdict recorded")))
 		case m.LastRun != m.LastGreen:
+			// A red verdict is a standing fact about LastRun, recorded at some
+			// time after LastGreenAt, so its age cannot be judged from that
+			// clock; it stays red until a newer verdict moves LastRun.
 			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Red, Value: "red", Detail: "main red at " + short(m.LastRun)})
+		case m.LastGreenAt.IsZero():
+			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("green verdict has no recorded time")))
+		case in.Now.Sub(m.LastGreenAt) > PostLandVerdictMaxAge:
+			age := in.Now.Sub(m.LastGreenAt)
+			fs = append(fs, unknown(FieldMain, m.Rig, "", fmt.Errorf("green verdict recorded %s ago, past the %s bound", Short(age), Short(PostLandVerdictMaxAge))))
 		default:
 			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "green"})
 		}

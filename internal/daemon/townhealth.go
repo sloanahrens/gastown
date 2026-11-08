@@ -499,12 +499,26 @@ func (s *healthSources) NewestBackup() (time.Time, bool, error) {
 func (s *healthSources) Mains() ([]townhealth.RigMain, error) {
 	var out []townhealth.RigMain
 	for _, rig := range s.landingRigs() {
+		rigPath := filepath.Join(s.townRoot(), rig)
 		st, err := fileMainState{path: RedMainStatePath(s.townRoot(), rig)}.Load()
-		// Read through the landing worker's own reader, so the field reports
-		// the command that worker would run, settings change and all
-		// (gt-fn9e6.34).
-		postLand := rigPostLandCommand(filepath.Join(s.townRoot(), rig)) != ""
-		out = append(out, townhealth.RigMain{Rig: rig, LastRun: st.LastRun, LastGreen: st.LastGreen, PostLand: postLand, Err: err})
+		// Read through the landing worker's own readers, so the field reports
+		// the check that worker would use, settings change and all
+		// (gt-fn9e6.34, gt-gg9hv.7.2).
+		context, configErr := rigPostLandStatusContextErr(rigPath)
+		if configErr != nil {
+			// A settings file that is present but unreadable is not "no
+			// setting": the field cannot say which check decides, so this
+			// rig reads UNKNOWN rather than n/a or green.
+			err = fmt.Errorf("reading merge_queue.post_land_status_context: %w", configErr)
+		}
+		postLand := townhealth.PostLandCheck{
+			Context: context,
+			Command: rigPostLandCommand(rigPath),
+		}
+		out = append(out, townhealth.RigMain{
+			Rig: rig, LastRun: st.LastRun, LastGreen: st.LastGreen, LastGreenAt: st.LastGreenAt,
+			PostLand: postLand, Err: err,
+		})
 	}
 	return out, nil
 }
