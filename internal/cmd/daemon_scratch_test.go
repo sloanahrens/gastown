@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,6 +178,102 @@ func TestDaemonScratchUpReportsAFailedStart(t *testing.T) {
 	}
 	if !r.composeExists() {
 		t.Error("the compose file was not left written after the failed start")
+	}
+}
+
+// up writes only a compose file gt wrote: an absent path and one carrying the
+// generated-file header are written, a hand-written file keeps its bytes and
+// starts nothing unless --force is given, and an unreadable file is refused
+// because it cannot be told apart from the operator's.
+func TestDaemonScratchUpOverwritesOnlyItsOwnComposeFile(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		existing []byte // written at --compose-file before up; nil for no file
+		readErr  error  // what reading --compose-file returns, when set
+		force    bool
+		wantErr  string
+	}{
+		{
+			name: "no file at the path",
+		},
+		{
+			name:     "a file gt wrote",
+			existing: []byte(templates.DaemonComposeHeader + "services:\n"),
+		},
+		{
+			name:     "a hand-written file",
+			existing: []byte("services: {}\n"),
+			wantErr:  "was not written by gt",
+		},
+		{
+			name:     "a hand-written file with --force",
+			existing: []byte("services: {}\n"),
+			force:    true,
+		},
+		{
+			name:    "a file that cannot be read",
+			readErr: fs.ErrPermission,
+			wantErr: "cannot read the existing compose file",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := newDaemonScratchRig(t)
+			r.flags.force = tc.force
+			if tc.existing != nil {
+				if err := os.WriteFile(r.flags.composeFile, tc.existing, 0o600); err != nil {
+					t.Fatalf("writing the existing compose file: %v", err)
+				}
+			}
+			if tc.readErr != nil {
+				r.deps.readFile = func(path string) ([]byte, error) {
+					if path == r.flags.composeFile {
+						return nil, tc.readErr
+					}
+					return os.ReadFile(path)
+				}
+			}
+			want, err := templates.RenderDaemonCompose(r.spec())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = runDaemonScratch(context.Background(), "up", r.flags, r.deps)
+
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("up error = %v, want it to contain %q", err, tc.wantErr)
+				}
+				if len(r.runs) != 0 {
+					t.Errorf("a refusal ran %d commands", len(r.runs))
+				}
+				got, readErr := os.ReadFile(r.flags.composeFile)
+				switch {
+				case tc.existing != nil && (readErr != nil || !bytes.Equal(got, tc.existing)):
+					t.Errorf("a refusal changed the compose file: %q (read error %v)", got, readErr)
+				case tc.existing == nil && !errors.Is(readErr, fs.ErrNotExist):
+					t.Errorf("a refusal wrote the compose file: %q (read error %v)", got, readErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("up: %v", err)
+			}
+			if len(r.runs) != 1 {
+				t.Fatalf("ran %d commands, want exactly the start", len(r.runs))
+			}
+			got, err := os.ReadFile(r.flags.composeFile)
+			if err != nil {
+				t.Fatalf("reading the written compose file: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Error("the compose file was not replaced with the render")
+			}
+			if r.runs[0].compose != string(want) {
+				t.Error("the start ran before the new compose file was on disk")
+			}
+		})
 	}
 }
 
@@ -470,13 +567,13 @@ func TestDaemonScratchFlagsAreWired(t *testing.T) {
 	})
 	c.SetArgs([]string{"up", "--live-root", "/l", "--root", "/r", "--compose-file", "/c", "--image", "gt-daemon:abc1234",
 		"--project", "gt-scratch", "--container", "gt-scratch-daemon-1", "--om-token-file", "/t",
-		"--forge-http-port", "3100", "--forge-ssh-port", "2322"})
+		"--forge-http-port", "3100", "--forge-ssh-port", "2322", "--force"})
 	c.SilenceUsage, c.SilenceErrors = true, true
 	if err := c.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 	want := scratchFlags{liveRoot: "/l", root: "/r", composeFile: "/c", image: "gt-daemon:abc1234", project: "gt-scratch", container: "gt-scratch-daemon-1", omTokenFile: "/t", omTokenFileSet: true,
-		forge: forgePorts{httpPort: 3100, sshPort: 2322, httpSet: true, sshSet: true}}
+		force: true, forge: forgePorts{httpPort: 3100, sshPort: 2322, httpSet: true, sshSet: true}}
 	if gotAction != "up" || got != want {
 		t.Errorf("action %q flags %+v, want up and %+v", gotAction, got, want)
 	}
