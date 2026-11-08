@@ -11,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
@@ -105,7 +104,10 @@ func runLandRequeue(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	cwd, err := callercwd.Getwd()
+	// The bead store is read from the real process directory: re-queueing a
+	// rejected landing is a decision about that landing, so a caller-supplied
+	// variable must not point it at another store.
+	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("resolving the working directory: %w", err)
 	}

@@ -79,6 +79,10 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 	const plain = "package pkg\n\nimport \"os\"\n\nfunc f() {\n\tos.Getwd()\n}\n"
 	const aliased = "package pkg\n\nimport o \"os\"\n\nfunc f() {\n\to.Getwd()\n}\n"
 	const dotted = "package pkg\n\nimport . \"os\"\n\nfunc f() {\n\tGetwd()\n}\n"
+	// A dot import makes a bare identifier named Getwd ambiguous, but a
+	// selector's Sel is not a dot-imported identifier: x.Getwd is a method or
+	// field, and the guard must not report it as os.Getwd.
+	const dottedSelector = "package pkg\n\nimport . \"os\"\n\ntype t struct{}\n\nfunc (t) Getwd() {}\n\nfunc f(x t) {\n\tx.Getwd()\n}\n"
 	const clean = "package pkg\n\nfunc f() {}\n"
 
 	cases := []struct {
@@ -87,6 +91,7 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 		allowlist string
 		run       func(root, allowlistPath string) error
 		want      string
+		wantOK    bool
 	}{
 		{
 			name:      "a direct call outside the allowlist names the file and line",
@@ -108,6 +113,13 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 			allowlist: "# no entries\n",
 			run:       checkNoDirectGetwdAt,
 			want:      "pkg/foo.go:6",
+		},
+		{
+			name:      "a selector named Getwd is not a dot-imported identifier",
+			source:    dottedSelector,
+			allowlist: "# no entries\n",
+			run:       checkNoDirectGetwdAt,
+			wantOK:    true,
 		},
 		{
 			name:      "a stale entry fails the shrink test",
@@ -135,7 +147,7 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 			source:    clean,
 			allowlist: "pkg/foo.go:f\tdeferred\ta guard\n",
 			run:       loadOnly,
-			want:      "is not real",
+			want:      "there is no deferred or pending class",
 		},
 		{
 			name:      "an empty reason is an error",
@@ -162,6 +174,12 @@ func TestGetwdGuardFixtureCases(t *testing.T) {
 			writeFixture(t, root, "allow.txt", tc.allowlist)
 
 			err := tc.run(root, allowlistPath)
+			if tc.wantOK {
+				if err != nil {
+					t.Fatalf("guard = %v, want no refusal: a selector's Sel is not a dot-imported identifier", err)
+				}
+				return
+			}
 			if err == nil {
 				t.Fatalf("guard = nil, want the %q refusal", tc.want)
 			}
@@ -389,6 +407,36 @@ func parseGetwdSitesFile(path, rel string) ([]getwdSite, error) {
 		return nil, fmt.Errorf("parse %s: %w", rel, err)
 	}
 	osNames := importNames(file, "os")
+	// nonValueIdents are the identifiers that do not reference a value: a
+	// selector's Sel (x.Getwd) and the name a declaration introduces (func
+	// Getwd, type Getwd, var Getwd, a field or parameter named Getwd). Only a
+	// bare identifier in value position can be the dot-imported os.Getwd, so
+	// the dot-import branch must not match these just because they share the
+	// name.
+	nonValueIdents := map[token.Pos]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.SelectorExpr:
+			nonValueIdents[d.Sel.Pos()] = true
+		case *ast.FuncDecl:
+			nonValueIdents[d.Name.Pos()] = true
+		case *ast.TypeSpec:
+			nonValueIdents[d.Name.Pos()] = true
+		case *ast.ValueSpec:
+			for _, id := range d.Names {
+				nonValueIdents[id.Pos()] = true
+			}
+		case *ast.Field:
+			for _, id := range d.Names {
+				nonValueIdents[id.Pos()] = true
+			}
+		case *ast.ImportSpec:
+			if d.Name != nil {
+				nonValueIdents[d.Name.Pos()] = true
+			}
+		}
+		return true
+	})
 	var sites []getwdSite
 	scan := func(owner string, node ast.Node) {
 		if node == nil {
@@ -401,7 +449,7 @@ func parseGetwdSitesFile(path, rel string) ([]getwdSite, error) {
 					sites = append(sites, getwdSite{file: rel, owner: owner, line: fset.Position(sel.Pos()).Line})
 				}
 			case *ast.Ident:
-				if osNames["."] && sel.Name == "Getwd" {
+				if osNames["."] && sel.Name == "Getwd" && !nonValueIdents[sel.Pos()] {
 					sites = append(sites, getwdSite{file: rel, owner: owner, line: fset.Position(sel.Pos()).Line})
 				}
 			}

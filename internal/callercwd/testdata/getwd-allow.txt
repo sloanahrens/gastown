@@ -16,6 +16,11 @@
 # any os.Getwd use not listed here. Do not add an entry for new code: convert
 # the call to internal/callercwd instead.
 internal/cmd/handoff.go:enforceHandoffCooldown	real	throttle: the handoff cooldown decides whether to delay or proceed, so the variable must not steer it
+internal/cmd/land.go:runLandRequeue	real	refusal: re-queueing a rejected landing acts on the real process directory; the variable must not redirect it
+internal/cmd/land_verdict.go:runLandVerdict	real	guard: the verdict store a landing was decided on is read from the real process directory; the variable must not point the command at another store
+internal/cmd/land_wait.go:runLandWait	real	guard: the wait polls a landing's verdict from the real process directory; the variable must not point it at another store
+internal/config/host.go:package	real	trust decision: agent resolution locates the town a spawn's config and prompt come from; the variable must not redirect it
+internal/done/options.go:Options.getwd	real	guard: gt done resolves the polecat worktree and crew identity from the real process directory; the variable must not place the caller elsewhere
 internal/cmd/hook.go:package	real	hook check: the hook worktree integrity guard reads the process directory; the variable must not open it
 internal/cmd/role.go:GetRole	real	guard: feeds the stop guard; the variable must not steer the role it resolves
 internal/cmd/root.go:doneCwd	real	guard: the gt done polecat-worktree guard; the variable must not place the caller elsewhere

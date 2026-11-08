@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/role"
 )
@@ -82,7 +81,10 @@ type Options struct {
 
 	// Env reads the process environment. Nil is os.Getenv.
 	Env func(string) string
-	// Getwd resolves the directory the run acts in. Nil is callercwd.Require,
+	// Getwd resolves the directory the run acts in. Nil is os.Getwd: the
+	// polecat worktree and crew resolution it feeds decide whether the run may
+	// proceed, so a caller-supplied variable must not place the caller
+	// elsewhere.
 	// which refuses a caller's directory that is not present in this process.
 	Getwd func() (string, error)
 	// Detect resolves the caller's role identity. Nil leaves the identity the
@@ -127,7 +129,7 @@ func (o Options) env() func(string) string {
 
 func (o Options) getwd() func() (string, error) {
 	if o.Getwd == nil {
-		return callercwd.Require
+		return os.Getwd
 	}
 	return o.Getwd
 }

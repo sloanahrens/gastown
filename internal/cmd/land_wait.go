@@ -16,7 +16,6 @@ import (
 
 	"github.com/steveyegge/gastown/internal/authorkind"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/daemonlog"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/role"
@@ -86,8 +85,10 @@ func init() {
 
 func runLandWait(cmd *cobra.Command, _ []string) error {
 	return landWaitCommand(cmd, landWaitAgent, landWaitTimeout, landWaitHost{
-		getenv:   os.Getenv,
-		getwd:    callercwd.Getwd,
+		getenv: os.Getenv,
+		// The bead store the wait polls is the record of a landing's verdict,
+		// so a caller-supplied variable must not point it at another store.
+		getwd:    os.Getwd,
 		findTown: workspace.FindFromCwdOrError,
 		now:      time.Now,
 		sleep:    time.Sleep,

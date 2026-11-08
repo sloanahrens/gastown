@@ -4,8 +4,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-
-	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // host is what agent resolution reads from the running process: its
@@ -44,8 +42,10 @@ func (h host) systemPromptRenderer() SystemPromptRender {
 	return SystemPromptRenderer
 }
 
-// processHost reads the running process.
-var processHost = host{getenv: os.Getenv, lookPath: exec.LookPath, getwd: callercwd.Getwd}
+// processHost reads the running process. Its getwd stays os.Getwd: agent
+// resolution locates the town a spawn's config and prompt come from, which is
+// a trust decision, so a caller-supplied variable must not redirect it.
+var processHost = host{getenv: os.Getenv, lookPath: exec.LookPath, getwd: os.Getwd}
 
 // host returns the host r resolves against: processHost unless r was loaded
 // for another one. A nil registry resolves against the process too.

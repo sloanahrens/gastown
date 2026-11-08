@@ -604,10 +604,18 @@ func TestCallerCwdReachesTheConvertedCommands(t *testing.T) {
 	if handoffDir != processDir {
 		t.Fatalf("gt handoff with the variable unset read git in %q, want the process directory %q", handoffDir, processDir)
 	}
+	// The unset baseline is the process directory's own answer, not merely a
+	// non-answer: the process directory is outside the fixture town, so
+	// determineTargets resolves no rig for it. Assert that the process
+	// directory really is outside first, so an inside directory could not make
+	// the empty result vacuous.
+	if rel, err := filepath.Rel(townRoot, processDir); err != nil || !strings.HasPrefix(rel, "..") {
+		t.Fatalf("the process directory %q is not outside the fixture town %q, so the unset baseline cannot show an outside answer", processDir, townRoot)
+	}
 	if targets, err := determineTargets(townRoot, constants.RoleCrew, false, []string{constants.RoleCrew}); err != nil {
 		t.Fatalf("gt hooks install with the variable unset: %v", err)
-	} else if len(targets) == 1 && targets[0] == rigCrew {
-		t.Fatalf("gt hooks install with the variable unset resolved the caller's rig %q; it must read this process's directory", rigCrew)
+	} else if len(targets) != 0 {
+		t.Fatalf("gt hooks install with the variable unset resolved %v for the process directory outside the town; want no targets", targets)
 	}
 
 	//testpolicy:allow no-env — GT_CALLER_CWD is the input under test

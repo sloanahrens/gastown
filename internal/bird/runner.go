@@ -34,7 +34,7 @@ type Runner struct {
 	Stat func(string) (fs.FileInfo, error)
 	// PID is the process a start records as the session's; nil means this one.
 	PID func() int
-	// Getwd is the directory a start records; nil means os.Getwd.
+	// Getwd is the directory a start records; nil means callercwd.Getwd.
 	Getwd func() (string, error)
 	// Exec replaces this process with path, as syscall.Exec does; nil means
 	// syscall.Exec.
