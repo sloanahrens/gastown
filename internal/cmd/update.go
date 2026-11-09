@@ -450,7 +450,11 @@ func realUpdateDeps(townRoot string) (update.Deps, error) {
 			Files: updateMaintFiles{},
 			Clock: clock,
 		},
-		Verify:   newVerifyProbes(verifyProbeEnv{}),
+		Verify: newVerifyProbes(verifyProbeEnv{
+			// The CI-built values file sits in the rig's repository, which the
+			// town keeps under its gastown directory.
+			ValuesDir: func() string { return filepath.Join(townRoot, "gastown") },
+		}),
 		NewRunID: newUpdateRunID,
 		Log:      os.Stderr,
 	}, nil

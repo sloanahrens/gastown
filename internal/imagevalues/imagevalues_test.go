@@ -246,6 +246,73 @@ func TestImageValuesLoadKeepsAMissingFileDistinct(t *testing.T) {
 	}
 }
 
+// TestLoadIn holds the consumers' reader: a missing file is no pair yet, a
+// file that exists answers its pair, and a file it cannot read or parse is
+// refused rather than read as absent.
+func TestLoadIn(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a missing file answers no pair and no error", func(t *testing.T) {
+		t.Parallel()
+		got, ok, err := imagevalues.LoadIn(t.TempDir())
+		if err != nil || ok || got != (imagevalues.Values{}) {
+			t.Fatalf("LoadIn = (%+v, %v, %v), want (Values{}, false, nil)", got, ok, err)
+		}
+	})
+
+	t.Run("a valid file answers its pair", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		want := testValues()
+		if err := imagevalues.Write(filepath.Join(dir, imagevalues.DefaultRelPath), want); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
+		got, ok, err := imagevalues.LoadIn(dir)
+		if err != nil || !ok || got != want {
+			t.Fatalf("LoadIn = (%+v, %v, %v), want (%+v, true, nil)", got, ok, err, want)
+		}
+	})
+
+	t.Run("a malformed file is refused naming the line", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := filepath.Join(dir, imagevalues.DefaultRelPath)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("creating the fixture directory: %v", err)
+		}
+		body := "daemon: " + testValues().Daemon + "\npolecat: [\ncommit: " + testCommit + "\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("writing the fixture: %v", err)
+		}
+		got, ok, err := imagevalues.LoadIn(dir)
+		if err == nil || ok || got != (imagevalues.Values{}) {
+			t.Fatalf("LoadIn = (%+v, %v, %v), want a refusal", got, ok, err)
+		}
+		if !strings.Contains(err.Error(), "yaml: line ") {
+			t.Errorf("LoadIn error = %q, want it to name the line the parser failed on", err)
+		}
+	})
+
+	t.Run("a file that cannot be read is an error, not an absent pair", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		// A directory where the file should be: present, but unreadable as a file.
+		if err := os.MkdirAll(filepath.Join(dir, imagevalues.DefaultRelPath), 0o755); err != nil {
+			t.Fatalf("creating the fixture: %v", err)
+		}
+		if _, ok, err := imagevalues.LoadIn(dir); err == nil || ok {
+			t.Fatalf("LoadIn over a directory = (%v, %v), want an error", ok, err)
+		}
+	})
+
+	t.Run("an empty directory is refused, never the working directory", func(t *testing.T) {
+		t.Parallel()
+		if _, ok, err := imagevalues.LoadIn(""); err == nil || ok {
+			t.Fatalf("LoadIn(\"\") = (%v, %v), want a refusal", ok, err)
+		}
+	})
+}
+
 // TestImageValuesRegistryRefusesAPartThatWouldNotReachAValue holds the
 // registry's refusals: a scheme, host or owner that a URL path or a values
 // line could not carry as typed is named rather than passed to a request.

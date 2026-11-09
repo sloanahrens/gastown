@@ -6,7 +6,9 @@
 package imagevalues
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,6 +27,11 @@ const (
 	// CommitLabel is the label each image carries for the commit it was built
 	// from.
 	CommitLabel = "org.gastown.gt-commit"
+	// DefaultRelPath is the values file, relative to the directory a caller
+	// names: the town's gastown directory, where the rig's repository sits.
+	// gt update images writes it under that directory and the consumers read
+	// it from there, all through PathIn, so the file written is the file read.
+	DefaultRelPath = "deploy/values/images.yaml"
 )
 
 var (
@@ -130,6 +137,32 @@ func Load(path string) (Values, error) {
 		return Values{}, err
 	}
 	return Parse(data)
+}
+
+// PathIn is the values file's path under dir, the one place the file's
+// location is resolved. gt update images writes it and every consumer reads it
+// through this function, so the writer and the readers cannot disagree about
+// where the file sits.
+func PathIn(dir string) string {
+	return filepath.Join(dir, DefaultRelPath)
+}
+
+// LoadIn reads the values file PathIn names under dir. A missing file answers
+// false with no error: no pair has been built yet, which is not a failure. A
+// file that exists and cannot be read or parsed is an error, never an absent
+// pair. dir is the caller's to name; this package reads no setting for it.
+func LoadIn(dir string) (Values, bool, error) {
+	if dir == "" {
+		return Values{}, false, fmt.Errorf("imagevalues: no directory to read %s from", DefaultRelPath)
+	}
+	v, err := Load(PathIn(dir))
+	if errors.Is(err, fs.ErrNotExist) {
+		return Values{}, false, nil
+	}
+	if err != nil {
+		return Values{}, false, err
+	}
+	return v, true, nil
 }
 
 // valuesHeader marks the file generated, so nobody edits it by hand.

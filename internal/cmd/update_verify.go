@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/update"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -35,6 +36,10 @@ type verifyProbeEnv struct {
 	// DaemonCommit is the running daemon's build commit, from the daemon
 	// state.
 	DaemonCommit func() (string, error)
+	// ValuesDir is the directory the CI-built values file sits under. A file
+	// there names the sandbox image ImageLabel inspects; nil means no values
+	// file, the probe's behavior before the file existed.
+	ValuesDir func() string
 }
 
 // newVerifyProbes returns the verify step's probes over env, filling each nil
@@ -115,16 +120,35 @@ func (p *verifyProbes) DaemonVersion(context.Context) (string, error) {
 	return commit, nil
 }
 
-// ImageLabel is the commit label of the sandbox image.
+// ImageLabel is the commit label of the sandbox image. With a values file, the
+// image is the one the file names, and its label must be the file's commit: a
+// label that differs is an error naming both. A values file that exists but
+// cannot be read is an error too, not a fall back to verifyImage.
 func (p *verifyProbes) ImageLabel(ctx context.Context) (string, error) {
-	out, exit, err := p.env.Run(ctx, "", nil, "docker", "image", "inspect", verifyImage, "--format", verifyImageLabelFormat)
+	image := verifyImage
+	var values imagevalues.Values
+	haveValues := false
+	if p.env.ValuesDir != nil {
+		v, ok, err := imagevalues.LoadIn(p.env.ValuesDir())
+		if err != nil {
+			return "", fmt.Errorf("reading the values file: %w", err)
+		}
+		if ok {
+			values, haveValues, image = v, true, v.Polecat
+		}
+	}
+	out, exit, err := p.env.Run(ctx, "", nil, "docker", "image", "inspect", image, "--format", verifyImageLabelFormat)
 	if err != nil {
-		return "", fmt.Errorf("running docker image inspect %s: %w", verifyImage, err)
+		return "", fmt.Errorf("running docker image inspect %s: %w", image, err)
 	}
 	if exit != 0 {
-		return "", fmt.Errorf("docker image inspect %s exited %d: %s", verifyImage, exit, out)
+		return "", fmt.Errorf("docker image inspect %s exited %d: %s", image, exit, out)
 	}
-	return strings.TrimSpace(out), nil
+	label := strings.TrimSpace(out)
+	if haveValues && label != values.Commit {
+		return "", fmt.Errorf("image %s is labeled commit %s, but the values file names commit %s", image, label, values.Commit)
+	}
+	return label, nil
 }
 
 // Health is the town's first health line. gt status --line exits nonzero for a

@@ -30,6 +30,10 @@ type Config struct {
 	RigRepo, BuildRoot string
 	// LockDir is the lock one run holds the image under.
 	LockDir string
+	// ValuesDir is the directory the CI-built values file sits under. A file
+	// there names the image, so a run that has to build it refuses before it
+	// builds anything. Empty reads no values file.
+	ValuesDir string
 	// StaleAfter is how long the lock may sit unmodified before the next run
 	// takes it over.
 	StaleAfter time.Duration

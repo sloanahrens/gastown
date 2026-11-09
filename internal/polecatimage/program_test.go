@@ -39,6 +39,7 @@ func TestConfigFromEnvDefaults(t *testing.T) {
 		{cfg.RigRepo, filepath.Join(town, "gastown", ".repo.git"), "rig repo"},
 		{cfg.BuildRoot, filepath.Join(town, "gastown", ".polecat-image-build"), "build root"},
 		{cfg.LockDir, filepath.Join(town, ".runtime", "polecat-image.lock"), "lock"},
+		{cfg.ValuesDir, filepath.Join(town, "gastown"), "values dir"},
 		{cfg.SandboxRecords, filepath.Join(town, ".runtime", "sandboxes"), "sandbox records"},
 		{cfg.Published, filepath.Join(town, ".runtime", "polecat-image.published"), "publish record"},
 		{cfg.RegistryKubeconfig, filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"), "registry kubeconfig"},
