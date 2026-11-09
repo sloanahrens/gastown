@@ -232,48 +232,6 @@ func shellCommandWord(segment []string) (string, []string) {
 	return word, append(lead, args...)
 }
 
-// splitHereStrings returns args without their "<<<" here-string redirections,
-// and the text each one feeds its command's stdin. A here-string on another
-// descriptor ("3<<<text", "{fd}<<<text") feeds that descriptor, not the
-// script, so it is dropped without its text (gt-hizij).
-//
-// A bare "<<<" takes the words after it as its text: the shell word-splits an
-// unquoted body, so the run of words up to the next redirection is the script.
-// The first word is read on its own as well, so a body of several words adds a
-// reading rather than replacing the one a single word drew (gt-norvx).
-func splitHereStrings(args []string) (rest, texts []string) {
-	for i := 0; i < len(args); i++ {
-		fd, tail, ok := redirectionFD(args[i])
-		if !ok || !strings.HasPrefix(tail, "<<<") {
-			rest = append(rest, args[i])
-			continue
-		}
-		text := strings.TrimPrefix(tail, "<<<")
-		var words []string
-		if text == "" && i+1 < len(args) {
-			end := i + 1
-			for end < len(args) {
-				if redirected, _, _ := shellRedirection(args[end]); redirected {
-					break
-				}
-				end++
-			}
-			// A redirection right behind the operator leaves the body empty; it
-			// stays a word of its own for the shell, read by the next pass.
-			if words = args[i+1 : end]; len(words) > 0 {
-				text, i = words[0], end-1
-			}
-		}
-		if fd == "" || fd == "0" {
-			texts = append(texts, text)
-			if len(words) > 1 {
-				texts = append(texts, strings.Join(words, " "))
-			}
-		}
-	}
-	return rest, texts
-}
-
 // shellReadsStdin reports whether a shell invoked with args (lowercased, the
 // words after the invoker) reads its script from stdin: it has no -c payload
 // and no script file operand, or -s asks for stdin outright; dashS says it was
@@ -377,120 +335,13 @@ type substitutionSpan struct {
 	open, bodyStart, bodyEnd int
 }
 
-// commandSubstitutionSpans finds the outermost command substitutions the shell
-// expands in text, in order. It balances parentheses and steps over quoted
-// text, so a body holding "(ok|FAIL)", "$(NF)" or a nested "$(nproc)" is cut
-// whole (gt-wrr5c). A "$(" or backtick is live outside quotes and inside double
-// quotes; a backslash escapes the next character, and single quotes hide
-// everything until the closing quote. A substitution that never closes runs to
-// the end of text, so a line the shell would reject is still judged rather than
-// passed unread (gt-6v07e).
-func commandSubstitutionSpans(text string) []substitutionSpan {
-	return substitutionSpansIn(text, true)
-}
-
-// heredocSubstitutionSpans is commandSubstitutionSpans for the text of an
-// unquoted heredoc body. There a quote mark is an ordinary character, so the
-// apostrophe in "don't" hides nothing and a "$(make gate)" after it is live;
-// only a backslash still keeps the next character literal (gt-6fkng).
-func heredocSubstitutionSpans(body string) []substitutionSpan {
-	return substitutionSpansIn(body, false)
-}
-
-// substitutionSpansIn is the one command-substitution scan: the
-// commandSubstitutionSpans and heredocSubstitutionSpans wrappers serve the
-// container-suite and dangerous guards, and the pr-workflow guard reads it
-// directly for the payloads it recurses into (gt-ejn41). quotes says whether a
-// quote mark in text opens quoted text; inside a substitution's own body
-// closingParen honors quotes either way, as the shell does.
-//
-// With quotes, a "#" that starts a word opens a comment to the end of the line:
-// the shell reads an apostrophe there as plain text, so "# don't" must not hide
-// the "$(...)" on the next line. The comment body is still scanned for
-// substitutions, so a "$(" in it is judged as before (over-blocked, never
-// passed). A "$'" opens an ANSI-C string, where "\'" does not close the quote.
-// The comment read ends a quoted span earlier than the bare scan did, so it only
-// adds spans. The ANSI-C read ends one later, so a "$(...)" after a "\'" inside
-// $'...' is now literal text and no longer a span, as the shell reads it
-// (gt-2yc0u).
-//
-// A process substitution ("<(...)" / ">(...)") is a span too: the shell runs
-// the command inside it and hands its output to the word, so "cat <(gh pr
-// create --fill)" creates the PR and "cat <(git reset --hard)" resets the tree
-// though the segment judge sees only a cat (gt-jj3or). It is read only where
-// the shell performs one — not inside double quotes, single quotes or a
-// comment, where the angle bracket is plain text, and not in a heredoc body
-// (quotes is false there), where the shell's expansion of the body does not
-// include process substitution: "cat > f <<EOF" holding "cat <(ls)" writes
-// that line as data. A heredoc body fed to a shell is a script, so the
-// recursion judges its process substitutions in the body's own reading.
-func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
-	var spans []substitutionSpan
-	// Found once for the whole text: closingParen skips the bodies, and the
-	// substitutions inside them share this scan rather than each rescanning
-	// (gt-lx8i8).
-	bodies := heredocBodiesFrom(text, 0)
-	inDouble := false
-	inComment := false
-	escapedAt := -1
-	subClose := -1
-	for i := 0; i < len(text); i++ {
-		switch c := text[i]; {
-		case inComment && c == '\n':
-			inComment = false
-		case c == '\\' && !inComment:
-			escapedAt = i + 1
-			i++
-		case quotes && !inComment && !inDouble && c == '\'':
-			end := strings.IndexByte(text[i+1:], '\'')
-			if end < 0 {
-				return spans
-			}
-			i += end + 1
-		case quotes && !inComment && !inDouble && c == '$' && ansiQuoteAt(text, i) >= 0:
-			// An unterminated $'...' is left to the plain single-quote scan
-			// on the next character, which is how it read before.
-			if end := closingANSIQuote(text, ansiQuoteAt(text, i)+1); end >= 0 {
-				i = end
-			}
-		case quotes && !inComment && !inDouble && c == '#' && startsWordAt(text, i, escapedAt, subClose):
-			inComment = true
-		case quotes && !inComment && c == '"':
-			inDouble = !inDouble
-		case quotes && !inComment && !inDouble && (c == '<' || c == '>') && i+1 < len(text) && text[i+1] == '(':
-			end := closingParen(text, i+2, bodies)
-			if end < 0 {
-				return append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: len(text)})
-			}
-			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: end})
-			subClose = end
-			i = end
-		case c == '$' && i+1 < len(text) && text[i+1] == '(':
-			end := closingParen(text, i+2, bodies)
-			if end < 0 {
-				return append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: len(text)})
-			}
-			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: end})
-			subClose = end
-			i = end
-		case c == '`':
-			end := backtickBodyEnd(text, i+1)
-			if end == len(text) {
-				return append(spans, substitutionSpan{open: i, bodyStart: i + 1, bodyEnd: len(text)})
-			}
-			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 1, bodyEnd: end})
-			i = end
-		}
-	}
-	return spans
-}
-
 // substitutionBody is the body of one command substitution as the shell parses
 // it: a backtick span's body drops the backslash of each \\, \` and \$ pair, the
 // only three the shell unescapes there. An escaped nested backtick and a
 // "\$(...)" are literal to the outer scan, yet live substitutions to the body's
 // own parse, so the nested command the caller must judge is judged (gt-tder1).
 // A "$(...)" or process-substitution body is returned as written.
+// Kept: the sandbox-secrets guard (backquoteBodyCut) calls it; gt-crn9gu.
 func substitutionBody(text string, span substitutionSpan) string {
 	body := text[span.bodyStart:span.bodyEnd]
 	if text[span.open] != '`' {
@@ -506,23 +357,6 @@ func substitutionBody(text string, span substitutionSpan) string {
 	return b.String()
 }
 
-// backtickBodyEnd returns the index of the backtick that closes the one whose
-// body starts at start, or len(text) when none does. A backslash keeps the next
-// character literal, so the shell reads "\`" as a literal backtick and the body
-// runs on past it; the shell drops that backslash, so a caller judging the body
-// as a command line drops it too (gt-ejn41).
-func backtickBodyEnd(text string, start int) int {
-	for i := start; i < len(text); i++ {
-		switch text[i] {
-		case '\\':
-			i++
-		case '`':
-			return i
-		}
-	}
-	return len(text)
-}
-
 // startsWordAt reports whether text[i] begins a shell word, the only place a
 // "#" opens a comment: at the start of text or after a blank, newline or
 // command separator. A "#" inside a word (a#b, $#, ${#x}), after a ")" that
@@ -534,6 +368,7 @@ func backtickBodyEnd(text string, start int) int {
 // a "#" right after it is literal: "echo $(date)#tail" prints "date#tail". Any
 // other ")" is an operator that ends a word, as the one in "(true)#c", and a
 // "#" after it opens a comment (gt-5wtmz).
+// Kept: the dangerous and bd-close-invariant guards call it; gt-crn9gu.
 func startsWordAt(text string, i, escapedAt, subClose int) bool {
 	if i == 0 {
 		return true
@@ -554,6 +389,7 @@ func startsWordAt(text string, i, escapedAt, subClose int) bool {
 // "$(...)", "$((...))" or "<(...)" / ">(...)" group — rather than a subshell.
 // The shell reads a substitution as a part of the word around it, so the ")"
 // that closes one ends no word (gt-5wtmz).
+// Kept: the dangerous and bd-close-invariant guards call it; gt-crn9gu.
 func opensSubstitution(text string, i int) bool {
 	if i == 0 {
 		return false
@@ -565,30 +401,6 @@ func opensSubstitution(text string, i int) bool {
 		return i > 1 && text[i-2] == '$'
 	}
 	return false
-}
-
-// ansiQuoteAt returns the index of the "'" that the "$" at dollar opens an
-// ANSI-C string with, or -1. It reads the opener as isANSICDollar does
-// (ansiCDollarQuote), so an escaped "$" and the second "$" of a PID "$$" open
-// nothing here either, and a backslash-newline between the "$" and the quote is
-// stepped over (gt-javvg, gt-22glo, gt-h4go2).
-func ansiQuoteAt(text string, dollar int) int {
-	return ansiCDollarQuote(len(text), bytesAt(text), dollar)
-}
-
-// closingANSIQuote returns the index of the "'" that closes a $'...' string
-// whose text starts at from, or -1 when none does. A backslash escapes the next
-// character, so \' stays inside the string.
-func closingANSIQuote(text string, from int) int {
-	for i := from; i < len(text); i++ {
-		switch text[i] {
-		case '\\':
-			i++
-		case '\'':
-			return i
-		}
-	}
-	return -1
 }
 
 // closingParen returns the index of the ")" that closes a "(" whose body starts
@@ -607,6 +419,7 @@ func closingANSIQuote(text string, from int) int {
 // found once per caller so the substitutions closingDoubleQuote steps into
 // share the scan rather than each rescanning the text); the slice is read, not
 // consumed, by the caller.
+// Kept: the dangerous and bd-close-invariant guards call it; gt-crn9gu.
 func closingParen(text string, from int, bodies []heredocSpan) int {
 	depth := 1
 	escapedAt := -1
@@ -678,6 +491,7 @@ func closingParen(text string, from int, bodies []heredocSpan) int {
 // order, as heredocSpans places the whole text. An unterminated body is left
 // out: it runs to the end of the text, which would hide the ")" that closes the
 // substitution (gt-lx8i8).
+// Kept: the dangerous and bd-close-invariant guards call it; gt-crn9gu.
 func heredocBodiesFrom(text string, from int) []heredocSpan {
 	if !strings.Contains(text[from:], "<<") {
 		return nil
@@ -697,6 +511,7 @@ func heredocBodiesFrom(text string, from int) []heredocSpan {
 // whole; a backtick pair is skipped as one. bodies carries the heredoc bodies
 // closingParen already found, so the substitution is read without rescanning
 // the text (gt-lx8i8).
+// Kept: the dangerous and bd-close-invariant guards call it; gt-crn9gu.
 func closingDoubleQuote(text string, from int, bodies []heredocSpan) int {
 	for i := from; i < len(text); i++ {
 		switch {
@@ -2033,8 +1848,8 @@ func containerSuiteHereStringRunWords(seg shellparse.Segment) []bool {
 }
 
 // containerSuiteHereStringPayloads returns the text each here-string on the
-// segment's stdin feeds it, the parsed counterpart of splitHereStrings. A
-// here-string on another descriptor feeds that descriptor, not the script.
+// segment's stdin feeds it. A here-string on another descriptor feeds that
+// descriptor, not the script.
 // A bare "<<<" takes the words after it as its text: the shell word-splits the
 // run up to the next redirection, and the first word is read on its own as
 // well, so a body of several words adds a reading rather than replacing the

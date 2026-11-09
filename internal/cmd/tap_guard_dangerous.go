@@ -2001,10 +2001,10 @@ func quotedSubstitutionCloses(command string, runes []rune, i int) bool {
 }
 
 // isANSICDollar reports whether the "$" at runes[i] opens a $'...' string. The
-// quote walk and spaceOutShellOperators judge the opener here, and the byte
-// scan in ansiQuoteAt reads it through the same ansiCDollarQuote, so they agree
-// on where a $'...' string starts (gt-0vbb2, gt-h4go2). heredocLineEnd reads
-// bytes forward and skips the second "$" of a "$$" in place for the same reason.
+// quote walk and spaceOutShellOperators judge the opener here, through
+// ansiCDollarQuote, so they agree on where a $'...' string starts (gt-0vbb2,
+// gt-h4go2). heredocLineEnd reads bytes forward and skips the second "$" of a
+// "$$" in place for the same reason.
 func isANSICDollar(runes []rune, i int) bool {
 	return ansiCDollarQuote(len(runes), runesAt(runes), i) >= 0
 }
@@ -2035,13 +2035,6 @@ func ansiCDollarQuote(n int, at func(int) rune, dollar int) int {
 // runesAt is the character reader ansiCDollarQuote takes, over runes.
 func runesAt(runes []rune) func(int) rune {
 	return func(i int) rune { return runes[i] }
-}
-
-// bytesAt is the character reader ansiCDollarQuote takes, over text's bytes. A
-// byte of a multi-byte character is never ASCII, so it matches none of the
-// characters the predicate looks for.
-func bytesAt(text string) func(int) rune {
-	return func(i int) rune { return rune(text[i]) }
 }
 
 // skipLineContinuations returns the index of the first rune at or after i that

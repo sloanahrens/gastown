@@ -1628,14 +1628,14 @@ func sandboxSecretsPipeOutput(argv []string, fed string, seg shellparse.Segment,
 }
 
 // sandboxSecretsANSICHereStrings returns the text of each here-string in command
-// whose word is ANSI-C quoted, keyed as splitHereStrings returns it. Only that
-// form has its escapes decoded: bash <<< $'x\nprintenv' hands the shell two lines,
-// while bash <<< 'x\nprintenv' hands it one word with a backslash in it, so
-// decoding every here-string blocks the single word the shell reports as a
-// missing command (gt-9q6sf, gt-3yhp0). The parsed redirections say which
-// "<<<" is a here-string (a quoted or commented one is not). The word is read
-// from its source text with its escapes undecoded (sandboxSecretsANSICBody),
-// the spelling the token line carries for it.
+// whose word is ANSI-C quoted, keyed by the body sandboxSecretsANSICBody reads.
+// Only that form has its escapes decoded: bash <<< $'x\nprintenv' hands the
+// shell two lines, while bash <<< 'x\nprintenv' hands it one word with a
+// backslash in it, so decoding every here-string blocks the single word the
+// shell reports as a missing command (gt-9q6sf, gt-3yhp0). The parsed
+// redirections say which "<<<" is a here-string (a quoted or commented one is
+// not). The word is read from its source text with its escapes undecoded
+// (sandboxSecretsANSICBody), the spelling the token line carries for it.
 func sandboxSecretsANSICHereStrings(command string) map[string]bool {
 	script, err := shellparse.Parse(command)
 	if err != nil {
