@@ -725,8 +725,7 @@ func TestSandboxSecretsSubstitutionHeredocBodies(t *testing.T) {
 
 // A branch a command line cannot reach, because launchers ahead of the command
 // consume it: an env that no launcher loop consumed prints the environment
-// (gt-80akp). The heredoc-pipeline parser this test also covered is gone with
-// the heredoc scanners: the pipeline now comes from the parsed segments.
+// (gt-80akp).
 func TestSandboxSecretsParserBranches(t *testing.T) {
 	t.Parallel()
 	if got := sandboxSecretsInvocation([]string{"env"}, nil, nil); got != "env prints the environment" {
@@ -1194,6 +1193,7 @@ func TestSandboxSecretsRefusesUnreadableCommands(t *testing.T) {
 		{"a quoted heredoc whose delimiter line is not alone", "cat <<'EOF'\n$FORGEJO_TOKEN\nEOF; bash -c 'true'", "unterminated here-document"},
 		{"a shell fed a heredoc on a line with an unclosed quote", "bash <<EOF\nmake test\nEOF\necho '", "unterminated quote"},
 		{"a substitution beside an unclosed quote", "echo \"$(cat <<'EOF'\nhello\nEOF\n)\"; echo '", "unterminated quote"},
+		{"a substitution's heredoc output run through a variable", "x=$(cat <<'EOF'\necho 'oops\nEOF\n)\n$x", "unterminated quote"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			reason := sandboxSecretsReason(tt.command)

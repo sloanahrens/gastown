@@ -4266,7 +4266,7 @@ func TestDangerousGuardQuotedParenShapes(t *testing.T) {
 // made it, so the rm on a later line sat mid-segment as an argument of the
 // previous line's command. bash runs those lines before it reports the syntax
 // error on the last one.
-func TestDangerousGuardLenientFallbackKeepsSeparators(t *testing.T) {
+func TestDangerousGuardRefusesUnreadableSeparatorLines(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name    string
@@ -4436,7 +4436,7 @@ func dangerousHookInput(t *testing.T, command string) string {
 // ";" that spaceOutShellOperators turns into separators stayed inside their
 // words, and a later line's rm sat mid-segment as an argument of the line
 // before it. bash runs each line before it reports the unclosed quote.
-func TestDangerousGuardFieldsFallbackKeepsSeparators(t *testing.T) {
+func TestDangerousGuardFieldsRefuseUnreadableSeparatorLines(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name    string

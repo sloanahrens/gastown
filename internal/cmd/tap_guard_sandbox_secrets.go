@@ -354,9 +354,9 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	expanded := sandboxSecretsExpandedNames(command)
 	var payloads []string
 	segments, piped := sandboxSecretsPipeSegments(tokens)
-	var stdin string            // the text a pipe hands the segment being judged
-	shells := false             // whether the line runs a shell or eval, which reads a substitution's output as a script
-	substitutedCommand := false // whether a segment's command word is a substitution, whose output the line runs
+	var stdin string         // the text a pipe hands the segment being judged
+	shells := false          // whether the line runs a shell or eval, which reads a substitution's output as a script
+	expandedCommand := false // whether a segment's command word is a substitution or a variable expansion, whose text the line runs
 	for i, segment := range segments {
 		r, launched, argv := sandboxSecretsSegment(segment, tainted, expanded)
 		if r != "" {
@@ -369,8 +369,8 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		if i+1 < len(segments) && piped[i+1] {
 			stdin = sandboxSecretsPipeOutput(argv, fed, ansiHereStrings)
 		}
-		if sandboxSecretsSubstitutedCommand(segment) {
-			substitutedCommand = true
+		if sandboxSecretsRunsExpansion(segment) {
+			expandedCommand = true
 		}
 		if len(argv) == 0 {
 			continue
@@ -466,13 +466,13 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		}
 	}
 	// A substitution's heredoc output runs as a command when the line runs it: as
-	// the command word ("$(cat <<'B' ... B)" runs the body it prints) or through a
-	// shell that reads it. Elsewhere it is data, an assignment value or an argument,
+	// the command word ("$(cat <<'B' ... B)" runs the body it prints, and so does
+	// "x=$(cat <<'B' ... B); $x") or through a shell that reads it. Elsewhere it is data, an assignment value or an argument,
 	// and text no parser reads is not a command the line runs, so it is not judged:
 	// x="$(cat <<'EOF' ... EOF)" with prose in the body is ordinary work
 	// (TestSandboxSecretsGuardAllowsOrdinaryWork). A readable output is judged either way.
 	for _, text := range sandboxSecretsSubstitutionHeredocs(command) {
-		if _, perr := shellparse.Parse(text); perr != nil && !shells && !substitutedCommand {
+		if _, perr := shellparse.Parse(text); perr != nil && !shells && !expandedCommand {
 			continue
 		}
 		payloads = append(payloads, text)
@@ -571,21 +571,13 @@ func sandboxSecretsSubstitutionHeredocs(command string) []string {
 	return bodies
 }
 
-// sandboxSecretsSegment looks through the assignments and launchers ahead of a
-// segment's command, as prWorkflowCommand does, but stops at an `env` that has
-// no command behind it. It returns the verdict on the command it finds, the
-// payloads a launcher carries, and that command's argv. tainted names the
-// variables the whole command assigns a secret to.
-//
-// A redirection ahead of the command ("2>/dev/null bash <<< printenv") is not
-// the command word. The shell applies it to the command all the same, so the
-// returned argv carries it after the command, where the callers already look
-// for a here-string, and the verdict is read on the command without it.
-// sandboxSecretsSubstitutedCommand reports whether a segment's command word is a
-// command substitution, so the line runs the substitution's output as a command.
+// sandboxSecretsRunsExpansion reports whether a segment's command word is a
+// command substitution or a variable expansion ($x, "$x", ${x}), so the line
+// runs the expansion's text as a command: a substitution's output may sit in a
+// variable and run through it, and text no parser reads must then be judged.
 // The words before it are the ones sandboxSecretsSegment skips the same way:
 // assignments, a leading "!", and redirections with their targets.
-func sandboxSecretsSubstitutedCommand(segment []string) bool {
+func sandboxSecretsRunsExpansion(segment []string) bool {
 	seg := trimShellKeywords(segment)
 	for len(seg) > 0 {
 		word := seg[0]
@@ -597,11 +589,21 @@ func sandboxSecretsSubstitutedCommand(segment []string) bool {
 			seg = seg[min(1+skip, len(seg)):]
 			continue
 		}
-		return word == prWorkflowSubstitutionWord
+		return word == prWorkflowSubstitutionWord || strings.HasPrefix(strings.Trim(word, "\"'"), "$")
 	}
 	return false
 }
 
+// sandboxSecretsSegment looks through the assignments and launchers ahead of a
+// segment's command, as prWorkflowCommand does, but stops at an `env` that has
+// no command behind it. It returns the verdict on the command it finds, the
+// payloads a launcher carries, and that command's argv. tainted names the
+// variables the whole command assigns a secret to.
+//
+// A redirection ahead of the command ("2>/dev/null bash <<< printenv") is not
+// the command word. The shell applies it to the command all the same, so the
+// returned argv carries it after the command, where the callers already look
+// for a here-string, and the verdict is read on the command without it.
 func sandboxSecretsSegment(segment []string, tainted, expanded map[string]bool) (reason string, payloads, argv []string) {
 	if sandboxSecretsHereStringRefsSecret(segment) {
 		return "a here-string expands a secret variable", nil, nil

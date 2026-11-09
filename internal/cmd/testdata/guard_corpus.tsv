@@ -384,3 +384,7 @@ test_scope	polecat	"go test -run TestGuardCorpus ./internal/cmd"	allow		gt-a7jzr
 # --- gt-a7jzr5 rework 3: the ANSI-C continuation and declaration-heredoc lines still judge the nested payloads they run live ---
 dangerous	polecat	"echo $\\\n'x'; bash -c 'git reset --hard'"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
 dangerous	polecat	"let y=1<<x; bash -c 'git reset --hard'\nx"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+# --- gt-a7jzr5 round 3: a variable command word runs a substitution's heredoc output, so that output is judged; stamp for the guard sources after the round ---
+dangerous	polecat	"git status"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
+container_suite	polecat	"go test ./internal/cmd -run TestGuardCorpusMatchesCurrentVerdicts -count=1"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
+test_scope	polecat	"go test -run TestSandboxSecrets ./internal/cmd"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
