@@ -316,6 +316,18 @@ type overrunState struct {
 	PushFailures int    `json:"push_failures,omitempty"`
 	PushGaveUp   bool   `json:"push_gave_up,omitempty"`
 	PushFailure  string `json:"push_failure,omitempty"`
+
+	// SavedAt is when the save step (overrunStop, step 1b) ran, before the
+	// session was stopped; a stop resumed later does not save again. SavedHead
+	// is the branch head that save pushed (empty when it had nothing to push),
+	// SaveCommitted says it made the WIP commit, and SaveFailure is why the
+	// save's push or commit was refused. A refused save keeps the sandbox and
+	// the seat paused, and the note names it.
+	SavedAt       time.Time `json:"saved_at,omitzero"`
+	SavedHead     string    `json:"saved_head,omitempty"`
+	SaveCommitted bool      `json:"save_committed,omitempty"`
+	SaveFailure   string    `json:"save_failure,omitempty"`
+
 	// ReworkSHA is the commit the kept branch held on origin before the stop's
 	// own push, when it was the worktree's head too: the finished work was
 	// already there, so the hand-back is rework (overrunStop, step 5).

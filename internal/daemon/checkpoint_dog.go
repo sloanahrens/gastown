@@ -183,7 +183,17 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 
 // checkpointWorktreeOutcome is checkpointWorktree with a clean worktree told
 // apart from a refused checkpoint; the overrun guard retries only the latter.
-func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string) (outcome checkpointOutcome) {
+func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string) checkpointOutcome {
+	return d.checkpointWorktreeAs(workDir, rigName, polecatName, checkpointCommitMessage)
+}
+
+// checkpointCommitMessage is the subject of a checkpoint dog commit.
+const checkpointCommitMessage = "WIP: checkpoint (auto)"
+
+// checkpointWorktreeAs is checkpointWorktreeOutcome with the commit's subject
+// given: the overrun stop's save names the bead it saved (overrunSaveWork) and
+// otherwise takes the same staging, exclusions and revert guard.
+func (d *Daemon) checkpointWorktreeAs(workDir, rigName, polecatName, message string) (outcome checkpointOutcome) {
 	g := d.gitAt(workDir)
 
 	// Check git status (exclude runtime dirs from consideration)
@@ -329,7 +339,7 @@ func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string)
 	}
 
 	// Commit the checkpoint
-	if err := g.Commit("WIP: checkpoint (auto)"); err != nil {
+	if err := g.Commit(message); err != nil {
 		d.logger.Printf("checkpoint_dog: git commit failed in %s/%s: %v", rigName, polecatName, err)
 		return checkpointRefused
 	}
