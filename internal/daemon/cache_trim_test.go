@@ -27,6 +27,7 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
@@ -296,6 +297,122 @@ func (f *cacheTrimFixture) appliedTrimJob(t *testing.T) cachevol.SeedJob {
 	}
 	t.Fatal("the pass applied no Job")
 	return cachevol.SeedJob{}
+}
+
+// cacheTrimValues is the image pair a test writes for the CI-built values file:
+// two digest references for one commit, the pair gt update images records.
+func cacheTrimValues() imagevalues.Values {
+	return imagevalues.Values{
+		Daemon:  "registry.internal:5000/town/gastown-daemon@sha256:" + strings.Repeat("a", 64),
+		Polecat: "registry.internal:5000/town/gastown-polecat@sha256:" + strings.Repeat("b", 64),
+		Commit:  strings.Repeat("c", 40),
+	}
+}
+
+// writeValuesFile records v at the path the pass reads under the fixture's town
+// root.
+func (f *cacheTrimFixture) writeValuesFile(t *testing.T, v imagevalues.Values) {
+	t.Helper()
+	path := imagevalues.PathIn(filepath.Join(f.d.config.TownRoot, "gastown"))
+	if err := imagevalues.Write(path, v); err != nil {
+		t.Fatalf("write the values file: %v", err)
+	}
+}
+
+// TestCacheTrimImageFromTheValuesFile is the bead's gate: with the CI-built
+// values file present, the Job the pass applies runs the polecat image the file
+// names, and its digest reference carries no pull policy; with no file the Job
+// runs the claim's profile image under today's policy for its moving tag.
+func TestCacheTrimImageFromTheValuesFile(t *testing.T) {
+	t.Parallel()
+	t.Run("the values file names the image", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+		values := cacheTrimValues()
+		f.writeValuesFile(t, values)
+		f.d.runDiskMaintenance()
+
+		containers := f.appliedTrimJob(t).Spec.Template.Spec.Containers
+		if len(containers) == 0 {
+			t.Fatal("the applied Job has no container")
+		}
+		for _, c := range containers {
+			if c.Image != values.Polecat {
+				t.Errorf("the Job's container %s runs %q, want the values file's polecat image %q", c.Name, c.Image, values.Polecat)
+			}
+			if c.ImagePullPolicy != "" {
+				t.Errorf("the Job's container %s carries the pull policy %q, want none for a digest reference", c.Name, c.ImagePullPolicy)
+			}
+		}
+	})
+	t.Run("no values file", func(t *testing.T) {
+		t.Parallel()
+		f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+		f.d.runDiskMaintenance()
+
+		// The fixture's profile runs a moving tag, so the claim's image keeps the
+		// policy a moving tag takes.
+		const claimImage = "gastown-polecat:dev"
+		containers := f.appliedTrimJob(t).Spec.Template.Spec.Containers
+		if len(containers) == 0 {
+			t.Fatal("the applied Job has no container")
+		}
+		for _, c := range containers {
+			if c.Image != claimImage {
+				t.Errorf("the Job's container %s runs %q, want the claim's image %q with no values file", c.Name, c.Image, claimImage)
+			}
+			if c.ImagePullPolicy != "Always" {
+				t.Errorf("the Job's container %s carries the pull policy %q, want %q for a moving tag", c.Name, c.ImagePullPolicy, "Always")
+			}
+		}
+	})
+}
+
+// TestCacheTrimMalformedValuesFile pins the refusal: a values file that is there
+// and does not parse is logged, stops the pass before any cluster call, and is
+// retried in fifteen minutes rather than at the full interval.
+func TestCacheTrimMalformedValuesFile(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	path := imagevalues.PathIn(filepath.Join(f.d.config.TownRoot, "gastown"))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create the values file's directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("polecat: not a digest\n"), 0o644); err != nil {
+		t.Fatalf("write the malformed values file: %v", err)
+	}
+
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+	trims := 0
+	profiles := f.d.diskMaint.sandboxes
+	f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+		trims++
+		return profiles()
+	}
+
+	f.d.runDiskMaintenance()
+	if trims != 1 {
+		t.Fatalf("the trim ran %d times at the first tick, want 1", trims)
+	}
+	if verbs := f.verbs(); len(verbs) != 0 {
+		t.Errorf("the malformed values file let the pass reach the cluster: %v", verbs)
+	}
+	logged := f.log.String()
+	if !strings.Contains(logged, "imagevalues:") || !strings.Contains(logged, "nothing trimmed") {
+		t.Errorf("the log does not name the values file's error: %s", logged)
+	}
+
+	now = now.Add(5 * time.Minute)
+	f.d.runDiskMaintenance() // a failed pass is due in fifteen minutes, not now
+	if trims != 1 {
+		t.Fatalf("the trim ran %d times five minutes after the malformed file, want the retry at fifteen", trims)
+	}
+	now = now.Add(10 * time.Minute)
+	f.d.runDiskMaintenance() // the retry
+	if trims != 2 {
+		t.Fatalf("the trim ran %d times fifteen minutes after the malformed file, want a retry", trims)
+	}
 }
 
 // TestDiskMaintenanceAppliesTheShardsBeforeTheJob is the bead's gate: the

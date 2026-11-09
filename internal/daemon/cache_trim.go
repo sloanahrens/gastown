@@ -42,6 +42,7 @@ import (
 	"maps"
 	"math"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -52,6 +53,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/polecat/cachevol"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 )
@@ -123,10 +125,11 @@ var errCacheTrimNoContext = errors.New("the kubeconfig names no sandbox context"
 // takes.
 var cacheTrimClaimRE = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
-// cacheTrimClaim is one shared cache claim a pass trims, the image its trim
-// Job runs, and where that Job's pod runs: the image and the placement the
-// sandbox profiles that mount it run and sit on, since the Job's containers are
-// helpers of that image and the claim's storage binds on that pool (gt-5paez).
+// cacheTrimClaim is one shared cache claim a pass trims, the image its sandbox
+// profiles mount, and where that Job's pod runs: the placement those profiles
+// run and sit on, since the claim's storage binds on that pool (gt-5paez). The
+// pass runs the image a CI-built values file names when there is one, and this
+// image otherwise.
 type cacheTrimClaim struct {
 	ClaimName    string
 	Image        string
@@ -306,6 +309,16 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	if len(claims) == 0 {
 		return true
 	}
+	// The pass runs the polecat image the CI-built values file names, when that
+	// file is there, so the trim's helper is the one built with the daemon's
+	// commit rather than a moving tag a profile carries. The file is read once
+	// for the pass, so every Job it applies runs the one image it records; with
+	// no file each claim keeps its profile's image (gt-pm2y2m).
+	valuesImage, fromValues, err := d.cacheTrimImage()
+	if err != nil {
+		d.cacheTrimLogf("disk_maintenance: cache trim: %v; nothing trimmed", err)
+		return false
+	}
 	capBytes, err := cacheTrimCap(s.getenv)
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim: not applied: %v", err)
@@ -341,13 +354,31 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 			d.cacheTrimLogf("disk_maintenance: cache trim %s: no claim of that name is in the cluster; nothing trimmed", claim.ClaimName)
 			continue
 		}
+		trimImage := claim.Image
+		if fromValues {
+			trimImage = valuesImage
+		}
 		for _, namespace := range found {
-			if !d.cacheTrimClaim(ctx, kubeconfig, claim, namespace, capBytes, mode == agentconfig.DiskMaintenanceModeApply, trimmed) {
+			if !d.cacheTrimClaim(ctx, kubeconfig, claim, trimImage, namespace, capBytes, mode == agentconfig.DiskMaintenanceModeApply, trimmed) {
 				verdict = false
 			}
 		}
 	}
 	return verdict
+}
+
+// cacheTrimImage is the polecat image the CI-built values file records, and
+// whether there is one at all: the Job that trims a claim runs the helper built
+// with the daemon's commit, not a tag a sandbox profile names (gt-pm2y2m). The
+// file is the one gt update images writes under the town's gastown directory. A
+// pair not built yet answers false with no error; a file that is there and
+// cannot be read or parsed is an error, never an absent pair.
+func (d *Daemon) cacheTrimImage() (string, bool, error) {
+	values, ok, err := imagevalues.LoadIn(filepath.Join(d.config.TownRoot, "gastown"))
+	if err != nil {
+		return "", false, err
+	}
+	return values.Polecat, ok, nil
 }
 
 // cacheTrimPreflight refuses a kubeconfig that does not resolve the sandbox
@@ -490,15 +521,16 @@ func cacheTrimOverTheCap(used, capBytes int64) bool {
 
 // cacheTrimClaim trims one claim in one namespace: it reads the listing through
 // a pod that mounts the claim there, builds the trim, and in apply mode applies
-// it. trimmed is the namespace each claim this pass already trims in, which the
-// claim joins.
+// it. image is the image the Job runs, which the pass resolved for the whole
+// pass; trimmed is the namespace each claim this pass already trims in, which
+// the claim joins.
 //
 // It reports whether this claim reached a verdict. A read that failed, no
 // running pod to read the listing through, a list that does not fit the claim,
 // or an apply that failed reports false, so the pass records a retry instead of
 // the full interval. A claim the config refuses, and a listing at or under the
 // cap, are verdicts.
-func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {
+func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {
 	sandboxes, sources, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the pods that mount it could not be read: %v; nothing trimmed", claim.ClaimName, namespace, err)
@@ -547,7 +579,7 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	m, err := cachevol.BuildTrimManifest(cachevol.TrimJobInput{
 		Name:             jobName,
 		Namespace:        namespace,
-		Image:            claim.Image,
+		Image:            image,
 		ClaimName:        claim.ClaimName,
 		Listing:          listing,
 		CapBytes:         capBytes,
