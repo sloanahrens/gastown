@@ -24,6 +24,10 @@ The pair is the one gt update --images recorded before it moved the daemon. The
 daemon and its polecat image go back together, and the daemon is recreated on
 them and must come back on their commit within the restart bound.
 
+--pod-context and --pod-namespace, given together, name the Deployment of a
+daemon that runs as a pod: the pair is restored to that Deployment, and the
+daemon's build is read from its pod rather than the state file.
+
 The command refuses, and changes nothing, when no digest install has been
 recorded, when the recorded pair is the one the daemon already runs, and when
 the registry does not hold a digest of the pair. A restore that fails escalates.
