@@ -724,6 +724,34 @@ func TestSandboxSecretsSubstitutionHeredocBodies(t *testing.T) {
 	}
 }
 
+// A backtick substitution in an unquoted heredoc body is judged as the shell cuts
+// it, so a secret read the shell runs there is refused (gt-4wd164). Only the
+// escaped inner backtick needs that cut to be seen: its raw body hides the read.
+// The doubled-backslash and escaped-dollar rows are refused by the text match the
+// walk already makes, so they hold whatever the cut does. A quoted body is data,
+// and an escaped pair the shell reads as literal text runs nothing.
+func TestSandboxSecretsHeredocBacktickBodyIsUnescaped(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		command string
+		refused bool
+	}{
+		{"a plain backtick body", "cat > f <<EOF\n`cat .env.local`\nEOF", true},
+		{"an escaped inner backtick", "cat > f <<EOF\necho `echo \\`cat .env.local\\``\nEOF", true},
+		{"a doubled backslash before a live dollar-paren", "cat > f <<EOF\necho `echo \\\\\\\\$(cat .env.local)`\nEOF", true},
+		{"an escaped dollar in a backtick body", "cat > f <<EOF\necho `echo \\$(cat .env.local)`\nEOF", true},
+		{"an escaped inner backtick around a harmless command", "cat > f <<EOF\necho `echo \\`echo hi\\``\nEOF", false},
+		{"the escaped inner backtick in a quoted body is data", "cat > f <<'EOF'\necho `echo \\`cat .env.local\\``\nEOF", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason := sandboxSecretsReason(tc.command); (reason != "") != tc.refused {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want refused = %v", tc.command, reason, tc.refused)
+			}
+		})
+	}
+}
+
 // A branch a command line cannot reach, because launchers ahead of the command
 // consume it: an env that no launcher loop consumed prints the environment
 // (gt-80akp).

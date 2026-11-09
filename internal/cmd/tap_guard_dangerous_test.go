@@ -1594,6 +1594,9 @@ func TestHeredocBodySubstitutionsReadsParsedBodies(t *testing.T) {
 		{"unquoted dollar-paren body", "cat <<EOF\n$(git reset --hard)\nEOF", []string{"git reset --hard"}},
 		{"quoted body is data", "cat <<'EOF'\n$(git reset --hard)\nEOF", nil},
 		{"escaped dollar-paren is literal", "cat <<EOF\n\\$(git reset --hard)\nEOF", nil},
+		// A backtick body is returned as written and as the shell cuts it, so the
+		// nested command the shell runs is judged (gt-4wd164).
+		{"backtick body with an escaped inner backtick", "cat <<EOF\necho `echo \\`cat .env.local\\``\nEOF", []string{"echo \\`cat .env.local\\`", "echo `cat .env.local`"}},
 		{"unreadable command comes back whole", "cat <<EOF\n$(git reset --hard)", []string{"cat <<EOF\n$(git reset --hard)"}},
 		// Intentional flip: an unterminated heredoc body the text scan skipped
 		// (span.unterminated) now returns the whole command, which the walk refuses.
