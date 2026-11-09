@@ -207,6 +207,13 @@ func TestParseBdCloseInvocations(t *testing.T) {
 		{name: "inside bash -c", command: "bash -c 'bd close gt-arno'", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
 		{name: "inside bash -lc", command: `bash -lc "bd close -r 'cancel: x' gt-arno"`, want: []bdCloseInvocation{{IDs: []string{"gt-arno"}, Reason: "cancel: x"}}},
 		{name: "a bash -c payload that is not a close", command: "bash -c 'echo bd close gt-arno'", want: nil},
+		{name: "a close in a process substitution", command: "cat <(bd close gt-arno)", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		// The parser cannot read this line, so the close inside its command
+		// substitution is unknown: it is judged as a close of the branch's bead
+		// rather than passed (fail closed). A line with no substitution has
+		// nothing to judge.
+		{name: "a substitution the parser cannot read is an unknown close", command: `echo $(bd close gt-arno) "unterminated`, want: []bdCloseInvocation{{IDsUnreadable: true}}},
+		{name: "a line the parser cannot read with no substitution is not a close", command: `echo "unterminated`, want: nil},
 		{
 			// A variable id is unreadable, so it cannot match a branch and
 			// cannot be judged. It is still reported as an invocation, so

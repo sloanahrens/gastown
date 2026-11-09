@@ -436,3 +436,7 @@ test_scope	polecat	"go test ./internal/config/..."	allow		gt-krdodf	4f7653c45d75
 dangerous	polecat	"git reset --hard origin/main~3"	refuse	Reset onto a remote-tracking ref	gt-oqcbqh	12c24168d61bb1a4693959c9dcae51fe8d6b0122396743bbce143951dceb63bb
 container_suite	polecat	"echo gt-oqcbqh"	allow		gt-oqcbqh	12c24168d61bb1a4693959c9dcae51fe8d6b0122396743bbce143951dceb63bb
 test_scope	polecat	"go test ./internal/hooks/..."	allow		gt-oqcbqh	12c24168d61bb1a4693959c9dcae51fe8d6b0122396743bbce143951dceb63bb
+# --- gt-bogfce: the bd-close guard reads its substitutions from the parsed command (unreadable lines fail closed), which moves the freeze stamp; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"git reset --hard HEAD~2"	refuse	Hard reset discards	gt-bogfce	abaae2455787b45bb216b2f99e7006ccf11b0c1c501b36111c5b086140f0f20f
+container_suite	polecat	"echo ok; echo done"	allow		gt-bogfce	abaae2455787b45bb216b2f99e7006ccf11b0c1c501b36111c5b086140f0f20f
+test_scope	polecat	"go test ./internal/shellparse/... -run TestParse"	allow		gt-bogfce	abaae2455787b45bb216b2f99e7006ccf11b0c1c501b36111c5b086140f0f20f

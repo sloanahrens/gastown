@@ -1397,6 +1397,57 @@ func resolveShellVar(arg string, vars map[string]string) string {
 	return arg
 }
 
+// parsedSubstitutionBodies returns the body of every substitution the shell
+// expands in command as the parser reads it: "$(...)", a backquote, and the
+// "<(...)" and ">(...)" process substitutions. Each body is the source text the
+// shell runs (Script.Raw), so a guard recurses into it as a command of its own.
+// readable is false when the parser cannot read command; the caller decides
+// how to fail closed.
+func parsedSubstitutionBodies(command string) (bodies []string, readable bool) {
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return nil, false
+	}
+	for _, sub := range dangerousScriptSubs(script) {
+		if sub.Raw != "" {
+			bodies = append(bodies, sub.Raw)
+		}
+	}
+	return bodies, true
+}
+
+// blankHeredocBodies is command with the content of every heredoc body replaced
+// by spaces, newlines and offsets kept. The parser reads the body as blank and
+// reads no substitution in it, as stripHeredocBodies leaves the scanners. The
+// terminator line is kept, since a span ends with it and the heredoc needs it to
+// close, so the rest of the command still parses.
+func blankHeredocBodies(command string) string {
+	b := []byte(command)
+	for _, span := range heredocSpans(command) {
+		if span.unterminated || span.bodyEnd <= span.bodyStart {
+			continue
+		}
+		// The span's last line is the terminator: blank up to its first byte.
+		content := command[span.bodyStart:span.bodyEnd]
+		terminator := strings.LastIndex(strings.TrimSuffix(content, "\n"), "\n") + 1
+		for i := span.bodyStart; i < span.bodyStart+terminator; i++ {
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+		}
+	}
+	return string(b)
+}
+
+// mayHoldSubstitution reports whether command holds the text a command or
+// process substitution opens with. It is a substring test, not a scan: it
+// answers only whether a command the parser cannot read could hold a
+// substitution the guard must judge.
+func mayHoldSubstitution(command string) bool {
+	return strings.Contains(command, "`") || strings.Contains(command, "$(") ||
+		strings.Contains(command, "<(") || strings.Contains(command, ">(")
+}
+
 // commandSubstitutions extracts the inner command text of every outermost $(...)
 // or `...` command substitution in command, so evaluateDangerousCommand can
 // recurse into it the same as a bash -c/eval payload (gt-5ihs attempt 2:
