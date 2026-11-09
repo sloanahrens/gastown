@@ -97,6 +97,8 @@ func (b bdStoreTown) runWithEnv(t *testing.T, role, cwd, command string, extraEn
 func TestTapGuardBdCreateStore(t *testing.T) {
 	t.Parallel()
 	b := newBdStoreTown(t)
+	townDB := filepath.Join(b.town, ".beads", "x.db")
+	rigDB := filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db")
 	tests := []struct {
 		name    string
 		role    string
@@ -247,6 +249,20 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"town root gt escalate", polecatRole, b.town, `gt escalate "bd create"`, false},
 		{"crew at town root", "gastown/crew/alice", b.town, `bd create --title=x`, false},
 		{"no role, town root", "", b.town, `bd create --title=x`, false},
+		// A store export the shell may not run (an if body, the left side of a
+		// pipe) is unplaced for a create after it; one in an if condition always
+		// runs and is followed (gt-j41yim).
+		{"conditional rig export, then create", polecatRole, b.worktree, `if false; then export BEADS_DB=` + rigDB + `; fi; bd create --title=x`, true},
+		{"rig export on the left of a pipe, then create", polecatRole, b.worktree, `export BEADS_DB=` + rigDB + ` | cat; bd create --title=x`, true},
+		{"rig export in an if condition, then create", polecatRole, b.worktree, `if export BEADS_DB=` + rigDB + `; then :; fi; bd create --title=x`, false},
+		// An unquoted heredoc body runs its substitutions; a quoted one is data
+		// (gt-j41yim).
+		{"unquoted heredoc substitution creates in the town", polecatRole, b.worktree, "cat <<EOF\n$(bd create --title=x --db " + townDB + ")\nEOF", true},
+		{"quoted heredoc substitution is data", polecatRole, b.worktree, "cat <<'EOF'\n$(bd create --title=x --db " + townDB + ")\nEOF", false},
+		// A construct header's substitution runs before the body, in the
+		// directory the line has reached when it runs (gt-j41yim).
+		{"for list creates in the town", polecatRole, b.worktree, `for x in $(bd create --title=x --db ` + townDB + `); do :; done`, true},
+		{"cd to the town before a for list that creates", polecatRole, b.worktree, `cd ` + b.town + ` && for x in $(bd create --title=x); do :; done`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

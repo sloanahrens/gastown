@@ -395,3 +395,7 @@ test_scope	polecat	"go test ./internal/shellparse -count=1"	allow		gt-j927ao	a89
 container_suite	polecat	"bd create --title=x \""	refuse	cannot be read	gt-j41yim	28e1c9a374a38255d41d632fd8af2065edfc208c1d77fa6790bb55b9a2cd8cad
 dangerous	polecat	"bd create --title=x \""	refuse	cannot be read	gt-j41yim	28e1c9a374a38255d41d632fd8af2065edfc208c1d77fa6790bb55b9a2cd8cad
 test_scope	polecat	"bd create --title=x \""	allow		gt-j41yim	28e1c9a374a38255d41d632fd8af2065edfc208c1d77fa6790bb55b9a2cd8cad
+# --- gt-j41yim: the bd-create-store walk reads parsed segments; stamp for the guard sources after the walk moved (an if-body export is unplaced, so the create after it is refused by the store guard, not these) ---
+container_suite	polecat	"if false; then export BEADS_DB=/t/rig/.beads/x.db; fi; bd create --title=x"	allow		gt-j41yim	d472bbc7f98623cbb0b9dc1930e521ce44d0365378a460434c24b49e828b8165
+dangerous	polecat	"if false; then export BEADS_DB=/t/rig/.beads/x.db; fi; bd create --title=x"	allow		gt-j41yim	d472bbc7f98623cbb0b9dc1930e521ce44d0365378a460434c24b49e828b8165
+test_scope	polecat	"if false; then export BEADS_DB=/t/rig/.beads/x.db; fi; bd create --title=x"	allow		gt-j41yim	d472bbc7f98623cbb0b9dc1930e521ce44d0365378a460434c24b49e828b8165

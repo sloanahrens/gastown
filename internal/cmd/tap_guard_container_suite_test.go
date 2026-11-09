@@ -1911,9 +1911,9 @@ func TestContainerSuiteGuardsBoundHeredocRecursion(t *testing.T) {
 // shell parses it — with the backslash that escapes a nested backtick pair
 // dropped. Cut raw, the body handed to the evaluator held "\`", which opens no
 // substitution, so "echo \`make test\`" written inside a heredoc ran make test
-// with nothing refusing it, while the same text on a command line
-// (substitutionScripts) was refused (gt-h3312). The pair below pins that the
-// unquoted body is judged and the quoted one stays data.
+// with nothing refusing it, while the same text on a command line was refused
+// (gt-h3312). The pair below pins that the unquoted body is judged and the
+// quoted one stays data.
 func TestContainerSuiteHeredocEscapedNestedBacktickIsJudged(t *testing.T) {
 	t.Parallel()
 	goTree := fakeModule(t, "gastown/refinery/rig")
