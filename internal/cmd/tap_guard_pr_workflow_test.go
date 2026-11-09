@@ -74,8 +74,8 @@ func TestMatchesPRWorkflowCommand(t *testing.T) {
 
 		// gt-q91m: a heredoc body fed to a shell invoker is not data, it's a
 		// script the shell will run — the same distinction
-		// shellFedHeredocBodies draws for the dangerous-command guard
-		// (gt-9g0y). "bash <<EOF ... gh pr create ... EOF" must be caught the
+		// the distinction the dangerous-command guard draws for its shell-fed
+		// heredocs (gt-9g0y). "bash <<EOF ... gh pr create ... EOF" must be caught the
 		// same as the equivalent compound command.
 		{"gh pr create inside a bash-fed heredoc", "bash <<'EOF'\ngh pr create --title foo\nEOF", true},
 		{"git checkout -b inside a sh-fed heredoc", "sh <<EOF\ngit checkout -b feature/x\nEOF", true},

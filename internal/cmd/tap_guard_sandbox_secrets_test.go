@@ -1277,3 +1277,55 @@ func TestSandboxSecretsRefusesUnplacedHeredocBody(t *testing.T) {
 		}
 	}
 }
+
+// gt-krdodf: the verdicts the sandbox walk gives before its token lines come
+// from the parsed segments rather than from prWorkflowTokenText. A command the
+// parser cannot read is refused whole, and a substitution's output a shell runs
+// is judged there too. An empty want is an allow; otherwise the reason must
+// contain it. Each row is recorded against the walk before the move.
+func TestSandboxSecretsVerdictsPinnedBeforeParsedSegments(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"an unclosed quote inside a process substitution", "sh <(echo 'printenv)", "cannot be read (unterminated quote)"},
+		{"an unclosed substitution after an echo", "echo \"$(printenv\"", "cannot be read ("},
+		{"an unclosed quote after an assignment substitution", "x=$(echo printenv) '", "cannot be read (unterminated quote)"},
+		{"a shell fed a process substitution that prints the environment", "sh <(echo printenv)", "environment"},
+		{"a shell fed a process substitution that lists files", "sh <(echo ls)", ""},
+		// Intentional flip (gt-krdodf): the walk reads the word's resolved text, so
+		// the escape \x70 is the "p" the shell runs. The verdict before the move was allow.
+		{"a shell fed an ANSI-C escaped command name", "bash -c $'\\x70rintenv'", "prints the environment"},
+		{"a prefix assignment ahead of export still lists the environment", "X=1 export", "environment"},
+		{"export of a named variable lists nothing", "export FOO=bar", ""},
+		{"export -p lists the environment", "export -p", "environment"},
+		{"a declaration after a separator is its own site", "ls; export FOO=bar", ""},
+		{"a substitution beside a secret variable in double quotes", "echo \"pre $(echo a) ${TOKEN}\"", "secret variable"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if tt.want == "" && reason != "" {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want allow", tt.command, reason)
+			}
+			if tt.want != "" && !strings.Contains(reason, tt.want) {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want a reason containing %q", tt.command, reason, tt.want)
+			}
+		})
+	}
+}
+
+// gt-krdodf: a shell's stdin text is read from the parsed command. A body the
+// parser cannot read comes back unjudged so the walk refuses it at depth; no
+// lenient read of its tokens may hand back a text the walk allows.
+func TestSandboxSecretsStdoutTextPassesUnreadableBodyOn(t *testing.T) {
+	t.Parallel()
+	const body = "echo 'printenv"
+	if got := sandboxSecretsStdoutText(body); got != body {
+		t.Errorf("sandboxSecretsStdoutText(%q) = %q, want the unreadable body unchanged", body, got)
+	}
+	if reason := sandboxSecretsReason(body); !strings.Contains(reason, "cannot be read") {
+		t.Errorf("sandboxSecretsReason(%q) = %q, want the unreadable refusal", body, reason)
+	}
+}

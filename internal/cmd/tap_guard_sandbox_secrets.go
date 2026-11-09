@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -344,16 +345,14 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	if err != nil || unplaced {
 		return sandboxSecretsUnreadableReason(err), false
 	}
-	tokenText := prWorkflowTokenText(command)
-	tokens := shellTokenize(tokenText)
-	ansiHereStrings := sandboxSecretsANSICHereStrings(tokenText)
+	ansiHereStrings := sandboxSecretsANSICHereStrings(command)
 	tainted := maps.Clone(inherited)
 	if tainted == nil {
 		tainted = map[string]bool{}
 	}
 	expanded := sandboxSecretsExpandedNames(command)
 	var payloads []string
-	segments, piped := sandboxSecretsPipeSegments(tokens)
+	segments, piped := sandboxSecretsParsedSegments(command, script)
 	var stdin string         // the text a pipe hands the segment being judged
 	shells := false          // whether the line runs a shell or eval, which reads a substitution's output as a script
 	expandedCommand := false // whether a segment's command word is a substitution or a variable expansion, whose text the line runs
@@ -1264,28 +1263,176 @@ func sandboxSecretsPrintedText(argv []string) string {
 	return sandboxSecretsEscapes.Replace(strings.Join(args, " "))
 }
 
-// sandboxSecretsPipeSegments splits tokens as splitShellSegments does, and reports for
-// each segment whether a pipe feeds it. A ;, && or || separator feeds nothing.
-func sandboxSecretsPipeSegments(tokens []string) (segments [][]string, piped []bool) {
-	var current []string
-	pipe := false // whether the separator before current is a pipe
-	for _, token := range tokens {
-		if shellCommandSeparators[token] {
-			if len(current) > 0 {
-				segments = append(segments, current)
-				piped = append(piped, pipe)
-			}
-			current = nil
-			pipe = token == "|"
-			continue
+// sandboxSecretsParsedSegments returns the command sites of script, which is the
+// parse of command, as the token lines the walk judges, and reports for each
+// whether a pipe feeds it. A ;, && or || separator feeds nothing. A site with no
+// tokens at all is not one.
+func sandboxSecretsParsedSegments(command string, script shellparse.Script) (segments [][]string, piped []bool) {
+	pipe := false // whether the separator before the segment is a pipe
+	for _, seg := range script.Segments {
+		if tokens := sandboxSecretsSegmentTokens(command, seg); len(tokens) > 0 {
+			segments = append(segments, tokens)
+			piped = append(piped, pipe)
 		}
-		current = append(current, token)
-	}
-	if len(current) > 0 {
-		segments = append(segments, current)
-		piped = append(piped, pipe)
+		pipe = seg.After == "|"
 	}
 	return segments, piped
+}
+
+// sandboxSecretsDeclarationBuiltins are the builtins the parser reads as a
+// declaration clause when they lead a command. The arguments of such a clause,
+// flags included, come back as assignments rather than words: export -p gives
+// the assignment "=-p".
+var sandboxSecretsDeclarationBuiltins = map[string]bool{
+	"export": true, "declare": true, "typeset": true, "local": true, "readonly": true,
+}
+
+// sandboxSecretsSegmentTokens returns the tokens of one command site in the order
+// the shell reads them: the prefix assignments, then its words and redirections
+// by source position, then the arguments of a declaration builtin. A word is its
+// resolved text (sandboxSecretsParsedWord). A redirection is its operator and
+// then its target, the spaced form shellRedirection reads. A here-document
+// contributes no token: the walk judges its body from the parsed script. A
+// redirection the parser marks Inherited belongs to an enclosing compound
+// command, not to this site, and is left out.
+func sandboxSecretsSegmentTokens(command string, seg shellparse.Segment) []string {
+	prefix, args := sandboxSecretsAssignSplit(command, seg)
+	var tokens []string
+	for _, a := range prefix {
+		tokens = append(tokens, sandboxSecretsAssignToken(a, seg.Subs))
+	}
+	type item struct {
+		at     int
+		tokens []string
+	}
+	var items []item
+	for _, w := range seg.Words {
+		items = append(items, item{w.Src, []string{sandboxSecretsParsedWord(w, seg.Subs)}})
+	}
+	for _, r := range seg.Redirs {
+		if r.Inherited {
+			continue
+		}
+		target := sandboxSecretsParsedWord(r.Word, seg.Subs)
+		if body, ok := sandboxSecretsANSICBody(r.Word.Raw); ok && r.Op == "<<<" {
+			target = body
+		}
+		items = append(items, item{r.OpSrc, []string{r.N + r.Op, target}})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].at < items[j].at })
+	for _, it := range items {
+		tokens = append(tokens, it.tokens...)
+	}
+	for _, a := range args {
+		tokens = append(tokens, sandboxSecretsAssignToken(a, seg.Subs))
+	}
+	return tokens
+}
+
+// sandboxSecretsAssignSplit splits a segment's assignments into the prefix the
+// shell sets for its command and the arguments of a declaration builtin. The
+// parser gives an assignment no source position, so the text before the command
+// word decides: a declaration's arguments follow its keyword, and a prefix is the
+// run of assignments that is that text. When the text holds anything else, such
+// as a redirection, the split is unknown and every assignment is taken as a
+// prefix. That can only add refusals: a declaration argument read as a prefix
+// leaves its builtin with no arguments, which the walk reads as a listing.
+func sandboxSecretsAssignSplit(command string, seg shellparse.Segment) (prefix, args []shellparse.Word) {
+	if len(seg.Words) == 0 || !sandboxSecretsDeclarationBuiltins[strings.ToLower(filepath.Base(seg.Words[0].Text))] {
+		return seg.Assigns, nil
+	}
+	at := seg.Words[0].Src
+	if at < 0 || at > len(command) {
+		return seg.Assigns, nil
+	}
+	head := command[:at]
+	// The head is what precedes the keyword in its own command.
+	if i := strings.LastIndexAny(head, ";&|\n()`"); i >= 0 {
+		head = head[i+1:]
+	}
+	for k := len(seg.Assigns); k >= 0; k-- {
+		if sandboxSecretsHeadIs(head, seg.Assigns[:k]) {
+			return seg.Assigns[:k], seg.Assigns[k:]
+		}
+	}
+	return seg.Assigns, nil
+}
+
+// sandboxSecretsHeadIs reports whether head is exactly the source text of the
+// assignments, in order and separated by blanks.
+func sandboxSecretsHeadIs(head string, assigns []shellparse.Word) bool {
+	rest := head
+	for _, a := range assigns {
+		rest = strings.TrimLeft(rest, " \t")
+		if !strings.HasPrefix(rest, a.Raw) {
+			return false
+		}
+		rest = rest[len(a.Raw):]
+		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
+			return false
+		}
+	}
+	return strings.TrimSpace(rest) == ""
+}
+
+// sandboxSecretsAssignToken returns an assignment's token: its text, with the
+// "=" the parser puts in front of an argument that has no name removed.
+func sandboxSecretsAssignToken(a shellparse.Word, subs []shellparse.Script) string {
+	return strings.TrimPrefix(sandboxSecretsParsedWord(a, subs), "=")
+}
+
+// sandboxSecretsParsedWord returns a word's text as the walk judges it: quoting is
+// resolved, and each substitution the word holds stands as the one opaque word
+// prWorkflowSubstitutionWord, so the words around it keep their place. subs are
+// the substitutions of the segment the word belongs to. A substitution's source
+// is masked where the word holds it, and so is a process substitution the word
+// names.
+func sandboxSecretsParsedWord(w shellparse.Word, subs []shellparse.Script) string {
+	text := w.Text
+	for _, sub := range subs {
+		text = sandboxSecretsMaskFirst(text, "$("+sub.Raw+")", "`"+sub.Raw+"`")
+	}
+	for _, ps := range w.ProcSubs {
+		text = sandboxSecretsMaskFirst(text, ps.Raw)
+	}
+	return text
+}
+
+// sandboxSecretsMaskFirst replaces the first of needles that text holds with
+// prWorkflowSubstitutionWord, and returns text unchanged when none is there.
+func sandboxSecretsMaskFirst(text string, needles ...string) string {
+	for _, needle := range needles {
+		if strings.Contains(text, needle) {
+			return strings.Replace(text, needle, prWorkflowSubstitutionWord, 1)
+		}
+	}
+	return text
+}
+
+// sandboxSecretsANSICBody returns the body of an ANSI-C quoted word ($'...') as
+// written, its escapes undecoded, and false for any other word. The body is the
+// spelling sandboxSecretsHereStrings decodes. A word of more than one piece, such
+// as $'a'b, is not one.
+func sandboxSecretsANSICBody(raw string) (string, bool) {
+	if !strings.HasPrefix(raw, "$") {
+		return "", false
+	}
+	// bash deletes a backslash-newline between the "$" and the quote before it
+	// reads the quote (gt-javvg, gt-vviaz).
+	quote := skipLineContinuationBytes(raw, 1)
+	if quote+1 >= len(raw) || raw[quote] != '\'' || raw[len(raw)-1] != '\'' {
+		return "", false
+	}
+	body := raw[quote+1 : len(raw)-1]
+	for i := 0; i < len(body); i++ {
+		switch body[i] {
+		case '\\':
+			i++
+		case '\'':
+			return "", false
+		}
+	}
+	return body, true
 }
 
 // sandboxSecretsPipeOutput returns the text a command writes to its output, given the
@@ -1314,10 +1461,9 @@ func sandboxSecretsPipeOutput(argv []string, fed string, ansiHereStrings map[str
 // while bash <<< 'x\nprintenv' hands it one word with a backslash in it, so
 // decoding every here-string blocks the single word the shell reports as a
 // missing command (gt-9q6sf, gt-3yhp0). The parsed redirections say which
-// "<<<" is a here-string (a quoted or commented one is not), and shlex drops
-// the $'...' marker, so the word is matched back by tokenizing it on its own,
-// the spelling the caller's token line carries. command must be the text the
-// caller tokenizes, so the two spellings agree.
+// "<<<" is a here-string (a quoted or commented one is not). The word is read
+// from its source text with its escapes undecoded (sandboxSecretsANSICBody),
+// the spelling the token line carries for it.
 func sandboxSecretsANSICHereStrings(command string) map[string]bool {
 	script, err := shellparse.Parse(command)
 	if err != nil {
@@ -1329,23 +1475,14 @@ func sandboxSecretsANSICHereStrings(command string) map[string]bool {
 			if r.Op != "<<<" {
 				continue
 			}
-			raw := r.Word.Raw
-			if !strings.HasPrefix(raw, "$") {
+			body, ok := sandboxSecretsANSICBody(r.Word.Raw)
+			if !ok {
 				continue
 			}
-			// bash deletes a backslash-newline between the "$" and the quote
-			// before it reads the quote, so $\<newline>'x' is the same ANSI-C
-			// string as $'x' (gt-javvg, gt-vviaz).
-			quote := skipLineContinuationBytes(raw, 1)
-			if quote >= len(raw) || raw[quote] != '\'' {
-				continue
+			if texts == nil {
+				texts = map[string]bool{}
 			}
-			if words := shellTokenize(raw); len(words) == 1 {
-				if texts == nil {
-					texts = map[string]bool{}
-				}
-				texts[words[0]] = true
-			}
+			texts[body] = true
 		}
 	}
 	return texts
@@ -1388,11 +1525,17 @@ func sandboxSecretsHereStringInput(argv []string, ansiHereStrings map[string]boo
 
 // sandboxSecretsStdoutText returns the text a command's last stage writes when the
 // command runs with no input, or "" when that stage writes none the guard follows.
+// A command the parser cannot read is returned as it stands: the walk refuses an
+// unreadable payload at every depth, where judging lenient tokens of it could
+// allow a line that prints the environment (gt-krdodf).
 func sandboxSecretsStdoutText(command string) string {
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return command
+	}
 	expanded := sandboxSecretsExpandedNames(command)
-	tokenText := prWorkflowTokenText(command)
-	ansiHereStrings := sandboxSecretsANSICHereStrings(tokenText)
-	segments, piped := sandboxSecretsPipeSegments(shellTokenize(tokenText))
+	ansiHereStrings := sandboxSecretsANSICHereStrings(command)
+	segments, piped := sandboxSecretsParsedSegments(command, script)
 	var stdin, out string
 	for i, segment := range segments {
 		_, _, argv := sandboxSecretsSegment(segment, nil, expanded)

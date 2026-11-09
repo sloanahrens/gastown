@@ -423,3 +423,12 @@ dangerous	polecat	"echo $(echo `git reset --hard`)"	refuse	Hard reset discards	g
 dangerous	polecat	"echo $(echo `id`)"	allow		gt-vi78tr	96fcd085d51d5ce2c5222c386cbaf97f47a3397ae0aed6e33dc9e40d50db327f
 container_suite	polecat	"echo $(GT_TEST_DOCKER=1 go test ./internal/beads/...)"	refuse	targets testcontainers-backed package(s)	gt-vi78tr	96fcd085d51d5ce2c5222c386cbaf97f47a3397ae0aed6e33dc9e40d50db327f
 test_scope	polecat	"echo $(go test ./internal/beads/...)"	allow		gt-vi78tr	96fcd085d51d5ce2c5222c386cbaf97f47a3397ae0aed6e33dc9e40d50db327f
+
+# --- gt-krdodf: the dead shellFedHeredocBodies helper is deleted, which moves the freeze stamp; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"git reset --hard HEAD"	refuse	Hard reset discards	gt-krdodf	4a5fd7462f46132eeb205305181964ad922d5380c55340b5eea570f4f2335d67
+container_suite	polecat	"echo ok"	allow		gt-krdodf	4a5fd7462f46132eeb205305181964ad922d5380c55340b5eea570f4f2335d67
+test_scope	polecat	"go test ./internal/shellparse/..."	allow		gt-krdodf	4a5fd7462f46132eeb205305181964ad922d5380c55340b5eea570f4f2335d67
+# --- gt-krdodf: the sandbox walk reads parsed segments and prWorkflowTokenText is deleted, which moves the freeze stamp; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"git reset --hard HEAD~1"	refuse	Hard reset discards	gt-krdodf	4f7653c45d7562f6f782277c28c8f7df4d4a0177360f98528b5f94ef1b34dc95
+container_suite	polecat	"echo ok && echo done"	allow		gt-krdodf	4f7653c45d7562f6f782277c28c8f7df4d4a0177360f98528b5f94ef1b34dc95
+test_scope	polecat	"go test ./internal/config/..."	allow		gt-krdodf	4f7653c45d7562f6f782277c28c8f7df4d4a0177360f98528b5f94ef1b34dc95
