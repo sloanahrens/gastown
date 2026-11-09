@@ -388,3 +388,7 @@ dangerous	polecat	"let y=1<<x; bash -c 'git reset --hard'\nx"	refuse	Hard reset 
 dangerous	polecat	"git status"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
 container_suite	polecat	"go test ./internal/cmd -run TestGuardCorpusMatchesCurrentVerdicts -count=1"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
 test_scope	polecat	"go test -run TestSandboxSecrets ./internal/cmd"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
+# --- gt-j927ao: shellparse gained Segment.Conditional, which moves the freeze stamp; one allow row per guard carries the new stamp ---
+dangerous	polecat	"go test ./internal/shellparse -count=1"	allow		gt-j927ao	a8929c442f0732c19846d5d2bd0eae80476423ed7a40a1a5ae0c19ccccf256a4
+container_suite	polecat	"go test ./internal/shellparse -count=1"	allow		gt-j927ao	a8929c442f0732c19846d5d2bd0eae80476423ed7a40a1a5ae0c19ccccf256a4
+test_scope	polecat	"go test ./internal/shellparse -count=1"	allow		gt-j927ao	a8929c442f0732c19846d5d2bd0eae80476423ed7a40a1a5ae0c19ccccf256a4

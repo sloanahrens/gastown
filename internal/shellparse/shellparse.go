@@ -68,6 +68,13 @@ type Segment struct {
 	// only when they run in the same subshell. A brace group is not a
 	// subshell and contributes no id.
 	Shells []int
+
+	// Conditional reports that the segment may not run, or runs in a copy of the
+	// shell, because it sits in the body of an if, elif, else, while, until, for,
+	// select, case or function, inside a brace group, subshell or coproc, after
+	// "&&" or "||" but not as the first command of the list, in a pipeline of
+	// more than one command, or in a background ("&") statement.
+	Conditional bool
 }
 
 // Word is one shell word: Text has quoting resolved, Raw is the source text,
@@ -244,6 +251,17 @@ type flattener struct {
 	// id the next "(" group takes.
 	shells    []int
 	nextShell int
+
+	// conditional counts the conditional constructs the walk is inside. A segment
+	// added while it is above zero is marked Conditional.
+	conditional int
+}
+
+// conditionally runs walk with the segments it adds marked Conditional.
+func (f *flattener) conditionally(walk func()) {
+	f.conditional++
+	walk()
+	f.conditional--
 }
 
 // segmentShells is the subshell stack a new segment carries, copied so a later
@@ -304,6 +322,12 @@ func (f *flattener) stmts(list []*syntax.Stmt, into *Script) {
 // Inherited. When the statement produced no segment (a redirection-only
 // command), the redirections get a segment of their own.
 func (f *flattener) stmt(s *syntax.Stmt, into *Script) {
+	if s.Background {
+		// A background statement runs in a copy of the shell while the walk
+		// moves on, so its segments are conditional.
+		f.conditional++
+		defer func() { f.conditional-- }()
+	}
 	before := len(into.Segments)
 	if s.Cmd != nil {
 		f.command(s.Cmd, into)
@@ -335,7 +359,7 @@ func (f *flattener) stmt(s *syntax.Stmt, into *Script) {
 	if len(redirs) == 0 && len(heredocs) == 0 && len(subs) == 0 {
 		return
 	}
-	into.Segments = append(into.Segments, Segment{Redirs: redirs, Heredocs: heredocs, Subs: subs, Shells: f.segmentShells()})
+	into.Segments = append(into.Segments, Segment{Redirs: redirs, Heredocs: heredocs, Subs: subs, Shells: f.segmentShells(), Conditional: f.conditional > 0})
 }
 
 // compoundCommand reports whether c encloses other commands, so a redirection
@@ -365,33 +389,42 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 			return
 		}
 		seg.Shells = f.segmentShells()
+		seg.Conditional = f.conditional > 0
 		into.Segments = append(into.Segments, seg)
 
 	case *syntax.BinaryCmd:
 		before := len(into.Segments)
-		f.stmt(x.X, into)
+		if x.Op == syntax.Pipe || x.Op == syntax.PipeAll {
+			// Every command of a pipeline runs in a subshell, so the left side is
+			// conditional too; "&&" and "||" make only the right side conditional.
+			f.conditionally(func() { f.stmt(x.X, into) })
+		} else {
+			f.stmt(x.X, into)
+		}
 		setAfter(into, before, x.Op.String())
-		f.stmt(x.Y, into)
+		f.conditionally(func() { f.stmt(x.Y, into) })
 
 	case *syntax.Subshell:
 		f.shells = append(f.shells, f.nextShell)
 		f.nextShell++
-		f.stmts(x.Stmts, into)
+		f.conditionally(func() { f.stmts(x.Stmts, into) })
 		f.shells = f.shells[:len(f.shells)-1]
 
 	case *syntax.Block:
-		f.stmts(x.Stmts, into)
+		f.conditionally(func() { f.stmts(x.Stmts, into) })
 
 	case *syntax.IfClause:
 		cond := len(into.Segments)
 		f.stmts(x.Cond, into)
 		setAfter(into, cond, ";")
-		then := len(into.Segments)
-		f.stmts(x.Then, into)
-		if x.Else != nil {
-			setAfter(into, then, ";")
-			f.command(x.Else, into)
-		}
+		f.conditionally(func() {
+			then := len(into.Segments)
+			f.stmts(x.Then, into)
+			if x.Else != nil {
+				setAfter(into, then, ";")
+				f.command(x.Else, into)
+			}
+		})
 
 	case *syntax.ForClause:
 		switch loop := x.Loop.(type) {
@@ -406,13 +439,13 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 				}
 			}
 		}
-		f.stmts(x.Do, into)
+		f.conditionally(func() { f.stmts(x.Do, into) })
 
 	case *syntax.WhileClause:
 		cond := len(into.Segments)
 		f.stmts(x.Cond, into)
 		setAfter(into, cond, ";")
-		f.stmts(x.Do, into)
+		f.conditionally(func() { f.stmts(x.Do, into) })
 
 	case *syntax.CaseClause:
 		f.wordSubs(x.Word, &into.Subs)
@@ -420,12 +453,12 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 			for _, pattern := range item.Patterns {
 				f.wordSubs(pattern, &into.Subs)
 			}
-			f.stmts(item.Stmts, into)
+			f.conditionally(func() { f.stmts(item.Stmts, into) })
 		}
 
 	case *syntax.FuncDecl:
 		if x.Body != nil {
-			f.stmt(x.Body, into)
+			f.conditionally(func() { f.stmt(x.Body, into) })
 		}
 
 	case *syntax.TimeClause:
@@ -436,7 +469,8 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 	case *syntax.CoprocClause:
 		f.wordSubs(x.Name, &into.Subs)
 		if x.Stmt != nil {
-			f.stmt(x.Stmt, into)
+			// A coproc runs in a copy of the shell, like a background statement.
+			f.conditionally(func() { f.stmt(x.Stmt, into) })
 		}
 
 	case *syntax.DeclClause:
@@ -452,6 +486,7 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 			return
 		}
 		seg.Shells = f.segmentShells()
+		seg.Conditional = f.conditional > 0
 		into.Segments = append(into.Segments, seg)
 
 	case *syntax.LetClause:
@@ -467,6 +502,7 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 			f.arithmSubs(expr, &seg.Subs)
 		}
 		seg.Shells = f.segmentShells()
+		seg.Conditional = f.conditional > 0
 		into.Segments = append(into.Segments, seg)
 
 	case *syntax.TestDecl:
