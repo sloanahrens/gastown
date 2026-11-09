@@ -255,10 +255,16 @@ func TestBootGateDoesNotGateTheLandingWorkerOrDoltSupervision(t *testing.T) {
 	writeDaemonRigConfigFile(t, rigPath, `{"type":"rig","version":1,"name":"testrig","default_branchh":"develop"}`)
 	d.notifier = notifyfake.New()
 	useGitfake(t, d).InitBare(t, filepath.Join(rigPath, ".repo.git"))
-	if reason := d.standbyReason(now); reason == "" {
-		t.Fatal("precondition: the boot hold is not in place")
+	const wantHold = "waiting for dolt"
+	if reason := d.standbyReason(now); !strings.HasPrefix(reason, wantHold) {
+		t.Fatalf("precondition: standbyReason = %q, want the boot hold naming dolt (%q)", reason, wantHold)
 	}
 	d.runRigLandingWorker(&landingWorkers{running: map[string]bool{}}, rigName, time.Hour)
+	if reason := d.standbyReason(now); !strings.HasPrefix(reason, wantHold) {
+		t.Errorf("the boot hold lifted while the landing worker ran: standbyReason = %q", reason)
+	}
+	// The worker's start is observable only through its log line in this
+	// tree: runRigLandingWorker returns without a value or a side effect.
 	if n := countContaining(lines(), "landing_worker: "+rigName+": not starting"); n != 1 {
 		t.Errorf("the landing worker did not reach its rig start under the boot hold; log: %v", lines())
 	}
@@ -267,10 +273,35 @@ func TestBootGateDoesNotGateTheLandingWorkerOrDoltSupervision(t *testing.T) {
 	awaitBootPollEnd(t, done)
 }
 
+// townFiles lists the files under root, relative to it. A file is listed
+// whatever its name, so a comparison of two listings sees any write.
+func townFiles(t *testing.T, root string) map[string]bool {
+	t.Helper()
+	files := map[string]bool{}
+	err := filepath.WalkDir(root, func(path string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !e.IsDir() {
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				return relErr
+			}
+			files[rel] = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking the town: %v", err)
+	}
+	return files
+}
+
 // TestBootGateNeverTouchesTheLease: a town with no lease file runs the whole
-// sequence (the outage, the lift, the heartbeat) and no lease file appears.
-// This code reads and writes no lease record; the walk checks that the
-// sequence leaves none behind.
+// sequence (the outage, the lift, the heartbeat), and the only file it writes
+// is the daemon's own state file, which the heartbeat saves. Any other new file
+// fails, whatever its name, so a lease record cannot be kept under another name.
+// This code reads and writes no lease record.
 func TestBootGateNeverTouchesTheLease(t *testing.T) {
 	t.Parallel()
 	now := standbyTestNow
@@ -281,6 +312,7 @@ func TestBootGateNeverTouchesTheLease(t *testing.T) {
 
 	d, _, _ := standbyHeartbeat(t, now)
 	d.bootGate = gate
+	before := townFiles(t, d.config.TownRoot)
 	done := startBootPoll(d, ctx)
 	awaitBootPoll(t, clk)
 	d.heartbeat(&State{})
@@ -292,17 +324,11 @@ func TestBootGateNeverTouchesTheLease(t *testing.T) {
 	awaitBootPollEnd(t, done)
 	d.heartbeat(&State{})
 
-	err := filepath.WalkDir(d.config.TownRoot, func(path string, e fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	stateFile := filepath.Join("daemon", "state.json")
+	for path := range townFiles(t, d.config.TownRoot) {
+		if !before[path] && path != stateFile {
+			t.Errorf("the boot gate sequence wrote %s; only the daemon's state file may be written", path)
 		}
-		if strings.Contains(strings.ToLower(e.Name()), "lease") {
-			t.Errorf("the boot gate sequence left a lease file behind: %s", path)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking the town: %v", err)
 	}
 }
 
