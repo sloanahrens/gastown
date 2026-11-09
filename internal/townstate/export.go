@@ -39,12 +39,18 @@ const (
 	SkipSymlinkOut SkipClass = "symlinks leaving the town root"
 	// SkipOlderThan is a regular file older than the --since time.
 	SkipOlderThan SkipClass = "files older than --since"
+	// SkipSecret is a file ExportOptions.Exclude names: a secret the copy must
+	// not carry. The summary counts it and never names it.
+	SkipSecret SkipClass = "secret files (the secrets list)"
+	// SkipUnchanged is a regular file ExportOptions.Only refuses: a delta copy
+	// leaves out what the volume already holds with the same bytes.
+	SkipUnchanged SkipClass = "files the volume already holds unchanged"
 )
 
 // skipClassOrder is the order the summary prints the classes in, so two runs
 // over the same town print the same line.
 var skipClassOrder = []SkipClass{
-	SkipDoltData, SkipGitTree, SkipSocket, SkipLockFile, SkipNotRegular, SkipSymlinkOut, SkipOlderThan,
+	SkipDoltData, SkipGitTree, SkipSocket, SkipLockFile, SkipNotRegular, SkipSymlinkOut, SkipOlderThan, SkipSecret, SkipUnchanged,
 }
 
 // ExportSummary counts what an export put in the archive and what it left out.
@@ -111,6 +117,15 @@ type ExportOptions struct {
 	// ErrNoRigs: an archive that silently lacks every rig row looks complete
 	// and is not.
 	AllowNoRigs bool
+	// Exclude reports whether a town-root-relative file name is a secret the
+	// archive must leave out. A nil Exclude excludes nothing. An excluded name
+	// is counted under SkipSecret and never written or named in the summary.
+	Exclude func(name string) bool
+	// Only, when set, keeps only the regular files whose town-root-relative
+	// name it accepts: a delta copy sends the files the volume lacks or holds
+	// with other bytes. Directories and links are always written, and a file
+	// it refuses is counted under SkipUnchanged.
+	Only func(name string) bool
 	// ops is the filesystem seam a test replaces; the zero value is the host.
 	ops townOps
 }
@@ -131,19 +146,10 @@ func Export(w io.Writer, root string, m *Manifest, opts ExportOptions) (ExportSu
 		return s, err
 	}
 	opts.ops = opts.ops.withDefaults()
-	townRoot, err := resolveTownRoot(opts.ops, root)
+	townRoot, rows, dropped, err := townRows(opts.ops, root, m, opts.AllowNoRigs)
+	s.RigRowsDropped = dropped
 	if err != nil {
 		return s, err
-	}
-	rigs, err := settingsRigs(os.DirFS(townRoot))
-	if err != nil {
-		return s, fmt.Errorf("reading the town's rigs: %w", err)
-	}
-	if len(rigs) == 0 {
-		s.RigRowsDropped = rigScopedDaemonRows(m)
-		if s.RigRowsDropped > 0 && !opts.AllowNoRigs {
-			return s, ErrNoRigs
-		}
 	}
 	walk := &exportWalk{
 		tw:      tar.NewWriter(w),
@@ -153,7 +159,7 @@ func Export(w io.Writer, root string, m *Manifest, opts ExportOptions) (ExportSu
 		written: map[string]fs.FileInfo{},
 		links:   map[string]string{},
 	}
-	walk.rows = daemonEntries(m, rigs)
+	walk.rows = rows
 	for _, e := range walk.rows {
 		s.Entries = append(s.Entries, e.Path)
 		walk.entry = e.Path
@@ -235,6 +241,10 @@ func (w *exportWalk) path(p, name string, info fs.FileInfo) error {
 		w.sum.Skipped[class]++
 		return nil
 	}
+	if !info.IsDir() && w.opts.Exclude != nil && w.opts.Exclude(name) {
+		w.sum.Skipped[SkipSecret]++
+		return nil
+	}
 	if info.Mode()&fs.ModeSymlink != 0 {
 		return w.symlink(p, name, info)
 	}
@@ -277,6 +287,10 @@ func (w *exportWalk) path(p, name string, info fs.FileInfo) error {
 func (w *exportWalk) file(p, name string, info fs.FileInfo) error {
 	if !w.opts.Since.IsZero() && !info.ModTime().After(w.opts.Since) {
 		w.sum.Skipped[SkipOlderThan]++
+		return nil
+	}
+	if w.opts.Only != nil && !w.opts.Only(name) {
+		w.sum.Skipped[SkipUnchanged]++
 		return nil
 	}
 	hdr := &tar.Header{
@@ -422,6 +436,28 @@ func rigScopedDaemonRows(m *Manifest) int {
 		}
 	}
 	return n
+}
+
+// townRows resolves the town root and the daemon-owned rows it names, for an
+// export and for the metadata walk a plan makes. A town whose registry names no
+// rig is refused with ErrNoRigs unless allowNoRigs; dropped counts the rig-scoped
+// rows the rows then lack.
+func townRows(ops townOps, root string, m *Manifest, allowNoRigs bool) (townRoot string, rows []Entry, dropped int, err error) {
+	townRoot, err = resolveTownRoot(ops, root)
+	if err != nil {
+		return "", nil, 0, err
+	}
+	rigs, err := settingsRigs(os.DirFS(townRoot))
+	if err != nil {
+		return "", nil, 0, fmt.Errorf("reading the town's rigs: %w", err)
+	}
+	if len(rigs) == 0 {
+		dropped = rigScopedDaemonRows(m)
+		if dropped > 0 && !allowNoRigs {
+			return "", nil, dropped, ErrNoRigs
+		}
+	}
+	return townRoot, daemonEntries(m, rigs), dropped, nil
 }
 
 // daemonEntries returns the daemon-owned rows expanded for rigs, in manifest

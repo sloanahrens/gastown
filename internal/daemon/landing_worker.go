@@ -135,6 +135,18 @@ func resolveOMPath(configured string, lookPath func(string) (string, error), hom
 	return "om"
 }
 
+// LandingWorkRoot is the work root the landing worker of rigName uses under the
+// town's patrol settings: the directory its landing, post-landing and revert
+// runs make their worktrees in. The cut-over probe reads it through the same
+// answer the worker starts with, so the probe and the worker cannot disagree.
+func LandingWorkRoot(config *DaemonPatrolConfig, townRoot, rigName string) (string, error) {
+	configured := ""
+	if cfg := landingWorkerConfig(config); cfg != nil {
+		configured = cfg.WorkRoot
+	}
+	return landingWorkRoot(configured, townRoot, rigName)
+}
+
 // landingWorkRoot is the private base directory for one rig's throwaway
 // worktrees: the configured work_root, else $TMPDIR/gt-landing-<uid> (the
 // uid-scoped pattern of the gate's GATE_DIR, gt-22hdp.51), plus the rig. It
