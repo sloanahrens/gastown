@@ -14,7 +14,8 @@ import (
 
 // newUpdateRollbackCmd builds `gt update rollback` over seams.
 func newUpdateRollbackCmd(seams updateSeams) *cobra.Command {
-	return &cobra.Command{
+	var podContext, podNamespace string
+	c := &cobra.Command{
 		Use:   "rollback",
 		Short: "Put the daemon back on the image pair its last digest install replaced",
 		Long: `Put the daemon back on the image pair its last digest install replaced.
@@ -32,15 +33,23 @@ restore failed, 5 when another update run holds the lock.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdateRollback(cmd, seams)
+			return runUpdateRollback(cmd, seams, podContext, podNamespace)
 		},
 	}
+	c.Flags().StringVar(&podContext, "pod-context", "", podContextUsage)
+	c.Flags().StringVar(&podNamespace, "pod-namespace", "", podNamespaceUsage)
+	return c
 }
 
 // runUpdateRollback restores the recorded pair under the update lock, so a
-// rollback never moves the daemon while a run is installing.
-func runUpdateRollback(cmd *cobra.Command, seams updateSeams) error {
+// rollback never moves the daemon while a run is installing. The pod flags name
+// the Deployment the pair is restored to, as they do for gt update --images.
+func runUpdateRollback(cmd *cobra.Command, seams updateSeams, podContext, podNamespace string) error {
 	errOut := cmd.ErrOrStderr()
+	pod, err := podDaemonFromFlags(podContext, podNamespace)
+	if err != nil {
+		return fmt.Errorf("gt update rollback: %w", err)
+	}
 	townRoot, err := seams.FindTownRoot()
 	if err != nil {
 		return fmt.Errorf("gt update rollback: finding the town root: %w", err)
@@ -48,6 +57,10 @@ func runUpdateRollback(cmd *cobra.Command, seams updateSeams) error {
 	deps, err := seams.DepsFactory(townRoot)
 	if err != nil {
 		return fmt.Errorf("gt update rollback: preparing: %w", err)
+	}
+	deps, err = podDaemonDeps(seams, deps, pod)
+	if err != nil {
+		return fmt.Errorf("gt update rollback: preparing the pod daemon: %w", err)
 	}
 	release, err := update.AcquireLock(update.Dir(townRoot))
 	if errors.Is(err, update.ErrLocked) {
@@ -59,7 +72,7 @@ func runUpdateRollback(cmd *cobra.Command, seams updateSeams) error {
 	}
 	defer release()
 
-	images, err := imageDeps(seams, townRoot, deps)
+	images, err := imageDeps(seams, townRoot, deps, pod)
 	if err != nil {
 		return fmt.Errorf("gt update rollback: %w", err)
 	}
