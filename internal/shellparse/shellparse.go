@@ -1098,11 +1098,12 @@ func (f *flattener) paramExpSubs(p *syntax.ParamExp, dest *[]Script) {
 // so "${v:-<(cmd)}" carries no ProcSubst part, while the shell runs the process
 // substitution in an unquoted word. A word that holds one is parsed again on
 // its own, behind ": " so it reads as command arguments, and the substitutions
-// that parse finds are the ones reported, each once. Its command substitutions
-// come from that parse too, not from the walk of the word's parts, so one that
-// sits inside a literal "<(" is not reported twice. A quoted word, or one with
-// no "<(", takes the ordinary walk. A word that does not parse is refused, never
-// read as having none.
+// that parse finds are the ones reported, each once. A "#" that would start a
+// comment in that parse is read as text (see parseExpansionWord). Its command
+// substitutions come from that parse too, not from the walk of the word's
+// parts, so one that sits inside a literal "<(" is not reported twice. A quoted
+// word, or one with no "<(", takes the ordinary walk. A word that does not parse
+// is refused, never read as having none.
 func (f *flattener) expWordSubs(w *syntax.Word, dest *[]Script) {
 	if w == nil {
 		return
@@ -1119,8 +1120,7 @@ func (f *flattener) expWordSubs(w *syntax.Word, dest *[]Script) {
 		f.wordSubs(w, dest)
 		return
 	}
-	synthetic := ": " + text
-	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(synthetic), "")
+	file, synthetic, err := parseExpansionWord(text)
 	if err != nil {
 		f.record(unparseable(err))
 		return
@@ -1136,6 +1136,63 @@ func (f *flattener) expWordSubs(w *syntax.Word, dest *[]Script) {
 		*dest = append(*dest, seg.Subs...)
 	}
 	*dest = append(*dest, parsed.Subs...)
+}
+
+// parseExpansionWord parses the word of a parameter expansion behind ": ", and
+// returns the file with the source it was parsed from. Inside the expansion a
+// "#" is an ordinary character, but the parser reads one that starts a word of
+// that text as a comment, which would hide the rest of the word and any
+// substitution in it. Each such "#" is blanked to "_", which keeps every offset,
+// and the text is parsed again until no "#" outside a substitution is a comment.
+func parseExpansionWord(text string) (*syntax.File, string, error) {
+	src := ": " + text
+	for {
+		file, err := syntax.NewParser(syntax.Variant(syntax.LangBash), syntax.KeepComments(true)).Parse(strings.NewReader(src), "")
+		if err != nil {
+			return nil, "", err
+		}
+		hashes := wordComments(file)
+		if len(hashes) == 0 {
+			return file, src, nil
+		}
+		b := []byte(src)
+		for _, i := range hashes {
+			b[i] = '_'
+		}
+		src = string(b)
+	}
+}
+
+// wordComments returns the offsets of the comments in file that stand outside
+// every substitution. A comment inside a substitution is one the shell reads
+// too, so it stays; any other comment is a "#" that the expansion reads as text.
+func wordComments(file *syntax.File) []int {
+	var subs []syntax.Node
+	var comments []*syntax.Comment
+	syntax.Walk(file, func(n syntax.Node) bool {
+		switch n := n.(type) {
+		case *syntax.CmdSubst, *syntax.ProcSubst:
+			subs = append(subs, n)
+		case *syntax.Comment:
+			comments = append(comments, n)
+		}
+		return true
+	})
+	var hashes []int
+	for _, c := range comments {
+		at := c.Pos().Offset()
+		inside := false
+		for _, s := range subs {
+			if at >= s.Pos().Offset() && at < s.End().Offset() {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			hashes = append(hashes, int(at))
+		}
+	}
+	return hashes
 }
 
 // arithmSubs appends the substitutions inside an arithmetic expression. A nil
