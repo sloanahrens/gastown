@@ -786,18 +786,20 @@ func TestOverrunStop_LateUnresolvableWorktreeParksWithItsReasonNoted(t *testing.
 
 	f := newOverrunFake(20*time.Minute, stopSeat)
 	f.removeSandbox = func(overrunSeat) error { return nil }
+	// The session stop fails on the first tick, so the save (1b) runs while the
+	// worktree is still there and the late check (2a) does not run yet.
+	f.failOn = map[string]error{"stop": errors.New("supervisor unavailable")}
 	s := f.seams()
 	s.saveWork = w.d.overrunSaveWork
-	stopSession := s.stopSession
-	s.stopSession = func(seat overrunSeat) error {
-		if err := stopSession(seat); err != nil {
-			return err
-		}
-		if err := os.RemoveAll(w.work); err != nil {
-			t.Fatal(err)
-		}
-		return nil
+
+	w.d.runOverrunGuard(s)
+	if len(f.handedBack) != 0 || slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Fatalf("setup: first tick handed back %q, calls %q; want the stop held before the late check", f.handedBack, f.calls)
 	}
+	if err := os.RemoveAll(w.work); err != nil {
+		t.Fatal(err)
+	}
+	f.failOn = nil
 
 	tickUntilSaveCap(t, w, f, s)
 
