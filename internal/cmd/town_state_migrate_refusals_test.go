@@ -249,21 +249,97 @@ func TestTownStateMigrateRecordFiles(t *testing.T) {
 	})
 }
 
+// hangingHelper is a dockerRun whose helper run blocks until its deadline passes.
+// A docker rm of the helper's container is answered by stopErr, so a test chooses
+// whether the stop succeeds. It records every argv it is given.
+func hangingHelper(stopErr error, calls *[][]string) dockerRun {
+	return func(ctx context.Context, args, _ []string, _ io.Reader, _, _ io.Writer) error {
+		*calls = append(*calls, args)
+		if strings.Contains(" "+strings.Join(args, " ")+" ", " rm -f ") {
+			return stopErr
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+}
+
+// helperContainerName is the value of the --name flag in a helper run's argv.
+func helperContainerName(t *testing.T, args []string) string {
+	t.Helper()
+	for i, a := range args {
+		if a == "--name" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	t.Fatalf("helper argv names no container: %v", args)
+	return ""
+}
+
 // TestTownStateMigrateHelperTimeoutIsNamed: a helper run that outlives its deadline
-// is stopped and named by the timeout, not reported as a docker failure.
+// is named by the timeout, not reported as a docker failure.
 func TestTownStateMigrateHelperTimeoutIsNamed(t *testing.T) {
 	t.Parallel()
+	var calls [][]string
 	eng := dockerEngine{
 		image:         "gt-daemon:test",
 		helperTimeout: time.Millisecond,
-		run: func(ctx context.Context, _, _ []string, _ io.Reader, _, _ io.Writer) error {
-			<-ctx.Done()
-			return ctx.Err()
-		},
+		run:           hangingHelper(nil, &calls),
 	}
 	err := eng.Run("gt-state", townstate.ListArgv, nil, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "did not finish within 1ms and was stopped") {
 		t.Fatalf("Run past its deadline = %v, want the timeout named", err)
+	}
+}
+
+// TestTownStateMigrateHelperTimeoutStopsTheContainer: killing the docker client does
+// not stop the helper container, so a run past its deadline removes that container
+// by its name, and says it was stopped only because the removal succeeded.
+func TestTownStateMigrateHelperTimeoutStopsTheContainer(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	eng := dockerEngine{
+		image:         "gt-daemon:test",
+		helperTimeout: time.Millisecond,
+		run:           hangingHelper(nil, &calls),
+	}
+	err := eng.Run("gt-state", townstate.ListArgv, nil, io.Discard)
+	if err == nil {
+		t.Fatal("Run past its deadline returned no error")
+	}
+	if len(calls) != 2 {
+		t.Fatalf("docker calls = %d, want the run and one stop: %v", len(calls), calls)
+	}
+	name := helperContainerName(t, calls[0])
+	stop := strings.Join(calls[1], " ")
+	if !strings.HasSuffix(stop, " rm -f "+name) {
+		t.Errorf("stop argv = %q, want the removal of container %s", stop, name)
+	}
+	if !strings.Contains(err.Error(), "and was stopped: container "+name) {
+		t.Errorf("Run = %v, want the container named as stopped", err)
+	}
+}
+
+// TestTownStateMigrateHelperTimeoutWordsAFailedStop: when the removal of the helper
+// container fails, the helper may still be running, and the message says so, names
+// the container, and carries no docker output.
+func TestTownStateMigrateHelperTimeoutWordsAFailedStop(t *testing.T) {
+	t.Parallel()
+	var calls [][]string
+	eng := dockerEngine{
+		image:         "gt-daemon:test",
+		helperTimeout: time.Millisecond,
+		run:           hangingHelper(errors.New("exit status 1"), &calls),
+	}
+	err := eng.Run("gt-state", townstate.ListArgv, nil, io.Discard)
+	if err == nil {
+		t.Fatal("Run past its deadline returned no error")
+	}
+	name := helperContainerName(t, calls[0])
+	if strings.Contains(err.Error(), "was stopped") {
+		t.Errorf("Run = %v, says the helper was stopped though the removal failed", err)
+	}
+	if !strings.Contains(err.Error(), "helper may still be running: container "+name) {
+		t.Errorf("Run = %v, want the container named as possibly running", err)
 	}
 }
 

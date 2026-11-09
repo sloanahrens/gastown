@@ -754,7 +754,7 @@ func TestTownStateMigrateBeadsReadFailureIsReported(t *testing.T) {
 // BEADS_DOLT_SERVER_HOST by name.
 func TestTownStateMigrateHelperRunArgs(t *testing.T) {
 	t.Parallel()
-	args, err := helperRunArgs("gt-state", "gt-daemon:abc1234", townstate.ImportArgv, true)
+	args, err := helperRunArgs("gt-state", "gt-daemon:abc1234", "gt-town-state-migrate-test", townstate.ImportArgv, true)
 	if err != nil {
 		t.Fatalf("helperRunArgs: %v", err)
 	}
@@ -770,11 +770,11 @@ func TestTownStateMigrateHelperRunArgs(t *testing.T) {
 	if strings.Contains(joined, "BEADS_DOLT_SERVER_HOST=") {
 		t.Errorf("the forwarded variable carries a value on the command line: %s", joined)
 	}
-	if _, err := helperRunArgs("/host/dir", "gt-daemon:abc1234", townstate.ImportArgv, false); err == nil {
+	if _, err := helperRunArgs("/host/dir", "gt-daemon:abc1234", "gt-town-state-migrate-test", townstate.ImportArgv, false); err == nil {
 		t.Error("a host path became a volume mount")
 	}
 
-	list, err := helperRunArgs("gt-state", "gt-daemon:abc1234", townstate.ListArgv, false)
+	list, err := helperRunArgs("gt-state", "gt-daemon:abc1234", "gt-town-state-migrate-test", townstate.ListArgv, false)
 	if err != nil {
 		t.Fatalf("helperRunArgs listing: %v", err)
 	}

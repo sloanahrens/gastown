@@ -893,7 +893,8 @@ func execDocker(ctx context.Context, args, env []string, stdin io.Reader, stdout
 // which must not happen on a copy. Stderr goes to the operator's terminal, never
 // into an error.
 func (e dockerEngine) Run(volume string, argv []string, stdin io.Reader, stdout io.Writer) error {
-	args, err := helperRunArgs(volume, e.image, argv, e.beadsHost != "")
+	name := helperName()
+	args, err := helperRunArgs(volume, e.image, name, argv, e.beadsHost != "")
 	if err != nil {
 		return err
 	}
@@ -909,18 +910,38 @@ func (e dockerEngine) Run(volume string, argv []string, stdin io.Reader, stdout 
 	defer cancel()
 	if err := e.run(ctx, args, env, stdin, stdout, os.Stderr); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("the helper for volume %s did not finish within %s and was stopped", volume, timeout)
+			return e.stopHelper(volume, name, timeout)
 		}
 		return fmt.Errorf("docker run of the helper for volume %s exited: %w", volume, err)
 	}
 	return nil
 }
 
+// stopHelper removes the helper container by name after its run passed the
+// deadline. Killing the docker client does not stop the container, so the removal
+// goes to docker itself. The message says "stopped" only when the removal
+// succeeded; docker's output is never put in the error.
+func (e dockerEngine) stopHelper(volume, name string, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), migrateProbeTimeout)
+	defer cancel()
+	args := []string{"--context", templates.ContainerDockerContext, "rm", "-f", name}
+	if err := e.run(ctx, args, nil, nil, io.Discard, io.Discard); err != nil {
+		return fmt.Errorf("the helper for volume %s did not finish within %s; helper may still be running: container %s", volume, timeout, name)
+	}
+	return fmt.Errorf("the helper for volume %s did not finish within %s and was stopped: container %s", volume, timeout, name)
+}
+
+// helperName is the container name of one helper run, so a run past its deadline
+// can be removed by name. The process id and clock keep names apart across runs.
+func helperName() string {
+	return fmt.Sprintf("gt-town-state-migrate-%d-%d", os.Getpid(), time.Now().UnixNano())
+}
+
 // helperRunArgs is the docker argv of one helper run: the volume mounted at
 // townstate.VolumeMount, the entrypoint cleared, and the image's own argv. The
 // volume name is validated first, so a path can never become a bind mount.
 // forwardBeads passes BEADS_DOLT_SERVER_HOST through by name, never by value.
-func helperRunArgs(volume, image string, argv []string, forwardBeads bool) ([]string, error) {
+func helperRunArgs(volume, image, name string, argv []string, forwardBeads bool) ([]string, error) {
 	if !volumeNamePattern.MatchString(volume) {
 		return nil, fmt.Errorf("volume %q is not a docker volume name", volume)
 	}
@@ -931,6 +952,7 @@ func helperRunArgs(volume, image string, argv []string, forwardBeads bool) ([]st
 		mount += ":ro"
 	}
 	args := []string{"--context", templates.ContainerDockerContext, "run", "--rm", "-i",
+		"--name", name,
 		"--entrypoint", "", "-w", townstate.VolumeMount,
 		"-v", mount}
 	if forwardBeads {
