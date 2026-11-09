@@ -497,7 +497,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 // body moves no span, and each body is then cut from the command itself, so a
 // substitution that holds a heredoc keeps the heredoc's text. Cut from the
 // stripped text, the same substitution is "cat <<'EOF'" with no body, a fragment
-// no parser reads (prWorkflowSubstitutions); the walk refuses an unreadable
+// no parser reads; the walk refuses an unreadable
 // payload at every depth, so it must not be handed that fragment.
 func sandboxSecretsSubstitutions(command string) []string {
 	stripped, cuts := stripHeredocBodiesWithCuts(command)

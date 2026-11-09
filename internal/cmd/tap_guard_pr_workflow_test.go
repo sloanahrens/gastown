@@ -81,6 +81,9 @@ func TestMatchesPRWorkflowCommand(t *testing.T) {
 		{"git checkout -b inside a sh-fed heredoc", "sh <<EOF\ngit checkout -b feature/x\nEOF", true},
 		{"unrelated body in a bash-fed heredoc stays unblocked", "bash <<'EOF'\necho hello\nEOF", false},
 		{"bash-fed heredoc piped through cat still counts", "cat <<'EOF' | bash\ngh pr create --title foo\nEOF", true},
+		// A body on another descriptor is not the script's standard input, so
+		// bash does not run it (gt-mru91l: the parser gives each body its descriptor).
+		{"heredoc body on descriptor 3 is not fed to bash", "bash 3<<EOF\ngh pr create\nEOF", false},
 
 		// Quoted text is never a command word, newline or not.
 		{"quoted mention on its own line", "git commit -m \"use gh pr create\"\nls -la", false},
@@ -481,6 +484,12 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"xargs with a flag value", "echo x | xargs -n 1 gh pr create", true},
 		{"git checkout -b behind setsid", "setsid git checkout -b feature/x", true},
 		{"setsid of an unrelated command", "setsid make build", false},
+		// The parser reads a coproc and a function body as the commands they
+		// run, which the text scan missed (gt-mru91l). A function body is judged
+		// where it is defined, so the definition is blocked even before it is
+		// called.
+		{"gh pr create under coproc", "coproc gh pr create", true},
+		{"gh pr create in a function body that is called", "function f { gh pr create; }; f", true},
 
 		{"gh --repo separate", "gh --repo o/r pr create", true},
 		{"gh --repo glued", "gh --repo=o/r pr create", true},
@@ -533,8 +542,21 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"substitution behind a separator", "cd /tmp && x=$(echo hi) gh pr create", true},
 		{"launcher behind a substitution", "x=$(echo hi) env GH_REPO=o/r gh pr create", true},
 		{"substitution in a later assignment", "GH_REPO=o/r url=$(echo hi) gh pr create", true},
+		// A process substitution runs its command and hands the word the result,
+		// so its command line is judged (gt-mru91l: the parser keeps it on the word).
+		{"gh pr create in a process substitution", "cat <(gh pr create --fill)", true},
+		{"quoted process substitution is text", `echo "<(gh pr create --fill)"`, false},
 		{"substitution after the command's own words", `gh pr create --title "$(date)"`, true},
 		{"substitution among the arguments starts no command", "echo $(date) gh pr create", false},
+		// A word that is one substitution is the stand-in whatever its body
+		// holds, a quoted parenthesis included; a word holding two substitutions,
+		// or text around one, is a name, and a single-quoted one is data
+		// (gt-mru91l: the parser reads each word, so the checks run per word).
+		{"substitution holding a quoted parenthesis as the command word", `$(echo ")") gh pr create`, true},
+		{"two substitutions joined as one command word", "$(a)$(b) pr create", false},
+		{"text around a substitution as the command word", "pre$(echo gh) pr create", false},
+		{"text after a substitution as the command word", "$(echo gh)x pr create", false},
+		{"single-quoted backtick span as the command word", "'`echo`' gh pr create", false},
 
 		// A body holding parentheses of its own still runs to its balancing ")".
 		{"substitution holding a nested substitution", `x=$(gh pr create --title "$(date)")`, true},
@@ -563,6 +585,11 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"substitution holding a parenthesis around an unrelated command", `x=$(gh pr view --json "a (b)")`, false},
 		{"quoted parenthesis does not end a body before a later one", `x=$(echo ")") && echo $(gh pr create)`, true},
 		{"substitution past the nesting cap naming gh", `x=$(bash -c "bash -c \"bash -c \\\"x=\$(gh pr create)\\\"\"")`, true},
+
+		// A substitution past the nesting cap is unread too; the words it holds
+		// are read for gh or git, the same as a payload string (gt-mru91l).
+		{"substitution past the cap naming gh", "$(echo $(echo $(echo $(gh pr create))))", true},
+		{"substitution past the cap naming neither", "$(echo $(echo $(echo $(ls -la))))", false},
 
 		// Past the nesting cap the payload is unread; one that still names gh
 		// or git is refused, one that does not is allowed.
@@ -667,7 +694,12 @@ func TestPRWorkflowSubstitutionCommentAndANSIQuote(t *testing.T) {
 		{"double quote in a comment", "# say \"hi\nx=$(gh pr create --fill)", true},
 		{"backtick substitution after a comment", "# don't\nx=`gh pr create --fill`", true},
 		{"escaped quote in an ANSI-C string", `echo $'it\'s' $(gh pr create --fill)`, true},
-		{"substitution in a comment", "echo hi # $(gh pr create --fill)", true},
+		// A word that begins with # is a comment to the end of the line, so the
+		// substitution in it never runs (gt-mru91l: the parser drops comments,
+		// the text scan blocked this row). A # glued to the word before it is
+		// not a comment, and the substitution after it runs.
+		{"substitution in a comment runs nothing", "echo hi # $(gh pr create --fill)", false},
+		{"substitution after a # glued to a word runs", "echo hi#$(gh pr create --fill)", true},
 		{"apostrophe comment then bare gh pr create", "# don't\ngh pr create --fill", true},
 		{"hash inside a word", `echo a#b $(gh pr create --fill)`, true},
 		{"single-quoted substitution stays data", `echo '$(gh pr create --fill)'`, false},

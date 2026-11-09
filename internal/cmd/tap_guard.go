@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/shellparse"
 )
 
 var tapGuardCmd = &cobra.Command{
@@ -139,8 +140,8 @@ const maxPRWorkflowNestDepth = 3
 // hide it (gt-zf2vy). Words are compared whole, so "git checkout -branch"
 // does not match "git checkout -b", and quoted text is never a command word.
 //
-// Heredoc bodies are data, not shell syntax, so they are stripped before
-// tokenizing (gt-3j8u): a body line that spells "gh pr create" would
+// Heredoc bodies are data, not shell syntax, so the parser keeps them out of
+// the words (gt-3j8u): a body line that spells "gh pr create" would
 // otherwise block an ordinary file write. A body fed to a shell invoker is
 // the exception, because that shell runs it (gt-9g0y, gt-q91m).
 func matchesPRWorkflowCommand(command string) bool {
@@ -222,8 +223,8 @@ func prWorkflowCommand(segment []string) (argv, payloads []string, standIn bool)
 		// words are judged as a command line (gt-qgya2). When it expands to
 		// gh or git instead ("$(echo gh) pr create"), the words behind it are
 		// that command's arguments; standIn lets the caller judge them so too
-		// (gt-n2gt8). The expansion itself is unreadable, and
-		// prWorkflowSubstitutions judges its body. A command named through a
+		// (gt-n2gt8). The expansion itself is not read; its body is judged as
+		// a command line of its own (Segment.Subs). A command named through a
 		// variable ("g=gh; $g pr create") is not resolved: the guard reads
 		// the text, not the shell's variables.
 		if word == prWorkflowSubstitutionWord {
@@ -409,34 +410,88 @@ func launcherFlagWidth(launcher prWorkflowLauncher, word string) int {
 // A payload past maxPRWorkflowNestDepth is not read; tooDeep is set when it
 // still names gh or git, since a script the guard cannot reach is not one that
 // runs nothing.
+//
+// A command shellparse cannot read has no invocations to judge. It is refused
+// (tooDeep) when its text could spell a blocked command (prWorkflowSpelled), and
+// allowed otherwise, the same fail-closed reading the bd-create-store guard
+// gives an unreadable bd create (gt-j41yim).
 func prWorkflowInvocations(command string, depth int) (invocations [][]string, tooDeep bool) {
-	tokens := shellTokenize(prWorkflowTokenText(command))
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return nil, prWorkflowSpelled(command)
+	}
+	return prWorkflowScriptInvocations(script, depth)
+}
 
-	var payloads []string
-	for _, segment := range splitShellSegments(tokens) {
-		argv, launched, standIn := prWorkflowCommand(segment)
-		payloads = append(payloads, launched...)
-		if len(argv) == 0 {
+// prWorkflowSpelled reports whether text could spell a command the pr-workflow
+// guard blocks: gh pr create, or a git checkout or switch that the guard reads
+// as a branch creation. It is the reading for a command shellparse cannot read,
+// so it follows bdCreateSpelled: the letters the shell could build the words
+// from are read in order, and each spelling must match as a subsequence of them.
+// A word split by quotes, an expansion or an escape still shows its letters.
+// Word boundaries are not kept, so it errs toward yes.
+// A word PRODUCED at run time (printf with an escape, a variable that holds the
+// word) shows no letters here and is not seen: the guard's threat model is an
+// accidental gh pr create, not deliberate obfuscation (gt-mru91l, as for gt-j41yim).
+//
+// The creation flag is any b or c after the subcommand: -b, -B, -c, -C and
+// --create all carry one of the two letters, and a flag-less checkout or switch
+// spells neither in the words that follow it.
+func prWorkflowSpelled(text string) bool {
+	letters := bdCreateLetters(text)
+	if _, ok := bdCreateSubsequence(letters, "ghprcreate"); ok {
+		return true
+	}
+	for _, subcommand := range []string{"checkout", "switch"} {
+		rest, ok := bdCreateSubsequence(letters, "git"+subcommand)
+		if !ok {
 			continue
 		}
-		invocations = append(invocations, argv)
-		if standIn {
-			// The substitution may have expanded to gh or git, so the words
-			// behind it are read as the arguments of each (gt-n2gt8).
-			invocations = append(invocations, append([]string{"gh"}, argv...), append([]string{"git"}, argv...))
+		if _, ok := bdCreateSubsequence(rest, "b"); ok {
+			return true
 		}
-		name := strings.ToLower(filepath.Base(argv[0]))
-		switch {
-		case shellInvokers[name]:
-			if idx := shellCPayloadIndex(toLowerTokens(argv[1:])); idx >= 0 {
-				payloads = append(payloads, argv[1+idx])
-			}
-		case name == "eval" && len(argv) > 1:
-			payloads = append(payloads, strings.Join(argv[1:], " "))
+		if _, ok := bdCreateSubsequence(rest, "c"); ok {
+			return true
 		}
 	}
-	payloads = append(payloads, shellFedHeredocBodies(command)...)
-	payloads = append(payloads, prWorkflowSubstitutions(command)...)
+	return false
+}
+
+// prWorkflowScriptInvocations is prWorkflowInvocations for a command shellparse
+// read. Each segment is judged by the words the parser gives it: the command
+// word and its arguments with quoting removed, and the leading assignments
+// apart from them. A command substitution the shell expands is one opaque word
+// (prWorkflowWordToken), and its body is judged as a command line of its own
+// through Segment.Subs, which also holds the process substitutions ("<(cmd)")
+// and the substitutions of an unquoted heredoc body. Script.Subs holds those a
+// construct header runs (a for list).
+func prWorkflowScriptInvocations(script shellparse.Script, depth int) (invocations [][]string, tooDeep bool) {
+	var payloads []string
+	var subs []shellparse.Script
+	for i, seg := range script.Segments {
+		argv, launched, standIn := prWorkflowCommand(prWorkflowSegmentTokens(seg))
+		payloads = append(payloads, launched...)
+		if len(argv) > 0 {
+			invocations = append(invocations, argv)
+			if standIn {
+				// The substitution may have expanded to gh or git, so the words
+				// behind it are read as the arguments of each (gt-n2gt8).
+				invocations = append(invocations, append([]string{"gh"}, argv...), append([]string{"git"}, argv...))
+			}
+			name := strings.ToLower(filepath.Base(argv[0]))
+			switch {
+			case shellInvokers[name]:
+				if idx := shellCPayloadIndex(toLowerTokens(argv[1:])); idx >= 0 {
+					payloads = append(payloads, argv[1+idx])
+				}
+			case name == "eval" && len(argv) > 1:
+				payloads = append(payloads, strings.Join(argv[1:], " "))
+			}
+		}
+		payloads = append(payloads, prWorkflowFedHeredocs(script, i)...)
+		subs = append(subs, seg.Subs...)
+	}
+	subs = append(subs, script.Subs...)
 
 	for _, payload := range payloads {
 		if depth >= maxPRWorkflowNestDepth {
@@ -447,7 +502,123 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 		invocations = append(invocations, nested...)
 		tooDeep = tooDeep || deep
 	}
+	for _, sub := range subs {
+		if depth >= maxPRWorkflowNestDepth {
+			tooDeep = tooDeep || prWorkflowScriptNamesGhOrGit(sub)
+			continue
+		}
+		nested, deep := prWorkflowScriptInvocations(sub, depth+1)
+		invocations = append(invocations, nested...)
+		tooDeep = tooDeep || deep
+	}
 	return invocations, tooDeep
+}
+
+// prWorkflowSegmentTokens returns the words a segment runs, as the shell reads
+// them: its leading assignments, then its command word and arguments.
+func prWorkflowSegmentTokens(seg shellparse.Segment) []string {
+	tokens := make([]string, 0, len(seg.Assigns)+len(seg.Words))
+	for _, a := range seg.Assigns {
+		tokens = append(tokens, bdAssignToken(a))
+	}
+	for _, w := range seg.Words {
+		tokens = append(tokens, prWorkflowWordToken(w))
+	}
+	return tokens
+}
+
+// prWorkflowWordToken returns a word as prWorkflowCommand reads it. A word that
+// is one command substitution is the stand-in, whatever the expansion gives;
+// any other word is its text with quoting removed. An unquoted "$(...)" is the
+// parser's text, not a literal, so Literal tells a substitution from a quoted
+// "$(...)", which the shell passes through as data.
+func prWorkflowWordToken(w shellparse.Word) string {
+	if !w.Literal && strings.ContainsAny(w.Text, "$`") && prWorkflowWholeSubstitution(w.Text) {
+		return prWorkflowSubstitutionWord
+	}
+	return w.Text
+}
+
+// prWorkflowWholeSubstitution reports whether text is one command substitution
+// and nothing else: "$(...)" or a backtick span that the parser reads as a
+// single word holding a single substitution. "pre$(x)" and "$(a)$(b)" are not
+// one, so the shell's joined word stays a name the guard reads as it is.
+func prWorkflowWholeSubstitution(text string) bool {
+	switch {
+	case strings.HasPrefix(text, "$("):
+		if !strings.HasSuffix(text, ")") {
+			return false
+		}
+	case strings.HasPrefix(text, "`"):
+		if !strings.HasSuffix(text, "`") {
+			return false
+		}
+	default:
+		return false
+	}
+	script, err := shellparse.Parse(text)
+	if err != nil || len(script.Segments) != 1 {
+		return false
+	}
+	seg := script.Segments[0]
+	return len(seg.Assigns) == 0 && len(seg.Words) == 1 && seg.Words[0].Text == text && len(seg.Subs) == 1
+}
+
+// prWorkflowFedHeredocs returns the bodies the segment at index reads on its
+// standard input when a shell on its reader line runs them as a script
+// (heredocReaderLineRunsShell): "bash <<EOF" and "cat <<EOF | bash" both do. A
+// body on a line with no shell is data, and so is a body on another descriptor.
+func prWorkflowFedHeredocs(script shellparse.Script, index int) []string {
+	if !heredocReaderLineRunsShell(script, index) {
+		return nil
+	}
+	var bodies []string
+	for _, h := range script.Segments[index].Heredocs {
+		if (h.N == "" || h.N == "0") && strings.TrimSpace(h.Body) != "" {
+			bodies = append(bodies, h.Body)
+		}
+	}
+	return bodies
+}
+
+// prWorkflowScriptNamesGhOrGit reports whether any text of a parsed script that
+// is too deep to read names gh or git: its words, assignments, redirection
+// targets, heredoc bodies and every substitution inside them.
+func prWorkflowScriptNamesGhOrGit(script shellparse.Script) bool {
+	named := func(text string) bool { return prWorkflowNamesGhOrGit.MatchString(text) }
+	for _, seg := range script.Segments {
+		for _, w := range seg.Assigns {
+			if named(w.Raw) {
+				return true
+			}
+		}
+		for _, w := range seg.Words {
+			if named(w.Raw) {
+				return true
+			}
+		}
+		for _, r := range seg.Redirs {
+			if named(r.Word.Raw) {
+				return true
+			}
+		}
+		for _, h := range seg.Heredocs {
+			if named(h.Body) {
+				return true
+			}
+		}
+		for _, sub := range seg.Subs {
+			if prWorkflowScriptNamesGhOrGit(sub) {
+				return true
+			}
+		}
+	}
+	for _, sub := range script.Subs {
+		if prWorkflowScriptNamesGhOrGit(sub) {
+			return true
+		}
+	}
+	return false
 }
 
 // prWorkflowSubstitutionWord stands in for a command substitution while the
@@ -465,7 +636,7 @@ const prWorkflowSubstitutionWord = "__gt_substitution__"
 // command word, so the "gh pr create" the line really runs, with x set for it,
 // was no word the guard saw and the line was allowed (gt-4t56h). One word in
 // the substitution's place keeps the words behind its ")" whole; the body is
-// judged as a command line of its own by prWorkflowSubstitutions.
+// judged as a command line of its own by the substitution scan of its caller.
 func prWorkflowTokenText(command string) string {
 	text := stripHeredocBodies(strings.TrimSpace(command))
 	spans := substitutionSpansIn(text, true)
@@ -499,34 +670,6 @@ func prWorkflowSpanEnd(text string, span substitutionSpan) int {
 // so bodyEnd is the text's length.
 func prWorkflowSpanUnterminated(text string, span substitutionSpan) bool {
 	return span.bodyEnd >= len(text)
-}
-
-// prWorkflowSubstitutions returns the body of every command substitution the
-// shell expands in command: the ones in the command text, and the ones in the
-// body of an unquoted heredoc, which the shell expands while reading it. The
-// scan is substitutionSpansIn, the one the other guards read too, so the
-// quote, comment and escaping rules are the ones its comment states (gt-ejn41).
-//
-// A substitution nested in a body is not returned here: the recursion in
-// prWorkflowInvocations scans the body for its own. A body is handed over as
-// the shell would run it: the backslash that makes a backtick literal, and
-// that the shell drops when it parses the body, is dropped too
-// (substitutionBody), so the "gh pr create" inside "echo \`gh pr create\`" is
-// read as the command it is. A body that runs to the end of the text hands its
-// last ")" over as a word of its own (prWorkflowSplitBodyParen).
-func prWorkflowSubstitutions(command string) []string {
-	text := stripHeredocBodies(command)
-	var bodies []string
-	for _, span := range substitutionSpansIn(text, true) {
-		body := substitutionBody(text, span)
-		if prWorkflowSpanUnterminated(text, span) {
-			body = prWorkflowSplitBodyParen(body)
-		}
-		if strings.TrimSpace(body) != "" {
-			bodies = append(bodies, body)
-		}
-	}
-	return append(bodies, heredocBodySubstitutions(command)...)
 }
 
 // prWorkflowSplitBodyParen returns body with a space in front of each ")" it
@@ -1019,15 +1162,20 @@ func isPRCreateCommand(command string) bool {
 // (gt-cyz8) — so a checkout glued after an && on the same line is NOT branch
 // creation here and exempts nothing.
 func isLeadingBranchCreation(command string) bool {
-	// The same token text prWorkflowInvocations reads, so the leading segment
-	// is the one the judge sees and not a second reading of it.
-	segs := splitShellSegments(shellTokenize(prWorkflowTokenText(command)))
-	if len(segs) == 0 {
+	// The same parse prWorkflowInvocations reads, so the leading segment is the
+	// one the judge sees and not a second reading of it.
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		// A command shellparse cannot read has no leading segment to read, so it
+		// is not granted the exemption (gt-mru91l).
+		return false
+	}
+	if len(script.Segments) == 0 {
 		return false
 	}
 	// The leading command is the one the first segment runs, so an env
 	// assignment or launcher in front of git (the shapes the matcher now
 	// reads, gt-zf2vy) keeps the exemption it had when they hid the command.
-	seg, _, _ := prWorkflowCommand(segs[0])
+	seg, _, _ := prWorkflowCommand(prWorkflowSegmentTokens(script.Segments[0]))
 	return isBranchCreation(seg)
 }
