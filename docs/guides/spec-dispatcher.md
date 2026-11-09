@@ -82,6 +82,8 @@ One tick. The daemon runs it with `--json` when the ticker is on; `--dry-run`
 decides and reports without slinging, labeling or commenting.
 
 1. The operator hold file (`<town>/seat-refill.hold`) or ESTOP stops the tick.
+   The daemon's boot hold (`<town>/daemon/boot-health`) stops it too. A file a
+   dead daemon left behind holds until someone removes it by hand.
 2. Candidates are ready, open, unassigned **task, bug or feature** beads at or
    above `polecat_pool.max_priority` (default 2), in every rig that is not
    parked or docked. Epics, agent beads, wisps, the other runtime families and
