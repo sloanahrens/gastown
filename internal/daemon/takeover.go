@@ -3,6 +3,8 @@ package daemon
 import (
 	"fmt"
 	"time"
+
+	agentconfig "github.com/steveyegge/gastown/internal/config"
 )
 
 // TakeoverWindow is how old a recorded heartbeat must be before a start may read
@@ -33,12 +35,21 @@ type TakeoverInput struct {
 	Now time.Time
 	// Self is the owner of the daemon about to start.
 	Self Owner
-	// Takeover lets a start pass a recorded owner the probe shows not running;
-	// it never passes one that is running or unreadable.
+	// Takeover lets a start pass a recorded owner the probe shows not running.
+	// It never passes one that is running. It passes a recorded container owner
+	// the probe cannot read: the probe cannot tell an engine that is absent (a pod)
+	// from one that answered with an error, so a takeover also passes a failed
+	// engine call, and the operator confirms the old container is stopped. No
+	// other unreadable owner passes.
 	Takeover bool
 	// Probe reads an owner's liveness, and every rule that judges an owner needs
 	// it; a nil probe refuses rather than allow.
 	Probe OwnerProbe
+	// TookOver is called with the recorded container owner a takeover passed while
+	// the probe could not read it. A takeover with a nil TookOver refuses rather
+	// than pass that owner unlogged. The guard does no I/O of its own, so the
+	// caller decides what the log line says.
+	TookOver func(Owner)
 }
 
 // CheckTakeover decides whether a daemon may start on a town root another owner
@@ -57,7 +68,9 @@ type TakeoverInput struct {
 //  6. A stale heartbeat: allow only when the probe shows the recorded owner not
 //     running. Running or unknown refuses, because a stuck daemon also stops
 //     writing its heartbeat, and its lock is not visible across a container
-//     boundary.
+//     boundary. The exception is a recorded container the probe cannot read,
+//     which a takeover passes (see TakeoverInput.Takeover); rules 4 and 5 judge
+//     an owner the same way.
 func CheckTakeover(in TakeoverInput) error {
 	if in.State == nil && !in.PriorRun {
 		return nil
@@ -129,29 +142,41 @@ func checkLegacyStart(in TakeoverInput) error {
 
 // refuseUnlessStopped allows the start when the probe proves owner is gone, and
 // otherwise refuses, reading found as the clause that states what was recorded.
+// The one unreadable owner a takeover passes is a container: see
+// TakeoverInput.Takeover. That takeover passes a failed engine call as well as an
+// absent engine, because the probe reads both as unknown; the operator's switch
+// is the bypass for both, and the refusal says so.
 func refuseUnlessStopped(in TakeoverInput, owner Owner, found string) error {
-	stopped, why := ownerStopped(in, owner)
-	if stopped {
-		return nil
-	}
-	return fmt.Errorf("%s, but %s; refusing to start %s", found, why, ownerName(in.Self))
-}
-
-// ownerStopped reports whether the probe proves the owner is not running. A
-// missing probe or an unreadable owner is not proof, and each returns the clause
-// a refusal states.
-func ownerStopped(in TakeoverInput, owner Owner) (bool, string) {
 	if in.Probe == nil {
-		return false, fmt.Sprintf("whether %s is still running is unknown (no probe was supplied)", ownerName(owner))
+		return refuseStart(in, found, fmt.Sprintf("whether %s is still running is unknown (no probe was supplied)", ownerName(owner)))
 	}
 	running, known := in.Probe(owner)
 	switch {
-	case !known:
-		return false, fmt.Sprintf("whether %s is still running is unknown", ownerName(owner))
-	case running:
-		return false, fmt.Sprintf("%s is still running", ownerName(owner))
+	case known && !running:
+		return nil
+	case known:
+		return refuseStart(in, found, fmt.Sprintf("%s is still running", ownerName(owner)))
+	case in.Takeover && owner.Kind == agentconfig.SupervisorContainer:
+		// A takeover is never allowed to pass unlogged: with no log to name the
+		// owner in, the start is refused rather than passed silently.
+		if in.TookOver == nil {
+			return refuseStart(in, found, fmt.Sprintf("whether %s is still running is unknown, and the takeover has no log to name it in", ownerName(owner)))
+		}
+		in.TookOver(owner)
+		return nil
+	case owner.Kind == agentconfig.SupervisorContainer:
+		return refuseStart(in, found, fmt.Sprintf(
+			"whether %s is still running is unknown, and this daemon cannot ask an engine for it, so the old owner cannot be shown stopped; "+
+				"the cut-over step sets %s=1 for this start once the operator has confirmed the old container is stopped (%s also passes a failed engine call)",
+			ownerName(owner), agentconfig.TakeoverEnv, agentconfig.TakeoverEnv))
 	}
-	return true, ""
+	return refuseStart(in, found, fmt.Sprintf("whether %s is still running is unknown", ownerName(owner)))
+}
+
+// refuseStart is the refusal every recorded-owner rule states: what was
+// recorded, why the probe does not clear it, and which start it refuses.
+func refuseStart(in TakeoverInput, found, why string) error {
+	return fmt.Errorf("%s, but %s; refusing to start %s", found, why, ownerName(in.Self))
 }
 
 // heartbeatPhrase states a recorded heartbeat's age for a refusal, in minutes

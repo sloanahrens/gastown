@@ -3,6 +3,8 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,10 +28,11 @@ var startGuardOther = daemon.Owner{Kind: daemon.OwnerKindManual, ID: "other-host
 var startGuardLaunchd = daemon.Owner{Kind: config.SupervisorLaunchd, ID: templates.LaunchdLabel}
 
 // guardProbe wraps daemon.GuardStart with the fixed clock and the given probe,
-// the shape of the control's guard seam. Everything else is the real guard.
+// the shape of the control's guard seam. Everything else is the real guard. The
+// takeover line goes to a discarded logger: these tests assert the refusals.
 func guardProbe(probe daemon.OwnerProbe) func(string, daemon.Owner, bool) error {
 	return func(townRoot string, self daemon.Owner, takeover bool) error {
-		return daemon.GuardStart(townRoot, self, takeover, probe, startGuardNow)
+		return daemon.GuardStart(townRoot, self, takeover, probe, startGuardNow, log.New(io.Discard, "", 0))
 	}
 }
 

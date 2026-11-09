@@ -213,7 +213,7 @@ func TestGuardStartup(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(t, town)
 			}
-			err := guardStartup(town, guardSelf, tc.takeover, tc.probe(t), guardNow, tc.logPreexisted)
+			err := guardStartup(town, guardSelf, tc.takeover, tc.probe(t), guardNow, tc.logPreexisted, nil)
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("guardStartup = %v, want the start to go on", err)

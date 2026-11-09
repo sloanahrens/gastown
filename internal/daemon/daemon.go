@@ -1641,7 +1641,7 @@ func (d *Daemon) Run() (err error) {
 		probe = startupOwnerProbeForTown(d.config.TownRoot, templates.RunDockerInspect, d.hostnameOrOS, templates.SupervisorJobState, d.clk().Now)
 	}
 	takeover := d.env(agentconfig.TakeoverEnv) == "1"
-	if err := guardStartup(d.config.TownRoot, self, takeover, probe, d.clk().Now(), d.logPreexisted); err != nil {
+	if err := guardStartup(d.config.TownRoot, self, takeover, probe, d.clk().Now(), d.logPreexisted, logTakeover(d.logger)); err != nil {
 		return err
 	}
 
