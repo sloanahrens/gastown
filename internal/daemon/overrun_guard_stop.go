@@ -90,11 +90,14 @@ const (
 // Between steps 1 and 2 the save step (overrunSaveWork, 1b) commits the seat's
 // uncommitted work as one WIP commit named for the bead and pushes the kept
 // branch, once per stop, before the session stops and before the sandbox is
-// removed. A refused save is noted in the hand-back, keeps the sandbox and
-// leaves the seat paused; it does not hold the stop. An unresolvable worktree
-// is a refused save. Before the sandbox is removed (step 2a) the worktree is
-// read again: one dirty since the save is saved once more, and a dirty worktree
-// that cannot be read or saved holds the stop with the sandbox kept.
+// removed. A refused save holds the stop with the seat paused, and the next
+// tick saves again; after overrunSaveMaxAttempts consecutive refusals the stop
+// gives up on the save: the sandbox is kept, the bead is handed back with the
+// refusal named, and the seat stays parked. An unresolvable worktree is a
+// refused save. Before the sandbox is removed (step 2a) the worktree is read
+// again: one dirty since the save is saved once more, a refused re-save counts
+// toward the same cap, and a dirty worktree that cannot be read holds the stop
+// with the sandbox kept.
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
@@ -215,19 +218,30 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 		// 1b. Save the seat's work before the session stops and the sandbox
 		// goes (overrunSaveWork): uncommitted edits become one WIP commit and
-		// the kept branch is pushed. It runs once, after the re-check above, so
-		// a seat taken back is never committed; a stop resumed later keeps the
-		// answer. A refusal is noted in the hand-back and keeps the sandbox, but
-		// it does not hold the stop, since the seat is paused meanwhile.
+		// the kept branch is pushed. It runs after the re-check above, so a
+		// seat taken back is never committed. A refusal holds the stop with the
+		// seat paused and the session running, and the next tick saves again,
+		// up to overrunSaveMaxAttempts refusals; the cap then parks the seat, and
+		// the stop goes on with the sandbox kept and the reason in the note.
 		if st.SavedAt.IsZero() && s.saveWork != nil {
 			saveSeat := seat
 			saveSeat.Bead, saveSeat.Branch, saveSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
 			saved, err := s.saveWork(saveSeat)
-			st.SavedAt = now
 			if err != nil {
+				st.SaveFailures++
 				st.SaveFailure = pushFailureReason(err)
-				d.logger.Printf("overrun_guard: stop %s on %s: work not saved before the stop, sandbox kept: %v", who, st.Bead, err)
+				if st.SaveFailures < overrunSaveMaxAttempts {
+					d.logger.Printf("overrun_guard: stop %s on %s: work not saved, retrying next tick (%d of %d): %v",
+						who, st.Bead, st.SaveFailures, overrunSaveMaxAttempts, err)
+					save()
+					return
+				}
+				st.SavedAt, st.SaveGaveUp = now, true
+				d.logger.Printf("overrun_guard: stop %s on %s: work not saved after %d attempts, sandbox kept: %v",
+					who, st.Bead, st.SaveFailures, err)
 			} else {
+				st.SavedAt = now
+				st.SaveFailure, st.SaveFailures = "", 0
 				st.SavedHead, st.SaveCommitted = saved.Head, saved.Committed
 			}
 			if !save() {
@@ -294,38 +308,58 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// seat left paused (sandboxKept). A host seat has no record and this does
 	// nothing; a seat on a rig the registry does not list is found by its
 	// record's rig and polecat, and a lookup that cannot tell holds the stop.
-	// A refused save keeps the sandbox too: its work is not known to be on
-	// origin, so nothing removes it (step 1b).
-	saveKept := st.SaveFailure != ""
+	// A save that gave up (SaveGaveUp, step 1b or 2a) keeps the sandbox too: its
+	// work is not known to be on origin, so nothing removes it. A refusal short
+	// of the cap holds the stop before the sandbox is touched.
+	saveKept := st.SaveGaveUp
 	sandboxKept := false
 	if s.removeSandbox != nil && !saveKept {
 		// 2a. Re-check the worktree before the sandbox goes. The save (1b) ran
 		// before the session stop, so an edit made between the two is not in
-		// it: a worktree dirty again is saved once more. A dirty check or save
-		// that fails holds the stop with the sandbox kept, as a refused push
-		// does, and the next tick checks again.
+		// it: a worktree dirty again is saved once more. A dirty check that
+		// fails holds the stop with the sandbox kept, as a refused push does, and
+		// the next tick checks again. A refused re-save holds the same way, up to
+		// overrunSaveMaxAttempts refusals; the cap parks the seat and keeps the
+		// sandbox, as a refused save at 1b does.
 		if s.saveWork != nil {
 			dirty, err := d.overrunWorktreeDirty(seat)
 			if err != nil {
 				d.logger.Printf("overrun_guard: stop %s on %s waits, sandbox kept: %v", who, st.Bead, err)
 				return
 			}
-			if dirty {
+			// A refused save may have committed without pushing (the WIP commit
+			// stays in the worktree), so a pending refusal saves again even when
+			// the worktree now reads clean: the sandbox never goes on an unpushed
+			// commit.
+			if dirty || st.SaveFailure != "" {
 				saveSeat := seat
 				saveSeat.Bead, saveSeat.Branch, saveSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
 				saved, err := s.saveWork(saveSeat)
 				if err != nil {
-					d.logger.Printf("overrun_guard: stop %s on %s waits: work edited after the save not saved, sandbox kept: %v", who, st.Bead, err)
-					return
-				}
-				if saved.Head != "" {
-					st.SavedHead, st.SaveCommitted = saved.Head, saved.Committed
+					st.SaveFailures++
+					st.SaveFailure = pushFailureReason(err)
+					if st.SaveFailures < overrunSaveMaxAttempts {
+						d.logger.Printf("overrun_guard: stop %s on %s waits: work edited after the save not saved, retrying next tick (%d of %d), sandbox kept: %v",
+							who, st.Bead, st.SaveFailures, overrunSaveMaxAttempts, err)
+						save()
+						return
+					}
+					st.SaveGaveUp, saveKept = true, true
+					d.logger.Printf("overrun_guard: stop %s on %s: work edited after the save not saved after %d attempts, sandbox kept: %v",
+						who, st.Bead, st.SaveFailures, err)
+				} else {
+					st.SaveFailure, st.SaveFailures = "", 0
+					if saved.Head != "" {
+						st.SavedHead, st.SaveCommitted = saved.Head, saved.Committed
+					}
 				}
 				if !save() {
 					return
 				}
 			}
 		}
+	}
+	if s.removeSandbox != nil && !saveKept {
 		err := s.removeSandbox(seat)
 		switch {
 		case err == nil:

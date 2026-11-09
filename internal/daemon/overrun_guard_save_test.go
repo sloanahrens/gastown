@@ -293,10 +293,25 @@ func TestOverrunStop_SaveRunsBeforeTheSessionStopAndTheSandbox(t *testing.T) {
 	}
 }
 
-// A refused save is noted in the hand-back and keeps the sandbox, but it does
-// not hold the stop: the session is stopped and the bead handed back, and the
-// seat stays paused so nothing reuses the worktree.
-func TestOverrunStop_RefusedSaveKeepsTheSandboxAndHandsBack(t *testing.T) {
+// tickUntilSaveCap runs the guard for the ticks a refusing save holds the stop
+// before its cap, asserting the bead is not handed back meanwhile, then runs the
+// cap tick. A refusal that never clears parks the seat on that tick.
+func tickUntilSaveCap(t *testing.T, w *resetWorld, f *overrunFake, s overrunSeams) {
+	t.Helper()
+	for tick := 1; tick < overrunSaveMaxAttempts; tick++ {
+		w.d.runOverrunGuard(s)
+		if len(f.handedBack) != 0 {
+			t.Fatalf("tick %d of %d: hand-backs %q; want the stop held until the cap",
+				tick, overrunSaveMaxAttempts, f.handedBack)
+		}
+	}
+	w.d.runOverrunGuard(s)
+}
+
+// A refused save holds the stop: nothing is stopped and the bead is not handed
+// back, and the next tick saves again. When the refusal clears the save lands,
+// the stop finishes, and the refusal is no longer recorded.
+func TestOverrunStop_RefusedSaveIsRetriedOnTheNextTick(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
 	w.divergeOriginBranch(t)
@@ -309,20 +324,87 @@ func TestOverrunStop_RefusedSaveKeepsTheSandboxAndHandsBack(t *testing.T) {
 
 	w.d.runOverrunGuard(s)
 
-	if !slices.Contains(f.stops, "gastown/capable") {
-		t.Errorf("stops = %q, want the seat stopped: a refused save does not hold the stop", f.stops)
+	if len(f.stops) != 0 || len(f.handedBack) != 0 || slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Fatalf("first tick: stops %q, hand-backs %q, calls %q; want the refused stop held",
+			f.stops, f.handedBack, f.calls)
+	}
+	st, err := readOverrunState(w.d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.SavedAt.IsZero() || st.SaveFailure == "" || st.SaveFailures != 1 {
+		t.Errorf("state after the refusal = SavedAt %v, SaveFailure %q, SaveFailures %d; want unset, the reason, and 1",
+			st.SavedAt, st.SaveFailure, st.SaveFailures)
+	}
+
+	// The refusal clears: origin's branch no longer holds a commit the seat's
+	// tip lacks, so the next tick's push goes through.
+	w.f.SetRef(t, w.origin, "refs/heads/"+stopSeat.Branch, w.baseSHA)
+	w.d.runOverrunGuard(s)
+
+	head, err := w.git().Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.f.Ref(w.origin, "refs/heads/"+stopSeat.Branch); got != head {
+		t.Errorf("origin holds %q for the branch, want the saved head %s", got, head)
+	}
+	if !slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Errorf("calls = %q, want the sandbox removed once the save landed", f.calls)
 	}
 	if len(f.handedBack) != 1 {
-		t.Errorf("hand-backs = %q, want the bead handed back", f.handedBack)
+		t.Errorf("hand-backs = %q, want the stop to finish on the retry", f.handedBack)
+	}
+	if len(f.handBackNotes) != 1 || !strings.Contains(f.handBackNotes[0], head) {
+		t.Errorf("hand-back note = %q, want it to name the saved head %s", f.handBackNotes, head)
+	}
+	st, err = readOverrunState(w.d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.SaveFailure != "" || st.SaveFailures != 0 || st.SaveGaveUp {
+		t.Errorf("state after the save landed = SaveFailure %q, SaveFailures %d, SaveGaveUp %v; want all cleared",
+			st.SaveFailure, st.SaveFailures, st.SaveGaveUp)
+	}
+}
+
+// A refusal that never clears parks the seat once, on the cap tick: the seat is
+// stopped, the sandbox is kept, and the hand-back names the reason. Later ticks
+// add no hand-back.
+func TestOverrunStop_PermanentlyRefusedSaveParksAfterTheCap(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	w.divergeOriginBranch(t)
+	writeWorkFiles(t, w.work, map[string]string{"more.txt": "more\n"})
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+
+	tickUntilSaveCap(t, w, f, s)
+
+	if !slices.Contains(f.stops, "gastown/capable") {
+		t.Errorf("stops = %q, want the seat stopped on the cap tick", f.stops)
 	}
 	if slices.Contains(f.calls, "sandbox gastown/capable") {
-		t.Errorf("calls = %q: the sandbox was removed before the save's result was known to be pushed", f.calls)
-	}
-	if slices.Contains(f.calls, "retire gastown/capable") {
-		t.Errorf("calls = %q: the seat was released although its work was not saved", f.calls)
+		t.Errorf("calls = %q: the sandbox was removed though the work was never saved", f.calls)
 	}
 	if len(f.handBackNotes) != 1 || !strings.Contains(f.handBackNotes[0], "could not be saved before the stop") {
-		t.Errorf("hand-back note = %q, want the refused save named", f.handBackNotes)
+		t.Fatalf("hand-back note = %q, want the refused save named", f.handBackNotes)
+	}
+	st, err := readOverrunState(w.d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.SaveGaveUp || st.SaveFailure == "" || !strings.Contains(f.handBackNotes[0], st.SaveFailure) {
+		t.Errorf("state = SaveGaveUp %v, SaveFailure %q; want the park recorded with the reason named in the note %q",
+			st.SaveGaveUp, st.SaveFailure, f.handBackNotes[0])
+	}
+
+	w.d.runOverrunGuard(s)
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %q after a later tick, want the seat parked once", f.handedBack)
 	}
 }
 
@@ -389,7 +471,8 @@ func TestOverrunSaveWork_UnresolvableWorktreeIsAnError(t *testing.T) {
 }
 
 // A refused save of an unresolvable worktree keeps the sandbox, as any refused
-// save does: the stop hands the bead back with the refusal named.
+// save does: the stop is held until the cap, then hands the bead back with the
+// refusal named.
 func TestOverrunStop_UnresolvableWorktreeKeepsTheSandbox(t *testing.T) {
 	t.Parallel()
 	w := newResetWorld(t)
@@ -402,7 +485,7 @@ func TestOverrunStop_UnresolvableWorktreeKeepsTheSandbox(t *testing.T) {
 	s := f.seams()
 	s.saveWork = w.d.overrunSaveWork
 
-	w.d.runOverrunGuard(s)
+	tickUntilSaveCap(t, w, f, s)
 
 	if slices.Contains(f.calls, "sandbox gastown/capable") {
 		t.Errorf("calls = %q: the sandbox was removed though the worktree could not be saved", f.calls)
@@ -486,17 +569,84 @@ func TestOverrunStop_LateEditThatCannotBeSavedKeepsTheSandbox(t *testing.T) {
 	}
 }
 
-// statusFailsOnSecondRead is the seat's git with its second status read failing.
-// The first read is the save's (step 1b); the second is the late re-check's
-// (step 2a), which must not read a dirty worktree as clean.
-type statusFailsOnSecondRead struct {
-	daemonGit
-	reads *int
+// A late edit the re-save keeps refusing holds the stop until the cap, then parks
+// the seat with the sandbox kept. The refused WIP commit stays in the worktree
+// with its push undone, and the worktree then reads clean: the re-save is still
+// tried on each tick, so the sandbox never goes on that unpushed commit.
+func TestOverrunStop_LateEditRefusedForeverParksAfterTheCap(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	stopSession := s.stopSession
+	s.stopSession = func(seat overrunSeat) error {
+		writeWorkFiles(t, w.work, map[string]string{"late.txt": "late\n"})
+		w.divergeOriginBranch(t)
+		return stopSession(seat)
+	}
+
+	tickUntilSaveCap(t, w, f, s)
+
+	if slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Errorf("calls = %q: the sandbox was removed with the late edit's commit unpushed", f.calls)
+	}
+	if len(f.handBackNotes) != 1 || !strings.Contains(f.handBackNotes[0], "could not be saved before the stop") {
+		t.Errorf("hand-back note = %q, want the refused late save named", f.handBackNotes)
+	}
 }
 
-func (g statusFailsOnSecondRead) Status() (*git.GitStatus, error) {
-	*g.reads++
-	if *g.reads == 2 {
+// The seat's worktree in production is a linked worktree of the rig's clone: its
+// .git is a file naming the clone's worktrees directory, not a .git directory of
+// its own. The save commits and pushes that shape the same way.
+func TestOverrunSaveWork_LinkedWorktreeIsSavedAndPushed(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := useGitfake(t, d)
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "initial", map[string]string{"a.txt": "a\n"})
+	clone := filepath.Join(t.TempDir(), "clone")
+	f.Clone(t, origin, clone)
+	work := filepath.Join(d.config.TownRoot, stopSeat.Rig, "polecats", stopSeat.Polecat, stopSeat.Rig)
+	if err := f.OpenBranchRepo(clone).WorktreeAddFromRef(work, stopSeat.Branch, base); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(work, ".git")); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("setup: .git in the linked worktree is not a file (%v, %v)", info, err)
+	}
+	writeWorkFiles(t, work, map[string]string{"work.txt": "work\n"})
+	w := &resetWorld{d: d, f: f, origin: origin, work: work, baseSHA: base}
+
+	if _, err := d.overrunSaveWork(stopSeat); err != nil {
+		t.Fatalf("save = %v, want the linked worktree saved", err)
+	}
+
+	head, err := w.git().Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := w.f.Ref(origin, "refs/heads/"+stopSeat.Branch); got != head {
+		t.Errorf("origin holds %q for the branch, want the WIP commit %s", got, head)
+	}
+	msgs := w.saveCommits(t, base)
+	if len(msgs) != 1 || msgs[0] != overrunSaveMessage(stopSeat.Bead) {
+		t.Errorf("commits above main = %q, want one WIP commit named for the bead", msgs)
+	}
+}
+
+// statusUnreadableAfterStop is the seat's git with its status unreadable once
+// the session has stopped: the late re-check (step 2a) reads the worktree then,
+// and must not read an unreadable status as clean.
+type statusUnreadableAfterStop struct {
+	daemonGit
+	stopped *bool
+}
+
+func (g statusUnreadableAfterStop) Status() (*git.GitStatus, error) {
+	if *g.stopped {
 		return nil, errors.New("status unreadable")
 	}
 	return g.daemonGit.Status()
@@ -512,10 +662,18 @@ func TestOverrunStop_UnreadableLateStatusKeepsTheSandbox(t *testing.T) {
 	f.removeSandbox = func(overrunSeat) error { return nil }
 	s := f.seams()
 	s.saveWork = w.d.overrunSaveWork
-	reads := 0
+	stopped := false
 	open := w.d.openGitFn
 	w.d.openGitFn = func(dir string) daemonGit {
-		return statusFailsOnSecondRead{daemonGit: open(dir), reads: &reads}
+		return statusUnreadableAfterStop{daemonGit: open(dir), stopped: &stopped}
+	}
+	stopSession := s.stopSession
+	s.stopSession = func(seat overrunSeat) error {
+		if err := stopSession(seat); err != nil {
+			return err
+		}
+		stopped = true
+		return nil
 	}
 
 	w.d.runOverrunGuard(s)
