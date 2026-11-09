@@ -80,8 +80,13 @@ func TestTownStateMigrateSeedAndDeltaStepsRefuse(t *testing.T) {
 	t.Run("the delta's verify cannot list the volume", func(t *testing.T) {
 		t.Parallel()
 		env, fv, _ := seededEnv(t, migrateTown(t))
-		// The copy's own empty check is the next listing; the delta's verify is the one after.
-		fv.failListFrom = fv.lists + 2
+		// The delta's verify is the listing after its free-space read and its
+		// import: the first listing that follows the free-space read fails.
+		fv.onRun = func(argv []string) {
+			if strings.Join(argv, " ") == strings.Join(townstate.FreeArgv, " ") {
+				fv.listErr = errors.New("the volume listing failed")
+			}
+		}
 		err := runTownStateMigrateCopyIn(env)
 		if err == nil || !strings.Contains(err.Error(), "listing volume") {
 			t.Fatalf("delta = %v, want the listing named", err)
@@ -112,25 +117,34 @@ func TestTownStateMigrateSeedAndDeltaStepsRefuse(t *testing.T) {
 			t.Fatalf("delta onto a full volume = %v, want the shortfall named", err)
 		}
 	})
-	t.Run("a host file vanishes while the delta is priced", func(t *testing.T) {
+	t.Run("a changed file that vanishes before its link state is read is named", func(t *testing.T) {
 		t.Parallel()
 		town := migrateTown(t)
 		env, fv, _ := seededEnv(t, town)
-		changed := filepath.Join(town, "daemon", "maintenance_state.json")
-		writeHostFile(t, changed, "changed\n", time.Now().Add(time.Hour))
-		// The delta's verify is the listing after the copy's empty check; the
-		// host file goes between that verify and the pricing.
-		at := fv.lists + 2
-		fv.onList = func(n int) {
-			if n == at {
-				if err := os.Remove(changed); err != nil {
-					panic(err)
+		writeHostFile(t, filepath.Join(town, "daemon", "maintenance_state.json"), "changed\n", time.Now())
+		// The first listing is the emptiness probe; the second is the delta's
+		// pre-check, which reads the host copy set before it lists the volume. A
+		// file removed when that second listing starts is differing and unreadable.
+		lists := 0
+		fv.onRun = func(argv []string) {
+			if strings.Join(argv, " ") != strings.Join(townstate.ListArgv, " ") {
+				return
+			}
+			lists++
+			if lists == 2 {
+				if err := os.Remove(filepath.Join(town, "daemon", "maintenance_state.json")); err != nil {
+					t.Errorf("removing the host file: %v", err)
 				}
 			}
 		}
 		err := runTownStateMigrateCopyIn(env)
-		if err == nil || !strings.Contains(err.Error(), "reading the size of daemon/maintenance_state.json") {
-			t.Fatalf("delta = %v, want the vanished file named", err)
+		if err == nil || !strings.Contains(err.Error(), "reading daemon/maintenance_state.json") {
+			t.Fatalf("delta over a vanished file = %v, want the file named", err)
+		}
+		for _, call := range fv.calls {
+			if call == strings.Join(townstate.ImportMergeArgv, " ") {
+				t.Errorf("a delta with an unreadable changed file still ran the import")
+			}
 		}
 	})
 	t.Run("the delta fails part way and the seed record cannot be removed", func(t *testing.T) {
@@ -182,6 +196,44 @@ func TestTownStateMigrateSeedAndDeltaStepsRefuse(t *testing.T) {
 			t.Fatalf("seed = %v, want the verify's listing named", err)
 		}
 	})
+}
+
+// TestTownStateMigrateHostDeltaNamesAVanishedFile: a delta file that cannot be read
+// while the delta is priced is named, never counted as zero bytes.
+func TestTownStateMigrateHostDeltaNamesAVanishedFile(t *testing.T) {
+	t.Parallel()
+	town := migrateTown(t)
+	content := "changed\n"
+	writeHostFile(t, filepath.Join(town, "daemon", "maintenance_state.json"), content, time.Now())
+	got, err := hostDelta(town, map[string]bool{"daemon/maintenance_state.json": true}, time.Time{})
+	if err != nil || got.bytes != int64(len(content)) {
+		t.Fatalf("hostDelta of a present file = %d, %v; want %d bytes", got.bytes, err, len(content))
+	}
+	_, err = hostDelta(town, map[string]bool{"daemon/gone.json": true}, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "reading the size of daemon/gone.json") {
+		t.Fatalf("hostDelta of a vanished file = %v, want the file named", err)
+	}
+}
+
+// TestTownStateMigrateHostDeltaSentSet: --since keeps a regular file only when it
+// is modified after the time, as the export does; a file it leaves out is not sent.
+func TestTownStateMigrateHostDeltaSentSet(t *testing.T) {
+	t.Parallel()
+	town := migrateTown(t)
+	since := time.Now().Add(-time.Hour)
+	writeHostFile(t, filepath.Join(town, "daemon", "newer.json"), "n\n", time.Now())
+	writeHostFile(t, filepath.Join(town, "daemon", "older.json"), "o\n", since.Add(-time.Hour))
+	names := map[string]bool{"daemon/newer.json": true, "daemon/older.json": true}
+	got, err := hostDelta(town, names, since)
+	if err != nil {
+		t.Fatalf("hostDelta: %v", err)
+	}
+	if !got.sent["daemon/newer.json"] || got.sent["daemon/older.json"] {
+		t.Errorf("sent set = %v, want only the file modified after --since", got.sent)
+	}
+	if got.bytes != 4 {
+		t.Errorf("bytes = %d, want both files priced (4)", got.bytes)
+	}
 }
 
 // TestTownStateMigrateRecordFiles: a record is refused when it cannot be encoded,

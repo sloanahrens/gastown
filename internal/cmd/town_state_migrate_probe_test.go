@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -98,6 +99,67 @@ func TestTownStateMigrateListWithinIsBounded(t *testing.T) {
 // TestTownStateMigrateLandingProbes: the candidate probe reads the landing worker's
 // own work root from the town's patrol settings, and the post-land probe reads each
 // rig's red-main state. An unreadable state is an error the caller counts unmet.
+// TestTownStateMigrateReadyToLandNamesItsStatuses: the list the queue reads asks
+// bd for exactly the actionable statuses by name, so the count does not depend on
+// bd's default for the statuses it leaves out.
+func TestTownStateMigrateReadyToLandNamesItsStatuses(t *testing.T) {
+	t.Parallel()
+	asked := map[beads.IssueStatus]bool{}
+	for _, s := range strings.Split(readyToLandListOptions().Status, ",") {
+		asked[beads.IssueStatus(s)] = true
+	}
+	every := []beads.IssueStatus{beads.StatusOpen, beads.StatusInProgress, beads.StatusBlocked, beads.IssueStatusHooked,
+		beads.StatusClosed, beads.StatusTombstone, beads.StatusDeferred, beads.IssueStatusPinned}
+	for _, s := range every {
+		if asked[s] != s.IsActionable() {
+			t.Errorf("status %q: asked for = %v, actionable = %v; the queue asks for exactly the actionable statuses", s, asked[s], s.IsActionable())
+		}
+	}
+}
+
+// TestTownStateMigrateWorkRootShapes: a run in flight is found under each work
+// root the landing worker uses: a configured root, with each run prefix it makes
+// (land-, post-, revert-), and the default $TMPDIR/gt-landing-<uid> root when the
+// town names none. It sets TMPDIR, so it does not run in parallel.
+//
+//testpolicy:allow parallel — TMPDIR is the input under test, and t.Setenv shares it with the whole process
+func TestTownStateMigrateWorkRootShapes(t *testing.T) {
+	t.Run("a configured root holds every run prefix", func(t *testing.T) {
+		town := t.TempDir()
+		writeTownStateFileContent(t, town, "mayor/rigs.json", rigsJSON)
+		base := t.TempDir()
+		writeTownStateFileContent(t, town, "mayor/daemon.json", `{"patrols":{"landing_worker":{"work_root":"`+base+`"}}}`)
+		for _, run := range []string{"land-1", "post-2", "revert-3"} {
+			if err := os.MkdirAll(filepath.Join(base, "beta", run), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		busy, err := landingCandidates(town)
+		if err != nil || len(busy) != 1 {
+			t.Fatalf("landingCandidates = %v, %v; want beta in flight", busy, err)
+		}
+		for _, run := range []string{"land-1", "post-2", "revert-3"} {
+			if !strings.Contains(busy[0], run+" last changed ") {
+				t.Errorf("landingCandidates = %q; want %s named", busy[0], run)
+			}
+		}
+	})
+	t.Run("the default root is under TMPDIR, per uid", func(t *testing.T) {
+		tmp := t.TempDir()
+		//testpolicy:allow no-env — TMPDIR is the input under test
+		t.Setenv("TMPDIR", tmp)
+		town := t.TempDir()
+		writeTownStateFileContent(t, town, "mayor/rigs.json", rigsJSON)
+		if err := os.MkdirAll(filepath.Join(tmp, fmt.Sprintf("gt-landing-%d", os.Getuid()), "beta", "post-9"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		busy, err := landingCandidates(town)
+		if err != nil || len(busy) != 1 || !strings.HasPrefix(busy[0], "beta [post-9 last changed ") {
+			t.Fatalf("landingCandidates = %v, %v; want beta in flight under the default root", busy, err)
+		}
+	})
+}
+
 func TestTownStateMigrateLandingProbes(t *testing.T) {
 	t.Parallel()
 	t.Run("a landing directory in the work root is a run in flight", func(t *testing.T) {
@@ -110,8 +172,27 @@ func TestTownStateMigrateLandingProbes(t *testing.T) {
 			t.Fatal(err)
 		}
 		busy, err := landingCandidates(town)
-		if err != nil || len(busy) != 1 || busy[0] != "beta" {
-			t.Fatalf("landingCandidates = %v, %v; want beta in flight", busy, err)
+		if err != nil || len(busy) != 1 || !strings.HasPrefix(busy[0], "beta [land-123 last changed ") {
+			t.Fatalf("landingCandidates = %v, %v; want beta in flight, with land-123 and its age", busy, err)
+		}
+	})
+	t.Run("a run directory left from long ago is named with its age", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeTownStateFileContent(t, town, "mayor/rigs.json", rigsJSON)
+		base := t.TempDir()
+		writeTownStateFileContent(t, town, "mayor/daemon.json", `{"patrols":{"landing_worker":{"work_root":"`+base+`"}}}`)
+		stale := filepath.Join(base, "beta", "land-old")
+		if err := os.MkdirAll(stale, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		old := time.Now().Add(-3 * time.Hour)
+		if err := os.Chtimes(stale, old, old); err != nil {
+			t.Fatal(err)
+		}
+		busy, err := landingCandidates(town)
+		if err != nil || len(busy) != 1 || busy[0] != "beta [land-old last changed 3h0m0s ago]" {
+			t.Fatalf("landingCandidates = %v, %v; want land-old named with its age", busy, err)
 		}
 	})
 	t.Run("an empty work root has no run in flight", func(t *testing.T) {

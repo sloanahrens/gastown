@@ -125,7 +125,7 @@ func init() {
 
 	for _, c := range []*cobra.Command{townStateMigratePlanCmd, townStateMigrateCopyCmd, townStateMigrateVerifyCmd, townStateMigrateRollbackPlanCmd} {
 		c.Flags().String("town", "", "the town root (default: the town containing the working directory)")
-		c.Flags().String("images", imagevalues.DefaultRelPath, "the image values file; a missing file falls back to the compose file's daemon tag")
+		c.Flags().String("images", "", "the image values file (default "+imagevalues.DefaultRelPath+" under the town root); a missing file falls back to the compose file's daemon tag")
 		c.Flags().String("compose-file", "", "the rendered compose file (default: <town>/daemon/container/compose.yml)")
 	}
 	townStateMigratePlanCmd.Flags().String("volume", "", "the volume whose free space the plan reads (optional)")
@@ -160,6 +160,10 @@ type townStateMigrateEnv struct {
 	cutover      bool
 	exclude      func(string) bool
 	allowNoRigs  bool
+	// deltaSent names the paths a delta copy sends. A changed path among them
+	// after the import is one the merge kept on the volume, so verify names it
+	// with the way out; nil for a seed or a full copy.
+	deltaSent map[string]bool
 	// daemonRemoved is the operator's word that the daemon container was removed
 	// (compose down), not merely stopped: a container docker cannot find reads the
 	// same whether it was removed or the name is wrong, so only this flag lets an
@@ -297,6 +301,9 @@ func runTownStateMigratePlanIn(env townStateMigrateEnv) error {
 		return fmt.Errorf("surveying the town state: %w", err)
 	}
 	fmt.Fprintf(env.out, "migrate plan: %d entries: %s\n", len(inv.Entries), strings.Join(inv.Entries, ", "))
+	if env.image != "" {
+		fmt.Fprintf(env.out, "helper image: %s\n", env.image)
+	}
 	fmt.Fprintf(env.out, "copy: %d files, %d directories, %d symlinks, %d bytes (metadata only; the symlink count is an estimate where the export would refuse a link)\n",
 		inv.Files, inv.Dirs, inv.Symlinks, inv.Bytes)
 	fmt.Fprintf(env.out, "skipped: %s\n", skippedLine(inv.Skipped))
@@ -444,9 +451,30 @@ func copyDelta(env townStateMigrateEnv, start time.Time) error {
 		}
 		return fmt.Errorf("volume %s holds entries the copy set does not; a delta deletes nothing, so remove them from the volume, or re-seed it", env.volume)
 	}
+	// A merge never replaces a link, so a link that differs is refused by name
+	// before any byte moves.
+	var changedLinks []string
+	for _, m := range res.Mismatches {
+		if m.Reason != townstate.ReasonChanged {
+			continue
+		}
+		isLink, err := hostIsLink(env.town, m.Path)
+		if err != nil {
+			return err
+		}
+		if isLink {
+			changedLinks = append(changedLinks, m.Path)
+		}
+	}
+	if len(changedLinks) > 0 {
+		for _, name := range changedLinks {
+			fmt.Fprintln(env.out, "changed link "+name)
+		}
+		return fmt.Errorf("volume %s holds links that differ from the copy set; a merge never replaces a link, so remove them from the volume, or re-seed it", env.volume)
+	}
 
 	diff := res.Differing()
-	deltaBytes, err := hostBytes(env.town, diff)
+	host, err := hostDelta(env.town, diff, env.since)
 	if err != nil {
 		return err
 	}
@@ -454,8 +482,8 @@ func copyDelta(env townStateMigrateEnv, start time.Time) error {
 	if err != nil {
 		return err
 	}
-	if free < deltaBytes {
-		return fmt.Errorf("volume %s has %d bytes free; the delta needs %d", env.volume, free, deltaBytes)
+	if free < host.bytes {
+		return fmt.Errorf("volume %s has %d bytes free; the delta needs %d", env.volume, free, host.bytes)
 	}
 	missing, changed := 0, 0
 	for _, m := range res.Mismatches {
@@ -469,7 +497,14 @@ func copyDelta(env townStateMigrateEnv, start time.Time) error {
 	fmt.Fprintf(env.out, "delta onto seeded volume %s: %d path(s) to send (%d missing, %d changed)\n",
 		env.volume, len(diff), missing, changed)
 
+	env.deltaSent = host.sent
 	if len(diff) > 0 {
+		// The import runs with --merge-newer, which keeps an existing file whose
+		// mtime is not older than the archive's. A host file older than the
+		// volume's copy therefore stays on the volume and verify refuses it by
+		// name. That limit is the merge's, and rollback shares the merge, so the
+		// delta keeps it: no import path, mode or flag changes. Touch the host
+		// file, or use the full copy, to send it.
 		opts := env.exportOptions()
 		opts.Only = func(name string) bool { return diff[name] }
 		sum, err := townstate.SeedVolume(env.engine, env.volume, env.town, townstate.Default(), opts, townstate.ImportMergeArgv, env.out)
@@ -491,20 +526,45 @@ func failedCopy(env townStateMigrateEnv, err error) error {
 	return err
 }
 
-// hostBytes sums the sizes of the host's files named in names, read from metadata
-// alone. A name that cannot be read is an error, never zero bytes.
-func hostBytes(town string, names map[string]bool) (int64, error) {
-	var total int64
+// deltaHost is the host's side of a delta: the bytes the delta weighs and the
+// names its export sends.
+type deltaHost struct {
+	bytes int64
+	// sent names the differing entries the export keeps. A regular file is kept
+	// only when it is modified after since (the zero time keeps every file), the
+	// way Export keeps it; any other entry is always kept.
+	sent map[string]bool
+}
+
+// hostDelta reads the host's differing names from metadata alone. A name that
+// cannot be read is an error, never zero bytes or an unsent file.
+func hostDelta(town string, names map[string]bool, since time.Time) (deltaHost, error) {
+	d := deltaHost{sent: map[string]bool{}}
 	for name := range names {
 		info, err := os.Lstat(filepath.Join(town, filepath.FromSlash(name)))
 		if err != nil {
-			return 0, fmt.Errorf("reading the size of %s: %w", name, err)
+			return deltaHost{}, fmt.Errorf("reading the size of %s: %w", name, err)
 		}
-		if info.Mode().IsRegular() {
-			total += info.Size()
+		if !info.Mode().IsRegular() {
+			d.sent[name] = true
+			continue
+		}
+		d.bytes += info.Size()
+		if since.IsZero() || info.ModTime().After(since) {
+			d.sent[name] = true
 		}
 	}
-	return total, nil
+	return d, nil
+}
+
+// hostIsLink reports whether the host's name is a symbolic link, read from its
+// metadata alone. A name that cannot be read is an error, never a regular file.
+func hostIsLink(town, name string) (bool, error) {
+	info, err := os.Lstat(filepath.Join(town, filepath.FromSlash(name)))
+	if err != nil {
+		return false, fmt.Errorf("reading %s: %w", name, err)
+	}
+	return info.Mode()&fs.ModeSymlink != 0, nil
 }
 
 // finishCopy is the end of every copy that moved bytes: the bd read through the
@@ -536,7 +596,7 @@ func verifyCopy(env townStateMigrateEnv, verifyOpts townstate.ExportOptions) (to
 	if err != nil {
 		return res, err
 	}
-	if problems := printVerifyProblems(env.out, res); problems > 0 {
+	if problems := printVerifyProblems(env.out, res, env.deltaSent); problems > 0 {
 		return res, &ExitCodeError{Code: 1, Err: fmt.Errorf("the copy to volume %s does not verify: %d problems; no cut-over time is written", env.volume, problems)}
 	}
 	return res, nil
@@ -546,21 +606,33 @@ func verifyCopy(env townStateMigrateEnv, verifyOpts townstate.ExportOptions) (to
 // verifies the volume again with it in the set. The record is written after the
 // copy's verify, so the copy cannot carry it; the send puts it on the volume the
 // daemon reads, and the second verify proves the volume holds it. A record that
-// does not reach the volume, or a volume that does not verify with it, is removed,
-// so no cut-over time stands for a volume without it.
+// does not reach the volume, or a volume that does not verify with it, is removed
+// from the host and from the volume, so no cut-over time stands for a volume
+// without it.
 func writeCutover(env townStateMigrateEnv, elapsed time.Duration, verifyOpts townstate.ExportOptions) error {
 	rec := cutoverRecord{CutoverAt: env.now().UTC().Format(time.RFC3339), Volume: env.volume, CopySeconds: elapsed.Seconds()}
 	if err := writeRecordFile(env.town, cutoverRecordRel, rec); err != nil {
 		return err
 	}
 	if err := sendCutoverRecord(env); err != nil {
-		return errors.Join(err, removeRecordFile(env.town, cutoverRecordRel))
+		return errors.Join(err, unwindCutover(env))
 	}
 	if _, err := verifyCopy(env, verifyOpts); err != nil {
-		return errors.Join(err, removeRecordFile(env.town, cutoverRecordRel))
+		return errors.Join(err, unwindCutover(env))
 	}
 	fmt.Fprintf(env.out, "cut-over copy took %s; the cut-over time is in %s and on volume %s\n", elapsed.Round(time.Millisecond), cutoverRecordRel, env.volume)
 	return nil
+}
+
+// unwindCutover removes the cut-over record from the host and from the volume. A
+// removal that fails is named in the error, never dropped: the volume may still
+// carry the record.
+func unwindCutover(env townStateMigrateEnv) error {
+	hostErr := removeRecordFile(env.town, cutoverRecordRel)
+	if err := townstate.RemoveVolumeFile(env.engine, env.volume, cutoverRecordRel); err != nil {
+		return errors.Join(hostErr, fmt.Errorf("removing the cut-over record from volume %s: %w", env.volume, err))
+	}
+	return hostErr
 }
 
 // sendCutoverRecord copies the cut-over record alone onto the volume, through the
@@ -612,17 +684,26 @@ func runTownStateMigrateVerifyIn(env townStateMigrateEnv) error {
 	if err != nil {
 		return err
 	}
-	if problems := printVerifyProblems(env.out, res); problems > 0 {
+	if problems := printVerifyProblems(env.out, res, nil); problems > 0 {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("volume %s does not match the host: %d problems", env.volume, problems)}
 	}
 	fmt.Fprintf(env.out, "migrate verify: volume %s matches the host copy set (%d files)\n", env.volume, res.Files)
 	return nil
 }
 
+// olderHostNote is the way out printed for a changed file the delta sent: the
+// merge kept the volume's copy because the host's was not newer.
+const olderHostNote = "host copy is older than the volume's, so the delta does not overwrite it; touch the host file or use the full copy"
+
 // printVerifyProblems prints each mismatch by path and the count of secret-named
 // entries, never their names or contents, and returns how many problems it found.
-func printVerifyProblems(out io.Writer, res townstate.VerifyResult) int {
+// A changed path in sent (a delta's) also names olderHostNote.
+func printVerifyProblems(out io.Writer, res townstate.VerifyResult, sent map[string]bool) int {
 	for _, m := range res.Mismatches {
+		if m.Reason == townstate.ReasonChanged && sent[m.Path] {
+			fmt.Fprintf(out, "%s %s: %s\n", m.Reason, m.Path, olderHostNote)
+			continue
+		}
 		fmt.Fprintf(out, "%s %s\n", m.Reason, m.Path)
 	}
 	problems := len(res.Mismatches)
@@ -726,6 +807,10 @@ func migrateEnvFromFlags(cmd *cobra.Command, needSecrets bool, findTown func() (
 	images, err := migrateFlagString(cmd, "images")
 	if err != nil {
 		return env, err
+	}
+	if images == "" {
+		// The town's own values file, whatever directory the command runs from.
+		images = filepath.Join(town, filepath.FromSlash(imagevalues.DefaultRelPath))
 	}
 	compose, err := migrateFlagString(cmd, "compose-file")
 	if err != nil {
@@ -1104,8 +1189,23 @@ type readyLister func(rigRoot string) ([]*beads.Issue, error)
 // the same question the landing worker asks, and bounded by migrateProbeTimeout.
 func listReadyToLand(rigRoot string) ([]*beads.Issue, error) {
 	return listWithin(migrateProbeTimeout, func() ([]*beads.Issue, error) {
-		return beads.NewWithBeadsDir(rigRoot, beads.ResolveBeadsDir(rigRoot)).List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
+		return beads.NewWithBeadsDir(rigRoot, beads.ResolveBeadsDir(rigRoot)).List(readyToLandListOptions())
 	})
+}
+
+// readyToLandStatuses are the statuses the landing worker still acts on. The
+// list asks bd for them by name: bd's own default for a status left out is not
+// relied on.
+var readyToLandStatuses = []beads.IssueStatus{beads.StatusOpen, beads.StatusInProgress, beads.StatusBlocked, beads.IssueStatusHooked}
+
+// readyToLandListOptions is the bd query the queue runs: the ready-to-land label,
+// in the actionable statuses, at every priority.
+func readyToLandListOptions() beads.ListOptions {
+	statuses := make([]string, 0, len(readyToLandStatuses))
+	for _, s := range readyToLandStatuses {
+		statuses = append(statuses, string(s))
+	}
+	return beads.ListOptions{Status: strings.Join(statuses, ","), Label: land.LabelReadyToLand, Priority: -1}
 }
 
 // listWithin runs list and returns its answer, or an error once d has passed. A
@@ -1156,7 +1256,9 @@ func landingQueueCount(list readyLister, town string) (int, error) {
 
 // landingCandidates names the rigs whose landing work root holds a landing,
 // post-landing or revert run. The root is the landing worker's own (daemon's
-// LandingWorkRoot), and each run's directory is counted by land.WorkInFlight.
+// LandingWorkRoot), and each run's directory is listed by land.WorkRuns. Each
+// rig is named with its run directories and how long ago each last changed, so
+// a run that never ended reads as stale, not as live.
 func landingCandidates(town string) ([]string, error) {
 	cfg, err := daemon.ReadPatrolConfig(town)
 	if err != nil {
@@ -1172,13 +1274,18 @@ func landingCandidates(town string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("rig %s: %w", name, err)
 		}
-		n, err := land.WorkInFlight(root)
+		runs, err := land.WorkRuns(root)
 		if err != nil {
 			return nil, fmt.Errorf("rig %s work root: %w", name, err)
 		}
-		if n > 0 {
-			busy = append(busy, name)
+		if len(runs) == 0 {
+			continue
 		}
+		named := make([]string, 0, len(runs))
+		for _, r := range runs {
+			named = append(named, fmt.Sprintf("%s last changed %s ago", r.Name, time.Since(r.ModTime).Round(time.Minute)))
+		}
+		busy = append(busy, fmt.Sprintf("%s [%s]", name, strings.Join(named, "; ")))
 	}
 	return busy, nil
 }

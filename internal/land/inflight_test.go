@@ -3,7 +3,9 @@ package land
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 // TestWorkInFlightCountsEveryRunDirectory: a landing, post-landing or revert
@@ -55,6 +57,49 @@ func TestWorkInFlightRefusesAnUnreadableRoot(t *testing.T) {
 	}
 	if got, err := WorkInFlight(file); err == nil {
 		t.Fatalf("WorkInFlight of a file = %d, nil; want an error", got)
+	}
+}
+
+// TestWorkRunsNamesEachRunAndWhenItLastChanged: each run directory is listed by
+// name with its modification time, so a run that never removed its directory is
+// told from a live one by its age; a file or another directory is not listed.
+func TestWorkRunsNamesEachRunAndWhenItLastChanged(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "rig")
+	mkdirs(t, root, "land-old", "wt")
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "land-old"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := WorkRuns(root)
+	if err != nil || len(runs) != 1 || runs[0].Name != "land-old" {
+		t.Fatalf("WorkRuns = %v, %v; want the one run land-old", runs, err)
+	}
+	if d := runs[0].ModTime.Sub(old); d < -time.Second || d > time.Second {
+		t.Fatalf("WorkRuns modification time = %v; want about %v", runs[0].ModTime, old)
+	}
+}
+
+// TestWorkRunsRefusesARunWhoseTimeIsUnreadable: a run the root lists but whose
+// time cannot be read is an error that names the run, never a run with a zero
+// time. The root has no search bit, so the listing reads the name and the
+// entry's stat is refused.
+func TestWorkRunsRefusesARunWhoseTimeIsUnreadable(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "rig")
+	mkdirs(t, root, "land-1")
+	if err := os.Chmod(root, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
+		if err := os.Chmod(root, 0o700); err != nil {
+			t.Errorf("restoring the root for cleanup: %v", err)
+		}
+	})
+	runs, err := WorkRuns(root)
+	if err == nil || !strings.Contains(err.Error(), "land-1") {
+		t.Fatalf("WorkRuns = %v, %v; want the run named in the refusal", runs, err)
 	}
 }
 

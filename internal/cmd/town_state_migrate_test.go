@@ -44,6 +44,9 @@ type fakeVolume struct {
 	hasErr  error
 	listErr error
 	freeErr error
+	// rmErr makes the removal of a file from the volume fail, so a cut-over that
+	// cannot drop its record is refused by name.
+	rmErr error
 	// created names the volumes a copy created, and createErr makes the create fail.
 	created   []string
 	createErr error
@@ -78,6 +81,16 @@ func (f *fakeVolume) Run(volume string, argv []string, stdin io.Reader, stdout i
 		if f.failListFrom > 0 && f.lists >= f.failListFrom {
 			return errors.New("the volume listing failed")
 		}
+	}
+	if len(argv) == 4 && argv[0] == "rm" {
+		if f.rmErr != nil {
+			return f.rmErr
+		}
+		rel := strings.TrimPrefix(argv[3], townstate.VolumeMount+"/")
+		if err := os.Remove(filepath.Join(f.dir, filepath.FromSlash(rel))); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		return nil
 	}
 	switch strings.Join(argv, " ") {
 	case strings.Join(townstate.ImportArgv, " "):
@@ -164,6 +177,15 @@ func tarTree(dir string, w io.Writer) error {
 				return nil
 			}
 			return tw.WriteHeader(&tar.Header{Name: name + "/", Mode: 0o755, Typeflag: tar.TypeDir})
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			// A link is listed as a link, as tar lists it: its target, never the
+			// bytes of the file it points at.
+			target, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			return tw.WriteHeader(&tar.Header{Name: name, Mode: 0o777, Linkname: target, Typeflag: tar.TypeSymlink})
 		}
 		body, err := os.ReadFile(p)
 		if err != nil {
@@ -858,5 +880,45 @@ func TestTownStateMigrateHelperImage(t *testing.T) {
 	}
 	if _, err := helperImage(dir, compose); err == nil {
 		t.Error("an unreadable values file fell back to the compose tag")
+	}
+}
+
+// TestTownStateMigrateImagesDefaultsToTheTown: with no --images, the values file
+// is the town's own, whichever directory the command runs from.
+func TestTownStateMigrateImagesDefaultsToTheTown(t *testing.T) {
+	t.Parallel()
+	town := migrateTown(t)
+	digest := "registry.example/gt-daemon@sha256:" + strings.Repeat("a", 64)
+	writeTownStateFileContent(t, town, "deploy/values/images.yaml", "daemon: "+digest+"\npolecat: registry.example/polecat@sha256:"+strings.Repeat("b", 64)+"\ncommit: "+strings.Repeat("c", 40)+"\n")
+	compose := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(compose, []byte("image: gt-daemon:4f2a1c9\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := migrateFlagCmd("plan", []string{"town", "images", "compose-file", "volume"}, nil)
+	for name, value := range map[string]string{"town": town, "volume": "gt-state", "compose-file": compose} {
+		if err := c.Flags().Set(name, value); err != nil {
+			t.Fatalf("setting --%s: %v", name, err)
+		}
+	}
+	noTown := func() (string, error) { return "", errors.New("no town here") }
+	env, err := migrateEnvFromFlags(c, false, noTown, "")
+	if err != nil {
+		t.Fatalf("migrateEnvFromFlags: %v", err)
+	}
+	if env.image != digest {
+		t.Fatalf("env.image = %q; want the town's values file digest %q, not the compose tag", env.image, digest)
+	}
+}
+
+// TestTownStateMigratePlanPrintsTheHelperImageOnce: the plan names the helper
+// image it would run, once.
+func TestTownStateMigratePlanPrintsTheHelperImageOnce(t *testing.T) {
+	t.Parallel()
+	env, _, out := newMigrateEnv(t, migrateTown(t))
+	if err := runTownStateMigratePlanIn(env); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if n := strings.Count(out.String(), "helper image: "+env.image+"\n"); n != 1 {
+		t.Fatalf("plan printed the helper image %d times; want once:\n%s", n, out.String())
 	}
 }
