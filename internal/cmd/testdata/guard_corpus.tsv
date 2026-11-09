@@ -565,3 +565,4 @@ test_scope	polecat	"cat <<EOF\n'$(make gate)'\nEOF\n"	refuse	polecat 'make gate'
 test_scope	polecat	"cat <<EOF\n\"$(make gate)\"\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
 test_scope	polecat	"cat <<EOF\nsay \"hi $(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
 test_scope	polecat	"cat <<EOF\nrun `make gate`\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\nrun \\\\$(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
