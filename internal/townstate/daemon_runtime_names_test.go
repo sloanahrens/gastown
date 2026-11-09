@@ -19,7 +19,7 @@ func TestDaemonRuntimeNames(t *testing.T) {
 		"bead-respawn-counts.json.flock", "ci-failures.jsonl", "claude-plan",
 		"cloud-check", "composer_pending", "container", "daemon-image",
 		"daemon-liveness.json", "daemon-respawn.json", "dashboard-load.jsonl",
-		"deploy-watch.json", "diskmaint", "gate-logs", "heartbeats", "hm-src",
+		"deploy-watch.json", "diskmaint", "dolt-archive", "gate-logs", "heartbeats", "hm-src",
 		"hooks", "host", "jev", "jev-dataset", "landing-logs", "landing-om",
 		"landings", "locks", "metrics", "nudge_poller", "nudge_queue", "om-src",
 		"openshell", "overrun-guard", "patrol_scan", "pids", "polecat-admission",
