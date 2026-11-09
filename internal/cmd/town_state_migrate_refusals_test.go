@@ -339,10 +339,10 @@ func TestTownStateMigrateLandingCandidatesRefuseUnreadableState(t *testing.T) {
 // TestTownStateMigrateCopyReadsTheTownSettingsForTheBeadsHost: a copy whose shell
 // names no BEADS_DOLT_SERVER_HOST reads the town's dolt.container_host, and a
 // settings file that does not parse refuses the copy rather than leaving the
-// bd read without a host. The shell variable is cleared for this test, so the town
-// settings are the read under test; t.Setenv keeps it out of parallel runs.
+// bd read without a host. The shell's value is passed in empty, so the town
+// settings are the read under test.
 func TestTownStateMigrateCopyReadsTheTownSettingsForTheBeadsHost(t *testing.T) {
-	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	t.Parallel()
 	town := t.TempDir()
 	writeTownStateFileContent(t, town, "mayor/town.json", "{")
 	compose := filepath.Join(t.TempDir(), "compose.yml")
@@ -366,7 +366,7 @@ func TestTownStateMigrateCopyReadsTheTownSettingsForTheBeadsHost(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	_, err := migrateEnvFromFlags(cmd, true, func() (string, error) { return town, nil })
+	_, err := migrateEnvFromFlags(cmd, true, func() (string, error) { return town, nil }, "")
 	if err == nil || !strings.Contains(err.Error(), "reading the town settings for dolt.container_host") {
 		t.Fatalf("copy with unparsable town settings = %v, want the settings named", err)
 	}

@@ -72,7 +72,7 @@ func TestTownStateMigrateFlagReads(t *testing.T) {
 					t.Fatalf("setting --%s: %v", name, err)
 				}
 			}
-			_, err := migrateEnvFromFlags(tc.cmd, tc.needSecrets, tc.find)
+			_, err := migrateEnvFromFlags(tc.cmd, tc.needSecrets, tc.find, "")
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("migrateEnvFromFlags = %v, want a refusal naming %q", err, tc.want)
 			}
@@ -91,7 +91,7 @@ func TestTownStateMigrateFlagReads(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		env, err := migrateEnvFromFlags(c, false, findTown)
+		env, err := migrateEnvFromFlags(c, false, findTown, "")
 		if err != nil {
 			t.Fatalf("migrateEnvFromFlags: %v", err)
 		}
@@ -110,7 +110,7 @@ func TestTownStateMigrateFlagReads(t *testing.T) {
 			t.Fatal(err)
 		}
 		before := time.Now()
-		env, err := migrateEnvFromFlags(c, false, findTown)
+		env, err := migrateEnvFromFlags(c, false, findTown, "")
 		if err != nil {
 			t.Fatalf("migrateEnvFromFlags: %v", err)
 		}

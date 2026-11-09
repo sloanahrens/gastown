@@ -271,7 +271,7 @@ func unmetChecks(checks []migrateCheck) []string {
 }
 
 func runTownStateMigratePlan(cmd *cobra.Command, _ []string) error {
-	env, err := migrateEnvFromFlags(cmd, false, workspace.FindFromCwdOrError)
+	env, err := migrateEnvFromFlags(cmd, false, workspace.FindFromCwdOrError, os.Getenv("BEADS_DOLT_SERVER_HOST"))
 	if err != nil {
 		return err
 	}
@@ -325,7 +325,7 @@ func skippedLine(skipped map[townstate.SkipClass]int) string {
 }
 
 func runTownStateMigrateCopy(cmd *cobra.Command, _ []string) error {
-	env, err := migrateEnvFromFlags(cmd, true, workspace.FindFromCwdOrError)
+	env, err := migrateEnvFromFlags(cmd, true, workspace.FindFromCwdOrError, os.Getenv("BEADS_DOLT_SERVER_HOST"))
 	if err != nil {
 		return err
 	}
@@ -583,7 +583,7 @@ func runBeadsReadThroughVolume(env townStateMigrateEnv) error {
 }
 
 func runTownStateMigrateVerify(cmd *cobra.Command, _ []string) error {
-	env, err := migrateEnvFromFlags(cmd, true, workspace.FindFromCwdOrError)
+	env, err := migrateEnvFromFlags(cmd, true, workspace.FindFromCwdOrError, os.Getenv("BEADS_DOLT_SERVER_HOST"))
 	if err != nil {
 		return err
 	}
@@ -622,7 +622,7 @@ func printVerifyProblems(out io.Writer, res townstate.VerifyResult) int {
 }
 
 func runTownStateMigrateRollbackPlan(cmd *cobra.Command, _ []string) error {
-	env, err := migrateEnvFromFlags(cmd, false, workspace.FindFromCwdOrError)
+	env, err := migrateEnvFromFlags(cmd, false, workspace.FindFromCwdOrError, os.Getenv("BEADS_DOLT_SERVER_HOST"))
 	if err != nil {
 		return err
 	}
@@ -696,8 +696,9 @@ func requireMigrateVolume(env townStateMigrateEnv) error {
 // production engine and probes. The engine and the image are only resolved when
 // the command reaches the volume (copy, verify, or a plan given --volume, or a
 // rollback plan, which prints the image). The copy also resolves the Dolt host
-// its bd read forwards. A command reads only the flags it defines.
-func migrateEnvFromFlags(cmd *cobra.Command, needSecrets bool, findTown func() (string, error)) (townStateMigrateEnv, error) {
+// its bd read forwards: shellBeadsHost, the caller's BEADS_DOLT_SERVER_HOST, wins,
+// else the town settings. A command reads only the flags it defines.
+func migrateEnvFromFlags(cmd *cobra.Command, needSecrets bool, findTown func() (string, error), shellBeadsHost string) (townStateMigrateEnv, error) {
 	env := townStateMigrateEnv{now: time.Now, out: cmd.OutOrStdout(), summary: cmd.ErrOrStderr(), probes: productionMigrateProbes()}
 	town, err := migrateFlagString(cmd, "town")
 	if err != nil {
@@ -768,7 +769,7 @@ func migrateEnvFromFlags(cmd *cobra.Command, needSecrets bool, findTown func() (
 			return env, err
 		}
 		if cmd.Name() == "copy" {
-			if env.beadsHost, env.beadsHostSource, err = resolveBeadsHost(town, os.Getenv("BEADS_DOLT_SERVER_HOST")); err != nil {
+			if env.beadsHost, env.beadsHostSource, err = resolveBeadsHost(town, shellBeadsHost); err != nil {
 				return env, err
 			}
 		}
