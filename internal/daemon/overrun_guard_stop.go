@@ -314,17 +314,11 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	saveKept := st.SaveGaveUp
 	sandboxKept := false
 	if s.removeSandbox != nil && !saveKept {
-		// 2a. Re-check the worktree before the sandbox goes. The save (1b) ran
-		// before the session stop, so an edit made between the two is not in
-		// it: a worktree dirty again is saved once more. A dirty check that
-		// fails is a refused save too: it counts in SaveFailures toward the same
-		// cap, the stop holds with the sandbox kept, and the next tick checks
-		// again. At the cap the seat is parked with the late check's reason in
-		// the note. That includes a seat with no resolvable worktree: its work
-		// cannot be seen, so the sandbox that may hold it is kept, and a check
-		// that can never succeed must not hold the stop forever. A refused
-		// re-save holds the same way, up to overrunSaveMaxAttempts refusals; the
-		// cap parks the seat and keeps the sandbox, as a refused save at 1b does.
+		// 2a. Re-check the worktree before the sandbox goes: the save (1b) ran
+		// before the session stop, so an edit made since is not in it. A check
+		// that cannot read the worktree is refused like a save, toward the same
+		// cap. A seat with no resolvable worktree is refused too, not read as
+		// clean: its work cannot be seen, so the sandbox that may hold it stays.
 		if s.saveWork != nil {
 			dirty, err := d.overrunWorktreeDirty(seat)
 			if err != nil {
