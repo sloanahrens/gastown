@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,15 +28,27 @@ type bootHealth struct {
 	probes  []bootProbe
 	timeout time.Duration
 
+	// running[i] is set while probe i's last run is still inside its Check. A
+	// probe that never returns keeps its flag, so a later call counts it as not
+	// answering instead of starting another goroutine for it.
+	running []atomic.Bool
+
 	mu      sync.Mutex
 	healthy bool
 }
 
 // newBootHealth returns a bootHealth over probes, each given timeout to answer.
-// The timeout must be positive: the caller sets it, and a zero one would race
-// each probe against the timer.
-func newBootHealth(probes []bootProbe, timeout time.Duration) *bootHealth {
-	return &bootHealth{probes: probes, timeout: timeout}
+// The timeout must be positive: the caller sets it, and a zero or negative one
+// would race each probe against the timer.
+func newBootHealth(probes []bootProbe, timeout time.Duration) (*bootHealth, error) {
+	if timeout <= 0 {
+		return nil, errors.New("boot health: timeout must be positive")
+	}
+	return &bootHealth{
+		probes:  probes,
+		timeout: timeout,
+		running: make([]atomic.Bool, len(probes)),
+	}, nil
 }
 
 // Unhealthy returns "" once every probe has answered. Otherwise it returns
@@ -51,11 +65,11 @@ func (b *bootHealth) Unhealthy(ctx context.Context) string {
 	}
 	answering := make([]bool, len(b.probes))
 	var wg sync.WaitGroup
-	for i, p := range b.probes {
+	for i := range b.probes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			answering[i] = b.answers(ctx, p)
+			answering[i] = b.answers(ctx, i)
 		}()
 	}
 	wg.Wait()
@@ -73,12 +87,16 @@ func (b *bootHealth) Unhealthy(ctx context.Context) string {
 	return "waiting for " + strings.Join(waiting, ", ")
 }
 
-// answers runs one probe and reports whether it answered within the timeout.
-// The probe runs in its own goroutine, so a probe that never returns holds only
-// that goroutine. The channel is buffered, so the goroutine exits when the probe
+// answers runs probe i and reports whether it answered within the timeout. The
+// probe runs in its own goroutine, and at most one goroutine runs a given probe:
+// while a hung run is still inside its Check, answers returns false at once and
+// starts nothing. The channel is buffered, so the goroutine exits when the probe
 // does, even after the caller has stopped waiting. The probe gets ctx, and one
 // that honors it returns early; the timeout bounds the rest.
-func (b *bootHealth) answers(ctx context.Context, p bootProbe) bool {
+func (b *bootHealth) answers(ctx context.Context, i int) bool {
+	if !b.running[i].CompareAndSwap(false, true) {
+		return false
+	}
 	done := make(chan bool, 1)
 	go func() {
 		answered := false
@@ -87,9 +105,10 @@ func (b *bootHealth) answers(ctx context.Context, p bootProbe) bool {
 			if recover() != nil {
 				answered = false
 			}
+			b.running[i].Store(false)
 			done <- answered
 		}()
-		answered = p.Check(ctx) == nil
+		answered = b.probes[i].Check(ctx) == nil
 	}()
 	timer := time.NewTimer(b.timeout)
 	defer timer.Stop()

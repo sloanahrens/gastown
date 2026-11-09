@@ -10,9 +10,14 @@ import (
 	"time"
 )
 
-// bootTestTimeout is the per-probe timeout the tests run with. The timeout
-// cases wait for it to fire, so it stays short.
-const bootTestTimeout = 20 * time.Millisecond
+// bootTestTimeout is the per-probe timeout for tests whose probes answer at
+// once. They never wait on it, so it is long enough that a loaded host cannot
+// push a healthy probe past it.
+const bootTestTimeout = 10 * time.Second
+
+// bootHungTimeout is the per-probe timeout for the one test that waits for a
+// hung probe to time out.
+const bootHungTimeout = 20 * time.Millisecond
 
 // fakeProbe answers while up is set and counts its calls.
 type fakeProbe struct {
@@ -30,6 +35,26 @@ func (f *fakeProbe) check(context.Context) error {
 
 func (f *fakeProbe) probe(name string) bootProbe {
 	return bootProbe{Name: name, Check: f.check}
+}
+
+func mustBootHealth(t *testing.T, probes []bootProbe, timeout time.Duration) *bootHealth {
+	t.Helper()
+	h, err := newBootHealth(probes, timeout)
+	if err != nil {
+		t.Fatalf("newBootHealth: %v", err)
+	}
+	return h
+}
+
+func TestBootHealthRejectsNonPositiveTimeout(t *testing.T) {
+	t.Parallel()
+	for _, timeout := range []time.Duration{0, -time.Millisecond} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			if _, err := newBootHealth(nil, timeout); err == nil {
+				t.Fatalf("newBootHealth(timeout=%v) error = nil, want an error", timeout)
+			}
+		})
+	}
 }
 
 func TestBootHealthHoldsUntilEveryProbeAnswers(t *testing.T) {
@@ -67,7 +92,7 @@ func TestBootHealthHoldsUntilEveryProbeAnswers(t *testing.T) {
 				f.up.Store(p.up)
 				set = append(set, f.probe(p.name))
 			}
-			h := newBootHealth(set, bootTestTimeout)
+			h := mustBootHealth(t, set, bootTestTimeout)
 			if got := h.Unhealthy(context.Background()); got != tt.want {
 				t.Fatalf("Unhealthy = %q, want %q", got, tt.want)
 			}
@@ -80,7 +105,7 @@ func TestBootHealthLatchesAfterTheFirstHealthyReading(t *testing.T) {
 	ctx := context.Background()
 	docker := &fakeProbe{}
 	docker.up.Store(true)
-	h := newBootHealth([]bootProbe{docker.probe("docker")}, bootTestTimeout)
+	h := mustBootHealth(t, []bootProbe{docker.probe("docker")}, bootTestTimeout)
 	if got := h.Unhealthy(ctx); got != "" {
 		t.Fatalf("first healthy reading = %q, want \"\"", got)
 	}
@@ -94,10 +119,8 @@ func TestBootHealthLatchesAfterTheFirstHealthyReading(t *testing.T) {
 	}
 }
 
-func TestBootHealthProbeErrorPanicAndTimeoutAreNotAnswering(t *testing.T) {
+func TestBootHealthErrorAndPanicAreNotAnswering(t *testing.T) {
 	t.Parallel()
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	ready := &fakeProbe{}
 	ready.up.Store(true)
 	tests := []struct {
@@ -112,14 +135,10 @@ func TestBootHealthProbeErrorPanicAndTimeoutAreNotAnswering(t *testing.T) {
 			name:  "panic",
 			probe: bootProbe{Name: "docker", Check: func(context.Context) error { panic("probe broke") }},
 		},
-		{
-			name:  "timeout",
-			probe: bootProbe{Name: "forgejo", Check: func(context.Context) error { <-release; return nil }},
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newBootHealth([]bootProbe{tt.probe, ready.probe("ready")}, bootTestTimeout)
+			h := mustBootHealth(t, []bootProbe{tt.probe, ready.probe("ready")}, bootTestTimeout)
 			want := "waiting for " + tt.probe.Name
 			for range 2 {
 				if got := h.Unhealthy(context.Background()); got != want {
@@ -130,9 +149,41 @@ func TestBootHealthProbeErrorPanicAndTimeoutAreNotAnswering(t *testing.T) {
 	}
 }
 
+func TestBootHealthHungProbeIsNotRunAgain(t *testing.T) {
+	t.Parallel()
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	started := make(chan struct{}, 1)
+	var calls atomic.Int32
+	hung := bootProbe{Name: "forgejo", Check: func(context.Context) error {
+		calls.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return nil
+	}}
+	h := mustBootHealth(t, []bootProbe{hung}, bootHungTimeout)
+	const rounds = 5
+	if got := h.Unhealthy(context.Background()); got != "waiting for forgejo" {
+		t.Fatalf("first Unhealthy = %q, want \"waiting for forgejo\"", got)
+	}
+	// The first run is inside its Check now, and it stays there until release.
+	<-started
+	for range rounds - 1 {
+		if got := h.Unhealthy(context.Background()); got != "waiting for forgejo" {
+			t.Fatalf("Unhealthy = %q, want \"waiting for forgejo\"", got)
+		}
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("hung probe ran %d times over %d calls, want 1", got, rounds)
+	}
+}
+
 func TestBootHealthEmptySetIsHealthy(t *testing.T) {
 	t.Parallel()
-	h := newBootHealth(nil, bootTestTimeout)
+	h := mustBootHealth(t, nil, bootTestTimeout)
 	if got := h.Unhealthy(context.Background()); got != "" {
 		t.Fatalf("empty set Unhealthy = %q, want \"\"", got)
 	}
@@ -142,7 +193,12 @@ func TestBootHealthConcurrentCallersAgree(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	docker, forgejo := &fakeProbe{}, &fakeProbe{}
-	h := newBootHealth([]bootProbe{docker.probe("docker"), forgejo.probe("forgejo")}, bootTestTimeout)
+	h := mustBootHealth(t, []bootProbe{docker.probe("docker"), forgejo.probe("forgejo")}, bootTestTimeout)
+	// Both probes are down, so this is the waiting side of the transition, and
+	// it happens before any caller starts.
+	if got := h.Unhealthy(ctx); got != "waiting for docker, forgejo" {
+		t.Fatalf("first Unhealthy = %q, want the waiting reading", got)
+	}
 	const callers, rounds = 16, 20
 	results := make([][]string, callers)
 	var wg sync.WaitGroup
@@ -150,14 +206,21 @@ func TestBootHealthConcurrentCallersAgree(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for range rounds {
+			for r := range rounds {
+				if c == 0 && r == rounds/2 {
+					// Caller 0 brings the probes up while the others are still
+					// calling, so its next reading is the healthy side.
+					docker.up.Store(true)
+					forgejo.up.Store(true)
+				}
 				results[c] = append(results[c], h.Unhealthy(ctx))
 			}
 		}()
 	}
-	docker.up.Store(true)
-	forgejo.up.Store(true)
 	wg.Wait()
+	if got := results[0][rounds/2]; got != "" {
+		t.Fatalf("caller 0 reading after the probes came up = %q, want \"\"", got)
+	}
 	for c, seq := range results {
 		healthy := false
 		for i, got := range seq {
