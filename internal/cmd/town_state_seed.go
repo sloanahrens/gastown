@@ -524,24 +524,31 @@ func seedHostFileSum(p string) (string, error) {
 // entry named rel and whether the listing has one. A non-regular entry under that
 // name is found with an empty sum, so it never matches a host file.
 func claimFileSum(eng townstate.Engine, claim, rel string) (string, bool, error) {
-	sums, err := claimFileSums(eng, claim, []string{rel})
+	entries, err := claimFileSums(eng, claim, []string{rel})
 	if err != nil {
 		return "", false, err
 	}
-	sum, found := sums[rel]
-	return sum, found, nil
+	entry, found := entries[rel]
+	return entry.sum, found, nil
+}
+
+// claimEntry is what the claim's listing holds for one name: the sha256 of its
+// bytes and its permission bits. A non-regular entry has an empty sum.
+type claimEntry struct {
+	sum  string
+	mode fs.FileMode
 }
 
 // claimFileSums lists the claim once and returns, for each name in rels the
-// listing has, the sha256 of its bytes; a non-regular entry under the name maps
-// to an empty sum. A name the listing lacks is absent from the result. The listing
-// is read to its end, so a listing that fails part way is an error.
-func claimFileSums(eng townstate.Engine, claim string, rels []string) (map[string]string, error) {
+// listing has, its claimEntry; a non-regular entry under the name maps to an empty
+// sum. A name the listing lacks is absent from the result. The listing is read to
+// its end, so a listing that fails part way is an error.
+func claimFileSums(eng townstate.Engine, claim string, rels []string) (map[string]claimEntry, error) {
 	want := make(map[string]bool, len(rels))
 	for _, rel := range rels {
 		want[rel] = true
 	}
-	sums := make(map[string]string, len(rels))
+	sums := make(map[string]claimEntry, len(rels))
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(eng.Run(claim, townstate.ListArgv, nil, pw)) }()
 	// A listing still writing when this returns fails on the closed pipe; its own
@@ -560,8 +567,9 @@ func claimFileSums(eng townstate.Engine, claim string, rels []string) (map[strin
 		if !want[name] {
 			continue
 		}
+		mode := fs.FileMode(hdr.Mode).Perm()
 		if hdr.Typeflag != tar.TypeReg {
-			sums[name] = ""
+			sums[name] = claimEntry{mode: mode}
 			continue
 		}
 		// The copy is bounded by the entry's own size, and a short read is an error.
@@ -569,7 +577,7 @@ func claimFileSums(eng townstate.Engine, claim string, rels []string) (map[strin
 		if _, err := io.CopyN(h, tr, hdr.Size); err != nil {
 			return nil, fmt.Errorf("listing claim %s: %w", claim, err)
 		}
-		sums[name] = hex.EncodeToString(h.Sum(nil))
+		sums[name] = claimEntry{sum: hex.EncodeToString(h.Sum(nil)), mode: mode}
 	}
 }
 
@@ -596,6 +604,9 @@ type seedCutoverFile struct {
 	data []byte
 	sum  string
 	mode int64
+	// checkMode makes a claim copy at another mode a mismatch too. Only the dispatch
+	// hold sets it: its 0600 is part of what the hold is.
+	checkMode bool
 }
 
 // seedCutoverPrepare reads what the live copy's settings step writes, before the
@@ -644,6 +655,7 @@ func seedCutoverPrepare(town string, read func(string) ([]byte, error)) (seedCut
 }
 
 // newSeedCutoverFile is the file the step sends for rel, with the sha256 of data.
+// Its mode is 0644, the mode a settings file is sent with; newSeedHoldFile sets its own.
 func newSeedCutoverFile(rel string, data []byte) seedCutoverFile {
 	sum := sha256.Sum256(data)
 	return seedCutoverFile{rel: rel, data: data, sum: hex.EncodeToString(sum[:]), mode: 0o644}
@@ -654,6 +666,7 @@ func newSeedCutoverFile(rel string, data []byte) seedCutoverFile {
 func newSeedHoldFile(rel string) seedCutoverFile {
 	f := newSeedCutoverFile(rel, nil)
 	f.mode = 0o600
+	f.checkMode = true
 	return f
 }
 
@@ -807,8 +820,9 @@ func writeCutoverTar(w io.Writer, files []seedCutoverFile) error {
 
 // seedCutoverMismatches lists the claim once and compares each prepared file's
 // sha256 with the sha256 of the bytes the step sent. A file the claim lacks, or
-// holds with other bytes, is a mismatch naming its path. A listing that fails is
-// an error, never a pass.
+// holds with other bytes, is a mismatch naming its path. A checkMode file is also
+// a mismatch when the claim holds it at another mode. A listing that fails is an
+// error, never a pass.
 func seedCutoverMismatches(eng townstate.Engine, files []seedCutoverFile) ([]townstate.Mismatch, error) {
 	rels := make([]string, 0, len(files))
 	for _, f := range files {
@@ -821,11 +835,14 @@ func seedCutoverMismatches(eng townstate.Engine, files []seedCutoverFile) ([]tow
 	var mismatches []townstate.Mismatch
 	for _, f := range files {
 		got, found := sums[f.rel]
+		want := fs.FileMode(f.mode).Perm()
 		switch {
 		case !found:
 			mismatches = append(mismatches, townstate.Mismatch{Path: f.rel, Reason: townstate.ReasonMissing})
-		case got != f.sum:
+		case got.sum != f.sum:
 			mismatches = append(mismatches, townstate.Mismatch{Path: f.rel, Reason: townstate.ReasonChanged})
+		case f.checkMode && got.mode != want:
+			mismatches = append(mismatches, townstate.Mismatch{Path: f.rel, Reason: fmt.Sprintf("mode %o, want %o", got.mode, want)})
 		}
 	}
 	return mismatches, nil
