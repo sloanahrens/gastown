@@ -28,7 +28,7 @@ func setupRoutedSourceTestTown(t *testing.T) (workDir, currentBeadsDir, ownerBea
 	// resolveDonePolecatWorktreeAt produces: it canonicalizes cwd via
 	// filepath.EvalSymlinks before deriving BEADS_DIR routing. On macOS,
 	// t.TempDir() lives under /var/folders/..., a symlink to
-	// /private/var/folders/...; without this, runDone's canonicalized cwd
+	// the resolved temp root; without this, runDone's canonicalized cwd
 	// diverges from the non-canonical paths the bd stub below expects,
 	// and every routed bd lookup falsely reports "issue not found".
 	if resolved, err := filepath.EvalSymlinks(townRoot); err == nil {

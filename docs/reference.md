@@ -2482,8 +2482,8 @@ ask, from just after the ask's instant through the 30th day:
 ### Notes battery (`jev_notes`)
 
 The daemon patrol `jev_notes` (heartbeat step `jev-notes`) runs once a week over
-the operator's memory notes and handbook: the `*.md` files in
-`~/.claude/projects/<town root with non-alphanumerics as "-">/memory/` and
+the operator's memory notes and handbook: the `*.md` files in the agent's
+projects directory, `<town root with non-alphanumerics as "-">/memory/`, and
 `~/.claude/commands/gastown.md`, read-only. Per file it asks Jev one call: the
 noul `still_describes_the_town` and `names_something_removed`, and the choice
 `kind` over `path`, `command`, `flag`, `config_key`, `process`, `none` and

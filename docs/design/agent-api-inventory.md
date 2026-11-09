@@ -356,11 +356,12 @@ returns allow/deny with reason
 
 **Code**:
 - `internal/cmd/costs.go` — `getClaudeProjectDir()` (line ~704): maps workdir to
-  `~/.claude/projects/{slug}/`; `findLatestTranscript()` (line ~717): finds most
-  recent `.jsonl`; `parseTranscriptUsage()` (line ~751): line-by-line JSONL scan
-  summing token usage
+  the agent's projects directory `{slug}/`; `findLatestTranscript()` (line ~717):
+  finds most recent `.jsonl`; `parseTranscriptUsage()` (line ~751): line-by-line
+  JSONL scan summing token usage
 - `internal/cmd/seance.go` — session discovery from `.events.jsonl` (line ~61),
-  fallback scan of `~/.claude/projects/` (line ~513), `sessions-index.json` (line ~674)
+  fallback scan of the agent's projects directory (line ~513),
+  `sessions-index.json` (line ~674)
 - Data structure: `TranscriptMessage` with `Type`, `SessionId`, `Message.Model`,
   `Message.Usage.{InputTokens, CacheCreationInputTokens, CacheReadInputTokens,
   OutputTokens}`

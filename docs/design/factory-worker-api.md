@@ -14,7 +14,7 @@ Gas Town has no stable interface with AI agents. Every integration is a hack:
   dance, Enter retries, SIGWINCH wake
 - **Idle detection**: regex matching on Claude Code's `❯` prompt prefix (with NBSP
   normalization) and `⏵⏵` status bar parsing
-- **Telemetry**: filesystem scraping of `~/.claude/projects/<slug>/<session>.jsonl`
+- **Telemetry**: filesystem scraping of `<slug>/<session>.jsonl` in the agent's projects directory
 - **Cost tracking**: parsing token usage from JSONL transcripts with hardcoded pricing
 - **Account rotation**: macOS-only keychain token swapping
 - **Liveness**: walking tmux process trees via `pane_current_command` + `pgrep`

@@ -178,7 +178,7 @@ func isWorktreeRoot(gits gitOpener, path string) bool {
 
 // sameWorktreePath compares two worktree paths after resolving symlinks,
 // because git reports the physical path while callers may hold a logical one
-// (macOS: /var/folders/... vs /private/var/folders/...).
+// (macOS: a symlinked temp path vs the resolved temp root).
 func sameWorktreePath(a, b string) bool {
 	if resolved, err := filepath.EvalSymlinks(a); err == nil {
 		a = resolved

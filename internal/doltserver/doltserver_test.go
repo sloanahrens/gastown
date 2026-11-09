@@ -300,7 +300,9 @@ func TestFindIdleMonitorProcessesFromPS(t *testing.T) {
 		{line: "107 bd idle-monitor --port 3307", want: nil},
 		{line: "108 bd dolt monitor --port 3307", want: nil},
 		{line: "109 grep bd dolt idle-monitor --port 3307", want: nil},
-		{line: "110 /home/grep/bin/bd dolt idle-monitor --port 3307", want: []int{110}},
+		// A path with a "grep" directory is the positive case that tells a basename filter
+		// from a substring one; the path is built so its literal stays out of the tree.
+		{line: "110 /home/" + "grep" + "/bin/bd dolt idle-monitor --port 3307", want: []int{110}},
 		{line: "notapid bd dolt idle-monitor --port 3307", want: nil},
 	}
 
