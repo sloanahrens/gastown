@@ -203,13 +203,12 @@ func WritePath(path string) string {
 	return host
 }
 
-// DaemonPatrolWritePath is WritePath for the daemon patrol config, with the
-// error WritePath drops. A settings/config.json that cannot be read, or is not
-// JSON, is an error and not a reason to rewrite mayor/daemon.json beside it:
+// PatrolWritePath is WritePath for the daemon patrol config, with the error
+// WritePath drops. A settings/config.json that cannot be read, or is not JSON,
+// is an error and not a reason to rewrite mayor/daemon.json beside it:
 // readConfigFile reports that host through its own loader, so a rewrite must
 // not go around it.
-func DaemonPatrolWritePath(townRoot string) (string, error) {
-	path := DaemonPatrolConfigPath(townRoot)
+func PatrolWritePath(path string) (string, error) {
 	host, _, ok, _, err := sectionFor(path)
 	if err != nil {
 		return "", err

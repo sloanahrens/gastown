@@ -47,7 +47,7 @@ const profileTestDaemonDoc = `{
     "tier_sweep": {"enabled": false}
   },
   "supervisor": "container",
-  "type": "daemon",
+  "type": "daemon-patrol-config",
   "version": 1
 }
 `
@@ -264,9 +264,9 @@ func TestTownStateProfileProfilesTheDaemonFileOnAFiveFileTown(t *testing.T) {
 	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
 		t.Fatalf("--check on a five-file town = %v, want exit 1", err)
 	}
-	for _, want := range []string{"daemon.patrols.landing_worker.enabled", "daemon.supervisor"} {
+	for _, want := range []string{daemonPath + ": daemon.patrols.landing_worker.enabled", daemonPath + ": daemon.supervisor"} {
 		if !strings.Contains(checkOut.String(), want) {
-			t.Errorf("--check output %q does not list %s", checkOut.String(), want)
+			t.Errorf("--check output %q does not list %q", checkOut.String(), want)
 		}
 	}
 
@@ -274,6 +274,11 @@ func TestTownStateProfileProfilesTheDaemonFileOnAFiveFileTown(t *testing.T) {
 	if err := runTownStateProfileIn(env); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	env.check = true
+	if err := runTownStateProfileIn(env); err != nil {
+		t.Fatalf("second --check on the five-file town = %v, want exit 0", err)
+	}
+	env.check = false
 	if got := readProfileFile(t, daemonPath+rehearsalBackupSuffix); string(got) != profileTestDaemonDoc {
 		t.Fatalf("the backup is not the old daemon document:\n%s", got)
 	}
@@ -291,6 +296,23 @@ func TestTownStateProfileProfilesTheDaemonFileOnAFiveFileTown(t *testing.T) {
 	}
 	if got := readProfileFile(t, settingsPath); string(got) != settings {
 		t.Errorf("the settings file changed on a five-file town:\n%s", got)
+	}
+}
+
+// TestTownStateProfileCheckRefusesADaemonFileTheDaemonCannotLoad: --check reads
+// the file back through the daemon's loader, so a file that loader rejects is
+// refused rather than reported as clean.
+func TestTownStateProfileCheckRefusesADaemonFileTheDaemonCannotLoad(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	daemonPath := config.DaemonPatrolConfigPath(town)
+	writeProfileFile(t, daemonPath, strings.Replace(profileTestDaemonDoc, "daemon-patrol-config", "daemon", 1))
+	env := newProfileEnv(town, &bytes.Buffer{})
+	env.check = true
+	err := runTownStateProfileIn(env)
+	var exitErr *ExitCodeError
+	if err == nil || errors.As(err, &exitErr) || !strings.Contains(err.Error(), "reading the daemon patrol config back") {
+		t.Fatalf("--check on a file the daemon cannot load = %v, want a refusal (not an exit code)", err)
 	}
 }
 

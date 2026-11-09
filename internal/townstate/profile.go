@@ -13,7 +13,10 @@ import (
 // RehearsalProfile rewrites the town settings for a rehearsal pod, where a
 // seeded copy must start nothing the live daemon starts. The daemon section is
 // the object under "daemon", which is where settings/config.json carries it on
-// the two-file layout. Every patrol object directly under daemon.patrols is set
+// the two-file layout. Every patrol the daemon knows, named in known, has an
+// object under daemon.patrols set to enabled false: a patrol the file leaves
+// out gets an object with enabled false, because the daemon enables some
+// patrols by default. Every other object directly under daemon.patrols is set
 // to enabled false (a missing enabled becomes an explicit false), and
 // daemon.supervisor is deleted. Every other key and value is left as it was:
 // numbers are kept as their text, and keys come out sorted.
@@ -22,13 +25,13 @@ import (
 // last; a patrol that was already disabled is not a change. A settings file
 // that is not valid JSON, has no daemon.patrols object, or has a patrol that is
 // not an object is refused, with an error that names what is wrong.
-func RehearsalProfile(settings []byte) (out []byte, changes []string, err error) {
+func RehearsalProfile(settings []byte, known []string) (out []byte, changes []string, err error) {
 	root, err := decodeSettings(settings)
 	if err != nil {
 		return nil, nil, err
 	}
 	daemon, _ := root["daemon"].(map[string]any)
-	changes, err = profileDaemon(daemon, "settings")
+	changes, err = profileDaemon(daemon, "settings", known)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -40,12 +43,12 @@ func RehearsalProfile(settings []byte) (out []byte, changes []string, err error)
 // level is the object that settings/config.json carries under "daemon". It
 // applies the same rules and names changes the same way, as daemon.patrols.X
 // and daemon.supervisor, so the two shapes report alike.
-func RehearsalDaemonProfile(doc []byte) (out []byte, changes []string, err error) {
+func RehearsalDaemonProfile(doc []byte, known []string) (out []byte, changes []string, err error) {
 	daemon, err := decodeSettings(doc)
 	if err != nil {
 		return nil, nil, err
 	}
-	changes, err = profileDaemon(daemon, "daemon document")
+	changes, err = profileDaemon(daemon, "daemon document", known)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -55,10 +58,15 @@ func RehearsalDaemonProfile(doc []byte) (out []byte, changes []string, err error
 // profileDaemon applies the rehearsal rules to a daemon object in place and
 // returns the keys it changed. where names the object in the error for a daemon
 // object that has no patrols.
-func profileDaemon(daemon map[string]any, where string) ([]string, error) {
+func profileDaemon(daemon map[string]any, where string, known []string) ([]string, error) {
 	patrols, ok := daemon["patrols"].(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("%s: no daemon.patrols object", where)
+	}
+	for _, name := range known {
+		if _, has := patrols[name]; !has {
+			patrols[name] = map[string]any{}
+		}
 	}
 	var changes []string
 	for _, name := range slices.Sorted(maps.Keys(patrols)) {

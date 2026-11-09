@@ -13,6 +13,9 @@
         "enabled": false,
         "interval": "1h"
       },
+      "events_prune": {
+        "enabled": false
+      },
       "handler": {
         "enabled": false,
         "plugins": [
@@ -25,6 +28,9 @@
         "interval": 30
       },
       "jev_patrol": {
+        "enabled": false
+      },
+      "landing_infra": {
         "enabled": false
       },
       "landing_worker": {

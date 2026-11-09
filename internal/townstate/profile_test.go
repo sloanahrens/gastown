@@ -32,6 +32,11 @@ const rehearsalFixture = `{
   "operational": {"threshold": 1e3}
 }`
 
+// rehearsalKnown are the patrol keys the daemon knows. events_prune and
+// landing_infra are on by default and the fixtures leave them out, so the
+// profile must add them disabled; landing_worker is in the fixture already.
+var rehearsalKnown = []string{"events_prune", "landing_infra", "landing_worker"}
+
 // decodeRehearsalSettings reads b the way the profile does: numbers stay text.
 func decodeRehearsalSettings(t *testing.T, b []byte) map[string]any {
 	t.Helper()
@@ -67,7 +72,7 @@ func without(m map[string]any, keys ...string) map[string]any {
 
 func TestRehearsalProfileTurnsEveryPatrolOff(t *testing.T) {
 	t.Parallel()
-	out, changes, err := RehearsalProfile([]byte(rehearsalFixture))
+	out, changes, err := RehearsalProfile([]byte(rehearsalFixture), rehearsalKnown)
 	if err != nil {
 		t.Fatalf("RehearsalProfile: %v", err)
 	}
@@ -82,8 +87,10 @@ func TestRehearsalProfileTurnsEveryPatrolOff(t *testing.T) {
 
 	wantChanges := []string{
 		"daemon.patrols.disk_maintenance.enabled",
+		"daemon.patrols.events_prune.enabled",
 		"daemon.patrols.handler.enabled",
 		"daemon.patrols.jev_bench.enabled",
+		"daemon.patrols.landing_infra.enabled",
 		"daemon.patrols.landing_worker.enabled",
 		"daemon.patrols.spec_dispatch.enabled",
 		"daemon.patrols.tier_sweep.enabled",
@@ -119,8 +126,14 @@ func TestRehearsalProfileTurnsEveryPatrolOff(t *testing.T) {
 	}
 	inPatrols := object(t, inDaemon["patrols"], "input patrols")
 	gotPatrols := object(t, gotDaemon["patrols"], "output patrols")
-	if len(gotPatrols) != len(inPatrols) {
-		t.Fatalf("output has %d patrols, input has %d", len(gotPatrols), len(inPatrols))
+	wantPatrols := len(inPatrols)
+	for _, name := range rehearsalKnown {
+		if _, has := inPatrols[name]; !has {
+			wantPatrols++
+		}
+	}
+	if len(gotPatrols) != wantPatrols {
+		t.Fatalf("output has %d patrols, want %d (the input's and each known patrol it left out)", len(gotPatrols), wantPatrols)
 	}
 	for name, inPatrol := range inPatrols {
 		gotPatrol := object(t, gotPatrols[name], "patrol "+name)
@@ -148,13 +161,13 @@ const rehearsalDaemonDoc = `{
     "wisp_reaper": {}
   },
   "supervisor": "container",
-  "type": "daemon",
+  "type": "daemon-patrol-config",
   "version": 1
 }`
 
 func TestRehearsalProfileTurnsTheDaemonDocumentOff(t *testing.T) {
 	t.Parallel()
-	out, changes, err := RehearsalDaemonProfile([]byte(rehearsalDaemonDoc))
+	out, changes, err := RehearsalDaemonProfile([]byte(rehearsalDaemonDoc), rehearsalKnown)
 	if err != nil {
 		t.Fatalf("RehearsalDaemonProfile: %v", err)
 	}
@@ -162,8 +175,10 @@ func TestRehearsalProfileTurnsTheDaemonDocumentOff(t *testing.T) {
 	// The same patrols change as in the settings shape, named the same way.
 	wantChanges := []string{
 		"daemon.patrols.disk_maintenance.enabled",
+		"daemon.patrols.events_prune.enabled",
 		"daemon.patrols.handler.enabled",
 		"daemon.patrols.jev_bench.enabled",
+		"daemon.patrols.landing_infra.enabled",
 		"daemon.patrols.landing_worker.enabled",
 		"daemon.patrols.spec_dispatch.enabled",
 		"daemon.patrols.tier_sweep.enabled",
@@ -177,7 +192,7 @@ func TestRehearsalProfileTurnsTheDaemonDocumentOff(t *testing.T) {
 	// The document is the daemon object: the settings shape, wrapped under
 	// "daemon", profiles to the same daemon object.
 	wrapped := []byte(`{"daemon": ` + rehearsalDaemonDoc + `}`)
-	wrappedOut, wrappedChanges, err := RehearsalProfile(wrapped)
+	wrappedOut, wrappedChanges, err := RehearsalProfile(wrapped, rehearsalKnown)
 	if err != nil {
 		t.Fatalf("RehearsalProfile of the wrapped document: %v", err)
 	}
@@ -192,7 +207,7 @@ func TestRehearsalProfileTurnsTheDaemonDocumentOff(t *testing.T) {
 	if _, ok := got["supervisor"]; ok {
 		t.Errorf("supervisor survived: %v", got["supervisor"])
 	}
-	if got["container_name"] != "gastown-daemon" || got["type"] != "daemon" || got["version"] != json.Number("1") {
+	if got["container_name"] != "gastown-daemon" || got["type"] != "daemon-patrol-config" || got["version"] != json.Number("1") {
 		t.Errorf("a non-patrol key changed: container_name=%v type=%v version=%v", got["container_name"], got["type"], got["version"])
 	}
 	for name, p := range object(t, got["patrols"], "output patrols") {
@@ -217,7 +232,7 @@ func TestRehearsalProfileRefusesAMalformedDaemonDocument(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			out, changes, err := RehearsalDaemonProfile([]byte(tc.doc))
+			out, changes, err := RehearsalDaemonProfile([]byte(tc.doc), rehearsalKnown)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("RehearsalDaemonProfile = %v, want a refusal naming %q", err, tc.want)
 			}
@@ -245,7 +260,7 @@ func TestRehearsalProfileRefusesAMalformedFile(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			out, changes, err := RehearsalProfile([]byte(tc.settings))
+			out, changes, err := RehearsalProfile([]byte(tc.settings), rehearsalKnown)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("RehearsalProfile = %v, want a refusal naming %q", err, tc.want)
 			}
