@@ -35,16 +35,16 @@ func TestBootGateHoldReadsTheFile(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
 		writeBootHealth(t, townRoot, "waiting for infrastructure\n")
-		reason := operatorHold(townRoot, testKey, time.Now())
+		reason := OperatorHold(townRoot)
 		if !strings.Contains(reason, "waiting for infrastructure") {
-			t.Fatalf("operatorHold with the boot file = %q, want the file's line", reason)
+			t.Fatalf("OperatorHold with the boot file = %q, want the file's line", reason)
 		}
 	})
 	t.Run("file absent allows", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
-		if reason := operatorHold(townRoot, testKey, time.Now()); reason != "" {
-			t.Fatalf("operatorHold with no boot file = %q, want \"\"", reason)
+		if reason := OperatorHold(townRoot); reason != "" {
+			t.Fatalf("OperatorHold with no boot file = %q, want \"\"", reason)
 		}
 	})
 	t.Run("file unreadable holds", func(t *testing.T) {
@@ -55,9 +55,9 @@ func TestBootGateHoldReadsTheFile(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(townRoot, "daemon"), nil, 0o644); err != nil {
 			t.Fatal(err)
 		}
-		reason := operatorHold(townRoot, testKey, time.Now())
+		reason := OperatorHold(townRoot)
 		if !strings.Contains(reason, "treating as held") {
-			t.Fatalf("operatorHold with an unreadable boot file = %q, want an unreadable-hold refusal", reason)
+			t.Fatalf("OperatorHold with an unreadable boot file = %q, want an unreadable-hold refusal", reason)
 		}
 	})
 	t.Run("valid Ring does not override the file", func(t *testing.T) {
