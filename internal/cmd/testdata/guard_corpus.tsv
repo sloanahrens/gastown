@@ -410,3 +410,11 @@ test_scope	polecat	"b${E}d create --title=x \""	allow		gt-j41yim	1495e3450d13df2
 container_suite	polecat	"$'\\x62'd create --title=x \""	refuse	cannot be read	gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
 dangerous	polecat	"$'\\x62'd create --title=x \""	refuse	cannot be read	gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
 test_scope	polecat	"$'\\x62'd create --title=x \""	allow		gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
+# --- gt-mru91l: the pr-workflow guard reads the parsed words; a substitution after a word-initial # is a comment the shell never runs, allowed by each guard (stamp for the guard sources after the move) ---
+container_suite	polecat	"echo hi # $(git reset --hard)"	allow		gt-mru91l	c1b2f8c5379e646cc3a442baf9803a0c6e51a3b0b1743f62adb5e913728e4a95
+dangerous	polecat	"echo hi # $(git reset --hard)"	allow		gt-mru91l	c1b2f8c5379e646cc3a442baf9803a0c6e51a3b0b1743f62adb5e913728e4a95
+test_scope	polecat	"echo hi # $(git reset --hard)"	allow		gt-mru91l	c1b2f8c5379e646cc3a442baf9803a0c6e51a3b0b1743f62adb5e913728e4a95
+# --- gt-mru91l: the pr-workflow guard refuses an unreadable command whose text spells gh pr create; the other guards read the same command as unreadable and allow it ---
+container_suite	polecat	"echo \"unterminated gh pr create"	refuse	cannot be read	gt-mru91l	3aef6bf01826acca3c3899c6abcd7a33f0d2b79bc38354195ff56a1dbf86a35f
+dangerous	polecat	"echo \"unterminated gh pr create"	refuse	cannot be read	gt-mru91l	3aef6bf01826acca3c3899c6abcd7a33f0d2b79bc38354195ff56a1dbf86a35f
+test_scope	polecat	"echo \"unterminated gh pr create"	allow		gt-mru91l	3aef6bf01826acca3c3899c6abcd7a33f0d2b79bc38354195ff56a1dbf86a35f
