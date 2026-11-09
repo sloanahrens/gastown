@@ -18,7 +18,7 @@ const (
 	green     = "0123456789abcdef0123456789abcdef01234567"
 	tag       = "0123456789ab"
 	mango     = "fedcba9876543210fedcba9876543210fedcba98"
-	mangoURL  = "http://forgejo:3000/sloan/mango.git"
+	mangoURL  = "http://forgejo:3000/example-owner/mango.git"
 	forgejo   = "forgejo:3000"
 	envFile   = "env"
 	noSuchJQ  = "no-such-jq"

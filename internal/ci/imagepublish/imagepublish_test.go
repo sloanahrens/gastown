@@ -23,8 +23,8 @@ var (
 )
 
 // daemonBase and polecatBase are the images' repository names without a tag.
-func daemonBase() string  { return "forgejo:3000/sloan/gastown-daemon" }
-func polecatBase() string { return "forgejo:3000/sloan/gastown-polecat" }
+func daemonBase() string  { return "forgejo:3000/example-owner/gastown-daemon" }
+func polecatBase() string { return "forgejo:3000/example-owner/gastown-polecat" }
 
 // daemonRef and polecatRef are the tagged references the job pushes.
 func daemonRef() string  { return daemonBase() + ":" + testTag }
@@ -70,7 +70,7 @@ func testOptions(t *testing.T) (imagepublish.Options, *recorder, *strings.Builde
 	errs := &strings.Builder{}
 	o := imagepublish.Options{
 		Registry: "forgejo:3000",
-		Owner:    "sloan",
+		Owner:    "example-owner",
 		Daemon:   "gastown-daemon",
 		Polecat:  "gastown-polecat",
 		Tag:      testTag,
@@ -170,7 +170,7 @@ func TestPushRefusesWhenTheRegistryListsNoSingleDigest(t *testing.T) {
 	cases := []struct{ name, digestOutput, want string }{
 		{"no digest", "", "listed 0 digests"},
 		{"two digests", daemonBase() + "@" + daemonDigest + "\n" + daemonBase() + "@" + polecatDigest + "\n", "listed 2 digests"},
-		{"another repository's digest", "forgejo:3000/sloan/other@" + daemonDigest + "\n", "listed 0 digests"},
+		{"another repository's digest", "forgejo:3000/example-owner/other@" + daemonDigest + "\n", "listed 0 digests"},
 		{"a digest that is not sha256 hex", daemonBase() + "@sha256:xyz\n", "is not sha256:<64 lowercase hex>"},
 	}
 	for _, tc := range cases {

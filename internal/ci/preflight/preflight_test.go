@@ -19,7 +19,7 @@ const (
 	// host is the Forgejo host:port the pins, the images and mango name.
 	host = "forgejo:3000"
 	// mangoURL is the mango source the repository variable names.
-	mangoURL = "http://forgejo:3000/sloan/mango.git"
+	mangoURL = "http://forgejo:3000/example-owner/mango.git"
 )
 
 // lookPath answers with the tools in present and a miss for the rest.
@@ -197,12 +197,12 @@ func TestCheckRefusesAMangoURLTheTokenMayNotReach(t *testing.T) {
 		wantErr bool
 		want    string
 	}{
-		{"https on the Forgejo host", "https://forgejo:3000/sloan/mango.git", false, ""},
+		{"https on the Forgejo host", "https://forgejo:3000/example-owner/mango.git", false, ""},
 		{"http on the Forgejo host", mangoURL, false, ""},
 		{"https on another host", "https://example.com/mango.git", true, `names "example.com", but the read-only token is only given to`},
 		{"http on another host", "http://example.com/mango.git", true, `names "example.com", but the read-only token is only given to`},
 		{"another scheme", "ftp://forgejo:3000/mango.git", true, "is not an http or https URL"},
-		{"no scheme", "forgejo:3000/sloan/mango.git", true, "is not an http or https URL"},
+		{"no scheme", "forgejo:3000/example-owner/mango.git", true, "is not an http or https URL"},
 		{"a URL that does not parse", "http://[::1", true, "is not a URL"},
 	}
 	for _, tc := range cases {
