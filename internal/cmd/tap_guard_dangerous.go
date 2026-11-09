@@ -1111,37 +1111,6 @@ func commandOffset(cuts []heredocBodyCut, offset int) int {
 	return out
 }
 
-// shellFedHeredocBodies returns the bodies of heredocs whose reader line runs a
-// shell, because that shell runs the body as a script rather than reading it as
-// data (gt-9g0y). Stripping those bodies — gt-mkrj's rule, which holds for every
-// other reader — left "bash <<'EOF' ... git reset --hard ... EOF" inspected by
-// nothing at all. The caller evaluates the returned bodies as nested commands.
-// A shell invoker anywhere on the reader line counts: "cat <<EOF | bash" feeds
-// bash the body just as "bash <<EOF" does. The line is the run of segments the
-// shell joins with |, &&, || or &, so a shell on a later line reads no body.
-func shellFedHeredocBodies(command string) []string {
-	script, err := shellparse.Parse(command)
-	if err != nil {
-		return nil
-	}
-	var bodies []string
-	for i, seg := range script.Segments {
-		if !heredocReaderLineRunsShell(script, i) {
-			continue
-		}
-		for _, h := range seg.Heredocs {
-			if h.N != "" && h.N != "0" {
-				continue
-			}
-			if strings.TrimSpace(h.Body) == "" {
-				continue
-			}
-			bodies = append(bodies, h.Body)
-		}
-	}
-	return bodies
-}
-
 // heredocPipelineRunsShell reports whether a shell invoker shares the pipeline
 // that holds the segment's here-document operator: "cat <<EOF | bash" feeds bash
 // the body, while a shell joined to the line by "&&" or ";" runs before or after
