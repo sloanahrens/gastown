@@ -1741,8 +1741,10 @@ func sandboxSecretsDecodeHereString(text string, ansi map[string]bool) string {
 // sandboxSecretsHereStringInput returns the text a here-string on a cat or tee
 // segment feeds as the command's stdin, and false when none does. The here-string
 // replaces what a pipe feeds, so cat <<< printenv | bash runs printenv. A cat that
-// names a file, or writes one through a redirection, reads the file instead (a lone
-// "-" still reads stdin); tee reads stdin whatever files it writes (gt-enim5).
+// names a file, or sends its stdout to one, leaves the pipe nothing (a lone "-" still
+// reads stdin); tee reads stdin whatever files it writes (gt-enim5). A stderr
+// redirection, or a stdout redirection to /dev/null, does not change what the pipe
+// gets (gt-z81tpi).
 func sandboxSecretsHereStringInput(argv []string, seg shellparse.Segment, ansi map[string]bool) (string, bool) {
 	texts, consumed := sandboxSecretsParsedHereStrings(seg, ansi)
 	if len(texts) == 0 {
@@ -1758,12 +1760,49 @@ func sandboxSecretsHereStringInput(argv []string, seg shellparse.Segment, ansi m
 			}
 		}
 		for _, r := range seg.Redirs {
-			if !r.Inherited && r.Op != "<<<" {
+			if !r.Inherited && r.Op != "<<<" && sandboxSecretsRedirectsStdoutToFile(seg, r) {
 				return "", false
 			}
 		}
 	}
 	return strings.Join(texts, "\n"), true
+}
+
+// sandboxSecretsNotAFile holds the targets a stdout redirection may name without
+// sending the output to a file: /dev/null discards it, and the aliases name the
+// command's own stdout, stderr or the terminal, so the output reaches the pipe,
+// stderr or the screen and never a file the shell reads back (gt-z81tpi).
+var sandboxSecretsNotAFile = map[string]bool{
+	"/dev/null":       true,
+	"/dev/stdout":     true,
+	"/dev/fd/1":       true,
+	"/proc/self/fd/1": true,
+	"/dev/stderr":     true,
+	"/dev/fd/2":       true,
+	"/dev/tty":        true,
+}
+
+// sandboxSecretsRedirectsStdoutToFile reports whether a redirection sends the
+// command's stdout to a file: ">", ">>" or ">|" on descriptor 1 (or none), or "&>"
+// and "&>>", whose target is not in sandboxSecretsNotAFile. Any other redirection
+// is not one: a stderr redirection ("2>/dev/null", "2>&1"), a stdin redirection, a
+// stdout redirection to a not-a-file target, and a descriptor duplication (">&2").
+// A duplication sends stdout to stderr, so the pipe gets nothing, yet the guard
+// still refuses it; that errs toward refusal (gt-z81tpi).
+func sandboxSecretsRedirectsStdoutToFile(seg shellparse.Segment, r shellparse.Redirection) bool {
+	switch r.Op {
+	case "&>", "&>>":
+		if r.N != "" {
+			return false
+		}
+	case ">", ">>", ">|":
+		if r.N != "" && r.N != "1" {
+			return false
+		}
+	default:
+		return false
+	}
+	return !sandboxSecretsNotAFile[sandboxSecretsParsedWord(r.Word, seg.Subs)]
 }
 
 // sandboxSecretsStdoutText returns the text a command's last stage writes when the

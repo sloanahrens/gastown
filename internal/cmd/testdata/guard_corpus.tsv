@@ -480,3 +480,8 @@ test_scope	polecat	"go test ./internal/shellparse -run TestParseHeaderArithmetic
 dangerous	polecat	"for x in $[printenv]; do echo $x; done"	allow		gt-l5pbgs	3402e84f0c118f2005c8ef0fb6c8e2af18829a0906934ca2e74df99e21b59d60
 container_suite	polecat	"[[ $[printenv] ]] && go test ./internal/shellparse -count=1"	allow		gt-l5pbgs	3402e84f0c118f2005c8ef0fb6c8e2af18829a0906934ca2e74df99e21b59d60
 test_scope	polecat	"go test ./internal/cmd -run TestSandboxSecretsHeaderArithmeticVerdicts -count=1"	allow		gt-l5pbgs	3402e84f0c118f2005c8ef0fb6c8e2af18829a0906934ca2e74df99e21b59d60
+# --- gt-z81tpi: the sandbox walk takes a cat here-string off the pipe only when the cat sends its stdout to a file; any other redirection keeps the guard judging the here-string; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"git reset --hard HEAD~6"	refuse	Hard reset discards	gt-z81tpi	cb077484ecffa11c276367932bc28c70a31763a0557cc0e3861c2239d92fd5b6
+container_suite	polecat	"echo ok && echo redirect"	allow		gt-z81tpi	cb077484ecffa11c276367932bc28c70a31763a0557cc0e3861c2239d92fd5b6
+test_scope	polecat	"go test ./internal/cmd -run TestSandboxSecretsHereStringThroughCat -count=1"	allow		gt-z81tpi	cb077484ecffa11c276367932bc28c70a31763a0557cc0e3861c2239d92fd5b6
+test_scope	polecat	"go test ./internal/cmd -run TestSandboxSecretsHereStringStdoutAliases -count=1"	allow		gt-z81tpi	cb077484ecffa11c276367932bc28c70a31763a0557cc0e3861c2239d92fd5b6
