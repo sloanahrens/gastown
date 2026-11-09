@@ -57,16 +57,20 @@ type hostToolKey struct {
 	tool string
 }
 
-// hostToolHit is a tool one file names, at the line of the first literal that
-// names it.
+// hostToolHit is a tool one file names: the number of string literals that name
+// it, and the line of the first one.
 type hostToolHit struct {
 	hostToolKey
-	line int
+	line  int
+	count int
 }
 
-// hostToolEntry is one allowlist line.
+// hostToolEntry is one allowlist line. count is the number of string literals
+// in the file that may name the tool; a new literal fails the ratchet, and so
+// does a count the file no longer reaches.
 type hostToolEntry struct {
 	hostToolKey
+	count  int
 	reason string
 	line   int
 }
@@ -98,7 +102,7 @@ func TestStaleHostToolEntryIsAnError(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeFixture(t, root, "pkg/run.go", "package pkg\n\nfunc run() {}\n")
-	allowPath := writeFixture(t, root, "allow.txt", "pkg/run.go\tlaunchctl\tpending-deletion\tgt power: the launchd job the power states load\n")
+	allowPath := writeFixture(t, root, "allow.txt", "pkg/run.go\tlaunchctl\t1\tpending-deletion\tgt power: the launchd job the power states load\n")
 
 	err := checkHostToolsAt(root, allowPath)
 	if err == nil {
@@ -111,7 +115,8 @@ func TestStaleHostToolEntryIsAnError(t *testing.T) {
 
 // TestHostToolAllowlistRules refuses every line the format does not allow: a
 // wildcard path, a blank reason, any class but pending-deletion, a name that is
-// not a host tool, a duplicate, and a line that is not four fields.
+// not a host tool, a count that is not a positive integer, a duplicate, and a
+// line that is not five fields.
 func TestHostToolAllowlistRules(t *testing.T) {
 	t.Parallel()
 
@@ -124,39 +129,54 @@ func TestHostToolAllowlistRules(t *testing.T) {
 	}{
 		{
 			name: "a wildcard path is refused",
-			line: "pkg/*.go\tlaunchctl\tpending-deletion\t" + reason,
+			line: "pkg/*.go\tlaunchctl\t1\tpending-deletion\t" + reason,
 			want: "wildcard",
 		},
 		{
 			name: "a blank reason is refused",
-			line: "pkg/run.go\tlaunchctl\tpending-deletion\t",
+			line: "pkg/run.go\tlaunchctl\t1\tpending-deletion\t",
 			want: "has no reason",
 		},
 		{
 			name: "a whitespace-only reason is refused",
-			line: "pkg/run.go\tlaunchctl\tpending-deletion\t   ",
+			line: "pkg/run.go\tlaunchctl\t1\tpending-deletion\t   ",
 			want: "has no reason",
 		},
 		{
 			name: "a class other than pending-deletion is refused",
-			line: "pkg/run.go\tlaunchctl\treal\t" + reason,
+			line: "pkg/run.go\tlaunchctl\t1\treal\t" + reason,
 			want: `class "real" is not pending-deletion`,
 		},
 		{
 			name: "a name that is not a host tool is refused",
-			line: "pkg/run.go\tlsof\tpending-deletion\t" + reason,
+			line: "pkg/run.go\tlsof\t1\tpending-deletion\t" + reason,
 			want: `"lsof" is not one of the four host tools`,
 		},
 		{
+			name: "a zero count is refused",
+			line: "pkg/run.go\tlaunchctl\t0\tpending-deletion\t" + reason,
+			want: `count "0" for pkg/run.go launchctl is not a positive integer`,
+		},
+		{
+			name: "a count that is not a number is refused",
+			line: "pkg/run.go\tlaunchctl\tmany\tpending-deletion\t" + reason,
+			want: `count "many" for pkg/run.go launchctl is not a positive integer`,
+		},
+		{
+			name: "a blank count is refused",
+			line: "pkg/run.go\tlaunchctl\t\tpending-deletion\t" + reason,
+			want: `count "" for pkg/run.go launchctl is not a positive integer`,
+		},
+		{
 			name:  "a duplicate use is refused",
-			line:  "pkg/run.go\tlaunchctl\tpending-deletion\t" + reason,
-			extra: "pkg/run.go\tlaunchctl\tpending-deletion\tsecond " + reason,
+			line:  "pkg/run.go\tlaunchctl\t1\tpending-deletion\t" + reason,
+			extra: "pkg/run.go\tlaunchctl\t1\tpending-deletion\tsecond " + reason,
 			want:  "duplicate entry for pkg/run.go launchctl",
 		},
 		{
-			name: "a line without four tab-separated fields is refused",
-			line: "pkg/run.go launchctl pending-deletion " + reason,
-			want: "want path<TAB>tool<TAB>class<TAB>reason",
+			name: "a line without five tab-separated fields is refused",
+			line: "pkg/run.go launchctl 1 pending-deletion " + reason,
+			want: "want path<TAB>tool<TAB>count<TAB>class<TAB>reason",
 		},
 	}
 
@@ -177,6 +197,71 @@ func TestHostToolAllowlistRules(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("checkHostToolsAt error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestHostToolCountIsEnforced holds a listed file to its line's count. A new
+// literal that names the tool fails even though the file is listed, a count the
+// file no longer reaches fails as stale, and an exact match passes.
+func TestHostToolCountIsEnforced(t *testing.T) {
+	t.Parallel()
+
+	const reason = "gt power: the power states load the launchd job"
+	const oneLiteral = "package pkg\n\nfunc load() string {\n\treturn \"launchctl bootstrap\"\n}\n"
+	const twoLiterals = "package pkg\n\nfunc load() string {\n\treturn \"launchctl bootstrap\"\n}\n\nfunc unload() string {\n\treturn \"launchctl bootout\"\n}\n"
+	cases := []struct {
+		name   string
+		source string
+		count  string
+		wants  []string
+	}{
+		{
+			name:   "an extra literal in a listed file fails",
+			source: twoLiterals,
+			count:  "1",
+			wants:  []string{"pkg/run.go:4 names launchctl in 2 literals", "allow.txt allows 1"},
+		},
+		{
+			name:   "a count the file no longer reaches fails as stale",
+			source: oneLiteral,
+			count:  "2",
+			wants:  []string{"allow.txt:1 pkg/run.go launchctl allows 2, the file names it in 1 literals; lower the count to 1"},
+		},
+		{
+			name:   "an exact match passes",
+			source: twoLiterals,
+			count:  "2",
+		},
+		{
+			name:   "a literal that names the tool twice counts once",
+			source: "package pkg\n\nfunc run() string {\n\treturn \"launchctl list; launchctl print\"\n}\n",
+			count:  "1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeFixture(t, root, "pkg/run.go", tc.source)
+			allowPath := writeFixture(t, root, "allow.txt", "pkg/run.go\tlaunchctl\t"+tc.count+"\tpending-deletion\t"+reason+"\n")
+
+			err := checkHostToolsAt(root, allowPath)
+			if len(tc.wants) == 0 {
+				if err != nil {
+					t.Fatalf("checkHostToolsAt = %v, want no refusal", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("checkHostToolsAt = nil, want a refusal containing %q", tc.wants)
+			}
+			for _, want := range tc.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("checkHostToolsAt error = %q, want it to contain %q", err, want)
+				}
 			}
 		})
 	}
@@ -338,9 +423,10 @@ func TestRepoHostTools(t *testing.T) {
 }
 
 // checkHostToolsAt fails for a host-tool string literal in a non-test Go file
-// under root that the allowlist does not list, and for an allowlist line whose
-// file no longer names its tool. The allowlist is loaded first, so a broken file
-// never reads as an empty exemption list.
+// under root that the allowlist does not cover, for a file that names a tool more
+// often than its line allows, and for an allowlist line that names fewer than it
+// allows or nothing. The allowlist is loaded first, so a broken file never reads
+// as an empty exemption list.
 func checkHostToolsAt(root, allowPath string) error {
 	entries, err := loadHostToolAllowlist(allowPath)
 	if err != nil {
@@ -350,15 +436,15 @@ func checkHostToolsAt(root, allowPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := unlistedHostToolHits(hits, entries); err != nil {
+	if err := unlistedHostToolHits(hits, entries, allowPath); err != nil {
 		return err
 	}
-	return staleHostToolEntries(entries, hits)
+	return staleHostToolEntries(entries, hits, allowPath)
 }
 
 // hostToolHits scans every non-test Go file under root and returns one hit per
-// file and tool. It fails on a directory or parse error rather than reporting a
-// clean scan.
+// file and tool, counting the literals that name it. It fails on a directory or
+// parse error rather than reporting a clean scan.
 func hostToolHits(root string) ([]hostToolHit, error) {
 	var hits []hostToolHit
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -392,7 +478,9 @@ func hostToolHits(root string) ([]hostToolHit, error) {
 }
 
 // hostToolHitsInFile parses one file and returns the host tools its string
-// literals name. Comments are not string literals, so they never count.
+// literals name, with the number of literals that name each. A literal that
+// names a tool twice still counts once. Comments are not string literals, so
+// they never count.
 func hostToolHitsInFile(path, rel string) ([]hostToolHit, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
@@ -400,7 +488,7 @@ func hostToolHitsInFile(path, rel string) ([]hostToolHit, error) {
 		return nil, fmt.Errorf("parse %s: %w", rel, err)
 	}
 	var hits []hostToolHit
-	seen := map[string]bool{}
+	index := map[string]int{}
 	var unquoteErr error
 	ast.Inspect(file, func(n ast.Node) bool {
 		if unquoteErr != nil {
@@ -415,14 +503,22 @@ func hostToolHitsInFile(path, rel string) ([]hostToolHit, error) {
 			unquoteErr = fmt.Errorf("%s:%d: %w", rel, fset.Position(lit.Pos()).Line, err)
 			return false
 		}
+		named := map[string]bool{}
 		for _, m := range hostToolPattern.FindAllStringSubmatch(value, -1) {
-			if seen[m[1]] {
+			tool := m[1]
+			if named[tool] {
 				continue
 			}
-			seen[m[1]] = true
+			named[tool] = true
+			if i, ok := index[tool]; ok {
+				hits[i].count++
+				continue
+			}
+			index[tool] = len(hits)
 			hits = append(hits, hostToolHit{
-				hostToolKey: hostToolKey{file: rel, tool: m[1]},
+				hostToolKey: hostToolKey{file: rel, tool: tool},
 				line:        fset.Position(lit.Pos()).Line,
+				count:       1,
 			})
 		}
 		return true
@@ -434,7 +530,8 @@ func hostToolHitsInFile(path, rel string) ([]hostToolHit, error) {
 }
 
 // loadHostToolAllowlist parses the allowlist. Each line is
-// path<TAB>tool<TAB>class<TAB>reason; blank lines and # comments are skipped.
+// path<TAB>tool<TAB>count<TAB>class<TAB>reason; blank lines and # comments are
+// skipped.
 func loadHostToolAllowlist(path string) ([]hostToolEntry, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -449,13 +546,14 @@ func loadHostToolAllowlist(path string) ([]hostToolEntry, error) {
 		}
 		where := fmt.Sprintf("%s:%d", path, i+1)
 		fields := strings.Split(text, "\t")
-		if len(fields) != 4 {
-			return nil, fmt.Errorf("%s: want path<TAB>tool<TAB>class<TAB>reason, got %q", where, text)
+		if len(fields) != 5 {
+			return nil, fmt.Errorf("%s: want path<TAB>tool<TAB>count<TAB>class<TAB>reason, got %q", where, text)
 		}
 		file := strings.TrimSpace(fields[0])
 		tool := strings.TrimSpace(fields[1])
-		class := strings.TrimSpace(fields[2])
-		reason := strings.TrimSpace(fields[3])
+		countText := strings.TrimSpace(fields[2])
+		class := strings.TrimSpace(fields[3])
+		reason := strings.TrimSpace(fields[4])
 		if file == "" {
 			return nil, fmt.Errorf("%s: entry has no path", where)
 		}
@@ -464,6 +562,10 @@ func loadHostToolAllowlist(path string) ([]hostToolEntry, error) {
 		}
 		if !isHostTool(tool) {
 			return nil, fmt.Errorf("%s: %q is not one of the four host tools (%s)", where, tool, strings.Join(hostTools, ", "))
+		}
+		count, err := strconv.Atoi(countText)
+		if err != nil || count < 1 {
+			return nil, fmt.Errorf("%s: count %q for %s %s is not a positive integer; a file that names the tool in no literal has no line", where, countText, file, tool)
 		}
 		if class != hostToolsAllowClass {
 			return nil, fmt.Errorf("%s: class %q is not pending-deletion; that is the only class", where, class)
@@ -476,49 +578,57 @@ func loadHostToolAllowlist(path string) ([]hostToolEntry, error) {
 			return nil, fmt.Errorf("%s: duplicate entry for %s %s (first at line %d)", where, file, tool, first)
 		}
 		seen[key] = i + 1
-		entries = append(entries, hostToolEntry{hostToolKey: key, reason: reason, line: i + 1})
+		entries = append(entries, hostToolEntry{hostToolKey: key, count: count, reason: reason, line: i + 1})
 	}
 	return entries, nil
 }
 
-// unlistedHostToolHits reports the uses the allowlist does not excuse, naming
-// each file, line and tool.
-func unlistedHostToolHits(hits []hostToolHit, entries []hostToolEntry) error {
-	allowed := map[hostToolKey]bool{}
+// unlistedHostToolHits reports the uses the allowlist does not excuse: a file and
+// tool with no line, and a file that names its tool in more literals than its
+// line allows. Each message names the file, the tool and the allowlist in use.
+func unlistedHostToolHits(hits []hostToolHit, entries []hostToolEntry, allowPath string) error {
+	allowed := map[hostToolKey]int{}
 	for _, entry := range entries {
-		allowed[entry.hostToolKey] = true
+		allowed[entry.hostToolKey] = entry.count
 	}
 	var b strings.Builder
 	for _, hit := range hits {
-		if allowed[hit.hostToolKey] {
-			continue
+		limit, listed := allowed[hit.hostToolKey]
+		switch {
+		case !listed:
+			fmt.Fprintf(&b, "  %s:%d names %s\n", hit.file, hit.line, hit.tool)
+		case hit.count > limit:
+			fmt.Fprintf(&b, "  %s:%d names %s in %d literals; %s allows %d\n", hit.file, hit.line, hit.tool, hit.count, allowPath, limit)
 		}
-		fmt.Fprintf(&b, "  %s:%d names %s\n", hit.file, hit.line, hit.tool)
 	}
 	if b.Len() == 0 {
 		return nil
 	}
-	return errors.New("non-test code names a host-only tool in a string literal and " + hostToolsAllowPath + " does not list it. The gt-in-container design deletes these tools, so do not add a use; remove it instead:\n" + b.String())
+	return errors.New("non-test code names a host-only tool in a string literal and " + allowPath + " does not allow that many. The gt-in-container design deletes these tools, so do not add a use; remove it instead:\n" + b.String())
 }
 
-// staleHostToolEntries reports the allowlist entries whose file no longer names
-// their tool.
-func staleHostToolEntries(entries []hostToolEntry, hits []hostToolHit) error {
-	live := map[hostToolKey]bool{}
+// staleHostToolEntries reports the allowlist entries that allow more than the
+// tree holds: a file that no longer names its tool loses its line, and a count
+// above the literals the file still has is lowered to match.
+func staleHostToolEntries(entries []hostToolEntry, hits []hostToolHit, allowPath string) error {
+	live := map[hostToolKey]int{}
 	for _, hit := range hits {
-		live[hit.hostToolKey] = true
+		live[hit.hostToolKey] = hit.count
 	}
 	var b strings.Builder
 	for _, entry := range entries {
-		if live[entry.hostToolKey] {
-			continue
+		have := live[entry.hostToolKey]
+		switch {
+		case have == 0:
+			fmt.Fprintf(&b, "  %s:%d %s %s names no literal; delete the line\n", allowPath, entry.line, entry.file, entry.tool)
+		case have < entry.count:
+			fmt.Fprintf(&b, "  %s:%d %s %s allows %d, the file names it in %d literals; lower the count to %d\n", allowPath, entry.line, entry.file, entry.tool, entry.count, have, have)
 		}
-		fmt.Fprintf(&b, "  %s:%d %s %s\n", hostToolsAllowPath, entry.line, entry.file, entry.tool)
 	}
 	if b.Len() == 0 {
 		return nil
 	}
-	return errors.New("allowlisted uses no longer name their tool in a string literal; delete the line from " + hostToolsAllowPath + " so the list only shrinks:\n" + b.String())
+	return errors.New("allowlisted uses are stale in " + allowPath + ": delete a line whose file no longer names its tool, and lower a count the file no longer reaches, so the list only shrinks:\n" + b.String())
 }
 
 // isHostTool reports whether name is one of the four host tools.

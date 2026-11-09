@@ -1,30 +1,34 @@
 # Non-test Go files that name a host-only tool (launchctl, cmux, osascript, diskutil)
 # in a string literal (gt-v3sdr2).
 #
-# Each line is: path<TAB>tool<TAB>class<TAB>reason
+# Each line is: path<TAB>tool<TAB>count<TAB>class<TAB>reason
+#   count   the number of string literals in the file that name the tool; a literal
+#           that names it twice counts once. A file with more literals fails; a count
+#           the file no longer reaches fails as stale, so lower it.
 #   class   pending-deletion, the only class: the reason names the gt-in-container
 #           deletion area that removes the use.
 #
 # The list is a ratchet. TestRepoHostTools fails on a host-tool literal this file does
-# not list, and on a line whose file no longer names its tool: delete that line in the
-# deletion that removes the use. Do not add a line for new code; remove the use instead.
-internal/bird/spawn.go	cmux	pending-deletion	bird spawner: opens the bird's cmux tab, deleted with the bird spawner
-internal/cmd/bird.go	cmux	pending-deletion	bird spawner: the bird command help names cmux, deleted with the bird spawner
-internal/cmd/daemon.go	launchctl	pending-deletion	remaining launchd references: the restart help says the restart reloads the program through launchctl kickstart
-internal/cmd/daemon_cutover.go	launchctl	pending-deletion	remaining launchd references: the cutover diagnosis names the launchd job it stops
-internal/cmd/daemon_supervisor.go	launchctl	pending-deletion	remaining launchd references: the launchd supervisor start, stop and bootstrap commands
-internal/cmd/host_agent.go	launchctl	pending-deletion	host agent and probes: the host agent install prints the launchctl bootstrap command for the operator
-internal/config/daemon_steps.go	launchctl	pending-deletion	remaining launchd references: the cloud-check step description names launchctl
-internal/daemon/upgrade_heal.go	launchctl	pending-deletion	remaining launchd references: the upgrade heal script bootouts and bootstraps the launchd job
-internal/doctor/daemon_job_check.go	launchctl	pending-deletion	remaining launchd references: the job check fix hint tells the operator to run launchctl print
-internal/doctor/daemon_respawn_check.go	launchctl	pending-deletion	remaining launchd references: the respawn check fix hint tells the operator to run launchctl print
-internal/doctor/openshell_gateway_check.go	launchctl	pending-deletion	host agent and probes: the gateway probe runs launchctl print and its fix hint kickstarts the agent
-internal/installer/gateway.go	launchctl	pending-deletion	installer: the gateway install bootstraps its launchd job, deleted with the installer
-internal/power/power.go	launchctl	pending-deletion	gt power: the power engine asks launchd whether the daemon job is loaded
-internal/power/states.go	launchctl	pending-deletion	gt power: the power states bootout and bootstrap the launchd job
-internal/templates/supervisor_state.go	launchctl	pending-deletion	remaining launchd references: the supervisor state reads the launchd job and its repair command
-internal/templates/templates.go	launchctl	pending-deletion	remaining launchd references: the plist loader unloads and loads the launchd job
-internal/testpolicy/cmd/testtiming/main.go	launchctl	pending-deletion	remaining launchd references: the test-timing tool starts its tmux server through launchctl submit
-internal/testutil/unittier/tools.go	diskutil	pending-deletion	lsof and diskutil reads: the unit tier tool list names diskutil, which the disk-space read runs
-internal/testutil/unittier/tools.go	launchctl	pending-deletion	remaining launchd references: the unit tier tool list names launchctl, which the launchd references run
-internal/util/diskspace_darwin.go	diskutil	pending-deletion	lsof and diskutil reads: the disk-space read runs diskutil info
+# not allow, and on a line whose file no longer names its tool or names it in fewer
+# literals than the count: fix the line in the deletion that removes the use. Do not
+# add a line for new code; remove the use instead.
+internal/bird/spawn.go	cmux	5	pending-deletion	bird spawner: opens the bird's cmux tab, deleted with the bird spawner
+internal/cmd/bird.go	cmux	2	pending-deletion	bird spawner: the bird command help names cmux, deleted with the bird spawner
+internal/cmd/daemon.go	launchctl	1	pending-deletion	remaining launchd references: the restart help says the restart reloads the program through launchctl kickstart
+internal/cmd/daemon_cutover.go	launchctl	1	pending-deletion	remaining launchd references: the cutover diagnosis names the launchd job it stops
+internal/cmd/daemon_supervisor.go	launchctl	4	pending-deletion	remaining launchd references: the launchd supervisor start, stop and bootstrap commands
+internal/cmd/host_agent.go	launchctl	2	pending-deletion	host agent and probes: the host agent install prints the launchctl bootstrap command for the operator
+internal/config/daemon_steps.go	launchctl	3	pending-deletion	remaining launchd references: the cloud-check step description names launchctl
+internal/daemon/upgrade_heal.go	launchctl	3	pending-deletion	remaining launchd references: the upgrade heal script bootouts and bootstraps the launchd job
+internal/doctor/daemon_job_check.go	launchctl	1	pending-deletion	remaining launchd references: the job check fix hint tells the operator to run launchctl print
+internal/doctor/daemon_respawn_check.go	launchctl	1	pending-deletion	remaining launchd references: the respawn check fix hint tells the operator to run launchctl print
+internal/doctor/openshell_gateway_check.go	launchctl	3	pending-deletion	host agent and probes: the gateway probe runs launchctl print and its fix hint kickstarts the agent
+internal/installer/gateway.go	launchctl	5	pending-deletion	installer: the gateway install bootstraps its launchd job, deleted with the installer
+internal/power/power.go	launchctl	1	pending-deletion	gt power: the power engine asks launchd whether the daemon job is loaded
+internal/power/states.go	launchctl	2	pending-deletion	gt power: the power states bootout and bootstrap the launchd job
+internal/templates/supervisor_state.go	launchctl	2	pending-deletion	remaining launchd references: the supervisor state reads the launchd job and its repair command
+internal/templates/templates.go	launchctl	2	pending-deletion	remaining launchd references: the plist loader unloads and loads the launchd job
+internal/testpolicy/cmd/testtiming/main.go	launchctl	2	pending-deletion	remaining launchd references: the test-timing tool starts its tmux server through launchctl submit
+internal/testutil/unittier/tools.go	diskutil	1	pending-deletion	lsof and diskutil reads: the unit tier tool list names diskutil, which the disk-space read runs
+internal/testutil/unittier/tools.go	launchctl	1	pending-deletion	remaining launchd references: the unit tier tool list names launchctl, which the launchd references run
+internal/util/diskspace_darwin.go	diskutil	3	pending-deletion	lsof and diskutil reads: the disk-space read runs diskutil info
