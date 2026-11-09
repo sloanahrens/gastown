@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestWorkInFlightCountsEveryRunDirectory: a landing, post-landing or revert
@@ -55,6 +56,26 @@ func TestWorkInFlightRefusesAnUnreadableRoot(t *testing.T) {
 	}
 	if got, err := WorkInFlight(file); err == nil {
 		t.Fatalf("WorkInFlight of a file = %d, nil; want an error", got)
+	}
+}
+
+// TestWorkRunsNamesEachRunAndWhenItLastChanged: each run directory is listed by
+// name with its modification time, so a run that never removed its directory is
+// told from a live one by its age; a file or another directory is not listed.
+func TestWorkRunsNamesEachRunAndWhenItLastChanged(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "rig")
+	mkdirs(t, root, "land-old", "wt")
+	old := time.Now().Add(-3 * time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "land-old"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := WorkRuns(root)
+	if err != nil || len(runs) != 1 || runs[0].Name != "land-old" {
+		t.Fatalf("WorkRuns = %v, %v; want the one run land-old", runs, err)
+	}
+	if d := runs[0].ModTime.Sub(old); d < -time.Second || d > time.Second {
+		t.Fatalf("WorkRuns modification time = %v; want about %v", runs[0].ModTime, old)
 	}
 }
 

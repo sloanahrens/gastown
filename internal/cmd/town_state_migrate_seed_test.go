@@ -102,7 +102,77 @@ func TestTownStateMigrateCutoverRecordReachesTheVolume(t *testing.T) {
 			t.Fatalf("cut-over copy = %v, want the extra file named\n%s", err, out.String())
 		}
 		if _, statErr := os.Stat(filepath.Join(town, filepath.FromSlash(cutoverRecordRel))); !errors.Is(statErr, fs.ErrNotExist) {
-			t.Errorf("a volume that does not verify kept the cut-over record (stat %v)", statErr)
+			t.Errorf("a volume that does not verify kept the cut-over record on the host (stat %v)", statErr)
+		}
+		if _, statErr := os.Stat(filepath.Join(fv.dir, filepath.FromSlash(cutoverRecordRel))); !errors.Is(statErr, fs.ErrNotExist) {
+			t.Errorf("a volume that does not verify kept the cut-over record on the volume (stat %v)", statErr)
+		}
+	})
+	t.Run("a volume that cannot drop the record names the removal", func(t *testing.T) {
+		t.Parallel()
+		env, fv, out := seedCutover(t, migrateTown(t))
+		fv.afterMerge = func(dir string) {
+			writeHostFile(t, filepath.Join(dir, "daemon", "late.json"), "x\n", time.Now())
+		}
+		fv.rmErr = errors.New("rm exited 1")
+		err := runTownStateMigrateCopyIn(env)
+		if err == nil || !strings.Contains(err.Error(), "removing the cut-over record from volume gt-state") {
+			t.Fatalf("cut-over copy = %v, want the failed removal named\n%s", err, out.String())
+		}
+	})
+}
+
+// TestTownStateMigrateDeltaLinks: a seeded volume keeps its links. An unchanged
+// link is not sent again, since a merge never replaces a link; a changed link is
+// refused before any byte moves, with no import run.
+func TestTownStateMigrateDeltaLinks(t *testing.T) {
+	t.Parallel()
+	seedWithLink := func(t *testing.T, town string) (townStateMigrateEnv, *fakeVolume, *bytes.Buffer) {
+		t.Helper()
+		if err := os.Symlink("maintenance_state.json", filepath.Join(town, "daemon", "current.json")); err != nil {
+			t.Fatal(err)
+		}
+		env, fv, out := newMigrateEnv(t, town)
+		if err := runTownStateMigrateCopyIn(env); err != nil {
+			t.Fatalf("seed: %v\n%s", err, out.String())
+		}
+		out.Reset()
+		return env, fv, out
+	}
+	t.Run("an unchanged link is not sent again", func(t *testing.T) {
+		t.Parallel()
+		town := migrateTown(t)
+		env, fv, out := seedWithLink(t, town)
+		writeHostFile(t, filepath.Join(town, "daemon", "new.json"), "new\n", time.Now())
+		if err := runTownStateMigrateCopyIn(env); err != nil {
+			t.Fatalf("delta: %v\n%s", err, out.String())
+		}
+		got, err := os.Readlink(filepath.Join(fv.dir, "daemon", "current.json"))
+		if err != nil || got != "maintenance_state.json" {
+			t.Fatalf("volume link = %q, %v; want the seeded link kept", got, err)
+		}
+		assertVolumeFile(t, fv.dir, "daemon/new.json", "new\n")
+	})
+	t.Run("a changed link is refused before any byte moves", func(t *testing.T) {
+		t.Parallel()
+		town := migrateTown(t)
+		env, fv, _ := seedWithLink(t, town)
+		link := filepath.Join(town, "daemon", "current.json")
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("nested/notes.json", link); err != nil {
+			t.Fatal(err)
+		}
+		fv.calls = nil
+		err := runTownStateMigrateCopyIn(env)
+		if err == nil || !strings.Contains(err.Error(), "links that differ") {
+			t.Fatalf("delta = %v, want the changed link refused", err)
+		}
+		for _, call := range fv.calls {
+			if call == strings.Join(townstate.ImportMergeArgv, " ") {
+				t.Errorf("a delta with a changed link still ran the import")
+			}
 		}
 	})
 }

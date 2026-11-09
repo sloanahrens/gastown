@@ -341,6 +341,13 @@ func archiveEmpty(r io.Reader) (bool, error) {
 	}
 }
 
+// RemoveVolumeFile removes the file at the town-root-relative name rel from the
+// volume, in one helper run of rm -f, which does not remove a directory: a name
+// that is one is an error. A file already gone is not an error.
+func RemoveVolumeFile(eng Engine, volume, rel string) error {
+	return eng.Run(volume, []string{"rm", "-f", "--", VolumeMount + "/" + rel}, nil, io.Discard)
+}
+
 // FreeBytes returns the bytes free on the volume's disk, read by df in the
 // helper. A df that prints no volume line is an error, never zero bytes.
 func FreeBytes(eng Engine, volume string) (int64, error) {

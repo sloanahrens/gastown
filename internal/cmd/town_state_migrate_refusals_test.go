@@ -80,8 +80,13 @@ func TestTownStateMigrateSeedAndDeltaStepsRefuse(t *testing.T) {
 	t.Run("the delta's verify cannot list the volume", func(t *testing.T) {
 		t.Parallel()
 		env, fv, _ := seededEnv(t, migrateTown(t))
-		// The copy's own empty check is the next listing; the delta's verify is the one after.
-		fv.failListFrom = fv.lists + 2
+		// The delta's verify is the listing after its free-space read and its
+		// import: the first listing that follows the free-space read fails.
+		fv.onRun = func(argv []string) {
+			if strings.Join(argv, " ") == strings.Join(townstate.FreeArgv, " ") {
+				fv.listErr = errors.New("the volume listing failed")
+			}
+		}
 		err := runTownStateMigrateCopyIn(env)
 		if err == nil || !strings.Contains(err.Error(), "listing volume") {
 			t.Fatalf("delta = %v, want the listing named", err)
@@ -110,27 +115,6 @@ func TestTownStateMigrateSeedAndDeltaStepsRefuse(t *testing.T) {
 		err := runTownStateMigrateCopyIn(env)
 		if err == nil || !strings.Contains(err.Error(), "the delta needs") {
 			t.Fatalf("delta onto a full volume = %v, want the shortfall named", err)
-		}
-	})
-	t.Run("a host file vanishes while the delta is priced", func(t *testing.T) {
-		t.Parallel()
-		town := migrateTown(t)
-		env, fv, _ := seededEnv(t, town)
-		changed := filepath.Join(town, "daemon", "maintenance_state.json")
-		writeHostFile(t, changed, "changed\n", time.Now().Add(time.Hour))
-		// The delta's verify is the listing after the copy's empty check; the
-		// host file goes between that verify and the pricing.
-		at := fv.lists + 2
-		fv.onList = func(n int) {
-			if n == at {
-				if err := os.Remove(changed); err != nil {
-					panic(err)
-				}
-			}
-		}
-		err := runTownStateMigrateCopyIn(env)
-		if err == nil || !strings.Contains(err.Error(), "reading the size of daemon/maintenance_state.json") {
-			t.Fatalf("delta = %v, want the vanished file named", err)
 		}
 	})
 	t.Run("the delta fails part way and the seed record cannot be removed", func(t *testing.T) {
@@ -182,6 +166,23 @@ func TestTownStateMigrateSeedAndDeltaStepsRefuse(t *testing.T) {
 			t.Fatalf("seed = %v, want the verify's listing named", err)
 		}
 	})
+}
+
+// TestTownStateMigrateHostBytesNamesAVanishedFile: a delta file that cannot be read
+// while the delta is priced is named, never counted as zero bytes.
+func TestTownStateMigrateHostBytesNamesAVanishedFile(t *testing.T) {
+	t.Parallel()
+	town := migrateTown(t)
+	content := "changed\n"
+	writeHostFile(t, filepath.Join(town, "daemon", "maintenance_state.json"), content, time.Now())
+	got, err := hostBytes(town, map[string]bool{"daemon/maintenance_state.json": true})
+	if err != nil || got != int64(len(content)) {
+		t.Fatalf("hostBytes of a present file = %d, %v; want %d bytes", got, err, len(content))
+	}
+	_, err = hostBytes(town, map[string]bool{"daemon/gone.json": true})
+	if err == nil || !strings.Contains(err.Error(), "reading the size of daemon/gone.json") {
+		t.Fatalf("hostBytes of a vanished file = %v, want the file named", err)
+	}
 }
 
 // TestTownStateMigrateRecordFiles: a record is refused when it cannot be encoded,

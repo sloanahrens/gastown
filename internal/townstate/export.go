@@ -121,10 +121,10 @@ type ExportOptions struct {
 	// archive must leave out. A nil Exclude excludes nothing. An excluded name
 	// is counted under SkipSecret and never written or named in the summary.
 	Exclude func(name string) bool
-	// Only, when set, keeps only the regular files whose town-root-relative
-	// name it accepts: a delta copy sends the files the volume lacks or holds
-	// with other bytes. Directories and links are always written, and a file
-	// it refuses is counted under SkipUnchanged.
+	// Only, when set, keeps only the regular files and links whose
+	// town-root-relative name it accepts: a delta copy sends the entries the
+	// volume lacks or holds differently. Directories are always written, and an
+	// entry it refuses is counted under SkipUnchanged.
 	Only func(name string) bool
 	// ops is the filesystem seam a test replaces; the zero value is the host.
 	ops townOps
@@ -328,6 +328,13 @@ func (w *exportWalk) file(p, name string, info fs.FileInfo) error {
 // to this entry, so a link the import would refuse is never archived. The target
 // is never opened.
 func (w *exportWalk) symlink(p, name string, info fs.FileInfo) error {
+	// A delta sends a link only where the volume differs. An unchanged link is
+	// on the volume already, and a merge never replaces a link, so sending it
+	// again fails the import.
+	if w.opts.Only != nil && !w.opts.Only(name) {
+		w.sum.Skipped[SkipUnchanged]++
+		return nil
+	}
 	link, err := w.opts.ops.readlink(p)
 	if err != nil {
 		return fmt.Errorf("reading the symlink %s: %w", name, err)
