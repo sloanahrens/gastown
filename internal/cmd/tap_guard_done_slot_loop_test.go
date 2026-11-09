@@ -514,3 +514,41 @@ func TestDoneSlotLoopRefusesUnreadableFileWrittenBody(t *testing.T) {
 		t.Errorf("matchesDoneSlotLoop(%q) refused with %q, want allowed", withoutHeredoc, reason)
 	}
 }
+
+// TestDoneSlotLoopReadsParsedSubstitutions pins the substitution half of the
+// done/slot rule after it moved from the text scan to the parsed command
+// (gt-bogfce): a loop in any substitution the shell runs is refused at any
+// depth, a loop in a literal span is not, and a substitution the line holds
+// without a loop is not refused by this rule.
+func TestDoneSlotLoopReadsParsedSubstitutions(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		command     string
+		wantBlocked bool
+	}{
+		{"loop in dollar-paren", "echo $(for i in 1; do gt done; done)", true},
+		{"loop in a nested dollar-paren", "echo $(echo $(for i in 1; do gt done; done))", true},
+		{"loop in backquotes", "echo `for i in 1; do gt done; done`", true},
+		{"loop in a process substitution", "cat <(while true; do gt done; done)", true},
+		{"loop in an assignment", "X=$(for i in 1; do gt done; done) ; echo", true},
+		{"loop in a substitution behind a declaration heredoc", "let y=1<<x\n$(for i in 1; do gt done; done)\nfoo", true},
+		{"single gt done in a substitution", "echo $(gt done)", false},
+		{"loop in a single-quoted span is literal", "echo '$(for i in 1; do gt done; done)'", false},
+		{"loop in a substitution of a quoted heredoc body", "cat <<'EOF'\n$(for i in 1; do gt done; done)\nEOF", true},
+		{"quoted heredoc body that cannot be read and may hold a substitution", "cat <<'EOF'\n$(for i in 1; do gt done; done\nEOF", true},
+		{"direct loop in a quoted heredoc body is data", "cat <<'EOF'\nfor i in 1; do gt done; done\nEOF", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.wantBlocked && reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want the done/slot loop refused", tt.command)
+			}
+			if !tt.wantBlocked && reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) refused with %q, want allowed", tt.command, reason)
+			}
+		})
+	}
+}

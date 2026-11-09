@@ -467,10 +467,20 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 	}
 	flush()
 	// A command substitution runs its body as a command of its own, wherever
-	// the surrounding word sits (`echo $(bd close gt-x)`), so each body is
-	// parsed the way a whole command is. A nested substitution is found when
-	// its enclosing body is parsed.
-	for _, body := range commandSubstitutions(stripped) {
+	// the surrounding word sits (`echo $(bd close gt-x)`), so each body the
+	// parser reads is parsed the way a whole command is. A nested substitution
+	// is found when its enclosing body is parsed. A command the parser cannot
+	// read may still hold a substitution whose close is unknown, so it is
+	// judged as a close of the branch's bead (IDsUnreadable), not passed.
+	trimmed := strings.TrimSpace(command)
+	bodies, readable := parsedSubstitutionBodies(blankQuotedHeredocBodies(trimmed))
+	if !readable {
+		if mayHoldSubstitution(trimmed) {
+			invocations = append(invocations, bdCloseInvocation{IDsUnreadable: true})
+		}
+		return invocations
+	}
+	for _, body := range bodies {
 		invocations = append(invocations, parseBdCloseInvocations(body)...)
 	}
 	return invocations

@@ -210,10 +210,12 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 // matchers read the words the shell will pass — quoting resolved, expansions
 // kept as source text, redirections and here-document bodies out of the word
 // list — instead of a second tokenization of the text, so the parser's reading
-// is the reading the matchers take (gt-kr5vf). Two rules stay on the text: the
-// done/slot loop rule, whose loop keywords are not segments
-// (judgeDangerousLoopText), and the two shapes the parser reads differently
-// from the shell, whose token checks follow the shell's text (judgeDisagreeingScript).
+// is the reading the matchers take (gt-kr5vf). The done/slot loop rule keeps a
+// text reading for its loop keywords, which are not segments
+// (matchesDoneSlotLoop, run by judgeDangerousLoopText), and reads the
+// substitutions it judges from the parsed script (dangerousSubstitutionLoop).
+// The two shapes the parser reads differently from the shell keep the shell's
+// text for their token checks (judgeDisagreeingScript).
 func judgeDangerousScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
 	// A declaration builtin's word spelling "<<" is a here-document to the
 	// shell's lexer, which reads the operator before the builtin sees its
@@ -229,7 +231,7 @@ func judgeDangerousScript(script shellparse.Script, text string, depth int, sess
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
 	}
-	if reason, alternative = judgeDangerousLoopText(text, depth); reason != "" {
+	if reason, alternative = judgeDangerousLoopText(text, script, depth); reason != "" {
 		return reason, alternative
 	}
 	return evaluateDangerousScriptNested(script, depth, sess)
@@ -352,7 +354,7 @@ func dangerousANSICContinuation(text string) bool {
 // reading is the only structured reading the nested checks have (gt-7ydceb).
 // Pinned by TestDisagreeingShapesJudgeNestedPayloads.
 func judgeDisagreeingScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
-	if reason, alternative = judgeDisagreeingShellText(text, depth, sess); reason != "" {
+	if reason, alternative = judgeDisagreeingShellText(text, script, depth, sess); reason != "" {
 		return reason, alternative
 	}
 	return evaluateDangerousScriptNested(script, depth, sess)
@@ -368,12 +370,12 @@ func judgeDisagreeingScript(script shellparse.Script, text string, depth int, se
 // reading of these lines, so the text is the only reading the matchers have
 // there. Pinned by TestHeredocDoesNotHideRealCommand and
 // TestDangerousGuardANSICLineContinuation.
-func judgeDisagreeingShellText(command string, depth int, sess guardSession) (reason, alternative string) {
+func judgeDisagreeingShellText(command string, script shellparse.Script, depth int, sess guardSession) (reason, alternative string) {
 	tokens := shellTokenize(stripHeredocBodies(command))
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
 	}
-	return judgeDangerousLoopText(command, depth)
+	return judgeDangerousLoopText(command, script, depth)
 }
 
 // judgeDangerousLoopText is the done/slot loop rule read from the command text.
@@ -388,12 +390,12 @@ func judgeDisagreeingShellText(command string, depth int, sess guardSession) (re
 // not passed (doneSlotLoopFileWrittenBodies). The rule reads the unstripped text
 // because a heredoc body the command writes to a FILE can hold the retry script;
 // the heredoc bodies it finds are the parsed ones (doneSlotLoopFileWrittenBodies).
-func judgeDangerousLoopText(text string, depth int) (reason, alternative string) {
+func judgeDangerousLoopText(text string, script shellparse.Script, depth int) (reason, alternative string) {
 	tokens := shellTokenize(stripHeredocBodies(text))
 	if reason, alternative = matchesDoneSlotLoop(text, tokens, toLowerTokens(tokens)); reason != "" {
 		return reason, alternative
 	}
-	return dangerousSubstitutionLoop(text, depth)
+	return dangerousSubstitutionLoop(script, depth)
 }
 
 // judgeDangerousTokens is the dangerous rules read over one token line.
@@ -495,7 +497,7 @@ func evaluateDangerousScript(script shellparse.Script, depth int, sess guardSess
 	// top-level script is in judgeDangerousScript. The done/slot
 	// loop rule is not read here: a substitution keeps no text, so that rule
 	// cannot see a loop in its body, and dangerousSubstitutionLoop carries it
-	// from the text of the line that holds the substitution (gt-7ydceb).
+	// from the parsed script of the line that holds the substitution (gt-7ydceb).
 	tokens := dangerousTokenLine(script)
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
 		return reason, alternative
@@ -605,30 +607,72 @@ func dangerousScriptSubs(script shellparse.Script) []shellparse.Script {
 	return append(subs, script.Subs...)
 }
 
-// dangerousSubstitutionLoop is the done/slot loop rule read from the command
-// substitutions in command. It is the one nested read the parsed Script cannot
-// feed that rule: the flattener records what a shell runs, and a for or while
-// block's keywords open and close around their segments instead of being
-// segments of their own ("for i in 1 2; do gt done; done" flattens to one "gt
-// done" segment). The rule is a shape of the text — a block that CLOSES around
-// a gt done or gt slot, a repeat or an xargs beside one (gt-7dxw) — so its
-// substitutions come from the text's substitution scan rather than the parsed
-// Script. It answers only that rule: every other nested judgment comes from the
-// parsed Script (gt-7ydceb), and a file-written body it cannot read is refused.
-func dangerousSubstitutionLoop(command string, depth int) (reason, alternative string) {
+// dangerousSubstitutionLoop is the done/slot loop rule read from the
+// substitutions the parser reads in script: the bodies of "$(...)", backquotes,
+// and process substitutions, including those in an unquoted heredoc body, and
+// those in a quoted heredoc body read as a script (quotedHeredocBodyLoop). The
+// flattener records what a shell runs, and a for or while block's keywords open
+// and close around their segments instead of being segments of their own ("for
+// i in 1 2; do gt done; done" flattens to one "gt done" segment). The rule is a
+// shape of the text — a block that CLOSES around a gt done or gt slot, a repeat
+// or an xargs beside one (gt-7dxw) — so each body's text is read for it, and a
+// body's own substitutions are read one level deeper from its parsed Script. It
+// answers only that rule: every other nested judgment comes from the parsed
+// Script (gt-7ydceb).
+func dangerousSubstitutionLoop(script shellparse.Script, depth int) (reason, alternative string) {
 	if depth >= maxDangerousNestDepth {
 		return "", ""
 	}
-	for _, body := range append(commandSubstitutions(command), heredocBodySubstitutions(command)...) {
+	for _, sub := range dangerousScriptSubs(script) {
+		body := sub.Raw
+		if body == "" {
+			continue
+		}
 		tokens := shellTokenize(body)
 		if r, alt := matchesDoneSlotLoop(body, tokens, toLowerTokens(tokens)); r != "" {
 			return r, alt
 		}
-		if r, alt := dangerousSubstitutionLoop(body, depth+1); r != "" {
+		if r, alt := dangerousSubstitutionLoop(sub, depth+1); r != "" {
 			return r, alt
 		}
 	}
+	for _, seg := range script.Segments {
+		for _, h := range seg.Heredocs {
+			if !h.Quoted {
+				continue
+			}
+			if r, alt := quotedHeredocBodyLoop(h.Body, depth); r != "" {
+				return r, alt
+			}
+		}
+	}
 	return "", ""
+}
+
+// quotedHeredocBodyLoop is the substitution half of the done/slot loop rule for
+// the body of a quoted here-document. The shell keeps that body literal, so the
+// parsed script holds no substitution in it, yet the body is what a file it is
+// written to later runs, and what a shell it is fed to runs. The body is read as
+// a script of its own and judged as a command line is, so a loop in one of its
+// substitutions is refused whether or not a file is written (gt-bogfce). A body
+// the parser cannot read that may hold a substitution is refused too, since no
+// substitution in it can be ruled out.
+func quotedHeredocBodyLoop(body string, depth int) (reason, alternative string) {
+	script, err := shellparse.Parse(body)
+	if err != nil {
+		if mayHoldSubstitution(body) {
+			return quotedHeredocBodyUnreadableReason(err), ""
+		}
+		return "", ""
+	}
+	return dangerousSubstitutionLoop(script, depth+1)
+}
+
+// quotedHeredocBodyUnreadableReason is the refusal for a quoted here-document
+// body the parser cannot read and that may hold a substitution, naming the
+// construct.
+func quotedHeredocBodyUnreadableReason(err error) string {
+	return "a quoted here-document body cannot be read (" + dangerousConstruct(err) + ") and may hold a substitution, so it cannot be checked for a retry loop"
 }
 
 // dangerousUnreadable is the refusal for a command shellparse could not read,
@@ -1165,7 +1209,7 @@ func heredocLineOperator(op string) bool {
 
 // heredocBodySubstitutions returns the command substitutions written in the
 // bodies of unquoted heredocs. stripHeredocBodies drops those bodies before
-// commandSubstitutions runs, yet the shell expands "$(git reset --hard)" in
+// its text is scanned, yet the shell expands "$(git reset --hard)" in
 // "cat > f <<EOF" while reading the body. A quoted tag keeps its body
 // literal, so its substitutions stay inert (gt-x50o8).
 func heredocBodySubstitutions(command string) []string {
@@ -1397,31 +1441,64 @@ func resolveShellVar(arg string, vars map[string]string) string {
 	return arg
 }
 
-// commandSubstitutions extracts the inner command text of every outermost $(...)
-// or `...` command substitution in command, so evaluateDangerousCommand can
-// recurse into it the same as a bash -c/eval payload (gt-5ihs attempt 2:
-// "recurse into ... command substitution"). Scanned against the raw
-// (untokenized) command text, since shlex has no notion of substitution
-// grouping and would otherwise split "$(rm -rf /)" across unrelated tokens.
-//
-// The scan is commandSubstitutionSpans, shared with the container-suite guard.
-// It balances the parentheses of a body, so "$(grep -E '(a|b)' f; git reset
-// --hard)" is cut whole and judged (gt-d1mlb). A substitution nested in a body
-// is judged when the body is, one nesting level deeper.
-//
-// A backslash before the opening "$(" or backtick escapes it, and single quotes
-// hide it (gt-d1mlb): the shell passes the text through literally and runs
-// nothing, so "\$(git reset --hard)" and '$(git reset --hard)' are both data
-// wherever they appear, most visibly in an unquoted heredoc body, which
-// heredocBodySubstitutions otherwise scans for the substitutions the shell DOES
-// expand (gt-y6mhx). An even run of backslashes escapes itself, leaving
-// \\$(cmd) live.
-func commandSubstitutions(command string) []string {
-	return substitutionBodies(command, commandSubstitutionSpans(command))
+// parsedSubstitutionBodies returns the body of every substitution the shell
+// expands in command as the parser reads it: "$(...)", a backquote, and the
+// "<(...)" and ">(...)" process substitutions. Each body is the source text the
+// shell runs (Script.Raw), so a guard recurses into it as a command of its own.
+// readable is false when the parser cannot read command; the caller decides
+// how to fail closed.
+func parsedSubstitutionBodies(command string) (bodies []string, readable bool) {
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return nil, false
+	}
+	for _, sub := range dangerousScriptSubs(script) {
+		if sub.Raw != "" {
+			bodies = append(bodies, sub.Raw)
+		}
+	}
+	return bodies, true
 }
 
-// heredocSubstitutions is commandSubstitutions for the text of an unquoted
-// heredoc body, where a quote mark is an ordinary character
+// blankQuotedHeredocBodies is command with the body of every quoted heredoc
+// replaced by spaces, newlines and offsets kept. A quoted tag leaves its body
+// literal, so nothing in it runs and a "$(...)" there is not a substitution.
+// An unquoted body is left as it is: the shell expands its substitutions while
+// it reads the body (heredocBodySubstitutions), so the parser must see them. An
+// unterminated heredoc has no closed body to blank, so it is left as it is too.
+// The terminator line is kept, since a span ends with it and the heredoc needs
+// it to close, so the rest of the command still parses.
+func blankQuotedHeredocBodies(command string) string {
+	b := []byte(command)
+	for _, span := range heredocSpans(command) {
+		if span.unterminated || !span.quoted || span.bodyEnd <= span.bodyStart {
+			continue
+		}
+		// The span's last line is the terminator: blank up to its first byte.
+		content := command[span.bodyStart:span.bodyEnd]
+		terminator := strings.LastIndex(strings.TrimSuffix(content, "\n"), "\n") + 1
+		for i := span.bodyStart; i < span.bodyStart+terminator; i++ {
+			if b[i] != '\n' {
+				b[i] = ' '
+			}
+		}
+	}
+	return string(b)
+}
+
+// mayHoldSubstitution reports whether command holds the text a command or
+// process substitution opens with. It is a substring test, not a scan: it
+// answers only whether a command the parser cannot read could hold a
+// substitution the guard must judge. It also matches a "$(" the shell reads as
+// literal text, such as one in single quotes; an unreadable line cannot tell the
+// two apart, so that refusal is the fail-closed reading and is kept on purpose.
+func mayHoldSubstitution(command string) bool {
+	return strings.Contains(command, "`") || strings.Contains(command, "$(") ||
+		strings.Contains(command, "<(") || strings.Contains(command, ">(")
+}
+
+// heredocSubstitutions returns the substitution bodies in the text of an
+// unquoted heredoc body, where a quote mark is an ordinary character
 // (heredocSubstitutionSpans).
 func heredocSubstitutions(body string) []string {
 	return substitutionBodies(body, heredocSubstitutionSpans(body))
@@ -1628,8 +1705,8 @@ func lenientShellSplit(command string, separators bool) []string {
 // scope opened from inside a double-quoted word therefore has its '"' and '\'
 // backslashed, which keeps the whole substitution inside the one opaque token
 // the enclosing quotes promise. Detection is not lost by that: quoted-text
-// matchers that need the body get it from the raw text instead
-// (commandSubstitutions).
+// matchers that need the body get it from the parsed command instead
+// (parsedSubstitutionBodies).
 //
 // An unquoted subshell — `( list )` — has its parentheses spaced out too, so
 // each is a token of its own. A "(" is spaced where it opens a shell word (so
