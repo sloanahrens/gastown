@@ -45,24 +45,44 @@ func TestPodDaemonCommitReadsTheVersionLine(t *testing.T) {
 	}
 }
 
+// TestPodDaemonCommitRunsTheTrimmedArguments: a context, namespace or
+// deployment with surrounding space is checked and run as its trimmed value,
+// so the command never carries a value the check did not read.
+func TestPodDaemonCommitRunsTheTrimmedArguments(t *testing.T) {
+	t.Parallel()
+	run := &podProbeRun{output: "gt version abc1234\n"}
+
+	if _, err := podDaemonCommit(context.Background(), run.run, " town-ctx ", "\tgastown ", " daemon"); err != nil {
+		t.Fatalf("podDaemonCommit: %v", err)
+	}
+	want := []string{"kubectl", "--context", "town-ctx", "-n", "gastown", "exec", "deployment/daemon", "--", "gt", "version"}
+	if len(run.calls) != 1 {
+		t.Fatalf("commands run = %d, want 1: %v", len(run.calls), run.calls)
+	}
+	if !slices.Equal(run.calls[0], want) {
+		t.Errorf("command = %v, want %v", run.calls[0], want)
+	}
+}
+
 // TestPodDaemonCommitRefusesBadOutput: every answer that does not name a
-// commit on the first line is an error, and an error never carries the
-// command's output.
+// commit on the first line is an error, the error names the step that failed,
+// and an error never carries the command's output.
 func TestPodDaemonCommitRefusesBadOutput(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
 		run    podProbeRun
+		want   string
 		secret string
 	}{
-		{name: "nonzero exit", run: podProbeRun{output: "pod error SECRET-TOKEN", exit: 1}, secret: "SECRET-TOKEN"},
-		{name: "nonzero exit after a version line", run: podProbeRun{output: "gt version abc1234\n", exit: 1}},
-		{name: "run error", run: podProbeRun{err: errors.New("exec: kubectl not found")}},
-		{name: "run error after a version line", run: podProbeRun{output: "gt version abc1234\n", err: errors.New("exec: signal: killed")}},
-		{name: "empty output", run: podProbeRun{output: ""}},
-		{name: "first line is not a version line", run: podProbeRun{output: "panic: boom\n"}},
-		{name: "version line names no commit", run: podProbeRun{output: "gt version\n"}},
-		{name: "commit only on the second line", run: podProbeRun{output: "banner\ngt version abc1234\n"}},
+		{name: "nonzero exit", run: podProbeRun{output: "pod error SECRET-TOKEN", exit: 1}, want: "kubectl exec in deployment daemon exited", secret: "SECRET-TOKEN"},
+		{name: "nonzero exit after a version line", run: podProbeRun{output: "gt version abc1234\n", exit: 1}, want: "kubectl exec in deployment daemon exited"},
+		{name: "run error", run: podProbeRun{err: errors.New("exec: kubectl not found")}, want: "running kubectl exec in deployment daemon"},
+		{name: "run error after a version line", run: podProbeRun{output: "gt version abc1234\n", err: errors.New("exec: signal: killed")}, want: "running kubectl exec in deployment daemon"},
+		{name: "empty output", run: podProbeRun{output: ""}, want: "names no commit"},
+		{name: "first line is not a version line", run: podProbeRun{output: "panic: boom\n"}, want: "names no commit"},
+		{name: "version line names no commit", run: podProbeRun{output: "gt version\n"}, want: "names no commit"},
+		{name: "commit only on the second line", run: podProbeRun{output: "banner\ngt version abc1234\n"}, want: "names no commit"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,6 +91,9 @@ func TestPodDaemonCommitRefusesBadOutput(t *testing.T) {
 			commit, err := podDaemonCommit(context.Background(), run.run, "town-ctx", "gastown", "daemon")
 			if err == nil {
 				t.Fatalf("podDaemonCommit = %q, want an error", commit)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name the failed step %q", err, tc.want)
 			}
 			if tc.secret != "" && strings.Contains(err.Error(), tc.secret) {
 				t.Errorf("error %q echoes the command output", err)
