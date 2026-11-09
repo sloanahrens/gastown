@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,9 +51,10 @@ const (
 // directory moves with the town-state volume, so the baseline the checks compare
 // against is carried by the copy.
 const (
-	// cutoverRecordRel is the cut-over record `migrate copy --cutover` writes.
-	// internal/cmd names the same path as its cutoverRecordRel.
-	cutoverRecordRel = "daemon/town-state-cutover.json"
+	// CutoverRecordRel is the cut-over record `migrate copy --cutover` writes. The
+	// migrate command writes it and the day-one checks read it, from this one
+	// definition.
+	CutoverRecordRel = "daemon/town-state-cutover.json"
 	gitBaselineRel   = "daemon/town-state-git-baseline.json"
 	daemonLogRel     = "daemon/daemon.log"
 )
@@ -152,11 +154,15 @@ func runBounded(ctx context.Context, env Env, bound time.Duration, dir, name str
 // CheckGitSpeed times each git command in each rig the landing worker reads and
 // holds the median to the baseline the volume move was recorded against. A rig
 // the baseline does not name fails; a missing baseline fails with the instruction
-// to record it.
+// to record it. A town with no rig to time fails too: no rows would read as a
+// clean pass.
 func CheckGitSpeed(ctx context.Context, env Env) []Row {
 	rigs, err := landingRigs(env.Town)
 	if err != nil {
 		return []Row{notRun("git speed", "rig list readable", err)}
+	}
+	if len(rigs) == 0 {
+		return []Row{failed("git speed", "-", "a rig to time", "git speed not measured: no rig to time; the rig registry names no rig, or the landing worker's rig list names none of them")}
 	}
 	gb, err := loadGitBaseline(env.Town)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -336,7 +342,7 @@ func CheckDaemonStart(ctx context.Context, env Env) []Row {
 	default:
 		line, _, _ := strings.Cut(p.out, "\n")
 		line = strings.TrimSpace(line)
-		measured := fmt.Sprintf("%s in %.2fs", line, p.took.Seconds())
+		measured := fmt.Sprintf("%s in %.2fs", strconv.Quote(line), p.took.Seconds())
 		if strings.HasPrefix(strings.ToLower(line), "green") {
 			rows = append(rows, passed(healthCheck, measured, healthThreshold))
 		} else {
@@ -458,22 +464,22 @@ func firstStartAtOrAfter(lines []logLine, cut time.Time) (time.Time, bool) {
 // readCutover reads the cut-over time from the cut-over record. An absent
 // record means the cut-over has not run, which is a reason, not a zero time.
 func readCutover(town string) (time.Time, error) {
-	data, err := os.ReadFile(filepath.Join(town, filepath.FromSlash(cutoverRecordRel)))
+	data, err := os.ReadFile(filepath.Join(town, filepath.FromSlash(CutoverRecordRel)))
 	if errors.Is(err, fs.ErrNotExist) {
-		return time.Time{}, fmt.Errorf("no cut-over record at %s, so the cut-over has not run", cutoverRecordRel)
+		return time.Time{}, fmt.Errorf("no cut-over record at %s, so the cut-over has not run", CutoverRecordRel)
 	}
 	if err != nil {
-		return time.Time{}, fmt.Errorf("reading %s: %w", cutoverRecordRel, err)
+		return time.Time{}, fmt.Errorf("reading %s: %w", CutoverRecordRel, err)
 	}
 	var rec struct {
 		CutoverAt string `json:"cutover_at"`
 	}
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return time.Time{}, fmt.Errorf("reading %s: %w", cutoverRecordRel, err)
+		return time.Time{}, fmt.Errorf("reading %s: %w", CutoverRecordRel, err)
 	}
 	at, err := time.Parse(time.RFC3339, rec.CutoverAt)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("reading %s: cutover_at is not RFC 3339: %w", cutoverRecordRel, err)
+		return time.Time{}, fmt.Errorf("reading %s: cutover_at is not RFC 3339: %w", CutoverRecordRel, err)
 	}
 	return at, nil
 }

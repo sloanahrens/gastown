@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -109,7 +110,7 @@ func writeTown(t *testing.T, tf townFiles) string {
 		put("mayor/daemon.json", tf.daemonJSON)
 	}
 	if tf.cutover != "" {
-		put(cutoverRecordRel, tf.cutover)
+		put(CutoverRecordRel, tf.cutover)
 	}
 	if tf.log != "" {
 		put(daemonLogRel, tf.log)
@@ -553,4 +554,121 @@ func TestCheckRecordBaseline(t *testing.T) {
 			t.Fatalf("baseline rigs = %v, want only gastown", rigs)
 		}
 	})
+}
+
+// TestCheckGitSpeedRefusesNoRigToTime drives the two ways the rig list can name
+// nothing to time: an empty registry, and a landing worker list that names no
+// registered rig. Both leave git unmeasured, so the check must fail, not return
+// no rows, and must run no git command at all.
+func TestCheckGitSpeedRefusesNoRigToTime(t *testing.T) {
+	t.Parallel()
+	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
+		"gastown": {"status --short": 0.1, "fetch --dry-run": 0.1},
+	}}
+	tests := []struct {
+		name       string
+		rigsJSON   string
+		daemonJSON string
+	}{
+		{name: "an empty rig registry", rigsJSON: `{"version":1,"rigs":{}}`},
+		{name: "a landing worker list that names no registered rig", daemonJSON: `{"patrols":{"landing_worker":{"enabled":true,"rigs":["nowhere"]}}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := writeTown(t, townFiles{rigsJSON: tt.rigsJSON, daemonJSON: tt.daemonJSON, baseline: baseline})
+			gitRuns := 0
+			host := newFakeHost(func(_, _ string, _ []string) fakeAnswer {
+				gitRuns++
+				return fakeAnswer{took: 100 * time.Millisecond}
+			})
+			rows := CheckGitSpeed(context.Background(), host.env(town))
+			if len(rows) != 1 {
+				t.Fatalf("got %d rows, want the one unmet row: %+v", len(rows), rows)
+			}
+			r := rows[0]
+			if r.OK || !strings.Contains(r.Result, "git speed not measured: no rig to time") {
+				t.Errorf("row = %+v, want an unmet row saying git speed was not measured", r)
+			}
+			if DayOneFailures(rows) != 1 {
+				t.Errorf("DayOneFailures = %d, want the unmet row counted so the command exits non-zero", DayOneFailures(rows))
+			}
+			if gitRuns != 0 {
+				t.Errorf("%d git runs, want none when there is no rig to time", gitRuns)
+			}
+		})
+	}
+}
+
+// TestGitSpeedRunsInEachRigsMayorClone asserts the directory every git command
+// runs in: each rig's mayor/rig clone, which is the work tree git status needs.
+// Both the check and the baseline record run through the same rig list.
+func TestGitSpeedRunsInEachRigsMayorClone(t *testing.T) {
+	t.Parallel()
+	rigsJSON := `{"version":1,"rigs":{"gastown":{"git_url":"https://example.invalid/g.git"},"other":{"git_url":"https://example.invalid/o.git"}}}`
+	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
+		"gastown": {"status --short": 0.1, "fetch --dry-run": 0.1},
+		"other":   {"status --short": 0.1, "fetch --dry-run": 0.1},
+	}}
+	// Each rig gets GitSpeedRuns runs of each of the two git commands.
+	wantRuns := func(town string) map[string]int {
+		return map[string]int{
+			filepath.Join(town, "gastown", "mayor", "rig"): 2 * GitSpeedRuns,
+			filepath.Join(town, "other", "mayor", "rig"):   2 * GitSpeedRuns,
+		}
+	}
+	record := func(t *testing.T, dirs map[string]int) func(dir, name string, args []string) fakeAnswer {
+		return func(dir, name string, _ []string) fakeAnswer {
+			if name != "git" {
+				t.Errorf("ran %q, want git", name)
+			}
+			dirs[dir]++
+			return fakeAnswer{took: 100 * time.Millisecond}
+		}
+	}
+
+	t.Run("the check runs each git command in each rig's mayor/rig clone", func(t *testing.T) {
+		t.Parallel()
+		town := writeTown(t, townFiles{rigsJSON: rigsJSON, baseline: baseline})
+		dirs := map[string]int{}
+		host := newFakeHost(record(t, dirs))
+		CheckGitSpeed(context.Background(), host.env(town))
+		if want := wantRuns(town); !reflect.DeepEqual(dirs, want) {
+			t.Errorf("git ran in %v, want %v", dirs, want)
+		}
+	})
+
+	t.Run("the baseline record runs each git command in each rig's mayor/rig clone", func(t *testing.T) {
+		t.Parallel()
+		town := writeTown(t, townFiles{rigsJSON: rigsJSON})
+		dirs := map[string]int{}
+		host := newFakeHost(record(t, dirs))
+		if _, err := RecordGitBaseline(context.Background(), host.env(town), false); err != nil {
+			t.Fatalf("record: %v", err)
+		}
+		if want := wantRuns(town); !reflect.DeepEqual(dirs, want) {
+			t.Errorf("git ran in %v, want %v", dirs, want)
+		}
+	})
+}
+
+// TestCheckDaemonProbeQuotesTheLine drives a passing probe whose first line
+// carries a control byte and whose later lines carry text. The table must show
+// the first line quoted, so a raw byte or a later line never reaches the output.
+func TestCheckDaemonProbeQuotesTheLine(t *testing.T) {
+	t.Parallel()
+	town := writeTown(t, townFiles{cutover: cutoverJSON(cutoverTime), log: logAt(cutoverTime.Add(time.Minute), "Daemon starting (PID 4)")})
+	host := newFakeHost(func(_, _ string, _ []string) fakeAnswer {
+		return fakeAnswer{out: "GREEN \x1b[2Jcleared\nsecond line with token=abc\n", took: 300 * time.Millisecond}
+	})
+	row := findRow(t, CheckDaemonStart(context.Background(), host.env(town)), "daemon health probe")
+	if !row.OK {
+		t.Fatalf("row = %+v, want the green probe to pass", row)
+	}
+	if want := strconv.Quote("GREEN \x1b[2Jcleared"); !strings.Contains(row.Measured, want) {
+		t.Errorf("measured = %q, want the first line quoted as %s", row.Measured, want)
+	}
+	if strings.ContainsRune(row.Measured, '\x1b') || strings.Contains(row.Measured, "token=abc") {
+		t.Errorf("measured = %q, want no raw control byte and no later line", row.Measured)
+	}
 }

@@ -62,7 +62,7 @@ func TestCheckGitSpeedIsNotRunWhenItCannotMeasure(t *testing.T) {
 // record.
 func TestCheckDaemonAndLandingAreNotRunWhenTheirFilesCannotBeRead(t *testing.T) {
 	t.Parallel()
-	goodCutover := map[string]string{cutoverRecordRel: cutoverJSON(cutoverTime)}
+	goodCutover := map[string]string{CutoverRecordRel: cutoverJSON(cutoverTime)}
 	tests := []struct {
 		name       string
 		files      map[string]string
@@ -83,19 +83,19 @@ func TestCheckDaemonAndLandingAreNotRunWhenTheirFilesCannotBeRead(t *testing.T) 
 		},
 		{
 			name:       "a cut-over record that does not parse is not run",
-			files:      map[string]string{cutoverRecordRel: "{not json"},
+			files:      map[string]string{CutoverRecordRel: "{not json"},
 			wantText:   "reading daemon/town-state-cutover.json",
 			landingToo: true,
 		},
 		{
 			name:       "a cut-over time that is not RFC 3339 is not run",
-			files:      map[string]string{cutoverRecordRel: `{"cutover_at":"yesterday"}`},
+			files:      map[string]string{CutoverRecordRel: `{"cutover_at":"yesterday"}`},
 			wantText:   "cutover_at is not RFC 3339",
 			landingToo: true,
 		},
 		{
 			name:       "a cut-over record that cannot be read is not run",
-			dirs:       []string{cutoverRecordRel},
+			dirs:       []string{CutoverRecordRel},
 			wantText:   "reading daemon/town-state-cutover.json",
 			landingToo: true,
 		},

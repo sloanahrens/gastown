@@ -144,13 +144,25 @@ func TestRunTownStateCheckIn(t *testing.T) {
 	})
 }
 
-func TestRunDayOneCommandFailsBeforeAnyProcessStarts(t *testing.T) {
+func TestRunTownStateCheckInCommandsThatCannotStart(t *testing.T) {
 	t.Parallel()
-	// A working directory that does not exist stops the command before it starts,
-	// so the error is the one the checks must not read as a clean exit.
-	missing := filepath.Join(t.TempDir(), "no-such-dir")
-	_, exit, err := runDayOneCommand(context.Background(), missing, "gt", "status", "--line")
-	if err == nil {
-		t.Fatalf("err = nil with exit %d, want the start failure", exit)
+	// Every command fails to start, so each check that runs one is not run, and
+	// the command exits 1 rather than reading the failed starts as a clean pass.
+	notFound := errors.New(`exec: "gt": executable file not found in $PATH`)
+	var buf bytes.Buffer
+	err := runTownStateCheckIn(context.Background(), townStateCheckEnv{
+		findTown: func() (string, error) { return townWithRig(t), nil },
+		run: func(context.Context, string, string, ...string) (string, int, error) {
+			return "", 0, notFound
+		},
+		now: func() time.Time { return time.Unix(0, 0) },
+		out: &buf,
+	})
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("err = %v, want an exit code 1", err)
+	}
+	if !strings.Contains(buf.String(), "not run: "+notFound.Error()) {
+		t.Errorf("table = %q, want a not-run row carrying the start error", buf.String())
 	}
 }
