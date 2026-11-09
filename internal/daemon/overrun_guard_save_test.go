@@ -527,3 +527,17 @@ func TestOverrunStop_UnreadableLateStatusKeepsTheSandbox(t *testing.T) {
 		t.Errorf("hand-backs = %q, want the stop held with the sandbox kept", f.handedBack)
 	}
 }
+
+// The late re-check of a worktree it cannot resolve is an error, never a clean
+// answer that would let the sandbox go.
+func TestOverrunWorktreeDirty_UnresolvableWorktreeIsAnError(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	if err := os.RemoveAll(w.work); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := w.d.overrunWorktreeDirty(stopSeat); err == nil {
+		t.Fatal("dirty = nil error, want the unresolvable worktree refused")
+	}
+}
