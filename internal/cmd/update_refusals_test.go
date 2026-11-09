@@ -235,6 +235,59 @@ func TestComposeDaemonSwapRefusesAFailingStep(t *testing.T) {
 			t.Error("the daemon settings changed although the compose write failed first")
 		}
 	})
+	t.Run("a daemon settings file that does not parse is refused before anything changes", func(t *testing.T) {
+		t.Parallel()
+		f := newSwapFixture(t, true)
+		if err := os.WriteFile(f.config, []byte("{not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		before := readSwapFile(t, f.compose)
+		if err := f.swap("town").Apply(context.Background(), pair); err == nil || !strings.Contains(err.Error(), "reading the daemon settings") {
+			t.Fatalf("Apply error = %v, want the unreadable settings named", err)
+		}
+		if got := readSwapFile(t, f.compose); got != before {
+			t.Error("the compose file changed although the settings could not be read")
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("commands = %+v, want none", f.calls)
+		}
+	})
+	t.Run("a settings file that is gone when the pin is set puts the compose file back", func(t *testing.T) {
+		t.Parallel()
+		f := newSwapFixture(t, true)
+		s := f.swap("town")
+		s.writeSettings = func(_ string, mutate func(*config.DaemonPatrolConfig, bool) error) error {
+			return mutate(nil, false)
+		}
+		before := readSwapFile(t, f.compose)
+		if err := s.Apply(context.Background(), pair); err == nil || !strings.Contains(err.Error(), "do not exist") {
+			t.Fatalf("Apply error = %v, want the missing settings named", err)
+		}
+		if got := readSwapFile(t, f.compose); got != before {
+			t.Error("the compose file was not put back after the settings were found missing")
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("commands = %+v, want none", f.calls)
+		}
+	})
+	t.Run("a settings file that names no runner when the pin is set puts the compose file back", func(t *testing.T) {
+		t.Parallel()
+		f := newSwapFixture(t, true)
+		s := f.swap("town")
+		s.writeSettings = func(_ string, mutate func(*config.DaemonPatrolConfig, bool) error) error {
+			return mutate(&config.DaemonPatrolConfig{}, true)
+		}
+		before := readSwapFile(t, f.compose)
+		if err := s.Apply(context.Background(), pair); err == nil || !strings.Contains(err.Error(), "no tier_sweep runner") {
+			t.Fatalf("Apply error = %v, want the missing runner named", err)
+		}
+		if got := readSwapFile(t, f.compose); got != before {
+			t.Error("the compose file was not put back after the runner was found missing")
+		}
+		if len(f.calls) != 0 {
+			t.Errorf("commands = %+v, want none", f.calls)
+		}
+	})
 }
 
 // TestImagePairRegistryCheckRefusesAnUnwiredOrUnreadableRegistry holds the
