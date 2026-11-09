@@ -231,6 +231,19 @@ func TestStartupOwnerTakeoverWithoutLogRefuses(t *testing.T) {
 	}
 }
 
+// GuardStart given a nil logger refuses the takeover over the recorded container
+// owner rather than panic in the log call: a nil logger is no log to name the
+// owner in, so the takeover is refused like any other unlogged takeover.
+func TestStartupOwnerGuardStartNilLoggerRefuses(t *testing.T) {
+	t.Parallel()
+	town := guardTown(t)
+	seedGuardState(t, town, State{Running: true, Owner: ownedBy(podRecorded), LastHeartbeat: guardNow.Add(-time.Minute)})
+	err := GuardStart(town, podSelf, true, podProbe(t, podEngine, unreadJob(t)), guardNow, nil)
+	if err == nil || !strings.Contains(err.Error(), "has no log to name it in") {
+		t.Fatalf("GuardStart(nil logger) = %v, want the refusal that the takeover has no log", err)
+	}
+}
+
 // A launchd, systemd or manual owner the probe cannot read is refused with the
 // takeover set, exactly as before: the pod's container pass does not reach them.
 func TestStartupOwnerOtherKindsUnchanged(t *testing.T) {

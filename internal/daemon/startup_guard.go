@@ -61,14 +61,19 @@ func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, 
 // now is the clock the decision reads, including the age of the host agent's
 // launchd reading. daemon.log existing is the prior-run evidence Run takes from
 // New, since the CLI has written nothing to it. logger receives the takeover
-// line when a takeover passes a recorded container owner; it must not be nil,
-// because a takeover is never allowed to pass unlogged.
+// line when a takeover passes a recorded container owner. A nil logger has no
+// log to write that line to, so it leaves the takeover without a callback and
+// CheckTakeover refuses it: a takeover is never allowed to pass unlogged.
 func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time, logger *log.Logger) error {
 	if probe == nil {
 		probe = startupOwnerProbeForTown(townRoot, templates.RunDockerInspect, os.Hostname, templates.SupervisorJobState, func() time.Time { return now })
 	}
+	var tookOver func(Owner)
+	if logger != nil {
+		tookOver = logTakeover(logger)
+	}
 	_, err := os.Stat(DefaultConfig(townRoot).LogFile)
-	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist), logTakeover(logger))
+	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist), tookOver)
 }
 
 // logTakeover is the takeover line both entry points write: Run into the
