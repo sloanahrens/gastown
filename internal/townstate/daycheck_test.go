@@ -569,9 +569,12 @@ func TestCheckGitSpeedRefusesNoRigToTime(t *testing.T) {
 		name       string
 		rigsJSON   string
 		daemonJSON string
+		// wantRows is the unmet no-rig row, plus one row for each name the
+		// landing worker's list gives that the registry does not hold.
+		wantRows int
 	}{
-		{name: "an empty rig registry", rigsJSON: `{"version":1,"rigs":{}}`},
-		{name: "a landing worker list that names no registered rig", daemonJSON: `{"patrols":{"landing_worker":{"enabled":true,"rigs":["nowhere"]}}}`},
+		{name: "an empty rig registry", rigsJSON: `{"version":1,"rigs":{}}`, wantRows: 1},
+		{name: "a landing worker list that names no registered rig", daemonJSON: `{"patrols":{"landing_worker":{"enabled":true,"rigs":["nowhere"]}}}`, wantRows: 2},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -583,15 +586,15 @@ func TestCheckGitSpeedRefusesNoRigToTime(t *testing.T) {
 				return fakeAnswer{took: 100 * time.Millisecond}
 			})
 			rows := CheckGitSpeed(context.Background(), host.env(town))
-			if len(rows) != 1 {
-				t.Fatalf("got %d rows, want the one unmet row: %+v", len(rows), rows)
+			if len(rows) != tt.wantRows {
+				t.Fatalf("got %d rows, want %d: %+v", len(rows), tt.wantRows, rows)
 			}
-			r := rows[0]
+			r := findRow(t, rows, "git speed")
 			if r.OK || !strings.Contains(r.Result, "git speed not measured: no rig to time") {
 				t.Errorf("row = %+v, want an unmet row saying git speed was not measured", r)
 			}
-			if DayOneFailures(rows) != 1 {
-				t.Errorf("DayOneFailures = %d, want the unmet row counted so the command exits non-zero", DayOneFailures(rows))
+			if DayOneFailures(rows) != tt.wantRows {
+				t.Errorf("DayOneFailures = %d, want every row counted so the command exits non-zero", DayOneFailures(rows))
 			}
 			if gitRuns != 0 {
 				t.Errorf("%d git runs, want none when there is no rig to time", gitRuns)

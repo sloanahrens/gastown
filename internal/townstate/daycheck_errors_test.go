@@ -2,7 +2,10 @@ package townstate
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -198,5 +201,105 @@ func TestCheckRecordBaselineRefusesAnUnencodableBaseline(t *testing.T) {
 	}})
 	if err == nil || !strings.Contains(err.Error(), "encoding daemon/town-state-git-baseline.json") {
 		t.Fatalf("err = %v, want the encoding refusal", err)
+	}
+}
+
+// TestCheckGitSpeedIsNotRunWhenTheRigListCannotBeRead drives the refusals that
+// read the rig registry and the landing worker's list. Neither can name the rigs
+// to time, so the check reports one row that did not run, names the file or key
+// that stopped it, and runs no git command.
+func TestCheckGitSpeedIsNotRunWhenTheRigListCannotBeRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		rigsJSON   string
+		daemonJSON string
+		wantText   string
+	}{
+		{
+			name:     "a rig registry that does not parse is not run",
+			rigsJSON: "{not json",
+			wantText: "reading the rig registry mayor/rigs.json",
+		},
+		{
+			name:       "a landing worker list that does not parse is not run",
+			daemonJSON: "{not json",
+			wantText:   "reading the landing worker's rig list (mayor/daemon.json patrols.landing_worker.rigs)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := writeTown(t, townFiles{rigsJSON: tt.rigsJSON, daemonJSON: tt.daemonJSON})
+			gitRuns := 0
+			host := newFakeHost(func(_, _ string, _ []string) fakeAnswer {
+				gitRuns++
+				return fakeAnswer{took: 100 * time.Millisecond}
+			})
+			rows := CheckGitSpeed(context.Background(), host.env(town))
+			if len(rows) != 1 {
+				t.Fatalf("got %d rows, want the one not-run row: %+v", len(rows), rows)
+			}
+			r := rows[0]
+			if r.OK || !strings.HasPrefix(r.Result, "not run: ") || !strings.Contains(r.Result, tt.wantText) {
+				t.Errorf("row = %+v, want not run mentioning %q", r, tt.wantText)
+			}
+			if gitRuns != 0 {
+				t.Errorf("%d git runs, want none when the rig list cannot be read", gitRuns)
+			}
+		})
+	}
+}
+
+// TestCheckGitSpeedNamesAnUnregisteredRig holds a landing worker list that names
+// one registered rig and one it does not. The registered rig is timed and passes;
+// the unregistered name is a failed row, so the daemon's silent skip is reported.
+func TestCheckGitSpeedNamesAnUnregisteredRig(t *testing.T) {
+	t.Parallel()
+	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
+		"gastown": {"status --short": 0.1, "fetch --dry-run": 0.1},
+	}}
+	town := writeTown(t, townFiles{
+		daemonJSON: `{"patrols":{"landing_worker":{"enabled":true,"rigs":["gastown","nowhere"]}}}`,
+		baseline:   baseline,
+	})
+	host := newFakeHost(gitAnswer(nil))
+	rows := CheckGitSpeed(context.Background(), host.env(town))
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want the unregistered row and the two gastown rows: %+v", len(rows), rows)
+	}
+	unreg := findRow(t, rows, "landing worker rig list: nowhere")
+	if unreg.OK || !strings.Contains(unreg.Result, `names "nowhere", which the rig registry does not hold`) {
+		t.Errorf("row = %+v, want an unmet row naming the unregistered rig", unreg)
+	}
+	if DayOneFailures(rows) != 1 {
+		t.Errorf("DayOneFailures = %d, want the unregistered row counted and the registered rig passing", DayOneFailures(rows))
+	}
+	findRow(t, rows, "git speed gastown: status --short")
+}
+
+// TestRecordGitBaselineRefusesAnUnregisteredRig: a baseline recorded over a
+// landing worker list that names a rig the registry does not hold would leave
+// that rig out of the comparison without a word, so the record refuses and
+// writes nothing.
+func TestRecordGitBaselineRefusesAnUnregisteredRig(t *testing.T) {
+	t.Parallel()
+	town := writeTown(t, townFiles{
+		daemonJSON: `{"patrols":{"landing_worker":{"enabled":true,"rigs":["gastown","nowhere"]}}}`,
+	})
+	gitRuns := 0
+	host := newFakeHost(func(_, _ string, _ []string) fakeAnswer {
+		gitRuns++
+		return fakeAnswer{took: 100 * time.Millisecond}
+	})
+	_, err := RecordGitBaseline(context.Background(), host.env(town), false)
+	if err == nil || !strings.Contains(err.Error(), `"nowhere"`) || !strings.Contains(err.Error(), "patrols.landing_worker.rigs") {
+		t.Fatalf("RecordGitBaseline error = %v, want a refusal naming the unregistered rig and the settings key", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(town, filepath.FromSlash(gitBaselineRel))); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf("baseline file stat = %v, want no baseline written", statErr)
+	}
+	if gitRuns != 0 {
+		t.Errorf("%d git runs, want none when the record refuses", gitRuns)
 	}
 }

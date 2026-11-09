@@ -122,8 +122,9 @@ func DayOneFailures(rows []Row) int {
 	return n
 }
 
-// DayOneChecks runs the four day-one checks in the order the table prints them:
-// git speed, the daemon and gt status, then the first landing since the cut-over.
+// DayOneChecks runs the day-one checks in the order the table prints them: git
+// speed, then the daemon and gt status rows, then the first landing since the
+// cut-over.
 func DayOneChecks(ctx context.Context, env Env) []Row {
 	rows := CheckGitSpeed(ctx, env)
 	rows = append(rows, CheckDaemonStart(ctx, env)...)
@@ -157,21 +158,21 @@ func runBounded(ctx context.Context, env Env, bound time.Duration, dir, name str
 // to record it. A town with no rig to time fails too: no rows would read as a
 // clean pass.
 func CheckGitSpeed(ctx context.Context, env Env) []Row {
-	rigs, err := landingRigs(env.Town)
+	rigs, unregistered, err := landingRigs(env.Town)
 	if err != nil {
 		return []Row{notRun("git speed", "rig list readable", err)}
 	}
+	rows := unregisteredRows(unregistered)
 	if len(rigs) == 0 {
-		return []Row{failed("git speed", "-", "a rig to time", "git speed not measured: no rig to time; the rig registry names no rig, or the landing worker's rig list names none of them")}
+		return append(rows, failed("git speed", "-", "a rig to time", "git speed not measured: no rig to time; the rig registry names no rig, or the landing worker's rig list names none of them"))
 	}
 	gb, err := loadGitBaseline(env.Town)
 	if errors.Is(err, fs.ErrNotExist) {
-		return []Row{failed("git speed baseline", "-", "a baseline recorded before the move", fmt.Sprintf("no baseline at %s; record it with gt town state check --record-baseline before the move", gitBaselineRel))}
+		return append(rows, failed("git speed baseline", "-", "a baseline recorded before the move", fmt.Sprintf("no baseline at %s; record it with gt town state check --record-baseline before the move", gitBaselineRel)))
 	}
 	if err != nil {
-		return []Row{notRun("git speed baseline", "a baseline recorded before the move", err)}
+		return append(rows, notRun("git speed baseline", "a baseline recorded before the move", err))
 	}
-	var rows []Row
 	for _, rig := range rigs {
 		repo := constants.RigMayorPath(filepath.Join(env.Town, rig))
 		for _, args := range gitSpeedCommands {
@@ -196,6 +197,17 @@ func CheckGitSpeed(ctx context.Context, env Env) []Row {
 				rows = append(rows, passed(check, measured, threshold))
 			}
 		}
+	}
+	return rows
+}
+
+// unregisteredRows fails the git speed check for each rig name the landing
+// worker's list gives that the rig registry does not hold. The daemon skips such
+// a name, so the day-one check says so instead.
+func unregisteredRows(names []string) []Row {
+	var rows []Row
+	for _, name := range names {
+		rows = append(rows, failed("landing worker rig list: "+name, "-", "every rig it names is registered", fmt.Sprintf("the landing worker's rig list (mayor/daemon.json patrols.landing_worker.rigs) names %q, which the rig registry does not hold; the landing worker skips it", name)))
 	}
 	return rows
 }
@@ -257,9 +269,12 @@ func RecordGitBaseline(ctx context.Context, env Env, force bool) (string, error)
 			return path, fmt.Errorf("checking %s: %w", gitBaselineRel, err)
 		}
 	}
-	rigs, err := landingRigs(env.Town)
+	rigs, unregistered, err := landingRigs(env.Town)
 	if err != nil {
 		return path, fmt.Errorf("recording the git speed baseline: %w", err)
+	}
+	if len(unregistered) > 0 {
+		return path, fmt.Errorf("recording the git speed baseline: the landing worker's rig list (mayor/daemon.json patrols.landing_worker.rigs) names %q, which the rig registry does not hold", unregistered)
 	}
 	if len(rigs) == 0 {
 		return path, errors.New("recording the git speed baseline: the town has no rigs to time")
@@ -496,7 +511,9 @@ func CheckLandingSinceCutover(env Env) Row {
 	if err != nil {
 		return notRun(check, threshold, err)
 	}
-	rigs, err := landingRigs(env.Town)
+	// The git speed check reports the rig names the registry does not hold, so
+	// this check reads the registered rigs only.
+	rigs, _, err := landingRigs(env.Town)
 	if err != nil {
 		return notRun(check, threshold, err)
 	}
@@ -535,30 +552,37 @@ func CheckLandingSinceCutover(env Env) Row {
 
 // landingRigs names the rigs the landing worker reads, in name order, as the
 // daemon's landingWorkerRigs does: every registered rig, narrowed to the
-// landing worker's rig list when the settings name one. A registry or settings
-// file that cannot be read is an error that names the file or key. It is never
-// the empty list, which would look like a town with nothing to check.
-func landingRigs(town string) ([]string, error) {
+// landing worker's rig list when the settings name one. A name in that list the
+// registry does not hold is not read; it comes back in unregistered, in the
+// order the list gives it, so the checks can report it. A list that narrows to
+// nothing returns no rigs. A registry or settings file that cannot be read is an
+// error that names the file or key.
+func landingRigs(town string) (rigs, unregistered []string, err error) {
 	reg, err := config.LoadRigsConfig(filepath.Join(town, constants.DirMayor, constants.FileRigsJSON))
 	if err != nil {
-		return nil, fmt.Errorf("reading the rig registry mayor/%s: %w", constants.FileRigsJSON, err)
+		return nil, nil, fmt.Errorf("reading the rig registry mayor/%s: %w", constants.FileRigsJSON, err)
 	}
 	known := slices.Sorted(maps.Keys(reg.Rigs))
 	for _, rig := range known {
 		if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." {
-			return nil, fmt.Errorf("the rig registry mayor/%s names %q, which is not a rig directory name", constants.FileRigsJSON, rig)
+			return nil, nil, fmt.Errorf("the rig registry mayor/%s names %q, which is not a rig directory name", constants.FileRigsJSON, rig)
 		}
 	}
 	patrols, err := config.LoadDaemonPatrolConfig(config.DaemonPatrolConfigPath(town))
 	if err != nil && !errors.Is(err, config.ErrNotFound) {
-		return nil, fmt.Errorf("reading the landing worker's rig list (mayor/daemon.json patrols.landing_worker.rigs): %w", err)
+		return nil, nil, fmt.Errorf("reading the landing worker's rig list (mayor/daemon.json patrols.landing_worker.rigs): %w", err)
 	}
 	var want []string
 	if patrols != nil && patrols.Patrols != nil && patrols.Patrols.LandingWorker != nil {
 		want = patrols.Patrols.LandingWorker.Rigs
 	}
 	if len(want) == 0 {
-		return known, nil
+		return known, nil, nil
 	}
-	return slices.DeleteFunc(known, func(r string) bool { return !slices.Contains(want, r) }), nil
+	for _, name := range want {
+		if !slices.Contains(known, name) && !slices.Contains(unregistered, name) {
+			unregistered = append(unregistered, name)
+		}
+	}
+	return slices.DeleteFunc(known, func(r string) bool { return !slices.Contains(want, r) }), unregistered, nil
 }
