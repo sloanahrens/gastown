@@ -203,6 +203,22 @@ func WritePath(path string) string {
 	return host
 }
 
+// PatrolWritePath is WritePath for the daemon patrol config, with the error
+// WritePath drops. A settings/config.json that cannot be read, or is not JSON,
+// is an error and not a reason to rewrite mayor/daemon.json beside it:
+// readConfigFile reports that host through its own loader, so a rewrite must
+// not go around it.
+func PatrolWritePath(path string) (string, error) {
+	host, _, ok, _, err := sectionFor(path)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return path, nil
+	}
+	return host, nil
+}
+
 // SourcePathRel is SourcePath phrased for a message that names files
 // relative to the town root: "mayor/rigs.json" while the registry is read
 // from its own file, `mayor/town.json (section "registry")` once it lives in
