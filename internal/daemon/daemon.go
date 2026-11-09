@@ -2259,11 +2259,11 @@ func (d *Daemon) heartbeat(state *State) {
 		return
 	}
 
-	// The standby (the town E-stop or a Waned Ring) holds dispatch and
-	// restarts, not upkeep: Dolt stays supervised and the logs keep rotating
-	// (gt-4k3fj.8). It holds the lifecycle steps in heartbeatSteps; the
-	// operator's dispatch hold file is not a standby, so the drain runs under
-	// that alone.
+	// The standby (the town E-stop, a Waned Ring, or the boot gate while
+	// infrastructure is not answering) holds dispatch and restarts, not upkeep:
+	// Dolt stays supervised and the logs keep rotating (gt-4k3fj.8). It holds
+	// the lifecycle steps in heartbeatSteps; the operator's dispatch hold file
+	// is not a standby, so the drain runs under that alone.
 	reason := d.standbyReason(d.clk().Now())
 	d.logStandby(&d.standbyHeartbeat, "heartbeat", reason)
 	if reason != "" {
