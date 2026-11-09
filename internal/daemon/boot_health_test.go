@@ -40,6 +40,11 @@ func (f *fakeProbe) probe(name string) bootProbe {
 	return bootProbe{Name: name, Check: f.check}
 }
 
+// bootTestClock is a fake clock at a fixed epoch, so no test reads the host's time.
+func bootTestClock() *clockwork.FakeClock {
+	return clockwork.NewFakeClockAt(time.Date(2026, 11, 9, 0, 0, 0, 0, time.UTC))
+}
+
 func mustBootHealth(t *testing.T, probes []bootProbe, clk clockwork.Clock) *bootHealth {
 	t.Helper()
 	h, err := newBootHealth(probes, bootTestTimeout)
@@ -96,7 +101,7 @@ func TestBootHealthHoldsUntilEveryProbeAnswers(t *testing.T) {
 				f.up.Store(p.up)
 				set = append(set, f.probe(p.name))
 			}
-			h := mustBootHealth(t, set, clockwork.NewFakeClock())
+			h := mustBootHealth(t, set, bootTestClock())
 			if got := h.Unhealthy(context.Background()); got != tt.want {
 				t.Fatalf("Unhealthy = %q, want %q", got, tt.want)
 			}
@@ -109,7 +114,7 @@ func TestBootHealthLatchesAfterTheFirstHealthyReading(t *testing.T) {
 	ctx := context.Background()
 	docker := &fakeProbe{}
 	docker.up.Store(true)
-	h := mustBootHealth(t, []bootProbe{docker.probe("docker")}, clockwork.NewFakeClock())
+	h := mustBootHealth(t, []bootProbe{docker.probe("docker")}, bootTestClock())
 	if got := h.Unhealthy(ctx); got != "" {
 		t.Fatalf("first healthy reading = %q, want \"\"", got)
 	}
@@ -142,7 +147,7 @@ func TestBootHealthErrorAndPanicAreNotAnswering(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := mustBootHealth(t, []bootProbe{tt.probe, ready.probe("ready")}, clockwork.NewFakeClock())
+			h := mustBootHealth(t, []bootProbe{tt.probe, ready.probe("ready")}, bootTestClock())
 			want := "waiting for " + tt.probe.Name
 			for range 2 {
 				if got := h.Unhealthy(context.Background()); got != want {
@@ -168,7 +173,7 @@ func TestBootHealthHungProbeIsNotRunAgain(t *testing.T) {
 		<-release
 		return nil
 	}}
-	clk := clockwork.NewFakeClock()
+	clk := bootTestClock()
 	h := mustBootHealth(t, []bootProbe{hung}, clk)
 	const rounds = 5
 	first := make(chan string, 1)
@@ -206,7 +211,7 @@ func TestBootHealthHungProbeIsNotRunAgain(t *testing.T) {
 
 func TestBootHealthEmptySetIsHealthy(t *testing.T) {
 	t.Parallel()
-	h := mustBootHealth(t, nil, clockwork.NewFakeClock())
+	h := mustBootHealth(t, nil, bootTestClock())
 	if got := h.Unhealthy(context.Background()); got != "" {
 		t.Fatalf("empty set Unhealthy = %q, want \"\"", got)
 	}
@@ -216,7 +221,7 @@ func TestBootHealthConcurrentCallersAgree(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	docker, forgejo := &fakeProbe{}, &fakeProbe{}
-	h := mustBootHealth(t, []bootProbe{docker.probe("docker"), forgejo.probe("forgejo")}, clockwork.NewFakeClock())
+	h := mustBootHealth(t, []bootProbe{docker.probe("docker"), forgejo.probe("forgejo")}, bootTestClock())
 	// Both probes are down, so this is the waiting side of the transition, and
 	// it happens before any caller starts.
 	if got := h.Unhealthy(ctx); got != "waiting for docker, forgejo" {
