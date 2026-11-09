@@ -367,11 +367,13 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	if err != nil {
 		return err
 	}
+	// The install path execs the daemon too, so the tier sweep check runs on
+	// both paths and before the install writes anything.
+	if err := e.refuseTierSweepWithoutRegistry(townRoot); err != nil {
+		return err
+	}
 	if !install {
 		if err := e.refuseDoltHostTheTownDoesNotName(townRoot); err != nil {
-			return err
-		}
-		if err := e.refuseTierSweepWithoutRegistry(townRoot); err != nil {
 			return err
 		}
 	}

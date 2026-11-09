@@ -149,3 +149,39 @@ func TestEntrypointTierSweepUnreadableSettingsInAPodIsAnError(t *testing.T) {
 		})
 	}
 }
+
+// The scratch install execs the daemon as a plain start does, so the tier
+// sweep check runs before the install in a pod too: no registry is refused
+// with no install run, and a registry installs and starts.
+func TestEntrypointTierSweepRefusesTheScratchInstallWithNoRegistry(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.env[podEnv] = "10.0.0.1"
+	r.patrols = tierSweepPatrols(true, &config.TierSweepRunnerConfig{Backend: "kubernetes", Image: "installed"})
+
+	err := runContainerEntrypoint(r.entrypoint())
+
+	if err == nil || !strings.Contains(err.Error(), "daemon.patrols.tier_sweep.runner.image_registry") ||
+		!strings.Contains(err.Error(), "nothing was started") {
+		t.Fatalf("error = %v, want a refusal naming daemon.patrols.tier_sweep.runner.image_registry and ending nothing was started", err)
+	}
+	if len(r.calls) != 0 || len(r.created) != 0 {
+		t.Errorf("a refusal ran commands %v and created markers %v, want neither", r.calls, r.created)
+	}
+}
+
+func TestEntrypointTierSweepStartsTheScratchInstallWhenTheRegistryIsSet(t *testing.T) {
+	t.Parallel()
+	r := scratchRig()
+	r.env[podEnv] = "10.0.0.1"
+	r.patrols = tierSweepPatrols(true, &config.TierSweepRunnerConfig{
+		Backend:       "kubernetes",
+		Image:         "installed",
+		ImageRegistry: "localhost:5001",
+	})
+
+	wantDaemonExec(t, r, runContainerEntrypoint(r.entrypoint()))
+	if r.installCalls() != 1 {
+		t.Errorf("install calls = %d, want 1: the scratch install still runs when the registry is set", r.installCalls())
+	}
+}
