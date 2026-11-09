@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,6 +151,71 @@ func TestUpdatePodProbeBoundsTheExec(t *testing.T) {
 	}
 	if left := time.Until(deadline); left > podProbeBound {
 		t.Errorf("the exec's deadline is %v away, want at most podProbeBound %v", left, podProbeBound)
+	}
+}
+
+// TestUpdatePodProbeFailsWhenTheExecFails holds the pod probe's failure branch:
+// an exec that exits, cannot run, or prints no commit makes the probe fail, and
+// the probe never hands the run a commit it did not read from the pod.
+func TestUpdatePodProbeFailsWhenTheExecFails(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		run  update.RunFunc
+	}{
+		{
+			name: "exec exits nonzero",
+			run: func(context.Context, string, []string, string, ...string) (string, int, error) {
+				return "pod output SECRET-TOKEN", 1, nil
+			},
+		},
+		{
+			name: "exec cannot run",
+			run: func(context.Context, string, []string, string, ...string) (string, int, error) {
+				return "", 0, errors.New("exec: kubectl not found")
+			},
+		},
+		{
+			name: "exec prints no version line",
+			run: func(context.Context, string, []string, string, ...string) (string, int, error) {
+				return "panic: boom\n", 0, nil
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			probe := podVerifyProbes{
+				target: podDaemonTarget{Context: podSwapContext, Namespace: podSwapNamespace, Deployment: k8sdaemon.Name},
+				run:    tc.run,
+			}
+			commit, err := probe.DaemonVersion(context.Background())
+			if err == nil {
+				t.Fatalf("DaemonVersion = %q, want an error", commit)
+			}
+			if commit != "" {
+				t.Errorf("DaemonVersion returned commit %q with the error, want none", commit)
+			}
+			if strings.Contains(err.Error(), "SECRET-TOKEN") {
+				t.Errorf("error %q echoes the pod's output", err)
+			}
+		})
+	}
+}
+
+// TestUpdatePodRollbackHelpNamesTheFlags: gt update rollback --help says the pod
+// flags move the pair's Deployment, as gt update --help does, so an operator
+// reads the flags' effect from the command they run.
+func TestUpdatePodRollbackHelpNamesTheFlags(t *testing.T) {
+	t.Parallel()
+	seams := updateSeams{FindTownRoot: func() (string, error) { return t.TempDir(), nil }}
+	out, err := runPodCommand(t, seams, "rollback", "--help")
+	if err != nil {
+		t.Fatalf("gt update rollback --help: %v", err)
+	}
+	want := "--pod-context and --pod-namespace, given together, name the Deployment"
+	if !strings.Contains(out, want) {
+		t.Errorf("rollback help does not name the pod flags; want %q in:\n%s", want, out)
 	}
 }
 
