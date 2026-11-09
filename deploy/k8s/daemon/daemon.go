@@ -955,7 +955,9 @@ func resourceList(v Values) map[string]string {
 // the dots of a file name replaced, since a volume name is a DNS-1123 label.
 // Each Secret volume's defaultMode is the entry's manifest mode, so the file the
 // pod reads carries the permission the manifest allows (gt-nlf1i6: the cloud
-// ledger reader refuses a DSN file readable by group or others).
+// ledger reader refuses a DSN file readable by group or others). Those files are
+// root-owned, so a USER in the daemon image would leave the daemon unable to read
+// them; TestSecretVolumesFitTheImageUser holds each volume to the image's user.
 func volumes(v Values) ([]Volume, error) {
 	vols := []Volume{
 		{Name: TownStateClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: TownStateClaim}},
@@ -972,7 +974,7 @@ func volumes(v Values) ([]Volume, error) {
 	for i, file := range v.Secrets {
 		mode, err := secretFileMode(file)
 		if err != nil {
-			return nil, fmt.Errorf("Values.Secrets[%d] %q %w", i, file.Name, err)
+			return nil, fmt.Errorf("Values.Secrets[%d] %q: %w", i, file.Name, err)
 		}
 		vols = append(vols, Volume{
 			Name:   secretVolumeName(file.Name),

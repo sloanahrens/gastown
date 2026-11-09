@@ -2112,6 +2112,46 @@ func TestSecretVolumesCarryTheirManifestMode(t *testing.T) {
 	}
 }
 
+// TestSecretModeRefusalSeparatesTheEntryFromTheReason holds the wording of a
+// Secret entry's mode refusal: the index and name are followed by a colon before
+// the reason, as the other Secret refusals are written (gt-4si2b0).
+func TestSecretModeRefusalSeparatesTheEntryFromTheReason(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	v.Secrets[0].Mode = "0644"
+	_, err := Build(v)
+	want := fmt.Sprintf(`Values.Secrets[0] %q: mode "0644" is not`, v.Secrets[0].Name)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("Build refused with %v, want the refusal to read %q", err, want)
+	}
+}
+
+// TestSecretVolumesFitTheImageUser holds every Secret volume the loop renders to
+// the user the daemon image runs as, as TestOpenShellModeFitsTheImageUser holds
+// the openshell volume. An entry's manifest mode is root-only, so a USER in the
+// image would leave the daemon unable to read it (gt-4si2b0).
+func TestSecretVolumesFitTheImageUser(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(packageDir(t), "..", "..", "daemon", "Dockerfile")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	v := goldenValues(t)
+	spec := mustBuild(t, v).Deployment.Spec.Template.Spec
+	users := userInstructions(string(data))
+	for _, file := range v.Secrets {
+		vol := volumeNamed(spec.Volumes, secretVolumeName(file.Name))
+		if vol == nil || vol.Secret == nil || vol.Secret.DefaultMode == nil {
+			t.Errorf("entry %q has no Secret volume with a defaultMode", file.Name)
+			continue
+		}
+		if finding := openShellModeFinding(*vol.Secret.DefaultMode, users, spec.SecurityContext); finding != "" {
+			t.Errorf("entry %q: %s", file.Name, finding)
+		}
+	}
+}
+
 // volumeNamed returns the pod volume named name, or nil.
 func volumeNamed(volumes []Volume, name string) *Volume {
 	for i := range volumes {
