@@ -22,20 +22,24 @@ type bootProbeDeps struct {
 	forgejoHealthy func(ctx context.Context, base string) error
 	// dial opens a TCP connection to addr, the Dolt endpoint; nil answers.
 	dial func(ctx context.Context, addr string) error
-	// docker reads the running containers; a nil error answers.
-	docker func(ctx context.Context) ([]string, error)
+	// engineProbe reads the running containers; a nil error answers.
+	engineProbe func(ctx context.Context) ([]string, error)
+	// inContainer reports whether this process is the container-mode daemon,
+	// which picks the Dolt endpoint the resolver names.
+	inContainer func() bool
 }
 
 // productionBootProbeDeps is the real seams: the Forgejo health read the
-// attention collector makes, a TCP dial, and the docker ps read behind
-// systemHostProbes.Containers.
+// attention collector makes, a TCP dial, the docker ps read behind
+// systemHostProbes.Containers, and the process's container mode.
 func productionBootProbeDeps() bootProbeDeps {
 	return bootProbeDeps{
 		forgejoHealthy: func(ctx context.Context, base string) error {
 			return systemHostProbes{forgejoBaseURL: func() (string, error) { return base, nil }}.ForgejoHealthy(ctx)
 		},
-		dial:   dialBootEndpoint,
-		docker: systemHostProbes{}.Containers,
+		dial:        dialBootEndpoint,
+		engineProbe: systemHostProbes{}.Containers,
+		inContainer: config.InContainerMode,
 	}
 }
 
@@ -61,14 +65,14 @@ func newBootProbes(townRoot string, getenv func(string) string, forgejoBaseURL f
 	var probes []bootProbe
 	if !inContainer {
 		probes = append(probes, bootProbe{Name: "docker", Check: func(ctx context.Context) error {
-			_, err := deps.docker(ctx)
+			_, err := deps.engineProbe(ctx)
 			return err
 		}})
 	}
 	if probe, ok := forgejoBootProbe(forgejoBaseURL, deps); ok {
 		probes = append(probes, probe)
 	}
-	return append(probes, doltBootProbe(townRoot, inContainer, deps))
+	return append(probes, doltBootProbe(townRoot, deps))
 }
 
 // forgejoBootProbe is the forgejo probe, and false when the town runs no
@@ -88,12 +92,13 @@ func forgejoBootProbe(forgejoBaseURL func() (string, error), deps bootProbeDeps)
 }
 
 // doltBootProbe dials the endpoint the town's resolver names for this process,
-// read at each check so a town.json written during boot is picked up. A town
-// that names no endpoint keeps the probe in the set, not answering: a Dolt
-// nobody can locate is not up.
-func doltBootProbe(townRoot string, inContainer bool, deps bootProbeDeps) bootProbe {
+// read at each check so a town.json written during boot is picked up. The mode
+// the resolver reads is the process's, from config.InContainerMode. A town that
+// names no endpoint keeps the probe in the set, not answering: a Dolt nobody
+// can locate is not up.
+func doltBootProbe(townRoot string, deps bootProbeDeps) bootProbe {
 	return bootProbe{Name: "dolt", Check: func(ctx context.Context) error {
-		ep, ok := config.ResolveDoltEndpointFor(townRoot, inContainer)
+		ep, ok := config.ResolveDoltEndpointFor(townRoot, deps.inContainer())
 		if !ok {
 			return errors.New("the town names no Dolt endpoint")
 		}

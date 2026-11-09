@@ -15,14 +15,16 @@ import (
 )
 
 // bootSeams are the fakes a test supplies for newBootProbes. Each records its
-// calls, so a test can prove a seam was never reached.
+// calls, so a test can prove a seam was never reached. container is the
+// process's container mode, which the Dolt probe reads.
 type bootSeams struct {
 	forgejoErr   error
 	dialErr      error
-	dockerErr    error
+	engineErr    error
+	container    bool
 	forgejoCalls atomic.Int32
 	dialCalls    atomic.Int32
-	dockerCalls  atomic.Int32
+	engineCalls  atomic.Int32
 }
 
 func (s *bootSeams) deps() bootProbeDeps {
@@ -35,10 +37,11 @@ func (s *bootSeams) deps() bootProbeDeps {
 			s.dialCalls.Add(1)
 			return s.dialErr
 		},
-		docker: func(context.Context) ([]string, error) {
-			s.dockerCalls.Add(1)
-			return nil, s.dockerErr
+		engineProbe: func(context.Context) ([]string, error) {
+			s.engineCalls.Add(1)
+			return nil, s.engineErr
 		},
+		inContainer: func() bool { return s.container },
 	}
 }
 
@@ -59,11 +62,22 @@ func bootMode(mode string) func(string) string {
 // 127.0.0.1:port, the file the endpoint resolver reads first.
 func writeBootTownDolt(t *testing.T, townRoot string, port int) {
 	t.Helper()
+	writeBootTownDoltHosts(t, townRoot, "127.0.0.1", "", port)
+}
+
+// writeBootTownDoltHosts writes mayor/town.json with a Dolt host, and a
+// container_host when containerHost is set, on port.
+func writeBootTownDoltHosts(t *testing.T, townRoot, host, containerHost string, port int) {
+	t.Helper()
 	dir := filepath.Join(townRoot, "mayor")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body := fmt.Sprintf(`{"type":"town","name":"boot-test","dolt":{"host":"127.0.0.1","port":%d}}`, port)
+	dolt := fmt.Sprintf(`"host":%q,"port":%d`, host, port)
+	if containerHost != "" {
+		dolt += fmt.Sprintf(`,"container_host":%q`, containerHost)
+	}
+	body := fmt.Sprintf(`{"type":"town","name":"boot-test","dolt":{%s}}`, dolt)
 	if err := os.WriteFile(filepath.Join(dir, "town.json"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +112,7 @@ func TestBootProbesHostSetHasEngineForgejoAndDolt(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		dockerErr  error
+		engineErr  error
 		forgejoErr error
 		dialErr    error
 		wantAnswer map[string]bool
@@ -109,7 +123,7 @@ func TestBootProbesHostSetHasEngineForgejoAndDolt(t *testing.T) {
 		},
 		{
 			name:       "engine error is not answering",
-			dockerErr:  errors.New("docker ps: cannot connect"),
+			engineErr:  errors.New("docker ps: cannot connect"),
 			wantAnswer: map[string]bool{"docker": false, "forgejo": true, "dolt": true},
 		},
 		{
@@ -128,7 +142,7 @@ func TestBootProbesHostSetHasEngineForgejoAndDolt(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			writeBootTownDolt(t, townRoot, 3307)
-			seams := bootSeams{dockerErr: tt.dockerErr, forgejoErr: tt.forgejoErr, dialErr: tt.dialErr}
+			seams := bootSeams{engineErr: tt.engineErr, forgejoErr: tt.forgejoErr, dialErr: tt.dialErr}
 			probes := newBootProbes(townRoot, bootMode(""), bootOrigin, seams.deps())
 			if got, want := bootProbeNames(probes), []string{"docker", "dolt", "forgejo"}; !slices.Equal(got, want) {
 				t.Fatalf("probe names = %v; want %v", got, want)
@@ -150,7 +164,7 @@ func TestBootProbesContainerAndPodSetsHaveNoEngineProbe(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	writeBootTownDolt(t, townRoot, 3307)
-	var seams bootSeams
+	seams := bootSeams{container: true}
 	probes := newBootProbes(townRoot, bootMode(config.SupervisorContainer), bootOrigin, seams.deps())
 	if got, want := bootProbeNames(probes), []string{"dolt", "forgejo"}; !slices.Equal(got, want) {
 		t.Fatalf("probe names = %v; want %v", got, want)
@@ -160,7 +174,7 @@ func TestBootProbesContainerAndPodSetsHaveNoEngineProbe(t *testing.T) {
 			t.Errorf("probe %q not answering with its seam healthy", p.Name)
 		}
 	}
-	if n := seams.dockerCalls.Load(); n != 0 {
+	if n := seams.engineCalls.Load(); n != 0 {
 		t.Errorf("engine seam called %d times in container mode; want 0", n)
 	}
 }
@@ -230,6 +244,47 @@ func TestBootProbesDoltWithNoEndpointIsNotAnswering(t *testing.T) {
 	}
 	if n := seams.dialCalls.Load(); n != 0 {
 		t.Errorf("dial made %d times with no endpoint; want 0", n)
+	}
+}
+
+func TestBootProbesDoltEndpointFollowsContainerMode(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		container bool
+		wantAddr  string
+	}{
+		{name: "host daemon dials the host name", container: false, wantAddr: "127.0.0.1:3307"},
+		{name: "container-mode daemon dials the container host", container: true, wantAddr: "172.20.0.5:3307"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			writeBootTownDoltHosts(t, townRoot, "127.0.0.1", "172.20.0.5", 3307)
+			mode := ""
+			if tt.container {
+				mode = config.SupervisorContainer
+			}
+			var dialed []string
+			seams := bootSeams{container: tt.container}
+			deps := seams.deps()
+			deps.dial = func(_ context.Context, addr string) error {
+				dialed = append(dialed, addr)
+				return nil
+			}
+			probes := newBootProbes(townRoot, bootMode(mode), bootOrigin, deps)
+			p, ok := bootProbeByName(probes, "dolt")
+			if !ok {
+				t.Fatal("dolt probe missing from the set")
+			}
+			if !bootAnswers(p) {
+				t.Error("dolt not answering with its dial seam accepting")
+			}
+			if !slices.Equal(dialed, []string{tt.wantAddr}) {
+				t.Errorf("dialed %v; want [%s]", dialed, tt.wantAddr)
+			}
+		})
 	}
 }
 

@@ -194,6 +194,7 @@ These files hold the literal `docker` without running the CLI as a program of a 
 - `internal/config/daemon_config.go` — `TierSweepRunnerDocker`, one of the two backend names.
 - `internal/config/daemon_steps.go` — the audit's Needs column, which names programs a step execs.
 - `internal/config/types.go` — `SandboxDriverDocker`, one of the two sandbox driver names.
+- `internal/daemon/boot_probes.go` — the boot gate's engine probe, named `docker` (`Name: "docker"`). It runs no docker command: its check calls the `docker ps` read behind `systemHostProbes.Containers` (`internal/daemon/attention_host.go:186`, the attention row above). The probe is left out of the set when `inContainer` holds (`internal/daemon/boot_probes.go:66`, `if !inContainer {`), which is `getenv(config.ContainerModeEnv) == config.SupervisorContainer` at line 64; the pod and the compose daemon set `GT_DAEMON_SUPERVISOR` to container (`deploy/k8s/daemon/daemon.go:336`).
 - `internal/polecatimage/program.go` — the default program name the image build runs.
 - `internal/polecatimage/registryprune.go` — `if name == "docker"` (line 201) gives the garbage collect its own context. The garbage collect is the `Target.gc` row above, run by `PruneRegistry` (`internal/polecatimage/program.go:31`); the file's comment (line 139) says it inherits this process's `DOCKER_HOST`, which is left empty on purpose.
 - `internal/scratchtown/scratchtown.go` — a key of the map of programs a scratch town allows.
