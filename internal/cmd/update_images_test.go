@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1261,20 +1262,61 @@ func writeTownFixture(t *testing.T, files map[string]string) string {
 }
 
 // TestUpdateImagesUsesTheSharedPath holds the one place the values file's path
-// lives: the command's default --out is imagevalues.DefaultRelPath, and no
-// other source in this package names the file, so moving it changes one
-// constant and every consumer follows (gt-mwjtgg).
+// lives: with no --out the command writes the file at imagevalues.PathIn under
+// the town's gastown directory whatever directory it runs in, the verify probe
+// reads that same file back, and no other source in this package names the
+// file, so moving it changes one constant and every consumer follows
+// (gt-mwjtgg).
+//
+//testpolicy:allow parallel — moves the working directory, which another parallel test must not change mid-run
 func TestUpdateImagesUsesTheSharedPath(t *testing.T) {
-	t.Parallel()
+	t.Run("the default output is the shared path, read back by the probe", func(t *testing.T) {
+		//testpolicy:allow no-chdir — the working directory is the input under test: the default path must not resolve against it
+		t.Chdir(t.TempDir())
+		townRoot := t.TempDir()
+		_, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+			imagevalues.DaemonImage:  matchingContents(testUpdateImagesSHA),
+			imagevalues.PolecatImage: matchingContents(testUpdateImagesSHA),
+		})
+		writes := 0
+		seams := testUpdateImagesSeams(t, server, &writes)
+		seams.FindTownRoot = func() (string, error) { return townRoot, nil }
 
-	t.Run("the default output is the shared path", func(t *testing.T) {
-		t.Parallel()
-		flag := newUpdateImagesCmd(updateImagesSeams{}).Flags().Lookup("out")
-		if flag == nil {
-			t.Fatal("gt update images has no --out flag")
+		stdout, stderr, err := runUpdateImagesCommand(t, seams, "--sha", testUpdateImagesSHA)
+		if err != nil {
+			t.Fatalf("gt update images with no --out: %v (stderr %q)", err, stderr)
 		}
-		if flag.DefValue != imagevalues.DefaultRelPath {
-			t.Errorf("--out defaults to %q, want imagevalues.DefaultRelPath %q", flag.DefValue, imagevalues.DefaultRelPath)
+		path := imagevalues.PathIn(filepath.Join(townRoot, "gastown"))
+		if writes != 1 {
+			t.Fatalf("the values file was written %d times, want once at %s", writes, path)
+		}
+		if !strings.Contains(stdout, path) {
+			t.Errorf("the command's output %q does not name %s", stdout, path)
+		}
+		if _, err := os.Stat(imagevalues.DefaultRelPath); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the command wrote a values file relative to its working directory: %v", err)
+		}
+		values, err := imagevalues.Load(path)
+		if err != nil {
+			t.Fatalf("reading the file the command wrote at the shared path: %v", err)
+		}
+
+		// The verify probe reads the same file through the directory its
+		// production wiring passes, so a writer/reader path mismatch fails here.
+		run := &verifyProbeRun{output: values.Commit + "\n"}
+		probes := newVerifyProbes(verifyProbeEnv{
+			Run:       run.run,
+			ValuesDir: func() string { return filepath.Join(townRoot, "gastown") },
+		})
+		label, err := probes.ImageLabel(context.Background())
+		if err != nil {
+			t.Fatalf("the verify probe reading the file the command wrote: %v", err)
+		}
+		if label != values.Commit {
+			t.Errorf("the probe read label %q, want the file's commit %q", label, values.Commit)
+		}
+		if len(run.calls) != 1 || !slices.Contains(run.calls[0].args, values.Polecat) {
+			t.Errorf("the probe ran %+v, want an inspect of the file's polecat image %s", run.calls, values.Polecat)
 		}
 	})
 

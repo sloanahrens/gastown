@@ -2,7 +2,6 @@ package polecatimage
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
@@ -24,7 +23,7 @@ func (r *Run) refuseCIBuilt() error {
 		return r.failf("cannot read the values file under %s, so the image cannot be built here: %v", r.Cfg.ValuesDir, err)
 	}
 	if ok {
-		return r.failf("the image %s is CI-built: %s names it, so this run does not build it locally", r.Cfg.Image, filepath.Join(r.Cfg.ValuesDir, imagevalues.DefaultRelPath))
+		return r.failf("the image %s is CI-built: %s names it, so this run does not build it locally", r.Cfg.Image, imagevalues.PathIn(r.Cfg.ValuesDir))
 	}
 	return nil
 }

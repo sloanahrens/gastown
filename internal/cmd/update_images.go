@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -163,7 +164,11 @@ refused before a request is made.
 
 A second run for the same commit with the same digests changes nothing. A
 recorded commit whose tag now answers another digest is refused, because an
-image rebuilt under the same tag is a finding, not a silent replace.`,
+image rebuilt under the same tag is a finding, not a silent replace.
+
+Without --out the values file goes where its readers look for it: under the
+town's gastown directory, at imagevalues.DefaultRelPath. --out writes the file
+where it names instead.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -171,7 +176,7 @@ image rebuilt under the same tag is a finding, not a silent replace.`,
 		},
 	}
 	c.Flags().StringVar(&sha, "sha", "", "The full green commit both images carry")
-	c.Flags().StringVar(&out, "out", imagevalues.DefaultRelPath, "The values file to write")
+	c.Flags().StringVar(&out, "out", "", "The values file to write; default is the shared path under the town's gastown directory")
 	return c
 }
 
@@ -181,7 +186,7 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 	if !imagevalues.ValidCommit(sha) {
 		return fmt.Errorf("gt update images: --sha %q is not a full 40-character lowercase commit", sha)
 	}
-	if out == "" {
+	if cmd.Flags().Changed("out") && out == "" {
 		return errors.New("gt update images: --out names no values file")
 	}
 	if err := validateUpdateImagesSeams(seams); err != nil {
@@ -190,6 +195,11 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 	townRoot, err := seams.FindTownRoot()
 	if err != nil {
 		return fmt.Errorf("gt update images: finding the town root: %w", err)
+	}
+	if !cmd.Flags().Changed("out") {
+		// The default is the file the readers look for: the shared path under
+		// the town's gastown directory, never the directory the command runs in.
+		out = imagevalues.PathIn(filepath.Join(townRoot, "gastown"))
 	}
 	registry, err := seams.Registry(townRoot)
 	if err != nil {

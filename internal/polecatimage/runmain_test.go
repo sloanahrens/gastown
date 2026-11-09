@@ -812,3 +812,50 @@ func TestValuesRefusesALocalBuild(t *testing.T) {
 		})
 	}
 }
+
+// TestValuesFileRoundTripFromAnotherDirectory holds that the writer and the
+// plugin agree on where the file sits: a file at the writer's default,
+// imagevalues.PathIn under the town's gastown directory, is the one the plugin
+// reads through the production ConfigFromEnv wiring, with the process in
+// another directory. A path mismatch would build the image the file pins
+// (gt-mwjtgg).
+//
+//testpolicy:allow parallel — moves the working directory, which another parallel test must not change mid-run
+func TestValuesFileRoundTripFromAnotherDirectory(t *testing.T) {
+	town := t.TempDir()
+	cfg, err := ConfigFromEnv(envMap(map[string]string{"POLECAT_IMAGE_TOWN_ROOT": town}))
+	if err != nil {
+		t.Fatalf("ConfigFromEnv() failed: %v", err)
+	}
+	// The writer's default for this town: the shared path under its gastown
+	// directory, the same directory the run reads.
+	path := imagevalues.PathIn(cfg.ValuesDir)
+	if want := filepath.Join(town, "gastown", imagevalues.DefaultRelPath); path != want {
+		t.Fatalf("the writer's default is %s, want %s", path, want)
+	}
+	v := imagevalues.Values{
+		Daemon:  "registry.internal:5000/gastown/gastown-daemon@sha256:" + strings.Repeat("2", 64),
+		Polecat: "registry.internal:5000/gastown/gastown-polecat@sha256:" + strings.Repeat("1", 64),
+		Commit:  "0123456789abcdef0123456789abcdef01234567",
+	}
+	if err := imagevalues.Write(path, v); err != nil {
+		t.Fatalf("writing the values file at the writer's default: %v", err)
+	}
+	//testpolicy:allow no-chdir — the working directory is the input under test: the run must not resolve the values file against it
+	t.Chdir(t.TempDir())
+
+	tr := newTestRun(t)
+	tr.Cfg.Registry = ""
+	tr.Cfg.ValuesDir = cfg.ValuesDir
+	reply := newRunReply("abc1234")
+	tr.reply = reply.answer(t, labelFormat(tr))
+	t.Cleanup(tr.Cleanup)
+
+	err = tr.Main()
+	if err == nil || !strings.Contains(err.Error(), "is CI-built") {
+		t.Fatalf("Main() = %v, want a refusal naming the image CI-built", err)
+	}
+	if got := len(tr.callsTo("make")); got != 0 {
+		t.Errorf("make was called %d times, want none: the refusal builds nothing", got)
+	}
+}
