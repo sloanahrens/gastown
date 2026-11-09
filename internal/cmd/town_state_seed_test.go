@@ -1,12 +1,15 @@
 package cmd
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -38,6 +41,15 @@ type fakeKubectl struct {
 	calls [][]string
 	// profileFails makes the pod's profile command fail.
 	profileFails error
+	// settingsFails makes the pod's unpack of the settings stream fail after it
+	// has read a little of the stream.
+	settingsFails error
+	// settingsDrop makes the pod discard the settings stream, so the claim never
+	// gets the file.
+	settingsDrop bool
+	// onSettings runs in the pod after the settings file is unpacked, with the
+	// pod's directory for the claim.
+	onSettings func(dir string)
 }
 
 func (k *fakeKubectl) run(_ context.Context, args []string, stdin io.Reader, stdout, _ io.Writer) error {
@@ -53,6 +65,9 @@ func (k *fakeKubectl) run(_ context.Context, args []string, stdin io.Reader, std
 		if a == k.town {
 			argv[i] = townstate.VolumeMount
 		}
+	}
+	if slices.Equal(argv, seedSettingsArgv) {
+		return k.unpackSettings(stdin)
 	}
 	if slices.Equal(argv, seedProfileArgv) {
 		if k.profileFails != nil {
@@ -70,6 +85,68 @@ func (k *fakeKubectl) run(_ context.Context, args []string, stdin io.Reader, std
 	return k.fv.Run(seedClaim, argv, stdin, stdout)
 }
 
+// unpackSettings is the pod's answer to the settings stream: the stream is unpacked
+// under the fake volume's directory, unless a fault or a drop is set.
+func (k *fakeKubectl) unpackSettings(stdin io.Reader) error {
+	if k.settingsFails != nil {
+		if _, err := io.CopyN(io.Discard, stdin, 10); err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		return k.settingsFails
+	}
+	if k.settingsDrop {
+		_, err := io.Copy(io.Discard, stdin)
+		return err
+	}
+	if err := podUnpack(k.fv.dir, stdin); err != nil {
+		return err
+	}
+	if k.onSettings != nil {
+		k.onSettings(k.fv.dir)
+	}
+	return nil
+}
+
+// podUnpack is the pod's "tar -x -f - -C <mount>", run in-process over the fake
+// volume's directory: each directory and regular file of the stream is written
+// under dir, and a name that is absolute or climbs out of dir is refused.
+func podUnpack(dir string, r io.Reader) error {
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		name := path.Clean(hdr.Name)
+		if path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
+			return fmt.Errorf("fake tar: refused entry %q", hdr.Name)
+		}
+		dst := filepath.Join(dir, filepath.FromSlash(name))
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(dst, 0o755); err != nil {
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+				return err
+			}
+			data, err := io.ReadAll(tr)
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(dst, data, 0o644); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("fake tar: refused entry %q of type %c", hdr.Name, hdr.Typeflag)
+		}
+	}
+}
+
 // seedSession is one seed run's fixtures: the env it runs with, the fake pod's
 // volume and runner, and the output.
 type seedSession struct {
@@ -79,31 +156,13 @@ type seedSession struct {
 	out  *bytes.Buffer
 }
 
-// seedManifest is the town's default split with the settings row daemon-owned. The
-// rehearsal profile rewrites settings/config.json in the claim, so these tests
-// make the claim carry that file. The default split names settings shared, so the
-// stream leaves it out.
-func seedManifest(t *testing.T) *townstate.Manifest {
-	t.Helper()
-	m := townstate.Default()
-	found := false
-	for i := range m.Entries {
-		if m.Entries[i].Path == "settings" {
-			m.Entries[i].Owner = townstate.OwnerDaemon
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("the default split has no settings row")
-	}
-	return m
-}
-
 // newSeedSession is a live-shaped session over town with a fake pod whose claim
-// is empty. The town has no rigs registered, so the copy allows it.
+// is empty. The split is the town's own default, which names settings shared, so
+// a rehearsal's settings file reaches the claim only through its own step. The
+// town has no rigs registered, so the copy allows it.
 func newSeedSession(t *testing.T, town string) seedSession {
 	t.Helper()
-	m := seedManifest(t)
+	m := townstate.Default()
 	// The pod's import checks each entry against the split the pod was given, the
 	// same split on the happy and the fault path.
 	fv := &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30, split: m}
@@ -371,6 +430,19 @@ func TestTownStateSeedPartialStreamIsReported(t *testing.T) {
 			t.Fatalf("seed = %v, want the claim named partial", err)
 		}
 	})
+	t.Run("a settings stream that fails says the claim is partial and stops before the profile", func(t *testing.T) {
+		t.Parallel()
+		s := newSeedSession(t, seedTown(t))
+		s.env.rehearsal = true
+		s.kube.settingsFails = errors.New("exec refused")
+		err := runTownStateSeedIn(s.env)
+		if err == nil || !strings.Contains(err.Error(), partial) || !strings.Contains(err.Error(), notUsed) {
+			t.Fatalf("seed = %v, want the claim named partial", err)
+		}
+		if i := slices.IndexFunc(s.kube.calls, func(a []string) bool { return podArgvIs(a, seedProfileArgv) }); i >= 0 {
+			t.Errorf("the profile ran after a failed settings stream: %q", s.kube.calls[i])
+		}
+	})
 	t.Run("a rehearsal profile that fails says the claim is partial", func(t *testing.T) {
 		t.Parallel()
 		s := newSeedSession(t, seedTown(t))
@@ -386,31 +458,242 @@ func TestTownStateSeedPartialStreamIsReported(t *testing.T) {
 	})
 }
 
-// TestTownStateSeedRehearsalRefusesASharedSettingsRow: the production flag path
-// builds the town's own split, which names settings shared, so a rehearsal is
-// refused before any stream and the claim is left alone. Only the engine is faked,
-// so nothing execs.
-func TestTownStateSeedRehearsalRefusesASharedSettingsRow(t *testing.T) {
-	t.Parallel()
-	town := seedTown(t)
+// flagPathSession is the production flag path over the fake runner: the session
+// townStateSeedEnvFromFlags builds from the flags, with only the pod engine
+// replaced by one that execs into the fake pod.
+func flagPathSession(t *testing.T, town string, rehearsal bool) (townStateSeedEnv, *fakeVolume, *fakeKubectl) {
+	t.Helper()
 	secrets := filepath.Join(t.TempDir(), "secrets.yaml")
 	writeProfileFile(t, secrets, secretsYAML)
-	// allow-no-rigs lets the export pass its registry check, so the settings
-	// refusal is the one that stops the run.
+	// allow-no-rigs lets the export pass its registry check, so only the settings
+	// step differs from the stream the other tests run.
 	env, err := townStateSeedEnvFromFlags(seedFlagCommand(seedFlagValues{
-		town: town, namespace: seedNamespace, pod: seedPod, secrets: secrets, rehearsal: true, allowNoRigs: true,
+		town: town, namespace: seedNamespace, pod: seedPod, secrets: secrets, rehearsal: rehearsal, allowNoRigs: true,
 	}, ""))
 	if err != nil {
 		t.Fatalf("townStateSeedEnvFromFlags: %v", err)
 	}
-	kube := &fakeKubectl{fv: &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30}, town: town}
+	fv := &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30}
+	kube := &fakeKubectl{fv: fv, town: town}
 	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run}
-	err = runTownStateSeedIn(env)
-	if err == nil || !strings.Contains(err.Error(), "settings/config.json") || !strings.Contains(err.Error(), "not daemon-owned") {
-		t.Fatalf("seed = %v, want the settings row named as not daemon-owned", err)
+	return env, fv, kube
+}
+
+// TestTownStateSeedRehearsalCopiesAndProfilesSettingsThroughTheFlagPath: the
+// production flag path, over the town's own split, copies the settings file in its
+// own step after the daemon stream, then profiles it. The success line comes after
+// the profile, and the split still names settings shared.
+func TestTownStateSeedRehearsalCopiesAndProfilesSettingsThroughTheFlagPath(t *testing.T) {
+	t.Parallel()
+	town := seedTown(t)
+	hostBefore := hostFileText(t, town, "settings/config.json")
+	env, fv, kube := flagPathSession(t, town, true)
+	var out bytes.Buffer
+	env.out = &out
+	var copied string
+	kube.onSettings = func(dir string) {
+		data, err := os.ReadFile(filepath.Join(dir, "settings", "config.json"))
+		if err != nil {
+			t.Errorf("the settings file is not in the claim after its step: %v", err)
+		}
+		copied = string(data)
 	}
-	if len(kube.calls) != 0 {
-		t.Errorf("a refused rehearsal ran %d pod commands; the claim must be left as it was", len(kube.calls))
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("rehearsal seed: %v\n%s", err, out.String())
+	}
+	if copied != hostBefore {
+		t.Errorf("the claim's settings file before the profile differs from the host's:\n%s", copied)
+	}
+	if got := readJSONFile(t, filepath.Join(fv.dir, "settings", "config.json"))["daemon"].(map[string]any)["patrols"].(map[string]any)["landing_worker"].(map[string]any)["enabled"]; got != false {
+		t.Errorf("the claim's landing_worker patrol is %v after the profile, want false", got)
+	}
+
+	settingsAt := slices.IndexFunc(kube.calls, func(a []string) bool { return podArgvIs(a, withTown(seedSettingsArgv, town)) })
+	profileAt := slices.IndexFunc(kube.calls, func(a []string) bool { return podArgvIs(a, withTown(seedProfileArgv, town)) })
+	if settingsAt < 0 || profileAt < 0 || settingsAt > profileAt {
+		t.Fatalf("pod commands %q: want the settings step before the profile", kube.calls)
+	}
+	text := out.String()
+	streamed := strings.Index(text, "settings settings/config.json streamed into claim")
+	profiled := strings.Index(text, "profiled settings/config.json")
+	success := strings.Index(text, "matches the host copy set")
+	if streamed < 0 || profiled < 0 || success < 0 || !(streamed < profiled && profiled < success) {
+		t.Errorf("output order is wrong, want streamed, then profiled, then the success line:\n%s", text)
+	}
+	if !strings.Contains(text, "the profile changed the claim") {
+		t.Errorf("success line does not say the profile changed the claim:\n%s", text)
+	}
+	if row, ok := townstate.Lookup(townstate.Default().Entries, "settings/config.json"); !ok || row.Owner != townstate.OwnerShared {
+		t.Errorf("the town's split no longer names settings shared (row %+v)", row)
+	}
+}
+
+// TestTownStateSeedRehearsalRefusesAnUnreadableSettingsFile: a rehearsal whose
+// settings file is missing, or is a link on the host, is refused before any stream,
+// so the claim is left as it was.
+func TestTownStateSeedRehearsalRefusesAnUnreadableSettingsFile(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, want string
+		setup      func(t *testing.T, town string)
+	}{
+		{
+			name: "a settings file the host does not have",
+			want: "cannot be read on the host",
+			setup: func(t *testing.T, town string) {
+				if err := os.Remove(filepath.Join(town, "settings", "config.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "a settings file that is a link on the host",
+			want: "is not a regular file on the host",
+			setup: func(t *testing.T, town string) {
+				target := filepath.Join(t.TempDir(), "elsewhere.json")
+				writeProfileFile(t, target, profileTestSettings)
+				settings := filepath.Join(town, "settings", "config.json")
+				if err := os.Remove(settings); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, settings); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := seedTown(t)
+			tc.setup(t, town)
+			s := newSeedSession(t, town)
+			s.env.rehearsal = true
+			err := runTownStateSeedIn(s.env)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("seed = %v, want the refusal %q", err, tc.want)
+			}
+			if len(s.kube.calls) != 0 {
+				t.Errorf("a refused rehearsal ran %d pod commands; the claim must be left as it was", len(s.kube.calls))
+			}
+		})
+	}
+}
+
+// TestTownStateSeedRehearsalSettingsCompareFailureIsPartial: a settings compare that
+// cannot be made, because the host file is gone or the claim's listing fails, is a
+// partial claim, never a pass, and the profile does not run.
+func TestTownStateSeedRehearsalSettingsCompareFailureIsPartial(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, s *seedSession)
+	}{
+		{
+			name: "a host settings file removed before the compare says the claim is partial",
+			setup: func(t *testing.T, s *seedSession) {
+				town := s.env.town
+				s.kube.onSettings = func(string) {
+					if err := os.Remove(filepath.Join(town, "settings", "config.json")); err != nil {
+						t.Errorf("removing the host settings file: %v", err)
+					}
+				}
+			},
+		},
+		{
+			name: "a claim listing that fails at the settings compare says the claim is partial",
+			setup: func(t *testing.T, s *seedSession) {
+				// The first listing is the daemon verify; the second is the compare.
+				s.fv.failListFrom = 2
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newSeedSession(t, seedTown(t))
+			s.env.rehearsal = true
+			tc.setup(t, &s)
+			err := runTownStateSeedIn(s.env)
+			if err == nil || !strings.Contains(err.Error(), "verifying settings in claim town-state") || !strings.Contains(err.Error(), "partial and not to be used") {
+				t.Fatalf("seed = %v, want the settings compare named partial", err)
+			}
+			if i := slices.IndexFunc(s.kube.calls, func(a []string) bool { return podArgvIs(a, seedProfileArgv) }); i >= 0 {
+				t.Errorf("the profile ran after an unmade compare: %q", s.kube.calls[i])
+			}
+			if strings.Contains(s.out.String(), "profiled ") {
+				t.Errorf("an unmade compare was reported as profiled:\n%s", s.out.String())
+			}
+		})
+	}
+}
+
+// TestTownStateSeedRehearsalSettingsDifferenceFails: a settings file the claim lacks,
+// or holds with other bytes when the compare runs, fails the seed by name before the
+// profile, so the profile never runs on a claim the compare has refused.
+func TestTownStateSeedRehearsalSettingsDifferenceFails(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, s *seedSession)
+		want  string
+	}{
+		{
+			name:  "a settings file the stream never delivers is missing",
+			setup: func(t *testing.T, s *seedSession) { s.kube.settingsDrop = true },
+			want:  "missing settings/config.json",
+		},
+		{
+			name: "a settings file the pod changes after the unpack is changed",
+			setup: func(t *testing.T, s *seedSession) {
+				s.kube.onSettings = func(dir string) {
+					if err := os.WriteFile(filepath.Join(dir, "settings", "config.json"), []byte("edited in the pod\n"), 0o644); err != nil {
+						t.Errorf("editing the pod's settings: %v", err)
+					}
+				}
+			},
+			want: "changed settings/config.json",
+		},
+		{
+			name: "a settings path the pod turns into a directory is changed",
+			setup: func(t *testing.T, s *seedSession) {
+				s.kube.onSettings = func(dir string) {
+					file := filepath.Join(dir, "settings", "config.json")
+					if err := os.Remove(file); err != nil {
+						t.Errorf("removing the pod's settings file: %v", err)
+					}
+					if err := os.Mkdir(file, 0o755); err != nil {
+						t.Errorf("making the pod's settings path a directory: %v", err)
+					}
+				}
+			},
+			want: "changed settings/config.json",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newSeedSession(t, seedTown(t))
+			s.env.rehearsal = true
+			tc.setup(t, &s)
+			err := runTownStateSeedIn(s.env)
+			var exitErr *ExitCodeError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+				t.Fatalf("seed = %v, want exit 1\n%s", err, s.out.String())
+			}
+			if !strings.Contains(s.out.String(), tc.want) {
+				t.Errorf("output does not name %q:\n%s", tc.want, s.out.String())
+			}
+			if !strings.Contains(err.Error(), "partial and not to be used") {
+				t.Errorf("error does not say the claim is partial: %v", err)
+			}
+			if i := slices.IndexFunc(s.kube.calls, func(a []string) bool { return podArgvIs(a, seedProfileArgv) }); i >= 0 {
+				t.Errorf("the profile ran on a claim the compare refused: %q", s.kube.calls[i])
+			}
+			if strings.Contains(s.out.String(), "profiled ") {
+				t.Errorf("a refused settings file was reported as profiled:\n%s", s.out.String())
+			}
+		})
 	}
 }
 
@@ -662,6 +945,12 @@ func TestTownStateSeedEngineLeavesTheClaimToThePod(t *testing.T) {
 	if err := eng.CreateVolume(seedClaim); err == nil {
 		t.Error("CreateVolume created a claim the engine does not manage")
 	}
+}
+
+// podArgvIs reports whether a recorded kubectl argv ends with the pod argv, so a
+// test finds one pod command whatever the exec prefix.
+func podArgvIs(call, argv []string) bool {
+	return len(call) >= len(argv) && slices.Equal(call[len(call)-len(argv):], argv)
 }
 
 // withTown returns argv with each townstate.VolumeMount replaced by town, the

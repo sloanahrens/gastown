@@ -1,13 +1,17 @@
 package cmd
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -32,6 +36,11 @@ const seedLiveNamespace = "gt"
 // is townstate.VolumeMount, which the pod engine maps to the claim's mount path.
 var seedProfileArgv = []string{"gt", "town", "state", "profile", "--town", townstate.VolumeMount, "--rehearsal"}
 
+// seedSettingsArgv is what the pod runs to unpack the rehearsal's settings file
+// into the claim. The pod's gt import refuses a shared row, so the file arrives as
+// a plain tar stream, unpacked under the mount.
+var seedSettingsArgv = []string{"tar", "-x", "-f", "-", "-C", townstate.VolumeMount}
+
 // seedNamespacePattern and seedPodPattern are the shapes a namespace and a pod
 // name take. A name outside them is refused before it reaches a kubectl argv.
 var (
@@ -52,13 +61,13 @@ the stream and of the listing. The host tree is only read. The claim is mounted
 in the pod at the --town path, so the pod's import and listing name the same
 path the host does.
 
-With --rehearsal the command runs "gt town state profile --rehearsal" in the pod
-after the stream, which turns every daemon patrol off in the seeded settings
-file. That settings file is compared before the profile runs, so a difference in
-it still fails, and it is then reported as "profiled", not as a difference. A
-rehearsal refuses the live namespace "gt", and it refuses while the town's split
-names the settings file shared: a shared row is not streamed, so there is no
-settings file in the claim to profile.
+With --rehearsal the command also copies the town's settings file into the claim
+in its own step after the daemon-owned stream. The split names that file shared,
+so the daemon stream leaves it out; the rehearsal's copy is one file, compared by
+sha256 before the profile runs, and a difference in it still fails. Then the
+command runs "gt town state profile --rehearsal" in the pod, which turns every
+daemon patrol off in that file, and the file is reported as "profiled", not as a
+difference. A rehearsal refuses the live namespace "gt".
 
 Without --rehearsal (the live copy) the command refuses unless the dispatch hold
 file exists and the daemon container is stopped.
@@ -318,17 +327,15 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 		if err != nil {
 			return fmt.Errorf("refused: naming the settings the rehearsal profile writes: %w", err)
 		}
+		if err := seedSettingsHostFile(env.town, rel); err != nil {
+			return fmt.Errorf("refused: %w", err)
+		}
 		settings = rel
 	}
 
 	m := env.manifest
 	if m == nil {
 		m = townstate.Default()
-	}
-	if env.rehearsal {
-		if err := seedSettingsDaemonOwned(m, settings); err != nil {
-			return fmt.Errorf("refused: %w", err)
-		}
 	}
 	opts := townstate.ExportOptions{Since: env.since, AllowNoRigs: env.allowNoRigs, Exclude: env.exclude}
 	sum, err := townstate.SeedVolume(env.engine, seedClaim, env.town, m, opts, townstate.ImportArgv, env.out)
@@ -337,13 +344,13 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	}
 	fmt.Fprintln(env.out, sum.String())
 
-	// The verify runs before the profile, so the settings file is compared as
-	// the stream left it.
+	// The verify runs before the settings step, so the claim holds only the
+	// daemon-owned set it compares.
 	res, err := townstate.VerifyVolume(env.engine, seedClaim, env.town, m, opts)
 	if err != nil {
 		return fmt.Errorf("verifying claim %s: the claim is partial and not to be used: %w", seedClaim, err)
 	}
-	if problems := printVerifyProblems(env.out, res); problems > 0 {
+	if problems := printVerifyProblems(env.out, res, nil); problems > 0 {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("claim %s does not match the host copy set (%d problems): the claim is partial and not to be used", seedClaim, problems)}
 	}
 
@@ -352,6 +359,16 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	// something still on.
 	profileNote := ""
 	if env.rehearsal {
+		if err := seedSettingsStream(env, settings); err != nil {
+			return fmt.Errorf("stream settings into claim %s: the claim is partial and not to be used: %w", seedClaim, err)
+		}
+		mismatches, err := seedSettingsMismatches(env, settings)
+		if err != nil {
+			return fmt.Errorf("verifying settings in claim %s: the claim is partial and not to be used: %w", seedClaim, err)
+		}
+		if problems := printVerifyProblems(env.out, townstate.VerifyResult{Mismatches: mismatches}, nil); problems > 0 {
+			return &ExitCodeError{Code: 1, Err: fmt.Errorf("claim %s does not match the host's %s (%d problems): the claim is partial and not to be used", seedClaim, settings, problems)}
+		}
 		var profileOut bytes.Buffer
 		if err := env.engine.Run(seedClaim, seedProfileArgv, nil, io.MultiWriter(env.out, &profileOut)); err != nil {
 			return fmt.Errorf("the rehearsal profile in claim %s failed: the claim is partial and not to be used: %w", seedClaim, err)
@@ -366,17 +383,109 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	return nil
 }
 
-// seedSettingsDaemonOwned refuses a rehearsal whose split does not stream the
-// settings file. Only daemon-owned rows are copied and imported, so a settings row
-// classed shared leaves the file out of the claim, and the profile would have
-// nothing to rewrite. The refusal comes before any stream, so the claim is left as
-// it was.
-func seedSettingsDaemonOwned(m *townstate.Manifest, rel string) error {
-	row, ok := townstate.Lookup(m.Entries, rel)
-	if !ok || row.Owner != townstate.OwnerDaemon {
-		return fmt.Errorf("the split does not copy %s into the claim (its row is not daemon-owned): a rehearsal cannot copy or profile it, and no claim is written", rel)
+// seedSettingsHostFile refuses a rehearsal whose settings file is not a regular
+// file on the host. It only reads the host, and it runs before any stream, so a
+// refused run leaves the claim as it was.
+func seedSettingsHostFile(town, rel string) error {
+	info, err := os.Lstat(filepath.Join(town, filepath.FromSlash(rel)))
+	if err != nil {
+		return fmt.Errorf("the settings file %s cannot be read on the host: %w", rel, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("the settings file %s is not a regular file on the host, and no claim is written", rel)
 	}
 	return nil
+}
+
+// seedSettingsStream copies the rehearsal's settings file into the claim, after
+// the daemon-owned stream and before the profile. The split names settings shared,
+// so the daemon stream leaves the file out; this is the rehearsal's own copy of
+// that one file, sent through the same kubectl exec as the daemon stream. The
+// live cut-over's way of giving the pod its settings is a separate question,
+// tracked outside this bead.
+func seedSettingsStream(env townStateSeedEnv, rel string) error {
+	m := &townstate.Manifest{Entries: []townstate.Entry{{
+		Path:  rel,
+		Owner: townstate.OwnerDaemon,
+		Why:   "the rehearsal's own copy of the settings file the profile rewrites",
+	}}}
+	opts := townstate.ExportOptions{Exclude: env.exclude}
+	if _, err := townstate.SeedVolume(env.engine, seedClaim, env.town, m, opts, seedSettingsArgv, env.out); err != nil {
+		return err
+	}
+	fmt.Fprintf(env.out, "settings %s streamed into claim %s (the rehearsal's own copy)\n", rel, seedClaim)
+	return nil
+}
+
+// seedSettingsMismatches compares the settings file as the claim holds it with the
+// host's, by sha256, before the profile rewrites it. A file the claim lacks, or
+// holds with other bytes, is a mismatch naming rel. A listing that fails is an
+// error, never a pass.
+func seedSettingsMismatches(env townStateSeedEnv, rel string) ([]townstate.Mismatch, error) {
+	host, err := seedHostFileSum(filepath.Join(env.town, filepath.FromSlash(rel)))
+	if err != nil {
+		return nil, fmt.Errorf("reading the host's %s: %w", rel, err)
+	}
+	vol, found, err := claimFileSum(env.engine, seedClaim, rel)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case !found:
+		return []townstate.Mismatch{{Path: rel, Reason: townstate.ReasonMissing}}, nil
+	case vol != host:
+		return []townstate.Mismatch{{Path: rel, Reason: townstate.ReasonChanged}}, nil
+	}
+	return nil, nil
+}
+
+// seedHostFileSum is the sha256 of the host file at p, read and never written.
+func seedHostFileSum(p string) (string, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// claimFileSum lists the claim through the engine and returns the sha256 of the
+// entry named rel and whether the listing has one. A non-regular entry under that
+// name is found with an empty sum, so it never matches a host file. The listing is
+// read to its end, so a listing that fails part way is an error.
+func claimFileSum(eng townstate.Engine, claim, rel string) (string, bool, error) {
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(eng.Run(claim, townstate.ListArgv, nil, pw)) }()
+	defer pr.Close()
+	tr := tar.NewReader(pr)
+	var sum string
+	found := false
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return sum, found, nil
+		}
+		if err != nil {
+			return "", false, fmt.Errorf("listing claim %s: %w", claim, err)
+		}
+		if path.Clean(hdr.Name) != rel {
+			continue
+		}
+		found = true
+		if hdr.Typeflag != tar.TypeReg {
+			sum = ""
+			continue
+		}
+		h := sha256.New()
+		if _, err := io.Copy(h, tr); err != nil {
+			return "", false, fmt.Errorf("listing claim %s: %w", claim, err)
+		}
+		sum = hex.EncodeToString(h.Sum(nil))
+	}
 }
 
 // seedCutoverUnmet reads the two cut-over prerequisites a live seed needs: the
