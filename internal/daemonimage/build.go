@@ -203,8 +203,8 @@ type plugin struct{ name, pkg string }
 // imagePlugins are the plugins the container daemon runs itself, in the order
 // BuildPlugins builds them. The town's plugin directories hold macOS builds the
 // container cannot exec, so the image carries its own linux/arm64 builds.
-// polecat-image, tool-updater and hm-sync run only on the host and are not
-// built here (gt-gg9hv.9).
+// polecat-image and hm-sync run only on the host and are not built here
+// (gt-gg9hv.9).
 var imagePlugins = []plugin{
 	{name: "app-promote", pkg: "./plugins/app-promote"},
 	{name: "town-metrics", pkg: "./plugins/town-metrics"},
