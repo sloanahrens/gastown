@@ -460,7 +460,9 @@ func seedHostFileSum(p string) (string, error) {
 func claimFileSum(eng townstate.Engine, claim, rel string) (string, bool, error) {
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(eng.Run(claim, townstate.ListArgv, nil, pw)) }()
-	defer pr.Close()
+	// A listing still writing when this returns fails on the closed pipe; its own
+	// error is never the answer here.
+	defer pr.CloseWithError(io.ErrClosedPipe)
 	tr := tar.NewReader(pr)
 	var sum string
 	found := false
@@ -480,8 +482,9 @@ func claimFileSum(eng townstate.Engine, claim, rel string) (string, bool, error)
 			sum = ""
 			continue
 		}
+		// The copy is bounded by the entry's own size, and a short read is an error.
 		h := sha256.New()
-		if _, err := io.Copy(h, tr); err != nil {
+		if _, err := io.CopyN(h, tr, hdr.Size); err != nil {
 			return "", false, fmt.Errorf("listing claim %s: %w", claim, err)
 		}
 		sum = hex.EncodeToString(h.Sum(nil))
