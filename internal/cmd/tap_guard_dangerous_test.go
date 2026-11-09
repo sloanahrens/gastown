@@ -1577,9 +1577,10 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 // finding no bodies in it.
 //
 // The rows marked "intentional flip" differ from the text scan this replaced
-// (heredocSpans with heredocSubstitutions). Every unreadable command now comes
-// back whole where the text scan returned nothing, which only adds refusals,
-// and the sandbox walk refuses an unreadable command before it asks for
+// (heredocSpans with heredocSubstitutions). An unreadable command now comes back
+// whole. The text scan returned nothing for it, or, where it could still read a
+// complete heredoc body before the unreadable part, that body's substitutions.
+// The sandbox walk refuses an unreadable command before it asks for
 // substitutions, so no verdict changes. A word's substitution beside an
 // unquoted body is returned too, a second judgement of text the walk already
 // judges from the command.
@@ -1601,6 +1602,9 @@ func TestHeredocBodySubstitutionsReadsParsedBodies(t *testing.T) {
 		// text scan returned nothing; the parser rejecting it fails it closed.
 		{"intentional flip: unterminated quote, no heredoc", "echo \"a", []string{"echo \"a"}},
 		{"intentional flip: open dollar-paren, no heredoc", "echo $(git reset --hard", []string{"echo $(git reset --hard"}},
+		// Intentional flip: a complete body read before an unreadable part. The
+		// command is refused whole rather than judged by the body alone.
+		{"intentional flip: complete body, then an unreadable part", "cat <<EOF\n$(git reset --hard)\nEOF\necho \"a", []string{"cat <<EOF\n$(git reset --hard)\nEOF\necho \"a"}},
 		// Intentional flip: a readable command beside an unquoted body. The
 		// word's substitution is returned with the body's, from Segment.Subs.
 		{"intentional flip: word substitution beside an unquoted body", "cat $(w) <<EOF\n$(git reset --hard)\nEOF", []string{"w", "git reset --hard"}},
