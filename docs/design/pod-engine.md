@@ -39,6 +39,8 @@ sweep-runner-backend: kubernetes
 
 The Line column is the source line of the call; the Source column is the text on that line. The guard checks both against the tree.
 
+The guard in `internal/podengine` is the source of truth for these rows; this table is a reviewer-facing snapshot of what the guard holds, and where the two differ the guard is right.
+
 | File | Function | Line | Source | Asks the engine for | Disposition | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
 | `internal/cmd/daemon_rehearse.go` | `rehearsal.dockerOutput` | 509 | `argv := append([]string{"docker", "--context", daemonimage.DockerContext}, args...)` | the entrypoint container's log in a rehearsal run | mac-job | `internal/cmd/daemon_rehearse.go:812` calls it from the rehearsal command; `internal/daemon` does not import `cmd` |
