@@ -1495,12 +1495,7 @@ func New(config *Config) (*Daemon, error) {
 	// (gt-niooz0). Only this constructor builds one, so a test daemon reads
 	// healthy.
 	probes := newBootProbes(config.TownRoot, d.env, d.townForgejoBaseURL, productionBootProbeDeps())
-	gate, err := newBootGate(probes)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("building the boot gate: %w", err)
-	}
-	d.bootGate = gate
+	d.bootGate = newBootGate(probes)
 
 	// A health-driven Dolt restart waits for an in-flight scheduled gc.
 	if doltServer != nil {

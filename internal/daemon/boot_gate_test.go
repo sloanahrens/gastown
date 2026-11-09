@@ -28,10 +28,7 @@ const bootGateTestInterval = time.Second
 // before the answer is stored.
 func bootGateOver(t *testing.T, now time.Time, probes ...bootProbe) (*bootGate, *clockwork.FakeClock) {
 	t.Helper()
-	gate, err := newBootGate(probes)
-	if err != nil {
-		t.Fatalf("newBootGate: %v", err)
-	}
+	gate := newBootGate(probes)
 	clk := clockwork.NewFakeClockAt(now)
 	gate.clock = clk
 	gate.interval = bootGateTestInterval

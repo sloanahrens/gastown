@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -41,11 +42,14 @@ type bootGate struct {
 	answer atomic.Pointer[string]
 }
 
-// newBootGate returns a gate over probes, waiting until the first poll.
-func newBootGate(probes []bootProbe) (*bootGate, error) {
+// newBootGate returns a gate over probes, waiting until the first poll. The
+// only way newBootHealth fails is a timeout that is not positive, and
+// bootGateProbeTimeout is a positive constant, so a failure here is a coding
+// error caught at the first start, not a runtime condition to handle.
+func newBootGate(probes []bootProbe) *bootGate {
 	health, err := newBootHealth(probes, bootGateProbeTimeout)
 	if err != nil {
-		return nil, err
+		panic(fmt.Sprintf("boot gate: %v", err))
 	}
 	g := &bootGate{
 		health:   health,
@@ -54,7 +58,7 @@ func newBootGate(probes []bootProbe) (*bootGate, error) {
 	}
 	waiting := bootGateWaiting
 	g.answer.Store(&waiting)
-	return g, nil
+	return g
 }
 
 // reason is the boot reason standbyReason reads: the last answer the poller
