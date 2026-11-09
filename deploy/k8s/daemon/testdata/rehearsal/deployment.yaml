@@ -39,6 +39,12 @@ spec:
               value: /Users/sloan/gt
             - name: XDG_CONFIG_HOME
               value: /run/gt/xdg
+            - name: GT_DAEMON_CONTAINER_NAME
+              value: daemon
+            - name: GT_DAEMON_SUPERVISOR
+              value: container
+            - name: TZ
+              value: America/Chicago
             - name: AWS_REGION
               value: us-east-1
           resources:

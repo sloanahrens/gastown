@@ -19,11 +19,16 @@
 // The Deployment runs one replica under Recreate, because two daemons must
 // never hold the town's volume at once, and its pod template runs as the
 // ServiceAccount daemon. The container's arguments are the live compose file's
-// daemon command (liveDaemonCommand, internal/templates/daemon_compose.go), and
-// its environment comes from the same map the compose writer renders
-// (ComposeSpec.Env); TestPodCommandEqualsTheComposeCommand and
-// TestPodEnvEqualsTheComposeEnv hold the two services equal, so the pod cannot
-// drift from the container it replaces. The container carries no preStop hook:
+// daemon command (liveDaemonCommand, internal/templates/daemon_compose.go). Its
+// environment starts from the map the compose writer renders (ComposeSpec.Env),
+// with every name decided for a pod by podEnvDecisions: the pod sets its
+// container-mode pair, its stable owner name and its clock, keeps the Dolt
+// endpoint and the provider settings, and drops the engine, the Mac's
+// kubeconfig, the host wrapper's cloud directories and the takeover switch.
+// TestPodEnvDecisions holds a decision for every live name,
+// TestPodEnvEqualsTheComposeEnv holds the two services equal but for the names
+// composeOnlyEnv lists, and TestPodCommandEqualsTheComposeCommand holds the
+// arguments. The container carries no preStop hook:
 // SIGTERM plus terminationGracePeriodSeconds is the drain, which is DrainBound's
 // sum of the daemon's shutdown budget and the landing-pass drain bound.
 //
@@ -205,6 +210,122 @@ const (
 	ConfigHomeEnv = "XDG_CONFIG_HOME"
 )
 
+// The pod's container-mode names. internal/config declares these names and the
+// value; the import rule keeps internal/config out of the renderer, and
+// TestPodEnvConstantsMatchConfig holds the copies equal. `gt daemon
+// container-entrypoint` refuses to start anything unless GT_DAEMON_SUPERVISOR
+// is SupervisorContainer (internal/cmd/daemon_container_entrypoint.go,
+// runContainerEntrypoint), and daemon.DetectSelf refuses container mode with no
+// GT_DAEMON_CONTAINER_NAME, never guessing an owner id (internal/daemon/
+// daemon.go, DetectSelf). GT_DAEMON_TAKEOVER stays compose-only: the pod's
+// rollout is the Deployment's.
+const (
+	ContainerModeEnv = "GT_DAEMON_SUPERVISOR"
+	ContainerNameEnv = "GT_DAEMON_CONTAINER_NAME"
+	TakeoverEnv      = "GT_DAEMON_TAKEOVER"
+	// SupervisorContainer is internal/config.SupervisorContainer: the value
+	// GT_DAEMON_SUPERVISOR carries to put `gt daemon run` in container mode.
+	SupervisorContainer = "container"
+)
+
+// The other environment names the pod decides, restated here because the
+// renderer imports no settings package.
+const (
+	timeZoneEnv            = "TZ"
+	kubeconfigEnv          = "KUBECONFIG"
+	hmConfigEnv            = "HM_CONFIG"
+	dockerHostEnv          = "DOCKER_HOST"
+	doltServerHostEnv      = "BEADS_DOLT_SERVER_HOST"
+	doltServerPortEnv      = "BEADS_DOLT_SERVER_PORT"
+	doltPoolReadTimeoutEnv = "BEADS_DOLT_POOL_READ_TIMEOUT"
+	doltBackupRootEnv      = "GT_DOLT_BACKUP_ROOT"
+	cloudReportsEnv        = "GT_CLOUD_REPORTS_DIR"
+	cloudReleasesEnv       = "GT_CLOUD_RELEASES_DIR"
+	cloudOffEnv            = "GT_OFF_DIR"
+	awsRegionEnv           = "AWS_REGION"
+)
+
+const (
+	// PodTimeZone is the zone the pod's TZ carries, the live container's
+	// polecat_pool.timezone: the daemon's 04:30 maintenance window reads local
+	// time, so a pod in UTC would move it by hours (gt-vi1p3).
+	PodTimeZone = "America/Chicago"
+	// DoltHostName is the name the pod reaches the host's Dolt server by;
+	// gt-h6d5yb adds the hostAliases entry that maps it to the host gateway,
+	// so BEADS_DOLT_SERVER_HOST keeps the compose value.
+	DoltHostName = "host.docker.internal"
+	// DoltBackupPath is where the compose file mounts the host's Dolt backups;
+	// gt-h6d5yb mounts its dolt-backup claim at this path, so
+	// GT_DOLT_BACKUP_ROOT keeps the compose value.
+	DoltBackupPath = "/Users/sloan/gt-backups/dolt"
+)
+
+// podEnvDecision is the pod's answer for one environment name: keep the
+// container's value, set a value of the pod's own, or carry nothing and name
+// why. Exactly one field is set; TestPodEnvDecisions holds that.
+type podEnvDecision struct {
+	// keep carries Values.Env's value unchanged.
+	keep bool
+	// value is the value the pod sets itself, whatever Values.Env holds. The
+	// render refuses a caller's entry for such a name, so a different value is
+	// never silently dropped.
+	value string
+	// drop is why the pod carries no such name; the name and the reason are in
+	// composeOnlyEnv.
+	drop string
+}
+
+// podEnvDecisions decides every name the live compose daemon service or the
+// town's daemon.env carries (gt-70plvt). The pod reaches the same Dolt and
+// keeps the same clock as the container it replaces; it drops what only the
+// Docker Desktop container can use. A Values.Env name absent here is refused by
+// validateEnv rather than carried undecided.
+var podEnvDecisions = map[string]podEnvDecision{
+	// The pod's identity: both names are required to start and to record an
+	// owner, and the container name is the Deployment's so it survives a
+	// restart under Recreate with one replica.
+	ContainerModeEnv: {value: SupervisorContainer},
+	ContainerNameEnv: {value: Name},
+	// The engine, the Mac's kubeconfig, the derived hm config, the host
+	// wrapper's cloud directories and the takeover switch describe the
+	// container on the Mac, not a pod.
+	dockerHostEnv:    {drop: "the pod has no Docker engine; the tier sweep runs as a gt-sweeps Job (gt-cd5rqa)"},
+	TakeoverEnv:      {drop: "the pod's rollout is the Deployment's, and a standing takeover would pass an owner the pod's probe cannot ask an engine about (gt-wgr6ck)"},
+	kubeconfigEnv:    {drop: "the files are written on the Mac under the town root and point at Mac-side API addresses; the pod uses its service account"},
+	hmConfigEnv:      {drop: "the pod render writes no derived hm config, so the path would name no file"},
+	cloudReportsEnv:  {drop: "the pod mounts no /Users/Shared/gt-cloud directory; the cloud step selects the Postgres source (gt-nlf1i6)"},
+	cloudReleasesEnv: {drop: "the pod mounts no /Users/Shared/gt-cloud directory; the cloud step selects the Postgres source (gt-nlf1i6)"},
+	cloudOffEnv:      {drop: "the off markers belong to the host wrapper's directory, which the pod does not mount"},
+	// The clock the maintenance windows read, and the town root and config
+	// home the render mounts.
+	timeZoneEnv:   {value: PodTimeZone},
+	TownRootEnv:   {value: TownRootPath},
+	ConfigHomeEnv: {value: manifestdata.LiveOpenShellConfigHome},
+	// The Dolt endpoint, its client timeout and the backup root name the host's
+	// data, which the pod reaches at the same names (gt-h6d5yb).
+	doltServerHostEnv:      {keep: true},
+	doltServerPortEnv:      {keep: true},
+	doltPoolReadTimeoutEnv: {keep: true},
+	doltBackupRootEnv:      {keep: true},
+	// A plain provider setting beside the credentials, host-agnostic.
+	awsRegionEnv: {keep: true},
+}
+
+// composeOnlyEnv maps every name the pod drops to the reason: each is a
+// difference between the compose service's environment and the pod's.
+var composeOnlyEnv = droppedEnv(podEnvDecisions)
+
+// droppedEnv returns the names decisions drop, with their reasons.
+func droppedEnv(decisions map[string]podEnvDecision) map[string]string {
+	out := make(map[string]string)
+	for name, d := range decisions {
+		if d.drop != "" {
+			out[name] = d.drop
+		}
+	}
+	return out
+}
+
 // rehearsalSecrets are the deploy/daemon/secrets.yaml entries a rehearsal renders
 // and mounts. It is an allowlist: an entry added to the manifest later is absent
 // from a rehearsal until it is named here, so a rehearsal starts with the fewest
@@ -295,8 +416,10 @@ type Values struct {
 	// (gt-gg9hv.63): repo@sha256:<64 lowercase hex>. A tag is refused.
 	Image string
 	// Env is the container's environment, the same map the compose writer
-	// renders (ComposeSpec.Env in internal/templates/daemon_compose.go). A value
-	// that looks like a secret is refused rather than written into a manifest.
+	// renders (ComposeSpec.Env in internal/templates/daemon_compose.go). Each
+	// name is decided by podEnvDecisions: kept, set by the pod itself, or
+	// dropped with a reason (composeOnlyEnv). A name with no decision is
+	// refused, and so is a value that looks like a secret.
 	Env map[string]string
 	// OMToken mounts the OMTokenFile Secret and passes --om-token-file at
 	// manifestdata.LiveOMTokenPath, as a live compose spec with OMTokenFile does.
@@ -563,19 +686,27 @@ func daemonArgs(v Values) []string {
 	return args
 }
 
-// containerEnvironment is GT_TOWN_ROOT and XDG_CONFIG_HOME at the mounted
-// paths, then the caller's environment sorted. The daemon resolves its config
-// directory through XDG_CONFIG_HOME, which is where the Secrets are mounted.
+// containerEnvironment is the pod's environment: the render-owned names at the
+// mounted paths, the pod's identity and clock, then every caller name the
+// decision table keeps, sorted. The daemon resolves its config directory
+// through XDG_CONFIG_HOME, which is where the Secrets are mounted.
 //
 // Values.Env is the same map the compose writer renders as its daemon service's
-// Env, and TestPodEnvEqualsTheComposeEnv holds the two services' environments
-// equal, so an entry that reaches the container reaches the pod.
+// Env. TestPodEnvEqualsTheComposeEnv holds the two services equal but for the
+// names composeOnlyEnv drops, and containerEnvironment applies podEnvDecisions
+// to the names that stay.
 func containerEnvironment(v Values) []EnvVar {
 	env := []EnvVar{
 		{Name: TownRootEnv, Value: TownRootPath},
 		{Name: ConfigHomeEnv, Value: manifestdata.LiveOpenShellConfigHome},
+		{Name: ContainerNameEnv, Value: podEnvDecisions[ContainerNameEnv].value},
+		{Name: ContainerModeEnv, Value: podEnvDecisions[ContainerModeEnv].value},
+		{Name: timeZoneEnv, Value: podEnvDecisions[timeZoneEnv].value},
 	}
 	for _, name := range sortedKeys(v.Env) {
+		if _, dropped := composeOnlyEnv[name]; dropped {
+			continue
+		}
 		env = append(env, EnvVar{Name: name, Value: v.Env[name]})
 	}
 	return env
@@ -823,17 +954,26 @@ func validForgeHost(host string) error {
 }
 
 // validateEnv refuses an environment entry the render cannot write: a key that
-// is not a variable name, a key the render sets itself, or a value that looks
-// like a secret. The refusal names the key and never the value.
+// is not a variable name, a key the pod sets itself, a name with no decision in
+// podEnvDecisions, a value that looks like a secret, or a Dolt name whose value
+// is not the one the pod's alias or claim gives it. The refusal names the key
+// and never the value.
 func (v Values) validateEnv() error {
 	for _, name := range sortedKeys(v.Env) {
+		decision, decided := podEnvDecisions[name]
 		switch {
 		case !envNameRE.MatchString(name):
 			return fmt.Errorf("Values.Env[%q]: want an environment variable name", name)
-		case name == TownRootEnv || name == ConfigHomeEnv:
-			return fmt.Errorf("Values.Env[%q]: the render sets this variable itself from the mount it writes", name)
+		case decision.value != "":
+			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, so a caller's value would be dropped", name)
+		case !decided:
+			return fmt.Errorf("Values.Env[%q]: the pod has no decision for this name; record it in podEnvDecisions as kept, set by the pod, or dropped with a reason", name)
 		case looksLikeSecret(name, v.Env[name]):
 			return fmt.Errorf("Values.Env[%q]: the value looks like a secret; the pod reads credentials from its mounted Secrets, so the manifest never carries one", name)
+		case name == doltServerHostEnv && v.Env[name] != DoltHostName:
+			return fmt.Errorf("Values.Env[%q] = %q: want %q, the name the hostAliases entry maps to the host gateway (gt-h6d5yb)", name, v.Env[name], DoltHostName)
+		case name == doltBackupRootEnv && v.Env[name] != DoltBackupPath:
+			return fmt.Errorf("Values.Env[%q] = %q: want %q, where the dolt-backup claim is mounted (gt-h6d5yb)", name, v.Env[name], DoltBackupPath)
 		}
 	}
 	return nil

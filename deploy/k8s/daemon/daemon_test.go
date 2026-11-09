@@ -56,8 +56,8 @@ func goldenValues(t *testing.T) Values {
 		Secrets:          manifest.Files,
 		Image:            testImage,
 		// Env is a daemon.env entry the compose writer forwards and no rule
-		// filters: a plain provider setting beside the credentials.
-		Env: map[string]string{"AWS_REGION": "us-east-1"},
+		// filters: a plain provider setting the decision table keeps unchanged.
+		Env: map[string]string{awsRegionEnv: "us-east-1"},
 		// CPU and Memory are a shape fixture, not the daemon's share: the goldens
 		// check that requests equal limits and that the units render, and the
 		// amount is the caller's. No source records the daemon's measured use (see
@@ -257,7 +257,11 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"a grace period under the drain bound", func(v *Values) { v.TerminationGraceSeconds = MinimumTerminationGraceSeconds - 1 }, "Values.TerminationGraceSeconds", ""},
 		{"an env key that is not a variable name", func(v *Values) { v.Env["A-B"] = "x" }, `Values.Env["A-B"]`, ""},
 		{"an env key the render sets itself", func(v *Values) { v.Env[TownRootEnv] = "/elsewhere" }, `Values.Env["GT_TOWN_ROOT"]`, ""},
-		{"an env value that looks like a secret", func(v *Values) { v.Env["SOME_TOKEN"] = "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }, `Values.Env["SOME_TOKEN"]`, ""},
+		{"an env key the pod sets itself", func(v *Values) { v.Env[timeZoneEnv] = "Europe/Berlin" }, `Values.Env["TZ"]`, ""},
+		{"an env name with no decision", func(v *Values) { v.Env["SOME_UNDECIDED"] = "x" }, `Values.Env["SOME_UNDECIDED"]`, "no decision"},
+		{"a Dolt host the alias does not map", func(v *Values) { v.Env[doltServerHostEnv] = "localhost" }, `Values.Env["BEADS_DOLT_SERVER_HOST"]`, ""},
+		{"a backup root away from the claim", func(v *Values) { v.Env[doltBackupRootEnv] = "/elsewhere/dolt" }, `Values.Env["GT_DOLT_BACKUP_ROOT"]`, ""},
+		{"an env value that looks like a secret", func(v *Values) { v.Env[awsRegionEnv] = "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }, `Values.Env["AWS_REGION"]`, ""},
 		{"two Secret files whose volume names collide", func(v *Values) {
 			v.Secrets = append(v.Secrets, templates.SecretFile{Name: "x.y"}, templates.SecretFile{Name: "x-y"})
 		}, "Values.Secrets", ""},
@@ -868,12 +872,12 @@ func TestPodCommandEqualsTheComposeCommand(t *testing.T) {
 
 	const secret = "ghp_0123456789abcdefghijklmnopqrstuvwxyz"
 	v = goldenValues(t)
-	v.Env["FORGEJO_TOKEN"] = secret
+	v.Env[awsRegionEnv] = secret
 	_, err = Build(v)
 	if err == nil {
 		t.Fatal("Build with a secret-looking env value = a render, want a refusal")
 	}
-	if !strings.Contains(err.Error(), "FORGEJO_TOKEN") {
+	if !strings.Contains(err.Error(), awsRegionEnv) {
 		t.Errorf("Build refused with %q, want the key named", err)
 	}
 	if strings.Contains(err.Error(), secret) {
@@ -881,34 +885,126 @@ func TestPodCommandEqualsTheComposeCommand(t *testing.T) {
 	}
 }
 
-// composeOnlyEnv are the names the compose render sets on the daemon service for
-// the docker engine and the container's identity: the engine it reaches, the
-// container's name and supervisor, and the takeover switch. The pod has no
-// engine sidecar and takes its identity from its own pod, so it sets none of
-// them; every other name of the service's environment must match the pod's.
-var composeOnlyEnv = []string{"DOCKER_HOST", "GT_DAEMON_CONTAINER_NAME", "GT_DAEMON_SUPERVISOR", "GT_DAEMON_TAKEOVER"}
+// liveEnv is the map the compose writer hands the pod as Values.Env: the
+// daemon.env entries the live container carries, with the live values where
+// gt-70plvt records them. The kubeconfig and the clock are not here: the
+// compose render sets those itself, as the pod does.
+func liveEnv() map[string]string {
+	return map[string]string{
+		doltPoolReadTimeoutEnv: "30s",
+		doltServerHostEnv:      DoltHostName,
+		doltServerPortEnv:      "3307",
+		doltBackupRootEnv:      DoltBackupPath,
+		cloudReportsEnv:        "/Users/Shared/gt-cloud/reports",
+		cloudReleasesEnv:       "/Users/Shared/gt-cloud/releases",
+		cloudOffEnv:            "/Users/Shared/gt-cloud/off",
+		awsRegionEnv:           "us-east-1",
+	}
+}
+
+// liveEnvNames are every name the live compose daemon service or the town's
+// daemon.env carries: the compose body's fixed lines, the client fields it
+// derives, and the entries of liveEnv.
+func liveEnvNames() []string {
+	return []string{
+		dockerHostEnv, ContainerNameEnv, ContainerModeEnv, TakeoverEnv, TownRootEnv,
+		kubeconfigEnv, hmConfigEnv, timeZoneEnv, ConfigHomeEnv,
+		doltServerHostEnv, doltServerPortEnv, doltPoolReadTimeoutEnv, doltBackupRootEnv,
+		cloudReportsEnv, cloudReleasesEnv, cloudOffEnv, awsRegionEnv,
+	}
+}
+
+// podEnvMap indexes the container's environment by name.
+func podEnvMap(pod Container) map[string]string {
+	out := make(map[string]string, len(pod.Env))
+	for _, e := range pod.Env {
+		out[e.Name] = e.Value
+	}
+	return out
+}
+
+// TestPodEnvDecisions holds the decision table to the live name set: every name
+// the compose writer or daemon.env carries has exactly one decision, the golden
+// records the decided pod environment, and a name with no decision is refused
+// naming it rather than carried undecided.
+func TestPodEnvDecisions(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range liveEnvNames() {
+		decision, ok := podEnvDecisions[name]
+		if !ok {
+			t.Errorf("the pod has no decision for %s, a name the compose service or daemon.env carries; record it as kept, set by the pod, or dropped with a reason", name)
+			continue
+		}
+		kinds := 0
+		if decision.keep {
+			kinds++
+		}
+		if decision.value != "" {
+			kinds++
+		}
+		if decision.drop != "" {
+			kinds++
+		}
+		if kinds != 1 {
+			t.Errorf("podEnvDecisions[%s] = %+v, want exactly one of keep, value or drop", name, decision)
+		}
+	}
+	for name, reason := range composeOnlyEnv {
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("composeOnlyEnv[%s] names no reason, so the difference is dropped silently", name)
+		}
+	}
+
+	// The zone is the live one: the 04:30 maintenance window reads local time.
+	if PodTimeZone != "America/Chicago" {
+		t.Errorf("PodTimeZone = %q, want the live container's America/Chicago", PodTimeZone)
+	}
+	if _, err := time.LoadLocation(PodTimeZone); err != nil {
+		t.Errorf("PodTimeZone %q does not load as a zone: %v", PodTimeZone, err)
+	}
+
+	undecided := goldenValues(t)
+	undecided.Env["SOME_UNDECIDED"] = "x"
+	_, err := Build(undecided)
+	if err == nil || !strings.Contains(err.Error(), "SOME_UNDECIDED") {
+		t.Errorf("Build with an undecided env name = %v, want a refusal naming SOME_UNDECIDED", err)
+	}
+
+	v := goldenValues(t)
+	v.Env = liveEnv()
+	m := mustBuild(t, v)
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "pod-env.yaml",
+		document(t, m.Deployment.Spec.Template.Spec.Containers[0].Env))
+}
 
 // TestPodEnvEqualsTheComposeEnv renders the live compose file with the pod's
-// Values and holds the two environments equal name for name and value for
-// value, after the compose-only names above: the pod's environment and the
-// container's come from the same Values.Env map, so an entry that reaches one
-// reaches the other, and a drift fails here naming both sets.
+// Values and holds the pod's environment equal to the compose service's after
+// the names composeOnlyEnv drops: the pod keeps the same Dolt names and value
+// for value, sets its own identity, and the four compose-only names plus the
+// Mac kubeconfig and cloud paths are absent from the pod. Every difference is
+// named, with its reason, in composeOnlyEnv or is a value the pod sets itself.
 func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 	t.Parallel()
 
 	v := goldenValues(t)
+	v.Env = liveEnv()
 	spec := templates.ComposeSpec{
 		Project:       "gt-town",
 		ContainerName: "gt-daemon",
 		Image:         "gt-daemon:abc1234",
 		TownRoot:      TownRootPath,
 		StopGrace:     templates.MinimumStopGrace,
-		DoltHost:      "host.docker.internal",
+		DoltHost:      DoltHostName,
 		Env:           maps.Clone(v.Env),
+		KubeconfigFiles: []string{
+			TownRootPath + "/.runtime/container/kubeconfig.yaml",
+			TownRootPath + "/.runtime/sbx-k8s/kubeconfig",
+		},
+		TimeZone: PodTimeZone,
 		// The config directory is what makes the compose render set
-		// XDG_CONFIG_HOME, the one render-owned name both services carry. No
-		// Secrets are listed, so the render mounts the directory and reads no host
-		// file.
+		// XDG_CONFIG_HOME, the render-owned name both services carry. No Secrets
+		// are listed, so the render mounts the directory and reads no host file.
 		ConfigDir: t.TempDir(),
 	}
 	rendered, err := templates.RenderDaemonCompose(spec)
@@ -927,24 +1023,179 @@ func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 	if len(composeEnv) == 0 {
 		t.Fatal("the compose daemon service carries no environment, so the equality check reads nothing")
 	}
-	for _, name := range composeOnlyEnv {
-		delete(composeEnv, name)
-	}
 
 	pod := mustBuild(t, v).Deployment.Spec.Template.Spec.Containers[0]
-	podEnv := make(map[string]string, len(pod.Env))
-	for _, e := range pod.Env {
-		podEnv[e.Name] = e.Value
+	podEnv := podEnvMap(pod)
+
+	// The dropped names must be present in the compose environment and absent
+	// from the pod's, so removing them below is not a check over nothing.
+	for name := range composeOnlyEnv {
+		if _, ok := composeEnv[name]; !ok {
+			if name == hmConfigEnv {
+				continue // the compose render writes it only with a derived hm config
+			}
+			t.Fatalf("the compose service carries no %s, so the drop it is meant to prove reads nothing", name)
+		}
+		delete(composeEnv, name)
+		if _, carried := podEnv[name]; carried {
+			t.Errorf("the pod carries %s = %q, which the pod drops: %s", name, podEnv[name], composeOnlyEnv[name])
+		}
+	}
+
+	// The pod's identity is not the compose service's: the container name is
+	// the Deployment's, stable across restarts, and the supervisor is what the
+	// entrypoint requires.
+	for _, name := range []string{ContainerNameEnv, ContainerModeEnv} {
+		want := podEnvDecisions[name].value
+		if got, ok := podEnv[name]; !ok || got != want {
+			t.Errorf("the pod's %s = %q (present %t), want the decided %q", name, got, ok, want)
+		}
+		delete(composeEnv, name)
+		delete(podEnv, name)
+	}
+	switch got := composeFile.Services["daemon"].Environment[ContainerNameEnv]; got {
+	case "":
+		t.Errorf("the compose service carries no %s, so the changed decision reads nothing", ContainerNameEnv)
+	case Name:
+		t.Errorf("the compose service's %s is the pod's %q, so the changed decision is not exercised", ContainerNameEnv, got)
 	}
 
 	if !maps.Equal(podEnv, composeEnv) {
-		t.Errorf("the pod's environment and the compose daemon service's differ: pod names %q, compose names %q (after removing the compose-only names %q)",
-			slices.Sorted(maps.Keys(podEnv)), slices.Sorted(maps.Keys(composeEnv)), composeOnlyEnv)
+		t.Errorf("the pod's environment and the compose daemon service's differ after the compose-only names %q: pod names %q, compose names %q",
+			slices.Sorted(maps.Keys(composeOnlyEnv)), slices.Sorted(maps.Keys(podEnv)), slices.Sorted(maps.Keys(composeEnv)))
 		for name, got := range podEnv {
 			if want, ok := composeEnv[name]; ok && want != got {
 				t.Errorf("env %s = %q in the pod, %q in the compose service", name, got, want)
 			}
 		}
+		for name, want := range composeEnv {
+			if _, ok := podEnv[name]; !ok {
+				t.Errorf("env %s = %q in the compose service, absent from the pod", name, want)
+			}
+		}
+	}
+}
+
+// townRootKubeconfigs reports every environment value that names a kubeconfig
+// under the town root. The Mac writes .runtime/container/kubeconfig.yaml and
+// .runtime/sbx-k8s/kubeconfig there; a pod carrying either path would send
+// kubectl at a file and an API address that are not its own.
+func townRootKubeconfigs(env []EnvVar) []string {
+	var out []string
+	for _, e := range env {
+		for _, p := range strings.Split(e.Value, ":") {
+			if !strings.HasPrefix(p, TownRootPath+"/") {
+				continue
+			}
+			if strings.Contains(strings.ToLower(path.Base(p)), "kubeconfig") {
+				out = append(out, e.Name+"="+e.Value)
+			}
+		}
+	}
+	return out
+}
+
+// TestPodKubeconfigIsNotATownRootFile holds the kubeconfig decision: a caller
+// that hands the pod the live compose environment still names the Mac's two
+// kubeconfig files, and the pod carries neither, because it reaches the cluster
+// through its service account.
+func TestPodKubeconfigIsNotATownRootFile(t *testing.T) {
+	t.Parallel()
+
+	v := goldenValues(t)
+	v.Env[kubeconfigEnv] = TownRootPath + "/.runtime/container/kubeconfig.yaml:" +
+		TownRootPath + "/.runtime/sbx-k8s/kubeconfig"
+	pod := mustBuild(t, v).Deployment.Spec.Template.Spec.Containers[0]
+
+	if got := townRootKubeconfigs(pod.Env); len(got) != 0 {
+		t.Errorf("the pod's environment names the Mac's kubeconfig: %q", got)
+	}
+	if got, ok := podEnvMap(pod)[kubeconfigEnv]; ok {
+		t.Errorf("the pod carries %s = %q; it uses its service account", kubeconfigEnv, got)
+	}
+	// The check reports both files of the live value, so the empty result above
+	// is not a check over nothing.
+	if got := townRootKubeconfigs([]EnvVar{{Name: kubeconfigEnv, Value: v.Env[kubeconfigEnv]}}); len(got) != 2 {
+		t.Errorf("townRootKubeconfigs reported %q for the live value, want both files named", got)
+	}
+}
+
+// configEnvConstants reads the environment names and the container supervisor
+// value internal/config declares, because the import rule keeps internal/config
+// out of the renderer.
+func configEnvConstants(t *testing.T) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(packageDir(t), "..", "..", "..", "internal", "config", "daemon_config.go"))
+	if err != nil {
+		t.Fatalf("reading internal/config/daemon_config.go: %v", err)
+	}
+	out := map[string]string{}
+	for _, name := range []string{"SupervisorContainer", "ContainerModeEnv", "ContainerNameEnv", "TakeoverEnv"} {
+		m := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(name) + `\s*=\s*"([^"]*)"`).FindStringSubmatch(string(data))
+		if m == nil {
+			t.Fatalf("internal/config/daemon_config.go declares no %s = \"...\"", name)
+		}
+		out[name] = m[1]
+	}
+	return out
+}
+
+// TestPodEnvConstantsMatchConfig holds the names and value the pod sets to
+// internal/config's declarations: the entrypoint and DetectSelf read those, so
+// a drift here starts the pod in no mode or records no owner id.
+func TestPodEnvConstantsMatchConfig(t *testing.T) {
+	t.Parallel()
+	c := configEnvConstants(t)
+	for _, tc := range []struct {
+		configName string
+		ourValue   string
+	}{
+		{"SupervisorContainer", SupervisorContainer},
+		{"ContainerModeEnv", ContainerModeEnv},
+		{"ContainerNameEnv", ContainerNameEnv},
+		{"TakeoverEnv", TakeoverEnv},
+	} {
+		if got := c[tc.configName]; got != tc.ourValue {
+			t.Errorf("internal/config %s = %q, but the renderer uses %q", tc.configName, got, tc.ourValue)
+		}
+	}
+}
+
+// TestPodSetsContainerModeAndAStableOwnerName holds the pod's start: `gt daemon
+// container-entrypoint` refuses to start anything unless GT_DAEMON_SUPERVISOR
+// is "container" (internal/cmd/daemon_container_entrypoint.go,
+// runContainerEntrypoint), and daemon.DetectSelf refuses container mode with no
+// GT_DAEMON_CONTAINER_NAME, never guessing an owner id (internal/daemon/
+// daemon.go, DetectSelf). The name is the Deployment's, so it is the same owner
+// after a restart under Recreate with one replica.
+//
+// The startup owner probe cannot ask an engine in a pod: containerOwnerRunning
+// reads templates.ContainerJobState, an unreachable engine is an error,
+// known=false, and CheckTakeover refuses on unknown rather than reading it as
+// stopped (internal/daemon/startup_guard.go, internal/daemon/takeover.go). The
+// pod's own restart passes only because the recorded owner equals Self, which
+// is {container, GT_DAEMON_CONTAINER_NAME}; a recorded Docker container owner
+// stays refused until the operator's GT_DAEMON_TAKEOVER start proves it stopped
+// (gt-wgr6ck).
+func TestPodSetsContainerModeAndAStableOwnerName(t *testing.T) {
+	t.Parallel()
+
+	first := mustBuild(t, goldenValues(t))
+	second := mustBuild(t, goldenValues(t))
+	podFirst := podEnvMap(first.Deployment.Spec.Template.Spec.Containers[0])
+
+	if got := podFirst[ContainerModeEnv]; got != SupervisorContainer {
+		t.Errorf("the pod's %s = %q, want %q; the entrypoint starts nothing without it", ContainerModeEnv, got, SupervisorContainer)
+	}
+	name, ok := podFirst[ContainerNameEnv]
+	if !ok || name == "" {
+		t.Fatalf("the pod carries no %s = %q; DetectSelf refuses container mode without it", ContainerNameEnv, name)
+	}
+	if name != Name || first.Deployment.Metadata.Name != Name {
+		t.Errorf("the pod's %s = %q and the Deployment is %q, want both %q: the owner id must survive a restart", ContainerNameEnv, name, first.Deployment.Metadata.Name, Name)
+	}
+	if got := podEnvMap(second.Deployment.Spec.Template.Spec.Containers[0])[ContainerNameEnv]; got != name {
+		t.Errorf("a second render names the owner %q, the first %q: the owner id must be stable", got, name)
 	}
 }
 
