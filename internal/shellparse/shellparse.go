@@ -261,6 +261,10 @@ type flattener struct {
 	// conditional counts the conditional constructs the walk is inside. A segment
 	// added while it is above zero is marked Conditional.
 	conditional int
+
+	// quoted counts the double-quoted words and here-document bodies the walk
+	// is inside, where a "<(" or ">(" is plain text to the shell.
+	quoted int
 }
 
 // conditionally runs walk with the segments it adds marked Conditional.
@@ -619,7 +623,11 @@ func (f *flattener) redirect(r *syntax.Redirect, redirs *[]Redirection, heredocs
 			n = r.N.Value
 		}
 		*heredocs = append(*heredocs, Heredoc{Delimiter: delimiter, Quoted: quoted, Body: body, N: n})
+		// A here-document body is read like a double-quoted word: a "<(" in it
+		// is text, not a process substitution.
+		f.quoted++
 		f.wordSubs(r.Hdoc, subs)
+		f.quoted--
 	default:
 		target := f.word(r.Word)
 		if f.err != nil {
@@ -961,7 +969,9 @@ func (f *flattener) partsSubs(parts []syntax.WordPart, dest *[]Script) {
 		switch x := part.(type) {
 		case *syntax.Lit, *syntax.SglQuoted:
 		case *syntax.DblQuoted:
+			f.quoted++
 			f.partsSubs(x.Parts, dest)
+			f.quoted--
 		case *syntax.CmdSubst:
 			f.script(x, x.Stmts, dest)
 		case *syntax.ProcSubst:
@@ -996,11 +1006,11 @@ func (f *flattener) script(node syntax.Node, stmts []*syntax.Stmt, dest *[]Scrip
 	}
 	// A substitution runs in a shell of its own, so the subshells enclosing
 	// the word it is written in do not enclose its segments.
-	outer := f.shells
-	f.shells = nil
+	outer, outerQuoted := f.shells, f.quoted
+	f.shells, f.quoted = nil, 0
 	script := Script{Raw: raw}
 	f.stmts(stmts, &script)
-	f.shells = outer
+	f.shells, f.quoted = outer, outerQuoted
 	if f.err != nil {
 		return
 	}
@@ -1072,15 +1082,60 @@ func (f *flattener) paramExpSubs(p *syntax.ParamExp, dest *[]Script) {
 	}
 	if p.Repl != nil {
 		for _, w := range []*syntax.Word{p.Repl.Orig, p.Repl.With} {
-			f.wordSubs(w, dest)
+			f.expWordSubs(w, dest)
 		}
 	}
 	if p.Exp != nil {
-		f.wordSubs(p.Exp.Word, dest)
+		f.expWordSubs(p.Exp.Word, dest)
 	}
 	if p.NestedParam != nil {
 		f.partsSubs([]syntax.WordPart{p.NestedParam}, dest)
 	}
+}
+
+// expWordSubs appends the substitutions in the word of a parameter expansion.
+// mvdan reads such a word as literal text wherever a "<(" or ">(" stands in it,
+// so "${v:-<(cmd)}" carries no ProcSubst part, while the shell runs the process
+// substitution in an unquoted word. A word that holds one is parsed again on
+// its own, behind ": " so it reads as command arguments, and the substitutions
+// that parse finds are the ones reported, each once. Its command substitutions
+// come from that parse too, not from the walk of the word's parts, so one that
+// sits inside a literal "<(" is not reported twice. A quoted word, or one with
+// no "<(", takes the ordinary walk. A word that does not parse is refused, never
+// read as having none.
+func (f *flattener) expWordSubs(w *syntax.Word, dest *[]Script) {
+	if w == nil {
+		return
+	}
+	if f.quoted > 0 {
+		f.wordSubs(w, dest)
+		return
+	}
+	text := f.raw(w)
+	if f.err != nil {
+		return
+	}
+	if !strings.Contains(text, "<(") && !strings.Contains(text, ">(") {
+		f.wordSubs(w, dest)
+		return
+	}
+	synthetic := ": " + text
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(synthetic), "")
+	if err != nil {
+		f.record(unparseable(err))
+		return
+	}
+	g := &flattener{src: synthetic, conditional: f.conditional}
+	var parsed Script
+	g.stmts(file.Stmts, &parsed)
+	if g.err != nil {
+		f.record(g.err)
+		return
+	}
+	for _, seg := range parsed.Segments {
+		*dest = append(*dest, seg.Subs...)
+	}
+	*dest = append(*dest, parsed.Subs...)
 }
 
 // arithmSubs appends the substitutions inside an arithmetic expression. A nil
