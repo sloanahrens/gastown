@@ -401,6 +401,9 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 			return nil, fmt.Errorf("the Deployment mounts Secret %s, which the render did not write, so no create command can be printed for it", name)
 		}
 		source := sec.Metadata.Annotations[k8sdaemon.SourceFileAnnotation]
+		if source == "" {
+			return nil, fmt.Errorf("the Deployment mounts Secret %s, which has no source file annotation, so no create command can be printed for it", name)
+		}
 		var froms []string
 		if source == manifestdata.OpenShellEntry.Name {
 			if len(vol.Secret.Items) == 0 {
@@ -412,7 +415,7 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 		} else {
 			froms = append(froms, fromFileArg(source, filepath.Join(configDir, source)))
 		}
-		lines = append(lines, fmt.Sprintf("kubectl -n %s create secret generic %s %s", namespace, name, strings.Join(froms, " ")))
+		lines = append(lines, fmt.Sprintf("kubectl -n %s create secret generic %s %s", shellQuote(namespace), shellQuote(name), strings.Join(froms, " ")))
 	}
 	return lines, nil
 }
@@ -420,7 +423,7 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 // fromFileArg is one --from-file argument: the Secret key and the operator's
 // file it is read from.
 func fromFileArg(key, path string) string {
-	return "--from-file=" + key + "=" + shellQuote(path)
+	return "--from-file=" + shellQuote(key) + "=" + shellQuote(path)
 }
 
 // shellSafe is a path a shell reads as one word without quoting.
