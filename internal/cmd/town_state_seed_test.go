@@ -811,6 +811,68 @@ func TestTownStateSeedListingFailureIsReported(t *testing.T) {
 	}
 }
 
+// TestTownStateSeedSettingsHashesFailPartly: the settings hashes read each side to
+// its end. A host path that is a directory, a claim listing cut short inside the
+// settings entry, and a listing that fails outright are each an error, never a hash
+// to compare.
+func TestTownStateSeedSettingsHashesFailPartly(t *testing.T) {
+	t.Parallel()
+	t.Run("a host settings path that is a directory cannot be hashed", func(t *testing.T) {
+		t.Parallel()
+		if _, err := seedHostFileSum(t.TempDir()); err == nil {
+			t.Fatal("a directory was hashed as a file")
+		}
+	})
+	t.Run("a claim listing cut short inside the settings entry is an error", func(t *testing.T) {
+		t.Parallel()
+		content := strings.Repeat("x", 100)
+		var full bytes.Buffer
+		tw := tar.NewWriter(&full)
+		if err := tw.WriteHeader(&tar.Header{Name: "./settings/config.json", Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		// The header is 512 bytes; keep ten bytes of the body.
+		cut := listingEngine{listing: full.Bytes()[:512+10]}
+		if _, _, err := claimFileSum(cut, seedClaim, "settings/config.json"); err == nil {
+			t.Fatal("a listing cut short inside the entry was read as a whole file")
+		}
+	})
+	t.Run("a claim listing that fails outright is an error", func(t *testing.T) {
+		t.Parallel()
+		if _, _, err := claimFileSum(listingEngine{err: errors.New("listing refused")}, seedClaim, "settings/config.json"); err == nil {
+			t.Fatal("a failed listing was read as an empty claim")
+		}
+	})
+}
+
+// listingEngine answers the claim listing with the bytes it is given, or with err.
+// It answers nothing else.
+type listingEngine struct {
+	listing []byte
+	err     error
+}
+
+func (e listingEngine) Run(_ string, argv []string, _ io.Reader, stdout io.Writer) error {
+	if !slices.Equal(argv, townstate.ListArgv) {
+		return errors.New("listingEngine: unexpected argv")
+	}
+	if e.err != nil {
+		return e.err
+	}
+	_, err := stdout.Write(e.listing)
+	return err
+}
+
+func (listingEngine) HasVolume(string) (bool, error) { return false, errors.New("not used") }
+
+func (listingEngine) CreateVolume(string) error { return errors.New("not used") }
+
 // seedFlagValues is what each flag of the seed command is given in a test.
 type seedFlagValues struct {
 	town, namespace, pod, since, secrets string
