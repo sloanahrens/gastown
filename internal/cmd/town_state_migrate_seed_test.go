@@ -255,11 +255,38 @@ func TestTownStateMigrateSeedThenDelta(t *testing.T) {
 		env.cutover = true
 		out.Reset()
 		err := runTownStateMigrateCopyIn(env)
-		if err == nil || !strings.Contains(out.String(), "changed daemon/nested/notes.json") {
+		if err == nil || !strings.Contains(out.String(), "changed daemon/nested/notes.json\n") {
 			t.Fatalf("copy = %v, want the older change named by the verify\n%s", err, out.String())
+		}
+		if strings.Contains(out.String(), olderHostNote) {
+			t.Errorf("a file --since left out was given the older-host note it was never sent for:\n%s", out.String())
 		}
 		if _, statErr := os.Stat(filepath.Join(town, filepath.FromSlash(cutoverRecordRel))); !errors.Is(statErr, fs.ErrNotExist) {
 			t.Errorf("a copy that does not verify wrote a cut-over record (stat %v)", statErr)
+		}
+	})
+
+	t.Run("a sent file the volume holds newer is refused with the way out named", func(t *testing.T) {
+		t.Parallel()
+		town := migrateTown(t)
+		env, fv, out := newMigrateEnv(t, town)
+		if err := runTownStateMigrateCopyIn(env); err != nil {
+			t.Fatalf("seed: %v\n%s", err, out.String())
+		}
+		// The volume's copy is an hour newer than the host's, so the delta sends the
+		// host file and the merge keeps the volume's copy.
+		writeHostFile(t, filepath.Join(fv.dir, "daemon", "maintenance_state.json"), "volume newer\n", time.Now().Add(time.Hour))
+		writeHostFile(t, filepath.Join(town, "daemon", "maintenance_state.json"), "host older\n", time.Now())
+		env.cutover = true
+		out.Reset()
+		err := runTownStateMigrateCopyIn(env)
+		want := "changed daemon/maintenance_state.json: host copy is older than the volume's, so the delta does not overwrite it; touch the host file or use the full copy"
+		if err == nil || !strings.Contains(out.String(), want) {
+			t.Fatalf("delta over a newer volume copy = %v, want the refusal and its way out named\n%s", err, out.String())
+		}
+		assertVolumeFile(t, fv.dir, "daemon/maintenance_state.json", "volume newer\n")
+		if _, statErr := os.Stat(filepath.Join(town, filepath.FromSlash(cutoverRecordRel))); !errors.Is(statErr, fs.ErrNotExist) {
+			t.Errorf("a refused delta wrote a cut-over record (stat %v)", statErr)
 		}
 	})
 

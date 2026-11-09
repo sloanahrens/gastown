@@ -168,20 +168,41 @@ func TestTownStateMigrateSeedAndDeltaStepsRefuse(t *testing.T) {
 	})
 }
 
-// TestTownStateMigrateHostBytesNamesAVanishedFile: a delta file that cannot be read
+// TestTownStateMigrateHostDeltaNamesAVanishedFile: a delta file that cannot be read
 // while the delta is priced is named, never counted as zero bytes.
-func TestTownStateMigrateHostBytesNamesAVanishedFile(t *testing.T) {
+func TestTownStateMigrateHostDeltaNamesAVanishedFile(t *testing.T) {
 	t.Parallel()
 	town := migrateTown(t)
 	content := "changed\n"
 	writeHostFile(t, filepath.Join(town, "daemon", "maintenance_state.json"), content, time.Now())
-	got, err := hostBytes(town, map[string]bool{"daemon/maintenance_state.json": true})
-	if err != nil || got != int64(len(content)) {
-		t.Fatalf("hostBytes of a present file = %d, %v; want %d bytes", got, err, len(content))
+	got, err := hostDelta(town, map[string]bool{"daemon/maintenance_state.json": true}, time.Time{})
+	if err != nil || got.bytes != int64(len(content)) {
+		t.Fatalf("hostDelta of a present file = %d, %v; want %d bytes", got.bytes, err, len(content))
 	}
-	_, err = hostBytes(town, map[string]bool{"daemon/gone.json": true})
+	_, err = hostDelta(town, map[string]bool{"daemon/gone.json": true}, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "reading the size of daemon/gone.json") {
-		t.Fatalf("hostBytes of a vanished file = %v, want the file named", err)
+		t.Fatalf("hostDelta of a vanished file = %v, want the file named", err)
+	}
+}
+
+// TestTownStateMigrateHostDeltaSentSet: --since keeps a regular file only when it
+// is modified after the time, as the export does; a file it leaves out is not sent.
+func TestTownStateMigrateHostDeltaSentSet(t *testing.T) {
+	t.Parallel()
+	town := migrateTown(t)
+	since := time.Now().Add(-time.Hour)
+	writeHostFile(t, filepath.Join(town, "daemon", "newer.json"), "n\n", time.Now())
+	writeHostFile(t, filepath.Join(town, "daemon", "older.json"), "o\n", since.Add(-time.Hour))
+	names := map[string]bool{"daemon/newer.json": true, "daemon/older.json": true}
+	got, err := hostDelta(town, names, since)
+	if err != nil {
+		t.Fatalf("hostDelta: %v", err)
+	}
+	if !got.sent["daemon/newer.json"] || got.sent["daemon/older.json"] {
+		t.Errorf("sent set = %v, want only the file modified after --since", got.sent)
+	}
+	if got.bytes != 4 {
+		t.Errorf("bytes = %d, want both files priced (4)", got.bytes)
 	}
 }
 
