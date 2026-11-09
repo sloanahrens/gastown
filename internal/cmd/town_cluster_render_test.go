@@ -391,8 +391,9 @@ func TestTownClusterRenderRefusesWithoutADigestOrAShare(t *testing.T) {
 			mutate: func(_ *testing.T, f *clusterRenderFlags) {
 				f.rehearsal = true
 				f.confirmStopped = false
+				f.namespace = k8sdaemon.DefaultNamespace
 			},
-			cause: "cannot render the manifests",
+			cause: "may not render into the live namespace",
 		},
 	}
 	for _, tt := range tests {
@@ -432,6 +433,7 @@ func TestTownClusterRenderRefusesWhenAnInputOrStepFails(t *testing.T) {
 		noOpenShellDir bool // leave --openshell-config-dir to its default
 		mutate         func(t *testing.T, dir string, d *clusterRenderDeps)
 		cause          string
+		writeRefused   bool // the refused write may leave --out made, but never with a file in it
 	}{
 		{
 			name:   "no town",
@@ -545,7 +547,8 @@ func TestTownClusterRenderRefusesWhenAnInputOrStepFails(t *testing.T) {
 			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
 				d.writeFile = func(string, []byte) error { return errors.New("disk full") }
 			},
-			cause: "cannot write",
+			cause:        "cannot write",
+			writeRefused: true,
 		},
 	}
 	for _, tt := range tests {
@@ -574,7 +577,7 @@ func TestTownClusterRenderRefusesWhenAnInputOrStepFails(t *testing.T) {
 			}
 			// Every refusal before the write step leaves --out absent. A refused write
 			// may leave --out made, but never with a file in it.
-			if tt.name == "a file cannot be written" {
+			if tt.writeRefused {
 				if names := dirNames(t, f.out); len(names) != 0 {
 					t.Fatalf("a refused write left %v in --out", names)
 				}
@@ -715,6 +718,41 @@ func TestSecretCreateLinesRefusesAVolumeItCannotName(t *testing.T) {
 			t.Fatalf("secretCreateLines = %v, want a refusal naming the empty openshell volume", err)
 		}
 	})
+	t.Run("the mounted Secret has no source annotation", func(t *testing.T) {
+		t.Parallel()
+		m := mounts("daemon-x", nil)
+		m.Secrets = []k8sdaemon.Secret{{Metadata: k8sdaemon.ObjectMeta{Name: "daemon-x"}}}
+		lines, err := secretCreateLines(m, "gt", "/cfg", "/ossl")
+		if err == nil || !strings.Contains(err.Error(), "no source file annotation") {
+			t.Fatalf("secretCreateLines = %q, %v; want a refusal naming the missing source annotation", lines, err)
+		}
+		if lines != nil {
+			t.Fatalf("a refused Secret still printed %q", lines)
+		}
+	})
+}
+
+// TestSecretCreateLinesQuotesEachWord holds the create line to one shell word
+// per value: a namespace, Secret name or key with a space stays one argument.
+func TestSecretCreateLinesQuotesEachWord(t *testing.T) {
+	t.Parallel()
+	var m k8sdaemon.Manifests
+	m.Deployment.Spec.Template.Spec.Volumes = []k8sdaemon.Volume{{
+		Name:   "v",
+		Secret: &k8sdaemon.SecretVolumeSource{SecretName: "daemon x"},
+	}}
+	m.Secrets = []k8sdaemon.Secret{{Metadata: k8sdaemon.ObjectMeta{
+		Name:        "daemon x",
+		Annotations: map[string]string{k8sdaemon.SourceFileAnnotation: "my config.toml"},
+	}}}
+	lines, err := secretCreateLines(m, "gt ns", "/cfg", "/ossl")
+	if err != nil {
+		t.Fatalf("secretCreateLines: %v", err)
+	}
+	want := []string{`kubectl -n 'gt ns' create secret generic 'daemon x' --from-file='my config.toml'='/cfg/my config.toml'`}
+	if !slices.Equal(lines, want) {
+		t.Fatalf("secretCreateLines = %q, want %q", lines, want)
+	}
 }
 
 // TestTownClusterRenderDefaultsTheConfigDirectories holds the defaults a render
