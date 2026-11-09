@@ -84,6 +84,21 @@ func TestPodDaemonSwapRunsSetImageThenRolloutStatus(t *testing.T) {
 	}
 }
 
+func TestPodDaemonSwapAcceptsANameAtTheDNSLabelLimit(t *testing.T) {
+	t.Parallel()
+	fake := &podSwapFake{}
+	swap := podSwapFor(fake)
+	swap.Namespace = strings.Repeat("a", 63)
+	swap.Deployment = strings.Repeat("b", 63)
+
+	if err := swap.Apply(context.Background(), update.ImagePair{Daemon: podSwapDigestRef}); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(fake.calls) != 2 {
+		t.Errorf("commands = %d, want 2 at the limit", len(fake.calls))
+	}
+}
+
 func TestPodDaemonSwapUsesTheNamedDeployment(t *testing.T) {
 	t.Parallel()
 	fake := &podSwapFake{}
@@ -143,9 +158,21 @@ func TestPodDaemonSwapRefusesATagAndMissingContext(t *testing.T) {
 			wantErr: "is not a Kubernetes namespace name",
 		},
 		{
+			name:    "a namespace one character past the DNS label limit is refused",
+			daemon:  podSwapDigestRef,
+			mutate:  func(s *podDaemonSwap) { s.Namespace = strings.Repeat("a", 64) },
+			wantErr: "is not a Kubernetes namespace name",
+		},
+		{
 			name:    "a deployment that is not a Kubernetes name is refused",
 			daemon:  podSwapDigestRef,
 			mutate:  func(s *podDaemonSwap) { s.Deployment = "daemon/x" },
+			wantErr: "is not a Kubernetes name",
+		},
+		{
+			name:    "a deployment one character past the DNS label limit is refused",
+			daemon:  podSwapDigestRef,
+			mutate:  func(s *podDaemonSwap) { s.Deployment = strings.Repeat("a", 64) },
 			wantErr: "is not a Kubernetes name",
 		},
 		{
@@ -211,6 +238,12 @@ func TestPodDaemonSwapFailureNamesTheStepNotTheOutput(t *testing.T) {
 			fake:      podSwapFake{verb: "set", err: errors.New("kubectl not found")},
 			wantStep:  "the daemon's set image",
 			wantCalls: 1,
+		},
+		{
+			name:      "a rollout command that cannot start is named as the rollout",
+			fake:      podSwapFake{verb: "rollout", err: errors.New("kubectl not found")},
+			wantStep:  "the daemon's rollout status",
+			wantCalls: 2,
 		},
 	}
 	for _, tt := range tests {
