@@ -121,6 +121,8 @@ func TestTownStateMigrateReadyToLandNamesItsStatuses(t *testing.T) {
 // root the landing worker uses: a configured root, with each run prefix it makes
 // (land-, post-, revert-), and the default $TMPDIR/gt-landing-<uid> root when the
 // town names none. It sets TMPDIR, so it does not run in parallel.
+//
+//testpolicy:allow parallel — TMPDIR is the input under test, and t.Setenv shares it with the whole process
 func TestTownStateMigrateWorkRootShapes(t *testing.T) {
 	t.Run("a configured root holds every run prefix", func(t *testing.T) {
 		town := t.TempDir()
@@ -144,6 +146,7 @@ func TestTownStateMigrateWorkRootShapes(t *testing.T) {
 	})
 	t.Run("the default root is under TMPDIR, per uid", func(t *testing.T) {
 		tmp := t.TempDir()
+		//testpolicy:allow no-env — TMPDIR is the input under test
 		t.Setenv("TMPDIR", tmp)
 		town := t.TempDir()
 		writeTownStateFileContent(t, town, "mayor/rigs.json", rigsJSON)
