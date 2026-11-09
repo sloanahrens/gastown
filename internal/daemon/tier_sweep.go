@@ -662,6 +662,10 @@ type tierSweepSeams struct {
 	// digest reference (see tierSweepRunnerImageFile). Empty is
 	// tierSweepPolecatImageFile, the path the pod's Deployment projects.
 	runnerImageFile string
+	// readImageFile reads the runner image file. Nil is os.ReadFile; a test sets
+	// one that holds a digest at the default path, so the default is exercised
+	// without a file under /run.
+	readImageFile func(path string) ([]byte, error)
 }
 
 // tierSweepPolecatImageFile is where a daemon pod finds the polecat image its
@@ -669,13 +673,6 @@ type tierSweepSeams struct {
 // gastown.dev/polecat-image annotation (deploy/k8s/daemon, gt-ldqqvk). A daemon
 // outside a pod finds no such file there.
 const tierSweepPolecatImageFile = "/run/gt/image/polecat-image"
-
-// tierSweepImageFileLast is the reason each runner image file path last logged
-// as unused, keyed by path. It is package state, not a seam, because
-// runTierSweepRig copies the seams by value and a copy would reset the latch: a
-// reason logs once per path, and a valid or absent file clears it, so a
-// recurrence logs again.
-var tierSweepImageFileLast sync.Map
 
 // tierSweepBeadStore is the bead store the sweep files and closes beads
 // through.
@@ -2085,9 +2082,13 @@ func (d *Daemon) tierSweepRunnerImageFile() (string, bool) {
 	if path == "" {
 		path = tierSweepPolecatImageFile
 	}
-	data, err := os.ReadFile(path)
+	read := d.tierSweepSeams.readImageFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		tierSweepImageFileLast.Delete(path)
+		d.tierSweepImageFileLast.Delete(path)
 		return "", false
 	}
 	image := strings.TrimSpace(string(data))
@@ -2101,10 +2102,10 @@ func (d *Daemon) tierSweepRunnerImageFile() (string, bool) {
 		reason = "does not hold a digest reference (repo@sha256:<64 hex>)"
 	}
 	if reason == "" {
-		tierSweepImageFileLast.Delete(path)
+		d.tierSweepImageFileLast.Delete(path)
 		return image, true
 	}
-	if last, _ := tierSweepImageFileLast.Swap(path, reason); last != reason {
+	if last, _ := d.tierSweepImageFileLast.Swap(path, reason); last != reason {
 		d.logger.Printf("tier_sweep: runner image file %s %s; using runner.image instead", path, reason)
 	}
 	return "", false

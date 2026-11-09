@@ -1206,6 +1206,11 @@ type Daemon struct {
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams
+	// tierSweepImageFileLast is the reason each runner image file path last
+	// logged as unused, keyed by path. It lives on the daemon, not in the
+	// package, so one daemon's log latch never silences another's; a reason logs
+	// once per path, and a valid or absent file clears it (gt-6u0k8x).
+	tierSweepImageFileLast sync.Map
 	// tierSweepPriorityLog reports the priority preflight's standing decline at
 	// most once an hour: a cycle runs every few minutes, and the same cause in
 	// every one of them would fill the log (gt-gg9hv.39).

@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -199,5 +200,66 @@ func TestTierSweepRunnerImageFilePathMatchesTheRender(t *testing.T) {
 
 	if tierSweepPolecatImageFile != k8sdaemon.PolecatImagePath {
 		t.Errorf("tierSweepPolecatImageFile = %q, want the render's mount path %q", tierSweepPolecatImageFile, k8sdaemon.PolecatImagePath)
+	}
+}
+
+// TestTierSweepRunnerImageFileDefaultPathIsRead: with no runnerImageFile seam,
+// the image comes from the file at the default path, and only that path is read.
+func TestTierSweepRunnerImageFileDefaultPathIsRead(t *testing.T) {
+	t.Parallel()
+
+	file := tierSweepImageRef("registry.example.com/gt/gastown-polecat")
+	d, _, logs := runnerImageFileDaemon(t, "", "", "")
+	var reads []string
+	d.tierSweepSeams.readImageFile = func(path string) ([]byte, error) {
+		reads = append(reads, path)
+		if path == tierSweepPolecatImageFile {
+			return []byte(file + "\n"), nil
+		}
+		return nil, fs.ErrNotExist
+	}
+
+	got, err := d.tierSweepRunnerImage(d.patrolConfig.Patrols.TierSweep.Runner)
+	if err != nil {
+		t.Fatalf("tierSweepRunnerImage: %v", err)
+	}
+	if got != file {
+		t.Errorf("runner image = %q, want the default file's digest %q", got, file)
+	}
+	if len(reads) == 0 {
+		t.Fatalf("no runner image file was read; want the default path %q", tierSweepPolecatImageFile)
+	}
+	for _, path := range reads {
+		if path != tierSweepPolecatImageFile {
+			t.Errorf("read %q, want only the default path %q", path, tierSweepPolecatImageFile)
+		}
+	}
+	if logs.Len() != 0 {
+		t.Errorf("a valid default file logged %q, want nothing", logs.String())
+	}
+}
+
+// TestTierSweepRunnerImageFileLatchIsPerDaemon: two daemons that meet the same
+// unusable file each log its reason once, however often each resolves it. A
+// latch shared by the package would silence the second daemon.
+func TestTierSweepRunnerImageFileLatchIsPerDaemon(t *testing.T) {
+	t.Parallel()
+
+	path := tierSweepImageFile(t, " \n")
+	first, _, firstLogs := runnerImageFileDaemon(t, "", "", path)
+	second, _, secondLogs := runnerImageFileDaemon(t, "", "", path)
+
+	for _, d := range []*Daemon{first, second} {
+		for range 2 {
+			if _, err := d.tierSweepRunnerImage(d.patrolConfig.Patrols.TierSweep.Runner); err != nil {
+				t.Fatalf("tierSweepRunnerImage: %v", err)
+			}
+		}
+	}
+	for name, logs := range map[string]*bytes.Buffer{"first": firstLogs, "second": secondLogs} {
+		lines := strings.Split(strings.TrimSuffix(logs.String(), "\n"), "\n")
+		if len(lines) != 1 || !strings.Contains(lines[0], "is empty") {
+			t.Errorf("%s daemon log = %q, want one line naming the empty file", name, logs.String())
+		}
 	}
 }
