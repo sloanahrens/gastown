@@ -489,3 +489,28 @@ func TestDoneSlotLoopZshShortFormWithAQuotedParenIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// gt-a7jzr5: a file-written heredoc the parser cannot read is refused, because
+// the rule cannot say whether its body holds a retry loop. A text with no "<<"
+// has no body to write, so the same unreadable shape is not refused for that.
+func TestDoneSlotLoopRefusesUnreadableFileWrittenBody(t *testing.T) {
+	t.Parallel()
+	// The body holds no loop of its own, so the loop checks pass and the parse
+	// error is what refuses the text.
+	withHeredoc := "cat > retry.sh <<'EOF'\necho ok\nEOF\necho '"
+	if _, err := doneSlotLoopFileWrittenBodies(withHeredoc); err == nil {
+		t.Fatalf("doneSlotLoopFileWrittenBodies(%q) returned no error, want the parse error", withHeredoc)
+	}
+	tokens := shellTokenize(withHeredoc)
+	if reason, _ := matchesDoneSlotLoop(withHeredoc, tokens, toLowerTokens(tokens)); !strings.Contains(reason, "cannot be read (unterminated quote)") {
+		t.Errorf("matchesDoneSlotLoop(%q) reason = %q, want the unreadable-body refusal", withHeredoc, reason)
+	}
+	withoutHeredoc := "echo '"
+	if _, err := doneSlotLoopFileWrittenBodies(withoutHeredoc); err != nil {
+		t.Errorf("doneSlotLoopFileWrittenBodies(%q) error = %v, want none: no heredoc to read", withoutHeredoc, err)
+	}
+	tokens = shellTokenize(withoutHeredoc)
+	if reason, _ := matchesDoneSlotLoop(withoutHeredoc, tokens, toLowerTokens(tokens)); reason != "" {
+		t.Errorf("matchesDoneSlotLoop(%q) refused with %q, want allowed", withoutHeredoc, reason)
+	}
+}

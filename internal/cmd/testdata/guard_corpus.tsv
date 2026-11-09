@@ -317,7 +317,7 @@ dangerous	polecat	"echo $(make test"	refuse	cannot be read (unterminated command
 dangerous	crew	"echo $(make test"	refuse	cannot be read (unterminated command substitution)	gt-m6x4py
 dangerous	polecat	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-m6x4py
 dangerous	crew	"bash <<'EOF'\nmake test\n"	refuse	cannot be read (unterminated here-document)	gt-m6x4py
-dangerous	polecat	"echo ok;rm -rf /;echo \""	refuse	filesystem destruction	gt-m6x4py
+dangerous	polecat	"echo ok;rm -rf /;echo \""	refuse	cannot be read (unterminated quote)	gt-m6x4py
 # --- dangerous: nested payloads judged from the parsed Script (gt-7ydceb) ---
 # A -c payload, an eval string, a command substitution and a process
 # substitution run as command lines of their own, and a payload the parser
@@ -350,8 +350,8 @@ container_suite	polecat	"GT_TEST_DOCKER=1 echo 'go test ./internal/beads/...' | 
 dangerous	polecat	"echo ok # n \\\nsh <<< 'git reset --hard'"	refuse	Hard reset	gt-4otugt
 container_suite	polecat	"GT_TEST_DOCKER=1 echo ok # n \\\nsh <<< 'go test ./internal/beads/...'"	refuse	targets testcontainers-backed package(s)	gt-4otugt
 # --- a comment ending in a backslash on a heredoc operator line: bash runs the line after the terminator (gt-4otugt) ---
-dangerous	polecat	"cat <<'EOF' # n \\\nEOF\ngit reset --hard\nEOF"	refuse	Hard reset	gt-4otugt
-dangerous	polecat	"cat <<-EOF # n \\\n\tEOF\ngit reset --hard\nEOF"	refuse	Hard reset	gt-4otugt
+dangerous	polecat	"cat <<'EOF' # n \\\nEOF\ngit reset --hard\nEOF"	refuse	cannot be read (unterminated here-document)	gt-4otugt
+dangerous	polecat	"cat <<-EOF # n \\\n\tEOF\ngit reset --hard\nEOF"	refuse	cannot be read (comment ending in a backslash on a heredoc operator line)	gt-4otugt
 container_suite	polecat	"GT_TEST_DOCKER=1 cat <<-EOF # n \\\n\tEOF\ngo test ./internal/beads/...\nEOF"	refuse	comment ending in a backslash on a heredoc operator line	gt-4otugt
 container_suite	polecat	"export GT_TEST_DOCKER=1; make x && cd internal/style; go test"	allow		gt-zz1t7g
 # --- a comment ending in a backslash before a CR LF: bash ends the comment at the LF, the parser does not (gt-s9ogqg) ---
@@ -365,3 +365,26 @@ dangerous	polecat	"echo a # n \\\r"	allow		gt-q0jecy
 container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/git/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
 dangerous	polecat	"git reset --hard origin/main"	refuse	Reset onto a remote-tracking ref drops merged work	gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
 test_scope	polecat	"go test -run TestGuard ./internal/cmd"	allow		gt-x1bvnf	26fca4f412f0b0ba53514c5c5291a0345760fdead97a6f4b83b02bc128504308
+# --- the heredoc readers and the parsed-word token line (gt-a7jzr5): the
+# declaration-builtin heredoc bash reads, the process substitution recovered
+# from inside an expansion, and assignments the parsed words keep as the shell
+# passes them ---
+dangerous	polecat	"let y=1<<x\nsudo rm -rf /\nx"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	crew	"let y=1<<x\nsudo rm -rf /\nx"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	polecat	"echo ${v:-<(bash <<EOF\ngit reset --hard\nEOF\n)}"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	polecat	"BD_ACTOR= bd comments add gt-1 hello"	refuse	polecat may not set a comment author or actor	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	polecat	"declare -x BD_ACTOR=Operator"	refuse	polecat may not set a comment author or actor	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/style/... -run TestStyle"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+container_suite	polecat	"GT_TEST_DOCKER=1 cat > note.md <<'EOF'\ngo test ./internal/beads/...\nEOF"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+test_scope	polecat	"go test -run TestDangerous ./internal/cmd"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+# --- gt-a7jzr5 rework: a command the parser cannot read is refused whole, naming the construct; one real case per guard carries the new stamp (freeze rule) ---
+dangerous	polecat	"echo ok\nrm -rf /\necho \""	refuse	cannot be read (unterminated quote)	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+test_scope	polecat	"go test -run TestGuardCorpus ./internal/cmd"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+# --- gt-a7jzr5 rework 3: the ANSI-C continuation and declaration-heredoc lines still judge the nested payloads they run live ---
+dangerous	polecat	"echo $\\\n'x'; bash -c 'git reset --hard'"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	polecat	"let y=1<<x; bash -c 'git reset --hard'\nx"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+# --- gt-a7jzr5 round 3: a variable command word runs a substitution's heredoc output, so that output is judged; stamp for the guard sources after the round ---
+dangerous	polecat	"git status"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
+container_suite	polecat	"go test ./internal/cmd -run TestGuardCorpusMatchesCurrentVerdicts -count=1"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
+test_scope	polecat	"go test -run TestSandboxSecrets ./internal/cmd"	allow		gt-a7jzr5	5b5cd52f57edd6c08ebe442290fea72cb5b02194fc548f025eb70c8871a59387
