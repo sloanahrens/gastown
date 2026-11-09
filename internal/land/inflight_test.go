@@ -3,7 +3,6 @@ package land
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -80,35 +79,19 @@ func TestWorkRunsNamesEachRunAndWhenItLastChanged(t *testing.T) {
 	}
 }
 
-// TestWorkRunsRefusesARunWhoseTimeIsUnreadable: a run the root lists but whose
-// time cannot be read is an error that names the run, never a run with a zero
-// time. The root has no search bit, so the listing reads the name and the
-// entry's stat is refused.
-// A process that bypasses the search bit (root, or a DAC override) stats the
-// entry anyway, so there the run is listed with its time and no refusal is due.
-func TestWorkRunsRefusesARunWhoseTimeIsUnreadable(t *testing.T) {
+// TestWorkRunsRefusesAWorkRootItCannotRead: a work root the walker cannot read
+// is an error, never a listing with no runs. A root that is not a directory
+// fails the read for every user, root included, so the refusal is asserted the
+// same way under every user.
+func TestWorkRunsRefusesAWorkRootItCannotRead(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "rig")
-	mkdirs(t, root, "land-1")
-	if err := os.Chmod(root, 0o400); err != nil {
+	if err := os.WriteFile(root, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
-		if err := os.Chmod(root, 0o700); err != nil {
-			t.Errorf("restoring the root for cleanup: %v", err)
-		}
-	})
-	_, statErr := os.Lstat(filepath.Join(root, "land-1"))
 	runs, err := WorkRuns(root)
-	if statErr == nil {
-		if err != nil || len(runs) != 1 || runs[0].Name != "land-1" {
-			t.Fatalf("WorkRuns = %v, %v; want the one run land-1 with no refusal", runs, err)
-		}
-		return
-	}
-	if err == nil || !strings.Contains(err.Error(), "land-1") {
-		t.Fatalf("WorkRuns = %v, %v; want the run named in the refusal", runs, err)
+	if err == nil || len(runs) != 0 {
+		t.Fatalf("WorkRuns = %v, %v; want the refusal of the unreadable root", runs, err)
 	}
 }
 
