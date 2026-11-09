@@ -279,12 +279,12 @@ func cacheTrimJobName(claim string) string {
 // in.
 //
 // It reports whether the pass reached a verdict: trimmed, or nothing to trim.
-// A pass that could not start -- unreadable profiles or cap, a kubeconfig that
-// names no sandbox context, an unreadable claim list -- or a claim whose trim
-// failed for a reason the next run may clear reports false, and the patrol
-// retries it soon rather than after the full interval. A refusal the config or
-// the listing decides is a verdict: the next run judges it again at the full
-// interval.
+// A pass that could not start -- unreadable profiles, values file or cap, a
+// kubeconfig that names no sandbox context, an unreadable claim list -- or a
+// claim whose trim failed for a reason the next run may clear reports false, and
+// the patrol retries it soon rather than after the full interval. A refusal the
+// config or the listing decides is a verdict: the next run judges it again at
+// the full interval.
 func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
 	profiles, err := s.sandboxes()
@@ -306,18 +306,20 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	for _, err := range errs {
 		d.cacheTrimLogf("disk_maintenance: cache trim: not applied: %v", err)
 	}
-	if len(claims) == 0 {
-		return true
-	}
 	// The pass runs the polecat image the CI-built values file names, when that
 	// file is there, so the trim's helper is the one built with the daemon's
 	// commit rather than a moving tag a profile carries. The file is read once
 	// for the pass, so every Job it applies runs the one image it records; with
-	// no file each claim keeps its profile's image (gt-pm2y2m).
+	// no file each claim keeps its profile's image (gt-pm2y2m). It is read
+	// before the empty-claims return below, so a malformed file is named in a
+	// pass with nothing to trim rather than only in one that trims (gt-714vqw).
 	valuesImage, fromValues, err := d.cacheTrimImage()
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim: %v; nothing trimmed", err)
 		return false
+	}
+	if len(claims) == 0 {
+		return true
 	}
 	capBytes, err := cacheTrimCap(s.getenv)
 	if err != nil {
