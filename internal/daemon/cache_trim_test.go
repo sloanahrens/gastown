@@ -39,6 +39,9 @@ const (
 	cacheTrimNamespace = "openshell"
 	// cacheTrimJob is the Job the pass names after that claim.
 	cacheTrimJob = cachevol.DefaultTrimJobName + "-" + cacheTrimClaimName
+	// cacheTrimListJob is the lister Job the pass names after that claim, read
+	// when no running pod mounts it.
+	cacheTrimListJob = cachevol.DefaultListJobName + "-" + cacheTrimClaimName
 	// cacheTrimMountPath is where a sandbox pod mounts the claim, the root the
 	// pass reads the listing through. It matches the kubernetes driver's mount,
 	// outside /sandbox so it does not replace the workspace.
@@ -52,6 +55,17 @@ const (
 	// cacheTrimListVerb is the pass's listing read through the pod that mounts
 	// the claim.
 	cacheTrimListVerb = "exec -n " + cacheTrimNamespace + " sbx-a -c agent -- " + cachevol.HelperPath + " trim-list --root " + cacheTrimMountPath
+
+	// cacheTrimNoPodsVerb is the pod read of a claim no pod mounts, the state the
+	// lister Job reads the claim in.
+	cacheTrimNoPodsVerb = "get pods -n " + cacheTrimNamespace + " -o json"
+
+	// The lister Job's calls after its apply, in the order the pass makes them:
+	// the wait for it to complete, the read of its log, and the delete once the
+	// log is read.
+	cacheTrimListerWaitVerb   = "wait --for=condition=complete job/" + cacheTrimListJob + " -n " + cacheTrimNamespace + " --timeout=120s"
+	cacheTrimListerLogsVerb   = "logs job/" + cacheTrimListJob + " -n " + cacheTrimNamespace
+	cacheTrimListerDeleteVerb = "delete job " + cacheTrimListJob + " -n " + cacheTrimNamespace + " --ignore-not-found --wait=true --timeout=60s"
 
 	// cacheTrimFreeVerb is the pass's read of the claim's free space, made only
 	// when the trim takes the claim route: df in the pod the listing came from,
@@ -127,6 +141,8 @@ func newCacheTrimFixture(t *testing.T, mode string, overrides map[string]cliRepl
 		case strings.HasPrefix(verb, "get pods "):
 			return cliReply{stdout: cacheTrimPodsJSON}
 		case strings.Contains(verb, " "+cachevol.HelperPath+" trim-list "):
+			return cliReply{stdout: cacheTrimListingJSON}
+		case strings.HasPrefix(verb, "logs job/"+cachevol.DefaultListJobName+"-"):
 			return cliReply{stdout: cacheTrimListingJSON}
 		case strings.Contains(verb, " df -Pk "):
 			return cliReply{stdout: cacheTrimDfReply(t, 1<<30)}
@@ -244,6 +260,17 @@ func (f *cacheTrimFixture) verbs() []string {
 func (f *cacheTrimFixture) indexOf(needle string) (int, bool) {
 	for i, call := range f.cli.recorded() {
 		if cacheTrimVerb(call.args) == needle {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// indexAfter is indexOf over the calls after index from: the call that follows a
+// given one, when the same argv runs more than once.
+func (f *cacheTrimFixture) indexAfter(needle string, from int) (int, bool) {
+	for i, call := range f.cli.recorded() {
+		if i > from && cacheTrimVerb(call.args) == needle {
 			return i, true
 		}
 	}
@@ -551,14 +578,18 @@ func TestDiskMaintenanceCacheTrimJudgesAClaimByItsOwnNamespace(t *testing.T) {
 	f.d.runDiskMaintenance()
 
 	// The busy namespace's pod is neither read nor counted for the other claim:
-	// the other claim has no pod of its own, so its listing cannot be read.
+	// the other claim has no pod of its own, so its listing comes from the lister
+	// Job in its own namespace, and nothing in that namespace is exec'd.
 	for _, verb := range f.verbs() {
-		if strings.Contains(verb, otherNamespace) && !strings.HasPrefix(verb, "get pods ") {
-			t.Errorf("the pass ran %q in the podless namespace", verb)
+		if strings.Contains(verb, otherNamespace) && strings.HasPrefix(verb, "exec ") {
+			t.Errorf("the pass exec'd %q in the podless namespace", verb)
 		}
 	}
-	if logged := f.log.String(); !strings.Contains(logged, "cache trim "+cacheTrimClaimName+" in "+otherNamespace+": no running pod mounts it") {
-		t.Errorf("the log does not say the other claim had no pod of its own: %s", logged)
+	if !slices.Contains(f.verbs(), "logs job/"+cacheTrimListJob+" -n "+otherNamespace) {
+		t.Errorf("the other claim's listing was not read through its own lister Job; calls: %v", f.verbs())
+	}
+	if logged := f.log.String(); !strings.Contains(logged, "cache trim "+cacheTrimClaimName+" in "+otherNamespace+" applied") {
+		t.Errorf("the log does not say the other claim was trimmed from its own lister's listing: %s", logged)
 	}
 	if logged := f.log.String(); !strings.Contains(logged, "cache trim "+cacheTrimClaimName+" in "+cacheTrimNamespace+" applied") {
 		t.Errorf("the log does not say the claim was trimmed from its own namespace's pod: %s", logged)
@@ -614,26 +645,279 @@ func TestDiskMaintenanceCacheTrimRefusesAnUnreadableListing(t *testing.T) {
 	}
 }
 
-// TestDiskMaintenanceCacheTrimRefusesWhenNoPodMountsTheClaim pins the other
-// unreadable listing: with no running pod that mounts the claim there is no
-// listing to read, so the trim refuses instead of guessing one.
-func TestDiskMaintenanceCacheTrimRefusesWhenNoPodMountsTheClaim(t *testing.T) {
+// cacheTrimLogListingJSON is a listing of one file over the fixture's cap on its
+// own, so the trim removes exactly it. It is not the exec route's listing, so a
+// test can tell which listing the trim was built from.
+const cacheTrimLogListingJSON = `[{"path":"gocache/ll/x","cache":"build","size":3000,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}]`
+
+// cacheTrimPendingHolderJSON is the pod list of a claim whose one holder is
+// pending: the claim is held, and no pod can answer an exec.
+const cacheTrimPendingHolderJSON = `{"items":[{"metadata":{"name":"sbx-b","namespace":"` + cacheTrimNamespace + `"},` +
+	`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"` + cacheTrimMountPath + `"}]}],` +
+	`"volumes":[{"name":"gt-cache","persistentVolumeClaim":{"claimName":"` + cacheTrimClaimName + `"}}]},` +
+	`"status":{"phase":"Pending"}}]}`
+
+// appliedContaining reports whether the pass applied a document whose bytes hold
+// needle.
+func (f *cacheTrimFixture) appliedContaining(needle string) bool {
+	for _, call := range f.cli.recorded() {
+		if strings.HasPrefix(cacheTrimVerb(call.args), "apply ") && strings.Contains(string(call.stdin), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCacheTrimListerJobReadsAClaimNoPodMounts is the bead's first box: with no
+// source pod the pass applies the lister Job, reads its log as the listing,
+// deletes the Job once read, and builds the trim from that listing.
+func TestCacheTrimListerJobReadsAClaimNoPodMounts(t *testing.T) {
 	t.Parallel()
 	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
-		"get pods -n " + cacheTrimNamespace + " -o json": {stdout: `{"items":[{"metadata":{"name":"sbx-b","namespace":"` + cacheTrimNamespace + `"},` +
-			`"spec":{"containers":[{"name":"agent","volumeMounts":[{"name":"gt-cache","mountPath":"` + cacheTrimMountPath + `"}]}],` +
-			`"volumes":[{"name":"gt-cache","persistentVolumeClaim":{"claimName":"` + cacheTrimClaimName + `"}}]},` +
-			`"status":{"phase":"Pending"}}]}`},
+		cacheTrimNoPodsVerb:     {stdout: `{"items":[]}`},
+		cacheTrimListerLogsVerb: {stdout: cacheTrimLogListingJSON},
+	})
+	f.d.runDiskMaintenance()
+
+	if applied := f.applied(t); !slices.Contains(applied, "Job "+cacheTrimListJob) {
+		t.Fatalf("the pass applied %v, want the lister Job", applied)
+	}
+	for _, verb := range f.verbs() {
+		if strings.HasPrefix(verb, "exec ") {
+			t.Errorf("the pass ran %q with no running pod to exec in", verb)
+		}
+	}
+	// The same delete runs before the apply, to clear an earlier pass's Job, and
+	// after the read, to remove this one: the second is the one after the log.
+	apply, applied := f.indexOf(cacheTrimApplyVerb)
+	wait, waited := f.indexOf(cacheTrimListerWaitVerb)
+	logs, read := f.indexOf(cacheTrimListerLogsVerb)
+	cleared, clearedFirst := f.indexOf(cacheTrimListerDeleteVerb)
+	deleted, gone := f.indexAfter(cacheTrimListerDeleteVerb, logs)
+	if !applied || !waited || !read || !clearedFirst || !gone {
+		t.Fatalf("the lister Job was not applied, waited for, read and deleted; calls: %v", f.verbs())
+	}
+	if !(cleared < apply && apply < wait && wait < logs && logs < deleted) {
+		t.Errorf("the lister Job's calls ran out of order (clear %d, apply %d, wait %d, logs %d, delete %d); calls: %v",
+			cleared, apply, wait, logs, deleted, f.verbs())
+	}
+	if !f.appliedContaining("gocache/ll/x") {
+		t.Errorf("the trim was not built from the lister's log: no applied document names its one file")
+	}
+	if !slices.Contains(f.applied(t), "Job "+cacheTrimJob) {
+		t.Errorf("the pass did not apply the trim Job after reading the listing; applied %v", f.applied(t))
+	}
+}
+
+// TestCacheTrimListerJobTrimsTheClaimRouteWithoutAFitCheck pins the reads a
+// claim with no running pod cannot make. The listing crosses the shard ceiling,
+// so the trim takes the claim route, whose free space df would read through a
+// pod; with none the room is unknown and the trim runs without the fit check its
+// writer makes again. The claim is not measured after the trim, since du needs a
+// pod too.
+func TestCacheTrimListerJobTrimsTheClaimRouteWithoutAFitCheck(t *testing.T) {
+	t.Parallel()
+	// The room is never read here, so the listing needs only to cross the ceiling;
+	// the KiB-aligned one costs a search this test does not need.
+	listing := cacheTrimClaimRouteListing(cachevol.TrimMaxShards+1, 0)
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimNoPodsVerb:     {stdout: `{"items":[]}`},
+		cacheTrimListerLogsVerb: {stdout: listing},
+	})
+	f.d.runDiskMaintenance()
+
+	if applied := f.applied(t); !slices.Equal(applied, []string{"Job " + cacheTrimListJob, "Job " + cacheTrimJob}) {
+		t.Fatalf("the pass applied %v, want the lister Job and the one trim Job; log: %s", applied, f.log.String())
+	}
+	for _, verb := range []string{cacheTrimFreeVerb, cacheTrimDuVerb} {
+		if _, ok := f.indexOf(verb); ok {
+			t.Errorf("the pass ran %q with no running pod to run it in", verb)
+		}
+	}
+	logged := f.log.String()
+	for _, want := range []string{"free space unknown", "no running pod mounts the claim", "not measured after the trim"} {
+		if !strings.Contains(logged, want) {
+			t.Errorf("the log does not say %q: %s", want, logged)
+		}
+	}
+}
+
+// TestCacheTrimListerJobFailureTrimsNothing is the bead's second box: a lister
+// Job that fails, does not finish, or whose log does not parse logs that the
+// listing could not be read, trims nothing, and reports a retry. A claim with no
+// image to run the Job in is refused the same way.
+func TestCacheTrimListerJobFailureTrimsNothing(t *testing.T) {
+	t.Parallel()
+	timedOut := cliReply{stderr: "error: timed out waiting for the condition on jobs/" + cacheTrimListJob, code: 1}
+	for _, tc := range []struct {
+		name      string
+		overrides map[string]cliReply
+		noImage   bool
+		why       string
+	}{
+		{
+			name:      "the log does not parse",
+			overrides: map[string]cliReply{cacheTrimListerLogsVerb: {stdout: "trim-list: no listing"}},
+			why:       "decoding the trim listing",
+		},
+		{
+			name: "the Job failed",
+			overrides: map[string]cliReply{
+				cacheTrimListerWaitVerb: timedOut,
+				"get job " + cacheTrimListJob + " -n " + cacheTrimNamespace + " -o json": {stdout: `{"status":{"failed":1}}`},
+			},
+			why: "the Job failed",
+		},
+		{
+			name:      "the Job does not finish",
+			overrides: map[string]cliReply{cacheTrimListerWaitVerb: timedOut},
+			why:       "has not finished within the wait",
+		},
+		{
+			name:      "the Job cannot be applied",
+			overrides: map[string]cliReply{cacheTrimApplyVerb: {stderr: "Error from server: forbidden", code: 1}},
+			why:       "applying the lister Job",
+		},
+		{
+			name:      "the Job's log cannot be read",
+			overrides: map[string]cliReply{cacheTrimListerLogsVerb: {stderr: "Error from server: pod not found", code: 1}},
+			why:       "reading the lister Job's log",
+		},
+		{
+			name:      "an earlier lister Job cannot be deleted",
+			overrides: map[string]cliReply{cacheTrimListerDeleteVerb: {stderr: "Error from server: forbidden", code: 1}},
+			why:       "deleting an earlier lister Job",
+		},
+		{
+			name:    "no image runs the Job",
+			noImage: true,
+			why:     "the trim Job image",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			overrides := map[string]cliReply{cacheTrimNoPodsVerb: {stdout: `{"items":[]}`}}
+			maps.Copy(overrides, tc.overrides)
+			f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, overrides)
+			if tc.noImage {
+				f.setProfiles(map[string]agentconfig.SandboxProfile{
+					"polecat-default": {
+						Driver:               agentconfig.SandboxDriverKubernetes,
+						KubernetesCacheClaim: cacheTrimClaimName,
+					},
+				})
+			}
+			now := diskMaintNow
+			passes := 0
+			profiles := f.d.diskMaint.sandboxes
+			f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+				passes++
+				return profiles()
+			}
+			f.d.diskMaint.now = func() time.Time { return now }
+
+			f.d.runDiskMaintenance()
+
+			if logged := f.log.String(); !strings.Contains(logged, "could not be read") || !strings.Contains(logged, tc.why) {
+				t.Errorf("the log does not say the listing could not be read because %q: %s", tc.why, logged)
+			}
+			for _, doc := range f.applied(t) {
+				if doc != "Job "+cacheTrimListJob {
+					t.Errorf("the pass applied %q from a listing it could not read; applied %v", doc, f.applied(t))
+				}
+			}
+			// The failed read reports a retry: due at fifteen minutes, not five.
+			now = now.Add(5 * time.Minute)
+			f.d.runDiskMaintenance()
+			if passes != 1 {
+				t.Fatalf("the pass ran %d times five minutes after a failed read, want the retry at fifteen minutes", passes)
+			}
+			now = now.Add(10 * time.Minute)
+			f.d.runDiskMaintenance()
+			if passes != 2 {
+				t.Errorf("the pass ran %d times fifteen minutes after a failed read, want 2", passes)
+			}
+		})
+	}
+}
+
+// TestCacheTrimExecRouteWinsOverListerJob pins the order: with a running source
+// pod the listing is read through exec, and no lister Job is applied or read.
+func TestCacheTrimExecRouteWinsOverListerJob(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	f.d.runDiskMaintenance()
+
+	if !slices.Contains(f.verbs(), cacheTrimListVerb) {
+		t.Fatalf("the pass did not read the listing through exec; calls: %v", f.verbs())
+	}
+	for _, doc := range f.applied(t) {
+		if doc == "Job "+cacheTrimListJob {
+			t.Errorf("the pass applied the lister Job with a running pod to read through")
+		}
+	}
+	if _, read := f.indexOf(cacheTrimListerLogsVerb); read {
+		t.Errorf("the pass read a lister Job's log with a running pod to read through")
+	}
+}
+
+// TestCacheTrimListerJobIsNotAppliedInADryRun pins the dry run: it applies
+// nothing, so the lister Job is not applied for a claim no running pod mounts.
+func TestCacheTrimListerJobIsNotAppliedInADryRun(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeDryRun, map[string]cliReply{
+		cacheTrimNoPodsVerb: {stdout: `{"items":[]}`},
 	})
 	f.d.runDiskMaintenance()
 
 	for _, verb := range f.verbs() {
-		if strings.HasPrefix(verb, "exec ") || strings.HasPrefix(verb, "apply ") {
-			t.Errorf("the pass ran %q with no running pod that mounts the claim", verb)
+		if strings.HasPrefix(verb, "apply ") || strings.HasPrefix(verb, "delete ") || strings.HasPrefix(verb, "wait ") {
+			t.Errorf("a dry run ran %q, want no change", verb)
 		}
 	}
-	if logged := f.log.String(); !strings.Contains(logged, "no running pod mounts it") {
-		t.Errorf("the log does not say why nothing was trimmed: %s", logged)
+	if logged := f.log.String(); !strings.Contains(logged, "cannot be read in a dry run") {
+		t.Errorf("the dry run does not say the listing was not read: %s", logged)
+	}
+}
+
+// TestCacheTrimListerJobNameIsDistinctFromTheTrimJob pins the lister's name: it
+// is named for the claim, is a valid object name even for the longest claim, and
+// never equals the trim Job's name, so one never touches the other.
+func TestCacheTrimListerJobNameIsDistinctFromTheTrimJob(t *testing.T) {
+	t.Parallel()
+	if got := cacheTrimListJobName(cacheTrimClaimName); got != cacheTrimListJob {
+		t.Errorf("cacheTrimListJobName(%q) = %q, want %q", cacheTrimClaimName, got, cacheTrimListJob)
+	}
+	for _, claim := range []string{cacheTrimClaimName, strings.Repeat("e", 63)} {
+		list, trim := cacheTrimListJobName(claim), cacheTrimJobName(claim)
+		if list == trim {
+			t.Errorf("the lister Job and the trim Job for %d-character claim share the name %q", len(claim), list)
+		}
+		if len(list) > cacheTrimJobNameMax {
+			t.Errorf("the lister Job name for a %d-character claim is %d characters, want at most %d", len(claim), len(list), cacheTrimJobNameMax)
+		}
+	}
+}
+
+// TestDiskMaintenanceCacheTrimReadsAClaimWithOnlyAPendingHolder pins the case the
+// old refusal named: a pod holds the claim but none runs, so no exec can read the
+// listing, and the lister Job reads it instead. The pending holder still counts
+// as a sandbox.
+func TestDiskMaintenanceCacheTrimReadsAClaimWithOnlyAPendingHolder(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, map[string]cliReply{
+		cacheTrimNoPodsVerb:     {stdout: cacheTrimPendingHolderJSON},
+		cacheTrimListerLogsVerb: {stdout: cacheTrimLogListingJSON},
+	})
+	f.d.runDiskMaintenance()
+
+	for _, verb := range f.verbs() {
+		if strings.HasPrefix(verb, "exec ") {
+			t.Errorf("the pass ran %q with no running pod to exec in", verb)
+		}
+	}
+	if !slices.Contains(f.applied(t), "Job "+cacheTrimListJob) {
+		t.Errorf("the pass did not apply the lister Job for a claim held by a pending pod; applied %v", f.applied(t))
 	}
 }
 
@@ -2869,18 +3153,24 @@ func TestCacheTrimNoOpNeverFailsATrim(t *testing.T) {
 	}
 
 	// A trim refused before its apply is not measured either: no running pod
-	// mounts the claim, so there is no reading to judge.
+	// mounts the claim, and the lister Job's log does not parse, so the listing
+	// is refused, no trim is applied, and there is no reading to judge.
 	refused := newCacheTrimNoOpFixture(t, agentconfig.DiskMaintenanceModeApply, cliReply{stdout: cacheTrimDuReply(t, 63<<30)})
 	inner := refused.cli.answer
 	refused.cli.answer = func(c cliCall) cliReply {
-		if strings.HasPrefix(cacheTrimVerb(c.args), "get pods ") {
+		switch verb := cacheTrimVerb(c.args); {
+		case strings.HasPrefix(verb, "get pods "):
 			return cliReply{stdout: `{"items":[]}`}
+		case strings.HasPrefix(verb, "logs job/"+cachevol.DefaultListJobName+"-"):
+			return cliReply{stdout: "trim-list: no listing"}
 		}
 		return inner(c)
 	}
 	refused.d.runDiskMaintenance()
-	if got := refused.applyCalls(); len(got) != 0 {
-		t.Fatalf("the refused trim applied %d documents", len(got))
+	for _, doc := range refused.applied(t) {
+		if doc != "Job "+cacheTrimListJob {
+			t.Fatalf("the refused trim applied %q; applied %v", doc, refused.applied(t))
+		}
 	}
 	if got := refused.noOpItems(t); len(got) != 0 {
 		t.Errorf("a refused trim yielded %+v, want no item", got)
@@ -2948,14 +3238,20 @@ func TestCacheTrimNoOpClearsWhenTheClaimVanishes(t *testing.T) {
 		}
 	})
 
+	// With no pod the claim is read through the lister Job and trimmed, but a
+	// measure needs a running pod, so nothing reads the claim's size afterwards
+	// and the item the earlier measure raised is left as it was.
 	t.Run("no pod holds the claim", func(t *testing.T) {
 		t.Parallel()
 		f := raised(t)
 		f.answerFrom("get pods ", cliReply{stdout: `{"items":[]}`})
 		f.trimDue()
 		f.d.runDiskMaintenance()
-		if got := f.noOpItems(t); len(got) != 0 {
-			t.Errorf("a pass that found no pod holding the claim yielded %+v, want no item", got)
+		if !slices.Contains(f.applied(t), "Job "+cacheTrimListJob) {
+			t.Errorf("a pass that found no pod holding the claim did not read it through the lister Job; applied %v", f.applied(t))
+		}
+		if got := f.noOpItems(t); len(got) != 1 {
+			t.Errorf("a pass that found no pod holding the claim yielded %+v, want the item left as it was", got)
 		}
 	})
 
@@ -3045,8 +3341,8 @@ func TestCacheTrimNoOpKeepsItemWhileAPodHoldsTheClaimWithoutRunning(t *testing.T
 	if got := f.noOpItems(t); len(got) != 1 {
 		t.Errorf("a pass whose only holder is pending yielded %+v, want the item kept", got)
 	}
-	if logged := f.log.String(); !strings.Contains(logged, "no running pod mounts it") {
-		t.Errorf("the pass does not say why nothing was trimmed: %s", logged)
+	if !slices.Contains(f.applied(t), "Job "+cacheTrimListJob) {
+		t.Errorf("the pass did not read the pending holder's claim through the lister Job; applied %v", f.applied(t))
 	}
 }
 
