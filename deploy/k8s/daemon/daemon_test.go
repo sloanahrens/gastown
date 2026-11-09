@@ -915,7 +915,7 @@ func TestDeploymentGolden(t *testing.T) {
 	if got := d.Spec.Template.Spec.ServiceAccountName; got != ServiceAccountName {
 		t.Errorf("the pod runs as service account %q, want %q", got, ServiceAccountName)
 	}
-	if got := d.Spec.Template.Spec.TerminationGracePeriodSeconds; got < int64(MinimumTerminationGraceSeconds) {
+	if got := *d.Spec.Template.Spec.TerminationGracePeriodSeconds; got < int64(MinimumTerminationGraceSeconds) {
 		t.Errorf("the pod's grace period is %ds, want at least %ds", got, MinimumTerminationGraceSeconds)
 	}
 
@@ -986,6 +986,36 @@ func daemonDeclaration(t *testing.T, data []byte, file, name string) string {
 	return string(m[1])
 }
 
+// TestDeploymentRendersAZeroGracePeriod holds that a grace period of zero renders
+// as 0. An omitted terminationGracePeriodSeconds takes the cluster's default of
+// 30 seconds, which is not the zero the caller named. Build defaults a zero, so
+// this calls deployment, the function Build renders the pod with.
+func TestDeploymentRendersAZeroGracePeriod(t *testing.T) {
+	t.Parallel()
+
+	v := goldenValues(t)
+	v.TerminationGraceSeconds = 0
+	var rendered struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					TerminationGracePeriodSeconds *int64 `yaml:"terminationGracePeriodSeconds"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(document(t, deployment(v, DefaultNamespace)), &rendered); err != nil {
+		t.Fatalf("parsing the rendered Deployment: %v", err)
+	}
+	got := rendered.Spec.Template.Spec.TerminationGracePeriodSeconds
+	if got == nil {
+		t.Fatal("the rendered Deployment omits terminationGracePeriodSeconds, so a zero grace period takes the cluster default instead of 0")
+	}
+	if *got != 0 {
+		t.Errorf("the rendered grace period = %d, want 0 for a zero Values.TerminationGraceSeconds", *got)
+	}
+}
+
 // TestPodHasNoPreStopAndGraceCoversTheDrain holds the shutdown contract: the pod
 // carries no preStop hook, so SIGTERM plus the grace period is the drain, and
 // the grace period is at least the drain bound the package computes from the
@@ -1024,10 +1054,10 @@ func TestPodHasNoPreStopAndGraceCoversTheDrain(t *testing.T) {
 
 	m := mustBuild(t, goldenValues(t))
 	pod := m.Deployment.Spec.Template.Spec
-	if got, want := pod.TerminationGracePeriodSeconds, int64(DefaultTerminationGraceSeconds); got != want {
+	if got, want := *pod.TerminationGracePeriodSeconds, int64(DefaultTerminationGraceSeconds); got != want {
 		t.Errorf("the pod's grace period = %ds, want the default %ds", got, want)
 	}
-	if got := pod.TerminationGracePeriodSeconds; got < int64(MinimumTerminationGraceSeconds) {
+	if got := *pod.TerminationGracePeriodSeconds; got < int64(MinimumTerminationGraceSeconds) {
 		t.Errorf("the pod's grace period = %ds, under the drain bound %ds", got, MinimumTerminationGraceSeconds)
 	}
 
@@ -1061,7 +1091,7 @@ func TestPodHasNoPreStopAndGraceCoversTheDrain(t *testing.T) {
 	// refusal below the floor is the only bound on the value.
 	v := goldenValues(t)
 	v.TerminationGraceSeconds = MinimumTerminationGraceSeconds
-	if got, want := mustBuild(t, v).Deployment.Spec.Template.Spec.TerminationGracePeriodSeconds, int64(MinimumTerminationGraceSeconds); got != want {
+	if got, want := *mustBuild(t, v).Deployment.Spec.Template.Spec.TerminationGracePeriodSeconds, int64(MinimumTerminationGraceSeconds); got != want {
 		t.Errorf("the pod's grace period = %ds for a caller's %ds, want the caller's value", got, want)
 	}
 }

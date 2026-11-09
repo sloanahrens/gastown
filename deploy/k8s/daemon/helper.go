@@ -82,7 +82,8 @@ func (v Values) helperNamespace() (string, error) {
 // two claims mounted read-write and nothing else. It carries no environment, no
 // hostAlias and no Secret, so no Docker-Desktop-only setting, no Dolt name and no
 // credential reaches the pod that fills the claims. Its service account token is
-// off, because the pod calls no API and the seed reaches it through the kubelet.
+// off, because the pod calls no API. The seed is written into it from outside
+// the pod, so the pod needs no token of its own.
 func helperPod(v Values) PodSpec {
 	noToken := false
 	root := int64(helperUserID)
