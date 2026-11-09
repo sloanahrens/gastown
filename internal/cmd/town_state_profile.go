@@ -39,8 +39,9 @@ so a seeded copy of the live settings starts none of the work the live daemon
 starts. That file is settings/config.json's daemon section on the two-file
 layout, and mayor/daemon.json on the five-file one. Every patrol object directly
 under daemon.patrols is set to enabled false (a missing enabled becomes an
-explicit false), and daemon.supervisor is removed. Every other key and value is
-left as it was.
+explicit false), each patrol the daemon knows that the file leaves out is added
+disabled, and daemon.supervisor is removed. Every other key and value is left as
+it was.
 
 The command refuses to run unless KUBERNETES_SERVICE_HOST is set, which
 Kubernetes sets in every pod. A write copies the old file beside itself as
@@ -158,7 +159,7 @@ func runTownStateProfileIn(env townStateProfileEnv) error {
 	if path == patrolFile {
 		profile = townstate.RehearsalDaemonProfile
 	}
-	out, changes, err := profile(settings, knownPatrolKeys())
+	out, changes, err := profile(settings, profilePatrolKeys())
 	if err != nil {
 		return fmt.Errorf("profiling %s: %w", path, err)
 	}
@@ -174,6 +175,21 @@ func runTownStateProfileIn(env townStateProfileEnv) error {
 	}
 	fmt.Fprintf(env.out, "rehearsal profile written to %s (%d changes); the old file is %s\n", path, len(changes), path+rehearsalBackupSuffix)
 	return nil
+}
+
+// retiredPatrolKeys are the patrol keys the daemon ignores: the refinery was
+// deleted (gt-v4ssj.6) and the schema says to remove its key from the file. The
+// profile neither adds them nor reads them back. IsPatrolEnabled answers true for
+// a key it does not handle, so reading back a profiled file that lacks one would
+// report it still on.
+var retiredPatrolKeys = []string{"refinery"}
+
+// profilePatrolKeys are the patrol keys the profile disables and --check reads
+// back: knownPatrolKeys less the retired ones.
+func profilePatrolKeys() []string {
+	return slices.DeleteFunc(knownPatrolKeys(), func(key string) bool {
+		return slices.Contains(retiredPatrolKeys, key)
+	})
 }
 
 // checkRehearsal is --check: it prints each setting still on in path, one per
@@ -195,7 +211,7 @@ func checkRehearsal(env townStateProfileEnv, path string, changes []string) erro
 			on = append(on, c)
 		}
 	}
-	for _, key := range knownPatrolKeys() {
+	for _, key := range profilePatrolKeys() {
 		if patrolReadsOn(cfg, key) {
 			add("daemon.patrols." + key + ".enabled")
 		}
@@ -266,7 +282,7 @@ func writeRehearsalSettings(files profileFiles, path string, mode fs.FileMode, o
 	backup := path + rehearsalBackupSuffix
 	if err := writeRehearsalFile(files, backup, os.O_EXCL, mode, old); err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			return fmt.Errorf("%s already exists: an earlier rehearsal profile kept the original there; move it aside to write a new profile", backup)
+			return fmt.Errorf("%s already exists: it is an earlier rehearsal's original or a partial copy a failed write left; move it aside to write a new profile", backup)
 		}
 		return fmt.Errorf("writing the rehearsal backup: %w", err)
 	}

@@ -24,7 +24,9 @@ import (
 // changes names each key it changed, in patrol-name order with the supervisor
 // last; a patrol that was already disabled is not a change. A settings file
 // that is not valid JSON, has no daemon.patrols object, or has a patrol that is
-// not an object is refused, with an error that names what is wrong.
+// not an object is refused, with an error that names what is wrong. This differs
+// from the gt-gvr05p constraint's signature, which had no known list, and adds
+// RehearsalDaemonProfile for the five-file daemon document.
 func RehearsalProfile(settings []byte, known []string) (out []byte, changes []string, err error) {
 	root, err := decodeSettings(settings)
 	if err != nil {

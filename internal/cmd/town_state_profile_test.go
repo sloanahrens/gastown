@@ -333,17 +333,103 @@ func TestTownStateProfileCheckRefusesADaemonFileTheDaemonCannotLoad(t *testing.T
 	}
 }
 
-func TestTownStateProfileRefusesAnUnreadableDaemonFile(t *testing.T) {
+// TestTownStateProfileRefusesAPatrolFileItCannotRead: a read failure on the
+// patrol file is refused by name, wrapping the read error, and leaves the file.
+func TestTownStateProfileRefusesAPatrolFileItCannotRead(t *testing.T) {
 	t.Parallel()
 	town, path := writeProfileTown(t, profileTestSettings)
 	env := newProfileEnv(town, &bytes.Buffer{})
 	env.files.read = func(string) ([]byte, error) { return nil, errProfileRead }
 	err := runTownStateProfileIn(env)
-	if !errors.Is(err, errProfileRead) {
-		t.Fatalf("profile of an unreadable file = %v, want the read error", err)
+	if !errors.Is(err, errProfileRead) || !strings.Contains(err.Error(), "reading the town settings") {
+		t.Fatalf("profile of an unreadable file = %v, want a refusal naming the settings read that wraps the read error", err)
 	}
 	if got := readProfileFile(t, path); string(got) != profileTestSettings {
 		t.Errorf("an unreadable file's settings changed:\n%s", got)
+	}
+}
+
+// TestTownStateProfileCheckNamesWhatTheLoaderStillRuns: an already-profiled file
+// passes the file's own check, so only the daemon's loader can refuse it. A loader
+// that reports a patrol or the supervisor on exits 1 and names that setting.
+func TestTownStateProfileCheckNamesWhatTheLoaderStillRuns(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		cfg  *daemon.DaemonPatrolConfig
+		want string
+	}{
+		{
+			name: "a patrol",
+			cfg:  &daemon.DaemonPatrolConfig{Patrols: &config.PatrolsConfig{LandingWorker: &config.LandingWorkerConfig{Enabled: true}}},
+			want: "daemon.patrols.landing_worker.enabled",
+		},
+		{
+			name: "the supervisor",
+			cfg:  &daemon.DaemonPatrolConfig{Supervisor: "container"},
+			want: "daemon.supervisor",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, path := writeProfileTown(t, profileTestSettings)
+			if err := runTownStateProfileIn(newProfileEnv(town, &bytes.Buffer{})); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			var out bytes.Buffer
+			env := newProfileEnv(town, &out)
+			env.check = true
+			env.readPatrols = func(string) (*daemon.DaemonPatrolConfig, error) { return tc.cfg, nil }
+			err := runTownStateProfileIn(env)
+			var exitErr *ExitCodeError
+			if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+				t.Fatalf("--check with the loader reporting %s on = %v, want exit 1", tc.name, err)
+			}
+			if want := path + ": " + tc.want; !strings.Contains(out.String(), want) {
+				t.Errorf("--check output %q does not list %q", out.String(), want)
+			}
+		})
+	}
+}
+
+// TestTownStateProfileLeavesTheRetiredRefineryKeyOut: the daemon ignores the
+// refinery key, so the profile adds none, and --check does not read a missing
+// one back as still on.
+func TestTownStateProfileLeavesTheRetiredRefineryKeyOut(t *testing.T) {
+	t.Parallel()
+	town, path := writeProfileTown(t, profileTestSettings)
+	env := newProfileEnv(town, &bytes.Buffer{})
+	if err := runTownStateProfileIn(env); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := readProfileFile(t, path); strings.Contains(string(got), "refinery") {
+		t.Errorf("the profile added the retired refinery key:\n%s", got)
+	}
+	env.check = true
+	if err := runTownStateProfileIn(env); err != nil {
+		t.Fatalf("--check on the profiled file = %v, want exit 0", err)
+	}
+}
+
+// TestTownStateProfileNamesAPartialBackupAsPartial: a backup write that fails
+// part-way leaves a partial copy beside the settings. The next run must not call
+// it the earlier original.
+func TestTownStateProfileNamesAPartialBackupAsPartial(t *testing.T) {
+	t.Parallel()
+	town, path := writeProfileTown(t, profileTestSettings)
+	backup := path + rehearsalBackupSuffix
+	first := newProfileEnv(town, &bytes.Buffer{})
+	first.files = failWrite(hostProfileFiles(), backup)
+	if err := runTownStateProfileIn(first); err == nil || !strings.Contains(err.Error(), "writing the rehearsal backup") {
+		t.Fatalf("first write = %v, want a refusal writing the backup", err)
+	}
+	err := runTownStateProfileIn(newProfileEnv(town, &bytes.Buffer{}))
+	if err == nil || !strings.Contains(err.Error(), "partial copy") {
+		t.Fatalf("second write = %v, want a refusal that names a partial copy", err)
+	}
+	if got := readProfileFile(t, path); string(got) != profileTestSettings {
+		t.Errorf("a failed backup changed the settings:\n%s", got)
 	}
 }
 
