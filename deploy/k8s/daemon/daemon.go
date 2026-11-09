@@ -677,9 +677,10 @@ func deployment(v Values, namespace string) Deployment {
 	if v.Rehearsal {
 		owner = TownOwnerRehearsal
 	}
+	grace := int64(v.TerminationGraceSeconds)
 	pod := PodSpec{
 		ServiceAccountName:            ServiceAccountName,
-		TerminationGracePeriodSeconds: int64(v.TerminationGraceSeconds),
+		TerminationGracePeriodSeconds: &grace,
 		Containers:                    append([]Container{daemonContainer(v)}, proxyContainers(v)...),
 		Volumes:                       volumes(v),
 	}
@@ -1586,13 +1587,15 @@ type PodTemplateMeta struct {
 	Labels map[string]string `yaml:"labels"`
 }
 
-// PodSpec is the subset of a pod's spec the builder sets.
+// PodSpec is the subset of a pod's spec the builder sets. A nil
+// TerminationGracePeriodSeconds omits the field, so the pod takes the cluster's
+// default; a set value renders even when it is zero.
 type PodSpec struct {
 	ServiceAccountName            string              `yaml:"serviceAccountName,omitempty"`
 	AutomountServiceAccountToken  *bool               `yaml:"automountServiceAccountToken,omitempty"`
 	SecurityContext               *PodSecurityContext `yaml:"securityContext,omitempty"`
 	HostAliases                   []HostAlias         `yaml:"hostAliases,omitempty"`
-	TerminationGracePeriodSeconds int64               `yaml:"terminationGracePeriodSeconds,omitempty"`
+	TerminationGracePeriodSeconds *int64              `yaml:"terminationGracePeriodSeconds,omitempty"`
 	Containers                    []Container         `yaml:"containers"`
 	Volumes                       []Volume            `yaml:"volumes,omitempty"`
 }
