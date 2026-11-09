@@ -240,8 +240,8 @@ func TestTierSweepRunnerImageFileDefaultPathIsRead(t *testing.T) {
 }
 
 // TestTierSweepRunnerImageFileLatchIsPerDaemon: two daemons that meet the same
-// unusable file each log its reason once. A latch shared by the package would
-// silence the second daemon.
+// unusable file each log its reason once, however often each resolves it. A
+// latch shared by the package would silence the second daemon.
 func TestTierSweepRunnerImageFileLatchIsPerDaemon(t *testing.T) {
 	t.Parallel()
 
@@ -250,8 +250,10 @@ func TestTierSweepRunnerImageFileLatchIsPerDaemon(t *testing.T) {
 	second, _, secondLogs := runnerImageFileDaemon(t, "", "", path)
 
 	for _, d := range []*Daemon{first, second} {
-		if _, err := d.tierSweepRunnerImage(d.patrolConfig.Patrols.TierSweep.Runner); err != nil {
-			t.Fatalf("tierSweepRunnerImage: %v", err)
+		for range 2 {
+			if _, err := d.tierSweepRunnerImage(d.patrolConfig.Patrols.TierSweep.Runner); err != nil {
+				t.Fatalf("tierSweepRunnerImage: %v", err)
+			}
 		}
 	}
 	for name, logs := range map[string]*bytes.Buffer{"first": firstLogs, "second": secondLogs} {
