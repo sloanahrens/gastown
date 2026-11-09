@@ -559,3 +559,9 @@ dangerous	polecat	"cat <<EOF\ncat <(make gate)\nEOF\n"	allow		gt-4sug95	a878812b
 dangerous	polecat	"cat <<EOF\nmake gate\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
 test_scope	polecat	"# don't forget\nout=$(make gate)"	refuse	runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
 container_suite	polecat	"echo '<(go test .)'"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\nrun $(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\ndon't $(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\n'$(make gate)'\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\n\"$(make gate)\"\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\nsay \"hi $(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\nrun `make gate`\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
