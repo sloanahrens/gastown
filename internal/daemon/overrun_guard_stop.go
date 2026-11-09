@@ -879,10 +879,21 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 	if err != nil {
 		return overrunSave{}, fmt.Errorf("resolve branch %s: %w", branch, err)
 	}
+	head, headErr := g.Rev("HEAD")
 	if committed {
 		// The WIP commit landed on HEAD: it reaches the branch only if HEAD is it.
-		if head, err := g.Rev("HEAD"); err != nil || head != sha {
+		if headErr != nil || head != sha {
 			return overrunSave{}, fmt.Errorf("HEAD is not on branch %s, so the WIP commit cannot be pushed to it", branch)
+		}
+	} else if headErr != nil {
+		return overrunSave{}, fmt.Errorf("read HEAD: %w", headErr)
+	} else if head != sha {
+		// A clean worktree whose HEAD is off the kept branch (a detached HEAD, or
+		// another branch) is saved only if the branch already holds HEAD's
+		// commits. Comparing the branch ref alone would call it saved while
+		// commits reachable only from HEAD are lost with the sandbox.
+		if held, err := g.IsAncestor(head, sha); err != nil || !held {
+			return overrunSave{}, fmt.Errorf("HEAD holds commits branch %s does not, so they would be lost with the sandbox", branch)
 		}
 	}
 	if !committed && originBranchSHA(g, branch) == sha {

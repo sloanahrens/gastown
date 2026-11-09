@@ -198,6 +198,47 @@ func TestOverrunSaveWork_WIPCommitOffTheKeptBranchIsRefused(t *testing.T) {
 	}
 }
 
+// A CLEAN worktree whose HEAD is off the kept branch is saved only when the
+// branch already holds HEAD's commits. With the branch equal to origin, comparing
+// the branch ref alone would call the seat saved while commits reachable only
+// from HEAD are lost with the sandbox.
+func TestOverrunSaveWork_CleanDetachedHeadIsSavedOnlyIfTheBranchHoldsIt(t *testing.T) {
+	t.Parallel()
+	t.Run("commits only HEAD holds are refused", func(t *testing.T) {
+		t.Parallel()
+		w := newResetWorld(t)
+		w.pushKeptBranch(t)
+		if err := w.git().CheckoutDetach(w.tip); err != nil {
+			t.Fatal(err)
+		}
+		writeWorkFiles(t, w.work, map[string]string{"only-head.txt": "only head\n"})
+		if w.d.checkpointWorktreeAs(w.work, stopSeat.Rig, stopSeat.Polecat, "work on a detached head") != checkpointCreated {
+			t.Fatal("setup: the commit on the detached HEAD was not created")
+		}
+
+		got, err := w.d.overrunSaveWork(stopSeat)
+		if err == nil {
+			t.Fatalf("save = %+v, nil; want a refusal: HEAD holds a commit the kept branch lacks", got)
+		}
+		if got != (overrunSave{}) {
+			t.Errorf("save result = %+v on a refusal, want nothing reported as saved", got)
+		}
+	})
+	t.Run("a HEAD the branch already holds is saved", func(t *testing.T) {
+		t.Parallel()
+		w := newResetWorld(t)
+		w.pushKeptBranch(t)
+		if err := w.git().CheckoutDetach(w.baseSHA); err != nil {
+			t.Fatal(err)
+		}
+
+		got, err := w.d.overrunSaveWork(stopSeat)
+		if err != nil || got != (overrunSave{}) {
+			t.Errorf("save = %+v, %v; want nothing to save: the branch holds HEAD", got, err)
+		}
+	})
+}
+
 // unreadableRefGit is the seat's git with one read failing: the current branch,
 // or the head of the ref failRev names. Every other call goes to the fake.
 type unreadableRefGit struct {
