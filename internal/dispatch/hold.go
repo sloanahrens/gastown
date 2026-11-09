@@ -40,11 +40,12 @@ func BootHealthPath(townRoot string) string {
 // BootHold returns the boot reason the daemon published at BootHealthPath, or
 // "" when the file does not exist. A file that exists but cannot be read, or
 // that names no reason, holds, because the daemon's answer cannot be ruled out.
-// A file left by a dead daemon holds on purpose (fail closed); to clear it,
-// remove daemon/boot-health under the town root by hand.
+// An empty town root holds too, since the file cannot be located to rule it
+// out. A file left by a dead daemon holds on purpose (fail closed); to clear
+// it, remove daemon/boot-health under the town root by hand.
 func BootHold(townRoot string) string {
 	if townRoot == "" {
-		return ""
+		return "no town root to read the boot health from; treating as held"
 	}
 	path := BootHealthPath(townRoot)
 	data, err := os.ReadFile(path)
