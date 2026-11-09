@@ -120,6 +120,9 @@ spec:
               mountPath: /run/secrets/forge-token
               subPath: forgejo-landing.env
               readOnly: true
+            - name: daemon-openshell
+              mountPath: /run/gt/xdg/openshell
+              readOnly: true
             - name: town-state
               mountPath: /run/gt/xdg/om/config.json
               subPath: .runtime/container/om-config.json
@@ -213,3 +216,30 @@ spec:
         - name: daemon-jev-env
           secret:
             secretName: daemon-jev.env
+        - name: daemon-openshell
+          secret:
+            secretName: daemon-openshell
+            defaultMode: 256
+            items:
+              - key: gateway.toml
+                path: gateway.toml
+              - key: active_gateway
+                path: active_gateway
+              - key: gateways__k8s__metadata.json
+                path: gateways/k8s/metadata.json
+              - key: gateways__k8s__last_sandbox
+                path: gateways/k8s/last_sandbox
+              - key: gateways__k8s__mtls__ca.crt
+                path: gateways/k8s/mtls/ca.crt
+              - key: gateways__k8s__mtls__tls.crt
+                path: gateways/k8s/mtls/tls.crt
+              - key: gateways__k8s__mtls__tls.key
+                path: gateways/k8s/mtls/tls.key
+              - key: gateways__openshell__metadata.json
+                path: gateways/openshell/metadata.json
+              - key: gateways__openshell__mtls__ca.crt
+                path: gateways/openshell/mtls/ca.crt
+              - key: gateways__openshell__mtls__tls.crt
+                path: gateways/openshell/mtls/tls.crt
+              - key: gateways__openshell__mtls__tls.key
+                path: gateways/openshell/mtls/tls.key

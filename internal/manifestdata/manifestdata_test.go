@@ -128,3 +128,19 @@ unclaimed:
 		t.Errorf("unclaimed = %+v, want the unclaimed file with its search", m.Unclaimed)
 	}
 }
+
+// TestOpenShellEntryIsGuarded holds the openshell entry to the same guard as a
+// listed file: its consumer citation is present, and the guard refuses the entry
+// once the citation is removed, naming it (gt-nr548n).
+func TestOpenShellEntryIsGuarded(t *testing.T) {
+	t.Parallel()
+	if err := ValidateSecretsManifest(SecretsManifest{Files: []SecretFile{OpenShellEntry}}); err != nil {
+		t.Fatalf("ValidateSecretsManifest(OpenShellEntry) = %v, want the entry accepted", err)
+	}
+	uncited := OpenShellEntry
+	uncited.Consumer = ""
+	err := ValidateSecretsManifest(SecretsManifest{Files: []SecretFile{uncited}})
+	if err == nil || !strings.Contains(err.Error(), `"openshell"`) {
+		t.Errorf("ValidateSecretsManifest on an uncited openshell entry = %v, want a refusal naming it", err)
+	}
+}

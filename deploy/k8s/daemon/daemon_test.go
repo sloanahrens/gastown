@@ -171,12 +171,14 @@ func TestRenderGolden(t *testing.T) {
 	} {
 		compareGolden(t, dir, doc.file, document(t, doc.value))
 	}
-	if len(m.Secrets) != len(v.Secrets) {
-		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries, want one each", len(m.Secrets), len(v.Secrets))
+	// One Secret per entry, then the daemon-openshell Secret.
+	if len(m.Secrets) != len(v.Secrets)+1 {
+		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries, want one each and the openshell Secret", len(m.Secrets), len(v.Secrets))
 	}
-	for i, s := range m.Secrets {
-		compareGolden(t, dir, "secret-"+v.Secrets[i].Name+".yaml", document(t, s))
+	for i, file := range v.Secrets {
+		compareGolden(t, dir, "secret-"+file.Name+".yaml", document(t, m.Secrets[i]))
 	}
+	compareGolden(t, dir, "secret-openshell.yaml", document(t, m.Secrets[len(v.Secrets)]))
 }
 
 // TestRenderWritesTheObjectsInOrder holds the stream's order, which an apply
@@ -646,8 +648,10 @@ func TestSecretsHoldNoBytes(t *testing.T) {
 	t.Parallel()
 	v := goldenValues(t)
 	m := mustBuild(t, v)
-	if len(m.Secrets) != len(v.Secrets) {
-		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries", len(m.Secrets), len(v.Secrets))
+	// The daemon-openshell Secret follows the entries; TestOpenShellSecretHasOneKeyPerFile
+	// holds its shape.
+	if len(m.Secrets) != len(v.Secrets)+1 {
+		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries and the openshell Secret", len(m.Secrets), len(v.Secrets))
 	}
 	for i, file := range v.Secrets {
 		s := m.Secrets[i]
@@ -1457,8 +1461,10 @@ type composeMount struct {
 // holds each row.
 var composeMounts = []composeMount{
 	{
+		// The daemon-openshell Secret serves the sandbox seats' gateway calls from
+		// the pod (gt-nr548n).
 		Name: "openshell config", Path: manifestdata.LiveOpenShellConfigPath,
-		Reason: "open gap, not rendered: the overseer ruled a read-only Secret mount at this path, but the host's ~/.config/openshell is a directory tree whose files are not enumerated in the repo, and a Secret's keys are flat (secret() in daemon.go), so no Secret shape is decided yet; until it is, the sandbox seats' gateway calls from the pod are unanswered (gt-nr548n)",
+		Volume: openShellVolumeName,
 	},
 	{
 		Name: "om config", Path: manifestdata.LiveOMConfigPath,
@@ -1649,6 +1655,153 @@ func TestClaudeBeadsDirIsMountedOrDropped(t *testing.T) {
 	neither.headComment = ""
 	if finding := claudeBeadsFinding(neither); !strings.Contains(finding, ClaudeBeadsRoot) {
 		t.Errorf("claudeBeadsFinding on a render with neither a mount nor the comment = %q, want a finding naming %s", finding, ClaudeBeadsRoot)
+	}
+}
+
+// openShellWantPaths is the openshell config tree's eleven files, each key mapped
+// to the nested path the pod mounts it at. It is written out here, not read from
+// openShellKeys, so a key that drifts from its path fails against this table.
+var openShellWantPaths = map[string]string{
+	"gateway.toml":                       "gateway.toml",
+	"active_gateway":                     "active_gateway",
+	"gateways__k8s__metadata.json":       "gateways/k8s/metadata.json",
+	"gateways__k8s__last_sandbox":        "gateways/k8s/last_sandbox",
+	"gateways__k8s__mtls__ca.crt":        "gateways/k8s/mtls/ca.crt",
+	"gateways__k8s__mtls__tls.crt":       "gateways/k8s/mtls/tls.crt",
+	"gateways__k8s__mtls__tls.key":       "gateways/k8s/mtls/tls.key",
+	"gateways__openshell__metadata.json": "gateways/openshell/metadata.json",
+	"gateways__openshell__mtls__ca.crt":  "gateways/openshell/mtls/ca.crt",
+	"gateways__openshell__mtls__tls.crt": "gateways/openshell/mtls/tls.crt",
+	"gateways__openshell__mtls__tls.key": "gateways/openshell/mtls/tls.key",
+}
+
+// openShellSecretFor returns the daemon-openshell Secret m renders, failing the
+// test when there is none.
+func openShellSecretFor(t *testing.T, m Manifests) Secret {
+	t.Helper()
+	for _, s := range m.Secrets {
+		if s.Metadata.Name == "daemon-openshell" {
+			return s
+		}
+	}
+	t.Fatal("the render writes no daemon-openshell Secret")
+	return Secret{}
+}
+
+// TestOpenShellSecretHasOneKeyPerFile holds the Secret's shape: one key per file
+// of the openshell tree, no key holds a slash, and every key is the file's nested
+// path with each folder separator written as a double underscore (gt-nr548n).
+func TestOpenShellSecretHasOneKeyPerFile(t *testing.T) {
+	t.Parallel()
+	s := openShellSecretFor(t, mustBuild(t, goldenValues(t)))
+	if len(s.StringData) != len(openShellWantPaths) {
+		t.Errorf("the daemon-openshell Secret has %d keys, want %d, one per file", len(s.StringData), len(openShellWantPaths))
+	}
+	for key := range s.StringData {
+		if strings.Contains(key, "/") {
+			t.Errorf("the daemon-openshell key %q holds a slash; a Secret key cannot", key)
+		}
+		want, ok := openShellWantPaths[key]
+		if !ok {
+			t.Errorf("the daemon-openshell Secret has key %q, which names no file of the openshell tree", key)
+			continue
+		}
+		if got := strings.ReplaceAll(key, "__", "/"); got != want {
+			t.Errorf("key %q maps to %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestOpenShellVolumeMapsEveryKeyAndIsPrivate holds the volume: exactly one item
+// per key, each item mapping its key to the nested path, and defaultMode 0400 so
+// the tls.key files are private in the pod.
+func TestOpenShellVolumeMapsEveryKeyAndIsPrivate(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues(t))
+	var vol *Volume
+	for i := range m.Deployment.Spec.Template.Spec.Volumes {
+		if v := &m.Deployment.Spec.Template.Spec.Volumes[i]; v.Name == "daemon-openshell" {
+			vol = v
+		}
+	}
+	if vol == nil || vol.Secret == nil {
+		t.Fatal("the pod has no daemon-openshell Secret volume")
+	}
+	if vol.Secret.SecretName != "daemon-openshell" {
+		t.Errorf("the volume reads Secret %q, want daemon-openshell", vol.Secret.SecretName)
+	}
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o400 {
+		t.Errorf("the volume's defaultMode = %v, want 0400", vol.Secret.DefaultMode)
+	}
+	if len(vol.Secret.Items) != len(openShellWantPaths) {
+		t.Errorf("the volume has %d items, want %d, one per key", len(vol.Secret.Items), len(openShellWantPaths))
+	}
+	for _, item := range vol.Secret.Items {
+		if want := openShellWantPaths[item.Key]; want == "" || item.Path != want {
+			t.Errorf("item %q maps to %q, want %q", item.Key, item.Path, want)
+		}
+	}
+}
+
+// TestOpenShellMountIsReadOnlyAtConfigHome holds the mount: the openshell config
+// is mounted read-only at the exact path beneath XDG_CONFIG_HOME, and that env
+// value names the mount's parent, so the daemon's openshell finds its gateways
+// there (gt-nr548n).
+func TestOpenShellMountIsReadOnlyAtConfigHome(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec
+	const mountAt = "/run/gt/xdg/openshell"
+	c := pod.Containers[0]
+	m := volumeMountAt(c.VolumeMounts, mountAt)
+	if m == nil {
+		t.Fatalf("the daemon container mounts nothing at %s", mountAt)
+	}
+	if m.Name != "daemon-openshell" || m.SubPath != "" {
+		t.Errorf("the mount at %s carries volume %q subPath %q, want the daemon-openshell volume and no subPath", mountAt, m.Name, m.SubPath)
+	}
+	if !m.ReadOnly {
+		t.Errorf("the mount at %s is writable, want read-only", mountAt)
+	}
+	var configHome string
+	for _, e := range c.Env {
+		if e.Name == ConfigHomeEnv {
+			configHome = e.Value
+		}
+	}
+	if path.Dir(mountAt) != configHome {
+		t.Errorf("%s = %q, want the openshell mount's parent %q", ConfigHomeEnv, configHome, path.Dir(mountAt))
+	}
+}
+
+// TestOpenShellIsAbsentFromRehearsal holds the rehearsal's credential allowlist:
+// a rehearsal renders neither the openshell Secret, its volume nor its mount.
+func TestOpenShellIsAbsentFromRehearsal(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, rehearsalValues(t))
+	for _, s := range m.Secrets {
+		if s.Metadata.Name == "daemon-openshell" {
+			t.Errorf("the rehearsal renders the daemon-openshell Secret, which it must not carry")
+		}
+	}
+	for _, v := range m.Deployment.Spec.Template.Spec.Volumes {
+		if v.Name == "daemon-openshell" {
+			t.Errorf("the rehearsal renders the daemon-openshell volume")
+		}
+	}
+	if volumeMountAt(m.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, "/run/gt/xdg/openshell") != nil {
+		t.Errorf("the rehearsal mounts the openshell config")
+	}
+}
+
+// TestSecretEntryNamedOpenShellIsRefused holds the volume-name collision: a
+// listed Secret file named openshell would take the openshell volume's name, so
+// the render refuses it, naming the entry.
+func TestSecretEntryNamedOpenShellIsRefused(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	v.Secrets = append(v.Secrets, manifestdata.SecretFile{Name: "openshell", Consumer: "a test", Mode: "0600"})
+	if _, err := Build(v); err == nil || !strings.Contains(err.Error(), `"openshell"`) {
+		t.Errorf("Build with a Secret file named openshell = %v, want a refusal naming it", err)
 	}
 }
 
