@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -32,6 +33,13 @@ const (
 	// needsEngineHeading starts the document's closing list of the rows the
 	// pod cannot answer, each with its bead.
 	needsEngineHeading = "## Needs an engine"
+	// classHeading starts the document's list of runners in the daemon's closure
+	// whose program the caller passes, each named by file and function, which
+	// have no row of their own.
+	classHeading = "## Runners the caller names"
+	// outOfClosureHeading starts the document's list of unresolved programs in
+	// packages the daemon does not reach, each named by file and function.
+	outOfClosureHeading = "## Out of the daemon's closure"
 	// packageSymbol stands for a site outside any function.
 	packageSymbol = "<package>"
 	// unresolvedProgram names a command whose program the scan cannot read.
@@ -46,6 +54,9 @@ const (
 	runnerConfigFile = "internal/config/daemon_config.go"
 	// daemonDir is the package whose calls rule out a mac-job row.
 	daemonDir = "internal/daemon"
+	// modulePath is the module's import path, whose internal packages the
+	// daemon closure follows.
+	modulePath = "github.com/steveyegge/gastown"
 	// minSites is the inventory's size less a margin: a scanner that stopped
 	// seeing call sites would otherwise pass every check below.
 	minSites = 25
@@ -65,9 +76,13 @@ type engineSite struct {
 	Symbol string
 	// Text is that source line, whitespace-collapsed.
 	Text string
-	// Unresolved marks a command whose program is a name the file binds to a
-	// value that is not a literal, so the scan cannot read it.
+	// Unresolved marks a command whose program the scan cannot read: a name the
+	// file binds to a value that is not a literal, a parameter, or an element
+	// read by index.
 	Unresolved bool
+	// Reached marks a site in a package internal/daemon reaches. An unresolved
+	// site outside it is listed in the document, not given a row.
+	Reached bool
 }
 
 func (s engineSite) key() string { return fmt.Sprintf("%s\x00%s\x00%d", s.File, s.Symbol, s.Line) }
@@ -79,6 +94,10 @@ const (
 	bindOpaque  bindKind = iota // a value the scan cannot read
 	bindLiteral                 // a string literal; value is its text
 	bindAlias                   // another name; value is that name
+	// bindList is a string slice whose first element is a string literal. The
+	// literal is read where it is written, so an index read of the list is not
+	// a second program the scan has to resolve.
+	bindList
 )
 
 // binding is one name's value in a scope.
@@ -100,8 +119,27 @@ func bindingOf(e ast.Expr) binding {
 		}
 	case *ast.Ident:
 		return binding{kind: bindAlias, value: x.Name}
+	case *ast.CompositeLit:
+		if len(x.Elts) > 0 && isArgvLiteral(x) {
+			if lit, ok := x.Elts[0].(*ast.BasicLit); ok && lit.Kind == token.STRING {
+				return binding{kind: bindList}
+			}
+		}
 	}
 	return binding{kind: bindOpaque}
+}
+
+// bindParams binds a function's named parameters, a variadic one included, to
+// values the scan cannot read: the caller passes the program in (gt-cesfam).
+func bindParams(scope bindings, ft *ast.FuncType) {
+	if ft.Params == nil {
+		return
+	}
+	for _, f := range ft.Params.List {
+		for _, name := range f.Names {
+			scope[name.Name] = binding{kind: bindOpaque}
+		}
+	}
 }
 
 // addSpecs binds the names of a const or var declaration.
@@ -160,7 +198,9 @@ func addLocals(scope bindings, body *ast.BlockStmt) {
 // programValue reads e as a program name: the literal's text, or the text a
 // name in scope is bound to, through aliases. known is false when the value
 // is not a literal the scan can read; bound is false when e is not a name the
-// scope binds, so a call through it is not read as a docker call.
+// scope binds, so a call through it is not read as a docker call. An element
+// read by index from a name the scope binds is unknown, except from a literal
+// list, whose program the literal already names.
 func programValue(e ast.Expr, scope bindings) (value string, known, bound bool) {
 	switch x := e.(type) {
 	case *ast.BasicLit:
@@ -173,22 +213,43 @@ func programValue(e ast.Expr, scope bindings) (value string, known, bound bool) 
 		}
 		return v, true, true
 	case *ast.Ident:
-		name := x.Name
-		for range 8 {
-			b, ok := scope[name]
-			if !ok {
-				return "", false, false
-			}
-			switch b.kind {
-			case bindLiteral:
-				return b.value, true, true
-			case bindOpaque:
-				return "", false, true
-			}
-			name = b.value
+		b, ok := bindingFor(x.Name, scope)
+		switch {
+		case !ok || b.kind == bindList:
+			return "", false, false
+		case b.kind == bindLiteral:
+			return b.value, true, true
 		}
+		return "", false, true
+	case *ast.IndexExpr:
+		id, ok := x.X.(*ast.Ident)
+		if !ok {
+			return "", false, false
+		}
+		b, ok := bindingFor(id.Name, scope)
+		if !ok || b.kind == bindList {
+			return "", false, false
+		}
+		return "", false, true
 	}
 	return "", false, false
+}
+
+// bindingFor follows a name through its aliases to what it is bound to. ok is
+// false when the scope does not bind the name, or the aliases do not end in a
+// binding within the scan's bound of eight hops.
+func bindingFor(name string, scope bindings) (b binding, ok bool) {
+	for range 8 {
+		b, ok = scope[name]
+		if !ok {
+			return binding{}, false
+		}
+		if b.kind != bindAlias {
+			return b, true
+		}
+		name = b.value
+	}
+	return binding{}, false
 }
 
 // siteFinder collects one file's docker call sites.
@@ -217,6 +278,14 @@ func (sf *siteFinder) add(pos token.Pos, symbol string, unresolved bool) {
 func (sf *siteFinder) scanBody(n ast.Node, scope bindings, symbol string, inFunc bool) {
 	ast.Inspect(n, func(c ast.Node) bool {
 		switch x := c.(type) {
+		case *ast.FuncLit:
+			// A literal's parameters are its own; its body is read in a scope of
+			// its own, with the enclosing names it can see.
+			inner := maps.Clone(scope)
+			bindParams(inner, x.Type)
+			addLocals(inner, x.Body)
+			sf.scanBody(x.Body, inner, symbol, inFunc)
+			return false
 		case *ast.CallExpr:
 			sf.scanCall(x, scope, symbol)
 		case *ast.CompositeLit:
@@ -269,6 +338,7 @@ func walkEngineSites(file string, f *ast.File, fset *token.FileSet, lines []stri
 				continue
 			}
 			scope := maps.Clone(pkg)
+			bindParams(scope, x.Type)
 			addLocals(scope, x.Body)
 			sf.scanBody(x.Body, scope, funcSymbol(x), true)
 		case *ast.GenDecl:
@@ -285,10 +355,77 @@ func walkEngineSites(file string, f *ast.File, fset *token.FileSet, lines []stri
 	return sf.sites, holds
 }
 
+// daemonClosure returns the package directories, slash-separated and relative
+// to root, that internal/daemon reaches: the packages its non-test files import
+// under this module's internal/, and the packages those import in turn. It takes
+// the import specs of each file and nothing else: no process starts and no
+// network call is made. Each file is parsed in full, so one that does not parse
+// is an error and not a short closure. No build constraint is applied, so the
+// closure is the widest the daemon can reach (gt-cesfam).
+func daemonClosure(root string) (map[string]bool, error) {
+	closure := map[string]bool{}
+	queue := []string{daemonDir}
+	for len(queue) > 0 {
+		dir := queue[0]
+		queue = queue[1:]
+		if closure[dir] {
+			continue
+		}
+		closure[dir] = true
+		imports, err := packageImports(filepath.Join(root, filepath.FromSlash(dir)))
+		if err != nil {
+			return nil, err
+		}
+		for _, imp := range imports {
+			rel, ok := strings.CutPrefix(imp, modulePath+"/internal/")
+			if !ok {
+				continue
+			}
+			next := "internal/" + rel
+			if path.Clean(next) != next {
+				return nil, fmt.Errorf("%s imports %s, which is not a clean package path under internal/, so the daemon closure is not known", filepath.ToSlash(dir), imp)
+			}
+			queue = append(queue, next)
+		}
+	}
+	return closure, nil
+}
+
+// packageImports returns the import paths the non-test Go files directly in dir
+// name. A directory or file it cannot read is an error.
+func packageImports(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("the package %s cannot be read, so the daemon closure is not known: %w", filepath.ToSlash(dir), err)
+	}
+	fset := token.NewFileSet()
+	var imports []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		file := filepath.Join(dir, e.Name())
+		f, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			return nil, fmt.Errorf("%s cannot be parsed, so the daemon closure is not known: %w", filepath.ToSlash(file), err)
+		}
+		for _, spec := range f.Imports {
+			p, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				return nil, fmt.Errorf("%s has an import path that does not unquote: %w", filepath.ToSlash(file), err)
+			}
+			imports = append(imports, p)
+		}
+	}
+	return imports, nil
+}
+
 // scanDockerSites walks the non-test Go files under root/internal and returns
 // the docker call sites and the files that hold the program literal at all. A
 // file that cannot be parsed is an error: a scan that skips it would read an
-// unreadable call site as no call site (gt-cd5rqa).
+// unreadable call site as no call site (gt-cd5rqa). Each site records whether
+// the daemon reaches its package, which decides whether an unresolved program
+// there needs a row (gt-cesfam).
 func scanDockerSites(root string) ([]engineSite, []string, error) {
 	var (
 		sites []engineSite
@@ -329,6 +466,13 @@ func scanDockerSites(root string) ([]engineSite, []string, error) {
 	})
 	if err != nil {
 		return nil, nil, err
+	}
+	closure, err := daemonClosure(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	for i := range sites {
+		sites[i].Reached = closure[path.Dir(sites[i].File)]
 	}
 	slices.SortFunc(sites, func(a, b engineSite) int {
 		if a.File != b.File {
@@ -431,9 +575,23 @@ type engineDocContent struct {
 	Backend string
 	// NeedsEngine is the closing section's text, read against the needs-engine rows.
 	NeedsEngine string
+	// Classes are the runners in the daemon's closure the document lists in
+	// place of rows.
+	Classes []docFunc
+	// OutOfClosure are the unresolved programs the document lists for packages
+	// the daemon does not reach.
+	OutOfClosure []docFunc
 	// Text is the whole document.
 	Text string
 }
+
+// docFunc is one bullet of a list that names a function by file and symbol.
+type docFunc struct {
+	File   string
+	Symbol string
+}
+
+var funcBulletRE = regexp.MustCompile("^- `(internal/[^`]+)` `([^`]+)`")
 
 // parseEngineDoc reads the table, the not-a-call-site list, the backend claim
 // and the closing section. A table row that is not seven cells is an error: a
@@ -462,6 +620,17 @@ func parseEngineDoc(path string) (*engineDocContent, error) {
 		if section == notCallSiteHeading {
 			if name, ok := bulletFile(trimmed); ok {
 				doc.NamedFiles = append(doc.NamedFiles, name)
+			}
+			continue
+		}
+		if section == classHeading || section == outOfClosureHeading {
+			if m := funcBulletRE.FindStringSubmatch(trimmed); m != nil {
+				f := docFunc{File: m[1], Symbol: m[2]}
+				if section == classHeading {
+					doc.Classes = append(doc.Classes, f)
+				} else {
+					doc.OutOfClosure = append(doc.OutOfClosure, f)
+				}
 			}
 			continue
 		}
@@ -508,38 +677,77 @@ func tableCells(line string) []string {
 	return cells
 }
 
-// handWrittenRows are rows for a call the scan cannot read, because the call
-// runs a program it takes as a parameter (gt-cesfam). The row still cites the
-// line that runs the program, which the citation check reads, and the closing
-// section lists it. Keyed by file, function and line.
-var handWrittenRows = map[string]bool{
-	"internal/doltserver/host.go\x00host.probe\x00238": true,
-}
-
 // compareInventory reports every call site the table does not classify and
-// every row that names no call at its line, except a hand-written row.
-func compareInventory(sites []engineSite, rows []engineRow) []string {
+// every row that names no call at its line. An unresolved program in the
+// daemon's closure needs a row, or a class that names its function. An
+// unresolved program outside the closure is not a row's business:
+// compareOutOfClosure holds it to the document's list instead.
+func compareInventory(sites []engineSite, rows []engineRow, classes []docFunc) []string {
 	rowKey := map[string]bool{}
 	for _, r := range rows {
 		rowKey[fmt.Sprintf("%s\x00%s\x00%d", r.File, r.Symbol, r.Line)] = true
 	}
+	classed := map[docFunc]bool{}
+	for _, c := range classes {
+		classed[c] = true
+	}
 	siteKey := map[string]bool{}
+	reachedFn := map[docFunc]bool{}
 	var problems []string
 	for _, s := range sites {
+		if s.Unresolved && !s.Reached {
+			continue
+		}
 		siteKey[s.key()] = true
-		if rowKey[s.key()] {
+		if s.Unresolved {
+			reachedFn[docFunc{s.File, s.Symbol}] = true
+		}
+		if rowKey[s.key()] || (s.Unresolved && classed[docFunc{s.File, s.Symbol}]) {
 			continue
 		}
 		what := "runs the docker CLI"
 		if s.Unresolved {
 			what = "runs a command whose program is " + unresolvedProgram
 		}
-		problems = append(problems, fmt.Sprintf("%s:%d: %s %s and %s has no row for it: %s", s.File, s.Line, s.Symbol, what, engineDoc, s.Text))
+		problems = append(problems, fmt.Sprintf("%s:%d: %s %s and %s has no row or class for it: %s", s.File, s.Line, s.Symbol, what, engineDoc, s.Text))
 	}
 	for _, r := range rows {
 		key := fmt.Sprintf("%s\x00%s\x00%d", r.File, r.Symbol, r.Line)
-		if r.Line != 0 && !siteKey[key] && !handWrittenRows[key] {
+		if r.Line != 0 && !siteKey[key] {
 			problems = append(problems, fmt.Sprintf("row %d (%s %s line %d): names no docker CLI call at that line", r.DocLine, r.File, r.Symbol, r.Line))
+		}
+	}
+	for _, c := range classes {
+		if !reachedFn[c] {
+			problems = append(problems, fmt.Sprintf("the runner list names %s %s, which holds no unresolved program in the daemon's closure", c.File, c.Symbol))
+		}
+	}
+	return problems
+}
+
+// compareOutOfClosure holds the unresolved programs outside the daemon's closure
+// to the document's list: each site is listed by file and function, and each
+// listed function holds such a site.
+func compareOutOfClosure(sites []engineSite, listed []docFunc) []string {
+	type fn struct{ file, symbol string }
+	have := map[fn]bool{}
+	for _, l := range listed {
+		have[fn{l.File, l.Symbol}] = true
+	}
+	found := map[fn]bool{}
+	var problems []string
+	for _, s := range sites {
+		if !s.Unresolved || s.Reached {
+			continue
+		}
+		found[fn{s.File, s.Symbol}] = true
+		if !have[fn{s.File, s.Symbol}] {
+			problems = append(problems, fmt.Sprintf("%s:%d: %s runs a command whose program is %s outside the daemon's closure, and %s does not list it: %s", s.File, s.Line, s.Symbol, unresolvedProgram, engineDoc, s.Text))
+		}
+	}
+	for _, l := range listed {
+		if !found[fn{l.File, l.Symbol}] {
+			problems = append(problems, fmt.Sprintf("the out-of-closure list names %s %s, which holds no unresolved program outside the daemon's closure", l.File, l.Symbol))
 		}
 	}
 	return problems
@@ -780,7 +988,8 @@ func inventoryProblems(t *testing.T, root string) []string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	problems := compareInventory(sites, doc.Rows)
+	problems := compareInventory(sites, doc.Rows, doc.Classes)
+	problems = append(problems, compareOutOfClosure(sites, doc.OutOfClosure)...)
 	problems = append(problems, compareNamedFiles(files, doc.Rows, doc.NamedFiles)...)
 	problems = append(problems, checkRowCitations(root, doc.Rows)...)
 	return append(problems, checkDispositions(root, doc.Rows)...)
@@ -943,6 +1152,7 @@ func TestEveryEngineSiteHasARowPerFunction(t *testing.T) {
 		t.Parallel()
 		root := fixtureTree(t, map[string]string{
 			"internal/x/x.go": "package x\n\nimport \"os/exec\"\n\nfunc pick() string { return \"docker\" }\n\nfunc Run() error {\n\tp := pick()\n\treturn exec.Command(p, \"ps\").Run()\n}\n",
+			daemonFile:        daemonImporting("internal/x"),
 			engineDoc:         renderEngineDoc(),
 		})
 		problems := inventoryProblems(t, root)
@@ -999,6 +1209,256 @@ func TestEveryEngineSiteHasARowPerFunction(t *testing.T) {
 			t.Fatalf("a test file's docker call was classified: %v", problems)
 		}
 	})
+}
+
+// daemonFile is a file in the daemon package. The closure of internal/daemon is
+// the packages its import specs reach, so a fixture that wants a package in the
+// closure has the daemon import it.
+const daemonFile = "internal/daemon/daemon.go"
+
+// daemonImporting is a daemon file that imports the given internal packages.
+func daemonImporting(pkgs ...string) string {
+	var b strings.Builder
+	b.WriteString("package daemon\n\nimport (\n")
+	for _, p := range pkgs {
+		fmt.Fprintf(&b, "\t_ %q\n", modulePath+"/"+p)
+	}
+	b.WriteString(")\n")
+	return b.String()
+}
+
+// TestUnresolvedProgramsInTheDaemonClosure holds the scan's reads of a program
+// it cannot see: a parameter, an element read by index, a function literal's
+// parameter. In a package the daemon reaches, such a program needs a row or a
+// class; elsewhere it is listed by function (gt-cesfam).
+func TestUnresolvedProgramsInTheDaemonClosure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		src    string
+		symbol string
+		line   int
+	}{
+		{
+			name:   "a program passed as a parameter",
+			src:    "package x\n\nimport \"os/exec\"\n\nfunc Run(name string) error {\n\treturn exec.Command(name, \"ps\").Run()\n}\n",
+			symbol: "Run", line: 6,
+		},
+		{
+			name:   "a program passed as a variadic parameter read by index",
+			src:    "package x\n\nimport \"os/exec\"\n\nfunc Run(argv ...string) error {\n\treturn exec.Command(argv[0], argv[1:]...).Run()\n}\n",
+			symbol: "Run", line: 6,
+		},
+		{
+			name:   "a program read by index from a name the scan cannot read",
+			src:    "package x\n\nimport \"os/exec\"\n\nfunc pick() []string { return nil }\n\nfunc Run() error {\n\tprogs := pick()\n\treturn exec.CommandContext(nil, progs[0], \"ps\").Run()\n}\n",
+			symbol: "Run", line: 9,
+		},
+		{
+			name:   "a function literal's parameter",
+			src:    "package x\n\nimport \"os/exec\"\n\nfunc Run() func(string) error {\n\treturn func(name string) error {\n\t\treturn exec.Command(name, \"ps\").Run()\n\t}\n}\n",
+			symbol: "Run", line: 7,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := fixtureTree(t, map[string]string{
+				"internal/x/x.go": tc.src,
+				daemonFile:        daemonImporting("internal/x"),
+				engineDoc:         renderEngineDoc(),
+			})
+			problems := inventoryProblems(t, root)
+			want := fmt.Sprintf("internal/x/x.go:%d", tc.line)
+			if len(problems) == 0 || !strings.Contains(problems[0], unresolvedProgram) || !strings.Contains(problems[0], want) || !strings.Contains(problems[0], tc.symbol) {
+				t.Fatalf("the unresolved program was not named at %s in %s: %v", want, tc.symbol, problems)
+			}
+			root = fixtureTree(t, map[string]string{
+				"internal/x/x.go": tc.src,
+				daemonFile:        daemonImporting("internal/x"),
+				engineDoc: renderEngineDoc(engineRow{
+					File: "internal/x/x.go", Symbol: tc.symbol, Line: tc.line, Source: normalize(strings.Split(tc.src, "\n")[tc.line-1]),
+					Asks: "ps", Disposition: "mac-job", Evidence: "`internal/x/x.go:" + strconv.Itoa(tc.line) + "`",
+				}),
+			})
+			if problems := inventoryProblems(t, root); len(problems) != 0 {
+				t.Fatalf("a site with its row was refused: %v", problems)
+			}
+		})
+	}
+
+	t.Run("a program read by index from a literal list is decided by the literal", func(t *testing.T) {
+		t.Parallel()
+		root := fixtureTree(t, map[string]string{
+			"internal/x/x.go": "package x\n\nimport \"os/exec\"\n\nfunc Run() error {\n\targv := []string{\"git\", \"status\"}\n\treturn exec.Command(argv[0], argv[1:]...).Run()\n}\n",
+			daemonFile:        daemonImporting("internal/x"),
+			engineDoc:         renderEngineDoc(),
+		})
+		if problems := inventoryProblems(t, root); len(problems) != 0 {
+			t.Fatalf("a literal list whose first element is git was read as an unresolved program: %v", problems)
+		}
+	})
+
+	// A package the daemon does not reach has no row; its unresolved program is
+	// listed by function in the document, and the listing is held to the scan.
+	outside := "package y\n\nimport \"os/exec\"\n\nfunc Run(name string) error {\n\treturn exec.Command(name, \"ps\").Run()\n}\n"
+	t.Run("an unresolved program outside the daemon's closure is refused unless listed", func(t *testing.T) {
+		t.Parallel()
+		root := fixtureTree(t, map[string]string{
+			"internal/y/y.go": outside,
+			daemonFile:        daemonImporting("internal/x"),
+			"internal/x/x.go": "package x\n",
+			engineDoc:         renderEngineDoc(),
+		})
+		problems := inventoryProblems(t, root)
+		if len(problems) != 1 || !strings.Contains(problems[0], "internal/y/y.go:6") || !strings.Contains(problems[0], "does not list it") {
+			t.Fatalf("an unlisted program outside the closure was not named: %v", problems)
+		}
+		root = fixtureTree(t, map[string]string{
+			"internal/y/y.go": outside,
+			daemonFile:        daemonImporting("internal/x"),
+			"internal/x/x.go": "package x\n",
+			engineDoc:         renderEngineDoc() + "\n## Out of the daemon's closure\n\n- `internal/y/y.go` `Run`\n",
+		})
+		if problems := inventoryProblems(t, root); len(problems) != 0 {
+			t.Fatalf("a listed program outside the closure was refused: %v", problems)
+		}
+	})
+
+	t.Run("a listed function with no unresolved program outside the closure is refused", func(t *testing.T) {
+		t.Parallel()
+		root := fixtureTree(t, map[string]string{
+			"internal/y/y.go": "package y\n\nfunc Run() {}\n",
+			"internal/x/x.go": "package x\n",
+			daemonFile:        daemonImporting("internal/x"),
+			engineDoc:         renderEngineDoc() + "\n## Out of the daemon's closure\n\n- `internal/y/y.go` `Run`\n",
+		})
+		problems := inventoryProblems(t, root)
+		if len(problems) != 1 || !strings.Contains(problems[0], "internal/y/y.go Run") {
+			t.Fatalf("a listed function that holds no such program was not named: %v", problems)
+		}
+	})
+
+	t.Run("a row for an unresolved program outside the closure is refused", func(t *testing.T) {
+		t.Parallel()
+		root := fixtureTree(t, map[string]string{
+			"internal/y/y.go": outside,
+			"internal/x/x.go": "package x\n",
+			daemonFile:        daemonImporting("internal/x"),
+			engineDoc: renderEngineDoc(engineRow{
+				File: "internal/y/y.go", Symbol: "Run", Line: 6, Source: "return exec.Command(name, \"ps\").Run()",
+				Asks: "ps", Disposition: "mac-job", Evidence: "`internal/y/y.go:6`",
+			}) + "\n## Out of the daemon's closure\n\n- `internal/y/y.go` `Run`\n",
+		})
+		problems := inventoryProblems(t, root)
+		if len(problems) != 1 || !strings.Contains(problems[0], "names no docker CLI call") {
+			t.Fatalf("a row for a site outside the closure was not refused: %v", problems)
+		}
+	})
+
+	t.Run("an unresolved program in the closure is refused unless a row or a class names it", func(t *testing.T) {
+		t.Parallel()
+		src := "package x\n\nimport \"os/exec\"\n\nfunc Run(name string) error {\n\treturn exec.Command(name, \"ps\").Run()\n}\n"
+		files := map[string]string{
+			"internal/x/x.go": src,
+			daemonFile:        daemonImporting("internal/x"),
+		}
+		files[engineDoc] = renderEngineDoc()
+		if problems := inventoryProblems(t, fixtureTree(t, files)); len(problems) != 1 || !strings.Contains(problems[0], "has no row or class") {
+			t.Fatalf("an unnamed in-closure program was not refused: %v", problems)
+		}
+		files[engineDoc] = renderEngineDoc() + "\n## Runners the caller names\n\n- `internal/x/x.go` `Run`\n"
+		if problems := inventoryProblems(t, fixtureTree(t, files)); len(problems) != 0 {
+			t.Fatalf("a runner the list names was refused: %v", problems)
+		}
+	})
+
+	t.Run("a runner the list names that holds no in-closure program is refused", func(t *testing.T) {
+		t.Parallel()
+		root := fixtureTree(t, map[string]string{
+			"internal/x/x.go": "package x\n\nfunc Run() {}\n",
+			daemonFile:        daemonImporting("internal/x"),
+			engineDoc:         renderEngineDoc() + "\n## Runners the caller names\n\n- `internal/x/x.go` `Run`\n",
+		})
+		problems := inventoryProblems(t, root)
+		if len(problems) != 1 || !strings.Contains(problems[0], "runner list names") {
+			t.Fatalf("a listed runner with no program was not named: %v", problems)
+		}
+	})
+}
+
+// TestDaemonClosureFollowsImportSpecs computes the packages internal/daemon
+// reaches from their import specs, through packages the daemon imports, and
+// refuses a closure it cannot read (gt-cesfam).
+func TestDaemonClosureFollowsImportSpecs(t *testing.T) {
+	t.Parallel()
+	t.Run("a package the daemon imports, and one it imports, are in the closure", func(t *testing.T) {
+		t.Parallel()
+		root := fixtureTree(t, map[string]string{
+			daemonFile:             daemonImporting("internal/x"),
+			"internal/x/x.go":      "package x\n\nimport _ \"" + modulePath + "/internal/z\"\n",
+			"internal/z/z.go":      "package z\n",
+			"internal/y/y.go":      "package y\n",
+			"internal/x/x_test.go": "package x\n\nimport _ \"" + modulePath + "/internal/y\"\n",
+		})
+		closure, err := daemonClosure(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !closure["internal/x"] || !closure["internal/z"] {
+			t.Fatalf("the closure misses a package the daemon reaches: %v", slices.Sorted(maps.Keys(closure)))
+		}
+		if closure["internal/y"] {
+			t.Fatalf("the closure reached internal/y through a test file, which is not a build import: %v", slices.Sorted(maps.Keys(closure)))
+		}
+	})
+
+	t.Run("the real tree puts a daemon-reached package in and a package it does not import out", func(t *testing.T) {
+		t.Parallel()
+		closure, err := daemonClosure(repoRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !closure["internal/doltserver"] {
+			t.Fatal("internal/doltserver is imported by internal/daemon, and the closure does not hold it")
+		}
+		if closure["internal/doctor"] {
+			t.Fatal("internal/doctor is not imported by internal/daemon, and the closure holds it")
+		}
+	})
+
+	for _, tc := range []struct {
+		name   string
+		files  map[string]string
+		break_ func(t *testing.T, root string)
+	}{
+		{name: "the daemon package is missing", break_: func(t *testing.T, root string) {
+			if err := os.RemoveAll(filepath.Join(root, daemonDir)); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "a package in the closure does not parse", files: map[string]string{
+			daemonFile:        daemonImporting("internal/x"),
+			"internal/x/x.go": "package x\n\nfunc {\n",
+		}},
+		{name: "an imported internal package is missing", files: map[string]string{
+			daemonFile: daemonImporting("internal/missing"),
+		}},
+		{name: "an import path leaves internal", files: map[string]string{
+			daemonFile: daemonImporting("internal/../cmd"),
+			"cmd/c.go": "package cmd\n",
+		}},
+	} {
+		t.Run("refuses a closure it cannot read when "+tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := fixtureTree(t, tc.files)
+			if tc.break_ != nil {
+				tc.break_(t, root)
+			}
+			if _, err := daemonClosure(root); err == nil {
+				t.Fatal("the closure was read as complete")
+			}
+		})
+	}
 }
 
 // TestEveryRowCitesALineThatHoldsItsText checks each row's file, line and
