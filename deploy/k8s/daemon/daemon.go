@@ -29,10 +29,15 @@
 //
 // Values.Image is the digest reference read from deploy/values/images.yaml,
 // which `gt update images` writes (gt-gg9hv.63); the render refuses a tag, so
-// the pod runs the commit the values file records. The Deployment carries
+// the pod runs the commit the values file records. The live Deployment carries
 // gt/town-owner: pod and is not rendered without ConfirmContainerStopped: the
 // Docker Desktop container owns the town until it is stopped, and only one of
 // the two may own it (gt-gg9hv.30).
+//
+// Values.Rehearsal renders a smaller pod that may run beside the live container:
+// it names its own namespace (never DefaultNamespace), carries gt/town-owner:
+// rehearsal, needs no ConfirmContainerStopped, mounts only the rehearsalSecrets
+// entries, and binds no sweep or cache-trim role (gt-z4ag59).
 //
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
@@ -73,11 +78,20 @@ const (
 	// own the town at once (gt-gg9hv.30).
 	TownOwnerAnnotation = "gt/town-owner"
 	TownOwnerPod        = "pod"
+	// TownOwnerRehearsal is the owner of a rehearsal Deployment, which runs
+	// beside the live container and never owns the town.
+	TownOwnerRehearsal = "rehearsal"
 	// OMTokenFile and ForgeTokenFile are the deploy/daemon/secrets.yaml entries
 	// whose Secrets the pod mounts at the paths the entrypoint's arguments name
 	// (manifestdata.LiveOMTokenPath and manifestdata.LiveForgeTokenPath).
 	OMTokenFile    = "om-daemon-token" //nolint:gosec // a file name, not a credential
 	ForgeTokenFile = "forgejo-landing.env"
+	// RehearsalForgeTokenFile is the read-only forge token a rehearsal mounts at
+	// the path ForgeTokenFile would take: the landing bot's token never reaches a
+	// rehearsal pod.
+	RehearsalForgeTokenFile = "forgejo-viewer.env" //nolint:gosec // a file name, not a credential
+	// OMTokenMetaFile is the om token's expiry sidecar (daemon.om_token_meta).
+	OMTokenMetaFile = "om-daemon-token.meta" //nolint:gosec // a file name, not a credential
 	// The sweep's roles in deploy/k8s/sweep-rbac.yaml. The render binds the
 	// pod's service account to them and copies no rule from them.
 	SweepNamespace     = "gt-sweeps"
@@ -191,6 +205,12 @@ const (
 	ConfigHomeEnv = "XDG_CONFIG_HOME"
 )
 
+// rehearsalSecrets are the deploy/daemon/secrets.yaml entries a rehearsal renders
+// and mounts. It is an allowlist: an entry added to the manifest later is absent
+// from a rehearsal until it is named here, so a rehearsal starts with the fewest
+// credentials. It excludes the promote keys, jev.env and the landing token.
+var rehearsalSecrets = []string{OMTokenFile, OMTokenMetaFile, RehearsalForgeTokenFile}
+
 // Mount is one volume of the daemon pod: the volume's name, the pod path it
 // appears at, and the town-root entries it carries.
 type Mount struct {
@@ -245,8 +265,12 @@ func ownedBy(m *manifestdata.Manifest, owner manifestdata.Owner) []string {
 // Values is what the caller supplies.
 type Values struct {
 	// Namespace is the namespace every object lands in; DefaultNamespace when
-	// empty.
+	// empty. A rehearsal must name one, and not DefaultNamespace.
 	Namespace string
+	// Rehearsal renders the rehearsal pod instead of the live one: see the
+	// package comment. It is refused a DefaultNamespace, needs no
+	// ConfirmContainerStopped, and renders only rehearsalSecrets.
+	Rehearsal bool
 	// TownStateStorage is the town-state claim's requested size;
 	// DefaultTownStateStorage when empty.
 	TownStateStorage string
@@ -264,7 +288,8 @@ type Values struct {
 	// Secrets are the entries of deploy/daemon/secrets.yaml's files list. One
 	// Secret is rendered per entry, whether or not the Deployment mounts it: an
 	// unclaimed entry still gets a Secret, holding the entry's name as an empty
-	// placeholder key. The renderer never receives a secret's bytes.
+	// placeholder key. A rehearsal renders only the entries rehearsalSecrets names.
+	// The renderer never receives a secret's bytes.
 	Secrets []manifestdata.SecretFile
 	// Image is the daemon reference read from deploy/values/images.yaml
 	// (gt-gg9hv.63): repo@sha256:<64 lowercase hex>. A tag is refused.
@@ -296,8 +321,9 @@ type Values struct {
 	// the floor.
 	TerminationGraceSeconds int
 	// ConfirmContainerStopped is the operator's acknowledgement that the Docker
-	// Desktop container is stopped. The render refuses without it: only one of
-	// the container and the pod may own the town (gt-gg9hv.30).
+	// Desktop container is stopped. The live render refuses without it: only one
+	// of the container and the pod may own the town (gt-gg9hv.30). A rehearsal
+	// does not need it, because it never owns the town.
 	ConfirmContainerStopped bool
 }
 
@@ -325,6 +351,9 @@ func Build(v Values) (Manifests, error) {
 	if namespace == "" {
 		namespace = DefaultNamespace
 	}
+	if v.Rehearsal {
+		v.Secrets = rehearsalFiles(v.Secrets)
+	}
 
 	m := Manifests{
 		Namespace: Namespace{
@@ -346,16 +375,36 @@ func Build(v Values) (Manifests, error) {
 				Ports:        []ServicePort{{Name: "http", Port: ForgejoPort, Protocol: "TCP"}},
 			},
 		},
-		Secrets:              make([]Secret, 0, len(v.Secrets)),
-		Deployment:           deployment(v, namespace),
-		SweepRoleBinding:     roleBinding(Name+"-"+SweepRole, SweepNamespace, SweepRole, namespace),
-		CacheTrimRoleBinding: roleBinding(Name+"-"+CacheTrimRole, CacheTrimNamespace, CacheTrimRole, namespace),
-		SweepReaderBinding:   clusterRoleBinding(Name+"-"+SweepReaderRole, SweepReaderRole, namespace),
+		Secrets:    make([]Secret, 0, len(v.Secrets)),
+		Deployment: deployment(v, namespace),
+	}
+	// A rehearsal binds no sweep or cache-trim role, so the render grants its pod
+	// no Job in gt-sweeps and no CI cache access. Its bindings stay zero, and
+	// Render writes only the bindings that are set.
+	if !v.Rehearsal {
+		m.SweepRoleBinding = roleBinding(Name+"-"+SweepRole, SweepNamespace, SweepRole, namespace)
+		m.CacheTrimRoleBinding = roleBinding(Name+"-"+CacheTrimRole, CacheTrimNamespace, CacheTrimRole, namespace)
+		m.SweepReaderBinding = clusterRoleBinding(Name+"-"+SweepReaderRole, SweepReaderRole, namespace)
 	}
 	for _, file := range v.Secrets {
 		m.Secrets = append(m.Secrets, secret(file, namespace))
 	}
 	return m, nil
+}
+
+// rehearsalFiles is the part of files a rehearsal renders, in the manifest's
+// order: the entries rehearsalSecrets names.
+func rehearsalFiles(files []manifestdata.SecretFile) []manifestdata.SecretFile {
+	out := make([]manifestdata.SecretFile, 0, len(files))
+	for _, file := range files {
+		for _, name := range rehearsalSecrets {
+			if file.Name == name {
+				out = append(out, file)
+				break
+			}
+		}
+	}
+	return out
 }
 
 // claim is a claim of size, on class, named name in namespace. On the class
@@ -418,15 +467,20 @@ func clusterRoleBinding(name, role, serviceAccountNamespace string) ClusterRoleB
 }
 
 // deployment is the daemon pod: one replica under Recreate, as the container is
-// one service that owns the town's volume.
+// one service that owns the town's volume. Its owner annotation names the pod as
+// the town's owner, or a rehearsal, which owns nothing.
 func deployment(v Values, namespace string) Deployment {
+	owner := TownOwnerPod
+	if v.Rehearsal {
+		owner = TownOwnerRehearsal
+	}
 	return Deployment{
 		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		Metadata: ObjectMeta{
 			Name:        Name,
 			Namespace:   namespace,
 			Labels:      labels(),
-			Annotations: map[string]string{TownOwnerAnnotation: TownOwnerPod},
+			Annotations: map[string]string{TownOwnerAnnotation: owner},
 		},
 		Spec: DeploymentSpec{
 			Replicas: 1,
@@ -578,13 +632,22 @@ func mounts(v Values) []VolumeMount {
 	}
 	if v.ForgeHost != "" {
 		m = append(m, VolumeMount{
-			Name:      secretVolumeName(ForgeTokenFile),
+			Name:      secretVolumeName(v.forgeTokenFile()),
 			MountPath: manifestdata.LiveForgeTokenPath,
-			SubPath:   ForgeTokenFile,
+			SubPath:   v.forgeTokenFile(),
 			ReadOnly:  true,
 		})
 	}
 	return m
+}
+
+// forgeTokenFile is the Secret entry the pod mounts at the forge token path: the
+// landing bot's token in the live pod, the read-only viewer's in a rehearsal.
+func (v Values) forgeTokenFile() string {
+	if v.Rehearsal {
+		return RehearsalForgeTokenFile
+	}
+	return ForgeTokenFile
 }
 
 // secretVolumeName is the pod volume for a Secret of file: a DNS-1123 label.
@@ -644,6 +707,11 @@ func (v Values) withDefaults() Values {
 }
 
 func (v Values) validate() error {
+	if v.Rehearsal {
+		if err := v.validateRehearsal(); err != nil {
+			return err
+		}
+	}
 	if v.Namespace != "" && !validDNS1123Label(v.Namespace) {
 		return fmt.Errorf("Values.Namespace %q: want a DNS-1123 label of at most 63 characters, such as gt", v.Namespace)
 	}
@@ -672,15 +740,28 @@ func (v Values) validate() error {
 	return v.validateDaemon()
 }
 
+// validateRehearsal refuses a rehearsal that could render into the live
+// namespace. The namespace is what keeps a rehearsal's objects apart from the
+// live pod's, so it is required and may not be DefaultNamespace.
+func (v Values) validateRehearsal() error {
+	switch v.Namespace {
+	case "":
+		return fmt.Errorf("Values.Namespace is empty: a rehearsal names its own namespace, and may not use %q, the live namespace", DefaultNamespace)
+	case DefaultNamespace:
+		return fmt.Errorf("Values.Namespace %q: a rehearsal may not render into the live namespace %q; name its own", v.Namespace, DefaultNamespace)
+	}
+	return nil
+}
+
 // validateDaemon refuses what the Deployment cannot be rendered from: an image
-// that is not a digest, a missing single-owner acknowledgement, a credential
-// the Secrets list does not carry, a share or grace outside its grammar, and an
-// environment entry the render cannot write.
+// that is not a digest, a missing single-owner acknowledgement on the live pod,
+// a credential the Secrets list does not carry, a share or grace outside its
+// grammar, and an environment entry the render cannot write.
 func (v Values) validateDaemon() error {
 	switch {
 	case !imageRefRE.MatchString(v.Image):
 		return fmt.Errorf("Values.Image %q: want the daemon image by digest (repo@sha256:<64 lowercase hex>) from deploy/values/images.yaml; a tag is refused so the pod runs the commit the values file records", v.Image)
-	case !v.ConfirmContainerStopped:
+	case !v.Rehearsal && !v.ConfirmContainerStopped:
 		return errors.New("Values.ConfirmContainerStopped is false: the Docker Desktop container owns the town until it is stopped, so the Deployment is not rendered until the operator confirms the container is down")
 	case v.CPU == "":
 		return errors.New("Values.CPU is empty: no source gives the daemon's measured CPU share, so the render carries no default; pass the measured share")
@@ -704,7 +785,7 @@ func (v Values) validateDaemon() error {
 
 // validateCredentials holds the two mounts the command line names to the
 // Secrets the render writes: a flag whose Secret is absent names a file the pod
-// would never have.
+// would never have. The forge token is the entry forgeTokenFile names.
 func (v Values) validateCredentials() error {
 	has := make(map[string]bool, len(v.Secrets))
 	for _, file := range v.Secrets {
@@ -716,8 +797,8 @@ func (v Values) validateCredentials() error {
 	if v.ForgeHost == "" {
 		return nil
 	}
-	if !has[ForgeTokenFile] {
-		return fmt.Errorf("Values.ForgeHost is %q and Values.Secrets has no %q entry: the pod would mount a Secret the render never wrote", v.ForgeHost, ForgeTokenFile)
+	if forge := v.forgeTokenFile(); !has[forge] {
+		return fmt.Errorf("Values.ForgeHost is %q and Values.Secrets has no %q entry: the pod would mount a Secret the render never wrote", v.ForgeHost, forge)
 	}
 	if err := validForgeHost(v.ForgeHost); err != nil {
 		return fmt.Errorf("Values.ForgeHost %q: %w", v.ForgeHost, err)
@@ -899,7 +980,18 @@ func Render(w io.Writer, m Manifests) error {
 	for _, s := range m.Secrets {
 		docs = append(docs, s)
 	}
-	docs = append(docs, m.Deployment, m.SweepRoleBinding, m.CacheTrimRoleBinding, m.SweepReaderBinding)
+	docs = append(docs, m.Deployment)
+	// Build leaves a binding zero in a rehearsal, so a zero binding is one that
+	// was not rendered and is not written.
+	if m.SweepRoleBinding.Kind != "" {
+		docs = append(docs, m.SweepRoleBinding)
+	}
+	if m.CacheTrimRoleBinding.Kind != "" {
+		docs = append(docs, m.CacheTrimRoleBinding)
+	}
+	if m.SweepReaderBinding.Kind != "" {
+		docs = append(docs, m.SweepReaderBinding)
+	}
 	return encode(w, docs...)
 }
 
