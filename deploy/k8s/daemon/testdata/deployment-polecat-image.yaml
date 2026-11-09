@@ -1,0 +1,277 @@
+# no /Users/sloan/.claude/.beads mount: the host's claude beads database is outside the town root and no claim carries a copy, so this pod has none; the wisp reaper skips its missing root (TestWispReaperSkipsMissingExtraRoot)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daemon
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: daemon
+  annotations:
+    gt/town-owner: pod
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: daemon
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: daemon
+      annotations:
+        gastown.dev/polecat-image: registry.example.com/gt/gastown-polecat@sha256:5e7a1c0d9b3f24e68a0c1d7f9b2e4a6c8d0f1b3e5a7c9d2f4b6e8a0c1d3f5b7e
+    spec:
+      serviceAccountName: daemon
+      hostAliases:
+        - ip: 192.168.5.2
+          hostnames:
+            - host.docker.internal
+      terminationGracePeriodSeconds: 180
+      containers:
+        - name: daemon
+          image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          args:
+            - --om-token-file
+            - /run/secrets/om-token
+            - --forge-host
+            - forgejo:3000
+            - --forge-token-file
+            - /run/secrets/forge-token
+          workingDir: /Users/sloan/gt
+          env:
+            - name: GT_TOWN_ROOT
+              value: /Users/sloan/gt
+            - name: XDG_CONFIG_HOME
+              value: /run/gt/xdg
+            - name: GT_DAEMON_CONTAINER_NAME
+              value: daemon
+            - name: GT_DAEMON_SUPERVISOR
+              value: container
+            - name: TZ
+              value: America/Chicago
+            - name: AWS_REGION
+              value: us-east-1
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: town-state
+              mountPath: /Users/sloan/gt
+            - name: landing-work
+              mountPath: /Users/sloan/gt-landing.noindex
+            - name: dolt-backup
+              mountPath: /Users/sloan/gt-backups/dolt
+            - name: gotmp
+              mountPath: /Users/Shared/gt-gotmp.noindex
+            - name: daemon-forgejo-landing-env
+              mountPath: /run/gt/xdg/gt/forgejo-landing.env
+              subPath: forgejo-landing.env
+              readOnly: true
+            - name: daemon-forgejo-viewer-env
+              mountPath: /run/gt/xdg/gt/forgejo-viewer.env
+              subPath: forgejo-viewer.env
+              readOnly: true
+            - name: daemon-promote-gastown-key
+              mountPath: /run/gt/xdg/gt/promote-gastown.key
+              subPath: promote-gastown.key
+              readOnly: true
+            - name: daemon-promote-om-key
+              mountPath: /run/gt/xdg/gt/promote-om.key
+              subPath: promote-om.key
+              readOnly: true
+            - name: daemon-promote-hm-key
+              mountPath: /run/gt/xdg/gt/promote-hm.key
+              subPath: promote-hm.key
+              readOnly: true
+            - name: daemon-promote-beads-key
+              mountPath: /run/gt/xdg/gt/promote-beads.key
+              subPath: promote-beads.key
+              readOnly: true
+            - name: daemon-promote-mango-key
+              mountPath: /run/gt/xdg/gt/promote-mango.key
+              subPath: promote-mango.key
+              readOnly: true
+            - name: daemon-promote-fractals-key
+              mountPath: /run/gt/xdg/gt/promote-fractals.key
+              subPath: promote-fractals.key
+              readOnly: true
+            - name: daemon-om-daemon-token
+              mountPath: /run/gt/xdg/gt/om-daemon-token
+              subPath: om-daemon-token
+              readOnly: true
+            - name: daemon-om-daemon-token-meta
+              mountPath: /run/gt/xdg/gt/om-daemon-token.meta
+              subPath: om-daemon-token.meta
+              readOnly: true
+            - name: daemon-jev-env
+              mountPath: /run/gt/xdg/gt/jev.env
+              subPath: jev.env
+              readOnly: true
+            - name: daemon-ledger-reader-dsn
+              mountPath: /run/gt/xdg/gt/ledger-reader.dsn
+              subPath: ledger-reader.dsn
+              readOnly: true
+            - name: daemon-om-daemon-token
+              mountPath: /run/secrets/om-token
+              subPath: om-daemon-token
+              readOnly: true
+            - name: daemon-forgejo-landing-env
+              mountPath: /run/secrets/forge-token
+              subPath: forgejo-landing.env
+              readOnly: true
+            - name: polecat-image
+              mountPath: /run/gt/image/polecat-image
+              subPath: polecat-image
+              readOnly: true
+            - name: daemon-openshell
+              mountPath: /run/gt/xdg/openshell
+              readOnly: true
+            - name: town-state
+              mountPath: /run/gt/xdg/om/config.json
+              subPath: .runtime/container/om-config.json
+              readOnly: true
+          readinessProbe:
+            exec:
+              command:
+                - gt
+                - status
+                - --line
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - gt
+                - daemon
+                - status
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 5
+        - name: registry-proxy
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          args:
+            - TCP-LISTEN:5001,fork,reuseaddr,bind=127.0.0.1
+            - TCP:192.168.5.2:5001
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 10m
+              memory: 64Mi
+        - name: gateway-proxy
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          args:
+            - TCP-LISTEN:28443,fork,reuseaddr,bind=127.0.0.1
+            - TCP:192.168.5.2:28443
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 10m
+              memory: 64Mi
+      volumes:
+        - name: town-state
+          persistentVolumeClaim:
+            claimName: town-state
+        - name: landing-work
+          persistentVolumeClaim:
+            claimName: landing-work
+        - name: dolt-backup
+          persistentVolumeClaim:
+            claimName: dolt-backup
+        - name: gotmp
+          emptyDir: {}
+        - name: daemon-forgejo-landing-env
+          secret:
+            secretName: daemon-forgejo-landing.env
+            defaultMode: 384
+        - name: daemon-forgejo-viewer-env
+          secret:
+            secretName: daemon-forgejo-viewer.env
+            defaultMode: 384
+        - name: daemon-promote-gastown-key
+          secret:
+            secretName: daemon-promote-gastown.key
+            defaultMode: 384
+        - name: daemon-promote-om-key
+          secret:
+            secretName: daemon-promote-om.key
+            defaultMode: 384
+        - name: daemon-promote-hm-key
+          secret:
+            secretName: daemon-promote-hm.key
+            defaultMode: 384
+        - name: daemon-promote-beads-key
+          secret:
+            secretName: daemon-promote-beads.key
+            defaultMode: 384
+        - name: daemon-promote-mango-key
+          secret:
+            secretName: daemon-promote-mango.key
+            defaultMode: 384
+        - name: daemon-promote-fractals-key
+          secret:
+            secretName: daemon-promote-fractals.key
+            defaultMode: 384
+        - name: daemon-om-daemon-token
+          secret:
+            secretName: daemon-om-daemon-token
+            defaultMode: 384
+        - name: daemon-om-daemon-token-meta
+          secret:
+            secretName: daemon-om-daemon-token.meta
+            defaultMode: 384
+        - name: daemon-jev-env
+          secret:
+            secretName: daemon-jev.env
+            defaultMode: 384
+        - name: daemon-ledger-reader-dsn
+          secret:
+            secretName: daemon-ledger-reader.dsn
+            defaultMode: 384
+        - name: polecat-image
+          downwardAPI:
+            defaultMode: 292
+            items:
+              - path: polecat-image
+                fieldRef:
+                  fieldPath: metadata.annotations['gastown.dev/polecat-image']
+        - name: daemon-openshell
+          secret:
+            secretName: daemon-openshell
+            defaultMode: 256
+            items:
+              - key: gateway.toml
+                path: gateway.toml
+              - key: active_gateway
+                path: active_gateway
+              - key: gateways__k8s__metadata.json
+                path: gateways/k8s/metadata.json
+              - key: gateways__k8s__last_sandbox
+                path: gateways/k8s/last_sandbox
+              - key: gateways__k8s__mtls__ca.crt
+                path: gateways/k8s/mtls/ca.crt
+              - key: gateways__k8s__mtls__tls.crt
+                path: gateways/k8s/mtls/tls.crt
+              - key: gateways__k8s__mtls__tls.key
+                path: gateways/k8s/mtls/tls.key
+              - key: gateways__openshell__metadata.json
+                path: gateways/openshell/metadata.json
+              - key: gateways__openshell__mtls__ca.crt
+                path: gateways/openshell/mtls/ca.crt
+              - key: gateways__openshell__mtls__tls.crt
+                path: gateways/openshell/mtls/tls.crt
+              - key: gateways__openshell__mtls__tls.key
+                path: gateways/openshell/mtls/tls.key

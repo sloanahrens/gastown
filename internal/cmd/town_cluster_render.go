@@ -73,6 +73,7 @@ type clusterRenderFlags struct {
 	confirmStopped     bool
 	withHelper         bool
 	proxyImage         string
+	polecatImage       string
 	configDir          string
 	openShellConfigDir string
 }
@@ -141,6 +142,8 @@ func init() {
 		"also write the seed helper Pod, applied before the Deployment")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.proxyImage, "proxy-image", "",
 		"the socat relay image by digest (repo@sha256:<64 hex>); set, the live pod runs the registry and gateway relays")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.polecatImage, "polecat-image", "",
+		"the polecat image by digest (repo@sha256:<64 hex>); set, the pod template carries it as the gastown.dev/polecat-image annotation and a read-only file")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.configDir, "config-dir", "",
 		"the town's config directory the operator's secret files are in, an absolute path (default $XDG_CONFIG_HOME/gt or ~/.config/gt)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.openShellConfigDir, "openshell-config-dir", "",
@@ -261,6 +264,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		Secrets:                 secrets.Files,
 		Image:                   pair.Daemon,
 		ProxyImage:              f.proxyImage,
+		PolecatImage:            f.polecatImage,
 		Env:                     env,
 		CPU:                     f.cpu,
 		Memory:                  f.memory,

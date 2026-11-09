@@ -912,6 +912,91 @@ func TestRefusesATagAndAnUnconfirmedOwner(t *testing.T) {
 	}
 }
 
+// testPolecatImage is the polecat image digest the polecat-image golden records,
+// shaped as the values file writes one. Its repository and digest differ from the
+// daemon's and the relays', so a test cannot pass one off as another.
+const testPolecatImage = "registry.example.com/gt/gastown-polecat@sha256:" +
+	"5e7a1c0d9b3f24e68a0c1d7f9b2e4a6c8d0f1b3e5a7c9d2f4b6e8a0c1d3f5b7e"
+
+// TestPolecatImageIsAnnotatedAndProjected holds a digest PolecatImage to the pod
+// template's annotation, to a read-only downward-API file at PolecatImagePath, and
+// to the golden that shows both.
+func TestPolecatImageIsAnnotatedAndProjected(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	v.PolecatImage = testPolecatImage
+	m := mustBuild(t, v)
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-polecat-image.yaml", document(t, m.Deployment))
+
+	pod := m.Deployment.Spec.Template
+	if got := pod.Metadata.Annotations["gastown.dev/polecat-image"]; got != testPolecatImage {
+		t.Errorf("the pod template's gastown.dev/polecat-image annotation = %q, want the digest %q", got, testPolecatImage)
+	}
+
+	var vol *Volume
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == "polecat-image" {
+			vol = &pod.Spec.Volumes[i]
+		}
+	}
+	if vol == nil || vol.DownwardAPI == nil {
+		t.Fatalf("the pod carries no downward-API volume named polecat-image: %+v", pod.Spec.Volumes)
+	}
+	items := vol.DownwardAPI.Items
+	if len(items) != 1 || items[0].Path != "polecat-image" || items[0].FieldRef == nil ||
+		items[0].FieldRef.FieldPath != "metadata.annotations['gastown.dev/polecat-image']" {
+		t.Errorf("the volume's items = %+v, want the annotation projected as the file polecat-image", items)
+	}
+	if mode := vol.DownwardAPI.DefaultMode; mode == nil || *mode != 0o444 {
+		t.Errorf("the volume's defaultMode = %v, want 0444: the file is read-only", mode)
+	}
+
+	var mount *VolumeMount
+	for i := range pod.Spec.Containers[0].VolumeMounts {
+		if pod.Spec.Containers[0].VolumeMounts[i].MountPath == "/run/gt/image/polecat-image" {
+			mount = &pod.Spec.Containers[0].VolumeMounts[i]
+		}
+	}
+	if mount == nil {
+		t.Fatal("the daemon container mounts nothing at /run/gt/image/polecat-image")
+	}
+	if mount.Name != "polecat-image" || mount.SubPath != "polecat-image" || !mount.ReadOnly {
+		t.Errorf("the polecat-image mount = %+v, want the volume's file read-only by subPath", mount)
+	}
+}
+
+// TestPolecatImageEmptyRendersToday holds the Deployment with no PolecatImage to
+// the golden the render wrote before the field existed, byte for byte.
+func TestPolecatImageEmptyRendersToday(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	v.PolecatImage = ""
+	m := mustBuild(t, v)
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment.yaml", document(t, m.Deployment))
+}
+
+// TestPolecatImageRefusesATag holds a tag, a digest-less reference and a short
+// digest to a refusal that names the field and the value, as ProxyImage's does.
+func TestPolecatImageRefusesATag(t *testing.T) {
+	t.Parallel()
+	for _, image := range []string{
+		"registry.example.com/gt/gastown-polecat:1.8.0.3",
+		"registry.example.com/gt/gastown-polecat",
+		"registry.example.com/gt/gastown-polecat@sha256:FEEDFACE",
+	} {
+		v := goldenValues(t)
+		v.PolecatImage = image
+		_, err := Build(v)
+		if err == nil {
+			t.Errorf("Build with PolecatImage %q = a render, want a refusal", image)
+			continue
+		}
+		if !strings.Contains(err.Error(), "Values.PolecatImage") || !strings.Contains(err.Error(), image) {
+			t.Errorf("Build refused with %q, want Values.PolecatImage and the value %q named", err, image)
+		}
+	}
+}
+
 // TestDeploymentGolden holds the Deployment to its golden and to the shape the
 // pod relies on: one replica under Recreate, the digest image, requests equal
 // to limits, the two probes and the single-owner annotation.

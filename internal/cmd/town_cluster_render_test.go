@@ -204,6 +204,36 @@ func deploymentSecretVolumes(t *testing.T, out string) []string {
 	return nil
 }
 
+// deploymentAnnotations is the pod template's annotations in the rendered
+// Deployment, or none when the Deployment carries none.
+func deploymentAnnotations(t *testing.T, out string) map[string]string {
+	t.Helper()
+	for _, name := range dirNames(t, out) {
+		if !strings.HasSuffix(name, "-deployment-daemon.yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Fatalf("reading the Deployment: %v", err)
+		}
+		var dep struct {
+			Spec struct {
+				Template struct {
+					Metadata struct {
+						Annotations map[string]string `yaml:"annotations"`
+					} `yaml:"metadata"`
+				} `yaml:"template"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal(data, &dep); err != nil {
+			t.Fatalf("the Deployment does not parse back: %v", err)
+		}
+		return dep.Spec.Template.Metadata.Annotations
+	}
+	t.Fatalf("no Deployment file in %s", out)
+	return nil
+}
+
 // createLines returns the kubectl lines the render printed.
 func createLines(output string) []string {
 	var lines []string
@@ -585,6 +615,26 @@ func TestTownClusterRenderRehearsalOmitsPromoteAndSweep(t *testing.T) {
 		if strings.Contains(line, "promote") {
 			t.Fatalf("a rehearsal create line names the promote key: %s", line)
 		}
+	}
+}
+
+// clusterRenderPolecatDigest is a polecat image digest distinct from the daemon's,
+// so the forwarding test cannot pass by reading the wrong field.
+const clusterRenderPolecatDigest = "registry.example.test/gastown/polecat@sha256:" +
+	"0000000000000000000000000000000000000000000000000000000000000002"
+
+// TestTownClusterRenderForwardsThePolecatImage holds --polecat-image to the
+// rendered pod template's annotation, the value the Deployment carries.
+func TestTownClusterRenderForwardsThePolecatImage(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.polecatImage = clusterRenderPolecatDigest
+	var out bytes.Buffer
+	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if got := deploymentAnnotations(t, f.out)["gastown.dev/polecat-image"]; got != clusterRenderPolecatDigest {
+		t.Fatalf("the pod template's gastown.dev/polecat-image annotation = %q, want the flag's digest %q", got, clusterRenderPolecatDigest)
 	}
 }
 
