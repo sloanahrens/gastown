@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/shellparse"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -123,6 +124,9 @@ type bdCreateStoreGuard struct {
 // nested payload or substitution, so a variable exported earlier on the outer
 // line reaches a bd create inside "bash -c" or "$(...)".
 func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth int, inherited *bdEnvState) string {
+	if _, err := shellparse.Parse(command); err != nil && bdCreateSpelled(command) {
+		return bdCreateUnreadable(err)
+	}
 	stripped := strings.TrimSpace(stripHeredocBodies(command))
 	tokens := shellTokenize(stripped)
 	vars := shellVarAssignments(tokens)
@@ -198,6 +202,35 @@ func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth i
 		}
 	}
 	return ""
+}
+
+// bdCreateUnreadable is the refusal for a command shellparse cannot read whose
+// text spells a bd create. Nothing can say which store such a command files
+// into, so it is refused whatever directory it runs in, with the construct the
+// parser named (gt-j41yim, the overseer's fail-closed ruling). The parser's own
+// text is not echoed; an error that is not an *shellparse.UnparseableError
+// keeps the generic construct name.
+func bdCreateUnreadable(err error) string {
+	return "command cannot be read (" + dangerousConstruct(err) + "), so the guard cannot tell which store a bd create in it would file into"
+}
+
+// bdCreateSpelled reports whether text spells a bd create: a bd command word
+// with a create verb after it. It reads the words of the text as written, with
+// quotes and grouping punctuation as separators, because the parser could not
+// read the text and a tokenizer would keep a quoted or "$("-led word whole. It
+// errs toward yes, since a command the guard cannot read is refused on a match.
+func bdCreateSpelled(text string) bool {
+	words := strings.FieldsFunc(text, func(r rune) bool {
+		return strings.ContainsRune(" \t\r\n\"'\\`$(){}[];&|<>", r)
+	})
+	bd := false
+	for _, word := range words {
+		if bd && bdCreateVerbs[word] {
+			return true
+		}
+		bd = bd || isBdCommandWord(word)
+	}
+	return false
 }
 
 // judgeSegment judges one simple command, filed in dir (known false when the

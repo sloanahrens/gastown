@@ -777,6 +777,49 @@ func TestTapGuardBdCreateStoreFailsOpenOnUnreadableContext(t *testing.T) {
 	}
 }
 
+// TestTapGuardBdCreateStoreUnreadableRefused pins the fail-closed rule for a
+// command shellparse cannot read: one whose text spells a bd create is refused,
+// with the construct named, wherever it runs (gt-j41yim). The first row was
+// allowed before the rule: the nested shell's open quote hid the town-store
+// create from the token reader.
+func TestTapGuardBdCreateStoreUnreadableRefused(t *testing.T) {
+	t.Parallel()
+	b := newBdStoreTown(t)
+	townDB := filepath.Join(b.town, ".beads", "x.db")
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		{"nested -c with an open quote, town store", b.town, `bash -c bd create --title=x --db ` + townDB + ` "`, true},
+		{"open command substitution, town store", b.town, `x=$(bd create --title=x --db ` + townDB, true},
+		{"open quote around a substitution", b.town, `echo "$(bd create --title=x)" "`, true},
+		{"unterminated heredoc around a create", b.town, `bash -c "bd create --title=x"; cat <<EOF`, true},
+		{"open quote, rig store", b.worktree, `bd create --title=x "`, true},
+		{"open quote, no create", b.town, `bd list "`, false},
+		{"open quote, no bd", b.town, `echo "create`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stderr, err := b.run(t, polecatRole, tt.cwd, tt.command)
+			if !tt.blocked {
+				if err != nil || stderr != "" {
+					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want blocked, got allowed")
+			}
+			if !strings.Contains(stderr, "command cannot be read (") || !strings.Contains(stderr, bdCreateStoreRefusal) {
+				t.Errorf("stderr lacks the unreadable refusal:\n%s", stderr)
+			}
+		})
+	}
+}
+
 // TestBdDirectoryFlagParse pins what the -C/--directory reader returns for the
 // token shapes a bd create can carry, apart from the store judgement on top.
 func TestBdDirectoryFlagParse(t *testing.T) {

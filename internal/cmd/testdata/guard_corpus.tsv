@@ -392,3 +392,6 @@ test_scope	polecat	"go test -run TestSandboxSecrets ./internal/cmd"	allow		gt-a7
 dangerous	polecat	"go test ./internal/shellparse -count=1"	allow		gt-j927ao	a8929c442f0732c19846d5d2bd0eae80476423ed7a40a1a5ae0c19ccccf256a4
 container_suite	polecat	"go test ./internal/shellparse -count=1"	allow		gt-j927ao	a8929c442f0732c19846d5d2bd0eae80476423ed7a40a1a5ae0c19ccccf256a4
 test_scope	polecat	"go test ./internal/shellparse -count=1"	allow		gt-j927ao	a8929c442f0732c19846d5d2bd0eae80476423ed7a40a1a5ae0c19ccccf256a4
+container_suite	polecat	"bd create --title=x \""	refuse	cannot be read	gt-j41yim	28e1c9a374a38255d41d632fd8af2065edfc208c1d77fa6790bb55b9a2cd8cad
+dangerous	polecat	"bd create --title=x \""	refuse	cannot be read	gt-j41yim	28e1c9a374a38255d41d632fd8af2065edfc208c1d77fa6790bb55b9a2cd8cad
+test_scope	polecat	"bd create --title=x \""	allow		gt-j41yim	28e1c9a374a38255d41d632fd8af2065edfc208c1d77fa6790bb55b9a2cd8cad
