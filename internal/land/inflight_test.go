@@ -1,8 +1,11 @@
 package land
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -92,6 +95,27 @@ func TestWorkRunsRefusesAWorkRootItCannotRead(t *testing.T) {
 	runs, err := WorkRuns(root)
 	if err == nil || len(runs) != 0 {
 		t.Fatalf("WorkRuns = %v, %v; want the refusal of the unreadable root", runs, err)
+	}
+}
+
+// TestWorkRunsRefusesARunWhoseInfoCannotBeRead: a run whose info cannot be read
+// is an error that names that run, and the other runs are not blamed for it.
+func TestWorkRunsRefusesARunWhoseInfoCannotBeRead(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "rig")
+	mkdirs(t, root, "land-bad", "land-ok")
+	entryInfo := func(e fs.DirEntry) (fs.FileInfo, error) {
+		if e.Name() == "land-bad" {
+			return nil, errors.New("stat refused")
+		}
+		return e.Info()
+	}
+	runs, err := listRuns(root, entryInfo)
+	if err == nil || len(runs) != 0 {
+		t.Fatalf("WorkRuns = %v, %v; want the refusal of land-bad", runs, err)
+	}
+	if !strings.Contains(err.Error(), "land-bad") || strings.Contains(err.Error(), "land-ok") {
+		t.Fatalf("WorkRuns error = %q; want it to name land-bad and not land-ok", err)
 	}
 }
 

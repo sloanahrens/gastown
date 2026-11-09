@@ -46,6 +46,13 @@ func WorkInFlight(workRoot string) (int, error) {
 // work root, each with its modification time. A root that does not exist holds
 // no run; a read failure, or a directory whose time cannot be read, is an error.
 func WorkRuns(workRoot string) ([]WorkRun, error) {
+	return listRuns(workRoot, fs.DirEntry.Info)
+}
+
+// listRuns is WorkRuns with the read of each run's info injected: entryInfo
+// stands for the directory entry's Info call, so a test can fail one named run,
+// which a directory's mode cannot do deterministically.
+func listRuns(workRoot string, entryInfo func(fs.DirEntry) (fs.FileInfo, error)) ([]WorkRun, error) {
 	entries, err := os.ReadDir(workRoot)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
@@ -59,7 +66,7 @@ func WorkRuns(workRoot string) ([]WorkRun, error) {
 		if !e.IsDir() || !isRunDir(name) {
 			continue
 		}
-		info, err := e.Info()
+		info, err := entryInfo(e)
 		if err != nil {
 			return nil, fmt.Errorf("reading the modification time of %s: %w", name, err)
 		}
