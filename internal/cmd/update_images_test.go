@@ -1210,6 +1210,72 @@ func TestTownImageRegistryReadsTheTownsForgejo(t *testing.T) {
 	}
 }
 
+// TestTownImageRegistryReadsTheRegistryOwner: a rig names the registry account
+// separately from its remote's owner (gt-69fgg3). Set, it replaces the remote's
+// owner; empty or whitespace-only, it is the remote's owner as before; an
+// invalid value is refused, and the refusal names the setting.
+func TestTownImageRegistryReadsTheRegistryOwner(t *testing.T) {
+	t.Parallel()
+
+	const (
+		rigsJSON = `{"version":1,"rigs":{"gastown":{"git_url":"https://github.com/example/gastown.git"}}}`
+		daemon   = `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"enabled":true,"image_rigs":["gastown"]}}}`
+		remote   = "http://forgejo:3000/sloan/gastown"
+	)
+	rigConfig := func(registryOwner string) string {
+		return `{"type":"rig","version":1,"name":"gastown","git_url":"https://github.com/example/gastown.git","merge_queue":{"forgejo":{"remote_url":"` + remote + `","registry_owner":"` + registryOwner + `"}}}`
+	}
+	files := func(registryOwner string) map[string]string {
+		return map[string]string{
+			"mayor/rigs.json":     rigsJSON,
+			"mayor/daemon.json":   daemon,
+			"gastown/config.json": rigConfig(registryOwner),
+		}
+	}
+
+	ok := []struct {
+		name          string
+		registryOwner string
+		wantOwner     string
+	}{
+		{name: "a set owner replaces the remote's owner", registryOwner: "bot-registry", wantOwner: "bot-registry"},
+		{name: "a set owner is trimmed", registryOwner: "  bot-registry  ", wantOwner: "bot-registry"},
+		{name: "an empty owner is the remote's owner", registryOwner: "", wantOwner: "sloan"},
+		{name: "a whitespace-only owner is the remote's owner", registryOwner: ` \t `, wantOwner: "sloan"},
+	}
+	for _, row := range ok {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := townImageRegistry(writeTownFixture(t, files(row.registryOwner)))
+			if err != nil {
+				t.Fatalf("townImageRegistry: %v", err)
+			}
+			want := imagevalues.Registry{Scheme: "http", Host: "forgejo:3000", Owner: row.wantOwner}
+			if got != want {
+				t.Errorf("townImageRegistry = %+v, want %+v", got, want)
+			}
+		})
+	}
+
+	refused := []struct {
+		name          string
+		registryOwner string
+	}{
+		{name: "an owner with a space", registryOwner: "bot registry"},
+		{name: "an owner with an uppercase letter", registryOwner: "BotRegistry"},
+		{name: "an owner with a path separator", registryOwner: "bot/registry"},
+	}
+	for _, row := range refused {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := townImageRegistry(writeTownFixture(t, files(row.registryOwner)))
+			if err == nil || !strings.Contains(err.Error(), "merge_queue.forgejo.registry_owner") {
+				t.Fatalf("townImageRegistry = %v, want a refusal naming merge_queue.forgejo.registry_owner", err)
+			}
+		})
+	}
+}
+
 // TestUpdateImagesWorkflowNamesTheTownsRegistry holds the one-spelling rule
 // across the build and the command: the workflow's FORGEJO_HOST and
 // REGISTRY_OWNER are the host and owner gt update images reads from the town's

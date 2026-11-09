@@ -129,8 +129,17 @@ func townImageRegistry(townRoot string) (imagevalues.Registry, error) {
 		// A URL that reached here and names no repository is one.
 		return imagevalues.Registry{}, fmt.Errorf("rig %s's merge_queue.forgejo.remote_url names no owner and repository, so there is no registry to read", rigName)
 	}
+	// A rig whose registry bot writes only its own namespace names that account
+	// here; the remote's owner is the default (gt-69fgg3).
+	registryOwner := strings.TrimSpace(fc.RegistryOwner)
+	if registryOwner != "" {
+		owner = registryOwner
+	}
 	registry := imagevalues.Registry{Scheme: u.Scheme, Host: u.Host, Owner: owner}
 	if err := registry.Validate(); err != nil {
+		if registryOwner != "" {
+			return imagevalues.Registry{}, fmt.Errorf("rig %s's merge_queue.forgejo.registry_owner names no usable registry: %w", rigName, err)
+		}
 		return imagevalues.Registry{}, err
 	}
 	return registry, nil

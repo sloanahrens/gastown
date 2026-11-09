@@ -637,6 +637,22 @@ func TestMergeSettingsCommand_Forgejo(t *testing.T) {
 		}
 	})
 
+	t.Run("registry owner carries through and a set override wins", func(t *testing.T) {
+		t.Parallel()
+		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{
+			RemoteURL:     "https://forgejo.example/sloan/gastown",
+			RegistryOwner: "bot-registry",
+		}}
+		local := &MergeQueueConfig{Forgejo: &ForgejoConfig{GateWorkflow: "gate"}}
+		if got := MergeSettingsCommand(floor, local).Forgejo.RegistryOwner; got != "bot-registry" {
+			t.Errorf("RegistryOwner = %q, want the floor value when the override omits it", got)
+		}
+		override := &MergeQueueConfig{Forgejo: &ForgejoConfig{RegistryOwner: "other-bot"}}
+		if got := MergeSettingsCommand(floor, override).Forgejo.RegistryOwner; got != "other-bot" {
+			t.Errorf("RegistryOwner = %q, want the override value", got)
+		}
+	})
+
 	t.Run("bots overlay role by role", func(t *testing.T) {
 		t.Parallel()
 		floor := &MergeQueueConfig{Forgejo: &ForgejoConfig{Bots: map[string]string{
