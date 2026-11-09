@@ -171,12 +171,14 @@ func TestRenderGolden(t *testing.T) {
 	} {
 		compareGolden(t, dir, doc.file, document(t, doc.value))
 	}
-	if len(m.Secrets) != len(v.Secrets) {
-		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries, want one each", len(m.Secrets), len(v.Secrets))
+	// One Secret per entry, then the daemon-openshell Secret.
+	if len(m.Secrets) != len(v.Secrets)+1 {
+		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries, want one each and the openshell Secret", len(m.Secrets), len(v.Secrets))
 	}
-	for i, s := range m.Secrets {
-		compareGolden(t, dir, "secret-"+v.Secrets[i].Name+".yaml", document(t, s))
+	for i, file := range v.Secrets {
+		compareGolden(t, dir, "secret-"+file.Name+".yaml", document(t, m.Secrets[i]))
 	}
+	compareGolden(t, dir, "secret-openshell.yaml", document(t, m.Secrets[len(v.Secrets)]))
 }
 
 // TestRenderWritesTheObjectsInOrder holds the stream's order, which an apply
@@ -646,8 +648,10 @@ func TestSecretsHoldNoBytes(t *testing.T) {
 	t.Parallel()
 	v := goldenValues(t)
 	m := mustBuild(t, v)
-	if len(m.Secrets) != len(v.Secrets) {
-		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries", len(m.Secrets), len(v.Secrets))
+	// The daemon-openshell Secret follows the entries; TestOpenShellSecretHasOneKeyPerFile
+	// holds its shape.
+	if len(m.Secrets) != len(v.Secrets)+1 {
+		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries and the openshell Secret", len(m.Secrets), len(v.Secrets))
 	}
 	for i, file := range v.Secrets {
 		s := m.Secrets[i]
@@ -762,6 +766,16 @@ func TestMountsMatchTheTownStateManifest(t *testing.T) {
 	for _, p := range []string{TownRootPath, LandingWorkPath, DoltBackupPath, TempPath} {
 		if !path.IsAbs(p) {
 			t.Errorf("the mount path %q is not absolute; the pod mounts it at the path the container uses", p)
+		}
+	}
+
+	// Each mount the live compose daemon carries beyond the town bind and the
+	// Secrets has a row in the render or a named reason it has none.
+	// TestEveryComposeMountHasAPodAnswer holds the table's own rows.
+	rendered := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec.Containers[0].VolumeMounts
+	for _, m := range composeMounts {
+		if finding := podAnswerFinding(m, rendered); finding != "" {
+			t.Error(finding)
 		}
 	}
 }
@@ -1425,6 +1439,445 @@ func TestPodKubeconfigIsNotATownRootFile(t *testing.T) {
 	// is not a check over nothing.
 	if got := townRootKubeconfigs([]EnvVar{{Name: kubeconfigEnv, Value: v.Env[kubeconfigEnv]}}); len(got) != 2 {
 		t.Errorf("townRootKubeconfigs reported %q for the live value, want both files named", got)
+	}
+}
+
+// composeMount is one mount the live compose daemon carries beyond the town bind
+// and the Secrets: its container path and the pod's answer. A row with a Volume
+// answers the mount with a read-only mount of that volume's SubPath at Path, as
+// the compose token mounts are; a row with no Volume names the Reason the pod
+// carries no mount for it.
+type composeMount struct {
+	Name    string
+	Path    string
+	Volume  string
+	SubPath string
+	Reason  string
+}
+
+// composeMounts is the pod's answer to each mount the compose daemon adds
+// (internal/templates/daemon_compose.go liveTokenMounts and
+// daemon_compose_client.go liveClientMounts). TestEveryComposeMountHasAPodAnswer
+// holds each row.
+var composeMounts = []composeMount{
+	{
+		// The daemon-openshell Secret serves the sandbox seats' gateway calls from
+		// the pod (gt-nr548n).
+		Name: "openshell config", Path: manifestdata.LiveOpenShellConfigPath,
+		Volume: openShellVolumeName,
+	},
+	{
+		Name: "om config", Path: manifestdata.LiveOMConfigPath,
+		Volume: TownStateClaim, SubPath: OMConfigSubPath,
+	},
+	{
+		Name: "claude beads", Path: ClaudeBeadsRoot,
+		Reason: "dropped for the pod: the reason is written in noClaudeBeadsComment",
+	},
+}
+
+// podAnswerFinding returns what is wrong with the pod's answer to m against the
+// rendered daemon mounts, or "" when the answer holds. An answered mount must be
+// a read-only mount of its volume's subPath at the compose path; an unanswered
+// one must name a reason. The finding names the mount.
+func podAnswerFinding(m composeMount, rendered []VolumeMount) string {
+	if m.Volume == "" {
+		if m.Reason == "" {
+			return fmt.Sprintf("the compose %s mount at %s has no pod row and no reason the pod has none", m.Name, m.Path)
+		}
+		return ""
+	}
+	got := volumeMountAt(rendered, m.Path)
+	switch {
+	case got == nil:
+		return fmt.Sprintf("the compose %s mount at %s has no pod row: the pod mounts nothing there", m.Name, m.Path)
+	case got.Name != m.Volume || got.SubPath != m.SubPath:
+		return fmt.Sprintf("the pod's mount at %s carries volume %q subPath %q, want the compose %s mount's volume %q subPath %q", m.Path, got.Name, got.SubPath, m.Name, m.Volume, m.SubPath)
+	case !got.ReadOnly:
+		return fmt.Sprintf("the pod's mount for the compose %s mount at %s is writable; the compose mount is read-only", m.Name, m.Path)
+	}
+	return ""
+}
+
+// claudeBeadsFinding returns what is wrong with the claude beads root on the
+// rendered Deployment, or "" when no container mounts it and the head comment
+// names it. The drop is enforced by the absent mount; the comment only tells a
+// reader of the manifest. A mount is a finding even with the comment present.
+// The finding names the root.
+func claudeBeadsFinding(d Deployment) string {
+	for _, c := range d.Spec.Template.Spec.Containers {
+		if volumeMountAt(c.VolumeMounts, ClaudeBeadsRoot) != nil {
+			return fmt.Sprintf("the pod mounts %s, which the render drops: the pod has no claude beads database", ClaudeBeadsRoot)
+		}
+	}
+	if !strings.Contains(d.headComment, ClaudeBeadsRoot) {
+		return fmt.Sprintf("the pod mounts no %s and the Deployment's head comment names no %s", ClaudeBeadsRoot, ClaudeBeadsRoot)
+	}
+	return ""
+}
+
+// TestPodDoesNotReadStaleKubeconfigs holds the kubeconfig decision on the whole
+// render, not only on the environment value: no env value, argument, mount path
+// or subPath names the .runtime container or sbx-k8s directory, the two
+// kubeconfig files the Mac writes with its own API addresses. The one reference
+// the pod makes into .runtime/container is the om config's subPath, which carries
+// no credential, so the test names it and holds it to that one path.
+func TestPodDoesNotReadStaleKubeconfigs(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec
+	staleDirs := []string{".runtime/container", ".runtime/sbx-k8s"}
+	var refs []string
+	scan := func(where, s string) {
+		for _, dir := range staleDirs {
+			if strings.Contains(s, dir) {
+				refs = append(refs, where+" "+s)
+			}
+		}
+	}
+	for _, c := range pod.Containers {
+		for _, e := range c.Env {
+			if e.Name == kubeconfigEnv {
+				t.Errorf("the pod sets %s, which names the Mac's kubeconfigs", kubeconfigEnv)
+			}
+			scan("env "+e.Name, e.Value)
+		}
+		for _, a := range c.Args {
+			scan("argument", a)
+		}
+		for _, m := range c.VolumeMounts {
+			scan("mount at", m.MountPath)
+			if m.SubPath != "" {
+				scan("subPath of "+m.MountPath, m.SubPath)
+			}
+		}
+	}
+	// The path is spelled out, not read from OMConfigSubPath: a constant the test
+	// compares against cannot catch that constant moving into a stale directory.
+	want := "subPath of " + manifestdata.LiveOMConfigPath + " .runtime/container/om-config.json"
+	if len(refs) != 1 || refs[0] != want {
+		t.Errorf("the render names %q under the stale directories, want only %q", refs, want)
+	}
+}
+
+// TestEveryComposeMountHasAPodAnswer holds each mount the live compose daemon
+// carries beyond the town bind and the Secrets to a pod answer: a render row at
+// the compose path, or a named reason the pod has none. An entry with neither is
+// refused, naming the mount.
+func TestEveryComposeMountHasAPodAnswer(t *testing.T) {
+	t.Parallel()
+	rendered := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec.Containers[0].VolumeMounts
+
+	names := make(map[string]bool, len(composeMounts))
+	for _, m := range composeMounts {
+		names[m.Name] = true
+		if finding := podAnswerFinding(m, rendered); finding != "" {
+			t.Error(finding)
+		}
+	}
+	for _, want := range []string{"openshell config", "om config", "claude beads"} {
+		if !names[want] {
+			t.Errorf("composeMounts has no %q entry, though the compose daemon mounts it", want)
+		}
+	}
+
+	neither := composeMount{Name: "an unanswered mount", Path: "/run/gt/xdg/unanswered"}
+	if got := podAnswerFinding(neither, rendered); !strings.Contains(got, "an unanswered mount") {
+		t.Errorf("podAnswerFinding on an entry with neither a row nor a reason = %q, want a finding naming it", got)
+	}
+	absent := composeMount{Name: "an om config the pod does not mount", Path: manifestdata.LiveOMConfigPath, Volume: TownStateClaim, SubPath: OMConfigSubPath}
+	if got := podAnswerFinding(absent, nil); !strings.Contains(got, "an om config the pod does not mount") {
+		t.Errorf("podAnswerFinding on a row the render does not carry = %q, want a finding naming it", got)
+	}
+	wrongSubPath := composeMount{Name: "an om config at the wrong subPath", Path: manifestdata.LiveOMConfigPath, Volume: TownStateClaim, SubPath: "elsewhere/om-config.json"}
+	if got := podAnswerFinding(wrongSubPath, rendered); !strings.Contains(got, "an om config at the wrong subPath") {
+		t.Errorf("podAnswerFinding on a render with another subPath = %q, want a finding naming it", got)
+	}
+	writable := append([]VolumeMount(nil), rendered...)
+	if m := volumeMountAt(writable, manifestdata.LiveOMConfigPath); m != nil {
+		m.ReadOnly = false
+	}
+	var om composeMount
+	for _, m := range composeMounts {
+		if m.Name == "om config" {
+			om = m
+		}
+	}
+	if got := podAnswerFinding(om, writable); !strings.Contains(got, "is writable") {
+		t.Errorf("podAnswerFinding on a writable om config mount = %q, want a finding saying it is writable", got)
+	}
+}
+
+// TestOMConfigComesFromThePrivateTownStateRow holds the om config's source: the
+// file sits under the .runtime/container row, which is daemon-owned and Private,
+// so the town-state volume carries it and the copy keeps the mode the daemon
+// wrote it with. A non-Private row would lose that mode on the copy. The
+// config's own mode is set by the compose writer, not by this row.
+func TestOMConfigComesFromThePrivateTownStateRow(t *testing.T) {
+	t.Parallel()
+	manifest := (*manifestdata.Manifest)(townstate.Default())
+	var covering *manifestdata.Entry
+	for i := range manifest.Entries {
+		e := &manifest.Entries[i]
+		if OMConfigSubPath == e.Path || strings.HasPrefix(OMConfigSubPath, e.Path+"/") {
+			covering = e
+		}
+	}
+	if covering == nil {
+		t.Fatalf("no manifest row covers %s, so the town-state volume does not carry the om config", OMConfigSubPath)
+	}
+	if covering.Path != ".runtime/container" || covering.Owner != manifestdata.OwnerDaemon || !covering.Private {
+		t.Errorf("the row covering %s is %+v, want the daemon-owned Private .runtime/container row", OMConfigSubPath, *covering)
+	}
+}
+
+// TestClaudeBeadsDirIsMountedOrDropped holds the claude beads decision: the pod
+// mounts nothing at the host's ~/.claude/.beads, and the Deployment names the
+// root. A mount in any container is refused, naming the root, even when the
+// comment is present; so is a render that names the root nowhere.
+func TestClaudeBeadsDirIsMountedOrDropped(t *testing.T) {
+	t.Parallel()
+	dropped := mustBuild(t, goldenValues(t)).Deployment
+	if finding := claudeBeadsFinding(dropped); finding != "" {
+		t.Error(finding)
+	}
+	if !bytes.Contains(document(t, dropped), []byte(ClaudeBeadsRoot)) {
+		t.Errorf("the rendered Deployment does not name %s, so the drop is unexplained", ClaudeBeadsRoot)
+	}
+
+	mounted := mustBuild(t, goldenValues(t)).Deployment
+	c := &mounted.Spec.Template.Spec.Containers[0]
+	c.VolumeMounts = append(c.VolumeMounts, VolumeMount{Name: "claude-beads", MountPath: ClaudeBeadsRoot})
+	if finding := claudeBeadsFinding(mounted); !strings.Contains(finding, ClaudeBeadsRoot) {
+		t.Errorf("claudeBeadsFinding on a render that mounts %s = %q, want a finding naming it", ClaudeBeadsRoot, finding)
+	}
+
+	neither := mustBuild(t, goldenValues(t)).Deployment
+	neither.headComment = ""
+	if finding := claudeBeadsFinding(neither); !strings.Contains(finding, ClaudeBeadsRoot) {
+		t.Errorf("claudeBeadsFinding on a render with neither a mount nor the comment = %q, want a finding naming %s", finding, ClaudeBeadsRoot)
+	}
+}
+
+// openShellWantPaths is the openshell config tree's eleven files, each key mapped
+// to the nested path the pod mounts it at. It is written out here, not read from
+// openShellKeys, so a key that drifts from its path fails against this table.
+var openShellWantPaths = map[string]string{
+	"gateway.toml":                       "gateway.toml",
+	"active_gateway":                     "active_gateway",
+	"gateways__k8s__metadata.json":       "gateways/k8s/metadata.json",
+	"gateways__k8s__last_sandbox":        "gateways/k8s/last_sandbox",
+	"gateways__k8s__mtls__ca.crt":        "gateways/k8s/mtls/ca.crt",
+	"gateways__k8s__mtls__tls.crt":       "gateways/k8s/mtls/tls.crt",
+	"gateways__k8s__mtls__tls.key":       "gateways/k8s/mtls/tls.key",
+	"gateways__openshell__metadata.json": "gateways/openshell/metadata.json",
+	"gateways__openshell__mtls__ca.crt":  "gateways/openshell/mtls/ca.crt",
+	"gateways__openshell__mtls__tls.crt": "gateways/openshell/mtls/tls.crt",
+	"gateways__openshell__mtls__tls.key": "gateways/openshell/mtls/tls.key",
+}
+
+// openShellSecretFor returns the daemon-openshell Secret m renders, failing the
+// test when there is none.
+func openShellSecretFor(t *testing.T, m Manifests) Secret {
+	t.Helper()
+	for _, s := range m.Secrets {
+		if s.Metadata.Name == "daemon-openshell" {
+			return s
+		}
+	}
+	t.Fatal("the render writes no daemon-openshell Secret")
+	return Secret{}
+}
+
+// TestOpenShellSecretHasOneKeyPerFile holds the Secret's shape: one key per file
+// of the openshell tree, no key holds a slash, and every key is the file's nested
+// path with each folder separator written as a double underscore (gt-nr548n).
+func TestOpenShellSecretHasOneKeyPerFile(t *testing.T) {
+	t.Parallel()
+	s := openShellSecretFor(t, mustBuild(t, goldenValues(t)))
+	if len(s.StringData) != len(openShellWantPaths) {
+		t.Errorf("the daemon-openshell Secret has %d keys, want %d, one per file", len(s.StringData), len(openShellWantPaths))
+	}
+	for key := range s.StringData {
+		if strings.Contains(key, "/") {
+			t.Errorf("the daemon-openshell key %q holds a slash; a Secret key cannot", key)
+		}
+		want, ok := openShellWantPaths[key]
+		if !ok {
+			t.Errorf("the daemon-openshell Secret has key %q, which names no file of the openshell tree", key)
+			continue
+		}
+		if got := strings.ReplaceAll(key, "__", "/"); got != want {
+			t.Errorf("key %q maps to %q, want %q", key, got, want)
+		}
+	}
+}
+
+// TestOpenShellVolumeMapsEveryKeyAndIsPrivate holds the volume: exactly one item
+// per key, each item mapping its key to the nested path, and defaultMode 0400 so
+// the tls.key files are private in the pod.
+func TestOpenShellVolumeMapsEveryKeyAndIsPrivate(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, goldenValues(t))
+	var vol *Volume
+	for i := range m.Deployment.Spec.Template.Spec.Volumes {
+		if v := &m.Deployment.Spec.Template.Spec.Volumes[i]; v.Name == "daemon-openshell" {
+			vol = v
+		}
+	}
+	if vol == nil || vol.Secret == nil {
+		t.Fatal("the pod has no daemon-openshell Secret volume")
+	}
+	if vol.Secret.SecretName != "daemon-openshell" {
+		t.Errorf("the volume reads Secret %q, want daemon-openshell", vol.Secret.SecretName)
+	}
+	if vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o400 {
+		t.Errorf("the volume's defaultMode = %v, want 0400", vol.Secret.DefaultMode)
+	}
+	if len(vol.Secret.Items) != len(openShellWantPaths) {
+		t.Errorf("the volume has %d items, want %d, one per key", len(vol.Secret.Items), len(openShellWantPaths))
+	}
+	for _, item := range vol.Secret.Items {
+		if want := openShellWantPaths[item.Key]; want == "" || item.Path != want {
+			t.Errorf("item %q maps to %q, want %q", item.Key, item.Path, want)
+		}
+	}
+}
+
+// TestOpenShellMountIsReadOnlyAtConfigHome holds the mount: the openshell config
+// is mounted read-only at the exact path beneath XDG_CONFIG_HOME, and that env
+// value names the mount's parent, so the daemon's openshell finds its gateways
+// there (gt-nr548n).
+func TestOpenShellMountIsReadOnlyAtConfigHome(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec
+	const mountAt = "/run/gt/xdg/openshell"
+	c := pod.Containers[0]
+	m := volumeMountAt(c.VolumeMounts, mountAt)
+	if m == nil {
+		t.Fatalf("the daemon container mounts nothing at %s", mountAt)
+	}
+	if m.Name != "daemon-openshell" || m.SubPath != "" {
+		t.Errorf("the mount at %s carries volume %q subPath %q, want the daemon-openshell volume and no subPath", mountAt, m.Name, m.SubPath)
+	}
+	if !m.ReadOnly {
+		t.Errorf("the mount at %s is writable, want read-only", mountAt)
+	}
+	var configHome string
+	for _, e := range c.Env {
+		if e.Name == ConfigHomeEnv {
+			configHome = e.Value
+		}
+	}
+	if path.Dir(mountAt) != configHome {
+		t.Errorf("%s = %q, want the openshell mount's parent %q", ConfigHomeEnv, configHome, path.Dir(mountAt))
+	}
+}
+
+// TestOpenShellIsAbsentFromRehearsal holds the rehearsal's credential allowlist:
+// a rehearsal renders neither the openshell Secret, its volume nor its mount.
+func TestOpenShellIsAbsentFromRehearsal(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, rehearsalValues(t))
+	for _, s := range m.Secrets {
+		if s.Metadata.Name == "daemon-openshell" {
+			t.Errorf("the rehearsal renders the daemon-openshell Secret, which it must not carry")
+		}
+	}
+	for _, v := range m.Deployment.Spec.Template.Spec.Volumes {
+		if v.Name == "daemon-openshell" {
+			t.Errorf("the rehearsal renders the daemon-openshell volume")
+		}
+	}
+	if volumeMountAt(m.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, "/run/gt/xdg/openshell") != nil {
+		t.Errorf("the rehearsal mounts the openshell config")
+	}
+}
+
+// openShellModeFinding returns what is wrong with a Secret volume's mode under an
+// image whose final stage carries users and a pod whose security context is sc,
+// or "" when the daemon can read the volume. The files are root-owned, so a
+// non-root daemon reads them only through group read on an fsGroup, or world
+// read; an fsGroup alone does not admit a 0400 file.
+func openShellModeFinding(mode int32, users []string, sc *PodSecurityContext) string {
+	if len(users) == 0 {
+		return ""
+	}
+	if (sc != nil && sc.FSGroup != nil && mode&0o040 != 0) || mode&0o004 != 0 {
+		return ""
+	}
+	return fmt.Sprintf("the daemon image's final stage carries %q, so the daemon pod does not run as root; a non-root daemon cannot read a root-owned %04o Secret; set fsGroup and 0440, or keep root", users, mode)
+}
+
+// TestOpenShellModeFitsTheImageUser ties the openshell volume's mode to the user
+// the daemon image runs as. The image's final stage is read the way
+// TestHelperRunsAsTheDaemonImageDoes reads it: a USER there makes the pod a
+// non-root daemon, which cannot read the root-owned 0400 files (gt-nr548n).
+func TestOpenShellModeFitsTheImageUser(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(packageDir(t), "..", "..", "daemon", "Dockerfile")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec
+	var vol *Volume
+	for i := range pod.Volumes {
+		if v := &pod.Volumes[i]; v.Name == "daemon-openshell" {
+			vol = v
+		}
+	}
+	if vol == nil || vol.Secret == nil || vol.Secret.DefaultMode == nil {
+		t.Fatal("the pod has no daemon-openshell Secret volume with a defaultMode")
+	}
+	if finding := openShellModeFinding(*vol.Secret.DefaultMode, userInstructions(string(data)), pod.SecurityContext); finding != "" {
+		t.Error(finding)
+	}
+}
+
+// TestOpenShellModeFindingRefusesARootOnlyFileUnderAUser holds each row of the
+// mode check: a USER with a file the user cannot read is named, and each way out
+// (keeping root, or group read through an fsGroup) passes.
+func TestOpenShellModeFindingRefusesARootOnlyFileUnderAUser(t *testing.T) {
+	t.Parallel()
+	user := []string{"USER agent"}
+	gid := int64(1000)
+	withFSGroup := &PodSecurityContext{FSGroup: &gid}
+	for _, tc := range []struct {
+		name  string
+		mode  int32
+		users []string
+		sc    *PodSecurityContext
+		want  string
+	}{
+		{name: "root keeps the 0400 files", mode: 0o400},
+		{name: "a USER with 0400", mode: 0o400, users: user, want: "cannot read a root-owned 0400 Secret"},
+		{name: "a USER with 0400 and an fsGroup", mode: 0o400, users: user, sc: withFSGroup, want: "cannot read a root-owned 0400 Secret"},
+		{name: "a USER with 0440 and no fsGroup", mode: 0o440, users: user, want: "cannot read a root-owned 0440 Secret"},
+		{name: "a USER with 0440 and an fsGroup", mode: 0o440, users: user, sc: withFSGroup},
+		{name: "a USER with world read", mode: 0o444, users: user},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := openShellModeFinding(tc.mode, tc.users, tc.sc)
+			if tc.want == "" && got != "" {
+				t.Errorf("openShellModeFinding = %q, want no finding", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("openShellModeFinding = %q, want a finding containing %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestSecretEntryNamedOpenShellIsRefused holds the volume-name collision: a
+// listed Secret file named openshell would take the openshell volume's name, so
+// the render refuses it, naming the entry.
+func TestSecretEntryNamedOpenShellIsRefused(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	v.Secrets = append(v.Secrets, manifestdata.SecretFile{Name: "openshell", Consumer: "a test", Mode: "0600"})
+	if _, err := Build(v); err == nil || !strings.Contains(err.Error(), `"openshell"`) {
+		t.Errorf("Build with a Secret file named openshell = %v, want a refusal naming it", err)
 	}
 }
 

@@ -1,4 +1,5 @@
 # no hostAliases: this pod has no gateway alias, so host.docker.internal does not resolve in it
+# no /Users/sloan/.claude/.beads mount: the host's claude beads database is outside the town root and no claim carries a copy, so this pod has none; the wisp reaper skips its missing root (TestWispReaperSkipsMissingExtraRoot)
 apiVersion: apps/v1
 kind: Deployment
 metadata:

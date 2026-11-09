@@ -38,6 +38,18 @@ type SecretsManifest struct {
 	Unclaimed []UnclaimedSecret `yaml:"unclaimed"`
 }
 
+// OpenShellEntry is the openshell gateway config the pod mounts (gt-nr548n). It is
+// a directory tree at ~/.config/openshell, not a file of the town's config
+// directory, so it is not listed in deploy/daemon/secrets.yaml: the compose writer
+// reads that list as files. Its consumer is cited here and held to the same guard
+// as a listed entry; the renderer builds its Secret from one key per file.
+var OpenShellEntry = SecretFile{
+	Name:     "openshell",
+	Consumer: "the openshell CLI the daemon runs for the sandbox seats' gateway calls (internal/seatprovider/exec.go, internal/openshellprov/client.go), which finds its gateways under XDG_CONFIG_HOME/openshell",
+	Mode:     "0400",
+	Required: false,
+}
+
 // secretMode is the form of a manifest entry's mode. The manifest header defines
 // the mode's meaning; this regexp is the form the parser accepts.
 var secretMode = regexp.MustCompile(`^0[0-7]00$`)

@@ -106,6 +106,38 @@ func TestWispReaperRefusesAnUnusableExtraBeadsRoot(t *testing.T) {
 	}
 }
 
+// TestWispReaperSkipsMissingExtraRoot: an absolute extra_beads_roots entry whose
+// directory is absent on this host does not fail the scan step, and the database
+// the town names is still reaped without an error. A pod that does not mount the
+// host's claude beads directory relies on this (gt-nr548n).
+func TestWispReaperSkipsMissingExtraRoot(t *testing.T) {
+	t.Parallel()
+	p := newTrackerPass(t, trackerPassRoutes)
+	beadsRig := filepath.Join(p.d.config.TownRoot, "beads", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(beadsRig, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsRig, "metadata.json"), []byte(`{"dolt_database":"beads_db"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "claude")
+	p.d.reaperOpenDBFn = func(string, time.Duration, time.Duration) (*beadsql.DB, error) {
+		return openEmptySweepDB(t), nil
+	}
+
+	p.d.reapWispsInline(&WispReaperConfig{
+		Databases:       []string{"beads_db"},
+		ExtraBeadsRoots: []string{missing},
+	}, 0, 0, 0, p.cycle)
+
+	if s := p.scanStep(t); s.result != dogStepDone {
+		t.Errorf("scan step = %+v, want done: a missing extra root is not a refusal", s)
+	}
+	if strings.Contains(p.log.String(), "beads_db: reap error") {
+		t.Errorf("log = %q, want the town's database reaped without a reap error", p.log.String())
+	}
+}
+
 // openEmptySweepDB returns a database handle that answers the questions
 // HasReaperSchema asks the way a beads database does and returns no rows for
 // everything else, so a whole sweep runs over it without a Dolt server. It

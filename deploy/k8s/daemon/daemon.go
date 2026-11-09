@@ -295,10 +295,24 @@ const (
 	// the dolt-backup claim is mounted there, so GT_DOLT_BACKUP_ROOT keeps the
 	// compose value.
 	DoltBackupPath = "/Users/sloan/gt-backups/dolt"
+	// OMConfigSubPath is the om config's path inside the town-state volume, which
+	// the pod mounts at manifestdata.LiveOMConfigPath. It is no Secret: the config
+	// carries no credential, and the row it sits in is private.
+	OMConfigSubPath = ".runtime/container/om-config.json"
+	// ClaudeBeadsRoot is the host's ~/.claude/.beads, which the compose daemon binds
+	// read-write. The pod mounts nothing there (TestClaudeBeadsDirIsMountedOrDropped),
+	// and the Deployment's head comment names the root (noClaudeBeadsComment).
+	ClaudeBeadsRoot = "/Users/sloan/.claude/.beads"
 	// noHostAliasComment is the Deployment's head comment when the pod carries no
 	// gateway alias, so a reader of the manifest knows the Dolt name does not
 	// resolve in this pod rather than assuming it does.
 	noHostAliasComment = "no hostAliases: this pod has no gateway alias, so " + DoltHostName + " does not resolve in it"
+	// noClaudeBeadsComment is the Deployment's head comment for the claude beads
+	// root the pod does not mount, and the one place the drop's reason is written:
+	// the host's copy is outside the town root and no claim carries one. The
+	// reaper's missing-root tolerance that keeps the drop safe is pinned by
+	// TestWispReaperSkipsMissingExtraRoot.
+	noClaudeBeadsComment = "no " + ClaudeBeadsRoot + " mount: the host's claude beads database is outside the town root and no claim carries a copy, so this pod has none; the wisp reaper skips its missing root (TestWispReaperSkipsMissingExtraRoot)"
 )
 
 // noProxyComment is the Deployment's head comment when Values.ProxyImage is
@@ -587,6 +601,11 @@ func Build(v Values) (Manifests, error) {
 	for _, file := range v.Secrets {
 		m.Secrets = append(m.Secrets, secret(file, namespace))
 	}
+	// A rehearsal carries no openshell config: its gateway calls are not the live
+	// seats', and rehearsalSecrets keeps it to the fewest credentials.
+	if !v.Rehearsal {
+		m.Secrets = append(m.Secrets, openShellSecret(namespace))
+	}
 	return m, nil
 }
 
@@ -639,6 +658,81 @@ func secret(file manifestdata.SecretFile, namespace string) Secret {
 		Type:       "Opaque",
 		StringData: map[string]string{file.Name: ""},
 	}
+}
+
+// openShellKeys is one key of the daemon-openshell Secret per file of the
+// openshell config tree (~/.config/openshell). A Secret key cannot hold a slash,
+// so a folder separator is written as openShellKeySep, and openShellVolume maps
+// each key back to its nested path. This table is the one place the tree's files
+// are written down; no test reads the live directory.
+var openShellKeys = []string{
+	"gateway.toml",
+	"active_gateway",
+	"gateways__k8s__metadata.json",
+	"gateways__k8s__last_sandbox",
+	"gateways__k8s__mtls__ca.crt",
+	"gateways__k8s__mtls__tls.crt",
+	"gateways__k8s__mtls__tls.key",
+	"gateways__openshell__metadata.json",
+	"gateways__openshell__mtls__ca.crt",
+	"gateways__openshell__mtls__tls.crt",
+	"gateways__openshell__mtls__tls.key",
+}
+
+// openShellKeySep stands in for a folder separator in a Secret key.
+const openShellKeySep = "__"
+
+// openShellSecretName is the Secret the pod mounts the openshell config from, and
+// openShellVolumeName its pod volume.
+var (
+	openShellSecretName = SecretNamePrefix + manifestdata.OpenShellEntry.Name
+	openShellVolumeName = secretVolumeName(manifestdata.OpenShellEntry.Name)
+)
+
+// openShellSecret is the daemon-openshell Secret: one placeholder key per file of
+// the openshell config tree, filled by the operator. The sandbox seats' gateway
+// calls are served by the mount this Secret backs (gt-nr548n).
+func openShellSecret(namespace string) Secret {
+	keys := make(map[string]string, len(openShellKeys))
+	for _, key := range openShellKeys {
+		keys[key] = ""
+	}
+	return Secret{
+		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		Metadata: ObjectMeta{
+			Name:        openShellSecretName,
+			Namespace:   namespace,
+			Labels:      labels(),
+			Annotations: map[string]string{SourceFileAnnotation: manifestdata.OpenShellEntry.Name},
+		},
+		Type:       "Opaque",
+		StringData: keys,
+	}
+}
+
+// openShellVolume is the Secret volume of the openshell config: each key at its
+// nested path, and every file at 0400 so the tls.key files stay private in the
+// pod (the YAML carries that mode in decimal, 256).
+func openShellVolume() Volume {
+	items := make([]KeyToPath, 0, len(openShellKeys))
+	for _, key := range openShellKeys {
+		items = append(items, KeyToPath{Key: key, Path: strings.ReplaceAll(key, openShellKeySep, "/")})
+	}
+	// 0400 is readable by root alone. The daemon image's final stage has no USER,
+	// so the pod runs as root and reads it; a USER in the image needs an fsGroup
+	// and 0440 instead (TestOpenShellModeFitsTheImageUser holds this).
+	mode := int32(0o400)
+	return Volume{
+		Name:   openShellVolumeName,
+		Secret: &SecretVolumeSource{SecretName: openShellSecretName, DefaultMode: &mode, Items: items},
+	}
+}
+
+// openShellMount is the read-only mount of the openshell config at the path
+// ConfigHomeEnv names beneath, so the daemon's openshell finds the gateways
+// there (gt-nr548n).
+func openShellMount() VolumeMount {
+	return VolumeMount{Name: openShellVolumeName, MountPath: manifestdata.LiveOpenShellConfigPath, ReadOnly: true}
 }
 
 // roleBinding binds the pod's service account to role in namespace, named name.
@@ -705,9 +799,13 @@ func deployment(v Values, namespace string) Deployment {
 			},
 		},
 	}
+	// The Deployment always names the claude beads root (noClaudeBeadsComment).
+	var heads []string
 	if v.ProxyImage == "" {
-		d.headComment = noProxyComment
+		heads = append(heads, noProxyComment)
 	}
+	heads = append(heads, noClaudeBeadsComment)
+	d.headComment = strings.Join(heads, "\n")
 	return d
 }
 
@@ -866,6 +964,9 @@ func volumes(v Values) []Volume {
 			Secret: &SecretVolumeSource{SecretName: SecretNamePrefix + file.Name},
 		})
 	}
+	if !v.Rehearsal {
+		vols = append(vols, openShellVolume())
+	}
 	return vols
 }
 
@@ -907,6 +1008,20 @@ func mounts(v Values) []VolumeMount {
 			Name:      secretVolumeName(v.forgeTokenFile()),
 			MountPath: manifestdata.LiveForgeTokenPath,
 			SubPath:   v.forgeTokenFile(),
+			ReadOnly:  true,
+		})
+	}
+	if !v.Rehearsal {
+		m = append(m, openShellMount())
+	}
+	if v.OMToken {
+		// The om config names the token's container path, so it is mounted beside
+		// the token. It is read from the town-state volume, whose .runtime/container
+		// row is Private and keeps the file's mode (gt-nr548n).
+		m = append(m, VolumeMount{
+			Name:      TownStateClaim,
+			MountPath: manifestdata.LiveOMConfigPath,
+			SubPath:   OMConfigSubPath,
 			ReadOnly:  true,
 		})
 	}
@@ -1233,9 +1348,10 @@ func (v Values) validateEnv() error {
 }
 
 // validateVolumes refuses two Secret files whose volume names collide or do not
-// fit a volume name, since the pod could not mount both.
+// fit a volume name, since the pod could not mount both. The openshell volume is
+// rendered beside them, so a file that would take its name is refused too.
 func (v Values) validateVolumes() error {
-	seen := make(map[string]string, len(v.Secrets))
+	seen := map[string]string{secretVolumeName(manifestdata.OpenShellEntry.Name): manifestdata.OpenShellEntry.Name}
 	for _, file := range v.Secrets {
 		name := secretVolumeName(file.Name)
 		if len(name) > 63 {
@@ -1477,8 +1593,8 @@ type ServicePort struct {
 	Protocol string `yaml:"protocol"`
 }
 
-// Secret is the subset of v1's Secret the builder renders: one placeholder key
-// and no value.
+// Secret is the subset of v1's Secret the builder renders: placeholder keys with
+// no value.
 type Secret struct {
 	TypeMeta   `yaml:",inline"`
 	Metadata   ObjectMeta        `yaml:"metadata"`
@@ -1606,6 +1722,9 @@ type PodSpec struct {
 type PodSecurityContext struct {
 	RunAsUser  *int64 `yaml:"runAsUser,omitempty"`
 	RunAsGroup *int64 `yaml:"runAsGroup,omitempty"`
+	// FSGroup is the group the Secret volumes are readable by. The daemon pod sets
+	// none while its image runs as root (openShellVolume's comment).
+	FSGroup *int64 `yaml:"fsGroup,omitempty"`
 }
 
 // HostAlias is one /etc/hosts entry the pod's containers share: every hostname
@@ -1671,7 +1790,15 @@ type EmptyDirVolumeSource struct{}
 
 // SecretVolumeSource names the Secret a volume carries.
 type SecretVolumeSource struct {
-	SecretName string `yaml:"secretName"`
+	SecretName  string      `yaml:"secretName"`
+	DefaultMode *int32      `yaml:"defaultMode,omitempty"`
+	Items       []KeyToPath `yaml:"items,omitempty"`
+}
+
+// KeyToPath maps one key of a Secret to the path it takes in its volume.
+type KeyToPath struct {
+	Key  string `yaml:"key"`
+	Path string `yaml:"path"`
 }
 
 // Probe is a readiness or liveness check: a command whose zero exit passes.
