@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/hooks"
+	"github.com/steveyegge/gastown/internal/shellparse"
 )
 
 func TestExtractCommand(t *testing.T) {
@@ -1574,6 +1575,14 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 // the parser, a quoted body and an escaped "\$(" are data, and a command the
 // parser cannot read comes back whole so the walk refuses it rather than
 // finding no bodies in it.
+//
+// The rows marked "intentional flip" differ from the text scan this replaced
+// (heredocSpans with heredocSubstitutions). Every unreadable command now comes
+// back whole where the text scan returned nothing, which only adds refusals,
+// and the sandbox walk refuses an unreadable command before it asks for
+// substitutions, so no verdict changes. A word's substitution beside an
+// unquoted body is returned too, a second judgement of text the walk already
+// judges from the command.
 func TestHeredocBodySubstitutionsReadsParsedBodies(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1585,12 +1594,66 @@ func TestHeredocBodySubstitutionsReadsParsedBodies(t *testing.T) {
 		{"quoted body is data", "cat <<'EOF'\n$(git reset --hard)\nEOF", nil},
 		{"escaped dollar-paren is literal", "cat <<EOF\n\\$(git reset --hard)\nEOF", nil},
 		{"unreadable command comes back whole", "cat <<EOF\n$(git reset --hard)", []string{"cat <<EOF\n$(git reset --hard)"}},
+		// Intentional flip: an unterminated heredoc body the text scan skipped
+		// (span.unterminated) now returns the whole command, which the walk refuses.
+		{"intentional flip: unterminated body, unreadable", "cat <<EOF\n$(git reset --hard)\n", []string{"cat <<EOF\n$(git reset --hard)\n"}},
+		// Intentional flip: an unreadable command with no heredoc at all. The
+		// text scan returned nothing; the parser rejecting it fails it closed.
+		{"intentional flip: unterminated quote, no heredoc", "echo \"a", []string{"echo \"a"}},
+		{"intentional flip: open dollar-paren, no heredoc", "echo $(git reset --hard", []string{"echo $(git reset --hard"}},
+		// Intentional flip: a readable command beside an unquoted body. The
+		// word's substitution is returned with the body's, from Segment.Subs.
+		{"intentional flip: word substitution beside an unquoted body", "cat $(w) <<EOF\n$(git reset --hard)\nEOF", []string{"w", "git reset --hard"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := heredocBodySubstitutions(tt.command)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("heredocBodySubstitutions(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHeredocBodySubstitutionsFallbackTerminates shows that the whole-command
+// fallback of heredocBodySubstitutions ends the walk (gt-4wd164). For each
+// command the parser rejects, the fallback returns exactly one payload, the
+// command itself, and the sandbox walk refuses that payload as unreadable at
+// once, so the substitution step is not reached again and no recursion starts.
+// The heredoc rows fail to parse together with a body, which is the case that
+// could have re-entered the walk.
+func TestHeredocBodySubstitutionsFallbackTerminates(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"unterminated quote", "echo \"a"},
+		{"open dollar-paren", "echo $(git reset --hard"},
+		{"heredoc with unterminated body", "cat <<EOF\n$(git reset --hard)"},
+		{"heredoc and a later unterminated quote", "cat <<EOF\n$(git reset --hard)\nEOF\necho \"a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := shellparse.Parse(tt.command)
+			if err == nil {
+				t.Fatalf("shellparse.Parse(%q) read the command, want a parse error", tt.command)
+			}
+			payloads := heredocBodySubstitutions(tt.command)
+			if !reflect.DeepEqual(payloads, []string{tt.command}) {
+				t.Fatalf("heredocBodySubstitutions(%q) = %q, want the one payload %q", tt.command, payloads, tt.command)
+			}
+			want := sandboxSecretsUnreadableReason(err)
+			reason, tooDeep := sandboxSecretsWalk(tt.command, 0, nil)
+			if reason != want || tooDeep {
+				t.Errorf("sandboxSecretsWalk(%q) = (%q, %v), want (%q, false)", tt.command, reason, tooDeep, want)
+			}
+			// The payload the fallback returns, judged one level down, gives the
+			// same refusal and does not descend: it is refused before any
+			// substitution is read from it.
+			reason, tooDeep = sandboxSecretsWalk(payloads[0], 1, nil)
+			if reason != want || tooDeep {
+				t.Errorf("sandboxSecretsWalk(fallback payload %q) = (%q, %v), want (%q, false)", payloads[0], reason, tooDeep, want)
 			}
 		})
 	}

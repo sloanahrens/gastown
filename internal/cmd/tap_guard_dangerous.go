@@ -1213,16 +1213,22 @@ func heredocLineOperator(op string) bool {
 // "cat > f <<EOF" while reading the body. A quoted tag keeps its body
 // literal, so its substitutions stay inert (gt-x50o8).
 //
-// The parser keeps a body's substitutions in the Subs of the segment that reads
-// the body, beside the words' own, so every Sub of a segment with an unquoted
-// body is returned. A word's substitution can come back too; the caller walks
-// it a second time and gets the verdict it already had. Substitutions nested in
-// other substitutions are read the same way. A command the parser cannot read
-// is returned whole, so the caller walks it and refuses it as unreadable
-// rather than finding no bodies in it.
+// The parser does not tell a heredoc body's substitutions from a word's:
+// Segment.Subs holds both, with no offset that sets them apart. So every Sub of
+// a segment with an unquoted body is returned, a word's included, and that
+// word's substitution is judged a second time with the verdict it already had.
+// Narrowing to the body's text would be a match on raw text that can miss a
+// body whose escapes the parser resolved, and a miss is an allow, so the wider
+// reading stays. Substitutions nested in other substitutions are read the same
+// way.
 func heredocBodySubstitutions(command string) []string {
 	script, err := shellparse.Parse(command)
 	if err != nil {
+		// Fail closed for every command the parser rejects, not only heredoc
+		// ones, as gt-j41yim and gt-mru91l do: the whole command goes back to
+		// the caller, whose walk refuses an unreadable payload before it asks
+		// for substitutions, so the payload is judged once as unreadable and
+		// the walk does not descend into it.
 		return []string{command}
 	}
 	var subs []string
@@ -1969,8 +1975,8 @@ func quotedDollarParen(dollar, paren, quote rune) bool {
 // at rune i of runes closes within command. closingDoubleQuote skips a
 // substitution that closes whole; spaceOutShellOperators reads one flat only
 // when it does not, so the two agree on where the quoted word ends (gt-l18zp).
-// Kept on the text answer: spaceOutShellOperators is shared by seven guards and
-// no follow-up bead is planned for it.
+// Kept on the text answer: spaceOutShellOperators is shared by seven guards, and
+// retiring it is planned in gt-crn9gu.
 func quotedSubstitutionCloses(command string, runes []rune, i int) bool {
 	from := len(string(runes[:i+2])) // the byte just past the "("
 	return closingParen(command, from, heredocBodiesFrom(command, from)) >= 0
