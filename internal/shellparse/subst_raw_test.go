@@ -47,6 +47,10 @@ func TestParseSubstitutionRaw(t *testing.T) {
 		{name: "backtick in double quotes", command: "echo \"`date`\"", want: []string{"date"}},
 		{name: "heredoc inside", command: "x=$(cat <<EOF\nhi\nEOF\n)", want: []string{"cat <<EOF\nhi\nEOF\n"}},
 		{name: "process substitutions", command: "diff <(ls a) >(wc)", want: []string{"ls a", "wc"}},
+		{name: "process substitution inside backquote", command: "echo `cat <(ls a)`", want: []string{"cat <(ls a)", "ls a"}},
+		{name: "output process substitution inside backquote", command: "echo `cat >(wc)`", want: []string{"cat >(wc)", "wc"}},
+		{name: "escaped backquote inside process substitution inside backquote", command: "echo `cat <(echo \\`id\\`)`", want: []string{"cat <(echo \\`id\\`)", "echo \\`id\\`", "id"}},
+		{name: "process substitution inside escaped nested backquote", command: "echo `echo \\`cat <(id)\\``", want: []string{"echo \\`cat <(id)\\`", "cat <(id)", "id"}},
 		{name: "header substitution", command: "for f in $(ls); do echo \"$f\"; done", want: []string{"ls"}},
 	}
 	for _, tt := range tests {
