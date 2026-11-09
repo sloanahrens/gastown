@@ -224,6 +224,69 @@ func TestParseConstructs(t *testing.T) {
 	}
 }
 
+// conditionalFlags is the Conditional flag of each segment, in source order.
+func conditionalFlags(script shellparse.Script) []bool {
+	var out []bool
+	for _, seg := range script.Segments {
+		out = append(out, seg.Conditional)
+	}
+	return out
+}
+
+// TestParseConditional gives one row per shape that sets Conditional, and the
+// shape's counterpart that leaves it unset. The want slice holds the flag of
+// every segment in source order, so a row shows both directions at once.
+func TestParseConditional(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []bool
+	}{
+		{name: "straight line", command: "echo a", want: []bool{false}},
+		{name: "semicolon list", command: "echo a; echo b", want: []bool{false, false}},
+		{name: "newline list", command: "echo a\necho b", want: []bool{false, false}},
+		{name: "and list first command", command: "echo a && echo b", want: []bool{false, true}},
+		{name: "or list second command", command: "echo a || echo b", want: []bool{false, true}},
+		{name: "pipeline", command: "echo a | grep b", want: []bool{true, true}},
+		{name: "subshell", command: "(cd /src; echo x)", want: []bool{true, true}},
+		{name: "brace group", command: "{ echo z; }", want: []bool{true}},
+		{name: "if condition", command: "if echo c; then echo y; fi", want: []bool{false, true}},
+		{name: "if body", command: "if true; then echo y; fi", want: []bool{false, true}},
+		{name: "else body", command: "if true; then echo y; else echo n; fi", want: []bool{false, true, true}},
+		{name: "elif body", command: "if true; then :; elif echo c; then echo e; fi", want: []bool{false, true, true, true}},
+		{name: "while body", command: "while false; do echo w; done", want: []bool{false, true}},
+		{name: "until body", command: "until true; do echo u; done", want: []bool{false, true}},
+		{name: "for body", command: "for i in 1 2; do echo $i; done", want: []bool{true}},
+		{name: "select body", command: "select x in a b; do echo s; done", want: []bool{true}},
+		{name: "case item", command: "case x in x) echo c;; esac", want: []bool{true}},
+		{name: "redirection only body", command: "if true; then >out; fi", want: []bool{false, true}},
+		{name: "declare body", command: "if true; then declare x=1; fi", want: []bool{false, true}},
+		{name: "let body", command: "if true; then let x=1; fi", want: []bool{false, true}},
+		// The while condition is set only because the function body is conditional.
+		{name: "function body", command: "f() while echo c; do :; done; f", want: []bool{true, true, false}},
+		{name: "background", command: "sleep 1 &", want: []bool{true}},
+		{name: "background then foreground", command: "echo a & echo b", want: []bool{true, false}},
+		{
+			name:    "conditional inside a plain list",
+			command: "echo a; if true; then echo b; fi; echo c",
+			want:    []bool{false, false, true, false},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			script, err := shellparse.Parse(tt.command)
+			if err != nil {
+				t.Fatalf("Parse(%q): %v", tt.command, err)
+			}
+			if got := conditionalFlags(script); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("Parse(%q) Conditional = %v, want %v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestParseHeredocBodies checks each body against what bash passes for the same
 // fixture. An unquoted delimiter decodes only an escaped backslash, dollar or
 // backtick and a line continuation; a quoted delimiter decodes nothing; <<-
