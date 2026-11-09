@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecatimage"
 	"github.com/steveyegge/gastown/internal/promote"
@@ -657,7 +658,24 @@ type tierSweepSeams struct {
 	// makeDir creates a rig's timings and resume directory. Nil resolves to
 	// os.MkdirAll at 0700.
 	makeDir func(dir string) error
+	// runnerImageFile is the file the runner image is read from when it holds a
+	// digest reference (see tierSweepRunnerImageFile). Empty is
+	// tierSweepPolecatImageFile, the path the pod's Deployment projects.
+	runnerImageFile string
 }
+
+// tierSweepPolecatImageFile is where a daemon pod finds the polecat image its
+// Deployment names: the file the pod template projects from the
+// gastown.dev/polecat-image annotation (deploy/k8s/daemon, gt-ldqqvk). A daemon
+// outside a pod finds no such file there.
+const tierSweepPolecatImageFile = "/run/gt/image/polecat-image"
+
+// tierSweepImageFileLast is the reason each runner image file path last logged
+// as unused, keyed by path. It is package state, not a seam, because
+// runTierSweepRig copies the seams by value and a copy would reset the latch: a
+// reason logs once per path, and a valid or absent file clears it, so a
+// recurrence logs again.
+var tierSweepImageFileLast sync.Map
 
 // tierSweepBeadStore is the bead store the sweep files and closes beads
 // through.
@@ -2007,17 +2025,18 @@ func (d *Daemon) withPolecatImageTrimContext(env []string) []string {
 	return append(env, entry...)
 }
 
-// tierSweepRunnerImage is the image a run's containers use: the pin the config
-// names, or, when it names none or asks for the installed build, the polecat
-// image make polecat-image publishes at the installed gt's build revision. With
-// image_registry set, that installed image is named inside the registry, and a
-// pin is always used as named, never inside the registry (gt-gg9hv.26). An
-// installed build the binary records no usable revision for cannot name an
-// image, and an unnameable image is an error: guessing one would run a tree no
-// build produced (gt-c3sue).
+// tierSweepRunnerImage is the image a run's containers use. A valid runner image
+// file wins: its digest reference is used as named, over the pin and over
+// image_registry. Otherwise it is the pin the config names, or, when it names
+// none or asks for the installed build, the polecat image make polecat-image
+// publishes at the installed gt's build revision. With image_registry set, that
+// installed image is named inside the registry, and a pin is always used as
+// named, never inside the registry (gt-gg9hv.26). An installed build the binary
+// records no usable revision for cannot name an image, and an unnameable image
+// is an error: guessing one would run a tree no build produced (gt-c3sue).
 func (d *Daemon) tierSweepRunnerImage(cfg *config.TierSweepRunnerConfig) (string, error) {
-	if !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
-		return cfg.Image, nil
+	if image, follows := d.tierSweepResolveRunnerImage(cfg); !follows {
+		return image, nil
 	}
 	rev := strings.TrimSpace(d.buildCommit())
 	switch {
@@ -2044,6 +2063,65 @@ func tierSweepRunnerImageFollowsInstalled(image string) bool {
 	return image == "" || image == config.TierSweepRunnerInstalledImage
 }
 
+// tierSweepResolveRunnerImage is the one answer to what a run's image is and
+// whether it follows the installed build: tierSweepRunnerImage and
+// tierSweepEnsureRunnerImage both ask it, so they cannot disagree. A valid
+// runner image file is a pin, used as named, so it does not follow the
+// installed build. Otherwise the answer is the configured image's own.
+func (d *Daemon) tierSweepResolveRunnerImage(cfg *config.TierSweepRunnerConfig) (image string, followsInstalled bool) {
+	if image, ok := d.tierSweepRunnerImageFile(); ok {
+		return image, false
+	}
+	return cfg.Image, tierSweepRunnerImageFollowsInstalled(cfg.Image)
+}
+
+// tierSweepRunnerImageFile reads the runner image file and returns the digest
+// reference it holds. A missing file is silent. A file that cannot be read, is
+// empty, or does not hold a digest reference is not used, and the run falls back
+// to the settings. The reason is logged once per path, until the file is valid
+// or gone again (gt-6u0k8x).
+func (d *Daemon) tierSweepRunnerImageFile() (string, bool) {
+	path := d.tierSweepSeams.runnerImageFile
+	if path == "" {
+		path = tierSweepPolecatImageFile
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		tierSweepImageFileLast.Delete(path)
+		return "", false
+	}
+	image := strings.TrimSpace(string(data))
+	var reason string
+	switch {
+	case err != nil:
+		reason = fmt.Sprintf("cannot be read: %v", err)
+	case image == "":
+		reason = "is empty"
+	case !tierSweepIsDigestRef(image):
+		reason = "does not hold a digest reference (repo@sha256:<64 hex>)"
+	}
+	if reason == "" {
+		tierSweepImageFileLast.Delete(path)
+		return image, true
+	}
+	if last, _ := tierSweepImageFileLast.Swap(path, reason); last != reason {
+		d.logger.Printf("tier_sweep: runner image file %s %s; using runner.image instead", path, reason)
+	}
+	return "", false
+}
+
+// tierSweepImageRepoRE is the repository shape a digest reference may name. It
+// starts with a letter or digit, so the reference cannot read as a docker flag
+// where it reaches the docker argv.
+var tierSweepImageRepoRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]*$`)
+
+// tierSweepIsDigestRef reports whether ref is a registry reference pinned by
+// digest: a repository, then @sha256: and 64 lowercase hex.
+func tierSweepIsDigestRef(ref string) bool {
+	at := strings.LastIndex(ref, "@")
+	return at > 0 && tierSweepImageRepoRE.MatchString(ref[:at]) && imagevalues.ValidDigest(ref[at+1:])
+}
+
 // tierSweepEnsureRunnerImage makes sure a run's image is in the sweep engine
 // before the run starts. Only an image that follows the installed build is
 // ensured: an explicit pin is the operator's and is used as it always was.
@@ -2057,7 +2135,8 @@ func tierSweepRunnerImageFollowsInstalled(image string) bool {
 // Docker backend does (gt-uv611).
 //
 // With an image_registry set, the installed image is checked in the registry
-// instead (see tierSweepRunnerImage).
+// instead (see tierSweepRunnerImage). A valid runner image file is a pin, so
+// the image it names is neither checked nor loaded (gt-6u0k8x).
 //
 // It returns the commands' combined output for the stage log, and an error
 // when the image could not be confirmed or loaded. An image the daemon cannot
@@ -2065,7 +2144,10 @@ func tierSweepRunnerImageFollowsInstalled(image string) bool {
 // with an older image.
 func (d *Daemon) tierSweepEnsureRunnerImage(ctx context.Context, spec sweeprunner.Spec) (string, error) {
 	cfg := tierSweepRunnerConfig(d.patrolConfig)
-	if cfg == nil || !tierSweepRunnerImageFollowsInstalled(cfg.Image) {
+	if cfg == nil {
+		return "", nil
+	}
+	if _, follows := d.tierSweepResolveRunnerImage(cfg); !follows {
 		return "", nil
 	}
 	budget := d.tierSweepSeams.imageBudget
