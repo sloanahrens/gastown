@@ -838,7 +838,7 @@ func bdCloseLostInProduction(command string) string {
 func bdCloseParsedGap(command string) (gap string, routed bool) {
 	unsafe := false
 	parsedOnly := func(c string) ([]string, bool) {
-		tokens, readable := bdCloseParsedTokenizer(c)
+		tokens, readable := parsedTokens(c)
 		if !readable || bdCloseParsedUnsafe(tokens) {
 			unsafe = true
 			return nil, false
@@ -852,34 +852,23 @@ func bdCloseParsedGap(command string) (gap string, routed bool) {
 	return bdCloseMissed(got, parseBdCloseInvocationsWith(command, bdCloseShellReading)), false
 }
 
-// useBdCloseParsedTokenizer puts read in place of the parsed tokenizer until t
-// ends. Only a test that is not parallel may call it.
-func useBdCloseParsedTokenizer(t *testing.T, read func(string) ([]string, bool)) {
-	t.Helper()
-	orig := bdCloseParsedTokenizer
-	bdCloseParsedTokenizer = read
-	t.Cleanup(func() { bdCloseParsedTokenizer = orig })
-}
-
 // bdCloseReadCounts counts the readings the production reader asked for.
 type bdCloseReadCounts struct{ parsed, shell int }
 
-// countBdCloseReadings counts the calls to both tokenizers until t ends. Only a
-// test that is not parallel may call it.
-func countBdCloseReadings(t *testing.T) *bdCloseReadCounts {
-	t.Helper()
-	counts := &bdCloseReadCounts{}
-	parsed, shell := bdCloseParsedTokenizer, bdCloseShellTokenizer
-	bdCloseParsedTokenizer = func(command string) ([]string, bool) {
-		counts.parsed++
-		return parsed(command)
-	}
-	bdCloseShellTokenizer = func(command string) []string {
-		counts.shell++
-		return shell(command)
-	}
-	t.Cleanup(func() { bdCloseParsedTokenizer, bdCloseShellTokenizer = parsed, shell })
-	return counts
+// countingBdCloseReader is the production reader over the real tokenizers, counting
+// the calls to each into counts. Each test passes its own counts, so tests that use
+// it can run in parallel.
+func countingBdCloseReader(counts *bdCloseReadCounts) bdCloseReader {
+	return bdCloseReaderOf(
+		func(command string) ([]string, bool) {
+			counts.parsed++
+			return parsedTokens(command)
+		},
+		func(command string) []string {
+			counts.shell++
+			return shellTokenize(command)
+		},
+	)
 }
 
 // TestParseBdCloseParsedReadingMatchesShellIDs is the coverage property, over the
@@ -910,9 +899,10 @@ func TestParseBdCloseParsedReadingMatchesShellIDs(t *testing.T) {
 // property sees the mutation. Through the production path the routing predicate
 // reads the merged tokens as unsafe and sends those commands to the shell reading,
 // so the guard loses nothing and the predicate routes more commands than the real
-// tokenizer does. It is not parallel, because it swaps the package's parsed
-// tokenizer.
+// tokenizer does. It passes the dropped-separator tokenizer to the
+// production reader as a parameter.
 func TestParseBdCloseCoverageCatchesDroppedSeparator(t *testing.T) {
+	t.Parallel()
 	dropped := func(command string) ([]string, bool) {
 		tokens, readable := parsedTokens(command)
 		return slices.DeleteFunc(tokens, func(s string) bool { return shellCommandSeparators[s] }), readable
@@ -929,9 +919,9 @@ func TestParseBdCloseCoverageCatchesDroppedSeparator(t *testing.T) {
 		t.Error("a parsed tokenizer that drops separators loses no close on any command, so the coverage property cannot see a dropped separator")
 	}
 
-	useBdCloseParsedTokenizer(t, dropped)
+	production := bdCloseReaderOf(dropped, shellTokenize)
 	for _, command := range commands {
-		if gap := bdCloseLostInProduction(command); gap != "" {
+		if gap := bdCloseMissed(parseBdCloseInvocationsWith(command, production), parseBdCloseInvocationsWith(command, bdCloseShellReading)); gap != "" {
 			t.Errorf("parseBdCloseInvocations(%q) loses %q under a tokenizer that drops separators; the routing predicate must send it to the shell reading", command, gap)
 		}
 	}
@@ -1056,9 +1046,10 @@ func TestParseBdCloseInvocationsRedirectTargetIsNotAnID(t *testing.T) {
 
 // TestParseBdCloseInvocationsRoutesUnsafeShapes checks which reading the production
 // reader takes. An unsafe shape goes to the shell reading, which finds the bead the
-// parsed tokens alone lose; a plain close is read by parsedTokens alone. It is not
-// parallel, because it counts the readings through the package's tokenizers.
+// parsed tokens alone lose; a plain close is read by parsedTokens alone. It counts the
+// readings through a reader built for the test.
 func TestParseBdCloseInvocationsRoutesUnsafeShapes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
@@ -1072,8 +1063,9 @@ func TestParseBdCloseInvocationsRoutesUnsafeShapes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			counts := countBdCloseReadings(t)
-			got := parseBdCloseInvocations(tt.command)
+			t.Parallel()
+			counts := &bdCloseReadCounts{}
+			got := parseBdCloseInvocationsWith(tt.command, countingBdCloseReader(counts))
 			if !bdCloseHasID(got, "gt-x") {
 				t.Errorf("parseBdCloseInvocations(%q) = %+v, want an invocation holding gt-x", tt.command, got)
 			}

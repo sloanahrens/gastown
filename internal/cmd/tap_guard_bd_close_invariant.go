@@ -441,14 +441,19 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 // shellTokenize's reading.
 type bdCloseReader func(command string) (tokens []string, parsed bool)
 
-// bdCloseParsedTokenizer and bdCloseShellTokenizer are the two readings
-// bdCloseReadTokens chooses between. They are variables so a test can put a
-// different reading in place and see the production path, routing included,
-// judge it.
-var (
-	bdCloseParsedTokenizer = parsedTokens
-	bdCloseShellTokenizer  = shellTokenize
-)
+// bdCloseReaderOf builds the production reader over the two readings it chooses
+// between: parsed, and shell as the fallback. A test passes its own readings, so
+// the production routing, unsafe shapes included, judges them without any package
+// variable being swapped.
+func bdCloseReaderOf(parsed func(string) ([]string, bool), shell func(string) []string) bdCloseReader {
+	return func(command string) ([]string, bool) {
+		tokens, readable := parsed(command)
+		if !readable || bdCloseParsedUnsafe(tokens) {
+			return shell(command), false
+		}
+		return tokens, true
+	}
+}
 
 // bdCloseReadTokens is the production reader, the parsedTokens reading of gt-crn9gu.
 // It falls back to shellTokenize when parsedTokens cannot read the command, and
@@ -456,11 +461,7 @@ var (
 // (bdCloseParsedUnsafe). shellTokenize is the reading gt-crn9gu retires; it stays
 // as the fallback until that plan removes it.
 func bdCloseReadTokens(command string) ([]string, bool) {
-	tokens, readable := bdCloseParsedTokenizer(command)
-	if !readable || bdCloseParsedUnsafe(tokens) {
-		return bdCloseShellTokenizer(command), false
-	}
-	return tokens, true
+	return bdCloseReaderOf(parsedTokens, shellTokenize)(command)
 }
 
 // parseBdCloseInvocationsWith is parseBdCloseInvocations over the reading read
