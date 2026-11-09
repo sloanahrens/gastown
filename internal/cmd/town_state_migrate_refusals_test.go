@@ -117,6 +117,36 @@ func TestTownStateMigrateSeedAndDeltaStepsRefuse(t *testing.T) {
 			t.Fatalf("delta onto a full volume = %v, want the shortfall named", err)
 		}
 	})
+	t.Run("a changed file that vanishes before its link state is read is named", func(t *testing.T) {
+		t.Parallel()
+		town := migrateTown(t)
+		env, fv, _ := seededEnv(t, town)
+		writeHostFile(t, filepath.Join(town, "daemon", "maintenance_state.json"), "changed\n", time.Now())
+		// The first listing is the emptiness probe; the second is the delta's
+		// pre-check, which reads the host copy set before it lists the volume. A
+		// file removed when that second listing starts is differing and unreadable.
+		lists := 0
+		fv.onRun = func(argv []string) {
+			if strings.Join(argv, " ") != strings.Join(townstate.ListArgv, " ") {
+				return
+			}
+			lists++
+			if lists == 2 {
+				if err := os.Remove(filepath.Join(town, "daemon", "maintenance_state.json")); err != nil {
+					t.Errorf("removing the host file: %v", err)
+				}
+			}
+		}
+		err := runTownStateMigrateCopyIn(env)
+		if err == nil || !strings.Contains(err.Error(), "reading daemon/maintenance_state.json") {
+			t.Fatalf("delta over a vanished file = %v, want the file named", err)
+		}
+		for _, call := range fv.calls {
+			if call == strings.Join(townstate.ImportMergeArgv, " ") {
+				t.Errorf("a delta with an unreadable changed file still ran the import")
+			}
+		}
+	})
 	t.Run("the delta fails part way and the seed record cannot be removed", func(t *testing.T) {
 		t.Parallel()
 		town := migrateTown(t)

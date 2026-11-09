@@ -2,6 +2,7 @@ package land
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"strings"
@@ -60,7 +61,7 @@ func WorkRuns(workRoot string) ([]WorkRun, error) {
 		}
 		info, err := e.Info()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading the modification time of %s: %w", name, err)
 		}
 		runs = append(runs, WorkRun{Name: name, ModTime: info.ModTime()})
 	}

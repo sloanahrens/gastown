@@ -3,6 +3,7 @@ package land
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,6 +77,28 @@ func TestWorkRunsNamesEachRunAndWhenItLastChanged(t *testing.T) {
 	}
 	if d := runs[0].ModTime.Sub(old); d < -time.Second || d > time.Second {
 		t.Fatalf("WorkRuns modification time = %v; want about %v", runs[0].ModTime, old)
+	}
+}
+
+// TestWorkRunsRefusesARunWhoseTimeIsUnreadable: a run the root lists but whose
+// time cannot be read is an error that names the run, never a run with a zero
+// time. The root has no search bit, so the listing reads the name and the
+// entry's stat is refused.
+func TestWorkRunsRefusesARunWhoseTimeIsUnreadable(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "rig")
+	mkdirs(t, root, "land-1")
+	if err := os.Chmod(root, 0o400); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(root, 0o700); err != nil {
+			t.Errorf("restoring the root for cleanup: %v", err)
+		}
+	})
+	runs, err := WorkRuns(root)
+	if err == nil || !strings.Contains(err.Error(), "land-1") {
+		t.Fatalf("WorkRuns = %v, %v; want the run named in the refusal", runs, err)
 	}
 }
 
