@@ -13,6 +13,10 @@ import (
 // pod runs and not the daemon state file in the town tree, which a pod does
 // not write. The command runs only through run; a refused argument runs nothing.
 func podDaemonCommit(ctx context.Context, run update.RunFunc, kubeContext, namespace, deployment string) (string, error) {
+	// Trim once here, so the checks and the kubectl command read the same value.
+	kubeContext = strings.TrimSpace(kubeContext)
+	namespace = strings.TrimSpace(namespace)
+	deployment = strings.TrimSpace(deployment)
 	if err := podArgument("kube context", kubeContext); err != nil {
 		return "", err
 	}
