@@ -53,13 +53,10 @@
 // Deployment opens with a comment saying so (gt-h6d5yb). A rehearsal runs beside
 // the live container and must not reach the live Dolt server (gt-0cosuv).
 //
-// Values.ProxyImage, a digest reference the overseer reads from the registry,
-// gives a live pod the two socat relays the compose override runs beside the
-// daemon: registry-proxy and gateway-proxy listen on 127.0.0.1:5001 and
-// 127.0.0.1:28443 in the pod's network namespace and forward to those ports on
-// Values.HostGatewayIP, so the sandbox sling works from a pod as it does from
-// the container. Without it the pod carries neither relay and the Deployment
-// opens with a comment saying so; a rehearsal never renders either (gt-ygx4qd).
+// Values.ProxyImage gives a live pod the two socat relays the compose override
+// runs beside the daemon, so the sandbox sling works from a pod as it does from
+// the container; a rehearsal never renders either (gt-ygx4qd). The field's
+// comment holds the contract.
 //
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
@@ -481,7 +478,7 @@ type Values struct {
 	// (gt-ygx4qd). Empty, the pod carries neither and the Deployment says so;
 	// set with an empty HostGatewayIP, a live render is refused, since the relay
 	// would name no host. A rehearsal never renders the relays, whatever this
-	// field holds.
+	// field holds, but still refuses a tag.
 	ProxyImage string
 	// Env is the container's environment: the kept entries of the map the compose
 	// writer renders (ComposeSpec.Env in internal/templates/daemon_compose.go).
@@ -672,9 +669,9 @@ func clusterRoleBinding(name, role, serviceAccountNamespace string) ClusterRoleB
 // the town's owner, or a rehearsal, which owns nothing. A live pod's hostAliases
 // maps DoltHostName to Values.HostGatewayIP when it is set. A rehearsal carries
 // no alias, so it cannot reach the live host's Dolt server, and the rendered
-// Deployment opens with noHostAliasComment whenever the pod carries none. When
-// Values.ProxyImage is set a live pod also carries the two relay sidecars; when
-// it is empty the Deployment opens with noProxyComment.
+// Deployment opens with noHostAliasComment whenever the pod carries none.
+// Values.ProxyImage decides the relay sidecars (see proxyContainers); when it is
+// empty the Deployment opens with noProxyComment.
 func deployment(v Values, namespace string) Deployment {
 	owner := TownOwnerPod
 	if v.Rehearsal {
