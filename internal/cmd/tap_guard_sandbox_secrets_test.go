@@ -720,9 +720,9 @@ func TestSandboxSecretsSubstitutionHeredocBodies(t *testing.T) {
 		script, err := shellparse.Parse(tc.command)
 		if err != nil {
 			// The walk refuses a command the parser cannot read before it asks for
-			// its bodies, so the refusal is what the row pins.
-			if sandboxSecretsReason(tc.command) == "" {
-				t.Errorf("%s: unreadable %q is not refused", tc.name, tc.command)
+			// its bodies, so the refusal and its reason are what the row pins.
+			if reason := sandboxSecretsReason(tc.command); !strings.Contains(reason, "cannot be read") {
+				t.Errorf("%s: unreadable %q: sandboxSecretsReason = %q, want the cannot-be-read refusal", tc.name, tc.command, reason)
 			}
 			continue
 		}
@@ -1471,14 +1471,12 @@ func TestSandboxSecretsHeaderArithmeticVerdicts(t *testing.T) {
 	}
 }
 
-// gt-l5pbgs (overseer ruling, escalation hq-wisp-cvnjy): 147 verdicts flipped from
-// refuse to allow when the walk moved onto the parse. Every one was refused on
-// main only because the old text scanner cut a dollar-paren body at the first
-// close paren of a case pattern, or cut a backquote inside a dollar-double-paren,
-// and then called the fragment unreadable. The parser reads the same command, so
-// the verdict is the one its real substitution bodies earn. These are intentional
-// flips; each class has a twin whose real body prints the environment, which must
-// stay refused, so the pin cannot hide a loosening.
+// gt-l5pbgs ruled these verdicts intentional flips from refuse to allow. The walk
+// judges a command the parser reads on its parsed substitution bodies, so a
+// command the old text scanner refused as unreadable is judged on the body the
+// shell runs. Each class has a twin whose real body prints the environment and
+// stays refused, so the pin cannot hide a loosening. The classes are generated
+// by TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies.
 func TestSandboxSecretsParserReadableCommandsAreJudgedOnTheirBodies(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -1503,4 +1501,71 @@ func TestSandboxSecretsParserReadableCommandsAreJudgedOnTheirBodies(t *testing.T
 			}
 		})
 	}
+}
+
+// TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies generates the three flip
+// classes of gt-l5pbgs, each crossed with a body word the shell runs, so a flip
+// beyond the pinned rows cannot pass unseen. Each generated command is checked
+// against its body judged on its own:
+//   - a command the walk allows must have a body that also allows on its own, so
+//     no verdict is loosened past what the body earns;
+//   - a command whose body prints the environment must be refused;
+//   - a data body must stay allowed, so the property is not met by refusing all.
+//
+// "BQ" stands for a backquote and "BODY" for the body word.
+func TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies(t *testing.T) {
+	t.Parallel()
+	shapes := []struct {
+		command string // the command, with the body word in place
+		judged  string // the body as the shell runs it, judged on its own
+	}{
+		// A case pattern's close paren inside a dollar-paren body, the body in an arm.
+		{"x=$(case a in *) BODY ;; esac)", "BODY"},
+		{"x=$(case printenv in *) BODY ;; esac)", "BODY"},
+		// A backquote inside a dollar-double-paren, quoted and unquoted.
+		{`echo "$((BQecho \BQBODY\BQBQ))"`, "echo BQBODYBQ"},
+		{`echo $((BQecho \BQBODY\BQBQ))`, "echo BQBODYBQ"},
+		// A backquote inside a for-in or case header substitution.
+		{"for x in $(echo BQBODYBQ); do echo $x; done", "echo BQBODYBQ"},
+		{`for x in "$(echo BQBODYBQ)"; do echo $x; done`, "echo BQBODYBQ"},
+		{"case $(echo BQBODYBQ) in *) ;; esac", "echo BQBODYBQ"},
+	}
+	bodies := []struct {
+		word              string
+		data              bool // runs nothing secret, so every shape allows it
+		printsEnvironment bool
+	}{
+		{"hi", true, false},
+		{"echo", true, false},
+		{"cat .env.local", false, false},
+		{"printenv", false, true},
+		{"env", false, true},
+		{"export -p", false, true},
+	}
+	generated, allowed := 0, 0
+	for _, shape := range shapes {
+		for _, body := range bodies {
+			fill := strings.NewReplacer("BQ", "`", "BODY", body.word)
+			command, judged := fill.Replace(shape.command), fill.Replace(shape.judged)
+			generated++
+			reason := sandboxSecretsReason(command)
+			if body.printsEnvironment && reason == "" {
+				t.Errorf("sandboxSecretsReason(%q) allows, but its body %q prints the environment", command, body.word)
+			}
+			if body.data && reason != "" {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want a data body allowed", command, reason)
+			}
+			if reason != "" {
+				continue
+			}
+			allowed++
+			if on := sandboxSecretsReason(judged); on != "" {
+				t.Errorf("sandboxSecretsReason(%q) allows, but its body %q is refused on its own: %q", command, judged, on)
+			}
+		}
+	}
+	if allowed == 0 {
+		t.Fatalf("no generated command of %d is allowed, so the property is vacuous", generated)
+	}
+	t.Logf("generated %d commands, %d allowed", generated, allowed)
 }
