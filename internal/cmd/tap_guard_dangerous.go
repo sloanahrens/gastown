@@ -1221,6 +1221,14 @@ func heredocLineOperator(op string) bool {
 // body whose escapes the parser resolved, and a miss is an allow, so the wider
 // reading stays. Substitutions nested in other substitutions are read the same
 // way.
+//
+// The parser's Raw is the body as written, so a backquote body keeps the escapes
+// the shell removes when it cuts the body (substitutionBody, gt-h3312). A body
+// whose cut differs from Raw is returned both ways, so a nested command the shell
+// runs (an escaped inner backquote, an escaped dollar the cut unescapes) is
+// judged (gt-4wd164). The parser does not say which substitutions are backquotes,
+// so a "$(...)" body with the same escapes is judged its cut too: a refusal it
+// may not need, never an allow.
 func heredocBodySubstitutions(command string) []string {
 	script, err := shellparse.Parse(command)
 	if err != nil {
@@ -1242,6 +1250,9 @@ func heredocBodySubstitutions(command string) []string {
 			for _, sub := range seg.Subs {
 				if unquoted && sub.Raw != "" {
 					subs = append(subs, sub.Raw)
+					if cut := backquoteBodyCut(sub.Raw); cut != sub.Raw {
+						subs = append(subs, cut)
+					}
 				}
 				walk(sub)
 			}
@@ -1252,6 +1263,13 @@ func heredocBodySubstitutions(command string) []string {
 	}
 	walk(script)
 	return subs
+}
+
+// backquoteBodyCut is body as the shell cuts a backquote substitution's body. It
+// reuses substitutionBody by wrapping body in backquotes, so the unescape is the
+// one gt-h3312 specified.
+func backquoteBodyCut(body string) string {
+	return substitutionBody("`"+body+"`", substitutionSpan{open: 0, bodyStart: 1, bodyEnd: 1 + len(body)})
 }
 
 // skipLineContinuationBytes is skipLineContinuations for command's bytes: it

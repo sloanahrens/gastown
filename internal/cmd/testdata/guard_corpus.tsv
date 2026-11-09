@@ -468,3 +468,7 @@ test_scope	polecat	"echo ${v:-#<(go test ./internal/shellparse/... -run TestPars
 dangerous	polecat	"cat <<EOF\n$(git reset --hard HEAD~5)\nEOF"	refuse	Hard reset discards	gt-4wd164	092fea418d78f707da673e00a10511ccb07e0975471430c620880eb06843ea6f
 container_suite	polecat	"echo ok ; echo more"	allow		gt-4wd164	092fea418d78f707da673e00a10511ccb07e0975471430c620880eb06843ea6f
 test_scope	polecat	"go test ./internal/shellparse/... -run TestParseHeredoc"	allow		gt-4wd164	092fea418d78f707da673e00a10511ccb07e0975471430c620880eb06843ea6f
+# --- gt-4wd164 rework: a backquote body in an unquoted heredoc is returned as written and as the shell cuts it, which moves the stamp again; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"cat <<EOF\necho `echo \\`git reset --hard\\``\nEOF"	refuse	Hard reset discards	gt-4wd164	0ca920b50aa2e2d98fd443c60fa7aae8b15d00a5592385bfc99709f98a2939b4
+container_suite	polecat	"cat <<EOF\necho `echo \\`echo hi\\``\nEOF"	allow		gt-4wd164	0ca920b50aa2e2d98fd443c60fa7aae8b15d00a5592385bfc99709f98a2939b4
+test_scope	polecat	"go test ./internal/cmd -run TestSandboxSecretsHeredocBacktickBodyIsUnescaped -count=1"	allow		gt-4wd164	0ca920b50aa2e2d98fd443c60fa7aae8b15d00a5592385bfc99709f98a2939b4
