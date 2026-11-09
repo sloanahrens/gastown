@@ -430,6 +430,9 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 // from are read in order, and each spelling must match as a subsequence of them.
 // A word split by quotes, an expansion or an escape still shows its letters.
 // Word boundaries are not kept, so it errs toward yes.
+// A word PRODUCED at run time (printf with an escape, a variable that holds the
+// word) shows no letters here and is not seen: the guard's threat model is an
+// accidental gh pr create, not deliberate obfuscation (gt-mru91l, as for gt-j41yim).
 //
 // The creation flag is any b or c after the subcommand: -b, -B, -c, -C and
 // --create all carry one of the two letters, and a flag-less checkout or switch
