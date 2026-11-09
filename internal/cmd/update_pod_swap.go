@@ -17,6 +17,14 @@ import (
 // value that reaches the kubectl argv is checked against it first.
 var dnsLabelPattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 
+// maxDNSLabelLength is the longest DNS label a namespace or Deployment name may be.
+const maxDNSLabelLength = 63
+
+// isDNSLabel reports whether name is a DNS label within the length limit.
+func isDNSLabel(name string) bool {
+	return len(name) <= maxDNSLabelLength && dnsLabelPattern.MatchString(name)
+}
+
 // podDaemonSwap puts a digest install's pair in force on a daemon that runs as a
 // pod. Apply points the Deployment's daemon container at the pair's daemon image
 // and waits for the rollout, so the caller's wait, restore and escalation work as
@@ -73,10 +81,10 @@ func (s podDaemonSwap) validate(pair update.ImagePair) error {
 	if s.Context == "" || strings.HasPrefix(s.Context, "-") {
 		return fmt.Errorf("the pod daemon swap names no usable kubectl context %q", s.Context)
 	}
-	if !dnsLabelPattern.MatchString(s.Namespace) {
+	if !isDNSLabel(s.Namespace) {
 		return fmt.Errorf("the pod daemon swap namespace %q is not a Kubernetes namespace name", s.Namespace)
 	}
-	if !dnsLabelPattern.MatchString(s.deployment()) {
+	if !isDNSLabel(s.deployment()) {
 		return fmt.Errorf("the pod daemon swap deployment %q is not a Kubernetes name", s.deployment())
 	}
 	if s.RolloutTimeout <= 0 {
