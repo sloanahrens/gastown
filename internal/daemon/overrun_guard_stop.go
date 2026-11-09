@@ -91,7 +91,10 @@ const (
 // uncommitted work as one WIP commit named for the bead and pushes the kept
 // branch, once per stop, before the session stops and before the sandbox is
 // removed. A refused save is noted in the hand-back, keeps the sandbox and
-// leaves the seat paused; it does not hold the stop.
+// leaves the seat paused; it does not hold the stop. An unresolvable worktree
+// is a refused save. Before the sandbox is removed (step 2a) the worktree is
+// read again: one dirty since the save is saved once more, and a dirty worktree
+// that cannot be read or saved holds the stop with the sandbox kept.
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
@@ -296,6 +299,33 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	saveKept := st.SaveFailure != ""
 	sandboxKept := false
 	if s.removeSandbox != nil && !saveKept {
+		// 2a. Re-check the worktree before the sandbox goes. The save (1b) ran
+		// before the session stop, so an edit made between the two is not in
+		// it: a worktree dirty again is saved once more. A dirty check or save
+		// that fails holds the stop with the sandbox kept, as a refused push
+		// does, and the next tick checks again.
+		if s.saveWork != nil {
+			dirty, err := d.overrunWorktreeDirty(seat)
+			if err != nil {
+				d.logger.Printf("overrun_guard: stop %s on %s waits, sandbox kept: %v", who, st.Bead, err)
+				return
+			}
+			if dirty {
+				saveSeat := seat
+				saveSeat.Bead, saveSeat.Branch, saveSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
+				saved, err := s.saveWork(saveSeat)
+				if err != nil {
+					d.logger.Printf("overrun_guard: stop %s on %s waits: work edited after the save not saved, sandbox kept: %v", who, st.Bead, err)
+					return
+				}
+				if saved.Head != "" {
+					st.SavedHead, st.SaveCommitted = saved.Head, saved.Committed
+				}
+				if !save() {
+					return
+				}
+			}
+		}
 		err := s.removeSandbox(seat)
 		switch {
 		case err == nil:
@@ -779,15 +809,15 @@ func overrunSaveMessage(bead string) string {
 // guards, so the runtime files and throwaway paths the checkpoint leaves out
 // stay out here too; the kept branch is then pushed, unforced, when origin
 // does not hold its head. A worktree that is clean and already pushed changes
-// nothing. A WIP commit made on no branch, or on a HEAD that is not the kept
+// nothing. A worktree that cannot be resolved is an error, never nothing to
+// save. A WIP commit made on no branch, or on a HEAD that is not the kept
 // branch, cannot reach that branch, so it is refused rather than left
 // unpushed. A refused commit or push is an error, and the stop keeps the
 // sandbox.
 func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
-	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
-	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
-	if workDir == "" {
-		return overrunSave{}, nil
+	workDir, err := d.overrunSeatWorktree(seat)
+	if err != nil {
+		return overrunSave{}, err
 	}
 	committed := false
 	switch d.checkpointWorktreeAs(workDir, seat.Rig, seat.Polecat, overrunSaveMessage(seat.Bead)) {
@@ -830,6 +860,32 @@ func (d *Daemon) overrunSaveWork(seat overrunSeat) (overrunSave, error) {
 		return overrunSave{}, err
 	}
 	return overrunSave{Head: sha, Committed: committed}, nil
+}
+
+// overrunSeatWorktree is the seat's worktree. One that cannot be resolved is an
+// error, never an empty answer: the save and the dirty check cannot see a
+// worktree they cannot resolve, and that worktree may hold the seat's work.
+func (d *Daemon) overrunSeatWorktree(seat overrunSeat) (string, error) {
+	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
+	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
+	if workDir == "" {
+		return "", fmt.Errorf("worktree of %s/%s cannot be resolved, so its work cannot be saved", seat.Rig, seat.Polecat)
+	}
+	return workDir, nil
+}
+
+// overrunWorktreeDirty reports whether the seat's worktree holds uncommitted
+// work now. A status that cannot be read is an error, never clean.
+func (d *Daemon) overrunWorktreeDirty(seat overrunSeat) (bool, error) {
+	workDir, err := d.overrunSeatWorktree(seat)
+	if err != nil {
+		return false, err
+	}
+	status, err := d.gitAt(workDir).Status()
+	if err != nil {
+		return false, fmt.Errorf("read status of %s/%s: %w", seat.Rig, seat.Polecat, err)
+	}
+	return !status.Clean, nil
 }
 
 // overrunTipAddsNothing reports whether tip adds no patch origin lacks: its

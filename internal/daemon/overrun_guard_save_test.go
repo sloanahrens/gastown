@@ -371,3 +371,115 @@ func TestOverrunStop_SaveRunsOnceAcrossAFailedSessionStop(t *testing.T) {
 		t.Errorf("hand-backs = %q, want the stop to finish on the retry", f.handedBack)
 	}
 }
+
+// A worktree the save cannot resolve is a refused save, never a clean one: the
+// save would otherwise report nothing to save and the sandbox would go.
+func TestOverrunSaveWork_UnresolvableWorktreeIsAnError(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	if err := os.RemoveAll(w.work); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := w.d.overrunSaveWork(stopSeat); err == nil {
+		t.Fatal("save = nil, want the unresolvable worktree refused")
+	}
+}
+
+// A refused save of an unresolvable worktree keeps the sandbox, as any refused
+// save does: the stop hands the bead back with the refusal named.
+func TestOverrunStop_UnresolvableWorktreeKeepsTheSandbox(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+	if err := os.RemoveAll(w.work); err != nil {
+		t.Fatal(err)
+	}
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+
+	w.d.runOverrunGuard(s)
+
+	if slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Errorf("calls = %q: the sandbox was removed though the worktree could not be saved", f.calls)
+	}
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %q, want the bead handed back", f.handedBack)
+	}
+	if len(f.handBackNotes) != 1 || !strings.Contains(f.handBackNotes[0], "could not be saved before the stop") {
+		t.Errorf("hand-back note = %q, want the refused save named", f.handBackNotes)
+	}
+}
+
+// The save runs before the session stops, so an edit made while the session is
+// still stopping is not in it. The sandbox must not go with that edit only in
+// the worktree: a worktree dirty again is saved before the sandbox is removed.
+func TestOverrunStop_LateEditIsSavedBeforeTheSandboxGoes(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	var headAtSandbox, originAtSandbox string
+	var cleanAtSandbox bool
+	f.removeSandbox = func(overrunSeat) error {
+		headAtSandbox, _ = w.git().Rev("HEAD")
+		originAtSandbox = w.f.Ref(w.origin, "refs/heads/"+stopSeat.Branch)
+		status, err := w.git().Status()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cleanAtSandbox = status.Clean
+		return nil
+	}
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	stopSession := s.stopSession
+	s.stopSession = func(seat overrunSeat) error {
+		writeWorkFiles(t, w.work, map[string]string{"late.txt": "late\n"})
+		return stopSession(seat)
+	}
+
+	w.d.runOverrunGuard(s)
+
+	if !slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Fatalf("calls = %q, want the sandbox removed", f.calls)
+	}
+	if !cleanAtSandbox {
+		t.Errorf("worktree was dirty when the sandbox went: the late edit would be lost")
+	}
+	if headAtSandbox == w.tip {
+		t.Errorf("head at the sandbox removal is still the seat's tip, want the late edit saved as a commit")
+	}
+	if originAtSandbox != headAtSandbox {
+		t.Errorf("origin held %q when the sandbox went, want the head %s pushed first", originAtSandbox, headAtSandbox)
+	}
+}
+
+// A late edit the save cannot push holds the stop: the sandbox, the only copy
+// of that edit, is kept and the bead is not handed back.
+func TestOverrunStop_LateEditThatCannotBeSavedKeepsTheSandbox(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	stopSession := s.stopSession
+	s.stopSession = func(seat overrunSeat) error {
+		writeWorkFiles(t, w.work, map[string]string{"late.txt": "late\n"})
+		w.divergeOriginBranch(t)
+		return stopSession(seat)
+	}
+
+	w.d.runOverrunGuard(s)
+
+	if slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Errorf("calls = %q: the sandbox was removed though the late edit was not saved", f.calls)
+	}
+	if len(f.handedBack) != 0 {
+		t.Errorf("hand-backs = %q, want the stop held with the sandbox kept", f.handedBack)
+	}
+}
