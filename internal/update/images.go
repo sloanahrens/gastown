@@ -225,6 +225,15 @@ type DigestInstaller struct {
 	Images ImageDeps
 }
 
+// validRecordedPair checks a pair the ledger holds. The zero pair is nothing
+// recorded and passes; any other pair must be one a values file could hold.
+func validRecordedPair(p ImagePair) error {
+	if p == (ImagePair{}) {
+		return nil
+	}
+	return imagevalues.ValidPair(imagevalues.Values{Daemon: p.Daemon, Polecat: p.Polecat, Commit: p.Commit})
+}
+
 // Install validates the values file and its commit before anything changes, runs
 // the host install, and moves the daemon to the pair.
 func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResult, error) {
@@ -242,6 +251,13 @@ func (d *DigestInstaller) Install(ctx context.Context, sha string) (InstallResul
 	rec, err := d.Images.Ledger.Read()
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("reading the daemon image record: %w", err)
+	}
+	// Both recorded pairs are checked before the host install or any write: a
+	// restore puts the previous pair back, so a damaged one stops the run here.
+	for _, p := range []ImagePair{rec.Current, rec.Previous} {
+		if err := validRecordedPair(p); err != nil {
+			return InstallResult{}, fmt.Errorf("the daemon image record names a damaged pair; nothing changed: %w", err)
+		}
 	}
 
 	res, err := d.Inner.Install(ctx, sha)

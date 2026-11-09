@@ -214,30 +214,25 @@ func TestComposeDaemonSwapRefusesAFailingStep(t *testing.T) {
 			t.Fatalf("Apply error = %v, want the missing settings named", err)
 		}
 	})
-	t.Run("a compose file that cannot be rewritten is refused", func(t *testing.T) {
+	t.Run("a compose file that cannot be rewritten is refused with the settings unchanged", func(t *testing.T) {
 		t.Parallel()
 		f := newSwapFixture(t, true)
-		// The compose file sits in its own directory, so the settings written
-		// first are not held by the read-only one.
-		dir := filepath.Join(filepath.Dir(f.compose), "compose")
-		if err := os.Mkdir(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		data, err := os.ReadFile(f.compose)
+		// The write is refused by the seam, not by a mode bit, so the case holds
+		// when the suite runs as root, which ignores the mode bits.
+		s := f.swap("town")
+		s.writeCompose = func(string, []byte) error { return errors.New("read-only file system") }
+		beforeCfg, err := os.ReadFile(f.config)
 		if err != nil {
 			t.Fatal(err)
 		}
-		s := f.swap("town")
-		s.ComposeFile = filepath.Join(dir, "compose.yml")
-		if err := os.WriteFile(s.ComposeFile, data, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		modelReadOnly(t, dir)
 		if err := s.Apply(context.Background(), pair); err == nil || !strings.Contains(err.Error(), "writing the compose file") {
 			t.Fatalf("Apply error = %v, want the compose write refusal", err)
 		}
 		if len(f.calls) != 0 {
 			t.Errorf("commands = %+v, want none after a failed write", f.calls)
+		}
+		if after := readSwapFile(t, f.config); after != string(beforeCfg) {
+			t.Error("the daemon settings changed although the compose write failed first")
 		}
 	})
 }

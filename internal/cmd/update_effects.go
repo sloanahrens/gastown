@@ -285,8 +285,11 @@ func setDaemonServiceImage(compose []byte, ref string) ([]byte, error) {
 // composeDaemonSwap puts a digest install's pair in force on the container
 // daemon. The compose file's daemon service takes the pair's daemon image, the
 // daemon settings pin the pair's polecat image, and the service is recreated on
-// both. Apply refuses a town whose settings name no runner before it changes
-// anything: the polecat half of the pair would have nothing to pin on.
+// both. The halves move together or not at all: the compose file is written
+// first and the settings last, and a step that fails after a half has moved puts
+// that half back from the values Apply held in memory. Apply refuses a town
+// whose settings name no runner before it changes anything: the polecat half of
+// the pair would have nothing to pin on.
 type composeDaemonSwap struct {
 	// ComposeFile is the container compose file the render writes.
 	ComposeFile string
@@ -298,11 +301,17 @@ type composeDaemonSwap struct {
 	ConfigPath string
 	// Run runs the compose command.
 	Run update.RunFunc
+	// writeCompose and writeSettings are the two writes Apply makes; nil means
+	// the real write. A test replaces one to fail that step.
+	writeCompose  func(path string, content []byte) error
+	writeSettings func(path string, mutate func(cfg *config.DaemonPatrolConfig, exists bool) error) error
 }
 
 // Apply moves the daemon service and the polecat pin to pair and recreates the
 // daemon. A failure names the step, never the command's output, which can hold
-// a secret.
+// a secret. When a step fails after a half has moved, both halves are put back
+// before Apply returns; a half that cannot be put back is named in the error, so
+// the caller escalates rather than reading the pair as whole.
 func (s composeDaemonSwap) Apply(ctx context.Context, pair update.ImagePair) error {
 	compose, err := os.ReadFile(s.ComposeFile)
 	if err != nil {
@@ -312,25 +321,65 @@ func (s composeDaemonSwap) Apply(ctx context.Context, pair update.ImagePair) err
 	if err != nil {
 		return err
 	}
-	// The pin is set under the settings file's lock, on the file as it is now.
-	// A mutate that errors writes nothing, so a town with no runner is refused
-	// before the compose file is touched.
-	err = config.UpdateConfigJSON(s.ConfigPath, 0o644, func(cfg *config.DaemonPatrolConfig, exists bool) error {
+	if _, err := s.readRunner(); err != nil {
+		return err
+	}
+	if err := s.compose(s.ComposeFile, next); err != nil {
+		return fmt.Errorf("writing the compose file: %w", err)
+	}
+	prevPin, err := s.pinPolecat(pair.Polecat)
+	if err != nil {
+		return s.undo(compose, "", false, fmt.Errorf("pinning the polecat image in the daemon settings: %w", err))
+	}
+	if err := s.recreate(ctx); err != nil {
+		return s.undo(compose, prevPin, true, err)
+	}
+	return nil
+}
+
+// readRunner reads the tier sweep runner the polecat pin is set on. A settings
+// file that is missing, or a town with no runner, is refused by name.
+func (s composeDaemonSwap) readRunner() (*config.TierSweepRunnerConfig, error) {
+	cfg, err := config.LoadDaemonPatrolConfig(s.ConfigPath)
+	if errors.Is(err, config.ErrNotFound) {
+		return nil, fmt.Errorf("the daemon settings %s do not exist", s.ConfigPath)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading the daemon settings: %w", err)
+	}
+	return tierSweepRunner(cfg)
+}
+
+// tierSweepRunner returns the runner the polecat pin is set on, or the reason
+// the town has none.
+func tierSweepRunner(cfg *config.DaemonPatrolConfig) (*config.TierSweepRunnerConfig, error) {
+	if cfg.Patrols == nil || cfg.Patrols.TierSweep == nil || cfg.Patrols.TierSweep.Runner == nil {
+		return nil, errors.New("the daemon settings name no tier_sweep runner, so the polecat image of the pair has nothing to pin on")
+	}
+	return cfg.Patrols.TierSweep.Runner, nil
+}
+
+// pinPolecat sets the runner's polecat image to image under the settings file's
+// lock, and returns the image it replaced.
+func (s composeDaemonSwap) pinPolecat(image string) (string, error) {
+	var prev string
+	err := s.settings(func(cfg *config.DaemonPatrolConfig, exists bool) error {
 		if !exists {
 			return fmt.Errorf("the daemon settings %s do not exist", s.ConfigPath)
 		}
-		if cfg.Patrols == nil || cfg.Patrols.TierSweep == nil || cfg.Patrols.TierSweep.Runner == nil {
-			return errors.New("the daemon settings name no tier_sweep runner, so the polecat image of the pair has nothing to pin on")
+		runner, err := tierSweepRunner(cfg)
+		if err != nil {
+			return err
 		}
-		cfg.Patrols.TierSweep.Runner.Image = pair.Polecat
+		prev = runner.Image
+		runner.Image = image
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("pinning the polecat image in the daemon settings: %w", err)
-	}
-	if err := daemonimage.WriteComposeFile(s.ComposeFile, next); err != nil {
-		return fmt.Errorf("writing the compose file: %w", err)
-	}
+	return prev, err
+}
+
+// recreate recreates the daemon service on the compose file as it now reads.
+func (s composeDaemonSwap) recreate(ctx context.Context) error {
 	argv := []string{"compose", "-p", s.Project, "-f", s.ComposeFile, "up", "-d", "--force-recreate", "daemon"}
 	_, exit, err := s.Run(ctx, filepath.Dir(s.ComposeFile), nil, "docker", append([]string{"--context", s.Context}, argv...)...)
 	if err != nil {
@@ -340,6 +389,43 @@ func (s composeDaemonSwap) Apply(ctx context.Context, pair update.ImagePair) err
 		return fmt.Errorf("docker compose for the daemon exited %d", exit)
 	}
 	return nil
+}
+
+// undo puts back each half Apply moved, after cause stopped it: the settings pin
+// when it was written, then the compose file from compose. Both are attempted,
+// and a half that cannot be put back is named with cause.
+func (s composeDaemonSwap) undo(compose []byte, prevPin string, pinned bool, cause error) error {
+	var failed []error
+	if pinned {
+		if _, err := s.pinPolecat(prevPin); err != nil {
+			failed = append(failed, fmt.Errorf("restoring the polecat pin: %w", err))
+		}
+	}
+	if err := s.compose(s.ComposeFile, compose); err != nil {
+		failed = append(failed, fmt.Errorf("restoring the compose file: %w", err))
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("%w; the pair is split and could not be put back: %w", cause, errors.Join(failed...))
+	}
+	return fmt.Errorf("%w; both halves of the pair were put back", cause)
+}
+
+// compose writes the compose file, through writeCompose when a test set one.
+func (s composeDaemonSwap) compose(path string, content []byte) error {
+	if s.writeCompose != nil {
+		return s.writeCompose(path, content)
+	}
+	return daemonimage.WriteComposeFile(path, content)
+}
+
+// settings runs mutate under the daemon settings file's lock, through
+// writeSettings when a test set one.
+func (s composeDaemonSwap) settings(mutate func(cfg *config.DaemonPatrolConfig, exists bool) error) error {
+	if s.writeSettings != nil {
+		return s.writeSettings(s.ConfigPath, mutate)
+	}
+	return config.UpdateConfigJSON(s.ConfigPath, 0o644, mutate)
 }
 
 // realImageSwap is the swap the town's container daemon takes: its compose file,

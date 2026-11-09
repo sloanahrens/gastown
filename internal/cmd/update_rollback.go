@@ -59,7 +59,7 @@ func runUpdateRollback(cmd *cobra.Command, seams updateSeams) error {
 	}
 	defer release()
 
-	images, err := rollbackImageDeps(seams, townRoot, deps)
+	images, err := imageDeps(seams, townRoot, deps)
 	if err != nil {
 		return fmt.Errorf("gt update rollback: %w", err)
 	}
@@ -73,29 +73,6 @@ func runUpdateRollback(cmd *cobra.Command, seams updateSeams) error {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "rolled the daemon back to %s and polecat image %s at commit %s\n", prev.Daemon, prev.Polecat, prev.Commit)
 	return nil
-}
-
-// rollbackImageDeps is the set of effects a rollback reaches: the record, the
-// swap, the daemon's version probe and clock, and the escalation sink. A seam
-// that is not wired is refused before the record is read.
-func rollbackImageDeps(seams updateSeams, townRoot string, deps update.Deps) (update.ImageDeps, error) {
-	if seams.ImageSwap == nil || seams.Notifier == nil {
-		return update.ImageDeps{}, errors.New("no daemon image swap or escalation sink is wired")
-	}
-	swap, err := seams.ImageSwap(townRoot)
-	if err != nil {
-		return update.ImageDeps{}, err
-	}
-	return update.ImageDeps{
-		Ledger: update.FileImageLedger{Dir: update.Dir(townRoot)},
-		Swap:   swap,
-		Verify: deps.Verify,
-		Clock:  deps.Clock,
-		Sleep:  deps.Sleep,
-		Wait:   updateRestartWait,
-		Poll:   updateRestartPoll,
-		Notify: seams.Notifier(townRoot),
-	}, nil
 }
 
 // imagePairRegistryCheck returns the check a rollback runs before it moves the

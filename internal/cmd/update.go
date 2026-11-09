@@ -503,26 +503,38 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 	if _, err := imagevalues.Load(path); err != nil {
 		return nil, fmt.Errorf("the --images values file: %w", err)
 	}
-	if seams.ImageSwap == nil || seams.Notifier == nil {
-		return nil, errors.New("no daemon image swap or escalation sink is wired")
-	}
-	swap, err := seams.ImageSwap(townRoot)
+	images, err := imageDeps(seams, townRoot, deps)
 	if err != nil {
 		return nil, err
 	}
 	return &update.DigestInstaller{
-		Inner: deps.Installer,
-		Path:  path,
-		Images: update.ImageDeps{
-			Ledger: update.FileImageLedger{Dir: update.Dir(townRoot)},
-			Swap:   swap,
-			Verify: deps.Verify,
-			Clock:  deps.Clock,
-			Sleep:  deps.Sleep,
-			Wait:   updateRestartWait,
-			Poll:   updateRestartPoll,
-			Notify: seams.Notifier(townRoot),
-		},
+		Inner:  deps.Installer,
+		Path:   path,
+		Images: images,
+	}, nil
+}
+
+// imageDeps is the set of effects a digest install and a rollback both reach:
+// the record, the daemon swap, the daemon's version probe and clock, the restart
+// bound, and the escalation sink. Both callers build it here, so the two cannot
+// wire the same swap differently. A seam that is not wired is refused.
+func imageDeps(seams updateSeams, townRoot string, deps update.Deps) (update.ImageDeps, error) {
+	if seams.ImageSwap == nil || seams.Notifier == nil {
+		return update.ImageDeps{}, errors.New("no daemon image swap or escalation sink is wired")
+	}
+	swap, err := seams.ImageSwap(townRoot)
+	if err != nil {
+		return update.ImageDeps{}, err
+	}
+	return update.ImageDeps{
+		Ledger: update.FileImageLedger{Dir: update.Dir(townRoot)},
+		Swap:   swap,
+		Verify: deps.Verify,
+		Clock:  deps.Clock,
+		Sleep:  deps.Sleep,
+		Wait:   updateRestartWait,
+		Poll:   updateRestartPoll,
+		Notify: seams.Notifier(townRoot),
 	}, nil
 }
 

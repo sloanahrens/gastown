@@ -156,6 +156,13 @@ func Write(path string, v Values) error {
 	return nil
 }
 
+// ValidPair reports whether v is a pair a values file could hold: each ref is
+// repo@sha256:<64 lowercase hex> and the commit is a full commit. A pair read
+// back from a ledger is checked with it before any write uses its values.
+func ValidPair(v Values) error {
+	return v.validate()
+}
+
 // validate refuses a pair that a consumer could not pull or that names no
 // commit.
 func (v Values) validate() error {

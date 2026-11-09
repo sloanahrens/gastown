@@ -2,7 +2,9 @@ package update
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -326,6 +328,58 @@ func TestInstallByDigestRollsBackAnUnhealthyDaemon(t *testing.T) {
 			t.Errorf("reason = %q, want the lost escalation named", res.Reason)
 		}
 	})
+}
+
+// TestInstallByDigestRefusesADamagedRecord holds the restore's input: a
+// images.json that holds a pair no values file could hold stops the install
+// before the host install, the swap, or any write, and the file is left as it was.
+func TestInstallByDigestRefusesADamagedRecord(t *testing.T) {
+	t.Parallel()
+	badDigest := ImagePair{Daemon: "registry.internal:5000/gastown/gastown-daemon@sha256:zz", Polecat: oldPair.Polecat, Commit: imgOldCommit}
+	partial := ImagePair{Daemon: oldPair.Daemon}
+	shortCommit := ImagePair{Daemon: oldPair.Daemon, Polecat: oldPair.Polecat, Commit: "abc"}
+	tests := []struct {
+		name string
+		rec  ImageRecord
+	}{
+		{name: "a previous digest that is not sha256 hex", rec: ImageRecord{V: imageRecordVersion, Current: oldPair, Previous: badDigest}},
+		{name: "a previous pair that names only a daemon", rec: ImageRecord{V: imageRecordVersion, Current: oldPair, Previous: partial}},
+		{name: "a current commit that is not a full commit", rec: ImageRecord{V: imageRecordVersion, Current: shortCommit}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			data, err := json.Marshal(tt.rec)
+			if err != nil {
+				t.Fatalf("encode the record: %v", err)
+			}
+			path := filepath.Join(dir, imageRecordFileName)
+			if err := os.WriteFile(path, data, 0o644); err != nil {
+				t.Fatalf("write the record: %v", err)
+			}
+			f := newImageFixture(t, ImageRecord{})
+			f.inst.Images.Ledger = FileImageLedger{Dir: dir}
+
+			_, err = f.inst.Install(context.Background(), newPair.Commit)
+			if err == nil || !strings.Contains(err.Error(), "damaged pair; nothing changed") {
+				t.Fatalf("Install error = %v, want the damaged record refused with nothing changed", err)
+			}
+			if f.host.calls != 0 {
+				t.Errorf("the host install ran %d times, want none", f.host.calls)
+			}
+			if len(f.swap.applied) != 0 {
+				t.Errorf("the daemon was swapped to %+v, want no swap", f.swap.applied)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read the record: %v", err)
+			}
+			if string(after) != string(data) {
+				t.Errorf("the record changed to %s, want it left as it was", after)
+			}
+		})
+	}
 }
 
 func TestInstallWithoutImagesIsUnchanged(t *testing.T) {
