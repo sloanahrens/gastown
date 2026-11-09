@@ -679,8 +679,9 @@ func tableCells(line string) []string {
 
 // compareInventory reports every call site the table does not classify and
 // every row that names no call at its line. An unresolved program in the
-// daemon's closure needs a row, or a class that names its function. An
-// unresolved program outside the closure is not a row's business:
+// daemon's closure needs a row, or a class that names its function and holds
+// no other such program without a row. An unresolved program outside the
+// closure is not a row's business:
 // compareOutOfClosure holds it to the document's list instead.
 func compareInventory(sites []engineSite, rows []engineRow, classes []docFunc) []string {
 	rowKey := map[string]bool{}
@@ -691,6 +692,14 @@ func compareInventory(sites []engineSite, rows []engineRow, classes []docFunc) [
 	for _, c := range classes {
 		classed[c] = true
 	}
+	// A class covers one program: it names a function that holds exactly one
+	// unresolved site without a row. A function with more needs a row for each.
+	uncovered := map[docFunc]int{}
+	for _, s := range sites {
+		if s.Unresolved && s.Reached && !rowKey[s.key()] {
+			uncovered[docFunc{s.File, s.Symbol}]++
+		}
+	}
 	siteKey := map[string]bool{}
 	reachedFn := map[docFunc]bool{}
 	var problems []string
@@ -699,10 +708,15 @@ func compareInventory(sites []engineSite, rows []engineRow, classes []docFunc) [
 			continue
 		}
 		siteKey[s.key()] = true
+		fn := docFunc{s.File, s.Symbol}
 		if s.Unresolved {
-			reachedFn[docFunc{s.File, s.Symbol}] = true
+			reachedFn[fn] = true
 		}
-		if rowKey[s.key()] || (s.Unresolved && classed[docFunc{s.File, s.Symbol}]) {
+		if rowKey[s.key()] || (s.Unresolved && classed[fn] && uncovered[fn] == 1) {
+			continue
+		}
+		if s.Unresolved && classed[fn] {
+			problems = append(problems, fmt.Sprintf("%s:%d: %s runs a command whose program is %s, and the runner list covers one program per function, so %s needs a row for it: %s", s.File, s.Line, s.Symbol, unresolvedProgram, engineDoc, s.Text))
 			continue
 		}
 		what := "runs the docker CLI"
@@ -1372,6 +1386,22 @@ func TestUnresolvedProgramsInTheDaemonClosure(t *testing.T) {
 		}
 	})
 
+	t.Run("two unresolved programs in one listed runner are each refused", func(t *testing.T) {
+		t.Parallel()
+		src := "package x\n\nimport \"os/exec\"\n\nfunc Run(name, other string) error {\n\tif err := exec.Command(name, \"ps\").Run(); err != nil {\n\t\treturn err\n\t}\n\treturn exec.Command(other, \"info\").Run()\n}\n"
+		root := fixtureTree(t, map[string]string{
+			"internal/x/x.go": src,
+			daemonFile:        daemonImporting("internal/x"),
+			engineDoc:         renderEngineDoc() + "\n## Runners the caller names\n\n- `internal/x/x.go` `Run`\n",
+		})
+		problems := strings.Join(inventoryProblems(t, root), "\n")
+		for _, want := range []string{"internal/x/x.go:6", "internal/x/x.go:9"} {
+			if !strings.Contains(problems, want) {
+				t.Fatalf("the unresolved program at %s was not refused under a class that names only its function: %s", want, problems)
+			}
+		}
+	})
+
 	t.Run("a runner the list names that holds no in-closure program is refused", func(t *testing.T) {
 		t.Parallel()
 		root := fixtureTree(t, map[string]string{
@@ -1394,11 +1424,12 @@ func TestDaemonClosureFollowsImportSpecs(t *testing.T) {
 	t.Run("a package the daemon imports, and one it imports, are in the closure", func(t *testing.T) {
 		t.Parallel()
 		root := fixtureTree(t, map[string]string{
-			daemonFile:             daemonImporting("internal/x"),
-			"internal/x/x.go":      "package x\n\nimport _ \"" + modulePath + "/internal/z\"\n",
-			"internal/z/z.go":      "package z\n",
-			"internal/y/y.go":      "package y\n",
-			"internal/x/x_test.go": "package x\n\nimport _ \"" + modulePath + "/internal/y\"\n",
+			daemonFile:                  daemonImporting("internal/x"),
+			"internal/x/x.go":           "package x\n\nimport _ \"" + modulePath + "/internal/z\"\n",
+			"internal/z/z.go":           "package z\n",
+			"internal/y/y.go":           "package y\n",
+			"internal/doctor/doctor.go": "package doctor\n",
+			"internal/x/x_test.go":      "package x\n\nimport _ \"" + modulePath + "/internal/y\"\n",
 		})
 		closure, err := daemonClosure(root)
 		if err != nil {
@@ -1410,19 +1441,8 @@ func TestDaemonClosureFollowsImportSpecs(t *testing.T) {
 		if closure["internal/y"] {
 			t.Fatalf("the closure reached internal/y through a test file, which is not a build import: %v", slices.Sorted(maps.Keys(closure)))
 		}
-	})
-
-	t.Run("the real tree puts a daemon-reached package in and a package it does not import out", func(t *testing.T) {
-		t.Parallel()
-		closure, err := daemonClosure(repoRoot)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !closure["internal/doltserver"] {
-			t.Fatal("internal/doltserver is imported by internal/daemon, and the closure does not hold it")
-		}
 		if closure["internal/doctor"] {
-			t.Fatal("internal/doctor is not imported by internal/daemon, and the closure holds it")
+			t.Fatalf("the closure holds internal/doctor, which no daemon file imports: %v", slices.Sorted(maps.Keys(closure)))
 		}
 	})
 
