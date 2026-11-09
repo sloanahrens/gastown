@@ -88,12 +88,17 @@ func (g *bootGate) reason() string {
 // The reason is also published to the boot-health file for the dispatchers in
 // other processes: the waiting reason before the first poll, then each changed
 // reason, and the file is removed at the first healthy answer. A publish failure
-// is logged and leaves the in-process answer as it is, so the daemon's
-// background work still holds.
+// is logged once per reason and leaves the in-process answer as it is, so the
+// daemon's background work still holds.
 func (g *bootGate) poll(ctx context.Context, logf func(format string, v ...any)) {
 	published := ""
+	// failed is the reason whose publish failure was logged last. A write that
+	// keeps failing for the same reason is logged once, not on every poll; a
+	// successful write clears it, so the next failure is logged again.
+	failed := ""
 	if err := g.publish(bootGateWaiting); err != nil {
 		logf("boot gate: publishing %q: %v", bootGateWaiting, err)
+		failed = bootGateWaiting
 	} else {
 		published = bootGateWaiting
 	}
@@ -112,9 +117,13 @@ func (g *bootGate) poll(ctx context.Context, logf func(format string, v ...any))
 		}
 		if reason != published {
 			if err := g.publish(reason); err != nil {
-				logf("boot gate: publishing %q: %v", reason, err)
+				if reason != failed {
+					logf("boot gate: publishing %q: %v", reason, err)
+					failed = reason
+				}
 			} else {
 				published = reason
+				failed = ""
 			}
 		}
 		timer := g.clock.NewTimer(g.interval)
