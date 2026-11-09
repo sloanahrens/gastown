@@ -69,14 +69,11 @@ type Segment struct {
 	// subshell and contributes no id.
 	Shells []int
 
-	// Conditional reports that the segment may not run, or runs in a copy of
-	// the shell, so a verdict on it cannot assume the command runs as written.
-	// It is set for a segment inside the body of an if, elif, else, while,
-	// until, for, select, case or function; inside a brace group or a
-	// subshell; after "&&" or "||" (not the first command of the list); in a
-	// pipeline of more than one command; or in a background ("&") statement.
-	// The condition of an if or while is not a body, so only an enclosing
-	// construct sets it.
+	// Conditional reports that the segment may not run, or runs in a copy of the
+	// shell, because it sits in the body of an if, elif, else, while, until, for,
+	// select, case or function, inside a brace group, subshell or coproc, after
+	// "&&" or "||" but not as the first command of the list, in a pipeline of
+	// more than one command, or in a background ("&") statement.
 	Conditional bool
 }
 
@@ -472,7 +469,8 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 	case *syntax.CoprocClause:
 		f.wordSubs(x.Name, &into.Subs)
 		if x.Stmt != nil {
-			f.stmt(x.Stmt, into)
+			// A coproc runs in a copy of the shell, like a background statement.
+			f.conditionally(func() { f.stmt(x.Stmt, into) })
 		}
 
 	case *syntax.DeclClause:

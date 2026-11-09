@@ -267,6 +267,8 @@ func TestParseConditional(t *testing.T) {
 		{name: "function body", command: "f() while echo c; do :; done; f", want: []bool{true, true, false}},
 		{name: "background", command: "sleep 1 &", want: []bool{true}},
 		{name: "background then foreground", command: "echo a & echo b", want: []bool{true, false}},
+		{name: "coproc body", command: "coproc echo a", want: []bool{true}},
+		{name: "coproc then foreground", command: "coproc echo a; echo b", want: []bool{true, false}},
 		{
 			name:    "conditional inside a plain list",
 			command: "echo a; if true; then echo b; fi; echo c",
