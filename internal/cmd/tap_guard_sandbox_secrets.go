@@ -1583,7 +1583,7 @@ func sandboxSecretsMaskFirst(text string, needles ...string) string {
 
 // sandboxSecretsANSICBody returns the body of an ANSI-C quoted word ($'...') as
 // written, its escapes undecoded, and false for any other word. The body is the
-// spelling sandboxSecretsHereStrings decodes. A word of more than one piece, such
+// spelling sandboxSecretsDecodeHereString decodes. A word of more than one piece, such
 // as $'a'b, is not one.
 func sandboxSecretsANSICBody(raw string) (string, bool) {
 	if !strings.HasPrefix(raw, "$") {
