@@ -35,6 +35,16 @@ func engineReports(out string) templates.ContainerDocker {
 	return func(context.Context, []string) ([]byte, error) { return []byte(out), nil }
 }
 
+// engineErrors is a container runner whose engine is reachable but whose read
+// fails with an error that is not docker's "No such object" verdict. The probe
+// reads it as unknown, the same as an absent engine.
+func engineErrors(context.Context, []string) ([]byte, error) {
+	return nil, &templates.DockerInspectError{
+		StderrText: "Error response from daemon: server error",
+		Err:        errors.New("exit status 1"),
+	}
+}
+
 // unreadableJobs is a service manager reader that cannot read any job.
 func unreadableJobs(kind string) templates.SupervisorState {
 	return templates.SupervisorState{Kind: kind, LastExit: -1, Err: errors.New("job unreadable")}
@@ -117,7 +127,7 @@ func TestStartupOwnerContainerUnknownRefusalNamesTheTakeover(t *testing.T) {
 			if err == nil {
 				t.Fatal("guardStartup = nil, want the refusal: a pod cannot show a container owner stopped")
 			}
-			for _, want := range []string{`container owner "scratch-town-daemon-1"`, "cannot ask an engine", "GT_DAEMON_TAKEOVER", "cut-over step"} {
+			for _, want := range []string{`container owner "scratch-town-daemon-1"`, "cannot ask an engine", "GT_DAEMON_TAKEOVER", "cut-over step", "GT_DAEMON_TAKEOVER also passes a failed engine call"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("refusal = %q, want it to contain %q", err, want)
 				}
@@ -150,13 +160,28 @@ func TestStartupOwnerTakeoverProceedsAndLogs(t *testing.T) {
 		}
 	})
 
+	t.Run("a reachable engine whose read fails passes and reports the owner", func(t *testing.T) {
+		t.Parallel()
+		town := guardTown(t)
+		seedGuardState(t, town, fresh)
+		var took []Owner
+		err := guardStartup(town, podSelf, true, podProbe(t, engineErrors, unreadJob(t)), guardNow, false,
+			func(o Owner) { took = append(took, o) })
+		if err != nil {
+			t.Fatalf("guardStartup = %v, want a failed engine call passed by the takeover", err)
+		}
+		if len(took) != 1 || took[0] != podRecorded {
+			t.Fatalf("takeover reported %+v, want the recorded owner %+v", took, podRecorded)
+		}
+	})
+
 	t.Run("Run logs the takeover with the owner", func(t *testing.T) {
 		t.Parallel()
 		town := guardTown(t)
 		seedGuardState(t, town, fresh)
 		logs, err := runPodStart(t, town, map[string]string{agentconfig.TakeoverEnv: "1"})
-		if err != nil && strings.Contains(err.Error(), "refusing to start") {
-			t.Fatalf("Run refused the takeover start: %v", err)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want nil or the context-cancel result of the parked start", err)
 		}
 		if !strings.Contains(logs, `Daemon takeover: container owner "scratch-town-daemon-1" could not be read`) {
 			t.Fatalf("daemon log = %q, want the takeover line naming the recorded owner", logs)
@@ -175,6 +200,35 @@ func TestStartupOwnerTakeoverProceedsAndLogs(t *testing.T) {
 			t.Errorf("daemon log = %q, want no takeover line for a refused start", logs)
 		}
 	})
+}
+
+// The entry point the CLI start paths call logs the takeover too: GuardStart
+// passes an unreadable container owner under the takeover and writes the line
+// that names it, so a takeover is never silent on that path.
+func TestStartupOwnerGuardStartLogsTheTakeover(t *testing.T) {
+	t.Parallel()
+	town := guardTown(t)
+	seedGuardState(t, town, State{Running: true, Owner: ownedBy(podRecorded), LastHeartbeat: guardNow.Add(-time.Minute)})
+	var logs bytes.Buffer
+	err := GuardStart(town, podSelf, true, podProbe(t, podEngine, unreadJob(t)), guardNow, log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatalf("GuardStart = %v, want the takeover to let the start go on", err)
+	}
+	if want := `Daemon takeover: container owner "scratch-town-daemon-1" could not be read`; !strings.Contains(logs.String(), want) {
+		t.Fatalf("GuardStart log = %q, want the takeover line %q", logs.String(), want)
+	}
+}
+
+// A takeover with nothing to log to refuses rather than pass the recorded
+// container owner unlogged, so the takeover is never silent.
+func TestStartupOwnerTakeoverWithoutLogRefuses(t *testing.T) {
+	t.Parallel()
+	town := guardTown(t)
+	seedGuardState(t, town, State{Running: true, Owner: ownedBy(podRecorded), LastHeartbeat: guardNow.Add(-time.Minute)})
+	err := guardStartup(town, podSelf, true, podProbe(t, podEngine, unreadJob(t)), guardNow, false, nil)
+	if err == nil || !strings.Contains(err.Error(), "has no log to name it in") {
+		t.Fatalf("guardStartup = %v, want the refusal that the takeover has no log", err)
+	}
 }
 
 // A launchd, systemd or manual owner the probe cannot read is refused with the

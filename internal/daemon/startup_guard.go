@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,10 +23,10 @@ import (
 // owner DetectSelf named for this process, takeover is the GT_DAEMON_TAKEOVER
 // flag, probe reads whether a recorded owner is running and now is the
 // caller's clock. logPreexisted is whether daemon.log existed before this
-// process wrote to it (see Daemon.logPreexisted). tookOver, when set, is told
-// of a recorded container owner the takeover passed unread (see
-// TakeoverInput.TookOver). A nil error lets the start go on; any other error is
-// the refusal, and the caller writes nothing.
+// process wrote to it (see Daemon.logPreexisted). tookOver is told of a recorded
+// container owner the takeover passed unread, and a takeover with a nil tookOver
+// refuses (see TakeoverInput.TookOver). A nil error lets the start go on; any
+// other error is the refusal, and the caller writes nothing.
 //
 // The guard only reads: state.json, the daemon's lock, and the town's daemon
 // settings for the container name. A state.json that cannot be read or does
@@ -59,13 +60,24 @@ func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, 
 // operator's --takeover; probe nil reads docker, launchd and systemd for real.
 // now is the clock the decision reads, including the age of the host agent's
 // launchd reading. daemon.log existing is the prior-run evidence Run takes from
-// New, since the CLI has written nothing to it.
-func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time) error {
+// New, since the CLI has written nothing to it. logger receives the takeover
+// line when a takeover passes a recorded container owner; it must not be nil,
+// because a takeover is never allowed to pass unlogged.
+func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time, logger *log.Logger) error {
 	if probe == nil {
 		probe = startupOwnerProbeForTown(townRoot, templates.RunDockerInspect, os.Hostname, templates.SupervisorJobState, func() time.Time { return now })
 	}
 	_, err := os.Stat(DefaultConfig(townRoot).LogFile)
-	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist), nil)
+	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist), logTakeover(logger))
+}
+
+// logTakeover is the takeover line both entry points write: Run into the
+// daemon's log, GuardStart into the CLI's logger. It names the recorded owner the
+// takeover started over, so the log shows what was passed unread.
+func logTakeover(logger *log.Logger) func(Owner) {
+	return func(owner Owner) {
+		logger.Printf("Daemon takeover: %s could not be read, so the start goes on over it under %s=1", ownerName(owner), agentconfig.TakeoverEnv)
+	}
 }
 
 // readStartupState reads state.json for the guard: nil when the file is

@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -931,9 +932,11 @@ func (c *daemonControl) guardStart(townRoot string, sup *daemonSupervisor, takeo
 }
 
 // realStartGuard is the guard of this host: docker, launchd and systemd read
-// for real, the wall clock.
+// for real, the wall clock. A takeover over a recorded container owner is
+// written to stderr, the CLI's own output, not to daemon.log: the log's presence
+// is prior-run evidence the started daemon reads, so the CLI must not write it.
 func realStartGuard(townRoot string, self daemon.Owner, takeover bool) error {
-	return daemon.GuardStart(townRoot, self, takeover, nil, time.Now())
+	return daemon.GuardStart(townRoot, self, takeover, nil, time.Now(), log.New(os.Stderr, "", log.LstdFlags))
 }
 
 // refuseFileKindTakeover refuses --takeover under launchd or systemd. Their

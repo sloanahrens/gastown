@@ -38,15 +38,17 @@ type TakeoverInput struct {
 	// Takeover lets a start pass a recorded owner the probe shows not running.
 	// It never passes one that is running. It passes a recorded container owner
 	// the probe cannot read: the probe cannot tell an engine that is absent (a pod)
-	// from one whose call failed, and the operator confirms the old container is
-	// stopped. No other unreadable owner passes.
+	// from one that answered with an error, so a takeover also passes a failed
+	// engine call, and the operator confirms the old container is stopped. No
+	// other unreadable owner passes.
 	Takeover bool
 	// Probe reads an owner's liveness, and every rule that judges an owner needs
 	// it; a nil probe refuses rather than allow.
 	Probe OwnerProbe
-	// TookOver, when set, is called with the recorded container owner a takeover
-	// passed while the probe could not read it. The guard does no I/O of its own,
-	// so the caller decides what the log line says.
+	// TookOver is called with the recorded container owner a takeover passed while
+	// the probe could not read it. A takeover with a nil TookOver refuses rather
+	// than pass that owner unlogged. The guard does no I/O of its own, so the
+	// caller decides what the log line says.
 	TookOver func(Owner)
 }
 
@@ -141,7 +143,9 @@ func checkLegacyStart(in TakeoverInput) error {
 // refuseUnlessStopped allows the start when the probe proves owner is gone, and
 // otherwise refuses, reading found as the clause that states what was recorded.
 // The one unreadable owner a takeover passes is a container: see
-// TakeoverInput.Takeover.
+// TakeoverInput.Takeover. That takeover passes a failed engine call as well as an
+// absent engine, because the probe reads both as unknown; the operator's switch
+// is the bypass for both, and the refusal says so.
 func refuseUnlessStopped(in TakeoverInput, owner Owner, found string) error {
 	if in.Probe == nil {
 		return refuseStart(in, found, fmt.Sprintf("whether %s is still running is unknown (no probe was supplied)", ownerName(owner)))
@@ -153,15 +157,18 @@ func refuseUnlessStopped(in TakeoverInput, owner Owner, found string) error {
 	case known:
 		return refuseStart(in, found, fmt.Sprintf("%s is still running", ownerName(owner)))
 	case in.Takeover && owner.Kind == agentconfig.SupervisorContainer:
-		if in.TookOver != nil {
-			in.TookOver(owner)
+		// A takeover is never allowed to pass unlogged: with no log to name the
+		// owner in, the start is refused rather than passed silently.
+		if in.TookOver == nil {
+			return refuseStart(in, found, fmt.Sprintf("whether %s is still running is unknown, and the takeover has no log to name it in", ownerName(owner)))
 		}
+		in.TookOver(owner)
 		return nil
 	case owner.Kind == agentconfig.SupervisorContainer:
 		return refuseStart(in, found, fmt.Sprintf(
 			"whether %s is still running is unknown, and this daemon cannot ask an engine for it, so the old owner cannot be shown stopped; "+
-				"the cut-over step sets %s=1 for this start once the operator has confirmed the old container is stopped",
-			ownerName(owner), agentconfig.TakeoverEnv))
+				"the cut-over step sets %s=1 for this start once the operator has confirmed the old container is stopped (%s also passes a failed engine call)",
+			ownerName(owner), agentconfig.TakeoverEnv, agentconfig.TakeoverEnv))
 	}
 	return refuseStart(in, found, fmt.Sprintf("whether %s is still running is unknown", ownerName(owner)))
 }
