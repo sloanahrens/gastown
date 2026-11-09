@@ -244,6 +244,109 @@ func TestBootGatePublishFailuresAreLogged(t *testing.T) {
 	})
 }
 
+// publishFailureRun is a boot poll over two probes that can be toggled. Its
+// boot-health path is a directory, so each publish fails until the test
+// replaces it.
+type publishFailureRun struct {
+	gate  *bootGate
+	clk   *clockwork.FakeClock
+	beads *fakeProbe
+	dolt  *fakeProbe
+	town  string
+	path  string
+	lines func() []string
+	done  <-chan struct{}
+}
+
+// startPublishFailureRun starts the poll with both probes down and returns once
+// the first poll has stored its answer and set its wait.
+func startPublishFailureRun(t *testing.T, now time.Time) *publishFailureRun {
+	t.Helper()
+	town := t.TempDir()
+	r := &publishFailureRun{town: town, path: dispatch.BootHealthPath(town), beads: &fakeProbe{}, dolt: &fakeProbe{}}
+	if err := os.MkdirAll(r.path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.gate, r.clk = publishGateOver(t, town, now, r.beads.probe("beads"), r.dolt.probe("dolt"))
+
+	d, _, lines := standbyHeartbeat(t, now)
+	d.bootGate = r.gate
+	r.lines = lines
+	ctx, cancel := context.WithCancel(context.Background())
+	r.done = startBootPoll(d, ctx)
+	t.Cleanup(func() {
+		cancel()
+		<-r.done
+	})
+	awaitBootPoll(t, r.clk)
+	return r
+}
+
+// advance ends the current poll's wait and returns once the next poll has
+// stored its answer and set its wait.
+func (r *publishFailureRun) advance(t *testing.T) {
+	t.Helper()
+	r.clk.Advance(r.gate.interval)
+	awaitBootPoll(t, r.clk)
+}
+
+// loggedPublish counts the log lines of a failed publish of reason.
+func (r *publishFailureRun) loggedPublish(reason string) int {
+	return countContaining(r.lines(), fmt.Sprintf("boot gate: publishing %q", reason))
+}
+
+// TestBootGatePublishFailureLogsOncePerReason: a publish that keeps failing for
+// the same reason is logged once, not on every poll. A changed reason that also
+// fails is logged once more. A write that succeeds and then fails for a reason
+// again is logged again, so the success clears the logged failure.
+func TestBootGatePublishFailureLogsOncePerReason(t *testing.T) {
+	t.Parallel()
+	r := startPublishFailureRun(t, standbyTestNow)
+
+	first := r.gate.reason()
+	if n := r.loggedPublish(first); n != 1 {
+		t.Fatalf("the first failed publish of %q was logged %d time(s), want once; log: %v", first, n, r.lines())
+	}
+	r.advance(t)
+	r.advance(t)
+	if n := r.loggedPublish(first); n != 1 {
+		t.Errorf("the same failed publish of %q was logged %d time(s) over three polls, want once; log: %v", first, n, r.lines())
+	}
+
+	r.beads.up.Store(true)
+	r.advance(t)
+	second := r.gate.reason()
+	if second == first || second == "" {
+		t.Fatalf("the gate's reason after beads answered = %q, want a reason other than %q", second, first)
+	}
+	if n := r.loggedPublish(second); n != 1 {
+		t.Errorf("the failed publish of the changed reason %q was logged %d time(s), want once; log: %v", second, n, r.lines())
+	}
+
+	// The file is writable again, and the first answer publishes.
+	if err := os.Remove(r.path); err != nil {
+		t.Fatal(err)
+	}
+	r.beads.up.Store(false)
+	r.advance(t)
+	if got, ok := readBootHealth(t, r.town); !ok || got != first+"\n" {
+		t.Fatalf("boot-health after the write succeeds = %q (exists %v), want %q", got, ok, first+"\n")
+	}
+
+	// The file is blocked again and the second answer fails the same way.
+	if err := os.Remove(r.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(r.path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r.beads.up.Store(true)
+	r.advance(t)
+	if n := r.loggedPublish(second); n != 2 {
+		t.Errorf("the failed publish of %q after a successful write was logged %d time(s) in total, want twice; log: %v", second, n, r.lines())
+	}
+}
+
 // TestBootGatePublishOwnerIsTheDaemonRow: the boot-health file sits under the
 // daemon row of the town-state manifest, which owns it, and the manifest has no
 // row of its own for it.
