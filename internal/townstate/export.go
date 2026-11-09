@@ -45,12 +45,15 @@ const (
 	// SkipUnchanged is a regular file ExportOptions.Only refuses: a delta copy
 	// leaves out what the volume already holds with the same bytes.
 	SkipUnchanged SkipClass = "files the volume already holds unchanged"
+	// SkipCutoverRecord is the cut-over record, which a rollback export leaves
+	// out: the Mac tree must not look cut over after a rollback.
+	SkipCutoverRecord SkipClass = "cut-over records (a rollback leaves them out)"
 )
 
 // skipClassOrder is the order the summary prints the classes in, so two runs
 // over the same town print the same line.
 var skipClassOrder = []SkipClass{
-	SkipDoltData, SkipGitTree, SkipSocket, SkipLockFile, SkipNotRegular, SkipSymlinkOut, SkipOlderThan, SkipSecret, SkipUnchanged,
+	SkipDoltData, SkipGitTree, SkipSocket, SkipLockFile, SkipNotRegular, SkipSymlinkOut, SkipOlderThan, SkipSecret, SkipUnchanged, SkipCutoverRecord,
 }
 
 // ExportSummary counts what an export put in the archive and what it left out.
@@ -128,7 +131,9 @@ type ExportOptions struct {
 	Only func(name string) bool
 	// RollbackSettings adds the town's settings/config.json and each registered
 	// rig's <rig>/settings/config.json after the rows, so a replay carries the
-	// settings the pod edited after the cut-over. Only the rollback sets it.
+	// settings the pod edited after the cut-over. It also leaves the cut-over
+	// record out, so a replay does not mark the Mac tree cut over. Only the
+	// rollback sets it.
 	RollbackSettings bool
 	// ops is the filesystem seam a test replaces; the zero value is the host.
 	ops townOps
@@ -250,6 +255,10 @@ func (w *exportWalk) path(p, name string, info fs.FileInfo) error {
 	}
 	if !info.IsDir() && w.opts.Exclude != nil && w.opts.Exclude(name) {
 		w.sum.Skipped[SkipSecret]++
+		return nil
+	}
+	if w.opts.RollbackSettings && name == CutoverRecordRel {
+		w.sum.Skipped[SkipCutoverRecord]++
 		return nil
 	}
 	if info.Mode()&fs.ModeSymlink != 0 {

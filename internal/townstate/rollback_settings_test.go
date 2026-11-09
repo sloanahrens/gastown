@@ -97,6 +97,46 @@ func TestRollbackSettingsExportCarriesTownAndRigFiles(t *testing.T) {
 	}
 }
 
+// TestRollbackExportOmitsTheCutoverRecord: the volume holds a cut-over record,
+// and the rollback archive leaves it out, so the Mac tree does not look cut over
+// after a rollback. The same volume's normal export still carries the record, so
+// the seed and a later copy keep it.
+func TestRollbackExportOmitsTheCutoverRecord(t *testing.T) {
+	t.Parallel()
+	volume := t.TempDir()
+	writeStateFile(t, volume, "mayor/town.json", rollbackRegistry, 0o644)
+	record := writeStateFile(t, volume, CutoverRecordRel, `{"cutover_at":"2026-11-09T06:40:00Z","volume":"town-state","copy_seconds":1.5}`+"\n", 0o644)
+	daemonLog := writeStateFile(t, volume, daemonLogRel, "a line the pod wrote\n", 0o644)
+	setModTime(t, record, cutover.Add(time.Hour))
+	setModTime(t, daemonLog, cutover.Add(time.Hour))
+
+	t.Run("the rollback archive omits the record and keeps the rest of the daemon row", func(t *testing.T) {
+		t.Parallel()
+		stream, sum := rollbackExport(t, volume)
+		names := archiveNames(t, stream)
+		if slices.Contains(names, CutoverRecordRel) {
+			t.Errorf("--rollback carries the cut-over record %s: %v", CutoverRecordRel, names)
+		}
+		if !slices.Contains(names, daemonLogRel) {
+			t.Errorf("--rollback dropped %s, which is newer than --since: %v", daemonLogRel, names)
+		}
+		if sum.Skipped[SkipCutoverRecord] != 1 {
+			t.Errorf("summary skipped %d cut-over records, want 1", sum.Skipped[SkipCutoverRecord])
+		}
+	})
+
+	t.Run("a normal export still carries the record", func(t *testing.T) {
+		t.Parallel()
+		var stream bytes.Buffer
+		if _, err := Export(&stream, volume, Default(), ExportOptions{}); err != nil {
+			t.Fatalf("Export: %v", err)
+		}
+		if names := archiveNames(t, stream.Bytes()); !slices.Contains(names, CutoverRecordRel) {
+			t.Errorf("a normal export dropped the cut-over record %s: %v", CutoverRecordRel, names)
+		}
+	})
+}
+
 // TestRollbackSettingsEditMadeInThePodSurvives drives the whole rollback: the
 // pod edits its settings after the cut-over, the rollback export carries them,
 // and the replay onto a Mac tree that holds older copies leaves the edits in place.
