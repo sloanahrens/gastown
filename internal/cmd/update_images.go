@@ -417,6 +417,33 @@ func (r registryReader) image(ctx context.Context, kind, name, tag string) (imag
 	}, nil
 }
 
+// digestAt checks that name's image is in the registry at digest: the manifest
+// the registry serves under that digest hashes to it, and the registry names
+// the same digest. A digest the registry does not hold is an error naming the
+// image, so a rollback can refuse a pair the registry no longer carries.
+func (r registryReader) digestAt(ctx context.Context, kind, name, digest string) error {
+	repo := r.registry.Repo(name)
+	if !imagevalues.ValidDigest(digest) {
+		return fmt.Errorf("the %s image %s names digest %q, not sha256:<64 lowercase hex>", kind, repo, digest)
+	}
+	manifestURL := r.endpoint("/v2/" + r.registry.Owner + "/" + name + "/manifests/" + digest)
+	var manifest registryManifest
+	header, manifestBody, err := r.getJSON(ctx, manifestURL, updateImagesMaxManifest, &manifest)
+	if errors.Is(err, errRegistryNotFound) {
+		return fmt.Errorf("the %s image %s has no digest %s in the registry", kind, repo, digest)
+	}
+	if err != nil {
+		return fmt.Errorf("reading the %s image %s at %s: %w", kind, repo, digest, err)
+	}
+	if answered := header.Get("Docker-Content-Digest"); answered != digest {
+		return fmt.Errorf("the %s image %s answered digest %q for %s", kind, repo, answered, digest)
+	}
+	if got := sha256Digest(manifestBody); got != digest {
+		return fmt.Errorf("the %s image %s at %s has manifest bytes that hash to %s", kind, repo, digest, got)
+	}
+	return nil
+}
+
 // endpoint is one v2 API path under the reader's base URL.
 func (r registryReader) endpoint(path string) string {
 	return strings.TrimRight(r.base, "/") + path
