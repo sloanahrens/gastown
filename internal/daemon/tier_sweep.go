@@ -630,6 +630,12 @@ type tierSweepSeams struct {
 	// between looks. Zero is tierSweepRunnerPollInterval; a test sets it short
 	// so a retried read does not wait out real seconds.
 	pollInterval time.Duration
+	// budgetTimer starts the budget a launched run's wait for its result runs on:
+	// its channel receives when the budget passes, and stop ends it. Nil is a
+	// time.NewTimer of the wait. A test returns a channel already ready, so a run
+	// with no result at its first look is judged RED, or one that never receives,
+	// so only the cycle's cancel or a result ends the wait.
+	budgetTimer func(wait time.Duration) (budget <-chan time.Time, stop func())
 	// imageBudget bounds confirming the runner image in the sweep engine and
 	// loading it there. Zero is tierSweepRunnerImageBudget; a test sets it short
 	// so a held load lock's wait ends without sitting out the real budget.
@@ -2492,8 +2498,15 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 	// cycle's: the two end the wait differently. A budget that passes with no
 	// result judged nothing, so it is RED; a cycle that ends the wait learned
 	// nothing about the tree, so the cycle defers and retries.
-	budget := time.NewTimer(wait)
-	defer budget.Stop()
+	newBudget := d.tierSweepSeams.budgetTimer
+	if newBudget == nil {
+		newBudget = func(wait time.Duration) (<-chan time.Time, func()) {
+			timer := time.NewTimer(wait)
+			return timer.C, func() { timer.Stop() }
+		}
+	}
+	budget, stopBudget := newBudget(wait)
+	defer stopBudget()
 	interval := d.tierSweepSeams.pollInterval
 	if interval == 0 {
 		interval = tierSweepRunnerPollInterval
@@ -2542,7 +2555,7 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 			return d.tierSweepRunnerStageResult(st, spec, res, started)
 		}
 		select {
-		case <-budget.C:
+		case <-budget:
 			stop()
 			why := fmt.Errorf("no result in %s after %s", spec.OutDir, st.budget)
 			if statusErr != nil {

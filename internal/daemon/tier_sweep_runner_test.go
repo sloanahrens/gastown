@@ -55,6 +55,22 @@ func runnerTestResult(spec sweeprunner.Spec, now time.Time) sweeprunner.Result {
 	}
 }
 
+// runnerBudgetSpent is a stage budget that has already passed: a wait for a
+// result that is not on the host at its first look ends RED, with no real time
+// spent. It stands in for a budget so a test never waits out a clock.
+func runnerBudgetSpent(time.Duration) (<-chan time.Time, func()) {
+	spent := make(chan time.Time, 1)
+	spent <- time.Time{}
+	return spent, func() {}
+}
+
+// runnerBudgetNeverEnds is a stage budget that does not pass within a test: the
+// wait it bounds ends by the cycle's own cancel or by a result, never by the
+// budget, so a test does not depend on how loaded the host is.
+func runnerBudgetNeverEnds(time.Duration) (<-chan time.Time, func()) {
+	return make(chan time.Time), func() {}
+}
+
 // runnerCycleDaemon is a sweep daemon whose runner block is set and whose shell
 // stage is answered by the test, while the container stage keeps the production
 // path: the runner branch is what the tests below exercise.
@@ -189,7 +205,9 @@ func TestTierSweepRunnerBudgetWithNoResultTearsDown(t *testing.T) {
 	d.tierSweepSeams.launch = func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch {
 		return tierSweepLaunch{exitCode: 0, stop: func() { stops++ }}
 	}
-	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: 25 * time.Millisecond}
+	// The budget has passed: the run shows no result at the stage's first look.
+	d.tierSweepSeams.budgetTimer = runnerBudgetSpent
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
 
 	res := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
 	if res.ran != true || res.reason != tierSweepRunnerNoResult {
@@ -269,17 +287,22 @@ func TestTierSweepRunnerNextCycleAdoptsTheRunAndReadsItsResult(t *testing.T) {
 		cancel()
 		return tierSweepLaunch{exitCode: 0, stop: func() { fakeStops++ }}
 	}
-	// A short budget keeps the test quick if the run is not adopted: the wait
-	// it bounds would otherwise be a minute of nothing.
-	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: 50 * time.Millisecond}
+	// The first cycle's wait can end only by the cancel: its budget does not pass.
+	d.tierSweepSeams.budgetTimer = runnerBudgetNeverEnds
+	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
 
 	if first := d.tierSweepRunStage(ctx, t.TempDir(), st); !errors.Is(first.err, context.Canceled) {
 		t.Fatalf("first cycle = %+v, want it canceled while the run went", first)
 	}
-	// The run finishes while no cycle is watching, writing into the directory
-	// every cycle for this sha names.
-	if err := sweeprunner.Write(launched.OutDir, runnerTestResult(launched, now)); err != nil {
-		t.Fatalf("writing the run's result: %v", err)
+	// The run finishes while the second cycle waits on it, not before: a result
+	// already on the host is read without adopting anything. The result lands as
+	// the wait begins, so its first look reads it. A second cycle that did not
+	// adopt the run launches a second one, which the launch count below refuses.
+	d.tierSweepSeams.budgetTimer = func(time.Duration) (<-chan time.Time, func()) {
+		if err := sweeprunner.Write(launched.OutDir, runnerTestResult(launched, now)); err != nil {
+			t.Errorf("writing the run's result: %v", err)
+		}
+		return runnerBudgetSpent(0)
 	}
 
 	second := d.tierSweepRunStage(context.Background(), t.TempDir(), st)
@@ -899,8 +922,10 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 	cfg := runnerTestConfig(t)
 	cfg.Backend = config.TierSweepRunnerKubernetes
 	d.patrolConfig.Patrols.TierSweep.Runner = cfg
-	// The budget is short so a run whose result is never copied is judged RED in
-	// about a second; the copy path reads its result without waiting on it.
+	// The budget has passed, so a run whose result is never copied is judged RED
+	// at its first look; the copy path reads its result without waiting on it.
+	// A test that polls through a failed read sets runnerBudgetNeverEnds.
+	d.tierSweepSeams.budgetTimer = runnerBudgetSpent
 	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Second}
 	spec, ok, err := d.tierSweepRunnerSpec(st)
 	if err != nil || !ok {
@@ -1482,7 +1507,7 @@ func TestTierSweepRunnerKubernetesRedAndTornDown(t *testing.T) {
 				t.Error("exit code 0 for a run whose result was never read; the cycle would record a clean sweep")
 			}
 			if tc.statusErr && !strings.Contains(stage.output, "the run's status cannot be read") {
-				t.Errorf("stage output does not name the status read that failed for the whole budget:\n%s", stage.output)
+				t.Errorf("stage output does not name the status read that failed on the look that judged it:\n%s", stage.output)
 			}
 			// The teardown's four removals run whether or not the launch got as
 			// far as its own sync-pod removal.
@@ -1505,6 +1530,8 @@ func TestTierSweepRunnerKubernetesStatusReadRetried(t *testing.T) {
 	cmds := &runnerFakeCmds{answer: cluster.answer}
 	d.execCmd = cmds.run
 	d.tierSweepSeams.pollInterval = time.Millisecond
+	// The wait keeps polling past the failed read; only the next tick reads again.
+	d.tierSweepSeams.budgetTimer = runnerBudgetNeverEnds
 
 	stage := d.tierSweepRunRunner(context.Background(), st, spec)
 
