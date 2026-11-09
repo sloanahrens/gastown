@@ -2009,7 +2009,7 @@ func (l *Lander) addWorktree(g Repo, base string) (dir, id string, cleanup func(
 	}
 	// The land-* directory is only the landing's identity now: unique, and
 	// the name its logs go under.
-	parent, err := os.MkdirTemp(l.WorkRoot, "land-*")
+	parent, err := os.MkdirTemp(l.WorkRoot, landDirPrefix+"*")
 	if err != nil {
 		return "", "", nil, err
 	}
