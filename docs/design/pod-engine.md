@@ -4,7 +4,7 @@ The live compose daemon reaches a Docker engine at `DOCKER_HOST=tcp://sweep-dind
 
 ## How to read a row
 
-There is a row for each docker call site in a non-test Go file under `internal/`: a function that runs two docker commands has two rows. A command whose program is a name the file binds to something other than a literal has a row too, marked by what it runs. The guard in `internal/podengine` holds the table and the tree equal: when you add, move or delete a call site, run `go test ./internal/podengine`, and its failure names the row to add or remove.
+There is a row for each docker call site in a non-test Go file under `internal/`: a function that runs two docker commands has two rows. A command whose program the scan cannot read, because it is a name the file binds to something other than a literal, a parameter, or an element read by index, has a row too when the daemon reaches its package, marked by what it runs. A runner the daemon reaches that takes its program from a caller is listed under "Runners the caller names" instead, and an unresolved program outside that reach is listed under "Out of the daemon's closure". The guard in `internal/podengine` holds the table and the tree equal: when you add, move or delete a call site, run `go test ./internal/podengine`, and its failure names the row to add or remove.
 
 The disposition is the pod's answer for that call:
 
@@ -21,7 +21,11 @@ A `gated` row's condition is text the cited line must hold, and the guard fails 
 
 The three container-mode gates were re-read on 2026-11-09 against the current render. `deploy/k8s/daemon/daemon.go:336` (the `ContainerModeEnv` entry of `podEnvDecisions`) sets it to the supervisor container value, and `deploy/k8s/daemon/daemon.go:830` (in `containerEnvironment`) carries it into the pod's environment. The lines are a snapshot of this tree; the symbols `podEnvDecisions` and `containerEnvironment` are what to search for if they move. So `config.InContainerMode()` is true in the pod, and each gate takes its probe-file branch there.
 
-**Not read yet.** The scan reads a program only when it is a literal in the call's function or file, or a name bound to one. A program the caller passes in (a parameter, such as `name` in `func (h *host) probe(name string, args ...string)` at `internal/doltserver/host.go:238`), an element read by index, or a struct field is not read, so a docker call made through one has no row. `host.probe` is the one such call on the daemon's path: its caller `containerRunningState` passes it `"docker"`, and the table has a hand-written row for it (`host.probe`, listed under needs an engine). The guard exempts that row from the stale-row check, because the scan cannot see its site; its line and quoted text are still checked. Reporting the other parameter and index sites would add 73 rows, most of them running non-docker programs; the choice is open in gt-cesfam. The scan's binding is also flow-insensitive: a name bound to `docker` in one place and rebound to another literal on a later branch is read as its last binding, so such a site can drop out of the guard. The guard catches a forgotten row, not a program rebound on purpose; gt-cesfam records this limit too.
+**What the scan reads.** The scan reads a program when it is a literal in the call's function or file, or a name bound to one. It cannot read, and reports as unresolved, a parameter of the function or function literal the call sits in (a variadic one included), or an element read by index from a name the file binds. An argv list written as a literal is read where it is written, so an index read of that list is not a second program. A program held in a struct field is not read. `host.probe` is the parameter case on the daemon's path: `probe(name string, args ...string)` at `internal/doltserver/host.go:238` runs `name`, and its caller `containerRunningState` passes `"docker"`, so the row for `host.probe` (listed under needs an engine) is the pod's answer for that call.
+
+The daemon closure is the set of packages `internal/daemon` reaches through the import specs of its non-test files, and of the internal packages those files import in turn. It is the widest set the daemon can reach: no build constraint narrows it. An unresolved program in a package outside the closure has no row; it is listed under "Out of the daemon's closure". Inside the closure, a runner that takes its program from a caller is listed under "Runners the caller names" (gt-cesfam).
+
+The scan's binding is also flow-insensitive: a name bound to `docker` in one place and rebound to another literal on a later branch is read as its last binding, so such a site can drop out of the guard. The guard catches a forgotten row, not a program rebound on purpose; gt-cesfam records this limit too.
 
 The live setting's runner backend, as this page claims it and as the guard reads it:
 
@@ -62,13 +66,11 @@ The Line column is the source line of the call; the Source column is the text on
 | `internal/diskmaint/nodes/target.go` | `Target.docker` | 348 | `return t.cfg.Run(ctx, nil, "docker", argv...)` | crictl on a cluster node, through `docker exec` | mac-job | the nodes target is built by the disk-maintenance command (`internal/diskmaint/nodes/target.go:348` is its only docker call); `internal/daemon` does not import `nodes` |
 | `internal/diskmaint/registry/gc.go` | `Target.gc` | 93 | `_, err := t.cfg.Run(context.WithoutCancel(ctx), env, "docker",` | registry garbage collect inside the registry container | needs-engine no bead yet | the daemon builds this target (`internal/daemon/disk_maintenance.go:1027`) and applies it (`disk_maintenance.go:934`, through `internal/diskmaint/registry/apply.go`); no container-mode gate |
 | `internal/doctor/openshell_gateway_check.go` | `checkImages` | 243 | `_, err := run([]string{"docker", "image", "inspect", p.image})` | whether each profile image is present | mac-job | `internal/doctor/openshell_gateway_check.go:105` is the doctor check; `internal/daemon` does not import `doctor` |
-| `internal/doctor/daemon_check.go` | `DaemonCheck.Fix` | 189 | `cmd := exec.Command(gtPath, "daemon", verb)` | starts or stops the host daemon (not an engine call) | mac-job | the doctor runs this fix from its check (`internal/doctor/daemon_check.go:83`); `internal/daemon` does not import `doctor` |
-| `internal/doctor/daemon_check.go` | `DaemonCheck.Fix` | 198 | `cmd := exec.Command(gtPath, "daemon", "run")` | starts the host daemon (not an engine call) | mac-job | the same doctor fix (`internal/doctor/daemon_check.go:83`); `internal/daemon` does not import `doctor` |
 | `internal/doltserver/containerplan.go` | `ContainerPlan` | 94 | `"docker", "create",` | the create argv for the Dolt container | mac-job | `internal/cmd/dolt_container_plan.go:100` is the only caller; `internal/daemon` does not call it |
 | `internal/doltserver/doltserver.go` | `host.startExternalContainer` | 2139 | `h.exec(exec.Command("docker", "start", name))` | starting the external Dolt container | needs-engine no bead yet | `internal/daemon/dolt.go:203` starts it when `dolt.external_container` is set (`dolt.go:679-683` sets containerMode); no pod gate |
 | `internal/doltserver/doltserver.go` | `host.stopExternalContainer` | 2173 | `h.exec(exec.Command("docker", "stop", "-t", grace, name))` | stopping the external Dolt container with a grace period | needs-engine no bead yet | `internal/doltserver/doltserver.go:2714` (`Stop`) reaches it; the daemon stops Dolt through `dolt.go`; no pod gate |
 | `internal/doltserver/doltserver.go` | `host.containerRunningState` | 2189 | `out, err := h.probe("docker", "inspect", "-f", "{{.State.Running}}", name)` | whether the external Dolt container is running | needs-engine no bead yet | `internal/doltserver/doltserver.go:2221` (`ContainerRunning`) is the daemon's interface (`internal/daemon/dolt.go:190`); no pod gate |
-| `internal/doltserver/host.go` | `host.probe` | 238 | `cmd := exec.CommandContext(ctx, name, args...)` | whatever program the caller passes; on the daemon's path, `docker` from `containerRunningState` | needs-engine no bead yet | by hand: the program is a parameter, which the scan does not read (gt-cesfam); `containerRunningState` (the row above) passes `"docker"` at `internal/doltserver/doltserver.go:2189`, so the daemon's container probe fails in the pod with no gate |
+| `internal/doltserver/host.go` | `host.probe` | 238 | `cmd := exec.CommandContext(ctx, name, args...)` | whatever program the caller passes; on the daemon's path, `docker` from `containerRunningState` | needs-engine no bead yet | the program is a parameter, which the scan reads (gt-cesfam); `containerRunningState` (the row above) passes `"docker"` at `internal/doltserver/doltserver.go:2189`, so the daemon's container probe fails in the pod with no gate |
 | `internal/gtwrap/docker.go` | `Docker.dockerArgv` | 312 | `argv := []string{"docker"}` | the Mac wrapper's argv for one tool in the daemon image | mac-job | `internal/gtwrap/docker.go:157` runs it from the Mac wrapper's attach; `internal/daemon` does not import `gtwrap` |
 | `internal/hostprobe/collect.go` | `dockerArgv` | 136 | `return append([]string{"docker", "--context", dockerContext}, args...)` | the host agent's docker argv on the desktop-linux context | mac-job | `internal/hostprobe/collect.go:170` is the host agent's collector; the daemon reads the probe file and does not call the collector |
 | `internal/hoststat/hoststat.go` | `psOutput` | 159 | `out, err := exec.CommandContext(ctx, name, args...).Output()` | the process table, `ps` on macOS and `top` on linux (not an engine call) | degrades internal/hoststat/hoststat.go:160 the sample reports the process table unread | `psOutput` is the `ps` probe of `hostProbes` (`internal/hoststat/hoststat.go:84`); an error is returned with the output (line 160), and the sample reports the table unread |
@@ -88,9 +90,95 @@ The Line column is the source line of the call; the Source column is the text on
 | `internal/sweeprunner/k8s.go` | `dindContainer` | 782 | `Exec: &ExecAction{Command: []string{"docker", "-H", "tcp://" + dindAddress + ":" + dindPort, "info"}},` | the dind sidecar's readiness inside the sweep Job pod | kube-api | `internal/sweeprunner/k8s.go:782` is the Job renderer's readiness probe; the pod's own dind sidecar answers it |
 | `internal/templates/container_state.go` | `ContainerJobState` | 76 | `argv := []string{"docker", "--context", dockerContext, "inspect", "-f", containerInspectFormat, containerName}` | a named container's state, as the host's docker reports it | needs-engine gt-wgr6ck | `internal/daemon/startup_guard.go:168` asks it for the recorded owner at the daemon's start; gt-wgr6ck handles the pod's answer (`startup_guard.go` holds no docker literal of its own) |
 | `internal/testutil/doltserver.go` | `isDockerAvailable` | 147 | `dockerAvail = exec.Command("docker", "info").Run() == nil` | whether a test host's docker answers, so a container test can run | mac-job | `internal/testutil/doltserver.go:499` is a test's skip check; only Mac test runs call it |
-| `internal/cmd/agents.go` | `runAgents` | 492 | `execCmd := exec.Command(tmuxPath, menuArgs...)` | the tmux menu (not an engine call) | mac-job | `internal/cmd/agents.go:87` is the command's `RunE`; `internal/daemon` does not import `cmd` |
-| `internal/cmd/daemon.go` | `spawnDaemonProcess` | 268 | `daemonCmd := exec.Command(gtPath, "daemon", "run")` | starts the host daemon process (not an engine call) | mac-job | `internal/cmd/daemon_supervisor.go:210` is the host supervisor's spawn; `internal/daemon` does not import `cmd` |
-| `internal/cmd/rig.go` | `runRigMenu` | 848 | `execCmd := exec.Command(tmuxPath, menuArgs...)` | the tmux rig menu (not an engine call) | mac-job | `internal/cmd/rig.go:737` is the command's `RunE`; `internal/daemon` does not import `cmd` |
+
+## Runners the caller names
+
+These runners are in the daemon's closure. Each runs the program its caller passes, which the scan does not read, so none has a row of its own. A caller that writes `"docker"` as a literal is already a row: the scan reads that literal as the program of a command, as an argument ahead of a call's subcommand, or as the first element of an argv list in a function, in any file under `internal/`. A docker program held in a name and passed in here is not read; the file check names every file that holds the literal, so such a file still needs a row or a named-file line. The guard holds this list to the scan: each runner here holds an unresolved program in the closure, and each unresolved program in the closure has a row or is listed here.
+
+- `internal/beads/beads.go` `probeAllowStale`
+- `internal/beads/exec.go` `CommandContextWithPath`
+- `internal/beads/exec.go` `CommandWithPath`
+- `internal/binaryinstall/replace.go` `Files.run`
+- `internal/binaryinstall/sign.go` `Signer.run`
+- `internal/binaryinstall/sign.go` `runStdinWith`
+- `internal/config/overseer.go` `runDetectionCommand`
+- `internal/crewfresh/gitexec.go` `realGit`
+- `internal/daemon/disk_maintenance.go` `Daemon.diskMaintRunner` — its callers pass `kubectl` (`internal/daemon/disk_maintenance_disks.go:153` and `:208`); the registry garbage collect's `"docker"` literal is a row of its own (`internal/diskmaint/registry/gc.go:93`)
+- `internal/daemon/health_notify.go` `Daemon.runNotifyCommand`
+- `internal/daemon/hm_sync.go` `Daemon.hmSyncRun`
+- `internal/daemon/om_skew.go` `Daemon.omSkewInstalledSHA`
+- `internal/daemon/rebuild_hm.go` `Daemon.rebuildHMBuiltSHA`
+- `internal/daemon/upgrade_heal.go` `runUpgradeHealCommand`
+- `internal/doltserver/doltserver.go` `NewSQLServerCommand`
+- `internal/exectax/exectax.go` `runFile`
+- `internal/imagebuild/supervisor.go` `realSystem`
+- `internal/installer/contract.go` `Contract.exec`
+- `internal/installer/execute.go` `RealExecute`
+- `internal/installer/repo.go` `combinedOutput`
+- `internal/land/gate.go` `runStep`
+- `internal/land/slow.go` `execOutput`
+- `internal/lock/lock.go` `realOutput`
+- `internal/metrics/runner.go` `osRun`
+- `internal/notify/pushcmd/pushcmd.go` `Run`
+- `internal/nudge/poller.go` `buildPollerCommand`
+- `internal/polecat/manager.go` `runSetupProcess`
+- `internal/rig/setuphooks.go` `runHook`
+- `internal/sandbox/cli.go` `execRunner`
+- `internal/session/backend_openshell.go` `hostGitEmail`
+- `internal/slot/run.go` `childCommand`
+- `internal/templates/container_state.go` `RunDockerInspect` — its argv is built by `ContainerJobState`, whose `"docker"` literal is that file's row (line 76)
+- `internal/templates/supervisor_state.go` `runSupervisorProbe` — its argv is `launchctl` or `systemctl`, not docker
+- `internal/tiersweep/gotier.go` `<package>`
+- `internal/tiersweep/gtbuild.go` `<package>`
+- `internal/tmux/exec.go` `realExec`
+- `internal/ui/pager.go` `ToPager`
+- `internal/update/installer.go` `<package>`
+- `internal/util/exec.go` `ExecRun`
+- `internal/util/exec.go` `ExecWithOutput`
+
+## Out of the daemon's closure
+
+These unresolved programs are in packages the daemon does not reach, so the daemon process does not link them and their calls are not the pod question this page answers. They have no rows. The guard holds this list to the scan: each function here holds an unresolved program outside the closure, and each such function is listed.
+
+- `internal/bdshim/osmain.go` `realCommand`
+- `internal/bdshim/recordexec.go` `execRunner`
+- `internal/bird/spawn.go` `runCmux`
+- `internal/ci/cmd/imagepreflight/main.go` `jqVersion`
+- `internal/cmd/agents.go` `runAgents`
+- `internal/cmd/daemon.go` `spawnDaemonProcess`
+- `internal/cmd/daemon_claude_exec.go` `runClaudeChild`
+- `internal/cmd/daemon_container_entrypoint.go` `runEntrypointCommand`
+- `internal/cmd/daemon_image.go` `execImageRunner`
+- `internal/cmd/daemon_quiet.go` `NewQuietProbes`
+- `internal/cmd/daemon_rehearse.go` `execImageCapture`
+- `internal/cmd/daemon_supervisor.go` `commandWithEnv`
+- `internal/cmd/daemon_supervisor.go` `realDaemonControl`
+- `internal/cmd/dashboard.go` `dashboardJevSpend`
+- `internal/cmd/dashboard.go` `dashboardSpend`
+- `internal/cmd/dashboard_reexec.go` `verifyBinary`
+- `internal/cmd/editor.go` `openInEditor`
+- `internal/cmd/maint.go` `maintExecRun`
+- `internal/cmd/metrics_questions.go` `questionsExec`
+- `internal/cmd/prime.go` `execPrimeExternalCommand`
+- `internal/cmd/rig.go` `runRigMenu`
+- `internal/cmd/update_effects.go` `buildCommand`
+- `internal/doctor/daemon_check.go` `DaemonCheck.Fix`
+- `internal/doctor/hooks_live_fire_check.go` `runLiveFireClaude`
+- `internal/doctor/openshell_gateway_check.go` `runOpenShellCommand`
+- `internal/forgejoresync/refs.go` `gitCommand`
+- `internal/gtwrap/docker.go` `OSShell.Attach`
+- `internal/gtwrap/docker.go` `OSShell.Capture`
+- `internal/hmhints/hmhints.go` `ExecRunner`
+- `internal/hostload/sample.go` `runArgv`
+- `internal/polecat/imagectx/imagectx.go` `runArgv`
+- `internal/power/seams.go` `runCommand`
+- `internal/procutil/run.go` `Output`
+- `internal/procutil/run.go` `Start`
+- `internal/repoguard/gofmt.go` `CLIExec.Run`
+- `internal/testpolicy/cmd/budget/main.go` `execTest`
+- `internal/testpolicy/cmd/integrationvet/main.go` `command`
+- `internal/testutil/harness_host.go` `processHost`
+- `internal/uninstallgt/remove.go` `OSExec`
 
 ## Named, not a call site
 
@@ -121,7 +209,7 @@ The rows whose disposition is `needs-engine`, with the bead that supplies the po
 - `internal/doltserver/doltserver.go` `host.startExternalContainer` — no bead yet
 - `internal/doltserver/doltserver.go` `host.stopExternalContainer` — no bead yet
 - `internal/doltserver/doltserver.go` `host.containerRunningState` — no bead yet
-- `internal/doltserver/host.go` `host.probe` — no bead yet (written by hand: the program is a parameter, see the limit above)
+- `internal/doltserver/host.go` `host.probe` — no bead yet (the program is a parameter, read by the scan at line 238)
 - `internal/session/backend_openshell.go` `runDocker` — no bead yet
 - `internal/slot/gate.go` `dockerCLI.Info` — no bead yet
 - `internal/templates/container_state.go` `ContainerJobState` — gt-wgr6ck (the startup owner guard)
