@@ -1337,6 +1337,12 @@ func sandboxSecretsSegmentTokens(command string, seg shellparse.Segment) []strin
 // as a redirection, the split is unknown and every assignment is taken as a
 // prefix. That can only add refusals: a declaration argument read as a prefix
 // leaves its builtin with no arguments, which the walk reads as a listing.
+//
+// The head is cut at the last separator, and a substitution holds separators of
+// its own: "X=$(echo 1) export" cut at the ")" would leave a blank head, read the
+// prefix as a declaration argument, and allow a listing. So each substitution the
+// segment holds is masked out of the head and out of each assignment before the
+// cut (gt-oqcbqh).
 func sandboxSecretsAssignSplit(command string, seg shellparse.Segment) (prefix, args []shellparse.Word) {
 	if len(seg.Words) == 0 || !sandboxSecretsDeclarationBuiltins[strings.ToLower(filepath.Base(seg.Words[0].Text))] {
 		return seg.Assigns, nil
@@ -1345,13 +1351,13 @@ func sandboxSecretsAssignSplit(command string, seg shellparse.Segment) (prefix, 
 	if at < 0 || at > len(command) {
 		return seg.Assigns, nil
 	}
-	head := command[:at]
+	head := sandboxSecretsMaskSubs(command[:at], seg.Subs)
 	// The head is what precedes the keyword in its own command.
 	if i := strings.LastIndexAny(head, ";&|\n()`"); i >= 0 {
 		head = head[i+1:]
 	}
 	for k := len(seg.Assigns); k >= 0; k-- {
-		if sandboxSecretsHeadIs(head, seg.Assigns[:k]) {
+		if sandboxSecretsHeadIs(head, seg.Assigns[:k], seg.Subs) {
 			return seg.Assigns[:k], seg.Assigns[k:]
 		}
 	}
@@ -1359,20 +1365,33 @@ func sandboxSecretsAssignSplit(command string, seg shellparse.Segment) (prefix, 
 }
 
 // sandboxSecretsHeadIs reports whether head is exactly the source text of the
-// assignments, in order and separated by blanks.
-func sandboxSecretsHeadIs(head string, assigns []shellparse.Word) bool {
+// assignments, in order and separated by blanks. Each assignment's text is read
+// with its substitutions masked, as the head is.
+func sandboxSecretsHeadIs(head string, assigns []shellparse.Word, subs []shellparse.Script) bool {
 	rest := head
 	for _, a := range assigns {
 		rest = strings.TrimLeft(rest, " \t")
-		if !strings.HasPrefix(rest, a.Raw) {
+		raw := sandboxSecretsMaskSubs(a.Raw, subs)
+		if !strings.HasPrefix(rest, raw) {
 			return false
 		}
-		rest = rest[len(a.Raw):]
+		rest = rest[len(raw):]
 		if rest != "" && rest[0] != ' ' && rest[0] != '\t' {
 			return false
 		}
 	}
 	return strings.TrimSpace(rest) == ""
+}
+
+// sandboxSecretsMaskSubs replaces every copy of each substitution in subs, written
+// as $(...) or `...`, with prWorkflowSubstitutionWord. The placeholder holds no
+// separator or parenthesis, so a cut at one cannot land inside a substitution.
+func sandboxSecretsMaskSubs(text string, subs []shellparse.Script) string {
+	for _, sub := range subs {
+		text = strings.ReplaceAll(text, "$("+sub.Raw+")", prWorkflowSubstitutionWord)
+		text = strings.ReplaceAll(text, "`"+sub.Raw+"`", prWorkflowSubstitutionWord)
+	}
+	return text
 }
 
 // sandboxSecretsAssignToken returns an assignment's token: its text, with the
