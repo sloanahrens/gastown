@@ -2,10 +2,10 @@
 // control cluster: the namespace, the ServiceAccount the pod runs as, the
 // claims that carry the town root, the landing work root and the host's Dolt
 // backups, the Service that keeps the name forgejo, one Secret per file of the
-// daemon's secrets manifest, the Deployment itself, and the bindings that give
-// the pod the sweep roles deploy/k8s/sweep-rbac.yaml defines. It renders only,
-// so no apply path and no Kubernetes client lives here (gt-gg9hv.69,
-// gt-gg9hv.70).
+// daemon's secrets manifest, the Deployment itself, the seed helper Pod
+// BuildHelper returns, and the bindings that give the pod the sweep roles
+// deploy/k8s/sweep-rbac.yaml defines. It renders only, so no apply path and no
+// Kubernetes client lives here (gt-gg9hv.69, gt-gg9hv.70, gt-p194yr).
 //
 // The pod mounts each volume at the path the compose container mounts it at, so
 // no setting that names a path changes at the move (gt-gg9hv.30). Mounts holds
@@ -678,7 +678,7 @@ func daemonContainer(v Values) Container {
 		Args:       daemonArgs(v),
 		WorkingDir: TownRootPath,
 		Env:        containerEnvironment(v),
-		Resources: ContainerResources{
+		Resources: &ContainerResources{
 			Requests: resourceList(v),
 			Limits:   resourceList(v),
 		},
@@ -934,11 +934,23 @@ func (v Values) validate() error {
 
 // validateRehearsal refuses a rehearsal that could render into a namespace the
 // live render or its bindings own, and a rehearsal that asks for the write-capable
-// om token. The namespace is what keeps a rehearsal's objects apart from the live
-// pod's, so it is required and may not be DefaultNamespace, the sweep's or cache
-// trim's namespace, or the namespace of the Forgejo Service the rehearsal's own
-// Service would shadow.
+// om token.
 func (v Values) validateRehearsal() error {
+	if err := v.validateRehearsalNamespace(); err != nil {
+		return err
+	}
+	if v.OMToken {
+		return fmt.Errorf("Values.OMToken is true: a rehearsal may not mount the om token, a write-capable credential; the rehearsal mounts only the read-only forge viewer's token")
+	}
+	return nil
+}
+
+// validateRehearsalNamespace is the namespace rule every rehearsal object takes:
+// the namespace is what keeps a rehearsal's objects apart from the live pod's, so
+// it is required and may not be DefaultNamespace, the sweep's or cache trim's
+// namespace, or the namespace of the Forgejo Service the rehearsal's own Service
+// would shadow.
+func (v Values) validateRehearsalNamespace() error {
 	switch v.Namespace {
 	case "":
 		return fmt.Errorf("Values.Namespace is empty: a rehearsal names its own namespace, and may not use %q, the live namespace", DefaultNamespace)
@@ -954,9 +966,6 @@ func (v Values) validateRehearsal() error {
 			return fmt.Errorf("Values.Namespace %q: a rehearsal may not render into the namespace of %s; name its own", v.Namespace, shared.owner)
 		}
 	}
-	if v.OMToken {
-		return fmt.Errorf("Values.OMToken is true: a rehearsal may not mount the om token, a write-capable credential; the rehearsal mounts only the read-only forge viewer's token")
-	}
 	return nil
 }
 
@@ -965,9 +974,10 @@ func (v Values) validateRehearsal() error {
 // a credential the Secrets list does not carry, a share or grace outside its
 // grammar, and an environment entry the render cannot write.
 func (v Values) validateDaemon() error {
+	if err := v.validateImage(); err != nil {
+		return err
+	}
 	switch {
-	case !imageRefRE.MatchString(v.Image):
-		return fmt.Errorf("Values.Image %q: want the daemon image by digest (repo@sha256:<64 lowercase hex>) from deploy/values/images.yaml; a tag is refused so the pod runs the commit the values file records", v.Image)
 	case !v.Rehearsal && !v.ConfirmContainerStopped:
 		return errors.New("Values.ConfirmContainerStopped is false: the Docker Desktop container owns the town until it is stopped, so the Deployment is not rendered until the operator confirms the container is down")
 	case v.CPU == "":
@@ -991,6 +1001,16 @@ func (v Values) validateDaemon() error {
 		return err
 	}
 	return v.validateVolumes()
+}
+
+// validateImage refuses an image that is not the digest reference
+// deploy/values/images.yaml writes: a tag would let a pod run a commit the values
+// file does not name (gt-gg9hv.63).
+func (v Values) validateImage() error {
+	if !imageRefRE.MatchString(v.Image) {
+		return fmt.Errorf("Values.Image %q: want the daemon image by digest (repo@sha256:<64 lowercase hex>) from deploy/values/images.yaml; a tag is refused so the pod runs the commit the values file records", v.Image)
+	}
+	return nil
 }
 
 // validateHostGateway refuses a gateway address that names no other machine: a
@@ -1445,11 +1465,21 @@ type PodTemplateMeta struct {
 
 // PodSpec is the subset of a pod's spec the builder sets.
 type PodSpec struct {
-	ServiceAccountName            string      `yaml:"serviceAccountName"`
-	HostAliases                   []HostAlias `yaml:"hostAliases,omitempty"`
-	TerminationGracePeriodSeconds int64       `yaml:"terminationGracePeriodSeconds"`
-	Containers                    []Container `yaml:"containers"`
-	Volumes                       []Volume    `yaml:"volumes,omitempty"`
+	ServiceAccountName            string              `yaml:"serviceAccountName,omitempty"`
+	AutomountServiceAccountToken  *bool               `yaml:"automountServiceAccountToken,omitempty"`
+	SecurityContext               *PodSecurityContext `yaml:"securityContext,omitempty"`
+	HostAliases                   []HostAlias         `yaml:"hostAliases,omitempty"`
+	TerminationGracePeriodSeconds int64               `yaml:"terminationGracePeriodSeconds,omitempty"`
+	Containers                    []Container         `yaml:"containers"`
+	Volumes                       []Volume            `yaml:"volumes,omitempty"`
+}
+
+// PodSecurityContext is the identity a pod runs as when the builder pins it. The
+// daemon pod pins none and takes the image's user, so only a pod that must write
+// a claim under a known owner sets it.
+type PodSecurityContext struct {
+	RunAsUser  *int64 `yaml:"runAsUser,omitempty"`
+	RunAsGroup *int64 `yaml:"runAsGroup,omitempty"`
 }
 
 // HostAlias is one /etc/hosts entry the pod's containers share: every hostname
@@ -1459,17 +1489,20 @@ type HostAlias struct {
 	Hostnames []string `yaml:"hostnames"`
 }
 
-// Container is the subset of one container the builder sets.
+// Container is the subset of one container the builder sets. Command replaces
+// the image's entrypoint, which the seed helper uses to run a plain sleep; the
+// daemon container carries none and runs the entrypoint.
 type Container struct {
-	Name           string             `yaml:"name"`
-	Image          string             `yaml:"image"`
-	Args           []string           `yaml:"args,omitempty"`
-	WorkingDir     string             `yaml:"workingDir,omitempty"`
-	Env            []EnvVar           `yaml:"env,omitempty"`
-	Resources      ContainerResources `yaml:"resources"`
-	VolumeMounts   []VolumeMount      `yaml:"volumeMounts,omitempty"`
-	ReadinessProbe *Probe             `yaml:"readinessProbe,omitempty"`
-	LivenessProbe  *Probe             `yaml:"livenessProbe,omitempty"`
+	Name           string              `yaml:"name"`
+	Image          string              `yaml:"image"`
+	Command        []string            `yaml:"command,omitempty"`
+	Args           []string            `yaml:"args,omitempty"`
+	WorkingDir     string              `yaml:"workingDir,omitempty"`
+	Env            []EnvVar            `yaml:"env,omitempty"`
+	Resources      *ContainerResources `yaml:"resources,omitempty"`
+	VolumeMounts   []VolumeMount       `yaml:"volumeMounts,omitempty"`
+	ReadinessProbe *Probe              `yaml:"readinessProbe,omitempty"`
+	LivenessProbe  *Probe              `yaml:"livenessProbe,omitempty"`
 }
 
 // EnvVar is one environment entry.

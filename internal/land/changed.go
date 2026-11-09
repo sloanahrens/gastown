@@ -329,6 +329,15 @@ var treeWideGuards = []treeWideGuard{
 		removal: true,
 	},
 	{
+		// TestHelperRunsAsTheDaemonImageDoes reads the same Dockerfile to hold
+		// the seed helper's pinned user to the user the image runs as
+		// (gt-p194yr).
+		pkg:     "deploy/k8s/daemon",
+		tests:   []string{"TestHelperRunsAsTheDaemonImageDoes"},
+		judges:  func(rel string) bool { return rel == "deploy/daemon/Dockerfile" },
+		removal: true,
+	},
+	{
 		// TestPolecatImageRecipe and TestPolecatImagePluginDocMatchesTheRecipe
 		// read the Makefile's polecat-image recipe and the plugin doc an agent
 		// runs that recipe from (gt-gg9hv.33).
