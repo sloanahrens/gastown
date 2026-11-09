@@ -456,3 +456,11 @@ test_scope	polecat	"go test ./internal/shellparse/... -run TestParseQuotedHeredo
 dangerous	polecat	"cat > /tmp/x <<'EOF'\n$(for i in 1; do gt done; done)\nEOF"	refuse	Never poll the slot	gt-bogfce	92afa9c1f3ebacbccb40fd7bc94feac4d043fbeabaea18c33a528bb365cef4e0
 container_suite	polecat	"echo ok || echo more"	allow		gt-bogfce	92afa9c1f3ebacbccb40fd7bc94feac4d043fbeabaea18c33a528bb365cef4e0
 test_scope	polecat	"go test ./internal/config/... -run TestLoad"	allow		gt-bogfce	92afa9c1f3ebacbccb40fd7bc94feac4d043fbeabaea18c33a528bb365cef4e0
+# --- gt-70q8j2: shellparse reports the process and command substitutions in a parameter expansion word, which moves the freeze stamp; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"echo ${v:-<(for i in 1; do gt done; done)}"	refuse	Never poll the slot	gt-70q8j2	6fab95364f1c435b0572a3d37f4a82ab2309c50458873bfe1b6fe62426371fff
+container_suite	polecat	"echo ${v:-<(GT_TEST_DOCKER=1 make test)}"	refuse	bare 'make test' runs	gt-70q8j2	6fab95364f1c435b0572a3d37f4a82ab2309c50458873bfe1b6fe62426371fff
+test_scope	polecat	"echo ${v:-<(go test ./internal/shellparse/... -run TestParseQuotedHeredoc)}"	allow		gt-70q8j2	6fab95364f1c435b0572a3d37f4a82ab2309c50458873bfe1b6fe62426371fff
+# --- gt-70q8j2 rework: a "#" that starts a word of a parameter expansion word is text, so the substitution after it is reported; the stamp moves again, one real case per freeze guard carries it ---
+dangerous	polecat	"echo ${v:-#<(for i in 1; do gt done; done)}"	refuse	Never poll the slot	gt-70q8j2	f6f4da12198586bfd683ee69d4dd2859f206c8ad263fbd81d087fb9be6e27656
+container_suite	polecat	"echo ${v:-a #<(GT_TEST_DOCKER=1 make test)}"	refuse	bare 'make test' runs	gt-70q8j2	f6f4da12198586bfd683ee69d4dd2859f206c8ad263fbd81d087fb9be6e27656
+test_scope	polecat	"echo ${v:-#<(go test ./internal/shellparse/... -run TestParseQuotedHeredoc)}"	allow		gt-70q8j2	f6f4da12198586bfd683ee69d4dd2859f206c8ad263fbd81d087fb9be6e27656
