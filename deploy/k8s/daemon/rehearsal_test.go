@@ -303,6 +303,28 @@ func TestRehearsalRendersNoProxy(t *testing.T) {
 	}
 }
 
+// TestRehearsalRefusesTagProxyImage holds that a rehearsal refuses a proxy tag
+// as a live pod does: the rehearsal renders no relay, but a wrong value is never
+// silently ignored.
+func TestRehearsalRefusesTagProxyImage(t *testing.T) {
+	t.Parallel()
+	for _, image := range []string{
+		"registry.example.com/gt/socat:1.8.0.3",
+		"registry.example.com/gt/socat@sha256:FEEDFACE",
+	} {
+		v := rehearsalValues(t)
+		v.ProxyImage = image
+		_, err := Build(v)
+		if err == nil {
+			t.Errorf("Build of a rehearsal with ProxyImage %q = a render, want a refusal", image)
+			continue
+		}
+		if !strings.Contains(err.Error(), "Values.ProxyImage") || !strings.Contains(err.Error(), image) {
+			t.Errorf("Build of a rehearsal refused with %q, want Values.ProxyImage and the value %q named", err, image)
+		}
+	}
+}
+
 // refusedInRehearsal reports whether a rehearsal may never carry the entry
 // named file: a promote key, jev.env, the landing bot's token or the write-capable
 // om token and its meta file.
