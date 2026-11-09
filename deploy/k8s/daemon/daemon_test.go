@@ -1578,6 +1578,23 @@ func TestEveryComposeMountHasAPodAnswer(t *testing.T) {
 	if got := podAnswerFinding(absent, nil); !strings.Contains(got, "an om config the pod does not mount") {
 		t.Errorf("podAnswerFinding on a row the render does not carry = %q, want a finding naming it", got)
 	}
+	wrongSubPath := composeMount{Name: "an om config at the wrong subPath", Path: manifestdata.LiveOMConfigPath, Volume: TownStateClaim, SubPath: "elsewhere/om-config.json"}
+	if got := podAnswerFinding(wrongSubPath, rendered); !strings.Contains(got, "an om config at the wrong subPath") {
+		t.Errorf("podAnswerFinding on a render with another subPath = %q, want a finding naming it", got)
+	}
+	writable := append([]VolumeMount(nil), rendered...)
+	if m := volumeMountAt(writable, manifestdata.LiveOMConfigPath); m != nil {
+		m.ReadOnly = false
+	}
+	var om composeMount
+	for _, m := range composeMounts {
+		if m.Name == "om config" {
+			om = m
+		}
+	}
+	if got := podAnswerFinding(om, writable); !strings.Contains(got, "is writable") {
+		t.Errorf("podAnswerFinding on a writable om config mount = %q, want a finding saying it is writable", got)
+	}
 }
 
 // TestOMConfigComesFromThePrivateTownStateRow holds the om config's source: the
