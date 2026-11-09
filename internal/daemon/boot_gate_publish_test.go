@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -76,8 +77,8 @@ func (p *gatedProbe) probe(name string) bootProbe {
 }
 
 // TestBootGatePublishWritesAndClears: the poller writes the waiting reason at
-// start, over a stale file a dead daemon left; writes the reason once the probe
-// answers it; and removes the file at the first healthy answer.
+// start, over a stale file a dead daemon left; writes the reason the probe
+// reports; and removes the file at the first healthy answer.
 func TestBootGatePublishWritesAndClears(t *testing.T) {
 	t.Parallel()
 	now := standbyTestNow
@@ -163,6 +164,84 @@ func TestBootGatePublishWriteErrorStillHoldsInProcess(t *testing.T) {
 	}
 	cancel()
 	awaitBootPollEnd(t, done)
+}
+
+// TestBootGatePublishFailuresAreLogged: a changed reason that cannot replace the
+// file, and a removal that fails at the healthy answer, are each logged, and
+// neither changes the in-process standby. Each failure is real: a directory
+// where the file must go makes the rename fail, and a regular file where the
+// daemon directory belongs makes the removal fail.
+func TestBootGatePublishFailuresAreLogged(t *testing.T) {
+	t.Parallel()
+	now := standbyTestNow
+	t.Run("a changed reason that cannot replace the file is logged and still holds", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		gp := newGatedProbe()
+		gate, clk := publishGateOver(t, town, now, gp.probe("dolt"))
+
+		d, _, lines := standbyHeartbeat(t, now)
+		d.bootGate = gate
+		ctx, cancel := context.WithCancel(context.Background())
+		done := startBootPoll(d, ctx)
+		t.Cleanup(func() {
+			gp.open()
+			cancel()
+			<-done
+		})
+
+		guard, stop := context.WithTimeout(context.Background(), bootHangGuard) //testpolicy:allow no-sleep — a hang guard only: the first probe's start is the event the test waits for, and a poll that never starts it fails here rather than hanging the test
+		defer stop()
+		select {
+		case <-gp.entered:
+		case <-guard.Done():
+			t.Fatal("the boot poll never started its first probe")
+		}
+		path := dispatch.BootHealthPath(town)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		gp.open()
+		awaitBootPoll(t, clk)
+		reason := gate.reason()
+		if reason == "" || reason == bootGateWaiting {
+			t.Fatalf("the gate's reason after the first poll = %q, want the probe's reason", reason)
+		}
+		if n := countContaining(lines(), fmt.Sprintf("boot gate: publishing %q", reason)); n != 1 {
+			t.Errorf("the failed change was logged %d time(s), want once; log: %v", n, lines())
+		}
+		if d.standbyReason(now) == "" {
+			t.Error("standbyReason lifted although the poll saw the probe down")
+		}
+		cancel()
+		awaitBootPollEnd(t, done)
+	})
+	t.Run("a removal that fails at the healthy answer is logged", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		if err := os.WriteFile(filepath.Join(town, "daemon"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		dolt := &fakeProbe{}
+		dolt.up.Store(true)
+		gate, _ := publishGateOver(t, town, now, dolt.probe("dolt"))
+
+		d, _, lines := standbyHeartbeat(t, now)
+		d.bootGate = gate
+		done := startBootPoll(d, context.Background())
+		awaitBootPollEnd(t, done)
+
+		if n := countContaining(lines(), "boot gate: removing the boot hold file"); n != 1 {
+			t.Errorf("the failed removal was logged %d time(s), want once; log: %v", n, lines())
+		}
+		if reason := d.standbyReason(now); reason != "" {
+			t.Errorf("standbyReason after every probe answered = %q, want \"\"", reason)
+		}
+	})
 }
 
 // TestBootGatePublishOwnerIsTheDaemonRow: the boot-health file sits under the

@@ -113,9 +113,9 @@ func TestBootGateHoldReasonNamesTheFile(t *testing.T) {
 }
 
 // TestBootGateHoldDocStatesFailClosedAndTheClearingStep: the BootHold comment
-// states that a file left by a dead daemon holds on purpose, and names the one
-// line that clears it. The bead asks for this text in the comment itself, so the
-// test reads the doc comment of BootHold from this package's hold.go.
+// states that a file left by a dead daemon holds on purpose, and names the step
+// that clears it. That contract lives in the comment, so the test reads the doc
+// comment of BootHold from this package's hold.go rather than a runtime value.
 func TestBootGateHoldDocStatesFailClosedAndTheClearingStep(t *testing.T) {
 	t.Parallel()
 	fset := token.NewFileSet()

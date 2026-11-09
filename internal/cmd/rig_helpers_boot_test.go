@@ -56,7 +56,7 @@ func TestRingHoldNowBootGate(t *testing.T) {
 	t.Run("file absent keeps the Ring's verdict", func(t *testing.T) {
 		t.Parallel()
 		// A town with no ring section holds nothing, whatever the host
-		// environment holds, so the verdict here is "" with no key read.
+		// environment holds, so the verdict does not depend on the key.
 		town := t.TempDir()
 		ringTestTownFile(t, town)
 		if got := ringHoldNow(town); got != "" {
