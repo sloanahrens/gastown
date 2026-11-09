@@ -369,15 +369,18 @@ test_scope	polecat	"go test -run TestGuard ./internal/cmd"	allow		gt-x1bvnf	26fc
 # declaration-builtin heredoc bash reads, the process substitution recovered
 # from inside an expansion, and assignments the parsed words keep as the shell
 # passes them ---
-dangerous	polecat	"let y=1<<x\nsudo rm -rf /\nx"	allow		gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
-dangerous	crew	"let y=1<<x\nsudo rm -rf /\nx"	allow		gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
-dangerous	polecat	"echo ${v:-<(bash <<EOF\ngit reset --hard\nEOF\n)}"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
-dangerous	polecat	"BD_ACTOR= bd comments add gt-1 hello"	refuse	polecat may not set a comment author or actor	gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
-dangerous	polecat	"declare -x BD_ACTOR=Operator"	refuse	polecat may not set a comment author or actor	gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
-container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/style/... -run TestStyle"	allow		gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
-container_suite	polecat	"GT_TEST_DOCKER=1 cat > note.md <<'EOF'\ngo test ./internal/beads/...\nEOF"	allow		gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
-test_scope	polecat	"go test -run TestDangerous ./internal/cmd"	allow		gt-a7jzr5	4f631daf5830f235b5844b355fdeca4c00798847d5750ef7dbded57e4513486b
+dangerous	polecat	"let y=1<<x\nsudo rm -rf /\nx"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	crew	"let y=1<<x\nsudo rm -rf /\nx"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	polecat	"echo ${v:-<(bash <<EOF\ngit reset --hard\nEOF\n)}"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	polecat	"BD_ACTOR= bd comments add gt-1 hello"	refuse	polecat may not set a comment author or actor	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	polecat	"declare -x BD_ACTOR=Operator"	refuse	polecat may not set a comment author or actor	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/style/... -run TestStyle"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+container_suite	polecat	"GT_TEST_DOCKER=1 cat > note.md <<'EOF'\ngo test ./internal/beads/...\nEOF"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+test_scope	polecat	"go test -run TestDangerous ./internal/cmd"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
 # --- gt-a7jzr5 rework: a command the parser cannot read is refused whole, naming the construct; one real case per guard carries the new stamp (freeze rule) ---
-dangerous	polecat	"echo ok\nrm -rf /\necho \""	refuse	cannot be read (unterminated quote)	gt-a7jzr5	2ebbac61230296bdab7003757b9a4a157d28f073c08624b44d6cbf559478d3fa
-container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-a7jzr5	2ebbac61230296bdab7003757b9a4a157d28f073c08624b44d6cbf559478d3fa
-test_scope	polecat	"go test -run TestGuardCorpus ./internal/cmd"	allow		gt-a7jzr5	2ebbac61230296bdab7003757b9a4a157d28f073c08624b44d6cbf559478d3fa
+dangerous	polecat	"echo ok\nrm -rf /\necho \""	refuse	cannot be read (unterminated quote)	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... -count=1"	refuse	targets testcontainers-backed package(s)	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+test_scope	polecat	"go test -run TestGuardCorpus ./internal/cmd"	allow		gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+# --- gt-a7jzr5 rework 3: the ANSI-C continuation and declaration-heredoc lines still judge the nested payloads they run live ---
+dangerous	polecat	"echo $\\\n'x'; bash -c 'git reset --hard'"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf
+dangerous	polecat	"let y=1<<x; bash -c 'git reset --hard'\nx"	refuse	Hard reset discards all uncommitted changes irreversibly	gt-a7jzr5	e2eac4ecdbf77de30820061268e9efe4f0360d1569addd7ca0cae6847e799bcf

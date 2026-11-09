@@ -1204,6 +1204,53 @@ func TestSandboxSecretsRefusesUnreadableCommands(t *testing.T) {
 	}
 }
 
+// gt-a7jzr5: a payload the walk derives is refused when the parser cannot
+// read it, at every depth. A depth-1 payload with no heredoc or variable in the
+// command still has to be read, or the text the shell runs goes unjudged.
+func TestSandboxSecretsRefusesUnreadablePayloadAtDepth(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+	}{
+		{"a shell -c payload with an unclosed quote", "bash -c \"echo '\""},
+		{"an eval payload with an unclosed quote", "eval \"echo '\""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if !strings.Contains(reason, "cannot be read (unterminated quote)") {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want the unreadable refusal for the nested payload", tt.command, reason)
+			}
+		})
+	}
+}
+
+// gt-a7jzr5: a substitution's heredoc output is judged when the line
+// runs it, and refused whole when no parser can read it. As an assignment value
+// nothing runs it, so the same unreadable body is data and is not judged.
+func TestSandboxSecretsJudgesSubstitutionOutputTheLineRuns(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		refused bool
+	}{
+		{"output run as the command word", "$(cat <<'EOF'\necho '\nEOF\n)", true},
+		{"output fed to a shell", "$(cat <<'EOF'\necho '\nEOF\n) | sh", true},
+		{"output held in an assignment", "x=\"$(cat <<'EOF'\necho '\nEOF\n)\"", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if tt.refused && !strings.Contains(reason, "cannot be read (unterminated quote)") {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want the unreadable refusal", tt.command, reason)
+			}
+			if !tt.refused && reason != "" {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want allowed: the output is data to the assignment", tt.command, reason)
+			}
+		})
+	}
+}
+
 // The substitution heredoc text the walk judges is the body with its delimiter
 // line appended, as the shell read it (gt-a7jzr5). The body excludes that line,
 // so the format is pinned here rather than inferred from the body alone.

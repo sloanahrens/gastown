@@ -213,18 +213,17 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 // is the reading the matchers take (gt-kr5vf). Two rules stay on the text: the
 // done/slot loop rule, whose loop keywords are not segments
 // (judgeDangerousLoopText), and the two shapes the parser reads differently
-// from the shell (judgeDisagreeingShellText).
+// from the shell, whose token checks follow the shell's text (judgeDisagreeingScript).
 func judgeDangerousScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
 	// A declaration builtin's word spelling "<<" is a here-document to the
 	// shell's lexer, which reads the operator before the builtin sees its
 	// argument: "let y=1<<x" feeds the next lines to the body as data. The
 	// parser reads the word as an arithmetic expression and reports no
-	// Heredoc there, so the text is judged by judgeDisagreeingShellText, which
-	// follows the shell, rather than by the parsed words that would judge the
-	// body as live commands. Nested payloads on such a line are not judged;
-	// the shapes it covers are arithmetic declarations, not shell invokers.
+	// Heredoc there, so the line is judged by judgeDisagreeingScript, which
+	// follows the shell for its token checks rather than the parsed words that
+	// would judge the body as live commands.
 	if dangerousDeclarationHeredoc(script) || dangerousANSICContinuation(text) {
-		return judgeDisagreeingShellText(text, depth, sess)
+		return judgeDisagreeingScript(script, text, depth, sess)
 	}
 	tokens := dangerousTokenLine(script)
 	if reason, alternative = judgeDangerousTokens(tokens, toLowerTokens(tokens), sess); reason != "" {
@@ -343,6 +342,20 @@ func dangerousANSICContinuation(text string) bool {
 		}
 	}
 	return false
+}
+
+// judgeDisagreeingScript judges a line the parser reads differently from the
+// shell. The token checks and the loop rule read the shell's reading of the
+// text (judgeDisagreeingShellText); then the nested payloads the parser did read
+// on that line are judged as on any other line, because the shell runs each one
+// live. A payload the parser places elsewhere is not judged here; the parser's
+// reading is the only structured reading the nested checks have (gt-7ydceb).
+// Pinned by TestDisagreeingShapesJudgeNestedPayloads.
+func judgeDisagreeingScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
+	if reason, alternative = judgeDisagreeingShellText(text, depth, sess); reason != "" {
+		return reason, alternative
+	}
+	return evaluateDangerousScriptNested(script, depth, sess)
 }
 
 // judgeDisagreeingShellText judges a command the parser reads differently from
@@ -1016,9 +1029,13 @@ func heredocLineEndAfter(text string, from int) int {
 
 // heredocDelimiterEnd returns the offset just past the first line at or after
 // bodyStart whose content is the delimiter, and false when no such line exists.
-// A tab-indented line is accepted for the "<<-" form; the parsed Heredoc does
-// not say whether the operator carried the dash, so the tab-indented spelling
-// is accepted for either, which only differs on a body line equal to the tag.
+// A tab-indented line is accepted for either operator. Only "<<-" strips tabs
+// (bash does not strip them for "<<"), but the parsed Heredoc keeps no dash flag
+// (shellparse is out of scope here), so the tab-indented spelling is taken for
+// both. That is safe in one direction only: a plain "<<" body that a
+// tab-indented line ends early leaves the rest of the body as text the
+// matchers judge as live, and the stripped span stays inside the real body, so
+// no live command is ever stripped as data.
 func heredocDelimiterEnd(text string, bodyStart int, delimiter string) (int, bool) {
 	for offset := bodyStart; offset <= len(text); {
 		lineEnd := strings.IndexByte(text[offset:], '\n')
@@ -1048,13 +1065,25 @@ func heredocDelimiterEnd(text string, bodyStart int, delimiter string) (int, boo
 // body is the whole tail of the text, so stripping on a match that may not
 // even be a redirection erased every command after it (gt-79opc).
 func stripHeredocBodies(command string) string {
-	spans := heredocSpans(command)
-	if len(spans) == 0 {
-		return command
-	}
+	stripped, _ := stripHeredocBodiesWithCuts(command)
+	return stripped
+}
+
+// heredocBodyCut is one heredoc body stripHeredocBodies removed: at is the
+// offset in the stripped text the body was cut at, and length the bytes it
+// took out of the command.
+type heredocBodyCut struct {
+	at, length int
+}
+
+// stripHeredocBodiesWithCuts is stripHeredocBodies with the cut it made at each
+// body, in order, so an offset in the stripped text maps back to the command
+// (commandOffset).
+func stripHeredocBodiesWithCuts(command string) (string, []heredocBodyCut) {
 	var b strings.Builder
+	var cuts []heredocBodyCut
 	pos := 0
-	for _, s := range spans {
+	for _, s := range heredocSpans(command) {
 		if s.unterminated || s.bodyEnd <= s.bodyStart {
 			continue
 		}
@@ -1062,10 +1091,24 @@ func stripHeredocBodies(command string) string {
 			continue
 		}
 		b.WriteString(command[pos:s.bodyStart])
+		cuts = append(cuts, heredocBodyCut{at: b.Len(), length: s.bodyEnd - s.bodyStart})
 		pos = s.bodyEnd
 	}
 	b.WriteString(command[pos:])
-	return b.String()
+	return b.String(), cuts
+}
+
+// commandOffset maps an offset in the text stripHeredocBodies returned to the
+// same byte of the command. A body cut at the offset sat before that byte, so
+// the byte lies past it.
+func commandOffset(cuts []heredocBodyCut, offset int) int {
+	out := offset
+	for _, c := range cuts {
+		if c.at <= offset {
+			out += c.length
+		}
+	}
+	return out
 }
 
 // shellFedHeredocBodies returns the bodies of heredocs whose reader line runs a

@@ -332,19 +332,17 @@ func sandboxSecretsReason(command string) string {
 // secret in. The walk starts from them and taints more as it passes each segment,
 // so an argument is judged by the assignments before it.
 //
-// The command the hook judges is refused whole when the parser cannot read it,
-// or cannot place one of its heredoc bodies (gt-a7jzr5). A payload the walk
-// derives from it is refused the same way only when it holds a heredoc and a
-// variable reference, the one shape a secret can reach unseen: the walk cuts
-// those payloads out of the text, so a fragment such as "cat <<'EOF'" is not a
-// command the shell runs on its own.
+// A command is refused whole when the parser cannot read it, or cannot place
+// one of its heredoc bodies, at every depth (gt-a7jzr5): a payload the walk
+// derives is a command the shell runs, so text no parser reads cannot be
+// checked for a secret. The payloads are cut from the command whole, so a
+// substitution that holds a heredoc is judged with its body
+// (sandboxSecretsSubstitutions).
 func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (reason string, tooDeep bool) {
 	script, err := shellparse.Parse(command)
 	unplaced := err == nil && heredocReadersUnplaced(script)
 	if err != nil || unplaced {
-		if depth == 0 || strings.Contains(command, "<<") && strings.Contains(command, "$") {
-			return sandboxSecretsUnreadableReason(err), false
-		}
+		return sandboxSecretsUnreadableReason(err), false
 	}
 	tokenText := prWorkflowTokenText(command)
 	tokens := shellTokenize(tokenText)
@@ -356,8 +354,9 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	expanded := sandboxSecretsExpandedNames(command)
 	var payloads []string
 	segments, piped := sandboxSecretsPipeSegments(tokens)
-	var stdin string // the text a pipe hands the segment being judged
-	shells := false  // whether the line runs a shell or eval, which reads a substitution's output as a script
+	var stdin string            // the text a pipe hands the segment being judged
+	shells := false             // whether the line runs a shell or eval, which reads a substitution's output as a script
+	substitutedCommand := false // whether a segment's command word is a substitution, whose output the line runs
 	for i, segment := range segments {
 		r, launched, argv := sandboxSecretsSegment(segment, tainted, expanded)
 		if r != "" {
@@ -369,6 +368,9 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		stdin = ""
 		if i+1 < len(segments) && piped[i+1] {
 			stdin = sandboxSecretsPipeOutput(argv, fed, ansiHereStrings)
+		}
+		if sandboxSecretsSubstitutedCommand(segment) {
+			substitutedCommand = true
 		}
 		if len(argv) == 0 {
 			continue
@@ -420,42 +422,40 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	if sandboxSecretsHeredocRefsSecret(command) {
 		return "an unquoted heredoc expands a secret variable", false
 	}
-	if err == nil && !unplaced {
-		var heredocReason string
-		sandboxSecretsEachHeredoc(script, func(script shellparse.Script, i int) {
-			if heredocReason != "" {
+	var heredocReason string
+	sandboxSecretsEachHeredoc(script, func(script shellparse.Script, i int) {
+		if heredocReason != "" {
+			return
+		}
+		fedToSource := sandboxSecretsHeredocFedToSource(script, i)
+		fedToShell := sandboxSecretsHeredocFedToShell(script, i)
+		interpreter := sandboxSecretsHeredocInterpreter(script, i)
+		for _, h := range script.Segments[i].Heredocs {
+			body := h.Body
+			if fedToSource {
+				// source /dev/stdin <<EOF runs the body as a script, so it is judged as shell text.
+				payloads = append(payloads, body)
+			}
+			if strings.TrimSpace(body) != "" && fedToShell {
+				// A redirection ahead of the shell hides it from the reader
+				// line's own stages: 2>/dev/null bash <<EOF still runs the
+				// body as a script.
+				payloads = append(payloads, body)
+			}
+			if interpreter == "" {
+				continue
+			}
+			if reason := sandboxSecretsScriptReason(body); reason != "" {
+				heredocReason = interpreter + " heredoc " + reason
 				return
 			}
-			fedToSource := sandboxSecretsHeredocFedToSource(script, i)
-			fedToShell := sandboxSecretsHeredocFedToShell(script, i)
-			interpreter := sandboxSecretsHeredocInterpreter(script, i)
-			for _, h := range script.Segments[i].Heredocs {
-				body := h.Body
-				if fedToSource {
-					// source /dev/stdin <<EOF runs the body as a script, so it is judged as shell text.
-					payloads = append(payloads, body)
-				}
-				if strings.TrimSpace(body) != "" && fedToShell {
-					// A redirection ahead of the shell hides it from the reader
-					// line's own stages: 2>/dev/null bash <<EOF still runs the
-					// body as a script.
-					payloads = append(payloads, body)
-				}
-				if interpreter == "" {
-					continue
-				}
-				if reason := sandboxSecretsScriptReason(body); reason != "" {
-					heredocReason = interpreter + " heredoc " + reason
-					return
-				}
-				payloads = append(payloads, sandboxSecretsShelledStrings(body)...)
-			}
-		})
-		if heredocReason != "" {
-			return heredocReason, false
+			payloads = append(payloads, sandboxSecretsShelledStrings(body)...)
 		}
+	})
+	if heredocReason != "" {
+		return heredocReason, false
 	}
-	substitutions := prWorkflowSubstitutions(command)
+	substitutions := sandboxSecretsSubstitutions(command)
 	payloads = append(payloads, substitutions...)
 	if shells {
 		// A shell reads a substitution's output as a script too: sh <(echo printenv).
@@ -465,9 +465,18 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			}
 		}
 	}
-	// A substitution's heredoc output runs as a command whether or not a shell reads it
-	// here: "$(cat <<'B' ... B)" runs the body it prints.
-	payloads = append(payloads, sandboxSecretsSubstitutionHeredocs(command)...)
+	// A substitution's heredoc output runs as a command when the line runs it: as
+	// the command word ("$(cat <<'B' ... B)" runs the body it prints) or through a
+	// shell that reads it. Elsewhere it is data, an assignment value or an argument,
+	// and text no parser reads is not a command the line runs, so it is not judged:
+	// x="$(cat <<'EOF' ... EOF)" with prose in the body is ordinary work
+	// (TestSandboxSecretsGuardAllowsOrdinaryWork). A readable output is judged either way.
+	for _, text := range sandboxSecretsSubstitutionHeredocs(command) {
+		if _, perr := shellparse.Parse(text); perr != nil && !shells && !substitutedCommand {
+			continue
+		}
+		payloads = append(payloads, text)
+	}
 	for _, payload := range payloads {
 		if depth >= maxPRWorkflowNestDepth {
 			tooDeep = true
@@ -480,6 +489,34 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		tooDeep = tooDeep || deep
 	}
 	return "", tooDeep
+}
+
+// sandboxSecretsSubstitutions returns the body of every command substitution the
+// shell expands in command, cut from the command as the shell reads it. The
+// spans are found in the text with heredoc bodies stripped, so a quote inside a
+// body moves no span, and each body is then cut from the command itself, so a
+// substitution that holds a heredoc keeps the heredoc's text. Cut from the
+// stripped text, the same substitution is "cat <<'EOF'" with no body, a fragment
+// no parser reads (prWorkflowSubstitutions); the walk refuses an unreadable
+// payload at every depth, so it must not be handed that fragment.
+func sandboxSecretsSubstitutions(command string) []string {
+	stripped, cuts := stripHeredocBodiesWithCuts(command)
+	var bodies []string
+	for _, span := range substitutionSpansIn(stripped, true) {
+		span = substitutionSpan{
+			open:      commandOffset(cuts, span.open),
+			bodyStart: commandOffset(cuts, span.bodyStart),
+			bodyEnd:   commandOffset(cuts, span.bodyEnd),
+		}
+		body := substitutionBody(command, span)
+		if prWorkflowSpanUnterminated(command, span) {
+			body = prWorkflowSplitBodyParen(body)
+		}
+		if strings.TrimSpace(body) != "" {
+			bodies = append(bodies, body)
+		}
+	}
+	return append(bodies, heredocBodySubstitutions(command)...)
 }
 
 // sandboxSecretsEachHeredoc calls fn for every segment that holds here-documents,
@@ -544,6 +581,27 @@ func sandboxSecretsSubstitutionHeredocs(command string) []string {
 // the command word. The shell applies it to the command all the same, so the
 // returned argv carries it after the command, where the callers already look
 // for a here-string, and the verdict is read on the command without it.
+// sandboxSecretsSubstitutedCommand reports whether a segment's command word is a
+// command substitution, so the line runs the substitution's output as a command.
+// The words before it are the ones sandboxSecretsSegment skips the same way:
+// assignments, a leading "!", and redirections with their targets.
+func sandboxSecretsSubstitutedCommand(segment []string) bool {
+	seg := trimShellKeywords(segment)
+	for len(seg) > 0 {
+		word := seg[0]
+		if isEnvAssignment(word) || word == "!" {
+			seg = seg[1:]
+			continue
+		}
+		if redirected, skip, _ := shellRedirection(word); redirected {
+			seg = seg[min(1+skip, len(seg)):]
+			continue
+		}
+		return word == prWorkflowSubstitutionWord
+	}
+	return false
+}
+
 func sandboxSecretsSegment(segment []string, tainted, expanded map[string]bool) (reason string, payloads, argv []string) {
 	if sandboxSecretsHereStringRefsSecret(segment) {
 		return "a here-string expands a secret variable", nil, nil

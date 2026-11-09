@@ -4596,3 +4596,28 @@ func TestDeclarationHeredocReaderNeedsAnUnquotedOperator(t *testing.T) {
 		t.Errorf("evaluateDangerousCommand(%q) reason = %q, want filesystem destruction: a quoted << starts no body", command, reason)
 	}
 }
+
+// gt-a7jzr5: the two shapes the parser reads differently from the shell
+// still judge the nested payloads on their line. The shell runs the payload
+// live, so the line is refused whichever reader the token checks follow.
+func TestDisagreeingShapesJudgeNestedPayloads(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+	}{
+		{"an ANSI-C continuation with bash -c", "echo $\\\n'x'; bash -c 'git reset --hard'"},
+		{"an ANSI-C continuation with eval", "echo $\\\n'x'; eval 'git reset --hard'"},
+		{"an ANSI-C continuation with a substitution", "echo $\\\n'x'; echo $(git reset --hard)"},
+		{"a declaration heredoc with bash -c", "let y=1<<x; bash -c 'git reset --hard'\nx"},
+		{"a declaration heredoc with eval", "let y=1<<x; eval 'git reset --hard'\nx"},
+		{"a declaration heredoc with a substitution", "let y=1<<x; echo $(git reset --hard)\nx"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if !strings.Contains(reason, "Hard reset") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want Hard reset: the payload runs live on that line", tt.command, reason)
+			}
+		})
+	}
+}
