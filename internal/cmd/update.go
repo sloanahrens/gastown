@@ -18,6 +18,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -66,6 +67,86 @@ type updateRequest struct {
 	// Images is the values file the install takes the daemon image from by
 	// digest; empty runs the install as it always has.
 	Images string
+	// PodContext and PodNamespace name the Deployment of a daemon that runs as a
+	// pod. They are given together or not at all.
+	PodContext   string
+	PodNamespace string
+}
+
+// podContextUsage and podNamespaceUsage are the pod flags' help, shared by
+// gt update and gt update rollback.
+const (
+	podContextUsage   = "The kubectl context of a daemon that runs as a pod; with --pod-namespace, the daemon's build and image pair move through that Deployment"
+	podNamespaceUsage = "The namespace of a daemon that runs as a pod; given with --pod-context"
+)
+
+// podDaemonTarget names the Deployment a daemon that runs as a pod is in. A run
+// that names one moves that Deployment's pair and reads the daemon's build from
+// its pod, in place of the container daemon and the daemon state file.
+type podDaemonTarget struct {
+	Context   string
+	Namespace string
+	// Deployment is the daemon's Deployment, which the render names k8sdaemon.Name.
+	Deployment string
+}
+
+// podDaemonFromFlags turns the pod flags into the target a run names, or nil
+// when neither is given. The flags are given together: one without the other,
+// or a value that is blank or that kubectl would refuse, is refused here, before
+// the update lock is taken or any step runs.
+func podDaemonFromFlags(kubeContext, namespace string) (*podDaemonTarget, error) {
+	if kubeContext == "" && namespace == "" {
+		return nil, nil
+	}
+	if kubeContext == "" || namespace == "" {
+		return nil, errors.New("--pod-context and --pod-namespace must be given together")
+	}
+	target := podDaemonTarget{
+		Context:    strings.TrimSpace(kubeContext),
+		Namespace:  strings.TrimSpace(namespace),
+		Deployment: k8sdaemon.Name,
+	}
+	if err := checkPodContext(target.Context); err != nil {
+		return nil, fmt.Errorf("--pod-context: %w", err)
+	}
+	if err := checkPodNamespace(target.Namespace); err != nil {
+		return nil, fmt.Errorf("--pod-namespace: %w", err)
+	}
+	return &target, nil
+}
+
+// podProbeBound bounds one kubectl exec the pod probe makes. It is far under the
+// restart wait, so a hung exec is one failed poll inside the wait, not a hang past it.
+const podProbeBound = time.Minute
+
+// podVerifyProbes is the run's probes with the daemon's build read from the pod.
+// Every other probe is the one the run already had.
+type podVerifyProbes struct {
+	update.VerifyProbes
+	target podDaemonTarget
+	run    update.RunFunc
+}
+
+// DaemonVersion is the build the pod's daemon runs, read through kubectl exec
+// under podProbeBound.
+func (p podVerifyProbes) DaemonVersion(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, podProbeBound)
+	defer cancel()
+	return podDaemonCommit(ctx, p.run, p.target.Context, p.target.Namespace, p.target.Deployment)
+}
+
+// podDaemonDeps moves the run's daemon probe to the pod. Without a target the
+// deps are returned as they are, so a run without the flags reads the state file
+// as it always has.
+func podDaemonDeps(seams updateSeams, deps update.Deps, pod *podDaemonTarget) (update.Deps, error) {
+	if pod == nil {
+		return deps, nil
+	}
+	if seams.PodRun == nil {
+		return update.Deps{}, errors.New("no pod command runner is wired")
+	}
+	deps.Verify = podVerifyProbes{VerifyProbes: deps.Verify, target: *pod, run: seams.PodRun}
+	return deps, nil
 }
 
 // updateSelectableSteps names the steps --skip and --only accept, in the order
@@ -93,6 +174,10 @@ type updateSeams struct {
 	ImageSwap func(townRoot string) (update.ImageSwap, error)
 	// Notifier raises the escalation for a daemon that could not be restored.
 	Notifier func(townRoot string) notify.Notifier
+	// PodRun runs kubectl for a daemon that runs as a pod: the pair's patch and
+	// rollout, and the daemon's build read from the pod. A run given the pod
+	// flags uses it in place of ImageSwap and the state-file probe.
+	PodRun update.RunFunc
 }
 
 // productionUpdateSeams wires the real town, effects and orchestrator.
@@ -103,6 +188,7 @@ func productionUpdateSeams() updateSeams {
 		Run:          update.Run,
 		Images:       productionUpdateImagesSeams(),
 		ImageSwap:    realImageSwap,
+		PodRun:       realRunFunc(),
 		Notifier: func(townRoot string) notify.Notifier {
 			return &notify.CLI{Dir: townRoot}
 		},
@@ -142,6 +228,10 @@ before is recorded first; a daemon that does not come back on the new pair is
 restored to it, and a restore that fails escalates. gt update rollback puts that
 recorded pair back.
 
+--pod-context and --pod-namespace, given together, name the Deployment of a
+daemon that runs as a pod: the pair moves that Deployment, and the daemon's
+build is read from its pod rather than the state file.
+
 Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 5 when another run holds the lock, 130 when interrupted.`,
 		Args:         cobra.NoArgs,
@@ -157,6 +247,8 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 	c.Flags().BoolVar(&req.JSON, "json", false, "Print the final state as JSON instead of the text report")
 	c.Flags().BoolVar(&req.FromDaemon, "from-daemon", false, "Record the run's source as daemon instead of manual")
 	c.Flags().StringVar(&req.Images, "images", "", "Install the daemon image by digest from this values file (gt update images writes it)")
+	c.Flags().StringVar(&req.PodContext, "pod-context", "", podContextUsage)
+	c.Flags().StringVar(&req.PodNamespace, "pod-namespace", "", podNamespaceUsage)
 	// The status reader shares the parent's town lookup, so both commands read
 	// the same town root, and it reads the wall clock for a heartbeat's age.
 	c.AddCommand(newUpdateStatusCmd(updateStatusSeams{FindTownRoot: seams.FindTownRoot, Now: time.Now}))
@@ -179,6 +271,10 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err != nil {
 		return err
 	}
+	pod, err := podDaemonFromFlags(req.PodContext, req.PodNamespace)
+	if err != nil {
+		return err
+	}
 
 	townRoot, err := seams.FindTownRoot()
 	if err != nil {
@@ -188,8 +284,12 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err != nil {
 		return fmt.Errorf("preparing the update: %w", err)
 	}
+	deps, err = podDaemonDeps(seams, deps, pod)
+	if err != nil {
+		return fmt.Errorf("preparing the pod daemon: %w", err)
+	}
 	if req.Images != "" {
-		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images)
+		deps.Installer, err = digestInstaller(seams, townRoot, deps, req.Images, pod)
 		if err != nil {
 			return fmt.Errorf("preparing the daemon image install: %w", err)
 		}
@@ -503,11 +603,11 @@ func realUpdateInstaller(townRoot string) (update.Installer, error) {
 // at path: the host install the cycle always runs, then the daemon moved to the
 // pair the file names. The file is read here as well, so a file that does not
 // parse stops the run before any polecat is drained.
-func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path string) (update.Installer, error) {
+func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path string, pod *podDaemonTarget) (update.Installer, error) {
 	if _, err := imagevalues.Load(path); err != nil {
 		return nil, fmt.Errorf("the --images values file: %w", err)
 	}
-	images, err := imageDeps(seams, townRoot, deps)
+	images, err := imageDeps(seams, townRoot, deps, pod)
 	if err != nil {
 		return nil, err
 	}
@@ -521,12 +621,14 @@ func digestInstaller(seams updateSeams, townRoot string, deps update.Deps, path 
 // imageDeps is the set of effects a digest install and a rollback both reach:
 // the record, the daemon swap, the daemon's version probe and clock, the restart
 // bound, and the escalation sink. Both callers build it here, so the two cannot
-// wire the same swap differently. A seam that is not wired is refused.
-func imageDeps(seams updateSeams, townRoot string, deps update.Deps) (update.ImageDeps, error) {
-	if seams.ImageSwap == nil || seams.Notifier == nil {
+// wire the same swap differently. A seam that is not wired is refused. deps
+// carries the probe the run wired, so the pod's probe is set on deps before this
+// is called.
+func imageDeps(seams updateSeams, townRoot string, deps update.Deps, pod *podDaemonTarget) (update.ImageDeps, error) {
+	if (pod == nil && seams.ImageSwap == nil) || seams.Notifier == nil {
 		return update.ImageDeps{}, errors.New("no daemon image swap or escalation sink is wired")
 	}
-	swap, err := seams.ImageSwap(townRoot)
+	swap, err := daemonImageSwap(seams, townRoot, pod)
 	if err != nil {
 		return update.ImageDeps{}, err
 	}
@@ -539,6 +641,23 @@ func imageDeps(seams updateSeams, townRoot string, deps update.Deps) (update.Ima
 		Wait:   updateRestartWait,
 		Poll:   updateRestartPoll,
 		Notify: seams.Notifier(townRoot),
+	}, nil
+}
+
+// daemonImageSwap is the swap a digest install and a rollback put a pair in
+// force through: the pod's Deployment when the run names one, else the container
+// daemon the town's seam builds. A run with a pod target has already had its
+// kubectl runner checked by podDaemonDeps.
+func daemonImageSwap(seams updateSeams, townRoot string, pod *podDaemonTarget) (update.ImageSwap, error) {
+	if pod == nil {
+		return seams.ImageSwap(townRoot)
+	}
+	return podDaemonSwap{
+		Context:        pod.Context,
+		Namespace:      pod.Namespace,
+		Deployment:     pod.Deployment,
+		Run:            seams.PodRun,
+		RolloutTimeout: updateRestartWait,
 	}, nil
 }
 
