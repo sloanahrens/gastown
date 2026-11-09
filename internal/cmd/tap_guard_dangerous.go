@@ -609,7 +609,8 @@ func dangerousScriptSubs(script shellparse.Script) []shellparse.Script {
 
 // dangerousSubstitutionLoop is the done/slot loop rule read from the
 // substitutions the parser reads in script: the bodies of "$(...)", backquotes,
-// and process substitutions, including those in an unquoted heredoc body. The
+// and process substitutions, including those in an unquoted heredoc body, and
+// those in a quoted heredoc body read as a script (quotedHeredocBodyLoop). The
 // flattener records what a shell runs, and a for or while block's keywords open
 // and close around their segments instead of being segments of their own ("for
 // i in 1 2; do gt done; done" flattens to one "gt done" segment). The rule is a
@@ -635,7 +636,43 @@ func dangerousSubstitutionLoop(script shellparse.Script, depth int) (reason, alt
 			return r, alt
 		}
 	}
+	for _, seg := range script.Segments {
+		for _, h := range seg.Heredocs {
+			if !h.Quoted {
+				continue
+			}
+			if r, alt := quotedHeredocBodyLoop(h.Body, depth); r != "" {
+				return r, alt
+			}
+		}
+	}
 	return "", ""
+}
+
+// quotedHeredocBodyLoop is the substitution half of the done/slot loop rule for
+// the body of a quoted here-document. The shell keeps that body literal, so the
+// parsed script holds no substitution in it, yet the body is what a file it is
+// written to later runs, and what a shell it is fed to runs. The body is read as
+// a script of its own and judged as a command line is, so a loop in one of its
+// substitutions is refused whether or not a file is written (gt-bogfce). A body
+// the parser cannot read that may hold a substitution is refused too, since no
+// substitution in it can be ruled out.
+func quotedHeredocBodyLoop(body string, depth int) (reason, alternative string) {
+	script, err := shellparse.Parse(body)
+	if err != nil {
+		if mayHoldSubstitution(body) {
+			return quotedHeredocBodyUnreadableReason(err), ""
+		}
+		return "", ""
+	}
+	return dangerousSubstitutionLoop(script, depth+1)
+}
+
+// quotedHeredocBodyUnreadableReason is the refusal for a quoted here-document
+// body the parser cannot read and that may hold a substitution, naming the
+// construct.
+func quotedHeredocBodyUnreadableReason(err error) string {
+	return "a quoted here-document body cannot be read (" + dangerousConstruct(err) + ") and may hold a substitution, so it cannot be checked for a retry loop"
 }
 
 // dangerousUnreadable is the refusal for a command shellparse could not read,

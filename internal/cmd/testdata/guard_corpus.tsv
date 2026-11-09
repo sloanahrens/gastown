@@ -452,3 +452,7 @@ test_scope	polecat	"go test ./internal/shellparse/... -run TestParseSubst"	allow
 dangerous	polecat	"cat <<EOF\n$(git reset --hard HEAD~4)\nEOF"	refuse	Hard reset discards	gt-bogfce	203f6fca684d5fb3e1a124311a98a08255930b58bf1d17ee911643e01a0bc368
 container_suite	polecat	"echo ok ; echo fine"	allow		gt-bogfce	203f6fca684d5fb3e1a124311a98a08255930b58bf1d17ee911643e01a0bc368
 test_scope	polecat	"go test ./internal/shellparse/... -run TestParseQuotedHeredoc"	allow		gt-bogfce	203f6fca684d5fb3e1a124311a98a08255930b58bf1d17ee911643e01a0bc368
+# --- gt-bogfce: the done/slot loop rule reads the substitutions in a quoted heredoc body too (quotedHeredocBodyLoop), which moves the freeze stamp; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"cat > /tmp/x <<'EOF'\n$(for i in 1; do gt done; done)\nEOF"	refuse	Never poll the slot	gt-bogfce	92afa9c1f3ebacbccb40fd7bc94feac4d043fbeabaea18c33a528bb365cef4e0
+container_suite	polecat	"echo ok || echo more"	allow		gt-bogfce	92afa9c1f3ebacbccb40fd7bc94feac4d043fbeabaea18c33a528bb365cef4e0
+test_scope	polecat	"go test ./internal/config/... -run TestLoad"	allow		gt-bogfce	92afa9c1f3ebacbccb40fd7bc94feac4d043fbeabaea18c33a528bb365cef4e0

@@ -535,6 +535,9 @@ func TestDoneSlotLoopReadsParsedSubstitutions(t *testing.T) {
 		{"loop in a substitution behind a declaration heredoc", "let y=1<<x\n$(for i in 1; do gt done; done)\nfoo", true},
 		{"single gt done in a substitution", "echo $(gt done)", false},
 		{"loop in a single-quoted span is literal", "echo '$(for i in 1; do gt done; done)'", false},
+		{"loop in a substitution of a quoted heredoc body", "cat <<'EOF'\n$(for i in 1; do gt done; done)\nEOF", true},
+		{"quoted heredoc body that cannot be read and may hold a substitution", "cat <<'EOF'\n$(for i in 1; do gt done; done\nEOF", true},
+		{"direct loop in a quoted heredoc body is data", "cat <<'EOF'\nfor i in 1; do gt done; done\nEOF", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
