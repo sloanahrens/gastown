@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
 
@@ -80,7 +81,9 @@ file's sha256 is compared with the bytes sent; a difference leaves the claim
 partial. Last, the cut-over record (the time the copy ended, the claim and the
 seconds the copy took) is written into the claim alone, in the shape
 "gt town state migrate copy --cutover" writes. A record the claim does not hold
-is removed from it, and the claim is partial. Nothing is written to the Mac tree.
+is removed from it, and the claim is partial. After the record, the empty dispatch
+hold file (seat-refill.hold) is written into the claim, so the pod starts held; the
+overseer removes it after the day-one checks. Nothing is written to the Mac tree.
 
 A failure after the stream starts exits non-zero and says the claim is partial
 and not to be used.
@@ -414,6 +417,9 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 		if err := seedCutoverRecord(env, copied); err != nil {
 			return err
 		}
+		if err := seedHoldStep(env); err != nil {
+			return err
+		}
 	}
 
 	// The success line comes last, after the profile, and says whether the profile
@@ -582,12 +588,14 @@ type seedCutover struct {
 	absent []string
 }
 
-// seedCutoverFile is one settings file the live copy writes into the claim. sum is
-// the sha256 of data, the bytes the step meant to write.
+// seedCutoverFile is one file the live copy writes into the claim. sum is the
+// sha256 of data, the bytes the step meant to write, and mode the permission bits
+// the claim's copy carries.
 type seedCutoverFile struct {
 	rel  string
 	data []byte
 	sum  string
+	mode int64
 }
 
 // seedCutoverPrepare reads what the live copy's settings step writes, before the
@@ -638,7 +646,15 @@ func seedCutoverPrepare(town string, read func(string) ([]byte, error)) (seedCut
 // newSeedCutoverFile is the file the step sends for rel, with the sha256 of data.
 func newSeedCutoverFile(rel string, data []byte) seedCutoverFile {
 	sum := sha256.Sum256(data)
-	return seedCutoverFile{rel: rel, data: data, sum: hex.EncodeToString(sum[:])}
+	return seedCutoverFile{rel: rel, data: data, sum: hex.EncodeToString(sum[:]), mode: 0o644}
+}
+
+// newSeedHoldFile is the empty dispatch hold file the live copy places at rel, mode
+// 0600.
+func newSeedHoldFile(rel string) seedCutoverFile {
+	f := newSeedCutoverFile(rel, nil)
+	f.mode = 0o600
+	return f
 }
 
 // seedHostSettings reads the host file at rel under town. A file that is not there
@@ -698,30 +714,53 @@ func seedCutoverRecord(env townStateSeedEnv, copied time.Duration) error {
 	}
 	data, err := encode(cutoverRecord{CutoverAt: at.UTC().Format(time.RFC3339), Volume: seedClaim, CopySeconds: copied.Seconds()})
 	if err != nil {
-		return seedCutoverUnwind(env, fmt.Errorf("encoding the cut-over record: %w", err))
+		return seedFileUnwind(env, cutoverRecordRel, "cut-over record", fmt.Errorf("encoding the cut-over record: %w", err))
 	}
 	file := newSeedCutoverFile(cutoverRecordRel, data)
 	if err := seedCutoverStream(env, []seedCutoverFile{file}); err != nil {
-		return seedCutoverUnwind(env, fmt.Errorf("stream the cut-over record: %w", err))
+		return seedFileUnwind(env, cutoverRecordRel, "cut-over record", fmt.Errorf("stream the cut-over record: %w", err))
 	}
 	mismatches, err := seedCutoverMismatches(env.engine, []seedCutoverFile{file})
 	if err != nil {
-		return seedCutoverUnwind(env, fmt.Errorf("verifying the cut-over record: %w", err))
+		return seedFileUnwind(env, cutoverRecordRel, "cut-over record", fmt.Errorf("verifying the cut-over record: %w", err))
 	}
 	if problems := printVerifyProblems(env.out, townstate.VerifyResult{Mismatches: mismatches}, nil); problems > 0 {
-		return seedCutoverUnwind(env, fmt.Errorf("the claim does not hold the cut-over record (%d problems)", problems))
+		return seedFileUnwind(env, cutoverRecordRel, "cut-over record", fmt.Errorf("the claim does not hold the cut-over record (%d problems)", problems))
 	}
 	fmt.Fprintf(env.out, "cut-over record written into claim %s\n", seedClaim)
 	return nil
 }
 
-// seedCutoverUnwind removes the cut-over record from the claim and returns cause
-// as the claim's partial-copy refusal. A removal that fails is joined in, never
-// dropped: the claim may still carry the record.
-func seedCutoverUnwind(env townStateSeedEnv, cause error) error {
+// seedHoldStep places the dispatch hold file in the claim as the live copy's last
+// step, so the pod starts held and its dispatcher does not sling before the day-one
+// checks. The file is empty, and its name is dispatch.HoldFileName, the name
+// dispatch.HoldFilePath joins to the town root. The overseer removes it after the
+// day-one checks. A hold that does not reach the claim, or a claim that does not
+// hold it afterwards, is removed from the claim, and the claim is partial.
+func seedHoldStep(env townStateSeedEnv) error {
+	rel := dispatch.HoldFileName
+	file := newSeedHoldFile(rel)
+	if err := seedCutoverStream(env, []seedCutoverFile{file}); err != nil {
+		return seedFileUnwind(env, rel, "dispatch hold", fmt.Errorf("stream the dispatch hold: %w", err))
+	}
+	mismatches, err := seedCutoverMismatches(env.engine, []seedCutoverFile{file})
+	if err != nil {
+		return seedFileUnwind(env, rel, "dispatch hold", fmt.Errorf("verifying the dispatch hold: %w", err))
+	}
+	if problems := printVerifyProblems(env.out, townstate.VerifyResult{Mismatches: mismatches}, nil); problems > 0 {
+		return seedFileUnwind(env, rel, "dispatch hold", fmt.Errorf("the claim does not hold the dispatch hold (%d problems)", problems))
+	}
+	fmt.Fprintf(env.out, "dispatch hold %s placed in claim %s; the overseer removes it after the day-one checks\n", rel, seedClaim)
+	return nil
+}
+
+// seedFileUnwind removes the file at rel from the claim and returns cause as the
+// claim's partial-copy refusal. what names the file in the removal's error. A
+// removal that fails is joined in, never dropped: the claim may still carry the file.
+func seedFileUnwind(env townStateSeedEnv, rel, what string, cause error) error {
 	err := fmt.Errorf("the claim %s is partial and not to be used: %w", seedClaim, cause)
-	if rmErr := townstate.RemoveVolumeFile(env.engine, seedClaim, cutoverRecordRel); rmErr != nil {
-		return errors.Join(err, fmt.Errorf("removing the cut-over record from claim %s: %w", seedClaim, rmErr))
+	if rmErr := townstate.RemoveVolumeFile(env.engine, seedClaim, rel); rmErr != nil {
+		return errors.Join(err, fmt.Errorf("removing the %s from claim %s: %w", what, seedClaim, rmErr))
 	}
 	return err
 }
@@ -756,7 +795,7 @@ func writeCutoverTar(w io.Writer, files []seedCutoverFile) error {
 				return err
 			}
 		}
-		if err := tw.WriteHeader(&tar.Header{Name: f.rel, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(f.data))}); err != nil {
+		if err := tw.WriteHeader(&tar.Header{Name: f.rel, Typeflag: tar.TypeReg, Mode: f.mode, Size: int64(len(f.data))}); err != nil {
 			return err
 		}
 		if _, err := tw.Write(f.data); err != nil {
