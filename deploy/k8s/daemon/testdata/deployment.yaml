@@ -1,3 +1,4 @@
+# no /Users/sloan/.claude/.beads mount: this pod has no claude beads database, so patrols.wisp_reaper.extra_beads_roots must not name it, or its ~/.claude parent, for this pod
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -118,6 +119,10 @@ spec:
             - name: daemon-forgejo-landing-env
               mountPath: /run/secrets/forge-token
               subPath: forgejo-landing.env
+              readOnly: true
+            - name: town-state
+              mountPath: /run/gt/xdg/om/config.json
+              subPath: .runtime/container/om-config.json
               readOnly: true
           readinessProbe:
             exec:

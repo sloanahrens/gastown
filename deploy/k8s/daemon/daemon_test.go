@@ -764,6 +764,16 @@ func TestMountsMatchTheTownStateManifest(t *testing.T) {
 			t.Errorf("the mount path %q is not absolute; the pod mounts it at the path the container uses", p)
 		}
 	}
+
+	// Each mount the live compose daemon carries beyond the town bind and the
+	// Secrets has a row in the render or a named reason it has none.
+	// TestEveryComposeMountHasAPodAnswer holds the table's own rows.
+	rendered := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec.Containers[0].VolumeMounts
+	for _, m := range composeMounts {
+		if finding := podAnswerFinding(m, rendered); finding != "" {
+			t.Error(finding)
+		}
+	}
 }
 
 // TestMountCheckReportsDrift drives every branch of checkMount against a split
@@ -1425,6 +1435,200 @@ func TestPodKubeconfigIsNotATownRootFile(t *testing.T) {
 	// is not a check over nothing.
 	if got := townRootKubeconfigs([]EnvVar{{Name: kubeconfigEnv, Value: v.Env[kubeconfigEnv]}}); len(got) != 2 {
 		t.Errorf("townRootKubeconfigs reported %q for the live value, want both files named", got)
+	}
+}
+
+// composeMount is one mount the live compose daemon carries beyond the town bind
+// and the Secrets: its container path and the pod's answer. A row with a Volume
+// answers the mount with a read-only mount of that volume's SubPath at Path, as
+// the compose token mounts are; a row with no Volume names the Reason the pod
+// carries no mount for it.
+type composeMount struct {
+	Name    string
+	Path    string
+	Volume  string
+	SubPath string
+	Reason  string
+}
+
+// composeMounts is the pod's answer to each mount the compose daemon adds
+// (internal/templates/daemon_compose.go liveTokenMounts and
+// daemon_compose_client.go liveClientMounts). TestEveryComposeMountHasAPodAnswer
+// holds each row.
+var composeMounts = []composeMount{
+	{
+		Name: "openshell config", Path: manifestdata.LiveOpenShellConfigPath,
+		Reason: "the host's ~/.config/openshell is a gateway tree (gateway.toml and per-gateway client files) outside the town root; no manifest Secret enumerates its files and the town-state volume does not carry it, so the pod mounts no openshell config (a decision for the overseer, gt-nr548n)",
+	},
+	{
+		Name: "om config", Path: manifestdata.LiveOMConfigPath,
+		Volume: TownStateClaim, SubPath: OMConfigSubPath,
+	},
+	{
+		Name: "claude beads", Path: ClaudeBeadsRoot,
+		Reason: "dropped for the pod: the host's ~/.claude/.beads is outside the town root and no claim carries a copy, so the Deployment's head comment says the reaper root is dropped (noClaudeBeadsComment)",
+	},
+}
+
+// podAnswerFinding returns what is wrong with the pod's answer to m against the
+// rendered daemon mounts, or "" when the answer holds. An answered mount must be
+// a read-only mount of its volume's subPath at the compose path; an unanswered
+// one must name a reason. The finding names the mount.
+func podAnswerFinding(m composeMount, rendered []VolumeMount) string {
+	if m.Volume == "" {
+		if m.Reason == "" {
+			return fmt.Sprintf("the compose %s mount at %s has no pod row and no reason the pod has none", m.Name, m.Path)
+		}
+		return ""
+	}
+	got := volumeMountAt(rendered, m.Path)
+	switch {
+	case got == nil:
+		return fmt.Sprintf("the compose %s mount at %s has no pod row: the pod mounts nothing there", m.Name, m.Path)
+	case got.Name != m.Volume || got.SubPath != m.SubPath:
+		return fmt.Sprintf("the pod's mount at %s carries volume %q subPath %q, want the compose %s mount's volume %q subPath %q", m.Path, got.Name, got.SubPath, m.Name, m.Volume, m.SubPath)
+	case !got.ReadOnly:
+		return fmt.Sprintf("the pod's mount for the compose %s mount at %s is writable; the compose mount is read-only", m.Name, m.Path)
+	}
+	return ""
+}
+
+// claudeBeadsFinding returns what is wrong with the claude beads root on the
+// rendered Deployment, or "" when the pod mounts it or the Deployment's head
+// comment says the reaper root is dropped. The finding names the root.
+func claudeBeadsFinding(d Deployment) string {
+	if volumeMountAt(d.Spec.Template.Spec.Containers[0].VolumeMounts, ClaudeBeadsRoot) != nil {
+		return ""
+	}
+	if strings.Contains(d.headComment, ClaudeBeadsRoot) {
+		return ""
+	}
+	return fmt.Sprintf("the pod neither mounts %s nor says the reaper root is dropped: the Deployment's head comment names no %s", ClaudeBeadsRoot, ClaudeBeadsRoot)
+}
+
+// TestPodDoesNotReadStaleKubeconfigs holds the kubeconfig decision on the whole
+// render, not only on the environment value: no env value, argument, mount path
+// or subPath names the .runtime container or sbx-k8s directory, the two
+// kubeconfig files the Mac writes with its own API addresses. The one reference
+// the pod makes into .runtime/container is the om config's subPath, which carries
+// no credential, so the test names it and holds it to that one path.
+func TestPodDoesNotReadStaleKubeconfigs(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec
+	staleDirs := []string{".runtime/container", ".runtime/sbx-k8s"}
+	var refs []string
+	scan := func(where, s string) {
+		for _, dir := range staleDirs {
+			if strings.Contains(s, dir) {
+				refs = append(refs, where+" "+s)
+			}
+		}
+	}
+	for _, c := range pod.Containers {
+		for _, e := range c.Env {
+			if e.Name == kubeconfigEnv {
+				t.Errorf("the pod sets %s, which names the Mac's kubeconfigs", kubeconfigEnv)
+			}
+			scan("env "+e.Name, e.Value)
+		}
+		for _, a := range c.Args {
+			scan("argument", a)
+		}
+		for _, m := range c.VolumeMounts {
+			scan("mount at", m.MountPath)
+			if m.SubPath != "" {
+				scan("subPath of "+m.MountPath, m.SubPath)
+			}
+		}
+	}
+	// The path is spelled out, not read from OMConfigSubPath: a constant the test
+	// compares against cannot catch that constant moving into a stale directory.
+	want := "subPath of " + manifestdata.LiveOMConfigPath + " .runtime/container/om-config.json"
+	if len(refs) != 1 || refs[0] != want {
+		t.Errorf("the render names %q under the stale directories, want only %q", refs, want)
+	}
+}
+
+// TestEveryComposeMountHasAPodAnswer holds each mount the live compose daemon
+// carries beyond the town bind and the Secrets to a pod answer: a render row at
+// the compose path, or a named reason the pod has none. An entry with neither is
+// refused, naming the mount.
+func TestEveryComposeMountHasAPodAnswer(t *testing.T) {
+	t.Parallel()
+	rendered := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec.Containers[0].VolumeMounts
+
+	names := make(map[string]bool, len(composeMounts))
+	for _, m := range composeMounts {
+		names[m.Name] = true
+		if finding := podAnswerFinding(m, rendered); finding != "" {
+			t.Error(finding)
+		}
+	}
+	for _, want := range []string{"openshell config", "om config", "claude beads"} {
+		if !names[want] {
+			t.Errorf("composeMounts has no %q entry, though the compose daemon mounts it", want)
+		}
+	}
+
+	neither := composeMount{Name: "an unanswered mount", Path: "/run/gt/xdg/unanswered"}
+	if got := podAnswerFinding(neither, rendered); !strings.Contains(got, "an unanswered mount") {
+		t.Errorf("podAnswerFinding on an entry with neither a row nor a reason = %q, want a finding naming it", got)
+	}
+	absent := composeMount{Name: "an om config the pod does not mount", Path: manifestdata.LiveOMConfigPath, Volume: TownStateClaim, SubPath: OMConfigSubPath}
+	if got := podAnswerFinding(absent, nil); !strings.Contains(got, "an om config the pod does not mount") {
+		t.Errorf("podAnswerFinding on a row the render does not carry = %q, want a finding naming it", got)
+	}
+}
+
+// TestOMConfigComesFromThePrivateTownStateRow holds the om config's source: the
+// file sits under the .runtime/container row, which is daemon-owned and Private,
+// so the town-state volume carries it and the copy keeps its 0600 mode. A
+// non-Private row would lose the mode and the pod would mount a world-readable
+// config.
+func TestOMConfigComesFromThePrivateTownStateRow(t *testing.T) {
+	t.Parallel()
+	manifest := (*manifestdata.Manifest)(townstate.Default())
+	var covering *manifestdata.Entry
+	for i := range manifest.Entries {
+		e := &manifest.Entries[i]
+		if OMConfigSubPath == e.Path || strings.HasPrefix(OMConfigSubPath, e.Path+"/") {
+			covering = e
+		}
+	}
+	if covering == nil {
+		t.Fatalf("no manifest row covers %s, so the town-state volume does not carry the om config", OMConfigSubPath)
+	}
+	if covering.Path != ".runtime/container" || covering.Owner != manifestdata.OwnerDaemon || !covering.Private {
+		t.Errorf("the row covering %s is %+v, want the daemon-owned Private .runtime/container row", OMConfigSubPath, *covering)
+	}
+}
+
+// TestClaudeBeadsDirIsMountedOrDropped holds the claude beads decision: the pod
+// either mounts the host's ~/.claude/.beads at its compose path, or the render
+// says on the Deployment that the reaper root is dropped. A render that does
+// neither is refused, naming the root.
+func TestClaudeBeadsDirIsMountedOrDropped(t *testing.T) {
+	t.Parallel()
+	dropped := mustBuild(t, goldenValues(t)).Deployment
+	if finding := claudeBeadsFinding(dropped); finding != "" {
+		t.Error(finding)
+	}
+	if !bytes.Contains(document(t, dropped), []byte(ClaudeBeadsRoot)) {
+		t.Errorf("the rendered Deployment does not name %s, so the reaper root is dropped without a word", ClaudeBeadsRoot)
+	}
+
+	mounted := mustBuild(t, goldenValues(t)).Deployment
+	mounted.headComment = ""
+	c := &mounted.Spec.Template.Spec.Containers[0]
+	c.VolumeMounts = append(c.VolumeMounts, VolumeMount{Name: "claude-beads", MountPath: ClaudeBeadsRoot})
+	if finding := claudeBeadsFinding(mounted); finding != "" {
+		t.Errorf("claudeBeadsFinding on a render that mounts %s = %q, want none", ClaudeBeadsRoot, finding)
+	}
+
+	neither := mustBuild(t, goldenValues(t)).Deployment
+	neither.headComment = ""
+	if finding := claudeBeadsFinding(neither); !strings.Contains(finding, ClaudeBeadsRoot) {
+		t.Errorf("claudeBeadsFinding on a render with neither a mount nor the comment = %q, want a finding naming %s", finding, ClaudeBeadsRoot)
 	}
 }
 

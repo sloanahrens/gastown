@@ -295,10 +295,22 @@ const (
 	// the dolt-backup claim is mounted there, so GT_DOLT_BACKUP_ROOT keeps the
 	// compose value.
 	DoltBackupPath = "/Users/sloan/gt-backups/dolt"
+	// OMConfigSubPath is the om config's path inside the town-state volume, which
+	// the pod mounts at manifestdata.LiveOMConfigPath. It is no Secret: the config
+	// carries no credential, and the row it sits in is private.
+	OMConfigSubPath = ".runtime/container/om-config.json"
+	// ClaudeBeadsRoot is the host's ~/.claude/.beads, which the compose daemon binds
+	// read-write. The pod mounts nothing there, and the Deployment's head comment
+	// says the reaper root is dropped (noClaudeBeadsComment).
+	ClaudeBeadsRoot = "/Users/sloan/.claude/.beads"
 	// noHostAliasComment is the Deployment's head comment when the pod carries no
 	// gateway alias, so a reader of the manifest knows the Dolt name does not
 	// resolve in this pod rather than assuming it does.
 	noHostAliasComment = "no hostAliases: this pod has no gateway alias, so " + DoltHostName + " does not resolve in it"
+	// noClaudeBeadsComment is the Deployment's head comment for the claude beads
+	// root the pod does not mount: patrols.wisp_reaper.extra_beads_roots must not
+	// name it for this pod, or the reaper reads a path the pod does not have.
+	noClaudeBeadsComment = "no " + ClaudeBeadsRoot + " mount: this pod has no claude beads database, so patrols.wisp_reaper.extra_beads_roots must not name it, or its ~/.claude parent, for this pod"
 )
 
 // noProxyComment is the Deployment's head comment when Values.ProxyImage is
@@ -705,9 +717,13 @@ func deployment(v Values, namespace string) Deployment {
 			},
 		},
 	}
+	// The claude beads root is never mounted, so the Deployment always says so.
+	var heads []string
 	if v.ProxyImage == "" {
-		d.headComment = noProxyComment
+		heads = append(heads, noProxyComment)
 	}
+	heads = append(heads, noClaudeBeadsComment)
+	d.headComment = strings.Join(heads, "\n")
 	return d
 }
 
@@ -907,6 +923,17 @@ func mounts(v Values) []VolumeMount {
 			Name:      secretVolumeName(v.forgeTokenFile()),
 			MountPath: manifestdata.LiveForgeTokenPath,
 			SubPath:   v.forgeTokenFile(),
+			ReadOnly:  true,
+		})
+	}
+	if v.OMToken {
+		// The om config names the token's container path, so it is mounted beside
+		// the token. It is read from the town-state volume, whose .runtime/container
+		// row is Private and keeps the file's mode (gt-nr548n).
+		m = append(m, VolumeMount{
+			Name:      TownStateClaim,
+			MountPath: manifestdata.LiveOMConfigPath,
+			SubPath:   OMConfigSubPath,
 			ReadOnly:  true,
 		})
 	}
