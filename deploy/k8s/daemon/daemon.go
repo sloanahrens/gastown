@@ -442,11 +442,12 @@ type Values struct {
 	// Image is the daemon reference read from deploy/values/images.yaml
 	// (gt-gg9hv.63): repo@sha256:<64 lowercase hex>. A tag is refused.
 	Image string
-	// Env is the container's environment, the same map the compose writer
-	// renders (ComposeSpec.Env in internal/templates/daemon_compose.go). Each
-	// name is decided by podEnvDecisions: kept, set by the pod itself, or
-	// dropped with a reason (composeOnlyEnv). A name with no decision is
-	// refused, and so is a value that looks like a secret.
+	// Env is the container's environment: the kept entries of the map the compose
+	// writer renders (ComposeSpec.Env in internal/templates/daemon_compose.go).
+	// Each name is decided by podEnvDecisions: kept, set by the pod itself, or
+	// dropped with a reason (composeOnlyEnv). A name the pod sets or drops is
+	// refused, a name with no decision is refused, and so is a value that looks
+	// like a secret.
 	Env map[string]string
 	// OMToken mounts the OMTokenFile Secret and passes --om-token-file at
 	// manifestdata.LiveOMTokenPath, as a live compose spec with OMTokenFile does.
@@ -1098,10 +1099,11 @@ func validForgeHost(host string) error {
 }
 
 // validateEnv refuses an environment entry the render cannot write: a key that
-// is not a variable name, a key the pod sets itself, a name with no decision in
-// podEnvDecisions, a value that looks like a secret, or a Dolt name whose value
-// is not the one the pod's alias or claim gives it. The refusal names the key
-// and never the value.
+// is not a variable name, a key the pod sets or drops itself, a name with no
+// decision in podEnvDecisions, a value that looks like a secret, or a Dolt name
+// whose value is not the one the pod's alias or claim gives it. A dropped name
+// is refused rather than discarded, so a caller's value never vanishes without
+// a reason. The refusal names the key and never the value.
 func (v Values) validateEnv() error {
 	for _, name := range sortedKeys(v.Env) {
 		decision, decided := podEnvDecisions[name]
@@ -1110,6 +1112,8 @@ func (v Values) validateEnv() error {
 			return fmt.Errorf("Values.Env[%q]: want an environment variable name", name)
 		case decision.value != "":
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, so a caller's value would be dropped", name)
+		case decision.drop != "":
+			return fmt.Errorf("Values.Env[%q]: the pod drops this variable, so a caller's value would be dropped silently; remove the entry", name)
 		case !decided:
 			return fmt.Errorf("Values.Env[%q]: the pod has no decision for this name; record it in podEnvDecisions as kept, set by the pod, or dropped with a reason", name)
 		case looksLikeSecret(name, v.Env[name]):
