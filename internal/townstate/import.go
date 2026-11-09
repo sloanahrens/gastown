@@ -2,6 +2,7 @@ package townstate
 
 import (
 	"archive/tar"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -18,7 +19,9 @@ import (
 type ImportOptions struct {
 	// MergeNewer makes the import a replay onto a populated tree: a regular
 	// file is written only when the archive's copy is newer than an existing
-	// regular file, and nothing else is replaced. It is the rollback's mode.
+	// regular file, and nothing else is replaced. It is the rollback's mode, and
+	// the only one that accepts the rollback's settings files. The town's own
+	// settings file keeps the Mac file's daemon.supervisor.
 	MergeNewer bool
 	// ops is the filesystem seam a test replaces; the zero value is the host.
 	ops townOps
@@ -123,6 +126,9 @@ func Import(r io.Reader, root string, m *Manifest, opts ImportOptions) (ImportSu
 		}
 		tree := destTree{root: townRoot, entries: daemonEntries(m, sortedRigs(known))}
 		e, ok := Lookup(tree.entries, name)
+		if !ok && opts.MergeNewer {
+			e, ok = rollbackSettingsEntry(name, sortedRigs(known))
+		}
 		if !ok {
 			return s, fmt.Errorf("the archive entry %q is not under a daemon-owned path of the manifest; an import writes nothing outside them", name)
 		}
@@ -219,7 +225,7 @@ func importEntry(ops townOps, tr io.Reader, hdr *tar.Header, name string, e Entr
 	case tar.TypeDir:
 		return importDir(ops, dest, name, fs.FileMode(hdr.Mode).Perm(), hdr.ModTime, s, dirs)
 	case tar.TypeReg, tar.TypeRegA:
-		return importFile(ops, tr, hdr, dest, name, e.Private, opts, s)
+		return importFile(ops, tr, hdr, dest, name, e.Private, name == townSettingsRel, opts, s)
 	case tar.TypeSymlink:
 		return importSymlink(ops, hdr, dest, name, tree, s)
 	default:
@@ -282,9 +288,11 @@ func finishDirs(ops townOps, dirs []dirTime) error {
 }
 
 // importFile writes a regular file, or keeps an existing newer one in merge
-// mode. A failure after the file is created removes it, so a retry never finds
-// a partial copy that reads as newer than the archive.
-func importFile(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, private bool, opts ImportOptions, s *ImportSummary) error {
+// mode. A town settings file is first rewritten to keep the Mac file's
+// daemon.supervisor, and a refusal there writes nothing. A failure after the file
+// is created removes it, so a retry never finds a partial copy that reads as
+// newer than the archive.
+func importFile(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, private, townSettings bool, opts ImportOptions, s *ImportSummary) error {
 	info, err := ops.lstat(dest)
 	switch {
 	case err == nil && !info.Mode().IsRegular():
@@ -297,6 +305,14 @@ func importFile(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, p
 	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("reading %q in the destination: %w", name, err)
 	}
+	src := tr
+	if townSettings {
+		out, err := keepMacSupervisor(ops, dest, name, tr)
+		if err != nil {
+			return err
+		}
+		src = bytes.NewReader(out)
+	}
 	if err := ops.mkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("creating the directory for %q: %w", name, err)
 	}
@@ -305,7 +321,7 @@ func importFile(ops townOps, tr io.Reader, hdr *tar.Header, dest, name string, p
 	if err != nil {
 		return fmt.Errorf("creating %q: %w", name, err)
 	}
-	n, copyErr := io.Copy(f, tr)
+	n, copyErr := io.Copy(f, src)
 	closeErr := f.Close()
 	switch {
 	case copyErr != nil:

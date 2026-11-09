@@ -68,7 +68,9 @@ The walk never follows a symlink. The rig clones' .git directories are left
 out and re-fetched from Forgejo after the import. Dolt data has its own backup
 path and never crosses this stream. With --rollback only the rows tagged
 rollback: true are written: the one-way state a rollback replays onto the Mac
-tree, which with --since is the bounded replay.
+tree, which with --since is the bounded replay. --rollback also writes the
+town's settings/config.json and each registered rig's <rig>/settings/config.json,
+since the pod owns those after the cut-over; --since bounds them too.
 
 Examples:
   gt town state export --town ~/gt > town-state.tar
@@ -85,7 +87,8 @@ var townStateImportCmd = &cobra.Command{
 restore it into the town root --town names. The root must hold none of the
 daemon-owned paths (the seed's empty volume). With --merge-newer the command is
 the rollback's replay onto a populated tree: a regular file is written only
-when the archive's copy is newer.
+when the archive's copy is newer. The town's settings/config.json keeps the Mac
+file's own daemon.supervisor, and has none when the Mac file has none.
 
 The archive is untrusted. A name that is absolute, contains "..", or resolves
 through a symlink is refused, and so is any entry that is not a regular file, a
@@ -110,7 +113,7 @@ func init() {
 	townStateExportCmd.Flags().String("town", "", "the town root to export (required)")
 	townStateExportCmd.Flags().String("since", "", "keep only regular files modified after this RFC 3339 time (optional)")
 	townStateExportCmd.Flags().Bool("allow-no-rigs", false, "export a town whose registry names no rig (the rig-scoped rows are then missing; the summary says so)")
-	townStateExportCmd.Flags().Bool("rollback", false, "write only the rows tagged rollback: true (the one-way state a rollback replays)")
+	townStateExportCmd.Flags().Bool("rollback", false, "write only the rows tagged rollback: true (the one-way state a rollback replays), plus the settings/config.json files")
 	_ = townStateExportCmd.MarkFlagRequired("town")
 	townStateImportCmd.Flags().String("town", "", "the town root to import into (required)")
 	townStateImportCmd.Flags().Bool("merge-newer", false, "write a regular file only when the archive's copy is newer (the rollback's replay)")
@@ -216,7 +219,7 @@ func runTownStateExportIn(env townStateExportEnv) error {
 	if env.rollback {
 		m = &townstate.Manifest{Entries: m.Rollback()}
 	}
-	s, err := townstate.Export(env.out, env.town, m, townstate.ExportOptions{Since: since, AllowNoRigs: env.allowNoRigs})
+	s, err := townstate.Export(env.out, env.town, m, townstate.ExportOptions{Since: since, AllowNoRigs: env.allowNoRigs, RollbackSettings: env.rollback})
 	fmt.Fprintln(env.summary, s.String())
 	if err != nil {
 		return fmt.Errorf("exporting the town state: %w", err)

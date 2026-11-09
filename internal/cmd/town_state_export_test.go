@@ -186,3 +186,42 @@ func TestTownStateExportRollbackSelectsTheOneWaySet(t *testing.T) {
 		}
 	}
 }
+
+// TestRollbackSettingsFlagReachesExport drives what `gt town state export` runs
+// with and without --rollback: only the rollback's archive carries the town's
+// settings file and the registered rig's.
+func TestRollbackSettingsFlagReachesExport(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTownStateFileContent(t, town, "mayor/town.json", `{"registry":{"version":1,"rigs":{"gastown":{}}}}`)
+	writeTownStateFileContent(t, town, "settings/config.json", "{\"name\":\"town\"}\n")
+	writeTownStateFileContent(t, town, "gastown/settings/config.json", "{\"name\":\"gastown\"}\n")
+
+	for _, tc := range []struct {
+		name     string
+		rollback bool
+		want     bool
+	}{
+		{name: "the rollback carries the settings files", rollback: true, want: true},
+		{name: "a normal export leaves them out", rollback: false, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var stream, summary bytes.Buffer
+			if err := runTownStateExportIn(townStateExportEnv{
+				town:     town,
+				rollback: tc.rollback,
+				out:      &stream,
+				summary:  &summary,
+			}); err != nil {
+				t.Fatalf("runTownStateExportIn: %v", err)
+			}
+			names := townStateArchiveNames(t, stream.Bytes())
+			for _, name := range []string{"settings/config.json", "gastown/settings/config.json"} {
+				if containsName(names, name) != tc.want {
+					t.Errorf("archive carries %q = %v, want %v: %v", name, !tc.want, tc.want, names)
+				}
+			}
+		})
+	}
+}
