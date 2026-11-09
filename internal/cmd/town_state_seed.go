@@ -664,14 +664,20 @@ func seedCutoverStream(env townStateSeedEnv, files []seedCutoverFile) error {
 }
 
 // writeCutoverTar writes the prepared files to w as one tar stream. Each file's
-// parent directories go first, as directory entries.
+// parent directories go first, as directory entries, shallowest first.
 func writeCutoverTar(w io.Writer, files []seedCutoverFile) error {
 	tw := tar.NewWriter(w)
 	made := map[string]bool{}
 	for _, f := range files {
+		// The walk up the tree finds the deepest missing parent first; the entries are
+		// written in reverse so each directory precedes the one under it.
+		var missing []string
 		for d := path.Dir(f.rel); d != "." && !made[d]; d = path.Dir(d) {
 			made[d] = true
-			if err := tw.WriteHeader(&tar.Header{Name: d + "/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+			missing = append(missing, d)
+		}
+		for i := len(missing) - 1; i >= 0; i-- {
+			if err := tw.WriteHeader(&tar.Header{Name: missing[i] + "/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
 				return err
 			}
 		}
