@@ -22,14 +22,16 @@ import (
 // owner DetectSelf named for this process, takeover is the GT_DAEMON_TAKEOVER
 // flag, probe reads whether a recorded owner is running and now is the
 // caller's clock. logPreexisted is whether daemon.log existed before this
-// process wrote to it (see Daemon.logPreexisted). A nil error lets the start go
-// on; any other error is the refusal, and the caller writes nothing.
+// process wrote to it (see Daemon.logPreexisted). tookOver, when set, is told
+// of a recorded container owner the takeover passed unread (see
+// TakeoverInput.TookOver). A nil error lets the start go on; any other error is
+// the refusal, and the caller writes nothing.
 //
 // The guard only reads: state.json, the daemon's lock, and the town's daemon
 // settings for the container name. A state.json that cannot be read or does
 // not parse refuses here, without CheckTakeover, because a file that does not
 // parse names no owner to judge.
-func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time, logPreexisted bool) error {
+func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time, logPreexisted bool, tookOver func(Owner)) error {
 	state, err := readStartupState(townRoot)
 	if err != nil {
 		return err
@@ -46,6 +48,7 @@ func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, 
 		Self:       self,
 		Takeover:   takeover,
 		Probe:      probe,
+		TookOver:   tookOver,
 	})
 }
 
@@ -62,7 +65,7 @@ func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, no
 		probe = startupOwnerProbeForTown(townRoot, templates.RunDockerInspect, os.Hostname, templates.SupervisorJobState, func() time.Time { return now })
 	}
 	_, err := os.Stat(DefaultConfig(townRoot).LogFile)
-	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist))
+	return guardStartup(townRoot, self, takeover, probe, now, !errors.Is(err, fs.ErrNotExist), nil)
 }
 
 // readStartupState reads state.json for the guard: nil when the file is

@@ -1641,7 +1641,10 @@ func (d *Daemon) Run() (err error) {
 		probe = startupOwnerProbeForTown(d.config.TownRoot, templates.RunDockerInspect, d.hostnameOrOS, templates.SupervisorJobState, d.clk().Now)
 	}
 	takeover := d.env(agentconfig.TakeoverEnv) == "1"
-	if err := guardStartup(d.config.TownRoot, self, takeover, probe, d.clk().Now(), d.logPreexisted); err != nil {
+	tookOver := func(owner Owner) {
+		d.logger.Printf("Daemon takeover: %s could not be read, so the start goes on over it under %s=1", ownerName(owner), agentconfig.TakeoverEnv)
+	}
+	if err := guardStartup(d.config.TownRoot, self, takeover, probe, d.clk().Now(), d.logPreexisted, tookOver); err != nil {
 		return err
 	}
 
