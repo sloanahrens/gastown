@@ -1,0 +1,704 @@
+package cmd
+
+import (
+	"bytes"
+	"errors"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/imagevalues"
+)
+
+// clusterRenderSecretsManifest is the secrets manifest the render reads from the
+// repo. Its files are the config entries the live pod mounts.
+const clusterRenderSecretsManifest = `files:
+  - name: forgejo-landing.env
+    consumer: "the landing bot's token"
+    mode: "0600"
+    required: true
+
+  - name: promote-gastown.key
+    consumer: "forgejo.promote_key_file in gastown's settings"
+    mode: "0600"
+    required: false
+
+  - name: forgejo-viewer.env
+    consumer: "the read-only Forgejo token"
+    mode: "0600"
+    required: false
+`
+
+const clusterRenderDaemonDigest = "registry.example.test/gastown/daemon@sha256:" +
+	"0000000000000000000000000000000000000000000000000000000000000001"
+
+// clusterRenderFixture writes a repo directory with a values file and a secrets
+// manifest, and returns the flags of a live render of it. The config directory
+// is absent, so a render that opened a secret file would fail.
+func clusterRenderFixture(t *testing.T) clusterRenderFlags {
+	t.Helper()
+	dir := t.TempDir()
+	if err := imagevalues.Write(imagevalues.PathIn(dir), imagevalues.Values{
+		Daemon:  clusterRenderDaemonDigest,
+		Polecat: clusterRenderDaemonDigest,
+		Commit:  strings.Repeat("a", 40),
+	}); err != nil {
+		t.Fatalf("writing the values file: %v", err)
+	}
+	writeClusterRenderManifest(t, dir, clusterRenderSecretsManifest)
+	return clusterRenderFlags{
+		dir:                dir,
+		out:                filepath.Join(t.TempDir(), "out"),
+		cpu:                "2",
+		memory:             "4Gi",
+		confirmStopped:     true,
+		configDir:          filepath.Join(t.TempDir(), "absent-config"),
+		openShellConfigDir: filepath.Join(t.TempDir(), "absent-openshell"),
+	}
+}
+
+// writeClusterRenderManifest writes the secrets manifest under the repo dir.
+func writeClusterRenderManifest(t *testing.T, dir, text string) {
+	t.Helper()
+	manifest := filepath.Join(dir, secretsManifestRelPath)
+	if err := os.MkdirAll(filepath.Dir(manifest), 0o755); err != nil {
+		t.Fatalf("making the manifest directory: %v", err)
+	}
+	if err := os.WriteFile(manifest, []byte(text), 0o600); err != nil {
+		t.Fatalf("writing the secrets manifest: %v", err)
+	}
+}
+
+// clusterRenderTestDeps stands in the host: a fixed town, an empty daemon.env, a
+// fixed home, and the real build and write steps against the temporary repo.
+func clusterRenderTestDeps(out io.Writer) clusterRenderDeps {
+	return clusterRenderDeps{
+		findTown:     func() (string, error) { return "/fake/town", nil },
+		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
+		readFile:     os.ReadFile,
+		getenv:       func(string) string { return "" },
+		userHome:     func() (string, error) { return "/fake/home", nil },
+		build:        k8sdaemon.Build,
+		render:       k8sdaemon.Render,
+		buildHelper:  k8sdaemon.BuildHelper,
+		encode:       k8sdaemon.YAML,
+		mkdirAll:     func(path string) error { return os.MkdirAll(path, 0o755) },
+		writeFile:    func(path string, data []byte) error { return os.WriteFile(path, data, 0o644) },
+		out:          out,
+	}
+}
+
+// dirNames returns the names of the entries of dir in name order; a missing
+// directory has none.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("listing %s: %v", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	return names
+}
+
+// outState describes what is at dir: absent, not a directory, or the names it
+// holds. A refused render must leave it as it was.
+func outState(dir string) string {
+	info, err := os.Stat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "absent"
+	case err != nil:
+		return "unreadable: " + err.Error()
+	case !info.IsDir():
+		return "a file"
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	return "directory holding " + strings.Join(names, ",")
+}
+
+// renderedKind is the kind a rendered file declares.
+func renderedKind(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var head struct {
+		Kind string `yaml:"kind"`
+	}
+	if err := yaml.Unmarshal(data, &head); err != nil {
+		t.Fatalf("%s does not parse back: %v", path, err)
+	}
+	return head.Kind
+}
+
+// renderedKinds is the kind of each file in out, in file-name order.
+func renderedKinds(t *testing.T, out string) []string {
+	t.Helper()
+	var kinds []string
+	for _, name := range dirNames(t, out) {
+		kinds = append(kinds, renderedKind(t, filepath.Join(out, name)))
+	}
+	return kinds
+}
+
+// deploymentSecretVolumes is the Secret each volume of the rendered Deployment
+// mounts, in the Deployment's order.
+func deploymentSecretVolumes(t *testing.T, out string) []string {
+	t.Helper()
+	for _, name := range dirNames(t, out) {
+		if !strings.HasSuffix(name, "-deployment-daemon.yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Fatalf("reading the Deployment: %v", err)
+		}
+		var dep struct {
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Volumes []struct {
+							Secret *struct {
+								SecretName string `yaml:"secretName"`
+							} `yaml:"secret"`
+						} `yaml:"volumes"`
+					} `yaml:"spec"`
+				} `yaml:"template"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal(data, &dep); err != nil {
+			t.Fatalf("the Deployment does not parse back: %v", err)
+		}
+		var names []string
+		for _, v := range dep.Spec.Template.Spec.Volumes {
+			if v.Secret != nil {
+				names = append(names, v.Secret.SecretName)
+			}
+		}
+		return names
+	}
+	t.Fatalf("no Deployment file in %s", out)
+	return nil
+}
+
+// createLines returns the kubectl lines the render printed.
+func createLines(output string) []string {
+	var lines []string
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "kubectl ") {
+			lines = append(lines, strings.TrimSpace(line))
+		}
+	}
+	return lines
+}
+
+func TestTownClusterRenderWritesTheObjectsInApplyOrder(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	var out bytes.Buffer
+	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	want := []string{
+		"Namespace",
+		"PersistentVolumeClaim", "PersistentVolumeClaim", "PersistentVolumeClaim",
+		"ServiceAccount",
+		"Service",
+		"RoleBinding", "RoleBinding", "ClusterRoleBinding",
+		"Deployment",
+	}
+	if got := renderedKinds(t, f.out); !slices.Equal(got, want) {
+		t.Fatalf("apply order = %v, want %v", got, want)
+	}
+}
+
+func TestTownClusterRenderPrintsOneCreateLinePerMountedSecret(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	var out bytes.Buffer
+	// The config and openshell directories are absent: a render that opened a
+	// secret file would fail here, so success proves none is opened.
+	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	mounted := deploymentSecretVolumes(t, f.out)
+	lines := createLines(out.String())
+	if len(lines) != len(mounted) {
+		t.Fatalf("printed %d create lines for %d mounted Secrets:\n%s", len(lines), len(mounted), out.String())
+	}
+	for _, name := range mounted {
+		var matches []string
+		for _, line := range lines {
+			if strings.HasPrefix(line, "kubectl -n gt create secret generic "+name+" ") {
+				matches = append(matches, line)
+			}
+		}
+		if len(matches) != 1 {
+			t.Fatalf("Secret %s has %d create lines, want exactly 1", name, len(matches))
+		}
+	}
+	// A config entry names its source file in the config directory.
+	want := "--from-file=forgejo-landing.env=" + f.configDir + "/forgejo-landing.env"
+	if !slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, want) }) {
+		t.Fatalf("no create line carries %q:\n%s", want, out.String())
+	}
+	// The openshell tree names each of its files under the openshell directory.
+	want = "--from-file=gateways__k8s__mtls__tls.key=" + f.openShellConfigDir + "/gateways/k8s/mtls/tls.key"
+	if !slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, want) }) {
+		t.Fatalf("no create line carries %q:\n%s", want, out.String())
+	}
+	if !strings.Contains(out.String(), clusterRenderDaemonDigest) {
+		t.Fatalf("the output does not name the daemon digest used:\n%s", out.String())
+	}
+}
+
+func TestTownClusterRenderRefusesWithoutADigestOrAShare(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(t *testing.T, f *clusterRenderFlags)
+		cause  string
+	}{
+		{
+			name: "missing values file",
+			mutate: func(t *testing.T, f *clusterRenderFlags) {
+				if err := os.Remove(imagevalues.PathIn(f.dir)); err != nil {
+					t.Fatalf("removing the values file: %v", err)
+				}
+			},
+			cause: "holds no image pair",
+		},
+		{
+			name:   "missing cpu",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.cpu = "" },
+			cause:  "--cpu is required",
+		},
+		{
+			name:   "missing memory",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.memory = "" },
+			cause:  "--memory is required",
+		},
+		{
+			name: "non-empty out",
+			mutate: func(t *testing.T, f *clusterRenderFlags) {
+				if err := os.MkdirAll(f.out, 0o755); err != nil {
+					t.Fatalf("making --out: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(f.out, "keep.txt"), []byte("x"), 0o600); err != nil {
+					t.Fatalf("writing the existing file: %v", err)
+				}
+			},
+			cause: "is not empty",
+		},
+		{
+			name:   "live render without confirmation",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.confirmStopped = false },
+			cause:  "--confirm-container-stopped",
+		},
+		{
+			name:   "missing dir",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.dir = "" },
+			cause:  "--dir is required",
+		},
+		{
+			name:   "missing out",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.out = "" },
+			cause:  "--out is required",
+		},
+		{
+			name:   "relative config dir",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.configDir = "relative/gt" },
+			cause:  `--config-dir "relative/gt" must be an absolute path`,
+		},
+		{
+			name:   "relative openshell config dir",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.openShellConfigDir = "relative/openshell" },
+			cause:  `--openshell-config-dir "relative/openshell" must be an absolute path`,
+		},
+		{
+			name: "out is a file",
+			mutate: func(t *testing.T, f *clusterRenderFlags) {
+				if err := os.WriteFile(f.out, []byte("x"), 0o600); err != nil {
+					t.Fatalf("writing --out as a file: %v", err)
+				}
+			},
+			cause: "cannot be read as a directory",
+		},
+		{
+			name: "values file does not parse",
+			mutate: func(t *testing.T, f *clusterRenderFlags) {
+				if err := os.WriteFile(imagevalues.PathIn(f.dir), []byte("daemon: [\n"), 0o600); err != nil {
+					t.Fatalf("writing a corrupt values file: %v", err)
+				}
+			},
+			cause: "reading the image values",
+		},
+		{
+			name: "rehearsal in the live namespace",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) {
+				f.rehearsal = true
+				f.confirmStopped = false
+			},
+			cause: "cannot render the manifests",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			tt.mutate(t, &f)
+			before := outState(f.out)
+			var out bytes.Buffer
+			err := runClusterRender(clusterRenderTestDeps(&out), f)
+			if err == nil {
+				t.Fatalf("render succeeded, want a refusal naming %q", tt.cause)
+			}
+			if !strings.Contains(err.Error(), tt.cause) {
+				t.Fatalf("refusal = %q, want it to name %q", err, tt.cause)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused render printed %q", out.String())
+			}
+			if after := outState(f.out); after != before {
+				t.Fatalf("a refused render changed --out: before %q, after %q", before, after)
+			}
+		})
+	}
+}
+
+// TestTownClusterRenderRefusesWhenAnInputOrStepFails drives each failure the
+// render reads from the host or writes through: a town, environment or manifest
+// it cannot read, and a build, encode or write step that fails. Each refusal
+// names the step and writes nothing.
+func TestTownClusterRenderRefusesWhenAnInputOrStepFails(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		with           bool // --with-helper
+		noConfigDirs   bool // leave --config-dir and --openshell-config-dir to the defaults
+		noOpenShellDir bool // leave --openshell-config-dir to its default
+		mutate         func(t *testing.T, dir string, d *clusterRenderDeps)
+		cause          string
+	}{
+		{
+			name:   "no town",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) { d.findTown = failing("no town") },
+			cause:  "not in a Gas Town workspace",
+		},
+		{
+			name: "no daemon env",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.containerEnv = func(string) (map[string]string, error) { return nil, errors.New("unreadable") }
+			},
+			cause: "reading the town's daemon.env",
+		},
+		{
+			name: "no secrets manifest",
+			mutate: func(_ *testing.T, dir string, d *clusterRenderDeps) {
+				d.readFile = func(path string) ([]byte, error) {
+					if path == filepath.Join(dir, secretsManifestRelPath) {
+						return nil, errors.New("unreadable")
+					}
+					return os.ReadFile(path)
+				}
+			},
+			cause: "reading the secrets manifest",
+		},
+		{
+			name: "secrets manifest refused",
+			mutate: func(t *testing.T, dir string, _ *clusterRenderDeps) {
+				writeClusterRenderManifest(t, dir, "files:\n  - name: forgejo-landing.env\n    consumer: \"x\"\n    mode: \"0644\"\n    required: true\n")
+			},
+			cause: "is refused",
+		},
+		{
+			name:         "no HOME for the default config directory",
+			noConfigDirs: true,
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.userHome = func() (string, error) { return "", errors.New("no HOME") }
+			},
+			cause: "HOME cannot be found, so the default ~/.config/gt",
+		},
+		{
+			name:           "no HOME for the openshell default",
+			noOpenShellDir: true,
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.userHome = func() (string, error) { return "", errors.New("no HOME") }
+			},
+			cause: "HOME cannot be found, so the default ~/.config/openshell",
+		},
+		{
+			name: "build refuses",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.build = func(k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+					return k8sdaemon.Manifests{}, errors.New("refused")
+				}
+			},
+			cause: "cannot render the manifests",
+		},
+		{
+			name: "render fails",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.render = func(io.Writer, k8sdaemon.Manifests) error { return errors.New("encode") }
+			},
+			cause: "cannot encode the manifests",
+		},
+		{
+			name: "render emits a kind with no place in the apply order",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.render = func(w io.Writer, _ k8sdaemon.Manifests) error {
+					_, err := io.WriteString(w, "kind: Bogus\nmetadata:\n  name: x\n")
+					return err
+				}
+			},
+			cause: "no place in the apply order",
+		},
+		{
+			name: "the Deployment mounts a Secret the render did not write",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+					m, err := k8sdaemon.Build(v)
+					m.Secrets = nil
+					return m, err
+				}
+			},
+			cause: "did not write",
+		},
+		{
+			name: "seed helper refuses",
+			with: true,
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.buildHelper = func(k8sdaemon.Values) (k8sdaemon.Helper, error) { return k8sdaemon.Helper{}, errors.New("refused") }
+			},
+			cause: "cannot render the seed helper",
+		},
+		{
+			name: "seed helper fails to encode",
+			with: true,
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.encode = func(io.Writer, any) error { return errors.New("encode") }
+			},
+			cause: "cannot encode the seed helper",
+		},
+		{
+			name: "out cannot be made",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.mkdirAll = func(string) error { return errors.New("read-only") }
+			},
+			cause: "cannot create --out",
+		},
+		{
+			name: "a file cannot be written",
+			mutate: func(_ *testing.T, _ string, d *clusterRenderDeps) {
+				d.writeFile = func(string, []byte) error { return errors.New("disk full") }
+			},
+			cause: "cannot write",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			f.withHelper = tt.with
+			if tt.noConfigDirs {
+				f.configDir, f.openShellConfigDir = "", ""
+			}
+			if tt.noOpenShellDir {
+				f.openShellConfigDir = ""
+			}
+			var out bytes.Buffer
+			d := clusterRenderTestDeps(&out)
+			tt.mutate(t, f.dir, &d)
+			err := runClusterRender(d, f)
+			if err == nil {
+				t.Fatalf("render succeeded, want a refusal naming %q", tt.cause)
+			}
+			if !strings.Contains(err.Error(), tt.cause) {
+				t.Fatalf("refusal = %q, want it to name %q", err, tt.cause)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused render printed %q", out.String())
+			}
+			// Every refusal before the write step leaves --out absent. A refused write
+			// may leave --out made, but never with a file in it.
+			if tt.name == "a file cannot be written" {
+				if names := dirNames(t, f.out); len(names) != 0 {
+					t.Fatalf("a refused write left %v in --out", names)
+				}
+				return
+			}
+			if _, statErr := os.Stat(f.out); statErr == nil {
+				t.Fatalf("a refused render created --out %s", f.out)
+			}
+		})
+	}
+}
+
+// failing is a step that always fails with the given message.
+func failing(msg string) func() (string, error) {
+	return func() (string, error) { return "", errors.New(msg) }
+}
+
+func TestTownClusterRenderRehearsalOmitsPromoteAndSweep(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.rehearsal = true
+	f.confirmStopped = false
+	f.namespace = "gt-rehearsal"
+	var out bytes.Buffer
+	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for _, kind := range renderedKinds(t, f.out) {
+		if kind == "RoleBinding" || kind == "ClusterRoleBinding" {
+			t.Fatalf("a rehearsal wrote a sweep binding of kind %s", kind)
+		}
+	}
+	mounted := deploymentSecretVolumes(t, f.out)
+	if !slices.Equal(mounted, []string{"daemon-forgejo-viewer.env"}) {
+		t.Fatalf("rehearsal mounts %v, want only the read-only viewer token", mounted)
+	}
+	for _, line := range createLines(out.String()) {
+		if strings.Contains(line, "promote") {
+			t.Fatalf("a rehearsal create line names the promote key: %s", line)
+		}
+	}
+}
+
+func TestTownClusterRenderWithHelperAppliesTheSeedBeforeTheDeployment(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.withHelper = true
+	var out bytes.Buffer
+	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	kinds := renderedKinds(t, f.out)
+	n := len(kinds)
+	if n < 2 || kinds[n-2] != "Pod" || kinds[n-1] != "Deployment" {
+		t.Fatalf("with --with-helper the last two objects are %v, want the seed Pod then the Deployment", kinds[max(0, n-2):])
+	}
+}
+
+// TestApplyObjectsRefusesWhatItCannotOrder holds the stream reader to a refusal
+// for each document it cannot read, name, rank or re-encode.
+func TestApplyObjectsRefusesWhatItCannotOrder(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		stream  string
+		marshal func(any) ([]byte, error)
+		cause   string
+	}{
+		{name: "stream is not YAML", stream: "kind: [\n", marshal: yaml.Marshal, cause: "reading the rendered manifests back"},
+		{name: "kind is not a string", stream: "kind: [a]\n", marshal: yaml.Marshal, cause: "reading a rendered document's kind"},
+		{name: "unknown kind", stream: "kind: Bogus\nmetadata:\n  name: x\n", marshal: yaml.Marshal, cause: "no place in the apply order"},
+		{
+			name:    "document does not re-encode",
+			stream:  "kind: Namespace\nmetadata:\n  name: gt\n",
+			marshal: func(any) ([]byte, error) { return nil, errors.New("encode") },
+			cause:   "encoding a rendered Namespace",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := applyObjects([]byte(tt.stream), tt.marshal)
+			if err == nil || !strings.Contains(err.Error(), tt.cause) {
+				t.Fatalf("applyObjects = %v, want a refusal naming %q", err, tt.cause)
+			}
+		})
+	}
+}
+
+// TestSecretCreateLinesRefusesAVolumeItCannotName holds the create-line printer
+// to a refusal for each mounted Secret it cannot name a source for.
+func TestSecretCreateLinesRefusesAVolumeItCannotName(t *testing.T) {
+	t.Parallel()
+	mounts := func(name string, items []k8sdaemon.KeyToPath) k8sdaemon.Manifests {
+		var m k8sdaemon.Manifests
+		m.Deployment.Spec.Template.Spec.Volumes = []k8sdaemon.Volume{{
+			Name:   "v",
+			Secret: &k8sdaemon.SecretVolumeSource{SecretName: name, Items: items},
+		}}
+		return m
+	}
+	t.Run("no Secret was written for the volume", func(t *testing.T) {
+		t.Parallel()
+		_, err := secretCreateLines(mounts("daemon-x", nil), "gt", "/cfg", "/ossl")
+		if err == nil || !strings.Contains(err.Error(), "did not write") {
+			t.Fatalf("secretCreateLines = %v, want a refusal naming the unwritten Secret", err)
+		}
+	})
+	t.Run("the openshell volume names no files", func(t *testing.T) {
+		t.Parallel()
+		m := mounts("daemon-openshell", nil)
+		m.Secrets = []k8sdaemon.Secret{{Metadata: k8sdaemon.ObjectMeta{
+			Name:        "daemon-openshell",
+			Annotations: map[string]string{k8sdaemon.SourceFileAnnotation: "openshell"},
+		}}}
+		_, err := secretCreateLines(m, "gt", "/cfg", "/ossl")
+		if err == nil || !strings.Contains(err.Error(), "names no files") {
+			t.Fatalf("secretCreateLines = %v, want a refusal naming the empty openshell volume", err)
+		}
+	})
+}
+
+// TestTownClusterRenderDefaultsTheConfigDirectories holds the defaults a render
+// takes when --config-dir and --openshell-config-dir are left out: the XDG config
+// home when it is set, else the home directory's .config, and no default at all
+// when there is no home to read.
+func TestTownClusterRenderDefaultsTheConfigDirectories(t *testing.T) {
+	t.Parallel()
+	noHome := func() (string, error) { return "", errors.New("no HOME") }
+	home := func() (string, error) { return "/home/op", nil }
+	tests := []struct {
+		name    string
+		env     map[string]string
+		home    func() (string, error)
+		want    string
+		wantErr bool
+	}{
+		{name: "XDG config home set", env: map[string]string{"XDG_CONFIG_HOME": "/xdg"}, home: home, want: "/xdg/gt"},
+		{name: "home directory's .config", env: map[string]string{}, home: home, want: "/home/op/.config/gt"},
+		{name: "no home to read", env: map[string]string{}, home: noHome, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := xdgConfigSubdir("gt", func(k string) string { return tt.env[k] }, tt.home)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("xdgConfigSubdir = %q, want a refusal naming the missing home", got)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("xdgConfigSubdir = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
