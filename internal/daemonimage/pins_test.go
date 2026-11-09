@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	pinBDCommit     = "ecf0fc58c789b6d5a158bcf4b485662bc15f296d"
-	pinOMCommit     = "218e13d1f6727a9b343239615c7b5f009c0ddd19"
-	pinHMCommit     = "e207fe9a913a7b3cddbdb631a04bcb81156f1fdf"
-	pinDevopsCommit = "09bcaa41d4720129c4c89779f924c7824fa77dcb"
+	pinBDCommit     = "44cb296bbe4180f31553cb61f753aa8bfb3f9321"
+	pinOMCommit     = "08ae32d0fa20bd6220d01b8171875123d318808c"
+	pinHMCommit     = "7f2647bd257e6cc86b0c1c9958f7a3f1e5438cfb"
+	pinDevopsCommit = "a87a19ab4fe7f3163d8e81997c91e56ddddf5815"
 )
 
 // testOwner is the Forgejo owner every fixture pin URL names, and testPinURL

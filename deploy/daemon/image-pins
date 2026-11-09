@@ -3,7 +3,7 @@
 # the rig's Forgejo remote, without a credential. The pin-drift guard refuses a
 # pin that is not an ancestor of the source's origin/main, more than 40 commits
 # behind it, or more than 7 days older than its tip.
-bd http://forgejo:3000/sloan/beads.git ecf0fc58c789b6d5a158bcf4b485662bc15f296d
-om http://forgejo:3000/sloan/organic-mechanic.git 218e13d1f6727a9b343239615c7b5f009c0ddd19
-hm http://forgejo:3000/sloan/history-man.git e207fe9a913a7b3cddbdb631a04bcb81156f1fdf
-devops http://forgejo:3000/sloan/devops.git 09bcaa41d4720129c4c89779f924c7824fa77dcb
+bd http://forgejo:3000/sloan/beads.git 44cb296bbe4180f31553cb61f753aa8bfb3f9321
+om http://forgejo:3000/sloan/organic-mechanic.git 08ae32d0fa20bd6220d01b8171875123d318808c
+hm http://forgejo:3000/sloan/history-man.git 7f2647bd257e6cc86b0c1c9958f7a3f1e5438cfb
+devops http://forgejo:3000/sloan/devops.git a87a19ab4fe7f3163d8e81997c91e56ddddf5815
