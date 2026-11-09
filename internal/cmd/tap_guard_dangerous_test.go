@@ -1597,6 +1597,13 @@ func TestEvaluateDangerousCommandUnquotedHeredocSubstitution(t *testing.T) {
 		{"double-quoted tag is literal", "cat > /tmp/x <<\"EOF\"\n$(git reset --hard origin/main)\nEOF", false},
 		{"single-quoted tag backtick is literal", "cat > /tmp/x <<'EOF'\n`git reset --hard origin/main`\nEOF", false},
 		{"double-quoted tag backtick is literal", "cat > /tmp/x <<\"EOF\"\n`git reset --hard origin/main`\nEOF", false},
+		// The done/slot loop rule reads the substitutions the parser reads, so a
+		// loop in a substitution of an unquoted body is refused, and the same
+		// text under a quoted tag is literal and allowed. The text scan this
+		// replaced refused the quoted form too; that is an intentional change
+		// (gt-bogfce).
+		{"unquoted tag loop in a substitution", "cat > /tmp/x <<EOF\n$(for i in 1; do gt done; done)\nEOF", true},
+		{"single-quoted tag loop in a substitution is literal", "cat > /tmp/x <<'EOF'\n$(for i in 1; do gt done; done)\nEOF", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
