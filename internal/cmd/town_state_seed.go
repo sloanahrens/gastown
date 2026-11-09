@@ -77,7 +77,10 @@ town's settings/config.json, with daemon.supervisor removed and every patrol
 left as the Mac has it, and each registered rig's <rig>/settings/config.json byte
 for byte, after the daemon-owned stream. The claim is listed afterwards and each
 file's sha256 is compared with the bytes sent; a difference leaves the claim
-partial.
+partial. Last, the cut-over record (the time the copy ended, the claim and the
+seconds the copy took) is written into the claim alone, in the shape
+"gt town state migrate copy --cutover" writes. A record the claim does not hold
+is removed from it, and the claim is partial. Nothing is written to the Mac tree.
 
 A failure after the stream starts exits non-zero and says the claim is partial
 and not to be used.
@@ -133,10 +136,7 @@ func (e podEngine) Run(volume string, argv []string, stdin io.Reader, stdout io.
 	}
 	args := []string{"exec", "-i", "-n", e.namespace, e.pod, "--"}
 	for _, a := range argv {
-		if a == townstate.VolumeMount {
-			a = e.town
-		}
-		args = append(args, a)
+		args = append(args, e.podPath(a))
 	}
 	timeout := e.timeout
 	if timeout == 0 {
@@ -151,6 +151,18 @@ func (e podEngine) Run(volume string, argv []string, stdin io.Reader, stdout io.
 		return fmt.Errorf("kubectl exec into pod %s exited: %w", e.pod, err)
 	}
 	return nil
+}
+
+// podPath is the argv entry the pod sees: the mount path, or a path under it, is
+// the town path the pod mounts the claim at. Any other entry passes unchanged.
+func (e podEngine) podPath(a string) string {
+	if a == townstate.VolumeMount {
+		return e.town
+	}
+	if strings.HasPrefix(a, townstate.VolumeMount+"/") {
+		return e.town + a[len(townstate.VolumeMount):]
+	}
+	return a
 }
 
 // HasVolume is not answered: the seed helper Pod mounts the claim, and the seed
@@ -194,7 +206,18 @@ type townStateSeedEnv struct {
 	patrolWritePath func(string) (string, error)
 	engine          townstate.Engine
 	probes          migrateProbes
-	out             io.Writer
+	// now is the command's clock: the cut-over record's time and its copy window.
+	// Nil means time.Now.
+	now func() time.Time
+	out io.Writer
+}
+
+// clock reads the session's clock, time.Now when none is set.
+func (env townStateSeedEnv) clock() time.Time {
+	if env.now == nil {
+		return time.Now()
+	}
+	return env.now()
 }
 
 func runTownStateSeed(cmd *cobra.Command, _ []string) error {
@@ -279,6 +302,7 @@ func townStateSeedEnvFromFlags(cmd *cobra.Command) (townStateSeedEnv, error) {
 		readHost:        os.ReadFile,
 		engine:          podEngine{namespace: f.namespace, pod: f.pod, claim: seedClaim, town: f.town, run: execKubectl},
 		probes:          productionMigrateProbes(),
+		now:             time.Now,
 		out:             cmd.OutOrStdout(),
 	}, nil
 }
@@ -359,6 +383,8 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 		m = townstate.Default()
 	}
 	opts := townstate.ExportOptions{Since: env.since, AllowNoRigs: env.allowNoRigs, Exclude: env.exclude}
+	// The copy window opens at the first read of the copy, as migrate copy's does.
+	start := env.clock()
 	sum, err := townstate.SeedVolume(env.engine, seedClaim, env.town, m, opts, townstate.ImportArgv, env.out)
 	if err != nil {
 		return fmt.Errorf("stream into claim %s: %w", seedClaim, err)
@@ -379,6 +405,9 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	// does, and its byte check runs before the success line.
 	if !env.rehearsal {
 		if err := seedCutoverStep(env, cutover); err != nil {
+			return err
+		}
+		if err := seedCutoverRecord(env, start); err != nil {
 			return err
 		}
 	}
@@ -649,6 +678,44 @@ func seedCutoverStep(env townStateSeedEnv, c seedCutover) error {
 	}
 	fmt.Fprintf(env.out, "settings %d files streamed into claim %s\n", len(c.files), seedClaim)
 	return nil
+}
+
+// seedCutoverRecord writes the cut-over record into the claim, after the daemon
+// verify and the settings verify have both passed. The record is one more file
+// through the settings stream, so the host tree is not written. Its time is the
+// end of the copy window, which runs from start, the copy's first read, to here.
+// A record that does not reach the claim, or a claim that does not hold it
+// afterwards, is removed from the claim.
+func seedCutoverRecord(env townStateSeedEnv, start time.Time) error {
+	end := env.clock()
+	data, err := encodeRecord(cutoverRecord{CutoverAt: end.UTC().Format(time.RFC3339), Volume: seedClaim, CopySeconds: end.Sub(start).Seconds()})
+	if err != nil {
+		return fmt.Errorf("encoding the cut-over record: %w", err)
+	}
+	file := newSeedCutoverFile(cutoverRecordRel, data)
+	if err := seedCutoverStream(env, []seedCutoverFile{file}); err != nil {
+		return seedCutoverUnwind(env, fmt.Errorf("stream the cut-over record: %w", err))
+	}
+	mismatches, err := seedCutoverMismatches(env.engine, []seedCutoverFile{file})
+	if err != nil {
+		return seedCutoverUnwind(env, fmt.Errorf("verifying the cut-over record: %w", err))
+	}
+	if problems := printVerifyProblems(env.out, townstate.VerifyResult{Mismatches: mismatches}, nil); problems > 0 {
+		return seedCutoverUnwind(env, fmt.Errorf("the claim does not hold the cut-over record (%d problems)", problems))
+	}
+	fmt.Fprintf(env.out, "cut-over record written into claim %s\n", seedClaim)
+	return nil
+}
+
+// seedCutoverUnwind removes the cut-over record from the claim and returns cause
+// as the claim's partial-copy refusal. A removal that fails is joined in, never
+// dropped: the claim may still carry the record.
+func seedCutoverUnwind(env townStateSeedEnv, cause error) error {
+	err := fmt.Errorf("the claim %s is partial and not to be used: %w", seedClaim, cause)
+	if rmErr := townstate.RemoveVolumeFile(env.engine, seedClaim, cutoverRecordRel); rmErr != nil {
+		return errors.Join(err, fmt.Errorf("removing the cut-over record from claim %s: %w", seedClaim, rmErr))
+	}
+	return err
 }
 
 // seedCutoverStream sends the prepared files as one tar stream. Each file's parent

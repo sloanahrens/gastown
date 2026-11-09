@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -51,6 +52,16 @@ type fakeKubectl struct {
 	// onSettings runs in the pod after the settings file is unpacked, with the
 	// pod's directory for the claim.
 	onSettings func(dir string)
+	// settingsCalls counts the settings streams sent, from the start.
+	// failSettingsCall and dropSettingsCall, 1-based, make that numbered stream
+	// fail or be discarded; zero never does. The live copy's settings stream is
+	// the first, and its cut-over record the second.
+	settingsCalls    int
+	failSettingsCall int
+	dropSettingsCall int
+	// onSettingsCall runs after the numbered settings stream is unpacked, with its
+	// number and the pod's directory for the claim.
+	onSettingsCall func(n int, dir string)
 }
 
 func (k *fakeKubectl) run(_ context.Context, args []string, stdin io.Reader, stdout, _ io.Writer) error {
@@ -60,11 +71,18 @@ func (k *fakeKubectl) run(_ context.Context, args []string, stdin io.Reader, std
 		return errors.New("fake kubectl: unexpected exec argv")
 	}
 	argv := slices.Clone(args[len(prefix):])
-	// The pod sees its own town path; map it back to the mount the fake volume
-	// answers to.
+	// The pod has the claim only at its town path. A mount-path argument the
+	// engine did not map is one this pod cannot see, so it fails here as it
+	// would in the pod.
+	for _, a := range argv {
+		if a == townstate.VolumeMount || strings.HasPrefix(a, townstate.VolumeMount+"/") {
+			return fmt.Errorf("fake pod: %s is not mounted in the pod; the claim is at %s", a, k.town)
+		}
+	}
+	// Map the pod's town path back to the mount the fake volume answers to.
 	for i, a := range argv {
-		if a == k.town {
-			argv[i] = townstate.VolumeMount
+		if a == k.town || strings.HasPrefix(a, k.town+"/") {
+			argv[i] = townstate.VolumeMount + a[len(k.town):]
 		}
 	}
 	if slices.Equal(argv, seedSettingsArgv) {
@@ -89,6 +107,17 @@ func (k *fakeKubectl) run(_ context.Context, args []string, stdin io.Reader, std
 // unpackSettings is the pod's answer to the settings stream: the stream is unpacked
 // under the fake volume's directory, unless a fault or a drop is set.
 func (k *fakeKubectl) unpackSettings(stdin io.Reader) error {
+	k.settingsCalls++
+	if k.settingsCalls == k.failSettingsCall {
+		if _, err := io.CopyN(io.Discard, stdin, 10); err != nil && !errors.Is(err, io.EOF) {
+			return err
+		}
+		return errors.New("pod exec dropped")
+	}
+	if k.settingsCalls == k.dropSettingsCall {
+		_, err := io.Copy(io.Discard, stdin)
+		return err
+	}
 	if k.settingsFails != nil {
 		if _, err := io.CopyN(io.Discard, stdin, 10); err != nil && !errors.Is(err, io.EOF) {
 			return err
@@ -104,6 +133,9 @@ func (k *fakeKubectl) unpackSettings(stdin io.Reader) error {
 	}
 	if k.onSettings != nil {
 		k.onSettings(k.fv.dir)
+	}
+	if k.onSettingsCall != nil {
+		k.onSettingsCall(k.settingsCalls, k.fv.dir)
 	}
 	return nil
 }
@@ -179,6 +211,7 @@ func newSeedSession(t *testing.T, town string) seedSession {
 			patrolWritePath: config.PatrolWritePath,
 			engine:          podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run},
 			probes:          readyProbes(),
+			now:             seedClock(),
 			out:             &out,
 		},
 		fv:   fv,
@@ -477,7 +510,47 @@ func flagPathSession(t *testing.T, town string, rehearsal bool) (townStateSeedEn
 	fv := &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30}
 	kube := &fakeKubectl{fv: fv, town: town}
 	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run}
+	env.now = seedClock()
 	return env, fv, kube
+}
+
+// seedClock is a clock that moves two seconds each time it is read, so a copy
+// window that reads it twice has a positive length and no test sleeps.
+func seedClock() func() time.Time {
+	at := time.Date(2026, 11, 9, 6, 40, 0, 0, time.UTC)
+	return func() time.Time {
+		at = at.Add(2 * time.Second)
+		return at
+	}
+}
+
+// townTreeSnapshot reads every regular file under town, by slash path, so a test
+// can show a run left the host tree as it found it.
+func townTreeSnapshot(t *testing.T, town string) map[string]string {
+	t.Helper()
+	files := map[string]string{}
+	err := filepath.WalkDir(town, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(town, p)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		files[filepath.ToSlash(rel)] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("reading the host town %s: %v", town, err)
+	}
+	return files
 }
 
 // TestTownStateSeedRehearsalCopiesAndProfilesSettingsThroughTheFlagPath: the
@@ -794,6 +867,23 @@ func TestTownStateSeedEngineNamesOnlyItsClaim(t *testing.T) {
 	want := []string{"exec", "-i", "-n", seedNamespace, seedPod, "--", "tar", "-c", "-C", town, "."}
 	if !slices.Equal(kube.calls[0], want) {
 		t.Errorf("listing argv = %q, want %q", kube.calls[0], want)
+	}
+}
+
+// TestTownStateSeedEngineMapsTheMountPrefix: a path under the mount reaches the pod
+// at the town path the claim is mounted at, so a removal of a claim file reaches
+// that file in the pod rather than a path the pod does not have.
+func TestTownStateSeedEngineMapsTheMountPrefix(t *testing.T) {
+	t.Parallel()
+	town := seedTown(t)
+	kube := &fakeKubectl{fv: &fakeVolume{dir: t.TempDir()}, town: town}
+	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run}
+	if err := townstate.RemoveVolumeFile(eng, seedClaim, cutoverRecordRel); err != nil {
+		t.Fatalf("removing the record from the claim: %v", err)
+	}
+	want := []string{"exec", "-i", "-n", seedNamespace, seedPod, "--", "rm", "-f", "--", town + "/" + cutoverRecordRel}
+	if !slices.Equal(kube.calls[0], want) {
+		t.Errorf("removal argv = %q, want %q", kube.calls[0], want)
 	}
 }
 
@@ -1241,6 +1331,108 @@ func TestTownStateSeedCutoverRefusesBeforeTheStream(t *testing.T) {
 				t.Errorf("the claim was written by a refused run: %d entries", len(entries))
 			}
 		})
+	}
+}
+
+// TestTownStateSeedCutoverRecordIsWrittenToTheClaim: a live seed that verifies
+// leaves the cut-over record in the claim, in the shape migrate copy --cutover
+// writes, and leaves the host town root as it found it.
+func TestTownStateSeedCutoverRecordIsWrittenToTheClaim(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	before := townTreeSnapshot(t, town)
+	env, fv, _, out := cutoverSession(t, town)
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("live seed: %v\n%s", err, out.String())
+	}
+	rec := readJSONFile(t, filepath.Join(fv.dir, filepath.FromSlash(cutoverRecordRel)))
+	if len(rec) != 3 {
+		t.Errorf("cut-over record has %d keys, want cutover_at, volume and copy_seconds: %v", len(rec), rec)
+	}
+	cutoverAt, _ := rec["cutover_at"].(string)
+	if _, err := time.Parse(time.RFC3339, cutoverAt); err != nil || !strings.HasSuffix(cutoverAt, "Z") {
+		t.Errorf("cutover_at = %q, want an RFC 3339 UTC time", cutoverAt)
+	}
+	if rec["volume"] != seedClaim {
+		t.Errorf("volume = %v, want the claim %q", rec["volume"], seedClaim)
+	}
+	if secs, _ := rec["copy_seconds"].(float64); secs <= 0 {
+		t.Errorf("copy_seconds = %v, want a positive copy window", rec["copy_seconds"])
+	}
+	if got := townTreeSnapshot(t, town); !reflect.DeepEqual(got, before) {
+		t.Errorf("the live seed changed the host town root")
+	}
+}
+
+// TestTownStateSeedCutoverRecordFailureUnwinds: a record that does not reach the
+// claim, or a claim that does not hold it afterwards, is removed from the claim,
+// and the run exits non-zero naming the claim as partial.
+func TestTownStateSeedCutoverRecordFailureUnwinds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, k *fakeKubectl)
+		// want is the part of the error the failing step names.
+		want string
+	}{
+		{"the record stream fails", func(_ *testing.T, k *fakeKubectl) {
+			k.failSettingsCall = 2
+		}, "stream the cut-over record"},
+		{"the claim drops the record", func(_ *testing.T, k *fakeKubectl) {
+			k.dropSettingsCall = 2
+		}, "does not hold the cut-over record"},
+		{"the claim holds other bytes for the record", func(t *testing.T, k *fakeKubectl) {
+			// The record lands, and the claim then holds other bytes for it: only a
+			// removal from the claim leaves the record gone.
+			k.onSettingsCall = func(n int, dir string) {
+				if n == 2 {
+					writeProfileFile(t, filepath.Join(dir, filepath.FromSlash(cutoverRecordRel)), "{}\n")
+				}
+			}
+		}, "does not hold the cut-over record"},
+		{"the claim listing fails after the record", func(_ *testing.T, k *fakeKubectl) {
+			// The listing that checks the record is the one after its stream.
+			k.onSettingsCall = func(n int, _ string) {
+				if n == 2 {
+					k.fv.listErr = errors.New("listing failed")
+				}
+			}
+		}, "verifying the cut-over record"},
+		{"the removal fails too", func(_ *testing.T, k *fakeKubectl) {
+			k.failSettingsCall = 2
+			k.fv.rmErr = errors.New("rm refused")
+		}, "removing the cut-over record from claim"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := cutoverTown(t)
+			env, fv, kube, out := cutoverSession(t, town)
+			tc.setup(t, kube)
+			err := runTownStateSeedIn(env)
+			if err == nil || !strings.Contains(err.Error(), "partial") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("live seed = %v, want an error naming claim %s as partial and %q\n%s", err, seedClaim, tc.want, out.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(fv.dir, filepath.FromSlash(cutoverRecordRel))); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("the claim still holds the cut-over record (stat %v)", statErr)
+			}
+		})
+	}
+}
+
+// TestTownStateSeedRehearsalWritesNoCutoverRecord: a rehearsal seed leaves no
+// cut-over record in the claim.
+func TestTownStateSeedRehearsalWritesNoCutoverRecord(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, _ := flagPathSession(t, town, true)
+	var out bytes.Buffer
+	env.out = &out
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("rehearsal seed: %v\n%s", err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(fv.dir, filepath.FromSlash(cutoverRecordRel))); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the rehearsal left a cut-over record in the claim (stat %v)", err)
 	}
 }
 

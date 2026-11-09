@@ -59,16 +59,25 @@ func readSeedRecord(town string) (seedRecord, bool, error) {
 	return rec, true, nil
 }
 
+// encodeRecord is a record's bytes: indented JSON with a trailing newline. A copy
+// and a seed write the same bytes for the same record.
+func encodeRecord(v any) ([]byte, error) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
 // writeRecordFile writes v as JSON to rel under the town, 0600, by a temporary
 // sibling and a rename, so a reader never sees half a record. The sibling's name
 // is fixed: a copy writes one record at a time, and the rename stays on one
 // filesystem.
 func writeRecordFile(town, rel string, v any) error {
-	data, err := json.MarshalIndent(v, "", "  ")
+	data, err := encodeRecord(v)
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", rel, err)
 	}
-	data = append(data, '\n')
 	tmpRel := rel + ".tmp"
 	if err := os.WriteFile(filepath.Join(town, filepath.FromSlash(tmpRel)), data, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", rel, err)
