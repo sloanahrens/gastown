@@ -13,11 +13,15 @@ import (
 	polecatseed "github.com/steveyegge/gastown/internal/polecat/seed"
 )
 
+// The pin commits below are fixtures for the parser and agreement tests. They
+// are not the committed pins: TestCommittedImagePinsParse and
+// TestCommittedPinsAgree read the real files, so a pin bump edits those files
+// only.
 const (
-	pinBDCommit     = "44cb296bbe4180f31553cb61f753aa8bfb3f9321"
-	pinOMCommit     = "08ae32d0fa20bd6220d01b8171875123d318808c"
-	pinHMCommit     = "7f2647bd257e6cc86b0c1c9958f7a3f1e5438cfb"
-	pinDevopsCommit = "a87a19ab4fe7f3163d8e81997c91e56ddddf5815"
+	pinBDCommit     = "3333333333333333333333333333333333333333"
+	pinOMCommit     = "4444444444444444444444444444444444444444"
+	pinHMCommit     = "5555555555555555555555555555555555555555"
+	pinDevopsCommit = "6666666666666666666666666666666666666666"
 )
 
 // testOwner is the Forgejo owner every fixture pin URL names, and testPinURL
