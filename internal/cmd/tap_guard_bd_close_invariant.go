@@ -473,7 +473,7 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 	// read may still hold a substitution whose close is unknown, so it is
 	// judged as a close of the branch's bead (IDsUnreadable), not passed.
 	trimmed := strings.TrimSpace(command)
-	bodies, readable := parsedSubstitutionBodies(blankHeredocBodies(trimmed))
+	bodies, readable := parsedSubstitutionBodies(blankQuotedHeredocBodies(trimmed))
 	if !readable {
 		if mayHoldSubstitution(trimmed) {
 			invocations = append(invocations, bdCloseInvocation{IDsUnreadable: true})

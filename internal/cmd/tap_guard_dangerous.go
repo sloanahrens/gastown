@@ -210,10 +210,12 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 // matchers read the words the shell will pass — quoting resolved, expansions
 // kept as source text, redirections and here-document bodies out of the word
 // list — instead of a second tokenization of the text, so the parser's reading
-// is the reading the matchers take (gt-kr5vf). Two rules stay on the text: the
-// done/slot loop rule, whose loop keywords are not segments
-// (judgeDangerousLoopText), and the two shapes the parser reads differently
-// from the shell, whose token checks follow the shell's text (judgeDisagreeingScript).
+// is the reading the matchers take (gt-kr5vf). The done/slot loop rule keeps a
+// text reading for its loop keywords, which are not segments
+// (matchesDoneSlotLoop, run by judgeDangerousLoopText), and reads the
+// substitutions it judges from the parsed script (dangerousSubstitutionLoop).
+// The two shapes the parser reads differently from the shell keep the shell's
+// text for their token checks (judgeDisagreeingScript).
 func judgeDangerousScript(script shellparse.Script, text string, depth int, sess guardSession) (reason, alternative string) {
 	// A declaration builtin's word spelling "<<" is a here-document to the
 	// shell's lexer, which reads the operator before the builtin sees its
@@ -1421,16 +1423,18 @@ func parsedSubstitutionBodies(command string) (bodies []string, readable bool) {
 	return bodies, true
 }
 
-// blankHeredocBodies is command with the content of every heredoc body replaced
-// by spaces, newlines and offsets kept. The parser reads the body as blank, so
-// it finds no substitution in it, which is the reading stripHeredocBodies gives
-// the text scanners. The
-// terminator line is kept, since a span ends with it and the heredoc needs it to
-// close, so the rest of the command still parses.
-func blankHeredocBodies(command string) string {
+// blankQuotedHeredocBodies is command with the body of every quoted heredoc
+// replaced by spaces, newlines and offsets kept. A quoted tag leaves its body
+// literal, so nothing in it runs and a "$(...)" there is not a substitution.
+// An unquoted body is left as it is: the shell expands its substitutions while
+// it reads the body (heredocBodySubstitutions), so the parser must see them. An
+// unterminated heredoc has no closed body to blank, so it is left as it is too.
+// The terminator line is kept, since a span ends with it and the heredoc needs
+// it to close, so the rest of the command still parses.
+func blankQuotedHeredocBodies(command string) string {
 	b := []byte(command)
 	for _, span := range heredocSpans(command) {
-		if span.unterminated || span.bodyEnd <= span.bodyStart {
+		if span.unterminated || !span.quoted || span.bodyEnd <= span.bodyStart {
 			continue
 		}
 		// The span's last line is the terminator: blank up to its first byte.
@@ -1448,7 +1452,9 @@ func blankHeredocBodies(command string) string {
 // mayHoldSubstitution reports whether command holds the text a command or
 // process substitution opens with. It is a substring test, not a scan: it
 // answers only whether a command the parser cannot read could hold a
-// substitution the guard must judge.
+// substitution the guard must judge. It also matches a "$(" the shell reads as
+// literal text, such as one in single quotes; an unreadable line cannot tell the
+// two apart, so that refusal is the fail-closed reading and is kept on purpose.
 func mayHoldSubstitution(command string) bool {
 	return strings.Contains(command, "`") || strings.Contains(command, "$(") ||
 		strings.Contains(command, "<(") || strings.Contains(command, ">(")

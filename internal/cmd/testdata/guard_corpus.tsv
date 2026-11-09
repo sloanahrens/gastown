@@ -448,3 +448,7 @@ test_scope	polecat	"go test ./internal/shellparse/... -run TestParseWordRaw"	all
 dangerous	polecat	"git reset --hard HEAD~4"	refuse	Hard reset discards	gt-bogfce	ef1a2a598b12d291b9463f17632293a757d8115bc6acb8498d5f8f5d67072dc0
 container_suite	polecat	"echo ok || echo fine"	allow		gt-bogfce	ef1a2a598b12d291b9463f17632293a757d8115bc6acb8498d5f8f5d67072dc0
 test_scope	polecat	"go test ./internal/shellparse/... -run TestParseSubst"	allow		gt-bogfce	ef1a2a598b12d291b9463f17632293a757d8115bc6acb8498d5f8f5d67072dc0
+# --- gt-bogfce: only a quoted heredoc's body is blanked before the bd-close and polecat-paths guards parse, so an unquoted body's substitutions are judged; the freeze stamp moved, one real case per freeze guard carries it ---
+dangerous	polecat	"cat <<EOF\n$(git reset --hard HEAD~4)\nEOF"	refuse	Hard reset discards	gt-bogfce	203f6fca684d5fb3e1a124311a98a08255930b58bf1d17ee911643e01a0bc368
+container_suite	polecat	"echo ok ; echo fine"	allow		gt-bogfce	203f6fca684d5fb3e1a124311a98a08255930b58bf1d17ee911643e01a0bc368
+test_scope	polecat	"go test ./internal/shellparse/... -run TestParseQuotedHeredoc"	allow		gt-bogfce	203f6fca684d5fb3e1a124311a98a08255930b58bf1d17ee911643e01a0bc368

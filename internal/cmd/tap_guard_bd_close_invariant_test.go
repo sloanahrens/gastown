@@ -208,6 +208,11 @@ func TestParseBdCloseInvocations(t *testing.T) {
 		{name: "inside bash -lc", command: `bash -lc "bd close -r 'cancel: x' gt-arno"`, want: []bdCloseInvocation{{IDs: []string{"gt-arno"}, Reason: "cancel: x"}}},
 		{name: "a bash -c payload that is not a close", command: "bash -c 'echo bd close gt-arno'", want: nil},
 		{name: "a close in a process substitution", command: "cat <(bd close gt-arno)", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		// The shell expands a substitution in an unquoted heredoc body while it
+		// reads the body, so it is a close like one on the command line. A quoted
+		// tag keeps its body literal, so the same text is data.
+		{name: "a close in an unquoted heredoc body", command: "cat <<EOF\n$(bd close gt-arno)\nEOF", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		{name: "a close in a quoted heredoc body is data", command: "cat <<'EOF'\n$(bd close gt-arno)\nEOF", want: nil},
 		// The parser cannot read this line, so the close inside its command
 		// substitution is unknown: it is judged as a close of the branch's bead
 		// rather than passed (fail closed). A line with no substitution has

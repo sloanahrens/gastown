@@ -801,6 +801,11 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"writing after a quoted paren in a substitution", `echo "$(grep -E '(a|b)' f; cp a.go ` + sib + `)"`, true},
 		{"writing after a nested substitution", `echo "$(echo $(date); cp a.go ` + sib + `)"`, true},
 		{"writing inside a nested substitution", `echo "$(echo $(cp a.go ` + sib + `))"`, true},
+		// The shell expands a substitution in an unquoted heredoc body, so the
+		// write is judged as it is on the command line. The same text in a quoted
+		// heredoc body is literal data.
+		{"writing inside a substitution in an unquoted heredoc body", "cat <<EOF\n$(cp a.go " + sib + ")\nEOF", true},
+		{"writing inside a substitution in a quoted heredoc body", "cat <<'EOF'\n$(cp a.go " + sib + ")\nEOF", false},
 		// sed edits in place when i sits anywhere in a short-option cluster,
 		// not only when the argument starts with -i (gt-x9gya).
 		{"sed -i on a sibling", "sed -i 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
@@ -1188,19 +1193,19 @@ func TestPolecatPathGuardRefusesTooManyCarriedDirs(t *testing.T) {
 	for i := 0; i < maxWalkDirs-6; i++ {
 		scope.dirs = append(scope.dirs, filepath.Join(p.root, fmt.Sprintf("carried%d", i)))
 	}
-	// Each stray ")" is a reading of the segment whose cd the shell may run.
+	// Each ")" inside the quoted token is a reading of the cd that follows it,
+	// and the parser reads the substitution whole, so the line is readable and
+	// every reading is walked. A refusal here is the cap's, not the fail-closed
+	// refusal for an unreadable line (gt-bogfce).
 	command := func(readings int) string {
 		parts := []string{"X=$(a"}
 		for i := 0; i < readings; i++ {
-			parts = append(parts, ") cd "+filepath.Join(p.root, fmt.Sprintf("cd%d", i)))
+			parts = append(parts, `")" cd `+filepath.Join(p.root, fmt.Sprintf("cd%d", i)))
 		}
-		return strings.Join(parts, " ")
+		return strings.Join(parts, " ") + " )"
 	}
-	// The line is unreadable (an unbalanced parenthesis), so it is refused for
-	// its substitutions, fail closed (gt-bogfce). What this test pins is that
-	// six readings stay under the cap: the refusal is not the cap's.
-	if reason := scope.checkBashCommand(command(6), 0); strings.Contains(reason, "too many directory changes") {
-		t.Fatalf("six readings from %d carried dirs: refused at the cap with %q, want the cap not reached", maxWalkDirs-6, reason)
+	if reason := scope.checkBashCommand(command(6), 0); reason != "" {
+		t.Fatalf("six readings from %d carried dirs: reason %q, want allow (the union is at the cap, not over it)", maxWalkDirs-6, reason)
 	}
 	reason := scope.checkBashCommand(command(7), 0)
 	if !strings.Contains(reason, "too many directory changes") {

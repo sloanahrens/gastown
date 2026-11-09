@@ -433,11 +433,12 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	}
 
 	// Each substitution the parser reads is a command of its own, judged the
-	// way a whole command is. The heredoc bodies are blanked first, so a body
-	// is data here as it is in the stripped text above. A command the parser
-	// cannot read may still hold a substitution whose path is unknown, so it
-	// is refused rather than passed (fail closed).
-	bodies, readable := parsedSubstitutionBodies(blankHeredocBodies(command))
+	// way a whole command is. A quoted heredoc's body is blanked first, so it is
+	// data here as it is in the stripped text above; an unquoted body runs its
+	// substitutions, so it is parsed and judged. A command the parser cannot
+	// read may still hold a substitution whose path is unknown, so it is refused
+	// rather than passed (fail closed).
+	bodies, readable := parsedSubstitutionBodies(blankQuotedHeredocBodies(command))
 	if !readable {
 		if mayHoldSubstitution(command) {
 			return "a command's substitutions cannot be read — run the command in a form this guard can read"
