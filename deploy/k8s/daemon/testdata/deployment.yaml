@@ -1,4 +1,4 @@
-# no /Users/sloan/.claude/.beads mount: this pod has no claude beads database; the wisp reaper behavior it relies on is TestWispReaperSkipsMissingExtraRoot
+# no /Users/sloan/.claude/.beads mount: the host's claude beads database is outside the town root and no claim carries a copy, so this pod has none; the wisp reaper skips its missing root (TestWispReaperSkipsMissingExtraRoot)
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -308,9 +308,11 @@ const (
 	// resolve in this pod rather than assuming it does.
 	noHostAliasComment = "no hostAliases: this pod has no gateway alias, so " + DoltHostName + " does not resolve in it"
 	// noClaudeBeadsComment is the Deployment's head comment for the claude beads
-	// root the pod does not mount. The reaper behavior the pod relies on is pinned
-	// by TestWispReaperSkipsMissingExtraRoot, not restated here.
-	noClaudeBeadsComment = "no " + ClaudeBeadsRoot + " mount: this pod has no claude beads database; the wisp reaper behavior it relies on is TestWispReaperSkipsMissingExtraRoot"
+	// root the pod does not mount, and the one place the drop's reason is written:
+	// the host's copy is outside the town root and no claim carries one. The
+	// reaper's missing-root tolerance that keeps the drop safe is pinned by
+	// TestWispReaperSkipsMissingExtraRoot.
+	noClaudeBeadsComment = "no " + ClaudeBeadsRoot + " mount: the host's claude beads database is outside the town root and no claim carries a copy, so this pod has none; the wisp reaper skips its missing root (TestWispReaperSkipsMissingExtraRoot)"
 )
 
 // noProxyComment is the Deployment's head comment when Values.ProxyImage is
@@ -716,6 +718,9 @@ func openShellVolume() Volume {
 	for _, key := range openShellKeys {
 		items = append(items, KeyToPath{Key: key, Path: strings.ReplaceAll(key, openShellKeySep, "/")})
 	}
+	// 0400 is readable by root alone. The daemon image's final stage has no USER,
+	// so the pod runs as root and reads it; a USER in the image needs an fsGroup
+	// and 0440 instead (TestOpenShellModeFitsTheImageUser holds this).
 	mode := int32(0o400)
 	return Volume{
 		Name:   openShellVolumeName,
@@ -794,7 +799,7 @@ func deployment(v Values, namespace string) Deployment {
 			},
 		},
 	}
-	// The claude beads root is never mounted, so the Deployment always names it.
+	// The Deployment always names the claude beads root (noClaudeBeadsComment).
 	var heads []string
 	if v.ProxyImage == "" {
 		heads = append(heads, noProxyComment)
@@ -1717,6 +1722,9 @@ type PodSpec struct {
 type PodSecurityContext struct {
 	RunAsUser  *int64 `yaml:"runAsUser,omitempty"`
 	RunAsGroup *int64 `yaml:"runAsGroup,omitempty"`
+	// FSGroup is the group the Secret volumes are readable by. The daemon pod sets
+	// none while its image runs as root (openShellVolume's comment).
+	FSGroup *int64 `yaml:"fsGroup,omitempty"`
 }
 
 // HostAlias is one /etc/hosts entry the pod's containers share: every hostname

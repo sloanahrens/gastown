@@ -1472,7 +1472,7 @@ var composeMounts = []composeMount{
 	},
 	{
 		Name: "claude beads", Path: ClaudeBeadsRoot,
-		Reason: "dropped for the pod: the host's ~/.claude/.beads is outside the town root and no claim carries a copy; the wisp reaper's missing-root behavior that keeps the drop safe is TestWispReaperSkipsMissingExtraRoot (internal/daemon), and the Deployment's head comment names the root (noClaudeBeadsComment)",
+		Reason: "dropped for the pod: the reason is written in noClaudeBeadsComment",
 	},
 }
 
@@ -1609,9 +1609,9 @@ func TestEveryComposeMountHasAPodAnswer(t *testing.T) {
 
 // TestOMConfigComesFromThePrivateTownStateRow holds the om config's source: the
 // file sits under the .runtime/container row, which is daemon-owned and Private,
-// so the town-state volume carries it and the copy keeps its 0600 mode. A
-// non-Private row would lose the mode and the pod would mount a world-readable
-// config.
+// so the town-state volume carries it and the copy keeps the mode the daemon
+// wrote it with. A non-Private row would lose that mode on the copy. The
+// config's own mode is set by the compose writer, not by this row.
 func TestOMConfigComesFromThePrivateTownStateRow(t *testing.T) {
 	t.Parallel()
 	manifest := (*manifestdata.Manifest)(townstate.Default())
@@ -1790,6 +1790,82 @@ func TestOpenShellIsAbsentFromRehearsal(t *testing.T) {
 	}
 	if volumeMountAt(m.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, "/run/gt/xdg/openshell") != nil {
 		t.Errorf("the rehearsal mounts the openshell config")
+	}
+}
+
+// openShellModeFinding returns what is wrong with a Secret volume's mode under an
+// image whose final stage carries users and a pod whose security context is sc,
+// or "" when the daemon can read the volume. The files are root-owned, so a
+// non-root daemon reads them only through group read on an fsGroup, or world
+// read; an fsGroup alone does not admit a 0400 file.
+func openShellModeFinding(mode int32, users []string, sc *PodSecurityContext) string {
+	if len(users) == 0 {
+		return ""
+	}
+	if (sc != nil && sc.FSGroup != nil && mode&0o040 != 0) || mode&0o004 != 0 {
+		return ""
+	}
+	return fmt.Sprintf("the daemon image's final stage carries %q, so the daemon pod does not run as root; a non-root daemon cannot read a root-owned %04o Secret; set fsGroup and 0440, or keep root", users, mode)
+}
+
+// TestOpenShellModeFitsTheImageUser ties the openshell volume's mode to the user
+// the daemon image runs as. The image's final stage is read the way
+// TestHelperRunsAsTheDaemonImageDoes reads it: a USER there makes the pod a
+// non-root daemon, which cannot read the root-owned 0400 files (gt-nr548n).
+func TestOpenShellModeFitsTheImageUser(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(packageDir(t), "..", "..", "daemon", "Dockerfile")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec
+	var vol *Volume
+	for i := range pod.Volumes {
+		if v := &pod.Volumes[i]; v.Name == "daemon-openshell" {
+			vol = v
+		}
+	}
+	if vol == nil || vol.Secret == nil || vol.Secret.DefaultMode == nil {
+		t.Fatal("the pod has no daemon-openshell Secret volume with a defaultMode")
+	}
+	if finding := openShellModeFinding(*vol.Secret.DefaultMode, userInstructions(string(data)), pod.SecurityContext); finding != "" {
+		t.Error(finding)
+	}
+}
+
+// TestOpenShellModeFindingRefusesARootOnlyFileUnderAUser holds each row of the
+// mode check: a USER with a file the user cannot read is named, and each way out
+// (keeping root, or group read through an fsGroup) passes.
+func TestOpenShellModeFindingRefusesARootOnlyFileUnderAUser(t *testing.T) {
+	t.Parallel()
+	user := []string{"USER agent"}
+	gid := int64(1000)
+	withFSGroup := &PodSecurityContext{FSGroup: &gid}
+	for _, tc := range []struct {
+		name  string
+		mode  int32
+		users []string
+		sc    *PodSecurityContext
+		want  string
+	}{
+		{name: "root keeps the 0400 files", mode: 0o400},
+		{name: "a USER with 0400", mode: 0o400, users: user, want: "cannot read a root-owned 0400 Secret"},
+		{name: "a USER with 0400 and an fsGroup", mode: 0o400, users: user, sc: withFSGroup, want: "cannot read a root-owned 0400 Secret"},
+		{name: "a USER with 0440 and no fsGroup", mode: 0o440, users: user, want: "cannot read a root-owned 0440 Secret"},
+		{name: "a USER with 0440 and an fsGroup", mode: 0o440, users: user, sc: withFSGroup},
+		{name: "a USER with world read", mode: 0o444, users: user},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := openShellModeFinding(tc.mode, tc.users, tc.sc)
+			if tc.want == "" && got != "" {
+				t.Errorf("openShellModeFinding = %q, want no finding", got)
+			}
+			if tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("openShellModeFinding = %q, want a finding containing %q", got, tc.want)
+			}
+		})
 	}
 }
 
