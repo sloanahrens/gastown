@@ -38,6 +38,12 @@ func updatingGoldens() bool {
 const testImage = "registry.example.com/gt/gastown-daemon@sha256:" +
 	"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
+// testProxyImage is the digest reference the proxy relays record, shaped the
+// same way: another repository, so a test cannot pass the daemon's image off as
+// the relay's.
+const testProxyImage = "registry.example.com/gt/socat@sha256:" +
+	"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
 // goldenValues is the configuration the goldens record: the shipped secrets
 // manifest's entries, so a manifest entry with no Secret fails the goldens.
 func goldenValues(t *testing.T) Values {
@@ -55,6 +61,9 @@ func goldenValues(t *testing.T) Values {
 		ForgejoNamespace: DefaultForgejoNamespace,
 		Secrets:          manifest.Files,
 		Image:            testImage,
+		// ProxyImage is a shape fixture: the goldens record the two relays the
+		// digest gives the pod, and the digest itself is the overseer's.
+		ProxyImage: testProxyImage,
 		// Env is a daemon.env entry the compose writer forwards and no rule
 		// filters: a plain provider setting the decision table keeps unchanged.
 		Env: map[string]string{awsRegionEnv: "us-east-1"},
@@ -406,6 +415,9 @@ func TestHostGatewayAlias(t *testing.T) {
 
 	v = goldenValues(t)
 	v.HostGatewayIP = ""
+	// The proxy relays need a host too, and TestProxySidecars holds that
+	// refusal; this case is the alias alone.
+	v.ProxyImage = ""
 	m := mustBuild(t, v)
 	rendered := document(t, m.Deployment)
 	var parsed struct {
@@ -439,6 +451,104 @@ func TestHostGatewayAlias(t *testing.T) {
 	v.HostGatewayIP = "10.0.5.7"
 	if bytes.Contains(document(t, mustBuild(t, v).Deployment), []byte(noHostAliasComment)) {
 		t.Error("the Deployment with a hostAlias still carries the no-alias comment")
+	}
+}
+
+// TestProxySidecars holds the two relays a live pod carries in the compose
+// override's place: registry-proxy and gateway-proxy listen on 127.0.0.1 of the
+// pod's network namespace and forward to the host gateway, so the sandbox
+// sling's localhost:5001 and localhost:28443 reach the host as they do under
+// compose. It also holds the refusals: a tag, and a proxy image with no gateway
+// address, since neither can render a relay that forwards.
+func TestProxySidecars(t *testing.T) {
+	t.Parallel()
+
+	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec
+	host := goldenValues(t).HostGatewayIP
+	if len(pod.Containers) != 3 {
+		t.Fatalf("the pod carries %d containers, want the daemon and its two relays", len(pod.Containers))
+	}
+	if got := pod.Containers[0].Name; got != Name {
+		t.Errorf("the first container is %q, want the daemon %q", got, Name)
+	}
+	byName := make(map[string]Container, len(pod.Containers))
+	for _, c := range pod.Containers {
+		byName[c.Name] = c
+	}
+	for _, tc := range []struct {
+		name string
+		port int
+	}{
+		{RegistryProxyContainer, RegistryProxyPort},
+		{GatewayProxyContainer, GatewayProxyPort},
+	} {
+		c, ok := byName[tc.name]
+		if !ok {
+			t.Fatalf("the pod carries no %s container", tc.name)
+		}
+		if c.Image != testProxyImage {
+			t.Errorf("%s image = %q, want the proxy digest %q", tc.name, c.Image, testProxyImage)
+		}
+		wantArgs := []string{
+			fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,bind=127.0.0.1", tc.port),
+			fmt.Sprintf("TCP:%s:%d", host, tc.port),
+		}
+		if !slices.Equal(c.Args, wantArgs) {
+			t.Errorf("%s args = %q, want %q", tc.name, c.Args, wantArgs)
+		}
+		if c.Resources == nil {
+			t.Fatalf("%s carries no resources, want the fixed share", tc.name)
+		}
+		if want := (map[string]string{"cpu": proxyCPU, "memory": proxyMemory}); !maps.Equal(c.Resources.Requests, want) {
+			t.Errorf("%s requests = %v, want the fixed share %v", tc.name, c.Resources.Requests, want)
+		}
+		if !maps.Equal(c.Resources.Requests, c.Resources.Limits) {
+			t.Errorf("%s requests %v and limits %v; requests equal limits", tc.name, c.Resources.Requests, c.Resources.Limits)
+		}
+		if len(c.Env) != 0 || len(c.VolumeMounts) != 0 {
+			t.Errorf("%s carries env %v and mounts %v, want neither", tc.name, c.Env, c.VolumeMounts)
+		}
+	}
+
+	// Without a proxy image the pod carries no relay, and the Deployment says
+	// so rather than leaving a reader to assume one.
+	v := goldenValues(t)
+	v.ProxyImage = ""
+	m := mustBuild(t, v)
+	if got := len(m.Deployment.Spec.Template.Spec.Containers); got != 1 {
+		t.Errorf("the pod carries %d containers with no ProxyImage, want the daemon alone", got)
+	}
+	if rendered := document(t, m.Deployment); !bytes.Contains(rendered, []byte("# "+noProxyComment)) {
+		t.Errorf("the Deployment with no ProxyImage carries no comment saying the pod has no relay:\n%s", rendered)
+	}
+
+	// A tag names whatever the registry holds at pull time, so it is refused
+	// with the value a caller can correct.
+	for _, image := range []string{
+		"registry.example.com/gt/socat:1.8.0.3",
+		"registry.example.com/gt/socat@sha256:FEEDFACE",
+	} {
+		v := goldenValues(t)
+		v.ProxyImage = image
+		_, err := Build(v)
+		if err == nil {
+			t.Errorf("Build with ProxyImage %q = a render, want a refusal", image)
+			continue
+		}
+		if !strings.Contains(err.Error(), "Values.ProxyImage") || !strings.Contains(err.Error(), image) {
+			t.Errorf("Build refused with %q, want Values.ProxyImage and the value %q named", err, image)
+		}
+	}
+
+	// A relay with no host to forward to would listen and never forward.
+	v = goldenValues(t)
+	v.HostGatewayIP = ""
+	_, err := Build(v)
+	if err == nil {
+		t.Fatal("Build with ProxyImage set and no HostGatewayIP = a render, want a refusal")
+	}
+	if !strings.Contains(err.Error(), "Values.HostGatewayIP") {
+		t.Errorf("Build refused with %q, want Values.HostGatewayIP named", err)
 	}
 }
 

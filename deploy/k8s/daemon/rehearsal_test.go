@@ -279,6 +279,30 @@ func TestRehearsalMountsNoLandingVolume(t *testing.T) {
 	}
 }
 
+// TestRehearsalRendersNoProxy holds that a rehearsal never carries the two
+// relays, even when Values.ProxyImage is set: the rehearsal pod must reach
+// neither the live registry nor the live gateway. It also holds that a
+// rehearsal needs no gateway address for a proxy image it never runs.
+func TestRehearsalRendersNoProxy(t *testing.T) {
+	t.Parallel()
+	v := rehearsalValues(t)
+	v.ProxyImage = testProxyImage
+	m := mustBuild(t, v)
+	for _, c := range m.Deployment.Spec.Template.Spec.Containers {
+		if c.Name == RegistryProxyContainer || c.Name == GatewayProxyContainer {
+			t.Errorf("the rehearsal pod carries the %s container, want no relay", c.Name)
+		}
+	}
+	if got := len(m.Deployment.Spec.Template.Spec.Containers); got != 1 {
+		t.Errorf("the rehearsal pod carries %d containers, want the daemon alone", got)
+	}
+
+	v.HostGatewayIP = ""
+	if _, err := Build(v); err != nil {
+		t.Errorf("Build of a rehearsal with a proxy image and no gateway address: %v, want no refusal: the rehearsal renders no relay", err)
+	}
+}
+
 // refusedInRehearsal reports whether a rehearsal may never carry the entry
 // named file: a promote key, jev.env, the landing bot's token or the write-capable
 // om token and its meta file.
