@@ -570,3 +570,6 @@ test_scope	polecat	"cat <<EOF\nrun \\\\$(make gate)\nEOF\n"	refuse	polecat 'make
 container_suite	polecat	"GT_TEST_DOCKER=1 cat <(go test ./internal/beads/...)"	refuse	targets testcontainers-backed package(s)	gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
 dangerous	polecat	"echo ${x:-<(git reset --hard HEAD)}"	refuse	Hard reset discards all uncommitted changes	gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
 test_scope	polecat	"go test ./internal/cmd -run TestSubstitutionBody -count=2"	allow		gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... > out"	refuse	targets testcontainers-backed package(s)	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
+test_scope	polecat	"go test ./... > out"	refuse	polecat 'go test' of the whole repo	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
+dangerous	polecat	"git push origin HEAD:main > out"	refuse	Polecats never push to main/master	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
