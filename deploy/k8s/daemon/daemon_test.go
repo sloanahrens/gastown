@@ -260,6 +260,10 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"a Secret entry that is a path", func(v *Values) { v.Secrets[0].Name = "forgejo/landing.env" }, "Values.Secrets[0]", ""},
 		{"a Secret entry that is absolute", func(v *Values) { v.Secrets[0].Name = "/etc/passwd" }, "Values.Secrets[0]", ""},
 		{"a Secret entry that is ..", func(v *Values) { v.Secrets[0].Name = ".." }, "Values.Secrets[0]", ""},
+		{"a Secret entry whose mode is readable by others", func(v *Values) { v.Secrets[0].Mode = "0644" }, "Values.Secrets[0]", "no group or other bits"},
+		{"a Secret entry whose mode is not octal", func(v *Values) { v.Secrets[0].Mode = "rw-------" }, "Values.Secrets[0]", "octal"},
+		{"a Secret entry whose mode has three digits", func(v *Values) { v.Secrets[0].Mode = "600" }, "Values.Secrets[0]", "four-digit octal"},
+		{"a Secret entry whose mode has a leading digit", func(v *Values) { v.Secrets[0].Mode = "1600" }, "Values.Secrets[0]", "four-digit octal"},
 		{"a Secret entry with a control character", func(v *Values) { v.Secrets[0].Name = "a\tb" }, "Values.Secrets[0]", ""},
 		{"a duplicate Secret entry", func(v *Values) { v.Secrets[1].Name = v.Secrets[0].Name }, "Values.Secrets[1]", ""},
 		{"no Secret entries", func(v *Values) { v.Secrets = nil }, "Values.Secrets", ""},
@@ -1018,7 +1022,11 @@ func TestDeploymentRendersAZeroGracePeriod(t *testing.T) {
 			} `yaml:"template"`
 		} `yaml:"spec"`
 	}
-	if err := yaml.Unmarshal(document(t, deployment(v, DefaultNamespace)), &rendered); err != nil {
+	dep, err := deployment(v, DefaultNamespace)
+	if err != nil {
+		t.Fatalf("rendering the Deployment: %v", err)
+	}
+	if err := yaml.Unmarshal(document(t, dep), &rendered); err != nil {
 		t.Fatalf("parsing the rendered Deployment: %v", err)
 	}
 	got := rendered.Spec.Template.Spec.TerminationGracePeriodSeconds
@@ -2011,4 +2019,105 @@ func (r *goldenRecorder) Errorf(format string, args ...any) {
 
 func (r *goldenRecorder) Fatalf(format string, args ...any) {
 	r.messages = append(r.messages, fmt.Sprintf(format, args...))
+}
+
+// ledgerReaderName is the manifest entry of the cloud ledger reader's DSN file.
+const ledgerReaderName = "ledger-reader.dsn"
+
+// TestRenderCarriesTheLedgerReaderSecret holds the reader's DSN through the
+// Secrets loop (gt-nlf1i6): a Secret for the entry that holds only its
+// placeholder, a read-only mount at the path the cloud settings name, and that
+// path resolved by the settings to the Postgres source. With the entry not
+// listed, neither the Secret nor the mount is rendered.
+func TestRenderCarriesTheLedgerReaderSecret(t *testing.T) {
+	t.Parallel()
+	const dsnPath = manifestdata.LiveConfigDirPath + "/" + ledgerReaderName
+
+	v := goldenValues(t)
+	m := mustBuild(t, v)
+	secretName := SecretNamePrefix + ledgerReaderName
+	var s *Secret
+	for i := range m.Secrets {
+		if m.Secrets[i].Metadata.Name == secretName {
+			s = &m.Secrets[i]
+		}
+	}
+	if s == nil {
+		t.Fatalf("the render writes no Secret %s for the ledger reader", secretName)
+	}
+	if len(s.StringData) != 1 || s.StringData[ledgerReaderName] != "" {
+		t.Errorf("Secret %s holds %v, want only the empty placeholder for %s", secretName, s.StringData, ledgerReaderName)
+	}
+
+	pod := m.Deployment.Spec.Template.Spec
+	vol := volumeNamed(pod.Volumes, secretVolumeName(ledgerReaderName))
+	switch {
+	case vol == nil || vol.Secret == nil:
+		t.Fatal("the pod has no Secret volume for the ledger reader")
+	case vol.Secret.SecretName != secretName:
+		t.Errorf("the ledger reader volume reads Secret %q, want %q", vol.Secret.SecretName, secretName)
+	case vol.Secret.DefaultMode == nil || *vol.Secret.DefaultMode != 0o600:
+		t.Errorf("the ledger reader volume's defaultMode = %v, want 0600 so the reader's mode check passes", vol.Secret.DefaultMode)
+	}
+	mnt := volumeMountAt(pod.Containers[0].VolumeMounts, dsnPath)
+	switch {
+	case mnt == nil:
+		t.Fatalf("the daemon container mounts nothing at %s", dsnPath)
+	case mnt.Name != secretVolumeName(ledgerReaderName) || mnt.SubPath != ledgerReaderName:
+		t.Errorf("the mount at %s carries volume %q subPath %q, want the ledger reader's volume and subPath", dsnPath, mnt.Name, mnt.SubPath)
+	case !mnt.ReadOnly:
+		t.Errorf("the mount at %s is writable, want read-only", dsnPath)
+	}
+
+	ts := config.TownSettings{Cloud: &config.CloudConfig{LedgerDSNFile: dsnPath}}
+	if got := ts.ResolveCloud(func(string) string { return "" }); !got.Postgres || got.DSNFile != dsnPath {
+		t.Errorf("the pod's cloud settings resolve to %+v, want the Postgres source reading %s", got, dsnPath)
+	}
+
+	// Unlisted, the entry renders no Secret and no mount.
+	without := goldenValues(t)
+	without.Secrets = slices.DeleteFunc(without.Secrets, func(f manifestdata.SecretFile) bool { return f.Name == ledgerReaderName })
+	m2 := mustBuild(t, without)
+	for _, sec := range m2.Secrets {
+		if sec.Metadata.Name == secretName {
+			t.Errorf("a render without the entry still writes Secret %s", secretName)
+		}
+	}
+	if mnt := volumeMountAt(m2.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, dsnPath); mnt != nil {
+		t.Errorf("a render without the entry still mounts %s", dsnPath)
+	}
+}
+
+// TestSecretVolumesCarryTheirManifestMode holds every Secret volume the loop
+// renders to its entry's manifest mode as the defaultMode. The reader refuses a
+// file readable by group or others, so a volume left at the Kubernetes default
+// 0644 would fail the cloud step closed (gt-nlf1i6).
+func TestSecretVolumesCarryTheirManifestMode(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	pod := mustBuild(t, v).Deployment.Spec.Template.Spec
+	for _, file := range v.Secrets {
+		vol := volumeNamed(pod.Volumes, secretVolumeName(file.Name))
+		if vol == nil || vol.Secret == nil || vol.Secret.DefaultMode == nil {
+			t.Errorf("entry %q has no Secret volume with a defaultMode", file.Name)
+			continue
+		}
+		want, err := strconv.ParseInt(file.Mode, 8, 32)
+		if err != nil {
+			t.Fatalf("entry %q mode %q does not parse as octal: %v", file.Name, file.Mode, err)
+		}
+		if got := *vol.Secret.DefaultMode; int64(got) != want {
+			t.Errorf("entry %q volume defaultMode = %o, want its manifest mode %s", file.Name, got, file.Mode)
+		}
+	}
+}
+
+// volumeNamed returns the pod volume named name, or nil.
+func volumeNamed(volumes []Volume, name string) *Volume {
+	for i := range volumes {
+		if volumes[i].Name == name {
+			return &volumes[i]
+		}
+	}
+	return nil
 }

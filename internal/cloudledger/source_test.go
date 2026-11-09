@@ -594,3 +594,52 @@ func TestCloudLedgerRefusesAWriterRole(t *testing.T) {
 		}
 	})
 }
+
+// TestNewSourceSelectsPostgresForADSNFile holds the selection the cloud settings
+// make: a cloud block that names a DSN file reads the ledger through Postgres,
+// and one that names the report and release directories reads the files
+// (gt-nlf1i6). The settings go through ResolveCloud, the resolution the daemon
+// makes, so the test covers the selection production uses.
+func TestNewSourceSelectsPostgresForADSNFile(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	t.Run("a DSN file selects Postgres and reads the ledger", func(t *testing.T) {
+		t.Parallel()
+		l := &ledgertest.Ledger{Report: emptyReport()}
+		_, dsnPath := ledgertest.Register(t, l)
+		ts := config.TownSettings{Cloud: &config.CloudConfig{LedgerDSNFile: dsnPath}}
+
+		src, ok := cloudledger.NewSource(ts.ResolveCloud(func(string) string { return "" })).(*cloudledger.PostgresSource)
+		if !ok {
+			t.Fatalf("a ledger_dsn_file selected a source other than the Postgres one")
+		}
+		t.Cleanup(func() {
+			if err := src.Close(); err != nil {
+				t.Errorf("closing the source: %v", err)
+			}
+		})
+		if _, err := src.LatestPatrolReport(ctx); err != nil {
+			t.Fatalf("LatestPatrolReport through the selected source: %v", err)
+		}
+		if len(l.Statements()) == 0 {
+			t.Error("the Postgres source read the report without a query to the ledger")
+		}
+	})
+
+	t.Run("report and release directories select the file source", func(t *testing.T) {
+		t.Parallel()
+		f := newLedgerFixture(t)
+		reports, releases, _ := fileDirs(t, f)
+		env := map[string]string{config.CloudReportsEnv: reports, config.CloudReleasesEnv: releases}
+		ts := config.TownSettings{}
+
+		src, ok := cloudledger.NewSource(ts.ResolveCloud(func(name string) string { return env[name] })).(*cloudledger.FileSource)
+		if !ok {
+			t.Fatalf("report and release directories selected a source other than the file one")
+		}
+		if _, err := src.LatestPatrolReport(ctx); err != nil {
+			t.Fatalf("LatestPatrolReport through the file source: %v", err)
+		}
+	})
+}
