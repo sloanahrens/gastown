@@ -1857,12 +1857,12 @@ func containerSuitePayloads(script shellparse.Script, index int) []string {
 }
 
 // containerSuiteStdinPayloads returns the script text fed to a shell that reads
-// stdin. The text comes from a
-// here-string on the shell, a here-document on stdin, a process substitution
-// the shell runs as its script, or an upstream echo/printf/yes in the same
-// pipeline. A redirection that replaces stdin ("< file", "<&3", a here-
-// document) feeds the shell something this guard cannot read, so neither the
-// pipe nor a here-string is its script (gt-sveq8, gt-hizij).
+// stdin. The text comes from a here-string on the shell, a here-document on
+// stdin, a process substitution the shell runs as its script, or an upstream
+// echo/printf/yes in the same pipeline. A redirection that replaces stdin
+// ("< file", "<&3", a here-document) feeds the shell something this guard
+// cannot read, so neither the pipe nor a here-string is its script (gt-sveq8,
+// gt-hizij).
 //
 // A process substitution is the script whether the shell opens it as a script
 // file or reads it on stdin; the body's output is the script, so each producer

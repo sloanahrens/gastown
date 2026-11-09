@@ -814,6 +814,12 @@ func TestTapGuardBdCreateStoreUnreadableRefused(t *testing.T) {
 		{"open quote around a substitution", b.town, `echo "$(bd create --title=x)" "`, true},
 		{"unterminated heredoc around a create", b.town, `bash -c "bd create --title=x"; cat <<EOF`, true},
 		{"open quote, rig store", b.worktree, `bd create --title=x "`, true},
+		{"open quote, bd word split by empty quotes", b.town, `b""d create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word split by a backslash", b.town, `b\d create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word split by a quote", b.town, `'b'd create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd and create each built from quotes", b.town, `"b"'d' "cr"eate --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word split by a line continuation", b.town, "b\\\nd create --title=x --db " + townDB + ` "`, true},
+		{"open quote, escaped backslash then a newline ends the word", b.town, "echo x\\\\\nbd create --title=x --db " + townDB + ` "`, true},
 		{"open quote, no create", b.town, `bd list "`, false},
 		{"open quote, no bd", b.town, `echo "create`, false},
 	}

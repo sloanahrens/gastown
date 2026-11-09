@@ -399,3 +399,7 @@ test_scope	polecat	"bd create --title=x \""	allow		gt-j41yim	28e1c9a374a38255d41
 container_suite	polecat	"if false; then export BEADS_DB=/t/rig/.beads/x.db; fi; bd create --title=x"	allow		gt-j41yim	d472bbc7f98623cbb0b9dc1930e521ce44d0365378a460434c24b49e828b8165
 dangerous	polecat	"if false; then export BEADS_DB=/t/rig/.beads/x.db; fi; bd create --title=x"	allow		gt-j41yim	d472bbc7f98623cbb0b9dc1930e521ce44d0365378a460434c24b49e828b8165
 test_scope	polecat	"if false; then export BEADS_DB=/t/rig/.beads/x.db; fi; bd create --title=x"	allow		gt-j41yim	d472bbc7f98623cbb0b9dc1930e521ce44d0365378a460434c24b49e828b8165
+# --- gt-j41yim: concatenated bd and create words in an unreadable command are refused (quote and backslash deleted, not split on); stamp for the bd-create-store guard source after the fix ---
+container_suite	polecat	"b\"\"d create --title=x \""	refuse	cannot be read	gt-j41yim	5b5718ea1a703791675abbd06746b011a5c11d3898e9a2f90c867dae3f7f7cb8
+dangerous	polecat	"b\"\"d create --title=x \""	refuse	cannot be read	gt-j41yim	5b5718ea1a703791675abbd06746b011a5c11d3898e9a2f90c867dae3f7f7cb8
+test_scope	polecat	"b\"\"d create --title=x \""	allow		gt-j41yim	5b5718ea1a703791675abbd06746b011a5c11d3898e9a2f90c867dae3f7f7cb8

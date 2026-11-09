@@ -327,22 +327,58 @@ func bdCreateUnreadable(err error) string {
 }
 
 // bdCreateSpelled reports whether text spells a bd create: a bd command word
-// with a create verb after it. It reads the words of the text as written, with
-// quotes and grouping punctuation as separators, because the parser could not
-// read the text and a tokenizer would keep a quoted or "$("-led word whole. It
-// errs toward yes, since a command the guard cannot read is refused on a match.
+// with a create verb after it. The parser could not read the text, so its words
+// are read the way the shell reads them: quote and backslash characters are
+// dropped from a word rather than split on, so b""d, b\d and 'b'd each spell bd.
+// It errs toward yes, since a command the guard cannot read is refused on a match.
 func bdCreateSpelled(text string) bool {
-	words := strings.FieldsFunc(text, func(r rune) bool {
-		return strings.ContainsRune(" \t\r\n\"'\\`$(){}[];&|<>", r)
-	})
 	bd := false
-	for _, word := range words {
+	for _, word := range bdCreateWords(text) {
 		if bd && bdCreateVerbs[word] {
 			return true
 		}
 		bd = bd || isBdCommandWord(word)
 	}
 	return false
+}
+
+// bdCreateWordSeparators end a word in bdCreateWords: whitespace, grouping and
+// redirection punctuation, and the starts of an expansion or a substitution.
+const bdCreateWordSeparators = " \t\r\n`$(){}[];&|<>"
+
+// bdCreateWords splits text into the words bdCreateSpelled compares. A quote or
+// backslash is deleted from the word it sits in, so a word built by
+// concatenation comes out whole. A backslash-newline is a line continuation and
+// joins the two lines. Any other escaped character is read as itself, so an
+// escaped separator still ends a word.
+func bdCreateWords(text string) []string {
+	var words []string
+	var word []byte
+	flush := func() {
+		if len(word) > 0 {
+			words = append(words, string(word))
+			word = word[:0]
+		}
+	}
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c == '\\' && i+1 < len(text) {
+			i++
+			if text[i] == '\n' {
+				continue
+			}
+			c = text[i]
+		}
+		switch {
+		case strings.IndexByte(bdCreateWordSeparators, c) >= 0:
+			flush()
+		case c == '"' || c == '\'' || c == '\\':
+		default:
+			word = append(word, c)
+		}
+	}
+	flush()
+	return words
 }
 
 // judgeSegment judges one simple command, filed in dir (known false when the
