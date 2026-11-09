@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/shellparse"
 )
 
 // sandboxSecretsBrokenReader is a hook payload that cannot be read.
@@ -1295,9 +1296,6 @@ func TestSandboxSecretsVerdictsPinnedBeforeParsedSegments(t *testing.T) {
 		{"an unclosed quote after an assignment substitution", "x=$(echo printenv) '", "cannot be read (unterminated quote)"},
 		{"a shell fed a process substitution that prints the environment", "sh <(echo printenv)", "environment"},
 		{"a shell fed a process substitution that lists files", "sh <(echo ls)", ""},
-		// Intentional flip (gt-krdodf): the walk reads the word's resolved text, so
-		// the escape \x70 is the "p" the shell runs. The verdict before the move was allow.
-		{"a shell fed an ANSI-C escaped command name", "bash -c $'\\x70rintenv'", "prints the environment"},
 		{"a prefix assignment ahead of export still lists the environment", "X=1 export", "environment"},
 		{"export of a named variable lists nothing", "export FOO=bar", ""},
 		{"export -p lists the environment", "export -p", "environment"},
@@ -1327,5 +1325,78 @@ func TestSandboxSecretsStdoutTextPassesUnreadableBodyOn(t *testing.T) {
 	}
 	if reason := sandboxSecretsReason(body); !strings.Contains(reason, "cannot be read") {
 		t.Errorf("sandboxSecretsReason(%q) = %q, want the unreadable refusal", body, reason)
+	}
+}
+
+// gt-oqcbqh: an ANSI-C escaped command name is a readable command whose verdict
+// flipped at gt-krdodf, when the walk began reading the word's resolved text: the
+// escape \x70 is the "p" the shell runs. The flip is not one the overseer ruling
+// accepted for unreadable commands, so it is pinned here on its own, apart from the
+// verdicts recorded before the move. The refusal stays: allowing it would let the
+// shell print the environment.
+func TestSandboxSecretsEscapedCommandNameIsRefused(t *testing.T) {
+	t.Parallel()
+	const command = "bash -c $'\\x70rintenv'"
+	if reason := sandboxSecretsReason(command); !strings.Contains(reason, "prints the environment") {
+		t.Errorf("sandboxSecretsReason(%q) = %q, want a reason containing %q", command, reason, "prints the environment")
+	}
+}
+
+// gt-oqcbqh: a prefix assignment whose value holds a substitution is a prefix, not a
+// declaration argument, so the export it runs lists the environment. Before the
+// head was masked, the three bare-export rows with a substitution prefix were
+// allowed: the head was cut at the substitution's ")", left blank, and the prefix
+// was read as an argument. Those three are intentional flips from allow to refuse on
+// a readable command. The "-p" row was refused already, by its flag, and the rows
+// after it are allowed both before and after, so the mask must not refuse them. The
+// repeated "$(echo 1)" pins that every copy is masked, not only the first.
+func TestSandboxSecretsSubstitutionPrefixIsNotDeclarationArgument(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"a substitution prefix ahead of export", "X=$(echo 1) export", "environment"},
+		{"a substitution prefix ahead of export -p", "X=$(echo 1) export -p", "environment"},
+		{"a backtick prefix ahead of export", "X=`echo 1` export", "environment"},
+		{"a substitution prefix after a separator, its text repeated", "echo $(echo 1); X=$(echo 1) export", "environment"},
+		{"a substitution value after export is a declaration argument", "export FOO=$(echo x)", ""},
+		{"a substitution after a separator, ahead of a named export", "echo $(date); export FOO=bar", ""},
+		{"a repeated named export after a separator", "export A=1; export A=1", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if tt.want == "" && reason != "" {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want allow", tt.command, reason)
+			}
+			if tt.want != "" && !strings.Contains(reason, tt.want) {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want a reason containing %q", tt.command, reason, tt.want)
+			}
+		})
+	}
+}
+
+// gt-oqcbqh: the command here parses, and the text it feeds a shell does not. The
+// refusal comes from the walk at depth, where the payload the shell reads is judged
+// as a command: no top-level check reads it. A walk that let an unreadable payload
+// through would allow both rows.
+func TestSandboxSecretsRefusesUnreadableOutputAtDepth(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+	}{
+		{"an echo whose output a bash reads", "echo \"echo 'printenv\" | bash"},
+		{"an echo whose output a sh reads", "echo \"echo 'printenv\" | sh"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := shellparse.Parse(tt.command); err != nil {
+				t.Fatalf("shellparse.Parse(%q) = %v, want the top-level command to parse", tt.command, err)
+			}
+			if reason := sandboxSecretsReason(tt.command); !strings.Contains(reason, "cannot be read") {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want the unreadable refusal at depth", tt.command, reason)
+			}
+		})
 	}
 }

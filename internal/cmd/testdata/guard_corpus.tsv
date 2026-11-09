@@ -432,3 +432,7 @@ test_scope	polecat	"go test ./internal/shellparse/..."	allow		gt-krdodf	4a5fd746
 dangerous	polecat	"git reset --hard HEAD~1"	refuse	Hard reset discards	gt-krdodf	4f7653c45d7562f6f782277c28c8f7df4d4a0177360f98528b5f94ef1b34dc95
 container_suite	polecat	"echo ok && echo done"	allow		gt-krdodf	4f7653c45d7562f6f782277c28c8f7df4d4a0177360f98528b5f94ef1b34dc95
 test_scope	polecat	"go test ./internal/config/..."	allow		gt-krdodf	4f7653c45d7562f6f782277c28c8f7df4d4a0177360f98528b5f94ef1b34dc95
+# --- gt-oqcbqh: the assign split masks a substitution before it cuts the head, which moves the freeze stamp; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"git reset --hard origin/main~3"	refuse	Reset onto a remote-tracking ref	gt-oqcbqh	12c24168d61bb1a4693959c9dcae51fe8d6b0122396743bbce143951dceb63bb
+container_suite	polecat	"echo gt-oqcbqh"	allow		gt-oqcbqh	12c24168d61bb1a4693959c9dcae51fe8d6b0122396743bbce143951dceb63bb
+test_scope	polecat	"go test ./internal/hooks/..."	allow		gt-oqcbqh	12c24168d61bb1a4693959c9dcae51fe8d6b0122396743bbce143951dceb63bb
