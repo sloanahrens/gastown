@@ -190,9 +190,16 @@ func promptRetryGuidance(hook permissionRequestInput) string {
 }
 
 // commandSegments splits a command into its per-segment token runs, the unit
-// Claude Code's own Bash permission rules are judged in.
+// Claude Code's own Bash permission rules are judged in. A command the parser
+// reads is split by parsedTokens; one it cannot read keeps the text tokenizer,
+// shellTokenize, as its fallback. That fallback is kept until the last guard
+// moves off shellTokenize (gt-crn9gu).
 func commandSegments(command string) [][]string {
-	tokens := shellTokenize(stripHeredocBodies(strings.TrimSpace(command)))
+	command = stripHeredocBodies(strings.TrimSpace(command))
+	tokens, readable := parsedTokens(command)
+	if !readable {
+		tokens = shellTokenize(command)
+	}
 	var segments [][]string
 	var segment []string
 	for _, tok := range tokens {

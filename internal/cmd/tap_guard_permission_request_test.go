@@ -330,6 +330,88 @@ func TestPermissionRequestShapeLabels(t *testing.T) {
 	}
 }
 
+// The three retry formulations promptRetryGuidance returns for a shell call.
+const (
+	guidanceCD    = `Retry without cd, naming the directory absolutely — "rm -rf \"$dir\"/*" or "touch /abs/path/f" rather than "cd $dir && ...".`
+	guidanceGlob  = "Retry with the paths named explicitly — \"rm -rf /tmp/work/one /tmp/work/two\" rather than a glob."
+	guidancePlain = "Retry with absolute paths and no cd in a compound command, or escalate if this call is genuinely required."
+)
+
+// TestPromptShapeParsedReading pins the shape label and the retry guidance a
+// shell command gets now that commandSegments reads it through parsedTokens.
+// The first rows are the existing shape and guidance rows. The rest carry one
+// row per differential class that can move a label: a glued redirection, a
+// parenthesised or braced group, and a substitution. Where a label differs from
+// the one the shellTokenize reading gave, the row's comment names that old label.
+func TestPromptShapeParsedReading(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		command      string
+		wantShape    string
+		wantGuidance string
+	}{
+		{"existing cd then rm glob", `cd /tmp/x && rm -rf *`, "bash cd-compound-write", guidanceCD},
+		{"existing rm glob", `rm -rf /tmp/x/*`, "bash rm-glob", guidanceGlob},
+		{"existing plain command", `go test ./internal/cmd/ -run TestFoo`, "bash", guidancePlain},
+		// glued-redirection: shellTokenize kept "hi>out" as one word, so the
+		// write was not seen; the parser splits off the ">" and the target.
+		// Old reading: "bash" with the plain guidance.
+		{"glued write after cd", `cd /tmp/x && echo hi>out`, "bash cd-compound-write", guidanceCD},
+		{"glued append after cd, no blanks", `cd /tmp/x&&echo hi>>out`, "bash cd-compound-write", guidanceCD},
+		// Order does not change the label, as for "touch f && cd /x". Old
+		// reading: "bash" with the plain guidance.
+		{"glued write before cd", `echo a>b && cd /tmp/x`, "bash cd-compound-write", guidanceCD},
+		// Both readings miss a write whose descriptor is glued to it: the
+		// analyzer only looks for a leading ">". Pinned so a change to that
+		// rule shows here, not silently.
+		{"descriptor-glued write after cd", `cd /tmp/x && echo hi 2>out`, "bash", guidancePlain},
+		// group-parentheses: shellTokenize leaves the "(" or "{" as the first
+		// token of the group's segment, so cd was not a segment head. Old
+		// reading: "bash" for the first two, and "bash rm-glob" for the third.
+		{"subshell cd then write", `(cd /tmp/x && touch f)`, "bash cd-compound-write", guidanceCD},
+		{"brace group cd then write", `{ cd /tmp/x; touch f; }`, "bash cd-compound-write", guidanceCD},
+		{"subshell cd then rm glob", `(cd /tmp/x && rm -rf *)`, "bash cd-compound-write", guidanceCD},
+		// substitution: parsedTokens keeps "$(...)" whole, so the commands
+		// inside it are not segments. Old reading: "bash rm-glob", because the
+		// shellTokenize split put "rm" at a segment head by accident.
+		{"substitution holding a rm glob", `echo $(cd /tmp/x; rm -rf *)`, "bash", guidancePlain},
+		// Both readings say "bash": the cd inside the substitution is not a
+		// segment head, so the write is never paired with a cd.
+		{"substitution holding a write", `echo $(cd /tmp/x && touch f)`, "bash", guidancePlain},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			hook := payloadInput(t, bashPermissionPayload(tt.command))
+			if got := promptShape(hook); got != tt.wantShape {
+				t.Errorf("promptShape(%q) = %q, want %q", tt.command, got, tt.wantShape)
+			}
+			if got := promptRetryGuidance(hook); got != tt.wantGuidance {
+				t.Errorf("promptRetryGuidance(%q) = %q, want %q", tt.command, got, tt.wantGuidance)
+			}
+		})
+	}
+}
+
+// TestPermissionRequestUnreadableCommandKeepsShapeAndGuidance pins the fallback:
+// a command shellparse cannot read is still labelled from the shellTokenize
+// reading, so its denial keeps the shape and the guidance that reading gives.
+func TestPermissionRequestUnreadableCommandKeepsShapeAndGuidance(t *testing.T) {
+	t.Parallel()
+	command := `cd /tmp/x && touch "f`
+	if _, readable := parsedTokens(command); readable {
+		t.Fatalf("fixture %q parses, so it does not exercise the unreadable fallback", command)
+	}
+	hook := payloadInput(t, bashPermissionPayload(command))
+	if got := promptShape(hook); got != "bash cd-compound-write" {
+		t.Errorf("promptShape(%q) = %q, want bash cd-compound-write", command, got)
+	}
+	if got := promptRetryGuidance(hook); got != guidanceCD {
+		t.Errorf("promptRetryGuidance(%q) = %q, want the cd guidance", command, got)
+	}
+}
+
 // TestPermissionRequestTreatsMonitorAsShell pins gt-nol0q: Monitor carries a
 // shell command like Bash, so its denial names the command and steers the retry
 // by command shape rather than falling to the non-shell wording.
