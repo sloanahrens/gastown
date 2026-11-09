@@ -47,10 +47,11 @@
 // landing work root, mounts the dolt-backup claim read-only, and binds no sweep
 // or cache-trim role (gt-z4ag59, gt-e6gxt0).
 //
-// Values.HostGatewayIP fills the pod's hostAliases for DoltHostName, since a pod
-// has no Docker Desktop's name for the host; the operator reads the address from
-// the control VM. Empty, the pod carries no alias and the Deployment opens with
-// a comment saying so (gt-h6d5yb).
+// Values.HostGatewayIP fills the live pod's hostAliases for DoltHostName, since a
+// pod has no Docker Desktop's name for the host; the operator reads the address
+// from the control VM. Empty, or a rehearsal, the pod carries no alias and the
+// Deployment opens with a comment saying so (gt-h6d5yb). A rehearsal runs beside
+// the live container and must not reach the live Dolt server (gt-0cosuv).
 //
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
@@ -267,17 +268,17 @@ const (
 	// time, so a pod in UTC would move it by hours (gt-vi1p3).
 	PodTimeZone = "America/Chicago"
 	// DoltHostName is the name the pod reaches the host's Dolt server by, the
-	// name the settings' BEADS_DOLT_SERVER_HOST carries. The pod's hostAliases
-	// maps it to the host gateway, so the pod keeps the compose value.
+	// name the settings' BEADS_DOLT_SERVER_HOST carries. The live pod's
+	// hostAliases maps it to the host gateway, so the pod keeps the compose value.
 	DoltHostName = "host.docker.internal"
 	// DoltBackupPath is where the compose file mounts the host's Dolt backups;
 	// the dolt-backup claim is mounted there, so GT_DOLT_BACKUP_ROOT keeps the
 	// compose value.
 	DoltBackupPath = "/Users/sloan/gt-backups/dolt"
-	// noHostAliasComment is the Deployment's head comment when the render was
-	// given no gateway address, so a reader of the manifest knows the Dolt name
-	// does not resolve in this pod rather than assuming it does.
-	noHostAliasComment = "no hostAliases: Values.HostGatewayIP is empty, so " + DoltHostName + " does not resolve in this pod"
+	// noHostAliasComment is the Deployment's head comment when the pod carries no
+	// gateway alias, so a reader of the manifest knows the Dolt name does not
+	// resolve in this pod rather than assuming it does.
+	noHostAliasComment = "no hostAliases: this pod has no gateway alias, so " + DoltHostName + " does not resolve in it"
 )
 
 // podEnvDecision is the pod's answer for one environment name: keep the
@@ -475,11 +476,11 @@ type Values struct {
 	// does not need it, because it never owns the town.
 	ConfirmContainerStopped bool
 	// HostGatewayIP is the address the control cluster's nodes reach the host
-	// at, read by the overseer from the control VM. The pod's hostAliases maps
+	// at, read by the overseer from the control VM. A live pod's hostAliases maps
 	// DoltHostName to it, so the settings' Dolt endpoint keeps the compose
 	// value. A loopback or unspecified IPv4 address, an IPv6 address and text
-	// that is not an address are refused: none names another machine. Empty
-	// renders no alias, and the Deployment says so in a comment.
+	// that is not an address are refused: none names another machine. Empty, or
+	// a rehearsal, renders no alias, and the Deployment says so in a comment.
 	HostGatewayIP string
 }
 
@@ -626,9 +627,10 @@ func clusterRoleBinding(name, role, serviceAccountNamespace string) ClusterRoleB
 
 // deployment is the daemon pod: one replica under Recreate, as the container is
 // one service that owns the town's volume. Its owner annotation names the pod as
-// the town's owner, or a rehearsal, which owns nothing. When Values.HostGatewayIP
-// is set the pod's hostAliases maps DoltHostName to it; when it is empty the
-// rendered Deployment opens with noHostAliasComment.
+// the town's owner, or a rehearsal, which owns nothing. A live pod's hostAliases
+// maps DoltHostName to Values.HostGatewayIP when it is set. A rehearsal carries
+// no alias, so it cannot reach the live host's Dolt server, and the rendered
+// Deployment opens with noHostAliasComment whenever the pod carries none.
 func deployment(v Values, namespace string) Deployment {
 	owner := TownOwnerPod
 	if v.Rehearsal {
@@ -640,7 +642,7 @@ func deployment(v Values, namespace string) Deployment {
 		Containers:                    []Container{daemonContainer(v)},
 		Volumes:                       volumes(v),
 	}
-	if v.HostGatewayIP != "" {
+	if v.HostGatewayIP != "" && !v.Rehearsal {
 		pod.HostAliases = []HostAlias{{IP: v.HostGatewayIP, Hostnames: []string{DoltHostName}}}
 	}
 	return Deployment{

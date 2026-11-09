@@ -1,3 +1,4 @@
+# no hostAliases: this pod has no gateway alias, so host.docker.internal does not resolve in it
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,10 +23,6 @@ spec:
         app.kubernetes.io/name: daemon
     spec:
       serviceAccountName: daemon
-      hostAliases:
-        - ip: 192.168.5.2
-          hostnames:
-            - host.docker.internal
       terminationGracePeriodSeconds: 180
       containers:
         - name: daemon

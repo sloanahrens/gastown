@@ -159,6 +159,22 @@ func TestRehearsalDeploymentIsNotTheTownOwner(t *testing.T) {
 	compareGolden(t, filepath.Join(packageDir(t), "testdata", "rehearsal"), "deployment.yaml", document(t, d))
 }
 
+// TestRehearsalHasNoHostAlias holds the rehearsal away from the live Dolt server:
+// it runs beside the live container, so even with a gateway address the pod
+// carries no hostAlias for DoltHostName, and its Deployment says so.
+func TestRehearsalHasNoHostAlias(t *testing.T) {
+	t.Parallel()
+	v := rehearsalValues(t)
+	v.HostGatewayIP = "10.0.5.7"
+	m := mustBuild(t, v)
+	if aliases := m.Deployment.Spec.Template.Spec.HostAliases; len(aliases) != 0 {
+		t.Errorf("the rehearsal pod carries hostAliases %+v with a gateway address, want none: a rehearsal must not reach the live host Dolt server", aliases)
+	}
+	if !bytes.Contains(document(t, m.Deployment), []byte("# "+noHostAliasComment)) {
+		t.Error("the rehearsal Deployment carries no comment saying the pod has no hostAlias")
+	}
+}
+
 // TestRehearsalGolden holds the rehearsal's other objects to their goldens: the
 // namespace, the ServiceAccount, the claims, the Service and each Secret.
 func TestRehearsalGolden(t *testing.T) {
