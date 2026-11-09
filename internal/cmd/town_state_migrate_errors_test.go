@@ -259,7 +259,7 @@ func TestTownStateMigrateContainerRunning(t *testing.T) {
 		{name: "running", out: "running gt-daemon:abc1234\n", want: true},
 		{name: "restarting counts as running", out: "restarting gt-daemon:abc1234\n", want: true},
 		{name: "exited", out: "exited gt-daemon:abc1234\n", want: false},
-		{name: "absent", err: absent, want: false},
+		{name: "absent is neither running nor stopped", err: absent, wantErr: true},
 		{name: "inspect fails", err: errors.New("cannot connect"), wantErr: true},
 		{name: "no status printed", out: "running\n", wantErr: true},
 	}
@@ -271,6 +271,9 @@ func TestTownStateMigrateContainerRunning(t *testing.T) {
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("containerRunningWith = %v, nil; want an error", got)
+				}
+				if tc.err == absent && !errors.Is(err, errDaemonContainerAbsent) {
+					t.Fatalf("containerRunningWith error = %v, want errDaemonContainerAbsent", err)
 				}
 				return
 			}

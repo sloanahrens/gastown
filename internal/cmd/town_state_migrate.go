@@ -131,6 +131,7 @@ func init() {
 	townStateMigratePlanCmd.Flags().String("volume", "", "the volume whose free space the plan reads (optional)")
 	townStateMigrateCopyCmd.Flags().String("volume", "", "the named volume to copy into; it is created when absent (required)")
 	townStateMigrateCopyCmd.Flags().String("since", "", "keep only regular files modified after this RFC 3339 time (optional)")
+	townStateMigrateCopyCmd.Flags().Bool("daemon-removed", false, "with --cutover: the daemon container was removed (compose down), so a container docker cannot find counts as stopped; without it an absent container is an unmet check, because a misnamed container reads the same")
 	townStateMigrateCopyCmd.Flags().Bool("cutover", false, "the cut-over copy: refuse unless every cut-over prerequisite is met, and write the cut-over time when the copy verifies")
 	townStateMigrateCopyCmd.Flags().String("secrets-manifest", "", "deploy/daemon/secrets.yaml: its file names are left out of the copy (required)")
 	townStateMigrateVerifyCmd.Flags().String("volume", "", "the named volume to verify (required)")
@@ -159,6 +160,11 @@ type townStateMigrateEnv struct {
 	cutover      bool
 	exclude      func(string) bool
 	allowNoRigs  bool
+	// daemonRemoved is the operator's word that the daemon container was removed
+	// (compose down), not merely stopped: a container docker cannot find reads the
+	// same whether it was removed or the name is wrong, so only this flag lets an
+	// absent container count as stopped.
+	daemonRemoved bool
 	// beadsHost is the Dolt host the helper's bd reads, from the operator's
 	// shell or the town's dolt.container_host; beadsHostSource names which. An
 	// empty beadsHost means the bd read is not forwarded.
@@ -219,7 +225,13 @@ func cutoverChecks(env townStateMigrateEnv) []migrateCheck {
 	name, err := env.probes.daemonContainer(env.town)
 	if err != nil {
 		checks = append(checks, migrateCheck{Text: fmt.Sprintf("daemon container state unreadable: %v", err)})
-	} else if running, err := env.probes.containerRunning(name); err != nil {
+	} else if running, err := env.probes.containerRunning(name); errors.Is(err, errDaemonContainerAbsent) {
+		if env.daemonRemoved {
+			checks = append(checks, migrateCheck{Met: true, Text: fmt.Sprintf("daemon container absent (%s), confirmed removed by --daemon-removed", name)})
+		} else {
+			checks = append(checks, migrateCheck{Text: fmt.Sprintf("daemon container %q not found: a removed container and a misnamed one read the same; if the daemon was removed (compose down), re-run with --daemon-removed", name)})
+		}
+	} else if err != nil {
 		checks = append(checks, migrateCheck{Text: fmt.Sprintf("daemon container state unreadable: %v", err)})
 	} else if running {
 		checks = append(checks, migrateCheck{Text: fmt.Sprintf("daemon container running (%s)", name)})
@@ -750,6 +762,11 @@ func migrateEnvFromFlags(cmd *cobra.Command, needSecrets bool, findTown func() (
 			return env, fmt.Errorf("reading --cutover: %w", err)
 		}
 	}
+	if cmd.Flags().Lookup("daemon-removed") != nil {
+		if env.daemonRemoved, err = cmd.Flags().GetBool("daemon-removed"); err != nil {
+			return env, fmt.Errorf("reading --daemon-removed: %w", err)
+		}
+	}
 	if needSecrets {
 		secretsPath, err := migrateFlagString(cmd, "secrets-manifest")
 		if err != nil {
@@ -1044,16 +1061,22 @@ func daemonContainerName(town string) (string, error) {
 	return cfg.ContainerName(), nil
 }
 
+// errDaemonContainerAbsent is containerRunningWith's answer for a container
+// docker cannot find. It is neither running nor stopped: the cut-over gate reads
+// it only with the operator's --daemon-removed.
+var errDaemonContainerAbsent = errors.New("the daemon container is absent")
+
 // containerRunningWith asks docker, through run, whether the container is
-// running. An absent container is stopped; a container docker cannot inspect is
-// unknown.
+// running. A container docker cannot find is errDaemonContainerAbsent, never
+// stopped (a misnamed container reads the same as a removed one); a container
+// docker cannot inspect is unknown.
 func containerRunningWith(run templates.ContainerDocker, name string) (bool, error) {
 	st := templates.ContainerJobState(run, templates.ContainerDockerContext, name)(config.SupervisorContainer)
 	if st.Err != nil {
 		return false, st.Err
 	}
 	if !st.Loaded {
-		return false, nil
+		return false, errDaemonContainerAbsent
 	}
 	return !stoppedContainerStates[st.Status], nil
 }

@@ -386,6 +386,43 @@ func TestTownStateMigrateCopyThenVerify(t *testing.T) {
 	}
 }
 
+// TestTownStateMigrateAbsentDaemonContainer: a container docker cannot find is
+// stopped only when the operator says it was removed (--daemon-removed); a
+// misnamed container reads the same as a removed one.
+func TestTownStateMigrateAbsentDaemonContainer(t *testing.T) {
+	t.Parallel()
+	absent := func(string) (bool, error) { return false, errDaemonContainerAbsent }
+	for _, tc := range []struct {
+		name    string
+		removed bool
+		wantMet bool
+		want    string
+	}{
+		{name: "without the flag it is unmet", removed: false, wantMet: false, want: "re-run with --daemon-removed"},
+		{name: "with the flag it is met and says why", removed: true, wantMet: true, want: "confirmed removed by --daemon-removed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env, _, _ := newMigrateEnv(t, migrateTown(t))
+			env.probes = readyProbes()
+			env.probes.containerRunning = absent
+			env.daemonRemoved = tc.removed
+			var found bool
+			for _, c := range cutoverChecks(env) {
+				if strings.Contains(c.Text, "daemon container") {
+					found = true
+					if c.Met != tc.wantMet || !strings.Contains(c.Text, tc.want) {
+						t.Errorf("check = %+v, want met=%v naming %q", c, tc.wantMet, tc.want)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("no daemon container check was produced")
+			}
+		})
+	}
+}
+
 // TestTownStateMigrateCutoverRefusesAnUnsafeState: --cutover is refused, before
 // any byte moves, with the hold absent, the container running or a landing in
 // flight; a rehearsal copy does not need the hold or the stopped container; a
@@ -407,6 +444,11 @@ func TestTownStateMigrateCutoverRefusesAnUnsafeState(t *testing.T) {
 			p.containerRunning = func(string) (bool, error) { return true, nil }
 			return p
 		}(), want: "daemon container running"},
+		{name: "container absent without the operator's word", probes: func() migrateProbes {
+			p := readyProbes()
+			p.containerRunning = func(string) (bool, error) { return false, errDaemonContainerAbsent }
+			return p
+		}(), want: "not found: a removed container and a misnamed one read the same"},
 		{name: "container state unknown", probes: func() migrateProbes {
 			p := readyProbes()
 			p.containerRunning = func(string) (bool, error) { return false, errors.New("docker inspect failed") }
