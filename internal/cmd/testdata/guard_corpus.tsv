@@ -440,3 +440,7 @@ test_scope	polecat	"go test ./internal/hooks/..."	allow		gt-oqcbqh	12c24168d61bb
 dangerous	polecat	"git reset --hard HEAD~2"	refuse	Hard reset discards	gt-bogfce	abaae2455787b45bb216b2f99e7006ccf11b0c1c501b36111c5b086140f0f20f
 container_suite	polecat	"echo ok; echo done"	allow		gt-bogfce	abaae2455787b45bb216b2f99e7006ccf11b0c1c501b36111c5b086140f0f20f
 test_scope	polecat	"go test ./internal/shellparse/... -run TestParse"	allow		gt-bogfce	abaae2455787b45bb216b2f99e7006ccf11b0c1c501b36111c5b086140f0f20f
+# --- gt-bogfce: the polecat-paths guard reads its substitutions from the parsed command (an unreadable line that holds one is refused, fail closed), which moves the freeze stamp; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"git reset --hard HEAD~3"	refuse	Hard reset discards	gt-bogfce	2b7175ffcb573cefded05f8d8ad493341ad9b17c17c12bd85e9c1441a4f554d9
+container_suite	polecat	"echo ok && echo fine"	allow		gt-bogfce	2b7175ffcb573cefded05f8d8ad493341ad9b17c17c12bd85e9c1441a4f554d9
+test_scope	polecat	"go test ./internal/shellparse/... -run TestParseWordRaw"	allow		gt-bogfce	2b7175ffcb573cefded05f8d8ad493341ad9b17c17c12bd85e9c1441a4f554d9

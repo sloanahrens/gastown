@@ -791,6 +791,11 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		// Command substitutions run as real commands.
 		{"writing inside a command substitution", `echo "$(cp a.go ` + sib + `)"`, true},
 		{"writing inside backticks", "echo `cp a.go " + sib + "`", true},
+		// A line the parser cannot read may hold a substitution the guard cannot
+		// name, so the line is refused (fail closed). A line with no substitution
+		// has nothing to name, and stays as it was.
+		{"a substitution in a line the parser cannot read", `echo $(date) "unterminated`, true},
+		{"a line the parser cannot read with no substitution", `echo "unterminated`, false},
 		// A body holding a parenthesis is cut whole, not at the first ")"
 		// (gt-d1mlb).
 		{"writing after a quoted paren in a substitution", `echo "$(grep -E '(a|b)' f; cp a.go ` + sib + `)"`, true},
@@ -1101,7 +1106,10 @@ func TestPolecatPathGuardReadingsStartFromEntry(t *testing.T) {
 		wantBlock bool
 	}{
 		{"payload with cd - after a reading that cd'd", `X=$(echo ")" ) cd sub ) bash -c "cd -; echo hi"`, true},
-		{"payload echoing after a reading that cd'd", `X=$(echo ")" ) cd sub ) bash -c "echo hi"`, false},
+		// Intentional flip (gt-bogfce): the parser cannot read this line (an
+		// unbalanced parenthesis), so its substitution is unknown and the line
+		// is refused rather than passed, the fail-closed reading.
+		{"payload echoing after a reading that cd'd", `X=$(echo ")" ) cd sub ) bash -c "echo hi"`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := p.run(t, "Bash", commandInput(tc.command))
@@ -1188,8 +1196,11 @@ func TestPolecatPathGuardRefusesTooManyCarriedDirs(t *testing.T) {
 		}
 		return strings.Join(parts, " ")
 	}
-	if reason := scope.checkBashCommand(command(6), 0); reason != "" {
-		t.Fatalf("six readings from %d carried dirs: refused with %q, want allowed at the cap", maxWalkDirs-6, reason)
+	// The line is unreadable (an unbalanced parenthesis), so it is refused for
+	// its substitutions, fail closed (gt-bogfce). What this test pins is that
+	// six readings stay under the cap: the refusal is not the cap's.
+	if reason := scope.checkBashCommand(command(6), 0); strings.Contains(reason, "too many directory changes") {
+		t.Fatalf("six readings from %d carried dirs: refused at the cap with %q, want the cap not reached", maxWalkDirs-6, reason)
 	}
 	reason := scope.checkBashCommand(command(7), 0)
 	if !strings.Contains(reason, "too many directory changes") {
