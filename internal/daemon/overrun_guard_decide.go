@@ -329,13 +329,16 @@ type overrunState struct {
 	// refused, and counts in SaveFailures: the stop holds and the next tick
 	// saves again. A success clears both. At overrunSaveMaxAttempts consecutive
 	// refusals the stop gives up on the save (SaveGaveUp): the seat is parked
-	// with SaveFailure as the reason, and the sandbox is kept.
-	SavedAt       time.Time `json:"saved_at,omitzero"`
-	SavedHead     string    `json:"saved_head,omitempty"`
-	SaveCommitted bool      `json:"save_committed,omitempty"`
-	SaveFailure   string    `json:"save_failure,omitempty"`
-	SaveFailures  int       `json:"save_failures,omitempty"`
-	SaveGaveUp    bool      `json:"save_gave_up,omitempty"`
+	// with SaveFailure as the reason, and the sandbox is kept. A late check
+	// (step 2a) that cannot read the worktree counts in the same SaveFailures
+	// and sets SaveFailedLate, so the hand-back note says it was a late check.
+	SavedAt        time.Time `json:"saved_at,omitzero"`
+	SavedHead      string    `json:"saved_head,omitempty"`
+	SaveCommitted  bool      `json:"save_committed,omitempty"`
+	SaveFailure    string    `json:"save_failure,omitempty"`
+	SaveFailures   int       `json:"save_failures,omitempty"`
+	SaveFailedLate bool      `json:"save_failed_late,omitempty"`
+	SaveGaveUp     bool      `json:"save_gave_up,omitempty"`
 
 	// ReworkSHA is the commit the kept branch held on origin before the stop's
 	// own push, when it was the worktree's head too: the finished work was
