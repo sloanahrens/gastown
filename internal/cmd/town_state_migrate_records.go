@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/townstate"
 )
 
 // seedRecordRel is the record a seed writes under the town's daemon directory
@@ -16,9 +18,10 @@ import (
 // volume is allowed only when this record names that volume.
 const seedRecordRel = "daemon/town-state-seed.json"
 
-// cutoverRecordRel is the cut-over time gt-yjzepk.7's landing check reads. It is
-// written only after a copy, its bd read and its verify have all passed.
-const cutoverRecordRel = "daemon/town-state-cutover.json"
+// cutoverRecordRel is the cut-over record. It is written only after a copy, its
+// bd read and its verify have all passed; townstate owns the path and the
+// day-one checks read it from there.
+const cutoverRecordRel = townstate.CutoverRecordRel
 
 // seedRecord is what the seed record holds. Files and Bytes are counted before
 // the record itself, which the copy carries as one more file.
