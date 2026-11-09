@@ -35,14 +35,22 @@ type Script struct {
 
 	// Subs holds the substitutions that run from a construct header (a for
 	// loop's iteration list, a case word or pattern, an arithmetic or [[ ]]
-	// expression) and so have no segment of their own.
+	// expression) and so have no segment of their own. An arithmetic expansion
+	// in a header is listed here too, as a Script whose Raw is its body and
+	// whose Subs are the substitutions inside it.
 	Subs []Script
 
 	// Raw is the source text of a substitution's body as written: the text
 	// between "$(" or "`" and the closing ")" or "`", or between "<(" or ">("
-	// and ")". The body of a nested substitution keeps its escapes and quotes
-	// as written. Parse's own result, the whole command, has no Raw.
+	// and ")". An arithmetic expansion listed in Subs has the text between "$(("
+	// and "))" (or "$[" and "]"). The body of a nested substitution keeps its
+	// escapes and quotes as written. Parse's own result, the whole command, has
+	// no Raw.
 	Raw string
+
+	// Backquote reports that the substitution was written with backquotes, "`cmd`"
+	// rather than "$(cmd)". Its Raw keeps the backquote escapes as written.
+	Backquote bool
 }
 
 // Segment is one command site: a simple command, a declaration or let clause,
@@ -265,6 +273,11 @@ type flattener struct {
 	// quoted counts the double-quoted words and here-document bodies the walk
 	// is inside, where a "<(" or ">(" is plain text to the shell.
 	quoted int
+
+	// inHeader reports that the walk is inside a construct header (a for-in
+	// list, a case word or pattern, a [[ ]] expression), where an arithmetic
+	// expansion has no segment of its own to carry its text.
+	inHeader bool
 }
 
 // conditionally runs walk with the segments it adds marked Conditional.
@@ -439,9 +452,11 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 	case *syntax.ForClause:
 		switch loop := x.Loop.(type) {
 		case *syntax.WordIter:
-			for _, item := range loop.Items {
-				f.wordSubs(item, &into.Subs)
-			}
+			f.asHeader(func() {
+				for _, item := range loop.Items {
+					f.wordSubs(item, &into.Subs)
+				}
+			})
 		case *syntax.CStyleLoop:
 			for _, expr := range []syntax.ArithmExpr{loop.Init, loop.Cond, loop.Post} {
 				if expr != nil {
@@ -458,11 +473,13 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 		f.conditionally(func() { f.stmts(x.Do, into) })
 
 	case *syntax.CaseClause:
-		f.wordSubs(x.Word, &into.Subs)
+		f.asHeader(func() { f.wordSubs(x.Word, &into.Subs) })
 		for _, item := range x.Items {
-			for _, pattern := range item.Patterns {
-				f.wordSubs(pattern, &into.Subs)
-			}
+			f.asHeader(func() {
+				for _, pattern := range item.Patterns {
+					f.wordSubs(pattern, &into.Subs)
+				}
+			})
 			f.conditionally(func() { f.stmts(item.Stmts, into) })
 		}
 
@@ -530,7 +547,7 @@ func (f *flattener) command(c syntax.Command, into *Script) {
 	case *syntax.TestClause:
 		// [[ ]] runs no words of its own; only its substitutions run.
 		if x.X != nil {
-			f.testSubs(x.X, &into.Subs)
+			f.asHeader(func() { f.testSubs(x.X, &into.Subs) })
 		}
 
 	default:
@@ -980,7 +997,7 @@ func (f *flattener) partsSubs(parts []syntax.WordPart, dest *[]Script) {
 			f.paramExpSubs(x, dest)
 		case *syntax.ArithmExp:
 			if x.X != nil {
-				f.arithmSubs(x.X, dest)
+				f.arithmExp(x, dest)
 			}
 		case *syntax.BraceExp:
 			for _, elem := range x.Elems {
@@ -1004,17 +1021,69 @@ func (f *flattener) script(node syntax.Node, stmts []*syntax.Stmt, dest *[]Scrip
 	if f.err != nil {
 		return
 	}
+	backquote := false
+	if x, ok := node.(*syntax.CmdSubst); ok {
+		backquote = x.Backquotes
+	}
 	// A substitution runs in a shell of its own, so the subshells enclosing
-	// the word it is written in do not enclose its segments.
-	outer, outerQuoted := f.shells, f.quoted
-	f.shells, f.quoted = nil, 0
-	script := Script{Raw: raw}
+	// the word it is written in do not enclose its segments, and a header
+	// around it does not reach its commands.
+	outer, outerQuoted, outerHeader := f.shells, f.quoted, f.inHeader
+	f.shells, f.quoted, f.inHeader = nil, 0, false
+	script := Script{Raw: raw, Backquote: backquote}
 	f.stmts(stmts, &script)
-	f.shells, f.quoted = outer, outerQuoted
+	f.shells, f.quoted, f.inHeader = outer, outerQuoted, outerHeader
 	if f.err != nil {
 		return
 	}
 	*dest = append(*dest, script)
+}
+
+// asHeader runs walk with the construct-header flag set, so the arithmetic
+// expansions it reaches are exposed by arithmExp. The flag is restored on
+// return, whether or not walk failed.
+func (f *flattener) asHeader(walk func()) {
+	outer := f.inHeader
+	f.inHeader = true
+	walk()
+	f.inHeader = outer
+}
+
+// arithmExp appends the substitutions in an arithmetic expansion to dest. In a
+// construct header the expansion has no Word of its own to carry its text, so
+// its body is appended too, as a Script whose Raw is the body text; the
+// substitutions inside the body nest under that Script.
+func (f *flattener) arithmExp(x *syntax.ArithmExp, dest *[]Script) {
+	if !f.inHeader {
+		f.arithmSubs(x.X, dest)
+		return
+	}
+	body := Script{Raw: f.arithmBody(x)}
+	if f.err != nil {
+		return
+	}
+	f.arithmSubs(x.X, &body.Subs)
+	*dest = append(*dest, body)
+}
+
+// arithmBody is the source text between the delimiters of an arithmetic
+// expansion: the text after "$((" up to the first ")" of "))", or after "$["
+// up to "]". A position outside src is a failure, never empty text.
+func (f *flattener) arithmBody(x *syntax.ArithmExp) string {
+	open := 3
+	if x.Bracket {
+		open = 2
+	}
+	if !x.Left.IsValid() || !x.Right.IsValid() {
+		f.record(&UnparseableError{Construct: "source position out of range"})
+		return ""
+	}
+	s, e := int(x.Left.Offset())+open, int(x.Right.Offset())
+	if s < 0 || e < s || e > len(f.src) {
+		f.record(&UnparseableError{Construct: "source position out of range"})
+		return ""
+	}
+	return f.src[s:e]
 }
 
 // substBody is the source text between the delimiters of a substitution node:
@@ -1125,7 +1194,7 @@ func (f *flattener) expWordSubs(w *syntax.Word, dest *[]Script) {
 		f.record(unparseable(err))
 		return
 	}
-	g := &flattener{src: synthetic, conditional: f.conditional}
+	g := &flattener{src: synthetic, conditional: f.conditional, inHeader: f.inHeader}
 	var parsed Script
 	g.stmts(file.Stmts, &parsed)
 	if g.err != nil {

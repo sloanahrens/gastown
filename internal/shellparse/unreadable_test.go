@@ -137,6 +137,15 @@ func TestParseUnparseableNamesConstructFailClosed(t *testing.T) {
 			},
 			want: "source position out of range",
 		},
+		{
+			name: "arithmetic expansion in a header without a position",
+			run: func(f *flattener) {
+				f.asHeader(func() {
+					f.partsSubs([]syntax.WordPart{&syntax.ArithmExp{X: &syntax.Word{}}}, &[]Script{})
+				})
+			},
+			want: "source position out of range",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
