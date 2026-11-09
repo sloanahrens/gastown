@@ -508,8 +508,16 @@ func tableCells(line string) []string {
 	return cells
 }
 
+// handWrittenRows are rows for a call the scan cannot read, because the call
+// runs a program it takes as a parameter (gt-cesfam). The row still cites the
+// line that runs the program, which the citation check reads, and the closing
+// section lists it. Keyed by file, function and line.
+var handWrittenRows = map[string]bool{
+	"internal/doltserver/host.go\x00host.probe\x00238": true,
+}
+
 // compareInventory reports every call site the table does not classify and
-// every row that names no call at its line.
+// every row that names no call at its line, except a hand-written row.
 func compareInventory(sites []engineSite, rows []engineRow) []string {
 	rowKey := map[string]bool{}
 	for _, r := range rows {
@@ -529,7 +537,8 @@ func compareInventory(sites []engineSite, rows []engineRow) []string {
 		problems = append(problems, fmt.Sprintf("%s:%d: %s %s and %s has no row for it: %s", s.File, s.Line, s.Symbol, what, engineDoc, s.Text))
 	}
 	for _, r := range rows {
-		if r.Line != 0 && !siteKey[fmt.Sprintf("%s\x00%s\x00%d", r.File, r.Symbol, r.Line)] {
+		key := fmt.Sprintf("%s\x00%s\x00%d", r.File, r.Symbol, r.Line)
+		if r.Line != 0 && !siteKey[key] && !handWrittenRows[key] {
 			problems = append(problems, fmt.Sprintf("row %d (%s %s line %d): names no docker CLI call at that line", r.DocLine, r.File, r.Symbol, r.Line))
 		}
 	}
