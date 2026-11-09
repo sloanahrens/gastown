@@ -1470,3 +1470,37 @@ func TestSandboxSecretsHeaderArithmeticVerdicts(t *testing.T) {
 		})
 	}
 }
+
+// gt-l5pbgs (overseer ruling, escalation hq-wisp-cvnjy): 147 verdicts flipped from
+// refuse to allow when the walk moved onto the parse. Every one was refused on
+// main only because the old text scanner cut a dollar-paren body at the first
+// close paren of a case pattern, or cut a backquote inside a dollar-double-paren,
+// and then called the fragment unreadable. The parser reads the same command, so
+// the verdict is the one its real substitution bodies earn. These are intentional
+// flips; each class has a twin whose real body prints the environment, which must
+// stay refused, so the pin cannot hide a loosening.
+func TestSandboxSecretsParserReadableCommandsAreJudgedOnTheirBodies(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"a case pattern close paren inside a substitution, data body", "x=$(case printenv in *) ;; esac)", ""},
+		{"a case pattern close paren inside a substitution, a real printenv body", "x=$(case a in *) printenv ;; esac)", "environment"},
+		{"a backquote inside a for-in substitution, data body", "for x in $(echo `echo hi`); do echo $x; done", ""},
+		{"a backquote inside a for-in substitution, a real printenv body", "for x in $(echo `printenv`); do echo $x; done", "environment"},
+		{"a backquote inside a double-paren, data body", "echo \"$((`echo \\`echo hi\\``))\"", ""},
+		{"a backquote inside a double-paren, a real printenv body", "echo \"$((`echo \\`printenv\\``))\"", "environment"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if tt.want == "" && reason != "" {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want allow", tt.command, reason)
+			}
+			if tt.want != "" && !strings.Contains(reason, tt.want) {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want a reason containing %q", tt.command, reason, tt.want)
+			}
+		})
+	}
+}
