@@ -135,7 +135,7 @@ func TestRehearsalMountsNoPromoteKeyAndBindsNoSweepRole(t *testing.T) {
 		kinds = append(kinds, obj.Kind)
 	}
 	// No binding document of any kind, not even an empty one.
-	want := []string{"Namespace", "ServiceAccount", "PersistentVolumeClaim", "PersistentVolumeClaim", "Service", "Secret", "Deployment"}
+	want := []string{"Namespace", "ServiceAccount", "PersistentVolumeClaim", "PersistentVolumeClaim", "PersistentVolumeClaim", "Service", "Secret", "Deployment"}
 	if !slices.Equal(kinds, want) {
 		t.Errorf("the rehearsal renders the kinds %q, want %q: no RoleBinding or ClusterRoleBinding", kinds, want)
 	}
@@ -173,6 +173,7 @@ func TestRehearsalGolden(t *testing.T) {
 		{"service-account.yaml", m.ServiceAccount},
 		{"town-state-claim.yaml", m.TownStateClaim},
 		{"landing-work-claim.yaml", m.LandingWorkClaim},
+		{"dolt-backup-claim.yaml", m.DoltBackupClaim},
 		{"forgejo-service.yaml", m.ForgejoService},
 	} {
 		compareGolden(t, dir, doc.file, document(t, doc.value))
@@ -278,6 +279,16 @@ func volumeMountAt(mounts []VolumeMount, path string) *VolumeMount {
 		}
 	}
 	return nil
+}
+
+// volumeClaim returns the claim the volume named name carries, or "".
+func volumeClaim(volumes []Volume, name string) string {
+	for _, vol := range volumes {
+		if vol.Name == name && vol.PersistentVolumeClaim != nil {
+			return vol.PersistentVolumeClaim.ClaimName
+		}
+	}
+	return ""
 }
 
 // volumeSecret returns the Secret the volume named name carries, or "".

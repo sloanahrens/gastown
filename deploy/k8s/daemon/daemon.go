@@ -1,10 +1,11 @@
 // Package daemon renders the Kubernetes objects the town's daemon needs on the
 // control cluster: the namespace, the ServiceAccount the pod runs as, the
-// claims that carry the town root and the landing work root, the Service that
-// keeps the name forgejo, one Secret per file of the daemon's secrets manifest,
-// the Deployment itself, and the bindings that give the pod the sweep roles
-// deploy/k8s/sweep-rbac.yaml defines. It renders only, so no apply path and no
-// Kubernetes client lives here (gt-gg9hv.69, gt-gg9hv.70).
+// claims that carry the town root, the landing work root and the host's Dolt
+// backups, the Service that keeps the name forgejo, one Secret per file of the
+// daemon's secrets manifest, the Deployment itself, and the bindings that give
+// the pod the sweep roles deploy/k8s/sweep-rbac.yaml defines. It renders only,
+// so no apply path and no Kubernetes client lives here (gt-gg9hv.69,
+// gt-gg9hv.70).
 //
 // The pod mounts each volume at the path the compose container mounts it at, so
 // no setting that names a path changes at the move (gt-gg9hv.30). Mounts holds
@@ -43,8 +44,13 @@
 // it names its own namespace (never DefaultNamespace, the sweep's, the cache
 // trim's or the Forgejo namespace), carries gt/town-owner: rehearsal, needs no
 // ConfirmContainerStopped, mounts only the rehearsalSecrets entries and no
-// landing work root, and binds no sweep or cache-trim role (gt-z4ag59,
-// gt-e6gxt0).
+// landing work root, mounts the dolt-backup claim read-only, and binds no sweep
+// or cache-trim role (gt-z4ag59, gt-e6gxt0).
+//
+// Values.HostGatewayIP fills the pod's hostAliases for DoltHostName, since a pod
+// has no Docker Desktop's name for the host; the operator reads the address from
+// the control VM. Empty, the pod carries no alias and the Deployment opens with
+// a comment saying so (gt-h6d5yb).
 //
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
@@ -134,6 +140,11 @@ const (
 	// LandingWorkClaim is the claim carrying the landing worker's work root,
 	// and the pod volume name it is mounted by.
 	LandingWorkClaim = "landing-work"
+	// DoltBackupClaim is the claim carrying the host's Dolt backups, and the pod
+	// volume name it is mounted by. It is a claim of its own so a backup never
+	// fills the town-state volume, and the off-box copy is made from the pod
+	// (gt-gg9hv.30).
+	DoltBackupClaim = "dolt-backup"
 	// TempVolume is the pod's scratch volume: an emptyDir at TempPath carrying
 	// GOTMPDIR and TMPDIR.
 	TempVolume = "gotmp"
@@ -149,6 +160,9 @@ const (
 	// DefaultLandingWorkStorage is the landing-work claim's size when Values
 	// names none.
 	DefaultLandingWorkStorage = "20Gi"
+	// DefaultDoltBackupStorage is the dolt-backup claim's size when Values names
+	// none.
+	DefaultDoltBackupStorage = "20Gi"
 	// DefaultStorageClass is the claims' storage class when Values names none.
 	DefaultStorageClass = "local-path"
 	// DefaultForgejoService and DefaultForgejoNamespace name the Forgejo
@@ -252,14 +266,18 @@ const (
 	// polecat_pool.timezone: the daemon's 04:30 maintenance window reads local
 	// time, so a pod in UTC would move it by hours (gt-vi1p3).
 	PodTimeZone = "America/Chicago"
-	// DoltHostName is the name the pod reaches the host's Dolt server by;
-	// gt-h6d5yb adds the hostAliases entry that maps it to the host gateway,
-	// so BEADS_DOLT_SERVER_HOST keeps the compose value.
+	// DoltHostName is the name the pod reaches the host's Dolt server by, the
+	// name the settings' BEADS_DOLT_SERVER_HOST carries. The pod's hostAliases
+	// maps it to the host gateway, so the pod keeps the compose value.
 	DoltHostName = "host.docker.internal"
 	// DoltBackupPath is where the compose file mounts the host's Dolt backups;
-	// gt-h6d5yb mounts its dolt-backup claim at this path, so
-	// GT_DOLT_BACKUP_ROOT keeps the compose value.
+	// the dolt-backup claim is mounted there, so GT_DOLT_BACKUP_ROOT keeps the
+	// compose value.
 	DoltBackupPath = "/Users/sloan/gt-backups/dolt"
+	// noHostAliasComment is the Deployment's head comment when the render was
+	// given no gateway address, so a reader of the manifest knows the Dolt name
+	// does not resolve in this pod rather than assuming it does.
+	noHostAliasComment = "no hostAliases: Values.HostGatewayIP is empty, so " + DoltHostName + " does not resolve in this pod"
 )
 
 // podEnvDecision is the pod's answer for one environment name: keep the
@@ -365,12 +383,13 @@ var townRootDirs = manifestdata.DirNames{
 var Mounts = mountTable(manifestdata.Default(townRootDirs))
 
 // mountTable is the pod's mount table for the split m. The town-state claim
-// carries m's daemon-owned rows in m's order; the other two carry nothing of the
+// carries m's daemon-owned rows in m's order; the others carry nothing of the
 // town.
 func mountTable(m *manifestdata.Manifest) []Mount {
 	return []Mount{
 		{Volume: TownStateClaim, Path: TownRootPath, Entries: ownedBy(m, manifestdata.OwnerDaemon)},
 		{Volume: LandingWorkClaim, Path: LandingWorkPath},
+		{Volume: DoltBackupClaim, Path: DoltBackupPath},
 		{Volume: TempVolume, Path: TempPath},
 	}
 }
@@ -402,6 +421,9 @@ type Values struct {
 	// LandingWorkStorage is the landing-work claim's requested size;
 	// DefaultLandingWorkStorage when empty.
 	LandingWorkStorage string
+	// DoltBackupStorage is the dolt-backup claim's requested size;
+	// DefaultDoltBackupStorage when empty.
+	DoltBackupStorage string
 	// StorageClass is the claims' storage class; DefaultStorageClass when
 	// empty.
 	StorageClass string
@@ -452,6 +474,13 @@ type Values struct {
 	// of the container and the pod may own the town (gt-gg9hv.30). A rehearsal
 	// does not need it, because it never owns the town.
 	ConfirmContainerStopped bool
+	// HostGatewayIP is the address the control cluster's nodes reach the host
+	// at, read by the overseer from the control VM. The pod's hostAliases maps
+	// DoltHostName to it, so the settings' Dolt endpoint keeps the compose
+	// value. A loopback or unspecified IPv4 address, an IPv6 address and text
+	// that is not an address are refused: none names another machine. Empty
+	// renders no alias, and the Deployment says so in a comment.
+	HostGatewayIP string
 }
 
 // Manifests is what Build returns, in the order Render writes it.
@@ -460,6 +489,7 @@ type Manifests struct {
 	ServiceAccount       ServiceAccount
 	TownStateClaim       PersistentVolumeClaim
 	LandingWorkClaim     PersistentVolumeClaim
+	DoltBackupClaim      PersistentVolumeClaim
 	ForgejoService       Service
 	Secrets              []Secret
 	Deployment           Deployment
@@ -493,6 +523,7 @@ func Build(v Values) (Manifests, error) {
 		},
 		TownStateClaim:   claim(TownStateClaim, namespace, v.TownStateStorage, v.StorageClass),
 		LandingWorkClaim: claim(LandingWorkClaim, namespace, v.LandingWorkStorage, v.StorageClass),
+		DoltBackupClaim:  claim(DoltBackupClaim, namespace, v.DoltBackupStorage, v.StorageClass),
 		ForgejoService: Service{
 			TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Service"},
 			Metadata: objectMeta(ForgejoName, namespace),
@@ -595,11 +626,22 @@ func clusterRoleBinding(name, role, serviceAccountNamespace string) ClusterRoleB
 
 // deployment is the daemon pod: one replica under Recreate, as the container is
 // one service that owns the town's volume. Its owner annotation names the pod as
-// the town's owner, or a rehearsal, which owns nothing.
+// the town's owner, or a rehearsal, which owns nothing. When Values.HostGatewayIP
+// is set the pod's hostAliases maps DoltHostName to it; when it is empty the
+// rendered Deployment opens with noHostAliasComment.
 func deployment(v Values, namespace string) Deployment {
 	owner := TownOwnerPod
 	if v.Rehearsal {
 		owner = TownOwnerRehearsal
+	}
+	pod := PodSpec{
+		ServiceAccountName:            ServiceAccountName,
+		TerminationGracePeriodSeconds: int64(v.TerminationGraceSeconds),
+		Containers:                    []Container{daemonContainer(v)},
+		Volumes:                       volumes(v),
+	}
+	if v.HostGatewayIP != "" {
+		pod.HostAliases = []HostAlias{{IP: v.HostGatewayIP, Hostnames: []string{DoltHostName}}}
 	}
 	return Deployment{
 		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
@@ -615,12 +657,7 @@ func deployment(v Values, namespace string) Deployment {
 			Selector: LabelSelector{MatchLabels: selectorLabels()},
 			Template: PodTemplate{
 				Metadata: PodTemplateMeta{Labels: labels()},
-				Spec: PodSpec{
-					ServiceAccountName:            ServiceAccountName,
-					TerminationGracePeriodSeconds: int64(v.TerminationGraceSeconds),
-					Containers:                    []Container{daemonContainer(v)},
-					Volumes:                       volumes(v),
-				},
+				Spec:     pod,
 			},
 		},
 	}
@@ -733,7 +770,10 @@ func volumes(v Values) []Volume {
 	if !v.Rehearsal {
 		vols = append(vols, Volume{Name: LandingWorkClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: LandingWorkClaim}})
 	}
-	vols = append(vols, Volume{Name: TempVolume, EmptyDir: &EmptyDirVolumeSource{}})
+	vols = append(vols,
+		Volume{Name: DoltBackupClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: DoltBackupClaim}},
+		Volume{Name: TempVolume, EmptyDir: &EmptyDirVolumeSource{}},
+	)
 	for _, file := range v.Secrets {
 		vols = append(vols, Volume{
 			Name:   secretVolumeName(file.Name),
@@ -754,7 +794,12 @@ func mounts(v Values) []VolumeMount {
 	if !v.Rehearsal {
 		m = append(m, VolumeMount{Name: LandingWorkClaim, MountPath: LandingWorkPath})
 	}
-	m = append(m, VolumeMount{Name: TempVolume, MountPath: TempPath})
+	m = append(m,
+		// A rehearsal must not write a backup of the live Dolt, so its claim is
+		// read-only there (gt-z4ag59).
+		VolumeMount{Name: DoltBackupClaim, MountPath: DoltBackupPath, ReadOnly: v.Rehearsal},
+		VolumeMount{Name: TempVolume, MountPath: TempPath},
+	)
 	for _, file := range v.Secrets {
 		m = append(m, VolumeMount{
 			Name:      secretVolumeName(file.Name),
@@ -834,6 +879,9 @@ func (v Values) withDefaults() Values {
 	if v.LandingWorkStorage == "" {
 		v.LandingWorkStorage = DefaultLandingWorkStorage
 	}
+	if v.DoltBackupStorage == "" {
+		v.DoltBackupStorage = DefaultDoltBackupStorage
+	}
 	if v.StorageClass == "" {
 		v.StorageClass = DefaultStorageClass
 	}
@@ -861,6 +909,9 @@ func (v Values) validate() error {
 	}
 	if !storageRE.MatchString(v.LandingWorkStorage) {
 		return fmt.Errorf("Values.LandingWorkStorage %q: want a non-zero whole number and one of Ki, Mi, Gi or Ti, such as 20Gi", v.LandingWorkStorage)
+	}
+	if !storageRE.MatchString(v.DoltBackupStorage) {
+		return fmt.Errorf("Values.DoltBackupStorage %q: want a non-zero whole number and one of Ki, Mi, Gi or Ti, such as 20Gi", v.DoltBackupStorage)
 	}
 	if !validDNS1123Subdomain(v.StorageClass) {
 		return fmt.Errorf("Values.StorageClass %q: want a DNS-1123 subdomain of at most 253 characters, such as local-path", v.StorageClass)
@@ -930,6 +981,9 @@ func (v Values) validateDaemon() error {
 	case v.TerminationGraceSeconds < MinimumTerminationGraceSeconds:
 		return fmt.Errorf("Values.TerminationGraceSeconds %d: want at least %d, the daemon's shutdown budget plus its landing-pass drain bound, or the pod is SIGKILLed mid-drain", v.TerminationGraceSeconds, MinimumTerminationGraceSeconds)
 	}
+	if err := v.validateHostGateway(); err != nil {
+		return err
+	}
 	if err := v.validateCredentials(); err != nil {
 		return err
 	}
@@ -937,6 +991,49 @@ func (v Values) validateDaemon() error {
 		return err
 	}
 	return v.validateVolumes()
+}
+
+// validateHostGateway refuses a gateway address that names no other machine: a
+// loopback or unspecified IPv4 address, an IPv6 address, and text that is not an
+// address at all. The refusal carries the value, since the operator passed it.
+func (v Values) validateHostGateway() error {
+	if v.HostGatewayIP == "" {
+		return nil
+	}
+	if !validIPv4(v.HostGatewayIP) {
+		return fmt.Errorf("Values.HostGatewayIP %q: want a dotted IPv4 address such as 192.168.5.2", v.HostGatewayIP)
+	}
+	switch {
+	case v.HostGatewayIP == "0.0.0.0":
+		return fmt.Errorf("Values.HostGatewayIP %q: is the unspecified address, which names no machine; name the address the host gateway answers on", v.HostGatewayIP)
+	case strings.HasPrefix(v.HostGatewayIP, "127."):
+		return fmt.Errorf("Values.HostGatewayIP %q: is a loopback address, which names the pod's own network; name the address the host gateway answers on", v.HostGatewayIP)
+	}
+	return nil
+}
+
+// validIPv4 reports whether s is a dotted-quad IPv4 address: four decimal
+// octets, no leading zero, each 0 to 255. It is written here because the import
+// rule forbids the net package, which gives the renderer a socket.
+func validIPv4(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || len(part) > 3 || (len(part) > 1 && part[0] == '0') {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		if n, err := strconv.Atoi(part); err != nil || n > 255 {
+			return false
+		}
+	}
+	return true
 }
 
 // validateCredentials holds the two mounts the command line names to the
@@ -1140,8 +1237,8 @@ func validDNS1123Subdomain(name string) bool {
 // Render writes m to w as one multi-document YAML stream, or returns the reason
 // the stream could not be written.
 func Render(w io.Writer, m Manifests) error {
-	docs := make([]any, 0, 9+len(m.Secrets))
-	docs = append(docs, m.Namespace, m.ServiceAccount, m.TownStateClaim, m.LandingWorkClaim, m.ForgejoService)
+	docs := make([]any, 0, 10+len(m.Secrets))
+	docs = append(docs, m.Namespace, m.ServiceAccount, m.TownStateClaim, m.LandingWorkClaim, m.DoltBackupClaim, m.ForgejoService)
 	for _, s := range m.Secrets {
 		docs = append(docs, s)
 	}
@@ -1302,6 +1399,20 @@ type Deployment struct {
 	Spec     DeploymentSpec `yaml:"spec"`
 }
 
+// MarshalYAML writes the Deployment, and opens it with noHostAliasComment when
+// the pod carries no hostAlias: a reader of a manifest must not take the Dolt
+// name for something this pod resolves.
+func (d Deployment) MarshalYAML() (any, error) {
+	// plain has no MarshalYAML, so encoding it cannot recurse into this method.
+	type plain Deployment
+	node := &yaml.Node{}
+	err := node.Encode(plain(d))
+	if err == nil && len(d.Spec.Template.Spec.HostAliases) == 0 {
+		node.HeadComment = noHostAliasComment
+	}
+	return node, err
+}
+
 // DeploymentSpec is the subset of a Deployment's spec the builder sets.
 type DeploymentSpec struct {
 	Replicas int32              `yaml:"replicas"`
@@ -1335,9 +1446,17 @@ type PodTemplateMeta struct {
 // PodSpec is the subset of a pod's spec the builder sets.
 type PodSpec struct {
 	ServiceAccountName            string      `yaml:"serviceAccountName"`
+	HostAliases                   []HostAlias `yaml:"hostAliases,omitempty"`
 	TerminationGracePeriodSeconds int64       `yaml:"terminationGracePeriodSeconds"`
 	Containers                    []Container `yaml:"containers"`
 	Volumes                       []Volume    `yaml:"volumes,omitempty"`
+}
+
+// HostAlias is one /etc/hosts entry the pod's containers share: every hostname
+// resolves to IP.
+type HostAlias struct {
+	IP        string   `yaml:"ip"`
+	Hostnames []string `yaml:"hostnames"`
 }
 
 // Container is the subset of one container the builder sets.

@@ -67,6 +67,9 @@ func goldenValues(t *testing.T) Values {
 		OMToken:                 true,
 		ForgeHost:               "forgejo:3000",
 		ConfirmContainerStopped: true,
+		// A shape fixture: any gateway IPv4 renders the one hostAlias, and the
+		// address is the caller's (see Values.HostGatewayIP).
+		HostGatewayIP: "192.168.5.2",
 	}
 }
 
@@ -150,6 +153,7 @@ func TestRenderGolden(t *testing.T) {
 		{"service-account.yaml", m.ServiceAccount},
 		{"town-state-claim.yaml", m.TownStateClaim},
 		{"landing-work-claim.yaml", m.LandingWorkClaim},
+		{"dolt-backup-claim.yaml", m.DoltBackupClaim},
 		{"forgejo-service.yaml", m.ForgejoService},
 		{"deployment.yaml", m.Deployment},
 		{"rolebinding-sweep-runner.yaml", m.SweepRoleBinding},
@@ -199,6 +203,7 @@ func TestRenderWritesTheObjectsInOrder(t *testing.T) {
 		"ServiceAccount/" + ServiceAccountName,
 		"PersistentVolumeClaim/" + TownStateClaim,
 		"PersistentVolumeClaim/" + LandingWorkClaim,
+		"PersistentVolumeClaim/" + DoltBackupClaim,
 		"Service/" + ForgejoName,
 	}
 	for _, file := range m.Secrets {
@@ -229,6 +234,12 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"a zero town-state size", func(v *Values) { v.TownStateStorage = "0Gi" }, "Values.TownStateStorage", ""},
 		{"a malformed landing size", func(v *Values) { v.LandingWorkStorage = "twenty" }, "Values.LandingWorkStorage", ""},
 		{"a zero landing size", func(v *Values) { v.LandingWorkStorage = "0Ti" }, "Values.LandingWorkStorage", ""},
+		{"a malformed dolt-backup size", func(v *Values) { v.DoltBackupStorage = "20GB" }, "Values.DoltBackupStorage", ""},
+		{"a zero dolt-backup size", func(v *Values) { v.DoltBackupStorage = "0Gi" }, "Values.DoltBackupStorage", ""},
+		{"a loopback host gateway address", func(v *Values) { v.HostGatewayIP = "127.0.0.1" }, "Values.HostGatewayIP", "loopback"},
+		{"an unspecified host gateway address", func(v *Values) { v.HostGatewayIP = "0.0.0.0" }, "Values.HostGatewayIP", "unspecified"},
+		{"an IPv6 host gateway address", func(v *Values) { v.HostGatewayIP = "fd00::1" }, "Values.HostGatewayIP", ""},
+		{"a host gateway that is not an address", func(v *Values) { v.HostGatewayIP = "host.gateway.local" }, "Values.HostGatewayIP", ""},
 		{"an empty Forgejo service", func(v *Values) { v.ForgejoService = "" }, "Values.ForgejoService", "is empty"},
 		{"an empty Forgejo namespace", func(v *Values) { v.ForgejoNamespace = "" }, "Values.ForgejoNamespace", "is empty"},
 		{"a malformed Forgejo service", func(v *Values) { v.ForgejoService = "Forgejo_Svc" }, "Values.ForgejoService", ""},
@@ -304,6 +315,132 @@ func TestAnEmptyTargetTakesTheDefaultPair(t *testing.T) {
 	}
 }
 
+// TestDoltBackupClaim holds the claim that carries the host's Dolt backups: it
+// exists at the default size on the claims' class, and the pod mounts it at the
+// path the compose file mounts read-write, while a rehearsal mounts it read-only
+// so it can never write a backup of the live Dolt.
+func TestDoltBackupClaim(t *testing.T) {
+	t.Parallel()
+
+	m := mustBuild(t, goldenValues(t))
+	claim := m.DoltBackupClaim
+	if claim.Metadata.Name != DoltBackupClaim || claim.Metadata.Namespace != DefaultNamespace {
+		t.Errorf("the claim is %s/%s, want %s/%s", claim.Metadata.Namespace, claim.Metadata.Name, DefaultNamespace, DoltBackupClaim)
+	}
+	if got := claim.Spec.Resources.Requests["storage"]; got != DefaultDoltBackupStorage {
+		t.Errorf("the %s claim's size = %q, want the default %q", DoltBackupClaim, got, DefaultDoltBackupStorage)
+	}
+	if got := claim.Spec.StorageClassName; got != DefaultStorageClass {
+		t.Errorf("the %s claim's class = %q, want %q", DoltBackupClaim, got, DefaultStorageClass)
+	}
+
+	v := goldenValues(t)
+	v.DoltBackupStorage = "40Gi"
+	if got := mustBuild(t, v).DoltBackupClaim.Spec.Resources.Requests["storage"]; got != "40Gi" {
+		t.Errorf("a caller's 40Gi rendered as %q, want the caller's size", got)
+	}
+
+	for _, tc := range []struct {
+		name string
+		v    Values
+		// wantRO is what the mount at DoltBackupPath must carry.
+		wantRO bool
+	}{
+		{"the live pod", goldenValues(t), false},
+		{"a rehearsal", rehearsalValues(t), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pod := mustBuild(t, tc.v).Deployment.Spec.Template.Spec
+			mount := volumeMountAt(pod.Containers[0].VolumeMounts, DoltBackupPath)
+			if mount == nil {
+				t.Fatalf("the pod mounts nothing at %s", DoltBackupPath)
+			}
+			if mount.Name != DoltBackupClaim {
+				t.Errorf("the mount at %s carries the volume %q, want %q", DoltBackupPath, mount.Name, DoltBackupClaim)
+			}
+			if mount.ReadOnly != tc.wantRO {
+				t.Errorf("the %s mount's readOnly = %t, want %t", DoltBackupClaim, mount.ReadOnly, tc.wantRO)
+			}
+			if got := volumeClaim(pod.Volumes, mount.Name); got != DoltBackupClaim {
+				t.Errorf("the volume %q carries the claim %q, want %q", mount.Name, got, DoltBackupClaim)
+			}
+		})
+	}
+}
+
+// TestHostGatewayAlias holds the pod's route to the host's Dolt server: a
+// gateway IPv4 address renders one hostAlias for DoltHostName, every address
+// that names no other machine is refused with the value named, and an empty
+// value renders no alias with a comment on the Deployment saying so.
+func TestHostGatewayAlias(t *testing.T) {
+	t.Parallel()
+
+	v := goldenValues(t)
+	v.HostGatewayIP = "10.0.5.7"
+	pod := mustBuild(t, v).Deployment.Spec.Template.Spec
+	if len(pod.HostAliases) != 1 {
+		t.Fatalf("the pod carries %d hostAliases, want one", len(pod.HostAliases))
+	}
+	if got := pod.HostAliases[0]; got.IP != "10.0.5.7" || !slices.Equal(got.Hostnames, []string{DoltHostName}) {
+		t.Errorf("the hostAlias = %+v, want 10.0.5.7 -> %s", got, DoltHostName)
+	}
+
+	for _, refused := range []string{
+		"127.0.0.1", "127.10.0.1", // loopback
+		"0.0.0.0",        // unspecified
+		"::1", "fd00::1", // IPv6
+		"host.gateway.local", "10.0.5", "10.0.5.256", // not an address
+	} {
+		v := goldenValues(t)
+		v.HostGatewayIP = refused
+		_, err := Build(v)
+		if err == nil {
+			t.Errorf("Build with HostGatewayIP %q = a render, want a refusal naming the value", refused)
+			continue
+		}
+		if !strings.Contains(err.Error(), "Values.HostGatewayIP") || !strings.Contains(err.Error(), refused) {
+			t.Errorf("Build refused with %q, want Values.HostGatewayIP and the value %q named", err, refused)
+		}
+	}
+
+	v = goldenValues(t)
+	v.HostGatewayIP = ""
+	m := mustBuild(t, v)
+	rendered := document(t, m.Deployment)
+	var parsed struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					HostAliases []HostAlias `yaml:"hostAliases"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(rendered, &parsed); err != nil {
+		t.Fatalf("parsing the rendered Deployment: %v", err)
+	}
+	if aliases := parsed.Spec.Template.Spec.HostAliases; len(aliases) != 0 {
+		t.Errorf("the pod's rendered hostAliases = %+v with no gateway address, want none", aliases)
+	}
+	if !bytes.Contains(rendered, []byte("# "+noHostAliasComment)) {
+		t.Errorf("the Deployment carries no comment saying it has no hostAlias:\n%s", rendered)
+	}
+	// The comment reaches the stream an apply reads, not only a single document.
+	var stream bytes.Buffer
+	if err := Render(&stream, m); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if !bytes.Contains(stream.Bytes(), []byte("# "+noHostAliasComment)) {
+		t.Errorf("the rendered stream carries no comment saying the pod has no hostAlias:\n%s", stream.Bytes())
+	}
+
+	// The comment is about the absence, so it is gone once the alias is there.
+	v.HostGatewayIP = "10.0.5.7"
+	if bytes.Contains(document(t, mustBuild(t, v).Deployment), []byte(noHostAliasComment)) {
+		t.Error("the Deployment with a hostAlias still carries the no-alias comment")
+	}
+}
+
 func TestServiceResolvesForgejo(t *testing.T) {
 	t.Parallel()
 	m := mustBuild(t, goldenValues(t))
@@ -338,6 +475,7 @@ func TestClaimsCarryTheDefaults(t *testing.T) {
 	}{
 		{TownStateClaim, m.TownStateClaim},
 		{LandingWorkClaim, m.LandingWorkClaim},
+		{DoltBackupClaim, m.DoltBackupClaim},
 	} {
 		claim := tc.claim
 		if claim.Metadata.Name != tc.name || claim.Metadata.Namespace != DefaultNamespace {
@@ -366,7 +504,7 @@ func TestSizeAnnotationOnlyOnTheUnenforcedClass(t *testing.T) {
 	v := goldenValues(t)
 	v.StorageClass = "standard-rwo"
 	m := mustBuild(t, v)
-	for _, claim := range []PersistentVolumeClaim{m.TownStateClaim, m.LandingWorkClaim} {
+	for _, claim := range []PersistentVolumeClaim{m.TownStateClaim, m.LandingWorkClaim, m.DoltBackupClaim} {
 		if got := claim.Spec.StorageClassName; got != "standard-rwo" {
 			t.Errorf("the %s claim's class = %q, want standard-rwo", claim.Metadata.Name, got)
 		}
@@ -503,7 +641,14 @@ func TestMountsMatchTheTownStateManifest(t *testing.T) {
 	if got, want := tmp.Path, "/Users/Shared/gt-gotmp.noindex"; got != want || TempPath != want {
 		t.Errorf("the %s mount is at %q and TempPath is %q, want the settings' %q", TempVolume, got, TempPath, want)
 	}
-	for _, p := range []string{TownRootPath, LandingWorkPath, TempPath} {
+	backup, ok := mountFor(DoltBackupClaim)
+	if !ok {
+		t.Fatalf("Mounts holds no %s volume", DoltBackupClaim)
+	}
+	if got, want := backup.Path, DoltBackupPath; got != want {
+		t.Errorf("the %s mount is at %q and DoltBackupPath is %q, want the compose mount's %q", DoltBackupClaim, got, DoltBackupPath, want)
+	}
+	for _, p := range []string{TownRootPath, LandingWorkPath, DoltBackupPath, TempPath} {
 		if !path.IsAbs(p) {
 			t.Errorf("the mount path %q is not absolute; the pod mounts it at the path the container uses", p)
 		}
