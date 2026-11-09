@@ -90,8 +90,8 @@ var pluginShowCmd = &cobra.Command{
 Displays the plugin's configuration, gate settings, and instructions.
 
 Examples:
-  gt plugin show tool-updater
-  gt plugin show tool-updater --json`,
+  gt plugin show town-metrics
+  gt plugin show town-metrics --json`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPluginShow,
 }
@@ -158,9 +158,9 @@ var pluginHistoryCmd = &cobra.Command{
 Queries ephemeral beads (wisps) that record plugin runs.
 
 Examples:
-  gt plugin history tool-updater
-  gt plugin history tool-updater --json
-  gt plugin history tool-updater --limit 20`,
+  gt plugin history town-metrics
+  gt plugin history town-metrics --json
+  gt plugin history town-metrics --limit 20`,
 	Args: cobra.ExactArgs(1),
 	RunE: runPluginHistory,
 }

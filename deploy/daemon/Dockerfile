@@ -63,8 +63,8 @@ COPY --chmod=0755 release-reporter /usr/local/bin/release-reporter
 
 # The plugins the container daemon runs itself, cross-compiled for linux/arm64
 # from the same rev as the binaries above: the town's plugin directories hold
-# macOS builds the container cannot exec. polecat-image, tool-updater and hm-sync
-# run only on the host, so they are not shipped here.
+# macOS builds the container cannot exec. polecat-image and hm-sync run only on
+# the host, so they are not shipped here.
 COPY --chmod=0755 plugins/app-promote/app-promote /usr/local/lib/gt/plugins/app-promote/app-promote
 COPY --chmod=0755 plugins/town-metrics/town-metrics /usr/local/lib/gt/plugins/town-metrics/town-metrics
 

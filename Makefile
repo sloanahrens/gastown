@@ -121,8 +121,6 @@ build:
 	@# A plugin's binary is a build artifact that lives beside its plugin.md:
 	@# the runner execs it there and gt plugin sync copies the directory, so an
 	@# install that skips this leaves the runtime copy with no entry point.
-	@mkdir -p plugins/tool-updater/bin
-	go build -ldflags "$(LDFLAGS)" -o plugins/tool-updater/bin/tool-updater ./plugins/tool-updater
 	@mkdir -p plugins/app-promote/bin
 	go build -ldflags "$(LDFLAGS)" -o plugins/app-promote/bin/app-promote ./plugins/app-promote
 	@mkdir -p plugins/polecat-image/bin

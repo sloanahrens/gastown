@@ -55,9 +55,8 @@ type DaemonStep struct {
 // Docker Desktop), so a fork that contributes upstream keeps them out of the
 // shared diff.
 var daemonSteps = []DaemonStep{
-	{"polecat-image", DaemonStepPlugin, DaemonStepHost, nil, "go, make, crane and the Docker Desktop engine build and publish the polecat image; a stale image refuses every sandbox sling"},
+	{"polecat-image", DaemonStepPlugin, DaemonStepHost, nil, "built by hand each cycle: its directory is the image's build program, and go, make, crane and the Docker Desktop engine build and publish the polecat image; a stale image refuses every sandbox sling"},
 	{"hm-sync", DaemonStepPlugin, DaemonStepHost, nil, "hm, make and go against hm-postgres on Docker Desktop"},
-	{"tool-updater", DaemonStepPlugin, DaemonStepHost, nil, "manual plugin that runs brew"},
 	{"cloud-check", DaemonStepPlugin, DaemonStepHost, nil, "launchctl, the Docker Desktop engine and /Users/Shared/gt-cloud"},
 	{"app-promote", DaemonStepPlugin, DaemonStepRuns, []string{"gt"}, "runs in the container: daemon.log 2026-11-08 12:52:16 'Handler: script plugin app-promote skipped (exit 0 after 0s); nothing to do this run', a clean skip, so the log shows no promotion; its one exec is gt"},
 	{"devops-reporter", DaemonStepPlugin, DaemonStepRuns, []string{"bd", "gt"}, "runs in the container: daemon.log 2026-11-08 12:46:00 'Handler: script plugin devops-reporter ok (exit 0 after 0s)', a clean exit with no work shown; the log does not show its reads of /Users/Shared/gt-cloud/reports, which the live compose does not mount"},

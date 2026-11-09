@@ -203,8 +203,8 @@ func TestRebuildGTNonBinaryPath(t *testing.T) {
 		// trees is still markdown: it is not compiled into the binary.
 		{"internal/daemon/rebuild_gt.go", false},
 		{"internal/binaryinstall/run.go", false},
-		{"plugins/tool-updater/main.go", false},
-		{"plugins/tool-updater/plugin.md", true},
+		{"plugins/town-metrics/main.go", false},
+		{"plugins/town-metrics/plugin.md", true},
 		{"plugins/README.md", true},
 		{"main.go", false},
 		{"AGENTS.md", true},
