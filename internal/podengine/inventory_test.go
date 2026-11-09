@@ -1,10 +1,12 @@
 package podengine
 
 import (
+	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
 	"io/fs"
 	"maps"
 	"os"
@@ -815,7 +817,7 @@ func checkRowCitations(root string, rows []engineRow) []string {
 	var problems []string
 	for _, r := range rows {
 		if r.Line == 0 {
-			problems = append(problems, fmt.Sprintf("row %d (%s %s): has no line column value", r.DocLine, r.File, r.Symbol))
+			problems = append(problems, fmt.Sprintf("row %d (%s %s): has no line column value; run with -update-lines to fill it from the quoted text", r.DocLine, r.File, r.Symbol))
 			continue
 		}
 		text, err := lineOf(root, r.File, r.Line)
@@ -824,10 +826,121 @@ func checkRowCitations(root string, rows []engineRow) []string {
 			continue
 		}
 		if r.Source == "" || !strings.Contains(text, normalize(r.Source)) {
-			problems = append(problems, fmt.Sprintf("row %d (%s %s): %s:%d does not hold the quoted text %q; it reads %q", r.DocLine, r.File, r.Symbol, r.File, r.Line, r.Source, text))
+			problems = append(problems, fmt.Sprintf("row %d (%s %s): %s:%d does not hold the quoted text %q; it reads %q; if the text moved, run with -update-lines", r.DocLine, r.File, r.Symbol, r.File, r.Line, r.Source, text))
 		}
 	}
 	return problems
+}
+
+// updateEngineDocLines is the -update-lines rewrite: each row's Line cell takes
+// the line, within the row's function, that holds the row's quoted text. A row
+// whose text is missing, occurs more than once, or whose file or function is
+// gone is printed and left as it is, so the strict run still fails on it.
+func updateEngineDocLines(root string, w io.Writer) error {
+	path := filepath.Join(root, engineDoc)
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	doc, err := parseEngineDoc(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(src), "\n")
+	changed := false
+	for _, r := range doc.Rows {
+		to, problem := uniqueLineInFunc(root, r)
+		if problem != "" {
+			fmt.Fprintf(w, "pod-engine: left row %d (%s %s) at line %d: %s\n", r.DocLine, r.File, r.Symbol, r.Line, problem)
+			continue
+		}
+		if to == r.Line {
+			continue
+		}
+		row, ok := setLineCell(lines[r.DocLine-1], to)
+		if !ok {
+			return fmt.Errorf("%s:%d: the row has no Line cell", path, r.DocLine)
+		}
+		lines[r.DocLine-1] = row
+		changed = true
+		fmt.Fprintf(w, "pod-engine: %s %s: line %d -> %d (row %d)\n", r.File, r.Symbol, r.Line, to, r.DocLine)
+	}
+	if !changed {
+		return nil
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+// uniqueLineInFunc returns the line of the row's function that holds the row's
+// quoted text. It returns a reason instead when the row cannot be placed: its
+// file or function is unreadable, or its text is missing from the function or
+// on more than one line of it.
+func uniqueLineInFunc(root string, r engineRow) (int, string) {
+	want := normalize(r.Source)
+	if want == "" {
+		return 0, "the row has no quoted text"
+	}
+	src, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(r.File)))
+	if err != nil {
+		return 0, fmt.Sprintf("%s cannot be read: %v", r.File, err)
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, r.File, src, 0)
+	if err != nil {
+		return 0, fmt.Sprintf("%s does not parse as Go: %v", r.File, err)
+	}
+	var fn *ast.FuncDecl
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || funcSymbol(fd) != r.Symbol {
+			continue
+		}
+		if fn != nil {
+			return 0, fmt.Sprintf("%s declares %s more than once", r.File, r.Symbol)
+		}
+		fn = fd
+	}
+	if fn == nil {
+		return 0, fmt.Sprintf("%s has no function %s", r.File, r.Symbol)
+	}
+	lines := strings.Split(string(src), "\n")
+	var hits []int
+	for n := fset.Position(fn.Pos()).Line; n <= fset.Position(fn.End()).Line; n++ {
+		if strings.Contains(normalize(lines[n-1]), want) {
+			hits = append(hits, n)
+		}
+	}
+	switch len(hits) {
+	case 0:
+		return 0, fmt.Sprintf("its quoted text %q is not in %s", r.Source, r.Symbol)
+	case 1:
+		return hits[0], ""
+	default:
+		return 0, fmt.Sprintf("its quoted text %q occurs on %d lines of %s, so it is ambiguous: %v", r.Source, len(hits), r.Symbol, hits)
+	}
+}
+
+// setLineCell replaces the Line cell, the third of a table row, with n. The
+// cell keeps its padding, a blank cell gets one space either side, and the
+// other cells are not touched; ok is false when the row has no third cell.
+func setLineCell(row string, n int) (string, bool) {
+	var pipes []int
+	for i := 0; i < len(row); i++ {
+		if row[i] == '|' && (i == 0 || row[i-1] != '\\') {
+			pipes = append(pipes, i)
+		}
+	}
+	if len(pipes) < 4 {
+		return row, false
+	}
+	start, end := pipes[2]+1, pipes[3]
+	seg := row[start:end]
+	lead := seg[:len(seg)-len(strings.TrimLeft(seg, " "))]
+	trail := seg[len(strings.TrimRight(seg, " ")):]
+	if strings.TrimSpace(seg) == "" {
+		lead, trail = " ", " "
+	}
+	return row[:start] + lead + strconv.Itoa(n) + trail + row[end:], true
 }
 
 // checkCitations returns every file:line cited in text and checks each one
@@ -1563,6 +1676,159 @@ func TestEveryRowCitesALineThatHoldsItsText(t *testing.T) {
 				t.Fatalf("want one problem naming row 7 with %q, got %v", tc.want, problems)
 			}
 		})
+	}
+}
+
+// updateFixtureSource is a file with one call in Run, on line 6.
+const updateFixtureSource = "package x\n\nimport \"os/exec\"\n\nfunc Run() error {\n\treturn exec.Command(\"docker\", \"ps\").Run()\n}\n"
+
+// updateFixtureRow is the Run row for updateFixtureSource, with its Line
+// column set by the caller.
+func updateFixtureRow(line int) engineRow {
+	return engineRow{File: "internal/x/x.go", Symbol: "Run", Line: line, Source: `exec.Command("docker", "ps").Run()`, Asks: "ps", Disposition: "mac-job", Evidence: "`internal/x/x.go:6`"}
+}
+
+// TestUpdateEngineDocLines holds the -update-lines rewrite: a row whose quoted
+// text occurs once in its function takes that line and the change is printed;
+// any other row is printed and left as it was, so the strict run still fails
+// on it (gt-cru7h3).
+func TestUpdateEngineDocLines(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		src  string
+		row  engineRow
+		want engineRow
+		// out is the report the rewrite prints.
+		out string
+	}{
+		{
+			name: "a drifted line is rewritten to the line its text is on",
+			src:  updateFixtureSource,
+			row:  updateFixtureRow(4),
+			want: updateFixtureRow(6),
+			out:  "internal/x/x.go Run: line 4 -> 6 (row 7)",
+		},
+		{
+			name: "a blank line cell is filled from the text",
+			src:  updateFixtureSource,
+			row:  updateFixtureRow(0),
+			want: updateFixtureRow(6),
+			out:  "internal/x/x.go Run: line 0 -> 6 (row 7)",
+		},
+		{
+			name: "a text outside the row's function does not count",
+			src:  "package x\n\nimport \"os/exec\"\n\nfunc Other() error {\n\treturn exec.Command(\"docker\", \"ps\").Run()\n}\n\nfunc Run() error {\n\treturn nil\n}\n",
+			row:  updateFixtureRow(4),
+			want: updateFixtureRow(4),
+			out:  "left row 7 (internal/x/x.go Run) at line 4: its quoted text",
+		},
+		{
+			name: "a text on two lines of the function is ambiguous and left",
+			src:  "package x\n\nimport \"os/exec\"\n\nfunc Run() error {\n\tif err := exec.Command(\"docker\", \"ps\").Run(); err != nil {\n\t\treturn err\n\t}\n\treturn exec.Command(\"docker\", \"ps\").Run()\n}\n",
+			row:  updateFixtureRow(4),
+			want: updateFixtureRow(4),
+			out:  "occurs on 2 lines of Run, so it is ambiguous",
+		},
+		{
+			name: "a function the file does not declare is left",
+			src:  updateFixtureSource,
+			row:  func() engineRow { r := updateFixtureRow(4); r.Symbol = "Gone"; return r }(),
+			want: func() engineRow { r := updateFixtureRow(4); r.Symbol = "Gone"; return r }(),
+			out:  "internal/x/x.go has no function Gone",
+		},
+		{
+			name: "a file that cannot be read is left",
+			src:  updateFixtureSource,
+			row:  func() engineRow { r := updateFixtureRow(4); r.File = "internal/x/gone.go"; return r }(),
+			want: func() engineRow { r := updateFixtureRow(4); r.File = "internal/x/gone.go"; return r }(),
+			out:  "internal/x/gone.go cannot be read",
+		},
+		{
+			name: "a file that does not parse is left",
+			src:  "package x\n\nfunc {\n",
+			row:  updateFixtureRow(4),
+			want: updateFixtureRow(4),
+			out:  "internal/x/x.go does not parse as Go",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := fixtureTree(t, map[string]string{
+				"internal/x/x.go": tc.src,
+				engineDoc:         renderEngineDoc(tc.row),
+			})
+			var out bytes.Buffer
+			if err := updateEngineDocLines(root, &out); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(root, engineDoc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := renderEngineDoc(tc.want); string(got) != want {
+				t.Errorf("the document after the rewrite:\n%s\nwant:\n%s", got, want)
+			}
+			if !strings.Contains(out.String(), tc.out) {
+				t.Errorf("the report %q does not contain %q", out.String(), tc.out)
+			}
+		})
+	}
+}
+
+// TestSetLineCell holds the cell rewrite: the Line cell takes the number, its
+// padding stays, a blank cell gets one space either side, the cells after it
+// keep their escaped pipes, and a row without a third cell is refused.
+func TestSetLineCell(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		row  string
+		want string
+		ok   bool
+	}{
+		{name: "the number replaces the number", row: "| f | s | 4 | c |", want: "| f | s | 6 | c |", ok: true},
+		{name: "a blank cell gets one space either side", row: "| f | s |  | c |", want: "| f | s | 6 | c |", ok: true},
+		{name: "the cells after it keep their escaped pipes", row: "| f | s | 4 | `x \\| y` | c |", want: "| f | s | 6 | `x \\| y` | c |", ok: true},
+		{name: "a row without a third cell is refused", row: "| f | s |", want: "| f | s |", ok: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := setLineCell(tc.row, 6)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("setLineCell(%q, 6) = %q, %v; want %q, %v", tc.row, got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// TestStrictRunFailsOnADriftedRowUntilTheFlagRewritesIt holds the two halves of
+// the flag: without it a drifted row fails and the failure names -update-lines,
+// and once the rewrite has run the same row passes (gt-cru7h3).
+func TestStrictRunFailsOnADriftedRowUntilTheFlagRewritesIt(t *testing.T) {
+	t.Parallel()
+	root := fixtureTree(t, map[string]string{
+		"internal/x/x.go": updateFixtureSource,
+		engineDoc:         renderEngineDoc(updateFixtureRow(4)),
+	})
+	docPath := filepath.Join(root, engineDoc)
+	doc, err := parseEngineDoc(docPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	problems := checkRowCitations(root, doc.Rows)
+	if len(problems) != 1 || !strings.Contains(problems[0], "-update-lines") {
+		t.Fatalf("the strict run on a drifted row: want one problem naming -update-lines, got %v", problems)
+	}
+	if err := updateEngineDocLines(root, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	doc, err = parseEngineDoc(docPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if problems := checkRowCitations(root, doc.Rows); len(problems) != 0 {
+		t.Fatalf("the strict run after the rewrite: want no problems, got %v", problems)
 	}
 }
 
