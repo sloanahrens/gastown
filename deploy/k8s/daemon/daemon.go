@@ -40,9 +40,11 @@
 // the two may own it (gt-gg9hv.30).
 //
 // Values.Rehearsal renders a smaller pod that may run beside the live container:
-// it names its own namespace (never DefaultNamespace), carries gt/town-owner:
-// rehearsal, needs no ConfirmContainerStopped, mounts only the rehearsalSecrets
-// entries, and binds no sweep or cache-trim role (gt-z4ag59).
+// it names its own namespace (never DefaultNamespace, the sweep's, the cache
+// trim's or the Forgejo namespace), carries gt/town-owner: rehearsal, needs no
+// ConfirmContainerStopped, mounts only the rehearsalSecrets entries and no
+// landing work root, and binds no sweep or cache-trim role (gt-z4ag59,
+// gt-e6gxt0).
 //
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
@@ -329,8 +331,9 @@ func droppedEnv(decisions map[string]podEnvDecision) map[string]string {
 // rehearsalSecrets are the deploy/daemon/secrets.yaml entries a rehearsal renders
 // and mounts. It is an allowlist: an entry added to the manifest later is absent
 // from a rehearsal until it is named here, so a rehearsal starts with the fewest
-// credentials. It excludes the promote keys, jev.env and the landing token.
-var rehearsalSecrets = []string{OMTokenFile, OMTokenMetaFile, RehearsalForgeTokenFile}
+// credentials. It excludes the promote keys, jev.env, the landing token and the
+// om token, which is write-capable (gt-e6gxt0).
+var rehearsalSecrets = []string{RehearsalForgeTokenFile}
 
 // Mount is one volume of the daemon pod: the volume's name, the pod path it
 // appears at, and the town-root entries it carries.
@@ -389,8 +392,9 @@ type Values struct {
 	// empty. A rehearsal must name one, and not DefaultNamespace.
 	Namespace string
 	// Rehearsal renders the rehearsal pod instead of the live one: see the
-	// package comment. It is refused a DefaultNamespace, needs no
-	// ConfirmContainerStopped, and renders only rehearsalSecrets.
+	// package comment. It is refused a namespace the live render owns, the om
+	// token, needs no ConfirmContainerStopped, mounts no landing work root, and
+	// renders only rehearsalSecrets.
 	Rehearsal bool
 	// TownStateStorage is the town-state claim's requested size;
 	// DefaultTownStateStorage when empty.
@@ -723,9 +727,13 @@ func resourceList(v Values) map[string]string {
 func volumes(v Values) []Volume {
 	vols := []Volume{
 		{Name: TownStateClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: TownStateClaim}},
-		{Name: LandingWorkClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: LandingWorkClaim}},
-		{Name: TempVolume, EmptyDir: &EmptyDirVolumeSource{}},
 	}
+	// A rehearsal carries no landing work root, so it cannot write the live
+	// landing work (gt-e6gxt0).
+	if !v.Rehearsal {
+		vols = append(vols, Volume{Name: LandingWorkClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: LandingWorkClaim}})
+	}
+	vols = append(vols, Volume{Name: TempVolume, EmptyDir: &EmptyDirVolumeSource{}})
 	for _, file := range v.Secrets {
 		vols = append(vols, Volume{
 			Name:   secretVolumeName(file.Name),
@@ -742,9 +750,11 @@ func volumes(v Values) []Volume {
 func mounts(v Values) []VolumeMount {
 	m := []VolumeMount{
 		{Name: TownStateClaim, MountPath: TownRootPath},
-		{Name: LandingWorkClaim, MountPath: LandingWorkPath},
-		{Name: TempVolume, MountPath: TempPath},
 	}
+	if !v.Rehearsal {
+		m = append(m, VolumeMount{Name: LandingWorkClaim, MountPath: LandingWorkPath})
+	}
+	m = append(m, VolumeMount{Name: TempVolume, MountPath: TempPath})
 	for _, file := range v.Secrets {
 		m = append(m, VolumeMount{
 			Name:      secretVolumeName(file.Name),
@@ -871,15 +881,30 @@ func (v Values) validate() error {
 	return v.validateDaemon()
 }
 
-// validateRehearsal refuses a rehearsal that could render into the live
-// namespace. The namespace is what keeps a rehearsal's objects apart from the
-// live pod's, so it is required and may not be DefaultNamespace.
+// validateRehearsal refuses a rehearsal that could render into a namespace the
+// live render or its bindings own, and a rehearsal that asks for the write-capable
+// om token. The namespace is what keeps a rehearsal's objects apart from the live
+// pod's, so it is required and may not be DefaultNamespace, the sweep's or cache
+// trim's namespace, or the namespace of the Forgejo Service the rehearsal's own
+// Service would shadow.
 func (v Values) validateRehearsal() error {
 	switch v.Namespace {
 	case "":
 		return fmt.Errorf("Values.Namespace is empty: a rehearsal names its own namespace, and may not use %q, the live namespace", DefaultNamespace)
 	case DefaultNamespace:
 		return fmt.Errorf("Values.Namespace %q: a rehearsal may not render into the live namespace %q; name its own", v.Namespace, DefaultNamespace)
+	}
+	for _, shared := range []struct{ name, owner string }{
+		{SweepNamespace, "the sweep's Jobs"},
+		{CacheTrimNamespace, "the CI cache trim's objects"},
+		{v.ForgejoNamespace, "the Forgejo Service the rehearsal's own Service would shadow"},
+	} {
+		if v.Namespace == shared.name {
+			return fmt.Errorf("Values.Namespace %q: a rehearsal may not render into the namespace of %s; name its own", v.Namespace, shared.owner)
+		}
+	}
+	if v.OMToken {
+		return fmt.Errorf("Values.OMToken is true: a rehearsal may not mount the om token, a write-capable credential; the rehearsal mounts only the read-only forge viewer's token")
 	}
 	return nil
 }

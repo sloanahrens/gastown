@@ -27,8 +27,6 @@ spec:
         - name: daemon
           image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
           args:
-            - --om-token-file
-            - /run/secrets/om-token
             - --forge-host
             - forgejo:3000
             - --forge-token-file
@@ -57,25 +55,11 @@ spec:
           volumeMounts:
             - name: town-state
               mountPath: /Users/sloan/gt
-            - name: landing-work
-              mountPath: /Users/sloan/gt-landing.noindex
             - name: gotmp
               mountPath: /Users/Shared/gt-gotmp.noindex
             - name: daemon-forgejo-viewer-env
               mountPath: /run/gt/xdg/gt/forgejo-viewer.env
               subPath: forgejo-viewer.env
-              readOnly: true
-            - name: daemon-om-daemon-token
-              mountPath: /run/gt/xdg/gt/om-daemon-token
-              subPath: om-daemon-token
-              readOnly: true
-            - name: daemon-om-daemon-token-meta
-              mountPath: /run/gt/xdg/gt/om-daemon-token.meta
-              subPath: om-daemon-token.meta
-              readOnly: true
-            - name: daemon-om-daemon-token
-              mountPath: /run/secrets/om-token
-              subPath: om-daemon-token
               readOnly: true
             - name: daemon-forgejo-viewer-env
               mountPath: /run/secrets/forge-token
@@ -105,17 +89,8 @@ spec:
         - name: town-state
           persistentVolumeClaim:
             claimName: town-state
-        - name: landing-work
-          persistentVolumeClaim:
-            claimName: landing-work
         - name: gotmp
           emptyDir: {}
         - name: daemon-forgejo-viewer-env
           secret:
             secretName: daemon-forgejo-viewer.env
-        - name: daemon-om-daemon-token
-          secret:
-            secretName: daemon-om-daemon-token
-        - name: daemon-om-daemon-token-meta
-          secret:
-            secretName: daemon-om-daemon-token.meta
