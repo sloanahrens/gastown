@@ -1461,6 +1461,22 @@ func TestDaemonClosureFollowsImportSpecs(t *testing.T) {
 	}
 }
 
+// TestScanRefusesATreeWhoseClosureIsUnknown holds the scan to the closure: a
+// scan that cannot read the daemon's closure is an error, not a scan that
+// treats every unresolved program as outside the daemon's reach (gt-cesfam).
+func TestScanRefusesATreeWhoseClosureIsUnknown(t *testing.T) {
+	t.Parallel()
+	root := fixtureTree(t, map[string]string{
+		"internal/x/x.go": "package x\n\nimport \"os/exec\"\n\nfunc Run(name string) error { return exec.Command(name, \"ps\").Run() }\n",
+	})
+	if err := os.RemoveAll(filepath.Join(root, daemonDir)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := scanDockerSites(root); err == nil {
+		t.Fatal("the scan read a tree whose daemon closure is unknown as complete")
+	}
+}
+
 // TestEveryRowCitesALineThatHoldsItsText checks each row's file, line and
 // quoted text against the tree, and each gate or effect citation the rows
 // carry. A row whose file, line or text is wrong fails naming the row, and a
