@@ -835,7 +835,9 @@ func checkRowCitations(root string, rows []engineRow) []string {
 // updateEngineDocLines is the -update-lines rewrite: each row's Line cell takes
 // the line, within the row's function, that holds the row's quoted text. A row
 // whose text is missing, occurs more than once, or whose file or function is
-// gone is printed and left as it is, so the strict run still fails on it.
+// gone is printed and left as it is, so the strict run still fails on it. A row
+// that already holds its text on its cited line is valid, so it is left silently
+// even when the text occurs more than once.
 func updateEngineDocLines(root string, w io.Writer) error {
 	path := filepath.Join(root, engineDoc)
 	src, err := os.ReadFile(path)
@@ -851,6 +853,9 @@ func updateEngineDocLines(root string, w io.Writer) error {
 	for _, r := range doc.Rows {
 		to, problem := uniqueLineInFunc(root, r)
 		if problem != "" {
+			if rowHoldsText(root, r) {
+				continue
+			}
 			fmt.Fprintf(w, "pod-engine: left row %d (%s %s) at line %d: %s\n", r.DocLine, r.File, r.Symbol, r.Line, problem)
 			continue
 		}
@@ -869,6 +874,18 @@ func updateEngineDocLines(root string, w io.Writer) error {
 		return nil
 	}
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+// rowHoldsText reports whether the row's cited line still holds its quoted text,
+// the test checkRowCitations makes on a strict run. A row that passes it is
+// valid, whatever uniqueLineInFunc says about its function, so the rewrite has
+// nothing to report for it.
+func rowHoldsText(root string, r engineRow) bool {
+	if r.Source == "" {
+		return false
+	}
+	text, err := lineOf(root, r.File, r.Line)
+	return err == nil && strings.Contains(text, normalize(r.Source))
 }
 
 // uniqueLineInFunc returns the line of the row's function that holds the row's
@@ -1690,8 +1707,9 @@ func updateFixtureRow(line int) engineRow {
 
 // TestUpdateEngineDocLines holds the -update-lines rewrite: a row whose quoted
 // text occurs once in its function takes that line and the change is printed;
-// any other row is printed and left as it was, so the strict run still fails
-// on it (gt-cru7h3).
+// any other row the strict run fails on is printed and left as it was, and a
+// row that already holds its text on its cited line is left without a report
+// (gt-cru7h3, gt-lrkmdj).
 func TestUpdateEngineDocLines(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -1773,6 +1791,34 @@ func TestUpdateEngineDocLines(t *testing.T) {
 				t.Errorf("the report %q does not contain %q", out.String(), tc.out)
 			}
 		})
+	}
+}
+
+// TestAmbiguousRowThatHoldsItsTextIsLeftSilently holds the rewrite's report for
+// a row the strict run already accepts: its cited line holds the quoted text and
+// the same text also sits on a second line of its function. The rewrite cannot
+// place it, but the row is valid, so it is neither moved nor reported as left
+// (gt-lrkmdj).
+func TestAmbiguousRowThatHoldsItsTextIsLeftSilently(t *testing.T) {
+	t.Parallel()
+	src := "package x\n\nimport \"os/exec\"\n\nfunc Run() error {\n\tif err := exec.Command(\"docker\", \"ps\").Run(); err != nil {\n\t\treturn err\n\t}\n\treturn exec.Command(\"docker\", \"ps\").Run()\n}\n"
+	root := fixtureTree(t, map[string]string{
+		"internal/x/x.go": src,
+		engineDoc:         renderEngineDoc(updateFixtureRow(6)),
+	})
+	var out bytes.Buffer
+	if err := updateEngineDocLines(root, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("the report for a valid ambiguous row: want none, got %q", out.String())
+	}
+	got, err := os.ReadFile(filepath.Join(root, engineDoc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := renderEngineDoc(updateFixtureRow(6)); string(got) != want {
+		t.Errorf("the document after the rewrite:\n%s\nwant:\n%s", got, want)
 	}
 }
 
