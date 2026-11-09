@@ -420,6 +420,7 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 	out := &ForgejoConfig{}
 	if base != nil {
 		out.RemoteURL = base.RemoteURL
+		out.RegistryOwner = base.RegistryOwner
 		out.GateWorkflow = base.GateWorkflow
 		out.MirrorTarget = base.MirrorTarget
 		out.PromoteTarget = base.PromoteTarget
@@ -429,6 +430,9 @@ func mergeForgejoConfig(base, override *ForgejoConfig) *ForgejoConfig {
 	if override != nil {
 		if override.RemoteURL != "" {
 			out.RemoteURL = override.RemoteURL
+		}
+		if override.RegistryOwner != "" {
+			out.RegistryOwner = override.RegistryOwner
 		}
 		if override.GateWorkflow != "" {
 			out.GateWorkflow = override.GateWorkflow

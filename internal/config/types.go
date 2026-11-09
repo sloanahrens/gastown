@@ -1435,6 +1435,12 @@ type ForgejoConfig struct {
 	// landing worker push once the rig is cut over.
 	RemoteURL string `json:"remote_url,omitempty"`
 
+	// RegistryOwner is the account gt update images reads the town's images
+	// from and the images workflow pushes them to, e.g. "bot-registry". Empty
+	// means the owner of RemoteURL. Set it when the registry bot can write only
+	// its own namespace and not the remote's.
+	RegistryOwner string `json:"registry_owner,omitempty"`
+
 	// GateWorkflow names the candidate gate's workflow, e.g. "gate" for
 	// .forgejo/workflows/gate.yml. Consumers derive the required commit
 	// status context from it rather than typing the name twice, so renaming

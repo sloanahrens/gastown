@@ -236,6 +236,7 @@ func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 	const target = "git@github.com:example/gastown.git"
 	const body = `{
 		"remote_url": "https://forgejo.example/gastown/gastown",
+		"registry_owner": "bot-registry",
 		"gate_workflow": "gate",
 		"bots": {"polecat": "gt-polecat", "landing": "gt-landing", "registry": "gt-registry"},
 		"mirror_target": "` + target + `",
@@ -251,6 +252,9 @@ func TestForgejoConfigDecodesItsKeys(t *testing.T) {
 	}
 	if mq.Forgejo.RemoteURL != "https://forgejo.example/gastown/gastown" {
 		t.Errorf("RemoteURL = %q", mq.Forgejo.RemoteURL)
+	}
+	if mq.Forgejo.RegistryOwner != "bot-registry" {
+		t.Errorf("RegistryOwner = %q, want bot-registry", mq.Forgejo.RegistryOwner)
 	}
 	if mq.Forgejo.GateWorkflowName() != "gate" {
 		t.Errorf("GateWorkflow = %q, want gate", mq.Forgejo.GateWorkflow)
