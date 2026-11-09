@@ -862,6 +862,9 @@ type dockerEngine struct {
 	// with its value in the docker client's environment, never on the command
 	// line. Empty forwards nothing.
 	beadsHost string
+	// helperTimeout bounds one helper run. Zero means migrateHelperTimeout; a
+	// test sets it short to drive the timeout without waiting ten minutes.
+	helperTimeout time.Duration
 }
 
 // dockerRun runs one docker argv with the environment and the streams given.
@@ -897,11 +900,15 @@ func (e dockerEngine) Run(volume string, argv []string, stdin io.Reader, stdout 
 	if e.beadsHost != "" {
 		env = []string{"BEADS_DOLT_SERVER_HOST=" + e.beadsHost}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), migrateHelperTimeout)
+	timeout := e.helperTimeout
+	if timeout == 0 {
+		timeout = migrateHelperTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	if err := e.run(ctx, args, env, stdin, stdout, os.Stderr); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("the helper for volume %s did not finish within %s and was stopped", volume, migrateHelperTimeout)
+			return fmt.Errorf("the helper for volume %s did not finish within %s and was stopped", volume, timeout)
 		}
 		return fmt.Errorf("docker run of the helper for volume %s exited: %w", volume, err)
 	}

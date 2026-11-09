@@ -50,6 +50,14 @@ type fakeVolume struct {
 	// afterMerge runs on the volume's directory after a merge import, so a test
 	// can change the volume between the cut-over send and its second verify.
 	afterMerge func(dir string)
+	// onRun runs before every helper run, with its argv, so a test can change the
+	// host between the steps of a copy. onList runs at each volume listing with
+	// the listing's number, counted from the fake's start. failListFrom makes the
+	// listing from that number on fail (zero: never).
+	onRun        func(argv []string)
+	onList       func(n int)
+	failListFrom int
+	lists        int
 }
 
 type importFault struct {
@@ -59,6 +67,18 @@ type importFault struct {
 
 func (f *fakeVolume) Run(volume string, argv []string, stdin io.Reader, stdout io.Writer) error {
 	f.calls = append(f.calls, strings.Join(argv, " "))
+	if f.onRun != nil {
+		f.onRun(argv)
+	}
+	if strings.Join(argv, " ") == strings.Join(townstate.ListArgv, " ") {
+		f.lists++
+		if f.onList != nil {
+			f.onList(f.lists)
+		}
+		if f.failListFrom > 0 && f.lists >= f.failListFrom {
+			return errors.New("the volume listing failed")
+		}
+	}
 	switch strings.Join(argv, " ") {
 	case strings.Join(townstate.ImportArgv, " "):
 		if f.fault != nil {

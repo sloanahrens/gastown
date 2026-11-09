@@ -57,32 +57,21 @@ func readSeedRecord(town string) (seedRecord, bool, error) {
 }
 
 // writeRecordFile writes v as JSON to rel under the town, 0600, by a temporary
-// file in the same directory and a rename, so a reader never sees half a record.
+// sibling and a rename, so a reader never sees half a record. The sibling's name
+// is fixed: a copy writes one record at a time, and the rename stays on one
+// filesystem.
 func writeRecordFile(town, rel string, v any) error {
-	p := filepath.Join(town, filepath.FromSlash(rel))
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encoding %s: %w", rel, err)
 	}
 	data = append(data, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".tmp-*")
-	if err != nil {
+	tmpRel := rel + ".tmp"
+	if err := os.WriteFile(filepath.Join(town, filepath.FromSlash(tmpRel)), data, 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", rel, err)
 	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("writing %s: %w", rel, err)
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("writing %s: %w", rel, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("writing %s: %w", rel, err)
-	}
-	if err := os.Rename(tmp.Name(), p); err != nil {
-		return fmt.Errorf("writing %s: %w", rel, err)
+	if err := os.Rename(filepath.Join(town, filepath.FromSlash(tmpRel)), filepath.Join(town, filepath.FromSlash(rel))); err != nil {
+		return errors.Join(fmt.Errorf("writing %s: %w", rel, err), removeRecordFile(town, tmpRel))
 	}
 	return nil
 }
