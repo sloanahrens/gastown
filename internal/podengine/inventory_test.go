@@ -671,6 +671,9 @@ func checkDispositions(root string, rows []engineRow) []string {
 
 // gateProblems checks a gated or degrades disposition: a file:line citation
 // that exists, then the condition (gated) or the effect (degrades) in words.
+// A gated condition is text the cited line must hold, so a gate that moved or
+// changed fails here. A degrades effect is a static claim the guard does not
+// read; the document says so.
 func gateProblems(root, where string, fields []string) []string {
 	if len(fields) < 3 {
 		return []string{fmt.Sprintf("%s: %s wants a file:line citation and the %s in words", where, fields[0], map[string]string{"gated": "condition", "degrades": "effect"}[fields[0]])}
@@ -680,8 +683,19 @@ func gateProblems(root, where string, fields []string) []string {
 		return []string{fmt.Sprintf("%s: %s names %q, which is not a file:line citation", where, fields[0], fields[1])}
 	}
 	n, _ := strconv.Atoi(m[2])
-	if _, err := lineOf(root, m[1], n); err != nil {
+	text, err := lineOf(root, m[1], n)
+	if err != nil {
 		return []string{where + ": " + err.Error()}
+	}
+	if fields[0] != "gated" {
+		return nil
+	}
+	if fields[2] != "when" || len(fields) < 4 {
+		return []string{where + `: gated wants "when" and the condition in words after the citation`}
+	}
+	condition := strings.Join(fields[3:], " ")
+	if !strings.Contains(text, condition) {
+		return []string{fmt.Sprintf("%s: %s reads %q, which does not hold the gate's condition %q", where, fields[1], text, condition)}
 	}
 	return nil
 }
@@ -1075,6 +1089,7 @@ func TestDispositionRules(t *testing.T) {
 		{name: "gated without a citation", disposition: "gated when the flag is set", evidence: "`internal/x/x.go:3`", want: "file:line citation"},
 		{name: "gated without a condition", disposition: "gated internal/x/x.go:3", evidence: "`internal/x/x.go:3`", want: "condition in words"},
 		{name: "gated citing a line past the end", disposition: "gated internal/x/x.go:99 when X", evidence: "`internal/x/x.go:3`", want: "the file has"},
+		{name: "gated on a line that does not hold its condition", disposition: `gated internal/x/x.go:4 when prog == "git"`, evidence: "`internal/x/x.go:3`", want: "does not hold the gate's condition"},
 		{name: "degrades without an effect", disposition: "degrades internal/x/x.go:3", evidence: "`internal/x/x.go:3`", want: "effect in words"},
 		{name: "mac-job without an entry point", disposition: "mac-job", evidence: "no citation here", want: "cites no file:line"},
 		{name: "mac-job with an argument", disposition: "mac-job later", evidence: "`internal/x/x.go:3`", want: "takes no argument"},
