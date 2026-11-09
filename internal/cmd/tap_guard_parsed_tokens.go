@@ -37,8 +37,8 @@ func parsedTokens(command string) (tokens []string, readable bool) {
 // parsedSegmentTokens returns the tokens of one command site: the prefix
 // assignments, then its words and redirections in source order, then the
 // arguments of a declaration builtin. A redirection the parser marks Inherited
-// belongs to an enclosing compound command, and is left out here (see the
-// TestParsedTokensDifferential class compound-redirection).
+// belongs to an enclosing compound command, so it is left out here: the commands
+// inside that compound command do not get it as a token.
 //
 // The split of prefix assignments from declaration arguments follows
 // sandboxSecretsAssignSplit. It is copied here (gt-8sg8to) rather than called,
