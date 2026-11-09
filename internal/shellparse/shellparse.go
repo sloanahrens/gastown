@@ -37,6 +37,12 @@ type Script struct {
 	// loop's iteration list, a case word or pattern, an arithmetic or [[ ]]
 	// expression) and so have no segment of their own.
 	Subs []Script
+
+	// Raw is the source text of a substitution's body as written: the text
+	// between "$(" or "`" and the closing ")" or "`", or between "<(" or ">("
+	// and ")". The body of a nested substitution keeps its escapes and quotes
+	// as written. Parse's own result, the whole command, has no Raw.
+	Raw string
 }
 
 // Segment is one command site: a simple command, a declaration or let clause,
@@ -750,7 +756,7 @@ func (f *flattener) partsProcSubsts(parts []syntax.WordPart, dest *[]ProcSubst) 
 				return
 			}
 			var scripts []Script
-			f.script(x.Stmts, &scripts)
+			f.script(x, x.Stmts, &scripts)
 			if f.err != nil {
 				return
 			}
@@ -957,9 +963,9 @@ func (f *flattener) partsSubs(parts []syntax.WordPart, dest *[]Script) {
 		case *syntax.DblQuoted:
 			f.partsSubs(x.Parts, dest)
 		case *syntax.CmdSubst:
-			f.script(x.Stmts, dest)
+			f.script(x, x.Stmts, dest)
 		case *syntax.ProcSubst:
-			f.script(x.Stmts, dest)
+			f.script(x, x.Stmts, dest)
 		case *syntax.ParamExp:
 			f.paramExpSubs(x, dest)
 		case *syntax.ArithmExp:
@@ -981,20 +987,73 @@ func (f *flattener) partsSubs(parts []syntax.WordPart, dest *[]Script) {
 	}
 }
 
-// script flattens one substitution's statements into a nested Script appended
-// to dest.
-func (f *flattener) script(stmts []*syntax.Stmt, dest *[]Script) {
+// script flattens one substitution node's statements into a nested Script
+// appended to dest, with the node's body text as its Raw.
+func (f *flattener) script(node syntax.Node, stmts []*syntax.Stmt, dest *[]Script) {
+	raw := f.substBody(node)
+	if f.err != nil {
+		return
+	}
 	// A substitution runs in a shell of its own, so the subshells enclosing
 	// the word it is written in do not enclose its segments.
 	outer := f.shells
 	f.shells = nil
-	var script Script
+	script := Script{Raw: raw}
 	f.stmts(stmts, &script)
 	f.shells = outer
 	if f.err != nil {
 		return
 	}
 	*dest = append(*dest, script)
+}
+
+// substBody is the source text between the delimiters of a substitution node:
+// the text after the opening "$(", "`", "<(" or ">(" up to the closing ")" or
+// "`". A node of another type, or a delimiter position outside src, is a
+// failure, never empty text.
+func (f *flattener) substBody(node syntax.Node) string {
+	var open, closing syntax.Pos
+	var openLen int
+	var backquote bool
+	switch x := node.(type) {
+	case *syntax.CmdSubst:
+		open, closing, openLen = x.Left, x.Right, 2
+		if x.Backquotes {
+			openLen, backquote = 1, true
+		}
+	case *syntax.ProcSubst:
+		open, closing, openLen = x.OpPos, x.Rparen, 2
+	default:
+		f.record(&UnparseableError{Construct: "source position out of range"})
+		return ""
+	}
+	if !open.IsValid() || !closing.IsValid() {
+		f.record(&UnparseableError{Construct: "source position out of range"})
+		return ""
+	}
+	s, e := int(open.Offset())+openLen, int(closing.Offset())
+	if s < 0 || e < s || e > len(f.src) {
+		f.record(&UnparseableError{Construct: "source position out of range"})
+		return ""
+	}
+	// A backquote nested in a backquote substitution closes with an escaped
+	// backquote, and the closing position is that backquote, after the
+	// backslash that escapes it. An odd run of backslashes before the position
+	// makes the backquote escaped, so the body ends before the one escaping
+	// backslash; an even run is body text and stays.
+	if backquote && e > s && oddBackslashRun(f.src[:e]) {
+		e--
+	}
+	return f.src[s:e]
+}
+
+// oddBackslashRun reports whether s ends in an odd number of backslashes.
+func oddBackslashRun(s string) bool {
+	n := 0
+	for i := len(s) - 1; i >= 0 && s[i] == '\\'; i-- {
+		n++
+	}
+	return n%2 == 1
 }
 
 // paramExpSubs appends the substitutions inside a ${...} expression.
