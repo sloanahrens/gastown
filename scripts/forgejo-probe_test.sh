@@ -18,11 +18,64 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SELF="$SCRIPT_DIR/$(basename "$0")"
 PROBE="$SCRIPT_DIR/forgejo-probe.sh"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/forgejo-probe-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+
+# helpers-begin
 PASS=0
 FAIL=0
+# fail keeps each failing case's name and detail, so the summary at the end of
+# the output names them all, even when the log above was cut short.
+FAILED=()
+FAILED_DETAIL=()
+pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
+fail() {
+  echo "  FAIL: $1"
+  FAIL=$((FAIL + 1))
+  FAILED+=("$1")
+  FAILED_DETAIL+=("${2:-}")
+  if [ $# -gt 1 ]; then printf '%s\n' "$2" | sed 's/^/    | /'; fi
+}
+# summary prints the verdict and, under a failure, the name and detail of each
+# failing case. It returns non-zero when a case failed. The summary case copies
+# this region out of the file and runs it on a fixture.
+summary() {
+  if [ "$FAIL" = 0 ]; then
+    echo "forgejo-probe_test.sh: all $PASS cases passed"
+    return 0
+  fi
+  echo "forgejo-probe_test.sh: $FAIL of $((PASS + FAIL)) cases failed"
+  echo "failing cases:"
+  local i
+  for i in "${!FAILED[@]}"; do
+    echo "  FAIL: ${FAILED[$i]}"
+    if [ -n "${FAILED_DETAIL[$i]}" ]; then
+      printf '%s\n' "${FAILED_DETAIL[$i]}" | sed 's/^/    | /'
+    fi
+  done
+  return 1
+}
+# helpers-end
+
+# PROBE_PATH is the only PATH a probe run gets: the stubs first, then the system
+# directories. PROBE_TMPDIR is the only TMPDIR, with the trailing slash a
+# runner's may carry, so norm() is exercised on every run.
+PROBE_PATH="$TMP/bin:/usr/bin:/bin"
+PROBE_TMPDIR="$TMP/"
+# probe_env runs its arguments with an empty environment plus the variables every
+# probe run gets. The runner's own variables (a token, a town root, an
+# XDG_CONFIG_HOME, a locale, a git setting) never reach a case; a case that needs
+# one names it on its own command line.
+probe_env() {
+  env -i PATH="$PROBE_PATH" TMPDIR="$PROBE_TMPDIR" HOME="$TMP/home" "$@"
+}
+# The stub switches are read from this shell, so a value the runner exported
+# would reach every case that does not set it. Clear them here: a case sets its
+# own on its run_probe call, and nothing else can.
+unset STUB_CONTEXT STUB_GATE_YML STUB_HOOK STUB_NO_RUN STUB_JOB_RENAMED \
+  STUB_CLOCK_STUCK STUB_REPO_LACKS_SHA STUB_SECRETS STUB_TOWN_ROOT STUB_READ_BUDGET
 STUB_ADMIN_TOKEN="stub-admin-token"
 BROKER_TOKEN="brokertoken-zqxvjkcd"
 DECOY_TOKEN="decoytoken-zqxvjkcd"
@@ -34,18 +87,6 @@ CFG="$TMP/config"
 TOWN="$TMP/town"
 BARE="$TOWN/rig/.repo.git"
 
-pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
-# fail keeps each failing case's name and detail, so the summary block at the
-# end of the output names them all, even when the log above was cut short.
-FAILED=()
-FAILED_DETAIL=()
-fail() {
-  echo "  FAIL: $1"
-  FAIL=$((FAIL + 1))
-  FAILED+=("$1")
-  FAILED_DETAIL+=("${2:-}")
-  if [ $# -gt 1 ]; then printf '%s\n' "$2" | sed 's/^/    | /'; fi
-}
 check() { # check DESCRIPTION COMMAND...
   local desc=$1
   shift
@@ -382,13 +423,15 @@ run_probe() {
     [ "$prev" = --timeout ] && timeout=$arg
     prev=$arg
   done
-  out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN \
-    -u FORGEJO_API_URL -u FORGEJO_URL \
-    HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+  # The stub switches a case sets (STUB_NO_RUN and the like) are named here, each
+  # empty unless that case sets it, because probe_env would drop them.
+  out=$(cd "$SCRIPT_DIR/.." && probe_env XDG_CONFIG_HOME="$CFG" \
     STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
     STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" STUB_CONTEXT="${STUB_CONTEXT:-ci / gate (push)}" \
     STUB_GATE_YML="${STUB_GATE_YML:-$TMP/gate.yml}" \
     STUB_HOOK="${STUB_HOOK:-}" STUB_REPO_LACKS_SHA="${STUB_REPO_LACKS_SHA:-}" \
+    STUB_NO_RUN="${STUB_NO_RUN:-}" STUB_JOB_RENAMED="${STUB_JOB_RENAMED:-}" \
+    STUB_CLOCK_STUCK="${STUB_CLOCK_STUCK:-}" \
     STUB_READ_BUDGET="${STUB_READ_BUDGET:-$timeout}" \
     bash "$PROBE" --api-url "$API" --web-url "$WEB" --admin-token-file "$TMP/admin.env" \
     --town-root "${STUB_TOWN_ROOT:-$TOWN}" "$@" 2>&1)
@@ -690,7 +733,7 @@ check "nothing is cloned for a missing repository" test ! -e "$STATE/git.log"
 
 echo "=== argument errors ==="
 free_home=$(mktemp -d "$TMP/free.XXXXXX")
-out=$(env PATH="$TMP/bin:$PATH" STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
+out=$(probe_env STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   HOME="$free_home" bash "$PROBE" --repo acme/rig 2>&1); rc=$?
 if [ "$rc" = 2 ]; then pass "a missing rig exits 2"; else fail "a missing rig exits 2 (rc=$rc)" "$out"; fi
 out=$(run_probe rig); rc=$?
@@ -710,8 +753,7 @@ if [ "$rc" = 2 ]; then pass "an unknown option exits 2"; else fail "an unknown o
 
 echo "=== a missing admin token fails loudly ==="
 fresh
-out=$(env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN HOME="$TMP/home" PATH="$TMP/bin:$PATH" \
-  STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
+out=$(probe_env STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   bash "$PROBE" rig --api-url "$API" --repo acme/rig --admin-token-file "$TMP/absent.env" 2>&1); rc=$?
 if [ "$rc" = 1 ]; then pass "a missing admin token exits 1"; else fail "a missing admin token exits 1 (rc=$rc)" "$out"; fi
 check "the missing token is named in the error" contains "no admin token" "$out"
@@ -723,9 +765,8 @@ echo "=== the auth broker's run act supplies the token ==="
 # scopes and revokes it when the run ends, so the probe takes it from the
 # environment and names no token file (gt-7ueb3).
 fresh
-out=$(cd "$SCRIPT_DIR/.." && env -u FORGEJO_ADMIN_TOKEN -u FORGEJO_ADMIN_ENV \
-  -u FORGEJO_API_URL -u FORGEJO_URL GT_AUTH_FORGEJO_TOKEN="$BROKER_TOKEN" \
-  HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+out=$(cd "$SCRIPT_DIR/.." && probe_env GT_AUTH_FORGEJO_TOKEN="$BROKER_TOKEN" \
+  XDG_CONFIG_HOME="$CFG" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   STUB_ADMIN_TOKEN="$BROKER_TOKEN" STUB_SECRETS="$BROKER_TOKEN" \
   STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" STUB_READ_BUDGET=20 \
@@ -745,9 +786,8 @@ echo "=== the environment override stands in for the broker ==="
 # A stand-in run may carry FORGEJO_ADMIN_TOKEN itself rather than name a file,
 # and a run with no token file names none (gt-7ueb3).
 fresh
-out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_ENV \
-  -u FORGEJO_API_URL -u FORGEJO_URL FORGEJO_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
-  HOME="$TMP/home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+out=$(cd "$SCRIPT_DIR/.." && probe_env FORGEJO_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
+  XDG_CONFIG_HOME="$CFG" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   STUB_ADMIN_TOKEN="$STUB_ADMIN_TOKEN" \
   STUB_GATE_YML="$TMP/gate.yml" STUB_CONTEXT="ci / gate (push)" STUB_READ_BUDGET=20 \
@@ -763,9 +803,7 @@ decoy_home="$TMP/home-decoy"
 mkdir -p "$decoy_home/forgejo"
 printf 'FORGEJO_ADMIN_TOKEN=%s\n' "$DECOY_TOKEN" > "$decoy_home/forgejo/.env"
 fresh
-out=$(cd "$SCRIPT_DIR/.." && env -u GT_AUTH_FORGEJO_TOKEN -u FORGEJO_ADMIN_TOKEN \
-  -u FORGEJO_ADMIN_ENV -u FORGEJO_API_URL -u FORGEJO_URL \
-  HOME="$decoy_home" XDG_CONFIG_HOME="$CFG" PATH="$TMP/bin:$PATH" \
+out=$(cd "$SCRIPT_DIR/.." && probe_env HOME="$decoy_home" XDG_CONFIG_HOME="$CFG" \
   STUB_STATE="$STATE" STUB_API="$API" STUB_WEB="$WEB" STUB_SHA="$SHA" \
   STUB_ADMIN_TOKEN="$DECOY_TOKEN" \
   bash "$PROBE" rig --api-url "$API" --web-url "$WEB" --repo acme/rig \
@@ -776,17 +814,20 @@ check "the failure names the broker command" contains "sudo -u gt-forge gt-appro
 check "the file's token never reaches the output" lacks "$DECOY_TOKEN" "$out"
 check "no request is sent without a token" test ! -s "$STATE/calls.log"
 
+echo "=== the summary names each failing case and its detail, and no passing one ==="
+# The fixture is the helper region of this file, copied out whole and run in a
+# subshell, so the case exercises the script's own pass, fail and summary rather
+# than a copy beside them. It holds one passing case, one failing case with a
+# detail, and one failing case without.
+fixture="$TMP/summary-fixture.sh"
+sed -n '/^# helpers-begin$/,/^# helpers-end$/p' "$SELF" > "$fixture"
+fixture_out=$(bash -c 'set -uo pipefail; . "$1"; pass "a passing case"; fail "a failing case" "its detail line"; fail "a bare failing case"; summary' _ "$fixture" 2>&1); fixture_rc=$?
+fixture_summary=$(printf '%s\n' "$fixture_out" | sed -n '/^failing cases:$/,$p')
+if [ "$fixture_rc" != 0 ]; then pass "a summary with a failing case returns non-zero"; else fail "a summary with a failing case returns non-zero (rc=$fixture_rc)" "$fixture_out"; fi
+check "the summary names the failing case" contains "  FAIL: a failing case" "$fixture_summary"
+check "the summary carries the failing case's detail" contains "    | its detail line" "$fixture_summary"
+check "the summary names a failing case with no detail" contains "  FAIL: a bare failing case" "$fixture_summary"
+check "the summary omits the passing case" lacks "a passing case" "$fixture_summary"
+
 echo
-if [ "$FAIL" = 0 ]; then
-  echo "forgejo-probe_test.sh: all $PASS cases passed"
-else
-  echo "forgejo-probe_test.sh: $FAIL of $((PASS + FAIL)) cases failed"
-  echo "failing cases:"
-  for i in "${!FAILED[@]}"; do
-    echo "  FAIL: ${FAILED[$i]}"
-    if [ -n "${FAILED_DETAIL[$i]}" ]; then
-      printf '%s\n' "${FAILED_DETAIL[$i]}" | sed 's/^/    | /'
-    fi
-  done
-  exit 1
-fi
+summary || exit 1
