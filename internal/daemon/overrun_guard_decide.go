@@ -76,6 +76,10 @@ const (
 	// branch exists only in the worktree. A remote that refuses the branch for
 	// good would otherwise hold the bead on a paused seat with a log line per tick.
 	overrunPushMaxAttempts = 5
+	// overrunSaveMaxAttempts is how many refused saves a stop tolerates, one per
+	// tick, before it parks the seat with the refusal as the reason. A save is a
+	// checkpoint and a push, so it takes the checkpoint's bound.
+	overrunSaveMaxAttempts = overrunCheckpointMaxAttempts
 	// overrunCommentMaxAttempts is how many failed bead comments a scheduled
 	// stop tolerates, one per tick, before it ends without one.
 	overrunCommentMaxAttempts = 5
@@ -316,6 +320,23 @@ type overrunState struct {
 	PushFailures int    `json:"push_failures,omitempty"`
 	PushGaveUp   bool   `json:"push_gave_up,omitempty"`
 	PushFailure  string `json:"push_failure,omitempty"`
+
+	// SavedAt is when the save step (overrunStop, step 1b) succeeded, or gave
+	// up; a stop resumed later does not save again once it is set. SavedHead is
+	// the branch head that save pushed (empty when it had nothing to push),
+	// SaveCommitted says it made the WIP commit. A refused save (step 1b, or the
+	// late re-save of step 2a) records SaveFailure, why its push or commit was
+	// refused, and counts in SaveFailures: the stop holds and the next tick
+	// saves again. A success clears both. At overrunSaveMaxAttempts consecutive
+	// refusals the stop gives up on the save (SaveGaveUp): the seat is parked
+	// with SaveFailure as the reason, and the sandbox is kept.
+	SavedAt       time.Time `json:"saved_at,omitzero"`
+	SavedHead     string    `json:"saved_head,omitempty"`
+	SaveCommitted bool      `json:"save_committed,omitempty"`
+	SaveFailure   string    `json:"save_failure,omitempty"`
+	SaveFailures  int       `json:"save_failures,omitempty"`
+	SaveGaveUp    bool      `json:"save_gave_up,omitempty"`
+
 	// ReworkSHA is the commit the kept branch held on origin before the stop's
 	// own push, when it was the worktree's head too: the finished work was
 	// already there, so the hand-back is rework (overrunStop, step 5).

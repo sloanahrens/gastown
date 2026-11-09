@@ -163,9 +163,14 @@ type overrunSeams struct {
 	// handBack returns its bead to the pool after elapsed, with note added to
 	// its comment (empty unless the stop gave up on the checkpoint). clearPause
 	// removes the marker again when the session would not stop.
-	pause         func(seat overrunSeat) error
-	clearPause    func(seat overrunSeat) error
-	stopSession   func(seat overrunSeat) error
+	pause       func(seat overrunSeat) error
+	clearPause  func(seat overrunSeat) error
+	stopSession func(seat overrunSeat) error
+	// saveWork runs before stopSession, while the seat is still paused: it
+	// commits the worktree's uncommitted work as one WIP commit and pushes the
+	// kept branch (overrunSaveWork). A refusal is an error; the stop notes it
+	// and keeps the sandbox (overrunStop, step 1b). nil means nothing is saved.
+	saveWork      func(seat overrunSeat) (overrunSave, error)
 	removeSandbox func(seat overrunSeat) error
 	checkpoint    func(seat overrunSeat) error
 	// stillOurs reports whether the bead is still hooked to the stopped seat:
