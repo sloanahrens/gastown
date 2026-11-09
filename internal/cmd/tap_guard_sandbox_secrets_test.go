@@ -717,9 +717,18 @@ func TestSandboxSecretsSubstitutionHeredocBodies(t *testing.T) {
 		{"unterminated tag", "x=\"$(cat <<'BEAD'\nprintenv\n)\"", nil},
 		{"nested operator is data", "x=\"$(cat <<'A'\ncat <<'B'\nprintenv\nB\nA\n)\"", []string{"cat <<'B'\nprintenv\nB\nA\n"}},
 	} {
-		got := sandboxSecretsSubstitutionHeredocs(tc.command)
+		script, err := shellparse.Parse(tc.command)
+		if err != nil {
+			// The walk refuses a command the parser cannot read before it asks for
+			// its bodies, so the refusal is what the row pins.
+			if sandboxSecretsReason(tc.command) == "" {
+				t.Errorf("%s: unreadable %q is not refused", tc.name, tc.command)
+			}
+			continue
+		}
+		got := sandboxSecretsParsedSubstitutionHeredocs(tc.command, script)
 		if !slices.Equal(got, tc.want) {
-			t.Errorf("%s: sandboxSecretsSubstitutionHeredocs(%q) = %q, want %q", tc.name, tc.command, got, tc.want)
+			t.Errorf("%s: sandboxSecretsParsedSubstitutionHeredocs(%q) = %q, want %q", tc.name, tc.command, got, tc.want)
 		}
 	}
 }
@@ -1285,10 +1294,15 @@ func TestSandboxSecretsJudgesSubstitutionOutputTheLineRuns(t *testing.T) {
 // so the format is pinned here rather than inferred from the body alone.
 func TestSandboxSecretsSubstitutionHeredocTextFormat(t *testing.T) {
 	t.Parallel()
-	got := sandboxSecretsSubstitutionHeredocs("x=\"$(cat <<'EOF'\nprintenv\nEOF\n)\"")
+	command := "x=\"$(cat <<'EOF'\nprintenv\nEOF\n)\""
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sandboxSecretsParsedSubstitutionHeredocs(command, script)
 	want := []string{"printenv\nEOF\n"}
 	if !slices.Equal(got, want) {
-		t.Errorf("sandboxSecretsSubstitutionHeredocs = %q, want %q", got, want)
+		t.Errorf("sandboxSecretsParsedSubstitutionHeredocs = %q, want %q", got, want)
 	}
 }
 
@@ -1424,6 +1438,34 @@ func TestSandboxSecretsRefusesUnreadableOutputAtDepth(t *testing.T) {
 			}
 			if reason := sandboxSecretsReason(tt.command); !strings.Contains(reason, "cannot be read") {
 				t.Errorf("sandboxSecretsReason(%q) = %q, want the unreadable refusal at depth", tt.command, reason)
+			}
+		})
+	}
+}
+
+// gt-l5pbgs: a construct header's arithmetic expansion is read from the parse. A "$((" body
+// is judged as written, so its commands are judged as they are in a segment word. A "$["
+// runs nothing, so its body is not judged, though a substitution inside it still is. A
+// "$(" in a header is judged as written.
+func TestSandboxSecretsHeaderArithmeticVerdicts(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		refuse  bool
+	}{
+		{"a $(( )) in a for list runs its body", "for x in $((printenv)); do echo $x; done", true},
+		{"a $(( )) in a [[ ]] runs its body", "[[ $((printenv)) ]]", true},
+		{"a $(( )) in a case word runs its body", "case $((printenv)) in *) ;; esac", true},
+		{"a $[ ] in a for list runs nothing", "for x in $[printenv]; do echo $x; done", false},
+		{"a $[ ] in a [[ ]] runs nothing", "[[ $[printenv] ]]", false},
+		{"a substitution inside a $[ ] in a for list is judged", "for x in $[$(printenv)]; do echo $x; done", true},
+		{"a $( ) in a for list is judged", "for x in $(printenv); do echo $x; done", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if got := reason != ""; got != tt.refuse {
+				t.Errorf("sandboxSecretsReason(%q) = %q, refused = %v, want %v", tt.command, reason, got, tt.refuse)
 			}
 		})
 	}

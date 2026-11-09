@@ -338,7 +338,7 @@ func sandboxSecretsReason(command string) string {
 // derives is a command the shell runs, so text no parser reads cannot be
 // checked for a secret. The payloads are cut from the command whole, so a
 // substitution that holds a heredoc is judged with its body
-// (sandboxSecretsSubstitutions).
+// (sandboxSecretsParsedSubstitutions).
 func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (reason string, tooDeep bool) {
 	script, err := shellparse.Parse(command)
 	unplaced := err == nil && heredocReadersUnplaced(script)
@@ -352,7 +352,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	}
 	expanded := sandboxSecretsExpandedNames(command)
 	var payloads []string
-	segments, piped := sandboxSecretsParsedSegments(command, script)
+	segments, piped, parsed := sandboxSecretsParsedSegments(command, script)
 	var stdin string         // the text a pipe hands the segment being judged
 	shells := false          // whether the line runs a shell or eval, which reads a substitution's output as a script
 	expandedCommand := false // whether a segment's command word is a substitution or a variable expansion, whose text the line runs
@@ -366,7 +366,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 		fed := stdin
 		stdin = ""
 		if i+1 < len(segments) && piped[i+1] {
-			stdin = sandboxSecretsPipeOutput(argv, fed, ansiHereStrings)
+			stdin = sandboxSecretsPipeOutput(argv, fed, parsed[i], ansiHereStrings)
 		}
 		if sandboxSecretsRunsExpansion(segment) {
 			expandedCommand = true
@@ -385,7 +385,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			// the way it runs a pipe's text: bash <<< printenv (gt-ma5e6).
 			// A -c string keeps that stdin for a shell it runs, so the text is judged
 			// even when -c is present: bash -c bash <<< printenv.
-			if _, texts := sandboxSecretsHereStrings(argv[1:], ansiHereStrings); len(texts) > 0 {
+			if texts, _ := sandboxSecretsParsedHereStrings(parsed[i], ansiHereStrings); len(texts) > 0 {
 				payloads = append(payloads, texts...)
 			}
 			if fed != "" {
@@ -410,7 +410,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			}
 			// A here-string reaches the same stdin, so its text is judged as a
 			// script too: source /dev/stdin <<< printenv (gt-ma5e6).
-			if _, texts := sandboxSecretsHereStrings(argv[1:], ansiHereStrings); len(texts) > 0 {
+			if texts, _ := sandboxSecretsParsedHereStrings(parsed[i], ansiHereStrings); len(texts) > 0 {
 				payloads = append(payloads, texts...)
 			}
 		}
@@ -454,7 +454,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	if heredocReason != "" {
 		return heredocReason, false
 	}
-	substitutions := sandboxSecretsSubstitutions(command)
+	substitutions := sandboxSecretsParsedSubstitutions(command, script)
 	payloads = append(payloads, substitutions...)
 	if shells {
 		// A shell reads a substitution's output as a script too: sh <(echo printenv).
@@ -470,7 +470,7 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	// and text no parser reads is not a command the line runs, so it is not judged:
 	// x="$(cat <<'EOF' ... EOF)" with prose in the body is ordinary work
 	// (TestSandboxSecretsGuardAllowsOrdinaryWork). A readable output is judged either way.
-	for _, text := range sandboxSecretsSubstitutionHeredocs(command) {
+	for _, text := range sandboxSecretsParsedSubstitutionHeredocs(command, script) {
 		if _, perr := shellparse.Parse(text); perr != nil && !shells && !expandedCommand {
 			continue
 		}
@@ -490,32 +490,166 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 	return "", tooDeep
 }
 
-// sandboxSecretsSubstitutions returns the body of every command substitution the
-// shell expands in command, cut from the command as the shell reads it. The
-// spans are found in the text with heredoc bodies stripped, so a quote inside a
-// body moves no span, and each body is then cut from the command itself, so a
-// substitution that holds a heredoc keeps the heredoc's text. Cut from the
-// stripped text, the same substitution is "cat <<'EOF'" with no body, a fragment
-// no parser reads; the walk refuses an unreadable
-// payload at every depth, so it must not be handed that fragment.
-func sandboxSecretsSubstitutions(command string) []string {
-	stripped, cuts := stripHeredocBodiesWithCuts(command)
+// sandboxSecretsParsedSubstitutions returns the body of every command substitution
+// the parsed script runs at its own level: the substitutions a segment holds (in
+// its words, assignment values, redirection targets, process substitutions and
+// heredoc bodies) and the ones a construct header holds (a for list, a case word,
+// an arithmetic or [[ ]] expression). A body's own substitutions are collected when
+// the walk reaches the body at the next depth, so they are not collected here.
+//
+// The parser gives an arithmetic expansion's inner substitutions but not the
+// expression, so the expression is read from each word's source text as "(expr)"
+// (sandboxSecretsArithmeticBodies), the subshell text the walk has always judged.
+func sandboxSecretsParsedSubstitutions(command string, script shellparse.Script) []string {
 	var bodies []string
-	for _, span := range substitutionSpansIn(stripped, true) {
-		span = substitutionSpan{
-			open:      commandOffset(cuts, span.open),
-			bodyStart: commandOffset(cuts, span.bodyStart),
-			bodyEnd:   commandOffset(cuts, span.bodyEnd),
+	for _, seg := range script.Segments {
+		for _, sub := range seg.Subs {
+			bodies = append(bodies, sandboxSecretsSubstitutionTexts(sub, &seg)...)
 		}
-		body := substitutionBody(command, span)
-		if prWorkflowSpanUnterminated(command, span) {
-			body = prWorkflowSplitBodyParen(body)
-		}
-		if strings.TrimSpace(body) != "" {
-			bodies = append(bodies, body)
+		for _, w := range sandboxSecretsSegmentWords(seg) {
+			bodies = append(bodies, sandboxSecretsArithmeticBodies(w.Raw)...)
 		}
 	}
-	return append(bodies, heredocBodySubstitutions(command)...)
+	for _, sub := range script.Subs {
+		bodies = append(bodies, sandboxSecretsHeaderTexts(command, sub)...)
+	}
+	return bodies
+}
+
+// sandboxSecretsHeaderTexts returns the texts the walk judges for a substitution a
+// construct header holds (a for list, a case word, a [[ ]] expression). The parse
+// gives an arithmetic expansion in a header as a Script too, with the same Raw as a
+// command substitution, so the form is read back from the command text, where Raw is
+// verbatim. A "$[" expansion runs nothing, so its body is not judged, but the
+// substitutions inside it are. Every other form is judged as written, which also
+// judges a "$((" expansion's body as the words the shell would run.
+func sandboxSecretsHeaderTexts(command string, sub shellparse.Script) []string {
+	raw := sub.Raw
+	switch {
+	case sub.Backquote,
+		strings.Contains(command, "$("+raw+")"),
+		strings.Contains(command, "<("+raw+")"),
+		strings.Contains(command, ">("+raw+")"),
+		strings.Contains(command, "$(("+raw+"))"):
+		return sandboxSecretsSubstitutionTexts(sub, nil)
+	case strings.Contains(command, "$["+raw+"]"):
+		var texts []string
+		for _, inner := range sub.Subs {
+			texts = append(texts, sandboxSecretsHeaderTexts(command, inner)...)
+		}
+		return texts
+	default:
+		return sandboxSecretsSubstitutionTexts(sub, nil)
+	}
+}
+
+// sandboxSecretsSubstitutionTexts returns the texts the walk judges for one
+// substitution: its body as written, or as the shell cuts it when the substitution
+// is a backquote (backquoteBodyCut, gt-4wd164). seg is the segment that holds the
+// substitution, or nil when a construct header holds it. A "$(" body is judged as
+// written, and so is a body in a segment with no substitution form the parse shows:
+// that is the form the parse can read, so a substitution the parse cannot place as
+// a backquote is judged both ways. An unquoted heredoc body is judged both ways too,
+// as it always has been. Blank bodies are not judged.
+func sandboxSecretsSubstitutionTexts(sub shellparse.Script, seg *shellparse.Segment) []string {
+	raw := sub.Raw
+	cut := backquoteBodyCut(raw)
+	var texts []string
+	switch {
+	case seg == nil || sandboxSecretsUnquotedHeredoc(*seg):
+		texts = []string{raw}
+		if cut != raw {
+			texts = append(texts, cut)
+		}
+	case sandboxSecretsBackquoted(*seg, raw):
+		texts = []string{cut}
+	default:
+		texts = []string{raw}
+	}
+	var kept []string
+	for _, text := range texts {
+		if strings.TrimSpace(text) != "" {
+			kept = append(kept, text)
+		}
+	}
+	return kept
+}
+
+// sandboxSecretsUnquotedHeredoc reports whether seg reads a heredoc whose body the
+// shell expands, so the substitutions the body holds run.
+func sandboxSecretsUnquotedHeredoc(seg shellparse.Segment) bool {
+	for _, h := range seg.Heredocs {
+		if !h.Quoted {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsBackquoted reports whether a word of seg holds raw as a backquote
+// substitution, "`raw`", which is the form that needs the cut to be judged as the
+// shell reads it.
+func sandboxSecretsBackquoted(seg shellparse.Segment, raw string) bool {
+	quoted := "`" + raw + "`"
+	for _, w := range sandboxSecretsSegmentWords(seg) {
+		if strings.Contains(w.Raw, quoted) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsSegmentWords returns every word of seg that the shell expands: its
+// assignment values, its command words and the targets of its redirections.
+func sandboxSecretsSegmentWords(seg shellparse.Segment) []shellparse.Word {
+	words := make([]shellparse.Word, 0, len(seg.Assigns)+len(seg.Words)+len(seg.Redirs))
+	words = append(words, seg.Assigns...)
+	words = append(words, seg.Words...)
+	for _, r := range seg.Redirs {
+		words = append(words, r.Word)
+	}
+	return words
+}
+
+// sandboxSecretsArithmeticBodies returns the "(expr)" text of each arithmetic
+// expansion "$((expr))" written in a word's source text, the text the walk judges as
+// a subshell. A single-quoted span is literal and holds none. The expansion's "$("
+// is closed where its depth returns to zero, so the body runs from the second "("
+// to the ")" that closes the first.
+func sandboxSecretsArithmeticBodies(raw string) []string {
+	var bodies []string
+	inSingle, inDouble := false, false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		switch {
+		case inSingle:
+			inSingle = c != '\''
+		case c == '\\':
+			i++
+		case c == '\'' && !inDouble:
+			inSingle = true
+		case c == '"':
+			inDouble = !inDouble
+		case c == '$' && strings.HasPrefix(raw[i:], "$(("):
+			end := len(raw)
+			depth := 1
+			for j := i + 2; j < len(raw); j++ {
+				switch raw[j] {
+				case '(':
+					depth++
+				case ')':
+					depth--
+				}
+				if depth == 0 {
+					end = j
+					break
+				}
+			}
+			bodies = append(bodies, raw[i+2:end])
+			i = end
+		}
+	}
+	return bodies
 }
 
 // sandboxSecretsEachHeredoc calls fn for every segment that holds here-documents,
@@ -539,30 +673,47 @@ func sandboxSecretsEachHeredoc(script shellparse.Script, fn func(script shellpar
 // output, so a substitution's output carries the body it read.
 var sandboxSecretsBodyPassers = map[string]bool{"cat": true, "tee": true}
 
-// sandboxSecretsSubstitutionHeredocs returns the bodies of heredocs that a command
-// substitution reads through a body passer such as cat or tee, which writes them back
-// out. The substitution's output is what a shell or a command word runs:
-// printf '%s' "$(cat <<'BEAD' ...)" | sh. The heredoc is found by parsing the
-// substitution's own body, so an operator written inside double quotes, which
-// starts no heredoc for the outer line, is the heredoc the substitution runs
-// (gt-ynkew). A body whose delimiter never closes is a syntax error, so
-// nothing runs and nothing is judged. The delimiter line is kept at the end of
-// the returned text, as the shell's reading of the body ran to it.
-func sandboxSecretsSubstitutionHeredocs(command string) []string {
+// sandboxSecretsParsedSubstitutionHeredocs returns the bodies of heredocs that a
+// command substitution of the script reads through a body passer such as cat or tee,
+// which writes them back out. The substitution's output is what a shell or a command
+// word runs: printf '%s' "$(cat <<'BEAD' ...)" | sh. Each text the substitution is
+// judged as (sandboxSecretsSubstitutionTexts, or sandboxSecretsHeaderTexts for a header)
+// is parsed again, so an operator written
+// inside double quotes, which starts no heredoc for the outer line, is the heredoc the
+// substitution runs (gt-ynkew). A text whose delimiter never closes is a syntax error,
+// so nothing runs and nothing is judged. The delimiter line is kept at the end of the
+// returned text, as the shell's reading of the body ran to it.
+func sandboxSecretsParsedSubstitutionHeredocs(command string, script shellparse.Script) []string {
 	var bodies []string
-	for _, sub := range substitutionSpansIn(command, true) {
-		text := substitutionBody(command, sub)
-		script, err := shellparse.Parse(text)
-		if err != nil {
-			continue
+	for _, seg := range script.Segments {
+		for _, sub := range seg.Subs {
+			for _, text := range sandboxSecretsSubstitutionTexts(sub, &seg) {
+				bodies = append(bodies, sandboxSecretsPassedHeredocs(text)...)
+			}
 		}
-		for i, seg := range script.Segments {
-			for _, h := range seg.Heredocs {
-				for _, argv := range sandboxSecretsHeredocPipeline(script, i) {
-					if sandboxSecretsBodyPassers[strings.ToLower(filepath.Base(argv[0]))] {
-						bodies = append(bodies, h.Body+h.Delimiter+"\n")
-						break
-					}
+	}
+	for _, sub := range script.Subs {
+		for _, text := range sandboxSecretsHeaderTexts(command, sub) {
+			bodies = append(bodies, sandboxSecretsPassedHeredocs(text)...)
+		}
+	}
+	return bodies
+}
+
+// sandboxSecretsPassedHeredocs returns the heredoc bodies, delimiter line kept, that
+// one text of a substitution reads through a body passer (sandboxSecretsParsedSubstitutionHeredocs).
+func sandboxSecretsPassedHeredocs(text string) []string {
+	var bodies []string
+	script, err := shellparse.Parse(text)
+	if err != nil {
+		return nil
+	}
+	for i, seg := range script.Segments {
+		for _, h := range seg.Heredocs {
+			for _, argv := range sandboxSecretsHeredocPipeline(script, i) {
+				if sandboxSecretsBodyPassers[strings.ToLower(filepath.Base(argv[0]))] {
+					bodies = append(bodies, h.Body+h.Delimiter+"\n")
+					break
 				}
 			}
 		}
@@ -1266,17 +1417,19 @@ func sandboxSecretsPrintedText(argv []string) string {
 // sandboxSecretsParsedSegments returns the command sites of script, which is the
 // parse of command, as the token lines the walk judges, and reports for each
 // whether a pipe feeds it. A ;, && or || separator feeds nothing. A site with no
-// tokens at all is not one.
-func sandboxSecretsParsedSegments(command string, script shellparse.Script) (segments [][]string, piped []bool) {
+// tokens at all is not one. parsed holds each returned site's parsed segment, at
+// the same index, for the here-strings the tokens do not carry.
+func sandboxSecretsParsedSegments(command string, script shellparse.Script) (segments [][]string, piped []bool, parsed []shellparse.Segment) {
 	pipe := false // whether the separator before the segment is a pipe
 	for _, seg := range script.Segments {
 		if tokens := sandboxSecretsSegmentTokens(command, seg); len(tokens) > 0 {
 			segments = append(segments, tokens)
 			piped = append(piped, pipe)
+			parsed = append(parsed, seg)
 		}
 		pipe = seg.After == "|"
 	}
-	return segments, piped
+	return segments, piped, parsed
 }
 
 // sandboxSecretsDeclarationBuiltins are the builtins the parser reads as a
@@ -1458,7 +1611,7 @@ func sandboxSecretsANSICBody(raw string) (string, bool) {
 // text a pipe feeds it: what echo or printf prints, or the input of cat or tee, which
 // pass it on. Any other command writes nothing the guard follows, so "". A filter that
 // rewrites its text (tr, sed) and a file the text is saved to are not followed.
-func sandboxSecretsPipeOutput(argv []string, fed string, ansiHereStrings map[string]bool) string {
+func sandboxSecretsPipeOutput(argv []string, fed string, seg shellparse.Segment, ansiHereStrings map[string]bool) string {
 	if len(argv) == 0 {
 		return ""
 	}
@@ -1466,7 +1619,7 @@ func sandboxSecretsPipeOutput(argv []string, fed string, ansiHereStrings map[str
 	case "echo", "printf":
 		return sandboxSecretsPrintedText(argv)
 	case "cat", "tee":
-		if text, ok := sandboxSecretsHereStringInput(argv, ansiHereStrings); ok {
+		if text, ok := sandboxSecretsHereStringInput(argv, seg, ansiHereStrings); ok {
 			return text
 		}
 		return fed
@@ -1507,34 +1660,105 @@ func sandboxSecretsANSICHereStrings(command string) map[string]bool {
 	return texts
 }
 
-// sandboxSecretsHereStrings is splitHereStrings with the text of each ANSI-C
-// quoted here-string decoded. shlex drops the $'...' marker, so bash <<<
-// $'x\nprintenv' arrives as one word and the printenv it runs is invisible until
-// the escapes are read; a plain here-string keeps its backslashes, so its text is
-// left as the shell reads it (gt-9q6sf).
-func sandboxSecretsHereStrings(args []string, ansiHereStrings map[string]bool) (rest, texts []string) {
-	rest, texts = splitHereStrings(args)
-	for i, text := range texts {
-		if ansiHereStrings[text] {
-			texts[i] = sandboxSecretsEscapes.Replace(text)
+// sandboxSecretsParsedHereStrings returns the text each here-string on the segment's
+// stdin feeds it, and the words of seg those here-strings take (consumed, by index
+// into seg.Words). It reads the parsed redirections and words: a here-string's text is
+// its target and the run of words after it up to the next redirection, joined as the
+// shell word-splits an unquoted body, and its first word is read on its own too
+// (gt-norvx). A here-string on a descriptor other than stdin takes its words and feeds
+// nothing. A here-string written before the command word takes its target alone: the
+// command's arguments follow the command word, not the redirection. ansi holds the
+// ANSI-C here-string texts whose escapes are decoded (sandboxSecretsANSICHereStrings,
+// gt-9q6sf).
+func sandboxSecretsParsedHereStrings(seg shellparse.Segment, ansi map[string]bool) (texts []string, consumed map[int]bool) {
+	consumed = map[int]bool{}
+	for _, r := range seg.Redirs {
+		if r.Op != "<<<" || r.Inherited {
+			continue
+		}
+		target := sandboxSecretsParsedWord(r.Word, seg.Subs)
+		if body, ok := sandboxSecretsANSICBody(r.Word.Raw); ok {
+			target = body
+		}
+		run := []string{target}
+		if !sandboxSecretsLeadsCommand(seg, r.OpSrc) {
+			next := sandboxSecretsNextRedirectOpSrc(seg, r.OpSrc)
+			for wi, w := range seg.Words {
+				if wi == 0 || w.Src <= r.OpSrc || (next >= 0 && w.Src >= next) {
+					continue
+				}
+				text := sandboxSecretsParsedWord(w, seg.Subs)
+				if redirected, _, _ := shellRedirection(text); redirected {
+					break
+				}
+				run = append(run, text)
+				consumed[wi] = true
+			}
+		}
+		if r.N != "" && r.N != "0" {
+			continue
+		}
+		texts = append(texts, sandboxSecretsDecodeHereString(run[0], ansi))
+		if len(run) > 1 {
+			texts = append(texts, sandboxSecretsDecodeHereString(strings.Join(run, " "), ansi))
 		}
 	}
-	return rest, texts
+	return texts, consumed
 }
 
-// sandboxSecretsHereStringInput returns the text a here-string in a cat or tee argv
-// feeds as the command's stdin, and false when none does. The here-string replaces
-// what a pipe feeds, so cat <<< printenv | bash runs printenv. A cat that names a file
-// reads the file instead (a lone "-" still reads stdin); tee reads stdin whatever
-// files it writes (gt-enim5).
-func sandboxSecretsHereStringInput(argv []string, ansiHereStrings map[string]bool) (string, bool) {
-	rest, texts := sandboxSecretsHereStrings(argv[1:], ansiHereStrings)
+// sandboxSecretsLeadsCommand reports whether a redirection at source offset opSrc
+// is written before the segment's command word, so the shell reads it ahead of the
+// command's arguments.
+func sandboxSecretsLeadsCommand(seg shellparse.Segment, opSrc int) bool {
+	return len(seg.Words) > 0 && seg.Words[0].Src >= 0 && opSrc < seg.Words[0].Src
+}
+
+// sandboxSecretsNextRedirectOpSrc returns the source offset of the next redirection
+// of seg after from, the one a here-string's word run stops at, or -1 when none
+// follows. A redirection the parser marks Inherited is not the segment's own.
+func sandboxSecretsNextRedirectOpSrc(seg shellparse.Segment, from int) int {
+	next := -1
+	for _, r := range seg.Redirs {
+		if r.Inherited || r.OpSrc <= from {
+			continue
+		}
+		if next < 0 || r.OpSrc < next {
+			next = r.OpSrc
+		}
+	}
+	return next
+}
+
+// sandboxSecretsDecodeHereString returns text with its escapes decoded when ansi
+// holds it as the text of an ANSI-C quoted here-string, and text as it is otherwise.
+func sandboxSecretsDecodeHereString(text string, ansi map[string]bool) string {
+	if ansi[text] {
+		return sandboxSecretsEscapes.Replace(text)
+	}
+	return text
+}
+
+// sandboxSecretsHereStringInput returns the text a here-string on a cat or tee
+// segment feeds as the command's stdin, and false when none does. The here-string
+// replaces what a pipe feeds, so cat <<< printenv | bash runs printenv. A cat that
+// names a file, or writes one through a redirection, reads the file instead (a lone
+// "-" still reads stdin); tee reads stdin whatever files it writes (gt-enim5).
+func sandboxSecretsHereStringInput(argv []string, seg shellparse.Segment, ansi map[string]bool) (string, bool) {
+	texts, consumed := sandboxSecretsParsedHereStrings(seg, ansi)
 	if len(texts) == 0 {
 		return "", false
 	}
 	if strings.ToLower(filepath.Base(argv[0])) == "cat" {
-		for _, a := range rest {
-			if a != "-" && !strings.HasPrefix(a, "-") {
+		for wi, w := range seg.Words {
+			if wi == 0 || consumed[wi] {
+				continue
+			}
+			if a := sandboxSecretsParsedWord(w, seg.Subs); a != "-" && !strings.HasPrefix(a, "-") {
+				return "", false
+			}
+		}
+		for _, r := range seg.Redirs {
+			if !r.Inherited && r.Op != "<<<" {
 				return "", false
 			}
 		}
@@ -1554,11 +1778,11 @@ func sandboxSecretsStdoutText(command string) string {
 	}
 	expanded := sandboxSecretsExpandedNames(command)
 	ansiHereStrings := sandboxSecretsANSICHereStrings(command)
-	segments, piped := sandboxSecretsParsedSegments(command, script)
+	segments, piped, parsed := sandboxSecretsParsedSegments(command, script)
 	var stdin, out string
 	for i, segment := range segments {
 		_, _, argv := sandboxSecretsSegment(segment, nil, expanded)
-		out = sandboxSecretsPipeOutput(argv, stdin, ansiHereStrings)
+		out = sandboxSecretsPipeOutput(argv, stdin, parsed[i], ansiHereStrings)
 		stdin = ""
 		if i+1 < len(segments) && piped[i+1] {
 			stdin = out
