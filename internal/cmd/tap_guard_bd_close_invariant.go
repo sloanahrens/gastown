@@ -6,7 +6,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -416,12 +419,13 @@ func isBeadIDShaped(s string) bool {
 // parseBdCloseInvocations finds every `bd close` in command and extracts the
 // ids and reason each one carries.
 //
-// The command is tokenized (quoted text stays one opaque token, so an id
+// The command is read into tokens (quoted text stays one opaque token, so an id
 // mentioned inside a quoted argument is never mistaken for an argument of the
 // command), split into per-segment sub-commands on shell operators, and each
 // segment is inspected on its own — `cd /tmp && bd close gt-x` must be found
 // on its second segment, and a heredoc body that merely mentions "bd close" is
-// data, not a command.
+// data, not a command. The tokens come from parsedTokens, with shellTokenize as
+// the fallback (bdCloseReadTokens); this is the per-guard move of gt-crn9gu.
 //
 // Only a segment whose command word is literally `bd` (or a path ending in
 // /bd) followed by `close` is an invocation. Everything a close can carry is
@@ -429,8 +433,43 @@ func isBeadIDShaped(s string) bool {
 // the value of -r/--reason is consumed as the reason rather than mistaken for
 // an id.
 func parseBdCloseInvocations(command string) []bdCloseInvocation {
+	return parseBdCloseInvocationsWith(command, bdCloseReadTokens)
+}
+
+// bdCloseReader reads a command into the argv-like tokens the bd-close parser
+// walks. parsed reports whether the tokens came from parsedTokens; false means
+// shellTokenize's reading.
+type bdCloseReader func(command string) (tokens []string, parsed bool)
+
+// bdCloseReaderOf builds the production reader over the two readings it chooses
+// between: parsed, and shell as the fallback. A test passes its own readings, so
+// the production routing, unsafe shapes included, judges them without any package
+// variable being swapped.
+func bdCloseReaderOf(parsed func(string) ([]string, bool), shell func(string) []string) bdCloseReader {
+	return func(command string) ([]string, bool) {
+		tokens, readable := parsed(command)
+		if !readable || bdCloseParsedUnsafe(tokens) {
+			return shell(command), false
+		}
+		return tokens, true
+	}
+}
+
+// bdCloseReadTokens is the production reader, the parsedTokens reading of gt-crn9gu.
+// It falls back to shellTokenize when parsedTokens cannot read the command, and
+// when the parsed tokens carry a shape the parsed reading does not cover
+// (bdCloseParsedUnsafe). shellTokenize is the reading gt-crn9gu retires; it stays
+// as the fallback until that plan removes it.
+func bdCloseReadTokens(command string) ([]string, bool) {
+	return bdCloseReaderOf(parsedTokens, shellTokenize)(command)
+}
+
+// parseBdCloseInvocationsWith is parseBdCloseInvocations over the reading read
+// gives. Every substitution body and shell payload is read with the same reader,
+// so one reading decides the whole command.
+func parseBdCloseInvocationsWith(command string, read bdCloseReader) []bdCloseInvocation {
 	stripped := stripHeredocBodies(strings.TrimSpace(command))
-	tokens := shellTokenize(stripped)
+	tokens, parsed := read(stripped)
 
 	var invocations []bdCloseInvocation
 	var segment []string
@@ -440,7 +479,9 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 	caseDepth := 0
 	flush := func() {
 		caseDepth += bdCloseCaseDepthChange(segment)
-		if caseDepth > 0 {
+		// The parsed reading emits no case keyword, so caseDepth stays zero and
+		// the unglue below runs only on the shellTokenize reading.
+		if caseDepth > 0 && !parsed {
 			segment = bdCloseUnglueArmLabel(segment)
 		}
 		if invocation, ok := parseBdCloseSegment(segment); ok {
@@ -451,7 +492,7 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 			}
 			invocations = append(invocations, invocation)
 		}
-		invocations = append(invocations, parseBdCloseShellPayload(segment)...)
+		invocations = append(invocations, parseBdCloseShellPayload(segment, read)...)
 	}
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
@@ -481,7 +522,7 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 		return invocations
 	}
 	for _, body := range bodies {
-		invocations = append(invocations, parseBdCloseInvocations(body)...)
+		invocations = append(invocations, parseBdCloseInvocationsWith(body, read)...)
 	}
 	return invocations
 }
@@ -806,12 +847,12 @@ func bdCloseCaseDepthChange(segment []string) int {
 }
 
 // parseBdCloseShellPayload reads the closes inside a `bash -c '...'` payload.
-func parseBdCloseShellPayload(segment []string) []bdCloseInvocation {
+func parseBdCloseShellPayload(segment []string, read bdCloseReader) []bdCloseInvocation {
 	tokens := bdCloseCommandTokens(segment)
 	// eval joins its arguments with spaces and runs the result as a command
 	// line, so `eval 'bd close gt-x'` is a close.
 	if len(tokens) >= 2 && tokens[0] == "eval" {
-		return parseBdCloseInvocations(strings.Join(tokens[1:], " "))
+		return parseBdCloseInvocationsWith(strings.Join(tokens[1:], " "), read)
 	}
 	if len(tokens) < 3 || !shellInvokers[filepath.Base(tokens[0])] {
 		return nil
@@ -820,7 +861,7 @@ func parseBdCloseShellPayload(segment []string) []bdCloseInvocation {
 	if i < 0 {
 		return nil
 	}
-	return parseBdCloseInvocations(tokens[1+i])
+	return parseBdCloseInvocationsWith(tokens[1+i], read)
 }
 
 // stripLeadingEnvAssignments drops leading VAR=value tokens (and the
@@ -896,4 +937,109 @@ func printBdCloseInvariantBlock(issueID, branch, refusal string) {
 	fmt.Fprintln(os.Stderr, "║  See: gt-6hmz (close-time invariant), gt-arno (this guard)       ║")
 	fmt.Fprintln(os.Stderr, "╚══════════════════════════════════════════════════════════════════╝")
 	fmt.Fprintln(os.Stderr, "")
+}
+
+// bdCloseParsedUnsafe reports whether the parsed tokens of a command have a shape
+// the parsed reading does not cover, so the command is read by shellTokenize
+// instead. The shapes are those where the two readings give a close different
+// ids: the shell reading finds an id or a close the parsed tokens lack (the first
+// three), or the parsed reading finds an id the shell reading does not (the last):
+//
+//   - A word holding a substitution with a blank in it. parsedTokens keeps
+//     $(...) whole; shellTokenize splits it at the blank, so a bead id written
+//     among the substitution's words is one only the shell reading finds.
+//   - A `bd close` that does not head its segment. parsedTokens drops the case
+//     arm terminator ";;", so `case a in a) make ;; b) bd close gt-x;; esac`
+//     reads as `make bd close gt-x`, and the close is only found by shellTokenize.
+//   - A `$` followed by a dashed name. shellparse reads `$\<newline>'gt-x'` as
+//     `$gt-x`; bash and shellTokenize read `gt-x`.
+//   - A `bd close` segment holding a redirection. parsedTokens splits `>gt-y`
+//     into `>` and `gt-y`, and the close would then carry gt-y as an id, which
+//     the shell reading does not.
+func bdCloseParsedUnsafe(tokens []string) bool {
+	var segment []string
+	for _, tok := range tokens {
+		if shellCommandSeparators[tok] {
+			if bdCloseSegmentUnsafe(segment) {
+				return true
+			}
+			segment = nil
+			continue
+		}
+		if bdCloseSubstitutionWithBlank(tok) || bdClosePrefixedDashedName(tok) {
+			return true
+		}
+		segment = append(segment, tok)
+	}
+	return bdCloseSegmentUnsafe(segment)
+}
+
+// bdCloseSegmentUnsafe reports whether a segment of parsed tokens has a shape
+// bdCloseParsedUnsafe routes: a close that does not head it, or a close beside a
+// redirection operator.
+func bdCloseSegmentUnsafe(segment []string) bool {
+	if bdCloseSegmentHidesClose(segment) {
+		return true
+	}
+	redirects := slices.ContainsFunc(segment, func(tok string) bool { return strings.ContainsAny(tok, "<>") })
+	return redirects && bdCloseSegmentHasClose(segment)
+}
+
+// bdCloseSubstitutionWithBlank reports whether tok holds a command or process
+// substitution with a blank or newline in it.
+func bdCloseSubstitutionWithBlank(tok string) bool {
+	if !strings.Contains(tok, "$(") && !strings.Contains(tok, "`") && !strings.Contains(tok, "<(") && !strings.Contains(tok, ">(") {
+		return false
+	}
+	return strings.ContainsAny(tok, " \t\n")
+}
+
+// bdClosePrefixedDashedName reports whether tok is a `$` followed by a name that
+// has a dash in it, the shape a bead id takes when shellparse keeps the `$` of a
+// line-continued quoted word.
+func bdClosePrefixedDashedName(tok string) bool {
+	if len(tok) < 2 || tok[0] != '$' {
+		return false
+	}
+	first, _ := utf8.DecodeRuneInString(tok[1:])
+	if first != '_' && !unicode.IsLetter(first) {
+		return false
+	}
+	return strings.Contains(tok, "-")
+}
+
+// bdCloseSegmentHidesClose reports whether a `bd close` in segment does not head
+// it: a command word comes before the close, so a separator the parsed reading
+// dropped joined the close to that command. The head is the segment's command
+// after its env assignments, launchers and case header, the same reading
+// parseBdCloseSegment makes.
+func bdCloseSegmentHidesClose(segment []string) bool {
+	start := len(segment) - len(bdCloseCommandTokens(segment))
+	for i := range segment {
+		if i != start && bdCloseOpensAt(segment, i) {
+			return true
+		}
+	}
+	return false
+}
+
+// bdCloseSegmentHasClose reports whether segment holds a `bd close` anywhere.
+func bdCloseSegmentHasClose(segment []string) bool {
+	for i := range segment {
+		if bdCloseOpensAt(segment, i) {
+			return true
+		}
+	}
+	return false
+}
+
+// bdCloseOpensAt reports whether segment has `bd close` (after any global bd
+// flags) with the bd command word at i.
+func bdCloseOpensAt(segment []string, i int) bool {
+	if !isBdCommandWord(segment[i]) {
+		return false
+	}
+	rest := segment[i+1:]
+	sub := bdSubcommandIndex(rest)
+	return sub >= 0 && isBdCloseSubcommand(rest[sub])
 }

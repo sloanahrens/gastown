@@ -2,9 +2,12 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -182,11 +185,18 @@ func TestParseBdCloseInvocations(t *testing.T) {
 		{name: "glued word after a finished case is not an arm", command: "case $x in a) true ;; esac; a)bd close gt-arno", want: nil},
 		{name: "glued word as an argument is not an arm", command: "echo a)bd close gt-arno", want: nil},
 		// A group's own `)` closes the segment, so the close in a subshell is
-		// still the command word rather than a label's tail. Every non-flag
-		// token after `close` is an id, so the `)` and the redirect land here
-		// beside the real one; only an id that names the branch is judged.
-		{name: "subshell holding the close keeps it", command: "( bd close gt-arno ) 2>/dev/null", want: []bdCloseInvocation{{IDs: []string{"gt-arno", ")", "2>/dev/null"}}}},
-		{name: "function body is not a case arm", command: "foo() { bd close gt-arno; }", want: nil},
+		// still the command word rather than a label's tail. The parsed reading
+		// has no token for the subshell's parentheses or its redirect, so the
+		// close carries its one id; the shell reading used to add `)` and
+		// `2>/dev/null` as ids, which no branch can name. Ruling on 0c852cb47f2b:
+		// the change is accepted because the dropped ids were never ids, and the
+		// bd-close invariant compares bead-shaped ids only (isBeadIDShaped).
+		{name: "subshell holding the close keeps it", command: "( bd close gt-arno ) 2>/dev/null", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
+		// The body is read as a command, as a `{ ...; }` group is. The shell
+		// reading missed a close in a function body, so `foo() { bd close
+		// gt-arno; }; foo` went unjudged; the parsed reading judges it. Ruling on
+		// 0c852cb47f2b: a close the shell reading missed may now be found.
+		{name: "function body is not a case arm", command: "foo() { bd close gt-arno; }", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
 		{name: "case inside a quoted argument", command: `echo "case $x in a) bd close gt-arno ;; esac"`, want: nil},
 		{name: "case written into a heredoc is data", command: "cat > /tmp/f.sh <<'EOF'\ncase $x in a) bd close gt-arno ;; esac\nEOF", want: nil},
 		{name: "behind timeout", command: "timeout 30 bd close gt-arno", want: []bdCloseInvocation{{IDs: []string{"gt-arno"}}}},
@@ -716,4 +726,396 @@ func TestCloseInvariantBranchBead(t *testing.T) {
 			t.Errorf("closeInvariantBranchBead = %v, want nil on lookup failure", got)
 		}
 	})
+}
+
+// bdCloseCoverageHazards are the commands the coverage property needs beyond the
+// differential's own: a line-continued quoted id that parsedTokens reads as
+// `$gt-x`, an ANSI-C quoted id, a substitution holding a blank, and a glued
+// redirection with a dashed target.
+var bdCloseCoverageHazards = []string{
+	"bd close $\\\n'gt-x'",
+	"bd close gt-x $\\\n'gt-y'",
+	"bd close $'gt-x'",
+	"bd close $(echo gt-x gt-y)",
+	"bd close gt-x >gt-y",
+}
+
+// bdCloseCoverageCommands is the command source of TestParsedTokensDifferential
+// (the guard corpus and the generated commands), each with a bd close placed at
+// every position the differential's classes touch: after a separator, in a case
+// arm, in a substitution, behind a glued redirection, and in an eval or sh -c
+// payload. The hazard commands come first.
+func bdCloseCoverageCommands(t *testing.T) []string {
+	t.Helper()
+	const cl = "bd close gt-x"
+	commands := append([]string{}, bdCloseCoverageHazards...)
+	for _, c := range parsedTokensCommands(t) {
+		commands = append(commands,
+			c,
+			cl+" "+c,
+			c+" ; "+cl,
+			c+";"+cl,
+			c+" && "+cl,
+			c+" | "+cl,
+			"echo $("+cl+") "+c,
+			"echo $("+c+"; "+cl+")",
+			"case a in a) "+cl+";; esac; "+c,
+			"case a in a) "+c+" ;; b) "+cl+";; esac",
+			c+" 2>f; "+cl,
+			c+" >f;"+cl,
+			"sh -c '"+cl+"'; "+c,
+			"eval '"+cl+"'; "+c,
+		)
+	}
+	return commands
+}
+
+// bdCloseShellReading is the shellTokenize reading, the reference the parsed
+// reading is compared with.
+func bdCloseShellReading(command string) ([]string, bool) {
+	return shellTokenize(command), false
+}
+
+// bdCloseCovers reports whether invocation g keeps what the close w is judged by:
+// every bead-shaped id of w, and the unreadable marker when w holds one. An id
+// that is not bead-shaped is never compared, since the guard never judges one
+// (ruling on 0c852cb47f2b).
+func bdCloseCovers(g, w bdCloseInvocation) bool {
+	if w.IDsUnreadable && !g.IDsUnreadable {
+		return false
+	}
+	for _, id := range w.IDs {
+		if isBeadIDShaped(id) && !slices.Contains(g.IDs, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// bdCloseHasID reports whether an invocation in invocations carries id.
+func bdCloseHasID(invocations []bdCloseInvocation, id string) bool {
+	for _, inv := range invocations {
+		if slices.Contains(inv.IDs, id) {
+			return true
+		}
+	}
+	return false
+}
+
+// bdCloseMissed returns "" when every invocation of want is covered by one of
+// got. Otherwise it names what the first uncovered invocation lost: a bead-shaped
+// id that no invocation of got holds, or "<unreadable close>" or "<close>" when
+// the invocation carries no such id.
+func bdCloseMissed(got, want []bdCloseInvocation) string {
+	for _, w := range want {
+		if slices.ContainsFunc(got, func(g bdCloseInvocation) bool { return bdCloseCovers(g, w) }) {
+			continue
+		}
+		for _, id := range w.IDs {
+			if isBeadIDShaped(id) && !bdCloseHasID(got, id) {
+				return id
+			}
+		}
+		if w.IDsUnreadable {
+			return "<unreadable close>"
+		}
+		return "<close>"
+	}
+	return ""
+}
+
+// bdCloseLostInProduction is the production check: parseBdCloseInvocations, routing
+// included, must cover every invocation the shell reading finds. It returns what
+// was lost, or "".
+func bdCloseLostInProduction(command string) string {
+	return bdCloseMissed(parseBdCloseInvocations(command), parseBdCloseInvocationsWith(command, bdCloseShellReading))
+}
+
+// bdCloseParsedGap reads command with the parsed tokenizer alone and no fallback.
+// It reports routed when some reading of command (the whole command, or a
+// substitution or shell payload inside it) is one bdCloseReadTokens would send to
+// the shell reading. Otherwise gap names what the parsed reading lost, or is "".
+func bdCloseParsedGap(command string) (gap string, routed bool) {
+	unsafe := false
+	parsedOnly := func(c string) ([]string, bool) {
+		tokens, readable := parsedTokens(c)
+		if !readable || bdCloseParsedUnsafe(tokens) {
+			unsafe = true
+			return nil, false
+		}
+		return tokens, true
+	}
+	got := parseBdCloseInvocationsWith(command, parsedOnly)
+	if unsafe {
+		return "", true
+	}
+	return bdCloseMissed(got, parseBdCloseInvocationsWith(command, bdCloseShellReading)), false
+}
+
+// bdCloseReadCounts counts the readings the production reader asked for.
+type bdCloseReadCounts struct{ parsed, shell int }
+
+// countingBdCloseReader is the production reader over the real tokenizers, counting
+// the calls to each into counts. Each test passes its own counts, so tests that use
+// it can run in parallel.
+func countingBdCloseReader(counts *bdCloseReadCounts) bdCloseReader {
+	return bdCloseReaderOf(
+		func(command string) ([]string, bool) {
+			counts.parsed++
+			return parsedTokens(command)
+		},
+		func(command string) []string {
+			counts.shell++
+			return shellTokenize(command)
+		},
+	)
+}
+
+// TestParseBdCloseParsedReadingMatchesShellIDs is the coverage property, over the
+// command source of TestParsedTokensDifferential with a bd close at each position:
+// on every command none of whose readings is routed to the shell reading, the
+// parsed reading loses no invocation and no bead-shaped id the shell reading finds.
+func TestParseBdCloseParsedReadingMatchesShellIDs(t *testing.T) {
+	t.Parallel()
+	var parsedN, routedN int
+	for _, command := range bdCloseCoverageCommands(t) {
+		gap, routed := bdCloseParsedGap(command)
+		if routed {
+			routedN++
+			continue
+		}
+		parsedN++
+		if gap != "" {
+			t.Errorf("parsed reading of %q loses %q that the shell reading finds", command, gap)
+		}
+	}
+	if parsedN == 0 || routedN == 0 {
+		t.Fatalf("the property ran on %d parsed and %d routed commands, want both", parsedN, routedN)
+	}
+}
+
+// TestParseBdCloseCoverageCatchesDroppedSeparator is the mutation check: a parsed
+// tokenizer that drops separators. Read on its own it loses closes, so the
+// property sees the mutation. Through the production path the routing predicate
+// reads the merged tokens as unsafe and sends those commands to the shell reading,
+// so the guard loses nothing and the predicate routes more commands than the real
+// tokenizer does. It passes the dropped-separator tokenizer to the
+// production reader as a parameter.
+func TestParseBdCloseCoverageCatchesDroppedSeparator(t *testing.T) {
+	t.Parallel()
+	dropped := func(command string) ([]string, bool) {
+		tokens, readable := parsedTokens(command)
+		return slices.DeleteFunc(tokens, func(s string) bool { return shellCommandSeparators[s] }), readable
+	}
+	commands := bdCloseCoverageCommands(t)
+
+	lost := 0
+	for _, command := range commands {
+		if gap := bdCloseMissed(parseBdCloseInvocationsWith(command, dropped), parseBdCloseInvocationsWith(command, bdCloseShellReading)); gap != "" {
+			lost++
+		}
+	}
+	if lost == 0 {
+		t.Error("a parsed tokenizer that drops separators loses no close on any command, so the coverage property cannot see a dropped separator")
+	}
+
+	production := bdCloseReaderOf(dropped, shellTokenize)
+	for _, command := range commands {
+		if gap := bdCloseMissed(parseBdCloseInvocationsWith(command, production), parseBdCloseInvocationsWith(command, bdCloseShellReading)); gap != "" {
+			t.Errorf("parseBdCloseInvocations(%q) loses %q under a tokenizer that drops separators; the routing predicate must send it to the shell reading", command, gap)
+		}
+	}
+	if real, mutant := bdCloseRoutedCount(commands, parsedTokens), bdCloseRoutedCount(commands, dropped); mutant <= real {
+		t.Errorf("the routing predicate routes %d commands under a tokenizer that drops separators and %d with the real one, want more under the dropped separators", mutant, real)
+	}
+}
+
+// bdCloseRoutedCount counts the commands whose top-level tokens from read the
+// routing predicate sends to the shell reading.
+func bdCloseRoutedCount(commands []string, read func(string) ([]string, bool)) int {
+	routed := 0
+	for _, command := range commands {
+		if tokens, readable := read(stripHeredocBodies(strings.TrimSpace(command))); !readable || bdCloseParsedUnsafe(tokens) {
+			routed++
+		}
+	}
+	return routed
+}
+
+// bdCloseBoundedAlphabet is the alphabet of the bounded exhaustive test: the
+// symbols the coverage hazards and the routing shapes are built from. ";;" is
+// listed beside ";" because a lone ";" joined by single spaces can never make the
+// case terminator the routing predicate exists for.
+var bdCloseBoundedAlphabet = []string{
+	"bd", "close", "gt-x", ";", ";;", "&&", "|", "(", ")", "{", "}",
+	"case", "in", "esac", "a)", ">", "2>/dev/null", "$(", "`", `""`,
+}
+
+// bdCloseBoundedMaxSymbols is the longest command the bounded exhaustive test builds.
+const bdCloseBoundedMaxSymbols = 4
+
+// TestParseBdCloseBoundedExhaustiveNoLostClose builds every command of up to
+// bdCloseBoundedMaxSymbols symbols from bdCloseBoundedAlphabet, joined by single
+// spaces, and checks each one. The production reading must lose no invocation and
+// no bead-shaped id the shell reading finds, and a command read by the parsed
+// tokens alone must lose none either. The claim holds within this bound.
+func TestParseBdCloseBoundedExhaustiveNoLostClose(t *testing.T) {
+	t.Parallel()
+	var parsedN, routedN atomic.Int64
+	t.Cleanup(func() {
+		if parsedN.Load() == 0 || routedN.Load() == 0 {
+			t.Errorf("the bounded set ran on %d parsed and %d routed commands, want both", parsedN.Load(), routedN.Load())
+		}
+	})
+	// One subtest per first symbol, so the 168420 commands run in parallel.
+	for _, first := range bdCloseBoundedAlphabet {
+		t.Run(first, func(t *testing.T) {
+			t.Parallel()
+			var failures []string
+			checked := 0
+			var walk func(parts []string)
+			walk = func(parts []string) {
+				command := strings.Join(parts, " ")
+				checked++
+				if lost := bdCloseLostInProduction(command); lost != "" {
+					failures = append(failures, fmt.Sprintf("parseBdCloseInvocations(%q) loses %q", command, lost))
+				}
+				if gap, routed := bdCloseParsedGap(command); routed {
+					routedN.Add(1)
+				} else {
+					parsedN.Add(1)
+					if gap != "" {
+						failures = append(failures, fmt.Sprintf("parsed reading of %q loses %q", command, gap))
+					}
+				}
+				if len(parts) == bdCloseBoundedMaxSymbols {
+					return
+				}
+				for _, s := range bdCloseBoundedAlphabet {
+					walk(append(slices.Clone(parts), s))
+				}
+			}
+			walk([]string{first})
+
+			// The commands starting with first are the sums of len^k for k from 0 to
+			// bdCloseBoundedMaxSymbols-1 further symbols.
+			want, power := 0, 1
+			for k := 1; k <= bdCloseBoundedMaxSymbols; k++ {
+				want += power
+				power *= len(bdCloseBoundedAlphabet)
+			}
+			if checked != want {
+				t.Fatalf("checked %d commands, want %d", checked, want)
+			}
+			for i, f := range failures {
+				if i == 10 {
+					t.Errorf("%d more failures", len(failures)-10)
+					break
+				}
+				t.Error(f)
+			}
+		})
+	}
+}
+
+// TestParseBdCloseInvocationsMatchesShellIDs runs the production reader, routing
+// included, over the coverage commands: it loses no invocation or bead-shaped id
+// the shell reading finds on any of them.
+func TestParseBdCloseInvocationsMatchesShellIDs(t *testing.T) {
+	t.Parallel()
+	for _, command := range bdCloseCoverageCommands(t) {
+		if lost := bdCloseLostInProduction(command); lost != "" {
+			t.Errorf("parseBdCloseInvocations(%q) loses %q that the shell reading finds", command, lost)
+		}
+	}
+}
+
+// TestParseBdCloseInvocationsRedirectTargetIsNotAnID: the target of a redirection
+// beside a close is not one of its ids, as the shell reading has it.
+func TestParseBdCloseInvocationsRedirectTargetIsNotAnID(t *testing.T) {
+	t.Parallel()
+	const command = "bd close gt-x >gt-y"
+	got := parseBdCloseInvocations(command)
+	if bdCloseHasID(got, "gt-y") {
+		t.Errorf("parseBdCloseInvocations(%q) = %+v, want no gt-y: it is the redirection's target", command, got)
+	}
+	if !bdCloseHasID(got, "gt-x") {
+		t.Errorf("parseBdCloseInvocations(%q) = %+v, want an invocation holding gt-x", command, got)
+	}
+}
+
+// TestParseBdCloseInvocationsRoutesUnsafeShapes checks which reading the production
+// reader takes. An unsafe shape goes to the shell reading, which finds the bead the
+// parsed tokens alone lose; a plain close is read by parsedTokens alone. It counts the
+// readings through a reader built for the test.
+func TestParseBdCloseInvocationsRoutesUnsafeShapes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		routed  bool
+	}{
+		{"case arm terminator dropped by parsedTokens", "case a in a) make test ;; b) bd close gt-x;; esac", true},
+		{"line-continued quoted id", "bd close $\\\n'gt-x'", true},
+		{"command substitution with a blank", "bd close $(echo gt-x gt-y)", true},
+		{"close beside a redirection", "bd close gt-x >gt-y", true},
+		{"plain close", "bd close gt-x", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			counts := &bdCloseReadCounts{}
+			got := parseBdCloseInvocationsWith(tt.command, countingBdCloseReader(counts))
+			if !bdCloseHasID(got, "gt-x") {
+				t.Errorf("parseBdCloseInvocations(%q) = %+v, want an invocation holding gt-x", tt.command, got)
+			}
+			if routed := counts.shell > 0; routed != tt.routed {
+				t.Errorf("parseBdCloseInvocations(%q) read the shell reading %d times, want routed=%v", tt.command, counts.shell, tt.routed)
+			}
+		})
+	}
+}
+
+// TestParseBdCloseInvocationsUnreadableFallsBackToShell: a command parsedTokens
+// cannot read is read by shellTokenize, as the guard read every command before
+// the move, so its closes are found and judged the same way.
+func TestParseBdCloseInvocationsUnreadableFallsBackToShell(t *testing.T) {
+	t.Parallel()
+	command := "bd close gt-x && ("
+	if _, readable := parsedTokens(command); readable {
+		t.Fatalf("parsedTokens reads %q; the test needs a command it cannot read", command)
+	}
+	got := parseBdCloseInvocations(command)
+	if want := parseBdCloseInvocationsWith(command, bdCloseShellReading); !reflect.DeepEqual(got, want) {
+		t.Errorf("parseBdCloseInvocations(%q) = %+v, want the shell reading %+v", command, got, want)
+	}
+	if !bdCloseHasID(got, "gt-x") {
+		t.Errorf("parseBdCloseInvocations(%q) = %+v, want an invocation holding gt-x", command, got)
+	}
+}
+
+// TestBdClosePrefixedDashedName pins the `$` then dashed name shape the parsed
+// reading routes to the shell reading. The letter test reads runes, so a multi-byte
+// letter counts and a multi-byte symbol does not.
+func TestBdClosePrefixedDashedName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		tok  string
+		want bool
+	}{
+		{"$gt-x", true},
+		{"$_gt-x", true},
+		{"$é-x", true},
+		{"$€-x", false},
+		{"$1-x", false},
+		{"$-x", false},
+		{"$gtx", false},
+		{"gt-x", false},
+		{"$", false},
+	}
+	for _, tt := range tests {
+		if got := bdClosePrefixedDashedName(tt.tok); got != tt.want {
+			t.Errorf("bdClosePrefixedDashedName(%q) = %v, want %v", tt.tok, got, tt.want)
+		}
+	}
 }
