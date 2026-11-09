@@ -32,7 +32,7 @@ var (
 var sqlKeywords = map[string]bool{
 	"select": true, "from": true, "where": true, "order": true, "by": true,
 	"desc": true, "asc": true, "limit": true, "and": true, "or": true,
-	"distinct": true, "null": true, "true": true, "false": true,
+	"distinct": true, "null": true, "true": true, "false": true, "join": true,
 	"current_user": true, "insert": true, "into": true, "values": true,
 	"update": true, "set": true, "delete": true, "on": true, "conflict": true,
 	"do": true, "nothing": true, "returning": true,
@@ -93,20 +93,30 @@ func parseGolden(text string) (map[string][]string, error) {
 }
 
 // unnamed returns what stmt names that the golden DDL does not create: a table
-// it reads or writes, or a column the tables it names lack. String literals and
-// $n placeholders are values, not names, and a word followed by "(" is a
+// it reads or writes, or a column its table lacks. A statement that names two
+// tables is refused rather than checked: an unqualified column cannot be tied
+// to one of them, so their columns are not pooled. String literals and $n
+// placeholders are values, not names, and a word followed by "(" is a
 // function.
 func unnamed(golden map[string][]string, stmt string) []string {
 	text := sqlPlaceholder.ReplaceAllString(sqlLiteral.ReplaceAllString(stmt, " "), " ")
 	var out []string
-	known := map[string]bool{}
+	var tables []string
 	for _, m := range sqlTableRef.FindAllStringSubmatch(text, -1) {
-		cols, ok := golden[m[1]]
-		if !ok {
+		if _, ok := golden[m[1]]; !ok {
 			out = append(out, "table "+m[1])
 		}
-		known[m[1]] = true
-		for _, c := range cols {
+		if !slices.Contains(tables, m[1]) {
+			tables = append(tables, m[1])
+		}
+	}
+	if len(tables) > 1 {
+		return append(out, "a join of "+strings.Join(tables, " and ")+", whose columns cannot be tied to one table")
+	}
+	known := map[string]bool{}
+	for _, t := range tables {
+		known[t] = true
+		for _, c := range golden[t] {
 			known[c] = true
 		}
 	}
@@ -187,6 +197,13 @@ func TestCloudLedgerQueriesMatchTheGoldenSchema(t *testing.T) {
 		got := unnamed(golden, "SELECT finished_at FROM ledger_release")
 		if !slices.Contains(got, "column finished_at") {
 			t.Errorf("unnamed = %v, want finished_at named: it is a column of ledger_patrol_report only", got)
+		}
+	})
+	t.Run("a join does not pool the columns of its tables", func(t *testing.T) {
+		t.Parallel()
+		got := unnamed(golden, "SELECT finished_at FROM ledger_release JOIN ledger_patrol_report ON ledger_release.app = ledger_patrol_report.run_id")
+		if !slices.ContainsFunc(got, func(s string) bool { return strings.Contains(s, "join") }) {
+			t.Errorf("unnamed = %v, want the join named: finished_at is a column of ledger_patrol_report, not of the table the statement reads from", got)
 		}
 	})
 	t.Run("a table the golden lacks is named", func(t *testing.T) {
