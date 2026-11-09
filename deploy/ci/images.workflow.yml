@@ -80,6 +80,7 @@ jobs:
             -host "$FORGEJO_HOST" \
             -env-out "$GITHUB_ENV"
       - name: log in to the registry
+        id: login
         env:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
@@ -211,8 +212,10 @@ jobs:
             -sha "$SHA"
       # Runs last, even after a failed step, so the login's token does not stay
       # in the Docker config for the next job on a persistent ci-base runner.
+      # It runs only when the login step succeeded: a run that died before the
+      # login has no login to undo, and a logout that fails after a login does
+      # fail the step.
       - name: log out of the registry
-        if: always()
+        if: always() && steps.login.outcome == 'success'
         run: |
-          # || true: a run that died before the login has no login to undo.
-          docker logout "$FORGEJO_HOST" || true
+          docker logout "$FORGEJO_HOST"
