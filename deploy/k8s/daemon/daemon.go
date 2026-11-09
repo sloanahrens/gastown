@@ -300,17 +300,17 @@ const (
 	// carries no credential, and the row it sits in is private.
 	OMConfigSubPath = ".runtime/container/om-config.json"
 	// ClaudeBeadsRoot is the host's ~/.claude/.beads, which the compose daemon binds
-	// read-write. The pod mounts nothing there, and the Deployment's head comment
-	// says the reaper root is dropped (noClaudeBeadsComment).
+	// read-write. The pod mounts nothing there (TestClaudeBeadsDirIsMountedOrDropped),
+	// and the Deployment's head comment names the root (noClaudeBeadsComment).
 	ClaudeBeadsRoot = "/Users/sloan/.claude/.beads"
 	// noHostAliasComment is the Deployment's head comment when the pod carries no
 	// gateway alias, so a reader of the manifest knows the Dolt name does not
 	// resolve in this pod rather than assuming it does.
 	noHostAliasComment = "no hostAliases: this pod has no gateway alias, so " + DoltHostName + " does not resolve in it"
 	// noClaudeBeadsComment is the Deployment's head comment for the claude beads
-	// root the pod does not mount: patrols.wisp_reaper.extra_beads_roots must not
-	// name it for this pod, or the reaper reads a path the pod does not have.
-	noClaudeBeadsComment = "no " + ClaudeBeadsRoot + " mount: this pod has no claude beads database, so patrols.wisp_reaper.extra_beads_roots must not name it, or its ~/.claude parent, for this pod"
+	// root the pod does not mount. The reaper behaviour the pod relies on is pinned
+	// by TestWispReaperSkipsMissingExtraRoot, not restated here.
+	noClaudeBeadsComment = "no " + ClaudeBeadsRoot + " mount: this pod has no claude beads database; the wisp reaper behaviour it relies on is TestWispReaperSkipsMissingExtraRoot"
 )
 
 // noProxyComment is the Deployment's head comment when Values.ProxyImage is
@@ -717,7 +717,7 @@ func deployment(v Values, namespace string) Deployment {
 			},
 		},
 	}
-	// The claude beads root is never mounted, so the Deployment always says so.
+	// The claude beads root is never mounted, so the Deployment always names it.
 	var heads []string
 	if v.ProxyImage == "" {
 		heads = append(heads, noProxyComment)

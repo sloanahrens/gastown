@@ -1,4 +1,4 @@
-# no /Users/sloan/.claude/.beads mount: this pod has no claude beads database, so patrols.wisp_reaper.extra_beads_roots must not name it, or its ~/.claude parent, for this pod
+# no /Users/sloan/.claude/.beads mount: this pod has no claude beads database; the wisp reaper behaviour it relies on is TestWispReaperSkipsMissingExtraRoot
 apiVersion: apps/v1
 kind: Deployment
 metadata:

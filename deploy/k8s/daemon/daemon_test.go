@@ -1458,7 +1458,7 @@ type composeMount struct {
 var composeMounts = []composeMount{
 	{
 		Name: "openshell config", Path: manifestdata.LiveOpenShellConfigPath,
-		Reason: "the host's ~/.config/openshell is a gateway tree (gateway.toml and per-gateway client files) outside the town root; no manifest Secret enumerates its files and the town-state volume does not carry it, so the pod mounts no openshell config (a decision for the overseer, gt-nr548n)",
+		Reason: "open gap, not rendered: the overseer ruled a read-only Secret mount at this path, but the host's ~/.config/openshell is a directory tree whose files are not enumerated in the repo, and a Secret's keys are flat (secret() in daemon.go), so no Secret shape is decided yet; until it is, the sandbox seats' gateway calls from the pod are unanswered (gt-nr548n)",
 	},
 	{
 		Name: "om config", Path: manifestdata.LiveOMConfigPath,
@@ -1466,7 +1466,7 @@ var composeMounts = []composeMount{
 	},
 	{
 		Name: "claude beads", Path: ClaudeBeadsRoot,
-		Reason: "dropped for the pod: the host's ~/.claude/.beads is outside the town root and no claim carries a copy, so the Deployment's head comment says the reaper root is dropped (noClaudeBeadsComment)",
+		Reason: "dropped for the pod: the host's ~/.claude/.beads is outside the town root and no claim carries a copy; the wisp reaper's missing-root behaviour that keeps the drop safe is TestWispReaperSkipsMissingExtraRoot (internal/daemon), and the Deployment's head comment names the root (noClaudeBeadsComment)",
 	},
 }
 
@@ -1494,16 +1494,20 @@ func podAnswerFinding(m composeMount, rendered []VolumeMount) string {
 }
 
 // claudeBeadsFinding returns what is wrong with the claude beads root on the
-// rendered Deployment, or "" when the pod mounts it or the Deployment's head
-// comment says the reaper root is dropped. The finding names the root.
+// rendered Deployment, or "" when no container mounts it and the head comment
+// names it. The drop is enforced by the absent mount; the comment only tells a
+// reader of the manifest. A mount is a finding even with the comment present.
+// The finding names the root.
 func claudeBeadsFinding(d Deployment) string {
-	if volumeMountAt(d.Spec.Template.Spec.Containers[0].VolumeMounts, ClaudeBeadsRoot) != nil {
-		return ""
+	for _, c := range d.Spec.Template.Spec.Containers {
+		if volumeMountAt(c.VolumeMounts, ClaudeBeadsRoot) != nil {
+			return fmt.Sprintf("the pod mounts %s, which the render drops: the pod has no claude beads database", ClaudeBeadsRoot)
+		}
 	}
-	if strings.Contains(d.headComment, ClaudeBeadsRoot) {
-		return ""
+	if !strings.Contains(d.headComment, ClaudeBeadsRoot) {
+		return fmt.Sprintf("the pod mounts no %s and the Deployment's head comment names no %s", ClaudeBeadsRoot, ClaudeBeadsRoot)
 	}
-	return fmt.Sprintf("the pod neither mounts %s nor says the reaper root is dropped: the Deployment's head comment names no %s", ClaudeBeadsRoot, ClaudeBeadsRoot)
+	return ""
 }
 
 // TestPodDoesNotReadStaleKubeconfigs holds the kubeconfig decision on the whole
@@ -1621,9 +1625,9 @@ func TestOMConfigComesFromThePrivateTownStateRow(t *testing.T) {
 }
 
 // TestClaudeBeadsDirIsMountedOrDropped holds the claude beads decision: the pod
-// either mounts the host's ~/.claude/.beads at its compose path, or the render
-// says on the Deployment that the reaper root is dropped. A render that does
-// neither is refused, naming the root.
+// mounts nothing at the host's ~/.claude/.beads, and the Deployment names the
+// root. A mount in any container is refused, naming the root, even when the
+// comment is present; so is a render that names the root nowhere.
 func TestClaudeBeadsDirIsMountedOrDropped(t *testing.T) {
 	t.Parallel()
 	dropped := mustBuild(t, goldenValues(t)).Deployment
@@ -1631,15 +1635,14 @@ func TestClaudeBeadsDirIsMountedOrDropped(t *testing.T) {
 		t.Error(finding)
 	}
 	if !bytes.Contains(document(t, dropped), []byte(ClaudeBeadsRoot)) {
-		t.Errorf("the rendered Deployment does not name %s, so the reaper root is dropped without a word", ClaudeBeadsRoot)
+		t.Errorf("the rendered Deployment does not name %s, so the drop is unexplained", ClaudeBeadsRoot)
 	}
 
 	mounted := mustBuild(t, goldenValues(t)).Deployment
-	mounted.headComment = ""
 	c := &mounted.Spec.Template.Spec.Containers[0]
 	c.VolumeMounts = append(c.VolumeMounts, VolumeMount{Name: "claude-beads", MountPath: ClaudeBeadsRoot})
-	if finding := claudeBeadsFinding(mounted); finding != "" {
-		t.Errorf("claudeBeadsFinding on a render that mounts %s = %q, want none", ClaudeBeadsRoot, finding)
+	if finding := claudeBeadsFinding(mounted); !strings.Contains(finding, ClaudeBeadsRoot) {
+		t.Errorf("claudeBeadsFinding on a render that mounts %s = %q, want a finding naming it", ClaudeBeadsRoot, finding)
 	}
 
 	neither := mustBuild(t, goldenValues(t)).Deployment
