@@ -232,95 +232,6 @@ func shellCommandWord(segment []string) (string, []string) {
 	return word, append(lead, args...)
 }
 
-// segmentPayloads returns the command lines the segment starting at
-// tokens[start] runs through a shell: -c payloads, an eval string and the
-// script fed to a stdin shell. Both test guards judge each as its own command.
-func segmentPayloads(tokens []string, start int, segment []string) []string {
-	payloads := append(shellCPayloads(segment), evalPayloads(segment)...)
-	return append(payloads, stdinShellPayloads(tokens, start, segment)...)
-}
-
-// stdinShellPayloads returns the script text fed to a shell that reads stdin
-// (`echo 'make gate' | sh`, `sh <<< 'make gate'`), which the segment judge
-// otherwise sees as a bare sh. The text comes from a here-string on the shell
-// or on any producer upstream in its pipeline, and from the arguments of an
-// upstream echo, printf or yes. Every producer counts whatever filters sit
-// between it and the shell, since a filter can rewrite the text and reading it
-// as the script is the stricter reading (gt-1daus).
-//
-// A process substitution word on the shell ("sh <(echo 'make gate')", "sh <
-// <(echo 'make gate')") is the script itself, whether the shell opens it as its
-// script file or reads it on stdin, so it is read like a pipe producer and the
-// pipe upstream, which the shell never reads, is not (gt-hizij). The body may
-// hold several commands, and the output of each is part of the script. The
-// exception is "sh -s <(cmd)": -s reads the script from stdin, so the
-// substitution is only an argument and the pipe is still the script
-// (gt-n2gt8).
-func stdinShellPayloads(tokens []string, start int, segment []string) []string {
-	word, args := shellCommandWord(segment)
-	if !shellInvokers[filepath.Base(strings.ToLower(word))] {
-		return nil
-	}
-	args, payloads := splitHereStrings(args)
-	// -s counts only ahead of the first substitution: after it, "sh <(cmd) -s"
-	// runs the substitution as the script file and -s is the file's argument.
-	before := args
-	for i, arg := range args {
-		if strings.HasPrefix(arg, "<(") {
-			before = args[:i]
-			break
-		}
-	}
-	_, dashS := shellReadsStdin(toLowerTokens(before))
-	args, subs := splitProcessSubstitutions(args, tokens[segmentEnd(tokens, start):])
-	if reads, _ := shellReadsStdin(toLowerTokens(args)); !reads {
-		return nil
-	}
-	scripted := false
-	for _, sub := range subs {
-		if dashS && !sub.onStdin {
-			continue
-		}
-		scripted = true
-		for _, command := range sub.commands {
-			payloads = append(payloads, producerPayloads(command)...)
-		}
-	}
-	if scripted {
-		return payloads
-	}
-	for end := start - 1; end > 0 && tokens[end] == "|"; {
-		begin := end
-		for begin > 0 && !shellCommandSeparators[tokens[begin-1]] {
-			begin--
-		}
-		payloads = append(payloads, producerPayloads(tokens[begin:end])...)
-		end = begin - 1
-	}
-	return payloads
-}
-
-// producerPayloads returns the script text a producer command line prints, and
-// the text of any here-string it is fed: what a shell reading its output runs.
-// Only echo, printf and yes print text nothing here can read past; any other
-// producer (a file, a download) yields none.
-func producerPayloads(segment []string) []string {
-	producer, printed := segmentCommandWordPastRedirections(trimShellKeywords(segment))
-	printed, payloads := splitHereStrings(printed)
-	switch filepath.Base(strings.ToLower(producer)) {
-	case "echo", "printf", "yes":
-		for len(printed) > 0 && strings.HasPrefix(printed[0], "-") && len(printed[0]) > 1 {
-			printed = printed[1:]
-		}
-		text := strings.ReplaceAll(strings.Join(printed, " "), `\n`, "\n")
-		payloads = append(payloads, text)
-		for _, arg := range printed {
-			payloads = append(payloads, strings.ReplaceAll(arg, `\n`, "\n"))
-		}
-	}
-	return payloads
-}
-
 // splitHereStrings returns args without their "<<<" here-string redirections,
 // and the text each one feeds its command's stdin. A here-string on another
 // descriptor ("3<<<text", "{fd}<<<text") feeds that descriptor, not the
@@ -361,85 +272,6 @@ func splitHereStrings(args []string) (rest, texts []string) {
 		}
 	}
 	return rest, texts
-}
-
-// processSubstitution is one "<(...)" word on a shell: the command lines inside
-// it, and whether a "<" ahead of it makes the shell read it on stdin.
-type processSubstitution struct {
-	commands [][]string
-	onStdin  bool
-}
-
-// segmentEnd returns the index of the separator that ends the segment starting
-// at tokens[start], or len(tokens) for the last segment.
-func segmentEnd(tokens []string, start int) int {
-	for end := start; end < len(tokens); end++ {
-		if shellCommandSeparators[tokens[end]] {
-			return end
-		}
-	}
-	return len(tokens)
-}
-
-// splitProcessSubstitutions returns args without their "<(...)" words, and what
-// each one holds. A bare "<" or "0<" ahead of one is dropped with it:
-// "sh < <(cmd)" reads the substitution on stdin. after holds the tokens behind
-// the segment args came from, separators included: a separator inside the body
-// ends the segment, so "sh <(echo a; echo 'make test')" reaches here as
-// "sh <(echo a" and the rest of the body is the next segment. The body is cut
-// into command lines at those separators.
-//
-// The substitution closes at the first word that ends in ")" with the body's
-// parentheses back to level. A word that holds a pair of its own ("echo
-// $(date)") does not close it; the quote marks are gone by now, so the balance
-// is all that is left to read; a quoted parenthesis ("echo ')'") skews it, and
-// TestStdinShellPayloadsMultiCommandProcessSubstitution pins that such a body
-// is still judged. One that never closes runs to the end of the
-// line, so a line the shell would reject is still judged (gt-hizij, gt-n2gt8).
-func splitProcessSubstitutions(args, after []string) (rest []string, subs []processSubstitution) {
-	for i := 0; i < len(args); i++ {
-		if !strings.HasPrefix(args[i], "<(") {
-			rest = append(rest, args[i])
-			continue
-		}
-		var sub processSubstitution
-		if n := len(rest); n > 0 && (rest[n-1] == "<" || rest[n-1] == "0<") {
-			rest = rest[:n-1]
-			sub.onStdin = true
-		}
-		words := append(append([]string(nil), args[i:]...), after...)
-		var command []string
-		endCommand := func() {
-			if len(command) > 0 {
-				sub.commands = append(sub.commands, command)
-				command = nil
-			}
-		}
-		depth, used := 1, len(words)
-		for j, word := range words {
-			if j > 0 && shellCommandSeparators[word] {
-				endCommand()
-				continue
-			}
-			if j == 0 {
-				word = strings.TrimPrefix(word, "<(")
-			}
-			depth += strings.Count(word, "(") - strings.Count(word, ")")
-			closed := depth <= 0 && strings.HasSuffix(word, ")")
-			word = strings.TrimSuffix(word, ")")
-			if word != "" {
-				command = append(command, word)
-			}
-			if closed {
-				used = j + 1
-				break
-			}
-		}
-		endCommand()
-		subs = append(subs, sub)
-		i += min(used, len(args)-i) - 1
-	}
-	return rest, subs
 }
 
 // shellReadsStdin reports whether a shell invoked with args (lowercased, the
@@ -536,57 +368,6 @@ func redirectionFD(word string) (fd, rest string, ok bool) {
 	}
 	digits := len(word) - len(strings.TrimLeft(word, "0123456789"))
 	return word[:digits], word[digits:], true
-}
-
-// nestedScript is a command line a shell runs inside the command being judged,
-// with the directory it runs in (the base when known is false).
-type nestedScript struct {
-	body  string
-	dir   string
-	known bool
-}
-
-// substitutionScripts returns the body of every $(...) and backtick command
-// substitution the shell expands in command, each with the directory it runs
-// in. The segment judges tokenize "out=$(go test ./internal/cmd)" as the words
-// "out=$(go", "test", ... and so never see a go test, and "echo $(make gate)"
-// as an echo, so the bodies are judged as command lines of their own the way
-// evaluateDangerousCommand does (gt-t1pct).
-//
-// commandSubstitutionSpans cuts each body with the parentheses balanced and
-// the quotes respected, so "$(grep -E '(ok|FAIL)' out)" and "$(tail -n $(nproc))"
-// are judged whole (gt-wrr5c). A substitution nested in a body is judged when
-// the body is, one nesting level deeper.
-//
-// A substitution runs in the directory the cds ahead of it on the same shell
-// line leave the shell in, found by the walk segmentWalkRoot gives a segment.
-// A "$(" the shell leaves literal is skipped: after a backslash, or inside
-// single quotes, where a bead note spelling "$(make gate)" is data. Heredoc
-// bodies are stripped first, as the segment judges do. The caller passes text
-// with its heredoc bodies already stripped, so a substitution inside an
-// unquoted body was read when the body's own command line was judged.
-func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) []nestedScript {
-	text := stripHeredocBodies(command)
-	var scripts []nestedScript
-	for _, span := range commandSubstitutionSpans(text) {
-		body := substitutionBody(text, span)
-		if strings.TrimSpace(body) == "" {
-			continue
-		}
-		tokens := shellTokenize(text[:span.open])
-		segStart := 0
-		for i, tok := range tokens {
-			if shellCommandSeparators[tok] {
-				segStart = i + 1
-			}
-		}
-		dir, known := segmentWalkRoot(proc, tokens, segStart, cwd, shellVarAssignments(tokens))
-		if !known || !cwdKnown {
-			dir, known = cwd, false
-		}
-		scripts = append(scripts, nestedScript{body: body, dir: dir, known: known})
-	}
-	return scripts
 }
 
 // substitutionSpan locates one command substitution in a shell line: open is
@@ -1007,7 +788,7 @@ func commandSegment(segment []string) []string {
 // judged like a -c payload even when it sits under a slot-run wrapper, and so
 // is a substitution in an unquoted heredoc body: "out=$(go test ./...)" and
 // "cat > f <<EOF" holding "$(make gate)" run the suite though no segment word
-// is a go or make binary (gt-t1pct, gt-6fkng, substitutionScripts).
+// is a go or make binary (gt-t1pct, gt-6fkng).
 func evaluateContainerSuiteCommand(proc guardProcess, command, envOptIn string) (reason string, matched []string) {
 	cwd, _ := proc.getwd()
 	return evaluateContainerSuiteCommandDepth(proc, command, cwd, true, envOptIn, 0)
@@ -2067,8 +1848,8 @@ func containerSuiteCommonShells(a, b []int) int {
 
 // containerSuitePayloads returns the command lines the segment at index runs
 // through another shell, each judged as a command line of its own: a -c
-// payload, an eval string and a script the shell reads on stdin. It is the
-// parsed counterpart of segmentPayloads, which the other guards still use.
+// payload, an eval string and a script the shell reads on stdin. The bd create
+// store guard reads its payloads through it too.
 func containerSuitePayloads(script shellparse.Script, index int) []string {
 	words := containerSuiteWords(script.Segments[index])
 	payloads := append(shellCPayloads(words), evalPayloads(words)...)
@@ -2076,12 +1857,12 @@ func containerSuitePayloads(script shellparse.Script, index int) []string {
 }
 
 // containerSuiteStdinPayloads returns the script text fed to a shell that reads
-// stdin, the parsed counterpart of stdinShellPayloads. The text comes from a
-// here-string on the shell, a here-document on stdin, a process substitution
-// the shell runs as its script, or an upstream echo/printf/yes in the same
-// pipeline. A redirection that replaces stdin ("< file", "<&3", a here-
-// document) feeds the shell something this guard cannot read, so neither the
-// pipe nor a here-string is its script (gt-sveq8, gt-hizij).
+// stdin. The text comes from a here-string on the shell, a here-document on
+// stdin, a process substitution the shell runs as its script, or an upstream
+// echo/printf/yes in the same pipeline. A redirection that replaces stdin
+// ("< file", "<&3", a here-document) feeds the shell something this guard
+// cannot read, so neither the pipe nor a here-string is its script (gt-sveq8,
+// gt-hizij).
 //
 // A process substitution is the script whether the shell opens it as a script
 // file or reads it on stdin; the body's output is the script, so each producer

@@ -97,6 +97,8 @@ func (b bdStoreTown) runWithEnv(t *testing.T, role, cwd, command string, extraEn
 func TestTapGuardBdCreateStore(t *testing.T) {
 	t.Parallel()
 	b := newBdStoreTown(t)
+	townDB := filepath.Join(b.town, ".beads", "x.db")
+	rigDB := filepath.Join(b.rigDir, "mayor", "rig", ".beads", "x.db")
 	tests := []struct {
 		name    string
 		role    string
@@ -247,6 +249,21 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		{"town root gt escalate", polecatRole, b.town, `gt escalate "bd create"`, false},
 		{"crew at town root", "gastown/crew/alice", b.town, `bd create --title=x`, false},
 		{"no role, town root", "", b.town, `bd create --title=x`, false},
+		// A store export the shell may not run (an if body, the left side of a
+		// pipe) is unplaced for a create after it; one in an if condition always
+		// runs and is followed (gt-j41yim).
+		{"conditional rig export, then create", polecatRole, b.worktree, `if false; then export BEADS_DB=` + rigDB + `; fi; bd create --title=x`, true},
+		{"rig export on the left of a pipe, then create", polecatRole, b.worktree, `export BEADS_DB=` + rigDB + ` | cat; bd create --title=x`, true},
+		{"rig export in an if condition, then create", polecatRole, b.worktree, `if export BEADS_DB=` + rigDB + `; then :; fi; bd create --title=x`, false},
+		// An unquoted heredoc body runs its substitutions; a quoted one is data
+		// (gt-j41yim).
+		{"unquoted heredoc substitution creates in the town", polecatRole, b.worktree, "cat <<EOF\n$(bd create --title=x --db " + townDB + ")\nEOF", true},
+		{"quoted heredoc substitution is data", polecatRole, b.worktree, "cat <<'EOF'\n$(bd create --title=x --db " + townDB + ")\nEOF", false},
+		// A construct header's substitution runs before the body, in the
+		// directory the line has reached when it runs (gt-j41yim).
+		{"for list creates in the town", polecatRole, b.worktree, `for x in $(bd create --title=x --db ` + townDB + `); do :; done`, true},
+		{"cd to the town before a for list that creates", polecatRole, b.worktree, `cd ` + b.town + ` && for x in $(bd create --title=x); do :; done`, true},
+		{"for list create past the nesting cap", polecatRole, b.worktree, `for a in $(for b in $(for c in $(for d in $(bd create --title=x); do :; done); do :; done); do :; done); do :; done`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -508,6 +525,11 @@ bd create --title=x`, true},
 		// The here-string is read as the text it feeds, not as a bd create by
 		// its own name: a body that files nothing stays allowed either way.
 		{"bare here-string body that files nothing", nil, `BEADS_DB=` + townDB + ` bash <<< echo hi`, false},
+		// A brace group is a producer too: its echo is the script sh reads from
+		// the pipe. origin/main allowed this (the token reader did not see past
+		// the brace), so this row is a verdict change, not a new refusal rule.
+		{"brace group echo piped into sh, town store", nil, `{ echo 'bd create --title=x --db ` + townDB + `'; } | sh`, true},
+		{"brace group echo piped into sh, nothing filed", nil, `{ echo 'bd list'; } | sh`, false},
 		// The shell the line starts inherits the guard process's env, so a
 		// selector the line never names reaches the bd create it runs.
 		{"process env BEADS_DB town into bash -c", map[string]string{"BEADS_DB": townDB}, `bash -c 'bd create --title=x'`, true},
@@ -772,6 +794,62 @@ func TestTapGuardBdCreateStoreFailsOpenOnUnreadableContext(t *testing.T) {
 			var stderr strings.Builder
 			if err := tapGuardBdCreateStore(tt.r, &stderr, tt.proc); err != nil || stderr.Len() != 0 {
 				t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr.String())
+			}
+		})
+	}
+}
+
+// TestTapGuardBdCreateStoreUnreadableRefused pins the fail-closed rule for a
+// command shellparse cannot read: one whose text spells a bd create is refused,
+// with the construct named, wherever it runs (gt-j41yim). The first row was
+// allowed before the rule: the nested shell's open quote hid the town-store
+// create from the token reader.
+func TestTapGuardBdCreateStoreUnreadableRefused(t *testing.T) {
+	t.Parallel()
+	b := newBdStoreTown(t)
+	townDB := filepath.Join(b.town, ".beads", "x.db")
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		{"nested -c with an open quote, town store", b.town, `bash -c bd create --title=x --db ` + townDB + ` "`, true},
+		{"open command substitution, town store", b.town, `x=$(bd create --title=x --db ` + townDB, true},
+		{"open quote around a substitution", b.town, `echo "$(bd create --title=x)" "`, true},
+		{"unterminated heredoc around a create", b.town, `bash -c "bd create --title=x"; cat <<EOF`, true},
+		{"open quote, rig store", b.worktree, `bd create --title=x "`, true},
+		{"open quote, bd word split by empty quotes", b.town, `b""d create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word split by a backslash", b.town, `b\d create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word split by a quote", b.town, `'b'd create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd and create each built from quotes", b.town, `"b"'d' "cr"eate --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word split by a line continuation", b.town, "b\\\nd create --title=x --db " + townDB + ` "`, true},
+		{"open quote, escaped backslash then a newline ends the word", b.town, "echo x\\\\\nbd create --title=x --db " + townDB + ` "`, true},
+		{"open quote, bd word built by an empty parameter expansion", b.town, `b${E}d create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word built by a default expansion", b.town, `b${E:-d} create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word built by an ANSI-C hex escape", b.town, `$'\x62'd create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word built by an ANSI-C octal escape", b.town, `$'\142\144' create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word built by an ANSI-C unicode escape", b.town, `$'\u0062'd create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd and create built from a glob", b.town, `b? ?reate --title=x --db ` + townDB + ` "`, true},
+		{"open quote, expansion but no create", b.town, `echo "$HOME" "`, false},
+		{"open quote, no create", b.town, `bd list "`, false},
+		{"open quote, no bd", b.town, `echo "create`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stderr, err := b.run(t, polecatRole, tt.cwd, tt.command)
+			if !tt.blocked {
+				if err != nil || stderr != "" {
+					t.Fatalf("want allowed, got err=%v stderr=%q", err, stderr)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("want blocked, got allowed")
+			}
+			if !strings.Contains(stderr, "command cannot be read (") || !strings.Contains(stderr, bdCreateStoreRefusal) {
+				t.Errorf("stderr lacks the unreadable refusal:\n%s", stderr)
 			}
 		})
 	}

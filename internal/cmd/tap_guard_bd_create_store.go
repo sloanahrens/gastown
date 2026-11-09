@@ -7,10 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/shellparse"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -23,7 +25,7 @@ const bdCreateStoreRefusal = "file it in your rig: cd to your worktree"
 // directory it runs in, so it cannot tell which store it would file into.
 const bdCreateNestingRefusal = "shells nested too deep to name the store this bd create would file into; run it in its own Bash call"
 
-// bdCreatePresenceDepth bounds bdCreateSomewhere's walk through nested shell
+// bdCreatePresenceDepth bounds bdCreateScriptSomewhere's walk through nested shell
 // text. It is larger than maxTestGuardNestDepth because the presence check is
 // what the depth cap consults: stopping at the same depth would miss the
 // create the cap exists to refuse.
@@ -108,96 +110,336 @@ type bdCreateStoreGuard struct {
 	townStore string
 }
 
-// evaluate judges command as a shell starting in cwd, one segment at a time.
+// evaluate judges command as a shell starting in cwd. A command shellparse
+// cannot read is refused when its text spells a bd create; any other unreadable
+// command is allowed, as the walk finds no bd create in it.
+//
 // cwdKnown is false for a -c payload whose directory the walk could not place;
 // nothing in that payload is then read against a directory the shell never
 // named, and a bd create in it is refused as unplaceable.
-//
-// Segment directories come from segmentWalkRoot, so a cd in a subshell,
-// pipeline or background job is not carried to the commands after it, and an
-// "&&" list whose cd fails does not name a directory its remainder never
-// reaches.
 //
 // inherited is the store-variable state the command starts with: nil for the
 // hook's own line (the process env), else what the enclosing line leaves a
 // nested payload or substitution, so a variable exported earlier on the outer
 // line reaches a bd create inside "bash -c" or "$(...)".
 func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth int, inherited *bdEnvState) string {
-	stripped := strings.TrimSpace(stripHeredocBodies(command))
-	tokens := shellTokenize(stripped)
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		if bdCreateSpelled(command) {
+			return bdCreateUnreadable(err)
+		}
+		return ""
+	}
+	return g.evaluateScript(script, cwd, cwdKnown, depth, inherited)
+}
+
+// bdCreateDir is the directory a segment or a substitution runs in, and whether
+// the walk could place it.
+type bdCreateDir struct {
+	dir   string
+	known bool
+}
+
+// in returns the directory d names, or cwd with known false when the walk could
+// not place it. A bd create judged there is refused as unplaceable, rather than
+// read against a directory the shell never named.
+func (d bdCreateDir) in(cwd string) (string, bool) {
+	if !d.known {
+		return cwd, false
+	}
+	return d.dir, true
+}
+
+// evaluateScript judges a parsed command one segment at a time, in source order.
+// A segment's directory comes from segmentWalkRoot over the rebuilt line, so a
+// cd in a subshell, pipeline or background job is not carried to the commands
+// after it, and an "&&" list whose cd fails does not name a directory its
+// remainder never reaches. A store change in a segment the parser marks
+// Conditional leaves the store variables unplaced for the rest of the line.
+//
+// The command substitutions run after the segments, each in the directory of
+// the segment that holds it. A construct header's substitution (a for list, a
+// case word) has no segment of its own, so it is judged in every directory the
+// walk reaches along the line: the header may run before any later cd.
+func (g bdCreateStoreGuard) evaluateScript(script shellparse.Script, cwd string, cwdKnown bool, depth int, inherited *bdEnvState) string {
+	tokens, starts := bdWalkLine(script)
 	vars := shellVarAssignments(tokens)
 	env := inherited
 	if env == nil {
 		env = g.newBdEnvState()
 	}
-	judge := func(segment []string, start int) string {
-		segment = commandSegment(segment)
-		dir, known := segmentWalkRoot(g.proc, tokens, start, cwd, vars)
-		known = known && cwdKnown
+	dirs := make([]bdCreateDir, len(script.Segments))
+	for i, seg := range script.Segments {
+		dir, known := segmentWalkRoot(g.proc, tokens, starts[i], cwd, vars)
+		dirs[i] = bdCreateDir{dir: dir, known: known && cwdKnown}
+		segment := bdSegmentTokens(seg)
 		// A launcher's own -C (env -C, sudo -D) runs the bd create, or the
 		// nested shell behind it, in that directory, so the store is read from
 		// there.
-		dir, known, placed := g.launcherRunDir(segment, dir, known, vars)
+		dir, known, placed := g.launcherRunDir(segment, dirs[i].dir, dirs[i].known, vars)
 		if reason := g.judgeSegment(segment, dir, known, placed, vars, env); reason != "" {
 			return reason
 		}
-		payloads := segmentPayloads(tokens, start, segment)
+		payloads := containerSuitePayloads(script, i)
 		if depth >= maxTestGuardNestDepth {
 			if bdCreateInScripts(payloads, depth) {
 				return bdCreateNestingRefusal
 			}
-			return ""
-		}
-		if !known {
-			dir = cwd
-		}
-		child := env.forPayload(segment)
-		for _, payload := range payloads {
-			if reason := g.evaluate(payload, dir, known, depth+1, child); reason != "" {
-				return reason
+		} else {
+			if !known {
+				dir = cwd
+			}
+			child := env.forPayload(segment)
+			for _, payload := range payloads {
+				if reason := g.evaluate(payload, dir, known, depth+1, child); reason != "" {
+					return reason
+				}
 			}
 		}
-		return ""
+		env.apply(segment, seg.Conditional)
 	}
 
-	var segment []string
-	start := 0
-	sep := ""
-	for i, tok := range tokens {
-		if shellCommandSeparators[tok] {
-			if reason := judge(segment, start); reason != "" {
-				return reason
-			}
-			env.apply(segment, sep)
-			segment = nil
-			sep = tok
-			start = i + 1
-			continue
-		}
-		segment = append(segment, tok)
-	}
-	if reason := judge(segment, start); reason != "" {
-		return reason
-	}
-
-	scripts := substitutionScripts(g.proc, stripped, cwd, cwdKnown)
 	if depth >= maxTestGuardNestDepth {
-		for _, script := range scripts {
-			if bdCreateSomewhere(script.body, depth) {
+		for _, seg := range script.Segments {
+			if bdCreateInSubs(seg.Subs, depth) {
 				return bdCreateNestingRefusal
 			}
+		}
+		if bdCreateInSubs(script.Subs, depth) {
+			return bdCreateNestingRefusal
 		}
 		return ""
 	}
 	// A substitution runs in a subshell that holds every variable the line has
-	// set; the state at the line's end stands for it, as the scripts carry no
-	// position.
-	for _, script := range scripts {
-		if reason := g.evaluate(script.body, script.dir, script.known, depth+1, env.forSubshell()); reason != "" {
-			return reason
+	// set; the state at the line's end stands for it.
+	for i, seg := range script.Segments {
+		dir, known := dirs[i].in(cwd)
+		for _, sub := range seg.Subs {
+			if reason := g.evaluateScript(sub, dir, known, depth+1, env.forSubshell()); reason != "" {
+				return reason
+			}
+		}
+	}
+	if len(script.Subs) == 0 {
+		return ""
+	}
+	headerDirs := []bdCreateDir{{dir: cwd, known: cwdKnown}}
+	headerDirs = append(headerDirs, dirs...)
+	end, endKnown := segmentWalkRoot(g.proc, tokens, len(tokens), cwd, vars)
+	headerDirs = append(headerDirs, bdCreateDir{dir: end, known: endKnown && cwdKnown})
+	seen := make(map[bdCreateDir]bool, len(headerDirs))
+	for _, d := range headerDirs {
+		if seen[d] {
+			continue
+		}
+		seen[d] = true
+		dir, known := d.in(cwd)
+		for _, sub := range script.Subs {
+			if reason := g.evaluateScript(sub, dir, known, depth+1, env.forSubshell()); reason != "" {
+				return reason
+			}
 		}
 	}
 	return ""
+}
+
+// bdWalkLine rebuilds the shell line script was parsed from as the token line
+// segmentWalkRoot reads: each segment's words in source order, the operator that
+// ends it (Segment.After), and a "(" / ")" pair around the segments a subshell
+// encloses. starts[i] is the token index segment i begins at, the point the walk
+// stops reading at.
+func bdWalkLine(script shellparse.Script) (tokens []string, starts []int) {
+	starts = make([]int, len(script.Segments))
+	var shells []int
+	for i, seg := range script.Segments {
+		common := containerSuiteCommonShells(shells, seg.Shells)
+		for len(shells) > common {
+			tokens = append(tokens, ")")
+			shells = shells[:len(shells)-1]
+		}
+		for len(shells) < len(seg.Shells) {
+			tokens = append(tokens, "(")
+			shells = append(shells, seg.Shells[len(shells)])
+		}
+		starts[i] = len(tokens)
+		tokens = append(tokens, bdSegmentTokens(seg)...)
+		if seg.After != "" {
+			tokens = append(tokens, seg.After)
+		}
+	}
+	for len(shells) > 0 {
+		tokens = append(tokens, ")")
+		shells = shells[:len(shells)-1]
+	}
+	return tokens, starts
+}
+
+// bdDeclarationWords are the builtins whose operands the parser files in
+// Segment.Assigns rather than Words.
+var bdDeclarationWords = map[string]bool{"export": true, "declare": true, "typeset": true, "local": true, "readonly": true}
+
+// bdSegmentTokens returns a simple command's words as the shell reads them: its
+// leading assignments and its words in order. A declaration's operands follow
+// its variant word, which is the first word the parser gives it.
+func bdSegmentTokens(seg shellparse.Segment) []string {
+	var tokens []string
+	if len(seg.Words) > 0 && bdDeclarationWords[seg.Words[0].Text] {
+		tokens = append(tokens, seg.Words[0].Text)
+		for _, a := range seg.Assigns {
+			tokens = append(tokens, bdAssignToken(a))
+		}
+		for _, w := range seg.Words[1:] {
+			tokens = append(tokens, w.Text)
+		}
+		return tokens
+	}
+	for _, a := range seg.Assigns {
+		tokens = append(tokens, bdAssignToken(a))
+	}
+	for _, w := range seg.Words {
+		tokens = append(tokens, w.Text)
+	}
+	return tokens
+}
+
+// bdAssignToken returns an assignment or declaration operand as the shell wrote
+// it. The parser's text drops the "=" of an empty value (NAME= reads as NAME) and
+// gives a declaration's flag a leading "=" ("export -n" reads as "=-n"); the raw
+// text has neither mistake.
+func bdAssignToken(w shellparse.Word) string {
+	if strings.HasPrefix(w.Text, "=") && !strings.HasPrefix(w.Raw, "=") {
+		return w.Raw
+	}
+	if !strings.Contains(w.Text, "=") && strings.Contains(w.Raw, "=") {
+		name, _, _ := strings.Cut(w.Raw, "=")
+		return name + "="
+	}
+	return w.Text
+}
+
+// bdCreateUnreadable is the refusal for a command shellparse cannot read whose
+// text spells a bd create. Nothing can say which store such a command files
+// into, so it is refused whatever directory it runs in, with the construct the
+// parser named (gt-j41yim, the overseer's fail-closed ruling). The parser's own
+// text is not echoed; an error that is not an *shellparse.UnparseableError
+// keeps the generic construct name.
+func bdCreateUnreadable(err error) string {
+	return "command cannot be read (" + dangerousConstruct(err) + "), so the guard cannot tell which store a bd create in it would file into"
+}
+
+// bdCreateWildcard stands for a glob character in bdCreateLetters: the shell
+// expands it to whatever file name it matches, so it may be any letter.
+const bdCreateWildcard = '?'
+
+// bdCreateSpelled reports whether text could spell a bd create.
+//
+// Threat model: the agent writes the command text, so every word the shell can
+// build from it comes from letters in that text. The parser could not read the
+// text, so the words the shell builds from it are unknown. The letters the shell
+// could build them from are read in order instead, and bd then create must both
+// match as subsequences of those letters: a word built by quotes, an expansion
+// or an escape still shows its letters, and a glob may stand for any one of
+// them. Word boundaries are not kept, so this errs toward yes, since a command
+// the guard cannot read is refused on a match.
+//
+// Documented limit: a value the text does not set, such as one from the process
+// environment or a file a glob matches in the directory, is not in the text, so
+// it is not read. A star stands for one wildcard letter, not a run of them.
+func bdCreateSpelled(text string) bool {
+	rest, ok := bdCreateSubsequence(bdCreateLetters(text), "bd")
+	if !ok {
+		return false
+	}
+	_, ok = bdCreateSubsequence(rest, "create")
+	return ok
+}
+
+// bdCreateLetters returns the letters text can spell, in order. An ASCII letter
+// is kept in lower case. A backslash escape (\x62, \142, \u0062, \U00000062) is
+// decoded to its character; a backslash before anything else is dropped and the
+// character after it is read as itself. A glob character is a wildcard. Every
+// other byte, a quote, a dollar sign or a brace included, is dropped.
+func bdCreateLetters(text string) string {
+	var letters []byte
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c == '\\' && i+1 < len(text) {
+			if r, n := bdCreateEscape(text[i+1:]); n > 0 {
+				letters = bdCreateAppendLetter(letters, r)
+				i += n
+				continue
+			}
+			i++
+			c = text[i]
+		}
+		if c == '?' || c == '*' || c == '[' {
+			letters = append(letters, bdCreateWildcard)
+			continue
+		}
+		letters = bdCreateAppendLetter(letters, rune(c))
+	}
+	return string(letters)
+}
+
+// bdCreateAppendLetter appends r to letters in lower case if it is an ASCII
+// letter, and drops it otherwise.
+func bdCreateAppendLetter(letters []byte, r rune) []byte {
+	switch {
+	case 'a' <= r && r <= 'z':
+		return append(letters, byte(r))
+	case 'A' <= r && r <= 'Z':
+		return append(letters, byte(r-'A'+'a'))
+	}
+	return letters
+}
+
+// bdCreateEscape decodes the escape s starts with, where s is the text after a
+// backslash: \xHH, an octal \NNN, \uHHHH or \UHHHHHHHH. It returns the rune and
+// how many bytes of s the escape used, or 0 when s starts no such escape.
+func bdCreateEscape(s string) (rune, int) {
+	prefix, base, limit := 0, 8, 3
+	switch s[0] {
+	case 'x':
+		prefix, base, limit = 1, 16, 2
+	case 'u':
+		prefix, base, limit = 1, 16, 4
+	case 'U':
+		prefix, base, limit = 1, 16, 8
+	}
+	digits := 0
+	for digits < limit && prefix+digits < len(s) && bdCreateDigit(s[prefix+digits], base) {
+		digits++
+	}
+	if digits == 0 {
+		return 0, 0
+	}
+	v, err := strconv.ParseUint(s[prefix:prefix+digits], base, 32)
+	if err != nil {
+		return 0, 0
+	}
+	return rune(v), prefix + digits
+}
+
+// bdCreateDigit reports whether c is a digit in base.
+func bdCreateDigit(c byte, base int) bool {
+	_, err := strconv.ParseUint(string(c), base, 8)
+	return err == nil
+}
+
+// bdCreateSubsequence reports whether pattern is a subsequence of letters, where
+// a wildcard letter matches any character. It returns the letters after the
+// match, so a second pattern can be matched after the first.
+func bdCreateSubsequence(letters, pattern string) (string, bool) {
+	j := 0
+	for i := 0; i < len(letters); i++ {
+		if j == len(pattern) {
+			return letters[i:], true
+		}
+		if letters[i] == pattern[j] || letters[i] == bdCreateWildcard {
+			j++
+		}
+	}
+	return "", j == len(pattern)
 }
 
 // judgeSegment judges one simple command, filed in dir (known false when the
@@ -474,10 +716,6 @@ func inlineAssignment(segment []string, name string) (value string, ok bool) {
 // bdStoreEnvNames are the variables bd reads to pick its store.
 var bdStoreEnvNames = []string{"BEADS_DIR", "BEADS_DB", "BD_DB"}
 
-// bdCompoundWords open, close or branch a command the shell may not run past,
-// so a store variable set after one is not known to be set when bd runs.
-var bdCompoundWords = map[string]bool{"case": true, "esac": true, "for": true, "in": true, "select": true, "function": true, "fi": true, "done": true, ")": true}
-
 // bdAssigningBuiltins are the builtins that set the variables they are given.
 var bdAssigningBuiltins = map[string]bool{"read": true, "mapfile": true, "readarray": true, "printf": true, "getopts": true, "let": true, "declare": true, "typeset": true, "local": true, "readonly": true}
 
@@ -558,12 +796,14 @@ func (env *bdEnvState) forPayload(segment []string) *bdEnvState {
 	return child
 }
 
-// apply moves env past segment, the simple command that follows the separator
-// sep ("" at the line's start). Only a store variable's export, unset or bare
-// assignment changes what bd reads. The guard follows one the shell surely runs;
-// one it may not run, or cannot read, leaves the state unplaced.
-func (env *bdEnvState) apply(segment []string, sep string) {
-	if sep == "&&" || sep == "||" || sep == "|" || sep == "&" || bdCompoundOpens(segment) {
+// apply moves env past segment, a simple command. conditional is the parser's
+// Segment.Conditional: the command may not run, or runs in a copy of the shell,
+// and once that holds for one command it holds for the rest of the line. Only a
+// store variable's export, unset or bare assignment changes what bd reads. The
+// guard follows one the shell surely runs; one it may not run, or cannot read,
+// leaves the state unplaced.
+func (env *bdEnvState) apply(segment []string, conditional bool) {
+	if conditional {
 		env.conditional = true
 	}
 	words := bdCloseCommandTokens(commandSegment(segment))
@@ -652,17 +892,6 @@ func bdFollowable(words []string) bool {
 		}
 	}
 	return true
-}
-
-// bdCompoundOpens reports whether segment holds a group, subshell, conditional
-// or loop word, after which the shell may not run the commands that follow.
-func bdCompoundOpens(segment []string) bool {
-	for _, tok := range segment {
-		if bdCloseLeadWords[tok] || bdCompoundWords[tok] {
-			return true
-		}
-	}
-	return false
 }
 
 // bdSetsAllExport reports whether set's operands turn allexport on or off (-a,
@@ -772,48 +1001,55 @@ func bdValueFlag(segment []string, long string, short ...string) (value string, 
 
 // bdCreateInScripts reports whether any of the nested command lines holds a bd
 // create, the reading the depth cap needs before it refuses a shell it will
-// not walk.
-func bdCreateInScripts(scripts []string, depth int) bool {
-	for _, script := range scripts {
-		if bdCreateSomewhere(script, depth) {
+// not walk. A line the parser cannot read is read by its text: a bd create
+// spelled in it counts.
+func bdCreateInScripts(commands []string, depth int) bool {
+	for _, command := range commands {
+		script, err := shellparse.Parse(command)
+		if err != nil {
+			if bdCreateSpelled(command) {
+				return true
+			}
+			continue
+		}
+		if bdCreateScriptSomewhere(script, depth) {
 			return true
 		}
 	}
 	return false
 }
 
-// bdCreateSomewhere reports whether command, or a shell payload or command
+// bdCreateInSubs reports whether any of the substitutions holds a bd create at
+// the depth cap, read the way bdCreateScriptSomewhere reads a script.
+func bdCreateInSubs(subs []shellparse.Script, depth int) bool {
+	for _, sub := range subs {
+		if bdCreateScriptSomewhere(sub, depth) {
+			return true
+		}
+	}
+	return false
+}
+
+// bdCreateScriptSomewhere reports whether script, or a shell payload or command
 // substitution it runs, spells a bd create in any segment. It does not follow
 // cd — it answers one question, so a deeply nested command that runs no bd
 // create is allowed rather than blocked for its nesting alone.
-func bdCreateSomewhere(command string, depth int) bool {
+func bdCreateScriptSomewhere(script shellparse.Script, depth int) bool {
 	if depth > bdCreatePresenceDepth {
 		return false
 	}
-	stripped := strings.TrimSpace(stripHeredocBodies(command))
-	tokens := shellTokenize(stripped)
-	var segment []string
-	judge := func() bool {
-		segment = commandSegment(segment)
-		if isBdCreateSegment(segment) {
+	for i, seg := range script.Segments {
+		if isBdCreateSegment(bdSegmentTokens(seg)) {
 			return true
 		}
-		return bdCreateInScripts(shellCPayloads(segment), depth+1)
-	}
-	for _, tok := range tokens {
-		if shellCommandSeparators[tok] {
-			if judge() {
-				return true
-			}
-			segment = nil
-			continue
+		if bdCreateInScripts(containerSuitePayloads(script, i), depth+1) {
+			return true
 		}
-		segment = append(segment, tok)
+		if bdCreateInSubs(seg.Subs, depth+1) {
+			return true
+		}
 	}
-	if judge() {
-		return true
-	}
-	return bdCreateInScripts(commandSubstitutions(stripped), depth+1)
+	return bdCreateInSubs(script.Subs, depth+1)
 }
 
 // sameDir compares two directories, following symlinks that exist (a macOS
