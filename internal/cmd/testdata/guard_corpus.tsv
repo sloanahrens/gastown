@@ -566,3 +566,7 @@ test_scope	polecat	"cat <<EOF\n\"$(make gate)\"\nEOF\n"	refuse	polecat 'make gat
 test_scope	polecat	"cat <<EOF\nsay \"hi $(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
 test_scope	polecat	"cat <<EOF\nrun `make gate`\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
 test_scope	polecat	"cat <<EOF\nrun \\\\$(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+# --- gt-8sg8to: tap_guard_parsed_tokens.go is a new guard file, which moves the freeze stamp; one real case per freeze guard carries the new stamp, each with the verdict its guard already gives (nothing calls parsedTokens yet) ---
+container_suite	polecat	"GT_TEST_DOCKER=1 cat <(go test ./internal/beads/...)"	refuse	targets testcontainers-backed package(s)	gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
+dangerous	polecat	"echo ${x:-<(git reset --hard HEAD)}"	refuse	Hard reset discards all uncommitted changes	gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
+test_scope	polecat	"go test ./internal/cmd -run TestSubstitutionBody -count=2"	allow		gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
