@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // The save step (overrunSaveWork) runs on newResetWorld: the seat's worktree
@@ -478,6 +480,48 @@ func TestOverrunStop_LateEditThatCannotBeSavedKeepsTheSandbox(t *testing.T) {
 
 	if slices.Contains(f.calls, "sandbox gastown/capable") {
 		t.Errorf("calls = %q: the sandbox was removed though the late edit was not saved", f.calls)
+	}
+	if len(f.handedBack) != 0 {
+		t.Errorf("hand-backs = %q, want the stop held with the sandbox kept", f.handedBack)
+	}
+}
+
+// statusFailsOnSecondRead is the seat's git with its second status read failing.
+// The first read is the save's (step 1b); the second is the late re-check's
+// (step 2a), which must not read a dirty worktree as clean.
+type statusFailsOnSecondRead struct {
+	daemonGit
+	reads *int
+}
+
+func (g statusFailsOnSecondRead) Status() (*git.GitStatus, error) {
+	*g.reads++
+	if *g.reads == 2 {
+		return nil, errors.New("status unreadable")
+	}
+	return g.daemonGit.Status()
+}
+
+// A late re-check that cannot read the worktree's status holds the stop with the
+// sandbox kept: a worktree that cannot be read is not known to be clean.
+func TestOverrunStop_UnreadableLateStatusKeepsTheSandbox(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	reads := 0
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return statusFailsOnSecondRead{daemonGit: open(dir), reads: &reads}
+	}
+
+	w.d.runOverrunGuard(s)
+
+	if slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Errorf("calls = %q: the sandbox was removed though the worktree's status was unread", f.calls)
 	}
 	if len(f.handedBack) != 0 {
 		t.Errorf("hand-backs = %q, want the stop held with the sandbox kept", f.handedBack)
