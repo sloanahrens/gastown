@@ -47,9 +47,13 @@ type entrypointRig struct {
 	// execEnv is the environment the daemon exec was handed; files are the
 	// files readFile can read (readErr fails every read); omTokenFile is the
 	// --om-token-file value.
-	execEnv     []string
-	files       map[string]string
-	readErr     error
+	execEnv []string
+	files   map[string]string
+	readErr error
+	// patrols is the daemon patrol settings the patrols seam returns, and
+	// patrolErr fails it.
+	patrols     *config.DaemonPatrolConfig
+	patrolErr   error
 	omTokenFile string
 	scratch     bool
 	// doltHost is the --dolt-host value and doltHostSet says the flag was given,
@@ -128,6 +132,9 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 				return "", errors.New("no such file")
 			}
 			return text, nil
+		},
+		patrols: func(string) (*config.DaemonPatrolConfig, error) {
+			return r.patrols, r.patrolErr
 		},
 		mountinfo: func() (string, error) { return r.mountinfo, r.mountErr },
 		dirNames:  func(string) ([]string, error) { return r.dir, r.dirErr },

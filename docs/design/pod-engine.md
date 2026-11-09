@@ -223,7 +223,7 @@ The rows whose disposition is `needs-engine`, with the bead that supplies the po
 
 Three reasons:
 
-1. The tier sweep runs as a Kubernetes Job (the runner backend claim above). Each run's Job pod carries its own dind sidecar when the run asks for one (`internal/sweeprunner/k8s.go`), so the sweep does not use the daemon's engine. The daemon's sweep docker calls are gated on the registry (`internal/daemon/tier_sweep.go:2079`), and the Docker backend on its name (`internal/daemon/tier_sweep.go:2739`).
+1. The tier sweep runs as a Kubernetes Job (the runner backend claim above). Each run's Job pod carries its own dind sidecar when the run asks for one (`internal/sweeprunner/k8s.go`), so the sweep does not use the daemon's engine. The daemon's sweep docker calls are gated on the registry (`internal/daemon/tier_sweep.go:2079`), and the Docker backend on its name (`internal/daemon/tier_sweep.go:2739`). A pod start that enables the sweep with no registry is refused by the entrypoint (`refuseTierSweepWithoutRegistry`, `internal/cmd/daemon_container_entrypoint.go`) before any patrol runs.
 2. A Service to `sweep-dind` cannot work: the service sits on an internal compose network and publishes nothing, so nothing outside the project reaches it.
 3. A privileged dind sidecar in the daemon pod would share a pod with the promote keys and the forgejo-landing token, the escape the privileged-sidecar design avoids (`internal/sweeprunner/backend.go`, the dind address's comment; gt-7zy61).
 

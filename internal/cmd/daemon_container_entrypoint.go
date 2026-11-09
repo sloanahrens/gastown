@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/metrics"
 )
@@ -175,9 +176,12 @@ type containerEntrypoint struct {
 	run    func(argv []string) error // runs a command and waits for it
 	// exec replaces this process with argv and env added to its environment;
 	// it returns only on error. The token travels in env, never in argv.
-	exec      func(argv []string, env []string) error
-	readFile  func(path string) (string, error) // reads a whole file
-	mountinfo func() (string, error)            // text of /proc/self/mountinfo
+	exec     func(argv []string, env []string) error
+	readFile func(path string) (string, error) // reads a whole file
+	// patrols reads the town's daemon patrol settings the way the daemon does;
+	// an absent settings file reads as nil, with no error.
+	patrols   func(townRoot string) (*config.DaemonPatrolConfig, error)
+	mountinfo func() (string, error) // text of /proc/self/mountinfo
 	dirNames  func(dir string) ([]string, error)
 	lstat     func(path string) (entryKind, error) // what sits at mayor/town.json, a link not followed
 	exists    func(path string) (bool, error)
@@ -230,6 +234,7 @@ func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 		run:       runEntrypointCommand,
 		exec:      execEntrypointArgv,
 		readFile:  readTextFile,
+		patrols:   daemon.ReadPatrolConfig,
 		mountinfo: func() (string, error) { return readTextFile(containerMountinfo) },
 		dirNames:  listDirNames,
 		lstat:     entrypointLstat,
@@ -362,6 +367,11 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	if err != nil {
 		return err
 	}
+	// The install path execs the daemon too, so the tier sweep check runs on
+	// both paths and before the install writes anything.
+	if err := e.refuseTierSweepWithoutRegistry(townRoot); err != nil {
+		return err
+	}
 	if !install {
 		if err := e.refuseDoltHostTheTownDoesNotName(townRoot); err != nil {
 			return err
@@ -481,6 +491,30 @@ func (e containerEntrypoint) refuseDoltHostTheTownDoesNotName(townRoot string) e
 	}
 	return fmt.Errorf("--%s %q is not the Dolt server the town at %s already names (%q), and this start runs no install that would write it, so the flag would be ignored; nothing was started",
 		config.DoltHostFlag, host, townRoot, named)
+}
+
+// refuseTierSweepWithoutRegistry refuses a pod start whose daemon patrol
+// settings enable tier_sweep with no runner image registry. A pod has no
+// container engine to load the runner image into, so a sweep with no registry
+// to ask instead fails on its first run. A settings file that cannot be read
+// or parsed is refused too, since the sweep cannot be ruled out without it.
+// Outside a pod nothing is checked.
+func (e containerEntrypoint) refuseTierSweepWithoutRegistry(townRoot string) error {
+	if e.getenv(podEnv) == "" {
+		return nil
+	}
+	cfg, err := e.patrols(townRoot)
+	if err != nil {
+		return fmt.Errorf("read the daemon patrol settings %s: %w; a pod cannot rule out the tier sweep without them, so nothing was started",
+			daemon.PatrolConfigSource(townRoot), err)
+	}
+	if cfg == nil || cfg.Patrols == nil || cfg.Patrols.TierSweep == nil || !cfg.Patrols.TierSweep.Enabled {
+		return nil
+	}
+	if runner := cfg.Patrols.TierSweep.Runner; runner != nil && runner.ImageRegistry != "" {
+		return nil
+	}
+	return fmt.Errorf("daemon.patrols.tier_sweep.runner.image_registry is not set while tier_sweep is enabled: this pod has no container engine to load the runner image into, so the first sweep would fail; set the key to a registry the daemon reaches, and nothing was started")
 }
 
 // apiCredentialEnvs are the variables that outrank CLAUDE_CODE_OAUTH_TOKEN in
