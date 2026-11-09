@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -346,6 +348,107 @@ func TestExportWithoutRollbackCarriesNoSettings(t *testing.T) {
 	}
 	if names := archiveNames(t, rollback.Bytes()); slices.Contains(names, "settings/config.json") {
 		t.Errorf("an export without RollbackSettings carries the settings file: %v", names)
+	}
+}
+
+// failingRead is a reader whose every read fails.
+type failingRead struct{}
+
+func (failingRead) Read([]byte) (int, error) { return 0, errors.New("read refused") }
+
+// failingClose is a reader whose close fails after its content is read.
+type failingClose struct{ io.Reader }
+
+func (failingClose) Close() error { return errors.New("close refused") }
+
+// TestRollbackSettingsRefusesWhatItCannotReadOnTheMac drives the replay's reads of
+// the Mac's settings file and of the archive entry through their failure paths.
+// Each refusal leaves the Mac's file as it was.
+func TestRollbackSettingsRefusesWhatItCannotReadOnTheMac(t *testing.T) {
+	t.Parallel()
+	const macContent = `{"name":"town"}`
+	goodArchive := func(t *testing.T) []byte {
+		return writeArchive(t, settingsEntry("settings/config.json", `{"name":"pod"}`, cutover.Add(time.Hour)))
+	}
+	for _, tc := range []struct {
+		name       string
+		macContent string
+		ops        func(t *testing.T) townOps
+		archive    func(t *testing.T) []byte
+		want       string
+	}{
+		{
+			name:       "the Mac's settings file cannot be opened",
+			macContent: macContent,
+			ops: func(*testing.T) townOps {
+				return opsWith(func(o *townOps) {
+					o.open = func(string) (io.ReadCloser, error) { return nil, errors.New("open refused") }
+				})
+			},
+			archive: goodArchive,
+			want:    "reading the Mac's settings file",
+		},
+		{
+			name:       "the Mac's settings file cannot be read",
+			macContent: macContent,
+			ops: func(*testing.T) townOps {
+				return opsWith(func(o *townOps) {
+					o.open = func(string) (io.ReadCloser, error) { return io.NopCloser(failingRead{}), nil }
+				})
+			},
+			archive: goodArchive,
+			want:    "reading the Mac's settings file",
+		},
+		{
+			name:       "the Mac's settings file cannot be closed",
+			macContent: macContent,
+			ops: func(*testing.T) townOps {
+				return opsWith(func(o *townOps) {
+					o.open = func(string) (io.ReadCloser, error) {
+						return failingClose{strings.NewReader(macContent)}, nil
+					}
+				})
+			},
+			archive: goodArchive,
+			want:    "closing the Mac's settings file",
+		},
+		{
+			name:       "the Mac's daemon is not an object",
+			macContent: `{"daemon":[]}`,
+			archive:    goodArchive,
+			want:       "the Mac's settings file: settings: daemon is not an object",
+		},
+		{
+			name:       "an archive entry cut short",
+			macContent: macContent,
+			archive: func(t *testing.T) []byte {
+				// Keep the header and part of the first data block: the entry
+				// promises 100 bytes and the stream ends after 40.
+				full := writeArchive(t, settingsEntry("settings/config.json", strings.Repeat("x", 100), cutover.Add(time.Hour)))
+				return full[:512+40]
+			},
+			want: `reading "settings/config.json" from the archive`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mac := t.TempDir()
+			writeStateFile(t, mac, "mayor/town.json", rollbackRegistry, 0o644)
+			macTown := filepath.Join(mac, "settings", "config.json")
+			writeStateFile(t, mac, "settings/config.json", tc.macContent, 0o644)
+			setModTime(t, macTown, cutover.Add(-time.Hour))
+			opts := ImportOptions{MergeNewer: true}
+			if tc.ops != nil {
+				opts.ops = tc.ops(t)
+			}
+			_, err := Import(bytes.NewReader(tc.archive(t)), mac, Default(), opts)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Import = %v, want a refusal holding %q", err, tc.want)
+			}
+			if got := string(mustRead(t, macTown)); got != tc.macContent {
+				t.Errorf("the refused replay changed the Mac's settings file to %q", got)
+			}
+		})
 	}
 }
 
