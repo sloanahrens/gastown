@@ -1032,6 +1032,8 @@ func (f *flattener) substBody(node syntax.Node) string {
 		return ""
 	}
 	s, e := int(open.Offset())+openLen, int(closing.Offset())
+	// Parse cannot produce positions outside src, so this bounds check is defense
+	// in depth and is reached only by a flattener built with bad positions.
 	if s < 0 || e < s || e > len(f.src) {
 		f.record(&UnparseableError{Construct: "source position out of range"})
 		return ""
