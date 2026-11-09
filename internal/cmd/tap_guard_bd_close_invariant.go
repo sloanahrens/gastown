@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -440,15 +441,24 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 // shellTokenize's reading.
 type bdCloseReader func(command string) (tokens []string, parsed bool)
 
+// bdCloseParsedTokenizer and bdCloseShellTokenizer are the two readings
+// bdCloseReadTokens chooses between. They are variables so a test can put a
+// different reading in place and see the production path, routing included,
+// judge it.
+var (
+	bdCloseParsedTokenizer = parsedTokens
+	bdCloseShellTokenizer  = shellTokenize
+)
+
 // bdCloseReadTokens is the production reader, the parsedTokens reading of gt-crn9gu.
 // It falls back to shellTokenize when parsedTokens cannot read the command, and
 // when the parsed tokens carry a shape the parsed reading does not cover
 // (bdCloseParsedUnsafe). shellTokenize is the reading gt-crn9gu retires; it stays
 // as the fallback until that plan removes it.
 func bdCloseReadTokens(command string) ([]string, bool) {
-	tokens, readable := parsedTokens(command)
+	tokens, readable := bdCloseParsedTokenizer(command)
 	if !readable || bdCloseParsedUnsafe(tokens) {
-		return shellTokenize(command), false
+		return bdCloseShellTokenizer(command), false
 	}
 	return tokens, true
 }
@@ -987,7 +997,11 @@ func bdCloseSubstitutionWithBlank(tok string) bool {
 // has a dash in it, the shape a bead id takes when shellparse keeps the `$` of a
 // line-continued quoted word.
 func bdClosePrefixedDashedName(tok string) bool {
-	if len(tok) < 2 || tok[0] != '$' || !(tok[1] == '_' || unicode.IsLetter(rune(tok[1]))) {
+	if len(tok) < 2 || tok[0] != '$' {
+		return false
+	}
+	first, _ := utf8.DecodeRuneInString(tok[1:])
+	if first != '_' && !unicode.IsLetter(first) {
 		return false
 	}
 	return strings.Contains(tok, "-")
