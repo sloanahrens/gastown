@@ -525,6 +525,11 @@ bd create --title=x`, true},
 		// The here-string is read as the text it feeds, not as a bd create by
 		// its own name: a body that files nothing stays allowed either way.
 		{"bare here-string body that files nothing", nil, `BEADS_DB=` + townDB + ` bash <<< echo hi`, false},
+		// A brace group is a producer too: its echo is the script sh reads from
+		// the pipe. origin/main allowed this (the token reader did not see past
+		// the brace), so this row is a verdict change, not a new refusal rule.
+		{"brace group echo piped into sh, town store", nil, `{ echo 'bd create --title=x --db ` + townDB + `'; } | sh`, true},
+		{"brace group echo piped into sh, nothing filed", nil, `{ echo 'bd list'; } | sh`, false},
 		// The shell the line starts inherits the guard process's env, so a
 		// selector the line never names reaches the bd create it runs.
 		{"process env BEADS_DB town into bash -c", map[string]string{"BEADS_DB": townDB}, `bash -c 'bd create --title=x'`, true},
@@ -820,6 +825,13 @@ func TestTapGuardBdCreateStoreUnreadableRefused(t *testing.T) {
 		{"open quote, bd and create each built from quotes", b.town, `"b"'d' "cr"eate --title=x --db ` + townDB + ` "`, true},
 		{"open quote, bd word split by a line continuation", b.town, "b\\\nd create --title=x --db " + townDB + ` "`, true},
 		{"open quote, escaped backslash then a newline ends the word", b.town, "echo x\\\\\nbd create --title=x --db " + townDB + ` "`, true},
+		{"open quote, bd word built by an empty parameter expansion", b.town, `b${E}d create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word built by a default expansion", b.town, `b${E:-d} create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word built by an ANSI-C hex escape", b.town, `$'\x62'd create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word built by an ANSI-C octal escape", b.town, `$'\142\144' create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd word built by an ANSI-C unicode escape", b.town, `$'\u0062'd create --title=x --db ` + townDB + ` "`, true},
+		{"open quote, bd and create built from a glob", b.town, `b? ?reate --title=x --db ` + townDB + ` "`, true},
+		{"open quote, expansion but no create", b.town, `echo "$HOME" "`, false},
 		{"open quote, no create", b.town, `bd list "`, false},
 		{"open quote, no bd", b.town, `echo "create`, false},
 	}

@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -326,59 +327,119 @@ func bdCreateUnreadable(err error) string {
 	return "command cannot be read (" + dangerousConstruct(err) + "), so the guard cannot tell which store a bd create in it would file into"
 }
 
-// bdCreateSpelled reports whether text spells a bd create: a bd command word
-// with a create verb after it. The parser could not read the text, so its words
-// are read the way the shell reads them: quote and backslash characters are
-// dropped from a word rather than split on, so b""d, b\d and 'b'd each spell bd.
-// It errs toward yes, since a command the guard cannot read is refused on a match.
+// bdCreateWildcard stands for a glob character in bdCreateLetters: the shell
+// expands it to whatever file name it matches, so it may be any letter.
+const bdCreateWildcard = '?'
+
+// bdCreateSpelled reports whether text could spell a bd create.
+//
+// Threat model: the agent writes the command text, so every word the shell can
+// build from it comes from letters in that text. The parser could not read the
+// text, so the words the shell builds from it are unknown. The letters the shell
+// could build them from are read in order instead, and bd then create must both
+// match as subsequences of those letters: a word built by quotes, an expansion
+// or an escape still shows its letters, and a glob may stand for any one of
+// them. Word boundaries are not kept, so this errs toward yes, since a command
+// the guard cannot read is refused on a match.
+//
+// Documented limit: a value the text does not set, such as one from the process
+// environment or a file a glob matches in the directory, is not in the text, so
+// it is not read. A star stands for one wildcard letter, not a run of them.
 func bdCreateSpelled(text string) bool {
-	bd := false
-	for _, word := range bdCreateWords(text) {
-		if bd && bdCreateVerbs[word] {
-			return true
-		}
-		bd = bd || isBdCommandWord(word)
+	rest, ok := bdCreateSubsequence(bdCreateLetters(text), "bd")
+	if !ok {
+		return false
 	}
-	return false
+	_, ok = bdCreateSubsequence(rest, "create")
+	return ok
 }
 
-// bdCreateWordSeparators end a word in bdCreateWords: whitespace, grouping and
-// redirection punctuation, and the starts of an expansion or a substitution.
-const bdCreateWordSeparators = " \t\r\n`$(){}[];&|<>"
-
-// bdCreateWords splits text into the words bdCreateSpelled compares. A quote or
-// backslash is deleted from the word it sits in, so a word built by
-// concatenation comes out whole. A backslash-newline is a line continuation and
-// joins the two lines. Any other escaped character is read as itself, so an
-// escaped separator still ends a word.
-func bdCreateWords(text string) []string {
-	var words []string
-	var word []byte
-	flush := func() {
-		if len(word) > 0 {
-			words = append(words, string(word))
-			word = word[:0]
-		}
-	}
+// bdCreateLetters returns the letters text can spell, in order. An ASCII letter
+// is kept in lower case. A backslash escape (\x62, \142, \u0062, \U00000062) is
+// decoded to its character; a backslash before anything else is dropped and the
+// character after it is read as itself. A glob character is a wildcard. Every
+// other byte, a quote, a dollar sign or a brace included, is dropped.
+func bdCreateLetters(text string) string {
+	var letters []byte
 	for i := 0; i < len(text); i++ {
 		c := text[i]
 		if c == '\\' && i+1 < len(text) {
-			i++
-			if text[i] == '\n' {
+			if r, n := bdCreateEscape(text[i+1:]); n > 0 {
+				letters = bdCreateAppendLetter(letters, r)
+				i += n
 				continue
 			}
+			i++
 			c = text[i]
 		}
-		switch {
-		case strings.IndexByte(bdCreateWordSeparators, c) >= 0:
-			flush()
-		case c == '"' || c == '\'' || c == '\\':
-		default:
-			word = append(word, c)
+		if c == '?' || c == '*' || c == '[' {
+			letters = append(letters, bdCreateWildcard)
+			continue
+		}
+		letters = bdCreateAppendLetter(letters, rune(c))
+	}
+	return string(letters)
+}
+
+// bdCreateAppendLetter appends r to letters in lower case if it is an ASCII
+// letter, and drops it otherwise.
+func bdCreateAppendLetter(letters []byte, r rune) []byte {
+	switch {
+	case 'a' <= r && r <= 'z':
+		return append(letters, byte(r))
+	case 'A' <= r && r <= 'Z':
+		return append(letters, byte(r-'A'+'a'))
+	}
+	return letters
+}
+
+// bdCreateEscape decodes the escape s starts with, where s is the text after a
+// backslash: \xHH, an octal \NNN, \uHHHH or \UHHHHHHHH. It returns the rune and
+// how many bytes of s the escape used, or 0 when s starts no such escape.
+func bdCreateEscape(s string) (rune, int) {
+	prefix, base, limit := 0, 8, 3
+	switch s[0] {
+	case 'x':
+		prefix, base, limit = 1, 16, 2
+	case 'u':
+		prefix, base, limit = 1, 16, 4
+	case 'U':
+		prefix, base, limit = 1, 16, 8
+	}
+	digits := 0
+	for digits < limit && prefix+digits < len(s) && bdCreateDigit(s[prefix+digits], base) {
+		digits++
+	}
+	if digits == 0 {
+		return 0, 0
+	}
+	v, err := strconv.ParseUint(s[prefix:prefix+digits], base, 32)
+	if err != nil {
+		return 0, 0
+	}
+	return rune(v), prefix + digits
+}
+
+// bdCreateDigit reports whether c is a digit in base.
+func bdCreateDigit(c byte, base int) bool {
+	_, err := strconv.ParseUint(string(c), base, 8)
+	return err == nil
+}
+
+// bdCreateSubsequence reports whether pattern is a subsequence of letters, where
+// a wildcard letter matches any character. It returns the letters after the
+// match, so a second pattern can be matched after the first.
+func bdCreateSubsequence(letters, pattern string) (string, bool) {
+	j := 0
+	for i := 0; i < len(letters); i++ {
+		if j == len(pattern) {
+			return letters[i:], true
+		}
+		if letters[i] == pattern[j] || letters[i] == bdCreateWildcard {
+			j++
 		}
 	}
-	flush()
-	return words
+	return "", j == len(pattern)
 }
 
 // judgeSegment judges one simple command, filed in dir (known false when the

@@ -403,3 +403,10 @@ test_scope	polecat	"if false; then export BEADS_DB=/t/rig/.beads/x.db; fi; bd cr
 container_suite	polecat	"b\"\"d create --title=x \""	refuse	cannot be read	gt-j41yim	5b5718ea1a703791675abbd06746b011a5c11d3898e9a2f90c867dae3f7f7cb8
 dangerous	polecat	"b\"\"d create --title=x \""	refuse	cannot be read	gt-j41yim	5b5718ea1a703791675abbd06746b011a5c11d3898e9a2f90c867dae3f7f7cb8
 test_scope	polecat	"b\"\"d create --title=x \""	allow		gt-j41yim	5b5718ea1a703791675abbd06746b011a5c11d3898e9a2f90c867dae3f7f7cb8
+# --- gt-j41yim: an unreadable command builds bd or create from a parameter expansion or an ANSI-C escape; refused by the letter reader, stamp for the bd-create-store guard source after the fix ---
+container_suite	polecat	"b${E}d create --title=x \""	refuse	cannot be read	gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
+dangerous	polecat	"b${E}d create --title=x \""	refuse	cannot be read	gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
+test_scope	polecat	"b${E}d create --title=x \""	allow		gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
+container_suite	polecat	"$'\\x62'd create --title=x \""	refuse	cannot be read	gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
+dangerous	polecat	"$'\\x62'd create --title=x \""	refuse	cannot be read	gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
+test_scope	polecat	"$'\\x62'd create --title=x \""	allow		gt-j41yim	1495e3450d13df260dcbb0d8f1dba59bd0da292e1a1b42872114bf4ea67107b2
