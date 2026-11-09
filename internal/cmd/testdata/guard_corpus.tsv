@@ -472,3 +472,7 @@ test_scope	polecat	"go test ./internal/shellparse/... -run TestParseHeredoc"	all
 dangerous	polecat	"cat <<EOF\necho `echo \\`git reset --hard\\``\nEOF"	refuse	Hard reset discards	gt-4wd164	0ca920b50aa2e2d98fd443c60fa7aae8b15d00a5592385bfc99709f98a2939b4
 container_suite	polecat	"cat <<EOF\necho `echo \\`echo hi\\``\nEOF"	allow		gt-4wd164	0ca920b50aa2e2d98fd443c60fa7aae8b15d00a5592385bfc99709f98a2939b4
 test_scope	polecat	"go test ./internal/cmd -run TestSandboxSecretsHeredocBacktickBodyIsUnescaped -count=1"	allow		gt-4wd164	0ca920b50aa2e2d98fd443c60fa7aae8b15d00a5592385bfc99709f98a2939b4
+# --- gt-jt3cf7: the parser exposes header arithmetic bodies and a backquote flag; one real case per freeze guard carries the new stamp ---
+dangerous	polecat	"for x in $((printenv)); do echo $x; done"	allow		gt-jt3cf7	868eade275b0ca6ab52661220b82531a01b38f56338ffa2af4c514292bf3b73f
+container_suite	polecat	"[[ $((printenv)) ]] && go test ./internal/shellparse -count=1"	allow		gt-jt3cf7	868eade275b0ca6ab52661220b82531a01b38f56338ffa2af4c514292bf3b73f
+test_scope	polecat	"go test ./internal/shellparse -run TestParseHeaderArithmeticBodies -count=1"	allow		gt-jt3cf7	868eade275b0ca6ab52661220b82531a01b38f56338ffa2af4c514292bf3b73f
