@@ -1569,6 +1569,33 @@ func TestHeredocBodyStaysOpaque(t *testing.T) {
 	}
 }
 
+// TestHeredocBodySubstitutionsReadsParsedBodies pins what the sandbox walk takes
+// from heredoc bodies (gt-4wd164): an unquoted body's substitution is read from
+// the parser, a quoted body and an escaped "\$(" are data, and a command the
+// parser cannot read comes back whole so the walk refuses it rather than
+// finding no bodies in it.
+func TestHeredocBodySubstitutionsReadsParsedBodies(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    []string
+	}{
+		{"unquoted dollar-paren body", "cat <<EOF\n$(git reset --hard)\nEOF", []string{"git reset --hard"}},
+		{"quoted body is data", "cat <<'EOF'\n$(git reset --hard)\nEOF", nil},
+		{"escaped dollar-paren is literal", "cat <<EOF\n\\$(git reset --hard)\nEOF", nil},
+		{"unreadable command comes back whole", "cat <<EOF\n$(git reset --hard)", []string{"cat <<EOF\n$(git reset --hard)"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := heredocBodySubstitutions(tt.command)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("heredocBodySubstitutions(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestEvaluateDangerousCommandUnquotedHeredocSubstitution pins gt-x50o8: the
 // shell expands $(...) and backticks in an unquoted heredoc body, so a
 // dangerous command written there runs even though the body is otherwise data.

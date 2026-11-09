@@ -1212,14 +1212,39 @@ func heredocLineOperator(op string) bool {
 // its text is scanned, yet the shell expands "$(git reset --hard)" in
 // "cat > f <<EOF" while reading the body. A quoted tag keeps its body
 // literal, so its substitutions stay inert (gt-x50o8).
+//
+// The parser keeps a body's substitutions in the Subs of the segment that reads
+// the body, beside the words' own, so every Sub of a segment with an unquoted
+// body is returned. A word's substitution can come back too; the caller walks
+// it a second time and gets the verdict it already had. Substitutions nested in
+// other substitutions are read the same way. A command the parser cannot read
+// is returned whole, so the caller walks it and refuses it as unreadable
+// rather than finding no bodies in it.
 func heredocBodySubstitutions(command string) []string {
-	var subs []string
-	for _, span := range heredocSpans(command) {
-		if span.unterminated || span.quoted {
-			continue
-		}
-		subs = append(subs, heredocSubstitutions(span.body)...)
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		return []string{command}
 	}
+	var subs []string
+	var walk func(s shellparse.Script)
+	walk = func(s shellparse.Script) {
+		for _, seg := range s.Segments {
+			unquoted := false
+			for _, h := range seg.Heredocs {
+				unquoted = unquoted || !h.Quoted
+			}
+			for _, sub := range seg.Subs {
+				if unquoted && sub.Raw != "" {
+					subs = append(subs, sub.Raw)
+				}
+				walk(sub)
+			}
+		}
+		for _, sub := range s.Subs {
+			walk(sub)
+		}
+	}
+	walk(script)
 	return subs
 }
 
@@ -1495,28 +1520,6 @@ func blankQuotedHeredocBodies(command string) string {
 func mayHoldSubstitution(command string) bool {
 	return strings.Contains(command, "`") || strings.Contains(command, "$(") ||
 		strings.Contains(command, "<(") || strings.Contains(command, ">(")
-}
-
-// heredocSubstitutions returns the substitution bodies in the text of an
-// unquoted heredoc body, where a quote mark is an ordinary character
-// (heredocSubstitutionSpans).
-func heredocSubstitutions(body string) []string {
-	return substitutionBodies(body, heredocSubstitutionSpans(body))
-}
-
-// substitutionBodies returns the non-empty bodies of spans, each cut the way the
-// shell runs it (substitutionBody), which is what every guard recursing into a
-// command substitution needs: cut raw, the backslash an escaped nested backtick
-// pair carries stayed in the body and the command the shell runs went unjudged
-// (gt-h3312).
-func substitutionBodies(text string, spans []substitutionSpan) []string {
-	var out []string
-	for _, span := range spans {
-		if body := substitutionBody(text, span); body != "" {
-			out = append(out, body)
-		}
-	}
-	return out
 }
 
 // backslashesBefore counts the backslashes immediately preceding pos, which is
