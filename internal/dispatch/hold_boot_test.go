@@ -87,12 +87,17 @@ func TestBootGateHoldEmptyFileHolds(t *testing.T) {
 	}
 }
 
-// TestBootGateHoldEmptyTownRootAllows: with no town there is no file to read,
-// so BootHold must not read daemon/boot-health from the working directory.
-func TestBootGateHoldEmptyTownRootAllows(t *testing.T) {
+// TestBootGateHoldEmptyTownRootHolds: with no town root the boot hold cannot be
+// read, so it holds rather than allowing (fail closed). It must not read
+// daemon/boot-health from the working directory to decide.
+func TestBootGateHoldEmptyTownRootHolds(t *testing.T) {
 	t.Parallel()
-	if reason := BootHold(""); reason != "" {
-		t.Fatalf("BootHold(\"\") = %q, want \"\"", reason)
+	reason := BootHold("")
+	if reason == "" {
+		t.Fatal("BootHold(\"\") = \"\", want it held")
+	}
+	if !strings.Contains(reason, "no town root") {
+		t.Errorf("BootHold(\"\") = %q, want it to say there is no town root", reason)
 	}
 }
 

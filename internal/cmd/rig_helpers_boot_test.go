@@ -53,6 +53,18 @@ func TestRingHoldNowBootGate(t *testing.T) {
 		}
 	})
 
+	t.Run("no town root refuses", func(t *testing.T) {
+		t.Parallel()
+		// An unresolved town root cannot be checked for the boot file, so the
+		// sling is refused, not passed through as clean.
+		if got := ringHoldNow(""); got == "" {
+			t.Fatal("ringHoldNow with no town root = \"\", want the dispatch held")
+		}
+		if err := slingBlocked("", "gastown", ringHoldNow, noEstop, notParked); err == nil {
+			t.Fatal("slingBlocked with no town root = nil, want the sling refused")
+		}
+	})
+
 	t.Run("file absent keeps the Ring's verdict", func(t *testing.T) {
 		t.Parallel()
 		// A town with no ring section holds nothing, whatever the host
