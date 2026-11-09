@@ -553,7 +553,7 @@ func dangerousHeredocBodies(script shellparse.Script) []string {
 // is read by the process substitution's command. The text inside the parens is
 // cut out and parsed as the script it is, and judged like any other
 // substitution. Only an unquoted word is read: a quoted "<(...)" is text the
-// shell passes through (gt-lx8i8).
+// shell passes through (gt-lx8i8). Kept until shellparse reports these: gt-70q8j2.
 func dangerousRecoveredSubs(script shellparse.Script) []shellparse.Script {
 	var subs []shellparse.Script
 	var recover func(s shellparse.Script)
@@ -1212,15 +1212,64 @@ func heredocLineOperator(op string) bool {
 // its text is scanned, yet the shell expands "$(git reset --hard)" in
 // "cat > f <<EOF" while reading the body. A quoted tag keeps its body
 // literal, so its substitutions stay inert (gt-x50o8).
+//
+// The parser does not tell a heredoc body's substitutions from a word's:
+// Segment.Subs holds both, with no offset that sets them apart. So every Sub of
+// a segment with an unquoted body is returned, a word's included, and that
+// word's substitution is judged a second time with the verdict it already had.
+// Narrowing to the body's text would be a match on raw text that can miss a
+// body whose escapes the parser resolved, and a miss is an allow, so the wider
+// reading stays. Substitutions nested in other substitutions are read the same
+// way.
+//
+// The parser's Raw is the body as written, so a backquote body keeps the escapes
+// the shell removes when it cuts the body (substitutionBody, gt-h3312). A body
+// whose cut differs from Raw is returned both ways, so a nested command the shell
+// runs (an escaped inner backquote, an escaped dollar the cut unescapes) is
+// judged (gt-4wd164). The parser does not say which substitutions are backquotes,
+// so a "$(...)" body with the same escapes is judged its cut too: a refusal it
+// may not need, never an allow.
 func heredocBodySubstitutions(command string) []string {
-	var subs []string
-	for _, span := range heredocSpans(command) {
-		if span.unterminated || span.quoted {
-			continue
-		}
-		subs = append(subs, heredocSubstitutions(span.body)...)
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		// Fail closed for every command the parser rejects, not only heredoc
+		// ones, as gt-j41yim and gt-mru91l do: the whole command goes back to
+		// the caller, whose walk refuses an unreadable payload before it asks
+		// for substitutions, so the payload is judged once as unreadable and
+		// the walk does not descend into it.
+		return []string{command}
 	}
+	var subs []string
+	var walk func(s shellparse.Script)
+	walk = func(s shellparse.Script) {
+		for _, seg := range s.Segments {
+			unquoted := false
+			for _, h := range seg.Heredocs {
+				unquoted = unquoted || !h.Quoted
+			}
+			for _, sub := range seg.Subs {
+				if unquoted && sub.Raw != "" {
+					subs = append(subs, sub.Raw)
+					if cut := backquoteBodyCut(sub.Raw); cut != sub.Raw {
+						subs = append(subs, cut)
+					}
+				}
+				walk(sub)
+			}
+		}
+		for _, sub := range s.Subs {
+			walk(sub)
+		}
+	}
+	walk(script)
 	return subs
+}
+
+// backquoteBodyCut is body as the shell cuts a backquote substitution's body. It
+// reuses substitutionBody by wrapping body in backquotes, so the unescape is the
+// one gt-h3312 specified.
+func backquoteBodyCut(body string) string {
+	return substitutionBody("`"+body+"`", substitutionSpan{open: 0, bodyStart: 1, bodyEnd: 1 + len(body)})
 }
 
 // skipLineContinuationBytes is skipLineContinuations for command's bytes: it
@@ -1495,28 +1544,6 @@ func blankQuotedHeredocBodies(command string) string {
 func mayHoldSubstitution(command string) bool {
 	return strings.Contains(command, "`") || strings.Contains(command, "$(") ||
 		strings.Contains(command, "<(") || strings.Contains(command, ">(")
-}
-
-// heredocSubstitutions returns the substitution bodies in the text of an
-// unquoted heredoc body, where a quote mark is an ordinary character
-// (heredocSubstitutionSpans).
-func heredocSubstitutions(body string) []string {
-	return substitutionBodies(body, heredocSubstitutionSpans(body))
-}
-
-// substitutionBodies returns the non-empty bodies of spans, each cut the way the
-// shell runs it (substitutionBody), which is what every guard recursing into a
-// command substitution needs: cut raw, the backslash an escaped nested backtick
-// pair carries stayed in the body and the command the shell runs went unjudged
-// (gt-h3312).
-func substitutionBodies(text string, spans []substitutionSpan) []string {
-	var out []string
-	for _, span := range spans {
-		if body := substitutionBody(text, span); body != "" {
-			out = append(out, body)
-		}
-	}
-	return out
 }
 
 // backslashesBefore counts the backslashes immediately preceding pos, which is
@@ -1966,6 +1993,8 @@ func quotedDollarParen(dollar, paren, quote rune) bool {
 // at rune i of runes closes within command. closingDoubleQuote skips a
 // substitution that closes whole; spaceOutShellOperators reads one flat only
 // when it does not, so the two agree on where the quoted word ends (gt-l18zp).
+// Kept on the text answer: spaceOutShellOperators is shared by seven guards, and
+// retiring it is planned in gt-crn9gu.
 func quotedSubstitutionCloses(command string, runes []rune, i int) bool {
 	from := len(string(runes[:i+2])) // the byte just past the "("
 	return closingParen(command, from, heredocBodiesFrom(command, from)) >= 0
