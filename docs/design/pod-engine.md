@@ -19,6 +19,8 @@ The dispositions `deferred`, `unknown` and blank are refused.
 
 A `gated` row's condition is text the cited line must hold, and the guard fails the row when the line does not hold it. A `degrades` row's effect is a static claim the guard does not read: it checks that the cited line exists, not what the line does. Read the line before you rely on the effect.
 
+The Evidence column's caller claims are prose the guard does not read. It checks that each cited `file:line` exists and, for a `mac-job` row, that no file in `internal/daemon` calls the function. It does not check that a cited line makes the call the text names, or any claim about imports, such as that `internal/daemon` does not import a package. Read the cited line before you rely on the claim.
+
 The three container-mode gates were re-read on 2026-11-09 against the current render. `deploy/k8s/daemon/daemon.go:336` (the `ContainerModeEnv` entry of `podEnvDecisions`) sets it to the supervisor container value, and `deploy/k8s/daemon/daemon.go:830` (in `containerEnvironment`) carries it into the pod's environment. The lines are a snapshot of this tree; the symbols `podEnvDecisions` and `containerEnvironment` are what to search for if they move. So `config.InContainerMode()` is true in the pod, and each gate takes its probe-file branch there.
 
 **What the scan reads.** The scan reads a program when it is a literal in the call's function or file, or a name bound to one. It cannot read, and reports as unresolved, a parameter of the function or function literal the call sits in (a variadic one included), or an element read by index from a name the file binds. An argv list written as a literal is read where it is written, so an index read of that list is not a second program. A program held in a struct field is not read. `host.probe` is the parameter case on the daemon's path: `probe(name string, args ...string)` at `internal/doltserver/host.go:238` runs `name`, and its caller `containerRunningState` passes `"docker"`, so the row for `host.probe` (listed under needs an engine) is the pod's answer for that call.
@@ -36,6 +38,8 @@ sweep-runner-backend: kubernetes
 ## The inventory
 
 The Line column is the source line of the call; the Source column is the text on that line. The guard checks both against the tree.
+
+The guard in `internal/podengine` is the source of truth for these rows; this table is a reviewer-facing snapshot of what the guard holds, and where the two differ the guard is right.
 
 | File | Function | Line | Source | Asks the engine for | Disposition | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
