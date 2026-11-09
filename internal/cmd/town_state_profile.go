@@ -98,7 +98,10 @@ type townStateProfileEnv struct {
 	check     bool
 	getenv    func(string) string
 	files     profileFiles
-	out       io.Writer
+	// readPatrols is the daemon's own loader, which --check reads the file back
+	// through; a test replaces it to drive the case the loader cannot produce.
+	readPatrols func(town string) (*daemon.DaemonPatrolConfig, error)
+	out         io.Writer
 }
 
 func runTownStateProfile(cmd *cobra.Command, _ []string) error {
@@ -115,12 +118,13 @@ func runTownStateProfile(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("reading --check: %w", err)
 	}
 	return runTownStateProfileIn(townStateProfileEnv{
-		town:      town,
-		rehearsal: rehearsal,
-		check:     check,
-		getenv:    os.Getenv,
-		files:     hostProfileFiles(),
-		out:       cmd.OutOrStdout(),
+		town:        town,
+		rehearsal:   rehearsal,
+		check:       check,
+		getenv:      os.Getenv,
+		files:       hostProfileFiles(),
+		readPatrols: daemon.ReadPatrolConfig,
+		out:         cmd.OutOrStdout(),
 	})
 }
 
@@ -178,7 +182,7 @@ func runTownStateProfileIn(env townStateProfileEnv) error {
 // through ReadPatrolConfig, the loader the daemon runs on, and each known
 // patrol the daemon would still run is named as well.
 func checkRehearsal(env townStateProfileEnv, path string, changes []string) error {
-	cfg, err := daemon.ReadPatrolConfig(env.town)
+	cfg, err := env.readPatrols(env.town)
 	if err != nil {
 		return fmt.Errorf("reading the daemon patrol config back: %w", err)
 	}

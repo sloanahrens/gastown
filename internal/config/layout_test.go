@@ -427,3 +427,48 @@ func TestTheRingIsARegisteredSection(t *testing.T) {
 		t.Errorf("SectionHost of an unregistered key = %q, %v; want no host", host, ok)
 	}
 }
+
+// TestPatrolWritePathNamesTheFileTheDaemonWrites: the patrol file is the host
+// that carries the daemon section, the file itself otherwise, and a host the
+// loader cannot read is an error rather than a fallback to the file.
+func TestPatrolWritePathNamesTheFileTheDaemonWrites(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		settings string // "" writes no settings file
+		want     string // relative to the town root
+		refused  bool
+	}{
+		{name: "no settings file: the patrol file itself", want: "mayor/daemon.json"},
+		{name: "settings without a daemon section: the patrol file itself", settings: `{"agents": {}}`, want: "mayor/daemon.json"},
+		{name: "settings with a daemon section: the settings file", settings: `{"daemon": {}}`, want: "settings/config.json"},
+		{name: "malformed settings: refused", settings: `{"daemon":`, refused: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			if tc.settings != "" {
+				if err := os.MkdirAll(filepath.Join(root, "settings"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(root, OperatorConfigFile), []byte(tc.settings), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := PatrolWritePath(DaemonPatrolConfigPath(root))
+			if tc.refused {
+				if err == nil {
+					t.Fatalf("PatrolWritePath = %q, want a refusal", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PatrolWritePath: %v", err)
+			}
+			if want := filepath.Join(root, filepath.FromSlash(tc.want)); got != want {
+				t.Errorf("PatrolWritePath = %q, want %q", got, want)
+			}
+		})
+	}
+}

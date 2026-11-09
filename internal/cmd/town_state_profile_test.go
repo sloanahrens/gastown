@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 )
 
 // profileTestSettings is a town's settings with one patrol on, one already off,
@@ -81,7 +82,7 @@ func readProfileFile(t *testing.T, path string) []byte {
 // newProfileEnv is a rehearsal run in a pod over the host filesystem, writing
 // its output to out.
 func newProfileEnv(town string, out io.Writer) townStateProfileEnv {
-	return townStateProfileEnv{town: town, rehearsal: true, getenv: inPod, files: hostProfileFiles(), out: out}
+	return townStateProfileEnv{town: town, rehearsal: true, getenv: inPod, files: hostProfileFiles(), readPatrols: daemon.ReadPatrolConfig, out: out}
 }
 
 // faultFile is a file whose Write or Close fails with the given error.
@@ -299,6 +300,22 @@ func TestTownStateProfileProfilesTheDaemonFileOnAFiveFileTown(t *testing.T) {
 	}
 }
 
+// TestTownStateProfileCheckRefusesWhenTheDaemonLoadsNoConfig: a loader that
+// reports no patrol config at all is a refusal: the daemon would run its
+// defaults, so --check must not report the town clean.
+func TestTownStateProfileCheckRefusesWhenTheDaemonLoadsNoConfig(t *testing.T) {
+	t.Parallel()
+	town, _ := writeProfileTown(t, profileTestSettings)
+	env := newProfileEnv(town, &bytes.Buffer{})
+	env.check = true
+	env.readPatrols = func(string) (*daemon.DaemonPatrolConfig, error) { return nil, nil }
+	err := runTownStateProfileIn(env)
+	var exitErr *ExitCodeError
+	if err == nil || errors.As(err, &exitErr) || !strings.Contains(err.Error(), "no patrol config") {
+		t.Fatalf("--check when the daemon loads no config = %v, want a refusal (not an exit code)", err)
+	}
+}
+
 // TestTownStateProfileCheckRefusesADaemonFileTheDaemonCannotLoad: --check reads
 // the file back through the daemon's loader, so a file that loader rejects is
 // refused rather than reported as clean.
@@ -401,6 +418,11 @@ func TestTownStateProfileRefusals(t *testing.T) {
 				}
 			},
 			want: "reading the town settings",
+		},
+		{
+			name: "settings without a patrols object", rehearsal: true,
+			setup: func(t *testing.T, town, path string) { writeProfileFile(t, path, `{"daemon":{}}`) },
+			want:  "no daemon.patrols object",
 		},
 		{
 			name: "a malformed settings file", rehearsal: true,
