@@ -71,8 +71,10 @@ const (
 
 // gitSpeedCommands are the two git commands timed in each rig. Both run in the
 // rig's mayor/rig clone: git status needs a work tree, and the bare repository
-// has none.
-var gitSpeedCommands = [][]string{{"status", "--short"}, {"fetch", "--dry-run"}}
+// has none. Both are read-only, since install-gt fetches in mayor/rig and a
+// concurrent fetch breaks its ff-only; ls-remote makes the fetch's round trip
+// to the remote without writing.
+var gitSpeedCommands = [][]string{{"status", "--short"}, {"ls-remote", "--heads", "origin"}}
 
 // Env is what the day-one checks read and run through. Run is the only way a
 // check reaches a process and Now the only clock it times with, so a test drives

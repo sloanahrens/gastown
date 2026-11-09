@@ -17,7 +17,7 @@ import (
 // a row that did not run, so it counts as a failure, and names what stopped it.
 func TestCheckGitSpeedIsNotRunWhenItCannotMeasure(t *testing.T) {
 	t.Parallel()
-	validBaseline := `{"rigs":{"gastown":{"status --short":0.1,"fetch --dry-run":0.1}}}`
+	validBaseline := `{"rigs":{"gastown":{"status --short":0.1,"ls-remote --heads origin":0.1}}}`
 	tests := []struct {
 		name     string
 		files    map[string]string
@@ -257,7 +257,7 @@ func TestCheckGitSpeedIsNotRunWhenTheRigListCannotBeRead(t *testing.T) {
 func TestCheckGitSpeedNamesAnUnregisteredRig(t *testing.T) {
 	t.Parallel()
 	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
-		"gastown": {"status --short": 0.1, "fetch --dry-run": 0.1},
+		"gastown": {"status --short": 0.1, "ls-remote --heads origin": 0.1},
 	}}
 	town := writeTown(t, townFiles{
 		daemonJSON: `{"patrols":{"landing_worker":{"enabled":true,"rigs":["gastown","nowhere"]}}}`,
