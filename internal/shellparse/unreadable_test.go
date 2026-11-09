@@ -106,6 +106,37 @@ func TestParseUnparseableNamesConstructFailClosed(t *testing.T) {
 			},
 			want: "source position out of range",
 		},
+		{
+			name: "substitution without a position",
+			run: func(f *flattener) {
+				f.partsSubs([]syntax.WordPart{&syntax.CmdSubst{}}, &[]Script{})
+			},
+			want: "source position out of range",
+		},
+		{
+			name: "substitution node of another type",
+			run: func(f *flattener) {
+				f.script(&syntax.Lit{}, nil, &[]Script{})
+			},
+			want: "source position out of range",
+		},
+		{
+			name: "substitution with an end but no start",
+			run: func(f *flattener) {
+				f.src = "echo $(date)"
+				sub := &syntax.CmdSubst{Right: syntax.NewPos(10, 1, 11)}
+				f.partsSubs([]syntax.WordPart{sub}, &[]Script{})
+			},
+			want: "source position out of range",
+		},
+		{
+			name: "substitution body past the source",
+			run: func(f *flattener) {
+				sub := &syntax.CmdSubst{Left: syntax.NewPos(5, 1, 6), Right: syntax.NewPos(9, 1, 10)}
+				f.partsSubs([]syntax.WordPart{sub}, &[]Script{})
+			},
+			want: "source position out of range",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

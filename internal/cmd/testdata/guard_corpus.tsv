@@ -418,3 +418,8 @@ test_scope	polecat	"echo hi # $(git reset --hard)"	allow		gt-mru91l	c1b2f8c5379e
 container_suite	polecat	"echo \"unterminated gh pr create"	refuse	cannot be read	gt-mru91l	3aef6bf01826acca3c3899c6abcd7a33f0d2b79bc38354195ff56a1dbf86a35f
 dangerous	polecat	"echo \"unterminated gh pr create"	refuse	cannot be read	gt-mru91l	3aef6bf01826acca3c3899c6abcd7a33f0d2b79bc38354195ff56a1dbf86a35f
 test_scope	polecat	"echo \"unterminated gh pr create"	allow		gt-mru91l	3aef6bf01826acca3c3899c6abcd7a33f0d2b79bc38354195ff56a1dbf86a35f
+# --- gt-vi78tr: a substitution carries its body text, nested ones included; the guards judge the same commands as before the Raw field ---
+dangerous	polecat	"echo $(echo `git reset --hard`)"	refuse	Hard reset discards	gt-vi78tr	96fcd085d51d5ce2c5222c386cbaf97f47a3397ae0aed6e33dc9e40d50db327f
+dangerous	polecat	"echo $(echo `id`)"	allow		gt-vi78tr	96fcd085d51d5ce2c5222c386cbaf97f47a3397ae0aed6e33dc9e40d50db327f
+container_suite	polecat	"echo $(GT_TEST_DOCKER=1 go test ./internal/beads/...)"	refuse	targets testcontainers-backed package(s)	gt-vi78tr	96fcd085d51d5ce2c5222c386cbaf97f47a3397ae0aed6e33dc9e40d50db327f
+test_scope	polecat	"echo $(go test ./internal/beads/...)"	allow		gt-vi78tr	96fcd085d51d5ce2c5222c386cbaf97f47a3397ae0aed6e33dc9e40d50db327f
