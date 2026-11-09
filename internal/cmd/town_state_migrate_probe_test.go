@@ -96,9 +96,6 @@ func TestTownStateMigrateListWithinIsBounded(t *testing.T) {
 	}
 }
 
-// TestTownStateMigrateLandingProbes: the candidate probe reads the landing worker's
-// own work root from the town's patrol settings, and the post-land probe reads each
-// rig's red-main state. An unreadable state is an error the caller counts unmet.
 // TestTownStateMigrateReadyToLandNamesItsStatuses: the list the queue reads asks
 // bd for exactly the actionable statuses by name, so the count does not depend on
 // bd's default for the statuses it leaves out.
@@ -160,6 +157,9 @@ func TestTownStateMigrateWorkRootShapes(t *testing.T) {
 	})
 }
 
+// TestTownStateMigrateLandingProbes: the candidate probe reads the landing worker's
+// own work root from the town's patrol settings, and the post-land probe reads each
+// rig's red-main state. An unreadable state is an error the caller counts unmet.
 func TestTownStateMigrateLandingProbes(t *testing.T) {
 	t.Parallel()
 	t.Run("a landing directory in the work root is a run in flight", func(t *testing.T) {
