@@ -22,6 +22,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
 
@@ -171,7 +172,7 @@ func podUnpack(dir string, r io.Reader) error {
 			if err != nil {
 				return err
 			}
-			if err := os.WriteFile(dst, data, 0o644); err != nil {
+			if err := os.WriteFile(dst, data, fs.FileMode(hdr.Mode).Perm()); err != nil {
 				return err
 			}
 		default:
@@ -1571,5 +1572,132 @@ func TestSeedCutoverTarRefusesAFailingWriter(t *testing.T) {
 		if err := writeCutoverTar(&cutoverBudgetWriter{budget: budget}, files); err == nil {
 			t.Errorf("budget %d: writeCutoverTar = nil, want the write error", budget)
 		}
+	}
+}
+
+// TestTownStateSeedHoldIsPlacedInTheClaim: a live seed that verifies leaves an empty
+// dispatch hold file at the claim's town root, mode 0600, after the cut-over record,
+// and the success output names it.
+func TestTownStateSeedHoldIsPlacedInTheClaim(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, _, out := cutoverSession(t, town)
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("live seed: %v\n%s", err, out.String())
+	}
+	hold := filepath.Join(fv.dir, dispatch.HoldFileName)
+	info, err := os.Stat(hold)
+	if err != nil {
+		t.Fatalf("the claim has no dispatch hold: %v\n%s", err, out.String())
+	}
+	if info.Size() != 0 {
+		t.Errorf("dispatch hold has %d bytes, want an empty file", info.Size())
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("dispatch hold mode = %o, want 0600", perm)
+	}
+	text := out.String()
+	record := strings.Index(text, "cut-over record written into claim")
+	held := strings.Index(text, "dispatch hold "+dispatch.HoldFileName+" placed in claim")
+	if record < 0 || held < 0 || held < record {
+		t.Errorf("the hold is not reported after the cut-over record (record at %d, hold at %d):\n%s", record, held, text)
+	}
+	if !strings.Contains(text, "the overseer removes it after the day-one checks") {
+		t.Errorf("success output does not say the overseer removes the hold:\n%s", text)
+	}
+}
+
+// TestTownStateSeedHoldNeverTouchesTheHost: the host town directory, including a
+// hold file the operator already has there, is byte-identical after a live seed,
+// and the claim still gets its hold.
+func TestTownStateSeedHoldNeverTouchesTheHost(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	writeProfileFile(t, filepath.Join(town, dispatch.HoldFileName), "operator hold\n")
+	before := townTreeSnapshot(t, town)
+	env, fv, _, out := cutoverSession(t, town)
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("live seed: %v\n%s", err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(fv.dir, dispatch.HoldFileName)); err != nil {
+		t.Fatalf("the claim has no dispatch hold, so the host check proves nothing: %v", err)
+	}
+	if got := townTreeSnapshot(t, town); !reflect.DeepEqual(got, before) {
+		t.Errorf("the live seed changed the host town directory\nbefore: %v\nafter:  %v", before, got)
+	}
+}
+
+// TestTownStateSeedHoldFailureUnwinds: a hold that does not reach the claim, or a
+// claim that does not hold it afterwards, is removed from the claim, and the run
+// exits non-zero naming the claim as partial.
+func TestTownStateSeedHoldFailureUnwinds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, k *fakeKubectl, fv *fakeVolume)
+		// want is the part of the error the failing step names.
+		want string
+	}{
+		{"the hold stream fails", func(_ *testing.T, k *fakeKubectl, _ *fakeVolume) {
+			k.failSettingsCall = 3
+		}, "stream the dispatch hold"},
+		{"the claim drops the hold", func(_ *testing.T, k *fakeKubectl, _ *fakeVolume) {
+			k.dropSettingsCall = 3
+		}, "does not hold the dispatch hold"},
+		{"the claim holds other bytes for the hold", func(t *testing.T, k *fakeKubectl, _ *fakeVolume) {
+			// The hold lands, and the claim then holds other bytes for it: only a
+			// removal from the claim leaves the hold gone.
+			k.onSettingsCall = func(n int, dir string) {
+				if n == 3 {
+					writeProfileFile(t, filepath.Join(dir, dispatch.HoldFileName), "x\n")
+				}
+			}
+		}, "does not hold the dispatch hold"},
+		{"the claim listing fails after the hold", func(_ *testing.T, k *fakeKubectl, fv *fakeVolume) {
+			// The listing that checks the hold is the one after its stream.
+			k.onSettingsCall = func(n int, _ string) {
+				if n == 3 {
+					fv.listErr = errors.New("listing failed")
+				}
+			}
+		}, "verifying the dispatch hold"},
+		{"the removal fails too", func(_ *testing.T, k *fakeKubectl, fv *fakeVolume) {
+			k.failSettingsCall = 3
+			fv.rmErr = errors.New("rm refused")
+		}, "removing the dispatch hold from claim"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := cutoverTown(t)
+			env, fv, kube, out := cutoverSession(t, town)
+			tc.setup(t, kube, fv)
+			err := runTownStateSeedIn(env)
+			if err == nil || !strings.Contains(err.Error(), "partial") || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("live seed = %v, want an error naming claim %s as partial and %q\n%s", err, seedClaim, tc.want, out.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(fv.dir, dispatch.HoldFileName)); !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("the claim still holds the dispatch hold (stat %v)", statErr)
+			}
+		})
+	}
+}
+
+// TestTownStateSeedRehearsalPlacesNoHold: a rehearsal seed leaves no dispatch hold
+// in the claim, and reports none.
+func TestTownStateSeedRehearsalPlacesNoHold(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, _ := flagPathSession(t, town, true)
+	var out bytes.Buffer
+	env.out = &out
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("rehearsal seed: %v\n%s", err, out.String())
+	}
+	if _, err := os.Stat(filepath.Join(fv.dir, dispatch.HoldFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the rehearsal left a dispatch hold in the claim (stat %v)", err)
+	}
+	if strings.Contains(out.String(), "dispatch hold") {
+		t.Errorf("the rehearsal reports a dispatch hold:\n%s", out.String())
 	}
 }
