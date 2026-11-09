@@ -627,8 +627,7 @@ var beadIDRE = regexp.MustCompile(`^[a-z][a-z0-9]*-[a-z0-9]{2,}(\.[a-z0-9]+)*$`)
 // citations to the tree, and the mac-job rule: a call a daemon-package file
 // makes can never be mac-job.
 func checkDispositions(root string, rows []engineRow) []string {
-	daemonCalls := calledNames(filepath.Join(root, daemonDir))
-	var problems []string
+	daemonCalls, problems := calledNames(filepath.Join(root, daemonDir))
 	for _, r := range rows {
 		where := fmt.Sprintf("row %d (%s %s)", r.DocLine, r.File, r.Symbol)
 		fields := strings.Fields(r.Disposition)
@@ -735,11 +734,12 @@ func calledName(symbol string) string {
 // calledNames returns every name the non-test Go files directly in dir call,
 // as an identifier or as a selector's name. The check is by name, so it reads
 // interface dispatch too; it does not follow a call through another package.
-func calledNames(dir string) map[string]bool {
+func calledNames(dir string) (map[string]bool, []string) {
 	names := map[string]bool{}
+	var problems []string
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return names
+		return names, []string{fmt.Sprintf("the daemon package %s cannot be read, so the mac-job rule cannot be checked: %v", dir, err)}
 	}
 	fset := token.NewFileSet()
 	for _, e := range entries {
@@ -748,6 +748,7 @@ func calledNames(dir string) map[string]bool {
 		}
 		f, err := parser.ParseFile(fset, filepath.Join(dir, e.Name()), nil, 0)
 		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s cannot be parsed, so the calls it makes are not seen by the mac-job rule: %v", e.Name(), err))
 			continue
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -764,7 +765,7 @@ func calledNames(dir string) map[string]bool {
 			return true
 		})
 	}
-	return names
+	return names, problems
 }
 
 // inventoryProblems runs the comparisons and the citation and disposition
@@ -795,6 +796,17 @@ func fixtureTree(t *testing.T, files map[string]string) string {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The mac-job rule reads internal/daemon and refuses a tree without it, so a
+	// fixture that names no file there still carries the package, with no calls.
+	daemon := filepath.Join(root, filepath.FromSlash(daemonDir))
+	if _, err := os.Stat(daemon); err != nil {
+		if err := os.MkdirAll(daemon, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(daemon, "doc.go"), []byte("package daemon\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1273,4 +1285,46 @@ func jsonTag(tag string) string {
 	}
 	name, _, _ := strings.Cut(rest[:end], ",")
 	return name
+}
+
+// The mac-job rule reads the calls internal/daemon makes. A daemon package the
+// check cannot read, or a file in it that does not parse, is a problem of its
+// own: the rule would otherwise pass for want of anything to compare against.
+func TestDispositionsFailClosedWhenTheDaemonPackageCannotBeRead(t *testing.T) {
+	t.Parallel()
+	row := engineRow{File: "internal/x/x.go", Symbol: "Run", Line: 4, Source: `exec.Command("docker", "ps")`, Asks: "ps", Disposition: "kube-api", Evidence: "`internal/x/x.go:3`"}
+	files := map[string]string{
+		"internal/x/x.go": "package x\n\nfunc Run() {\n\texec.Command(\"docker\", \"ps\")\n}\n",
+		engineDoc:         renderEngineDoc(row),
+	}
+	for _, tc := range []struct {
+		name   string
+		break_ func(t *testing.T, root string)
+		want   string
+	}{
+		{name: "the daemon package is missing", break_: func(t *testing.T, root string) {
+			if err := os.RemoveAll(filepath.Join(root, daemonDir)); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "cannot be read"},
+		{name: "a daemon file does not parse", break_: func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, daemonDir, "broken.go"), []byte("package daemon\n\nfunc {\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, want: "cannot be parsed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := fixtureTree(t, files)
+			tc.break_(t, root)
+			doc, err := parseEngineDoc(filepath.Join(root, engineDoc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			problems := checkDispositions(root, doc.Rows)
+			if len(problems) != 1 || !strings.Contains(problems[0], tc.want) {
+				t.Fatalf("checkDispositions = %v, want one problem containing %q", problems, tc.want)
+			}
+		})
+	}
 }
