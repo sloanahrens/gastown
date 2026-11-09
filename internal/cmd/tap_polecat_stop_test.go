@@ -398,6 +398,110 @@ func TestPolecatStopVerificationArgv(t *testing.T) {
 	}
 }
 
+// TestPolecatStopParsedReading pins the block-or-allow outcome of the Stop
+// guard's argv read through parsedTokens and shellTokenize (gt-crn9gu). Each row
+// gives the outcome the guard had before the move in old, and the test computes
+// that outcome from shellTokenize rather than trusting the row. A row where old
+// and block differ is a changed outcome: an argv that now blocks a stop it used
+// to allow. No row blocks before and allows now.
+func TestPolecatStopParsedReading(t *testing.T) {
+	t.Parallel()
+
+	gates := []polecat.Invocation{
+		{Program: "make", Target: "test"},
+		{Program: "make", Target: "lint"},
+		{Program: "make", Target: "build"},
+	}
+
+	cases := []struct {
+		name  string
+		argv  string
+		old   bool
+		block bool
+	}{
+		// Changed: parsedTokens decodes an ANSI-C escape that shellTokenize
+		// leaves as text, so the eval body gains its blank and a make test runs.
+		{name: "ansi-c space escape in an eval body", argv: `eval $'make\x20test'`, old: false, block: true},
+		{name: "ansi-c tab escape in an eval body", argv: `eval $'make\ttest'`, old: false, block: true},
+		// Changed: the redirection glued to the body made it "make test>/dev/null".
+		{name: "glued redirection after an eval body", argv: `eval 'make test'>/dev/null`, old: false, block: true},
+		// Changed: the glued target made the word "test>out".
+		{name: "glued redirection after a command", argv: `make test>out`, old: false, block: true},
+		{name: "ansi-c space escape in a shell -c body", argv: `sh -c $'make\x20test'`, old: false, block: true},
+
+		// Compound keywords and a leading comment are not tokens of parsedTokens,
+		// but the command inside them still reads the same: block on both readings.
+		{name: "make test in a while body", argv: `while true; do make test; done`, old: true, block: true},
+		{name: "gt slot run in an if body", argv: `if true; then gt slot run --role x -- make test; fi`, old: true, block: true},
+		{name: "make test under a comment line", argv: "# note\nmake test", old: true, block: true},
+
+		// Shapes parsedTokens drops or re-splits: the shellTokenize token is
+		// still in the union, so the block holds.
+		{name: "here-document body run by bash", argv: "bash <<EOF\ngo test .\nEOF", old: true, block: true},
+		{name: "tab-stripped here-document body run by bash", argv: "bash <<-EOF\n\tgo test .\n\tEOF", old: true, block: true},
+		{name: "make test in a substitution with blanks", argv: "echo $( make test )", old: true, block: true},
+		// The match is a false positive on a list, kept so no row stops blocking.
+		{name: "go test as a for-list word", argv: "for x in go test; do :; done", old: true, block: true},
+		// parsedTokens keeps the "$" the shell joins to the ANSI-C quote, so the
+		// body is not a command there; the shellTokenize token still names it.
+		{name: "backslash-newline joins an ANSI-C quote", argv: "eval $\\\n'make test'", old: true, block: true},
+		{name: "make test as a conditional word", argv: `[[ make test ]]`, old: true, block: true},
+
+		// Unreadable to parsedTokens, so shellTokenize reads them alone, as before.
+		{name: "unreadable stray double semicolon still blocks", argv: "echo a;; make test", old: true, block: true},
+		{name: "unreadable slot-run wrapper with an open quote still blocks", argv: "gt slot run --role x -- make test < /dev/null 'x", old: true, block: true},
+		{name: "unreadable eval with an open quote still allows", argv: `sh -c 'make test`, old: false, block: false},
+		{name: "unreadable eval body and open quote still allows", argv: `eval 'make test' ; echo 'unterminated`, old: false, block: false},
+
+		// Data, not a command, on both readings.
+		{name: "make test in double quotes is data", argv: `echo "make test"`, old: false, block: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, oldOK := polecat.SuiteArgv(tc.argv, stopCheckShellTokens, stopCheckMatchingSuites(gates))
+			if oldOK != tc.old {
+				t.Fatalf("shellTokenize reading of %q blocks = %v, but the row names the old outcome as %v", tc.argv, oldOK, tc.old)
+			}
+			got, ok := polecat.SuiteArgv(tc.argv, stopCheckTokens, stopCheckMatchingSuites(gates))
+			if ok != tc.block {
+				t.Fatalf("polecat.SuiteArgv(%q) = (%q, %v), want block=%v", tc.argv, got, ok, tc.block)
+			}
+		})
+	}
+}
+
+// TestPolecatStopBlockMonotone is the safe-direction property over the whole
+// command set of the parsedTokens differential: every argv the guard blocked on
+// the old reading still blocks. It runs the production split, and the same
+// commands TestParsedTokensDifferential reads, so a command added there is
+// checked here too.
+func TestPolecatStopBlockMonotone(t *testing.T) {
+	t.Parallel()
+
+	suites := stopCheckMatchingSuites([]polecat.Invocation{
+		{Program: "make", Target: "test"},
+		{Program: "make", Target: "lint"},
+		{Program: "make", Target: "build"},
+	})
+	commands := parsedTokensCommands(t)
+	oldBlocks := 0
+	for _, argv := range commands {
+		if _, oldOK := polecat.SuiteArgv(argv, stopCheckShellTokens, suites); !oldOK {
+			continue
+		}
+		oldBlocks++
+		if got, ok := polecat.SuiteArgv(argv, stopCheckTokens, suites); !ok {
+			t.Errorf("%q blocked a stop on the old reading and allows now (the new reading named %q)", argv, got)
+		}
+	}
+	// A set with no blocking command would pass the property without testing it.
+	if oldBlocks == 0 {
+		t.Fatalf("none of the %d commands blocks on the old reading, so the property holds vacuously", len(commands))
+	}
+	t.Logf("%d of %d commands block on the old reading", oldBlocks, len(commands))
+}
+
 // TestStopCheckGateFromCommand guards the rig-config half of the pane scan:
 // the configured gate must reduce to the pair the process table carries, with
 // the env prefix and the flag arguments out of the way.
