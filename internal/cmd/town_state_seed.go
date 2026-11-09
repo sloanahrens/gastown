@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -20,6 +21,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
@@ -70,7 +72,12 @@ daemon patrol off in that file, and the file is reported as "profiled", not as a
 difference. A rehearsal refuses the live namespace "gt".
 
 Without --rehearsal (the live copy) the command refuses unless the dispatch hold
-file exists and the daemon container is stopped.
+file exists and the daemon container is stopped. The live copy also sends the
+town's settings/config.json, with daemon.supervisor removed and every patrol
+left as the Mac has it, and each registered rig's <rig>/settings/config.json byte
+for byte, after the daemon-owned stream. The claim is listed afterwards and each
+file's sha256 is compared with the bytes sent; a difference leaves the claim
+partial.
 
 A failure after the stream starts exits non-zero and says the claim is partial
 and not to be used.
@@ -179,6 +186,9 @@ type townStateSeedEnv struct {
 	exclude     func(string) bool
 	// manifest is the copy set. Nil means the town's default split.
 	manifest *townstate.Manifest
+	// readHost reads the town's settings files on the host for the live copy. Nil
+	// means os.ReadFile.
+	readHost func(string) ([]byte, error)
 	// patrolWritePath names the file the daemon patrol config is written to,
 	// which the rehearsal profile rewrites. Production is config.PatrolWritePath.
 	patrolWritePath func(string) (string, error)
@@ -266,6 +276,7 @@ func townStateSeedEnvFromFlags(cmd *cobra.Command) (townStateSeedEnv, error) {
 		allowNoRigs:     f.allowNoRigs,
 		exclude:         exclude,
 		patrolWritePath: config.PatrolWritePath,
+		readHost:        os.ReadFile,
 		engine:          podEngine{namespace: f.namespace, pod: f.pod, claim: seedClaim, town: f.town, run: execKubectl},
 		probes:          productionMigrateProbes(),
 		out:             cmd.OutOrStdout(),
@@ -332,6 +343,16 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 		}
 		settings = rel
 	}
+	// The live copy reads every file it sends before the claim is touched, so a
+	// refusal here leaves the claim as it was.
+	var cutover seedCutover
+	if !env.rehearsal {
+		c, err := seedCutoverPrepare(env.town, env.readHost)
+		if err != nil {
+			return fmt.Errorf("refused: %w", err)
+		}
+		cutover = c
+	}
 
 	m := env.manifest
 	if m == nil {
@@ -352,6 +373,14 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	}
 	if problems := printVerifyProblems(env.out, res, nil); problems > 0 {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("claim %s does not match the host copy set (%d problems): the claim is partial and not to be used", seedClaim, problems)}
+	}
+
+	// The live copy's settings step runs after the daemon verify, as the rehearsal's
+	// does, and its byte check runs before the success line.
+	if !env.rehearsal {
+		if err := seedCutoverStep(env, cutover); err != nil {
+			return err
+		}
 	}
 
 	// The success line comes last, after the profile, and says whether the profile
@@ -401,8 +430,7 @@ func seedSettingsHostFile(town, rel string) error {
 // the daemon-owned stream and before the profile. The split names settings shared,
 // so the daemon stream leaves the file out; this is the rehearsal's own copy of
 // that one file, sent through the same kubectl exec as the daemon stream. The
-// live cut-over's way of giving the pod its settings is a separate question,
-// tracked outside this bead.
+// live copy sends its settings in seedCutoverStep, not here.
 func seedSettingsStream(env townStateSeedEnv, rel string) error {
 	m := &townstate.Manifest{Entries: []townstate.Entry{{
 		Path:  rel,
@@ -455,40 +483,232 @@ func seedHostFileSum(p string) (string, error) {
 
 // claimFileSum lists the claim through the engine and returns the sha256 of the
 // entry named rel and whether the listing has one. A non-regular entry under that
-// name is found with an empty sum, so it never matches a host file. The listing is
-// read to its end, so a listing that fails part way is an error.
+// name is found with an empty sum, so it never matches a host file.
 func claimFileSum(eng townstate.Engine, claim, rel string) (string, bool, error) {
+	sums, err := claimFileSums(eng, claim, []string{rel})
+	if err != nil {
+		return "", false, err
+	}
+	sum, found := sums[rel]
+	return sum, found, nil
+}
+
+// claimFileSums lists the claim once and returns, for each name in rels the
+// listing has, the sha256 of its bytes; a non-regular entry under the name maps
+// to an empty sum. A name the listing lacks is absent from the result. The listing
+// is read to its end, so a listing that fails part way is an error.
+func claimFileSums(eng townstate.Engine, claim string, rels []string) (map[string]string, error) {
+	want := make(map[string]bool, len(rels))
+	for _, rel := range rels {
+		want[rel] = true
+	}
+	sums := make(map[string]string, len(rels))
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(eng.Run(claim, townstate.ListArgv, nil, pw)) }()
 	// A listing still writing when this returns fails on the closed pipe; its own
 	// error is never the answer here.
 	defer pr.CloseWithError(io.ErrClosedPipe)
 	tr := tar.NewReader(pr)
-	var sum string
-	found := false
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return sum, found, nil
+			return sums, nil
 		}
 		if err != nil {
-			return "", false, fmt.Errorf("listing claim %s: %w", claim, err)
+			return nil, fmt.Errorf("listing claim %s: %w", claim, err)
 		}
-		if path.Clean(hdr.Name) != rel {
+		name := path.Clean(hdr.Name)
+		if !want[name] {
 			continue
 		}
-		found = true
 		if hdr.Typeflag != tar.TypeReg {
-			sum = ""
+			sums[name] = ""
 			continue
 		}
 		// The copy is bounded by the entry's own size, and a short read is an error.
 		h := sha256.New()
 		if _, err := io.CopyN(h, tr, hdr.Size); err != nil {
-			return "", false, fmt.Errorf("listing claim %s: %w", claim, err)
+			return nil, fmt.Errorf("listing claim %s: %w", claim, err)
 		}
-		sum = hex.EncodeToString(h.Sum(nil))
+		sums[name] = hex.EncodeToString(h.Sum(nil))
 	}
+}
+
+// seedCutoverTownRel is the town's settings file the live copy sends, relative to
+// the town root. Its rig counterpart is <rig>/settings/config.json.
+var seedCutoverTownRel = path.Join(constants.DirSettings, "config.json")
+
+// seedRigNamePattern is the shape a registered rig name takes in a path the copy
+// builds. A name outside it is refused before it names a host or claim file.
+var seedRigNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// seedCutover is the live copy's settings step: each file to send, with the bytes
+// and their sha256, and the settings files that are absent on the host.
+type seedCutover struct {
+	files  []seedCutoverFile
+	absent []string
+}
+
+// seedCutoverFile is one settings file the live copy writes into the claim. sum is
+// the sha256 of data, the bytes the step meant to write.
+type seedCutoverFile struct {
+	rel  string
+	data []byte
+	sum  string
+}
+
+// seedCutoverPrepare reads what the live copy's settings step writes, before the
+// claim is touched: the town's settings file with its supervisor removed, and each
+// registered rig's settings file byte for byte. The host is only read. The town's
+// file is required, because a pod without it runs on compiled-in defaults. A rig
+// with no settings file is listed in absent, not refused.
+func seedCutoverPrepare(town string, read func(string) ([]byte, error)) (seedCutover, error) {
+	if read == nil {
+		read = os.ReadFile
+	}
+	var c seedCutover
+	data, found, err := seedHostSettings(town, seedCutoverTownRel, read)
+	if err != nil {
+		return seedCutover{}, err
+	}
+	if !found {
+		return seedCutover{}, fmt.Errorf("the town's settings file %s is not on the host: the pod would run on compiled-in defaults, and no claim is written", seedCutoverTownRel)
+	}
+	townOut, _, err := townstate.RemoveSupervisor(data)
+	if err != nil {
+		return seedCutover{}, fmt.Errorf("the town's settings file %s: %w", seedCutoverTownRel, err)
+	}
+	c.files = append(c.files, newSeedCutoverFile(seedCutoverTownRel, townOut))
+
+	rigs, err := townstate.RegisteredRigs(town)
+	if err != nil {
+		return seedCutover{}, fmt.Errorf("reading the town's rigs: %w", err)
+	}
+	for _, rig := range rigs {
+		if !seedRigNamePattern.MatchString(rig) {
+			return seedCutover{}, fmt.Errorf("registered rig %q is not a plain name, and no claim is written", rig)
+		}
+		rel := path.Join(rig, constants.DirSettings, "config.json")
+		data, found, err := seedHostSettings(town, rel, read)
+		if err != nil {
+			return seedCutover{}, err
+		}
+		if !found {
+			c.absent = append(c.absent, rel)
+			continue
+		}
+		c.files = append(c.files, newSeedCutoverFile(rel, data))
+	}
+	return c, nil
+}
+
+// newSeedCutoverFile is the file the step sends for rel, with the sha256 of data.
+func newSeedCutoverFile(rel string, data []byte) seedCutoverFile {
+	sum := sha256.Sum256(data)
+	return seedCutoverFile{rel: rel, data: data, sum: hex.EncodeToString(sum[:])}
+}
+
+// seedHostSettings reads the host file at rel under town. A file that is not there
+// is reported as not found; one that is not a regular file is an error.
+func seedHostSettings(town, rel string, read func(string) ([]byte, error)) ([]byte, bool, error) {
+	p := filepath.Join(town, filepath.FromSlash(rel))
+	info, err := os.Lstat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("the settings file %s cannot be read on the host: %w", rel, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("the settings file %s is not a regular file on the host, and no claim is written", rel)
+	}
+	data, err := read(p)
+	if err != nil {
+		return nil, false, fmt.Errorf("reading the host's %s: %w", rel, err)
+	}
+	return data, true, nil
+}
+
+// seedCutoverStep is the live copy's settings step: the prepared files are sent
+// into the claim as one tar stream, unpacked by the pod, then the claim is listed
+// and each file's sha256 is compared with the bytes sent. A difference, or a
+// stream or listing that fails, leaves the claim partial.
+func seedCutoverStep(env townStateSeedEnv, c seedCutover) error {
+	for _, rel := range c.absent {
+		fmt.Fprintf(env.out, "%s is absent on the host: the claim has no file for it\n", rel)
+	}
+	if err := seedCutoverStream(env, c.files); err != nil {
+		return fmt.Errorf("stream settings into claim %s: the claim is partial and not to be used: %w", seedClaim, err)
+	}
+	mismatches, err := seedCutoverMismatches(env.engine, c.files)
+	if err != nil {
+		return fmt.Errorf("verifying settings in claim %s: the claim is partial and not to be used: %w", seedClaim, err)
+	}
+	if problems := printVerifyProblems(env.out, townstate.VerifyResult{Mismatches: mismatches}, nil); problems > 0 {
+		return &ExitCodeError{Code: 1, Err: fmt.Errorf("claim %s does not match the host's settings files (%d problems): the claim is partial and not to be used", seedClaim, problems)}
+	}
+	fmt.Fprintf(env.out, "settings %d files streamed into claim %s\n", len(c.files), seedClaim)
+	return nil
+}
+
+// seedCutoverStream sends the prepared files as one tar stream. Each file's parent
+// directories go first, as directory entries, and the pod unpacks the stream with
+// the command the rehearsal's settings step uses.
+func seedCutoverStream(env townStateSeedEnv, files []seedCutoverFile) error {
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(writeCutoverTar(pw, files)) }()
+	// The pipe is closed on every path: a writer still sending when the exec
+	// returns fails on the closed pipe and does not block.
+	defer pr.CloseWithError(io.ErrClosedPipe)
+	return env.engine.Run(seedClaim, seedSettingsArgv, pr, env.out)
+}
+
+// writeCutoverTar writes the prepared files to w as one tar stream. Each file's
+// parent directories go first, as directory entries.
+func writeCutoverTar(w io.Writer, files []seedCutoverFile) error {
+	tw := tar.NewWriter(w)
+	made := map[string]bool{}
+	for _, f := range files {
+		for d := path.Dir(f.rel); d != "." && !made[d]; d = path.Dir(d) {
+			made[d] = true
+			if err := tw.WriteHeader(&tar.Header{Name: d + "/", Typeflag: tar.TypeDir, Mode: 0o755}); err != nil {
+				return err
+			}
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: f.rel, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(f.data))}); err != nil {
+			return err
+		}
+		if _, err := tw.Write(f.data); err != nil {
+			return err
+		}
+	}
+	return tw.Close()
+}
+
+// seedCutoverMismatches lists the claim once and compares each prepared file's
+// sha256 with the sha256 of the bytes the step sent. A file the claim lacks, or
+// holds with other bytes, is a mismatch naming its path. A listing that fails is
+// an error, never a pass.
+func seedCutoverMismatches(eng townstate.Engine, files []seedCutoverFile) ([]townstate.Mismatch, error) {
+	rels := make([]string, 0, len(files))
+	for _, f := range files {
+		rels = append(rels, f.rel)
+	}
+	sums, err := claimFileSums(eng, seedClaim, rels)
+	if err != nil {
+		return nil, err
+	}
+	var mismatches []townstate.Mismatch
+	for _, f := range files {
+		got, found := sums[f.rel]
+		switch {
+		case !found:
+			mismatches = append(mismatches, townstate.Mismatch{Path: f.rel, Reason: townstate.ReasonMissing})
+		case got != f.sum:
+			mismatches = append(mismatches, townstate.Mismatch{Path: f.rel, Reason: townstate.ReasonChanged})
+		}
+	}
+	return mismatches, nil
 }
 
 // seedCutoverUnmet reads the two cut-over prerequisites a live seed needs: the

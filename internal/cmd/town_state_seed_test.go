@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -1039,4 +1040,296 @@ func readJSONFile(t *testing.T, path string) map[string]any {
 		t.Fatalf("parsing %s: %v", path, err)
 	}
 	return doc
+}
+
+// cutoverSession is a live-copy session over town through the flag path: the
+// prerequisites are met, and the output is kept.
+func cutoverSession(t *testing.T, town string) (townStateSeedEnv, *fakeVolume, *fakeKubectl, *bytes.Buffer) {
+	t.Helper()
+	env, fv, kube := flagPathSession(t, town, false)
+	env.probes = readyProbes()
+	var out bytes.Buffer
+	env.out = &out
+	return env, fv, kube, &out
+}
+
+// cutoverTown is a town whose registry names alpha and beta, whose settings file
+// is profileTestSettings (a supervisor and patrols), and whose alpha has a settings
+// file. beta has none, so it is listed as absent.
+func cutoverTown(t *testing.T) string {
+	t.Helper()
+	town := seedTown(t)
+	writeTownStateFileContent(t, town, "mayor/rigs.json", rigsJSON)
+	writeProfileFile(t, filepath.Join(town, "alpha", "settings", "config.json"), `{"landing":{"branch":"main"}}`+"\n")
+	return town
+}
+
+// TestTownStateSeedCutoverSettingsCopiesTownAndRigFiles: a live copy through the
+// flag path writes the town's settings file and each registered rig's settings
+// file into the claim, and lists the rig without one as absent.
+func TestTownStateSeedCutoverSettingsCopiesTownAndRigFiles(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, _, out := cutoverSession(t, town)
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("live seed: %v\n%s", err, out.String())
+	}
+	for _, rel := range []string{"settings/config.json", "alpha/settings/config.json"} {
+		if _, err := os.Stat(filepath.Join(fv.dir, filepath.FromSlash(rel))); err != nil {
+			t.Errorf("the claim has no %s after the live copy: %v", rel, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(fv.dir, "beta", "settings", "config.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the claim has a beta settings file, want none: %v", err)
+	}
+	if !strings.Contains(out.String(), "beta/settings/config.json is absent on the host") {
+		t.Errorf("output does not list beta's settings file as absent:\n%s", out.String())
+	}
+}
+
+// TestTownStateSeedCutoverSettingsRemovesOnlyTheSupervisor: the claim's town file
+// has no daemon.supervisor and every patrol the Mac file has; the rig file is
+// byte-equal to the Mac's.
+func TestTownStateSeedCutoverSettingsRemovesOnlyTheSupervisor(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, _, out := cutoverSession(t, town)
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("live seed: %v\n%s", err, out.String())
+	}
+	macTown := readJSONFile(t, filepath.Join(town, "settings", "config.json"))
+	claimTown := readJSONFile(t, filepath.Join(fv.dir, "settings", "config.json"))
+	macDaemon := macTown["daemon"].(map[string]any)
+	claimDaemon := claimTown["daemon"].(map[string]any)
+	if _, has := claimDaemon["supervisor"]; has {
+		t.Errorf("the claim's town file still has daemon.supervisor")
+	}
+	if !reflect.DeepEqual(claimDaemon["patrols"], macDaemon["patrols"]) {
+		t.Errorf("the claim's patrols differ from the Mac's:\nclaim %v\nmac   %v", claimDaemon["patrols"], macDaemon["patrols"])
+	}
+	if got, want := hostFileText(t, fv.dir, "alpha/settings/config.json"), hostFileText(t, town, "alpha/settings/config.json"); got != want {
+		t.Errorf("the claim's rig file is not byte-equal to the Mac's:\n%s", got)
+	}
+	if got, want := hostFileText(t, town, "settings/config.json"), profileTestSettings; got != want {
+		t.Errorf("the Mac's town file changed: %q", got)
+	}
+}
+
+// TestTownStateSeedCutoverSettingsByteMismatchIsPartial: a write the pod corrupts,
+// drops or fails exits 1 and names the claim as partial; the Mac files are unchanged.
+func TestTownStateSeedCutoverSettingsByteMismatchIsPartial(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, k *fakeKubectl)
+		// exitOne is whether the failure is a byte difference, which exits 1; a
+		// stream or listing that fails is an error with no exit code of its own.
+		exitOne bool
+	}{
+		{"town file corrupted in the claim", func(t *testing.T, k *fakeKubectl) {
+			k.onSettings = func(dir string) {
+				writeProfileFile(t, filepath.Join(dir, "settings", "config.json"), `{"daemon":{}}`)
+			}
+		}, true},
+		{"rig file dropped from the claim", func(t *testing.T, k *fakeKubectl) {
+			k.onSettings = func(dir string) {
+				if err := os.Remove(filepath.Join(dir, "alpha", "settings", "config.json")); err != nil {
+					t.Errorf("removing the claim's rig file: %v", err)
+				}
+			}
+		}, true},
+		{"stream fails part way", func(t *testing.T, k *fakeKubectl) {
+			k.settingsFails = errors.New("pod exec dropped")
+		}, false},
+		{"listing fails after the stream", func(t *testing.T, k *fakeKubectl) {
+			// The daemon's verify listing has run by the time the stream unpacks, so
+			// the failing listing is the cut-over's own.
+			k.onSettings = func(string) { k.fv.listErr = errors.New("listing failed") }
+		}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := cutoverTown(t)
+			macTown := hostFileText(t, town, "settings/config.json")
+			macRig := hostFileText(t, town, "alpha/settings/config.json")
+			env, _, kube, out := cutoverSession(t, town)
+			tc.mutate(t, kube)
+			err := runTownStateSeedIn(env)
+			var exitErr *ExitCodeError
+			if err == nil || !strings.Contains(err.Error(), "partial") {
+				t.Fatalf("live seed = %v, want an error naming the claim as partial\n%s", err, out.String())
+			}
+			if tc.exitOne && (!errors.As(err, &exitErr) || exitErr.Code != 1) {
+				t.Errorf("live seed error is not exit 1: %v", err)
+			}
+			if got := hostFileText(t, town, "settings/config.json"); got != macTown {
+				t.Errorf("the Mac's town file changed")
+			}
+			if got := hostFileText(t, town, "alpha/settings/config.json"); got != macRig {
+				t.Errorf("the Mac's rig file changed")
+			}
+		})
+	}
+}
+
+// TestTownStateSeedCutoverRefusesBeforeTheStream: each refusal the live copy's
+// settings step makes happens before the stream, so the pod is never called and
+// the claim stays empty.
+func TestTownStateSeedCutoverRefusesBeforeTheStream(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		setup  func(t *testing.T, town string)
+		reason string
+	}{
+		{"town settings file missing", func(t *testing.T, town string) {
+			if err := os.Remove(filepath.Join(town, "settings", "config.json")); err != nil {
+				t.Fatal(err)
+			}
+		}, "is not on the host"},
+		{"town settings file not JSON", func(t *testing.T, town string) {
+			writeProfileFile(t, filepath.Join(town, "settings", "config.json"), "{")
+		}, "not valid JSON"},
+		{"town settings path is a directory", func(t *testing.T, town string) {
+			if err := os.Remove(filepath.Join(town, "settings", "config.json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(town, "settings", "config.json"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "not a regular file"},
+		{"rig settings path is a directory", func(t *testing.T, town string) {
+			if err := os.Remove(filepath.Join(town, "alpha", "settings", "config.json")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(filepath.Join(town, "alpha", "settings", "config.json"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "not a regular file"},
+		{"rig name is not a plain name", func(t *testing.T, town string) {
+			writeTownStateFileContent(t, town, "mayor/rigs.json", `{"version":1,"rigs":{"a b":{"git_url":"x"}}}`)
+		}, "not a plain name"},
+		{"rig registry is not JSON", func(t *testing.T, town string) {
+			writeTownStateFileContent(t, town, "mayor/rigs.json", "{")
+		}, "reading the town's rigs"},
+		{"rig settings directory is a file", func(t *testing.T, town string) {
+			if err := os.RemoveAll(filepath.Join(town, "alpha", "settings")); err != nil {
+				t.Fatal(err)
+			}
+			writeProfileFile(t, filepath.Join(town, "alpha", "settings"), "not a directory")
+		}, "cannot be read on the host"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := cutoverTown(t)
+			tc.setup(t, town)
+			env, fv, kube, out := cutoverSession(t, town)
+			err := runTownStateSeedIn(env)
+			if err == nil || !strings.Contains(err.Error(), tc.reason) {
+				t.Fatalf("live seed = %v, want a refusal naming %q\n%s", err, tc.reason, out.String())
+			}
+			if len(kube.calls) != 0 {
+				t.Errorf("the pod was called %d times, want none before a refusal", len(kube.calls))
+			}
+			entries, err := os.ReadDir(fv.dir)
+			if err != nil {
+				t.Fatalf("reading the claim: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("the claim was written by a refused run: %d entries", len(entries))
+			}
+		})
+	}
+}
+
+// TestTownStateSeedRehearsalSettingsStepUnchanged: a rehearsal still copies and
+// profiles its one settings file: one settings stream, one profile, and no rig file
+// in the claim.
+func TestTownStateSeedRehearsalSettingsStepUnchanged(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, kube := flagPathSession(t, town, true)
+	var out bytes.Buffer
+	env.out = &out
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("rehearsal seed: %v\n%s", err, out.String())
+	}
+	settings := 0
+	profiles := 0
+	for _, call := range kube.calls {
+		switch {
+		case podArgvIs(call, withTown(seedSettingsArgv, town)):
+			settings++
+		case podArgvIs(call, withTown(seedProfileArgv, town)):
+			profiles++
+		}
+	}
+	if settings != 1 || profiles != 1 {
+		t.Errorf("pod ran the settings step %d times and the profile %d times, want 1 and 1", settings, profiles)
+	}
+	if _, err := os.Stat(filepath.Join(fv.dir, "alpha", "settings", "config.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the rehearsal copied a rig settings file: %v", err)
+	}
+	if strings.Contains(out.String(), "is absent on the host") {
+		t.Errorf("the rehearsal printed the live copy's absent-file line:\n%s", out.String())
+	}
+}
+
+// TestTownStateSeedCutoverRefusesAnUnreadableTownFile: a town settings file that
+// is there but cannot be read is refused before the stream, and the claim is not
+// touched.
+func TestTownStateSeedCutoverRefusesAnUnreadableTownFile(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, kube, out := cutoverSession(t, town)
+	env.readHost = func(string) ([]byte, error) { return nil, errors.New("read refused") }
+	err := runTownStateSeedIn(env)
+	if err == nil || !strings.Contains(err.Error(), "reading the host's settings/config.json") {
+		t.Fatalf("live seed = %v, want a refusal naming the unreadable file\n%s", err, out.String())
+	}
+	if len(kube.calls) != 0 {
+		t.Errorf("the pod was called %d times, want none before a refusal", len(kube.calls))
+	}
+	entries, err := os.ReadDir(fv.dir)
+	if err != nil {
+		t.Fatalf("reading the claim: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the claim was written by a refused run: %d entries", len(entries))
+	}
+}
+
+// cutoverBudgetWriter accepts budget bytes and then fails, so a write fails at the
+// point the budget runs out.
+type cutoverBudgetWriter struct{ budget int }
+
+func (w *cutoverBudgetWriter) Write(p []byte) (int, error) {
+	if len(p) <= w.budget {
+		w.budget -= len(p)
+		return len(p), nil
+	}
+	n := w.budget
+	w.budget = 0
+	return n, errors.New("write refused")
+}
+
+// TestSeedCutoverTarRefusesAFailingWriter: a write that fails anywhere in the
+// stream is returned, whichever of the directory header, the file header, the file
+// bytes or the closing blocks it fails in.
+func TestSeedCutoverTarRefusesAFailingWriter(t *testing.T) {
+	t.Parallel()
+	files := []seedCutoverFile{newSeedCutoverFile("settings/config.json", []byte(`{"daemon":{}}`+"\n"))}
+	var whole bytes.Buffer
+	if err := writeCutoverTar(&whole, files); err != nil {
+		t.Fatalf("writeCutoverTar to a whole buffer: %v", err)
+	}
+	// The stream is a directory header (512 bytes), a file header (512), the file
+	// bytes, and two closing blocks. Each budget runs out in one of those writes.
+	for _, budget := range []int{0, 512, 1024, whole.Len() - 1} {
+		if err := writeCutoverTar(&cutoverBudgetWriter{budget: budget}, files); err == nil {
+			t.Errorf("budget %d: writeCutoverTar = nil, want the write error", budget)
+		}
+	}
 }
