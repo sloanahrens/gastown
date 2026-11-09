@@ -140,8 +140,8 @@ type bdCreateDir struct {
 }
 
 // in returns the directory d names, or cwd with known false when the walk could
-// not place it: a nested command is then judged against the directory the shell
-// named, not one it never reached.
+// not place it. A bd create judged there is refused as unplaceable, rather than
+// read against a directory the shell never named.
 func (d bdCreateDir) in(cwd string) (string, bool) {
 	if !d.known {
 		return cwd, false

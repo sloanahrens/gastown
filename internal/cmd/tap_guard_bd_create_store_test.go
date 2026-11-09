@@ -263,6 +263,7 @@ func TestTapGuardBdCreateStore(t *testing.T) {
 		// directory the line has reached when it runs (gt-j41yim).
 		{"for list creates in the town", polecatRole, b.worktree, `for x in $(bd create --title=x --db ` + townDB + `); do :; done`, true},
 		{"cd to the town before a for list that creates", polecatRole, b.worktree, `cd ` + b.town + ` && for x in $(bd create --title=x); do :; done`, true},
+		{"for list create past the nesting cap", polecatRole, b.worktree, `for a in $(for b in $(for c in $(for d in $(bd create --title=x); do :; done); do :; done); do :; done); do :; done`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
