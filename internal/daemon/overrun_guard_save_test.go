@@ -728,6 +728,99 @@ func TestOverrunStop_UnreadableLateStatusKeepsTheSandbox(t *testing.T) {
 	}
 }
 
+// A late check that keeps failing counts toward the save cap: the stop holds
+// with the sandbox kept on each tick before the cap, then parks the seat once.
+// The note names the reason and says the check was a late one, not one before
+// the stop.
+func TestOverrunStop_LateDirtyCheckThatKeepsFailingParksAfterTheCap(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	stopped := false
+	open := w.d.openGitFn
+	w.d.openGitFn = func(dir string) daemonGit {
+		return statusUnreadableAfterStop{daemonGit: open(dir), stopped: &stopped}
+	}
+	stopSession := s.stopSession
+	s.stopSession = func(seat overrunSeat) error {
+		if err := stopSession(seat); err != nil {
+			return err
+		}
+		stopped = true
+		return nil
+	}
+
+	tickUntilSaveCap(t, w, f, s)
+
+	if slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Errorf("calls = %q: the sandbox was removed though the worktree was never read", f.calls)
+	}
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-back notes = %q, want the seat parked with one note", f.handBackNotes)
+	}
+	note := f.handBackNotes[0]
+	if !strings.Contains(note, "late check") || !strings.Contains(note, "status unreadable") {
+		t.Errorf("hand-back note = %q, want the late check and its reason named", note)
+	}
+	if strings.Contains(note, "could not be saved before the stop") {
+		t.Errorf("hand-back note = %q, want the late check named, not a refused save before the stop", note)
+	}
+
+	w.d.runOverrunGuard(s)
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %q after a later tick, want the seat parked once", f.handedBack)
+	}
+}
+
+// A seat whose worktree cannot be resolved at the late check is refused, not
+// read as clean. It counts toward the same cap, and at the cap is parked with
+// the reason in the hand-back note. This is the decision for such a seat: its
+// work cannot be seen, so the sandbox that may hold it is kept.
+func TestOverrunStop_LateUnresolvableWorktreeParksWithItsReasonNoted(t *testing.T) {
+	t.Parallel()
+	w := newResetWorld(t)
+
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	f.removeSandbox = func(overrunSeat) error { return nil }
+	s := f.seams()
+	s.saveWork = w.d.overrunSaveWork
+	stopSession := s.stopSession
+	s.stopSession = func(seat overrunSeat) error {
+		if err := stopSession(seat); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(w.work); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}
+
+	tickUntilSaveCap(t, w, f, s)
+
+	if slices.Contains(f.calls, "sandbox gastown/capable") {
+		t.Errorf("calls = %q: the sandbox was removed though its worktree could not be seen", f.calls)
+	}
+	if len(f.handBackNotes) != 1 {
+		t.Fatalf("hand-back notes = %q, want the seat parked with one note", f.handBackNotes)
+	}
+	note := f.handBackNotes[0]
+	if !strings.Contains(note, "late check") || !strings.Contains(note, "cannot be resolved") {
+		t.Errorf("hand-back note = %q, want the late check and the unresolvable worktree named", note)
+	}
+	if strings.Contains(note, "could not be saved before the stop") {
+		t.Errorf("hand-back note = %q, want the late check named, not a refused save before the stop", note)
+	}
+
+	w.d.runOverrunGuard(s)
+	if len(f.handedBack) != 1 {
+		t.Errorf("hand-backs = %q after a later tick, want the seat parked once", f.handedBack)
+	}
+}
+
 // The late re-check of a worktree it cannot resolve is an error, never a clean
 // answer that would let the sandbox go.
 func TestOverrunWorktreeDirty_UnresolvableWorktreeIsAnError(t *testing.T) {

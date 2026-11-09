@@ -96,8 +96,8 @@ const (
 // refusal named, and the seat stays parked. An unresolvable worktree is a
 // refused save. Before the sandbox is removed (step 2a) the worktree is read
 // again: one dirty since the save is saved once more, a refused re-save counts
-// toward the same cap, and a dirty worktree that cannot be read holds the stop
-// with the sandbox kept.
+// toward the same cap, and a worktree that cannot be read counts there too: at
+// the cap the seat is parked with the late check named in the note.
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
@@ -229,7 +229,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			saved, err := s.saveWork(saveSeat)
 			if err != nil {
 				st.SaveFailures++
-				st.SaveFailure = pushFailureReason(err)
+				st.SaveFailure, st.SaveFailedLate = pushFailureReason(err), false
 				if st.SaveFailures < overrunSaveMaxAttempts {
 					d.logger.Printf("overrun_guard: stop %s on %s: work not saved, retrying next tick (%d of %d): %v",
 						who, st.Bead, st.SaveFailures, overrunSaveMaxAttempts, err)
@@ -241,7 +241,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 					who, st.Bead, st.SaveFailures, err)
 			} else {
 				st.SavedAt = now
-				st.SaveFailure, st.SaveFailures = "", 0
+				st.SaveFailure, st.SaveFailures, st.SaveFailedLate = "", 0, false
 				st.SavedHead, st.SaveCommitted = saved.Head, saved.Committed
 			}
 			if !save() {
@@ -317,27 +317,42 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		// 2a. Re-check the worktree before the sandbox goes. The save (1b) ran
 		// before the session stop, so an edit made between the two is not in
 		// it: a worktree dirty again is saved once more. A dirty check that
-		// fails holds the stop with the sandbox kept, as a refused push does, and
-		// the next tick checks again. A refused re-save holds the same way, up to
-		// overrunSaveMaxAttempts refusals; the cap parks the seat and keeps the
-		// sandbox, as a refused save at 1b does.
+		// fails is a refused save too: it counts in SaveFailures toward the same
+		// cap, the stop holds with the sandbox kept, and the next tick checks
+		// again. At the cap the seat is parked with the late check's reason in
+		// the note. That includes a seat with no resolvable worktree: its work
+		// cannot be seen, so the sandbox that may hold it is kept, and a check
+		// that can never succeed must not hold the stop forever. A refused
+		// re-save holds the same way, up to overrunSaveMaxAttempts refusals; the
+		// cap parks the seat and keeps the sandbox, as a refused save at 1b does.
 		if s.saveWork != nil {
 			dirty, err := d.overrunWorktreeDirty(seat)
 			if err != nil {
-				d.logger.Printf("overrun_guard: stop %s on %s waits, sandbox kept: %v", who, st.Bead, err)
-				return
-			}
-			// A refused save may have committed without pushing (the WIP commit
-			// stays in the worktree), so a pending refusal saves again even when
-			// the worktree now reads clean: the sandbox never goes on an unpushed
-			// commit.
-			if dirty || st.SaveFailure != "" {
+				st.SaveFailures++
+				st.SaveFailure, st.SaveFailedLate = pushFailureReason(err), true
+				if st.SaveFailures < overrunSaveMaxAttempts {
+					d.logger.Printf("overrun_guard: stop %s on %s waits: late check of the worktree failed, retrying next tick (%d of %d), sandbox kept: %v",
+						who, st.Bead, st.SaveFailures, overrunSaveMaxAttempts, err)
+					save()
+					return
+				}
+				st.SaveGaveUp, saveKept = true, true
+				d.logger.Printf("overrun_guard: stop %s on %s: late check of the worktree failed after %d attempts, sandbox kept: %v",
+					who, st.Bead, st.SaveFailures, err)
+				if !save() {
+					return
+				}
+			} else if dirty || st.SaveFailure != "" {
+				// A refused save may have committed without pushing (the WIP commit
+				// stays in the worktree), so a pending refusal saves again even when
+				// the worktree now reads clean: the sandbox never goes on an unpushed
+				// commit.
 				saveSeat := seat
 				saveSeat.Bead, saveSeat.Branch, saveSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
 				saved, err := s.saveWork(saveSeat)
 				if err != nil {
 					st.SaveFailures++
-					st.SaveFailure = pushFailureReason(err)
+					st.SaveFailure, st.SaveFailedLate = pushFailureReason(err), false
 					if st.SaveFailures < overrunSaveMaxAttempts {
 						d.logger.Printf("overrun_guard: stop %s on %s waits: work edited after the save not saved, retrying next tick (%d of %d), sandbox kept: %v",
 							who, st.Bead, st.SaveFailures, overrunSaveMaxAttempts, err)
@@ -348,7 +363,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 					d.logger.Printf("overrun_guard: stop %s on %s: work edited after the save not saved after %d attempts, sandbox kept: %v",
 						who, st.Bead, st.SaveFailures, err)
 				} else {
-					st.SaveFailure, st.SaveFailures = "", 0
+					st.SaveFailure, st.SaveFailures, st.SaveFailedLate = "", 0, false
 					if saved.Head != "" {
 						st.SavedHead, st.SaveCommitted = saved.Head, saved.Committed
 					}
@@ -484,7 +499,11 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			notes = append(notes, fmt.Sprintf("Branch %s was pushed at %s before the stop.", branch, st.SavedHead))
 		}
 	}
-	if saveKept {
+	if saveKept && st.SaveFailedLate {
+		notes = append(notes, fmt.Sprintf("The late check of the seat's worktree, made after the session stopped, failed (%s): branch %s may hold work origin lacks. "+
+			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
+			st.SaveFailure, branch, who))
+	} else if saveKept {
 		notes = append(notes, fmt.Sprintf("The seat's work could not be saved before the stop (%s): branch %s may hold work origin lacks. "+
 			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
 			st.SaveFailure, branch, who))
