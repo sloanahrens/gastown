@@ -1090,6 +1090,7 @@ func TestDispositionRules(t *testing.T) {
 		{name: "gated without a condition", disposition: "gated internal/x/x.go:3", evidence: "`internal/x/x.go:3`", want: "condition in words"},
 		{name: "gated citing a line past the end", disposition: "gated internal/x/x.go:99 when X", evidence: "`internal/x/x.go:3`", want: "the file has"},
 		{name: "gated on a line that does not hold its condition", disposition: `gated internal/x/x.go:4 when prog == "git"`, evidence: "`internal/x/x.go:3`", want: "does not hold the gate's condition"},
+		{name: "gated without the word when", disposition: `gated internal/x/x.go:4 prog == "docker"`, evidence: "`internal/x/x.go:3`", want: `wants "when"`},
 		{name: "degrades without an effect", disposition: "degrades internal/x/x.go:3", evidence: "`internal/x/x.go:3`", want: "effect in words"},
 		{name: "mac-job without an entry point", disposition: "mac-job", evidence: "no citation here", want: "cites no file:line"},
 		{name: "mac-job with an argument", disposition: "mac-job later", evidence: "`internal/x/x.go:3`", want: "takes no argument"},
