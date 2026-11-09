@@ -1315,6 +1315,38 @@ func (w *cutoverBudgetWriter) Write(p []byte) (int, error) {
 	return n, errors.New("write refused")
 }
 
+// TestSeedCutoverTarListsParentsBeforeEntries: each file's parent directories are
+// in the stream before the file, shallowest first, and a directory two files share
+// is written once.
+func TestSeedCutoverTarListsParentsBeforeEntries(t *testing.T) {
+	t.Parallel()
+	files := []seedCutoverFile{
+		newSeedCutoverFile("a/b/c/f.json", []byte("{}\n")),
+		newSeedCutoverFile("a/b/g.json", []byte("{}\n")),
+		newSeedCutoverFile("top.json", []byte("{}\n")),
+	}
+	var stream bytes.Buffer
+	if err := writeCutoverTar(&stream, files); err != nil {
+		t.Fatalf("writeCutoverTar: %v", err)
+	}
+	var names []string
+	tr := tar.NewReader(&stream)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading the stream: %v", err)
+		}
+		names = append(names, hdr.Name)
+	}
+	want := []string{"a/", "a/b/", "a/b/c/", "a/b/c/f.json", "a/b/g.json", "top.json"}
+	if !slices.Equal(names, want) {
+		t.Errorf("stream entries = %q, want %q", names, want)
+	}
+}
+
 // TestSeedCutoverTarRefusesAFailingWriter: a write that fails anywhere in the
 // stream is returned, whichever of the directory header, the file header, the file
 // bytes or the closing blocks it fails in.
