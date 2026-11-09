@@ -270,3 +270,51 @@ func TestRehearsalProfileRefusesAMalformedFile(t *testing.T) {
 		})
 	}
 }
+
+// TestRemoveSupervisorKeepsEveryOtherKey: the cut-over removes daemon.supervisor and
+// nothing else. A patrol the rehearsal would turn off stays on, its values keep
+// their text, and a file with no supervisor is reported with no change.
+func TestRemoveSupervisorKeepsEveryOtherKey(t *testing.T) {
+	t.Parallel()
+	out, changes, err := RemoveSupervisor([]byte(rehearsalFixture))
+	if err != nil {
+		t.Fatalf("RemoveSupervisor: %v", err)
+	}
+	if !slices.Equal(changes, []string{"daemon.supervisor"}) {
+		t.Errorf("changes = %q, want only daemon.supervisor", changes)
+	}
+	got := decodeRehearsalSettings(t, out)
+	daemon := object(t, got["daemon"], "daemon")
+	if _, has := daemon["supervisor"]; has {
+		t.Errorf("daemon.supervisor survives the removal")
+	}
+	want := decodeRehearsalSettings(t, []byte(rehearsalFixture))
+	if !reflect.DeepEqual(got["agents"], want["agents"]) {
+		t.Errorf("agents changed: %v, want %v", got["agents"], want["agents"])
+	}
+	if !reflect.DeepEqual(daemon["patrols"], object(t, want["daemon"], "daemon")["patrols"]) {
+		t.Errorf("patrols changed by the supervisor removal")
+	}
+
+	again, changes, err := RemoveSupervisor(out)
+	if err != nil {
+		t.Fatalf("RemoveSupervisor on a removed file: %v", err)
+	}
+	if len(changes) != 0 {
+		t.Errorf("a file with no supervisor reports changes %q", changes)
+	}
+	if !bytes.Equal(again, out) {
+		t.Errorf("a second removal rewrote the file")
+	}
+}
+
+// TestRemoveSupervisorRefusesAMalformedFile: a file that is not one JSON object, or
+// whose daemon is not an object, is refused.
+func TestRemoveSupervisorRefusesAMalformedFile(t *testing.T) {
+	t.Parallel()
+	for _, doc := range []string{"{", `{"daemon": {}} trailing`, `{"daemon": "container"}`} {
+		if _, _, err := RemoveSupervisor([]byte(doc)); err == nil {
+			t.Errorf("RemoveSupervisor(%q) = nil error, want a refusal", doc)
+		}
+	}
+}

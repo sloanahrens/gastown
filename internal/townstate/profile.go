@@ -57,6 +57,31 @@ func RehearsalDaemonProfile(doc []byte, known []string) (out []byte, changes []s
 	return encodeSettings(daemon), changes, nil
 }
 
+// RemoveSupervisor deletes daemon.supervisor from a settings file and leaves every
+// other key and value as it was, patrols included. It is the supervisor step of
+// RehearsalProfile on its own: the live cut-over seed uses it, since the live pod
+// keeps the Mac's patrols. changes names the key it removed, or is empty when the
+// file has no supervisor. A file that is not one JSON object is refused, as
+// RehearsalProfile refuses it.
+func RemoveSupervisor(settings []byte) (out []byte, changes []string, err error) {
+	root, err := decodeSettings(settings)
+	if err != nil {
+		return nil, nil, err
+	}
+	var daemon map[string]any
+	if raw, has := root["daemon"]; has {
+		obj, ok := raw.(map[string]any)
+		if !ok {
+			return nil, nil, errors.New("settings: daemon is not an object")
+		}
+		daemon = obj
+	}
+	if removeSupervisor(daemon) {
+		changes = []string{"daemon.supervisor"}
+	}
+	return encodeSettings(root), changes, nil
+}
+
 // profileDaemon applies the rehearsal rules to a daemon object in place and
 // returns the keys it changed. where names the object in the error for a daemon
 // object that has no patrols.
@@ -81,11 +106,20 @@ func profileDaemon(daemon map[string]any, where string, known []string) ([]strin
 			changes = append(changes, "daemon.patrols."+name+".enabled")
 		}
 	}
-	if _, has := daemon["supervisor"]; has {
-		delete(daemon, "supervisor")
+	if removeSupervisor(daemon) {
 		changes = append(changes, "daemon.supervisor")
 	}
 	return changes, nil
+}
+
+// removeSupervisor deletes daemon.supervisor from a daemon object in place and
+// reports whether there was one. A nil object has none.
+func removeSupervisor(daemon map[string]any) bool {
+	if _, has := daemon["supervisor"]; !has {
+		return false
+	}
+	delete(daemon, "supervisor")
+	return true
 }
 
 // encodeSettings writes a decoded document back as indented JSON.

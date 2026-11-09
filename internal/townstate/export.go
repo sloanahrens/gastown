@@ -484,3 +484,10 @@ func daemonEntries(m *Manifest, rigs []string) []Entry {
 func sortedRigs(rigs map[string]bool) []string {
 	return slices.Sorted(maps.Keys(rigs))
 }
+
+// RegisteredRigs names the rigs the town at townRoot registers, sorted. It is the
+// read townRows makes to expand the rig-scoped rows of an export, so a caller
+// that copies a rig's files names the same rigs the stream does.
+func RegisteredRigs(townRoot string) ([]string, error) {
+	return settingsRigs(os.DirFS(townRoot))
+}
