@@ -2,10 +2,11 @@
 # sweep publishes (gt-gg9hv.61), and builds and pushes the daemon and the
 # polecat image at that one commit (gt-gg9hv.62).
 #
-# This text lives under deploy/ci/ because .forgejo/workflows/ is
-# operator-protected: the pre-receive hook refuses an agent push that changes a
-# workflow file. The operator copies it to .forgejo/workflows/images.yml, the
-# way .forgejo/workflows/post-land.yml went in.
+# This file is the reviewed text of the images workflow. The live copy is
+# .forgejo/workflows/images.yml: the operator copies this file there byte for
+# byte, because the pre-receive hook admits only the operator's account to
+# .forgejo/workflows/. TestImagesWorkflowLiveCopyMatchesReviewedText in
+# internal/ci holds the two equal.
 #
 # One commit for both images: the preflight reads GITHUB_SHA once and writes
 # the tag, each image is built at it and labelled with the full sha, and after
@@ -208,3 +209,10 @@ jobs:
             -polecat "$POLECAT_IMAGE" \
             -tag "$TAG" \
             -sha "$SHA"
+      # Runs last, even after a failed step, so the login's token does not stay
+      # in the Docker config for the next job on a persistent ci-base runner.
+      - name: log out of the registry
+        if: always()
+        run: |
+          # || true: a run that died before the login has no login to undo.
+          docker logout "$FORGEJO_HOST" || true

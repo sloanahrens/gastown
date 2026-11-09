@@ -1,8 +1,11 @@
 package ci
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -46,12 +49,13 @@ func helperSchemes(script string) []string {
 }
 
 // step is one entry of the images job's steps: its name, the run script, the
-// env a secret reaches it through, and the action it uses.
+// env a secret reaches it through, the action it uses, and its if condition.
 type step struct {
 	name string
 	run  string
 	env  map[string]string
 	uses string
+	cond string
 }
 
 // loadWorkflow parses the workflow file. A file that is not valid YAML fails
@@ -118,6 +122,9 @@ func loadJob(t *testing.T) (map[string]any, []step) {
 		}
 		if v, ok := m["uses"]; ok {
 			s.uses = text(t, v, s.name+" uses")
+		}
+		if v, ok := m["if"]; ok {
+			s.cond = text(t, v, s.name+" if")
 		}
 		if v, ok := m["env"]; ok {
 			for k, val := range object(t, v, s.name+" env") {
@@ -742,4 +749,140 @@ func TestImagesWorkflowRunsOneJobOnCIBase(t *testing.T) {
 	if got := text(t, job["runs-on"], "the images job's runs-on"); got != "ci-base" {
 		t.Fatalf("the images job runs on %q, want ci-base", got)
 	}
+}
+
+// liveWorkflowPath is the live copy the operator writes from workflowPath. It is
+// absent until the operator copies the text, so a checkout may lack it.
+const liveWorkflowPath = "../../.forgejo/workflows/images.yml"
+
+// checkLiveCopy holds the live copy equal to the reviewed text. An absent live
+// copy passes, since the text may land before the operator's copy. Any other
+// read failure, and any byte difference, is an error that names the paths.
+func checkLiveCopy(livePath, reviewedPath string) error {
+	live, err := os.ReadFile(livePath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading the live copy %s: %w", livePath, err)
+	}
+	reviewed, err := os.ReadFile(reviewedPath)
+	if err != nil {
+		return fmt.Errorf("reading the reviewed text %s: %w", reviewedPath, err)
+	}
+	if !bytes.Equal(live, reviewed) {
+		return fmt.Errorf("%s differs from the reviewed text %s: copy the reviewed text over it byte for byte", livePath, reviewedPath)
+	}
+	return nil
+}
+
+// TestImagesWorkflowLiveCopyMatchesReviewedText holds the two copies equal in
+// the checkout: once the operator has written the live copy, it is the reviewed
+// text byte for byte.
+func TestImagesWorkflowLiveCopyMatchesReviewedText(t *testing.T) {
+	t.Parallel()
+	if err := checkLiveCopy(filepath.FromSlash(liveWorkflowPath), filepath.FromSlash(workflowPath)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestImagesWorkflowLiveCopyBranches drives each branch of the live-copy check
+// against files under t.TempDir(), never the checkout.
+func TestImagesWorkflowLiveCopyBranches(t *testing.T) {
+	t.Parallel()
+	reviewed := []byte("name: images\n")
+	cases := []struct {
+		name    string
+		live    []byte // nil: no live file is written
+		liveDir bool   // the live path is a directory, which cannot be read as a file
+		wantErr bool
+	}{
+		{name: "an absent live copy passes", live: nil},
+		{name: "an identical live copy passes", live: reviewed},
+		{name: "a differing live copy is refused", live: []byte("name: other\n"), wantErr: true},
+		{name: "an unreadable live copy is refused, not read as absent", liveDir: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			reviewedPath := filepath.Join(dir, "images.workflow.yml")
+			livePath := filepath.Join(dir, "images.yml")
+			if err := os.WriteFile(reviewedPath, reviewed, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case tc.liveDir:
+				if err := os.Mkdir(livePath, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case tc.live != nil:
+				if err := os.WriteFile(livePath, tc.live, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := checkLiveCopy(livePath, reviewedPath)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkLiveCopy = %v, want an error: %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), livePath) {
+				t.Errorf("the error %q does not name the live copy %s", err, livePath)
+			}
+		})
+	}
+
+	t.Run("a differing live copy names both paths", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		reviewedPath := filepath.Join(dir, "images.workflow.yml")
+		livePath := filepath.Join(dir, "images.yml")
+		if err := os.WriteFile(reviewedPath, reviewed, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(livePath, []byte("name: other\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := checkLiveCopy(livePath, reviewedPath)
+		if err == nil {
+			t.Fatal("checkLiveCopy passed a live copy that differs from the reviewed text")
+		}
+		for _, p := range []string{livePath, reviewedPath} {
+			if !strings.Contains(err.Error(), p) {
+				t.Errorf("the error %q does not name %s", err, p)
+			}
+		}
+	})
+}
+
+// TestImagesWorkflowLogsOutOfTheRegistryAlways holds the logout rule: the last
+// step logs out of the registry host with if: always(), after the login, so the
+// login's token never outlives a job that failed.
+func TestImagesWorkflowLogsOutOfTheRegistryAlways(t *testing.T) {
+	t.Parallel()
+	_, steps := loadJob(t)
+	at := containing(steps, `docker logout "$FORGEJO_HOST"`)
+	if at < 0 {
+		t.Fatal("no step runs docker logout on the registry host")
+	}
+
+	t.Run("the logout runs after the login, as the last step", func(t *testing.T) {
+		t.Parallel()
+		login := containing(steps, "docker login")
+		if login < 0 {
+			t.Fatal("no step runs docker login")
+		}
+		if at <= login {
+			t.Errorf("the logout is step %d, before or with the login (step %d)", at, login)
+		}
+		if at != len(steps)-1 {
+			t.Errorf("the logout is step %d of %d, want the final step", at, len(steps))
+		}
+	})
+
+	t.Run("the logout runs always, even after a failed step", func(t *testing.T) {
+		t.Parallel()
+		if got := steps[at].cond; got != "always()" {
+			t.Errorf("the logout step's if is %q, want always()", got)
+		}
+	})
 }
