@@ -48,10 +48,12 @@ func helperSchemes(script string) []string {
 	return out
 }
 
-// step is one entry of the images job's steps: its name, the run script, the
-// env a secret reaches it through, the action it uses, and its if condition.
+// step is one entry of the images job's steps: its name, its id, the run
+// script, the env a secret reaches it through, the action it uses, and its if
+// condition.
 type step struct {
 	name string
+	id   string
 	run  string
 	env  map[string]string
 	uses string
@@ -116,6 +118,9 @@ func loadJob(t *testing.T) (map[string]any, []step) {
 		s := step{name: fmt.Sprintf("step %d", i+1), env: map[string]string{}}
 		if v, ok := m["name"]; ok {
 			s.name = text(t, v, fmt.Sprintf("step %d name", i+1))
+		}
+		if v, ok := m["id"]; ok {
+			s.id = text(t, v, s.name+" id")
 		}
 		if v, ok := m["run"]; ok {
 			s.run = text(t, v, s.name+" run")
@@ -856,7 +861,8 @@ func TestImagesWorkflowLiveCopyBranches(t *testing.T) {
 
 // TestImagesWorkflowLogsOutOfTheRegistryAlways holds the logout rule: the last
 // step logs out of the registry host with if: always(), after the login, so the
-// login's token never outlives a job that failed.
+// login's token never outlives a job that failed. The logout runs only when the
+// login succeeded, and a logout that fails fails the step.
 func TestImagesWorkflowLogsOutOfTheRegistryAlways(t *testing.T) {
 	t.Parallel()
 	_, steps := loadJob(t)
@@ -879,10 +885,29 @@ func TestImagesWorkflowLogsOutOfTheRegistryAlways(t *testing.T) {
 		}
 	})
 
-	t.Run("the logout runs always, even after a failed step", func(t *testing.T) {
+	t.Run("the logout runs always, but only after a successful login", func(t *testing.T) {
 		t.Parallel()
-		if got := steps[at].cond; got != "always()" {
-			t.Errorf("the logout step's if is %q, want always()", got)
+		const want = "always() && steps.login.outcome == 'success'"
+		if got := steps[at].cond; got != want {
+			t.Errorf("the logout step's if is %q, want %q", got, want)
+		}
+	})
+
+	t.Run("the condition reads the login step by the id the login step has", func(t *testing.T) {
+		t.Parallel()
+		login := named(steps, "log in to the registry")
+		if login < 0 {
+			t.Fatal("no step is named log in to the registry")
+		}
+		if got := steps[login].id; got != "login" {
+			t.Errorf("the login step's id is %q, want login: the logout condition reads steps.login", got)
+		}
+	})
+
+	t.Run("a failed logout fails the step, it is not ignored", func(t *testing.T) {
+		t.Parallel()
+		if got := strings.TrimSpace(steps[at].run); got != `docker logout "$FORGEJO_HOST"` {
+			t.Errorf("the logout script is %q, want the bare logout with no fallback", got)
 		}
 	})
 }
