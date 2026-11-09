@@ -35,7 +35,17 @@ TOWN="$TMP/town"
 BARE="$TOWN/rig/.repo.git"
 
 pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); if [ $# -gt 1 ]; then printf '%s\n' "$2" | sed 's/^/    | /'; fi; }
+# fail keeps each failing case's name and detail, so the summary block at the
+# end of the output names them all, even when the log above was cut short.
+FAILED=()
+FAILED_DETAIL=()
+fail() {
+  echo "  FAIL: $1"
+  FAIL=$((FAIL + 1))
+  FAILED+=("$1")
+  FAILED_DETAIL+=("${2:-}")
+  if [ $# -gt 1 ]; then printf '%s\n' "$2" | sed 's/^/    | /'; fi
+}
 check() { # check DESCRIPTION COMMAND...
   local desc=$1
   shift
@@ -157,9 +167,12 @@ case "$sub" in
       cd "$gitdir" || exit 1
       # git reports the refspec's source as local_ref: the SHA for the probe's
       # own refspec, the remote-tracking ref for the clone's.
-      if ! printf '%s %s %s %s\n' "${refspec%%:*}" "$STUB_SHA" "${refspec#*:}" \
-        0000000000000000000000000000000000000000 \
-        | "$gitdir/.githooks/pre-push" origin "$STUB_SHA"; then
+      # The hook reads its update lines from a file, not a pipe: a hook that
+      # exits without reading stdin closes a pipe under the writer, and with
+      # pipefail that failed the push whenever the hook won the race for the CPU.
+      printf '%s %s %s %s\n' "${refspec%%:*}" "$STUB_SHA" "${refspec#*:}" \
+        0000000000000000000000000000000000000000 > "$STUB_STATE/pre-push-input"
+      if ! "$gitdir/.githooks/pre-push" origin "$STUB_SHA" < "$STUB_STATE/pre-push-input"; then
         exit 1
       fi
     fi
@@ -768,5 +781,12 @@ if [ "$FAIL" = 0 ]; then
   echo "forgejo-probe_test.sh: all $PASS cases passed"
 else
   echo "forgejo-probe_test.sh: $FAIL of $((PASS + FAIL)) cases failed"
+  echo "failing cases:"
+  for i in "${!FAILED[@]}"; do
+    echo "  FAIL: ${FAILED[$i]}"
+    if [ -n "${FAILED_DETAIL[$i]}" ]; then
+      printf '%s\n' "${FAILED_DETAIL[$i]}" | sed 's/^/    | /'
+    fi
+  done
   exit 1
 fi
