@@ -621,49 +621,10 @@ func prWorkflowScriptNamesGhOrGit(script shellparse.Script) bool {
 	return false
 }
 
-// prWorkflowSubstitutionWord stands in for a command substitution while the
-// pr-workflow guard tokenizes, so the words on either side of it stay whole.
+// prWorkflowSubstitutionWord stands in for a command substitution in a token
+// line, so the words on either side of it stay whole. The sandbox-secrets walk
+// masks each substitution of a parsed word with it (sandboxSecretsParsedWord).
 const prWorkflowSubstitutionWord = "__gt_substitution__"
-
-// prWorkflowTokenText returns command as the text prWorkflowInvocations
-// tokenizes: every command substitution the shell expands is replaced by one
-// opaque word.
-//
-// shellTokenize splits on whitespace and knows nothing of a substitution scope,
-// so it cuts "x=$(echo hi) gh pr create" into "x=$(echo", "hi)", "gh" — the
-// "$(" left glued to the assignment and the ")" left glued to the last word of
-// the body. The segment judge reads the assignment as setup and "hi)" as the
-// command word, so the "gh pr create" the line really runs, with x set for it,
-// was no word the guard saw and the line was allowed (gt-4t56h). One word in
-// the substitution's place keeps the words behind its ")" whole; the body is
-// judged as a command line of its own by the substitution scan of its caller.
-func prWorkflowTokenText(command string) string {
-	text := stripHeredocBodies(strings.TrimSpace(command))
-	spans := substitutionSpansIn(text, true)
-	if len(spans) == 0 {
-		return text
-	}
-	var b strings.Builder
-	b.Grow(len(text))
-	last := 0
-	for _, span := range spans {
-		b.WriteString(text[last:span.open])
-		b.WriteString(prWorkflowSubstitutionWord)
-		last = prWorkflowSpanEnd(text, span)
-	}
-	b.WriteString(text[last:])
-	return b.String()
-}
-
-// prWorkflowSpanEnd returns the index just past a substitution span: the ")" or
-// backtick that closes it sits at bodyEnd, while an unterminated substitution
-// runs to the end of the text.
-func prWorkflowSpanEnd(text string, span substitutionSpan) int {
-	if prWorkflowSpanUnterminated(text, span) {
-		return len(text)
-	}
-	return span.bodyEnd + 1
-}
 
 // prWorkflowSpanUnterminated reports whether the text never closes a
 // substitution: substitutionSpansIn then reads its body to the end of the text,

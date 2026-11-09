@@ -1295,7 +1295,13 @@ func TestSandboxSecretsVerdictsPinnedBeforeParsedSegments(t *testing.T) {
 		{"an unclosed quote after an assignment substitution", "x=$(echo printenv) '", "cannot be read (unterminated quote)"},
 		{"a shell fed a process substitution that prints the environment", "sh <(echo printenv)", "environment"},
 		{"a shell fed a process substitution that lists files", "sh <(echo ls)", ""},
-		{"a shell fed an ANSI-C escaped command name", "bash -c $'\\x70rintenv'", ""},
+		// Intentional flip (gt-krdodf): the walk reads the word's resolved text, so
+		// the escape \x70 is the "p" the shell runs. The verdict before the move was allow.
+		{"a shell fed an ANSI-C escaped command name", "bash -c $'\\x70rintenv'", "prints the environment"},
+		{"a prefix assignment ahead of export still lists the environment", "X=1 export", "environment"},
+		{"export of a named variable lists nothing", "export FOO=bar", ""},
+		{"export -p lists the environment", "export -p", "environment"},
+		{"a declaration after a separator is its own site", "ls; export FOO=bar", ""},
 		{"a substitution beside a secret variable in double quotes", "echo \"pre $(echo a) ${TOKEN}\"", "secret variable"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1307,5 +1313,19 @@ func TestSandboxSecretsVerdictsPinnedBeforeParsedSegments(t *testing.T) {
 				t.Errorf("sandboxSecretsReason(%q) = %q, want a reason containing %q", tt.command, reason, tt.want)
 			}
 		})
+	}
+}
+
+// gt-krdodf: a shell's stdin text is read from the parsed command. A body the
+// parser cannot read comes back unjudged so the walk refuses it at depth; no
+// lenient read of its tokens may hand back a text the walk allows.
+func TestSandboxSecretsStdoutTextPassesUnreadableBodyOn(t *testing.T) {
+	t.Parallel()
+	const body = "echo 'printenv"
+	if got := sandboxSecretsStdoutText(body); got != body {
+		t.Errorf("sandboxSecretsStdoutText(%q) = %q, want the unreadable body unchanged", body, got)
+	}
+	if reason := sandboxSecretsReason(body); !strings.Contains(reason, "cannot be read") {
+		t.Errorf("sandboxSecretsReason(%q) = %q, want the unreadable refusal", body, reason)
 	}
 }
