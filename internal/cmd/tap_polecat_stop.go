@@ -373,7 +373,54 @@ var stopCheckShellNames = map[string]bool{
 // This is the Stop guard's own read of an argv; the overrun guard reads
 // through polecat.GateTokens instead (see its file comment).
 func stopCheckTokens(argv string) []string {
-	return stopCheckExpand(shellTokenize(argv), 0)
+	return stopCheckExpand(stopCheckRead(argv), 0)
+}
+
+// stopCheckRead reads one command line through parsedTokens (gt-crn9gu), with
+// shellTokenize as the reading where parsedTokens cannot read the string and
+// for the shapes stopCheckShellShape names. Those shapes are kept on
+// shellTokenize because parsedTokens drops or re-splits a token there that the
+// guard's match needs: a here-document body a shell runs, a substitution's
+// blanks, a for, select, case or [[ header's words, a backslash-newline. A
+// shape kept here reads as it always did, so it cannot stop blocking.
+func stopCheckRead(argv string) []string {
+	shell := shellTokenize(argv)
+	if !stopCheckShellShape(argv, shell) {
+		if tokens, readable := parsedTokens(argv); readable {
+			return tokens
+		}
+	}
+	return shell
+}
+
+// stopCheckShellOpeners are the spellings whose parsedTokens reading moves the
+// guard's match toward allow: "<<" a here-document body (also a here-string,
+// where the carve-out costs nothing); "$(", "`", "<(" and ">(" a substitution,
+// which shellTokenize splits at its blanks and parsedTokens keeps as one word;
+// and a backslash-newline, after which parsedTokens keeps the "$" of an ANSI-C
+// quote that the shell joins to it.
+var stopCheckShellOpeners = []string{"<<", "$(", "`", "<(", ">(", "\\\n"}
+
+// stopCheckShellHeaders are the words that open a construct whose header
+// parsedTokens drops, so a command named in the header is not seen. shellTokenize
+// keeps each one as a token, so stopCheckShellShape finds them there.
+var stopCheckShellHeaders = map[string]bool{"for": true, "select": true, "case": true, "[[": true}
+
+// stopCheckShellShape reports whether argv has a shape stopCheckRead reads
+// through shellTokenize: a spelling in stopCheckShellOpeners, or a header word
+// among shell's tokens.
+func stopCheckShellShape(argv string, shell []string) bool {
+	for _, opener := range stopCheckShellOpeners {
+		if strings.Contains(argv, opener) {
+			return true
+		}
+	}
+	for _, tok := range shell {
+		if stopCheckShellHeaders[tok] {
+			return true
+		}
+	}
+	return false
 }
 
 // stopCheckExpand appends tokens and, after any argument a shell would
@@ -388,7 +435,7 @@ func stopCheckExpand(tokens []string, depth int) []string {
 		if !stopCheckExecutesArgument(tokens, i) {
 			continue
 		}
-		out = append(out, stopCheckExpand(shellTokenize(tok), depth+1)...)
+		out = append(out, stopCheckExpand(stopCheckRead(tok), depth+1)...)
 	}
 	return out
 }
