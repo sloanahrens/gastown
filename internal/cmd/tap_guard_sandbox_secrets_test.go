@@ -607,12 +607,34 @@ func TestSandboxSecretsHereStringThroughCat(t *testing.T) {
 		{"cat <<< printenv 1> out.txt | bash", ""},
 		{"cat <<< printenv &> out.txt | bash", ""},
 		{"cat <<< printenv 2>/dev/null > out.txt | bash", ""},
+		// A path that only starts like an alias is a real file: the alias set matches whole paths.
+		{"cat <<< printenv > /dev/stdout.txt | bash", ""},
+		{"cat <<< printenv > /dev/fd/10 | bash", ""},
 		// Only a stdout redirection to a file takes the here-string off the pipe; a
 		// stdin redirection is not one, so the here-string still feeds the pipe (gt-z81tpi).
 		{"cat <<< printenv 0< in.txt | bash", printenvRule},
 	} {
 		if got := sandboxSecretsReason(tc.command); got != tc.want {
 			t.Errorf("sandboxSecretsReason(%q) = %q, want %q", tc.command, got, tc.want)
+		}
+	}
+}
+
+// TestSandboxSecretsHereStringStdoutAliases holds the stdout redirect forms to the
+// paths that name the command's own stdout, stderr or the terminal. Each alias sends
+// the output to the pipe or the screen, not to a file, so the here-string stays on
+// the pipe and printenv is refused (gt-z81tpi).
+func TestSandboxSecretsHereStringStdoutAliases(t *testing.T) {
+	t.Parallel()
+	const printenvRule = "printenv prints the environment"
+	for _, alias := range []string{
+		"/dev/stdout", "/dev/fd/1", "/proc/self/fd/1", "/dev/stderr", "/dev/fd/2", "/dev/tty",
+	} {
+		for _, form := range []string{">", ">>", "1>", "&>", "&>>"} {
+			command := "cat <<< printenv " + form + " " + alias + " | bash"
+			if got := sandboxSecretsReason(command); got != printenvRule {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want %q", command, got, printenvRule)
+			}
 		}
 	}
 }

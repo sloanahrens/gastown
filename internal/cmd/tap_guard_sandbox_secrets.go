@@ -1768,13 +1768,27 @@ func sandboxSecretsHereStringInput(argv []string, seg shellparse.Segment, ansi m
 	return strings.Join(texts, "\n"), true
 }
 
+// sandboxSecretsNotAFile holds the targets a stdout redirection may name without
+// sending the output to a file: /dev/null discards it, and the aliases name the
+// command's own stdout, stderr or the terminal, so the output reaches the pipe,
+// stderr or the screen and never a file the shell reads back (gt-z81tpi).
+var sandboxSecretsNotAFile = map[string]bool{
+	"/dev/null":       true,
+	"/dev/stdout":     true,
+	"/dev/fd/1":       true,
+	"/proc/self/fd/1": true,
+	"/dev/stderr":     true,
+	"/dev/fd/2":       true,
+	"/dev/tty":        true,
+}
+
 // sandboxSecretsRedirectsStdoutToFile reports whether a redirection sends the
 // command's stdout to a file: ">", ">>" or ">|" on descriptor 1 (or none), or "&>"
-// and "&>>", whose target is not /dev/null. Any other redirection is not one: a
-// stderr redirection ("2>/dev/null", "2>&1"), a stdin redirection, a stdout
-// redirection to /dev/null, and a descriptor duplication (">&2"). A duplication
-// sends stdout to stderr, so the pipe gets nothing, yet the guard still refuses
-// it; that errs toward refusal (gt-z81tpi).
+// and "&>>", whose target is not in sandboxSecretsNotAFile. Any other redirection
+// is not one: a stderr redirection ("2>/dev/null", "2>&1"), a stdin redirection, a
+// stdout redirection to a not-a-file target, and a descriptor duplication (">&2").
+// A duplication sends stdout to stderr, so the pipe gets nothing, yet the guard
+// still refuses it; that errs toward refusal (gt-z81tpi).
 func sandboxSecretsRedirectsStdoutToFile(seg shellparse.Segment, r shellparse.Redirection) bool {
 	switch r.Op {
 	case "&>", "&>>":
@@ -1788,7 +1802,7 @@ func sandboxSecretsRedirectsStdoutToFile(seg shellparse.Segment, r shellparse.Re
 	default:
 		return false
 	}
-	return sandboxSecretsParsedWord(r.Word, seg.Subs) != "/dev/null"
+	return !sandboxSecretsNotAFile[sandboxSecretsParsedWord(r.Word, seg.Subs)]
 }
 
 // sandboxSecretsStdoutText returns the text a command's last stage writes when the
