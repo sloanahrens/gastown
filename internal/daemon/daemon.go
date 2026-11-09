@@ -95,6 +95,10 @@ type Daemon struct {
 	// attention is the background attention tick (attention_background.go,
 	// gt-zszj0).
 	attention attentionRun
+	// bootGate is the boot standby (boot_gate.go, gt-niooz0): the poller's last
+	// answer, which standbyReason reads. New builds it from the real probe set;
+	// a daemon built without one (a test that does not set it) reads healthy.
+	bootGate *bootGate
 
 	config       *Config
 	patrolConfig *DaemonPatrolConfig
@@ -1487,6 +1491,16 @@ func New(config *Config) (*Daemon, error) {
 	// The Dolt image check asks the Dolt server itself for its version when
 	// docker cannot see the container's image (gt-w9wdav).
 	d.doltImage.serverVersion = d.doltServerVersion
+	// The boot gate waits on the real probe set until every probe answers
+	// (gt-niooz0). Only this constructor builds one, so a test daemon reads
+	// healthy.
+	probes := newBootProbes(config.TownRoot, d.env, d.townForgejoBaseURL, productionBootProbeDeps())
+	gate, err := newBootGate(probes)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("building the boot gate: %w", err)
+	}
+	d.bootGate = gate
 
 	// A health-driven Dolt restart waits for an in-flight scheduled gc.
 	if doltServer != nil {
@@ -1730,6 +1744,13 @@ func (d *Daemon) Run() (err error) {
 
 	// Landing workers (gt-v4ssj.2): opt-in, one goroutine per rig.
 	d.startLandingWorkers()
+
+	// The boot gate's poller (gt-niooz0): its own goroutine asks the probes
+	// until they all answer, and ends with the daemon's context. The landing
+	// workers and Dolt supervision do not read its answer.
+	if d.bootGate != nil {
+		go d.bootGate.poll(d.ctx, d.logger.Printf)
+	}
 
 	// Start dedicated Dolt health check ticker if Dolt server is configured.
 	// This runs at a much higher frequency (default 30s) than the general
