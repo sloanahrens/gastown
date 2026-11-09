@@ -269,6 +269,7 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"an env key that is not a variable name", func(v *Values) { v.Env["A-B"] = "x" }, `Values.Env["A-B"]`, ""},
 		{"an env key the render sets itself", func(v *Values) { v.Env[TownRootEnv] = "/elsewhere" }, `Values.Env["GT_TOWN_ROOT"]`, ""},
 		{"an env key the pod sets itself", func(v *Values) { v.Env[timeZoneEnv] = "Europe/Berlin" }, `Values.Env["TZ"]`, ""},
+		{"an env key the pod drops", func(v *Values) { v.Env[cloudReportsEnv] = "/Users/Shared/gt-cloud/reports" }, `Values.Env["GT_CLOUD_REPORTS_DIR"]`, "drops"},
 		{"an env name with no decision", func(v *Values) { v.Env["SOME_UNDECIDED"] = "x" }, `Values.Env["SOME_UNDECIDED"]`, "no decision"},
 		{"a Dolt host the alias does not map", func(v *Values) { v.Env[doltServerHostEnv] = "localhost" }, `Values.Env["BEADS_DOLT_SERVER_HOST"]`, ""},
 		{"a backup root away from the claim", func(v *Values) { v.Env[doltBackupRootEnv] = "/elsewhere/dolt" }, `Values.Env["GT_DOLT_BACKUP_ROOT"]`, ""},
@@ -1031,32 +1032,91 @@ func TestPodCommandEqualsTheComposeCommand(t *testing.T) {
 }
 
 // liveEnv is the map the compose writer hands the pod as Values.Env: the
-// daemon.env entries the live container carries, with the live values where
-// gt-70plvt records them. The kubeconfig and the clock are not here: the
-// compose render sets those itself, as the pod does.
+// daemon.env entries the pod keeps, with the live values where gt-70plvt records
+// them. The kubeconfig and the clock are not here: the compose render sets those
+// itself, as the pod does. The entries the pod drops are macOnlyEnv's.
 func liveEnv() map[string]string {
 	return map[string]string{
 		doltPoolReadTimeoutEnv: "30s",
 		doltServerHostEnv:      DoltHostName,
 		doltServerPortEnv:      "3307",
 		doltBackupRootEnv:      DoltBackupPath,
-		cloudReportsEnv:        "/Users/Shared/gt-cloud/reports",
-		cloudReleasesEnv:       "/Users/Shared/gt-cloud/releases",
-		cloudOffEnv:            "/Users/Shared/gt-cloud/off",
 		awsRegionEnv:           "us-east-1",
 	}
 }
 
-// liveEnvNames are every name the live compose daemon service or the town's
-// daemon.env carries: the compose body's fixed lines, the client fields it
-// derives, and the entries of liveEnv.
-func liveEnvNames() []string {
-	return []string{
-		dockerHostEnv, ContainerNameEnv, ContainerModeEnv, TakeoverEnv, TownRootEnv,
-		kubeconfigEnv, hmConfigEnv, timeZoneEnv, ConfigHomeEnv,
-		doltServerHostEnv, doltServerPortEnv, doltPoolReadTimeoutEnv, doltBackupRootEnv,
-		cloudReportsEnv, cloudReleasesEnv, cloudOffEnv, awsRegionEnv,
+// macOnlyEnv is the daemon.env entries the Mac's container carries and the pod
+// drops: the cloud directories under /Users/Shared/gt-cloud, which the host
+// wrapper mounts and the pod does not. Values.Env refuses them.
+func macOnlyEnv() map[string]string {
+	return map[string]string{
+		cloudReportsEnv:  "/Users/Shared/gt-cloud/reports",
+		cloudReleasesEnv: "/Users/Shared/gt-cloud/releases",
+		cloudOffEnv:      "/Users/Shared/gt-cloud/off",
 	}
+}
+
+// liveDaemonEnv is the Mac's whole daemon.env: the entries the pod keeps and the
+// entries it drops. The compose writer renders it as ComposeSpec.Env.
+func liveDaemonEnv() map[string]string {
+	env := liveEnv()
+	maps.Copy(env, macOnlyEnv())
+	return env
+}
+
+// liveComposeSpec is the live compose spec the checks render. It carries the
+// Mac's daemon.env as Env and every client field the render derives a name from:
+// KUBECONFIG, the clock, the config directory and HM_CONFIG.
+func liveComposeSpec(t *testing.T, env map[string]string) templates.ComposeSpec {
+	t.Helper()
+	return templates.ComposeSpec{
+		Project:       "gt-town",
+		ContainerName: "gt-daemon",
+		Image:         "gt-daemon:abc1234",
+		TownRoot:      TownRootPath,
+		StopGrace:     templates.MinimumStopGrace,
+		DoltHost:      DoltHostName,
+		Env:           maps.Clone(env),
+		KubeconfigFiles: []string{
+			TownRootPath + "/.runtime/container/kubeconfig.yaml",
+			TownRootPath + "/.runtime/sbx-k8s/kubeconfig",
+		},
+		TimeZone:     PodTimeZone,
+		HMConfigFile: filepath.Join(t.TempDir(), "hm-config.yaml"),
+		// The config directory is what makes the compose render set
+		// XDG_CONFIG_HOME, the render-owned name both services carry. No Secrets
+		// are listed, so the render mounts the directory and reads no host file.
+		ConfigDir: t.TempDir(),
+	}
+}
+
+// composeDaemonEnv renders the spec and returns the daemon service's environment.
+func composeDaemonEnv(t *testing.T, spec templates.ComposeSpec) map[string]string {
+	t.Helper()
+	rendered, err := templates.RenderDaemonCompose(spec)
+	if err != nil {
+		t.Fatalf("RenderDaemonCompose: %v", err)
+	}
+	var composeFile struct {
+		Services map[string]struct {
+			Environment map[string]string `yaml:"environment"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(rendered, &composeFile); err != nil {
+		t.Fatalf("the rendered compose file does not parse: %v", err)
+	}
+	return composeFile.Services["daemon"].Environment
+}
+
+// liveEnvNames are every name the live compose daemon service carries, read from
+// the rendered file, and every entry of the Mac's daemon.env. The compose body's
+// fixed lines and the client names it derives come from the render itself, so a
+// name added there needs a decision without a second list here.
+func liveEnvNames(t *testing.T) []string {
+	t.Helper()
+	names := composeDaemonEnv(t, liveComposeSpec(t, liveDaemonEnv()))
+	maps.Copy(names, liveDaemonEnv())
+	return slices.Sorted(maps.Keys(names))
 }
 
 // podEnvMap indexes the container's environment by name.
@@ -1075,7 +1135,7 @@ func podEnvMap(pod Container) map[string]string {
 func TestPodEnvDecisions(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range liveEnvNames() {
+	for _, name := range liveEnvNames(t) {
 		decision, ok := podEnvDecisions[name]
 		if !ok {
 			t.Errorf("the pod has no decision for %s, a name the compose service or daemon.env carries; record it as kept, set by the pod, or dropped with a reason", name)
@@ -1134,37 +1194,8 @@ func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 
 	v := goldenValues(t)
 	v.Env = liveEnv()
-	spec := templates.ComposeSpec{
-		Project:       "gt-town",
-		ContainerName: "gt-daemon",
-		Image:         "gt-daemon:abc1234",
-		TownRoot:      TownRootPath,
-		StopGrace:     templates.MinimumStopGrace,
-		DoltHost:      DoltHostName,
-		Env:           maps.Clone(v.Env),
-		KubeconfigFiles: []string{
-			TownRootPath + "/.runtime/container/kubeconfig.yaml",
-			TownRootPath + "/.runtime/sbx-k8s/kubeconfig",
-		},
-		TimeZone: PodTimeZone,
-		// The config directory is what makes the compose render set
-		// XDG_CONFIG_HOME, the render-owned name both services carry. No Secrets
-		// are listed, so the render mounts the directory and reads no host file.
-		ConfigDir: t.TempDir(),
-	}
-	rendered, err := templates.RenderDaemonCompose(spec)
-	if err != nil {
-		t.Fatalf("RenderDaemonCompose: %v", err)
-	}
-	var composeFile struct {
-		Services map[string]struct {
-			Environment map[string]string `yaml:"environment"`
-		} `yaml:"services"`
-	}
-	if err := yaml.Unmarshal(rendered, &composeFile); err != nil {
-		t.Fatalf("the rendered compose file does not parse: %v", err)
-	}
-	composeEnv := maps.Clone(composeFile.Services["daemon"].Environment)
+	composeFileEnv := composeDaemonEnv(t, liveComposeSpec(t, liveDaemonEnv()))
+	composeEnv := maps.Clone(composeFileEnv)
 	if len(composeEnv) == 0 {
 		t.Fatal("the compose daemon service carries no environment, so the equality check reads nothing")
 	}
@@ -1176,9 +1207,6 @@ func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 	// from the pod's, so removing them below is not a check over nothing.
 	for name := range composeOnlyEnv {
 		if _, ok := composeEnv[name]; !ok {
-			if name == hmConfigEnv {
-				continue // the compose render writes it only with a derived hm config
-			}
 			t.Fatalf("the compose service carries no %s, so the drop it is meant to prove reads nothing", name)
 		}
 		delete(composeEnv, name)
@@ -1198,7 +1226,7 @@ func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 		delete(composeEnv, name)
 		delete(podEnv, name)
 	}
-	switch got := composeFile.Services["daemon"].Environment[ContainerNameEnv]; got {
+	switch got := composeFileEnv[ContainerNameEnv]; got {
 	case "":
 		t.Errorf("the compose service carries no %s, so the changed decision reads nothing", ContainerNameEnv)
 	case Name:
@@ -1241,22 +1269,17 @@ func townRootKubeconfigs(env []EnvVar) []string {
 }
 
 // TestPodKubeconfigIsNotATownRootFile holds the kubeconfig decision: a caller
-// that hands the pod the live compose environment still names the Mac's two
-// kubeconfig files, and the pod carries neither, because it reaches the cluster
-// through its service account.
+// that hands the pod the Mac's two kubeconfig files is refused, naming the key,
+// because the pod reaches the cluster through its service account and a dropped
+// name is refused rather than discarded.
 func TestPodKubeconfigIsNotATownRootFile(t *testing.T) {
 	t.Parallel()
 
 	v := goldenValues(t)
 	v.Env[kubeconfigEnv] = TownRootPath + "/.runtime/container/kubeconfig.yaml:" +
 		TownRootPath + "/.runtime/sbx-k8s/kubeconfig"
-	pod := mustBuild(t, v).Deployment.Spec.Template.Spec.Containers[0]
-
-	if got := townRootKubeconfigs(pod.Env); len(got) != 0 {
-		t.Errorf("the pod's environment names the Mac's kubeconfig: %q", got)
-	}
-	if got, ok := podEnvMap(pod)[kubeconfigEnv]; ok {
-		t.Errorf("the pod carries %s = %q; it uses its service account", kubeconfigEnv, got)
+	if _, err := Build(v); err == nil || !strings.Contains(err.Error(), kubeconfigEnv) {
+		t.Errorf("Build with the Mac's %s = %v, want a refusal naming the key", kubeconfigEnv, err)
 	}
 	// The check reports both files of the live value, so the empty result above
 	// is not a check over nothing.
@@ -1265,43 +1288,25 @@ func TestPodKubeconfigIsNotATownRootFile(t *testing.T) {
 	}
 }
 
-// configEnvConstants reads the environment names and the container supervisor
-// value internal/config declares, because the import rule keeps internal/config
-// out of the renderer.
-func configEnvConstants(t *testing.T) map[string]string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(packageDir(t), "..", "..", "..", "internal", "config", "daemon_config.go"))
-	if err != nil {
-		t.Fatalf("reading internal/config/daemon_config.go: %v", err)
-	}
-	out := map[string]string{}
-	for _, name := range []string{"SupervisorContainer", "ContainerModeEnv", "ContainerNameEnv", "TakeoverEnv"} {
-		m := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(name) + `\s*=\s*"([^"]*)"`).FindStringSubmatch(string(data))
-		if m == nil {
-			t.Fatalf("internal/config/daemon_config.go declares no %s = \"...\"", name)
-		}
-		out[name] = m[1]
-	}
-	return out
-}
-
 // TestPodEnvConstantsMatchConfig holds the names and value the pod sets to
 // internal/config's declarations: the entrypoint and DetectSelf read those, so
-// a drift here starts the pod in no mode or records no owner id.
+// a drift here starts the pod in no mode or records no owner id. The import rule
+// (imports_test.go) reads only non-test files, so this test imports internal/config
+// and compares the exported constants rather than their source text.
 func TestPodEnvConstantsMatchConfig(t *testing.T) {
 	t.Parallel()
-	c := configEnvConstants(t)
 	for _, tc := range []struct {
-		configName string
-		ourValue   string
+		name        string
+		configValue string
+		ourValue    string
 	}{
-		{"SupervisorContainer", SupervisorContainer},
-		{"ContainerModeEnv", ContainerModeEnv},
-		{"ContainerNameEnv", ContainerNameEnv},
-		{"TakeoverEnv", TakeoverEnv},
+		{"SupervisorContainer", config.SupervisorContainer, SupervisorContainer},
+		{"ContainerModeEnv", config.ContainerModeEnv, ContainerModeEnv},
+		{"ContainerNameEnv", config.ContainerNameEnv, ContainerNameEnv},
+		{"TakeoverEnv", config.TakeoverEnv, TakeoverEnv},
 	} {
-		if got := c[tc.configName]; got != tc.ourValue {
-			t.Errorf("internal/config %s = %q, but the renderer uses %q", tc.configName, got, tc.ourValue)
+		if tc.configValue != tc.ourValue {
+			t.Errorf("internal/config %s = %q, but the renderer uses %q", tc.name, tc.configValue, tc.ourValue)
 		}
 	}
 }
@@ -1320,8 +1325,10 @@ func TestPodEnvConstantsMatchConfig(t *testing.T) {
 // stopped (internal/daemon/startup_guard.go, internal/daemon/takeover.go). The
 // pod's own restart passes only because the recorded owner equals Self, which
 // is {container, GT_DAEMON_CONTAINER_NAME}; a recorded Docker container owner
-// stays refused until the operator's GT_DAEMON_TAKEOVER start proves it stopped
-// (gt-wgr6ck).
+// stays refused in the pod. podEnvDecisions drops GT_DAEMON_TAKEOVER, so the pod
+// has no takeover switch; only the operator's `--takeover` start on the Mac,
+// which the compose file passes GT_DAEMON_TAKEOVER through for, proves that
+// owner stopped (gt-wgr6ck).
 func TestPodSetsContainerModeAndAStableOwnerName(t *testing.T) {
 	t.Parallel()
 
