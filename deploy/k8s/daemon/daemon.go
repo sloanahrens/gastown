@@ -566,6 +566,10 @@ func Build(v Values) (Manifests, error) {
 		v.Secrets = rehearsalFiles(v.Secrets)
 	}
 
+	deploy, err := deployment(v, namespace)
+	if err != nil {
+		return Manifests{}, err
+	}
 	m := Manifests{
 		Namespace: Namespace{
 			TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Namespace"},
@@ -588,7 +592,7 @@ func Build(v Values) (Manifests, error) {
 			},
 		},
 		Secrets:    make([]Secret, 0, len(v.Secrets)),
-		Deployment: deployment(v, namespace),
+		Deployment: deploy,
 	}
 	// A rehearsal binds no sweep or cache-trim role, so the render grants its pod
 	// no Job in gt-sweeps and no CI cache access. Its bindings stay zero, and
@@ -766,17 +770,21 @@ func clusterRoleBinding(name, role, serviceAccountNamespace string) ClusterRoleB
 // Deployment opens with noHostAliasComment whenever the pod carries none.
 // Values.ProxyImage decides the relay sidecars (see proxyContainers); when it is
 // empty the Deployment opens with noProxyComment.
-func deployment(v Values, namespace string) Deployment {
+func deployment(v Values, namespace string) (Deployment, error) {
 	owner := TownOwnerPod
 	if v.Rehearsal {
 		owner = TownOwnerRehearsal
 	}
 	grace := int64(v.TerminationGraceSeconds)
+	vols, err := volumes(v)
+	if err != nil {
+		return Deployment{}, err
+	}
 	pod := PodSpec{
 		ServiceAccountName:            ServiceAccountName,
 		TerminationGracePeriodSeconds: &grace,
 		Containers:                    append([]Container{daemonContainer(v)}, proxyContainers(v)...),
-		Volumes:                       volumes(v),
+		Volumes:                       vols,
 	}
 	if v.HostGatewayIP != "" && !v.Rehearsal {
 		pod.HostAliases = []HostAlias{{IP: v.HostGatewayIP, Hostnames: []string{DoltHostName}}}
@@ -806,7 +814,7 @@ func deployment(v Values, namespace string) Deployment {
 	}
 	heads = append(heads, noClaudeBeadsComment)
 	d.headComment = strings.Join(heads, "\n")
-	return d
+	return d, nil
 }
 
 // proxyContainers are the two relays the compose override runs beside the
@@ -945,7 +953,10 @@ func resourceList(v Values) map[string]string {
 // volumes are the claims at the container's paths, the scratch emptyDir, and
 // one volume per rendered Secret. A Secret volume is named after its file with
 // the dots of a file name replaced, since a volume name is a DNS-1123 label.
-func volumes(v Values) []Volume {
+// Each Secret volume's defaultMode is the entry's manifest mode, so the file the
+// pod reads carries the permission the manifest allows (gt-nlf1i6: the cloud
+// ledger reader refuses a DSN file readable by group or others).
+func volumes(v Values) ([]Volume, error) {
 	vols := []Volume{
 		{Name: TownStateClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: TownStateClaim}},
 	}
@@ -958,16 +969,32 @@ func volumes(v Values) []Volume {
 		Volume{Name: DoltBackupClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: DoltBackupClaim}},
 		Volume{Name: TempVolume, EmptyDir: &EmptyDirVolumeSource{}},
 	)
-	for _, file := range v.Secrets {
+	for i, file := range v.Secrets {
+		mode, err := secretFileMode(file)
+		if err != nil {
+			return nil, fmt.Errorf("Values.Secrets[%d] %q %w", i, file.Name, err)
+		}
 		vols = append(vols, Volume{
 			Name:   secretVolumeName(file.Name),
-			Secret: &SecretVolumeSource{SecretName: SecretNamePrefix + file.Name},
+			Secret: &SecretVolumeSource{SecretName: SecretNamePrefix + file.Name, DefaultMode: &mode},
 		})
 	}
 	if !v.Rehearsal {
 		vols = append(vols, openShellVolume())
 	}
-	return vols
+	return vols, nil
+}
+
+// secretFileMode is an entry's manifest mode as the octal permission bits its
+// Secret volume's defaultMode takes. The manifest's form is four octal digits
+// with no group or other bits (manifestdata.ValidateSecretsManifest), and the
+// renderer re-checks it because Values is a caller's value.
+func secretFileMode(file manifestdata.SecretFile) (int32, error) {
+	bits, err := strconv.ParseUint(file.Mode, 8, 32)
+	if err != nil || len(file.Mode) != 4 || file.Mode[0] != '0' || bits&0o077 != 0 {
+		return 0, fmt.Errorf("mode %q is not a four-digit octal mode with no group or other bits, such as 0600", file.Mode)
+	}
+	return int32(bits), nil //nolint:gosec // the four-digit form with no group or other bits caps bits at 0o700, far inside int32
 }
 
 // mounts place each volume at the path the container uses. Each config file is

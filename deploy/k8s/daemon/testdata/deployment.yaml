@@ -112,6 +112,10 @@ spec:
               mountPath: /run/gt/xdg/gt/jev.env
               subPath: jev.env
               readOnly: true
+            - name: daemon-ledger-reader-dsn
+              mountPath: /run/gt/xdg/gt/ledger-reader.dsn
+              subPath: ledger-reader.dsn
+              readOnly: true
             - name: daemon-om-daemon-token
               mountPath: /run/secrets/om-token
               subPath: om-daemon-token
@@ -186,36 +190,51 @@ spec:
         - name: daemon-forgejo-landing-env
           secret:
             secretName: daemon-forgejo-landing.env
+            defaultMode: 384
         - name: daemon-forgejo-viewer-env
           secret:
             secretName: daemon-forgejo-viewer.env
+            defaultMode: 384
         - name: daemon-promote-gastown-key
           secret:
             secretName: daemon-promote-gastown.key
+            defaultMode: 384
         - name: daemon-promote-om-key
           secret:
             secretName: daemon-promote-om.key
+            defaultMode: 384
         - name: daemon-promote-hm-key
           secret:
             secretName: daemon-promote-hm.key
+            defaultMode: 384
         - name: daemon-promote-beads-key
           secret:
             secretName: daemon-promote-beads.key
+            defaultMode: 384
         - name: daemon-promote-mango-key
           secret:
             secretName: daemon-promote-mango.key
+            defaultMode: 384
         - name: daemon-promote-fractals-key
           secret:
             secretName: daemon-promote-fractals.key
+            defaultMode: 384
         - name: daemon-om-daemon-token
           secret:
             secretName: daemon-om-daemon-token
+            defaultMode: 384
         - name: daemon-om-daemon-token-meta
           secret:
             secretName: daemon-om-daemon-token.meta
+            defaultMode: 384
         - name: daemon-jev-env
           secret:
             secretName: daemon-jev.env
+            defaultMode: 384
+        - name: daemon-ledger-reader-dsn
+          secret:
+            secretName: daemon-ledger-reader.dsn
+            defaultMode: 384
         - name: daemon-openshell
           secret:
             secretName: daemon-openshell

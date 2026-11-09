@@ -1,6 +1,9 @@
 package manifestdata
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -142,5 +145,35 @@ func TestOpenShellEntryIsGuarded(t *testing.T) {
 	err := ValidateSecretsManifest(SecretsManifest{Files: []SecretFile{uncited}})
 	if err == nil || !strings.Contains(err.Error(), `"openshell"`) {
 		t.Errorf("ValidateSecretsManifest on an uncited openshell entry = %v, want a refusal naming it", err)
+	}
+}
+
+// TestLedgerReaderEntryIsGuarded holds the cloud ledger reader's DSN entry to the
+// guard every listed file meets: the manifest lists it with its consumer, the
+// guard accepts it, and the guard refuses it once the citation is removed,
+// naming it (gt-nlf1i6).
+func TestLedgerReaderEntryIsGuarded(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "daemon", "secrets.yaml"))
+	if err != nil {
+		t.Fatalf("reading the secrets manifest: %v", err)
+	}
+	m, err := ParseSecretsManifest(data)
+	if err != nil {
+		t.Fatalf("ParseSecretsManifest: %v", err)
+	}
+	i := slices.IndexFunc(m.Files, func(f SecretFile) bool { return f.Name == "ledger-reader.dsn" })
+	if i < 0 {
+		t.Fatal("the secrets manifest does not list ledger-reader.dsn")
+	}
+	entry := m.Files[i]
+	if err := ValidateSecretsManifest(SecretsManifest{Files: []SecretFile{entry}}); err != nil {
+		t.Fatalf("ValidateSecretsManifest(ledger-reader.dsn) = %v, want the entry accepted", err)
+	}
+	uncited := entry
+	uncited.Consumer = ""
+	err = ValidateSecretsManifest(SecretsManifest{Files: []SecretFile{uncited}})
+	if err == nil || !strings.Contains(err.Error(), `"ledger-reader.dsn"`) {
+		t.Errorf("ValidateSecretsManifest on an uncited ledger-reader.dsn = %v, want a refusal naming it", err)
 	}
 }

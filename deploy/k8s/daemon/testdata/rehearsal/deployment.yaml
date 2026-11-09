@@ -102,3 +102,4 @@ spec:
         - name: daemon-forgejo-viewer-env
           secret:
             secretName: daemon-forgejo-viewer.env
+            defaultMode: 384
