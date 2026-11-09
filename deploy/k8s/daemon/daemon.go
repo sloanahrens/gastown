@@ -53,6 +53,14 @@
 // Deployment opens with a comment saying so (gt-h6d5yb). A rehearsal runs beside
 // the live container and must not reach the live Dolt server (gt-0cosuv).
 //
+// Values.ProxyImage, a digest reference the overseer reads from the registry,
+// gives a live pod the two socat relays the compose override runs beside the
+// daemon: registry-proxy and gateway-proxy listen on 127.0.0.1:5001 and
+// 127.0.0.1:28443 in the pod's network namespace and forward to those ports on
+// Values.HostGatewayIP, so the sandbox sling works from a pod as it does from
+// the container. Without it the pod carries neither relay and the Deployment
+// opens with a comment saying so; a rehearsal never renders either (gt-ygx4qd).
+//
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
 // through the same grants, and a manifest that renames one fails the coverage
@@ -271,6 +279,21 @@ const (
 	// name the settings' BEADS_DOLT_SERVER_HOST carries. The live pod's
 	// hostAliases maps it to the host gateway, so the pod keeps the compose value.
 	DoltHostName = "host.docker.internal"
+	// RegistryProxyContainer and GatewayProxyContainer name the two socat
+	// sidecars that stand in for the compose override's relays, and
+	// RegistryProxyPort and GatewayProxyPort are the ports the sandbox sling
+	// reaches them at: a pod without them can land a branch but cannot sling a
+	// polecat (gt-ygx4qd).
+	RegistryProxyContainer = "registry-proxy"
+	GatewayProxyContainer  = "gateway-proxy"
+	RegistryProxyPort      = 5001
+	GatewayProxyPort       = 28443
+	// proxyCPU and proxyMemory are each sidecar's share. A socat relay holds no
+	// state, so the figures are small and fixed; requests equal limits, as the
+	// daemon container's do, so the scheduler promises the share instead of
+	// letting it burst into a neighbor.
+	proxyCPU    = "10m"
+	proxyMemory = "64Mi"
 	// DoltBackupPath is where the compose file mounts the host's Dolt backups;
 	// the dolt-backup claim is mounted there, so GT_DOLT_BACKUP_ROOT keeps the
 	// compose value.
@@ -279,6 +302,14 @@ const (
 	// gateway alias, so a reader of the manifest knows the Dolt name does not
 	// resolve in this pod rather than assuming it does.
 	noHostAliasComment = "no hostAliases: this pod has no gateway alias, so " + DoltHostName + " does not resolve in it"
+)
+
+// noProxyComment is the Deployment's head comment when Values.ProxyImage is
+// empty: the live compose file's two relays have no sidecar in this pod, so the
+// sandbox sling's two local names have no listener rather than a working one.
+var noProxyComment = fmt.Sprintf(
+	"no proxy sidecars: Values.ProxyImage is empty, so 127.0.0.1:%d and 127.0.0.1:%d have no listener in this pod",
+	RegistryProxyPort, GatewayProxyPort,
 )
 
 // podEnvDecision is the pod's answer for one environment name: keep the
@@ -442,6 +473,16 @@ type Values struct {
 	// Image is the daemon reference read from deploy/values/images.yaml
 	// (gt-gg9hv.63): repo@sha256:<64 lowercase hex>. A tag is refused.
 	Image string
+	// ProxyImage is the image the two socat relays run, read from the registry
+	// by the overseer: repo@sha256:<64 lowercase hex>, because a tag would run
+	// what the registry holds at pull time. Set, a live pod carries
+	// registry-proxy and gateway-proxy in its network namespace, relaying
+	// 127.0.0.1:5001 and 127.0.0.1:28443 to the same ports on Values.HostGatewayIP
+	// (gt-ygx4qd). Empty, the pod carries neither and the Deployment says so;
+	// set with an empty HostGatewayIP, a live render is refused, since the relay
+	// would name no host. A rehearsal never renders the relays, whatever this
+	// field holds.
+	ProxyImage string
 	// Env is the container's environment: the kept entries of the map the compose
 	// writer renders (ComposeSpec.Env in internal/templates/daemon_compose.go).
 	// Each name is decided by podEnvDecisions: kept, set by the pod itself, or
@@ -631,7 +672,9 @@ func clusterRoleBinding(name, role, serviceAccountNamespace string) ClusterRoleB
 // the town's owner, or a rehearsal, which owns nothing. A live pod's hostAliases
 // maps DoltHostName to Values.HostGatewayIP when it is set. A rehearsal carries
 // no alias, so it cannot reach the live host's Dolt server, and the rendered
-// Deployment opens with noHostAliasComment whenever the pod carries none.
+// Deployment opens with noHostAliasComment whenever the pod carries none. When
+// Values.ProxyImage is set a live pod also carries the two relay sidecars; when
+// it is empty the Deployment opens with noProxyComment.
 func deployment(v Values, namespace string) Deployment {
 	owner := TownOwnerPod
 	if v.Rehearsal {
@@ -640,13 +683,13 @@ func deployment(v Values, namespace string) Deployment {
 	pod := PodSpec{
 		ServiceAccountName:            ServiceAccountName,
 		TerminationGracePeriodSeconds: int64(v.TerminationGraceSeconds),
-		Containers:                    []Container{daemonContainer(v)},
+		Containers:                    append([]Container{daemonContainer(v)}, proxyContainers(v)...),
 		Volumes:                       volumes(v),
 	}
 	if v.HostGatewayIP != "" && !v.Rehearsal {
 		pod.HostAliases = []HostAlias{{IP: v.HostGatewayIP, Hostnames: []string{DoltHostName}}}
 	}
-	return Deployment{
+	d := Deployment{
 		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		Metadata: ObjectMeta{
 			Name:        Name,
@@ -664,6 +707,48 @@ func deployment(v Values, namespace string) Deployment {
 			},
 		},
 	}
+	if v.ProxyImage == "" {
+		d.headComment = noProxyComment
+	}
+	return d
+}
+
+// proxyContainers are the two relays the compose override runs beside the
+// daemon. Every container of a pod shares one network namespace, so each relay
+// listens on 127.0.0.1 where the daemon reaches it and forwards to the host
+// gateway. A rehearsal reaches neither the live gateway nor the registry, so it
+// renders no relay even when Values.ProxyImage is set.
+func proxyContainers(v Values) []Container {
+	if v.Rehearsal || v.ProxyImage == "" {
+		return nil
+	}
+	return []Container{
+		proxyContainer(RegistryProxyContainer, v.ProxyImage, v.HostGatewayIP, RegistryProxyPort),
+		proxyContainer(GatewayProxyContainer, v.ProxyImage, v.HostGatewayIP, GatewayProxyPort),
+	}
+}
+
+// proxyContainer is one relay: its socat addresses, the same fixed share every
+// relay carries, and no volume or environment of its own.
+func proxyContainer(name, image, host string, port int) Container {
+	return Container{
+		Name:  name,
+		Image: image,
+		Args: []string{
+			fmt.Sprintf("TCP-LISTEN:%d,fork,reuseaddr,bind=127.0.0.1", port),
+			fmt.Sprintf("TCP:%s:%d", host, port),
+		},
+		Resources: &ContainerResources{
+			Requests: proxyResourceList(),
+			Limits:   proxyResourceList(),
+		},
+	}
+}
+
+// proxyResourceList is one relay's share; each call builds its own map, so
+// requests and limits never share one.
+func proxyResourceList() map[string]string {
+	return map[string]string{"cpu": proxyCPU, "memory": proxyMemory}
 }
 
 // daemonContainer is the daemon's container. Its arguments are the live compose
@@ -997,6 +1082,9 @@ func (v Values) validateDaemon() error {
 	if err := v.validateHostGateway(); err != nil {
 		return err
 	}
+	if err := v.validateProxies(); err != nil {
+		return err
+	}
 	if err := v.validateCredentials(); err != nil {
 		return err
 	}
@@ -1012,6 +1100,25 @@ func (v Values) validateDaemon() error {
 func (v Values) validateImage() error {
 	if !imageRefRE.MatchString(v.Image) {
 		return fmt.Errorf("Values.Image %q: want the daemon image by digest (repo@sha256:<64 lowercase hex>) from deploy/values/images.yaml; a tag is refused so the pod runs the commit the values file records", v.Image)
+	}
+	return nil
+}
+
+// validateProxies refuses a proxy image that is not a digest, and a proxy image
+// on a live pod with no gateway address: a relay would listen on 127.0.0.1 and
+// have no host to forward to. A tag is refused wherever it is set, a rehearsal
+// included, so a wrong value is never silently ignored; the gateway is required
+// only where the relays render, so a rehearsal carrying a proxy image still
+// renders with none.
+func (v Values) validateProxies() error {
+	if v.ProxyImage == "" {
+		return nil
+	}
+	if !imageRefRE.MatchString(v.ProxyImage) {
+		return fmt.Errorf("Values.ProxyImage %q: want the proxy image by digest (repo@sha256:<64 lowercase hex>) that the registry serves, as Values.Image is; a tag is refused so the relays run the image the overseer read", v.ProxyImage)
+	}
+	if !v.Rehearsal && v.HostGatewayIP == "" {
+		return fmt.Errorf("Values.ProxyImage %q: Values.HostGatewayIP is empty, so the registry-proxy and gateway-proxy relays would name no host; name the address the host registry and gateway answer on, or leave Values.ProxyImage empty for no relay", v.ProxyImage)
 	}
 	return nil
 }
@@ -1423,18 +1530,31 @@ type Deployment struct {
 	TypeMeta `yaml:",inline"`
 	Metadata ObjectMeta     `yaml:"metadata"`
 	Spec     DeploymentSpec `yaml:"spec"`
+	// headComment is a comment the render writes above the object, such as the
+	// note that Values.ProxyImage is empty. It is not encoded as a field: the
+	// YAML encoder skips an unexported one, and MarshalYAML moves it to the
+	// node's head comment.
+	headComment string
 }
 
 // MarshalYAML writes the Deployment, and opens it with noHostAliasComment when
 // the pod carries no hostAlias: a reader of a manifest must not take the Dolt
-// name for something this pod resolves.
+// name for something this pod resolves. It adds the builder's own headComment
+// on the next line when there is one.
 func (d Deployment) MarshalYAML() (any, error) {
 	// plain has no MarshalYAML, so encoding it cannot recurse into this method.
 	type plain Deployment
 	node := &yaml.Node{}
 	err := node.Encode(plain(d))
-	if err == nil && len(d.Spec.Template.Spec.HostAliases) == 0 {
-		node.HeadComment = noHostAliasComment
+	if err == nil {
+		var comments []string
+		if len(d.Spec.Template.Spec.HostAliases) == 0 {
+			comments = append(comments, noHostAliasComment)
+		}
+		if d.headComment != "" {
+			comments = append(comments, d.headComment)
+		}
+		node.HeadComment = strings.Join(comments, "\n")
 	}
 	return node, err
 }
