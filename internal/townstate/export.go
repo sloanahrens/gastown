@@ -126,6 +126,10 @@ type ExportOptions struct {
 	// volume lacks or holds differently. Directories are always written, and an
 	// entry it refuses is counted under SkipUnchanged.
 	Only func(name string) bool
+	// RollbackSettings adds the town's settings/config.json and each registered
+	// rig's <rig>/settings/config.json after the rows, so a replay carries the
+	// settings the pod edited after the cut-over. Only the rollback sets it.
+	RollbackSettings bool
 	// ops is the filesystem seam a test replaces; the zero value is the host.
 	ops townOps
 }
@@ -146,10 +150,13 @@ func Export(w io.Writer, root string, m *Manifest, opts ExportOptions) (ExportSu
 		return s, err
 	}
 	opts.ops = opts.ops.withDefaults()
-	townRoot, rows, dropped, err := townRows(opts.ops, root, m, opts.AllowNoRigs)
+	townRoot, rigs, rows, dropped, err := townRowsAndRigs(opts.ops, root, m, opts.AllowNoRigs)
 	s.RigRowsDropped = dropped
 	if err != nil {
 		return s, err
+	}
+	if opts.RollbackSettings {
+		rows = append(rows, rollbackSettingsRows(rigs)...)
 	}
 	walk := &exportWalk{
 		tw:      tar.NewWriter(w),
@@ -450,21 +457,28 @@ func rigScopedDaemonRows(m *Manifest) int {
 // rig is refused with ErrNoRigs unless allowNoRigs; dropped counts the rig-scoped
 // rows the rows then lack.
 func townRows(ops townOps, root string, m *Manifest, allowNoRigs bool) (townRoot string, rows []Entry, dropped int, err error) {
+	townRoot, _, rows, dropped, err = townRowsAndRigs(ops, root, m, allowNoRigs)
+	return townRoot, rows, dropped, err
+}
+
+// townRowsAndRigs is townRows that also names the rigs the rows expand to, so an
+// export can add each rig's settings file for the same rigs.
+func townRowsAndRigs(ops townOps, root string, m *Manifest, allowNoRigs bool) (townRoot string, rigs []string, rows []Entry, dropped int, err error) {
 	townRoot, err = resolveTownRoot(ops, root)
 	if err != nil {
-		return "", nil, 0, err
+		return "", nil, nil, 0, err
 	}
-	rigs, err := settingsRigs(os.DirFS(townRoot))
+	rigs, err = settingsRigs(os.DirFS(townRoot))
 	if err != nil {
-		return "", nil, 0, fmt.Errorf("reading the town's rigs: %w", err)
+		return "", nil, nil, 0, fmt.Errorf("reading the town's rigs: %w", err)
 	}
 	if len(rigs) == 0 {
 		dropped = rigScopedDaemonRows(m)
 		if dropped > 0 && !allowNoRigs {
-			return "", nil, dropped, ErrNoRigs
+			return "", nil, nil, dropped, ErrNoRigs
 		}
 	}
-	return townRoot, daemonEntries(m, rigs), dropped, nil
+	return townRoot, rigs, daemonEntries(m, rigs), dropped, nil
 }
 
 // daemonEntries returns the daemon-owned rows expanded for rigs, in manifest
