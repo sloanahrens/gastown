@@ -84,6 +84,8 @@ func TestWorkRunsNamesEachRunAndWhenItLastChanged(t *testing.T) {
 // time cannot be read is an error that names the run, never a run with a zero
 // time. The root has no search bit, so the listing reads the name and the
 // entry's stat is refused.
+// A process that bypasses the search bit (root, or a DAC override) stats the
+// entry anyway, so there the run is listed with its time and no refusal is due.
 func TestWorkRunsRefusesARunWhoseTimeIsUnreadable(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "rig")
@@ -97,7 +99,14 @@ func TestWorkRunsRefusesARunWhoseTimeIsUnreadable(t *testing.T) {
 			t.Errorf("restoring the root for cleanup: %v", err)
 		}
 	})
+	_, statErr := os.Lstat(filepath.Join(root, "land-1"))
 	runs, err := WorkRuns(root)
+	if statErr == nil {
+		if err != nil || len(runs) != 1 || runs[0].Name != "land-1" {
+			t.Fatalf("WorkRuns = %v, %v; want the one run land-1 with no refusal", runs, err)
+		}
+		return
+	}
 	if err == nil || !strings.Contains(err.Error(), "land-1") {
 		t.Fatalf("WorkRuns = %v, %v; want the run named in the refusal", runs, err)
 	}
