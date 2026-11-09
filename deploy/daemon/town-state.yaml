@@ -176,6 +176,9 @@ entries:
   - path: .runtime/diskmaint
     owner: daemon
     why: the disk maintenance ledger gt maint writes (internal/cmd/maint.go) and internal/polecatimage reads before it prunes a registry
+  - path: .runtime/dolt-archive
+    owner: daemon
+    why: the history archive internal/daemon/scheduled_maintenance_archive.go appends each database's dolt_log rows to, as dolt-log-<db>-<UTC date>.csv.gz; the path is the town's configured archive_dir (internal/config/daemon_config.go ArchiveDir), not a code default
   - path: .runtime/gate-logs
     owner: daemon
     private: true
@@ -242,6 +245,9 @@ entries:
   - path: .runtime/tier-sweep
     owner: daemon
     why: the tier sweep's per-rig records internal/daemon/tier_sweep.go writes
+  - path: .runtime/tiertiming
+    owner: shared
+    why: the shell timing log shelltier.TimingPath names (internal/shelltier/timing.go), which the shelltier runner appends to; the daemon's tier sweep (internal/daemon/tier_sweep.go tierSweepShellRunner) and make test-slow (Makefile SHELL_TESTS) both run that runner, so both write
   - path: .runtime/tiertrigger
     owner: daemon
     why: the tier trigger's state and per-tier run files cmd/tiertrigger writes through internal/tiertrigger/state.go

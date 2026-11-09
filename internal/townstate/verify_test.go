@@ -347,6 +347,30 @@ func TestVerifyKeepsConfigJSONAsARigMarker(t *testing.T) {
 	}
 }
 
+// TestVerifyClassifiesTheArchiveAndTimingPaths: the history archive's files and
+// the shell timing log have their rows, so verify reports neither; a directory
+// that only shares the archive's name prefix has no row and is still reported.
+func TestVerifyClassifiesTheArchiveAndTimingPaths(t *testing.T) {
+	t.Parallel()
+	town := fstest.MapFS{
+		"mayor/town.json": {Data: []byte("{}")},
+		".runtime/dolt-archive/dolt-log-x-20261108.csv.gz": {Data: []byte("x")},
+		".runtime/tiertiming/shell.jsonl":                  {Data: []byte("{}\n")},
+		".runtime/dolt-archive-stray/a":                    {Data: []byte("x")},
+	}
+	problems, err := Verify(town, Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	want := []Problem{{
+		Path:   ".runtime/dolt-archive-stray",
+		Reason: "no manifest entry; classify it daemon, session or shared",
+	}}
+	if !slices.Equal(problems, want) {
+		t.Errorf("Verify reported %v, want exactly %v", problems, want)
+	}
+}
+
 // TestVerifyReportsAnUnclassifiedDirectoryOnce: a directory no entry names is
 // one problem at its own path, not one per descendant, so a wrong rule shows as
 // one line.
