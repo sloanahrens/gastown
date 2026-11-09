@@ -4121,38 +4121,11 @@ func TestIsANSICDollar(t *testing.T) {
 		{"a continuation then a plain letter opens nothing", "$\\\na", 0, false},
 		{"an escaped backslash before a newline is not a continuation", "$\\\\\n'a'", 0, false},
 		{"a PID tail across a continuation is still a tail", "$$\\\n'a'", 1, false},
+		{"a multi-byte character before the dollar", "é$'x'", 1, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isANSICDollar([]rune(tt.text), tt.i); got != tt.want {
 				t.Errorf("isANSICDollar(%q, %d) = %v, want %v", tt.text, tt.i, got, tt.want)
-			}
-		})
-	}
-}
-
-// gt-h4go2: the rune walk (isANSICDollar) and the byte scan (ansiQuoteAt) read
-// one predicate, so they answer alike for the same "$" and the quote it opens.
-func TestANSIQuoteAtAgreesWithIsANSICDollar(t *testing.T) {
-	t.Parallel()
-	for _, tt := range []struct {
-		name   string
-		text   string
-		dollar int
-		want   bool
-	}{
-		{"a plain ANSI-C opener", "$'x'", 0, true},
-		{"the second dollar of a PID", "$$'x'", 1, false},
-		{"an escaped dollar", `\$'x'`, 1, false},
-		{"a backslash-newline before the quote", "$\\\n'x'", 0, true},
-		{"a multi-byte character before the dollar", "é$'x'", 2, true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			bytesGot := ansiQuoteAt(tt.text, tt.dollar) >= 0
-			runes := []rune(tt.text)
-			runeDollar := len([]rune(tt.text[:tt.dollar]))
-			runesGot := isANSICDollar(runes, runeDollar)
-			if bytesGot != tt.want || runesGot != tt.want {
-				t.Errorf("%q at %d: ansiQuoteAt = %v, isANSICDollar = %v, want both %v", tt.text, tt.dollar, bytesGot, runesGot, tt.want)
 			}
 		})
 	}

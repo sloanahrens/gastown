@@ -2021,7 +2021,7 @@ func TestHeredocBodyIsJudgedInReaderLineCwd(t *testing.T) {
 			// unplaced directory, so the body is judged as unplaced rather
 			// than read against the invocation's own — the handoff the -c
 			// payload and the substitutions inside an unquoted body already
-			// get (gt-jj3or, heredocSubstitutionScripts). An unplaceable
+			// get (gt-jj3or). An unplaceable
 			// directory is no more evidence that the body runs in a non-Go
 			// tree than that it runs in a Go one, the reading gt-ofj05 gives
 			// every other directory the walk cannot place.
@@ -2522,186 +2522,6 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 	}
 }
 
-// commandSubstitutionSpans cuts a body with the parentheses balanced and the
-// quotes respected, and runs a substitution that never closes to the end of the
-// text (gt-wrr5c, gt-6v07e). A backslash keeps the next character literal, so
-// an escaped backtick is text rather than the end of a backtick body. A process
-// substitution is a span where the shell performs one — a command line, not
-// inside a quote or a comment (gt-jj3or).
-func TestCommandSubstitutionSpans(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   string
-		want []string
-	}{
-		{"plain", `x=$(go test .)`, []string{"go test ."}},
-		{"quoted group", `x=$(grep -E '(ok|FAIL)' f)`, []string{"grep -E '(ok|FAIL)' f"}},
-		{"awk field", `x=$(awk '{print $(NF)}' f)`, []string{"awk '{print $(NF)}' f"}},
-		{"nested", `x=$(tail -n $(nproc))`, []string{"tail -n $(nproc)"}},
-		{"nested in double quotes", `x=$(echo "$(pwd))")`, []string{`echo "$(pwd))"`}},
-		{"subshell", `x=$( (cd a && ls) )`, []string{` (cd a && ls) `}},
-		{"two", `a=$(one) b=$(two (x))`, []string{"one", "two (x)"}},
-		{"backticks", "x=`pwd`", []string{"pwd"}},
-		{"backticks with an escaped backtick", "x=`echo \\`pwd\\``", []string{"echo \\`pwd\\`"}},
-		{"paren inside backticks in the body", "x=$(echo `a)b`)", []string{"echo `a)b`"}},
-		{"in double quotes", `echo "$(pwd)"`, []string{"pwd"}},
-		{"single quoted", `echo '$(pwd)'`, nil},
-		{"single quote hiding a paren", `echo '$(' "$(pwd)" ')'`, []string{"pwd"}},
-		{"escaped", `echo \$(pwd)`, nil},
-		{"escaped paren in the body", `x=$(echo \) ; pwd)`, []string{`echo \) ; pwd`}},
-		{"unterminated", `x=$(go test .`, []string{"go test ."}},
-		{"unterminated backtick", "x=`go test .", []string{"go test ."}},
-		{"unterminated quote in the body", `echo $(a "b) $(c)`, []string{`a "b) $(c)`}},
-		// gt-qg832: the quote after a quoted dollar-paren's "(" is the one that
-		// ends the double-quoted word, so the ")" that closes the substitution
-		// around it is found instead of the body running past it.
-		{"quoted dollar-paren in a substitution", `echo $(echo "$(" ; rm -rf /)`, []string{`echo "$(" ; rm -rf /`}},
-		{"unterminated after a closed one", `a=$(one) b=$(two`, []string{"one", "two"}},
-		{"process substitution", `cat <(go test .)`, []string{"go test ."}},
-		{"output process substitution", `cat > >(tee out)`, []string{"tee out"}},
-		{"nested process substitution", `cat <(cat <(go test .))`, []string{"cat <(go test .)"}},
-		{"unterminated process substitution", `cat <(go test .`, []string{"go test ."}},
-		{"single-quoted process substitution", `echo '<(go test .)'`, nil},
-		{"double-quoted process substitution", `echo "<(go test .)"`, nil},
-		{"process substitution in a comment", `echo hi # <(go test .)`, nil},
-		// A heredoc body the substitution holds is data, so its quote mark
-		// opens nothing and its ")" closes nothing (gt-lx8i8).
-		{"heredoc body with a quote mark in a double-quoted substitution", "x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; pwd", []string{"cat <<'EOF'\nit's a note\nEOF\n"}},
-		{"heredoc body with a quote mark in a substitution", "x=$(cat <<EOF\nit's a note\nEOF\n)", []string{"cat <<EOF\nit's a note\nEOF\n"}},
-		{"heredoc body holding a closing paren", "x=$(cat <<'EOF'\nfoo)\nEOF\n)", []string{"cat <<'EOF'\nfoo)\nEOF\n"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			var got []string
-			for _, s := range commandSubstitutionSpans(tt.in) {
-				got = append(got, tt.in[s.bodyStart:s.bodyEnd])
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("commandSubstitutionSpans(%q) bodies = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
-// An apostrophe in a "#" comment is plain text and a "\'" inside $'...' does not
-// close the string, so neither hides a live "$(...)" behind it. The scan still
-// reads quotes elsewhere as before: 'it' closes, a#b is no comment, and a "$(" in
-// a comment is still judged (gt-2yc0u).
-func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   string
-		want []string
-	}{
-		{"apostrophe in a comment", "# don't\nx=$(git reset --hard)", []string{"git reset --hard"}},
-		{"apostrophe in a trailing comment", "echo hi # don't\nx=$(git reset --hard)", []string{"git reset --hard"}},
-		{"comment after a separator", "true;# don't\nx=$(git reset --hard)", []string{"git reset --hard"}},
-		{"double quote in a comment", "# say \"hi\nx=$(git reset --hard)", []string{"git reset --hard"}},
-		{"substitution in a comment", "# don't $(git reset --hard)", []string{"git reset --hard"}},
-		{"escaped quote in an ANSI-C string", `echo $'it\'s' $(git reset --hard)`, []string{"git reset --hard"}},
-		{"ANSI-C string hiding a substitution", `echo $'$(pwd)' $(git reset --hard)`, []string{"git reset --hard"}},
-		// gt-22glo: bash deletes the backslash-newline between "$" and "'", so
-		// the quote opens an ANSI-C string whose \' does not close it, and the
-		// "$(git reset --hard)" inside is text.
-		{"ANSI-C string opened across a backslash-newline hides a substitution", "echo $\\\n'a\\' $(git reset --hard) '", nil},
-		// gt-h4go2: the second "$" of "$$" is the PID's tail, so the quote after
-		// it is plain and the "\" is the last text of that word: the
-		// "$(git reset --hard)" is live.
-		{"quote after a PID is plain and the substitution is live", `echo $$'a\'$(git reset --hard)''`, []string{"git reset --hard"}},
-		{"escaped dollar opens no ANSI-C string", `echo \$'a\'$(git reset --hard)''`, []string{"git reset --hard"}},
-		{"unterminated ANSI-C string reads as plain quotes", `echo $'it\'s $(git reset --hard)`, []string{"git reset --hard"}},
-		{"plain single quotes", `echo 'it' $(git reset --hard)`, []string{"git reset --hard"}},
-		{"hash inside a word", `echo a#b $(git reset --hard)`, []string{"git reset --hard"}},
-		{"hash after an escaped space", `echo \ #b 'x $(git reset --hard)'`, nil},
-		{"hash inside double quotes", "echo \"# don't\" $(git reset --hard)", []string{"git reset --hard"}},
-		{"hash in a parameter expansion", `echo ${#x} 'a $(git reset --hard)'`, nil},
-		{"apostrophe after the comment ended", "# note\necho 'a $(git reset --hard)'", nil},
-		// A "#" opens a comment after the ")" that ends a word and not after
-		// the one that closes a "$(...)", "$((...))" or "<(...)" group, whose
-		// "#" is a word part: the apostrophe after "(true)" hides nothing, and
-		// the process substitution after "$(date)" or after the quoted paren
-		// in '$(")")' still runs (gt-5wtmz).
-		{"hash after a subshell is a comment", "(true)#c 'a\n$(git reset --hard)", []string{"git reset --hard"}},
-		{"hash after a substitution close is a word part", "cat $(date)#<(git reset --hard)", []string{"date", "git reset --hard"}},
-		{"comment to the end of the text inside a body", "x=$(# )\n$(git reset --hard)", []string{"# )\n$(git reset --hard)"}},
-		{"quoted paren before the hash", `cat $(")")#<(git reset --hard)`, []string{`")"`, "git reset --hard"}},
-		{"quoted paren in a longer body", `cat $(echo ")")#<(git reset --hard)`, []string{`echo ")"`, "git reset --hard"}},
-		{"single-quoted paren before the hash", `cat $(')')#<(git reset --hard)`, []string{`')'`, "git reset --hard"}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			var got []string
-			for _, s := range commandSubstitutionSpans(tt.in) {
-				got = append(got, tt.in[s.bodyStart:s.bodyEnd])
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("commandSubstitutionSpans(%q) bodies = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-
-	for _, command := range []string{
-		"# don't\nx=$(git reset --hard)",
-		`echo $'it\'s' $(git reset --hard)`,
-		`echo a#b $(git reset --hard)`,
-		"(true)#c 'a\n$(git reset --hard)",
-		`cat $(")")#<(git reset --hard)`,
-	} {
-		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
-			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked", command)
-		}
-	}
-	scope := "# don't forget\nout=$(make gate)"
-	if reason, _ := evaluatePolecatTestScope(fakeGuardProcess(nil, ""), scope); reason == "" {
-		t.Errorf("evaluatePolecatTestScope(%q) allowed, want blocked", scope)
-	}
-}
-
-// heredocSubstitutionSpans cuts the substitutions of an unquoted heredoc body.
-// The body is not shell text: a quote mark in it opens nothing, so an
-// apostrophe in prose does not hide a live "$(" the way commandSubstitutionSpans
-// reads it on a command line, and only a backslash keeps the next character
-// literal (gt-6fkng).
-func TestHeredocSubstitutionSpans(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   string
-		want []string
-	}{
-		{"plain", "run $(make gate)\n", []string{"make gate"}},
-		{"after an apostrophe", "don't $(make gate)\n", []string{"make gate"}},
-		{"between single quotes", "'$(make gate)'\n", []string{"make gate"}},
-		{"inside double quotes", "\"$(make gate)\"\n", []string{"make gate"}},
-		{"after an unbalanced double quote", "say \"hi $(make gate)\n", []string{"make gate"}},
-		{"backticks", "run `make gate`\n", []string{"make gate"}},
-		{"nested", "$(echo $(pwd))\n", []string{"echo $(pwd)"}},
-		{"quoted group in the body", "$(grep -E '(ok|FAIL)' f)\n", []string{"grep -E '(ok|FAIL)' f"}},
-		{"two", "$(a) and `b`\n", []string{"a", "b"}},
-		{"escaped", "run \\$(make gate)\n", nil},
-		{"escaped backslash", "run \\\\$(make gate)\n", []string{"make gate"}},
-		{"unterminated", "run $(make gate\n", []string{"make gate\n"}},
-		{"process substitution is data", "cat <(make gate)\n", nil},
-		{"no substitution", "make gate\n", nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			var got []string
-			for _, s := range heredocSubstitutionSpans(tt.in) {
-				got = append(got, tt.in[s.bodyStart:s.bodyEnd])
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("heredocSubstitutionSpans(%q) bodies = %q, want %q", tt.in, got, tt.want)
-			}
-		})
-	}
-}
-
 // TestTapGuardDeepReviewP3Batch pins the command-text gaps the deep review
 // filed against the internal/cmd guards (gt-jj3or). Each subtest is a command
 // the shell runs — or a form the guard's own direct spelling already refuses —
@@ -2715,8 +2535,7 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 
 	// The shell expands a $(...) written in an unquoted heredoc body while it
 	// reads the body, so the container guard judges the body's substitution as
-	// the command line it is, with the container opt-in the invocation carries
-	// (heredocSubstitutionScripts).
+	// the command line it is, with the container opt-in the invocation carries.
 	t.Run("unquoted_heredoc_substitution", func(t *testing.T) {
 		command := "GT_TEST_DOCKER=1 cat <<EOF\n$(go test ./internal/beads)\nEOF"
 		reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), command, "")
@@ -2753,10 +2572,9 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 		if reason, _ := evaluateDangerousCommand("bash <<EOF\ncat <(git reset --hard)\nEOF", 0, sess); !strings.Contains(reason, wantDanger) {
 			t.Errorf("evaluateDangerousCommand(process substitution in a script body) reason = %q, want %q", reason, wantDanger)
 		}
-		// The container-suite and polecat test-scope guards read the same spans
-		// through commandSubstitutionSpans, so the command inside one is judged
-		// as the shell runs it. An unterminated "<(" runs to the end of the
-		// text, so the words after the last one are read the same way.
+		// The container-suite and polecat test-scope guards judge the command
+		// inside one as the shell runs it. An unterminated "<(" runs to the end
+		// of the text, so the words after the last one are read the same way.
 		wantContainer := "targets testcontainers-backed package(s)"
 		for _, command := range []string{
 			`GT_TEST_DOCKER=1 cat <(go test ./internal/beads)`,
@@ -2888,6 +2706,21 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 	})
 }
 
+// soleSubstitutionSpan is the span of the one substitution text holds: it opens
+// at the first "$(", "<(" or backquote, and its closer is the last byte. It
+// builds the span by hand because the scan that used to cut spans was deleted
+// with its tests (gt-4sug95); each input holds exactly one substitution that
+// ends the text, so the span is known by construction, and what the test pins
+// is substitutionBody's unescape, not the span.
+func soleSubstitutionSpan(text string) substitutionSpan {
+	open := strings.IndexAny(text, "`$<")
+	bodyStart := open + 2
+	if text[open] == '`' {
+		bodyStart = open + 1
+	}
+	return substitutionSpan{open: open, bodyStart: bodyStart, bodyEnd: len(text) - 1}
+}
+
 // substitutionBody drops the backslash of each \\, \` and \$ pair in a backtick
 // body, the three the shell unescapes there, in one left-to-right pass: "\$("
 // becomes the live "$(", while "\\$(" becomes "\$(", a literal "$(" behind a
@@ -2912,23 +2745,73 @@ func TestSubstitutionBody(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			spans := commandSubstitutionSpans(tt.in)
-			if len(spans) != 1 {
-				t.Fatalf("commandSubstitutionSpans(%q) = %d spans, want 1", tt.in, len(spans))
-			}
-			if got := substitutionBody(tt.in, spans[0]); got != tt.want {
+			if got := substitutionBody(tt.in, soleSubstitutionSpan(tt.in)); got != tt.want {
 				t.Errorf("substitutionBody(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
 
-	// The unescaped body is what the guards scan next, so its own scan finds the
-	// command the "\$(...)" runs.
+	// The unescaped body is what the guards scan next, so the command the
+	// "\$(...)" runs is the body's own substitution.
 	in := "echo `echo \\$(git reset --hard)`"
-	body := substitutionBody(in, commandSubstitutionSpans(in)[0])
-	nested := commandSubstitutionSpans(body)
-	if len(nested) != 1 || body[nested[0].bodyStart:nested[0].bodyEnd] != "git reset --hard" {
-		t.Errorf("commandSubstitutionSpans(%q) = %v, want one span holding %q", body, nested, "git reset --hard")
+	body := substitutionBody(in, soleSubstitutionSpan(in))
+	nested := soleSubstitutionSpan(body)
+	if got := body[nested.bodyStart:nested.bodyEnd]; got != "git reset --hard" {
+		t.Errorf("substitutionBody(%q) holds the substitution %q, want %q", in, got, "git reset --hard")
+	}
+}
+
+// closingParen's quote, comment, nesting and heredoc logic changes no verdict
+// a corpus row pins: its depth and comment branches can be broken with every
+// row still green. The deleted span tables read these bodies through it, so
+// the rows call it directly (gt-4sug95), inside a whole command "x=$(...": the
+// body it ends, or none when the text never closes the substitution. The whole
+// command is passed, as the guards pass it, because heredoc bodies are placed
+// by parsing it.
+func TestClosingParenEndsTheSubstitutionBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		in     string
+		body   string
+		closed bool
+	}{
+		{"plain", "go test .)", "go test .", true},
+		{"nested", "tail -n $(nproc))", "tail -n $(nproc)", true},
+		{"subshell", " (cd a && ls) )", " (cd a && ls) ", true},
+		{"quoted paren", `echo ")")`, `echo ")"`, true},
+		{"single-quoted paren", `echo ')')`, `echo ')'`, true},
+		{"nested in double quotes", `echo "$(pwd))")`, `echo "$(pwd))"`, true},
+		{"paren inside backticks", "echo `a)b`)", "echo `a)b`", true},
+		{"escaped paren", `echo \) ; pwd)`, `echo \) ; pwd`, true},
+		{"hash inside a word", "echo a#b)", "echo a#b", true},
+		{"hash after a substitution close is a word part", "echo $(date)#x)", "echo $(date)#x", true},
+		{"hash after a subshell starts a comment", " (true)#c )\n)", " (true)#c )\n", true},
+		{"comment hides a paren", "echo hi # )\n)", "echo hi # )\n", true},
+		{"heredoc body holding a closing paren", "cat <<'EOF'\nfoo)\nEOF\n)", "cat <<'EOF'\nfoo)\nEOF\n", true},
+		{"unterminated", "go test .", "", false},
+		{"unterminated quote in the body", `a "b) $(c)`, "", false},
+		{"comment runs to the end of the text", "# )\n$(git reset --hard)", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			const open = "x=$("
+			command := open + tt.in
+			end := closingParen(command, len(open), heredocBodiesFrom(command, len(open)))
+			if !tt.closed {
+				if end != -1 {
+					t.Errorf("closingParen(%q) = %d, want -1", command, end)
+				}
+				return
+			}
+			if end < 0 {
+				t.Fatalf("closingParen(%q) = -1, want the body %q", command, tt.body)
+			}
+			if got := command[len(open):end]; got != tt.body {
+				t.Errorf("closingParen(%q) ends the body at %q, want %q", command, got, tt.body)
+			}
+		})
 	}
 }
 
@@ -2997,36 +2880,6 @@ func TestStdinShellPayloadsDashSWithProcessSubstitution(t *testing.T) {
 			reason, matched := evaluateContainerSuiteCommand(proc, tt.command, "")
 			if got := reason != ""; got != tt.blocked {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
-			}
-		})
-	}
-}
-
-// A bare here-string body is word-split by the shell, so the run of words
-// behind the operator is its text: the first word stays a text of its own and
-// the joined run is one too, up to the next redirection, which is the shell's
-// (gt-norvx).
-func TestSplitHereStringsWordSplitBody(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		args  []string
-		rest  []string
-		texts []string
-	}{
-		{"quoted body", []string{"<<<", "bd create --title=x"}, nil, []string{"bd create --title=x"}},
-		{"single bare word", []string{"<<<", "printenv"}, nil, []string{"printenv"}},
-		{"word-split body", []string{"<<<", "bd", "create", "--title=x"}, nil, []string{"bd", "bd create --title=x"}},
-		{"redirection ends the body", []string{"<<<", "printenv", "2>/dev/null"}, []string{"2>/dev/null"}, []string{"printenv"}},
-		{"redirection right behind the operator", []string{"<<<", "2>/dev/null"}, []string{"2>/dev/null"}, []string{""}},
-		{"other descriptor keeps no text", []string{"3<<<", "make", "test"}, nil, nil},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			rest, texts := splitHereStrings(tt.args)
-			if !reflect.DeepEqual(rest, tt.rest) || !reflect.DeepEqual(texts, tt.texts) {
-				t.Errorf("splitHereStrings(%q) = rest %q, texts %q; want rest %q, texts %q", tt.args, rest, texts, tt.rest, tt.texts)
 			}
 		})
 	}

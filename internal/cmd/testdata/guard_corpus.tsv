@@ -485,3 +485,84 @@ dangerous	polecat	"git reset --hard HEAD~6"	refuse	Hard reset discards	gt-z81tpi
 container_suite	polecat	"echo ok && echo redirect"	allow		gt-z81tpi	cb077484ecffa11c276367932bc28c70a31763a0557cc0e3861c2239d92fd5b6
 test_scope	polecat	"go test ./internal/cmd -run TestSandboxSecretsHereStringThroughCat -count=1"	allow		gt-z81tpi	cb077484ecffa11c276367932bc28c70a31763a0557cc0e3861c2239d92fd5b6
 test_scope	polecat	"go test ./internal/cmd -run TestSandboxSecretsHereStringStdoutAliases -count=1"	allow		gt-z81tpi	cb077484ecffa11c276367932bc28c70a31763a0557cc0e3861c2239d92fd5b6
+# --- gt-4sug95: the scanners no guard reaches are deleted; one real case per freeze guard carries the new stamp, on the reads that stay (the recovered parameter-expansion substitution, the container process substitution, the substitution-body test) ---
+dangerous	polecat	"echo ${x:-<(git reset --hard)}"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	1beac5a7ed554e62ce01a945908179864f245d53c02cfbb457b1f33a539f55d1
+container_suite	polecat	"GT_TEST_DOCKER=1 cat <(go test ./internal/beads)"	refuse	targets testcontainers-backed package(s)	gt-4sug95	1beac5a7ed554e62ce01a945908179864f245d53c02cfbb457b1f33a539f55d1
+test_scope	polecat	"go test ./internal/cmd -run TestSubstitutionBody -count=1"	allow		gt-4sug95	1beac5a7ed554e62ce01a945908179864f245d53c02cfbb457b1f33a539f55d1
+# --- gt-4sug95 rework: the span-table cases the deleted scanner tests pinned, judged through the guard they reach (dangerous, and test_scope for the scope case); verdicts measured on e018df9a5 and unchanged at HEAD; a container_suite row carries the stamp too (bytesAt deleted) ---
+dangerous	polecat	"x=$(go test .)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(grep -E '(ok|FAIL)' f)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(awk '{print $(NF)}' f)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(tail -n $(nproc))"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(echo \"$(pwd))\")"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$( (cd a && ls) )"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"a=$(one) b=$(two (x))"	refuse	command cannot be read (incomplete command)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=`pwd`"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=`echo \\`pwd\\``"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(echo `a)b`)"	refuse	command cannot be read (unbalanced parenthesis)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo \"$(pwd)\""	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo '$(pwd)'"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo '$(' \"$(pwd)\" ')'"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo \\$(pwd)"	refuse	command cannot be read (unrecognized shell syntax)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(echo \\) ; pwd)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(go test ."	refuse	command cannot be read (unterminated command substitution)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=`go test ."	refuse	command cannot be read (unterminated quote)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo $(a \"b) $(c)"	refuse	command cannot be read (unterminated quote)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo $(echo \"$(\" ; rm -rf /)"	refuse	command cannot be read (unterminated quote)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"a=$(one) b=$(two"	refuse	command cannot be read (unterminated command substitution)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <(go test .)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat > >(tee out)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <(cat <(go test .))"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <(go test ."	refuse	command cannot be read (unterminated process substitution)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo '<(go test .)'"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo \"<(go test .)\""	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo hi # <(go test .)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; pwd"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(cat <<EOF\nit's a note\nEOF\n)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(cat <<'EOF'\nfoo)\nEOF\n)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"# don't\nx=$(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo hi # don't\nx=$(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"true;# don't\nx=$(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"# say \"hi\nx=$(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"# don't $(git reset --hard)"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo $'it\\'s' $(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo $'$(pwd)' $(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo $\\\n'a\\' $(git reset --hard) '"	refuse	command cannot be read (unterminated quote)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo $$'a\\'$(git reset --hard)''"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo \\$'a\\'$(git reset --hard)''"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo $'it\\'s $(git reset --hard)"	refuse	command cannot be read (unterminated quote)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo 'it' $(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo a#b $(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo \\ #b 'x $(git reset --hard)'"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo \"# don't\" $(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"echo ${#x} 'a $(git reset --hard)'"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"# note\necho 'a $(git reset --hard)'"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"(true)#c 'a\n$(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat $(date)#<(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"x=$(# )\n$(git reset --hard)"	refuse	command cannot be read (unterminated command substitution)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat $(\")\")#<(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat $(echo \")\")#<(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat $(')')#<(git reset --hard)"	refuse	Hard reset discards all uncommitted changes	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\nrun $(make gate)\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\ndon't $(make gate)\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\n'$(make gate)'\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\n\"$(make gate)\"\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\nsay \"hi $(make gate)\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\nrun `make gate`\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\n$(echo $(pwd))\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\n$(grep -E '(ok|FAIL)' f)\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\n$(a) and `b`\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\nrun \\$(make gate)\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\nrun \\\\$(make gate)\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\nrun $(make gate\n"	refuse	command cannot be read (unterminated command substitution)	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\ncat <(make gate)\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+dangerous	polecat	"cat <<EOF\nmake gate\nEOF\n"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"# don't forget\nout=$(make gate)"	refuse	runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+container_suite	polecat	"echo '<(go test .)'"	allow		gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\nrun $(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\ndon't $(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\n'$(make gate)'\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\n\"$(make gate)\"\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\nsay \"hi $(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\nrun `make gate`\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502
+test_scope	polecat	"cat <<EOF\nrun \\\\$(make gate)\nEOF\n"	refuse	polecat 'make gate' runs the whole suite	gt-4sug95	a878812b7ec86ab0daff1d5ada6f2d6184a819b35789002f99ebe0790d949502

@@ -627,8 +627,8 @@ func prWorkflowScriptNamesGhOrGit(script shellparse.Script) bool {
 const prWorkflowSubstitutionWord = "__gt_substitution__"
 
 // prWorkflowSpanUnterminated reports whether the text never closes a
-// substitution: substitutionSpansIn then reads its body to the end of the text,
-// so bodyEnd is the text's length.
+// substitution: the span of an unterminated one runs its body to the end of the
+// text, so bodyEnd is the text's length.
 func prWorkflowSpanUnterminated(text string, span substitutionSpan) bool {
 	return span.bodyEnd >= len(text)
 }
