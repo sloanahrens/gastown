@@ -415,6 +415,56 @@ func TestCacheTrimMalformedValuesFile(t *testing.T) {
 	}
 }
 
+// TestCacheTrimMalformedValuesFileWithNoClaims: a malformed values file is named
+// and the pass retried in fifteen minutes even when no profile mounts a claim.
+// The file read once there was a claim to trim made the fault silent in a pass
+// with nothing to trim (gt-714vqw).
+func TestCacheTrimMalformedValuesFileWithNoClaims(t *testing.T) {
+	t.Parallel()
+	f := newCacheTrimFixture(t, agentconfig.DiskMaintenanceModeApply, nil)
+	// A docker profile mounts no kubernetes cache claim, so the pass has no claim
+	// to trim and reaches the empty-claims return.
+	f.setProfiles(map[string]agentconfig.SandboxProfile{
+		"polecat-default": {Driver: agentconfig.SandboxDriverDocker, Image: "gastown-polecat:dev"},
+	})
+	path := imagevalues.PathIn(filepath.Join(f.d.config.TownRoot, "gastown"))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create the values file's directory: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("polecat: not a digest\n"), 0o644); err != nil {
+		t.Fatalf("write the malformed values file: %v", err)
+	}
+
+	now := diskMaintNow
+	f.d.diskMaint.now = func() time.Time { return now }
+	passes := 0
+	profiles := f.d.diskMaint.sandboxes
+	f.d.diskMaint.sandboxes = func() (map[string]agentconfig.SandboxProfile, error) {
+		passes++
+		return profiles()
+	}
+
+	f.d.runDiskMaintenance()
+	if passes != 1 {
+		t.Fatalf("the trim ran %d times at the first tick, want 1", passes)
+	}
+	logged := f.log.String()
+	if !strings.Contains(logged, "imagevalues:") || !strings.Contains(logged, "nothing trimmed") {
+		t.Errorf("the log does not name the values file's error: %s", logged)
+	}
+
+	now = now.Add(5 * time.Minute)
+	f.d.runDiskMaintenance() // a failed pass is due in fifteen minutes, not now
+	if passes != 1 {
+		t.Fatalf("the trim ran %d times five minutes after the malformed file, want the retry at fifteen", passes)
+	}
+	now = now.Add(10 * time.Minute)
+	f.d.runDiskMaintenance() // the retry
+	if passes != 2 {
+		t.Fatalf("the trim ran %d times fifteen minutes after the malformed file, want a retry", passes)
+	}
+}
+
 // TestDiskMaintenanceAppliesTheShardsBeforeTheJob is the bead's gate: the
 // patrol's own pass reaches cachevol.BuildTrimManifest and applies the
 // manifest's documents in order, the shard ConfigMaps before the Job that
