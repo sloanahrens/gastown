@@ -180,7 +180,7 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 	t.Parallel()
 	baseline := func(status, fetch float64) *GitBaseline {
 		return &GitBaseline{RecordedAt: cutoverTime.Add(-time.Hour), Rigs: map[string]map[string]float64{
-			"gastown": {"status --short": status, "fetch --dry-run": fetch},
+			"gastown": {"status --short": status, "ls-remote --heads origin": fetch},
 		}}
 	}
 	tests := []struct {
@@ -194,8 +194,8 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 			name:     "faster than the baseline passes",
 			baseline: baseline(0.10, 2.0),
 			runs: map[string][]time.Duration{
-				"status --short":  {50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond},
-				"fetch --dry-run": {time.Second, time.Second, time.Second},
+				"status --short":           {50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond},
+				"ls-remote --heads origin": {time.Second, time.Second, time.Second},
 			},
 		},
 		{
@@ -218,9 +218,9 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 			name:     "a median over three seconds fails whatever the baseline",
 			baseline: baseline(0.10, 2.0),
 			runs: map[string][]time.Duration{
-				"fetch --dry-run": {3500 * time.Millisecond, 3500 * time.Millisecond, 3500 * time.Millisecond},
+				"ls-remote --heads origin": {3500 * time.Millisecond, 3500 * time.Millisecond, 3500 * time.Millisecond},
 			},
-			failRow:  "git speed gastown: fetch --dry-run",
+			failRow:  "git speed gastown: ls-remote --heads origin",
 			wantText: "rig gastown takes 3.50s, over 3.0s",
 		},
 		{
@@ -228,7 +228,7 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 			baseline: &GitBaseline{RecordedAt: cutoverTime.Add(-time.Hour), Rigs: map[string]map[string]float64{
 				"gastown": {"status --short": 0.10},
 			}},
-			failRow:  "git speed gastown: fetch --dry-run",
+			failRow:  "git speed gastown: ls-remote --heads origin",
 			wantText: "record it with gt town state check --record-baseline",
 		},
 		{
@@ -419,7 +419,7 @@ func TestCheckNotRunIsAFailure(t *testing.T) {
 		}
 	})
 	t.Run("a git command that cannot start is not run for its rig", func(t *testing.T) {
-		town := writeTown(t, townFiles{baseline: &GitBaseline{Rigs: map[string]map[string]float64{"gastown": {"status --short": 0.1, "fetch --dry-run": 0.1}}}})
+		town := writeTown(t, townFiles{baseline: &GitBaseline{Rigs: map[string]map[string]float64{"gastown": {"status --short": 0.1, "ls-remote --heads origin": 0.1}}}})
 		host := newFakeHost(func(_, _ string, _ []string) fakeAnswer {
 			return fakeAnswer{took: time.Millisecond, err: notFound}
 		})
@@ -563,7 +563,7 @@ func TestCheckRecordBaseline(t *testing.T) {
 func TestCheckGitSpeedRefusesNoRigToTime(t *testing.T) {
 	t.Parallel()
 	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
-		"gastown": {"status --short": 0.1, "fetch --dry-run": 0.1},
+		"gastown": {"status --short": 0.1, "ls-remote --heads origin": 0.1},
 	}}
 	tests := []struct {
 		name       string
@@ -610,8 +610,8 @@ func TestGitSpeedRunsInEachRigsMayorClone(t *testing.T) {
 	t.Parallel()
 	rigsJSON := `{"version":1,"rigs":{"gastown":{"git_url":"https://example.invalid/g.git"},"other":{"git_url":"https://example.invalid/o.git"}}}`
 	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
-		"gastown": {"status --short": 0.1, "fetch --dry-run": 0.1},
-		"other":   {"status --short": 0.1, "fetch --dry-run": 0.1},
+		"gastown": {"status --short": 0.1, "ls-remote --heads origin": 0.1},
+		"other":   {"status --short": 0.1, "ls-remote --heads origin": 0.1},
 	}}
 	// Each rig gets GitSpeedRuns runs of each of the two git commands.
 	wantRuns := func(town string) map[string]int {
@@ -653,6 +653,117 @@ func TestGitSpeedRunsInEachRigsMayorClone(t *testing.T) {
 			t.Errorf("git ran in %v, want %v", dirs, want)
 		}
 	})
+}
+
+// firstWritingGitCommand returns the first command in cmds whose verb is not a
+// read-only one, or "" when every command is read-only. The speed check times
+// each rig's mayor/rig clone, which install-gt fetches into, so a verb that
+// writes or takes the fetch locks must never be timed there.
+func firstWritingGitCommand(cmds [][]string) string {
+	for _, args := range cmds {
+		if args[0] != "status" && args[0] != "ls-remote" {
+			return strings.Join(args, " ")
+		}
+	}
+	return ""
+}
+
+// TestGitSpeedCommandsAreReadOnly holds the timed list to the two read-only
+// commands, and shows that a list holding a writing verb names it.
+func TestGitSpeedCommandsAreReadOnly(t *testing.T) {
+	t.Parallel()
+	want := [][]string{{"status", "--short"}, {"ls-remote", "--heads", "origin"}}
+	if !reflect.DeepEqual(gitSpeedCommands, want) {
+		t.Fatalf("gitSpeedCommands = %v, want exactly %v", gitSpeedCommands, want)
+	}
+	if got := firstWritingGitCommand(gitSpeedCommands); got != "" {
+		t.Errorf("timed command %q is not read-only", got)
+	}
+	tests := []struct {
+		name string
+		cmds [][]string
+		want string
+	}{
+		{name: "fetch names itself", cmds: [][]string{{"fetch", "--dry-run"}}, want: "fetch --dry-run"},
+		{name: "pull names itself", cmds: [][]string{{"pull"}}, want: "pull"},
+		{name: "gc names itself", cmds: [][]string{{"gc"}}, want: "gc"},
+		{name: "prune names itself", cmds: [][]string{{"prune"}}, want: "prune"},
+		{name: "remote update names itself", cmds: [][]string{{"remote", "update"}}, want: "remote update"},
+		{name: "a writing verb among read-only ones is named", cmds: [][]string{{"status", "--short"}, {"fetch"}}, want: "fetch"},
+		{name: "a list of read-only commands names nothing", cmds: [][]string{{"status", "--short"}, {"ls-remote", "--heads", "origin"}}, want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := firstWritingGitCommand(tt.cmds); got != tt.want {
+				t.Errorf("firstWritingGitCommand = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGitSpeedRowsUseTheNewCommands shows the baseline record and the check name
+// each command by its text, and judge each row against its own baseline value.
+func TestGitSpeedRowsUseTheNewCommands(t *testing.T) {
+	t.Parallel()
+	t.Run("the baseline record keys each command by its text", func(t *testing.T) {
+		t.Parallel()
+		town := writeTown(t, townFiles{})
+		host := newFakeHost(gitAnswer(nil))
+		path, err := RecordGitBaseline(context.Background(), host.env(town), false)
+		if err != nil {
+			t.Fatalf("record: %v", err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var gb GitBaseline
+		if err := json.Unmarshal(data, &gb); err != nil {
+			t.Fatal(err)
+		}
+		want := map[string]float64{"status --short": 0.1, "ls-remote --heads origin": 0.1}
+		if !reflect.DeepEqual(gb.Rigs["gastown"], want) {
+			t.Errorf("baseline gastown = %v, want keys %v", gb.Rigs["gastown"], want)
+		}
+	})
+	t.Run("each row is judged against its own baseline", func(t *testing.T) {
+		t.Parallel()
+		town := writeTown(t, townFiles{baseline: &GitBaseline{Rigs: map[string]map[string]float64{
+			"gastown": {"status --short": 0.1, "ls-remote --heads origin": 2.0},
+		}}})
+		host := newFakeHost(gitAnswer(map[string][]time.Duration{
+			"status --short":           {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
+			"ls-remote --heads origin": {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
+		}))
+		rows := CheckGitSpeed(context.Background(), host.env(town))
+		status := findRow(t, rows, "git speed gastown: status --short")
+		if status.OK || !strings.Contains(status.Result, "over 2.0x its baseline of 0.10s") {
+			t.Errorf("status row = %+v, want it over 2.0x its 0.10s baseline", status)
+		}
+		lsRemote := findRow(t, rows, "git speed gastown: ls-remote --heads origin")
+		if !lsRemote.OK {
+			t.Errorf("ls-remote row = %+v, want it to pass against its own 2.0s baseline", lsRemote)
+		}
+	})
+}
+
+// TestGitSpeedOldBaselineKeyIsReportedMissing shows a baseline recorded under the
+// retired fetch --dry-run key is not carried over: each command's row fails
+// with the instruction to record the baseline again.
+func TestGitSpeedOldBaselineKeyIsReportedMissing(t *testing.T) {
+	t.Parallel()
+	town := writeTown(t, townFiles{baseline: &GitBaseline{Rigs: map[string]map[string]float64{
+		"gastown": {"fetch --dry-run": 0.1},
+	}}})
+	host := newFakeHost(gitAnswer(nil))
+	rows := CheckGitSpeed(context.Background(), host.env(town))
+	for _, check := range []string{"git speed gastown: status --short", "git speed gastown: ls-remote --heads origin"} {
+		r := findRow(t, rows, check)
+		if r.OK || !strings.Contains(r.Result, "record it with gt town state check --record-baseline") {
+			t.Errorf("row %q = %+v, want the missing-key failure with the record-baseline instruction", check, r)
+		}
+	}
 }
 
 // TestCheckDaemonProbeQuotesTheLine drives a passing probe whose first line
