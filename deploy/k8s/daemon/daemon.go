@@ -58,6 +58,10 @@
 // the container; a rehearsal never renders either (gt-ygx4qd). The field's
 // comment holds the contract.
 //
+// Values.PolecatImage puts the polecat image's digest on the pod template and in
+// a read-only file beside the daemon's, so one Deployment change moves both halves
+// of the pair (gt-ldqqvk). The field's comment holds the contract.
+//
 // The bindings name the Roles and ClusterRole of deploy/k8s/sweep-rbac.yaml and
 // copy no rule from it: the daemon's own kubectl calls and the sweep Job read
 // through the same grants, and a manifest that renames one fails the coverage
@@ -197,6 +201,18 @@ const (
 	TownRootPath    = "/Users/sloan/gt"
 	LandingWorkPath = "/Users/sloan/gt-landing.noindex"
 	TempPath        = "/Users/Shared/gt-gotmp.noindex"
+)
+
+// The polecat image's digest travels on the pod template as an annotation, and a
+// read-only downward-API file carries it into the pod at PolecatImagePath, so one
+// change to the Deployment moves the daemon image and the polecat image together
+// (gt-ldqqvk). The file is mounted by subPath, so the pod reads the value it
+// started with; a new value is a new template, which is a rollout.
+const (
+	PolecatImageAnnotation = "gastown.dev/polecat-image"
+	PolecatImageVolume     = "polecat-image"
+	PolecatImageFile       = "polecat-image"
+	PolecatImagePath       = "/run/gt/image/" + PolecatImageFile
 )
 
 var (
@@ -494,6 +510,15 @@ type Values struct {
 	// would name no host. A rehearsal never renders the relays, whatever this
 	// field holds, but still refuses a tag.
 	ProxyImage string
+	// PolecatImage is the sandbox image of the daemon's pair, by digest: repo@sha256:
+	// <64 lowercase hex>, as ProxyImage is, since a tag would name whatever the
+	// registry holds at pull time. Set, the pod template carries it as the
+	// gastown.dev/polecat-image annotation, and a read-only downward-API file
+	// projects it at PolecatImagePath. The daemon does not read the file yet, and no
+	// environment variable carries the value: the file is where the value lives, and
+	// a later bead reads it. Empty, the pod carries neither the annotation nor the
+	// file. A tag is refused, a rehearsal included.
+	PolecatImage string
 	// Env is the container's environment: the kept entries of the map the compose
 	// writer renders (ComposeSpec.Env in internal/templates/daemon_compose.go).
 	// Each name is decided by podEnvDecisions: kept, set by the pod itself, or
@@ -789,6 +814,10 @@ func deployment(v Values, namespace string) (Deployment, error) {
 	if v.HostGatewayIP != "" && !v.Rehearsal {
 		pod.HostAliases = []HostAlias{{IP: v.HostGatewayIP, Hostnames: []string{DoltHostName}}}
 	}
+	template := PodTemplateMeta{Labels: labels()}
+	if v.PolecatImage != "" {
+		template.Annotations = map[string]string{PolecatImageAnnotation: v.PolecatImage}
+	}
 	d := Deployment{
 		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
 		Metadata: ObjectMeta{
@@ -802,7 +831,7 @@ func deployment(v Values, namespace string) (Deployment, error) {
 			Strategy: DeploymentStrategy{Type: "Recreate"},
 			Selector: LabelSelector{MatchLabels: selectorLabels()},
 			Template: PodTemplate{
-				Metadata: PodTemplateMeta{Labels: labels()},
+				Metadata: template,
 				Spec:     pod,
 			},
 		},
@@ -981,10 +1010,30 @@ func volumes(v Values) ([]Volume, error) {
 			Secret: &SecretVolumeSource{SecretName: SecretNamePrefix + file.Name, DefaultMode: &mode},
 		})
 	}
+	if v.PolecatImage != "" {
+		vols = append(vols, polecatImageVolume())
+	}
 	if !v.Rehearsal {
 		vols = append(vols, openShellVolume())
 	}
 	return vols, nil
+}
+
+// polecatImageVolume projects the pod template's polecat-image annotation to the
+// file PolecatImageFile. The file is mode 0444 and its mount is read-only (see
+// mounts), so the pod's own processes have no write path to it.
+func polecatImageVolume() Volume {
+	mode := int32(0o444)
+	return Volume{
+		Name: PolecatImageVolume,
+		DownwardAPI: &DownwardAPIVolumeSource{
+			DefaultMode: &mode,
+			Items: []DownwardAPIVolumeFile{{
+				Path:     PolecatImageFile,
+				FieldRef: &ObjectFieldSelector{FieldPath: "metadata.annotations['" + PolecatImageAnnotation + "']"},
+			}},
+		},
+	}
 }
 
 // secretFileMode is an entry's manifest mode as the octal permission bits its
@@ -1037,6 +1086,14 @@ func mounts(v Values) []VolumeMount {
 			Name:      secretVolumeName(v.forgeTokenFile()),
 			MountPath: manifestdata.LiveForgeTokenPath,
 			SubPath:   v.forgeTokenFile(),
+			ReadOnly:  true,
+		})
+	}
+	if v.PolecatImage != "" {
+		m = append(m, VolumeMount{
+			Name:      PolecatImageVolume,
+			MountPath: PolecatImagePath,
+			SubPath:   PolecatImageFile,
 			ReadOnly:  true,
 		})
 	}
@@ -1227,6 +1284,9 @@ func (v Values) validateDaemon() error {
 	if err := v.validateProxies(); err != nil {
 		return err
 	}
+	if err := v.validatePolecatImage(); err != nil {
+		return err
+	}
 	if err := v.validateCredentials(); err != nil {
 		return err
 	}
@@ -1261,6 +1321,20 @@ func (v Values) validateProxies() error {
 	}
 	if !v.Rehearsal && v.HostGatewayIP == "" {
 		return fmt.Errorf("Values.ProxyImage %q: Values.HostGatewayIP is empty, so the registry-proxy and gateway-proxy relays would name no host; name the address the host registry and gateway answer on, or leave Values.ProxyImage empty for no relay", v.ProxyImage)
+	}
+	return nil
+}
+
+// validatePolecatImage refuses a polecat image that is not a digest, as
+// validateImage refuses the daemon's: the annotation and the file carry the value
+// the overseer read, so a tag would name whatever the registry holds at pull time.
+// Empty is no image, and the pod carries neither the annotation nor the file.
+func (v Values) validatePolecatImage() error {
+	if v.PolecatImage == "" {
+		return nil
+	}
+	if !imageRefRE.MatchString(v.PolecatImage) {
+		return fmt.Errorf("Values.PolecatImage %q: want the polecat image by digest (repo@sha256:<64 lowercase hex>), as Values.Image is; a tag is refused so the pod's annotation names the image the overseer read", v.PolecatImage)
 	}
 	return nil
 }
@@ -1727,9 +1801,11 @@ type PodTemplate struct {
 	Spec     PodSpec         `yaml:"spec"`
 }
 
-// PodTemplateMeta is the pod's labels; a template carries no name or namespace.
+// PodTemplateMeta is the pod's labels and annotations; a template carries no name
+// or namespace. A change to the template, annotations included, is a rollout.
 type PodTemplateMeta struct {
-	Labels map[string]string `yaml:"labels"`
+	Labels      map[string]string `yaml:"labels"`
+	Annotations map[string]string `yaml:"annotations,omitempty"`
 }
 
 // PodSpec is the subset of a pod's spec the builder sets. A nil
@@ -1801,12 +1877,31 @@ type VolumeMount struct {
 	ReadOnly  bool   `yaml:"readOnly,omitempty"`
 }
 
-// Volume is one pod volume: a claim, an emptyDir or a Secret.
+// Volume is one pod volume: a claim, an emptyDir, a Secret or a downward-API file.
 type Volume struct {
-	Name                  string                `yaml:"name"`
-	PersistentVolumeClaim *PVCVolumeSource      `yaml:"persistentVolumeClaim,omitempty"`
-	EmptyDir              *EmptyDirVolumeSource `yaml:"emptyDir,omitempty"`
-	Secret                *SecretVolumeSource   `yaml:"secret,omitempty"`
+	Name                  string                   `yaml:"name"`
+	PersistentVolumeClaim *PVCVolumeSource         `yaml:"persistentVolumeClaim,omitempty"`
+	EmptyDir              *EmptyDirVolumeSource    `yaml:"emptyDir,omitempty"`
+	Secret                *SecretVolumeSource      `yaml:"secret,omitempty"`
+	DownwardAPI           *DownwardAPIVolumeSource `yaml:"downwardAPI,omitempty"`
+}
+
+// DownwardAPIVolumeSource projects pod metadata into files: each item is one
+// file, named by its path, holding the field the item selects.
+type DownwardAPIVolumeSource struct {
+	DefaultMode *int32                  `yaml:"defaultMode,omitempty"`
+	Items       []DownwardAPIVolumeFile `yaml:"items"`
+}
+
+// DownwardAPIVolumeFile is one projected file and the field it holds.
+type DownwardAPIVolumeFile struct {
+	Path     string               `yaml:"path"`
+	FieldRef *ObjectFieldSelector `yaml:"fieldRef,omitempty"`
+}
+
+// ObjectFieldSelector names a metadata field, such as an annotation by key.
+type ObjectFieldSelector struct {
+	FieldPath string `yaml:"fieldPath"`
 }
 
 // PVCVolumeSource names the claim a volume carries.
