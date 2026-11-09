@@ -30,13 +30,15 @@ on:
     branches: ["green/**"]
 
 env:
-  # The Forgejo host and the registry owner are this town's own: the operator
-  # sets them to the values the town's rig records in
-  # merge_queue.forgejo.remote_url, which gt update images (gt-gg9hv.63) reads
-  # instead of typing them. The two image names are internal/imagevalues'
-  # constants, which TestImagesWorkflowNamesTheSharedImageConstants holds equal.
+  # The Forgejo host is this town's own: the operator sets it to the host the
+  # town's rig records in merge_queue.forgejo.remote_url, which gt update images
+  # (gt-gg9hv.63) reads instead of typing it. The registry owner is the registry
+  # bot's own namespace, merge_queue.forgejo.registry_owner: the bot can write
+  # only there (a push into the repository owner's namespace answers 401). The
+  # two image names are internal/imagevalues' constants, which
+  # TestImagesWorkflowNamesTheSharedImageConstants holds equal.
   FORGEJO_HOST: forgejo:3000
-  REGISTRY_OWNER: sloan
+  REGISTRY_OWNER: bot-registry
   DAEMON_IMAGE: gastown-daemon
   POLECAT_IMAGE: gastown-polecat
   # The account REGISTRY_TOKEN was minted for: the bot the provisioner gives
