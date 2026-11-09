@@ -4,9 +4,12 @@
 package dispatch
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,16 +31,46 @@ func HoldFilePath(townRoot string) string {
 	return filepath.Join(townRoot, HoldFileName)
 }
 
+// BootHealthPath returns the file the daemon publishes its boot reason in: the
+// daemon's own directory, read by dispatchers in other processes.
+func BootHealthPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", "boot-health")
+}
+
+// BootHold returns the boot reason the daemon published at BootHealthPath, or
+// "" when the file does not exist. A file that exists but cannot be read, or
+// that names no reason, holds, because the daemon's answer cannot be ruled out.
+// A file left by a dead daemon holds on purpose (fail closed); to clear it,
+// remove daemon/boot-health under the town root by hand.
+func BootHold(townRoot string) string {
+	if townRoot == "" {
+		return ""
+	}
+	path := BootHealthPath(townRoot)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		return fmt.Sprintf("boot health unreadable (%v); treating as held", err)
+	}
+	reason, _, _ := strings.Cut(string(data), "\n")
+	if reason == "" {
+		reason = "boot health file names no reason"
+	}
+	return fmt.Sprintf("%s (%s); remove the file by hand if the daemon is retired", reason, path)
+}
+
 // OperatorHold reports why automatic dispatch must not run in this town right
 // now, or "" when it may. It answers for the operator's hold file, for a
-// town-wide ESTOP and for the Ring when it is Waned, the holds the seat-refill
-// plugin checked and the spec dispatcher checks now. It is the one dispatch
-// choke point for e-stop (gt-4k3fj.4); restarts and kills have theirs in
-// internal/supervisor.
+// town-wide ESTOP, for the daemon's boot hold file and for the Ring when it is
+// Waned, the holds the seat-refill plugin checked and the spec dispatcher
+// checks now. It is the one dispatch choke point for e-stop (gt-4k3fj.4);
+// restarts and kills have theirs in internal/supervisor.
 //
 // Only automatic dispatchers consult it. An explicit `gt sling` typed by an
-// operator is the decision the hold file defers to; an e-stop and a Waned
-// Ring refuse it too, in the sling path itself.
+// operator is the decision the hold file defers to; an e-stop, the boot hold
+// and a Waned Ring refuse it too, in the sling path itself.
 //
 // A hold path or ESTOP sentinel that cannot be stat'ed for any reason other
 // than not existing fails closed: the hold cannot be ruled out, and
@@ -60,6 +93,9 @@ func operatorHold(townRoot string, key ring.KeyFunc, now time.Time) string {
 		return fmt.Sprintf("operator dispatch hold unreadable (%v); treating as held", err)
 	}
 	if reason := estopHold(townRoot, ""); reason != "" {
+		return reason
+	}
+	if reason := BootHold(townRoot); reason != "" {
 		return reason
 	}
 	return ring.Hold(townRoot, key, now)

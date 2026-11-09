@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/ring"
@@ -136,10 +137,15 @@ func findCurrentRigWith(getenv func(string) string, cwd, townRoot string) (strin
 	return rigName, r, nil
 }
 
-// ringHoldNow is the Ring's hold on a dispatch at the wall clock, its key read
-// under the daemon environment. Every dispatch path passes it to slingBlocked
-// or the sling engine.
+// ringHoldNow is the hold on a dispatch at the wall clock: the daemon's boot
+// hold file first, then the Ring at the wall clock, its key read under the
+// daemon environment. The boot hold comes first because the daemon publishes it
+// from another process while infrastructure is not answering (gt-ib2nt7). Every
+// dispatch path passes it to slingBlocked or the sling engine.
 func ringHoldNow(townRoot string) string {
+	if reason := dispatch.BootHold(townRoot); reason != "" {
+		return reason
+	}
 	return ring.Hold(townRoot, ring.TownKey(os.Getenv), time.Now())
 }
 
