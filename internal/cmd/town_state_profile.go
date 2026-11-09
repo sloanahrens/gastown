@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -19,8 +18,10 @@ import (
 // the live town (gt-gvr05p).
 const podEnv = "KUBERNETES_SERVICE_HOST"
 
-// rehearsalBackupName is the copy of the settings a write leaves beside them.
-const rehearsalBackupName = "config.json.pre-rehearsal"
+// rehearsalBackupSuffix is appended to the daemon patrol file's path for the
+// copy a write leaves beside it: config.json.pre-rehearsal on the two-file
+// layout, daemon.json.pre-rehearsal on the five-file one.
+const rehearsalBackupSuffix = ".pre-rehearsal"
 
 // rehearsalTempSuffix is appended to the settings path for the file a write
 // builds before renaming it over the settings.
@@ -29,16 +30,18 @@ const rehearsalTempSuffix = ".rehearsal-tmp"
 var townStateProfileCmd = &cobra.Command{
 	Use:   "profile",
 	Short: "Turn the daemon's patrols off in a seeded settings file (rehearsal pods only)",
-	Long: `Rewrite the town's settings/config.json for a rehearsal pod, so a seeded copy
-of the live settings starts none of the work the live daemon starts. Every
-patrol object directly under daemon.patrols is set to enabled false (a missing
-enabled becomes an explicit false), and daemon.supervisor is removed. Every
-other key and value is left as it was.
+	Long: `Rewrite the file the daemon reads its patrol config from, for a rehearsal pod,
+so a seeded copy of the live settings starts none of the work the live daemon
+starts. That file is settings/config.json's daemon section on the two-file
+layout, and mayor/daemon.json on the five-file one. Every patrol object directly
+under daemon.patrols is set to enabled false (a missing enabled becomes an
+explicit false), and daemon.supervisor is removed. Every other key and value is
+left as it was.
 
 The command refuses to run unless KUBERNETES_SERVICE_HOST is set, which
-Kubernetes sets in every pod. A write copies the old file to
-config.json.pre-rehearsal first, and refuses when that copy already exists, so
-the original is never overwritten. A profile that changes nothing writes nothing.
+Kubernetes sets in every pod. A write copies the old file beside itself as
+<file>.pre-rehearsal first, and refuses when that copy already exists, so the
+original is never overwritten. A profile that changes nothing writes nothing.
 
 With --check the command writes nothing. It prints each patrol still enabled and
 the supervisor if set, and exits 1 when there is one.
@@ -63,6 +66,7 @@ func init() {
 // drive the failure it names, as townstate's townOps does.
 type profileFiles struct {
 	stat   func(string) (fs.FileInfo, error)
+	read   func(string) ([]byte, error)
 	open   func(name string, flag int, perm fs.FileMode) (io.WriteCloser, error)
 	rename func(oldpath, newpath string) error
 	remove func(string) error
@@ -72,8 +76,11 @@ type profileFiles struct {
 func hostProfileFiles() profileFiles {
 	return profileFiles{
 		stat: os.Stat,
+		read: func(name string) ([]byte, error) {
+			return os.ReadFile(name) //nolint:gosec // G304: the name is the town's daemon patrol file
+		},
 		open: func(name string, flag int, perm fs.FileMode) (io.WriteCloser, error) {
-			return os.OpenFile(name, flag, perm) //nolint:gosec // G304: the name is the town's settings file or a fixed name beside it
+			return os.OpenFile(name, flag, perm) //nolint:gosec // G304: the name is the town's daemon patrol file or a fixed name beside it
 		},
 		rename: os.Rename,
 		remove: os.Remove,
@@ -121,16 +128,27 @@ func runTownStateProfileIn(env townStateProfileEnv) error {
 	if !env.rehearsal {
 		return errors.New("gt town state profile needs --rehearsal: it is the only profile")
 	}
-	path := config.TownSettingsPath(env.town)
+	// The daemon reads its patrols from this file, which is not always
+	// settings/config.json: on the five-file layout it is mayor/daemon.json,
+	// whose top level is the daemon object itself. Profiling any other file
+	// would leave the patrols running (gt-gvr05p).
+	path, err := config.DaemonPatrolWritePath(env.town)
+	if err != nil {
+		return fmt.Errorf("reading the town settings: %w", err)
+	}
 	info, err := env.files.stat(path)
 	if err != nil {
 		return fmt.Errorf("reading the town settings: %w", err)
 	}
-	settings, err := os.ReadFile(path) //nolint:gosec // G304: the path is the town's own settings file
+	settings, err := env.files.read(path)
 	if err != nil {
 		return fmt.Errorf("reading the town settings: %w", err)
 	}
-	out, changes, err := townstate.RehearsalProfile(settings)
+	profile := townstate.RehearsalProfile
+	if path == config.DaemonPatrolConfigPath(env.town) {
+		profile = townstate.RehearsalDaemonProfile
+	}
+	out, changes, err := profile(settings)
 	if err != nil {
 		return fmt.Errorf("profiling %s: %w", path, err)
 	}
@@ -144,7 +162,7 @@ func runTownStateProfileIn(env townStateProfileEnv) error {
 	if err := writeRehearsalSettings(env.files, path, info.Mode().Perm(), settings, out); err != nil {
 		return err
 	}
-	fmt.Fprintf(env.out, "rehearsal profile written to %s (%d changes); the old file is %s\n", path, len(changes), rehearsalBackupName)
+	fmt.Fprintf(env.out, "rehearsal profile written to %s (%d changes); the old file is %s\n", path, len(changes), path+rehearsalBackupSuffix)
 	return nil
 }
 
@@ -168,7 +186,7 @@ func reportRehearsalChanges(w io.Writer, changes []string) error {
 // refused, so an earlier original is never overwritten; a backup that fails
 // part-way is left for an operator to look at rather than removed.
 func writeRehearsalSettings(files profileFiles, path string, mode fs.FileMode, old, out []byte) error {
-	backup := filepath.Join(filepath.Dir(path), rehearsalBackupName)
+	backup := path + rehearsalBackupSuffix
 	if err := writeRehearsalFile(files, backup, os.O_EXCL, mode, old); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return fmt.Errorf("%s already exists: an earlier rehearsal profile kept the original there; move it aside to write a new profile", backup)

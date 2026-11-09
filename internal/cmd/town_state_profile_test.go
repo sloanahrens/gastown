@@ -32,11 +32,25 @@ const profileTestSettings = `{
 
 // The failures a write test makes happen, one per operation.
 var (
+	errProfileRead   = errors.New("read refused")
 	errProfileOpen   = errors.New("open refused")
 	errProfileWrite  = errors.New("write refused")
 	errProfileClose  = errors.New("close refused")
 	errProfileRename = errors.New("rename refused")
 )
+
+// profileTestDaemonDoc is a five-file town's mayor/daemon.json: the daemon object
+// itself, with one patrol on and the container supervisor set.
+const profileTestDaemonDoc = `{
+  "patrols": {
+    "landing_worker": {"enabled": true},
+    "tier_sweep": {"enabled": false}
+  },
+  "supervisor": "container",
+  "type": "daemon",
+  "version": 1
+}
+`
 
 // inPod is the environment of a pod: the variable Kubernetes sets is non-empty.
 func inPod(string) string { return "10.43.0.1" }
@@ -172,7 +186,7 @@ func TestTownStateProfileRefusesOutsideAPod(t *testing.T) {
 	if got := readProfileFile(t, path); string(got) != profileTestSettings {
 		t.Errorf("the settings changed outside a pod:\n%s", got)
 	}
-	if _, err := os.Stat(filepath.Join(filepath.Dir(path), rehearsalBackupName)); !os.IsNotExist(err) {
+	if _, err := os.Stat(path + rehearsalBackupSuffix); !os.IsNotExist(err) {
 		t.Errorf("a backup was written outside a pod: stat = %v", err)
 	}
 }
@@ -205,7 +219,7 @@ func TestTownStateProfileCheckAndWrite(t *testing.T) {
 	if err := runTownStateProfileIn(env); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	backup := filepath.Join(filepath.Dir(path), rehearsalBackupName)
+	backup := path + rehearsalBackupSuffix
 	if got := readProfileFile(t, backup); string(got) != profileTestSettings {
 		t.Fatalf("the backup is not the old settings:\n%s", got)
 	}
@@ -230,6 +244,70 @@ func TestTownStateProfileCheckAndWrite(t *testing.T) {
 	}
 }
 
+// TestTownStateProfileProfilesTheDaemonFileOnAFiveFileTown: on the five-file
+// layout the daemon reads its patrols from mayor/daemon.json, not from
+// settings/config.json, so the profile must rewrite that file.
+func TestTownStateProfileProfilesTheDaemonFileOnAFiveFileTown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	daemonPath := config.DaemonPatrolConfigPath(town)
+	writeProfileFile(t, daemonPath, profileTestDaemonDoc)
+	const settings = `{"agents": {}}` + "\n"
+	settingsPath := config.TownSettingsPath(town)
+	writeProfileFile(t, settingsPath, settings)
+	var checkOut bytes.Buffer
+	env := newProfileEnv(town, &checkOut)
+
+	env.check = true
+	err := runTownStateProfileIn(env)
+	var exitErr *ExitCodeError
+	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("--check on a five-file town = %v, want exit 1", err)
+	}
+	for _, want := range []string{"daemon.patrols.landing_worker.enabled", "daemon.supervisor"} {
+		if !strings.Contains(checkOut.String(), want) {
+			t.Errorf("--check output %q does not list %s", checkOut.String(), want)
+		}
+	}
+
+	env.check = false
+	if err := runTownStateProfileIn(env); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := readProfileFile(t, daemonPath+rehearsalBackupSuffix); string(got) != profileTestDaemonDoc {
+		t.Fatalf("the backup is not the old daemon document:\n%s", got)
+	}
+	var profiled map[string]any
+	if err := json.Unmarshal(readProfileFile(t, daemonPath), &profiled); err != nil {
+		t.Fatalf("the written daemon document is not JSON: %v", err)
+	}
+	if _, ok := profiled["supervisor"]; ok {
+		t.Errorf("the written daemon document kept supervisor")
+	}
+	for name, p := range profiled["patrols"].(map[string]any) {
+		if p.(map[string]any)["enabled"] != false {
+			t.Errorf("patrol %s is not disabled in the written daemon document", name)
+		}
+	}
+	if got := readProfileFile(t, settingsPath); string(got) != settings {
+		t.Errorf("the settings file changed on a five-file town:\n%s", got)
+	}
+}
+
+func TestTownStateProfileRefusesAnUnreadableDaemonFile(t *testing.T) {
+	t.Parallel()
+	town, path := writeProfileTown(t, profileTestSettings)
+	env := newProfileEnv(town, &bytes.Buffer{})
+	env.files.read = func(string) ([]byte, error) { return nil, errProfileRead }
+	err := runTownStateProfileIn(env)
+	if !errors.Is(err, errProfileRead) {
+		t.Fatalf("profile of an unreadable file = %v, want the read error", err)
+	}
+	if got := readProfileFile(t, path); string(got) != profileTestSettings {
+		t.Errorf("an unreadable file's settings changed:\n%s", got)
+	}
+}
+
 func TestTownStateProfileWritesNothingWhenAlreadyProfiled(t *testing.T) {
 	t.Parallel()
 	town, path := writeProfileTown(t, profileTestSettings)
@@ -246,7 +324,7 @@ func TestTownStateProfileWritesNothingWhenAlreadyProfiled(t *testing.T) {
 		t.Errorf("a write with nothing to change rewrote the settings")
 	}
 	// The backup is still the first run's original, not the profiled copy.
-	backup := filepath.Join(filepath.Dir(path), rehearsalBackupName)
+	backup := path + rehearsalBackupSuffix
 	if got := readProfileFile(t, backup); string(got) != profileTestSettings {
 		t.Errorf("the backup was overwritten by a later run:\n%s", got)
 	}
@@ -255,7 +333,7 @@ func TestTownStateProfileWritesNothingWhenAlreadyProfiled(t *testing.T) {
 func TestTownStateProfileRefusesAnExistingBackup(t *testing.T) {
 	t.Parallel()
 	town, path := writeProfileTown(t, profileTestSettings)
-	backup := filepath.Join(filepath.Dir(path), rehearsalBackupName)
+	backup := path + rehearsalBackupSuffix
 	if err := os.WriteFile(backup, []byte("original"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +383,7 @@ func TestTownStateProfileRefusals(t *testing.T) {
 		{
 			name: "a malformed settings file", rehearsal: true,
 			setup: func(t *testing.T, town, path string) { writeProfileFile(t, path, `{"daemon":`) },
-			want:  "profiling",
+			want:  "does not parse",
 		},
 	}
 	for _, tc := range cases {
@@ -388,7 +466,7 @@ func TestTownStateProfileKeepsTheSettingsWhenAWriteFails(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			town, path := writeProfileTown(t, profileTestSettings)
-			backup := filepath.Join(filepath.Dir(path), rehearsalBackupName)
+			backup := path + rehearsalBackupSuffix
 			tmp := path + rehearsalTempSuffix
 			env := newProfileEnv(town, &bytes.Buffer{})
 			env.files = tc.files(hostProfileFiles(), backup, tmp)
