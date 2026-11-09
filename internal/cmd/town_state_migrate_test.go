@@ -155,7 +155,8 @@ func (f *fakeVolume) CreateVolume(volume string) error {
 }
 
 // tarTree writes the directory's tree as a tar archive named the way tar -C
-// writes it: "./" for the root, then each entry below it.
+// writes it: "./" for the root, then each entry below it. A regular file carries its
+// permission bits, as tar -c writes them.
 func tarTree(dir string, w io.Writer) error {
 	tw := tar.NewWriter(w)
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
@@ -186,7 +187,11 @@ func tarTree(dir string, w io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: int64(info.Mode().Perm()), Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
 			return err
 		}
 		_, err = tw.Write(body)

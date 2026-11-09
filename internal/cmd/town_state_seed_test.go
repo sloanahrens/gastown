@@ -1688,6 +1688,17 @@ func TestTownStateSeedHoldFailureUnwinds(t *testing.T) {
 				}
 			}
 		}, "does not hold the dispatch hold"},
+		{"the claim holds the hold at another mode", func(t *testing.T, k *fakeKubectl, _ *fakeVolume) {
+			// The hold lands with its bytes, and the claim then holds it at 0644: the mode
+			// the hold is meant to have is 0600, so only a removal leaves the hold gone.
+			k.onSettingsCall = func(n int, dir string) {
+				if n == 3 {
+					if err := os.Chmod(filepath.Join(dir, dispatch.HoldFileName), 0o644); err != nil {
+						t.Errorf("chmod the hold: %v", err)
+					}
+				}
+			}
+		}, "does not hold the dispatch hold"},
 		{"the claim listing fails after the hold", func(_ *testing.T, k *fakeKubectl, fv *fakeVolume) {
 			// The listing that checks the hold is the one after its stream.
 			k.onSettingsCall = func(n int, _ string) {
