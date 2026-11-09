@@ -1505,30 +1505,28 @@ func TestSandboxSecretsParserReadableCommandsAreJudgedOnTheirBodies(t *testing.T
 
 // TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies generates the three flip
 // classes of gt-l5pbgs, each crossed with a body word the shell runs, so a flip
-// beyond the pinned rows cannot pass unseen. Each generated command is checked
-// against its body judged on its own:
-//   - a command the walk allows must have a body that also allows on its own, so
-//     no verdict is loosened past what the body earns;
+// beyond the pinned rows cannot pass unseen. Each generated command is parsed, and
+// its substitution bodies are the parse's own (sandboxSecretsParsedSubstitutions),
+// judged on their own:
+//   - a command the walk allows must have every parsed body also allowed on its own,
+//     so no verdict is loosened past what the body earns;
 //   - a command whose body prints the environment must be refused;
 //   - a data body must stay allowed, so the property is not met by refusing all.
 //
 // "BQ" stands for a backquote and "BODY" for the body word.
 func TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies(t *testing.T) {
 	t.Parallel()
-	shapes := []struct {
-		command string // the command, with the body word in place
-		judged  string // the body as the shell runs it, judged on its own
-	}{
+	shapes := []string{
 		// A case pattern's close paren inside a dollar-paren body, the body in an arm.
-		{"x=$(case a in *) BODY ;; esac)", "BODY"},
-		{"x=$(case printenv in *) BODY ;; esac)", "BODY"},
+		"x=$(case a in *) BODY ;; esac)",
+		"x=$(case printenv in *) BODY ;; esac)",
 		// A backquote inside a dollar-double-paren, quoted and unquoted.
-		{`echo "$((BQecho \BQBODY\BQBQ))"`, "echo BQBODYBQ"},
-		{`echo $((BQecho \BQBODY\BQBQ))`, "echo BQBODYBQ"},
+		`echo "$((BQecho \BQBODY\BQBQ))"`,
+		`echo $((BQecho \BQBODY\BQBQ))`,
 		// A backquote inside a for-in or case header substitution.
-		{"for x in $(echo BQBODYBQ); do echo $x; done", "echo BQBODYBQ"},
-		{`for x in "$(echo BQBODYBQ)"; do echo $x; done`, "echo BQBODYBQ"},
-		{"case $(echo BQBODYBQ) in *) ;; esac", "echo BQBODYBQ"},
+		"for x in $(echo BQBODYBQ); do echo $x; done",
+		`for x in "$(echo BQBODYBQ)"; do echo $x; done`,
+		"case $(echo BQBODYBQ) in *) ;; esac",
 	}
 	bodies := []struct {
 		word              string
@@ -1546,8 +1544,16 @@ func TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies(t *testing.T) {
 	for _, shape := range shapes {
 		for _, body := range bodies {
 			fill := strings.NewReplacer("BQ", "`", "BODY", body.word)
-			command, judged := fill.Replace(shape.command), fill.Replace(shape.judged)
+			command := fill.Replace(shape)
 			generated++
+			script, err := shellparse.Parse(command)
+			if err != nil {
+				t.Fatalf("shellparse.Parse(%q) = %v, want the generated command to parse", command, err)
+			}
+			parsed := sandboxSecretsParsedSubstitutions(command, script)
+			if len(parsed) == 0 {
+				t.Fatalf("shellparse.Parse(%q) yields no substitution body, so the property is vacuous", command)
+			}
 			reason := sandboxSecretsReason(command)
 			if body.printsEnvironment && reason == "" {
 				t.Errorf("sandboxSecretsReason(%q) allows, but its body %q prints the environment", command, body.word)
@@ -1559,8 +1565,10 @@ func TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies(t *testing.T) {
 				continue
 			}
 			allowed++
-			if on := sandboxSecretsReason(judged); on != "" {
-				t.Errorf("sandboxSecretsReason(%q) allows, but its body %q is refused on its own: %q", command, judged, on)
+			for _, judged := range parsed {
+				if on := sandboxSecretsReason(judged); on != "" {
+					t.Errorf("sandboxSecretsReason(%q) allows, but its parsed body %q is refused on its own: %q", command, judged, on)
+				}
 			}
 		}
 	}
