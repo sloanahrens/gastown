@@ -69,6 +69,7 @@ func TestParseParamExpansionUnterminatedSubstitutionIsUnparseable(t *testing.T) 
 		{name: "process substitution closed by the expansion", command: "echo ${v:-<(ls a}"},
 		{name: "expansion never closed", command: "echo ${v:-<(ls a"},
 		{name: "command substitution never closed", command: "echo ${v:-$(date}"},
+		{name: "process substitution after a word-initial hash never closed", command: "echo ${v:-#<(ls a}"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
