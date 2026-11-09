@@ -104,6 +104,12 @@ func runDayOneCommand(ctx context.Context, dir, name string, args ...string) (st
 	c := exec.CommandContext(ctx, name, args...)
 	c.Dir = dir
 	out, err := c.Output()
+	return dayOneCommandResult(out, err)
+}
+
+// dayOneCommandResult reads a finished command's output and error. An exit
+// status is a result the checks read; a command that did not start is an error.
+func dayOneCommandResult(out []byte, err error) (string, int, error) {
 	var exitErr *exec.ExitError
 	switch {
 	case err == nil:

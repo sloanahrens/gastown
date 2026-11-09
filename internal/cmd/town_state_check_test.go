@@ -166,3 +166,17 @@ func TestRunTownStateCheckInCommandsThatCannotStart(t *testing.T) {
 		t.Errorf("table = %q, want a not-run row carrying the start error", buf.String())
 	}
 }
+
+func TestDayOneCommandResultRefusesACommandThatDidNotStart(t *testing.T) {
+	t.Parallel()
+	// A command that never started has no output or status to read, so its start
+	// failure is the error the checks must see, not an exit 0 with empty output.
+	notStarted := errors.New("fork/exec gt: no such file or directory")
+	out, exit, err := dayOneCommandResult([]byte("ignored"), notStarted)
+	if !errors.Is(err, notStarted) {
+		t.Fatalf("err = %v, want the start failure", err)
+	}
+	if out != "" || exit != 0 {
+		t.Errorf("out = %q exit = %d, want nothing from a command that did not start", out, exit)
+	}
+}
