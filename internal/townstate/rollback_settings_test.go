@@ -36,8 +36,13 @@ func setModTime(t *testing.T, p string, at time.Time) {
 // settingsEntry is a regular archive entry whose mtime is at, so the replay
 // reads it as newer or older than the Mac file it meets.
 func settingsEntry(name, content string, at time.Time) archiveEntry {
+	return settingsEntryMode(name, content, at, 0o644)
+}
+
+// settingsEntryMode is settingsEntry with the mode the archive entry carries.
+func settingsEntryMode(name, content string, at time.Time, mode int64) archiveEntry {
 	return archiveEntry{
-		hdr:  &tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(content)), ModTime: at},
+		hdr:  &tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: mode, Size: int64(len(content)), ModTime: at},
 		data: []byte(content),
 	}
 }
@@ -138,44 +143,44 @@ func TestRollbackSettingsEditMadeInThePodSurvives(t *testing.T) {
 // copy, a Mac file with none stays without one, and every other key is the pod's.
 func TestRollbackSettingsKeepsTheMacSupervisor(t *testing.T) {
 	t.Parallel()
-	macSupervisor := map[string]any{"restart": "always", "max": float64(3)}
 	for _, tc := range []struct {
 		name string
 		// mac is the Mac's settings file; noMacFile leaves it absent.
-		mac         string
-		noMacFile   bool
-		archived    string
-		wantPresent bool
-		wantValue   any
+		mac       string
+		noMacFile bool
+		archived  string
+		// want is the replayed town settings, written out in full.
+		want string
 	}{
 		{
-			name:        "the Mac's value is set back over the pod's copy",
-			mac:         `{"name":"town","daemon":{"supervisor":{"restart":"always","max":3.0}}}`,
-			archived:    `{"name":"town","edited":"in the pod","daemon":{"supervisor":"pod copy","patrols":{"refinery":{"enabled":false}}}}`,
-			wantPresent: true,
-			wantValue:   macSupervisor,
+			name:     "the Mac's value is set back over the pod's copy",
+			mac:      `{"name":"town","daemon":{"supervisor":{"restart":"always","max":3.0}}}`,
+			archived: `{"name":"town","edited":"in the pod","daemon":{"supervisor":"pod copy","patrols":{"refinery":{"enabled":false}}}}`,
+			want:     `{"name":"town","edited":"in the pod","daemon":{"supervisor":{"restart":"always","max":3},"patrols":{"refinery":{"enabled":false}}}}`,
 		},
 		{
 			name:     "a Mac file with none stays without one",
 			mac:      `{"name":"town","daemon":{"patrols":{}}}`,
 			archived: `{"name":"town","daemon":{"supervisor":"pod copy"}}`,
+			want:     `{"name":"town","daemon":{}}`,
 		},
 		{
 			name:     "neither side has a supervisor, so nothing changes",
 			mac:      `{"name":"town"}`,
 			archived: `{"name":"town","edited":"in the pod"}`,
+			want:     `{"name":"town","edited":"in the pod"}`,
 		},
 		{
-			name:        "the Mac's value is set back when the archive has no daemon object",
-			mac:         `{"name":"town","daemon":{"supervisor":{"restart":"always","max":3.0}}}`,
-			archived:    `{"name":"town","edited":"in the pod"}`,
-			wantPresent: true,
-			wantValue:   macSupervisor,
+			name:     "the Mac's value is set back when the archive has no daemon object",
+			mac:      `{"name":"town","daemon":{"supervisor":{"restart":"always","max":3.0}}}`,
+			archived: `{"name":"town","edited":"in the pod"}`,
+			want:     `{"name":"town","edited":"in the pod","daemon":{"supervisor":{"restart":"always","max":3}}}`,
 		},
 		{
 			name:      "no Mac file: the archive's supervisor is not carried",
 			noMacFile: true,
 			archived:  `{"name":"town","daemon":{"supervisor":"pod copy"}}`,
+			want:      `{"name":"town","daemon":{}}`,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -193,21 +198,40 @@ func TestRollbackSettingsKeepsTheMacSupervisor(t *testing.T) {
 			}
 
 			got := decodeDoc(t, mustRead(t, macTown))
-			want := decodeDoc(t, []byte(tc.archived))
-			daemon, _ := want["daemon"].(map[string]any)
-			if tc.wantPresent {
-				if daemon == nil {
-					daemon = map[string]any{}
-					want["daemon"] = daemon
-				}
-				daemon["supervisor"] = tc.wantValue
-			} else if daemon != nil {
-				delete(daemon, "supervisor")
-			}
+			want := decodeDoc(t, []byte(tc.want))
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("the replayed town settings = %v, want %v", got, want)
 			}
 		})
+	}
+}
+
+// TestRollbackSettingsKeepsTheArchivedMode replays a town and a rig settings file
+// whose archive entries are private (0600) onto Mac files at 0644. Each replayed
+// file takes the archived mode, not the 0644 a shared row is masked to.
+func TestRollbackSettingsKeepsTheArchivedMode(t *testing.T) {
+	t.Parallel()
+	mac := t.TempDir()
+	writeStateFile(t, mac, "mayor/town.json", rollbackRegistry, 0o644)
+	macTown := writeStateFile(t, mac, "settings/config.json", `{"name":"town"}`, 0o644)
+	macRig := writeStateFile(t, mac, "gastown/settings/config.json", `{"name":"gastown"}`, 0o644)
+	setModTime(t, macTown, cutover.Add(-time.Hour))
+	setModTime(t, macRig, cutover.Add(-time.Hour))
+	archive := writeArchive(t,
+		settingsEntryMode("settings/config.json", `{"name":"town"}`, cutover.Add(time.Hour), 0o600),
+		settingsEntryMode("gastown/settings/config.json", `{"name":"gastown"}`, cutover.Add(time.Hour), 0o600),
+	)
+	if _, err := Import(bytes.NewReader(archive), mac, Default(), ImportOptions{MergeNewer: true}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	for _, p := range []string{macTown, macRig} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != 0o600 {
+			t.Errorf("%s replayed at mode %o, want 0600 as archived", p, got)
+		}
 	}
 }
 

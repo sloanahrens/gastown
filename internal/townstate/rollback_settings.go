@@ -36,9 +36,16 @@ func rollbackSettingsRows(rigs []string) []Entry {
 // rollbackSettingsEntry returns the row for name when name is one of the settings
 // files the rollback carries for a rig the destination registers. The replay is
 // the only import that accepts one; a seed into an empty root refuses it.
+//
+// The row comes back Private, so the replay writes the file at the mode its
+// archive entry carries instead of the 0644 a shared row is masked to. The
+// manifest cannot hold that flag on a shared row (Validate refuses it), so the
+// flag is set on this copy only. The copy is never validated or persisted, and
+// the import reads nothing from it but Private.
 func rollbackSettingsEntry(name string, rigs []string) (Entry, bool) {
 	for _, e := range rollbackSettingsRows(rigs) {
 		if e.Path == name {
+			e.Private = true
 			return e, true
 		}
 	}
@@ -69,9 +76,10 @@ func keepMacSupervisor(ops townOps, dest, name string, tr io.Reader) ([]byte, er
 
 // keepSupervisor returns the archived town settings with daemon.supervisor taken
 // from the Mac's own file: set to the Mac's value when that file has one, removed
-// when it has none or is absent. Every other key and value is left as archived,
-// and an archive that already agrees with the Mac comes back as it came. A file
-// that is not one JSON object is refused on either side, so a replay never
+// when it has none or is absent. Every other key and value is left as archived.
+// Only an archive with no supervisor on either side comes back byte for byte;
+// any other document is re-encoded, even when the two supervisors already agree.
+// A file that is not one JSON object is refused on either side, so a replay never
 // overwrites a file it could not read.
 func keepSupervisor(archived, mac []byte, macExists bool) ([]byte, error) {
 	root, err := decodeSettings(archived)
