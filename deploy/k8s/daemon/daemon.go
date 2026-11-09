@@ -308,9 +308,9 @@ const (
 	// resolve in this pod rather than assuming it does.
 	noHostAliasComment = "no hostAliases: this pod has no gateway alias, so " + DoltHostName + " does not resolve in it"
 	// noClaudeBeadsComment is the Deployment's head comment for the claude beads
-	// root the pod does not mount. The reaper behaviour the pod relies on is pinned
+	// root the pod does not mount. The reaper behavior the pod relies on is pinned
 	// by TestWispReaperSkipsMissingExtraRoot, not restated here.
-	noClaudeBeadsComment = "no " + ClaudeBeadsRoot + " mount: this pod has no claude beads database; the wisp reaper behaviour it relies on is TestWispReaperSkipsMissingExtraRoot"
+	noClaudeBeadsComment = "no " + ClaudeBeadsRoot + " mount: this pod has no claude beads database; the wisp reaper behavior it relies on is TestWispReaperSkipsMissingExtraRoot"
 )
 
 // noProxyComment is the Deployment's head comment when Values.ProxyImage is

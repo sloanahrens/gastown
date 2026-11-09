@@ -1472,7 +1472,7 @@ var composeMounts = []composeMount{
 	},
 	{
 		Name: "claude beads", Path: ClaudeBeadsRoot,
-		Reason: "dropped for the pod: the host's ~/.claude/.beads is outside the town root and no claim carries a copy; the wisp reaper's missing-root behaviour that keeps the drop safe is TestWispReaperSkipsMissingExtraRoot (internal/daemon), and the Deployment's head comment names the root (noClaudeBeadsComment)",
+		Reason: "dropped for the pod: the host's ~/.claude/.beads is outside the town root and no claim carries a copy; the wisp reaper's missing-root behavior that keeps the drop safe is TestWispReaperSkipsMissingExtraRoot (internal/daemon), and the Deployment's head comment names the root (noClaudeBeadsComment)",
 	},
 }
 

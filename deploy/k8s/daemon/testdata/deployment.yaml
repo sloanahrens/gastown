@@ -1,4 +1,4 @@
-# no /Users/sloan/.claude/.beads mount: this pod has no claude beads database; the wisp reaper behaviour it relies on is TestWispReaperSkipsMissingExtraRoot
+# no /Users/sloan/.claude/.beads mount: this pod has no claude beads database; the wisp reaper behavior it relies on is TestWispReaperSkipsMissingExtraRoot
 apiVersion: apps/v1
 kind: Deployment
 metadata:
