@@ -125,7 +125,7 @@ func init() {
 
 	for _, c := range []*cobra.Command{townStateMigratePlanCmd, townStateMigrateCopyCmd, townStateMigrateVerifyCmd, townStateMigrateRollbackPlanCmd} {
 		c.Flags().String("town", "", "the town root (default: the town containing the working directory)")
-		c.Flags().String("images", "", "the image values file (default deploy/values/images.yaml under the town root); a missing file falls back to the compose file's daemon tag")
+		c.Flags().String("images", "", "the image values file (default "+imagevalues.DefaultRelPath+" under the town root); a missing file falls back to the compose file's daemon tag")
 		c.Flags().String("compose-file", "", "the rendered compose file (default: <town>/daemon/container/compose.yml)")
 	}
 	townStateMigratePlanCmd.Flags().String("volume", "", "the volume whose free space the plan reads (optional)")
