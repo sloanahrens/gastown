@@ -22,6 +22,10 @@ spec:
         app.kubernetes.io/name: daemon
     spec:
       serviceAccountName: daemon
+      hostAliases:
+        - ip: 192.168.5.2
+          hostnames:
+            - host.docker.internal
       terminationGracePeriodSeconds: 180
       containers:
         - name: daemon
@@ -55,6 +59,9 @@ spec:
           volumeMounts:
             - name: town-state
               mountPath: /Users/sloan/gt
+            - name: dolt-backup
+              mountPath: /Users/sloan/gt-backups/dolt
+              readOnly: true
             - name: gotmp
               mountPath: /Users/Shared/gt-gotmp.noindex
             - name: daemon-forgejo-viewer-env
@@ -89,6 +96,9 @@ spec:
         - name: town-state
           persistentVolumeClaim:
             claimName: town-state
+        - name: dolt-backup
+          persistentVolumeClaim:
+            claimName: dolt-backup
         - name: gotmp
           emptyDir: {}
         - name: daemon-forgejo-viewer-env
