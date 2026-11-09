@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,8 +34,6 @@ const (
 type fakeKubectl struct {
 	fv   *fakeVolume
 	town string
-	// manifest is the split the pod's import checks each archive entry against.
-	manifest *townstate.Manifest
 	// calls records each argv the runner was given, from the start.
 	calls [][]string
 	// profileFails makes the pod's profile command fail.
@@ -56,14 +53,6 @@ func (k *fakeKubectl) run(_ context.Context, args []string, stdin io.Reader, std
 		if a == k.town {
 			argv[i] = townstate.VolumeMount
 		}
-	}
-	// The import checks each entry against the split the pod was given, not the
-	// default one, which the fake volume's own import would use. A fault is the
-	// fake volume's to make.
-	if slices.Equal(argv, townstate.ImportArgv) && k.fv.fault == nil {
-		s, err := townstate.Import(stdin, k.fv.dir, k.manifest, townstate.ImportOptions{})
-		fmt.Fprintln(stdout, s.String())
-		return err
 	}
 	if slices.Equal(argv, seedProfileArgv) {
 		if k.profileFails != nil {
@@ -114,9 +103,11 @@ func seedManifest(t *testing.T) *townstate.Manifest {
 // is empty. The town has no rigs registered, so the copy allows it.
 func newSeedSession(t *testing.T, town string) seedSession {
 	t.Helper()
-	fv := &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30}
 	m := seedManifest(t)
-	kube := &fakeKubectl{fv: fv, town: town, manifest: m}
+	// The pod's import checks each entry against the split the pod was given, the
+	// same split on the happy and the fault path.
+	fv := &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30, split: m}
+	kube := &fakeKubectl{fv: fv, town: town}
 	var out bytes.Buffer
 	return seedSession{
 		env: townStateSeedEnv{
@@ -395,6 +386,86 @@ func TestTownStateSeedPartialStreamIsReported(t *testing.T) {
 	})
 }
 
+// TestTownStateSeedRehearsalRefusesASharedSettingsRow: the production flag path
+// builds the town's own split, which names settings shared, so a rehearsal is
+// refused before any stream and the claim is left alone. Only the engine is faked,
+// so nothing execs.
+func TestTownStateSeedRehearsalRefusesASharedSettingsRow(t *testing.T) {
+	t.Parallel()
+	town := seedTown(t)
+	secrets := filepath.Join(t.TempDir(), "secrets.yaml")
+	writeProfileFile(t, secrets, secretsYAML)
+	// allow-no-rigs lets the export pass its registry check, so the settings
+	// refusal is the one that stops the run.
+	env, err := townStateSeedEnvFromFlags(seedFlagCommand(seedFlagValues{
+		town: town, namespace: seedNamespace, pod: seedPod, secrets: secrets, rehearsal: true, allowNoRigs: true,
+	}, ""))
+	if err != nil {
+		t.Fatalf("townStateSeedEnvFromFlags: %v", err)
+	}
+	kube := &fakeKubectl{fv: &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30}, town: town}
+	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run}
+	err = runTownStateSeedIn(env)
+	if err == nil || !strings.Contains(err.Error(), "settings/config.json") || !strings.Contains(err.Error(), "not daemon-owned") {
+		t.Fatalf("seed = %v, want the settings row named as not daemon-owned", err)
+	}
+	if len(kube.calls) != 0 {
+		t.Errorf("a refused rehearsal ran %d pod commands; the claim must be left as it was", len(kube.calls))
+	}
+}
+
+// TestTownStateSeedReportsWhetherTheProfileChangedTheClaim: the success line comes
+// after the profile and says whether the profile changed the claim; a profile that
+// fails prints no success line.
+func TestTownStateSeedReportsWhetherTheProfileChangedTheClaim(t *testing.T) {
+	t.Parallel()
+	t.Run("a profile that writes the settings says it changed the claim, after the profile", func(t *testing.T) {
+		t.Parallel()
+		s := newSeedSession(t, seedTown(t))
+		s.env.rehearsal = true
+		if err := runTownStateSeedIn(s.env); err != nil {
+			t.Fatalf("rehearsal seed: %v\n%s", err, s.out.String())
+		}
+		out := s.out.String()
+		if !strings.Contains(out, "matches the host copy set") || !strings.Contains(out, "the profile changed the claim") {
+			t.Errorf("success line does not say the profile changed the claim:\n%s", out)
+		}
+		if strings.Index(out, "profiled settings/config.json") > strings.Index(out, "matches the host copy set") {
+			t.Errorf("the success line comes before the profile:\n%s", out)
+		}
+	})
+	t.Run("a claim that is already profiled says the profile changed nothing", func(t *testing.T) {
+		t.Parallel()
+		town := seedTown(t)
+		profiled, _, err := townstate.RehearsalProfile([]byte(profileTestSettings), profilePatrolKeys())
+		if err != nil {
+			t.Fatalf("profiling the test settings: %v", err)
+		}
+		writeProfileFile(t, filepath.Join(town, "settings", "config.json"), string(profiled))
+		s := newSeedSession(t, town)
+		s.env.rehearsal = true
+		if err := runTownStateSeedIn(s.env); err != nil {
+			t.Fatalf("rehearsal seed: %v\n%s", err, s.out.String())
+		}
+		out := s.out.String()
+		if !strings.Contains(out, "the profile changed nothing") || strings.Contains(out, "the profile changed the claim") {
+			t.Errorf("success line does not say the profile changed nothing:\n%s", out)
+		}
+	})
+	t.Run("a profile that fails prints no success line", func(t *testing.T) {
+		t.Parallel()
+		s := newSeedSession(t, seedTown(t))
+		s.env.rehearsal = true
+		s.kube.profileFails = errors.New("exec refused")
+		if err := runTownStateSeedIn(s.env); err == nil {
+			t.Fatal("a failed profile was reported as a success")
+		}
+		if strings.Contains(s.out.String(), "matches the host copy set") {
+			t.Errorf("a failed profile printed the success line:\n%s", s.out.String())
+		}
+	})
+}
+
 // TestTownStateSeedRefusesAnUnusableTarget: a namespace, a pod name or a town root
 // that cannot be used in the kubectl argv or as the mount path is refused.
 func TestTownStateSeedRefusesAnUnusableTarget(t *testing.T) {
@@ -460,7 +531,7 @@ func TestTownStateSeedListingFailureIsReported(t *testing.T) {
 // seedFlagValues is what each flag of the seed command is given in a test.
 type seedFlagValues struct {
 	town, namespace, pod, since, secrets string
-	rehearsal                            bool
+	rehearsal, allowNoRigs               bool
 }
 
 // seedFlagCommand is a command with every flag the seed reads, each given its
@@ -483,7 +554,7 @@ func seedFlagCommand(v seedFlagValues, mistyped string) *cobra.Command {
 	if mistyped == "allow-no-rigs" {
 		c.Flags().String("allow-no-rigs", "", "")
 	} else {
-		c.Flags().Bool("allow-no-rigs", false, "")
+		c.Flags().Bool("allow-no-rigs", v.allowNoRigs, "")
 	}
 	return c
 }

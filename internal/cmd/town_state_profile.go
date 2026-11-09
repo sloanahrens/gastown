@@ -173,9 +173,13 @@ func runTownStateProfileIn(env townStateProfileEnv) error {
 	if err := writeRehearsalSettings(env.files, path, info.Mode().Perm(), settings, out); err != nil {
 		return err
 	}
-	fmt.Fprintf(env.out, "rehearsal profile written to %s (%d changes); the old file is %s\n", path, len(changes), path+rehearsalBackupSuffix)
+	fmt.Fprintf(env.out, "%s%s (%d changes); the old file is %s\n", rehearsalWrittenPrefix, path, len(changes), path+rehearsalBackupSuffix)
 	return nil
 }
+
+// rehearsalWrittenPrefix opens the line a profile prints when it wrote the file.
+// The seed reads it to say whether the profile changed the claim.
+const rehearsalWrittenPrefix = "rehearsal profile written to "
 
 // retiredPatrolKeys are the patrol keys the daemon ignores: the refinery was
 // deleted (gt-v4ssj.6) and the schema says to remove its key from the file. The

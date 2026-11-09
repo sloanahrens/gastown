@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -55,7 +56,9 @@ With --rehearsal the command runs "gt town state profile --rehearsal" in the pod
 after the stream, which turns every daemon patrol off in the seeded settings
 file. That settings file is compared before the profile runs, so a difference in
 it still fails, and it is then reported as "profiled", not as a difference. A
-rehearsal refuses the live namespace "gt".
+rehearsal refuses the live namespace "gt", and it refuses while the town's split
+names the settings file shared: a shared row is not streamed, so there is no
+settings file in the claim to profile.
 
 Without --rehearsal (the live copy) the command refuses unless the dispatch hold
 file exists and the daemon container is stopped.
@@ -322,6 +325,11 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	if m == nil {
 		m = townstate.Default()
 	}
+	if env.rehearsal {
+		if err := seedSettingsDaemonOwned(m, settings); err != nil {
+			return fmt.Errorf("refused: %w", err)
+		}
+	}
 	opts := townstate.ExportOptions{Since: env.since, AllowNoRigs: env.allowNoRigs, Exclude: env.exclude}
 	sum, err := townstate.SeedVolume(env.engine, seedClaim, env.town, m, opts, townstate.ImportArgv, env.out)
 	if err != nil {
@@ -339,13 +347,35 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("claim %s does not match the host copy set (%d problems): the claim is partial and not to be used", seedClaim, problems)}
 	}
 
+	// The success line comes last, after the profile, and says whether the profile
+	// changed the claim: the profile writes the settings file only when it finds
+	// something still on.
+	profileNote := ""
 	if env.rehearsal {
-		if err := env.engine.Run(seedClaim, seedProfileArgv, nil, env.out); err != nil {
+		var profileOut bytes.Buffer
+		if err := env.engine.Run(seedClaim, seedProfileArgv, nil, io.MultiWriter(env.out, &profileOut)); err != nil {
 			return fmt.Errorf("the rehearsal profile in claim %s failed: the claim is partial and not to be used: %w", seedClaim, err)
 		}
 		fmt.Fprintf(env.out, "profiled %s\n", settings)
+		profileNote = "; the profile changed nothing"
+		if strings.Contains(profileOut.String(), rehearsalWrittenPrefix) {
+			profileNote = "; the profile changed the claim"
+		}
 	}
-	fmt.Fprintf(env.out, "claim %s matches the host copy set (%d files)\n", seedClaim, res.Files)
+	fmt.Fprintf(env.out, "claim %s matches the host copy set (%d files) as streamed%s\n", seedClaim, res.Files, profileNote)
+	return nil
+}
+
+// seedSettingsDaemonOwned refuses a rehearsal whose split does not stream the
+// settings file. Only daemon-owned rows are copied and imported, so a settings row
+// classed shared leaves the file out of the claim, and the profile would have
+// nothing to rewrite. The refusal comes before any stream, so the claim is left as
+// it was.
+func seedSettingsDaemonOwned(m *townstate.Manifest, rel string) error {
+	row, ok := townstate.Lookup(m.Entries, rel)
+	if !ok || row.Owner != townstate.OwnerDaemon {
+		return fmt.Errorf("the split does not copy %s into the claim (its row is not daemon-owned): a rehearsal cannot copy or profile it, and no claim is written", rel)
+	}
 	return nil
 }
 

@@ -38,7 +38,10 @@ type fakeVolume struct {
 	free   int64
 	bdFail bool
 	fault  *importFault
-	calls  []string
+	// split is the split the volume's import checks each entry against; nil is the
+	// town's default split, which the copy uses.
+	split *townstate.Manifest
+	calls []string
 	// hasErr, listErr and freeErr make the volume's existence check, listing and
 	// df fail, so each command's read of the volume has a failure to refuse.
 	hasErr  error
@@ -93,7 +96,7 @@ func (f *fakeVolume) Run(volume string, argv []string, stdin io.Reader, stdout i
 		return nil
 	}
 	switch strings.Join(argv, " ") {
-	case strings.Join(townstate.ImportArgv, " "):
+	case strings.Join(townstate.ImportArgv, " "), strings.Join(townstate.ImportMergeArgv, " "):
 		if f.fault != nil {
 			if _, err := io.CopyN(io.Discard, stdin, f.fault.after); err != nil && !errors.Is(err, io.EOF) {
 				return err
@@ -103,22 +106,14 @@ func (f *fakeVolume) Run(volume string, argv []string, stdin io.Reader, stdout i
 			}
 			return nil
 		}
-		s, err := townstate.Import(stdin, f.dir, townstate.Default(), townstate.ImportOptions{})
-		fmt.Fprintln(stdout, s.String())
-		return err
-	case strings.Join(townstate.ImportMergeArgv, " "):
-		if f.fault != nil {
-			if _, err := io.CopyN(io.Discard, stdin, f.fault.after); err != nil && !errors.Is(err, io.EOF) {
-				return err
-			}
-			if f.fault.fail {
-				return errors.New("import helper exited 1")
-			}
-			return nil
+		merge := strings.Join(argv, " ") == strings.Join(townstate.ImportMergeArgv, " ")
+		m := f.split
+		if m == nil {
+			m = townstate.Default()
 		}
-		s, err := townstate.Import(stdin, f.dir, townstate.Default(), townstate.ImportOptions{MergeNewer: true})
+		s, err := townstate.Import(stdin, f.dir, m, townstate.ImportOptions{MergeNewer: merge})
 		fmt.Fprintln(stdout, s.String())
-		if f.afterMerge != nil {
+		if merge && f.afterMerge != nil {
 			f.afterMerge(f.dir)
 		}
 		return err
