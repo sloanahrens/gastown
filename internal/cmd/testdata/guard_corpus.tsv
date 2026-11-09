@@ -465,6 +465,6 @@ dangerous	polecat	"echo ${v:-#<(for i in 1; do gt done; done)}"	refuse	Never pol
 container_suite	polecat	"echo ${v:-a #<(GT_TEST_DOCKER=1 make test)}"	refuse	bare 'make test' runs	gt-70q8j2	f6f4da12198586bfd683ee69d4dd2859f206c8ad263fbd81d087fb9be6e27656
 test_scope	polecat	"echo ${v:-#<(go test ./internal/shellparse/... -run TestParseQuotedHeredoc)}"	allow		gt-70q8j2	f6f4da12198586bfd683ee69d4dd2859f206c8ad263fbd81d087fb9be6e27656
 # --- gt-4wd164: the sandbox walk reads heredoc body substitutions from the parsed segments (heredocSubstitutions and substitutionBodies are deleted), which moves the freeze stamp; one real case per freeze guard carries the new stamp ---
-dangerous	polecat	"cat <<EOF\n$(git reset --hard HEAD~5)\nEOF"	refuse	Hard reset discards	gt-4wd164	2346ed3536c5d7531c8b86136fe9b64c57021342910e6c58520417e6b4d650e8
-container_suite	polecat	"echo ok ; echo more"	allow		gt-4wd164	2346ed3536c5d7531c8b86136fe9b64c57021342910e6c58520417e6b4d650e8
-test_scope	polecat	"go test ./internal/shellparse/... -run TestParseHeredoc"	allow		gt-4wd164	2346ed3536c5d7531c8b86136fe9b64c57021342910e6c58520417e6b4d650e8
+dangerous	polecat	"cat <<EOF\n$(git reset --hard HEAD~5)\nEOF"	refuse	Hard reset discards	gt-4wd164	092fea418d78f707da673e00a10511ccb07e0975471430c620880eb06843ea6f
+container_suite	polecat	"echo ok ; echo more"	allow		gt-4wd164	092fea418d78f707da673e00a10511ccb07e0975471430c620880eb06843ea6f
+test_scope	polecat	"go test ./internal/shellparse/... -run TestParseHeredoc"	allow		gt-4wd164	092fea418d78f707da673e00a10511ccb07e0975471430c620880eb06843ea6f
