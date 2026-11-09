@@ -182,13 +182,31 @@ func TestDayOneCommandResultRefusesACommandThatDidNotStart(t *testing.T) {
 	}
 }
 
-// TestRunTownStateCheckRefusesAFlagItCannotRead drives the flag reads: a command
-// without the check's flags defined refuses with the flag's name before it looks
-// for a town or runs any check, rather than reading the flag as false.
+// TestRunTownStateCheckRefusesAFlagItCannotRead drives each flag read: a command
+// that does not define one of the check's flags refuses with that flag's name
+// before it looks for a town or runs any check, rather than reading it as false.
 func TestRunTownStateCheckRefusesAFlagItCannotRead(t *testing.T) {
 	t.Parallel()
-	err := runTownStateCheck(&cobra.Command{Use: "check"}, nil)
-	if err == nil || !strings.Contains(err.Error(), "record-baseline") {
-		t.Fatalf("runTownStateCheck error = %v, want a refusal naming the flag it cannot read", err)
+	tests := []struct {
+		name    string
+		defined []string
+		missing string
+	}{
+		{name: "no flag defined", defined: nil, missing: "record-baseline"},
+		{name: "force not defined", defined: []string{"record-baseline"}, missing: "force"},
+		{name: "json not defined", defined: []string{"record-baseline", "force"}, missing: "json"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := &cobra.Command{Use: "check"}
+			for _, f := range tt.defined {
+				cmd.Flags().Bool(f, false, "")
+			}
+			err := runTownStateCheck(cmd, nil)
+			if err == nil || !strings.Contains(err.Error(), tt.missing) {
+				t.Fatalf("runTownStateCheck error = %v, want a refusal naming the flag %q it cannot read", err, tt.missing)
+			}
+		})
 	}
 }
