@@ -272,6 +272,7 @@ func TestOverrunSaveWork_UnreadableBranchIsAnError(t *testing.T) {
 	}{
 		{name: "current branch unreadable", seat: "", read: unreadableRefGit{failCurrentBranch: true}},
 		{name: "kept branch head unreadable", seat: stopSeat.Branch, read: unreadableRefGit{failRev: "refs/heads/" + stopSeat.Branch}},
+		{name: "HEAD unreadable on a clean worktree", seat: stopSeat.Branch, read: unreadableRefGit{failRev: "HEAD"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
