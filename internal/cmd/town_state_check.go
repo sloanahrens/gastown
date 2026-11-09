@@ -61,9 +61,18 @@ type townStateCheckEnv struct {
 }
 
 func runTownStateCheck(cmd *cobra.Command, _ []string) error {
-	record, _ := cmd.Flags().GetBool("record-baseline")
-	force, _ := cmd.Flags().GetBool("force")
-	asJSON, _ := cmd.Flags().GetBool("json")
+	record, err := cmd.Flags().GetBool("record-baseline")
+	if err != nil {
+		return err
+	}
+	force, err := cmd.Flags().GetBool("force")
+	if err != nil {
+		return err
+	}
+	asJSON, err := cmd.Flags().GetBool("json")
+	if err != nil {
+		return err
+	}
 	return runTownStateCheckIn(cmd.Context(), townStateCheckEnv{
 		record:   record,
 		force:    force,

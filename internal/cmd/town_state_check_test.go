@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/townstate"
 )
 
@@ -178,5 +179,16 @@ func TestDayOneCommandResultRefusesACommandThatDidNotStart(t *testing.T) {
 	}
 	if out != "" || exit != 0 {
 		t.Errorf("out = %q exit = %d, want nothing from a command that did not start", out, exit)
+	}
+}
+
+// TestRunTownStateCheckRefusesAFlagItCannotRead drives the flag reads: a command
+// without the check's flags defined refuses with the flag's name before it looks
+// for a town or runs any check, rather than reading the flag as false.
+func TestRunTownStateCheckRefusesAFlagItCannotRead(t *testing.T) {
+	t.Parallel()
+	err := runTownStateCheck(&cobra.Command{Use: "check"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "record-baseline") {
+		t.Fatalf("runTownStateCheck error = %v, want a refusal naming the flag it cannot read", err)
 	}
 }
