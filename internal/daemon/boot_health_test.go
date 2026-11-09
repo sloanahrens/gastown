@@ -8,16 +8,19 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
-// bootTestTimeout is the per-probe timeout for tests whose probes answer at
-// once. They never wait on it, so it is long enough that a loaded host cannot
-// push a healthy probe past it.
-const bootTestTimeout = 10 * time.Second
+// bootTestTimeout is the per-probe timeout the tests give bootHealth. Every
+// test runs it on a fake clock, and only advancing that clock fires it, so no
+// test waits on this value in real time.
+const bootTestTimeout = 20 * time.Millisecond
 
-// bootHungTimeout is the per-probe timeout for the one test that waits for a
-// hung probe to time out.
-const bootHungTimeout = 20 * time.Millisecond
+// bootHangGuard bounds each wait in the hung-probe test. It is a hang guard
+// only: the waits end on their event, and a guard that fires means the event
+// never came.
+const bootHangGuard = 10 * time.Second
 
 // fakeProbe answers while up is set and counts its calls.
 type fakeProbe struct {
@@ -37,12 +40,13 @@ func (f *fakeProbe) probe(name string) bootProbe {
 	return bootProbe{Name: name, Check: f.check}
 }
 
-func mustBootHealth(t *testing.T, probes []bootProbe, timeout time.Duration) *bootHealth {
+func mustBootHealth(t *testing.T, probes []bootProbe, clk clockwork.Clock) *bootHealth {
 	t.Helper()
-	h, err := newBootHealth(probes, timeout)
+	h, err := newBootHealth(probes, bootTestTimeout)
 	if err != nil {
 		t.Fatalf("newBootHealth: %v", err)
 	}
+	h.clock = clk
 	return h
 }
 
@@ -92,7 +96,7 @@ func TestBootHealthHoldsUntilEveryProbeAnswers(t *testing.T) {
 				f.up.Store(p.up)
 				set = append(set, f.probe(p.name))
 			}
-			h := mustBootHealth(t, set, bootTestTimeout)
+			h := mustBootHealth(t, set, clockwork.NewFakeClock())
 			if got := h.Unhealthy(context.Background()); got != tt.want {
 				t.Fatalf("Unhealthy = %q, want %q", got, tt.want)
 			}
@@ -105,7 +109,7 @@ func TestBootHealthLatchesAfterTheFirstHealthyReading(t *testing.T) {
 	ctx := context.Background()
 	docker := &fakeProbe{}
 	docker.up.Store(true)
-	h := mustBootHealth(t, []bootProbe{docker.probe("docker")}, bootTestTimeout)
+	h := mustBootHealth(t, []bootProbe{docker.probe("docker")}, clockwork.NewFakeClock())
 	if got := h.Unhealthy(ctx); got != "" {
 		t.Fatalf("first healthy reading = %q, want \"\"", got)
 	}
@@ -138,7 +142,7 @@ func TestBootHealthErrorAndPanicAreNotAnswering(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := mustBootHealth(t, []bootProbe{tt.probe, ready.probe("ready")}, bootTestTimeout)
+			h := mustBootHealth(t, []bootProbe{tt.probe, ready.probe("ready")}, clockwork.NewFakeClock())
 			want := "waiting for " + tt.probe.Name
 			for range 2 {
 				if got := h.Unhealthy(context.Background()); got != want {
@@ -164,13 +168,32 @@ func TestBootHealthHungProbeIsNotRunAgain(t *testing.T) {
 		<-release
 		return nil
 	}}
-	h := mustBootHealth(t, []bootProbe{hung}, bootHungTimeout)
+	clk := clockwork.NewFakeClock()
+	h := mustBootHealth(t, []bootProbe{hung}, clk)
 	const rounds = 5
-	if got := h.Unhealthy(context.Background()); got != "waiting for forgejo" {
-		t.Fatalf("first Unhealthy = %q, want \"waiting for forgejo\"", got)
-	}
+	first := make(chan string, 1)
+	go func() { first <- h.Unhealthy(context.Background()) }()
 	// The first run is inside its Check now, and it stays there until release.
-	<-started
+	select {
+	case <-started:
+	case <-time.After(bootHangGuard): //testpolicy:allow no-sleep — a hang guard only: the probe's start is the event the test waits for, and a probe that never starts fails here rather than hanging the test
+		t.Fatal("hung probe never started")
+	}
+	// The first call waits on the fake clock's timeout, so advance it past.
+	guard, cancel := context.WithTimeout(context.Background(), bootHangGuard) //testpolicy:allow no-sleep — a hang guard only: the timer's registration is the event the test waits for, and a call that never waits fails here rather than hanging the test
+	defer cancel()
+	if err := clk.BlockUntilContext(guard, 1); err != nil {
+		t.Fatalf("first Unhealthy never set its timeout: %v", err)
+	}
+	clk.Advance(bootTestTimeout)
+	select {
+	case got := <-first:
+		if got != "waiting for forgejo" {
+			t.Fatalf("first Unhealthy = %q, want \"waiting for forgejo\"", got)
+		}
+	case <-time.After(bootHangGuard): //testpolicy:allow no-sleep — a hang guard only: the timeout's expiry is the event the call returns on, and a call that never returns fails here rather than hanging the test
+		t.Fatal("first Unhealthy never returned after its timeout")
+	}
 	for range rounds - 1 {
 		if got := h.Unhealthy(context.Background()); got != "waiting for forgejo" {
 			t.Fatalf("Unhealthy = %q, want \"waiting for forgejo\"", got)
@@ -183,7 +206,7 @@ func TestBootHealthHungProbeIsNotRunAgain(t *testing.T) {
 
 func TestBootHealthEmptySetIsHealthy(t *testing.T) {
 	t.Parallel()
-	h := mustBootHealth(t, nil, bootTestTimeout)
+	h := mustBootHealth(t, nil, clockwork.NewFakeClock())
 	if got := h.Unhealthy(context.Background()); got != "" {
 		t.Fatalf("empty set Unhealthy = %q, want \"\"", got)
 	}
@@ -193,7 +216,7 @@ func TestBootHealthConcurrentCallersAgree(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	docker, forgejo := &fakeProbe{}, &fakeProbe{}
-	h := mustBootHealth(t, []bootProbe{docker.probe("docker"), forgejo.probe("forgejo")}, bootTestTimeout)
+	h := mustBootHealth(t, []bootProbe{docker.probe("docker"), forgejo.probe("forgejo")}, clockwork.NewFakeClock())
 	// Both probes are down, so this is the waiting side of the transition, and
 	// it happens before any caller starts.
 	if got := h.Unhealthy(ctx); got != "waiting for docker, forgejo" {

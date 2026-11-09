@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jonboulle/clockwork"
 )
 
 // bootProbe is one named check that a piece of infrastructure is answering.
@@ -28,6 +30,10 @@ type bootHealth struct {
 	probes  []bootProbe
 	timeout time.Duration
 
+	// clock times each probe's wait. newBootHealth sets the real clock; a test
+	// sets a fake one, so the test decides when a probe times out.
+	clock clockwork.Clock
+
 	// running[i] is set while probe i's last run is still inside its Check. A
 	// probe that never returns keeps its flag, so a later call counts it as not
 	// answering instead of starting another goroutine for it.
@@ -47,6 +53,7 @@ func newBootHealth(probes []bootProbe, timeout time.Duration) (*bootHealth, erro
 	return &bootHealth{
 		probes:  probes,
 		timeout: timeout,
+		clock:   clockwork.NewRealClock(),
 		running: make([]atomic.Bool, len(probes)),
 	}, nil
 }
@@ -110,12 +117,12 @@ func (b *bootHealth) answers(ctx context.Context, i int) bool {
 		}()
 		answered = b.probes[i].Check(ctx) == nil
 	}()
-	timer := time.NewTimer(b.timeout)
+	timer := b.clock.NewTimer(b.timeout)
 	defer timer.Stop()
 	select {
 	case ok := <-done:
 		return ok
-	case <-timer.C:
+	case <-timer.Chan():
 		return false
 	}
 }
