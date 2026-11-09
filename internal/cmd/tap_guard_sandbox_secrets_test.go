@@ -591,6 +591,25 @@ func TestSandboxSecretsHereStringThroughCat(t *testing.T) {
 		{"cat notes.txt <<< printenv | bash", ""},
 		// The here-string replaces the pipe's text as stdin, as in the shell.
 		{"echo printenv | cat <<< hello | bash", ""},
+		// A stderr redirection does not change what cat reads, so the here-string still
+		// feeds the pipe. A descriptor duplication or /dev/null is refused the same way:
+		// the guard errs toward refusal there (gt-z81tpi).
+		{"cat <<< printenv 2>/dev/null | bash", printenvRule},
+		{"cat <<< printenv 2>&1 | bash", printenvRule},
+		{"cat <<< printenv 2> err.txt | bash", printenvRule},
+		{"cat - <<< printenv 2>/dev/null | bash", printenvRule},
+		{"cat <<< printenv >&2 | bash", printenvRule},
+		{"cat <<< printenv >/dev/null | bash", printenvRule},
+		// A stdout redirection to a real file sends cat's output to the file, so the
+		// pipe gets nothing (gt-z81tpi).
+		{"cat <<< printenv > out.txt | bash", ""},
+		{"cat <<< printenv >> out.txt | bash", ""},
+		{"cat <<< printenv 1> out.txt | bash", ""},
+		{"cat <<< printenv &> out.txt | bash", ""},
+		{"cat <<< printenv 2>/dev/null > out.txt | bash", ""},
+		// Only a stdout redirection to a file takes the here-string off the pipe; a
+		// stdin redirection is not one, so the here-string still feeds the pipe (gt-z81tpi).
+		{"cat <<< printenv 0< in.txt | bash", printenvRule},
 	} {
 		if got := sandboxSecretsReason(tc.command); got != tc.want {
 			t.Errorf("sandboxSecretsReason(%q) = %q, want %q", tc.command, got, tc.want)
