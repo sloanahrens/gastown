@@ -717,9 +717,18 @@ func TestSandboxSecretsSubstitutionHeredocBodies(t *testing.T) {
 		{"unterminated tag", "x=\"$(cat <<'BEAD'\nprintenv\n)\"", nil},
 		{"nested operator is data", "x=\"$(cat <<'A'\ncat <<'B'\nprintenv\nB\nA\n)\"", []string{"cat <<'B'\nprintenv\nB\nA\n"}},
 	} {
-		got := sandboxSecretsSubstitutionHeredocs(tc.command)
+		script, err := shellparse.Parse(tc.command)
+		if err != nil {
+			// The walk refuses a command the parser cannot read before it asks for
+			// its bodies, so the refusal and its reason are what the row pins.
+			if reason := sandboxSecretsReason(tc.command); !strings.Contains(reason, "cannot be read") {
+				t.Errorf("%s: unreadable %q: sandboxSecretsReason = %q, want the cannot-be-read refusal", tc.name, tc.command, reason)
+			}
+			continue
+		}
+		got := sandboxSecretsParsedSubstitutionHeredocs(tc.command, script)
 		if !slices.Equal(got, tc.want) {
-			t.Errorf("%s: sandboxSecretsSubstitutionHeredocs(%q) = %q, want %q", tc.name, tc.command, got, tc.want)
+			t.Errorf("%s: sandboxSecretsParsedSubstitutionHeredocs(%q) = %q, want %q", tc.name, tc.command, got, tc.want)
 		}
 	}
 }
@@ -1285,10 +1294,15 @@ func TestSandboxSecretsJudgesSubstitutionOutputTheLineRuns(t *testing.T) {
 // so the format is pinned here rather than inferred from the body alone.
 func TestSandboxSecretsSubstitutionHeredocTextFormat(t *testing.T) {
 	t.Parallel()
-	got := sandboxSecretsSubstitutionHeredocs("x=\"$(cat <<'EOF'\nprintenv\nEOF\n)\"")
+	command := "x=\"$(cat <<'EOF'\nprintenv\nEOF\n)\""
+	script, err := shellparse.Parse(command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := sandboxSecretsParsedSubstitutionHeredocs(command, script)
 	want := []string{"printenv\nEOF\n"}
 	if !slices.Equal(got, want) {
-		t.Errorf("sandboxSecretsSubstitutionHeredocs = %q, want %q", got, want)
+		t.Errorf("sandboxSecretsParsedSubstitutionHeredocs = %q, want %q", got, want)
 	}
 }
 
@@ -1427,4 +1441,139 @@ func TestSandboxSecretsRefusesUnreadableOutputAtDepth(t *testing.T) {
 			}
 		})
 	}
+}
+
+// gt-l5pbgs: a construct header's arithmetic expansion is read from the parse. A "$((" body
+// is judged as written, so its commands are judged as they are in a segment word. A "$["
+// runs nothing, so its body is not judged, though a substitution inside it still is. A
+// "$(" in a header is judged as written.
+func TestSandboxSecretsHeaderArithmeticVerdicts(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		refuse  bool
+	}{
+		{"a $(( )) in a for list runs its body", "for x in $((printenv)); do echo $x; done", true},
+		{"a $(( )) in a [[ ]] runs its body", "[[ $((printenv)) ]]", true},
+		{"a $(( )) in a case word runs its body", "case $((printenv)) in *) ;; esac", true},
+		{"a $[ ] in a for list runs nothing", "for x in $[printenv]; do echo $x; done", false},
+		{"a $[ ] in a [[ ]] runs nothing", "[[ $[printenv] ]]", false},
+		{"a substitution inside a $[ ] in a for list is judged", "for x in $[$(printenv)]; do echo $x; done", true},
+		{"a $( ) in a for list is judged", "for x in $(printenv); do echo $x; done", true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if got := reason != ""; got != tt.refuse {
+				t.Errorf("sandboxSecretsReason(%q) = %q, refused = %v, want %v", tt.command, reason, got, tt.refuse)
+			}
+		})
+	}
+}
+
+// gt-l5pbgs ruled these verdicts intentional flips from refuse to allow. The walk
+// judges a command the parser reads on its parsed substitution bodies, so a
+// command the old text scanner refused as unreadable is judged on the body the
+// shell runs. Each class has a twin whose real body prints the environment and
+// stays refused, so the pin cannot hide a loosening. The classes are generated
+// by TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies.
+func TestSandboxSecretsParserReadableCommandsAreJudgedOnTheirBodies(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"a case pattern close paren inside a substitution, data body", "x=$(case printenv in *) ;; esac)", ""},
+		{"a case pattern close paren inside a substitution, a real printenv body", "x=$(case a in *) printenv ;; esac)", "environment"},
+		{"a backquote inside a for-in substitution, data body", "for x in $(echo `echo hi`); do echo $x; done", ""},
+		{"a backquote inside a for-in substitution, a real printenv body", "for x in $(echo `printenv`); do echo $x; done", "environment"},
+		{"a backquote inside a double-paren, data body", "echo \"$((`echo \\`echo hi\\``))\"", ""},
+		{"a backquote inside a double-paren, a real printenv body", "echo \"$((`echo \\`printenv\\``))\"", "environment"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason := sandboxSecretsReason(tt.command)
+			if tt.want == "" && reason != "" {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want allow", tt.command, reason)
+			}
+			if tt.want != "" && !strings.Contains(reason, tt.want) {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want a reason containing %q", tt.command, reason, tt.want)
+			}
+		})
+	}
+}
+
+// TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies generates the three flip
+// classes of gt-l5pbgs, each crossed with a body word the shell runs, so a flip
+// beyond the pinned rows cannot pass unseen. Each generated command is parsed, and
+// its substitution bodies are the parse's own (sandboxSecretsParsedSubstitutions),
+// judged on their own:
+//   - a command the walk allows must have every parsed body also allowed on its own,
+//     so no verdict is loosened past what the body earns;
+//   - a command whose body prints the environment must be refused;
+//   - a data body must stay allowed, so the property is not met by refusing all.
+//
+// "BQ" stands for a backquote and "BODY" for the body word.
+func TestSandboxSecretsFlipClassesAreJudgedOnTheirBodies(t *testing.T) {
+	t.Parallel()
+	shapes := []string{
+		// A case pattern's close paren inside a dollar-paren body, the body in an arm.
+		"x=$(case a in *) BODY ;; esac)",
+		"x=$(case printenv in *) BODY ;; esac)",
+		// A backquote inside a dollar-double-paren, quoted and unquoted.
+		`echo "$((BQecho \BQBODY\BQBQ))"`,
+		`echo $((BQecho \BQBODY\BQBQ))`,
+		// A backquote inside a for-in or case header substitution.
+		"for x in $(echo BQBODYBQ); do echo $x; done",
+		`for x in "$(echo BQBODYBQ)"; do echo $x; done`,
+		"case $(echo BQBODYBQ) in *) ;; esac",
+	}
+	bodies := []struct {
+		word              string
+		data              bool // runs nothing secret, so every shape allows it
+		printsEnvironment bool
+	}{
+		{"hi", true, false},
+		{"echo", true, false},
+		{"cat .env.local", false, false},
+		{"printenv", false, true},
+		{"env", false, true},
+		{"export -p", false, true},
+	}
+	generated, allowed := 0, 0
+	for _, shape := range shapes {
+		for _, body := range bodies {
+			fill := strings.NewReplacer("BQ", "`", "BODY", body.word)
+			command := fill.Replace(shape)
+			generated++
+			script, err := shellparse.Parse(command)
+			if err != nil {
+				t.Fatalf("shellparse.Parse(%q) = %v, want the generated command to parse", command, err)
+			}
+			parsed := sandboxSecretsParsedSubstitutions(command, script)
+			if len(parsed) == 0 {
+				t.Fatalf("shellparse.Parse(%q) yields no substitution body, so the property is vacuous", command)
+			}
+			reason := sandboxSecretsReason(command)
+			if body.printsEnvironment && reason == "" {
+				t.Errorf("sandboxSecretsReason(%q) allows, but its body %q prints the environment", command, body.word)
+			}
+			if body.data && reason != "" {
+				t.Errorf("sandboxSecretsReason(%q) = %q, want a data body allowed", command, reason)
+			}
+			if reason != "" {
+				continue
+			}
+			allowed++
+			for _, judged := range parsed {
+				if on := sandboxSecretsReason(judged); on != "" {
+					t.Errorf("sandboxSecretsReason(%q) allows, but its parsed body %q is refused on its own: %q", command, judged, on)
+				}
+			}
+		}
+	}
+	if allowed == 0 {
+		t.Fatalf("no generated command of %d is allowed, so the property is vacuous", generated)
+	}
+	t.Logf("generated %d commands, %d allowed", generated, allowed)
 }
