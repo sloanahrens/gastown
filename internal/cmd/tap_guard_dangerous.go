@@ -553,7 +553,7 @@ func dangerousHeredocBodies(script shellparse.Script) []string {
 // is read by the process substitution's command. The text inside the parens is
 // cut out and parsed as the script it is, and judged like any other
 // substitution. Only an unquoted word is read: a quoted "<(...)" is text the
-// shell passes through (gt-lx8i8).
+// shell passes through (gt-lx8i8). Kept until shellparse reports these: gt-70q8j2.
 func dangerousRecoveredSubs(script shellparse.Script) []shellparse.Script {
 	var subs []shellparse.Script
 	var recover func(s shellparse.Script)
@@ -1969,6 +1969,8 @@ func quotedDollarParen(dollar, paren, quote rune) bool {
 // at rune i of runes closes within command. closingDoubleQuote skips a
 // substitution that closes whole; spaceOutShellOperators reads one flat only
 // when it does not, so the two agree on where the quoted word ends (gt-l18zp).
+// Kept on the text answer: spaceOutShellOperators is shared by seven guards and
+// no follow-up bead is planned for it.
 func quotedSubstitutionCloses(command string, runes []rune, i int) bool {
 	from := len(string(runes[:i+2])) // the byte just past the "("
 	return closingParen(command, from, heredocBodiesFrom(command, from)) >= 0
