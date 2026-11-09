@@ -1364,6 +1364,41 @@ func TestTownStateSeedCutoverRecordIsWrittenToTheClaim(t *testing.T) {
 	}
 }
 
+// TestTownStateSeedCopySecondsExcludesVerify: copy_seconds times the copy alone. The
+// copy is the first exec; the fake clock moves ten seconds during it and an hour
+// during every exec after it (the verify, the settings steps and the record), so a
+// window that runs to the record's write comes out over an hour long.
+func TestTownStateSeedCopySecondsExcludesVerify(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, kube, out := cutoverSession(t, town)
+	clock := &manualClock{at: time.Date(2026, 11, 9, 6, 40, 0, 0, time.UTC)}
+	env.now = clock.now
+	execs := 0
+	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town,
+		run: func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+			execs++
+			if execs == 1 {
+				clock.at = clock.at.Add(10 * time.Second)
+			} else {
+				clock.at = clock.at.Add(time.Hour)
+			}
+			return kube.run(ctx, args, stdin, stdout, stderr)
+		}}
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("live seed: %v\n%s", err, out.String())
+	}
+	rec := readJSONFile(t, filepath.Join(fv.dir, filepath.FromSlash(cutoverRecordRel)))
+	if secs, _ := rec["copy_seconds"].(float64); secs != 10 {
+		t.Errorf("copy_seconds = %v, want 10: the copy alone, without the verify steps", rec["copy_seconds"])
+	}
+}
+
+// manualClock reads the instant it holds, so a test sets how long each step takes.
+type manualClock struct{ at time.Time }
+
+func (c *manualClock) now() time.Time { return c.at }
+
 // TestTownStateSeedCutoverRecordFailureUnwinds: a record that does not reach the
 // claim, or a claim that does not hold it afterwards, is removed from the claim,
 // and the run exits non-zero naming the claim as partial.

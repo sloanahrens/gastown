@@ -391,6 +391,8 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	if err != nil {
 		return fmt.Errorf("stream into claim %s: %w", seedClaim, err)
 	}
+	// The copy window closes when the copy returns, before any verify step.
+	copied := env.clock().Sub(start)
 	fmt.Fprintln(env.out, sum.String())
 
 	// The verify runs before the settings step, so the claim holds only the
@@ -409,7 +411,7 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 		if err := seedCutoverStep(env, cutover); err != nil {
 			return err
 		}
-		if err := seedCutoverRecord(env, start); err != nil {
+		if err := seedCutoverRecord(env, copied); err != nil {
 			return err
 		}
 	}
@@ -684,17 +686,17 @@ func seedCutoverStep(env townStateSeedEnv, c seedCutover) error {
 
 // seedCutoverRecord writes the cut-over record into the claim, after the daemon
 // verify and the settings verify have both passed. The record is one more file
-// through the settings stream, so the host tree is not written. Its time is the
-// end of the copy window, which runs from start, the copy's first read, to here.
-// A record that does not reach the claim, or a claim that does not hold it
-// afterwards, is removed from the claim.
-func seedCutoverRecord(env townStateSeedEnv, start time.Time) error {
-	end := env.clock()
+// through the settings stream, so the host tree is not written. Its cutover_at is
+// the time of this write; copied is the copy window, from the copy's first read to
+// the copy's return, so the verify steps are not in it. A record that does not reach
+// the claim, or a claim that does not hold it afterwards, is removed from the claim.
+func seedCutoverRecord(env townStateSeedEnv, copied time.Duration) error {
+	at := env.clock()
 	encode := encodeRecord
 	if env.encode != nil {
 		encode = env.encode
 	}
-	data, err := encode(cutoverRecord{CutoverAt: end.UTC().Format(time.RFC3339), Volume: seedClaim, CopySeconds: end.Sub(start).Seconds()})
+	data, err := encode(cutoverRecord{CutoverAt: at.UTC().Format(time.RFC3339), Volume: seedClaim, CopySeconds: copied.Seconds()})
 	if err != nil {
 		return seedCutoverUnwind(env, fmt.Errorf("encoding the cut-over record: %w", err))
 	}
