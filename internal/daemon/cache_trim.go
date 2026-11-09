@@ -79,6 +79,16 @@ const (
 	// rerun applies next is not racing that delete.
 	cacheTrimDeleteTimeout = 60 * time.Second
 
+	// cacheTrimListerBudget bounds, together, the waits for the lister Jobs to
+	// complete in one pass. Every claim with no running pod is read through its
+	// own lister Job, and they share this one budget, so a pass with many such
+	// claims waits for them no longer than one trim Job's wait; a claim read once
+	// the budget is spent is not read this pass and is judged again soon. The
+	// pass runs under diskMaintRunTimeout and its trim Job waits up to
+	// cacheTrimWaitTimeout after the listing, so one wait's worth is what the
+	// listings may take.
+	cacheTrimListerBudget = cacheTrimWaitTimeout
+
 	// cacheTrimJobNameMax is the most a Kubernetes object name holds. A Job
 	// name of a longer claim would be refused at apply, so it is shortened in
 	// one place (cacheTrimJobName) rather than at every caller.
@@ -354,6 +364,9 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 	// are the same for every claim, so two claims trimming in one namespace
 	// would delete each other's objects; the second is refused.
 	trimmed := map[string]string{}
+	// The lister Jobs of this pass share one deadline, read from the daemon's
+	// clock, so the waits on them end together (cacheTrimListerBudget).
+	listerDeadline := d.clk().Now().Add(cacheTrimListerBudget)
 	verdict := true
 	for _, claim := range claims {
 		found := namespaces[claim.ClaimName]
@@ -371,7 +384,7 @@ func (d *Daemon) cacheTrim(ctx context.Context, mode string) bool {
 			trimImage = valuesImage
 		}
 		for _, namespace := range found {
-			if !d.cacheTrimClaim(ctx, kubeconfig, claim, trimImage, namespace, capBytes, mode == agentconfig.DiskMaintenanceModeApply, trimmed) {
+			if !d.cacheTrimClaim(ctx, kubeconfig, claim, trimImage, namespace, capBytes, mode == agentconfig.DiskMaintenanceModeApply, trimmed, listerDeadline) {
 				verdict = false
 			}
 		}
@@ -535,14 +548,16 @@ func cacheTrimOverTheCap(used, capBytes int64) bool {
 // a running pod that mounts the claim there, or through the lister Job when no
 // running pod does, builds the trim, and in apply mode applies it. image is the
 // image the Job runs, which the pass resolved for the whole pass; trimmed is the
-// namespace each claim this pass already trims in, which the claim joins.
+// namespace each claim this pass already trims in, which the claim joins;
+// listerDeadline is the pass's shared deadline for the lister Jobs.
 //
 // It reports whether this claim reached a verdict. A read that failed, a list
-// that does not fit the claim, an apply that failed, or a dry run with no
-// running pod to read through reports false, so the pass records a retry instead
-// of the full interval. A claim the config refuses, and a listing at or under the
-// cap, are verdicts.
-func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string) bool {
+// that does not fit the claim, an apply that failed, no running pod to read the
+// free space through for a claim-carried list, or a dry run with no running pod
+// to read through reports false, so the pass records a retry instead of the full
+// interval. A claim no pod holds at all is cleared and reports false too. A
+// claim the config refuses, and a listing at or under the cap, are verdicts.
+func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, capBytes int64, apply bool, trimmed map[string]string, listerDeadline time.Time) bool {
 	sandboxes, sources, err := d.cacheTrimPods(ctx, kubeconfig, namespace, claim.ClaimName)
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the pods that mount it could not be read: %v; nothing trimmed", claim.ClaimName, namespace, err)
@@ -552,23 +567,25 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	switch {
 	case len(sources) > 0:
 		listing, err = d.cacheTrimListing(ctx, kubeconfig, sources[0])
+	case sandboxes == 0:
+		// No pod holds the claim at all, in either mode: nothing mounts the claim
+		// the completed trim measured, so its item describes nothing this pass can
+		// judge and is cleared. There is no listing to read, so no lister Job is
+		// applied for it.
+		d.cacheTrimNoOp.clear(cacheTrimNoOpKey(namespace, claim.ClaimName))
+		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: no running pod mounts it, so its listing cannot be read (%d pod(s) hold it); nothing trimmed", claim.ClaimName, namespace, sandboxes)
+		return false
 	case !apply:
 		// The lister Job is an apply, and a dry run applies nothing, so a claim
-		// no running pod mounts is not read here. No pod holds the claim at all
-		// means nothing mounts the claim the completed trim measured: its item
-		// describes nothing this pass can judge, so it is cleared. Pods that hold
-		// the claim without one running leave the item, since a later trim can
-		// measure the claim.
-		if sandboxes == 0 {
-			d.cacheTrimNoOp.clear(cacheTrimNoOpKey(namespace, claim.ClaimName))
-		}
+		// that pods hold without one running is not read here. Its item stays:
+		// a later trim can measure the claim.
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: no running pod mounts it, so its listing cannot be read in a dry run (%d pod(s) hold it); nothing trimmed", claim.ClaimName, namespace, sandboxes)
 		return false
 	default:
-		// No running pod mounts the claim, so the listing comes from the lister
-		// Job: a read-only Job whose log is the trim-list output the exec route
-		// reads. A claim that is stopped with its sandboxes is read this way.
-		listing, err = d.cacheTrimListerListing(ctx, kubeconfig, claim, image, namespace)
+		// Pods hold the claim without one running, so the listing comes from the
+		// lister Job: a read-only Job whose log is the trim-list output the exec
+		// route reads. A claim whose sandboxes are stopped is read this way.
+		listing, err = d.cacheTrimListerListing(ctx, kubeconfig, claim, image, namespace, listerDeadline)
 	}
 	if err != nil {
 		d.cacheTrimLogf("disk_maintenance: cache trim %s in %s: the listing could not be read: %v; nothing trimmed", claim.ClaimName, namespace, err)
@@ -622,13 +639,18 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 	// leaves the room unknown and the trim still runs -- a DELIBERATE fail-open:
 	// the Job's writer measures the free space again and refuses a list that
 	// will not fit, so skipping this early check loses the clearer refusal, not
-	// the guard. The unknown line is held to one an hour like a refusal. With no
-	// running pod there is no df to run, so the room is unknown the same way.
+	// the guard. The unknown line is held to one an hour like a refusal.
+	//
+	// With no running pod there is no df to read the room through, and the room
+	// is what this check judges, so that is a refusal, not an unknown: the claim
+	// route trims nothing, and the pass retries soon, since a sandbox may start.
 	if m.Route() == cachevol.TrimRouteClaim {
-		reading, err := cacheTrimDfReading{}, errors.New("no running pod mounts the claim to read its free space through")
-		if len(sources) > 0 {
-			reading, err = d.cacheTrimDf(ctx, kubeconfig, sources[0])
+		if len(sources) == 0 {
+			d.cacheTrimLogKeyed("cache_trim_no_room_read:"+namespace+"/"+claim.ClaimName,
+				"disk_maintenance: cache trim %s in %s: no running pod mounts the claim to read its free space through; nothing trimmed", claim.ClaimName, namespace)
+			return false
 		}
+		reading, err := d.cacheTrimDf(ctx, kubeconfig, sources[0])
 		if err != nil {
 			d.cacheTrimLogKeyed("cache_trim_free_unknown:"+namespace+"/"+claim.ClaimName,
 				"disk_maintenance: cache trim %s in %s: free space unknown: %v; trimming the claim route without the fit check", claim.ClaimName, namespace, err)
@@ -672,7 +694,17 @@ func (d *Daemon) cacheTrimClaim(ctx context.Context, kubeconfig string, claim ca
 // its template is immutable. The Job is deleted once its log is read, or once
 // the read has failed. A Job that does not complete, or a log that does not
 // parse, is an error: the pass never trims from a partial listing.
-func (d *Daemon) cacheTrimListerListing(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string) ([]cachevol.Entry, error) {
+//
+// The wait for the Job to complete is bounded by listerDeadline, the pass's
+// shared deadline: a read that starts once it has passed is refused without a
+// cluster call, and a wait runs no longer than what is left of it. The delete of
+// an earlier Job before the apply, and the delete after the read, keep their own
+// cacheTrimDeleteTimeout bounds.
+func (d *Daemon) cacheTrimListerListing(ctx context.Context, kubeconfig string, claim cacheTrimClaim, image, namespace string, listerDeadline time.Time) ([]cachevol.Entry, error) {
+	wait := min(listerDeadline.Sub(d.clk().Now()), cacheTrimWaitTimeout)
+	if wait <= 0 {
+		return nil, errors.New("the pass's budget for the lister Jobs is spent")
+	}
 	jobName := cacheTrimListJobName(claim.ClaimName)
 	m, err := cachevol.BuildListManifest(cachevol.ListJobInput{
 		Name:         jobName,
@@ -696,7 +728,7 @@ func (d *Daemon) cacheTrimListerListing(ctx context.Context, kubeconfig string, 
 			return nil, fmt.Errorf("applying the lister Job %s: %w: %s", jobName, err, cacheTrimFirstLine(string(stderr)))
 		}
 	}
-	timeout := strconv.Itoa(int(cacheTrimWaitTimeout.Seconds())) + "s"
+	timeout := strconv.Itoa(int(math.Ceil(wait.Seconds()))) + "s"
 	_, stderr, err := d.cacheTrimKubectlRun(ctx, kubeconfig, nil, "wait", "--for=condition=complete", "job/"+jobName, "-n", namespace, "--timeout="+timeout)
 	if err != nil {
 		return nil, fmt.Errorf("the lister Job %s did not complete: %s", jobName, d.cacheTrimWaitFailure(ctx, kubeconfig, namespace, jobName, stderr))
