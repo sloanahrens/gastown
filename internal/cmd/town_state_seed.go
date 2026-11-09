@@ -209,7 +209,9 @@ type townStateSeedEnv struct {
 	// now is the command's clock: the cut-over record's time and its copy window.
 	// Nil means time.Now.
 	now func() time.Time
-	out io.Writer
+	// encode writes the cut-over record's bytes. Nil means encodeRecord.
+	encode func(any) ([]byte, error)
+	out    io.Writer
 }
 
 // clock reads the session's clock, time.Now when none is set.
@@ -688,9 +690,13 @@ func seedCutoverStep(env townStateSeedEnv, c seedCutover) error {
 // afterwards, is removed from the claim.
 func seedCutoverRecord(env townStateSeedEnv, start time.Time) error {
 	end := env.clock()
-	data, err := encodeRecord(cutoverRecord{CutoverAt: end.UTC().Format(time.RFC3339), Volume: seedClaim, CopySeconds: end.Sub(start).Seconds()})
+	encode := encodeRecord
+	if env.encode != nil {
+		encode = env.encode
+	}
+	data, err := encode(cutoverRecord{CutoverAt: end.UTC().Format(time.RFC3339), Volume: seedClaim, CopySeconds: end.Sub(start).Seconds()})
 	if err != nil {
-		return fmt.Errorf("encoding the cut-over record: %w", err)
+		return seedCutoverUnwind(env, fmt.Errorf("encoding the cut-over record: %w", err))
 	}
 	file := newSeedCutoverFile(cutoverRecordRel, data)
 	if err := seedCutoverStream(env, []seedCutoverFile{file}); err != nil {

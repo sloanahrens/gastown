@@ -1420,6 +1420,22 @@ func TestTownStateSeedCutoverRecordFailureUnwinds(t *testing.T) {
 	}
 }
 
+// TestTownStateSeedCutoverRecordEncodeFailureIsPartial: a record the encoder
+// refuses is never written, and the claim is named partial for it.
+func TestTownStateSeedCutoverRecordEncodeFailureIsPartial(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	env, fv, _, out := cutoverSession(t, town)
+	env.encode = func(any) ([]byte, error) { return nil, errors.New("encoder refused") }
+	err := runTownStateSeedIn(env)
+	if err == nil || !strings.Contains(err.Error(), "encoding the cut-over record") || !strings.Contains(err.Error(), "partial") {
+		t.Fatalf("live seed = %v, want the claim named partial for the record's encoding\n%s", err, out.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(fv.dir, filepath.FromSlash(cutoverRecordRel))); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the claim holds a cut-over record (stat %v)", statErr)
+	}
+}
+
 // TestTownStateSeedRehearsalWritesNoCutoverRecord: a rehearsal seed leaves no
 // cut-over record in the claim.
 func TestTownStateSeedRehearsalWritesNoCutoverRecord(t *testing.T) {
