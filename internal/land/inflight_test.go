@@ -92,6 +92,7 @@ func TestWorkRunsRefusesARunWhoseTimeIsUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
+		//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
 		if err := os.Chmod(root, 0o700); err != nil {
 			t.Errorf("restoring the root for cleanup: %v", err)
 		}
