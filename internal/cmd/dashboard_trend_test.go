@@ -2,10 +2,12 @@ package cmd
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1842,4 +1844,64 @@ func TestDashboardLandingsNoRowAfterNow(t *testing.T) {
 			t.Errorf("%s at %v is after now %v", row.Bead, row.At.UTC(), now)
 		}
 	}
+}
+
+// A load history on a read-only town is a state, not a failure: the first create
+// the filesystem refuses latches the writer and logs one line, the writer stops
+// trying until the dashboard restarts, and the in-memory history keeps serving
+// the page. The writers that take a create function and their read-only refusal
+// are the ones this covers in the cmd package; the report writers are covered in
+// internal/dashboard.
+func TestDashboardWritersTolerateReadOnly(t *testing.T) {
+	t.Parallel()
+
+	erofs := func(name string) error { return &fs.PathError{Op: "open", Path: name, Err: syscall.EROFS} }
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
+
+	t.Run("append", func(t *testing.T) {
+		t.Parallel()
+		l := newDashLoads(t.TempDir(), func() time.Time { return now })
+		var opens int
+		var logs []string
+		l.openFile = func(name string, _ int, _ fs.FileMode) (*os.File, error) {
+			opens++
+			return nil, erofs(name)
+		}
+		l.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+		for i := range 3 {
+			l.append(now.Add(time.Duration(i)*time.Second), float64(i))
+		}
+		if opens != 1 {
+			t.Errorf("the read-only history was opened %d times, want one attempt", opens)
+		}
+		if len(logs) != 1 {
+			t.Errorf("the read-only history logged %d lines, want one: %q", len(logs), logs)
+		}
+		if pts := l.points(); len(pts) != 3 {
+			t.Errorf("the in-memory history holds %d points, want the 3 appended", len(pts))
+		}
+	})
+
+	t.Run("rewrite", func(t *testing.T) {
+		t.Parallel()
+		l := newDashLoads(t.TempDir(), func() time.Time { return now })
+		var creates int
+		var logs []string
+		l.createTemp = func(dir, pattern string) (*os.File, error) {
+			creates++
+			return nil, erofs(filepath.Join(dir, pattern))
+		}
+		l.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+		l.append(now, 1)
+		l.rewrite(l.points())
+		l.append(now.Add(time.Second), 2)
+		if creates != 1 {
+			t.Errorf("the read-only rewrite created %d files, want one attempt", creates)
+		}
+		if len(logs) != 1 {
+			t.Errorf("the read-only rewrite logged %d lines, want one: %q", len(logs), logs)
+		}
+	})
 }

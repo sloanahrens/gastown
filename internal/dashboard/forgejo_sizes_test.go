@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -539,4 +542,28 @@ func TestForgejoSizeStaleTempFromACrashedRunDoesNotBlock(t *testing.T) {
 	require.Len(t, lines, 1, "the day holds this run's one row, none of the dead run's")
 	_, statErr := os.Stat(stale)
 	assert.True(t, os.IsNotExist(statErr), "the temporary file is gone after the run")
+}
+
+// A size-report directory on a read-only town is a state: the first refused
+// create latches the writer and logs one line, each run still answers with its
+// rows, and no later run tries to create the file again.
+func TestForgejoSizesToleratesReadOnly(t *testing.T) {
+	t.Parallel()
+
+	w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
+	var opens int
+	var logs []string
+	w.openTemp = func(string) (io.WriteCloser, error) {
+		opens++
+		return nil, &fs.PathError{Op: "open", Path: "day.jsonl.tmp", Err: syscall.EROFS}
+	}
+	w.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	for range 2 {
+		rows, err := w.Write(context.Background())
+		require.NoError(t, err)
+		require.Len(t, rows, 1, "a read-only run did not answer with its rows")
+	}
+	assert.Equal(t, 1, opens, "a read-only report directory was tried again after its refusal")
+	assert.Len(t, logs, 1, "a read-only report directory logs one line: %q", logs)
 }

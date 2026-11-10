@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
 // The reader's clock: every fixture file below is written against this instant.
@@ -240,5 +242,41 @@ func TestUsageReaderTellsAnEmptyDayFromAnUnreadableOne(t *testing.T) {
 	// Without the scan's state file there is no scan time to draw.
 	if u.AsOf != "" {
 		t.Errorf("as of = %q, want empty with no state file", u.AsOf)
+	}
+}
+
+// A usage records directory that is not there is the cluster's absence, and the
+// usage pane and the Claude plan pane say so as the reason. A records path that
+// is there but cannot be read as a directory is a failed read, so it keeps the
+// unavailable mark and no reason.
+func TestDashboardUsageAbsentSaysNotInCluster(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	u := newDashUsageReader(root).read(usageReaderNow)
+	if !u.Unavailable || u.Reason != dashboard.NotInClusterReason {
+		t.Errorf("absent records: %+v, want unavailable with the reason", u)
+	}
+	plan := newDashboardClaudePlanReader(root, newDashUsageReader(root), 0).Read(usageReaderNow)
+	if !plan.Unavailable || plan.Reason != dashboard.NotInClusterReason {
+		t.Errorf("absent series and records: plan %+v, want unavailable with the reason", plan)
+	}
+
+	// The records path is a regular file: listing it fails, and the directory is
+	// there, so nothing is absent and no reason is named.
+	root = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".runtime", "usage"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".runtime", "usage", usageRecordsSubdir), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	u = newDashUsageReader(root).read(usageReaderNow)
+	if !u.Unavailable || u.Reason != "" {
+		t.Errorf("unreadable records: %+v, want unavailable and no reason", u)
+	}
+	plan = newDashboardClaudePlanReader(root, newDashUsageReader(root), 0).Read(usageReaderNow)
+	if !plan.Unavailable || plan.Reason != "" {
+		t.Errorf("unreadable records: plan %+v, want unavailable and no reason", plan)
 	}
 }

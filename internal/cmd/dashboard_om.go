@@ -571,11 +571,17 @@ func resolveOMConfig(user omConfig, rigName string, rr omRigRead) (omConfig, str
 // dashboard: what backend it reviews with, how deep, how strict. Empty when
 // there is no home to look in, which every reader of it reads as "no config".
 func omConfigPath() string {
-	home, err := os.UserHomeDir()
+	return omConfigPathIn(os.UserHomeDir)
+}
+
+// omConfigPathIn is omConfigPath with the home directory injected, so a test
+// drives the no-home case without the real one.
+func omConfigPathIn(home func() (string, error)) string {
+	h, err := home()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config", "om", "config.json")
+	return filepath.Join(h, ".config", "om", "config.json")
 }
 
 // read is the panel's whole reading. A reader that fails leaves its part out;

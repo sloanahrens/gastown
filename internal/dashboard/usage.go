@@ -174,6 +174,10 @@ type Usage struct {
 	// Skipped counts the records with no end time, which no window can hold.
 	Skipped     int  `json:"skipped"`
 	Unavailable bool `json:"unavailable,omitempty"`
+	// Reason is the NotInClusterReason when the records directory is absent
+	// where the dashboard runs. Unavailable is set with it, so an older page
+	// still draws the pane as unread; the newer page draws the reason instead.
+	Reason string `json:"reason,omitempty"`
 }
 
 // AggregateUsage folds the records the reader decoded into the payload the page

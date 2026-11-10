@@ -3,6 +3,8 @@ package cmd
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -758,6 +760,12 @@ type loadSample struct {
 type dashLoads struct {
 	path string
 	now  func() time.Time
+	// openFile and createTemp make the history's append and rewrite files. They
+	// are fields so a test refuses the create the way a read-only town does.
+	openFile   func(name string, flag int, perm fs.FileMode) (*os.File, error)
+	createTemp func(dir, pattern string) (*os.File, error)
+	// logf writes the one line a read-only history earns.
+	logf func(format string, args ...any)
 
 	mu  sync.Mutex
 	pts []dashboard.LoadPoint
@@ -765,6 +773,21 @@ type dashLoads struct {
 	// wholesale, so a long-lived run trims it periodically instead of
 	// appending forever (gt-2czgm).
 	sinceRewrite int
+	// readOnly is set by the first create the filesystem refuses as read-only.
+	// The writer stops trying until the dashboard restarts; the in-memory
+	// history keeps serving the page.
+	readOnly bool
+}
+
+// refused handles a create or a directory make that failed. A refusal the
+// filesystem gives as read-only latches the writer and logs once; any other
+// failure is left as it always was, a write that did not land.
+func (l *dashLoads) refused(err error) {
+	if !dashboard.IsReadOnlyErr(err) || l.readOnly {
+		return
+	}
+	l.readOnly = true
+	l.logf("the load history %s is read-only (%v); it is kept in memory until the dashboard restarts", l.path, err)
 }
 
 // loadRewriteEvery is how many appends the writer lets accumulate before it
@@ -774,7 +797,15 @@ type dashLoads struct {
 const loadRewriteEvery = 360
 
 func newDashLoads(townRoot string, now func() time.Time) *dashLoads {
-	l := &dashLoads{path: filepath.Join(constants.TownRuntimePath(townRoot), "dashboard-load.jsonl"), now: now}
+	l := &dashLoads{
+		path:       filepath.Join(constants.TownRuntimePath(townRoot), "dashboard-load.jsonl"),
+		now:        now,
+		openFile:   os.OpenFile,
+		createTemp: os.CreateTemp,
+		logf: func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "dashboard: "+format+"\n", args...)
+		},
+	}
 	read := l.read()
 	l.pts = l.trim(read)
 	if len(read) > 0 {
@@ -794,7 +825,7 @@ func (l *dashLoads) append(at time.Time, load float64) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.pts = l.trim(append(l.pts, dashboard.LoadPoint{At: at, Load: load}))
-	if len(l.pts) == 0 {
+	if len(l.pts) == 0 || l.readOnly {
 		return
 	}
 	l.sinceRewrite++
@@ -804,10 +835,12 @@ func (l *dashLoads) append(at time.Time, load float64) {
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(l.path), 0o755); err != nil {
+		l.refused(err)
 		return
 	}
-	f, err := os.OpenFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := l.openFile(l.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
+		l.refused(err)
 		return
 	}
 	defer func() { _ = f.Close() }()
@@ -859,14 +892,16 @@ func (l *dashLoads) trim(pts []dashboard.LoadPoint) []dashboard.LoadPoint {
 func (l *dashLoads) rewrite(pts []dashboard.LoadPoint) {
 	dir := filepath.Dir(l.path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		l.refused(err)
 		return
 	}
 	var b []byte
 	for _, p := range pts {
 		b = loadLine(b, p)
 	}
-	tmp, err := os.CreateTemp(dir, "dashboard-load-*.jsonl")
+	tmp, err := l.createTemp(dir, "dashboard-load-*.jsonl")
 	if err != nil {
+		l.refused(err)
 		return
 	}
 	name := tmp.Name()

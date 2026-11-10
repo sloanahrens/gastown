@@ -382,6 +382,8 @@ func planStatus(weeklyPct, projectedPct float64) string {
 // claudePlanUnreadWhy is why the plan has no figures, in the page's words.
 func claudePlanUnreadWhy(plan *ClaudePlan, now time.Time) string {
 	switch {
+	case plan.Reason != "":
+		return plan.Reason
 	case plan.Unavailable:
 		return "the status line's samples could not be read"
 	case plan.SampledAt == 0:

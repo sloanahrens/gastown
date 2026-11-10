@@ -703,3 +703,26 @@ func TestDashboardOmPrefilterSkipsLinesThatCannotBeEvents(t *testing.T) {
 		t.Errorf("the prefilter changed the rows:\nfiltered   %+v\nunfiltered %+v", filtered.rejects, unfiltered.rejects)
 	}
 }
+
+// A dashboard with no home directory has no reviewer config to read. That is
+// the cluster's absence, not a failed read: the panel gets the default config,
+// with no threshold set and no unreadable line in its source.
+func TestOMConfigAbsentIsNoConfig(t *testing.T) {
+	t.Parallel()
+
+	noHome := func() (string, error) { return "", errors.New("no home") }
+	path := omConfigPathIn(noHome)
+	if path != "" {
+		t.Fatalf("omConfigPathIn with no home = %q, want no path", path)
+	}
+	if cfg := loadOMConfig(path); cfg.Threshold != nil || cfg.Depth != "" || cfg.Timeout != 0 || cfg.Backend != nil {
+		t.Errorf("no config path loaded %+v, want the zero config", cfg)
+	}
+	cfg, source := resolveOMConfig(loadOMConfig(path), omPanelRig, omRigRead{})
+	if cfg.Threshold != nil {
+		t.Errorf("threshold = %v with no config, want the default", *cfg.Threshold)
+	}
+	if strings.Contains(source, "unreadable") {
+		t.Errorf("source %q names an error for an absent config", source)
+	}
+}

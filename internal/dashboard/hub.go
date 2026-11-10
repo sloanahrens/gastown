@@ -28,14 +28,17 @@ const (
 type Hub struct {
 	cfg Config
 
-	mu       sync.Mutex
-	state    State
-	ring     []Entry
-	seq      int64
-	subs     map[*Sub]struct{}
-	gating   map[string]bool // beads the landing worker is gating right now
-	polecats []Polecat
-	jevGood  map[string]time.Time // battery -> when its line last read good
+	mu    sync.Mutex
+	state State
+	// spendWatch keeps the watch file current from the spend report. It is
+	// touched only by the spend poll, which runs one at a time.
+	spendWatch *spendWatchWriter
+	ring       []Entry
+	seq        int64
+	subs       map[*Sub]struct{}
+	gating     map[string]bool // beads the landing worker is gating right now
+	polecats   []Polecat
+	jevGood    map[string]time.Time // battery -> when its line last read good
 
 	// cloudAt is the last cloud read and cloudMissing whether that machine had
 	// no cloud patrol and no app power line, which is what re-reads one at the
@@ -104,13 +107,15 @@ type Sub struct {
 func NewHub(cfg Config) *Hub {
 	cfg.defaults()
 	return &Hub{
-		cfg:      cfg,
-		subs:     map[*Sub]struct{}{},
-		gating:   map[string]bool{},
-		jevGood:  map[string]time.Time{},
-		listSent: map[string][]byte{},
-		wake:     make(chan struct{}),
-		alerts:   NewAlerter(cfg.Now),
+		cfg:        cfg,
+		state:      State{SpendReason: cfg.SpendReason},
+		spendWatch: &spendWatchWriter{create: createSpendTemp, logf: warnf},
+		subs:       map[*Sub]struct{}{},
+		gating:     map[string]bool{},
+		jevGood:    map[string]time.Time{},
+		listSent:   map[string][]byte{},
+		wake:       make(chan struct{}),
+		alerts:     NewAlerter(cfg.Now),
 		after: func(d time.Duration) (<-chan time.Time, func()) {
 			t := time.NewTimer(d)
 			return t.C, func() { t.Stop() }
@@ -163,7 +168,7 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Mango != nil {
 		start(h.cfg.MangoEvery, h.pollMango)
 	}
-	if h.cfg.Spend != nil {
+	if h.cfg.Spend != nil || h.cfg.SpendHours != nil {
 		start(h.cfg.SpendEvery, h.pollSpend)
 	}
 	if h.cfg.JevSpend != nil {
@@ -1140,7 +1145,12 @@ func (h *Hub) pollTrend() {
 }
 
 func (h *Hub) pollSpend() {
-	sp := h.cfg.Spend()
+	// A tool that is absent where the dashboard runs has no report to read, and
+	// that is not a failed read: the pane carries SpendReason instead.
+	var sp json.RawMessage
+	if h.cfg.Spend != nil {
+		sp = h.cfg.Spend()
+	}
 	var read SpendRead
 	if h.cfg.SpendHours != nil {
 		read = h.cfg.SpendHours()
@@ -1151,20 +1161,23 @@ func (h *Hub) pollSpend() {
 	// nothing, so a failed read leaves the file's own age showing.
 	var writeErr error
 	if len(sp) != 0 {
-		writeErr = writeSpendWatch(h.cfg.WatchDir, sp, h.cfg.Now())
+		writeErr = h.spendWatch.write(h.cfg.WatchDir, sp, h.cfg.Now())
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.cfg.SpendHours != nil {
 		h.state.SpendHours = read.Hours
 		h.state.SpendSkipped = read.Skipped
+		h.state.SpendHoursReason = read.Reason
 	}
 	// The hours move on every poll, so the charts are rebuilt on every poll,
 	// whether or not the spend report answered: a failed report keeps its last
 	// good figures, and the hours are whatever the ledger read gave, or none.
 	if len(sp) == 0 {
 		h.rebuildCostChartsLocked()
-		h.readFailedLocked(SourceSpend, h.cfg.SpendEvery)
+		if h.cfg.Spend != nil {
+			h.readFailedLocked(SourceSpend, h.cfg.SpendEvery)
+		}
 		h.publishLocked()
 		return
 	}

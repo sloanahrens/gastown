@@ -3,6 +3,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +29,52 @@ func TestDashboardClassName(t *testing.T) {
 
 func TestResolveSpendCmdPrefersFlag(t *testing.T) {
 	t.Parallel()
-	if got := resolveSpendCmd("/bin/echo {}"); len(got) != 2 || got[0] != "/bin/echo" {
-		t.Errorf("flag not honored: %v", got)
+	got, reason := resolveSpendCmd("/bin/echo {}")
+	if len(got) != 2 || got[0] != "/bin/echo" || reason != "" {
+		t.Errorf("flag not honored: %v, reason %q", got, reason)
+	}
+}
+
+// A town run where the spend tool and the balance ledger exist only on the Mac
+// says so, as the reason, and a source that is there but does not stat is still
+// run, so its failure is a failed read rather than an absent pane.
+func TestDashboardSpendAbsentSaysNotInCluster(t *testing.T) {
+	t.Parallel()
+	noHome := func() (string, error) { return "", errors.New("no home") }
+	home := func() (string, error) { return t.TempDir(), nil }
+	absent := func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+	present := func(string) (fs.FileInfo, error) { return nil, nil }
+	denied := func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }
+
+	if argv, reason := resolveSpendCmdIn("", noHome, present); argv != nil || reason != dashboard.NotInClusterReason {
+		t.Errorf("no home: argv %v, reason %q; want no argv and %q", argv, reason, dashboard.NotInClusterReason)
+	}
+	if argv, reason := resolveSpendCmdIn("", home, absent); argv != nil || reason != dashboard.NotInClusterReason {
+		t.Errorf("no tool file: argv %v, reason %q; want no argv and %q", argv, reason, dashboard.NotInClusterReason)
+	}
+	if argv, reason := resolveSpendCmdIn("", home, present); len(argv) != 2 || reason != "" {
+		t.Errorf("tool present: argv %v, reason %q; want the tool and no reason", argv, reason)
+	}
+	if argv, reason := resolveSpendCmdIn("", home, denied); len(argv) != 2 || reason != "" {
+		t.Errorf("tool unreadable: argv %v, reason %q; want the tool run and no reason", argv, reason)
+	}
+
+	if read := dashboardSpendHoursIn(noHome)(); read.Reason != dashboard.NotInClusterReason || read.Hours != nil {
+		t.Errorf("no home ledger: %+v; want the reason and no hours", read)
+	}
+	missing := filepath.Join(t.TempDir(), "balance.log")
+	if read := dashboardSpendHoursFrom(missing)(); read.Reason != dashboard.NotInClusterReason || read.Hours != nil {
+		t.Errorf("no ledger: %+v; want the reason and no hours", read)
+	}
+	ledger := filepath.Join(t.TempDir(), "balance.log")
+	if err := os.WriteFile(ledger, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if read := dashboardSpendHoursFrom(ledger)(); read.Reason != "" || len(read.Hours) == 0 {
+		t.Errorf("ledger present: %+v; want hours and no reason", read)
+	}
+	if h := dashboard.NewHub(dashboard.Config{SpendReason: dashboard.NotInClusterReason}); h.State().SpendReason != dashboard.NotInClusterReason {
+		t.Errorf("hub spend reason = %q, want %q", h.State().SpendReason, dashboard.NotInClusterReason)
 	}
 }
 
