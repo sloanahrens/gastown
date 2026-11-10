@@ -2,12 +2,13 @@
 
 package daemon
 
-// The engine prune's two programs run as root inside the runner's dind container:
-// they are shell text, so the only proof of what they run is running the text.
-// This is the integration tier because each case starts sh, which the unit tier
-// forbids. A fake docker on PATH stands in for the engine: it logs each call,
-// prints the canned output named for its verb, and fails for a verb marked to
-// fail (gt-i02983).
+// The engine prune's list program is shell text that runs as root inside the
+// runner's dind container, so the only proof of what it runs is running the text;
+// the remove step is docker commands whose argv the daemon builds, proven here by
+// running that argv against a fake docker. This is the integration tier because
+// each case starts a process, which the unit tier forbids. The fake docker on PATH
+// stands in for the engine: it logs each call, prints the canned output named for
+// its verb, and fails for a verb marked to fail (gt-i02983).
 
 import (
 	"bytes"
@@ -95,77 +96,82 @@ func (f fakeDockerEnv) runProgram(t *testing.T, program string, args ...string) 
 	return stdout.Bytes(), err == nil
 }
 
-// TestCIEngineRemoveProgramRemovesTheNamedItems: the remove program removes the
-// containers, then the images, then the volumes it was passed, prunes the build
-// cache at the cutoff, and prints the three-figure reply with the count.
-func TestIntegrationCIEngineRemoveProgramRemovesTheNamedItems(t *testing.T) {
+// runArgv runs one command with the fake docker first on PATH, returning its
+// stdout and whether it exited zero.
+func (f fakeDockerEnv) runArgv(t *testing.T, argv ...string) ([]byte, bool) {
+	t.Helper()
+	// The program is the fake under f.dir by path: exec.Command resolves a bare
+	// name through this process's PATH, not the child's, and must never reach a
+	// real docker.
+	cmd := exec.Command(filepath.Join(f.dir, "bin", argv[0]), argv[1:]...)
+	cmd.Env = []string{
+		"PATH=" + filepath.Join(f.dir, "bin") + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin",
+		"FAKE_DOCKER_DIR=" + f.dir,
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		t.Logf("%s exited: %v: %s", argv[0], err, stderr.String())
+	}
+	return stdout.Bytes(), err == nil
+}
+
+// TestIntegrationCIEngineRemovalsReachDockerAsGiven: each removal's argv reaches
+// docker as the verb and the ids, nothing else, and docker's output read back
+// names every id removed.
+func TestIntegrationCIEngineRemovalsReachDockerAsGiven(t *testing.T) {
 	f := newFakeDocker(t)
-	root := t.TempDir()
-	const cutoff = "2026-11-09T00:00:00Z"
-	stdout, ok := f.runProgram(t, ciEngineRemoveScript, root, "c1 c2", "sha256:i1", "v1 v2", cutoff)
-	if !ok {
-		t.Fatalf("the remove program failed on a clean engine")
+	plan := ciEnginePlan{
+		containers: []ciEngineContainer{{ID: "c1"}, {ID: "c2"}},
+		images:     []ciEngineImage{{ID: "sha256:i1"}},
+		volumes:    []ciEngineVolume{{Name: "v1"}, {Name: "v2"}},
+	}
+	f.canned(t, "rm", "c1\nc2\n")
+	f.canned(t, "rmi", "Untagged: some:tag\nDeleted: sha256:i1\n")
+	f.canned(t, "volume-rm", "v1\nv2\n")
+	for _, r := range ciEngineRemovals(plan) {
+		out, ok := f.runArgv(t, r.argv...)
+		if !ok {
+			t.Fatalf("the %s removal failed on a clean engine", r.kind)
+		}
+		if missing := ciEngineMissing(r, out); len(missing) != 0 {
+			t.Errorf("the %s removal left %q unreported by docker", r.kind, missing)
+		}
+	}
+	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv("2026-11-09T00:00:00Z")...); !ok {
+		t.Fatalf("the build cache prune failed on a clean engine")
 	}
 	want := []string{
 		"rm c1 c2",
 		"rmi -f sha256:i1",
 		"volume rm v1 v2",
-		"builder prune -af --filter until=" + cutoff,
+		"builder prune -af --filter until=2026-11-09T00:00:00Z",
 	}
 	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("docker calls = %q, want %q", got, want)
 	}
-	reply, err := parseCICacheTrimReply(stdout)
-	if err != nil {
-		t.Fatalf("the reply does not parse: %v: %q", err, stdout)
-	}
-	if reply.removed != 5 {
-		t.Errorf("reply removed = %d, want 5", reply.removed)
-	}
 }
 
-// TestIntegrationCIEngineRemoveProgramSkipsAnEmptyKind: a kind the plan names no
-// item of is not sent to docker at all, so an engine with no volumes to remove
-// never runs a volume removal without names, and the count is the ids passed.
-func TestIntegrationCIEngineRemoveProgramSkipsAnEmptyKind(t *testing.T) {
-	f := newFakeDocker(t)
-	const cutoff = "2026-11-09T00:00:00Z"
-	stdout, ok := f.runProgram(t, ciEngineRemoveScript, t.TempDir(), "", "sha256:i1", "", cutoff)
-	if !ok {
-		t.Fatalf("the remove program failed with an empty container and volume list")
-	}
-	want := []string{
-		"rmi -f sha256:i1",
-		"builder prune -af --filter until=" + cutoff,
-	}
-	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
-		t.Errorf("docker calls = %q, want %q", got, want)
-	}
-	reply, err := parseCICacheTrimReply(stdout)
-	if err != nil {
-		t.Fatalf("the reply does not parse: %v: %q", err, stdout)
-	}
-	if reply.removed != 1 {
-		t.Errorf("reply removed = %d, want 1", reply.removed)
-	}
-}
-
-// TestCIEngineRemoveProgramStopsAtAFailure: a removal that fails stops the program
-// before the rest, prints no reply, and so is a failed run, not a count.
-func TestIntegrationCIEngineRemoveProgramStopsAtAFailure(t *testing.T) {
+// TestIntegrationCIEngineRemovalFailureIsAnExitStatus: a removal docker refuses
+// exits non-zero, which the daemon reads as a failed run; and a removal docker
+// performs only in part is read from its output, not from the ids passed.
+func TestIntegrationCIEngineRemovalFailureIsAnExitStatus(t *testing.T) {
 	f := newFakeDocker(t)
 	f.failing(t, "rmi")
-	stdout, ok := f.runProgram(t, ciEngineRemoveScript, t.TempDir(), "c1", "sha256:i1", "v1", "2026-11-09T00:00:00Z")
-	if ok {
-		t.Fatalf("a failed image removal exited zero")
+	f.canned(t, "rm", "c1\n")
+	plan := ciEnginePlan{containers: []ciEngineContainer{{ID: "c1"}, {ID: "c2"}}, images: []ciEngineImage{{ID: "sha256:i1"}}}
+	removals := ciEngineRemovals(plan)
+	out, ok := f.runArgv(t, removals[0].argv...)
+	if !ok {
+		t.Fatalf("docker rm failed")
 	}
-	if len(stdout) != 0 {
-		t.Errorf("a failed removal printed a reply: %q", stdout)
+	if missing := ciEngineMissing(removals[0], out); !strings.Contains(strings.Join(missing, " "), "c2") {
+		t.Errorf("a container docker did not print is not missing: %q", missing)
 	}
-	for _, call := range f.calls(t) {
-		if strings.HasPrefix(call, "volume rm") || strings.HasPrefix(call, "builder prune") {
-			t.Errorf("the program went on after the failure: %q", call)
-		}
+	if _, ok := f.runArgv(t, removals[1].argv...); ok {
+		t.Fatalf("a refused image removal exited zero")
 	}
 }
 

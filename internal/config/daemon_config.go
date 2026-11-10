@@ -1158,10 +1158,10 @@ type DiskMaintenanceConfig struct {
 	// removes it when nothing uses it. Empty means DiskMaintenanceDefaultCIEnginePruneAge.
 	CIEnginePruneAge string `json:"ci_engine_prune_age,omitempty"` // Go duration such as "48h"
 	// CIEngineKeepRepos names the image repositories the engine prune never
-	// removes, an image also tagged with one included. ci-base is the rollback's
-	// repository, so its images follow the latest-and-predecessor rule instead.
-	// Nil means DiskMaintenanceDefaultCIEngineKeepRepos; an explicit empty list is
-	// refused, because it would leave the base images unprotected.
+	// removes, an image also tagged with one included. ci-base's own rule is in
+	// docs/guides/disk-maintenance.md. Nil means
+	// DiskMaintenanceDefaultCIEngineKeepRepos; an explicit empty list is refused,
+	// because it would leave the base images unprotected.
 	CIEngineKeepRepos []string `json:"ci_engine_keep_repos,omitempty"`
 	// Targets holds the targets with a cadence of their own. A target absent
 	// here keeps the daily window.

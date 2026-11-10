@@ -6,11 +6,13 @@ package daemon
 // the disk maintenance patrol, through the same exec into the dind container and
 // with the same dry-run default as the cache trim.
 //
-// Each run is two execs. The list program prints the engine as JSON. The planner,
-// a pure function over that listing, decides what goes, so the keep rule is tested
-// in-process. The remove program removes only the ids and names the planner named,
-// passed as argv data, and prints the cache trim's three-figure reply. A dry run
-// runs the list program alone. The keep rule is written once, in
+// Each run lists, plans, then removes. The list program prints the engine as
+// JSON. The planner, a pure function over that listing, decides what goes, so the
+// keep rule is tested in-process. The remove step is one docker command per kind
+// the plan names (docker rm, docker rmi -f, docker volume rm), each over that
+// kind's ids as argv with no shell between the plan and docker, and each read back
+// from docker's own output: an id docker did not report removed fails the run. A
+// dry run runs the list program alone. The keep rule is written once, in
 // docs/guides/disk-maintenance.md: read it before changing what is removed.
 //
 // Build cache is not sized in a dry run, since docker has no dry run for it.
@@ -22,6 +24,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,25 +68,82 @@ if [ -n "$volumes" ]; then docker volume inspect $volumes; else printf '[]'; fi
 printf '}\n'
 `
 
-// ciEngineRemoveScript is the remove program. Its arguments are the data root, three
-// space-separated lists (container ids, image ids and volume names, each one the
-// planner validated) and the build cache cutoff. Each list is one docker call over
-// its ids; an empty list is not sent to docker. The first refused removal stops the
-// program (set -e), so the reply is printed only when every named item went, and
-// removed is the number of ids passed.
-const ciEngineRemoveScript = `set -euf
-root=$1; containers=$2; images=$3; volumes=$4; cutoff=$5
-before=$(du -sk "$root" | cut -f1)
-printf '%s\n' $containers | xargs -r docker rm >/dev/null
-printf '%s\n' $images | xargs -r docker rmi -f >/dev/null
-printf '%s\n' $volumes | xargs -r docker volume rm >/dev/null
-docker builder prune -af --filter "until=$cutoff" >/dev/null
-set -- $containers $images $volumes
-after=$(du -sk "$root" | cut -f1)
-echo "before_kib=$before"
-echo "removed=$#"
-echo "after_kib=$after"
-`
+// ciEngineRemoval is one docker command of the remove step: the kind it removes,
+// the argv docker runs (the verb and the plan's ids, nothing else) and the ids
+// docker must report removed for the step to count.
+type ciEngineRemoval struct {
+	kind string
+	argv []string
+	ids  []string
+}
+
+// ciEngineRemovals is the remove step as docker commands: one per kind the plan
+// names, each over that kind's ids as argv. No shell runs and nothing counts: a
+// kind with no ids is not sent, and what was removed is read from docker's output
+// (ciEngineMissing), never from the number of ids passed.
+func ciEngineRemovals(plan ciEnginePlan) []ciEngineRemoval {
+	var out []ciEngineRemoval
+	if len(plan.containers) > 0 {
+		ids := make([]string, 0, len(plan.containers))
+		for _, c := range plan.containers {
+			ids = append(ids, c.ID)
+		}
+		out = append(out, ciEngineRemoval{kind: "container", argv: append([]string{"docker", "rm"}, ids...), ids: ids})
+	}
+	if len(plan.images) > 0 {
+		ids := make([]string, 0, len(plan.images))
+		for _, img := range plan.images {
+			ids = append(ids, img.ID)
+		}
+		out = append(out, ciEngineRemoval{kind: "image", argv: append([]string{"docker", "rmi", "-f"}, ids...), ids: ids})
+	}
+	if len(plan.volumes) > 0 {
+		names := make([]string, 0, len(plan.volumes))
+		for _, v := range plan.volumes {
+			names = append(names, v.Name)
+		}
+		out = append(out, ciEngineRemoval{kind: "volume", argv: append([]string{"docker", "volume", "rm"}, names...), ids: names})
+	}
+	return out
+}
+
+// ciEngineBuildCachePruneArgv is the build cache prune: everything unused since
+// cutoff, an RFC 3339 time.
+func ciEngineBuildCachePruneArgv(cutoff string) []string {
+	return []string{"docker", "builder", "prune", "-af", "--filter", "until=" + cutoff}
+}
+
+// ciEngineRemoved reads what docker reported removed. docker rm and docker volume
+// rm print each removed id or name on its own line; docker rmi prints "Deleted: "
+// before each image id it deleted and "Untagged: " before each tag it dropped,
+// which names no removal. Any other line is not a removal.
+func ciEngineRemoved(out []byte) map[string]bool {
+	removed := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "", strings.HasPrefix(line, "Untagged: "):
+		case strings.HasPrefix(line, "Deleted: "):
+			removed[strings.TrimSpace(strings.TrimPrefix(line, "Deleted: "))] = true
+		default:
+			removed[line] = true
+		}
+	}
+	return removed
+}
+
+// ciEngineMissing returns the ids of r that docker's output does not report
+// removed, in the plan's order.
+func ciEngineMissing(r ciEngineRemoval, out []byte) []string {
+	removed := ciEngineRemoved(out)
+	var missing []string
+	for _, id := range r.ids {
+		if !removed[id] {
+			missing = append(missing, id)
+		}
+	}
+	return missing
+}
 
 var (
 	// ciEngineContainerIDRE is a full container id, as docker inspect prints it.
@@ -219,7 +279,10 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keep
 			continue
 		}
 		if slices.Contains(repos, ciEngineBaseRepo) {
-			if !baseKeep[id] {
+			// A base the rollback rule does not keep still waits out the age, like
+			// any other image: a build just made and not yet tagged latest is not
+			// swept away under the runner (gt-i02983, review round 3).
+			if !baseKeep[id] && now.Sub(created[id]) > age {
 				removable[id] = true
 			}
 			continue
@@ -486,10 +549,10 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 
 // ciEnginePrune runs the engine prune once and reports whether it reached a
 // verdict. A run that cannot list the engine, plan from the listing, or read the
-// remove program's reply is a failed run that says why. A run that fails before
-// the remove program removes nothing; one whose remove program fails partway has
-// removed the items the program took before the failure, and the next run plans
-// again from what is left.
+// removals' output is a failed run that says why. A run that fails before the
+// first removal removes nothing; one whose removals fail partway has removed the
+// kinds docker took before the failure, and the next run plans again from what
+// is left.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
 	_, maxAge, keepRepos, err := ciEnginePruneSettings(d.patrolConfig)
@@ -554,48 +617,60 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		return true
 	}
 
-	ids := make([]string, 0, len(plan.containers))
-	for _, c := range plan.containers {
-		ids = append(ids, c.ID)
-	}
-	images := make([]string, 0, len(plan.images))
-	for _, img := range plan.images {
-		images = append(images, img.ID)
-	}
-	volumes := make([]string, 0, len(plan.volumes))
-	for _, v := range plan.volumes {
-		volumes = append(volumes, v.Name)
+	for _, r := range ciEngineRemovals(plan) {
+		stdout, _, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.argv...)
+		if err != nil {
+			d.ciEnginePruneLogf("remove failed", "disk_maintenance: ci engine prune: the %s removal in the %s container failed (%s); the run is retried",
+				r.kind, ciCacheContainer, ciEngineExitStatus(err))
+			return false
+		}
+		if missing := ciEngineMissing(r, stdout); len(missing) > 0 {
+			d.ciEnginePruneLogf("not removed", "disk_maintenance: ci engine prune: docker reported %d of %d planned %s(s) removed, so %d were not; the run is retried",
+				len(r.ids)-len(missing), len(r.ids), r.kind, len(missing))
+			return false
+		}
 	}
 	cutoff := now.Add(-ciEngineUnusedAge).Format(time.RFC3339)
-	stdout, _, err = d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
-		"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--",
-		"sh", "-c", ciEngineRemoveScript, "ci-engine-remove", ciEngineRoot,
-		strings.Join(ids, " "), strings.Join(images, " "), strings.Join(volumes, " "), cutoff)
-	if err != nil {
-		d.ciEnginePruneLogf("remove failed", "disk_maintenance: ci engine prune: the remove exec into the %s container failed (%s); the run is retried",
+	if _, _, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(cutoff)...); err != nil {
+		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
 			ciCacheContainer, ciEngineExitStatus(err))
 		return false
 	}
-	reply, err := parseCIEnginePruneReply(stdout)
+	afterKiB, err := d.ciEngineDataRootKiB(ctx, kubeconfig, kubeContext, pod)
 	if err != nil {
-		d.ciEnginePruneLogf("reply unreadable", "disk_maintenance: ci engine prune: the remove reply could not be read: %v; the run is retried", err)
-		return false
-	}
-	if reply.removed != int64(plan.count()) {
-		d.ciEnginePruneLogf("count mismatch", "disk_maintenance: ci engine prune: the remove reply names %d removals, the plan named %d; the run is retried",
-			reply.removed, plan.count())
+		d.ciEnginePruneLogf("size unreadable", "disk_maintenance: ci engine prune: removed %s, but the data root's size after could not be read: %v; the run is retried",
+			counts, err)
 		return false
 	}
 	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s",
-		counts, before, polecatimage.Human(reply.afterKiB*1024))
+		counts, before, polecatimage.Human(afterKiB*1024))
 	return true
 }
 
-// parseCIEnginePruneReply reads the remove program's reply: the cache trim's three
-// figures, read by the same strict reader, so a reply that is not exactly those
-// three lines is never read as zeros.
-func parseCIEnginePruneReply(out []byte) (ciCacheTrimReply, error) {
-	return parseCICacheTrimReply(out)
+// ciEngineExec runs one program in the runner's engine container with argv as
+// given: kubectl exec hands docker the words themselves, so no shell reads them.
+func (d *Daemon) ciEngineExec(ctx context.Context, kubeconfig, kubeContext, pod string, argv ...string) ([]byte, []byte, error) {
+	args := append([]string{"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--"}, argv...)
+	return d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, args...)
+}
+
+// ciEngineDataRootKiB reads the data root's size in KiB through du -sk, whose
+// first field is the figure. The error names the exit status only, never the
+// output, as every engine exec's does.
+func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContext, pod string) (int64, error) {
+	out, _, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "du", "-sk", ciEngineRoot)
+	if err != nil {
+		return 0, fmt.Errorf("du of the data root failed (%s)", ciEngineExitStatus(err))
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return 0, errors.New("du printed no figure")
+	}
+	kib, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || kib < 0 {
+		return 0, fmt.Errorf("du printed %q, not a KiB figure", fields[0])
+	}
+	return kib, nil
 }
 
 // ciEnginePruneLogf logs one refusal or failure line of the engine prune, at most

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -186,7 +187,8 @@ func TestCIEnginePruneKeepsCIBaseAndUsedImages(t *testing.T) {
 
 // TestCIEnginePruneKeepsCurrentLatestAndItsImmediatePredecessor: the ci-base rollback
 // is the id built just before the latest tag's id, not the newest other id. A base
-// built after the latest, under another tag, goes, as does an older one.
+// built after the latest, under another tag, waits out the age like any image;
+// one past the age goes, as does an older one.
 func TestCIEnginePruneKeepsCurrentLatestAndItsImmediatePredecessor(t *testing.T) {
 	t.Parallel()
 	images := []map[string]any{
@@ -194,10 +196,13 @@ func TestCIEnginePruneKeepsCurrentLatestAndItsImmediatePredecessor(t *testing.T)
 		engImg('a', 50*time.Hour, []string{"sha256:layer-a"}, "ci-base:latest"),
 		// The id built just before the latest: the rollback, kept.
 		engImg('b', 100*time.Hour, []string{"sha256:layer-b"}, "ci-base:jq17"),
-		// The newest other id, built after the latest under another tag: removed.
+		// The newest other id, built two hours ago under another tag: not kept by
+		// the rollback rule, but younger than the age, so it waits like any image.
 		engImg('c', 2*time.Hour, []string{"sha256:layer-c"}, "ci-base:pre-gate-tools"),
 		// An older id: removed.
 		engImg('d', 200*time.Hour, []string{"sha256:layer-d"}, "ci-base:pre-jq17"),
+		// Another id not kept by the rule and past the age: removed.
+		engImg('e', 150*time.Hour, []string{"sha256:layer-e"}, "ci-base:stale-build"),
 	}
 	plan, err := planCIEnginePrune(engDecode(t, engListing(t, nil, images, nil)), ciCacheTestStart, 48*time.Hour, []string{"ci-base"})
 	if err != nil {
@@ -212,7 +217,10 @@ func TestCIEnginePruneKeepsCurrentLatestAndItsImmediatePredecessor(t *testing.T)
 			t.Errorf("image %s is planned for removal, want the latest and its predecessor kept", id)
 		}
 	}
-	for _, id := range []string{engImageID('c'), engImageID('d')} {
+	if got[engImageID('c')] {
+		t.Errorf("image %s is planned for removal, want a base younger than the age to wait it out", engImageID('c'))
+	}
+	for _, id := range []string{engImageID('d'), engImageID('e')} {
 		if !got[id] {
 			t.Errorf("image %s is not planned for removal", id)
 		}
@@ -318,7 +326,36 @@ func TestCIEnginePruneRefusesAListingItCannotRead(t *testing.T) {
 // newCIEngineFixture is the daemon a CI engine prune test runs: the CI cache
 // trim's fixture, with the list program answered from listing and the remove
 // program answered from remove.
-func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove cliReply) *ciCacheFixture {
+// engineRemoveAnswers says how the fake engine answers the remove step's docker
+// commands: fail makes every docker removal exit 1 with stderr, short makes docker
+// report one id fewer than it was given, garbage makes it print lines naming none.
+// The zero value is an engine that removes everything it is asked to and says so.
+type engineRemoveAnswers struct {
+	fail    bool
+	stderr  string
+	short   bool
+	garbage bool
+}
+
+// engineDockerIDs returns the ids a docker removal exec was given: the argv after
+// the verb words and flags.
+func engineDockerIDs(args []string) []string {
+	i := slices.Index(args, "docker")
+	if i < 0 {
+		return nil
+	}
+	var ids []string
+	for _, a := range args[i+1:] {
+		switch a {
+		case "rm", "rmi", "-f", "volume":
+			continue
+		}
+		ids = append(ids, a)
+	}
+	return ids
+}
+
+func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engineRemoveAnswers) *ciCacheFixture {
 	t.Helper()
 	f := newCICacheFixture(t, mode)
 	// This fixture's engine prune is due at its first tick: the default interval,
@@ -332,12 +369,45 @@ func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove cliRep
 			return f.pods
 		case strings.Contains(verb, "ci-engine-list"):
 			return cliReply{stdout: string(listing)}
-		case strings.Contains(verb, "ci-engine-remove"):
-			return remove
+		case strings.Contains(verb, "-- du -sk"):
+			return cliReply{stdout: "10485760\t" + ciEngineRoot + "\n"}
+		case strings.Contains(verb, "-- docker builder prune"):
+			return cliReply{stdout: "Total:\t0B\n"}
+		case strings.Contains(verb, "-- docker "):
+			if remove.fail {
+				return cliReply{code: 1, stderr: remove.stderr}
+			}
+			if remove.garbage {
+				return cliReply{stdout: "garbage\n"}
+			}
+			ids := engineDockerIDs(c.args)
+			if remove.short && len(ids) > 0 {
+				ids = ids[1:]
+			}
+			var out strings.Builder
+			for _, id := range ids {
+				if strings.Contains(verb, "-- docker rmi") {
+					out.WriteString("Untagged: some/repo:tag\nDeleted: " + id + "\n")
+				} else {
+					out.WriteString(id + "\n")
+				}
+			}
+			return cliReply{stdout: out.String()}
 		}
 		return cliReply{}
 	}
 	return f
+}
+
+// engineDockerExecs returns the exec calls that ran docker with the given verb words.
+func engineDockerExecs(f *ciCacheFixture, verb string) []cliCall {
+	var out []cliCall
+	for _, c := range f.execs() {
+		if strings.Contains(cacheTrimVerb(c.args)+" ", "-- docker "+verb+" ") {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // engineExecs returns the exec calls whose program is named name.
@@ -359,12 +429,12 @@ func TestCIEnginePruneDryRunRemovesNothing(t *testing.T) {
 		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)},
 		[]map[string]any{engImg('e', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
 		[]map[string]any{engVol(engHex64('1'), 30*time.Hour)},
-	), cliReply{})
+	), engineRemoveAnswers{})
 	f.tick()
 	f.drain()
 
-	if n := len(engineExecs(f, "ci-engine-remove")); n != 0 {
-		t.Fatalf("a dry run ran the remove program %d time(s)", n)
+	if n := len(engineDockerExecs(f, "")); n != 0 {
+		t.Fatalf("a dry run ran %d docker command(s)", n)
 	}
 	if n := len(engineExecs(f, "ci-engine-list")); n != 1 {
 		t.Fatalf("a dry run ran the list program %d time(s), want once", n)
@@ -380,9 +450,10 @@ func TestCIEnginePruneDryRunRemovesNothing(t *testing.T) {
 	}
 }
 
-// TestCIEnginePruneApplyRemovesThePlannedIds: an apply passes exactly the planned
-// ids and names as argv data, and its reply is the verdict; a reply that names
-// another count is a failed run that is tried again soon.
+// TestCIEnginePruneApplyRemovesThePlannedIds: an apply runs one docker command per
+// kind over exactly the planned ids, prunes the build cache at the cutoff, and takes
+// its verdict from what docker reported removed; a removal docker did not report,
+// or did not perform, is a failed run that is tried again soon.
 func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 	t.Parallel()
 	listing := engListing(t,
@@ -391,44 +462,61 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 		[]map[string]any{engVol(engHex64('1'), 30*time.Hour)},
 	)
 
-	t.Run("the planned ids reach the remove program, and its reply is the verdict", func(t *testing.T) {
+	t.Run("one docker command per kind over the planned ids, and docker's report is the verdict", func(t *testing.T) {
 		t.Parallel()
-		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, cliReply{stdout: "before_kib=41943040\nremoved=3\nafter_kib=10485760\n"})
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{})
 		f.tick()
 		f.drain()
-		removes := engineExecs(f, "ci-engine-remove")
-		if len(removes) != 1 {
-			t.Fatalf("the remove program ran %d time(s), want once", len(removes))
+		for verb, want := range map[string][]string{
+			"rm":        {"docker", "rm", engHex64('4')},
+			"rmi":       {"docker", "rmi", "-f", engImageID('e')},
+			"volume rm": {"docker", "volume", "rm", engHex64('1')},
+		} {
+			execs := engineDockerExecs(f, verb)
+			if len(execs) != 1 {
+				t.Fatalf("docker %s ran %d time(s), want once", verb, len(execs))
+			}
+			i := slices.Index(execs[0].args, "docker")
+			if got := execs[0].args[i:]; !slices.Equal(got, want) {
+				t.Errorf("docker %s argv = %q, want %q", verb, got, want)
+			}
 		}
-		argv := strings.Join(removes[0].args, "\x00")
 		cutoff := ciCacheTestStart.Add(-ciEngineUnusedAge).Format(time.RFC3339)
-		for _, want := range []string{engHex64('4'), engImageID('e'), engHex64('1'), cutoff} {
-			if !strings.Contains(argv, want) {
-				t.Errorf("the remove exec's argv lacks %s", want)
+		prunes := engineDockerExecs(f, "builder prune")
+		if len(prunes) != 1 || !slices.Contains(prunes[0].args, "until="+cutoff) {
+			t.Errorf("build cache prune = %q, want one run with until=%s", prunes, cutoff)
+		}
+		// The list program is shell by design; no removal is.
+		for _, c := range engineDockerExecs(f, "") {
+			if slices.Contains(c.args, "sh") || slices.Contains(c.args, "-c") {
+				t.Errorf("the remove step ran a shell: %q", c.args)
 			}
 		}
 		if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
 			t.Errorf("a verdict left the engine prune unscheduled")
 		}
+		if !strings.Contains(f.logs.String(), "removed 1 containers, 1 images, 1 volumes") {
+			t.Errorf("the verdict line is missing:\n%s", f.logs.String())
+		}
 	})
 
-	// A remove that fails, or whose reply cannot be read or disagrees with the plan,
-	// is a failed run: no verdict, a retry soon, and a line that says why.
+	// A removal that fails, or that docker does not report performing, is a failed
+	// run: no verdict, a retry soon, and a line that says why.
 	for name, tc := range map[string]struct {
-		remove  cliReply
+		remove  engineRemoveAnswers
 		wantLog string
 	}{
-		"a reply naming another count": {
-			remove:  cliReply{stdout: "before_kib=1\nremoved=7\nafter_kib=1\n"},
-			wantLog: "the plan named 3",
+		"docker reports one id fewer than planned": {
+			remove:  engineRemoveAnswers{short: true},
+			wantLog: "were not; the run is retried",
 		},
-		"a reply that cannot be read": {
-			remove:  cliReply{stdout: "garbage\n"},
-			wantLog: "could not be read",
+		"docker prints lines naming no id": {
+			remove:  engineRemoveAnswers{garbage: true},
+			wantLog: "docker reported 0 of 1",
 		},
-		"a remove exec that fails": {
-			remove:  cliReply{code: 1, stderr: "volume is in use"},
-			wantLog: "remove exec",
+		"a removal exec fails": {
+			remove:  engineRemoveAnswers{fail: true, stderr: "volume is in use"},
+			wantLog: "removal in the",
 		},
 	} {
 		t.Run(name+" is a failed run, tried again soon", func(t *testing.T) {
@@ -449,27 +537,26 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 	}
 }
 
-// TestParseCIEnginePruneReply: the remove program's reply is exactly its three
-// figures, in order; anything else is an error, never zeros.
-func TestParseCIEnginePruneReply(t *testing.T) {
+// TestCIEngineRemovedReadsDockersOutput: docker rm and docker volume rm print each
+// removed id or name on a line; docker rmi prints Deleted: before each image id and
+// Untagged: before each dropped tag, which is not a removal. Anything else names no
+// removal, so a plan id docker did not print is missing.
+func TestCIEngineRemovedReadsDockersOutput(t *testing.T) {
 	t.Parallel()
-	good, err := parseCIEnginePruneReply([]byte("before_kib=41943040\nremoved=4\nafter_kib=10485760\n"))
-	if err != nil {
-		t.Fatalf("a well-formed reply does not parse: %v", err)
-	}
-	if good.beforeKiB != 41943040 || good.removed != 4 || good.afterKiB != 10485760 {
-		t.Errorf("parsed %+v, want before 41943040, removed 4, after 10485760", good)
-	}
-	for name, out := range map[string]string{
-		"empty":             "",
-		"no removed line":   "before_kib=5\nafter_kib=3\n",
-		"keys out of order": "removed=2\nbefore_kib=5\nafter_kib=3\n",
-		"extra line":        "before_kib=5\nremoved=2\nafter_kib=3\nnoise\n",
-		"not a number":      "before_kib=5\nremoved=two\nafter_kib=3\n",
-		"negative":          "before_kib=5\nremoved=-1\nafter_kib=3\n",
+	r := ciEngineRemoval{kind: "image", ids: []string{"sha256:aaa", "sha256:bbb"}}
+	for name, tc := range map[string]struct {
+		out     string
+		missing []string
+	}{
+		"both deleted":          {"Untagged: ci-base:old\nDeleted: sha256:aaa\nDeleted: sha256:bbb\n", nil},
+		"one deleted":           {"Deleted: sha256:aaa\n", []string{"sha256:bbb"}},
+		"only untagged":         {"Untagged: ci-base:old\n", []string{"sha256:aaa", "sha256:bbb"}},
+		"garbage":               {"garbage\n", []string{"sha256:aaa", "sha256:bbb"}},
+		"empty":                 {"", []string{"sha256:aaa", "sha256:bbb"}},
+		"plain lines (rm form)": {"sha256:aaa\nsha256:bbb\n", nil},
 	} {
-		if _, err := parseCIEnginePruneReply([]byte(out)); err == nil {
-			t.Errorf("%s reply parsed without an error", name)
+		if got := ciEngineMissing(r, []byte(tc.out)); !slices.Equal(got, tc.missing) {
+			t.Errorf("%s: missing = %q, want %q", name, got, tc.missing)
 		}
 	}
 }
@@ -479,7 +566,7 @@ func TestParseCIEnginePruneReply(t *testing.T) {
 // run is tried again soon rather than read as an engine with nothing to prune.
 func TestCIEnginePruneFailsWhenTheEngineIsNotRunning(t *testing.T) {
 	t.Parallel()
-	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), cliReply{})
+	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
 	f.pods = cliReply{stdout: ciCachePodsDindWaitingJSON}
 	f.tick()
 	f.drain()
@@ -509,7 +596,7 @@ func TestCIEnginePruneFailedListingRemovesNothing(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), cliReply{})
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
 			f.cli.answer = func(c cliCall) cliReply {
 				verb := cacheTrimVerb(c.args)
 				switch {
@@ -541,7 +628,7 @@ func TestCIEnginePruneFailedListingRemovesNothing(t *testing.T) {
 // cutoff arrives as argv data.
 func TestCIEnginePruneScriptsHoldNoKeepLogic(t *testing.T) {
 	t.Parallel()
-	for name, script := range map[string]string{"list": ciEngineListScript, "remove": ciEngineRemoveScript} {
+	for name, script := range map[string]string{"list": ciEngineListScript} {
 		for _, rule := range []string{ciEngineBaseRepo, "keep", "24h", "48h", "mtime", "find "} {
 			if strings.Contains(script, rule) {
 				t.Errorf("the %s program holds %q: keep, age and repository logic is decided in Go", name, rule)
@@ -562,10 +649,11 @@ func TestCIEnginePruneExecErrorLogsNoEngineStderr(t *testing.T) {
 		[]map[string]any{engVol(engHex64('1'), 30*time.Hour)},
 	)
 	for name, tc := range map[string]struct {
-		list, remove cliReply
+		list   cliReply
+		remove engineRemoveAnswers
 	}{
 		"list exec fails":   {list: cliReply{code: 1, stderr: engineStderr}},
-		"remove exec fails": {remove: cliReply{code: 1, stderr: engineStderr}},
+		"remove exec fails": {remove: engineRemoveAnswers{fail: true, stderr: engineStderr}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -622,15 +710,38 @@ func TestCIEnginePrunePrunesAnonymousVolumesNamedWith64HexDigits(t *testing.T) {
 	}
 }
 
-// TestCIEnginePruneRemoveProgramHoldsNoLoop: the remove program is a straight run of
-// docker calls over the argv ids. It holds no loop, conditional or arithmetic, so
-// the count it reports is the ids it was passed.
-func TestCIEnginePruneRemoveProgramHoldsNoLoop(t *testing.T) {
+// TestCIEngineRemovalsAreOneDockerCommandPerKind: the remove step is docker commands
+// over argv ids, one per kind the plan names, with no shell, loop, counter or
+// conditional anywhere between the plan and docker; a kind with no ids is not sent.
+func TestCIEngineRemovalsAreOneDockerCommandPerKind(t *testing.T) {
 	t.Parallel()
-	for _, form := range []string{"for ", "while ", "until ", "if ", "case ", "$((", "[ ", "&&", "||"} {
-		if strings.Contains(ciEngineRemoveScript, form) {
-			t.Errorf("the remove program holds %q: it runs docker over the argv ids, with no loop, conditional or counter", form)
+	plan := ciEnginePlan{
+		containers: []ciEngineContainer{{ID: engHex64('1')}, {ID: engHex64('2')}},
+		images:     []ciEngineImage{{ID: engImageID('a')}},
+	}
+	got := ciEngineRemovals(plan)
+	want := []ciEngineRemoval{
+		{kind: "container", argv: []string{"docker", "rm", engHex64('1'), engHex64('2')}, ids: []string{engHex64('1'), engHex64('2')}},
+		{kind: "image", argv: []string{"docker", "rmi", "-f", engImageID('a')}, ids: []string{engImageID('a')}},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("removals = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i].kind != want[i].kind || !slices.Equal(got[i].argv, want[i].argv) || !slices.Equal(got[i].ids, want[i].ids) {
+			t.Errorf("removal %d = %+v, want %+v", i, got[i], want[i])
 		}
+		for _, a := range got[i].argv {
+			if strings.ContainsAny(a, "|&;$`<>()\\\"' ") {
+				t.Errorf("removal %d argv word %q would mean something to a shell", i, a)
+			}
+		}
+	}
+	if len(ciEngineRemovals(ciEnginePlan{})) != 0 {
+		t.Errorf("an empty plan still has removals")
+	}
+	if argv := ciEngineBuildCachePruneArgv("2026-11-09T00:00:00Z"); !slices.Equal(argv, []string{"docker", "builder", "prune", "-af", "--filter", "until=2026-11-09T00:00:00Z"}) {
+		t.Errorf("build cache prune argv = %q", argv)
 	}
 }
 
@@ -646,7 +757,7 @@ func TestCIEnginePrunePodLookupFailureLogsNoStderr(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), cliReply{})
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
 			answer := f.cli.answer
 			f.cli.answer = func(c cliCall) cliReply {
 				if strings.HasPrefix(cacheTrimVerb(c.args), "get pods ") {
@@ -699,7 +810,7 @@ func TestCIEnginePruneRefusesASettingItCannotActOn(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), cliReply{})
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), engineRemoveAnswers{})
 			tc.breakSetting(f)
 			f.tick()
 			f.drain()
