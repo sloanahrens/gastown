@@ -69,6 +69,19 @@ type Seams struct {
 	Git    bdbuild.Git
 	GitEnv GitEnv
 	Go     bdbuild.Go
+	// Environ is the host environment the builds and the git reads start from;
+	// nil reads the process's own. A test sets it, so none touches the process
+	// environment.
+	Environ []string
+}
+
+// environ is the host environment Build starts from: Environ, or the process's
+// own when it is nil.
+func (s Seams) environ() []string {
+	if s.Environ == nil {
+		return os.Environ()
+	}
+	return s.Environ
 }
 
 // Result is a staged context and the labels its image build needs.
@@ -149,7 +162,8 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 	if err := os.MkdirAll(filepath.Join(in.Out, "bin"), 0o755); err != nil {
 		return Result{}, fmt.Errorf("imagectx: cannot make the bin directory in %s: %w", in.Out, err)
 	}
-	env := buildEnv()
+	env := buildEnvFrom(s.environ())
+	genv := gitEnv(s.environ())
 	res := Result{Dir: in.Out, GTCommit: in.Rev}
 
 	// Every tree is read and every pin guarded before anything is unpacked into
@@ -165,7 +179,7 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 		if src.Rig == BuildRig {
 			continue
 		}
-		note, tree, err := stageRig(ctx, in, s, env, src)
+		note, tree, err := stageRig(ctx, in, s, genv, src)
 		if err != nil {
 			return Result{}, err
 		}
@@ -175,7 +189,7 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 		trees[src.Rig] = tree
 	}
 
-	bdCommit, err := buildBD(ctx, in, s, env)
+	bdCommit, err := buildBD(ctx, in, s, genv)
 	if err != nil {
 		return Result{}, err
 	}
@@ -492,13 +506,47 @@ func compareVersions(a, b []int) int {
 	return 0
 }
 
-// buildEnv is the environment the builds, the fetch commands ExecRun runs and
-// the ls-remote read ExecGitEnv runs start with: the host's toolchain variables
-// and the cross-compile settings bdbuild.Env keeps, with git told never to
-// prompt, so a fetch or a read that wants a credential fails rather than
-// waiting on a terminal.
+// buildEnv is the environment the compiles start with: the host's toolchain
+// variables and the cross-compile settings bdbuild.Env keeps, with git told
+// never to prompt, so a fetch or a read that wants a credential fails rather
+// than waiting on a terminal. The fetches and the ls-remote read use gitEnv,
+// which adds the credential-helper variables a compile must not see.
 func buildEnv() []string {
-	return append(bdbuild.Env(nil), "GIT_TERMINAL_PROMPT=0")
+	return buildEnvFrom(nil)
+}
+
+// buildEnvFrom is buildEnv for the host environment environ; nil reads the
+// process's own.
+func buildEnvFrom(environ []string) []string {
+	return append(bdbuild.Env(environ), "GIT_TERMINAL_PROMPT=0")
+}
+
+// gitCredentialVars names the host variables a git fetch needs to reach a
+// private source: the config file that installs a credential helper
+// (GIT_CONFIG_GLOBAL) and the two variables that helper prints. bdbuild.Env
+// drops them on purpose, because a compile must not see them; git does need
+// them, or the helper is gone and a private repository refuses the fetch with
+// "could not read Username" (gt-y1p1np).
+var gitCredentialVars = []string{"GIT_CONFIG_GLOBAL", "SOURCES_USER", "SOURCES_TOKEN"}
+
+// gitEnv is the environment the fetches and the ls-remote read run with:
+// buildEnv, plus gitCredentialVars when environ holds them with a value. Only
+// the names are chosen here; the values travel inside the child's environment
+// and are never put in an argv, a plan line or an error.
+func gitEnv(environ []string) []string {
+	env := buildEnvFrom(environ)
+	for _, kv := range environ {
+		key, val, ok := strings.Cut(kv, "=")
+		if !ok || val == "" {
+			continue
+		}
+		for _, name := range gitCredentialVars {
+			if key == name {
+				env = append(env, kv)
+			}
+		}
+	}
+	return env
 }
 
 // ExecRun runs argv in dir with env as its whole environment, and stops it past
