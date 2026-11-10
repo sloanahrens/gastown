@@ -51,6 +51,12 @@ or choice probability, and the crossing share: the share of pairs that cross
 --cut, or for a choice the share whose pick changed. It also gives the rule
 counts that replaced text in those states.
 
+Beside the table, the coverage gives, per caller, the requests it logged, the
+distinct states those requests carried, and the sampled states, meaning the
+states whose check ran. It prints even when no pair exists. A caller with fewer
+distinct states than MinPairs is said so in words, since its pairs reach MinPairs
+only when a sampled state repeats.
+
 The baseline is the repeat noise of the same caller and question, read from the
 repeat log beside logtriage's battery log. A scrub is free when its crossing
 share is at most FreeMargin above that baseline, borderline up to CostlyMargin

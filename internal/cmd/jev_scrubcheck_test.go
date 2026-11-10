@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,4 +223,46 @@ func TestJevScrubcheckHelpNamesConstants(t *testing.T) {
 	for _, restated := range []string{"two points", "five points", "30 pairs", "fewer than 30"} {
 		assert.NotContains(t, help, restated)
 	}
+}
+
+// TestJevScrubcheckCoverageText: a log with requests but no checked pair still
+// names each caller with its requests, distinct states and sampled states, and
+// says in words which callers have fewer distinct states than MinPairs.
+func TestJevScrubcheckCoverageText(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	ts := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	var lines []scrubcheck.Line
+	// jev-few: 4 requests over 2 distinct states, fewer than MinPairs.
+	for _, state := range []string{"s1", "s1", "s2", "s2"} {
+		lines = append(lines, scrubcheck.Line{TS: ts, Caller: "jev-few", StateSHA256: state, QuestionIDs: []string{logtriage.QNeedsAction}, Outcome: "unsampled"})
+	}
+	// jev-many asks 40 requests over 35 states, enough distinct states for MinPairs.
+	for i := range 40 {
+		state := fmt.Sprintf("m%d", i%35)
+		lines = append(lines, scrubcheck.Line{TS: ts, Caller: "jev-many", StateSHA256: state, QuestionIDs: []string{logtriage.QNeedsAction}, Outcome: "unsampled"})
+	}
+	writeScrubChecks(t, town, lines...)
+
+	var out bytes.Buffer
+	require.NoError(t, jevScrubcheckWithFlags(&out, town, "", "", noise.DefaultCut, false, now))
+
+	text := out.String()
+	assert.Contains(t, text, "no checked request has both answer sets to count")
+	assert.Equal(t, []string{"jev-few", "4", "2", "0"}, coverageFields(text, "jev-few"))
+	assert.Equal(t, []string{"jev-many", "40", "35", "0"}, coverageFields(text, "jev-many"))
+	assert.Contains(t, text, "jev-few has 2 distinct states, fewer than the 30 pairs a question needs")
+	assert.NotContains(t, text, "jev-many has", "35 distinct states can reach the pairs, so no note")
+}
+
+// coverageFields returns the fields of caller's coverage row, the line that
+// starts with its name and holds exactly four fields.
+func coverageFields(text, caller string) []string {
+	for _, line := range strings.Split(text, "\n") {
+		if f := strings.Fields(line); len(f) == 4 && f[0] == caller {
+			return f
+		}
+	}
+	return nil
 }
