@@ -128,20 +128,24 @@ func openOS(path string) (file, error) {
 	if err != nil {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
+	// From here the descriptor is owned by an *os.File, whose Close reports
+	// errors; a refusal before that point closes it itself and reports the
+	// refusal, which a close error cannot change.
+	f := os.NewFile(uintptr(fd), path)
 	var st syscall.Stat_t
 	if err := syscall.Fstat(fd, &st); err != nil {
-		syscall.Close(fd)
+		_ = f.Close()
 		return nil, &os.PathError{Op: "stat", Path: path, Err: err}
 	}
 	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
-		syscall.Close(fd)
+		_ = f.Close()
 		return nil, &os.PathError{Op: "open", Path: path, Err: errNotRegular}
 	}
 	if err := syscall.SetNonblock(fd, false); err != nil {
-		syscall.Close(fd)
+		_ = f.Close()
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
-	return os.NewFile(uintptr(fd), path), nil
+	return f, nil
 }
 
 // Confine returns the File at path under root, which must be absolute, or an
