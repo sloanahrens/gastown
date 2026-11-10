@@ -37,6 +37,15 @@ entries:
   - path: settings
     owner: shared
     why: edited by gt config daemon, read by the daemon (gt-yjzepk.4)
+  - path: seat-refill.hold
+    owner: shared
+    why: the operator's dispatch hold, written on the Mac and read by the pod each tick; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it
+  - path: ESTOP
+    owner: shared
+    why: the town-wide ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it
+  - path: ESTOP.<rig>
+    owner: shared
+    why: the per-rig ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it
   - path: power-state
     owner: daemon
     why: the last requested power state gt power writes and the daemon reads (internal/power/power.go StatePath)

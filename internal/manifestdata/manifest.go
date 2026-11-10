@@ -91,6 +91,9 @@ func Default(dirs DirNames) *Manifest {
 		{Path: "plugins", Owner: OwnerDaemon, Why: "installed plugins the daemon loads"},
 		{Path: ".claude-town", Owner: OwnerDaemon, Why: "the daemon's liveness probe reads session transcripts under it (internal/liveness)"},
 		{Path: "settings", Owner: OwnerShared, Why: "edited by gt config daemon, read by the daemon (gt-yjzepk.4)"},
+		{Path: "seat-refill.hold", Owner: OwnerShared, Why: "the operator's dispatch hold, written on the Mac and read by the pod each tick; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it"},
+		{Path: "ESTOP", Owner: OwnerShared, Why: "the town-wide ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it"},
+		{Path: "ESTOP.<rig>", Owner: OwnerShared, Why: "the per-rig ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it"},
 		{Path: "power-state", Owner: OwnerDaemon, Why: "the last requested power state gt power writes and the daemon reads (internal/power/power.go StatePath)"},
 		{Path: ".events.jsonl.lock", Owner: OwnerDaemon, Why: "the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave"},
 		{Path: ".dolt-archive", Owner: OwnerDaemon, Why: "the JSONL git backup repository internal/daemon/jsonl_git_backup.go pushes each database's history into"},
@@ -280,8 +283,8 @@ func (e Entry) Validate() error {
 		case ".", "..":
 			return fmt.Errorf("town-state entry %q: %q is not a town-root path segment", e.Path, seg)
 		}
-		if strings.ContainsAny(seg, "<>") && seg != RigPlaceholder && seg != BirdPlaceholder {
-			return fmt.Errorf("town-state entry %q: unknown placeholder %q (want %s or %s)",
+		if strings.ContainsAny(seg, "<>") && !validPlaceholderSeg(seg) {
+			return fmt.Errorf("town-state entry %q: unknown placeholder %q (want %s or %s, one per segment)",
 				e.Path, seg, RigPlaceholder, BirdPlaceholder)
 		}
 	}
@@ -312,18 +315,20 @@ func (m *Manifest) Rollback() []Entry {
 	return out
 }
 
-// Expand replaces the rig and bird placeholders with the names a town has.
+// Expand replaces the rig and bird placeholders with the names a town has. A
+// placeholder may be a whole segment (<rig>) or part of one (ESTOP.<rig>); only
+// the placeholder text is replaced, so the text beside it stays.
 func (m *Manifest) Expand(rigs, birds []string) []Entry {
 	out := make([]Entry, 0, len(m.Entries))
 	for _, e := range m.Entries {
 		segs := strings.Split(e.Path, "/")
 		var expanded []Entry
 		switch {
-		case slices.Contains(segs, RigPlaceholder):
+		case carries(segs, RigPlaceholder):
 			for _, rig := range rigs {
 				expanded = append(expanded, e.withPath(replaceSeg(segs, RigPlaceholder, rig)))
 			}
-		case slices.Contains(segs, BirdPlaceholder):
+		case carries(segs, BirdPlaceholder):
 			for _, name := range birds {
 				expanded = append(expanded, e.withPath(replaceSeg(segs, BirdPlaceholder, name)))
 			}
@@ -341,15 +346,39 @@ func (e Entry) withPath(p string) Entry {
 	return e
 }
 
-// replaceSeg returns segs with every occurrence of old swapped for name.
+// replaceSeg returns segs with every occurrence of old swapped for name, inside
+// a segment as well as for a whole one.
 func replaceSeg(segs []string, old, name string) string {
 	out := slices.Clone(segs)
 	for i, s := range out {
-		if s == old {
-			out[i] = name
-		}
+		out[i] = strings.ReplaceAll(s, old, name)
 	}
 	return strings.Join(out, "/")
+}
+
+// carries reports whether a segment of segs holds ph, whole or with text beside it.
+func carries(segs []string, ph string) bool {
+	return slices.ContainsFunc(segs, func(s string) bool { return strings.Contains(s, ph) })
+}
+
+// validPlaceholderSeg reports whether every < and > in seg belongs to one rig or
+// bird placeholder, and seg carries at most one of them.
+func validPlaceholderSeg(seg string) bool {
+	n := strings.Count(seg, RigPlaceholder) + strings.Count(seg, BirdPlaceholder)
+	rest := strings.ReplaceAll(strings.ReplaceAll(seg, RigPlaceholder, ""), BirdPlaceholder, "")
+	return n <= 1 && !strings.ContainsAny(rest, "<>")
+}
+
+// segMatches reports whether the path segment name fits pattern. A pattern with
+// no placeholder fits only its own text. A placeholder fits any non-empty text in
+// its place, so ESTOP.<rig> fits ESTOP.gastown but not ESTOP or ESTOPX.gastown.
+func segMatches(pattern, name string) bool {
+	for _, ph := range []string{RigPlaceholder, BirdPlaceholder} {
+		if prefix, suffix, ok := strings.Cut(pattern, ph); ok {
+			return len(name) > len(prefix)+len(suffix) && strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix)
+		}
+	}
+	return pattern == name
 }
 
 // Lookup returns the deepest entry covering p, and whether one covers it.
@@ -369,8 +398,8 @@ func Lookup(entries []Entry, p string) (Entry, bool) {
 
 // SessionOwned returns the session-owned entry covering rel, a town-root-relative
 // path, and whether one covers it. The rig and bird placeholders stand for any
-// one non-empty segment, so a caller that does not know the town's rigs still
-// finds a path under any rig's session tree. The deepest entry wins, and an
+// non-empty name in their segment, so a caller that does not know the town's
+// rigs still finds a path under any rig's session tree. The deepest entry wins, and an
 // entry with no placeholder wins over a placeholder at the same depth, so
 // .runtime/usage stays the daemon's even though .runtime/<bird> also matches it.
 // Letters are folded as the default macOS volume folds them, so the same path in
@@ -402,7 +431,7 @@ func (m *Manifest) SessionOwned(rel string) (Entry, bool) {
 }
 
 // coversEntry reports whether rel is pattern or lies under it, with the rig and
-// bird placeholders matching any one non-empty segment.
+// bird placeholders matching a non-empty part of one segment (see segMatches).
 func coversEntry(pattern, rel string) bool {
 	ps := strings.Split(strings.ToLower(pattern), "/")
 	rs := strings.Split(strings.ToLower(rel), "/")
@@ -410,10 +439,7 @@ func coversEntry(pattern, rel string) bool {
 		return false
 	}
 	for i, seg := range ps {
-		if seg == RigPlaceholder || seg == BirdPlaceholder {
-			continue
-		}
-		if rs[i] != seg {
+		if !segMatches(seg, rs[i]) {
 			return false
 		}
 	}
@@ -423,11 +449,11 @@ func coversEntry(pattern, rel string) bool {
 // entryDepth is how many segments an entry path has.
 func entryDepth(p string) int { return strings.Count(p, "/") }
 
-// hasPlaceholder reports whether an entry path holds the rig or bird placeholder.
+// hasPlaceholder reports whether an entry path holds the rig or bird placeholder,
+// whole or in part of a segment.
 func hasPlaceholder(p string) bool {
-	return slices.ContainsFunc(strings.Split(p, "/"), func(seg string) bool {
-		return seg == RigPlaceholder || seg == BirdPlaceholder
-	})
+	segs := strings.Split(p, "/")
+	return carries(segs, RigPlaceholder) || carries(segs, BirdPlaceholder)
 }
 
 // Names reports whether an entry path is exactly p.

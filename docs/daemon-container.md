@@ -1108,8 +1108,12 @@ day.
       file older than three intervals. A permanent service for it is not part of
       this window.
 - [ ] **The dispatch hold is on.** The operator creates it, never an agent:
-      `<live-town>/seat-refill.hold` exists. The cutover only reads it. The
-      ESTOP files are the operator's too and are not touched.
+      `<live-town>/seat-refill.hold` exists. It is a shared row
+      (`deploy/daemon/town-state.yaml`): the operator writes it on the Mac, and
+      the pod reads it each tick. The cutover only reads it. The ESTOP files
+      (`ESTOP` and `ESTOP.<rig>`) are shared rows the same way: the operator
+      writes them on the Mac, the pod reads them, and the cutover neither creates,
+      removes nor edits them.
 - [ ] **No install is pending.** `ls <live-town>/daemon/install-pending.json`
       reports no such file. The marker is written while an install is in flight
       and removed when the cycle reaches a verdict (`docs/INSTALLING.md`); a
