@@ -33,6 +33,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
+	"github.com/steveyegge/gastown/internal/jev/scrub"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/procutil"
 	"github.com/steveyegge/gastown/internal/report"
@@ -799,18 +800,51 @@ func dashboardReadyPart(s *dashboard.Summary, read func() (int, *time.Time, map[
 // dashWhyMax is how many characters of a failed read's reason the page is sent.
 const dashWhyMax = 200
 
-// dashWhy is the reason a failed read names: the error's first line, with each
-// path in it cut to its file name, held to dashWhyMax characters. The page shows
-// it beside a pane, so a directory layout or a stack's later lines do not belong
-// in it. A token with a slash is taken as a path, so "a/b" reads as "b" (gt-6qc3nw.2).
+// dashWhyNoText is the reason of a failed read whose error has no text to name,
+// so a failure never reads as a success (gt-6qc3nw.2).
+const dashWhyNoText = "read failed (no error text)"
+
+// dashWhyScrub redacts secret-shaped text from a reason before it is logged or
+// sent to the page.
+var dashWhyScrub = scrub.Default()
+
+// dashWhy is the reason a failed read names: the error's first line made safe
+// by dashWhyText, or dashWhyNoText when that leaves nothing. A nil error is a
+// success and names no reason (gt-6qc3nw.2).
 func dashWhy(err error) string {
 	if err == nil {
 		return ""
 	}
 	line, _, _ := strings.Cut(err.Error(), "\n")
-	fields := strings.Fields(line)
+	if why := dashWhyText(line); why != "" {
+		return why
+	}
+	return dashWhyNoText
+}
+
+// dashWhyText is the text a reason is logged and drawn at. Control characters
+// go first, so the scrubber sees the text an operator would read. The scrubber
+// then redacts it, and each path is cut to its file name: the page shows a
+// reason beside a pane, so a directory layout does not belong in it. A URL is
+// kept whole, since the scrubber has already masked its credentials and cutting
+// it to a file name would drop its host. The result is held to dashWhyMax
+// characters (gt-6qc3nw.2).
+func dashWhyText(s string) string {
+	var clean strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			clean.WriteByte(' ')
+		case r < 0x20, r == 0x7f:
+			// Other control characters can rewrite the line that shows them.
+		default:
+			clean.WriteRune(r)
+		}
+	}
+	redacted, _ := dashWhyScrub.Scrub(clean.String())
+	fields := strings.Fields(redacted)
 	for i, f := range fields {
-		if strings.Contains(f, "/") {
+		if strings.Contains(f, "/") && !strings.Contains(f, "://") {
 			fields[i] = path.Base(f)
 		}
 	}

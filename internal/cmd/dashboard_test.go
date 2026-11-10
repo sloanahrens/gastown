@@ -52,10 +52,60 @@ func TestDashWhyNamesTheFirstLineWithNoPath(t *testing.T) {
 		"first line only":      {errors.New("bd list failed\n  stack line"), "bd list failed"},
 		"path cut to its file": {errors.New("open /sandbox/gt/town/.beads/routes.jsonl: no such file"), "open routes.jsonl: no such file"},
 		"held to the limit":    {errors.New(strings.Repeat("é", dashWhyMax+50)), strings.Repeat("é", dashWhyMax)},
+		"no first line text":   {errors.New("\n  stack line"), dashWhyNoText},
+		"empty error":          {errors.New(""), dashWhyNoText},
 	} {
 		if got := dashWhy(c.err); got != c.want {
 			t.Errorf("%s: dashWhy = %q, want %q", name, got, c.want)
 		}
+	}
+}
+
+// A reason is logged and drawn as plain text: control characters and newlines
+// are gone, a secret the scrubber knows is its mask, and the reason stops at
+// dashWhyMax characters, in the log line and in the page's data alike
+// (gt-6qc3nw.2).
+func TestWhyTextIsSafe(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct{ in, want string }{
+		"control characters go": {"bd \x1b[2J list\x07 failed\x7f", "bd [2J list failed"},
+		"newlines are spaces":   {"bd list\r\nfailed", "bd list failed"},
+		"token is masked":       {"login rejected token=hunter2", "login rejected token=[REDACTED:assignment]"},
+		"url credentials go":    {"clone https://bob:s3cret@git.example.com/repo.git failed", "clone https://[REDACTED:url-userinfo]@git.example.com/repo.git failed"},
+		"path is its file":      {"open /sandbox/gt/town/routes.jsonl: no such file", "open routes.jsonl: no such file"},
+		"held to the limit":     {strings.Repeat("é", dashWhyMax+50), strings.Repeat("é", dashWhyMax)},
+	} {
+		if got := dashWhyText(c.in); got != c.want {
+			t.Errorf("%s: dashWhyText(%q) = %q, want %q", name, c.in, got, c.want)
+		}
+	}
+
+	var logged []string
+	why := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	town := t.TempDir()
+	hostile := errors.New("bd list \x1b[2J failed\ntoken=hunter2 " + strings.Repeat("x", 300))
+	var s dashboard.Summary
+	dashboardPolecatsWith(dashPolecatReaders{
+		kept: func(string) (map[string]time.Time, error) { return nil, nil },
+		seats: func(_ string, _ []string, _ bool, _ *dashSeatCache, _ *gtevents.DispatchReader, _ sessionLister, _ map[string]time.Time) ([]dashSeat, error) {
+			return nil, hostile
+		},
+	}, &s, town, nil, nil, true, nil, newDashLandings(town), newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{})
+	why.summary(&s)
+
+	if got := len([]rune(s.SeatsWhy)); got > dashWhyMax {
+		t.Errorf("page reason is %d characters, want at most %d", got, dashWhyMax)
+	}
+	for _, text := range []string{s.SeatsWhy, logged[0]} {
+		if strings.ContainsFunc(text, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			t.Errorf("reason %q carries a control character", text)
+		}
+		if strings.Contains(text, "hunter2") {
+			t.Errorf("reason %q carries the secret", text)
+		}
+	}
+	if want := dashboard.SourceSeats + " read failed: " + s.SeatsWhy; len(logged) != 1 || logged[0] != want {
+		t.Errorf("logged %q, want one line %q", logged, want)
 	}
 }
 

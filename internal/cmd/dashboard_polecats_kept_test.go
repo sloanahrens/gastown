@@ -277,6 +277,11 @@ func TestDashboardSeatsErrorNamesWhy(t *testing.T) {
 		t.Errorf("SeatsWhy = %q, want the error's first line %q", failed.SeatsWhy, want)
 	}
 
+	blank := read(readers(errors.New("\n  stack line")))
+	if !blank.SeatsError || blank.SeatsWhy != dashWhyNoText {
+		t.Errorf("a failed seats read with no error text: SeatsError=%v SeatsWhy=%q, want the error flagged and %q", blank.SeatsError, blank.SeatsWhy, dashWhyNoText)
+	}
+
 	ok := read(readers(nil))
 	if ok.SeatsError || ok.SeatsWhy != "" {
 		t.Errorf("a successful seats read kept SeatsError=%v SeatsWhy=%q, want both cleared", ok.SeatsError, ok.SeatsWhy)

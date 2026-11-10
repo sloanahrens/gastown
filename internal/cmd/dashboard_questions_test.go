@@ -443,6 +443,14 @@ func TestDashboardReadyAndQuestionsNameWhy(t *testing.T) {
 			t.Errorf("ReadyWhy = %q, want the first line %q", failed.ReadyWhy, want)
 		}
 
+		var blank dashboard.Summary
+		dashboardReadyPart(&blank, func() (int, *time.Time, map[string]bool, error) {
+			return 0, nil, nil, errors.New("")
+		})
+		if !blank.ReadyError || blank.ReadyWhy != dashWhyNoText {
+			t.Errorf("a failed ready read with no error text: ReadyError=%v ReadyWhy=%q, want the error flagged and %q", blank.ReadyError, blank.ReadyWhy, dashWhyNoText)
+		}
+
 		var ok dashboard.Summary
 		dashboardReadyPart(&ok, func() (int, *time.Time, map[string]bool, error) {
 			return 2, nil, map[string]bool{"gt-a": true, "gt-b": true}, nil
@@ -465,6 +473,17 @@ func TestDashboardReadyAndQuestionsNameWhy(t *testing.T) {
 		}
 		if want := "bd list: dolt circuit breaker is open: server appears down"; got.Why != want {
 			t.Errorf("Why = %q, want %q", got.Why, want)
+		}
+	})
+
+	t.Run("questions list with no error text", func(t *testing.T) {
+		t.Parallel()
+		r := &dashQuestionsReader{
+			list: func() ([]*beads.Issue, error) { return nil, errors.New("") },
+		}
+		got := r.read(questionsNow)
+		if !got.Unavailable || got.Why != dashWhyNoText {
+			t.Errorf("a failed list read with no error text: Unavailable=%v Why=%q, want it unavailable and %q", got.Unavailable, got.Why, dashWhyNoText)
 		}
 	})
 
