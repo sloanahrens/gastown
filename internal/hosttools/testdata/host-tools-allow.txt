@@ -20,7 +20,6 @@ internal/cmd/daemon_supervisor.go	launchctl	4	pending-deletion	remaining launchd
 internal/cmd/host_agent.go	launchctl	2	pending-deletion	host agent and probes: the host agent install prints the launchctl bootstrap command for the operator
 internal/config/daemon_steps.go	launchctl	3	pending-deletion	remaining launchd references: the cloud-check step description names launchctl
 internal/daemon/upgrade_heal.go	launchctl	3	pending-deletion	remaining launchd references: the upgrade heal script bootouts and bootstraps the launchd job
-internal/doctor/daemon_job_check.go	launchctl	1	pending-deletion	remaining launchd references: the job check fix hint tells the operator to run launchctl print
 internal/doctor/daemon_respawn_check.go	launchctl	1	pending-deletion	remaining launchd references: the respawn check fix hint tells the operator to run launchctl print
 internal/doctor/openshell_gateway_check.go	launchctl	3	pending-deletion	host agent and probes: the gateway probe runs launchctl print and its fix hint kickstarts the agent
 internal/installer/gateway.go	launchctl	5	pending-deletion	installer: the gateway install bootstraps its launchd job, deleted with the installer

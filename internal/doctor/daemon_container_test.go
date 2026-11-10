@@ -54,17 +54,17 @@ func containerRunning() templates.SupervisorState {
 	return templates.SupervisorState{Kind: config.SupervisorContainer, Loaded: true, LastExit: -1}
 }
 
-// containerCheck is one of the four daemon checks and the message it reports
+// containerCheck is one of the three daemon checks and the message it reports
 // for a healthy container town.
 type containerCheck struct {
 	check Check
 	ok    string
 }
 
-// containerChecks builds the four daemon checks with the container reading
-// wired to read. DaemonCheck and DaemonJobCheck also get a running seam that
-// fails the test: in a container town neither may read a pid, and the
-// container branch of each runs before the seam is reached (gt-qpeei.20).
+// containerChecks builds the three daemon checks with the container reading
+// wired to read. DaemonCheck also gets a running seam that fails the test: in
+// a container town it may not read a pid, and the container branch runs
+// before the seam is reached (gt-qpeei.20).
 func containerChecks(t *testing.T, read func(string) containerDaemonReading) []containerCheck {
 	t.Helper()
 	pidRead := func(string) (bool, int, error) {
@@ -75,16 +75,12 @@ func containerChecks(t *testing.T, read func(string) containerDaemonReading) []c
 	daemonCheck := NewDaemonCheck()
 	daemonCheck.containerReading = read
 	daemonCheck.running = pidRead
-	jobCheck := NewDaemonJobCheck()
-	jobCheck.containerReading = read
-	jobCheck.running = pidRead
 	liveness := NewDaemonLivenessCheck()
 	liveness.containerReading = read
 	respawn := NewDaemonRespawnCheck()
 	respawn.containerReading = read
 	return []containerCheck{
 		{daemonCheck, inContainer},
-		{jobCheck, inContainer},
 		// The liveness check keeps its own heartbeat message; the container
 		// verdict only has to let it through.
 		{liveness, "heartbeat is fresh"},
@@ -92,7 +88,7 @@ func containerChecks(t *testing.T, read func(string) containerDaemonReading) []c
 	}
 }
 
-// Every one of the four daemon checks reports a healthy container town from
+// Every one of the three daemon checks reports a healthy container town from
 // state.json and the supervisor, and never from a pid.
 func TestDaemonChecks_ContainerReportsHealthyFromState(t *testing.T) {
 	t.Parallel()
@@ -110,7 +106,7 @@ func TestDaemonChecks_ContainerReportsHealthyFromState(t *testing.T) {
 	}
 }
 
-// Each of the four checks reports the failure its reading names — never OK —
+// Each of the three checks reports the failure its reading names — never OK —
 // when the container is absent or stopped, its heartbeat is stale, the
 // supervisor's state cannot be read, or the daemon that wrote state.json is
 // not the container's. The status is pinned so a refusal that is removed or
@@ -335,7 +331,7 @@ func (f *fakeDockerInspect) read(townRoot string) containerDaemonReading {
 	return readContainerDaemonWith(f.run, townRoot)
 }
 
-// Each of the four daemon checks reports a healthy container town from the
+// Each of the three daemon checks reports a healthy container town from the
 // production reading: state.json as the container's daemon wrote it, and one
 // docker inspect of the container the town's settings name answering that it
 // runs. Nothing but the docker CLI is faked.
