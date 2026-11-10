@@ -831,48 +831,65 @@ func TestMainFieldPlaceholderCommandIsUnknown(t *testing.T) {
 	}
 }
 
-// A green verdict older than PostLandVerdictMaxAge is UNKNOWN for a rig with a
-// status context, whose verdict can be dropped after post_land_timeout and
-// never arrive, and a green whose record carries no time cannot be aged
-// either. A command-configured rig records its verdict when it runs the check,
-// so neither guard applies to it. A red verdict is a standing fact about its
-// commit and is not aged by that clock (gt-gg9hv.7.2).
-func TestMainFieldStaleVerdictIsUnknown(t *testing.T) {
+// A recorded green stays green however old it is (gt-f701fm): its verdict
+// stands until a newer one moves LastRun.
+// Past PostLandAgeShownAfter its age rides in the value. A red stands at any
+// age, a never-recorded rig stays UNKNOWN, and a status green with no recorded
+// time stays UNKNOWN because its age cannot be shown (gt-gg9hv.7.2). A
+// command-configured rig records its verdict synchronously, so its green is
+// never aged.
+func TestMainFieldRecordedGreenStaysGreen(t *testing.T) {
+	t.Parallel()
+	status := PostLandCheck{Context: "ci / post-land"}
+	command := PostLandCheck{Command: "make test"}
+	green := func(age time.Duration, check PostLandCheck) RigMain {
+		return RigMain{Rig: "mango", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(age), PostLand: check}
+	}
+	tests := []struct {
+		name        string
+		main        RigMain
+		wantVerdict Verdict
+		wantValue   string
+		wantDetail  string
+	}{
+		{"green-1h", green(time.Hour, status), Green, "green", ""},
+		{"green-30h", green(30*time.Hour, status), Green, "green 30h", ""},
+		{"green-10d", green(10*24*time.Hour, status), Green, "green 10d", ""},
+		{"red-30h", RigMain{Rig: "mango", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(30 * time.Hour), PostLand: status}, Red, "red", "main red at 22222222"},
+		{"never-recorded", RigMain{Rig: "mango", PostLand: status}, VerdictUnknown, "?", "no post-landing verdict recorded"},
+		{"untimed-green", RigMain{Rig: "mango", LastRun: "1111111111", LastGreen: "1111111111", PostLand: status}, VerdictUnknown, "?", "green verdict has no recorded time"},
+		{"command-green-30h", green(30*time.Hour, command), Green, "green", ""},
+		{"command-untimed", RigMain{Rig: "mango", LastRun: "1111111111", LastGreen: "1111111111", PostLand: command}, Green, "green", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := healthy()
+			f.mains = []RigMain{tt.main}
+			r := Compute(context.Background(), inputs(f))
+			got := field(t, r, "main/mango")
+			if got.Verdict != tt.wantVerdict || got.Value != tt.wantValue || got.Detail != tt.wantDetail {
+				t.Errorf("main/mango = %+v, want verdict %s value %q detail %q", got, tt.wantVerdict, tt.wantValue, tt.wantDetail)
+			}
+		})
+	}
+}
+
+// An aged green keeps the whole town green, and its age appears in gt status
+// but not on the one line, which lists only non-green fields (gt-f701fm).
+func TestAgedGreenKeepsTheLineGreen(t *testing.T) {
 	t.Parallel()
 	f := healthy()
-	f.mains = []RigMain{
-		{Rig: "stale", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
-		{Rig: "fresh", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge - time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
-		{Rig: "untimed", LastRun: "1111111111", LastGreen: "1111111111", PostLand: PostLandCheck{Context: "ci / post-land"}},
-		{Rig: "old-red", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}},
-		// Both settings: the context decides the verdict, so the green is aged.
-		{Rig: "context-and-command", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Command: "make test", Context: "ci / post-land"}},
-		// Command-configured rigs record a verdict synchronously, so an old or
-		// untimed green still describes the last check run and is not UNKNOWN.
-		{Rig: "command-old", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(PostLandVerdictMaxAge + time.Hour), PostLand: PostLandCheck{Command: "make test"}},
-		{Rig: "command-untimed", LastRun: "1111111111", LastGreen: "1111111111", PostLand: PostLandCheck{Command: "make test"}},
-	}
+	f.mains = []RigMain{{Rig: "mango", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(30 * time.Hour), PostLand: PostLandCheck{Context: "ci / post-land"}}}
 	r := Compute(context.Background(), inputs(f))
-	if got := field(t, r, "main/stale"); got.Verdict != VerdictUnknown {
-		t.Errorf("main/stale = %+v, want UNKNOWN past the age bound", got)
+	if r.Verdict != Green {
+		t.Fatalf("report verdict = %s, want green for an idle rig with a recorded green", r.Verdict)
 	}
-	if got := field(t, r, "main/fresh"); got.Verdict != Green {
-		t.Errorf("main/fresh = %+v, want green inside the bound", got)
+	if got := Line(r, now, DefaultStaleAfter); !strings.HasPrefix(got, "GREEN ") || strings.Contains(got, "main/") {
+		t.Errorf("Line = %q, want a green line that does not list the idle rig", got)
 	}
-	if got := field(t, r, "main/untimed"); got.Verdict != VerdictUnknown || got.Detail != "green verdict has no recorded time" {
-		t.Errorf("main/untimed = %+v, want UNKNOWN naming the missing time", got)
-	}
-	if got := field(t, r, "main/old-red"); got.Verdict != Red {
-		t.Errorf("main/old-red = %+v, want the red to stand; its age is not judgable by LastGreenAt", got)
-	}
-	if got := field(t, r, "main/context-and-command"); got.Verdict != VerdictUnknown {
-		t.Errorf("main/context-and-command = %+v, want the context's age bound to apply", got)
-	}
-	if got := field(t, r, "main/command-old"); got.Verdict != Green {
-		t.Errorf("main/command-old = %+v, want green; a command rig's verdict is not aged", got)
-	}
-	if got := field(t, r, "main/command-untimed"); got.Verdict != Green {
-		t.Errorf("main/command-untimed = %+v, want green; a command rig's verdict needs no clock", got)
+	if got := strings.Join(Lines(r, now, DefaultStaleAfter), "\n"); !strings.Contains(got, "green 30h") {
+		t.Errorf("Lines = %q, want the idle rig's age in gt status", got)
 	}
 }
 
