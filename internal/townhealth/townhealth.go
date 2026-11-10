@@ -458,10 +458,12 @@ const postLandPlaceholderCommand = "true"
 // before a rig with a status context carries its age in the main field's value
 // ("green 31h"). It does not expire the green: an idle rig's last recorded green
 // stands until a newer verdict moves LastRun (gt-f701fm). A status verdict that
-// never arrives leaves that green standing; the landing worker's
-// post_land_timeout attention item is what reports it. A command-configured rig
-// records its verdict synchronously, so its green is never aged. A constant
-// rather than a GT_ environment read: the dashboard has one town-wide value.
+// never arrives leaves that green standing. The daemon raises a post-land-unknown
+// attention item for it once post_land_timeout passes, and only until the landing
+// worker's alarm window ends and drops the pending entry; after that, this age is
+// the only report of the silence. A command-configured rig records its verdict
+// synchronously, so its green is never aged. A constant rather than a GT_
+// environment read: the dashboard has one town-wide value.
 const PostLandAgeShownAfter = 24 * time.Hour
 
 // RigMain is one rig's post-landing main state: the newest commit a run
