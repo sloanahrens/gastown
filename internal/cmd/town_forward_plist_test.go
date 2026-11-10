@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/xml"
 	"errors"
-	"flag"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,8 +11,6 @@ import (
 	"strings"
 	"testing"
 )
-
-var updateForwardPlistGolden = flag.Bool("update-forward-plist-golden", false, "rewrite testdata/town_forward_plist.golden")
 
 const forwardPlistGoldenPath = "town_forward_plist.golden"
 
@@ -132,11 +129,6 @@ func TestTownForwardPlistGolden(t *testing.T) {
 	}
 
 	goldenFile := filepath.Join("testdata", forwardPlistGoldenPath)
-	if *updateForwardPlistGolden {
-		if err := os.WriteFile(goldenFile, out.Bytes(), 0o644); err != nil { //nolint:gosec // a test fixture
-			t.Fatalf("rewriting the golden: %v", err)
-		}
-	}
 	want, err := os.ReadFile(goldenFile)
 	if err != nil {
 		t.Fatalf("reading the golden: %v", err)
