@@ -21,29 +21,28 @@ const BeadsMetadataFile = "metadata.json"
 // metadata.json, trimmed, or "" when the file is absent, does not parse, or
 // names none. It does not follow a redirect.
 func BeadsMetadataDatabase(beadsDir string) string {
-	db, _, _ := BeadsFileDatabase(filepath.Join(beadsDir, BeadsMetadataFile))
+	db, _ := BeadsFileDatabase(filepath.Join(beadsDir, BeadsMetadataFile))
 	return db
 }
 
 // BeadsFileDatabase is the trimmed dolt_database of a bd config file
-// (metadata.json, or the legacy config.json bd migrates from); present
-// reports whether the file exists. A file that does not parse names none.
-// err is nil, or the read failure, or the parse failure naming the path: a
-// file that exists but cannot be read or parsed is not absent, and a caller
-// that must not read it as absence checks err, not present. A missing file is
-// an error wrapping fs.ErrNotExist.
-func BeadsFileDatabase(path string) (db string, present bool, err error) {
+// (metadata.json, or the legacy config.json bd migrates from). err is nil when
+// the file was read and parsed, and otherwise says why it could not be: a
+// missing file wraps fs.ErrNotExist, and a read or parse failure names the
+// path. A file that does not parse is an error, not a file that names no
+// database, so a caller must check err before it reads the name as absent.
+func BeadsFileDatabase(path string) (db string, err error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: bd config file of a beads directory gastown chose
 	if err != nil {
-		return "", false, err
+		return "", err
 	}
 	var meta struct {
 		DoltDatabase string `json:"dolt_database"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", true, fmt.Errorf("parse %s: %w", path, err)
+		return "", fmt.Errorf("parse %s: %w", path, err)
 	}
-	return strings.TrimSpace(meta.DoltDatabase), true, nil
+	return strings.TrimSpace(meta.DoltDatabase), nil
 }
 
 // RigBeadsDirs are the directories, relative to the town root, where a rig's

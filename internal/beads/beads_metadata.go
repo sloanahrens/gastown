@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -38,7 +39,10 @@ func InitDatabaseTarget(beadsDir string) (string, error) {
 // config.json it migrates from.
 func configuredDatabase(beadsDir string) string {
 	for _, name := range []string{agentconfig.BeadsMetadataFile, "config.json"} {
-		if db, present, _ := agentconfig.BeadsFileDatabase(filepath.Join(beadsDir, name)); present {
+		// A file that is there but cannot be read or parsed stops the search:
+		// the legacy file is not read in its place (gt-b3ar38).
+		db, err := agentconfig.BeadsFileDatabase(filepath.Join(beadsDir, name))
+		if err == nil || !errors.Is(err, fs.ErrNotExist) {
 			return db
 		}
 	}

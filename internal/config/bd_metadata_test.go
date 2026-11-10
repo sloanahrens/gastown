@@ -24,39 +24,48 @@ func TestBeadsFileDatabase(t *testing.T) {
 		return path
 	}
 
-	t.Run("missing file is fs.ErrNotExist and not present", func(t *testing.T) {
+	t.Run("missing file is fs.ErrNotExist", func(t *testing.T) {
 		t.Parallel()
-		_, present, err := BeadsFileDatabase(filepath.Join(dir, "absent.json"))
-		if !errors.Is(err, fs.ErrNotExist) || present {
-			t.Errorf("present = %v, error = %v; want not present and fs.ErrNotExist", present, err)
+		_, err := BeadsFileDatabase(filepath.Join(dir, "absent.json"))
+		if !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("error = %v, want fs.ErrNotExist", err)
 		}
 	})
 	t.Run("file that does not parse is an error naming the path", func(t *testing.T) {
 		t.Parallel()
 		path := write("broken.json", "{not json")
-		db, present, err := BeadsFileDatabase(path)
+		db, err := BeadsFileDatabase(path)
 		if err == nil || errors.Is(err, fs.ErrNotExist) || db != "" {
-			t.Fatalf("BeadsFileDatabase = %q, %v, %v; want an empty name and a parse error", db, present, err)
-		}
-		if !present {
-			t.Errorf("present = false for a file that exists; want true")
+			t.Fatalf("BeadsFileDatabase = %q, %v; want an empty name and a parse error", db, err)
 		}
 		if !strings.Contains(err.Error(), path) {
 			t.Errorf("error = %v, want it to name %s", err, path)
 		}
 	})
+	t.Run("file that cannot be read is an error, not absence", func(t *testing.T) {
+		t.Parallel()
+		// A directory named metadata.json exists but cannot be read as a file.
+		path := filepath.Join(dir, "unreadable.json")
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := BeadsFileDatabase(path)
+		if err == nil || errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("error = %v, want a read error that is not fs.ErrNotExist", err)
+		}
+	})
 	t.Run("parsed name is trimmed", func(t *testing.T) {
 		t.Parallel()
-		db, present, err := BeadsFileDatabase(write("named.json", `{"dolt_database":"  gt  "}`))
-		if err != nil || !present || db != "gt" {
-			t.Errorf("BeadsFileDatabase = %q, %v, %v; want gt, present, nil", db, present, err)
+		db, err := BeadsFileDatabase(write("named.json", `{"dolt_database":"  gt  "}`))
+		if err != nil || db != "gt" {
+			t.Errorf("BeadsFileDatabase = %q, %v; want gt, nil", db, err)
 		}
 	})
 	t.Run("file naming no database is not an error", func(t *testing.T) {
 		t.Parallel()
-		db, present, err := BeadsFileDatabase(write("empty.json", `{}`))
-		if err != nil || !present || db != "" {
-			t.Errorf("BeadsFileDatabase = %q, %v, %v; want empty, present, nil", db, present, err)
+		db, err := BeadsFileDatabase(write("empty.json", `{}`))
+		if err != nil || db != "" {
+			t.Errorf("BeadsFileDatabase = %q, %v; want empty, nil", db, err)
 		}
 	})
 }
