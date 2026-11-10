@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -221,6 +222,8 @@ type townStateSeedEnv struct {
 	// readHost reads the town's settings files on the host for the live copy. Nil
 	// means os.ReadFile.
 	readHost func(string) ([]byte, error)
+	// statHost stats a host file for a rehearsal's churn sort. Nil means os.Lstat.
+	statHost func(string) (fs.FileInfo, error)
 	// patrolWritePath names the file the daemon patrol config is written to,
 	// which the rehearsal profile rewrites. Production is config.PatrolWritePath.
 	patrolWritePath func(string) (string, error)
@@ -240,6 +243,14 @@ func (env townStateSeedEnv) clock() time.Time {
 		return time.Now()
 	}
 	return env.now()
+}
+
+// stat stats a host file, os.Lstat when no stat is set.
+func (env townStateSeedEnv) stat(p string) (fs.FileInfo, error) {
+	if env.statHost == nil {
+		return os.Lstat(p)
+	}
+	return env.statHost(p)
 }
 
 func runTownStateSeed(cmd *cobra.Command, _ []string) error {
@@ -326,6 +337,7 @@ func townStateSeedEnvFromFlags(cmd *cobra.Command) (townStateSeedEnv, error) {
 		exclude:         exclude,
 		patrolWritePath: config.PatrolWritePath,
 		readHost:        os.ReadFile,
+		statHost:        os.Lstat,
 		engine:          podEngine{namespace: f.namespace, pod: f.pod, claim: seedClaim, context: f.context, town: f.town, run: execKubectl},
 		probes:          productionMigrateProbes(),
 		now:             time.Now,
@@ -439,6 +451,13 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	if err != nil {
 		return fmt.Errorf("verifying claim %s: the claim is partial and not to be used: %w", seedClaim, err)
 	}
+	// A rehearsal's churn is what the running town changed while the copy ran. It is
+	// printed, and only the rest fails the run. The cut-over form has no churn.
+	if env.rehearsal {
+		churn, rest := sortSeedChurn(env.town, start, res.Mismatches, env.stat)
+		printSeedChurn(env.out, churn)
+		res.Mismatches = rest
+	}
 	if problems := printVerifyProblems(env.out, res, nil); problems > 0 {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("claim %s does not match the host copy set (%d problems): the claim is partial and not to be used", seedClaim, problems)}
 	}
@@ -484,6 +503,89 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	}
 	fmt.Fprintf(env.out, "claim %s matches the host copy set (%d files) as streamed%s\n", seedClaim, res.Files, profileNote)
 	return nil
+}
+
+// seedChurnListed is how many churn paths a rehearsal prints; the rest are counted.
+const seedChurnListed = 20
+
+// seedWispBaselinePath is the daemon patrol's open-wisp series, relative to the town
+// root: the file daemon.WispAlertBaselinePath names, rewritten every patrol cycle.
+const seedWispBaselinePath = "daemon/wisp_open_baseline_daemon.json"
+
+// seedRigRefDirs are the directories under <rig>/.repo.git/ that a running town
+// writes while a copy runs: refs, reflogs and new worktrees.
+var seedRigRefDirs = []string{"refs", "logs", "worktrees"}
+
+// sortSeedChurn splits a rehearsal's verify mismatches into churn, the differences
+// the running town made while the copy ran, and problems, everything else. A
+// mismatch is churn when its reason is changed, missing or extra, and either its
+// host file's modification time is after start, or its path is one seedChurnPath
+// names. A file deleted from the host has no modification time to read, so the
+// path rule is what sorts it. A stat that fails for any reason but absence is a
+// problem, whatever the path.
+func sortSeedChurn(town string, start time.Time, mismatches []townstate.Mismatch, stat func(string) (fs.FileInfo, error)) (churn, problems []townstate.Mismatch) {
+	for _, m := range mismatches {
+		if isSeedChurn(town, start, m, stat) {
+			churn = append(churn, m)
+			continue
+		}
+		problems = append(problems, m)
+	}
+	return churn, problems
+}
+
+// isSeedChurn is the churn rule for one mismatch; sortSeedChurn states it.
+func isSeedChurn(town string, start time.Time, m townstate.Mismatch, stat func(string) (fs.FileInfo, error)) bool {
+	switch m.Reason {
+	case townstate.ReasonChanged, townstate.ReasonMissing, townstate.ReasonExtra:
+	default:
+		return false
+	}
+	// The name comes from the claim's listing, so one that climbs out of the town is
+	// never a host file to stat.
+	if !fs.ValidPath(m.Path) {
+		return false
+	}
+	info, err := stat(filepath.Join(town, filepath.FromSlash(m.Path)))
+	if err == nil && info.ModTime().After(start) {
+		return true
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return seedChurnPath(m.Path)
+}
+
+// seedChurnPath reports whether rel names a file a running town rewrites or
+// creates: the open-wisp baseline, and last-touched or FETCH_HEAD at any depth,
+// and anything under <rig>/.repo.git/refs, logs or worktrees.
+func seedChurnPath(rel string) bool {
+	if rel == seedWispBaselinePath {
+		return true
+	}
+	if base := path.Base(rel); base == "last-touched" || base == "FETCH_HEAD" {
+		return true
+	}
+	parts := strings.Split(rel, "/")
+	return len(parts) >= 3 && parts[1] == ".repo.git" && slices.Contains(seedRigRefDirs, parts[2])
+}
+
+// printSeedChurn says how many files changed since the copy opened, lists the
+// first seedChurnListed of them, and counts the rest.
+func printSeedChurn(out io.Writer, churn []townstate.Mismatch) {
+	if len(churn) == 0 {
+		return
+	}
+	fmt.Fprintf(out, "%d files changed since the copy opened: churn, not differences\n", len(churn))
+	for i, m := range churn {
+		if i == seedChurnListed {
+			break
+		}
+		fmt.Fprintf(out, "%s %s: changed since the copy\n", m.Reason, m.Path)
+	}
+	if more := len(churn) - seedChurnListed; more > 0 {
+		fmt.Fprintf(out, "... and %d more changed since the copy\n", more)
+	}
 }
 
 // seedSettingsHostFile refuses a rehearsal whose settings file is not a regular
