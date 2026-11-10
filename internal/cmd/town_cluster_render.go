@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -76,6 +77,7 @@ type clusterRenderFlags struct {
 	polecatImage       string
 	configDir          string
 	openShellConfigDir string
+	forgeHost          string
 }
 
 var clusterRender clusterRenderFlags
@@ -148,6 +150,8 @@ func init() {
 		"the town's config directory the operator's secret files are in, an absolute path (default $XDG_CONFIG_HOME/gt or ~/.config/gt)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.openShellConfigDir, "openshell-config-dir", "",
 		"the operator's openshell config directory, an absolute path (default $XDG_CONFIG_HOME/openshell or ~/.config/openshell)")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.forgeHost, config.ForgeHostFlag, "",
+		"the forge's host:port the pod's git asks for a credential (required for a live render, the flag `gt daemon compose write` takes); a rehearsal takes none")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)
@@ -184,6 +188,10 @@ func (f clusterRenderFlags) validate() error {
 		return errors.New("--memory is required: no source records a measured share, so the render takes no default")
 	case !f.rehearsal && !f.confirmStopped:
 		return errors.New("a live render needs --confirm-container-stopped: the Docker Desktop container owns the town until it is stopped, and only one of it and the pod may own the town")
+	case !f.rehearsal && strings.TrimSpace(f.forgeHost) == "":
+		return fmt.Errorf("--%s is required for a live render: the pod's git has no credential helper without it, and every Forgejo call fails (the live compose command passes the same flag)", config.ForgeHostFlag)
+	case f.rehearsal && strings.TrimSpace(f.forgeHost) != "":
+		return fmt.Errorf("--%s is for a live render: a rehearsal mounts only the read-only viewer token and carries no forge host", config.ForgeHostFlag)
 	case !filepath.IsAbs(f.configDir):
 		return fmt.Errorf("--config-dir %q must be an absolute path: the create commands are run from another directory", f.configDir)
 	case !filepath.IsAbs(f.openShellConfigDir):
@@ -270,6 +278,12 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		Memory:                  f.memory,
 		ConfirmContainerStopped: f.confirmStopped,
 		HostGatewayIP:           f.hostGateway,
+	}
+	if !f.rehearsal {
+		// The live pod's arguments equal the live compose command's: the om token
+		// file and the forge host with the landing bot's token (gt-22wubb).
+		v.OMToken = true
+		v.ForgeHost = strings.TrimSpace(f.forgeHost)
 	}
 	m, err := d.build(v)
 	if err != nil {
