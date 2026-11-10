@@ -111,7 +111,7 @@ type hostDisk struct {
 // disk could be read, so there is nothing to watch. It is not a probe failure:
 // a host with no control cluster is not an outage, and the rules raise nothing.
 // Container mode runs in the control cluster, so there the same answer is a
-// failed read (fileHostProbes.NodeDisk).
+// failed read (fileHostProbes.NodeDisks).
 var errHostNodeNotConfigured = errors.New("the town runs no control cluster, so there is no control node disk to read")
 
 // hostProbes are the host reads the collectors make. attentionHostProbes
