@@ -4,16 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // ErrNoBeadsDir is the not-found error of BeadsDirForDatabase: no searched root
-// holds a beads directory that names the database. A metadata.json that fails
-// to read or parse names no database, so it reads as not found too; this error
-// does not by itself prove the directory is absent.
+// names the database, and no metadata.json among them was present but unreadable.
+// An unreadable metadata.json is not this error: it may be the one that names
+// the database.
 var ErrNoBeadsDir = errors.New("no beads directory")
 
 // BeadsDirForDatabase returns the beads directory whose metadata.json names
@@ -26,10 +29,27 @@ func BeadsDirForDatabase(townRoot, dbName string, extraRoots ...string) (string,
 	// server and must hand the write to bd, which selects its database by
 	// beads dir. The town's own workspaces are searched first; extraRoots
 	// follow, for a workspace outside the town such as ~/.claude (gt-33etw).
+	//
+	// A metadata.json that is present but unreadable reads as naming no
+	// database, so the search goes on past it: a match in a later root still
+	// wins. Only a search that finds nothing reports the unreadable file, and
+	// it does so as an error other than ErrNoBeadsDir, so no caller reads a
+	// broken workspace as an absent one.
+	var unreadable error
 	for _, dir := range append(candidateBeadsDirs(townRoot), extraRootBeadsDirs(extraRoots)...) {
-		if DatabaseForBeadsDir(dir) == dbName {
+		db := DatabaseForBeadsDir(dir)
+		if db == dbName {
 			return dir, nil
 		}
+		if db == "" && unreadable == nil {
+			_, err := configpkg.BeadsFileDatabaseErr(filepath.Join(dir, configpkg.BeadsMetadataFile))
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				unreadable = err
+			}
+		}
+	}
+	if unreadable != nil {
+		return "", fmt.Errorf("beads dir for database %q: %w", dbName, unreadable)
 	}
 	searched := append([]string{townRoot}, extraRoots...)
 	return "", fmt.Errorf("%w in %s names database %q in its metadata.json",

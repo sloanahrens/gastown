@@ -592,8 +592,10 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	if totalMoleculeSteps > 0 {
 		summary += fmt.Sprintf(" molecule_steps_closed=%d", totalMoleculeSteps)
 	}
-	summary += fmt.Sprintf(" purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d open=%d databases=%d dryRun=%v",
-		totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
+	// databases counts the databases the reap attempted, reaped or failed;
+	// skipped counts those no searched beads root names, reported apart.
+	summary += fmt.Sprintf(" purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d open=%d databases=%d skipped=%d dryRun=%v",
+		totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, openDBs+reapErrors, len(skipped), dryRun)
 	d.logger.Printf("%s", summary)
 	cycle.closeStep("report")
 }

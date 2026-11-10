@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -223,6 +224,74 @@ func TestWispReaperResolvedDatabaseThatFailsStaysAFailure(t *testing.T) {
 	}
 	if !strings.Contains(p.log.String(), "open-wisp alert skipped") {
 		t.Errorf("log = %q, want the open-wisp alert skipped for a cycle with a reap failure", p.log.String())
+	}
+}
+
+// TestWispReaperUnreadableTownMetadataFailsCycle: the town's own metadata.json
+// is present but corrupt, and an extra root is configured. The database it
+// should name is not skipped as absent: the cycle fails, the log names the file,
+// and no skip line is logged (gt-b3ar38).
+func TestWispReaperUnreadableTownMetadataFailsCycle(t *testing.T) {
+	t.Parallel()
+	p := newTrackerPass(t, trackerPassRoutes)
+	townMetadata := filepath.Join(p.d.config.TownRoot, ".beads", "metadata.json")
+	if err := os.MkdirAll(filepath.Dir(townMetadata), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(townMetadata, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p.d.reaperOpenDBFn = func(string, time.Duration, time.Duration) (*beadsql.DB, error) {
+		return openEmptySweepDB(t), nil
+	}
+
+	p.d.reapWispsInline(&WispReaperConfig{
+		Databases:       []string{"beads_db"},
+		ExtraBeadsRoots: []string{filepath.Join(t.TempDir(), "claude")},
+	}, 0, 0, 0, p.cycle)
+
+	if outcome, reason := p.cycle.outcome(); outcome != dogCycleFailed {
+		t.Errorf("cycle outcome = %s (%s), want failed: an unreadable town metadata.json is not absence", outcome, reason)
+	}
+	if !strings.Contains(p.log.String(), townMetadata) {
+		t.Errorf("log = %q, want the unreadable file named", p.log.String())
+	}
+	if strings.Contains(p.log.String(), "skipped database") {
+		t.Errorf("log = %q, want no skip line for a database whose workspace file is unreadable", p.log.String())
+	}
+}
+
+// TestWispReaperSummaryCountsAttemptedAndSkipped: the cycle summary's databases
+// count is the databases the reap attempted, reaped or failed, and the skipped
+// database is reported apart. Here claude is skipped, beads_db is reaped, and
+// ghost_db's writer fails; "bad db" is not a database name, so it is never
+// attempted and is left out of the count. The summary reads databases=2
+// skipped=1 (gt-b3ar38).
+func TestWispReaperSummaryCountsAttemptedAndSkipped(t *testing.T) {
+	t.Parallel()
+	p := newTrackerPass(t, trackerPassRoutes)
+	writeTownBeadsDB(t, p.d.config.TownRoot)
+	p.d.reaperOpenDBFn = func(string, time.Duration, time.Duration) (*beadsql.DB, error) {
+		return openEmptySweepDB(t), nil
+	}
+	p.d.reaperWriterForFn = func(townRoot, dbName string) (reaper.Writer, error) {
+		switch dbName {
+		case "claude":
+			return nil, fmt.Errorf("resolve bd writer for claude: %w", doltserver.ErrNoBeadsDir)
+		case "ghost_db":
+			return nil, errors.New("bd: connection refused")
+		}
+		return reaper.WriterForDatabase(townRoot, dbName)
+	}
+
+	p.d.reapWispsInline(&WispReaperConfig{
+		Databases:       []string{"claude", "beads_db", "ghost_db", "bad db"},
+		ExtraBeadsRoots: []string{filepath.Join(t.TempDir(), "claude")},
+	}, 0, 0, 0, p.cycle)
+
+	const want = "databases=2 skipped=1"
+	if !strings.Contains(p.log.String(), want) {
+		t.Errorf("log = %q, want the cycle summary to read %q", p.log.String(), want)
 	}
 }
 

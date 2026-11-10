@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,24 @@ const BeadsMetadataFile = "metadata.json"
 func BeadsMetadataDatabase(beadsDir string) string {
 	db, _ := BeadsFileDatabase(filepath.Join(beadsDir, BeadsMetadataFile))
 	return db
+}
+
+// BeadsFileDatabaseErr is the trimmed dolt_database of the bd config file at
+// path. A file that does not exist is fs.ErrNotExist. A file that cannot be
+// read or does not parse is an error naming the path: it names no database,
+// but it is not absent, so a caller must not read it as absence.
+func BeadsFileDatabaseErr(path string) (string, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: bd config file of a beads directory gastown chose
+	if err != nil {
+		return "", err
+	}
+	var meta struct {
+		DoltDatabase string `json:"dolt_database"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	return strings.TrimSpace(meta.DoltDatabase), nil
 }
 
 // BeadsFileDatabase is the trimmed dolt_database of a bd config file

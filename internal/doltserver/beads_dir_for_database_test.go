@@ -118,3 +118,100 @@ func TestBeadsDirForDatabaseSearchesExtraRoots(t *testing.T) {
 		t.Errorf("unmapped database error = %v, want it to name the database and the extra root searched", err)
 	}
 }
+
+// TestBeadsDirForDatabaseUnreadableMetadata: a metadata.json that is present but
+// cannot be read or parsed is not absence. The lookup returns an error other
+// than ErrNoBeadsDir that names the file, so the reaper fails the database rather
+// than skipping it. A match in a later root still resolves past the broken file.
+func TestBeadsDirForDatabaseUnreadableMetadata(t *testing.T) {
+	t.Parallel()
+	writeMetadata := func(t *testing.T, dir, body string) string {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, "metadata.json")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	cases := []struct {
+		name string
+		// setup writes the fixture and returns the metadata.json the error must
+		// name, or "" when the lookup must return ErrNoBeadsDir.
+		setup func(t *testing.T, townRoot, extra string) string
+		// wantExtra wants the lookup to resolve to the extra root's beads dir.
+		wantExtra bool
+	}{
+		{
+			name: "town metadata does not parse",
+			setup: func(t *testing.T, townRoot, _ string) string {
+				return writeMetadata(t, filepath.Join(townRoot, ".beads"), "{not json")
+			},
+		},
+		{
+			name: "extra root metadata does not parse",
+			setup: func(t *testing.T, _, extra string) string {
+				return writeMetadata(t, filepath.Join(extra, ".beads"), "{not json")
+			},
+		},
+		{
+			name: "extra root metadata cannot be read",
+			setup: func(t *testing.T, _, extra string) string {
+				path := filepath.Join(extra, ".beads", "metadata.json")
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			},
+		},
+		{
+			name: "a match in an extra root wins over an unparseable town file",
+			setup: func(t *testing.T, townRoot, extra string) string {
+				writeMetadata(t, filepath.Join(townRoot, ".beads"), "{not json")
+				writeMetadata(t, filepath.Join(extra, ".beads"), `{"dolt_database":"claude"}`)
+				return ""
+			},
+			wantExtra: true,
+		},
+		{
+			name: "a readable file naming another database is absence",
+			setup: func(t *testing.T, townRoot, _ string) string {
+				writeMetadata(t, filepath.Join(townRoot, ".beads"), `{"dolt_database":"hq"}`)
+				return ""
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			extra := filepath.Join(t.TempDir(), "claude")
+			wantFile := tc.setup(t, townRoot, extra)
+
+			got, err := BeadsDirForDatabase(townRoot, "claude", extra)
+			if tc.wantExtra {
+				if err != nil || got != filepath.Join(extra, ".beads") {
+					t.Fatalf("BeadsDirForDatabase = %q, %v; want the extra root's beads dir", got, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("BeadsDirForDatabase = %q, want an error", got)
+			}
+			if wantFile == "" {
+				if !errors.Is(err, ErrNoBeadsDir) {
+					t.Errorf("error = %v, want ErrNoBeadsDir for a file that names another database", err)
+				}
+				return
+			}
+			if errors.Is(err, ErrNoBeadsDir) {
+				t.Errorf("error = %v, want not ErrNoBeadsDir: an unreadable metadata.json is not absence", err)
+			}
+			if !strings.Contains(err.Error(), wantFile) {
+				t.Errorf("error = %v, want it to name %s", err, wantFile)
+			}
+		})
+	}
+}
