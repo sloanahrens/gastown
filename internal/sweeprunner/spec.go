@@ -58,6 +58,11 @@ type Spec struct {
 	// It is a field so a render names its engine instead of taking whichever one
 	// the environment happens to select.
 	Context string
+	// InCluster is set when the process runs in a pod and no kubeconfig names
+	// Context: the kubectl steps then omit --context and use the pod's service
+	// account. The caller decides it once, with InClusterWithoutContext, when it
+	// builds the Spec. It is not Validate's to rule on.
+	InCluster bool
 	// ProtectedNamespaces are the namespaces the Kubernetes preflight checks
 	// before it launches: a pod there at or below the sweep's priority would be
 	// what the scheduler sheds for the run. Empty refuses the launch (an

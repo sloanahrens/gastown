@@ -1882,3 +1882,40 @@ func TestTierSweepRunnerPriorityDeclineDefers(t *testing.T) {
 		t.Errorf("the decline line appears %d times after the hour, want the standing decline reported again:\n%s", got, logs.String())
 	}
 }
+
+// TestTierSweepRunnerSpecInCluster: a daemon that decides it runs in a pod sets
+// Spec.InCluster on every Spec it builds, asks the decision for the runner's
+// context, and logs it once, not per Spec; a daemon that decides otherwise leaves
+// it unset and logs nothing (gt-2by0ke).
+func TestTierSweepRunnerSpecInCluster(t *testing.T) {
+	t.Parallel()
+	for _, inPod := range []bool{true, false} {
+		d, _, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+		cfg := runnerTestConfig(t)
+		d.patrolConfig.Patrols.TierSweep.Runner = cfg
+		var asked []string
+		d.sweepInClusterFn = func(context string) bool {
+			asked = append(asked, context)
+			return inPod
+		}
+		for i := 0; i < 2; i++ {
+			spec, ok, err := d.tierSweepRunnerSpec(tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA})
+			if err != nil || !ok {
+				t.Fatalf("inPod=%v: spec = %+v, ok = %v, err = %v", inPod, spec, ok, err)
+			}
+			if spec.InCluster != inPod {
+				t.Errorf("inPod=%v: Spec.InCluster = %v", inPod, spec.InCluster)
+			}
+		}
+		if len(asked) == 0 || asked[0] != cfg.Context {
+			t.Errorf("inPod=%v: the decision was asked for %q, want the runner's context %q", inPod, asked, cfg.Context)
+		}
+		want := 0
+		if inPod {
+			want = 1
+		}
+		if n := strings.Count(logs.String(), "sweep runner: in-cluster, context "+cfg.Context+" not used"); n != want {
+			t.Errorf("inPod=%v: the in-cluster line was logged %d times, want %d\n%s", inPod, n, want, logs.String())
+		}
+	}
+}
