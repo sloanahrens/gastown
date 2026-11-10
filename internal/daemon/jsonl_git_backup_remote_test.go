@@ -20,21 +20,34 @@ const remoteDoltHost = "192.0.2.10"
 
 // remoteServerFake is the Dolt server a backup reads. SHOW DATABASES answers
 // with showOut or showErr; each export records the database and the directory
-// it was handed.
+// it was handed. Every command the backup runs is recorded in cmds, and a table
+// export that runs for real gets an empty result.
 type remoteServerFake struct {
 	showOut   []byte
 	showErr   error
 	showCalls int
 	exported  []string
 	exportDir []string
+	cmds      []*exec.Cmd
 }
 
-func (s *remoteServerFake) run(_ context.Context, _ *exec.Cmd, table string, _ time.Duration) ([]byte, error) {
-	if table != "SHOW DATABASES" {
-		return nil, errors.New("unexpected query: " + table)
+func (s *remoteServerFake) run(_ context.Context, cmd *exec.Cmd, table string, _ time.Duration) ([]byte, error) {
+	s.cmds = append(s.cmds, cmd)
+	if table == "SHOW DATABASES" {
+		s.showCalls++
+		return s.showOut, s.showErr
 	}
-	s.showCalls++
-	return s.showOut, s.showErr
+	return []byte(`{"rows":[]}`), nil
+}
+
+// flagValue is the argument after flag in cmd's argv, or "" when it is absent.
+func flagValue(cmd *exec.Cmd, flag string) string {
+	for i := 0; i+1 < len(cmd.Args); i++ {
+		if cmd.Args[i] == flag {
+			return cmd.Args[i+1]
+		}
+	}
+	return ""
 }
 
 // newRemoteBackupDaemon wires a backup over a town whose data dir is absent, the
@@ -173,8 +186,14 @@ func TestJSONLGitBackupRemoteServerWithOnlySystemDatabasesHasNothingToExport(t *
 	if len(server.exported) != 0 {
 		t.Errorf("exported %v, want nothing", server.exported)
 	}
-	if open := rec.OpenEscalations(alertKeyJSONLNoDBs); len(open) != 1 {
-		t.Errorf("open no-databases escalations = %+v, want one", open)
+	open := rec.OpenEscalations(alertKeyJSONLNoDBs)
+	if len(open) != 1 {
+		t.Fatalf("open no-databases escalations = %+v, want one", open)
+	}
+	// The list came from the server, so the escalation names the server, and not
+	// the data dir the remote patrol never read.
+	if reason := open[0].Reason; !strings.Contains(reason, remoteDoltHost) || strings.Contains(reason, ".dolt-data") {
+		t.Errorf("no-databases escalation = %q, want it to name the server %s and not the data dir", reason, remoteDoltHost)
 	}
 }
 
@@ -198,53 +217,74 @@ func TestJSONLGitBackupRemoteServerNoDoltClientDirExportsNothing(t *testing.T) {
 	if open := rec.OpenEscalations(alertKeyJSONLRemote); len(open) != 1 {
 		t.Errorf("open remote escalations = %+v, want one", open)
 	}
-	if !strings.Contains(logs.String(), "creating the dolt client directory") {
+	if !strings.Contains(logs.String(), "creating the Dolt client working directory") {
 		t.Errorf("client directory failure not logged; log:\n%s", logs.String())
 	}
 }
 
-// TestJSONLGitBackupRemoteWorkDir: the client directory is private, under the
-// town root, and a town root that is unset or not a directory is an error, never
-// the current directory.
-func TestJSONLGitBackupRemoteWorkDir(t *testing.T) {
+// TestJSONLGitBackupRemoteTargetReadOncePerTick: a tick reads the Dolt endpoint
+// once, and the database list and every export it runs take that value. The
+// endpoint the tick resolves differs from the daemon's own server config, so an
+// export that read the config again would name the other host and fail here.
+func TestJSONLGitBackupRemoteTargetReadOncePerTick(t *testing.T) {
 	t.Parallel()
-	fileRoot := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(fileRoot, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
+	const tickHost, tickPort = "192.0.2.20", 5507
+	townRoot := t.TempDir()
+	server := &remoteServerFake{showOut: []byte(`{"rows":[{"Database":"hq"},{"Database":"gt"}]}`)}
+	d, _, _ := newRemoteBackupDaemon(t, townRoot, remoteDoltHost, server)
+	d.jsonlExportFn = nil
+	reads := 0
+	d.jsonlTargetFn = func() jsonlTarget {
+		reads++
+		return jsonlTarget{useServer: true, host: tickHost, port: tickPort, user: "root"}
 	}
-	tests := []struct {
-		name     string
-		townRoot string
-		wantErr  bool
-	}{
-		{"an unset town root is refused", "", true},
-		{"a town root that is a file is refused", fileRoot, true},
-		{"a town root directory gets a private client directory", t.TempDir(), false},
+
+	d.syncJsonlGitBackup()
+
+	if reads != 1 {
+		t.Fatalf("the tick read the Dolt endpoint %d times, want once", reads)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			dir, err := jsonlRemoteWorkDir(tt.townRoot)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("jsonlRemoteWorkDir(%q) = %q, want an error", tt.townRoot, dir)
-				}
-				return
+	if server.showCalls != 1 || len(server.cmds) < 2 {
+		t.Fatalf("the tick ran %d list(s) and %d command(s), want one list and the exports", server.showCalls, len(server.cmds))
+	}
+	for i, cmd := range server.cmds {
+		if host, port := flagValue(cmd, "--host"), flagValue(cmd, "--port"); host != tickHost || port != "5507" {
+			t.Errorf("command %d reached %s:%s, want the tick's %s:5507", i, host, port, tickHost)
+		}
+	}
+}
+
+// TestJSONLGitBackupRemoteExportCommandsRunInClientDir: each export a remote tick
+// runs is the real command. It runs in the client directory the tick made, names
+// the server's host and port, and queries the database it is exporting.
+func TestJSONLGitBackupRemoteExportCommandsRunInClientDir(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	server := &remoteServerFake{showOut: []byte(`{"rows":[{"Database":"hq"},{"Database":"gt"}]}`)}
+	d, _, _ := newRemoteBackupDaemon(t, townRoot, remoteDoltHost, server)
+	d.jsonlExportFn = nil
+
+	d.syncJsonlGitBackup()
+
+	clientDir := filepath.Join(townRoot, ".runtime", "dolt-client")
+	for _, db := range []string{"gt", "hq"} {
+		exports := 0
+		for _, cmd := range server.cmds {
+			query := flagValue(cmd, "-q")
+			if query == "SHOW DATABASES" || !strings.Contains(query, "`"+db+"`.") {
+				continue
 			}
-			if err != nil {
-				t.Fatalf("jsonlRemoteWorkDir(%q): %v", tt.townRoot, err)
+			exports++
+			if cmd.Dir != clientDir {
+				t.Errorf("%s export ran in %q, want the client directory %q", db, cmd.Dir, clientDir)
 			}
-			if want := filepath.Join(tt.townRoot, ".runtime", "dolt-client"); dir != want {
-				t.Errorf("jsonlRemoteWorkDir = %q, want %q", dir, want)
+			if host, port := flagValue(cmd, "--host"), flagValue(cmd, "--port"); host != remoteDoltHost || port != "3307" {
+				t.Errorf("%s export reached %s:%s, want %s:3307", db, host, port, remoteDoltHost)
 			}
-			info, err := os.Stat(dir)
-			if err != nil || !info.IsDir() {
-				t.Fatalf("client directory %s was not made: %v", dir, err)
-			}
-			if perm := info.Mode().Perm(); perm != 0o700 {
-				t.Errorf("client directory mode = %o, want 0700", perm)
-			}
-		})
+		}
+		if exports == 0 {
+			t.Errorf("no export command queried database %s", db)
+		}
 	}
 }
 

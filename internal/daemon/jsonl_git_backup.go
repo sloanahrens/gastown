@@ -241,8 +241,10 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// A remote server's data dir is the server's, not this host's, so it is not
 	// stat'd: the databases come from the server, and the dolt commands run in a
 	// directory this town owns (cmdDir), since exec needs its working dir to exist.
-	useServer, host, port, user, password := jsonlDoltTarget(d.doltServer, doltserver.DefaultConfig(d.config.TownRoot))
-	remote := useServer && !isLoopbackHost(host)
+	// The Dolt endpoint is read once for the whole tick: the list and every export
+	// take this value, so they all read the same server.
+	target := d.resolveJsonlTarget()
+	remote := target.useServer && !isLoopbackHost(target.host)
 	cmdDir := dataDir
 	if !remote {
 		if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -250,11 +252,11 @@ func (d *Daemon) syncJsonlGitBackup() {
 			return
 		}
 	} else {
-		workDir, err := jsonlRemoteWorkDir(d.config.TownRoot)
+		workDir, err := doltserver.ClientWorkDir(&doltserver.Config{DataDir: dataDir, TownRoot: d.config.TownRoot})
 		if err != nil {
 			d.logger.Printf("jsonl_git_backup: %v", err)
 			cycle.failStep("export", "dolt client directory unavailable")
-			d.escalateAlert(alertKeyJSONLRemote, "jsonl_git_backup", fmt.Sprintf("the offsite backup cannot run its dolt commands for the remote server %s: %v", host, err))
+			d.escalateAlert(alertKeyJSONLRemote, "jsonl_git_backup", fmt.Sprintf("the offsite backup cannot run its dolt commands for the remote server %s: %v", target.host, err))
 			return
 		}
 		cmdDir = workDir
@@ -267,11 +269,11 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// behavior (types.go) was never implemented (gt-kme).
 	databases := config.Databases
 	if len(databases) == 0 && remote {
-		served, err := d.listServerJsonlDatabases(cmdDir, useServer, host, port, user, password)
+		served, err := d.listServerJsonlDatabases(cmdDir, target)
 		if err != nil {
-			d.logger.Printf("jsonl_git_backup: cannot list the databases on the Dolt server %s: %v", host, err)
+			d.logger.Printf("jsonl_git_backup: cannot list the databases on the Dolt server %s: %v", target.host, err)
 			cycle.failStep("export", "listing the databases on the Dolt server failed")
-			d.escalateAlert(alertKeyJSONLRemote, "jsonl_git_backup", fmt.Sprintf("cannot list the databases on the Dolt server %s — offsite backup has nothing to export: %v", host, err))
+			d.escalateAlert(alertKeyJSONLRemote, "jsonl_git_backup", fmt.Sprintf("cannot list the databases on the Dolt server %s — offsite backup has nothing to export: %v", target.host, err))
 			return
 		}
 		d.clearAlerts("databases listed through the server", alertKeyJSONLRemote)
@@ -280,9 +282,15 @@ func (d *Daemon) syncJsonlGitBackup() {
 		databases = discoverJsonlBackupDatabases(dataDir)
 	}
 	if len(databases) == 0 {
-		d.logger.Printf("jsonl_git_backup: no databases found (configured or auto-discovered) under %s, skipping", dataDir)
+		// A remote server's list is empty, not its data dir: name the server, so
+		// the operator looks there and not at a directory that was never read.
+		where := "under " + dataDir
+		if remote {
+			where = "served by the Dolt server " + target.host
+		}
+		d.logger.Printf("jsonl_git_backup: no databases found (configured or auto-discovered) %s, skipping", where)
 		cycle.failStep("export", "no databases found")
-		d.escalateAlert(alertKeyJSONLNoDBs, "jsonl_git_backup", fmt.Sprintf("no databases found under %s — offsite backup has nothing to export", dataDir))
+		d.escalateAlert(alertKeyJSONLNoDBs, "jsonl_git_backup", fmt.Sprintf("no databases found %s — offsite backup has nothing to export", where))
 		return
 	}
 	d.clearAlerts("databases discovered", alertKeyJSONLNoDBs)
@@ -308,7 +316,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// export is the dolt-backed per-database export, unless a test injected one
 	// (jsonlExportFn) to drive this cycle's bookkeeping without running dolt.
 	export := func(db, repo, dir string, scrub bool) (int, error) {
-		return d.exportDatabaseToJsonlFor(db, repo, dir, scrub, routes)
+		return d.exportDatabaseToJsonlFor(db, repo, dir, scrub, routes, &target)
 	}
 	if d.jsonlExportFn != nil {
 		export = d.jsonlExportFn
@@ -529,15 +537,17 @@ var supplementalTables = []string{
 // while it has a problem: neither is exported as a rig the table did not
 // choose.
 func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) (int, error) {
-	return d.exportDatabaseToJsonlFor(db, gitRepo, dataDir, scrub, d.jsonlTrackerRoutes())
+	return d.exportDatabaseToJsonlFor(db, gitRepo, dataDir, scrub, d.jsonlTrackerRoutes(), nil)
 }
 
 // exportDatabaseToJsonlFor is exportDatabaseToJsonl with the cycle's tracker
-// routing already read: the backup cycle reads the route table once and hands
-// every database the same answer, so one database's export is never the only
-// one to see a table that changed under it, and a table the backup cannot read
-// is reported once rather than once per database.
-func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub bool, routes trackerRoutes) (int, error) {
+// routing and Dolt endpoint already read: the backup cycle reads the route table
+// once and hands every database the same answer, so one database's export is
+// never the only one to see a table that changed under it, and a table the backup
+// cannot read is reported once rather than once per database. The endpoint is the
+// tick's target for the same reason: every export in a tick reads one server. A
+// nil target is read at the first table export, for a caller outside a tick.
+func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub bool, routes trackerRoutes, target *jsonlTarget) (int, error) {
 	if !validDBName.MatchString(db) {
 		return 0, fmt.Errorf("invalid database name: %q", db)
 	}
@@ -568,7 +578,13 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 
 	total := 0
 
-	exportTable := jsonlTableExporter(d.exportTableToJsonl)
+	exportTable := jsonlTableExporter(func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
+		if target == nil {
+			resolved := d.resolveJsonlTarget()
+			target = &resolved
+		}
+		return d.exportTableToJsonl(*target, table, q, dir, dataDir, budget)
+	})
 	if d.jsonlTableExportFn != nil {
 		exportTable = d.jsonlTableExportFn
 	}
@@ -640,10 +656,11 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 // (gt-gg9hv.4). Only a town naming no port at all has no server to read
 // through, so only then does the export stay embedded.
 //
-// The caller resolves the town's config with doltserver.DefaultConfig(townRoot)
-// and refuses one whose dolt.external_container would not parse
-// (ExternalContainerSetting) before calling this; this function is a pure
-// decision over what it is handed.
+// The caller (resolveJsonlTarget) reads the town's config with
+// doltserver.DefaultConfig(townRoot); a dolt.external_container that would not
+// parse (ExternalContainerSetting) is carried on the target and refused by each
+// export, not decided here. This function is a pure decision over what it is
+// handed.
 func jsonlDoltTarget(manager *DoltServerManager, town *doltserver.Config) (useServer bool, host string, port int, user, password string) {
 	if manager != nil && manager.IsEnabled() {
 		host, user = "127.0.0.1", doltserver.DefaultUser
@@ -663,6 +680,36 @@ func jsonlDoltTarget(manager *DoltServerManager, town *doltserver.Config) (useSe
 		return true, town.EffectiveHost(), town.Port, user, town.Password
 	}
 	return false, "", 0, "", ""
+}
+
+// jsonlTarget is the Dolt endpoint one backup tick reads. The tick resolves it
+// once (resolveJsonlTarget), and the database list and every export take that
+// value, so they all read the same server even if the town's config changes
+// during the tick. configErr is the town's dolt config error: each export refuses
+// it, as it always has, and the list does not read it.
+type jsonlTarget struct {
+	useServer bool
+	host      string
+	port      int
+	user      string
+	password  string
+	configErr error
+}
+
+// resolveJsonlTarget reads the Dolt endpoint for a backup tick from the town's
+// config and the daemon's server. It is the one read of either per tick;
+// Daemon.jsonlTargetFn replaces it in tests that count the reads.
+func (d *Daemon) resolveJsonlTarget() jsonlTarget {
+	if d.jsonlTargetFn != nil {
+		return d.jsonlTargetFn()
+	}
+	town := doltserver.DefaultConfig(d.config.TownRoot)
+	// A dolt.external_container set but not a container name is a config error.
+	// doltserver requires every caller to refuse it rather than read it as
+	// unset (ExternalContainerSetting).
+	_, configErr := town.ExternalContainerSetting()
+	useServer, host, port, user, password := jsonlDoltTarget(d.doltServer, town)
+	return jsonlTarget{useServer: useServer, host: host, port: port, user: user, password: password, configErr: configErr}
 }
 
 // jsonlExportCommand builds the `dolt sql` command for one JSONL export.
@@ -741,11 +788,13 @@ type jsonlTableExporter func(table string, q beadsql.Query, dir, dataDir string,
 // exportTableToJsonl runs a query and writes the result as JSONL to {dir}/{table}.jsonl,
 // continuing in {table}.2.jsonl, {table}.3.jsonl, ... when it outgrows one shard.
 // Connects to the running Dolt server via --host/--port to get current committed data,
-// falling back to embedded mode (cmd.Dir=dataDir) if no server config is available.
+// falling back to embedded mode (cmd.Dir=dataDir) if the target names no server.
+// target is the endpoint the backup tick resolved (resolveJsonlTarget), so the
+// export reads the same server as the tick's database list.
 // budget is the whole time this table's export may run; the caller hands the
 // issues table jsonlExportTimeout and each supplemental table what is left of
 // its database's shared bound. Returns the number of records exported.
-func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
+func (d *Daemon) exportTableToJsonl(target jsonlTarget, table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
 	query, err := q.Inline()
 	if err != nil {
 		return 0, err
@@ -755,20 +804,15 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 	start := time.Now()
 
 	// Prefer querying the running server (accurate, up-to-date data) over embedded
-	// mode (reads on-disk state which may lag behind server commits). The town's
-	// config is read per export: the endpoint it names can change under a running
-	// daemon.
-	town := doltserver.DefaultConfig(d.config.TownRoot)
-	// A dolt.external_container set but not a container name is a config error.
-	// doltserver requires every caller to refuse it rather than read it as
-	// unset (ExternalContainerSetting), so this export fails for the database
-	// instead of choosing a target the town did not name.
-	if _, err := town.ExternalContainerSetting(); err != nil {
-		return 0, fmt.Errorf("%s: town dolt config: %w", table, err)
+	// mode (reads on-disk state which may lag behind server commits). A
+	// dolt.external_container that is not a container name is refused here, so
+	// this export fails for the database instead of choosing a target the town did
+	// not name.
+	if target.configErr != nil {
+		return 0, fmt.Errorf("%s: town dolt config: %w", table, target.configErr)
 	}
-	useServer, host, port, user, password := jsonlDoltTarget(d.doltServer, town)
 
-	cmd := jsonlExportCommand(ctx, useServer, host, port, user, password, query, dataDir)
+	cmd := jsonlExportCommand(ctx, target.useServer, target.host, target.port, target.user, target.password, query, dataDir)
 
 	run := d.jsonlExportRunFn
 	if run == nil {
@@ -1591,28 +1635,14 @@ func discoverJsonlBackupDatabases(dataDir string) []string {
 	return databases
 }
 
-// jsonlRemoteWorkDir is the directory the backup's dolt commands run in when the
-// Dolt server is remote: the data dir belongs to the server, so the commands run
-// in a private directory under the town root instead. It is the same directory
-// doltserver's clientWorkDir uses when the data dir is absent (gt-1saf37).
-func jsonlRemoteWorkDir(townRoot string) (string, error) {
-	if townRoot == "" {
-		return "", errors.New("the town root is unset, so there is no dolt client directory")
-	}
-	dir := filepath.Join(townRoot, ".runtime", "dolt-client")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("creating the dolt client directory %s: %w", dir, err)
-	}
-	return dir, nil
-}
-
 // listServerJsonlDatabases lists the databases a remote Dolt server serves: SHOW
 // DATABASES through the same connection the exports use, so the list and the
-// exports read one server.
-func (d *Daemon) listServerJsonlDatabases(cmdDir string, useServer bool, host string, port int, user, password string) ([]string, error) {
+// exports read one server. cmdDir is the client directory doltserver.ClientWorkDir
+// returns for the remote server.
+func (d *Daemon) listServerJsonlDatabases(cmdDir string, target jsonlTarget) ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), jsonlExportTimeout)
 	defer cancel()
-	cmd := jsonlExportCommand(ctx, useServer, host, port, user, password, "SHOW DATABASES", cmdDir)
+	cmd := jsonlExportCommand(ctx, target.useServer, target.host, target.port, target.user, target.password, "SHOW DATABASES", cmdDir)
 	run := d.jsonlExportRunFn
 	if run == nil {
 		run = runJSONLExport
