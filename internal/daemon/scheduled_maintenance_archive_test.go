@@ -2920,6 +2920,11 @@ func TestArchiveLoopStopsWhenABatchFailsMidLoop(t *testing.T) {
 	}
 }
 
+// archiveTestMaxBatches is the per-cycle batch bound the batch-cap tests set on
+// their daemon, small enough that a loop which never runs dry stops in a few
+// batches. The production bound is maintenanceArchiveMaxBatchesPerExport.
+const archiveTestMaxBatches = 3
+
 // TestArchiveLoopHasAnIterationBound: a read that never runs dry ends at the
 // per-cycle batch bound even when the injected clock never reaches the
 // deadline, says so, and marks the database unarchived so its gc is skipped
@@ -2933,6 +2938,7 @@ func TestArchiveLoopHasAnIterationBound(t *testing.T) {
 	limit := 1
 	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
 	d.maint.now = func() time.Time { return gcTestNow } // never reaches the deadline
+	d.maint.archiveMaxBatches = archiveTestMaxBatches
 	withEventsFake(d, nil, nil, nil)
 	// A no-op append keeps the batches on the loop rather than on writing and
 	// re-reading a growing archive.
@@ -2950,11 +2956,22 @@ func TestArchiveLoopHasAnIterationBound(t *testing.T) {
 	if out.outcome != gcOutcomeCompleted || !unarchived["gt"] || len(unarchived) != 1 {
 		t.Fatalf("maintenanceArchive = %v, unarchived %v; want completed with gt marked: it stopped behind", out, unarchived)
 	}
-	if reads != maintenanceArchiveMaxBatchesPerExport {
-		t.Errorf("dolt_log read %d time(s), want the %d-batch per-cycle bound", reads, maintenanceArchiveMaxBatchesPerExport)
+	if reads != archiveTestMaxBatches {
+		t.Errorf("dolt_log read %d time(s), want the %d-batch per-cycle bound", reads, archiveTestMaxBatches)
 	}
 	if !strings.Contains(logs.String(), "per-cycle bound") {
 		t.Errorf("log does not report the per-cycle bound:\n%s", logs.String())
+	}
+}
+
+// TestArchiveBatchBoundDefaultsToTheConstant: a daemon that sets no bound
+// resolves to the production per-cycle bound, so the seam changes nothing in
+// production.
+func TestArchiveBatchBoundDefaultsToTheConstant(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{}
+	if got := d.maintenance().archiveMaxBatches; got != maintenanceArchiveMaxBatchesPerExport {
+		t.Errorf("unset archive batch bound resolves to %d, want the %d-batch constant", got, maintenanceArchiveMaxBatchesPerExport)
 	}
 }
 
@@ -3018,8 +3035,8 @@ func TestMaintenanceArchiveBudgetStopSkipsGcOfThatDatabase(t *testing.T) {
 }
 
 // TestMaintenanceArchiveBatchCapSkipsGcOfThatDatabase: a database whose export
-// ends at maintenanceArchiveMaxBatchesPerExport is marked unarchived, its gc is
-// skipped, and the stop line names the export and says why (gt-s5edka).
+// ends at the per-cycle batch bound is marked unarchived, its gc is skipped,
+// and the stop line names the export and says why (gt-s5edka).
 func TestMaintenanceArchiveBatchCapSkipsGcOfThatDatabase(t *testing.T) {
 	t.Parallel()
 	d, logs := gcTestDaemon(t)
@@ -3030,6 +3047,7 @@ func TestMaintenanceArchiveBatchCapSkipsGcOfThatDatabase(t *testing.T) {
 	limit := 1
 	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
 	d.maint.now = func() time.Time { return gcTestNow } // never reaches the deadline
+	d.maint.archiveMaxBatches = archiveTestMaxBatches
 	withEventsFake(d, nil, nil, nil)
 	// A no-op append keeps every batch on the loop: the archive file never
 	// grows, so each read serves a fresh commit.
@@ -3047,13 +3065,13 @@ func TestMaintenanceArchiveBatchCapSkipsGcOfThatDatabase(t *testing.T) {
 
 	d.runScheduledMaintenance()
 
-	if reads["gt"] != maintenanceArchiveMaxBatchesPerExport {
-		t.Errorf("gt dolt_log read %d time(s), want the %d-batch per-cycle bound", reads["gt"], maintenanceArchiveMaxBatchesPerExport)
+	if reads["gt"] != archiveTestMaxBatches {
+		t.Errorf("gt dolt_log read %d time(s), want the %d-batch per-cycle bound", reads["gt"], archiveTestMaxBatches)
 	}
 	if got := strings.Join(f.gcCalls, ","); got != "hq" {
 		t.Errorf("gc calls = %v, want only hq: gt stopped at the batch bound", f.gcCalls)
 	}
-	want := fmt.Sprintf("gt dolt_log: stopped at the %d-batch per-cycle bound, still behind — its gc is skipped this cycle because the archive did not finish", maintenanceArchiveMaxBatchesPerExport)
+	want := fmt.Sprintf("gt dolt_log: stopped at the %d-batch per-cycle bound, still behind — its gc is skipped this cycle because the archive did not finish", archiveTestMaxBatches)
 	if !strings.Contains(logs.String(), want) {
 		t.Errorf("log does not report the batch-cap stop and its skipped gc %q:\n%s", want, logs.String())
 	}
