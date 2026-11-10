@@ -30,6 +30,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/procutil"
@@ -390,7 +391,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// The deploy block reads the same repos through the same viewer client as
 	// the Forgejo panel, so the two are wired together from one token read;
 	// the staging ship reader dates the app rigs' landings off the same runs.
-	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos)
+	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos, dashboardLogf(out))
 	news, err := dashboardNewsReader(townRoot)
 	if err != nil {
 		return nil, nil, err
@@ -926,12 +927,17 @@ func jevBatteryFromCache(block scorecard.BatteryBlock) dashboard.JevBattery {
 // rig repo the viewer cannot see instead of silently reading a subset
 // (gt-faml5). No viewer token file means none of them, like the spend panel
 // with no spend command. The token is read once, here, and never leaves the
-// client.
-func dashboardForgejoReaders(townRoot string, repos []string) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging) {
+// client. The client reads the API root the rigs' Forgejo remote names
+// (dashboardForgejoBase), so the panes reach the Forgejo the rigs use.
+func dashboardForgejoReaders(townRoot string, repos []string, logf func(format string, args ...any)) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging) {
 	if len(repos) == 0 {
 		repos = rigForgejoRepos(townRoot)
 	}
-	client, err := forgejo.NewClient(config.ForgejoRoleViewer)
+	var opts []forgejo.Option
+	if base := dashboardForgejoBase(townRoot, logf); base != "" {
+		opts = append(opts, forgejo.WithBaseURL(base))
+	}
+	client, err := forgejo.NewClient(config.ForgejoRoleViewer, opts...)
 	if err != nil {
 		return nil, nil, nil
 	}
@@ -1015,6 +1021,51 @@ func rigForgejoRepos(townRoot string) []string {
 		out = append(out, owner+"/"+repo)
 	}
 	return out
+}
+
+// dashboardRepoFileOpener is the production repo-file reader the Forgejo
+// settings resolve through, the same git reader rig's own resolver uses.
+func dashboardRepoFileOpener(repoPath string) rig.RepoFileReader { return git.NewGit(repoPath) }
+
+// dashboardForgejoBase is the API root the Forgejo and deploys panes read: the
+// root the first rig in rig-name order names through its merge_queue.forgejo
+// remote, derived the way the daemon derives its own (land.APIBaseFromRemoteURL).
+// Without it the client falls back to its built-in loopback root, which is the
+// pod's own address in the control cluster. Empty when no rig names a remote,
+// or when the registry or a rig's setting cannot be read; logf names that case.
+// Rigs on different hosts do not split the panes: the first rig's host wins, and
+// logf names the other host once.
+func dashboardForgejoBase(townRoot string, logf func(format string, args ...any)) string {
+	names, err := knownRigNames(townRoot)
+	if err != nil {
+		logf("the rig registry could not be read, so the Forgejo panes use the built-in API root: %v", err)
+		return ""
+	}
+	base, first := "", ""
+	for _, name := range names {
+		fc, err := rig.ResolveForgejoConfigWithError(dashboardRepoFileOpener, townRoot, name)
+		if err != nil {
+			logf("rig %s's Forgejo setting could not be read, so the Forgejo panes use the built-in API root: %v", name, err)
+			return ""
+		}
+		if fc == nil || fc.RemoteURL == "" {
+			continue
+		}
+		root, err := land.APIBaseFromRemoteURL(fc.RemoteURL)
+		if err != nil {
+			logf("rig %s's Forgejo remote names no host, so the Forgejo panes do not take their root from it", name)
+			continue
+		}
+		if base == "" {
+			base, first = root, name
+			continue
+		}
+		if root != base {
+			logf("the Forgejo panes read %s from rig %s; rig %s names %s, which they do not read", base, first, name, root)
+			return base
+		}
+	}
+	return base
 }
 
 // dashboardSpendHours reads the day's spend by hour from the balance ledger the
