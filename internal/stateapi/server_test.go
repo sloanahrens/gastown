@@ -67,6 +67,7 @@ func TestServerAuth(t *testing.T) {
 		{"wrong token refused on info", fixedToken(testToken), "/v1/info", "Bearer tok-nope", http.StatusUnauthorized},
 		{"other scheme refused on info", fixedToken(testToken), "/v1/info", "Basic " + testToken, http.StatusUnauthorized},
 		{"bearer without a token refused", fixedToken(testToken), "/v1/info", "Bearer ", http.StatusUnauthorized},
+		{"multi-word bearer refused even when it matches", fixedToken("tok 0123456789"), "/v1/info", "Bearer tok 0123456789", http.StatusUnauthorized},
 		{"empty configured token refuses a presented token", fixedToken(""), "/v1/info", "Bearer " + testToken, http.StatusUnauthorized},
 		{"empty configured token refuses an empty bearer", fixedToken(""), "/v1/info", "Bearer ", http.StatusUnauthorized},
 		{"nil token func refuses a presented token", nil, "/v1/info", "Bearer " + testToken, http.StatusUnauthorized},
@@ -139,6 +140,26 @@ func TestServerUnknownRouteIs404(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
+func TestServerUnknownRouteRefusedWithoutToken(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		auth string
+		want int
+	}{
+		{"missing header refused", "", http.StatusUnauthorized},
+		{"wrong token refused", "Bearer tok-nope", http.StatusUnauthorized},
+		{"right token gets 404", "Bearer " + testToken, http.StatusNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := NewServer("alpha", fixedToken(testToken))
+			rec := serve(s, http.MethodGet, "/v1/nope", tt.auth)
+			assert.Equal(t, tt.want, rec.Code)
+		})
+	}
+}
+
 func TestHandleRoutesBehindToken(t *testing.T) {
 	t.Parallel()
 	s := NewServer("alpha", fixedToken(testToken))
@@ -164,4 +185,10 @@ func TestHandleRejectsDuplicatePath(t *testing.T) {
 	s := NewServer("alpha", fixedToken(testToken))
 	s.Handle("/v1/zeta", okHandler)
 	assert.Panics(t, func() { s.Handle("/v1/zeta", okHandler) })
+}
+
+func TestHandleRejectsNilHandler(t *testing.T) {
+	t.Parallel()
+	s := NewServer("alpha", fixedToken(testToken))
+	assert.Panics(t, func() { s.Handle("/v1/nil", nil) })
 }

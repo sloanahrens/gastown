@@ -45,7 +45,8 @@ func NewServer(town string, token func() string) *Server {
 }
 
 // Handle registers h at path behind the bearer check. It panics if path is
-// already registered, since a second handler would silently shadow the first.
+// already registered, since a second handler would silently shadow the first,
+// or if h is nil, since the request would panic instead.
 func (s *Server) Handle(path string, h http.Handler) {
 	s.register(path, h, false)
 }
@@ -60,12 +61,19 @@ func (s *Server) Routes() []string {
 	return paths
 }
 
-// ServeHTTP answers 404 for an unregistered path, then 405 for any method but
-// GET, then 401 for a protected route without the configured token. It checks
-// the method before the token, so a refusal never depends on the token.
+// ServeHTTP answers 401 for an unregistered path unless the request carries the
+// configured token, then 404, so a caller without the token gets the same answer
+// for every unregistered path. For a registered path it answers 405 for any
+// method but GET, then 401 for a protected route without the configured token.
+// It checks the method before the token there, so that refusal never depends on
+// the token.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rt, ok := s.routes[r.URL.Path]
 	if !ok {
+		if !s.authorized(r) {
+			writeError(w, http.StatusUnauthorized, "unauthorized")
+			return
+		}
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -84,6 +92,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) register(path string, h http.Handler, public bool) {
 	if _, dup := s.routes[path]; dup {
 		panic("stateapi: route already registered: " + path)
+	}
+	if h == nil {
+		panic("stateapi: nil handler for route: " + path)
 	}
 	s.routes[path] = route{h: h, public: public}
 }
