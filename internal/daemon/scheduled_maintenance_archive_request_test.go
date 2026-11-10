@@ -329,6 +329,7 @@ func TestArchiveRequestBatchCapIsPartialNotArchived(t *testing.T) {
 	d, _, _ := archiveRequestDaemon(t, outsideRequestNow, "hq")
 	limit := 1
 	d.patrolConfig.Patrols.ScheduledMaintenance.ArchiveCommitLimit = &limit
+	d.maint.archiveMaxBatches = archiveTestMaxBatches
 	// A no-op append keeps every batch on the loop: the archive file never
 	// grows, so the read keeps serving a fresh commit, and the clock never
 	// reaches the deadline.
@@ -351,7 +352,7 @@ func TestArchiveRequestBatchCapIsPartialNotArchived(t *testing.T) {
 	if res.Outcome != "partial" {
 		t.Errorf("outcome = %q, want partial: a branch-cap stop nothing failed for is still behind", res.Outcome)
 	}
-	want := fmt.Sprintf("hq: commits archived %d (stopped at the per-cycle batch bound, still behind)", maintenanceArchiveMaxBatchesPerExport)
+	want := fmt.Sprintf("hq: commits archived %d (stopped at the per-cycle batch bound, still behind)", archiveTestMaxBatches)
 	if !strings.Contains(res.Detail, want) {
 		t.Errorf("detail = %q, want it to hold %q", res.Detail, want)
 	}

@@ -61,6 +61,10 @@ type maintenanceSeams struct {
 	// file while the member is written, proving the watermark moves after the
 	// close and not before.
 	archiveAppend func(path string, columns []string, rows [][]string) error
+	// archiveMaxBatches is the per-cycle batch bound one export's loop stops
+	// at; zero is maintenanceArchiveMaxBatchesPerExport. A test sets a small
+	// bound so a loop that never runs dry stops in a few batches.
+	archiveMaxBatches int
 	// quiet is the quiet-window guard, re-checked before each database.
 	quiet func(d *Daemon) (bool, string)
 	// slotHolders lists the roles holding a container-gate slot.
@@ -142,6 +146,9 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.archiveAppend == nil {
 		s.archiveAppend = appendArchiveTable
+	}
+	if s.archiveMaxBatches == 0 {
+		s.archiveMaxBatches = maintenanceArchiveMaxBatchesPerExport
 	}
 	if s.quiet == nil {
 		s.quiet = (*Daemon).maintenanceQuiet

@@ -463,7 +463,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 	unarchived := map[string]bool{}
 	outcomes := make(map[string]archiveDatabaseOutcome, len(databases))
 	for _, db := range databases {
-		commitStop, commitArchived, commitErr := archiveUntilCaughtUp(st.ArchiveWatermarks[db], commitLimit, deadline, s.now, sameCommitWatermark,
+		commitStop, commitArchived, commitErr := archiveUntilCaughtUp(st.ArchiveWatermarks[db], commitLimit, s.archiveMaxBatches, deadline, s.now, sameCommitWatermark,
 			func(wm ArchiveWatermark) (int, int, ArchiveWatermark, error) {
 				return d.maintenanceArchiveCommits(ctx, dir, db, wm)
 			})
@@ -476,9 +476,9 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			if archiveStopLeftBehind(commitStop) {
 				unarchived[db] = true
 			}
-			logArchiveStop(d.logger, db, "dolt_log", commitStop, budget)
+			logArchiveStop(d.logger, db, "dolt_log", commitStop, budget, s.archiveMaxBatches)
 		}
-		eventsStop, eventsArchived, eventsErr := archiveUntilCaughtUp(st.ArchiveEventsWatermarks[db], eventsLimit, deadline, s.now, sameEventsArchiveWatermark,
+		eventsStop, eventsArchived, eventsErr := archiveUntilCaughtUp(st.ArchiveEventsWatermarks[db], eventsLimit, s.archiveMaxBatches, deadline, s.now, sameEventsArchiveWatermark,
 			func(wm EventsArchiveWatermark) (int, int, EventsArchiveWatermark, error) {
 				return d.maintenanceArchiveEvents(ctx, dir, db, wm)
 			})
@@ -493,7 +493,7 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 			if archiveStopLeftBehind(eventsStop) {
 				unarchived[db] = true
 			}
-			logArchiveStop(d.logger, db, "events", eventsStop, budget)
+			logArchiveStop(d.logger, db, "events", eventsStop, budget, s.archiveMaxBatches)
 		}
 	}
 	if len(failed) > 0 {
@@ -513,14 +513,14 @@ func (d *Daemon) maintenanceArchive(databases []string) (maintenanceGCResult, ma
 // the operator has no sign that its gc was skipped and the next cycle is
 // expected to continue. A short batch or one that could not advance needs no
 // line: nothing is known to be behind and no gc is skipped.
-func logArchiveStop(logger *log.Logger, db, export string, stop archiveStop, budget time.Duration) {
+func logArchiveStop(logger *log.Logger, db, export string, stop archiveStop, budget time.Duration, maxBatches int) {
 	switch stop {
 	case archiveStopBudget:
 		logger.Printf("scheduled_maintenance: archive %s %s: stopped at the cycle's %v archive_budget, still behind — its gc is skipped this cycle because the archive did not finish; the next cycle continues from the watermark",
 			db, export, budget)
 	case archiveStopCapped:
 		logger.Printf("scheduled_maintenance: archive %s %s: stopped at the %d-batch per-cycle bound, still behind — its gc is skipped this cycle because the archive did not finish; the next cycle continues from the watermark",
-			db, export, maintenanceArchiveMaxBatchesPerExport)
+			db, export, maxBatches)
 	}
 }
 
@@ -641,10 +641,10 @@ func archiveStopLeftBehind(stop archiveStop) bool {
 // (archiveStopShort), when a batch records the same watermark it started with
 // (archiveStopNoProgress, so another batch would repeat it), when a batch
 // fails (archiveStopFailed), when now() is at or past deadline
-// (archiveStopBudget), or at maintenanceArchiveMaxBatchesPerExport
-// (archiveStopCapped). The stop counts rows the read returned, not rows
-// written: the events read re-reads its lookback window, so a full page can
-// carry rows the watermark already holds. The events export moves such a page
+// (archiveStopBudget), or at maxBatches (archiveStopCapped). The stop counts
+// rows the read returned, not rows written: the events read re-reads its
+// lookback window, so a full page can carry rows the watermark already
+// holds. The events export moves such a page
 // out of the way itself (maintenanceArchiveEvents), so a page short only after
 // filtering never ends the loop with rows still behind (gt-o4sk8.1). The first
 // batch always runs, even past the deadline, so every database gets its one
@@ -661,6 +661,7 @@ func archiveStopLeftBehind(stop archiveStop) bool {
 func archiveUntilCaughtUp[W any](
 	wm W,
 	limit int,
+	maxBatches int,
 	deadline time.Time,
 	now func() time.Time,
 	same func(W, W) bool,
@@ -681,7 +682,7 @@ func archiveUntilCaughtUp[W any](
 		if !now().Before(deadline) {
 			return archiveStopBudget, archived, nil
 		}
-		if batches+1 >= maintenanceArchiveMaxBatchesPerExport {
+		if batches+1 >= maxBatches {
 			return archiveStopCapped, archived, nil
 		}
 		wm = next
