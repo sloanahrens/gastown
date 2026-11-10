@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +41,15 @@ func birdReportsWriteRaw(t *testing.T, town, name string, data []byte) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, reportdir.SidecarName), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// birdReportsMkdirReportDir makes a reporter's legacy reports directory with no
+// report in it, so the town shows the daemon a bird report directory.
+func birdReportsMkdirReportDir(t *testing.T, town, name string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(town, ".runtime", name, "reports"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -223,6 +234,7 @@ func TestBirdReportsRemovedReporterLosesItsItem(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	birdReportsMkdirReportDir(t, town, "dipper")
 	cfg := &BirdReportsConfig{Enabled: true, Reporters: []string{"dunlin", "dipper"}}
 	d := birdReportsTestDaemon(town, now, cfg)
 
@@ -246,6 +258,7 @@ func TestBirdReportsOverseerIsTheTenthReporter(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	birdReportsMkdirReportDir(t, town, "overseer")
 	d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: true})
 
 	d.runBirdReports()
@@ -283,6 +296,7 @@ func TestBirdReportsFailedCheckIsAnItem(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	birdReportsMkdirReportDir(t, town, "dunlin")
 	cfg := &BirdReportsConfig{Enabled: true, Reporters: []string{"dunlin"}}
 	d := birdReportsTestDaemon(town, now, cfg)
 	d.runBirdReports()
@@ -311,6 +325,110 @@ func TestBirdReportsFailedCheckIsAnItem(t *testing.T) {
 	}
 }
 
+// TestBirdReportsNoVisibleDirectoryRaisesOneCheckFailedItem holds the
+// not-visible case: a town with no bird report directory under its root raises
+// one high check-failed item saying the reports cannot be seen, not one stale
+// item per bird, and logs the line that names the root.
+func TestBirdReportsNoVisibleDirectoryRaisesOneCheckFailedItem(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: true, Reporters: []string{"dunlin", "dipper", "eagle"}})
+	var logs bytes.Buffer
+	d.logger = log.New(&logs, "", 0)
+
+	d.runBirdReports()
+
+	got := d.birdReportStale.observed()
+	if len(got) != 1 {
+		t.Fatalf("items = %+v, want exactly one check-failed item and no stale items", got)
+	}
+	it := got[0]
+	if it.Key != birdReportsCheckFailedKey || it.Kind != attention.KindBirdReportStale || it.Severity != attention.SeverityHigh {
+		t.Errorf("item = %+v, want a high bird-report-check-failed item", it)
+	}
+	if !strings.Contains(it.Summary, "not visible to this daemon") {
+		t.Errorf("summary = %q, want it to say the reports directory is not visible to this daemon", it.Summary)
+	}
+	if want := "bird_reports: not checking: no bird report directory is visible under " + town + "\n"; logs.String() != want {
+		t.Errorf("log = %q, want %q", logs.String(), want)
+	}
+}
+
+// TestBirdReportsOneVisibleDirectoryJudgesTheRest holds the partial case: once
+// one reporter's directory is visible, the check runs as it always has, so the
+// reporters whose directories are absent are late items and the visible one is
+// judged by its report.
+func TestBirdReportsOneVisibleDirectoryJudgesTheRest(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	birdReportsWriteDaily(t, town, "dunlin", now.Add(-time.Hour))
+	d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: true, Reporters: []string{"dunlin", "dipper", "eagle"}})
+
+	d.runBirdReports()
+
+	got := d.birdReportStale.observed()
+	if len(got) != 2 {
+		t.Fatalf("items = %+v, want the two absent reporters as late items", got)
+	}
+	for i, name := range []string{"dipper", "eagle"} {
+		if got[i].Key != "bird-report-stale:"+name || got[i].Kind != attention.KindBirdReportStale || got[i].Severity != attention.SeverityLow {
+			t.Errorf("item %d = %+v, want a low bird-report-stale:%s item", i, got[i], name)
+		}
+		if !strings.Contains(got[i].Summary, "missing") {
+			t.Errorf("item %d summary = %q, want the report named missing", i, got[i].Summary)
+		}
+	}
+}
+
+// TestBirdReportsPublishedDirectoryAloneIsVisible holds the published location
+// as a visible directory: a town whose only reports directory is the one gt
+// report publish writes is one the daemon can see, so the check runs.
+func TestBirdReportsPublishedDirectoryAloneIsVisible(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	dir, err := reportdir.Published(filepath.Join(town, ".runtime"), "dunlin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: true, Reporters: []string{"dunlin"}})
+
+	d.runBirdReports()
+
+	got := d.birdReportStale.observed()
+	if len(got) != 1 || got[0].Key != "bird-report-stale:dunlin" {
+		t.Errorf("items = %+v, want dunlin's missing report as its one late item", got)
+	}
+}
+
+// TestBirdReportsRefusedNameIsNotAVisibleDirectory holds the resolver's name
+// check on the visibility path: a reporter name the resolver refuses does not
+// see a directory, even one a path join would reach, so a town with only that
+// directory is not visible.
+func TestBirdReportsRefusedNameIsNotAVisibleDirectory(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
+	// "../dunlin" joined under .runtime is town/dunlin: a directory outside the
+	// runtime that a refused name must not reach.
+	if err := os.MkdirAll(filepath.Join(town, "dunlin", "reports"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: true, Reporters: []string{"../dunlin"}})
+
+	d.runBirdReports()
+
+	got := d.birdReportStale.observed()
+	if len(got) != 1 || got[0].Key != birdReportsCheckFailedKey {
+		t.Errorf("items = %+v, want the check-failed item for a town with no visible directory", got)
+	}
+}
+
 // TestBirdReportsWithNoDaemonConfigRecordsNothing covers a daemon that never
 // loaded a config: the check has no town to read, so it is not run at all.
 func TestBirdReportsWithNoDaemonConfigRecordsNothing(t *testing.T) {
@@ -333,6 +451,7 @@ func TestBirdReportsUnsetZoneUsesLocalClock(t *testing.T) {
 	town := t.TempDir()
 	now := time.Date(2026, 11, 1, 9, 0, 0, 0, birdReportsTestZone)
 	hour := 0 // no hour is before midnight, so the gate cannot hide the item
+	birdReportsMkdirReportDir(t, town, "dunlin")
 	d := birdReportsTestDaemon(town, now, &BirdReportsConfig{Enabled: true, StartHour: &hour, Reporters: []string{"dunlin"}})
 	d.birdReportLoc = nil
 	d.runBirdReports()
