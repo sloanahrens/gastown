@@ -13,14 +13,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
-
-func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
-}
 
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
@@ -557,6 +552,59 @@ func TestConfineReportsUnresolvablePaths(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConfineRefusesNonRegularFiles: a FIFO, a symlink to one, and a directory
+// are refused, so a read never opens a file that can block or is not a file of
+// lines. Confine does not open the FIFO, so the test cannot block.
+func TestConfineRefusesNonRegularFiles(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(root, "pipe.jsonl"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(root, "pipe.jsonl"), filepath.Join(root, "pipelink.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "adir.jsonl"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"pipe.jsonl", "pipelink.jsonl", "adir.jsonl"} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Confine(root, path); err == nil {
+				t.Fatalf("Confine(%q) accepted a file that is not regular", path)
+			}
+		})
+	}
+}
+
+// TestCursorZeroRoundTrips: an empty page from a missing file echoes the zero
+// cursor. Its String must parse back to the zero cursor, so a client that stores
+// the cursor from that page resumes from the file's start.
+func TestCursorZeroRoundTrips(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	f := confine(t, dir, "absent.jsonl")
+
+	page, err := ReadLines(f, Cursor{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := ParseCursor(page.Cursor.String())
+	if err != nil {
+		t.Fatalf("ParseCursor(%q): %v", page.Cursor.String(), err)
+	}
+	if back != (Cursor{}) {
+		t.Fatalf("round trip = %+v, want the zero cursor", back)
+	}
+
+	writeFile(t, filepath.Join(dir, "absent.jsonl"), "a\n")
+	got, err := ReadLines(f, back, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPage(t, got, []string{"a"}, false, false)
 }
 
 // TestReadLinesReportsOpenFailure: an open that fails for a reason other than a

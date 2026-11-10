@@ -44,8 +44,13 @@ type Cursor struct {
 	Off int64
 }
 
-// String encodes the cursor as gen:offset, the form ParseCursor reads.
+// String encodes the cursor as gen:offset, the form ParseCursor reads. The zero
+// Cursor encodes as the empty string, which ParseCursor reads back as the zero
+// Cursor.
 func (c Cursor) String() string {
+	if c == (Cursor{}) {
+		return ""
+	}
 	return c.Gen + ":" + strconv.FormatInt(c.Off, 10)
 }
 
@@ -115,10 +120,12 @@ func openOS(path string) (file, error) {
 // Confine returns the File at path under root, which must be absolute, or an
 // error when the path would read outside root. It refuses a path with a ".."
 // element, resolves symlinks in root and in the path's directory, and refuses a
-// file that resolves outside the resolved root, including through a symlink. A
-// missing file is accepted, since a read of one is an empty page. Confine checks
-// links as they are when it is called; a link swapped in after that is not
-// checked again.
+// file that resolves outside the resolved root, including through a symlink. It
+// refuses a file that is not a regular file: opening a FIFO can block until a
+// writer arrives, and a directory or device is not a file of lines. A missing
+// file is accepted, since a read of one is an empty page. Confine checks links
+// and file types as they are when it is called; a link or file swapped in after
+// that is not checked again.
 func Confine(root, path string) (File, error) {
 	if !filepath.IsAbs(root) {
 		return File{}, fmt.Errorf("root %q is not an absolute path", root)
@@ -150,9 +157,16 @@ func Confine(root, path string) (File, error) {
 		if full, err = filepath.EvalSymlinks(full); err != nil {
 			return File{}, fmt.Errorf("resolving %s: %w", path, err)
 		}
+		if info, err = os.Stat(full); err != nil {
+			return File{}, fmt.Errorf("checking %s: %w", path, err)
+		}
 	}
 	if !within(realRoot, full) {
 		return File{}, fmt.Errorf("path %q is outside the root", path)
+	}
+	// info is nil only when the file is missing, which is accepted above.
+	if info != nil && !info.Mode().IsRegular() {
+		return File{}, fmt.Errorf("path %q is not a regular file", path)
 	}
 	return File{path: full}, nil
 }
