@@ -64,7 +64,7 @@ func init() {
 	statusCmd.Flags().IntVarP(&statusInterval, "interval", "n", 2, "Refresh interval in seconds")
 	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show detailed multi-line output per agent")
 	statusCmd.Flags().BoolVar(&statusHealthLine, "line", false, "Print the one health line; exit 0 green, 1 degraded, 2 red, 3 unknown")
-	statusCmd.Flags().BoolVar(&statusHealthReady, "ready", false, "With --line: exit 0 when fresh and every non-green field is recorded [R]")
+	statusCmd.Flags().BoolVar(&statusHealthReady, "ready", false, "With --line: exit 0 when ready for traffic, not only green")
 	rootCmd.AddCommand(statusCmd)
 }
 

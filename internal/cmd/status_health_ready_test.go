@@ -7,12 +7,20 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/townhealth"
+	"github.com/steveyegge/gastown/internal/townstatus"
 )
 
+// notLooping is a supervisor that is running the daemon, so the health file
+// alone decides the view. The test never reads the host's launchctl.
+func notLooping(string) (templates.SupervisorState, bool) {
+	return templates.SupervisorState{}, false
+}
+
 // TestStatusLineReadyExitCodes runs the health line over a report a test wrote
-// into a temp town, at a clock the test fixes, and reads the exit code and the
-// printed line.
+// into a temp town, at a clock the test fixes, and reads the exit code, the
+// printed line and the not-ready reason on stderr.
 func TestStatusLineReadyExitCodes(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
@@ -24,12 +32,18 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 		{Name: townhealth.FieldDolt, Tag: townhealth.Live, Verdict: townhealth.Red, Value: "p50 900ms"},
 		{Name: townhealth.FieldDispatch, Tag: townhealth.Recorded, Verdict: townhealth.Red, Value: "off"},
 	}
+	// view reads the health file with the supervisor stubbed, so the answer
+	// depends only on the report the test wrote.
+	view := func(townRoot string, at time.Time) ([]string, townhealth.Verdict, *townhealth.Report) {
+		return townstatus.HealthViewWith(townRoot, at, notLooping)
+	}
 	tests := []struct {
-		name     string
-		ready    bool
-		report   townhealth.Report
-		wantCode int
-		wantLine string
+		name       string
+		ready      bool
+		report     townhealth.Report
+		wantCode   int
+		wantLine   string
+		wantReason string // a substring of stderr; "" means stderr is empty
 	}{
 		{
 			name:     "ready: red with only recorded fields exits 0 and prints its line",
@@ -39,21 +53,23 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 			wantLine: "RED tick",
 		},
 		{
-			name:     "ready: a measured red field exits 2",
-			ready:    true,
-			report:   townhealth.Report{At: now, Verdict: townhealth.Red, Fields: measuredRed},
-			wantCode: 2,
-			wantLine: "RED tick",
+			name:       "ready: a measured red field exits 2 and names it",
+			ready:      true,
+			report:     townhealth.Report{At: now, Verdict: townhealth.Red, Fields: measuredRed},
+			wantCode:   2,
+			wantLine:   "RED tick",
+			wantReason: "not ready: dolt is LIVE, not RECORDED",
 		},
 		{
-			name:     "ready: a stale report exits 3",
-			ready:    true,
-			report:   townhealth.Report{At: now.Add(-time.Hour), Verdict: townhealth.Red, Fields: recorded},
-			wantCode: 3,
-			wantLine: "UNKNOWN tick",
+			name:       "ready: a stale report exits 3 and says so",
+			ready:      true,
+			report:     townhealth.Report{At: now.Add(-time.Hour), Verdict: townhealth.Red, Fields: recorded},
+			wantCode:   3,
+			wantLine:   "UNKNOWN tick",
+			wantReason: "not ready: report is stale",
 		},
 		{
-			name:     "without ready: the same red report exits 2",
+			name:     "without ready: the same red report exits 2 and prints no reason",
 			ready:    false,
 			report:   townhealth.Report{At: now, Verdict: townhealth.Red, Fields: recorded},
 			wantCode: 2,
@@ -72,12 +88,19 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 			cmd.SetOut(&out)
 			cmd.SetErr(&errOut)
 
-			code := silentExitCode(t, statusHealthLineExit(cmd, town, tt.ready, now))
+			code := silentExitCode(t, statusHealthLineExit(cmd, town, tt.ready, now, view))
 			if code != tt.wantCode {
 				t.Errorf("exit = %d, want %d (stderr %q)", code, tt.wantCode, errOut.String())
 			}
 			if !strings.HasPrefix(out.String(), tt.wantLine) {
 				t.Errorf("line = %q, want it to start with %q", out.String(), tt.wantLine)
+			}
+			if tt.wantReason == "" {
+				if errOut.Len() != 0 {
+					t.Errorf("stderr = %q, want none", errOut.String())
+				}
+			} else if !strings.Contains(errOut.String(), tt.wantReason) {
+				t.Errorf("stderr = %q, want it to contain %q", errOut.String(), tt.wantReason)
 			}
 		})
 	}
