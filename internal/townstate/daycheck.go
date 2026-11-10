@@ -28,6 +28,11 @@ const (
 	GitSpeedRuns = 3
 	// GitSpeedMaxFactor fails a median more than this many times its baseline.
 	GitSpeedMaxFactor = 2.0
+	// GitSpeedFloorSeconds is the median under which the factor does not apply.
+	// rev-list answers in milliseconds, so twice a millisecond baseline is a
+	// bound that process-start noise alone would cross. The GitSpeedMaxSeconds
+	// ceiling is checked whatever the median.
+	GitSpeedFloorSeconds = 0.25
 	// GitSpeedMaxSeconds fails a median over this many seconds, whatever the
 	// baseline says.
 	GitSpeedMaxSeconds = 3.0
@@ -70,12 +75,17 @@ const (
 )
 
 // gitSpeedCommands are the two git commands timed in each rig. Both run in the
-// rig's mayor/rig clone: git status needs a work tree, and the bare repository
-// has none. Neither moves a ref or writes an object, so neither can break the
-// ff-only of the fetch install-gt runs in mayor/rig. git status does refresh
-// .git/index, so it is not strictly read-only; ls-remote makes the fetch's round
-// trip to the remote and writes nothing.
-var gitSpeedCommands = [][]string{{"status", "--short"}, {"ls-remote", "--heads", "origin"}}
+// rig's bare repository, which the export carries intact, where the work clone
+// mayor/rig arrives without its .git pointer. rev-list walks history from HEAD
+// and moves no ref and writes no object; ls-remote makes the fetch's round trip
+// to the remote and writes nothing. Neither needs a work tree.
+var gitSpeedCommands = [][]string{{"rev-list", "--count", "--max-count=2000", "HEAD"}, {"ls-remote", "--heads", "origin"}}
+
+// gitSpeedDir is the directory the timed commands run in: the rig's bare
+// repository under its rig directory.
+func gitSpeedDir(town, rig string) string {
+	return constants.RigBareRepoPath(filepath.Join(town, rig))
+}
 
 // Env is what the day-one checks read and run through. Run is the only way a
 // check reaches a process and Now the only clock it times with, so a test drives
@@ -177,7 +187,7 @@ func CheckGitSpeed(ctx context.Context, env Env) []Row {
 		return append(rows, notRun("git speed baseline", "a baseline recorded before the move", err))
 	}
 	for _, rig := range rigs {
-		repo := constants.RigMayorPath(filepath.Join(env.Town, rig))
+		repo := gitSpeedDir(env.Town, rig)
 		for _, args := range gitSpeedCommands {
 			cmdText := strings.Join(args, " ")
 			check := fmt.Sprintf("git speed %s: %s", rig, cmdText)
@@ -187,12 +197,12 @@ func CheckGitSpeed(ctx context.Context, env Env) []Row {
 				continue
 			}
 			base, ok := gb.Rigs[rig][cmdText]
-			threshold := fmt.Sprintf("<= %.1fx baseline and <= %.1fs", GitSpeedMaxFactor, GitSpeedMaxSeconds)
+			threshold := fmt.Sprintf("<= %.1fx baseline above %.2fs, and <= %.1fs", GitSpeedMaxFactor, GitSpeedFloorSeconds, GitSpeedMaxSeconds)
 			measured := fmt.Sprintf("%.2fs median of %d", m, GitSpeedRuns)
 			switch {
 			case !ok:
 				rows = append(rows, failed(check, measured, threshold, fmt.Sprintf("the baseline names no %s run for rig %s; record it with gt town state check --record-baseline before the move", cmdText, rig)))
-			case m > GitSpeedMaxFactor*base:
+			case m >= GitSpeedFloorSeconds && m > GitSpeedMaxFactor*base:
 				rows = append(rows, failed(check, measured, threshold, fmt.Sprintf("rig %s takes %.2fs, over %.1fx its baseline of %.2fs", rig, m, GitSpeedMaxFactor, base)))
 			case m > GitSpeedMaxSeconds:
 				rows = append(rows, failed(check, measured, threshold, fmt.Sprintf("rig %s takes %.2fs, over %.1fs", rig, m, GitSpeedMaxSeconds)))
@@ -300,7 +310,7 @@ func RecordGitBaseline(ctx context.Context, env Env, force bool) (string, error)
 	}
 	gb := GitBaseline{RecordedAt: env.Now().UTC(), Rigs: make(map[string]map[string]float64, len(rigs))}
 	for _, rig := range rigs {
-		repo := constants.RigMayorPath(filepath.Join(env.Town, rig))
+		repo := gitSpeedDir(env.Town, rig)
 		gb.Rigs[rig] = make(map[string]float64, len(gitSpeedCommands))
 		for _, args := range gitSpeedCommands {
 			m, err := timeGit(ctx, env, repo, args)

@@ -180,7 +180,7 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 	t.Parallel()
 	baseline := func(status, fetch float64) *GitBaseline {
 		return &GitBaseline{RecordedAt: cutoverTime.Add(-time.Hour), Rigs: map[string]map[string]float64{
-			"gastown": {"status --short": status, "ls-remote --heads origin": fetch},
+			"gastown": {"rev-list --count --max-count=2000 HEAD": status, "ls-remote --heads origin": fetch},
 		}}
 	}
 	tests := []struct {
@@ -194,24 +194,24 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 			name:     "faster than the baseline passes",
 			baseline: baseline(0.10, 2.0),
 			runs: map[string][]time.Duration{
-				"status --short":           {50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond},
-				"ls-remote --heads origin": {time.Second, time.Second, time.Second},
+				"rev-list --count --max-count=2000 HEAD": {50 * time.Millisecond, 50 * time.Millisecond, 50 * time.Millisecond},
+				"ls-remote --heads origin":               {time.Second, time.Second, time.Second},
 			},
 		},
 		{
 			name:     "a median over twice the baseline fails, naming the rig",
 			baseline: baseline(0.10, 2.0),
 			runs: map[string][]time.Duration{
-				"status --short": {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
+				"rev-list --count --max-count=2000 HEAD": {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
 			},
-			failRow:  "git speed gastown: status --short",
+			failRow:  "git speed gastown: rev-list --count --max-count=2000 HEAD",
 			wantText: "rig gastown takes 0.25s, over 2.0x",
 		},
 		{
 			name:     "one slow run does not fail a median of three",
 			baseline: baseline(0.10, 2.0),
 			runs: map[string][]time.Duration{
-				"status --short": {100 * time.Millisecond, 100 * time.Millisecond, 5 * time.Second},
+				"rev-list --count --max-count=2000 HEAD": {100 * time.Millisecond, 100 * time.Millisecond, 5 * time.Second},
 			},
 		},
 		{
@@ -226,7 +226,7 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 		{
 			name: "a command the baseline does not name fails",
 			baseline: &GitBaseline{RecordedAt: cutoverTime.Add(-time.Hour), Rigs: map[string]map[string]float64{
-				"gastown": {"status --short": 0.10},
+				"gastown": {"rev-list --count --max-count=2000 HEAD": 0.10},
 			}},
 			failRow:  "git speed gastown: ls-remote --heads origin",
 			wantText: "record it with gt town state check --record-baseline",
@@ -245,7 +245,7 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 			rows := CheckGitSpeed(context.Background(), host.env(town))
 			if tt.failRow == "" {
 				if len(rows) != 2 {
-					t.Fatalf("got %d rows, want the status and fetch rows: %+v", len(rows), rows)
+					t.Fatalf("got %d rows, want the rev-list and ls-remote rows: %+v", len(rows), rows)
 				}
 				for _, r := range rows {
 					if !r.OK {
@@ -419,7 +419,7 @@ func TestCheckNotRunIsAFailure(t *testing.T) {
 		}
 	})
 	t.Run("a git command that cannot start is not run for its rig", func(t *testing.T) {
-		town := writeTown(t, townFiles{baseline: &GitBaseline{Rigs: map[string]map[string]float64{"gastown": {"status --short": 0.1, "ls-remote --heads origin": 0.1}}}})
+		town := writeTown(t, townFiles{baseline: &GitBaseline{Rigs: map[string]map[string]float64{"gastown": {"rev-list --count --max-count=2000 HEAD": 0.1, "ls-remote --heads origin": 0.1}}}})
 		host := newFakeHost(func(_, _ string, _ []string) fakeAnswer {
 			return fakeAnswer{took: time.Millisecond, err: notFound}
 		})
@@ -469,9 +469,9 @@ func TestCheckRecordBaseline(t *testing.T) {
 		if _, err := recordAt(t, town, false, nil); err != nil {
 			t.Fatalf("first record: %v", err)
 		}
-		got := readBaseline(t, town).Rigs["gastown"]["status --short"]
+		got := readBaseline(t, town).Rigs["gastown"]["rev-list --count --max-count=2000 HEAD"]
 		if math.Abs(got-0.1) > 1e-9 {
-			t.Fatalf("recorded status median = %v, want 0.1", got)
+			t.Fatalf("recorded rev-list median = %v, want 0.1", got)
 		}
 		path := filepath.Join(town, filepath.FromSlash(gitBaselineRel))
 		before, err := os.ReadFile(path)
@@ -496,13 +496,13 @@ func TestCheckRecordBaseline(t *testing.T) {
 		if _, err := recordAt(t, town, false, nil); err != nil {
 			t.Fatalf("first record: %v", err)
 		}
-		slow := map[string][]time.Duration{"status --short": {200 * time.Millisecond, 200 * time.Millisecond, 200 * time.Millisecond}}
+		slow := map[string][]time.Duration{"rev-list --count --max-count=2000 HEAD": {200 * time.Millisecond, 200 * time.Millisecond, 200 * time.Millisecond}}
 		if _, err := recordAt(t, town, true, slow); err != nil {
 			t.Fatalf("forced record: %v", err)
 		}
-		got := readBaseline(t, town).Rigs["gastown"]["status --short"]
+		got := readBaseline(t, town).Rigs["gastown"]["rev-list --count --max-count=2000 HEAD"]
 		if math.Abs(got-0.2) > 1e-9 {
-			t.Fatalf("forced status median = %v, want 0.2", got)
+			t.Fatalf("forced rev-list median = %v, want 0.2", got)
 		}
 	})
 
@@ -563,7 +563,7 @@ func TestCheckRecordBaseline(t *testing.T) {
 func TestCheckGitSpeedRefusesNoRigToTime(t *testing.T) {
 	t.Parallel()
 	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
-		"gastown": {"status --short": 0.1, "ls-remote --heads origin": 0.1},
+		"gastown": {"rev-list --count --max-count=2000 HEAD": 0.1, "ls-remote --heads origin": 0.1},
 	}}
 	tests := []struct {
 		name       string
@@ -603,21 +603,22 @@ func TestCheckGitSpeedRefusesNoRigToTime(t *testing.T) {
 	}
 }
 
-// TestGitSpeedRunsInEachRigsMayorClone asserts the directory every git command
-// runs in: each rig's mayor/rig clone, which is the work tree git status needs.
-// Both the check and the baseline record run through the same rig list.
-func TestGitSpeedRunsInEachRigsMayorClone(t *testing.T) {
+// TestDayCheckGitRowsRunInTheBareRepository asserts the directory every git
+// command runs in: each rig's bare repository, and never the work clone, which
+// the export arrives without its .git pointer. Both the check and the baseline
+// record run through the same rig list.
+func TestDayCheckGitRowsRunInTheBareRepository(t *testing.T) {
 	t.Parallel()
 	rigsJSON := `{"version":1,"rigs":{"gastown":{"git_url":"https://example.invalid/g.git"},"other":{"git_url":"https://example.invalid/o.git"}}}`
 	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
-		"gastown": {"status --short": 0.1, "ls-remote --heads origin": 0.1},
-		"other":   {"status --short": 0.1, "ls-remote --heads origin": 0.1},
+		"gastown": {"rev-list --count --max-count=2000 HEAD": 0.1, "ls-remote --heads origin": 0.1},
+		"other":   {"rev-list --count --max-count=2000 HEAD": 0.1, "ls-remote --heads origin": 0.1},
 	}}
 	// Each rig gets GitSpeedRuns runs of each of the two git commands.
 	wantRuns := func(town string) map[string]int {
 		return map[string]int{
-			filepath.Join(town, "gastown", "mayor", "rig"): 2 * GitSpeedRuns,
-			filepath.Join(town, "other", "mayor", "rig"):   2 * GitSpeedRuns,
+			filepath.Join(town, "gastown", ".repo.git"): 2 * GitSpeedRuns,
+			filepath.Join(town, "other", ".repo.git"):   2 * GitSpeedRuns,
 		}
 	}
 	record := func(t *testing.T, dirs map[string]int) func(dir, name string, args []string) fakeAnswer {
@@ -630,7 +631,7 @@ func TestGitSpeedRunsInEachRigsMayorClone(t *testing.T) {
 		}
 	}
 
-	t.Run("the check runs each git command in each rig's mayor/rig clone", func(t *testing.T) {
+	t.Run("the check runs each git command in each rig's bare repository", func(t *testing.T) {
 		t.Parallel()
 		town := writeTown(t, townFiles{rigsJSON: rigsJSON, baseline: baseline})
 		dirs := map[string]int{}
@@ -641,7 +642,7 @@ func TestGitSpeedRunsInEachRigsMayorClone(t *testing.T) {
 		}
 	})
 
-	t.Run("the baseline record runs each git command in each rig's mayor/rig clone", func(t *testing.T) {
+	t.Run("the baseline record runs each git command in each rig's bare repository", func(t *testing.T) {
 		t.Parallel()
 		town := writeTown(t, townFiles{rigsJSON: rigsJSON})
 		dirs := map[string]int{}
@@ -657,11 +658,11 @@ func TestGitSpeedRunsInEachRigsMayorClone(t *testing.T) {
 
 // firstWritingGitCommand returns the first command in cmds whose verb is not a
 // read-only one, or "" when every command is read-only. The speed check times
-// each rig's mayor/rig clone, which install-gt fetches into, so a verb that
-// writes or takes the fetch locks must never be timed there.
+// each rig's bare repository, which every worktree of the rig shares, so a verb
+// that writes a ref or takes the fetch locks must never be timed there.
 func firstWritingGitCommand(cmds [][]string) string {
 	for _, args := range cmds {
-		if args[0] != "status" && args[0] != "ls-remote" {
+		if args[0] != "rev-list" && args[0] != "ls-remote" {
 			return strings.Join(args, " ")
 		}
 	}
@@ -672,7 +673,7 @@ func firstWritingGitCommand(cmds [][]string) string {
 // commands, and shows that a list holding a writing verb names it.
 func TestGitSpeedCommandsAreReadOnly(t *testing.T) {
 	t.Parallel()
-	want := [][]string{{"status", "--short"}, {"ls-remote", "--heads", "origin"}}
+	want := [][]string{{"rev-list", "--count", "--max-count=2000", "HEAD"}, {"ls-remote", "--heads", "origin"}}
 	if !reflect.DeepEqual(gitSpeedCommands, want) {
 		t.Fatalf("gitSpeedCommands = %v, want exactly %v", gitSpeedCommands, want)
 	}
@@ -689,8 +690,8 @@ func TestGitSpeedCommandsAreReadOnly(t *testing.T) {
 		{name: "gc names itself", cmds: [][]string{{"gc"}}, want: "gc"},
 		{name: "prune names itself", cmds: [][]string{{"prune"}}, want: "prune"},
 		{name: "remote update names itself", cmds: [][]string{{"remote", "update"}}, want: "remote update"},
-		{name: "a writing verb among read-only ones is named", cmds: [][]string{{"status", "--short"}, {"fetch"}}, want: "fetch"},
-		{name: "a list of read-only commands names nothing", cmds: [][]string{{"status", "--short"}, {"ls-remote", "--heads", "origin"}}, want: ""},
+		{name: "a writing verb among read-only ones is named", cmds: [][]string{{"rev-list", "--count", "--max-count=2000", "HEAD"}, {"fetch"}}, want: "fetch"},
+		{name: "a list of read-only commands names nothing", cmds: [][]string{{"rev-list", "--count", "--max-count=2000", "HEAD"}, {"ls-remote", "--heads", "origin"}}, want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -722,7 +723,7 @@ func TestGitSpeedRowsUseTheNewCommands(t *testing.T) {
 		if err := json.Unmarshal(data, &gb); err != nil {
 			t.Fatal(err)
 		}
-		want := map[string]float64{"status --short": 0.1, "ls-remote --heads origin": 0.1}
+		want := map[string]float64{"rev-list --count --max-count=2000 HEAD": 0.1, "ls-remote --heads origin": 0.1}
 		if !reflect.DeepEqual(gb.Rigs["gastown"], want) {
 			t.Errorf("baseline gastown = %v, want keys %v", gb.Rigs["gastown"], want)
 		}
@@ -730,16 +731,16 @@ func TestGitSpeedRowsUseTheNewCommands(t *testing.T) {
 	t.Run("each row is judged against its own baseline", func(t *testing.T) {
 		t.Parallel()
 		town := writeTown(t, townFiles{baseline: &GitBaseline{Rigs: map[string]map[string]float64{
-			"gastown": {"status --short": 0.1, "ls-remote --heads origin": 2.0},
+			"gastown": {"rev-list --count --max-count=2000 HEAD": 0.1, "ls-remote --heads origin": 2.0},
 		}}})
 		host := newFakeHost(gitAnswer(map[string][]time.Duration{
-			"status --short":           {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
-			"ls-remote --heads origin": {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
+			"rev-list --count --max-count=2000 HEAD": {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
+			"ls-remote --heads origin":               {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
 		}))
 		rows := CheckGitSpeed(context.Background(), host.env(town))
-		status := findRow(t, rows, "git speed gastown: status --short")
-		if status.OK || !strings.Contains(status.Result, "over 2.0x its baseline of 0.10s") {
-			t.Errorf("status row = %+v, want it over 2.0x its 0.10s baseline", status)
+		revList := findRow(t, rows, "git speed gastown: rev-list --count --max-count=2000 HEAD")
+		if revList.OK || !strings.Contains(revList.Result, "over 2.0x its baseline of 0.10s") {
+			t.Errorf("rev-list row = %+v, want it over 2.0x its 0.10s baseline", revList)
 		}
 		lsRemote := findRow(t, rows, "git speed gastown: ls-remote --heads origin")
 		if !lsRemote.OK {
@@ -758,10 +759,135 @@ func TestGitSpeedOldBaselineKeyIsReportedMissing(t *testing.T) {
 	}}})
 	host := newFakeHost(gitAnswer(nil))
 	rows := CheckGitSpeed(context.Background(), host.env(town))
-	for _, check := range []string{"git speed gastown: status --short", "git speed gastown: ls-remote --heads origin"} {
+	for _, check := range []string{"git speed gastown: rev-list --count --max-count=2000 HEAD", "git speed gastown: ls-remote --heads origin"} {
 		r := findRow(t, rows, check)
 		if r.OK || !strings.Contains(r.Result, "record it with gt town state check --record-baseline") {
 			t.Errorf("row %q = %+v, want the missing-key failure with the record-baseline instruction", check, r)
+		}
+	}
+}
+
+// TestDayCheckGitSpeedFloorFactorAndCeiling holds the rev-list row to the floor,
+// the factor above it, and the ceiling. Under the floor the factor never fails
+// the row, whatever the baseline; above it, twice the baseline still fails; and
+// the 3 s ceiling fails any median over it.
+func TestDayCheckGitSpeedFloorFactorAndCeiling(t *testing.T) {
+	t.Parallel()
+	const (
+		revList    = "rev-list --count --max-count=2000 HEAD"
+		revListRow = "git speed gastown: " + revList
+	)
+	tests := []struct {
+		name     string
+		baseline float64
+		took     time.Duration
+		wantOK   bool
+		wantText string
+	}{
+		{name: "a median under the floor passes whatever its factor", baseline: 0.001, took: 200 * time.Millisecond, wantOK: true},
+		{name: "a median just under the floor passes against a tiny baseline", baseline: 0.001, took: 249 * time.Millisecond, wantOK: true},
+		{name: "a median above the floor and over twice its baseline fails", baseline: 0.1, took: 300 * time.Millisecond, wantText: "over 2.0x its baseline of 0.10s"},
+		{name: "a median above the floor within twice its baseline passes", baseline: 0.2, took: 300 * time.Millisecond, wantOK: true},
+		{name: "a median over three seconds fails whatever the baseline", baseline: 2.0, took: 3500 * time.Millisecond, wantText: "over 3.0s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := writeTown(t, townFiles{baseline: &GitBaseline{Rigs: map[string]map[string]float64{
+				"gastown": {revList: tt.baseline, "ls-remote --heads origin": 0.1},
+			}}})
+			host := newFakeHost(gitAnswer(map[string][]time.Duration{
+				revList: {tt.took, tt.took, tt.took},
+			}))
+			r := findRow(t, CheckGitSpeed(context.Background(), host.env(town)), revListRow)
+			if r.OK != tt.wantOK {
+				t.Fatalf("row = %+v, want OK %v", r, tt.wantOK)
+			}
+			if !tt.wantOK && !strings.Contains(r.Result, tt.wantText) {
+				t.Errorf("row result = %q, want it to contain %q", r.Result, tt.wantText)
+			}
+		})
+	}
+}
+
+// TestDayCheckOldFormatBaselineAsksForARerecord shows a baseline holding only the
+// old command keys fails each new row with the instruction to record the baseline
+// again. The pre-change file also carries an ls-remote entry: that command's text
+// did not change, so its key still matches and the row is judged against the
+// recorded value. The rev-list row, which has no key in any old file, still asks
+// for the record.
+func TestDayCheckOldFormatBaselineAsksForARerecord(t *testing.T) {
+	t.Parallel()
+	const (
+		instruction = "record it with gt town state check --record-baseline before the move"
+		revList     = "git speed gastown: rev-list --count --max-count=2000 HEAD"
+		lsRemote    = "git speed gastown: ls-remote --heads origin"
+	)
+	t.Run("a baseline holding only the retired status key fails each new row", func(t *testing.T) {
+		t.Parallel()
+		town := writeTown(t, townFiles{files: map[string]string{
+			gitBaselineRel: `{"rigs":{"gastown":{"status --short":0.1}}}`,
+		}})
+		rows := CheckGitSpeed(context.Background(), newFakeHost(gitAnswer(nil)).env(town))
+		for _, check := range []string{revList, lsRemote} {
+			if r := findRow(t, rows, check); r.OK || !strings.Contains(r.Result, instruction) {
+				t.Errorf("row %q = %+v, want the missing-key failure with the record-baseline instruction", check, r)
+			}
+		}
+	})
+	t.Run("the pre-change file fails the rev-list row and judges ls-remote by its text key", func(t *testing.T) {
+		t.Parallel()
+		town := writeTown(t, townFiles{files: map[string]string{
+			gitBaselineRel: `{"rigs":{"gastown":{"status --short":0.1,"ls-remote --heads origin":0.1}}}`,
+		}})
+		rows := CheckGitSpeed(context.Background(), newFakeHost(gitAnswer(nil)).env(town))
+		if r := findRow(t, rows, revList); r.OK || !strings.Contains(r.Result, instruction) {
+			t.Errorf("rev-list row = %+v, want the missing-key failure with the record-baseline instruction", r)
+		}
+		if r := findRow(t, rows, lsRemote); !r.OK {
+			t.Errorf("ls-remote row = %+v, want it judged against its recorded value", r)
+		}
+	})
+}
+
+// TestRecordGitBaselineTimesTheBareRepository shows the record writes the medians
+// of the two commands in each rig under their text keys, and no other key.
+func TestRecordGitBaselineTimesTheBareRepository(t *testing.T) {
+	t.Parallel()
+	rigsJSON := `{"version":1,"rigs":{"gastown":{"git_url":"https://example.invalid/g.git"},"other":{"git_url":"https://example.invalid/o.git"}}}`
+	town := writeTown(t, townFiles{rigsJSON: rigsJSON})
+	dirs := map[string]int{}
+	took := map[string]time.Duration{
+		"rev-list --count --max-count=2000 HEAD": 20 * time.Millisecond,
+		"ls-remote --heads origin":               300 * time.Millisecond,
+	}
+	host := newFakeHost(func(dir, _ string, args []string) fakeAnswer {
+		dirs[dir]++
+		return fakeAnswer{took: took[strings.Join(args, " ")]}
+	})
+	path, err := RecordGitBaseline(context.Background(), host.env(town), false)
+	if err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	wantDirs := map[string]int{
+		filepath.Join(town, "gastown", ".repo.git"): 2 * GitSpeedRuns,
+		filepath.Join(town, "other", ".repo.git"):   2 * GitSpeedRuns,
+	}
+	if !reflect.DeepEqual(dirs, wantDirs) {
+		t.Errorf("git ran in %v, want %v", dirs, wantDirs)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gb GitBaseline
+	if err := json.Unmarshal(data, &gb); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]float64{"rev-list --count --max-count=2000 HEAD": 0.02, "ls-remote --heads origin": 0.3}
+	for _, rig := range []string{"gastown", "other"} {
+		if !reflect.DeepEqual(gb.Rigs[rig], want) {
+			t.Errorf("baseline %s = %v, want %v", rig, gb.Rigs[rig], want)
 		}
 	}
 }
