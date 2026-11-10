@@ -3,6 +3,7 @@ package testpolicy
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -75,6 +76,30 @@ func CheckSweepHostReasons(entries []SweepHostEntry) []string {
 	for _, e := range entries {
 		if e.Reason == "" {
 			findings = append(findings, fmt.Sprintf("sweep-host.txt:%d names %s without a '# reason': say why the runner cannot run it", e.Line, e.Package))
+		}
+	}
+	return findings
+}
+
+// CheckSweepHostReasonFiles reports each reason that names a .go file its
+// package no longer holds under root, since the next reader is sent to a file
+// that is gone. A name with a path separator is reported too: the reason names
+// a file in its package, not a path, so the manifest text never reaches a path.
+func CheckSweepHostReasonFiles(entries []SweepHostEntry, root string) []string {
+	var findings []string
+	for _, e := range entries {
+		for _, field := range strings.Fields(e.Reason) {
+			name := strings.Trim(field, ";,:.()")
+			if !strings.HasSuffix(name, ".go") {
+				continue
+			}
+			if strings.ContainsAny(name, `/\`) {
+				findings = append(findings, fmt.Sprintf("sweep-host.txt:%d reason names %s, a path rather than a file of %s: name the file alone", e.Line, name, e.Package))
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(root, e.Package, name)); err != nil {
+				findings = append(findings, fmt.Sprintf("sweep-host.txt:%d reason names %s, which %s does not hold: %v", e.Line, name, e.Package, err))
+			}
 		}
 	}
 	return findings
