@@ -106,6 +106,65 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 	}
 }
 
+// TestStatusLineReadyNilReport runs the health line over a town with no health
+// file, so HealthViewWith reads nothing and returns a nil report. With --ready
+// that is not ready and says why; without it the view's exit code stands.
+func TestStatusLineReadyNilReport(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	view := func(townRoot string, at time.Time) ([]string, townhealth.Verdict, *townhealth.Report) {
+		return townstatus.HealthViewWith(townRoot, at, notLooping)
+	}
+	tests := []struct {
+		name       string
+		ready      bool
+		wantCode   int
+		wantReason string // a substring of stderr; "" means stderr is empty
+	}{
+		{name: "ready: nothing readable exits non-zero and names the reason", ready: true, wantCode: 3, wantReason: "not ready: no health report"},
+		{name: "without ready: the view's own exit code stands", ready: false, wantCode: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cmd := &cobra.Command{}
+			var out, errOut bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(&errOut)
+
+			code := silentExitCode(t, statusHealthLineExit(cmd, t.TempDir(), tt.ready, now, view))
+			if code != tt.wantCode {
+				t.Errorf("exit = %d, want %d (stderr %q)", code, tt.wantCode, errOut.String())
+			}
+			if tt.wantReason == "" {
+				if errOut.Len() != 0 {
+					t.Errorf("stderr = %q, want none", errOut.String())
+				}
+			} else if !strings.Contains(errOut.String(), tt.wantReason) {
+				t.Errorf("stderr = %q, want it to contain %q", errOut.String(), tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestStatusFlagUsageIsOneLine holds the --ready flag usage to one short line
+// that leaves the [R] explanation to the Long help.
+func TestStatusFlagUsageIsOneLine(t *testing.T) {
+	t.Parallel()
+	usage := statusCmd.Flags().Lookup("ready").Usage
+	if strings.Contains(usage, "\n") {
+		t.Errorf("usage %q spans more than one line", usage)
+	}
+	if len(usage) > 80 {
+		t.Errorf("usage %q is %d characters, want 80 or fewer", usage, len(usage))
+	}
+	for _, marker := range []string{"[R]", "RECORDED"} {
+		if strings.Contains(usage, marker) {
+			t.Errorf("usage %q restates the Long help's %q explanation", usage, marker)
+		}
+	}
+}
+
 // TestStatusLineReadyNeedsLine refuses --ready without --line through the
 // command's dispatch, naming both flags, before any town state is read.
 func TestStatusLineReadyNeedsLine(t *testing.T) {
