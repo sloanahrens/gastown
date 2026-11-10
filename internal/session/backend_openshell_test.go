@@ -623,6 +623,29 @@ func TestOpenShellPrepareRefusesAPulledImageTheRegistryCannotVouchFor(t *testing
 	}
 }
 
+// TestOpenShellPrepareRefusesWhenTheDockerLabelReadFails: a docker-driver gateway
+// whose host docker cannot read the image's label refuses the spawn before
+// anything is pushed or created, naming the sandbox and the failure.
+func TestOpenShellPrepareRefusesWhenTheDockerLabelReadFails(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
+	b.imageGT = func(context.Context, string) (string, error) {
+		return "", errors.New("docker image inspect: Cannot connect to the Docker daemon")
+	}
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), "Cannot connect to the Docker daemon") || !strings.Contains(err.Error(), "sandbox ") {
+		t.Fatalf("Prepare = %v, want the label read's failure named under the sandbox", err)
+	}
+	if len(*pushes) != 0 {
+		t.Errorf("pushes = %+v, want none", *pushes)
+	}
+	if calls := fake.Calls(); len(calls) != 0 {
+		t.Errorf("openshell calls = %v, want none", calls)
+	}
+}
+
 // createFrom is the image reference the recorded sandbox create named.
 func createFrom(t *testing.T, fake *sandbox.Fake) string {
 	t.Helper()

@@ -113,3 +113,48 @@ func TestInspectImageRefusals(t *testing.T) {
 		}
 	})
 }
+
+// TestInspectImageFailurePaths drives each way a read can fail before it returns
+// a label: a bad ref, a manifest or blob the registry will not serve, a header
+// that does not name the body, and a body that is not the document it must be.
+func TestInspectImageFailurePaths(t *testing.T) {
+	t.Parallel()
+	cfg := configWithLabel("abc123")
+	cfgDigest := hashOf([]byte(cfg))
+	image := imageBody(cfgDigest, int64(len(cfg)))
+	archIndex := func(child string) string {
+		return fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":%q,"platform":{"os":"linux","architecture":"arm64"}}]}`, child)
+	}
+	notJSON := "not json"
+	notJSONDigest := hashOf([]byte(notJSON))
+	childIndexBody := archIndex(digestOf('f'))
+	childIndexDigest := hashOf([]byte(childIndexBody))
+	noConfig := `{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","layers":[]}`
+	badBlob := "not json either"
+	badBlobDigest := hashOf([]byte(badBlob))
+	cases := []struct {
+		name string
+		ref  string
+		h    http.HandlerFunc
+		want string
+	}{
+		{"a ref that fails validation", "bad ref!", imageRegistry(nil, nil), "failed validation"},
+		{"a manifest the registry will not serve", "dev", imageRegistry(nil, nil), "manifests/dev"},
+		{"a header that does not name the body", "dev", func(w http.ResponseWriter, r *http.Request) { served(w, digestOf('a'), image) }, "does not name the body"},
+		{"a manifest that is not JSON", "dev", imageRegistry(map[string]string{"/v2/r/manifests/dev": notJSON}, nil), "decode"},
+		{"a child manifest the registry will not serve", "dev", imageRegistry(map[string]string{"/v2/r/manifests/dev": archIndex(digestOf('d'))}, nil), "manifests/" + digestOf('d')},
+		{"a child manifest that is not JSON", "dev", imageRegistry(map[string]string{"/v2/r/manifests/dev": archIndex(notJSONDigest), "/v2/r/manifests/" + notJSONDigest: notJSON}, nil), "decode"},
+		{"a child that is itself an index", "dev", imageRegistry(map[string]string{"/v2/r/manifests/dev": archIndex(childIndexDigest), "/v2/r/manifests/" + childIndexDigest: childIndexBody}, nil), "is an index, not an image"},
+		{"a manifest that names no config", "dev", imageRegistry(map[string]string{"/v2/r/manifests/dev": noConfig}, nil), "names no config digest"},
+		{"a config blob that is not JSON", "dev", imageRegistry(map[string]string{"/v2/r/manifests/dev": imageBody(badBlobDigest, int64(len(badBlob)))}, map[string]string{"/v2/r/blobs/" + badBlobDigest: badBlob}), "decode"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := newTestClient(tc.h).InspectImage(context.Background(), "r", tc.ref, "linux", "arm64")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("InspectImage error = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+}
