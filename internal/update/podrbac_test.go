@@ -88,8 +88,8 @@ type podRBACRefusal struct {
 	want string
 }
 
-// parsePodRBAC decodes every document of a manifest. A document with no kind is
-// skipped; it holds nothing a check reads.
+// parsePodRBAC decodes every document of a manifest, kind-less ones included: the
+// shape check refuses a document with no kind rather than letting it pass unread.
 func parsePodRBAC(raw []byte) ([]podRBACDoc, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	var docs []podRBACDoc
@@ -102,9 +102,7 @@ func parsePodRBAC(raw []byte) ([]podRBACDoc, error) {
 		if err != nil {
 			return nil, err
 		}
-		if doc.Kind != "" {
-			docs = append(docs, doc)
-		}
+		docs = append(docs, doc)
 	}
 }
 
@@ -164,12 +162,16 @@ func podRBACRuleGrants(rule podRBACRule, g podRBACGrant) bool {
 // podRBACShapeProblems holds the manifest to its shape: exactly one ServiceAccount,
 // Role and RoleBinding, each named gt-update in gt; the binding's roleRef is the
 // Role and its only subject is the ServiceAccount. Any other document, such as a
-// ClusterRole, is refused by its kind.
+// ClusterRole, is refused by its kind, and a document with no kind is refused too.
 func podRBACShapeProblems(docs []podRBACDoc) []string {
 	var problems []string
 	counts := map[string]int{}
 	for _, doc := range docs {
 		counts[doc.Kind]++
+		if doc.Kind == "" {
+			problems = append(problems, "the manifest holds a document with no kind")
+			continue
+		}
 		if !slices.Contains(podRBACKinds, doc.Kind) {
 			problems = append(problems, fmt.Sprintf("the manifest holds a %s, and only %s are allowed", doc.Kind, strings.Join(podRBACKinds, ", ")))
 			continue
@@ -449,21 +451,33 @@ func TestPodUpdateRBACManifestParses(t *testing.T) {
 	}
 }
 
-// TestPodUpdateRBACCoversEveryRead holds the Role to the golden: every golden line
-// is granted by a rule. Removing any one rule fails the test, and the failure names
-// each golden line that rule alone granted.
-func TestPodUpdateRBACCoversEveryRead(t *testing.T) {
+// TestPodUpdateRBACManifestRefusesKindlessDocument holds the parser to the shape: a
+// document with no kind, carrying a Secrets rule, is refused by name. Dropping it
+// unread would let a grant pass the checks.
+func TestPodUpdateRBACManifestRefusesKindlessDocument(t *testing.T) {
 	t.Parallel()
-	golden := loadPodReadsGolden(t)
-	grants, badLines := podRBACGrantsOf(golden)
-	if len(badLines) > 0 {
-		t.Fatalf("%s: %s", podReadsGolden, strings.Join(badLines, "; "))
+	raw, err := os.ReadFile(filepath.FromSlash(podRBACManifest))
+	if err != nil {
+		t.Fatalf("reading %s: %v", podRBACManifest, err)
 	}
-	if problems := podRBACCoverageProblems(podRBACKindOf(loadPodRBAC(t), "Role"), golden); len(problems) > 0 {
-		t.Errorf("%s: %s", podRBACManifest, strings.Join(problems, "; "))
+	kindless := append(slices.Clone(raw), []byte("---\nmetadata:\n  name: gt-update\n  namespace: gt\nrules:\n  - apiGroups: [\"\"]\n    resources: [\"secrets\"]\n    verbs: [\"get\"]\n")...)
+	docs, err := parsePodRBAC(kindless)
+	if err != nil {
+		t.Fatalf("parsing the manifest with a kind-less document: %v", err)
 	}
+	podRBACRefused(t, "a kind-less document", podRBACShapeProblems(docs), "no kind")
+}
 
-	role := podRBACKindOf(loadPodRBAC(t), "Role")
+// podRBACRemovalProblems removes each rule of the Role in turn, on a copy, and names
+// each golden line the removed rule alone granted that is then left unnamed. A
+// manifest with no Role, a golden line that is not `verb resource`, and a rule that
+// grants no golden line are problems too: each is named, never skipped.
+func podRBACRemovalProblems(docs []podRBACDoc, golden []string) []string {
+	role := podRBACKindOf(docs, "Role")
+	if role == nil {
+		return []string{"the manifest holds no Role"}
+	}
+	grants, problems := podRBACGrantsOf(golden)
 	for i, rule := range role.Rules {
 		var granted []podRBACGrant
 		for _, g := range grants {
@@ -472,18 +486,61 @@ func TestPodUpdateRBACCoversEveryRead(t *testing.T) {
 			}
 		}
 		if len(granted) == 0 {
-			t.Errorf("rule %d grants no golden line, so removing it proves nothing", i)
+			problems = append(problems, fmt.Sprintf("rule %d grants no golden line, so removing it proves nothing", i))
 			continue
 		}
-		fixture := loadPodRBAC(t)
-		fixtureRole := podRBACKindOf(fixture, "Role")
-		fixtureRole.Rules = slices.Delete(fixtureRole.Rules, i, i+1)
-		problems := strings.Join(podRBACCoverageProblems(fixtureRole, golden), "\n")
+		without := *role
+		without.Rules = slices.Delete(slices.Clone(role.Rules), i, i+1)
+		unnamed := strings.Join(podRBACCoverageProblems(&without, golden), "\n")
 		for _, g := range granted {
-			if !strings.Contains(problems, fmt.Sprintf("%q", g)) {
-				t.Errorf("removing rule %d leaves golden line %q unnamed; problems: %s", i, g, problems)
+			if !strings.Contains(unnamed, fmt.Sprintf("%q", g)) {
+				problems = append(problems, fmt.Sprintf("removing rule %d leaves golden line %q unnamed", i, g))
 			}
 		}
+	}
+	return problems
+}
+
+// TestPodUpdateRBACCoversEveryRead holds the Role to the golden: every golden line
+// is granted by a rule. Removing any one rule fails the test, and the failure names
+// each golden line that rule alone granted.
+func TestPodUpdateRBACCoversEveryRead(t *testing.T) {
+	t.Parallel()
+	golden := loadPodReadsGolden(t)
+	docs := loadPodRBAC(t)
+	if problems := podRBACCoverageProblems(podRBACKindOf(docs, "Role"), golden); len(problems) > 0 {
+		t.Errorf("%s: %s", podRBACManifest, strings.Join(problems, "; "))
+	}
+	if problems := podRBACRemovalProblems(docs, golden); len(problems) > 0 {
+		t.Errorf("%s: %s", podRBACManifest, strings.Join(problems, "; "))
+	}
+}
+
+// TestPodUpdateRBACRemovalCheckRefusesBadRole holds the removal check to its refusals:
+// a manifest with no Role and a rule that grants no golden line are each named, not
+// passed and not a panic.
+func TestPodUpdateRBACRemovalCheckRefusesBadRole(t *testing.T) {
+	t.Parallel()
+	golden := loadPodReadsGolden(t)
+	for _, r := range []podRBACRefusal{
+		{
+			name: "no Role",
+			edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+				return slices.DeleteFunc(docs, func(d podRBACDoc) bool { return d.Kind == "Role" })
+			},
+			want: "no Role",
+		},
+		{
+			name: "a rule granting no golden line",
+			edit: func(t *testing.T, docs []podRBACDoc) []podRBACDoc {
+				role := podRBACDocOrFail(t, docs, "Role")
+				role.Rules = append(role.Rules, podRBACRule{APIGroups: []string{""}, Resources: []string{"configmaps"}, Verbs: []string{"get"}})
+				return docs
+			},
+			want: "grants no golden line",
+		},
+	} {
+		podRBACRefused(t, r.name, podRBACRemovalProblems(r.edit(t, loadPodRBAC(t)), golden), r.want)
 	}
 }
 
