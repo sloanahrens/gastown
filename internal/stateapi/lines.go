@@ -107,14 +107,41 @@ type file interface {
 // substitutes one whose files fail on cue.
 type opener func(path string) (file, error)
 
+// errNotRegular is why a read refuses a file that is not a regular file.
+var errNotRegular = errors.New("not a regular file")
+
 // openOS is the opener for files on disk. It returns a nil file on error, so a
-// failed open is never a non-nil interface holding a nil *os.File.
+// failed open is never a non-nil interface holding a nil *os.File. It opens
+// without blocking (opening a FIFO with no writer would otherwise wait for one;
+// on a regular file the flag changes nothing), checks the type of the descriptor
+// it holds before anything reads it, and refuses one that is not a regular file:
+// the file Confine accepted can have been swapped for a special file since.
 func openOS(path string) (file, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+	var fd int
+	var err error
+	for {
+		fd, err = syscall.Open(path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+		if err != syscall.EINTR {
+			break
+		}
 	}
-	return f, nil
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		syscall.Close(fd)
+		return nil, &os.PathError{Op: "stat", Path: path, Err: err}
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		syscall.Close(fd)
+		return nil, &os.PathError{Op: "open", Path: path, Err: errNotRegular}
+	}
+	if err := syscall.SetNonblock(fd, false); err != nil {
+		syscall.Close(fd)
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(fd), path), nil
 }
 
 // Confine returns the File at path under root, which must be absolute, or an
@@ -124,8 +151,9 @@ func openOS(path string) (file, error) {
 // refuses a file that is not a regular file: opening a FIFO can block until a
 // writer arrives, and a directory or device is not a file of lines. A missing
 // file is accepted, since a read of one is an empty page. Confine checks links
-// and file types as they are when it is called; a link or file swapped in after
-// that is not checked again.
+// and file types as they are when it is called. A read checks the type again on
+// the descriptor it opens, so a special file swapped in after Confine is refused
+// rather than read; a link swapped in after Confine is not checked again.
 func Confine(root, path string) (File, error) {
 	if !filepath.IsAbs(root) {
 		return File{}, fmt.Errorf("root %q is not an absolute path", root)
@@ -233,6 +261,11 @@ func read(open opener, f File, cur Cursor, maxLines int, tail int64) (page Page,
 	info, err := fh.Stat()
 	if err != nil {
 		return Page{}, fmt.Errorf("checking %s: %w", f.path, err)
+	}
+	// The opener on disk already refused a special file; this holds the rule
+	// for any opener, on the descriptor that is read.
+	if !info.Mode().IsRegular() {
+		return Page{}, fmt.Errorf("checking %s: %w", f.path, errNotRegular)
 	}
 	gen, err := fileGen(info)
 	if err != nil {

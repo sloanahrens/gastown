@@ -893,3 +893,72 @@ func TestFileGenRefusesUnknownIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestReadLinesRefusesASpecialFileSwappedInAfterConfine: Confine accepted a
+// regular file; a FIFO put in its place before the read is refused by the read,
+// which neither blocks on the open nor reads from it (gt-lv52sb round 3).
+func TestReadLinesRefusesASpecialFileSwappedInAfterConfine(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	path := filepath.Join(root, "swap.jsonl")
+	if err := os.WriteFile(path, []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Confine(root, "swap.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadLines(f, Cursor{}, 10); !errors.Is(err, errNotRegular) {
+		t.Errorf("ReadLines on a swapped-in FIFO: err = %v, want errNotRegular", err)
+	}
+	if _, err := ReadTail(f, 64); !errors.Is(err, errNotRegular) {
+		t.Errorf("ReadTail on a swapped-in FIFO: err = %v, want errNotRegular", err)
+	}
+}
+
+// specialInfo is a FileInfo whose mode says the file is a named pipe.
+type specialInfo struct{ os.FileInfo }
+
+func (specialInfo) Mode() os.FileMode { return os.ModeNamedPipe | 0o600 }
+
+// specialFile reports itself as a named pipe to Stat, whatever is on disk.
+type specialFile struct{ *os.File }
+
+func (f *specialFile) Stat() (os.FileInfo, error) {
+	fi, err := f.File.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return specialInfo{fi}, nil
+}
+
+// TestReadRefusesAnOpenerThatHandsOverASpecialFile: the regular-file rule holds
+// behind the opener seam too, on the descriptor's own stat, so an opener that
+// does not check is still refused before a byte is read.
+func TestReadRefusesAnOpenerThatHandsOverASpecialFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.jsonl"), []byte("a\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := Confine(root, "a.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := func(path string) (file, error) {
+		fh, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		return &specialFile{fh}, nil
+	}
+	if _, err := read(open, f, Cursor{}, 10, 0); !errors.Is(err, errNotRegular) {
+		t.Errorf("read through a special file: err = %v, want errNotRegular", err)
+	}
+}
