@@ -176,3 +176,71 @@ func TestPlanCarriesTheCallersDirectoryAndTerminal(t *testing.T) {
 		}
 	}
 }
+
+// A CLAUDE_ name that the config does not list still drops when it carries a
+// credential word. The lower-case row pins that the match is on the upper-case name.
+func TestPlanDropsAClaudeNameThatContainsACredentialWord(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+	}{
+		{"CLAUDE_SERVICE_TOKEN"},
+		{"CLAUDE_SERVICE_SECRET"},
+		{"CLAUDE_SERVICE_PASSWORD"},
+		{"CLAUDE_SERVICE_PASSPHRASE"},
+		{"CLAUDE_SERVICE_KEY"},
+		{"CLAUDE_service_token"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			call, err := Plan("gt", []string{"status"}, []string{tt.name + "=secret"}, "/town", false)
+			if err != nil {
+				t.Fatalf("Plan returned an error: %v", err)
+			}
+			if len(call.Env) != 0 {
+				t.Fatalf("Plan forwarded %q, want %s dropped", call.Env, tt.name)
+			}
+		})
+	}
+}
+
+func TestPlanKeepsAClaudeNameWithNoCredentialWord(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENTRYPOINT"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			entry := name + "=/Users/operator/.claude"
+			call, err := Plan("gt", []string{"status"}, []string{entry}, "/town", false)
+			if err != nil {
+				t.Fatalf("Plan returned an error: %v", err)
+			}
+			if !slices.Equal(call.Env, []string{entry}) {
+				t.Fatalf("Plan forwarded %q, want %q", call.Env, entry)
+			}
+		})
+	}
+}
+
+// The screen runs in Plan, so no -e flag is built for a dropped name: neither the
+// name nor its value reaches the argv the plan returns or the flags callFlags builds.
+func TestPlanScreensBeforeAnyEnvFlagIsBuilt(t *testing.T) {
+	t.Parallel()
+	const name = "CLAUDE_SERVICE_SECRET"
+	const value = "dropped-value-do-not-forward"
+	env := []string{name + "=" + value, "CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
+	call, err := Plan("gt", []string{"status"}, env, "/town", false)
+	if err != nil {
+		t.Fatalf("Plan returned an error: %v", err)
+	}
+	flags, dockerEnv := callFlags(call)
+	for _, arg := range append(slices.Clone(call.Argv), flags...) {
+		if strings.Contains(arg, name) || strings.Contains(arg, value) {
+			t.Fatalf("argv or flags carry the dropped credential: %q", arg)
+		}
+	}
+	want := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
+	if !slices.Equal(dockerEnv, want) {
+		t.Fatalf("docker environment is %q, want %q", dockerEnv, want)
+	}
+}
