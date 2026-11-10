@@ -149,17 +149,17 @@ func Confine(root, path string) (File, error) {
 	}
 	full := filepath.Join(dir, filepath.Base(abs))
 	info, err := os.Lstat(full)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		if full, err = filepath.EvalSymlinks(full); err != nil {
+			return File{}, fmt.Errorf("resolving %s: %w", path, err)
+		}
+		// The resolved path holds no symlink, so its Lstat is the file's own.
+		info, err = os.Lstat(full)
+	}
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
 		return File{}, fmt.Errorf("checking %s: %w", path, err)
-	case info.Mode()&os.ModeSymlink != 0:
-		if full, err = filepath.EvalSymlinks(full); err != nil {
-			return File{}, fmt.Errorf("resolving %s: %w", path, err)
-		}
-		if info, err = os.Stat(full); err != nil {
-			return File{}, fmt.Errorf("checking %s: %w", path, err)
-		}
 	}
 	if !within(realRoot, full) {
 		return File{}, fmt.Errorf("path %q is outside the root", path)
