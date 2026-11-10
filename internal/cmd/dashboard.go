@@ -390,7 +390,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// The deploy block reads the same repos through the same viewer client as
 	// the Forgejo panel, so the two are wired together from one token read;
 	// the staging ship reader dates the app rigs' landings off the same runs.
-	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos)
+	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos, dashboardLogf(out))
 	news, err := dashboardNewsReader(townRoot)
 	if err != nil {
 		return nil, nil, err
@@ -926,12 +926,17 @@ func jevBatteryFromCache(block scorecard.BatteryBlock) dashboard.JevBattery {
 // rig repo the viewer cannot see instead of silently reading a subset
 // (gt-faml5). No viewer token file means none of them, like the spend panel
 // with no spend command. The token is read once, here, and never leaves the
-// client.
-func dashboardForgejoReaders(townRoot string, repos []string) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging) {
+// client. The client reads the API root the rigs' Forgejo remote names
+// (dashboardForgejoBase), so the panes reach the Forgejo the rigs use.
+func dashboardForgejoReaders(townRoot string, repos []string, logf func(format string, args ...any)) (func() *dashboard.ForgejoFeed, func() *dashboard.Deploys, tailShipStaging) {
 	if len(repos) == 0 {
 		repos = rigForgejoRepos(townRoot)
 	}
-	client, err := forgejo.NewClient(config.ForgejoRoleViewer)
+	var opts []forgejo.Option
+	if base := dashboardForgejoBase(townRoot, rigForgejoRemote, logf); base != "" {
+		opts = append(opts, forgejo.WithBaseURL(base))
+	}
+	client, err := forgejo.NewClient(config.ForgejoRoleViewer, opts...)
 	if err != nil {
 		return nil, nil, nil
 	}
@@ -1015,6 +1020,62 @@ func rigForgejoRepos(townRoot string) []string {
 		out = append(out, owner+"/"+repo)
 	}
 	return out
+}
+
+// rigForgejoRemote is the remote URL a rig's merge_queue.forgejo setting names,
+// read through the same repo-file seam the rig's own resolver uses. An error is
+// a setting this run could not read, which is not a rig that names no remote.
+func rigForgejoRemote(townRoot, name string) (string, error) {
+	fc, err := rig.ResolveForgejoConfigWithError(rig.OpenRepoFile, townRoot, name)
+	if err != nil || fc == nil {
+		return "", err
+	}
+	return fc.RemoteURL, nil
+}
+
+// dashboardForgejoBase is the API root the Forgejo and deploys panes read: the
+// root the first rig in rig-name order names through its merge_queue.forgejo
+// remote, derived the way the daemon derives its own (land.APIBaseFromRemoteURL).
+// remoteOf reads each rig's remote; the dashboard passes rigForgejoRemote.
+// Without a root the client falls back to its built-in loopback root, which is
+// the pod's own address in the control cluster. Empty when no rig names a remote,
+// or when the registry cannot be read; logf names each case.
+//
+// A rig whose setting cannot be read, or whose remote names no host, is logged
+// and passed over, so a later rig can supply the root. A failure after the root
+// is found is logged and never discards it. Rigs on different hosts do not split
+// the panes: the first rig's host wins, and logf names the host it did not read,
+// once.
+func dashboardForgejoBase(townRoot string, remoteOf func(townRoot, rig string) (string, error), logf func(format string, args ...any)) string {
+	names, err := knownRigNames(townRoot)
+	if err != nil {
+		logf("the rig registry could not be read, so the Forgejo panes use the built-in API root: %v", err)
+		return ""
+	}
+	base, first := "", ""
+	for _, name := range names {
+		remote, err := remoteOf(townRoot, name)
+		if err != nil {
+			logf("rig %s's Forgejo setting could not be read, so the Forgejo panes do not take their root from it: %v", name, err)
+			continue
+		}
+		if remote == "" {
+			continue
+		}
+		root, err := land.APIBaseFromRemoteURL(remote)
+		if err != nil {
+			logf("rig %s's Forgejo remote names no host, so the Forgejo panes do not take their root from it", name)
+			continue
+		}
+		switch {
+		case base == "":
+			base, first = root, name
+		case root != base:
+			logf("the Forgejo panes read %s from rig %s; rig %s names %s, which they do not read", base, first, name, root)
+			return base
+		}
+	}
+	return base
 }
 
 // dashboardSpendHours reads the day's spend by hour from the balance ledger the

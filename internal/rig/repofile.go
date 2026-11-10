@@ -25,6 +25,11 @@ type RepoFileOpener func(repoPath string) RepoFileReader
 // openRepoFile is the production RepoFileOpener.
 func openRepoFile(repoPath string) RepoFileReader { return git.NewGit(repoPath) }
 
+// OpenRepoFile is the production RepoFileOpener for a caller outside this
+// package that resolves a rig's settings through the same git seam (the
+// dashboard's Forgejo panes, through ResolveForgejoConfigWithError).
+func OpenRepoFile(repoPath string) RepoFileReader { return openRepoFile(repoPath) }
+
 // RepoFileFor is ReadRepoFile with the production git reader, for a caller
 // outside this package that reads a rig's tracked file through a seam of its
 // own (the metrics snapshot's Env, gt-16efl).
