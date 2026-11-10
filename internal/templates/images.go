@@ -46,9 +46,7 @@ const (
 
 	// DindImage is the Docker engine the daemon's tier sweep drives, pinned by
 	// digest rather than tag so a restart runs the engine the ladder proved.
-	// The registry stopped serving the digest it first named, so it was moved
-	// to the dind tag's index digest on 2026-11-10 (gt-3we5ru), the same one
-	// SweepDindImage names; the rehearsal proves the engine before a cut-over.
+	// It shares its digest with SweepDindImage (gt-3we5ru).
 	DindImage = "data.forgejo.org/oci/docker@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121"
 
 	// SweepDindImage is the Docker engine the sweep runner's sidecar runs, and the
@@ -74,7 +72,7 @@ const (
 	// the operator's live Forgejo compose project (~/forgejo/compose.yml) runs,
 	// so the ladder proves the daemon against the forge it will meet. They are
 	// tags, as the live project names them; the scratch project's engine for the
-	// runner is DindImage, the digest the live project runs.
+	// runner is DindImage.
 	ForgejoImage       = "data.forgejo.org/forgejo/forgejo:16.0.5"
 	ForgePostgresImage = "postgres:17.11"
 	ForgejoRunnerImage = "data.forgejo.org/forgejo/runner:13.2.0"
@@ -100,11 +98,11 @@ type ClientToolPin struct {
 //     at v0.1.5, the version the host runs; its sha256 is the one in that
 //     release's openshell-checksums-sha256.txt (read 2026-11-01).
 //   - docker is the static client from download.docker.com at 29.8.2, the
-//     version inside the sweep engine (DindImage). Docker publishes no checksum
-//     file, so this sha256 is our own pin of the download: it was taken from
-//     the download of 2026-11-01 (trust on first use), so it guards later
-//     builds against change, not the first download. ACCEPTED-RISK: gt-sx34i,
-//     with the digests recorded on that bead.
+//     version inside the sweep engine (SweepDindImage). Docker publishes no
+//     checksum file, so this sha256 is our own pin of the download: it was
+//     taken from the download of 2026-11-01 (trust on first use), so it guards
+//     later builds against change, not the first download. ACCEPTED-RISK:
+//     gt-sx34i, with the digests recorded on that bead.
 //   - kubectl is the v1.37.0 binary from dl.k8s.io, the cluster's node version,
 //     with the sha256 published beside it as kubectl.sha256.
 var DaemonClientTools = []ClientToolPin{
