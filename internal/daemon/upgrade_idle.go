@@ -259,6 +259,12 @@ func (d *Daemon) resolveOwnCommit() string {
 	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "gastown"))
 	full, err := d.gitAt(repo).Rev(own + "^{commit}")
 	if err != nil {
+		// Said once per reading: the short commit still works for the skew
+		// probes, but a bare repo that lacks the running build is a fact worth a
+		// line, not a silent fallback (gt-3lvcjz.2, review round 4).
+		if d.logger != nil {
+			d.logger.Printf("resolveOwnCommit: the gastown bare repo at %s cannot resolve build commit %s (%v); using the short commit", repo, own, err)
+		}
 		return own
 	}
 	return strings.TrimSpace(full)
