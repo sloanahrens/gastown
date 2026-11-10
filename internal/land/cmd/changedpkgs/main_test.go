@@ -3,11 +3,17 @@ package main
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/presubmit"
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
 
 // testDoc is a pod-engine document with one inventory row, whose Evidence cell
 // cites internal/a/a.go:4, and a prose line ref to internal/c/c.go:12.
