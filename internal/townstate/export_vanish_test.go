@@ -27,8 +27,9 @@ func TestExportSkipsAFileThatVanishesDuringTheWalk(t *testing.T) {
 	cases := []struct {
 		name     string
 		over     func(*townOps)
-		vanished string // the entry that must be missing from the archive
-		kept     string // an entry that must still be in it
+		vanished string   // the entry that must be missing from the archive
+		subtree  []string // entries beneath a vanished directory, also missing
+		kept     string   // an entry that must still be in it
 	}{
 		{
 			name: "gone between the listing and the stat",
@@ -57,6 +58,20 @@ func TestExportSkipsAFileThatVanishesDuringTheWalk(t *testing.T) {
 			vanished: "daemon/state.json",
 			kept:     "daemon/sub/inner.txt",
 		},
+		{
+			name: "a directory gone with its subtree between the listing and the stat",
+			over: func(o *townOps) {
+				o.lstat = func(p string) (fs.FileInfo, error) {
+					if strings.HasSuffix(filepath.ToSlash(p), "/daemon/sub") {
+						return nil, &fs.PathError{Op: "lstat", Path: p, Err: fs.ErrNotExist}
+					}
+					return os.Lstat(p)
+				}
+			},
+			vanished: "daemon/sub/",
+			subtree:  []string{"daemon/sub/inner.txt"},
+			kept:     "daemon/state.json",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,6 +90,11 @@ func TestExportSkipsAFileThatVanishesDuringTheWalk(t *testing.T) {
 			if slices.Contains(names, tc.vanished) {
 				t.Errorf("the archive carries %s, which vanished during the walk: %q", tc.vanished, names)
 			}
+			for _, gone := range tc.subtree {
+				if slices.Contains(names, gone) {
+					t.Errorf("the archive carries %s, beneath a directory that vanished: %q", gone, names)
+				}
+			}
 			if !slices.Contains(names, tc.kept) {
 				t.Errorf("the archive lacks %s, which did not vanish: %q", tc.kept, names)
 			}
@@ -84,5 +104,39 @@ func TestExportSkipsAFileThatVanishesDuringTheWalk(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// closeCounter reads its body and counts the closes, so a test can see that a
+// file the copy abandoned was still closed.
+type closeCounter struct {
+	io.Reader
+	closes *int
+}
+
+func (c closeCounter) Close() error {
+	*c.closes++
+	return nil
+}
+
+// TestExportClosesAFileWhoseCopyFails holds the descriptor rule: a file whose
+// body ends before its header says is closed on the way out, and the copy's
+// refusal is what the walk returns.
+func TestExportClosesAFileWhoseCopyFails(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeStateFile(t, town, "daemon/state.json", "state\n", 0o644)
+	closes := 0
+	ops := opsWith(func(o *townOps) {
+		o.open = func(string) (io.ReadCloser, error) {
+			return closeCounter{Reader: strings.NewReader("short"), closes: &closes}, nil
+		}
+	})
+	_, err := Export(io.Discard, town, Default(), ExportOptions{AllowNoRigs: true, ops: ops})
+	if err == nil || !strings.Contains(err.Error(), "copying daemon/state.json into the archive") {
+		t.Fatalf("Export = %v, want the copy refusal for daemon/state.json", err)
+	}
+	if closes != 1 {
+		t.Errorf("the file was closed %d times after its copy failed, want 1", closes)
 	}
 }
