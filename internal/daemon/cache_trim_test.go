@@ -21,6 +21,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -2111,13 +2113,12 @@ func cacheTrimAppliedLine(t *testing.T, logged string) string {
 	return ""
 }
 
-// cacheTrimRemovalListBytes is the removal list a listing plans, encoded as the
-// claim-carried writer encodes it.
-func cacheTrimRemovalListBytes(t *testing.T, listing string) int {
-	t.Helper()
+// cacheTrimRemovalListSize is the byte size of the removal list a listing plans,
+// encoded as the claim-carried writer encodes it.
+func cacheTrimRemovalListSize(listing string) (int, error) {
 	entries, err := cacheTrimParseListing([]byte(listing))
 	if err != nil {
-		t.Fatalf("the listing does not parse: %v", err)
+		return 0, fmt.Errorf("the listing does not parse: %w", err)
 	}
 	plan := cachevol.PlanTrim(entries, 1024, true)
 	paths := make([]string, 0, len(plan.Removals))
@@ -2126,29 +2127,89 @@ func cacheTrimRemovalListBytes(t *testing.T, listing string) int {
 	}
 	data, err := json.Marshal(paths)
 	if err != nil {
-		t.Fatalf("encoding the removal list: %v", err)
+		return 0, fmt.Errorf("encoding the removal list: %w", err)
 	}
-	return len(data)
+	return len(data), nil
 }
 
-// cacheTrimListingAcrossTheCeilingOnAKiBGrid is a listing whose removal list
-// packs past the shard ceiling and whose WRITER ROOM (polecatimage.TrimListRoom
-// of the encoded list: the list and its digest, each on disk twice) is a whole
-// number of KiB, so a df -Pk reply can name exactly the room the writer needs
-// and the fit, equal and no-fit cases are each one KiB apart. It returns the
-// listing and that room.
-func cacheTrimListingAcrossTheCeilingOnAKiBGrid(t *testing.T) (string, int64) {
+// cacheTrimRemovalListBytes is cacheTrimRemovalListSize for a test body: a
+// listing that does not parse fails the test.
+func cacheTrimRemovalListBytes(t *testing.T, listing string) int {
 	t.Helper()
+	size, err := cacheTrimRemovalListSize(listing)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return size
+}
+
+// cacheTrimCeilingListing is the ceiling listing and the writer room it names.
+type cacheTrimCeilingListing struct {
+	listing string
+	room    int64
+}
+
+// cacheTrimCeilingBuilds counts runs of the ceiling builder. The memo below
+// runs it once per test binary, so the count stays at one however many tests
+// ask for the listing.
+var cacheTrimCeilingBuilds atomic.Int32
+
+// cacheTrimCeilingOnce memoizes the builder. The listing is a string no caller
+// mutates, and the room is a number, so the tests can share the one pair
+// (gt-t89628).
+var cacheTrimCeilingOnce = sync.OnceValues(buildCacheTrimCeilingListing)
+
+// buildCacheTrimCeilingListing is a listing whose removal list packs past the
+// shard ceiling and whose WRITER ROOM (polecatimage.TrimListRoom of the encoded
+// list: the list and its digest, each on disk twice) is a whole number of KiB,
+// so a df -Pk reply can name exactly the room the writer needs and the fit,
+// equal and no-fit cases are each one KiB apart.
+func buildCacheTrimCeilingListing() (cacheTrimCeilingListing, error) {
+	cacheTrimCeilingBuilds.Add(1)
 	listing := cacheTrimClaimRouteListing(cachevol.TrimMaxShards+1, 0)
-	room := polecatimage.TrimListRoom(cacheTrimRemovalListBytes(t, listing))
+	size, err := cacheTrimRemovalListSize(listing)
+	if err != nil {
+		return cacheTrimCeilingListing{}, err
+	}
+	room := polecatimage.TrimListRoom(size)
 	for pad := 0; room%1024 != 0 && pad < 1024; pad++ {
 		listing = cacheTrimClaimRouteListing(cachevol.TrimMaxShards+1, pad)
-		room = polecatimage.TrimListRoom(cacheTrimRemovalListBytes(t, listing))
+		size, err = cacheTrimRemovalListSize(listing)
+		if err != nil {
+			return cacheTrimCeilingListing{}, err
+		}
+		room = polecatimage.TrimListRoom(size)
 	}
 	if room%1024 != 0 {
-		t.Fatalf("the writer's room is %d bytes, which a df -Pk reply cannot name", room)
+		return cacheTrimCeilingListing{}, fmt.Errorf("the writer's room is %d bytes, which a df -Pk reply cannot name", room)
 	}
-	return listing, room
+	return cacheTrimCeilingListing{listing: listing, room: room}, nil
+}
+
+// cacheTrimListingAcrossTheCeilingOnAKiBGrid returns the ceiling listing and its
+// writer room, built once per test binary (gt-t89628).
+func cacheTrimListingAcrossTheCeilingOnAKiBGrid(t *testing.T) (string, int64) {
+	t.Helper()
+	c, err := cacheTrimCeilingOnce()
+	if err != nil {
+		t.Fatalf("building the ceiling listing: %v", err)
+	}
+	return c.listing, c.room
+}
+
+// TestCeilingListingIsBuiltOnce: the callers share one build of the ceiling
+// listing. Two calls return the same listing and room, and the builder ran once
+// (gt-t89628).
+func TestCeilingListingIsBuiltOnce(t *testing.T) {
+	t.Parallel()
+	listing, room := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	again, againRoom := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
+	if again != listing || againRoom != room {
+		t.Errorf("the second call returned room %d, the first room %d; the listings equal: %t", againRoom, room, again == listing)
+	}
+	if n := cacheTrimCeilingBuilds.Load(); n != 1 {
+		t.Errorf("the ceiling listing was built %d times, want 1", n)
+	}
 }
 
 // TestCacheTrimCrossesTheShardCeilingByTheClaimRoute is the bead's gate: a
