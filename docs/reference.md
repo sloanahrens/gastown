@@ -1275,6 +1275,13 @@ ever writes `acks.json` and `acks-history.jsonl`:
   table of each rule's flags is `ruleFlags` in `internal/attention/rules.go`;
   `host.disk_warn` is `info` until it holds for three consecutive heartbeats,
   then the daemon appends one `operator_action` wake line for it.
+  `host.node_disk_warn` and `host.node_disk_crit` are the control node's data
+  disk, beside `host.disk_warn` and `host.disk_crit`: the same thresholds (80%
+  used or under 12 GB free warns, 90% or under 5 GB free is critical) and the
+  same flags, except that the warning does not promote: it is `info` and the
+  critical wakes. The disk is the node's image filesystem, which holds the
+  container runtime's store and the local-path claims, read through the control
+  cluster; a node that cannot be read is its own `host.probe_failed` item.
   `landing.risk_path` is `info` until the landing is three hours old (the
   record's `landed_at`, held in the item) with no review note; the daemon then
   appends one `operator_action` wake line for it, once per item. A risk-path

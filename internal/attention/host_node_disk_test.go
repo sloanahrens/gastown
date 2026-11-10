@@ -1,6 +1,11 @@
 package attention
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // The control node's disk rules are the town root's rules over the node's
 // image filesystem: each item is keyed by its rule, so a reader and an ack find
@@ -31,5 +36,32 @@ func TestHostNodeDiskRules(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("Kinds() does not list %q, so readers and the rule check skip it", KindHostNodeDisk)
+	}
+}
+
+// The reference documents the control node's disk rules beside the town root's:
+// the block that names host.disk_warn also names both node rules, so a reader
+// finds the two disks' rules together.
+func TestReferenceDocumentsHostNodeDiskRules(t *testing.T) {
+	t.Parallel()
+
+	doc, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference.md"))
+	if err != nil {
+		t.Fatalf("reading the reference: %v", err)
+	}
+	var block string
+	for _, b := range strings.Split(string(doc), "\n\n") {
+		if strings.Contains(b, "`"+RuleHostDiskWarn+"`") {
+			block = b
+			break
+		}
+	}
+	if block == "" {
+		t.Fatalf("the reference does not name %s", RuleHostDiskWarn)
+	}
+	for _, rule := range []string{RuleHostNodeDiskWarn, RuleHostNodeDiskCrit} {
+		if !strings.Contains(block, "`"+rule+"`") {
+			t.Errorf("the block that names %s does not name %s", RuleHostDiskWarn, rule)
+		}
 	}
 }
