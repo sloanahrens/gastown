@@ -20,6 +20,11 @@ import (
 // clusterRenderSecretsManifest is the secrets manifest the render reads from the
 // repo. Its files are the config entries the live pod mounts.
 const clusterRenderSecretsManifest = `files:
+  - name: om-daemon-token
+    consumer: "the om token the daemon passes to om"
+    mode: "0600"
+    required: true
+
   - name: forgejo-landing.env
     consumer: "the landing bot's token"
     mode: "0600"
@@ -59,6 +64,7 @@ func clusterRenderFixture(t *testing.T) clusterRenderFlags {
 		cpu:                "2",
 		memory:             "4Gi",
 		confirmStopped:     true,
+		forgeHost:          "forgejo:3000",
 		configDir:          filepath.Join(t.TempDir(), "absent-config"),
 		openShellConfigDir: filepath.Join(t.TempDir(), "absent-openshell"),
 	}
@@ -327,6 +333,19 @@ func TestTownClusterRenderRefusesWithoutADigestOrAShare(t *testing.T) {
 			cause:  "--cpu is required",
 		},
 		{
+			name:   "live render without a forge host",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.forgeHost = "  " },
+			cause:  "--forge-host is required for a live render",
+		},
+		{
+			name: "rehearsal with a forge host",
+			mutate: func(_ *testing.T, f *clusterRenderFlags) {
+				f.rehearsal = true
+				f.namespace = "gt-rehearsal"
+			},
+			cause: "--forge-host is for a live render",
+		},
+		{
 			name:   "missing memory",
 			mutate: func(_ *testing.T, f *clusterRenderFlags) { f.memory = "" },
 			cause:  "--memory is required",
@@ -390,6 +409,7 @@ func TestTownClusterRenderRefusesWithoutADigestOrAShare(t *testing.T) {
 			name: "rehearsal in the live namespace",
 			mutate: func(_ *testing.T, f *clusterRenderFlags) {
 				f.rehearsal = true
+				f.forgeHost = ""
 				f.confirmStopped = false
 				f.namespace = k8sdaemon.DefaultNamespace
 			},
@@ -599,6 +619,7 @@ func TestTownClusterRenderRehearsalOmitsPromoteAndSweep(t *testing.T) {
 	t.Parallel()
 	f := clusterRenderFixture(t)
 	f.rehearsal = true
+	f.forgeHost = ""
 	f.confirmStopped = false
 	f.namespace = "gt-rehearsal"
 	var out bytes.Buffer
@@ -788,5 +809,97 @@ func TestTownClusterRenderDefaultsTheConfigDirectories(t *testing.T) {
 				t.Fatalf("xdgConfigSubdir = %q, %v; want %q", got, err, tt.want)
 			}
 		})
+	}
+}
+
+// daemonContainer returns the daemon container of the rendered Deployment file.
+func daemonContainer(t *testing.T, out string) (args []string, mounts map[string]string) {
+	t.Helper()
+	var dep struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					Containers []struct {
+						Name         string   `yaml:"name"`
+						Args         []string `yaml:"args"`
+						VolumeMounts []struct {
+							MountPath string `yaml:"mountPath"`
+							SubPath   string `yaml:"subPath"`
+						} `yaml:"volumeMounts"`
+					} `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	for _, name := range dirNames(t, out) {
+		if !strings.Contains(name, "-deployment-") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		if err := yaml.Unmarshal(data, &dep); err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+	}
+	containers := dep.Spec.Template.Spec.Containers
+	if len(containers) == 0 {
+		t.Fatalf("no Deployment container was rendered into %s: %v", out, dirNames(t, out))
+	}
+	c := containers[0]
+	mounts = map[string]string{}
+	for _, m := range c.VolumeMounts {
+		mounts[m.MountPath] = m.SubPath
+	}
+	return c.Args, mounts
+}
+
+// TestTownClusterRenderLiveCarriesTheEntrypointArguments holds the live
+// Deployment to the arguments and mounts the live compose command carries, so
+// the pod's git has the forge credential helper (gt-22wubb).
+func TestTownClusterRenderLiveCarriesTheEntrypointArguments(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	var out bytes.Buffer
+	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	args, mounts := daemonContainer(t, f.out)
+	wantArgs := []string{"--om-token-file", "/run/secrets/om-token", "--forge-host", "forgejo:3000", "--forge-token-file", "/run/secrets/forge-token"}
+	if !slices.Equal(args, wantArgs) {
+		t.Fatalf("daemon args = %v, want %v", args, wantArgs)
+	}
+	for path, sub := range map[string]string{
+		"/run/secrets/om-token":    "om-daemon-token",
+		"/run/secrets/forge-token": "forgejo-landing.env",
+	} {
+		if mounts[path] != sub {
+			t.Fatalf("mount %s has subPath %q, want %q (mounts %v)", path, mounts[path], sub, mounts)
+		}
+	}
+}
+
+// TestTownClusterRenderRehearsalCarriesNeitherToken keeps the rehearsal pod off
+// the om token and the forge host: it mounts only the viewer token.
+func TestTownClusterRenderRehearsalCarriesNeitherToken(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.rehearsal = true
+	f.forgeHost = ""
+	f.confirmStopped = false
+	f.namespace = "gt-rehearsal"
+	var out bytes.Buffer
+	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	args, mounts := daemonContainer(t, f.out)
+	if len(args) != 0 {
+		t.Fatalf("a rehearsal daemon carries args %v, want none", args)
+	}
+	for _, path := range []string{"/run/secrets/om-token", "/run/secrets/forge-token"} {
+		if sub, ok := mounts[path]; ok {
+			t.Fatalf("a rehearsal mounts %s from %q", path, sub)
+		}
 	}
 }
