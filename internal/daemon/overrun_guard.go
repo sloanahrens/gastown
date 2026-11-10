@@ -94,6 +94,10 @@ type overrunSeat struct {
 	// time it spent dead was not time a session was alive on the bead
 	// (gt-y9lkx).
 	RestartedAt time.Time
+	// SessionStart is when the seat's current session was created, zero when it
+	// cannot be read. The guard never measures a run from before it
+	// (slungFloor, gt-i6recg).
+	SessionStart time.Time
 	// Scheduled is set when the bead carries a scheduled: label, the mark of a
 	// run the daemon's scheduled_slings patrol created. Those run long by
 	// design (the deep-review is report-only), so the guard never nudges them
@@ -411,6 +415,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		if !ok {
 			continue
 		}
+		slung = slungFloor(slung, seat.SessionStart, seat.RestartedAt)
 		state, err := readOverrunState(d.config.TownRoot, seat.Bead)
 		if err != nil {
 			// An unreadable record could hide a nudge already sent; act on
@@ -632,6 +637,9 @@ func (d *Daemon) overrunSeatFor(polecatsDir, rigName, name string) (overrunSeat,
 	alive, err := d.tmux.HasSession(sessionName)
 	if err != nil || !alive {
 		return seat, false
+	}
+	if created, err := d.tmux.GetSessionCreatedTime(sessionName); err == nil {
+		seat.SessionStart = created
 	}
 	if d.gtDoneInFlight(sessionName) {
 		seat.Submitted = true

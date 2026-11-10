@@ -585,9 +585,6 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// Labels live on the base bead even when a formula wisp was hooked.
 	d.ClearOrphanLabels(townRoot, opts.BeadID, hookWorkDir)
 
-	// 7. Log dispatch event
-	_ = d.LogFeed(events.TypeSling, actor, events.SlingPayload(beadToHook, targetAgent))
-
 	// 8. Update agent hook_bead state
 	d.UpdateAgentHook(targetAgent, beadToHook, hookWorkDir, beadsDir)
 
@@ -616,6 +613,11 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		return result, fmt.Errorf("starting polecat session: %w", err)
 	}
 	fmt.Fprintf(d.out(), "  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
+	// 7. Log the dispatch event, once the session is running. The overrun guard
+	// dates a bead's run from its earliest sling event, so one written before a
+	// session that then failed to start would be inherited by the next sling of
+	// the bead and stop that polecat for time it never ran (gt-i6recg).
+	_ = d.LogFeed(events.TypeSling, actor, events.SlingPayload(beadToHook, targetAgent))
 	// The sandbox's own phases were reported from inside the start, so this
 	// names what is left of it — the runtime wait and the pane read (gt-7nctk).
 	st.end()

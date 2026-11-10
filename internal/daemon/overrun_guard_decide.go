@@ -85,6 +85,32 @@ const (
 	overrunCommentMaxAttempts = 5
 )
 
+// overrunSessionGrace is how long after a sling the seat's session may have
+// been created and still belong to that sling: the time the sling spent
+// preparing the session (a sandbox's image resolve, create and wait). A session
+// created later than this after the sling belongs to a later dispatch.
+const overrunSessionGrace = 5 * time.Minute
+
+// slungFloor is the dispatch time the guard measures a run from, never earlier
+// than the session that is running it. The event log dates a bead's run from its
+// earliest sling, so a sling whose session never started leaves a date that a
+// later sling of the same bead inherits; the polecat that finally starts would
+// be stopped for time it never ran (gt-i6recg). A session created more than
+// overrunSessionGrace after the sling cannot be that sling's, so the run is
+// measured from the session. A zero sessionStart (unknown) leaves the sling as
+// it is. A restart of the seat after the sling already accounts for a later
+// session (withRestart restarts the clock, within its cap), so it is left to that
+// rule.
+func slungFloor(slung, sessionStart, restarted time.Time) time.Time {
+	if sessionStart.IsZero() || restarted.After(slung) {
+		return slung
+	}
+	if sessionStart.After(slung.Add(overrunSessionGrace)) {
+		return sessionStart
+	}
+	return slung
+}
+
 // nudgeFailures is how many nudges have failed for the sling at slung.
 func (s overrunState) nudgeFailures(slung time.Time) int {
 	if s.NudgeFailedAt.Before(slung) {

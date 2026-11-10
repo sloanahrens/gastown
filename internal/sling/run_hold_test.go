@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/events"
 )
 
 // holdMidDispatch is the incident of gt-0k7kb: an automatic dispatcher read a
@@ -42,8 +44,9 @@ type fakeSlingDeps struct {
 	hooks     int
 	rollback  int
 	started   int
-	startErr  error // what StartSession fails with, nil to start
-	noted     int   // dispatches filed back into the tick's duplicate pool
+	startErr  error    // what StartSession fails with, nil to start
+	feed      []string // the event types LogFeed was given, each tagged "after-session" when the session had started
+	noted     int      // dispatches filed back into the tick's duplicate pool
 
 	// Span recording, in call order with the session start.
 	order      []string
@@ -91,10 +94,17 @@ func (f *fakeSlingDeps) deps() *Deps {
 		RecordReassignment: func(string, string, string, string, string) {},
 		ClearOrphanLabels:  func(string, string, string) {},
 		NoteDispatched:     func(string, *Duplicate) { f.noted++ },
-		LogFeed:            func(string, string, map[string]interface{}) error { return nil },
-		UpdateAgentHook:    func(string, string, string, string) {},
-		UpdateAgentMode:    func(string, string, string, string) {},
-		StoreFields:        func(string, string, FieldUpdates) error { return nil },
+		LogFeed: func(typ, _ string, _ map[string]interface{}) error {
+			tag := typ
+			if f.started > 0 {
+				tag += " after-session"
+			}
+			f.feed = append(f.feed, tag)
+			return nil
+		},
+		UpdateAgentHook: func(string, string, string, string) {},
+		UpdateAgentMode: func(string, string, string, string) {},
+		StoreFields:     func(string, string, FieldUpdates) error { return nil },
 		RecordBlockerOverride: func(_, _, actor string, blockers []string) error {
 			f.overrides = append(f.overrides, actor+" over "+strings.Join(blockers, ", "))
 			f.admissionSequence = append(f.admissionSequence, "override")
@@ -290,4 +300,37 @@ func TestRunAutoForceStillTakesAHookedBead(t *testing.T) {
 	if f.hooks != 1 || result == nil || !result.Success {
 		t.Fatalf("hooks = %d, result %+v, want the recovering dispatch to take the bead", f.hooks, result)
 	}
+}
+
+// TestRunLogsTheSlingEventOnlyOnceTheSessionRuns is gt-i6recg's case: the overrun
+// guard dates a bead's run from its earliest sling event, so a sling that failed
+// to start its session must leave none, and a sling that started one writes it
+// after the session is up.
+func TestRunLogsTheSlingEventOnlyOnceTheSessionRuns(t *testing.T) {
+	t.Parallel()
+	t.Run("a session that fails to start leaves no sling event", func(t *testing.T) {
+		t.Parallel()
+		f := &fakeSlingDeps{startErr: errors.New("preparing openshell session: docker image inspect: exit status 1")}
+		if _, err := Run(context.Background(), f.deps(), holdTestOptions()); err == nil {
+			t.Fatal("the dispatch succeeded although its session failed to start")
+		}
+		if f.rollback != 1 {
+			t.Errorf("rolled back %d time(s), want 1", f.rollback)
+		}
+		for _, ev := range f.feed {
+			if strings.HasPrefix(ev, events.TypeSling) {
+				t.Errorf("a %q event was logged for a sling whose session never ran: %v", events.TypeSling, f.feed)
+			}
+		}
+	})
+	t.Run("a session that starts is followed by the sling event", func(t *testing.T) {
+		t.Parallel()
+		f := &fakeSlingDeps{}
+		if _, err := Run(context.Background(), f.deps(), holdTestOptions()); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if want := []string{events.TypeSling + " after-session"}; !slices.Equal(f.feed, want) {
+			t.Errorf("feed = %q, want %q", f.feed, want)
+		}
+	})
 }

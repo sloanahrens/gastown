@@ -159,10 +159,11 @@ func TestExecuteSlingSuccess(t *testing.T) {
 		"reassign gt-abc123  -> gastown/polecats/Toast",
 		"hook gt-abc123 gastown/polecats/Toast",
 		"clear orphan labels gt-abc123",
-		"feed sling",
 		"agent hook gastown/polecats/Toast gt-abc123",
 		"agent mode gastown/polecats/Toast ralph",
 		"start session Toast",
+		// The sling event is logged once the session runs (gt-i6recg).
+		"feed sling",
 		// The pool note follows the session, at the commit point (gt-fvak3).
 		"note dispatched",
 		"unlock assignee gastown/polecats/Toast",
