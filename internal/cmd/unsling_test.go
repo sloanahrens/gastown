@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // gt hook shows hooked and in_progress beads as the agent's work, so gt
@@ -418,5 +419,121 @@ func TestUnslingCommandForceSemantics(t *testing.T) {
 				t.Errorf("bead status after unsling = %q, want open", got.Status)
 			}
 		})
+	}
+}
+
+// unslingTestRegistry maps the gt prefix to the gastown rig, so a target
+// resolves from an in-test registry rather than the live town.
+func unslingTestRegistry() *session.PrefixRegistry {
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	return reg
+}
+
+// A polecat or crew target resolves to its canonical agent id from the prefix
+// registry and session name alone: resolveTargetAgentID calls no tmux function.
+func TestUnslingTargetResolvesWithoutTmux(t *testing.T) {
+	t.Parallel()
+	reg := unslingTestRegistry()
+
+	for _, tc := range []struct {
+		target string
+		want   string
+	}{
+		{"gastown/polecats/slit", "gastown/polecats/slit"},
+		{"gastown/crew/name", "gastown/crew/name"},
+	} {
+		got, err := resolveTargetAgentID(reg, tc.target)
+		if err != nil {
+			t.Fatalf("resolveTargetAgentID(%q) = %v, want nil", tc.target, err)
+		}
+		if got != tc.want {
+			t.Errorf("resolveTargetAgentID(%q) = %q, want %q", tc.target, got, tc.want)
+		}
+	}
+}
+
+// An invalid path segment is refused, and the error names the target so the
+// operator can see which argument was wrong.
+func TestUnslingTargetRefusesAnInvalidPath(t *testing.T) {
+	t.Parallel()
+	const target = "gastown/polecats/bad.name"
+
+	got, err := resolveTargetAgentID(unslingTestRegistry(), target)
+	if err == nil || !strings.Contains(err.Error(), target) {
+		t.Fatalf("resolveTargetAgentID(%q) = (%q, %v), want an error naming the target", target, got, err)
+	}
+}
+
+// The production wiring hands the command the id-only resolver over the registry
+// it is given, so it resolves a polecat target with no tmux lookup. The registry
+// is injected, so the test reads no live town registry.
+func TestUnslingProductionDepsResolveWithoutTmux(t *testing.T) {
+	t.Parallel()
+	const polecat = "gastown/polecats/slit"
+
+	got, err := productionUnslingDeps(unslingTestRegistry()).resolver.agentID(polecat)
+	if err != nil {
+		t.Fatalf("resolver.agentID(%q) = %v, want nil", polecat, err)
+	}
+	if got != polecat {
+		t.Errorf("resolver.agentID(%q) = %q, want %q", polecat, got, polecat)
+	}
+}
+
+// unslingDepsFor wires the command to the id resolver and the beads stub only.
+// A targeted unsling takes no self path, so the caller's identity and tmux pane
+// are never read.
+func unslingDepsFor(store beads.Client) unslingDeps {
+	return unslingDeps{
+		resolver: agentIDResolver{reg: unslingTestRegistry()},
+		townRoot: func() (string, error) { return "", nil },
+		open:     func(string) beads.Client { return store },
+	}
+}
+
+// gt unsling <bead> <polecat> reopens the hooked bead and clears its assignee
+// through the stubs, with no tmux lookup for the target.
+func TestUnslingCommandNeverAsksTmux(t *testing.T) {
+	t.Parallel()
+	const polecat = "gastown/polecats/slit"
+	store := beadsfake.New()
+	is := seedAssigned(t, store, polecat, beads.IssueStatusHooked)
+
+	deps := unslingDepsFor(store)
+	deps.townRoot = func() (string, error) { return t.TempDir(), nil }
+	if err := runUnslingDeps(&cobra.Command{}, []string{is.ID, polecat}, false, false, deps); err != nil {
+		t.Fatalf("runUnslingDeps = %v, want nil", err)
+	}
+
+	got, err := store.Show(is.ID)
+	if err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if got.Status != "open" || got.Assignee != "" {
+		t.Errorf("bead after unsling = (status %q, assignee %q), want (open, \"\")", got.Status, got.Assignee)
+	}
+}
+
+// A target that cannot become an agent id stops the command before any bead is
+// read or written: the hooked bead keeps its status and assignee.
+func TestUnslingCommandRefusesInvalidTarget(t *testing.T) {
+	t.Parallel()
+	const polecat = "gastown/polecats/slit"
+	store := beadsfake.New()
+	is := seedAssigned(t, store, polecat, beads.IssueStatusHooked)
+
+	const target = "gastown/polecats/bad.name"
+	err := runUnslingDeps(&cobra.Command{}, []string{is.ID, target}, false, false, unslingDepsFor(store))
+	if err == nil || !strings.Contains(err.Error(), target) {
+		t.Fatalf("runUnslingDeps = %v, want an error naming %q", err, target)
+	}
+
+	got, err := store.Show(is.ID)
+	if err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if got.Status != string(beads.IssueStatusHooked) || got.Assignee != polecat {
+		t.Errorf("bead after refused unsling = (status %q, assignee %q), want it still hooked to %s", got.Status, got.Assignee, polecat)
 	}
 }
