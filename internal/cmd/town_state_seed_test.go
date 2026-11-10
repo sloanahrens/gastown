@@ -31,6 +31,7 @@ import (
 const (
 	seedNamespace = "rehearsal"
 	seedPod       = "seed-helper"
+	seedContext   = "colima-gt-control"
 )
 
 // fakeKubectl is the kubectl runner a seed test injects. It checks the exec argv
@@ -67,7 +68,7 @@ type fakeKubectl struct {
 
 func (k *fakeKubectl) run(_ context.Context, args []string, stdin io.Reader, stdout, _ io.Writer) error {
 	k.calls = append(k.calls, slices.Clone(args))
-	prefix := []string{"exec", "-i", "-n", seedNamespace, seedPod, "--"}
+	prefix := []string{"--context", seedContext, "exec", "-i", "-n", seedNamespace, seedPod, "--"}
 	if len(args) < len(prefix) || !slices.Equal(args[:len(prefix)], prefix) {
 		return errors.New("fake kubectl: unexpected exec argv")
 	}
@@ -210,7 +211,7 @@ func newSeedSession(t *testing.T, town string) seedSession {
 			exclude:         migrateSecretExclusion(t),
 			manifest:        m,
 			patrolWritePath: config.PatrolWritePath,
-			engine:          podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run},
+			engine:          podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext, town: town, run: kube.run},
 			probes:          readyProbes(),
 			now:             seedClock(),
 			out:             &out,
@@ -503,14 +504,14 @@ func flagPathSession(t *testing.T, town string, rehearsal bool) (townStateSeedEn
 	// allow-no-rigs lets the export pass its registry check, so only the settings
 	// step differs from the stream the other tests run.
 	env, err := townStateSeedEnvFromFlags(seedFlagCommand(seedFlagValues{
-		town: town, namespace: seedNamespace, pod: seedPod, secrets: secrets, rehearsal: rehearsal, allowNoRigs: true,
+		town: town, namespace: seedNamespace, pod: seedPod, context: seedContext, secrets: secrets, rehearsal: rehearsal, allowNoRigs: true,
 	}, ""))
 	if err != nil {
 		t.Fatalf("townStateSeedEnvFromFlags: %v", err)
 	}
 	fv := &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30}
 	kube := &fakeKubectl{fv: fv, town: town}
-	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run}
+	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext, town: town, run: kube.run}
 	env.now = seedClock()
 	return env, fv, kube
 }
@@ -855,7 +856,7 @@ func TestTownStateSeedEngineNamesOnlyItsClaim(t *testing.T) {
 	t.Parallel()
 	town := seedTown(t)
 	kube := &fakeKubectl{fv: &fakeVolume{dir: t.TempDir()}, town: town}
-	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run}
+	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext, town: town, run: kube.run}
 	if err := eng.Run("gt-state", townstate.ListArgv, nil, io.Discard); err == nil {
 		t.Fatal("a volume other than the claim was run")
 	}
@@ -865,7 +866,7 @@ func TestTownStateSeedEngineNamesOnlyItsClaim(t *testing.T) {
 	if err := eng.Run(seedClaim, townstate.ListArgv, nil, io.Discard); err != nil {
 		t.Fatalf("listing the claim: %v", err)
 	}
-	want := []string{"exec", "-i", "-n", seedNamespace, seedPod, "--", "tar", "-c", "-C", town, "."}
+	want := []string{"--context", seedContext, "exec", "-i", "-n", seedNamespace, seedPod, "--", "tar", "-c", "-C", town, "."}
 	if !slices.Equal(kube.calls[0], want) {
 		t.Errorf("listing argv = %q, want %q", kube.calls[0], want)
 	}
@@ -878,11 +879,11 @@ func TestTownStateSeedEngineMapsTheMountPrefix(t *testing.T) {
 	t.Parallel()
 	town := seedTown(t)
 	kube := &fakeKubectl{fv: &fakeVolume{dir: t.TempDir()}, town: town}
-	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town, run: kube.run}
+	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext, town: town, run: kube.run}
 	if err := townstate.RemoveVolumeFile(eng, seedClaim, cutoverRecordRel); err != nil {
 		t.Fatalf("removing the record from the claim: %v", err)
 	}
-	want := []string{"exec", "-i", "-n", seedNamespace, seedPod, "--", "rm", "-f", "--", town + "/" + cutoverRecordRel}
+	want := []string{"--context", seedContext, "exec", "-i", "-n", seedNamespace, seedPod, "--", "rm", "-f", "--", town + "/" + cutoverRecordRel}
 	if !slices.Equal(kube.calls[0], want) {
 		t.Errorf("removal argv = %q, want %q", kube.calls[0], want)
 	}
@@ -967,16 +968,16 @@ func (listingEngine) CreateVolume(string) error { return errors.New("not used") 
 
 // seedFlagValues is what each flag of the seed command is given in a test.
 type seedFlagValues struct {
-	town, namespace, pod, since, secrets string
-	rehearsal, allowNoRigs               bool
+	town, namespace, pod, context, since, secrets string
+	rehearsal, allowNoRigs                        bool
 }
 
 // seedFlagCommand is a command with every flag the seed reads, each given its
 // value from v. A flag named in mistyped is defined with the other type.
 func seedFlagCommand(v seedFlagValues, mistyped string) *cobra.Command {
 	c := &cobra.Command{Use: "seed"}
-	strs := map[string]string{"town": v.town, "namespace": v.namespace, "pod": v.pod, "since": v.since, "secrets-manifest": v.secrets}
-	for _, name := range []string{"town", "namespace", "pod", "since", "secrets-manifest"} {
+	strs := map[string]string{"town": v.town, "namespace": v.namespace, "pod": v.pod, "context": v.context, "since": v.since, "secrets-manifest": v.secrets}
+	for _, name := range []string{"town", "namespace", "pod", "context", "since", "secrets-manifest"} {
 		if name == mistyped {
 			c.Flags().Bool(name, true, "")
 			continue
@@ -1004,7 +1005,7 @@ func TestTownStateSeedReadsItsFlags(t *testing.T) {
 	secrets := filepath.Join(t.TempDir(), "secrets.yaml")
 	writeProfileFile(t, secrets, secretsYAML)
 	env, err := townStateSeedEnvFromFlags(seedFlagCommand(seedFlagValues{
-		town: town, namespace: seedNamespace, pod: seedPod, since: "2026-11-06T14:30:00Z", secrets: secrets, rehearsal: true,
+		town: town, namespace: seedNamespace, pod: seedPod, context: seedContext, since: "2026-11-06T14:30:00Z", secrets: secrets, rehearsal: true,
 	}, ""))
 	if err != nil {
 		t.Fatalf("townStateSeedEnvFromFlags: %v", err)
@@ -1018,6 +1019,9 @@ func TestTownStateSeedReadsItsFlags(t *testing.T) {
 	if env.exclude == nil || env.engine == nil || env.patrolWritePath == nil {
 		t.Error("the session is missing its exclusion, engine or settings path")
 	}
+	if eng, ok := env.engine.(podEngine); !ok || eng.context != seedContext {
+		t.Errorf("engine = %#v, want the --context flag's name on the pod engine", env.engine)
+	}
 }
 
 // TestTownStateSeedRefusesABadFlag: a flag value or a flag of the wrong type that
@@ -1027,7 +1031,7 @@ func TestTownStateSeedRefusesABadFlag(t *testing.T) {
 	town := t.TempDir()
 	secrets := filepath.Join(t.TempDir(), "secrets.yaml")
 	writeProfileFile(t, secrets, secretsYAML)
-	valid := seedFlagValues{town: town, namespace: seedNamespace, pod: seedPod, secrets: secrets}
+	valid := seedFlagValues{town: town, namespace: seedNamespace, pod: seedPod, context: seedContext, secrets: secrets}
 	with := func(f func(v *seedFlagValues)) seedFlagValues {
 		v := valid
 		f(&v)
@@ -1073,6 +1077,121 @@ func TestTownStateSeedCommandRefusesBeforeAnyExec(t *testing.T) {
 	}
 }
 
+// TestTownStateSeedEveryExecNamesTheContext: a full seed run sends every kubectl
+// exec with --context and the given name first, and the runs cover the stream, the
+// listing, the settings step and, for a rehearsal, the profile.
+func TestTownStateSeedEveryExecNamesTheContext(t *testing.T) {
+	t.Parallel()
+	t.Run("a rehearsal", func(t *testing.T) {
+		t.Parallel()
+		town := seedTown(t)
+		s := newSeedSession(t, town)
+		s.env.rehearsal = true
+		if err := runTownStateSeedIn(s.env); err != nil {
+			t.Fatalf("rehearsal seed: %v\n%s", err, s.out.String())
+		}
+		assertEveryExecNamesContext(t, s.kube.calls)
+		must := [][]string{withTown(townstate.ImportArgv, town), withTown(townstate.ListArgv, town), withTown(seedSettingsArgv, town), withTown(seedProfileArgv, town)}
+		assertExecsRan(t, s.kube.calls, must)
+	})
+	t.Run("a live copy", func(t *testing.T) {
+		t.Parallel()
+		town := cutoverTown(t)
+		env, _, kube, out := cutoverSession(t, town)
+		if err := runTownStateSeedIn(env); err != nil {
+			t.Fatalf("live seed: %v\n%s", err, out.String())
+		}
+		assertEveryExecNamesContext(t, kube.calls)
+		assertExecsRan(t, kube.calls, [][]string{withTown(townstate.ImportArgv, town), withTown(townstate.ListArgv, town), withTown(seedSettingsArgv, town)})
+	})
+}
+
+// assertEveryExecNamesContext fails unless the run made an exec and every recorded
+// argv begins --context followed by seedContext.
+func assertEveryExecNamesContext(t *testing.T, calls [][]string) {
+	t.Helper()
+	if len(calls) == 0 {
+		t.Fatal("the run made no exec, so nothing shows the context")
+	}
+	for i, call := range calls {
+		if len(call) < 2 || call[0] != "--context" || call[1] != seedContext {
+			t.Errorf("exec %d = %q, want it to start --context %s", i, call, seedContext)
+		}
+	}
+}
+
+// assertExecsRan fails unless each argv in must is one of the recorded execs,
+// after the --context and exec prefix.
+func assertExecsRan(t *testing.T, calls, must [][]string) {
+	t.Helper()
+	prefix := []string{"--context", seedContext, "exec", "-i", "-n", seedNamespace, seedPod, "--"}
+	for _, want := range must {
+		found := slices.ContainsFunc(calls, func(call []string) bool {
+			return len(call) >= len(prefix) && slices.Equal(call[:len(prefix)], prefix) && slices.Equal(call[len(prefix):], want)
+		})
+		if !found {
+			t.Errorf("no exec ran %q", want)
+		}
+	}
+}
+
+// TestTownStateSeedRefusesAMissingOrBadContext: an empty, a blank, a dash-led and a
+// spaced --context is refused by the flag path, and the engine refuses it before
+// the fake records any exec.
+func TestTownStateSeedRefusesAMissingOrBadContext(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	secrets := filepath.Join(t.TempDir(), "secrets.yaml")
+	writeProfileFile(t, secrets, secretsYAML)
+	cases := []struct {
+		name, context, want string
+	}{
+		{name: "an empty flag", context: "", want: "--context is required"},
+		{name: "a blank flag", context: "   ", want: "--context is required"},
+		{name: "a name that starts with a dash", context: "--kubeconfig=/dev/null", want: "is not a kubectl context name"},
+		{name: "a name with a space", context: "colima gt", want: "is not a kubectl context name"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := townStateSeedEnvFromFlags(seedFlagCommand(seedFlagValues{
+				town: town, namespace: seedNamespace, pod: seedPod, context: tc.context, secrets: secrets,
+			}, ""))
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("townStateSeedEnvFromFlags = %v, want an error naming %q", err, tc.want)
+			}
+			fv := &fakeVolume{dir: t.TempDir(), exists: true, free: 1 << 30}
+			kube := &fakeKubectl{fv: fv, town: town}
+			eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: tc.context, town: town, run: kube.run}
+			if err := eng.Run(seedClaim, townstate.ListArgv, nil, io.Discard); err == nil {
+				t.Fatal("the engine ran an exec for a context that is not a name")
+			}
+			if len(kube.calls) != 0 {
+				t.Errorf("the fake recorded %d execs for a refused context: %q", len(kube.calls), kube.calls)
+			}
+		})
+	}
+}
+
+// TestTownStateSeedContextFlagIsRequired: the command marks --context required, and
+// its help has the --context example and says profile and check take no flag.
+func TestTownStateSeedContextFlagIsRequired(t *testing.T) {
+	t.Parallel()
+	f := townStateSeedCmd.Flags().Lookup("context")
+	if f == nil {
+		t.Fatal("the seed command has no --context flag")
+	}
+	if got := f.Annotations[cobra.BashCompOneRequiredFlag]; !slices.Equal(got, []string{"true"}) {
+		t.Errorf("--context annotations = %q, want it marked required", got)
+	}
+	help := strings.Join(strings.Fields(townStateSeedCmd.Long), " ")
+	for _, want := range []string{"--context colima-gt-control", "The profile and check commands run no kubectl and take no --context flag."} {
+		if !strings.Contains(help, want) {
+			t.Errorf("help text does not contain %q", want)
+		}
+	}
+}
+
 // TestTownStateSeedEngineStopsAHungExec: an exec that outlives its bound is
 // stopped, and the error says the pod may still be running it.
 func TestTownStateSeedEngineStopsAHungExec(t *testing.T) {
@@ -1081,7 +1200,7 @@ func TestTownStateSeedEngineStopsAHungExec(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}
-	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: t.TempDir(), run: hang, timeout: time.Millisecond}
+	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext, town: t.TempDir(), run: hang, timeout: time.Millisecond}
 	err := eng.Run(seedClaim, townstate.ListArgv, nil, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "did not finish within") || !strings.Contains(err.Error(), "may still be running") {
 		t.Fatalf("Run = %v, want the hung exec named", err)
@@ -1092,7 +1211,7 @@ func TestTownStateSeedEngineStopsAHungExec(t *testing.T) {
 // look up or create the claim, and if it did the answer is an error, never a pass.
 func TestTownStateSeedEngineLeavesTheClaimToThePod(t *testing.T) {
 	t.Parallel()
-	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim}
+	eng := podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext}
 	if _, err := eng.HasVolume(seedClaim); err == nil {
 		t.Error("HasVolume answered for a claim the engine does not manage")
 	}
@@ -1376,7 +1495,7 @@ func TestTownStateSeedCopySecondsExcludesVerify(t *testing.T) {
 	clock := &manualClock{at: time.Date(2026, 11, 9, 6, 40, 0, 0, time.UTC)}
 	env.now = clock.now
 	execs := 0
-	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, town: town,
+	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext, town: town,
 		run: func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 			execs++
 			if execs == 1 {
