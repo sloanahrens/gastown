@@ -38,7 +38,7 @@ func InitDatabaseTarget(beadsDir string) (string, error) {
 // config.json it migrates from.
 func configuredDatabase(beadsDir string) string {
 	for _, name := range []string{agentconfig.BeadsMetadataFile, "config.json"} {
-		if db, present := agentconfig.BeadsFileDatabase(filepath.Join(beadsDir, name)); present {
+		if db, present, _ := agentconfig.BeadsFileDatabase(filepath.Join(beadsDir, name)); present {
 			return db
 		}
 	}

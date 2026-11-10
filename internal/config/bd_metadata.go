@@ -21,43 +21,29 @@ const BeadsMetadataFile = "metadata.json"
 // metadata.json, trimmed, or "" when the file is absent, does not parse, or
 // names none. It does not follow a redirect.
 func BeadsMetadataDatabase(beadsDir string) string {
-	db, _ := BeadsFileDatabase(filepath.Join(beadsDir, BeadsMetadataFile))
+	db, _, _ := BeadsFileDatabase(filepath.Join(beadsDir, BeadsMetadataFile))
 	return db
-}
-
-// BeadsFileDatabaseErr is the trimmed dolt_database of the bd config file at
-// path. A file that does not exist is fs.ErrNotExist. A file that cannot be
-// read or does not parse is an error naming the path: it names no database,
-// but it is not absent, so a caller must not read it as absence.
-func BeadsFileDatabaseErr(path string) (string, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // G304: bd config file of a beads directory gastown chose
-	if err != nil {
-		return "", err
-	}
-	var meta struct {
-		DoltDatabase string `json:"dolt_database"`
-	}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", fmt.Errorf("parse %s: %w", path, err)
-	}
-	return strings.TrimSpace(meta.DoltDatabase), nil
 }
 
 // BeadsFileDatabase is the trimmed dolt_database of a bd config file
 // (metadata.json, or the legacy config.json bd migrates from); present
 // reports whether the file exists. A file that does not parse names none.
-func BeadsFileDatabase(path string) (db string, present bool) {
+// err is nil, or the read failure, or the parse failure naming the path: a
+// file that exists but cannot be read or parsed is not absent, and a caller
+// that must not read it as absence checks err, not present. A missing file is
+// an error wrapping fs.ErrNotExist.
+func BeadsFileDatabase(path string) (db string, present bool, err error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: bd config file of a beads directory gastown chose
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	var meta struct {
 		DoltDatabase string `json:"dolt_database"`
 	}
-	if json.Unmarshal(data, &meta) != nil {
-		return "", true
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", true, fmt.Errorf("parse %s: %w", path, err)
 	}
-	return strings.TrimSpace(meta.DoltDatabase), true
+	return strings.TrimSpace(meta.DoltDatabase), true, nil
 }
 
 // RigBeadsDirs are the directories, relative to the town root, where a rig's

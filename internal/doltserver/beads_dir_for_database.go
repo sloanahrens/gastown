@@ -42,7 +42,7 @@ func BeadsDirForDatabase(townRoot, dbName string, extraRoots ...string) (string,
 			return dir, nil
 		}
 		if db == "" && unreadable == nil {
-			_, err := configpkg.BeadsFileDatabaseErr(filepath.Join(dir, configpkg.BeadsMetadataFile))
+			_, _, err := configpkg.BeadsFileDatabase(filepath.Join(dir, configpkg.BeadsMetadataFile))
 			if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				unreadable = err
 			}
