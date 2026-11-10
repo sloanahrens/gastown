@@ -49,6 +49,9 @@ var seedSettingsArgv = []string{"tar", "-x", "-f", "-", "-C", townstate.VolumeMo
 var (
 	seedNamespacePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 	seedPodPattern       = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$`)
+	// seedContextPattern is the shape a kubectl context name takes here. The first
+	// character is not a dash, so the name never reads as a kubectl flag.
+	seedContextPattern = regexp.MustCompile(`^[A-Za-z0-9._:@/][A-Za-z0-9._:@/-]*$`)
 )
 
 var townStateSeedCmd = &cobra.Command{
@@ -63,6 +66,12 @@ import" in the pod through kubectl exec. The secret-named files are left out of
 the stream and of the listing. The host tree is only read. The claim is mounted
 in the pod at the --town path, so the pod's import and listing name the same
 path the host does.
+
+--context names the kubectl context every exec runs in, and it is required: the
+shell's default context is not used, since it may name a cluster that is not
+running. The stream, the listing, the hash reads and the rehearsal's settings and
+profile steps all go through the same exec, so each of them names the context.
+The profile and check commands run no kubectl and take no --context flag.
 
 With --rehearsal the command also copies the town's settings file into the claim
 in its own step after the daemon-owned stream. The split names that file shared,
@@ -90,7 +99,7 @@ and not to be used.
 
 Examples:
   gt town state seed --town /Users/sloan/gt --namespace rehearsal --pod seed-helper \
-    --secrets-manifest deploy/daemon/secrets.yaml --rehearsal`,
+    --context colima-gt-control --secrets-manifest deploy/daemon/secrets.yaml --rehearsal`,
 	Args: cobra.NoArgs,
 	RunE: runTownStateSeed,
 }
@@ -100,6 +109,7 @@ func init() {
 	townStateSeedCmd.Flags().String("town", "", "the town root to copy from, an absolute path the pod mounts the claim at (required)")
 	townStateSeedCmd.Flags().String("namespace", "", "the namespace of the seed helper Pod (required)")
 	townStateSeedCmd.Flags().String("pod", "", "the seed helper Pod that mounts the town-state claim (required)")
+	townStateSeedCmd.Flags().String("context", "", "the kubectl context every exec runs in; the shell's default context is not used (required)")
 	townStateSeedCmd.Flags().Bool("rehearsal", false, "seed a rehearsal: refuse namespace gt, and profile the seeded settings in the pod")
 	townStateSeedCmd.Flags().String("since", "", "keep only regular files modified after this RFC 3339 time (optional)")
 	townStateSeedCmd.Flags().Bool("allow-no-rigs", false, "copy a town with no registered rigs (every rig-scoped row would be missing)")
@@ -107,6 +117,7 @@ func init() {
 	_ = townStateSeedCmd.MarkFlagRequired("town")
 	_ = townStateSeedCmd.MarkFlagRequired("namespace")
 	_ = townStateSeedCmd.MarkFlagRequired("pod")
+	_ = townStateSeedCmd.MarkFlagRequired("context")
 	_ = townStateSeedCmd.MarkFlagRequired("secrets-manifest")
 }
 
@@ -120,6 +131,9 @@ type podEngine struct {
 	namespace string
 	pod       string
 	claim     string
+	// context is the kubectl context each exec runs in. It is never the shell's
+	// default: Run refuses an engine whose context does not pass validSeedContext.
+	context string
 	// town is the path the pod mounts the claim at. Each argv entry that is
 	// townstate.VolumeMount names it.
 	town string
@@ -131,13 +145,16 @@ type podEngine struct {
 
 // Run runs argv in the pod with stdin streamed in and stdout streamed out. A
 // volume other than the claim is refused, so the engine never reaches a claim the
-// pod does not mount. The pod's stderr goes to the operator's terminal, never into
-// an error.
+// pod does not mount, and a context that is not a usable name is refused before
+// any exec. The pod's stderr goes to the operator's terminal, never into an error.
 func (e podEngine) Run(volume string, argv []string, stdin io.Reader, stdout io.Writer) error {
 	if volume != e.claim {
 		return fmt.Errorf("the seed helper Pod mounts claim %s, not volume %s", e.claim, volume)
 	}
-	args := []string{"exec", "-i", "-n", e.namespace, e.pod, "--"}
+	if err := validSeedContext(e.context); err != nil {
+		return err
+	}
+	args := []string{"--context", e.context, "exec", "-i", "-n", e.namespace, e.pod, "--"}
 	for _, a := range argv {
 		args = append(args, e.podPath(a))
 	}
@@ -235,8 +252,8 @@ func runTownStateSeed(cmd *cobra.Command, _ []string) error {
 
 // seedFlags is the seed command's flag values, read once.
 type seedFlags struct {
-	town, namespace, pod, since, secretsPath string
-	rehearsal, allowNoRigs                   bool
+	town, namespace, pod, context, since, secretsPath string
+	rehearsal, allowNoRigs                            bool
 }
 
 // readSeedFlags reads every flag the seed command defines. A flag the command
@@ -250,6 +267,7 @@ func readSeedFlags(cmd *cobra.Command) (seedFlags, error) {
 		{"town", &f.town},
 		{"namespace", &f.namespace},
 		{"pod", &f.pod},
+		{"context", &f.context},
 		{"since", &f.since},
 		{"secrets-manifest", &f.secretsPath},
 	}
@@ -288,6 +306,9 @@ func townStateSeedEnvFromFlags(cmd *cobra.Command) (townStateSeedEnv, error) {
 	if err := validSeedTarget(f.namespace, f.pod, f.town); err != nil {
 		return townStateSeedEnv{}, err
 	}
+	if err := validSeedContext(f.context); err != nil {
+		return townStateSeedEnv{}, err
+	}
 	sinceAt, err := parseSeedSince(f.since)
 	if err != nil {
 		return townStateSeedEnv{}, err
@@ -305,7 +326,7 @@ func townStateSeedEnvFromFlags(cmd *cobra.Command) (townStateSeedEnv, error) {
 		exclude:         exclude,
 		patrolWritePath: config.PatrolWritePath,
 		readHost:        os.ReadFile,
-		engine:          podEngine{namespace: f.namespace, pod: f.pod, claim: seedClaim, town: f.town, run: execKubectl},
+		engine:          podEngine{namespace: f.namespace, pod: f.pod, claim: seedClaim, context: f.context, town: f.town, run: execKubectl},
 		probes:          productionMigrateProbes(),
 		now:             time.Now,
 		out:             cmd.OutOrStdout(),
@@ -346,6 +367,20 @@ func validSeedTarget(namespace, pod, town string) error {
 	}
 	if !filepath.IsAbs(town) {
 		return fmt.Errorf("--town %q is not an absolute path: the pod mounts the claim at that same path", town)
+	}
+	return nil
+}
+
+// validSeedContext refuses a kubectl context that is empty, blank, or not a plain
+// name: letters, digits and . _ - : @ /, with no leading dash. The shell's default
+// context is never used in its place: a missing context would send every exec to
+// whatever the kubeconfig's current context is.
+func validSeedContext(name string) error {
+	if strings.TrimSpace(name) == "" {
+		return errors.New("--context is required: it names the cluster the seed writes to, and the shell's default context is not used")
+	}
+	if !seedContextPattern.MatchString(name) {
+		return fmt.Errorf("--context %q is not a kubectl context name (letters, digits and . _ - : @ /, no leading dash); the shell's default context is not used", name)
 	}
 	return nil
 }
