@@ -2,11 +2,9 @@ package ci
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,8 +15,8 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/steveyegge/gastown/internal/ci/preflight"
+	"github.com/steveyegge/gastown/internal/cmd"
 	"github.com/steveyegge/gastown/internal/imagevalues"
-	"github.com/steveyegge/gastown/internal/land"
 )
 
 // workflowPath is the images workflow text, relative to this package: the file
@@ -691,7 +689,10 @@ func TestImagesWorkflowNamesTheSharedImageConstants(t *testing.T) {
 	t.Parallel()
 	wf := loadWorkflow(t)
 	env := object(t, wf["env"], "env")
-	reg := townImagesRegistry(t)
+	reg, err := cmd.TownImageRegistry(filepath.FromSlash("../../deploy/ci/testdata/images-town"))
+	if err != nil {
+		t.Fatalf("townImageRegistry: %v", err)
+	}
 	for _, want := range []struct{ key, value string }{
 		{"DAEMON_IMAGE", imagevalues.DaemonImage},
 		{"POLECAT_IMAGE", imagevalues.PolecatImage},
@@ -702,49 +703,6 @@ func TestImagesWorkflowNamesTheSharedImageConstants(t *testing.T) {
 			t.Errorf("the workflow's %s is %q, but the town's rig settings name %q", want.key, got, want.value)
 		}
 	}
-}
-
-// townImagesRegistry is the registry the fixture town's rig settings name: the
-// source gt update images reads. The fixture is the same one
-// TestUpdateImagesWorkflowNamesTheTownsRegistry resolves through the command in
-// internal/cmd, so the two tests hold the workflow to the registry the command
-// actually reads.
-func townImagesRegistry(t *testing.T) imagevalues.Registry {
-	t.Helper()
-	const path = "../../deploy/ci/testdata/images-town/gastown/config.json"
-	raw, err := os.ReadFile(filepath.FromSlash(path))
-	if err != nil {
-		t.Fatalf("reading %s: %v", path, err)
-	}
-	var rigConfig struct {
-		MergeQueue struct {
-			Forgejo struct {
-				RemoteURL     string `json:"remote_url"`
-				RegistryOwner string `json:"registry_owner"`
-			} `json:"forgejo"`
-		} `json:"merge_queue"`
-	}
-	if err := json.Unmarshal(raw, &rigConfig); err != nil {
-		t.Fatalf("%s is not valid JSON: %v", path, err)
-	}
-	remote := rigConfig.MergeQueue.Forgejo.RemoteURL
-	if remote == "" {
-		t.Fatalf("%s names no merge_queue.forgejo.remote_url", path)
-	}
-	owner, _, err := land.RepoFromRemoteURL(remote)
-	if err != nil {
-		t.Fatalf("reading the owner from %q: %v", remote, err)
-	}
-	u, err := url.Parse(remote)
-	if err != nil || u.Host == "" {
-		t.Fatalf("the town's rig settings name no registry host: %q", remote)
-	}
-	// The rig's registry_owner, when set, replaces the remote's owner: the registry
-	// bot can write only its own namespace (gt update images reads the same rule).
-	if named := strings.TrimSpace(rigConfig.MergeQueue.Forgejo.RegistryOwner); named != "" {
-		owner = named
-	}
-	return imagevalues.Registry{Scheme: u.Scheme, Host: u.Host, Owner: owner}
 }
 
 // TestImagesWorkflowRunsOneJobOnCIBase holds the runner rule: one job named

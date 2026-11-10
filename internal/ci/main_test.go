@@ -4,12 +4,13 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
-// TestMain holds the unit tier's run checks, as TestUnitTierMain requires of
-// every package whose tests do not run under the hermetic harness: this package
-// reads only the workflow text the repository carries and writes nothing.
+// TestMain runs this package's tests under the hermetic harness (gt-lwi): the
+// images workflow test links internal/cmd, whose dependency closure reaches the
+// beads SDK and the Dolt server manager, so the package adopts the harness
+// rather than the unit tier.
 func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
+	os.Exit(testutil.HermeticMain(m))
 }
