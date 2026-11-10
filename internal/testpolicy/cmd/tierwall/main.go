@@ -19,6 +19,13 @@
 // package can be explained test by test from the gate's log alone (gt-vijwck).
 // With -jsonl the same tests are appended to the series as timings lines.
 //
+// -slow-tests also prints, after that list, a phases line for each of the three
+// slowest packages: `tierwall: phases <package> serial <a>s parallel <b>s`. go
+// test runs every top-level test that does not call t.Parallel one at a time,
+// and releases the paused parallel tests only after them. So serial is the sum
+// of the elapsed of the top-level tests that never reported pause, and parallel
+// is the package wall minus that sum, floored at 0 (gt-0vbi8h).
+//
 // -jsonl <path> -run <id> also appends one line per package to a series, so
 // "where does the gate's time go" can be read over weeks rather than from one
 // run's report (gt-u0up0). An absolute path is used as given; a relative one
@@ -198,6 +205,12 @@ type report struct {
 	results map[string]string   // each package's verdict: pass, fail or skip
 	cached  map[string]bool     // packages go test served from its result cache
 
+	// paused marks the tests that reported pause, which go test emits when one
+	// calls t.Parallel. serial sums, per package, the elapsed of its top-level
+	// tests that never paused: the phases line reads it.
+	paused map[string]bool
+	serial map[string]time.Duration
+
 	// listSlow is set by -slow-tests; slow then holds the tests of SlowTest or
 	// longer that the list and the series name.
 	listSlow bool
@@ -213,6 +226,8 @@ func newReport(out io.Writer) *report {
 		elapsed: map[string]float64{},
 		results: map[string]string{},
 		cached:  map[string]bool{},
+		paused:  map[string]bool{},
+		serial:  map[string]time.Duration{},
 	}
 }
 
@@ -273,18 +288,28 @@ func (r *report) handle(e event) {
 			key := testKey(e.Package, e.Test)
 			r.tests[key] = append(r.tests[key], e.Output)
 		}
+	case "pause":
+		if e.Test != "" {
+			r.paused[testKey(e.Package, e.Test)] = true
+		}
 	case "pass", "fail", "skip":
 		r.verdict(e)
 	}
 }
 
 // verdict closes the bucket that a package's or a test's event ends, printing
-// it when the verdict is a failure.
+// it when the verdict is a failure. A top-level test that never paused ran in
+// go test's serial phase, so its elapsed joins the package's serial sum; a
+// subtest's time sits inside its parent's and is not counted again.
 func (r *report) verdict(e event) {
 	if e.Test != "" {
 		key := testKey(e.Package, e.Test)
 		lines := r.tests[key]
 		delete(r.tests, key)
+		if !r.paused[key] && !strings.Contains(e.Test, "/") {
+			r.serial[e.Package] += seconds(e.Elapsed)
+		}
+		delete(r.paused, key)
 		if e.Action == "fail" {
 			r.failed = true
 			r.printLines(lines)
@@ -332,6 +357,7 @@ func (r *report) print(bar time.Duration) error {
 		for _, tt := range slowest(r.slow) {
 			r.write(fmt.Sprintf("tierwall:   %s %s %s\n", tt.Package, tt.Test, secs(seconds(tt.Elapsed))))
 		}
+		r.phases(pkgs)
 	}
 	verdict := "OK"
 	if r.tier() > bar {
@@ -339,6 +365,28 @@ func (r *report) print(bar time.Duration) error {
 	}
 	r.write(fmt.Sprintf("tierwall: tier %s bar %s %s\n", secs(r.tier()), secs(bar), verdict))
 	return r.err
+}
+
+// phasesShown is how many of the slowest packages -slow-tests splits into a
+// serial and a parallel phase.
+const phasesShown = 3
+
+// phases writes, for the slowest packages in pkgs (already slowest first), the
+// serial and parallel phases of each package's wall. Parallel is the wall less
+// the serial sum, floored at 0: a serial sum that outruns the wall reads as no
+// parallel phase, not a negative one.
+func (r *report) phases(pkgs []string) {
+	for i, pkg := range pkgs {
+		if i == phasesShown {
+			break
+		}
+		serial := r.serial[pkg]
+		parallel := seconds(r.elapsed[pkg]) - serial
+		if parallel < 0 {
+			parallel = 0
+		}
+		r.write(fmt.Sprintf("tierwall: phases %s serial %s parallel %s\n", pkg, secs(serial), secs(parallel)))
+	}
 }
 
 // slowest returns the tests slowest first, ties by package and then test name,
