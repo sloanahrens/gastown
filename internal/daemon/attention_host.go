@@ -110,6 +110,8 @@ type hostDisk struct {
 // errHostNodeNotConfigured says the town runs no control cluster whose node
 // disk could be read, so there is nothing to watch. It is not a probe failure:
 // a host with no control cluster is not an outage, and the rules raise nothing.
+// Container mode runs in the control cluster, so there the same answer is a
+// failed read (fileHostProbes.NodeDisk).
 var errHostNodeNotConfigured = errors.New("the town runs no control cluster, so there is no control node disk to read")
 
 // hostProbes are the host reads the collectors make. attentionHostProbes
@@ -121,7 +123,8 @@ type hostProbes interface {
 	// NodeDisk is the control node's data disk, read from the image
 	// filesystem the node's kubelet reports (parseNodeStatsImageFs). A nil
 	// error is a reading; errHostNodeNotConfigured says the town runs no
-	// control cluster to read; any other error is a read that failed.
+	// control cluster to read, and is only returned outside container mode;
+	// any other error is a read that failed.
 	NodeDisk(ctx context.Context) (hostNodeDisk, error)
 	// MemFreePct is the host's free memory as a percentage of total.
 	MemFreePct(ctx context.Context) (float64, error)
@@ -446,7 +449,8 @@ func (s *attentionSources) collectHostDisk(ctx context.Context) ([]attention.Ite
 // town root's disk rule. The node's image filesystem holds the container
 // runtime's store and the local-path claims, so a full one gets the node's pods
 // evicted (gt-x1po96). A town with no control cluster raises nothing; a read
-// that failed is an info item.
+// that failed, including a container-mode town with no kubernetes runner, is an
+// info item.
 func (s *attentionSources) collectHostNodeDisk(ctx context.Context) ([]attention.Item, error) {
 	n, err := s.host.NodeDisk(ctx)
 	if errors.Is(err, errHostNodeNotConfigured) {

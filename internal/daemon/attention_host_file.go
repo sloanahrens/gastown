@@ -85,12 +85,19 @@ func (p fileHostProbes) Disk() (hostDisk, error) {
 }
 
 // NodeDisk reads the control node's disk through the control cluster. A probe
-// built with no node read is a wiring error, never a quiet disk.
+// built with no node read is a wiring error, never a quiet disk. Container mode
+// runs in the control cluster, so a town with no kubernetes runner to read it
+// through is a failed read here, not the not-configured sentinel that raises
+// nothing (gt-x1po96).
 func (p fileHostProbes) NodeDisk(ctx context.Context) (hostNodeDisk, error) {
 	if p.nodeDisk == nil {
 		return hostNodeDisk{}, errors.New("the file host probes were built with no control node read")
 	}
-	return p.nodeDisk(ctx)
+	n, err := p.nodeDisk(ctx)
+	if errors.Is(err, errHostNodeNotConfigured) {
+		return hostNodeDisk{}, errors.New("container mode reads the control node's disk, but the tier sweep runner is not a kubernetes runner, so there is no control cluster to read it through")
+	}
+	return n, err
 }
 
 func (p fileHostProbes) MemFreePct(context.Context) (float64, error) {

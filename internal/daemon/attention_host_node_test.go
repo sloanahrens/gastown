@@ -413,6 +413,49 @@ func TestFileHostProbesNodeDiskUsesItsReader(t *testing.T) {
 	}
 }
 
+// In container mode the daemon runs in the control cluster, so a town whose
+// tier sweep runner names no kubernetes cluster cannot read its node disk. That
+// is a failed probe, never the not-configured sentinel that raises nothing.
+func TestFileHostProbesNodeDiskNoRunnerIsAFailure(t *testing.T) {
+	t.Parallel()
+	p := newFileHostProbes(t.TempDir(), nil, func(context.Context) (hostNodeDisk, error) {
+		return hostNodeDisk{}, errHostNodeNotConfigured
+	})
+	_, err := p.NodeDisk(context.Background())
+	if err == nil {
+		t.Fatalf("NodeDisk = nil error, want a failed read")
+	}
+	if errors.Is(err, errHostNodeNotConfigured) {
+		t.Errorf("NodeDisk err = %v, want a read failure and not the not-configured sentinel", err)
+	}
+}
+
+// Container mode with no kubernetes runner reads as an info item from the
+// production wiring, so a silent probe cannot pass as a healthy disk. The
+// daemon makes no kubectl call: the runner names no context to read through.
+func TestCollectNodeDiskContainerModeNoRunnerIsAnInfoItem(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	cli := newFakeCLIFor(func(cliCall) cliReply { return cliReply{} })
+	d := nodeDiskDaemon(t, cli, nil)
+	inContainer := func(key string) string {
+		if key == agentconfig.ContainerModeEnv {
+			return agentconfig.SupervisorContainer
+		}
+		return ""
+	}
+	f.src.host = attentionHostProbes(d.config.TownRoot, inContainer, func() (string, error) { return "", nil }, d.controlNodeDisk)
+
+	items := f.collect(t, f.src.collectHostNodeDisk)
+	if _, ok := findItem(items, hostProbeFailedPrefix+hostProbeNodeDisk); !ok {
+		t.Fatalf("items = %+v, want a failed control node disk probe item", items)
+	}
+	if calls := cli.recorded(); len(calls) != 0 {
+		t.Errorf("kubectl ran %d times, want none", len(calls))
+	}
+}
+
 // findItem is the item with key among items, if there is one.
 func findItem(items []attention.Item, key string) (attention.Item, bool) {
 	for _, it := range items {
