@@ -105,7 +105,7 @@ func newForwardPlistCmd(home func() (string, error)) *cobra.Command {
 --service to 127.0.0.1:--port, restarting it if it exits. The job logs under
 ~/gt/daemon.
 
-The command only prints. The plist and the cmux URL go to stdout and stderr;
+The command only prints. The plist and the dashboard URL go to stdout and stderr;
 nothing is loaded into launchd and no cluster is contacted.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -119,7 +119,7 @@ nothing is loaded into launchd and no cluster is contacted.`,
 			if err = writeForwardPlist(cmd.OutOrStdout(), dir, f); err != nil {
 				return err
 			}
-			if _, err = fmt.Fprintf(cmd.ErrOrStderr(), "cmux tab URL: http://%s:%d/\n", f.bind, f.port); err != nil {
+			if _, err = fmt.Fprintf(cmd.ErrOrStderr(), "dashboard URL: http://%s:%d/\n", f.bind, f.port); err != nil {
 				return fmt.Errorf("writing the URL: %w", err)
 			}
 			return nil

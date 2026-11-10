@@ -149,7 +149,7 @@ func TestTownForwardPlistGolden(t *testing.T) {
 	if got := plistProgramArguments(t, out.String()); !slices.Equal(got, wantArgs) {
 		t.Errorf("program arguments = %q, want %q", got, wantArgs)
 	}
-	const wantStderr = "cmux tab URL: http://127.0.0.1:8787/\n"
+	const wantStderr = "dashboard URL: http://127.0.0.1:8787/\n"
 	if stderr != wantStderr {
 		t.Errorf("stderr = %q, want %q", stderr, wantStderr)
 	}
