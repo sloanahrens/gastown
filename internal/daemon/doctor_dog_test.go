@@ -364,6 +364,37 @@ func TestDoctorDogFindings_ReapListingErrorIsANoteNotAFinding(t *testing.T) {
 	}
 }
 
+// TestDoctorDogReapEngineAbsentIsOneSkipNote: with the engine socket absent the
+// reap step is skipped with one note and the cycle has no finding; an engine
+// error that is not the engine's absence is a finding (gt-1saf37).
+func TestDoctorDogReapEngineAbsentIsOneSkipNote(t *testing.T) {
+	t.Parallel()
+	for _, absent := range []string{
+		`listing gate containers: exec: "docker": executable file not found in $PATH`,
+		"listing gate containers: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+		"listing gate containers: dial unix /var/run/docker.sock: connect: no such file or directory",
+	} {
+		p := healthyDoctorProbes()
+		p.reap = func() (slot.ReapReport, error) { return slot.ReapReport{}, errors.New(absent) }
+		r := doctorDogFindings(p, defaultDoctorLimits())
+		if len(r.findings) != 0 {
+			t.Errorf("%q: findings = %v, want none", absent, r.findings)
+		}
+		if len(r.notes) != 1 || !strings.Contains(r.notes[0], "slot reap skipped") {
+			t.Errorf("%q: notes = %v, want one skip note", absent, r.notes)
+		}
+	}
+
+	p := healthyDoctorProbes()
+	p.reap = func() (slot.ReapReport, error) {
+		return slot.ReapReport{}, errors.New("listing gate containers: permission denied while trying to connect to the Docker daemon API")
+	}
+	r := doctorDogFindings(p, defaultDoctorLimits())
+	if len(r.findings) != 1 || !strings.Contains(r.findings[0], "slot reap failed") {
+		t.Errorf("another engine error: findings = %v, want one finding", r.findings)
+	}
+}
+
 // A backup probe that errors is a finding, as every other failed probe is: an
 // unreadable backup root must not read as a database with nothing to judge.
 func TestDoctorDogFindings_BackupProbeErrorIsFinding(t *testing.T) {

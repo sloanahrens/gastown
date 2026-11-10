@@ -4761,19 +4761,21 @@ func TestDefaultConfigRejectsUnknownLogLevel(t *testing.T) {
 func TestBuildDoltSQLCmd_Local(t *testing.T) {
 	t.Parallel()
 	h := newFakeHost().host()
+	// The data directory exists, so it is the Dir; a missing one falls back
+	// (TestConnectionCountClientDir, gt-1saf37).
 	config := &Config{
 		Host:    "",
 		Port:    3307,
 		User:    "root",
-		DataDir: "/tmp/dolt-data",
+		DataDir: t.TempDir(),
 	}
 
 	ctx := t.Context()
 	cmd := h.buildDoltSQLCmd(ctx, config, "-q", "SELECT 1")
 
 	// Should set Dir for local
-	if cmd.Dir != "/tmp/dolt-data" {
-		t.Errorf("cmd.Dir = %q, want %q", cmd.Dir, "/tmp/dolt-data")
+	if cmd.Dir != config.DataDir {
+		t.Errorf("cmd.Dir = %q, want %q", cmd.Dir, config.DataDir)
 	}
 
 	// Should force a TCP client connection even for local servers.
@@ -4807,13 +4809,13 @@ func TestBuildDoltSQLCmd_Remote(t *testing.T) {
 		Port:     3307,
 		User:     "root",
 		Password: "secret",
-		DataDir:  "/tmp/dolt-data",
+		DataDir:  t.TempDir(),
 	}
 
 	ctx := t.Context()
 	cmd := h.buildDoltSQLCmd(ctx, config, "-q", "SELECT 1")
 
-	// Dir is always set to DataDir — even for remote connections (GH#2537)
+	// Dir is DataDir when it exists, even for remote connections (GH#2537)
 	// to prevent dolt from auto-creating .doltcfg/privileges.db in $CWD.
 	if cmd.Dir != config.DataDir {
 		t.Errorf("cmd.Dir = %q, want %q (DataDir set for remote per GH#2537)", cmd.Dir, config.DataDir)
@@ -6439,7 +6441,7 @@ func TestBuildServerSQLCmdPasswordNotInArgv(t *testing.T) {
 	t.Parallel()
 
 	for _, password := range []string{"secret", ""} {
-		config := &Config{Host: "127.0.0.1", Port: 3307, User: "root", Password: password, DataDir: "/tmp/dolt-data"}
+		config := &Config{TownRoot: t.TempDir(), Host: "127.0.0.1", Port: 3307, User: "root", Password: password, DataDir: "/tmp/dolt-data"}
 		cmd := buildServerSQLCmd(context.Background(), config, "-q", "SELECT 1")
 
 		for _, arg := range cmd.Args {

@@ -534,7 +534,7 @@ func (h *host) buildDoltSQLCmd(ctx context.Context, config *Config, args ...stri
 	// GH#2537: Always set cmd.Dir to prevent dolt from creating stray
 	// .doltcfg/privileges.db files in the caller's CWD. Even TCP client
 	// connections can trigger .doltcfg creation if CWD is uncontrolled.
-	cmd.Dir = config.DataDir
+	setClientDir(cmd, config)
 	setProcessGroup(cmd)
 
 	// Always set DOLT_CLI_PASSWORD to suppress interactive prompts.
@@ -4988,7 +4988,11 @@ func (h *host) GetActiveConnectionCount(townRoot string) (int, error) {
 	// GH#2537: Set cmd.Dir to the server's data directory to prevent dolt from
 	// creating stray .doltcfg/privileges.db files in the caller's CWD. Even in
 	// TCP client mode, dolt may auto-create .doltcfg/ in the working directory.
-	cmd.Dir = config.DataDir
+	dir, err := clientWorkDir(config)
+	if err != nil {
+		return 0, err
+	}
+	cmd.Dir = dir
 	// Always set DOLT_CLI_PASSWORD to prevent interactive password prompt.
 	// When empty, dolt connects without a password (which is the default for local servers).
 	cmd.Env = append(h.environ(), "DOLT_CLI_PASSWORD="+config.Password)
@@ -5563,6 +5567,40 @@ func (h *host) serverExecSQL(townRoot, query string) error {
 	return nil
 }
 
+// clientWorkDir is the working directory a dolt client command runs in: the
+// server's data directory when it exists on this machine, else a directory that
+// does, under the town root. In a pod the Dolt server is remote and the town has
+// no data directory; a missing Dir would fail the exec with "fork/exec dolt: no
+// such file or directory" although the binary is fine (gt-1saf37). The fallback
+// is private (0700) and empty, so dolt's stray .doltcfg files still land
+// somewhere harmless (GH#2537). A town root that is unset falls back to the
+// system temporary directory.
+func clientWorkDir(config *Config) (string, error) {
+	if info, err := os.Stat(config.DataDir); err == nil && info.IsDir() {
+		return config.DataDir, nil
+	}
+	if config.TownRoot == "" {
+		return os.TempDir(), nil
+	}
+	dir := filepath.Join(config.TownRoot, ".runtime", "dolt-client")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating the Dolt client working directory %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// setClientDir sets cmd's working directory from clientWorkDir. A directory that
+// cannot be made is cmd.Err, which Start returns before anything runs, so the
+// caller sees that error and not a fork/exec failure.
+func setClientDir(cmd *exec.Cmd, config *Config) {
+	dir, err := clientWorkDir(config)
+	if err != nil {
+		cmd.Err = err
+		return
+	}
+	cmd.Dir = dir
+}
+
 // buildServerSQLCmd constructs a dolt sql command that always connects to the
 // running sql-server via explicit --host/--port flags. Unlike buildDoltSQLCmd,
 // which omits connection flags for local servers (relying on dolt auto-detection),
@@ -5586,7 +5624,7 @@ func buildServerSQLCmd(ctx context.Context, config *Config, args ...string) *exe
 	fullArgs = append(fullArgs, args...)
 
 	cmd := exec.CommandContext(ctx, "dolt", fullArgs...)
-	cmd.Dir = config.DataDir
+	setClientDir(cmd, config)
 	setProcessGroup(cmd)
 
 	cmd.Env = serverSQLEnv(os.Environ(), config.Password)
