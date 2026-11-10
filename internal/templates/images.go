@@ -46,15 +46,17 @@ const (
 
 	// DindImage is the Docker engine the daemon's tier sweep drives, pinned by
 	// digest rather than tag so a restart runs the engine the ladder proved.
-	// It is the same digest the live Forgejo project's engine runs, so the
-	// sweep meets the engine its CI jobs already use.
-	DindImage = "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"
+	// The registry stopped serving the digest it first named, so it was moved
+	// to the dind tag's index digest on 2026-11-10 (gt-3we5ru), the same one
+	// SweepDindImage names; the rehearsal proves the engine before a cut-over.
+	DindImage = "data.forgejo.org/oci/docker@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121"
 
 	// SweepDindImage is the Docker engine the sweep runner's sidecar runs, and the
 	// image the polecat image's docker client is copied from (gt-2u79h). It is
 	// pinned by the digest of the dind tag's image index, so the client and the
-	// engine are one build. DindImage stays the daemon's own engine. Moving this
-	// pin means reading the tag's index digest from the registry again.
+	// engine are one build. DindImage is the daemon's own engine and now names
+	// the same digest. Moving this pin means reading the tag's index digest
+	// from the registry again.
 	SweepDindImage = "data.forgejo.org/oci/docker@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121"
 
 	// DoltServerImage is the Dolt SQL server the scratch project runs, at the

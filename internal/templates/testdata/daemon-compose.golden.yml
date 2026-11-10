@@ -24,7 +24,7 @@ services:
       - default
       - sweep
   sweep-dind:
-    image: "data.forgejo.org/oci/docker@sha256:7dcdfc4a20246236f558175182ccace1eb15a41bd3eb119dd2284f393498b7c1"
+    image: "data.forgejo.org/oci/docker@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121"
     restart: unless-stopped
     privileged: true
     command: ["--tls=false"]
