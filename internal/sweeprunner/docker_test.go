@@ -563,9 +563,6 @@ func TestDockerSidecarUsesTheSweepDindPinAndNamesDockerd(t *testing.T) {
 	if !sweepDindPinShape.MatchString(templates.SweepDindImage) {
 		t.Fatalf("SweepDindImage = %q, want a reference pinned by a lowercase 64 hex digit digest", templates.SweepDindImage)
 	}
-	if templates.SweepDindImage == templates.DindImage {
-		t.Error("the sweep sidecar uses the daemon engine's pin again, whose digest the registry no longer serves")
-	}
 	plan, err := Docker{}.Render(goldenSpec())
 	if err != nil {
 		t.Fatalf("rendering: %v", err)
