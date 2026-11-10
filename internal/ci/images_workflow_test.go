@@ -308,6 +308,44 @@ func TestImagesWorkflowBuildsBothImagesAtOneCommit(t *testing.T) {
 		}
 	})
 
+	t.Run("mango is built into the daemon context and stamped with its pin", func(t *testing.T) {
+		t.Parallel()
+		// The Dockerfile's COPY of mango/mango and mango/mango.sha fails on a
+		// context-only stage, which leaves mango out (gt-t2jlo9). The step
+		// builds mango with a plain docker build and exports it with --output,
+		// because a bind-mounted docker run cannot see the runner's paths on an
+		// engine that runs beside the job; the Dockerfile's commands are held
+		// equal to the local build's by TestMangoDockerfile in daemonimage.
+		at := named(steps, "build mango for the daemon image")
+		if at < 0 {
+			t.Fatal("no step is named: build mango for the daemon image")
+		}
+		if stage := named(steps, "stage the daemon image's build context"); stage < 0 || at < stage {
+			t.Errorf("the mango build is step %d, before the context stage (step %d) that names DAEMON_CONTEXT", at, stage)
+		}
+		if build := named(steps, "build the daemon image"); build < 0 || at > build {
+			t.Errorf("the mango build is step %d, after the daemon image build (step %d) that copies it", at, build)
+		}
+		run := steps[at].run
+		for _, want := range []string{
+			`docker build`,
+			`--platform linux/arm64`,
+			`-f "$GITHUB_WORKSPACE/deploy/daemon/mango.Dockerfile"`,
+			`--output "type=local,dest=$DAEMON_CONTEXT/mango"`,
+			`"$MANGO_SRC"`,
+			`printf '%s\n' "$MANGO_COMMIT" > "$DAEMON_CONTEXT/mango/mango.sha"`,
+		} {
+			if !strings.Contains(run, want) {
+				t.Errorf("the mango build does not contain %s", want)
+			}
+		}
+		for _, banned := range []string{"docker run", " -v ", "--volume"} {
+			if strings.Contains(run, banned) {
+				t.Errorf("the mango build uses %q: a bind mount of a runner path does not reach a docker engine beside the job", banned)
+			}
+		}
+	})
+
 	t.Run("the polecat context is built at the one commit", func(t *testing.T) {
 		t.Parallel()
 		at := containing(steps, "./internal/polecat/imagectx/cmd/build")

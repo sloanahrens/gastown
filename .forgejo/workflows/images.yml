@@ -140,6 +140,20 @@ jobs:
           # copies the file the Dockerfile's COPY reads from the checkout.
           cp "$GITHUB_WORKSPACE/deploy/daemon/ssh_known_hosts" "$ctx/ssh_known_hosts"
           echo "DAEMON_CONTEXT=$ctx" >> "$GITHUB_ENV"
+      - name: build mango for the daemon image
+        run: |
+          set -euo pipefail
+          # The context-only stage above leaves mango out of the context, and
+          # the Dockerfile's COPY of it needs both files. Build mango from its
+          # pinned checkout with a plain docker build and export the binary
+          # with --output: a bind mount cannot see the runner's directories
+          # on an engine that runs beside the job (gt-t2jlo9).
+          DOCKER_BUILDKIT=1 docker build \
+            --platform linux/arm64 \
+            -f "$GITHUB_WORKSPACE/deploy/daemon/mango.Dockerfile" \
+            --output "type=local,dest=$DAEMON_CONTEXT/mango" \
+            "$MANGO_SRC"
+          printf '%s\n' "$MANGO_COMMIT" > "$DAEMON_CONTEXT/mango/mango.sha"
       - name: build the daemon image
         run: |
           set -euo pipefail
