@@ -31,9 +31,9 @@ to repeat after a partial failure:
   what that role does: `polecat` `write:repository`; `landing`
   `write:repository,read:user` (it reads its own login); `registry`
   `write:package,read:package` only, which pushes images with no repository
-  scope at all; `viewer` `read:repository,read:user`. An unknown role is an
-  error, not a default scope. A token minted by an earlier version keeps its
-  old scope until `--rotate` replaces it;
+  scope at all; `viewer` `read:repository,read:user,read:package`. An unknown
+  role is an error, not a default scope. A token minted by an earlier version
+  keeps its old scope until `--rotate` replaces it;
 - for each `--repo OWNER/NAME`, each role's collaborator access, the viewer
   bot's read access, and then the one branch-protection rule the landing path
   depends on. The access comes first on

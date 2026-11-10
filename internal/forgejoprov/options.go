@@ -90,7 +90,7 @@ func roleTable() []roleScopes {
 		{"polecat", []string{"write:repository"}},
 		{"landing", []string{"write:repository", "read:user"}},
 		{"registry", []string{"write:package", "read:package"}},
-		{"viewer", []string{"read:repository", "read:user"}},
+		{"viewer", []string{"read:repository", "read:user", "read:package"}},
 	}
 }
 

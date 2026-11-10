@@ -592,7 +592,7 @@ mkdir -p "$STATE/collaborators"
 printf 'write' > "$STATE/collaborators/acme__rig__bot-landing"
 out=$(run_provision --role viewer --repo acme/rig); rc=$?
 if [ "$rc" = 0 ]; then pass "the viewer role provisions and exits 0"; else fail "the viewer role provisions and exits 0 (rc=$rc)" "$out"; fi
-check "viewer mints read scopes only" has_all "$STATE/mints/bot-viewer.json" '"scopes":["read:repository","read:user"]'
+check "viewer mints read scopes only" has_all "$STATE/mints/bot-viewer.json" '"scopes":["read:repository","read:user","read:package"]'
 check "viewer is granted read on the repo" test "$(cat "$STATE/collaborators/acme__rig__bot-viewer")" = read
 check "a viewer run grants the viewer once" test "$(count_calls PUT /collaborators)" = 1
 check "the viewer run creates only its own bot" test -e "$STATE/users/bot-viewer" -a ! -e "$STATE/users/bot-polecat"
