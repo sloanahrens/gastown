@@ -21,6 +21,11 @@ var envPrefixes = []string{"GT_", "BEADS_", "BD_", "CLAUDE_"}
 // terminal variables, so a tool that lays out a screen knows the size it has.
 var envNames = []string{"TERM", "COLUMNS", "LINES"}
 
+// credentialWords mark a CLAUDE_ name as a credential whether or not the config
+// lists it. KEY also drops the mTLS client key path (CLAUDE_CODE_CLIENT_KEY),
+// which is the safe side of the match.
+var credentialWords = []string{"TOKEN", "SECRET", "PASSWORD", "PASSPHRASE", "KEY"}
+
 // Plan returns the call that runs the tool the wrapper was invoked as, with args
 // unchanged and env filtered to the variables that cross, or an error naming the
 // four for any other name.
@@ -68,8 +73,14 @@ func forwardEnv(env []string) []string {
 // forwards reports whether the variable named name crosses into the container.
 // A credential is refused before the prefix match: CLAUDE_CODE_OAUTH_TOKEN is in
 // the CLAUDE_ family, and a forwarded credential would reach the container's argv.
+// An unlisted CLAUDE_ name is refused too when its upper-case form contains a
+// credentialWords entry. The GT_, BEADS_ and BD_ families are not screened by
+// substring: GT_DOLT_PASSWORD must cross.
 func forwards(name string) bool {
 	if slices.Contains(config.UnforwardedCredentialEnvVars(), name) {
+		return false
+	}
+	if strings.HasPrefix(name, "CLAUDE_") && containsCredentialWord(strings.ToUpper(name)) {
 		return false
 	}
 	for _, prefix := range envPrefixes {
@@ -79,6 +90,17 @@ func forwards(name string) bool {
 	}
 	for _, exact := range envNames {
 		if name == exact {
+			return true
+		}
+	}
+	return false
+}
+
+// containsCredentialWord reports whether upper, an upper-case variable name,
+// contains one of the credentialWords.
+func containsCredentialWord(upper string) bool {
+	for _, word := range credentialWords {
+		if strings.Contains(upper, word) {
 			return true
 		}
 	}
