@@ -25,11 +25,16 @@ USER root
 # The pin comes from `make -s golangci-lint-version`, so the Makefile is its one
 # home and an image is only ever built with the version `make lint` accepts. The
 # test is the build's own check: a missing binary or another version fails here.
+#
+# The install writes its module and build caches under GOPATH and GOCACHE, which
+# the runner image points at /home/ci, not /root. go clean empties those caches
+# in this RUN, before the layer closes, so the layer does not carry them.
 ARG GOLANGCI_LINT_VERSION
 RUN test -n "${GOLANGCI_LINT_VERSION}" \
  && GOBIN=/usr/local/bin GOFLAGS= go install \
       "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
  && test "$(golangci-lint version --short)" = "${GOLANGCI_LINT_VERSION#v}" \
+ && go clean -cache -modcache \
  && rm -rf /root/go /root/.cache
 
 # jq 1.7.1, the version scripts/deep-review_test.sh needs; Debian's 1.6 fails
