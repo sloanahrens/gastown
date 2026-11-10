@@ -1,6 +1,7 @@
 package testpolicy
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -68,6 +69,57 @@ func TestSweepHostEveryLineHasAReason(t *testing.T) {
 	entries, _ := sweepHostOfTree(t)
 	for _, f := range CheckSweepHostReasons(entries) {
 		t.Error(f)
+	}
+}
+
+// TestSweepHostReasonsNameExistingFiles keeps each reason's .go names to files
+// its package still holds: a reason that names a deleted test sends the next
+// reader to a file that is gone.
+func TestSweepHostReasonsNameExistingFiles(t *testing.T) {
+	t.Parallel()
+	entries, _ := sweepHostOfTree(t)
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range CheckSweepHostReasonFiles(entries, root) {
+		t.Error(f)
+	}
+}
+
+// TestSweepHostReasonFilesFixtures drives each branch of the reason-file check
+// against a temp tree: a file the package holds passes, a file it does not
+// hold fails, a path fails, and a file held by another package fails.
+func TestSweepHostReasonFilesFixtures(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "internal", "doctor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "internal", "doctor", "present_test.go"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		line string
+		want string
+	}{
+		{name: "held", line: "internal/doctor # launchctl in present_test.go"},
+		{name: "no go name", line: "internal/doctor # darwin daemon checks"},
+		{name: "missing", line: "internal/doctor # launchctl in gone_test.go", want: "reason names gone_test.go, which internal/doctor does not hold"},
+		{name: "path", line: "internal/doctor # see sub/present_test.go", want: "reason names sub/present_test.go, a path rather than a file of internal/doctor"},
+		{name: "other package", line: "internal/cmd # launchctl in present_test.go", want: "reason names present_test.go, which internal/cmd does not hold"},
+	} {
+		got := strings.Join(CheckSweepHostReasonFiles(ParseSweepHost([]string{tc.line}), root), "\n")
+		if tc.want == "" {
+			if got != "" {
+				t.Errorf("%s: findings %q, want none", tc.name, got)
+			}
+			continue
+		}
+		if !strings.Contains(got, "sweep-host.txt:1 "+tc.want) {
+			t.Errorf("%s: findings %q, want %q with line 1", tc.name, got, tc.want)
+		}
 	}
 }
 
