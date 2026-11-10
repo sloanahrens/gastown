@@ -287,6 +287,9 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 
 	// Step 2: Reap
 	reapErrors := 0
+	// skipped holds the databases no searched beads root names: the reap is the
+	// first step to resolve each writer, so every later step drops them (below).
+	skipped := map[string]bool{}
 	for _, dbName := range databases {
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
@@ -306,6 +309,15 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			continue
 		}
 		w, err := d.reaperWriter(dbName, dryRun, extraRoots...)
+		// With an extra root configured, a database no root names is skipped, not
+		// failed: the root that holds it may not be mounted on this host (the pod
+		// has no ~/.claude). With the town's roots alone it stays an error (gt-33etw).
+		if errors.Is(err, doltserver.ErrNoBeadsDir) && len(extraRoots) > 0 {
+			db.Close()
+			skipped[dbName] = true
+			d.logger.Printf("wisp_reaper: skipped database %s: no beads directory in this town's roots", dbName)
+			continue
+		}
 		if err != nil {
 			db.Close()
 			d.logger.Printf("wisp_reaper: %s: %v", dbName, err)
@@ -335,6 +347,17 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		cycle.failStep("reap", fmt.Sprintf("%d databases had reap errors", reapErrors))
 	} else {
 		cycle.closeStep("reap")
+	}
+	// A skipped database is out of every later step, so none opens or writes it.
+	// databases may be the configured slice, so filter into a new one.
+	if len(skipped) > 0 {
+		var live []string
+		for _, dbName := range databases {
+			if !skipped[dbName] {
+				live = append(live, dbName)
+			}
+		}
+		databases = live
 	}
 
 	// Step 3: Purge
@@ -569,8 +592,10 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	if totalMoleculeSteps > 0 {
 		summary += fmt.Sprintf(" molecule_steps_closed=%d", totalMoleculeSteps)
 	}
-	summary += fmt.Sprintf(" purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d open=%d databases=%d dryRun=%v",
-		totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
+	// databases counts the databases the reap attempted, reaped or failed;
+	// skipped counts those no searched beads root names, reported apart.
+	summary += fmt.Sprintf(" purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d open=%d databases=%d skipped=%d dryRun=%v",
+		totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, openDBs+reapErrors, len(skipped), dryRun)
 	d.logger.Printf("%s", summary)
 	cycle.closeStep("report")
 }

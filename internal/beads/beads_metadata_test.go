@@ -106,6 +106,27 @@ func TestInitDatabaseTargetReadsLegacyConfigJSON(t *testing.T) {
 	}
 }
 
+// TestInitDatabaseTargetRefusesAnUnreadableMetadata: a metadata.json that is
+// present but cannot be read does not fall through to the legacy config.json
+// beside it. The name metadata.json would hold is unknown, so bd init is refused
+// rather than run against a database read from the other file (gt-b3ar38).
+func TestInitDatabaseTargetRefusesAnUnreadableMetadata(t *testing.T) {
+	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
+	// A directory named metadata.json exists but cannot be read as a file.
+	if err := os.MkdirAll(filepath.Join(beadsDir, "metadata.json"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.json"),
+		[]byte(`{"dolt_database":"zzlegacy"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := InitDatabaseTarget(beadsDir)
+	if !errors.Is(err, ErrNoConfiguredDatabase) {
+		t.Errorf("InitDatabaseTarget = %q, %v; want ErrNoConfiguredDatabase", db, err)
+	}
+}
+
 // TestEnsureMetadataDatabaseNamesTheDatabase is the second half of the fix:
 // bd init --server is documented to write dolt_mode=server WITHOUT
 // dolt_database, which leaves the workspace naming no database at all, and

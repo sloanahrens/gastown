@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,20 +26,23 @@ func BeadsMetadataDatabase(beadsDir string) string {
 }
 
 // BeadsFileDatabase is the trimmed dolt_database of a bd config file
-// (metadata.json, or the legacy config.json bd migrates from); present
-// reports whether the file exists. A file that does not parse names none.
-func BeadsFileDatabase(path string) (db string, present bool) {
+// (metadata.json, or the legacy config.json bd migrates from). err is nil when
+// the file was read and parsed, and otherwise says why it could not be: a
+// missing file wraps fs.ErrNotExist, and a read or parse failure names the
+// path. A file that does not parse is an error, not a file that names no
+// database, so a caller must check err before it reads the name as absent.
+func BeadsFileDatabase(path string) (db string, err error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: bd config file of a beads directory gastown chose
 	if err != nil {
-		return "", false
+		return "", err
 	}
 	var meta struct {
 		DoltDatabase string `json:"dolt_database"`
 	}
-	if json.Unmarshal(data, &meta) != nil {
-		return "", true
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
 	}
-	return strings.TrimSpace(meta.DoltDatabase), true
+	return strings.TrimSpace(meta.DoltDatabase), nil
 }
 
 // RigBeadsDirs are the directories, relative to the town root, where a rig's
