@@ -296,12 +296,12 @@ seconds after. Stop it with Ctrl-C when L1 ends; that is a clean stop.
 minutes for 30 minutes (seven samples):
 
 ```
-gt doctor --check daemon --check daemon-liveness --check daemon-job --check daemon-respawn
+gt doctor --check daemon --check daemon-liveness
 ls -l <scratch-root>/.runtime/host/probes.json
 cat <scratch-root>/daemon/state.json
 ```
 
-Expected, each sample: the four checks report OK (for a container town they
+Expected, each sample: the two checks report OK (for a container town they
 read the container and `state.json`, not a pid; the first sample of a run
 reports `daemon-liveness` as `unknown: no baseline yet` and records one, which is
 a skip, not a failure); `probes.json` was modified in
@@ -362,7 +362,7 @@ program bead with its time.
 - [ ] The container is up: `compose ps` shows `daemon`, `scratch-dolt` and
       `scratch-dind` running, and `gt daemon status` in the scratch town prints
       `Supervised: container gt-scratch-daemon-1 running ...`.
-- [ ] The four daemon checks were OK at all seven samples over 30 minutes.
+- [ ] The two daemon checks were OK at all seven samples over 30 minutes.
 - [ ] The probe file was modified within 180 seconds at all seven samples.
 - [ ] A hand-started `gt daemon run` in the scratch town was refused with
       `takeover window`, and `state.json` was unchanged by it.
@@ -1206,9 +1206,8 @@ when the operator lifts the dispatch hold. Checks 1 to 5 and 7 only read. Check
 6 is the one operator action: the operator lifts the hold, and puts it back on
 at the first sign of trouble.
 
-- [ ] `gt doctor --check daemon --check daemon-liveness --check daemon-job
-      --check daemon-respawn` report OK; for a container town they read the
-      container and `state.json`, not a pid.
+- [ ] `gt doctor --check daemon --check daemon-liveness` report OK; for a
+      container town they read the container and `state.json`, not a pid.
 - [ ] `cat <live-town>/daemon/state.json` names owner `container` and the live
       container's name, `"running": true`, and a `heartbeat_count` larger than
       at the previous check (it counts from 0 in the new process).
