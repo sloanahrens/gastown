@@ -1,32 +1,35 @@
 package presubmit
 
 import (
+	"errors"
 	"slices"
 	"strings"
 	"testing"
 )
 
-// podEngineFixtureDoc is a pod-engine document with two inventory rows. Its
-// Evidence cell cites internal/e/e.go, and a prose bullet names internal/c/c.go:
-// neither is a pinned file, because only the inventory's File column is.
+// podEngineFixtureDoc is a pod-engine document with one inventory row. Its
+// Evidence cell cites internal/e/e.go:7, and a prose bullet cites
+// internal/c/c.go:12, so both are pinned. A prose mention with no line, and a
+// bare basename with a line, are not pins.
 const podEngineFixtureDoc = "# Pod engine\n\n" +
 	"## How to read a row\n\n" +
 	"| not | an | inventory | row |\n\n" +
 	"## The inventory\n\n" +
 	"| File | Function | Line | Source | Asks the engine for | Disposition | Evidence |\n" +
 	"| --- | --- | --- | --- | --- | --- | --- |\n" +
-	"| `internal/a/a.go` | `F` | 4 | `docker x` | one | mac-job | `internal/e/e.go:7` |\n" +
-	"| `internal/b/b.go` | `G` | 9 | `docker y` | two | mac-job | `internal/b/b.go:9` |\n\n" +
+	"| `internal/a/a.go` | `F` | 4 | `docker x` | one | mac-job | `internal/e/e.go:7` |\n\n" +
 	"## Named, not a call site\n\n" +
-	"- `internal/c/c.go` names docker in prose.\n"
+	"- `internal/c/c.go:12` names docker in prose.\n" +
+	"- `internal/d/d.go` names docker in prose.\n" +
+	"- dolt.go:203 names docker in prose.\n"
 
-func TestPinnedFilesReadsTheFileColumnOfTheInventoryRows(t *testing.T) {
+func TestPinnedFilesReadsTheInventoryAndEveryProseLineRef(t *testing.T) {
 	t.Parallel()
 	got, err := PinnedFiles(podEngineFixtureDoc)
 	if err != nil {
 		t.Fatalf("PinnedFiles: %v", err)
 	}
-	want := []string{"internal/a/a.go", "internal/b/b.go"}
+	want := []string{"internal/a/a.go", "internal/c/c.go", "internal/e/e.go"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("PinnedFiles = %v, want %v", got, want)
 	}
@@ -93,13 +96,14 @@ func TestPodEngineTouchedSelectsOnlyPinnedFiles(t *testing.T) {
 		nameStatus string
 		want       bool
 	}{
-		{name: "the first pinned row selects", nameStatus: nameStatusPaths("M internal/a/a.go"), want: true},
-		{name: "the second pinned row selects", nameStatus: nameStatusPaths("A internal/b/b.go"), want: true},
-		{name: "a file only the Evidence column cites does not select", nameStatus: nameStatusPaths("M internal/e/e.go"), want: false},
-		{name: "a file named only in prose does not select", nameStatus: nameStatusPaths("M internal/c/c.go"), want: false},
+		{name: "the inventory's File column selects", nameStatus: nameStatusPaths("M internal/a/a.go"), want: true},
+		{name: "a file a prose line ref cites selects", nameStatus: nameStatusPaths("M internal/c/c.go"), want: true},
+		{name: "a file an Evidence line ref cites selects", nameStatus: nameStatusPaths("A internal/e/e.go"), want: true},
+		{name: "a file named in prose without a line does not select", nameStatus: nameStatusPaths("M internal/d/d.go"), want: false},
+		{name: "a bare basename cited with a line does not select", nameStatus: nameStatusPaths("M dolt.go"), want: false},
 		{name: "an unrelated file does not select", nameStatus: nameStatusPaths("M internal/z/z.go"), want: false},
 		{name: "a rename away from a pinned file selects", nameStatus: nameStatusPaths("R100 internal/a/a.go internal/a/moved.go"), want: true},
-		{name: "a deleted pinned file selects", nameStatus: nameStatusPaths("D internal/b/b.go"), want: true},
+		{name: "a deleted pinned file selects", nameStatus: nameStatusPaths("D internal/c/c.go"), want: true},
 		{name: "an empty change does not select", nameStatus: "", want: false},
 	}
 	for _, tt := range tests {
@@ -162,27 +166,64 @@ func TestPodEngineDirsDoesNotDuplicateTheInventoryPackage(t *testing.T) {
 	}
 }
 
-func TestPodEngineRecoveryPrintsOneLineOnlyWhenAPinnedFileMoved(t *testing.T) {
+func TestRecoveryHintPrintsTheRecoveryOnlyWhenAPinnedFileMovedAndTheInventoryFails(t *testing.T) {
 	t.Parallel()
-	line, err := RecoveryLine(nameStatusPaths("M internal/a/a.go"), podEngineFixtureDoc)
-	if err != nil {
-		t.Fatalf("RecoveryLine: %v", err)
+	tests := []struct {
+		name       string
+		nameStatus string
+		inventory  error
+		want       string
+		wantRun    bool
+	}{
+		{name: "a pinned file moved and the inventory fails", nameStatus: nameStatusPaths("M internal/a/a.go"), inventory: errors.New("FAIL"), want: PodEngineRecovery, wantRun: true},
+		{name: "a pinned file moved and the inventory passes", nameStatus: nameStatusPaths("M internal/a/a.go"), inventory: nil, want: "", wantRun: true},
+		{name: "a prose-cited file moved and the inventory fails", nameStatus: nameStatusPaths("M internal/c/c.go"), inventory: errors.New("FAIL"), want: PodEngineRecovery, wantRun: true},
+		{name: "no pinned file moved", nameStatus: nameStatusPaths("M internal/z/z.go"), inventory: errors.New("FAIL"), want: "", wantRun: false},
 	}
-	if line != PodEngineRecovery {
-		t.Fatalf("RecoveryLine = %q, want the recovery line", line)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ran := false
+			run := func() error {
+				ran = true
+				return tt.inventory
+			}
+			got, err := RecoveryHint(tt.nameStatus, podEngineFixtureDoc, run)
+			if err != nil {
+				t.Fatalf("RecoveryHint: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("RecoveryHint = %q, want %q", got, tt.want)
+			}
+			if ran != tt.wantRun {
+				t.Fatalf("inventory run = %v, want %v", ran, tt.wantRun)
+			}
+		})
 	}
-	if strings.Contains(line, "\n") {
-		t.Fatalf("RecoveryLine spans more than one line: %q", line)
-	}
-	if !strings.Contains(line, "go test ./internal/podengine -update-lines") {
-		t.Fatalf("RecoveryLine = %q, want the -update-lines command", line)
-	}
+}
 
-	none, err := RecoveryLine(nameStatusPaths("M internal/z/z.go"), podEngineFixtureDoc)
-	if err != nil {
-		t.Fatalf("RecoveryLine: %v", err)
+func TestRecoveryHintIsOneLineThatNamesTheRenumberCommand(t *testing.T) {
+	t.Parallel()
+	if strings.Contains(PodEngineRecovery, "\n") {
+		t.Fatalf("PodEngineRecovery spans more than one line: %q", PodEngineRecovery)
 	}
-	if none != "" {
-		t.Fatalf("RecoveryLine for an unpinned change = %q, want nothing", none)
+	if !strings.Contains(PodEngineRecovery, "go test ./internal/podengine -update-lines") {
+		t.Fatalf("PodEngineRecovery = %q, want the -update-lines command", PodEngineRecovery)
+	}
+}
+
+func TestRecoveryHintRefusesAnUnreadableInventoryWithoutRunningIt(t *testing.T) {
+	t.Parallel()
+	const noInventory = "## How to read a row\n\n| a | b |\n| - | - |\n"
+	ran := false
+	got, err := RecoveryHint(nameStatusPaths("M internal/a/a.go"), noInventory, func() error {
+		ran = true
+		return errors.New("FAIL")
+	})
+	if err == nil {
+		t.Fatalf("RecoveryHint = %q, nil error; want a refusal", got)
+	}
+	if ran {
+		t.Fatal("RecoveryHint ran the inventory beside an unreadable document")
 	}
 }

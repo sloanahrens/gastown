@@ -3,6 +3,7 @@ package presubmit
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 
@@ -14,7 +15,7 @@ const (
 	PodEngineDoc = "docs/design/pod-engine.md"
 	// PodEngineDir is the package whose inventory test fails when a pinned line moves.
 	PodEngineDir = "internal/podengine"
-	// podEngineSection starts the inventory table; its File column is the pinned set.
+	// podEngineSection starts the inventory table; its File column is one part of the pinned set.
 	podEngineSection = "## The inventory"
 	// podEngineCells is the cell count of an inventory row (File through Evidence).
 	podEngineCells = 7
@@ -22,11 +23,16 @@ const (
 	PodEngineRecovery = "presubmit: a file docs/design/pod-engine.md pins moved; if ./internal/podengine failed, run `go test ./internal/podengine -update-lines`, then renumber the prose line refs by hand, then re-run"
 )
 
-// PinnedFiles returns the repo-relative files the inventory table in doc pins:
-// the File column of each row under the inventory heading, sorted and without
-// duplicates. It fails on a row that is not podEngineCells wide and on a
-// document with no inventory rows, so a parse that found nothing never reads
-// as a set with nothing pinned.
+// podEngineRef matches a repo-relative Go file cited with a line, such as
+// internal/daemon/tier_sweep.go:2822. The path must hold a slash, so a bare
+// basename in prose (dolt.go:203) is not read as a pin.
+var podEngineRef = regexp.MustCompile(`(?:^|[^A-Za-z0-9_./-])((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.go):[0-9]+`)
+
+// PinnedFiles returns the repo-relative files doc pins: the File column of each
+// inventory row, and every Go file cited with a line anywhere in the document (a
+// prose line ref, or an Evidence cell). Sorted, without duplicates. It fails on
+// a row that is not podEngineCells wide and on a document with no inventory
+// rows, so a parse that found nothing never reads as a set with nothing pinned.
 func PinnedFiles(doc string) ([]string, error) {
 	seen := map[string]bool{}
 	section := ""
@@ -53,6 +59,9 @@ func PinnedFiles(doc string) ([]string, error) {
 	}
 	if len(seen) == 0 {
 		return nil, fmt.Errorf("%s: no rows under %q", PodEngineDoc, podEngineSection)
+	}
+	for _, m := range podEngineRef.FindAllStringSubmatch(doc, -1) {
+		seen[path.Clean(m[1])] = true
 	}
 	pinned := make([]string, 0, len(seen))
 	for f := range seen {
@@ -110,13 +119,17 @@ func PodEngineDirs(dirs []string, nameStatus, doc string) ([]string, error) {
 	return out, nil
 }
 
-// RecoveryLine returns PodEngineRecovery when the change touches a pinned file,
-// and "" otherwise. The line holds no newline, so a caller that prints it once
-// on a failure prints one line.
-func RecoveryLine(nameStatus, doc string) (string, error) {
+// RecoveryHint returns PodEngineRecovery when the change touches a pinned file
+// and runInventory, which runs the inventory package's tests, fails. It returns
+// "" when no pinned file moved, or when the inventory passes: the failure that
+// brought the caller here was elsewhere. The line holds no newline.
+func RecoveryHint(nameStatus, doc string, runInventory func() error) (string, error) {
 	touched, err := PodEngineTouched(nameStatus, doc)
 	if err != nil || !touched {
 		return "", err
+	}
+	if runInventory() == nil {
+		return "", nil
 	}
 	return PodEngineRecovery, nil
 }

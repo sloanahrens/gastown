@@ -591,9 +591,8 @@ tier-check:
 # packages' tests rerun even when nothing else about them changed.
 #
 # A branch that changes a file docs/design/pod-engine.md pins also tests
-# internal/podengine (gt-tk6l7k): the inventory test fails on a moved pinned
-# line, and the recovery line the changed-package run prints on failure says
-# how to renumber it. The pinned set is read from the doc's inventory rows.
+# internal/podengine (gt-tk6l7k); internal/land/cmd/changedpkgs describes the
+# selection and the recovery line printed when that test fails.
 #
 # A commit that changes a go.mod or go.sum file must explain it in a
 # "Rationale:" line (internal/presubmit/cmd/gomodrationale, gt-b9j3o.6).
