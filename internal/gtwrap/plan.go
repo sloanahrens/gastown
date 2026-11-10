@@ -24,6 +24,7 @@ var envNames = []string{"TERM", "COLUMNS", "LINES"}
 // credentialWords mark a CLAUDE_ name as a credential whether or not the config
 // lists it. KEY also drops the mTLS client key path (CLAUDE_CODE_CLIENT_KEY),
 // which is the safe side of the match.
+// The rule is set out in docs/design/gt-in-container.md.
 var credentialWords = []string{"TOKEN", "SECRET", "PASSWORD", "PASSPHRASE", "KEY"}
 
 // Plan returns the call that runs the tool the wrapper was invoked as, with args

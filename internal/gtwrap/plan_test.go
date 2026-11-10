@@ -161,6 +161,30 @@ func TestPlanForwardsTheDoltPasswordButNoBrokerOrRingKey(t *testing.T) {
 	}
 }
 
+// The credential-word screen covers only the CLAUDE_ family. A GT_, BEADS_ or BD_
+// name that carries a credential word still crosses, as GT_DOLT_PASSWORD must.
+func TestPlanForwardsGTBeadsAndBDNamesThatCarryACredentialWord(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"BEADS_DOLT_PASSWORD",
+		"BD_SECRET_HINT",
+		"GT_SESSION_TOKEN",
+		"BD_DOLT_KEY_FILE",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			entry := name + "=value"
+			call, err := Plan("gt", []string{"status"}, []string{entry}, "/town", false)
+			if err != nil {
+				t.Fatalf("Plan returned an error: %v", err)
+			}
+			if !slices.Equal(call.Env, []string{entry}) {
+				t.Fatalf("Plan forwarded %q, want %q to cross", call.Env, entry)
+			}
+		})
+	}
+}
+
 func TestPlanCarriesTheCallersDirectoryAndTerminal(t *testing.T) {
 	t.Parallel()
 	for _, isTTY := range []bool{false, true} {
@@ -189,6 +213,7 @@ func TestPlanDropsAClaudeNameThatContainsACredentialWord(t *testing.T) {
 		{"CLAUDE_SERVICE_PASSWORD"},
 		{"CLAUDE_SERVICE_PASSPHRASE"},
 		{"CLAUDE_SERVICE_KEY"},
+		{"CLAUDE_CODE_CLIENT_KEY"},
 		{"CLAUDE_service_token"},
 	}
 	for _, tt := range tests {
@@ -240,6 +265,9 @@ func TestPlanScreensBeforeAnyEnvFlagIsBuilt(t *testing.T) {
 		}
 	}
 	want := []string{"CLAUDE_CONFIG_DIR=/Users/operator/.claude"}
+	if !slices.Equal(call.Env, want) {
+		t.Fatalf("Plan forwarded %q, want %q: the screen must run in Plan, before any flag is built", call.Env, want)
+	}
 	if !slices.Equal(dockerEnv, want) {
 		t.Fatalf("docker environment is %q, want %q", dockerEnv, want)
 	}
