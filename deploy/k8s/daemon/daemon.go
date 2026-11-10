@@ -281,6 +281,11 @@ const (
 	cloudReleasesEnv       = "GT_CLOUD_RELEASES_DIR"
 	cloudOffEnv            = "GT_OFF_DIR"
 	awsRegionEnv           = "AWS_REGION"
+	// forgejoAPIURLEnv is the Forgejo API root the forge-reading children read.
+	// The render sets it from Values.ForgeHost, not from the decision table: the
+	// compose file carries no such name, so validateEnv refuses a caller's entry
+	// for it the way it refuses a name the pod sets (gt-s0homy).
+	forgejoAPIURLEnv = "FORGEJO_API_URL"
 )
 
 const (
@@ -967,6 +972,14 @@ func containerEnvironment(v Values) []EnvVar {
 		{Name: ContainerModeEnv, Value: podEnvDecisions[ContainerModeEnv].value},
 		{Name: timeZoneEnv, Value: podEnvDecisions[timeZoneEnv].value},
 	}
+	// The forge-reading children default to the pod's own loopback, which is not
+	// Forgejo, so the live pod names the host the git credential helper reads
+	// (gt-s0homy). ForgeHost is validated as host:port before this runs. A
+	// rehearsal keeps its goldens unchanged: the cluster render gives it no
+	// --forge-host (town_cluster_render.go), so this branch is the live pod's.
+	if v.ForgeHost != "" && !v.Rehearsal {
+		env = append(env, EnvVar{Name: forgejoAPIURLEnv, Value: "http://" + v.ForgeHost + "/api/v1"})
+	}
 	for _, name := range sortedKeys(v.Env) {
 		if _, dropped := composeOnlyEnv[name]; dropped {
 			continue
@@ -1435,6 +1448,8 @@ func (v Values) validateEnv() error {
 		switch {
 		case !envNameRE.MatchString(name):
 			return fmt.Errorf("Values.Env[%q]: want an environment variable name", name)
+		case name == forgejoAPIURLEnv:
+			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.ForgeHost, so a caller's value would be dropped", name)
 		case decision.value != "":
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, so a caller's value would be dropped", name)
 		case decision.drop != "":

@@ -812,16 +812,21 @@ func TestTownClusterRenderDefaultsTheConfigDirectories(t *testing.T) {
 	}
 }
 
-// daemonContainer returns the daemon container of the rendered Deployment file.
-func daemonContainer(t *testing.T, out string) (args []string, mounts map[string]string) {
+// daemonContainer returns the daemon container's arguments, its mounts by path,
+// and its environment by name, from the rendered Deployment file.
+func daemonContainer(t *testing.T, out string) (args []string, mounts map[string]string, env map[string]string) {
 	t.Helper()
 	var dep struct {
 		Spec struct {
 			Template struct {
 				Spec struct {
 					Containers []struct {
-						Name         string   `yaml:"name"`
-						Args         []string `yaml:"args"`
+						Name string   `yaml:"name"`
+						Args []string `yaml:"args"`
+						Env  []struct {
+							Name  string `yaml:"name"`
+							Value string `yaml:"value"`
+						} `yaml:"env"`
 						VolumeMounts []struct {
 							MountPath string `yaml:"mountPath"`
 							SubPath   string `yaml:"subPath"`
@@ -852,12 +857,18 @@ func daemonContainer(t *testing.T, out string) (args []string, mounts map[string
 	for _, m := range c.VolumeMounts {
 		mounts[m.MountPath] = m.SubPath
 	}
-	return c.Args, mounts
+	env = map[string]string{}
+	for _, e := range c.Env {
+		env[e.Name] = e.Value
+	}
+	return c.Args, mounts, env
 }
 
 // TestTownClusterRenderLiveCarriesTheEntrypointArguments holds the live
 // Deployment to the arguments and mounts the live compose command carries, so
-// the pod's git has the forge credential helper (gt-22wubb).
+// the pod's git has the forge credential helper (gt-22wubb). The forge-reading
+// children read the same Forgejo, so the pod's environment names its API root
+// (gt-s0homy).
 func TestTownClusterRenderLiveCarriesTheEntrypointArguments(t *testing.T) {
 	t.Parallel()
 	f := clusterRenderFixture(t)
@@ -865,7 +876,7 @@ func TestTownClusterRenderLiveCarriesTheEntrypointArguments(t *testing.T) {
 	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	args, mounts := daemonContainer(t, f.out)
+	args, mounts, env := daemonContainer(t, f.out)
 	wantArgs := []string{"--om-token-file", "/run/secrets/om-token", "--forge-host", "forgejo:3000", "--forge-token-file", "/run/secrets/forge-token"}
 	if !slices.Equal(args, wantArgs) {
 		t.Fatalf("daemon args = %v, want %v", args, wantArgs)
@@ -877,6 +888,9 @@ func TestTownClusterRenderLiveCarriesTheEntrypointArguments(t *testing.T) {
 		if mounts[path] != sub {
 			t.Fatalf("mount %s has subPath %q, want %q (mounts %v)", path, mounts[path], sub, mounts)
 		}
+	}
+	if got, want := env["FORGEJO_API_URL"], "http://forgejo:3000/api/v1"; got != want {
+		t.Fatalf("daemon env FORGEJO_API_URL = %q, want %q: the forge-reading children default to the pod's loopback otherwise", got, want)
 	}
 }
 
@@ -893,7 +907,7 @@ func TestTownClusterRenderRehearsalCarriesNeitherToken(t *testing.T) {
 	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	args, mounts := daemonContainer(t, f.out)
+	args, mounts, env := daemonContainer(t, f.out)
 	if len(args) != 0 {
 		t.Fatalf("a rehearsal daemon carries args %v, want none", args)
 	}
@@ -901,5 +915,8 @@ func TestTownClusterRenderRehearsalCarriesNeitherToken(t *testing.T) {
 		if sub, ok := mounts[path]; ok {
 			t.Fatalf("a rehearsal mounts %s from %q", path, sub)
 		}
+	}
+	if got, ok := env["FORGEJO_API_URL"]; ok {
+		t.Fatalf("a rehearsal daemon carries FORGEJO_API_URL = %q, want none: it has no forge host", got)
 	}
 }
