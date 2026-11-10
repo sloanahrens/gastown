@@ -787,7 +787,9 @@ func (l *dashLoads) refused(err error) {
 		return
 	}
 	l.readOnly = true
-	l.logf("the load history %s is read-only (%v); it is kept in memory until the dashboard restarts", l.path, err)
+	if l.logf != nil {
+		l.logf("the load history %s is read-only (%v); it is kept in memory until the dashboard restarts", l.path, err)
+	}
 }
 
 // loadRewriteEvery is how many appends the writer lets accumulate before it

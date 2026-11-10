@@ -61,7 +61,9 @@ func (w *spendWatchWriter) write(dir string, report json.RawMessage, now time.Ti
 		return err
 	}
 	w.readOnly = true
-	w.logf("the spend watch file in %s is read-only (%v); it is not rewritten until the dashboard restarts", dir, err)
+	if w.logf != nil {
+		w.logf("the spend watch file in %s is read-only (%v); it is not rewritten until the dashboard restarts", dir, err)
+	}
 	return nil
 }
 

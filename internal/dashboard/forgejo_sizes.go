@@ -288,14 +288,16 @@ func warnf(format string, args ...any) {
 // read-only. The first such refusal latches the writer and logs one line naming
 // the directory; a later refusal is silent, since the writer no longer tries.
 // Reporting it as a state rather than an error is what keeps the run from
-// failing the same way every night.
+// failing the same way every night. A nil logf latches without the line.
 func (w *ForgejoSizeWriter) latchReadOnly(dir string, err error) bool {
 	if !IsReadOnlyErr(err) {
 		return false
 	}
 	if !w.readOnly {
 		w.readOnly = true
-		w.logf("the forgejo size reports in %s are read-only (%v); they are not written until the dashboard restarts", dir, err)
+		if w.logf != nil {
+			w.logf("the forgejo size reports in %s are read-only (%v); they are not written until the dashboard restarts", dir, err)
+		}
 	}
 	return true
 }

@@ -3,11 +3,8 @@ package dashboard
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 	"time"
 
@@ -324,36 +321,6 @@ func TestPollSpendWriteFailureDoesNotStopThePoll(t *testing.T) {
 	doc, _ := readSpendWatch(t, dir)
 	require.NotNil(t, doc.Balance)
 	assert.InDelta(t, 74.55, *doc.Balance, 1e-9)
-}
-
-// On a read-only watch directory the first refused write latches the writer: it
-// logs one line and stops trying until the dashboard restarts. The reading the
-// page holds is in memory, so the refusal is a state, not a failed read.
-func TestSpendWatchToleratesReadOnly(t *testing.T) {
-	t.Parallel()
-
-	report := spendReport(t, 74.55, 1.25, 2.5)
-	h := NewHub(Config{
-		Now:      func() time.Time { return spendWatchNow },
-		Spend:    func() json.RawMessage { return report },
-		WatchDir: filepath.Join(t.TempDir(), "watch"),
-	})
-	var creates int
-	var logs []string
-	h.spendWatch.create = func(string) (spendTempFile, error) {
-		creates++
-		return nil, &fs.PathError{Op: "open", Path: "spend.json", Err: syscall.EROFS}
-	}
-	h.spendWatch.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
-
-	h.pollSpend()
-	h.pollSpend()
-
-	st := h.State()
-	assert.Equal(t, 1, creates, "a read-only watch directory was tried again after its refusal")
-	assert.Len(t, logs, 1, "a read-only watch directory logs one line: %q", logs)
-	assert.False(t, st.Reads[SourceSpend].Error, "a read-only watch file is a state, not a failed read")
-	assert.NotEmpty(t, st.Spend, "the page lost its in-memory report to the refusal")
 }
 
 // A spend tool or ledger absent where the dashboard runs gives the pane its

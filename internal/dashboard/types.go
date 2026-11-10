@@ -150,7 +150,8 @@ type Polecat struct {
 const NotInClusterReason = "not available in the cluster"
 
 // IsReadOnlyErr says a create was refused because the filesystem is read-only
-// (EROFS) or this process may not create there (EACCES). A dashboard run in a
+// (EROFS) or this process may not create there (EACCES; fs.ErrPermission also
+// matches EPERM). A dashboard run in a
 // pod whose town mount is read-only gets that refusal on every write; it is a
 // state the writer stops on and reports once, not a failure of the data it holds.
 func IsReadOnlyErr(err error) bool {

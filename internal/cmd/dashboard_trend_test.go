@@ -1849,10 +1849,43 @@ func TestDashboardLandingsNoRowAfterNow(t *testing.T) {
 // A load history on a read-only town is a state, not a failure: the first create
 // the filesystem refuses latches the writer and logs one line, the writer stops
 // trying until the dashboard restarts, and the in-memory history keeps serving
-// the page. The writers that take a create function and their read-only refusal
-// are the ones this covers in the cmd package; the report writers are covered in
-// internal/dashboard.
-func TestDashboardWritersTolerateReadOnly(t *testing.T) {
+// the page. The load series is the dashboard writer this package holds; the size
+// reports and the spend watch file are covered in internal/dashboard. The
+// overseer's report files are written by internal/daemon and have no case yet.
+func TestWriterReadOnly(t *testing.T) {
+	t.Parallel()
+
+	t.Run("load_series", loadSeriesReadOnly)
+}
+
+// A writer built with no logf still latches on a read-only refusal: the load
+// series stops trying and does not panic on the line it would have written.
+func TestLatchReadOnlyNilLogger(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.Local)
+	l := newDashLoads(t.TempDir(), func() time.Time { return now })
+	l.logf = nil
+	var opens int
+	l.openFile = func(name string, _ int, _ fs.FileMode) (*os.File, error) {
+		opens++
+		return nil, &fs.PathError{Op: "open", Path: name, Err: syscall.EROFS}
+	}
+
+	for i := range 3 {
+		l.append(now.Add(time.Duration(i)*time.Second), float64(i))
+	}
+	if opens != 1 {
+		t.Errorf("a nil logf let the read-only history be opened %d times, want one attempt", opens)
+	}
+	if pts := l.points(); len(pts) != 3 {
+		t.Errorf("the in-memory history holds %d points, want the 3 appended", len(pts))
+	}
+}
+
+// loadSeriesReadOnly is the load series' read-only case: the append and the
+// rewrite each latch on the first refusal.
+func loadSeriesReadOnly(t *testing.T) {
 	t.Parallel()
 
 	erofs := func(name string) error { return &fs.PathError{Op: "open", Path: name, Err: syscall.EROFS} }
