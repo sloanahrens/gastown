@@ -369,6 +369,10 @@ type Daemon struct {
 	// pass, which runs on its own interval and off the quiet guard
 	// (gt-gg9hv.57).
 	ciCacheTrimRunning atomic.Bool
+	// ciEnginePruneRunning is the single-flight guard of the CI runner's engine
+	// prune pass, which runs on its own interval and off the quiet guard
+	// (gt-i02983).
+	ciEnginePruneRunning atomic.Bool
 
 	// hmSync replaces the hm_sync patrol's clock and run seam in tests (see
 	// hmSyncSeams); the zero value is production.

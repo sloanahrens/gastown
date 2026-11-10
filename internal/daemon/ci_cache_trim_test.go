@@ -107,6 +107,12 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 	d.diskMaint.trim = func(context.Context, string) bool { return true }
 	d.diskMaint.readDisks = func(context.Context) []disks.Reading { return nil }
 	d.diskMaintSchedule.record(diskMaintCacheTrimName, ciCacheTestStart)
+	// The engine prune runs on the same patrol with a kubernetes runner, and these
+	// tests count the CI cache trim's kubectl calls and log lines alone. Its
+	// interval is held past their span, with its last run recorded at the start, as
+	// the trim above is (gt-i02983).
+	patrol.Patrols.DiskMaintenance.CIEnginePruneInterval = "1000h"
+	d.diskMaintSchedule.record(ciEnginePruneName, ciCacheTestStart)
 	d.diskMaint.dispatch = func(fn func()) { f.pending = append(f.pending, fn) }
 	f.d = d
 	return f

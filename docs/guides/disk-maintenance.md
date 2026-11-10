@@ -256,6 +256,64 @@ trim does, so a landing pass in flight does not hold it off.
   The item means the trim is not reaching what is there, or that nothing is yet
   older than the max age. A later reading under the figure clears it.
 
+## The CI runner's engine
+
+The `dind` container's Docker data root holds more than the Go cache: images,
+stopped containers, build cache and anonymous volumes, on a claim that nothing
+bounds. The engine prune keeps the rest of the engine in check on its own
+interval (`ci_engine_prune_interval`), under the same patrol, the same exec into
+the `dind` container and the same `dry_run` default as the cache trim above.
+
+- The settings sit under `patrols.disk_maintenance`: `ci_engine_prune_interval`
+  (default `1h`), `ci_engine_prune_age` (default `48h`) and `ci_engine_keep_repos`
+  (default `["ci-base"]`). An empty setting is the default. A zero or negative
+  interval or age is refused, and an explicit empty keep list is refused, since it
+  would leave the base images unprotected. A keep name that is not a repository
+  name is refused. Each error names its setting.
+- Each run lists, plans, then removes. The first exec lists the engine as JSON and
+  changes nothing. The planner decides what goes from that listing alone. The
+  remove step is skipped in `dry_run`; in an apply it is one docker command per
+  kind the plan names (`docker rm`, `docker rmi -f`, `docker volume rm`) over that
+  kind's ids, then the build cache prune, with no shell between the plan and
+  docker.
+- What goes:
+  - stopped containers (`created`, `exited`, `dead`) created more than 24 hours
+    ago;
+  - images no container uses that were created more than `ci_engine_prune_age`
+    ago and carry no tag in a `ci_engine_keep_repos` repository other than
+    `ci-base`;
+  - `ci-base` images other than the one `ci-base:latest` names, and the id created
+    just before it, which is kept as the rollback. With no `ci-base:latest` tag, the
+    newest `ci-base` id is the latest. The others wait out `ci_engine_prune_age`
+    like any image, so a build not yet tagged latest is not swept away. A `ci-base`
+    image that also carries a tag in another kept repository is kept. The rollback
+    is chosen among images that still carry a `ci-base` tag, so it assumes every
+    base carries a second tag (as `gate-tools`, `jq17` and the `pre-*` tags do): a
+    former `:latest` that carried no other tag has no `ci-base` tag once the tag
+    moves, and falls out of the rule and goes after the age;
+  - anonymous volumes, whose names are the 64 hex digits docker gives one, with no
+    container that stays mounting them, and created more than 24 hours ago. A
+    volume's own name and mounts decide it; no companion volume is consulted;
+  - build cache unused for 24 hours, pruned by docker itself in an apply.
+- What stays: any image a container that stays uses; any image that is a parent
+  of an image that stays, which docker would refuse to remove; named volumes, so
+  `ci-gocache`, `ci-gomod` and `ci-npm` are never candidates.
+- A dry run logs one line per container, image and volume it would remove, and a
+  summary. It does not size the build cache, since docker has no dry run for it.
+- An applied run logs `disk_maintenance: ci engine prune: removed N containers, N
+  images, N volumes, X to Y`. The sizes are the data root's, read with `du`.
+- A run that cannot tell what the engine holds is a failed run and removes nothing:
+  a runner pod whose `dind` container is not running, a listing that does not
+  decode, an id or time in an unexpected shape, or a failed exec. Each logs its own
+  line, at most once an hour, and the run is retried in 15 minutes.
+- What a removal did is read back from docker, not from the command's exit status
+  (`docker rmi -f` exits 1 over an image an earlier argument already freed). The
+  ids docker printed removed count. For the rest, one `docker <kind> inspect
+  --format` names which are still in the engine: an id gone counts as removed, an
+  id still there fails the run. Every kind and the build cache prune run whatever
+  an earlier one did, and the size after is still read; the run then fails once,
+  with one log line per failed kind, and the next run plans again.
+
 ## Rollback
 
 A wrong delete costs a rebuild, not data: any per-commit image is rebuilt from

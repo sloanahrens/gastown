@@ -1209,6 +1209,97 @@ func TestDiskMaintenanceCICacheSettings(t *testing.T) {
 	}
 }
 
+// TestDiskMaintenanceCIEnginePruneSettings: the CI engine prune's settings default
+// to 1h, 48h and ["ci-base"]; a value the patrol cannot act on is refused naming
+// its own key, and an explicit empty keep list is refused rather than read as
+// the default (gt-i02983).
+func TestDiskMaintenanceCIEnginePruneSettings(t *testing.T) {
+	t.Parallel()
+	t.Run("interval empty is the 1h default, override is read", func(t *testing.T) {
+		t.Parallel()
+		every, err := DiskMaintenanceConfig{}.CIEnginePruneEvery()
+		if err != nil || every.String() != "1h0m0s" {
+			t.Fatalf("empty interval = %v, %v; want 1h0m0s", every, err)
+		}
+		every, err = DiskMaintenanceConfig{CIEnginePruneInterval: "30m"}.CIEnginePruneEvery()
+		if err != nil || every.String() != "30m0s" {
+			t.Fatalf("interval 30m = %v, %v; want 30m0s", every, err)
+		}
+	})
+	t.Run("interval refused naming its key", func(t *testing.T) {
+		t.Parallel()
+		for _, raw := range []string{"0s", "-1h", "hourly"} {
+			_, err := DiskMaintenanceConfig{CIEnginePruneInterval: raw}.CIEnginePruneEvery()
+			if err == nil || !strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_prune_interval") {
+				t.Errorf("interval %q: error %v, want one naming the key", raw, err)
+			}
+		}
+	})
+	t.Run("age empty is the 48h default, override is read, zero refused", func(t *testing.T) {
+		t.Parallel()
+		age, err := DiskMaintenanceConfig{}.CIEnginePruneAgeDuration()
+		if err != nil || age.String() != "48h0m0s" {
+			t.Fatalf("empty age = %v, %v; want 48h0m0s", age, err)
+		}
+		age, err = DiskMaintenanceConfig{CIEnginePruneAge: "24h"}.CIEnginePruneAgeDuration()
+		if err != nil || age.String() != "24h0m0s" {
+			t.Fatalf("age 24h = %v, %v; want 24h0m0s", age, err)
+		}
+		_, err = DiskMaintenanceConfig{CIEnginePruneAge: "0h"}.CIEnginePruneAgeDuration()
+		if err == nil || !strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_prune_age") {
+			t.Errorf("age 0h: error %v, want one naming the key", err)
+		}
+	})
+	t.Run("keep repos: absent is ci-base, explicit list is read", func(t *testing.T) {
+		t.Parallel()
+		repos, err := DiskMaintenanceConfig{}.CIEngineKeepRepoList()
+		if err != nil || !slices.Equal(repos, []string{"ci-base"}) {
+			t.Fatalf("absent keep repos = %v, %v; want [ci-base]", repos, err)
+		}
+		repos, err = DiskMaintenanceConfig{CIEngineKeepRepos: []string{"ci-base", "org/tools"}}.CIEngineKeepRepoList()
+		if err != nil || !slices.Equal(repos, []string{"ci-base", "org/tools"}) {
+			t.Fatalf("keep repos = %v, %v; want the list", repos, err)
+		}
+	})
+	t.Run("keep repos: explicit empty and a malformed name are refused", func(t *testing.T) {
+		t.Parallel()
+		for name, repos := range map[string][]string{
+			"explicit empty":    {},
+			"with a space":      {"ci base"},
+			"with a dash lead":  {"-ci-base"},
+			"with a tag":        {"ci-base:latest"},
+			"with a slash lead": {"/ci-base"},
+		} {
+			_, err := DiskMaintenanceConfig{CIEngineKeepRepos: repos}.CIEngineKeepRepoList()
+			if err == nil || !strings.Contains(err.Error(), "patrols.disk_maintenance.ci_engine_keep_repos") {
+				t.Errorf("%s: error %v, want one naming the key", name, err)
+			}
+		}
+	})
+	t.Run("the patrol block refuses a bad value at decode", func(t *testing.T) {
+		t.Parallel()
+		for name, doc := range map[string]string{
+			"interval zero":    `{"disk_maintenance": {"ci_engine_prune_interval": "0s"}}`,
+			"age zero":         `{"disk_maintenance": {"ci_engine_prune_age": "0h"}}`,
+			"keep repos empty": `{"disk_maintenance": {"ci_engine_keep_repos": []}}`,
+		} {
+			var p PatrolsConfig
+			if err := json.Unmarshal([]byte(doc), &p); err == nil {
+				t.Errorf("%s decoded without an error: %+v", name, p.DiskMaintenance)
+			}
+		}
+		var p PatrolsConfig
+		doc := `{"disk_maintenance": {"ci_engine_prune_interval": "2h", "ci_engine_prune_age": "72h", "ci_engine_keep_repos": ["ci-base"]}}`
+		if err := json.Unmarshal([]byte(doc), &p); err != nil {
+			t.Fatalf("valid ci_engine settings do not decode: %v", err)
+		}
+		if p.DiskMaintenance.CIEnginePruneInterval != "2h" || p.DiskMaintenance.CIEnginePruneAge != "72h" ||
+			!slices.Equal(p.DiskMaintenance.CIEngineKeepRepos, []string{"ci-base"}) {
+			t.Errorf("ci_engine settings decoded as %+v", p.DiskMaintenance)
+		}
+	})
+}
+
 // TestDiskMaintenanceTargetEvery: a cadence is a Go duration of at least a
 // minute, and an empty one keeps the daily window.
 func TestDiskMaintenanceTargetEvery(t *testing.T) {
