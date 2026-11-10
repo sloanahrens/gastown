@@ -143,60 +143,6 @@ func hmSkewRunner(t *testing.T, a hmSkewAnswers) cmdRunFunc {
 	}
 }
 
-// TestHMSkewRemoteReadsTheBareRepo: the hm rig's origin url is read from
-// <town>/hm/.repo.git and never from the mayor/rig clone, and a rig with no
-// bare repo fails naming the bare path rather than falling back to a clone.
-func TestHMSkewRemoteReadsTheBareRepo(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		bare    bool   // the rig's .repo.git exists
-		url     string // the origin url the bare repo prints
-		wantErr bool
-	}{
-		{name: "the bare repo answers the url and the tip", bare: true, url: hmSkewTestURL},
-		{name: "a rig with no bare repo fails naming it", bare: false, url: hmSkewTestURL, wantErr: true},
-		{name: "a bare repo with no origin url fails naming it", bare: true, url: "", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			town := t.TempDir()
-			bare := filepath.Join(town, "hm", ".repo.git")
-			if tc.bare {
-				mkdirs(t, bare)
-			}
-			r := &skewBareRunner{url: tc.url}
-			d := &Daemon{config: &Config{TownRoot: town}, execCmd: r.run}
-
-			url, sha, err := d.hmSkewRemote(town)
-
-			if r.calledWithMayorRig() {
-				t.Errorf("a probe read the mayor/rig clone: calls %q", r.calls)
-			}
-			if tc.wantErr {
-				if err == nil || !strings.Contains(err.Error(), bare) {
-					t.Fatalf("hmSkewRemote error = %v, want one naming %s", err, bare)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("hmSkewRemote: %v", err)
-			}
-			if url != hmSkewTestURL {
-				t.Errorf("url = %q, want %q", url, hmSkewTestURL)
-			}
-			if sha != omSkewRemoteSHA {
-				t.Errorf("sha = %q, want origin's main tip %q", sha, omSkewRemoteSHA)
-			}
-			want := []string{"git", "--git-dir=" + bare, "remote", "get-url", "origin"}
-			if len(r.calls) == 0 || !slices.Equal(r.calls[0], want) {
-				t.Errorf("first git call = %q, want %q", r.calls, want)
-			}
-		})
-	}
-}
-
 // hmSkewDaemon is a Daemon whose hm and git answers come from a, with its log
 // and everything it escalates or clears recorded. Nothing starts a process or
 // reaches a remote, and the clone lives under the test's own town.

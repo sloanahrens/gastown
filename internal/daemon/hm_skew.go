@@ -38,9 +38,12 @@ const (
 	// hmSkewInterval is the gap between checks after the first.
 	hmSkewInterval = omSkewInterval
 
-	// hmSkewRigWorktree is the hm rig's canonical worktree, the only place the
-	// daemon reads hm's origin url from (never a fetch, as om_skew).
-	hmSkewRigWorktree = "hm/mayor/rig"
+	// hmSkewRig is the hm rig's directory under the town; its bare repository
+	// (<rig>/.repo.git) is where the origin url is read from.
+	hmSkewRig = "hm"
+	// hmSkewRigWorktree is the hm rig's canonical worktree, which the skew
+	// message names as the place to install hm from.
+	hmSkewRigWorktree = hmSkewRig + "/mayor/rig"
 	// hmSkewCloneDir is the job-owned clone the diff runs in, relative to the
 	// town. The monitor clones it from the rig's origin on first use and fetches
 	// origin's main into it before each diff. It is never the rig worktree.
@@ -396,7 +399,7 @@ func parseHMVersion(out string) (string, error) {
 // mayor/rig clone, and the tip from an ls-remote against that url. The read is
 // never a fetch, so the rig's refs do not move.
 func (d *Daemon) hmSkewRemote(townRoot string) (url, sha string, err error) {
-	bare := constants.RigBareRepoPath(filepath.Join(townRoot, "hm"))
+	bare := constants.RigBareRepoPath(filepath.Join(townRoot, hmSkewRig))
 	url, err = d.omSkewGit("--git-dir="+bare, "remote", "get-url", "origin")
 	if err != nil {
 		return "", "", err

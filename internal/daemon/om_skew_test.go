@@ -102,40 +102,54 @@ func (r *skewBareRunner) calledWithMayorRig() bool {
 	return false
 }
 
-// TestOMSkewRemoteSHAReadsTheBareRepo: the om rig's origin url is read from
-// <town>/om/.repo.git and never from the mayor/rig clone, and a rig with no
-// bare repo fails naming the bare path rather than falling back to a clone.
-func TestOMSkewRemoteSHAReadsTheBareRepo(t *testing.T) {
+// TestOMSkewRemoteReadsTheBareRepo: the om and hm rigs' origin urls are read from
+// <town>/<rig>/.repo.git and never from the mayor/rig clone, the tip is read
+// from that url, and a rig with no bare repo fails naming the bare path rather
+// than falling back to a clone. One table covers both probes.
+func TestOMSkewRemoteReadsTheBareRepo(t *testing.T) {
 	t.Parallel()
+	omProbe := func(d *Daemon, town string) (string, error) {
+		return d.omSkewRemoteSHA(town)
+	}
+	hmProbe := func(d *Daemon, town string) (string, error) {
+		_, sha, err := d.hmSkewRemote(town)
+		return sha, err
+	}
+	const omURL = "https://example.invalid/om.git"
 	tests := []struct {
 		name    string
+		rig     string // the rig whose bare repo the probe reads
+		probe   func(*Daemon, string) (string, error)
 		bare    bool   // the rig's .repo.git exists
 		url     string // the origin url the bare repo prints
 		wantErr bool
 	}{
-		{name: "the bare repo answers the url and the tip", bare: true, url: "https://example.invalid/om.git"},
-		{name: "a rig with no bare repo fails naming it", bare: false, url: "https://example.invalid/om.git", wantErr: true},
-		{name: "a bare repo with no origin url fails naming it", bare: true, url: "", wantErr: true},
+		{name: "om: the bare repo answers the url and the tip", rig: "om", probe: omProbe, bare: true, url: omURL},
+		{name: "om: a rig with no bare repo fails naming it", rig: "om", probe: omProbe, bare: false, url: omURL, wantErr: true},
+		{name: "om: a bare repo with no origin url fails naming it", rig: "om", probe: omProbe, bare: true, url: "", wantErr: true},
+		{name: "hm: the bare repo answers the url and the tip", rig: "hm", probe: hmProbe, bare: true, url: hmSkewTestURL},
+		{name: "hm: a rig with no bare repo fails naming it", rig: "hm", probe: hmProbe, bare: false, url: hmSkewTestURL, wantErr: true},
+		{name: "hm: a bare repo with no origin url fails naming it", rig: "hm", probe: hmProbe, bare: true, url: "", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
-			bare := filepath.Join(town, "om", ".repo.git")
+			bare := filepath.Join(town, tc.rig, ".repo.git")
 			if tc.bare {
 				mkdirs(t, bare)
 			}
 			r := &skewBareRunner{url: tc.url}
 			d := &Daemon{config: &Config{TownRoot: town}, execCmd: r.run}
 
-			sha, err := d.omSkewRemoteSHA(town)
+			sha, err := tc.probe(d, town)
 
 			if r.calledWithMayorRig() {
 				t.Errorf("a probe read the mayor/rig clone: calls %q", r.calls)
 			}
 			if tc.wantErr {
 				if err == nil || !strings.Contains(err.Error(), bare) {
-					t.Fatalf("omSkewRemoteSHA error = %v, want one naming %s", err, bare)
+					t.Fatalf("probe error = %v, want one naming %s", err, bare)
 				}
 				if sha != "" {
 					t.Errorf("sha = %q with no bare repo, want none", sha)
@@ -143,14 +157,17 @@ func TestOMSkewRemoteSHAReadsTheBareRepo(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("omSkewRemoteSHA: %v", err)
+				t.Fatalf("probe: %v", err)
 			}
 			if sha != omSkewRemoteSHA {
 				t.Errorf("sha = %q, want origin's main tip %q", sha, omSkewRemoteSHA)
 			}
 			want := []string{"git", "--git-dir=" + bare, "remote", "get-url", "origin"}
-			if len(r.calls) == 0 || !slices.Equal(r.calls[0], want) {
-				t.Errorf("first git call = %q, want %q", r.calls, want)
+			if len(r.calls) < 2 || !slices.Equal(r.calls[0], want) {
+				t.Fatalf("git calls = %q, want the get-url call %q then ls-remote", r.calls, want)
+			}
+			if lsRemote := r.calls[len(r.calls)-1]; !slices.Contains(lsRemote, tc.url) {
+				t.Errorf("ls-remote call = %q, want it against the bare repo's url %q", lsRemote, tc.url)
 			}
 		})
 	}

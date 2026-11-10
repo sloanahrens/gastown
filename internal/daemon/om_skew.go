@@ -47,9 +47,8 @@ const (
 	omSkewVersionTimeout = 20 * time.Second
 	omSkewRemoteTimeout  = 20 * time.Second
 
-	// omSkewRigWorktree is the om rig's canonical worktree, the only place
-	// the daemon reads om's origin url from (never a fetch: an om build runs
-	// in that worktree, and a probe must not move its refs).
+	// omSkewRigWorktree is the om rig's canonical worktree. The skew message
+	// names it as the place to install om from, and rebuild_om builds from it.
 	omSkewRigWorktree = "om/mayor/rig"
 	// omSkewRemoteRef is the branch the installed om is meant to come from.
 	omSkewRemoteRef = "refs/heads/main"
@@ -557,10 +556,9 @@ func parseOMVersion(out string) (string, error) {
 }
 
 // omSkewRemoteSHA reads the om rig's origin/main tip: the url from the rig's
-// own origin remote, the tip from an ls-remote against that url. The url is
-// read from the rig's bare repository, not the mayor/rig clone, so the check
-// survives that clone's retirement. The read is never a fetch: a probe must
-// not move the rig's refs.
+// origin remote, read from its bare repository (<rig>/.repo.git), and the tip
+// from an ls-remote against that url. The read is never a fetch, so the rig's
+// refs do not move.
 func (d *Daemon) omSkewRemoteSHA(townRoot string) (string, error) {
 	if d.omHeadFn != nil {
 		return d.omHeadFn(townRoot)
