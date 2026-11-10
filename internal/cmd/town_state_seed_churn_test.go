@@ -283,33 +283,65 @@ func TestTownStateSeedRehearsalStillFailsOnARealProblem(t *testing.T) {
 	}
 }
 
-// TestTownStateSeedCutoverStaysStrictOnChurn: the cut-over form fails on the same
-// churn that a rehearsal tolerates, and names it as a difference.
-func TestTownStateSeedCutoverStaysStrictOnChurn(t *testing.T) {
+// TestTownStateSeedCutoverToleratesChurnAndRunsTheSettingsStep: the cut-over form
+// whose verify finds only churn, files a Mac-side writer changed during the copy,
+// prints it, exits clean and runs the settings step (gt-uq4bo4).
+func TestTownStateSeedCutoverToleratesChurnAndRunsTheSettingsStep(t *testing.T) {
 	t.Parallel()
 	town := cutoverTown(t)
+	copyStart := time.Date(2026, 11, 10, 11, 53, 0, 0, time.UTC)
 	env, fv, kube, out := cutoverSession(t, town)
+	env.now = (&manualClock{at: copyStart}).now
+	env.statHost = hostStat(town, copyStart, "daemon/maintenance_state.json")
 	fv.onRun = churnListing(t, fv, "alpha")
+	if err := runTownStateSeedIn(env); err != nil {
+		t.Fatalf("cut-over seed with only churn: %v\n%s", err, out.String())
+	}
+	for _, want := range []string{
+		"changed daemon/maintenance_state.json: changed since the copy",
+		"extra alpha/.repo.git/refs/heads/feature: changed since the copy",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("output does not contain %q:\n%s", want, out.String())
+		}
+	}
+	if !slices.ContainsFunc(kube.calls, func(a []string) bool { return podArgvIs(a, withTown(seedSettingsArgv, town)) }) {
+		t.Errorf("the cut-over settings step did not run after the churn: %q", kube.calls)
+	}
+}
+
+// TestTownStateSeedCutoverStillFailsOnARealProblemBesideChurn: one difference that
+// is neither newer than the copy nor in the churn list fails the cut-over form,
+// names it, still prints the churn, and never reaches the settings step.
+func TestTownStateSeedCutoverStillFailsOnARealProblemBesideChurn(t *testing.T) {
+	t.Parallel()
+	town := cutoverTown(t)
+	copyStart := time.Date(2026, 11, 10, 11, 53, 0, 0, time.UTC)
+	env, fv, kube, out := cutoverSession(t, town)
+	env.now = (&manualClock{at: copyStart}).now
+	env.statHost = hostStat(town, copyStart, "daemon/maintenance_state.json")
+	churn := churnListing(t, fv, "alpha")
+	fv.onRun = func(argv []string) {
+		churn(argv)
+		if slices.Equal(argv, townstate.ListArgv) {
+			writePodFile(t, fv.dir, "daemon/nested/notes.json", "edited in the pod\n")
+		}
+	}
 	err := runTownStateSeedIn(env)
 	var exitErr *ExitCodeError
 	if !errors.As(err, &exitErr) || exitErr.Code != 1 {
 		t.Fatalf("cut-over seed = %v, want exit 1\n%s", err, out.String())
 	}
-	for _, want := range []string{
-		"changed daemon/maintenance_state.json\n",
-		"extra alpha/.repo.git/refs/heads/feature\n",
-	} {
-		if !strings.Contains(out.String(), want) {
-			t.Errorf("output does not name %q as a difference:\n%s", want, out.String())
-		}
+	if !strings.Contains(out.String(), "changed daemon/nested/notes.json\n") {
+		t.Errorf("the real difference is not named as a problem:\n%s", out.String())
 	}
-	if strings.Contains(out.String(), "changed since the copy") {
-		t.Errorf("the cut-over form printed churn:\n%s", out.String())
+	if !strings.Contains(out.String(), "changed since the copy") {
+		t.Errorf("the churn is not printed beside the problem:\n%s", out.String())
 	}
 	if !strings.Contains(err.Error(), "partial and not to be used") {
 		t.Errorf("error does not say the claim is partial: %v", err)
 	}
 	if i := slices.IndexFunc(kube.calls, func(a []string) bool { return podArgvIs(a, withTown(seedSettingsArgv, town)) }); i >= 0 {
-		t.Errorf("the cut-over settings step ran after a failed verify: %q", kube.calls[i])
+		t.Errorf("the cut-over settings step ran after a real problem: %q", kube.calls[i])
 	}
 }
