@@ -3505,59 +3505,11 @@ func (g *Git) WorktreeAddExistingForce(path, branch string) error {
 	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
 }
 
-// submoduleReferencePath returns the mayor/rig path to use as --reference
-// for submodule init. For bare repos (.repo.git), this resolves to the
-// sibling mayor/rig directory which contains the initialized submodules.
-// Returns empty string if no suitable reference path exists or if the
-// reference repo is a shallow clone (git rejects shallow references).
+// submoduleReferencePath returns the --reference path for submodule init. It
+// is always empty: a rig's retired reference clone is no longer offered, so
+// submodule update runs without --reference and fetches from the remote.
 func (g *Git) submoduleReferencePath() string {
-	// For bare repos, the gitDir is <rig>/.repo.git
-	// The reference clone is at <rig>/mayor/rig/
-	if g.gitDir != "" {
-		rigDir := filepath.Dir(g.gitDir)
-		mayorRig := filepath.Join(rigDir, "mayor", "rig")
-		if isValidSubmoduleReference(g.runner(), mayorRig) {
-			return mayorRig
-		}
-	}
-
-	// For regular clones (workDir-based), the workDir itself could be mayor/rig
-	// but we don't want to reference ourselves. Check for a sibling .repo.git
-	// to find the rig root, then use mayor/rig.
-	if g.workDir != "" {
-		dir := g.workDir
-		for i := 0; i < 4; i++ {
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			if _, err := os.Stat(filepath.Join(parent, ".repo.git")); err == nil {
-				mayorRig := filepath.Join(parent, "mayor", "rig")
-				if mayorRig != g.workDir && isValidSubmoduleReference(g.runner(), mayorRig) {
-					return mayorRig
-				}
-				break
-			}
-			dir = parent
-		}
-	}
-
 	return ""
-}
-
-// isValidSubmoduleReference checks if a path is suitable as a --reference
-// for git submodule update. It must have a tracked .gitmodules and not be a
-// shallow clone (git rejects shallow repos as references).
-func isValidSubmoduleReference(run runFunc, repoPath string) bool {
-	if !hasTrackedGitmodules(run, repoPath) {
-		return false
-	}
-	// Check if shallow — git rev-parse --is-shallow-repository
-	out, _, err := run(gitCall{args: []string{"-C", repoPath, "rev-parse", "--is-shallow-repository"}})
-	if err != nil {
-		return false
-	}
-	return strings.TrimSpace(out) != "true"
 }
 
 // WorktreeRemove removes a worktree.
@@ -5508,7 +5460,7 @@ func initSubmodules(run runFunc, repoPath string, referencePath ...string) error
 
 // hasTrackedGitmodules checks whether .gitmodules exists on disk AND is tracked
 // by git. After a submodule-to-monorepo migration, .gitmodules may linger as an
-// untracked file (e.g., in a stale mayor/rig clone or bare repo worktree) even
+// untracked file (e.g., in a stale rig reference clone or bare repo worktree) even
 // though it has been removed from the repository. Checking only os.Stat would
 // incorrectly trigger submodule init on these stale artifacts.
 func hasTrackedGitmodules(run runFunc, repoPath string) bool {
