@@ -17,7 +17,7 @@ import (
 // a row that did not run, so it counts as a failure, and names what stopped it.
 func TestCheckGitSpeedIsNotRunWhenItCannotMeasure(t *testing.T) {
 	t.Parallel()
-	validBaseline := `{"rigs":{"gastown":{"status --short":0.1,"ls-remote --heads origin":0.1}}}`
+	validBaseline := `{"rigs":{"gastown":{"rev-list --count --max-count=2000 HEAD":0.1,"ls-remote --heads origin":0.1}}}`
 	tests := []struct {
 		name     string
 		files    map[string]string
@@ -29,8 +29,8 @@ func TestCheckGitSpeedIsNotRunWhenItCannotMeasure(t *testing.T) {
 		{
 			name:     "a git run past its bound is not run",
 			files:    map[string]string{gitBaselineRel: validBaseline},
-			runs:     map[string][]time.Duration{"status --short": {61 * time.Second, 61 * time.Second, 61 * time.Second}},
-			failRow:  "git speed gastown: status --short",
+			runs:     map[string][]time.Duration{"rev-list --count --max-count=2000 HEAD": {61 * time.Second, 61 * time.Second, 61 * time.Second}},
+			failRow:  "git speed gastown: rev-list --count --max-count=2000 HEAD",
 			wantText: "did not finish within 1m0s",
 		},
 		{
@@ -197,7 +197,7 @@ func TestCheckRecordBaselineRefusesAnUnencodableBaseline(t *testing.T) {
 	town := t.TempDir()
 	path := filepath.Join(town, "daemon", "town-state-git-baseline.json")
 	err := writeGitBaseline(path, GitBaseline{Rigs: map[string]map[string]float64{
-		"gastown": {"status --short": math.NaN()},
+		"gastown": {"rev-list --count --max-count=2000 HEAD": math.NaN()},
 	}})
 	if err == nil || !strings.Contains(err.Error(), "encoding daemon/town-state-git-baseline.json") {
 		t.Fatalf("err = %v, want the encoding refusal", err)
@@ -257,7 +257,7 @@ func TestCheckGitSpeedIsNotRunWhenTheRigListCannotBeRead(t *testing.T) {
 func TestCheckGitSpeedNamesAnUnregisteredRig(t *testing.T) {
 	t.Parallel()
 	baseline := &GitBaseline{Rigs: map[string]map[string]float64{
-		"gastown": {"status --short": 0.1, "ls-remote --heads origin": 0.1},
+		"gastown": {"rev-list --count --max-count=2000 HEAD": 0.1, "ls-remote --heads origin": 0.1},
 	}}
 	town := writeTown(t, townFiles{
 		daemonJSON: `{"patrols":{"landing_worker":{"enabled":true,"rigs":["gastown","nowhere"]}}}`,
@@ -275,7 +275,7 @@ func TestCheckGitSpeedNamesAnUnregisteredRig(t *testing.T) {
 	if DayOneFailures(rows) != 1 {
 		t.Errorf("DayOneFailures = %d, want the unregistered row counted and the registered rig passing", DayOneFailures(rows))
 	}
-	findRow(t, rows, "git speed gastown: status --short")
+	findRow(t, rows, "git speed gastown: rev-list --count --max-count=2000 HEAD")
 }
 
 // TestRecordGitBaselineRefusesAnUnregisteredRig: a baseline recorded over a
