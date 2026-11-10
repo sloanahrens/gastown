@@ -165,6 +165,11 @@ func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []s
 	switch {
 	case d.ReuseStatus == polecat.WorkstateReuseStatusParked:
 		return dashboard.StateParked, d.Reason
+	case item.Spawning:
+		// A seat inside its spawn grace is still starting: its git facts come
+		// from a host worktree that may be a leftover of an earlier run, so
+		// they do not read it as recovery yet (gt-915m14).
+		return dashboard.StateSpawning, "inside its spawn grace"
 	case d.NeedsRecovery:
 		return dashboard.StateRecovery, d.Reason
 	}

@@ -80,6 +80,45 @@ func TestNeedsOverseerDashPolecatStateNamesThePersonLabel(t *testing.T) {
 	}
 }
 
+// A seat inside its spawn grace is still starting: its git facts come from a
+// host worktree that may be a leftover of an earlier run, so a dirty worktree
+// does not make it recovery until the grace has passed (gt-915m14).
+func TestDashPolecatStateInsideSpawnGrace(t *testing.T) {
+	t.Parallel()
+	dirty := polecat.WorkstateDisposition{NeedsRecovery: true, Reason: "git-dirty"}
+	parked := polecat.WorkstateDisposition{ReuseStatus: polecat.WorkstateReuseStatusParked}
+	spawning := func(d polecat.WorkstateDisposition) polecatInventoryItem {
+		item := dashItem(polecat.StateIdle, d)
+		item.Spawning = true
+		return item
+	}
+	for _, tc := range []struct {
+		name   string
+		item   polecatInventoryItem
+		work   bool
+		ready  bool
+		labels []string
+		want   string
+		reason string
+	}{
+		{"dirty worktree inside grace reads spawning", spawning(dirty), true, false, nil,
+			dashboard.StateSpawning, "inside its spawn grace"},
+		{"dirty worktree past grace reads recovery", dashItem(polecat.StateIdle, dirty), true, false, nil,
+			dashboard.StateRecovery, "git-dirty"},
+		{"overseer label inside grace reads needs-overseer", spawning(dirty), true, false, []string{"needs-overseer"},
+			dashboard.StateNeedsOverseer, "the bead is labeled needs-overseer"},
+		{"queued bead inside grace reads queued", spawning(dirty), true, true, nil,
+			dashboard.StateQueued, "submitted for landing"},
+		{"parked inside grace reads parked", spawning(parked), true, false, nil,
+			dashboard.StateParked, ""},
+	} {
+		got, reason := dashPolecatState(tc.item, tc.work, tc.ready, tc.labels)
+		if got != tc.want || reason != tc.reason {
+			t.Errorf("%s: %q %q, want %q %q", tc.name, got, reason, tc.want, tc.reason)
+		}
+	}
+}
+
 func TestBuildDashPolecats(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
