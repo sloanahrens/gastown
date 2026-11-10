@@ -295,8 +295,8 @@ func (w *exportWalk) path(p, name string, info fs.FileInfo) error {
 		childPath := filepath.Join(p, child)
 		childInfo, err := w.opts.ops.lstat(childPath)
 		if errors.Is(err, fs.ErrNotExist) {
-			// Listed a moment ago and gone now: the daemon finished an atomic
-			// write and removed its temporary file.
+			// Listed a moment ago and gone now: the entry was removed between
+			// the listing and the stat.
 			w.sum.Skipped[SkipVanished]++
 			continue
 		}
@@ -346,7 +346,7 @@ func (w *exportWalk) file(p, name string, info fs.FileInfo) error {
 	// it was read is copied to a consistent prefix, and a file that shrank is
 	// an error rather than a short entry.
 	if _, err := io.CopyN(w.tw, f, hdr.Size); err != nil {
-		return fmt.Errorf("copying %s into the archive: %w", name, err)
+		return errors.Join(fmt.Errorf("copying %s into the archive: %w", name, err), f.Close())
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("closing %s after the copy: %w", name, err)
