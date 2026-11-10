@@ -170,11 +170,44 @@ func (s *birdReportStale) observed() []attention.Item {
 	return append([]attention.Item(nil), s.items...)
 }
 
+// birdReportsVisible reports whether the daemon can see at least one expected
+// reporter's report directory under the town root: the published directory
+// gt report publish writes, or the one a bird wrote before it. A reporter whose
+// name the resolver refuses has no directory to see.
+func birdReportsVisible(r birdReportsReads) bool {
+	runtimeDir := filepath.Join(r.townRoot, ".runtime")
+	for _, name := range r.reporters {
+		published, err := reportdir.Published(runtimeDir, name)
+		if err != nil {
+			continue
+		}
+		// Dir is the published directory when it holds a report and the old one
+		// otherwise, so checking both covers the two places a report can be.
+		resolved, err := reportdir.Dir(runtimeDir, name)
+		if err != nil {
+			continue
+		}
+		if birdReportDirExists(published) || birdReportDirExists(resolved) {
+			return true
+		}
+	}
+	return false
+}
+
+// birdReportDirExists reports whether path is a directory the daemon can stat.
+func birdReportDirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
 // runBirdReports is one check of the patrol: it reads every expected reporter's
 // daily report and replaces the items the attention collector sees. A setting
 // it cannot act on raises the check-failed item in their place: a check that
 // never ran tells the operator nothing about any report, and silence would
-// read as a town whose reports are all fresh.
+// read as a town whose reports are all fresh. So does a town where the daemon
+// sees no bird report directory at all: every reporter's report would read as
+// missing, and the queue would show each bird as one that failed to report when
+// the daemon cannot see the reports. In that case the check does not run.
 func (d *Daemon) runBirdReports() {
 	if !d.isPatrolActive("bird_reports") || d.config == nil {
 		return
@@ -187,6 +220,12 @@ func (d *Daemon) runBirdReports() {
 	if err != nil {
 		d.birdReportStale.mark([]attention.Item{birdReportCheckFailedItem(err)})
 		d.logger.Printf("bird_reports: not checking: %v", err)
+		return
+	}
+	if !birdReportsVisible(reads) {
+		notVisible := fmt.Errorf("no bird report directory is visible under %s", reads.townRoot)
+		d.birdReportStale.mark([]attention.Item{birdReportCheckFailedItem(fmt.Errorf("the reports directory is not visible to this daemon: %w", notVisible))})
+		d.logger.Printf("bird_reports: not checking: %v", notVisible)
 		return
 	}
 	items := birdReportStaleItems(d.clk().Now(), reads)
