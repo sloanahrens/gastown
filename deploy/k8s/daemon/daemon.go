@@ -973,11 +973,11 @@ func containerEnvironment(v Values) []EnvVar {
 		{Name: timeZoneEnv, Value: podEnvDecisions[timeZoneEnv].value},
 	}
 	// The forge-reading children default to the pod's own loopback, which is not
-	// Forgejo, so the live pod names the host the git credential helper reads
-	// (gt-s0homy). ForgeHost is validated as host:port before this runs. A
-	// rehearsal keeps its goldens unchanged: the cluster render gives it no
-	// --forge-host (town_cluster_render.go), so this branch is the live pod's.
-	if v.ForgeHost != "" && !v.Rehearsal {
+	// Forgejo, so a pod given a forge host names the host the git credential
+	// helper reads (gt-s0homy). ForgeHost is validated as host:port before this
+	// runs, and a rehearsal given one reads the same Forgejo, so it carries the
+	// name in every mode.
+	if v.ForgeHost != "" {
 		env = append(env, EnvVar{Name: forgejoAPIURLEnv, Value: "http://" + v.ForgeHost + "/api/v1"})
 	}
 	for _, name := range sortedKeys(v.Env) {
@@ -1449,7 +1449,7 @@ func (v Values) validateEnv() error {
 		case !envNameRE.MatchString(name):
 			return fmt.Errorf("Values.Env[%q]: want an environment variable name", name)
 		case name == forgejoAPIURLEnv:
-			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.ForgeHost, so a caller's value would be dropped", name)
+			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself from Values.ForgeHost when one is given, so a caller's value would be dropped", name)
 		case decision.value != "":
 			return fmt.Errorf("Values.Env[%q]: the pod sets this variable itself, so a caller's value would be dropped", name)
 		case decision.drop != "":

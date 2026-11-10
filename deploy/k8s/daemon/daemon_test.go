@@ -286,8 +286,8 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"an env key the pod sets itself", func(v *Values) { v.Env[timeZoneEnv] = "Europe/Berlin" }, `Values.Env["TZ"]`, ""},
 		{"an env key the pod drops", func(v *Values) { v.Env[cloudReportsEnv] = "/Users/Shared/gt-cloud/reports" }, `Values.Env["GT_CLOUD_REPORTS_DIR"]`, "drops"},
 		{"an env name with no decision", func(v *Values) { v.Env["SOME_UNDECIDED"] = "x" }, `Values.Env["SOME_UNDECIDED"]`, "no decision"},
-		{"the forge API root with a forge host", func(v *Values) { v.Env[forgejoAPIURLEnv] = "http://elsewhere:3000/api/v1" }, `Values.Env["FORGEJO_API_URL"]`, "sets this variable itself"},
-		{"the forge API root with no forge host", func(v *Values) { v.ForgeHost = ""; v.Env[forgejoAPIURLEnv] = "http://elsewhere:3000/api/v1" }, `Values.Env["FORGEJO_API_URL"]`, "sets this variable itself"},
+		{"the forge API root with a forge host", func(v *Values) { v.Env[forgejoAPIURLEnv] = "http://elsewhere:3000/api/v1" }, `Values.Env["FORGEJO_API_URL"]`, "from Values.ForgeHost when one is given"},
+		{"the forge API root with no forge host", func(v *Values) { v.ForgeHost = ""; v.Env[forgejoAPIURLEnv] = "http://elsewhere:3000/api/v1" }, `Values.Env["FORGEJO_API_URL"]`, "from Values.ForgeHost when one is given"},
 		{"a Dolt host the alias does not map", func(v *Values) { v.Env[doltServerHostEnv] = "localhost" }, `Values.Env["BEADS_DOLT_SERVER_HOST"]`, ""},
 		{"a backup root away from the claim", func(v *Values) { v.Env[doltBackupRootEnv] = "/elsewhere/dolt" }, `Values.Env["GT_DOLT_BACKUP_ROOT"]`, ""},
 		{"an env value that looks like a secret", func(v *Values) { v.Env[awsRegionEnv] = "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }, `Values.Env["AWS_REGION"]`, ""},
@@ -1435,29 +1435,33 @@ func envValuesNamed(pod Container, name string) []string {
 }
 
 // TestForgejoAPIURLFollowsTheForgeHost holds the forge API root to the forge
-// host: with a ForgeHost the container carries the one entry the forge-reading
-// children read, the host the git credential helper reads; with none the
-// container carries no FORGEJO_API_URL (gt-s0homy).
+// host in both render modes: with a ForgeHost the container carries the one
+// entry the forge-reading children read, the host the git credential helper
+// reads; with none it carries no FORGEJO_API_URL (gt-s0homy).
 func TestForgejoAPIURLFollowsTheForgeHost(t *testing.T) {
 	t.Parallel()
 
-	withHost := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec.Containers[0]
-	if got, want := envValuesNamed(withHost, forgejoAPIURLEnv), []string{"http://forgejo:3000/api/v1"}; !slices.Equal(got, want) {
-		t.Errorf("with ForgeHost forgejo:3000, the pod's %s = %q, want exactly %q", forgejoAPIURLEnv, got, want)
-	}
+	for _, mode := range []struct {
+		name   string
+		values func(*testing.T) Values
+	}{
+		{"the live pod", goldenValues},
+		{"a rehearsal", rehearsalValues},
+	} {
+		withHost := mode.values(t)
+		if withHost.ForgeHost == "" {
+			t.Fatalf("%s: the fixture carries no ForgeHost, so the check reads nothing", mode.name)
+		}
+		got := envValuesNamed(mustBuild(t, withHost).Deployment.Spec.Template.Spec.Containers[0], forgejoAPIURLEnv)
+		if want := []string{"http://" + withHost.ForgeHost + "/api/v1"}; !slices.Equal(got, want) {
+			t.Errorf("%s with ForgeHost %q: the pod's %s = %q, want exactly %q", mode.name, withHost.ForgeHost, forgejoAPIURLEnv, got, want)
+		}
 
-	v := goldenValues(t)
-	v.ForgeHost = ""
-	noHost := mustBuild(t, v).Deployment.Spec.Template.Spec.Containers[0]
-	if got := envValuesNamed(noHost, forgejoAPIURLEnv); len(got) != 0 {
-		t.Errorf("with no ForgeHost the pod carries %s = %q, want none", forgejoAPIURLEnv, got)
-	}
-
-	// A rehearsal's Values carry a forge host in the fixture, but the cluster
-	// render never gives one, and its goldens stay as they are.
-	rehearsal := mustBuild(t, rehearsalValues(t)).Deployment.Spec.Template.Spec.Containers[0]
-	if got := envValuesNamed(rehearsal, forgejoAPIURLEnv); len(got) != 0 {
-		t.Errorf("a rehearsal carries %s = %q, want none: its goldens stay unchanged", forgejoAPIURLEnv, got)
+		noHost := mode.values(t)
+		noHost.ForgeHost = ""
+		if got := envValuesNamed(mustBuild(t, noHost).Deployment.Spec.Template.Spec.Containers[0], forgejoAPIURLEnv); len(got) != 0 {
+			t.Errorf("%s with no ForgeHost carries %s = %q, want none", mode.name, forgejoAPIURLEnv, got)
+		}
 	}
 }
 
