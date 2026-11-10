@@ -530,6 +530,48 @@ func TestConfineRefusesOutsideRoot(t *testing.T) {
 	}
 }
 
+// TestConfineReportsUnresolvablePaths: a root or path that cannot be resolved is
+// refused, never confined to a guessed location.
+func TestConfineReportsUnresolvablePaths(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := os.Symlink(filepath.Join(dir, "nowhere.jsonl"), filepath.Join(dir, "dangling.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		root string
+		path string
+	}{
+		{"relative root", "relative", "feed.jsonl"},
+		{"missing root", filepath.Join(dir, "gone"), "feed.jsonl"},
+		{"missing directory", dir, "gone/feed.jsonl"},
+		{"dangling symlink", dir, "dangling.jsonl"},
+		{"name longer than a file name", dir, strings.Repeat("a", 300)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := Confine(tt.root, tt.path); err == nil {
+				t.Fatalf("Confine(%q, %q) resolved an unresolvable path", tt.root, tt.path)
+			}
+		})
+	}
+}
+
+// TestReadLinesReportsOpenFailure: an open that fails for a reason other than a
+// missing file is returned, not read as an empty page.
+func TestReadLinesReportsOpenFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "feed.jsonl"), "a\n")
+	open := func(string) (file, error) { return nil, errInjected }
+	_, err := read(open, confine(t, dir, "feed.jsonl"), Cursor{}, 10, 0)
+	if !errors.Is(err, errInjected) {
+		t.Fatalf("err = %v, want the open failure", err)
+	}
+}
+
 // TestReadLinesTakesOnlyConfinedFiles: a File reaches a read only through
 // Confine. The zero File, which no caller can name a path in, is refused.
 func TestReadLinesTakesOnlyConfinedFiles(t *testing.T) {

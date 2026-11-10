@@ -112,23 +112,23 @@ func openOS(path string) (file, error) {
 	return f, nil
 }
 
-// Confine returns the File at path under root, or an error when the path would
-// read outside root. It refuses a path with a ".." element, resolves symlinks in
-// root and in the path's directory, and refuses a file that resolves outside the
-// resolved root, including through a symlink. A missing file is accepted, since
-// a read of one is an empty page. Confine checks links as they are when it is
-// called; a link swapped in after that is not checked again.
+// Confine returns the File at path under root, which must be absolute, or an
+// error when the path would read outside root. It refuses a path with a ".."
+// element, resolves symlinks in root and in the path's directory, and refuses a
+// file that resolves outside the resolved root, including through a symlink. A
+// missing file is accepted, since a read of one is an empty page. Confine checks
+// links as they are when it is called; a link swapped in after that is not
+// checked again.
 func Confine(root, path string) (File, error) {
+	if !filepath.IsAbs(root) {
+		return File{}, fmt.Errorf("root %q is not an absolute path", root)
+	}
 	for _, el := range strings.FieldsFunc(path, isSeparator) {
 		if el == ".." {
 			return File{}, fmt.Errorf("path %q has a .. element", path)
 		}
 	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return File{}, fmt.Errorf("resolving root %s: %w", root, err)
-	}
-	realRoot, err := filepath.EvalSymlinks(absRoot)
+	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return File{}, fmt.Errorf("resolving root %s: %w", root, err)
 	}
