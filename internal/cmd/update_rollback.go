@@ -15,6 +15,7 @@ import (
 // newUpdateRollbackCmd builds `gt update rollback` over seams.
 func newUpdateRollbackCmd(seams updateSeams) *cobra.Command {
 	var podContext, podNamespace string
+	var podInCluster bool
 	c := &cobra.Command{
 		Use:   "rollback",
 		Short: "Put the daemon back on the image pair its last digest install replaced",
@@ -27,6 +28,7 @@ them and must come back on their commit within the restart bound.
 --pod-context and --pod-namespace, given together, name the Deployment of a
 daemon that runs as a pod: the pair is restored to that Deployment, and the
 daemon's build is read from its pod rather than the state file.
+--pod-in-cluster with --pod-namespace names the same Deployment with no context.
 
 The command refuses, and changes nothing, when no digest install has been
 recorded, when the recorded pair is the one the daemon already runs, and when
@@ -37,20 +39,21 @@ restore failed, 5 when another update run holds the lock.`,
 		Args:         cobra.NoArgs,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdateRollback(cmd, seams, podContext, podNamespace)
+			return runUpdateRollback(cmd, seams, podContext, podNamespace, podInCluster)
 		},
 	}
 	c.Flags().StringVar(&podContext, "pod-context", "", podContextUsage)
 	c.Flags().StringVar(&podNamespace, "pod-namespace", "", podNamespaceUsage)
+	c.Flags().BoolVar(&podInCluster, "pod-in-cluster", false, podInClusterUsage)
 	return c
 }
 
 // runUpdateRollback restores the recorded pair under the update lock, so a
 // rollback never moves the daemon while a run is installing. The pod flags name
 // the Deployment the pair is restored to, as they do for gt update --images.
-func runUpdateRollback(cmd *cobra.Command, seams updateSeams, podContext, podNamespace string) error {
+func runUpdateRollback(cmd *cobra.Command, seams updateSeams, podContext, podNamespace string, podInCluster bool) error {
 	errOut := cmd.ErrOrStderr()
-	pod, err := podDaemonFromFlags(podContext, podNamespace)
+	pod, err := podDaemonFromFlags(podContext, podNamespace, podInCluster, seams.inPod())
 	if err != nil {
 		return fmt.Errorf("gt update rollback: %w", err)
 	}

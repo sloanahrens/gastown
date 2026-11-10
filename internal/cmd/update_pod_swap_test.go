@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -347,4 +348,68 @@ func TestPodDaemonSwapFailureNamesTheStepNotTheOutput(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPodDaemonSwapInClusterOmitsContext: an InCluster swap runs the patch and
+// the rollout wait with the namespace and no --context, and a swap that names
+// neither a context nor InCluster, or both, is refused before any command runs.
+func TestPodDaemonSwapInClusterOmitsContext(t *testing.T) {
+	t.Parallel()
+
+	t.Run("one Apply patches and waits with the namespace and no --context", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{}
+		swap := podSwapFor(fake)
+		swap.Context = ""
+		swap.InCluster = true
+
+		if err := swap.Apply(context.Background(), podSwapPair); err != nil {
+			t.Fatalf("Apply: %v", err)
+		}
+		if len(fake.calls) != 2 {
+			t.Fatalf("commands = %+v, want the patch then the rollout wait", fake.calls)
+		}
+		for _, c := range fake.calls {
+			if containsArg(c.args, "--context") {
+				t.Errorf("command %v carries --context, want none in-cluster", c.args)
+			}
+			if !slices.Equal(c.args[:2], []string{"-n", podSwapNamespace}) {
+				t.Errorf("command %v does not start with the namespace", c.args)
+			}
+		}
+		if !containsArg(fake.calls[0].args, "patch") {
+			t.Errorf("first command %v is not the patch", fake.calls[0].args)
+		}
+		if !containsArg(fake.calls[1].args, "rollout") {
+			t.Errorf("second command %v is not the rollout wait", fake.calls[1].args)
+		}
+	})
+
+	t.Run("a swap with neither a context nor InCluster is refused before any command runs", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{}
+		swap := podSwapFor(fake)
+		swap.Context = ""
+
+		if err := swap.Apply(context.Background(), podSwapPair); err == nil {
+			t.Fatal("Apply accepted a swap with no context, want an error")
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("commands run = %+v, want none", fake.calls)
+		}
+	})
+
+	t.Run("a swap that names both a context and InCluster is refused before any command runs", func(t *testing.T) {
+		t.Parallel()
+		fake := &podSwapFake{}
+		swap := podSwapFor(fake)
+		swap.InCluster = true
+
+		if err := swap.Apply(context.Background(), podSwapPair); err == nil || !strings.Contains(err.Error(), "both a kubectl context and the in-cluster") {
+			t.Fatalf("Apply error = %v, want the context and in-cluster refusal", err)
+		}
+		if len(fake.calls) != 0 {
+			t.Errorf("commands run = %+v, want none", fake.calls)
+		}
+	})
 }

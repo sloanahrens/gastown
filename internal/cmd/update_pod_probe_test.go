@@ -29,7 +29,7 @@ func TestPodDaemonCommitReadsTheVersionLine(t *testing.T) {
 	t.Parallel()
 	run := &podProbeRun{output: "gt version abc1234 (built 2026-11-08T10:00:00Z)\n"}
 
-	commit, err := podDaemonCommit(context.Background(), run.run, "town-ctx", "gastown", "daemon")
+	commit, err := podDaemonCommit(context.Background(), run.run, "town-ctx", "gastown", "daemon", false)
 	if err != nil {
 		t.Fatalf("podDaemonCommit: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestPodDaemonCommitRunsTheTrimmedArguments(t *testing.T) {
 	t.Parallel()
 	run := &podProbeRun{output: "gt version abc1234\n"}
 
-	if _, err := podDaemonCommit(context.Background(), run.run, " town-ctx ", "\tgastown ", " daemon"); err != nil {
+	if _, err := podDaemonCommit(context.Background(), run.run, " town-ctx ", "\tgastown ", " daemon", false); err != nil {
 		t.Fatalf("podDaemonCommit: %v", err)
 	}
 	want := []string{"kubectl", "--context", "town-ctx", "-n", "gastown", "exec", "deployment/daemon", "--", "gt", "version"}
@@ -88,7 +88,7 @@ func TestPodDaemonCommitRefusesBadOutput(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			run := tc.run
-			commit, err := podDaemonCommit(context.Background(), run.run, "town-ctx", "gastown", "daemon")
+			commit, err := podDaemonCommit(context.Background(), run.run, "town-ctx", "gastown", "daemon", false)
 			if err == nil {
 				t.Fatalf("podDaemonCommit = %q, want an error", commit)
 			}
@@ -123,7 +123,7 @@ func TestPodDaemonCommitRefusesEmptyArguments(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			run := &podProbeRun{output: "gt version abc1234\n"}
-			if _, err := podDaemonCommit(context.Background(), run.run, tc.kubeContext, tc.ns, tc.deployment); err == nil {
+			if _, err := podDaemonCommit(context.Background(), run.run, tc.kubeContext, tc.ns, tc.deployment, false); err == nil {
 				t.Fatal("podDaemonCommit accepted the argument, want an error")
 			}
 			if len(run.calls) != 0 {
@@ -131,4 +131,64 @@ func TestPodDaemonCommitRefusesEmptyArguments(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestPodDaemonCommitInClusterOmitsContext: with inCluster the version read has
+// no --context, so kubectl uses the pod's service account. A namespace that is
+// blank or reads as a flag, or a context named with inCluster, is refused before
+// any command runs.
+func TestPodDaemonCommitInClusterOmitsContext(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the version read runs in the pod's cluster with no --context", func(t *testing.T) {
+		t.Parallel()
+		run := &podProbeRun{output: "gt version abc1234\n"}
+
+		commit, err := podDaemonCommit(context.Background(), run.run, "", " gastown ", "daemon", true)
+		if err != nil {
+			t.Fatalf("podDaemonCommit: %v", err)
+		}
+		if commit != "abc1234" {
+			t.Errorf("commit = %q, want abc1234", commit)
+		}
+		want := []string{"kubectl", "-n", "gastown", "exec", "deployment/daemon", "--", "gt", "version"}
+		if len(run.calls) != 1 || !slices.Equal(run.calls[0], want) {
+			t.Errorf("commands = %v, want exactly %v", run.calls, want)
+		}
+	})
+
+	t.Run("a namespace that is blank or reads as a flag is refused before any command", func(t *testing.T) {
+		t.Parallel()
+		cases := []struct {
+			name, ns string
+		}{
+			{name: "empty namespace", ns: ""},
+			{name: "blank namespace", ns: "   "},
+			{name: "namespace reads as a flag", ns: "-A"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				t.Parallel()
+				run := &podProbeRun{output: "gt version abc1234\n"}
+				if _, err := podDaemonCommit(context.Background(), run.run, "", tc.ns, "daemon", true); err == nil {
+					t.Fatal("podDaemonCommit accepted the namespace, want an error")
+				}
+				if len(run.calls) != 0 {
+					t.Errorf("commands run = %v, want none", run.calls)
+				}
+			})
+		}
+	})
+
+	t.Run("a context named with inCluster is refused before any command", func(t *testing.T) {
+		t.Parallel()
+		run := &podProbeRun{output: "gt version abc1234\n"}
+		_, err := podDaemonCommit(context.Background(), run.run, "town-ctx", "gastown", "daemon", true)
+		if err == nil || !strings.Contains(err.Error(), "both a kube context and the in-cluster") {
+			t.Fatalf("podDaemonCommit error = %v, want the context and in-cluster refusal", err)
+		}
+		if len(run.calls) != 0 {
+			t.Errorf("commands run = %v, want none", run.calls)
+		}
+	})
 }
