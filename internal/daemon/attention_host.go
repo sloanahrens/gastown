@@ -487,16 +487,40 @@ func (s *attentionSources) collectHostNodeDisk(ctx context.Context) ([]attention
 		}
 	}
 	// A node that could not be read may hold a rule it raised on an earlier
-	// tick, and its last reading is not a clear. The rule item the fresh
-	// readings raise replaces the held one of the same key.
+	// tick, and its last reading is not a clear. One rule stands at a time: of
+	// the fresh rule and the held ones, the worst level is kept, so a held
+	// warning never sits beside a fresh critical, nor a fresh warning beside a
+	// held critical (gt-x1po96, review round 3).
 	if len(probes) > 0 {
 		for _, held := range prevOfKind(s.prev, attention.KindHostNodeDisk) {
-			if !hasItemKey(rated, held.Key) {
-				rated = append(rated, held)
-			}
+			rated = worseNodeDiskRule(rated, held)
 		}
 	}
 	return append(rated, probes...), nil
+}
+
+// worseNodeDiskRule returns rated with candidate folded in: the single rule item
+// at the worse level of the two (critical over warning), the existing one on a
+// tie, so the result never holds two node-disk rules.
+func worseNodeDiskRule(rated []attention.Item, candidate attention.Item) []attention.Item {
+	if len(rated) == 0 {
+		return []attention.Item{candidate}
+	}
+	if nodeDiskRuleLevel(candidate.Key) > nodeDiskRuleLevel(rated[0].Key) {
+		return []attention.Item{candidate}
+	}
+	return rated
+}
+
+// nodeDiskRuleLevel is the level a node-disk rule key stands for.
+func nodeDiskRuleLevel(key string) int {
+	switch key {
+	case hostRuleNodeDiskCrit:
+		return nodeDiskLevelCrit
+	case hostRuleNodeDiskWarn:
+		return nodeDiskLevelWarn
+	}
+	return nodeDiskLevelQuiet
 }
 
 // nodeDiskItem is the rule item a node's disk raises, if its level is over a

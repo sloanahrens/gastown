@@ -199,6 +199,8 @@ func TestCollectNodeDiskOneUnreadableNodeStillRulesTheOthers(t *testing.T) {
 	probeKey := hostProbeFailedPrefix + hostProbeNodeDisk + " " + worker
 	controlProbeKey := hostProbeFailedPrefix + hostProbeNodeDisk + " " + control
 	held := attention.Item{Key: hostRuleNodeDiskCrit, Kind: attention.KindHostNodeDisk, Severity: attention.SeverityHigh, Summary: "held"}
+	heldWarn := attention.Item{Key: hostRuleNodeDiskWarn, Kind: attention.KindHostNodeDisk, Severity: attention.SeverityLow, Summary: "held warning"}
+	warn := hostDisk{UsedPct: 85, FreeGB: 150}
 	tests := []struct {
 		name  string
 		reads []hostNodeRead
@@ -236,6 +238,18 @@ func TestCollectNodeDiskOneUnreadableNodeStillRulesTheOthers(t *testing.T) {
 			name:  "two unreadable nodes raise one probe item each",
 			reads: []hostNodeRead{nodeReadFailed(worker), nodeReadFailed(control)},
 			want:  []string{probeKey, controlProbeKey},
+		},
+		{
+			name:  "a held warning does not sit beside a fresh critical",
+			reads: []hostNodeRead{nodeRead(control, crit), nodeReadFailed(worker)},
+			prev:  []attention.Item{heldWarn},
+			want:  []string{hostRuleNodeDiskCrit, probeKey},
+		},
+		{
+			name:  "a fresh warning does not sit beside a held critical, which stands",
+			reads: []hostNodeRead{nodeRead(control, warn), nodeReadFailed(worker)},
+			prev:  []attention.Item{held},
+			want:  []string{hostRuleNodeDiskCrit, probeKey},
 		},
 	}
 	for _, tt := range tests {
