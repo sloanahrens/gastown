@@ -719,7 +719,8 @@ func townImagesRegistry(t *testing.T) imagevalues.Registry {
 	var rigConfig struct {
 		MergeQueue struct {
 			Forgejo struct {
-				RemoteURL string `json:"remote_url"`
+				RemoteURL     string `json:"remote_url"`
+				RegistryOwner string `json:"registry_owner"`
 			} `json:"forgejo"`
 		} `json:"merge_queue"`
 	}
@@ -737,6 +738,11 @@ func townImagesRegistry(t *testing.T) imagevalues.Registry {
 	u, err := url.Parse(remote)
 	if err != nil || u.Host == "" {
 		t.Fatalf("the town's rig settings name no registry host: %q", remote)
+	}
+	// The rig's registry_owner, when set, replaces the remote's owner: the registry
+	// bot can write only its own namespace (gt update images reads the same rule).
+	if named := strings.TrimSpace(rigConfig.MergeQueue.Forgejo.RegistryOwner); named != "" {
+		owner = named
 	}
 	return imagevalues.Registry{Scheme: u.Scheme, Host: u.Host, Owner: owner}
 }
