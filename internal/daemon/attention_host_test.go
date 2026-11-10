@@ -22,9 +22,11 @@ type fakeHost struct {
 	diskErr error
 	// node is the control node's disk and nodeErr the read's failure. A zero
 	// node with no error is a town with no control cluster: a reading always
-	// names its node.
+	// names its node. nodeReads, when set, is the per-node reads in full, for a
+	// test where one node fails and another reads.
 	node                hostNodeDisk
 	nodeErr             error
+	nodeReads           []hostNodeRead
 	nodeCalls           int
 	memFree             float64
 	memErr              error
@@ -59,8 +61,8 @@ func noForgejo() (string, error) { return "", nil }
 
 // noNodeDisk is a town with no control node read: the production probe built
 // over it reports the node disk not configured.
-func noNodeDisk(context.Context) (hostNodeDisk, error) {
-	return hostNodeDisk{}, errHostNodeNotConfigured
+func noNodeDisk(context.Context) ([]hostNodeRead, error) {
+	return nil, errHostNodeNotConfigured
 }
 
 // healthyHost is a host no rule fires on.
@@ -78,12 +80,20 @@ func (f *fakeHost) Disk() (hostDisk, error) {
 	return f.disk, f.diskErr
 }
 
-func (f *fakeHost) NodeDisk(context.Context) (hostNodeDisk, error) {
+// NodeDisks answers with nodeReads when a test sets them, and otherwise with the
+// one node in node: a zero node with no error is a town with no control cluster.
+func (f *fakeHost) NodeDisks(context.Context) ([]hostNodeRead, error) {
 	f.nodeCalls++
-	if f.nodeErr == nil && f.node.Node == "" {
-		return hostNodeDisk{}, errHostNodeNotConfigured
+	if f.nodeReads != nil {
+		return f.nodeReads, nil
 	}
-	return f.node, f.nodeErr
+	if f.nodeErr != nil {
+		return nil, f.nodeErr
+	}
+	if f.node.Node == "" {
+		return nil, errHostNodeNotConfigured
+	}
+	return []hostNodeRead{{hostNodeDisk: f.node}}, nil
 }
 
 func (f *fakeHost) MemFreePct(context.Context) (float64, error) {

@@ -33,23 +33,23 @@ type fileHostProbes struct {
 	// now is the reader's clock, so a test decides what the file's age is.
 	now    func() time.Time
 	maxAge time.Duration
-	// nodeDisk reads the control node's disk through the control cluster. The
-	// node is not on the host's probe file: the daemon container reads it
+	// nodeDisks reads the control nodes' disks through the control cluster. The
+	// nodes are not on the host's probe file: the daemon container reads them
 	// through the cluster API, as the control-disk patrol does.
-	nodeDisk func(context.Context) (hostNodeDisk, error)
+	nodeDisks func(context.Context) ([]hostNodeRead, error)
 }
 
 // newFileHostProbes returns the file-backed host reads for the town rooted at
 // townRoot. forgejoBaseURL is the town's Forgejo origin, which the health read
 // asks over the network because the probe file the host agent publishes has no
-// say in it. nodeDisk is the control node's disk read (controlNodeDisk).
-func newFileHostProbes(townRoot string, forgejoBaseURL func() (string, error), nodeDisk func(context.Context) (hostNodeDisk, error)) fileHostProbes {
+// say in it. nodeDisks is the control nodes' disk read (controlNodeDisk).
+func newFileHostProbes(townRoot string, forgejoBaseURL func() (string, error), nodeDisks func(context.Context) ([]hostNodeRead, error)) fileHostProbes {
 	return fileHostProbes{
 		systemHostProbes: systemHostProbes{townRoot: townRoot, forgejoBaseURL: forgejoBaseURL},
 		path:             filepath.Join(townRoot, ".runtime", "host", "probes.json"),
 		now:              time.Now,
 		maxAge:           fileHostProbeMaxAge,
-		nodeDisk:         nodeDisk,
+		nodeDisks:        nodeDisks,
 	}
 }
 
@@ -84,20 +84,20 @@ func (p fileHostProbes) Disk() (hostDisk, error) {
 	return hostDisk{UsedPct: pr.Disk.Value.UsedPct, FreeGB: pr.Disk.Value.FreeGB}, nil
 }
 
-// NodeDisk reads the control node's disk through the control cluster. A probe
+// NodeDisks reads the control nodes' disks through the control cluster. A probe
 // built with no node read is a wiring error, never a quiet disk. Container mode
-// runs in the control cluster, so a town with no kubernetes runner to read it
+// runs in the control cluster, so a town with no kubernetes runner to read them
 // through is a failed read here, not the not-configured sentinel that raises
 // nothing (gt-x1po96).
-func (p fileHostProbes) NodeDisk(ctx context.Context) (hostNodeDisk, error) {
-	if p.nodeDisk == nil {
-		return hostNodeDisk{}, errors.New("the file host probes were built with no control node read")
+func (p fileHostProbes) NodeDisks(ctx context.Context) ([]hostNodeRead, error) {
+	if p.nodeDisks == nil {
+		return nil, errors.New("the file host probes were built with no control node read")
 	}
-	n, err := p.nodeDisk(ctx)
+	reads, err := p.nodeDisks(ctx)
 	if errors.Is(err, errHostNodeNotConfigured) {
-		return hostNodeDisk{}, errors.New("container mode reads the control node's disk, but the tier sweep runner is not a kubernetes runner, so there is no control cluster to read it through")
+		return nil, errors.New("container mode reads the control node's disk, but the tier sweep runner is not a kubernetes runner, so there is no control cluster to read it through")
 	}
-	return n, err
+	return reads, err
 }
 
 func (p fileHostProbes) MemFreePct(context.Context) (float64, error) {

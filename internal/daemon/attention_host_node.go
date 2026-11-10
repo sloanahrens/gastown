@@ -31,6 +31,15 @@ type hostNodeDisk struct {
 	Disk hostDisk
 }
 
+// hostNodeRead is one control node's read: its reading, or the error that
+// stopped it. Each node is ruled on its own figures, and a node that could not
+// be read is its own info item, so one node's failure never withholds another
+// node's alarm (gt-x1po96).
+type hostNodeRead struct {
+	hostNodeDisk
+	Err error
+}
+
 // nodeStatsImageFs is the part of the kubelet stats summary the node disk
 // reading takes: the node's name and the image filesystem its container runtime
 // reports. The byte counts stay json.Number, so an absent field is not read as
@@ -174,24 +183,25 @@ func parseControlNodeNames(out []byte) ([]string, error) {
 // controlNodeDisk reads the control node's image filesystem through the control
 // cluster the tier sweep runner names: the same context the CI cache trim
 // resolves. A town with no kubernetes runner has no control node and reports
-// errHostNodeNotConfigured. A cluster with more than one node reads each, and
-// the fullest answers; a node that cannot be read fails the whole read, so the
-// probe is an info item and no node is judged on another's reading.
+// errHostNodeNotConfigured. The read returns one hostNodeRead per node: a node
+// whose summary cannot be read carries its own error, and the other nodes'
+// readings are still returned, so each node is ruled on its own figures.
+// Only a failed listing fails the whole read.
 //
 // The node names are listed once per controlNodeNameReuse and held between
-// ticks; every tick reads each node's summary fresh. A failed read drops the
-// held names, so a node that left the cluster is not read again for the rest
-// of the window.
+// ticks; every tick reads each node's summary fresh. A tick in which any node's
+// read fails drops the held names, so a node that left the cluster is not read
+// again for the rest of the window.
 //
-// Nothing the kubectl run printed to stderr enters an error: a credential or a
-// path in it would reach the queue (rule 11).
-func (d *Daemon) controlNodeDisk(ctx context.Context) (hostNodeDisk, error) {
+// Nothing the kubectl run printed to stderr enters an error, so a credential or
+// a path in it never reaches the queue.
+func (d *Daemon) controlNodeDisk(ctx context.Context) ([]hostNodeRead, error) {
 	kubeContext, configured, err := ciCacheTrimContext(d.patrolConfig)
 	if !configured {
-		return hostNodeDisk{}, errHostNodeNotConfigured
+		return nil, errHostNodeNotConfigured
 	}
 	if err != nil {
-		return hostNodeDisk{}, err
+		return nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
 	defer cancel()
@@ -201,38 +211,38 @@ func (d *Daemon) controlNodeDisk(ctx context.Context) (hostNodeDisk, error) {
 	if names == nil {
 		listing, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, "get", "nodes", "-o", "name")
 		if err != nil {
-			return hostNodeDisk{}, fmt.Errorf("listing the control cluster's nodes: %w", err)
+			return nil, fmt.Errorf("listing the control cluster's nodes: %w", err)
 		}
 		names, err = parseControlNodeNames(listing)
 		if err != nil {
-			return hostNodeDisk{}, err
+			return nil, err
 		}
 		d.controlNodes.hold(kubeContext, names, now)
 	}
-	var (
-		worst    hostNodeDisk
-		found    bool
-		failures []error
-	)
+	reads := make([]hostNodeRead, 0, len(names))
+	failed := false
 	for _, name := range names {
-		summary, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
-			"get", "--raw", "/api/v1/nodes/"+name+"/proxy/stats/summary")
+		n, err := d.readNodeDisk(ctx, kubeconfig, kubeContext, name)
 		if err != nil {
-			failures = append(failures, fmt.Errorf("node %s: %w", name, err))
+			failed = true
+			reads = append(reads, hostNodeRead{hostNodeDisk: hostNodeDisk{Node: name}, Err: err})
 			continue
 		}
-		n, err := parseNodeStatsImageFs(summary)
-		if err != nil {
-			failures = append(failures, fmt.Errorf("node %s: %w", name, err))
-			continue
-		}
-		if !found || n.Disk.UsedPct > worst.Disk.UsedPct {
-			worst, found = n, true
-		}
+		reads = append(reads, hostNodeRead{hostNodeDisk: n})
 	}
-	if len(failures) > 0 {
+	if failed {
 		d.controlNodes.forget()
-		return hostNodeDisk{}, errors.Join(failures...)
 	}
-	return worst, nil
+	return reads, nil
+}
+
+// readNodeDisk reads one node's image filesystem: its stats summary through the
+// control context, parsed.
+func (d *Daemon) readNodeDisk(ctx context.Context, kubeconfig, kubeContext, name string) (hostNodeDisk, error) {
+	summary, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
+		"get", "--raw", "/api/v1/nodes/"+name+"/proxy/stats/summary")
+	if err != nil {
+		return hostNodeDisk{}, fmt.Errorf("reading the stats summary: %w", err)
+	}
+	return parseNodeStatsImageFs(summary)
 }
