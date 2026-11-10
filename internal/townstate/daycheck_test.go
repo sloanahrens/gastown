@@ -202,10 +202,10 @@ func TestCheckGitSpeedAgainstTheBaseline(t *testing.T) {
 			name:     "a median over twice the baseline fails, naming the rig",
 			baseline: baseline(0.10, 2.0),
 			runs: map[string][]time.Duration{
-				"rev-list --count --max-count=2000 HEAD": {250 * time.Millisecond, 250 * time.Millisecond, 250 * time.Millisecond},
+				"rev-list --count --max-count=2000 HEAD": {500 * time.Millisecond, 500 * time.Millisecond, 500 * time.Millisecond},
 			},
 			failRow:  "git speed gastown: rev-list --count --max-count=2000 HEAD",
-			wantText: "rig gastown takes 0.25s, over 2.0x",
+			wantText: "rig gastown takes 0.50s, over 2.0x",
 		},
 		{
 			name:     "one slow run does not fail a median of three",
