@@ -619,6 +619,7 @@ func TestSlowTestsListedFromTheStream(t *testing.T) {
 		"tierwall: slow tests",
 		"tierwall:   github.com/steveyegge/gastown/internal/daemon TestLong 31s",
 		"tierwall:   github.com/steveyegge/gastown/internal/daemon TestFive 5s",
+		"tierwall: phases github.com/steveyegge/gastown/internal/daemon serial 37s parallel 0s",
 		"tierwall: tier 37s bar 90s OK",
 		"",
 	}, "\n")
@@ -722,5 +723,131 @@ func TestSlowTestsTiesGoByPackageThenName(t *testing.T) {
 	}, "\n")
 	if out.String() != want {
 		t.Errorf("stdout = %q, want %q", out.String(), want)
+	}
+}
+
+// phaseStream is one package's go test -json stream for the phases tests: the
+// serial lines given, then three tests that pause, run and pass, then the
+// package's own pass with a 25s wall.
+func phaseStream(serial ...string) string {
+	const p = `"Package":"example.com/fx/a"`
+	lines := append([]string(nil), serial...)
+	lines = append(lines,
+		`{"Action":"pause",`+p+`,"Test":"TestParA"}`,
+		`{"Action":"pause",`+p+`,"Test":"TestParB"}`,
+		`{"Action":"pause",`+p+`,"Test":"TestParC"}`,
+		`{"Action":"cont",`+p+`,"Test":"TestParA"}`,
+		`{"Action":"cont",`+p+`,"Test":"TestParB"}`,
+		`{"Action":"cont",`+p+`,"Test":"TestParC"}`,
+		`{"Action":"pass",`+p+`,"Test":"TestParA","Elapsed":8}`,
+		`{"Action":"pass",`+p+`,"Test":"TestParB","Elapsed":9}`,
+		`{"Action":"pass",`+p+`,"Test":"TestParC","Elapsed":7}`,
+		`{"Action":"pass",`+p+`,"Elapsed":25}`,
+		"",
+	)
+	return strings.Join(lines, "\n")
+}
+
+// TestPhasesSplitSerialFromParallel pins the phases line on fixed streams. In
+// the first, two top-level tests that never pause run 4s and 6s and three
+// tests pause, so serial is the 10s of the two and parallel the 15s the rest of
+// the 25s wall holds. A subtest's time sits inside its parent's, so the
+// subtest does not add to serial. A package whose serial tests outrun its wall
+// prints parallel 0s, never a negative. Mutation: count the paused tests as
+// serial and the first row reads serial 34s; ignore the pause event and every
+// test reads serial; count the subtest and the second row reads serial 13s;
+// drop the floor and the third row prints a negative parallel.
+func TestPhasesSplitSerialFromParallel(t *testing.T) {
+	t.Parallel()
+	const p = `"Package":"example.com/fx/a"`
+	for _, tc := range []struct {
+		name   string
+		stream string
+		want   string
+	}{
+		{
+			name: "serial tests split from the parallel rest",
+			stream: phaseStream(
+				`{"Action":"pass",`+p+`,"Test":"TestSerialA","Elapsed":4}`,
+				`{"Action":"pass",`+p+`,"Test":"TestSerialB","Elapsed":6}`,
+			),
+			want: "tierwall: phases example.com/fx/a serial 10s parallel 15s",
+		},
+		{
+			name: "a subtest is counted inside its parent",
+			stream: phaseStream(
+				`{"Action":"pass",`+p+`,"Test":"TestSerialA/child","Elapsed":3}`,
+				`{"Action":"pass",`+p+`,"Test":"TestSerialA","Elapsed":4}`,
+				`{"Action":"pass",`+p+`,"Test":"TestSerialB","Elapsed":6}`,
+			),
+			want: "tierwall: phases example.com/fx/a serial 10s parallel 15s",
+		},
+		{
+			name: "serial past the wall leaves no parallel phase",
+			stream: phaseStream(
+				`{"Action":"pass",`+p+`,"Test":"TestSerialA","Elapsed":20}`,
+				`{"Action":"pass",`+p+`,"Test":"TestSerialB","Elapsed":15}`,
+			),
+			want: "tierwall: phases example.com/fx/a serial 35s parallel 0s",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out, errOut bytes.Buffer
+			code := run([]string{"-slow-tests"}, strings.NewReader(tc.stream), &out, &errOut, fixedHost())
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0: a passing stream is go test's verdict", code)
+			}
+			if !strings.Contains(out.String(), tc.want+"\n") {
+				t.Errorf("stdout = %q, want it to hold %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// TestPhasesOnlyForTheSlowestThree pins which packages get a phases line: the
+// three slowest of a five-package stream, and none without -slow-tests. The
+// packages run no tests, so each one's serial is 0s and its parallel is its
+// whole wall. Mutation: drop the cap and all five packages get a line; drop
+// the flag check and the three lines print without -slow-tests.
+func TestPhasesOnlyForTheSlowestThree(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`{"Action":"pass","Package":"example.com/fx/a","Elapsed":50}`,
+		`{"Action":"pass","Package":"example.com/fx/b","Elapsed":40}`,
+		`{"Action":"pass","Package":"example.com/fx/c","Elapsed":30}`,
+		`{"Action":"pass","Package":"example.com/fx/d","Elapsed":20}`,
+		`{"Action":"pass","Package":"example.com/fx/e","Elapsed":10}`,
+		"",
+	}, "\n")
+	phaseLines := func(stdout string) string {
+		var got []string
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.HasPrefix(line, "tierwall: phases ") {
+				got = append(got, line)
+			}
+		}
+		return strings.Join(got, "\n")
+	}
+
+	var out, errOut bytes.Buffer
+	if code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost()); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr %q", code, errOut.String())
+	}
+	want := strings.Join([]string{
+		"tierwall: phases example.com/fx/a serial 0s parallel 50s",
+		"tierwall: phases example.com/fx/b serial 0s parallel 40s",
+		"tierwall: phases example.com/fx/c serial 0s parallel 30s",
+	}, "\n")
+	if got := phaseLines(out.String()); got != want {
+		t.Errorf("phase lines = %q, want %q", got, want)
+	}
+
+	out.Reset()
+	if code := run(nil, strings.NewReader(stream), &out, &errOut, fixedHost()); code != 0 {
+		t.Fatalf("exit code = %d, want 0 without -slow-tests; stderr %q", code, errOut.String())
+	}
+	if got := phaseLines(out.String()); got != "" {
+		t.Errorf("phase lines without -slow-tests = %q, want none", got)
 	}
 }
