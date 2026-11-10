@@ -63,10 +63,7 @@ var hostCmd = &cobra.Command{
 'gt host agent' writes the host's health to a file a container daemon reads: a
 container cannot run memory_pressure, ps or top against the Mac, so a launchd
 job reads them and writes .runtime/host/probes.json every 60 seconds. In
-container mode the daemon reads that file instead of probing the host itself.
-
-'gt host load' prints who is using the host's CPU, by owner, with the load
-averages and the town's own timings beside it.`,
+container mode the daemon reads that file instead of probing the host itself.`,
 	RunE: requireSubcommand,
 }
 
