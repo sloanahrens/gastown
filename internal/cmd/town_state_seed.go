@@ -591,8 +591,8 @@ func isSeedChurn(town string, start time.Time, m townstate.Mismatch, stat func(s
 	return err != nil && seedRigRefPath(m.Path)
 }
 
-// seedChurnName reports whether rel names a file a running town rewrites at any
-// depth: the open-wisp baseline, and last-touched or FETCH_HEAD.
+// seedChurnName reports whether rel names a file a running town rewrites: the
+// open-wisp baseline at its own path, or last-touched or FETCH_HEAD at any depth.
 func seedChurnName(rel string) bool {
 	if rel == seedWispBaselinePath {
 		return true
