@@ -101,7 +101,7 @@ func TestTheStripAccountsForEveryStateTheReaderSends(t *testing.T) {
 	// Every state this package can put on a row (types.go).
 	states := []string{
 		StateWorking, StateQuiet, StateGating, StateQueued, StateSpawning, StateStalled,
-		StateReviewNeeded, StateRecovery, StateNeedsHuman, StateNeedsOverseer, StateNeedsOperator,
+		StateReviewNeeded, StateRecovery, StateKept, StateNeedsHuman, StateNeedsOverseer, StateNeedsOperator,
 		StateParked, StateIdle, StateUnknown,
 	}
 	working, words := pageTable(t, "POLE_WORKING"), pageTable(t, "POLE_WORD")
@@ -150,7 +150,7 @@ func TestTheStripAccountsForEveryStateTheReaderSends(t *testing.T) {
 	// in progress and the quiet ones, but never the working number's own states,
 	// which the number already counts.
 	for _, state := range []string{StateQueued, StateSpawning, StateStalled, StateReviewNeeded,
-		StateRecovery, StateNeedsHuman, StateNeedsOverseer, StateNeedsOperator, StateParked, StateUnknown, StateQuiet} {
+		StateRecovery, StateKept, StateNeedsHuman, StateNeedsOverseer, StateNeedsOperator, StateParked, StateUnknown, StateQuiet} {
 		if words[state] == "" {
 			t.Errorf("POLE_WORD names %q nothing, so its polecats would vanish from the title", state)
 		}

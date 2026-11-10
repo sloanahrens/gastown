@@ -97,7 +97,7 @@ td.n,th.n{text-align:right}
 tr.live{background:#101a13}
 .badge{padding:1px 8px;border-radius:999px;font-size:11px;border:1px solid currentColor;white-space:nowrap}
 .st-working{color:var(--green)}.st-gating{color:var(--violet)}.st-queued{color:var(--blue)}
-.st-needs-human,.st-needs-overseer,.st-needs-operator{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle,.st-unknown{color:var(--dim)}
+.st-needs-human,.st-needs-overseer,.st-needs-operator{color:var(--red)}.st-quiet{color:var(--amber)}.st-stalled{color:var(--red)}.st-review-needed,.st-recovery{color:var(--amber)}.st-spawning{color:var(--teal)}.st-parked,.st-idle,.st-unknown,.st-kept{color:var(--dim)}
 .tag.p0,.tag.p1{color:var(--red)}.tag.p2{color:var(--amber)}.tag.p3,.tag.p4{color:var(--dim)}
 .cmd{display:inline-block;margin:2px 6px 0 0;padding:0 6px;border:1px solid var(--line);border-radius:4px;color:var(--dim);background:none;font:inherit;font-size:11px;cursor:pointer;text-align:left}
 .cmd:hover{color:var(--text);border-color:var(--dim)}.cmd.done{color:var(--green);border-color:var(--green)}
@@ -600,8 +600,8 @@ let state = null;
 // states this page has never seen the moment the town learns one, so no state
 // is dropped: one in neither table is counted as a state this page does not
 // know, and which of them alarm is the reader's own verdict (StripAlarms).
-const POLE_WORKING = {working: 1, quiet: 1, gating: 1, queued: 0, spawning: 0, stalled: 0, "review-needed": 0, recovery: 0, "needs-human": 0, "needs-overseer": 0, "needs-operator": 0, parked: 0, idle: 0, unknown: 0};
-const POLE_WORD = {queued: "queued", spawning: "spawning", stalled: "stalled", "review-needed": "need review", recovery: "recovering", "needs-human": "need a human", "needs-overseer": "need the overseer", "needs-operator": "need the operator", parked: "parked", unknown: "unknown (tmux unreadable)", quiet: "quiet"};
+const POLE_WORKING = {working: 1, quiet: 1, gating: 1, queued: 0, spawning: 0, stalled: 0, "review-needed": 0, recovery: 0, "kept (jev)": 0, "needs-human": 0, "needs-overseer": 0, "needs-operator": 0, parked: 0, idle: 0, unknown: 0};
+const POLE_WORD = {queued: "queued", spawning: "spawning", stalled: "stalled", "review-needed": "need review", recovery: "recovering", "kept (jev)": "kept (jev)", "needs-human": "need a human", "needs-overseer": "need the overseer", "needs-operator": "need the operator", parked: "parked", unknown: "unknown (tmux unreadable)", quiet: "quiet"};
 // polecatsWorking is the strip's working count and the Work section's summary:
 // the live polecats whose state is work in progress. A parked rig holds nothing
 // and is counted nowhere, so both readers take their number from here.
@@ -1021,6 +1021,7 @@ const STATE_HELP = {
   spawning: "dispatched seconds ago, session not up yet",
   "review-needed": "a live session holding uncommitted or unpushed work",
   recovery: "idle, but its worktree needs recovery before it can be reused",
+  "kept (jev)": "finished, and the daemon keeps its seat until the jev_rules battery has asked about its submission",
   parked: "parked by an operator",
   unknown: "tmux could not be read, so this polecat cannot be told apart from a working one",
   idle: "holds nothing"
@@ -1167,9 +1168,12 @@ function paintAges(r, now) {
   const dispatched = dispatchedSec == null ? "" : " · dispatched " + fmtDur(dispatchedSec) + " ago";
   const stateTip = "in " + p.state + (since == null ? "" : " for " + fmtDur(since));
   r.badge.title = (STATE_HELP[p.state] || "") + (p.reason && p.bead ? " — " + p.reason : "") + silent;
+  // A seat holding no bead has no age of its own unless its state has a clock:
+  // a kept seat waits since its submit (gt-ddg96x).
+  const aged = p.bead || p.state_since;
   r.age.className = "wnum" + (p.bead && (stuck || since > 5400 || (quiet != null && quiet >= 600)) ? " warnc" : "");
-  r.age.textContent = p.bead ? (since == null ? "–" : fmtDur(since)) : "";
-  r.age.title = p.bead ? (stuck || stateTip) + dispatched + silent : "";
+  r.age.textContent = aged ? (since == null ? "–" : fmtDur(since)) : "";
+  r.age.title = aged ? (stuck || stateTip) + dispatched + silent : "";
 }
 
 // seatShortNames is the one table of the sandbox seats' short names, read by
@@ -1259,7 +1263,7 @@ function workRow(names, p, now) {
 // and a state that wants an operator is folded below them (gt-n7yb8). A state
 // this table does not name draws with the live seats, last, so a state added
 // later is seen rather than hidden.
-const WORK_RANK = {working: 0, spawning: 1, queued: 2, gating: 3, quiet: 4,
+const WORK_RANK = {working: 0, spawning: 1, queued: 2, "kept (jev)": 2, gating: 3, quiet: 4,
   "needs-human": 5, "needs-overseer": 5, "needs-operator": 5, stalled: 6, unknown: 7, recovery: 8, "review-needed": 9};
 const WORK_LOOK = new Set(["needs-human", "needs-overseer", "needs-operator", "stalled", "unknown", "recovery", "review-needed"]);
 const workRank = p => WORK_RANK[p.state] == null ? 10 : WORK_RANK[p.state];

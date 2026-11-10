@@ -668,7 +668,15 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 	for n := range sessions {
 		names = append(names, n)
 	}
-	if seats, err := dashSeats(townRoot, names, sessionsKnown, seatCache, dispatches, newPoolSessionLister()); err == nil {
+	// The seats the daemon keeps for the jev_rules battery are read with the
+	// seats: a kept record that cannot be read fails the seats read, so no seat
+	// is shown as the recovery it is kept from (gt-ddg96x).
+	kept, err := dashKeptSeats(townRoot)
+	var seats []dashSeat
+	if err == nil {
+		seats, err = dashSeats(townRoot, names, sessionsKnown, seatCache, dispatches, newPoolSessionLister(), kept)
+	}
+	if err == nil {
 		s.Polecats = buildDashPolecats(dashPolecatInputs{
 			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, SessionsKnown: sessionsKnown, Records: recs.get(),
 		})

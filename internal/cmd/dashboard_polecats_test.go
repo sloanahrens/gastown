@@ -46,7 +46,7 @@ func TestDashPolecatStateFollowsTheInventory(t *testing.T) {
 		"done":        {dashItem(polecat.StateDone, polecat.WorkstateDisposition{Reusable: true}), false, false, nil, dashboard.StateIdle},
 		"label no wk": {dashItem(polecat.StateIdle, polecat.WorkstateDisposition{}), false, false, []string{"needs-human"}, dashboard.StateIdle},
 	} {
-		got, _ := dashPolecatState(c.item, c.work, c.ready, c.labels)
+		got, _ := dashPolecatState(c.item, c.work, c.ready, false, c.labels)
 		if got != c.want {
 			t.Errorf("%s: state = %q, want %q", name, got, c.want)
 		}
@@ -73,7 +73,7 @@ func TestNeedsOverseerDashPolecatStateNamesThePersonLabel(t *testing.T) {
 		{"two labels read as the overseer's step", []string{"gt:needs-human", "gt:needs-operator", "gt:needs-overseer"},
 			dashboard.StateNeedsOverseer, "the bead is labeled needs-overseer"},
 	} {
-		got, reason := dashPolecatState(working, true, false, tc.labels)
+		got, reason := dashPolecatState(working, true, false, false, tc.labels)
 		if got != tc.want || reason != tc.reason {
 			t.Errorf("%s: %q %q, want %q %q", tc.name, got, reason, tc.want, tc.reason)
 		}
@@ -112,7 +112,7 @@ func TestDashPolecatStateInsideSpawnGrace(t *testing.T) {
 		{"parked inside grace reads parked", spawning(parked), true, false, nil,
 			dashboard.StateParked, ""},
 	} {
-		got, reason := dashPolecatState(tc.item, tc.work, tc.ready, tc.labels)
+		got, reason := dashPolecatState(tc.item, tc.work, tc.ready, false, tc.labels)
 		if got != tc.want || reason != tc.reason {
 			t.Errorf("%s: %q %q, want %q %q", tc.name, got, reason, tc.want, tc.reason)
 		}
@@ -537,7 +537,7 @@ func TestDashSeatsReportsAnUnreadableDispatchRecord(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(town, gtevents.EventsFile), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dashSeats(town, nil, false, newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{}); err == nil {
+	if _, err := dashSeats(town, nil, false, newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{}, nil); err == nil {
 		t.Fatal("dashSeats read an unreadable dispatch record as a town with no dispatches")
 	}
 }

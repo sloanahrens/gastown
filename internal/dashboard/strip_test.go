@@ -161,7 +161,7 @@ func TestTheAlarmTableCoversEveryStateTheReaderSends(t *testing.T) {
 
 	states := []string{
 		StateWorking, StateQuiet, StateGating, StateQueued, StateSpawning, StateStalled,
-		StateReviewNeeded, StateRecovery, StateNeedsHuman, StateNeedsOverseer, StateNeedsOperator,
+		StateReviewNeeded, StateRecovery, StateKept, StateNeedsHuman, StateNeedsOverseer, StateNeedsOperator,
 		StateParked, StateIdle, StateUnknown,
 	}
 	want := map[string]string{
