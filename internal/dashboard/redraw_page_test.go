@@ -150,6 +150,14 @@ func TestPageRedrawsAPaneWhenOnlyItsReadStatusChanged(t *testing.T) {
 		if got := dom.element(t, "polecatsnote").Text; !strings.Contains(got, "the seats read failed") {
 			t.Errorf("#polecatsnote reads %q after the seats read failed, want it named", got)
 		}
+		// A kept-seat read that failed is named beside the seats, which still draw
+		// (gt-ddg96x).
+		keptFailed := reading(fresh)
+		keptFailed["summary"].(map[string]any)["kept_error"] = "1 sandbox seat-end record(s) cannot be read"
+		pushState(t, dom, keptFailed)
+		if got := dom.element(t, "polecatsnote").Text; !strings.Contains(got, "kept seats not read") || !strings.Contains(got, "cannot be read") {
+			t.Errorf("#polecatsnote reads %q after the kept read failed, want it named", got)
+		}
 	})
 }
 

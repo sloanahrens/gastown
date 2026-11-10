@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -140,16 +141,11 @@ type dashPolecatInputs struct {
 	Records       []omRecord
 }
 
-// dashPolecatState maps the town's inventory state to the dashboard's. The
-// inventory decides; the dashboard adds only what the inventory cannot see: a
-// bead the queue says is waiting to land, the person label its bead carries,
-// and a finished seat the daemon keeps for the jev_rules battery (kept). The
-// person branch names the label, so the row says which person must act
-// (gt-slmaz); a bead carrying two of the labels reads as the first step, the
-// overseer's. Kept applies only to a seat holding no bead: a seat the daemon
-// kept and that has been slung again is working, and the inventory says so. A
-// seat inside its spawn grace reads as spawning rather than recovery, even when
-// its host worktree is dirty (gt-915m14).
+// dashPolecatState maps the town's inventory state to the dashboard's and adds
+// one rule of its own: a seat the daemon keeps for the jev_rules battery reads
+// kept (jev) when it holds no bead, so a seat slung again reads as the
+// inventory has it. Where that rule falls among the others is the order of the
+// switch below.
 func dashPolecatState(item polecatInventoryItem, hasWork, ready, kept bool, labels []string) (state, reason string) {
 	d := item.Disposition
 	switch {
@@ -206,8 +202,16 @@ func dashPersonState(labels []string) (state, reason string) {
 // the Landings panel ages from the same field. Every other state answers nil,
 // and the page reads the hub's hook time (gt-iv7jf). A last write that does not
 // parse answers an error, so the caller reports the hook fallback instead of
-// letting it happen silently (gt-uqmdg).
-func dashPolecatStateSince(state string, issue *beads.Issue) (*time.Time, error) {
+// letting it happen silently (gt-uqmdg). A kept seat is dated by the submit its
+// record holds (gt-ddg96x); a record with no submit stamp answers an error, so
+// the kept row names the missing read instead of showing no clock unexplained.
+func dashPolecatStateSince(state string, issue *beads.Issue, kept *time.Time) (*time.Time, error) {
+	if state == dashboard.StateKept {
+		if kept == nil || kept.IsZero() {
+			return nil, errors.New("the kept seat's submit time is missing from its record")
+		}
+		return kept, nil
+	}
 	if state != dashboard.StateQueued || issue == nil {
 		return nil, nil
 	}
@@ -285,10 +289,12 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 			}
 		}
 		p.State, p.Reason = dashPolecatState(s.Item, hasWork, hasWork && in.Ready[p.Bead], s.Kept != nil, labels)
-		at, err := dashPolecatStateSince(p.State, s.Issue)
+		at, err := dashPolecatStateSince(p.State, s.Issue, s.Kept)
 		switch {
-		case p.State == dashboard.StateKept:
-			p.StateSince = s.Kept
+		case err != nil && p.State == dashboard.StateKept:
+			// The kept seat's submit time is unread, so its wait has no clock:
+			// the row says which read failed rather than dropping it (gt-ddg96x).
+			p.Reason = "the kept seat's submit time could not be read: " + err.Error()
 		case err != nil:
 			// The bead's last write could not be read, so the queued wait has no
 			// clock of its own and the page dates it from the hook: say so rather

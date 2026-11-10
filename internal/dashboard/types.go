@@ -209,6 +209,11 @@ type Summary struct {
 	// dropped read is never read as a drained queue (gt-q6h8e).
 	SeatsError bool `json:"-"`
 	ReadyError bool `json:"-"`
+
+	// KeptError names the failed read of the seats the daemon keeps for the
+	// jev_rules battery. The seats still read; they read as they did without
+	// that fact, and the page says so beside the table (gt-ddg96x).
+	KeptError string `json:"kept_error,omitempty"`
 }
 
 // Proc is one busy process.

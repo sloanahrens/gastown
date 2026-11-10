@@ -668,26 +668,7 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 	for n := range sessions {
 		names = append(names, n)
 	}
-	// The seats the daemon keeps for the jev_rules battery are read with the
-	// seats: a kept record that cannot be read fails the seats read, so no seat
-	// is shown as the recovery it is kept from (gt-ddg96x).
-	kept, err := dashKeptSeats(townRoot)
-	var seats []dashSeat
-	if err == nil {
-		seats, err = dashSeats(townRoot, names, sessionsKnown, seatCache, dispatches, newPoolSessionLister(), kept)
-	}
-	if err == nil {
-		s.Polecats = buildDashPolecats(dashPolecatInputs{
-			Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, SessionsKnown: sessionsKnown, Records: recs.get(),
-		})
-		if max, err := configuredSchedulerMaxPolecats(townRoot); err == nil && max > 0 {
-			s.SeatsCap = &max
-		}
-	} else {
-		// Likewise the seats: the hub keeps the last good list and the page says
-		// unavailable rather than "no polecats" (gt-q6h8e).
-		s.SeatsError = true
-	}
+	dashboardPolecats(&s, townRoot, names, sessions, sessionsKnown, ready, recs, seatCache, dispatches, newPoolSessionLister())
 	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
 		s.MainTip, s.InstalledGT, s.Behind = tip, installed, &behind
 	}
@@ -707,6 +688,32 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 		}
 	}
 	return s
+}
+
+// dashboardPolecats fills the summary's polecat table from the seats. The seats
+// the daemon keeps for the jev_rules battery are read with them: a kept record
+// that cannot be read leaves every seat readable, the seats read as they did
+// before the kept fact, and the summary names the failed read so the page can
+// show it beside the table (gt-ddg96x). Only a failed seats read sets
+// SeatsError, which hides the table.
+func dashboardPolecats(s *dashboard.Summary, townRoot string, names []string, sessions map[string]time.Time, sessionsKnown bool, ready map[string]bool, recs *dashLandings, seatCache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister) {
+	kept, keptErr := dashKeptSeats(townRoot)
+	if keptErr != nil {
+		s.KeptError = keptErr.Error()
+	}
+	seats, err := dashSeats(townRoot, names, sessionsKnown, seatCache, dispatches, lister, kept)
+	if err != nil {
+		// The hub keeps the last good list and the page says unavailable rather
+		// than "no polecats" (gt-q6h8e).
+		s.SeatsError = true
+		return
+	}
+	s.Polecats = buildDashPolecats(dashPolecatInputs{
+		Now: time.Now(), Seats: seats, Ready: ready, Sessions: sessions, SessionsKnown: sessionsKnown, Records: recs.get(),
+	})
+	if max, err := configuredSchedulerMaxPolecats(townRoot); err == nil && max > 0 {
+		s.SeatsCap = &max
+	}
 }
 
 // dashboardReadyToLand is tailReadyToLand plus the oldest waiting bead's last

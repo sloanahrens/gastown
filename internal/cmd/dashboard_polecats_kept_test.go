@@ -3,11 +3,13 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	gtevents "github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -135,5 +137,66 @@ func TestDashKeptSeatsIsEmptyWithoutAStore(t *testing.T) {
 	}
 	if len(kept) != 0 {
 		t.Errorf("kept seats = %v, want none", kept)
+	}
+}
+
+// A kept seat whose record holds no submit stamp has no clock. The row keeps the
+// kept state and its reason names the read that failed, instead of showing no
+// clock with no explanation (gt-ddg96x).
+func TestBuildDashPolecatsNamesAKeptSeatWhoseSubmitIsUnread(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 10, 9, 30, 0, 0, time.UTC)
+	unread := time.Time{}
+	recovery := polecat.WorkstateDisposition{NeedsRecovery: true, Reason: "git-check-failed"}
+	got := buildDashPolecats(dashPolecatInputs{
+		Now: now, SessionsKnown: true,
+		Seats: []dashSeat{{Rig: "gastown", Name: "beaver", Kept: &unread, Item: dashItem(polecat.StateIdle, recovery)}},
+	})
+	if len(got) != 1 {
+		t.Fatalf("buildDashPolecats = %d rows, want the kept seat", len(got))
+	}
+	p := got[0]
+	if p.State != dashboard.StateKept || p.StateSince != nil {
+		t.Errorf("kept seat = state %q since %v, want kept with no clock", p.State, p.StateSince)
+	}
+	if !strings.Contains(p.Reason, "submit time could not be read") {
+		t.Errorf("reason = %q, want it to name the failed submit read", p.Reason)
+	}
+}
+
+// A kept record the dashboard cannot read does not blank the polecat table: the
+// seats still read, SeatsError stays unset, and the summary names the failed
+// kept read and its error for the page. A town with no record shows no note
+// (gt-ddg96x).
+func TestDashboardPolecatsNamesAFailedKeptReadAndKeepsTheSeats(t *testing.T) {
+	t.Parallel()
+	for name, c := range map[string]struct {
+		body     string
+		wantNote bool
+	}{
+		"unreadable record": {`{not json`, true},
+		"no record":         {"", false},
+	} {
+		town := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(`{"version":1,"rigs":{}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if c.body != "" {
+			writeKeptRecord(t, town, "gastown", "beaver", c.body)
+		}
+		var s dashboard.Summary
+		dashboardPolecats(&s, town, nil, nil, true, nil, newDashLandings(town), newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{})
+		if s.SeatsError {
+			t.Errorf("%s: a kept read hid the seats table", name)
+		}
+		if got := s.KeptError != ""; got != c.wantNote {
+			t.Errorf("%s: kept note = %q, want a note %v", name, s.KeptError, c.wantNote)
+		}
+		if c.wantNote && !strings.Contains(s.KeptError, "cannot be read") {
+			t.Errorf("%s: kept note = %q, want it to name the unread record", name, s.KeptError)
+		}
 	}
 }

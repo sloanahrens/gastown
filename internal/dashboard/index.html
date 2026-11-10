@@ -1423,7 +1423,12 @@ function renderPolecats(s, force) {
   const parts = [];
   if (s.summary_at) parts.push("seats read " + age(s.summary_at) + " ago");
   if (rSeats && rSeats.stale) parts.push(rSeats.error ? "the seats read failed" : "the seats read is old");
+  // A kept-seat read that failed leaves the seats drawn without it; the note
+  // names the failure beside them (gt-ddg96x).
+  const keptError = (s.summary || {}).kept_error;
+  if (keptError) parts.push("kept seats not read, so kept seats show as their recovery: " + keptError);
   $("polecatsnote").textContent = parts.join(" · ");
+  if (keptError) $("polecatsnote").classList.add("warnc");
 
   const key = polecatsKey(s);
   if (!force && key === pKey) { const now = Date.now(); workSeatRows.forEach(r => paintAges(r, now)); return; }
