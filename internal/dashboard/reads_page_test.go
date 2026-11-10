@@ -3,6 +3,7 @@ package dashboard
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // Every pane that keeps a last good value reads its own source's status, greys
@@ -77,4 +78,73 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 			t.Errorf("readOf has no %q, so a server that sends no status breaks the page", want)
 		}
 	}
+}
+
+// A failed read names its reason where the operator reads that pane: the
+// polecats note, the strip's tips for waiting to land and needs you, and the
+// attention panel's line. The reason is drawn as text, so markup in it stays
+// literal, and the page holds it to 200 characters (gt-6qc3nw.2).
+func TestPaneTipShowsWhy(t *testing.T) {
+	t.Parallel()
+
+	markup := "<b>dolt</b> circuit breaker " + strings.Repeat("x", 300)
+	want := string([]rune(markup)[:200])
+	now := time.Now().UTC().Format(time.RFC3339)
+	failed := map[string]any{"at": now, "every_sec": 60, "error": true, "stale": true}
+
+	t.Run("polecats note", func(t *testing.T) {
+		t.Parallel()
+		dom := newPageDOM(t)
+		dom.call(t, "renderPolecats", map[string]any{
+			"summary":    map[string]any{"seats_why": markup},
+			"summary_at": now,
+			"polecats":   []any{},
+			"reads":      map[string]any{"seats": failed},
+		})
+		note := dom.element(t, "polecatsnote").Text
+		if !strings.Contains(note, "the seats read failed: "+want) {
+			t.Errorf("the polecats note reads %q, want the seats' reason held to 200 characters", note)
+		}
+		if strings.Contains(note, markup) {
+			t.Errorf("the polecats note draws the reason past 200 characters: %q", note)
+		}
+	})
+
+	t.Run("strip", func(t *testing.T) {
+		t.Parallel()
+		dom := newPageDOM(t)
+		dom.call(t, "renderStrip", map[string]any{
+			"summary":   map[string]any{"ready_why": markup},
+			"reads":     map[string]any{"ready": failed},
+			"attention": map[string]any{"rows": []any{}, "failed": []any{"questions"}},
+			"questions": map[string]any{"unavailable": true, "why": markup},
+		})
+		waiting := stripFact(t, dom, "waiting to land").Title
+		if !strings.Contains(waiting, "the read that lists what is waiting to land failed: "+want) {
+			t.Errorf("the waiting-to-land tip reads %q, want the ready read's reason", waiting)
+		}
+		needs := stripFact(t, dom, "needs you").Title
+		if !strings.Contains(needs, "the questions could not be read: "+want) {
+			t.Errorf("the needs-you tip reads %q, want the questions' reason", needs)
+		}
+		if !strings.Contains(needs, "<b>dolt</b>") {
+			t.Errorf("the needs-you tip reads %q, want the reason's markup drawn as text", needs)
+		}
+	})
+
+	t.Run("attention", func(t *testing.T) {
+		t.Parallel()
+		dom := newPageDOM(t)
+		dom.call(t, "renderAttention", map[string]any{
+			"attention": map[string]any{"rows": []any{}, "failed": []any{"questions"}},
+			"questions": map[string]any{"unavailable": true, "why": markup},
+		})
+		text := dom.element(t, "attention").Text
+		if !strings.Contains(text, "unavailable: the questions could not be read: "+want) {
+			t.Errorf("the attention panel reads %q, want the questions' reason", text)
+		}
+		if strings.Contains(text, markup) {
+			t.Errorf("the attention panel draws the reason past 200 characters: %q", text)
+		}
+	})
 }

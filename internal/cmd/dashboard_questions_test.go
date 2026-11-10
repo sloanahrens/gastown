@@ -420,3 +420,74 @@ func TestQuestionsStripsControlCharactersAndCapsFields(t *testing.T) {
 		t.Error("the question is drawn across lines")
 	}
 }
+
+// A ready-to-land read that fails names its reason, and the next read that
+// succeeds clears it. The failed read keeps no count, so the page cannot draw a
+// drained queue for it (gt-6qc3nw.2).
+func TestDashboardReadyAndQuestionsNameWhy(t *testing.T) {
+	t.Parallel()
+
+	t.Run("ready to land", func(t *testing.T) {
+		t.Parallel()
+		failing := func() (int, *time.Time, map[string]bool, error) {
+			return 0, nil, nil, errors.New("bd list: exit status 1\nstderr: dolt circuit breaker is open")
+		}
+		var failed dashboard.Summary
+		if ids := dashboardReadyPart(&failed, failing); len(ids) != 0 {
+			t.Errorf("a failed ready read returned ids %v", ids)
+		}
+		if !failed.ReadyError || failed.ReadyToLand != nil {
+			t.Fatalf("a failed ready read: ReadyError=%v ReadyToLand=%v, want the error and no count", failed.ReadyError, failed.ReadyToLand)
+		}
+		if want := "bd list: exit status 1"; failed.ReadyWhy != want {
+			t.Errorf("ReadyWhy = %q, want the first line %q", failed.ReadyWhy, want)
+		}
+
+		var ok dashboard.Summary
+		dashboardReadyPart(&ok, func() (int, *time.Time, map[string]bool, error) {
+			return 2, nil, map[string]bool{"gt-a": true, "gt-b": true}, nil
+		})
+		if ok.ReadyError || ok.ReadyWhy != "" || ok.ReadyToLand == nil || *ok.ReadyToLand != 2 {
+			t.Errorf("a successful ready read: ReadyError=%v ReadyWhy=%q ReadyToLand=%v, want the count and no reason", ok.ReadyError, ok.ReadyWhy, ok.ReadyToLand)
+		}
+	})
+
+	t.Run("questions list", func(t *testing.T) {
+		t.Parallel()
+		r := &dashQuestionsReader{
+			list: func() ([]*beads.Issue, error) {
+				return nil, errors.New("bd list: dolt circuit breaker is open: server appears down")
+			},
+		}
+		got := r.read(questionsNow)
+		if !got.Unavailable {
+			t.Fatalf("a failed list read is not unavailable: %+v", got)
+		}
+		if want := "bd list: dolt circuit breaker is open: server appears down"; got.Why != want {
+			t.Errorf("Why = %q, want %q", got.Why, want)
+		}
+	})
+
+	t.Run("questions comments", func(t *testing.T) {
+		t.Parallel()
+		f := &fakeQuestions{
+			issues:      []*beads.Issue{questionIssue("gt-q1", "retry policy", "keep it?", "yes", "none", questionsNow.Add(-time.Hour))},
+			commentsErr: errors.New("bd comments gt-q1: no such issue"),
+		}
+		got := f.reader().read(questionsNow)
+		if !got.Unavailable {
+			t.Fatalf("a failed comments read is not unavailable: %+v", got)
+		}
+		if want := "bd comments gt-q1: no such issue"; got.Why != want {
+			t.Errorf("Why = %q, want %q", got.Why, want)
+		}
+	})
+
+	t.Run("questions cleared", func(t *testing.T) {
+		t.Parallel()
+		got := (&fakeQuestions{}).reader().read(questionsNow)
+		if got.Unavailable || got.Why != "" {
+			t.Errorf("a successful read kept Unavailable=%v Why=%q, want both cleared", got.Unavailable, got.Why)
+		}
+	})
+}

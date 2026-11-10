@@ -12,10 +12,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -472,7 +474,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		WithApps(dashboard.NewAppPowerReaderFromSource(cloudSettings.OffDir, cloudSource))
 	reports := dashboard.NewReportsReader(dashboardReportsDir(townRoot))
 	birds := dashboard.NewBirdReportsReader(dashboardRuntimeDir(townRoot)).WithHeadline(dashboardHeadlineBird(townRoot))
-	questions := newDashQuestionsReader(townRoot)
+	// The reasons behind a failed seats, ready or questions read are logged
+	// once per change, so a read that stays down is one line (gt-6qc3nw.2).
+	whyLog := newDashWhyLog(dashboardLogf(out))
+	questions := newDashQuestionsReader(townRoot).withWhy(whyLog)
 	overseerPane := newDashOverseerReader(townRoot, func() (int, error) {
 		open, err := questions.list()
 		return len(open), err
@@ -490,8 +495,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	attentionScoreReader := attention.NewScoreReader(attention.AnswersPath(townRoot))
 	landingRiskReader := attention.NewLandingRiskReader(attention.LandingRiskPath(townRoot))
 	return dashboard.NewHub(dashboard.Config{
-		Feed:           feed,
-		Summary:        func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache, dispatches) },
+		Feed: feed,
+		Summary: func() dashboard.Summary {
+			return dashboardSummary(townRoot, deploys, recs, seatCache, dispatches, whyLog)
+		},
 		Health:         func() dashboard.Health { return dashboardHealth(townRoot) },
 		Machine:        dashboard.SampleMachine,
 		Cloud:          func() *dashboard.Cloud { return cloud.Read(time.Now()) },
@@ -649,26 +656,20 @@ func dashboardHealthCauses(rep *townhealth.Report) []dashboard.HealthCause {
 
 // dashboardSummary is the summary line's state as fields, the polecat table,
 // and the age of the oldest bead waiting to land. A reader that fails leaves
-// its fields out and flags the failure, so the hub keeps the previous reading
-// rather than showing the empty one (gt-q6h8e).
-func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings, seatCache *dashSeatCache, dispatches *events.DispatchReader) dashboard.Summary {
+// its fields out, flags the failure and names its reason, so the hub keeps the
+// previous reading rather than showing the empty one (gt-q6h8e, gt-6qc3nw.2).
+func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings, seatCache *dashSeatCache, dispatches *events.DispatchReader, why *dashWhyLog) dashboard.Summary {
 	var s dashboard.Summary
-	ready := map[string]bool{}
-	if n, oldest, ids, err := dashboardReadyToLand(townRoot); err == nil {
-		s.ReadyToLand = &n
-		s.OldestReady = oldest
-		ready = ids
-	} else {
-		// The hub keeps the previous reading and the page marks it stale: an
-		// unread queue must not read as an empty one (gt-q6h8e).
-		s.ReadyError = true
-	}
+	ready := dashboardReadyPart(&s, func() (int, *time.Time, map[string]bool, error) {
+		return dashboardReadyToLand(townRoot)
+	})
 	sessions, sessionsKnown := dashSessions()
 	names := make([]string, 0, len(sessions))
 	for n := range sessions {
 		names = append(names, n)
 	}
 	dashboardPolecats(&s, townRoot, names, sessions, sessionsKnown, ready, recs, seatCache, dispatches, newPoolSessionLister())
+	why.summary(&s)
 	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
 		s.MainTip, s.InstalledGT, s.Behind = tip, installed, &behind
 	}
@@ -726,8 +727,9 @@ func dashboardPolecatsWith(r dashPolecatReaders, s *dashboard.Summary, townRoot 
 	seats, err := r.seats(townRoot, names, sessionsKnown, seatCache, dispatches, lister, kept)
 	if err != nil {
 		// The hub keeps the last good list and the page says unavailable rather
-		// than "no polecats" (gt-q6h8e).
+		// than "no polecats" (gt-q6h8e). The page names why (gt-6qc3nw.2).
 		s.SeatsError = true
+		s.SeatsWhy = dashWhy(err)
 		return
 	}
 	s.Polecats = buildDashPolecats(dashPolecatInputs{
@@ -774,6 +776,92 @@ func dashboardReadyToLand(townRoot string) (int, *time.Time, map[string]bool, er
 		}
 	}
 	return total, oldest, ids, nil
+}
+
+// dashboardReadyPart fills the summary's ready-to-land fields from the read it
+// is handed, and returns the ids of the beads waiting for the polecat rows. A
+// read that fails keeps no count, so the page cannot draw a drained queue for
+// it, and it names its reason (gt-q6h8e, gt-6qc3nw.2).
+func dashboardReadyPart(s *dashboard.Summary, read func() (int, *time.Time, map[string]bool, error)) map[string]bool {
+	n, oldest, ids, err := read()
+	if err != nil {
+		// The hub keeps the previous reading and the page marks it stale: an
+		// unread queue must not read as an empty one (gt-q6h8e).
+		s.ReadyError = true
+		s.ReadyWhy = dashWhy(err)
+		return map[string]bool{}
+	}
+	s.ReadyToLand = &n
+	s.OldestReady = oldest
+	return ids
+}
+
+// dashWhyMax is how many characters of a failed read's reason the page is sent.
+const dashWhyMax = 200
+
+// dashWhy is the reason a failed read names: the error's first line, with each
+// path in it cut to its file name, held to dashWhyMax characters. The page shows
+// it beside a pane, so a directory layout or a stack's later lines do not belong
+// in it. A token with a slash is taken as a path, so "a/b" reads as "b" (gt-6qc3nw.2).
+func dashWhy(err error) string {
+	if err == nil {
+		return ""
+	}
+	line, _, _ := strings.Cut(err.Error(), "\n")
+	fields := strings.Fields(line)
+	for i, f := range fields {
+		if strings.Contains(f, "/") {
+			fields[i] = path.Base(f)
+		}
+	}
+	why := []rune(strings.Join(fields, " "))
+	if len(why) > dashWhyMax {
+		why = why[:dashWhyMax]
+	}
+	return string(why)
+}
+
+// dashWhyLog logs a failed read's reason once per change, so a read that fails
+// on every poll is one line in the log rather than one a minute. A read that
+// comes back logs once more. The page gets the reason from the summary or the
+// questions list; this only keeps the log quiet (gt-6qc3nw.2).
+type dashWhyLog struct {
+	logf func(format string, args ...any)
+
+	mu sync.Mutex
+	// last is the reason each source reported on its latest poll, "" when its
+	// read succeeded.
+	last map[string]string
+}
+
+// newDashWhyLog logs through the dashboard's logf.
+func newDashWhyLog(logf func(format string, args ...any)) *dashWhyLog {
+	return &dashWhyLog{logf: logf, last: map[string]string{}}
+}
+
+// note records what source's read reported on this poll: why is "" when the
+// read succeeded. A nil log records nothing.
+func (l *dashWhyLog) note(source, why string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last[source] == why {
+		return
+	}
+	l.last[source] = why
+	if why == "" {
+		l.logf("%s read is back", source)
+		return
+	}
+	l.logf("%s read failed: %s", source, why)
+}
+
+// summary notes the seats and ready-to-land reads of one summary.
+func (l *dashWhyLog) summary(s *dashboard.Summary) {
+	l.note(dashboard.SourceSeats, s.SeatsWhy)
+	l.note(dashboard.SourceReady, s.ReadyWhy)
 }
 
 const dashboardSpendTimeout = 25 * time.Second

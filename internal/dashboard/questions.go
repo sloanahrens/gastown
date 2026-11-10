@@ -61,9 +61,11 @@ type QuestionRow struct {
 // one priority, the longest wait first. Unavailable says the read failed, which
 // the pane draws as itself and never as an empty list: "the overseer has asked
 // nothing" and "the questions could not be read" are different things to tell
-// the operator.
+// the operator. Why names the failure behind an unavailable list, the first
+// line of its error with paths cut to the file name (gt-6qc3nw.2).
 type Questions struct {
 	Rows        []QuestionRow `json:"rows"`
 	More        int           `json:"more,omitempty"`
 	Unavailable bool          `json:"unavailable,omitempty"`
+	Why         string        `json:"why,omitempty"`
 }
