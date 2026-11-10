@@ -293,3 +293,38 @@ func TestTownStateSeedStateRecordFailuresArePartial(t *testing.T) {
 		}
 	}
 }
+
+// TestTownStateSeedSuccessLineNamesTheRewrittenStateRecord: the success line is
+// printed after the state record is rewritten in the claim, so it names that file
+// as the one that no longer matches the stream. With no host record nothing was
+// rewritten and the line makes no such exception.
+func TestTownStateSeedSuccessLineNamesTheRewrittenStateRecord(t *testing.T) {
+	t.Parallel()
+	const match = "matches the host copy set"
+	const exception = "except daemon/state.json, which the seed rewrote as stopped and owned by the pod"
+	for _, form := range stateRecordForms {
+		t.Run(form.name+"/host record", func(t *testing.T) {
+			t.Parallel()
+			town := cutoverTown(t)
+			writeHostStateRecord(t, town, seedHostStateRecord)
+			env, _, _, out := stateRecordSession(t, town, form.rehearsal)
+			if err := runTownStateSeedIn(env); err != nil {
+				t.Fatalf("seed: %v\n%s", err, out.String())
+			}
+			if !strings.Contains(out.String(), match+" ") || !strings.Contains(out.String(), exception) {
+				t.Errorf("success line does not name the rewritten state record:\n%s", out.String())
+			}
+		})
+		t.Run(form.name+"/no host record", func(t *testing.T) {
+			t.Parallel()
+			town := cutoverTown(t)
+			env, _, _, out := stateRecordSession(t, town, form.rehearsal)
+			if err := runTownStateSeedIn(env); err != nil {
+				t.Fatalf("seed without a host record: %v\n%s", err, out.String())
+			}
+			if strings.Contains(out.String(), "except daemon/state.json") {
+				t.Errorf("success line names a rewrite that did not happen:\n%s", out.String())
+			}
+		})
+	}
+}
