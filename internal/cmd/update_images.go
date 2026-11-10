@@ -83,6 +83,12 @@ func viewerCredentialReader(tokenPath func(role string) (string, error)) func() 
 	}
 }
 
+// TownImageRegistry is the exported seam over townImageRegistry, so a test in
+// another package holds a fixture town to the registry this command reads.
+func TownImageRegistry(townRoot string) (imagevalues.Registry, error) {
+	return townImageRegistry(townRoot)
+}
+
 // townImageRegistry resolves the registry the town's images live in: the
 // Forgejo host and owner of the first rig patrols.tier_sweep.image_rigs names,
 // the rigs whose fully green sweep publishes a green ref for the image build
