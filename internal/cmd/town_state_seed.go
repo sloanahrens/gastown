@@ -582,13 +582,11 @@ func isSeedChurn(town string, start time.Time, m townstate.Mismatch, stat func(s
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
-	if seedChurnName(m.Path) {
-		return true
-	}
-	// Only a file the host no longer has is sorted by its ref directory: a host
-	// file that is still there, and not newer than start, differs for a reason
-	// the running town does not explain.
-	return err != nil && seedRigRefPath(m.Path)
+	// Only a file the host no longer has is sorted by its name or its ref
+	// directory: a host file that is still there, and not newer than start, was
+	// not rewritten while the copy ran, so it differs for a reason the running
+	// town does not explain, whatever it is called.
+	return err != nil && (seedChurnName(m.Path) || seedRigRefPath(m.Path))
 }
 
 // seedChurnName reports whether rel names a file a running town rewrites: the
