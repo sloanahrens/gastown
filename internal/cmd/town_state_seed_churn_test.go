@@ -35,9 +35,10 @@ func statFails(p string) (fs.FileInfo, error) {
 	return nil, &fs.PathError{Op: "lstat", Path: p, Err: fs.ErrPermission}
 }
 
-// TestSeedChurnSortTable: a rehearsal's verify mismatch is churn when the running
+// TestTownStateSeedChurnSortTable: a rehearsal's verify mismatch is churn when the running
 // town made it while the copy ran, and a problem otherwise. One row is one mismatch.
-func TestSeedChurnSortTable(t *testing.T) {
+// The name starts with TestTownStateSeed so the -run TestTownStateSeed gate runs it.
+func TestTownStateSeedChurnSortTable(t *testing.T) {
 	t.Parallel()
 	const town = "/town"
 	start := time.Date(2026, 11, 9, 6, 40, 0, 0, time.UTC)
@@ -113,6 +114,12 @@ func TestSeedChurnSortTable(t *testing.T) {
 			name:  "a changed file whose stat fails is a problem",
 			m:     churnMismatch(townstate.ReasonChanged, "crew/notes.md"),
 			stat:  statFails,
+			churn: false,
+		},
+		{
+			name:  "a ref file the host still has, older than the copy window, is a problem",
+			m:     churnMismatch(townstate.ReasonChanged, "gastown/.repo.git/refs/heads/main"),
+			stat:  statAt(before),
 			churn: false,
 		},
 		{

@@ -545,10 +545,13 @@ var seedRigRefDirs = []string{"refs", "logs", "worktrees"}
 // sortSeedChurn splits a rehearsal's verify mismatches into churn, the differences
 // the running town made while the copy ran, and problems, everything else. A
 // mismatch is churn when its reason is changed, missing or extra, and either its
-// host file's modification time is after start, or its path is one seedChurnPath
-// names. A file deleted from the host has no modification time to read, so the
-// path rule is what sorts it. A stat that fails for any reason but absence is a
-// problem, whatever the path.
+// host file's modification time is after start, or its path is one the running
+// town writes: a name seedChurnName gives, or a path seedRigRefPath gives when the
+// host no longer has the file. A file deleted from the host has no modification
+// time to read, so the path rule is what sorts it. A host file still there and not
+// newer than start is churn only under a name seedChurnName gives, so a ref file
+// that differs for another reason stays a problem. A stat that fails for any reason
+// but absence is a problem, whatever the path.
 func sortSeedChurn(town string, start time.Time, mismatches []townstate.Mismatch, stat func(string) (fs.FileInfo, error)) (churn, problems []townstate.Mismatch) {
 	for _, m := range mismatches {
 		if isSeedChurn(town, start, m, stat) {
@@ -579,19 +582,28 @@ func isSeedChurn(town string, start time.Time, m townstate.Mismatch, stat func(s
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return false
 	}
-	return seedChurnPath(m.Path)
+	if seedChurnName(m.Path) {
+		return true
+	}
+	// Only a file the host no longer has is sorted by its ref directory: a host
+	// file that is still there, and not newer than start, differs for a reason
+	// the running town does not explain.
+	return err != nil && seedRigRefPath(m.Path)
 }
 
-// seedChurnPath reports whether rel names a file a running town rewrites or
-// creates: the open-wisp baseline, and last-touched or FETCH_HEAD at any depth,
-// and anything under <rig>/.repo.git/refs, logs or worktrees.
-func seedChurnPath(rel string) bool {
+// seedChurnName reports whether rel names a file a running town rewrites at any
+// depth: the open-wisp baseline, and last-touched or FETCH_HEAD.
+func seedChurnName(rel string) bool {
 	if rel == seedWispBaselinePath {
 		return true
 	}
-	if base := path.Base(rel); base == "last-touched" || base == "FETCH_HEAD" {
-		return true
-	}
+	base := path.Base(rel)
+	return base == "last-touched" || base == "FETCH_HEAD"
+}
+
+// seedRigRefPath reports whether rel is anything under <rig>/.repo.git/refs, logs
+// or worktrees, the directories a running town writes while a copy runs.
+func seedRigRefPath(rel string) bool {
 	parts := strings.Split(rel, "/")
 	return len(parts) >= 3 && parts[1] == ".repo.git" && slices.Contains(seedRigRefDirs, parts[2])
 }
