@@ -62,7 +62,11 @@ type manifestDoc struct {
 		Size   int64  `json:"size"`
 	} `json:"layers"`
 	Manifests []struct {
-		Digest string `json:"digest"`
+		Digest   string `json:"digest"`
+		Platform struct {
+			OS           string `json:"os"`
+			Architecture string `json:"architecture"`
+		} `json:"platform"`
 	} `json:"manifests"`
 }
 

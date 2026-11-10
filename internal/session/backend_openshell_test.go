@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"io"
 	"net/http"
 	"os"
@@ -291,13 +292,17 @@ func (r *fakeImageRegistry) run(_ context.Context, args ...string) ([]byte, []by
 	return []byte(label + "\n"), nil, nil
 }
 
-// useFakeDocker points a backend's image resolution at the fake host docker, as
-// dockerImageRef and imageGTFrom do in production, and at digest for the
-// registry read a pulling gateway makes.
-func useFakeDocker(b *openshellBackend, docker *fakeImageRegistry, digest manifestDigester) {
+// useFakeDocker points a backend's image resolution at the fake host docker for a
+// docker-driver gateway, as dockerImageRef and imageGTFrom do in production, and at
+// reg for a pulling gateway, which reads the registry only and never calls docker
+// (gt-xzze6g).
+func useFakeDocker(b *openshellBackend, docker *fakeImageRegistry, reg *pinRegistry) {
 	b.docker = docker.run
 	b.imageRef = func(ctx context.Context, image string, pull bool) (resolvedImage, error) {
-		return imageRefFor(ctx, docker.run, digest, image, pull)
+		if pull {
+			return pulledImage(ctx, registryInspector(&http.Client{Transport: reg}), image)
+		}
+		return imageRefFor(ctx, docker.run, image)
 	}
 	b.imageGT = func(ctx context.Context, image string) (string, error) { return imageGTFrom(ctx, docker.run, image) }
 }
@@ -309,8 +314,14 @@ func useFakeDocker(b *openshellBackend, docker *fakeImageRegistry, digest manife
 var (
 	pinDigestChecked = pinDigestOf(pinManifest("checked"))
 	pinDigestRebuilt = pinDigestOf(pinManifest("rebuilt"))
-	pinConfigDigest  = "sha256:" + strings.Repeat("c", 64)
+	pinConfigDigest  = pinDigestOf(pinConfigBody(openshellTestGTCommit))
 )
+
+// pinConfigBody is the image config blob the pin registry serves: the config a
+// build records, whose label names the gt commit the image was built from.
+func pinConfigBody(gtCommit string) string {
+	return fmt.Sprintf(`{"architecture":"arm64","os":"linux","config":{"Labels":{%q:%q}}}`, gtCommitLabel, gtCommit)
+}
 
 // pinManifest is the manifest body the pin registry serves for one build. build
 // names the build, so each build has a body of its own and a digest of its own.
@@ -346,6 +357,7 @@ type pinRegistry struct {
 	omitDigest bool   // the manifest reply carries no Docker-Content-Digest
 	badDigest  string // when set, the manifest reply carries this digest instead
 	down       bool   // the registry does not answer: every request fails to connect
+	configBody string // when set, the config blob the manifest's config digest is served as
 }
 
 func (r *pinRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -383,8 +395,12 @@ func (r *pinRegistry) RoundTrip(req *http.Request) (*http.Response, error) {
 			r.manifest, r.retagTo = r.retagTo, ""
 		}
 		return reply(http.StatusOK, header, body)
-	case "/v2/" + pinRepo + "/blobs/" + pinConfigDigest:
-		return reply(http.StatusOK, nil, `{"created":"2026-10-28T00:00:00Z"}`)
+	}
+	if strings.HasPrefix(req.URL.Path, "/v2/"+pinRepo+"/blobs/") {
+		if r.configBody != "" {
+			return reply(http.StatusOK, nil, r.configBody)
+		}
+		return reply(http.StatusOK, nil, pinConfigBody(openshellTestGTCommit))
 	}
 	return reply(http.StatusNotFound, nil, "")
 }
@@ -394,11 +410,6 @@ func (r *pinRegistry) tagDigest() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return pinDigestOf(r.manifest)
-}
-
-// pinnedDigester is the registry digest read through reg, in process.
-func pinnedDigester(reg *pinRegistry) manifestDigester {
-	return registryDigester(&http.Client{Transport: reg})
 }
 
 // pulledProfile is a kubernetes profile whose image is the pin registry's tag.
@@ -426,7 +437,7 @@ func TestOpenShellPreparePinsTheImageDigestItChecked(t *testing.T) {
 		labels: map[string]string{pinDigestChecked: openshellTestGTCommit, pinDigestRebuilt: openshellTestDriftedGT},
 	}
 	reg.retag = func() { reg.tags[openshellTestProfile.Image] = pinDigestRebuilt }
-	useFakeDocker(b, reg, pinnedDigester(&pinRegistry{down: true}))
+	useFakeDocker(b, reg, &pinRegistry{down: true})
 
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
 		t.Fatalf("Prepare: %v", err)
@@ -457,7 +468,7 @@ func TestOpenShellPreparePinsThePulledDigestItChecked(t *testing.T) {
 		tags:   map[string]string{profile.Image: openshellTestImageDigest},
 		labels: map[string]string{openshellTestImageDigest: openshellTestGTCommit},
 	}
-	useFakeDocker(b, docker, pinnedDigester(reg))
+	useFakeDocker(b, docker, reg)
 
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
 		t.Fatalf("Prepare: %v", err)
@@ -465,8 +476,8 @@ func TestOpenShellPreparePinsThePulledDigestItChecked(t *testing.T) {
 	if got := reg.tagDigest(); got != pinDigestRebuilt {
 		t.Fatalf("the registry tag names %q, want the rebuild %q: the test did not retag between the check and the create", got, pinDigestRebuilt)
 	}
-	if want := []string{openshellTestImageDigest}; !reflect.DeepEqual(docker.labelRefs, want) {
-		t.Fatalf("the gt label was read for %q, want %q: the label is read from the host's local image", docker.labelRefs, want)
+	if len(docker.labelRefs) != 0 {
+		t.Fatalf("the host's docker was asked for the gt label of %q: a pulling gateway reads the registry only", docker.labelRefs)
 	}
 	if want := pinHost + "/" + pinRepo + "@" + pinDigestChecked; createFrom(t, fake) != want {
 		t.Fatalf("the create used --from %q, want the checked manifest digest %q", createFrom(t, fake), want)
@@ -487,11 +498,11 @@ func TestOpenShellPrepareRefusesAPulledImageWithoutAVerifiedPin(t *testing.T) {
 		image     string // a reference with no registry host, in place of the pin registry's
 		wantErr   string
 	}{
-		{name: "a registry that does not answer", configure: func(r *pinRegistry) { r.down = true }, wantErr: "pinning"},
-		{name: "a registry that answers a server error", configure: func(r *pinRegistry) { r.status = http.StatusInternalServerError }, wantErr: "pinning"},
-		{name: "a reply with no digest", configure: func(r *pinRegistry) { r.omitDigest = true }, wantErr: "pinning"},
-		{name: "a reply with a malformed digest", configure: func(r *pinRegistry) { r.badDigest = "sha256:abc" }, wantErr: "pinning"},
-		{name: "a reply with a digest its body does not hash to", configure: func(r *pinRegistry) { r.badDigest = pinDigestOf(pinManifest("other")) }, wantErr: "pinning"},
+		{name: "a registry that does not answer", configure: func(r *pinRegistry) { r.down = true }, wantErr: "from registry " + pinHost},
+		{name: "a registry that answers a server error", configure: func(r *pinRegistry) { r.status = http.StatusInternalServerError }, wantErr: "from registry " + pinHost},
+		{name: "a reply with no digest", configure: func(r *pinRegistry) { r.omitDigest = true }, wantErr: "from registry " + pinHost},
+		{name: "a reply with a malformed digest", configure: func(r *pinRegistry) { r.badDigest = "sha256:abc" }, wantErr: "from registry " + pinHost},
+		{name: "a reply with a digest its body does not hash to", configure: func(r *pinRegistry) { r.badDigest = pinDigestOf(pinManifest("other")) }, wantErr: "from registry " + pinHost},
 		{name: "a reference with no registry host", image: pinRepo + ":" + pinTag, wantErr: "names no registry host"},
 	}
 	for _, tt := range tests {
@@ -511,7 +522,7 @@ func TestOpenShellPrepareRefusesAPulledImageWithoutAVerifiedPin(t *testing.T) {
 			useFakeDocker(b, &fakeImageRegistry{
 				tags:   map[string]string{profile.Image: openshellTestImageDigest},
 				labels: map[string]string{openshellTestImageDigest: openshellTestGTCommit},
-			}, pinnedDigester(reg))
+			}, reg)
 
 			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("Prepare = %v, want the spawn refused naming %q", err, tt.wantErr)
@@ -521,6 +532,92 @@ func TestOpenShellPrepareRefusesAPulledImageWithoutAVerifiedPin(t *testing.T) {
 			}
 			if calls := fake.Calls(); len(calls) != 0 {
 				t.Errorf("openshell calls = %v, want none: a sandbox was created without a pinned digest", calls)
+			}
+		})
+	}
+}
+
+// pinManifestFor is a manifest body naming configDigest, for the registries a
+// refusal test builds with a config of its own.
+func pinManifestFor(configDigest string) string {
+	return fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"digest":%q,"size":2},"layers":[]}`, configDigest)
+}
+
+// TestOpenShellPrepareResolvesAPulledImageThroughTheRegistryOnly is gt-xzze6g's
+// case: the daemon pod has the docker CLI and no engine, so a pulling gateway
+// resolves the digest and reads the gt label from the registry, and the host's
+// docker is never called. The docker runner here fails the test on any call.
+func TestOpenShellPrepareResolvesAPulledImageThroughTheRegistryOnly(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	profile := pulledProfile()
+	b, _ := openshellTestBackend(town, profile, fake)
+	noDocker := func(_ context.Context, args ...string) ([]byte, []byte, error) {
+		t.Errorf("the host's docker was called: %v", args)
+		return nil, []byte("Cannot connect to the Docker daemon"), errors.New("exit status 1")
+	}
+	reg := &pinRegistry{manifest: pinManifest("checked")}
+	b.docker = noDocker
+	b.imageRef = func(ctx context.Context, image string, pull bool) (resolvedImage, error) {
+		if !pull {
+			t.Errorf("a kubernetes gateway was resolved as a docker one")
+		}
+		return pulledImage(ctx, registryInspector(&http.Client{Transport: reg}), image)
+	}
+	b.imageGT = func(_ context.Context, image string) (string, error) {
+		t.Errorf("the docker label read ran for %s", image)
+		return "", errors.New("unexpected")
+	}
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if want := pinHost + "/" + pinRepo + "@" + pinDigestChecked; createFrom(t, fake) != want {
+		t.Fatalf("the create used --from %q, want the registry digest %q", createFrom(t, fake), want)
+	}
+}
+
+// TestOpenShellPrepareRefusesAPulledImageTheRegistryCannotVouchFor: a registry
+// that serves no gt label, holds no linux/arm64 entry or serves a config that does
+// not hash to the digest its manifest names refuses the spawn before anything is
+// pushed or created, naming the registry and the image.
+func TestOpenShellPrepareRefusesAPulledImageTheRegistryCannotVouchFor(t *testing.T) {
+	t.Parallel()
+	labelless := `{"architecture":"arm64","os":"linux","config":{"Labels":{}}}`
+	noArm := fmt.Sprintf(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":%q,"platform":{"os":"linux","architecture":"amd64"}}]}`, pinDigestChecked)
+	tests := []struct {
+		name    string
+		reg     *pinRegistry
+		wantErr string // "|" separates substrings the error must name
+	}{
+		{name: "a config with no gt label", reg: &pinRegistry{manifest: pinManifestFor(pinDigestOf(labelless)), configBody: labelless}, wantErr: "records no gt commit"},
+		{name: "a manifest list with no linux/arm64 entry", reg: &pinRegistry{manifest: noArm}, wantErr: "linux/arm64"},
+		{name: "a config blob that does not hash to its digest", reg: &pinRegistry{manifest: pinManifest("checked"), configBody: pinConfigBody(openshellTestDriftedGT)}, wantErr: "not the digest the manifest names"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town, work := openshellTown(t)
+			fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+			profile := pulledProfile()
+			b, pushes := openshellTestBackend(town, profile, fake)
+			useFakeDocker(b, &fakeImageRegistry{}, tt.reg)
+
+			_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+			if err == nil {
+				t.Fatal("Prepare succeeded, want the spawn refused")
+			}
+			for _, want := range append(strings.Split(tt.wantErr, "|"), pinHost, profile.Image) {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Prepare = %v, want it to name %q", err, want)
+				}
+			}
+			if len(*pushes) != 0 {
+				t.Errorf("pushes = %+v, want none", *pushes)
+			}
+			if calls := fake.Calls(); len(calls) != 0 {
+				t.Errorf("openshell calls = %v, want none", calls)
 			}
 		})
 	}
@@ -724,49 +821,29 @@ const (
 	openshellTestImageDigest = "sha256:3f7a1c5e9b2d4a6f8c0e1b3d5a7f9c2e4b6d8a0f1c3e5b7d9a2f4c6e8b0d1a3f"
 )
 
-// TestImageRefFor covers the references Prepare pins. A docker driver names the
-// local content id. A registry-pulling driver names the manifest digest its
-// registry holds for the tag, read from the registry the reference names, and
-// the label check reads the local id. A pinned reference is named as it stands.
-// A reference that names no registry, and a registry that refuses or answers
-// without a manifest digest, is refused rather than passed to the create.
+// TestImageRefFor covers the docker path: a docker driver names the local content
+// id for both the label check and the create, a reference that already names its
+// digest is created as it stands, and a docker that cannot inspect the image
+// refuses with the image and docker's reason.
 func TestImageRefFor(t *testing.T) {
 	t.Parallel()
-	const (
-		localID = openshellTestImageDigest
-		pulled  = "localhost:5001/gastown-polecat:dev"
-	)
+	const localID = openshellTestImageDigest
 	pinned := "localhost:5001/gastown-polecat@" + pinDigestChecked
 	tests := []struct {
 		name       string
 		image      string
-		pull       bool
 		fail       bool   // docker fails the inspect
 		stderr     string // docker's reason when it fails
-		digest     string // the registry's answer for the tag
-		digestErr  error  // the registry's refusal to answer
-		wantLocal  string
 		wantCreate string
-		wantLookup []string // the registry host, repository and tag read, if any
-		wantErr    string   // "|" separates substrings the error must name
+		wantErr    string // "|" separates substrings the error must name
 	}{
-		{name: "a docker driver names the local id", image: "gastown-polecat:dev", wantLocal: localID, wantCreate: localID},
+		{name: "a docker driver names the local id", image: "gastown-polecat:dev", wantCreate: localID},
 		{name: "a failed docker inspect names the image and docker's reason", image: "gastown-polecat:dev", fail: true, stderr: "Cannot connect to the Docker daemon\n", wantErr: "docker image inspect gastown-polecat:dev|Cannot connect to the Docker daemon"},
-		{name: "a pinned reference is named as it stands", image: pinned, pull: true, wantLocal: localID, wantCreate: pinned},
-		{name: "a pulled tag is named by the registry's digest", image: pulled, pull: true, digest: pinDigestChecked, wantLocal: localID, wantCreate: "localhost:5001/gastown-polecat@" + pinDigestChecked, wantLookup: []string{"localhost:5001 gastown-polecat dev"}},
-		{name: "a nested repository keeps its path", image: "localhost:5001/team/gastown-polecat:dev", pull: true, digest: pinDigestChecked, wantLocal: localID, wantCreate: "localhost:5001/team/gastown-polecat@" + pinDigestChecked, wantLookup: []string{"localhost:5001 team/gastown-polecat dev"}},
-		{name: "a reference with no tag reads as latest", image: "localhost:5001/gastown-polecat", pull: true, digest: pinDigestChecked, wantLocal: localID, wantCreate: "localhost:5001/gastown-polecat@" + pinDigestChecked, wantLookup: []string{"localhost:5001 gastown-polecat latest"}},
-		{name: "a reference with no registry host is refused", image: "gastown-polecat:dev", pull: true, wantLocal: localID, wantErr: "names no registry host"},
-		{name: "a registry host with userinfo is refused before any lookup", image: "registry.test@evil.example/gastown-polecat:dev", pull: true, wantLocal: localID, wantErr: "is not a host name"},
-		{name: "a registry port that is not a number is refused before any lookup", image: "registry.test:port/gastown-polecat:dev", pull: true, wantLocal: localID, wantErr: "is not a host name"},
-		{name: "a registry that does not answer refuses", image: pulled, pull: true, digestErr: errors.New("dial tcp: connection refused"), wantLookup: []string{"localhost:5001 gastown-polecat dev"}, wantErr: "pinning|connection refused"},
-		{name: "a reply with no digest refuses", image: pulled, pull: true, digest: "", wantLookup: []string{"localhost:5001 gastown-polecat dev"}, wantErr: "not a manifest digest"},
-		{name: "a reply with a malformed digest refuses", image: pulled, pull: true, digest: "sha256:abc", wantLookup: []string{"localhost:5001 gastown-polecat dev"}, wantErr: "not a manifest digest"},
+		{name: "a pinned reference is named as it stands", image: pinned, wantCreate: pinned},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var lookups []string
 			run := func(_ context.Context, args ...string) ([]byte, []byte, error) {
 				if len(args) != 5 || args[2] != "--format" || args[3] != imageIDFormat {
 					t.Fatalf("docker call = %v, want image inspect for the id", args)
@@ -776,11 +853,7 @@ func TestImageRefFor(t *testing.T) {
 				}
 				return []byte(localID + "\n"), nil, nil
 			}
-			digest := func(_ context.Context, host, repo, tag string) (string, error) {
-				lookups = append(lookups, host+" "+repo+" "+tag)
-				return tt.digest, tt.digestErr
-			}
-			got, err := imageRefFor(context.Background(), run, digest, tt.image, tt.pull)
+			got, err := imageRefFor(context.Background(), run, tt.image)
 			if tt.wantErr != "" {
 				if err == nil {
 					t.Fatalf("imageRefFor = %+v, want a refusal naming %q", got, tt.wantErr)
@@ -790,16 +863,86 @@ func TestImageRefFor(t *testing.T) {
 						t.Errorf("imageRefFor = %v, want it to name %q", err, want)
 					}
 				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("imageRefFor: %v", err)
+			}
+			if want := (resolvedImage{Local: localID, Create: tt.wantCreate}); got != want {
+				t.Errorf("imageRefFor = %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// TestPulledImage covers a pulling gateway's references (gt-xzze6g): the manifest
+// digest the registry holds for the tag names the create, the gt commit is read
+// from the config the registry serves, and docker is not involved. A reference
+// that names its digest is created as it stands. A reference that names no
+// registry, a registry that refuses or answers without a manifest digest, one
+// that serves no label, one that holds no linux/arm64 entry, and a config that
+// does not hash to its digest are each refused, naming the registry and the image.
+func TestPulledImage(t *testing.T) {
+	t.Parallel()
+	const pulled = "localhost:5001/gastown-polecat:dev"
+	pinned := "localhost:5001/gastown-polecat@" + pinDigestChecked
+	label := func(commit string) map[string]string { return map[string]string{gtCommitLabel: commit} }
+	tests := []struct {
+		name       string
+		image      string
+		info       registry.ImageInfo
+		inspectErr error
+		wantRef    string // the "host repo ref" the registry was asked
+		wantCreate string
+		wantCommit string
+		wantErr    string // "|" separates substrings the error must name
+	}{
+		{name: "a pulled tag is named by the registry's digest", image: pulled, info: registry.ImageInfo{ManifestDigest: pinDigestChecked, ConfigDigest: pinConfigDigest, Labels: label("abc")}, wantRef: "localhost:5001 gastown-polecat dev", wantCreate: "localhost:5001/gastown-polecat@" + pinDigestChecked, wantCommit: "abc"},
+		{name: "a nested repository keeps its path", image: "localhost:5001/team/gastown-polecat:dev", info: registry.ImageInfo{ManifestDigest: pinDigestChecked, Labels: label("abc")}, wantRef: "localhost:5001 team/gastown-polecat dev", wantCreate: "localhost:5001/team/gastown-polecat@" + pinDigestChecked, wantCommit: "abc"},
+		{name: "a reference with no tag reads as latest", image: "localhost:5001/gastown-polecat", info: registry.ImageInfo{ManifestDigest: pinDigestChecked, Labels: label("abc")}, wantRef: "localhost:5001 gastown-polecat latest", wantCreate: "localhost:5001/gastown-polecat@" + pinDigestChecked, wantCommit: "abc"},
+		{name: "a pinned reference is read by its digest and named as it stands", image: pinned, info: registry.ImageInfo{ManifestDigest: pinDigestChecked, Labels: label("abc")}, wantRef: "localhost:5001 gastown-polecat " + pinDigestChecked, wantCreate: pinned, wantCommit: "abc"},
+		{name: "a pinned reference the registry answers another digest for is refused", image: pinned, info: registry.ImageInfo{ManifestDigest: pinDigestRebuilt, Labels: label("abc")}, wantRef: "localhost:5001 gastown-polecat " + pinDigestChecked, wantErr: "localhost:5001|" + pinned},
+		{name: "a reference with no registry host is refused", image: "gastown-polecat:dev", wantErr: "names no registry host"},
+		{name: "a registry host with userinfo is refused before any lookup", image: "registry.test@evil.example/gastown-polecat:dev", wantErr: "is not a host name"},
+		{name: "a registry that does not answer refuses", image: pulled, inspectErr: errors.New("dial tcp: connection refused"), wantRef: "localhost:5001 gastown-polecat dev", wantErr: "registry localhost:5001|" + pulled + "|connection refused"},
+		{name: "a reply with a malformed digest refuses", image: pulled, info: registry.ImageInfo{ManifestDigest: "sha256:abc", Labels: label("abc")}, wantRef: "localhost:5001 gastown-polecat dev", wantErr: "not a manifest digest|localhost:5001"},
+		{name: "an image with no gt label is read as no commit, which the check refuses", image: pulled, info: registry.ImageInfo{ManifestDigest: pinDigestChecked}, wantRef: "localhost:5001 gastown-polecat dev", wantCreate: "localhost:5001/gastown-polecat@" + pinDigestChecked, wantCommit: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var asked []string
+			inspect := func(_ context.Context, host, repo, ref string) (registry.ImageInfo, error) {
+				asked = append(asked, host+" "+repo+" "+ref)
+				return tt.info, tt.inspectErr
+			}
+			got, err := pulledImage(context.Background(), inspect, tt.image)
+			if tt.wantErr != "" {
+				if err == nil {
+					t.Fatalf("pulledImage = %+v, want a refusal naming %q", got, tt.wantErr)
+				}
+				for _, want := range strings.Split(tt.wantErr, "|") {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("pulledImage = %v, want it to name %q", err, want)
+					}
+				}
 			} else {
 				if err != nil {
-					t.Fatalf("imageRefFor: %v", err)
+					t.Fatalf("pulledImage: %v", err)
 				}
-				if want := (resolvedImage{Local: tt.wantLocal, Create: tt.wantCreate}); got != want {
-					t.Errorf("imageRefFor = %+v, want %+v", got, want)
+				if got.Create != tt.wantCreate || got.Commit != tt.wantCommit || !got.CommitRead || got.Local != tt.info.ConfigDigest {
+					t.Errorf("pulledImage = %+v, want create %q, commit %q, read, local %q", got, tt.wantCreate, tt.wantCommit, tt.info.ConfigDigest)
+				}
+				if !strings.Contains(got.Source, "localhost:5001") {
+					t.Errorf("Source = %q, want it to name the registry", got.Source)
 				}
 			}
-			if !reflect.DeepEqual(lookups, tt.wantLookup) {
-				t.Errorf("registry lookups = %q, want %q", lookups, tt.wantLookup)
+			var want []string
+			if tt.wantRef != "" {
+				want = []string{tt.wantRef}
+			}
+			if !reflect.DeepEqual(asked, want) {
+				t.Errorf("registry reads = %q, want %q", asked, want)
 			}
 		})
 	}
@@ -811,11 +954,11 @@ type schemeTransport func(*http.Request) (*http.Response, error)
 
 func (f schemeTransport) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
-// TestRegistryDigesterReachesARegistryOverTLSUnlessLoopback is the scheme the
+// TestRegistryInspectorReachesARegistryOverTLSUnlessLoopback is the scheme the
 // pulled digest is read over (gt-jbuow): a registry on any other host is reached
 // over https, and only a loopback host, which docker also reads as a local
 // registry, over plain HTTP.
-func TestRegistryDigesterReachesARegistryOverTLSUnlessLoopback(t *testing.T) {
+func TestRegistryInspectorReachesARegistryOverTLSUnlessLoopback(t *testing.T) {
 	t.Parallel()
 	tests := []struct{ host, wantScheme string }{
 		{"registry.example.com:5000", "https"},
@@ -839,9 +982,9 @@ func TestRegistryDigesterReachesARegistryOverTLSUnlessLoopback(t *testing.T) {
 				}, nil
 			})}
 
-			if _, err := registryDigester(client)(context.Background(), tt.host, pinRepo, pinTag); err != nil {
-				t.Fatalf("registryDigester: %v", err)
-			}
+			// The reply is not an image, so the read ends after the first request;
+			// only where that request went is under test.
+			_, _ = registryInspector(client)(context.Background(), tt.host, pinRepo, pinTag)
 			if want := []string{tt.wantScheme + "://" + tt.host}; !reflect.DeepEqual(sent, want) {
 				t.Errorf("requests went to %q, want %q", sent, want)
 			}
@@ -1282,7 +1425,7 @@ func TestOpenShellPrepareRefusesAPulledSandboxThatDiffersFromTheCheckedImage(t *
 		tags:   map[string]string{profile.Image: local},
 		labels: map[string]string{local: openshellTestGTCommit},
 	}
-	useFakeDocker(b, reg, pinnedDigester(&pinRegistry{manifest: pinManifest("checked")}))
+	useFakeDocker(b, reg, &pinRegistry{manifest: pinManifest("checked")})
 
 	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
 	if err == nil || !strings.Contains(err.Error(), openshellTestDriftedGT) || !strings.Contains(err.Error(), openshellTestGTCommit) {
