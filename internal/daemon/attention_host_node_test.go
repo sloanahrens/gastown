@@ -2,13 +2,13 @@ package daemon
 
 import (
 	"context"
-	"sync"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
