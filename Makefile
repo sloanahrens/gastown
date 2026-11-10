@@ -537,7 +537,8 @@ gate-test:
 	@# ends, not piped: a backgrounded pipeline reports only its last element,
 	@# so a pipe would hand back tierwall's status instead of go test's, and
 	@# the subshell a pipefail wrapper needs would become the trap's child in
-	@# place of the suite. tierwall prints the per-package walls and appends the
+	@# place of the suite. tierwall prints the per-package walls, the tests of 5s
+	@# or more under their package (-slow-tests, gt-vijwck), and appends the
 	@# series; its exit code is not folded into the suite's, because the gate's
 	@# verdict is go test's. A series that could not be written is tierwall's exit
 	@# code 4 (go run folds any program code to 1 and prints "exit status N"), and
@@ -548,7 +549,7 @@ gate-test:
 	stream=$$(mktemp); \
 	$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 20m ./... -json >"$$stream" & gt=$$!; \
 	wait $$gt; go_rc=$$?; \
-	go run ./internal/testpolicy/cmd/tierwall $(GATE_WALLS) <"$$stream"; tw_rc=$$?; \
+	go run ./internal/testpolicy/cmd/tierwall -slow-tests $(GATE_WALLS) <"$$stream"; tw_rc=$$?; \
 	rm -f "$$stream"; \
 	if [ $$go_rc -eq 0 ] && [ $$tw_rc -ne 0 ]; then echo "gate: tierwall exited $$tw_rc, so the wall series may be incomplete; the Go suite's verdict stands" >&2; fi; \
 	if [ $$go_rc -eq 0 ]; then for m in $(TESTED_MODULES); do echo "gate: vet and unit tier in $$m" >&2; ($(CPU_CLASS) go -C "$$m" vet ./... && $(CPU_CLASS) GT_TEST_DOCKER=0 go -C "$$m" test ./...) || { go_rc=$$?; break; }; done; fi; \
