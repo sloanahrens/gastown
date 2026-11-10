@@ -54,6 +54,31 @@ func TestLineStaleIsUnknown(t *testing.T) {
 	}
 }
 
+// A report the daemon wrote stale-after ago or more is UNKNOWN whatever it
+// recorded, green included, so a green main carried in an old report cannot keep
+// the town green (gt-f701fm).
+func TestReportAtOrPastStaleAfterIsUnknown(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		age  time.Duration
+		want Verdict
+	}{
+		{"just-fresh", DefaultStaleAfter - time.Second, Green},
+		{"at-stale-after", DefaultStaleAfter, VerdictUnknown},
+		{"well-past", DefaultStaleAfter + time.Hour, VerdictUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			r := Report{At: now.Add(-tt.age), Verdict: Green}
+			if got := Effective(r, now, DefaultStaleAfter); got != tt.want {
+				t.Errorf("Effective at age %s = %s, want %s", tt.age, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestLineNonGreenFieldsWorstFirstWithTags(t *testing.T) {
 	t.Parallel()
 	r := Report{At: ago(time.Minute), Verdict: VerdictUnknown, Fields: []Field{

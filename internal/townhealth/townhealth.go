@@ -454,14 +454,15 @@ func (c PostLandCheck) Configured() bool { return c.Context != "" || c.Command !
 // (gt-gg9hv.7).
 const postLandPlaceholderCommand = "true"
 
-// PostLandVerdictMaxAge bounds how old the newest recorded green verdict may
-// be before a rig with a status context reads UNKNOWN instead of green. A
-// status verdict that never came is dropped after post_land_timeout, so
-// without the bound the last green would read green forever (gt-gg9hv.7.1). A
-// command-configured rig records its verdict synchronously, so its green is
-// not aged. A constant rather than a GT_ environment read: the dashboard has
-// one town-wide value.
-const PostLandVerdictMaxAge = 24 * time.Hour
+// PostLandAgeShownAfter is how old the newest recorded green verdict may be
+// before a rig with a status context carries its age in the main field's value
+// ("green 31h"). It does not expire the green: an idle rig's last recorded green
+// stands until a newer verdict moves LastRun (gt-f701fm). A status verdict that
+// never arrives leaves that green standing; the landing worker's
+// post_land_timeout attention item is what reports it. A command-configured rig
+// records its verdict synchronously, so its green is never aged. A constant
+// rather than a GT_ environment read: the dashboard has one town-wide value.
+const PostLandAgeShownAfter = 24 * time.Hour
 
 // RigMain is one rig's post-landing main state: the newest commit a run
 // reached a verdict at and the newest one that passed.
@@ -471,8 +472,8 @@ type RigMain struct {
 	LastGreen string
 	// LastGreenAt is when the newest green verdict was recorded; zero when
 	// the record carries no time. A rig with a status context judges a green
-	// by it: a green older than PostLandVerdictMaxAge, or one with no recorded
-	// time, reads UNKNOWN rather than green (gt-gg9hv.7.2).
+	// by it: one with no recorded time reads UNKNOWN rather than green
+	// (gt-gg9hv.7.2); an old one stays green and carries its age (gt-f701fm).
 	LastGreenAt time.Time
 	// PostLand is what the rig configures to decide a post-land verdict. A
 	// rig without one never runs a post-landing check, so having no verdict
@@ -1157,9 +1158,12 @@ func mains(in Inputs) []Field {
 			// a green with no recorded time leave the age unknown. A command
 			// rig's green is recorded when the check runs and needs no clock.
 			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("green verdict has no recorded time")))
-		case check.Context != "" && in.Now.Sub(m.LastGreenAt) > PostLandVerdictMaxAge:
+		case check.Context != "" && in.Now.Sub(m.LastGreenAt) > PostLandAgeShownAfter:
+			// No newer verdict is recorded, so the green stands and its age goes
+			// in the value. The line lists only non-green fields, so this green
+			// adds nothing to a green line.
 			age := in.Now.Sub(m.LastGreenAt)
-			fs = append(fs, unknown(FieldMain, m.Rig, "", fmt.Errorf("green verdict recorded %s ago, past the %s bound", Short(age), Short(PostLandVerdictMaxAge))))
+			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "green " + Short(age)})
 		default:
 			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "green"})
 		}
