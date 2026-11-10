@@ -458,3 +458,31 @@ func TestBuildMangoRefusesBeforeItRuns(t *testing.T) {
 		})
 	}
 }
+
+// TestMangoDockerfile holds the images workflow's mango build equal to the one
+// `gt daemon image` runs on a developer machine: deploy/daemon/mango.Dockerfile
+// names the same builder, installs with the same command and compiles with the
+// same command as mangoCompile, each on a line of its own. Without it the CI
+// image's mango and a local build's mango would drift apart unseen.
+func TestMangoDockerfile(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.FromSlash("../../deploy/daemon/mango.Dockerfile"))
+	if err != nil {
+		t.Fatalf("reading the mango Dockerfile: %v", err)
+	}
+	have := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		have[strings.TrimSpace(line)] = true
+	}
+	for _, want := range []string{
+		"FROM " + mangoBuildImage + " AS build",
+		"RUN " + mangoAptInstall,
+		"WORKDIR /src/" + mangoGoAPI,
+		"RUN " + mangoGoBuild,
+		"COPY --from=build /out/mango /mango",
+	} {
+		if !have[want] {
+			t.Errorf("deploy/daemon/mango.Dockerfile has no line %q", want)
+		}
+	}
+}

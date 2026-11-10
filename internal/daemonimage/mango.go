@@ -28,8 +28,15 @@ const (
 // reading the worktree's .git, which names a gitdir the container does not
 // mount; the commit reaches the image through the caller and the mango.sha
 // stamp instead of VCS stamping.
-const mangoCompile = `apt-get update && apt-get install -y --no-install-recommends gcc g++ && ` +
-	`CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-w -s" -o /out/mango ` + mangoPackage
+const mangoCompile = mangoAptInstall + ` && ` + mangoGoBuild
+
+// mangoAptInstall and mangoGoBuild are the two commands of mangoCompile. The
+// images workflow builds the same mango from deploy/daemon/mango.Dockerfile, whose
+// two RUN lines are these strings; TestMangoDockerfile holds them equal.
+const (
+	mangoAptInstall = `apt-get update && apt-get install -y --no-install-recommends gcc g++`
+	mangoGoBuild    = `CGO_ENABLED=1 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-w -s" -o /out/mango ` + mangoPackage
+)
 
 // mangoDir is the directory under the build context the image's COPY reads mango
 // and its commit stamp from.
