@@ -1062,7 +1062,8 @@ func TestHasBeadsDatabase(t *testing.T) {
 			// a workspace whose Dolt server had the database, this one does not.
 			// It is an uninitialized rig, not a read failure.
 			name: "server mode naming a database the server lacks",
-			setup: func(t *testing.T, _, rigPath string) {
+			setup: func(t *testing.T, townRoot, rigPath string) {
+				mkdirTestDir(t, filepath.Join(townRoot, ".dolt-data", "beads_other"))
 				writeTestFile(t, filepath.Join(rigPath, ".beads", "metadata.json"), testServerMetadata)
 			},
 			want: false,
@@ -1088,14 +1089,14 @@ func TestHasBeadsDatabase(t *testing.T) {
 			mkdirTestDir(t, filepath.Join(rigPath, ".beads"))
 			tt.setup(t, townRoot, rigPath)
 
-			if got := hasBeadsDatabase(filepath.Join(rigPath, ".beads")); got != tt.want {
+			if got := hasBeadsDatabaseWith(filepath.Join(rigPath, ".beads"), os.Stat, func(string) string { return "" }, func(string) {}); got != tt.want {
 				t.Errorf("hasBeadsDatabase() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 
 	t.Run("missing directory", func(t *testing.T) {
-		if hasBeadsDatabase(filepath.Join(t.TempDir(), ".beads")) {
+		if hasBeadsDatabaseWith(filepath.Join(t.TempDir(), ".beads"), os.Stat, func(string) string { return "" }, func(string) {}) {
 			t.Error("hasBeadsDatabase() = true for a directory that does not exist")
 		}
 	})
