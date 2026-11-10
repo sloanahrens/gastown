@@ -389,6 +389,34 @@ func TestVerifyReportsAnUnclassifiedDirectoryOnce(t *testing.T) {
 	}
 }
 
+// TestVerifyRefusesAHoldOrEstopNoRowCovers holds the shared rows to their names:
+// the hold and the ESTOP files the rows cover pass, and a file that only shares
+// part of one of those names is reported with the existing no-entry refusal.
+func TestVerifyRefusesAHoldOrEstopNoRowCovers(t *testing.T) {
+	t.Parallel()
+	town := registryTown()
+	for _, p := range []string{"seat-refill.hold", "ESTOP", "ESTOP.hm"} {
+		town[p] = &fstest.MapFile{Data: []byte("x")}
+	}
+	for _, p := range []string{"seat-refill.hold.bak", "ESTOP.hm.bak", "ESTOP-old"} {
+		town[p] = &fstest.MapFile{Data: []byte("x")}
+	}
+	problems, err := Verify(town, Default(), time.Now())
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	var paths []string
+	for _, p := range problems {
+		paths = append(paths, p.Path)
+		if !strings.Contains(p.Reason, "no manifest entry") {
+			t.Errorf("Verify reported %s as %q, want the no-manifest-entry refusal", p.Path, p.Reason)
+		}
+	}
+	if want := []string{"ESTOP-old", "ESTOP.hm.bak", "seat-refill.hold.bak"}; !slices.Equal(paths, want) {
+		t.Errorf("Verify reported %v, want exactly %v", paths, want)
+	}
+}
+
 // TestVerifyReportsEverySiblingFile: gastown/.runtime is a container, since rig
 // rows lie below it, and it holds three files no row names. Each is its own
 // problem. An unclassified directory is reported once and never entered, so

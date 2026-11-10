@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/dispatch"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -75,6 +77,16 @@ func TestManifestMirrorMatches(t *testing.T) {
 			want: `unknown placeholder "<rigx>"`,
 		},
 		{
+			name: "unknown placeholder beside text",
+			yaml: "entries:\n  - path: ESTOP.<rigx>\n    owner: shared\n    why: a typo\n",
+			want: `unknown placeholder "ESTOP.<rigx>"`,
+		},
+		{
+			name: "two placeholders in one segment",
+			yaml: "entries:\n  - path: <rig><bird>/crew\n    owner: session\n    why: two placeholders\n",
+			want: `unknown placeholder "<rig><bird>"`,
+		},
+		{
 			name: "not YAML",
 			yaml: "entries: [unclosed\n",
 			want: "reading the town-state manifest",
@@ -103,6 +115,12 @@ var newManifestRows = []manifestRow{
 	{path: ".events.jsonl.lock", owner: OwnerDaemon},
 	{path: ".dolt-archive", owner: OwnerDaemon},
 	{path: ".beads-wisp", owner: OwnerDaemon},
+
+	// The dispatch hold and the ESTOP sentinels: the operator writes them on the
+	// Mac and the pod reads them each tick.
+	{path: "seat-refill.hold", owner: OwnerShared},
+	{path: "ESTOP", owner: OwnerShared},
+	{path: "ESTOP.<rig>", owner: OwnerShared},
 
 	// Rig-level paths each registered rig carries.
 	{path: "<rig>/.beads", owner: OwnerDaemon},
@@ -575,5 +593,62 @@ func TestSessionOwned(t *testing.T) {
 		if ok && got.Path != tc.path {
 			t.Errorf("SessionOwned(%q) covered by %q, want %q", tc.rel, got.Path, tc.path)
 		}
+	}
+}
+
+// TestSessionOwnedPlaceholderInsideASegment holds a placeholder that is part of
+// a segment to the text beside it: <rig>-scratch covers gastown-scratch, and
+// nothing that shares only part of the name.
+func TestSessionOwnedPlaceholderInsideASegment(t *testing.T) {
+	t.Parallel()
+	m := &Manifest{Entries: []Entry{{Path: "<rig>-scratch", Owner: OwnerSession, Why: "a fixture row"}}}
+	cases := []struct {
+		rel  string
+		want bool
+	}{
+		{rel: "gastown-scratch", want: true},
+		{rel: "gastown-scratch/notes", want: true},
+		{rel: "gastown-scratchy/notes", want: false},
+		{rel: "gastown/notes", want: false},
+		{rel: "-scratch/notes", want: false},
+	}
+	for _, tc := range cases {
+		if _, ok := m.SessionOwned(tc.rel); ok != tc.want {
+			t.Errorf("SessionOwned(%q) covered = %v, want %v", tc.rel, ok, tc.want)
+		}
+	}
+}
+
+// TestDispatchHoldAndEstopRowsAreShared fails when the dispatch hold, the town
+// ESTOP or a registered rig's ESTOP has no shared row. The paths are the names
+// the code reads, so a renamed file moves this test with it.
+func TestDispatchHoldAndEstopRowsAreShared(t *testing.T) {
+	t.Parallel()
+	entries := Default().Expand([]string{"gastown"}, nil)
+	for _, p := range []string{dispatch.HoldFileName, estop.FileName, estop.RigFileName("gastown")} {
+		e, ok := Lookup(entries, p)
+		if !ok {
+			t.Errorf("no row covers %s", p)
+			continue
+		}
+		if e.Owner != OwnerShared {
+			t.Errorf("row %q covers %s, want owner %q", e.Path, p, OwnerShared)
+		}
+	}
+}
+
+// TestEstopRigRowExpandsPerRegisteredRig holds ESTOP.<rig> to the rigs the town
+// registers: one ESTOP.<name> per rig, beside the town ESTOP, and no row for a
+// rig the town does not have.
+func TestEstopRigRowExpandsPerRegisteredRig(t *testing.T) {
+	t.Parallel()
+	var got []string
+	for _, e := range Default().Expand([]string{"gastown", "beads"}, nil) {
+		if strings.HasPrefix(e.Path, estop.FileName) {
+			got = append(got, e.Path)
+		}
+	}
+	if want := []string{"ESTOP", "ESTOP.gastown", "ESTOP.beads"}; !slices.Equal(got, want) {
+		t.Errorf("ESTOP rows expand to %v, want %v", got, want)
 	}
 }
