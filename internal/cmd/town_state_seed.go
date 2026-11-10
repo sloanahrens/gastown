@@ -454,6 +454,7 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	// The live copy's settings step runs after the daemon verify, as the rehearsal's
 	// does, and its byte check runs before the success line. The state record is
 	// the last write, so the pod's guard reads it stopped when the pod starts.
+	stateRewritten := false
 	if !env.rehearsal {
 		if err := seedCutoverStep(env, cutover); err != nil {
 			return err
@@ -464,7 +465,7 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 		if err := seedHoldStep(env); err != nil {
 			return err
 		}
-		if err := seedStateRecordStep(env); err != nil {
+		if stateRewritten, err = seedStateRecordStep(env); err != nil {
 			return err
 		}
 	}
@@ -472,7 +473,7 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	// The rehearsal's state record is written after the daemon verify, which compares
 	// the record as the host has it, and before the settings step.
 	if env.rehearsal {
-		if err := seedStateRecordStep(env); err != nil {
+		if stateRewritten, err = seedStateRecordStep(env); err != nil {
 			return err
 		}
 	}
@@ -502,7 +503,13 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 			profileNote = "; the profile changed the claim"
 		}
 	}
-	fmt.Fprintf(env.out, "claim %s matches the host copy set (%d files) as streamed%s\n", seedClaim, res.Files, profileNote)
+	// The verify ran before the state record was rewritten, so that one file no longer
+	// matches the stream. The line names it.
+	stateNote := ""
+	if stateRewritten {
+		stateNote = ", except " + daemonStateRel + ", which the seed rewrote as stopped and owned by the pod"
+	}
+	fmt.Fprintf(env.out, "claim %s matches the host copy set (%d files) as streamed%s%s\n", seedClaim, res.Files, stateNote, profileNote)
 	return nil
 }
 
@@ -834,8 +841,9 @@ const daemonStateRel = "daemon/state.json"
 // writes nothing and says so. A record that does not parse, or a claim that does not
 // hold the written record, leaves the claim partial. The copied record is never
 // removed on failure: with no record the guard starts a daemon with no prior run,
-// and the copied one still refuses.
-func seedStateRecordStep(env townStateSeedEnv) error {
+// and the copied one still refuses. It reports whether it rewrote the claim's
+// record: false, and no error, when the host has no record to rewrite.
+func seedStateRecordStep(env townStateSeedEnv) (bool, error) {
 	read := env.readHost
 	if read == nil {
 		read = os.ReadFile
@@ -843,10 +851,10 @@ func seedStateRecordStep(env townStateSeedEnv) error {
 	data, err := read(filepath.Join(env.town, filepath.FromSlash(daemonStateRel)))
 	if errors.Is(err, fs.ErrNotExist) {
 		fmt.Fprintf(env.out, "%s is not on the host: no state record is written into claim %s\n", daemonStateRel, seedClaim)
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("reading the host's %s: the claim is partial and not to be used: %w", daemonStateRel, err)
+		return false, fmt.Errorf("reading the host's %s: the claim is partial and not to be used: %w", daemonStateRel, err)
 	}
 	encode := encodeRecord
 	if env.encode != nil {
@@ -854,21 +862,21 @@ func seedStateRecordStep(env townStateSeedEnv) error {
 	}
 	rec, err := stoppedStateRecord(data, encode)
 	if err != nil {
-		return fmt.Errorf("the claim is partial and not to be used: %w", err)
+		return false, fmt.Errorf("the claim is partial and not to be used: %w", err)
 	}
 	file := newSeedCutoverFile(daemonStateRel, rec)
 	if err := seedCutoverStream(env, []seedCutoverFile{file}); err != nil {
-		return fmt.Errorf("stream the daemon state record into claim %s: the claim is partial and not to be used: %w", seedClaim, err)
+		return false, fmt.Errorf("stream the daemon state record into claim %s: the claim is partial and not to be used: %w", seedClaim, err)
 	}
 	mismatches, err := seedCutoverMismatches(env.engine, []seedCutoverFile{file})
 	if err != nil {
-		return fmt.Errorf("verifying the daemon state record in claim %s: the claim is partial and not to be used: %w", seedClaim, err)
+		return false, fmt.Errorf("verifying the daemon state record in claim %s: the claim is partial and not to be used: %w", seedClaim, err)
 	}
 	if problems := printVerifyProblems(env.out, townstate.VerifyResult{Mismatches: mismatches}, nil); problems > 0 {
-		return fmt.Errorf("the claim does not hold the daemon state record (%d problems): the claim is partial and not to be used", problems)
+		return false, fmt.Errorf("the claim does not hold the daemon state record (%d problems): the claim is partial and not to be used", problems)
 	}
 	fmt.Fprintf(env.out, "daemon state record written into claim %s as stopped and owned by %s %q\n", seedClaim, config.SupervisorContainer, k8sdaemon.Name)
-	return nil
+	return true, nil
 }
 
 // seedPodOwner is the owner the pod's daemon records for itself: the container
