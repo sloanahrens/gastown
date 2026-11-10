@@ -1039,7 +1039,7 @@ func TestExportTableToJsonlUsesTheTownEndpoint(t *testing.T) {
 			return []byte(`{"rows":[]}`), nil
 		})
 
-	if _, err := d.exportTableToJsonl("issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute); err != nil {
+	if _, err := d.exportTableToJsonl(d.resolveJsonlTarget(), "issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute); err != nil {
 		t.Fatalf("exportTableToJsonl: %v", err)
 	}
 	if got == nil {
@@ -1067,7 +1067,7 @@ func TestExportTableToJsonlRefusesUnusableTownDoltConfig(t *testing.T) {
 			return nil, nil
 		})
 
-	_, err := d.exportTableToJsonl("issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute)
+	_, err := d.exportTableToJsonl(d.resolveJsonlTarget(), "issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute)
 
 	if err == nil {
 		t.Fatal("exportTableToJsonl accepted an unusable dolt.external_container")
@@ -1091,7 +1091,7 @@ func TestExportTableToJsonlFailsWithoutEmbeddedFallback(t *testing.T) {
 			return nil, serverErr
 		})
 
-	_, err := d.exportTableToJsonl("issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute)
+	_, err := d.exportTableToJsonl(d.resolveJsonlTarget(), "issues", beadsql.BackupTable("testdb", "issues"), t.TempDir(), t.TempDir(), time.Minute)
 
 	if !errors.Is(err, serverErr) {
 		t.Fatalf("exportTableToJsonl error = %v, want the server's %v", err, serverErr)

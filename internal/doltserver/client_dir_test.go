@@ -136,3 +136,18 @@ func TestServerSQLCmdClientDir(t *testing.T) {
 		}
 	})
 }
+
+// TestClientWorkDirUnsetTownRoot: with no data directory and no town root there
+// is no private directory to make, so the client runs in the system temporary
+// directory rather than failing the exec.
+func TestClientWorkDirUnsetTownRoot(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "missing")
+	dir, err := ClientWorkDir(&Config{DataDir: missing})
+	if err != nil {
+		t.Fatalf("ClientWorkDir = %v, want the temporary directory", err)
+	}
+	if dir != os.TempDir() {
+		t.Errorf("ClientWorkDir = %q, want %q", dir, os.TempDir())
+	}
+}

@@ -470,6 +470,10 @@ type Daemon struct {
 	// without running dolt; nil is runJSONLExport.
 	jsonlExportRunFn func(ctx context.Context, cmd *exec.Cmd, table string, timeout time.Duration) ([]byte, error)
 
+	// jsonlTargetFn replaces resolveJsonlTarget in tests, so a backup tick's read
+	// of the Dolt endpoint can be counted; nil is the real read.
+	jsonlTargetFn func() jsonlTarget
+
 	// jsonlTrackerExportFn replaces the tracker client behind the JSONL
 	// backup's tracker branch in tests, so a tracker rig's export is driven
 	// with records a test wrote; nil is the client built from the environment

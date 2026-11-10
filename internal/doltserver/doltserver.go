@@ -4988,7 +4988,7 @@ func (h *host) GetActiveConnectionCount(townRoot string) (int, error) {
 	// GH#2537: Set cmd.Dir to the server's data directory to prevent dolt from
 	// creating stray .doltcfg/privileges.db files in the caller's CWD. Even in
 	// TCP client mode, dolt may auto-create .doltcfg/ in the working directory.
-	dir, err := clientWorkDir(config)
+	dir, err := ClientWorkDir(config)
 	if err != nil {
 		return 0, err
 	}
@@ -5567,15 +5567,16 @@ func (h *host) serverExecSQL(townRoot, query string) error {
 	return nil
 }
 
-// clientWorkDir is the working directory a dolt client command runs in: the
+// ClientWorkDir is the working directory a dolt client command runs in: the
 // server's data directory when it exists on this machine, else a directory that
 // does, under the town root. In a pod the Dolt server is remote and the town has
 // no data directory; a missing Dir would fail the exec with "fork/exec dolt: no
 // such file or directory" although the binary is fine (gt-1saf37). The fallback
 // is private (0700) and empty, so dolt's stray .doltcfg files still land
 // somewhere harmless (GH#2537). A town root that is unset falls back to the
-// system temporary directory.
-func clientWorkDir(config *Config) (string, error) {
+// system temporary directory. The JSONL backup runs its dolt commands here when
+// the server is remote.
+func ClientWorkDir(config *Config) (string, error) {
 	if info, err := os.Stat(config.DataDir); err == nil && info.IsDir() {
 		return config.DataDir, nil
 	}
@@ -5589,11 +5590,11 @@ func clientWorkDir(config *Config) (string, error) {
 	return dir, nil
 }
 
-// setClientDir sets cmd's working directory from clientWorkDir. A directory that
+// setClientDir sets cmd's working directory from ClientWorkDir. A directory that
 // cannot be made is cmd.Err, which Start returns before anything runs, so the
 // caller sees that error and not a fork/exec failure.
 func setClientDir(cmd *exec.Cmd, config *Config) {
-	dir, err := clientWorkDir(config)
+	dir, err := ClientWorkDir(config)
 	if err != nil {
 		cmd.Err = err
 		return
