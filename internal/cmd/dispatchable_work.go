@@ -2,9 +2,13 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -26,6 +30,40 @@ import (
 // still surface as a read failure; asking whether a database is *configured*
 // keeps the two apart (gt-ka00).
 func hasBeadsDatabase(beadsDir string) bool {
+	return hasBeadsDatabaseWith(beadsDir, os.Stat, os.Getenv, noteRemoteDoltOnce)
+}
+
+// remoteDoltLatch prints a message the first time it is asked, once per process,
+// not once per tick or per rig.
+type remoteDoltLatch struct{ once sync.Once }
+
+func (l *remoteDoltLatch) note(w io.Writer, msg string) {
+	l.once.Do(func() { fmt.Fprintln(w, msg) })
+}
+
+var remoteDoltNoted remoteDoltLatch
+
+// noteRemoteDoltOnce prints the remote-server decision to stderr the first time
+// it is made.
+func noteRemoteDoltOnce(msg string) { remoteDoltNoted.note(os.Stderr, msg) }
+
+// isLocalDoltHost reports whether host names this machine's own Dolt server. An
+// unset host is the local default.
+func isLocalDoltHost(host string) bool {
+	switch strings.TrimSpace(host) {
+	case "", "127.0.0.1", "localhost", "::1", "[::1]":
+		return true
+	}
+	return false
+}
+
+// hasBeadsDatabaseWith is hasBeadsDatabase with the filesystem stat, the
+// environment and the log sink injected. Server mode is the town's .dolt-data
+// check when this town holds the Dolt data; when it does not (a pod's claim: the
+// Dolt server stays on the Mac), or when BEADS_DOLT_SERVER_HOST names a host
+// other than this machine, the local directory says nothing about the rig, so it
+// counts as initialized and the ready query is the real test (gt-ti0dps).
+func hasBeadsDatabaseWith(beadsDir string, stat func(string) (fs.FileInfo, error), getenv func(string) string, note func(string)) bool {
 	// Embedded mode: the data directory sits beside the config, and a .beads
 	// directory carrying one need not carry a metadata.json to name it. bd
 	// writes embeddeddolt/<database>/.dolt; dolt/ is the older layout.
@@ -57,7 +95,15 @@ func hasBeadsDatabase(beadsDir string) bool {
 	if townRoot == "" {
 		return true // No town to look in — assume initialized
 	}
-	_, err = os.Stat(filepath.Join(townRoot, ".dolt-data", db))
+	if host := getenv("BEADS_DOLT_SERVER_HOST"); !isLocalDoltHost(host) {
+		note(fmt.Sprintf("spec dispatch: Dolt server %s is remote; rig databases are not checked on disk", strings.TrimSpace(host)))
+		return true
+	}
+	if _, err := stat(filepath.Join(townRoot, ".dolt-data")); os.IsNotExist(err) {
+		note("spec dispatch: Dolt server is remote (this town holds no .dolt-data); rig databases are not checked on disk")
+		return true
+	}
+	_, err = stat(filepath.Join(townRoot, ".dolt-data", db))
 	return !os.IsNotExist(err)
 }
 
