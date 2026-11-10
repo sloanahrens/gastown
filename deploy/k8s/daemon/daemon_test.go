@@ -1035,12 +1035,6 @@ func TestDeploymentGolden(t *testing.T) {
 	if c.ReadinessProbe == nil || c.LivenessProbe == nil {
 		t.Fatalf("the container carries readiness %v and liveness %v, want both", c.ReadinessProbe, c.LivenessProbe)
 	}
-	if got, want := c.ReadinessProbe.Exec.Command, []string{"gt", "status", "--line"}; !slices.Equal(got, want) {
-		t.Errorf("the readiness probe runs %q, want the health line %q", got, want)
-	}
-	if got, want := c.LivenessProbe.Exec.Command, []string{"gt", "daemon", "status"}; !slices.Equal(got, want) {
-		t.Errorf("the liveness probe runs %q, want the running check %q", got, want)
-	}
 	if c.LivenessProbe.PeriodSeconds <= c.ReadinessProbe.PeriodSeconds || c.LivenessProbe.FailureThreshold <= c.ReadinessProbe.FailureThreshold {
 		t.Errorf("the liveness probe (%ds period, %d failures) is not looser than readiness (%ds, %d)",
 			c.LivenessProbe.PeriodSeconds, c.LivenessProbe.FailureThreshold,
@@ -1087,6 +1081,57 @@ func daemonDeclaration(t *testing.T, data []byte, file, name string) string {
 		t.Fatalf("internal/daemon/%s declares no %s", file, name)
 	}
 	return string(m[1])
+}
+
+// TestReadinessProbeUsesTheReadyAnswer holds the readiness probe to the ready
+// answer in the standard and the rehearsal render: gt status --line --ready
+// exits 0 for a fresh report with every non-green field recorded, so a pod
+// with an accepted non-green state becomes Ready. The timings stay as they were.
+func TestReadinessProbeUsesTheReadyAnswer(t *testing.T) {
+	t.Parallel()
+	renders := []struct {
+		name string
+		v    Values
+	}{
+		{"standard", goldenValues(t)},
+		{"rehearsal", rehearsalValues(t)},
+	}
+	for _, r := range renders {
+		c := mustBuild(t, r.v).Deployment.Spec.Template.Spec.Containers[0]
+		if c.ReadinessProbe == nil || c.ReadinessProbe.Exec == nil {
+			t.Fatalf("the %s render's container carries no exec readiness probe", r.name)
+		}
+		if got, want := c.ReadinessProbe.Exec.Command, []string{"gt", "status", "--line", "--ready"}; !slices.Equal(got, want) {
+			t.Errorf("the %s render's readiness probe runs %q, want the ready answer %q", r.name, got, want)
+		}
+		p := c.ReadinessProbe
+		if p.InitialDelaySeconds != 30 || p.PeriodSeconds != 30 || p.TimeoutSeconds != 10 || p.FailureThreshold != 3 {
+			t.Errorf("the %s render's readiness timings are delay %d, period %d, timeout %d, failures %d; want 30, 30, 10, 3",
+				r.name, p.InitialDelaySeconds, p.PeriodSeconds, p.TimeoutSeconds, p.FailureThreshold)
+		}
+	}
+}
+
+// TestLivenessProbeIsDaemonStatus holds the liveness probe to gt daemon status in
+// the standard and the rehearsal render: liveness asks whether the daemon runs,
+// not whether the town is ready, so a degraded town never restarts the pod.
+func TestLivenessProbeIsDaemonStatus(t *testing.T) {
+	t.Parallel()
+	for _, r := range []struct {
+		name string
+		v    Values
+	}{
+		{"standard", goldenValues(t)},
+		{"rehearsal", rehearsalValues(t)},
+	} {
+		c := mustBuild(t, r.v).Deployment.Spec.Template.Spec.Containers[0]
+		if c.LivenessProbe == nil || c.LivenessProbe.Exec == nil {
+			t.Fatalf("the %s render's container carries no exec liveness probe", r.name)
+		}
+		if got, want := c.LivenessProbe.Exec.Command, []string{"gt", "daemon", "status"}; !slices.Equal(got, want) {
+			t.Errorf("the %s render's liveness probe runs %q, want the running check %q", r.name, got, want)
+		}
+	}
 }
 
 // TestDeploymentRendersAZeroGracePeriod holds that a grace period of zero renders

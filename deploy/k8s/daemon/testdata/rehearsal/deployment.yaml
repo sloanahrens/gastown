@@ -76,6 +76,7 @@ spec:
                 - gt
                 - status
                 - --line
+                - --ready
             initialDelaySeconds: 30
             periodSeconds: 30
             timeoutSeconds: 10

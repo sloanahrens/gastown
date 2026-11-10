@@ -905,13 +905,15 @@ func daemonContainer(v Values) Container {
 		},
 		VolumeMounts: mounts(v),
 		ReadinessProbe: &Probe{
-			// gt status --line is the health line the update cycle judges a swap
-			// by (internal/cmd/update_verify.go), and its exit code is green
-			// alone: 0 green, 1 degraded, 2 red, 3 unknown
-			// (internal/cmd/status_health.go), so a degraded or red town keeps
-			// the pod out of readiness. Probed 2026-11-08: the command exists,
-			// printed its one UNKNOWN line, and exited 3.
-			Exec:                &ExecAction{Command: []string{"gt", "status", "--line"}},
+			// gt status --line --ready exits 0 when the report is fresh and every
+			// non-green field is recorded (a state the town accepts, such as
+			// dispatch off). A stale report or an unrecorded non-green field
+			// keeps the pod not Ready, with the reason on stderr
+			// (internal/cmd/status_health.go). Plain gt status --line is not used:
+			// its exit code is the verdict alone, so an accepted non-green state
+			// would hold the pod out of readiness. The image must carry the
+			// --ready flag (gt-f9a8fn).
+			Exec:                &ExecAction{Command: []string{"gt", "status", "--line", "--ready"}},
 			InitialDelaySeconds: 30,
 			PeriodSeconds:       30,
 			TimeoutSeconds:      10,
