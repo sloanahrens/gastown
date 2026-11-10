@@ -209,8 +209,10 @@ func CheckGitSpeed(ctx context.Context, env Env) []Row {
 // a name, so the day-one check says so instead.
 func unregisteredRows(town string, names []string) []Row {
 	var rows []Row
+	listSource := daemonListSource(town)
+	registry := registrySource(town)
 	for _, name := range names {
-		rows = append(rows, failed("landing worker rig list: "+name, "-", "every rig it names is registered", fmt.Sprintf("the landing worker's rig list (%s patrols.landing_worker.rigs) names %q, which the rig registry does not hold (read from %s); the landing worker skips it", daemonListSource(town), name, registrySource(town))))
+		rows = append(rows, failed("landing worker rig list: "+name, "-", "every rig it names is registered", fmt.Sprintf("the landing worker's rig list (%s patrols.landing_worker.rigs) names %q, which the rig registry does not hold (read from %s); the landing worker skips it", listSource, name, registry)))
 	}
 	return rows
 }
