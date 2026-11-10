@@ -48,12 +48,17 @@ const (
 	// SkipCutoverRecord is the cut-over record, which a rollback export leaves
 	// out: the Mac tree must not look cut over after a rollback.
 	SkipCutoverRecord SkipClass = "cut-over records (a rollback leaves them out)"
+	// SkipVanished is an entry a directory listing named that was gone by the
+	// time it was stat'ed or opened: the live daemon writes files atomically
+	// through a temporary name, and a rehearsal export runs beside it. Only
+	// fs.ErrNotExist is a vanish; every other error still fails the walk.
+	SkipVanished SkipClass = "files that vanished during the walk (the daemon's temporary files)"
 )
 
 // skipClassOrder is the order the summary prints the classes in, so two runs
 // over the same town print the same line.
 var skipClassOrder = []SkipClass{
-	SkipDoltData, SkipGitTree, SkipSocket, SkipLockFile, SkipNotRegular, SkipSymlinkOut, SkipOlderThan, SkipSecret, SkipUnchanged, SkipCutoverRecord,
+	SkipDoltData, SkipGitTree, SkipSocket, SkipLockFile, SkipNotRegular, SkipSymlinkOut, SkipOlderThan, SkipSecret, SkipUnchanged, SkipCutoverRecord, SkipVanished,
 }
 
 // ExportSummary counts what an export put in the archive and what it left out.
@@ -289,6 +294,12 @@ func (w *exportWalk) path(p, name string, info fs.FileInfo) error {
 		childName := name + "/" + child
 		childPath := filepath.Join(p, child)
 		childInfo, err := w.opts.ops.lstat(childPath)
+		if errors.Is(err, fs.ErrNotExist) {
+			// Listed a moment ago and gone now: the daemon finished an atomic
+			// write and removed its temporary file.
+			w.sum.Skipped[SkipVanished]++
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", childName, err)
 		}
@@ -309,6 +320,17 @@ func (w *exportWalk) file(p, name string, info fs.FileInfo) error {
 		w.sum.Skipped[SkipUnchanged]++
 		return nil
 	}
+	// The file is opened before its header is written, so a file that vanished
+	// between the stat and the open is skipped whole: a header already in the
+	// stream with no body behind it would corrupt the archive.
+	f, err := w.opts.ops.open(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		w.sum.Skipped[SkipVanished]++
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("opening %s for the archive: %w", name, err)
+	}
 	hdr := &tar.Header{
 		Name:     name,
 		Mode:     int64(info.Mode().Perm()),
@@ -317,11 +339,8 @@ func (w *exportWalk) file(p, name string, info fs.FileInfo) error {
 		Typeflag: tar.TypeReg,
 	}
 	if err := w.tw.WriteHeader(hdr); err != nil {
+		_ = f.Close()
 		return fmt.Errorf("writing the archive header for %s: %w", name, err)
-	}
-	f, err := w.opts.ops.open(p)
-	if err != nil {
-		return fmt.Errorf("opening %s for the archive: %w", name, err)
 	}
 	// The size is the one the header carries, so a file the daemon grew while
 	// it was read is copied to a consistent prefix, and a file that shrank is
