@@ -486,3 +486,33 @@ func TestCIEnginePruneRefusesASettingItCannotActOn(t *testing.T) {
 		})
 	}
 }
+
+// TestCIEnginePruneSettingsNameTheSettingTheyRefuse: a setting the patrol cannot act
+// on makes the settings read fail with an error naming that setting, never a default.
+func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		set     func(c *DiskMaintenanceConfig)
+		wantKey string
+	}{
+		"an interval that is not a duration": {
+			set:     func(c *DiskMaintenanceConfig) { c.CIEnginePruneInterval = "soon" },
+			wantKey: "ci_engine_prune_interval",
+		},
+		"an age of zero": {
+			set:     func(c *DiskMaintenanceConfig) { c.CIEnginePruneAge = "0h" },
+			wantKey: "ci_engine_prune_age",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
+			tc.set(cfg.Patrols.DiskMaintenance)
+			_, _, _, err := ciEnginePruneSettings(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.wantKey) {
+				t.Errorf("ciEnginePruneSettings() error = %v, want one naming %s", err, tc.wantKey)
+			}
+		})
+	}
+}
