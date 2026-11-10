@@ -256,6 +256,49 @@ trim does, so a landing pass in flight does not hold it off.
   The item means the trim is not reaching what is there, or that nothing is yet
   older than the max age. A later reading under the figure clears it.
 
+## The CI runner's engine
+
+The `dind` container's Docker data root holds more than the Go cache: images,
+stopped containers, build cache and anonymous volumes, on a claim that nothing
+bounds. The engine prune keeps the rest of the engine in check on its own
+interval (`ci_engine_prune_interval`), under the same patrol, the same exec into
+the `dind` container and the same `dry_run` default as the cache trim above.
+
+- The settings sit under `patrols.disk_maintenance`: `ci_engine_prune_interval`
+  (default `1h`), `ci_engine_prune_age` (default `48h`) and `ci_engine_keep_repos`
+  (default `["ci-base"]`). An empty setting is the default. A zero or negative
+  interval or age is refused, and an explicit empty keep list is refused, since it
+  would leave the base images unprotected. A keep name that is not a repository
+  name is refused. Each error names its setting.
+- Each run is two execs. The first lists the engine as JSON and changes nothing.
+  The planner decides what goes from that listing alone. The second removes only
+  the ids and names the planner named, and is skipped in `dry_run`.
+- What goes:
+  - stopped containers (`created`, `exited`, `dead`) created more than 24 hours
+    ago;
+  - images no container uses that were created more than `ci_engine_prune_age`
+    ago and carry no tag in a `ci_engine_keep_repos` repository;
+  - `ci-base` images other than the one `ci-base:latest` names, and the id just
+    before it, which is kept as the rollback. These go without an age gate;
+  - anonymous volumes, whose names are the 32 hex digits docker gives one, with no
+    `<name>-env` volume beside them, no container that stays mounting them, and
+    created more than 24 hours ago;
+  - build cache unused for 24 hours, pruned by docker itself in an apply.
+- What stays: any image a container that stays uses; any image that is a parent
+  of an image that stays, which docker would refuse to remove; named volumes, so
+  `ci-gocache`, `ci-gomod` and `ci-npm` are never candidates.
+- A dry run logs one line per container, image and volume it would remove, and a
+  summary. It does not size the build cache, since docker has no dry run for it.
+- An applied run logs `disk_maintenance: ci engine prune: removed N containers, N
+  images, N volumes, X to Y`. The sizes are the data root's, read with `du`.
+- A run that cannot tell what the engine holds is a failed run and removes nothing:
+  a runner pod whose `dind` container is not running, a listing that does not
+  decode, an id or time in an unexpected shape, a failed exec, or a remove reply
+  whose count differs from the plan. Each logs its own line, at most once an hour,
+  and the run is retried in 15 minutes. A removal docker refuses, for example a
+  resource a new container has just started using, stops the apply there; the next
+  run plans again.
+
 ## Rollback
 
 A wrong delete costs a rebuild, not data: any per-commit image is rebuilt from

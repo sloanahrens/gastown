@@ -1151,6 +1151,16 @@ type DiskMaintenanceConfig struct {
 	// CICacheWarnBytes is the size above which a trim that removed nothing is an
 	// attention item. Empty means DiskMaintenanceDefaultCICacheWarnBytes.
 	CICacheWarnBytes string `json:"ci_cache_warn_bytes,omitempty"` // size such as "30GB"
+	// CIEnginePruneInterval is how often the CI runner's docker-in-docker engine
+	// is pruned, in any window. Empty means DiskMaintenanceDefaultCIEnginePruneInterval.
+	CIEnginePruneInterval string `json:"ci_engine_prune_interval,omitempty"` // Go duration such as "1h"
+	// CIEnginePruneAge is how old an image must be before the engine prune
+	// removes it when nothing uses it. Empty means DiskMaintenanceDefaultCIEnginePruneAge.
+	CIEnginePruneAge string `json:"ci_engine_prune_age,omitempty"` // Go duration such as "48h"
+	// CIEngineKeepRepos names the image repositories the engine prune never
+	// removes. Nil means DiskMaintenanceDefaultCIEngineKeepRepos; an explicit
+	// empty list is refused, because it would leave the base images unprotected.
+	CIEngineKeepRepos []string `json:"ci_engine_keep_repos,omitempty"`
 	// Targets holds the targets with a cadence of their own. A target absent
 	// here keeps the daily window.
 	Targets map[string]DiskMaintenanceTarget `json:"targets,omitempty"`
@@ -1232,6 +1242,60 @@ func (c DiskMaintenanceConfig) CICacheWarnLimit() (int64, error) {
 	}
 	return limit, nil
 }
+
+// CIEnginePruneEvery returns the cadence the CI engine prune runs on: the
+// default when the setting is empty, and an error naming the setting for a value
+// the patrol cannot schedule (gt-i02983).
+func (c DiskMaintenanceConfig) CIEnginePruneEvery() (time.Duration, error) {
+	raw := c.CIEnginePruneInterval
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCIEnginePruneInterval
+	}
+	every, err := parseDiskMaintenanceCadence(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_prune_interval: %w", err)
+	}
+	return every, nil
+}
+
+// CIEnginePruneAgeDuration returns how old an unused image must be before the
+// engine prune removes it: the default when the setting is empty, and an error
+// naming the setting otherwise, zero and negative values included.
+func (c DiskMaintenanceConfig) CIEnginePruneAgeDuration() (time.Duration, error) {
+	raw := c.CIEnginePruneAge
+	if raw == "" {
+		raw = DiskMaintenanceDefaultCIEnginePruneAge
+	}
+	age, err := parseDiskMaintenanceCadence(raw)
+	if err != nil {
+		return 0, fmt.Errorf("patrols.disk_maintenance.ci_engine_prune_age: %w", err)
+	}
+	return age, nil
+}
+
+// CIEngineKeepRepoList returns the repositories the engine prune keeps: the
+// default when the setting is absent, and an error naming the setting for an
+// explicit empty list or a name that is not a repository name. It never falls
+// back to the default on an error.
+func (c DiskMaintenanceConfig) CIEngineKeepRepoList() ([]string, error) {
+	if c.CIEngineKeepRepos == nil {
+		return slices.Clone(DiskMaintenanceDefaultCIEngineKeepRepos), nil
+	}
+	if len(c.CIEngineKeepRepos) == 0 {
+		return nil, errors.New("patrols.disk_maintenance.ci_engine_keep_repos is empty: name at least one repository, or omit the setting for the default")
+	}
+	for _, repo := range c.CIEngineKeepRepos {
+		if !diskMaintenanceRepoRE.MatchString(repo) {
+			return nil, fmt.Errorf("patrols.disk_maintenance.ci_engine_keep_repos %q: want a repository name such as ci-base", repo)
+		}
+	}
+	return slices.Clone(c.CIEngineKeepRepos), nil
+}
+
+// diskMaintenanceRepoRE is a repository name as the engine lists it: lower-case
+// path components joined by one separator. It is the check that keeps a setting
+// from reaching the engine's argv as anything but a name.
+var diskMaintenanceRepoRE = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
 
 // diskMaintenanceSizeRE is a byte count: digits and an optional binary unit.
 var diskMaintenanceSizeRE = regexp.MustCompile(`^([0-9]+)(B|KB|MB|GB|TB)?$`)
@@ -1372,7 +1436,17 @@ const (
 	// DiskMaintenanceDefaultCICacheWarnBytes is the size above which a CI cache
 	// trim that removed nothing raises its attention item (gt-gg9hv.57).
 	DiskMaintenanceDefaultCICacheWarnBytes = "30GB"
+	// DiskMaintenanceDefaultCIEnginePruneInterval is the CI runner engine prune's
+	// cadence: the engine fills its claim in hours, not days (gt-i02983).
+	DiskMaintenanceDefaultCIEnginePruneInterval = "1h"
+	// DiskMaintenanceDefaultCIEnginePruneAge is how long an unused image may sit
+	// before the engine prune removes it (gt-i02983).
+	DiskMaintenanceDefaultCIEnginePruneAge = "48h"
 )
+
+// DiskMaintenanceDefaultCIEngineKeepRepos is the repository the engine prune
+// never removes by age: the CI base images, whose tags the gate runs from.
+var DiskMaintenanceDefaultCIEngineKeepRepos = []string{"ci-base"}
 
 // UnmarshalJSON decodes the patrol's block strictly, refusing a value the
 // patrol cannot act on: an unknown mode, an interval other than daily, or a
@@ -1429,6 +1503,15 @@ func (c *DiskMaintenanceConfig) validate() error {
 		return err
 	}
 	if _, err := c.CICacheWarnLimit(); err != nil {
+		return err
+	}
+	if _, err := c.CIEnginePruneEvery(); err != nil {
+		return err
+	}
+	if _, err := c.CIEnginePruneAgeDuration(); err != nil {
+		return err
+	}
+	if _, err := c.CIEngineKeepRepoList(); err != nil {
 		return err
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.Targets)) {

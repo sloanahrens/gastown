@@ -516,6 +516,7 @@ func (d *Daemon) runDiskMaintenance() {
 	// The CI cache trim is due on its own interval whatever the town is doing, so
 	// it is ticked before the quiet guard that holds the targets back (gt-gg9hv.57).
 	d.runCICacheTrimTick()
+	d.runCIEnginePruneTick()
 
 	due, errs := d.diskMaintenanceDue(now)
 	for _, err := range errs {
