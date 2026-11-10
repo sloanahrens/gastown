@@ -102,11 +102,11 @@ func (r *skewBareRunner) calledWithMayorRig() bool {
 	return false
 }
 
-// TestOMSkewRemoteReadsTheBareRepo: the om and hm rigs' origin urls are read from
-// <town>/<rig>/.repo.git and never from the mayor/rig clone, the tip is read
-// from that url, and a rig with no bare repo fails naming the bare path rather
-// than falling back to a clone. One table covers both probes.
-func TestOMSkewRemoteReadsTheBareRepo(t *testing.T) {
+// TestOMSkewAndHMSkewRemoteReadsTheBareRepo: the om and hm rigs' origin urls are
+// read from <town>/<rig>/.repo.git and never from the mayor/rig clone, the tip
+// is read from that url, and a rig with no bare repo fails naming the bare path
+// rather than falling back to a clone. One table covers both probes.
+func TestOMSkewAndHMSkewRemoteReadsTheBareRepo(t *testing.T) {
 	t.Parallel()
 	omProbe := func(d *Daemon, town string) (string, error) {
 		return d.omSkewRemoteSHA(town)

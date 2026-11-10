@@ -47,9 +47,12 @@ const (
 	omSkewVersionTimeout = 20 * time.Second
 	omSkewRemoteTimeout  = 20 * time.Second
 
+	// omSkewRig is the om rig's directory under the town; its bare repository
+	// (<rig>/.repo.git) is where the origin url is read from.
+	omSkewRig = "om"
 	// omSkewRigWorktree is the om rig's canonical worktree. The skew message
 	// names it as the place to install om from, and rebuild_om builds from it.
-	omSkewRigWorktree = "om/mayor/rig"
+	omSkewRigWorktree = omSkewRig + "/mayor/rig"
 	// omSkewRemoteRef is the branch the installed om is meant to come from.
 	omSkewRemoteRef = "refs/heads/main"
 )
@@ -563,7 +566,7 @@ func (d *Daemon) omSkewRemoteSHA(townRoot string) (string, error) {
 	if d.omHeadFn != nil {
 		return d.omHeadFn(townRoot)
 	}
-	bare := constants.RigBareRepoPath(filepath.Join(townRoot, "om"))
+	bare := constants.RigBareRepoPath(filepath.Join(townRoot, omSkewRig))
 	url, err := d.omSkewGit("--git-dir="+bare, "remote", "get-url", "origin")
 	if err != nil {
 		return "", err
