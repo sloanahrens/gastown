@@ -116,7 +116,7 @@ func init() {
 	townStateSeedCmd.Flags().String("town", "", "the town root to copy from, an absolute path the pod mounts the claim at (required)")
 	townStateSeedCmd.Flags().String("namespace", "", "the namespace of the seed helper Pod (required)")
 	townStateSeedCmd.Flags().String("pod", "", "the seed helper Pod that mounts the town-state claim (required)")
-	townStateSeedCmd.Flags().String("context", "", "the kubectl context every exec runs in; the shell's default context is not used (required)")
+	townStateSeedCmd.Flags().String("context", "", "the kubectl context every exec runs in (required)")
 	townStateSeedCmd.Flags().Bool("rehearsal", false, "seed a rehearsal: refuse namespace gt, and profile the seeded settings in the pod")
 	townStateSeedCmd.Flags().String("since", "", "keep only regular files modified after this RFC 3339 time (optional)")
 	townStateSeedCmd.Flags().Bool("allow-no-rigs", false, "copy a town with no registered rigs (every rig-scoped row would be missing)")
@@ -138,8 +138,8 @@ type podEngine struct {
 	namespace string
 	pod       string
 	claim     string
-	// context is the kubectl context each exec runs in. It is never the shell's
-	// default: Run refuses an engine whose context does not pass validSeedContext.
+	// context is the kubectl context each exec runs in, checked by validSeedContext
+	// before any exec.
 	context string
 	// town is the path the pod mounts the claim at. Each argv entry that is
 	// townstate.VolumeMount names it.
@@ -380,15 +380,13 @@ func validSeedTarget(namespace, pod, town string) error {
 }
 
 // validSeedContext refuses a kubectl context that is empty, blank, or not a plain
-// name: letters, digits and . _ - : @ /, with no leading dash. The shell's default
-// context is never used in its place: a missing context would send every exec to
-// whatever the kubeconfig's current context is.
+// name: letters, digits and . _ - : @ /, with no leading dash.
 func validSeedContext(name string) error {
 	if strings.TrimSpace(name) == "" {
-		return errors.New("--context is required: it names the cluster the seed writes to, and the shell's default context is not used")
+		return errors.New("--context is required: it names the cluster the seed writes to")
 	}
 	if !seedContextPattern.MatchString(name) {
-		return fmt.Errorf("--context %q is not a kubectl context name (letters, digits and . _ - : @ /, no leading dash); the shell's default context is not used", name)
+		return fmt.Errorf("--context %q is not a kubectl context name (letters, digits and . _ - : @ /, no leading dash)", name)
 	}
 	return nil
 }
