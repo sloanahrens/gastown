@@ -1,0 +1,53 @@
+# The cluster access the pod-update Job runs as (gt-360i18): the gt-update
+# ServiceAccount in the gt namespace, its namespaced Role and the RoleBinding that
+# grants it. A daemon that runs as a pod is moved by three kubectl calls: a
+# strategic patch of its Deployment, the rollout wait on it, and an exec into its
+# pod to read the build. All three rules reach wider than the one call each needs,
+# because a rule cannot bound them to one object. The Deployment rule's list and
+# watch cannot be bound to one Deployment name, so its get and patch reach every
+# Deployment in gt too. The pods rules reach every pod in gt, because the exec
+# resolves its pod from the Deployment's selector, so the pod's name is not known
+# when the grant is written.
+#
+# This file is not applied by the daemon. The operator's apply step comes with the
+# Job bead that uses it. TestPodUpdateRBACManifestParses,
+# TestPodUpdateRBACCoversEveryRead and TestPodUpdateRBACGrantsNothingElse hold it to
+# the reads in internal/update/testdata/pod-update-reads.golden.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gt-update
+  namespace: gt
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gt-update
+  namespace: gt
+rules:
+  # The strategic patch, the rollout wait and the exec's Deployment read.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch"]
+  # The exec's pod read, and the list of the pods its Deployment's selector matches.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  # The exec itself.
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: gt-update
+  namespace: gt
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: gt-update
+subjects:
+  - kind: ServiceAccount
+    name: gt-update
+    namespace: gt

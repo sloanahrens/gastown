@@ -1,0 +1,22 @@
+# Every cluster call the pod daemon's kubectl commands make, one line per distinct
+# call as `verb resource`. Every call is in the gt namespace. The groups below say
+# which command each line serves, read from the code:
+#
+# patch deployments: podDaemonSwap.Apply in internal/cmd/update_pod_swap.go, the
+#   strategic patch of the daemon's Deployment (kubectl patch deployment/<name>).
+#
+# get deployments, list deployments, watch deployments: podDaemonSwap.Apply's
+#   rollout wait (kubectl rollout status deployment/<name>). The get also serves the
+#   Deployment read in the exec below.
+#
+# get pods, list pods, create pods/exec: podDaemonCommit in
+#   internal/cmd/update_pod_probe.go (kubectl exec deployment/<name> -- gt version).
+#   The exec reads the pod it runs in, lists the pods the Deployment selects, and
+#   creates the exec.
+patch deployments
+get deployments
+list deployments
+watch deployments
+get pods
+list pods
+create pods/exec
