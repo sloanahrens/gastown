@@ -53,7 +53,7 @@ restore failed, 5 when another update run holds the lock.`,
 // the Deployment the pair is restored to, as they do for gt update --images.
 func runUpdateRollback(cmd *cobra.Command, seams updateSeams, podContext, podNamespace string, podInCluster bool) error {
 	errOut := cmd.ErrOrStderr()
-	pod, err := podDaemonFromFlags(podContext, podNamespace, podInCluster)
+	pod, err := podDaemonFromFlags(podContext, podNamespace, podInCluster, seams.inPod())
 	if err != nil {
 		return fmt.Errorf("gt update rollback: %w", err)
 	}

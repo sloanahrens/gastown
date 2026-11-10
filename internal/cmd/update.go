@@ -97,12 +97,12 @@ type podDaemonTarget struct {
 
 // podDaemonFromFlags turns the pod flags into the target a run names, or nil
 // when none is given. With inCluster, the target names a namespace and no
-// context; without it the flags are given together: one without the other, or
-// a value that is blank or that kubectl would refuse, is refused here, before
-// the update lock is taken or any step runs.
-func podDaemonFromFlags(kubeContext, namespace string, inCluster bool) (*podDaemonTarget, error) {
+// context, and only in a pod (inPod); without it the flags are given together:
+// one without the other, or a value that is blank or that kubectl would refuse,
+// is refused here, before the update lock is taken or any step runs.
+func podDaemonFromFlags(kubeContext, namespace string, inCluster, inPod bool) (*podDaemonTarget, error) {
 	if inCluster {
-		return podDaemonInClusterFromFlags(kubeContext, namespace)
+		return podDaemonInClusterFromFlags(kubeContext, namespace, inPod)
 	}
 	if kubeContext == "" && namespace == "" {
 		return nil, nil
@@ -124,10 +124,14 @@ func podDaemonFromFlags(kubeContext, namespace string, inCluster bool) (*podDaem
 	return &target, nil
 }
 
-// podDaemonInClusterFromFlags is podDaemonFromFlags for --pod-in-cluster: a
-// namespace is required, and a context is refused, since the pod's kubectl has
-// no named context.
-func podDaemonInClusterFromFlags(kubeContext, namespace string) (*podDaemonTarget, error) {
+// podDaemonInClusterFromFlags is podDaemonFromFlags for --pod-in-cluster: the
+// process must be in a pod, since kubectl with no context uses whatever kubeconfig
+// the process has outside one; a namespace is required, and a context is refused,
+// since the pod's kubectl has no named context.
+func podDaemonInClusterFromFlags(kubeContext, namespace string, inPod bool) (*podDaemonTarget, error) {
+	if !inPod {
+		return nil, errors.New("--pod-in-cluster runs only inside a pod, and KUBERNETES_SERVICE_HOST is not set")
+	}
 	if kubeContext != "" {
 		return nil, errors.New("--pod-in-cluster and --pod-context cannot be given together")
 	}
@@ -208,6 +212,20 @@ type updateSeams struct {
 	// rollout, and the daemon's build read from the pod. A run given the pod
 	// flags uses it in place of ImageSwap and the state-file probe.
 	PodRun update.RunFunc
+	// InPod reports whether this process runs in a pod, which --pod-in-cluster
+	// requires. Nil reports false, so an in-cluster run with no seam is refused.
+	InPod func() bool
+}
+
+// inPod reports whether the run's process is in a pod: a nil InPod is not.
+func (s updateSeams) inPod() bool {
+	return s.InPod != nil && s.InPod()
+}
+
+// runsInPod reports whether the environment getenv reads names a pod. Kubernetes
+// sets podEnv in every pod, as it does for the profile command's rehearsal check.
+func runsInPod(getenv func(string) string) bool {
+	return getenv(podEnv) != ""
 }
 
 // productionUpdateSeams wires the real town, effects and orchestrator.
@@ -219,6 +237,7 @@ func productionUpdateSeams() updateSeams {
 		Images:       productionUpdateImagesSeams(),
 		ImageSwap:    realImageSwap,
 		PodRun:       realRunFunc(),
+		InPod:        func() bool { return runsInPod(os.Getenv) },
 		Notifier: func(townRoot string) notify.Notifier {
 			return &notify.CLI{Dir: townRoot}
 		},
@@ -304,7 +323,7 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err != nil {
 		return err
 	}
-	pod, err := podDaemonFromFlags(req.PodContext, req.PodNamespace, req.PodInCluster)
+	pod, err := podDaemonFromFlags(req.PodContext, req.PodNamespace, req.PodInCluster, seams.inPod())
 	if err != nil {
 		return err
 	}

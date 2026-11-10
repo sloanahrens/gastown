@@ -359,6 +359,7 @@ func TestUpdatePodFlagsComeTogether(t *testing.T) {
 					kubectl++
 					return "", 0, nil
 				},
+				InPod: func() bool { return true },
 			}
 			_, err := runPodCommand(t, seams, tt.args...)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
@@ -464,7 +465,7 @@ func TestPodDaemonFromFlagsInCluster(t *testing.T) {
 
 	t.Run("with a namespace the target is in-cluster and names no context", func(t *testing.T) {
 		t.Parallel()
-		got, err := podDaemonFromFlags("", " "+podSwapNamespace+" ", true)
+		got, err := podDaemonFromFlags("", " "+podSwapNamespace+" ", true, true)
 		if err != nil {
 			t.Fatalf("podDaemonFromFlags: %v", err)
 		}
@@ -489,7 +490,7 @@ func TestPodDaemonFromFlagsInCluster(t *testing.T) {
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := podDaemonFromFlags(tc.kubeContext, tc.ns, true)
+			got, err := podDaemonFromFlags(tc.kubeContext, tc.ns, true, true)
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Fatalf("podDaemonFromFlags error = %v, want one containing %q", err, tc.wantErr)
 			}
@@ -499,18 +500,100 @@ func TestPodDaemonFromFlagsInCluster(t *testing.T) {
 		})
 	}
 
+	t.Run("outside a pod it is refused before the other checks", func(t *testing.T) {
+		t.Parallel()
+		got, err := podDaemonFromFlags("", podSwapNamespace, true, false)
+		if err == nil || !strings.Contains(err.Error(), "runs only inside a pod") {
+			t.Fatalf("podDaemonFromFlags error = %v, want the outside-a-pod refusal", err)
+		}
+		if got != nil {
+			t.Errorf("target = %+v, want nil with the error", *got)
+		}
+	})
+
 	t.Run("without the flag the together rule still holds", func(t *testing.T) {
 		t.Parallel()
-		if got, err := podDaemonFromFlags("", "", false); got != nil || err != nil {
+		if got, err := podDaemonFromFlags("", "", false, false); got != nil || err != nil {
 			t.Errorf("no flags = %+v, %v; want nil and no error", got, err)
 		}
-		if _, err := podDaemonFromFlags(podSwapContext, "", false); err == nil || !strings.Contains(err.Error(), "must be given together") {
+		if _, err := podDaemonFromFlags(podSwapContext, "", false, false); err == nil || !strings.Contains(err.Error(), "must be given together") {
 			t.Errorf("context alone error = %v, want the together refusal", err)
 		}
-		if _, err := podDaemonFromFlags("", podSwapNamespace, false); err == nil || !strings.Contains(err.Error(), "must be given together") {
+		if _, err := podDaemonFromFlags("", podSwapNamespace, false, false); err == nil || !strings.Contains(err.Error(), "must be given together") {
 			t.Errorf("namespace alone error = %v, want the together refusal", err)
 		}
 	})
+}
+
+// TestRunsInPod: a process runs in a pod when the environment names the variable
+// Kubernetes sets in every pod, and not otherwise.
+func TestRunsInPod(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "unset is not a pod", value: "", want: false},
+		{name: "set names a pod", value: "10.0.0.1", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			getenv := func(name string) string {
+				if name == podEnv {
+					return tc.value
+				}
+				return ""
+			}
+			if got := runsInPod(getenv); got != tc.want {
+				t.Errorf("runsInPod = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPodInClusterPassesTheGuardInAPod: gt update --pod-in-cluster in a pod is
+// not refused by the guard; the run goes on to find the town.
+func TestPodInClusterPassesTheGuardInAPod(t *testing.T) {
+	t.Parallel()
+	seams := updateSeams{
+		FindTownRoot: func() (string, error) { return "", errors.New("the town was reached") },
+		InPod:        func() bool { return true },
+	}
+	_, err := runPodCommand(t, seams, "--pod-in-cluster", "--pod-namespace", podSwapNamespace)
+	if err == nil || !strings.Contains(err.Error(), "the town was reached") {
+		t.Fatalf("gt update --pod-in-cluster in a pod error = %v, want the run to reach the town", err)
+	}
+}
+
+// TestPodInClusterRefusedOutsideAPod: gt update and gt update rollback given
+// --pod-in-cluster outside a pod are refused before the town is found or any
+// kubectl command runs, so an ambient kubeconfig never moves a Deployment.
+func TestPodInClusterRefusedOutsideAPod(t *testing.T) {
+	t.Parallel()
+	commands := map[string][]string{
+		"update":   {"--pod-in-cluster", "--pod-namespace", podSwapNamespace},
+		"rollback": {"rollback", "--pod-in-cluster", "--pod-namespace", podSwapNamespace},
+	}
+	for name, args := range commands {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			kube := &podDaemonKubectl{}
+			seams := updateSeams{
+				FindTownRoot: func() (string, error) { return "", errors.New("the town was reached") },
+				InPod:        func() bool { return false },
+				PodRun:       kube.run,
+			}
+			_, err := runPodCommand(t, seams, args...)
+			if err == nil || !strings.Contains(err.Error(), "runs only inside a pod") {
+				t.Fatalf("%s error = %v, want the outside-a-pod refusal", name, err)
+			}
+			if len(kube.calls) != 0 {
+				t.Errorf("kubectl ran %v, want no command", kube.calls)
+			}
+		})
+	}
 }
 
 // TestUpdateRollbackAcceptsPodInCluster: gt update rollback --pod-in-cluster
@@ -541,6 +624,7 @@ func TestUpdateRollbackAcceptsPodInCluster(t *testing.T) {
 		ImageSwap: func(string) (update.ImageSwap, error) { return f.swap, nil },
 		Notifier:  func(string) notify.Notifier { return f.notes },
 		PodRun:    kube.run,
+		InPod:     func() bool { return true },
 	}
 
 	if _, err := runPodCommand(t, seams, "rollback", "--pod-in-cluster", "--pod-namespace", podSwapNamespace); err != nil {
