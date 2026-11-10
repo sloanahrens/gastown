@@ -29,10 +29,11 @@ ENV DEBIAN_FRONTEND=noninteractive
 # SSH, which app-promote does to GitHub with the promote keys; curl is what the
 # ntfy push script posts with; tzdata is the zone database the compose file's
 # TZ name is resolved from, so the container's clock and the daemon's log
-# stamps can be the operator's zone rather than UTC (gt-gg9hv.34). These six
-# are the only things installed.
+# stamps can be the operator's zone rather than UTC (gt-gg9hv.34); lsof is the
+# town-metrics plugin's count of the Dolt connections (internal/metrics/source_host.go).
+# These seven are the only things installed.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client tmux tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates curl git lsof openssh-client tmux tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub's host key, pinned in the system known_hosts that openssh-client reads.
