@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // The om-skew check compares the installed om with the om rig's origin/main
@@ -555,20 +557,21 @@ func parseOMVersion(out string) (string, error) {
 }
 
 // omSkewRemoteSHA reads the om rig's origin/main tip: the url from the rig's
-// own origin remote, the tip from an ls-remote against that url. The read is
-// never a fetch — the om rig's worktree is what an om build runs in, and a
-// probe must not move its refs.
+// own origin remote, the tip from an ls-remote against that url. The url is
+// read from the rig's bare repository, not the mayor/rig clone, so the check
+// survives that clone's retirement. The read is never a fetch: a probe must
+// not move the rig's refs.
 func (d *Daemon) omSkewRemoteSHA(townRoot string) (string, error) {
 	if d.omHeadFn != nil {
 		return d.omHeadFn(townRoot)
 	}
-	rigPath := filepath.Join(townRoot, filepath.FromSlash(omSkewRigWorktree))
-	url, err := d.omSkewGit("-C", rigPath, "remote", "get-url", "origin")
+	bare := constants.RigBareRepoPath(filepath.Join(townRoot, "om"))
+	url, err := d.omSkewGit("--git-dir="+bare, "remote", "get-url", "origin")
 	if err != nil {
 		return "", err
 	}
 	if url == "" {
-		return "", fmt.Errorf("git -C %s remote get-url origin: no url", rigPath)
+		return "", fmt.Errorf("git --git-dir=%s remote get-url origin: no url", bare)
 	}
 	out, err := d.omSkewGit("ls-remote", url, omSkewRemoteRef)
 	if err != nil {

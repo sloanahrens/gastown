@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofrs/flock"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/version"
 )
 
@@ -248,14 +249,14 @@ func (d *Daemon) buildCommit() string {
 	return version.BuildCommit()
 }
 
-// resolveOwnCommit returns the full SHA of this build when the gastown source
-// repo can resolve it, else the (short) build commit.
+// resolveOwnCommit returns the full SHA of this build when the gastown rig's
+// bare repository can resolve it, else the (short) build commit.
 func (d *Daemon) resolveOwnCommit() string {
 	own := d.buildCommit()
 	if own == "" {
 		return ""
 	}
-	repo := filepath.Join(d.config.TownRoot, "gastown", "mayor", "rig")
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "gastown"))
 	full, err := d.gitAt(repo).Rev(own + "^{commit}")
 	if err != nil {
 		return own

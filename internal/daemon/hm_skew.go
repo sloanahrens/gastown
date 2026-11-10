@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // The hm-skew check compares the installed hm with the hm rig's origin/main at
@@ -390,16 +392,17 @@ func parseHMVersion(out string) (string, error) {
 }
 
 // hmSkewRemote reads the hm rig's origin url and origin/main's tip: the url from
-// the rig's own origin remote, the tip from an ls-remote against that url. The
-// read is never a fetch, so the rig's refs do not move.
+// the rig's own origin remote, read from its bare repository rather than the
+// mayor/rig clone, and the tip from an ls-remote against that url. The read is
+// never a fetch, so the rig's refs do not move.
 func (d *Daemon) hmSkewRemote(townRoot string) (url, sha string, err error) {
-	rigPath := filepath.Join(townRoot, filepath.FromSlash(hmSkewRigWorktree))
-	url, err = d.omSkewGit("-C", rigPath, "remote", "get-url", "origin")
+	bare := constants.RigBareRepoPath(filepath.Join(townRoot, "hm"))
+	url, err = d.omSkewGit("--git-dir="+bare, "remote", "get-url", "origin")
 	if err != nil {
 		return "", "", err
 	}
 	if url == "" {
-		return "", "", fmt.Errorf("git -C %s remote get-url origin: no url", rigPath)
+		return "", "", fmt.Errorf("git --git-dir=%s remote get-url origin: no url", bare)
 	}
 	// The "--" keeps a url that begins with "-" from being read as an option.
 	out, err := d.omSkewGit("ls-remote", "--", url, omSkewRemoteRef)
