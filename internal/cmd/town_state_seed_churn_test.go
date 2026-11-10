@@ -37,7 +37,8 @@ func statFails(p string) (fs.FileInfo, error) {
 
 // TestTownStateSeedChurnSortTable: a rehearsal's verify mismatch is churn when the running
 // town made it while the copy ran, and a problem otherwise. One row is one mismatch.
-// The name starts with TestTownStateSeed so the -run TestTownStateSeed gate runs it.
+// The name starts with TestTownStateSeed so the gate in gt-ovc2t5's Gate field
+// (go test ./internal/cmd -run 'TestTownStateSeed') runs it.
 func TestTownStateSeedChurnSortTable(t *testing.T) {
 	t.Parallel()
 	const town = "/town"
