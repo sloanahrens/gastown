@@ -905,6 +905,20 @@ func TestImageCarriedProgramsRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// TestImageCarriedProgramsCopyToADirectoryCarriesTheSourceName: a COPY whose
+// destination ends in a slash puts the source under its own name in that
+// directory, so COPY to /usr/local/bin/ carries the source's basename.
+func TestImageCarriedProgramsCopyToADirectoryCarriesTheSourceName(t *testing.T) {
+	t.Parallel()
+	carried, problems := imageCarriedPrograms(t, "COPY --chmod=0755 gt /usr/local/bin/\n")
+	if len(problems) != 0 {
+		t.Fatalf("problems = %q, want none", problems)
+	}
+	if !carried["gt"] {
+		t.Errorf("carried = %v, want gt, which the COPY puts at /usr/local/bin/gt", carried)
+	}
+}
+
 // aptPackagePrograms maps each package the one install RUN installs to the
 // programs it puts on the PATH. A nil list is a package with no program.
 var aptPackagePrograms = map[string][]string{
@@ -957,6 +971,9 @@ func imageCarriedPrograms(t *testing.T, body string) (map[string]bool, []string)
 			if src == "" || dst == "" {
 				problems = append(problems, fmt.Sprintf("COPY %q has no source and destination", strings.Join(in.args, " ")))
 				continue
+			}
+			if strings.HasSuffix(dst, "/") {
+				dst = path.Join(dst, path.Base(src))
 			}
 			if path.Dir(dst) == "/usr/local/bin" {
 				carried[path.Base(dst)] = true
