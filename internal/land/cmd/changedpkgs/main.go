@@ -9,6 +9,11 @@
 // The guard tests run under -run so presubmit does not pay for the whole
 // suite of the package that hosts one: internal/cmd and internal/polecat take
 // minutes each, and the guard test inside them takes a second.
+//
+// The package list also names ./internal/podengine when the branch changes a
+// file the pod-engine inventory pins (gt-tk6l7k). -podengine-recovery prints
+// the one-line recovery for that case, and nothing when the branch pins
+// nothing; presubmit prints it once when the changed-package tests fail.
 package main
 
 import (
@@ -16,15 +21,18 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/presubmit"
 )
 
 func main() {
 	base := flag.String("base", "origin/main", "ref the branch is compared against")
 	guards := flag.Bool("guards", false, "print the go test arguments for the tree-wide guard tests the branch triggers")
+	recovery := flag.Bool("podengine-recovery", false, "print the pod-engine recovery line when the branch changes a file the inventory pins")
 	flag.Parse()
 
 	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
@@ -52,7 +60,31 @@ func main() {
 		printGuards(sel)
 		return
 	}
+	// The inventory is read from the tree the branch is checked out on. A
+	// document that cannot be read fails the run: a branch must not pass
+	// presubmit because the pins it may touch could not be read.
+	doc, err := os.ReadFile(filepath.Join(repoRoot, presubmit.PodEngineDoc))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "changedpkgs: reading %s: %v\n", presubmit.PodEngineDoc, err)
+		os.Exit(1)
+	}
+	if *recovery {
+		line, err := presubmit.RecoveryLine(string(out), string(doc))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "changedpkgs:", err)
+			os.Exit(1)
+		}
+		if line != "" {
+			fmt.Println(line)
+		}
+		return
+	}
 	dirs, err := land.ChangedPackages(string(out), hasGo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "changedpkgs:", err)
+		os.Exit(1)
+	}
+	dirs, err = presubmit.PodEngineDirs(dirs, string(out), string(doc))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "changedpkgs:", err)
 		os.Exit(1)
