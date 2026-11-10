@@ -16,6 +16,60 @@ import (
 	"time"
 )
 
+// socketPathBudget is the length a bind path must stay under for the
+// round-trip fixture. macOS caps a unix socket path at 104 bytes; the budget
+// keeps headroom.
+const socketPathBudget = 100
+
+// shortSocketPath joins the fixture's socket name onto dir and refuses a
+// result at or over the budget, naming the path and its length.
+func shortSocketPath(dir string) (string, error) {
+	p := filepath.Join(dir, "daemon.sock")
+	if len(p) >= socketPathBudget {
+		return "", fmt.Errorf("socket bind path %q is %d bytes, at or over the %d-byte budget under macOS's 104-byte sun_path limit; the TMPDIR is too long", p, len(p), socketPathBudget)
+	}
+	return p, nil
+}
+
+// TestShortSocketPathRefusesLongPaths drives both sides of the budget: a
+// path one byte under it is accepted, and one at it is refused with the
+// path and its length in the error.
+func TestShortSocketPathRefusesLongPaths(t *testing.T) {
+	t.Parallel()
+	const socketName = len("/daemon.sock")
+	cases := []struct {
+		name    string
+		dirLen  int
+		wantErr bool
+	}{
+		{name: "one byte under the budget", dirLen: socketPathBudget - socketName - 1},
+		{name: "at the budget", dirLen: socketPathBudget - socketName, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := strings.Repeat("d", tc.dirLen)
+			got, err := shortSocketPath(dir)
+			if !tc.wantErr {
+				if err != nil {
+					t.Fatalf("shortSocketPath(%d-byte dir): %v", tc.dirLen, err)
+				}
+				if got != filepath.Join(dir, "daemon.sock") {
+					t.Errorf("shortSocketPath returned %q", got)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("shortSocketPath(%d-byte dir) accepted %q, want a refusal", tc.dirLen, got)
+			}
+			want := fmt.Sprintf("%d bytes", socketPathBudget)
+			if !strings.Contains(err.Error(), filepath.Join(dir, "daemon.sock")) || !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal %q does not name the path and its length", err)
+			}
+		})
+	}
+}
+
 // writeStateFile makes dirs and a file under root and returns its path.
 func writeStateFile(t *testing.T, root, rel, content string, mode os.FileMode) string {
 	t.Helper()
@@ -147,12 +201,27 @@ func TestExportImportRoundTrip(t *testing.T) {
 	if err := syscall.Mkfifo(filepath.Join(town, "logs", "pipe"), 0o644); err != nil {
 		t.Fatalf("making the fifo: %v", err)
 	}
+	// bind in a short directory: macOS caps a unix socket path at 104 bytes,
+	// and t.TempDir() plus the logs path runs past that under the host's TMPDIR.
+	sockDir, err := os.MkdirTemp("", "gt")
+	if err != nil {
+		t.Fatalf("making the socket directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(sockDir) })
+	bind, err := shortSocketPath(sockDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	//testpolicy:allow no-network — a unix socket at rest is the entry the export must skip, and nothing dials or accepts it
-	ln, err := net.Listen("unix", filepath.Join(town, "logs", "daemon.sock"))
+	ln, err := net.Listen("unix", bind)
 	if err != nil {
 		t.Fatalf("making the socket: %v", err)
 	}
 	defer ln.Close()
+	// The inode keeps its socket type across the rename, so Export still skips it.
+	if err := os.Rename(bind, filepath.Join(town, "logs", "daemon.sock")); err != nil {
+		t.Fatalf("moving the socket into the town: %v", err)
+	}
 
 	// The session-owned and shared set: never in the archive.
 	untouched := map[string]string{
