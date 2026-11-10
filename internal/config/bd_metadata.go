@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // A rig's bd workspace records its database in .beads/metadata.json, which bd
@@ -49,7 +51,7 @@ func BeadsFileDatabase(path string) (db string, err error) {
 // bd workspace keeps metadata.json, in the order gastown looks:
 // <rig>/mayor/rig/.beads (the tracked workspace), then <rig>/.beads.
 func RigBeadsDirs(rig string) []string {
-	return []string{rig + "/mayor/rig/.beads", rig + "/.beads"}
+	return []string{constants.RigBeadsPath(rig), rig + "/.beads"}
 }
 
 // RigMetadataDatabase is the dolt_database of the first of rig's
