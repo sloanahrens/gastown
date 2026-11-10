@@ -93,7 +93,7 @@ func ReadRoleDirectives(role, townRoot, rigName string) ([]RoleDirective, error)
 // directiveScope names the scope of a directive file: "town" for one under
 // <townRoot>/directives, otherwise the rig directory it sits in.
 func directiveScope(path, townRoot string) string {
-	if strings.HasPrefix(path, CentralDirectiveDir(townRoot)+string(filepath.Separator)) {
+	if IsTownDirective(path, townRoot) {
 		return "town"
 	}
 	rel, err := filepath.Rel(townRoot, path)
@@ -151,9 +151,9 @@ func readDirectiveFile(path string) (string, error) {
 func directivePaths(role, townRoot, rigName string) []string {
 	var paths []string
 	for _, name := range directiveFileNames(role) {
-		paths = append(paths, layerDirectivePath(CentralDirectiveDir(townRoot), filepath.Join(townRoot, "directives"), name))
+		paths = append(paths, layerDirectivePath(CentralDirectiveDir(townRoot), centralLegacyDirectiveDir(townRoot), name))
 		if rigName != "" {
-			paths = append(paths, layerDirectivePath(RigDirectiveDir(townRoot, rigName), filepath.Join(townRoot, rigName, "directives"), name))
+			paths = append(paths, layerDirectivePath(RigDirectiveDir(townRoot, rigName), rigLegacyDirectiveDir(townRoot, rigName), name))
 		}
 	}
 	return paths
@@ -202,9 +202,9 @@ func ReadRoleDirectiveFrom(role, townRoot, rigName string, read func(string) ([]
 // layerDirectivePath resolves each layer with a stat. Reading is the test:
 // absence moves on, and any other failure is returned.
 func readDirectiveSources(read func(string) ([]byte, error), name, townRoot, rigName string) ([]string, error) {
-	layers := [][2]string{{CentralDirectiveDir(townRoot), filepath.Join(townRoot, "directives")}}
+	layers := [][2]string{{CentralDirectiveDir(townRoot), centralLegacyDirectiveDir(townRoot)}}
 	if rigName != "" {
-		layers = append(layers, [2]string{RigDirectiveDir(townRoot, rigName), filepath.Join(townRoot, rigName, "directives")})
+		layers = append(layers, [2]string{RigDirectiveDir(townRoot, rigName), rigLegacyDirectiveDir(townRoot, rigName)})
 	}
 	var texts []string
 	for _, layer := range layers {
@@ -231,32 +231,43 @@ func DirectivePaths(role, townRoot, rigName string) []string {
 	return directivePaths(role, townRoot, rigName)
 }
 
-// DirectiveEditPath is the file gt directive edit writes for a layer: the new
-// path of the central layer (townLevel, or no rig) or of the rig's own layer.
-// An edit of the central layer is a change to the gastown repo's checkout, which
-// lands through the pipeline (gt-80rnu).
-func DirectiveEditPath(role, townRoot, rigName string, townLevel bool) string {
+// DirectiveLayerPath is the new path of a role's file in one layer: the central
+// layer (townLevel, or no rig) or the rig's own layer. It names the path whether
+// or not the file exists, and whether or not gt directive edit may write it.
+func DirectiveLayerPath(role, townRoot, rigName string, townLevel bool) string {
 	if townLevel || rigName == "" {
 		return filepath.Join(CentralDirectiveDir(townRoot), role+".md")
 	}
 	return filepath.Join(RigDirectiveDir(townRoot, rigName), role+".md")
 }
 
-// IsTownDirective reports whether path is a file of the town-level layer, the
-// central one or the legacy town directory (gt-80rnu).
+// DirectiveEditPath is the file gt directive edit writes for a layer. The central
+// layer is the deployed copy of the gastown repo's directives/, so it is never
+// edited here: the town-level layer refuses, naming the repo file to edit and the
+// install step that deploys it, and writes nothing (gt-3lvcjz.11). The rig's own
+// layer is written at <rig>/.gastown/directives.
+func DirectiveEditPath(role, townRoot, rigName string, townLevel bool) (string, error) {
+	if townLevel || rigName == "" {
+		return "", fmt.Errorf("the town-level %s directive is deployed from the gastown repo, not edited here: edit directives/%s.md in the gastown repo, then run 'gt install' to write %s", role, role, DirectiveLayerPath(role, townRoot, rigName, true))
+	}
+	return DirectiveLayerPath(role, townRoot, rigName, false), nil
+}
+
+// IsTownDirective reports whether path is a file of the town-level layer: the
+// central directory or its legacy directory (gt-80rnu, gt-3lvcjz.11).
 func IsTownDirective(path, townRoot string) bool {
 	sep := string(filepath.Separator)
 	return strings.HasPrefix(path, CentralDirectiveDir(townRoot)+sep) ||
-		strings.HasPrefix(path, filepath.Join(townRoot, "directives")+sep)
+		strings.HasPrefix(path, centralLegacyDirectiveDir(townRoot)+sep)
 }
 
 // DirectiveTreeRels lists, relative to the town root, the directive trees a
 // sandbox copies for rig: the central and rig layers, and the legacy directories
-// the reader still falls back to until they are removed (gt-80rnu).
+// the reader still falls back to until they are removed (gt-80rnu, gt-3lvcjz.11).
 func DirectiveTreeRels(rig string) []string {
 	rels := []string{
 		filepath.ToSlash(filepath.Join("gastown", "mayor", "rig", "directives")),
-		filepath.ToSlash(filepath.Join(rig, "mayor", "rig", ".gastown", "directives")),
+		filepath.ToSlash(filepath.Join(rig, ".gastown", "directives")),
 		"directives",
 	}
 	if rig != "" {
@@ -265,16 +276,30 @@ func DirectiveTreeRels(rig string) []string {
 	return rels
 }
 
-// CentralDirectiveDir is the central directive layer: the gastown repo's
-// canonical checkout, read for every rig (gt-oz73l).
+// CentralDirectiveDir is the central directive layer: <town>/directives, the
+// deployed copy of the gastown repo's directives/ that every rig reads. The repo
+// file is the source; the install writes this copy (gt-3lvcjz.13).
 func CentralDirectiveDir(townRoot string) string {
+	return filepath.Join(townRoot, "directives")
+}
+
+// RigDirectiveDir is a rig's own directive layer, <rig>/.gastown/directives, in
+// the rig's own repo (gt-3lvcjz.11).
+func RigDirectiveDir(townRoot, rig string) string {
+	return filepath.Join(townRoot, rig, ".gastown", "directives")
+}
+
+// centralLegacyDirectiveDir is the central layer's legacy directory: the gastown
+// repo's old mayor/rig checkout, read where the new central file is not there
+// (gt-3lvcjz.11).
+func centralLegacyDirectiveDir(townRoot string) string {
 	return filepath.Join(townRoot, "gastown", "mayor", "rig", "directives")
 }
 
-// RigDirectiveDir is a rig's own directive layer, in the rig's canonical
-// checkout (gt-oz73l).
-func RigDirectiveDir(townRoot, rig string) string {
-	return filepath.Join(townRoot, rig, "mayor", "rig", ".gastown", "directives")
+// rigLegacyDirectiveDir is a rig's legacy directory, <rig>/directives, read where
+// the rig's new file is not there (gt-oz73l).
+func rigLegacyDirectiveDir(townRoot, rig string) string {
+	return filepath.Join(townRoot, rig, "directives")
 }
 
 // layerDirectivePath is the file for name in one layer. The new directory's file
@@ -287,7 +312,7 @@ func layerDirectivePath(newDir, legacyDir, name string) string {
 	}
 	legacy := filepath.Join(legacyDir, name+".md")
 	if directiveFileExists(legacy) {
-		warnLegacyDirective(legacy)
+		warnLegacyDirective(legacy, newPath)
 		return legacy
 	}
 	return newPath
@@ -305,12 +330,13 @@ func directiveFileExists(path string) bool {
 var legacyDirectiveWarned sync.Map
 
 // warnLegacyDirective names a legacy directive file once per process, so a
-// prompt rendered on every spawn does not repeat the line.
-func warnLegacyDirective(path string) {
+// prompt rendered on every spawn does not repeat the line. newPath is the file
+// the layer reads once it is moved there.
+func warnLegacyDirective(path, newPath string) {
 	if _, done := legacyDirectiveWarned.LoadOrStore(path, true); done {
 		return
 	}
-	log.Printf("directive %s is at a legacy path; move it under the gastown repo's directives (gt-oz73l)", path)
+	log.Printf("directive %s is at a legacy path; move it to %s (gt-oz73l, gt-3lvcjz.11)", path, newPath)
 }
 
 // DirectiveFile is one <name>.md file under a directives/ directory.
@@ -336,7 +362,7 @@ func (f DirectiveFile) Unused() bool {
 func ScanDirectiveFiles(townRoot, rigName string) ([]DirectiveFile, error) {
 	var files []DirectiveFile
 
-	townFiles, err := scanDirectiveLayer(CentralDirectiveDir(townRoot), filepath.Join(townRoot, "directives"), "town")
+	townFiles, err := scanDirectiveLayer(CentralDirectiveDir(townRoot), centralLegacyDirectiveDir(townRoot), "town")
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +373,7 @@ func ScanDirectiveFiles(townRoot, rigName string) ([]DirectiveFile, error) {
 		return nil, err
 	}
 	for _, rig := range rigs {
-		rigFiles, err := scanDirectiveLayer(RigDirectiveDir(townRoot, rig), filepath.Join(townRoot, rig, "directives"), rig)
+		rigFiles, err := scanDirectiveLayer(RigDirectiveDir(townRoot, rig), rigLegacyDirectiveDir(townRoot, rig), rig)
 		if err != nil {
 			return nil, err
 		}

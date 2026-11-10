@@ -23,12 +23,12 @@ type directiveLayer struct {
 var documentedDirectiveLayers = []directiveLayer{
 	{
 		name:      "central",
-		newDir:    "<townRoot>/gastown/mayor/rig/directives",
-		legacyDir: "<townRoot>/directives",
+		newDir:    "<townRoot>/directives",
+		legacyDir: "<townRoot>/gastown/mayor/rig/directives",
 	},
 	{
 		name:      "rig",
-		newDir:    "<townRoot>/<rig>/mayor/rig/.gastown/directives",
+		newDir:    "<townRoot>/<rig>/.gastown/directives",
 		legacyDir: "<townRoot>/<rig>/directives",
 	},
 }
