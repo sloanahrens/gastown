@@ -58,7 +58,25 @@ func runUnsling(cmd *cobra.Command, args []string) error {
 	return runUnslingWith(cmd, args, unslingDryRun, unslingForce)
 }
 
+// unslingDeps are the collaborators an unsling reaches outside its arguments.
+// runUnslingWith supplies the production ones; tests supply stubs.
+type unslingDeps struct {
+	resolveTarget func(target string) (string, error)
+	townRoot      func() (string, error)
+	open          beadsOpener
+}
+
 func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error {
+	return runUnslingDeps(cmd, args, dryRun, force, unslingDeps{
+		resolveTarget: func(target string) (string, error) {
+			return resolveTargetAgentID(townRegistry(), target)
+		},
+		townRoot: workspace.FindFromCwd,
+		open:     openBeads,
+	})
+}
+
+func runUnslingDeps(cmd *cobra.Command, args []string, dryRun, force bool, deps unslingDeps) error {
 	var targetBeadID string
 	var targetAgent string
 
@@ -83,7 +101,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	var agentID string
 	var err error
 	if targetAgent != "" {
-		agentID, _, _, err = resolveTargetAgent(targetAgent)
+		agentID, err = deps.resolveTarget(targetAgent)
 		if err != nil {
 			return fmt.Errorf("resolving target agent: %w", err)
 		}
@@ -95,12 +113,12 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	}
 
 	// Find town root and rig path for agent beads
-	townRoot, err := workspace.FindFromCwd()
+	townRoot, err := deps.townRoot()
 	if err != nil {
 		return fmt.Errorf("finding town root: %w", err)
 	}
 
-	return unslingHook(cmd, agentID, townRoot, targetAgent, targetBeadID, dryRun, force, openBeads)
+	return unslingHook(cmd, agentID, townRoot, targetAgent, targetBeadID, dryRun, force, deps.open)
 }
 
 // unslingHook clears the hook of agentID in townRoot. It reads the process only
