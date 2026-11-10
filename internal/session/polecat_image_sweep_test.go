@@ -15,8 +15,8 @@ import (
 // cross-compiles for the image's platform (internal/polecat/imagectx pins the
 // arm64 environment and the output path). A binary built for the host would not
 // start in the runner container (gt-q7wkn).
-// Mutation: drop the COPY, the chmod entry, or the staging command from the
-// recipe, and this goes red.
+// Mutation: drop the COPY, its --chmod=0755, or the staging command from the
+// recipe, or add a RUN chmod on the target, and this goes red.
 func TestPolecatImageCopiesSweepRun(t *testing.T) {
 	t.Parallel()
 	const target = "/usr/local/bin/sweep-run"
@@ -29,11 +29,11 @@ func TestPolecatImageCopiesSweepRun(t *testing.T) {
 			chmods = append(chmods, in)
 		}
 	}
-	if want := "COPY bin/sweep-run " + target; !slices.Equal(copies, []string{want}) {
-		t.Errorf("the Dockerfile's copies of the sweep runner are %q, want exactly %q: bin/sweep-run is where make polecat-image writes it inside the build context", copies, want)
+	if want := "COPY --chmod=0755 bin/sweep-run " + target; !slices.Equal(copies, []string{want}) {
+		t.Errorf("the Dockerfile's copies of the sweep runner are %q, want exactly %q: bin/sweep-run is where make polecat-image writes it inside the build context, and COPY sets it executable", copies, want)
 	}
-	if len(chmods) != 1 {
-		t.Errorf("the Dockerfile has %d chmod runs naming %s, want 1: the chmod is what makes the copied file executable whatever mode the artifact carries", len(chmods), target)
+	if len(chmods) != 0 {
+		t.Errorf("the Dockerfile has %d RUN chmod runs naming %s, want none: a RUN chmod rewrites the runner into a second layer, so its mode comes from the COPY", len(chmods), target)
 	}
 
 	recipe := polecatImageRecipe(t)

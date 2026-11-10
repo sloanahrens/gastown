@@ -155,7 +155,7 @@ func TestIsBaseToolsLsofInstall(t *testing.T) {
 // goes red.
 func TestPolecatImageCopiesTheSweepRunner(t *testing.T) {
 	t.Parallel()
-	want := "COPY bin/sweep-run " + sweeprunner.RunnerCommand
+	want := "COPY --chmod=0755 bin/sweep-run " + sweeprunner.RunnerCommand
 	if !slices.Contains(dockerfileInstructions(t), want) {
 		t.Errorf("the Dockerfile has no %q: the runner container runs sweeprunner.RunnerCommand, so the image must hold the binary there", want)
 	}
