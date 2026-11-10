@@ -465,6 +465,22 @@ func TestUnslingTargetRefusesAnInvalidPath(t *testing.T) {
 	}
 }
 
+// The production resolver runs with no tmux server in the test environment, so
+// a polecat target resolves only if it reads no pane: a tmux lookup fails here.
+// The id's form depends on the process-wide registry, so only the resolution
+// itself is asserted.
+func TestUnslingProductionResolverNeedsNoTmux(t *testing.T) {
+	t.Parallel()
+
+	got, err := resolveUnslingTarget("gastown/polecats/slit")
+	if err != nil {
+		t.Fatalf("resolveUnslingTarget = (%q, %v), want an agent id with no error", got, err)
+	}
+	if got == "" {
+		t.Errorf("resolveUnslingTarget returned an empty agent id")
+	}
+}
+
 // unslingDepsFor wires the command to the id resolver and the beads stub only.
 // A targeted unsling takes no self path, so the caller's identity and tmux pane
 // are never read.

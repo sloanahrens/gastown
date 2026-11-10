@@ -46,10 +46,9 @@ func resolveTargetAgent(target string) (agentID string, pane string, hookRoot st
 	return agentID, pane, hookRoot, nil
 }
 
-// resolveTargetAgentID converts a target spec to the agent ID it names. It reads
-// only the prefix registry and the session name, so unlike resolveTargetAgent it
-// never asks tmux for the target's pane or working directory: a seat with no
-// tmux session still resolves.
+// resolveTargetAgentID converts a target spec to the agent ID it names. Unlike
+// resolveTargetAgent it never asks tmux for the target's pane or working
+// directory, so a seat with no tmux session still resolves.
 func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
 	sessionName, err := resolveRoleToSession(reg, target)
 	if err != nil {

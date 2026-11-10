@@ -66,13 +66,17 @@ type unslingDeps struct {
 	open          beadsOpener
 }
 
+// resolveUnslingTarget turns a target into its agent id with no tmux lookup:
+// a seat with no tmux session still resolves, so its hook can be cleared.
+func resolveUnslingTarget(target string) (string, error) {
+	return resolveTargetAgentID(townRegistry(), target)
+}
+
 func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error {
 	return runUnslingDeps(cmd, args, dryRun, force, unslingDeps{
-		resolveTarget: func(target string) (string, error) {
-			return resolveTargetAgentID(townRegistry(), target)
-		},
-		townRoot: workspace.FindFromCwd,
-		open:     openBeads,
+		resolveTarget: resolveUnslingTarget,
+		townRoot:      workspace.FindFromCwd,
+		open:          openBeads,
 	})
 }
 
