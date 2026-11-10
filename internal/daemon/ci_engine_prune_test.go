@@ -187,6 +187,91 @@ func TestCIEnginePruneKeepsCIBaseAndUsedImages(t *testing.T) {
 	}
 }
 
+// TestCIEnginePruneKeepsCurrentLatestAndItsImmediatePredecessor: the ci-base rollback
+// is the id built just before the latest tag's id, not the newest other id. A base
+// built after the latest, under another tag, goes, as does an older one.
+func TestCIEnginePruneKeepsCurrentLatestAndItsImmediatePredecessor(t *testing.T) {
+	t.Parallel()
+	images := []map[string]any{
+		// The latest tag's id, built 50 hours ago: kept.
+		engImg('a', 50*time.Hour, []string{"sha256:layer-a"}, "ci-base:latest"),
+		// The id built just before the latest: the rollback, kept.
+		engImg('b', 100*time.Hour, []string{"sha256:layer-b"}, "ci-base:jq17"),
+		// The newest other id, built after the latest under another tag: removed.
+		engImg('c', 2*time.Hour, []string{"sha256:layer-c"}, "ci-base:pre-gate-tools"),
+		// An older id: removed.
+		engImg('d', 200*time.Hour, []string{"sha256:layer-d"}, "ci-base:pre-jq17"),
+	}
+	plan, err := planCIEnginePrune(engDecode(t, engListing(t, nil, images, nil)), ciCacheTestStart, 48*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	got := map[string]bool{}
+	for _, img := range plan.images {
+		got[img.ID] = true
+	}
+	for _, id := range []string{engImageID('a'), engImageID('b')} {
+		if got[id] {
+			t.Errorf("image %s is planned for removal, want the latest and its predecessor kept", id)
+		}
+	}
+	for _, id := range []string{engImageID('c'), engImageID('d')} {
+		if !got[id] {
+			t.Errorf("image %s is not planned for removal", id)
+		}
+	}
+	if len(plan.images) != 2 {
+		t.Errorf("planned %d images, want exactly 2", len(plan.images))
+	}
+}
+
+// TestCIEnginePruneKeepReposProtectASharedCIBaseImage: an image tagged with a kept
+// repository other than ci-base stays, even when it is also tagged ci-base and is
+// neither the latest nor its predecessor. ci-base in the list does not shield an
+// image: an old base with no other kept tag goes.
+func TestCIEnginePruneKeepReposProtectASharedCIBaseImage(t *testing.T) {
+	t.Parallel()
+	images := []map[string]any{
+		engImg('a', 2*time.Hour, []string{"sha256:layer-a"}, "ci-base:latest"),
+		// The rollback: kept whatever the keep list names.
+		engImg('6', 50*time.Hour, []string{"sha256:layer-p"}, "ci-base:jq17"),
+		// Old, ci-base-tagged, and tagged with org/tools: kept only by that name.
+		engImg('b', 300*time.Hour, []string{"sha256:layer-b"}, "ci-base:pre-tools", "org/tools:1"),
+		// Old, ci-base-tagged, with no other kept tag: removed.
+		engImg('c', 400*time.Hour, []string{"sha256:layer-c"}, "ci-base:pre-jq17"),
+	}
+	listing := engDecode(t, engListing(t, nil, images, nil))
+
+	for name, tc := range map[string]struct {
+		keepRepos []string
+		wantB     bool
+	}{
+		"org/tools is kept, so its shared image stays":    {keepRepos: []string{"ci-base", "org/tools"}, wantB: true},
+		"ci-base alone does not shield a shared base tag": {keepRepos: []string{"ci-base"}, wantB: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			plan, err := planCIEnginePrune(listing, ciCacheTestStart, 48*time.Hour, tc.keepRepos)
+			if err != nil {
+				t.Fatalf("planning: %v", err)
+			}
+			got := map[string]bool{}
+			for _, img := range plan.images {
+				got[img.ID] = true
+			}
+			if got[engImageID('b')] == tc.wantB {
+				t.Errorf("shared image planned for removal = %v, want %v", got[engImageID('b')], !tc.wantB)
+			}
+			if !got[engImageID('c')] {
+				t.Errorf("the old ci-base image with no kept tag is not planned for removal")
+			}
+			if got[engImageID('a')] || got[engImageID('6')] {
+				t.Errorf("the latest or its predecessor is planned for removal")
+			}
+		})
+	}
+}
+
 // TestCIEnginePruneRefusesAListingItCannotRead: a listing with a missing figure, an
 // id or name in an unexpected shape, or a time it cannot read is refused, never
 // planned as empty or with the item read as absent.
@@ -319,7 +404,8 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 			t.Fatalf("the remove program ran %d time(s), want once", len(removes))
 		}
 		argv := strings.Join(removes[0].args, "\x00")
-		for _, want := range []string{engHex64('4'), engImageID('e'), engHex32('1')} {
+		cutoff := ciCacheTestStart.Add(-ciEngineUnusedAge).Format(time.RFC3339)
+		for _, want := range []string{engHex64('4'), engImageID('e'), engHex32('1'), cutoff} {
 			if !strings.Contains(argv, want) {
 				t.Errorf("the remove exec's argv lacks %s", want)
 			}
@@ -447,6 +533,63 @@ func TestCIEnginePruneFailedListingRemovesNothing(t *testing.T) {
 			}
 			if retry := f.d.diskMaintSchedule.retryAtOf(ciEnginePruneName); retry.IsZero() {
 				t.Errorf("a failed listing left no retry")
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneScriptsHoldNoKeepLogic: the two shell programs hold no keep, age
+// or repository rule. The keep set is decided in Go; the programs only list the
+// engine, or remove the ids and names the planner named, and the build cache
+// cutoff arrives as argv data.
+func TestCIEnginePruneScriptsHoldNoKeepLogic(t *testing.T) {
+	t.Parallel()
+	for name, script := range map[string]string{"list": ciEngineListScript, "remove": ciEngineRemoveScript} {
+		for _, rule := range []string{ciEngineBaseRepo, "keep", "24h", "48h", "mtime", "find "} {
+			if strings.Contains(script, rule) {
+				t.Errorf("the %s program holds %q: keep, age and repository logic is decided in Go", name, rule)
+			}
+		}
+	}
+}
+
+// TestCIEnginePruneExecErrorLogsNoEngineStderr: a failed list or remove exec is
+// logged with its exit status only. The engine's stderr can carry what the engine
+// holds, so it reaches neither the log nor an attention item.
+func TestCIEnginePruneExecErrorLogsNoEngineStderr(t *testing.T) {
+	t.Parallel()
+	const engineStderr = "Error response from daemon: secret-engine-detail-7f3a"
+	listing := engListing(t,
+		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)},
+		[]map[string]any{engImg('e', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
+		[]map[string]any{engVol(engHex32('1'), 30*time.Hour)},
+	)
+	for name, tc := range map[string]struct {
+		list, remove cliReply
+	}{
+		"list exec fails":   {list: cliReply{code: 1, stderr: engineStderr}},
+		"remove exec fails": {remove: cliReply{code: 1, stderr: engineStderr}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, tc.remove)
+			if tc.list != (cliReply{}) {
+				answer := f.cli.answer
+				f.cli.answer = func(c cliCall) cliReply {
+					if strings.Contains(cacheTrimVerb(c.args), "ci-engine-list") {
+						return tc.list
+					}
+					return answer(c)
+				}
+			}
+			f.tick()
+			f.drain()
+			logs := f.logs.String()
+			if strings.Contains(logs, "secret-engine-detail") {
+				t.Errorf("the engine's stderr reached the log:\n%s", logs)
+			}
+			if !strings.Contains(logs, "exit status 1") {
+				t.Errorf("the failed exec is not logged with its exit status:\n%s", logs)
 			}
 		})
 	}

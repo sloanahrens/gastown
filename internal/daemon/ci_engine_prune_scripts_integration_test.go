@@ -101,7 +101,8 @@ func (f fakeDockerEnv) runProgram(t *testing.T, program string, args ...string) 
 func TestIntegrationCIEngineRemoveProgramRemovesTheNamedItems(t *testing.T) {
 	f := newFakeDocker(t)
 	root := t.TempDir()
-	stdout, ok := f.runProgram(t, ciEngineRemoveScript, root, "c1 c2", "sha256:i1", "v1 v2")
+	const cutoff = "2026-11-09T00:00:00Z"
+	stdout, ok := f.runProgram(t, ciEngineRemoveScript, root, "c1 c2", "sha256:i1", "v1 v2", cutoff)
 	if !ok {
 		t.Fatalf("the remove program failed on a clean engine")
 	}
@@ -111,7 +112,7 @@ func TestIntegrationCIEngineRemoveProgramRemovesTheNamedItems(t *testing.T) {
 		"rmi -f sha256:i1",
 		"volume rm v1",
 		"volume rm v2",
-		"builder prune -af --filter until=24h",
+		"builder prune -af --filter until=" + cutoff,
 	}
 	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("docker calls = %q, want %q", got, want)
@@ -130,7 +131,7 @@ func TestIntegrationCIEngineRemoveProgramRemovesTheNamedItems(t *testing.T) {
 func TestIntegrationCIEngineRemoveProgramStopsAtAFailure(t *testing.T) {
 	f := newFakeDocker(t)
 	f.failing(t, "rmi")
-	stdout, ok := f.runProgram(t, ciEngineRemoveScript, t.TempDir(), "c1", "sha256:i1", "v1")
+	stdout, ok := f.runProgram(t, ciEngineRemoveScript, t.TempDir(), "c1", "sha256:i1", "v1", "2026-11-09T00:00:00Z")
 	if ok {
 		t.Fatalf("a failed image removal exited zero")
 	}

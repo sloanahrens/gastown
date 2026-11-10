@@ -1158,8 +1158,10 @@ type DiskMaintenanceConfig struct {
 	// removes it when nothing uses it. Empty means DiskMaintenanceDefaultCIEnginePruneAge.
 	CIEnginePruneAge string `json:"ci_engine_prune_age,omitempty"` // Go duration such as "48h"
 	// CIEngineKeepRepos names the image repositories the engine prune never
-	// removes. Nil means DiskMaintenanceDefaultCIEngineKeepRepos; an explicit
-	// empty list is refused, because it would leave the base images unprotected.
+	// removes, an image also tagged with one included. ci-base is the rollback's
+	// repository, so its images follow the latest-and-predecessor rule instead.
+	// Nil means DiskMaintenanceDefaultCIEngineKeepRepos; an explicit empty list is
+	// refused, because it would leave the base images unprotected.
 	CIEngineKeepRepos []string `json:"ci_engine_keep_repos,omitempty"`
 	// Targets holds the targets with a cadence of their own. A target absent
 	// here keeps the daily window.
@@ -1444,8 +1446,9 @@ const (
 	DiskMaintenanceDefaultCIEnginePruneAge = "48h"
 )
 
-// DiskMaintenanceDefaultCIEngineKeepRepos is the repository the engine prune
-// never removes by age: the CI base images, whose tags the gate runs from.
+// DiskMaintenanceDefaultCIEngineKeepRepos is the default keep list: ci-base, the
+// rollback's repository, whose latest image and the one before it the engine prune
+// keeps, the gate running from the latest tag.
 var DiskMaintenanceDefaultCIEngineKeepRepos = []string{"ci-base"}
 
 // UnmarshalJSON decodes the patrol's block strictly, refusing a value the

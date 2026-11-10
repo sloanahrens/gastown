@@ -51,10 +51,6 @@ const (
 	// ciEngineUnusedAge is how long a stopped container, an unused anonymous volume
 	// and an unused build cache record must sit before the prune takes them.
 	ciEngineUnusedAge = 24 * time.Hour
-
-	// ciEngineBuildCacheFilter is the builder prune's age filter: build cache
-	// unused for ciEngineUnusedAge.
-	ciEngineBuildCacheFilter = "until=24h"
 )
 
 // ciEngineListScript is the list program. It prints one JSON object: the data
@@ -73,19 +69,21 @@ if [ -n "$volumes" ]; then docker volume inspect $volumes; else printf '[]'; fi
 printf '}\n'
 `
 
-// ciEngineRemoveScript is the remove program. Its arguments are the data root and
-// three space-separated lists: container ids, image ids and volume names, each
-// one the planner validated. The removal stops at the first failure (set -e), so
-// the reply is printed only when every named item went. The build cache is pruned
-// last, unused for 24 hours. Its reply is the cache trim's three figures.
+// ciEngineRemoveScript is the remove program. Its arguments are the data root,
+// three space-separated lists (container ids, image ids and volume names, each one
+// the planner validated) and the build cache cutoff the planner computed. The
+// removal stops at the first failure (set -e), so the reply is printed only when
+// every named item went. The build cache is pruned last, unused since the cutoff.
+// Its reply is the cache trim's three figures. The program holds no age, keep or
+// repository logic: each of those is decided in Go.
 const ciEngineRemoveScript = `set -euf
-root=$1; containers=$2; images=$3; volumes=$4
+root=$1; containers=$2; images=$3; volumes=$4; cutoff=$5
 before=$(du -sk "$root" | cut -f1)
 removed=0
 for id in $containers; do docker rm "$id" >/dev/null; removed=$((removed + 1)); done
 for id in $images; do docker rmi -f "$id" >/dev/null; removed=$((removed + 1)); done
 for name in $volumes; do docker volume rm "$name" >/dev/null; removed=$((removed + 1)); done
-docker builder prune -af --filter ` + ciEngineBuildCacheFilter + ` >/dev/null
+docker builder prune -af --filter "until=$cutoff" >/dev/null
 after=$(du -sk "$root" | cut -f1)
 echo "before_kib=$before"
 echo "removed=$removed"
@@ -173,7 +171,8 @@ func (p ciEnginePlan) count() int {
 //   - an image used by a container that stays is kept;
 //   - a ci-base image is kept only when it is the latest tag's id or the id before
 //     it, and is removed otherwise, with no age gate;
-//   - any other image with a tag in keepRepos is kept;
+//   - an image with a tag in keepRepos other than ci-base is kept, even when it is
+//     also tagged ci-base;
 //   - any other image is removed when it was created more than age ago;
 //   - an image that is a parent of a kept image is kept, as docker would refuse;
 //   - an anonymous volume is removed when no container that stays mounts it, no
@@ -223,19 +222,25 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keep
 
 	baseKeep := ciEngineBaseKeep(images, created)
 
+	// ci-base in keepRepos is the default and names the rollback's repository, not a
+	// shield: its images follow the base rule above, so a default list does not keep
+	// every old base. Any other kept repository protects its images, ci-base tags
+	// included.
+	protected := slices.DeleteFunc(slices.Clone(keepRepos), func(r string) bool { return r == ciEngineBaseRepo })
+
 	removable := map[string]bool{}
 	for id, img := range images {
 		if usedImage[id] {
 			continue
 		}
 		repos := ciEngineRepoTags(img.RepoTags)
+		if anyOf(repos, protected) {
+			continue
+		}
 		if slices.Contains(repos, ciEngineBaseRepo) {
 			if !baseKeep[id] {
 				removable[id] = true
 			}
-			continue
-		}
-		if anyOf(repos, keepRepos) {
 			continue
 		}
 		if now.Sub(created[id]) > age {
@@ -297,8 +302,9 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keep
 }
 
 // ciEngineBaseKeep returns the ci-base image ids the prune keeps: the latest tag's
-// id and the newest id after it. With no latest tag, the newest ci-base id is the
-// latest, so a town that has not tagged one still keeps its newest base.
+// id and the id created just before it, the rollback. With no latest tag, the
+// newest ci-base id is the latest, so a town that has not tagged one still keeps
+// its newest base and the one before it.
 func ciEngineBaseKeep(images map[string]ciEngineImage, created map[string]time.Time) map[string]bool {
 	keep := map[string]bool{}
 	var base []string
@@ -324,9 +330,12 @@ func ciEngineBaseKeep(images map[string]ciEngineImage, created map[string]time.T
 		}
 	}
 	keep[latest] = true
+	// The rollback is the id built just before the latest, not the newest other id:
+	// a newer base under another tag is not the one the latest replaced. base is
+	// newest first, so the first id older than the latest is that one.
 	for _, id := range base {
-		if id != latest {
-			keep[id] = true // the previous id: the newest after the latest
+		if created[id].Before(created[latest]) {
+			keep[id] = true
 			break
 		}
 	}
@@ -393,13 +402,25 @@ func parseCIEngineTime(raw string) (time.Time, error) {
 }
 
 // parseCIEngineListing reads the list program's JSON, which must decode fully:
-// any other output is a failed run.
+// any other output is a failed run. The decoder's own error is not returned: it
+// quotes the bytes it refused, which are the engine's output.
 func parseCIEngineListing(out []byte) (ciEngineListing, error) {
 	var l ciEngineListing
 	if err := json.Unmarshal(out, &l); err != nil {
-		return ciEngineListing{}, fmt.Errorf("the engine listing does not decode: %w", err)
+		return ciEngineListing{}, errors.New("the engine listing does not decode as the list program's JSON")
 	}
 	return l, nil
+}
+
+// ciEngineExitStatus names a failed exec by its exit status alone. An engine
+// command's stderr can carry what the engine holds, so no part of its output
+// reaches the log or an attention item.
+func ciEngineExitStatus(err error) string {
+	var status interface{ ExitCode() int }
+	if errors.As(err, &status) {
+		return fmt.Sprintf("exit status %d", status.ExitCode())
+	}
+	return "no exit status"
 }
 
 // ciEnginePruneSettings reads the engine prune's three settings from the patrol's
@@ -522,8 +543,8 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--",
 		"sh", "-c", ciEngineListScript, "ci-engine-list", ciEngineRoot)
 	if err != nil {
-		d.ciEnginePruneLogf("list failed", "disk_maintenance: ci engine prune: the listing exec into the %s container failed: %v; nothing pruned",
-			ciCacheContainer, err)
+		d.ciEnginePruneLogf("list failed", "disk_maintenance: ci engine prune: the listing exec into the %s container failed (%s); nothing pruned",
+			ciCacheContainer, ciEngineExitStatus(err))
 		return false
 	}
 	listing, err := parseCIEngineListing(stdout)
@@ -531,7 +552,8 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		d.ciEnginePruneLogf("listing unreadable", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false
 	}
-	plan, err := planCIEnginePrune(listing, s.now(), maxAge, keepRepos)
+	now := s.now()
+	plan, err := planCIEnginePrune(listing, now, maxAge, keepRepos)
 	if err != nil {
 		d.ciEnginePruneLogf("plan refused", "disk_maintenance: ci engine prune: the listing could not be planned: %v; nothing pruned", err)
 		return false
@@ -566,13 +588,14 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	for _, v := range plan.volumes {
 		volumes = append(volumes, v.Name)
 	}
+	cutoff := now.Add(-ciEngineUnusedAge).Format(time.RFC3339)
 	stdout, _, err = d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
 		"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--",
 		"sh", "-c", ciEngineRemoveScript, "ci-engine-remove", ciEngineRoot,
-		strings.Join(ids, " "), strings.Join(images, " "), strings.Join(volumes, " "))
+		strings.Join(ids, " "), strings.Join(images, " "), strings.Join(volumes, " "), cutoff)
 	if err != nil {
-		d.ciEnginePruneLogf("remove failed", "disk_maintenance: ci engine prune: the remove exec into the %s container failed: %v; the run is retried",
-			ciCacheContainer, err)
+		d.ciEnginePruneLogf("remove failed", "disk_maintenance: ci engine prune: the remove exec into the %s container failed (%s); the run is retried",
+			ciCacheContainer, ciEngineExitStatus(err))
 		return false
 	}
 	reply, err := parseCIEnginePruneReply(stdout)

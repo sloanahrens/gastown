@@ -277,9 +277,11 @@ the `dind` container and the same `dry_run` default as the cache trim above.
   - stopped containers (`created`, `exited`, `dead`) created more than 24 hours
     ago;
   - images no container uses that were created more than `ci_engine_prune_age`
-    ago and carry no tag in a `ci_engine_keep_repos` repository;
-  - `ci-base` images other than the one `ci-base:latest` names, and the id just
-    before it, which is kept as the rollback. These go without an age gate;
+    ago and carry no tag in a `ci_engine_keep_repos` repository other than
+    `ci-base`;
+  - `ci-base` images other than the one `ci-base:latest` names, and the id created
+    just before it, which is kept as the rollback. These go without an age gate.
+    A `ci-base` image that also carries a tag in another kept repository is kept;
   - anonymous volumes, whose names are the 32 hex digits docker gives one, with no
     `<name>-env` volume beside them, no container that stays mounting them, and
     created more than 24 hours ago;
