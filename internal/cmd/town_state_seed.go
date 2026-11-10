@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemon"
@@ -79,7 +81,9 @@ so the daemon stream leaves it out; the rehearsal's copy is one file, compared b
 sha256 before the profile runs, and a difference in it still fails. Then the
 command runs "gt town state profile --rehearsal" in the pod, which turns every
 daemon patrol off in that file, and the file is reported as "profiled", not as a
-difference. A rehearsal refuses the live namespace "gt".
+difference. Before that settings copy, the claim's daemon/state.json is rewritten
+as stopped and owned by the pod, as the live copy writes it last. A rehearsal
+refuses the live namespace "gt".
 
 Without --rehearsal (the live copy) the command refuses unless the dispatch hold
 file exists and the daemon container is stopped. The live copy also sends the
@@ -92,7 +96,10 @@ seconds the copy took) is written into the claim alone, in the shape
 "gt town state migrate copy --cutover" writes. A record the claim does not hold
 is removed from it, and the claim is partial. After the record, the empty dispatch
 hold file (seat-refill.hold) is written into the claim, so the pod starts held; the
-overseer removes it after the day-one checks. Nothing is written to the Mac tree.
+overseer removes it after the day-one checks. Last, the claim's daemon/state.json
+is rewritten as stopped and owned by the pod, so the pod's startup guard starts
+without the takeover switch; the host's record is not changed. Nothing is written
+to the Mac tree.
 
 A failure after the stream starts exits non-zero and says the claim is partial
 and not to be used.
@@ -229,7 +236,8 @@ type townStateSeedEnv struct {
 	// now is the command's clock: the cut-over record's time and its copy window.
 	// Nil means time.Now.
 	now func() time.Time
-	// encode writes the cut-over record's bytes. Nil means encodeRecord.
+	// encode writes the cut-over record's bytes and the daemon state record's. Nil
+	// means encodeRecord.
 	encode func(any) ([]byte, error)
 	out    io.Writer
 }
@@ -444,7 +452,8 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	}
 
 	// The live copy's settings step runs after the daemon verify, as the rehearsal's
-	// does, and its byte check runs before the success line.
+	// does, and its byte check runs before the success line. The state record is
+	// the last write, so the pod's guard reads it stopped when the pod starts.
 	if !env.rehearsal {
 		if err := seedCutoverStep(env, cutover); err != nil {
 			return err
@@ -453,6 +462,17 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 			return err
 		}
 		if err := seedHoldStep(env); err != nil {
+			return err
+		}
+		if err := seedStateRecordStep(env); err != nil {
+			return err
+		}
+	}
+
+	// The rehearsal's state record is written after the daemon verify, which compares
+	// the record as the host has it, and before the settings step.
+	if env.rehearsal {
+		if err := seedStateRecordStep(env); err != nil {
 			return err
 		}
 	}
@@ -800,6 +820,90 @@ func seedHoldStep(env townStateSeedEnv) error {
 	}
 	fmt.Fprintf(env.out, "dispatch hold %s placed in claim %s; the overseer removes it after the day-one checks\n", rel, seedClaim)
 	return nil
+}
+
+// daemonStateRel is the daemon's state record. The daemon stream copies it into the
+// claim with the rest of daemon/, and seedStateRecordStep rewrites that copy.
+const daemonStateRel = "daemon/state.json"
+
+// seedStateRecordStep writes the claim's daemon state record as stopped and owned by
+// the pod. The record the stream copied names the old owner, the container gt-daemon,
+// with its last heartbeat, and the pod's startup guard refuses that without the
+// takeover switch, which the render drops from the pod. Recorded as the pod's own
+// owner, a pod restart passes the guard as a restart of itself. A host with no record
+// writes nothing and says so. A record that does not parse, or a claim that does not
+// hold the written record, leaves the claim partial. The copied record is never
+// removed on failure: with no record the guard starts a daemon with no prior run,
+// and the copied one still refuses.
+func seedStateRecordStep(env townStateSeedEnv) error {
+	read := env.readHost
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(filepath.Join(env.town, filepath.FromSlash(daemonStateRel)))
+	if errors.Is(err, fs.ErrNotExist) {
+		fmt.Fprintf(env.out, "%s is not on the host: no state record is written into claim %s\n", daemonStateRel, seedClaim)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading the host's %s: the claim is partial and not to be used: %w", daemonStateRel, err)
+	}
+	encode := encodeRecord
+	if env.encode != nil {
+		encode = env.encode
+	}
+	rec, err := stoppedStateRecord(data, encode)
+	if err != nil {
+		return fmt.Errorf("the claim is partial and not to be used: %w", err)
+	}
+	file := newSeedCutoverFile(daemonStateRel, rec)
+	if err := seedCutoverStream(env, []seedCutoverFile{file}); err != nil {
+		return fmt.Errorf("stream the daemon state record into claim %s: the claim is partial and not to be used: %w", seedClaim, err)
+	}
+	mismatches, err := seedCutoverMismatches(env.engine, []seedCutoverFile{file})
+	if err != nil {
+		return fmt.Errorf("verifying the daemon state record in claim %s: the claim is partial and not to be used: %w", seedClaim, err)
+	}
+	if problems := printVerifyProblems(env.out, townstate.VerifyResult{Mismatches: mismatches}, nil); problems > 0 {
+		return fmt.Errorf("the claim does not hold the daemon state record (%d problems): the claim is partial and not to be used", problems)
+	}
+	fmt.Fprintf(env.out, "daemon state record written into claim %s as stopped and owned by %s %q\n", seedClaim, config.SupervisorContainer, k8sdaemon.Name)
+	return nil
+}
+
+// seedPodOwner is the owner the pod's daemon records for itself: the container
+// named k8sdaemon.Name, the owner the pod's startup guard reads as its own.
+func seedPodOwner() daemon.Owner {
+	return daemon.Owner{Kind: config.SupervisorContainer, ID: k8sdaemon.Name}
+}
+
+// stoppedStateRecord rewrites a host daemon state record as stopped and owned by the
+// pod: running false, pid 0, and the owner seedPodOwner names. Every other field keeps
+// its value, including a field this binary does not know, because the record is
+// decoded as an object of raw values. The record must also decode as a
+// daemon.State, so a record of the wrong shape is refused here, not by the guard.
+// encode writes the owner and the record, as the cut-over record's encoder does.
+func stoppedStateRecord(data []byte, encode func(any) ([]byte, error)) ([]byte, error) {
+	var st daemon.State
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("the host's %s does not parse as a daemon state record: %w", daemonStateRel, err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil || fields == nil {
+		return nil, fmt.Errorf("the host's %s is not a daemon state record object", daemonStateRel)
+	}
+	owner, err := encode(seedPodOwner())
+	if err != nil {
+		return nil, fmt.Errorf("encoding the pod's owner for %s: %w", daemonStateRel, err)
+	}
+	fields["running"] = json.RawMessage("false")
+	fields["pid"] = json.RawMessage("0")
+	fields["owner"] = json.RawMessage(owner)
+	rec, err := encode(fields)
+	if err != nil {
+		return nil, fmt.Errorf("encoding the daemon state record: %w", err)
+	}
+	return rec, nil
 }
 
 // seedFileUnwind removes the file at rel from the claim and returns cause as the
