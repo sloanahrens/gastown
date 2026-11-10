@@ -464,7 +464,7 @@ func WriteText(w io.Writer, rep Report) error {
 	if len(rep.Callers) == 0 {
 		return nil
 	}
-	return writeCallers(w, rep.Callers)
+	return writeCallers(w, rep.Callers, rep.Rows)
 }
 
 // writeRows prints the question rows as an aligned table.
@@ -482,10 +482,11 @@ func writeRows(w io.Writer, rows []Row) error {
 }
 
 // writeCallers prints each caller's requests, distinct states and sampled states,
-// then says in words which callers have fewer distinct states than MinPairs. A
-// pair comes from a checked line, so such a caller reaches MinPairs only when a
-// sampled state repeats.
-func writeCallers(w io.Writer, callers []Coverage) error {
+// then says in words which callers have fewer distinct states than MinPairs and
+// have not measured MinPairs pairs for every question. A pair comes from a
+// checked line, so such a caller reaches MinPairs only when a sampled state
+// repeats.
+func writeCallers(w io.Writer, callers []Coverage, rows []Row) error {
 	if _, err := fmt.Fprintln(w, "requests logged, distinct states, and sampled states (states whose check ran), per caller"); err != nil {
 		return err
 	}
@@ -499,7 +500,7 @@ func writeCallers(w io.Writer, callers []Coverage) error {
 		return err
 	}
 	for _, c := range callers {
-		if c.DistinctStates >= MinPairs {
+		if c.DistinctStates >= MinPairs || pairsReach(rows, c.Caller) {
 			continue
 		}
 		if _, err := fmt.Fprintf(w, "%s has %d distinct states, fewer than the %d pairs a question needs: its pairs reach %d only if a sampled state repeats\n",
@@ -508,6 +509,23 @@ func writeCallers(w io.Writer, callers []Coverage) error {
 		}
 	}
 	return nil
+}
+
+// pairsReach reports whether caller has measured MinPairs pairs for every question
+// it has a row for. A caller with no row has measured no question, so it has not
+// reached them.
+func pairsReach(rows []Row, caller string) bool {
+	measured := false
+	for _, r := range rows {
+		if r.Caller != caller {
+			continue
+		}
+		if r.Pairs < MinPairs {
+			return false
+		}
+		measured = true
+	}
+	return measured
 }
 
 func num(v *float64) string {

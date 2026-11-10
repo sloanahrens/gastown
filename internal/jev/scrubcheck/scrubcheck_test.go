@@ -615,3 +615,52 @@ func TestScrubcheckCoverageSampled(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []Coverage{{Caller: caller, Requests: 4, DistinctStates: 3, Sampled: 2}}, rep.Callers)
 }
+
+// TestScrubcheckShortNoteCountsPairsProduced: a caller with fewer distinct states
+// than MinPairs gets the short-of-pairs note only while a question it measured
+// is short of MinPairs pairs. Repeated sampled states can produce the pairs.
+func TestScrubcheckShortNoteCountsPairsProduced(t *testing.T) {
+	t.Parallel()
+	const caller = "jev-logtriage"
+	const late = "2026-10-30T12:00:00Z"
+	const qOther = "other"
+	// pairs returns n checked pairs of question q over the states q0..q{states-1},
+	// so the states repeat when n exceeds states.
+	pairs := func(q string, n, states int) []string {
+		var out []string
+		for i := range n {
+			out = append(out, pairLine(late, caller, fmt.Sprintf("%s%d", q, i%states), q))
+		}
+		return out
+	}
+	tests := []struct {
+		name     string
+		lines    []string
+		wantNote bool
+	}{
+		{"repeated sampled states reach MinPairs", pairs(qNeeds, MinPairs, 5), false},
+		{"too few pairs keep the note", pairs(qNeeds, 3, 3), true},
+		{"one question short of MinPairs keeps the note", append(pairs(qNeeds, MinPairs, 5), pairs(qOther, 3, 3)...), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rep, err := Compute(readLines(t, tc.lines...), Options{}, nil)
+			require.NoError(t, err)
+			var out strings.Builder
+			require.NoError(t, WriteText(&out, rep))
+			if tc.wantNote {
+				assert.Contains(t, out.String(), "fewer than the 30 pairs a question needs")
+			} else {
+				assert.NotContains(t, out.String(), "fewer than the 30 pairs a question needs")
+			}
+		})
+	}
+}
+
+// pairLine is a checked line of caller at ts for the state hashed to state, whose
+// scrubbed call answered question q, so the line measures one pair.
+func pairLine(ts, caller, state, q string) string {
+	return fmt.Sprintf(`{"ts":%q,"caller":%q,"question_ids":[%q],"state_sha256":%q,"outcome":"checked","original_answers":{"noul":{%q:0.3}},"scrubbed_answers":{"noul":{%q:0.6}}}`,
+		ts, caller, q, state, q, q)
+}
