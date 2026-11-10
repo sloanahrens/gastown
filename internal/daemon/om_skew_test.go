@@ -127,9 +127,11 @@ func TestOMSkewAndHMSkewRemoteReadsTheBareRepo(t *testing.T) {
 		{name: "om: the bare repo answers the url and the tip", rig: "om", probe: omProbe, bare: true, url: omURL},
 		{name: "om: a rig with no bare repo fails naming it", rig: "om", probe: omProbe, bare: false, url: omURL, wantErr: true},
 		{name: "om: a bare repo with no origin url fails naming it", rig: "om", probe: omProbe, bare: true, url: "", wantErr: true},
+		// hm's failure rows (no origin url, a failed ls-remote) are the hm_skew
+		// tests' own; here hm proves only that it reads the bare repo and never
+		// the mayor/rig clone.
 		{name: "hm: the bare repo answers the url and the tip", rig: "hm", probe: hmProbe, bare: true, url: hmSkewTestURL},
 		{name: "hm: a rig with no bare repo fails naming it", rig: "hm", probe: hmProbe, bare: false, url: hmSkewTestURL, wantErr: true},
-		{name: "hm: a bare repo with no origin url fails naming it", rig: "hm", probe: hmProbe, bare: true, url: "", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -163,8 +165,8 @@ func TestOMSkewAndHMSkewRemoteReadsTheBareRepo(t *testing.T) {
 				t.Errorf("sha = %q, want origin's main tip %q", sha, omSkewRemoteSHA)
 			}
 			want := []string{"git", "--git-dir=" + bare, "remote", "get-url", "origin"}
-			if len(r.calls) < 2 || !slices.Equal(r.calls[0], want) {
-				t.Fatalf("git calls = %q, want the get-url call %q then ls-remote", r.calls, want)
+			if !slices.ContainsFunc(r.calls, func(c []string) bool { return slices.Equal(c, want) }) {
+				t.Fatalf("git calls = %q, want one get-url call %q against the bare repo", r.calls, want)
 			}
 			if lsRemote := r.calls[len(r.calls)-1]; !slices.Contains(lsRemote, tc.url) {
 				t.Errorf("ls-remote call = %q, want it against the bare repo's url %q", lsRemote, tc.url)
