@@ -244,3 +244,46 @@ func TestDashboardPolecatsNamesAFailedKeptReadAndKeepsTheSeats(t *testing.T) {
 		})
 	}
 }
+
+// A seats read that fails hides the table and names its reason on the summary:
+// the first line of the error, with no path beyond the file name. The next read
+// that succeeds carries no reason, so the page's note clears on that read
+// (gt-6qc3nw.2).
+func TestDashboardSeatsErrorNamesWhy(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	breaker := errors.New("dolt circuit breaker is open: server appears down, failing fast\n" +
+		"  socket /sandbox/gt/.beads/dolt.sock")
+	readers := func(err error) dashPolecatReaders {
+		return dashPolecatReaders{
+			kept: func(string) (map[string]time.Time, error) { return nil, nil },
+			seats: func(_ string, _ []string, _ bool, _ *dashSeatCache, _ *gtevents.DispatchReader, _ sessionLister, _ map[string]time.Time) ([]dashSeat, error) {
+				return nil, err
+			},
+		}
+	}
+	read := func(r dashPolecatReaders) dashboard.Summary {
+		var s dashboard.Summary
+		dashboardPolecatsWith(r, &s, town, nil, nil, true, nil, newDashLandings(town), newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{})
+		return s
+	}
+
+	failed := read(readers(breaker))
+	if !failed.SeatsError {
+		t.Fatalf("a failed seats read did not set SeatsError")
+	}
+	const want = "dolt circuit breaker is open: server appears down, failing fast"
+	if failed.SeatsWhy != want {
+		t.Errorf("SeatsWhy = %q, want the error's first line %q", failed.SeatsWhy, want)
+	}
+
+	blank := read(readers(errors.New("\n  stack line")))
+	if !blank.SeatsError || blank.SeatsWhy != dashWhyNoText {
+		t.Errorf("a failed seats read with no error text: SeatsError=%v SeatsWhy=%q, want the error flagged and %q", blank.SeatsError, blank.SeatsWhy, dashWhyNoText)
+	}
+
+	ok := read(readers(nil))
+	if ok.SeatsError || ok.SeatsWhy != "" {
+		t.Errorf("a successful seats read kept SeatsError=%v SeatsWhy=%q, want both cleared", ok.SeatsError, ok.SeatsWhy)
+	}
+}

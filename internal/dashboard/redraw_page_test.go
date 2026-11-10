@@ -161,6 +161,58 @@ func TestPageRedrawsAPaneWhenOnlyItsReadStatusChanged(t *testing.T) {
 	})
 }
 
+// A read that is still failing can fail for a different reason on the next
+// poll. The reason is part of what a pane draws, so a push that carries a new
+// reason must redraw the pane that names it, even though the read's status did
+// not move (gt-6qc3nw.2).
+func TestPageRedrawsAFailedPaneWhenItsReasonChanged(t *testing.T) {
+	t.Parallel()
+
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	failed := map[string]any{"at": stamp, "every_sec": 60, "error": true, "stale": true}
+
+	t.Run("the Polecats pane", func(t *testing.T) {
+		t.Parallel()
+
+		dom := newPageDOM(t)
+		reading := func(why string) map[string]any {
+			s := workState([]any{}, workQueueReading(3, 0, 0, 0))
+			s["summary_at"] = stamp
+			s["summary"].(map[string]any)["seats_why"] = why
+			s["reads"].(map[string]any)["seats"] = failed
+			return s
+		}
+		pushState(t, dom, reading("dolt circuit breaker is open"))
+		pushState(t, dom, reading("bd: connection refused"))
+		if got := dom.element(t, "polecatsnote").Text; !strings.Contains(got, "the seats read failed: bd: connection refused") {
+			t.Errorf("#polecatsnote reads %q after the reason changed, want the new reason", got)
+		}
+	})
+
+	t.Run("the Attention panel and the strip", func(t *testing.T) {
+		t.Parallel()
+
+		dom := newPageDOM(t)
+		if dom.fold(t, "attention").Collapsed {
+			dom.press(t, "attention", "click")
+		}
+		reading := func(why string) map[string]any {
+			s := workState([]any{}, workQueueReading(3, 0, 0, 0))
+			s["attention"] = map[string]any{"rows": []any{}, "failed": []any{"questions"}}
+			s["questions"] = map[string]any{"unavailable": true, "why": why}
+			return s
+		}
+		pushState(t, dom, reading("dolt circuit breaker is open"))
+		pushState(t, dom, reading("bd: connection refused"))
+		if got := dom.element(t, "attention").Text; !strings.Contains(got, "questions could not be read: bd: connection refused") {
+			t.Errorf("#attention reads %q after the reason changed, want the new reason", got)
+		}
+		if got := stripFact(t, dom, "needs you").Title; !strings.Contains(got, "bd: connection refused") {
+			t.Errorf("the needs-you tip reads %q after the reason changed, want the new reason", got)
+		}
+	})
+}
+
 // TestPageRetriesAPaneWhoseDrawThrew: a draw that threw has not drawn the
 // reading, so the push that ran it must not record that reading as drawn — the
 // next push has to draw the pane again (gt-quuq5).

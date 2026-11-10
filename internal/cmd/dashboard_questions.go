@@ -36,10 +36,21 @@ type dashQuestionsReader struct {
 	// all lifts the panel's row cap, for gt questions, which lists the whole
 	// queue.
 	all bool
+	// why logs a failed read's reason once per change. Nil logs nothing.
+	why *dashWhyLog
 }
+
+// dashQuestionsSource names the questions read in the log.
+const dashQuestionsSource = "questions"
 
 func newDashQuestionsReader(townRoot string) *dashQuestionsReader {
 	return newQuestionsReader(beads.New(beads.ResolveBeadsDir(townRoot)))
+}
+
+// withWhy logs the reason a failed read names, once per change.
+func (r *dashQuestionsReader) withWhy(l *dashWhyLog) *dashQuestionsReader {
+	r.why = l
+	return r
 }
 
 // questionReads is the part of the beads client the reader needs.
@@ -56,12 +67,25 @@ func newQuestionsReader(b questionReads) *dashQuestionsReader {
 }
 
 // read is the panel's whole question reading. A read that fails at any point is
-// an unavailable list: the page cannot draw "awaiting you" for a question whose
-// comments it could not read, since that is the one wrong answer it could give.
+// an unavailable list that names why: the page cannot draw "awaiting you" for a
+// question whose comments it could not read, since that is the one wrong answer
+// it could give (gt-6qc3nw.2).
 func (r *dashQuestionsReader) read(now time.Time) *dashboard.Questions {
+	out, err := r.readRows(now)
+	why := dashWhy(err)
+	r.why.note(dashQuestionsSource, why)
+	if err != nil {
+		return &dashboard.Questions{Unavailable: true, Why: why}
+	}
+	return out
+}
+
+// readRows is the question rows of one read. It returns the error of the first
+// read that fails, and no rows with it.
+func (r *dashQuestionsReader) readRows(now time.Time) (*dashboard.Questions, error) {
 	issues, err := r.list()
 	if err != nil {
-		return &dashboard.Questions{Unavailable: true}
+		return nil, err
 	}
 	candidates := make([]questionCandidate, 0, len(issues))
 	for _, issue := range issues {
@@ -77,14 +101,14 @@ func (r *dashQuestionsReader) read(now time.Time) *dashboard.Questions {
 	for _, c := range candidates {
 		comments, err := r.comments(c.row.ID)
 		if err != nil {
-			return &dashboard.Questions{Unavailable: true}
+			return nil, err
 		}
 		c.row.Comments = len(comments)
 		c.row.State = questionState(comments)
 		c.row.AgeSec = question.AgeSec(now, c.askedAt)
 		out.Rows = append(out.Rows, c.row)
 	}
-	return out
+	return out, nil
 }
 
 // questionCandidate is one listed bead and the time the queue orders it by.

@@ -590,6 +590,14 @@ function readCaption(r, parts) {
   const why = r && r.stale ? (r.error ? "read failed" : "stale") : null;
   return parts.filter(Boolean).concat(why ? [why] : []).join(" · ");
 }
+// failWhy is the reason the server named for a read that failed, held to the
+// WHY_MAX characters a reason is drawn at. A read that named none is "".
+const WHY_MAX = 200;
+function failWhy(s, source) {
+  const sm = s.summary || {};
+  const why = source === "seats" ? sm.seats_why : source === "ready" ? sm.ready_why : source === "questions" ? (s.questions || {}).why : "";
+  return why ? Array.from(String(why)).slice(0, WHY_MAX).join("") : "";
+}
 
 let state = null;
 
@@ -834,7 +842,8 @@ function renderStrip(s) {
   const rr = readOf(s, "ready");
   const q = sm.ready_to_land;
   const oldest = sm.oldest_ready ? (Date.now() - new Date(sm.oldest_ready).getTime()) / 1000 : null;
-  const why = rr && rr.stale ? (rr.error ? "the read that lists what is waiting to land failed" : "the last count of what is waiting to land is old") : null;
+  const readWhy = failWhy(s, "ready");
+  const why = rr && rr.stale ? (rr.error ? "the read that lists what is waiting to land failed" + (readWhy ? ": " + readWhy : "") : "the last count of what is waiting to land is old") : null;
   if (q == null && why) fact(box, "unavailable", "waiting to land", {cls: a.waiting || "", tip: why});
   else fact(box, q == null ? "–" : String(q), "waiting to land",
     {cls: q == null ? "" : (a.waiting || ""), extra: oldest == null ? null : "oldest " + fmtDur(oldest),
@@ -846,9 +855,10 @@ function renderStrip(s) {
   const at = s.attention || null;
   const failed = at ? (at.failed || []) : [], pending = at ? (at.pending || []) : [];
   const waiters = failed.join(" and the "), unread = pending.join(" and the ");
+  const reasons = failed.map(f => failWhy(s, f)).filter(Boolean).join(" · ");
   if (!at) fact(box, "–", "needs you", {cls: a.needs_you || "", tip: "the list of what is waiting has not been read yet"});
   else if (failed.length) fact(box, "unavailable", "needs you", {cls: a.needs_you || "",
-    tip: "the " + waiters + " could not be read" + (pending.length ? ", and the " + unread + " have not been read yet" : "")});
+    tip: "the " + waiters + " could not be read" + (reasons ? ": " + reasons : "") + (pending.length ? ", and the " + unread + " have not been read yet" : "")});
   else if (pending.length) fact(box, "–", "needs you", {cls: a.needs_you || "", tip: "the " + unread + " have not been read yet"});
   else {
     // A reader that capped rows out of the list never read their owner, so the
@@ -1427,7 +1437,10 @@ function renderPolecats(s, force) {
   paintsRead(box, $("polecatsnote"), rSeats);
   const parts = [];
   if (s.summary_at) parts.push("seats read " + age(s.summary_at) + " ago");
-  if (rSeats && rSeats.stale) parts.push(rSeats.error ? "the seats read failed" : "the seats read is old");
+  if (rSeats && rSeats.stale) {
+    const seatsWhy = failWhy(s, "seats");
+    parts.push(rSeats.error ? "the seats read failed" + (seatsWhy ? ": " + seatsWhy : "") : "the seats read is old");
+  }
   // A kept-seat read that failed leaves the seats drawn without it; the note
   // names the failure beside them (gt-ddg96x).
   const keptError = (s.summary || {}).kept_error;
@@ -3188,7 +3201,8 @@ function drawAttention() {
   // A read that failed is a named state, never an empty panel: "nothing is
   // waiting" and "the list could not be read" must not look alike. The rows the
   // readers did return are still drawn beside the line.
-  if (failed.length) box.append(el("div", "badc", "unavailable: the " + failed.join(" and the ") + " could not be read"));
+  const reasons = failed.map(f => failWhy(attentionState, f)).filter(Boolean).join(" · ");
+  if (failed.length) box.append(el("div", "badc", "unavailable: the " + failed.join(" and the ") + " could not be read" + (reasons ? ": " + reasons : "")));
   // A reader that has not reported yet is not a reader that found nothing, so
   // its absence is named before the empty line can stand for it.
   if (pending.length) box.append(el("div", "empty", "the " + pending.join(" and the ") + " have not been read yet"));
@@ -5038,12 +5052,12 @@ function drawQueueList(box, s) {
 // not.
 const PANES = {
   health: {read: h => h, draw: s => renderHealth(s.health)},
-  strip: {read: s => [s.summary, s.strip, s.trend, s.models, s.polecats, s.attention, s.machine, s.overseer, s.dispatch, readInput(s, "ready")], draw: s => renderStrip(s)},
+  strip: {read: s => [s.summary, s.strip, s.trend, s.models, s.polecats, s.attention, s.questions, s.machine, s.overseer, s.dispatch, readInput(s, "ready")], draw: s => renderStrip(s)},
   models: {read: s => s.models, draw: s => renderModelsPanel(s)},
   hold: {read: s => s.hold, draw: s => renderHold(s)},
   update: {read: s => s.update, draw: s => renderUpdate(s)},
   healthmark: {read: s => s.deploys, draw: s => renderHealthMark(s)},
-  attention: {sec: "attention", body: ["attention"], read: s => s.attention, draw: s => renderAttention(s)},
+  attention: {sec: "attention", body: ["attention"], read: s => [s.attention, s.questions], draw: s => renderAttention(s)},
   birds: {sec: "birds", body: ["birds"], read: s => [s.birds, readInput(s, "birds")], draw: s => renderBirds(s)},
   cost: {sec: "cost", body: ["cost"], read: s => [s.spend, s.usage, s.cost_providers, s.cloud, s.cost_charts, s.jev_spend, s.deepreview, readInput(s, "spend")], draw: s => renderCost(s)},
   rigs: {sec: "rigs", body: ["rigs"], read: s => [s.rigs, s.queue, readInput(s, "queue")], draw: s => renderRigs(s)},

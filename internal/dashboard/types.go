@@ -210,6 +210,12 @@ type Summary struct {
 	SeatsError bool `json:"-"`
 	ReadyError bool `json:"-"`
 
+	// SeatsWhy and ReadyWhy name why that read failed: the first line of its
+	// error, with paths cut to the file name. A read that succeeds on a poll
+	// carries none, so the reason clears on that read (gt-6qc3nw.2).
+	SeatsWhy string `json:"seats_why,omitempty"`
+	ReadyWhy string `json:"ready_why,omitempty"`
+
 	// KeptError names the failed read of the seats the daemon keeps for the
 	// jev_rules battery. The seats still read; they read as they did without
 	// that fact, and the page says so beside the table (gt-ddg96x).
