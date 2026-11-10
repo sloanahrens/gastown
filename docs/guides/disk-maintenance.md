@@ -270,9 +270,12 @@ the `dind` container and the same `dry_run` default as the cache trim above.
   interval or age is refused, and an explicit empty keep list is refused, since it
   would leave the base images unprotected. A keep name that is not a repository
   name is refused. Each error names its setting.
-- Each run is two execs. The first lists the engine as JSON and changes nothing.
-  The planner decides what goes from that listing alone. The second removes only
-  the ids and names the planner named, and is skipped in `dry_run`.
+- Each run lists, plans, then removes. The first exec lists the engine as JSON and
+  changes nothing. The planner decides what goes from that listing alone. The
+  remove step is skipped in `dry_run`; in an apply it is one docker command per
+  kind the plan names (`docker rm`, `docker rmi -f`, `docker volume rm`) over that
+  kind's ids, then the build cache prune, with no shell between the plan and
+  docker.
 - What goes:
   - stopped containers (`created`, `exited`, `dead`) created more than 24 hours
     ago;
@@ -281,8 +284,13 @@ the `dind` container and the same `dry_run` default as the cache trim above.
     `ci-base`;
   - `ci-base` images other than the one `ci-base:latest` names, and the id created
     just before it, which is kept as the rollback. With no `ci-base:latest` tag, the
-    newest `ci-base` id is the latest. These go without an age gate. A `ci-base`
-    image that also carries a tag in another kept repository is kept;
+    newest `ci-base` id is the latest. The others wait out `ci_engine_prune_age`
+    like any image, so a build not yet tagged latest is not swept away. A `ci-base`
+    image that also carries a tag in another kept repository is kept. The rollback
+    is chosen among images that still carry a `ci-base` tag, so it assumes every
+    base carries a second tag (as `gate-tools`, `jq17` and the `pre-*` tags do): a
+    former `:latest` that carried no other tag has no `ci-base` tag once the tag
+    moves, and falls out of the rule and goes after the age;
   - anonymous volumes, whose names are the 64 hex digits docker gives one, with no
     container that stays mounting them, and created more than 24 hours ago. A
     volume's own name and mounts decide it; no companion volume is consulted;
@@ -296,11 +304,15 @@ the `dind` container and the same `dry_run` default as the cache trim above.
   images, N volumes, X to Y`. The sizes are the data root's, read with `du`.
 - A run that cannot tell what the engine holds is a failed run and removes nothing:
   a runner pod whose `dind` container is not running, a listing that does not
-  decode, an id or time in an unexpected shape, a failed exec, or a remove reply
-  whose count differs from the plan. Each logs its own line, at most once an hour,
-  and the run is retried in 15 minutes. A removal docker refuses, for example a
-  resource a new container has just started using, stops the apply there; the next
-  run plans again.
+  decode, an id or time in an unexpected shape, or a failed exec. Each logs its own
+  line, at most once an hour, and the run is retried in 15 minutes.
+- What a removal did is read back from docker, not from the command's exit status
+  (`docker rmi -f` exits 1 over an image an earlier argument already freed). The
+  ids docker printed removed count. For the rest, one `docker <kind> inspect
+  --format` names which are still in the engine: an id gone counts as removed, an
+  id still there fails the run. Every kind and the build cache prune run whatever
+  an earlier one did, and the size after is still read; the run then fails once,
+  with one log line per failed kind, and the next run plans again.
 
 ## Rollback
 

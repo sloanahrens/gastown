@@ -2,13 +2,16 @@
 
 package daemon
 
-// The engine prune's list program is shell text that runs as root inside the
-// runner's dind container, so the only proof of what it runs is running the text;
-// the remove step is docker commands whose argv the daemon builds, proven here by
-// running that argv against a fake docker. This is the integration tier because
-// each case starts a process, which the unit tier forbids. The fake docker on PATH
-// stands in for the engine: it logs each call, prints the canned output named for
-// its verb, and fails for a verb marked to fail (gt-i02983).
+// What this tier proves, and what it does not. It proves that the list program,
+// the one shell text the prune runs as root inside the runner's dind, runs under a
+// real sh and prints JSON the daemon parses; that each removal and presence argv
+// the daemon builds reaches a docker binary as the verb and the ids with nothing
+// shell-quoted between them; and that a non-zero exit comes back as a non-zero
+// exit. It does not prove docker's output shapes or flags: the fake docker prints
+// the text each case writes for it, so a case shows that the parser reads that
+// text, not that docker prints it. The shapes are held by the captures in
+// TestCIEngineRemovedReadsDockersOutput and TestCIEnginePresentReadsInspectOutput,
+// taken from the runner's dind (gt-i02983).
 
 import (
 	"bytes"
@@ -219,5 +222,22 @@ func TestIntegrationCIEngineListProgramOnAnEmptyEngine(t *testing.T) {
 	}
 	if l.DataRootKiB == nil || len(l.Containers)+len(l.Images)+len(l.Volumes) != 0 {
 		t.Errorf("the empty listing = %q", stdout)
+	}
+}
+
+// TestIntegrationCIEnginePresenceArgvReachesDocker: the presence inspect reaches
+// docker as the kind's inspect with the format and the ids, and a docker that
+// exits 1 over a gone id still hands back the present ones on stdout.
+func TestIntegrationCIEnginePresenceArgvReachesDocker(t *testing.T) {
+	f := newFakeDocker(t)
+	f.failing(t, "image-inspect")
+	r := ciEngineRemoval{kind: "image"}
+	_, ok := f.runArgv(t, r.presenceArgv([]string{"sha256:gone", "sha256:here"})...)
+	if ok {
+		t.Fatalf("an inspect over a gone id exited zero")
+	}
+	want := []string{"image inspect --format {{.Id}} sha256:gone sha256:here"}
+	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("docker calls = %q, want %q", got, want)
 	}
 }

@@ -40,6 +40,9 @@ func (c cliCall) getenv(key string) string {
 type cliReply struct {
 	stdout, stderr string
 	code           int // exit status; 0 is success
+	// startErr is a failure to run the program at all: an error with no exit
+	// status, as exec returns for a program it could not start.
+	startErr error
 }
 
 // cliExitError is a fakeCLI call's non-zero exit. It carries its status
@@ -100,6 +103,9 @@ func (f *fakeCLI) run(cmd *exec.Cmd) ([]byte, []byte, error) {
 	var err error
 	if r.code != 0 {
 		err = &cliExitError{code: r.code}
+	}
+	if r.startErr != nil {
+		err = r.startErr
 	}
 	return []byte(r.stdout), []byte(r.stderr), err
 }

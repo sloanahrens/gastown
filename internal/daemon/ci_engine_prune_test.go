@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -327,14 +329,23 @@ func TestCIEnginePruneRefusesAListingItCannotRead(t *testing.T) {
 // trim's fixture, with the list program answered from listing and the remove
 // program answered from remove.
 // engineRemoveAnswers says how the fake engine answers the remove step's docker
-// commands: fail makes every docker removal exit 1 with stderr, short makes docker
-// report one id fewer than it was given, garbage makes it print lines naming none.
-// The zero value is an engine that removes everything it is asked to and says so.
+// commands: fail makes every docker removal exit 1 with stderr and remove nothing,
+// gone makes that failing removal exit 1 with nothing left (the id was freed by an
+// earlier argument), short makes docker print one id fewer than it was given and
+// leave that id in the engine, garbage makes it print lines naming none, and
+// noInspect makes the presence inspect fail to run. The zero value is an engine
+// that removes everything it is asked to and says so.
 type engineRemoveAnswers struct {
-	fail    bool
-	stderr  string
-	short   bool
-	garbage bool
+	fail      bool
+	stderr    string
+	gone      bool
+	short     bool
+	garbage   bool
+	noInspect bool
+	// duOut replaces du's reply when duSet; duFail makes du exit 1.
+	duOut  string
+	duSet  bool
+	duFail bool
 }
 
 // engineDockerIDs returns the ids a docker removal exec was given: the argv after
@@ -358,6 +369,10 @@ func engineDockerIDs(args []string) []string {
 func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engineRemoveAnswers) *ciCacheFixture {
 	t.Helper()
 	f := newCICacheFixture(t, mode)
+	// held is the set of ids the fake engine still has after a removal that did not
+	// take them; the presence inspect echoes the requested ids it holds.
+	var heldMu sync.Mutex
+	held := map[string]bool{}
 	// This fixture's engine prune is due at its first tick: the default interval,
 	// and no recorded run.
 	f.d.patrolConfig.Patrols.DiskMaintenance.CIEnginePruneInterval = ""
@@ -370,18 +385,54 @@ func newCIEngineFixture(t *testing.T, mode string, listing []byte, remove engine
 		case strings.Contains(verb, "ci-engine-list"):
 			return cliReply{stdout: string(listing)}
 		case strings.Contains(verb, "-- du -sk"):
+			if remove.duFail {
+				return cliReply{code: 1, stderr: "du: cannot read"}
+			}
+			if remove.duSet {
+				return cliReply{stdout: remove.duOut}
+			}
 			return cliReply{stdout: "10485760\t" + ciEngineRoot + "\n"}
 		case strings.Contains(verb, "-- docker builder prune"):
 			return cliReply{stdout: "Total:\t0B\n"}
+		case strings.Contains(verb, " inspect "):
+			if remove.noInspect {
+				return cliReply{startErr: errors.New("kubectl: could not run")}
+			}
+			i := slices.Index(c.args, "--format")
+			var out strings.Builder
+			gone := false
+			heldMu.Lock()
+			for _, id := range c.args[i+2:] {
+				if held[id] {
+					out.WriteString(id + "\n")
+				} else {
+					gone = true
+				}
+			}
+			heldMu.Unlock()
+			if gone {
+				return cliReply{stdout: out.String(), code: 1, stderr: "Error: No such object"}
+			}
+			return cliReply{stdout: out.String()}
 		case strings.Contains(verb, "-- docker "):
+			ids := engineDockerIDs(c.args)
 			if remove.fail {
+				if !remove.gone {
+					heldMu.Lock()
+					for _, id := range ids {
+						held[id] = true
+					}
+					heldMu.Unlock()
+				}
 				return cliReply{code: 1, stderr: remove.stderr}
 			}
 			if remove.garbage {
 				return cliReply{stdout: "garbage\n"}
 			}
-			ids := engineDockerIDs(c.args)
 			if remove.short && len(ids) > 0 {
+				heldMu.Lock()
+				held[ids[0]] = true
+				heldMu.Unlock()
 				ids = ids[1:]
 			}
 			var out strings.Builder
@@ -500,23 +551,23 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 		}
 	})
 
-	// A removal that fails, or that docker does not report performing, is a failed
-	// run: no verdict, a retry soon, and a line that says why.
+	// A removal docker leaves in place is a failed run: no verdict, a retry soon, and
+	// a line that says which kind and how the removal ended. Every kind still ran.
 	for name, tc := range map[string]struct {
 		remove  engineRemoveAnswers
 		wantLog string
 	}{
-		"docker reports one id fewer than planned": {
+		"docker prints one id fewer than planned and keeps it": {
 			remove:  engineRemoveAnswers{short: true},
-			wantLog: "were not; the run is retried",
+			wantLog: "docker left 1 of 1 planned image(s)",
 		},
-		"docker prints lines naming no id": {
-			remove:  engineRemoveAnswers{garbage: true},
-			wantLog: "docker reported 0 of 1",
-		},
-		"a removal exec fails": {
+		"a removal exec fails and the object stays": {
 			remove:  engineRemoveAnswers{fail: true, stderr: "volume is in use"},
-			wantLog: "removal in the",
+			wantLog: "(the removal ended: exit status 1)",
+		},
+		"the presence check cannot run": {
+			remove:  engineRemoveAnswers{garbage: true, noInspect: true},
+			wantLog: "presence check could not run",
 		},
 	} {
 		t.Run(name+" is a failed run, tried again soon", func(t *testing.T) {
@@ -533,8 +584,43 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 			if !strings.Contains(f.logs.String(), tc.wantLog) {
 				t.Errorf("the failed run does not name %q:\n%s", tc.wantLog, f.logs.String())
 			}
+			// Whatever failed, every kind and the build cache prune still ran, and the
+			// size after was read.
+			for _, verb := range []string{"rm", "rmi", "volume rm", "builder prune"} {
+				if len(engineDockerExecs(f, verb)) != 1 {
+					t.Errorf("docker %s ran %d time(s) after a failure, want once", verb, len(engineDockerExecs(f, verb)))
+				}
+			}
+			if len(engineExecs(f, "du -sk")) == 0 {
+				t.Errorf("the size after was not read after a failed removal")
+			}
 		})
 	}
+
+	// docker rmi -f exits 1 over an id an earlier argument already freed. The id is
+	// gone, so the kind counts as removed and the run reaches a verdict.
+	t.Run("a removal that exits 1 over objects already gone is a verdict", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{fail: true, gone: true})
+		f.tick()
+		f.drain()
+		if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+			t.Errorf("ids absent from the engine after the removal did not reach a verdict:\n%s", f.logs.String())
+		}
+		if !strings.Contains(f.logs.String(), "removed 1 containers, 1 images, 1 volumes") {
+			t.Errorf("the verdict line is missing:\n%s", f.logs.String())
+		}
+	})
+
+	t.Run("docker prints no id but the objects are gone is a verdict", func(t *testing.T) {
+		t.Parallel()
+		f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, engineRemoveAnswers{garbage: true})
+		f.tick()
+		f.drain()
+		if f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+			t.Errorf("objects absent from the engine did not reach a verdict:\n%s", f.logs.String())
+		}
+	})
 }
 
 // TestCIEngineRemovedReadsDockersOutput: docker rm and docker volume rm print each
@@ -554,6 +640,9 @@ func TestCIEngineRemovedReadsDockersOutput(t *testing.T) {
 		"garbage":               {"garbage\n", []string{"sha256:aaa", "sha256:bbb"}},
 		"empty":                 {"", []string{"sha256:aaa", "sha256:bbb"}},
 		"plain lines (rm form)": {"sha256:aaa\nsha256:bbb\n", nil},
+		// Captured from the runner's dind (docker 28, containerd image store): a tagged
+		// image removed by its full id prints these two lines and no parent layers.
+		"captured rmi -f of a tagged id": {"Untagged: forgejo:3000/bot-registry/gastown-daemon:8707a343dbf7\nDeleted: sha256:aaa\n", []string{"sha256:bbb"}},
 	} {
 		if got := ciEngineMissing(r, []byte(tc.out)); !slices.Equal(got, tc.missing) {
 			t.Errorf("%s: missing = %q, want %q", name, got, tc.missing)
@@ -851,5 +940,94 @@ func TestCIEnginePruneSettingsNameTheSettingTheyRefuse(t *testing.T) {
 				t.Errorf("ciEnginePruneSettings() error = %v, want one naming %s", err, tc.wantKey)
 			}
 		})
+	}
+}
+
+// TestCIEngineSizeAfterIsReadFromDu: the size after a removal is du's first field.
+// A du that fails, prints nothing or prints a non-number is a failed run that says
+// so, and the removals still ran.
+func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
+	t.Parallel()
+	listing := engListing(t,
+		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)}, nil, nil)
+	for name, tc := range map[string]struct {
+		remove  engineRemoveAnswers
+		wantLog string
+	}{
+		"du fails":            {engineRemoveAnswers{duFail: true}, "du of the data root failed (exit status 1)"},
+		"du prints nothing":   {engineRemoveAnswers{duSet: true, duOut: "\n"}, "du printed no figure"},
+		"du prints a non-KiB": {engineRemoveAnswers{duSet: true, duOut: "lots\t/var/lib/docker\n"}, `du printed "lots", not a KiB figure`},
+		"du prints negative":  {engineRemoveAnswers{duSet: true, duOut: "-4\t/var/lib/docker\n"}, `du printed "-4", not a KiB figure`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, tc.remove)
+			f.tick()
+			f.drain()
+			logs := f.logs.String()
+			if !strings.Contains(logs, "the data root's size after could not be read") || !strings.Contains(logs, tc.wantLog) {
+				t.Errorf("the log does not name an unreadable size (%q):\n%s", tc.wantLog, logs)
+			}
+			if !f.d.diskMaintSchedule.lastRunAt(ciEnginePruneName).IsZero() {
+				t.Errorf("an unreadable size was recorded as a verdict")
+			}
+			if len(engineDockerExecs(f, "rm")) != 1 {
+				t.Errorf("the container removal did not run before du")
+			}
+		})
+	}
+}
+
+// TestCIEnginePresentReadsInspectOutput: the presence inspect prints the id (the
+// name, for a volume) of each object found, one per line. A line not in that
+// kind's shape names nothing. The image rows are captured from the runner's dind
+// (docker 28, containerd image store): the present id alone on stdout, with the
+// gone id's error on stderr, which the daemon never reads. No stopped container
+// or anonymous volume existed to capture, so those rows use the documented shape,
+// one id or name per line.
+func TestCIEnginePresentReadsInspectOutput(t *testing.T) {
+	t.Parallel()
+	const present = "sha256:6f1314f5fe28a6de6f7ab8e1e562b450339e1b1720882b2dd4387f651bb2b35d"
+	for name, tc := range map[string]struct {
+		kind string
+		out  string
+		want []string
+	}{
+		"image, one present of two (captured)": {"image", present + "\n", []string{present}},
+		"image, none present":                  {"image", "", nil},
+		"image, a short id names nothing":      {"image", "sha256:6f13\n" + present + "\n", []string{present}},
+		"image, error text names nothing":      {"image", "Error response from daemon: No such image: " + present + "\n", nil},
+		"container, two present (documented)":  {"container", engHex64('1') + "\n" + engHex64('2') + "\n", []string{engHex64('1'), engHex64('2')}},
+		"container, a name names nothing":      {"container", "boring_name\n", nil},
+		"volume, a name per line (documented)": {"volume", "ci-gocache\n" + engHex64('1') + "\n", []string{"ci-gocache", engHex64('1')}},
+		"volume, a line with a space":          {"volume", "bad name\n", nil},
+		"unknown kind":                         {"network", present + "\n", nil},
+	} {
+		got := ciEnginePresent(tc.kind, []byte(tc.out))
+		if len(got) != len(tc.want) {
+			t.Errorf("%s: present = %v, want %v", name, got, tc.want)
+			continue
+		}
+		for _, id := range tc.want {
+			if !got[id] {
+				t.Errorf("%s: %s is not reported present (%v)", name, id, got)
+			}
+		}
+	}
+}
+
+// TestCIEnginePresenceArgv: the presence check is the kind's inspect over the
+// missing ids, formatted to the id (the name for a volume), with no shell.
+func TestCIEnginePresenceArgv(t *testing.T) {
+	t.Parallel()
+	for kind, want := range map[string][]string{
+		"container": {"docker", "container", "inspect", "--format", "{{.Id}}", "a", "b"},
+		"image":     {"docker", "image", "inspect", "--format", "{{.Id}}", "a", "b"},
+		"volume":    {"docker", "volume", "inspect", "--format", "{{.Name}}", "a", "b"},
+	} {
+		got := ciEngineRemoval{kind: kind}.presenceArgv([]string{"a", "b"})
+		if !slices.Equal(got, want) {
+			t.Errorf("%s presence argv = %q, want %q", kind, got, want)
+		}
 	}
 }

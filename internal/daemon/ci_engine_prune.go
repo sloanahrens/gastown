@@ -10,9 +10,14 @@ package daemon
 // JSON. The planner, a pure function over that listing, decides what goes, so the
 // keep rule is tested in-process. The remove step is one docker command per kind
 // the plan names (docker rm, docker rmi -f, docker volume rm), each over that
-// kind's ids as argv with no shell between the plan and docker, and each read back
-// from docker's own output: an id docker did not report removed fails the run. A
-// dry run runs the list program alone. The keep rule is written once, in
+// kind's ids as argv with no shell between the plan and docker. What each command
+// did is read back from docker: the ids it printed removed, and for any it did not
+// print, one docker inspect that names which of them are still in the engine. An
+// id still there fails the run; an id gone counts as removed, whatever the
+// command's exit status said, since docker rmi -f exits 1 over an image a
+// previous argument already freed. Every kind and the build cache prune run
+// whatever an earlier one did, so one refused image never keeps the cache from
+// being pruned. A dry run runs the list program alone. The keep rule is written once, in
 // docs/guides/disk-maintenance.md: read it before changing what is removed.
 //
 // Build cache is not sized in a dry run, since docker has no dry run for it.
@@ -107,6 +112,18 @@ func ciEngineRemovals(plan ciEnginePlan) []ciEngineRemoval {
 	return out
 }
 
+// presenceArgv is the docker inspect that prints which of ids the engine still
+// holds: the id (the name for a volume) of each object found, one per line. It
+// exits 1 when any id is gone, which is the case it exists to find, so a caller
+// reads its output and not its status.
+func (r ciEngineRemoval) presenceArgv(ids []string) []string {
+	format := "{{.Id}}"
+	if r.kind == "volume" {
+		format = "{{.Name}}"
+	}
+	return append([]string{"docker", r.kind, "inspect", "--format", format}, ids...)
+}
+
 // ciEngineBuildCachePruneArgv is the build cache prune: everything unused since
 // cutoff, an RFC 3339 time.
 func ciEngineBuildCachePruneArgv(cutoff string) []string {
@@ -143,6 +160,30 @@ func ciEngineMissing(r ciEngineRemoval, out []byte) []string {
 		}
 	}
 	return missing
+}
+
+// ciEnginePresent reads the output of a presence inspect for a kind of object: the
+// set of ids (names, for a volume) docker printed. A line that is not in the
+// shape docker prints that kind's id in names nothing, so text docker prints
+// beside the ids never marks an object present.
+func ciEnginePresent(kind string, out []byte) map[string]bool {
+	present := map[string]bool{}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		var ok bool
+		switch kind {
+		case "container":
+			ok = ciEngineContainerIDRE.MatchString(line)
+		case "image":
+			ok = ciEngineImageIDRE.MatchString(line)
+		case "volume":
+			ok = ciEngineVolumeNameRE.MatchString(line)
+		}
+		if ok {
+			present[line] = true
+		}
+	}
+	return present
 }
 
 var (
@@ -548,11 +589,11 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 }
 
 // ciEnginePrune runs the engine prune once and reports whether it reached a
-// verdict. A run that cannot list the engine, plan from the listing, or read the
-// removals' output is a failed run that says why. A run that fails before the
-// first removal removes nothing; one whose removals fail partway has removed the
-// kinds docker took before the failure, and the next run plans again from what
-// is left.
+// verdict. A run that cannot list the engine or plan from the listing removes
+// nothing and says why. Once it removes, every kind and the build cache prune run
+// whatever an earlier one did; a kind docker left in place, or that could not be
+// checked, fails the run after the rest have run, and the next run plans again
+// from what is left.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
 	_, maxAge, keepRepos, err := ciEnginePruneSettings(d.patrolConfig)
@@ -617,34 +658,80 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		return true
 	}
 
+	// Every kind and the build cache prune run whatever an earlier one did; each
+	// failure is logged on its own line and the run fails once they have all run.
+	failed := false
 	for _, r := range ciEngineRemovals(plan) {
-		stdout, _, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.argv...)
-		if err != nil {
-			d.ciEnginePruneLogf("remove failed", "disk_maintenance: ci engine prune: the %s removal in the %s container failed (%s); the run is retried",
-				r.kind, ciCacheContainer, ciEngineExitStatus(err))
-			return false
-		}
-		if missing := ciEngineMissing(r, stdout); len(missing) > 0 {
-			d.ciEnginePruneLogf("not removed", "disk_maintenance: ci engine prune: docker reported %d of %d planned %s(s) removed, so %d were not; the run is retried",
-				len(r.ids)-len(missing), len(r.ids), r.kind, len(missing))
-			return false
+		if !d.ciEngineRemoveKind(ctx, kubeconfig, kubeContext, pod, r) {
+			failed = true
 		}
 	}
 	cutoff := now.Add(-ciEngineUnusedAge).Format(time.RFC3339)
 	if _, _, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(cutoff)...); err != nil {
 		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
 			ciCacheContainer, ciEngineExitStatus(err))
-		return false
+		failed = true
 	}
 	afterKiB, err := d.ciEngineDataRootKiB(ctx, kubeconfig, kubeContext, pod)
 	if err != nil {
-		d.ciEnginePruneLogf("size unreadable", "disk_maintenance: ci engine prune: removed %s, but the data root's size after could not be read: %v; the run is retried",
-			counts, err)
+		d.ciEnginePruneLogf("size unreadable", "disk_maintenance: ci engine prune: the data root's size after could not be read: %v; the run is retried", err)
+		return false
+	}
+	if failed {
+		d.logger.Printf("disk_maintenance: ci engine prune: a removal failed; the engine is %s, from %s; the run is retried", polecatimage.Human(afterKiB*1024), before)
 		return false
 	}
 	d.logger.Printf("disk_maintenance: ci engine prune: removed %s, %s to %s",
 		counts, before, polecatimage.Human(afterKiB*1024))
 	return true
+}
+
+// ciEngineRemoveKind runs one kind's removal and reports whether every planned id
+// is gone from the engine afterwards. The command's exit status is not the
+// answer: docker rmi -f exits 1 over an id an earlier argument already freed. The
+// answer is docker's own report, then one presence inspect over the ids it did
+// not print. A failure is logged here, naming the kind and the exit status only.
+func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext, pod string, r ciEngineRemoval) bool {
+	stdout, _, runErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.argv...)
+	missing := ciEngineMissing(r, stdout)
+	if len(missing) == 0 {
+		return true
+	}
+	// The inspect exits 1 whenever one of the ids is gone, so only a failure to run
+	// it at all, not a status, stops the answer.
+	seen, _, inspectErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.presenceArgv(missing)...)
+	if !ciEngineRan(inspectErr) {
+		d.ciEnginePruneLogf("presence "+r.kind, "disk_maintenance: ci engine prune: the %s presence check could not run (%s); the run is retried", r.kind, ciEngineExitStatus(inspectErr))
+		return false
+	}
+	present := ciEnginePresent(r.kind, seen)
+	left := 0
+	for _, id := range missing {
+		if present[id] {
+			left++
+		}
+	}
+	if left == 0 {
+		return true
+	}
+	d.ciEnginePruneLogf("not removed "+r.kind, "disk_maintenance: ci engine prune: docker left %d of %d planned %s(s) in the %s container (the removal ended: %s); the run is retried",
+		left, len(r.ids), r.kind, ciCacheContainer, ciEngineRunEnd(runErr))
+	return false
+}
+
+// ciEngineRan reports whether an exec reached its program: it succeeded or the
+// program exited with a status. An error with no status means it never ran.
+func ciEngineRan(err error) bool {
+	var status interface{ ExitCode() int }
+	return err == nil || errors.As(err, &status)
+}
+
+// ciEngineRunEnd names how a removal command ended, by its exit status alone.
+func ciEngineRunEnd(err error) string {
+	if err == nil {
+		return "exit status 0"
+	}
+	return ciEngineExitStatus(err)
 }
 
 // ciEngineExec runs one program in the runner's engine container with argv as
