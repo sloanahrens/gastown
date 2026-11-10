@@ -1,6 +1,7 @@
 package testpolicy
 
 import (
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -68,6 +69,29 @@ func TestSweepHostEveryLineHasAReason(t *testing.T) {
 	entries, _ := sweepHostOfTree(t)
 	for _, f := range CheckSweepHostReasons(entries) {
 		t.Error(f)
+	}
+}
+
+// TestSweepHostReasonsNameExistingFiles keeps each reason's .go names to files
+// its package still holds: a reason that names a deleted test sends the next
+// reader to a file that is gone.
+func TestSweepHostReasonsNameExistingFiles(t *testing.T) {
+	t.Parallel()
+	entries, _ := sweepHostOfTree(t)
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		for _, field := range strings.Fields(e.Reason) {
+			name := strings.Trim(field, ";,:.()")
+			if !strings.HasSuffix(name, ".go") {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(root, e.Package, name)); err != nil {
+				t.Errorf("sweep-host.txt:%d reason names %s, which %s does not hold: %v", e.Line, name, e.Package, err)
+			}
+		}
 	}
 }
 
