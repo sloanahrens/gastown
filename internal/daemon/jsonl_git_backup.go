@@ -252,6 +252,13 @@ func (d *Daemon) syncJsonlGitBackup() {
 			return
 		}
 	} else {
+		// discoverJsonlBackupDatabases is the one step that reads Dolt files on this
+		// host (the data dir listing and each database's .dolt stat). A remote server
+		// has none here, so that step is skipped once per tick and the list comes
+		// from the server.
+		skipReason := fmt.Sprintf("Dolt server %s is remote; databases come from the server", target.host)
+		d.logger.Printf(`jsonl_git_backup: step "%s" needs a local data dir, skipped (%s)`, jsonlDiscoverStep, skipReason)
+		cycle.skipStep(jsonlDiscoverStep, skipReason)
 		workDir, err := doltserver.ClientWorkDir(&doltserver.Config{DataDir: dataDir, TownRoot: d.config.TownRoot})
 		if err != nil {
 			d.logger.Printf("jsonl_git_backup: %v", err)
@@ -659,7 +666,7 @@ func (d *Daemon) exportDatabaseToJsonlFor(db, gitRepo, dataDir string, scrub boo
 // The caller (resolveJsonlTarget) reads the town's config with
 // doltserver.DefaultConfig(townRoot); a dolt.external_container that would not
 // parse (ExternalContainerSetting) is carried on the target and refused by each
-// export, not decided here. This function is a pure decision over what it is
+// export and by the remote database list, not decided here. This function is a pure decision over what it is
 // handed.
 func jsonlDoltTarget(manager *DoltServerManager, town *doltserver.Config) (useServer bool, host string, port int, user, password string) {
 	if manager != nil && manager.IsEnabled() {
@@ -686,7 +693,7 @@ func jsonlDoltTarget(manager *DoltServerManager, town *doltserver.Config) (useSe
 // once (resolveJsonlTarget), and the database list and every export take that
 // value, so they all read the same server even if the town's config changes
 // during the tick. configErr is the town's dolt config error: each export refuses
-// it, as it always has, and the list does not read it.
+// it, and so does the remote database list.
 type jsonlTarget struct {
 	useServer bool
 	host      string
@@ -1603,6 +1610,10 @@ func (d *Daemon) gitPackSizeSummary(gitRepo string) string {
 	return size + " KiB"
 }
 
+// jsonlDiscoverStep names the tick step that lists databases from the data dir,
+// the one step that reads Dolt files on this host.
+const jsonlDiscoverStep = "discover databases from data dir"
+
 // discoverJsonlBackupDatabases lists production database directories under
 // dataDir, for use when JsonlGitBackupConfig.Databases is empty. It skips
 // test/scratch DB prefixes (internal/testdb) and requires a real `.dolt` subdirectory so stray non-database
@@ -1638,8 +1649,13 @@ func discoverJsonlBackupDatabases(dataDir string) []string {
 // listServerJsonlDatabases lists the databases a remote Dolt server serves: SHOW
 // DATABASES through the same connection the exports use, so the list and the
 // exports read one server. cmdDir is the client directory doltserver.ClientWorkDir
-// returns for the remote server.
+// returns for the remote server. A town dolt config error refuses the list as it
+// refuses each export (exportTableToJsonl), so neither reads a server the town did
+// not name.
 func (d *Daemon) listServerJsonlDatabases(cmdDir string, target jsonlTarget) ([]string, error) {
+	if target.configErr != nil {
+		return nil, fmt.Errorf("town dolt config: %w", target.configErr)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), jsonlExportTimeout)
 	defer cancel()
 	cmd := jsonlExportCommand(ctx, target.useServer, target.host, target.port, target.user, target.password, "SHOW DATABASES", cmdDir)

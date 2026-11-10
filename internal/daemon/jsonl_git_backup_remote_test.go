@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 )
 
@@ -112,9 +113,19 @@ func TestJSONLGitBackupRemoteServerExportsEveryServedDatabase(t *testing.T) {
 	if strings.Contains(logs.String(), "does not exist, skipping") {
 		t.Errorf("remote server patrol skipped on the data dir; log:\n%s", logs.String())
 	}
+	if got := strings.Count(logs.String(), remoteDataDirSkipLine(remoteDoltHost)); got != 1 {
+		t.Errorf("the data-dir skip line appeared %d time(s) in one tick, want once; log:\n%s", got, logs.String())
+	}
 	if open := rec.OpenEscalations(alertKeyJSONLRemote); len(open) != 0 {
 		t.Errorf("remote listing escalated on success: %+v", open)
 	}
+}
+
+// remoteDataDirSkipLine is the log line a remote tick writes for the data-dir
+// step it does not run.
+func remoteDataDirSkipLine(host string) string {
+	return `jsonl_git_backup: step "discover databases from data dir" needs a local data dir, skipped (Dolt server ` +
+		host + ` is remote; databases come from the server)`
 }
 
 // TestJSONLGitBackupLocalServerMissingDataDirStillSkips: a local server with no
@@ -130,6 +141,9 @@ func TestJSONLGitBackupLocalServerMissingDataDirStillSkips(t *testing.T) {
 	want := "data dir " + filepath.Join(townRoot, ".dolt-data") + " does not exist, skipping"
 	if !strings.Contains(logs.String(), want) {
 		t.Errorf("local server with no data dir did not log the skip; log:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "needs a local data dir") {
+		t.Errorf("local server logged the remote-only data-dir skip; log:\n%s", logs.String())
 	}
 	if server.showCalls != 0 || len(server.exported) != 0 {
 		t.Errorf("local skip listed (%d) or exported %v, want neither", server.showCalls, server.exported)
@@ -254,6 +268,35 @@ func TestJSONLGitBackupRemoteTargetReadOncePerTick(t *testing.T) {
 	}
 }
 
+// TestJSONLGitBackupRemoteServerConfigErrorRefusesListAndExports: a town dolt
+// config error the exports refuse refuses the remote list too. The list never
+// runs, nothing is exported, and the refusal is raised.
+func TestJSONLGitBackupRemoteServerConfigErrorRefusesListAndExports(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	server := &remoteServerFake{showOut: []byte(`{"rows":[{"Database":"hq"}]}`)}
+	d, rec, logs := newRemoteBackupDaemon(t, townRoot, remoteDoltHost, server)
+	d.jsonlTargetFn = func() jsonlTarget {
+		return jsonlTarget{useServer: true, host: remoteDoltHost, port: 3307, user: "root",
+			configErr: errors.New("dolt.external_container is not a container name")}
+	}
+
+	d.syncJsonlGitBackup()
+
+	if server.showCalls != 0 || len(server.cmds) != 0 {
+		t.Errorf("the tick ran %d list(s) and %d command(s) under a config error, want none", server.showCalls, len(server.cmds))
+	}
+	if len(server.exported) != 0 {
+		t.Errorf("exported %v under a config error, want nothing", server.exported)
+	}
+	if open := rec.OpenEscalations(alertKeyJSONLRemote); len(open) != 1 {
+		t.Errorf("open remote escalations = %+v, want one", open)
+	}
+	if !strings.Contains(logs.String(), "town dolt config") {
+		t.Errorf("config-error refusal not logged; log:\n%s", logs.String())
+	}
+}
+
 // TestJSONLGitBackupRemoteExportCommandsRunInClientDir: each export a remote tick
 // runs is the real command. It runs in the client directory the tick made, names
 // the server's host and port, and queries the database it is exporting.
@@ -266,7 +309,10 @@ func TestJSONLGitBackupRemoteExportCommandsRunInClientDir(t *testing.T) {
 
 	d.syncJsonlGitBackup()
 
-	clientDir := filepath.Join(townRoot, ".runtime", "dolt-client")
+	clientDir, err := doltserver.ClientWorkDir(&doltserver.Config{DataDir: filepath.Join(townRoot, ".dolt-data"), TownRoot: townRoot})
+	if err != nil {
+		t.Fatalf("ClientWorkDir: %v", err)
+	}
 	for _, db := range []string{"gt", "hq"} {
 		exports := 0
 		for _, cmd := range server.cmds {
