@@ -167,6 +167,51 @@ func checkCIBaseJQ(text string) error {
 	return nil
 }
 
+// golangciLintModule marks the RUN that installs golangci-lint, and goCacheClean
+// is the segment of that RUN that empties the Go caches the install wrote.
+const (
+	golangciLintModule = "cmd/golangci-lint@"
+	goCacheClean       = "go clean -cache -modcache"
+)
+
+// checkCIBaseGoCaches reports why the golangci-lint layer of a ci-base
+// Dockerfile leaves the Go module and build caches in the image. The layer is
+// the one RUN that installs golangci-lint. Its && steps must include
+// `go clean -cache -modcache` after the install step, so the caches the install
+// writes under GOPATH and GOCACHE are removed in the same layer, before it
+// closes. It returns nil when that holds.
+func checkCIBaseGoCaches(text string) error {
+	ins := parseDockerfile(text)
+	var layer string
+	installers := 0
+	for _, in := range ins {
+		if in.keyword == "RUN" && strings.Contains(in.args, golangciLintModule) {
+			layer = in.args
+			installers++
+		}
+	}
+	if installers != 1 {
+		return fmt.Errorf("%d RUN steps install golangci-lint, want exactly one lint layer", installers)
+	}
+	install, clean := -1, -1
+	for i, step := range strings.Split(layer, "&&") {
+		step = strings.TrimSpace(step)
+		if strings.Contains(step, golangciLintModule) {
+			install = i
+		}
+		if step == goCacheClean {
+			clean = i
+		}
+	}
+	if clean < 0 {
+		return fmt.Errorf("the lint layer has no %q step, so the Go module and build caches the install wrote stay in the image", goCacheClean)
+	}
+	if clean < install {
+		return fmt.Errorf("the lint layer runs %q before the install, so the install writes its caches after the clean; the clean must come after it", goCacheClean)
+	}
+	return nil
+}
+
 // readCIBaseDockerfile reads deploy/ci-base/Dockerfile from the checkout. This
 // package sits two directories below the repo root.
 func readCIBaseDockerfile(t *testing.T) string {
@@ -311,6 +356,52 @@ func TestCIBaseDockerfileJQDigest(t *testing.T) {
 			}
 			if !tc.wantErr && err != nil {
 				t.Fatalf("checkCIBaseJQ refused the Dockerfile: %v", err)
+			}
+		})
+	}
+}
+
+// lintInstallStep is the install segment of the lint RUN as the shipped
+// Dockerfile writes it, so the synthetic rows match the real step.
+const lintInstallStep = `GOBIN=/usr/local/bin GOFLAGS= go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"`
+
+// TestCIBaseDockerfileCleansGoCaches checks that the golangci-lint install
+// leaves no Go module or build cache in the image. The install writes both under
+// GOPATH and GOCACHE, which the base sets to /home/ci, so a cleanup of /root
+// removes nothing. The clean must be a step of the same RUN, after the install.
+func TestCIBaseDockerfileCleansGoCaches(t *testing.T) {
+	t.Parallel()
+	shipped := readCIBaseDockerfile(t)
+	tests := []struct {
+		name     string
+		old, new string // a fragment of the shipped file to replace; empty keeps the file
+		text     string // a whole Dockerfile to check instead
+		wantErr  bool
+	}{
+		{name: "shipped file"},
+		{name: "clean removed from the lint layer", old: " && " + goCacheClean, wantErr: true},
+		{name: "build cache only, module cache kept", old: goCacheClean, new: "go clean -cache", wantErr: true},
+		{name: "clean may fail silently", old: goCacheClean, new: goCacheClean + " || true", wantErr: true},
+		{name: "clean in the install layer", text: "FROM base\nRUN " + lintInstallStep + " && " + goCacheClean + "\n"},
+		{name: "clean in a separate RUN after the layer closed", text: "FROM base\nRUN " + lintInstallStep + "\nRUN " + goCacheClean + "\n", wantErr: true},
+		{name: "clean before the install", text: "FROM base\nRUN " + goCacheClean + " && " + lintInstallStep + "\n", wantErr: true},
+		{name: "no lint layer", text: "FROM base\nRUN true\n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			text := tc.text
+			switch {
+			case tc.old != "":
+				text = mutate(t, shipped, tc.old, tc.new)
+			case tc.text == "":
+				text = shipped
+			}
+			err := checkCIBaseGoCaches(text)
+			if tc.wantErr && err == nil {
+				t.Fatalf("checkCIBaseGoCaches accepted the Dockerfile, want a refusal")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("checkCIBaseGoCaches refused the Dockerfile: %v", err)
 			}
 		})
 	}
