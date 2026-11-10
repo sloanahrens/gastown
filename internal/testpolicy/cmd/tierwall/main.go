@@ -406,14 +406,14 @@ func (r *report) series(runID string, h host) ([]byte, error) {
 	if v, ok := h.load1(); ok {
 		load = &v
 	}
-	var buf bytes.Buffer
+	var lines []any
 	for _, pkg := range pkgs {
 		var wall *float64
 		if !r.cached[pkg] {
 			w := r.elapsed[pkg]
 			wall = &w
 		}
-		line, err := json.Marshal(wallLine{
+		lines = append(lines, wallLine{
 			TS:     ts,
 			Run:    runID,
 			Pkg:    pkg,
@@ -422,16 +422,15 @@ func (r *report) series(runID string, h host) ([]byte, error) {
 			Load1:  load,
 			Cached: r.cached[pkg],
 		})
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(line)
-		buf.WriteByte('\n')
 	}
 	// A slow test follows the packages in timings.jsonl's own format, with its
 	// kind set, so a reader of walls skips it (tiersweep.ParseWalls).
 	for _, tt := range slowest(r.slow) {
-		line, err := json.Marshal(tiersweep.TestTimingOf(slowTier, tt.Package, tt))
+		lines = append(lines, tiersweep.TestTimingOf(slowTier, tt.Package, tt))
+	}
+	var buf bytes.Buffer
+	for _, v := range lines {
+		line, err := json.Marshal(v)
 		if err != nil {
 			return nil, err
 		}
