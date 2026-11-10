@@ -186,9 +186,32 @@ func (e doctorSettingError) Error() string { return e.err.Error() }
 
 func (e doctorSettingError) Unwrap() error { return e.err }
 
-// reapNotes runs the debris reap. A removal that failed, or an unusable
-// dolt.external_container, is a finding; a docker that cannot be listed is a
-// note, since nothing here can start it.
+// engineAbsentMarkers are the texts of a reap error that says the container
+// engine is not here at all: no docker program, no socket, no daemon behind it.
+// A daemon pod has none (gt-1saf37). Nothing in the cycle can start one, so the
+// step is skipped with a note.
+var engineAbsentMarkers = []string{
+	"executable file not found",
+	"cannot connect to the docker daemon",
+	"is the docker daemon running",
+	"docker.sock",
+}
+
+// engineAbsent reports whether err says there is no container engine to ask.
+func engineAbsent(err error) bool {
+	text := strings.ToLower(err.Error())
+	for _, m := range engineAbsentMarkers {
+		if strings.Contains(text, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// reapNotes runs the debris reap. A removal that failed, an unusable
+// dolt.external_container, or an engine error that is not the engine's absence is
+// a finding; an engine that is absent is one skip note, since nothing here can
+// start it.
 func reapNotes(p doctorProbes, r *doctorReport) []string {
 	var notes []string
 	rep, err := p.reap()
@@ -196,8 +219,10 @@ func reapNotes(p doctorProbes, r *doctorReport) []string {
 	switch {
 	case errors.As(err, &setting):
 		r.findings = append(r.findings, fmt.Sprintf("slot reap skipped: %v", err))
+	case err != nil && engineAbsent(err):
+		notes = append(notes, fmt.Sprintf("slot reap skipped: no container engine here: %v", err))
 	case err != nil:
-		notes = append(notes, fmt.Sprintf("slot reap skipped: %v", err))
+		r.findings = append(r.findings, fmt.Sprintf("slot reap failed: %v", err))
 	}
 	if len(rep.Removed) > 0 {
 		notes = append(notes, "slot reap removed: "+strings.Join(rep.Removed, ", "))
