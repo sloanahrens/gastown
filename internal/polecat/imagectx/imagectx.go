@@ -69,6 +69,19 @@ type Seams struct {
 	Git    bdbuild.Git
 	GitEnv GitEnv
 	Go     bdbuild.Go
+	// Environ is the host environment the builds and the git reads start from;
+	// nil reads the process's own. A test sets it, so none touches the process
+	// environment.
+	Environ []string
+}
+
+// environ is the host environment Build starts from: Environ, or the process's
+// own when it is nil.
+func (s Seams) environ() []string {
+	if s.Environ == nil {
+		return os.Environ()
+	}
+	return s.Environ
 }
 
 // Result is a staged context and the labels its image build needs.
@@ -149,8 +162,8 @@ func Build(ctx context.Context, in Inputs, s Seams) (Result, error) {
 	if err := os.MkdirAll(filepath.Join(in.Out, "bin"), 0o755); err != nil {
 		return Result{}, fmt.Errorf("imagectx: cannot make the bin directory in %s: %w", in.Out, err)
 	}
-	env := buildEnv()
-	genv := gitEnv(os.Environ())
+	env := buildEnvFrom(s.environ())
+	genv := gitEnv(s.environ())
 	res := Result{Dir: in.Out, GTCommit: in.Rev}
 
 	// Every tree is read and every pin guarded before anything is unpacked into
@@ -499,7 +512,13 @@ func compareVersions(a, b []int) int {
 // than waiting on a terminal. The fetches and the ls-remote read use gitEnv,
 // which adds the credential-helper variables a compile must not see.
 func buildEnv() []string {
-	return append(bdbuild.Env(nil), "GIT_TERMINAL_PROMPT=0")
+	return buildEnvFrom(nil)
+}
+
+// buildEnvFrom is buildEnv for the host environment environ; nil reads the
+// process's own.
+func buildEnvFrom(environ []string) []string {
+	return append(bdbuild.Env(environ), "GIT_TERMINAL_PROMPT=0")
 }
 
 // gitCredentialVars names the host variables a git fetch needs to reach a
@@ -515,7 +534,7 @@ var gitCredentialVars = []string{"GIT_CONFIG_GLOBAL", "SOURCES_USER", "SOURCES_T
 // the names are chosen here; the values travel inside the child's environment
 // and are never put in an argv, a plan line or an error.
 func gitEnv(environ []string) []string {
-	env := buildEnv()
+	env := buildEnvFrom(environ)
 	for _, kv := range environ {
 		key, val, ok := strings.Cut(kv, "=")
 		if !ok || val == "" {

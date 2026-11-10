@@ -55,14 +55,11 @@ func TestBuildEnvGitKeepsTheCredentialHelperVariables(t *testing.T) {
 }
 
 // TestBuildEnvCompileDoesNotGainTheCredentialVariables checks the compile
-// environment stays as it was: with the helper's variables set on the host,
-// neither bdbuild.Env nor buildEnv takes them. It sets the process environment,
-// so it does not run in parallel.
+// environment stays as it was: with the helper's variables in the host list,
+// neither bdbuild.Env nor buildEnvFrom takes them.
 func TestBuildEnvCompileDoesNotGainTheCredentialVariables(t *testing.T) {
-	t.Setenv("GIT_CONFIG_GLOBAL", "/fx/gitconfig")
-	t.Setenv("SOURCES_USER", "fx-user")
-	t.Setenv("SOURCES_TOKEN", "fx-token")
-	for name, env := range map[string][]string{"bdbuild.Env": bdbuild.Env(nil), "buildEnv": buildEnv(), "bdbuild.Env(host list)": bdbuild.Env(credentialHost)} {
+	t.Parallel()
+	for name, env := range map[string][]string{"bdbuild.Env": bdbuild.Env(credentialHost), "buildEnvFrom": buildEnvFrom(credentialHost)} {
 		for _, key := range gitCredentialVars {
 			if _, ok := envHas(env, key); ok {
 				t.Errorf("%s carries %s", name, key)
@@ -74,11 +71,11 @@ func TestBuildEnvCompileDoesNotGainTheCredentialVariables(t *testing.T) {
 // TestBuildEnvBuildGivesTheHelperToGitReadsOnly checks Build hands the
 // credential-helper variables to the ls-remote reads and to no compile.
 func TestBuildEnvBuildGivesTheHelperToGitReadsOnly(t *testing.T) {
-	t.Setenv("GIT_CONFIG_GLOBAL", "/fx/gitconfig")
-	t.Setenv("SOURCES_USER", "fx-user")
-	t.Setenv("SOURCES_TOKEN", "fx-token")
+	t.Parallel()
 	w := newWorld(t)
-	if _, err := Build(context.Background(), w.inputs(t.TempDir()), w.seams()); err != nil {
+	seams := w.seams()
+	seams.Environ = credentialHost
+	if _, err := Build(context.Background(), w.inputs(t.TempDir()), seams); err != nil {
 		t.Fatalf("Build: %v\n%s", err, w.dump())
 	}
 	if len(w.gitEnvs) == 0 || len(w.goEnvs) == 0 {
