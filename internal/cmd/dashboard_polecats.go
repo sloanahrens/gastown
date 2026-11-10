@@ -137,11 +137,12 @@ type dashPolecatInputs struct {
 }
 
 // dashPolecatState maps the town's inventory state to the dashboard's. The
-// inventory decides; the dashboard adds only what the inventory cannot see: a
-// bead the queue says is waiting to land, and the person label its bead
+// inventory decides, except where the dashboard adds what the inventory cannot
+// see: a bead the queue says is waiting to land, and the person label its bead
 // carries. The person branch names the label, so the row says which person must
 // act (gt-slmaz); a bead carrying two of the labels reads as the first step,
-// the overseer's.
+// the overseer's. A seat inside its spawn grace reads as spawning rather than
+// recovery, even when its host worktree is dirty (gt-915m14).
 func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []string) (state, reason string) {
 	d := item.Disposition
 	switch {
