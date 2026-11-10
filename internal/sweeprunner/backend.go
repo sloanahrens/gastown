@@ -121,7 +121,7 @@ func (e *GuardUnreadable) Line() string {
 }
 
 // readWords is the program and the words of argv before its first flag, with
-// a --context pair dropped: the read's verb and resource, not its flags or the
+// a --context or -n pair dropped: the read's verb and resource, not its flags or the
 // values they carry.
 func readWords(argv []string) string {
 	if len(argv) == 0 {
@@ -130,7 +130,7 @@ func readWords(argv []string) string {
 	words := []string{filepath.Base(argv[0])}
 	for i := 1; i < len(argv); i++ {
 		switch {
-		case argv[i] == "--context":
+		case argv[i] == "--context", argv[i] == "-n":
 			i++
 		case strings.HasPrefix(argv[i], "-"):
 			return strings.Join(words, " ")

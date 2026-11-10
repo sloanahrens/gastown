@@ -166,8 +166,9 @@ type Job struct {
 // ObjectMeta is an object's name, which is what a caller reads and removes it
 // by, and the labels a caller selects it by.
 type ObjectMeta struct {
-	Name   string            `json:"name"`
-	Labels map[string]string `json:"labels,omitempty"`
+	Name      string            `json:"name"`
+	Namespace string            `json:"namespace,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 // JobSpec is the Job's single attempt, the deadline it runs under, and the pod
@@ -345,9 +346,9 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	if err != nil {
 		return Plan{}, err
 	}
-	repoClaim := renderClaim(RepoClaimName(spec.Rig), repoClaimStorage)
-	cacheClaim := renderClaim(CacheClaimName(spec.Rig), cacheClaimStorage)
-	claim := renderClaim(OutClaimName(spec), outClaimStorage)
+	repoClaim := renderClaim(spec, RepoClaimName(spec.Rig), repoClaimStorage)
+	cacheClaim := renderClaim(spec, CacheClaimName(spec.Rig), cacheClaimStorage)
+	claim := renderClaim(spec, OutClaimName(spec), outClaimStorage)
 	reader := renderReader(spec)
 	sync := renderSyncPod(spec)
 	return Plan{
@@ -359,7 +360,7 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 		// objects' requests itself, so a request it cannot read declines the
 		// launch instead of sizing it from zero.
 		Preflight: &Preflight{
-			Step: Step{Argv: kubectlArgv(spec, "get", "nodes,pods", "-A", "-o", "json")},
+			Step: Step{Argv: kubectlClusterArgv(spec, "get", "nodes,pods", "-A", "-o", "json")},
 			Read: capacityRead(job, sync, reader, job.Spec.Template.Spec.Tolerations),
 		},
 		Guards: []Guard{{
@@ -433,6 +434,19 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 // in a cluster with no kubeconfig naming the context carries no --context, so
 // kubectl uses the pod's service account (gt-2by0ke).
 func kubectlArgv(spec Spec, args ...string) []string {
+	argv := []string{kubectl}
+	if !spec.InCluster {
+		argv = append(argv, "--context", spec.Context)
+	}
+	if spec.Namespace != "" {
+		argv = append(argv, "-n", spec.Namespace)
+	}
+	return append(argv, args...)
+}
+
+// kubectlClusterArgv is a kubectl command whose read spans the cluster (the
+// preflights' -A listings): it names no namespace, because the call names none.
+func kubectlClusterArgv(spec Spec, args ...string) []string {
 	if spec.InCluster {
 		return append([]string{kubectl}, args...)
 	}
@@ -467,11 +481,11 @@ func (p *Pod) JSON() []byte { return manifestJSON(p) }
 
 // renderClaim is a claim the plan applies: ReadWriteOnce, so one node mounts it
 // at a time, asking for the given storage.
-func renderClaim(name, storage string) *Claim {
+func renderClaim(spec Spec, name, storage string) *Claim {
 	return &Claim{
 		APIVersion: "v1",
 		Kind:       "PersistentVolumeClaim",
-		Metadata:   ObjectMeta{Name: name},
+		Metadata:   ObjectMeta{Name: name, Namespace: spec.Namespace},
 		Spec: ClaimSpec{
 			AccessModes: []string{"ReadWriteOnce"},
 			Resources:   ClaimResources{Requests: map[string]string{"storage": storage}},
@@ -487,7 +501,7 @@ func renderReader(spec Spec) *Pod {
 	return &Pod{
 		APIVersion: "v1",
 		Kind:       "Pod",
-		Metadata:   ObjectMeta{Name: readerName(spec)},
+		Metadata:   ObjectMeta{Name: readerName(spec), Namespace: spec.Namespace},
 		Spec: PodSpec{
 			PriorityClassName:     PriorityClass,
 			RestartPolicy:         "Never",
@@ -520,7 +534,7 @@ func renderSyncPod(spec Spec) *Pod {
 	return &Pod{
 		APIVersion: "v1",
 		Kind:       "Pod",
-		Metadata:   ObjectMeta{Name: syncPodName(spec), Labels: map[string]string{runLabelKey: runLabelValue(spec.RunID)}},
+		Metadata:   ObjectMeta{Name: syncPodName(spec), Namespace: spec.Namespace, Labels: map[string]string{runLabelKey: runLabelValue(spec.RunID)}},
 		Spec: PodSpec{
 			PriorityClassName:     PriorityClass,
 			RestartPolicy:         "Never",
@@ -626,7 +640,7 @@ func renderJob(spec Spec) (*Job, error) {
 	return &Job{
 		APIVersion: "batch/v1",
 		Kind:       "Job",
-		Metadata:   ObjectMeta{Name: JobName(spec), Labels: jobLabels(spec)},
+		Metadata:   ObjectMeta{Name: JobName(spec), Namespace: spec.Namespace, Labels: jobLabels(spec)},
 		Spec: JobSpec{
 			// A failed run reports itself once: the result the runner did not
 			// write is what the daemon reads as RED, and a retried pod would

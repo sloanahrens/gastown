@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
@@ -1916,6 +1917,32 @@ func TestTierSweepRunnerSpecInCluster(t *testing.T) {
 		}
 		if n := strings.Count(logs.String(), "sweep runner: in-cluster, context "+cfg.Context+" not used"); n != want {
 			t.Errorf("inPod=%v: the in-cluster line was logged %d times, want %d\n%s", inPod, n, want, logs.String())
+		}
+	}
+}
+
+// TestTierSweepRunnerSpecCarriesTheSweepNamespace: the Spec the daemon builds
+// names the namespace from tier_sweep.runner.namespace, and the default is the
+// namespace the render binds the sweep role in (gt-42xdun).
+func TestTierSweepRunnerSpecCarriesTheSweepNamespace(t *testing.T) {
+	t.Parallel()
+	if config.DefaultSweepNamespace != k8sdaemon.SweepNamespace {
+		t.Fatalf("config.DefaultSweepNamespace = %q, want the render's sweep namespace %q", config.DefaultSweepNamespace, k8sdaemon.SweepNamespace)
+	}
+	for _, tc := range []struct{ name, setting, want string }{
+		{"the default", "", k8sdaemon.SweepNamespace},
+		{"the setting", "gt-ci", "gt-ci"},
+	} {
+		d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+		cfg := runnerTestConfig(t)
+		cfg.Namespace = tc.setting
+		d.patrolConfig.Patrols.TierSweep.Runner = cfg
+		spec, ok, err := d.tierSweepRunnerSpec(tierSweepStage{tiers: []string{"integration"}, slot: true, rig: "gastown", tested: runnerTestSHA})
+		if err != nil || !ok {
+			t.Fatalf("%s: spec = %+v, ok = %v, err = %v", tc.name, spec, ok, err)
+		}
+		if spec.Namespace != tc.want {
+			t.Errorf("%s: Spec.Namespace = %q, want %q", tc.name, spec.Namespace, tc.want)
 		}
 	}
 }

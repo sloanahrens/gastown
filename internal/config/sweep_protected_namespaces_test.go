@@ -75,3 +75,34 @@ func TestSweepProtectedNamespacesIsReadFromTownSettings(t *testing.T) {
 		})
 	}
 }
+
+// The sweep's namespace is read from tier_sweep.runner.namespace: set, it is
+// used as typed; unset, it reads as DefaultSweepNamespace; a value that is not a
+// namespace name is refused naming the key (gt-42xdun).
+func TestSweepRunnerNamespaceIsReadFromTownSettings(t *testing.T) {
+	t.Parallel()
+
+	const base = `{"backend":"kubernetes","image":"installed","cpus":4,"memory":5,"jobs":4,"output_root":"/out","context":"gt-control"`
+
+	var set PatrolsConfig
+	if err := json.Unmarshal([]byte(`{"tier_sweep":{"runner":`+base+`,"namespace":"gt-ci"}}}`), &set); err != nil {
+		t.Fatalf("a runner block with a namespace does not decode: %v", err)
+	}
+	if got := set.TierSweep.Runner.NamespaceName(); got != "gt-ci" {
+		t.Errorf("NamespaceName() = %q, want the setting gt-ci", got)
+	}
+
+	var unset PatrolsConfig
+	if err := json.Unmarshal([]byte(`{"tier_sweep":{"runner":`+base+`}}}`), &unset); err != nil {
+		t.Fatalf("a runner block without a namespace does not decode: %v", err)
+	}
+	if got := unset.TierSweep.Runner.NamespaceName(); got != "gt-sweeps" {
+		t.Errorf("NamespaceName() = %q, want the default gt-sweeps", got)
+	}
+
+	var bad PatrolsConfig
+	err := json.Unmarshal([]byte(`{"tier_sweep":{"runner":`+base+`,"namespace":"Not A Name"}}}`), &bad)
+	if err == nil || !strings.Contains(err.Error(), "namespace") {
+		t.Errorf("a malformed namespace gave %v, want a refusal naming namespace", err)
+	}
+}

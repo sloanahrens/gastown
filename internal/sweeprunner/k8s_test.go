@@ -1180,3 +1180,110 @@ func TestSweepJobPullPolicyFollowsTheImageReference(t *testing.T) {
 		})
 	}
 }
+
+// planSteps lists every kubectl step the plan can run, whichever field holds it.
+func planSteps(plan Plan) []Step {
+	var steps []Step
+	if plan.Preflight != nil {
+		steps = append(steps, plan.Preflight.Step)
+	}
+	for _, g := range plan.Guards {
+		steps = append(steps, g.Step)
+	}
+	steps = append(steps, plan.Apply...)
+	steps = append(steps, plan.Steps...)
+	if plan.Poll != nil {
+		steps = append(steps, plan.Poll.Status)
+		steps = append(steps, plan.Poll.Collect...)
+	}
+	return steps
+}
+
+// TestK8sPlanNamesTheSweepNamespaceOnEveryCall holds the namespace to the plan:
+// every kubectl call that acts on a namespaced object carries -n <namespace>,
+// the two cluster-wide listings (-A) carry none, and every document the plan
+// applies carries metadata.namespace. A pod's kubectl otherwise acts in the pod's
+// own namespace, where the sweep role is not bound (gt-42xdun).
+func TestK8sPlanNamesTheSweepNamespaceOnEveryCall(t *testing.T) {
+	t.Parallel()
+	for _, inCluster := range []bool{true, false} {
+		spec := goldenSpec()
+		spec.InCluster = inCluster
+		spec.Namespace = "gt-sweeps"
+		spec.ProtectedNamespaces = []string{"forgejo"}
+		plan, err := Kubernetes{}.Render(spec)
+		if err != nil {
+			t.Fatalf("inCluster=%v: render: %v", inCluster, err)
+		}
+		steps := planSteps(plan)
+		if len(steps) < 15 {
+			t.Fatalf("inCluster=%v: only %d steps found, the plan walk is missing some", inCluster, len(steps))
+		}
+		var clusterWide int
+		for _, step := range steps {
+			argv := step.Argv
+			if argv[0] != "kubectl" {
+				t.Errorf("inCluster=%v: step %v does not run kubectl", inCluster, argv)
+				continue
+			}
+			if slices.Contains(argv, "-A") {
+				clusterWide++
+				if slices.Contains(argv, "-n") {
+					t.Errorf("inCluster=%v: cluster-wide read %v names a namespace", inCluster, argv)
+				}
+			} else if i := slices.Index(argv, "-n"); i < 0 || i+1 >= len(argv) || argv[i+1] != "gt-sweeps" {
+				t.Errorf("inCluster=%v: namespaced call %v does not carry -n gt-sweeps", inCluster, argv)
+			}
+			if inCluster == slices.Contains(argv, "--context") {
+				t.Errorf("inCluster=%v: call %v has the wrong --context", inCluster, argv)
+			}
+			if len(step.Stdin) > 0 {
+				var doc struct {
+					Kind     string `json:"kind"`
+					Metadata struct {
+						Namespace string `json:"namespace"`
+					} `json:"metadata"`
+				}
+				if err := json.Unmarshal(step.Stdin, &doc); err != nil {
+					t.Fatalf("inCluster=%v: a document does not parse: %v", inCluster, err)
+				}
+				if doc.Metadata.Namespace != "gt-sweeps" {
+					t.Errorf("inCluster=%v: the applied %s carries metadata.namespace %q, want gt-sweeps", inCluster, doc.Kind, doc.Metadata.Namespace)
+				}
+			}
+		}
+		if clusterWide != 2 {
+			t.Errorf("inCluster=%v: %d cluster-wide reads, want the capacity listing and the priority listing", inCluster, clusterWide)
+		}
+		if plan.Job.Metadata.Namespace != "gt-sweeps" {
+			t.Errorf("inCluster=%v: the Job carries namespace %q", inCluster, plan.Job.Metadata.Namespace)
+		}
+	}
+}
+
+// TestK8sPlanWithoutANamespaceKeepsTheKubeconfigDefault: a Spec that names none
+// renders no -n and no metadata.namespace, as before.
+func TestK8sPlanWithoutANamespaceKeepsTheKubeconfigDefault(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	spec.ProtectedNamespaces = []string{"forgejo"}
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for _, step := range planSteps(plan) {
+		if slices.Contains(step.Argv, "-n") || strings.Contains(string(step.Stdin), `"namespace"`) {
+			t.Errorf("step %v names a namespace though the Spec has none", step.Argv)
+		}
+	}
+}
+
+// TestReadWordsDropsTheNamespacePair: a guard's failed-read line names the verb
+// and resource, not the -n flag or its value.
+func TestReadWordsDropsTheNamespacePair(t *testing.T) {
+	t.Parallel()
+	argv := []string{"kubectl", "-n", "gt-sweeps", "get", "jobs", "-o", "json"}
+	if got, want := readWords(argv), "kubectl get jobs"; got != want {
+		t.Errorf("readWords(%v) = %q, want %q", argv, got, want)
+	}
+}

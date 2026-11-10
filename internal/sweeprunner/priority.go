@@ -62,7 +62,7 @@ var ControlPriorities = []ControlPriority{
 // the class its Job names, read from the cluster rather than written here.
 func PriorityGuard(spec Spec, protected []string) Guard {
 	return Guard{
-		Step:   Step{Argv: kubectlArgv(spec, "get", "pods,priorityclasses", "-A", "-o", "json")},
+		Step:   Step{Argv: kubectlClusterArgv(spec, "get", "pods,priorityclasses", "-A", "-o", "json")},
 		Refuse: refuseControlPriorities(protected),
 	}
 }

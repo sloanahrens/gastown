@@ -69,6 +69,13 @@ type Spec struct {
 	// unwired guard checks nothing), so a caller fills it from
 	// tier_sweep.runner.protected_namespaces.
 	ProtectedNamespaces []string
+	// Namespace is the namespace the Kubernetes backend's objects live in: every
+	// Job, Pod and claim carries it as metadata.namespace and every namespaced
+	// kubectl call names it with -n. The daemon fills it from
+	// tier_sweep.runner.namespace. Empty leaves both to the kubeconfig context,
+	// which is only right where that context names the namespace; a pod's does
+	// not (gt-42xdun).
+	Namespace string
 }
 
 // FieldError is a Spec field whose value a render cannot use, named so the
