@@ -14,7 +14,15 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 )
+
+// controlNodeNameReuse is how long the control cluster's node names are reused
+// before the next listing. Only the names are held, never a reading: a stale
+// node list costs a node until the window ends, and a stale disk reading would
+// hide the fill the rules exist to catch (gt-x1po96).
+const controlNodeNameReuse = time.Hour
 
 // hostNodeDisk is the control node's image filesystem as the rules read it: the
 // node that answered and the volume's usage.
@@ -101,6 +109,42 @@ func imageFsBytes(node, field string, value json.Number) (int64, error) {
 	return n, nil
 }
 
+// controlNodeNames holds the node names last listed through one kubernetes
+// context, for controlNodeNameReuse. The attention tick runs one at a time, so
+// the mutex only guards against a second caller.
+type controlNodeNames struct {
+	mu      sync.Mutex
+	context string
+	names   []string
+	listed  time.Time
+}
+
+// held returns the names listed through kubeContext that are still inside the
+// reuse window at now, or nil when none are held: the context changed, the
+// window ended, or nothing was listed.
+func (c *controlNodeNames) held(kubeContext string, now time.Time) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.names == nil || c.context != kubeContext || now.Sub(c.listed) >= controlNodeNameReuse {
+		return nil
+	}
+	return c.names
+}
+
+// hold keeps the names a listing through kubeContext at now returned.
+func (c *controlNodeNames) hold(kubeContext string, names []string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.context, c.names, c.listed = kubeContext, names, now
+}
+
+// forget drops the held names, so the next read lists the cluster again.
+func (c *controlNodeNames) forget() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.names = nil
+}
+
 // parseControlNodeNames reads the names from kubectl get nodes -o name, one
 // node/<name> line each. A line in any other form, or a name that is not a node
 // name, is an error, because the name becomes part of a request path. A listing
@@ -134,6 +178,11 @@ func parseControlNodeNames(out []byte) ([]string, error) {
 // the fullest answers; a node that cannot be read fails the whole read, so the
 // probe is an info item and no node is judged on another's reading.
 //
+// The node names are listed once per controlNodeNameReuse and held between
+// ticks; every tick reads each node's summary fresh. A failed read drops the
+// held names, so a node that left the cluster is not read again for the rest
+// of the window.
+//
 // Nothing the kubectl run printed to stderr enters an error: a credential or a
 // path in it would reach the queue (rule 11).
 func (d *Daemon) controlNodeDisk(ctx context.Context) (hostNodeDisk, error) {
@@ -147,13 +196,18 @@ func (d *Daemon) controlNodeDisk(ctx context.Context) (hostNodeDisk, error) {
 	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
 	defer cancel()
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, d.diskMaintenanceSeams().getenv)
-	listing, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, "get", "nodes", "-o", "name")
-	if err != nil {
-		return hostNodeDisk{}, fmt.Errorf("listing the control cluster's nodes: %w", err)
-	}
-	names, err := parseControlNodeNames(listing)
-	if err != nil {
-		return hostNodeDisk{}, err
+	now := d.clk().Now()
+	names := d.controlNodes.held(kubeContext, now)
+	if names == nil {
+		listing, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, "get", "nodes", "-o", "name")
+		if err != nil {
+			return hostNodeDisk{}, fmt.Errorf("listing the control cluster's nodes: %w", err)
+		}
+		names, err = parseControlNodeNames(listing)
+		if err != nil {
+			return hostNodeDisk{}, err
+		}
+		d.controlNodes.hold(kubeContext, names, now)
 	}
 	var (
 		worst    hostNodeDisk
@@ -177,6 +231,7 @@ func (d *Daemon) controlNodeDisk(ctx context.Context) (hostNodeDisk, error) {
 		}
 	}
 	if len(failures) > 0 {
+		d.controlNodes.forget()
 		return hostNodeDisk{}, errors.Join(failures...)
 	}
 	return worst, nil

@@ -368,6 +368,112 @@ func TestControlNodeDiskRefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// nodeDiskTwoNodes answers the node listing and the two node summaries a
+// two-node control cluster gives, and counts the listings it served.
+func nodeDiskTwoNodes(listings *int) func(cliCall) cliReply {
+	return func(c cliCall) cliReply {
+		switch cacheTrimVerb(c.args) {
+		case "get nodes -o name":
+			*listings++
+			return cliReply{stdout: "node/colima-gt-control\nnode/colima-gt-worker\n"}
+		case "get --raw /api/v1/nodes/colima-gt-control/proxy/stats/summary":
+			return cliReply{stdout: nodeSummary("colima-gt-control", 100, 80)}
+		case "get --raw /api/v1/nodes/colima-gt-worker/proxy/stats/summary":
+			return cliReply{stdout: nodeSummary("colima-gt-worker", 100, 10)}
+		}
+		return cliReply{}
+	}
+}
+
+// Steady state is one kubectl run per node per tick: the names are listed once
+// and reused, and every tick still reads each node's summary, so the figures
+// are fresh.
+func TestNodeDiskTickRunsOneKubectlPerNode(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	listings := 0
+	cli := newFakeCLIFor(nodeDiskTwoNodes(&listings))
+	d := nodeDiskDaemon(t, cli, nodeDiskPatrol(ciCacheTestContext))
+	fc := clockwork.NewFakeClockAt(now)
+	d.clock = fc
+
+	if _, err := d.controlNodeDisk(context.Background()); err != nil {
+		t.Fatalf("first tick: %v", err)
+	}
+	if got := len(cli.recorded()); got != 3 {
+		t.Fatalf("first tick kubectl runs = %d, want the list and two summaries", got)
+	}
+	fc.Advance(3 * time.Minute)
+	if _, err := d.controlNodeDisk(context.Background()); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	if got := len(cli.recorded()); got != 5 {
+		t.Errorf("two ticks kubectl runs = %d, want 3 + 2 summaries", got)
+	}
+	if listings != 1 {
+		t.Errorf("listings = %d over two ticks, want the one listing", listings)
+	}
+}
+
+// The held names are dropped after controlNodeNameReuse, so a node added to
+// the cluster is read within the hour.
+func TestNodeDiskNodeNamesExpireAfterTheReuseWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	listings := 0
+	cli := newFakeCLIFor(nodeDiskTwoNodes(&listings))
+	d := nodeDiskDaemon(t, cli, nodeDiskPatrol(ciCacheTestContext))
+	fc := clockwork.NewFakeClockAt(now)
+	d.clock = fc
+
+	if _, err := d.controlNodeDisk(context.Background()); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	fc.Advance(controlNodeNameReuse - time.Minute)
+	if _, err := d.controlNodeDisk(context.Background()); err != nil {
+		t.Fatalf("read inside the window: %v", err)
+	}
+	if listings != 1 {
+		t.Errorf("listings inside the window = %d, want 1", listings)
+	}
+	fc.Advance(time.Minute)
+	if _, err := d.controlNodeDisk(context.Background()); err != nil {
+		t.Fatalf("read at the window's end: %v", err)
+	}
+	if listings != 2 {
+		t.Errorf("listings at the window's end = %d, want 2", listings)
+	}
+}
+
+// A failed summary drops the held names, so the next tick lists the cluster
+// again and a node that left it is not failed on every tick until the window
+// ends.
+func TestNodeDiskFailedSummaryDropsTheNodeNames(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	listings := 0
+	failWorker := true
+	cli := newFakeCLIFor(func(c cliCall) cliReply {
+		if failWorker && cacheTrimVerb(c.args) == "get --raw /api/v1/nodes/colima-gt-worker/proxy/stats/summary" {
+			return cliReply{code: 1}
+		}
+		return nodeDiskTwoNodes(&listings)(c)
+	})
+	d := nodeDiskDaemon(t, cli, nodeDiskPatrol(ciCacheTestContext))
+	d.clock = clockwork.NewFakeClockAt(now)
+
+	if _, err := d.controlNodeDisk(context.Background()); err == nil {
+		t.Fatalf("first read = nil error, want the failed worker summary")
+	}
+	failWorker = false
+	if _, err := d.controlNodeDisk(context.Background()); err != nil {
+		t.Fatalf("second read: %v", err)
+	}
+	if listings != 2 {
+		t.Errorf("listings = %d, want the names listed again after the failure", listings)
+	}
+}
+
 // The control node's read comes through the daemon's own probe and its item
 // reaches the state file, so the collector is wired into the tick.
 func TestAttentionHostNodeDiskIsRegistered(t *testing.T) {

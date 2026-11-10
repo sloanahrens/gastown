@@ -248,6 +248,11 @@ type Daemon struct {
 	// only.
 	lastAttention *attentionCache
 
+	// controlNodes holds the control cluster's node names between attention
+	// ticks, for controlNodeNameReuse (see controlNodeNames). Readings are never
+	// held here.
+	controlNodes controlNodeNames
+
 	// hostProbes replaces the production reads of the attention host
 	// collectors (attention_host.go); nil is production.
 	hostProbes hostProbes
