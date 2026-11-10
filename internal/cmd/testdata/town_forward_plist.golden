@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.gastown.forward-dashboard</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>kubectl</string>
+		<string>--context=colima-gt-control</string>
+		<string>--namespace=gt</string>
+		<string>port-forward</string>
+		<string>--address=127.0.0.1</string>
+		<string>service/dashboard</string>
+		<string>8787:8787</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/operator/gt/daemon/forward-dashboard.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/operator/gt/daemon/forward-dashboard.err.log</string>
+</dict>
+</plist>
