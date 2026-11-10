@@ -1936,6 +1936,9 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		// The preflight checks these namespaces for a pod the run would outrank;
 		// the config's default applies when the setting names none.
 		ProtectedNamespaces: cfg.ProtectedNamespaceList(),
+		// Every namespaced kubectl call and every manifest names this namespace,
+		// so a pod's calls land where the sweep role is bound (gt-42xdun).
+		Namespace: cfg.NamespaceName(),
 	}
 	if err := spec.Validate(); err != nil {
 		return sweeprunner.Spec{}, false, err

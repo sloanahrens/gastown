@@ -2493,6 +2493,27 @@ type TierSweepRunnerConfig struct {
 	// explicit empty list is refused, because a preflight that checks no
 	// namespace is not a preflight (gt-gg9hv.39).
 	ProtectedNamespaces []string `json:"protected_namespaces,omitempty"`
+
+	// Namespace is the namespace the Kubernetes backend's Jobs, pods and claims
+	// live in, and the one every namespaced kubectl call names with -n. Empty
+	// means DefaultSweepNamespace. A pod's kubectl otherwise acts in the pod's
+	// own namespace, where the sweep role is not bound (gt-42xdun).
+	Namespace string `json:"namespace,omitempty"`
+}
+
+// DefaultSweepNamespace is the namespace the sweep runs in when the setting
+// names none. It equals deploy/k8s/daemon.SweepNamespace, where the render binds
+// the sweep role; a daemon test holds the two together (this package cannot
+// import the render).
+const DefaultSweepNamespace = "gt-sweeps"
+
+// NamespaceName is the namespace the sweep's Kubernetes objects live in: the
+// setting, or DefaultSweepNamespace when it names none.
+func (c *TierSweepRunnerConfig) NamespaceName() string {
+	if c.Namespace != "" {
+		return c.Namespace
+	}
+	return DefaultSweepNamespace
 }
 
 // DefaultSweepProtectedNamespaces is what the sweep's priority preflight
@@ -2619,6 +2640,9 @@ func (c *TierSweepRunnerConfig) validate() error {
 		if !validDNS1123Label(ns) {
 			return fmt.Errorf("protected_namespaces = %q: want a namespace name", ns)
 		}
+	}
+	if c.Namespace != "" && !validDNS1123Label(c.Namespace) {
+		return fmt.Errorf("namespace = %q: want a namespace name", c.Namespace)
 	}
 	return nil
 }
