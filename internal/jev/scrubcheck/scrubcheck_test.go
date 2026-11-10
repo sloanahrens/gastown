@@ -449,6 +449,40 @@ func TestScrubcheckWriteTextRefusesAFailingWriter(t *testing.T) {
 	}
 }
 
+// failingOn fails every write whose text holds match and accepts the rest. The
+// tabwriter splits a table into writes per cell, so a count of writes cannot
+// name the write that fails; the text can.
+type failingOn struct{ match string }
+
+func (w failingOn) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), w.match) {
+		return 0, errors.New("disk full")
+	}
+	return len(p), nil
+}
+
+// TestScrubcheckWriteCoverageRefusesAFailingWriter: the coverage heading, its
+// table and its short-of-pairs note each report a write error rather than return
+// as printed.
+func TestScrubcheckWriteCoverageRefusesAFailingWriter(t *testing.T) {
+	t.Parallel()
+	coverage := Report{Cut: 0.5, Callers: []Coverage{{Caller: "jev-logtriage", Requests: 1, DistinctStates: 1}}}
+	tests := []struct {
+		name  string
+		match string
+	}{
+		{"the coverage heading", "requests logged"},
+		{"the coverage table", "DISTINCT STATES"},
+		{"the short-of-pairs note", "fewer than the"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.ErrorContains(t, WriteText(failingOn{match: tc.match}, coverage), "disk full")
+		})
+	}
+}
+
 // TestBaselineReadsTheRepeatLog: the baseline is the repeats' crossing share under
 // logtriage's caller name, and a town with no repeat log has no baseline.
 func TestBaselineReadsTheRepeatLog(t *testing.T) {
@@ -468,4 +502,116 @@ func TestBaselineReadsTheRepeatLog(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, base)
 	})
+}
+
+// stateLine is one check line of caller at ts for the state hashed to state. A
+// checked line carries its original answer, as the shadow check writes it.
+func stateLine(ts, caller, state, outcome string) string {
+	line := fmt.Sprintf(`{"ts":%q,"caller":%q,"question_ids":[%q],"state_sha256":%q,"outcome":%q`, ts, caller, qNeeds, state, outcome)
+	if outcome == outcomeChecked {
+		line += fmt.Sprintf(`,"original_answers":{"noul":{%q:0.3}},"unchanged":true`, qNeeds)
+	}
+	return line + "}"
+}
+
+// TestScrubcheckCoverage is a table over fixture lines: each case reads the
+// lines from a log and checks the callers' requests, distinct states and sampled
+// states, whether or not they produced a pair.
+func TestScrubcheckCoverage(t *testing.T) {
+	t.Parallel()
+	const (
+		caller = "jev-logtriage"
+		early  = "2026-10-01T12:00:00Z"
+		late   = "2026-10-30T12:00:00Z"
+	)
+	tests := []struct {
+		name  string
+		lines []string
+		opts  Options
+		want  []Coverage
+	}{
+		{
+			name: "ten requests over three states, none sampled",
+			lines: []string{
+				stateLine(late, caller, "a", "unsampled"), stateLine(late, caller, "a", "unsampled"),
+				stateLine(late, caller, "a", "unsampled"), stateLine(late, caller, "a", "unsampled"),
+				stateLine(late, caller, "b", "unsampled"), stateLine(late, caller, "b", "unsampled"),
+				stateLine(late, caller, "b", "unsampled"),
+				stateLine(late, caller, "c", "unsampled"), stateLine(late, caller, "c", "unsampled"),
+				stateLine(late, caller, "c", "unsampled"),
+			},
+			want: []Coverage{{Caller: caller, Requests: 10, DistinctStates: 3, Sampled: 0}},
+		},
+		{
+			name: "a line without a state hash is its own state",
+			lines: []string{
+				stateLine(late, caller, "", "unsampled"), stateLine(late, caller, "", "unsampled"),
+				stateLine(late, caller, "a", "unsampled"), stateLine(late, caller, "a", "unsampled"),
+			},
+			want: []Coverage{{Caller: caller, Requests: 4, DistinctStates: 3, Sampled: 0}},
+		},
+		{
+			name: "a failed or capped check is a request, not a sampled state",
+			lines: []string{
+				stateLine(late, caller, "a", "failed"),
+				stateLine(late, caller, "b", "capped"),
+			},
+			want: []Coverage{{Caller: caller, Requests: 2, DistinctStates: 2, Sampled: 0}},
+		},
+		{
+			name: "the window keeps the lines at or after Since",
+			lines: []string{
+				stateLine(early, caller, "a", "unsampled"),
+				stateLine(late, caller, "b", "unsampled"),
+			},
+			opts: Options{Since: time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)},
+			want: []Coverage{{Caller: caller, Requests: 1, DistinctStates: 1, Sampled: 0}},
+		},
+		{
+			name: "the caller filter keeps one caller's lines",
+			lines: []string{
+				stateLine(late, caller, "a", "unsampled"),
+				stateLine(late, "jev-other", "a", "unsampled"),
+				stateLine(late, "jev-other", "b", "unsampled"),
+			},
+			opts: Options{Caller: caller},
+			want: []Coverage{{Caller: caller, Requests: 1, DistinctStates: 1, Sampled: 0}},
+		},
+		{
+			name: "callers come sorted by name, each with its own counts",
+			lines: []string{
+				stateLine(late, "jev-b", "a", "unsampled"),
+				stateLine(late, "jev-a", "a", "unsampled"),
+				stateLine(late, "jev-a", "a", "unsampled"),
+			},
+			want: []Coverage{
+				{Caller: "jev-a", Requests: 2, DistinctStates: 1, Sampled: 0},
+				{Caller: "jev-b", Requests: 1, DistinctStates: 1, Sampled: 0},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rep, err := Compute(readLines(t, tc.lines...), tc.opts, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, rep.Callers)
+		})
+	}
+}
+
+// TestScrubcheckCoverageSampled: a state counts as sampled once however many of
+// its requests were checked, and only a state whose check ran is sampled.
+func TestScrubcheckCoverageSampled(t *testing.T) {
+	t.Parallel()
+	const caller = "jev-logtriage"
+	const late = "2026-10-30T12:00:00Z"
+	rep, err := Compute(readLines(t,
+		stateLine(late, caller, "a", "checked"),
+		stateLine(late, caller, "a", "checked"),
+		stateLine(late, caller, "b", "checked"),
+		stateLine(late, caller, "c", "unsampled"),
+	), Options{}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []Coverage{{Caller: caller, Requests: 4, DistinctStates: 3, Sampled: 2}}, rep.Callers)
 }

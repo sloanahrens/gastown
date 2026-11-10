@@ -54,8 +54,11 @@ type Line struct {
 	TS          time.Time `json:"ts"`
 	Caller      string    `json:"caller"`
 	QuestionIDs []string  `json:"question_ids"`
-	Outcome     string    `json:"outcome"`
-	Original    *Answers  `json:"original_answers,omitempty"`
+	// StateSHA256 is the hex SHA-256 of the state before scrubbing. A line
+	// without it counts as its own state.
+	StateSHA256 string   `json:"state_sha256"`
+	Outcome     string   `json:"outcome"`
+	Original    *Answers `json:"original_answers,omitempty"`
 	// Unchanged is true when the scrub replaced nothing, so no second call ran.
 	Unchanged bool     `json:"unchanged,omitempty"`
 	Scrubbed  *Answers `json:"scrubbed_answers,omitempty"`
@@ -188,10 +191,23 @@ type Row struct {
 	Verdict string         `json:"verdict"`
 }
 
-// Report is the scrub check's signal cost, one row per caller and question.
+// Coverage is one caller's requests in the log, whether or not they produced a
+// pair: how many it logged, how many distinct states they carried, and how many
+// of those states the shadow check sampled and checked.
+type Coverage struct {
+	Caller         string `json:"caller"`
+	Requests       int    `json:"requests"`
+	DistinctStates int    `json:"distinct_states"`
+	// Sampled is how many distinct states had their check run.
+	Sampled int `json:"sampled"`
+}
+
+// Report is the scrub check's signal cost, one row per caller and question, and
+// the coverage of each caller the log holds.
 type Report struct {
-	Cut  float64 `json:"cut"`
-	Rows []Row   `json:"rows"`
+	Cut     float64    `json:"cut"`
+	Rows    []Row      `json:"rows"`
+	Callers []Coverage `json:"callers"`
 }
 
 // key names one caller's question.
@@ -213,7 +229,7 @@ type measure struct {
 // the repeat share per question, as Baseline reads it. A question answered as
 // two kinds across the lines is refused: its numbers would mix two measures.
 func Compute(lines []Line, opts Options, baseline map[string]map[string]float64) (Report, error) {
-	rep := Report{Cut: opts.Cut, Rows: []Row{}}
+	rep := Report{Cut: opts.Cut, Rows: []Row{}, Callers: coverageOf(lines, opts)}
 	accums := map[key]*measure{}
 	for _, l := range lines {
 		if l.Outcome != outcomeChecked || l.Original == nil {
@@ -271,6 +287,48 @@ func Compute(lines []Line, opts Options, baseline map[string]map[string]float64)
 		rep.Rows = append(rep.Rows, accums[k].row(k, base))
 	}
 	return rep, nil
+}
+
+// coverageOf counts each caller's requests, distinct states and sampled states
+// over every line in the window and caller filter Compute applies, whatever its
+// outcome. A line without a state hash is its own state, so it is never merged
+// into another.
+func coverageOf(lines []Line, opts Options) []Coverage {
+	type tally struct {
+		requests int
+		states   map[string]bool
+		sampled  map[string]bool
+	}
+	tallies := map[string]*tally{}
+	for i, l := range lines {
+		if !opts.Since.IsZero() && l.TS.Before(opts.Since) {
+			continue
+		}
+		if opts.Caller != "" && l.Caller != opts.Caller {
+			continue
+		}
+		t := tallies[l.Caller]
+		if t == nil {
+			t = &tally{states: map[string]bool{}, sampled: map[string]bool{}}
+			tallies[l.Caller] = t
+		}
+		state := l.StateSHA256
+		if state == "" {
+			state = fmt.Sprintf("line %d", i)
+		}
+		t.requests++
+		t.states[state] = true
+		if l.Outcome == outcomeChecked && l.Original != nil {
+			t.sampled[state] = true
+		}
+	}
+
+	out := make([]Coverage, 0, len(tallies))
+	for caller, t := range tallies {
+		out = append(out, Coverage{Caller: caller, Requests: t.requests, DistinctStates: len(t.states), Sampled: len(t.sampled)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Caller < out[j].Caller })
+	return out
 }
 
 // pair measures one state's original and scrubbed answer to question q.
@@ -389,26 +447,67 @@ func maxProbGap(a, b map[string]float64) float64 {
 }
 
 // WriteText prints the report as an aligned table, one row per caller and
-// question.
+// question, then the coverage of each caller the log holds. The coverage shows
+// even when no checked pair exists.
 func WriteText(w io.Writer, rep Report) error {
 	if _, err := fmt.Fprintf(w, "scrub check, cut %.2f, margins: free within %s, costly above %s, at least %d pairs\n",
 		rep.Cut, pts(FreeMargin), pts(CostlyMargin), MinPairs); err != nil {
 		return err
 	}
 	if len(rep.Rows) == 0 {
-		_, err := fmt.Fprintln(w, "no checked request has both answer sets to count")
+		if _, err := fmt.Fprintln(w, "no checked request has both answer sets to count"); err != nil {
+			return err
+		}
+	} else if err := writeRows(w, rep.Rows); err != nil {
 		return err
 	}
+	if len(rep.Callers) == 0 {
+		return nil
+	}
+	return writeCallers(w, rep.Callers)
+}
+
+// writeRows prints the question rows as an aligned table.
+func writeRows(w io.Writer, rows []Row) error {
 	// The tabwriter buffers every cell until Flush, so its writes cannot fail;
 	// a write error to w comes back from Flush.
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "CALLER\tQUESTION\tKIND\tPAIRS\tUNCHANGED\tMISSING\tMEAN CHANGE\tMAX CHANGE\tCROSSING\tBASELINE\tVERDICT\tRULES")
-	for _, r := range rep.Rows {
+	for _, r := range rows {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			r.Caller, r.Question, r.Kind, r.Pairs, r.Unchanged, r.Missing,
 			num(r.MeanChange), num(r.MaxChange), pct(r.Crossing), pct(r.Baseline), r.Verdict, rules(r.Rules))
 	}
 	return tw.Flush()
+}
+
+// writeCallers prints each caller's requests, distinct states and sampled states,
+// then says in words which callers have fewer distinct states than MinPairs. A
+// pair comes from a checked line, so such a caller reaches MinPairs only when a
+// sampled state repeats.
+func writeCallers(w io.Writer, callers []Coverage) error {
+	if _, err := fmt.Fprintln(w, "requests logged, distinct states, and sampled states (states whose check ran), per caller"); err != nil {
+		return err
+	}
+	// As in writeRows, the tabwriter's Flush reports any write error to w.
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "CALLER\tREQUESTS\tDISTINCT STATES\tSAMPLED")
+	for _, c := range callers {
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\n", c.Caller, c.Requests, c.DistinctStates, c.Sampled)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	for _, c := range callers {
+		if c.DistinctStates >= MinPairs {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "%s has %d distinct states, fewer than the %d pairs a question needs: its pairs reach %d only if a sampled state repeats\n",
+			c.Caller, c.DistinctStates, MinPairs, MinPairs); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func num(v *float64) string {
