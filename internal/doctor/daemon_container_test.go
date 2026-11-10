@@ -61,7 +61,7 @@ type containerCheck struct {
 	ok    string
 }
 
-// containerChecks builds the three daemon checks with the container reading
+// containerChecks builds the two daemon checks with the container reading
 // wired to read. DaemonCheck also gets a running seam that fails the test: in
 // a container town it may not read a pid, and the container branch runs
 // before the seam is reached (gt-qpeei.20).
@@ -77,19 +77,16 @@ func containerChecks(t *testing.T, read func(string) containerDaemonReading) []c
 	daemonCheck.running = pidRead
 	liveness := NewDaemonLivenessCheck()
 	liveness.containerReading = read
-	respawn := NewDaemonRespawnCheck()
-	respawn.containerReading = read
 	return []containerCheck{
 		{daemonCheck, inContainer},
 		// The liveness check keeps its own heartbeat message; the container
 		// verdict only has to let it through.
 		{liveness, "heartbeat is fresh"},
-		{respawn, inContainer},
 	}
 }
 
-// Every one of the three daemon checks reports a healthy container town from
-// state.json and the supervisor, and never from a pid.
+// Both daemon checks report a healthy container town from state.json and the
+// supervisor, and never from a pid.
 func TestDaemonChecks_ContainerReportsHealthyFromState(t *testing.T) {
 	t.Parallel()
 	townRoot, read := containerDaemonTown(t, containerOwnedState(time.Now().Add(-time.Minute)), containerRunning())
@@ -106,7 +103,7 @@ func TestDaemonChecks_ContainerReportsHealthyFromState(t *testing.T) {
 	}
 }
 
-// Each of the three checks reports the failure its reading names — never OK —
+// Each of the two checks reports the failure its reading names — never OK —
 // when the container is absent or stopped, its heartbeat is stale, the
 // supervisor's state cannot be read, or the daemon that wrote state.json is
 // not the container's. The status is pinned so a refusal that is removed or

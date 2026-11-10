@@ -168,7 +168,7 @@ func Default(dirs DirNames) *Manifest {
 		{Path: ".runtime/townhealth.json", Owner: OwnerDaemon, Why: "the town health snapshot internal/townhealth/file.go records, the one file the daemon writes"},
 		{Path: ".runtime/update", Owner: OwnerDaemon, Why: "the update run's state and history internal/update/state.go writes"},
 		{Path: ".runtime/daemon-liveness.json", Owner: OwnerDaemon, Why: "the daemon liveness baseline the doctor check writes (internal/doctor/daemon_liveness_check.go), run by the daemon's doctor_dog"},
-		{Path: ".runtime/daemon-respawn.json", Owner: OwnerDaemon, Why: "the daemon respawn baseline the doctor check writes (internal/doctor/daemon_respawn_check.go), run by the daemon's doctor_dog"},
+		{Path: ".runtime/daemon-respawn.json", Owner: OwnerDaemon, Why: "the daemon respawn baseline a retired doctor check wrote; that check is deleted (docs/design/gt-in-container.md lists the launchd-era daemon checks), and no code writes the file now, so a town may still hold it"},
 
 		// .runtime state only gt commands write; each owner is as the
 		// .runtime/agents row says.

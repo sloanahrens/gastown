@@ -265,7 +265,7 @@ entries:
     why: the daemon liveness baseline the doctor check writes (internal/doctor/daemon_liveness_check.go), run by the daemon's doctor_dog
   - path: .runtime/daemon-respawn.json
     owner: daemon
-    why: the daemon respawn baseline the doctor check writes (internal/doctor/daemon_respawn_check.go), run by the daemon's doctor_dog
+    why: the daemon respawn baseline a retired doctor check wrote; that check is deleted (docs/design/gt-in-container.md lists the launchd-era daemon checks), and no code writes the file now, so a town may still hold it
   - path: .runtime/polecat-admission
     owner: daemon
     why: admission reservations gt sling writes (internal/cmd/polecat_capacity.go writePolecatAdmissionReservation); owner as the .runtime/agents row says
