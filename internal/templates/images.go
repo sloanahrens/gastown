@@ -55,7 +55,7 @@ const (
 	// pinned by the digest of the dind tag's image index, so the client and the
 	// engine are one build. DindImage stays the daemon's own engine. Moving this
 	// pin means reading the tag's index digest from the registry again.
-	SweepDindImage = "data.forgejo.org/oci/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977"
+	SweepDindImage = "data.forgejo.org/oci/docker@sha256:08a98015fce594af7c382883bea080ea206de74402a95da9dc52b6428c8cd121"
 
 	// DoltServerImage is the Dolt SQL server the scratch project runs, at the
 	// version DoltVersion names, so the scratch town's Dolt and the daemon
