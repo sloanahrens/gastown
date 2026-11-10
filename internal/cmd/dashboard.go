@@ -697,11 +697,33 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 // show it beside the table (gt-ddg96x). Only a failed seats read sets
 // SeatsError, which hides the table.
 func dashboardPolecats(s *dashboard.Summary, townRoot string, names []string, sessions map[string]time.Time, sessionsKnown bool, ready map[string]bool, recs *dashLandings, seatCache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister) {
-	kept, keptErr := dashKeptSeats(townRoot)
+	dashboardPolecatsWith(defaultDashPolecatReaders, s, townRoot, names, sessions, sessionsKnown, ready, recs, seatCache, dispatches, lister)
+}
+
+// dashPolecatReaders are the two reads dashboardPolecats makes before it
+// builds the table: the records of the seats the daemon keeps, then the seats
+// themselves. A test injects both, so a failed kept read is shown to leave the
+// seats drawn and to hand the seats reader no kept set (gt-ddg96x).
+type dashPolecatReaders struct {
+	kept  func(townRoot string) (map[string]time.Time, error)
+	seats func(townRoot string, names []string, sessionsKnown bool, cache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister, kept map[string]time.Time) ([]dashSeat, error)
+}
+
+// defaultDashPolecatReaders are the real reads: the daemon's seat-end records
+// and the rigs' seats.
+var defaultDashPolecatReaders = dashPolecatReaders{kept: dashKeptSeats, seats: dashSeats}
+
+// dashboardPolecatsWith is dashboardPolecats with its two reads injected. A
+// kept read that fails is named in KeptError and the seats are still read and
+// drawn, with no kept set, so every kept seat shows as the recovery it is kept
+// from; only a failed seats read hides the table (SeatsError).
+func dashboardPolecatsWith(r dashPolecatReaders, s *dashboard.Summary, townRoot string, names []string, sessions map[string]time.Time, sessionsKnown bool, ready map[string]bool, recs *dashLandings, seatCache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister) {
+	kept, keptErr := r.kept(townRoot)
 	if keptErr != nil {
 		s.KeptError = keptErr.Error()
+		kept = nil
 	}
-	seats, err := dashSeats(townRoot, names, sessionsKnown, seatCache, dispatches, lister, kept)
+	seats, err := r.seats(townRoot, names, sessionsKnown, seatCache, dispatches, lister, kept)
 	if err != nil {
 		// The hub keeps the last good list and the page says unavailable rather
 		// than "no polecats" (gt-q6h8e).

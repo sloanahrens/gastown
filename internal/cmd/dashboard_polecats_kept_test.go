@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -68,6 +70,26 @@ func TestBuildDashPolecatsDatesAKeptSeatBySubmit(t *testing.T) {
 	}
 }
 
+// keptRecord is a daemon seat-end record in the shape the daemon writes (its
+// pendingSandboxSeatEnd: a landing with the bead and its submit stamp), encoded
+// rather than typed by hand; TestDashKeptSeatsReadsTheDaemonsRecords reads it
+// back through the daemon's own reader, which pins the shape (gt-ddg96x).
+func keptRecord(t *testing.T, beadID string, submitted time.Time) string {
+	t.Helper()
+	rec := struct {
+		Landing struct {
+			BeadID    string
+			Submitted time.Time
+		} `json:"landing"`
+	}{}
+	rec.Landing.BeadID, rec.Landing.Submitted = beadID, submitted
+	body, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(body)
+}
+
 // writeKeptRecord puts a daemon seat-end record where the daemon keeps it, the
 // file the dashboard reads (gt-ddg96x).
 func writeKeptRecord(t *testing.T, town, rig, name, body string) {
@@ -86,7 +108,7 @@ func writeKeptRecord(t *testing.T, town, rig, name, body string) {
 func TestDashKeptSeatsReadsTheDaemonsRecords(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeKeptRecord(t, town, "gastown", "beaver", `{"landing":{"BeadID":"gt-1","Submitted":"2026-11-10T09:08:00Z"}}`)
+	writeKeptRecord(t, town, "gastown", "beaver", keptRecord(t, "gt-1", time.Date(2026, 11, 10, 9, 8, 0, 0, time.UTC)))
 
 	kept, err := dashKeptSeats(town)
 	if err != nil {
@@ -165,38 +187,60 @@ func TestBuildDashPolecatsNamesAKeptSeatWhoseSubmitIsUnread(t *testing.T) {
 }
 
 // A kept record the dashboard cannot read does not blank the polecat table: the
-// seats still read, SeatsError stays unset, and the summary names the failed
-// kept read and its error for the page. A town with no record shows no note
-// (gt-ddg96x).
+// seats are still read and drawn, the seats reader is handed no kept set (so a
+// kept seat shows as the recovery it is kept from), SeatsError stays unset, and
+// the summary names the failed kept read and its error for the page. A town
+// whose records read clean shows no note and hands the set on (gt-ddg96x).
 func TestDashboardPolecatsNamesAFailedKeptReadAndKeepsTheSeats(t *testing.T) {
 	t.Parallel()
+	submitted := time.Date(2026, 11, 10, 9, 8, 0, 0, time.UTC)
+	recovery := polecat.WorkstateDisposition{NeedsRecovery: true, Reason: "git-check-failed"}
 	for name, c := range map[string]struct {
-		body     string
+		kept     map[string]time.Time
+		keptErr  error
 		wantNote bool
+		wantSet  int // the kept entries the seats reader must be handed
+		want     string
 	}{
-		"unreadable record": {`{not json`, true},
-		"no record":         {"", false},
+		"unreadable records": {nil, errors.New("1 sandbox seat-end record(s) cannot be read"), true, 0, dashboard.StateRecovery},
+		"records read":       {map[string]time.Time{"gastown/beaver": submitted}, nil, false, 1, dashboard.StateKept},
 	} {
-		town := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(`{"version":1,"rigs":{}}`), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if c.body != "" {
-			writeKeptRecord(t, town, "gastown", "beaver", c.body)
-		}
-		var s dashboard.Summary
-		dashboardPolecats(&s, town, nil, nil, true, nil, newDashLandings(town), newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{})
-		if s.SeatsError {
-			t.Errorf("%s: a kept read hid the seats table", name)
-		}
-		if got := s.KeptError != ""; got != c.wantNote {
-			t.Errorf("%s: kept note = %q, want a note %v", name, s.KeptError, c.wantNote)
-		}
-		if c.wantNote && !strings.Contains(s.KeptError, "cannot be read") {
-			t.Errorf("%s: kept note = %q, want it to name the unread record", name, s.KeptError)
-		}
+		c := c
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			var handed map[string]time.Time
+			readers := dashPolecatReaders{
+				kept: func(string) (map[string]time.Time, error) { return c.kept, c.keptErr },
+				seats: func(_ string, _ []string, _ bool, _ *dashSeatCache, _ *gtevents.DispatchReader, _ sessionLister, kept map[string]time.Time) ([]dashSeat, error) {
+					handed = kept
+					seat := dashSeat{Rig: "gastown", Name: "beaver", Item: dashItem(polecat.StateIdle, recovery)}
+					if at, ok := kept["gastown/beaver"]; ok {
+						seat.Kept = &at
+					}
+					return []dashSeat{seat}, nil
+				},
+			}
+			var s dashboard.Summary
+			dashboardPolecatsWith(readers, &s, town, nil, nil, true, nil, newDashLandings(town), newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{})
+			if s.SeatsError {
+				t.Fatalf("a kept read hid the seats table")
+			}
+			if len(handed) != c.wantSet {
+				t.Errorf("seats reader was handed %d kept seat(s), want %d", len(handed), c.wantSet)
+			}
+			if len(s.Polecats) != 1 || s.Polecats[0].Name != "beaver" {
+				t.Fatalf("polecats = %+v, want the one seat still drawn", s.Polecats)
+			}
+			if got := s.Polecats[0].State; got != c.want {
+				t.Errorf("beaver = %q, want %q", got, c.want)
+			}
+			if got := s.KeptError != ""; got != c.wantNote {
+				t.Errorf("kept note = %q, want a note %v", s.KeptError, c.wantNote)
+			}
+			if c.wantNote && !strings.Contains(s.KeptError, "cannot be read") {
+				t.Errorf("kept note = %q, want it to name the unread record", s.KeptError)
+			}
+		})
 	}
 }

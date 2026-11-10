@@ -600,6 +600,11 @@ let state = null;
 // states this page has never seen the moment the town learns one, so no state
 // is dropped: one in neither table is counted as a state this page does not
 // know, and which of them alarm is the reader's own verdict (StripAlarms).
+// KEPT_MEANING is what the page says of the "kept (jev)" state, the one the
+// daemon keeps a finished sandbox seat in until the jev_rules battery has asked
+// about its submission: one sentence, used wherever the page explains it
+// (gt-ddg96x). The state tables keep the literal key: the strip test reads them.
+const KEPT_MEANING = "finished, and the daemon keeps its seat until the jev_rules battery has asked about its submission";
 const POLE_WORKING = {working: 1, quiet: 1, gating: 1, queued: 0, spawning: 0, stalled: 0, "review-needed": 0, recovery: 0, "kept (jev)": 0, "needs-human": 0, "needs-overseer": 0, "needs-operator": 0, parked: 0, idle: 0, unknown: 0};
 const POLE_WORD = {queued: "queued", spawning: "spawning", stalled: "stalled", "review-needed": "need review", recovery: "recovering", "kept (jev)": "kept (jev)", "needs-human": "need a human", "needs-overseer": "need the overseer", "needs-operator": "need the operator", parked: "parked", unknown: "unknown (tmux unreadable)", quiet: "quiet"};
 // polecatsWorking is the strip's working count and the Work section's summary:
@@ -1021,7 +1026,7 @@ const STATE_HELP = {
   spawning: "dispatched seconds ago, session not up yet",
   "review-needed": "a live session holding uncommitted or unpushed work",
   recovery: "idle, but its worktree needs recovery before it can be reused",
-  "kept (jev)": "finished, and the daemon keeps its seat until the jev_rules battery has asked about its submission",
+  "kept (jev)": KEPT_MEANING,
   parked: "parked by an operator",
   unknown: "tmux could not be read, so this polecat cannot be told apart from a working one",
   idle: "holds nothing"
@@ -1426,7 +1431,7 @@ function renderPolecats(s, force) {
   // A kept-seat read that failed leaves the seats drawn without it; the note
   // names the failure beside them (gt-ddg96x).
   const keptError = (s.summary || {}).kept_error;
-  if (keptError) parts.push("kept seats not read, so kept seats show as their recovery: " + keptError);
+  if (keptError) parts.push("kept seats not read (" + KEPT_MEANING + "), so each shows as the recovery it is kept from: " + keptError);
   $("polecatsnote").textContent = parts.join(" · ");
   if (keptError) $("polecatsnote").classList.add("warnc");
 
