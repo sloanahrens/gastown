@@ -186,16 +186,17 @@ RUN groupadd -g 10001 polecat \
     && useradd -M -u 10001 -g 10001 -d /sandbox -s /bin/bash polecat
 
 # Town binaries, cross-compiled by `make polecat-image` (CGO_ENABLED=0 linux/arm64).
-COPY bin/gt /usr/local/bin/gt
-COPY bin/bd /usr/local/bin/bd
+# The mode is set in the COPY itself: a RUN chmod on these files would rewrite
+# each one into a second layer (TestPolecatImageSetsBinaryModesWithCopyChmod).
+COPY --chmod=0755 bin/gt /usr/local/bin/gt
+COPY --chmod=0755 bin/bd /usr/local/bin/bd
 # The trim helper a cache-volume container runs; plugin.md, "Per-rig cache
 # volumes", says why the trim has to run in the image.
-COPY bin/polecat-image /usr/local/bin/polecat-image
+COPY --chmod=0755 bin/polecat-image /usr/local/bin/polecat-image
 # The entrypoint a tier-sweep runner container runs (cmd/sweep-run, gt-q7wkn); its
 # path is sweeprunner.RunnerCommand, which TestPolecatImageCopiesTheSweepRunner
 # keeps equal to this COPY's target.
-COPY bin/sweep-run /usr/local/bin/sweep-run
-RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd /usr/local/bin/polecat-image /usr/local/bin/sweep-run
+COPY --chmod=0755 bin/sweep-run /usr/local/bin/sweep-run
 
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
     GOPATH=/sandbox/go \
