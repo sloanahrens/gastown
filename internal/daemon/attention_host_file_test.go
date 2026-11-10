@@ -40,7 +40,7 @@ func TestFileHostProbesServeAFreshFile(t *testing.T) {
 		t.Fatalf("parking %s: %v", hostHMRig, err)
 	}
 
-	p := newFileHostProbes(townRoot, nil)
+	p := newFileHostProbes(townRoot, nil, nil)
 	writeFileProbes(t, p, hostprobe.Probes{
 		At:         now,
 		MemFreePct: hostprobe.Field[float64]{Value: 42.5},
@@ -89,7 +89,7 @@ func TestFileHostProbesRefuseAMissingOrStaleFile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p := newFileHostProbes(t.TempDir(), nil)
+			p := newFileHostProbes(t.TempDir(), nil, nil)
 			if tt.write {
 				writeFileProbes(t, p, hostprobe.Probes{
 					At:         tt.at,
@@ -138,7 +138,7 @@ func TestFileHostProbesReturnOneFieldsErrorOnly(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p := newFileHostProbes(t.TempDir(), nil)
+			p := newFileHostProbes(t.TempDir(), nil, nil)
 			probes := hostprobe.Probes{
 				At:         now,
 				MemFreePct: hostprobe.Field[float64]{Value: 42},
@@ -194,7 +194,7 @@ func TestAttentionHostRefusedProbeFileRaisesProbeAlarms(t *testing.T) {
 	// The mode is in the daemon's environment in production; the injected
 	// getenv selects the same branch without a process-wide setenv, which a
 	// parallel test in this package would see.
-	d.hostProbes = attentionHostProbes(town, func(string) string { return config.SupervisorContainer }, noForgejo)
+	d.hostProbes = attentionHostProbes(town, func(string) string { return config.SupervisorContainer }, noForgejo, noNodeDisk)
 	if _, ok := d.hostProbes.(fileHostProbes); !ok {
 		t.Fatalf("container mode selected %T, want fileHostProbes", d.hostProbes)
 	}
@@ -240,13 +240,13 @@ func TestAttentionHostProbesSelectByMode(t *testing.T) {
 	}
 	if _, ok := attentionHostProbes(townRoot, getenv(map[string]string{
 		config.ContainerModeEnv: config.SupervisorContainer,
-	}), noForgejo).(fileHostProbes); !ok {
+	}), noForgejo, noNodeDisk).(fileHostProbes); !ok {
 		t.Errorf("container mode did not select fileHostProbes")
 	}
 	for _, mode := range []string{"", config.SupervisorLaunchd, config.SupervisorSystemd} {
 		if _, ok := attentionHostProbes(townRoot, getenv(map[string]string{
 			config.ContainerModeEnv: mode,
-		}), noForgejo).(systemHostProbes); !ok {
+		}), noForgejo, noNodeDisk).(systemHostProbes); !ok {
 			t.Errorf("mode %q did not select systemHostProbes", mode)
 		}
 	}

@@ -650,6 +650,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunParkedSeats, owns: overrunParkedSeatItem},
 		{kind: attention.KindScheduledGate, collect: s.collectScheduledGate},
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
+		{kind: attention.KindHostNodeDisk, collect: s.collectHostNodeDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
 		{kind: attention.KindHostDocker, collect: s.collectHostDocker},
 		{kind: attention.KindHostForgejo, collect: s.collectHostForgejo},
@@ -678,7 +679,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		if forgejoBaseURL == nil {
 			forgejoBaseURL = d.townForgejoBaseURL
 		}
-		s.host = attentionHostProbes(d.config.TownRoot, os.Getenv, forgejoBaseURL)
+		s.host = attentionHostProbes(d.config.TownRoot, os.Getenv, forgejoBaseURL, d.controlNodeDisk)
 	}
 	s.landingRigs = d.attentionLandingRigs
 	overseerCfg := d.loadOperationalConfig().GetOverseerConfig()

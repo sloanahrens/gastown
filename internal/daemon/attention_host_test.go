@@ -18,8 +18,14 @@ import (
 // fakeHost is a hostProbes whose answers a test sets. The zero value is not
 // healthy; healthyHost is.
 type fakeHost struct {
-	disk                hostDisk
-	diskErr             error
+	disk    hostDisk
+	diskErr error
+	// node is the control node's disk and nodeErr the read's failure. A zero
+	// node with no error is a town with no control cluster: a reading always
+	// names its node.
+	node                hostNodeDisk
+	nodeErr             error
+	nodeCalls           int
 	memFree             float64
 	memErr              error
 	containers          []string
@@ -51,10 +57,17 @@ func (f *fakeHost) RigParked(rig string) (bool, error) {
 // reaches no network.
 func noForgejo() (string, error) { return "", nil }
 
+// noNodeDisk is a town with no control node read: the production probe built
+// over it reports the node disk not configured.
+func noNodeDisk(context.Context) (hostNodeDisk, error) {
+	return hostNodeDisk{}, errHostNodeNotConfigured
+}
+
 // healthyHost is a host no rule fires on.
 func healthyHost() *fakeHost {
 	return &fakeHost{
 		disk:       hostDisk{UsedPct: 40, FreeGB: 300},
+		node:       hostNodeDisk{Node: "colima-gt-control", Disk: hostDisk{UsedPct: 40, FreeGB: 300}},
 		memFree:    60,
 		containers: allStackContainers(),
 	}
@@ -63,6 +76,14 @@ func healthyHost() *fakeHost {
 func (f *fakeHost) Disk() (hostDisk, error) {
 	f.diskCalls++
 	return f.disk, f.diskErr
+}
+
+func (f *fakeHost) NodeDisk(context.Context) (hostNodeDisk, error) {
+	f.nodeCalls++
+	if f.nodeErr == nil && f.node.Node == "" {
+		return hostNodeDisk{}, errHostNodeNotConfigured
+	}
+	return f.node, f.nodeErr
 }
 
 func (f *fakeHost) MemFreePct(context.Context) (float64, error) {

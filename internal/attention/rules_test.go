@@ -8,13 +8,17 @@ import (
 	"testing"
 )
 
-// itemsForRules is one item per rule id the kinds can raise: the disk kind
-// raises two rules, keyed by the item.
+// itemsForRules is one item per rule id the kinds can raise: the disk kinds
+// raise two rules each, keyed by the item.
 func itemsForRules() []Item {
 	var out []Item
 	for _, k := range Kinds() {
 		if k == KindHostDisk {
 			out = append(out, Item{Kind: k, Key: RuleHostDiskWarn}, Item{Kind: k, Key: RuleHostDiskCrit})
+			continue
+		}
+		if k == KindHostNodeDisk {
+			out = append(out, Item{Kind: k, Key: RuleHostNodeDiskWarn}, Item{Kind: k, Key: RuleHostNodeDiskCrit})
 			continue
 		}
 		out = append(out, Item{Kind: k, Key: "k:" + string(k)})

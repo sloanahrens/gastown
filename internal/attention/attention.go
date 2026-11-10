@@ -69,6 +69,10 @@ const (
 	KindScheduledGate Kind = "scheduled-gate"
 	// KindHostDisk: the volume holding the town root is filling.
 	KindHostDisk Kind = "host-disk"
+	// KindHostNodeDisk: the control node's data disk, the image filesystem
+	// that holds the container runtime's store and the local-path claims, is
+	// filling (gt-x1po96).
+	KindHostNodeDisk Kind = "host-node-disk"
 	// KindHostMem: the host's free memory is low.
 	KindHostMem Kind = "host-mem"
 	// KindHostDocker: a Docker Desktop container the town cannot run without
@@ -127,7 +131,7 @@ func Kinds() []Kind {
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindTierSweepStarved, KindTierSweepStuck, KindTierSweepGuardUnreadable,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
-		KindHostDisk, KindHostMem, KindHostDocker, KindHostForgejo, KindHostProbe,
+		KindHostDisk, KindHostNodeDisk, KindHostMem, KindHostDocker, KindHostForgejo, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,

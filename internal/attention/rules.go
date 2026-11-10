@@ -51,6 +51,8 @@ const (
 	RuleScheduledGate    = "schedule.gate_failed"
 	RuleHostDiskWarn     = "host.disk_warn"
 	RuleHostDiskCrit     = "host.disk_crit"
+	RuleHostNodeDiskWarn = "host.node_disk_warn"
+	RuleHostNodeDiskCrit = "host.node_disk_crit"
 	RuleHostMemLow       = "host.mem_low"
 	RuleHostDockerDown   = "host.docker_stack_down"
 	RuleHostForgejoDown  = "host.forgejo_down"
@@ -131,6 +133,7 @@ var ruleFlags = map[string]RuleFlags{
 	RuleBlockedMail:      flagsWake,
 	RuleScheduledGate:    flagsWake,
 	RuleHostDiskCrit:     flagsWake,
+	RuleHostNodeDiskCrit: flagsWake,
 	RuleHostMemLow:       flagsWake,
 	RuleHostDockerDown:   flagsWake,
 	// A Forgejo that does not answer its health endpoint is every landing
@@ -192,7 +195,10 @@ var ruleFlags = map[string]RuleFlags{
 	// host.disk_warn becomes operator_action after DiskWarnPromoteBeats
 	// consecutive heartbeats; the daemon writes that promotion as its own line.
 	RuleHostDiskWarn: flagsInfo,
-	RuleHostProbe:    flagsInfo,
+	// The control node's disk raises the same two levels as the town root's
+	// with the same flags: a warning is for the next look, a critical wakes.
+	RuleHostNodeDiskWarn: flagsInfo,
+	RuleHostProbe:        flagsInfo,
 	// The overrun guard stopped the polecat and handed the bead back itself.
 	RuleOverrunStopped: flagsSelf,
 }
@@ -228,8 +234,8 @@ func Rules() []string {
 	return out
 }
 
-// kindRules maps a kind to its rule id. The disk kind is keyed by the item
-// instead (RuleFor), because it raises two rules.
+// kindRules maps a kind to its rule id. The disk kinds are keyed by the item
+// instead (RuleFor), because each raises two rules.
 var kindRules = map[Kind]string{
 	KindRiskPath:                 RuleRiskPath,
 	KindRedMain:                  RuleRedMain,
@@ -268,11 +274,12 @@ var kindRules = map[Kind]string{
 	KindDoltImageBehind:          RuleDoltImageBehind,
 }
 
-// RuleFor is the rule id of an item. The disk collector's key is its rule
-// (host.disk_warn or host.disk_crit); every other kind has one rule. An item
-// of a kind with no rule yields "".
+// RuleFor is the rule id of an item. A disk collector's key is its rule
+// (host.disk_warn or host.disk_crit, host.node_disk_warn or
+// host.node_disk_crit); every other kind has one rule. An item of a kind with
+// no rule yields "".
 func RuleFor(it Item) string {
-	if it.Kind == KindHostDisk {
+	if it.Kind == KindHostDisk || it.Kind == KindHostNodeDisk {
 		return it.Key
 	}
 	return kindRules[it.Kind]

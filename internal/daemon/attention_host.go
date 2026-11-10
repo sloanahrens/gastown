@@ -47,11 +47,13 @@ const (
 // The host rules' stable ids. They are the item keys, so an ack and a reader
 // find a rule by the same name.
 const (
-	hostRuleDiskWarn    = attention.RuleHostDiskWarn
-	hostRuleDiskCrit    = attention.RuleHostDiskCrit
-	hostRuleMemLow      = attention.RuleHostMemLow
-	hostRuleDockerDown  = attention.RuleHostDockerDown
-	hostRuleForgejoDown = attention.RuleHostForgejoDown
+	hostRuleDiskWarn     = attention.RuleHostDiskWarn
+	hostRuleDiskCrit     = attention.RuleHostDiskCrit
+	hostRuleNodeDiskWarn = attention.RuleHostNodeDiskWarn
+	hostRuleNodeDiskCrit = attention.RuleHostNodeDiskCrit
+	hostRuleMemLow       = attention.RuleHostMemLow
+	hostRuleDockerDown   = attention.RuleHostDockerDown
+	hostRuleForgejoDown  = attention.RuleHostForgejoDown
 	// hostProbeFailedPrefix keys the item a failed probe raises; the probe's
 	// name follows.
 	hostProbeFailedPrefix = "host.probe_failed:"
@@ -92,10 +94,11 @@ func (s *attentionSources) requiredStackContainers() []string {
 // The names a failed probe is reported under, as the operator would type the
 // command.
 const (
-	hostProbeDisk    = "disk usage"
-	hostProbeMem     = "memory_pressure"
-	hostProbeDocker  = "docker ps"
-	hostProbeForgejo = "forgejo /api/healthz"
+	hostProbeDisk     = "disk usage"
+	hostProbeNodeDisk = "control node disk"
+	hostProbeMem      = "memory_pressure"
+	hostProbeDocker   = "docker ps"
+	hostProbeForgejo  = "forgejo /api/healthz"
 )
 
 // hostDisk is one volume's usage as the rules read it.
@@ -104,12 +107,22 @@ type hostDisk struct {
 	FreeGB  float64
 }
 
+// errHostNodeNotConfigured says the town runs no control cluster whose node
+// disk could be read, so there is nothing to watch. It is not a probe failure:
+// a host with no control cluster is not an outage, and the rules raise nothing.
+var errHostNodeNotConfigured = errors.New("the town runs no control cluster, so there is no control node disk to read")
+
 // hostProbes are the host reads the collectors make. attentionHostProbes
 // selects the production one: fileHostProbes (attention_host_file.go) in
 // container mode, systemHostProbes otherwise. Tests inject fakes.
 type hostProbes interface {
 	// Disk is the usage of the volume holding the town root.
 	Disk() (hostDisk, error)
+	// NodeDisk is the control node's data disk, read from the image
+	// filesystem the node's kubelet reports (parseNodeStatsImageFs). A nil
+	// error is a reading; errHostNodeNotConfigured says the town runs no
+	// control cluster to read; any other error is a read that failed.
+	NodeDisk(ctx context.Context) (hostNodeDisk, error)
 	// MemFreePct is the host's free memory as a percentage of total.
 	MemFreePct(ctx context.Context) (float64, error)
 	// Containers are the names of the running Docker containers.
@@ -130,10 +143,12 @@ type hostProbes interface {
 // every other mode the machine the daemon runs on. getenv is a seam so a test
 // sets the mode without touching the process environment. forgejoBaseURL is
 // the town's Forgejo origin (townForgejoBaseURL), which both modes ask over
-// the network rather than read from the host.
-func attentionHostProbes(townRoot string, getenv func(string) string, forgejoBaseURL func() (string, error)) hostProbes {
+// the network rather than read from the host. nodeDisk reads the control node's
+// disk; only container mode uses it, and every other mode reports the node disk
+// not configured.
+func attentionHostProbes(townRoot string, getenv func(string) string, forgejoBaseURL func() (string, error), nodeDisk func(context.Context) (hostNodeDisk, error)) hostProbes {
 	if getenv(config.ContainerModeEnv) == config.SupervisorContainer {
-		return newFileHostProbes(townRoot, forgejoBaseURL)
+		return newFileHostProbes(townRoot, forgejoBaseURL, nodeDisk)
 	}
 	return systemHostProbes{townRoot: townRoot, forgejoBaseURL: forgejoBaseURL}
 }
@@ -158,6 +173,12 @@ func (p systemHostProbes) Disk() (hostDisk, error) {
 		return hostDisk{}, err
 	}
 	return hostDisk{UsedPct: info.UsedPercent, FreeGB: info.AvailableGB()}, nil
+}
+
+// NodeDisk reports the control node's disk as not configured: the node is read
+// only in container mode, through the control cluster (fileHostProbes.NodeDisk).
+func (systemHostProbes) NodeDisk(context.Context) (hostNodeDisk, error) {
+	return hostNodeDisk{}, errHostNodeNotConfigured
 }
 
 func (p systemHostProbes) RigParked(rig string) (bool, error) {
@@ -417,6 +438,38 @@ func (s *attentionSources) collectHostDisk(ctx context.Context) ([]attention.Ite
 		Kind:     attention.KindHostDisk,
 		Severity: sev,
 		Summary:  fmt.Sprintf("disk %.0f%% used, %.1f GB free; see docker-watch runbook", d.UsedPct, d.FreeGB),
+	}}, nil
+}
+
+// collectHostNodeDisk raises host.node_disk_crit or host.node_disk_warn, whichever
+// the control node's data disk is at (never both), with the thresholds of the
+// town root's disk rule. The node's image filesystem holds the container
+// runtime's store and the local-path claims, so a full one gets the node's pods
+// evicted (gt-x1po96). A town with no control cluster raises nothing; a read
+// that failed is an info item.
+func (s *attentionSources) collectHostNodeDisk(ctx context.Context) ([]attention.Item, error) {
+	n, err := s.host.NodeDisk(ctx)
+	if errors.Is(err, errHostNodeNotConfigured) {
+		return nil, nil
+	}
+	if err != nil {
+		return s.hostProbeFailed(hostProbeNodeDisk, err, attention.KindHostNodeDisk), nil
+	}
+	rule, sev := "", attention.SeverityLow
+	switch {
+	case n.Disk.UsedPct >= attentionDiskCritUsedPct || n.Disk.FreeGB < attentionDiskCritFreeGB:
+		rule, sev = hostRuleNodeDiskCrit, attention.SeverityHigh
+	case n.Disk.UsedPct >= attentionDiskWarnUsedPct || n.Disk.FreeGB < attentionDiskWarnFreeGB:
+		rule = hostRuleNodeDiskWarn
+	default:
+		return nil, nil
+	}
+	return []attention.Item{{
+		Key:      rule,
+		Kind:     attention.KindHostNodeDisk,
+		Severity: sev,
+		Summary: fmt.Sprintf("control node %s data disk %.0f%% used, %.1f GB free; see docs/guides/control-cluster-disk.md",
+			n.Node, n.Disk.UsedPct, n.Disk.FreeGB),
 	}}, nil
 }
 

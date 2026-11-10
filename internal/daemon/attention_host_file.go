@@ -33,18 +33,23 @@ type fileHostProbes struct {
 	// now is the reader's clock, so a test decides what the file's age is.
 	now    func() time.Time
 	maxAge time.Duration
+	// nodeDisk reads the control node's disk through the control cluster. The
+	// node is not on the host's probe file: the daemon container reads it
+	// through the cluster API, as the control-disk patrol does.
+	nodeDisk func(context.Context) (hostNodeDisk, error)
 }
 
 // newFileHostProbes returns the file-backed host reads for the town rooted at
 // townRoot. forgejoBaseURL is the town's Forgejo origin, which the health read
 // asks over the network because the probe file the host agent publishes has no
-// say in it.
-func newFileHostProbes(townRoot string, forgejoBaseURL func() (string, error)) fileHostProbes {
+// say in it. nodeDisk is the control node's disk read (controlNodeDisk).
+func newFileHostProbes(townRoot string, forgejoBaseURL func() (string, error), nodeDisk func(context.Context) (hostNodeDisk, error)) fileHostProbes {
 	return fileHostProbes{
 		systemHostProbes: systemHostProbes{townRoot: townRoot, forgejoBaseURL: forgejoBaseURL},
 		path:             filepath.Join(townRoot, ".runtime", "host", "probes.json"),
 		now:              time.Now,
 		maxAge:           fileHostProbeMaxAge,
+		nodeDisk:         nodeDisk,
 	}
 }
 
@@ -77,6 +82,15 @@ func (p fileHostProbes) Disk() (hostDisk, error) {
 		return hostDisk{}, err
 	}
 	return hostDisk{UsedPct: pr.Disk.Value.UsedPct, FreeGB: pr.Disk.Value.FreeGB}, nil
+}
+
+// NodeDisk reads the control node's disk through the control cluster. A probe
+// built with no node read is a wiring error, never a quiet disk.
+func (p fileHostProbes) NodeDisk(ctx context.Context) (hostNodeDisk, error) {
+	if p.nodeDisk == nil {
+		return hostNodeDisk{}, errors.New("the file host probes were built with no control node read")
+	}
+	return p.nodeDisk(ctx)
 }
 
 func (p fileHostProbes) MemFreePct(context.Context) (float64, error) {
