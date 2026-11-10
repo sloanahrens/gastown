@@ -1,11 +1,26 @@
 package doltserver
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// TestBeadsDirForDatabaseNotFoundIsErrNoBeadsDir: a database no searched root
+// names is the ErrNoBeadsDir sentinel, so a caller can skip it without mistaking
+// a root it could not read for an absent one.
+func TestBeadsDirForDatabaseNotFoundIsErrNoBeadsDir(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "claude")
+
+	_, err := BeadsDirForDatabase(townRoot, "claude", missing)
+	if !errors.Is(err, ErrNoBeadsDir) {
+		t.Errorf("BeadsDirForDatabase error = %v, want ErrNoBeadsDir", err)
+	}
+}
 
 // TestBeadsDirForDatabase: the reaper writes through bd, and bd picks its
 // database from a beads dir, so a database name the reaper discovered on the

@@ -2,12 +2,19 @@ package doltserver
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
+
+// ErrNoBeadsDir is the not-found error of BeadsDirForDatabase: no searched root
+// holds a beads directory that names the database. A metadata.json that fails
+// to read or parse names no database, so it reads as not found too; this error
+// does not by itself prove the directory is absent.
+var ErrNoBeadsDir = errors.New("no beads directory")
 
 // BeadsDirForDatabase returns the beads directory whose metadata.json names
 // dbName as its dolt_database.
@@ -25,8 +32,8 @@ func BeadsDirForDatabase(townRoot, dbName string, extraRoots ...string) (string,
 		}
 	}
 	searched := append([]string{townRoot}, extraRoots...)
-	return "", fmt.Errorf("no beads directory in %s names database %q in its metadata.json",
-		strings.Join(searched, ", "), dbName)
+	return "", fmt.Errorf("%w in %s names database %q in its metadata.json",
+		ErrNoBeadsDir, strings.Join(searched, ", "), dbName)
 }
 
 // extraRootBeadsDirs are the beads directories an extra root can hold: a
