@@ -406,7 +406,20 @@ func (s rigPolecatSandbox) RemovePolecat(name string) error { return s.mgr.Remov
 
 // DeleteBranch keeps any branch whose tip has no remote copy (gt-yxys).
 func (s rigPolecatSandbox) DeleteBranch(branch string) {
-	deletePolecatBranch(branch, getRepoGitForRig(s.rigPath), false)
+	if err := s.deleteBranch(branch); err != nil {
+		style.PrintWarning("branch %s kept: %v", branch, err)
+	}
+}
+
+// deleteBranch deletes the branch from the rig's bare repo. A rig with no
+// .repo.git returns its error, and the branch is kept.
+func (s rigPolecatSandbox) deleteBranch(branch string) error {
+	repoGit, err := getRepoGitForRig(s.rigPath)
+	if err != nil {
+		return err
+	}
+	deletePolecatBranch(branch, repoGit, false)
+	return nil
 }
 
 // openSpawnedPolecatSandboxFn is a seam for tests.
@@ -510,14 +523,10 @@ func resolveRigFromBeadIDs(beadIDs []string, townRoot string) (string, error) {
 	return resolvedRig, nil
 }
 
-// getRepoGitForRig creates a Git client for the rig's repository.
-// It tries the bare repo first, then falls back to the mayor/rig directory.
-func getRepoGitForRig(rigPath string) *git.Git {
-	bareRepoPath := filepath.Join(rigPath, ".repo.git")
-	if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
-		return git.NewGitWithDir(bareRepoPath, "")
-	}
-	return git.NewGit(filepath.Join(rigPath, "mayor", "rig"))
+// getRepoGitForRig returns the git client for the rig's shared bare repo. A
+// rig with no .repo.git is an error, as in getRigGit.
+func getRepoGitForRig(rigPath string) (*git.Git, error) {
+	return getRigGit(rigPath)
 }
 
 // deletePolecatBranch deletes a local git branch for a polecat.

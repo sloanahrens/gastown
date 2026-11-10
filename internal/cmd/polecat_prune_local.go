@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -190,11 +190,11 @@ func pruneLocalPolecatBranches(repo localPruneRepo, apply bool) localPruneRigRes
 	return res
 }
 
-// localPruneTarget is one rig in the sweep: its name, and the repo holding
-// its polecat branches. RepoDir is empty for a rig with neither .repo.git
-// nor mayor/rig.
+// localPruneTarget is one rig in the sweep: its name, its path, and the repo
+// holding its polecat branches. RepoDir is empty for a rig with no .repo.git.
 type localPruneTarget struct {
 	Name    string
+	RigPath string
 	RepoDir string
 }
 
@@ -203,15 +203,10 @@ type localPruneTarget struct {
 // thing the sweep needs to try.
 type localPruneOpener func(repoDir string) localPruneRepo
 
-// openRealLocalPruneRepo opens a rig repo for the production sweep, in the
-// shape rigPruneRepoDir found it: a bare .repo.git is its own git dir and
-// takes no working tree, while a legacy mayor/rig is an ordinary clone whose
-// .git sits inside it.
+// openRealLocalPruneRepo opens a rig's bare .repo.git for the production
+// sweep. The bare repo is its own git dir and takes no working tree.
 func openRealLocalPruneRepo(repoDir string) localPruneRepo {
-	if filepath.Base(repoDir) == ".repo.git" {
-		return realLocalPruneRepo{git: git.NewGitWithDir(repoDir, "")}
-	}
-	return realLocalPruneRepo{git: git.NewGit(repoDir)}
+	return realLocalPruneRepo{git: git.NewGitWithDir(repoDir, "")}
 }
 
 // localPruneTotals is the whole-run sum of every rig's counts.
@@ -241,7 +236,7 @@ func pruneLocalPolecatBranchBacklog(out io.Writer, targets []localPruneTarget, o
 	for _, target := range targets {
 		var res localPruneRigResult
 		if target.RepoDir == "" {
-			res.SkippedReason = "no git repo (neither .repo.git nor mayor/rig)"
+			res.SkippedReason = "no .repo.git under " + target.RigPath
 		} else {
 			res = pruneLocalPolecatBranches(open(target.RepoDir), apply)
 		}
@@ -333,24 +328,19 @@ func resolveLocalPruneTargets() ([]localPruneTarget, error) {
 	}
 	targets := make([]localPruneTarget, 0, len(rigs))
 	for _, r := range rigs {
-		targets = append(targets, localPruneTarget{Name: r.Name, RepoDir: rigPruneRepoDir(r.Path)})
+		targets = append(targets, localPruneTarget{Name: r.Name, RigPath: r.Path, RepoDir: rigPruneRepoDir(r.Path)})
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Name < targets[j].Name })
 	return targets, nil
 }
 
-// rigPruneRepoDir picks the repo holding a rig's polecat branches, the same
-// choice `gt polecat prune <rig>` makes: the shared bare .repo.git, else the
-// legacy mayor/rig clone. An empty result means neither exists, which the
-// sweep reports as a skipped rig.
+// rigPruneRepoDir picks the repo holding a rig's polecat branches: the shared
+// bare .repo.git. An empty result means it does not exist, which the sweep
+// reports as a skipped rig.
 func rigPruneRepoDir(rigRoot string) string {
-	bare := filepath.Join(rigRoot, ".repo.git")
+	bare := constants.RigBareRepoPath(rigRoot)
 	if info, err := os.Stat(bare); err == nil && info.IsDir() {
 		return bare
-	}
-	legacy := filepath.Join(rigRoot, "mayor", "rig")
-	if info, err := os.Stat(legacy); err == nil && info.IsDir() {
-		return legacy
 	}
 	return ""
 }

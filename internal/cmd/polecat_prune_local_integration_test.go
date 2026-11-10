@@ -128,15 +128,16 @@ func TestIntegrationPruneLocalPolecatBranchBacklogCountsTempRigRepos(t *testing.
 	}
 }
 
-// TestIntegrationPruneLocalPolecatBranchBacklogSweepsMayorRigLayout pins the
-// second repo layout a rig can have: without .repo.git the branches live in
-// the mayor/rig clone, which is a working tree and not a bare repo.
-func TestIntegrationPruneLocalPolecatBranchBacklogSweepsMayorRigLayout(t *testing.T) {
+// TestIntegrationPruneLocalPolecatBranchBacklogSkipsMayorRigOnlyRig pins that a
+// rig whose only repo is a mayor/rig clone is not swept: the sweep reads the
+// shared .repo.git alone, so the clone's merged branch is left where it is.
+func TestIntegrationPruneLocalPolecatBranchBacklogSkipsMayorRigOnlyRig(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	remoteDir := initLocalSweepOrigin(t, tmp)
 
-	cloneDir := filepath.Join(tmp, "legacyrig", "mayor", "rig")
+	rigPath := filepath.Join(tmp, "legacyrig")
+	cloneDir := filepath.Join(rigPath, "mayor", "rig")
 	if err := os.MkdirAll(filepath.Dir(cloneDir), 0755); err != nil {
 		t.Fatalf("mkdir rig: %v", err)
 	}
@@ -146,17 +147,21 @@ func TestIntegrationPruneLocalPolecatBranchBacklogSweepsMayorRigLayout(t *testin
 	merged := "polecat/legacy/gt-4+dd"
 	runGit(t, cloneDir, "branch", merged, "origin/main")
 
-	if got := rigPruneRepoDir(filepath.Dir(filepath.Dir(cloneDir))); got != cloneDir {
-		t.Fatalf("rigPruneRepoDir = %q, want the mayor/rig clone %q", got, cloneDir)
+	target := localPruneTarget{Name: "legacyrig", RigPath: rigPath, RepoDir: rigPruneRepoDir(rigPath)}
+	if target.RepoDir != "" {
+		t.Fatalf("rigPruneRepoDir = %q, want empty for a rig with only a mayor/rig clone", target.RepoDir)
 	}
 
 	var out bytes.Buffer
-	totals := pruneLocalPolecatBranchBacklog(&out, []localPruneTarget{{Name: "legacyrig", RepoDir: cloneDir}}, openRealLocalPruneRepo, true)
-	if totals != (localPruneTotals{Deleted: 1}) {
-		t.Fatalf("totals %+v, want one delete and no skip; report %q", totals, out.String())
+	totals := pruneLocalPolecatBranchBacklog(&out, []localPruneTarget{target}, openRealLocalPruneRepo, true)
+	if totals != (localPruneTotals{Skipped: 1}) {
+		t.Fatalf("totals %+v, want one skip and no delete; report %q", totals, out.String())
 	}
-	if localSweepBranchExists(t, git.NewGit(cloneDir), merged) {
-		t.Errorf("merged branch %s survived the sweep", merged)
+	if !strings.Contains(out.String(), "no .repo.git under "+rigPath) {
+		t.Errorf("report %q does not name the missing .repo.git", out.String())
+	}
+	if !localSweepBranchExists(t, git.NewGit(cloneDir), merged) {
+		t.Errorf("merged branch %s was touched in the mayor/rig clone", merged)
 	}
 }
 

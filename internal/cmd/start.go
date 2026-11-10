@@ -478,11 +478,12 @@ func cleanupPolecats(townRoot string) {
 				continue
 			}
 
-			// Delete the polecat branch from mayor's clone
+			// Delete the polecat branch from the rig's bare repo
 			branchName := fmt.Sprintf("polecat/%s", p.Name)
-			mayorPath := filepath.Join(r.Path, "mayor", "rig")
-			mayorGit := git.NewGit(mayorPath)
-			_ = mayorGit.DeleteBranch(branchName, true) // Ignore errors
+			if err := deleteRigPolecatBranch(r.Path, branchName); err != nil {
+				fmt.Printf("  %s %s/%s: branch %s not deleted: %v\n",
+					style.Dim.Render("○"), r.Name, p.Name, branchName, err)
+			}
 
 			fmt.Printf("  %s %s/%s: cleaned up\n", style.Bold.Render("✓"), r.Name, p.Name)
 			totalCleaned++
@@ -504,6 +505,16 @@ func cleanupPolecats(townRoot string) {
 	} else {
 		fmt.Printf("  %s No polecats to clean up\n", style.Dim.Render("○"))
 	}
+}
+
+// deleteRigPolecatBranch deletes a polecat's local branch from the rig's
+// shared bare repo. A rig with no .repo.git is an error.
+func deleteRigPolecatBranch(rigPath, branch string) error {
+	repoGit, err := getRigGit(rigPath)
+	if err != nil {
+		return err
+	}
+	return repoGit.DeleteBranch(branch, true)
 }
 
 // stopDaemonIfRunning stops the daemon if it is running.
