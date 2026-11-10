@@ -68,15 +68,30 @@ func hostSupervisorRespawn(townRoot string) (templates.SupervisorState, bool) {
 // daemon is the one state the file cannot carry, so it is read live and
 // renders the daemon field RED (gt-92qx3).
 func HealthView(townRoot string, now time.Time) (lines []string, v townhealth.Verdict, rep *townhealth.Report) {
-	return healthView(townRoot, now, hostSupervisorRespawn)
+	return HealthViewWith(townRoot, now, hostSupervisorRespawn)
+}
+
+// HealthViewWith is HealthView with the supervisor read from supervisor, for a
+// caller that must not read the host's launchctl (a test).
+func HealthViewWith(townRoot string, now time.Time, supervisor func(townRoot string) (templates.SupervisorState, bool)) (lines []string, v townhealth.Verdict, rep *townhealth.Report) {
+	return healthView(townRoot, now, supervisor)
+}
+
+// HealthStaleAfter is the age past which the health file is stale: the
+// operational.health.stale_after setting, or the default when that block is
+// broken. The health line and the readiness answer both read it here, so they
+// cannot disagree about staleness.
+func HealthStaleAfter(townRoot string) time.Duration {
+	_, stale, err := config.LoadOperationalConfig(townRoot).GetHealthSettings().Resolve()
+	if err != nil {
+		return townhealth.DefaultStaleAfter
+	}
+	return stale
 }
 
 // healthView is HealthView over an injected supervisor probe.
 func healthView(townRoot string, now time.Time, supervisor supervisorProbe) (lines []string, v townhealth.Verdict, rep *townhealth.Report) {
-	_, stale, err := config.LoadOperationalConfig(townRoot).GetHealthSettings().Resolve()
-	if err != nil {
-		stale = townhealth.DefaultStaleAfter
-	}
+	stale := HealthStaleAfter(townRoot)
 	r, readErr := townhealth.Read(townRoot)
 	if st, looping := supervisor(townRoot); looping {
 		out := daemonRespawnReport(r, readErr, st, now, stale)

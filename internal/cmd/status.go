@@ -27,6 +27,7 @@ var statusWatch bool
 var statusInterval int
 var statusVerbose bool
 var statusHealthLine bool
+var statusHealthReady bool
 
 var statusCmd = &cobra.Command{
 	Use:     "status",
@@ -46,7 +47,13 @@ writes every heartbeat, with the verdict as the exit code: 0 green,
 operational.health.stale_after, default 10m). A green line is the verdict,
 the report's age and the day's landings; any other line lists the non-green
 fields worst first as key=value, where [R] marks a RECORDED field and [?] an
-UNKNOWN one. gt status prints every field.`,
+UNKNOWN one. gt status prints every field.
+
+Use --line --ready to ask whether the town can take traffic rather than
+whether it is green: exit 0 when the report is fresh and every non-green
+field is [R] (RECORDED, a state the town accepts, such as dispatch off or a
+backup not yet taken). Otherwise the exit code is the verdict's, as without
+--ready, and the reason is printed to stderr.`,
 	RunE: runStatus,
 }
 
@@ -57,7 +64,17 @@ func init() {
 	statusCmd.Flags().IntVarP(&statusInterval, "interval", "n", 2, "Refresh interval in seconds")
 	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show detailed multi-line output per agent")
 	statusCmd.Flags().BoolVar(&statusHealthLine, "line", false, "Print the one health line; exit 0 green, 1 degraded, 2 red, 3 unknown")
+	statusCmd.Flags().BoolVar(&statusHealthReady, "ready", false, "With --line: exit 0 when ready for traffic, not only when green")
 	rootCmd.AddCommand(statusCmd)
+}
+
+// validateStatusReady rejects --ready without --line: readiness is the health
+// line's answer, and the full status view has no line to answer with.
+func validateStatusReady(line, ready bool) error {
+	if ready && !line {
+		return fmt.Errorf("--ready needs --line: readiness is the health line's answer, so use gt status --line --ready")
+	}
+	return nil
 }
 
 // doltCommitMarker is the Services-line marker for databases over the
@@ -97,8 +114,17 @@ func compactorCommitAdvisories(townRoot string) []townstatus.CommitAdvisoryInfo 
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	if statusHealthLine {
-		return runStatusHealthLine(cmd)
+	return runStatusWith(cmd, args, statusHealthLine, statusHealthReady)
+}
+
+// runStatusWith is runStatus over the health-line flags as values, so the
+// flag combination is refused before any town state is read.
+func runStatusWith(cmd *cobra.Command, args []string, line, ready bool) error {
+	if err := validateStatusReady(line, ready); err != nil {
+		return err
+	}
+	if line {
+		return runStatusHealthLine(cmd, ready)
 	}
 	if statusWatch {
 		return runStatusWatch(cmd, args)
