@@ -429,8 +429,13 @@ func (Kubernetes) Render(spec Spec) (Plan, error) {
 	}, nil
 }
 
-// kubectlArgv is a kubectl command against the Spec's context.
+// kubectlArgv is a kubectl command against the Spec's context. A Spec that runs
+// in a cluster with no kubeconfig naming the context carries no --context, so
+// kubectl uses the pod's service account (gt-2by0ke).
 func kubectlArgv(spec Spec, args ...string) []string {
+	if spec.InCluster {
+		return append([]string{kubectl}, args...)
+	}
 	return append([]string{kubectl, "--context", spec.Context}, args...)
 }
 

@@ -57,10 +57,12 @@ func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *
 			TierSweep:     &TierSweepConfig{Enabled: true},
 			LandingWorker: &LandingWorkerConfig{WorkRoot: t.TempDir()},
 		}},
-		logger:         log.New(&logs, "", 0),
-		clock:          clockwork.NewFakeClockAt(now),
-		dogFeedFn:      (&feedCapture{}).record,
-		tierSweepSeams: tierSweepSeams{run: rec.run, beads: func(string) tierSweepBeadStore { return bd }, treeHas: goTree},
+		logger: log.New(&logs, "", 0),
+		// A test never reads the process for the in-cluster signal: CI may run in a pod.
+		sweepInClusterFn: func(string) bool { return false },
+		clock:            clockwork.NewFakeClockAt(now),
+		dogFeedFn:        (&feedCapture{}).record,
+		tierSweepSeams:   tierSweepSeams{run: rec.run, beads: func(string) tierSweepBeadStore { return bd }, treeHas: goTree},
 	}
 	useGitfake(t, d)
 	return d, rec, bd, &logs

@@ -74,6 +74,12 @@ import (
 // This is recovery-focused: normal wake is handled by feed subscription (bd activity --follow).
 // The daemon is the safety net for dead sessions, GUPP violations, and orphaned work.
 type Daemon struct {
+	// sweepInClusterFn decides whether the sweep's kubectl steps use the pod's
+	// service account; nil reads this process (sweeprunner.HostInClusterWithoutContext).
+	// sweepInClusterLog logs that decision once (gt-2by0ke).
+	sweepInClusterFn  func(context string) bool
+	sweepInClusterLog logLatch
+
 	// crashSkipLog logs a polecat's "Skipping crash detection" reason once
 	// per state, not every heartbeat (gt tail noise).
 	crashSkipLog logLatch

@@ -1930,6 +1930,9 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		Dind:     cfg.Dind,
 		RunID:    runID,
 		Context:  cfg.Context,
+		// In a pod with no kubeconfig naming the context, the kubectl steps use the
+		// service account (gt-2by0ke).
+		InCluster: d.sweepInCluster(cfg.Context),
 		// The preflight checks these namespaces for a pod the run would outrank;
 		// the config's default applies when the setting names none.
 		ProtectedNamespaces: cfg.ProtectedNamespaceList(),
@@ -1938,6 +1941,20 @@ func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool,
 		return sweeprunner.Spec{}, false, err
 	}
 	return spec, true, nil
+}
+
+// sweepInCluster decides once per Spec whether the sweep's kubectl steps use the
+// pod's service account, and logs the decision once, not per call.
+func (d *Daemon) sweepInCluster(context string) bool {
+	decide := d.sweepInClusterFn
+	if decide == nil {
+		decide = sweeprunner.HostInClusterWithoutContext
+	}
+	if !decide(context) {
+		return false
+	}
+	d.sweepInClusterLog.logf(d.logger.Printf, "sweep-in-cluster", "sweep runner: in-cluster, context %s not used", context)
+	return true
 }
 
 // tierSweepRunnerConfig returns the runner block the sweep's config names, or
