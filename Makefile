@@ -591,6 +591,10 @@ tier-check:
 # run passes -coverprofile, which go test cannot cache, so the changed
 # packages' tests rerun even when nothing else about them changed.
 #
+# A branch that changes a file docs/design/pod-engine.md pins also tests
+# internal/podengine (gt-tk6l7k); internal/land/cmd/changedpkgs describes the
+# selection and the recovery line printed when that test fails.
+#
 # A commit that changes a go.mod or go.sum file must explain it in a
 # "Rationale:" line (internal/presubmit/cmd/gomodrationale, gt-b9j3o.6).
 # PRESUBMIT_BASE is the ref the branch is compared against.
@@ -611,7 +615,7 @@ presubmit: lint
 			cover=$$(mktemp "$${TMPDIR:-/tmp}/gt-presubmit-cover.XXXXXX") || { echo "presubmit: FAILED making room for the cover profile" >&2; exit 1; }; \
 			trap 'rm -f "$$cover"' EXIT; \
 			echo "presubmit: go test of the changed packages:" $$pkgs >&2; \
-			$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 10m -coverprofile="$$cover" $$pkgs || { echo "presubmit: FAILED at tests" >&2; exit 1; }; \
+			$(CPU_CLASS) GT_TEST_DOCKER=0 go test -timeout 10m -coverprofile="$$cover" $$pkgs || { echo "presubmit: FAILED at tests" >&2; go run ./internal/land/cmd/changedpkgs -base $(PRESUBMIT_BASE) -podengine-recovery >&2; exit 1; }; \
 		fi; \
 		if [ -n "$$guards" ]; then \
 			echo "presubmit: go test of the tree-wide guard tests:" $$guards >&2; \
