@@ -350,9 +350,9 @@ func dockerImageRef(ctx context.Context, image string, pull bool) (resolvedImage
 // pulledImage resolves image for a gateway that pulls it, through the registry
 // the reference names and nothing else: the host's docker is never asked, because
 // the sandbox pulls by the registry's digest and the pod running the daemon has
-// no engine (gt-xzze6g). The create names repository@manifest digest as
-// pulledImageRef does; the gt commit comes from the label of the config blob the
-// platform's manifest names. A registry that does not answer, holds no entry for
+// no engine (gt-xzze6g). The create names repository@manifest digest, the digest
+// the registry holds for the tag; the gt commit comes from the label of the config
+// blob the platform's manifest names. A registry that does not answer, holds no entry for
 // the sandbox's platform, serves a config that does not hash to its digest, or
 // serves a label-less one refuses the spawn, naming the registry and the image.
 func pulledImage(ctx context.Context, inspect imageInspector, image string) (resolvedImage, error) {
