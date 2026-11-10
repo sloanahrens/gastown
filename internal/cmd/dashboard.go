@@ -30,7 +30,6 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/forgejo"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/procutil"
@@ -934,7 +933,7 @@ func dashboardForgejoReaders(townRoot string, repos []string, logf func(format s
 		repos = rigForgejoRepos(townRoot)
 	}
 	var opts []forgejo.Option
-	if base := dashboardForgejoBase(townRoot, logf); base != "" {
+	if base := dashboardForgejoBase(townRoot, rigForgejoRemote, logf); base != "" {
 		opts = append(opts, forgejo.WithBaseURL(base))
 	}
 	client, err := forgejo.NewClient(config.ForgejoRoleViewer, opts...)
@@ -1023,19 +1022,31 @@ func rigForgejoRepos(townRoot string) []string {
 	return out
 }
 
-// dashboardRepoFileOpener is the production repo-file reader the Forgejo
-// settings resolve through, the same git reader rig's own resolver uses.
-func dashboardRepoFileOpener(repoPath string) rig.RepoFileReader { return git.NewGit(repoPath) }
+// rigForgejoRemote is the remote URL a rig's merge_queue.forgejo setting names,
+// read through the same repo-file seam the rig's own resolver uses. An error is
+// a setting this run could not read, which is not a rig that names no remote.
+func rigForgejoRemote(townRoot, name string) (string, error) {
+	fc, err := rig.ResolveForgejoConfigWithError(rig.OpenRepoFile, townRoot, name)
+	if err != nil || fc == nil {
+		return "", err
+	}
+	return fc.RemoteURL, nil
+}
 
 // dashboardForgejoBase is the API root the Forgejo and deploys panes read: the
 // root the first rig in rig-name order names through its merge_queue.forgejo
 // remote, derived the way the daemon derives its own (land.APIBaseFromRemoteURL).
-// Without it the client falls back to its built-in loopback root, which is the
-// pod's own address in the control cluster. Empty when no rig names a remote,
-// or when the registry or a rig's setting cannot be read; logf names that case.
-// Rigs on different hosts do not split the panes: the first rig's host wins, and
-// logf names the other host once.
-func dashboardForgejoBase(townRoot string, logf func(format string, args ...any)) string {
+// remoteOf reads each rig's remote; the dashboard passes rigForgejoRemote.
+// Without a root the client falls back to its built-in loopback root, which is
+// the pod's own address in the control cluster. Empty when no rig names a remote,
+// or when the registry cannot be read; logf names each case.
+//
+// A rig whose setting cannot be read, or whose remote names no host, is logged
+// and passed over, so a later rig can supply the root. A failure after the root
+// is found is logged and never discards it. Rigs on different hosts do not split
+// the panes: the first rig's host wins, and logf names the host it did not read,
+// once.
+func dashboardForgejoBase(townRoot string, remoteOf func(townRoot, rig string) (string, error), logf func(format string, args ...any)) string {
 	names, err := knownRigNames(townRoot)
 	if err != nil {
 		logf("the rig registry could not be read, so the Forgejo panes use the built-in API root: %v", err)
@@ -1043,24 +1054,23 @@ func dashboardForgejoBase(townRoot string, logf func(format string, args ...any)
 	}
 	base, first := "", ""
 	for _, name := range names {
-		fc, err := rig.ResolveForgejoConfigWithError(dashboardRepoFileOpener, townRoot, name)
+		remote, err := remoteOf(townRoot, name)
 		if err != nil {
-			logf("rig %s's Forgejo setting could not be read, so the Forgejo panes use the built-in API root: %v", name, err)
-			return ""
-		}
-		if fc == nil || fc.RemoteURL == "" {
+			logf("rig %s's Forgejo setting could not be read, so the Forgejo panes do not take their root from it: %v", name, err)
 			continue
 		}
-		root, err := land.APIBaseFromRemoteURL(fc.RemoteURL)
+		if remote == "" {
+			continue
+		}
+		root, err := land.APIBaseFromRemoteURL(remote)
 		if err != nil {
 			logf("rig %s's Forgejo remote names no host, so the Forgejo panes do not take their root from it", name)
 			continue
 		}
-		if base == "" {
+		switch {
+		case base == "":
 			base, first = root, name
-			continue
-		}
-		if root != base {
+		case root != base:
 			logf("the Forgejo panes read %s from rig %s; rig %s names %s, which they do not read", base, first, name, root)
 			return base
 		}
