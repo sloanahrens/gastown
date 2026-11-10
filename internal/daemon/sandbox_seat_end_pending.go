@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -115,6 +116,29 @@ func readPendingSandboxSeatEnds(townRoot string) (records []pendingSandboxSeatEn
 	}
 	sortPendingSandboxSeatEnds(records)
 	return records, bad, nil
+}
+
+// PendingSandboxSeat is one seat the daemon keeps for the jev_rules battery: its
+// rig and polecat name, and the submission stamp its record holds.
+type PendingSandboxSeat struct {
+	Rig       string
+	Name      string
+	Submitted time.Time
+}
+
+// PendingSandboxSeatEnds is the seats the daemon keeps for the jev_rules battery
+// under town, read from their records. A record that cannot be read or decoded
+// is returned in bad, by path, never skipped; a directory that cannot be listed
+// is the error. A town with no records is an empty result, not an error.
+func PendingSandboxSeatEnds(townRoot string) (seats []PendingSandboxSeat, bad []string, err error) {
+	records, bad, err := readPendingSandboxSeatEnds(townRoot)
+	if err != nil {
+		return nil, bad, err
+	}
+	for _, rec := range records {
+		seats = append(seats, PendingSandboxSeat{Rig: rec.Rig, Name: rec.Name, Submitted: rec.Landing.Submitted})
+	}
+	return seats, bad, nil
 }
 
 // readPendingSandboxSeatEnd reads one record; ok is false when the file cannot

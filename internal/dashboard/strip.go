@@ -37,6 +37,7 @@ var polecatAlarm = map[string]string{
 	StateStalled:       alarmBad,
 	StateReviewNeeded:  "",
 	StateRecovery:      "",
+	StateKept:          "",
 	StateNeedsHuman:    alarmBad,
 	StateNeedsOverseer: alarmBad,
 	StateNeedsOperator: alarmBad,

@@ -57,6 +57,7 @@ const (
 	StateStalled       = "stalled"        // assigned work but no session: nothing is doing it
 	StateReviewNeeded  = "review-needed"  // a live session holding uncommitted or unpushed state
 	StateRecovery      = "recovery"       // idle, but its worktree needs recovery before reuse
+	StateKept          = "kept (jev)"     // finished, and the daemon keeps its seat until the jev_rules battery has asked
 	StateNeedsHuman    = "needs-human"    // its bead carries the old needs-human label
 	StateNeedsOverseer = "needs-overseer" // its bead is labeled needs-overseer: the overseer acts or vets first
 	StateNeedsOperator = "needs-operator" // its bead is labeled needs-operator: only the operator can settle it
@@ -109,7 +110,8 @@ type Polecat struct {
 	// StateSince is when the seat entered the state State names, for the one
 	// state whose clock is not the hook: a bead submitted for landing entered
 	// queued at its last write, which is the wait the Landings panel ages
-	// (gt-iv7jf). Empty for every other state, whose clock is Slung.
+	// (gt-iv7jf). A kept seat entered kept at its submit, the stamp its record
+	// holds (gt-ddg96x). Empty for every other state, whose clock is Slung.
 	StateSince *time.Time `json:"state_since,omitempty"`
 	// Hooked is when the seat's bead was dispatched: the bead's first sling
 	// since its last run-end event (gt done, a hand close through gt bead
@@ -207,6 +209,11 @@ type Summary struct {
 	// dropped read is never read as a drained queue (gt-q6h8e).
 	SeatsError bool `json:"-"`
 	ReadyError bool `json:"-"`
+
+	// KeptError names the failed read of the seats the daemon keeps for the
+	// jev_rules battery. The seats still read; they read as they did without
+	// that fact, and the page says so beside the table (gt-ddg96x).
+	KeptError string `json:"kept_error,omitempty"`
 }
 
 // Proc is one busy process.

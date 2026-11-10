@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -104,6 +105,10 @@ type dashSeat struct {
 	// Sandbox is the seat's liveness where the host tmux cannot see it: a
 	// sandboxed seat's session lives inside its sandbox (gt-43k7c).
 	Sandbox dashSandboxSeat
+	// Kept is the submitted time of the bead the daemon keeps this seat for,
+	// until the jev_rules battery has asked about it; nil when the daemon keeps
+	// nothing for the seat (gt-ddg96x).
+	Kept *time.Time
 }
 
 // dashSandboxSeat is a sandboxed seat's liveness as the town answers it. The
@@ -136,20 +141,20 @@ type dashPolecatInputs struct {
 	Records       []omRecord
 }
 
-// dashPolecatState maps the town's inventory state to the dashboard's. The
-// inventory decides, except where the dashboard adds what the inventory cannot
-// see: a bead the queue says is waiting to land, and the person label its bead
-// carries. The person branch names the label, so the row says which person must
-// act (gt-slmaz); a bead carrying two of the labels reads as the first step,
-// the overseer's. A seat inside its spawn grace reads as spawning rather than
-// recovery, even when its host worktree is dirty (gt-915m14).
-func dashPolecatState(item polecatInventoryItem, hasWork, ready bool, labels []string) (state, reason string) {
+// dashPolecatState maps the town's inventory state to the dashboard's and adds
+// one rule of its own: a seat the daemon keeps for the jev_rules battery reads
+// kept (jev) when it holds no bead, so a seat slung again reads as the
+// inventory has it. Where that rule falls among the others is the order of the
+// switch below.
+func dashPolecatState(item polecatInventoryItem, hasWork, ready, kept bool, labels []string) (state, reason string) {
 	d := item.Disposition
 	switch {
 	case hasWork && hasAnyLabel(labels, "needs-human", "gt:needs-human", "needs-overseer", "gt:needs-overseer", "needs-operator", "gt:needs-operator"):
 		return dashPersonState(labels)
 	case hasWork && ready:
 		return dashboard.StateQueued, "submitted for landing"
+	case kept && !hasWork:
+		return dashboard.StateKept, "the daemon keeps this seat until the jev_rules battery has asked about its submission"
 	}
 	switch item.State {
 	case polecat.StateWorking:
@@ -197,8 +202,16 @@ func dashPersonState(labels []string) (state, reason string) {
 // the Landings panel ages from the same field. Every other state answers nil,
 // and the page reads the hub's hook time (gt-iv7jf). A last write that does not
 // parse answers an error, so the caller reports the hook fallback instead of
-// letting it happen silently (gt-uqmdg).
-func dashPolecatStateSince(state string, issue *beads.Issue) (*time.Time, error) {
+// letting it happen silently (gt-uqmdg). A kept seat is dated by the submit its
+// record holds (gt-ddg96x); a record with no submit stamp answers an error, so
+// the kept row names the missing read instead of showing no clock unexplained.
+func dashPolecatStateSince(state string, issue *beads.Issue, kept *time.Time) (*time.Time, error) {
+	if state == dashboard.StateKept {
+		if kept == nil || kept.IsZero() {
+			return nil, errors.New("the kept seat's submit time is missing from its record")
+		}
+		return kept, nil
+	}
 	if state != dashboard.StateQueued || issue == nil {
 		return nil, nil
 	}
@@ -275,14 +288,19 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 				p.Hooked = &at
 			}
 		}
-		p.State, p.Reason = dashPolecatState(s.Item, hasWork, hasWork && in.Ready[p.Bead], labels)
-		at, err := dashPolecatStateSince(p.State, s.Issue)
-		if err != nil {
+		p.State, p.Reason = dashPolecatState(s.Item, hasWork, hasWork && in.Ready[p.Bead], s.Kept != nil, labels)
+		at, err := dashPolecatStateSince(p.State, s.Issue, s.Kept)
+		switch {
+		case err != nil && p.State == dashboard.StateKept:
+			// The kept seat's submit time is unread, so its wait has no clock:
+			// the row says which read failed rather than dropping it (gt-ddg96x).
+			p.Reason = "the kept seat's submit time could not be read: " + err.Error()
+		case err != nil:
 			// The bead's last write could not be read, so the queued wait has no
 			// clock of its own and the page dates it from the hook: say so rather
 			// than let the fallback pass as the submit time (gt-uqmdg).
 			p.Reason = "the bead's last write could not be read, so the queued wait is dated from the hook"
-		} else if at != nil {
+		case at != nil:
 			p.StateSince = at
 		}
 		if !in.SessionsKnown && p.State == dashboard.StateStalled {
@@ -364,7 +382,7 @@ func dashStateRank(state string) int {
 		return 4
 	case dashboard.StateGating:
 		return 5
-	case dashboard.StateQueued:
+	case dashboard.StateQueued, dashboard.StateKept:
 		return 6
 	case dashboard.StateParked:
 		return 7
@@ -450,8 +468,10 @@ func dashHookTime(townRoot string, agentUpdated time.Time, bead *beads.Issue, di
 // seats and wrong for describing them.) Sessions are the tmux names read once
 // by the caller, plus the sandbox registry's, which the host tmux cannot see
 // (gt-43k7c). A rig whose beads cannot be read is an error, not a rig of
-// idle polecats: a store that is down must not read as a quiet town.
-func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister) ([]dashSeat, error) {
+// idle polecats: a store that is down must not read as a quiet town. kept is
+// the seats the daemon keeps for the jev_rules battery, by rig/name, read by
+// dashKeptSeats; a seat in it carries its submitted time (gt-ddg96x).
+func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache *dashSeatCache, dispatches *events.DispatchReader, lister sessionLister, kept map[string]time.Time) ([]dashSeat, error) {
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
 		return nil, err
@@ -542,10 +562,35 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 			// that bead is already in hand, so it costs no read.
 			item.Agent = dashSeatAgent(host, rig, name, agentBead)
 			sandbox := dashSandboxStatus(sandboxAgents, sandboxErr, item.Agent, func() bool { return dashSandboxSampled(townRoot, rig, name) })
-			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name], HookedAt: hookedAt, Sandbox: sandbox})
+			var keptAt *time.Time
+			if at, ok := kept[id]; ok {
+				keptAt = &at
+			}
+			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name], HookedAt: hookedAt, Sandbox: sandbox, Kept: keptAt})
 		}
 	}
 	return seats, nil
+}
+
+// dashKeptSeats is the seats the daemon keeps for the jev_rules battery, by
+// rig/name, each at the submitted time its record holds (gt-ddg96x). The record
+// is the daemon's own fact that it is keeping the seat, so the dashboard reads
+// it rather than guessing from git. A record that cannot be read, or a store
+// that cannot be listed, is an error: a seat whose record is unread would read
+// as the recovery it is kept from, and the caller must not decide on that.
+func dashKeptSeats(townRoot string) (map[string]time.Time, error) {
+	seats, bad, err := daemon.PendingSandboxSeatEnds(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	if len(bad) > 0 {
+		return nil, fmt.Errorf("%d sandbox seat-end record(s) cannot be read, so the seats they keep cannot be told apart: %s", len(bad), strings.Join(bad, ", "))
+	}
+	kept := make(map[string]time.Time, len(seats))
+	for _, s := range seats {
+		kept[s.Rig+"/"+s.Name] = s.Submitted
+	}
+	return kept, nil
 }
 
 // dashSeatAgent is the agent a seat's row names: its live session's own record
