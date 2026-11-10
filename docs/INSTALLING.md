@@ -359,9 +359,9 @@ A job launchd cannot initialize respawns forever without the daemon ever
 reaching `daemon.log`. `launchctl print` reports no pid, a `runs` count that
 keeps climbing and `last exit code = 78` (EX_CONFIG, "Service could not
 initialize"), and `launchctl kickstart` does not clear it — the failure is in
-launchd's own load of the job, before the program starts. `gt doctor`'s
-`daemon-respawn` check and `gt status --line` both name that state; neither
-repairs it. Boot the job out, bootstrap it again, and confirm launchd took it:
+launchd's own load of the job, before the program starts. `gt status --line`
+names that state, and neither repairs it. Boot the job out, bootstrap it
+again, and confirm launchd took it:
 
 ```bash
 launchctl bootout gui/$(id -u)/com.gastown.daemon
