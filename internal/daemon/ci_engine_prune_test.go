@@ -13,14 +13,12 @@ import (
 // volume is the map docker inspect would print, with only the fields the planner
 // reads. Ids are full-length and hex, as docker prints them.
 
-// engHex64 is a container id, or the digest part of an image id.
+// engHex64 is a container id, the digest part of an image id, or an anonymous
+// volume's name.
 func engHex64(c byte) string { return strings.Repeat(string(c), 64) }
 
 // engImageID is an image id, as docker prints it.
 func engImageID(c byte) string { return "sha256:" + engHex64(c) }
-
-// engHex32 is an anonymous volume's name.
-func engHex32(c byte) string { return strings.Repeat(string(c), 32) }
 
 // engAgo is the RFC 3339 time d before the fixture's first instant.
 func engAgo(d time.Duration) string {
@@ -94,7 +92,7 @@ func engineBaseListing(t *testing.T) ciEngineListing {
 	)
 	containers := []map[string]any{
 		// A running container uses the daemon image and the volume 0s: both stay.
-		engCtr('1', '2', "running", 1*time.Hour, engHex32('0')),
+		engCtr('1', '2', "running", 1*time.Hour, engHex64('0')),
 		// A running container from 300 hours ago uses a ci-base image: it stays.
 		engCtr('3', 'd', "running", 300*time.Hour),
 		// A stopped container older than the unused age goes, and the image it used
@@ -133,14 +131,13 @@ func engineBaseListing(t *testing.T) ciEngineListing {
 	}
 	volumes := []map[string]any{
 		// Anonymous and used by the running container: kept.
-		engVol(engHex32('0'), 30*time.Hour),
+		engVol(engHex64('0'), 30*time.Hour),
 		// Anonymous, unused and older than the age: removed.
-		engVol(engHex32('1'), 30*time.Hour),
-		// Anonymous with an -env companion: kept as a pair.
-		engVol(engHex32('2'), 30*time.Hour),
-		engVol(engHex32('2')+"-env", 30*time.Hour),
+		engVol(engHex64('1'), 30*time.Hour),
+		// A 32-hex name is not the shape docker gives an anonymous volume: kept.
+		engVol(strings.Repeat("2", 32), 30*time.Hour),
 		// Anonymous and too new: kept.
-		engVol(engHex32('3'), 1*time.Hour),
+		engVol(engHex64('3'), 1*time.Hour),
 		// A named volume the gate uses: never a candidate.
 		engVol("ci-gocache", 400*time.Hour),
 	}
@@ -175,7 +172,7 @@ func TestCIEnginePruneKeepsCIBaseAndUsedImages(t *testing.T) {
 	if len(plan.containers) != 1 || plan.containers[0].ID != engHex64('4') {
 		t.Errorf("planned containers = %+v, want only the old stopped container", plan.containers)
 	}
-	if len(plan.volumes) != 1 || plan.volumes[0].Name != engHex32('1') {
+	if len(plan.volumes) != 1 || plan.volumes[0].Name != engHex64('1') {
 		t.Errorf("planned volumes = %+v, want only the unused anonymous volume", plan.volumes)
 	}
 
@@ -303,7 +300,7 @@ func TestCIEnginePruneRefusesAListingItCannotRead(t *testing.T) {
 			l.Volumes = append(l.Volumes, ciEngineVolume{Name: "bad name", CreatedAt: engAgo(30 * time.Hour)})
 		},
 		"volume time missing": func(l *ciEngineListing) {
-			l.Volumes = append(l.Volumes, ciEngineVolume{Name: engHex32('4')})
+			l.Volumes = append(l.Volumes, ciEngineVolume{Name: engHex64('4')})
 		},
 	}
 	for name, mutate := range cases {
@@ -361,7 +358,7 @@ func TestCIEnginePruneDryRunRemovesNothing(t *testing.T) {
 	f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeDryRun, engListing(t,
 		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)},
 		[]map[string]any{engImg('e', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
-		[]map[string]any{engVol(engHex32('1'), 30*time.Hour)},
+		[]map[string]any{engVol(engHex64('1'), 30*time.Hour)},
 	), cliReply{})
 	f.tick()
 	f.drain()
@@ -391,7 +388,7 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 	listing := engListing(t,
 		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)},
 		[]map[string]any{engImg('e', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
-		[]map[string]any{engVol(engHex32('1'), 30*time.Hour)},
+		[]map[string]any{engVol(engHex64('1'), 30*time.Hour)},
 	)
 
 	t.Run("the planned ids reach the remove program, and its reply is the verdict", func(t *testing.T) {
@@ -405,7 +402,7 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 		}
 		argv := strings.Join(removes[0].args, "\x00")
 		cutoff := ciCacheTestStart.Add(-ciEngineUnusedAge).Format(time.RFC3339)
-		for _, want := range []string{engHex64('4'), engImageID('e'), engHex32('1'), cutoff} {
+		for _, want := range []string{engHex64('4'), engImageID('e'), engHex64('1'), cutoff} {
 			if !strings.Contains(argv, want) {
 				t.Errorf("the remove exec's argv lacks %s", want)
 			}
@@ -562,7 +559,7 @@ func TestCIEnginePruneExecErrorLogsNoEngineStderr(t *testing.T) {
 	listing := engListing(t,
 		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)},
 		[]map[string]any{engImg('e', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
-		[]map[string]any{engVol(engHex32('1'), 30*time.Hour)},
+		[]map[string]any{engVol(engHex64('1'), 30*time.Hour)},
 	)
 	for name, tc := range map[string]struct {
 		list, remove cliReply
@@ -590,6 +587,92 @@ func TestCIEnginePruneExecErrorLogsNoEngineStderr(t *testing.T) {
 			}
 			if !strings.Contains(logs, "exit status 1") {
 				t.Errorf("the failed exec is not logged with its exit status:\n%s", logs)
+			}
+		})
+	}
+}
+
+// TestCIEnginePrunePrunesAnonymousVolumesNamedWith64HexDigits: an anonymous volume is
+// one docker names with 64 hex digits, and there is no companion rule: an unmounted
+// one older than the age goes even beside a "-env" volume. A 32-hex name, a named
+// volume, a mounted volume and a young one stay.
+func TestCIEnginePrunePrunesAnonymousVolumesNamedWith64HexDigits(t *testing.T) {
+	t.Parallel()
+	const (
+		anon    = "cec4c545e1d3f5d23ce7cbecb0e47bb61644a8eab4178730068a4712f4099b81"
+		mounted = "e98ecf6d8a8b17d753845a8268105dc3dc7d56a0a6643e10cd2b3198f3a97969"
+	)
+	listing := engListing(t,
+		[]map[string]any{engCtr('1', 'e', "running", 1*time.Hour, mounted)},
+		nil,
+		[]map[string]any{
+			engVol(anon, 30*time.Hour),
+			engVol(anon+"-env", 30*time.Hour),
+			engVol(anon[:32], 30*time.Hour),
+			engVol(mounted, 30*time.Hour),
+			engVol("ci-npm", 400*time.Hour),
+		},
+	)
+	plan, err := planCIEnginePrune(engDecode(t, listing), ciCacheTestStart, 48*time.Hour, []string{"ci-base"})
+	if err != nil {
+		t.Fatalf("planning: %v", err)
+	}
+	if len(plan.volumes) != 1 || plan.volumes[0].Name != anon {
+		t.Errorf("planned volumes = %+v, want only the unmounted 64-hex volume", plan.volumes)
+	}
+}
+
+// TestCIEnginePruneRemoveProgramHoldsNoLoop: the remove program is a straight run of
+// docker calls over the argv ids. It holds no loop, conditional or arithmetic, so
+// the count it reports is the ids it was passed.
+func TestCIEnginePruneRemoveProgramHoldsNoLoop(t *testing.T) {
+	t.Parallel()
+	for _, form := range []string{"for ", "while ", "until ", "if ", "case ", "$((", "[ ", "&&", "||"} {
+		if strings.Contains(ciEngineRemoveScript, form) {
+			t.Errorf("the remove program holds %q: it runs docker over the argv ids, with no loop, conditional or counter", form)
+		}
+	}
+}
+
+// TestCIEnginePrunePodLookupFailureLogsNoStderr: a pod lookup that fails, whether
+// kubectl exits non-zero or its reply does not decode, is logged with a fixed reason
+// and nothing of its output, and nothing is pruned.
+func TestCIEnginePrunePodLookupFailureLogsNoStderr(t *testing.T) {
+	t.Parallel()
+	const podOutput = "secret-engine-detail-7f3a"
+	for name, reply := range map[string]cliReply{
+		"pod lookup exec fails":     {code: 1, stderr: podOutput},
+		"pod reply does not decode": {stdout: podOutput + " not json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engListing(t, nil, nil, nil), cliReply{})
+			answer := f.cli.answer
+			f.cli.answer = func(c cliCall) cliReply {
+				if strings.HasPrefix(cacheTrimVerb(c.args), "get pods ") {
+					return reply
+				}
+				return answer(c)
+			}
+			f.tick()
+			f.drain()
+			// The cache trim shares this lookup and logs its own line from it, so only
+			// the engine prune's lines are read here.
+			var logs []string
+			for _, line := range strings.Split(f.logs.String(), "\n") {
+				if strings.Contains(line, "ci engine prune") {
+					logs = append(logs, line)
+				}
+			}
+			engineLogs := strings.Join(logs, "\n")
+			if strings.Contains(engineLogs, "secret-engine-detail") {
+				t.Errorf("the pod lookup's output reached the engine prune's log:\n%s", engineLogs)
+			}
+			if !strings.Contains(engineLogs, "pod lookup failed") {
+				t.Errorf("the failed pod lookup is not logged by the engine prune:\n%s", engineLogs)
+			}
+			if n := len(engineExecs(f, "ci-engine-remove")); n != 0 {
+				t.Errorf("a failed pod lookup ran the remove program %d time(s)", n)
 			}
 		})
 	}

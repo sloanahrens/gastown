@@ -280,11 +280,12 @@ the `dind` container and the same `dry_run` default as the cache trim above.
     ago and carry no tag in a `ci_engine_keep_repos` repository other than
     `ci-base`;
   - `ci-base` images other than the one `ci-base:latest` names, and the id created
-    just before it, which is kept as the rollback. These go without an age gate.
-    A `ci-base` image that also carries a tag in another kept repository is kept;
-  - anonymous volumes, whose names are the 32 hex digits docker gives one, with no
-    `<name>-env` volume beside them, no container that stays mounting them, and
-    created more than 24 hours ago;
+    just before it, which is kept as the rollback. With no `ci-base:latest` tag, the
+    newest `ci-base` id is the latest. These go without an age gate. A `ci-base`
+    image that also carries a tag in another kept repository is kept;
+  - anonymous volumes, whose names are the 64 hex digits docker gives one, with no
+    container that stays mounting them, and created more than 24 hours ago. A
+    volume's own name and mounts decide it; no companion volume is consulted;
   - build cache unused for 24 hours, pruned by docker itself in an apply.
 - What stays: any image a container that stays uses; any image that is a parent
   of an image that stays, which docker would refuse to remove; named volumes, so

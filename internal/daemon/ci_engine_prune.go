@@ -1,22 +1,19 @@
 package daemon
 
-// The CI runner's docker-in-docker engine prune (gt-i02983). The runner's dind
-// container keeps its Docker data root on the claim forgejo-runner-dind, which
-// local-path does not bound, so the engine filled the control node's data disk
-// and the node evicted the runner. ci_cache_trim trims one volume; this prunes the
-// rest of the engine on its own interval (ci_engine_prune_interval), under the
-// same patrol, the same exec into the runner's dind container and the same
-// dry-run default.
+// The CI runner's docker-in-docker engine prune. It bounds the Docker data root in
+// the runner's dind container: images, stopped containers, build cache and
+// anonymous volumes are removed on an interval (ci_engine_prune_interval), under
+// the disk maintenance patrol, through the same exec into the dind container and
+// with the same dry-run default as the cache trim.
 //
-// Each run is two execs. The list program prints the engine as JSON: the data
-// root's size and the containers, images and volumes as docker inspects them. The
-// planner, a pure function over that listing, decides what goes, so the keep rule
-// is tested in-process. The remove program removes only the ids and names the
-// planner named, passed as argv data, and prints the cache trim's three-figure
-// reply. A dry run runs the list program alone and removes nothing.
+// Each run is two execs. The list program prints the engine as JSON. The planner,
+// a pure function over that listing, decides what goes, so the keep rule is tested
+// in-process. The remove program removes only the ids and names the planner named,
+// passed as argv data, and prints the cache trim's three-figure reply. A dry run
+// runs the list program alone. The keep rule is written once, in
+// docs/guides/disk-maintenance.md: read it before changing what is removed.
 //
-// Build cache is pruned by docker itself (builder prune, unused for 24 hours), and
-// is not sized in a dry run: docker has no dry run for it.
+// Build cache is not sized in a dry run, since docker has no dry run for it.
 
 import (
 	"context"
@@ -37,8 +34,7 @@ const (
 	// under. It is not a target name, so it cannot collide with one.
 	ciEnginePruneName = "ci_engine_prune"
 
-	// ciEngineBaseRepo is the repository whose images keep a rollback: the latest
-	// tag's id and the one before it. Every other ci-base id goes.
+	// ciEngineBaseRepo is the base image repository the rollback rule applies to.
 	ciEngineBaseRepo = "ci-base"
 
 	// ciEngineBaseLatestTag is the tag that names the base image the gate runs.
@@ -48,8 +44,8 @@ const (
 	// claim the dind container mounts.
 	ciEngineRoot = ciCacheDindMount
 
-	// ciEngineUnusedAge is how long a stopped container, an unused anonymous volume
-	// and an unused build cache record must sit before the prune takes them.
+	// ciEngineUnusedAge is the age the keep rule gives a stopped container, an unused
+	// anonymous volume and an unused build cache record. See the guide.
 	ciEngineUnusedAge = 24 * time.Hour
 )
 
@@ -69,24 +65,23 @@ if [ -n "$volumes" ]; then docker volume inspect $volumes; else printf '[]'; fi
 printf '}\n'
 `
 
-// ciEngineRemoveScript is the remove program. Its arguments are the data root,
-// three space-separated lists (container ids, image ids and volume names, each one
-// the planner validated) and the build cache cutoff the planner computed. The
-// removal stops at the first failure (set -e), so the reply is printed only when
-// every named item went. The build cache is pruned last, unused since the cutoff.
-// Its reply is the cache trim's three figures. The program holds no age, keep or
-// repository logic: each of those is decided in Go.
+// ciEngineRemoveScript is the remove program. Its arguments are the data root, three
+// space-separated lists (container ids, image ids and volume names, each one the
+// planner validated) and the build cache cutoff. Each list is one docker call over
+// its ids; an empty list is not sent to docker. The first refused removal stops the
+// program (set -e), so the reply is printed only when every named item went, and
+// removed is the number of ids passed.
 const ciEngineRemoveScript = `set -euf
 root=$1; containers=$2; images=$3; volumes=$4; cutoff=$5
 before=$(du -sk "$root" | cut -f1)
-removed=0
-for id in $containers; do docker rm "$id" >/dev/null; removed=$((removed + 1)); done
-for id in $images; do docker rmi -f "$id" >/dev/null; removed=$((removed + 1)); done
-for name in $volumes; do docker volume rm "$name" >/dev/null; removed=$((removed + 1)); done
+printf '%s\n' $containers | xargs -r docker rm >/dev/null
+printf '%s\n' $images | xargs -r docker rmi -f >/dev/null
+printf '%s\n' $volumes | xargs -r docker volume rm >/dev/null
 docker builder prune -af --filter "until=$cutoff" >/dev/null
+set -- $containers $images $volumes
 after=$(du -sk "$root" | cut -f1)
 echo "before_kib=$before"
-echo "removed=$removed"
+echo "removed=$#"
 echo "after_kib=$after"
 `
 
@@ -98,10 +93,9 @@ var (
 	// ciEngineVolumeNameRE is a volume name docker accepts. The check keeps a name
 	// from reaching the remove program's argv as anything but a name.
 	ciEngineVolumeNameRE = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
-	// ciEngineAnonymousVolumeRE is an anonymous volume's name: the 32 hex digits
-	// docker gives one. Named volumes never match, so ci-gocache, ci-gomod and
-	// ci-npm are never candidates.
-	ciEngineAnonymousVolumeRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	// ciEngineAnonymousVolumeRE is an anonymous volume's name: the 64 hex digits
+	// docker gives one. Named volumes never match.
+	ciEngineAnonymousVolumeRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // ciEngineListing is the JSON the list program prints.
@@ -161,23 +155,10 @@ func (p ciEnginePlan) count() int {
 }
 
 // planCIEnginePrune decides what the engine prune removes from a listing taken at
-// now. It refuses a listing it cannot read in full: an id or name that is not in
-// docker's shape, a time it cannot parse, or a missing data root figure. A refusal
-// is a failed run, never an empty plan.
-//
-// The keep rule:
-//   - a container is removed when it is stopped and was created more than the
-//     unused age ago;
-//   - an image used by a container that stays is kept;
-//   - a ci-base image is kept only when it is the latest tag's id or the id before
-//     it, and is removed otherwise, with no age gate;
-//   - an image with a tag in keepRepos other than ci-base is kept, even when it is
-//     also tagged ci-base;
-//   - any other image is removed when it was created more than age ago;
-//   - an image that is a parent of a kept image is kept, as docker would refuse;
-//   - an anonymous volume is removed when no container that stays mounts it, no
-//     volume named <name>-env exists, and it was created more than the unused age
-//     ago.
+// now, under the keep rule in docs/guides/disk-maintenance.md. It refuses a listing
+// it cannot read in full: an id or name that is not in docker's shape, a time it
+// cannot parse, or a missing data root figure. A refusal is a failed run, never an
+// empty plan.
 func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keepRepos []string) (ciEnginePlan, error) {
 	var plan ciEnginePlan
 	if l.DataRootKiB == nil {
@@ -278,19 +259,17 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keep
 	})
 	slices.SortFunc(plan.containers, func(a, b ciEngineContainer) int { return strings.Compare(a.ID, b.ID) })
 
-	names := make(map[string]bool, len(l.Volumes))
 	for _, v := range l.Volumes {
 		if !ciEngineVolumeNameRE.MatchString(v.Name) {
 			return plan, errors.New("the engine listing names a volume that is not a volume name")
 		}
-		names[v.Name] = true
 	}
 	for _, v := range l.Volumes {
 		t, err := parseCIEngineTime(v.CreatedAt)
 		if err != nil {
 			return plan, fmt.Errorf("volume %s: %w", v.Name, err)
 		}
-		if !ciEngineAnonymousVolumeRE.MatchString(v.Name) || names[v.Name+"-env"] || usedVolume[v.Name] {
+		if !ciEngineAnonymousVolumeRE.MatchString(v.Name) || usedVolume[v.Name] {
 			continue
 		}
 		if now.Sub(t) > ciEngineUnusedAge {
@@ -301,10 +280,8 @@ func planCIEnginePrune(l ciEngineListing, now time.Time, age time.Duration, keep
 	return plan, nil
 }
 
-// ciEngineBaseKeep returns the ci-base image ids the prune keeps: the latest tag's
-// id and the id created just before it, the rollback. With no latest tag, the
-// newest ci-base id is the latest, so a town that has not tagged one still keeps
-// its newest base and the one before it.
+// ciEngineBaseKeep returns the ci-base image ids the rollback rule keeps. The rule
+// is in docs/guides/disk-maintenance.md.
 func ciEngineBaseKeep(images map[string]ciEngineImage, created map[string]time.Time) map[string]bool {
 	keep := map[string]bool{}
 	var base []string
@@ -330,9 +307,8 @@ func ciEngineBaseKeep(images map[string]ciEngineImage, created map[string]time.T
 		}
 	}
 	keep[latest] = true
-	// The rollback is the id built just before the latest, not the newest other id:
-	// a newer base under another tag is not the one the latest replaced. base is
-	// newest first, so the first id older than the latest is that one.
+	// base is newest first, so the first id older than the latest is the one built
+	// just before it.
 	for _, id := range base {
 		if created[id].Before(created[latest]) {
 			keep[id] = true
@@ -529,11 +505,13 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
 	pod, err := d.ciCacheTrimPod(ctx, kubeconfig, kubeContext)
 	if err != nil {
-		kind := "pod listing"
+		// The lookup's error can carry kubectl's stderr, so only the sentinel's text
+		// or the exit status is logged.
 		if errors.Is(err, errCICacheTrimNotRunning) {
-			kind = "pod not running"
+			d.ciEnginePruneLogf("pod not running", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
+		} else {
+			d.ciEnginePruneLogf("pod lookup", "disk_maintenance: ci engine prune: the runner's pod lookup failed (%s); nothing pruned", ciEngineExitStatus(err))
 		}
-		d.ciEnginePruneLogf(kind, "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false
 	}
 
@@ -571,7 +549,7 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		for _, v := range plan.volumes {
 			d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove volume %s", v.Name)
 		}
-		d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove %s, of %s, and prune build cache unused for 24h (not sized in a dry run); nothing removed",
+		d.logger.Printf("disk_maintenance: ci engine prune dry_run: would remove %s, of %s, and prune build cache (not sized in a dry run); nothing removed",
 			counts, before)
 		return true
 	}

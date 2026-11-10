@@ -97,7 +97,7 @@ func (f fakeDockerEnv) runProgram(t *testing.T, program string, args ...string) 
 
 // TestCIEngineRemoveProgramRemovesTheNamedItems: the remove program removes the
 // containers, then the images, then the volumes it was passed, prunes the build
-// cache unused for 24 hours, and prints the three-figure reply with the count.
+// cache at the cutoff, and prints the three-figure reply with the count.
 func TestIntegrationCIEngineRemoveProgramRemovesTheNamedItems(t *testing.T) {
 	f := newFakeDocker(t)
 	root := t.TempDir()
@@ -107,11 +107,9 @@ func TestIntegrationCIEngineRemoveProgramRemovesTheNamedItems(t *testing.T) {
 		t.Fatalf("the remove program failed on a clean engine")
 	}
 	want := []string{
-		"rm c1",
-		"rm c2",
+		"rm c1 c2",
 		"rmi -f sha256:i1",
-		"volume rm v1",
-		"volume rm v2",
+		"volume rm v1 v2",
 		"builder prune -af --filter until=" + cutoff,
 	}
 	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -123,6 +121,32 @@ func TestIntegrationCIEngineRemoveProgramRemovesTheNamedItems(t *testing.T) {
 	}
 	if reply.removed != 5 {
 		t.Errorf("reply removed = %d, want 5", reply.removed)
+	}
+}
+
+// TestIntegrationCIEngineRemoveProgramSkipsAnEmptyKind: a kind the plan names no
+// item of is not sent to docker at all, so an engine with no volumes to remove
+// never runs a volume removal without names, and the count is the ids passed.
+func TestIntegrationCIEngineRemoveProgramSkipsAnEmptyKind(t *testing.T) {
+	f := newFakeDocker(t)
+	const cutoff = "2026-11-09T00:00:00Z"
+	stdout, ok := f.runProgram(t, ciEngineRemoveScript, t.TempDir(), "", "sha256:i1", "", cutoff)
+	if !ok {
+		t.Fatalf("the remove program failed with an empty container and volume list")
+	}
+	want := []string{
+		"rmi -f sha256:i1",
+		"builder prune -af --filter until=" + cutoff,
+	}
+	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("docker calls = %q, want %q", got, want)
+	}
+	reply, err := parseCICacheTrimReply(stdout)
+	if err != nil {
+		t.Fatalf("the reply does not parse: %v: %q", err, stdout)
+	}
+	if reply.removed != 1 {
+		t.Errorf("reply removed = %d, want 1", reply.removed)
 	}
 }
 
