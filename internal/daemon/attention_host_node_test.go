@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"sync"
 	"errors"
 	"fmt"
 	"io"
@@ -732,4 +733,51 @@ func findItem(items []attention.Item, key string) (attention.Item, bool) {
 		}
 	}
 	return attention.Item{}, false
+}
+
+// TestControlNodeDiskGivesEachRunItsOwnDeadline: the listing and each node's
+// summary read get a deadline of their own, every one derived from the caller's
+// context and none from another run's, so a node that hangs spends only its
+// own budget (gt-x1po96, review round 3).
+func TestControlNodeDiskGivesEachRunItsOwnDeadline(t *testing.T) {
+	t.Parallel()
+	cli := newFakeCLIFor(func(c cliCall) cliReply {
+		switch cacheTrimVerb(c.args) {
+		case "get nodes -o name":
+			return cliReply{stdout: "node/colima-gt-control\nnode/colima-gt-worker\n"}
+		case "get --raw /api/v1/nodes/colima-gt-control/proxy/stats/summary":
+			return cliReply{stdout: nodeSummary("colima-gt-control", 100, 80)}
+		case "get --raw /api/v1/nodes/colima-gt-worker/proxy/stats/summary":
+			return cliReply{stdout: nodeSummary("colima-gt-worker", 100, 10)}
+		}
+		return cliReply{code: 1}
+	})
+	d := nodeDiskDaemon(t, cli, nodeDiskPatrol(ciCacheTestContext))
+	type parentKey struct{}
+	parent := context.WithValue(context.Background(), parentKey{}, "caller")
+	var mu sync.Mutex
+	var derivedFromCaller, derivedFromAnother int
+	d.hostNodeReadContextFn = func(p context.Context) (context.Context, context.CancelFunc) {
+		mu.Lock()
+		defer mu.Unlock()
+		if p == parent {
+			derivedFromCaller++
+		} else {
+			derivedFromAnother++
+		}
+		return context.WithTimeout(p, attentionHostProbeTimeout)
+	}
+
+	reads, err := d.controlNodeDisk(parent)
+	if err != nil {
+		t.Fatalf("controlNodeDisk: %v", err)
+	}
+	if len(reads) != 2 || reads[0].Err != nil || reads[1].Err != nil {
+		t.Fatalf("reads = %+v, want two clean reads", reads)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if derivedFromCaller != 3 || derivedFromAnother != 0 {
+		t.Errorf("deadlines: %d from the caller's context, %d from another run's; want 3 (the listing and two reads) and 0", derivedFromCaller, derivedFromAnother)
+	}
 }

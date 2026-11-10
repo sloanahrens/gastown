@@ -195,8 +195,10 @@ var ruleFlags = map[string]RuleFlags{
 	// host.disk_warn becomes operator_action after DiskWarnPromoteBeats
 	// consecutive heartbeats; the daemon writes that promotion as its own line.
 	RuleHostDiskWarn: flagsInfo,
-	// The control node's disk raises the same two levels as the town root's
-	// with the same flags: a warning is for the next look, a critical wakes.
+	// The control node's disk raises the same two levels as the town root's:
+	// a warning is for the next look, a critical wakes. Unlike host.disk_warn,
+	// the node warning is not promoted after a run of heartbeats; the node is
+	// re-read every tick and a worsening disk raises the critical itself.
 	RuleHostNodeDiskWarn: flagsInfo,
 	RuleHostProbe:        flagsInfo,
 	// The overrun guard stopped the polecat and handed the bead back itself.

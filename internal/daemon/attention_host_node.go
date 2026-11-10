@@ -193,6 +193,10 @@ func parseControlNodeNames(out []byte) ([]string, error) {
 // read fails drops the held names, so a node that left the cluster is not read
 // again for the rest of the window.
 //
+// Every kubectl run, the listing and each node's summary, gets its own
+// deadline from ctx (hostNodeReadContext): a node that hangs spends only its
+// own budget, and the nodes read after it still get theirs.
+//
 // Nothing the kubectl run printed to stderr enters an error, so a credential or
 // a path in it never reaches the queue.
 func (d *Daemon) controlNodeDisk(ctx context.Context) ([]hostNodeRead, error) {
@@ -203,13 +207,13 @@ func (d *Daemon) controlNodeDisk(ctx context.Context) ([]hostNodeRead, error) {
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
-	defer cancel()
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, d.diskMaintenanceSeams().getenv)
 	now := d.clk().Now()
 	names := d.controlNodes.held(kubeContext, now)
 	if names == nil {
-		listing, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext, "get", "nodes", "-o", "name")
+		lctx, lcancel := d.hostNodeReadContext(ctx)
+		listing, _, err := d.ciCacheTrimKubectlRun(lctx, kubeconfig, kubeContext, "get", "nodes", "-o", "name")
+		lcancel()
 		if err != nil {
 			return nil, fmt.Errorf("listing the control cluster's nodes: %w", err)
 		}
@@ -239,10 +243,23 @@ func (d *Daemon) controlNodeDisk(ctx context.Context) ([]hostNodeRead, error) {
 // readNodeDisk reads one node's image filesystem: its stats summary through the
 // control context, parsed.
 func (d *Daemon) readNodeDisk(ctx context.Context, kubeconfig, kubeContext, name string) (hostNodeDisk, error) {
+	ctx, cancel := d.hostNodeReadContext(ctx)
+	defer cancel()
 	summary, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
 		"get", "--raw", "/api/v1/nodes/"+name+"/proxy/stats/summary")
 	if err != nil {
 		return hostNodeDisk{}, fmt.Errorf("reading the stats summary: %w", err)
 	}
 	return parseNodeStatsImageFs(summary)
+}
+
+// hostNodeReadContext bounds one kubectl run of the node-disk read with its own
+// attentionHostProbeTimeout from parent. One deadline per run, never one shared
+// across the nodes: a node that hangs cannot spend the budget of the nodes read
+// after it (gt-x1po96). hostNodeReadContextFn replaces it in a test.
+func (d *Daemon) hostNodeReadContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if d.hostNodeReadContextFn != nil {
+		return d.hostNodeReadContextFn(parent)
+	}
+	return context.WithTimeout(parent, attentionHostProbeTimeout)
 }
