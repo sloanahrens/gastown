@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/deps"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -495,7 +496,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	// to avoid "no route found" warnings (#1424). Determine beadsWorkDir for rig identity bead.
 	var beadsWorkDir string
 	if newRig.Config.Prefix != "" {
-		mayorRigBeads := filepath.Join(townRoot, name, "mayor", "rig", ".beads")
+		mayorRigBeads := constants.RigBeadsPath(filepath.Join(townRoot, name))
 		if _, err := os.Stat(mayorRigBeads); err == nil {
 			beadsWorkDir = filepath.Join(townRoot, name, "mayor", "rig")
 		} else {
@@ -1061,7 +1062,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 	rigPath := filepath.Join(townRoot, name)
 	beadsDirCandidates := []string{
 		filepath.Join(rigPath, ".beads"),
-		filepath.Join(rigPath, "mayor", "rig", ".beads"),
+		constants.RigBeadsPath(rigPath),
 	}
 	foundBeadsCandidate := false
 	for _, beadsDir := range beadsDirCandidates {
@@ -1132,7 +1133,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 
 	// Create rig identity bead if prefix is set
 	if result.BeadsPrefix != "" {
-		mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
+		mayorRigBeads := constants.RigBeadsPath(rigPath)
 		beadsWorkDir := rigPath
 		if _, err := os.Stat(mayorRigBeads); err == nil {
 			beadsWorkDir = filepath.Join(rigPath, "mayor", "rig")

@@ -20,6 +20,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // skeletonRoot is the directory the archive extracts into, relative to /sandbox.
@@ -545,7 +546,7 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		{name: skeletonRoot + "/", dir: true},
 		{name: path.Join(skeletonRoot, ".beads") + "/", dir: true},
 		{name: path.Join(skeletonRoot, s.Rig, ".beads") + "/", dir: true},
-		{name: path.Join(skeletonRoot, s.Rig, "mayor/rig/.beads") + "/", dir: true},
+		{name: path.Join(skeletonRoot, constants.RigBeadsPath(s.Rig)) + "/", dir: true},
 	}
 	add := func(rel string, data []byte) {
 		entries = append(entries, skeletonEntry{name: path.Join(skeletonRoot, rel), data: data})
@@ -605,10 +606,10 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: %s: %w", configRel, err)
 	}
-	add(s.Rig+"/mayor/rig/.beads/config.yaml", beadsConfig)
+	add(constants.RigBeadsPath(s.Rig)+"/config.yaml", beadsConfig)
 
 	// Both beads metadata files point at the control plane's Dolt server.
-	for _, rel := range []string{".beads/metadata.json", s.Rig + "/mayor/rig/.beads/metadata.json"} {
+	for _, rel := range []string{".beads/metadata.json", constants.RigBeadsPath(s.Rig) + "/metadata.json"} {
 		raw, err := town.read(rel)
 		if err != nil {
 			return nil, err

@@ -566,7 +566,7 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 
 	// Check if source repo has tracked .beads/ directory.
 	// If so, we need to initialize the database (it doesn't exist after clone since DB files are gitignored).
-	sourceBeadsDir := filepath.Join(mayorRigPath, ".beads")
+	sourceBeadsDir := constants.RigBeadsPath(rigPath)
 	if _, err := os.Stat(sourceBeadsDir); err == nil {
 		// Remove any redirect file that might have been accidentally tracked.
 		// Redirect files are runtime/local config and should not be in git.
@@ -800,7 +800,7 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// created under the new prefix: routing needs it to exist (#1424).
 	if opts.BeadsPrefix != "" {
 		routePath := opts.Name
-		mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
+		mayorRigBeads := constants.RigBeadsPath(rigPath)
 		if _, err := os.Stat(mayorRigBeads); err == nil {
 			routePath = opts.Name + "/mayor/rig"
 		}
@@ -1622,7 +1622,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	}
 
 	beadsDir := filepath.Join(rigPath, ".beads")
-	mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
+	mayorRigBeads := constants.RigBeadsPath(rigPath)
 
 	// Check if source repo has tracked .beads/ (cloned into mayor/rig).
 	// We detect this by checking for metadata.json (a real beads database marker),
@@ -1635,7 +1635,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 			return err
 		}
 		redirectPath := filepath.Join(beadsDir, "redirect")
-		if err := os.WriteFile(redirectPath, []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		if err := os.WriteFile(redirectPath, []byte(strings.TrimPrefix(constants.RigBeadsPath("."), "./")+"\n"), 0644); err != nil {
 			return fmt.Errorf("creating redirect file: %w", err)
 		}
 		return nil

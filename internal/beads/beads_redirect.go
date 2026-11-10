@@ -7,8 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
+
+// rigBeadsRelPath is the rig's tracked beads directory relative to the rig
+// root, the form a redirect file carries (e.g. "mayor/rig/.beads").
+func rigBeadsRelPath() string {
+	return strings.TrimPrefix(constants.RigBeadsPath("."), "./")
+}
 
 // ResolveBeadsDir returns the actual beads directory, following any redirect.
 // If workDir/.beads/redirect exists, it reads the redirect path and resolves it
@@ -210,7 +217,7 @@ func ComputeRedirectTarget(townRoot, worktreePath string) (string, error) {
 	rigRoot := filepath.Join(townRootAbs, rigName)
 	townBeadsPath := filepath.Join(townRootAbs, ".beads")
 	rigBeadsPath := filepath.Join(rigRoot, ".beads")
-	mayorBeadsPath := filepath.Join(rigRoot, "mayor", "rig", ".beads")
+	mayorBeadsPath := constants.RigBeadsPath(rigRoot)
 
 	// Check rig-level .beads first: if the rig has its own database
 	// (metadata.json with dolt_database), crew must use rig-level beads
@@ -291,7 +298,7 @@ func ComputeRedirectTarget(townRoot, worktreePath string) (string, error) {
 	var redirectPath string
 	if usesMayorFallback {
 		// Direct redirect to mayor/rig/.beads since rig/.beads doesn't exist
-		redirectPath = upPath + "mayor/rig/.beads"
+		redirectPath = upPath + rigBeadsRelPath()
 	} else {
 		redirectPath = upPath + ".beads"
 
@@ -347,7 +354,7 @@ func SetupRedirect(townRoot, worktreePath string) error {
 	// Warn only when using mayor fallback WITHOUT a redirect file.
 	// When rig/.beads/redirect exists pointing to mayor/rig/.beads, that's the
 	// intended configuration for tracked beads — not a fallback worth warning about.
-	if strings.Contains(redirectPath, "mayor/rig/.beads") {
+	if strings.Contains(redirectPath, rigBeadsRelPath()) {
 		relPath, _ := filepath.Rel(townRoot, worktreePath)
 		parts := strings.Split(filepath.ToSlash(relPath), "/")
 		rigRoot := filepath.Join(townRoot, parts[0])
@@ -355,7 +362,7 @@ func SetupRedirect(townRoot, worktreePath string) error {
 		if _, err := os.Stat(rigRedirectPath); os.IsNotExist(err) {
 			// No redirect file — this is an unexpected fallback
 			rigBeadsPath := filepath.Join(rigRoot, ".beads")
-			mayorBeadsPath := filepath.Join(rigRoot, "mayor", "rig", ".beads")
+			mayorBeadsPath := constants.RigBeadsPath(rigRoot)
 			fmt.Fprintf(os.Stderr, "Warning: rig .beads not found at %s, using %s\n", rigBeadsPath, mayorBeadsPath)
 			fmt.Fprintf(os.Stderr, "  Run 'bd doctor' to fix rig beads configuration\n")
 		}

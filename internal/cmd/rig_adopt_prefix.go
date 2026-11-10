@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
@@ -47,7 +48,7 @@ func detectAdoptBeadsPrefix(rigPath, flagPrefix string, configGet func(workDir s
 	var undetected error
 	for _, beadsDir := range []string{
 		filepath.Join(rigPath, ".beads"),
-		filepath.Join(rigPath, "mayor", "rig", ".beads"),
+		constants.RigBeadsPath(rigPath),
 	} {
 		if _, err := os.Stat(beadsDir); err != nil {
 			continue
@@ -162,7 +163,7 @@ func adoptRegisterIn(townRoot string, req rigAdoptRequest, configGet func(workDi
 	// Add route to town-level routes.jsonl for prefix-based routing
 	if result.BeadsPrefix != "" {
 		routePath := req.name
-		if _, err := os.Stat(filepath.Join(townRoot, req.name, "mayor", "rig", ".beads")); err == nil {
+		if _, err := os.Stat(constants.RigBeadsPath(filepath.Join(townRoot, req.name))); err == nil {
 			routePath = req.name + "/mayor/rig"
 		}
 		route := beads.Route{

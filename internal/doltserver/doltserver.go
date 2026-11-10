@@ -4140,7 +4140,7 @@ func collectReferencedDatabases(townRoot string) map[string]bool {
 				referenced[db] = true
 			}
 			// Check <rig>/mayor/rig/.beads/metadata.json
-			if db := readExistingDoltDatabase(filepath.Join(townRoot, entry.Name(), "mayor", "rig", ".beads")); db != "" {
+			if db := readExistingDoltDatabase(constants.RigBeadsPath(filepath.Join(townRoot, entry.Name()))); db != "" {
 				referenced[db] = true
 			}
 		}
@@ -4221,7 +4221,7 @@ func (h *host) CollectDatabaseOwners(townRoot string) map[string]string {
 					owners[db] = dirName + " rig beads"
 				}
 			}
-			if db := readExistingDoltDatabase(filepath.Join(townRoot, dirName, "mayor", "rig", ".beads")); db != "" {
+			if db := readExistingDoltDatabase(constants.RigBeadsPath(filepath.Join(townRoot, dirName))); db != "" {
 				if _, already := owners[db]; !already {
 					owners[db] = dirName + " rig beads"
 				}
@@ -4869,7 +4869,7 @@ func FindRigBeadsDir(townRoot, rigName string) string {
 	}
 
 	// Prefer mayor/rig/.beads (canonical location for tracked beads)
-	mayorBeads := filepath.Join(townRoot, rigName, "mayor", "rig", ".beads")
+	mayorBeads := constants.RigBeadsPath(filepath.Join(townRoot, rigName))
 	if _, err := os.Stat(mayorBeads); err == nil {
 		return mayorBeads
 	}
@@ -4917,7 +4917,7 @@ func FindOrCreateRigBeadsDir(townRoot, rigName string) (string, error) {
 	// Check mayor/rig/.beads first (canonical location).
 	// Use MkdirAll as an idempotent existence check+create to close the
 	// TOCTOU window between os.Stat and the caller's file operations.
-	mayorBeads := filepath.Join(townRoot, rigName, "mayor", "rig", ".beads")
+	mayorBeads := constants.RigBeadsPath(filepath.Join(townRoot, rigName))
 	if _, err := os.Stat(mayorBeads); err == nil {
 		// Ensure it still exists (no-op if present, recreates if deleted)
 		if err := os.MkdirAll(mayorBeads, 0755); err != nil {

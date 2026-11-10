@@ -2776,7 +2776,7 @@ func (d *Daemon) checkAllRigsDolt() error {
 
 	// Check each registered rig
 	for _, rigName := range d.getKnownRigs() {
-		rigBeadsDir := filepath.Join(d.config.TownRoot, rigName, "mayor", "rig", ".beads")
+		rigBeadsDir := constants.RigBeadsPath(filepath.Join(d.config.TownRoot, rigName))
 		if backend := readBeadsBackend(rigBeadsDir); backend != "" && backend != "dolt" {
 			rigPath := filepath.Join(d.config.TownRoot, rigName)
 			problems = append(problems, fmt.Sprintf(

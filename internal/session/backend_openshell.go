@@ -24,6 +24,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/buildpaths"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -1296,7 +1297,7 @@ func sandboxRel(spec SpawnSpec) (string, error) {
 // gastown/polecats/<name>/gastown it is ../../../mayor/rig/.beads, the same
 // string the host worktree's .beads/redirect carries.
 func redirectTarget(rel string) string {
-	return strings.Repeat("../", strings.Count(rel, "/")) + "mayor/rig/.beads"
+	return strings.Repeat("../", strings.Count(rel, "/")) + strings.TrimPrefix(constants.RigBeadsPath("."), "./")
 }
 
 // cacheVolumeName is the rig's cache volume. {rig} in the profile's name
