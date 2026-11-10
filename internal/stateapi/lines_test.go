@@ -319,6 +319,32 @@ func TestReadLinesTailBytesIdentitySource(t *testing.T) {
 	}
 }
 
+// TestPackageHasOneTestMain: server_test.go already declares the package's
+// TestMain, so no other test file in the package declares one.
+func TestPackageHasOneTestMain(t *testing.T) {
+	t.Parallel()
+	files, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	count := 0
+	for _, name := range files {
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range f.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "TestMain" {
+				count++
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("package declares %d TestMain functions, want exactly 1", count)
+	}
+}
+
 func TestReadLinesTailBytes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -554,10 +580,10 @@ func TestConfineReportsUnresolvablePaths(t *testing.T) {
 	}
 }
 
-// TestConfineRefusesNonRegularFiles: a FIFO, a symlink to one, and a directory
-// are refused, so a read never opens a file that can block or is not a file of
+// TestConfineRefusesSpecialFiles: a FIFO, a symlink to one, and a directory are
+// refused, so a read never opens a file that can block or is not a file of
 // lines. Confine does not open the FIFO, so the test cannot block.
-func TestConfineRefusesNonRegularFiles(t *testing.T) {
+func TestConfineRefusesSpecialFiles(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	if err := syscall.Mkfifo(filepath.Join(root, "pipe.jsonl"), 0o600); err != nil {
@@ -579,10 +605,32 @@ func TestConfineRefusesNonRegularFiles(t *testing.T) {
 	}
 }
 
-// TestCursorZeroRoundTrips: an empty page from a missing file echoes the zero
-// cursor. Its String must parse back to the zero cursor, so a client that stores
-// the cursor from that page resumes from the file's start.
-func TestCursorZeroRoundTrips(t *testing.T) {
+// TestCursorRoundTrip: a cursor that String writes parses back unchanged, the
+// zero cursor included.
+func TestCursorRoundTrip(t *testing.T) {
+	t.Parallel()
+	cursors := map[string]Cursor{
+		"zero":   {},
+		"normal": {Gen: "2049-7340033", Off: 17},
+	}
+	for name, c := range cursors {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseCursor(c.String())
+			if err != nil {
+				t.Fatalf("ParseCursor(%q): %v", c.String(), err)
+			}
+			if got != c {
+				t.Fatalf("round trip of %+v = %+v", c, got)
+			}
+		})
+	}
+}
+
+// TestCursorRoundTripResumesMissingFile: an empty page from a missing file echoes
+// the zero cursor. A client that stores that cursor and sends it back resumes
+// from the file's start once the file appears.
+func TestCursorRoundTripResumesMissingFile(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	f := confine(t, dir, "absent.jsonl")
