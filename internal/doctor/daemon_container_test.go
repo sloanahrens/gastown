@@ -54,7 +54,7 @@ func containerRunning() templates.SupervisorState {
 	return templates.SupervisorState{Kind: config.SupervisorContainer, Loaded: true, LastExit: -1}
 }
 
-// containerCheck is one of the three daemon checks and the message it reports
+// containerCheck is one of the two daemon checks and the message it reports
 // for a healthy container town.
 type containerCheck struct {
 	check Check
@@ -328,7 +328,7 @@ func (f *fakeDockerInspect) read(townRoot string) containerDaemonReading {
 	return readContainerDaemonWith(f.run, townRoot)
 }
 
-// Each of the three daemon checks reports a healthy container town from the
+// Each of the two daemon checks reports a healthy container town from the
 // production reading: state.json as the container's daemon wrote it, and one
 // docker inspect of the container the town's settings name answering that it
 // runs. Nothing but the docker CLI is faked.
