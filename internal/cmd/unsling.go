@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -58,26 +59,37 @@ func runUnsling(cmd *cobra.Command, args []string) error {
 	return runUnslingWith(cmd, args, unslingDryRun, unslingForce)
 }
 
-// unslingDeps are the collaborators an unsling reaches outside its arguments.
-// runUnslingWith supplies the production ones; tests supply stubs.
-type unslingDeps struct {
-	resolveTarget func(target string) (string, error)
-	townRoot      func() (string, error)
-	open          beadsOpener
+// agentIDResolver turns a target into its agent id. It has no pane or working
+// directory method, so unsling cannot ask tmux for either: a seat with no tmux
+// session still resolves, and the hook can be cleared.
+type agentIDResolver struct {
+	reg *session.PrefixRegistry
 }
 
-// resolveUnslingTarget turns a target into its agent id with no tmux lookup:
-// a seat with no tmux session still resolves, so its hook can be cleared.
-func resolveUnslingTarget(target string) (string, error) {
-	return resolveTargetAgentID(townRegistry(), target)
+func (r agentIDResolver) agentID(target string) (string, error) {
+	return resolveTargetAgentID(r.reg, target)
+}
+
+// unslingDeps are the collaborators an unsling reaches outside its arguments.
+// productionUnslingDeps supplies the production ones; tests supply stubs.
+type unslingDeps struct {
+	resolver agentIDResolver
+	townRoot func() (string, error)
+	open     beadsOpener
+}
+
+// productionUnslingDeps is the wiring runUnslingWith uses. The registry is a
+// parameter, so a test wires the same deps over an in-test registry.
+func productionUnslingDeps(reg *session.PrefixRegistry) unslingDeps {
+	return unslingDeps{
+		resolver: agentIDResolver{reg: reg},
+		townRoot: workspace.FindFromCwd,
+		open:     openBeads,
+	}
 }
 
 func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error {
-	return runUnslingDeps(cmd, args, dryRun, force, unslingDeps{
-		resolveTarget: resolveUnslingTarget,
-		townRoot:      workspace.FindFromCwd,
-		open:          openBeads,
-	})
+	return runUnslingDeps(cmd, args, dryRun, force, productionUnslingDeps(townRegistry()))
 }
 
 func runUnslingDeps(cmd *cobra.Command, args []string, dryRun, force bool, deps unslingDeps) error {
@@ -105,7 +117,7 @@ func runUnslingDeps(cmd *cobra.Command, args []string, dryRun, force bool, deps 
 	var agentID string
 	var err error
 	if targetAgent != "" {
-		agentID, err = deps.resolveTarget(targetAgent)
+		agentID, err = deps.resolver.agentID(targetAgent)
 		if err != nil {
 			return fmt.Errorf("resolving target agent: %w", err)
 		}

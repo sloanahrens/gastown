@@ -465,19 +465,19 @@ func TestUnslingTargetRefusesAnInvalidPath(t *testing.T) {
 	}
 }
 
-// The production resolver runs with no tmux server in the test environment, so
-// a polecat target resolves only if it reads no pane: a tmux lookup fails here.
-// The id's form depends on the process-wide registry, so only the resolution
-// itself is asserted.
-func TestUnslingProductionResolverNeedsNoTmux(t *testing.T) {
+// The production wiring hands the command the id-only resolver over the registry
+// it is given, so it resolves a polecat target with no tmux lookup. The registry
+// is injected, so the test reads no live town registry.
+func TestUnslingProductionDepsResolveWithoutTmux(t *testing.T) {
 	t.Parallel()
+	const polecat = "gastown/polecats/slit"
 
-	got, err := resolveUnslingTarget("gastown/polecats/slit")
+	got, err := productionUnslingDeps(unslingTestRegistry()).resolver.agentID(polecat)
 	if err != nil {
-		t.Fatalf("resolveUnslingTarget = (%q, %v), want an agent id with no error", got, err)
+		t.Fatalf("resolver.agentID(%q) = %v, want nil", polecat, err)
 	}
-	if got == "" {
-		t.Errorf("resolveUnslingTarget returned an empty agent id")
+	if got != polecat {
+		t.Errorf("resolver.agentID(%q) = %q, want %q", polecat, got, polecat)
 	}
 }
 
@@ -485,11 +485,8 @@ func TestUnslingProductionResolverNeedsNoTmux(t *testing.T) {
 // A targeted unsling takes no self path, so the caller's identity and tmux pane
 // are never read.
 func unslingDepsFor(store beads.Client) unslingDeps {
-	reg := unslingTestRegistry()
 	return unslingDeps{
-		resolveTarget: func(target string) (string, error) {
-			return resolveTargetAgentID(reg, target)
-		},
+		resolver: agentIDResolver{reg: unslingTestRegistry()},
 		townRoot: func() (string, error) { return "", nil },
 		open:     func(string) beads.Client { return store },
 	}

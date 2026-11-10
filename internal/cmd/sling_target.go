@@ -21,14 +21,10 @@ var resolveTargetAgentFn = resolveTargetAgent
 // resolveTargetAgent converts a target spec to agent ID, pane, and hook root.
 func resolveTargetAgent(target string) (agentID string, pane string, hookRoot string, err error) {
 	reg := townRegistry()
-	// First resolve to session name
-	sessionName, err := resolveRoleToSession(reg, target)
+	sessionName, agentID, err := resolveTargetSession(reg, target)
 	if err != nil {
 		return "", "", "", err
 	}
-
-	// Convert session name to agent ID format (this doesn't require tmux)
-	agentID = sessionToAgentID(reg, sessionName)
 
 	// Get the pane for that session
 	pane, err = getSessionPane(sessionName)
@@ -46,15 +42,22 @@ func resolveTargetAgent(target string) (agentID string, pane string, hookRoot st
 	return agentID, pane, hookRoot, nil
 }
 
+// resolveTargetSession converts a target spec to its session name and agent ID.
+// Both come from the prefix registry and the spec alone; tmux is never asked.
+func resolveTargetSession(reg *session.PrefixRegistry, target string) (sessionName, agentID string, err error) {
+	sessionName, err = resolveRoleToSession(reg, target)
+	if err != nil {
+		return "", "", err
+	}
+	return sessionName, sessionToAgentID(reg, sessionName), nil
+}
+
 // resolveTargetAgentID converts a target spec to the agent ID it names. Unlike
 // resolveTargetAgent it never asks tmux for the target's pane or working
 // directory, so a seat with no tmux session still resolves.
 func resolveTargetAgentID(reg *session.PrefixRegistry, target string) (string, error) {
-	sessionName, err := resolveRoleToSession(reg, target)
-	if err != nil {
-		return "", err
-	}
-	return sessionToAgentID(reg, sessionName), nil
+	_, agentID, err := resolveTargetSession(reg, target)
+	return agentID, err
 }
 
 // sessionToAgentID converts a session name to agent ID format.
