@@ -214,6 +214,7 @@ func newSeedSession(t *testing.T, town string) seedSession {
 			engine:          podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext, town: town, run: kube.run},
 			probes:          readyProbes(),
 			now:             seedClock(),
+			statHost:        hostStat(town, seedClockStart),
 			out:             &out,
 		},
 		fv:   fv,
@@ -513,13 +514,18 @@ func flagPathSession(t *testing.T, town string, rehearsal bool) (townStateSeedEn
 	kube := &fakeKubectl{fv: fv, town: town}
 	env.engine = podEngine{namespace: seedNamespace, pod: seedPod, claim: seedClaim, context: seedContext, town: town, run: kube.run}
 	env.now = seedClock()
+	env.statHost = hostStat(town, seedClockStart)
 	return env, fv, kube
 }
+
+// seedClockStart is where seedClock begins. A session's host files read as older
+// than it, so the churn rule treats no mismatch as churn unless a test says so.
+var seedClockStart = time.Date(2026, 11, 9, 6, 40, 0, 0, time.UTC)
 
 // seedClock is a clock that moves two seconds each time it is read, so a copy
 // window that reads it twice has a positive length and no test sleeps.
 func seedClock() func() time.Time {
-	at := time.Date(2026, 11, 9, 6, 40, 0, 0, time.UTC)
+	at := seedClockStart
 	return func() time.Time {
 		at = at.Add(2 * time.Second)
 		return at

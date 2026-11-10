@@ -229,7 +229,7 @@ type townStateSeedEnv struct {
 	// readHost reads the town's settings files on the host for the live copy. Nil
 	// means os.ReadFile.
 	readHost func(string) ([]byte, error)
-	// statHost stats a host file for a rehearsal's churn sort. Nil means os.Lstat.
+	// statHost stats a host file for the churn sort. Nil means os.Lstat.
 	statHost func(string) (fs.FileInfo, error)
 	// patrolWritePath names the file the daemon patrol config is written to,
 	// which the rehearsal profile rewrites. Production is config.PatrolWritePath.
@@ -457,13 +457,14 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	if err != nil {
 		return fmt.Errorf("verifying claim %s: the claim is partial and not to be used: %w", seedClaim, err)
 	}
-	// A rehearsal's churn is what the running town changed while the copy ran. It is
-	// printed, and only the rest fails the run. The cut-over form has no churn.
-	if env.rehearsal {
-		churn, rest := sortSeedChurn(env.town, start, res.Mismatches, env.stat)
-		printSeedChurn(env.out, churn)
-		res.Mismatches = rest
-	}
+	// Churn is what changed on the host while the copy ran. It is printed, and only
+	// the rest fails the run, in the rehearsal and the cut-over form alike. The
+	// daemon's own files cannot churn in the cut-over form, since the daemon is
+	// stopped, but the Mac-side writers that outlive it can: the dashboard, the host
+	// sampler, the openshell gateway and bd (gt-uq4bo4).
+	churn, rest := sortSeedChurn(env.town, start, res.Mismatches, env.stat)
+	printSeedChurn(env.out, churn)
+	res.Mismatches = rest
 	if problems := printVerifyProblems(env.out, res, nil); problems > 0 {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("claim %s does not match the host copy set (%d problems): the claim is partial and not to be used", seedClaim, problems)}
 	}
@@ -530,7 +531,7 @@ func runTownStateSeedIn(env townStateSeedEnv) error {
 	return nil
 }
 
-// seedChurnListed is how many churn paths a rehearsal prints; the rest are counted.
+// seedChurnListed is how many churn paths a seed prints; the rest are counted.
 const seedChurnListed = 20
 
 // seedWispBaselinePath is the daemon patrol's open-wisp series, relative to the town
