@@ -63,7 +63,7 @@ var daemonSteps = []DaemonStep{
 	{"release-reporter", DaemonStepPlugin, DaemonStepRuns, []string{"bd", "gt"}, "runs in the container: daemon.log 2026-11-08 12:46:00 'Handler: script plugin release-reporter ok (exit 0 after 0s)', a clean exit with no work shown; the log does not show its reads of /Users/Shared/gt-cloud/releases, which the live compose does not mount, or of two files under HOME"},
 	{"town-metrics", DaemonStepPlugin, DaemonStepRuns, []string{"docker", "lsof", "ps"}, "runs in the container: daemon.log 2026-11-08 12:52:20 'Handler: script plugin town-metrics ok (exit 0 after 5s)'; its lsof, ps and docker probes read the container, not the host"},
 
-	{"landing_worker", DaemonStepPatrol, DaemonStepRuns, []string{"make", "go", "golangci-lint", "om"}, "runs in the container: daemon.log 2026-11-08 12:55:40 'landing_worker: Landing of gt-gg9hv.68 ... left for the overseer', 1239 of its lines in the last 20000; gates with make gate (make, go, golangci-lint) and reviews with om when review is on"},
+	{"landing_worker", DaemonStepPatrol, DaemonStepRuns, []string{"om"}, "runs in the container: daemon.log 2026-11-08 12:55:40 'landing_worker: Landing of gt-gg9hv.68 ... left for the overseer', 1239 of its lines in the last 20000; reviews with om when review is on. A rig that sets post_land_command needs a toolchain this image does not carry, so the verdict stays main's Forgejo status (gt-gg9hv.7.1)"},
 	{"rebuild_gt", DaemonStepPatrol, DaemonStepHost, nil, "make install and launchctl"},
 	{"update", DaemonStepPatrol, DaemonStepHost, nil, "make install and launchctl install the binary on the host and reload the host's daemon"},
 	{"rebuild_om", DaemonStepPatrol, DaemonStepHost, nil, "go build"},

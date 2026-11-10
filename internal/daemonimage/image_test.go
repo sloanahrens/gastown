@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -292,7 +294,7 @@ func TestDaemonDockerfileHasNoBuildStep(t *testing.T) {
 // TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages: the image is
 // config, so no instruction downloads anything over the network and the only RUN
 // that is not a git identity command installs exactly ca-certificates, git,
-// openssh-client, tmux, curl and tzdata. The Dolt client arrives by COPY from the
+// openssh-client, tmux, curl, lsof and tzdata. The Dolt client arrives by COPY from the
 // official Dolt image, whose registry layers the daemon verifies by digest, rather
 // than by a download inside a RUN that no checksum would guard. curl is named only
 // as a package: a RUN that fetched with it would be a second install RUN and fail
@@ -323,7 +325,7 @@ func TestDaemonDockerfileFetchesNothingAndInstallsOnlyThePackages(t *testing.T) 
 	if problem != "" {
 		t.Fatalf("%s: %s", DockerfilePath, problem)
 	}
-	if want := []string{"ca-certificates", "curl", "git", "openssh-client", "tmux", "tzdata"}; !reflect.DeepEqual(got, want) {
+	if want := []string{"ca-certificates", "curl", "git", "lsof", "openssh-client", "tmux", "tzdata"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("%s installs %q, want %q", DockerfilePath, got, want)
 	}
 }
@@ -840,6 +842,149 @@ func dockerfileInstructions(t *testing.T, body string) []dockerfileInstruction {
 	flush()
 	if len(out) == 0 {
 		t.Fatalf("%s parsed as no instructions", DockerfilePath)
+	}
+	return out
+}
+
+// TestDaemonImageCarriesWhatTheAuditExecs: every program a runs-in-container row
+// of the audit table execs is on the image's PATH. The image's programs are read
+// from the build file, so a row naming a program the image does not carry fails
+// here before a rehearsal runs it.
+func TestDaemonImageCarriesWhatTheAuditExecs(t *testing.T) {
+	t.Parallel()
+	carried, problems := imageCarriedPrograms(t, readDockerfile(t))
+	for _, problem := range problems {
+		t.Errorf("%s: %s", DockerfilePath, problem)
+	}
+	var runs []config.DaemonStep
+	for _, s := range config.DaemonSteps() {
+		if s.Class == config.DaemonStepRuns {
+			runs = append(runs, s)
+		}
+	}
+	if len(runs) == 0 {
+		t.Fatal("the audit table has no runs-in-container row, so nothing is checked")
+	}
+	for _, problem := range missingAuditPrograms(runs, carried) {
+		t.Error(problem)
+	}
+}
+
+// TestMissingAuditProgramsNamesTheStep: a runs-in-container row that execs make,
+// on an image without make, is reported with make and the row's name.
+func TestMissingAuditProgramsNamesTheStep(t *testing.T) {
+	t.Parallel()
+	rows := []config.DaemonStep{{Name: "fixture_step", Kind: config.DaemonStepPatrol, Class: config.DaemonStepRuns, Needs: []string{"make"}}}
+	got := missingAuditPrograms(rows, map[string]bool{"git": true})
+	if len(got) != 1 || !strings.Contains(got[0], "make") || !strings.Contains(got[0], "fixture_step") {
+		t.Fatalf("missingAuditPrograms = %q, want one failure naming make and fixture_step", got)
+	}
+}
+
+// TestImageCarriedProgramsRefusesWhatItCannotRead: an install of a package the
+// test maps to no program, or a COPY with no destination, is reported as a
+// problem rather than read as carrying nothing.
+func TestImageCarriedProgramsRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "an unmapped package", body: "RUN apt-get update && apt-get install -y --no-install-recommends mystery-pkg && rm -rf /var/lib/apt/lists/*\n", want: "mystery-pkg"},
+		{name: "a COPY with no destination", body: "COPY gt\n", want: `COPY "gt"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, problems := imageCarriedPrograms(t, tc.body)
+			if !slices.ContainsFunc(problems, func(p string) bool { return strings.Contains(p, tc.want) }) {
+				t.Errorf("problems = %q, want one naming %q", problems, tc.want)
+			}
+		})
+	}
+}
+
+// aptPackagePrograms maps each package the one install RUN installs to the
+// programs it puts on the PATH. A nil list is a package with no program.
+var aptPackagePrograms = map[string][]string{
+	"ca-certificates": nil,
+	"curl":            {"curl"},
+	"git":             {"git"},
+	"lsof":            {"lsof"},
+	"openssh-client":  {"ssh"},
+	"tmux":            {"tmux"},
+	"tzdata":          nil,
+}
+
+// basePrograms are the programs the ubuntu:24.04 base image carries, so the
+// Dockerfile installs neither.
+var basePrograms = []string{"bash", "ps"}
+
+// imageCarriedPrograms returns the programs the image built from body carries:
+// the base programs, the programs of each package the apt install RUN installs,
+// and the basename of each COPY whose destination is in /usr/local/bin. A package
+// the map does not name, or a COPY it cannot read, is returned as a problem.
+func imageCarriedPrograms(t *testing.T, body string) (map[string]bool, []string) {
+	t.Helper()
+	carried := map[string]bool{}
+	for _, p := range basePrograms {
+		carried[p] = true
+	}
+	var problems []string
+	for _, in := range dockerfileInstructions(t, body) {
+		switch in.cmd {
+		case "RUN":
+			if !slices.Contains(in.args, "apt-get") {
+				continue
+			}
+			pkgs, problem := aptInstalls("RUN " + strings.Join(in.args, " "))
+			if problem != "" {
+				problems = append(problems, problem)
+				continue
+			}
+			for _, pkg := range pkgs {
+				progs, known := aptPackagePrograms[pkg]
+				if !known {
+					problems = append(problems, fmt.Sprintf("installs %s, which the test maps to no program", pkg))
+				}
+				for _, p := range progs {
+					carried[p] = true
+				}
+			}
+		case "COPY":
+			_, src, dst := copyOperands(in.args)
+			if src == "" || dst == "" {
+				problems = append(problems, fmt.Sprintf("COPY %q has no source and destination", strings.Join(in.args, " ")))
+				continue
+			}
+			if path.Dir(dst) == "/usr/local/bin" {
+				carried[path.Base(dst)] = true
+			}
+		}
+	}
+	return carried, problems
+}
+
+// missingAuditPrograms names each program the rows exec that carried does not hold,
+// with the rows that need it, sorted by program.
+func missingAuditPrograms(rows []config.DaemonStep, carried map[string]bool) []string {
+	needed := map[string][]string{}
+	for _, s := range rows {
+		for _, p := range s.Needs {
+			if !carried[p] {
+				needed[p] = append(needed[p], s.Name)
+			}
+		}
+	}
+	progs := make([]string, 0, len(needed))
+	for p := range needed {
+		progs = append(progs, p)
+	}
+	slices.Sort(progs)
+	out := make([]string, 0, len(progs))
+	for _, p := range progs {
+		out = append(out, fmt.Sprintf("%s is not on the image's PATH, needed by %s", p, strings.Join(needed[p], ", ")))
 	}
 	return out
 }
