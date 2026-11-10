@@ -982,3 +982,18 @@ func TestHostAgentRefuseATemporaryBinaryResolvesSymlinks(t *testing.T) {
 		}
 	}
 }
+
+// TestHostCommandHasNoLoadSubcommand pins that `gt host` names only commands
+// that exist: the load subcommand is gone, so neither the command tree nor the
+// help text may offer it.
+func TestHostCommandHasNoLoadSubcommand(t *testing.T) {
+	t.Parallel()
+	for _, c := range hostCmd.Commands() {
+		if c.Name() == "load" {
+			t.Errorf("gt host has a child named %q; want none", c.Name())
+		}
+	}
+	if strings.Contains(hostCmd.Long, "host load") {
+		t.Errorf("gt host help names %q, which no command provides", "host load")
+	}
+}

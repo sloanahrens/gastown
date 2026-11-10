@@ -56,7 +56,7 @@ Measured cost: `gt status --line` takes 74 ms through `docker exec` and 41 ms na
 Each item is a candidate sized on main at design time; each deletion bead proves no live caller first and lands separately.
 
 - The launchd-era daemon checks (`internal/doctor` daemon, job and respawn checks, `internal/templates` supervisor state and the launchd plist templates).
-- The host agent and `probes.json` (`internal/cmd` host agent, `internal/hostprobe`, `internal/hostload`, about 3,200 lines with tests).
+- The host agent and `probes.json` (`internal/cmd` host agent, `internal/hostprobe`, about 3,200 lines with tests). `gt host load` and `internal/hostload` are already deleted (gt-yjzepk.17).
 - `gt power` (`internal/power`, about 3,900 lines with tests).
 - The installer and update commands (`internal/installer`, about 8,800 lines with tests; the install is an image rollout).
 - The `cmux` bird spawner (`internal/bird`, about 5,700 lines with tests): it moves to the operator's own tools next to `claude-agent`; `gt` never calls `cmux`.
