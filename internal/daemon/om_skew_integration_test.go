@@ -50,3 +50,36 @@ func TestIntegrationOMSkewEmbedRulesReadsRealGitGrep(t *testing.T) {
 		t.Errorf("a tree with no directive gave %+v, want no rule", rules)
 	}
 }
+
+// TestIntegrationOMSkewRemoteSHAReadsTheBareRepo runs the origin read against a
+// real om/.repo.git: the url is the bare repository's origin, and the tip is
+// what ls-remote reads from that url, with no seam answering either call.
+func TestIntegrationOMSkewRemoteSHAReadsTheBareRepo(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	origin := filepath.Join(town, "origin.git")
+	src := filepath.Join(town, "src")
+	mkdirs(t, src)
+	lwGit(t, town, "init", "-q", "--bare", origin)
+	lwGit(t, src, "init", "-q", "-b", "main")
+	lwGit(t, src, "commit", "-q", "--allow-empty", "-m", "om main")
+	lwGit(t, src, "push", "-q", origin, "main")
+	tip := lwGit(t, src, "rev-parse", "HEAD")
+
+	bare := filepath.Join(town, "om", ".repo.git")
+	lwGit(t, town, "init", "-q", "--bare", bare)
+	lwGit(t, bare, "remote", "add", "origin", origin)
+
+	d := &Daemon{
+		logger:  discardLogger,
+		config:  &Config{TownRoot: town},
+		execCmd: runCmdProcess,
+	}
+	sha, err := d.omSkewRemoteSHA(town)
+	if err != nil {
+		t.Fatalf("omSkewRemoteSHA over a real bare repo: %v", err)
+	}
+	if sha != tip {
+		t.Errorf("omSkewRemoteSHA = %q, want origin's main tip %q", sha, tip)
+	}
+}

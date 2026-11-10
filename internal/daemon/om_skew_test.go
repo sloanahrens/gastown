@@ -3,7 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"log"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -39,6 +42,137 @@ func omSkewDaemon(t *testing.T) (*Daemon, *notifyfake.Recorder) {
 	d.omVersionFn = func(string) (string, error) { return omSkewInstalledSHA, nil }
 	d.omHeadFn = func(string) (string, error) { return omSkewRemoteSHA, nil }
 	return d, rec
+}
+
+// skewBareRunner answers a skew probe's git calls the way git answers a
+// --git-dir: `remote get-url origin` prints url while the named repository
+// exists and exits 128 with git's fatal line while it does not, and ls-remote
+// prints origin's main tip. Every call's argv is recorded for the test to read.
+type skewBareRunner struct {
+	mu    sync.Mutex
+	url   string
+	calls [][]string
+}
+
+func (r *skewBareRunner) run(cmd *exec.Cmd) ([]byte, []byte, error) {
+	args := slices.Clone(cmd.Args)
+	r.mu.Lock()
+	r.calls = append(r.calls, args)
+	r.mu.Unlock()
+
+	var out string
+	var err error
+	switch {
+	case slices.Contains(args, "remote"):
+		gitDir := ""
+		for _, a := range args {
+			if v, ok := strings.CutPrefix(a, "--git-dir="); ok {
+				gitDir = v
+			}
+		}
+		if _, statErr := os.Stat(gitDir); statErr != nil {
+			out = "fatal: not a git repository: '" + gitDir + "'\n"
+			err = &cliExitError{code: 128}
+		} else {
+			out = r.url + "\n"
+		}
+	case slices.Contains(args, "ls-remote"):
+		out = omSkewRemoteSHA + "\t" + omSkewRemoteRef + "\n"
+	default:
+		err = errors.New("unexpected call: " + strings.Join(args, " "))
+	}
+	if _, werr := io.WriteString(cmd.Stdout, out); werr != nil {
+		return nil, nil, werr
+	}
+	return nil, nil, err
+}
+
+// calledWithMayorRig reports whether any recorded call's argv names a path
+// under a mayor/rig clone, the checkout the probes must no longer read.
+func (r *skewBareRunner) calledWithMayorRig() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, args := range r.calls {
+		for _, a := range args {
+			if strings.Contains(a, "mayor/rig") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestOMSkewAndHMSkewRemoteReadsTheBareRepo: the om and hm rigs' origin urls are
+// read from <town>/<rig>/.repo.git and never from the mayor/rig clone, the tip
+// is read from that url, and a rig with no bare repo fails naming the bare path
+// rather than falling back to a clone. One table covers both probes.
+func TestOMSkewAndHMSkewRemoteReadsTheBareRepo(t *testing.T) {
+	t.Parallel()
+	omProbe := func(d *Daemon, town string) (string, error) {
+		return d.omSkewRemoteSHA(town)
+	}
+	hmProbe := func(d *Daemon, town string) (string, error) {
+		_, sha, err := d.hmSkewRemote(town)
+		return sha, err
+	}
+	const omURL = "https://example.invalid/om.git"
+	tests := []struct {
+		name    string
+		rig     string // the rig whose bare repo the probe reads
+		probe   func(*Daemon, string) (string, error)
+		bare    bool   // the rig's .repo.git exists
+		url     string // the origin url the bare repo prints
+		wantErr bool
+	}{
+		{name: "om: the bare repo answers the url and the tip", rig: "om", probe: omProbe, bare: true, url: omURL},
+		{name: "om: a rig with no bare repo fails naming it", rig: "om", probe: omProbe, bare: false, url: omURL, wantErr: true},
+		{name: "om: a bare repo with no origin url fails naming it", rig: "om", probe: omProbe, bare: true, url: "", wantErr: true},
+		// hm's failure rows (no origin url, a failed ls-remote) are the hm_skew
+		// tests' own; here hm proves only that it reads the bare repo and never
+		// the mayor/rig clone.
+		{name: "hm: the bare repo answers the url and the tip", rig: "hm", probe: hmProbe, bare: true, url: hmSkewTestURL},
+		{name: "hm: a rig with no bare repo fails naming it", rig: "hm", probe: hmProbe, bare: false, url: hmSkewTestURL, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			bare := filepath.Join(town, tc.rig, ".repo.git")
+			if tc.bare {
+				mkdirs(t, bare)
+			}
+			r := &skewBareRunner{url: tc.url}
+			d := &Daemon{config: &Config{TownRoot: town}, execCmd: r.run}
+
+			sha, err := tc.probe(d, town)
+
+			if r.calledWithMayorRig() {
+				t.Errorf("a probe read the mayor/rig clone: calls %q", r.calls)
+			}
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), bare) {
+					t.Fatalf("probe error = %v, want one naming %s", err, bare)
+				}
+				if sha != "" {
+					t.Errorf("sha = %q with no bare repo, want none", sha)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("probe: %v", err)
+			}
+			if sha != omSkewRemoteSHA {
+				t.Errorf("sha = %q, want origin's main tip %q", sha, omSkewRemoteSHA)
+			}
+			want := []string{"git", "--git-dir=" + bare, "remote", "get-url", "origin"}
+			if !slices.ContainsFunc(r.calls, func(c []string) bool { return slices.Equal(c, want) }) {
+				t.Fatalf("git calls = %q, want one get-url call %q against the bare repo", r.calls, want)
+			}
+			if lsRemote := r.calls[len(r.calls)-1]; !slices.Contains(lsRemote, tc.url) {
+				t.Errorf("ls-remote call = %q, want it against the bare repo's url %q", lsRemote, tc.url)
+			}
+		})
+	}
 }
 
 // TestOMSkewMismatchRaisesOnceThenClears: a skew raises one keyed alert naming

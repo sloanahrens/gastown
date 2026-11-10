@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofrs/flock"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/version"
 )
 
@@ -248,16 +249,22 @@ func (d *Daemon) buildCommit() string {
 	return version.BuildCommit()
 }
 
-// resolveOwnCommit returns the full SHA of this build when the gastown source
-// repo can resolve it, else the (short) build commit.
+// resolveOwnCommit returns the full SHA of this build when the gastown rig's
+// bare repository can resolve it, else the (short) build commit.
 func (d *Daemon) resolveOwnCommit() string {
 	own := d.buildCommit()
 	if own == "" {
 		return ""
 	}
-	repo := filepath.Join(d.config.TownRoot, "gastown", "mayor", "rig")
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "gastown"))
 	full, err := d.gitAt(repo).Rev(own + "^{commit}")
 	if err != nil {
+		// Said once per reading: the short commit still works for the skew
+		// probes, but a bare repo that lacks the running build is a fact worth a
+		// line, not a silent fallback (gt-3lvcjz.2, review round 4).
+		if d.logger != nil {
+			d.logger.Printf("resolveOwnCommit: the gastown bare repo at %s cannot resolve build commit %s (%v); using the short commit", repo, own, err)
+		}
 		return own
 	}
 	return strings.TrimSpace(full)

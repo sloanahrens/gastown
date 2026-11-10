@@ -1915,23 +1915,30 @@ func TestMergedAtIsTheCommitterTimeInUTC(t *testing.T) {
 	}
 }
 
-// resolveOwnCommit widens the short build commit through the town's gastown
-// checkout, and keeps it as built when the checkout cannot resolve it.
-func TestResolveOwnCommitWidensThroughTheGastownCheckout(t *testing.T) {
+// resolveOwnCommit widens the short build commit through the gastown rig's bare
+// repository, and keeps it as built when that repository cannot resolve it. A
+// mayor/rig checkout that holds the commit is not read.
+func TestResolveOwnCommitWidensThroughTheGastownBareRepo(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}}
 	f := useGitfake(t, d)
 	own := strings.Repeat("ab", 20)
 	d.buildCommitFn = func() string { return own[:7] }
 	if got := d.resolveOwnCommit(); got != own[:7] {
-		t.Fatalf("resolveOwnCommit with no checkout = %q, want the build commit %q", got, own[:7])
+		t.Fatalf("resolveOwnCommit with no bare repo = %q, want the build commit %q", got, own[:7])
 	}
 	checkout := filepath.Join(d.config.TownRoot, "gastown", "mayor", "rig")
 	f.InitBare(t, checkout)
-	id := f.Commit(t, checkout, "main", "build", map[string]string{"a": "a"})
+	f.Commit(t, checkout, "main", "checkout", map[string]string{"a": "a"})
+	bare := filepath.Join(d.config.TownRoot, "gastown", ".repo.git")
+	f.InitBare(t, bare)
 	d.buildCommitFn = func() string { return "main" }
+	if got := d.resolveOwnCommit(); got != "main" {
+		t.Fatalf("resolveOwnCommit with an empty bare repo = %q, want the build commit as built \"main\"", got)
+	}
+	id := f.Commit(t, bare, "main", "build", map[string]string{"a": "a"})
 	if got := d.resolveOwnCommit(); got != id {
-		t.Fatalf("resolveOwnCommit = %q, want the checkout's full id %s", got, id)
+		t.Fatalf("resolveOwnCommit = %q, want the bare repo's full id %s", got, id)
 	}
 }
 

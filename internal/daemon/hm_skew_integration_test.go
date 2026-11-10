@@ -57,7 +57,9 @@ func hmSkewCommit(t *testing.T, rig, path, content string) string {
 
 // hmSkewRealTown is a town whose hm rig is a real repository with a local
 // origin: rig is the rig's worktree, origin the bare repository it pushes main
-// to. The first commit (the installed hm's) is returned as base.
+// to, and the rig's bare repository (hm/.repo.git) carries the same origin url,
+// which is where the skew check reads it. The first commit (the installed hm's)
+// is returned as base.
 func hmSkewRealTown(t *testing.T) (town, rig, origin, base string) {
 	t.Helper()
 	town = t.TempDir()
@@ -69,6 +71,9 @@ func hmSkewRealTown(t *testing.T) (town, rig, origin, base string) {
 	hmSkewGitIn(t, town, "init", "-q", "--bare", origin)
 	hmSkewGitIn(t, rig, "remote", "add", "origin", origin)
 	hmSkewGitIn(t, rig, "push", "-q", "origin", "main")
+	bare := filepath.Join(town, "hm", ".repo.git")
+	hmSkewGitIn(t, town, "init", "-q", "--bare", bare)
+	hmSkewGitIn(t, bare, "remote", "add", "origin", origin)
 	return town, rig, origin, base
 }
 
