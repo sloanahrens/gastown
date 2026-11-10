@@ -238,9 +238,26 @@ func (d *Daemon) syncJsonlGitBackup() {
 	} else {
 		dataDir = filepath.Join(d.config.TownRoot, ".dolt-data")
 	}
-	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		d.logger.Printf("jsonl_git_backup: data dir %s does not exist, skipping", dataDir)
-		return
+	// A remote server's data dir is the server's, not this host's, so it is not
+	// stat'd: the databases come from the server, and the dolt commands run in a
+	// directory this town owns (cmdDir), since exec needs its working dir to exist.
+	useServer, host, port, user, password := jsonlDoltTarget(d.doltServer, doltserver.DefaultConfig(d.config.TownRoot))
+	remote := useServer && !isLoopbackHost(host)
+	cmdDir := dataDir
+	if !remote {
+		if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+			d.logger.Printf("jsonl_git_backup: data dir %s does not exist, skipping", dataDir)
+			return
+		}
+	} else {
+		workDir, err := jsonlRemoteWorkDir(d.config.TownRoot)
+		if err != nil {
+			d.logger.Printf("jsonl_git_backup: %v", err)
+			cycle.failStep("export", "dolt client directory unavailable")
+			d.escalateAlert(alertKeyJSONLRemote, "jsonl_git_backup", fmt.Sprintf("the offsite backup cannot run its dolt commands for the remote server %s: %v", host, err))
+			return
+		}
+		cmdDir = workDir
 	}
 
 	// Get database list. The shipped default config has no explicit Databases
@@ -249,7 +266,17 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// git-repo fix above — the documented "auto-discovers from dolt server"
 	// behavior (types.go) was never implemented (gt-kme).
 	databases := config.Databases
-	if len(databases) == 0 {
+	if len(databases) == 0 && remote {
+		served, err := d.listServerJsonlDatabases(cmdDir, useServer, host, port, user, password)
+		if err != nil {
+			d.logger.Printf("jsonl_git_backup: cannot list the databases on the Dolt server %s: %v", host, err)
+			cycle.failStep("export", "listing the databases on the Dolt server failed")
+			d.escalateAlert(alertKeyJSONLRemote, "jsonl_git_backup", fmt.Sprintf("cannot list the databases on the Dolt server %s — offsite backup has nothing to export: %v", host, err))
+			return
+		}
+		d.clearAlerts("databases listed through the server", alertKeyJSONLRemote)
+		databases = served
+	} else if len(databases) == 0 {
 		databases = discoverJsonlBackupDatabases(dataDir)
 	}
 	if len(databases) == 0 {
@@ -299,7 +326,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	var exportedDBs []string
 	counts := make(map[string]int)
 	for _, db := range databases {
-		n, err := export(db, gitRepo, dataDir, scrub)
+		n, err := export(db, gitRepo, cmdDir, scrub)
 		if err != nil {
 			d.logger.Printf("jsonl_git_backup: %s: export failed: %v", db, err)
 			failed = append(failed, db)
@@ -1564,6 +1591,67 @@ func discoverJsonlBackupDatabases(dataDir string) []string {
 	return databases
 }
 
+// jsonlRemoteWorkDir is the directory the backup's dolt commands run in when the
+// Dolt server is remote: the data dir belongs to the server, so the commands run
+// in a private directory under the town root instead. It is the same directory
+// doltserver's clientWorkDir uses when the data dir is absent (gt-1saf37).
+func jsonlRemoteWorkDir(townRoot string) (string, error) {
+	if townRoot == "" {
+		return "", errors.New("the town root is unset, so there is no dolt client directory")
+	}
+	dir := filepath.Join(townRoot, ".runtime", "dolt-client")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating the dolt client directory %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// listServerJsonlDatabases lists the databases a remote Dolt server serves: SHOW
+// DATABASES through the same connection the exports use, so the list and the
+// exports read one server.
+func (d *Daemon) listServerJsonlDatabases(cmdDir string, useServer bool, host string, port int, user, password string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), jsonlExportTimeout)
+	defer cancel()
+	cmd := jsonlExportCommand(ctx, useServer, host, port, user, password, "SHOW DATABASES", cmdDir)
+	run := d.jsonlExportRunFn
+	if run == nil {
+		run = runJSONLExport
+	}
+	out, err := run(ctx, cmd, "SHOW DATABASES", jsonlExportTimeout)
+	if err != nil {
+		return nil, err
+	}
+	return parseServerJsonlDatabases(out)
+}
+
+// parseServerJsonlDatabases reads SHOW DATABASES' JSON rows and drops the system
+// databases and the test databases discoverJsonlBackupDatabases also skips. An
+// output that is not the JSON the query prints is an error, never an empty list
+// that would read as a clean backup of nothing.
+func parseServerJsonlDatabases(out []byte) ([]string, error) {
+	var result struct {
+		Rows *[]struct {
+			Database string `json:"Database"`
+		} `json:"rows"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("parsing SHOW DATABASES output: %w", err)
+	}
+	if result.Rows == nil {
+		return nil, errors.New("SHOW DATABASES output has no rows")
+	}
+	var databases []string
+	for _, row := range *result.Rows {
+		name := row.Database
+		if doltserver.IsSystemDatabase(name) || testdb.IsTestDatabaseName(name) {
+			continue
+		}
+		databases = append(databases, name)
+	}
+	sort.Strings(databases)
+	return databases, nil
+}
+
 // gitIdentityEnv returns the HOME/USER/LOGNAME entries missing from the
 // daemon's environment, recovered from the user database. Daemon-launched git
 // falls back to getpwuid(uid) for committer/author identity if $USER and
@@ -1771,6 +1859,9 @@ const (
 	alertKeyJSONLInit   = "jsonl_git_backup:init"
 	alertKeyJSONLNoDBs  = "jsonl_git_backup:no-databases"
 	alertKeyJSONLExport = "jsonl_git_backup:export"
+	// alertKeyJSONLRemote names a remote Dolt server the backup could not list
+	// or run its commands against. A successful list clears it.
+	alertKeyJSONLRemote = "jsonl_git_backup:remote-server"
 	// alertKeyJSONLRoute names a town route table the backup could not read
 	// whole. It is its own key because the cycle still exports every database:
 	// a success elsewhere in the cycle must not clear a routing failure.
