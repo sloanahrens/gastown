@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -11,13 +12,18 @@ import (
 // podDaemonCommit is the commit of the build the daemon running in a pod
 // reports. It asks the pod for `gt version`, so the cycle judges the build the
 // pod runs and not the daemon state file in the town tree, which a pod does
-// not write. The command runs only through run; a refused argument runs nothing.
-func podDaemonCommit(ctx context.Context, run update.RunFunc, kubeContext, namespace, deployment string) (string, error) {
+// not write. With inCluster the command runs with no --context, as the pod's
+// service account. The command runs only through run; a refused argument runs nothing.
+func podDaemonCommit(ctx context.Context, run update.RunFunc, kubeContext, namespace, deployment string, inCluster bool) (string, error) {
 	// Trim once here, so the checks and the kubectl command read the same value.
 	kubeContext = strings.TrimSpace(kubeContext)
 	namespace = strings.TrimSpace(namespace)
 	deployment = strings.TrimSpace(deployment)
-	if err := podArgument("kube context", kubeContext); err != nil {
+	if inCluster {
+		if kubeContext != "" {
+			return "", errors.New("pod daemon commit: names both a kube context and the in-cluster service account")
+		}
+	} else if err := podArgument("kube context", kubeContext); err != nil {
 		return "", err
 	}
 	if err := podArgument("namespace", namespace); err != nil {
@@ -26,8 +32,8 @@ func podDaemonCommit(ctx context.Context, run update.RunFunc, kubeContext, names
 	if err := podArgument("deployment", deployment); err != nil {
 		return "", err
 	}
-	out, exit, err := run(ctx, "", nil, "kubectl", "--context", kubeContext, "-n", namespace,
-		"exec", "deployment/"+deployment, "--", "gt", "version")
+	argv := append(podKubectlPrefix(kubeContext, namespace, inCluster), "exec", "deployment/"+deployment, "--", "gt", "version")
+	out, exit, err := run(ctx, "", nil, "kubectl", argv...)
 	if err != nil {
 		return "", fmt.Errorf("pod daemon commit: running kubectl exec in deployment %s: %w", deployment, err)
 	}

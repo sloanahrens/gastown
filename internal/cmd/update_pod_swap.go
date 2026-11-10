@@ -36,8 +36,12 @@ func isDNSLabel(name string) bool {
 // step is named by the step and its exit, never by the command's output, which
 // can hold a secret.
 type podDaemonSwap struct {
-	// Context is the kubectl context the Deployment runs in. Required.
+	// Context is the kubectl context the Deployment runs in. Required unless
+	// InCluster, and refused with it.
 	Context string
+	// InCluster runs kubectl with no --context, in the cluster the pod is in,
+	// through the pod's service account.
+	InCluster bool
 	// Namespace is the namespace the Deployment runs in. Required.
 	Namespace string
 	// Deployment is the Deployment whose daemon container takes the image. Empty
@@ -116,7 +120,7 @@ func (s podDaemonSwap) validate(pair update.ImagePair) error {
 	if s.Run == nil {
 		return errors.New("the pod daemon swap has no command runner wired")
 	}
-	if err := checkPodContext(s.Context); err != nil {
+	if err := checkPodTarget(s.Context, s.InCluster); err != nil {
 		return err
 	}
 	if err := checkPodNamespace(s.Namespace); err != nil {
@@ -142,6 +146,29 @@ func checkPodContext(kubeContext string) error {
 	return nil
 }
 
+// checkPodTarget refuses a pod target that names both a kubectl context and the
+// in-cluster service account, or neither. Without InCluster the context is
+// checked as checkPodContext checks it.
+func checkPodTarget(kubeContext string, inCluster bool) error {
+	if inCluster {
+		if kubeContext != "" {
+			return errors.New("the pod daemon swap names both a kubectl context and the in-cluster service account")
+		}
+		return nil
+	}
+	return checkPodContext(kubeContext)
+}
+
+// podKubectlPrefix is the argv every kubectl command against a pod starts with:
+// the context when the target names one, then the namespace. With InCluster the
+// context is omitted, so kubectl uses the pod's service account.
+func podKubectlPrefix(kubeContext, namespace string, inCluster bool) []string {
+	if inCluster {
+		return []string{"-n", namespace}
+	}
+	return []string{"--context", kubeContext, "-n", namespace}
+}
+
 // checkPodNamespace refuses a namespace that is not a Kubernetes namespace name.
 func checkPodNamespace(namespace string) error {
 	if !isDNSLabel(namespace) {
@@ -161,10 +188,11 @@ func checkPodDigest(what, ref string) error {
 	return nil
 }
 
-// kubectl runs one kubectl step against the swap's context and namespace. A
-// nonzero exit or a Run error is named by step; the command's output is not.
+// kubectl runs one kubectl step against the swap's context and namespace, or in
+// the cluster when the swap is InCluster. A nonzero exit or a Run error is named
+// by step; the command's output is not.
 func (s podDaemonSwap) kubectl(ctx context.Context, step string, args ...string) error {
-	argv := append([]string{"--context", s.Context, "-n", s.Namespace}, args...)
+	argv := append(podKubectlPrefix(s.Context, s.Namespace, s.InCluster), args...)
 	_, exit, err := s.Run(ctx, "", nil, "kubectl", argv...)
 	if err != nil {
 		return fmt.Errorf("running kubectl for the daemon's %s: %w", step, err)

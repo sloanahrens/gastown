@@ -68,33 +68,42 @@ type updateRequest struct {
 	// digest; empty runs the install as it always has.
 	Images string
 	// PodContext and PodNamespace name the Deployment of a daemon that runs as a
-	// pod. They are given together or not at all.
+	// pod. They are given together or not at all. PodInCluster names the same
+	// Deployment in the cluster the job runs in, with PodNamespace and no context.
 	PodContext   string
 	PodNamespace string
+	PodInCluster bool
 }
 
-// podContextUsage and podNamespaceUsage are the pod flags' help, shared by
-// gt update and gt update rollback.
+// podContextUsage, podNamespaceUsage and podInClusterUsage are the pod flags'
+// help, shared by gt update and gt update rollback.
 const (
 	podContextUsage   = "The kubectl context of a daemon that runs as a pod; with --pod-namespace, the daemon's build and image pair move through that Deployment"
-	podNamespaceUsage = "The namespace of a daemon that runs as a pod; given with --pod-context"
+	podNamespaceUsage = "The namespace of a daemon that runs as a pod; given with --pod-context or --pod-in-cluster"
+	podInClusterUsage = "The daemon runs as a pod in the cluster this job runs in; with --pod-namespace, and instead of --pod-context, kubectl uses the pod's service account"
 )
 
 // podDaemonTarget names the Deployment a daemon that runs as a pod is in. A run
 // that names one moves that Deployment's pair and reads the daemon's build from
-// its pod, in place of the container daemon and the daemon state file.
+// its pod, in place of the container daemon and the daemon state file. InCluster
+// means kubectl runs with no context, in the cluster the pod is in.
 type podDaemonTarget struct {
 	Context   string
 	Namespace string
+	InCluster bool
 	// Deployment is the daemon's Deployment, which the render names k8sdaemon.Name.
 	Deployment string
 }
 
 // podDaemonFromFlags turns the pod flags into the target a run names, or nil
-// when neither is given. The flags are given together: one without the other,
-// or a value that is blank or that kubectl would refuse, is refused here, before
+// when none is given. With inCluster, the target names a namespace and no
+// context; without it the flags are given together: one without the other, or
+// a value that is blank or that kubectl would refuse, is refused here, before
 // the update lock is taken or any step runs.
-func podDaemonFromFlags(kubeContext, namespace string) (*podDaemonTarget, error) {
+func podDaemonFromFlags(kubeContext, namespace string, inCluster bool) (*podDaemonTarget, error) {
+	if inCluster {
+		return podDaemonInClusterFromFlags(kubeContext, namespace)
+	}
 	if kubeContext == "" && namespace == "" {
 		return nil, nil
 	}
@@ -108,6 +117,27 @@ func podDaemonFromFlags(kubeContext, namespace string) (*podDaemonTarget, error)
 	}
 	if err := checkPodContext(target.Context); err != nil {
 		return nil, fmt.Errorf("--pod-context: %w", err)
+	}
+	if err := checkPodNamespace(target.Namespace); err != nil {
+		return nil, fmt.Errorf("--pod-namespace: %w", err)
+	}
+	return &target, nil
+}
+
+// podDaemonInClusterFromFlags is podDaemonFromFlags for --pod-in-cluster: a
+// namespace is required, and a context is refused, since the pod's kubectl has
+// no named context.
+func podDaemonInClusterFromFlags(kubeContext, namespace string) (*podDaemonTarget, error) {
+	if kubeContext != "" {
+		return nil, errors.New("--pod-in-cluster and --pod-context cannot be given together")
+	}
+	if namespace == "" {
+		return nil, errors.New("--pod-in-cluster needs --pod-namespace")
+	}
+	target := podDaemonTarget{
+		Namespace:  strings.TrimSpace(namespace),
+		InCluster:  true,
+		Deployment: k8sdaemon.Name,
 	}
 	if err := checkPodNamespace(target.Namespace); err != nil {
 		return nil, fmt.Errorf("--pod-namespace: %w", err)
@@ -132,7 +162,7 @@ type podVerifyProbes struct {
 func (p podVerifyProbes) DaemonVersion(ctx context.Context) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, podProbeBound)
 	defer cancel()
-	return podDaemonCommit(ctx, p.run, p.target.Context, p.target.Namespace, p.target.Deployment)
+	return podDaemonCommit(ctx, p.run, p.target.Context, p.target.Namespace, p.target.Deployment, p.target.InCluster)
 }
 
 // podDaemonDeps moves the run's daemon probe to the pod. Without a target the
@@ -230,7 +260,9 @@ recorded pair back.
 
 --pod-context and --pod-namespace, given together, name the Deployment of a
 daemon that runs as a pod: the pair moves that Deployment, and the daemon's
-build is read from its pod rather than the state file.
+build is read from its pod rather than the state file. --pod-in-cluster with
+--pod-namespace names the same Deployment with no context, for a job that runs
+in the cluster the pod is in.
 
 Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 5 when another run holds the lock, 130 when interrupted.`,
@@ -249,6 +281,7 @@ Exit status: 0 for an ok run or a dry run, 1 failed, 3 partial, 4 aborted,
 	c.Flags().StringVar(&req.Images, "images", "", "Install the daemon image by digest from this values file (gt update images writes it)")
 	c.Flags().StringVar(&req.PodContext, "pod-context", "", podContextUsage)
 	c.Flags().StringVar(&req.PodNamespace, "pod-namespace", "", podNamespaceUsage)
+	c.Flags().BoolVar(&req.PodInCluster, "pod-in-cluster", false, podInClusterUsage)
 	// The status reader shares the parent's town lookup, so both commands read
 	// the same town root, and it reads the wall clock for a heartbeat's age.
 	c.AddCommand(newUpdateStatusCmd(updateStatusSeams{FindTownRoot: seams.FindTownRoot, Now: time.Now}))
@@ -271,7 +304,7 @@ func runUpdate(cmd *cobra.Command, req updateRequest, seams updateSeams) error {
 	if err != nil {
 		return err
 	}
-	pod, err := podDaemonFromFlags(req.PodContext, req.PodNamespace)
+	pod, err := podDaemonFromFlags(req.PodContext, req.PodNamespace, req.PodInCluster)
 	if err != nil {
 		return err
 	}
@@ -655,6 +688,7 @@ func daemonImageSwap(seams updateSeams, townRoot string, pod *podDaemonTarget) (
 	return podDaemonSwap{
 		Context:        pod.Context,
 		Namespace:      pod.Namespace,
+		InCluster:      pod.InCluster,
 		Deployment:     pod.Deployment,
 		Run:            seams.PodRun,
 		RolloutTimeout: updateRestartWait,
