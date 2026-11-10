@@ -35,9 +35,10 @@ func statFails(p string) (fs.FileInfo, error) {
 	return nil, &fs.PathError{Op: "lstat", Path: p, Err: fs.ErrPermission}
 }
 
-// TestSeedChurnSortTable: a rehearsal's verify mismatch is churn when the running
-// town made it while the copy ran, and a problem otherwise. One row is one mismatch.
-func TestSeedChurnSortTable(t *testing.T) {
+// TestTownStateSeedChurnSortTable: a rehearsal's verify mismatch is churn when the
+// running town made it while the copy ran, and a problem otherwise. One row is one
+// mismatch.
+func TestTownStateSeedChurnSortTable(t *testing.T) {
 	t.Parallel()
 	const town = "/town"
 	start := time.Date(2026, 11, 9, 6, 40, 0, 0, time.UTC)
@@ -80,16 +81,28 @@ func TestSeedChurnSortTable(t *testing.T) {
 			churn: true,
 		},
 		{
-			name:  "the open-bead baseline is churn",
+			name:  "the open-bead baseline rewritten after the copy opened is churn",
 			m:     churnMismatch(townstate.ReasonChanged, "daemon/wisp_open_baseline_daemon.json"),
-			stat:  statAt(before),
+			stat:  statAt(after),
 			churn: true,
 		},
 		{
-			name:  "last-touched is churn at any depth",
+			name:  "the open-bead baseline deleted from the host is churn",
+			m:     churnMismatch(townstate.ReasonMissing, "daemon/wisp_open_baseline_daemon.json"),
+			stat:  statMissing,
+			churn: true,
+		},
+		{
+			name:  "last-touched deleted from the host is churn at any depth",
+			m:     churnMismatch(townstate.ReasonMissing, "gastown/polecats/nux/last-touched"),
+			stat:  statMissing,
+			churn: true,
+		},
+		{
+			name:  "last-touched still on the host and older than the copy window is a problem",
 			m:     churnMismatch(townstate.ReasonChanged, "gastown/last-touched"),
 			stat:  statAt(before),
-			churn: true,
+			churn: false,
 		},
 		{
 			name:  "FETCH_HEAD under a rig's bare repository is churn",
@@ -113,6 +126,12 @@ func TestSeedChurnSortTable(t *testing.T) {
 			name:  "a changed file whose stat fails is a problem",
 			m:     churnMismatch(townstate.ReasonChanged, "crew/notes.md"),
 			stat:  statFails,
+			churn: false,
+		},
+		{
+			name:  "a ref file the host still has, older than the copy window, is a problem",
+			m:     churnMismatch(townstate.ReasonChanged, "gastown/.repo.git/refs/heads/main"),
+			stat:  statAt(before),
 			churn: false,
 		},
 		{
