@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -31,9 +32,9 @@ const mayorRigAllowPath = "internal/mayorrig/testdata/mayor-rig-allow.txt"
 // retirement bead that removes the use deletes its line.
 const mayorRigAllowClass = "pending-retirement"
 
-// The three shapes a use takes. A string literal that contains the path, a call
-// whose string-literal arguments include both segments of it, and an identifier
-// named after the constants that hold the segments.
+// The segments of the path. A use is a string that holds the path, a concatenation
+// that spells it, a call whose arguments include both segments, or an identifier
+// that names one of the constants that hold or build the path.
 const (
 	mayorSegment = "mayor"
 	rigSegment   = "rig"
@@ -43,9 +44,10 @@ const (
 // registry, contains the characters but names another file, so it is not a use.
 var mayorRigPathPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_-])mayor/rig($|[^A-Za-z0-9_-])`)
 
-// mayorRigIdents are the constants.DirMayor and constants.DirRig names. Every
-// occurrence counts, including the definitions in internal/constants.
-var mayorRigIdents = map[string]bool{"DirMayor": true, "DirRig": true}
+// mayorRigIdents are the constants that name the path: DirMayor and DirRig name its
+// segments, and RigMayorPath and RigBeadsPath build it. Every occurrence counts,
+// including the definitions in internal/constants.
+var mayorRigIdents = map[string]bool{"DirMayor": true, "DirRig": true, "RigMayorPath": true, "RigBeadsPath": true}
 
 // skippedScanDirs are the directories the scan does not descend into. No other
 // directory is skipped by name: a skip by a name a new package could take is a
@@ -281,8 +283,9 @@ func TestMayorRigAllowlistRules(t *testing.T) {
 
 // TestMayorRigUseCount fixes what one use is. A string literal that contains the
 // path is one use however often it repeats it, a call with both segments as
-// string-literal arguments is one use, and each constants.DirMayor or
-// constants.DirRig identifier is one use.
+// arguments is one use (a segment may be a literal or a name the file gives the
+// value), a concatenation that spells the path is one use, and each
+// constants.DirMayor, DirRig, RigMayorPath or RigBeadsPath identifier is one use.
 func TestMayorRigUseCount(t *testing.T) {
 	t.Parallel()
 
@@ -355,6 +358,51 @@ func TestMayorRigUseCount(t *testing.T) {
 			name:   "an identifier that contains DirMayor as a prefix is not a use",
 			source: "package pkg\n\nfunc run() string {\n\treturn DirMayorOld\n}\n",
 			want:   0,
+		},
+		{
+			name:   "a const holding mayor joined with a rig literal is one use",
+			source: "package pkg\n\nconst m = \"mayor\"\n\nfunc run(root string) string {\n\treturn filepath.Join(root, m, \"rig\")\n}\n",
+			want:   1,
+		},
+		{
+			name:   "a name assigned mayor and joined with rig is one use",
+			source: "package pkg\n\nfunc run(root string) string {\n\tm := \"mayor\"\n\treturn filepath.Join(root, m, \"rig\")\n}\n",
+			want:   1,
+		},
+		{
+			name:   "a name declared after the call that joins it is one use",
+			source: "package pkg\n\nfunc run(root string) string {\n\treturn filepath.Join(root, m, r)\n}\n\nvar m, r = \"mayor\", \"rig\"\n",
+			want:   1,
+		},
+		{
+			name:   "a call joining a literal mayor with a const holding rig is one use",
+			source: "package pkg\n\nconst r = \"rig\"\n\nfunc run(root string) string {\n\treturn filepath.Join(root, \"mayor\", r)\n}\n",
+			want:   1,
+		},
+		{
+			name:   "a segment read at run time is not seen (the accepted limit)",
+			source: "package pkg\n\nfunc run(root, r string) string {\n\treturn filepath.Join(root, \"mayor\", r)\n}\n",
+			want:   0,
+		},
+		{
+			name:   "a path concatenated from two literals is one use",
+			source: "package pkg\n\nconst p = \"mayor/\" + \"rig\"\n",
+			want:   1,
+		},
+		{
+			name:   "a concatenation with a literal that holds the path counts once",
+			source: "package pkg\n\nvar p = \"x/mayor/rig/\" + \"y\"\n",
+			want:   1,
+		},
+		{
+			name:   "a call of constants.RigMayorPath is one use",
+			source: "package pkg\n\nfunc run(rig string) string {\n\treturn constants.RigMayorPath(rig)\n}\n",
+			want:   1,
+		},
+		{
+			name:   "a call of constants.RigBeadsPath is one use",
+			source: "package pkg\n\nfunc run(rig string) string {\n\treturn constants.RigBeadsPath(rig)\n}\n",
+			want:   1,
 		},
 		{
 			name:   "a comment naming the path is not a use",
@@ -524,6 +572,37 @@ func TestMayorRigUnparsableSourceIsAnError(t *testing.T) {
 	}
 }
 
+// unreadableDirFS is a filesystem whose directory dir cannot be opened, so the walk
+// meets a read error there.
+type unreadableDirFS struct {
+	fs.FS
+	dir string
+}
+
+func (f unreadableDirFS) Open(name string) (fs.File, error) {
+	if name == f.dir {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrPermission}
+	}
+	return f.FS.Open(name)
+}
+
+// TestMayorRigWalkErrorIsReturned keeps a directory the walk cannot read from being
+// skipped: the scan returns the error and names the directory.
+func TestMayorRigWalkErrorIsReturned(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFixture(t, root, "pkg/run.go", "package pkg\n\nfunc run() {}\n")
+	writeFixture(t, root, "other/run.go", "package other\n\nfunc run() {}\n")
+
+	_, err := scanMayorRig(unreadableDirFS{FS: os.DirFS(root), dir: "pkg"})
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("scanMayorRig = %v, want the permission error for pkg", err)
+	}
+	if !strings.Contains(err.Error(), "pkg") {
+		t.Fatalf("scanMayorRig error = %q, want it to name pkg", err)
+	}
+}
+
 // TestRepoMayorRig is the gate on the real tree: every mayor/rig use in the gt
 // module is listed in the allowlist, and every listed use still exists.
 func TestRepoMayorRig(t *testing.T) {
@@ -557,25 +636,31 @@ func checkMayorRigAt(root, allowPath string) error {
 // each file that has a use. It fails on a directory or parse error rather than
 // reporting a clean scan.
 func mayorRigHits(root string) ([]mayorRigHit, error) {
+	hits, err := scanMayorRig(os.DirFS(root))
+	if err != nil {
+		return nil, fmt.Errorf("scanning %s: %w", root, err)
+	}
+	return hits, nil
+}
+
+// scanMayorRig walks fsys and scans each non-test Go file in it. The filesystem is
+// a parameter so a test can hand the walk a directory it cannot read.
+func scanMayorRig(fsys fs.FS) ([]mayorRigHit, error) {
 	var hits []mayorRigHit
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err := fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if path != root && skippedScanDirs[d.Name()] {
-				return filepath.SkipDir
+			if path != "." && skippedScanDirs[d.Name()] {
+				return fs.SkipDir
 			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		hit, err := mayorRigHitInFile(path, filepath.ToSlash(rel))
+		hit, err := mayorRigHitInFile(fsys, path)
 		if err != nil {
 			return err
 		}
@@ -585,19 +670,29 @@ func mayorRigHits(root string) ([]mayorRigHit, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("scanning %s: %w", root, err)
+		return nil, err
 	}
 	return hits, nil
 }
 
 // mayorRigHitInFile parses one file and counts its uses of the path. The count is
 // zero for a file with no use.
-func mayorRigHitInFile(path, rel string) (mayorRigHit, error) {
+//
+// The scan reads syntax only. A path assembled from a value read at run time
+// (config, the environment, a function result) is not seen; that limit is accepted.
+// A name is matched by its spelling within the file, so a name that holds a
+// segment counts in every call of the file that joins it.
+func mayorRigHitInFile(fsys fs.FS, rel string) (mayorRigHit, error) {
+	data, err := fs.ReadFile(fsys, rel)
+	if err != nil {
+		return mayorRigHit{}, fmt.Errorf("read %s: %w", rel, err)
+	}
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, 0)
+	file, err := parser.ParseFile(fset, rel, data, 0)
 	if err != nil {
 		return mayorRigHit{}, fmt.Errorf("parse %s: %w", rel, err)
 	}
+	names := stringNames(file)
 	hit := mayorRigHit{file: rel}
 	note := func(pos token.Pos) {
 		hit.count++
@@ -623,20 +718,20 @@ func mayorRigHitInFile(path, rel string) (mayorRigHit, error) {
 			if mayorRigPathPattern.MatchString(value) {
 				note(n.Pos())
 			}
+		case *ast.BinaryExpr:
+			// A concatenation that spells the path across its operands. A literal
+			// operand that holds the path alone is already counted, so it is not
+			// counted again.
+			if anyMayorRigPath(possibleStrings(n, names)) && !literalHoldsPath(n) {
+				note(n.Pos())
+			}
 		case *ast.CallExpr:
 			var hasMayor, hasRig bool
 			for _, arg := range n.Args {
-				lit, ok := arg.(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					continue
+				for _, value := range possibleStrings(arg, names) {
+					hasMayor = hasMayor || value == mayorSegment
+					hasRig = hasRig || value == rigSegment
 				}
-				value, err := unquoteLiteral(fset, rel, lit)
-				if err != nil {
-					unquoteErr = err
-					return false
-				}
-				hasMayor = hasMayor || value == mayorSegment
-				hasRig = hasRig || value == rigSegment
 			}
 			if hasMayor && hasRig {
 				note(n.Pos())
@@ -652,6 +747,110 @@ func mayorRigHitInFile(path, rel string) (mayorRigHit, error) {
 		return mayorRigHit{}, unquoteErr
 	}
 	return hit, nil
+}
+
+// stringNames maps each name the file assigns a string to every string it can
+// hold: a const or var with a value, or a name assigned in a statement. A name
+// may take its value from one declared later, so the pass repeats until no name
+// gains a value. The repeat is bounded by the number of declarations.
+func stringNames(file *ast.File) map[string][]string {
+	type binding struct {
+		name  string
+		value ast.Expr
+	}
+	var bindings []binding
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.ValueSpec:
+			for i, name := range n.Names {
+				if i < len(n.Values) {
+					bindings = append(bindings, binding{name.Name, n.Values[i]})
+				}
+			}
+		case *ast.AssignStmt:
+			if len(n.Lhs) != len(n.Rhs) {
+				return true
+			}
+			for i, lhs := range n.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok {
+					bindings = append(bindings, binding{id.Name, n.Rhs[i]})
+				}
+			}
+		}
+		return true
+	})
+	names := map[string][]string{}
+	changed := true
+	for pass := 0; changed && pass <= len(bindings); pass++ {
+		changed = false
+		for _, b := range bindings {
+			for _, value := range possibleStrings(b.value, names) {
+				if !slices.Contains(names[b.name], value) {
+					names[b.name] = append(names[b.name], value)
+					changed = true
+				}
+			}
+		}
+	}
+	return names
+}
+
+// possibleStrings returns the strings expr can evaluate to: a string literal, a
+// name in names, a parenthesised expression, or a + of two of these. Any other
+// expression, such as a call or a field read, gives none. A literal that does not
+// unquote gives none too: the scan reports that literal when it visits it.
+func possibleStrings(expr ast.Expr, names map[string][]string) []string {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		if e.Kind != token.STRING {
+			return nil
+		}
+		value, err := strconv.Unquote(e.Value)
+		if err != nil {
+			return nil
+		}
+		return []string{value}
+	case *ast.ParenExpr:
+		return possibleStrings(e.X, names)
+	case *ast.Ident:
+		return names[e.Name]
+	case *ast.BinaryExpr:
+		if e.Op != token.ADD {
+			return nil
+		}
+		var out []string
+		for _, left := range possibleStrings(e.X, names) {
+			for _, right := range possibleStrings(e.Y, names) {
+				out = append(out, left+right)
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+// literalHoldsPath reports whether a string literal among the operands of a
+// concatenation holds the path on its own.
+func literalHoldsPath(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.BasicLit:
+		return anyMayorRigPath(possibleStrings(e, nil))
+	case *ast.ParenExpr:
+		return literalHoldsPath(e.X)
+	case *ast.BinaryExpr:
+		return literalHoldsPath(e.X) || literalHoldsPath(e.Y)
+	}
+	return false
+}
+
+// anyMayorRigPath reports whether one of the strings holds the path as whole segments.
+func anyMayorRigPath(values []string) bool {
+	for _, value := range values {
+		if mayorRigPathPattern.MatchString(value) {
+			return true
+		}
+	}
+	return false
 }
 
 // unquoteLiteral returns the value of a string literal, or an error naming the
