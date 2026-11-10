@@ -394,10 +394,9 @@ func TestManagerAddSyncsRemotesFromRig(t *testing.T) {
 	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
 	f.InitBare(t, upstreamRepoPath)
 
-	// Create mayor/rig with both remotes configured
-	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	f.Clone(t, forkRepoPath, mayorRigPath)
-	if _, err := f.Open(mayorRigPath).(gitfake.CrewRepo).AddRemote("upstream", upstreamRepoPath); err != nil {
+	// The rig's shared .repo.git with both remotes configured
+	bareRepoPath := rigBareRepo(t, f, rigPath, forkRepoPath)
+	if _, err := f.Open(bareRepoPath).(gitfake.CrewRepo).AddRemote("upstream", upstreamRepoPath); err != nil {
 		t.Fatal(err)
 	}
 
@@ -493,107 +492,32 @@ func TestManagerAddSyncsRemotesFromBareRepoWithoutMayorClone(t *testing.T) {
 	}
 }
 
-// Where a rig has both, the mayor clone is still what crew clones copy from:
-// .repo.git is the fallback, not the new source of truth (gt-jmqc5).
-func TestManagerAddPrefersMayorCloneOverBareRepo(t *testing.T) {
-	t.Parallel()
-	f := gitfake.New()
-	tmpDir := t.TempDir()
-
-	rigPath := filepath.Join(tmpDir, "test-rig")
-	if err := os.MkdirAll(rigPath, 0755); err != nil {
-		t.Fatalf("failed to create rig dir: %v", err)
-	}
-
-	forkRepoPath := filepath.Join(tmpDir, "fork.git")
-	staleRepoPath := filepath.Join(tmpDir, "stale.git")
-	f.InitBare(t, forkRepoPath)
-	f.InitBare(t, staleRepoPath)
-
-	// The clone holds the fork; the bare repo still points at where the rig was
-	// cloned from before the fork was configured.
-	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	f.Clone(t, forkRepoPath, mayorRigPath)
+// rigBareRepo lays out the rig's shared .repo.git with origin at origin and
+// returns its path: the repository crew clones copy their remotes from.
+func rigBareRepo(t *testing.T, f *gitfake.Fake, rigPath, origin string) string {
+	t.Helper()
 	bareRepoPath := filepath.Join(rigPath, ".repo.git")
 	f.InitBare(t, bareRepoPath)
-	if _, err := f.Open(bareRepoPath).(gitfake.CrewRepo).AddRemote("origin", staleRepoPath); err != nil {
+	if _, err := f.Open(bareRepoPath).(gitfake.CrewRepo).AddRemote("origin", origin); err != nil {
 		t.Fatal(err)
 	}
-
-	r := &rig.Rig{
-		Name:   "test-rig",
-		Path:   rigPath,
-		GitURL: staleRepoPath,
-	}
-	mgr := fakeManager(t, f, r)
-
-	worker, err := mgr.Add("preferclone", false)
-	if err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
-
-	originURL, err := f.Open(worker.ClonePath).RemoteURL("origin")
-	if err != nil {
-		t.Fatalf("failed to get crew origin URL: %v", err)
-	}
-	if originURL != forkRepoPath {
-		t.Errorf("crew origin = %q, want %q (the mayor clone's fork)", originURL, forkRepoPath)
-	}
+	return bareRepoPath
 }
 
-// A mayor/rig whose .git points at a deleted gitdir is not a clone: crew must
-// take the remotes from .repo.git instead of opening the dead directory.
-func TestManagerAddIgnoresDanglingMayorCloneForBareRepo(t *testing.T) {
+// rigRepo is the git base crew clones copy remotes from: the rig's shared
+// .repo.git only. A rig with a legacy mayor/rig clone and no .repo.git is an
+// error naming the bare path (gt-3lvcjz.4).
+func TestRigRepoRefusesAMayorCloneWithoutBareRepo(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
-	tmpDir := t.TempDir()
+	rigPath := t.TempDir()
+	f.InitRepo(t, filepath.Join(rigPath, "mayor", "rig"))
+	mgr := fakeManager(t, f, &rig.Rig{Name: "test-rig", Path: rigPath})
 
-	rigPath := filepath.Join(tmpDir, "test-rig")
-	if err := os.MkdirAll(rigPath, 0755); err != nil {
-		t.Fatalf("failed to create rig dir: %v", err)
-	}
-
-	forkRepoPath := filepath.Join(tmpDir, "fork.git")
-	staleRepoPath := filepath.Join(tmpDir, "stale.git")
-	f.InitBare(t, forkRepoPath)
-	f.InitBare(t, staleRepoPath)
-	bareRepoPath := filepath.Join(rigPath, ".repo.git")
-	f.InitBare(t, bareRepoPath)
-	if _, err := f.Open(bareRepoPath).(gitfake.CrewRepo).AddRemote("origin", forkRepoPath); err != nil {
-		t.Fatal(err)
-	}
-
-	// The mayor clone still has a stale origin, but its gitdir was deleted
-	// afterwards: .git is a dangling pointer, so the directory is not a clone.
-	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	f.Clone(t, staleRepoPath, mayorRigPath)
-	dotGit := filepath.Join(mayorRigPath, ".git")
-	if err := os.RemoveAll(dotGit); err != nil {
-		t.Fatalf("failed to remove mayor clone's .git: %v", err)
-	}
-	deletedGitDir := filepath.Join(tmpDir, "deleted", "worktrees", "mayor")
-	if err := os.WriteFile(dotGit, []byte("gitdir: "+deletedGitDir+"\n"), 0644); err != nil {
-		t.Fatalf("failed to write dangling .git: %v", err)
-	}
-
-	r := &rig.Rig{
-		Name:   "test-rig",
-		Path:   rigPath,
-		GitURL: forkRepoPath,
-	}
-	mgr := fakeManager(t, f, r)
-
-	worker, err := mgr.Add("danglingclone", false)
-	if err != nil {
-		t.Fatalf("Add failed: %v", err)
-	}
-
-	originURL, err := f.Open(worker.ClonePath).RemoteURL("origin")
-	if err != nil {
-		t.Fatalf("failed to get crew origin URL: %v", err)
-	}
-	if originURL != forkRepoPath {
-		t.Errorf("crew origin = %q, want %q (from .repo.git, not the dangling mayor clone)", originURL, forkRepoPath)
+	_, err := mgr.rigRepo()
+	want := "no .repo.git under " + rigPath
+	if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "mayor/rig") {
+		t.Fatalf("rigRepo err = %v, want an error naming %q and not mayor/rig", err, want)
 	}
 }
 
@@ -838,13 +762,9 @@ func TestManagerAddSyncsCustomPushURLFromRig(t *testing.T) {
 	f.InitBare(t, upstreamRepoPath)
 	f.InitBare(t, forkRepoPath)
 
-	// Create mayor clone with fetch=upstream and push=fork.
-	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
-		t.Fatalf("failed to create mayor dir: %v", err)
-	}
-	f.Clone(t, upstreamRepoPath, mayorRigPath)
-	if err := f.Open(mayorRigPath).ConfigurePushURL("origin", forkRepoPath); err != nil {
+	// Rig repo with fetch=upstream and push=fork.
+	bareRepoPath := rigBareRepo(t, f, rigPath, upstreamRepoPath)
+	if err := f.Open(bareRepoPath).ConfigurePushURL("origin", forkRepoPath); err != nil {
 		t.Fatal(err)
 	}
 
@@ -903,13 +823,9 @@ func TestManagerAddSyncsFallbackPushURLFromConfig(t *testing.T) {
 	f.InitBare(t, upstreamRepoPath)
 	f.InitBare(t, forkRepoPath)
 
-	// Create mayor clone pointing to upstream — NO custom push URL on mayor.
-	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
-		t.Fatalf("failed to create mayor dir: %v", err)
-	}
-	f.Clone(t, upstreamRepoPath, mayorRigPath)
-	// Intentionally NOT setting push URL on mayor — this tests the fallback path.
+	// Rig repo pointing to upstream — NO custom push URL on the rig repo.
+	rigBareRepo(t, f, rigPath, upstreamRepoPath)
+	// Intentionally NOT setting push URL on the rig repo — this tests the fallback path.
 
 	// Rig has PushURL set (as if loaded from config.json)
 	r := &rig.Rig{
@@ -956,12 +872,8 @@ func TestManagerAddNoPushURLWhenConfigEmpty(t *testing.T) {
 	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
 	f.InitBare(t, upstreamRepoPath)
 
-	// Create mayor clone with NO custom push URL.
-	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
-		t.Fatalf("failed to create mayor dir: %v", err)
-	}
-	f.Clone(t, upstreamRepoPath, mayorRigPath)
+	// Rig repo with NO custom push URL.
+	rigBareRepo(t, f, rigPath, upstreamRepoPath)
 
 	r := &rig.Rig{
 		Name:   "test-rig",
@@ -1016,12 +928,8 @@ func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
 	f.InitBare(t, upstreamRepoPath)
 	f.InitBare(t, forkRepoPath)
 
-	// Create mayor clone (no custom push URL on mayor)
-	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
-		t.Fatalf("failed to create mayor dir: %v", err)
-	}
-	f.Clone(t, upstreamRepoPath, mayorRigPath)
+	// Rig repo (no custom push URL on it)
+	rigBareRepo(t, f, rigPath, upstreamRepoPath)
 
 	// Step 1: Create crew with a push URL configured (simulating previous config)
 	r := &rig.Rig{

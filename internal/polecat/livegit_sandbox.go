@@ -200,8 +200,7 @@ func sandboxSeatGoneSharedRepoGitState(gits gitOpener, worktreePath, rigRoot, br
 	}
 	repo := rigGitRepo(root)
 	if repo == "" {
-		return liveGitUnknown(worktreePath, "locating the shared repository",
-			errors.New("no .repo.git or mayor/rig under the rig root"))
+		return liveGitUnknown(worktreePath, "locating the shared repository", noBareRepoErr(root))
 	}
 	g := openRigRepo(gits, repo)
 
@@ -257,8 +256,9 @@ func sandboxSeatGoneSharedRepoGitState(gits gitOpener, worktreePath, rigRoot, br
 }
 
 // sharedRepoSeatRef locates the shared repository's local ref for a recorded
-// branch. ok is false when the rig has no shared repository or holds no ref for
-// the branch; a repository or ref that cannot be read is an error.
+// branch. ok is false when the rig holds no ref for the branch; a rig with no
+// .repo.git, or a repository or ref that cannot be read, is an error, so a
+// missing repository is never read as a ref that holds nothing.
 func sharedRepoSeatRef(gits gitOpener, rigRoot, branch string) (g gitRepo, localRef string, ok bool, err error) {
 	root := strings.TrimSpace(rigRoot)
 	if root == "" {
@@ -266,7 +266,7 @@ func sharedRepoSeatRef(gits gitOpener, rigRoot, branch string) (g gitRepo, local
 	}
 	repo := rigGitRepo(root)
 	if repo == "" {
-		return nil, "", false, nil
+		return nil, "", false, noBareRepoErr(root)
 	}
 	g = openRigRepo(gits, repo)
 	localRef = "refs/heads/" + branch

@@ -2,9 +2,13 @@ package polecat
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // TestBranchOnOrigin: the spec dispatcher's resume-branch check reads the
@@ -16,10 +20,10 @@ func TestBranchOnOrigin(t *testing.T) {
 	w := newWorld()
 	root := t.TempDir()
 	buildCanonicalRigIn(t, w, root)
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	head := w.rev(t, mayorRig, "main")
-	w.SetRef(t, mayorRig, "refs/heads/polecat/agate/gt-a+mu1", head)
-	w.SetRef(t, mayorRig, "refs/heads/polecat/agate/gt-a+mu1-suffix", head)
+	bare := constants.RigBareRepoPath(root)
+	head := w.rev(t, bare, "main")
+	w.SetRef(t, bare, "refs/heads/polecat/agate/gt-a+mu1", head)
+	w.SetRef(t, bare, "refs/heads/polecat/agate/gt-a+mu1-suffix", head)
 
 	for _, tc := range []struct {
 		branch string
@@ -42,6 +46,44 @@ func TestBranchOnOrigin(t *testing.T) {
 
 	if _, err := branchOnOrigin(w.opener(), t.TempDir(), "polecat/agate/gt-a+mu1"); !errors.Is(err, ErrNoRigRepo) {
 		t.Errorf("no-repo error = %v, want ErrNoRigRepo", err)
+	}
+}
+
+// A rig with a legacy mayor/rig clone and no .repo.git is an unknown answer
+// that names the bare path from every survival reader: its polecat branches
+// are unreadable here, so it must never read as the nothing-to-protect
+// ErrNoRigRepo.
+func TestLegacyCloneWithoutBareRepoIsUnknownForEachReader(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gits := newWorld().opener()
+	for _, tc := range []struct {
+		name string
+		read func() error
+	}{
+		{name: "origin polecat branches", read: func() error {
+			_, err := listOriginPolecatBranches(gits, root)
+			return err
+		}},
+		{name: "branch on origin", read: func() error {
+			_, err := branchOnOrigin(gits, root, "polecat/agate/gt-a+mu1")
+			return err
+		}},
+		{name: "work survival", read: func() error {
+			_, err := newWorkSurvival(gits, root, time.Second)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.read()
+			if err == nil || errors.Is(err, ErrNoRigRepo) || !strings.Contains(err.Error(), "no .repo.git under "+root) {
+				t.Fatalf("err = %v, want an unknown error naming no .repo.git under %s", err, root)
+			}
+		})
 	}
 }
 

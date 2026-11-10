@@ -10,9 +10,10 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// ErrNoRigRepo means the rig has neither a shared bare repo nor a mayor/rig
-// clone, so there is no git state to judge surviving work from.
-var ErrNoRigRepo = errors.New("rig has no git repo (neither .repo.git nor mayor/rig)")
+// ErrNoRigRepo means the rig has no git state at all: no shared bare repo and
+// no legacy mayor/rig clone, so there is no polecat branch to judge. A rig with
+// a mayor/rig clone but no .repo.git is not this error; see noBareRepoErr.
+var ErrNoRigRepo = errors.New("rig has no git repo")
 
 // SurvivalVerdict is one answer from the surviving-work predicate: the branch
 // carrying work found on no base branch, or why that could not be determined.
@@ -79,7 +80,7 @@ type WorkSurvival struct {
 }
 
 // NewWorkSurvival prepares the predicate for one rig. It returns ErrNoRigRepo
-// when the rig has no git repo.
+// when the rig has no git state, and an unknown error when it has no .repo.git.
 func NewWorkSurvival(rigRoot string) (*WorkSurvival, error) {
 	return newWorkSurvival(gitOpener{}, rigRoot, git.RemoteQueryTimeout)
 }
@@ -89,7 +90,7 @@ func NewWorkSurvival(rigRoot string) (*WorkSurvival, error) {
 func newWorkSurvival(gits gitOpener, rigRoot string, fetchTimeout time.Duration) (*WorkSurvival, error) {
 	root := rigGitRepo(rigRoot)
 	if root == "" {
-		return nil, ErrNoRigRepo
+		return nil, noBareRepoErr(rigRoot)
 	}
 	g := openRigRepo(gits, root)
 	defaultBranch := "main"

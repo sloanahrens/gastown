@@ -176,7 +176,7 @@ type Manager struct {
 	rig *rig.Rig
 	git crewRepo
 
-	// openGit opens the repository at a directory (a crew clone, mayor/rig);
+	// openGit opens the repository at a directory (a crew clone, the rig's bare repo);
 	// nil opens a *git.Git. Tests hand it a gitfake world.
 	openGit func(dir string) crewRepo
 
@@ -509,20 +509,13 @@ func (m *Manager) syncRemotesFromRig(crewPath string) error {
 	return nil
 }
 
-// rigRepo opens the repository a crew clone copies its remote configuration
-// from: the mayor/rig clone while the rig has one — where the town has always
-// read them, so a rig that has one keeps the remotes it had — else the rig's
-// shared bare .repo.git, which carries the same ones. A rig whose mayor clone
-// is gone still provisions crew clones that point at the rig's fork (gt-jmqc5).
+// rigRepo opens the rig's shared bare .repo.git, the repository a crew clone
+// copies its remote configuration from. A rig without one is an error.
 func (m *Manager) rigRepo() (crewRepo, error) {
-	mayorRigPath := filepath.Join(m.rig.Path, "mayor", "rig")
-	if rig.IsWorkTreeRoot(mayorRigPath) {
-		return m.gitAt(mayorRigPath), nil
-	}
 	if bareRepoPath := m.rig.BareRepoPath(); bareRepoPath != "" {
 		return m.gitAtBare(bareRepoPath), nil
 	}
-	return nil, fmt.Errorf("rig %s has no repository to read remotes from: neither %s nor %s is a git repository", m.rig.Name, mayorRigPath, filepath.Join(m.rig.Path, ".repo.git"))
+	return nil, fmt.Errorf("no .repo.git under %s", m.rig.Path)
 }
 
 // gitAtBare opens the bare repository at dir through openGit, or as

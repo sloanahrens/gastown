@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gofrs/flock"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -41,18 +42,16 @@ func TestReconcileUnderThePoolLockReadsOnlyThePolecatsDirectory(t *testing.T) {
 func TestTheWorktreePruneRunsAfterThePoolLockIsReleased(t *testing.T) {
 	t.Parallel()
 	rigPath := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := &rig.Rig{Name: "myrig", Path: rigPath}
 	w := newWorld()
+	w.InitBare(t, constants.RigBareRepoPath(rigPath))
+	r := &rig.Rig{Name: "myrig", Path: rigPath}
 	m := newTestManager(r, w, nil, newNoDatabaseDB())
 
 	lockPath := filepath.Join(rigPath, ".runtime", "locks", "polecat-pool.lock")
 	pruned := 0
 	free := false
-	m.gits = gitOpener{open: func(dir string) gitRepo {
-		return pruneProbe{gitRepo: w.OpenBranchRepo(dir), onPrune: func() {
+	m.gits = gitOpener{openDir: func(gitDir, workDir string) gitRepo {
+		return pruneProbe{gitRepo: w.repo(gitDir), onPrune: func() {
 			pruned++
 			free = poolLockIsFree(t, lockPath)
 		}}

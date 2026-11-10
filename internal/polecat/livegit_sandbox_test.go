@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestSandboxSeatGitStateRunningSandboxIsUnknown(t *testing.T) {
@@ -269,7 +271,7 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 		w, dir, branch := sandboxHostRepo(t)
 		rigRoot := t.TempDir()
 		buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
-		shared := filepath.Join(rigRoot, "mayor", "rig")
+		shared := constants.RigBareRepoPath(rigRoot)
 		// The shared repository kept the seat's branch at a commit the worktree
 		// never reached.
 		w.SetRef(t, shared, "refs/heads/"+branch, w.rev(t, shared, "refs/heads/main"))
@@ -285,7 +287,7 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 		w, dir, branch := sandboxHostRepo(t)
 		rigRoot := t.TempDir()
 		buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
-		shared := filepath.Join(rigRoot, "mayor", "rig")
+		shared := constants.RigBareRepoPath(rigRoot)
 		w.SetRef(t, shared, "refs/heads/"+branch, w.rev(t, shared, "refs/heads/main"))
 		w.DeleteRef(t, shared, "refs/remotes/origin/main")
 		st := judgeGoneIn(w, dir, rigRoot, branch)
@@ -298,7 +300,7 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 		t.Parallel()
 		w, dir, branch := sandboxHostRepo(t)
 		rigRoot := t.TempDir()
-		// A rig root whose mayor/rig is not a repository the seam can read.
+		// A rig root with a legacy mayor/rig clone and no .repo.git: the shared repository cannot be read.
 		if err := os.MkdirAll(filepath.Join(rigRoot, "mayor", "rig"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -311,7 +313,7 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 
 const sharedRepoBranch = "polecat/toast/gt-a+x"
 
-// sharedRepoRig builds a rig whose mayor/rig shared repository holds the
+// sharedRepoRig builds a rig whose shared .repo.git holds the
 // seat's branch with one commit, and returns the world, the rig root, and the
 // path the seat's gone worktree directory is named by.
 func sharedRepoRig(t *testing.T) (*world, string, string) {
@@ -319,7 +321,7 @@ func sharedRepoRig(t *testing.T) (*world, string, string) {
 	w := newWorld()
 	rigRoot := t.TempDir()
 	buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
-	shared := filepath.Join(rigRoot, "mayor", "rig")
+	shared := constants.RigBareRepoPath(rigRoot)
 	w.SetRef(t, shared, "refs/heads/"+sharedRepoBranch, w.rev(t, shared, "refs/heads/main"))
 	w.Commit(t, shared, sharedRepoBranch, "the seat's commit", map[string]string{"fix.txt": "x\n"})
 	return w, rigRoot, filepath.Join(rigRoot, "polecats", "toast", "gastown")
@@ -351,7 +353,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("a local branch already pushed reads clean", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		shared := filepath.Join(rigRoot, "mayor", "rig")
+		shared := constants.RigBareRepoPath(rigRoot)
 		pushed := w.rev(t, shared, "refs/heads/"+sharedRepoBranch)
 		mainTip := w.rev(t, shared, "refs/heads/main")
 		w.SetRef(t, shared, "refs/remotes/origin/"+sharedRepoBranch, pushed)
@@ -369,7 +371,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("no local branch reads clean", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/heads/"+sharedRepoBranch)
+		w.DeleteRef(t, constants.RigBareRepoPath(rigRoot), "refs/heads/"+sharedRepoBranch)
 		st := judgeGoneIn(w, gone, rigRoot, sharedRepoBranch)
 		if st.Source != GitStateSourceLive || st.UnpushedCommits != 0 {
 			t.Errorf("state = %+v, want live clean for a branch the shared repo never held", st)
@@ -379,7 +381,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("an unreadable comparison is unknown", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/remotes/origin/main")
+		w.DeleteRef(t, constants.RigBareRepoPath(rigRoot), "refs/remotes/origin/main")
 		st := judgeGoneIn(w, gone, rigRoot, sharedRepoBranch)
 		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "comparing refs/heads/") {
 			t.Errorf("state = %+v, want unknown naming the comparison", st)
@@ -410,7 +412,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("no recorded branch and no local branch for the seat reads clean", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		shared := filepath.Join(rigRoot, "mayor", "rig")
+		shared := constants.RigBareRepoPath(rigRoot)
 		w.DeleteRef(t, shared, "refs/heads/"+sharedRepoBranch)
 		// Another seat's branch in the repository is not this seat's work.
 		w.SetRef(t, shared, "refs/heads/polecat/other/gt-b+x", w.rev(t, shared, "refs/heads/main"))
@@ -432,7 +434,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("no recorded branch with an unreadable branch list is unknown", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
+		if err := os.MkdirAll(constants.RigBareRepoPath(root), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		st := judgeGoneIn(newWorld(), filepath.Join(root, "polecats", "toast", "gastown"), root, "")
@@ -444,7 +446,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("no recorded branch with an unreadable comparison is unknown", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/remotes/origin/main")
+		w.DeleteRef(t, constants.RigBareRepoPath(rigRoot), "refs/remotes/origin/main")
 		st := judgeGoneIn(w, gone, rigRoot, "")
 		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "judging refs/heads/") {
 			t.Errorf("state = %+v, want unknown naming the comparison", st)
