@@ -598,3 +598,129 @@ func TestJSONLSeriesFailureDoesNotMaskTheVerdict(t *testing.T) {
 		t.Errorf("failed package with an unwritable series: exit code = %d, want 1", code)
 	}
 }
+
+// TestSlowTestsListedFromTheStream pins -slow-tests on a fixed stream with a
+// test of 1s, one of 5s, one of 31s and a subtest of 30s: the 5s and 31s tests
+// print under the package that ran them, slowest first. The 1s test and the
+// subtest, whose time sits inside its parent's, print nothing. Mutation: raise
+// tiersweep.SlowTest above 5s and the 5s line goes; drop the threshold and the
+// 1s line appears.
+func TestSlowTestsListedFromTheStream(t *testing.T) {
+	t.Parallel()
+	code, stdout, stderr := runFile(t, "slow.jsonl", "-slow-tests")
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: a passing stream is go test's verdict", code)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing", stderr)
+	}
+	want := strings.Join([]string{
+		"tierwall: github.com/steveyegge/gastown/internal/daemon 37s",
+		"tierwall: slow tests",
+		"tierwall:   github.com/steveyegge/gastown/internal/daemon TestLong 31s",
+		"tierwall:   github.com/steveyegge/gastown/internal/daemon TestFive 5s",
+		"tierwall: tier 37s bar 90s OK",
+		"",
+	}, "\n")
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// TestSlowTestsOffByDefault pins the flag's default: without -slow-tests the
+// pass and fail fixtures print no slow-test header and no test line. Their
+// exact reports are pinned byte for byte by the two TestReport cases above.
+// Mutation: default the flag on, and the header appears in both reports.
+func TestSlowTestsOffByDefault(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"pass.jsonl", "fail.jsonl"} {
+		_, stdout, _ := runFile(t, name)
+		if strings.Contains(stdout, "tierwall: slow tests") {
+			t.Errorf("%s without -slow-tests printed the slow-test header: %q", name, stdout)
+		}
+		for _, line := range strings.Split(stdout, "\n") {
+			if strings.HasPrefix(line, "tierwall:   ") {
+				t.Errorf("%s without -slow-tests printed a test line %q", name, line)
+			}
+		}
+	}
+}
+
+// TestSlowTestsSeriesTagsTheTests pins what -jsonl appends with -slow-tests:
+// the package's line, then one timings line per slow test in the sweep's
+// format, kind "test", tier "unit", elapsed_ms, slowest first. Mutation: stop
+// appending the test lines, and the file ends after the package line.
+func TestSlowTestsSeriesTagsTheTests(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	code, _, stderr := runFileWith(t, "slow.jsonl", fixedHost(), "-slow-tests", "-jsonl", path, "-run", "gate-1")
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: recording a series fails nothing", code)
+	}
+	if stderr != "" {
+		t.Errorf("stderr = %q, want nothing", stderr)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the run wrote no series: %v", err)
+	}
+	want := strings.Join([]string{
+		`{"ts":"2026-10-02T11:00:00-05:00","run":"gate-1","pkg":"github.com/steveyegge/gastown/internal/daemon","wall_s":37,"result":"pass"}`,
+		`{"kind":"test","tier":"unit","package":"github.com/steveyegge/gastown/internal/daemon","test":"TestLong","elapsed_ms":31000}`,
+		`{"kind":"test","tier":"unit","package":"github.com/steveyegge/gastown/internal/daemon","test":"TestFive","elapsed_ms":5000}`,
+		"",
+	}, "\n")
+	if string(data) != want {
+		t.Errorf("series = %q, want %q", string(data), want)
+	}
+}
+
+// TestSlowTestsMalformedEventIsARunnerFailure pins the refusal: a JSON object
+// line that is not a go test event stops -slow-tests with exit 2, names the
+// line number on stderr, and prints no report, so no list is short of tests
+// and no event text is echoed. Mutation: fall back to the tolerant parse on a
+// parse error, and the run exits 0 with a list missing the tests after it.
+func TestSlowTestsMalformedEventIsARunnerFailure(t *testing.T) {
+	t.Parallel()
+	stream := `{"Action":"pass","Package":"example.com/fx/a","Test":"TestA","Elapsed":6}` + "\n" +
+		`{"Action":5,"Package":"example.com/fx/a","Output":"secret-ish text"}` + "\n"
+	var out, errOut bytes.Buffer
+	code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost())
+	if code != 2 {
+		t.Errorf("exit code = %d, want 2: a malformed event is the runner's failure", code)
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want no report after a malformed event", out.String())
+	}
+	if want := "tierwall: slow tests: line 2: malformed go test -json event\n"; errOut.String() != want {
+		t.Errorf("stderr = %q, want %q", errOut.String(), want)
+	}
+}
+
+// TestSlowTestsTiesGoByPackageThenName pins the order of equal walls: the
+// package first, then the test name, so one stream always prints one list.
+// Mutation: sort by elapsed alone, and the tie prints in stream order.
+func TestSlowTestsTiesGoByPackageThenName(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`{"Action":"pass","Package":"example.com/fx/b","Test":"TestZ","Elapsed":6}`,
+		`{"Action":"pass","Package":"example.com/fx/a","Test":"TestB","Elapsed":6}`,
+		`{"Action":"pass","Package":"example.com/fx/a","Test":"TestA","Elapsed":6}`,
+		"",
+	}, "\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost()); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr %q", code, errOut.String())
+	}
+	want := strings.Join([]string{
+		"tierwall: slow tests",
+		"tierwall:   example.com/fx/a TestA 6s",
+		"tierwall:   example.com/fx/a TestB 6s",
+		"tierwall:   example.com/fx/b TestZ 6s",
+		"tierwall: tier 0s bar 90s OK",
+		"",
+	}, "\n")
+	if out.String() != want {
+		t.Errorf("stdout = %q, want %q", out.String(), want)
+	}
+}

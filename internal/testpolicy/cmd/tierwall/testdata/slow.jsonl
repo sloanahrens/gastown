@@ -1,0 +1,15 @@
+{"Time":"2026-10-02T11:00:00.000000-05:00","Action":"start","Package":"github.com/steveyegge/gastown/internal/daemon"}
+{"Time":"2026-10-02T11:00:00.100000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestQuick"}
+{"Time":"2026-10-02T11:00:01.100000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestQuick","Output":"--- PASS: TestQuick (1.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:01.100100-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestQuick","Elapsed":1}
+{"Time":"2026-10-02T11:00:01.200000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestFive"}
+{"Time":"2026-10-02T11:00:06.200000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestFive","Output":"--- PASS: TestFive (5.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:06.200100-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestFive","Elapsed":5}
+{"Time":"2026-10-02T11:00:06.300000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLong"}
+{"Time":"2026-10-02T11:00:06.400000-05:00","Action":"run","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLong/sub"}
+{"Time":"2026-10-02T11:00:36.400000-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLong/sub","Elapsed":30}
+{"Time":"2026-10-02T11:00:37.000000-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLong","Output":"--- PASS: TestLong (31.00s)\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:37.000100-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/daemon","Test":"TestLong","Elapsed":31}
+{"Time":"2026-10-02T11:00:37.000200-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Output":"PASS\n","OutputType":"frame"}
+{"Time":"2026-10-02T11:00:37.000300-05:00","Action":"output","Package":"github.com/steveyegge/gastown/internal/daemon","Output":"ok  \tgithub.com/steveyegge/gastown/internal/daemon\t37.000s\n"}
+{"Time":"2026-10-02T11:00:37.000000-05:00","Action":"pass","Package":"github.com/steveyegge/gastown/internal/daemon","Elapsed":37}

@@ -14,6 +14,11 @@
 // default (gt-z7qtk); -max-wall turns the tier's wall into a failure on
 // request.
 //
+// -slow-tests lists, after the package lines, each top-level test that took
+// tiersweep.SlowTest (5s) or more, under the package that ran it, so a slow
+// package can be explained test by test from the gate's log alone (gt-vijwck).
+// With -jsonl the same tests are appended to the series as timings lines.
+//
 // -jsonl <path> -run <id> also appends one line per package to a series, so
 // "where does the gate's time go" can be read over weeks rather than from one
 // run's report (gt-u0up0). An absolute path is used as given; a relative one
@@ -44,12 +49,18 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/hoststat"
+	"github.com/steveyegge/gastown/internal/tiersweep"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // maxLine is the longest stdin line read: one event, which carries a whole
 // line of test output, so it can be long.
 const maxLine = 1 << 20
+
+// slowTier labels the slow-test lines -slow-tests appends to the series. It is
+// the gate's unit tier, the only caller that passes the flag; the sweep's tiers
+// (shell, integration, race) name their own.
+const slowTier = "unit"
 
 // event is the part of a go test -json event this report reads. A package
 // that does not build reports through ImportPath and FailedBuild instead of
@@ -103,6 +114,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	maxWall := fs.Duration("max-wall", 0, "exit 3 when the tier is over this wall; 0 turns the check off")
 	jsonl := fs.String("jsonl", "", "append one JSON line per package to this file (needs -run); a relative path is taken from the town root")
 	runID := fs.String("run", "", "the run id each -jsonl line carries")
+	slowTests := fs.Bool("slow-tests", false, "list each test of 5s or more under its package, and tag them in -jsonl")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -114,8 +126,29 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 		return 2
 	}
 
+	// The slow tests come from tiersweep's parser, which reads the whole stream,
+	// so with -slow-tests the stream is buffered and read twice: once for the
+	// packages, once for the tests. Without the flag it streams, as before.
+	in := stdin
 	r := newReport(stdout)
-	if err := r.read(stdin); err != nil {
+	if *slowTests {
+		data, err := io.ReadAll(stdin)
+		if err != nil {
+			fmt.Fprintln(stderr, "tierwall:", err)
+			return 2
+		}
+		_, tests, err := tiersweep.ParseTestJSON(bytes.NewReader(data))
+		if err != nil {
+			// The error names a line number, never the line, so no event text is
+			// echoed, and the run stops rather than print a list short of tests.
+			fmt.Fprintln(stderr, "tierwall: slow tests:", err)
+			return 2
+		}
+		r.listSlow = true
+		r.slow = tiersweep.SlowTests(tests)
+		in = bytes.NewReader(data)
+	}
+	if err := r.read(in); err != nil {
 		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
@@ -164,6 +197,11 @@ type report struct {
 	elapsed map[string]float64  // each package's pass/fail Elapsed, in seconds
 	results map[string]string   // each package's verdict: pass, fail or skip
 	cached  map[string]bool     // packages go test served from its result cache
+
+	// listSlow is set by -slow-tests; slow then holds the tests of SlowTest or
+	// longer that the list and the series name.
+	listSlow bool
+	slow     []tiersweep.TestTime
 }
 
 func newReport(out io.Writer) *report {
@@ -287,12 +325,37 @@ func (r *report) print(bar time.Duration) error {
 	for _, pkg := range pkgs {
 		r.write(fmt.Sprintf("tierwall: %s %s\n", pkg, secs(seconds(r.elapsed[pkg]))))
 	}
+	if r.listSlow {
+		// The header prints even when no test was slow, so an empty list reads
+		// as a check that ran and found nothing, not as a flag left off.
+		r.write("tierwall: slow tests\n")
+		for _, tt := range slowest(r.slow) {
+			r.write(fmt.Sprintf("tierwall:   %s %s %s\n", tt.Package, tt.Test, secs(seconds(tt.Elapsed))))
+		}
+	}
 	verdict := "OK"
 	if r.tier() > bar {
 		verdict = "OVER"
 	}
 	r.write(fmt.Sprintf("tierwall: tier %s bar %s %s\n", secs(r.tier()), secs(bar), verdict))
 	return r.err
+}
+
+// slowest returns the tests slowest first, ties by package and then test name,
+// so one stream always prints one list. It sorts a copy and leaves tests as
+// they were.
+func slowest(tests []tiersweep.TestTime) []tiersweep.TestTime {
+	out := append([]tiersweep.TestTime(nil), tests...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Elapsed != out[j].Elapsed {
+			return out[i].Elapsed > out[j].Elapsed
+		}
+		if out[i].Package != out[j].Package {
+			return out[i].Package < out[j].Package
+		}
+		return out[i].Test < out[j].Test
+	})
+	return out
 }
 
 // tier is the wall from the first event read to the last, which spans every
@@ -320,7 +383,8 @@ type wallLine struct {
 }
 
 // series renders one line per package the stream reported a verdict for,
-// sorted by package so one stream always renders one file. ts is the run's own
+// sorted by package so one stream always renders one file, then one timings
+// line per slow test when -slow-tests listed any. ts is the run's own
 // start, the stream's first event; a stream with no timestamps is stamped from
 // the clock. The load is read once for the run, and left out when the host
 // reports none. A cached package keeps its line and its verdict but carries no
@@ -358,6 +422,16 @@ func (r *report) series(runID string, h host) ([]byte, error) {
 			Load1:  load,
 			Cached: r.cached[pkg],
 		})
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	// A slow test follows the packages in timings.jsonl's own format, with its
+	// kind set, so a reader of walls skips it (tiersweep.ParseWalls).
+	for _, tt := range slowest(r.slow) {
+		line, err := json.Marshal(tiersweep.TestTimingOf(slowTier, tt.Package, tt))
 		if err != nil {
 			return nil, err
 		}

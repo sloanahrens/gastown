@@ -42,10 +42,22 @@ var ProcessExec Exec = func(dir string, env []string, argv []string, out io.Writ
 // enough to name the failure, few enough that a red tier stays readable.
 const excerptLines = 5
 
-// slowTest is the shortest test a -json run writes to timings.jsonl: below it a
+// SlowTest is the shortest test a -json run writes to timings.jsonl: below it a
 // test is noise beside the package's wall, and a per-test cap is slowcheck's
-// job, not the sweep's (gt-juo5e).
-const slowTest = 5 * time.Second
+// job, not the sweep's (gt-juo5e). tierwall lists the same tests in the gate
+// log (gt-vijwck), so both read this one threshold.
+const SlowTest = 5 * time.Second
+
+// SlowTests returns the tests that took SlowTest or longer, in stream order.
+func SlowTests(tests []TestTime) []TestTime {
+	var slow []TestTime
+	for _, tt := range tests {
+		if tt.Elapsed >= SlowTest.Seconds() {
+			slow = append(slow, tt)
+		}
+	}
+	return slow
+}
 
 // Runner runs one tier's packages, one at a time unless Jobs names more, so no
 // single go test outlives its timeout and a red package is named on its own.
@@ -88,7 +100,7 @@ type Runner struct {
 	Resume *Resume
 	// JSON makes each package's command print go test's -json stream: the log
 	// holds the plain text the same run would print, and every top-level test
-	// that took slowTest or longer is written to Timings as a test line
+	// that took SlowTest or longer is written to Timings as a test line
 	// (gt-juo5e). False keeps the command's own output as it comes.
 	JSON bool
 	// Stream, when not nil, makes the pipe a -json command writes into, as
@@ -523,7 +535,7 @@ func (r *Runner) addTiming(tier, name string, start time.Time, code int) {
 	})
 }
 
-// addSlowTests writes one test line per top-level test that took slowTest or
+// addSlowTests writes one test line per top-level test that took SlowTest or
 // longer, so the next sweep can name the tests inside a slow package
 // (gt-juo5e). A test's time is recorded even when the package failed: the test
 // that took the minutes is the one to look at.
@@ -531,17 +543,20 @@ func (r *Runner) addSlowTests(tier, name string, tests []TestTime) {
 	if r.Timings == nil {
 		return
 	}
-	for _, tt := range tests {
-		if tt.Elapsed < slowTest.Seconds() {
-			continue
-		}
-		r.Timings.AddTest(TestTiming{
-			Kind:      kindTest,
-			Tier:      tier,
-			Package:   name,
-			Test:      tt.Test,
-			ElapsedMS: int64(tt.Elapsed*1000 + 0.5),
-		})
+	for _, tt := range SlowTests(tests) {
+		r.Timings.AddTest(TestTimingOf(tier, name, tt))
+	}
+}
+
+// TestTimingOf is the timings line of one slow test of a package in tier, the
+// line the sweep and tierwall both write (gt-vijwck).
+func TestTimingOf(tier, pkg string, tt TestTime) TestTiming {
+	return TestTiming{
+		Kind:      kindTest,
+		Tier:      tier,
+		Package:   pkg,
+		Test:      tt.Test,
+		ElapsedMS: int64(tt.Elapsed*1000 + 0.5),
 	}
 }
 
