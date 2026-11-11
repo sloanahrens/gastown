@@ -845,7 +845,11 @@ func (e *passEnv) Intent(string, string) (intent.Record, error)          { retur
 func (e *passEnv) Assess(string, string) liveness.Result                 { return liveness.Result{} }
 func (e *passEnv) AssignedWork(string, string) (*patrolscan.Work, error) { return nil, nil }
 func (e *passEnv) WorkBead(string, string) (*patrolscan.Work, error)     { return nil, nil }
-func (e *passEnv) ClearSubmission(string, string, string) (bool, error)  { return false, nil }
+func (e *passEnv) BlockingDeps(string, string) ([]patrolscan.WorkRef, error) {
+	return nil, nil
+}
+func (e *passEnv) DeferBlocked(string, string, string, string) (bool, error) { return false, nil }
+func (e *passEnv) ClearSubmission(string, string, string) (bool, error)      { return false, nil }
 func (e *passEnv) AgentRecord(string, string) (patrolscan.AgentRecord, error) {
 	return patrolscan.AgentRecord{}, nil
 }

@@ -588,6 +588,41 @@ func (h *patrolScanHost) WorkBead(rig, id string) (*patrolscan.Work, error) {
 	return &w, nil
 }
 
+// BlockingDeps reads the bead's unresolved blocking dependencies through the
+// dispatcher's own admission rule (sling.Admit and spec's blocked check both
+// ask beads.UnresolvedBlockerIDs), so the tick releases a seat for exactly the
+// edges a sling would refuse the bead over. The tick's own work read named the
+// bead on this reader, so a Show that cannot answer — not found included — is
+// an inconsistent read, not proof of an unblocked bead: it is returned as an
+// error so the tick acts on nothing rather than resuming a blocked seat
+// (gt-otb5m3 rework).
+func (h *patrolScanHost) BlockingDeps(rig, id string) ([]patrolscan.WorkRef, error) {
+	issue, err := h.readBeads(rig).Show(id)
+	if err != nil {
+		return nil, fmt.Errorf("bd show %s: %w", id, err)
+	}
+	if issue == nil {
+		return nil, fmt.Errorf("bd show %s: no issue", id)
+	}
+	open := make(map[string]bool)
+	for _, blockerID := range beads.UnresolvedBlockerIDs(issue.Dependencies) {
+		open[blockerID] = true
+	}
+	if len(open) == 0 {
+		return nil, nil
+	}
+	out := make([]patrolscan.WorkRef, 0, len(open))
+	for _, dep := range issue.Dependencies {
+		blockerID := beads.ExtractIssueID(dep.ID)
+		if !open[blockerID] {
+			continue
+		}
+		delete(open, blockerID) // one entry per blocker, however many edges name it
+		out = append(out, patrolscan.WorkRef{ID: blockerID, Status: dep.Status})
+	}
+	return out, nil
+}
+
 // ClearSubmission ends the seat's submitted wait once its work bead is no
 // longer submitted (the landing was pulled for rework, or a human took it):
 // the record goes to stop and the ordinary path decides what the seat needs.
