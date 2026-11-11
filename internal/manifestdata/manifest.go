@@ -94,7 +94,6 @@ func Default(dirs DirNames) *Manifest {
 		{Path: "seat-refill.hold", Owner: OwnerShared, Why: "the operator's dispatch hold, written on the Mac and read by the pod each tick; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it"},
 		{Path: "ESTOP", Owner: OwnerShared, Why: "the town-wide ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it"},
 		{Path: "ESTOP.<rig>", Owner: OwnerShared, Why: "the per-rig ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it"},
-		{Path: "power-state", Owner: OwnerDaemon, Why: "the last requested power state gt power writes and the daemon reads (internal/power/power.go StatePath)"},
 		{Path: ".events.jsonl.lock", Owner: OwnerDaemon, Why: "the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave"},
 		{Path: ".dolt-archive", Owner: OwnerDaemon, Why: "the JSONL git backup repository internal/daemon/jsonl_git_backup.go pushes each database's history into"},
 		{Path: ".beads-wisp", Owner: OwnerDaemon, Why: "the wisp config layer internal/wisp/config.go writes and internal/rig/config.go reads"},

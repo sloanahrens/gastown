@@ -32,8 +32,6 @@ internal/doctor/openshell_gateway_check.go	launchctl	3	pending-deletion	host age
 internal/hoststat/top_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: the host CPU sample runs macOS top; deleted after the gt-wrap cutover
 internal/installer/gateway.go	launchctl	5	pending-deletion	installer: the gateway install bootstraps its launchd job, deleted with the installer
 internal/polecatimage/stat_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: the image cache reads atime through Stat_t; deleted after the gt-wrap cutover
-internal/power/power.go	launchctl	1	pending-deletion	gt power: the power engine asks launchd whether the daemon job is loaded
-internal/power/states.go	launchctl	2	pending-deletion	gt power: the power states bootout and bootstrap the launchd job
 internal/procid/start_darwin.go	darwin	1	portable-shim	gt-a2uug4.23: StartToken reads kinfo_proc through sysctl; deleted after the gt-wrap cutover
 internal/templates/supervisor_state.go	launchctl	1	pending-deletion	remaining launchd references: the supervisor state reads the launchd job for gt daemon status and gt doctor
 internal/testpolicy/cmd/testtiming/main.go	launchctl	2	pending-deletion	remaining launchd references: the test-timing tool starts its tmux server through launchctl submit
