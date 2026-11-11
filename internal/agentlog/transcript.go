@@ -29,6 +29,13 @@ const (
 	// spawned with CLAUDE_CONFIG_DIR at it log under its projects directory, which
 	// the daemon's own config dir does not name.
 	townConfigDir = ".claude-town"
+
+	// hostClaudeDir is where a container sees the host's Claude config
+	// directory, beside its own: the live daemon pod mounts the Mac's
+	// ~/.claude/projects at $HOME/.claude-host/projects, outside $HOME/.claude,
+	// so the mount never shadows $HOME/.claude/projects, where the container's
+	// own claude children (the om reviews) write their transcripts (gt-xxhzf6).
+	hostClaudeDir = ".claude-host"
 )
 
 // claudeProjectDirFor returns the primary Claude Code project directory for
@@ -50,7 +57,8 @@ func claudeProjectDirFor(workDir string) (string, error) {
 
 // claudeProjectDirsFor returns every Claude Code project directory that can
 // hold transcripts for workDir: the configured config dir's first, then the
-// default ~/.claude one, then the town's own .claude-town one when townRoot is
+// default ~/.claude one, then the host's when a container mounts it at
+// $HOME/.claude-host, then the town's own .claude-town one when townRoot is
 // set.
 //
 // The config dir is a property of the process, not of the worktree. A seat
@@ -103,10 +111,21 @@ func claudeProjectHashFor(workDir string) (string, error) {
 	return claudeProjectHash(normalized), nil
 }
 
+// HostClaudeProjectsDir names the host's Claude projects directory as a
+// container sees it when the host's directory is mounted beneath the
+// container's home: <home>/.claude-host/projects. It is a sibling of
+// <home>/.claude, never that directory itself, so the mount cannot shadow the
+// transcripts the container's own claude children write (gt-xxhzf6). A host
+// with no such directory holds no transcripts there, and a caller that cannot
+// resolve its home names none.
+func HostClaudeProjectsDir(home string) string {
+	return filepath.Join(home, hostClaudeDir, claudeProjectsSubdir)
+}
+
 // claudeProjectRoots returns the project directories for hash under the
 // resolved Claude config dir and, when home is known (non-empty), under the
-// pre-CLAUDE_CONFIG_DIR ~/.claude. When townRoot is non-empty it also returns
-// the town's own .claude-town projects directory for hash, last.
+// pre-CLAUDE_CONFIG_DIR ~/.claude, under the host's mounted projects directory,
+// and under the town's own .claude-town one when townRoot is non-empty.
 func claudeProjectRoots(hash, configDir, home, townRoot string) []string {
 	dirs := []string{filepath.Join(configDir, claudeProjectsSubdir, hash)}
 
@@ -119,7 +138,18 @@ func claudeProjectRoots(hash, configDir, home, townRoot string) []string {
 		}
 	}
 
-	// Third root: the town's config tree. Identical to the first when the
+	// Third root: the host's projects directory, which a container mounts at
+	// $HOME/.claude-host/projects. The mount is a sibling of $HOME/.claude: were
+	// it at $HOME/.claude/projects it would shadow the config dir the
+	// container's own claude children write, and every review transcript would
+	// be lost (gt-xxhzf6).
+	if home != "" {
+		if host := filepath.Join(HostClaudeProjectsDir(home), hash); !slices.Contains(dirs, host) {
+			dirs = append(dirs, host)
+		}
+	}
+
+	// Fourth root: the town's config tree. Identical to the first when the
 	// configured dir is the town's own, so it is dropped the same way.
 	if townRoot != "" {
 		if town := filepath.Join(townRoot, townConfigDir, claudeProjectsSubdir, hash); !slices.Contains(dirs, town) {

@@ -248,18 +248,28 @@ const (
 	DashboardTmpVolume    = "dashboard-tmp"
 	DashboardTmpPath      = "/tmp"
 	DashboardClaudeVolume = "dashboard-claude"
+	// DaemonHomePath is the container's HOME: the image runs as root, so the
+	// daemon's own Claude config dir is ClaudeHomePath.
+	DaemonHomePath = "/root"
 	// ClaudeHomePath is where the Mac's ~/.claude sits in the image: its HOME is
 	// /root, so the transcripts and the spend ledger sit there. The dashboard mounts
-	// the whole directory here; the daemon mounts only the projects subtree below it.
-	ClaudeHomePath = "/root/.claude"
+	// the whole directory here; the daemon mounts the host's projects directory
+	// beside it, at DaemonHostClaudeProjectsPath.
+	ClaudeHomePath = DaemonHomePath + "/.claude"
 	// DaemonClaudeVolume carries the Mac's ~/.claude into the daemon container, for
-	// the usage_attrib patrol that reads the transcripts there.
+	// the usage scan that reads the host's transcripts.
 	DaemonClaudeVolume = "daemon-claude"
-	// DaemonClaudeProjectsPath is the one subtree of ~/.claude the daemon container
-	// sees: the patrol reads only the projects directory of transcripts, so the
-	// mount is narrowed to it with a subPath (gt-w9eca2).
-	DaemonClaudeProjectsPath = ClaudeHomePath + "/projects"
-	DaemonClaudeProjectsSub  = "projects"
+	// DaemonHostClaudeProjectsPath is where the daemon container sees the Mac's
+	// projects directory: the scan reads only the projects subtree, so the mount
+	// is narrowed to it with a subPath (gt-w9eca2). It is a sibling of
+	// ClaudeHomePath, never $HOME/.claude/projects: that is the config dir the
+	// container's own claude children (the om reviews) write, and mounting the
+	// Mac's directory there read-only made every review write no transcript
+	// (gt-xxhzf6). agentlog.HostClaudeProjectsDir names the same path from the
+	// home the scan resolves, and TestDaemonHostClaudePathMatchesAgentlog holds
+	// the two equal.
+	DaemonHostClaudeProjectsPath = DaemonHomePath + "/.claude-host/projects"
+	DaemonClaudeProjectsSub      = "projects"
 	// ViewerTokenFile is the read-only Forgejo token the dashboard page reads from
 	// $XDG_CONFIG_HOME/gt, the same Secret entry a rehearsal mounts.
 	ViewerTokenFile = RehearsalForgeTokenFile
@@ -653,8 +663,10 @@ type Values struct {
 	// read-only, as a hostPath of type Directory so a missing directory fails the
 	// pod rather than creating one. Empty mounts nothing. Set, it must be absolute.
 	// The volume is the whole directory, but the container mounts only its
-	// projects subtree at ClaudeHomePath/projects, the one the usage scan reads, so
-	// the rest of ~/.claude is not visible in the pod (gt-w9eca2).
+	// projects subtree at DaemonHostClaudeProjectsPath, the one the usage scan
+	// reads, so the rest of ~/.claude is not visible in the pod (gt-w9eca2). The
+	// mount is a sibling of ClaudeHomePath, so the container's own Claude config
+	// dir stays writable for its om reviews (gt-xxhzf6).
 	DaemonClaudeDir string
 }
 
@@ -1487,7 +1499,7 @@ func mounts(v Values) []VolumeMount {
 	if v.DaemonClaudeDir != "" {
 		m = append(m, VolumeMount{
 			Name:      DaemonClaudeVolume,
-			MountPath: DaemonClaudeProjectsPath,
+			MountPath: DaemonHostClaudeProjectsPath,
 			SubPath:   DaemonClaudeProjectsSub,
 			ReadOnly:  true,
 		})

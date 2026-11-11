@@ -20,6 +20,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -359,7 +360,8 @@ func TestDashboardMountsTheClaimReadOnly(t *testing.T) {
 // TestDaemonClaudeMountIsReadOnlyDirectory holds the daemon's claude directory to
 // the golden that shows it: one host path, the Mac's ~/.claude as a Directory, and
 // in the daemon container only its projects subtree, mounted read-only at
-// /root/.claude/projects. No other host path exists.
+// DaemonHostClaudeProjectsPath, beside the pod's own config dir rather than over
+// it. No other host path exists.
 func TestDaemonClaudeMountIsReadOnlyDirectory(t *testing.T) {
 	t.Parallel()
 	v := goldenValues(t)
@@ -379,12 +381,34 @@ func TestDaemonClaudeMountIsReadOnlyDirectory(t *testing.T) {
 	if hostPaths != 1 || host.Name != DaemonClaudeVolume || host.HostPath.Path != v.DaemonClaudeDir || host.HostPath.Type != "Directory" {
 		t.Fatalf("the daemon pod has %d host paths, want the claude directory alone: %s of type Directory", hostPaths, v.DaemonClaudeDir)
 	}
-	m := volumeMountAt(pod.Containers[0].VolumeMounts, DaemonClaudeProjectsPath)
+	m := volumeMountAt(pod.Containers[0].VolumeMounts, DaemonHostClaudeProjectsPath)
 	if m == nil || m.Name != DaemonClaudeVolume || m.SubPath != DaemonClaudeProjectsSub || !m.ReadOnly {
-		t.Errorf("the claude mount = %+v, want %s from %s subPath %s read-only", m, DaemonClaudeProjectsPath, DaemonClaudeVolume, DaemonClaudeProjectsSub)
+		t.Errorf("the claude mount = %+v, want %s from %s subPath %s read-only", m, DaemonHostClaudeProjectsPath, DaemonClaudeVolume, DaemonClaudeProjectsSub)
 	}
 	if whole := volumeMountAt(pod.Containers[0].VolumeMounts, ClaudeHomePath); whole != nil {
-		t.Errorf("the daemon mounts %s as a whole (%+v), want only its projects subtree", ClaudeHomePath, whole)
+		t.Errorf("the daemon mounts %s as a whole (%+v), want only the host's projects subtree beside it", ClaudeHomePath, whole)
+	}
+	// The pod's own config dir must stay the container's: a mount at
+	// $HOME/.claude/projects shadows the transcripts the om reviews write
+	// there, which is what the 11:00 roll broke (gt-xxhzf6).
+	if own := volumeMountAt(pod.Containers[0].VolumeMounts, filepath.Join(ClaudeHomePath, "projects")); own != nil {
+		t.Errorf("the daemon mounts %+v at %s, over the pod's own Claude projects dir", own, filepath.Join(ClaudeHomePath, "projects"))
+	}
+}
+
+// TestDaemonHostClaudePathMatchesAgentlog holds the daemon's host-projects mount
+// to the path the usage scan searches: internal/agentlog reads the host's
+// transcripts under HostClaudeProjectsDir(home), which is a sibling of the
+// config dir. A drift leaves every host transcript unread (gt-xxhzf6). The
+// import rule (imports_test.go) reads only non-test files, so this test imports
+// internal/agentlog and compares the exported paths.
+func TestDaemonHostClaudePathMatchesAgentlog(t *testing.T) {
+	t.Parallel()
+	if got, want := DaemonHostClaudeProjectsPath, agentlog.HostClaudeProjectsDir(DaemonHomePath); got != want {
+		t.Errorf("the daemon mounts the host's projects at %q, so the usage scan must look there; agentlog looks in %q", got, want)
+	}
+	if strings.HasPrefix(DaemonHostClaudeProjectsPath, ClaudeHomePath+"/") {
+		t.Errorf("the host's projects mount %q is under the pod's own config dir %q, so it shadows the om reviews' transcripts", DaemonHostClaudeProjectsPath, ClaudeHomePath)
 	}
 }
 
