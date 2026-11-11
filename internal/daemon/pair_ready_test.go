@@ -45,9 +45,10 @@ func digestOf(body []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// fakePairAPI is the viewer's Forgejo read: the branches a listing returns and
-// the commit counts a comparison returns, keyed "base...head". A comparison with
-// no entry is an error, so a test that drops one exercises that refusal.
+// fakePairAPI is the viewer's Forgejo read: the branches a listing returns, the
+// commit counts a comparison returns (keyed "base...head"), and the images
+// workflow runs with their jobs and logs. A comparison with no entry is an
+// error, so a test that drops one exercises that refusal.
 type fakePairAPI struct {
 	branches  []forgejo.Branch
 	branchErr error
@@ -58,6 +59,26 @@ type fakePairAPI struct {
 	// green, so the listing never ends.
 	endless  bool
 	compares map[string]int
+	// runs is what a run listing returns, filtered by the commit and workflow
+	// the filter names. runErr fails every run listing, and the listing an
+	// ignored filter returns is modelled by filling runs with another commit's.
+	runs   []forgejo.ActionRun
+	runErr error
+	// ignoreFilter makes the run listing answer runs.runs as they are: a
+	// server that honours none of the filter's fields. nilList answers no list
+	// and no error, which no Forgejo does and every caller must still survive.
+	ignoreFilter bool
+	nilList      bool
+	// jobs and logs answer by run id and job id, as the API does. jobsErr and
+	// logErr fail those reads.
+	jobs    map[int64][]forgejo.ActionRunJob
+	jobsErr error
+	logs    map[int64]string
+	logErr  error
+	// runsQueries records the filter each run listing was asked with, and
+	// jobReads counts the job list and log reads made.
+	runsQueries []forgejo.RunFilter
+	jobReads    int
 }
 
 func (f *fakePairAPI) ListBranches(_ context.Context, _, _ string, page, limit int) ([]forgejo.Branch, error) {
@@ -86,6 +107,43 @@ func (f *fakePairAPI) CompareCommits(_ context.Context, _, _, base, head string)
 		return nil, fmt.Errorf("no comparison fixture for %s...%s", base, head)
 	}
 	return &forgejo.CompareInfo{TotalCommits: total}, nil
+}
+
+func (f *fakePairAPI) ListRuns(_ context.Context, _, _ string, filter forgejo.RunFilter) (*forgejo.RunList, error) {
+	f.runsQueries = append(f.runsQueries, filter)
+	if f.runErr != nil {
+		return nil, f.runErr
+	}
+	if f.nilList {
+		return nil, nil
+	}
+	out := forgejo.RunList{}
+	for _, run := range f.runs {
+		if !f.ignoreFilter && filter.HeadSHA != "" && run.CommitSHA != filter.HeadSHA {
+			continue
+		}
+		if !f.ignoreFilter && filter.WorkflowID != "" && run.WorkflowID != filter.WorkflowID {
+			continue
+		}
+		out.Runs = append(out.Runs, run)
+	}
+	return &out, nil
+}
+
+func (f *fakePairAPI) ListRunJobs(_ context.Context, _, _ string, runID int64) ([]forgejo.ActionRunJob, error) {
+	f.jobReads++
+	if f.jobsErr != nil {
+		return nil, f.jobsErr
+	}
+	return f.jobs[runID], nil
+}
+
+func (f *fakePairAPI) JobLogs(_ context.Context, _, _ string, jobID int64) (string, error) {
+	f.jobReads++
+	if f.logErr != nil {
+		return "", f.logErr
+	}
+	return f.logs[jobID], nil
 }
 
 // fakePairRegistry is the registry a test fills with the tags it holds, keyed
@@ -824,4 +882,525 @@ func TestPairReadyTokenNeverReachesLogOrItem(t *testing.T) {
 		require.NotEmpty(t, fx.logs, "the failed read was not logged")
 		assert.NotContains(t, strings.Join(fx.logs, "\n"), pairToken)
 	})
+}
+
+const (
+	pairImagesRun  = int64(14757)
+	pairImagesJob  = int64(311)
+	pairImagesLine = "Error: rig devops pin fc7615ec3b0b is 44 commits behind main, over the 40-commit bound"
+)
+
+// setImagesRun makes the fixture's images workflow hold one run for sha: the
+// run is the newest, and its only job reports the same status, so a succeeded
+// run clears what a failed one raised.
+func (fx *pairFixture) setImagesRun(sha, status string) {
+	if fx.api.jobs == nil {
+		fx.api.jobs = map[int64][]forgejo.ActionRunJob{}
+	}
+	if fx.api.logs == nil {
+		fx.api.logs = map[int64]string{}
+	}
+	run := forgejo.ActionRun{
+		ID: pairImagesRun, CommitSHA: sha, WorkflowID: pairReadyImagesWorkflow, Status: status,
+	}
+	// Runs are listed newest first, so the run this helper set is the one the
+	// scan judges even when a case adds more behind it.
+	fx.api.runs = append([]forgejo.ActionRun{run}, fx.api.runs...)
+	fx.api.jobs[pairImagesRun] = []forgejo.ActionRunJob{
+		{ID: pairImagesJob, RunID: pairImagesRun, Name: "images", Status: status},
+	}
+	fx.api.logs[pairImagesJob] = "[preflight] checking the pins\n" + pairImagesLine + "\n"
+}
+
+// TestImagesFailedRaisesAnItemForAFailedRun: an images run that ended failed or
+// canceled for a green commit newer than the running one raises one item
+// naming the commit and the first Error: line of the job it ran. The registry
+// holds nothing, which is what a failed build leaves behind.
+func TestImagesFailedRaisesAnItemForAFailedRun(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{deployRunFailed, deployRunCancelled} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.reg = &fakePairRegistry{}
+			fx.setImagesRun(pairGreen, status)
+
+			fx.run(pairT0)
+
+			items := fx.check.observed()
+			require.Len(t, items, 1)
+			it := items[0]
+			assert.Equal(t, attention.KindImagesFailed, it.Kind)
+			assert.Equal(t, "images-failed:gastown:"+pairGreen12, it.Key)
+			assert.Equal(t, "gastown", it.Rig)
+			assert.Equal(t, pairGreen, it.SHA)
+			assert.Contains(t, it.Summary, pairGreen12, "the item does not name the commit")
+			assert.Contains(t, it.Summary, pairImagesLine, "the item does not carry the Error line")
+			assert.Equal(t, attention.RuleImagesFailed, attention.RuleFor(it))
+			require.NotEmpty(t, fx.api.runsQueries, "the images runs were not read")
+			assert.Equal(t, pairReadyImagesWorkflow, fx.api.runsQueries[0].WorkflowID)
+			assert.Equal(t, pairGreen, fx.api.runsQueries[0].HeadSHA)
+			assert.Empty(t, fx.api.runsQueries[0].Event, "the run was looked up for one event, not every event")
+		})
+	}
+}
+
+// TestImagesFailedIsOneItemAndASuccessClearsIt: the item is keyed by the
+// commit, so a second scan keeps one and does not duplicate it, and a later
+// green run of the same commit clears it.
+func TestImagesFailedIsOneItemAndASuccessClearsIt(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+
+	fx.run(pairT0.Add(pairReadyInterval))
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a second scan duplicated the failed build")
+	assert.Equal(t, "images-failed:gastown:"+pairGreen12, items[0].Key)
+
+	fx.setImagesRun(pairGreen, deployRunSucceeded)
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+
+	assert.Empty(t, fx.check.observed(), "a green run for the commit did not clear the item")
+}
+
+// TestImagesFailedStandsWhileTheRerunIsInFlight: a new run that has not
+// finished is no answer, so the failure the check last raised for the commit
+// stands until the run settles. Clearing it when the re-run starts would report
+// a fix nobody has seen yet.
+func TestImagesFailedStandsWhileTheRerunIsInFlight(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+
+	fx.setImagesRun(pairGreen, forgejo.RunStatusRunning)
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "an in-flight re-run cleared the item it has not answered yet")
+	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+
+	fx.setImagesRun(pairGreen, deployRunSucceeded)
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+	assert.Empty(t, fx.check.observed())
+}
+
+// TestImagesFailedWithAnUnreadableLogStillRaises: the run ended failed, which
+// the scan knows whatever the log says, so every way of not reading the log
+// still raises the item and says the log could not be read rather than passing
+// for a build that did not fail.
+func TestImagesFailedWithAnUnreadableLogStillRaises(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		apply func(fx *pairFixture)
+		want  string
+	}{
+		{
+			name:  "the run's jobs cannot be listed",
+			apply: func(fx *pairFixture) { fx.api.jobsErr = errors.New("forgejo answered 500 on the job list") },
+			want:  `the job log could not be read: log: "forgejo answered 500 on the job list"`,
+		},
+		{
+			name:  "the job's log cannot be read",
+			apply: func(fx *pairFixture) { fx.api.logErr = errors.New("forgejo answered 404 on the log") },
+			want:  `the job log could not be read: log: "forgejo answered 404 on the log"`,
+		},
+		{
+			name:  "the run names no job",
+			apply: func(fx *pairFixture) { fx.api.jobs = nil },
+			want:  "no failed job found, so no log was read",
+		},
+		{
+			name:  "the log names no Error: line",
+			apply: func(fx *pairFixture) { fx.api.logs[pairImagesJob] = "step failed\n" },
+			want:  "the job log names no Error: line",
+		},
+		{
+			// The run failed but the API marked no job failed. The check does not
+			// read an arbitrary job's log for the reason, so it says none was found.
+			name: "the run marks no job failed",
+			apply: func(fx *pairFixture) {
+				fx.api.jobs[pairImagesRun] = []forgejo.ActionRunJob{
+					{ID: pairImagesJob, RunID: pairImagesRun, Name: "images", Status: deployRunSucceeded},
+				}
+			},
+			want: "no failed job found, so no log was read",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.reg = &fakePairRegistry{}
+			fx.setImagesRun(pairGreen, deployRunFailed)
+			tc.apply(fx)
+
+			fx.run(pairT0)
+
+			items := fx.check.observed()
+			require.Len(t, items, 1)
+			assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+			assert.Contains(t, items[0].Summary, tc.want)
+			assert.Contains(t, items[0].Summary, pairGreen12)
+		})
+	}
+}
+
+// TestImagesFailedRefusesARunForAnotherCommit: the run list is asked for one
+// commit, and a run it returns for another is not that commit's verdict. A
+// filter a server ignores must not put another commit's failure in the queue.
+func TestImagesFailedRefusesARunForAnotherCommit(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairOther, deployRunFailed)
+	// A server that ignores the filter answers this commit's listing with the
+	// other commit's failed run.
+	fx.api.ignoreFilter = true
+
+	fx.run(pairT0)
+
+	assert.Empty(t, fx.check.observed(), "a failed run for another commit raised an item for this one")
+}
+
+// TestImagesFailedAbsentRunKeepsItsItem: a run list with no run for the commit
+// is no answer, so the failure raised for it stands until a successful run
+// clears it.
+func TestImagesFailedAbsentRunKeepsItsItem(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+
+	fx.api.runs = nil
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a run list with no run for the commit cleared the failure")
+	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+}
+
+// TestImagesUnknownRaisesWhenTheRunListCannotBeRead: a run list that cannot be
+// read says nothing about the commit, and it is not a clean commit. The commit
+// gets one images-unknown item naming the error as quoted data; the rig is not
+// marked unreadable, so the pass still answers for its other commits.
+func TestImagesUnknownRaisesWhenTheRunListCannotBeRead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		apply func(fx *pairFixture)
+		want  string
+	}{
+		{
+			name:  "the run list fails",
+			apply: func(fx *pairFixture) { fx.api.runErr = errors.New("forgejo answered 500 on the run list") },
+			want:  `log: "forgejo answered 500 on the run list"`,
+		},
+		{
+			name:  "the run list answers nothing",
+			apply: func(fx *pairFixture) { fx.api.nilList = true },
+			want:  `log: "the list is not there"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.reg = &fakePairRegistry{}
+			tc.apply(fx)
+
+			fx.run(pairT0)
+
+			items := fx.check.observed()
+			require.Len(t, items, 1, "an unreadable run list did not raise one unknown item")
+			it := items[0]
+			assert.Equal(t, attention.KindImagesUnknown, it.Kind)
+			assert.Equal(t, "images-unknown:gastown:"+pairGreen12, it.Key)
+			assert.Equal(t, pairGreen, it.SHA)
+			assert.Equal(t, attention.RuleImagesUnknown, attention.RuleFor(it))
+			assert.Contains(t, it.Summary, "images status unknown for "+pairGreen12+": the run list could not be read")
+			assert.Contains(t, it.Summary, tc.want)
+		})
+	}
+}
+
+// TestImagesFailedRunListErrorKeepsWhatItHeld: after a failed run raised its
+// item, a run list that then fails keeps that failed item, since the failure is
+// still known, and raises the unknown item beside it, since the status is not.
+func TestImagesFailedRunListErrorKeepsWhatItHeld(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+
+	fx.api.runErr = errors.New("forgejo answered 500 on the run list")
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	// observed is ordered by key, so the failed item (images-failed:) precedes
+	// the unknown one (images-unknown:).
+	items := fx.check.observed()
+	require.Len(t, items, 2, "an unreadable run list cleared the failure it had raised, or raised no unknown item")
+	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+	assert.Equal(t, attention.KindImagesUnknown, items[1].Kind)
+}
+
+// TestImagesUnknownLogsOncePerStreak: a run list that keeps failing is logged
+// when the streak starts and not on each read it stays failed. A readable list
+// ends the streak, so the next failure is logged again.
+func TestImagesUnknownLogsOncePerStreak(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.api.runErr = errors.New("forgejo answered 500 on the run list")
+
+	fx.run(pairT0)
+	fx.run(pairT0.Add(pairReadyInterval))
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+	require.Len(t, fx.logs, 1, "a failing run list was logged on every read of its streak")
+	require.Len(t, fx.check.observed(), 1, "the streak did not hold one unknown item")
+
+	fx.api.runErr = nil
+	fx.run(pairT0.Add(3 * pairReadyInterval))
+	assert.Empty(t, fx.check.observed(), "a readable run list with no run for the commit did not clear the unknown item")
+
+	fx.api.runErr = errors.New("forgejo answered 503 on the run list")
+	fx.run(pairT0.Add(4 * pairReadyInterval))
+	require.Len(t, fx.logs, 2, "a new streak after a readable list was not logged")
+	assert.Contains(t, fx.logs[1], "503")
+	require.Len(t, fx.check.observed(), 1)
+}
+
+// TestImagesUnknownIsClearedByAReadableList: the first readable run list answers
+// the commit, whatever it says, so the unknown item goes: a succeeded run and an
+// absent run clear it, and a failed run replaces it with the failed item.
+func TestImagesUnknownIsClearedByAReadableList(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		apply func(fx *pairFixture)
+		want  attention.Kind
+	}{
+		{
+			name:  "a succeeded run",
+			apply: func(fx *pairFixture) { fx.setImagesRun(pairGreen, deployRunSucceeded) },
+		},
+		{
+			name:  "no run for the commit",
+			apply: func(fx *pairFixture) { fx.api.runs = nil },
+		},
+		{
+			name:  "a failed run",
+			apply: func(fx *pairFixture) { fx.setImagesRun(pairGreen, deployRunFailed) },
+			want:  attention.KindImagesFailed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.reg = &fakePairRegistry{}
+			fx.api.runErr = errors.New("forgejo answered 500 on the run list")
+			fx.run(pairT0)
+			require.Len(t, fx.check.observed(), 1)
+
+			fx.api.runErr = nil
+			tc.apply(fx)
+			fx.run(pairT0.Add(pairReadyInterval))
+
+			items := fx.check.observed()
+			if tc.want == "" {
+				assert.Empty(t, items, "a readable run list left the unknown item standing")
+				return
+			}
+			require.Len(t, items, 1, "the unknown item was not replaced by the readable answer")
+			assert.Equal(t, tc.want, items[0].Kind)
+		})
+	}
+}
+
+// TestImagesFailedKeptByAnUnreadableRigIsNotReRead: a rig whose read fails keeps
+// the failed item it held, and the failed run's answer with it, so the next
+// readable read reuses the item instead of reading the job and its log again.
+func TestImagesFailedKeptByAnUnreadableRigIsNotReRead(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+	reads := fx.api.jobReads
+	require.NotZero(t, reads, "the failed run's log was not read")
+
+	fx.rigErr = errors.New("the rig's settings are unreadable")
+	fx.run(pairT0.Add(pairReadyInterval))
+	require.NotEmpty(t, fx.check.observed())
+
+	fx.rigErr = nil
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+
+	assert.Equal(t, reads, fx.api.jobReads, "a failed run kept through an unreadable read had its job or log read again")
+	items := fx.check.observed()
+	require.Len(t, items, 1)
+	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+	assert.Contains(t, items[0].Summary, pairImagesLine)
+}
+
+// TestImagesFailedKeptByAPartialScanIsNotReRead: a scan that stops before the
+// green commit keeps the failed item it held for that commit, and the failed
+// run's answer with it, so the next full scan reuses the item instead of reading
+// the job and its log again.
+func TestImagesFailedKeptByAPartialScanIsNotReRead(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+	reads := fx.api.jobReads
+	require.NotZero(t, reads, "the failed run's log was not read")
+
+	// Without the comparison the scan cannot judge the green commit, so it stops
+	// there and keeps what it held for that commit.
+	delete(fx.api.compares, pairGreen+"..."+pairRunning)
+	fx.run(pairT0.Add(pairReadyInterval))
+	require.NotEmpty(t, fx.check.observed(), "the partial scan dropped the failed item it could not judge")
+
+	fx.api.compares[pairGreen+"..."+pairRunning] = 0
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+
+	assert.Equal(t, reads, fx.api.jobReads, "a failed run kept through a partial scan had its job or log read again")
+	items := fx.check.observed()
+	require.Len(t, items, 1)
+	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+}
+
+// TestPairReadyDoesNotAskForRunsWhenThePairIsPublished: a commit whose pair is
+// in the registry needs no run read, so a failed run for it raises nothing.
+func TestPairReadyDoesNotAskForRunsWhenThePairIsPublished(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.setImagesRun(pairGreen, deployRunFailed)
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1)
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
+	assert.Empty(t, fx.api.runsQueries, "a commit whose pair is published had its run read")
+}
+
+// TestImagesFailedReadsAFailedRunsLogOnce: a failed run keeps its item across
+// scans, so its job and log are read once rather than on every scan.
+func TestImagesFailedReadsAFailedRunsLogOnce(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+	reads := fx.api.jobReads
+	require.NotZero(t, reads, "the failed run's log was not read")
+
+	fx.run(pairT0.Add(pairReadyInterval))
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+
+	assert.Equal(t, reads, fx.api.jobReads, "a failed run's job or log was read again on a later scan")
+	items := fx.check.observed()
+	require.Len(t, items, 1)
+	assert.Contains(t, items[0].Summary, pairImagesLine)
+}
+
+// TestImagesFailedRereadsAnUnreadableLog: a log the check could not read is no
+// answer to keep, so the next scan reads it again and names the Error line once
+// it can.
+func TestImagesFailedRereadsAnUnreadableLog(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.api.logErr = errors.New("forgejo answered 404 on the log")
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+	assert.Contains(t, fx.check.observed()[0].Summary, "the job log could not be read")
+
+	fx.api.logErr = nil
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	items := fx.check.observed()
+	require.Len(t, items, 1)
+	assert.Contains(t, items[0].Summary, pairImagesLine, "the log was not read again")
+}
+
+// TestImagesFailedQuotesTheLogLineAsData: the log is text a build writes, so the
+// summary states its Error line quoted as CI output, with control characters
+// dropped, double quotes made single, and the line capped at 160 characters.
+func TestImagesFailedQuotesTheLogLineAsData(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			name: "control characters and double quotes",
+			line: "Error:\tthe\x07 pin \"drifted\"\x1b[0m",
+			want: `log: "Error: the pin 'drifted'[0m"`,
+		},
+		{
+			name: "a line past the cap",
+			line: "Error: " + strings.Repeat("x", 300),
+			want: `log: "Error: ` + strings.Repeat("x", 153) + `..."`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.reg = &fakePairRegistry{}
+			fx.setImagesRun(pairGreen, deployRunFailed)
+			fx.api.logs[pairImagesJob] = "[preflight] checking the pins\n" + tc.line + "\n"
+
+			fx.run(pairT0)
+
+			items := fx.check.observed()
+			require.Len(t, items, 1)
+			assert.Contains(t, items[0].Summary, tc.want)
+		})
+	}
+}
+
+// TestImagesFailedHasItsOwnCollector: a failed build is a third kind from the
+// pair check's one read, so it needs a collector of its own to reach the queue
+// and to survive a failed collector beside it.
+func TestImagesFailedHasItsOwnCollector(t *testing.T) {
+	t.Parallel()
+	failed := attention.Item{Key: "images-failed:gastown:" + pairGreen12, Kind: attention.KindImagesFailed}
+	s := &attentionSources{pairReady: func() []attention.Item { return []attention.Item{failed} }}
+
+	var found bool
+	for _, c := range s.collectors() {
+		if c.kind != attention.KindImagesFailed {
+			continue
+		}
+		found = true
+		items, err := c.collect(context.Background())
+		require.NoError(t, err)
+		require.Len(t, items, 1)
+		assert.Equal(t, failed, items[0])
+		kept := c.kept(attention.State{Items: []attention.Item{failed}})
+		require.Len(t, kept, 1)
+		assert.Equal(t, attention.KindImagesFailed, kept[0].Kind)
+	}
+	assert.True(t, found, "no collector raises the images-failed kind, so its items never reach the queue")
 }
