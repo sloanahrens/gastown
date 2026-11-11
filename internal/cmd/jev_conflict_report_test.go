@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -583,5 +584,124 @@ func TestJevConflictReportRejectsABadSince(t *testing.T) {
 		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil))
 	if err == nil {
 		t.Fatal("--since 0d was accepted")
+	}
+}
+
+// noFetchRepo stands in for the bare clone. It holds no commits, so every read
+// of a landing's commit fails, and it counts each sync the report asks for.
+type noFetchRepo struct {
+	syncs int
+	runs  [][]string
+}
+
+func (r *noFetchRepo) Sync(context.Context) error {
+	r.syncs++
+	return nil
+}
+
+func (r *noFetchRepo) Run(_ context.Context, args ...string) (string, error) {
+	r.runs = append(r.runs, args)
+	return "", errors.New("commit not in the clone")
+}
+
+// writeJevConflictLandings writes the rig's landing records, one line each.
+func writeJevConflictLandings(t *testing.T, town string, recs ...land.LandingRecord) {
+	t.Helper()
+	file, err := land.RigLandingsFile(town, conflict.RigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(file.Path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, rec := range recs {
+		raw, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(raw)
+		b.WriteByte('\n')
+	}
+	if err := os.WriteFile(file.Path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The report reads the bare clone as it stands. It never syncs the clone, and a
+// pair whose landing commits the clone does not hold is counted as unlabeled,
+// neither failing the report nor taken as a negative label.
+func TestJevConflictReportNeverFetchesAndCountsAbsentBranchesAsUnlabeled(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeJevConflictLog(t, town, jevConflictLogLine(t, "x", "y", time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC), 0.9))
+	const base, head, landed = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222", "3333333333333333333333333333333333333333"
+	landedAt := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	writeJevConflictLandings(t, town,
+		land.LandingRecord{BeadID: "x", Rig: conflict.RigName, Base: base, Head: head, LandedCommit: landed, LandedAt: landedAt},
+		land.LandingRecord{BeadID: "y", Rig: conflict.RigName, Base: base, Head: head, LandedCommit: landed, LandedAt: landedAt},
+	)
+
+	repo := &noFetchRepo{}
+	open := func(battery, townRoot string) (scorecard.Adapter, error) {
+		return scorecard.NewConflictReadOnly(townRoot, func() (scorecard.ConflictRepo, error) { return repo, nil }), nil
+	}
+	rep := runJevConflictJSON(t, town, open, jevConflictLandings)
+
+	cut := jevConflictCutAt(t, rep, 0.6)
+	if cut.Total.Pairs != 1 || cut.Total.Unlabeled != 1 || cut.Total.Labeled != 0 {
+		t.Errorf("cut 0.6 total = pairs %d, unlabeled %d, labeled %d; want the one pair unlabeled",
+			cut.Total.Pairs, cut.Total.Unlabeled, cut.Total.Labeled)
+	}
+	if repo.syncs != 0 {
+		t.Errorf("the report synced the clone %d times; want none", repo.syncs)
+	}
+	for _, args := range repo.runs {
+		for _, arg := range args {
+			if arg == "fetch" {
+				t.Errorf("the report ran git %v; want no fetch", args)
+			}
+		}
+	}
+}
+
+// A missing landings file would read every bead as never landed, so every
+// answer would count, including answers logged after the beads landed. The
+// report refuses instead, and the error names the file.
+func TestJevConflictReportRefusesWhenTheLandingsFileIsMissing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeJevConflictLog(t, town, jevConflictLogLine(t, "a", "b", time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC), 0.9))
+	file, err := land.RigLandingsFile(town, conflict.RigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err = jevConflictReportWith(context.Background(), &out, town, "", false, jevConflictNow,
+		jevConflictOpenWith(nil, nil), jevConflictLandings)
+	if err == nil {
+		t.Fatalf("a missing landings file returned a report:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), file.Path) {
+		t.Errorf("error %q does not name the landings file %s", err, file.Path)
+	}
+	if out.Len() != 0 {
+		t.Errorf("a refused report wrote output: %q", out.String())
+	}
+}
+
+// A pair whose answer stays below 0.6 is counted at no cut, so it is never
+// labeled: a label that cannot be read for it does not fail the report.
+func TestJevConflictReportLabelsOnlyPairsAtTheLowestCut(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeJevConflictLog(t, town, jevConflictLogLine(t, "a", "b", time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC), 0.4))
+
+	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, context.DeadlineExceeded), jevConflictLandingsAt(nil))
+	for _, c := range rep.Cuts {
+		if c.Total.Pairs != 0 {
+			t.Errorf("cut %v counted %d pairs; want none below 0.6", c.Cut, c.Total.Pairs)
+		}
 	}
 }

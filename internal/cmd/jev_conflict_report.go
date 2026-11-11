@@ -55,9 +55,10 @@ The total row carries a 95% Wilson interval on the precision, and the mean
 pairs per day is the warning volume. The mean divides by the window's length,
 so a log younger than the window reads low.
 
-It makes no Jev call and changes no bead. The labels come from the conflict
-adapter, which reads the rig's landings and fetches the bare clone when a pair
-has landings to compare, as the scorecard does.
+It makes no Jev call, changes no bead and never fetches. The labels come from
+the conflict adapter, which reads the rig's landings and the bare clone as it
+stands. A pair whose commits the clone does not hold is counted as unlabeled,
+and so is a pair whose answer stays below 0.6, which no cut reaches.
 
 Examples:
   gt jev conflict-report
@@ -85,7 +86,7 @@ func jevConflictReportRun(ctx context.Context, w io.Writer, findTown func() (str
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevConflictReportWith(ctx, w, townRoot, since, asJSON, now, scorecard.Open, jevConflictLandings)
+	return jevConflictReportWith(ctx, w, townRoot, since, asJSON, now, scorecard.OpenReadOnly, jevConflictLandings)
 }
 
 // jevConflictOpener opens a battery's adapter. It is a parameter so a test can
@@ -276,6 +277,7 @@ func jevConflictPick(entries []jevConflictEntry, landed jevLandedAt, from time.T
 type jevConflictCell struct {
 	Pairs      int      `json:"pairs"`
 	Labeled    int      `json:"labeled"`
+	Unlabeled  int      `json:"unlabeled"`
 	Overlapped int      `json:"overlapped"`
 	Precision  *float64 `json:"precision"`
 }
@@ -309,6 +311,17 @@ type jevConflictCut struct {
 	Total jevConflictTotal `json:"total"`
 }
 
+// jevConflictReaches reports whether a same_files answer is at or above at least
+// one cut, so the pair is counted at some cut.
+func jevConflictReaches(sameFiles float64) bool {
+	for _, cut := range jevConflictCuts {
+		if sameFiles >= cut {
+			return true
+		}
+	}
+	return false
+}
+
 // jevConflictReport is the report, in the shape --json prints.
 type jevConflictReport struct {
 	Since        time.Time        `json:"since"`
@@ -334,6 +347,11 @@ func jevConflictBuild(ctx context.Context, a scorecard.Adapter, entries []jevCon
 	}
 	labels := make([]labeled, 0, len(counted))
 	for _, c := range counted {
+		// A pair below every cut is counted at none, so it is never labeled: a
+		// label that cannot be read for it must not fail the report.
+		if !jevConflictReaches(c.sameFiles) {
+			continue
+		}
 		lab, err := a.Label(ctx, c.item)
 		if err != nil {
 			return jevConflictReport{}, fmt.Errorf("labeling pair %s: %w", c.item.ID, err)
@@ -359,11 +377,13 @@ func jevConflictBuild(ctx context.Context, a scorecard.Adapter, entries []jevCon
 			}
 			for _, c := range []*jevConflictCell{cell, &total} {
 				c.Pairs++
-				if l.ok {
-					c.Labeled++
-					if l.label {
-						c.Overlapped++
-					}
+				if !l.ok {
+					c.Unlabeled++
+					continue
+				}
+				c.Labeled++
+				if l.label {
+					c.Overlapped++
 				}
 			}
 		}
@@ -398,6 +418,15 @@ func jevConflictLandingsOf(townRoot, rig string) (jevLandedAt, error) {
 	f, err := land.RigLandingsFile(townRoot, rig)
 	if err != nil {
 		return nil, err
+	}
+	// A missing file reads every bead as never landed, so every answer would
+	// count, including answers logged after the beads landed. The report refuses
+	// instead.
+	if _, err := os.Stat(f.Path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("the landings file %s does not exist, so the report cannot tell which answers came before a landing", f.Path)
+		}
+		return nil, fmt.Errorf("reading the landings file %s: %w", f.Path, err)
 	}
 	type landing struct {
 		at    time.Time
@@ -441,17 +470,17 @@ func writeJevConflictText(w io.Writer, rep jevConflictReport) error {
 	fmt.Fprintf(&b, "pairs counted %d, lines skipped %d\n", rep.Pairs, rep.LinesSkipped)
 	for _, c := range rep.Cuts {
 		fmt.Fprintf(&b, "\ncut %.1f\n", c.Cut)
-		fmt.Fprintf(&b, "%-10s  %6s  %7s  %10s  %9s\n", "DAY", "PAIRS", "LABELED", "OVERLAPPED", "PRECISION")
+		fmt.Fprintf(&b, "%-10s  %6s  %7s  %9s  %10s  %9s\n", "DAY", "PAIRS", "LABELED", "UNLABELED", "OVERLAPPED", "PRECISION")
 		for _, d := range c.Days {
-			fmt.Fprintf(&b, "%-10s  %6d  %7d  %10d  %9s\n", d.Day, d.Pairs, d.Labeled, d.Overlapped, jevPrecisionText(d.Precision))
+			fmt.Fprintf(&b, "%-10s  %6d  %7d  %9d  %10d  %9s\n", d.Day, d.Pairs, d.Labeled, d.Unlabeled, d.Overlapped, jevPrecisionText(d.Precision))
 		}
 		t := c.Total
 		wilson := "-"
 		if t.WilsonLow != nil {
 			wilson = fmt.Sprintf("%.3f-%.3f", *t.WilsonLow, *t.WilsonHigh)
 		}
-		fmt.Fprintf(&b, "total: pairs %d, labeled %d, overlapped %d, precision %s, 95%% Wilson %s\n",
-			t.Pairs, t.Labeled, t.Overlapped, jevPrecisionText(t.Precision), wilson)
+		fmt.Fprintf(&b, "total: pairs %d, labeled %d, unlabeled %d, overlapped %d, precision %s, 95%% Wilson %s\n",
+			t.Pairs, t.Labeled, t.Unlabeled, t.Overlapped, jevPrecisionText(t.Precision), wilson)
 		fmt.Fprintf(&b, "mean pairs per day: %.2f\n", t.MeanPairsPerDay)
 	}
 	_, err := io.WriteString(w, b.String())
