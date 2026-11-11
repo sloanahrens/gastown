@@ -498,6 +498,50 @@ func TestInitBeads_UncheckableBeadsDirFails(t *testing.T) {
 	}
 }
 
+// The untracked path's mayor redirect is a write that can fail, and a failure
+// is an error, not a skipped redirect (gt-3lvcjz.16). Each row blocks one
+// write: a file where mayor/rig must be a directory, and a directory where the
+// redirect file goes.
+func TestInitBeads_MayorRedirectWriteFailuresFail(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		block func(t *testing.T, rigPath string)
+		want  string
+	}{
+		"mayor/rig is a file, so its .beads cannot be created": {
+			block: func(t *testing.T, rigPath string) {
+				if err := os.MkdirAll(filepath.Join(rigPath, "mayor"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(rigPath, "mayor", "rig"), []byte("x\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "creating mayor/rig/.beads directory",
+		},
+		"the redirect path is a directory, so the redirect cannot be written": {
+			block: func(t *testing.T, rigPath string) {
+				if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "creating mayor redirect file",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rigPath := t.TempDir()
+			tc.block(t, rigPath)
+
+			manager, _, _ := testManager("", nil)
+			err := manager.InitBeads(rigPath, "tk", "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("InitBeads error = %v, want one naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // An adopted rig's beads files are its own database (gt-3lvcjz.16): InitBeads
 // runs bd init at the rig root against them and writes no redirect, neither in
 // <rig>/.beads, which would point the database at itself, nor under mayor/rig,
