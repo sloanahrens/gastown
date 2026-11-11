@@ -47,6 +47,12 @@ func TestAcceptanceTickBoxFlipsOnlyTheNamedLine(t *testing.T) {
 			want:  "- [x] run the gate\n- [x] run the gate",
 		},
 		{
+			name:  "a later bracket in the text does not move the box",
+			block: "- [ ] see [docs]",
+			box:   "see [docs]",
+			want:  "- [x] see [docs]",
+		},
+		{
 			name:  "a box inside a fence is not a box",
 			block: "```\n- [ ] example\n```\n- [ ] example",
 			box:   "example",

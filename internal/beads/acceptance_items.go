@@ -73,14 +73,12 @@ func acceptanceItemsAt(text string) []acceptanceItemAt {
 			line:           i,
 		}
 		// The box opens at the line's first "[": no list marker holds one, and
-		// m[1] lies inside line. An item with no such "[" is not boxed.
+		// the box match is m[1], which lies inside line and starts with that "[".
 		if box := acceptanceBoxRe.FindStringSubmatch(m[1]); box != nil {
-			if boxAt := strings.Index(line, "["); boxAt >= 0 {
-				at.Boxed = true
-				at.Checked = box[1] != " "
-				at.boxAt = boxAt
-				at.box = strings.TrimSpace(m[1][len(box[0]):])
-			}
+			at.Boxed = true
+			at.Checked = box[1] != " "
+			at.boxAt = strings.Index(line, "[")
+			at.box = strings.TrimSpace(m[1][len(box[0]):])
 		}
 		items = append(items, at)
 	}
