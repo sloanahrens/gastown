@@ -153,6 +153,10 @@ type Admin interface {
 	// Version reports what the bd serving this store says about itself. It
 	// reads no database.
 	Version() (VersionInfo, error)
+	// UpdateOffersFlag reports whether the bd serving the store offers flag on
+	// bd update, read from its --help; a test that needs a flag newer than the
+	// bd on PATH asks this before it runs (gastown gt-8mvpvz).
+	UpdateOffersFlag(flag string) (bool, error)
 	// SchemaLevel reports the migration level of the database this store
 	// serves, or an error wrapping ErrStoreUnavailable when it did not
 	// answer.

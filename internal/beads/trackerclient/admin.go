@@ -17,6 +17,13 @@ func (c *Client) Version() (beads.VersionInfo, error) {
 	return beads.VersionInfo{}, fmt.Errorf("Version: %w", ErrUnsupported)
 }
 
+// UpdateOffersFlag answers for a store with no bd behind it: the tracker
+// client's writes go to the tracker, so no bd flag is offered and the caller
+// that needs one hears that rather than a false "offered".
+func (c *Client) UpdateOffersFlag(flag string) (bool, error) {
+	return false, fmt.Errorf("the tracker client runs no bd, so it cannot offer bd update %s", flag)
+}
+
 // SchemaLevel refuses: the tracker knows the wire schema this client speaks,
 // which is not the migration level of the store behind it.
 func (c *Client) SchemaLevel() (int, error) {

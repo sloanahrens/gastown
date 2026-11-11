@@ -65,6 +65,16 @@ func RunVersionContract(t *testing.T, newImpl func(t *testing.T) AdminClient) {
 		if level <= 0 || level != info.DBSchemaVersion {
 			t.Errorf("SchemaLevel = %d, Version.DBSchemaVersion = %d; want the database at the level bd migrates to", level, info.DBSchemaVersion)
 		}
+		// The bd behind every store offers --if-status on bd update (the
+		// guard the tick's --if-acceptance joined); a store that reads bd's
+		// help answers so, and one with no bd behind it is not in this suite.
+		offers, err := c.UpdateOffersFlag("--if-status")
+		if err != nil {
+			t.Fatalf("UpdateOffersFlag(--if-status): %v", err)
+		}
+		if !offers {
+			t.Errorf("UpdateOffersFlag(--if-status) = false; want the bd behind the store to offer it")
+		}
 	})
 }
 

@@ -20,6 +20,26 @@ func requireBd(t *testing.T) {
 	}
 }
 
+// requireUpdateFlag skips the test when the bd serving b does not offer flag on
+// bd update. The sweep image's bd is built at the committed pin and moves only
+// with an image pair; a pair cannot publish while a sweep is red, so a test that
+// needs a flag newer than that bd would hold the sweep red until the pair it
+// waits for exists (gt-8mvpvz). The skip names the bd found and the beads
+// commit the test needs, so the reason is in the log, not a dropped test.
+func requireUpdateFlag(t *testing.T, b *beads.Beads, flag, neededBeadsCommit string) {
+	t.Helper()
+	offers, err := b.UpdateOffersFlag(flag)
+	if err != nil {
+		t.Fatalf("asking bd update --help for %s: %v", flag, err)
+	}
+	if offers {
+		return
+	}
+	version, _ := b.Version()
+	t.Skipf("bd %s (%s) offers no %s on bd update; the test needs beads %s, which the next image pair carries",
+		version.Version, version.Commit, flag, neededBeadsCommit)
+}
+
 // setupPatrolTestDB runs bd init in a fresh directory against a database
 // leased from the shared Dolt test container, and returns the directory and
 // an isolated client for it.
