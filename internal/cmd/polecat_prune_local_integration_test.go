@@ -353,7 +353,7 @@ func TestIntegrationRunPolecatPruneAllRigsSweepsEveryRigInTheTownConfig(t *testi
 			t.Fatalf("runPolecatPrune --all-rigs: %v", err)
 		}
 	})
-	for _, want := range []string{"dry run", rigName, "would delete: 1", merged, "norepo", "skipped: no git repo", "Total: would delete 1"} {
+	for _, want := range []string{"dry run", rigName, "would delete: 1", merged, "norepo", "skipped: no .repo.git under", "Total: would delete 1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q lacks %q", out, want)
 		}
