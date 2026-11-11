@@ -284,11 +284,11 @@ func TestStatusPoolLocksOnlySkipsDockerProbe(t *testing.T) {
 	}
 }
 
-// TestPoolBusyReadOnlyWritesNothing pins the daemon cutover's contract
-// (gt-qpeei.22): the quiet gate asks whether the pool is busy and must leave
-// the town exactly as it found it, so the dead holder's owner file survives the
-// read. The ordinary status read is the one that sweeps it, and this test
-// asserts both halves so a read-only path that starts cleaning is caught here.
+// TestPoolBusyReadOnlyWritesNothing pins the read-only busy contract
+// (gt-qpeei.22): a caller asks whether the pool is busy and must leave the town
+// exactly as it found it, so the dead holder's owner file survives the read.
+// The ordinary status read is the one that sweeps it, and this test asserts
+// both halves so a read-only path that starts cleaning is caught here.
 func TestPoolBusyReadOnlyWritesNothing(t *testing.T) {
 	t.Parallel()
 	tg := newTestGate(t)

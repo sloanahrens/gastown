@@ -163,8 +163,8 @@ func containerDoltHost(resolve doltEndpointResolver) func(townRoot string) (stri
 func realDaemonComposeDeps(out io.Writer) daemonComposeDeps {
 	deps := daemonComposeDeps{
 		findTown: workspace.FindFromCwdOrError,
-		// The settings are read through the control the supervisor and the
-		// cutover refuse from, so this command refuses the same towns they do.
+		// The settings are read through the control the supervisor refuses
+		// from, so this command refuses the same towns it does.
 		daemonConfig: realDaemonControl().townDaemonConfig,
 		doltHost:     containerDoltHost(config.ResolveDoltEndpointFor),
 		containerEnv: func(townRoot string) (map[string]string, error) {
@@ -276,9 +276,9 @@ func newDaemonComposeCmd(run func(out io.Writer, f daemonComposeFlags) error) *c
 		Long: `Render the compose file the town's daemon container runs from, at
 <town>/daemon/container/compose.yml.
 
-gt daemon cutover --to container starts the container from this file, so it must
-name the town's own container, compose project and image. The file is rendered
-from the town's settings, never by hand.`,
+The daemon supervisor starts the container from this file, so it must name the
+town's own container, compose project and image. The file is rendered from the
+town's settings, never by hand.`,
 		RunE: requireSubcommand,
 	}
 	write := &cobra.Command{
@@ -287,7 +287,7 @@ from the town's settings, never by hand.`,
 		Long: `Write the live compose file from the town in the working directory and start
 nothing. The town must set both daemon.container_name and daemon.compose_project:
 a field left unset would render the live defaults into a file this town's
-cutover then starts.
+supervisor then starts.
 
 Dolt is resolved as the container reaches it: dolt.container_host when the town
 sets it, dolt.host when it does not, and a loopback or empty host is refused,

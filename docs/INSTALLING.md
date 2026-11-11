@@ -318,63 +318,30 @@ gt peek myproject/<polecat>
 
 #### Auto-Restart on Crash/Boot (Optional)
 
-The live town has been container-supervised since 2026-11-04: `gt daemon status` shows `Supervised: container gt-daemon`, and the daemon is stopped and started with `gt daemon stop` and `gt daemon start`. The launchd recipe below describes a host-supervised town and is the rollback path; the cutover and rollback steps are in [daemon-container.md](daemon-container.md).
-
-To have the daemon auto-restart if it crashes and start automatically on
-login/boot, hand it off to the OS supervisor (launchd on macOS, systemd on
-Linux):
+The live town has been container-supervised since 2026-11-04: `gt daemon status` shows `Supervised: container gt-daemon`, and the daemon is stopped and started with `gt daemon stop` and `gt daemon start`. A town that runs gt on a Linux host can have the daemon auto-restart if it crashes and start automatically on login/boot by handing it to systemd; macOS has no gt supervisor (gt-a2uug4.15 removed the launchd commands), so the Mac's daemon runs in its container.
 
 ```bash
 # If a manually-started daemon is running, stop it first — enable-supervisor
-# refuses while daemon.lock is held, to avoid a launchd/systemd respawn loop
-# racing the manual daemon for the lock.
+# refuses while daemon.lock is held, to avoid a systemd respawn loop racing
+# the manual daemon for the lock.
 gt daemon stop
 
 gt daemon enable-supervisor
 ```
 
-On macOS, `gt daemon enable-supervisor` writes
-`~/Library/LaunchAgents/com.gastown.daemon.plist` and does not load it;
-launchd loads the file at the next login. On Linux it enables and starts the
-systemd user unit.
+On Linux, `gt daemon enable-supervisor` enables and starts the systemd user
+unit.
 
 Host-specific environment variables the daemon needs (e.g. `SDKROOT` on
 machines with a custom CLT/SDK setup) can be supplied via
 `settings/daemon.env` — see [Reference](reference.md#daemon-environment-settingsdaemonenv).
 
 `gt daemon status` reports what the supervisor is doing, not just that it is
-installed: `Supervised: launchd` means the job is running the daemon holding
-daemon.lock, and `DETACHED` with a spawn count and last exit code means the job
-is not — the daemon is running outside it while launchd respawns and loses the
-lock every `ThrottleInterval`. Stopping a supervised daemon goes through the
-supervisor: on launchd the job is left unloaded and `gt daemon start` bootstraps
-it again, while `systemctl --user stop` leaves the systemd unit loaded but
-inactive and `gt daemon start` restarts it. A stop that cannot establish the
-job's state exits non-zero and names the uncertainty rather than reporting a
-stop it could not confirm.
-
-The job file also records how long the daemon is given to stop before launchd
-SIGKILLs it, and that value comes from the `gt` that wrote the file. `gt daemon
-start`, `gt daemon restart` and `gt up` therefore rewrite a file installed by
-an older `gt` and reload the job from it, so expect the daemon to restart once
-at the first of those commands after an upgrade. Only that value is repaired
-this way; re-provision anything else with `gt daemon enable-supervisor`.
-
-A job launchd cannot initialize respawns forever without the daemon ever
-reaching `daemon.log`. `launchctl print` reports no pid, a `runs` count that
-keeps climbing and `last exit code = 78` (EX_CONFIG, "Service could not
-initialize"), and `launchctl kickstart` does not clear it — the failure is in
-launchd's own load of the job, before the program starts. Boot the job out,
-bootstrap it again, and confirm launchd took it:
-
-```bash
-launchctl bootout gui/$(id -u)/com.gastown.daemon
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gastown.daemon.plist
-launchctl print gui/$(id -u)/com.gastown.daemon | grep -E 'spawn type|pid '
-```
-
-`spawn type = daemon (3)` with a pid is the job running the daemon again;
-`runs` stops climbing.
+installed: `Supervised: systemd` means the unit is running the daemon holding
+daemon.lock. Stopping a supervised daemon goes through the supervisor:
+`systemctl --user stop` leaves the unit loaded but inactive, and `gt daemon
+start` restarts it. A stop that cannot establish the job's state exits non-zero
+and names the uncertainty rather than reporting a stop it could not confirm.
 
 ### Choosing Roles
 

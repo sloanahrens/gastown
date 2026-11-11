@@ -7,8 +7,7 @@ import (
 )
 
 // SlingPattern is the pgrep pattern that matches a running `gt sling`, whatever
-// path it was invoked by: the daemon cutover's quiet gate asks the same
-// question of the same process (gt-qpeei.22).
+// path it was invoked by (gt-qpeei.22).
 const SlingPattern = `^([^ ]*/)?gt sling `
 
 // DeferReason is why a rebuild must wait, "" when it may run: a gt sling is

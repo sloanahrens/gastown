@@ -1051,9 +1051,9 @@ func (g *Gate) StatusPool(townRoot string, pool Pool) (Report, error) {
 // Both answers stop the wait, so neither reads an unchecked host as free.
 //
 // The answer is busy when ANY slot is held (a gate job is running), not only
-// when every slot is, which is where it differs from Report.Busy (gt-zh3wx). The
-// daemon cutover's quiet gate (internal/cmd/daemon_quiet.go) is the caller: it
-// must be able to give up having changed nothing (gt-qpeei.22).
+// when every slot is, which is where it differs from Report.Busy (gt-zh3wx). A
+// caller that must be able to give up having changed nothing needs that
+// reading (gt-qpeei.22).
 func PoolBusyReadOnly(townRoot string, pool Pool) (bool, error) {
 	return NewGate().PoolBusyReadOnly(townRoot, pool)
 }

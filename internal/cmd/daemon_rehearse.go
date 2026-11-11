@@ -768,7 +768,7 @@ func checkSettingAddresses(ctx context.Context, r *rehearsal) []string {
 
 // composeImages are the images the live compose pulls besides the daemon image
 // itself. A pin the registry no longer serves is found here, loudly, and not by
-// the cutover on an engine that has not cached it.
+// a start on an engine that has not cached it.
 func composeImages() []string { return []string{templates.DindImage} }
 
 func checkComposeImagesPull(ctx context.Context, r *rehearsal) []string {

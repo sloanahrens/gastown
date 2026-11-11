@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,10 +48,9 @@ func stubSupervisor(t *testing.T, goos, file string, state templates.SupervisorS
 	t.Helper()
 	calls := &supervisorCalls{}
 	c := &daemonControl{
-		goos:      goos,
-		plistPath: func() (string, error) { return file, nil },
-		unitPath:  func() (string, error) { return file, nil },
-		uid:       os.Getuid(),
+		goos:     goos,
+		unitPath: func() (string, error) { return file, nil },
+		uid:      os.Getuid(),
 		run: func(a []string) error {
 			calls.argv = append(calls.argv, append([]string{}, a...))
 			calls.envs = append(calls.envs, nil)
@@ -103,16 +101,11 @@ func loadedJob() templates.SupervisorState {
 	return templates.SupervisorState{Loaded: true, LastExit: -1}
 }
 
-// writeSupervisorFile writes a plist/unit naming town as WorkingDirectory,
-// the way the two templates render it.
+// writeSupervisorFile writes a systemd unit naming town as WorkingDirectory,
+// the way the template renders it.
 func writeSupervisorFile(t *testing.T, name, town string) string {
 	t.Helper()
-	var body string
-	if strings.HasSuffix(name, ".plist") {
-		body = "<plist><dict><key>WorkingDirectory</key>\n<string>" + town + "</string></dict></plist>"
-	} else {
-		body = "[Service]\nWorkingDirectory=" + town + "\nExecStart=/usr/local/bin/gt daemon run\n"
-	}
+	body := "[Service]\nWorkingDirectory=" + town + "\nExecStart=/usr/local/bin/gt daemon run\n"
 	p := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
@@ -120,62 +113,35 @@ func writeSupervisorFile(t *testing.T, name, town string) string {
 	return p
 }
 
-// With a launchd plist provisioned for this town, gt daemon start must start
-// the daemon THROUGH launchd (kickstart) and never spawn its own child: a
-// manual daemon holds daemon.lock, and the KeepAlive job then respawns every
-// ~10 s, loses the lock and exits 1 for as long as the manual one lives
-// (gt-3jrm).
-func TestStartDaemon_UsesLaunchdWhenProvisioned(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
-
-	via, pid, err := c.startDaemon(town)
-	if err != nil {
-		t.Fatalf("startDaemon: %v", err)
-	}
-	if calls.spawned {
-		t.Fatal("spawned a direct daemon child although launchd is provisioned")
-	}
-	if via != "launchd" || pid != 4242 {
-		t.Fatalf("startDaemon = (%q, %d), want (launchd, 4242)", via, pid)
-	}
-	got := calls.joined()
-	if !strings.HasPrefix(got, "launchctl kickstart -k gui/") || !strings.HasSuffix(got, "/com.gastown.daemon") {
-		t.Fatalf("supervisor command = %q, want launchctl kickstart -k gui/<uid>/com.gastown.daemon", got)
-	}
-}
-
-// A job the service manager does not know — the state gt daemon stop leaves
-// on macOS — cannot be kickstarted, so start bootstraps it rather than
-// falling back to a hand spawn that recreates the crash loop.
+// A unit the service manager does not know — the state gt daemon stop leaves
+// — cannot be restarted, so start loads it rather than falling back to a hand
+// spawn that recreates the crash loop.
 func TestStartDaemon_BootstrapsAJobTheManagerDoesNotKnow(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, templates.SupervisorState{Loaded: false, LastExit: -1},
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, templates.SupervisorState{Loaded: false, LastExit: -1},
 		errors.New("Could not find service"))
 
 	via, pid, err := c.startDaemon(town)
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if via != "launchd" || pid != 4242 || calls.spawned {
-		t.Fatalf("startDaemon = (%q, %d, spawned=%v), want (launchd, 4242, false)", via, pid, calls.spawned)
+	if via != "systemd" || pid != 4242 || calls.spawned {
+		t.Fatalf("startDaemon = (%q, %d, spawned=%v), want (systemd, 4242, false)", via, pid, calls.spawned)
 	}
 	if len(calls.argv) != 2 {
-		t.Fatalf("supervisor commands = %v, want a kickstart that failed and a bootstrap", calls.argv)
+		t.Fatalf("supervisor commands = %v, want a restart that failed and a load", calls.argv)
 	}
-	if got := calls.joined(); got != "launchctl bootstrap gui/"+strconv.Itoa(os.Getuid())+" "+plist {
-		t.Fatalf("second supervisor command = %q, want the bootstrap for %s", got, plist)
+	if got := calls.joined(); got != "systemctl --user enable --now gastown-daemon.service" {
+		t.Fatalf("second supervisor command = %q, want the bootstrap for %s", got, unit)
 	}
 }
 
-// No plist → the direct spawn, exactly as before.
+// No unit → the direct spawn, exactly as before.
 func TestStartDaemon_SpawnsDirectlyWithoutSupervisor(t *testing.T) {
 	t.Parallel()
-	c, calls := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"), loadedJob(), nil)
+	c, calls := stubSupervisor(t, "linux", filepath.Join(t.TempDir(), "absent.service"), loadedJob(), nil)
 	via, _, err := c.startDaemon(t.TempDir())
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
@@ -188,13 +154,13 @@ func TestStartDaemon_SpawnsDirectlyWithoutSupervisor(t *testing.T) {
 	}
 }
 
-// The plist is per user and names the town it was provisioned for; from a
-// different workspace it must not be kickstarted (that would restart the
-// other town's daemon and then wait for this one's lock in vain).
+// The unit is per user and names the town it was provisioned for; from a
+// different workspace it must not be started (that would restart the other
+// town's daemon and then wait for this one's lock in vain).
 func TestStartDaemon_IgnoresSupervisorOfAnotherTown(t *testing.T) {
 	t.Parallel()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", filepath.Join(t.TempDir(), "other-town"))
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", filepath.Join(t.TempDir(), "other-town"))
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	via, _, err := c.startDaemon(t.TempDir())
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
@@ -204,20 +170,20 @@ func TestStartDaemon_IgnoresSupervisorOfAnotherTown(t *testing.T) {
 	}
 }
 
-// A plist that exists but whose job is not loaded (booted out) makes
-// kickstart fail. The daemon must NOT be spawned by hand — a job that is in
-// fact still loaded would respawn against it forever — and the error must
-// say how to load the job.
+// A unit that exists but whose job is not loaded (stopped) makes the restart
+// fail. The daemon must NOT be spawned by hand — a job that is in fact still
+// loaded would respawn against it forever — and the error must say how to load
+// the job.
 func TestStartDaemon_SupervisorFailureIsAnErrorNotAManualSpawn(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), errors.New("launchd refused"))
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), errors.New("systemctl refused"))
 	// The daemon never comes up: every answer is "not running" for this case.
 	c.isRunning = func(string) (bool, int, error) { return false, 0, nil }
 	_, _, err := c.startDaemon(town)
 	if err == nil {
-		t.Fatal("startDaemon succeeded although launchd could not start the daemon")
+		t.Fatal("startDaemon succeeded although the unit could not start the daemon")
 	}
 	if len(calls.argv) == 0 {
 		t.Fatal("did not try the supervisor first")
@@ -225,7 +191,7 @@ func TestStartDaemon_SupervisorFailureIsAnErrorNotAManualSpawn(t *testing.T) {
 	if calls.spawned {
 		t.Fatal("spawned a manual daemon beside a provisioned supervisor")
 	}
-	if !strings.Contains(err.Error(), "launchctl bootstrap gui/") || !strings.Contains(err.Error(), plist) {
+	if !strings.Contains(err.Error(), "systemctl --user enable --now gastown-daemon.service") {
 		t.Fatalf("error does not say how to load the job: %v", err)
 	}
 }
@@ -235,14 +201,14 @@ func TestStartDaemon_SupervisorFailureIsAnErrorNotAManualSpawn(t *testing.T) {
 func TestStartDaemon_SupervisorErrorButDaemonCameUp(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), errors.New("kickstart: noise on stderr"))
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), errors.New("restart: noise on stderr"))
 	via, pid, err := c.startDaemon(town)
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if via != "launchd" || pid != 4242 || calls.spawned {
-		t.Fatalf("got (%q, %d, spawned=%v), want (launchd, 4242, false)", via, pid, calls.spawned)
+	if via != "systemd" || pid != 4242 || calls.spawned {
+		t.Fatalf("got (%q, %d, spawned=%v), want (systemd, 4242, false)", via, pid, calls.spawned)
 	}
 }
 
@@ -253,11 +219,11 @@ func TestStartDaemon_UnreadableSupervisorFileIsAnError(t *testing.T) {
 	town := t.TempDir()
 	// A directory where the file should be: it exists, and reading it fails
 	// for every user, root included.
-	plist := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
-	if err := os.Mkdir(plist, 0o755); err != nil {
+	unit := filepath.Join(t.TempDir(), "gastown-daemon.service")
+	if err := os.Mkdir(unit, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	if _, _, err := c.startDaemon(town); err == nil {
 		t.Fatal("startDaemon succeeded with an unreadable supervisor file")
 	}
@@ -321,7 +287,7 @@ func TestSystemdSupervisorOwner(t *testing.T) {
 				goos:     "linux",
 				stateFor: func(string) templates.SupervisorState { return row.state },
 			}
-			owner, err := c.fileSupervisor("/unit", kind).owner()
+			owner, err := c.fileSupervisor(kind).owner()
 			if err != nil {
 				t.Fatalf("owner: %v", err)
 			}
@@ -343,7 +309,7 @@ func TestSystemdSupervisorOwnerWithoutAStateSeam(t *testing.T) {
 	if st := c.supervisorState(kind); !errors.Is(st.Err, errNoSupervisorStateSeam) {
 		t.Errorf("supervisorState without a seam = %+v, want the unknown state errNoSupervisorStateSeam, not the host's answer", st)
 	}
-	owner, err := c.fileSupervisor("/unit", kind).owner()
+	owner, err := c.fileSupervisor(kind).owner()
 	if err != nil {
 		t.Fatalf("owner: %v", err)
 	}
@@ -367,7 +333,7 @@ func TestRestartDaemon_SystemdOwnerPassesTheRealTakeoverGuard(t *testing.T) {
 			return templates.SupervisorState{Kind: kind, Loaded: true, PID: 4242, LastExit: -1, InvocationID: running}
 		},
 	}
-	self, err := c.fileSupervisor("/unit", config.SupervisorSystemd).owner()
+	self, err := c.fileSupervisor(config.SupervisorSystemd).owner()
 	if err != nil {
 		t.Fatalf("owner: %v", err)
 	}
@@ -409,27 +375,27 @@ func TestStartDaemon_MatchesSupervisorThroughSymlink(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", real)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", real)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	via, _, err := c.startDaemon(link)
 	if err != nil {
 		t.Fatalf("startDaemon: %v", err)
 	}
-	if via != "launchd" || calls.spawned || len(calls.argv) == 0 {
-		t.Fatalf("via=%q spawned=%v ran=%v; want launchd through the symlinked town", via, calls.spawned, calls.argv)
+	if via != "systemd" || calls.spawned || len(calls.argv) == 0 {
+		t.Fatalf("via=%q spawned=%v ran=%v; want systemd through the symlinked town", via, calls.spawned, calls.argv)
 	}
 }
 
 // A supervisor file with no WorkingDirectory (hand-edited, older format)
-// is provisioned as far as launchd is concerned; it must be an error, not
+// is provisioned as far as systemd is concerned; it must be an error, not
 // "no supervisor".
 func TestStartDaemon_SupervisorFileWithoutWorkingDirectoryIsAnError(t *testing.T) {
 	t.Parallel()
-	plist := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
-	if err := os.WriteFile(plist, []byte("<plist><dict><key>Label</key><string>com.gastown.daemon</string></dict></plist>"), 0o644); err != nil {
+	unit := filepath.Join(t.TempDir(), "gastown-daemon.service")
+	if err := os.WriteFile(unit, []byte("<unit><dict><key>Label</key><string>com.gastown.daemon</string></dict></unit>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	_, _, err := c.startDaemon(t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "WorkingDirectory") {
 		t.Fatalf("err = %v, want an error naming the missing WorkingDirectory", err)
@@ -445,8 +411,8 @@ func TestStartDaemon_SupervisorFileWithoutWorkingDirectoryIsAnError(t *testing.T
 func TestRunDaemonStop_StopsTheJobThroughTheSupervisor(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	// Holding the lock when stop starts, free once the job has taken the
 	// process down.
 	checks := 0
@@ -458,8 +424,8 @@ func TestRunDaemonStop_StopsTheJobThroughTheSupervisor(t *testing.T) {
 	if err := c.stopDaemon(io.Discard, town); err != nil {
 		t.Fatalf("runDaemonStop: %v", err)
 	}
-	if got := calls.joined(); got != "launchctl bootout gui/"+strconv.Itoa(os.Getuid())+"/com.gastown.daemon" {
-		t.Fatalf("supervisor command = %q, want launchctl bootout gui/<uid>/com.gastown.daemon", got)
+	if got := calls.joined(); got != "systemctl --user stop gastown-daemon.service" {
+		t.Fatalf("supervisor command = %q, want systemctl --user stop gastown-daemon.service", got)
 	}
 	if calls.stopped {
 		t.Fatal("signaled the process although the supervisor job took it down")
@@ -467,12 +433,12 @@ func TestRunDaemonStop_StopsTheJobThroughTheSupervisor(t *testing.T) {
 }
 
 // With the job unloaded, there is no supervisor to stop: the daemon is the
-// only thing left to signal, and nothing should be run against launchd.
+// only thing left to signal, and nothing should be run against the unit.
 func TestRunDaemonStop_UnloadedJobSignalsTheDaemon(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, templates.SupervisorState{Loaded: false, LastExit: -1}, nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, templates.SupervisorState{Loaded: false, LastExit: -1}, nil)
 	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
 
 	if err := c.stopDaemon(io.Discard, town); err != nil {
@@ -492,19 +458,19 @@ func TestRunDaemonStop_UnloadedJobSignalsTheDaemon(t *testing.T) {
 func TestRunDaemonStop_SupervisorFailureIsNotReportedAsSuccess(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), errors.New("Boot-out failed: 3: No such process"))
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), errors.New("Boot-out failed: 3: No such process"))
 	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
 
 	err := c.stopDaemon(io.Discard, town)
 	if err == nil {
-		t.Fatal("runDaemonStop reported success although the launchd job could not be stopped")
+		t.Fatal("runDaemonStop reported success although the systemd unit could not be stopped")
 	}
-	if !strings.Contains(err.Error(), "com.gastown.daemon") && !strings.Contains(err.Error(), "launchd") {
+	if !strings.Contains(err.Error(), "com.gastown.daemon") && !strings.Contains(err.Error(), "systemd") {
 		t.Errorf("err = %v, want it to name the job that may still be loaded", err)
 	}
-	if got := calls.joined(); got != "launchctl bootout gui/"+strconv.Itoa(os.Getuid())+"/com.gastown.daemon" {
-		t.Fatalf("supervisor command = %q, want the bootout attempt", got)
+	if got := calls.joined(); got != "systemctl --user stop gastown-daemon.service" {
+		t.Fatalf("supervisor command = %q, want the stop attempt", got)
 	}
 	if !calls.stopped {
 		t.Fatal("did not signal the daemon after the supervisor could not stop the job")
@@ -512,21 +478,21 @@ func TestRunDaemonStop_SupervisorFailureIsNotReportedAsSuccess(t *testing.T) {
 }
 
 // A probe that fails says nothing about whether the job is loaded, so the
-// unreadable state is the same uncertainty as a failed bootout — not the
+// unreadable state is the same uncertainty as a failed stop — not the
 // "not loaded" reading that turns into a signal and a success report (gt-ojbb).
 func TestRunDaemonStop_ProbeFailureIsNotReportedAsSuccess(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	state := templates.SupervisorState{Err: errors.New("launchctl print: exit status 1")}
-	c, calls := stubSupervisor(t, "darwin", plist, state, nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	state := templates.SupervisorState{Err: errors.New("systemctl: exit status 1")}
+	c, calls := stubSupervisor(t, "linux", unit, state, nil)
 	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
 
 	err := c.stopDaemon(io.Discard, town)
 	if err == nil {
 		t.Fatal("runDaemonStop reported success although the job's state could not be read")
 	}
-	if !strings.Contains(err.Error(), "launchctl print") {
+	if !strings.Contains(err.Error(), "systemctl: exit status 1") {
 		t.Errorf("err = %v, want it to carry the probe failure", err)
 	}
 	if len(calls.argv) != 0 {
@@ -545,11 +511,11 @@ func TestRunDaemonStop_DetectionFailureIsNotReportedAsSuccess(t *testing.T) {
 	town := t.TempDir()
 	// Present but silent about its town: detectDaemonSupervisor errors rather
 	// than answering "no supervisor".
-	plist := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
-	if err := os.WriteFile(plist, []byte("<plist><dict><key>Label</key><string>com.gastown.daemon</string></dict></plist>"), 0o644); err != nil {
+	unit := filepath.Join(t.TempDir(), "gastown-daemon.service")
+	if err := os.WriteFile(unit, []byte("<unit><dict><key>Label</key><string>com.gastown.daemon</string></dict></unit>"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
 
 	err := c.stopDaemon(io.Discard, town)
@@ -573,8 +539,8 @@ func TestRunDaemonStop_DetectionFailureIsNotReportedAsSuccess(t *testing.T) {
 func TestRunDaemonStop_DaemonReleasingTheLockMidStopIsNotAnError(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	c.stopDirect = func(string) error { calls.stopped = true; return errors.New("daemon is not running") }
 	checks := 0
 	c.isRunning = func(string) (bool, int, error) {
@@ -583,10 +549,10 @@ func TestRunDaemonStop_DaemonReleasingTheLockMidStopIsNotAnError(t *testing.T) {
 	}
 
 	if err := c.stopDaemon(io.Discard, town); err != nil {
-		t.Fatalf("runDaemonStop: %v, want no error for a daemon that stopped under the bootout", err)
+		t.Fatalf("runDaemonStop: %v, want no error for a daemon that stopped under the stop", err)
 	}
 	if !calls.stopped {
-		t.Fatal("did not attempt the direct stop after the bootout")
+		t.Fatal("did not attempt the direct stop after the stop")
 	}
 }
 
@@ -595,8 +561,8 @@ func TestRunDaemonStop_DaemonReleasingTheLockMidStopIsNotAnError(t *testing.T) {
 func TestRunDaemonStop_StillRunningAfterTheDirectStopIsAnError(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	c.stopDirect = func(string) error { return errors.New("sending termination signal: operation not permitted") }
 	c.isRunning = func(string) (bool, int, error) { return true, 4242, nil }
 
@@ -612,19 +578,19 @@ func TestRunDaemonStop_StillRunningAfterTheDirectStopIsAnError(t *testing.T) {
 func TestDaemonStatus_PrintsTheSupervisorLineForTheLockHolder(t *testing.T) {
 	t.Parallel()
 	for _, pid := range []int{76426, 0} {
-		c, _ := stubSupervisor(t, "darwin", "", loadedJob(), nil)
+		c, _ := stubSupervisor(t, "linux", "", loadedJob(), nil)
 		c.isRunning = func(string) (bool, int, error) { return pid != 0, pid, nil }
 		var asked []int
 		c.statusLine = func(_ string, lockPID int) string {
 			asked = append(asked, lockPID)
-			return "launchd (DETACHED - stub)"
+			return "systemd (DETACHED - stub)"
 		}
 		var out strings.Builder
 		_ = c.daemonStatus(&out, t.TempDir())
 		if len(asked) != 1 || asked[0] != pid {
 			t.Errorf("pid %d: status line asked for %v, want [%d]", pid, asked, pid)
 		}
-		if !strings.Contains(out.String(), "Supervised: launchd (DETACHED - stub)\n") {
+		if !strings.Contains(out.String(), "Supervised: systemd (DETACHED - stub)\n") {
 			t.Errorf("pid %d: status output = %q, want the supervisor line", pid, out.String())
 		}
 	}
@@ -648,173 +614,28 @@ func stubRestart(t *testing.T, goos, file string, pids ...int) (*daemonControl, 
 	return c, calls
 }
 
-// A plist as this binary renders it for town, but without the ExitTimeOut a
-// binary that passes a shutdown budget adds — the shape a file installed
-// before that key existed has on disk (gt-x872). Written where the supervisor
-// path seams say the plist lives.
-func writeStaleSupervisorFile(t *testing.T, town string) string {
-	t.Helper()
-	body, ok, err := templates.SupervisorFileContent("launchd", town, 0)
-	if err != nil || !ok {
-		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
-	}
-	p := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
-	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
-// The plist on disk is repaired on the way into a start, and because launchd
-// reads a job definition only when it loads one, the job is loaded from the
-// rewritten file rather than kickstarted from the definition it cached
-// (gt-x872): a kickstart would restart the daemon under the ExitTimeOut the
-// file was installed with, which is the value the repair exists to replace.
-func TestStartDaemon_RepairsAStaleExitTimeOutBeforeStarting(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	plist := writeStaleSupervisorFile(t, town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
-
-	via, pid, err := c.startDaemon(town)
-	if err != nil {
-		t.Fatalf("startDaemon: %v", err)
-	}
-	if via != "launchd" || pid != 4242 || calls.spawned {
-		t.Fatalf("startDaemon = (%q, %d, spawned=%v), want (launchd, 4242, false)", via, pid, calls.spawned)
-	}
-	if len(calls.argv) != 2 {
-		t.Fatalf("supervisor commands = %v, want an unload then a load", calls.argv)
-	}
-	if got := strings.Join(calls.argv[0], " "); !strings.HasPrefix(got, "launchctl bootout gui/") {
-		t.Errorf("first supervisor command = %q, want a bootout first: a loaded job does not re-read its file", got)
-	}
-	if got := strings.Join(calls.argv[1], " "); got != "launchctl bootstrap gui/"+strconv.Itoa(os.Getuid())+" "+plist {
-		t.Errorf("second supervisor command = %q, want the bootstrap for %s", got, plist)
-	}
-
-	repaired, err := os.ReadFile(plist)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(repaired), "<key>ExitTimeOut</key>") {
-		t.Errorf("plist was not repaired before the job was loaded from it:\n%s", repaired)
-	}
-}
-
-// A restart repairs the same way, so the ExitTimeOut a restart depends on is
-// in force for the stop that restart causes and every one after it (gt-x872).
-func TestRestartDaemon_RepairsAStaleExitTimeOutBeforeRestarting(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	plist := writeStaleSupervisorFile(t, town)
-	c, calls := stubRestart(t, "darwin", plist, 1111, 1111, 4242)
-
-	via, pid, err := c.restartDaemon(town)
-	if err != nil {
-		t.Fatalf("restartDaemon: %v", err)
-	}
-	if via != "launchd" || pid != 4242 {
-		t.Fatalf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
-	}
-	if len(calls.argv) != 2 {
-		t.Fatalf("supervisor commands = %v, want an unload then a load", calls.argv)
-	}
-	if got := strings.Join(calls.argv[0], " "); !strings.HasPrefix(got, "launchctl bootout gui/") {
-		t.Errorf("first supervisor command = %q, want a bootout: the job has to be loaded from the repaired file", got)
-	}
-	repaired, err := os.ReadFile(plist)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(repaired), "<key>ExitTimeOut</key>") {
-		t.Errorf("plist was not repaired before the job was loaded from it:\n%s", repaired)
-	}
-}
-
 // A file that is not this binary's rendering of this town is left exactly as
-// it is, and the start proceeds in place: repairing it would be a
+// it is, and the start proceeds in place: rewriting it would be a
 // reconfiguration of somebody else's job, not a repair (gt-x872).
 func TestSyncSupervisorFile_LeavesAFileItDidNotRender(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	before, err := os.ReadFile(plist)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	before, err := os.ReadFile(unit)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 
 	if rewritten := c.syncSupervisorFile(town); rewritten {
-		t.Error("syncSupervisorFile rewrote a plist this binary did not render")
+		t.Error("syncSupervisorFile rewrote a unit this binary did not render")
 	}
-	after, err := os.ReadFile(plist)
+	after, err := os.ReadFile(unit)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(before) != string(after) {
-		t.Errorf("plist changed:\nbefore:\n%s\nafter:\n%s", before, after)
-	}
-}
-
-// A repair that cannot be made is warned about and dropped: the job file
-// being behind is a reason to restart the daemon under a worse ExitTimeOut,
-// never a reason to leave the town with no daemon at all (gt-x872).
-func TestStartDaemon_StartsWithAFileItCouldNotRepair(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	body, ok, err := templates.SupervisorFileContent("launchd", town, 0)
-	if err != nil || !ok {
-		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
-	}
-	plist := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
-	if err := os.WriteFile(plist, []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
-	c.install = func(string, string) error { return errors.New("read-only file system") }
-
-	via, pid, err := c.startDaemon(town)
-	if err != nil {
-		t.Fatalf("startDaemon: %v", err)
-	}
-	if via != "launchd" || pid != 4242 {
-		t.Fatalf("startDaemon = (%q, %d), want (launchd, 4242)", via, pid)
-	}
-	if got := calls.joined(); !strings.HasPrefix(got, "launchctl kickstart -k gui/") {
-		t.Errorf("supervisor command = %q, want the ordinary kickstart when no repair was made", got)
-	}
-	after, err := os.ReadFile(plist)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(after) != body {
-		t.Error("the plist changed although the repair could not be installed")
-	}
-}
-
-// The town boot is the one place a stale job file is found with the daemon
-// already up, so it is the one place the reload happens without a start or a
-// restart asking for it (gt-x872). The note it returns is what stops the
-// daemon's PID changing from looking unexplained.
-func TestReconcileSupervisorJob_ReloadsAStaleJob(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	plist := writeStaleSupervisorFile(t, town)
-	c, calls := stubRestart(t, "darwin", plist, 1111, 4242)
-
-	note, err := c.reconcileSupervisorJob(town, 1111)
-	if err != nil {
-		t.Fatalf("reconcileSupervisorJob: %v", err)
-	}
-	if note == "" {
-		t.Error("reconcileSupervisorJob returned no note for a job it reloaded")
-	}
-	if len(calls.argv) != 2 {
-		t.Fatalf("supervisor commands = %v, want an unload then a load", calls.argv)
-	}
-	if got := strings.Join(calls.argv[0], " "); !strings.HasPrefix(got, "launchctl bootout gui/") {
-		t.Errorf("first supervisor command = %q, want a bootout", got)
+		t.Errorf("unit changed:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 }
 
@@ -823,15 +644,15 @@ func TestReconcileSupervisorJob_ReloadsAStaleJob(t *testing.T) {
 func TestReconcileSupervisorJob_LeavesACurrentJobRunning(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	body, ok, err := templates.SupervisorFileContent("launchd", town, daemon.ShutdownBudget)
+	body, ok, err := templates.SupervisorFileContent("systemd", town, daemon.ShutdownBudget)
 	if err != nil || !ok {
-		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
+		t.Fatalf("SupervisorFileContent(systemd, %q) = (ok=%v, err=%v)", town, ok, err)
 	}
-	plist := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
-	if err := os.WriteFile(plist, []byte(body), 0o644); err != nil {
+	unit := filepath.Join(t.TempDir(), "gastown-daemon.service")
+	if err := os.WriteFile(unit, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	c, calls := stubRestart(t, "darwin", plist, 1111)
+	c, calls := stubRestart(t, "linux", unit, 1111)
 
 	note, err := c.reconcileSupervisorJob(town, 1111)
 	if err != nil {
@@ -845,15 +666,15 @@ func TestReconcileSupervisorJob_LeavesACurrentJobRunning(t *testing.T) {
 	}
 }
 
-// A restart of a supervised daemon goes through the supervisor's kickstart -k
-// and never through a hand stop: the stop path is launchctl bootout, which
-// unloads the job, so a restart built from it leaves the town unsupervised
-// between the two commands (gt-oqbw).
+// A restart of a supervised daemon goes through the supervisor's restart and
+// never through a hand stop: the stop path is systemctl stop, which unloads
+// the job, so a restart built from it leaves the town unsupervised between the
+// two commands (gt-oqbw).
 func TestRestartDaemon_SupervisedRestartsInPlace(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubRestart(t, "darwin", plist, 1111, 1111, 4242)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubRestart(t, "linux", unit, 1111, 1111, 4242)
 
 	via, pid, err := c.restartDaemon(town)
 	if err != nil {
@@ -862,11 +683,11 @@ func TestRestartDaemon_SupervisedRestartsInPlace(t *testing.T) {
 	if calls.stopped || calls.spawned {
 		t.Errorf("supervised restart used a hand path: stopped=%v spawned=%v", calls.stopped, calls.spawned)
 	}
-	if got := calls.joined(); !strings.HasPrefix(got, "launchctl kickstart -k gui/") || !strings.HasSuffix(got, "/com.gastown.daemon") {
-		t.Errorf("supervisor command = %q, want launchctl kickstart -k gui/<uid>/com.gastown.daemon", got)
+	if got := calls.joined(); got != "systemctl --user restart gastown-daemon.service" {
+		t.Errorf("supervisor command = %q, want systemctl --user restart gastown-daemon.service", got)
 	}
-	if via != "launchd" || pid != 4242 {
-		t.Errorf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	if via != "systemd" || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d), want (systemd, 4242)", via, pid)
 	}
 	// Reports the NEW pid, not the outgoing one the lock still names.
 	if pid == 1111 {
@@ -960,7 +781,7 @@ func TestRestartDaemon_SystemdNamesTheRunningInvocation(t *testing.T) {
 func TestRestartDaemon_HandRestartWithoutASupervisor(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	c, calls := stubRestart(t, "darwin", "", 1111, 0)
+	c, calls := stubRestart(t, "linux", "", 1111, 0)
 
 	via, pid, err := c.restartDaemon(town)
 	if err != nil {
@@ -986,7 +807,7 @@ func TestRestartDaemon_HandRestartWithoutASupervisor(t *testing.T) {
 func TestRestartDaemon_HandPathRefusesToStartBeforeTheOldDaemonIsGone(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	c, calls := stubRestart(t, "darwin", "", 1111) // never reports gone
+	c, calls := stubRestart(t, "linux", "", 1111) // never reports gone
 
 	_, _, err := c.restartDaemon(town)
 	if err == nil {
@@ -1005,10 +826,10 @@ func TestRestartDaemon_HandPathRefusesToStartBeforeTheOldDaemonIsGone(t *testing
 func TestRestartDaemon_StartsAStoppedDaemon(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 	// Two stopped reads: the restart's own check, then start's. The third is
-	// waitForDaemon seeing the daemon the kickstart brought up.
-	c, calls := stubRestart(t, "darwin", plist, 0, 0, 4242)
+	// waitForDaemon seeing the daemon the restart brought up.
+	c, calls := stubRestart(t, "linux", unit, 0, 0, 4242)
 
 	via, pid, err := c.restartDaemon(town)
 	if err != nil {
@@ -1017,7 +838,7 @@ func TestRestartDaemon_StartsAStoppedDaemon(t *testing.T) {
 	if calls.stopped {
 		t.Error("a stopped daemon must not be stopped again")
 	}
-	if !strings.Contains(calls.joined(), "kickstart") || via != "launchd" || pid != 4242 {
+	if !strings.Contains(calls.joined(), "systemctl --user restart") || via != "systemd" || pid != 4242 {
 		t.Errorf("restartDaemon = (%q, %d) via %q", via, pid, calls.joined())
 	}
 }
@@ -1028,15 +849,15 @@ func TestRestartDaemon_StartsAStoppedDaemon(t *testing.T) {
 func TestRestartDaemon_ErrorsWhenTheNewDaemonNeverTakesTheLock(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 	// The lock keeps naming the old PID for the whole wait: the restarted
 	// daemon never came up (or came up and died immediately).
-	c, calls := stubRestart(t, "darwin", plist, 1111)
+	c, calls := stubRestart(t, "linux", unit, 1111)
 
 	if _, _, err := c.restartDaemon(town); err == nil {
 		t.Fatal("restartDaemon reported success although no new daemon took the lock")
 	}
-	if !strings.Contains(calls.joined(), "kickstart") {
+	if !strings.Contains(calls.joined(), "systemctl --user restart") {
 		t.Errorf("the restart was never attempted: %v", calls.argv)
 	}
 }
@@ -1048,19 +869,19 @@ func TestRestartDaemon_ErrorsWhenTheNewDaemonNeverTakesTheLock(t *testing.T) {
 func TestRestartDaemon_WaitForRestartIgnoresPidZero(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 	// oldPID, then a stretch of "running but pid unknown yet", then the real
 	// new daemon.
-	c, calls := stubRestart(t, "darwin", plist, 1111, 1111, 0, 0, 4242)
+	c, calls := stubRestart(t, "linux", unit, 1111, 1111, 0, 0, 4242)
 
 	via, pid, err := c.restartDaemon(town)
 	if err != nil {
 		t.Fatalf("restartDaemon: %v", err)
 	}
-	if via != "launchd" || pid != 4242 {
-		t.Errorf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	if via != "systemd" || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d), want (systemd, 4242)", via, pid)
 	}
-	if !strings.Contains(calls.joined(), "kickstart") {
+	if !strings.Contains(calls.joined(), "systemctl --user restart") {
 		t.Errorf("the restart was never attempted: %v", calls.argv)
 	}
 }
@@ -1079,7 +900,7 @@ func TestRestartDaemon_WaitForRestartIgnoresPidZero(t *testing.T) {
 func TestRestartDaemon_ToleratesASlowShutdownAndRestart(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 	const oldPID, newPID, slowAttempts = 1111, 4242, 550
 	if slowAttempts >= restartWaitAttempts {
 		t.Fatalf("slowAttempts (%d) must stay below restartWaitAttempts (%d) or this test proves nothing", slowAttempts, restartWaitAttempts)
@@ -1089,16 +910,16 @@ func TestRestartDaemon_ToleratesASlowShutdownAndRestart(t *testing.T) {
 		pids = append(pids, oldPID)
 	}
 	pids = append(pids, newPID)
-	c, calls := stubRestart(t, "darwin", plist, pids...)
+	c, calls := stubRestart(t, "linux", unit, pids...)
 
 	via, pid, err := c.restartDaemon(town)
 	if err != nil {
 		t.Fatalf("restartDaemon: %v (budget too short for a slow-but-real restart)", err)
 	}
-	if via != "launchd" || pid != newPID {
-		t.Errorf("restartDaemon = (%q, %d), want (launchd, %d)", via, pid, newPID)
+	if via != "systemd" || pid != newPID {
+		t.Errorf("restartDaemon = (%q, %d), want (systemd, %d)", via, pid, newPID)
 	}
-	if !strings.Contains(calls.joined(), "kickstart") {
+	if !strings.Contains(calls.joined(), "systemctl --user restart") {
 		t.Errorf("the restart was never attempted: %v", calls.argv)
 	}
 }
@@ -1110,7 +931,7 @@ func TestRestartDaemon_ToleratesASlowShutdownAndRestart(t *testing.T) {
 // (LSB "program is not running"); running exits 0.
 func TestRunDaemonStatus_ExitCodeReportsRunning(t *testing.T) {
 	t.Parallel()
-	c, _ := stubSupervisor(t, "darwin", "", templates.SupervisorState{}, nil)
+	c, _ := stubSupervisor(t, "linux", "", templates.SupervisorState{}, nil)
 
 	c.isRunning = func(string) (bool, int, error) { return false, 0, nil }
 	err := c.daemonStatus(io.Discard, t.TempDir())
@@ -1126,33 +947,41 @@ func TestRunDaemonStatus_ExitCodeReportsRunning(t *testing.T) {
 }
 
 // scriptedJob stubs the supervisor commands against a job that is loaded until
-// its stop runs and loaded again by a bootstrap that succeeds. bootoutErr is
-// returned by the stop (which still unloads the job, as launchd does when it
-// reports failure for a job it removed); bootstrapFails is how many
-// bootstraps fail before one takes.
+// its stop runs and loaded again by a load that succeeds. stopErr is returned
+// by the stop (which still leaves the job stopped); bootstrapFails is how many
+// loads fail before one takes.
 type scriptedJob struct {
 	loaded         bool
-	bootoutErr     error
+	stopErr        error
 	bootstrapFails int
 	bootstraps     int
+}
+
+// scriptedVerb is the systemctl verb of one scripted argv: argv is
+// ["systemctl", "--user", verb, ...].
+func scriptedVerb(a []string) string {
+	if len(a) < 3 {
+		return ""
+	}
+	return a[2]
 }
 
 func stubScriptedJob(c *daemonControl, calls *supervisorCalls, job *scriptedJob) {
 	c.run = func(a []string) error {
 		calls.argv = append(calls.argv, append([]string{}, a...))
-		switch a[1] {
-		case "bootout":
+		switch scriptedVerb(a) {
+		case "stop":
 			job.loaded = false
-			return job.bootoutErr
-		case "bootstrap":
+			return job.stopErr
+		case "enable":
 			job.bootstraps++
 			if job.bootstraps <= job.bootstrapFails {
-				return errors.New("Bootstrap failed: 5: Input/output error")
+				return errors.New("Failed to enable unit: Input/output error")
 			}
 			job.loaded = true
-		case "kickstart":
+		case "restart":
 			if !job.loaded {
-				return errors.New("Could not find service")
+				return errors.New("Unit gastown-daemon.service not found")
 			}
 		}
 		return nil
@@ -1162,25 +991,24 @@ func stubScriptedJob(c *daemonControl, calls *supervisorCalls, job *scriptedJob)
 	}
 }
 
-func provisionedLaunchd(t *testing.T) *daemonSupervisor {
+func provisionedSystemd(t *testing.T) *daemonSupervisor {
 	t.Helper()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	sup, err := c.detectDaemonSupervisor(town)
 	if err != nil || sup == nil {
-		t.Fatalf("detectDaemonSupervisor = (%v, %v), want a launchd supervisor", sup, err)
+		t.Fatalf("detectDaemonSupervisor = (%v, %v), want a systemd supervisor", sup, err)
 	}
 	return sup
 }
 
-// launchd finishes removing a job after bootout returns, and a bootstrap that
-// lands in that window fails. The job has to end up loaded anyway: a reload
-// that gives up after one try leaves the town with no job and no daemon
-// (gt-4k3fj.11).
-func TestStartFromFile_RetriesABootstrapThatLosesTheRaceWithTheUnload(t *testing.T) {
+// A load that loses a race with the stop is retried. The job has to end up
+// loaded anyway: a reload that gives up after one try leaves the town with no
+// job and no daemon (gt-4k3fj.11).
+func TestStartFromFile_RetriesALoadThatLostTheRaceWithTheStop(t *testing.T) {
 	t.Parallel()
-	sup := provisionedLaunchd(t)
+	sup := provisionedSystemd(t)
 	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, bootstrapFails: 3}
 	stubScriptedJob(sup.ctl, calls, job)
 
@@ -1188,34 +1016,34 @@ func TestStartFromFile_RetriesABootstrapThatLosesTheRaceWithTheUnload(t *testing
 		t.Fatalf("startFromFile: %v", err)
 	}
 	if !job.loaded {
-		t.Error("the job was left unloaded")
+		t.Error("the job was left stopped")
 	}
-	if len(calls.argv) != 5 { // bootout, then three failed bootstraps and the one that took
-		t.Errorf("supervisor commands = %v, want a bootout then 4 bootstraps", calls.argv)
+	if len(calls.argv) != 5 { // the stop, then three failed loads and the one that took
+		t.Errorf("supervisor commands = %v, want a stop then 4 loads", calls.argv)
 	}
 }
 
-// A bootout that reports failure for a job launchd did remove must not end
-// the reload: the job is gone, so the load still has to happen.
-func TestStartFromFile_LoadsAfterABootoutThatFailedButUnloaded(t *testing.T) {
+// A stop that reports failure for a job it did stop must not end the reload:
+// the job is gone, so the load still has to happen.
+func TestStartFromFile_LoadsAfterAStopThatFailedButStopped(t *testing.T) {
 	t.Parallel()
-	sup := provisionedLaunchd(t)
-	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, bootoutErr: errors.New("Boot-out failed: 5: Input/output error")}
+	sup := provisionedSystemd(t)
+	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, stopErr: errors.New("Failed to stop unit: Input/output error")}
 	stubScriptedJob(sup.ctl, calls, job)
 
 	if err := sup.startFromFile(); err != nil {
 		t.Fatalf("startFromFile: %v", err)
 	}
 	if !job.loaded || job.bootstraps != 1 {
-		t.Errorf("loaded=%v bootstraps=%d, want the job loaded by one bootstrap", job.loaded, job.bootstraps)
+		t.Errorf("loaded=%v bootstraps=%d, want the job loaded by one load", job.loaded, job.bootstraps)
 	}
 }
 
-// A bootout that failed and left the job loaded changed nothing: the job is
-// still supervising, so this is an error and not a bootstrap beside it.
-func TestStartFromFile_BootoutThatLeavesTheJobLoadedIsAnErrorWithoutABootstrap(t *testing.T) {
+// A stop that failed and left the job loaded changed nothing: the job is still
+// supervising, so this is an error and not a load beside it.
+func TestStartFromFile_StopThatLeavesTheJobLoadedIsAnErrorWithoutALoad(t *testing.T) {
 	t.Parallel()
-	sup := provisionedLaunchd(t)
+	sup := provisionedSystemd(t)
 	calls := &supervisorCalls{}
 	stubScriptedJob(sup.ctl, calls, &scriptedJob{})
 	sup.ctl.run = func(a []string) error {
@@ -1227,18 +1055,18 @@ func TestStartFromFile_BootoutThatLeavesTheJobLoadedIsAnErrorWithoutABootstrap(t
 	}
 
 	if err := sup.startFromFile(); err == nil {
-		t.Fatal("startFromFile succeeded although the unload failed and the job is still loaded")
+		t.Fatal("startFromFile succeeded although the stop failed and the job is still loaded")
 	}
 	if len(calls.argv) != 1 {
-		t.Errorf("supervisor commands = %v, want only the failed bootout", calls.argv)
+		t.Errorf("supervisor commands = %v, want only the failed stop", calls.argv)
 	}
 }
 
-// When no bootstrap takes, the error says the daemon has no supervisor rather
-// than reporting a start that failed.
+// When no load takes, the error says the daemon has no supervisor rather than
+// reporting a start that failed.
 func TestStartFromFile_GivesUpLoudlyWhenTheJobWillNotLoad(t *testing.T) {
 	t.Parallel()
-	sup := provisionedLaunchd(t)
+	sup := provisionedSystemd(t)
 	calls, job := &supervisorCalls{}, &scriptedJob{loaded: true, bootstrapFails: 1 << 30}
 	stubScriptedJob(sup.ctl, calls, job)
 
@@ -1252,14 +1080,14 @@ func TestStartFromFile_GivesUpLoudlyWhenTheJobWillNotLoad(t *testing.T) {
 }
 
 // A daemon running outside a job the manager does not know is replaced by the
-// job, not kickstarted (which fails) and not left beside a job loaded next to
+// job, not restarted (which fails) and not left beside a job loaded next to
 // it (gt-4k3fj.11, gt-3jrm).
 func TestRestartDaemon_LoadsAJobTheManagerLostAndReplacesTheDaemonBesideIt(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 	// The lock: the hand-run daemon, then free, then the job's daemon.
-	c, calls := stubRestart(t, "darwin", plist, 1111, 0, 4242)
+	c, calls := stubRestart(t, "linux", unit, 1111, 0, 4242)
 	job := &scriptedJob{}
 	stubScriptedJob(c, calls, job)
 
@@ -1267,8 +1095,8 @@ func TestRestartDaemon_LoadsAJobTheManagerLostAndReplacesTheDaemonBesideIt(t *te
 	if err != nil {
 		t.Fatalf("restartDaemon: %v", err)
 	}
-	if via != "launchd" || pid != 4242 {
-		t.Errorf("restartDaemon = (%q, %d), want (launchd, 4242)", via, pid)
+	if via != "systemd" || pid != 4242 {
+		t.Errorf("restartDaemon = (%q, %d), want (systemd, 4242)", via, pid)
 	}
 	if !calls.stopped || !job.loaded {
 		t.Errorf("stopped=%v loaded=%v, want the old daemon stopped and the job loaded", calls.stopped, job.loaded)
@@ -1684,8 +1512,8 @@ func TestDaemonStatus_UnreadableSettings(t *testing.T) {
 			if tt.container {
 				writeComposeFile(t, town)
 			}
-			plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-			c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+			unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+			c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 			c.patrolConfig = daemon.ReadPatrolConfig
 			c.statusLine = c.supervisedLine
 			readLock := false
@@ -1704,7 +1532,7 @@ func TestDaemonStatus_UnreadableSettings(t *testing.T) {
 				t.Errorf("status output = %q, want the supervisor line unverified", out.String())
 			}
 			if strings.Contains(out.String(), config.SupervisorLaunchd) {
-				t.Errorf("status output = %q, reads the host's launchd for a town whose settings could not be read", out.String())
+				t.Errorf("status output = %q, reads the host's supervisor for a town whose settings could not be read", out.String())
 			}
 			if !tt.container {
 				if err != nil {
@@ -1820,15 +1648,15 @@ func TestStartDaemon_ContainerContextIsAField(t *testing.T) {
 	}
 }
 
-// A container town with a launchd plist provisioned for it still runs under
-// the container: the setting is what the town asked for, and the job launchd
+// A container town with a host unit provisioned for it still runs under
+// the container: the setting is what the town asked for, and the host unit
 // keeps is the rollback, not the supervisor.
 func TestDetectDaemonSupervisor_ContainerNeverReturnsLaunchd(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 	writeComposeFile(t, town)
-	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
 		return containerTownConfig("scratch-daemon-1", "scratch"), nil
 	}
@@ -1838,7 +1666,7 @@ func TestDetectDaemonSupervisor_ContainerNeverReturnsLaunchd(t *testing.T) {
 		t.Fatalf("detectDaemonSupervisor = (%v, %v), want the container supervisor", sup, err)
 	}
 	if sup.name != "container" {
-		t.Errorf("supervisor = %q, want container although launchd is provisioned for this town", sup.name)
+		t.Errorf("supervisor = %q, want container although a host unit is provisioned for this town", sup.name)
 	}
 }
 
@@ -1949,14 +1777,14 @@ func TestContainerSupervisor_RefusesATownWithoutBothContainerSettings(t *testing
 }
 
 // A container town's supervisor file is its compose file, which this binary
-// never rewrites, and the launchd plist the host may still carry is not the
+// never rewrites, and the systemd unit the host may still carry is not the
 // town's to touch either. Reconciling must write neither.
 func TestSyncSupervisorFile_LeavesTheFilesOfAContainerTownAlone(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeStaleSupervisorFile(t, town)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 	compose := writeComposeFile(t, town)
-	c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
 		return containerTownConfig("scratch-daemon-1", "scratch"), nil
 	}
@@ -1966,20 +1794,12 @@ func TestSyncSupervisorFile_LeavesTheFilesOfAContainerTownAlone(t *testing.T) {
 		return installSupervisorFile(path, content)
 	}
 	before := map[string]string{}
-	for _, path := range []string{compose, plist} {
+	for _, path := range []string{compose, unit} {
 		body, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)
 		}
 		before[path] = string(body)
-	}
-	// The control: the same stale plist on a host town is rewritten, so the
-	// container town's untouched plist is the branch under test.
-	host := t.TempDir()
-	hostPlist := writeStaleSupervisorFile(t, host)
-	hostControl, _ := stubSupervisor(t, "darwin", hostPlist, loadedJob(), nil)
-	if !hostControl.syncSupervisorFile(host) {
-		t.Fatal("control: a host town's stale plist was not repaired, so the fixture proves nothing")
 	}
 
 	if c.syncSupervisorFile(town) {
@@ -2000,61 +1820,51 @@ func TestSyncSupervisorFile_LeavesTheFilesOfAContainerTownAlone(t *testing.T) {
 }
 
 // syncSupervisorFile reports false, and leaves the file it would have repaired
-// as it was, when it cannot make the repair: settings it cannot read, a kind it
-// cannot tell, and an install that fails. Each is a warning, never a reason to
-// refuse the start that follows.
+// as it was, when it cannot make the repair: settings it cannot read and a
+// kind it cannot tell. Each is a warning, never a reason to refuse the start
+// that follows.
 func TestSyncSupervisorFile_CannotRepairReportsFalseAndWritesNothing(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
 		name         string
 		patrolConfig func(string) (*config.DaemonPatrolConfig, error)
-		installErr   error
-		wantInstalls int
 	}{
 		{
 			name: "unreadable settings",
 			patrolConfig: func(string) (*config.DaemonPatrolConfig, error) {
 				return nil, errors.New("daemon.json: unexpected end of JSON input")
 			},
-			wantInstalls: 0,
 		},
 		{
 			name: "unknown supervisor kind",
 			patrolConfig: func(string) (*config.DaemonPatrolConfig, error) {
 				return &config.DaemonPatrolConfig{Supervisor: "kube"}, nil
 			},
-			wantInstalls: 0,
-		},
-		{
-			name:         "install fails",
-			patrolConfig: func(string) (*config.DaemonPatrolConfig, error) { return nil, nil },
-			installErr:   errors.New("read-only file system"),
-			wantInstalls: 1,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
-			plist := writeStaleSupervisorFile(t, town)
-			before, err := os.ReadFile(plist)
+			unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+			before, err := os.ReadFile(unit)
 			if err != nil {
 				t.Fatal(err)
 			}
-			c, _ := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+			c, _ := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 			c.patrolConfig = tt.patrolConfig
 			installs := 0
 			c.install = func(string, string) error {
 				installs++
-				return tt.installErr
+				return errors.New("read-only file system")
 			}
 
 			if c.syncSupervisorFile(town) {
 				t.Error("reported a rewrite it could not make")
 			}
-			if installs != tt.wantInstalls {
-				t.Errorf("installs = %d, want %d", installs, tt.wantInstalls)
+			if installs != 0 {
+				t.Errorf("installs = %d, want 0", installs)
 			}
-			after, err := os.ReadFile(plist)
+			after, err := os.ReadFile(unit)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2131,7 +1941,7 @@ func TestRestartDaemon_ContainerFailedRestartLeavesTheDaemonAlone(t *testing.T) 
 // A container town's daemon runs in another namespace, so daemon.lock's PID
 // is not a process this host may signal. With the container's state unreadable,
 // the stop must refuse instead of falling through to that signal, the mop-up
-// the launchd and systemd kinds may use (gt-qpeei.10).
+// the systemd kind may use (gt-qpeei.10).
 func TestRunDaemonStop_ContainerUnknownStateNeverSignalsTheLockPID(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -2236,13 +2046,13 @@ func TestRunDaemonStop_ContainerWithoutAComposeFileNeverSignalsTheLockPID(t *tes
 }
 
 // Unreadable settings leave it unknown whether the town runs in a container,
-// and an unknown is not the launchd kind: the stop refuses the signal rather
+// and an unknown is not a supervisor kind: the stop refuses the signal rather
 // than guess what the lock's PID belongs to.
 func TestRunDaemonStop_UnreadableSettingsNeverSignalTheLockPID(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
 		return nil, errors.New("daemon.json: unexpected end of JSON input")
 	}
@@ -2266,8 +2076,8 @@ func TestRunDaemonStop_UnreadableSettingsNeverSignalTheLockPID(t *testing.T) {
 func TestRunDaemonStop_UnknownSupervisorKindNeverSignalsTheLockPID(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
-	c, calls := stubSupervisor(t, "darwin", plist, loadedJob(), nil)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
+	c, calls := stubSupervisor(t, "linux", unit, loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
 		return &config.DaemonPatrolConfig{Supervisor: "kube"}, nil
 	}
@@ -2285,15 +2095,83 @@ func TestRunDaemonStop_UnknownSupervisorKindNeverSignalsTheLockPID(t *testing.T)
 	}
 }
 
+// readDaemonState tells a missing state.json from one it cannot read and one
+// that does not parse: only the missing file is no state, never an error read
+// as absent.
+func TestReadDaemonState(t *testing.T) {
+	t.Parallel()
+	dir := func(t *testing.T, town string) {
+		t.Helper()
+		if err := os.MkdirAll(daemon.StateFile(town), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		setup   func(t *testing.T, town string)
+		missing bool
+		wantErr bool
+	}{
+		{name: "no file is no state", setup: func(*testing.T, string) {}, missing: true},
+		{name: "an unreadable file is an error", setup: dir, wantErr: true},
+		{
+			name: "a file that does not parse is an error",
+			setup: func(t *testing.T, town string) {
+				t.Helper()
+				if err := os.MkdirAll(filepath.Dir(daemon.StateFile(town)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(daemon.StateFile(town), []byte("{"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			tc.setup(t, town)
+			st, err := readDaemonState(town)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("readDaemonState = (%+v, nil), want an error", st)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("readDaemonState: %v", err)
+			}
+			if (st == nil) != tc.missing {
+				t.Errorf("readDaemonState state = %+v, want missing=%v", st, tc.missing)
+			}
+		})
+	}
+}
+
+// gt daemon enable-supervisor on a host with no supervisor kind refuses before
+// anything is written: a macOS host has no gt supervisor (gt-a2uug4.15), so a
+// unit there would be a job no gt command could act on.
+func TestEnableSupervisorOn_RefusesAHostWithoutASupervisor(t *testing.T) {
+	t.Parallel()
+	c := &daemonControl{goos: "darwin", unitPath: func() (string, error) { return "/unit", nil }}
+
+	err := enableSupervisorOn(c, t.TempDir())
+
+	if err == nil || !strings.Contains(err.Error(), "no supervisor") {
+		t.Fatalf("enableSupervisorOn = %v, want a refusal naming the host's missing supervisor", err)
+	}
+}
+
 // A setting this host has no manager for is refused rather than answered with
 // the host's own: driving systemd for a town that asked for launchd is not
 // what the setting says.
 func TestDetectDaemonSupervisor_RefusesAKindThisHostCannotRun(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	c, _ := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "com.gastown.daemon.plist"), loadedJob(), nil)
+	c, _ := stubSupervisor(t, "linux", filepath.Join(t.TempDir(), "gastown-daemon.service"), loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
-		return &config.DaemonPatrolConfig{Supervisor: config.SupervisorSystemd}, nil
+		return &config.DaemonPatrolConfig{Supervisor: config.SupervisorLaunchd}, nil
 	}
 
 	sup, err := c.detectDaemonSupervisor(town)
@@ -2308,7 +2186,7 @@ func TestDetectDaemonSupervisor_RefusesAKindThisHostCannotRun(t *testing.T) {
 func TestDetectDaemonSupervisor_UnreadableSettingsAreAnError(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	c, _ := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "com.gastown.daemon.plist"), loadedJob(), nil)
+	c, _ := stubSupervisor(t, "linux", filepath.Join(t.TempDir(), "gastown-daemon.service"), loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
 		return nil, errors.New("daemon.json: unexpected end of JSON input")
 	}
@@ -2325,7 +2203,7 @@ func TestDetectDaemonSupervisor_UnreadableSettingsAreAnError(t *testing.T) {
 func TestDetectDaemonSupervisor_RefusesAnUnknownKind(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	c, _ := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "com.gastown.daemon.plist"), loadedJob(), nil)
+	c, _ := stubSupervisor(t, "linux", filepath.Join(t.TempDir(), "gastown-daemon.service"), loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
 		return &config.DaemonPatrolConfig{Supervisor: "kube"}, nil
 	}
@@ -2371,20 +2249,20 @@ func TestStartDaemon_ContainerRefusesSettingsDockerCannotTake(t *testing.T) {
 func TestRestartDaemon_SupervisorFailureWithoutANewDaemonIsAnError(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	plist := writeSupervisorFile(t, "com.gastown.daemon.plist", town)
+	unit := writeSupervisorFile(t, "gastown-daemon.service", town)
 	// The lock keeps naming the outgoing PID for the whole wait.
-	c, calls := stubRestart(t, "darwin", plist, 1111)
+	c, calls := stubRestart(t, "linux", unit, 1111)
 	c.run = func(a []string) error {
 		calls.argv = append(calls.argv, append([]string{}, a...))
 		return errors.New("Could not find service")
 	}
 
 	if _, _, err := c.restartDaemon(town); err == nil {
-		t.Fatal("restartDaemon reported success although launchd failed and no new daemon took the lock")
+		t.Fatal("restartDaemon reported success although the supervisor failed and no new daemon took the lock")
 	} else if !strings.Contains(err.Error(), "could not restart the daemon") {
 		t.Errorf("error = %v, want it to report the failed restart", err)
 	}
-	if !strings.Contains(calls.joined(), "kickstart") {
+	if !strings.Contains(calls.joined(), "systemctl --user restart") {
 		t.Errorf("the restart was never attempted: %v", calls.argv)
 	}
 }
@@ -2426,10 +2304,9 @@ func TestContainerSupervisorRestartRecreatesTheService(t *testing.T) {
 		t.Errorf("restart argv %v differs from the start argv %v by more than --force-recreate", got, start)
 	}
 
-	launchd := c.fileSupervisor("/plist", config.SupervisorLaunchd)
-	systemd := c.fileSupervisor("/unit", config.SupervisorSystemd)
-	if launchd.restart != nil || systemd.restart != nil {
-		t.Error("a file kind has a restart builder: launchd and systemd restart with their start")
+	systemd := c.fileSupervisor(config.SupervisorSystemd)
+	if systemd.restart != nil {
+		t.Error("the file kind has a restart builder: systemd restarts with its start")
 	}
 }
 
@@ -2522,9 +2399,9 @@ func TestRestartDaemon_ContainerRestartIsNotProvenByAnythingLess(t *testing.T) {
 	later := restartBaselineStart.Add(time.Minute)
 	good := stateReading{state: containerOwnerState(later, true)}
 	baseline := stateReading{state: containerOwnerState(restartBaselineStart, true)}
-	launchdOwner := containerOwnerState(later, true)
+	otherOwner := containerOwnerState(later, true)
 	other := daemon.Owner{Kind: config.SupervisorLaunchd, ID: templates.LaunchdLabel}
-	launchdOwner.Owner = &other
+	otherOwner.Owner = &other
 	cases := []struct {
 		name      string
 		readings  []stateReading
@@ -2534,7 +2411,7 @@ func TestRestartDaemon_ContainerRestartIsNotProvenByAnythingLess(t *testing.T) {
 	}{
 		{"the same start time", []stateReading{baseline, baseline}, "running img\n", nil, "still records the start"},
 		{"an earlier start time", []stateReading{baseline, {state: containerOwnerState(restartBaselineStart.Add(-time.Hour), true)}}, "running img\n", nil, "still records the start"},
-		{"another owner with a later start", []stateReading{baseline, {state: launchdOwner}}, "running img\n", nil, "names owner"},
+		{"another owner with a later start", []stateReading{baseline, {state: otherOwner}}, "running img\n", nil, "names owner"},
 		{"the container's daemon recorded not running", []stateReading{baseline, {state: containerOwnerState(later, false)}}, "running img\n", nil, "not running"},
 		{"state.json unreadable", []stateReading{baseline, {err: errors.New("read failed")}}, "running img\n", nil, "cannot be read"},
 		{"state.json missing", []stateReading{baseline, {}}, "running img\n", nil, "is missing"},
@@ -2632,7 +2509,7 @@ func TestRestartedLine(t *testing.T) {
 		want string
 	}{
 		{"container", 0, "Daemon restarted under container"},
-		{"launchd", 4242, "Daemon restarted under launchd (PID 4242)"},
+		{"systemd", 4242, "Daemon restarted under systemd (PID 4242)"},
 		{"", 7, "Daemon restarted (PID 7)"},
 	} {
 		if got := restartedLine(tc.via, tc.pid); got != tc.want {
