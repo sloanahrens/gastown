@@ -24,7 +24,8 @@
 // test runs every top-level test that does not call t.Parallel one at a time,
 // and releases the paused parallel tests only after them. So serial is the sum
 // of the elapsed of the top-level tests that never reported pause, and parallel
-// is the package wall minus that sum, floored at 0 (gt-0vbi8h).
+// is the package wall minus that sum, floored at 0, and 0 for a package that ran
+// no test (gt-0vbi8h).
 //
 // -jsonl <path> -run <id> also appends one line per package to a series, and
 // one per slow test with -slow-tests, so "where does the gate's time go" can be
@@ -234,9 +235,12 @@ type report struct {
 
 	// paused marks the tests that reported pause, which go test emits when one
 	// calls t.Parallel. serial sums, per package, the elapsed of its top-level
-	// tests that never paused: the phases line reads it.
+	// tests that never paused: the phases line reads it. tested marks each
+	// package that reported any test event, so the phases line can tell a
+	// package that ran tests from one that ran none.
 	paused map[string]bool
 	serial map[string]time.Duration
+	tested map[string]bool
 
 	// listSlow is set by -slow-tests; slow then holds the tests of SlowTest or
 	// longer that the list and the series name.
@@ -255,6 +259,7 @@ func newReport(out io.Writer) *report {
 		cached:  map[string]bool{},
 		paused:  map[string]bool{},
 		serial:  map[string]time.Duration{},
+		tested:  map[string]bool{},
 	}
 }
 
@@ -294,6 +299,9 @@ func (r *report) handle(e event) {
 			r.first = e.Time
 		}
 		r.last = e.Time
+	}
+	if e.Test != "" {
+		r.tested[e.Package] = true
 	}
 	switch e.Action {
 	case "build-output":
@@ -445,14 +453,18 @@ const phasesShown = 3
 // phases writes, for the slowest packages in pkgs (already slowest first), the
 // serial and parallel phases of each package's wall. Parallel is the wall less
 // the serial sum, floored at 0: a serial sum that outruns the wall reads as no
-// parallel phase, not a negative one.
+// parallel phase, not a negative one. A package with no test events has no
+// parallel phase at all, so its parallel is 0.
 func (r *report) phases(pkgs []string) {
 	for i, pkg := range pkgs {
 		if i == phasesShown {
 			break
 		}
 		serial := r.serial[pkg]
-		parallel := seconds(r.elapsed[pkg]) - serial
+		var parallel time.Duration
+		if r.tested[pkg] {
+			parallel = seconds(r.elapsed[pkg]) - serial
+		}
 		if parallel < 0 {
 			parallel = 0
 		}

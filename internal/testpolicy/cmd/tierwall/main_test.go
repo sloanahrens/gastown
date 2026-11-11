@@ -873,11 +873,55 @@ func TestPhasesSplitSerialFromParallel(t *testing.T) {
 	}
 }
 
+// TestPhasesNoParallelWithoutTestEvents pins that a package whose stream holds
+// no test event has no parallel phase, while its wall still counts as a
+// package. The fixed stream is one package's own pass with a 25s wall and
+// nothing else. A package with a test event keeps its wall as the phase split
+// (the phaseStream cases above). Mutation: drop the tested check and the line
+// reads parallel 25s.
+func TestPhasesNoParallelWithoutTestEvents(t *testing.T) {
+	t.Parallel()
+	stream := `{"Action":"pass","Package":"example.com/fx/a","Elapsed":25}` + "\n"
+	var out, errOut bytes.Buffer
+	code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost())
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: a passing stream is go test's verdict", code)
+	}
+	want := "tierwall: phases example.com/fx/a serial 0s parallel 0s\n"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("stdout = %q, want it to hold %q", out.String(), want)
+	}
+}
+
+// TestPhasesTestOutputMarksPackageAsTested pins that a test event without a
+// verdict still marks its package as having run tests: the stream holds only a
+// test's output line, then the package's 25s pass, so the package keeps its
+// wall as parallel. Mutation: mark the package tested only on a verdict and the
+// line reads parallel 0s.
+func TestPhasesTestOutputMarksPackageAsTested(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`{"Action":"output","Package":"example.com/fx/a","Test":"TestRun","Output":"=== RUN   TestRun\n"}`,
+		`{"Action":"pass","Package":"example.com/fx/a","Elapsed":25}`,
+		"",
+	}, "\n")
+	var out, errOut bytes.Buffer
+	code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost())
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: a passing stream is go test's verdict", code)
+	}
+	want := "tierwall: phases example.com/fx/a serial 0s parallel 25s\n"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("stdout = %q, want it to hold %q", out.String(), want)
+	}
+}
+
 // TestPhasesOnlyForTheSlowestThree pins which packages get a phases line: the
 // three slowest of a five-package stream, and none without -slow-tests. The
-// packages run no tests, so each one's serial is 0s and its parallel is its
-// whole wall. Mutation: drop the cap and all five packages get a line; drop
-// the flag check and the three lines print without -slow-tests.
+// packages run no tests, so each one's serial and parallel are both 0s: a
+// package with no test events has no parallel phase. Mutation: drop the cap
+// and all five packages get a line; drop the flag check and the three lines
+// print without -slow-tests.
 func TestPhasesOnlyForTheSlowestThree(t *testing.T) {
 	t.Parallel()
 	stream := strings.Join([]string{
@@ -903,9 +947,9 @@ func TestPhasesOnlyForTheSlowestThree(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; stderr %q", code, errOut.String())
 	}
 	want := strings.Join([]string{
-		"tierwall: phases example.com/fx/a serial 0s parallel 50s",
-		"tierwall: phases example.com/fx/b serial 0s parallel 40s",
-		"tierwall: phases example.com/fx/c serial 0s parallel 30s",
+		"tierwall: phases example.com/fx/a serial 0s parallel 0s",
+		"tierwall: phases example.com/fx/b serial 0s parallel 0s",
+		"tierwall: phases example.com/fx/c serial 0s parallel 0s",
 	}, "\n")
 	if got := phaseLines(out.String()); got != want {
 		t.Errorf("phase lines = %q, want %q", got, want)
