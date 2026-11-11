@@ -167,7 +167,7 @@ Depends: SP2, SP5, SP7. Gate: `go test ./internal/metrics ./internal/storypoints
 
 ### SP17. The split route (held for the operator)
 
-In the spec dispatcher tick, behind `patrols.spec_dispatch.story_points.split_over_minutes` (default 0, meaning off): when set and a bead's blended minutes are at least the setting, do not sling it; add the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`) and a comment with the estimate and the nearest beads; log one line. A bead already carrying `sp:` and the label is not touched again. Tests: off does nothing, on flags, an estimate below the trigger is slung.
+In the spec dispatcher tick, behind `patrols.spec_dispatch.story_points.split_over_minutes` (default 0, meaning off): when set (the operator's value is 15) and a bead's blended minutes are at least the setting, do not sling it; add the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`) and a comment with the estimate and the nearest beads; log one line. A bead already carrying `sp:` and the label is not touched again. Tests: off does nothing, on flags, an estimate below the trigger is slung.
 Depends: SP13, SP15, and the operator's word after the shadow report. Gate: `go test ./internal/cmd -run 'SpecDispatch.*Split' -count=1`.
 
 ### SP18. Documentation
@@ -182,8 +182,6 @@ Depends: SP12. Gate: `go run ./cmd/docs-lint`.
 - Only SP14 writes after landing, and a failure there never blocks a landing.
 - No task commits a weights change: SP16 proposes, a person adopts.
 
-## Open questions for the overseer
+## Decisions on the open questions
 
-1. The estimate runs in the daemon pod; the embedder is on the Mac. Do we expose ollama to the cluster, or accept the Jev-plus-shape rung in the pod?
-2. Jev's `fits_twenty_minutes` is asked before dispatch (SP8): is the spend inside the existing Jev daily cap acceptable, about one call per dispatched bead?
-3. The setting names above are mine; rename them before SP13 if the patrol config has a convention.
+The operator decided on 2026-11-11 at 13:12: ollama is exposed to the pod at the host gateway (gt-7vrjuo), so SP7's embedder is reachable from the pod; the pre-dispatch Jev ask in SP8 is accepted; the split trigger is 15 minutes (13 points) in SP17. Setting names are mine; rename them before SP13 if the patrol config has a convention.

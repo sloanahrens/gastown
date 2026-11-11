@@ -24,6 +24,9 @@ The operator decided these on 2026-11-11, through the overseer. They are not reo
 4. The shape model is a small model in Go with its weights in a checked-in JSON file, retrained monthly by `gt metrics`. A linear model first, kept if it clears 0.4; boosted trees only if it does not.
 5. Shadow mode lasts a few hours. The live rank correlation is recomputed once 60 estimated beads have landed. The over-21 split turns on only at the operator's word.
 6. The actual is the landing record's `polecat_secs`.
+7. (13:12, after the retrospective's findings) The split triggers on an estimate of 13 points or more, which is 15 minutes or more, through a minutes setting that is off by default. It applies the split label and never splits by itself.
+8. Jev is asked before dispatch (task SP8).
+9. ollama is exposed to the daemon pod at the host gateway (folded into gt-7vrjuo). The embedding ridge joins the blend; until the pod reaches ollama, shape plus Jev is the rung.
 
 ## What the retrospective changes
 
@@ -120,11 +123,11 @@ The route is behind a setting, `patrols.spec_dispatch.story_points.split_over`, 
 
 The operator's rule reads "over 21 points splits". The retrospective shows that no estimate reaches 21 points, so the route is built on a minutes trigger, and the setting holds that trigger. When the trigger fires, the dispatcher does not sling the bead; it adds the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`, which already keeps a bead off the dispatcher) and a comment with the estimate and the nearest beads, for the overseer or a bird to split. It never splits a bead by itself.
 
-Choosing the trigger is the operator's decision at the recompute. The retrospective's sweep gives the shape: at 15 estimated minutes about 4% of beads are flagged, four in ten of them run long and one long bead in five is caught; at 13 minutes 11% are flagged, three in ten run long and four in ten of the long beads are caught. The shadow report recomputes this table on live estimates.
+The operator set the trigger at an estimate of 13 points or more, which is 15 estimated minutes or more (13 points begins at 10.5 minutes, so the minutes setting, 15, is the binding one). The setting stays off until the operator's word after the shadow report, and the report recomputes the trigger table on live estimates in case he moves it. The retrospective's sweep gives the shape: at 15 estimated minutes about 4% of beads are flagged, four in ten of them run long and one long bead in five is caught; at 13 minutes 11% are flagged, three in ten run long and four in ten of the long beads are caught. The shadow report recomputes this table on live estimates.
 
 ## Risks
 
-1. **The embedder is on the Mac.** The estimate runs in the daemon pod, and ollama listens on the Mac's loopback. The embedder endpoint is a setting, and unreachable means the ladder falls back, so correctness does not depend on it. If the operator wants the full blend in the pod, the embedder must be exposed to the cluster, or the embedding must move. This is an open question for the overseer.
+1. **The embedder is on the Mac.** The estimate runs in the daemon pod, and ollama listens on the Mac. The operator decided to expose ollama to the pod at the host gateway (folded into gt-7vrjuo). Until that lands the pod's rung is shape plus Jev, and the embedder endpoint is a setting: unreachable means the ladder falls back, so correctness does not depend on it.
 2. **Jev's pre-dispatch answer is not the logged answer.** The retrospective measured logged answers. The shadow recompute is the first measurement of the real thing.
 3. **Four-day holdout.** All holdout figures come from beads landed 11-03 to 11-06 (Jev: to 11-11). The shadow recompute with 60 beads is small too; the monthly retrain is the real calibration.
 4. **Rework is noise the estimate cannot see.** Beads that need several om rounds take three times as long. The estimate predicts the work, not the rejections.
