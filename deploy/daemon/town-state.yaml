@@ -202,7 +202,7 @@ entries:
     why: the om install's checkout, the default internal/ominstaller/resolve.go uses; the clone's .git/config holds the origin URL rebuild_om.go copies, which can carry credentials
   - path: .runtime/host
     owner: daemon
-    why: the host agent's probe file, written by gt host agent run (internal/cmd/host_agent.go, internal/hostprobe/probes.go) and read by the daemon (internal/daemon/startup_guard.go, disk_maintenance_disks.go)
+    why: the host probe file, written by the Mac's gt-mac-watch (internal/hostprobe/probes.go) and read by the daemon (internal/daemon/startup_guard.go, disk_maintenance_disks.go)
   - path: .runtime/nudge_poller
     owner: daemon
     why: the nudge poller's PID files, written by internal/nudge/poller.go startPoller and pruned by the daemon (internal/daemon/pollution.go)
