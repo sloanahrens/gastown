@@ -493,15 +493,11 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	// rigs.json is saved atomically inside AddRig; no separate save needed here.
 
 	// Route registration is now handled inside AddRig (before agent bead creation)
-	// to avoid "no route found" warnings (#1424). Determine beadsWorkDir for rig identity bead.
+	// to avoid "no route found" warnings (#1424). The rig identity bead is
+	// created from the rig root, where the rig's beads live (gt-3lvcjz.17).
 	var beadsWorkDir string
 	if newRig.Config.Prefix != "" {
-		mayorRigBeads := constants.LegacyRigBeadsPath(filepath.Join(townRoot, name))
-		if _, err := os.Stat(mayorRigBeads); err == nil {
-			beadsWorkDir = filepath.Join(townRoot, name, "mayor", "rig")
-		} else {
-			beadsWorkDir = filepath.Join(townRoot, name)
-		}
+		beadsWorkDir = filepath.Join(townRoot, name)
 	}
 
 	// Create rig identity bead
@@ -1133,13 +1129,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 
 	// Create rig identity bead if prefix is set
 	if result.BeadsPrefix != "" {
-		mayorRigBeads := constants.LegacyRigBeadsPath(rigPath)
-		beadsWorkDir := rigPath
-		if _, err := os.Stat(mayorRigBeads); err == nil {
-			beadsWorkDir = filepath.Join(rigPath, "mayor", "rig")
-		}
-
-		bd := beads.New(beadsWorkDir)
+		bd := beads.New(rigPath)
 		rigBeadID := beads.RigBeadIDWithPrefix(result.BeadsPrefix, name)
 
 		// Check if bead already exists

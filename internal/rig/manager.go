@@ -807,14 +807,9 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// Register the route in town-level routes.jsonl before any bead is
 	// created under the new prefix: routing needs it to exist (#1424).
 	if opts.BeadsPrefix != "" {
-		routePath := opts.Name
-		mayorRigBeads := constants.LegacyRigBeadsPath(rigPath)
-		if _, err := os.Stat(mayorRigBeads); err == nil {
-			routePath = opts.Name + "/mayor/rig"
-		}
 		route := beads.Route{
 			Prefix: opts.BeadsPrefix + "-",
-			Path:   routePath,
+			Path:   opts.Name,
 		}
 		if err := beads.AppendRoute(m.townRoot, route); err != nil {
 			fmt.Printf("  Warning: Could not update routes.jsonl: %v\n", err)
@@ -925,11 +920,6 @@ func mayorCloneNeeded(opts AddRigOptions) string {
 	return ""
 }
 
-// adoptedBeadsMarker is written into an adopted rig's beads directory and into
-// no other. InitBeads reads it to tell adopted files from an untracked rig's
-// own metadata.json, which bd init writes at the same path (gt-3lvcjz.16).
-const adoptedBeadsMarker = ".gt-adopted"
-
 // adoptTrackedBeads copies the beads files bareGit tracks at branch, config.yaml
 // and metadata.json, byte for byte into dir, and reports whether the repo tracks
 // any. A file the repo does not track is not written. A bare repo has no working
@@ -938,7 +928,7 @@ const adoptedBeadsMarker = ".gt-adopted"
 // before anything is written: it is not read as "not tracked" (gt-3lvcjz.16).
 //
 // The copy is per-town state in dir, not a checkout of the repo's .beads/: later
-// steps of AddRig rewrite it. A tracked repo also gets adoptedBeadsMarker in dir.
+// steps of AddRig rewrite it.
 func adoptTrackedBeads(bareGit Repo, branch, dir string) (bool, error) {
 	refFiles, ok := bareGit.(refFileReader)
 	if !ok {
@@ -966,9 +956,6 @@ func adoptTrackedBeads(bareGit Repo, branch, dir string) (bool, error) {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
 			return false, fmt.Errorf("writing %s from the source repo: %w", name, err)
 		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, adoptedBeadsMarker), nil, 0644); err != nil {
-		return false, fmt.Errorf("writing the adopted-beads marker: %w", err)
 	}
 	return true, nil
 }
@@ -1644,58 +1631,12 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 		return fmt.Errorf("invalid beads prefix %q: must be alphanumeric with optional hyphens, start with letter, max 20 chars", prefix)
 	}
 
+	// The rig's beads live at <rig>/.beads, whether its source repo tracks
+	// .beads/ or not: no redirect is written, and nothing is created under
+	// mayor/rig (gt-3lvcjz.17).
 	beadsDir := filepath.Join(rigPath, ".beads")
-	mayorRigBeads := constants.LegacyRigBeadsPath(rigPath)
-
-	// A source repo that tracks .beads/ was adopted by AddRig: its config.yaml
-	// and metadata.json are the rig's database, already in <rig>/.beads, so no
-	// redirect is written for it, here or under mayor/rig (gt-3lvcjz.16). Only
-	// adoptTrackedBeads writes the marker, so an untracked rig's own metadata.json
-	// does not count. This check runs before the mayor clone check: a redirect
-	// written for an adopted rig would point its own database at mayor/rig.
-	_, adoptedErr := os.Stat(filepath.Join(beadsDir, adoptedBeadsMarker))
-	if adoptedErr != nil && !os.IsNotExist(adoptedErr) {
-		return fmt.Errorf("checking for adopted beads in %s: %w", beadsDir, adoptedErr)
-	}
-	adopted := adoptedErr == nil
-
-	// Check if source repo has tracked .beads/ (cloned into mayor/rig).
-	// We detect this by checking for metadata.json (a real beads database marker),
-	// not just the directory existence. This avoids false positives when we
-	// create mayorRigBeads for the untracked case (just a redirect container).
-	mayorRigMetadata := filepath.Join(mayorRigBeads, "metadata.json")
-	if _, err := os.Stat(mayorRigMetadata); err == nil && !adopted {
-		// Tracked beads exist - create redirect to mayor/rig/.beads
-		if err := os.MkdirAll(beadsDir, 0755); err != nil {
-			return err
-		}
-		redirectPath := filepath.Join(beadsDir, "redirect")
-		if err := os.WriteFile(redirectPath, []byte(constants.RigLegacyBeadsRelPath()+"\n"), 0644); err != nil {
-			return fmt.Errorf("creating redirect file: %w", err)
-		}
-		return nil
-	}
-
-	// No tracked beads - create local database and redirect for mayor clone
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		return err
-	}
-
-	// Create redirect file in mayor/rig/.beads pointing to rig/.beads.
-	// This allows bd commands from the mayor clone's working directory to find
-	// the beads database. We create only the redirect file (not the DB directory)
-	// to avoid interfering with the tracked-beads detection logic.
-	// The directory must exist for WriteFile to create the redirect file.
-	// mayor/rig/.beads of an adopted rig is the clone's own tracked files, or
-	// absent when the clone was refused, so the adopted rig gets no redirect there.
-	if !adopted {
-		if err := os.MkdirAll(mayorRigBeads, 0755); err != nil {
-			return fmt.Errorf("creating mayor/rig/.beads directory: %w", err)
-		}
-		mayorRedirectPath := filepath.Join(mayorRigBeads, "redirect")
-		if err := os.WriteFile(mayorRedirectPath, []byte("../../.beads\n"), 0644); err != nil {
-			return fmt.Errorf("creating mayor redirect file: %w", err)
-		}
 	}
 
 	// Pin bd to the intended .beads directory/database through the shared

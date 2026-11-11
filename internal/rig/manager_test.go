@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -438,115 +439,103 @@ func TestEnsureGitignoreEntry_AppendsToExisting(t *testing.T) {
 	}
 }
 
-func TestInitBeads_TrackedBeads_CreatesRedirect(t *testing.T) {
+// InitBeads writes no redirect and creates nothing under mayor/rig/.beads, for a
+// rig whose clone tracks beads and for one whose clone does not: the rig's
+// beads live at <rig>/.beads, so bd init runs there (gt-3lvcjz.17). The clone's
+// beads directory is listed before and after, and must be the same.
+func TestInitBeads_WritesNothingUnderMayorRigBeads(t *testing.T) {
 	t.Parallel()
-	// When the cloned repo has tracked beads (mayor/rig/.beads exists),
-	// initBeads should create a redirect file at <rig>/.beads/redirect
-	// pointing to mayor/rig/.beads instead of creating a local database.
-	rigPath := t.TempDir()
+	for name, tracked := range map[string]bool{
+		"tracked clone":   true,
+		"untracked clone": false,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rigPath := t.TempDir()
+			mayorBeadsDir := filepath.Join(rigPath, "mayor", "rig", ".beads")
+			if tracked {
+				if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
+					t.Fatalf("mkdir mayor beads: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(mayorBeadsDir, "metadata.json"), []byte("{}\n"), 0644); err != nil {
+					t.Fatalf("write mayor metadata.json: %v", err)
+				}
+			}
+			before := listRelTree(t, mayorBeadsDir)
 
-	// Simulate tracked beads in the cloned repo (metadata.json is the marker)
-	mayorBeadsDir := filepath.Join(rigPath, "mayor", "rig", ".beads")
-	if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
-		t.Fatalf("mkdir mayor beads: %v", err)
-	}
-	// Create metadata.json to simulate a real beads database
-	if err := os.WriteFile(filepath.Join(mayorBeadsDir, "metadata.json"), []byte("{}\n"), 0644); err != nil {
-		t.Fatalf("write mayor metadata.json: %v", err)
-	}
+			manager, _, bd := testManager("", nil)
+			if err := manager.InitBeads(rigPath, "gt", ""); err != nil {
+				t.Fatalf("InitBeads: %v", err)
+			}
 
-	manager := &Manager{}
-	if err := manager.InitBeads(rigPath, "gt", ""); err != nil {
-		t.Fatalf("initBeads: %v", err)
-	}
-
-	// Verify redirect file was created
-	redirectPath := filepath.Join(rigPath, ".beads", "redirect")
-	content, err := os.ReadFile(redirectPath)
-	if err != nil {
-		t.Fatalf("reading redirect file: %v", err)
-	}
-
-	expected := "mayor/rig/.beads\n"
-	if string(content) != expected {
-		t.Errorf("redirect content = %q, want %q", string(content), expected)
-	}
-
-	// Verify no local database was created (no config.yaml at rig level)
-	rigConfigPath := filepath.Join(rigPath, ".beads", "config.yaml")
-	if _, err := os.Stat(rigConfigPath); !os.IsNotExist(err) {
-		t.Errorf("expected no config.yaml at rig level when using redirect, but it exists")
+			if after := listRelTree(t, mayorBeadsDir); !slices.Equal(after, before) {
+				t.Errorf("mayor/rig/.beads after InitBeads = %v, want %v unchanged", after, before)
+			}
+			if _, err := os.Stat(filepath.Join(rigPath, ".beads", "redirect")); !os.IsNotExist(err) {
+				t.Errorf("rig redirect = %v, want none written", err)
+			}
+			if inits := bd.withVerb("init"); len(inits) != 1 || inits[0].Dir != rigPath {
+				t.Errorf("bd init calls = %+v, want one in %s", inits, rigPath)
+			}
+		})
 	}
 }
 
-// A beads path that cannot be checked is not read as untracked: InitBeads fails
-// before it writes a redirect (gt-3lvcjz.16). A regular file named .beads makes
-// the metadata.json check fail with ENOTDIR, which is not "not exist".
-func TestInitBeads_UncheckableBeadsDirFails(t *testing.T) {
+// listRelTree returns the sorted paths under dir, relative to it, with a
+// trailing slash on directories. A missing dir lists nothing.
+func listRelTree(t *testing.T, dir string) []string {
+	t.Helper()
+	var names []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if path == dir {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			rel += "/"
+		}
+		names = append(names, rel)
+		return nil
+	})
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("listing %s: %v", dir, err)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// A .beads path that is a regular file fails InitBeads before any bd init runs,
+// and nothing is written under mayor/rig (gt-3lvcjz.16, gt-3lvcjz.17).
+func TestInitBeads_BeadsPathThatIsAFileFails(t *testing.T) {
 	t.Parallel()
 	rigPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(rigPath, ".beads"), []byte("not a dir\n"), 0644); err != nil {
 		t.Fatalf("writing .beads file: %v", err)
 	}
 
-	manager, _, _ := testManager("", nil)
+	manager, _, bd := testManager("", nil)
 	if err := manager.InitBeads(rigPath, "tk", ""); err == nil {
-		t.Fatal("InitBeads succeeded, want an error for a .beads path it cannot check")
+		t.Fatal("InitBeads succeeded, want an error for a .beads path that is a file")
 	}
-	if _, err := os.Stat(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect")); !os.IsNotExist(err) {
-		t.Errorf("mayor redirect = %v, want none written", err)
+	if inits := bd.withVerb("init"); len(inits) != 0 {
+		t.Errorf("bd init calls = %+v, want none", inits)
 	}
-}
-
-// The untracked path's mayor redirect is a write that can fail, and a failure
-// is an error, not a skipped redirect (gt-3lvcjz.16). Each row blocks one
-// write: a file where mayor/rig must be a directory, and a directory where the
-// redirect file goes.
-func TestInitBeads_MayorRedirectWriteFailuresFail(t *testing.T) {
-	t.Parallel()
-	for name, tc := range map[string]struct {
-		block func(t *testing.T, rigPath string)
-		want  string
-	}{
-		"mayor/rig is a file, so its .beads cannot be created": {
-			block: func(t *testing.T, rigPath string) {
-				if err := os.MkdirAll(filepath.Join(rigPath, "mayor"), 0755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(rigPath, "mayor", "rig"), []byte("x\n"), 0644); err != nil {
-					t.Fatal(err)
-				}
-			},
-			want: "creating mayor/rig/.beads directory",
-		},
-		"the redirect path is a directory, so the redirect cannot be written": {
-			block: func(t *testing.T, rigPath string) {
-				if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect"), 0755); err != nil {
-					t.Fatal(err)
-				}
-			},
-			want: "creating mayor redirect file",
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			rigPath := t.TempDir()
-			tc.block(t, rigPath)
-
-			manager, _, _ := testManager("", nil)
-			err := manager.InitBeads(rigPath, "tk", "")
-			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Errorf("InitBeads error = %v, want one naming %q", err, tc.want)
-			}
-		})
+	if _, err := os.Stat(filepath.Join(rigPath, "mayor")); !os.IsNotExist(err) {
+		t.Errorf("mayor/ = %v, want nothing written", err)
 	}
 }
 
-// An adopted rig's beads files are its own database (gt-3lvcjz.16): InitBeads
+// A <rig>/.beads that already holds config.yaml and metadata.json, as an
+// adopted tracked repo's does (gt-3lvcjz.16), is the rig's database: InitBeads
 // runs bd init at the rig root against them and writes no redirect, neither in
-// <rig>/.beads, which would point the database at itself, nor under mayor/rig,
-// which a tracked rig may not have.
-func TestInitBeads_AdoptedBeads_InitsWithoutRedirect(t *testing.T) {
+// <rig>/.beads, which would point the database at itself, nor under mayor/rig.
+func TestInitBeads_RigBeadsFiles_InitsWithoutRedirect(t *testing.T) {
 	t.Parallel()
 	rigPath := t.TempDir()
 	rigBeads := filepath.Join(rigPath, ".beads")
@@ -554,9 +543,8 @@ func TestInitBeads_AdoptedBeads_InitsWithoutRedirect(t *testing.T) {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 	for name, body := range map[string]string{
-		"config.yaml":      "issue-prefix: tk\n",
-		"metadata.json":    "{}\n",
-		adoptedBeadsMarker: "",
+		"config.yaml":   "issue-prefix: tk\n",
+		"metadata.json": "{}\n",
 	} {
 		if err := os.WriteFile(filepath.Join(rigBeads, name), []byte(body), 0644); err != nil {
 			t.Fatalf("writing adopted %s: %v", name, err)
@@ -584,34 +572,6 @@ func TestInitBeads_AdoptedBeads_InitsWithoutRedirect(t *testing.T) {
 		if _, err := os.Stat(redirect); !os.IsNotExist(err) {
 			t.Errorf("%s = %v, want no redirect", redirect, err)
 		}
-	}
-}
-
-// An untracked rig's own metadata.json at <rig>/.beads is not an adopted
-// database: without the adoption marker InitBeads keeps the mayor redirect, so
-// the untracked path still writes mayor/rig/.beads/redirect (gt-3lvcjz.16).
-func TestInitBeads_MetadataWithoutAdoptionMarkerKeepsMayorRedirect(t *testing.T) {
-	t.Parallel()
-	rigPath := t.TempDir()
-	rigBeads := filepath.Join(rigPath, ".beads")
-	if err := os.MkdirAll(rigBeads, 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte("{}\n"), 0644); err != nil {
-		t.Fatalf("writing metadata.json: %v", err)
-	}
-
-	manager, _, _ := testManager("", nil)
-	if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
-		t.Fatalf("InitBeads: %v", err)
-	}
-
-	got, err := os.ReadFile(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect"))
-	if err != nil {
-		t.Fatalf("reading mayor redirect: %v; want the untracked path to write it", err)
-	}
-	if string(got) != "../../.beads\n" {
-		t.Errorf("mayor redirect = %q, want %q", got, "../../.beads\n")
 	}
 }
 
@@ -2221,9 +2181,8 @@ func TestAdoptTrackedBeads(t *testing.T) {
 			repo:        bareOf(withBeads),
 			wantTracked: true,
 			wantFiles: map[string]string{
-				"config.yaml":      "prefix: wb\n\n",
-				"metadata.json":    "{}\n",
-				adoptedBeadsMarker: "",
+				"config.yaml":   "prefix: wb\n\n",
+				"metadata.json": "{}\n",
 			},
 		},
 		"no .beads/": {
@@ -2254,17 +2213,6 @@ func TestAdoptTrackedBeads(t *testing.T) {
 			// A directory where config.yaml goes makes that write fail.
 			setup: func(t *testing.T, dir string) {
 				if err := os.MkdirAll(filepath.Join(dir, "config.yaml"), 0755); err != nil {
-					t.Fatalf("making the blocking directory: %v", err)
-				}
-			},
-			wantErr: true,
-		},
-		"adopted marker that cannot be written fails": {
-			repo: bareOf(withBeads),
-			// The copied files are written first; a directory where the marker
-			// goes makes only the marker write fail.
-			setup: func(t *testing.T, dir string) {
-				if err := os.MkdirAll(filepath.Join(dir, adoptedBeadsMarker), 0755); err != nil {
 					t.Fatalf("making the blocking directory: %v", err)
 				}
 			},
@@ -2316,6 +2264,38 @@ func TestAdoptTrackedBeads(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The route AddRig registers names the rig directory, <name>, even when the
+// clone holds a mayor/rig/.beads: the rig's beads live at <rig>/.beads
+// (gt-3lvcjz.17).
+func TestAddRig_RouteNamesTheRigDirectory(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "routed",
+		GitURL:        trackedBeadsRepo(t, f, "routed", "rt"),
+		BeadsPrefix:   "rt",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig: %v", err)
+	}
+
+	routes, err := beads.LoadRoutes(filepath.Join(root, ".beads"))
+	if err != nil {
+		t.Fatalf("LoadRoutes: %v", err)
+	}
+	var paths []string
+	for _, r := range routes {
+		if r.Prefix == "rt-" {
+			paths = append(paths, r.Path)
+		}
+	}
+	if want := []string{"routed"}; !slices.Equal(paths, want) {
+		t.Errorf("routes for rt- = %v, want %v", paths, want)
 	}
 }
 
