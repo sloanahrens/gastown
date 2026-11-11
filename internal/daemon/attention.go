@@ -1206,7 +1206,7 @@ func (s *attentionSources) collectReviewRejected(ctx context.Context) ([]attenti
 			}
 			summary := fmt.Sprintf("%s review rejected (count %d), owner %s", is.ID, d.review, ownerText)
 			if d.finding != "" {
-				summary += ": " + d.finding
+				summary += ": " + land.NoteField(d.finding)
 			}
 			out = append(out, attention.Item{
 				Key:      fmt.Sprintf("review-rejected:%s:%d", is.ID, d.review),

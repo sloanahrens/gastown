@@ -669,9 +669,36 @@ func TestAttentionCollector_ReviewRejectedTitle(t *testing.T) {
 	}
 }
 
-// TestAttentionCollector_ReviewRejectedReadFailure: a failed read is the
-// collector's error, so the queue keeps the previous tick's items rather than
-// reading a bead it could not see as clean.
+// TestAttentionCollector_ReviewRejectedTitleOneLine: a title is bead text, so
+// the summary keeps it to one line: a carriage return or tab inside it is read
+// as a space.
+func TestAttentionCollector_ReviewRejectedTitleOneLine(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	major := land.Finding{ID: "f1", Severity: "major", Path: "internal/x.go", Line: 12, Title: "nil map write in lander"}
+	notes := strings.Replace(reviewRejection(1, major), "nil map write in lander", "nil map\rwrite\tin lander", 1)
+	f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-r", Status: "open", UpdatedAt: "t1", CreatedBy: "town/crew/dipper", Notes: notes},
+		}, nil
+	}
+
+	items := f.collect(t, f.src.collectReviewRejected)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want one review rejection", items)
+	}
+	if strings.ContainsAny(items[0].Summary, "\r\t") {
+		t.Errorf("summary %q holds a carriage return or tab, want one line", items[0].Summary)
+	}
+	if !strings.HasSuffix(items[0].Summary, ": nil map write in lander") {
+		t.Errorf("summary %q, want it to end with the title on one line", items[0].Summary)
+	}
+}
+
+// TestAttentionCollector_ReviewRejectedReadFailure: a failed read returns the
+// collector's error with no items, so the caller sees the failure rather than a
+// clean read.
 func TestAttentionCollector_ReviewRejectedReadFailure(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
