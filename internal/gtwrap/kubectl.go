@@ -127,8 +127,8 @@ func isCredential(name string) bool {
 }
 
 // checkDir runs one check that dir is a directory in the pod's container. A
-// directory the pod lacks is the wrapper's refusal, so the tool never runs in a
-// place the shell could not cd to, and a check that does not run refuses too.
+// directory the pod lacks is refused by the wrapper, so the tool never starts in a
+// directory the pod does not have; a check that does not run refuses too.
 func (k Kubectl) checkDir(pod, dir string) error {
 	_, exit, err := k.probe("-n", k.Namespace, "exec", pod, "-c", k.Container, "--", "test", "-d", dir)
 	if err != nil {
