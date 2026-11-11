@@ -32,10 +32,19 @@ func (g *recordingGit) run(dir string, args ...string) ([]byte, error) {
 	if len(args) == 0 {
 		return nil, fmt.Errorf("no git verb")
 	}
-	if err := g.errs[args[0]]; err != nil {
+	// The verb is the first argument that is not a flag: a bare-repo read
+	// carries --git-dir before it.
+	verb := args[0]
+	for _, a := range args {
+		if !strings.HasPrefix(a, "--") {
+			verb = a
+			break
+		}
+	}
+	if err := g.errs[verb]; err != nil {
 		return nil, err
 	}
-	switch args[0] {
+	switch verb {
 	case "cat-file":
 		return []byte("commit\n"), nil
 	case "ls-tree":
@@ -53,16 +62,30 @@ func (g *recordingGit) run(dir string, args ...string) ([]byte, error) {
 	return nil, fmt.Errorf("unexpected git call: %v", args)
 }
 
+// townBareRepo makes <town>/gastown/.repo.git hold the on-disk shape of a bare
+// repository, the shape the seed checks before it reads a rig, and returns its
+// path. The git calls are answered by the fake, so the directory holds no history.
+func townBareRepo(t *testing.T, town string) string {
+	t.Helper()
+	dir := filepath.Join(town, "gastown", ".repo.git")
+	for _, p := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(dir, p), 0o755); err != nil {
+			t.Fatalf("make the town bare repo: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("write the town bare repo HEAD: %v", err)
+	}
+	return dir
+}
+
 // TestBuildSrcFlag pins the flag: absent, the build rig is read from the town
-// checkout; given, from that directory; and an empty or missing directory is
+// bare repo; given, from that directory; and an empty or missing directory is
 // refused naming the flag before any git call.
 func TestBuildSrcFlag(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	townCheckout := filepath.Join(town, "gastown", "mayor", "rig")
-	if err := os.MkdirAll(townCheckout, 0o755); err != nil {
-		t.Fatalf("make the town checkout: %v", err)
-	}
+	townCheckout := townBareRepo(t, town)
 	buildSrc := t.TempDir()
 	pins := filepath.Join(t.TempDir(), "pins")
 	if err := os.WriteFile(pins, []byte("gastown "+pinSHA+"\n"), 0o644); err != nil {
@@ -130,12 +153,12 @@ func TestBuildSrcFlag(t *testing.T) {
 
 // TestBuildSrcAbsentKeepsTheTownsAdvice pins that omitting the flag is
 // behaviour-identical to the command before it existed: the error names the
-// town's canonical checkout and advises fetching through the town, never
-// naming a build source or offering build-checkout advice.
+// town's bare repo and advises fetching through the town, never naming a build
+// source or offering build-checkout advice.
 func TestBuildSrcAbsentKeepsTheTownsAdvice(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	townCheckout := filepath.Join(town, "gastown", "mayor", "rig")
+	townBare := townBareRepo(t, town)
 	pins := filepath.Join(t.TempDir(), "pins")
 	if err := os.WriteFile(pins, []byte("gastown "+pinSHA+"\n"), 0o644); err != nil {
 		t.Fatalf("write the pins file: %v", err)
@@ -149,16 +172,16 @@ func TestBuildSrcAbsentKeepsTheTownsAdvice(t *testing.T) {
 		notWant []string
 	}{
 		{
-			name:    "the build checkout lacks the build commit",
+			name:    "the build repo lacks the build commit",
 			errs:    map[string]error{"cat-file": errors.New("fatal: Not a valid object name")},
-			want:    []string{"cannot read the build commit", townCheckout, "fetch that checkout through the town's path"},
+			want:    []string{"cannot read the build commit", townBare, "fetch that bare repo through the town's path"},
 			notWant: []string{"build from a checkout that holds"},
 		},
 		{
 			name:    "the pin cannot be read for the module comparison",
 			errs:    map[string]error{"ls-tree": errors.New("fatal: Not a valid object name")},
-			want:    []string{"not readable in its canonical checkout"},
-			notWant: []string{"the build source"},
+			want:    []string{"not readable in its bare repo " + townBare},
+			notWant: []string{"the build source", "canonical checkout"},
 		},
 	}
 	for _, tt := range tests {

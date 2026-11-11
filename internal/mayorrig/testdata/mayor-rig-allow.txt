@@ -65,9 +65,6 @@ internal/mail/router.go	1	pending-retirement	mail router: the constants.DirMayor
 internal/metrics/source_config.go	1	pending-retirement	metrics source config: the .om.json path under the rig's mayor/rig checkout
 internal/nudge/deliver/town.go	1	pending-retirement	nudge delivery: the constants.DirMayor target prefix, which is not the clone path
 internal/plugin/sync.go	1	pending-retirement	plugin sync: the mayor/rig plugins directory it syncs from
-internal/polecat/seed/cmd/stage/main.go	2	pending-retirement	seed stage command: flag help naming the <rig>/mayor/rig checkouts and the default build source
-internal/polecat/seed/guard.go	1	pending-retirement	seed guard: the mayor/rig checkout it checks for the seed source
-internal/polecat/seed/seed.go	2	pending-retirement	seed: the build rig and source rig mayor/rig checkout paths
 internal/rig/manager.go	7	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
 internal/rig/repofile.go	2	pending-retirement	rig repo file: reads files from the rig's mayor/rig clone, and its warning text
 internal/rig/types.go	2	pending-retirement	rig types: the mayor/rig entry in the rig directory list, and the RigMayorPath call that builds the checkout path

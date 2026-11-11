@@ -3,6 +3,8 @@ package seed
 import (
 	"fmt"
 	"path"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -10,14 +12,27 @@ import (
 const (
 	pinSHA  = "1111111111111111111111111111111111111111"
 	mainSHA = "2222222222222222222222222222222222222222"
-	town    = "/town"
 )
 
-// guardGit answers the three git calls the guard makes from a table keyed by
-// the rig directory and the arguments; an unknown call is an error.
+// guardGit answers the git calls the guard makes from a table keyed by the
+// repository directory and the arguments; an unknown call is an error. Its town
+// is a temporary directory, and bare creates each rig's bare repository there so
+// the guard finds the on-disk shape it checks before it runs git.
 type guardGit struct {
+	t      *testing.T
+	town   string
 	calls  []string
 	answer map[string]string
+}
+
+func newGuardGit(t *testing.T) *guardGit {
+	t.Helper()
+	return &guardGit{t: t, town: t.TempDir(), answer: map[string]string{}}
+}
+
+// bare makes the rig's bare repository under the town and returns its path.
+func (f *guardGit) bare(rig string) string {
+	return bareFixture(f.t, f.town, rig)
 }
 
 func (f *guardGit) run(dir string, args ...string) ([]byte, error) {
@@ -28,8 +43,6 @@ func (f *guardGit) run(dir string, args ...string) ([]byte, error) {
 	}
 	return nil, fmt.Errorf("no answer for %q", key)
 }
-
-func rigDir(rig string) string { return path.Join(town, rig, "mayor", "rig") }
 
 // fixtureVersion is a version whose major matches the module path, as modfile
 // requires: github.com/x/a v1.0.0, github.com/jackc/pgx/v5 v5.0.0.
@@ -50,16 +63,22 @@ func goMod(module string, requires ...string) string {
 	return s + ")\n"
 }
 
-// seedRig fills the table for one rig: its origin/main, and the go.mod files at
-// the pin and at main, each listed by ls-tree and read by show.
-func seedRig(f *guardGit, rig, main string, files map[string]map[string]string) {
-	seedRigAt(f, rigDir(rig), main, files)
+// mainRevParse is the argv Guard sends to read a bare repo's main: the bare
+// repo named by --git-dir, then the rev-parse.
+func mainRevParse(dir string) string {
+	return "--git-dir=" + dir + " rev-parse --verify main^{commit}"
 }
 
-// seedRigAt is seedRig for a checkout at an arbitrary directory, such as a build
-// source that is not under the town.
+// seedRig fills the table for one rig: its main, and the go.mod files at the pin
+// and at main, each listed by ls-tree and read by show.
+func seedRig(f *guardGit, rig, main string, files map[string]map[string]string) {
+	seedRigAt(f, f.bare(rig), main, files)
+}
+
+// seedRigAt is seedRig for a repository at an arbitrary directory, such as a
+// build source that is not under the town.
 func seedRigAt(f *guardGit, dir, main string, files map[string]map[string]string) {
-	f.answer[dir+" rev-parse --verify origin/main^{commit}"] = main + "\n"
+	f.answer[dir+" "+mainRevParse(dir)] = main + "\n"
 	for commit, mods := range files {
 		var names []string
 		for name, body := range mods {
@@ -72,26 +91,26 @@ func seedRigAt(f *guardGit, dir, main string, files map[string]map[string]string
 
 func TestGuardPassesWhenThePinIsMain(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
 		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a")},
 	})
 	pins := []Source{{Rig: "devops", Commit: mainSHA}}
-	if _, err := Guard(pins, "gastown", town, f.run); err != nil {
+	if _, err := Guard(pins, "gastown", f.town, f.run); err != nil {
 		t.Fatalf("Guard on a pin equal to main = %v, want nil", err)
 	}
 }
 
 func TestGuardPassesABehindPinWithTheSameModulesWithANote(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/devops", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a")},
 	})
-	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
-	f.answer[rigDir("devops")+" rev-list --count "+pinSHA+".."+mainSHA] = "14\n"
-	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	f.answer[f.bare("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
+	f.answer[f.bare("devops")+" rev-list --count "+pinSHA+".."+mainSHA] = "14\n"
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", f.town, f.run)
 	if err != nil {
 		t.Fatalf("Guard on a behind pin with the same modules = %v, want nil", err)
 	}
@@ -102,28 +121,64 @@ func TestGuardPassesABehindPinWithTheSameModulesWithANote(t *testing.T) {
 
 func TestGuardFailsWhenABehindPinLacksAModuleMainRequires(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/devops", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a", "github.com/x/new")},
 	})
-	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
-	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	f.answer[f.bare("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
+	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", f.town, f.run)
 	if err == nil {
 		t.Fatal("Guard on a pin lacking a module main requires = nil, want an error")
 	}
-	// The whole sentence is pinned, so the Guard path keeps the wording it has
-	// (gt-gg9hv.33).
-	want := fmt.Sprintf("pin-drift guard: rig devops pin %s lacks modules its main %s requires: github.com/x/new (in .); run make polecat-seed-pins on the canonical checkout at main, then commit the pin",
-		short(pinSHA), short(mainSHA))
+	// The whole sentence is pinned: the refusal names the bare repo main is
+	// read from, so an operator sees which .repo.git the advice refers to.
+	want := fmt.Sprintf("pin-drift guard: rig devops pin %s lacks modules its main %s requires: github.com/x/new (in .); main is read from the .repo.git bare repo %s; run make polecat-seed-pins, then commit the pin",
+		short(pinSHA), short(mainSHA), f.bare("devops"))
 	if got := err.Error(); got != want {
-		t.Errorf("refusal = %q, want the canonical-checkout sentence unchanged: %q", got, want)
+		t.Errorf("refusal = %q, want %q", got, want)
+	}
+}
+
+// Guard reads a rig's main with --git-dir naming the rig's bare repo, so the
+// read needs no working tree.
+func TestGuardReadsMainThroughTheBareRepoGitDir(t *testing.T) {
+	t.Parallel()
+	f := newGuardGit(t)
+	seedRig(f, "devops", mainSHA, map[string]map[string]string{
+		mainSHA: {"go.mod": goMod("example/devops")},
+	})
+	bare := filepath.Join(f.town, "devops", ".repo.git")
+	var mainReads []gitCall
+	record := func(dir string, args ...string) ([]byte, error) {
+		if verb := withoutFlags(args); len(verb) > 0 && verb[0] == "rev-parse" {
+			mainReads = append(mainReads, gitCall{dir: dir, args: args})
+		}
+		return f.run(dir, args...)
+	}
+	if _, err := Guard([]Source{{Rig: "devops", Commit: mainSHA}}, "gastown", f.town, record); err != nil {
+		t.Fatalf("Guard = %v, want nil", err)
+	}
+	if len(mainReads) != 1 {
+		t.Fatalf("main reads = %v, want one rev-parse", mainReads)
+	}
+	if got, has := gitDirFlag(mainReads[0].args); !has || got != bare {
+		t.Errorf("main read --git-dir = %q (present %v), want %q", got, has, bare)
+	}
+	if mainReads[0].dir != bare {
+		t.Errorf("main read ran in %q, want %q", mainReads[0].dir, bare)
+	}
+	if !slices.Contains(mainReads[0].args, "--verify") {
+		t.Errorf("main read args = %v, want --verify", mainReads[0].args)
+	}
+	if want := []string{"rev-parse", "main^{commit}"}; !slices.Equal(withoutFlags(mainReads[0].args), want) {
+		t.Errorf("main read verb and operands = %v, want %v", withoutFlags(mainReads[0].args), want)
 	}
 }
 
 func TestGuardNamesANestedModuleThePinLacks(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
 	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
 		pinSHA: {
 			"go.mod":         goMod("example/root", "github.com/x/a"),
@@ -134,9 +189,9 @@ func TestGuardNamesANestedModuleThePinLacks(t *testing.T) {
 			"tracker/go.mod": goMod("example/tracker", "github.com/x/a", "github.com/jackc/pgx/v5"),
 		},
 	})
-	f.answer[rigDir("gastown")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
+	f.answer[f.bare("gastown")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
 	pins := []Source{{Rig: "gastown", Commit: pinSHA}}
-	_, err := Guard(pins, "devops", town, f.run)
+	_, err := Guard(pins, "devops", f.town, f.run)
 	if err == nil {
 		t.Fatal("Guard on a pin that lacks a nested module = nil, want an error")
 	}
@@ -148,9 +203,9 @@ func TestGuardNamesANestedModuleThePinLacks(t *testing.T) {
 
 func TestGuardSkipsTheBuildRig(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
 	pins := []Source{{Rig: "gastown", Commit: pinSHA}}
-	if _, err := Guard(pins, "gastown", town, f.run); err != nil {
+	if _, err := Guard(pins, "gastown", f.town, f.run); err != nil {
 		t.Fatalf("Guard on the build rig = %v, want nil", err)
 	}
 	if len(f.calls) != 0 {
@@ -158,28 +213,47 @@ func TestGuardSkipsTheBuildRig(t *testing.T) {
 	}
 }
 
+// A rig with no .repo.git is refused before git runs, and the error names the
+// bare path the guard would have read.
+func TestGuardRefusesARigWithNoBareRepo(t *testing.T) {
+	t.Parallel()
+	f := newGuardGit(t)
+	pins := []Source{{Rig: "devops", Commit: pinSHA}}
+	_, err := Guard(pins, "gastown", f.town, f.run)
+	if err == nil {
+		t.Fatal("Guard on a rig with no bare repo = nil, want an error")
+	}
+	if want := path.Join(f.town, "devops", ".repo.git"); !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the bare path %q", err, want)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("Guard ran git against a rig with no bare repo: %v", f.calls)
+	}
+}
+
 func TestGuardFailsWhenMainCannotBeRead(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
+	f.bare("devops")
 	pins := []Source{{Rig: "devops", Commit: pinSHA}}
-	_, err := Guard(pins, "gastown", town, f.run)
+	_, err := Guard(pins, "gastown", f.town, f.run)
 	if err == nil {
-		t.Fatal("Guard with no origin/main = nil, want an error naming the rig")
+		t.Fatal("Guard with no main = nil, want an error naming the rig")
 	}
-	if !strings.Contains(err.Error(), "devops") || !strings.Contains(err.Error(), "origin/main") {
-		t.Errorf("error %q does not name the rig and origin/main", err)
+	if !strings.Contains(err.Error(), "devops") || !strings.Contains(err.Error(), "main^{commit}") {
+		t.Errorf("error %q does not name the rig and main", err)
 	}
 }
 
 func TestGuardPassesAnAheadOrDivergedPinWithEqualModulesWithANote(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/devops")},
 		mainSHA: {"go.mod": goMod("example/devops")},
 	})
 	// no merge-base answer: the pin is not an ancestor of main
-	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", f.town, f.run)
 	if err != nil {
 		t.Fatalf("Guard on an ahead or diverged pin with equal modules = %v, want nil", err)
 	}
@@ -188,41 +262,40 @@ func TestGuardPassesAnAheadOrDivergedPinWithEqualModulesWithANote(t *testing.T) 
 	}
 }
 
-func TestGuardNamesAPinThatIsNotInItsCheckout(t *testing.T) {
+func TestGuardNamesAPinThatIsNotInItsBareRepo(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
-	dir := rigDir("devops")
-	f.answer[dir+" rev-parse --verify origin/main^{commit}"] = mainSHA + "\n"
-	// no ls-tree answer for the pin: the commit is not in this checkout
-	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	f := newGuardGit(t)
+	dir := f.bare("devops")
+	f.answer[dir+" "+mainRevParse(dir)] = mainSHA + "\n"
+	// no ls-tree answer for the pin: the commit is not in this repository
+	_, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", f.town, f.run)
 	if err == nil {
-		t.Fatal("Guard on a pin the checkout lacks = nil, want an error")
+		t.Fatal("Guard on a pin the bare repo lacks = nil, want an error")
 	}
-	// The whole sentence is pinned: CheckAgainstMain takes the sentence's
-	// location from its caller, and this keeps the Guard path reading what it
-	// always has (gt-gg9hv.33).
-	want := fmt.Sprintf("pin-drift guard: rig devops pin %s is not readable in its canonical checkout, so it cannot be compared with main %s (no answer for %q): fetch or fix that checkout, then rerun",
-		short(pinSHA), short(mainSHA), rigDir("devops")+" ls-tree -r --name-only "+pinSHA)
+	// The whole sentence is pinned: it names the .repo.git path the pin was
+	// read from (gt-gg9hv.33).
+	want := fmt.Sprintf("pin-drift guard: rig devops pin %s is not readable in the .repo.git bare repo %s, so it cannot be compared with main %s (no answer for %q): fetch or fix that repository, then rerun",
+		short(pinSHA), dir, short(mainSHA), dir+" ls-tree -r --name-only "+pinSHA)
 	if got := err.Error(); got != want {
-		t.Errorf("refusal = %q, want the canonical-checkout sentence unchanged: %q", got, want)
+		t.Errorf("refusal = %q, want %q", got, want)
 	}
 }
 
 func TestGuardReadsOnlyGitQueries(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
 		mainSHA: {"go.mod": goMod("example/devops")},
 	})
-	_, _ = Guard([]Source{{Rig: "devops", Commit: mainSHA}}, "gastown", town, f.run)
+	_, _ = Guard([]Source{{Rig: "devops", Commit: mainSHA}}, "gastown", f.town, f.run)
 	allowed := map[string]bool{}
 	for _, v := range ReadOnlyGitVerbs {
 		allowed[v] = true
 	}
 	for _, c := range f.calls {
-		args := strings.Fields(c)
-		// c is "<dir> <verb> ..."; the verb is the second field
-		if len(args) < 2 || !allowed[args[1]] {
+		// c is "<dir> <args>..."; the verb is the first argument that is not a flag
+		args := withoutFlags(strings.Fields(c)[1:])
+		if len(args) == 0 || !allowed[args[0]] {
 			t.Errorf("Guard ran %q; only read-only queries are allowed", c)
 		}
 	}
@@ -235,14 +308,14 @@ func TestGuardReadsOnlyGitQueries(t *testing.T) {
 // its main, without the count.
 func TestGuardNotesABehindPinWithoutACountWhenTheCountCannotBeRead(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{}}
+	f := newGuardGit(t)
 	seedRig(f, "devops", mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/devops", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/devops", "github.com/x/a")},
 	})
-	f.answer[rigDir("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
+	f.answer[f.bare("devops")+" merge-base --is-ancestor "+pinSHA+" "+mainSHA] = ""
 	// no rev-list answer: the count cannot be read
-	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", town, f.run)
+	notes, err := Guard([]Source{{Rig: "devops", Commit: pinSHA}}, "gastown", f.town, f.run)
 	if err != nil {
 		t.Fatalf("Guard = %v, want nil", err)
 	}

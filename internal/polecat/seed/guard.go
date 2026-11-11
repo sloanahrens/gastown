@@ -23,9 +23,9 @@ var ReadOnlyGitVerbs = []string{"rev-parse", "ls-tree", "show", "merge-base", "r
 // sha and the missing modules. The build rig takes the build commit and has no
 // committed pin, so it is skipped.
 //
-// The main sha is read from the rig's canonical checkout (origin/main as it
-// stands there); the guard never fetches. It returns one note per rig that is
-// behind main but has no coverage gap.
+// The main sha is read from the rig's .repo.git bare repository, from its main
+// branch (the bare repo keeps no origin/main); the guard never fetches. It
+// returns one note per rig that is behind main but has no coverage gap.
 //
 // Signature change: Guard now returns the notes as well as the error (it was
 // error only, when it failed on any pin behind main). The only caller in the
@@ -36,13 +36,16 @@ func Guard(pins []Source, buildRig, town string, git Git) (notes []string, err e
 		if src.Rig == buildRig {
 			continue
 		}
-		dir := path.Join(town, src.Rig, "mayor", "rig")
-		out, err := git(dir, "rev-parse", "--verify", "origin/main^{commit}")
+		dir, err := bareRepo(town, src.Rig)
 		if err != nil {
-			return nil, fmt.Errorf("pin-drift guard: cannot read origin/main of rig %s in %s (%v): fetch that checkout through the town's path, then rerun", src.Rig, dir, err)
+			return nil, err
+		}
+		out, err := git(dir, "--git-dir="+dir, "rev-parse", "--verify", "main^{commit}")
+		if err != nil {
+			return nil, fmt.Errorf("pin-drift guard: cannot read main of rig %s from its .repo.git bare repo %s (%v): fetch that rig's bare repo, then rerun", src.Rig, dir, err)
 		}
 		main := strings.TrimSpace(string(out))
-		note, err := CheckAgainstMain(src.Rig, src.Commit, main, "its canonical checkout", dir, git)
+		note, err := CheckAgainstMain(src.Rig, src.Commit, main, "the .repo.git bare repo "+dir, dir, git)
 		if err != nil {
 			return nil, err
 		}
@@ -65,10 +68,10 @@ func CheckAgainstMain(rig, pin, main, where, dir string, git Git) (note string, 
 	}
 	missing, err := missingModules(git, dir, pin, main)
 	if err != nil {
-		return "", fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in %s, so it cannot be compared with main %s (%v): fetch or fix that checkout, then rerun", rig, short(pin), where, short(main), err)
+		return "", fmt.Errorf("pin-drift guard: rig %s pin %s is not readable in %s, so it cannot be compared with main %s (%v): fetch or fix that repository, then rerun", rig, short(pin), where, short(main), err)
 	}
 	if len(missing) > 0 {
-		return "", fmt.Errorf("pin-drift guard: rig %s pin %s lacks modules its main %s requires: %s; run make polecat-seed-pins on the canonical checkout at main, then commit the pin", rig, short(pin), short(main), strings.Join(missing, ", "))
+		return "", fmt.Errorf("pin-drift guard: rig %s pin %s lacks modules its main %s requires: %s; main is read from %s; run make polecat-seed-pins, then commit the pin", rig, short(pin), short(main), strings.Join(missing, ", "), where)
 	}
 	return fmt.Sprintf("pin-drift guard: rig %s pin %s is %s, main %s: no module coverage gap", rig, short(pin), behind(git, dir, pin, main), short(main)), nil
 }
