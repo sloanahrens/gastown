@@ -132,7 +132,6 @@ func TestBeadsSubprocessTimeoutFromTownSettings(t *testing.T) {
 // through its own exec wiring (gt tail's journal probe): the town's
 // bd_command_timeout, or the compiled-in 30s outside a town.
 func TestCommandTimeoutForTownSettings(t *testing.T) {
-	t.Parallel()
 	town := writeFixtureTown(t, `{"type":"town-settings","version":1,"operational":{"session":{"bd_command_timeout":"45s"}}}`)
 	blanket := writeFixtureTown(t, `{"type":"town-settings","version":1,"operational":{"session":{"bd_command_timeout":"45s","bd_subprocess_timeout":"12s"}}}`)
 

@@ -590,7 +590,6 @@ func TestEnsureCustomTypes_LockNarrowed(t *testing.T) {
 }
 
 func TestEnsureCustomTypesConfigYAML(t *testing.T) {
-	t.Parallel()
 	ResetEnsuredDirs()
 
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -621,7 +620,6 @@ func TestEnsureCustomTypesConfigYAML(t *testing.T) {
 }
 
 func TestEnsureCustomTypesConfigYAMLIgnoresDBCache(t *testing.T) {
-	t.Parallel()
 	ResetEnsuredDirs()
 
 	beadsDir := filepath.Join(t.TempDir(), ".beads")

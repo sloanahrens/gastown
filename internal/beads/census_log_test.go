@@ -150,7 +150,6 @@ func TestCensusLogLogsOneLinePerWindow(t *testing.T) {
 }
 
 func TestCensusLogSilentWindowLogsNothing(t *testing.T) {
-	t.Parallel()
 	run := startCensusLog(t)
 	base := time.Now()
 
@@ -296,7 +295,6 @@ func TestParseCensusLineKeepsTheCallsItsRowsDoNot(t *testing.T) {
 }
 
 func TestCensusLogStopsOnCancelAndChannelClose(t *testing.T) {
-	t.Parallel()
 	t.Run("cancel", func(t *testing.T) {
 		run := startCensusLog(t)
 		run.stop(t)
