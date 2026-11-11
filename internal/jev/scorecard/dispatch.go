@@ -5,14 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/constants"
 	gtdispatch "github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
@@ -65,9 +61,10 @@ type beadReader interface {
 type overrunRecord int
 
 const (
-	// overrunNone: the bead has no record.
+	// overrunNone: the bead has no record, or a record carrying only sling
+	// bookkeeping and no stop stamp.
 	overrunNone overrunRecord = iota
-	// overrunPending: a record whose stop has not finished, so the outcome is
+	// overrunPending: a stop that began and has not finished, so the outcome is
 	// not known yet.
 	overrunPending
 	// overrunStopped: a record with stopped_at, so the bead overran.
@@ -242,27 +239,24 @@ func (a *dispatchAdapter) showBead(id string) (*beads.Issue, error) {
 	return issue, nil
 }
 
-// readOverrun reads the overrun guard's record for bead. A missing record is
-// overrunNone; a record that cannot be read is an error.
+// readOverrun reads the overrun guard's record for bead through the rule
+// thrash.go's reader states: a stop in progress is stop_began_at set and
+// stopped_at not. A missing record, or one carrying only sling bookkeeping, is
+// overrunNone; a stop that began and has not finished is overrunPending; a
+// record with stopped_at is overrunStopped. A record that cannot be read is an
+// error.
 func readOverrun(town, bead string) (overrunRecord, error) {
-	path := filepath.Join(constants.TownRuntimePath(town), "overrun-guard", bead+".json")
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return overrunNone, nil
-	}
+	stop, err := overrunGuardRecord(town, bead)
 	if err != nil {
-		return overrunNone, fmt.Errorf("reading the overrun record for %s: %w", bead, err)
+		return overrunNone, err
 	}
-	var st struct {
-		StoppedAt time.Time `json:"stopped_at"`
-	}
-	if err := json.Unmarshal(data, &st); err != nil {
-		return overrunNone, fmt.Errorf("parsing the overrun record for %s: %w", bead, err)
-	}
-	if st.StoppedAt.IsZero() {
+	switch stop {
+	case stopDone:
+		return overrunStopped, nil
+	case stopInProgress:
 		return overrunPending, nil
 	}
-	return overrunStopped, nil
+	return overrunNone, nil
 }
 
 // dispatchLabels applies the join rules to one placement, and names each rule
@@ -275,8 +269,9 @@ func readOverrun(town, bead string) (overrunRecord, error) {
 // verdict from a later attempt, so its first try is unknown.
 //
 // fits_twenty_minutes: a stopped overrun record, or a bead closed as superseded
-// or labeled needs-split, is false. A pending overrun record leaves it
-// unlabeled. With neither, a bead closed as landed is true.
+// or labeled needs-split, is false. A pending overrun record (stop_began_at set,
+// stopped_at not) leaves it unlabeled. With no stop in the record, a bead closed
+// as landed is true.
 func dispatchLabels(review *land.ReviewRecord, reworked bool, issue *beads.Issue, overrun overrunRecord) (map[QuestionID]bool, []string) {
 	labels := map[QuestionID]bool{}
 	var rules []string
@@ -308,6 +303,7 @@ func dispatchLabels(review *land.ReviewRecord, reworked bool, issue *beads.Issue
 		labels[qFitsTwentyMinutes] = false
 		rules = append(rules, "label:needs-split")
 	case overrun == overrunPending:
+		// A stop that began and has not finished is not an outcome yet.
 	case landed:
 		labels[qFitsTwentyMinutes] = true
 		rules = append(rules, "landed")

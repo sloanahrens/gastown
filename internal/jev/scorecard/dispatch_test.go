@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -543,6 +544,97 @@ func TestScorecardDispatchReworkedBeadFirstTryIsUnlabeled(t *testing.T) {
 	}
 	if got.Labels[qFitsTwentyMinutes] != true {
 		t.Errorf("fits_twenty_minutes = %v, want true for a landed bead with no overrun", got.Labels[qFitsTwentyMinutes])
+	}
+}
+
+// The overrun guard's records in the pod mostly carry sling bookkeeping only —
+// gate_sling_at, escalation_sling_at and restart_sling_at — and no stop stamp.
+// That is no stop at all, so a landed bead carrying one fits twenty minutes by
+// rule landed.
+func TestDispatchSlingOnlyOverrunRecordLeavesALandedBeadLabeledTrue(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	at := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+	writeDispatchFixture(t, town,
+		[]dispatch.Line{{Bead: "gt-s1", AttachedAt: at, Answers: dispatchAnswers(0.5)}},
+		nil, nil,
+		map[string]string{
+			"gt-s1": `{"gate_sling_at":"2026-10-19T09:01:00Z","escalation_sling_at":"2026-10-19T09:02:00Z","restart_sling_at":"2026-10-19T09:03:00Z"}`,
+		})
+	store := dispatchBeadStore{
+		"gt-s1": {ID: "gt-s1", Status: "closed", CloseReason: "Landed on main\nlanded_commit: 1111"},
+	}
+	got, err := dispatchAdapterFor(town, store).Label(context.Background(), Item{ID: "gt-s1"})
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	fits, ok := got.Labels[qFitsTwentyMinutes]
+	if !ok || !fits {
+		t.Errorf("fits_twenty_minutes = %v (labeled %v), want true on a landed bead with a sling-only record", fits, ok)
+	}
+	if got.Rule != "landed:no-review+landed" {
+		t.Errorf("rule = %q, want %q", got.Rule, "landed:no-review+landed")
+	}
+}
+
+// A stop that began and has not finished is the guard's normal form while it
+// runs: it writes stopped_at last. Such a record is a stop in progress, not a
+// record with no stop.
+func TestDispatchStopBeganWithoutStoppedAtIsPending(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeFile(t, filepath.Join(constants.TownRuntimePath(town), "overrun-guard", "gt-p1.json"),
+		`{"bead":"gt-p1","stop_began_at":"2026-10-19T09:30:00Z"}`)
+	got, err := readOverrun(town, "gt-p1")
+	if err != nil {
+		t.Fatalf("readOverrun: %v", err)
+	}
+	if got != overrunPending {
+		t.Errorf("readOverrun = %v, want overrunPending", got)
+	}
+}
+
+// A record with stopped_at is a stop that finished, so the bead overran and
+// fits_twenty_minutes is false even though the bead landed.
+func TestDispatchStoppedOverrunLabelsFalse(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	at := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+	writeDispatchFixture(t, town,
+		[]dispatch.Line{{Bead: "gt-s2", AttachedAt: at, Answers: dispatchAnswers(0.5)}},
+		nil, nil,
+		map[string]string{
+			"gt-s2": `{"stop_began_at":"2026-10-19T09:10:00Z","stopped_at":"2026-10-19T09:30:00Z"}`,
+		})
+	store := dispatchBeadStore{
+		"gt-s2": {ID: "gt-s2", Status: "closed", CloseReason: "Landed on main\nlanded_commit: 2222"},
+	}
+	got, err := dispatchAdapterFor(town, store).Label(context.Background(), Item{ID: "gt-s2"})
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	fits, ok := got.Labels[qFitsTwentyMinutes]
+	if !ok || fits {
+		t.Errorf("fits_twenty_minutes = %v (labeled %v), want false on a stopped overrun", fits, ok)
+	}
+	if !strings.Contains(got.Rule, "overrun:stopped") {
+		t.Errorf("rule = %q, want it to name overrun:stopped", got.Rule)
+	}
+}
+
+// A record carrying only sling bookkeeping has no stop in it, so it is no
+// overrun at all — not a stop still pending.
+func TestReadOverrunSlingOnlyRecordIsNone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeFile(t, filepath.Join(constants.TownRuntimePath(town), "overrun-guard", "gt-s3.json"),
+		`{"bead":"gt-s3","gate_sling_at":"2026-10-19T09:01:00Z","escalation_sling_at":"2026-10-19T09:02:00Z","restart_sling_at":"2026-10-19T09:03:00Z"}`)
+	got, err := readOverrun(town, "gt-s3")
+	if err != nil {
+		t.Fatalf("readOverrun: %v", err)
+	}
+	if got != overrunNone {
+		t.Errorf("readOverrun = %v, want overrunNone", got)
 	}
 }
 
