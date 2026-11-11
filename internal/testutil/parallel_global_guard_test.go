@@ -49,17 +49,20 @@ const parallelGlobalWaiver = "parallel-global-ok"
 // a caller's value; a reset-named helper (Reset*, Clear*, Invalidate*, *AndReset)
 // that zeroes, clears or deletes a package variable; a call into another
 // package's seam; and a method call, matched by name and argument count to a
-// method of this package that writes a package variable.
+// method of this package that writes a package variable, and by the receiver's
+// type where the receiver is declared in the same file.
 //
 // Residual, not seen: state a parallel test shares through a fixed filesystem
 // path, a port, the environment, the working directory, or a reset reached
-// through another package's exported function. Method calls are unresolved:
-// a call is matched by name and argument count to a direct writer, so a method
-// that writes a package variable only through a further call is not followed.
-// Each such chain is logged by name as unfollowed in the test log, and is not
-// a failure. The guard reads package variables and helper calls only, with no
-// type information, so a clean verdict does not prove a parallel test safe on
-// those.
+// through another package's exported function. Method calls are resolved only
+// that far: a receiver with no declaration in view, such as a call result or a
+// struct field, matches by name and argument count to any type's writer, and a
+// method that writes a package variable only through a further call is not
+// followed. Each such chain is logged by name as unfollowed in the test log,
+// and is not a failure: go test shows that log with -v, and with the output of
+// a failing run. The guard reads package variables and helper calls only, with
+// no type information, so a clean verdict does not prove a parallel test safe
+// on those.
 func TestNoParallelTestsReachProcessGlobalSwaps(t *testing.T) {
 	t.Parallel()
 	scanner := newSeamScanner(sharedRepoTree(t))
@@ -146,6 +149,13 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 		// A method call that the guard resolves by name and argument count to a
 		// writer method of this package is reported by name.
 		"TestParallelCallsResetMethod": true,
+		// The receiver's declared type decides: a bufio.Reader is not Holder.
+		"TestParallelResetsForeignReader": false,
+		// A parameter's declared type decides, and a call result is unresolved,
+		// so it still matches by name.
+		"TestParallelCallsResetThroughParam": true,
+		"TestParallelCallsResetOnCallResult": true,
+		"TestParallelCallsResetOnTypeParam":  true,
 		// A bare Swap with no restore is a setter, not a seam (the spec's shape
 		// restores what it swapped).
 		"TestParallelSetsSlotNoRestore": false,
@@ -200,6 +210,24 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 	if !sawUnfollowed {
 		t.Errorf("scanner did not log the unfollowed method call relay.Forward reached from TestParallelCallsRelayForward.\nUnfollowed:\n%s",
 			strings.Join(scanner.unfollowed, "\n"))
+	}
+}
+
+// The scanner is shared by its callers, so a second scan of the same tree must
+// not repeat the unfollowed lines the first one logged.
+func TestParallelGlobalGuardScanTwiceLogsOnce(t *testing.T) {
+	t.Parallel()
+	fixture, err := loadRepoTree(writeGuardFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scanner := newSeamScanner(fixture)
+	scanner.scan(t)
+	first := len(scanner.unfollowed)
+	scanner.scan(t)
+	if got := len(scanner.unfollowed); got != first {
+		t.Errorf("a second scan changed the unfollowed log from %d to %d lines:\n%s",
+			first, got, strings.Join(scanner.unfollowed, "\n"))
 	}
 }
 
@@ -274,6 +302,7 @@ func TestParallelCallsOtherReset(t *testing.T) {
 		"pkg/seam_test.go": `package pkg
 
 import (
+	"bufio"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -514,6 +543,44 @@ func TestParallelCallsResetMethod(t *testing.T) {
 	h.Reset(3)
 }
 
+// A receiver's declared type decides the method. A bufio.Reader is no Holder,
+// so its Reset(nil) is no call to Holder.Reset, though the count fits.
+func TestParallelResetsForeignReader(t *testing.T) {
+	t.Parallel()
+	var br bufio.Reader
+	br.Reset(nil)
+}
+
+// A receiver declared as a parameter takes its type from the parameter list.
+func resetParam(h Holder) {
+	h.Reset(3)
+}
+
+func TestParallelCallsResetThroughParam(t *testing.T) {
+	t.Parallel()
+	resetParam(Holder{})
+}
+
+// A receiver with no declaration in view, a call result, is not resolved, so
+// the name and count still match: unknown is not read as unrelated.
+func pickHolder() Holder { return Holder{} }
+
+func TestParallelCallsResetOnCallResult(t *testing.T) {
+	t.Parallel()
+	pickHolder().Reset(3)
+}
+
+// A receiver typed by a type parameter names no type here, so it is unresolved
+// and still matches by name: the constraint may be a type of this package.
+func resetGeneric[T any](x T) {
+	x.Reset(3)
+}
+
+func TestParallelCallsResetOnTypeParam(t *testing.T) {
+	t.Parallel()
+	resetGeneric(Holder{})
+}
+
 // relay.Forward writes the seam only through SetSeam, so it is no direct writer
 // and the guard cannot follow a call to it past its own body. The test is not
 // reported, and its chain is logged by name as unfollowed.
@@ -614,6 +681,9 @@ func newSeamScanner(tree *repoTree) *seamScanner {
 // parsing them.
 func (s *seamScanner) scan(t *testing.T) []string {
 	t.Helper()
+	// The log is rebuilt by each scan, so a repeated scan of the same tree
+	// reports each unfollowed chain once.
+	s.unfollowed = nil
 	for _, dir := range s.dirs {
 		s.analysis(dir)
 	}
@@ -1405,7 +1475,7 @@ func (pa *pkgAnalysis) callsWriter(name string, set map[string]bool) bool {
 		if within(call.Pos(), once) {
 			return true
 		}
-		for _, callee := range pa.calleeNames(call, pa.fileOf[name]) {
+		for _, callee := range pa.calleeNames(call, name) {
 			if set[callee] {
 				found = true
 				return false
@@ -1420,47 +1490,139 @@ func (pa *pkgAnalysis) callsWriter(name string, set map[string]bool) bool {
 // `f()` names a free function, whose key is its bare name; it never names a
 // method, whose key is Recv.Name.
 //
-// A method call `x.M(...)` has no receiver type without type information, so
-// it names each method of this package that writes a package variable, is
-// called M, and takes a compatible argument count (methodsNamed). Matching only that set keeps
-// the call graph from connecting a test to every unrelated M in the package. A
+// A method call `x.M(...)` names each method of this package that writes a
+// package variable, is called M, takes a compatible argument count, and whose
+// receiver type x may have (methodsNamed). Matching only that set keeps the
+// call graph from connecting a test to every unrelated M in the package. A
 // call on an import alias is another package's function, which crossWrites
 // handles, so it names nothing here.
-func (pa *pkgAnalysis) calleeNames(call *ast.CallExpr, file string) []string {
+func (pa *pkgAnalysis) calleeNames(call *ast.CallExpr, fn string) []string {
 	switch fun := call.Fun.(type) {
 	case *ast.Ident:
 		return []string{fun.Name}
 	case *ast.SelectorExpr:
 		if base, ok := fun.X.(*ast.Ident); ok {
-			if _, isImport := pa.imports[file][base.Name]; isImport {
+			if _, isImport := pa.imports[pa.fileOf[fn]][base.Name]; isImport {
 				return nil
 			}
 		}
-		return pa.methodsNamed(fun.Sel.Name, call)
+		return pa.methodsNamed(fun, call)
 	}
 	return nil
 }
 
-// methodsNamed lists this package's methods named name that write a package
-// variable, and whose parameter list the call's argument count fits. The count
-// filter is sound for what it rules out: a call with the wrong number of
-// arguments cannot be that method. It is not resolution: a same-named method of
-// another type with a fitting count still matches, and a variable written only
-// through a further call is not listed (the residual). Methods that write the
-// environment are not listed, since that case is out of scope.
-func (pa *pkgAnalysis) methodsNamed(name string, call *ast.CallExpr) []string {
+// methodsNamed lists this package's methods named after sel that write a package
+// variable, whose parameter list the call's argument count fits, and whose
+// receiver type sel's receiver may have (receiverMayBe). The count filter is
+// sound for what it rules out: a call with the wrong number of arguments cannot
+// be that method. A receiver with no declaration in view, such as a call result,
+// is not resolved, so any type with a fitting method matches it. A variable
+// written only through a further call is not listed (the residual). Methods
+// that write the environment are not listed, since that case is out of scope.
+func (pa *pkgAnalysis) methodsNamed(sel *ast.SelectorExpr, call *ast.CallExpr) []string {
 	var out []string
 	for key, w := range pa.direct {
 		fd := pa.funcs[key]
-		if fd == nil || fd.Recv == nil || !strings.HasSuffix(key, "."+name) || !isPackageVar(w.what) {
+		if fd == nil || fd.Recv == nil || !strings.HasSuffix(key, "."+sel.Sel.Name) || !isPackageVar(w.what) {
 			continue
 		}
-		if fitsArgs(fd.Type, call) {
+		if fitsArgs(fd.Type, call) && pa.receiverMayBe(sel, recvTypeName(fd.Recv.List[0].Type)) {
 			out = append(out, key)
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// receiverMayBe reports whether the receiver of sel, a method selector, may be a
+// value of the package type recv. The receiver's type is read from the
+// declaration its identifier resolves to in the same file: a parameter or
+// receiver, `var x T`, `x := T{}`, `x := &T{}` or `x := new(T)`. A type another
+// package names is no type of this package, so it is no match. A receiver whose
+// declared type is not resolved here, or that has no declaration in view, is
+// unresolved, and may be any type.
+func (pa *pkgAnalysis) receiverMayBe(sel *ast.SelectorExpr, recv string) bool {
+	id, ok := sel.X.(*ast.Ident)
+	if !ok || id.Obj == nil || id.Obj.Decl == nil {
+		return true
+	}
+	typ, ok := pa.typeOfDecl(id.Obj.Decl, id.Name)
+	if !ok {
+		return true
+	}
+	return typ == recv
+}
+
+// typeOfDecl names the package type that a declaration gives name, read from
+// the declaration's own syntax. It returns "" for a type another package names,
+// and ok false when the syntax does not say what the type is.
+func (pa *pkgAnalysis) typeOfDecl(decl any, name string) (string, bool) {
+	switch d := decl.(type) {
+	case *ast.Field:
+		return pa.typeExpr(d.Type)
+	case *ast.ValueSpec:
+		if d.Type != nil {
+			return pa.typeExpr(d.Type)
+		}
+		for i, n := range d.Names {
+			if n.Name == name && i < len(d.Values) {
+				return pa.valueType(d.Values[i])
+			}
+		}
+	case *ast.AssignStmt:
+		for i, lhs := range d.Lhs {
+			if id, ok := lhs.(*ast.Ident); ok && id.Name == name && len(d.Lhs) == len(d.Rhs) {
+				return pa.valueType(d.Rhs[i])
+			}
+		}
+	}
+	return "", false
+}
+
+// typeExpr names the type a type expression denotes, as typeOfDecl does.
+func (pa *pkgAnalysis) typeExpr(expr ast.Expr) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.StarExpr:
+		return pa.typeExpr(e.X)
+	case *ast.ParenExpr:
+		return pa.typeExpr(e.X)
+	case *ast.IndexExpr:
+		return pa.typeExpr(e.X)
+	case *ast.IndexListExpr:
+		return pa.typeExpr(e.X)
+	case *ast.Ident:
+		// A name this package declares is its type. Any other name, a type
+		// parameter or a predeclared type, is not resolved here.
+		if pa.pkgLevel[e.Name] {
+			return e.Name, true
+		}
+		return "", false
+	case *ast.SelectorExpr:
+		return "", true
+	}
+	return "", false
+}
+
+// valueType names the type of a value expression that builds its own type:
+// a composite literal, its address, or new(T). Any other value is unresolved.
+func (pa *pkgAnalysis) valueType(expr ast.Expr) (string, bool) {
+	switch e := expr.(type) {
+	case *ast.ParenExpr:
+		return pa.valueType(e.X)
+	case *ast.UnaryExpr:
+		if e.Op == token.AND {
+			return pa.valueType(e.X)
+		}
+	case *ast.CompositeLit:
+		if e.Type != nil {
+			return pa.typeExpr(e.Type)
+		}
+	case *ast.CallExpr:
+		if id, ok := e.Fun.(*ast.Ident); ok && id.Name == "new" && len(e.Args) == 1 {
+			return pa.typeExpr(e.Args[0])
+		}
+	}
+	return "", false
 }
 
 // fitsArgs reports whether call could pass the arguments ft declares. A single
@@ -1551,12 +1713,12 @@ func (pa *pkgAnalysis) unfollowedSite(fn string, reach, seen map[string]bool) st
 		return true
 	})
 	for _, call := range calls {
-		if key := pa.unfollowedMethod(call, pa.fileOf[fn]); key != "" {
+		if key := pa.unfollowedMethod(call, fn); key != "" {
 			return key + " at " + pa.fset.Position(call.Pos()).String()
 		}
 	}
 	for _, call := range calls {
-		for _, callee := range pa.calleeNames(call, pa.fileOf[fn]) {
+		for _, callee := range pa.calleeNames(call, fn) {
 			if !reach[callee] {
 				continue
 			}
@@ -1572,21 +1734,21 @@ func (pa *pkgAnalysis) unfollowedSite(fn string, reach, seen map[string]bool) st
 // package variable only through a further call, and no direct writer matches
 // the call. Such a method is the one the guard cannot follow past. It returns ""
 // for every other call, including calls into another package.
-func (pa *pkgAnalysis) unfollowedMethod(call *ast.CallExpr, file string) string {
+func (pa *pkgAnalysis) unfollowedMethod(call *ast.CallExpr, fn string) string {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		return ""
 	}
 	if base, ok := sel.X.(*ast.Ident); ok {
-		if _, isImport := pa.imports[file][base.Name]; isImport {
+		if _, isImport := pa.imports[pa.fileOf[fn]][base.Name]; isImport {
 			return ""
 		}
 	}
-	if len(pa.methodsNamed(sel.Sel.Name, call)) > 0 {
+	if len(pa.methodsNamed(sel, call)) > 0 {
 		return ""
 	}
 	for _, key := range pa.indirectMethods()[sel.Sel.Name] {
-		if fitsArgs(pa.funcs[key].Type, call) {
+		if fitsArgs(pa.funcs[key].Type, call) && pa.receiverMayBe(sel, recvTypeName(pa.funcs[key].Recv.List[0].Type)) {
 			return key
 		}
 	}
@@ -1663,7 +1825,7 @@ func (pa *pkgAnalysis) hasUnfollowedCall(name string) bool {
 		if !ok || within(call.Pos(), once) {
 			return true
 		}
-		if pa.unfollowedMethod(call, pa.fileOf[name]) != "" {
+		if pa.unfollowedMethod(call, name) != "" {
 			found = true
 			return false
 		}
@@ -1740,7 +1902,7 @@ func (pa *pkgAnalysis) nextMutator(name string, seen map[string]bool) string {
 		if within(call.Pos(), once) {
 			return true
 		}
-		for _, callee := range pa.calleeNames(call, pa.fileOf[name]) {
+		for _, callee := range pa.calleeNames(call, name) {
 			if seen[callee] {
 				continue
 			}
