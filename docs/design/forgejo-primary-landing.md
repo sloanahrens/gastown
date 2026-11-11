@@ -1,7 +1,7 @@
 # Forgejo-primary landing
 
-Ref: gt-fn9e6.1 (epic gt-fn9e6). Companion: [mayor-retirement.md](mayor-retirement.md),
-[architecture.md](../architecture.md), [escalation.md](escalation.md).
+Ref: gt-fn9e6.1 (epic gt-fn9e6). Companion: [architecture.md](../architecture.md),
+[escalation.md](escalation.md).
 
 The landing path moves its gate from a daemon-side function to Forgejo CI. A
 polecat still pushes its branch and labels the bead; the landing worker still
@@ -41,8 +41,8 @@ required status contexts, `merge_when_checks_succeed`, `head_commit_id`,
 creator attribution, push mirrors — was verified against the local instance at
 `http://127.0.0.1:3000` (16.0.5) in the research the epic cites, and is not
 re-derived here. The doc's shape follows
-[mayor-retirement.md](mayor-retirement.md): decisions, current code, ordered
-slices, risks, open questions.
+the retired mayor design record (kept in git history): decisions, current code,
+ordered slices, risks, open questions.
 
 Constraints carried from the epic: no cloud deploys or cloud credentials in CI;
 the town is flash-only; gastown keeps landing through the old path until the new

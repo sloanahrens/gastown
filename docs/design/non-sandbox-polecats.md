@@ -138,10 +138,10 @@ The exact-name grep at `origin/main` (`65474d9e`,
 | `docs/design/k8s-sandboxes.md` | 18: `deepseek-flash-sandbox-k8s` | The first k8s seat in a dated decision; the page also still calls the Docker-driver seat the control, which P6 retires |
 | `README.md` (outside `docs/`) | 435: `deepseek-flash`; 462: `claude-sonnet` | Quick-start examples |
 
-`docs/design/model-aware-molecules.md` has ten `claude-sonnet-4-5` hits. That is
-a model ID, not the seat name, and the file is historical (`docs/plans`,
-`docs/research` and the historical `docs/design` files are not maintained); the
-exact-name grep does not count it.
+Ten `claude-sonnet-4-5` hits in a removed historical design record (git history
+keeps it) are a model ID, not the seat name. The exact-name grep does not count
+them, because `docs/plans`, `docs/research` and the historical `docs/design`
+files are not maintained.
 
 The `deepseek` provider, the spend metric and the `deepseek` OpenShell provider
 are live; only the *seat* names retired. A grep for `deepseek` in `internal/` is

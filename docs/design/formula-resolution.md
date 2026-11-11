@@ -237,7 +237,7 @@ gt formula uninstall mol-code-review-strict
 
 ### Phase 3: Mol Mall Integration
 
-1. Define registry API (see mol-mall-design.md)
+1. Define registry API (the Mol Mall design record is in git history)
 2. Implement `gt formula install` from remote
 3. Add version pinning and upgrade flows
 4. Add integrity verification (checksums, optional signing)
@@ -251,5 +251,4 @@ gt formula uninstall mol-code-review-strict
 
 ## Related Documents
 
-- [Mol Mall Design](mol-mall-design.md) - Registry architecture
 - [Molecules](../concepts/molecules.md) - Formula → Proto → Mol lifecycle
