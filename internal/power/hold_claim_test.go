@@ -343,6 +343,59 @@ func TestSetEstopReportsAnEstopThatTheMacHoldsButThePodRefused(t *testing.T) {
 	}
 }
 
+// TestClearEstopRefusesAHalfGivenPodSetting drives the setting read in the
+// resume's ESTOP step: a setting given in part is refused before the Mac's
+// ESTOP is lifted or gt thaw runs.
+func TestClearEstopRefusesAHalfGivenPodSetting(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	holdclaimtest.WritePodSetting(t, f.town, "", "gt")
+	if err := estop.Activate(f.town, estop.TriggerManual, "standby"); err != nil {
+		t.Fatal(err)
+	}
+	o, _, _ := f.optsWithOut()
+	o.PodExec = holdclaimtest.New().Exec
+
+	err := newEngine(o).clearEstop(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "resume refused, the ESTOP was not cleared") {
+		t.Fatalf("clearEstop error = %v, want the refusal naming the pod setting", err)
+	}
+	if !estop.IsActive(f.town) {
+		t.Fatal("the Mac ESTOP was lifted on a refused pod setting")
+	}
+	for _, c := range f.cmds {
+		if c.name == "gt" && len(c.args) > 0 && c.args[0] == "thaw" {
+			t.Fatal("gt thaw ran on a refused pod setting")
+		}
+	}
+}
+
+// TestClearEstopReportsAThawThatFailsAndSaysThePodMayStayStopped drives the Mac
+// side of the resume failing: gt thaw exits non-zero, so the resume refuses and
+// says the pod may still be STOPPED.
+func TestClearEstopReportsAThawThatFailsAndSaysThePodMayStayStopped(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	holdclaimtest.WritePodSetting(t, f.town, "kind-gt", "gt")
+	if err := estop.Activate(f.town, estop.TriggerManual, "standby"); err != nil {
+		t.Fatal(err)
+	}
+	o, _, _ := f.optsWithOut()
+	o.PodExec = holdclaimtest.New().Exec
+	run := o.Run
+	o.Run = func(ctx context.Context, dir, name string, args ...string) (string, error) {
+		if name == "gt" && len(args) > 0 && args[0] == "thaw" {
+			return "thaw refused", errBoom
+		}
+		return run(ctx, dir, name, args...)
+	}
+
+	err := newEngine(o).clearEstop(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "the pod may still be STOPPED") {
+		t.Fatalf("clearEstop error = %v, want the refusal saying the pod may still be STOPPED", err)
+	}
+}
+
 // TestFullPartialThawLeavesThePodStopped drives the resume path through the
 // ESTOP lift. An earlier thaw cleared the Mac's ESTOP but left the pod's copy,
 // and this resume's removal of that copy fails: Full must refuse, say the pod
