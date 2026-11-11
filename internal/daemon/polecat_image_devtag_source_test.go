@@ -2,12 +2,16 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
@@ -198,6 +202,188 @@ func TestPolecatImageDevTagRefusesSourceWithoutPath(t *testing.T) {
 	got := n.got()
 	if len(got) != 1 || !strings.Contains(got[0].Reason, "want a repository path after host:port") {
 		t.Fatalf("escalations = %+v, want one naming the missing repository path", got)
+	}
+}
+
+// TestPolecatImageDevTagReadsSourceWithViewerLogin: the CI registry answers 401 to
+// an anonymous read, so the source is read with the viewer's login. The publish
+// still moves dev to the running commit's source, and nothing is escalated.
+func TestPolecatImageDevTagReadsSourceWithViewerLogin(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.want = &devTagViewer
+	source := ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.addImage("dev", devTagOldCommit)
+	d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+
+	// The fake is strict: an anonymous read of the source is refused.
+	anon := httptest.NewRecorder()
+	ci.serve(anon, httptest.NewRequest(http.MethodGet, "/v2/"+devTagCIRepo+"/manifests/"+devTagRevision, nil))
+	if anon.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous read of the source = %d, want 401", anon.Code)
+	}
+
+	d.publishPolecatDevTag()
+
+	if got := sandbox.tagBytes("dev"); !bytes.Equal(got, source) {
+		t.Fatalf("sandbox dev tag was not moved to the source read with the viewer login")
+	}
+	if got := n.got(); len(got) != 0 {
+		t.Fatalf("escalations = %+v, want none", got)
+	}
+}
+
+// TestPolecatImageDevTagCopiesToSandboxWithoutCredential: the source is read with
+// the viewer's login, but the copy into the sandbox registry carries no credential.
+// The sandbox fake accepts anonymous uploads and refuses a request that carries a
+// login, so the publish only moves dev if the copy writes anonymously; it files
+// nothing.
+func TestPolecatImageDevTagCopiesToSandboxWithoutCredential(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.want = &devTagViewer
+	source := ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.anonymousOnly = true
+	sandbox.addImage("dev", devTagOldCommit)
+	d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+
+	d.publishPolecatDevTag()
+
+	if got := sandbox.tagBytes("dev"); !bytes.Equal(got, source) {
+		t.Fatalf("sandbox dev tag was not moved by an anonymous copy")
+	}
+	if sandbox.uploads != 1 {
+		t.Fatalf("sandbox uploads = %d, want the one config blob uploaded anonymously", sandbox.uploads)
+	}
+	if got := n.got(); len(got) != 0 {
+		t.Fatalf("escalations = %+v, want none", got)
+	}
+}
+
+// TestPolecatImageDevTagEscalatesRefusedViewerLogin: a viewer login the CI registry
+// refuses fails the source read. The step files one escalation naming the source
+// tag and the 401, writes nothing to the sandbox registry, and neither the
+// escalation nor the log carries the token.
+func TestPolecatImageDevTagEscalatesRefusedViewerLogin(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.want = &devTagViewer
+	ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.addImage("dev", devTagOldCommit)
+	before := sandbox.tagBytes("dev")
+	const staleToken = "devtag-stale-token-value"
+	d, n, logs := devTagSplitDaemon(t, ci, sandbox)
+	d.polecatDevTagSeams.viewerCredential = func() (registry.Credential, error) {
+		return registry.Credential{User: devTagViewer.User, Token: staleToken}, nil
+	}
+
+	d.publishPolecatDevTag()
+
+	if !bytes.Equal(sandbox.tagBytes("dev"), before) {
+		t.Fatalf("sandbox dev tag moved although the source read was refused")
+	}
+	if _, puts := sandbox.requests(); len(puts) != 0 {
+		t.Fatalf("sandbox PUTs = %v, want none after the source read was refused", puts)
+	}
+	got := n.got()
+	if len(got) != 1 || !strings.Contains(got[0].Reason, "cannot read the source tag "+devTagRevision) || !strings.Contains(got[0].Reason, "HTTP 401") {
+		t.Fatalf("escalations = %+v, want one naming the source tag read and HTTP 401", got)
+	}
+	if strings.Contains(fmt.Sprintf("%+v", got), staleToken) || strings.Contains(logs.String(), staleToken) {
+		t.Fatalf("the token reached an escalation or the log: escalations = %+v, log = %q", got, logs.String())
+	}
+}
+
+// TestPolecatImageDevTagEscalatesUnreadableViewerLogin: a viewer token file that
+// cannot be read fails the step before the CI registry is asked anything. The step
+// does not fall back to an anonymous read, so the source is never requested
+// without the login.
+func TestPolecatImageDevTagEscalatesUnreadableViewerLogin(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.addImage("dev", devTagOldCommit)
+	before := sandbox.tagBytes("dev")
+	d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+	d.polecatDevTagSeams.viewerCredential = func() (registry.Credential, error) {
+		return registry.Credential{}, errors.New("forgejo: token file is mode 644; it must be 600")
+	}
+
+	d.publishPolecatDevTag()
+
+	if gets, _ := ci.requests(); len(gets) != 0 {
+		t.Fatalf("CI GETs = %v, want none without the viewer login", gets)
+	}
+	if !bytes.Equal(sandbox.tagBytes("dev"), before) {
+		t.Fatalf("sandbox dev tag moved although the viewer login could not be read")
+	}
+	got := n.got()
+	if len(got) != 1 || !strings.Contains(got[0].Reason, "cannot read the viewer credential the source is read with") {
+		t.Fatalf("escalations = %+v, want one naming the unreadable viewer login", got)
+	}
+}
+
+// TestPolecatImageDevTagEscalatesUnresolvableTokenDir: the directory the viewer's
+// token file lives in cannot be named, so the login cannot be read. The step files
+// one escalation naming the credential read and asks the CI registry nothing.
+func TestPolecatImageDevTagEscalatesUnresolvableTokenDir(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.want = &devTagViewer
+	ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.addImage("dev", devTagOldCommit)
+	before := sandbox.tagBytes("dev")
+	d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+	d.polecatDevTagSeams.viewerCredential = nil
+	d.polecatDevTagSeams.tokenDir = func() (string, error) {
+		return "", errors.New("neither XDG_CONFIG_HOME nor a home directory names a token directory")
+	}
+
+	d.publishPolecatDevTag()
+
+	if gets, _ := ci.requests(); len(gets) != 0 {
+		t.Fatalf("CI GETs = %v, want none without a token directory", gets)
+	}
+	if !bytes.Equal(sandbox.tagBytes("dev"), before) {
+		t.Fatalf("sandbox dev tag moved although the token directory could not be named")
+	}
+	got := n.got()
+	if len(got) != 1 || !strings.Contains(got[0].Reason, "cannot read the viewer credential the source is read with") || !strings.Contains(got[0].Reason, "names a token directory") {
+		t.Fatalf("escalations = %+v, want one naming the viewer credential read and the token directory failure", got)
+	}
+}
+
+// TestPolecatImageDevTagEscalatesMissingViewerTokenFile: the token directory names
+// a file that is not there, so the login cannot be read. The step files one
+// escalation naming the credential read and asks the CI registry nothing.
+func TestPolecatImageDevTagEscalatesMissingViewerTokenFile(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.want = &devTagViewer
+	ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.addImage("dev", devTagOldCommit)
+	before := sandbox.tagBytes("dev")
+	d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+	d.polecatDevTagSeams.viewerCredential = nil
+	d.polecatDevTagSeams.tokenDir = func() (string, error) { return t.TempDir(), nil }
+
+	d.publishPolecatDevTag()
+
+	if gets, _ := ci.requests(); len(gets) != 0 {
+		t.Fatalf("CI GETs = %v, want none without the viewer token file", gets)
+	}
+	if !bytes.Equal(sandbox.tagBytes("dev"), before) {
+		t.Fatalf("sandbox dev tag moved although the viewer token file was missing")
+	}
+	got := n.got()
+	if len(got) != 1 || !strings.Contains(got[0].Reason, "cannot read the viewer credential the source is read with") {
+		t.Fatalf("escalations = %+v, want one naming the viewer credential read", got)
 	}
 }
 

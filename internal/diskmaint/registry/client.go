@@ -39,6 +39,10 @@ type Client struct {
 	Base string // "http://localhost:5001"
 	HTTP *http.Client
 
+	// Credential, when set, is the login every request to Base carries. A request
+	// the registry sends to another origin goes without it.
+	Credential *Credential
+
 	// pageLimit and waitLimit narrow the package bounds so a test reaches the
 	// page bound and the request deadline without a listing of a thousand
 	// pages or a wait of thirty seconds. A zero field takes the package
@@ -287,11 +291,60 @@ func (c *Client) requestURL(path string) (*url.URL, error) {
 	return url.Parse(c.base() + path)
 }
 
-func (c *Client) httpClient() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
+// Credential is a bot's login to the registry: the user the token belongs to and
+// the token, sent as HTTP basic auth. No error or log in this package names it.
+type Credential struct {
+	User  string
+	Token string
+}
+
+// credentialTransport sends cred on every request to scheme://host and on no
+// other request, so a login never reaches an origin the client was not given.
+type credentialTransport struct {
+	scheme, host string
+	cred         Credential
+	next         http.RoundTripper
+}
+
+// RoundTrip sends r with the login when it is for the client's origin. The
+// request is cloned, so the caller's request is left as it was.
+func (t credentialTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if t.host != "" && r.URL.Scheme == t.scheme && r.URL.Host == t.host {
+		r = r.Clone(r.Context())
+		r.SetBasicAuth(t.cred.User, t.cred.Token)
 	}
-	return defaultHTTPClient
+	return t.next.RoundTrip(r)
+}
+
+// httpClient is the client requests are sent through. With a Credential it is a
+// copy of the client's http client whose transport carries the login to Base's
+// origin; a Base that does not parse gets no login at all.
+func (c *Client) httpClient() *http.Client {
+	base := c.HTTP
+	if base == nil {
+		base = defaultHTTPClient
+	}
+	if c.Credential == nil {
+		return base
+	}
+	next := base.Transport
+	if next == nil {
+		next = http.DefaultTransport
+	}
+	scheme, host := c.origin()
+	authed := *base
+	authed.Transport = credentialTransport{scheme: scheme, host: host, cred: *c.Credential, next: next}
+	return &authed
+}
+
+// origin is the scheme and host of Base, or two empty strings when Base does not
+// parse, which matches no request.
+func (c *Client) origin() (scheme, host string) {
+	u, err := url.Parse(c.base())
+	if err != nil {
+		return "", ""
+	}
+	return u.Scheme, u.Host
 }
 
 // reply is one answered request: the header, which carries a listing's next
