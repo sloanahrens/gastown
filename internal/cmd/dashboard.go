@@ -379,13 +379,14 @@ func dashboardClaudePlanPath(townRoot string) string {
 }
 
 // resolveClaudePlanPath is the series the plan meter reads: the status line's
-// file under the home directory when it exists, else the town's own series. In
-// the dashboard pod the home is /root, where the Mac's ~/.claude is mounted
-// read-only; the town's copy there is a stale snapshot. The home lookup and the
-// file check are injected so a test drives each case without the real home. A
-// home lookup that fails, or a check that fails for a reason other than the
-// file's absence, falls back to the town's series and the reason goes to
-// whyLog. The path is resolved once when the hub is built.
+// file under the home directory when it exists, else the town's own series. The
+// dashboard pod mounts the Mac's ~/.claude at the home path, so the file there is
+// the one the status line writes, and the town's copy is a snapshot that falls
+// behind it. The home lookup and the file check are injected so a test drives
+// each case without the real home. A home lookup that fails, or a check that
+// fails for a reason other than the file's absence, falls back to the town's
+// series and the reason goes to whyLog. Callers resolve it on every poll, so a
+// file that appears after the hub started is read at the next poll.
 func resolveClaudePlanPath(townRoot string, home func() (string, error), stat func(string) (fs.FileInfo, error), whyLog *dashWhyLog) string {
 	town := dashboardClaudePlanPath(townRoot)
 	h, err := home()
@@ -405,6 +406,21 @@ func resolveClaudePlanPath(townRoot string, home func() (string, error), stat fu
 	default:
 		whyLog.claudePlanSeries(town, fmt.Sprintf("cannot stat %s: %v", homePath, err))
 		return town
+	}
+}
+
+// newDashboardClaudePlanRead is the plan meter's read for the hub. It resolves the
+// series path on every poll, not once at build: the status line can begin writing
+// under the home directory after the hub has started, and the next poll must
+// read it. The series the meter starts on is resolved once at build too, so the
+// log names it from the start; the why-log logs a change only once.
+func newDashboardClaudePlanRead(townRoot string, home func() (string, error), stat func(string) (fs.FileInfo, error), whyLog *dashWhyLog, usage *dashUsageReader, planUSDMonth float64, renewalDay int) func() *dashboard.ClaudePlan {
+	resolve := func() string { return resolveClaudePlanPath(townRoot, home, stat, whyLog) }
+	resolve()
+	return func() *dashboard.ClaudePlan {
+		return newDashboardClaudePlanReader(resolve(), usage, planUSDMonth).
+			WithRenewalDay(renewalDay).
+			Read(time.Now())
 	}
 }
 
@@ -520,8 +536,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	})
 	deepReview := newDashDeepReviewReader(townRoot)
 	usage := newDashUsageReader(townRoot)
-	claudePlan := newDashboardClaudePlanReader(resolveClaudePlanPath(townRoot, home, os.Stat, whyLog), usage, claudePlanUSD).
-		WithRenewalDay(claudePlanRenewalDay)
+	claudePlan := newDashboardClaudePlanRead(townRoot, home, os.Stat, whyLog, usage, claudePlanUSD, claudePlanRenewalDay)
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)
 	mango := dashboardMangoPath(townRoot, mangoDir)
@@ -561,7 +576,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Overseer:       func() *dashboard.Overseer { return overseerPane.read(time.Now()) },
 		DeepReview:     func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
 		Usage:          func() *dashboard.Usage { return usage.read(time.Now()) },
-		ClaudePlan:     func() *dashboard.ClaudePlan { return claudePlan.Read(time.Now()) },
+		ClaudePlan:     claudePlan,
 		Rework:         func() *dashboard.Rework { return rework.read(time.Now()) },
 		Escalation:     func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:       om.dispatch,
