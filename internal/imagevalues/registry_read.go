@@ -41,8 +41,10 @@ var (
 // CheckCredentialTransport refuses an http URL whose host is neither a loopback
 // address nor plaintextHost, the one non-loopback host the caller names as the
 // town's own Forgejo (forgejo.PlaintextHostOf). The viewer credential would
-// otherwise cross a network in clear text to whoever answers there. This package
-// names no host of its own: the caller passes the town's.
+// otherwise cross a network in clear text to whoever answers there. It is the
+// one rule for every read that credential makes — the registry manifest read
+// and the Forgejo branch and compare reads alike. This package names no host of
+// its own: the caller passes the town's.
 func CheckCredentialTransport(u *url.URL, plaintextHost string) error {
 	if u.Scheme == "https" {
 		return nil
@@ -50,7 +52,7 @@ func CheckCredentialTransport(u *url.URL, plaintextHost string) error {
 	if u.Scheme == "http" && (isLoopbackHost(u.Host) || (plaintextHost != "" && strings.EqualFold(u.Host, plaintextHost))) {
 		return nil
 	}
-	return fmt.Errorf("refusing to send the registry credential over %s to %s: http is allowed only to a loopback address or the town's own Forgejo, every other registry is read over https", u.Scheme, u.Host)
+	return fmt.Errorf("refusing to send the viewer credential over %s to %s: http is allowed only to a loopback address or the town's own Forgejo, every other host is read over https", u.Scheme, u.Host)
 }
 
 // isLoopbackHost reports whether host, with an optional port, is a loopback
@@ -75,7 +77,7 @@ func SameEndpointRedirect(req *http.Request, via []*http.Request) error {
 	}
 	prev := via[len(via)-1].URL
 	if req.URL.Scheme != prev.Scheme || req.URL.Host != prev.Host {
-		return fmt.Errorf("the registry redirected from %s://%s to %s://%s; a redirect that changes the scheme or the host is refused, so the credential stays with the registry",
+		return fmt.Errorf("the endpoint redirected from %s://%s to %s://%s; a redirect that changes the scheme or the host is refused, so the credential stays with the first endpoint",
 			prev.Scheme, prev.Host, req.URL.Scheme, req.URL.Host)
 	}
 	return nil

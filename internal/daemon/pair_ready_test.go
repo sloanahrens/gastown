@@ -28,6 +28,7 @@ const (
 	pairGreen   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	pairOther   = "cccccccccccccccccccccccccccccccccccccccc"
 	pairGreen12 = "bbbbbbbbbbbb"
+	pairOther12 = "cccccccccccc"
 	pairUser    = "viewer-bot"
 	pairToken   = "viewer-token-never-logged"
 	pairOwner   = "town"
@@ -104,18 +105,28 @@ func (f *fakePairRegistry) TagDigest(_ context.Context, image, tag string) (stri
 	return d, ok, nil
 }
 
+// pairBranch is a green branch fixture whose name carries sha's stamp.
+func pairBranch(sha string) forgejo.Branch {
+	b := forgejo.Branch{Name: "green/" + sha[:12]}
+	b.Commit.ID = sha
+	return b
+}
+
 // pairFixture is one rig's check: a town whose values file names the running
 // commit, a viewer API and a registry. Its logs are what the check said.
 type pairFixture struct {
-	town    string
-	api     *fakePairAPI
-	reg     pairReadyRegistry
-	rigErr  error
-	rigsErr error
-	check   pairReadyCheck
-	logs    []string
-	daemon  string
-	polecat string
+	town string
+	api  *fakePairAPI
+	// apiOverride, when set, is the rig's API instead of the fake: the
+	// production client, so a test can drive the wiring a rig resolves to.
+	apiOverride pairReadyAPI
+	reg         pairReadyRegistry
+	rigErr      error
+	rigsErr     error
+	check       pairReadyCheck
+	logs        []string
+	daemon      string
+	polecat     string
 }
 
 // newPairFixture is the case that raises: running at pairRunning, green at
@@ -128,9 +139,7 @@ func newPairFixture(t *testing.T) *pairFixture {
 		polecat: digestOf([]byte("polecat manifest")),
 	}
 	fx.api = &fakePairAPI{
-		branches: []forgejo.Branch{{Name: "green/" + pairGreen12, Commit: struct {
-			ID string `json:"id"`
-		}{ID: pairGreen}}},
+		branches: []forgejo.Branch{pairBranch(pairGreen)},
 		compares: map[string]int{
 			pairGreen + "..." + pairRunning: 0,
 			pairRunning + "..." + pairGreen: 3,
@@ -174,9 +183,13 @@ func (fx *pairFixture) run(now time.Time) {
 		if fx.rigsErr != nil {
 			return nil, fx.rigsErr
 		}
+		api := pairReadyAPI(fx.api)
+		if fx.apiOverride != nil {
+			api = fx.apiOverride
+		}
 		return []pairReadyRig{{
 			Rig: "gastown", Owner: pairOwner, Repo: pairRepo,
-			API: fx.api, Registry: fx.reg, Err: fx.rigErr,
+			API: api, Registry: fx.reg, Err: fx.rigErr,
 		}}, nil
 	}
 	logf := func(format string, args ...any) { fx.logs = append(fx.logs, fmt.Sprintf(format, args...)) }
@@ -583,6 +596,90 @@ func TestPairReadyPartialScanClearsThePairItReached(t *testing.T) {
 	items := fx.check.observed()
 	require.Len(t, items, 1, "a pair the incomplete scan reached was not cleared")
 	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+}
+
+// TestPairReadyOneBranchsFailedReadKeepsThePass: a comparison or image read
+// that fails on one branch makes the pass incomplete, not failed. The pairs it
+// already confirmed are still raised, and a branch it could not judge keeps the
+// pair it last held: one branch's failure cannot discard the pass.
+func TestPairReadyOneBranchsFailedReadKeepsThePass(t *testing.T) {
+	t.Parallel()
+	t.Run("the pairs the pass confirmed are kept", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		// A second green commit whose first comparison has no fixture, so it
+		// fails after the first branch's pair was confirmed.
+		fx.api.branches = append(fx.api.branches, pairBranch(pairOther))
+
+		fx.run(pairT0)
+
+		items := fx.check.observed()
+		require.Len(t, items, 2, "one branch's failed read discarded the pass's confirmed pair")
+		assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key)
+		assert.Equal(t, attention.KindDeployPairUnreadable, items[1].Kind)
+		assert.Contains(t, items[1].Summary, "green/"+pairOther12)
+	})
+
+	t.Run("a branch the pass did not judge keeps the pair it held", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		fx.api.branches = append(fx.api.branches, pairBranch(pairOther))
+		fx.api.compares[pairOther+"..."+pairRunning] = 0
+		fx.api.compares[pairRunning+"..."+pairOther] = 7
+		fx.reg.(*fakePairRegistry).digests[imagevalues.DaemonImage+"@"+pairOther12] = digestOf([]byte("other daemon"))
+		fx.reg.(*fakePairRegistry).digests[imagevalues.PolecatImage+"@"+pairOther12] = digestOf([]byte("other polecat"))
+		fx.run(pairT0)
+		require.Len(t, fx.check.observed(), 2)
+
+		// The second branch's comparison now fails: its held pair is not judged,
+		// so it stays, beside the unreadable item.
+		delete(fx.api.compares, pairRunning+"..."+pairOther)
+		fx.run(pairT0.Add(pairReadyInterval))
+
+		items := fx.check.observed()
+		require.Len(t, items, 3, "a pair the pass could not judge was cleared")
+		assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key)
+		assert.Equal(t, "deploy-pair-ready:gastown:"+pairOther12, items[1].Key)
+		assert.Equal(t, attention.KindDeployPairUnreadable, items[2].Kind)
+		assert.Contains(t, items[2].Summary, "green/"+pairOther12)
+	})
+}
+
+// TestPairReadyKindsHaveTheirOwnCollector: the pair items and the check's
+// unreadable items are two kinds from one read, so each has a collector of its
+// own. Each collector returns only its kind, and a failed collector keeps only
+// the previous items of its kind (gt-4nlpw8).
+func TestPairReadyKindsHaveTheirOwnCollector(t *testing.T) {
+	t.Parallel()
+	ready := attention.Item{Key: "deploy-pair-ready:gastown:" + pairGreen12, Kind: attention.KindDeployPairReady}
+	unreadable := attention.Item{Key: "deploy-pair-unreadable:rig:gastown", Kind: attention.KindDeployPairUnreadable}
+	s := &attentionSources{pairReady: func() []attention.Item {
+		return []attention.Item{ready, unreadable}
+	}}
+
+	var collectors []attentionCollector
+	for _, c := range s.collectors() {
+		if c.kind == attention.KindDeployPairReady || c.kind == attention.KindDeployPairUnreadable {
+			collectors = append(collectors, c)
+		}
+	}
+	require.Len(t, collectors, 2, "each kind the pair check raises needs a collector of its own")
+
+	want := map[attention.Kind]attention.Item{
+		attention.KindDeployPairReady:      ready,
+		attention.KindDeployPairUnreadable: unreadable,
+	}
+	prev := attention.State{Items: []attention.Item{ready, unreadable}}
+	for _, c := range collectors {
+		items, err := c.collect(context.Background())
+		require.NoError(t, err)
+		require.Len(t, items, 1, "collector %s returned %d items, want only its own kind", c.kind, len(items))
+		assert.Equal(t, want[c.kind], items[0])
+
+		kept := c.kept(prev)
+		require.Len(t, kept, 1, "collector %s kept %d items, want only its own kind", c.kind, len(kept))
+		assert.Equal(t, c.kind, kept[0].Kind)
+	}
 }
 
 // TestPairReadyRunningCommitRefusesAnInvalidCommit: the commit line is compared

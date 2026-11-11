@@ -775,7 +775,7 @@ func TestUpdateImagesCredentialTransport(t *testing.T) {
 		if err == nil {
 			t.Fatal("checkCredentialTransport(http://evil:3000) = nil, want a refusal")
 		}
-		const want = "refusing to send the registry credential over http to evil:3000: http is allowed only to a loopback address or the town's own Forgejo, every other registry is read over https"
+		const want = "refusing to send the viewer credential over http to evil:3000: http is allowed only to a loopback address or the town's own Forgejo, every other host is read over https"
 		if err.Error() != want {
 			t.Errorf("refusal = %q, want %q", err.Error(), want)
 		}

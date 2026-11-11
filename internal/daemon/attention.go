@@ -662,6 +662,11 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindCacheTrimNoOp, collect: s.collectCacheTrimNoOp},
 		{kind: attention.KindDoltImageBehind, collect: s.collectDoltImage},
 		{kind: attention.KindDeployPairReady, collect: s.collectPairReady},
+		// The pair check's own failure item is a second kind from the same
+		// read, and a separate collector: a failed collector keeps the previous
+		// tick's items of its own kind, so one entry cannot preserve both
+		// (gt-4nlpw8).
+		{kind: attention.KindDeployPairUnreadable, collect: s.collectPairUnreadable},
 	}, s.questionCollectors()...)
 }
 

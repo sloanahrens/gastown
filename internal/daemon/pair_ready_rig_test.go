@@ -1,14 +1,17 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -144,6 +147,44 @@ func TestPairReadyRigResolution(t *testing.T) {
 			assert.Equal(t, "viewer-bot", reader.user)
 		})
 	}
+}
+
+// TestPairReadyViewerTokenNeverCrossesPlaintext: the branch and compare reads
+// carry the viewer's token, so they go through the same credential-transport
+// rule as the registry read. A rig reached over plain http on a host that is
+// neither loopback nor the town's Forgejo resolves, and every read is refused
+// before a request is made; the check records the refusal as its unreadable
+// item, so a refused read cannot pass for a town with no pair.
+func TestPairReadyViewerTokenNeverCrossesPlaintext(t *testing.T) {
+	t.Parallel()
+	const token = "viewer-token-never-logged"
+	dir := t.TempDir()
+	writeViewerTokenFile(t, dir, "FORGEJO_USER=viewer-bot\nFORGEJO_TOKEN="+token+"\n")
+	got := pairReadyRigFrom("gastown",
+		&config.ForgejoConfig{RemoteURL: "http://forgejo.example.invalid/town/gastown.git"}, nil, dir, nil)
+	require.NoError(t, got.Err)
+	require.NotNil(t, got.API)
+
+	ctx := context.Background()
+	_, err := got.API.ListBranches(ctx, "town", "gastown", 1, 10)
+	require.Error(t, err, "a plain http read of a public host was not refused")
+	assert.Contains(t, err.Error(), "refusing to send the viewer credential over http to forgejo.example.invalid")
+	assert.NotContains(t, err.Error(), token)
+
+	_, err = got.API.CompareCommits(ctx, "town", "gastown", pairGreen, pairRunning)
+	require.Error(t, err, "the compare read was not refused")
+	assert.Contains(t, err.Error(), "refusing to send the viewer credential")
+
+	fx := newPairFixture(t)
+	fx.apiOverride = got.API
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a refused read raised %d items, want the check's unreadable item", len(items))
+	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+	assert.Contains(t, items[0].Summary, "refusing to send the viewer credential")
+	assert.NotContains(t, items[0].Summary, token)
+	assert.NotContains(t, strings.Join(fx.logs, "\n"), token)
 }
 
 // TestPairReadyRefusesAnUnknownImageRig: an image rig the town does not register

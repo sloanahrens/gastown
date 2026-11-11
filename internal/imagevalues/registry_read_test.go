@@ -127,7 +127,7 @@ func TestTagDigestRefusesPlaintextToAPublicHost(t *testing.T) {
 
 	_, _, err := imagevalues.TagDigest(context.Background(), hc, public, "", testViewerUser, testViewerToken, imagevalues.DaemonImage, testTag)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "refusing to send the registry credential")
+	assert.Contains(t, err.Error(), "refusing to send the viewer credential")
 }
 
 // TestTagDigestSendsPlaintextOnlyToTheHostTheCallerNames: http reaches a host
@@ -147,7 +147,7 @@ func TestTagDigestSendsPlaintextOnlyToTheHostTheCallerNames(t *testing.T) {
 
 	_, _, err = imagevalues.TagDigest(context.Background(), hc, town, "", testViewerUser, testViewerToken, imagevalues.DaemonImage, testTag)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "refusing to send the registry credential")
+	assert.Contains(t, err.Error(), "refusing to send the viewer credential")
 }
 
 // TestTagDigestRefusesABadTagOrImage: a tag or image name that is not one the

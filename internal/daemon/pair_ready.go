@@ -239,62 +239,75 @@ type pairReadyGreen struct {
 
 // pairReadyItems reads one rig and returns the items it raises: one for each
 // green commit newer than running whose daemon and polecat images are both in
-// the registry at its stamp. A read that fails returns an error, so the caller
-// keeps what the rig held until the failure bound. A listing that ended early
-// (the budget ran out or the pages ran past their bound) returns a non-nil
-// scanErr with the items it did confirm plus the items from prev whose branch it
-// never reached: a scan that did not see a branch cannot say its pair is gone.
-// An image that is not there is not an error: one image alone raises nothing.
+// the registry at its stamp. A read that cannot list the branches returns an
+// error, so the caller keeps what the rig held until the failure bound. A
+// listing that ended early or a branch whose comparison or image read did not
+// answer returns a non-nil scanErr with the items it did confirm plus the items
+// from prev whose branch it did not judge: a scan that could not read a branch
+// cannot say its pair is gone, and one branch's failure does not discard the
+// pass. An image that is not there is not an error: one image alone raises
+// nothing.
 func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []attention.Item) (items []attention.Item, scanErr error, err error) {
 	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
 		return nil, nil, err
 	}
 	var out []attention.Item
+	// seen holds the branches this pass judged: no longer newer, or read to a
+	// pair or to one image. A branch a failed read stopped at is not seen, so
+	// its previous item is kept and a stale pair is only cleared by a read that
+	// looked at it.
 	seen := make(map[string]bool, len(scan.greens))
+	incomplete := scan.err
 	for _, g := range scan.greens {
-		// Every branch the scan reached is seen, so a stale item for one that
-		// no longer has a pair is cleared even when the scan is incomplete.
-		seen[pairReadyKey(r.Rig, g.sha12)] = true
+		key := pairReadyKey(r.Rig, g.sha12)
 		if g.sha == running {
+			seen[key] = true
 			continue
 		}
 		// running is an ancestor of the green commit when no commit of running
 		// is missing from it: the comparison of green against running counts none.
 		behind, err := r.API.CompareCommits(ctx, r.Owner, r.Repo, g.sha, running)
 		if err != nil {
-			return nil, nil, fmt.Errorf("comparing green/%s with the running commit %s: %w", g.sha12, greenRefShortSHA(running), err)
+			incomplete = fmt.Errorf("comparing green/%s with the running commit %s: %w", g.sha12, greenRefShortSHA(running), err)
+			break
 		}
 		if behind.TotalCommits != 0 {
+			seen[key] = true
 			continue
 		}
 		ahead, err := r.API.CompareCommits(ctx, r.Owner, r.Repo, running, g.sha)
 		if err != nil {
-			return nil, nil, fmt.Errorf("counting the commits of green/%s ahead of the running commit: %w", g.sha12, err)
+			incomplete = fmt.Errorf("counting the commits of green/%s ahead of the running commit: %w", g.sha12, err)
+			break
 		}
 		if ahead.TotalCommits == 0 {
+			seen[key] = true
 			continue
 		}
 		daemon, daemonFound, err := r.Registry.TagDigest(ctx, imagevalues.DaemonImage, g.sha12)
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.DaemonImage, g.sha12, err)
+			incomplete = fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.DaemonImage, g.sha12, err)
+			break
 		}
 		polecat, polecatFound, err := r.Registry.TagDigest(ctx, imagevalues.PolecatImage, g.sha12)
 		if err != nil {
-			return nil, nil, fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.PolecatImage, g.sha12, err)
+			incomplete = fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.PolecatImage, g.sha12, err)
+			break
 		}
+		seen[key] = true
 		if !daemonFound || !polecatFound {
 			continue
 		}
 		out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, ahead.TotalCommits))
 	}
-	if scan.err != nil {
+	if incomplete != nil {
 		for _, it := range prev {
 			if it.Kind == attention.KindDeployPairReady && !seen[it.Key] {
 				out = append(out, it)
 			}
 		}
-		return out, scan.err, nil
+		return out, incomplete, nil
 	}
 	return out, nil, nil
 }
@@ -501,7 +514,20 @@ func pairReadyRigFrom(name string, fc *config.ForgejoConfig, resolveErr error, t
 		return out
 	}
 	tokenPath := filepath.Join(tokenDir, "forgejo-"+config.ForgejoRoleViewer+".env")
-	api, err := forgejo.NewClient(config.ForgejoRoleViewer, forgejo.WithBaseURL(apiBase), forgejo.WithTokenFile(tokenPath))
+	// The branch and compare reads carry the viewer's token, so they go
+	// through the same credential-transport rule as the registry read: plain
+	// http only to a loopback address or the town's own Forgejo, and no
+	// redirect that changes the scheme or the host. A refused read never
+	// reaches the network.
+	plaintext := forgejo.PlaintextHostOf(u.Scheme, u.Host)
+	api, err := forgejo.NewClient(config.ForgejoRoleViewer,
+		forgejo.WithBaseURL(apiBase),
+		forgejo.WithTokenFile(tokenPath),
+		forgejo.WithRequestGuard(func(reqURL *url.URL) error {
+			return imagevalues.CheckCredentialTransport(reqURL, plaintext)
+		}),
+		forgejo.WithHTTPClient(&http.Client{CheckRedirect: imagevalues.SameEndpointRedirect}),
+	)
 	if err != nil {
 		out.Err = fmt.Errorf("no %s Forgejo token: %w", config.ForgejoRoleViewer, err)
 		return out
@@ -517,10 +543,30 @@ func pairReadyRigFrom(name string, fc *config.ForgejoConfig, resolveErr error, t
 	return out
 }
 
-// collectPairReady returns the items the pair check holds.
+// collectPairReady returns the pair items the pair check holds: one per green
+// commit whose images are both published. It raises only its own kind, so the
+// unreadable item has a collector of its own.
 func (s *attentionSources) collectPairReady(context.Context) ([]attention.Item, error) {
+	return s.pairReadyItemsOfKind(attention.KindDeployPairReady), nil
+}
+
+// collectPairUnreadable returns the check's own failure items: the reads it
+// could not finish. It is a separate collector so a failed collector keeps the
+// previous items of its own kind (gt-4nlpw8).
+func (s *attentionSources) collectPairUnreadable(context.Context) ([]attention.Item, error) {
+	return s.pairReadyItemsOfKind(attention.KindDeployPairUnreadable), nil
+}
+
+// pairReadyItemsOfKind is the pair check's held items of one kind.
+func (s *attentionSources) pairReadyItemsOfKind(kind attention.Kind) []attention.Item {
 	if s.pairReady == nil {
-		return nil, nil
+		return nil
 	}
-	return s.pairReady(), nil
+	var out []attention.Item
+	for _, it := range s.pairReady() {
+		if it.Kind == kind {
+			out = append(out, it)
+		}
+	}
+	return out
 }

@@ -31,6 +31,11 @@ type Client struct {
 	// noToken marks a client that sends no Authorization header, for the
 	// calls that need no account (the version probe, gt-fn9e6.11).
 	noToken bool
+	// requestGuard, when set, checks every request's URL before the request is
+	// sent, so a request it refuses never reaches the network. A caller whose
+	// requests carry a credential uses it to keep the credential from an
+	// endpoint it may not cross to.
+	requestGuard func(*url.URL) error
 }
 
 // Option configures a Client.
@@ -53,6 +58,16 @@ func WithTokenFile(path string) Option { return func(cl *Client) { cl.tokenFile 
 // is up, and a town whose token file is missing can still be told that
 // (gt-fn9e6.11). It skips the role's token file entirely.
 func WithoutToken() Option { return func(cl *Client) { cl.noToken = true } }
+
+// WithRequestGuard makes the client run check on every request's URL before the
+// request is sent. A request the check refuses is returned as an error and
+// never reaches the HTTP client, so a token it carries cannot leave for an
+// endpoint the caller's rule does not allow. A caller whose requests carry the
+// viewer's credential passes the same transport rule it uses for its other
+// reads.
+func WithRequestGuard(check func(*url.URL) error) Option {
+	return func(cl *Client) { cl.requestGuard = check }
+}
 
 // NewClient builds a client for role, reading the role's token unless an
 // option supplies one.
@@ -157,6 +172,13 @@ func (c *Client) do(ctx context.Context, method, path string, query url.Values, 
 	// text/plain rather than send two Accept values.
 	for k, vs := range header {
 		req.Header[k] = vs
+	}
+	// The guard runs before the request is sent, so a refusal costs no network
+	// call and the request's header never leaves the process.
+	if c.requestGuard != nil {
+		if err := c.requestGuard(req.URL); err != nil {
+			return nil, err
+		}
 	}
 
 	resp, err := c.httpClient.Do(req)
