@@ -319,6 +319,11 @@ func pastTenLandings(now time.Time, n int) []omRecord {
 // titleReads is the title cache over a fake bd: show counts each read by bead
 // id, answers a title made from the id, and fails for the ids in failing.
 func titleReads(shown map[string]int, failing ...string) *tailBeads {
+	return titleReadsBounded(shown, tailTitleCacheSize, failing...)
+}
+
+// titleReadsBounded is titleReads with the cache bounded at max titles.
+func titleReadsBounded(shown map[string]int, max int, failing ...string) *tailBeads {
 	return newTailBeads(func(rig, id string) (*beads.Issue, error) {
 		shown[id]++
 		for _, f := range failing {
@@ -327,7 +332,7 @@ func titleReads(shown map[string]int, failing ...string) *tailBeads {
 			}
 		}
 		return &beads.Issue{ID: id, Title: "title of " + id}, nil
-	})
+	}, max)
 }
 
 // shownTotal is the number of bd reads a fake bd has answered.
@@ -401,18 +406,28 @@ func TestRecentLandingsFillTitlesOverPolls(t *testing.T) {
 	}
 }
 
+// TestDashboardTitleCacheHoldsAFullPage: the dashboard's reader is bounded at
+// least at recentLandingRows, so the titles of a full page all fit and the fill
+// can settle. A reader bounded lower evicts titles the page still shows
+// (gt-bjhc3r).
+func TestDashboardTitleCacheHoldsAFullPage(t *testing.T) {
+	t.Parallel()
+	if got := openDashboardBeads(t.TempDir()).max; got < recentLandingRows {
+		t.Fatalf("dashboard title bound = %d, want at least %d: a full page's titles must all fit", got, recentLandingRows)
+	}
+}
+
 // TestRecentLandingsConvergeOnFullPage: a page of recentLandingRows rows, the
-// most the dashboard shows, takes every title over polls from the dashboard's
-// reader, bounded by boundDashboardTitles. Each bead is read once, and every
-// row is titled once the fill has had the polls it needs at
-// recentExtraTitleLookups a poll. A reader bounded below the page evicts the
-// titles it fetched and never settles (gt-bjhc3r).
+// most the dashboard shows, takes every title over polls from a reader bounded
+// at the dashboard's production bound. Each bead is read once, and every row is
+// titled once the fill has had the polls it needs at recentExtraTitleLookups a
+// poll. A reader bounded below the page evicts the titles it fetched and never
+// settles (gt-bjhc3r).
 func TestRecentLandingsConvergeOnFullPage(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
 	shown := map[string]int{}
-	reads := titleReads(shown)
-	boundDashboardTitles(reads)
+	reads := titleReadsBounded(shown, openDashboardBeads(t.TempDir()).max)
 	title := func(rig, id string) string { return reads.title(rig, id) }
 	cached := func(rig, id string) (string, bool) { return reads.cachedTitle(id) }
 	// Seconds apart, so the whole page sits inside the day the dashboard keeps.

@@ -937,7 +937,7 @@ func (s *blockingTailStore) count(id string) int {
 func TestTailBeads_ConcurrentAskSharesTheInFlightRead(t *testing.T) {
 	t.Parallel()
 	store := &blockingTailStore{entered: make(chan string, 1), release: make(chan struct{})}
-	b := newTailBeads(store.show)
+	b := newTailBeads(store.show, tailTitleCacheSize)
 
 	done := make(chan string, 1)
 	go func() { done <- b.title("gastown", "gt-1") }()
@@ -972,7 +972,7 @@ func TestTailBeads_CachesSuccessAndRetriesFailure(t *testing.T) {
 		},
 		errs: map[string]error{"gt-lost": errors.New("dolt: connection refused")},
 	}
-	b := newTailBeads(store.show)
+	b := newTailBeads(store.show, tailTitleCacheSize)
 
 	if got := b.title("gastown", "gt-1"); got != "show the bead a line is about" {
 		t.Fatalf("title = %q", got)
@@ -1012,7 +1012,7 @@ func TestTailBeads_EvictsTheLeastRecentlyUsed(t *testing.T) {
 		"gt-2": {ID: "gt-2", Title: "two"},
 		"gt-3": {ID: "gt-3", Title: "three"},
 	}}
-	b := newTailBeads(store.show)
+	b := newTailBeads(store.show, tailTitleCacheSize)
 	b.max = 2
 
 	b.title("r", "gt-1")
@@ -1058,7 +1058,7 @@ func TestTailEventsSource_TitlesTheBeadAndReadsAVerdict(t *testing.T) {
 		{Seq: 4, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-2", Actor: "witness"},
 		{Seq: 5, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-gastown-polecat-opal", Actor: "daemon"},
 	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
 	got := s.Poll()
 	if len(got) != 5 {
 		t.Fatalf("poll = %q", texts(got))
@@ -1108,7 +1108,7 @@ func TestTailEventsSource_UnreadableBeadIsNotAnErrorLine(t *testing.T) {
 	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
 		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-1", Actor: "Test Operator"},
 	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
 	got := s.Poll()
 	if len(got) != 1 || got[0].Text != "comment gt-1 actor=Test Operator seq=1" || got[0].Verdict != "" {
 		t.Fatalf("poll = %+v", got)
@@ -1427,7 +1427,7 @@ func TestTailEventsSource_CommentTextAndSubmittedLine(t *testing.T) {
 		{Seq: 3, TS: "2026-09-30T13:52:00Z", Op: "comment", IssueID: "gt-3", Actor: "Test Operator"},
 		{Seq: 4, TS: "2026-09-30T13:53:00Z", Op: "comment", IssueID: "gt-4", Actor: "witness"},
 	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
 	got := s.Poll()
 	if len(got) != 4 {
 		t.Fatalf("poll = %q", texts(got))
@@ -1665,7 +1665,7 @@ func TestTailBeads_NotFoundIsRemembered(t *testing.T) {
 		"gt-slow":  errors.New("bd show: timed out"),
 		"gt-gone2": beads.ErrNotFound,
 	}}
-	b := newTailBeads(store.show)
+	b := newTailBeads(store.show, tailTitleCacheSize)
 
 	for i := 0; i < 3; i++ {
 		if got := b.issue("gastown", "gt-gone"); got != nil {
@@ -1707,7 +1707,7 @@ func TestTailBeads_CachedTitleNeverReads(t *testing.T) {
 			"gt-slow": errors.New("bd show: timed out"),
 		},
 	}
-	b := newTailBeads(store.show)
+	b := newTailBeads(store.show, tailTitleCacheSize)
 
 	if title, settled := b.cachedTitle("gt-ok"); title != "" || settled {
 		t.Fatalf("unread bead: cachedTitle = (%q, %v), want (\"\", false)", title, settled)
@@ -1748,7 +1748,7 @@ func TestTailBeads_NotFoundCacheIsBounded(t *testing.T) {
 	for i := 0; i <= tailMissingCacheSize; i++ {
 		store.errs[fmt.Sprintf("gt-%d", i)] = beads.ErrNotFound
 	}
-	b := newTailBeads(store.show)
+	b := newTailBeads(store.show, tailTitleCacheSize)
 	for i := 0; i <= tailMissingCacheSize; i++ {
 		b.issue("gastown", fmt.Sprintf("gt-%d", i))
 	}
@@ -1771,7 +1771,7 @@ func TestTailBeads_NotFoundCacheIsBounded(t *testing.T) {
 func TestTailBeads_NotFoundIsAskedAgainAfterTheWindow(t *testing.T) {
 	t.Parallel()
 	store := &fakeTailStore{errs: map[string]error{"gt-late": beads.ErrNotFound}}
-	b := newTailBeads(store.show)
+	b := newTailBeads(store.show, tailTitleCacheSize)
 	clock := time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)
 	b.now = func() time.Time { return clock }
 
@@ -1819,7 +1819,7 @@ func TestTailBeadsSubmittedBy(t *testing.T) {
 		"unreadable comments": {func(string, string) ([]beads.Comment, error) { return nil, fmt.Errorf("bd failed") }, submitterUnknown},
 		"no comments source":  {nil, ""},
 	} {
-		b := newTailBeads(nil)
+		b := newTailBeads(nil, tailTitleCacheSize)
 		b.comments = tc.read
 		if got := b.submittedBy("gastown", "gt-1"); got != tc.want {
 			t.Errorf("%s: submittedBy = %q, want %q", name, got, tc.want)
@@ -1831,7 +1831,7 @@ func TestTailBeadsSubmittedBy(t *testing.T) {
 	}
 
 	read := false
-	b := newTailBeads(nil)
+	b := newTailBeads(nil, tailTitleCacheSize)
 	b.comments = func(string, string) ([]beads.Comment, error) { read = true; return comments, nil }
 	if got := b.submittedBy("gastown", "-danger"); got != "" {
 		t.Errorf("flag-shaped id submittedBy = %q, want none", got)
@@ -1848,7 +1848,7 @@ func TestTailBeadsSubmittedByIsCached(t *testing.T) {
 	t.Parallel()
 	clock := time.Date(2026, 11, 7, 12, 0, 0, 0, time.UTC)
 	reads := 0
-	b := newTailBeads(nil)
+	b := newTailBeads(nil, tailTitleCacheSize)
 	b.now = func() time.Time { return clock }
 	b.comments = func(string, string) ([]beads.Comment, error) {
 		reads++
@@ -1878,7 +1878,7 @@ func TestTailBeadsSubmittedByFailureIsNotCached(t *testing.T) {
 	t.Parallel()
 	failing := true
 	reads := 0
-	b := newTailBeads(nil)
+	b := newTailBeads(nil, tailTitleCacheSize)
 	b.comments = func(string, string) ([]beads.Comment, error) {
 		reads++
 		if failing {
@@ -1931,7 +1931,7 @@ func TestTailBeadsFromStoreReadsComments(t *testing.T) {
 	b := newTailBeadsFromStore(func(rig string) (tailStore, error) {
 		opened = append(opened, rig)
 		return store, nil
-	})
+	}, tailTitleCacheSize)
 	if got := b.title("gastown", "gt-1"); got != "title of gt-1" {
 		t.Fatalf("title = %q, want the store's title", got)
 	}
@@ -1945,7 +1945,7 @@ func TestTailBeadsFromStoreReadsComments(t *testing.T) {
 		t.Fatalf("opened %v, want the same rig's store for both reads", opened)
 	}
 
-	b = newTailBeadsFromStore(func(string) (tailStore, error) { return nil, fmt.Errorf("no store") })
+	b = newTailBeadsFromStore(func(string) (tailStore, error) { return nil, fmt.Errorf("no store") }, tailTitleCacheSize)
 	if got := b.submittedBy("gastown", "gt-1"); got != submitterUnknown {
 		t.Fatalf("submittedBy with no store = %q, want %q", got, submitterUnknown)
 	}
@@ -1957,7 +1957,7 @@ func TestTailBeadsFromStoreReadsComments(t *testing.T) {
 // answers the unreadable mark, never the operator (gt-f1fc2f).
 func TestOpenTailBeadsWithoutATown(t *testing.T) {
 	t.Parallel()
-	b := openTailBeads("")
+	b := openTailBeads("", tailTitleCacheSize)
 	if got := b.title("gastown", "gt-1"); got != "" {
 		t.Errorf("title = %q with no beads directory, want none", got)
 	}
@@ -1980,7 +1980,7 @@ func TestEventsSource_NotFoundBeadIsReadOnceAcrossPolls(t *testing.T) {
 		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-gone"},
 		{Seq: 2, TS: "2026-09-30T13:50:01Z", Op: "update", IssueID: "gt-gone", Status: "in_progress"},
 	}}
-	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
 	s.Poll()
 	j.records = append(j.records, beads.EventRecord{Seq: 3, TS: "2026-09-30T13:50:02Z", Op: "comment", IssueID: "gt-gone"})
 	lines := s.Poll()
@@ -2012,7 +2012,7 @@ func TestEventsSource_DeletedInPageIsNotRead(t *testing.T) {
 		{Seq: 5, TS: "2026-09-30T13:50:04Z", Op: "comment", IssueID: "gt-live"},
 		{Seq: 6, TS: "2026-09-30T13:50:05Z", Op: "delete", IssueID: "gt-gone"},
 	}}
-	beadReads := newTailBeads(store.show)
+	beadReads := newTailBeads(store.show, tailTitleCacheSize)
 	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: beadReads}
 	lines := s.Poll()
 	if len(lines) != 6 {

@@ -339,7 +339,7 @@ func TestRunTailStream_DefaultViewGolden(t *testing.T) {
 		{Seq: 6, TS: "2026-09-30T13:53:00Z", Op: "update", IssueID: "gt-2", Actor: "gastown/polecats/quartz", Status: "open"},
 		{Seq: 7, TS: "2026-09-30T13:53:30Z", Op: "create", IssueID: "gt-4", Actor: "Test Operator", Status: "open"},
 	}}
-	events := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	events := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show, tailTitleCacheSize)}
 	const tickDispatched = "spec_dispatch: tick: 4 candidate(s), roster deepseek-flash 1/3, 1 dispatched, 0 refused, 0 planning, 3 skipped, 0 failed, 0 held by the failed label; skipped: gt-a (unshaped: ## Gate)"
 	daemon := &scriptedTailSource{batches: [][]tailLine{{
 		{At: at("2026-09-30T13:54:00Z"), Rig: "town", Kind: tailKindDaemon, Text: tailTickQuiet},
@@ -349,7 +349,7 @@ func TestRunTailStream_DefaultViewGolden(t *testing.T) {
 	}}}
 
 	var buf bytes.Buffer
-	view := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(store.show), now: fixedNow})
+	view := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(store.show, tailTitleCacheSize), now: fixedNow})
 	if err := runTailStream(context.Background(), &buf, []tailSource{events, daemon}, nil, false, nil, view, nil); err != nil {
 		t.Fatal(err)
 	}
