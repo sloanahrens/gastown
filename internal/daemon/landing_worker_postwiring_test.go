@@ -45,6 +45,9 @@ func statusOf(name string, state forgejo.CommitState) *forgejo.CombinedStatus {
 
 const wiringContext = "ci / post-land (push)"
 
+// postLandTestOwner is the placeholder owner the fixture's wiring and its assertions name.
+const postLandTestOwner = "placeholder-owner"
+
 // postLandWiringFixture builds the wiring the way newRigLandingWorker does, over
 // fakes, and the runner newPostLandRunner makes from it.
 type postLandWiringFixture struct {
@@ -79,7 +82,7 @@ func newPostLandWiringFixture(t *testing.T, timeout time.Duration) *postLandWiri
 	isAncestor := func(ancestor, descendant string) (bool, error) {
 		return ancestor == w.older && descendant == w.newer, nil
 	}
-	w.wiring = newPostLandWiring(w.client, "sloan", "gastown", w.store, timeout, nil, redMain.Beads, redMain, isAncestor)
+	w.wiring = newPostLandWiring(w.client, postLandTestOwner, "gastown", w.store, timeout, nil, redMain.Beads, redMain, isAncestor)
 	rigPath := t.TempDir()
 	writeRigPostLandStatusContext(t, rigPath, wiringContext)
 	w.runner = w.f.d.newPostLandRunner(attentionRig, rigPath, w.wiring)
@@ -95,8 +98,8 @@ func TestPostLandWiringReadsTheLandedCommitsStatus(t *testing.T) {
 	if _, err := w.wiring.Status(context.Background(), landworker.PostLand{Commit: w.older}); err != nil {
 		t.Fatal(err)
 	}
-	if len(w.client.asked) != 1 || w.client.asked[0] != [3]string{"sloan", "gastown", w.older} {
-		t.Fatalf("status asked of %v, want owner sloan, repo gastown, ref %s (the landed commit)", w.client.asked, w.older)
+	if len(w.client.asked) != 1 || w.client.asked[0] != [3]string{postLandTestOwner, "gastown", w.older} {
+		t.Fatalf("status asked of %v, want owner %s, repo gastown, ref %s (the landed commit)", w.client.asked, postLandTestOwner, w.older)
 	}
 }
 

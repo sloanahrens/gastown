@@ -1,5 +1,5 @@
 // Command forgejo-sources-secret stores the SOURCES_TOKEN Actions secret on
-// sloan/gastown without any person seeing the token. It mints a read:repository
+// the owning account/gastown without any person seeing the token. It mints a read:repository
 // token for bot-viewer, checks that the token reads every repository the image
 // build fetches, and stores it only when all of them answer 200. The site-admin
 // token comes from the environment the auth broker sets ($GT_AUTH_FORGEJO_TOKEN,
@@ -264,7 +264,7 @@ func printPlan(stdout io.Writer, name string) {
 var mintedName = regexp.MustCompile(`^` + regexp.QuoteMeta(tokenNamePrefix) + `[0-9]{8}-[0-9]{6}$`)
 
 // checkState reads the state a real run depends on and prints it: whether SOURCES_TOKEN is
-// listed on sloan/gastown, the status of bot-viewer's collaborator check on each read
+// listed on the owning account/gastown, the status of bot-viewer's collaborator check on each read
 // repository, and the sources-token- tokens bot-viewer holds. It sends GETs only, so it
 // mints, revokes and stores nothing. Every read is made before any is judged, so the
 // operator sees each one. A collaborator check that answers 204 is readable; 404 is a
