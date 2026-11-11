@@ -35,6 +35,7 @@ commands act on that queue; wait reports a crew member's own landing outcomes.
 
 Subcommands:
   requeue     Put a rejected landing back in the queue unchanged
+  takeover    Land an escalated branch on the overseer's review of its head
   om-stats    Report how often om rejects landings, by day, rig and agent
   om-lessons  Cluster om's findings into rejection classes, by window
   wait        Wait for the outcome of a crew member's own landings
