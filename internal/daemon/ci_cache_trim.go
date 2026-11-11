@@ -225,7 +225,9 @@ fi
 // root, the age in minutes and the cap in KiB. The module path is the constant
 // pkg/mod under the root, and the program refuses a root or module path that is
 // not there. At or under the cap it reports the size and stops, as the capped
-// script does: the walk below runs only over the cap.
+// script does: the walk below runs only over the cap. The walk is a shell program
+// because it runs under sh -c in the dind container, which has no gt binary; the
+// Go side owns the table, the argv and the reply.
 const ciCacheModuleOpen = `set -eu
 root=$1; age=$2; cap=$3
 mod="$root/pkg/mod"
@@ -246,13 +248,14 @@ cd "$mod"
 // prunes ./cache before anything is matched, so the download cache is never
 // walked. A directory named '*@*' is a module: the walk prunes it whether or not
 // it is old, so nothing inside a module is a candidate, and it prints only an old
-// one. The walk stops eight levels below pkg/mod.
-const ciCacheModuleFind = `find . -maxdepth 8 -path ./cache -prune -o -type d -name '*@*' -prune -a -mmin +"$age" -print`
+// one. The walk stops eight levels below pkg/mod. Its list is NUL-terminated, so a
+// directory name with a newline in it is still one entry.
+const ciCacheModuleFind = `find . -maxdepth 8 -path ./cache -prune -o -type d -name '*@*' -prune -a -mmin +"$age" -print0`
 
 // ciCacheModuleListScript is the module volume's dry run: it lists the module
 // directories the apply would remove and removes nothing.
 const ciCacheModuleListScript = ciCacheModuleOpen + ciCacheModuleFind + ` > "$tmp/list"
-removed=$(wc -l < "$tmp/list" | tr -d ' ')
+removed=$(tr -cd '\000' < "$tmp/list" | wc -c | tr -d ' ')
 echo "before_kib=$before"
 echo "removed=$removed"
 echo "after_kib=$before"
@@ -266,8 +269,8 @@ echo "after_kib=$before"
 // the next build. That is why the age is the module directory's own time and not
 // its files': the directory's time is when a build last extracted into it.
 const ciCacheModuleTrimScript = ciCacheModuleOpen + ciCacheModuleFind + ` > "$tmp/list"
-while IFS= read -r dir; do rm -rf "$dir"; done < "$tmp/list"
-removed=$(wc -l < "$tmp/list" | tr -d ' ')
+removed=$(tr -cd '\000' < "$tmp/list" | wc -c | tr -d ' ')
+if [ "$removed" -gt 0 ]; then xargs -0 rm -rf < "$tmp/list"; fi
 after=$(du -sk "$root" | cut -f1)
 echo "before_kib=$before"
 echo "removed=$removed"
