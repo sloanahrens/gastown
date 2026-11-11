@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // newTown returns a town root under a fresh temp dir. The town itself is not
@@ -250,5 +252,104 @@ func TestEnsureReplacesDirectoryLeftByDeadClone(t *testing.T) {
 	}
 	if len(git.calls) == 0 || git.calls[0] != "clone" {
 		t.Fatalf("git calls = %v, want a clone first", git.calls)
+	}
+}
+
+// A caller whose ctx has ended while another holder has the rig's lock gets
+// ctx's error back and runs no git: the lock wait watches ctx. The ctx is
+// already past its deadline, so the wait is over as soon as it is tried. The
+// failsafe fires only if Ensure goes on waiting for the holder.
+func TestEnsureReturnsWhenItsCtxEndsWhileTheRigLockIsHeld(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	if err := os.MkdirAll(filepath.Join(town, "gastown", ".repo.git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(town, dirRel)
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lock.FlockAcquire(filepath.Join(base, "gastown.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	git := &fakeGit{clone: cloneWithGit}
+	done := make(chan error, 1)
+	go func() {
+		_, err := ensure(ctx, git.run, town, "gastown", "")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ensure error = %v, want one wrapping context.DeadlineExceeded", err)
+		}
+		if !strings.Contains(err.Error(), "gastown") {
+			t.Errorf("ensure error %q does not name the rig", err)
+		}
+		if len(git.calls) != 0 {
+			t.Errorf("git calls = %v, want none while the lock is held", git.calls)
+		}
+	case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard only: ensure returns once its ctx ends, so this fires only when it keeps waiting for the holder
+		t.Fatal("ensure still waits for the rig lock after its ctx ended")
+	}
+}
+
+// A ctx that ends while the lock wait is polling, after the holder has already
+// refused the lock, ends the wait with ctx's error. The fake try cancels the ctx
+// on its third refusal, so the cancel lands mid-poll with no sleep or deadline.
+func TestLockRigStopsPollingWhenItsCtxIsCancelledMidWait(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tries := 0
+	try := func(string) (func(), bool, error) {
+		tries++
+		if tries == 3 {
+			cancel()
+		}
+		if tries > 10 {
+			// A wait that ignores ctx keeps polling; granting the lock here makes
+			// that fail the test below instead of looping forever.
+			return func() {}, true, nil
+		}
+		return nil, false, nil
+	}
+	unlock, err := lockRig(ctx, try, "unused.lock", "gastown")
+	if unlock != nil {
+		unlock()
+		t.Fatal("lockRig returned a lock although every try was refused")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("lockRig error = %v, want one wrapping context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "gastown") {
+		t.Errorf("lockRig error %q does not name the rig", err)
+	}
+	if tries < 3 {
+		t.Errorf("lockRig tried %d times, want the cancel on the third try to be reached", tries)
+	}
+}
+
+// A lock that cannot be taken at all (not merely held) is an error that names
+// the rig and wraps the cause, not a wait.
+func TestLockRigReportsALockErrorNamingTheRig(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("flock: permission denied")
+	try := func(string) (func(), bool, error) { return nil, false, cause }
+	unlock, err := lockRig(context.Background(), try, "unused.lock", "gastown")
+	if unlock != nil {
+		unlock()
+		t.Fatal("lockRig returned a lock after the lock call failed")
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("lockRig error = %v, want one wrapping the lock error", err)
+	}
+	if !strings.Contains(err.Error(), "gastown") {
+		t.Errorf("lockRig error %q does not name the rig", err)
 	}
 }

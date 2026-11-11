@@ -252,6 +252,9 @@ type execScheduledSlingRunner struct {
 	townRoot, bdPath, gtPath string
 	// execCmd runs the gt subprocesses; nil runs them for real.
 	execCmd cmdRunFunc
+	// ensureBuildSrc is the gate's build checkout (buildsrc.Ensure); nil is
+	// buildsrc.Ensure. A test stubs it so no git runs.
+	ensureBuildSrc func(ctx context.Context, townRoot, rig, rev string) (string, error)
 	// open opens a rig's database; nil is bdPath pinned to the rig's .beads.
 	open func(rig string) beads.Client
 }

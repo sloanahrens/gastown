@@ -24,11 +24,15 @@ const dirRel = ".runtime/build-src"
 
 // Each git call is bounded by its own timeout. The per-rig lock is held only
 // across those calls, so a caller waiting on it waits for the holder's calls to
-// finish, not for anything unbounded. The lock wait itself does not watch ctx.
+// finish, not for anything unbounded. The lock wait watches ctx: a caller whose
+// ctx ends before it gets the lock returns ctx's error.
 const (
 	cloneTimeout    = 5 * time.Minute
 	fetchTimeout    = 2 * time.Minute
 	checkoutTimeout = 2 * time.Minute
+	// lockPollInterval is how often a caller waiting on the rig's lock tries
+	// again. A waiter stops waiting as soon as its ctx ends, not at the next try.
+	lockPollInterval = 50 * time.Millisecond
 )
 
 // gitFunc runs git in dir and returns an error that names nothing from the
@@ -64,12 +68,11 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		return "", fmt.Errorf("creating %s: %w", base, err)
 	}
-	// internal/lock's FlockAcquire takes the flock. It is taken before the
-	// checkout is looked at, so two callers cannot both find none and clone.
-	// It is released on every return.
-	unlock, err := lock.FlockAcquire(filepath.Join(base, rig+".lock"))
+	// The flock is taken before the checkout is looked at, so two callers cannot
+	// both find none and clone. It is released on every return.
+	unlock, err := lockRig(ctx, lock.FlockTryAcquire, filepath.Join(base, rig+".lock"), rig)
 	if err != nil {
-		return "", fmt.Errorf("locking the build checkout of rig %s: %w", rig, err)
+		return "", err
 	}
 	defer unlock()
 
@@ -93,6 +96,29 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 		return "", fmt.Errorf("checking out %s in %s: %w", target, dir, err)
 	}
 	return dir, nil
+}
+
+// lockRig takes the exclusive flock at path for rig through try, which is
+// lock.FlockTryAcquire. It polls try every lockPollInterval rather than blocking
+// in FlockAcquire, so a ctx that ends while another holder has the lock returns
+// ctx's error instead of waiting for the holder.
+func lockRig(ctx context.Context, try func(string) (func(), bool, error), path, rig string) (func(), error) {
+	ticker := time.NewTicker(lockPollInterval)
+	defer ticker.Stop()
+	for {
+		unlock, ok, err := try(path)
+		if err != nil {
+			return nil, fmt.Errorf("locking the build checkout of rig %s: %w", rig, err)
+		}
+		if ok {
+			return unlock, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("waiting for the build checkout lock of rig %s: %w", rig, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // ensureClone clones bare into dir when dir is not a checkout yet. A directory

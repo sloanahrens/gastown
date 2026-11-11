@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -210,20 +211,107 @@ func TestScheduledSlingEntry_ValidateGateTimeout(t *testing.T) {
 	}
 }
 
-// The real runner: sh -c in <town>/<rig>/mayor/rig with GT_TOWN_ROOT and
-// GT_SCHEDULE_NAME set, through the execCmd seam.
+// An Ensure failure is a gate failure: the verdict is failed with the error in
+// its detail, and no command starts. A git exit status inside the error must not
+// read as the gate's own exit 1 ("nothing to do").
+func TestScheduledGate_EnsureFailureRecordsAGateFailureAndStartsNoCommand(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		ensureErr error
+		want      string
+	}{
+		"no bare repo": {errors.New("rig gastown has no bare repo"), "could not run: build checkout of rig gastown: rig gastown has no bare repo"},
+		"git exit 1":   {fmt.Errorf("git clone: %w", exitErr(1)), "could not run: build checkout of rig gastown: git clone: exit status"},
+	}
+	for name, c := range cases {
+		commands := 0
+		r := &execScheduledSlingRunner{
+			townRoot: t.TempDir(),
+			ensureBuildSrc: func(context.Context, string, string, string) (string, error) {
+				return "", c.ensureErr
+			},
+			execCmd: func(*exec.Cmd) ([]byte, []byte, error) {
+				commands++
+				return nil, nil, nil
+			},
+		}
+		d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{gatedEntry}, r)
+		if d.scheduledGateAllows(context.Background(), r, gatedEntry) {
+			t.Errorf("%s: a failed build checkout let the run go ahead", name)
+		}
+		if commands != 0 {
+			t.Errorf("%s: %d commands started after an Ensure failure, want none", name, commands)
+		}
+		if got := d.scheduledGateFailures.m[gatedEntry.Name]; got.count != 1 || got.detail != c.want {
+			t.Errorf("%s: recorded %+v, want count 1 and detail %q", name, got, c.want)
+		}
+	}
+}
+
+// A build checkout whose lock wait runs until the gate's deadline is a gate
+// timeout: Ensure sees the deadline on its ctx, the gate fails with the timeout
+// as its detail, and no command starts. The failsafe fires only if the gate's
+// deadline never reaches Ensure, and fails the test there.
+func TestScheduledGate_BuildCheckoutWaitPastTheGateDeadlineTimesOut(t *testing.T) {
+	t.Parallel()
+	e := gatedEntry
+	e.GateTimeoutStr = "1ms"
+	commands := 0
+	r := &execScheduledSlingRunner{
+		townRoot: t.TempDir(),
+		ensureBuildSrc: func(ctx context.Context, _, _, _ string) (string, error) {
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("waiting for the build checkout lock: %w", ctx.Err())
+			case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard only: Ensure returns once the gate deadline ends, so this fires only when the deadline never reaches it
+				t.Error("ensure was not given the gate deadline")
+				return "", errors.New("ensure was not given the gate deadline")
+			}
+		},
+		execCmd: func(*exec.Cmd) ([]byte, []byte, error) {
+			commands++
+			return nil, nil, nil
+		},
+	}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, r)
+	if d.scheduledGateAllows(context.Background(), r, e) {
+		t.Fatal("a build checkout that timed out let the run go ahead")
+	}
+	if commands != 0 {
+		t.Errorf("%d commands started after the build checkout timed out, want none", commands)
+	}
+	const want = "timed out after 1ms"
+	if got := d.scheduledGateFailures.m[e.Name]; got.count != 1 || got.detail != want {
+		t.Errorf("recorded %+v, want count 1 and detail %q", got, want)
+	}
+}
+
+// The real runner: sh -c in the build checkout buildsrc.Ensure returns, at
+// main, with GT_TOWN_ROOT and GT_SCHEDULE_NAME set, through the execCmd seam.
 func TestExecScheduledSlingRunner_RunGateDirAndEnv(t *testing.T) {
 	t.Parallel()
+	const build = "/town/.runtime/build-src/gastown"
 	var got *exec.Cmd
-	r := &execScheduledSlingRunner{townRoot: "/town", execCmd: func(cmd *exec.Cmd) ([]byte, []byte, error) {
-		got = cmd
-		return nil, nil, nil
-	}}
+	var ensuredRig, ensuredRev string
+	r := &execScheduledSlingRunner{
+		townRoot: "/town",
+		ensureBuildSrc: func(_ context.Context, _, rig, rev string) (string, error) {
+			ensuredRig, ensuredRev = rig, rev
+			return build, nil
+		},
+		execCmd: func(cmd *exec.Cmd) ([]byte, []byte, error) {
+			got = cmd
+			return nil, nil, nil
+		},
+	}
 	if _, err := r.runGate(context.Background(), gatedEntry); err != nil {
 		t.Fatal(err)
 	}
-	if got.Dir != "/town/gastown/mayor/rig" {
-		t.Errorf("dir = %q, want the rig's canonical clone", got.Dir)
+	if ensuredRig != "gastown" || ensuredRev != "" {
+		t.Errorf("Ensure called for rig %q rev %q, want gastown at main", ensuredRig, ensuredRev)
+	}
+	if got.Dir != build {
+		t.Errorf("dir = %q, want the build checkout %q", got.Dir, build)
 	}
 	if len(got.Args) != 3 || got.Args[1] != "-c" || got.Args[2] != gatedEntry.GateCommand {
 		t.Errorf("argv = %v, want sh -c <gate_command>", got.Args)

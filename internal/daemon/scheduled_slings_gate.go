@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 )
 
 const (
@@ -83,11 +83,24 @@ func scheduledGateDetail(status string, out []byte) string {
 	return fmt.Sprintf("%s: %s", status, tail)
 }
 
-// runGate runs the entry's gate_command with sh -c in the rig's canonical
-// clone, bounded by ctx. It returns the combined output and the run's error.
+// runGate runs the entry's gate_command with sh -c in the rig's job-owned build
+// checkout at main (buildsrc.Ensure), bounded by ctx. Ensure runs under the same
+// ctx, so the gate's deadline covers the wait for the checkout's lock, the clone
+// and the fetch. An Ensure failure is returned as the run error and no command
+// starts. It returns the combined output and the run's error.
 func (r *execScheduledSlingRunner) runGate(ctx context.Context, e ScheduledSlingEntry) ([]byte, error) {
+	ensure := r.ensureBuildSrc
+	if ensure == nil {
+		ensure = buildsrc.Ensure
+	}
+	dir, err := ensure(ctx, r.townRoot, e.Rig, "")
+	if err != nil {
+		// %v, not %w: a git exit status inside err would read as the gate's own
+		// exit code, and exit 1 means "nothing to do", not a failure.
+		return nil, fmt.Errorf("build checkout of rig %s: %v", e.Rig, err)
+	}
 	cmd := exec.CommandContext(ctx, "sh", "-c", scheduledSlingGateCommand(e)) //nolint:gosec // G204: the operator's own configured command
-	cmd.Dir = filepath.Join(r.townRoot, e.Rig, "mayor", "rig")
+	cmd.Dir = dir
 	cmd.Env = append(daemonGTEnv(bdMutationRoutingEnv(r.townRoot)), "GT_TOWN_ROOT="+r.townRoot, "GT_SCHEDULE_NAME="+e.Name)
 	return combinedOutputWith(r.execCmd, boundDaemonCmd(cmd))
 }
