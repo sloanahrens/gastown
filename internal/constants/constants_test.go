@@ -116,15 +116,6 @@ func TestRigMayorPath(t *testing.T) {
 	}
 }
 
-func TestRigBeadsPath(t *testing.T) {
-	t.Parallel()
-	got := RigBeadsPath("/rig")
-	expect := "/rig/mayor/rig/.beads"
-	if got != expect {
-		t.Errorf("RigBeadsPath = %q, want %q", got, expect)
-	}
-}
-
 func TestRigBeadsPathTable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -133,6 +124,7 @@ func TestRigBeadsPathTable(t *testing.T) {
 		want string
 	}{
 		{name: "absolute rig", rig: "/t/r", want: "/t/r/mayor/rig/.beads"},
+		{name: "top-level absolute rig", rig: "/rig", want: "/rig/mayor/rig/.beads"},
 		{name: "relative rig", rig: "gastown", want: "gastown/mayor/rig/.beads"},
 	}
 	for _, tt := range tests {
