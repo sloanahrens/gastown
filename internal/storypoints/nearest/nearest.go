@@ -1,4 +1,4 @@
-package storypoints
+package nearest
 
 import (
 	"context"
