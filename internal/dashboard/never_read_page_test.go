@@ -343,12 +343,11 @@ var ageAllowList = map[string]string{
 	"tr.append(el(\"td\", \"when title\", r.outcome === \"running\" ? \"merging \" + fmtDur((Date.now() - when.getTime()) / 1000) : r.outcome === \"backoff\" ? \"checked \" + clock(r.at).slice(0, 5) : (when.toDateString() === today ? clock(r.at).slice(0, 5) : when.toLocaleDateString([], {month: \"short\", day: \"numeric\"}) + \" \" + clock(r.at).slice(0, 5))));": "a running merge's start: the merge record's own stamp",
 	"st.append(el(\"b\", \"good\", \"running\"), el(\"span\", \"\", run.rig + \" · \" + stages + \" · \" + fmtDur((Date.now() - new Date(run.since).getTime()) / 1000)));":                                                                                                                                                                                                   "a running run's start: the run record's own stamp",
 	"$(\"tiersweepnote\").textContent = rows.length + \" sweeps · last \" + fmtDur((Date.now() - new Date(newest.at).getTime()) / 1000) + \" ago\";":                                                                                                                                                                                                                         "the newest sweep's stamp: a sweep record, not a read",
-	"return isNaN(t) ? null : (Date.now() - t) / 1000;":                                                                "secsSince: a run's start or stop stamp; an unreadable one is null",
-	"const oldest = stamps.length && stamps.every(t => !isNaN(t)) ? (Date.now() - Math.min(...stamps)) / 1000 : null;": "the oldest event bead's own stamp, not a read",
-	"return {counts: counts, ageSec: newest === null ? null : Math.max(0, Math.round((now - newest) / 1000))};":        "age of the newest alert event: the feed's own stamp, not a read",
-	"const since = now - EVENT_STATS_WINDOW_MS;":                                                                       "the start of the event stats window: a count of milliseconds",
-	"const now = Date.now(), late = now - lastTick > 2 * WATCHDOG_MS;":                                                 "the page's watchdog clock, not a stamp from the server",
-	"if (now - lastEvent < SILENT_MS) return;":                                                                         "the page's watchdog clock, not a stamp from the server",
+	"return isNaN(t) ? null : (Date.now() - t) / 1000;":                                                         "secsSince: a run's start or stop stamp; an unreadable one is null",
+	"return {counts: counts, ageSec: newest === null ? null : Math.max(0, Math.round((now - newest) / 1000))};": "age of the newest alert event: the feed's own stamp, not a read",
+	"const since = now - EVENT_STATS_WINDOW_MS;":                                                                "the start of the event stats window: a count of milliseconds",
+	"const now = Date.now(), late = now - lastTick > 2 * WATCHDOG_MS;":                                          "the page's watchdog clock, not a stamp from the server",
+	"if (now - lastEvent < SILENT_MS) return;":                                                                  "the page's watchdog clock, not a stamp from the server",
 }
 
 // expressionEnd returns the offset where the expression that starts at from ends:
