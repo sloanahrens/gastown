@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,5 +89,21 @@ func TestUnresolvedThemeLinesReportsAnUnreadableParkState(t *testing.T) {
 	lines := unresolvedThemeLines(root, []string{"alpha"})
 	if len(lines) != 1 || !strings.Contains(lines[0], "park state unreadable") || !strings.Contains(lines[0], "alpha") {
 		t.Fatalf("lines = %q, want one line saying the park state of alpha is unreadable", lines)
+	}
+}
+
+// The startup warning writes each unresolved rig's line to the daemon's log, and
+// no line for a rig whose theme resolves (gt-pno1e6).
+func TestWarnUnresolvedThemesLogsOneLinePerUnresolvedRig(t *testing.T) {
+	t.Parallel()
+	root := themeTown(t, []string{"alpha", "beta"}, map[string]string{"alpha": "gone", "beta": "here"}, []string{"here"})
+	var logged bytes.Buffer
+	d := &Daemon{config: &Config{TownRoot: root}, logger: log.New(&logged, "", 0)}
+
+	d.warnUnresolvedThemes()
+
+	lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "rig alpha") || strings.Contains(lines[0], "rig beta") {
+		t.Fatalf("logged %q, want one line for rig alpha only", logged.String())
 	}
 }
