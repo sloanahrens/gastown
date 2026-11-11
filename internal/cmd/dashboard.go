@@ -29,11 +29,13 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cloudledger"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/deepseekspend"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/jev/scrub"
 	"github.com/steveyegge/gastown/internal/land"
@@ -561,6 +563,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		SpendHours:     dashboardSpendHours(),
 		JevSpend:       dashboardJevSpend(jevSpendArgv),
 		JevScorecard:   dashboardJevScorecard(townRoot),
+		JevCap:         dashboardJevCap(townRoot),
 		OM:             func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:      func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Update:         func() *dashboard.UpdateStatus { return updateStatus.read(time.Now()) },
@@ -1173,9 +1176,11 @@ func dashboardJevScorecardWith(townRoot string, cache scorecard.Cache) func() *d
 			}
 			return nil
 		}
+		scored := doc.ScoredAt
 		sc := &dashboard.JevScorecard{
 			Batteries: make([]dashboard.JevBattery, 0, len(doc.Batteries)),
 			Window:    doc.Since,
+			ScoredAt:  &scored,
 		}
 		for _, block := range doc.Batteries {
 			sc.Batteries = append(sc.Batteries, jevBatteryFromCache(block))
@@ -1202,9 +1207,36 @@ func jevBatteryFromCache(block scorecard.BatteryBlock) dashboard.JevBattery {
 		b.Unit = "packages"
 	}
 	for _, q := range block.Report.Questions {
-		b.Questions = append(b.Questions, dashboard.JevQuestion{ID: q.ID, Verdict: q.Verdict, Labeled: q.Labeled, BaseRate: q.BaseRate, Precision: q.Precision})
+		b.Questions = append(b.Questions, dashboard.JevQuestion{
+			ID: q.ID, Verdict: q.Verdict, Kind: q.Kind, Labeled: q.Labeled,
+			Positives: q.Positives, Negatives: q.Negatives,
+			BaseRate: q.BaseRate, Precision: q.Precision, PrecisionAtBest: q.PrecisionAtBest,
+		})
 	}
 	return b
+}
+
+// dashboardJevCap reads the town's daily Jev cap from the daemon's patrol
+// config: the dispatch battery's max_usd_per_day, which the config's comments
+// name the town-wide cap every Jev caller shares. A config that names no cap
+// takes the dispatch default. A town with no patrol config, or none with a
+// dispatch battery, has no configured cap and reads nil with no error. A config
+// that cannot be read is an error, so the summary says the cap is unknown.
+func dashboardJevCap(townRoot string) func() (*float64, error) {
+	return func() (*float64, error) {
+		cfg, err := daemon.ReadPatrolConfig(townRoot)
+		if err != nil {
+			return nil, fmt.Errorf("reading the Jev cap from the patrol config: %w", err)
+		}
+		if cfg == nil || cfg.Patrols == nil || cfg.Patrols.JevDispatch == nil {
+			return nil, nil
+		}
+		capUSD := cfg.Patrols.JevDispatch.MaxUSDPerDay
+		if capUSD == 0 {
+			capUSD = dispatch.DefaultMaxUSDPerDay
+		}
+		return &capUSD, nil
+	}
 }
 
 // dashboardForgejoReaders wires the readers the viewer's token feeds — the

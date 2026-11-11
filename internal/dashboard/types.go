@@ -836,8 +836,11 @@ type State struct {
 	// until the reader first reports; a failed read keeps the last good value
 	// and says so in Reads.
 	JevScorecard *JevScorecard `json:"jev_scorecard,omitempty"`
-	OM           *OM           `json:"om,omitempty"`
-	TierSweep    *TierSweep    `json:"tiersweep,omitempty"`
+	// JevSummary is the JEV page's summary, built from the scorecard and the
+	// spend row beside it. It is nil until the scorecard first reports.
+	JevSummary *JevSummary `json:"jev_summary,omitempty"`
+	OM         *OM         `json:"om,omitempty"`
+	TierSweep  *TierSweep  `json:"tiersweep,omitempty"`
 	// Update is the gt update job's run while it is in flight or for a day
 	// after it ended, which is why nothing is being dispatched. It is nil when
 	// no run has recorded state, when the record cannot be read, when a running
@@ -913,6 +916,11 @@ type Config struct {
 	// JevScorecard reads the cached scorecard, nil when the cache could not be
 	// read. A missing cache is a value with NoScorecard set, not a failed read.
 	JevScorecard func() *JevScorecard
+	// JevCap reads the configured daily Jev cap in dollars. It returns nil and no
+	// error when no cap is configured, and an error when the config cannot be
+	// read, so the summary says the cap is unknown rather than unset. A nil
+	// function means no cap reader is wired.
+	JevCap func() (*float64, error)
 	// OM reads the reviewer's record from disk.
 	OM func() *OM
 	// TierSweep reads the daemon's tier sweeps from the daemon log.

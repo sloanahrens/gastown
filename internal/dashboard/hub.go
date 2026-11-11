@@ -1312,17 +1312,42 @@ func jevSpendForRows(jev *JevSpend, r ReadStatus) *JevSpend {
 // other's value or status.
 func (h *Hub) pollJevSpend() {
 	j := h.cfg.JevSpend()
+	capUSD, capErr := h.readJevCap()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if j == nil {
 		h.readFailedLocked(SourceJevSpend, h.cfg.JevSpendEvery)
+		h.refreshJevSummaryLocked(capUSD, capErr)
 		h.publishLocked()
 		return
 	}
 	h.state.JevSpend = j
 	h.costRows = nil
 	h.readOKLocked(SourceJevSpend, h.cfg.JevSpendEvery)
+	h.refreshJevSummaryLocked(capUSD, capErr)
 	h.publishLocked()
+}
+
+// readJevCap reads the configured daily Jev cap through the config reader. It
+// returns no cap and no error when none is wired. It is read outside h.mu,
+// since it reads a file.
+func (h *Hub) readJevCap() (*float64, error) {
+	if h.cfg.JevCap == nil {
+		return nil, nil
+	}
+	return h.cfg.JevCap()
+}
+
+// refreshJevSummaryLocked rebuilds the JEV summary from the last good
+// scorecard and spend row, against capUSD. A cap read that failed is marked
+// on the summary, so the page says the cap is unknown rather than unset. The
+// caller holds h.mu.
+func (h *Hub) refreshJevSummaryLocked(capUSD *float64, capErr error) {
+	s := BuildJevSummary(h.state.JevScorecard, h.state.JevSpend, capUSD)
+	if s != nil && capErr != nil {
+		s.Spend.CapUnreadable = true
+	}
+	h.state.JevSummary = s
 }
 
 // pollJevScorecard publishes the cached scorecard read. A read that failed
@@ -1333,16 +1358,19 @@ func (h *Hub) pollJevSpend() {
 // status.
 func (h *Hub) pollJevScorecard() {
 	sc := h.cfg.JevScorecard()
+	capUSD, capErr := h.readJevCap()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if sc == nil {
 		h.readFailedLocked(SourceJevScorecard, h.cfg.JevScorecardEvery)
+		h.refreshJevSummaryLocked(capUSD, capErr)
 		h.publishLocked()
 		return
 	}
 	keepLastGoodJevBatteries(h.state.JevScorecard, sc, h.jevGood, h.cfg.Now())
 	h.state.JevScorecard = sc
 	h.readOKLocked(SourceJevScorecard, h.cfg.JevScorecardEvery)
+	h.refreshJevSummaryLocked(capUSD, capErr)
 	h.publishLocked()
 }
 
