@@ -38,10 +38,9 @@
 // cannot write, or a run it finds no town for, is reported on stderr and fails
 // nothing, because the gate's verdict is go test's alone.
 //
-// The last line of the report, `tierwall: cpus: NumCPU=<n> GOMAXPROCS=<n>
-// cgroup=<value>`, says what CPUs the run had: the count Go saw, the Go scheduler
-// width, and the cgroup CPU quota, so a gate log shows the limits it ran under
-// (gt-50ujsx). It prints on every run and fails nothing.
+// The last line of the report is the cpus line (cpuLine), which says what CPUs
+// the run had, so a gate log shows the limits it ran under (gt-50ujsx). It
+// prints on every run and fails nothing.
 package main
 
 import (
