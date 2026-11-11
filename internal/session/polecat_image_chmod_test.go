@@ -7,14 +7,15 @@ import (
 )
 
 // polecatImageBinaries are the town binaries the image copies to /usr/local/bin,
-// each from bin/<name> in the build context.
-var polecatImageBinaries = []string{"gt", "bd", "polecat-image", "sweep-run"}
+// each from bin/<name> in the build context. sweep-run is not listed:
+// TestPolecatImageCopiesSweepRun pins its COPY and its lack of a RUN chmod.
+var polecatImageBinaries = []string{"gt", "bd", "polecat-image"}
 
 // TestPolecatImageSetsBinaryModesWithCopyChmod pins that the town binaries get
 // their mode from COPY --chmod=0755. A RUN chmod on the same files rewrites each
 // one into a second layer, so the image carries every binary twice.
 //
-// Mutation: drop --chmod=0755 from any of the four COPY lines, or put back a
+// Mutation: drop --chmod=0755 from any of the three COPY lines, or put back a
 // RUN chmod that names one of their paths, and this goes red.
 func TestPolecatImageSetsBinaryModesWithCopyChmod(t *testing.T) {
 	t.Parallel()
