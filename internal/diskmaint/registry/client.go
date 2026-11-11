@@ -163,7 +163,7 @@ func (c *Client) nextPage(answered reply, path string) (*url.URL, error) {
 		return nil, fmt.Errorf("GET %s: Link %q is not a path", path, target)
 	}
 	next := answered.url.ResolveReference(ref)
-	if next.Scheme != answered.url.Scheme || next.Host != answered.url.Host {
+	if !sameOrigin(next, answered.url) {
 		return nil, fmt.Errorf("GET %s: Link %q names another origin", path, target)
 	}
 	// The base carries any prefix a proxy puts in front of the registry. A
@@ -309,7 +309,7 @@ type credentialTransport struct {
 // RoundTrip sends r with the login when it is for the client's origin. The
 // request is cloned, so the caller's request is left as it was.
 func (t credentialTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	if t.host != "" && r.URL.Scheme == t.scheme && r.URL.Host == t.host {
+	if s, h := originOf(r.URL); t.host != "" && s == t.scheme && h == t.host {
 		r = r.Clone(r.Context())
 		r.SetBasicAuth(t.cred.User, t.cred.Token)
 	}
@@ -344,7 +344,37 @@ func (c *Client) origin() (scheme, host string) {
 	if err != nil {
 		return "", ""
 	}
-	return u.Scheme, u.Host
+	return originOf(u)
+}
+
+// originOf returns the scheme and host of u with the default port of that scheme
+// left off, so "http://registry.test:80" and "http://registry.test" give the same
+// origin. Any other port stays in the host.
+func originOf(u *url.URL) (scheme, host string) {
+	host = u.Host
+	if port := u.Port(); port != "" && port == defaultPort(u.Scheme) {
+		host = strings.TrimSuffix(host, ":"+port)
+	}
+	return u.Scheme, host
+}
+
+// defaultPort is the port a scheme uses when a URL names none, or "" for a
+// scheme this package does not default.
+func defaultPort(scheme string) string {
+	switch scheme {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	}
+	return ""
+}
+
+// sameOrigin reports whether a and b name one origin under originOf.
+func sameOrigin(a, b *url.URL) bool {
+	as, ah := originOf(a)
+	bs, bh := originOf(b)
+	return as == bs && ah == bh
 }
 
 // reply is one answered request: the header, which carries a listing's next
