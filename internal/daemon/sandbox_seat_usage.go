@@ -40,6 +40,12 @@ var errNoSeatStart = errors.New("its sandbox record is gone, so its start is unk
 // seat's transcripts are not read, and no record is written.
 var errSeatUsageUnlisted = errors.New("no transcript lister is wired, so its transcripts are not read")
 
+// errSeatTranscriptsUnreachable is the refusal when the host holds no transcript of
+// the seat. A sandbox seat's sessions write theirs inside the sandbox, under
+// /sandbox/.claude/projects, which the host's Claude project directories do not
+// hold: copying them out before the sandbox is deleted would bring them in.
+var errSeatTranscriptsUnreachable = errors.New("no transcript of its sessions is on the host: its sessions write theirs inside the sandbox, under /sandbox/.claude/projects, and copying them out before the sandbox is deleted would bring them in")
+
 // seatStartedAt is when the seat started: the creation stamp of its sandbox
 // record. When a teardown has already removed that record, the removal left the
 // stamp on the seat-end ledger line it wrote, so the start is read from the line
@@ -66,13 +72,14 @@ func (h *patrolScanHost) seatStartedAt(rig, name string, submitted time.Time) (t
 
 // writeSeatUsage writes the usage record of the seat rig/name, which ends now
 // and started at start, before its directories are removed. startErr is what
-// seatStartedAt reported. A seat with no transcript written since it started
-// writes nothing. A seat with no lister wired is refused before anything is
-// read. It returns the path of the record when one was written, and incomplete:
-// the reasons some transcript could not be read in full, which the record already
-// says its totals may understate. err is the reason no record was written. The
-// caller logs err as not written, or incomplete as written but not read in full,
-// once; the removal goes on either way.
+// seatStartedAt reported. A seat with no transcript on the host, or none written
+// since it started, writes nothing and says why. A seat with no lister wired is
+// refused before anything is read. It returns the path of the record when one was
+// written, and incomplete: the reasons some transcript could not be read in full,
+// which the record already says its totals may understate. Every outcome that
+// writes no record returns a non-nil err, the reason. The caller logs err as not
+// written, or incomplete as written but not read in full, once; the removal goes
+// on either way.
 func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLanding, start time.Time, startErr error) (written string, incomplete, err error) {
 	list := h.seatUsage.list
 	if list == nil {
@@ -88,7 +95,10 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		return "", nil, fmt.Errorf("listing its transcripts: %w", err)
 	}
 	if len(paths) == 0 {
-		return "", nil, startErr
+		if startErr != nil {
+			return "", nil, startErr
+		}
+		return "", nil, errSeatTranscriptsUnreachable
 	}
 	if startErr != nil {
 		return "", nil, startErr
@@ -109,6 +119,10 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		}
 	}
 	if len(sessions) == 0 {
+		if len(readErrs) == 0 {
+			// Every transcript was last written before the start: each is a predecessor's.
+			return "", nil, fmt.Errorf("none of its %d transcripts was written since it started, so none is its own", len(paths))
+		}
 		return "", nil, errors.Join(readErrs...)
 	}
 	workspace, err := usageattrib.WorkspaceOf(h.town(), landing.BeadID)
