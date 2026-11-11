@@ -83,30 +83,50 @@ func Plan(pins []Source, buildRig, seedAt string) ([]Source, error) {
 	return out, nil
 }
 
-// buildRigCheckout returns the directory the build rig's commits and sources are
-// read from: buildSrc when the caller names one, and the rig's canonical
-// checkout under town otherwise.
-func buildRigCheckout(town, buildRig, buildSrc string) string {
-	if buildSrc != "" {
-		return buildSrc
+// bareRepo returns the path of the rig's bare repository, <town>/<rig>/.repo.git,
+// once it is checked to be one. git run in a directory that is not a repository
+// searches its parents, so a missing or partial bare repo is refused here, naming
+// the path, before any git call can read a repository above it.
+func bareRepo(town, rig string) (string, error) {
+	dir := filepath.Join(town, rig, ".repo.git")
+	for _, p := range []string{"HEAD", "objects", "refs"} {
+		if _, err := os.Stat(filepath.Join(dir, p)); err != nil {
+			return "", fmt.Errorf("rig %s has no bare repository at %s (%v): the seed reads each rig's history from <rig>/.repo.git, so restore that bare repo, then rerun", rig, dir, err)
+		}
 	}
-	return filepath.Join(town, buildRig, "mayor", "rig")
+	return dir, nil
 }
 
-// Stage writes each source into <dest>/<rig>, read from that rig's canonical
-// checkout <town>/<rig>/mayor/rig at the source's commit, so the seed holds
+// buildRigCheckout returns the directory the build rig's commits and sources are
+// read from: buildSrc when the caller names one, and the rig's bare repository
+// under town otherwise.
+func buildRigCheckout(town, buildRig, buildSrc string) (string, error) {
+	if buildSrc != "" {
+		return buildSrc, nil
+	}
+	return bareRepo(town, buildRig)
+}
+
+// Stage writes each source into <dest>/<rig>, read from that rig's bare
+// repository <town>/<rig>/.repo.git at the source's commit, so the seed holds
 // exactly that commit's tree. The build rig is read from buildSrc when one is
 // given, because an image build already runs in a checkout holding its commit;
-// the other rigs keep their canonical checkouts.
+// the other rigs keep reading their bare repositories.
 func Stage(dest, town, buildRig, buildSrc string, sources []Source, git Git) error {
 	for _, s := range sources {
-		checkout := filepath.Join(town, s.Rig, "mayor", "rig")
-		if buildSrc != "" && s.Rig == buildRig {
-			checkout = buildSrc
+		from := buildSrc
+		args := []string{"archive", "--format=tar", s.Commit}
+		if buildSrc == "" || s.Rig != buildRig {
+			bare, err := bareRepo(town, s.Rig)
+			if err != nil {
+				return err
+			}
+			from = bare
+			args = append([]string{"--git-dir=" + bare}, args...)
 		}
-		tree, err := git(checkout, "archive", "--format=tar", s.Commit)
+		tree, err := git(from, args...)
 		if err != nil {
-			return fmt.Errorf("cannot stage rig %s at %s from %s: %w", s.Rig, s.Commit, checkout, err)
+			return fmt.Errorf("cannot stage rig %s at %s from %s: %w", s.Rig, s.Commit, from, err)
 		}
 		// A rig's directory is written whole: a file the source's new commit
 		// deleted must not survive from an earlier stage.

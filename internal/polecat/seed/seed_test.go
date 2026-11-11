@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -85,12 +86,31 @@ func TestPins(t *testing.T) {
 	}
 }
 
+// bareFixture makes <town>/<rig>/.repo.git hold the on-disk shape of a bare
+// repository (HEAD, objects, refs), the shape bareRepo checks. The git calls a
+// test makes are answered by a fake, so the directory holds no history.
+func bareFixture(t *testing.T, town, rig string) string {
+	t.Helper()
+	dir := filepath.Join(town, rig, ".repo.git")
+	for _, p := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(dir, p), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	return dir
+}
+
 // TestStageReadsTheBuildCommit stages gastown at the build commit while the
 // checkout it reads from holds another, and devops at its pin: a sandbox then
 // has the modules of the gt it runs, and every other rig its pinned set.
 func TestStageReadsTheBuildCommit(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
+	gastownBare := bareFixture(t, town, "gastown")
+	devopsBare := bareFixture(t, town, "devops")
 	dest := t.TempDir()
 	const buildCommit = "f05e821cda74197a137049fc69f9a46c0c23c78f"
 	const pin = "92b9e510ac2f9ff8c80b0291f312ac482bf96c38"
@@ -116,21 +136,20 @@ func TestStageReadsTheBuildCommit(t *testing.T) {
 			t.Errorf("%s staged %q, want the tree of %s", want.rig, got, want.commit)
 		}
 	}
-	wantCalls := []string{
-		filepath.Join(town, "gastown", "mayor", "rig") + " archive --format=tar " + buildCommit,
-		filepath.Join(town, "devops", "mayor", "rig") + " archive --format=tar " + pin,
+	if len(g.calls) != 2 {
+		t.Fatalf("git calls = %v, want one archive per rig", g.calls)
 	}
-	if got := strings.Join(g.calls, "\n"); got != strings.Join(wantCalls, "\n") {
-		t.Errorf("git calls:\n%s\nwant:\n%s", got, strings.Join(wantCalls, "\n"))
-	}
+	checkArchiveCall(t, g.calls[0], gastownBare, gastownBare, buildCommit)
+	checkArchiveCall(t, g.calls[1], devopsBare, devopsBare, pin)
 }
 
 // With a build source, the build rig's sources come from that directory while
-// every other pinned rig is still read from its own canonical checkout under
+// every other pinned rig is still read from its own .repo.git bare repo under
 // the town.
 func TestStageReadsTheBuildRigFromTheBuildSource(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
+	devopsBare := bareFixture(t, town, "devops")
 	buildSrc := t.TempDir()
 	dest := t.TempDir()
 	const buildCommit = "f05e821cda74197a137049fc69f9a46c0c23c78f"
@@ -148,13 +167,11 @@ func TestStageReadsTheBuildRigFromTheBuildSource(t *testing.T) {
 		t.Fatalf("Stage: %v", err)
 	}
 
-	wantCalls := []string{
-		buildSrc + " archive --format=tar " + buildCommit,
-		filepath.Join(town, "devops", "mayor", "rig") + " archive --format=tar " + pin,
+	if len(g.calls) != 2 {
+		t.Fatalf("git calls = %v, want one archive per rig", g.calls)
 	}
-	if got := strings.Join(g.calls, "\n"); got != strings.Join(wantCalls, "\n") {
-		t.Errorf("git calls:\n%s\nwant:\n%s", got, strings.Join(wantCalls, "\n"))
-	}
+	checkArchiveCall(t, g.calls[0], buildSrc, "", buildCommit)
+	checkArchiveCall(t, g.calls[1], devopsBare, devopsBare, pin)
 	for _, want := range []struct{ rig, commit string }{{"gastown", buildCommit}, {"devops", pin}} {
 		got, err := os.ReadFile(filepath.Join(dest, want.rig, "go.mod"))
 		if err != nil {
@@ -178,8 +195,10 @@ func TestStageClearsARigStagedBefore(t *testing.T) {
 	}
 	const buildCommit = "f05e821cda74197a137049fc69f9a46c0c23c78f"
 	g := &fakeGit{t: t, trees: map[string]map[string]string{buildCommit: {"go.mod": "module example.com/gastown\n"}}}
+	town := t.TempDir()
+	bareFixture(t, town, "gastown")
 
-	if err := Stage(dest, t.TempDir(), "gastown", "", []Source{{Rig: "gastown", Commit: buildCommit}}, g.archives); err != nil {
+	if err := Stage(dest, town, "gastown", "", []Source{{Rig: "gastown", Commit: buildCommit}}, g.archives); err != nil {
 		t.Fatalf("Stage: %v", err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
@@ -187,18 +206,37 @@ func TestStageClearsARigStagedBefore(t *testing.T) {
 	}
 }
 
-func TestStageNamesTheRigAndCommitTheCheckoutLacks(t *testing.T) {
+func TestStageNamesTheRigAndCommitTheBareRepoLacks(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	bare := bareFixture(t, town, "gastown")
+	g := &fakeGit{t: t, trees: map[string]map[string]string{}}
+	err := Stage(t.TempDir(), town, "gastown", "", []Source{{Rig: "gastown", Commit: "f05e821c"}}, g.archives)
+	if err == nil {
+		t.Fatal("Stage accepted a commit no bare repo holds")
+	}
+	for _, want := range []string{"cannot stage rig gastown at f05e821c", bare, "not a valid object name"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Stage: error lacks %q: %v", want, err)
+		}
+	}
+}
+
+// A rig with no .repo.git is refused before git runs, and the error names the
+// bare path the stage would have read.
+func TestStageRefusesARigWithNoBareRepo(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	g := &fakeGit{t: t, trees: map[string]map[string]string{}}
 	err := Stage(t.TempDir(), town, "gastown", "", []Source{{Rig: "gastown", Commit: "f05e821c"}}, g.archives)
 	if err == nil {
-		t.Fatal("Stage accepted a commit no checkout holds")
+		t.Fatal("Stage read a rig with no bare repo")
 	}
-	for _, want := range []string{"cannot stage rig gastown at f05e821c", filepath.Join(town, "gastown", "mayor", "rig"), "not a valid object name"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("Stage: error lacks %q: %v", want, err)
-		}
+	if want := filepath.Join(town, "gastown", ".repo.git"); !strings.Contains(err.Error(), want) {
+		t.Errorf("Stage: error does not name the bare path %q: %v", want, err)
+	}
+	if len(g.calls) != 0 {
+		t.Errorf("Stage ran git against a rig with no bare repo: %v", g.calls)
 	}
 }
 
@@ -457,21 +495,73 @@ func TestUnpackRefusesAFileWrittenThroughAnEscapingSymlink(t *testing.T) {
 	}
 }
 
+// gitCall is one call the fake received: the directory git ran in and its argv.
+type gitCall struct {
+	dir  string
+	args []string
+}
+
+// gitDirFlag returns the value of the --git-dir flag in args and whether args
+// carries one.
+func gitDirFlag(args []string) (string, bool) {
+	for _, a := range args {
+		if v, ok := strings.CutPrefix(a, "--git-dir="); ok {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// withoutFlags returns args with every --flag removed: the verb and its operands.
+func withoutFlags(args []string) []string {
+	var out []string
+	for _, a := range args {
+		if !strings.HasPrefix(a, "--") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// checkArchiveCall asserts one call Stage made: it ran in dir, carries
+// --git-dir=gitDir when gitDir is set and no --git-dir flag otherwise, and its
+// verb archives commit. Flags are matched by name, not position.
+func checkArchiveCall(t *testing.T, c gitCall, dir, gitDir, commit string) {
+	t.Helper()
+	if c.dir != dir {
+		t.Errorf("git ran in %q, want %q", c.dir, dir)
+	}
+	got, has := gitDirFlag(c.args)
+	switch {
+	case gitDir == "" && has:
+		t.Errorf("git ran with --git-dir=%s, want the plain checkout form", got)
+	case gitDir != "" && (!has || got != gitDir):
+		t.Errorf("git --git-dir = %q (present %v), want %q", got, has, gitDir)
+	}
+	if !slices.Contains(c.args, "--format=tar") {
+		t.Errorf("git args = %v, want --format=tar", c.args)
+	}
+	if want := []string{"archive", commit}; !slices.Equal(withoutFlags(c.args), want) {
+		t.Errorf("git verb and operands = %v, want %v", withoutFlags(c.args), want)
+	}
+}
+
 // fakeGit answers the one git command Stage issues with the tree recorded for
 // the commit: a tar stream of the file paths and contents given.
 type fakeGit struct {
 	t     *testing.T
 	trees map[string]map[string]string // commit -> path -> content
-	calls []string
+	calls []gitCall
 }
 
 func (g *fakeGit) archives(dir string, args ...string) ([]byte, error) {
 	g.t.Helper()
-	g.calls = append(g.calls, dir+" "+strings.Join(args, " "))
-	if len(args) != 3 || args[0] != "archive" || args[1] != "--format=tar" {
+	g.calls = append(g.calls, gitCall{dir: dir, args: args})
+	operands := withoutFlags(args)
+	if len(operands) != 2 || operands[0] != "archive" || !slices.Contains(args, "--format=tar") {
 		g.t.Fatalf("unexpected git call: %s %v", dir, args)
 	}
-	files, ok := g.trees[args[2]]
+	files, ok := g.trees[operands[1]]
 	if !ok {
 		return nil, errors.New("exit status 128: fatal: not a valid object name")
 	}

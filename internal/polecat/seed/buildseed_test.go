@@ -9,14 +9,23 @@ import (
 // build commit when the pin lacks a module, and an error only when the pin cannot
 // be read at all. The image builds the build commit in every case.
 
+// buildRigFixture is a guard table whose build rig, gastown, has its bare repo
+// holding the build commit.
+func buildRigFixture(t *testing.T) *guardGit {
+	t.Helper()
+	f := newGuardGit(t)
+	f.answer[f.bare("gastown")+" cat-file -t "+mainSHA] = "commit"
+	return f
+}
+
 func TestBuildRigSeedUsesThePinThatCoversTheBuildCommit(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
+	f := buildRigFixture(t)
 	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a")},
 	})
-	commit, notes, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, "", f.run)
+	commit, notes, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, f.town, "", f.run)
 	if err != nil {
 		t.Fatalf("BuildRigSeed: %v", err)
 	}
@@ -30,12 +39,12 @@ func TestBuildRigSeedUsesThePinThatCoversTheBuildCommit(t *testing.T) {
 
 func TestBuildRigSeedFallsBackToTheBuildCommitWhenThePinLacksAModule(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
+	f := buildRigFixture(t)
 	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a", "github.com/x/new")},
 	})
-	commit, notes, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, "", f.run)
+	commit, notes, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, f.town, "", f.run)
 	if err != nil {
 		t.Fatalf("BuildRigSeed on a pin lacking a module = %v, want the build commit, not an error", err)
 	}
@@ -50,22 +59,36 @@ func TestBuildRigSeedFallsBackToTheBuildCommitWhenThePinLacksAModule(t *testing.
 
 func TestBuildRigSeedFailsWhenThePinCannotBeRead(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
+	f := buildRigFixture(t)
 	seedRig(f, "gastown", mainSHA, map[string]map[string]string{
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a")},
 	})
-	_, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, "", f.run)
-	if err == nil || !strings.Contains(err.Error(), "not readable in its canonical checkout") {
-		t.Fatalf("BuildRigSeed on an unreadable pin = %v, want an unreadable-pin error", err)
+	_, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, f.town, "", f.run)
+	if err == nil || !strings.Contains(err.Error(), "not readable in its bare repo "+f.bare("gastown")) {
+		t.Fatalf("BuildRigSeed on an unreadable pin = %v, want an unreadable-pin error naming the bare repo", err)
 	}
 }
 
 func TestBuildRigSeedWithNoPinUsesTheBuildCommit(t *testing.T) {
 	t.Parallel()
-	f := &guardGit{answer: map[string]string{rigDir("gastown") + " cat-file -t " + mainSHA: "commit"}}
-	commit, notes, err := BuildRigSeed(nil, "gastown", mainSHA, town, "", f.run)
+	f := buildRigFixture(t)
+	commit, notes, err := BuildRigSeed(nil, "gastown", mainSHA, f.town, "", f.run)
 	if err != nil || commit != mainSHA || len(notes) != 0 {
 		t.Errorf("BuildRigSeed without a pin = %s, %v, %v; want the build commit and no notes", commit, notes, err)
+	}
+}
+
+// A build rig with no bare repo under the town is refused before git runs,
+// naming the bare path.
+func TestBuildRigSeedRefusesABuildRigWithNoBareRepo(t *testing.T) {
+	t.Parallel()
+	f := newGuardGit(t)
+	_, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, f.town, "", f.run)
+	if err == nil || !strings.Contains(err.Error(), f.town+"/gastown/.repo.git") {
+		t.Fatalf("BuildRigSeed with no bare repo = %v, want an error naming the bare path", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("BuildRigSeed ran git against a rig with no bare repo: %v", f.calls)
 	}
 }
 
@@ -74,8 +97,8 @@ func TestBuildRigSeedWithNoPinUsesTheBuildCommit(t *testing.T) {
 func TestBuildRigSeedFailsWhenTheBuildSourceLacksTheBuildCommit(t *testing.T) {
 	t.Parallel()
 	const buildSrc = "/build/checkout"
-	f := &guardGit{answer: map[string]string{}}
-	_, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, buildSrc, f.run)
+	f := newGuardGit(t)
+	_, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, f.town, buildSrc, f.run)
 	if err == nil {
 		t.Fatal("BuildRigSeed on a build source lacking the build commit = nil, want an error")
 	}
@@ -87,16 +110,17 @@ func TestBuildRigSeedFailsWhenTheBuildSourceLacksTheBuildCommit(t *testing.T) {
 }
 
 // With a build source, the build rig's commit check and pin comparison are
-// asked of that directory, never of the town's canonical checkout.
+// asked of that directory, never of the town's bare repo.
 func TestBuildRigSeedReadsTheBuildSource(t *testing.T) {
 	t.Parallel()
 	const buildSrc = "/build/checkout"
-	f := &guardGit{answer: map[string]string{buildSrc + " cat-file -t " + mainSHA: "commit"}}
+	f := newGuardGit(t)
+	f.answer[buildSrc+" cat-file -t "+mainSHA] = "commit"
 	seedRigAt(f, buildSrc, mainSHA, map[string]map[string]string{
 		pinSHA:  {"go.mod": goMod("example/gastown", "github.com/x/a")},
 		mainSHA: {"go.mod": goMod("example/gastown", "github.com/x/a")},
 	})
-	commit, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, town, buildSrc, f.run)
+	commit, _, err := BuildRigSeed([]Source{{Rig: "gastown", Commit: pinSHA}}, "gastown", mainSHA, f.town, buildSrc, f.run)
 	if err != nil {
 		t.Fatalf("BuildRigSeed with a build source: %v", err)
 	}

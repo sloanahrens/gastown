@@ -28,11 +28,11 @@ func runWith(args []string, stdout, stderr io.Writer, git seed.Git) int {
 	fs := flag.NewFlagSet("stage", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	pins := fs.String("pins", "deploy/polecat/seed-pins", "the file naming each pinned rig's commit")
-	town := fs.String("town", "", "the town root holding <rig>/mayor/rig checkouts")
+	town := fs.String("town", "", "the town root holding each rig's <rig>/.repo.git bare repo")
 	dest := fs.String("dest", "", "the directory the sources are written into")
 	buildRig := fs.String("build-rig", "gastown", "the rig the image is built at, seeded from the build commit")
 	buildCommit := fs.String("build-commit", "", "the commit the image is built at")
-	buildSrc := fs.String("build-src", "", "the checkout the build rig is read from (default <town>/<build-rig>/mayor/rig)")
+	buildSrc := fs.String("build-src", "", "the checkout the build rig is read from (default <town>/<build-rig>/.repo.git)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -41,7 +41,7 @@ func runWith(args []string, stdout, stderr io.Writer, git seed.Git) int {
 		return 2
 	}
 	// Only a given flag is checked, and only a given value is passed on: an
-	// absent flag stays "" so seed resolves the town's canonical checkout and
+	// absent flag stays "" so seed resolves the town's bare repo and
 	// fails exactly as it did before this flag existed.
 	if flagSet(fs, "build-src") {
 		if *buildSrc == "" {
