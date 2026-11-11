@@ -232,6 +232,26 @@ func (f *fakeDoneRepo) FirstParentCommitSummaries(base, head string) ([]git.Comm
 	return f.summaries[head], nil
 }
 
+// DiffNameOnly and PatchIDExcluding report no paths and no id. A commit with no
+// changed paths matches nothing in the conflict-resolved rebase check, so these
+// fakes keep a divergence refused, as they did before that check existed.
+func (f *fakeDoneRepo) DiffNameOnly(base, head string) ([]string, error) { return nil, nil }
+
+func (f *fakeDoneRepo) PatchIDExcluding(base, head string, exclude []string) (string, error) {
+	return "", nil
+}
+
+// DiffLineChanges and ShowFileBytesAtRev report no lines and no file. A commit
+// with no changed paths never reaches them, and if one did, no line would be
+// found locally, keeping the divergence refused.
+func (f *fakeDoneRepo) DiffLineChanges(base, head string, paths []string) ([]string, []string, error) {
+	return nil, nil, nil
+}
+
+func (f *fakeDoneRepo) ShowFileBytesAtRev(ref, path string) ([]byte, error) {
+	return nil, git.ErrNotAtRef
+}
+
 // FullRangeCommitSummaries answers from its own map. A test that takes the
 // full-range path records what that walk returns; the first-parent listing is
 // not substituted for it, or the fake could not tell the two walks apart. An

@@ -89,6 +89,70 @@ func TestIntegrationPatchID_StableAcrossNoOpRebase(t *testing.T) {
 	}
 }
 
+// TestIntegrationPatchIDExcluding_LeavesOutOnlyTheExcludedPaths pins what the
+// rebase divergence check reads from PatchIDExcluding: the id of the range
+// with the excluded paths removed, so it equals the id of the same change made
+// without them; no exclusion is the whole-range id; excluding every path is no
+// id at all; and an exclude entry with glob characters names only that literal
+// path. (gt-d8rpw0)
+func TestIntegrationPatchIDExcluding_LeavesOutOnlyTheExcludedPaths(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	base, err := g.Rev("HEAD")
+	if err != nil {
+		t.Fatalf("rev HEAD: %v", err)
+	}
+	commitFile(t, dir, "a.txt", "alpha\n", "add a")
+	head := commitFile(t, dir, "b.txt", "beta\n", "add b")
+
+	whole, err := g.PatchID(base, head)
+	if err != nil {
+		t.Fatalf("PatchID: %v", err)
+	}
+	none, err := g.PatchIDExcluding(base, head, nil)
+	if err != nil {
+		t.Fatalf("PatchIDExcluding with no exclusions: %v", err)
+	}
+	if none != whole {
+		t.Errorf("no exclusion = %s, want the whole-range id %s", none, whole)
+	}
+
+	cmd := exec.Command("git", "checkout", "-b", "only-b", base)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("checkout only-b: %v\n%s", err, out)
+	}
+	onlyB := commitFile(t, dir, "b.txt", "beta\n", "add b alone")
+	wantOnlyB, err := g.PatchID(base, onlyB)
+	if err != nil {
+		t.Fatalf("PatchID of b alone: %v", err)
+	}
+	withoutA, err := g.PatchIDExcluding(base, head, []string{"a.txt"})
+	if err != nil {
+		t.Fatalf("PatchIDExcluding a.txt: %v", err)
+	}
+	if withoutA != wantOnlyB {
+		t.Errorf("excluding a.txt = %s, want the id of b.txt's change alone %s", withoutA, wantOnlyB)
+	}
+
+	literal, err := g.PatchIDExcluding(base, head, []string{"*.txt"})
+	if err != nil {
+		t.Fatalf("PatchIDExcluding *.txt: %v", err)
+	}
+	if literal != whole {
+		t.Errorf("excluding the literal path *.txt = %s, want the whole-range id %s: no file has that name", literal, whole)
+	}
+
+	everything, err := g.PatchIDExcluding(base, head, []string{"a.txt", "b.txt"})
+	if err != nil {
+		t.Fatalf("PatchIDExcluding every path: %v", err)
+	}
+	if everything != "" {
+		t.Errorf("excluding every path = %q, want no id", everything)
+	}
+}
+
 // TestPatchIDVerbatim_DistinguishesWhitespaceOnlyEdit is gt-2colr from both
 // sides in one run: PatchID cannot tell a rework that answers a whitespace
 // finding from the attempt that was rejected for it, and PatchIDVerbatim can.

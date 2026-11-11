@@ -346,7 +346,7 @@ sequenceDiagram
 
 **3. Work.** A polecat in a sandbox reads the bead, edits files in its worktree, runs the gate commands the bead names and writes tests. It talks to the town only through `bd` and git.
 
-**4. `gt done`.** The polecat rebases onto the current `main`, runs the gate locally, pushes its branch, and marks the bead ready to land. It does not merge. The polecat's part of the work is finished.
+**4. `gt done`.** The polecat rebases onto the current `main`, runs the gate locally, pushes its branch, and marks the bead ready to land. It does not merge. The polecat's part of the work is finished. The branch push is leased. When origin's tip is not an ancestor of the local head — an earlier dispatch pushed the branch and the seat then rebased or reworked it — `gt done` compares the two change-sets first. The same work rebased, a rework on top of origin's commits, and a rebase whose conflict resolution kept origin's own lines in the files `main` rewrote are pushed over the lease. Origin work absent locally is real divergence: `gt done` refuses, pushes nothing, and prints both tips (gt-bf5x, gt-d8rpw0).
 
 **5. Landing.** The landing worker picks the oldest ready bead of a rig and builds a *merge candidate*: it merges the branch into a throwaway worktree of `main`. The result is pushed as `land/<bead>`. This is what the gate runs on, so the gate sees exactly what would become `main`, not the polecat's pre-rebase view. The landing is a squash: one commit on `main` per bead.
 

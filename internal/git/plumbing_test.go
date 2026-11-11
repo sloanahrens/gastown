@@ -361,6 +361,78 @@ func TestPatchIDNoOutputIsAnError(t *testing.T) {
 	}
 }
 
+// PatchIDExcluding sends the excluded paths as literal exclude pathspecs after
+// "--", and each failure of its two git calls is returned, not read as an id.
+// An empty diff once the paths are left out is "" with no error, and patch-id
+// is not run for it. (gt-d8rpw0)
+func TestPatchIDExcludingSendsPathspecsAndReturnsEveryFailure(t *testing.T) {
+	t.Parallel()
+	const diffArgs = "diff a..b -- . :(exclude,literal)x.txt"
+	cases := []struct {
+		name    string
+		answers map[string]reply
+		wantID  string
+		wantErr string
+	}{
+		{
+			name: "id of the diff that is left",
+			answers: map[string]reply{
+				diffArgs:            ok("diff --git a/y b/y\n+y\n"),
+				"patch-id --stable": ok("p1 0000\n"),
+			},
+			wantID: "p1",
+		},
+		{
+			name: "empty diff has no id and runs no patch-id",
+			answers: map[string]reply{
+				diffArgs: ok(""),
+			},
+		},
+		{
+			name: "diff fails",
+			answers: map[string]reply{
+				diffArgs: fail(128, "bad revision"),
+			},
+			wantErr: "bad revision",
+		},
+		{
+			name: "patch-id fails",
+			answers: map[string]reply{
+				diffArgs:            ok("diff --git a/y b/y\n+y\n"),
+				"patch-id --stable": fail(1, "patch-id broke"),
+			},
+			wantErr: "patch-id broke",
+		},
+		{
+			name: "patch-id prints nothing for a non-empty diff",
+			answers: map[string]reply{
+				diffArgs:            ok("diff --git a/y b/y\n+y\n"),
+				"patch-id --stable": ok(""),
+			},
+			wantErr: "produced no output",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newScripted(tc.answers)
+			id, err := newTestGit(t, s).PatchIDExcluding("a", "b", []string{"x.txt"})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("PatchIDExcluding = %q, %v; want an error naming %q", id, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || id != tc.wantID {
+				t.Fatalf("PatchIDExcluding = %q, %v; want %q", id, err, tc.wantID)
+			}
+			if tc.wantID == "" && s.hasSent("patch-id --stable") {
+				t.Errorf("patch-id ran for an empty diff: %v", s.sent())
+			}
+		})
+	}
+}
+
 func TestCheckBranchContamination(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{
@@ -557,5 +629,75 @@ func TestAuthorEmailReadsTheWorktreeIdentity(t *testing.T) {
 	}
 	if got != seatEmail {
 		t.Errorf("AuthorEmail = %q, want %s", got, seatEmail)
+	}
+}
+
+// DiffLineChanges reads only the hunk lines of a -U0 diff: a file's ---/+++
+// headers come before its first @@ and must not read as changes, a line whose
+// own content starts with -- or ++ is a change, and a second file's headers
+// after the first file's hunk are headers again. The literal pathspec keeps a
+// path with glob characters naming only itself. (gt-d8rpw0)
+func TestDiffLineChangesReturnsOnlyHunkLines(t *testing.T) {
+	t.Parallel()
+	const diff = "diff --git a/allow[1].txt b/allow[1].txt\n" +
+		"index 1111111..2222222 100644\n" +
+		"--- a/allow[1].txt\n" +
+		"+++ b/allow[1].txt\n" +
+		"@@ -3 +3,2 @@\n" +
+		"-three\n" +
+		"+three feature\n" +
+		"+-- not a header\n" +
+		"diff --git a/other.txt b/other.txt\n" +
+		"index 3333333..4444444 100644\n" +
+		"--- a/other.txt\n" +
+		"+++ b/other.txt\n" +
+		"@@ -1 +1 @@\n" +
+		"-old\n" +
+		"+new\n"
+	s := newScripted(map[string]reply{
+		"diff -U0 --no-renames a b -- :(literal)allow[1].txt": ok(diff),
+	})
+	added, removed, err := newTestGit(t, s).DiffLineChanges("a", "b", []string{"allow[1].txt"})
+	if err != nil {
+		t.Fatalf("DiffLineChanges: %v", err)
+	}
+	if want := []string{"three feature", "-- not a header", "new"}; !reflect.DeepEqual(added, want) {
+		t.Errorf("added = %q, want %q", added, want)
+	}
+	if want := []string{"three", "old"}; !reflect.DeepEqual(removed, want) {
+		t.Errorf("removed = %q, want %q", removed, want)
+	}
+}
+
+// An unchanged path has an empty diff: no lines, and no error. A failed diff
+// returns its error rather than an empty change set. (gt-d8rpw0)
+func TestDiffLineChangesEmptyAndFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		answer  reply
+		wantErr string
+	}{
+		{name: "no change", answer: ok("")},
+		{name: "diff fails", answer: fail(128, "bad revision"), wantErr: "bad revision"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newScripted(map[string]reply{"diff -U0 --no-renames a b -- :(literal)x.txt": tc.answer})
+			added, removed, err := newTestGit(t, s).DiffLineChanges("a", "b", []string{"x.txt"})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("DiffLineChanges = %q, %q, %v; want an error naming %q", added, removed, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DiffLineChanges: %v", err)
+			}
+			if len(added) != 0 || len(removed) != 0 {
+				t.Fatalf("DiffLineChanges = %q, %q; want no lines", added, removed)
+			}
+		})
 	}
 }
