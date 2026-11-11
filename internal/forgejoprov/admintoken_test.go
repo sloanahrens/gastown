@@ -100,7 +100,7 @@ func TestResolveAdminTokenOrder(t *testing.T) {
 	}{
 		{
 			name: "the broker's variable beats FORGEJO_ADMIN_TOKEN and the file",
-			vars: map[string]string{brokerTokenEnv: "broker-tok", adminTokenEnv: "admin-tok"},
+			vars: map[string]string{BrokerTokenEnv: "broker-tok", adminTokenEnv: "admin-tok"},
 			want: "broker-tok",
 		},
 		{
@@ -210,7 +210,7 @@ func TestResolveAdminTokenRefusals(t *testing.T) {
 		},
 		{
 			name:    "a token with a single quote is refused without echoing it",
-			vars:    map[string]string{brokerTokenEnv: "sec'ret"},
+			vars:    map[string]string{BrokerTokenEnv: "sec'ret"},
 			wantErr: "refusing to use it",
 			leak:    "sec'ret",
 		},

@@ -58,7 +58,7 @@ func newRestoreFixture(t *testing.T, c restoreCase) *restoreFixture {
 	t.Helper()
 	fx := &restoreFixture{}
 	getenv := func(name string) string {
-		if name == restoreTokenEnv && !c.noToken {
+		if name == forgejoprov.BrokerTokenEnv && !c.noToken {
 			return forgejotest.AdminToken
 		}
 		return ""
@@ -92,7 +92,7 @@ func newRestoreFixture(t *testing.T, c restoreCase) *restoreFixture {
 	}
 	fx.resync.Provision = func(_ context.Context, opts *forgejoprov.Options, env forgejoprov.Env) int {
 		fx.events = append(fx.events, "restore")
-		fx.calls = append(fx.calls, restoreCall{opts: *opts, token: env.Getenv(restoreTokenEnv)})
+		fx.calls = append(fx.calls, restoreCall{opts: *opts, token: env.Getenv(forgejoprov.BrokerTokenEnv)})
 		if c.writes != nil {
 			c.writes(env.Log)
 		} else {

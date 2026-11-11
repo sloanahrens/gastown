@@ -176,7 +176,7 @@ func TestIntegrationPruningPushConvergesRealRefs(t *testing.T) {
 		},
 		HTTP: &http.Client{Transport: &liftTransport{fake: fake, events: &events}},
 		Getenv: func(name string) string {
-			if name == restoreTokenEnv {
+			if name == forgejoprov.BrokerTokenEnv {
 				return forgejotest.AdminToken
 			}
 			return ""

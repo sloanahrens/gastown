@@ -74,11 +74,6 @@ const revokeTimeout = 30 * time.Second
 // live: the token's name and the account, never its value. It is printed last.
 const stillLiveLine = "token still live: revoke token %s for %s by hand"
 
-// brokerTokenEnv is the variable the auth broker's run act sets with the
-// site-admin token. It names the first source ResolveAdminToken reads, and the one
-// a no-argument run under the broker takes its token from.
-const brokerTokenEnv = "GT_AUTH_FORGEJO_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
-
 // env is what the command reads and writes through: the clock the token's name is
 // taken from, the environment and the file the admin token is read from, and the
 // HTTP client Forgejo is reached through (nil means the client's default, with a
@@ -207,7 +202,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	fs := flag.NewFlagSet("forgejo-sources-secret", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&opts.APIURL, "api-url", forgejoprov.DefaultAPIURL, "Forgejo API root")
-	fs.StringVar(&opts.AdminTokenFile, "admin-token-file", "", "file holding FORGEJO_ADMIN_TOKEN=...; optional when $"+brokerTokenEnv+" is set")
+	fs.StringVar(&opts.AdminTokenFile, "admin-token-file", "", "file holding FORGEJO_ADMIN_TOKEN=...; optional when $"+forgejoprov.BrokerTokenEnv+" or $FORGEJO_ADMIN_TOKEN is set")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "print the plan; mint and store nothing")
 	fs.BoolVar(&opts.Check, "check", false, "read the secret, the collaborators and the tokens; mint, revoke and store nothing")
 	if err := fs.Parse(args); err != nil {
@@ -225,7 +220,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 // errNoTokenSource is the refusal when the command line names no token file and the
 // environment holds no token either: no source names a token, so the command line is
 // incomplete and the run exits with the usage code.
-var errNoTokenSource = errors.New("no admin token: set $" + brokerTokenEnv + " (the auth broker sets it), or pass --admin-token-file <file>")
+var errNoTokenSource = errors.New("no admin token: set $" + forgejoprov.BrokerTokenEnv + " (the auth broker sets it), or pass --admin-token-file <file>")
 
 // readAdminToken reads the site-admin token from the environment, then from path, in
 // the order forgejoprov.ResolveAdminToken uses. A run that names no file and finds no
