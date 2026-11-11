@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -167,9 +168,10 @@ func (c *Client) mountOrOpenUpload(ctx context.Context, base *url.URL, dstRepo, 
 
 // streamBlob reads digest from repo on c and sends its bytes to the upload
 // session at location on dst, which completes the upload under digest. The
-// bytes are hashed as they stream, and a source whose bytes do not hash to digest
-// is an error after the send, so a mismatch never passes as a copy. dstBase is
-// dst's parsed base, which the upload location resolves against.
+// bytes are spooled and hashed before the send, and a source whose bytes do not
+// hash to digest is an error before any byte reaches dst, so a mismatch never
+// passes as a copy. dstBase is dst's parsed base, which the upload location
+// resolves against.
 func (c *Client) streamBlob(ctx context.Context, dst *Client, dstBase *url.URL, repo, digest, location string) error {
 	srcBase, err := url.Parse(c.base())
 	if err != nil {
@@ -189,12 +191,29 @@ func (c *Client) streamBlob(ctx context.Context, dst *Client, dstBase *url.URL, 
 		return &statusError{code: resp.StatusCode, method: http.MethodGet, path: path}
 	}
 
+	// The bytes are spooled and hashed before the PUT, so a source whose bytes do
+	// not hash to digest never reaches the destination's upload session. The PUT
+	// then sends exactly the bytes that were hashed.
+	spool, err := os.CreateTemp(c.spoolDir, "registry-blob-*")
+	if err != nil {
+		return fmt.Errorf("copy blob %s: spool: %w", digest, err)
+	}
+	defer func() { _ = spool.Close(); _ = os.Remove(spool.Name()) }()
+	sum := sha256.New()
+	n, err := io.Copy(io.MultiWriter(spool, sum), resp.Body)
+	if err != nil {
+		return fmt.Errorf("copy blob %s: %w", digest, err)
+	}
+	if got := "sha256:" + hex.EncodeToString(sum.Sum(nil)); got != digest {
+		return fmt.Errorf("GET %s: the bytes hash to %s, not the digest asked", path, got)
+	}
+
 	target, err := uploadURL(dstBase, location, digest)
 	if err != nil {
 		return err
 	}
-	sum := sha256.New()
-	put, putDone, err := dst.exchange(ctx, http.MethodPut, target, io.TeeReader(resp.Body, sum), "application/octet-stream", resp.ContentLength)
+	body := io.NewSectionReader(spool, 0, n)
+	put, putDone, err := dst.exchange(ctx, http.MethodPut, target, body, "application/octet-stream", n)
 	if err != nil {
 		return fmt.Errorf("PUT blob %s: %w", digest, err)
 	}
@@ -202,9 +221,6 @@ func (c *Client) streamBlob(ctx context.Context, dst *Client, dstBase *url.URL, 
 	defer func() { _ = put.Body.Close() }()
 	if put.StatusCode < 200 || put.StatusCode > 299 {
 		return &statusError{code: put.StatusCode, method: http.MethodPut, path: "/blobs/" + digest}
-	}
-	if got := "sha256:" + hex.EncodeToString(sum.Sum(nil)); got != digest {
-		return fmt.Errorf("GET %s: the bytes hash to %s, not the digest asked", path, got)
 	}
 	return nil
 }

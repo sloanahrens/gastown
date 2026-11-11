@@ -45,6 +45,11 @@ type Client struct {
 	// default, which is what the town's runs take.
 	pageLimit int
 	waitLimit time.Duration
+
+	// spoolDir is the directory a blob copy spools the bytes it hashes into. A
+	// zero field takes the system temp dir; a test points it at a path that
+	// cannot hold a file to reach the spool refusal without touching TMPDIR.
+	spoolDir string
 }
 
 // pageBound is the number of pages one listing reads.

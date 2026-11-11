@@ -6,9 +6,12 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 )
 
 // copyFake is an in-memory registry for the copy tests. It answers the blob,
@@ -70,6 +73,44 @@ func (f *copyFake) failingClient(base, method, pathPart string) *Client {
 func (f *copyFake) failingClientAfter(base, method, pathPart string, passFirst int) *Client {
 	seen := 0
 	return &Client{Base: base, HTTP: &http.Client{Transport: methodFailingTransport{inner: roundTrip(f.serve), method: method, pathPart: pathPart, passFirst: passFirst, seen: &seen}}}
+}
+
+// bodyDropTransport answers blob reads with the first bytes of the blob and then
+// cause, as a connection dropped mid-blob does.
+type bodyDropTransport struct {
+	inner http.RoundTripper
+	cause error
+}
+
+func (t bodyDropTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.inner.RoundTrip(req)
+	if err != nil || req.Method != http.MethodGet || !strings.Contains(req.URL.Path, "/blobs/") {
+		return resp, err
+	}
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(io.MultiReader(strings.NewReader("lay"), iotest.ErrReader(t.cause)))
+	return resp, nil
+}
+
+// TestCopyBlobToReportsADroppedSource: a source that drops the connection while
+// the blob streams is refused with the cause in the error chain, and the
+// destination holds no blob.
+func TestCopyBlobToReportsADroppedSource(t *testing.T) {
+	t.Parallel()
+	layer := []byte("layer bytes")
+	src, dst := newCopyFake(), newCopyFake()
+	src.blobs[hashOf(layer)] = layer
+	cause := errors.New("connection reset")
+	source := src.client("http://src.test")
+	source.HTTP.Transport = bodyDropTransport{inner: source.HTTP.Transport, cause: cause}
+
+	err := source.CopyBlobTo(context.Background(), dst.client("http://dst.test"), "bot-registry/gastown-polecat", "gastown-polecat", hashOf(layer))
+	if !errors.Is(err, cause) {
+		t.Fatalf("CopyBlobTo error = %v, want the dropped connection in its chain", err)
+	}
+	if dst.has(hashOf(layer)) {
+		t.Fatal("the destination holds a blob after a source dropped mid-blob")
+	}
 }
 
 // copyManifest is a manifest the fake holds: its media type and its bytes.
@@ -341,6 +382,30 @@ func TestCopyBlobToRefusesACopyThatIsNotTheDigest(t *testing.T) {
 	}
 }
 
+// TestCopyBlobToRefusesASpoolThatCannotBeMade: a source whose bytes cannot be
+// spooled is refused before any byte is sent, and the destination holds no blob.
+func TestCopyBlobToRefusesASpoolThatCannotBeMade(t *testing.T) {
+	t.Parallel()
+	layer := []byte("layer bytes")
+	src, dst := newCopyFake(), newCopyFake()
+	src.blobs[hashOf(layer)] = layer
+	// A regular file cannot be the spool directory, so the spool file cannot be made.
+	notADir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADir, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := src.client("http://src.test")
+	source.spoolDir = notADir
+
+	err := source.CopyBlobTo(context.Background(), dst.client("http://dst.test"), "bot-registry/gastown-polecat", "gastown-polecat", hashOf(layer))
+	if err == nil {
+		t.Fatal("CopyBlobTo returned no error for a spool that cannot be made")
+	}
+	if dst.has(hashOf(layer)) {
+		t.Fatal("the destination holds a blob after a copy that could not be spooled")
+	}
+}
+
 // TestCopyBlobToRefusesUnusableUploadAnswers: an upload the destination answers
 // without a session, or with a location on another origin, is an error, and no
 // bytes are sent to that other origin.
@@ -429,7 +494,7 @@ func TestCopyBlobToRefusesFailedRequests(t *testing.T) {
 			setup: func(src, dst *copyFake) {
 				src.blobs[hashOf(layer)] = []byte("tampered bytes")
 				dst.trustUploads = true
-			}, keeps: true},
+			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
