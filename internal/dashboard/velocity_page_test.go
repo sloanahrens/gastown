@@ -294,3 +294,33 @@ func TestVelocityUnweightedLandingsDrawACapNotAZeroBar(t *testing.T) {
 		t.Errorf("the 16:00 tooltip is %q, want %q", only.Title, wantOnly)
 	}
 }
+
+// A trend hour the velocity feed holds no reading for is an empty column that
+// says so, not a bar: the feed did not measure that hour, so it is not zero
+// points. The bars still scale to the hours that have a reading.
+func TestVelocityHourWithNoReadingDrawsAnEmptyColumn(t *testing.T) {
+	t.Parallel()
+
+	st := velocityPaneReading()
+	st["trend"].(map[string]any)["velocity"].(map[string]any)["hours"] = []map[string]any{
+		{"hour": velocityPaneHour(0).Format(time.RFC3339), "points": 4, "weighted": 2, "unweighted": 0},
+		{"hour": velocityPaneHour(2).Format(time.RFC3339), "points": 0, "weighted": 0, "unweighted": 2},
+	}
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", st)
+	cols := readPointsRow(t, p)
+	if len(cols) != 3 {
+		t.Fatalf("the points row has %d columns, want one per trend hour (3)", len(cols))
+	}
+
+	gap := cols[1]
+	if len(gap.Parts) != 0 {
+		t.Errorf("the 15:00 hour has no reading but draws %+v, want an empty column", gap.Parts)
+	}
+	if want := fmt.Sprintf("%s · no points reading", velocityPaneHour(1).Format("15:04")); gap.Title != want {
+		t.Errorf("the 15:00 tooltip is %q, want %q", gap.Title, want)
+	}
+	if h := cols[0].Parts; len(h) != 1 || h[0].Height != "100%" {
+		t.Errorf("14:00 draws %+v, want its points bar at 100%% (the largest reading)", h)
+	}
+}
