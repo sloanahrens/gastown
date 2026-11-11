@@ -10,8 +10,8 @@ import (
 
 // A source the server has never read is stamped with a zero time, and a pane
 // that subtracts that from now draws an age in centuries ("read 739930d ago").
-// The page's read ages ask one decider, neverRead: an empty stamp or one before
-// the year 2000 is "never read" (gt-6qc3nw.14).
+// The page's read ages ask one decider, neverRead: an empty stamp, one that does
+// not parse, or one before the year 2000 is "never read" (gt-6qc3nw.14).
 
 // neverStamp is the zero time the server sends for a read that has not happened.
 const neverStamp = "0001-01-01T00:00:00Z"
@@ -26,7 +26,9 @@ func freshStamp() string {
 // absurdDays finds any age the page drew in days above a year.
 var absurdDays = regexp.MustCompile(`\b(\d+)d\b`)
 
-func assertNoAbsurdAge(t *testing.T, what, text string) {
+// assertNoBadAge fails on an age the page could not have drawn honestly: a day
+// count above a year, the zero stamp's age, NaN or Infinity.
+func assertNoBadAge(t *testing.T, what, text string) {
 	t.Helper()
 	for _, m := range absurdDays.FindAllStringSubmatch(text, -1) {
 		if n, err := strconv.Atoi(m[1]); err == nil && n > 365 {
@@ -36,54 +38,83 @@ func assertNoAbsurdAge(t *testing.T, what, text string) {
 	if strings.Contains(text, "739930") {
 		t.Errorf("%s draws the zero stamp's age in %q", what, text)
 	}
+	if strings.Contains(text, "NaN") || strings.Contains(text, "Infinity") {
+		t.Errorf("%s draws %q, which has no age to show", what, text)
+	}
 }
 
-// TestPageNeverReadAge draws the panes that print a read's age (the Cost header,
-// Machine, News and the Polecats seats note) with a read that never happened,
-// and again with one taken four minutes ago. The never read says "never read"
-// and no age; the fresh one says its age.
-func TestPageNeverReadAge(t *testing.T) {
-	t.Parallel()
+// agePane is one line on the page that draws a read's age: how it is drawn for a
+// read that never happened, the words a fresh read's age follows, and how to
+// draw it and read it back.
+type agePane struct {
+	name  string
+	never string
+	fresh string
+	draw  func(t *testing.T, dom *pageDOM, stamp string)
+	text  func(t *testing.T, dom *pageDOM) string
+}
 
-	panes := []struct {
-		name string
-		draw func(t *testing.T, dom *pageDOM, stamp string)
-		note string
-	}{
+// costUsageState is the usage reading the data-quality line is drawn from, with
+// the stamp of the scan under test.
+func costUsageState(stamp string) map[string]any {
+	return map[string]any{
+		"spend":          spendReading(),
+		"cost_providers": []any{},
+		"deepreview":     map[string]any{"schedules": []any{}},
+		"usage": map[string]any{
+			"window":           "24h",
+			"by_class_model":   []any{},
+			"deep_review_runs": []any{},
+			"top_beads":        []any{},
+			"over20":           []any{},
+			"as_of":            stamp,
+		},
+	}
+}
+
+func agePanes() []agePane {
+	// A story keeps the caption drawn: a pane with no stories clears it.
+	story := map[string]any{"rank": 1, "title": "a story", "url": "https://example.com/1", "points": 1, "comments": 0, "id": 1}
+	return []agePane{
 		{
-			name: "COST header",
-			note: "costnote",
+			name:  "COST header",
+			never: "never read",
+			fresh: "read ",
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderCost", map[string]any{
 					"spend": liveSpend(),
 					"reads": map[string]any{"spend": map[string]any{"at": stamp, "every_sec": 900}},
 				})
 			},
+			text: func(t *testing.T, dom *pageDOM) string { return dom.element(t, "costnote").Text },
 		},
 		{
-			name: "Machine",
-			note: "machnote",
+			name:  "Machine",
+			never: "never read",
+			fresh: "read ",
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderMachine", map[string]any{
 					"machine": map[string]any{},
 					"reads":   map[string]any{"machine": map[string]any{"at": stamp, "every_sec": 60}},
 				})
 			},
+			text: func(t *testing.T, dom *pageDOM) string { return dom.element(t, "machnote").Text },
 		},
 		{
-			name: "News",
-			note: "newsnote",
+			name:  "News",
+			never: "never read",
+			fresh: "read ",
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
-				// A story keeps the caption drawn: a pane with no stories clears it.
-				story := map[string]any{"rank": 1, "title": "a story", "url": "https://example.com/1", "points": 1, "comments": 0, "id": 1}
 				dom.call(t, "renderNews", map[string]any{
 					"news": map[string]any{"at": stamp, "stories": []any{story}},
 				})
 			},
+			text: func(t *testing.T, dom *pageDOM) string { return dom.element(t, "newsnote").Text },
 		},
 		{
-			name: "Polecats seats",
-			note: "polecatsnote",
+			name:  "Polecats seats",
+			never: "never read",
+			fresh: "read ",
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderPolecats", map[string]any{
 					"summary_at": stamp,
@@ -91,41 +122,87 @@ func TestPageNeverReadAge(t *testing.T) {
 					"reads":      map[string]any{"seats": map[string]any{"at": stamp, "every_sec": 900}},
 				})
 			},
+			text: func(t *testing.T, dom *pageDOM) string { return dom.element(t, "polecatsnote").Text },
+		},
+		{
+			name:  "cloud checks",
+			never: "never read",
+			fresh: "last ran ",
+			draw: func(t *testing.T, dom *pageDOM, stamp string) {
+				dom.call(t, "renderCloud", map[string]any{
+					"cloud": map[string]any{"checks": map[string]any{"at": stamp, "state": "stale", "every_sec": 300}},
+				})
+			},
+			text: func(t *testing.T, dom *pageDOM) string { return dom.element(t, "cloud").Text },
+		},
+		{
+			// The data-quality line keeps its own word: the pinned tests name
+			// "never scanned" for it, and the helper decides only when.
+			name:  "data quality",
+			never: "never scanned",
+			fresh: "last scanned ",
+			draw: func(t *testing.T, dom *pageDOM, stamp string) {
+				dom.call(t, "renderCost", costUsageState(stamp))
+			},
+			text: func(t *testing.T, dom *pageDOM) string {
+				lines := panelFoldLines(t, dom, "cost.quality")
+				if len(lines) == 0 {
+					t.Fatal("the data-quality fold draws no lines")
+				}
+				return lines[0].Text
+			},
 		},
 	}
+}
 
-	for _, pane := range panes {
-		t.Run(pane.name+" never read", func(t *testing.T) {
-			t.Parallel()
+// TestPageNeverReadAge draws every read-age line with a read that never happened
+// (a zero, empty or unparsable stamp) and with one taken four minutes ago. The
+// never read draws its own word and no age; the fresh one draws its age and none
+// of the never words.
+func TestPageNeverReadAge(t *testing.T) {
+	t.Parallel()
 
-			dom := newPageDOM(t)
-			pane.draw(t, dom, neverStamp)
-			got := dom.element(t, pane.note).Text
-			if !strings.Contains(got, "never read") {
-				t.Errorf("a read that never happened draws %q, want \"never read\"", got)
-			}
-			assertNoAbsurdAge(t, pane.name, got)
-		})
+	for _, pane := range agePanes() {
+		for _, never := range []struct{ label, stamp string }{
+			{"a zero stamp", neverStamp},
+			{"an empty stamp", ""},
+			{"an unparsable stamp", "not a time"},
+		} {
+			t.Run(pane.name+" with "+never.label, func(t *testing.T) {
+				t.Parallel()
+
+				dom := newPageDOM(t)
+				pane.draw(t, dom, never.stamp)
+				got := pane.text(t, dom)
+				if !strings.Contains(got, pane.never) {
+					t.Errorf("%s draws %q for a read that never happened, want %q", pane.name, got, pane.never)
+				}
+				assertNoBadAge(t, pane.name, got)
+			})
+		}
 
 		t.Run(pane.name+" fresh read", func(t *testing.T) {
 			t.Parallel()
 
 			dom := newPageDOM(t)
 			pane.draw(t, dom, freshStamp())
-			got := dom.element(t, pane.note).Text
-			if !strings.Contains(got, "read 4m ago") {
-				t.Errorf("a read taken four minutes ago draws %q, want its age \"read 4m ago\"", got)
+			got := pane.text(t, dom)
+			if !regexp.MustCompile(regexp.QuoteMeta(pane.fresh) + `\S+ ago`).MatchString(got) {
+				t.Errorf("%s draws %q for a read taken four minutes ago, want its age after %q", pane.name, got, pane.fresh)
 			}
-			if strings.Contains(got, "never read") {
-				t.Errorf("a read that has happened draws %q as never read", got)
+			for _, bad := range []string{"never read", "never scanned"} {
+				if strings.Contains(got, bad) {
+					t.Errorf("%s draws %q for a read that has happened", pane.name, got)
+				}
 			}
+			assertNoBadAge(t, pane.name, got)
 		})
 	}
 }
 
-// TestPageNeverReadDecidesByStamp pins the decider's edges: an empty stamp and
-// one a second before the year 2000 are never read, and the first instant of
-// 2000 is an old read with an age.
+// TestPageNeverReadDecidesByStamp pins the decider's edges: an empty stamp, one
+// that does not parse, and one a second before the year 2000 are never read, and
+// the first instant of 2000 is an old read with an age.
 func TestPageNeverReadDecidesByStamp(t *testing.T) {
 	t.Parallel()
 
@@ -134,6 +211,7 @@ func TestPageNeverReadDecidesByStamp(t *testing.T) {
 		never       bool
 	}{
 		{"empty", "", true},
+		{"unparsable", "not a time", true},
 		{"a second before 2000", "1999-12-31T23:59:59Z", true},
 		{"the first instant of 2000", "2000-01-01T00:00:00Z", false},
 	} {
@@ -174,7 +252,7 @@ func TestPageNeverReadKeepsFailureMark(t *testing.T) {
 		if want := "never read · read failed: " + reason; !strings.Contains(got, want) {
 			t.Errorf("the header draws %q, want %q", got, want)
 		}
-		assertNoAbsurdAge(t, "COST header", got)
+		assertNoBadAge(t, "COST header", got)
 	})
 
 	t.Run("Polecats seats", func(t *testing.T) {
@@ -191,7 +269,7 @@ func TestPageNeverReadKeepsFailureMark(t *testing.T) {
 		if want := "seats never read · the seats read failed: " + reason; !strings.Contains(got, want) {
 			t.Errorf("the polecats note draws %q, want %q", got, want)
 		}
-		assertNoAbsurdAge(t, "Polecats seats", got)
+		assertNoBadAge(t, "Polecats seats", got)
 	})
 
 	t.Run("Machine", func(t *testing.T) {
@@ -206,6 +284,35 @@ func TestPageNeverReadKeepsFailureMark(t *testing.T) {
 		if want := "never read · read failed"; !strings.Contains(got, want) {
 			t.Errorf("the machine caption draws %q, want %q", got, want)
 		}
-		assertNoAbsurdAge(t, "Machine", got)
+		assertNoBadAge(t, "Machine", got)
 	})
+}
+
+// TestPageAgeLinesUseTheHelper is a source scan of the page. A line that names a
+// read in its text and ages a stamp from the clock (a subtraction from Date.now(),
+// or an age() call) must ask neverRead on that line or within the three lines
+// above it, so a zero, empty or unparsable stamp never reaches the subtraction.
+// Comment lines are skipped: they describe the code, they do not draw it.
+func TestPageAgeLinesUseTheHelper(t *testing.T) {
+	t.Parallel()
+
+	agesAStamp := regexp.MustCompile(`Date\.now\(\)\s*-|-\s*Date\.now\(\)|\bage\(`)
+	namesARead := regexp.MustCompile(`"[^"]*\bread\b[^"]*"|last ran|last scanned|checks:`)
+	comment := regexp.MustCompile(`^\s*//`)
+
+	lines := strings.Split(string(indexHTML), "\n")
+	for i, line := range lines {
+		if comment.MatchString(line) || !agesAStamp.MatchString(line) || !namesARead.MatchString(line) {
+			continue
+		}
+		guarded := false
+		for j := max(0, i-3); j <= i; j++ {
+			if strings.Contains(lines[j], "neverRead(") {
+				guarded = true
+			}
+		}
+		if !guarded {
+			t.Errorf("index.html:%d draws a read's age without neverRead: %s", i+1, strings.TrimSpace(line))
+		}
+	}
 }
