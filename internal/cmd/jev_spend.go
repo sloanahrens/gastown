@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -42,10 +43,16 @@ their tokens at --usd-per-billion-tokens, which is required because the
 ledger stores tokens and never dollars. A missing ledger prints zeros; a line
 that does not parse is skipped and counted in lines_skipped.
 
+The first line names the copy the numbers came from: the newest write among the
+batteries' logs and the ledger, warning when that copy looks older than a live
+one may.
+
 --json prints {calls, input_tokens, output_tokens, usd, lines_skipped,
-by_caller, periods}, where by_caller maps each caller to its {calls, usd}
-and periods holds the dollars of the last hour, today (since local midnight),
-yesterday and the last 168 hours, for a dashboard that draws Jev spend beside DeepSeek's and Claude's.
+by_caller, periods, copy_newest_write, copy_stale}, where by_caller maps each
+caller to its {calls, usd}, periods holds the dollars of the last hour, today
+(since local midnight), yesterday and the last 168 hours, for a dashboard that
+draws Jev spend beside DeepSeek's and Claude's, and copy_newest_write is
+{at, path} of the copy's newest write, null when nothing has been written.
 
 Examples:
   gt jev spend --usd-per-billion-tokens 3 --json
@@ -86,6 +93,15 @@ func jevSpendWithFlags(w io.Writer, townRoot string, hours int, usdPerBillion fl
 	if err != nil {
 		return err
 	}
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return fmt.Errorf("reading the patrol config: %w", err)
+	}
+	logCopy, err := jevReadLogCopy(townRoot)
+	if err != nil {
+		return err
+	}
+	line, copyStale := jevLogCopyText(logCopy, jevHealthConfig(cfg), now)
 	if asJSON {
 		// The periods ride beside the window's own fields, for the dashboard's
 		// Jev row (today, yesterday, 7 days, last hour); a reader that does not
@@ -96,12 +112,27 @@ func jevSpendWithFlags(w io.Writer, townRoot string, hours int, usdPerBillion fl
 		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(struct {
-			jev.SpendReport
-			Periods jev.SpendPeriods `json:"periods"`
-		}{rep, periods})
+		return enc.Encode(jevSpendDoc{
+			SpendReport:     rep,
+			Periods:         periods,
+			CopyNewestWrite: logCopy.doc(),
+			CopyStale:       copyStale,
+		})
+	}
+	if _, err := fmt.Fprintln(w, line); err != nil {
+		return err
 	}
 	return writeJevSpendTable(w, rep)
+}
+
+// jevSpendDoc is the --json document: the window's report, the periods the
+// dashboard draws, and the copy the ledger was read from, so a reader can tell
+// which copy the numbers describe.
+type jevSpendDoc struct {
+	jev.SpendReport
+	Periods         jev.SpendPeriods `json:"periods"`
+	CopyNewestWrite *jevCopyWrite    `json:"copy_newest_write"`
+	CopyStale       bool             `json:"copy_stale"`
 }
 
 // writeJevSpendTable prints the totals and then one row per caller, in name

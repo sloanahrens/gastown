@@ -89,6 +89,13 @@ func TestScorecardFindingGolden(t *testing.T) {
 	if err := os.WriteFile(logPath, []byte(strings.Join(findingFixtureLog(), "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The log is one of the files the report's copy line measures, so stamp it
+	// with the clock the report is judged at and keep the wall clock out of
+	// the golden.
+	fixtureAt := time.Date(2026, 10, 20, 11, 55, 0, 0, time.UTC)
+	if err := os.Chtimes(logPath, fixtureAt, fixtureAt); err != nil {
+		t.Fatal(err)
+	}
 
 	open := func(name, townRoot string) (scorecard.Adapter, error) {
 		if name != scorecard.FindingBattery {
@@ -103,9 +110,12 @@ func TestScorecardFindingGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The copy line names the absolute log path, and the town is a temp
+	// directory, so the golden holds the town as <town>.
+	got := strings.ReplaceAll(out.String(), town, "<town>")
 	golden := filepath.Join("testdata", jevScorecardFindingGoldenPath)
 	if *updateJevScorecardFindingGolden {
-		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -113,7 +123,7 @@ func TestScorecardFindingGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != string(want) {
-		t.Errorf("output differs from %s (rewrite with -update-jev-scorecard-finding-golden):\n%s\nwant:\n%s", golden, out.String(), want)
+	if got != string(want) {
+		t.Errorf("output differs from %s (rewrite with -update-jev-scorecard-finding-golden):\n%s\nwant:\n%s", golden, got, want)
 	}
 }

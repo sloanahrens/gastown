@@ -259,3 +259,27 @@ func TestScorecardJSONLabeledTotalMatchesRows(t *testing.T) {
 		t.Errorf("rows %d of %d items, omitted %v, labeled total %d, labeled rows %d", len(rep.Lines), rep.Items, rep.LinesOmitted, rep.Labeled, labeled)
 	}
 }
+
+// TestJevScorecardPrintsTheLogCopyAge prints the newest write among the town's
+// Jev files above the report, so a score read from a copy other than the
+// daemon's says so (gt-bgimh9).
+func TestJevScorecardPrintsTheLogCopyAge(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeScorecardFixture(t, town)
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	logPath := filepath.Join(town, ".runtime", "jev", "dedupe.jsonl")
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	jevSetModTime(t, logPath, now.Add(-5*time.Minute))
+
+	var out bytes.Buffer
+	if err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", false, false, now); err != nil {
+		t.Fatal(err)
+	}
+	want := "log copy: newest write 2026-10-20 11:55Z (5m ago) at " + logPath
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("output does not carry %q:\n%s", want, out.String())
+	}
+}

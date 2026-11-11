@@ -190,3 +190,36 @@ func TestJevSpendCommandRefusesBadFlags(t *testing.T) {
 		assert.InDelta(t, 4.5e-6, got.USD, 1e-12, "1500 tokens at $3 per billion")
 	})
 }
+
+// TestJevSpendPrintsTheLogCopyAge prints the newest write among the town's Jev
+// files above the table, the same line health prints, so a reader of 0.12 USD
+// can tell which copy it came from (gt-bgimh9).
+func TestJevSpendPrintsTheLogCopyAge(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	writeJevSpendLedger(t, town, jevSpendLine(now.Add(-time.Hour), "attention", 10, 5))
+	ledger := jev.UsageLedgerPath(town)
+	jevSetModTime(t, ledger, now.Add(-10*time.Minute))
+
+	var out bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, false, now))
+	assert.Contains(t, out.String(), "log copy: newest write 2026-10-19 11:50Z (10m ago) at "+ledger)
+	assert.Less(t, strings.Index(out.String(), "log copy:"), strings.Index(out.String(), "Calls"),
+		"the line sits above the table")
+}
+
+// TestJevSpendRefusesANonRegularLogCopyFile covers the copy read's failure
+// path: a log path that is a directory has an mtime, but its mtime is not a
+// write, so the command refuses rather than measuring it.
+func TestJevSpendRefusesANonRegularLogCopyFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(town, ".runtime", "jev", "attention.jsonl"), 0o700))
+
+	var out bytes.Buffer
+	err := jevSpendWithFlags(&out, town, 24, 1e9, false, time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attention.jsonl")
+	assert.Contains(t, err.Error(), "not a regular file")
+}

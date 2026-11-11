@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -44,8 +45,10 @@ rate by 0.1. Scoring one battery is read-only; only --refresh writes.
 
 --battery is required, and an unknown name is an error that lists the
 registered batteries. --since keeps only the lines stamped in the window ending
-now, given as Nd for days or a Go duration such as 36h. --json prints the same
-report as JSON. The testsel battery asks about every package of every change, so
+now, given as Nd for days or a Go duration such as 36h. The report's first line
+names the copy it read: the newest write among the town's Jev logs and the
+ledger, warning when that copy looks older than a live one may. --json prints
+the same report as JSON, the copy as copy_newest_write and copy_stale. The testsel battery asks about every package of every change, so
 its --json report leaves out the per-item rows (the totals stay); --lines prints
 them.
 
@@ -301,19 +304,43 @@ func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery,
 	if err != nil {
 		return err
 	}
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return fmt.Errorf("reading the patrol config: %w", err)
+	}
+	logCopy, err := jevReadLogCopy(townRoot)
+	if err != nil {
+		return err
+	}
 	rep, err := scorecard.Build(ctx, a, from)
 	if err != nil {
 		return err
 	}
+	line, copyStale := jevLogCopyText(logCopy, jevHealthConfig(cfg), now)
 	if asJSON {
 		if _, bulky := a.(scorecard.Bulky); bulky && !withLines {
 			rep.Lines, rep.LinesOmitted = nil, true
 		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(rep)
+		return enc.Encode(jevScorecardDoc{
+			Report:          rep,
+			CopyNewestWrite: logCopy.doc(),
+			CopyStale:       copyStale,
+		})
+	}
+	if _, err := fmt.Fprintln(w, line); err != nil {
+		return err
 	}
 	return scorecard.WriteText(w, rep)
+}
+
+// jevScorecardDoc is the --json document: the battery's report, the copy its
+// log was read from, and whether that copy looks older than a live one may.
+type jevScorecardDoc struct {
+	scorecard.Report
+	CopyNewestWrite *jevCopyWrite `json:"copy_newest_write"`
+	CopyStale       bool          `json:"copy_stale"`
 }
 
 // parseSince returns the start of the --since window ending at now. An empty
