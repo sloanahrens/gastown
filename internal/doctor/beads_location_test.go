@@ -26,10 +26,12 @@ var beadsLocationRigFiles = map[string]string{
 	"config.yaml":   "prefix: tr\n",
 }
 
-// beadsLocationConfigOnlyFiles are a rig's beads files with no metadata.json, so
-// beads.ComputeRedirectTarget finds no database and takes its mayor/rig fallback.
-var beadsLocationConfigOnlyFiles = map[string]string{
-	"config.yaml": "prefix: tr\n",
+// beadsLocationNoDatabaseFiles are a rig's beads files at <rig>/.beads whose
+// metadata.json names no dolt_database, so beads.ComputeRedirectTarget finds no
+// database there and takes its mayor/rig fallback.
+var beadsLocationNoDatabaseFiles = map[string]string{
+	"metadata.json": `{"prefix":"tr"}`,
+	"config.yaml":   "prefix: tr\n",
 }
 
 // The rows below cover the four cases each beads-location check must tell
@@ -55,6 +57,22 @@ func TestBeadsRedirectCheck_BeadsLocationTable(t *testing.T) {
 			afterFix: func(t *testing.T, rigPath string) {
 				if _, err := os.Stat(filepath.Join(rigPath, ".beads", "redirect")); err == nil {
 					t.Error("Fix wrote a redirect for a rig whose files are at .beads/")
+				}
+			},
+		},
+		{
+			name: "new location beside a legacy copy with no redirect passes, and Fix leaves both alone",
+			setup: func(t *testing.T, rigPath string) {
+				writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationRigFiles)
+				writeBeadsLocationFiles(t, filepath.Join(rigPath, "mayor", "rig", ".beads"), beadsLocationRigFiles)
+			},
+			wantStatus: StatusOK,
+			afterFix: func(t *testing.T, rigPath string) {
+				if _, err := os.Stat(filepath.Join(rigPath, ".beads", "redirect")); err == nil {
+					t.Error("Fix wrote a redirect for a rig whose files are at .beads/")
+				}
+				if _, err := os.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); err != nil {
+					t.Errorf("metadata.json after Fix: %v, want it kept", err)
 				}
 			},
 		},
@@ -408,7 +426,7 @@ func TestBeadsRedirectTargetCheck_FixRefusesLegacyRecompute(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
-	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationConfigOnlyFiles)
+	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationNoDatabaseFiles)
 	writeBeadsLocationFiles(t, filepath.Join(rigPath, "mayor", "rig", ".beads"), beadsLocationRigFiles)
 	crewBeads := filepath.Join(rigPath, "crew", "max", ".beads")
 	writeBeadsLocationFiles(t, crewBeads, map[string]string{"redirect": "../../missing/.beads\n"})
@@ -435,7 +453,7 @@ func TestStaleBeadsRedirectCheck_FixRefusesLegacyRedirect(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
-	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationConfigOnlyFiles)
+	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationNoDatabaseFiles)
 	writeBeadsLocationFiles(t, filepath.Join(rigPath, "mayor", "rig", ".beads"), beadsLocationRigFiles)
 	crewBeads := filepath.Join(rigPath, "crew", "max", ".beads")
 	writeBeadsLocationFiles(t, crewBeads, map[string]string{"redirect": "../../missing/.beads\n"})

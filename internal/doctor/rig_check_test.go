@@ -535,7 +535,7 @@ func TestBeadsRedirectCheck_FixInitBeads(t *testing.T) {
 	}
 }
 
-func TestBeadsRedirectCheck_RigRootBeadsBesideLegacyCopy(t *testing.T) {
+func TestBeadsRedirectCheck_ConflictingLocalBeads(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
@@ -567,13 +567,13 @@ func TestBeadsRedirectCheck_RigRootBeadsBesideLegacyCopy(t *testing.T) {
 	check := NewBeadsRedirectCheck()
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
 
-	// Beads with data at .beads/ and no redirect are the rig's beads; the legacy copy is not a conflict
+	// Check should detect conflicting beads
 	result := check.Run(ctx)
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK for rig-root beads beside a legacy copy, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusError {
+		t.Errorf("expected StatusError for conflicting beads, got %v", result.Status)
 	}
-	if _, err := os.Stat(filepath.Join(localBeads, "config.yaml")); err != nil {
-		t.Errorf("rig-root config.yaml after Run: %v, want it kept", err)
+	if !strings.Contains(result.Message, "Conflicting") {
+		t.Errorf("expected message about conflicting beads, got %q", result.Message)
 	}
 }
 
@@ -713,7 +713,7 @@ func TestDefaultBranchAllRigsSkippedRigNotCounted(t *testing.T) {
 	})
 }
 
-func TestBeadsRedirectCheck_FixKeepsRigRootBeadsBesideLegacyCopy(t *testing.T) {
+func TestBeadsRedirectCheck_FixConflictingLocalBeads(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
@@ -740,24 +740,31 @@ func TestBeadsRedirectCheck_FixKeepsRigRootBeadsBesideLegacyCopy(t *testing.T) {
 	check := NewBeadsRedirectCheck()
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
 
-	// The rig's beads are at .beads/ with no redirect: nothing to fix
+	// Verify fix is needed
 	result := check.Run(ctx)
-	if result.Status != StatusOK {
-		t.Fatalf("expected StatusOK before fix, got %v", result.Status)
+	if result.Status != StatusError {
+		t.Fatalf("expected StatusError before fix, got %v", result.Status)
 	}
 
-	// Fix must not remove the rig-root beads or point the rig at the legacy copy
+	// Apply fix - should remove conflicting local beads and create redirect
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(localBeads, "redirect")); err == nil {
-		t.Error("Fix wrote a redirect for a rig whose files are at .beads/")
+
+	// Verify redirect was created
+	redirectPath := filepath.Join(localBeads, "redirect")
+	content, err := os.ReadFile(redirectPath)
+	if err != nil {
+		t.Fatalf("redirect file not created: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(localBeads, "config.yaml")); err != nil {
-		t.Errorf("rig-root config.yaml after Fix: %v, want it kept", err)
+	if string(content) != "mayor/rig/.beads\n" {
+		t.Errorf("redirect content = %q, want 'mayor/rig/.beads\\n'", string(content))
 	}
-	if result := check.Run(ctx); result.Status != StatusOK {
-		t.Errorf("expected StatusOK after fix, got %v", result.Status)
+
+	// The legacy redirect is a warning: the move to .beads/ is not done
+	result = check.Run(ctx)
+	if result.Status != StatusWarning {
+		t.Errorf("expected StatusWarning after fix to legacy redirect, got %v", result.Status)
 	}
 }
 

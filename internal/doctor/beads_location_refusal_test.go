@@ -34,7 +34,7 @@ func TestStaleBeadsRedirectCheck_FixRefusesLegacyForMissingRedirect(t *testing.T
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
-	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationConfigOnlyFiles)
+	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationNoDatabaseFiles)
 	writeBeadsLocationFiles(t, filepath.Join(rigPath, "mayor", "rig", ".beads"), beadsLocationRigFiles)
 	crewDir := filepath.Join(rigPath, "crew", "max")
 	if err := os.MkdirAll(crewDir, 0755); err != nil {

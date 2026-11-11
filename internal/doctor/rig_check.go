@@ -765,8 +765,23 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Tracked beads exist at the legacy location, with no redirect.
+	// Tracked beads exist at the legacy location, with no redirect. Local
+	// beads with data here are a conflict: the directory has to go for bd to
+	// follow the tracked beads, which constants.RigBeadsPath also answers.
 	if dirExists(legacyBeadsDir) {
+		if hasBeadsData(rigBeadsDir) {
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusError,
+				Message: "Conflicting local beads found with tracked beads",
+				Details: []string{
+					"Tracked beads exist at: " + constants.RigLegacyBeadsRelPath(),
+					"Local beads with data exist at: .beads/",
+					"Fix will remove local beads and create redirect to tracked beads",
+				},
+				FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to fix",
+			}
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
@@ -875,10 +890,20 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
-	// Case 2: Legacy beads exist and the rig's files are not at <rig>/.beads -
-	// point the rig root at the legacy copy. The rig root holds no data here
-	// (rigBeadsAtRigRoot is false), so there is no local data to remove.
+	// Case 2: Tracked beads exist and the rig's files are not at <rig>/.beads -
+	// create the redirect to the legacy copy. A local beads database with no
+	// redirect is a genuine conflict: the directory has to go for bd to follow
+	// the tracked beads. When a redirect is already present, only its target
+	// is wrong, so rewriting it must leave metadata.json and local data in place.
 	if hasTrackedBeads {
+		_, redirectErr := os.Stat(redirectPath)
+		if hasLocalBeads && errors.Is(redirectErr, fs.ErrNotExist) && hasBeadsData(rigBeadsDir) {
+			// Remove conflicting local beads directory
+			if err := os.RemoveAll(rigBeadsDir); err != nil {
+				return fmt.Errorf("removing conflicting local beads: %w", err)
+			}
+		}
+
 		// Create .beads directory if needed
 		if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
 			return fmt.Errorf("creating .beads directory: %w", err)
@@ -894,12 +919,13 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 }
 
 // rigBeadsAtRigRoot reports whether a rig's real beads files are at
-// <rig>/.beads: the directory holds data or metadata.json. A redirect file
-// does not change the answer, so a stale legacy redirect beside data at the
-// rig root is still a rig whose files moved.
+// <rig>/.beads: the directory holds metadata.json, the file
+// constants.RigBeadsPath takes as the data's home. A redirect file does not
+// change the answer, so a stale legacy redirect beside metadata at the rig root
+// is still a rig whose files moved. A config.yaml alone is not the data: the
+// database it belongs to may still be at the legacy location.
 func rigBeadsAtRigRoot(rigPath string) bool {
-	dir := constants.RigBeadsWritePath(rigPath)
-	return hasBeadsData(dir) || fileExists(filepath.Join(dir, "metadata.json"))
+	return fileExists(filepath.Join(constants.RigBeadsWritePath(rigPath), "metadata.json"))
 }
 
 // redirectTargetsLegacyBeads reports whether a rig-root redirect's content
