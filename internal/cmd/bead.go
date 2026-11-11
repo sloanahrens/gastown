@@ -34,6 +34,7 @@ Read with 'gt show' or 'bd show'; write with these:
   gt bead create "title"               File a bead (--rig <rig> files in another rig)
   gt bead note <id> "findings"         Append to the bead's notes
   gt bead update <id> --title=...      Edit title, priority, labels, acceptance
+  gt bead tick <id> "<box text>"       Tick one acceptance box, named by its text
   gt bead claim <id>                   Claim a bead (in_progress, assigned to you)
   gt bead reset <id> --reason=...      Return an orphaned claim to open
   gt bead comment <id> "text"          Add a comment
@@ -141,14 +142,16 @@ var beadUpdateCmd = &cobra.Command{
 Status moves through the other verbs: claim, reset, close, reopen. Notes
 append through 'gt bead note'.
 
---acceptance takes the whole criteria block, replacing what the bead had:
-bd show prints the current text, and you resend it with '- [x]' on each line
-your work satisfies. gt done refuses a submit while any '- [ ]' line is left.
+--acceptance takes the whole criteria block, replacing what the bead had, so
+use it to amend the criteria. To tick a box your work satisfies, use
+'gt bead tick', which reads the field at that moment and flips only that box.
+gt done refuses a submit while any '- [ ]' line is left.
 
 Examples:
   gt bead update gt-abc --title="DISPROVEN: <claim>; <what shipped>"
   gt bead update gt-abc --add-label=needs-review --priority=1
-  gt bead update gt-abc --acceptance="- [x] the refusal names the verb"`,
+  gt bead update gt-abc --acceptance="- [ ] the refusal names the verb"
+  gt bead tick gt-abc "the refusal names the verb"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.update(args[0], beadUpdateOptions(cmd.Flags())) })
@@ -179,6 +182,25 @@ func beadUpdateOptions(f *pflag.FlagSet) beads.UpdateOptions {
 	opts.SetMetadata, _ = f.GetStringArray("set-metadata")
 	opts.UnsetMetadata, _ = f.GetStringArray("unset-metadata")
 	return opts
+}
+
+var beadTickCmd = &cobra.Command{
+	Use:   "tick <id> <box text>",
+	Short: "Tick one acceptance box, named by its text",
+	Long: `Tick one unchecked acceptance box. The box is named by its text (what
+follows its '[ ] '), and the field is re-read when the tick runs, so a box
+another writer added since you read the criteria is kept. Every other line
+keeps its bytes.
+
+A box whose text is no longer in the field refuses, and the refusal prints
+the criteria as they now stand. A box already ticked is left as it is.
+
+Example:
+  gt bead tick gt-abc "make lint && make gate pass"`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.tick(args[0], args[1]) })
+	},
 }
 
 var beadClaimCmd = &cobra.Command{
@@ -313,7 +335,7 @@ func init() {
 	beadReviewCmd.Flags().StringSliceVar(&beadReviewFindings, "finding", nil, "Finding bead a FAIL covers (repeatable; required for FAIL)")
 
 	beadDepCmd.AddCommand(beadDepAddCmd, beadDepRemoveCmd)
-	beadCmd.AddCommand(beadCreateCmd, beadNoteCmd, beadUpdateCmd, beadClaimCmd, beadResetCmd,
+	beadCmd.AddCommand(beadCreateCmd, beadNoteCmd, beadUpdateCmd, beadTickCmd, beadClaimCmd, beadResetCmd,
 		beadCommentCmd, beadReviewCmd, beadDepCmd, beadCloseCmd, beadReopenCmd, beadSearchCmd)
 	rootCmd.AddCommand(beadCmd)
 }
@@ -481,6 +503,41 @@ func (v *beadVerbs) update(id string, opts beads.UpdateOptions) error {
 		return err
 	}
 	_, err := fmt.Fprintf(v.out, "✓ Updated %s\n", id)
+	return err
+}
+
+// tick flips the one unchecked acceptance box whose text is box. It reads the
+// field now, not at any earlier read, so a box another writer added since the
+// caller started is kept, and it names the box by text, not position. A box
+// that is no longer in the field refuses with the field as it stands now. The
+// write is not conditional on this read: a writer that lands between the Show
+// and the Update is overwritten, and the store offers no compare-and-set.
+func (v *beadVerbs) tick(id, box string) error {
+	is, err := v.client.Show(id)
+	if err != nil {
+		return err
+	}
+	// A bead whose criteria sit only in its description has no field to tick.
+	// Say so, and name the one write that gives the field its block, rather
+	// than refuse as if a box had gone missing.
+	if strings.TrimSpace(is.AcceptanceCriteria) == "" {
+		return fmt.Errorf("not ticking %s: its acceptance field is empty, so no box is in it; "+
+			"the criteria may sit in the description's Acceptance section, which tick does not edit. "+
+			"Set the field once with gt bead update %s --acceptance=\"<the block, those lines ticked>\", then tick", id, id)
+	}
+	next, err := beads.TickAcceptanceBox(is.AcceptanceCriteria, box)
+	if err != nil {
+		return fmt.Errorf("not ticking %s: %q: %w; its criteria now read:\n%s",
+			id, box, err, is.AcceptanceCriteria)
+	}
+	if next == is.AcceptanceCriteria {
+		_, err = fmt.Fprintf(v.out, "✓ %s already has %q ticked\n", id, box)
+		return err
+	}
+	if err := v.client.Update(id, beads.UpdateOptions{Acceptance: &next}); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(v.out, "✓ Ticked %q on %s\n", box, id)
 	return err
 }
 

@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 )
@@ -28,6 +29,27 @@ type AcceptanceItem struct {
 // still count and an unfinished criterion cannot hide behind it.
 func AcceptanceItems(text string) []AcceptanceItem {
 	var items []AcceptanceItem
+	for _, at := range acceptanceItemsAt(text) {
+		items = append(items, at.AcceptanceItem)
+	}
+	return items
+}
+
+// acceptanceItemAt is an item with where it sits in its text: line is the
+// index of its line in strings.Split(text, "\n"), boxAt is the byte offset of
+// the "[" that opens its checkbox in that line, and box is the text after the
+// checkbox, trimmed. boxAt and box are unset when the item is not boxed.
+type acceptanceItemAt struct {
+	AcceptanceItem
+	line  int
+	boxAt int
+	box   string
+}
+
+// acceptanceItemsAt is AcceptanceItems with each item's line index, so a
+// caller that rewrites one line finds it without a second parse.
+func acceptanceItemsAt(text string) []acceptanceItemAt {
+	var items []acceptanceItemAt
 	lines := strings.Split(text, "\n")
 	fence := ""
 	for i, line := range lines {
@@ -46,14 +68,72 @@ func AcceptanceItems(text string) []AcceptanceItem {
 		if m == nil {
 			continue
 		}
-		item := AcceptanceItem{Line: trimmed, Nested: strings.TrimLeft(line, " \t") != line}
-		if box := acceptanceBoxRe.FindStringSubmatch(m[1]); box != nil {
-			item.Boxed = true
-			item.Checked = box[1] != " "
+		at := acceptanceItemAt{
+			AcceptanceItem: AcceptanceItem{Line: trimmed, Nested: strings.TrimLeft(line, " \t") != line},
+			line:           i,
 		}
-		items = append(items, item)
+		// The box opens at the line's first "[": no list marker holds one, and
+		// m[1] lies inside line. An item with no such "[" is not boxed.
+		if box := acceptanceBoxRe.FindStringSubmatch(m[1]); box != nil {
+			if boxAt := strings.Index(line, "["); boxAt >= 0 {
+				at.Boxed = true
+				at.Checked = box[1] != " "
+				at.boxAt = boxAt
+				at.box = strings.TrimSpace(m[1][len(box[0]):])
+			}
+		}
+		items = append(items, at)
 	}
 	return items
+}
+
+// ErrAcceptanceBoxNotFound is returned by TickAcceptanceBox when no unchecked
+// box has the text asked for.
+var ErrAcceptanceBoxNotFound = errors.New("no unchecked acceptance box has that text")
+
+// ErrAcceptanceBoxAmbiguous is returned by TickAcceptanceBox when more than one
+// unchecked box has the text asked for, so no one of them is the box meant.
+var ErrAcceptanceBoxAmbiguous = errors.New("more than one unchecked acceptance box has that text")
+
+// TickAcceptanceBox returns block with the one unchecked box whose text is box
+// ticked. box is the text after the checkbox; a whole item line as bd prints
+// it ("- [ ] text") names the same box. Only the "[ ]" of that line changes:
+// every other byte of block is kept, so an amendment a writer made after the
+// caller read block survives the tick. A box that is already ticked returns
+// block unchanged. An unknown or ambiguous box is an error, never a guess.
+func TickAcceptanceBox(block, box string) (string, error) {
+	box = strings.TrimSpace(box)
+	if m := acceptanceItemRe.FindStringSubmatch(box); m != nil {
+		if b := acceptanceBoxRe.FindStringSubmatch(m[1]); b != nil {
+			box = strings.TrimSpace(m[1][len(b[0]):])
+		}
+	}
+	if box == "" {
+		return "", errors.New("the acceptance box text is empty")
+	}
+	var open, ticked []acceptanceItemAt
+	for _, at := range acceptanceItemsAt(block) {
+		if !at.Boxed || at.box != box {
+			continue
+		}
+		if at.Checked {
+			ticked = append(ticked, at)
+		} else {
+			open = append(open, at)
+		}
+	}
+	switch {
+	case len(open) > 1:
+		return "", ErrAcceptanceBoxAmbiguous
+	case len(open) == 0 && len(ticked) > 0:
+		return block, nil
+	case len(open) == 0:
+		return "", ErrAcceptanceBoxNotFound
+	}
+	lines := strings.Split(block, "\n")
+	raw, at := lines[open[0].line], open[0].boxAt
+	lines[open[0].line] = raw[:at+1] + "x" + raw[at+2:]
+	return strings.Join(lines, "\n"), nil
 }
 
 // closesFence reports whether a trimmed line closes the fence that opened with
