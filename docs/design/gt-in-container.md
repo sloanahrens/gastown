@@ -8,7 +8,7 @@ Status: approved by the operator, 2026-11-06. Epic: gt-yjzepk.
 
 Why: every install today is done twice (the daemon image and the Mac binary), the two drift (the installed `gt` reads "72 commits behind"), and the Mac build drags in code that only exists to supervise a daemon running directly on the Mac (launchd jobs, a host agent, power states). The daemon is in a container now, so that code is local-run debt.
 
-Out of scope: moving the daemon into the control cluster (the wrapper's target is a setting so that move needs no rewrite), and building images automatically from a green tier sweep (its own design).
+The daemon moved into the control cluster on 2026-11-10, and the Mac stops being a town (see [The one town copy](#the-one-town-copy-2026-11-11)). Out of scope: building images automatically from a green tier sweep (its own design).
 
 ## Principles
 
@@ -35,11 +35,33 @@ Behaviour:
 - Environment forwarded: `GT_*`, `BEADS_*`, `BD_*`, `CLAUDE_*`, `TERM`, `COLUMNS`, `LINES`. Nothing else crosses.
 - The `CLAUDE_*` family must be screened before it crosses. A variable named in `UnforwardedCredentialEnvVars` (`internal/config`) must be dropped, and so must any `CLAUDE_*` name containing `TOKEN`, `SECRET`, `PASSWORD`, `PASSPHRASE` or `KEY`; the last also drops the mTLS key path, which is the safe side. The screen must run before any `-e` flag is built, because a forwarded value reaches the docker command line and its argv. `forwards` in `internal/gtwrap/plan.go` refuses the listed names and the `CLAUDE_*` names that contain one of those words, so an unlisted credential under that prefix is dropped too.
 - Exit code, stdout and stderr pass through unchanged; stdin is attached.
-- The target is a setting in a small config file (`docker` today; a later `kubectl exec` target is a second runner behind the same interface). The image tag is read from the compose file, never hard-coded.
+- The target is a setting in a small config file (see [Targets](#targets)). The image tag is read from the compose file, never hard-coded.
 - `--doctor` reports which rung would be used and why.
 - Logic is a package with a runner interface; `main` only wires it. Unit tests drive a fake runner. One integration test runs the wrapper against the live container.
 
 Measured cost: `gt status --line` takes 74 ms through `docker exec` and 41 ms natively.
+
+## Targets
+
+The config file `~/.config/gt/wrap.json` names the target; an absent file means `docker`. A file that does not parse, or names no target, refuses. Each target is a runner behind the same `Launch` and `Doctor` pair, and the environment rules in `internal/gtwrap/plan.go` are shared by both.
+
+| Target | Config | Reaches | Ladder (`--doctor` reports the first rung that fails) |
+|---|---|---|---|
+| `docker` | `{"target": "docker"}` | the daemon container, through the docker CLI | exec, run, down (see The wrapper) |
+| `kubernetes` | `{"target": "kubernetes", "context", "namespace", "deployment", "container"}` | the one Running pod of the Deployment, through `kubectl exec` | kubectl on PATH, the context answers `get /readyz`, one Running pod, the tool on the container's PATH |
+
+The kubernetes target reads its four fields only when it is named, and refuses a config that leaves one out, naming the field. Its pod is looked up on every call from the Deployment's own selector, so a restarted pod is found without a config edit.
+
+- The pod cannot see Mac directories. The Mac's town for this target is `$HOME/gt`, and it needs no town marker, since the Mac keeps no town of its own; a working directory outside it is not a refusal. A directory under `$HOME/gt` maps to the same relative path under the pod's town root, which is the Deployment's `TownRootPath`. Any other directory maps to the pod's town root, and the wrapper writes a note to stderr saying so.
+- Before the tool runs, the wrapper checks that the mapped directory is a directory in the pod's container. One that is missing, or a check that does not run, is refused with exit 1 and one line naming it, so the shell's own message never reaches the caller. The check is one more `kubectl exec` per call, on top of the ladder's probes, so `gt status --line` through this target costs more than through docker.
+- There is no throwaway rung. With no Running pod, or with the context unreachable, the call is refused with exit 1 and the doctor's reason.
+- The tool runs in the Deployment's container with `kubectl exec -i`, and with `-t` only when stdin is a terminal. The exit status passes through.
+- `BEADS_DOLT_SERVER_HOST=host.docker.internal` is set in the pod as in the container. The Deployment carries the matching host alias.
+- `kubectl exec` forwards no environment, so the forwarded variables travel as `env NAME=VALUE` arguments, in the argv of the Mac's kubectl process and of the pod's `env` process. The kubernetes target therefore drops every name that carries a credential word (`TOKEN`, `SECRET`, `PASSWORD`, `PASSPHRASE`, `KEY`) under any prefix, and every name in `UnforwardedCredentialEnvVars`, with one stderr note naming the names and never their values. That includes `GT_DOLT_PASSWORD`, which the `GT_` family forwards to docker: the container keeps its own Secrets, so the pod still has it. Decided 2026-11-11 after review: the overseer's spec says credentials never reach the argv and the other forwarded names may cross. The docker target is unchanged.
+
+## The one town copy (2026-11-11)
+
+Decided by the operator at 10:35 on 2026-11-11: the persistent claim is the one town copy, and the Mac stops being a town. The Mac keeps no town of its own; its `gt`, `bd`, `om` and `hm` reach the one copy through the kubernetes target. The daemon has run in the control cluster since 2026-11-10.
 
 ## What replaces the Mac facts
 
