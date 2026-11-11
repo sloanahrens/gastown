@@ -497,6 +497,74 @@ func TestJevConflictLandingsFailsOnAnUnreadableFile(t *testing.T) {
 	}
 }
 
+func TestJevConflictReportRunFailsOutsideATown(t *testing.T) {
+	t.Parallel()
+	findTown := func() (string, error) { return "", context.DeadlineExceeded }
+
+	var out bytes.Buffer
+	err := jevConflictReportRun(context.Background(), &out, findTown, "", false, jevConflictNow)
+	if err == nil {
+		t.Fatalf("a command outside any town returned a report:\n%s", out.String())
+	}
+	if out.Len() != 0 {
+		t.Errorf("a command outside any town wrote output: %q", out.String())
+	}
+}
+
+func TestJevConflictReportLandingsOpenErrorFailsTheReport(t *testing.T) {
+	t.Parallel()
+	landings := func(string) (jevLandedAt, error) { return nil, context.DeadlineExceeded }
+
+	var out bytes.Buffer
+	err := jevConflictReportWith(context.Background(), &out, t.TempDir(), "", false, jevConflictNow,
+		jevConflictOpenWith(nil, nil), landings)
+	if err == nil {
+		t.Fatal("landings that cannot be opened returned a report")
+	}
+}
+
+func TestJevConflictReportUnopenableLogFailsTheReport(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A regular file where the log's directory should be fails to open with
+	// something other than a missing file.
+	dir := filepath.Dir(conflict.LogPath(town))
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := jevConflictReportWith(context.Background(), &out, town, "", false, jevConflictNow,
+		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil))
+	if err == nil {
+		t.Fatal("a conflict log that cannot be opened returned a report")
+	}
+}
+
+func TestJevConflictReportSkipsALineWithNoBead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeJevConflictLog(t, town,
+		jevConflictLogLine(t, "", "b", time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC), 0.9),
+	)
+
+	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil))
+
+	if rep.Pairs != 0 || rep.LinesSkipped != 1 {
+		t.Errorf("a line with no bead gave pairs %d, skipped %d; want 0 pairs and 1 skipped", rep.Pairs, rep.LinesSkipped)
+	}
+}
+
+func TestJevConflictLandingsOfRejectsAnInvalidRig(t *testing.T) {
+	t.Parallel()
+	if _, err := jevConflictLandingsOf(t.TempDir(), ""); err == nil {
+		t.Error("landings of an empty rig name opened")
+	}
+}
+
 func TestJevConflictReportMissingLogIsEmpty(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()

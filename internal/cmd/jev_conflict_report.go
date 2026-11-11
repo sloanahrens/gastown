@@ -13,7 +13,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -75,12 +74,18 @@ func init() {
 }
 
 func runJevConflictReport(cmd *cobra.Command, _ []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
+	return jevConflictReportRun(cmd.Context(), cmd.OutOrStdout(), workspace.FindFromCwdOrError,
+		jevConflictReportSince, jevConflictReportJSON, time.Now())
+}
+
+// jevConflictReportRun finds the town and runs the report in it. findTown is a
+// parameter so a test can stand in for a cwd outside any town.
+func jevConflictReportRun(ctx context.Context, w io.Writer, findTown func() (string, error), since string, asJSON bool, now time.Time) error {
+	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevConflictReportWith(cmd.Context(), cmd.OutOrStdout(), townRoot, jevConflictReportSince, jevConflictReportJSON,
-		time.Now(), scorecard.Open, jevConflictLandings)
+	return jevConflictReportWith(ctx, w, townRoot, since, asJSON, now, scorecard.Open, jevConflictLandings)
 }
 
 // jevConflictOpener opens a battery's adapter. It is a parameter so a test can
@@ -164,14 +169,15 @@ func jevConflictRead(a scorecard.Adapter) ([]jevConflictEntry, int, error) {
 		if len(raw) == 0 {
 			continue
 		}
+		var l conflict.Line
+		if err := json.Unmarshal(raw, &l); err != nil {
+			skipped++
+			continue
+		}
 		item, err := a.Parse(raw)
 		if err != nil {
 			skipped++
 			continue
-		}
-		var l conflict.Line
-		if err := json.Unmarshal(raw, &l); err != nil {
-			return nil, 0, fmt.Errorf("reading a conflict line: %w", err)
 		}
 		entries = append(entries, jevConflictEntry{
 			item:      item,
@@ -381,10 +387,15 @@ func jevConflictBuild(ctx context.Context, a scorecard.Adapter, entries []jevCon
 	return rep, nil
 }
 
-// jevConflictLandings opens the rig's landings. Each bead's record is read once
-// per report, and a bead with no record never landed.
+// jevConflictLandings opens the landings of the rig the conflict battery reads.
 func jevConflictLandings(townRoot string) (jevLandedAt, error) {
-	f, err := land.RigLandingsFile(townRoot, conflict.RigName)
+	return jevConflictLandingsOf(townRoot, conflict.RigName)
+}
+
+// jevConflictLandingsOf opens the rig's landings. Each bead's record is read
+// once per report, and a bead with no record never landed.
+func jevConflictLandingsOf(townRoot, rig string) (jevLandedAt, error) {
+	f, err := land.RigLandingsFile(townRoot, rig)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +432,8 @@ func jevWilson(k, n int) (low, high float64, ok bool) {
 	return math.Max(0, center-half), math.Min(1, center+half), true
 }
 
-// writeJevConflictText prints one table per cut, then the total line.
+// writeJevConflictText prints one table per cut, then the total line. The
+// columns are fixed width, so the text is built in full before it is written.
 func writeJevConflictText(w io.Writer, rep jevConflictReport) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "conflict-report: same_files answers, one per bead pair, over %.1f days from %s (UTC)\n",
@@ -429,13 +441,9 @@ func writeJevConflictText(w io.Writer, rep jevConflictReport) error {
 	fmt.Fprintf(&b, "pairs counted %d, lines skipped %d\n", rep.Pairs, rep.LinesSkipped)
 	for _, c := range rep.Cuts {
 		fmt.Fprintf(&b, "\ncut %.1f\n", c.Cut)
-		tw := tabwriter.NewWriter(&b, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "DAY\tPAIRS\tLABELED\tOVERLAPPED\tPRECISION")
+		fmt.Fprintf(&b, "%-10s  %6s  %7s  %10s  %9s\n", "DAY", "PAIRS", "LABELED", "OVERLAPPED", "PRECISION")
 		for _, d := range c.Days {
-			fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%s\n", d.Day, d.Pairs, d.Labeled, d.Overlapped, jevPrecisionText(d.Precision))
-		}
-		if err := tw.Flush(); err != nil {
-			return err
+			fmt.Fprintf(&b, "%-10s  %6d  %7d  %10d  %9s\n", d.Day, d.Pairs, d.Labeled, d.Overlapped, jevPrecisionText(d.Precision))
 		}
 		t := c.Total
 		wilson := "-"
