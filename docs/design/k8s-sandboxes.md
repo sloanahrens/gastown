@@ -24,7 +24,7 @@ DeepSeek polecats run in OpenShell sandboxes on Kubernetes, first on a local kin
 
 ## Node pools (town cluster)
 
-The town cluster has a control plane and two workers, `core` and `sandbox`; the labels, the sandbox taint and which workloads each pool carries are in `deploy/k8s/kind/up.sh`, and the eviction order is in `deploy/k8s/priority-classes.yaml`. A node can read only the Secrets of pods scheduled on it, so sandbox pods, which tolerate the taint, share no node with the control plane's secrets.
+The town cluster has a control plane and two workers, `core` and `sandbox`; the labels, the sandbox taint and which workloads each pool carries are in `deploy/k8s/kind/cluster.yaml`, which `up.sh` renders with the cluster name and gateway port, and the eviction order is in `deploy/k8s/priority-classes.yaml`. A node can read only the Secrets of pods scheduled on it, so sandbox pods, which tolerate the taint, share no node with the control plane's secrets.
 
 ## Things that cost time
 
@@ -35,6 +35,7 @@ The town cluster has a control plane and two workers, `core` and `sandbox`; the 
 - **Active gateway.** `openshell gateway add` makes the new gateway active, so a town registration reads the active gateway first and selects it back afterwards; a restore that fails stops the run and names the `openshell gateway select` to run. A rebuild replaces the client certificates, so `--register-town` re-adds only the `k8s` entry on every run. The old entry is removed before the new certificates are written, and an exit trap re-adds it and selects the previous gateway if the run stops in between, so a failed registration never leaves the daemon without `k8s`. A run that finds no active gateway in the town config says so and leaves `k8s` active.
 - **Docker context.** `colima start` switches Docker's global context and sends the town's plain `docker` calls to the wrong VM. Every kind and registry call here uses the VM's socket through `DOCKER_HOST`; if colima flips the context anyway, `up.sh` restores the original.
 - **Ports.** Someone else may already listen on a port; `up.sh` refuses a busy gateway port and never signals the other process.
+- **Image GC.** kind's kubelet garbage-collects no images by default, which once filled the VM's disk (gt-ppgga). `cluster.yaml` turns the kubelet's own image GC on for every node (high 80 percent, low 70 percent, 72h maximum age), so a rebuilt cluster prunes unused images from its first start.
 - **NetworkPolicy lag.** kindnet enforces ingress and egress policy a few seconds after it is applied; OpenShell creates policies before it starts the workload, so this does not affect it.
 
 ## Build beads

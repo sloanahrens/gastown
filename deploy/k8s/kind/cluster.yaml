@@ -1,0 +1,45 @@
+# The kind cluster that deploy/k8s/kind/up.sh creates. up.sh fills the two
+# placeholders from its own settings (GT_K8S_CLUSTER and GT_K8S_GATEWAY_PORT in
+# common.sh) and passes the rendered copy to `kind create cluster --config`.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: __CLUSTER__
+containerdConfigPatches:
+- |-
+  [plugins."io.containerd.grpc.v1.cri".registry]
+    config_path = "/etc/containerd/certs.d"
+# kind's kubelet garbage-collects no images by default (imageGCHighThresholdPercent
+# 100, imageMaximumGCAge 0s), which once filled the gt-sbx VM's disk (gt-ppgga).
+# The patch applies to every node, so a rebuilt cluster prunes its own unused
+# images from its first start.
+kubeadmConfigPatches:
+- |
+  kind: KubeletConfiguration
+  imageGCHighThresholdPercent: 80
+  imageGCLowThresholdPercent: 70
+  imageMaximumGCAge: 72h
+nodes:
+- role: control-plane
+  extraPortMappings:
+  - containerPort: 30443
+    hostPort: __GATEWAY_PORT__
+    listenAddress: 127.0.0.1
+# The pools mirror the cloud node pools: control-plane workloads on core, and
+# only pods that tolerate the taint on sandbox (a node reads the secrets of
+# the pods scheduled on it, so sandbox nodes hold none of the control plane's).
+# Labels and the taint are set at node registration, so a rebuilt cluster is
+# right from its first start.
+- role: worker
+  labels:
+    gt.dev/pool: core
+- role: worker
+  labels:
+    gt.dev/pool: sandbox
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      taints:
+      - key: gt.dev/pool
+        value: sandbox
+        effect: NoSchedule

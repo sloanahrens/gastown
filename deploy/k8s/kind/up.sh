@@ -97,40 +97,13 @@ if vmkind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   say "kind cluster $CLUSTER exists; leaving it"
 else
   port_in_use "$GATEWAY_PORT" && die "127.0.0.1:$GATEWAY_PORT already has a listener (not ours to touch); set GT_K8S_GATEWAY_PORT to a free port"
-  cat >"$OUT/kind-config.yaml" <<YAML
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: $CLUSTER
-containerdConfigPatches:
-- |-
-  [plugins."io.containerd.grpc.v1.cri".registry]
-    config_path = "/etc/containerd/certs.d"
-nodes:
-- role: control-plane
-  extraPortMappings:
-  - containerPort: 30443
-    hostPort: $GATEWAY_PORT
-    listenAddress: 127.0.0.1
-# The pools mirror the cloud node pools: control-plane workloads on core, and
-# only pods that tolerate the taint on sandbox (a node reads the secrets of
-# the pods scheduled on it, so sandbox nodes hold none of the control plane's).
-# Labels and the taint are set at node registration, so a rebuilt cluster is
-# right from its first start.
-- role: worker
-  labels:
-    gt.dev/pool: core
-- role: worker
-  labels:
-    gt.dev/pool: sandbox
-  kubeadmConfigPatches:
-  - |
-    kind: JoinConfiguration
-    nodeRegistration:
-      taints:
-      - key: gt.dev/pool
-        value: sandbox
-        effect: NoSchedule
-YAML
+  # cluster.yaml is the checked-in kind config; the cluster name and the gateway
+  # port are the two values up.sh sets per run. The replacement is escaped so an
+  # operator's GT_K8S_* value cannot rewrite the expression or the config.
+  sed_replacement() { printf '%s' "$1" | sed 's/[&\\|]/\\&/g'; }
+  sed -e "s|__CLUSTER__|$(sed_replacement "$CLUSTER")|g" \
+    -e "s|__GATEWAY_PORT__|$(sed_replacement "$GATEWAY_PORT")|g" \
+    "$HERE/cluster.yaml" >"$OUT/kind-config.yaml"
   say "creating kind cluster $CLUSTER"
   vmkind create cluster --config "$OUT/kind-config.yaml" --wait 180s
 fi
