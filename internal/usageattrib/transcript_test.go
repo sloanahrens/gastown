@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -157,6 +158,91 @@ func TestReaderLinesWithNoIDAreKeptApart(t *testing.T) {
 	}
 	if msgs[0].ID != nil || msgs[1].ID != nil {
 		t.Errorf("ids = %v, want both nil", idsOf(msgs))
+	}
+}
+
+func TestReaderMessageIDFallsBackToUUIDAndMerges(t *testing.T) {
+	t.Parallel()
+	// Python: m.get("id") is absent, so the key is o.get("uuid"). Two lines with the same uuid merge.
+	line := `{"type":"assistant","timestamp":"t","uuid":"u1","message":{"model":"m","usage":{"output_tokens":5}}}`
+	msgs, _, err := IterAssistantUsage(writeTranscript(t, []string{line, line}))
+	if err != nil {
+		t.Fatalf("IterAssistantUsage: %v", err)
+	}
+	if got := idsOf(msgs); !reflect.DeepEqual(got, []string{"u1"}) {
+		t.Fatalf("ids = %v, want [u1]", got)
+	}
+}
+
+func TestReaderEmptyMessageIDFallsBackToUUID(t *testing.T) {
+	t.Parallel()
+	// Python: m.get("id") or o.get("uuid") treats an empty id as absent, so the uuid is the key.
+	line := `{"type":"assistant","timestamp":"t","uuid":"u1","message":{"id":"","model":"m","usage":{"output_tokens":5}}}`
+	msgs, _, err := IterAssistantUsage(writeTranscript(t, []string{line}))
+	if err != nil {
+		t.Fatalf("IterAssistantUsage: %v", err)
+	}
+	if got := idsOf(msgs); !reflect.DeepEqual(got, []string{"u1"}) {
+		t.Fatalf("ids = %v, want [u1]", got)
+	}
+}
+
+func TestReaderEmptyUUIDIsAKeyNotNil(t *testing.T) {
+	t.Parallel()
+	// Python: "" is not None, so a line with no message id and an empty uuid is keyed "" and two such
+	// lines merge. Only a line with neither key is kept apart.
+	line := `{"type":"assistant","timestamp":"t","uuid":"","message":{"model":"m","usage":{"input_tokens":1}}}`
+	msgs, _, err := IterAssistantUsage(writeTranscript(t, []string{line, line}))
+	if err != nil {
+		t.Fatalf("IterAssistantUsage: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("len(msgs) = %d, want 1", len(msgs))
+	}
+	if msgs[0].ID == nil || *msgs[0].ID != "" {
+		t.Errorf("ID = %v, want a non-nil empty key", idsOf(msgs))
+	}
+}
+
+func TestReaderLaterLineWithLowerOutputDoesNotLowerTotal(t *testing.T) {
+	t.Parallel()
+	// Python: each token field is the maximum over the id's lines. A later line reporting fewer output
+	// tokens does not lower the total, which a last-line-wins merge would do.
+	lines := asstLines(t, "m1", "m", "2026-10-12T10:00:00Z", 1, 1, 1, 900, 1, false)
+	lines = append(lines, asstLines(t, "m1", "m", "2026-10-12T10:00:01Z", 1, 1, 1, 500, 1, false)...)
+	msgs, _, err := IterAssistantUsage(writeTranscript(t, lines))
+	if err != nil {
+		t.Fatalf("IterAssistantUsage: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Output != 900 {
+		t.Fatalf("msgs = %+v, want one message with Output 900", msgs)
+	}
+}
+
+// longLineReader yields n bytes of 'x' and no newline, without holding them in memory.
+type longLineReader struct{ n int }
+
+func (r *longLineReader) Read(p []byte) (int, error) {
+	if r.n == 0 {
+		return 0, io.EOF
+	}
+	k := min(len(p), r.n)
+	for i := range k {
+		p[i] = 'x'
+	}
+	r.n -= k
+	return k, nil
+}
+
+func TestReaderLineOverCapIsErrorWithNoPartialResult(t *testing.T) {
+	t.Parallel()
+	// A line over maxLineBytes is refused, not skipped: a dropped usage line would undercount.
+	msgs, bad, err := ReadAssistantUsage(&longLineReader{n: maxLineBytes + 1})
+	if !errors.Is(err, errLineTooLong) {
+		t.Fatalf("err = %v, want errLineTooLong", err)
+	}
+	if msgs != nil || bad != 0 {
+		t.Errorf("got msgs=%v bad=%d alongside the error, want none", msgs, bad)
 	}
 }
 
