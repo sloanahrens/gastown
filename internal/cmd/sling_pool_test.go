@@ -18,6 +18,8 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
@@ -151,24 +153,30 @@ func (f *fakeLister) GetSessionCreatedTime(name string) (time.Time, error) {
 }
 
 // Only polecat sessions count, identified by GT_ROLE; witnesses, refineries
-// and dogs on the same server are ignored; a polecat without GT_AGENT is
-// counted with an empty agent (so it never inflates the seat count).
+// and dogs on the same server are ignored; a polecat whose seat record names no
+// agent is counted with an empty agent (so it never inflates the seat count).
+// The session's own GT_AGENT is never read for it (gt-5h87d7).
 func TestListPolecatSessions(t *testing.T) {
 	t.Parallel()
+	town := t.TempDir()
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "marble"}, town,
+		intent.Record{Agent: "local-coder-polecat"})
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "slate"}, town,
+		intent.Record{Agent: "deepseek-flash"})
 	now := time.Now()
 	f := &fakeLister{
 		sessions: map[string]map[string]string{
-			"gt-marble":   {"GT_ROLE": "gastown/polecats/marble", "GT_AGENT": "local-coder-polecat"},
-			"gt-slate":    {"GT_ROLE": "gastown/polecats/slate", "GT_AGENT": "deepseek-flash"},
+			"gt-marble":   {"GT_ROLE": "gastown/polecats/marble"},
+			"gt-slate":    {"GT_ROLE": "gastown/polecats/slate"},
 			"gt-opal":     {"GT_ROLE": "gastown/polecats/opal"},
-			"gt-witness":  {"GT_ROLE": "gastown/witness", "GT_AGENT": "local-coder-polecat"},
-			"gt-refinery": {"GT_ROLE": "gastown/refinery", "GT_AGENT": "local-coder-polecat"},
+			"gt-witness":  {"GT_ROLE": "gastown/witness"},
+			"gt-refinery": {"GT_ROLE": "gastown/refinery"},
 			"hq-overseer": {"GT_ROLE": "overseer"},
 			"random":      {},
 		},
 		created: map[string]time.Time{"gt-marble": now.Add(-time.Minute), "gt-slate": now.Add(-time.Hour)},
 	}
-	got, err := listPolecatSessionsWith(f, poolDispositionFor(""), now)
+	got, err := listPolecatSessionsWith(f, poolSeatAgentFor(town), poolDispositionFor(""), now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,6 +201,62 @@ func TestListPolecatSessions(t *testing.T) {
 	}
 }
 
+// TestPoolCountsASandboxSeatOnItsRecordedClass is gt-5h87d7, the reading that
+// put sbx-flash at 4/3 on 2026-11-11: a sandboxed seat's environment cannot be
+// read from the host, so GT_AGENT came back empty for 8 of 13 working seats and
+// the pool counted them on a class they do not run. Each seat's record is the
+// one source for its class, so the class's count is what the records say and no
+// class is counted above its cap.
+func TestPoolCountsASandboxSeatOnItsRecordedClass(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	records := map[string]string{
+		"sbx01": "sbx-flash",
+		"sbx02": "sbx-flash",
+		"sbx03": "sbx-flash",
+		"deep1": "deepseek-flash",
+	}
+	env := map[string]map[string]string{}
+	for name, agent := range records {
+		writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: name}, town,
+			intent.Record{Agent: agent})
+		// A sandboxed seat: the session has a role and nothing else readable.
+		env["gt-"+name] = map[string]string{"GT_ROLE": "gastown/polecats/" + name}
+	}
+	lister := &gtAgentCountingLister{fakeSessionLister: fakeSessionLister{
+		sessions: []string{"gt-sbx01", "gt-sbx02", "gt-sbx03", "gt-deep1"},
+		env:      env,
+	}}
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"sbx-flash":      {Cap: 3},
+		"deepseek-flash": {Cap: 3},
+	}}
+	ts := config.NewTownSettings()
+	ts.PolecatPool = pool
+
+	sessions, err := poolSeatSessionsWith(lister, town, nil, noHeldHooks, nil, pool)
+	if err != nil {
+		t.Fatalf("poolSeatSessionsWith: %v", err)
+	}
+	roster := specRosterFrom(sessions, ts)
+	if got := roster.Live["sbx-flash"]; got != 3 {
+		t.Errorf("sbx-flash live = %d, want the 3 its records name (roster %+v)", got, roster.Live)
+	}
+	if got := roster.Live["deepseek-flash"]; got != 1 {
+		t.Errorf("deepseek-flash live = %d, want the 1 its record names (roster %+v)", got, roster.Live)
+	}
+	for agent, live := range roster.Live {
+		seat, ok := pool.Seats[agent]
+		if !ok || live > seat.Cap {
+			t.Errorf("%s counts %d live, above its cap (%d seats, ok=%v): the class's count must not exceed what the records say", agent, live, seat.Cap, ok)
+		}
+	}
+	if lister.gtAgentReads != 0 {
+		t.Errorf("the pool count read GT_AGENT from the session %d time(s); the seat record is the only source", lister.gtAgentReads)
+	}
+}
+
 // TestListPolecatSessionsExcludesDoneWithOpenMR pins gt-2nft: a polecat whose
 // own agent bead reads done with an MR still in the queue does not occupy the
 // seat its session name would otherwise claim. The pool refused a 4th flash
@@ -209,11 +273,15 @@ func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
 
 	f := &fakeLister{
 		sessions: map[string]map[string]string{
-			"gt-granite": {"GT_ROLE": "gastown/polecats/granite", "GT_AGENT": "deepseek-flash"},
-			"gt-diamond": {"GT_ROLE": "gastown/polecats/diamond", "GT_AGENT": "deepseek-flash"},
+			"gt-granite": {"GT_ROLE": "gastown/polecats/granite"},
+			"gt-diamond": {"GT_ROLE": "gastown/polecats/diamond"},
 		},
 	}
-	got, err := listPolecatSessionsWith(f, disposition, poolTestNow)
+	seats := seatAgentAnswering(map[string]string{
+		"gastown/granite": "deepseek-flash",
+		"gastown/diamond": "deepseek-flash",
+	})
+	got, err := listPolecatSessionsWith(f, seats, disposition, poolTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,6 +292,13 @@ func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
 	if n := poolSeatCount("deepseek-flash", got); n != 1 {
 		t.Errorf("seat occupancy should count only the live working session, got %d", n)
 	}
+}
+
+// seatAgentAnswering is the seat-record read over a canned map, for tests whose
+// subject is not where the agent came from. A seat the map does not name has no
+// recorded agent, as one with no record does.
+func seatAgentAnswering(agents map[string]string) poolSeatAgentFunc {
+	return func(rigName, polecatName string) string { return agents[rigName+"/"+polecatName] }
 }
 
 // TestListPolecatSessionsExcludesFinishedSeatWithPreservedCommits pins gt-b9ud0:
@@ -249,11 +324,11 @@ func TestListPolecatSessionsExcludesFinishedSeatWithPreservedCommits(t *testing.
 
 	f := &fakeLister{
 		sessions: map[string]map[string]string{
-			"gt-agate":  {"GT_ROLE": "gastown/polecats/agate", "GT_AGENT": "deepseek-flash"},
-			"gt-garnet": {"GT_ROLE": "gastown/polecats/garnet", "GT_AGENT": "deepseek-flash"},
+			"gt-agate":  {"GT_ROLE": "gastown/polecats/agate"},
+			"gt-garnet": {"GT_ROLE": "gastown/polecats/garnet"},
 		},
 	}
-	got, err := listPolecatSessionsWith(f, disposition, poolTestNow)
+	got, err := listPolecatSessionsWith(f, nil, disposition, poolTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +351,7 @@ func TestListPolecatSessionsFailsOpenOnDispositionError(t *testing.T) {
 			"gt-diamond": {"GT_ROLE": "gastown/polecats/diamond", "GT_AGENT": "deepseek-flash"},
 		},
 	}
-	got, err := listPolecatSessionsWith(f, disposition, poolTestNow)
+	got, err := listPolecatSessionsWith(f, nil, disposition, poolTestNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +369,9 @@ var poolTestNow = time.Date(2026, 9, 18, 16, 0, 0, 0, time.UTC)
 // faked: the settings, the tmux server and the seat claim filesystem. Each
 // process() is a fresh `gt sling` against it.
 type testPoolTown struct {
+	// t is the test the town stages seats on behalf of, so a fixture that adds
+	// a session can write the seat record that names its agent in the town root.
+	t      *testing.T
 	pool   *config.PolecatPool
 	lister sessionLister
 	fs     poolSeatFS
@@ -311,18 +389,25 @@ type testPoolTown struct {
 	nextPID int
 }
 
-func newTestPoolTown(pool *config.PolecatPool) *testPoolTown {
+func newTestPoolTown(t *testing.T, pool *config.PolecatPool) *testPoolTown {
+	t.Helper()
+	root := t.TempDir()
+	// The seat picture enumerates the town's rigs and reads each seat's record
+	// from the town root, so the fixture town names its rig.
+	writeTestRigsConfig(t, root, "gastown")
 	return &testPoolTown{
+		t:      t,
 		pool:   pool,
 		lister: &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}},
 		fs:     newFakeSeatFS(),
-		root:   "/town",
+		root:   root,
 		dead:   map[int]bool{},
 	}
 }
 
 // liveSessions puts polecat sessions on the fake tmux server, one per agent
-// given, each created an hour before the test clock.
+// given, each created an hour before the test clock, and records the agent on
+// each seat — the record the pool counts a live seat on (gt-5h87d7).
 func (w *testPoolTown) liveSessions(agents ...string) {
 	f := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
 	for i, agent := range agents {
@@ -331,6 +416,7 @@ func (w *testPoolTown) liveSessions(agents ...string) {
 		f.created[name] = poolTestNow.Add(-time.Hour)
 	}
 	w.lister = f
+	recordSlungSeats(w.t, w.root, f)
 }
 
 // process is a router standing in for one `gt sling` process: its own claim
@@ -339,6 +425,7 @@ func (w *testPoolTown) process() *poolRouter {
 	w.nextPID++
 	clock := func() time.Time { return poolTestNow }
 	return &poolRouter{
+		townRoot:    w.root,
 		pool:        func() *config.PolecatPool { return w.pool },
 		sessions:    func() sessionLister { return w.lister },
 		disposition: nil,
@@ -410,13 +497,18 @@ func (l *lockWatchingLister) ListSessions() ([]string, error) {
 	return l.fakeLister.ListSessions()
 }
 
-// add puts a live polecat session on the fake tmux server, an hour old.
+// add puts a live polecat session on the fake tmux server, an hour old, and
+// records the agent its seat was slung on.
 func (l *lockWatchingLister) add(name, agent string) {
 	l.fakeLister.sessions[name] = map[string]string{
 		"GT_ROLE":  "gastown/polecats/" + name,
 		"GT_AGENT": agent,
 	}
 	l.fakeLister.created[name] = poolTestNow.Add(-time.Hour)
+	seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: name}
+	if err := writeSeatRecord(l.town.root, seat, intent.Record{Agent: agent}); err != nil {
+		l.town.t.Fatal(err)
+	}
 }
 
 // listedUnderLock reports the listing the pool counted from: the count is taken
@@ -463,7 +555,7 @@ func (w *testPoolTown) decisionLockReleased(t *testing.T) {
 // refuses with the convoy feeder's deferral marker.
 func TestResolvePolecatPoolAgent(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(nil)
+	w := newTestPoolTown(t, nil)
 	r := w.process()
 	if a, rs, err := r.route("", true); a != "" || rs != "" || err != nil {
 		t.Errorf("no pool: got %q %q %v", a, rs, err)
@@ -504,7 +596,7 @@ func TestResolvePolecatPoolAgent(t *testing.T) {
 // must answer nothing here — not a seat, not a refusal, not a claim.
 func TestResolvePoolAgentLeavesANonPoolRequestUntouched(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(1))
+	w := newTestPoolTown(t, cappedPool(1))
 	w.liveSessions(claimAgent)
 
 	agent, reason, err := w.process().route("claude-sonnet", true)
@@ -523,7 +615,7 @@ func TestResolvePoolAgentLeavesANonPoolRequestUntouched(t *testing.T) {
 // (gt-mukgk).
 func TestRouteAdmitsAndClaimsEachSeatByItsOwnCap(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(&config.PolecatPool{Seats: map[string]config.SeatConfig{
+	w := newTestPoolTown(t, &config.PolecatPool{Seats: map[string]config.SeatConfig{
 		claimAgent:      {Cap: 1},
 		"claude-sonnet": {Cap: 2},
 	}})
@@ -554,7 +646,7 @@ func TestRouteAdmitsAndClaimsEachSeatByItsOwnCap(t *testing.T) {
 // polecat on any agent is one of the polecats it bounds.
 func TestRouteRefusesTheTownTotal(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(&config.PolecatPool{Seats: map[string]config.SeatConfig{claimAgent: {Cap: 3}}, MaxTotal: intPtr(2)})
+	w := newTestPoolTown(t, &config.PolecatPool{Seats: map[string]config.SeatConfig{claimAgent: {Cap: 3}}, MaxTotal: intPtr(2)})
 	w.liveSessions(claimAgent, "claude-sonnet")
 
 	agent, reason, err := w.process().route("", true)
@@ -576,7 +668,7 @@ func TestRouteRefusesTheTownTotal(t *testing.T) {
 	}
 
 	// One polecat fewer: the pool's own seat has room and the sling goes.
-	under := newTestPoolTown(&config.PolecatPool{Seats: map[string]config.SeatConfig{claimAgent: {Cap: 3}}, MaxTotal: intPtr(3)})
+	under := newTestPoolTown(t, &config.PolecatPool{Seats: map[string]config.SeatConfig{claimAgent: {Cap: 3}}, MaxTotal: intPtr(3)})
 	under.liveSessions(claimAgent, "claude-sonnet")
 	if agent, reason := under.sling(t); agent != claimAgent || !strings.Contains(reason, "seat 2/3") {
 		t.Errorf("a town under its total spends the free seat: %q (%s)", agent, reason)
@@ -591,7 +683,7 @@ func TestRouteRefusesTheTownTotal(t *testing.T) {
 // in TestResolvePoolAgentLeavesANonPoolRequestUntouched above.
 func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnListSessionsFailure(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(1))
+	w := newTestPoolTown(t, cappedPool(1))
 	w.lister = &fakeLister{err: errors.New("no server")}
 
 	agent, reason, err := w.process().route("claude-sonnet", true)
@@ -604,7 +696,7 @@ func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnListSessionsFailure(t *
 // directory that cannot be read must not override a non-pool --agent either.
 func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnSeatClaimReadFailure(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(3))
+	w := newTestPoolTown(t, cappedPool(3))
 	seatFS := newFakeSeatFS()
 	seatFS.readDirErr = errSeatFSUnreadable
 	w.fs = seatFS
@@ -623,7 +715,7 @@ func TestResolvePoolAgentLeavesANonPoolRequestUntouchedOnSeatClaimReadFailure(t 
 // racy decision off as a reserved one.
 func TestResolvePoolAgentUnreservedWhenTheDecisionLockFails(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 	w.lockErr = errors.New("polecat pool lock busy for 5s")
 
 	agent, reason := w.sling(t)
@@ -645,7 +737,7 @@ func TestResolvePoolAgentUnreservedWhenTheDecisionLockFails(t *testing.T) {
 // never neither.
 func TestPoolCountsASessionThatAppearsBeforeTheDecisionLock(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 	lister := newLockWatchingLister(w)
 	w.lister = lister
 	// The concurrent sling's session starts as this sling reaches the lock:
@@ -669,7 +761,7 @@ func TestPoolCountsASessionThatAppearsBeforeTheDecisionLock(t *testing.T) {
 // polecat onto a two-seat cap.
 func TestPoolIsFullWhenTheCapFillsBeforeTheDecisionLock(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 	lister := newLockWatchingLister(w)
 	w.lister = lister
 	w.onLock = func() {
@@ -697,7 +789,7 @@ func TestPoolIsFullWhenTheCapFillsBeforeTheDecisionLock(t *testing.T) {
 // from — the same count, so the same lock (gt-8o35b).
 func TestPoolListsUnderTheDecisionLockWhenTheListerFails(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 	lister := newLockWatchingLister(w)
 	lister.err = errors.New("no server")
 	w.lister = lister
@@ -938,6 +1030,8 @@ func TestSeatDecisionOverlapsOccupancyReads(t *testing.T) {
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "p01")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "p01"}, town,
+		intent.Record{Agent: claimAgent})
 
 	got := concurrentSeatDecisions(t, town, cappedPool(2), newSeatReadBarrier(2))
 	for i, d := range got {
@@ -1002,6 +1096,8 @@ func TestSeatDecisionHoldsTheLockAcrossNoBdRead(t *testing.T) {
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "p01")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "p01"}, town,
+		intent.Record{Agent: claimAgent})
 	// A seat whose submission is waiting to land: the count has to read its bead.
 	writeLandingSeat(t, town, "gastown", "p02", "gt-landing")
 
@@ -1062,6 +1158,8 @@ func TestRouteNamesTheFailedSeatPictureWhenTheDegradedCountAdmits(t *testing.T) 
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "p01")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "p01"}, town,
+		intent.Record{Agent: claimAgent})
 	writeLandingSeat(t, town, "gastown", "p02", "gt-landing")
 
 	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
@@ -1101,6 +1199,8 @@ func TestRouteCountsLiveSessionsWhenTheSeatPictureCannotBeRead(t *testing.T) {
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "p01")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "p01"}, town,
+		intent.Record{Agent: claimAgent})
 	// A seat whose submission waits to land: the picture has to read its bead,
 	// and that read is the one that fails.
 	writeLandingSeat(t, town, "gastown", "p02", "gt-landing")
@@ -1183,6 +1283,8 @@ func TestSeatDecisionCountsTheSessionTheSeatPictureDidNotRead(t *testing.T) {
 			town := t.TempDir()
 			writeTestRigsConfig(t, town, "gastown")
 			writeTownPolecatDir(t, town, "gastown", "p01")
+			writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "p01"}, town,
+				intent.Record{Agent: claimAgent})
 
 			lister := &fakeLister{sessions: map[string]map[string]string{}, created: map[string]time.Time{}}
 			r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
@@ -1229,6 +1331,8 @@ func TestSeatDecisionStillAtomicCountAndClaim(t *testing.T) {
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "p01")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "p01"}, town,
+		intent.Record{Agent: claimAgent})
 
 	got := concurrentSeatDecisions(t, town, cappedPool(1), newSeatReadBarrier(2))
 	admitted, refused := 0, 0
@@ -1275,7 +1379,7 @@ func cappedPool(maxSeats int) *config.PolecatPool {
 // refused rather than spawned (gt-jzr1).
 func TestPoolSeatClaimsHoldTheCapForConcurrentSlings(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 
 	a1, r1 := w.sling(t)
 	a2, r2 := w.sling(t)
@@ -1306,7 +1410,7 @@ func TestPoolSeatClaimsHoldTheCapForConcurrentSlings(t *testing.T) {
 // both and never neither.
 func TestPoolSeatClaimIsHandedOverToTheSession(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 	first := w.process()
 	if a, r, err := first.route("", true); err != nil || a != claimAgent {
 		t.Fatalf("empty pool: want the seat, got %q (%s) %v", a, r, err)
@@ -1334,7 +1438,7 @@ func TestPoolSeatClaimIsHandedOverToTheSession(t *testing.T) {
 // but claims nothing and drops nothing.
 func TestPeekPolecatPoolAgentNeitherClaimsNorDropsSeats(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 
 	if a, _, _ := w.process().route("", false); a != claimAgent {
 		t.Fatalf("empty pool: the preview route should be the seat, got %q", a)
@@ -1360,7 +1464,7 @@ func TestPeekPolecatPoolAgentNeitherClaimsNorDropsSeats(t *testing.T) {
 // by a process that lingers must not shadow one forever.
 func TestPoolSeatClaimCleanupDropsCrashedAndStaleSlingers(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 	const crashedPID, livePID = 9001, 9002
 	w.dead[crashedPID] = true
 	seats := w.process().seats
@@ -1410,7 +1514,7 @@ func TestPoolClaimSessionsSkipDeadAndExpired(t *testing.T) {
 
 	t.Run("dry run and live decision through the ledger", func(t *testing.T) {
 		t.Parallel()
-		w := newTestPoolTown(cappedPool(3))
+		w := newTestPoolTown(t, cappedPool(3))
 		const crashedPID, livePID = 9001, 9002
 		w.dead[crashedPID] = true
 		seats := w.process().seats
@@ -1620,7 +1724,7 @@ func (e fakeSeatDirEntry) Info() (os.FileInfo, error) {
 // not as "no claims yet".
 func TestPoolSeatClaimReadFailureIsNamedWhenThePathIsNotADirectory(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(3))
+	w := newTestPoolTown(t, cappedPool(3))
 	w.root = t.TempDir()
 	w.fs = osPoolSeatFS{}
 	if err := os.MkdirAll(filepath.Join(w.root, ".runtime"), 0755); err != nil {
@@ -1641,7 +1745,7 @@ func TestPoolSeatClaimReadFailureIsNamedWhenThePathIsNotADirectory(t *testing.T)
 // off as a clean one. It routes without a reservation and says so (gt-t8q5).
 func TestPoolSeatClaimReadFailureRoutesUnreserved(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(3))
+	w := newTestPoolTown(t, cappedPool(3))
 	seatFS := newFakeSeatFS()
 	seatFS.readDirErr = errSeatFSUnreadable
 	w.fs = seatFS
@@ -1673,7 +1777,7 @@ func TestPoolSeatClaimReadFailureRoutesUnreserved(t *testing.T) {
 func TestSlingSeatSpawnReleasesTheClaimOfASpawnThatFailed(t *testing.T) {
 	t.Parallel()
 	spawnWith := func(prepareErr error) (*fakeSeatFS, *poolRouter, error) {
-		w := newTestPoolTown(cappedPool(3))
+		w := newTestPoolTown(t, cappedPool(3))
 		seatFS := newFakeSeatFS()
 		w.fs = seatFS
 		router := w.process()
@@ -1805,7 +1909,7 @@ func TestEachSpawnGetsItsOwnSeatClaimStore(t *testing.T) {
 // dispatcher's retry (gt-vaivp).
 func TestTheSeatDecisionLockIsReleasedBeforeTheSpawnsSlowWork(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(2))
+	w := newTestPoolTown(t, cappedPool(2))
 	router := w.process()
 	lockedDuringPrepare := false
 	s := slingSeatSpawn{
@@ -1834,7 +1938,7 @@ func TestTheSeatDecisionLockIsReleasedBeforeTheSpawnsSlowWork(t *testing.T) {
 // would hold a seat nothing could release.
 func TestSpawnHandsItsSeatClaimToTheSpawnRecord(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(3))
+	w := newTestPoolTown(t, cappedPool(3))
 	seatFS := newFakeSeatFS()
 	w.fs = seatFS
 	router := w.process()
@@ -1874,7 +1978,7 @@ func TestSpawnHandsItsSeatClaimToTheSpawnRecord(t *testing.T) {
 // would take — and still claims nothing.
 func TestPeekPolecatPoolAgentReportsTheSeatRefusal(t *testing.T) {
 	t.Parallel()
-	w := newTestPoolTown(cappedPool(1))
+	w := newTestPoolTown(t, cappedPool(1))
 	if a, _ := w.sling(t); a != claimAgent {
 		t.Fatalf("setup: the seat should go to the first sling, got %q", a)
 	}
@@ -1927,6 +2031,7 @@ func TestPoolAdmissionAndSeatPictureCountTheSameSeats(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
 			writeTestRigsConfig(t, town, "gastown")
+			recordSlungSeats(t, town, c.lister)
 			if c.claim {
 				writeSeatClaim(t, town, "claim-1", claimAgent)
 			}
@@ -2529,7 +2634,7 @@ func TestRouteUnnamedSlingReadsTheRouterClock(t *testing.T) {
 
 	t.Run("an unnamed sling claims the open seat", func(t *testing.T) {
 		t.Parallel()
-		w := newTestPoolTown(windowedPool())
+		w := newTestPoolTown(t, windowedPool())
 		agent, reason, err := atNight(w).route("", true)
 		if err != nil || agent != "claude-sonnet" {
 			t.Fatalf("route = %q (%s) %v, want claude-sonnet", agent, reason, err)
@@ -2541,7 +2646,7 @@ func TestRouteUnnamedSlingReadsTheRouterClock(t *testing.T) {
 
 	t.Run("an unnamed sling with every open seat full is refused", func(t *testing.T) {
 		t.Parallel()
-		w := newTestPoolTown(windowedPool())
+		w := newTestPoolTown(t, windowedPool())
 		w.liveSessions("claude-sonnet", "claude-sonnet")
 		agent, reason, err := atNight(w).route("", true)
 		if !errors.Is(err, errPoolBackpressure) || agent != "" {
@@ -2557,7 +2662,7 @@ func TestRouteUnnamedSlingReadsTheRouterClock(t *testing.T) {
 
 	t.Run("a sling naming the shut seat's agent is admitted", func(t *testing.T) {
 		t.Parallel()
-		w := newTestPoolTown(windowedPool())
+		w := newTestPoolTown(t, windowedPool())
 		agent, reason, err := atNight(w).route("deepseek-flash", true)
 		if err != nil || agent != "deepseek-flash" {
 			t.Fatalf("route = %q (%s) %v, want deepseek-flash", agent, reason, err)
@@ -2566,7 +2671,7 @@ func TestRouteUnnamedSlingReadsTheRouterClock(t *testing.T) {
 
 	t.Run("an unreadable count falls back to an open seat", func(t *testing.T) {
 		t.Parallel()
-		w := newTestPoolTown(windowedPool())
+		w := newTestPoolTown(t, windowedPool())
 		w.lister = &fakeLister{err: errors.New("tmux: no server")}
 		agent, reason, err := atNight(w).route("", true)
 		if err != nil || agent != "claude-sonnet" {
@@ -2721,7 +2826,7 @@ func TestSnapshotOccupied(t *testing.T) {
 		{name: "landing/gastown/nux", agent: "claude-sonnet", rig: "gastown", polecat: "nux", landing: true},
 		{name: "pool-claim/abc", agent: "claude-haiku"}, // the ledger appends the claims of the moment itself
 	}
-	got, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, nil, func() time.Time { return now })()
+	got, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, seatAgentAnswering(map[string]string{"gastown/capable": "claude-haiku", "gastown/dag": "deepseek-flash"}), func() sessionLister { return lister }, nil, func() time.Time { return now })()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2735,7 +2840,7 @@ func TestSnapshotOccupied(t *testing.T) {
 		t.Fatalf("occupied = %v, want %v", names, want)
 	}
 	lister.err = errors.New("tmux down")
-	if _, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, nil, func() time.Time { return now })(); err == nil {
+	if _, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, seatAgentAnswering(map[string]string{"gastown/capable": "claude-haiku", "gastown/dag": "deepseek-flash"}), func() sessionLister { return lister }, nil, func() time.Time { return now })(); err == nil {
 		t.Fatal("a failed session listing must fail the read, not count the snapshot alone")
 	}
 
@@ -2769,7 +2874,7 @@ func TestSnapshotOccupied(t *testing.T) {
 				snap.released = map[string]bool{"gastown/ember": true}
 			}
 			dead := func(sessionName, rigName, polecatName string) bool { return tc.dead }
-			got, err := snapshotOccupied(snap, func() sessionLister { return deadLister }, dead, func() time.Time { return rosterAt.Add(time.Minute) })()
+			got, err := snapshotOccupied(snap, seatAgentAnswering(map[string]string{"gastown/ember": "deepseek-flash"}), func() sessionLister { return deadLister }, dead, func() time.Time { return rosterAt.Add(time.Minute) })()
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -2794,7 +2899,7 @@ func TestSnapshotOccupied(t *testing.T) {
 	}, created: map[string]time.Time{"gt-ember": ember.created}}
 	dead := func(string, string, string) bool { return true }
 	read := func() []poolSession {
-		got, err := snapshotOccupied(poolSeatSnapshot{sessions: []poolSession{claim}, at: rosterAt}, func() sessionLister { return deadLister }, dead, func() time.Time { return rosterAt.Add(time.Minute) })()
+		got, err := snapshotOccupied(poolSeatSnapshot{sessions: []poolSession{claim}, at: rosterAt}, seatAgentAnswering(map[string]string{"gastown/ember": "deepseek-flash"}), func() sessionLister { return deadLister }, dead, func() time.Time { return rosterAt.Add(time.Minute) })()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2837,7 +2942,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 		t.Fatalf("the roster counts an idle-pr-open seat free, got %+v", snap.sessions)
 	}
 
-	got, err := snapshotOccupied(snap, func() sessionLister { return lister }, nil, now)()
+	got, err := snapshotOccupied(snap, seatAgentAnswering(map[string]string{"gastown/diamond": "claude-haiku"}), func() sessionLister { return lister }, nil, now)()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2849,7 +2954,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 	r.pool = func() *config.PolecatPool { return pool }
 	r.sessions = func() sessionLister { return lister }
 	r.now = now
-	agent, reason, err := r.routeWith("claude-haiku", true, snapshotOccupied(snap, func() sessionLister { return lister }, nil, now))
+	agent, reason, err := r.routeWith("claude-haiku", true, snapshotOccupied(snap, seatAgentAnswering(map[string]string{"gastown/diamond": "claude-haiku"}), func() sessionLister { return lister }, nil, now))
 	if err != nil || agent != "claude-haiku" {
 		t.Fatalf("a spec sling is refused the seat the roster freed: agent %q, reason %q, err %v", agent, reason, err)
 	}
@@ -2857,7 +2962,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 	// A session that is new since the roster is not the one it released, even
 	// on the same seat: it counts.
 	lister.created["gt-diamond"] = rosterAt.Add(time.Second)
-	got, err = snapshotOccupied(snap, func() sessionLister { return lister }, nil, now)()
+	got, err = snapshotOccupied(snap, seatAgentAnswering(map[string]string{"gastown/diamond": "claude-haiku"}), func() sessionLister { return lister }, nil, now)()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2867,7 +2972,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 
 	// A zero creation time is unknown, not old: the session counts.
 	lister.created["gt-diamond"] = time.Time{}
-	got, err = snapshotOccupied(snap, func() sessionLister { return lister }, nil, now)()
+	got, err = snapshotOccupied(snap, seatAgentAnswering(map[string]string{"gastown/diamond": "claude-haiku"}), func() sessionLister { return lister }, nil, now)()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2918,7 +3023,7 @@ func TestRouteWithSnapshotAdmitsOneOfTwoConcurrentSlings(t *testing.T) {
 	db := beadsfake.New()
 	lister := &fakeLister{sessions: map[string]map[string]string{}}
 	now := func() time.Time { return time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC) }
-	occupied := snapshotOccupied(poolSeatSnapshot{}, func() sessionLister { return lister }, nil, now)
+	occupied := snapshotOccupied(poolSeatSnapshot{}, nil, func() sessionLister { return lister }, nil, now)
 	type outcome struct {
 		agent string
 		err   error
@@ -3093,7 +3198,7 @@ func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
 	}
 	spawnAgent := func(t *testing.T, bead, agent string) string {
 		t.Helper()
-		w := newTestPoolTown(pool)
+		w := newTestPoolTown(t, pool)
 		w.fs = newFakeSeatFS()
 		router := w.process()
 		s := slingSeatSpawn{

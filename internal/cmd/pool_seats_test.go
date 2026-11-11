@@ -191,16 +191,50 @@ func writeLandingSeat(t *testing.T, townRoot, rigName, polecatName, workBead str
 // writeIntentRecord writes an intent record at its own seat path.
 func writeIntentRecord(t *testing.T, seat intent.Seat, townRoot string, rec intent.Record) {
 	t.Helper()
+	if err := writeSeatRecord(townRoot, seat, rec); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeSeatRecord is writeIntentRecord for a fixture with no *testing.T in
+// hand (a town's helper that stages sessions itself).
+func writeSeatRecord(townRoot string, seat intent.Seat, rec intent.Record) error {
 	path := seat.Path(townRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
+		return err
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		t.Fatal(err)
+	return os.WriteFile(path, data, 0o644)
+}
+
+// recordSlungSeats writes a seat record for every polecat session a fake lister
+// holds, naming the agent its GT_AGENT holds. The fixture's GT_AGENT is what a
+// sling recorded on the seat; production no longer reads it back from the
+// session (gt-5h87d7), so a fixture that stages a slung seat stages its record
+// too.
+func recordSlungSeats(t *testing.T, townRoot string, lister sessionLister) {
+	t.Helper()
+	var sessions map[string]map[string]string
+	switch l := lister.(type) {
+	case *fakeLister:
+		sessions = l.sessions
+	case *gtAgentCountingLister:
+		sessions = l.fakeSessionLister.env
+	default:
+		t.Fatalf("recordSlungSeats: no session fixture in %T", lister)
+	}
+	for _, env := range sessions {
+		rigName, polecatName, ok := parsePolecatRole(env["GT_ROLE"])
+		if !ok {
+			continue
+		}
+		seat := intent.Seat{Rig: rigName, Role: constants.RolePolecat, Name: polecatName}
+		if err := writeSeatRecord(townRoot, seat, intent.Record{Agent: env["GT_AGENT"]}); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -269,6 +303,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
 			writeTestRigsConfig(t, town, "gastown")
+			recordSlungSeats(t, town, c.lister)
 			work := submittedWork()
 			if c.claim {
 				writeSeatClaim(t, town, "claim-1", "deepseek-flash")
@@ -352,6 +387,7 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 			town := t.TempDir()
 			writeTestRigsConfig(t, town, "gastown")
 			writeTownPolecatDir(t, town, "gastown", "ember")
+			recordSlungSeats(t, town, &fakeLister{sessions: c.sessions})
 
 			disposition := func(rigName, polecatName string) (poolSeatState, error) {
 				if rigName != "gastown" || polecatName != "ember" {
@@ -372,8 +408,9 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 
 // writeSandboxSeat stages a sandboxed seat: the registry record that makes the
 // session a sandbox's (routing and the dead-seat read both look it up by
-// session name) and the seat's intent record with the patrol's last sample.
-func writeSandboxSeat(t *testing.T, town, sessionName, rigName, polecatName string, progress *intent.Progress) {
+// session name) and the seat's intent record with the patrol's last sample and
+// the agent its sling recorded.
+func writeSandboxSeat(t *testing.T, town, sessionName, rigName, polecatName, agent string, progress *intent.Progress) {
 	t.Helper()
 	if err := session.WriteSandboxRecord(town, session.SandboxRecord{
 		Session: sessionName, Rig: rigName, Polecat: polecatName, Profile: "openshell", Image: "gt",
@@ -381,7 +418,7 @@ func writeSandboxSeat(t *testing.T, town, sessionName, rigName, polecatName stri
 		t.Fatalf("WriteSandboxRecord: %v", err)
 	}
 	writeIntentRecord(t, intent.Seat{Rig: rigName, Role: constants.RolePolecat, Name: polecatName}, town,
-		intent.Record{Progress: progress})
+		intent.Record{Progress: progress, Agent: agent})
 }
 
 // The roster's dead-seat answer is the verdict the patrol recorded for the
@@ -405,20 +442,20 @@ func TestSandboxSeatDeathsAreThePatrolsRecordedVerdict(t *testing.T) {
 		{
 			name: "the patrol recorded the seat dead",
 			stage: func(t *testing.T, town string) {
-				writeSandboxSeat(t, town, sandbox, "gastown", "ember", dead)
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", "", dead)
 			},
 			want: true,
 		},
 		{
 			name: "the patrol's last sample found the seat alive",
 			stage: func(t *testing.T, town string) {
-				writeSandboxSeat(t, town, sandbox, "gastown", "ember", alive)
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", "", alive)
 			},
 		},
 		{
 			name: "the seat has never been sampled",
 			stage: func(t *testing.T, town string) {
-				writeSandboxSeat(t, town, sandbox, "gastown", "ember", nil)
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", "", nil)
 			},
 		},
 		{
@@ -433,7 +470,7 @@ func TestSandboxSeatDeathsAreThePatrolsRecordedVerdict(t *testing.T) {
 		{
 			name: "a record that cannot be read is not a death",
 			stage: func(t *testing.T, town string) {
-				writeSandboxSeat(t, town, sandbox, "gastown", "ember", dead)
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", "", dead)
 				path := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}.Path(town)
 				if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 					t.Fatal(err)
@@ -516,7 +553,12 @@ func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
 			writeTestRigsConfig(t, town, "gastown")
 			writeTownPolecatDir(t, town, "gastown", "ember")
 			if !c.noTown {
-				writeSandboxSeat(t, town, sandbox, "gastown", "ember", c.progress)
+				writeSandboxSeat(t, town, sandbox, "gastown", "ember", "deepseek-flash", c.progress)
+			} else {
+				// No registry record, but the seat was still slung: its intent
+				// record names the agent.
+				writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "ember"}, town,
+					intent.Record{Agent: "deepseek-flash", Progress: c.progress})
 			}
 			disposition := func(rigName, polecatName string) (poolSeatState, error) {
 				if rigName != "gastown" || polecatName != "ember" {
@@ -588,7 +630,7 @@ func TestPoolSeatSessionsKeepsASandboxSeatShortOfTheDeadThreshold(t *testing.T) 
 					t.Fatalf("SavePatrolConfig: %v", err)
 				}
 			}
-			writeSandboxSeat(t, town, sandbox, "gastown", "ember",
+			writeSandboxSeat(t, town, sandbox, "gastown", "ember", "deepseek-flash",
 				&intent.Progress{SampledAt: created, DeadSamples: 1})
 			answering := &fakeLister{
 				sessions: map[string]map[string]string{
@@ -681,6 +723,7 @@ func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 	restarted := &fakeLister{sessions: map[string]map[string]string{
 		"gt-ember": {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
 	}}
+	recordSlungSeats(t, town, restarted)
 	after, err := poolSeatSessionsWith(restarted, town, disposition, hookHeldOf(disposition), nil, pool)
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith (restarted): %v", err)

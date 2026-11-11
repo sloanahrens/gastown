@@ -65,7 +65,7 @@ func (b poolBead) hasLabel(label string) bool {
 // session is gone while its bead is still hooked (deadHooked).
 type poolSession struct {
 	name    string
-	agent   string // GT_AGENT in the tmux session environment
+	agent   string // the agent the seat's record names; empty when it names none
 	created time.Time
 	// rig and polecat name the seat this session runs, parsed from the session's
 	// GT_ROLE. Empty for a claim or a landing seat, which name no live polecat.
@@ -562,8 +562,14 @@ func poolHookHeldFor(townRoot string) polecatHookHeldFunc {
 // creation time, less the seats the polecat-state read says are no longer
 // spending one. Polecats are identified by the GT_ROLE their session carries
 // ("<rig>/polecats/<name>"), so witnesses, refineries and dogs on the same
-// server are not counted. GT_AGENT is written into the session environment at
-// spawn (SessionStartOptions.Agent / AgentEnv fallback).
+// server are not counted.
+//
+// The agent is the seat's own record (poolSeatAgentFor), never the session's
+// GT_AGENT: a sandboxed seat's environment cannot be read from the host, so
+// that read came back empty and the pool counted those seats on the wrong
+// class (gt-5h87d7). A record that names no agent leaves the agent empty,
+// which the roster counts as unrecorded rather than on a class the record does
+// not name.
 //
 // disposition is the polecat's own bead state (poolDispositionFor); a nil one
 // fails open. now stands in for a session whose creation time tmux cannot
@@ -579,7 +585,7 @@ func poolHookHeldFor(townRoot string) polecatHookHeldFunc {
 // scheduler.max_polecats (polecat_capacity.go) already trust over a session's
 // mere presence, so a session that outlives its polecat's done+MR-open state
 // never counts twice against two different capacity models.
-func listPolecatSessionsWith(t sessionLister, disposition polecatDispositionFunc, now time.Time) ([]poolSession, error) {
+func listPolecatSessionsWith(t sessionLister, seatAgent poolSeatAgentFunc, disposition polecatDispositionFunc, now time.Time) ([]poolSession, error) {
 	names, err := t.ListSessions()
 	if err != nil {
 		return nil, err
@@ -590,7 +596,6 @@ func listPolecatSessionsWith(t sessionLister, disposition polecatDispositionFunc
 		if err != nil || !strings.Contains(role, "/polecats/") {
 			continue
 		}
-		agent, _ := t.GetEnvironment(n, "GT_AGENT")
 		created, err := t.GetSessionCreatedTime(n)
 		if err != nil {
 			// Unknown age counts as "just spawned": it forces the spec
@@ -602,7 +607,12 @@ func listPolecatSessionsWith(t sessionLister, disposition polecatDispositionFunc
 		if ok && !polecatSeatOccupied(disposition, rigName, polecatName) {
 			continue
 		}
-		out = append(out, poolSession{name: n, agent: strings.TrimSpace(agent), created: created, rig: rigName, polecat: polecatName})
+		// A role that names no seat names no record to read either.
+		agent := ""
+		if ok {
+			agent = poolSeatAgent(seatAgent, rigName, polecatName)
+		}
+		out = append(out, poolSession{name: n, agent: agent, created: created, rig: rigName, polecat: polecatName})
 	}
 	return out, nil
 }
@@ -1711,9 +1721,9 @@ func releasedSeatRecorder(disposition polecatDispositionFunc) (polecatDispositio
 //
 // A zero snapshot is the count of a live sling whose picture could not be read:
 // the live sessions alone, with nothing to release or carry (poolRouter.route).
-func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, deadSandbox sandboxSeatDeadFunc, now func() time.Time) func() ([]poolSession, error) {
+func snapshotOccupied(snapshot poolSeatSnapshot, seatAgent poolSeatAgentFunc, lister func() sessionLister, deadSandbox sandboxSeatDeadFunc, now func() time.Time) func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
-		listed, err := listPolecatSessionsWith(lister(), nil, now())
+		listed, err := listPolecatSessionsWith(lister(), seatAgent, nil, now())
 		if err != nil {
 			return nil, &poolOccupancyError{sessions: true, err: err}
 		}
@@ -1792,10 +1802,10 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 	snapshot, snapErr := r.seatSnapshot()
 	if snapErr != nil {
 		return r.routeWithNotice(requested, true,
-			snapshotOccupied(poolSeatSnapshot{}, r.sessions, sandboxSeatDeathsFor(r.townRoot), r.now),
+			snapshotOccupied(poolSeatSnapshot{}, poolSeatAgentFor(r.townRoot), r.sessions, sandboxSeatDeathsFor(r.townRoot), r.now),
 			"pool: cannot read the seat picture ("+snapErr.Error()+"), counting live sessions only")
 	}
-	return r.routeWith(requested, true, snapshotOccupied(snapshot, r.sessions, sandboxSeatDeathsFor(r.townRoot), r.now))
+	return r.routeWith(requested, true, snapshotOccupied(snapshot, poolSeatAgentFor(r.townRoot), r.sessions, sandboxSeatDeathsFor(r.townRoot), r.now))
 }
 
 // routeWith is route over a given occupancy read. The spec dispatcher passes

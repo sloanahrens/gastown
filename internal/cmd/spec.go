@@ -2879,7 +2879,7 @@ func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSe
 			},
 			ts,
 			func(seats poolSeatSnapshot) func() ([]poolSession, error) {
-				return snapshotOccupied(seats, lister, sandboxSeatDeathsFor(townRoot), time.Now)
+				return snapshotOccupied(seats, poolSeatAgentFor(townRoot), lister, sandboxSeatDeathsFor(townRoot), time.Now)
 			},
 			// Kept for the slings: each one's seat decision reads this
 			// snapshot plus the live sessions and claims of its moment
@@ -3177,7 +3177,7 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 			trace := session.NewSandboxTrace(time.Now)
 			var occupied func() ([]poolSession, error)
 			if seats := snapshot.Load(); seats != nil {
-				occupied = snapshotOccupied(*seats, newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
+				occupied = snapshotOccupied(*seats, poolSeatAgentFor(townRoot), newPoolSessionLister, sandboxSeatDeathsFor(townRoot), time.Now)
 			}
 			name, err := slingSpec(townRoot, c, resumeBranch, seat, occupied, trace, docked)
 			slingTraces.add(specSlingTraceLine(c.Spec.ID, seat.Agent, trace, err))
