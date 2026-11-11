@@ -4,6 +4,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
@@ -24,11 +25,11 @@ func TestNewRigPromoterResolvesKeyFileThroughConfigHome(t *testing.T) {
 		}
 		return ""
 	}
-	stat := func(path string) error {
+	stat := func(path string) (fs.FileInfo, error) {
 		if path == mounted {
-			return nil
+			return regularKeyInfo{}, nil
 		}
-		return &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
+		return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
 	}
 	fj := &config.ForgejoConfig{PromoteTarget: "git@github.com:org/rig.git", PromoteKeyFile: configured}
 
@@ -39,4 +40,17 @@ func TestNewRigPromoterResolvesKeyFileThroughConfigHome(t *testing.T) {
 	if p.KeyFile != mounted {
 		t.Errorf("KeyFile = %q, want the config-home key %q", p.KeyFile, mounted)
 	}
+	if p.KeyFileConfigured != configured {
+		t.Errorf("KeyFileConfigured = %q, want the configured path %q scrubbed from messages", p.KeyFileConfigured, configured)
+	}
 }
+
+// regularKeyInfo is the FileInfo a stat fake returns for a regular file.
+type regularKeyInfo struct{}
+
+func (regularKeyInfo) Name() string       { return "" }
+func (regularKeyInfo) Size() int64        { return 0 }
+func (regularKeyInfo) Mode() fs.FileMode  { return 0o600 }
+func (regularKeyInfo) ModTime() time.Time { return time.Time{} }
+func (regularKeyInfo) IsDir() bool        { return false }
+func (regularKeyInfo) Sys() any           { return nil }

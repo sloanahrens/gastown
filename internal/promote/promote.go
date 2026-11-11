@@ -96,6 +96,11 @@ type Promoter struct {
 	// reaches ssh as the one -i argument and nowhere else: never logged, never
 	// stored.
 	KeyFile string
+	// KeyFileConfigured is the path merge_queue.forgejo.promote_key_file names,
+	// before ResolveKeyFile substitutes a config-home copy. A message can name
+	// the configured path instead of the resolved one, so scrub covers both.
+	// Empty scrubs nothing extra.
+	KeyFileConfigured string
 	// Repo reads the target and pushes to it from the rig's repository.
 	Repo Repo
 	// LockPath is the file a promotion holds while it runs, so the red-main
@@ -256,13 +261,17 @@ func (p *Promoter) lock() (func(), bool, error) {
 	return lock.FlockTryAcquire(p.LockPath)
 }
 
-// scrub replaces the key file's path with KeyPlaceholder, so a message that
-// quotes an ssh error cannot name where the deploy key lives.
+// scrub replaces the key file's path, and the configured path it was resolved
+// from, with KeyPlaceholder, so a message that quotes an ssh error cannot name
+// where the deploy key lives. An empty path is skipped: ReplaceAll with an
+// empty old string would insert the placeholder between every character.
 func (p *Promoter) scrub(s string) string {
-	if p.KeyFile == "" {
-		return s
+	for _, path := range []string{p.KeyFile, p.KeyFileConfigured} {
+		if path != "" {
+			s = strings.ReplaceAll(s, path, KeyPlaceholder)
+		}
 	}
-	return strings.ReplaceAll(s, p.KeyFile, KeyPlaceholder)
+	return s
 }
 
 // safeTarget is the target with any key path scrubbed; it names a repository,

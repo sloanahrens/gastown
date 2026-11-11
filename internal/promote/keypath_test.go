@@ -6,20 +6,37 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// keyPathStat answers stat from a fixed set of existing paths; any other path
-// is missing. The paths are strings only, so no real file is read.
-func keyPathStat(existing ...string) func(string) error {
+// keyPathInfo is the FileInfo a stat fake returns: a regular file, or a
+// directory when dir is set.
+type keyPathInfo struct{ dir bool }
+
+func (keyPathInfo) Name() string       { return "" }
+func (keyPathInfo) Size() int64        { return 0 }
+func (keyPathInfo) ModTime() time.Time { return time.Time{} }
+func (keyPathInfo) Sys() any           { return nil }
+func (i keyPathInfo) IsDir() bool      { return i.dir }
+func (i keyPathInfo) Mode() fs.FileMode {
+	if i.dir {
+		return fs.ModeDir | 0o755
+	}
+	return 0o600
+}
+
+// keyPathStat answers stat from a fixed set of existing regular files; any
+// other path is missing. The paths are strings only, so no real file is read.
+func keyPathStat(existing ...string) func(string) (fs.FileInfo, error) {
 	have := map[string]bool{}
 	for _, p := range existing {
 		have[p] = true
 	}
-	return func(p string) error {
+	return func(p string) (fs.FileInfo, error) {
 		if have[p] {
-			return nil
+			return keyPathInfo{}, nil
 		}
-		return &fs.PathError{Op: "stat", Path: p, Err: fs.ErrNotExist}
+		return nil, &fs.PathError{Op: "stat", Path: p, Err: fs.ErrNotExist}
 	}
 }
 
@@ -45,7 +62,7 @@ func TestKeyPathResolvesToConfigHomeFile(t *testing.T) {
 		name       string
 		path       string
 		configHome string
-		stat       func(string) error
+		stat       func(string) (fs.FileInfo, error)
 		wantPath   string
 		wantLogs   int
 	}{
@@ -82,9 +99,9 @@ func TestKeyPathResolvesToConfigHomeFile(t *testing.T) {
 			name:       "configured path exists but cannot be stat'ed",
 			path:       filepath.Join("/mac", "permission", "promote-rig.key"),
 			configHome: configHome,
-			stat: func(p string) error {
+			stat: func(p string) (fs.FileInfo, error) {
 				if p == filepath.Join("/mac", "permission", "promote-rig.key") {
-					return &fs.PathError{Op: "stat", Path: p, Err: fs.ErrPermission}
+					return nil, &fs.PathError{Op: "stat", Path: p, Err: fs.ErrPermission}
 				}
 				return keyPathStat(filepath.Join(configHome, "gt", "promote-rig.key"))(p)
 			},
@@ -97,6 +114,18 @@ func TestKeyPathResolvesToConfigHomeFile(t *testing.T) {
 			stat:       keyPathStat(filepath.Join(configHome, "gt", "promote-rig.key")),
 			wantPath:   filepath.Join(configHome, "gt", "promote-rig.key"),
 			wantLogs:   1,
+		},
+		{
+			name:       "configured path missing and config-home entry is a directory",
+			path:       filepath.Join("/mac", "directory", "promote-rig.key"),
+			configHome: configHome,
+			stat: func(p string) (fs.FileInfo, error) {
+				if p == filepath.Join(configHome, "gt", "promote-rig.key") {
+					return keyPathInfo{dir: true}, nil
+				}
+				return keyPathStat()(p)
+			},
+			wantPath: filepath.Join("/mac", "directory", "promote-rig.key"),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

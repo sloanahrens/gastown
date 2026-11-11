@@ -18,18 +18,20 @@ var (
 // ResolveKeyFile returns the deploy key path a promotion hands ssh for the
 // configured promote_key_file. A path that exists is returned unchanged. A
 // path that does not exist resolves to the same basename under
-// $XDG_CONFIG_HOME/gt, where the pod mounts the key, when that file exists.
-// Anything else returns the configured path so ssh's own error names what is
-// missing, and an empty path stays empty.
+// $XDG_CONFIG_HOME/gt, where the pod mounts the key, when that is a regular
+// file. Anything else returns the configured path so ssh's own error names
+// what is missing, and an empty path stays empty.
 //
 // Only a missing path is substituted: a path that exists but cannot be stat'ed
 // (permission denied) is returned unchanged rather than swapped for another
-// file. The log line names the two paths and never the key's contents.
-func ResolveKeyFile(path string, getenv func(string) string, stat func(string) error, logf func(string, ...any)) string {
+// file. A config-home entry that is a directory is not a key, so it is never
+// substituted either. The log line names the two paths and never the key's
+// contents.
+func ResolveKeyFile(path string, getenv func(string) string, stat func(string) (fs.FileInfo, error), logf func(string, ...any)) string {
 	if path == "" {
 		return ""
 	}
-	if err := stat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
+	if _, err := stat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
 		return path
 	}
 	configHome := getenv("XDG_CONFIG_HOME")
@@ -37,11 +39,18 @@ func ResolveKeyFile(path string, getenv func(string) string, stat func(string) e
 		return path
 	}
 	resolved := filepath.Join(configHome, "gt", filepath.Base(path))
-	if stat(resolved) != nil {
+	if !isRegularFile(stat, resolved) {
 		return path
 	}
 	logKeyFileSubstitution(path, resolved, logf)
 	return resolved
+}
+
+// isRegularFile reports whether stat finds path and it is a regular file. stat
+// follows symlinks, so a key linked to a regular file passes.
+func isRegularFile(stat func(string) (fs.FileInfo, error), path string) bool {
+	info, err := stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // logKeyFileSubstitution logs the substitution the first time path is
