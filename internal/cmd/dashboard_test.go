@@ -129,6 +129,20 @@ func TestDashboardSpendRunnerSeam(t *testing.T) {
 	}
 }
 
+// A command that fails, or prints something that is not JSON, gives no report.
+func TestDashboardSpendRefusesAFailedCommand(t *testing.T) {
+	t.Parallel()
+	failing := func(context.Context, []string) ([]byte, error) {
+		return []byte(`{"ok":true}`), errors.New("exit status 1")
+	}
+	notJSON := func(context.Context, []string) ([]byte, error) { return []byte("balance: 51.50"), nil }
+	for name, run := range map[string]func(context.Context, []string) ([]byte, error){"exits non-zero": failing, "prints no JSON": notJSON} {
+		if out := dashboardSpend([]string{"/usr/bin/spend-report"}, run)(); out != nil {
+			t.Errorf("%s: served %s, want no report", name, out)
+		}
+	}
+}
+
 // A missing ledger is no spend source. An empty ledger is a zero report with no
 // balance. A ledger or events log that cannot be read is a failed read: no report,
 // and the error's first line goes to the log without the path.

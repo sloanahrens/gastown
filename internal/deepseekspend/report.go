@@ -442,7 +442,7 @@ func NewReader(ledgerPath, eventsPath string, loc *time.Location, c Constants, d
 // now. A ledger that cannot be read is an error. A missing events log has no
 // alerts; one that exists and cannot be read is an error.
 func (r *Reader) Report(now time.Time) (Report, error) {
-	lines, next, restarted, err := readAppended(r.ledgerPath, r.open, r.ledger)
+	text, next, restarted, err := readAppended(r.ledgerPath, r.open, r.ledger)
 	if err != nil {
 		return Report{}, err
 	}
@@ -450,13 +450,9 @@ func (r *Reader) Report(now time.Time) (Report, error) {
 		r.rows = nil
 	}
 	r.ledger = next
-	for _, line := range lines {
-		if row, ok := parseRow(line, r.loc); ok {
-			r.rows = append(r.rows, row)
-		}
-	}
+	r.rows = append(r.rows, ParseLedger(text, r.loc)...)
 
-	lines, next, restarted, err = readAppended(r.eventsPath, r.open, r.events)
+	text, next, restarted, err = readAppended(r.eventsPath, r.open, r.events)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		r.events, r.alerts = cursor{}, nil
@@ -467,7 +463,7 @@ func (r *Reader) Report(now time.Time) (Report, error) {
 			r.alerts = nil
 		}
 		r.events = next
-		r.alerts = append(r.alerts, lines...)
+		r.alerts = append(r.alerts, splitLines(text)...)
 		if over := len(r.alerts) - alertKeep; over > 0 {
 			r.alerts = r.alerts[over:]
 		}
@@ -476,19 +472,19 @@ func (r *Reader) Report(now time.Time) (Report, error) {
 }
 
 // readAppended reads the complete lines the file at path has past from's offset,
-// and returns them with the cursor just past them. restarted is set when the
-// file is not the one from was read from, or is shorter than its offset: the
-// read starts at the top, and the caller drops what it had kept. Nothing is
-// returned for a file that has no complete line past the offset.
-func readAppended(path string, open Opener, from cursor) (lines []string, next cursor, restarted bool, err error) {
+// and returns their text with the cursor just past them. restarted is set when
+// the file is not the one from was read from, or is shorter than its offset: the
+// read starts at the top, and the caller drops what it had kept. The text is
+// empty for a file that has no complete line past the offset.
+func readAppended(path string, open Opener, from cursor) (text string, next cursor, restarted bool, err error) {
 	f, err := open(path)
 	if err != nil {
-		return nil, from, false, err
+		return "", from, false, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return nil, from, false, err
+		return "", from, false, err
 	}
 	next = from
 	if from.info == nil || !os.SameFile(from.info, info) || info.Size() < from.offset {
@@ -496,14 +492,14 @@ func readAppended(path string, open Opener, from cursor) (lines []string, next c
 		restarted = true
 	}
 	if _, err := f.Seek(next.offset, io.SeekStart); err != nil {
-		return nil, from, false, err
+		return "", from, false, err
 	}
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return nil, from, false, err
+		return "", from, false, err
 	}
 	end := bytes.LastIndexByte(data, '\n') + 1
 	next.info = info
 	next.offset += int64(end)
-	return splitLines(string(data[:end])), next, restarted, nil
+	return string(data[:end]), next, restarted, nil
 }
