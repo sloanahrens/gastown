@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +202,121 @@ func mkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A clone killed after git made .git leaves that .git behind and no marker. The
+// next call must clone again, not take the directory for a finished checkout.
+func TestEnsureClonesAgainWhenKilledCloneLeftGitDir(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	if err := os.MkdirAll(filepath.Join(town, "gastown", ".repo.git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mkdir(t, filepath.Join(town, dirRel, "gastown", ".git"))
+	git := &fakeGit{clone: cloneWithGit}
+
+	if _, err := ensure(context.Background(), git.run, town, "gastown", ""); err != nil {
+		t.Fatalf("ensure over a killed clone: %v", err)
+	}
+	if len(git.calls) == 0 || git.calls[0] != "clone" {
+		t.Fatalf("git calls = %v, want a clone first", git.calls)
+	}
+}
+
+// A clone that returns but cannot be marked finished is an error, not a clone
+// that passes. The marker path is made a directory during the clone, so the
+// marker cannot be written.
+func TestEnsureFailsWhenFinishedCloneCannotBeMarked(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	mkdir(t, filepath.Join(town, "gastown", ".repo.git"))
+	git := &fakeGit{clone: func(dir string) error {
+		if err := cloneWithGit(dir); err != nil {
+			return err
+		}
+		mkdir(t, dir+".cloned")
+		return nil
+	}}
+
+	if _, err := ensure(context.Background(), git.run, town, "gastown", ""); err == nil {
+		t.Fatalf("ensure returned no error when the clone could not be marked finished")
+	}
+}
+
+func TestEnsureDoesNotCloneAgainAfterAFinishedClone(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	mkdir(t, filepath.Join(town, "gastown", ".repo.git"))
+	git := &fakeGit{clone: cloneWithGit}
+
+	for range 2 {
+		if _, err := ensure(context.Background(), git.run, town, "gastown", ""); err != nil {
+			t.Fatalf("ensure: %v", err)
+		}
+	}
+	clones := 0
+	for _, call := range git.calls {
+		if call == "clone" {
+			clones++
+		}
+	}
+	if clones != 1 {
+		t.Fatalf("clones = %d over two calls, want 1 (calls %v)", clones, git.calls)
+	}
+}
+
+// The clone marker is cleared before any clone runs. When it cannot be cleared,
+// a killed clone could leave a stale marker that makes a broken checkout look
+// finished, so the call refuses and runs no git.
+func TestEnsureRefusesWhenCloneMarkerCannotBeCleared(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	mkdir(t, filepath.Join(town, "gastown", ".repo.git"))
+	// A non-empty directory cannot be removed as a file.
+	mkdir(t, filepath.Join(town, dirRel, "gastown.cloned", "held"))
+	git := &fakeGit{clone: cloneWithGit}
+
+	if _, err := ensure(context.Background(), git.run, town, "gastown", ""); err == nil {
+		t.Fatalf("ensure returned no error with the clone marker stuck")
+	}
+	if len(git.calls) != 0 {
+		t.Fatalf("git was called %v with a clone marker it could not clear", git.calls)
+	}
+}
+
+// gitEnv drops the variables git reads to find a repository, so a caller's
+// values cannot point a build call at another repo. Everything else is kept.
+func TestGitEnvDropsCallerRepoVariables(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		environ []string
+		want    []string
+	}{
+		{
+			name:    "git dir and work tree are dropped",
+			environ: []string{"PATH=/bin", "GIT_DIR=/elsewhere/.git", "GIT_WORK_TREE=/elsewhere"},
+			want:    []string{"PATH=/bin", "GIT_TERMINAL_PROMPT=0"},
+		},
+		{
+			name:    "index, object and common dirs are dropped",
+			environ: []string{"GIT_INDEX_FILE=/x", "GIT_OBJECT_DIRECTORY=/y", "GIT_ALTERNATE_OBJECT_DIRECTORIES=/z", "GIT_COMMON_DIR=/c"},
+			want:    []string{"GIT_TERMINAL_PROMPT=0"},
+		},
+		{
+			name:    "other git variables are kept",
+			environ: []string{"GIT_TRACE=1", "GIT_SSH_COMMAND=ssh -i key"},
+			want:    []string{"GIT_TRACE=1", "GIT_SSH_COMMAND=ssh -i key", "GIT_TERMINAL_PROMPT=0"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := gitEnv(tc.environ); !slices.Equal(got, tc.want) {
+				t.Fatalf("gitEnv = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

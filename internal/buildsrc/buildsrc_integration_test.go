@@ -151,6 +151,42 @@ func (c *cloneCounter) run(ctx context.Context, timeout time.Duration, dir strin
 	return execGit(ctx, timeout, dir, args...)
 }
 
+// childFixtureEnv names the fixture repo for TestIntegrationExecGitChildProcess.
+const childFixtureEnv = "BUILDSRC_EXECGIT_FIXTURE"
+
+// TestIntegrationExecGitIgnoresCallerRepoEnv starts the test binary as a child
+// whose environment points GIT_DIR at an empty repo. The child's execGit must
+// still see the fixture repo at dir, which holds only if execGit drops the
+// caller's GIT_DIR. The child runs in its own process because the variable has
+// to be in the environment execGit reads.
+func TestIntegrationExecGitIgnoresCallerRepoEnv(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	fixture := filepath.Join(town, "fixture")
+	runGit(t, "init", "--quiet", "--initial-branch=main", fixture)
+	runGit(t, "-C", fixture, "commit", "--quiet", "--allow-empty", "-m", "first")
+	empty := filepath.Join(town, "empty.git")
+	runGit(t, "init", "--bare", "--quiet", empty)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestIntegrationExecGitChildProcess$")
+	cmd.Env = append(os.Environ(), childFixtureEnv+"="+fixture, "GIT_DIR="+empty)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("child process: %v\n%s", err, out)
+	}
+}
+
+// TestIntegrationExecGitChildProcess is the child half of
+// TestIntegrationExecGitIgnoresCallerRepoEnv. Run on its own it does nothing.
+func TestIntegrationExecGitChildProcess(t *testing.T) {
+	fixture := os.Getenv(childFixtureEnv)
+	if fixture == "" {
+		t.Skip("only run as the child of TestIntegrationExecGitIgnoresCallerRepoEnv")
+	}
+	if err := execGit(context.Background(), time.Minute, fixture, "rev-parse", "--verify", "--quiet", "HEAD"); err != nil {
+		t.Fatalf("execGit in the fixture repo: %v", err)
+	}
+}
+
 func TestIntegrationConcurrentCallsCloneOnce(t *testing.T) {
 	t.Parallel()
 	town := newTown(t)
