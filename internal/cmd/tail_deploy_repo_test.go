@@ -196,6 +196,19 @@ func TestTailGitAncestry_AsksTheBareRepo(t *testing.T) {
 	}
 }
 
+// TestTailGitAncestry_AGitThatCannotRunReturnsItsError: the production runner
+// reports a git that cannot run as an error, not as an exit code, so the
+// ancestry check reads it as unknown. The working directory does not exist, so
+// the run fails before git starts.
+func TestTailGitAncestry_AGitThatCannotRunReturnsItsError(t *testing.T) {
+	t.Parallel()
+	missing := filepath.Join(t.TempDir(), "no-such-dir")
+	code, err := tailExecGit(missing, "merge-base", "--is-ancestor", "c1", "c2")
+	if err == nil {
+		t.Fatalf("tailExecGit in a missing directory = (%d, nil), want an error", code)
+	}
+}
+
 // TestTailGitAncestry_FallsBackToTheCheckoutAndSaysSo: a town with no bare repo
 // asks the checkout, and the why-log names the checkout that answered, once.
 func TestTailGitAncestry_FallsBackToTheCheckoutAndSaysSo(t *testing.T) {
