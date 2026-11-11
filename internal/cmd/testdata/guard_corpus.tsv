@@ -573,6 +573,6 @@ test_scope	polecat	"go test ./internal/cmd -run TestSubstitutionBody -count=2"	a
 container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... > out"	refuse	targets testcontainers-backed package(s)	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
 test_scope	polecat	"go test ./... > out"	refuse	polecat 'go test' of the whole repo	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
 dangerous	polecat	"git push origin HEAD:main > out"	refuse	Polecats never push to main/master	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
-container_suite	polecat	"bd close gt-x && GT_TEST_DOCKER=1 go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	gt-qtag33	22bba0454bc6d22654d10cbd78410bef14eb93af159e090d64ca51ea9a58a0bf
-dangerous	polecat	"bd close gt-x && git reset --hard"	refuse	Hard reset discards all uncommitted changes	gt-qtag33	22bba0454bc6d22654d10cbd78410bef14eb93af159e090d64ca51ea9a58a0bf
-test_scope	polecat	"bd close gt-x && go test ./..."	refuse	polecat 'go test' of the whole repo	gt-qtag33	22bba0454bc6d22654d10cbd78410bef14eb93af159e090d64ca51ea9a58a0bf
+container_suite	polecat	"bd close gt-x && GT_TEST_DOCKER=1 go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10
+dangerous	polecat	"bd close gt-x && git reset --hard"	refuse	Hard reset discards all uncommitted changes	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10
+test_scope	polecat	"bd close gt-x && go test ./..."	refuse	polecat 'go test' of the whole repo	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10

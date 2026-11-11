@@ -170,6 +170,11 @@ func (e *UnparseableError) Error() string {
 // *UnparseableError rather than a partial result, so a caller that guards
 // against a dangerous command can fail closed.
 func Parse(command string) (Script, error) {
+	return parses.parse(command, parseUncached)
+}
+
+// parseUncached is Parse without the memo.
+func parseUncached(command string) (Script, error) {
 	// The parser reads a backslash at the end of a comment line as a line
 	// continuation, which hides the next line from it. The blank gives it the
 	// line break bash reads and keeps every offset, so the words are still
