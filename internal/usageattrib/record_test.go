@@ -429,6 +429,32 @@ func TestMarkIncompleteRefusesWhatItCannotMerge(t *testing.T) {
 			t.Error("mark over an unreadable path: no error")
 		}
 	})
+	t.Run("record that will not encode", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		f := factsIn("ws-a")
+		f.Start = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) // a year JSON cannot encode
+		if err := MarkIncomplete(dir, f, "boom"); err == nil {
+			t.Fatal("mark of a record that will not encode: no error")
+		}
+		if _, err := os.Stat(recordPathFor(t, dir)); !os.IsNotExist(err) {
+			t.Errorf("a record that did not encode left a file behind: %v", err)
+		}
+	})
+	t.Run("beads directory that cannot be made", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		beads := filepath.Join(dir, "beads")
+		if err := os.Symlink(filepath.Join(dir, "nowhere"), beads); err != nil { // a dangling symlink
+			t.Fatal(err)
+		}
+		if err := MarkIncomplete(dir, factsIn("ws-a"), "boom"); err == nil {
+			t.Fatal("mark with no beads directory it can make: no error")
+		}
+		if _, err := os.Lstat(beads); err != nil {
+			t.Errorf("the beads symlink was changed: %v", err)
+		}
+	})
 }
 
 // Eight runs for one bead end at once. Each merges into the file the others have just
