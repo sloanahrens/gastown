@@ -741,14 +741,20 @@ func ciEngineRan(err error) bool {
 const ciEngineStderrMax = 200
 
 // ciEngineKubectlErrorPrefixes are the lines kubectl prints for its own failures
-// about the pod, the context or the connection. kubectl relays the engine's stderr
-// on the same stream, so these are skipped to reach the program's own line.
+// about the pod, the context or the connection, and its warnings. kubectl relays the
+// engine's stderr on the same stream, so these are skipped to reach the program's own
+// line. The lines klog writes for kubectl are matched by ciEngineKlogHeader instead.
 var ciEngineKubectlErrorPrefixes = []string{
 	"error: ",
 	"Error from server",
 	"Unable to connect to the server",
 	"The connection to the server",
+	"Warning: ",
 }
+
+// ciEngineKlogHeader matches the header klog writes before each line it logs: a
+// severity letter, the date as MMDD, then the time with its fraction.
+var ciEngineKlogHeader = regexp.MustCompile(`^[IWEF]\d{4} \d{2}:\d{2}:\d{2}\.\d+ `)
 
 // ciEngineFailure names how an engine exec ended for the log: its exit status, then,
 // for a failed exec, the first line of its stderr. A nil error is exit status 0 with
@@ -765,16 +771,16 @@ func ciEngineFailure(err error, stderr []byte) string {
 }
 
 // ciEngineStderrLine is the first line of an engine program's stderr, bounded for the
-// log. kubectl's own error lines and blank lines are skipped; control characters,
-// newlines among them, become spaces; the line is cut at ciEngineStderrMax
-// characters.
+// log. kubectl's own lines and blank lines are skipped; control and format characters,
+// bidi overrides and isolates among them, become spaces; the line is cut at
+// ciEngineStderrMax characters.
 func ciEngineStderrLine(stderr []byte) string {
 	for _, raw := range strings.Split(string(stderr), "\n") {
 		if ciEngineKubectlLine(raw) {
 			continue
 		}
 		line := strings.TrimSpace(strings.Map(func(r rune) rune {
-			if unicode.IsControl(r) {
+			if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 				return ' '
 			}
 			return r
@@ -797,7 +803,7 @@ func ciEngineKubectlLine(line string) bool {
 			return true
 		}
 	}
-	return false
+	return ciEngineKlogHeader.MatchString(line)
 }
 
 // ciEngineExec runs one program in the runner's engine container with argv as
