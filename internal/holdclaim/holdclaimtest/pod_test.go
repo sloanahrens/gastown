@@ -37,7 +37,7 @@ func TestExecCatOfAMissingFileFails(t *testing.T) {
 func TestExecRefusesAnUnknownPodCommand(t *testing.T) {
 	t.Parallel()
 	p := New()
-	if _, err := p.Exec(context.Background(), []string{"kubectl", "--", "sh", "-c", "x"}, nil); err == nil {
+	if _, err := p.Exec(context.Background(), []string{"kubectl", "--", "ls", "/"}, nil); err == nil {
 		t.Fatal("an unknown pod command returned nil, want an error")
 	}
 }

@@ -427,6 +427,36 @@ func TestLiftHoldWithNoPodRemovesOnlyTheMacFile(t *testing.T) {
 	}
 }
 
+// TestActivateHoldWithNoPodReportsAMacWriteThatFails drives the Mac-only write
+// refusal: with no pod there is no copy to fall back on, so the error names the
+// Mac file.
+func TestActivateHoldWithNoPodReportsAMacWriteThatFails(t *testing.T) {
+	t.Parallel()
+	local := filepath.Join(t.TempDir(), "no-such-dir", "seat-refill.hold")
+
+	if err := Activate(nil, "hold", local, nil); err == nil || !strings.Contains(err.Error(), "writing the hold") {
+		t.Fatalf("Activate error = %v, want the Mac write refusal", err)
+	}
+}
+
+// TestLiftEstopWithNoPodReportsAMacFileThatCannotBeRemoved drives the Mac-only
+// removal refusal: a non-empty directory where the sentinel should be cannot be
+// removed, and the error says so rather than reading as lifted.
+func TestLiftEstopWithNoPodReportsAMacFileThatCannotBeRemoved(t *testing.T) {
+	t.Parallel()
+	local := filepath.Join(t.TempDir(), "ESTOP")
+	if err := os.MkdirAll(local, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(local, "inside"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Lift(nil, "E-stop", local); err == nil || !strings.Contains(err.Error(), "failed to remove the E-stop file") {
+		t.Fatalf("Lift error = %v, want the Mac-only removal refusal", err)
+	}
+}
+
 // TestRemoveDeletesTheClaimFileAndReadsItBack pins the removal of one claim
 // file: rm -f, then the probe that reads back that it is gone.
 func TestRemoveDeletesTheClaimFileAndReadsItBack(t *testing.T) {
