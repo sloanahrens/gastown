@@ -342,7 +342,7 @@ sequenceDiagram
 
 **1. Shape.** A bead is *shaped* when it has these sections: Goal, Constraints, Out of scope, Gate, Size and Acceptance (one to six checkboxes). `gt spec lint` checks the shape and also checks claims the text makes, such as whether the files it names exist. The spec dispatcher only takes beads that pass.
 
-**2. Dispatch.** Each tick the dispatcher looks for ready beads, lints them, and slings the clean ones to a free seat of the right class. It refuses when a dispatch hold file exists or when an emergency stop file exists for the town or the rig. Labels keep a bead off the dispatcher: `overseer-only`, `operator-only`, `needs-overseer`, `needs-operator`, `needs-human`, `crew-only`, `needs-split`, `gt:ready-to-land` and the dispatch-failed label (the list is `excludedLabels` in `internal/specdispatch/dispatch.go`). An unshaped bead is also skipped, because lint refuses it. So a person can hold a bead until it is released.
+**2. Dispatch.** Each tick the dispatcher looks for ready beads, lints them, and slings the clean ones to a free seat of the right class. It refuses when a dispatch hold file exists or when an emergency stop file exists for the town or the rig. Labels keep a bead off the dispatcher: `overseer-only`, `operator-only`, `needs-overseer`, `needs-operator`, `needs-human`, `crew-only`, `needs-split`, `gt:ready-to-land` and the dispatch-failed label (the list is `excludedLabels` in `internal/specdispatch/dispatch.go`). The dispatcher also skips an unshaped bead (lint refuses it), a deferred bead, and every bead while the dispatch hold is set. So a person can hold a bead until it is released.
 
 **3. Work.** A polecat in a sandbox reads the bead, edits files in its worktree, runs the gate commands the bead names and writes tests. It talks to the town only through `bd` and git.
 
@@ -370,7 +370,7 @@ sequenceDiagram
 
 The path is automatic except at four places:
 
-- a person shapes or approves what enters it (a label such as `overseer-only` keeps a bead off the dispatcher, and the dispatch hold stops everything);
+- a person shapes or approves what enters it (a label such as `overseer-only` keeps a bead off the dispatcher, as does being unshaped or deferred, and the dispatch hold stops every bead);
 - a landing that touches a risk path is reviewed by a human afterwards, through the attention queue;
 - changing a CI workflow file is a human act (see [The security model](#the-security-model));
 - the roll of a new image onto the cluster is a person's step.
