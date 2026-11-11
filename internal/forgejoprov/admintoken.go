@@ -175,9 +175,12 @@ func (e noAdminToken) Error() string { return e.text }
 // Unwrap returns ErrNoAdminToken, so errors.Is recognizes the case.
 func (e noAdminToken) Unwrap() error { return ErrNoAdminToken }
 
-// The auth broker's run rules for the three forgejo commands. This is the one
-// place the names are written: the no-admin-token messages, the tests and the
-// runbook (docs/forgejo-runbook.md) take them from here.
+// The auth broker's run rules for the three forgejo commands. Go code reads
+// the names only from these constants: the no-admin-token messages and the
+// tests use them. Human-facing docs (docs/forgejo-runbook.md, docs/reference.md
+// and the design and plugin docs) spell the names out on purpose, because an
+// operator types them at gt-approve; when a name changes here, those docs
+// change in the same commit.
 const (
 	ProvisionRule = "forgejo-provision-go"
 	ResyncRule    = "forgejo-resync-go"
