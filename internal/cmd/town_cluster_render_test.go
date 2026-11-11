@@ -1180,6 +1180,71 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 	})
 }
 
+// TestTownClusterRenderDaemonClaudeDirFlag holds --daemon-claude-dir: the flag sets
+// Values.DaemonClaudeDir, its absence leaves the file names and the daemon's host
+// paths as they were, and a relative path is refused naming the flag before a write.
+func TestTownClusterRenderDaemonClaudeDirFlag(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the flag sets Values.DaemonClaudeDir", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.daemonClaudeDir = "/Users/sloan/.claude"
+		var out bytes.Buffer
+		deps := clusterRenderTestDeps(&out)
+		var seen k8sdaemon.Values
+		deps.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
+			seen = v
+			return k8sdaemon.Build(v)
+		}
+		if err := runClusterRender(deps, f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		if seen.DaemonClaudeDir != f.daemonClaudeDir {
+			t.Errorf("Values.DaemonClaudeDir = %q, want %q", seen.DaemonClaudeDir, f.daemonClaudeDir)
+		}
+		if got, want := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"), []string{"/Users/sloan/.claude Directory"}; !slices.Equal(got, want) {
+			t.Errorf("the daemon's host paths = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("the flag off leaves the names and the daemon's host paths as they were", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+			t.Fatalf("render without the flag: %v", err)
+		}
+		want := []string{
+			"01-namespace-gt.yaml",
+			"02-persistentvolumeclaim-town-state.yaml",
+			"03-persistentvolumeclaim-landing-work.yaml",
+			"04-persistentvolumeclaim-dolt-backup.yaml",
+			"05-serviceaccount-daemon.yaml",
+			"06-service-forgejo.yaml",
+			"07-rolebinding-daemon-sweep-runner.yaml",
+			"08-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"09-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"10-deployment-daemon.yaml",
+		}
+		if got := dirNames(t, f.out); !slices.Equal(got, want) {
+			t.Fatalf("file names without the flag = %v, want %v", got, want)
+		}
+		if got := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"); len(got) != 0 {
+			t.Errorf("the daemon's host paths without the flag = %q, want none", got)
+		}
+	})
+
+	t.Run("a relative claude directory refuses before a write", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.daemonClaudeDir = "Users/sloan/.claude"
+		var out bytes.Buffer
+		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		requireErrorNames(t, err, "--daemon-claude-dir", "absolute")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left %s: %s", f.out, got)
+		}
+	})
+}
+
 // requireErrorNames fails the test unless err is non-nil and its text names each
 // of want.
 func requireErrorNames(t *testing.T, err error, want ...string) {
