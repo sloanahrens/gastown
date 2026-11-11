@@ -99,6 +99,119 @@ func TestLandingColumnsKeepThePinnedHeader(t *testing.T) {
 	}
 }
 
+// polecatLedgerLine is one ledger.jsonl line for a landing, with the polecat
+// members in extra (raw JSON members, or "" for a line from before they existed).
+func polecatLedgerLine(extra string) string {
+	base := `"bead":"gt-p1","rig":"gastown","landed_commit":"c-p1","landed_at":"2026-10-24T12:00:00Z",` +
+		`"route":"daemon","om_verdict":"approve","gate_result":"build"`
+	if extra == "" {
+		return "{" + base + "}"
+	}
+	return "{" + base + "," + extra + "}"
+}
+
+// polecatCells reads one ledger line through LoadLedger and the BuildLandings
+// join the extract runs, and returns the landing's row.
+func polecatCells(t *testing.T, line string) Row {
+	t.Helper()
+	ledger := LoadLedger(map[string][]string{"gastown": {line}}, &Dropped{})
+	rows := buildLedgerLandings(t, ledger, nil, nil, StageStamps{})
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want the one landing", len(rows))
+	}
+	return rows[0]
+}
+
+// TestPolecatCellsFollowTheLedgerLine: a ledger line that carries the polecat
+// time, bound and agent fills the new columns, and a line from before those
+// fields existed leaves every one of them empty (gt-5d9k2f.3).
+func TestPolecatCellsFollowTheLedgerLine(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		extra string
+		want  map[string]string
+	}{
+		{
+			name:  "a measured landing",
+			extra: `"polecat_secs":600,"agent":"sbx-haiku"`,
+			want: map[string]string{"polecat_secs": "600", "polecat_lower_bound": "0",
+				"agent": "sbx-haiku", "seat_class": "haiku", "sp_actual": "8"},
+		},
+		{
+			name:  "a lower-bound time has no points",
+			extra: `"polecat_secs":600,"polecat_lower_bound":true,"agent":"claude-sonnet"`,
+			want: map[string]string{"polecat_secs": "600", "polecat_lower_bound": "1",
+				"agent": "claude-sonnet", "seat_class": "sonnet", "sp_actual": ""},
+		},
+		{
+			name:  "a bound with no time",
+			extra: `"polecat_lower_bound":true`,
+			want: map[string]string{"polecat_secs": "", "polecat_lower_bound": "1",
+				"agent": "", "seat_class": "", "sp_actual": ""},
+		},
+		{
+			name:  "a line from before the fields existed",
+			extra: "",
+			want: map[string]string{"polecat_secs": "", "polecat_lower_bound": "",
+				"agent": "", "seat_class": "", "sp_actual": ""},
+		},
+		{
+			name:  "zero seconds has no points",
+			extra: `"polecat_secs":0`,
+			want: map[string]string{"polecat_secs": "", "polecat_lower_bound": "",
+				"agent": "", "seat_class": "", "sp_actual": ""},
+		},
+		{
+			name:  "a negative time reads as absent",
+			extra: `"polecat_secs":-60`,
+			want: map[string]string{"polecat_secs": "", "polecat_lower_bound": "",
+				"agent": "", "seat_class": "", "sp_actual": ""},
+		},
+		{
+			name:  "twenty minutes is the twenty-one-point bucket",
+			extra: `"polecat_secs":1200,"agent":"deepseek-v3"`,
+			want: map[string]string{"polecat_secs": "1200", "polecat_lower_bound": "0",
+				"agent": "deepseek-v3", "seat_class": "flash", "sp_actual": "21"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			row := polecatCells(t, polecatLedgerLine(tc.extra))
+			for col, want := range tc.want {
+				if got := row[col]; got != want {
+					t.Errorf("%s = %q, want %q", col, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestSeatClassFromTheAgentName: each agent the design names maps to its seat
+// class through the extract, and a name in none of them is empty.
+func TestSeatClassFromTheAgentName(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"sbx-haiku":     "haiku",
+		"claude-haiku":  "haiku",
+		"sbx-flash":     "flash",
+		"deepseek-v3":   "flash",
+		"deepseek":      "flash",
+		"claude-sonnet": "sonnet",
+		"claude-opus":   "",
+		"sbx-haiku-2":   "",
+		"Deepseek-v3":   "",
+		"":              "",
+	}
+	for agent, want := range cases {
+		row := polecatCells(t, polecatLedgerLine(`"polecat_secs":600,"agent":"`+agent+`"`))
+		if got := row["seat_class"]; got != want {
+			t.Errorf("seat_class(%q) = %q, want %q", agent, got, want)
+		}
+	}
+}
+
 // buildLedgerLandings runs BuildLandings, the production join Extract calls,
 // for ledger, so a test drives the model, stage stamps and time to land the
 // extract actually writes rather than a helper beside it.
@@ -112,9 +225,9 @@ func buildLedgerLandings(t *testing.T, ledger []LedgerRow, beads map[string]Bead
 	return rows
 }
 
-// TestLedgerNewColumnsAppendAtTheEnd: the stage and time-to-land columns extend
-// the header, so a reader of the extract's existing columns finds each in the
-// place it was written (gt-p9pok).
+// TestLedgerNewColumnsAppendAtTheEnd: the stage, time-to-land and polecat-time
+// columns extend the header, so a reader of the extract's existing columns finds
+// each in the place it was written (gt-p9pok).
 func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
 	t.Parallel()
 	legacy := []string{
@@ -124,7 +237,10 @@ func TestLedgerNewColumnsAppendAtTheEnd(t *testing.T) {
 		"manual_rescue", "reached_overrun_stop", "unreadable", "type", "priority",
 		"shaped", "label_count", "model", "om_threshold", "dominant_model",
 	}
-	appended := []string{"created_at", "dispatched_at", "submitted_at", "time_to_land_s"}
+	appended := []string{
+		"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
+		"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
+	}
 	if len(landingColumns) != len(legacy)+len(appended) {
 		t.Fatalf("landingColumns has %d columns, want %d", len(landingColumns), len(legacy)+len(appended))
 	}

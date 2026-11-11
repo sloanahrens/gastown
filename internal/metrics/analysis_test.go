@@ -119,7 +119,9 @@ var analysisWeeks = []int{12, 12, 12, 4, 4}
 // analysisLandings is 44 landings whose first 30 train rejected_before_landing:
 // enough positives for that target's mango stage, none for the other two. Each
 // landing's week is its landed_at's Monday, so the panel's trend holds the
-// three thick weeks and leaves the two thin ones out.
+// three thick weeks and leaves the two thin ones out. The table is an extract
+// from before the seat class and polecat time existed, so its header leaves
+// those two columns out and the panel reports them missing (review F8).
 func analysisLandings() (header []string, rows []Row) {
 	base := time.Date(2026, 9, 14, 0, 0, 0, 0, time.UTC)
 	for week, count := range analysisWeeks {
@@ -160,7 +162,13 @@ func analysisLandings() (header []string, rows []Row) {
 			rows = append(rows, row)
 		}
 	}
-	return append([]string(nil), landingColumns...), rows
+	for _, name := range landingColumns {
+		if name == "seat_class" || name == "polecat_secs" {
+			continue
+		}
+		header = append(header, name)
+	}
+	return header, rows
 }
 
 // writeTownFile writes body at path, creating the directories above it.

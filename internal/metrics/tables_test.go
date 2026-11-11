@@ -263,6 +263,7 @@ func TestWriteLandingSidecarListsExplainOnly(t *testing.T) {
 // byte for byte, with no trailing newline.
 const landingSidecarBytes = `{
  "explain_only": [
+  "agent",
   "attempts",
   "created_at",
   "dispatched_at",
@@ -274,6 +275,10 @@ const landingSidecarBytes = `{
   "lines_total",
   "om_verdict",
   "package_entropy",
+  "polecat_lower_bound",
+  "polecat_secs",
+  "seat_class",
+  "sp_actual",
   "submitted_at",
   "time_to_land_s",
   "unreadable"

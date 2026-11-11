@@ -37,15 +37,23 @@ func jsonRows(lines []string, source string, dropped *Dropped) []json.RawMessage
 // LedgerRow is one line of a rig's ledger.jsonl: the fields the loader keeps,
 // with Rig filled from the source rig when the line names none. Branch is kept
 // because it names the seat that wrote the work that landed.
+//
+// PolecatSecs, PolecatLowerBound and Agent are the polecat time and seat the
+// landing worker writes since 10-26. The writer omits a zero time and a false
+// bound, so a line that carries none of them reads as zero here, which the
+// landings table reads as no time.
 type LedgerRow struct {
-	Bead         string `json:"bead"`
-	Rig          string `json:"rig"`
-	LandedCommit string `json:"landed_commit"`
-	LandedAt     string `json:"landed_at"`
-	Route        string `json:"route"`
-	OMVerdict    string `json:"om_verdict"`
-	GateResult   string `json:"gate_result"`
-	Branch       string `json:"branch"`
+	Bead              string  `json:"bead"`
+	Rig               string  `json:"rig"`
+	LandedCommit      string  `json:"landed_commit"`
+	LandedAt          string  `json:"landed_at"`
+	Route             string  `json:"route"`
+	OMVerdict         string  `json:"om_verdict"`
+	GateResult        string  `json:"gate_result"`
+	Branch            string  `json:"branch"`
+	PolecatSecs       float64 `json:"polecat_secs"`
+	PolecatLowerBound bool    `json:"polecat_lower_bound"`
+	Agent             string  `json:"agent"`
 }
 
 // LoadLedger parses each rig's ledger lines into rows. A line that is not JSON,
