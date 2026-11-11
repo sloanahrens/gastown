@@ -516,6 +516,103 @@ func TestRunDryRunReportsRemovalAndViewerGrant(t *testing.T) {
 	}
 }
 
+// TestRunSkipTokensSendsNoTokenRequest: --skip-tokens leaves the bots' tokens
+// alone and still grants the repository access and the protection rule.
+func TestRunSkipTokensSendsNoTokenRequest(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	for _, role := range []string{"polecat", "landing", "registry"} {
+		user := DefaultBotPrefix + role
+		f.SeedUser(user, user+"@"+DefaultBotEmailDomain)
+	}
+	files := newMemFiles()
+
+	res := runProvisioning(t, f, files, nil, "--repo", protectionRepo, "--skip-tokens")
+	if res.code != ExitOK {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
+	}
+	calls := f.CallLog()
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodDelete} {
+		if got := countCalls(calls, method, "/tokens"); got != 0 {
+			t.Errorf("%s calls under /tokens = %d, want 0", method, got)
+		}
+	}
+	if got := countCalls(calls, http.MethodPut, "/collaborators/"); got == 0 {
+		t.Errorf("collaborator grants = %d, want the repository access still granted", got)
+	}
+	if got := countCalls(calls, http.MethodPost, "/branch_protections"); got != 1 {
+		t.Errorf("branch protection POSTs = %d, want 1", got)
+	}
+	if got := len(files.files); got != 0 {
+		t.Errorf("run wrote %d token files, want none", got)
+	}
+}
+
+// TestRunSkipTokensRefusesAMissingBot: --skip-tokens refuses a bot that does not
+// exist yet, since its first token would have to be minted; the refusal names
+// the bot and no write is sent.
+func TestRunSkipTokensRefusesAMissingBot(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	// polecat and landing exist, registry does not: the run gets past the earlier
+	// roles without a write and refuses at the missing one.
+	for _, role := range []string{"polecat", "landing"} {
+		user := DefaultBotPrefix + role
+		f.SeedUser(user, user+"@"+DefaultBotEmailDomain)
+	}
+
+	res := runProvisioning(t, f, newMemFiles(), nil, "--repo", protectionRepo, "--skip-tokens")
+	if res.code != ExitFailure {
+		t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+	}
+	if missing := DefaultBotPrefix + "registry"; !strings.Contains(res.logs, missing) {
+		t.Errorf("logs = %q, want the missing user %s named", res.shown(), missing)
+	}
+	if writes := f.Writes(); len(writes) != 0 {
+		t.Errorf("run sent writes %v, want none", writes)
+	}
+	if _, ok := f.UserEmail(DefaultBotPrefix + "registry"); ok {
+		t.Errorf("run created %s, want the refusal before any create", DefaultBotPrefix+"registry")
+	}
+}
+
+// TestRunSkipTokensDryRunPlanNamesTheSkippedStep: a dry run with --skip-tokens
+// prints the token step as skipped and still plans the repository writes.
+func TestRunSkipTokensDryRunPlanNamesTheSkippedStep(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	f.AddRepo(protectionRepo)
+	for _, role := range []string{"polecat", "landing", "registry"} {
+		user := DefaultBotPrefix + role
+		f.SeedUser(user, user+"@"+DefaultBotEmailDomain)
+	}
+	files := newMemFiles()
+
+	res := runProvisioning(t, f, files, nil, "--repo", protectionRepo, "--dry-run", "--skip-tokens")
+	if res.code != ExitOK {
+		t.Fatalf("dry run = %d, want %d (logs: %s)", res.code, ExitOK, res.shown())
+	}
+	if !strings.Contains(res.logs, "tokens: skipped (--skip-tokens)") {
+		t.Errorf("dry run logs = %q, want the skipped token step named", res.shown())
+	}
+	for _, want := range []string{
+		"would grant bot-polecat write access to acme/rig",
+		"would create branch protection main on acme/rig",
+	} {
+		if !strings.Contains(res.logs, want) {
+			t.Errorf("dry run logs = %q, want %q", res.shown(), want)
+		}
+	}
+	if writes := f.Writes(); len(writes) != 0 {
+		t.Errorf("dry run sent writes %v, want none", writes)
+	}
+	if got := len(files.files); got != 0 {
+		t.Errorf("dry run wrote %d token files, want none", got)
+	}
+}
+
 // TestRunExitCodes: a run that fails at a step exits 1 and names the step's failure.
 func TestRunExitCodes(t *testing.T) {
 	t.Parallel()

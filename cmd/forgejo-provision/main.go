@@ -89,6 +89,9 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
   --rotate               mint a new token even where a token file exists, and
                          revoke the previous token of the same name
   --dry-run              read but never write
+  --skip-tokens          mint, list and revoke no bot token, for a broker run
+                         with no HOME onboarding a repository whose bots
+                         already hold theirs
   -h, --help             this text
 `,
 	forgejoprov.DefaultAPIURL,

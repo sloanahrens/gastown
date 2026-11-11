@@ -70,6 +70,8 @@ func TestMainHelpExitsZero(t *testing.T) {
 				"Usage: forgejo-provision",
 				"--api-url",
 				"--dry-run",
+				"--skip-tokens",
+				"with no HOME",
 				"else " + forgejoprov.DefaultAPIURL,
 				"(default: " + strings.Join(forgejoprov.DefaultRoles(), " ") + ";",
 				"known: " + forgejoprov.KnownRoles() + ")",

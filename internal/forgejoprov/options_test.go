@@ -142,6 +142,7 @@ func TestParseDefaultsTable(t *testing.T) {
 		},
 		{name: "--rotate", args: []string{"--rotate"}, change: func(o *Options) { o.Rotate = true }},
 		{name: "--dry-run", args: []string{"--dry-run"}, change: func(o *Options) { o.DryRun = true }},
+		{name: "--skip-tokens", args: []string{"--skip-tokens"}, change: func(o *Options) { o.SkipTokens = true }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
