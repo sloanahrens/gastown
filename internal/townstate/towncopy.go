@@ -17,8 +17,11 @@ type TownCopyRow struct {
 	// "/" (every file under it, at any depth), or a glob whose last element holds
 	// a "*" (every file it matches in that one directory).
 	Path string
-	// Owner is the side of the split that carries the file: OwnerDaemon rows go
-	// in the town-state export, OwnerShared rows in the live copy's settings step.
+	// Owner is the side of the split that carries the file. The live copy's
+	// settings step sends the OwnerShared rows only. An OwnerDaemon row is carried
+	// by the town-state export through its own manifest (internal/manifestdata),
+	// which does not read this table: the daemon rows here list those files, and
+	// they do not drive the export.
 	Owner Owner
 	// Why names what reads the file in the pod.
 	Why string

@@ -802,9 +802,10 @@ func seedCutoverPrepare(town string, read func(string) ([]byte, error)) (seedCut
 		}
 	}
 
-	// The live copy sends the table's shared rows; its daemon rows are the
-	// town-state export's. A settings file the table does not name stays on the
-	// host, so a new secret under settings/ cannot reach the pod by existing.
+	// The live copy sends the table's shared rows only. The daemon rows are carried
+	// by the town-state export's manifest, which does not read this table. A
+	// settings file the table does not name stays on the host, so a new secret
+	// under settings/ cannot reach the pod by existing.
 	var shared []townstate.TownCopyRow
 	for _, row := range townstate.TownCopyRows(rigs) {
 		if row.Shared() {
