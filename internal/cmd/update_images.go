@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/config"
+	diskregistry "github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -31,7 +32,8 @@ const (
 	// updateImagesTagLength is how much of the commit the images' tag carries.
 	updateImagesTagLength = 12
 	// updateImagesAccept asks for an image manifest first; an index is accepted
-	// so the reader can refuse it by name instead of reporting a missing tag.
+	// so the reader resolves it to its linux/arm64 child instead of reporting a
+	// missing tag.
 	updateImagesAccept = "application/vnd.oci.image.manifest.v1+json, " +
 		"application/vnd.docker.distribution.manifest.v2+json, " +
 		"application/vnd.oci.image.index.v1+json, " +
@@ -42,6 +44,10 @@ const (
 	updateImagesMaxConfig   = 4 << 20
 	// updateImagesTimeout bounds one registry request.
 	updateImagesTimeout = 30 * time.Second
+	// updateImagesOS and updateImagesArch are the platform an index resolves
+	// to: the sandbox pods and the polecat image run linux/arm64.
+	updateImagesOS   = "linux"
+	updateImagesArch = "arm64"
 )
 
 // updateImagesSeams are the subcommand's dependencies: the town's registry,
@@ -178,6 +184,11 @@ The viewer credential goes over https. It goes over http only to a loopback
 address or to the town's own Forgejo at forgejo:3000, which has no https
 endpoint inside the town network; a read from any other host over http is
 refused before a request is made.
+
+A tag that names an image index is resolved to its linux/arm64 child: the
+values file records the index's own digest, the digest the cluster pulls, and
+the commit label is read from that child's config. An index with no such child,
+or with two, is refused.
 
 A second run for the same commit with the same digests changes nothing. A
 recorded commit whose tag now answers another digest is refused, because an
@@ -413,7 +424,16 @@ func (r registryReader) image(ctx context.Context, kind, name, tag string) (imag
 		return imageRead{}, fmt.Errorf("the %s image %s answered digest %s, but its manifest bytes hash to %s", kind, repo, digest, got)
 	}
 	if manifest.isIndex() {
-		return imageRead{}, fmt.Errorf("the %s image %s at tag %s is an index, not an image", kind, repo, tag)
+		// The index's own digest is the one the cluster pulls, so it stays the
+		// recorded digest; the commit label comes from the platform child.
+		child, err := diskregistry.ChildForPlatform(tag, manifestBody, updateImagesOS, updateImagesArch)
+		if err != nil {
+			return imageRead{}, fmt.Errorf("the %s image %s: %w", kind, repo, err)
+		}
+		manifest, err = r.indexChild(ctx, kind, name, repo, child)
+		if err != nil {
+			return imageRead{}, err
+		}
 	}
 	if !imagevalues.ValidDigest(manifest.Config.Digest) {
 		return imageRead{}, fmt.Errorf("the %s image %s names config digest %q, not sha256:<64 lowercase hex>", kind, repo, manifest.Config.Digest)
@@ -432,6 +452,28 @@ func (r registryReader) image(ctx context.Context, kind, name, tag string) (imag
 		Digest: digest,
 		Commit: config.Config.Labels[imagevalues.CommitLabel],
 	}, nil
+}
+
+// indexChild reads the platform image an index names at digest. Its bytes must
+// hash to that digest, and a child that is itself an index is refused, so the
+// config the label is read from is the one the index's platform entry pins.
+func (r registryReader) indexChild(ctx context.Context, kind, name, repo, digest string) (registryManifest, error) {
+	childURL := r.endpoint("/v2/" + r.registry.Owner + "/" + name + "/manifests/" + digest)
+	var child registryManifest
+	_, childBody, err := r.getJSON(ctx, childURL, updateImagesMaxManifest, &child)
+	if errors.Is(err, errRegistryNotFound) {
+		return registryManifest{}, fmt.Errorf("the %s image %s has no child manifest %s in the registry", kind, repo, digest)
+	}
+	if err != nil {
+		return registryManifest{}, fmt.Errorf("reading the %s image %s child %s: %w", kind, repo, digest, err)
+	}
+	if got := sha256Digest(childBody); got != digest {
+		return registryManifest{}, fmt.Errorf("the %s image %s child %s has manifest bytes that hash to %s", kind, repo, digest, got)
+	}
+	if child.isIndex() {
+		return registryManifest{}, fmt.Errorf("the %s image %s child %s is an index, not an image", kind, repo, digest)
+	}
+	return child, nil
 }
 
 // digestAt checks that name's image is in the registry at digest: the manifest

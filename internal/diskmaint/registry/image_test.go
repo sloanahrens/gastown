@@ -114,6 +114,49 @@ func TestInspectImageRefusals(t *testing.T) {
 	})
 }
 
+// TestChildForPlatformResolvesOneChildOrRefuses holds the one index resolution
+// both readers call: a single match is its digest, and no match or two matches
+// is an error that names the reference and every platform the index holds.
+func TestChildForPlatformResolvesOneChildOrRefuses(t *testing.T) {
+	t.Parallel()
+	arm := digestOf('a')
+	amd := digestOf('b')
+	index := func(entries ...string) []byte {
+		return []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[` + strings.Join(entries, ",") + `]}`)
+	}
+	entry := func(digest, os, arch string) string {
+		return fmt.Sprintf(`{"digest":%q,"platform":{"os":%q,"architecture":%q}}`, digest, os, arch)
+	}
+	cases := []struct {
+		name string
+		body []byte
+		want string
+		err  string
+	}{
+		{"one linux/arm64 child", index(entry(amd, "linux", "amd64"), entry(arm, "linux", "arm64")), arm, ""},
+		{"no linux/arm64 child", index(entry(amd, "linux", "amd64")), "", "holds no linux/arm64 entry; the platforms it holds are linux/amd64"},
+		{"two linux/arm64 children", index(entry(arm, "linux", "arm64"), entry(amd, "linux", "arm64")), "", "holds 2 linux/arm64 entries; the platforms it holds are linux/arm64"},
+		{"no platform at all", index(), "", "the platforms it holds are no platforms"},
+		{"a child digest that fails validation", index(entry("sha256:xyz", "linux", "arm64")), "", "not sha256:<64 lowercase hex>"},
+		{"a body that does not parse", []byte("not json"), "", "does not parse"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ChildForPlatform("0123456789ab", tc.body, "linux", "arm64")
+			if tc.err == "" {
+				if err != nil || got != tc.want {
+					t.Fatalf("ChildForPlatform = %q, %v; want %q", got, err, tc.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.err) || !strings.Contains(err.Error(), "0123456789ab") {
+				t.Fatalf("ChildForPlatform error = %v; want one naming the tag and %q", err, tc.err)
+			}
+		})
+	}
+}
+
 // TestInspectImageFailurePaths drives each way a read can fail before it returns
 // a label: a bad ref, a manifest or blob the registry will not serve, a header
 // that does not name the body, and a body that is not the document it must be.
