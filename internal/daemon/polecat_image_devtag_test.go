@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -18,16 +19,16 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
-	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/notify"
 )
 
 const (
 	// devTagRunningCommit is the full commit the running gt was built from; its
-	// first buildstamp.Len characters are the build stamp make polecat-image tags
-	// the source image with.
+	// first polecatDevTagSourceLen characters are the tag the images workflow
+	// pushes the source image under.
 	devTagRunningCommit = "0123456789abcdef0123456789abcdef01234567"
 	// devTagOldCommit is the commit the dev tag carried before the roll.
 	devTagOldCommit = "ffffffffffffffffffffffffffffffffffffffff"
@@ -35,9 +36,12 @@ const (
 	devTagOtherCommit = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 )
 
-// devTagRevision is the build stamp of the running commit, the tag make
-// polecat-image gives the source image.
-var devTagRevision = devTagRunningCommit[:buildstamp.Len]
+// devTagRevision is the source tag of the running commit: its first 12
+// characters, the tag the images workflow gives the source image.
+var devTagRevision = devTagRunningCommit[:polecatDevTagSourceLen]
+
+// devTagViewer is the viewer's login the source is read with in these tests.
+var devTagViewer = registry.Credential{User: "viewer", Token: "devtag-viewer-token"}
 
 // devTagRegistry is an in-memory registry for the polecat image repository. It
 // holds each tag's manifest bytes and each blob, serves them the way the
@@ -57,6 +61,15 @@ type devTagRegistry struct {
 	// uploadStatus, when set, is the status every blob upload answers, and nothing
 	// is stored.
 	uploadStatus int
+	// want, when set, is the login every request must carry; any other request
+	// answers 401 and is not served.
+	want *registry.Credential
+}
+
+// devTagAuthorized reports whether req carries the login want names.
+func devTagAuthorized(req *http.Request, want registry.Credential) bool {
+	user, token, ok := req.BasicAuth()
+	return ok && user == want.User && token == want.Token
 }
 
 // devTagHost is the registry's host:port, the form image_registry carries. The
@@ -123,6 +136,10 @@ func (r *devTagRegistry) requests() (gets, puts []string) {
 func (r *devTagRegistry) serve(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.want != nil && !devTagAuthorized(req, *r.want) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 	prefix := "/v2/" + r.repo + "/"
 	path, ok := strings.CutPrefix(req.URL.Path, prefix)
 	if !ok {
@@ -232,8 +249,9 @@ func (n *devTagNotifier) got() []notify.Escalation {
 	return append([]notify.Escalation(nil), n.escalations...)
 }
 
-// devTagDaemon is a daemon whose runner image registry is reg, whose build is
-// the stamp of the running commit, and whose escalations and log are captured.
+// devTagDaemon is a daemon whose runner image registry is reg, whose running
+// commit is devTagRunningCommit, whose viewer login is devTagViewer, and whose
+// escalations and log are captured.
 func devTagDaemon(t *testing.T, reg *devTagRegistry) (*Daemon, *devTagNotifier, *bytes.Buffer) {
 	t.Helper()
 	d, _, _, logs := newTierSweepDaemon(t, time.Now(), "gastown")
@@ -241,8 +259,8 @@ func devTagDaemon(t *testing.T, reg *devTagRegistry) (*Daemon, *devTagNotifier, 
 	// The CI source is the same fake here, so these tests keep one registry; the
 	// tests in polecat_image_devtag_source_test.go split the two.
 	d.patrolConfig.PolecatImageSourceSetting = devTagHost + "/" + imagevalues.PolecatImage
-	d.buildCommitFn = func() string { return devTagRevision }
 	d.polecatDevTagSeams.runningCommit = func() string { return devTagRunningCommit }
+	d.polecatDevTagSeams.viewerCredential = func() (registry.Credential, error) { return devTagViewer, nil }
 	d.polecatDevTagSeams.http = &http.Client{Transport: devTagTransport(reg.serve)}
 	// No dev tag in these tests descends from the running commit, so the copy
 	// goes ahead; the descendant test replaces this.
@@ -448,21 +466,20 @@ func TestPolecatImageDevTagRestoresOnLabelMismatch(t *testing.T) {
 	}
 }
 
-// TestPolecatImageDevTagRefusesUnnamedSource: a build whose revision cannot name
-// the running commit's source tag, or whose running commit is not a full commit,
-// files one escalation and touches the registry not at all.
-func TestPolecatImageDevTagRefusesUnnamedSource(t *testing.T) {
+// TestPolecatImageDevTagRefusesNonFullRunningCommit: a running commit that is not
+// a full commit names no source tag, so the step files one escalation that names
+// the commit's length and touches the registry not at all. The 9-character gt
+// stamp and the 12-character source tag are both refused on that ground.
+func TestPolecatImageDevTagRefusesNonFullRunningCommit(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
-		build   string
 		running string
+		length  int
 	}{
-		{name: "no build commit", build: "", running: devTagRunningCommit},
-		{name: "unknown build commit", build: "unknown", running: devTagRunningCommit},
-		{name: "full-length build commit", build: devTagRunningCommit, running: devTagRunningCommit},
-		{name: "build commit not the running commit", build: "fedcba987654", running: devTagRunningCommit},
-		{name: "running commit not full", build: devTagRevision, running: devTagRevision},
+		{name: "empty running commit", running: "", length: 0},
+		{name: "9-character gt stamp", running: devTagRunningCommit[:9], length: 9},
+		{name: "12-character source tag", running: devTagRevision, length: 12},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -470,7 +487,6 @@ func TestPolecatImageDevTagRefusesUnnamedSource(t *testing.T) {
 			reg.addImage("dev", devTagOldCommit)
 			reg.addImage(devTagRevision, devTagRunningCommit)
 			d, n, _ := devTagDaemon(t, reg)
-			d.buildCommitFn = func() string { return tc.build }
 			d.polecatDevTagSeams.runningCommit = func() string { return tc.running }
 
 			d.publishPolecatDevTag()
@@ -478,8 +494,12 @@ func TestPolecatImageDevTagRefusesUnnamedSource(t *testing.T) {
 			if gets, puts := reg.requests(); len(gets)+len(puts) != 0 {
 				t.Fatalf("registry requests gets=%v puts=%v, want none", gets, puts)
 			}
-			if got := n.got(); len(got) != 1 {
+			got := n.got()
+			if len(got) != 1 {
 				t.Fatalf("escalations = %+v, want exactly one", got)
+			}
+			if want := fmt.Sprintf("is %d characters, not a full 40-character commit", tc.length); !strings.Contains(got[0].Reason, want) {
+				t.Fatalf("escalation = %q, want it to name the length: %q", got[0].Reason, want)
 			}
 		})
 	}
