@@ -218,7 +218,7 @@ func runTail(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	beadReads := openTailBeads(townRoot)
+	beadReads := openTailBeads(townRoot, tailTitleCacheSize)
 	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot), cutoff)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, rig: tailRig, kinds: kinds, cutoff: cutoff, loc: loc, now: time.Now,

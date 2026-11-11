@@ -243,7 +243,7 @@ func TestNewTailView_FlagsSelectFilterColumnsAndClock(t *testing.T) {
 	at := time.Date(2026, 10, 1, 16, 34, 5, 0, tailTestLoc)
 	line := tailLine{At: at, Rig: "r", Kind: "k", Text: "t"}
 
-	def := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(nil), gitUser: "Test Operator"})
+	def := newTailView(tailTestLoc, tailViewOptions{beads: newTailBeads(nil, tailTitleCacheSize), gitUser: "Test Operator"})
 	if def.Show == nil {
 		t.Fatal("the default view must filter")
 	}
@@ -259,7 +259,7 @@ func TestNewTailView_FlagsSelectFilterColumnsAndClock(t *testing.T) {
 	if !def.Trim || def.Beads == nil {
 		t.Error("the default view trims the raw fields and names the bead")
 	}
-	all := newTailView(tailTestLoc, tailViewOptions{all: true, beads: newTailBeads(nil), gitUser: "Test Operator"})
+	all := newTailView(tailTestLoc, tailViewOptions{all: true, beads: newTailBeads(nil, tailTitleCacheSize), gitUser: "Test Operator"})
 	if all.Show != nil {
 		t.Error("--all must show every line")
 	}

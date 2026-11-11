@@ -36,9 +36,19 @@ import (
 type tailOnce struct{ last string }
 
 // tailTitleCacheSize bounds the titles one run remembers. A run that outlives
-// this many distinct beads stops taking new titles rather than growing: the
-// line prints without one, which is what a failed read does too.
+// this many distinct beads evicts its least recently used title for each new
+// one, so the cache never grows past this bound; an evicted bead is read again
+// the next time its title is asked for.
 const tailTitleCacheSize = 512
+
+// dashboardTitleCacheSize bounds the titles the dashboard's reader keeps. One
+// reader serves two readers of titles: the landings page, which shows up to
+// recentLandingRows rows and needs a title for each, and the event feed, whose
+// working set is what tailTitleCacheSize was sized for (a gt tail run keeps the
+// same stream). A bound under the page's row count evicts titles the page still
+// shows before the fill reads them, and the fill never settles (gt-bjhc3r), so
+// the bound is the page's rows plus the feed's own share.
+const dashboardTitleCacheSize = recentLandingRows + tailTitleCacheSize
 
 // tailMissingCacheSize bounds the not-found ids one run remembers. A bead
 // deleted a moment after it was created is asked about once per journal record
@@ -124,11 +134,12 @@ type tailBeads struct {
 	now        func() time.Time
 }
 
-// newTailBeads wraps show with the process-lifetime title cache.
-func newTailBeads(show func(rig, id string) (*beads.Issue, error)) *tailBeads {
+// newTailBeads wraps show with the process-lifetime title cache, which keeps at
+// most max titles.
+func newTailBeads(show func(rig, id string) (*beads.Issue, error), max int) *tailBeads {
 	return &tailBeads{
 		show:       show,
-		max:        tailTitleCacheSize,
+		max:        max,
 		titles:     map[string]string{},
 		used:       map[string]uint64{},
 		fetching:   map[string]bool{},
@@ -379,14 +390,14 @@ type tailStore interface {
 // newTailBeadsFromStore builds the reader over one store opener. A title and a
 // landing's submitter are asked of the same store, so the opener's own cache
 // opens a rig's store once for both.
-func newTailBeadsFromStore(open func(rig string) (tailStore, error)) *tailBeads {
+func newTailBeadsFromStore(open func(rig string) (tailStore, error), max int) *tailBeads {
 	b := newTailBeads(func(rig, id string) (*beads.Issue, error) {
 		s, err := open(rig)
 		if err != nil {
 			return nil, err
 		}
 		return s.Show(id)
-	})
+	}, max)
 	b.comments = func(rig, id string) ([]beads.Comment, error) {
 		s, err := open(rig)
 		if err != nil {
@@ -399,8 +410,9 @@ func newTailBeadsFromStore(open func(rig string) (tailStore, error)) *tailBeads 
 
 // openTailBeads is the production tailBeads.show: the store that owns a rig's
 // beads, opened once per rig. The store is read with bd show, which routes by
-// issue id, so one store answers for any bead the monitor asks about.
-func openTailBeads(townRoot string) *tailBeads {
+// issue id, so one store answers for any bead the monitor asks about. max is
+// the title bound the reader keeps.
+func openTailBeads(townRoot string, max int) *tailBeads {
 	var mu sync.Mutex
 	stores := map[string]tailStore{}
 	open := func(rig string) (tailStore, error) {
@@ -417,7 +429,13 @@ func openTailBeads(townRoot string) *tailBeads {
 		stores[rig] = s
 		return s, nil
 	}
-	return newTailBeadsFromStore(open)
+	return newTailBeadsFromStore(open, max)
+}
+
+// openDashboardBeads is the dashboard's reader: openTailBeads bounded at
+// dashboardTitleCacheSize, so the landings page keeps every title it reads.
+func openDashboardBeads(townRoot string) *tailBeads {
+	return openTailBeads(townRoot, dashboardTitleCacheSize)
 }
 
 func (o *tailOnce) first(msg string) bool {
