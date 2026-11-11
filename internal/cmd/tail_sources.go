@@ -227,6 +227,29 @@ func (b *tailBeads) title(rig, id string) string {
 	return title
 }
 
+// cachedTitle answers a bead's title from the cache alone: it never starts a
+// bd read. settled is true when the reader already has a final answer for the
+// bead — a remembered title, or a not-found within tailMissingTTL, which reads
+// as "". It is false for a bead never read, or whose last read failed, so the
+// caller decides whether to spend a read on it.
+func (b *tailBeads) cachedTitle(id string) (title string, settled bool) {
+	if b == nil || id == "" {
+		return "", false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.isMissing(id) {
+		return "", true
+	}
+	title, ok := b.titles[id]
+	if !ok {
+		return "", false
+	}
+	b.clock++
+	b.used[id] = b.clock
+	return title, true
+}
+
 // submittedBy names the actor of a bead's newest "Submitted for landing"
 // comment, the builder a landing on the reserved ops branch shows: the comment
 // is gt done's own record of who submitted the bead (gt-6ua0sn). A successful

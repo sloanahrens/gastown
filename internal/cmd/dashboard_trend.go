@@ -143,9 +143,17 @@ func buildTrend(now time.Time, recs []omRecord, stages []omStage, rejs []omRejec
 const recentLandingRows = 2000
 
 // recentTitleRows is how many of those rows look up a bead title. A title is a
-// bd read (cached after the first), so the rows past it show their bead id and
-// no title, which keeps a day of landings from costing a read per row (gt-1kttu).
+// bd read (cached after the first), so the rows past it take only what the
+// cache already answers, plus recentExtraTitleLookups fresh reads a poll, which
+// keeps a day of landings from costing a read per row (gt-1kttu).
 const recentTitleRows = 10
+
+// recentExtraTitleLookups is how many titles a poll reads for the rows past
+// recentTitleRows that the title cache does not hold yet. Each poll reads these
+// few and the cache keeps them, so a fresh page fills in over successive polls
+// without a poll ever costing more than recentTitleRows+recentExtraTitleLookups
+// bd reads.
+const recentExtraTitleLookups = 5
 
 // submissionNameRows bounds the first-sight records one page read keeps: the
 // newest few hundred submissions. The log is trimmed by the submission battery
@@ -331,7 +339,10 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // than inside it: a landing running now is not one of the day's finished rows.
 // The title of a bead is asked for only once the rows to show are known, and
 // only for the first recentTitleRows of them, so that read is bounded by the
-// table rather than by the day's traffic. ship reads a landing's ship reading
+// table rather than by the day's traffic. The rows past that take their title
+// from cachedTitle, which starts no read; up to recentExtraTitleLookups of the
+// ones it does not know are looked up through title each poll, so the cache
+// fills over successive polls. ship reads a landing's ship reading
 // off the deploy tracker, by its rig because what ships a landing depends on
 // the rig; a rejection never carries one, and ship is asked for every landed
 // record in the window as its row is built, before the bound. The polecat
@@ -360,7 +371,7 @@ func landingName(who func(rig, bead string) string, rig, bead string) string {
 // the By and Polecat cells: who names a row whose record carries no branch,
 // and submitter names a landing on the reserved ops branch (gt-6ua0sn), asked
 // only when the branch naming the row is that reserved one.
-func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, names landingNames, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), rigOfBead func(bead string) string, limit int) []dashboard.LandingRow {
+func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs []omRejection, live []dashboard.LandingRow, ship func(rig, bead string) tailShip, title func(rig, bead string) string, names landingNames, crew func(rig, bead string) bool, polecat func(bead string, asOf time.Time) (float64, []land.PolecatAttempt, bool), rigOfBead func(bead string) string, cachedTitle func(rig, bead string) (string, bool), limit int) []dashboard.LandingRow {
 	since := now.Add(-trendHours * time.Hour)
 	var rows []dashboard.LandingRow
 	rigOf := map[string]string{} // a rejection line names no rig; a landing of the same bead does
@@ -458,15 +469,24 @@ func buildRecentLandings(now time.Time, recs []omRecord, stages []omStage, rejs 
 		}
 	}
 	if title != nil {
+		// seen holds each bead's answer for this poll, so a lookup that failed
+		// is not asked again by a later row of the same bead.
 		seen := map[string]string{}
+		extra := 0
 		for i := range rows {
-			if i >= recentTitleRows {
-				break
-			}
 			key := rows[i].Rig + "/" + rows[i].Bead
 			t, ok := seen[key]
 			if !ok {
-				t = title(rows[i].Rig, rows[i].Bead)
+				if i < recentTitleRows {
+					t = title(rows[i].Rig, rows[i].Bead)
+				} else if cachedTitle != nil {
+					var settled bool
+					t, settled = cachedTitle(rows[i].Rig, rows[i].Bead)
+					if !settled && extra < recentExtraTitleLookups {
+						extra++
+						t = title(rows[i].Rig, rows[i].Bead)
+					}
+				}
 				seen[key] = t
 			}
 			rows[i].Title = t
