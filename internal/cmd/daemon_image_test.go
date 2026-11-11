@@ -499,7 +499,7 @@ func TestDaemonImageRefusesBeforeAnything(t *testing.T) {
 func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 	t.Parallel()
 	r := newImageRig(t)
-	for _, name := range []string{"gt", "bd", "om", "claude", "hm", "devops-reporter", "release-reporter", "openshell", "docker", "kubectl"} {
+	for _, name := range []string{"gt", "bd", "om", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"} {
 		if err := os.WriteFile(filepath.Join(r.flags.out, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -539,6 +539,7 @@ func TestDaemonImageDockerBuildIgnoresTheShellsDockerEnvironment(t *testing.T) {
 		filepath.Join(r.flags.out, "gt"), filepath.Join(r.flags.out, "bd"),
 		filepath.Join(r.flags.out, "om"), filepath.Join(r.flags.out, "claude"),
 		filepath.Join(r.flags.out, "hm"), filepath.Join(r.flags.out, "devops-reporter"), filepath.Join(r.flags.out, "release-reporter"),
+		filepath.Join(r.flags.out, "cloudcheck"), filepath.Join(r.flags.out, "cloud-check.apps"),
 		filepath.Join(r.flags.out, "openshell"), filepath.Join(r.flags.out, "docker"), filepath.Join(r.flags.out, "kubectl"),
 		pluginBinary("app-promote"), pluginBinary("town-metrics"),
 		filepath.Join(r.flags.out, "mango", "mango"), filepath.Join(r.flags.out, "mango", "mango.sha"),
