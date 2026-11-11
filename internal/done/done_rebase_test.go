@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,20 @@ type fakeDivergedPushGit struct {
 	// merged-in ones included, keyed by the same [base, head] pair.
 	fullSummaries    map[[2]string][]gitpkg.CommitSummary
 	fullSummariesErr error
+
+	// diffPaths backs DiffNameOnly, keyed by the [base, head] pair it is asked
+	// about: the old-to-new base pair for the paths main moved, and [sha^, sha]
+	// for a commit's own changed paths. Unset pairs have no paths.
+	diffPaths map[[2]string][]string
+	pathErrs  map[[2]string]error
+
+	// excluded backs PatchIDExcluding, keyed by the same [base, head] pair. An
+	// unset pair is the empty id: nothing left outside the excluded paths.
+	excluded     map[[2]string]string
+	excludedErrs map[[2]string]error
+
+	// summaryErrs fails FirstParentCommitSummaries for one [base, head] pair.
+	summaryErrs map[[2]string]error
 
 	leaseErr   error
 	leaseCalls int
@@ -146,7 +161,24 @@ func (f *fakeDivergedPushGit) FirstParentCommitSummaries(base, head string) ([]g
 	if f.summariesErr != nil {
 		return nil, f.summariesErr
 	}
+	if err := f.summaryErrs[[2]string{base, head}]; err != nil {
+		return nil, err
+	}
 	return f.summaries[[2]string{base, head}], nil
+}
+
+func (f *fakeDivergedPushGit) DiffNameOnly(base, head string) ([]string, error) {
+	if err := f.pathErrs[[2]string{base, head}]; err != nil {
+		return nil, err
+	}
+	return f.diffPaths[[2]string{base, head}], nil
+}
+
+func (f *fakeDivergedPushGit) PatchIDExcluding(base, head string, _ []string) (string, error) {
+	if err := f.excludedErrs[[2]string{base, head}]; err != nil {
+		return "", err
+	}
+	return f.excluded[[2]string{base, head}], nil
 }
 
 func (f *fakeDivergedPushGit) FullRangeCommitSummaries(base, head string) ([]gitpkg.CommitSummary, error) {
@@ -523,6 +555,191 @@ func TestRecoverDivergedPush_PatchIDsErrorAborts(t *testing.T) {
 	}
 	if f.leaseCalls != 0 {
 		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+// conflictRebaseFake is origin holding one feature commit o1, and local holding
+// its rebase l1: same author and subject, same changed path, which main also
+// moved, and nothing outside that path. Each row changes one thing from it.
+func conflictRebaseFake() *fakeDivergedPushGit {
+	return &fakeDivergedPushGit{
+		revs: map[string]string{
+			"origin/feature": "origSHA",
+			"HEAD":           "localSHA",
+		},
+		mergeBases: map[[2]string]string{
+			{"origin/main", "origSHA"}:  "base1",
+			{"origin/main", "localSHA"}: "base2",
+		},
+		patchIDLists: map[[2]string][]string{
+			{"base1", "origSHA"}:  {"p-origin"},
+			{"base2", "localSHA"}: {"p-local"},
+		},
+		summaries: map[[2]string][]gitpkg.CommitSummary{
+			{"base1", "origSHA"}:  {{SHA: "o1", Email: "a@example.com", Subject: "feature work"}},
+			{"base2", "localSHA"}: {{SHA: "l1", Email: "a@example.com", Subject: "feature work"}},
+		},
+		diffPaths: map[[2]string][]string{
+			{"base1", "base2"}: {"allow.txt"},
+			{"o1^", "o1"}:      {"allow.txt"},
+			{"l1^", "l1"}:      {"allow.txt"},
+		},
+		excluded: map[[2]string]string{
+			{"o1^", "o1"}: "",
+			{"l1^", "l1"}: "",
+		},
+	}
+}
+
+// TestRecoverDivergedPush_ConflictResolvedRebase is the gt-d8rpw0 decision: a
+// rebase that resolved a conflict in a path main moved is recovered under a
+// lease on origin's tip, and every other difference is real divergence.
+func TestRecoverDivergedPush_ConflictResolvedRebase(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		mutate        func(f *fakeDivergedPushGit)
+		wantRecovered bool
+		wantErr       bool
+	}{
+		{
+			name:          "resolved line in a path main moved is recovered",
+			mutate:        func(*fakeDivergedPushGit) {},
+			wantRecovered: true,
+		},
+		{
+			name: "origin holds a second commit local lacks",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.patchIDLists[[2]string{"base1", "origSHA"}] = []string{"p-origin", "p-extra"}
+				f.summaries[[2]string{"base1", "origSHA"}] = append(f.summaries[[2]string{"base1", "origSHA"}],
+					gitpkg.CommitSummary{SHA: "o2", Email: "a@example.com", Subject: "second"})
+				f.diffPaths[[2]string{"o2^", "o2"}] = []string{"allow.txt"}
+				f.excluded[[2]string{"o2^", "o2"}] = ""
+			},
+		},
+		{
+			name: "local counterpart has a different author",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.summaries[[2]string{"base2", "localSHA"}][0].Email = "b@example.com"
+			},
+		},
+		{
+			name: "local counterpart has a different subject",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.summaries[[2]string{"base2", "localSHA"}][0].Subject = "rewritten"
+			},
+		},
+		{
+			name: "local counterpart differs outside the paths main moved",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.excluded[[2]string{"l1^", "l1"}] = "other-content"
+			},
+		},
+		{
+			name: "origin commit changes no path",
+			mutate: func(f *fakeDivergedPushGit) {
+				delete(f.diffPaths, [2]string{"o1^", "o1"})
+			},
+		},
+		{
+			name: "origin commit has no recorded summary",
+			mutate: func(f *fakeDivergedPushGit) {
+				delete(f.summaries, [2]string{"base1", "origSHA"})
+			},
+		},
+		{
+			name: "one local commit cannot cover two origin commits",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.patchIDLists[[2]string{"base1", "origSHA"}] = []string{"p-origin", "p-extra"}
+				f.summaries[[2]string{"base1", "origSHA"}] = []gitpkg.CommitSummary{
+					{SHA: "o1", Email: "a@example.com", Subject: "feature work"},
+					{SHA: "o2", Email: "a@example.com", Subject: "feature work"},
+				}
+				f.diffPaths[[2]string{"o2^", "o2"}] = []string{"allow.txt"}
+				f.excluded[[2]string{"o2^", "o2"}] = ""
+				f.patchIDLists[[2]string{"base2", "localSHA"}] = []string{"p-local", "p-local2"}
+				f.summaries[[2]string{"base2", "localSHA"}] = []gitpkg.CommitSummary{
+					{SHA: "l1", Email: "a@example.com", Subject: "feature work"},
+					{SHA: "l2", Email: "a@example.com", Subject: "other"},
+				}
+				f.diffPaths[[2]string{"l2^", "l2"}] = []string{"allow.txt"}
+				f.excluded[[2]string{"l2^", "l2"}] = ""
+			},
+		},
+		{
+			name: "listing the paths main moved fails",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.pathErrs = map[[2]string]error{{"base1", "base2"}: errors.New("diff failed")}
+			},
+			wantErr: true,
+		},
+		{
+			name: "listing a local commit's paths fails",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.pathErrs = map[[2]string]error{{"l1^", "l1"}: errors.New("diff failed")}
+			},
+			wantErr: true,
+		},
+		{
+			name: "listing an origin commit's paths fails",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.pathErrs = map[[2]string]error{{"o1^", "o1"}: errors.New("diff failed")}
+			},
+			wantErr: true,
+		},
+		{
+			name: "diff outside the moved paths fails",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.excludedErrs = map[[2]string]error{{"o1^", "o1"}: errors.New("patch-id failed")}
+			},
+			wantErr: true,
+		},
+		{
+			name: "local range summaries fail",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.summaryErrs = map[[2]string]error{{"base2", "localSHA"}: errors.New("log failed")}
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := conflictRebaseFake()
+			tc.mutate(f)
+			recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want an error, got recovered=%v diagnosis=%q", recovered, diagnosis)
+				}
+				if recovered || f.leaseCalls != 0 {
+					t.Errorf("an error must not push: recovered=%v lease calls=%d", recovered, f.leaseCalls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if recovered != tc.wantRecovered {
+				t.Fatalf("recovered = %v, want %v (diagnosis %q)", recovered, tc.wantRecovered, diagnosis)
+			}
+			if !tc.wantRecovered {
+				if f.leaseCalls != 0 {
+					t.Errorf("lease push must not run on real divergence, got %d calls", f.leaseCalls)
+				}
+				if !strings.Contains(diagnosis, "real divergence") {
+					t.Errorf("diagnosis = %q, want mention of real divergence", diagnosis)
+				}
+				return
+			}
+			if !strings.Contains(diagnosis, "rebase over a moved main with a conflict resolved") {
+				t.Errorf("diagnosis = %q, want the conflict-resolved rebase named", diagnosis)
+			}
+			wantArgs := []string{"origin", "feature:feature", "feature", "origSHA"}
+			if !slices.Equal(f.leaseArgs, wantArgs) {
+				t.Errorf("lease args = %v, want %v: the push must lease over origin's old tip", f.leaseArgs, wantArgs)
+			}
+		})
 	}
 }
 

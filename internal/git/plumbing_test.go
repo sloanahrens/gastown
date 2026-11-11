@@ -361,6 +361,78 @@ func TestPatchIDNoOutputIsAnError(t *testing.T) {
 	}
 }
 
+// PatchIDExcluding sends the excluded paths as literal exclude pathspecs after
+// "--", and each failure of its two git calls is returned, not read as an id.
+// An empty diff once the paths are left out is "" with no error, and patch-id
+// is not run for it. (gt-d8rpw0)
+func TestPatchIDExcludingSendsPathspecsAndReturnsEveryFailure(t *testing.T) {
+	t.Parallel()
+	const diffArgs = "diff a..b -- . :(exclude,literal)x.txt"
+	cases := []struct {
+		name    string
+		answers map[string]reply
+		wantID  string
+		wantErr string
+	}{
+		{
+			name: "id of the diff that is left",
+			answers: map[string]reply{
+				diffArgs:            ok("diff --git a/y b/y\n+y\n"),
+				"patch-id --stable": ok("p1 0000\n"),
+			},
+			wantID: "p1",
+		},
+		{
+			name: "empty diff has no id and runs no patch-id",
+			answers: map[string]reply{
+				diffArgs: ok(""),
+			},
+		},
+		{
+			name: "diff fails",
+			answers: map[string]reply{
+				diffArgs: fail(128, "bad revision"),
+			},
+			wantErr: "bad revision",
+		},
+		{
+			name: "patch-id fails",
+			answers: map[string]reply{
+				diffArgs:            ok("diff --git a/y b/y\n+y\n"),
+				"patch-id --stable": fail(1, "patch-id broke"),
+			},
+			wantErr: "patch-id broke",
+		},
+		{
+			name: "patch-id prints nothing for a non-empty diff",
+			answers: map[string]reply{
+				diffArgs:            ok("diff --git a/y b/y\n+y\n"),
+				"patch-id --stable": ok(""),
+			},
+			wantErr: "produced no output",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newScripted(tc.answers)
+			id, err := newTestGit(t, s).PatchIDExcluding("a", "b", []string{"x.txt"})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("PatchIDExcluding = %q, %v; want an error naming %q", id, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || id != tc.wantID {
+				t.Fatalf("PatchIDExcluding = %q, %v; want %q", id, err, tc.wantID)
+			}
+			if tc.wantID == "" && s.hasSent("patch-id --stable") {
+				t.Errorf("patch-id ran for an empty diff: %v", s.sent())
+			}
+		})
+	}
+}
+
 func TestCheckBranchContamination(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{

@@ -17,6 +17,8 @@ type divergedPushGit interface {
 	Rev(ref string) (string, error)
 	MergeBase(a, b string) (string, error)
 	PatchID(base, head string) (string, error)
+	PatchIDExcluding(base, head string, exclude []string) (string, error)
+	DiffNameOnly(base, head string) ([]string, error)
 	FirstParentPatchIDs(base, head string) ([]git.PatchIDCommit, error)
 	FirstParentCommitSummaries(base, head string) ([]git.CommitSummary, error)
 	FullRangeCommitSummaries(base, head string) ([]git.CommitSummary, error)
@@ -71,6 +73,13 @@ type divergedPushGit interface {
 // rework alters patch-ids, so the comparison above would call it divergence;
 // that tip is the refused submission, so overwriting it is the point of the
 // rework (gt-dq6p8). A stale local behind that tip is not a rework (gt-k44d0).
+//
+// A fourth shape is a rebase that resolved a conflict. The resolution rewrites
+// a commit's diff, so its patch-id changes and the comparison above calls it
+// missing. It is still the same work when every origin commit that is missing
+// locally has a local counterpart with the same author, subject and changed
+// paths, and the same diff outside the paths main changed between the two
+// bases (see rebasedKeepingContent). Only paths main itself changed may differ.
 //
 // Returns recovered=true only when the leased push actually landed.
 // diagnosis is set whenever the comparison could be made, for inclusion in
@@ -150,6 +159,15 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 	}
 
 	refused := len(missing) > 0 && !rangeIdentical
+	rebased := false
+	if refused {
+		localOnly := missingCommits(localPairs, originIDs)
+		rebased, err = rebasedKeepingContent(g, originBase, localBase, localSHA, missing, localOnly, originSummaries)
+		if err != nil {
+			return false, "", err
+		}
+		refused = !rebased
+	}
 
 	// The rework check reads every commit in origin's range, not just the
 	// first-parent chain: a seat-authored merge can carry another author's
@@ -176,6 +194,9 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 			ShortSHA(originSHA), len(originRange), rework.seatAuthor, ShortSHA(localSHA))
 	case refused:
 		return false, divergenceRefusal(originSHA, localSHA, missing, originSummaries), nil
+	case rebased:
+		diagnosis = fmt.Sprintf("rebase over a moved main with a conflict resolved (origin=%s is the tip the rebase replaced, local=%s; %d origin commit(s) match a local commit by author, subject and paths, and differ only in paths main changed)",
+			ShortSHA(originSHA), ShortSHA(localSHA), len(missing))
 	case len(originIDs) == 0:
 		diagnosis = fmt.Sprintf("no origin work at risk: origin/%s (%s) carries no commits of its own against %s (origin=%s local=%s)",
 			branch, ShortSHA(originSHA), target, ShortSHA(originSHA), ShortSHA(localSHA))
@@ -246,15 +267,100 @@ func missingCommits(want []git.PatchIDCommit, have []string) []git.PatchIDCommit
 	return missing
 }
 
+// rebasedKeepingContent reports whether every origin commit missing locally is
+// one a conflict-resolving rebase would have made from a local-only commit. A
+// rebase keeps a commit's author and subject, but a resolution changes its diff,
+// so its patch-id no longer matches. A match therefore needs the same author,
+// subject and changed paths, and the same diff outside the paths main changed
+// between oldBase and newBase: a resolution may differ only inside those paths.
+// Matching is one-to-one, so one local commit never covers two origin commits.
+// A commit with no recorded summary or no changed paths matches nothing, so the
+// check fails closed.
+func rebasedKeepingContent(g divergedPushGit, oldBase, newBase, localSHA string, missing, localOnly []git.PatchIDCommit, originSummaries []git.CommitSummary) (bool, error) {
+	if len(missing) == 0 || len(missing) > len(localOnly) {
+		return false, nil
+	}
+	moved, err := g.DiffNameOnly(oldBase, newBase)
+	if err != nil {
+		return false, fmt.Errorf("paths main changed between %s and %s: %w", ShortSHA(oldBase), ShortSHA(newBase), err)
+	}
+	localSummaries, err := g.FirstParentCommitSummaries(newBase, localSHA)
+	if err != nil {
+		return false, fmt.Errorf("commit summaries of local range %s..%s: %w", ShortSHA(newBase), ShortSHA(localSHA), err)
+	}
+	originBy := summariesBySHA(originSummaries)
+	localBy := summariesBySHA(localSummaries)
+
+	local := make([]string, len(localOnly))
+	localOK := make([]bool, len(localOnly))
+	for i, l := range localOnly {
+		local[i], localOK[i], err = rebasedShape(g, l.Commit, localBy, moved)
+		if err != nil {
+			return false, err
+		}
+	}
+	used := make([]bool, len(localOnly))
+	for _, m := range missing {
+		shape, ok, err := rebasedShape(g, m.Commit, originBy, moved)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+		matched := false
+		for i := range local {
+			if localOK[i] && !used[i] && local[i] == shape {
+				used[i] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// rebasedShape is what a rebase keeps of one commit, as a comparable key: the
+// author, the subject, the changed paths, and the diff outside the paths main
+// changed (moved). ok is false when the commit has no summary or no changed
+// paths, so it can match nothing.
+func rebasedShape(g divergedPushGit, sha string, bySHA map[string]git.CommitSummary, moved []string) (shape string, ok bool, err error) {
+	summary, found := bySHA[sha]
+	if !found {
+		return "", false, nil
+	}
+	paths, err := g.DiffNameOnly(sha+"^", sha)
+	if err != nil {
+		return "", false, fmt.Errorf("changed paths of commit %s: %w", ShortSHA(sha), err)
+	}
+	if len(paths) == 0 {
+		return "", false, nil
+	}
+	outside, err := g.PatchIDExcluding(sha+"^", sha, moved)
+	if err != nil {
+		return "", false, fmt.Errorf("diff of commit %s outside main's changes: %w", ShortSHA(sha), err)
+	}
+	return strings.Join([]string{summary.Email, summary.Subject, strings.Join(paths, "\n"), outside}, "\x00"), true, nil
+}
+
+// summariesBySHA indexes commit summaries by full sha.
+func summariesBySHA(list []git.CommitSummary) map[string]git.CommitSummary {
+	bySHA := make(map[string]git.CommitSummary, len(list))
+	for _, c := range list {
+		bySHA[c.SHA] = c
+	}
+	return bySHA
+}
+
 // divergenceRefusal is the message for origin holding changes local does not.
 // A patch-id hashes a diff, not a commit, so each id is named with the origin
 // commit it came from; a reader would otherwise look for a commit that does
 // not exist (gt-dq6p8).
 func divergenceRefusal(originSHA, localSHA string, missing []git.PatchIDCommit, origin []git.CommitSummary) string {
-	subjects := make(map[string]git.CommitSummary, len(origin))
-	for _, c := range origin {
-		subjects[c.SHA] = c
-	}
+	subjects := summariesBySHA(origin)
 	var b strings.Builder
 	fmt.Fprintf(&b, "origin=%s local=%s — origin has %d commit(s) whose changes are absent locally — real divergence, not just a rebase; nothing pushed so that work is not clobbered\n",
 		ShortSHA(originSHA), ShortSHA(localSHA), len(missing))

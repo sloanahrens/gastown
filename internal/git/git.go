@@ -1495,6 +1495,35 @@ func (g *Git) PatchIDZeroContext(base, head string) (string, error) {
 	return g.patchID(base, head, "--stable", "-U0")
 }
 
+// PatchIDExcluding is the stable patch-id of the diff between base and head
+// with the paths in exclude left out (git diff base..head -- . ':(exclude,literal)p'
+// | git patch-id --stable). Each exclude entry is matched literally, so a path
+// with glob characters names only itself. A diff that is empty once the paths
+// are left out has no id: it returns "" with a nil error, which is a real answer
+// (nothing changed outside exclude), not a failed read.
+func (g *Git) PatchIDExcluding(base, head string, exclude []string) (string, error) {
+	args := []string{"diff", base + ".." + head, "--", "."}
+	for _, p := range exclude {
+		args = append(args, ":(exclude,literal)"+p)
+	}
+	diff, err := g.runOutput(args...)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(diff) == "" {
+		return "", nil
+	}
+	out, err := g.runWithStdin(diff, "patch-id", "--stable")
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(out)
+	if len(fields) == 0 {
+		return "", fmt.Errorf("git patch-id produced no output for %s..%s excluding %d path(s)", base, head, len(exclude))
+	}
+	return fields[0], nil
+}
+
 // patchID is the shared plumbing; mode is git patch-id's hashing algorithm and
 // diffArgs are extra git diff flags. The diff comes from runOutput, not run:
 // run's trim eats the trailing whitespace of the diff's last line, which is a
