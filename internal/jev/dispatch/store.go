@@ -1,8 +1,13 @@
 package dispatch
 
 import (
+	"bufio"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
@@ -76,6 +81,55 @@ func ReadRecent(path string, n int) ([]Line, error) {
 		return nil, err
 	}
 	return lines, nil
+}
+
+// ReadAll returns every line of the log, oldest first, and the number of
+// lines it skipped because they did not parse as a Line. The count is the
+// second result, so a caller can see how much of the log it did not read. A
+// blank line is neither returned nor counted. A missing log is an error, not
+// an empty result. A read that fails partway returns an error and no lines.
+// An empty log is an empty result with a count of 0.
+func ReadAll(path string) ([]Line, int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, 0, fmt.Errorf("opening the dispatch log: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var lines []Line
+	malformed := 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
+			continue
+		}
+		var l Line
+		if json.Unmarshal([]byte(text), &l) != nil {
+			malformed++
+			continue
+		}
+		lines = append(lines, l)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, 0, fmt.Errorf("reading the dispatch log: %w", err)
+	}
+	return lines, malformed, nil
+}
+
+// FirstPerBead returns the earliest line per bead, by TS. A bead placed twice
+// has a line for each placement, and this keeps the first answer Jev logged
+// for it. When two lines for one bead share a TS, the one earlier in lines is
+// kept.
+func FirstPerBead(lines []Line) map[string]Line {
+	first := make(map[string]Line, len(lines))
+	for _, l := range lines {
+		if cur, ok := first[l.Bead]; !ok || l.TS.Before(cur.TS) {
+			first[l.Bead] = l
+		}
+	}
+	return first
 }
 
 // ErrBusy means another pass holds the run lock: a manual pass and the
