@@ -77,8 +77,8 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
   --bot-email-domain D   email domain for new bots (default: %s)
   --config-dir DIR       where the role token files go (default
                          $XDG_CONFIG_HOME/gt, else $HOME/.config/gt)
-  --token-name NAME      name of the minted token (default: %s); the token
-                         file records it on a TOKEN_NAME line
+  --token-name NAME      name of the minted token (default: %s); the
+                         token file records it on a TOKEN_NAME line
   --repo OWNER/NAME      repository to protect; repeatable
   --landing-bot LOGIN    login on the merge whitelist (default: --bot-prefix
                          followed by landing)
