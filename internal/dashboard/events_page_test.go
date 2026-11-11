@@ -120,8 +120,18 @@ func streamAlert(t *testing.T, dom *pageDOM, a Alert) {
 	deliverStream(t, dom, "alert", string(b))
 }
 
+// newestFirst is the order the hub serves its recent alerts in. A test that
+// builds a list oldest first hands the page the reverse of it.
+func newestFirst(alerts []Alert) []Alert {
+	out := make([]Alert, 0, len(alerts))
+	for i := len(alerts) - 1; i >= 0; i-- {
+		out = append(out, alerts[i])
+	}
+	return out
+}
+
 // stateAlerts hands the page a state reading whose recent alerts are the given
-// ones, oldest first, the way the hub's state carries them.
+// ones, in the order given, which is the order the hub serves them: newest first.
 func stateAlerts(t *testing.T, dom *pageDOM, alerts ...Alert) {
 	t.Helper()
 
@@ -241,14 +251,14 @@ func TestAStateRefreshAddsNoDuplicateAndKeepsTheLastHundred(t *testing.T) {
 
 	// The hub's recent list is the last twenty alerts, all of which the stream
 	// has already delivered: a refresh of them adds nothing.
-	stateAlerts(t, dom, all[130:]...)
+	stateAlerts(t, dom, newestFirst(all[130:])...)
 	if again := feedLines(t, dom); len(again) != 100 || again[0].Cells[3] != "reason 150" {
 		t.Errorf("a refresh repeating delivered alerts changed the feed to %d lines, newest %q",
 			len(again), again[0].Cells[3])
 	}
 
 	// A refresh that carries one alert the page has not seen adds that one, at the top.
-	stateAlerts(t, dom, append(all[131:], rejectedAlert(151, "gt-x"))...)
+	stateAlerts(t, dom, append([]Alert{rejectedAlert(151, "gt-x")}, newestFirst(all[131:])...)...)
 	again := feedLines(t, dom)
 	if len(again) != 100 || again[0].Cells[3] != "reason 151" || again[99].Cells[3] != "reason 52" {
 		t.Errorf("a refresh with one new alert left the feed %d lines, from %q to %q",
@@ -273,7 +283,7 @@ func TestAlertsRaisedBeforeThePageOpenedAreReadNotUnread(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
-	stateAlerts(t, dom, rejectedAlert(1, "gt-x"), rejectedAlert(2, "gt-y"))
+	stateAlerts(t, dom, rejectedAlert(2, "gt-y"), rejectedAlert(1, "gt-x"))
 
 	if n := len(feedLines(t, dom)); n != 2 {
 		t.Fatalf("the feed holds %d lines for the two alerts the state carried, want 2", n)
@@ -308,10 +318,10 @@ func TestAlertsFromARestartedHubAreNotTakenForRepeats(t *testing.T) {
 }
 
 // The EVENTS header says how busy and how bad the last hour has been: the
-// events of each level inside the hour, then how long ago the newest event of
-// all arrived. The count is taken from the alerts the feed holds, so an event
-// older than the hour is in the feed and out of the count, and one the page
-// cannot date is in neither (gt-y3fau).
+// events of each level inside the hour, then how long ago the newest event
+// arrived, which is the feed's first row. The count is taken from the alerts the
+// feed holds, so an event older than the hour is in the feed and out of the
+// count, and one the page cannot date is in neither (gt-y3fau).
 func TestEventsStatsCountTheLastHourByLevelAndAgeTheNewest(t *testing.T) {
 	t.Parallel()
 
@@ -336,7 +346,7 @@ func TestEventsStatsCountTheLastHourByLevelAndAgeTheNewest(t *testing.T) {
 		},
 		{
 			name:  "an event older than the hour is not counted",
-			lines: []map[string]any{ev("a", "warn", at(61*time.Minute)), ev("b", "crit", at(90*time.Minute)), ev("c", "info", at(10*time.Minute))},
+			lines: []map[string]any{ev("c", "info", at(10*time.Minute)), ev("a", "warn", at(61*time.Minute)), ev("b", "crit", at(90*time.Minute))},
 			want:  map[string]int{"info": 1, "warn": 0, "crit": 0},
 			age:   "10m",
 		},
@@ -421,6 +431,13 @@ func TestTheEventsHeaderShowsTheLastHourStatsBesideTheUnreadCount(t *testing.T) 
 	streamAlert(t, dom, alertAt(rejectedAlert(2, "gt-a"), now.Add(-20*time.Minute), LevelInfo))
 	streamAlert(t, dom, alertAt(rejectedAlert(3, "gt-b"), now.Add(-5*time.Minute), LevelWarn))
 	streamAlert(t, dom, alertAt(rejectedAlert(4, "gt-c"), now.Add(-10*time.Minute), LevelCrit))
+	// The hub sends the state behind each alert, with the recent list in the
+	// order it serves: newest first. The NEWEST age reads that list's first row.
+	stateAlerts(t, dom,
+		alertAt(rejectedAlert(3, "gt-b"), now.Add(-5*time.Minute), LevelWarn),
+		alertAt(rejectedAlert(4, "gt-c"), now.Add(-10*time.Minute), LevelCrit),
+		alertAt(rejectedAlert(2, "gt-a"), now.Add(-20*time.Minute), LevelInfo),
+		alertAt(rejectedAlert(1, "gt-old"), now.Add(-3*time.Hour), LevelWarn))
 
 	want := []chipLine{
 		{Cls: "echip info", Text: "1 info"},
@@ -479,6 +496,37 @@ func TestTheEventsHeaderShowsNoStatsForAnEmptyFeed(t *testing.T) {
 	stateAlerts(t, dom, alertAt(rejectedAlert(1, "gt-a"), pageNow(t, dom).Add(-time.Minute), LevelWarn))
 	if chips := eventChips(t, dom); len(chips) == 0 {
 		t.Error("a feed with an alert in the hour drew no chips, so the empty-feed check above passes for a header that draws none at all")
+	}
+}
+
+// The EVENTS feed draws the recent alerts in the order the hub serves them, and
+// the NEWEST header reads the first row of that order. The pair here is served
+// oldest first, which the hub never does: a page that sorted the list would draw
+// it the other way round, and a header that took the newest of the rows would
+// read the newer one instead of the first.
+func TestAlertsNewestHeaderMatchesFirstRow(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	now := pageNow(t, dom)
+	older := alertAt(rejectedAlert(1, "gt-old"), now.Add(-30*time.Minute), LevelWarn)
+	newer := alertAt(rejectedAlert(2, "gt-new"), now.Add(-5*time.Minute), LevelWarn)
+	stateAlerts(t, dom, older, newer)
+
+	lines := feedLines(t, dom)
+	if len(lines) != 2 {
+		t.Fatalf("the feed holds %d lines for two served alerts, want 2", len(lines))
+	}
+	if lines[0].Cells[3] != older.Text || lines[1].Cells[3] != newer.Text {
+		t.Errorf("the feed draws %q then %q, want the served order %q then %q",
+			lines[0].Cells[3], lines[1].Cells[3], older.Text, newer.Text)
+	}
+	want := []chipLine{
+		{Cls: "echip warn", Text: "2 warn"},
+		{Cls: "echip", Text: "newest 30m ago"},
+	}
+	if got := eventChips(t, dom); !slices.Equal(got, want) {
+		t.Errorf("the header's chips read %+v, want the first row's age %+v", got, want)
 	}
 }
 

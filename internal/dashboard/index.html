@@ -4527,9 +4527,11 @@ let eventsUnread = 0;
 let eventsPrimed = false; // the first reading is a baseline: what was raised before the page opened is read
 
 function eventsOpen() { const s = $("eventssec"); return !!s && !s.classList.contains("collapsed"); }
-// takeEvent adds one alert to the feed unless it is there already, and reports
-// whether it did. fresh says whether it is news: an alert off the stream always
-// is, and a reading's alerts are once the baseline has been taken.
+// takeEvent adds one alert to the top of the feed unless it is there already, and
+// reports whether it did. fresh says whether it is news: an alert off the stream
+// always is, and a reading's alerts are once the baseline has been taken. The
+// stream's alert goes on top as it arrives; the state the hub sends behind it puts
+// the recent list in the order the hub serves (renderEvents).
 function takeEvent(a, fresh) {
   if (!a || eventIDs.has(a.id)) return false;
   eventIDs.add(a.id);
@@ -4554,23 +4556,23 @@ const EVENT_STATS_WINDOW_MS = 3600e3;
 const EVENT_LEVELS = ["info", "warn", "crit"];
 // eventStats is the feed's last hour: how many events of each level arrived in
 // the window ending at now — an event exactly an hour old is still inside it —
-// and how long ago the newest event of all arrived (ageSec, null while the feed
-// holds none). An event with no readable time is left out of both, and a level
-// the page has no colour for counts as info, the level the feed draws a row
-// without one in.
+// and how long ago the newest event arrived (ageSec, null while the feed holds
+// none or its first row has no readable time). The feed is in the order the hub
+// serves it, newest first, so the newest event is its first row. An event with no
+// readable time is left out of the counts, and a level the page has no colour for
+// counts as info, the level the feed draws a row without one in.
 function eventStats(lines, now) {
   const counts = {};
   for (const lvl of EVENT_LEVELS) counts[lvl] = 0;
   const since = now - EVENT_STATS_WINDOW_MS;
-  let newest = null;
   for (const a of lines || []) {
     if (!a || !a.at) continue;
     const t = new Date(a.at).getTime();
-    if (!isFinite(t)) continue;
-    if (newest === null || t > newest) newest = t;
-    if (t < since) continue;
+    if (!isFinite(t) || t < since) continue;
     counts[EVENT_LEVELS.indexOf(a.level) < 0 ? "info" : a.level]++;
   }
+  const first = lines && lines.length && lines[0] && lines[0].at ? new Date(lines[0].at).getTime() : NaN;
+  const newest = isFinite(first) ? first : null;
   // A clock that runs behind the hub dates its newest alert ahead of now; an age
   // before now is no age at all, so it reads as just arrived.
   return {counts: counts, ageSec: newest === null ? null : Math.max(0, Math.round((now - newest) / 1000))};
@@ -4599,12 +4601,23 @@ function paintEvents() {
   paintEventStats(Date.now());
   paintFolds(state);
 }
-// renderEvents takes the state's recent alerts into the feed, oldest first so the
-// newest ends up at the top. The state repeats alerts the stream has already
-// delivered, which takeEvent drops.
+// renderEvents takes the state's recent alerts into the feed in the order the hub
+// serves them, newest first, and draws the feed in that order: the served list
+// takes the top, and the alerts the feed holds that the served list has dropped
+// follow it. The hub keeps its last twenty arrivals, so a dropped alert arrived
+// before every alert the list still serves. The state repeats alerts the stream
+// has already delivered; each id is taken once.
 function renderEvents(s) {
   if (pushSkip("events", s)) return;
-  ((s && s.alerts) || []).forEach(a => takeEvent(a, eventsPrimed));
+  const served = ((s && s.alerts) || []).filter(a => a);
+  const ids = new Set(served.map(a => a.id));
+  served.forEach(a => {
+    if (eventIDs.has(a.id)) return;
+    eventIDs.add(a.id);
+    if (eventsPrimed && !eventsOpen()) eventsUnread++;
+  });
+  eventLines = served.concat(eventLines.filter(a => !ids.has(a.id)));
+  while (eventLines.length > EVENTS_KEPT) eventIDs.delete(eventLines.pop().id);
   eventsPrimed = true;
   paintEvents();
 }

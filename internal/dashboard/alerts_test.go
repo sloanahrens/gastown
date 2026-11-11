@@ -1,11 +1,15 @@
 package dashboard
 
 import (
+	"context"
 	"fmt"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/attention"
 )
 
 var alertBase = time.Date(2026, 10, 3, 16, 0, 0, 0, time.UTC)
@@ -424,7 +428,124 @@ func TestHubBroadcastsAlertsAndCapsState(t *testing.T) {
 	}
 }
 
-// State.Alerts keeps the last alertsKept, newest last.
+// The EVENTS feed is the recent alerts in the order the hub serves them: newest
+// first, whichever source raised them. Three sources feed the list here: the
+// watch feed's rejection (timed when the alert is raised), the attention queue's
+// wake line (timed by the line's own stamp, so it can be older than the alerts
+// raised before it), and the Alerter's own health rule. The served list is what
+// /api/state answers with, so the test reads it there.
+func TestAlertsNewestFirst(t *testing.T) {
+	t.Parallel()
+	now := alertBase
+	var feed []Entry
+	var attn []attention.Event
+	reads := 0
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		Feed: func() []Entry {
+			out := feed
+			feed = nil
+			return out
+		},
+		Attention: func() ([]attention.Event, attention.Acks) {
+			out := attn
+			attn = nil
+			return out, attention.Acks{}
+		},
+		Health: func() Health {
+			reads++
+			return Health{Line: "RED disk", Verdict: "red", ReadAt: alertBase.Add(time.Duration(reads) * time.Second)}
+		},
+	})
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	now = alertBase.Add(10 * time.Minute)
+	feed = []Entry{rejectionEntry(1, now, "gt-a")}
+	h.pollFeed()
+
+	now = alertBase.Add(11 * time.Minute)
+	slot := wakeEvent(attention.RuleSlotHeld, "slot:gastown", "slot held 3h", attention.SeverityHigh)
+	slot.TS = alertBase.Add(4 * time.Minute)
+	attn = []attention.Event{slot}
+	h.pollAttention()
+
+	now = alertBase.Add(12 * time.Minute)
+	h.pollHealth() // the first red read is held by the debounce
+	now = alertBase.Add(13 * time.Minute)
+	h.pollHealth() // the second raises health:red, timed when it fires
+
+	// Equal times keep their source order: the health alert arrived first.
+	feed = []Entry{rejectionEntry(2, now, "gt-b")}
+	h.pollFeed()
+
+	now = alertBase.Add(14 * time.Minute)
+	feed = []Entry{rejectionEntry(3, now, "gt-c")}
+	h.pollFeed()
+
+	want := []string{"reject:gt-c:gate", "health:red", "reject:gt-b:gate", "reject:gt-a:gate", "slot:gastown"}
+	if got := servedKeys(t, h); !slices.Equal(got, want) {
+		t.Errorf("/api/state serves the alerts %v, want newest first %v", got, want)
+	}
+}
+
+// An alert with no time sorts after every timed one and keeps its place among
+// those without one, so the EVENTS feed's newest row is always a timed alert
+// when there is one. The hub's clock is the only source of an alert's time here,
+// so the test sets it to no time for some alerts.
+func TestAlertsUnparsableTimeSortsLast(t *testing.T) {
+	t.Parallel()
+	var now time.Time
+	var feed []Entry
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		Feed: func() []Entry {
+			out := feed
+			feed = nil
+			return out
+		},
+	})
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	raise := func(at time.Time, seq int64, bead string) {
+		now = at
+		feed = []Entry{rejectionEntry(seq, at, bead)}
+		h.pollFeed()
+	}
+	raise(time.Time{}, 1, "gt-a")
+	raise(alertBase.Add(5*time.Minute), 2, "gt-b")
+	raise(time.Time{}, 3, "gt-c")
+	raise(alertBase.Add(9*time.Minute), 4, "gt-d")
+	raise(time.Time{}, 5, "gt-e")
+
+	want := []string{"reject:gt-d:gate", "reject:gt-b:gate", "reject:gt-a:gate", "reject:gt-c:gate", "reject:gt-e:gate"}
+	if got := servedKeys(t, h); !slices.Equal(got, want) {
+		t.Errorf("/api/state serves the alerts %v, want the timed ones newest first then the untimed in their order %v", got, want)
+	}
+}
+
+// rejectionEntry is a landing rejection the watch feed delivers, stamped at.
+func rejectionEntry(seq int64, at time.Time, bead string) Entry {
+	return Entry{Seq: seq, At: at, Kind: "landings", Text: fmt.Sprintf("[land] %s: rejected (gate): failed", bead)}
+}
+
+// servedKeys returns the keys of the recent alerts /api/state answers with, in
+// the order it serves them.
+func servedKeys(t *testing.T, h *Hub) []string {
+	t.Helper()
+	st, err := fetchAPIState(h, context.Background())
+	if err != nil {
+		t.Fatalf("reading /api/state: %v", err)
+	}
+	keys := make([]string, 0, len(st.Alerts))
+	for _, a := range st.Alerts {
+		keys = append(keys, a.Key)
+	}
+	return keys
+}
+
+// State.Alerts keeps the last alertsKept arrivals, served newest first.
 func TestHubCapsRecentAlerts(t *testing.T) {
 	t.Parallel()
 	var entries []Entry
