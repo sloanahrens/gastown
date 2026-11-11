@@ -17,12 +17,19 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // dirRel is the directory under the town root that holds one build checkout
 // per rig.
 const dirRel = ".runtime/build-src"
+
+// BaseDirRel is the build-checkout base directory relative to the town root, in
+// the platform's separator: <town>/<BaseDirRel()> holds one checkout per rig.
+func BaseDirRel() string {
+	return filepath.FromSlash(dirRel)
+}
 
 // Each git call is bounded by its own timeout. The per-rig lock is held only
 // across those calls, so a caller waiting on it waits for the holder's calls to
@@ -32,6 +39,7 @@ const (
 	cloneTimeout    = 5 * time.Minute
 	fetchTimeout    = 2 * time.Minute
 	checkoutTimeout = 2 * time.Minute
+	revParseTimeout = 30 * time.Second
 	// lockPollInterval is how often a caller waiting on the rig's lock tries
 	// again. A waiter stops waiting as soon as its ctx ends, not at the next try.
 	lockPollInterval = 50 * time.Millisecond
@@ -42,10 +50,34 @@ const (
 // through a runner that records the call and then runs the real git.
 type gitFunc func(ctx context.Context, timeout time.Duration, dir string, args ...string) error
 
+// IsBuildCheckout reports whether repoDir is a rig's build checkout: a
+// directory directly under the build-checkout base, where ensure puts it. The
+// layout is the test, so a caller that holds only the checkout's path, such as
+// the staleness check, needs no town root.
+func IsBuildCheckout(repoDir string) bool {
+	parent := filepath.Dir(filepath.Clean(repoDir))
+	return strings.HasSuffix(parent, string(filepath.Separator)+BaseDirRel())
+}
+
+// BareRepoOf returns the bare repo the build checkout at repoDir clones from:
+// its rig's .repo.git under the town root that holds the base. It reports false
+// when repoDir is not a build checkout. The path comes from the layout, as
+// IsBuildCheckout does, and no git runs.
+func BareRepoOf(repoDir string) (string, bool) {
+	if !IsBuildCheckout(repoDir) {
+		return "", false
+	}
+	clean := filepath.Clean(repoDir)
+	townRoot := filepath.Dir(filepath.Dir(filepath.Dir(clean)))
+	return constants.RigBareRepoPath(filepath.Join(townRoot, filepath.Base(clean))), true
+}
+
 // Ensure returns the build checkout of rig, detached at rev: "" for the bare
 // repo's main, or a full commit sha the bare repo has. Calls for one rig are
-// serialized, and each one fetches from <townRoot>/<rig>/.repo.git, so a commit
-// that landed since the last call is there.
+// serialized. A call for the bare repo's main first points the checkout's
+// origin/main at the bare repo's main, and a call for a commit fetches it, so a
+// commit that landed since the last call is there. Neither reads the network:
+// every fetch names the bare repo's path.
 func Ensure(ctx context.Context, townRoot, rig, rev string) (string, error) {
 	return ensure(ctx, execGit, townRoot, rig, rev)
 }
@@ -66,7 +98,7 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 		return "", fmt.Errorf("the bare repo of rig %s at %s: %w", rig, bare, err)
 	}
 
-	base := filepath.Join(townRoot, filepath.FromSlash(dirRel))
+	base := filepath.Join(townRoot, BaseDirRel())
 	if err := os.MkdirAll(base, 0o755); err != nil {
 		return "", fmt.Errorf("creating %s: %w", base, err)
 	}
@@ -85,10 +117,18 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 
 	target := rev
 	if rev == "" {
-		if err := run(ctx, fetchTimeout, dir, "fetch", "--quiet", "--no-tags", "--", bare, "main"); err != nil {
-			return "", fmt.Errorf("fetching main of %s into %s: %w", bare, dir, err)
+		// origin/main is the ref the rebuild's preflight compares HEAD with, so it
+		// is brought to the bare repo's main on every call, the fast path included.
+		if err := refreshOriginMain(ctx, run, bare, dir); err != nil {
+			return "", err
 		}
-		target = "FETCH_HEAD"
+		// A checkout already detached at the bare repo's main is what the checkout
+		// below would leave, so it is returned as it is. A cycle with nothing new to
+		// build then checks out nothing.
+		if atBareMain(ctx, run, dir) {
+			return dir, nil
+		}
+		target = "refs/remotes/origin/main"
 	} else {
 		if err := run(ctx, fetchTimeout, dir, "fetch", "--quiet", "--no-tags", "--", bare, rev); err != nil {
 			return "", fmt.Errorf("fetching commit %s from %s: %w", rev, bare, err)
@@ -98,6 +138,33 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 		return "", fmt.Errorf("checking out %s in %s: %w", target, dir, err)
 	}
 	return dir, nil
+}
+
+// refreshOriginMain points the checkout's refs/remotes/origin/main at the bare
+// repo's main. The source is the bare repo's path, not the origin remote, so the
+// fetch reads the rig's bare repo on this host and reaches no network.
+func refreshOriginMain(ctx context.Context, run gitFunc, bare, dir string) error {
+	refspec := "+refs/heads/main:refs/remotes/origin/main"
+	if err := run(ctx, fetchTimeout, dir, "fetch", "--quiet", "--no-tags", "--", bare, refspec); err != nil {
+		return fmt.Errorf("fetching main of %s into %s: %w", bare, dir, err)
+	}
+	return nil
+}
+
+// atBareMain reports whether dir is detached at origin/main, which refreshOriginMain
+// has just pointed at the bare repo's main: the state ensure leaves a checkout in
+// after a checkout of main. The runner returns no output, so the comparison is by
+// ancestry in both directions, which holds exactly when the two are the same
+// commit. A check that fails reports false, so the caller takes the full path,
+// which reports the failure instead of returning a checkout it could not check.
+func atBareMain(ctx context.Context, run gitFunc, dir string) bool {
+	// symbolic-ref exits non-zero when HEAD is detached. A checkout on a branch,
+	// even one at main's commit, is not the detached state, so it takes the full path.
+	if err := run(ctx, revParseTimeout, dir, "symbolic-ref", "--quiet", "HEAD"); err == nil {
+		return false
+	}
+	return run(ctx, revParseTimeout, dir, "merge-base", "--is-ancestor", "HEAD", "refs/remotes/origin/main") == nil &&
+		run(ctx, revParseTimeout, dir, "merge-base", "--is-ancestor", "refs/remotes/origin/main", "HEAD") == nil
 }
 
 // lockRig takes the exclusive flock at path for rig through try, which is

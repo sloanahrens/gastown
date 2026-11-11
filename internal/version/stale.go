@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/buildpaths"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -201,6 +202,14 @@ func (c checker) checkStale(repoDir string) *StaleBinaryInfo {
 		branch = strings.TrimSpace(string(branchOutput))
 	}
 	info.OnMainBranch = isBuildBranch(branch)
+	// A detached HEAD is the job-owned build checkout's shape (buildsrc.Ensure):
+	// it is on main when it is the bare repo's main or an ancestor of it. Any
+	// other detached checkout keeps the answer it always had.
+	detachedTip, detached := "", false
+	if branch == "" && buildsrc.IsBuildCheckout(repoDir) {
+		detachedTip, detached = c.detachedMainTip(repoDir)
+		info.OnMainBranch = detached
+	}
 
 	// Decide which ref to compare the binary against.
 	//
@@ -220,7 +229,12 @@ func (c checker) checkStale(repoDir string) *StaleBinaryInfo {
 		// even though origin/main has since moved on (gt-h8s8). Comparing
 		// against the remote-tracking ref instead — kept current by
 		// CheckStaleBinaryFresh's explicit fetch — catches that case.
-		if ref, ok := c.resolveMainRemoteRef(repoDir, branch); ok {
+		if detached {
+			// The bare repo's main is the build checkout's origin/main, read here
+			// from the repo itself so the verdict needs no fetch.
+			info.CompareRef = "origin/main"
+			compareCommit = detachedTip
+		} else if ref, ok := c.resolveMainRemoteRef(repoDir, branch); ok {
 			info.CompareRef = ref.display
 			compareCommit = ref.commit
 		} else {
@@ -239,8 +253,10 @@ func (c checker) checkStale(repoDir string) *StaleBinaryInfo {
 		// binary commit, it predates the binary and is not a meaningful
 		// staleness reference — fall through to the freshest build-branch
 		// ref that does contain it (origin/main preferred; see
-		// resolveBuildBranchRef) (gt-ugo).
-		if !c.isAncestor(repoDir, binaryCommit, compareCommit) {
+		// resolveBuildBranchRef) (gt-ugo). A detached build checkout compares
+		// against the bare main alone: a fallback would read the checkout's cached
+		// origin/main, which is not the ref this check trusts.
+		if !detached && !c.isAncestor(repoDir, binaryCommit, compareCommit) {
 			if ref, ok := c.resolveBuildBranchRef(repoDir, binaryCommit); ok {
 				info.CompareRef = ref.display
 				compareCommit = ref.commit
@@ -328,6 +344,13 @@ func CheckStaleBinaryFresh(repoDir string) *StaleBinaryInfo {
 }
 
 func (c checker) checkStaleFresh(repoDir string) *StaleBinaryInfo {
+	// A detached build checkout is judged against the bare repo's main, which is
+	// local and is the ref the checkout follows. Nothing here fetches: a live
+	// refresh of the checkout's origin would read the network for an answer the
+	// local ref already gives.
+	if buildsrc.IsBuildCheckout(repoDir) && c.isDetached(repoDir) {
+		return c.checkStale(repoDir)
+	}
 	info := c.checkStale(repoDir)
 	if !liveRefVerdict(info) {
 		return info
@@ -345,6 +368,36 @@ func (c checker) checkStaleFresh(repoDir string) *StaleBinaryInfo {
 	}
 
 	return info
+}
+
+// isDetached reports whether repoDir's HEAD is detached, as a build checkout is
+// once buildsrc.Ensure has checked out a commit.
+func (c checker) isDetached(repoDir string) bool {
+	_, err := c.output(repoDir, "symbolic-ref", "--short", "HEAD")
+	return err != nil
+}
+
+// detachedMainTip returns the bare repo's main commit and whether a detached
+// build checkout is on main: HEAD is that commit or an ancestor of it. The main
+// is read from the bare repo, the ref buildsrc.Ensure follows, so the check
+// reads no remote. An unresolvable HEAD or main is not on main.
+func (c checker) detachedMainTip(repoDir string) (string, bool) {
+	bare, ok := buildsrc.BareRepoOf(repoDir)
+	if !ok {
+		return "", false
+	}
+	head, err := c.resolveGitCommit(repoDir, "HEAD")
+	if err != nil {
+		return "", false
+	}
+	tip, err := c.resolveGitCommit(bare, "refs/heads/main")
+	if err != nil {
+		return "", false
+	}
+	if !c.isAncestor(bare, head, tip) {
+		return "", false
+	}
+	return tip, true
 }
 
 // liveRefVerdict reports whether info is about to say the binary is current on

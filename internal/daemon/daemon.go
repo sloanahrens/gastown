@@ -520,6 +520,10 @@ type Daemon struct {
 	// slot package, which shells out to docker. Tests answer both.
 	rebuildGTStaleFn func(repoRoot string) *version.StaleBinaryInfo
 	rebuildGTGateFn  func() (busy string, reservable bool)
+	// rebuildGTEnsureFn returns the gastown rig's job-owned build checkout
+	// (see rebuild_gt.go); nil is buildsrc.Ensure, which clones and fetches.
+	// Tests point it at a checkout they built.
+	rebuildGTEnsureFn func(ctx context.Context, townRoot, rig, rev string) (string, error)
 	// slotGate is the container gate the quiet check reads its report through;
 	// nil is slot.NewGate(), which lists the host's docker. A test supplies a
 	// gate over a fake runtime, so the quiet check's container classification
