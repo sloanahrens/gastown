@@ -367,20 +367,21 @@ func TestTailDeployRepo_WhyLogLogsOnlyAChangeOfRepo(t *testing.T) {
 	nilLog.deployRepo("absent") // must not panic
 }
 
-// TestTailDeployRepo_UnreadableBareRepoLogsOnceThroughWhyLog: gt tail's ancestry
-// check logs an unreadable bare repo once on its stderr and answers unknown. The
-// .repo.git here is a file, so tailDeployRepo refuses before any git runs.
+// TestTailDeployRepo_UnreadableBareRepoLogsOnceThroughWhyLog: gt tail's why-log
+// writes an unreadable bare repo's reason once to its stderr, however many
+// ancestry checks are built on it, and every ancestry call answers unknown. The
+// fake look fails the bare path with a permission error, so no git runs.
 func TestTailDeployRepo_UnreadableBareRepoLogsOnceThroughWhyLog(t *testing.T) {
 	t.Parallel()
-	townRoot, _ := tailDeployTown(t)
-	bare := filepath.Join(townRoot, "gastown", ".repo.git")
-	if err := os.WriteFile(bare, []byte("not a directory\n"), 0o644); err != nil {
-		t.Fatal(err)
+	townRoot := t.TempDir()
+	run := func(string, ...string) (int, error) {
+		t.Error("git ran for an unreadable bare repo")
+		return 0, nil
 	}
 	var stderr strings.Builder
 	why := tailWhyLog(&stderr)
 	for i := 0; i < 2; i++ {
-		ancestor := tailGitAncestry(townRoot, why)
+		ancestor := tailGitAncestryIn(townRoot, why, tailStatFails(fs.ErrPermission), run)
 		if ok, known := ancestor("c1", "c2"); ok || known {
 			t.Errorf("ancestor(c1, c2) = (%v, %v), want unknown (false, false)", ok, known)
 		}
