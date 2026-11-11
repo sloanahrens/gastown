@@ -14,7 +14,7 @@
 # The list is a ratchet. TestRepoMayorRig fails on a use this file does not allow, and on a
 # line whose file no longer has a use or has fewer uses than its count: fix the line in the
 # retirement that removes the use. Do not add a line for new code; remove the use instead.
-internal/beads/beads_redirect.go	4	pending-retirement	beads redirect: writes and checks the rig's mayor/rig/.beads redirect target and its error text
+internal/beads/beads_redirect.go	3	pending-retirement	beads redirect: writes and checks the rig's mayor/rig/.beads redirect target and its error text
 internal/beads/sling_context_scan.go	1	pending-retirement	sling context scan: looks for the mayor/rig checkout under a rig directory
 internal/cmd/crew_fresh.go	1	pending-retirement	gt crew fresh: help text saying where the fetch runs, in mayor/rig or a polecat worktree
 internal/cmd/daemon_image.go	2	pending-retirement	gt daemon image: refuses a canonical mayor/rig clone as a source, in the flag help and the error text
@@ -25,15 +25,14 @@ internal/cmd/hooks_install.go	1	pending-retirement	gt hooks install: skips the c
 internal/cmd/plugin.go	1	pending-retirement	gt plugin: help text naming the mayor/rig plugins search path
 internal/cmd/polecat.go	1	pending-retirement	gt polecat: opens the beads and git handles at the rig's mayor/rig checkout
 internal/cmd/report.go	1	pending-retirement	gt report: help text saying the mayor/rig canonical clone is never fetched
-internal/cmd/rig.go	8	pending-retirement	gt rig: the help and status output, and the mayor/rig checkout and .beads paths it opens
-internal/cmd/rig_adopt_prefix.go	3	pending-retirement	gt rig adopt-prefix: reads the rig's mayor/rig/.beads and writes its route
+internal/cmd/rig.go	7	pending-retirement	gt rig: the help and status output, and the mayor/rig checkout and .beads paths it opens
+internal/cmd/rig_adopt_prefix.go	2	pending-retirement	gt rig adopt-prefix: reads the rig's mayor/rig/.beads and writes its route
 internal/cmd/rig_dock.go	1	pending-retirement	gt rig dock: the mayor/rig checkout as the beads working directory
 internal/cmd/rig_helpers.go	1	pending-retirement	rig helpers: the mayor/rig beads path the rig commands open
 internal/cmd/sling_helpers.go	1	pending-retirement	gt sling: the mayor/rig path used as a rig's work directory
-internal/config/bd_metadata.go	1	pending-retirement	bd metadata: the beads directory list that names rig/mayor/rig/.beads
 internal/config/directives.go	3	pending-retirement	directives loader: reads the central and per-rig directives under mayor/rig
 internal/config/loader.go	1	pending-retirement	config loader: the daemon patrol config path under constants.DirMayor
-internal/constants/constants.go	12	pending-retirement	constants: the DirMayor and DirRig definitions and the RigMayorPath and RigBeadsPath helpers built from them
+internal/constants/constants.go	11	pending-retirement	constants: the DirMayor and DirRig definitions and the RigMayorPath and RigBeadsPath helpers built from them
 internal/crew/manager.go	1	pending-retirement	crew manager: the rig's mayor/rig path as the crew's git base
 internal/daemon/daemon.go	1	pending-retirement	daemon: the rig beads directory under mayor/rig/.beads
 internal/daemon/hm_skew.go	1	pending-retirement	daemon hm skew probe: the hm rig worktree path, hm/mayor/rig
@@ -77,11 +76,10 @@ internal/polecat/seed/guard.go	1	pending-retirement	seed guard: the mayor/rig ch
 internal/polecat/seed/seed.go	2	pending-retirement	seed: the build rig and source rig mayor/rig checkout paths
 internal/polecat/surviving_branch.go	2	pending-retirement	surviving branch: the legacy mayor/rig git base and its error text
 internal/polecat/surviving_work.go	1	pending-retirement	surviving work: the ErrNoRigRepo text naming mayor/rig
-internal/rig/manager.go	11	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
+internal/rig/manager.go	10	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
 internal/rig/repofile.go	2	pending-retirement	rig repo file: reads files from the rig's mayor/rig clone, and its warning text
 internal/rig/types.go	2	pending-retirement	rig types: the mayor/rig entry in the rig directory list, and the RigMayorPath call that builds the checkout path
-internal/sandbox/skeleton.go	3	pending-retirement	sandbox skeleton: the mayor/rig/.beads paths in the sandbox layout
-internal/session/backend_openshell.go	1	pending-retirement	openshell backend: the relative beads redirect target mayor/rig/.beads
+internal/sandbox/skeleton.go	1	pending-retirement	sandbox skeleton: the mayor/rig/.beads paths in the sandbox layout
 internal/townstate/daycheck.go	1	pending-retirement	townstate daycheck: the constants.DirMayor path to the rigs registry
 internal/townstate/townstate.go	2	pending-retirement	townstate: the constants.DirMayor and constants.DirRig names in its path table
 internal/townstate/verify.go	2	pending-retirement	townstate verify: the constants.DirMayor/constants.DirRig path it verifies

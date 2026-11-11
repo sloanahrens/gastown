@@ -90,6 +90,10 @@ type mayorRigHit struct {
 	file  string
 	line  int
 	count int
+	// capped reports that the file's string collector stopped at its pass cap
+	// with names still changing, so uses built from the deepest names may be
+	// missed; the real-tree gate logs these files so the cap is never silent.
+	capped bool
 }
 
 // mayorRigEntry is one allowlist line. count is the number of uses the file may
@@ -520,7 +524,7 @@ func TestMayorRigStringNamesIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	names := stringNames(file)
+	names, _ := stringNames(file)
 	if got := len(names["s2"]); got != 16 {
 		t.Fatalf("s2 holds %d strings, want 16: two values squared twice", got)
 	}
@@ -541,8 +545,47 @@ func TestMayorRigStringNamesIsBounded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := len(stringNames(manyFile)["x"]); got != maxPossibleStrings {
+	manyNames, manyCapped := stringNames(manyFile)
+	if got := len(manyNames["x"]); got != maxPossibleStrings {
 		t.Fatalf("x holds %d strings from 71 assignments, want the cap %d", got, maxPossibleStrings)
+	}
+	if manyCapped {
+		t.Fatal("71 flat assignments resolve in one pass and must not report the pass cap")
+	}
+
+	// A name that grows from itself gains one value per pass, so it is still
+	// changing when the pass cap ends the collection, and the collector says so.
+	const selfLoop = "package pkg\n\nfunc run() string {\n\tx := \"m\"\n\tx = x + \"/\"\n\treturn x\n}\n"
+	loopFile, err := parser.ParseFile(token.NewFileSet(), "pkg/loop.go", selfLoop, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, loopCapped := stringNames(loopFile); !loopCapped {
+		t.Fatal("a self-growing name must report the pass cap")
+	}
+}
+
+// TestMayorRigPassCapIsReported pins that a file whose string collector stops
+// at the pass cap is marked, so the real-tree gate can name it instead of
+// counting from a partial string set in silence.
+func TestMayorRigPassCapIsReported(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeFixture(t, root, "pkg/loop.go", "package pkg\n\nfunc run() string {\n\tx := \"mayor\"\n\tx = x + \"/rig\"\n\treturn x\n}\n")
+	hit, err := mayorRigHitInFile(os.DirFS(root), "pkg/loop.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hit.capped {
+		t.Fatal("a self-growing name must mark the file's hit as capped")
+	}
+	writeFixture(t, root, "pkg/flat.go", "package pkg\n\nfunc run() string {\n\treturn \"mayor/rig\"\n}\n")
+	flat, err := mayorRigHitInFile(os.DirFS(root), "pkg/flat.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flat.capped {
+		t.Fatal("a flat literal must not mark the hit as capped")
 	}
 }
 
@@ -731,6 +774,11 @@ func TestRepoMayorRig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, h := range hits {
+		if h.capped {
+			t.Logf("%s: the string collector hit its pass cap (%d) with names still changing; uses built from its deepest names may be missed", h.file, maxStringPasses)
+		}
+	}
 	if err := checkMayorRigEntries(entries, hits, allowPath); err != nil {
 		t.Fatal(err)
 	}
@@ -855,7 +903,7 @@ func mayorRigHitInFile(fsys fs.FS, rel string) (mayorRigHit, error) {
 	if err != nil {
 		return mayorRigHit{}, fmt.Errorf("parse %s: %w", rel, err)
 	}
-	names := stringNames(file)
+	names, capped := stringNames(file)
 	qualifier := constantsQualifier(file)
 	c := &useCounter{
 		fset:      fset,
@@ -869,7 +917,7 @@ func mayorRigHitInFile(fsys fs.FS, rel string) (mayorRigHit, error) {
 	if c.err != nil {
 		return mayorRigHit{}, c.err
 	}
-	return mayorRigHit{file: rel, line: c.line, count: c.count}, nil
+	return mayorRigHit{file: rel, line: c.line, count: c.count, capped: capped}, nil
 }
 
 // useCounter counts the uses of one file. A use is one expression: once visit counts
@@ -976,8 +1024,11 @@ func selectorIdents(file *ast.File) map[*ast.Ident]bool {
 // its value from one declared later, so the pass repeats until no name gains a
 // value. The collector stops at maxStringPasses passes and at maxPossibleStrings
 // values for a name, so a chain of concatenations that repeats a name is read to a
-// fixed depth and a fixed size.
-func stringNames(file *ast.File) map[string][]string {
+// fixed depth and a fixed size. capped reports that the pass cap ended the
+// collection while names were still changing: the file holds a chain deeper than
+// the collector reads, so a caller that counts uses must fail loud rather than
+// count from a partial set.
+func stringNames(file *ast.File) (names map[string][]string, capped bool) {
 	type binding struct {
 		name  string
 		value ast.Expr
@@ -1003,7 +1054,7 @@ func stringNames(file *ast.File) map[string][]string {
 		}
 		return true
 	})
-	names := map[string][]string{}
+	names = map[string][]string{}
 	changed := true
 	for pass := 0; changed && pass < maxStringPasses; pass++ {
 		changed = false
@@ -1016,7 +1067,7 @@ func stringNames(file *ast.File) map[string][]string {
 			}
 		}
 	}
-	return names
+	return names, changed
 }
 
 // possibleStrings returns the strings expr can evaluate to: a string literal, a
