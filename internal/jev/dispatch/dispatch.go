@@ -62,6 +62,10 @@ const (
 	agentVar = "agent"
 )
 
+// ErrCapReached reports that the day's Jev spend left no room for another
+// ask, so Ask asked nothing.
+var ErrCapReached = errors.New("dispatch: the day's Jev spend cap was reached")
+
 // Asker asks one battery. *jev.Client satisfies it.
 type Asker interface {
 	Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error)
@@ -272,6 +276,32 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	return sum, nil
 }
 
+// Ask returns the answers the pass would log for a bead it has not placed,
+// asking the same battery through the pass's asker without writing the log,
+// moving the cursor or touching the retry queue.
+//
+// Like Run it asks nothing when the day's cap is spent, returning
+// ErrCapReached; a spend it cannot read is returned, and a pass with no spend
+// check is refused. An asker error is returned unchanged.
+func (p *Pass) Ask(ctx context.Context, b *beads.Issue) (Answers, error) {
+	var none Answers
+	if p.Allows == nil {
+		return none, errors.New("dispatch: Ask needs a spend check")
+	}
+	allowed, err := p.Allows()
+	if err != nil {
+		return none, err
+	}
+	if !allowed {
+		return none, ErrCapReached
+	}
+	ans, err := p.askState(ctx, stateFor(b, ""))
+	if err != nil {
+		return none, err
+	}
+	return lineAnswers(ans), nil
+}
+
 // queuePlacements returns what this pass should ask about, oldest first: every
 // placement after the cursor, and every queued placement the cursor already
 // passed. It drops queue entries for beads the lister no longer calls a
@@ -365,10 +395,16 @@ func agentOf(b *beads.Issue) string {
 	return ""
 }
 
-// choose asks the battery about one bead. A 429 gets one retry, after the
-// delay the server asked for, capped at maxRetryWait.
+// choose asks the battery about one bead, naming the agent the dispatcher
+// seats for it.
 func (p *Pass) choose(ctx context.Context, b *beads.Issue) (*jev.Answers, error) {
-	state := buildState(b)
+	return p.askState(ctx, stateFor(b, agentOf(b)))
+}
+
+// askState asks the battery about one state. A 429 gets one retry, after the
+// delay the server asked for, capped at maxRetryWait. Run and Ask share it, so
+// both wait through the pass's Wait.
+func (p *Pass) askState(ctx context.Context, state string) (*jev.Answers, error) {
 	qs := questions()
 	ans, err := p.Asker.Ask(ctx, state, qs)
 	if !errors.Is(err, jev.ErrRateLimited) {
@@ -399,11 +435,17 @@ func lineAnswers(a *jev.Answers) Answers {
 	}
 }
 
-// buildState returns the state for one bead: one "name: value" line per field,
+// buildState returns the state for one bead with the agent the dispatcher
+// seats for it.
+func buildState(b *beads.Issue) string {
+	return stateFor(b, agentOf(b))
+}
+
+// stateFor returns the state for one bead: one "name: value" line per field,
 // each value a JSON string literal on one line, so the model reads every value
 // as data. It holds the title, the Goal, Constraints, Acceptance and Size
-// sections, the labels and the agent, and nothing else of the bead.
-func buildState(b *beads.Issue) string {
+// sections, the labels and agent, and nothing else of the bead.
+func stateFor(b *beads.Issue, agent string) string {
 	sections := specdispatch.Sections(beads.StripAttachmentFields(b.Description))
 	acceptance := strings.TrimSpace(b.AcceptanceCriteria)
 	if acceptance == "" {
@@ -424,7 +466,7 @@ func buildState(b *beads.Issue) string {
 	fmt.Fprintf(&s, "acceptance: %s\n", quote(truncate(acceptance, maxSectionRunes)))
 	fmt.Fprintf(&s, "size: %s\n", quote(truncate(sections["size"], maxSectionRunes)))
 	fmt.Fprintf(&s, "labels: [%s]\n", strings.Join(labels, ", "))
-	fmt.Fprintf(&s, "agent: %s\n", quote(agentOf(b)))
+	fmt.Fprintf(&s, "agent: %s\n", quote(agent))
 	return s.String()
 }
 
