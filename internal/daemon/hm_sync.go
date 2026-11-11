@@ -176,7 +176,7 @@ func (d *Daemon) hmSyncPass(s hmSyncSeams, started time.Time) {
 	elapsed := s.now().Sub(started).Round(time.Millisecond)
 	d.hmSyncLastRun.Store(s.now().UnixNano())
 
-	status := hmSyncStatus(err)
+	status := runExitStatus(err)
 	if err != nil {
 		d.logger.Printf("hm_sync: %s sync: %s in %v: %v", command, status, elapsed, err)
 		return
@@ -194,11 +194,11 @@ func (d *Daemon) hmSyncContext() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, hmSyncRunTimeout)
 }
 
-// hmSyncStatus names the exit status of a sync, which is what the summary line
-// reports alongside the duration. ExitCode reports -1 for a command that never
-// exited on its own — one the run timeout killed, or one a shutdown stopped —
-// and that is a killed sync, not a status of -1.
-func hmSyncStatus(err error) string {
+// runExitStatus names the exit status of a patrol's child process, which is
+// what its summary line reports alongside the duration. ExitCode reports -1 for
+// a command that never exited on its own — one the run timeout killed, or one a
+// shutdown stopped — and that is a killed run, not a status of -1.
+func runExitStatus(err error) string {
 	if err == nil {
 		return "exit 0"
 	}

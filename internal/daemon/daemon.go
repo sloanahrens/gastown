@@ -401,6 +401,21 @@ type Daemon struct {
 	// the alert functions a test replaces (see hm_sync_alert.go).
 	hmSyncAlerts hmSyncAlerts
 
+	// cloudCheck replaces the cloud_check patrol's clock, runner, key lookup and
+	// side effects in tests (see cloudCheckSeams); the zero value is production.
+	cloudCheck cloudCheckSeams
+	// cloudCheckRunning is that patrol's single-flight guard.
+	cloudCheckRunning atomic.Bool
+	// cloudCheckLastRun is when it last finished a check, as UnixNano: the pass
+	// runs off the loop goroutine, so the marker it writes is atomic and the loop
+	// only reads it.
+	cloudCheckLastRun atomic.Int64
+	// cloudCheckNoKeyOnce holds the unconfigured line to one per daemon run.
+	cloudCheckNoKeyOnce sync.Once
+	// cloudCheckAlertRaised is set while the patrol's one failure item is open,
+	// so a good run clears it and a key that was never raised clears nothing.
+	cloudCheckAlertRaised atomic.Bool
+
 	// rigOperational memoizes each rig's docked/parked determination for a short
 	// window, so the many per-rig-per-heartbeat call sites share one lookup
 	// instead of each paying a bd subprocess - which, on a CPU-starved host,
@@ -1994,6 +2009,21 @@ func (d *Daemon) Run() (err error) {
 		}
 	}
 
+	// Start the cloud_check ticker if configured. It runs the town's cloud
+	// check once per interval, off the loop goroutine, and writes the status
+	// file the dashboard's Cloud pane reads (cloud_check.go, gt-c57pax). A
+	// restart checks once at startup so the pane is not stale for an interval.
+	var cloudCheckTicker *time.Ticker
+	var cloudCheckChan <-chan time.Time
+	if d.isPatrolActive("cloud_check") {
+		cloudCheckTicker = d.startCloudCheckTicker()
+		if cloudCheckTicker != nil {
+			cloudCheckChan = cloudCheckTicker.C
+			defer cloudCheckTicker.Stop()
+			d.runCloudCheckPatrol()
+		}
+	}
+
 	// Start the scheduled_slings ticker if configured. Each tick evaluates
 	// every entry; the decision function decides due-ness, so a coarse tick
 	// is enough (gt-nj23).
@@ -2233,6 +2263,13 @@ func (d *Daemon) Run() (err error) {
 			// loop goroutine.
 			if !d.isShutdownInProgress() {
 				d.runHMSync()
+			}
+
+		case <-cloudCheckChan:
+			// Cloud check — runs the configured check once per interval, off
+			// the loop goroutine (gt-c57pax).
+			if !d.isShutdownInProgress() {
+				d.runCloudCheckPatrol()
 			}
 
 		case <-scheduledSlingsChan:

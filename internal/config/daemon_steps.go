@@ -69,6 +69,7 @@ var daemonSteps = []DaemonStep{
 	{"rebuild_om", DaemonStepPatrol, DaemonStepHost, nil, "go build"},
 	{"rebuild_hm", DaemonStepPatrol, DaemonStepHost, nil, "go build"},
 	{"disk_maintenance", DaemonStepPatrol, DaemonStepRuns, []string{"kubectl"}, "runs in the container: daemon.log 2026-11-08 12:53:42 'disk_maintenance: cache trim gt-cache in openshell applied: route=shards n=15'; the cache trim execs kubectl (internal/daemon/cache_trim.go)"},
+	{"cloud_check", DaemonStepPatrol, DaemonStepRuns, []string{"cloudcheck"}, "runs in the container: it execs the devops cloudcheck binary the image carries (deploy/daemon/Dockerfile), which writes the status file the dashboard reads from the town state claim (gt-c57pax)"},
 	{"main_branch_test", DaemonStepPatrol, DaemonStepHost, nil, "go test"},
 	{"doctor_dog", DaemonStepPatrol, DaemonStepRuns, nil, "in process, so it runs in the container: daemon.log 2026-11-08 12:53:18 'doctor_dog: all clear (latency 14ms, connections 22/1000, orphans 0)'; its probes (internal/daemon/doctor_dog.go) exec no program"},
 	{"health_notify", DaemonStepPatrol, DaemonStepSeam, nil, "the macOS notify scripts (deferred by the operator)"},

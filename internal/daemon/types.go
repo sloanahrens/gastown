@@ -339,6 +339,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 		}
 		return config.Patrols.HMSync.Enabled
 	}
+	// cloud_check is opt-in for the same reason: it runs a program on a timer,
+	// so only an explicit enabled:true turns it on (gt-c57pax).
+	if patrol == "cloud_check" {
+		if config == nil || config.Patrols == nil || config.Patrols.CloudCheck == nil {
+			return false
+		}
+		return config.Patrols.CloudCheck.Enabled
+	}
 	// landing_worker is opt-in: it pushes main, so only an explicit
 	// enabled:true turns it on (gt-v4ssj.2).
 	if patrol == "landing_worker" {

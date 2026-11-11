@@ -635,26 +635,26 @@ func TestForgejoTokenDirDefault(t *testing.T) {
 	const home = "/home/user"
 	homeDir := func() (string, error) { return home, nil }
 
-	got, err := forgejoTokenDir(func(string) string { return "/xdg" }, homeDir)
+	got, err := gtConfigDir(func(string) string { return "/xdg" }, homeDir)
 	if err != nil {
-		t.Fatalf("forgejoTokenDir(xdg): %v", err)
+		t.Fatalf("gtConfigDir(xdg): %v", err)
 	}
 	if got != "/xdg/gt" {
 		t.Errorf("with XDG_CONFIG_HOME = %q, want /xdg/gt", got)
 	}
 
-	got, err = forgejoTokenDir(func(string) string { return "" }, homeDir)
+	got, err = gtConfigDir(func(string) string { return "" }, homeDir)
 	if err != nil {
-		t.Fatalf("forgejoTokenDir(home): %v", err)
+		t.Fatalf("gtConfigDir(home): %v", err)
 	}
 	if want := filepath.Join(home, ".config", "gt"); got != want {
 		t.Errorf("without XDG_CONFIG_HOME = %q, want %q", got, want)
 	}
 
 	boom := errors.New("no home")
-	if _, err := forgejoTokenDir(func(string) string { return "" },
+	if _, err := gtConfigDir(func(string) string { return "" },
 		func() (string, error) { return "", boom }); !errors.Is(err, boom) {
-		t.Errorf("forgejoTokenDir(home error) = %v, want the home error", err)
+		t.Errorf("gtConfigDir(home error) = %v, want the home error", err)
 	}
 }
 

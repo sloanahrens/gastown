@@ -334,6 +334,7 @@ type PatrolsConfig struct {
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
 	DiskMaintenance      *DiskMaintenanceConfig      `json:"disk_maintenance,omitempty"`
 	HMSync               *HMSyncConfig               `json:"hm_sync,omitempty"`
+	CloudCheck           *CloudCheckConfig           `json:"cloud_check,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	OverseerReport       *OverseerReportConfig       `json:"overseer_report,omitempty"`
 	BirdReports          *BirdReportsConfig          `json:"bird_reports,omitempty"`
@@ -1695,6 +1696,81 @@ func (c *HMSyncConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// CloudCheckConfig configures the cloud_check patrol: the interval run of the
+// devops cloudcheck binary that writes the Cloud pane's status file
+// (internal/daemon/cloud_check.go).
+//
+// The patrol is opt-in. It runs a program on a timer, so a town that has not
+// asked for it must not get it from a default.
+type CloudCheckConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Interval string `json:"interval"` // Go duration, default "10m"
+	// Command is the binary to run. Its default is the name the daemon image
+	// carries on PATH; a host whose binary is elsewhere names the path here.
+	Command string `json:"command"` // default "cloudcheck"
+	// KeyFile is the GCP service-account key the child reads through
+	// GOOGLE_APPLICATION_CREDENTIALS. The key's value never leaves the file:
+	// the patrol only stats it and passes the path. Empty means
+	// CloudCheckDefaultKeyFile in the daemon's config directory.
+	KeyFile string `json:"key_file"`
+}
+
+// The values CloudCheckConfig accepts. An empty field means the default, so a
+// town that sets only enabled still gets an interval, a command and a key path.
+const (
+	CloudCheckDefaultInterval = "10m"
+	CloudCheckDefaultCommand  = "cloudcheck"
+	// CloudCheckDefaultKeyFile is the key's name in the daemon's config
+	// directory: it is the deploy/daemon/secrets.yaml entry the render mounts
+	// as the daemon-gcp-key Secret.
+	CloudCheckDefaultKeyFile = "gcp-key"
+)
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing an interval the
+// patrol cannot schedule: a mistyped one must not read as the default, or the
+// town would run the check on a cadence it never asked for.
+//
+// The unknown-field check is repeated here because a type that decodes itself
+// is decoded by the config kernel's strict decoder opaquely.
+func (c *CloudCheckConfig) UnmarshalJSON(data []byte) error {
+	type plain CloudCheckConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.cloud_check: %w", err)
+	}
+	if p.Interval != "" {
+		every, err := time.ParseDuration(p.Interval)
+		if err != nil || every <= 0 {
+			return fmt.Errorf("patrols.cloud_check.interval = %q: want a positive Go duration such as %q", p.Interval, CloudCheckDefaultInterval)
+		}
+	}
+	*c = CloudCheckConfig(p)
+	return nil
+}
+
+// KeyFilePath returns the key file the patrol reads: the setting, or the
+// default name in the daemon's config directory. It reads the environment
+// through DefaultGtConfigDir, so the host daemon and the pod both resolve the
+// file the render mounts for them.
+func (c *CloudCheckConfig) KeyFilePath() (string, error) {
+	return c.keyFilePath(DefaultGtConfigDir)
+}
+
+// keyFilePath is KeyFilePath with the config-directory lookup injected, so a
+// test pins the directory without mutating the process environment.
+func (c *CloudCheckConfig) keyFilePath(configDir func() (string, error)) (string, error) {
+	if c != nil && c.KeyFile != "" {
+		return c.KeyFile, nil
+	}
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, CloudCheckDefaultKeyFile), nil
+}
+
 // JevScrub turns on the state scrubber for one Jev battery: secret-shaped text
 // and the operator's identity are replaced in the state before it leaves the
 // machine (internal/jev/scrub), and the request log counts the rules that
@@ -3008,13 +3084,21 @@ func (c *LandingWorkerConfig) ForgejoTokenDir() (string, error) {
 // $XDG_CONFIG_HOME/gt when set, else ~/.config/gt (the path the epic names
 // for forgejo-<role>.env).
 func DefaultForgejoTokenDir() (string, error) {
-	return forgejoTokenDir(os.Getenv, os.UserHomeDir)
+	return DefaultGtConfigDir()
 }
 
-// forgejoTokenDir is DefaultForgejoTokenDir with its environment injected,
-// the way config.ClaudeConfigDir is, so a test can pin the directory without
-// mutating the process environment.
-func forgejoTokenDir(getenv func(string) string, userHomeDir func() (string, error)) (string, error) {
+// DefaultGtConfigDir returns the town's config directory: $XDG_CONFIG_HOME/gt
+// when set, else ~/.config/gt. The live container's Secrets are mounted under
+// it, so a setting that resolves a file through this function finds the mounted
+// copy in the pod and the operator's own on the host.
+func DefaultGtConfigDir() (string, error) {
+	return gtConfigDir(os.Getenv, os.UserHomeDir)
+}
+
+// gtConfigDir is DefaultGtConfigDir with its environment injected, the way
+// config.ClaudeConfigDir is, so a test can pin the directory without mutating
+// the process environment.
+func gtConfigDir(getenv func(string) string, userHomeDir func() (string, error)) (string, error) {
 	if xdg := getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "gt"), nil
 	}
