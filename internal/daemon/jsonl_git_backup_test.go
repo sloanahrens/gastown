@@ -2595,6 +2595,37 @@ func TestRunGitIndexOp_OtherFailuresAreNotRetried(t *testing.T) {
 	}
 }
 
+// TestCommitAndPushJsonlBackup_RefusesWhenUnstagingAWithheldDatabaseFails: a
+// failed unstage must abort the commit. The withheld database's export was
+// rejected by the spike guard, and a commit that still carried it would advance
+// the baseline past the halt (gt-5tpas2).
+func TestCommitAndPushJsonlBackup_RefusesWhenUnstagingAWithheldDatabaseFails(t *testing.T) {
+	t.Parallel()
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", "seed", map[string]string{"README": "init\n"})
+	gitRepo := filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+	if err := os.MkdirAll(filepath.Join(gitRepo, "hq"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeNLines(t, filepath.Join(gitRepo, "hq", "issues.jsonl"), 1300)
+
+	d.openGitFn = func(dir string) daemonGit {
+		return unstagingFailsGit{daemonGit: f.Open(dir).(daemonGit)}
+	}
+
+	err := d.commitAndPushJsonlBackup(gitRepo, []string{"hq"}, map[string]int{"hq": 1300}, nil, []string{"hq"})
+	if err == nil || !strings.Contains(err.Error(), "unstaging withheld databases") {
+		t.Fatalf("commitAndPushJsonlBackup = %v, want the failed unstage named", err)
+	}
+	if subjects := backupSubjects(t, d, gitRepo); len(subjects) != 1 {
+		t.Errorf("commits = %q; want the seed alone — the withheld export must not land", subjects)
+	}
+}
+
 // TestCommitAndPushJsonlBackup_ExhaustedLocalBudgetFailsFast is the gt-ttqq8
 // regression for the phase deadline: the local commands share one, so
 // time.Until(localDeadline) reaches zero once an earlier one has spent it, and
