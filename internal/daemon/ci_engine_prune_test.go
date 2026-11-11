@@ -779,17 +779,19 @@ func TestCIEnginePruneFailureLineCarriesTheFirstStderrLine(t *testing.T) {
 	const first = "Error response from daemon: conflict: unable to delete"
 	const later = "a later stderr line"
 	stderr := first + "\n" + later + "\n"
+	const exited = "exit status 1"
 	for name, setup := range map[string]struct {
 		match  string
 		reply  cliReply
 		remove engineRemoveAnswers
 		marker string
+		status string
 	}{
-		"list exec":         {match: "ci-engine-list", reply: cliReply{code: 1, stderr: stderr}, marker: "the listing exec"},
-		"build cache prune": {match: "-- docker builder prune", reply: cliReply{code: 1, stderr: stderr}, marker: "the build cache prune"},
-		"size read":         {match: "-- du -sk", reply: cliReply{code: 1, stderr: stderr}, marker: "data root's size after"},
-		"removal":           {remove: engineRemoveAnswers{fail: true, stderr: stderr}, marker: "planned image(s)"},
-		"presence check":    {match: "-- docker image inspect", reply: cliReply{startErr: errors.New("exec stream broke"), stderr: stderr}, remove: engineRemoveAnswers{fail: true}, marker: "presence check could not run"},
+		"list exec":         {match: "ci-engine-list", reply: cliReply{code: 1, stderr: stderr}, marker: "the listing exec", status: exited},
+		"build cache prune": {match: "-- docker builder prune", reply: cliReply{code: 1, stderr: stderr}, marker: "the build cache prune", status: exited},
+		"size read":         {match: "-- du -sk", reply: cliReply{code: 1, stderr: stderr}, marker: "data root's size after", status: exited},
+		"removal":           {remove: engineRemoveAnswers{fail: true, stderr: stderr}, marker: "planned image(s)", status: exited},
+		"presence check":    {match: "-- docker image inspect", reply: cliReply{startErr: errors.New("exec stream broke"), stderr: stderr}, remove: engineRemoveAnswers{fail: true}, marker: "presence check could not run", status: "no exit status"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -810,8 +812,8 @@ func TestCIEnginePruneFailureLineCarriesTheFirstStderrLine(t *testing.T) {
 			if strings.Contains(logs, later) {
 				t.Errorf("a stderr line after the first reached the log:\n%s", logs)
 			}
-			if !strings.Contains(line, "exit status 1, stderr: ") && !strings.Contains(line, "no exit status, stderr: ") {
-				t.Errorf("the failure line does not name the exit status before its stderr:\n%s", line)
+			if !strings.Contains(line, setup.status+", stderr: ") {
+				t.Errorf("the failure line does not name %q before its stderr:\n%s", setup.status, line)
 			}
 		})
 	}
@@ -833,6 +835,10 @@ func TestCIEnginePruneFailureLineStderrIsBounded(t *testing.T) {
 		"control characters and tabs become spaces": {
 			stderr: "one\x1b[2J\ttwo\rthree\nnext",
 			want:   "one [2J two three",
+		},
+		"format and bidi characters become spaces": {
+			stderr: "a\u202eb\u2066c\u200bd\ufeffe\nnext",
+			want:   "a b c d e",
 		},
 		"blank lines before the first line are skipped": {
 			stderr: "\n \nfirst real line\nlater",
@@ -872,23 +878,43 @@ func TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr(t *testing.T) 
 	t.Parallel()
 	const kubectlNotFound = `Error from server (NotFound): pods "runner-1" not found`
 	const kubectlUpgrade = "error: unable to upgrade connection: container not found"
+	const kubectlKlog = "E1103 10:00:00.000000    1234 memcache.go:265] couldn't get current server API group list"
+	const kubectlKlogWarning = "W1103 10:00:00.000000    1234 warnings.go:70] deprecated API"
+	const kubectlWarning = "Warning: deprecated API version"
 	for name, tc := range map[string]struct {
-		match  string
-		reply  cliReply
-		marker string
-		want   string
+		match   string
+		reply   cliReply
+		marker  string
+		kubectl string
+		want    string
 	}{
 		"list exec, kubectl's error only": {
 			match: "ci-engine-list", reply: cliReply{code: 1, stderr: kubectlNotFound + "\n"},
-			marker: "the listing exec", want: "",
+			marker: "the listing exec", kubectl: kubectlNotFound, want: "",
 		},
 		"build cache prune, kubectl's error only": {
 			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlUpgrade + "\n"},
-			marker: "the build cache prune", want: "",
+			marker: "the build cache prune", kubectl: kubectlUpgrade, want: "",
 		},
 		"kubectl's line before the program's": {
 			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlUpgrade + "\nprogram line\n"},
-			marker: "the build cache prune", want: "program line",
+			marker: "the build cache prune", kubectl: kubectlUpgrade, want: "program line",
+		},
+		"klog error line before the program's": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlKlog + "\nprogram line\n"},
+			marker: "the build cache prune", kubectl: kubectlKlog, want: "program line",
+		},
+		"klog warning line before the program's": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlKlogWarning + "\nprogram line\n"},
+			marker: "the build cache prune", kubectl: kubectlKlogWarning, want: "program line",
+		},
+		"kubectl warning line before the program's": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlWarning + "\nprogram line\n"},
+			marker: "the build cache prune", kubectl: kubectlWarning, want: "program line",
+		},
+		"the engine's own Error line is kept": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: "Error: No such object: x\n"},
+			marker: "the build cache prune", want: "Error: No such object: x",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -898,8 +924,8 @@ func TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr(t *testing.T) 
 			f.tick()
 			f.drain()
 			logs := f.logs.String()
-			if strings.Contains(logs, "pods \"runner-1\"") || strings.Contains(logs, "unable to upgrade") {
-				t.Errorf("kubectl's own error reached the log:\n%s", logs)
+			if tc.kubectl != "" && strings.Contains(logs, tc.kubectl) {
+				t.Errorf("kubectl's own line reached the log:\n%s", logs)
 			}
 			line := engineLogLine(logs, tc.marker)
 			if line == "" {
