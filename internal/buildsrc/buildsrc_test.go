@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // newTown returns a town root under a fresh temp dir. The town itself is not
@@ -250,5 +252,49 @@ func TestEnsureReplacesDirectoryLeftByDeadClone(t *testing.T) {
 	}
 	if len(git.calls) == 0 || git.calls[0] != "clone" {
 		t.Fatalf("git calls = %v, want a clone first", git.calls)
+	}
+}
+
+// A caller whose ctx has ended while another holder has the rig's lock gets
+// ctx's error back and runs no git: the lock wait watches ctx. The ctx is
+// already past its deadline, so the wait is over as soon as it is tried. The
+// failsafe fires only if Ensure goes on waiting for the holder.
+func TestEnsureReturnsWhenItsCtxEndsWhileTheRigLockIsHeld(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	if err := os.MkdirAll(filepath.Join(town, "gastown", ".repo.git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(town, dirRel)
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lock.FlockAcquire(filepath.Join(base, "gastown.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	git := &fakeGit{clone: cloneWithGit}
+	done := make(chan error, 1)
+	go func() {
+		_, err := ensure(ctx, git.run, town, "gastown", "")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("ensure error = %v, want one wrapping context.DeadlineExceeded", err)
+		}
+		if !strings.Contains(err.Error(), "gastown") {
+			t.Errorf("ensure error %q does not name the rig", err)
+		}
+		if len(git.calls) != 0 {
+			t.Errorf("git calls = %v, want none while the lock is held", git.calls)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ensure still waits for the rig lock after its ctx ended")
 	}
 }

@@ -214,7 +214,7 @@ func TestScheduledSlingEntry_ValidateGateTimeout(t *testing.T) {
 // An Ensure failure is a gate failure: the verdict is failed with the error in
 // its detail, and no command starts. A git exit status inside the error must not
 // read as the gate's own exit 1 ("nothing to do").
-func TestScheduledGate_EnsureFailureSkipsTheTick(t *testing.T) {
+func TestScheduledGate_EnsureFailureRecordsAGateFailureAndStartsNoCommand(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
 		ensureErr error
@@ -245,6 +245,44 @@ func TestScheduledGate_EnsureFailureSkipsTheTick(t *testing.T) {
 		if got := d.scheduledGateFailures.m[gatedEntry.Name]; got.count != 1 || got.detail != c.want {
 			t.Errorf("%s: recorded %+v, want count 1 and detail %q", name, got, c.want)
 		}
+	}
+}
+
+// A build checkout whose lock wait runs until the gate's deadline is a gate
+// timeout: Ensure sees the deadline on its ctx, the gate fails with the timeout
+// as its detail, and no command starts. The failsafe fires only if the gate's
+// deadline never reaches Ensure, and fails the test there.
+func TestScheduledGate_BuildCheckoutWaitPastTheGateDeadlineTimesOut(t *testing.T) {
+	t.Parallel()
+	e := gatedEntry
+	e.GateTimeoutStr = "1ms"
+	commands := 0
+	r := &execScheduledSlingRunner{
+		townRoot: t.TempDir(),
+		ensureBuildSrc: func(ctx context.Context, _, _, _ string) (string, error) {
+			select {
+			case <-ctx.Done():
+				return "", fmt.Errorf("waiting for the build checkout lock: %w", ctx.Err())
+			case <-time.After(10 * time.Second):
+				t.Error("ensure was not given the gate deadline")
+				return "", errors.New("ensure was not given the gate deadline")
+			}
+		},
+		execCmd: func(*exec.Cmd) ([]byte, []byte, error) {
+			commands++
+			return nil, nil, nil
+		},
+	}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, r)
+	if d.scheduledGateAllows(context.Background(), r, e) {
+		t.Fatal("a build checkout that timed out let the run go ahead")
+	}
+	if commands != 0 {
+		t.Errorf("%d commands started after the build checkout timed out, want none", commands)
+	}
+	const want = "timed out after 1ms"
+	if got := d.scheduledGateFailures.m[e.Name]; got.count != 1 || got.detail != want {
+		t.Errorf("recorded %+v, want count 1 and detail %q", got, want)
 	}
 }
 

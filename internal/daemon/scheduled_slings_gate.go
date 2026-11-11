@@ -85,9 +85,9 @@ func scheduledGateDetail(status string, out []byte) string {
 
 // runGate runs the entry's gate_command with sh -c in the rig's job-owned build
 // checkout at main (buildsrc.Ensure), bounded by ctx. Ensure runs under the same
-// ctx, so the gate's deadline covers the clone and fetch too. An Ensure failure
-// is returned as the run error and no command starts. It returns the combined
-// output and the run's error.
+// ctx, so the gate's deadline covers the wait for the checkout's lock, the clone
+// and the fetch. An Ensure failure is returned as the run error and no command
+// starts. It returns the combined output and the run's error.
 func (r *execScheduledSlingRunner) runGate(ctx context.Context, e ScheduledSlingEntry) ([]byte, error) {
 	ensure := r.ensureBuildSrc
 	if ensure == nil {
