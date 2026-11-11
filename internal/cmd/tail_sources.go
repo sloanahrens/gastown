@@ -2080,7 +2080,12 @@ func tailExecGit(dir string, args ...string) (int, error) {
 	// The same detached process group internal/version gives its git calls:
 	// the context is the only thing that ends this one.
 	util.SetDetachedProcessGroup(cmd)
-	err := cmd.Run()
+	return tailGitExit(cmd.Run())
+}
+
+// tailGitExit reads the outcome of a git run: its exit code, or err when git did
+// not start, so the caller can tell an answer from no answer.
+func tailGitExit(err error) (int, error) {
 	if err == nil {
 		return 0, nil
 	}

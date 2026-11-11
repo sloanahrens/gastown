@@ -391,3 +391,18 @@ func TestTailDeployRepo_UnreadableBareRepoLogsOnceThroughWhyLog(t *testing.T) {
 		t.Errorf("why-log = %q, want exactly one gt tail line naming the unreadable bare repo", stderr.String())
 	}
 }
+
+// TestTailGitAncestry_AGitThatDidNotStartIsAnError: a git run that never started
+// is an error, not an exit code, so the ancestry check reads it as unknown. The
+// integration tier runs the real start failure; this drives the classification.
+func TestTailGitAncestry_AGitThatDidNotStartIsAnError(t *testing.T) {
+	t.Parallel()
+	start := errors.New("chdir: no such file or directory")
+	code, err := tailGitExit(start)
+	if !errors.Is(err, start) {
+		t.Errorf("tailGitExit(start failure) error = %v, want the start failure returned", err)
+	}
+	if code != 0 {
+		t.Errorf("tailGitExit(start failure) code = %d, want 0 with the error", code)
+	}
+}
