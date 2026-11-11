@@ -769,7 +769,7 @@ func TestSeatEndUsageLogsOneLineForItsOutcome(t *testing.T) {
 			name: "transcripts the daemon cannot reach log the reason",
 			list: func(*testing.T, string) []string { return nil },
 			wantLine: func(string) string {
-				return "its usage record is not written: no transcript of its sessions is on the host"
+				return "its usage record is not written: no transcript of its sessions is in the host's Claude project directories"
 			},
 		},
 		{
@@ -867,7 +867,7 @@ func TestSeatEndUsageUnreachableFromTheDaemonSaysSo(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("usage lines = %d, want exactly 1; log:\n%s", len(lines), logs.String())
 	}
-	for _, want := range []string{"usage record is not written", "/sandbox/.claude/projects", "copy"} {
+	for _, want := range []string{"usage record is not written", "may have written", "/sandbox/.claude/projects", "copy"} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("usage line %q does not contain %q", lines[0], want)
 		}
