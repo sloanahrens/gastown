@@ -74,7 +74,6 @@ The guard in `internal/podengine` is the source of truth for these rows; this ta
 | `internal/diskmaint/colima/target.go` | `Target.docker` | 344 | `return t.cfg.Run(ctx, []string{"DOCKER_HOST=" + t.cfg.DockerHost}, "docker", args...)` | one docker command on the colima sandbox daemon | mac-job | the colima target is built by the disk-maintenance command (`internal/diskmaint/colima/target.go:344` is its only docker call); `internal/daemon` does not import `colima` |
 | `internal/diskmaint/nodes/target.go` | `Target.docker` | 348 | `return t.cfg.Run(ctx, nil, "docker", argv...)` | crictl on a cluster node, through `docker exec` | mac-job | the nodes target is built by the disk-maintenance command (`internal/diskmaint/nodes/target.go:348` is its only docker call); `internal/daemon` does not import `nodes` |
 | `internal/diskmaint/registry/gc.go` | `Target.gc` | 93 | `_, err := t.cfg.Run(context.WithoutCancel(ctx), env, "docker",` | registry garbage collect inside the registry container | needs-engine no bead yet | the daemon builds this target (`internal/daemon/disk_maintenance.go:1027`) and applies it (`disk_maintenance.go:934`, through `internal/diskmaint/registry/apply.go`); no container-mode gate |
-| `internal/doctor/openshell_gateway_check.go` | `checkImages` | 225 | `_, err := run([]string{"docker", "image", "inspect", p.image})` | whether each profile image is present | mac-job | `internal/doctor/openshell_gateway_check.go:95` is the doctor check; `internal/daemon` does not import `doctor` |
 | `internal/doltserver/containerplan.go` | `ContainerPlan` | 94 | `"docker", "create",` | the create argv for the Dolt container | mac-job | `internal/cmd/dolt_container_plan.go:100` is the only caller; `internal/daemon` does not call it |
 | `internal/doltserver/doltserver.go` | `host.startExternalContainer` | 2139 | `h.exec(exec.Command("docker", "start", name))` | starting the external Dolt container | needs-engine no bead yet | `internal/daemon/dolt.go:203` starts it when `dolt.external_container` is set (`dolt.go:679-683` sets containerMode); no pod gate |
 | `internal/doltserver/doltserver.go` | `host.stopExternalContainer` | 2173 | `h.exec(exec.Command("docker", "stop", "-t", grace, name))` | stopping the external Dolt container with a grace period | needs-engine no bead yet | `internal/doltserver/doltserver.go:2714` (`Stop`) reaches it; the daemon stops Dolt through `dolt.go`; no pod gate |
@@ -167,7 +166,6 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/cmd/update_effects.go` `buildCommand`
 - `internal/doctor/daemon_check.go` `DaemonCheck.Fix`
 - `internal/doctor/hooks_live_fire_check.go` `runLiveFireClaude`
-- `internal/doctor/openshell_gateway_check.go` `runOpenShellCommand`
 - `internal/forgejoresync/refs.go` `gitCommand`
 - `internal/gtwrap/docker.go` `OSShell.Attach`
 - `internal/gtwrap/docker.go` `OSShell.Capture`

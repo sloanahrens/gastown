@@ -1,6 +1,6 @@
 # OpenShell gateway
 
-The OpenShell gateway is the long-lived service behind the `openshell` session backend: polecat seats whose `backend` is `openshell` run in sandboxes the gateway creates, and the daemon reaches them through it. On macOS it runs as the user launchd agent `com.gastown.openshell-gateway`. Read this before installing, restarting or repairing the gateway.
+The OpenShell gateway is the long-lived service behind the `openshell` session backend: polecat seats whose `backend` is `openshell` run in sandboxes the gateway creates, and the daemon reaches them through it. The Mac gateway is retired: sandbox seats now run on the k8s gateway, and a sandbox profile with `driver: kubernetes` runs there (see [Sandbox profile driver](#sandbox-profile-driver)). The Mac gateway was the user launchd agent `com.gastown.openshell-gateway`; the Install, Restart and Regenerate certificates sections below apply only to a Mac that still runs that agent.
 
 ## Install
 
@@ -80,10 +80,6 @@ openshell status
 ```
 
 `openshell status` reporting a connected gateway means the new set works; delete `tls.old` then. If it does not connect, `~/gt/.runtime/openshell/gateway.log` names the reason, and moving `tls.old` back restores the previous set.
-
-## Doctor
-
-`gt doctor` runs the `openshell-gateway` check on the sandbox profiles the openshell seats use. It warns, and names each missing piece, when the gateway does not report connected, a provider a profile names is not registered, or a profile image is not present. It also warns when the town settings or `polecat_pool.seats` cannot be read, and when the docker CLI is not on PATH: the image check cannot run then, so the warning says the images are unverified. A town with no openshell seats passes without running any command.
 
 ## What a sandbox polecat cannot do
 
