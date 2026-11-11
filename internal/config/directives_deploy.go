@@ -217,18 +217,39 @@ type gitDirectiveSource struct {
 	run  gitRunner
 }
 
+// missingCommit is the cat-file error for a commit a readable repo lacks. It
+// reads as that git error, and Is reports ErrDirectiveCommitMissing.
+type missingCommit struct{ err error }
+
+func (m missingCommit) Error() string { return m.err.Error() }
+func (m missingCommit) Unwrap() error { return m.err }
+
+func (m missingCommit) Is(target error) bool { return target == ErrDirectiveCommitMissing }
+
+// gitFatal reports whether err is a git that exited with status 128, git's
+// fatal exit. A git killed by a signal, such as a timeout, exits -1 and is not.
+func gitFatal(err error) bool {
+	var exited interface{ ExitCode() int }
+	return errors.As(err, &exited) && exited.ExitCode() == 128
+}
+
 // hasCommit returns ErrDirectiveCommitMissing when the repo is readable and does
-// not hold commit. cat-file fails the same way for a missing commit and for an
-// unreadable repo, so the repo is probed before the commit is called missing: an
-// unreadable repo is not a commit it lacks, and must not read as one.
+// not hold commit. cat-file exits 128 for a missing commit and for an unreadable
+// repo alike, so the repo is probed before the commit is called missing: an
+// unreadable repo is not a commit it lacks, and must not read as one. A cat-file
+// that failed some other way (a timeout, a signal) says nothing about the commit.
 func (s gitDirectiveSource) hasCommit(commit string) error {
-	if _, err := s.run(s.repo, "cat-file", "-e", commit+"^{commit}"); err != nil {
-		if _, rerr := s.run(s.repo, "rev-parse", "--git-dir"); rerr != nil {
-			return fmt.Errorf("commit %s: reading %s: %w", commit, s.repo, rerr)
-		}
-		return fmt.Errorf("commit %s is not in %s: %w (%w)", commit, s.repo, ErrDirectiveCommitMissing, err)
+	_, err := s.run(s.repo, "cat-file", "-e", commit+"^{commit}")
+	if err == nil {
+		return nil
 	}
-	return nil
+	if !gitFatal(err) {
+		return fmt.Errorf("commit %s: reading %s: %w", commit, s.repo, err)
+	}
+	if _, rerr := s.run(s.repo, "rev-parse", "--git-dir"); rerr != nil {
+		return fmt.Errorf("commit %s: reading %s: %w", commit, s.repo, rerr)
+	}
+	return fmt.Errorf("commit %s is not in %s: %w", commit, s.repo, missingCommit{err})
 }
 
 func (s gitDirectiveSource) listDirectives(commit string) ([]directiveEntry, error) {

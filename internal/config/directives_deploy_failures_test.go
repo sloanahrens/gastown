@@ -98,6 +98,13 @@ func TestDeployCentralDirectivesReportsAStaleFileThatCannotBeRemoved(t *testing.
 	}
 }
 
+// exitStatusError is a git failure that carries its exit status, as the error
+// execGit returns for a git that exited (-1 for one killed by a signal).
+type exitStatusError struct{ code int }
+
+func (e exitStatusError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+func (e exitStatusError) ExitCode() int { return e.code }
+
 // The git-backed source asks git for the commit, its directives tree and each
 // file; a scripted git stands in so the unit tier runs no git.
 type scriptedGit struct {
@@ -160,7 +167,7 @@ func TestDeployCentralDirectivesGitSourceRefusesAFailingGit(t *testing.T) {
 	}{
 		{
 			name: "a commit the repo lacks",
-			g:    scriptedGit{catFileErr: errors.New("exit status 128")},
+			g:    scriptedGit{catFileErr: exitStatusError{128}},
 			call: func(s gitDirectiveSource) error { return s.hasCommit(commit) },
 		},
 		{
@@ -199,15 +206,20 @@ func TestDeployCentralDirectivesGitSourceClassifiesAMissingCommit(t *testing.T) 
 	}{
 		{
 			name:        "a readable repo that lacks the commit",
-			g:           scriptedGit{catFileErr: errors.New("exit status 128")},
+			g:           scriptedGit{catFileErr: exitStatusError{128}},
 			wantMissing: true,
 		},
 		{
 			name: "a repo that cannot be read",
 			g: scriptedGit{
-				catFileErr:  errors.New("exit status 128"),
-				revParseErr: errors.New("exit status 128"),
+				catFileErr:  exitStatusError{128},
+				revParseErr: exitStatusError{128},
 			},
+			wantMissing: false,
+		},
+		{
+			name:        "a cat-file killed by a signal on a readable repo",
+			g:           scriptedGit{catFileErr: exitStatusError{-1}},
 			wantMissing: false,
 		},
 	}
@@ -226,5 +238,23 @@ func TestDeployCentralDirectivesGitSourceClassifiesAMissingCommit(t *testing.T) 
 				t.Errorf("error = %v, want one naming commit %s", err, commit)
 			}
 		})
+	}
+}
+
+// A commit the readable repo lacks reads as it did before the missing-commit
+// sentinel existed: the commit, the repo and the git error, nothing added.
+func TestDeployCentralDirectivesGitSourceMissingCommitKeepsItsText(t *testing.T) {
+	t.Parallel()
+	const commit = "2222222"
+	g := scriptedGit{catFileErr: exitStatusError{128}}
+	src := gitDirectiveSource{repo: "/x.git", run: g.run}
+
+	err := src.hasCommit(commit)
+	const want = "commit 2222222 is not in /x.git: exit status 128"
+	if err == nil || err.Error() != want {
+		t.Errorf("hasCommit error = %v, want %q", err, want)
+	}
+	if !errors.Is(err, ErrDirectiveCommitMissing) {
+		t.Errorf("errors.Is(ErrDirectiveCommitMissing) = false, want true (error: %v)", err)
 	}
 }
