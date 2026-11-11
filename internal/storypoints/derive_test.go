@@ -119,7 +119,8 @@ func TestDeriveNeedsTwelveDefinedDifferencesToJudge(t *testing.T) {
 			if got.Err != nil {
 				t.Fatalf("Derive: %v", got.Err)
 			}
-			if hr := got.Hours[step]; hr.D1 == nil || hr.D1State != tc.state {
+			hr := got.Hours[step]
+			if hr.D1State != tc.state || (hr.D1 == nil) != (tc.state == StateInsufficient) {
 				t.Fatalf("hour %d: D1 %v, D1State %v, want state %v", step, hr.D1, hr.D1State, tc.state)
 			}
 		})
@@ -255,8 +256,8 @@ func TestDeriveRefusesWindowsWithFewerThanTwelveWeightedLandings(t *testing.T) {
 
 func TestDeriveRefusesDifferencesWithFewerThanTwelveDefinedValues(t *testing.T) {
 	t.Parallel()
-	// Eleven defined D1 values: the values are present, but the state is
-	// insufficient rather than noise, so a short series cannot read as quiet.
+	// Eleven defined D1 values: the series cannot be judged, so every D1 and D2
+	// value is nil and its state is insufficient, never noise.
 	const n = 19
 	points, weighted := constant(n, 10, 2)
 	got := Derive(points, weighted, closed(n), hourly(n))
@@ -264,12 +265,12 @@ func TestDeriveRefusesDifferencesWithFewerThanTwelveDefinedValues(t *testing.T) 
 		t.Fatalf("Derive: %v", got.Err)
 	}
 	for h, hr := range got.Hours {
-		if hr.D1 != nil && hr.D1State != StateInsufficient {
-			t.Errorf("hour %d: D1State = %v with eleven defined values, want StateInsufficient", h, hr.D1State)
+		if hr.D1 != nil || hr.D2 != nil {
+			t.Errorf("hour %d: D1 %v and D2 %v, want both nil with eleven defined values", h, hr.D1, hr.D2)
 		}
-	}
-	if got.Hours[n-1].D1 == nil {
-		t.Fatal("the last hour's D1 is nil, so the state check did not run")
+		if hr.D1State != StateInsufficient || hr.D2State != StateInsufficient {
+			t.Errorf("hour %d: states %v and %v, want StateInsufficient for both", h, hr.D1State, hr.D2State)
+		}
 	}
 }
 

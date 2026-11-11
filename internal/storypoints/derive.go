@@ -58,8 +58,9 @@ const (
 )
 
 // Hour is the velocity at one hour. A nil value is not defined: the hour is
-// partial, its window holds too few weighted landings, or a value it needs is
-// undefined. Its state is StateInsufficient wherever the value is nil.
+// partial, its window holds too few weighted landings, a value it needs is
+// undefined, or its difference has fewer than 12 defined values. Its state is
+// StateInsufficient wherever the value is nil.
 type Hour struct {
 	Smoothed *float64
 	D1       *float64
@@ -86,7 +87,8 @@ type Derived struct {
 // A difference is a signal when its absolute value is more than the larger of
 // twice 1.4826 times the median absolute deviation of its defined values over
 // the hours given, and its floor. It is noise when it does not exceed that
-// limit, and insufficient when fewer than 12 of its values are defined. The
+// limit. A difference with fewer than 12 defined values is nil and insufficient,
+// because it cannot be judged. The
 // comparison is strict: a change exactly at the floor is the smallest change
 // the series can show, and it is not a signal.
 func Derive(points []float64, weighted []int, now time.Time, hourStarts []time.Time) Derived {
@@ -108,8 +110,8 @@ func Derive(points []float64, weighted []int, now time.Time, hourStarts []time.T
 		mean := sumFloats(points[lo:h+1]) / smoothHours
 		smoothed[h] = &mean
 	}
-	d1 := difference(smoothed)
-	d2 := difference(d1)
+	d1 := sufficient(difference(smoothed))
+	d2 := sufficient(difference(d1))
 	d1States := states(d1, d1Floor)
 	d2States := states(d2, d2Floor)
 
@@ -161,6 +163,22 @@ func difference(series []*float64) []*float64 {
 		out[h] = &d
 	}
 	return out
+}
+
+// sufficient returns d unchanged when at least minDefined of its values are
+// defined. A shorter series cannot be judged, so every value is nil: it is not
+// reported as a number that could be read as quiet.
+func sufficient(d []*float64) []*float64 {
+	defined := 0
+	for _, v := range d {
+		if v != nil {
+			defined++
+		}
+	}
+	if defined >= minDefined {
+		return d
+	}
+	return make([]*float64, len(d))
 }
 
 // states classifies each value of d against its limit, the larger of the
