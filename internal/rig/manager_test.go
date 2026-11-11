@@ -1932,6 +1932,55 @@ func TestAddRig_TrackedBeadsPrefix(t *testing.T) {
 	}
 }
 
+// A tracked beads file that cannot be read fails the add and leaves no rig
+// behind: it is not taken for an untracked repo (gt-3lvcjz.16).
+func TestAddRig_UnreadableTrackedBeadsFailsTheAdd(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	openRepo := manager.openRepo
+	manager.openRepo = func(gitDir, workDir string) Repo {
+		return unreadableBeadsFile{openRepo(gitDir, workDir)}
+	}
+
+	_, err := manager.AddRig(AddRigOptions{
+		Name:          "unreadable",
+		GitURL:        trackedBeadsRepo(t, f, "unreadable", "ur"),
+		BeadsPrefix:   "ur",
+		SkipDoltCheck: true,
+	})
+	if err == nil {
+		t.Fatal("AddRig succeeded, want the unreadable .beads/ file to fail the add")
+	}
+	if !strings.Contains(err.Error(), ".beads/") {
+		t.Errorf("error = %q, want it to name .beads/", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "unreadable")); !os.IsNotExist(err) {
+		t.Errorf("rig directory = %v, want the failed add rolled back", err)
+	}
+	if _, ok := rigsConfig.Rigs["unreadable"]; ok {
+		t.Error("rig was registered in rigs.json despite the failed add")
+	}
+}
+
+// An untracked repo's beads init runs through InitBeads, and its refusal of a
+// bad prefix fails the add by name (gt-3lvcjz.16).
+func TestAddRig_InvalidPrefixFailsTheBeadsInit(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+
+	_, err := manager.AddRig(AddRigOptions{
+		Name:          "badprefix",
+		GitURL:        remoteRepo(t, f, filepath.Join(t.TempDir(), "badprefix"), nil),
+		BeadsPrefix:   "9x",
+		SkipDoltCheck: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "initializing beads") {
+		t.Fatalf("AddRig error = %v, want the beads init to refuse prefix 9x", err)
+	}
+}
+
 // mayorCloneNeeded names only the reasons a rig cannot be added without its
 // clone: --sparse-checkout. A tracked .beads/ is not one: its files are adopted
 // from the bare repo, which TestAddRig_TrackedBeadsWithoutAMayorClone drives
@@ -2012,7 +2061,12 @@ func TestAdoptTrackedBeads(t *testing.T) {
 		repo        Repo
 		wantTracked bool
 		wantFiles   map[string]string
-		wantErr     bool
+		// setup makes the beads directory's path unwritable before the adopt.
+		setup func(t *testing.T, dir string)
+		// wantErr is an adopt that fails; wantNoDir also checks that the failed
+		// read wrote nothing.
+		wantErr   bool
+		wantNoDir bool
 	}{
 		"tracks .beads/": {
 			repo:        bareOf(withBeads),
@@ -2023,24 +2077,48 @@ func TestAdoptTrackedBeads(t *testing.T) {
 			repo:        bareOf(withoutBeads),
 			wantTracked: false,
 		},
-		"unreadable file fails": {
-			repo:    unreadableBeadsFile{bareOf(withBeads)},
-			wantErr: true,
+		"unreadable file fails before writing": {
+			repo:      unreadableBeadsFile{bareOf(withBeads)},
+			wantErr:   true,
+			wantNoDir: true,
 		},
 		"repo that cannot read at a ref fails": {
 			repo:    noRefFileReads{bareOf(withBeads)},
+			wantErr: true,
+		},
+		"beads directory that cannot be created fails": {
+			repo: bareOf(withBeads),
+			// The rig path is a file, so the directory beneath it cannot exist.
+			setup: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Dir(dir), []byte("not a directory"), 0644); err != nil {
+					t.Fatalf("writing the blocking file: %v", err)
+				}
+			},
+			wantErr: true,
+		},
+		"beads file that cannot be written fails": {
+			repo: bareOf(withBeads),
+			// A directory where config.yaml goes makes that write fail.
+			setup: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, "config.yaml"), 0755); err != nil {
+					t.Fatalf("making the blocking directory: %v", err)
+				}
+			},
 			wantErr: true,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			dir := filepath.Join(t.TempDir(), "rig", ".beads")
+			if tc.setup != nil {
+				tc.setup(t, dir)
+			}
 			tracked, err := adoptTrackedBeads(tc.repo, "main", dir)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("adoptTrackedBeads succeeded, want an error")
 				}
-				if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+				if _, statErr := os.Stat(dir); tc.wantNoDir && !os.IsNotExist(statErr) {
 					t.Errorf("beads dir = %v, want nothing written on a failed read", statErr)
 				}
 				return
