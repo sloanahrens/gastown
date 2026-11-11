@@ -38,9 +38,22 @@ func newFakeDocker(t *testing.T) fakeDockerEnv {
 		}
 	}
 	// The verb key is the command, with the object word for the verbs that take one.
+	// The builder prune takes its until filter as a duration, as docker does: a value
+	// that is not one is refused with docker's own message.
 	const script = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_DOCKER_DIR/calls"
 case "$1" in container|image|volume|builder) key="$1-$2" ;; *) key="$1" ;; esac
+if [ "$key" = "builder-prune" ]; then
+  for a in "$@"; do
+    case "$a" in until=*)
+      v=${a#until=}
+      case "$v" in ''|*[!0-9hmsun.]*)
+        echo "ERROR: \"until\" filter expects a duration (e.g., '24h'): time: unknown unit \"-\" in duration \"$v\"" >&2
+        exit 1 ;;
+      esac ;;
+    esac
+  done
+fi
 if [ -f "$FAKE_DOCKER_DIR/fail/$key" ]; then echo "fake: $key failed" >&2; exit 1; fi
 if [ -f "$FAKE_DOCKER_DIR/out/$key" ]; then cat "$FAKE_DOCKER_DIR/out/$key"; fi
 `
@@ -143,17 +156,31 @@ func TestIntegrationCIEngineRemovalsReachDockerAsGiven(t *testing.T) {
 			t.Errorf("the %s removal left %q unreported by docker", r.kind, missing)
 		}
 	}
-	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv("2026-11-09T00:00:00Z")...); !ok {
+	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(ciEngineUnusedAge)...); !ok {
 		t.Fatalf("the build cache prune failed on a clean engine")
 	}
 	want := []string{
 		"rm c1 c2",
 		"rmi -f sha256:i1",
 		"volume rm v1 v2",
-		"builder prune -af --filter until=2026-11-09T00:00:00Z",
+		"builder prune -af --filter until=24h",
 	}
 	if got := f.calls(t); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("docker calls = %q, want %q", got, want)
+	}
+}
+
+// TestIntegrationCIEngineBuildCachePruneRejectsATimestamp: the build cache prune the
+// daemon builds is accepted, and a timestamp in its until filter is refused by docker
+// with exit 1, so a run that sends one cannot pass.
+func TestIntegrationCIEngineBuildCachePruneRejectsATimestamp(t *testing.T) {
+	f := newFakeDocker(t)
+	if _, ok := f.runArgv(t, ciEngineBuildCachePruneArgv(ciEngineUnusedAge)...); !ok {
+		t.Fatalf("the build cache prune the daemon builds was refused")
+	}
+	timestamp := []string{"docker", "builder", "prune", "-af", "--filter", "until=2026-11-09T20:03:27-06:00"}
+	if _, ok := f.runArgv(t, timestamp...); ok {
+		t.Fatalf("docker's builder prune accepted a timestamp in its until filter")
 	}
 }
 
