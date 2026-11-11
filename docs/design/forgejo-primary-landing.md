@@ -40,9 +40,8 @@ every `internal/forgejo` path is new. The behaviour of the Forgejo API itself â€
 required status contexts, `merge_when_checks_succeed`, `head_commit_id`,
 creator attribution, push mirrors â€” was verified against the local instance at
 `http://127.0.0.1:3000` (16.0.5) in the research the epic cites, and is not
-re-derived here. The doc's shape follows
-the retired mayor design record (kept in git history): decisions, current code,
-ordered slices, risks, open questions.
+re-derived here. The doc's shape: decisions, current code, ordered slices,
+risks, open questions.
 
 Constraints carried from the epic: no cloud deploys or cloud credentials in CI;
 the town is flash-only; gastown keeps landing through the old path until the new
