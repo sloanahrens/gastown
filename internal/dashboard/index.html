@@ -2814,14 +2814,17 @@ function renderForgejo(s) {
   // round, so the event's age cannot tell them apart (gt-faml5).
   const read = Date.parse(f.at || "");
   const every = f.every_seconds || 0;
-  const age = neverRead(f.at) ? null : (Date.now() - read) / 1000;
-  const stale = age != null && every > 0 && age > 2 * every;
+  const never = neverRead(f.at);
+  const age = never ? null : (Date.now() - read) / 1000;
+  const stale = never || (age != null && every > 0 && age > 2 * every);
   let note = (f.error ? "stale (" + f.error + ") · " : "") + events.length + " events";
-  if (neverRead(f.at)) note += " · snapshot never read";
+  if (never) note += " · snapshot never read";
   else note += " · snapshot " + fmtDur(age) + " old";
-  if (stale) note += " · STALE";
+  if (stale && !never) note += " · STALE";
   $("forgejonote").textContent = note;
-  if (stale) $("forgejonote").className = "r badc";
+  // A snapshot never read is stale the way readOf marks a source: amber, or red
+  // when its read failed. An aged snapshot stays red.
+  if (stale) $("forgejonote").className = "r " + (never && !f.error ? "warnc" : "badc");
   if (follow) box.scrollTop = box.scrollHeight;
 }
 

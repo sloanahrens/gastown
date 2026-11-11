@@ -1,7 +1,9 @@
 package dashboard
 
 import (
+	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -301,21 +303,95 @@ func TestPageNeverReadKeepsFailureMark(t *testing.T) {
 	})
 }
 
-// TestPageAgeLinesUseTheHelper is a source scan of the page. A line that names a
-// read in its text and ages a stamp from the clock (a subtraction from Date.now(),
-// or an age() call) must ask neverRead on that line or within the three lines
-// above it, so a zero, empty or unparsable stamp never reaches the subtraction.
-// Comment lines are skipped: they describe the code, they do not draw it.
+// clockOperand is the clock as index.html writes it: Date.now(), new Date() or a
+// variable named now, with any whitespace inside the call.
+const clockOperand = `(?:Date\s*\.\s*now\s*\(\s*\)|new\s+Date\s*\(\s*\)|\bnow\b)`
+
+// clockSubtraction matches a subtraction with the clock on either side: the clock
+// minus a stamp ("Date.now() - new Date(x)", "now - x", "new Date() - x") or a
+// stamp minus the clock. A minus that begins "-=", "--" or "->" is not one.
+var clockSubtraction = regexp.MustCompile(clockOperand + `\s*-(?:[^-=>]|$)|-\s*` + clockOperand)
+
+// ageAllowList names each subtraction from the clock that is not a read's age,
+// by a piece of its line, with the reason. A subtraction on a line that asks
+// neverRead is guarded and needs no entry. The test fails on an entry that matches
+// no line, so an entry for a line that moved or went is removed with it.
+var ageAllowList = map[string]string{
+	"const age = iso => iso ?":                               "age formats a stamp; every caller asks neverRead first (the call check below)",
+	"const ageSec = never ? null :":                          "readOf: never is neverRead(x.at), decided on the line above",
+	"const age = never ? null :":                             "the Forgejo snapshot's age: never is neverRead(f.at), decided on the line above",
+	"const old = (Date.now() - new Date(u.as_of).getTime())": "the else of neverRead(u.as_of) two lines up, so the stamp is a real read",
+	"const oldest = sm.oldest_ready ?":                       "age of the oldest ready bead: the bead's own stamp, not a read",
+	"const tickSec = dp ?":                                   "age of the dispatcher's last tick: the record's own stamp, not a read",
+	"const dispatchedSec = p.slung ?":                        "a polecat's dispatch time: a session stamp, not a read",
+	"const since = p.state_since ?":                          "how long a polecat has been in its state: a session stamp, not a read",
+	"const quiet = p.has_session && p.last_active ?":         "how long a polecat has been quiet: a session stamp, not a read",
+	"const inSecs = (new Date(r.next_try) - Date.now())":     "time until a retry: a future stamp, not an age",
+	"fmtDur((Date.now() - when.getTime())":                   "a running merge's start: the merge record's own stamp",
+	"fmtDur((Date.now() - new Date(run.since).getTime())":    "a running run's start: the run record's own stamp",
+	"fmtDur((Date.now() - new Date(newest.at).getTime())":    "the newest sweep's stamp: a sweep record, not a read",
+	"return isNaN(t) ? null : (Date.now() - t) / 1000;":      "secsSince: a run's start or stop stamp; an unreadable one is null",
+	"const oldest = stamps.length &&":                        "the oldest event bead's own stamp, not a read",
+	"ageSec: newest === null":                                "age of the newest alert event: the feed's own stamp, not a read",
+	"const since = now - EVENT_STATS_WINDOW_MS;":             "the start of the event stats window: a count of milliseconds",
+	"const now = Date.now(), late = now - lastTick":          "the page's watchdog clock, not a stamp from the server",
+	"if (now - lastEvent < SILENT_MS) return;":               "the page's watchdog clock, not a stamp from the server",
+}
+
+// unguardedClockLines returns one message for each line of src that subtracts a
+// stamp from the clock, or the clock from a stamp, when the line neither asks
+// neverRead nor contains a piece of allow. unused lists the pieces of allow that
+// no line contains. Comment lines describe the code and are skipped.
+func unguardedClockLines(src string, allow map[string]string) (bad, unused []string) {
+	matched := map[string]bool{}
+	for i, line := range strings.Split(src, "\n") {
+		text := strings.TrimSpace(line)
+		if strings.HasPrefix(text, "//") || !clockSubtraction.MatchString(text) || strings.Contains(text, "neverRead(") {
+			continue
+		}
+		allowed := false
+		for piece := range allow {
+			if strings.Contains(text, piece) {
+				matched[piece] = true
+				allowed = true
+			}
+		}
+		if !allowed {
+			bad = append(bad, fmt.Sprintf("line %d subtracts a stamp from the clock without neverRead or an allow-list reason: %s", i+1, text))
+		}
+	}
+	for piece := range allow {
+		if !matched[piece] {
+			unused = append(unused, piece)
+		}
+	}
+	sort.Strings(unused)
+	return bad, unused
+}
+
+// TestPageAgeLinesUseTheHelper is a source scan of the page. Every subtraction from
+// the clock in index.html must sit on a line that asks neverRead, or on the
+// allow-list with its reason, so a zero, empty or unparsable stamp never reaches
+// a subtraction unasked. Every age() call that names a read must also ask
+// neverRead within the three lines above it. Comment lines are skipped.
 func TestPageAgeLinesUseTheHelper(t *testing.T) {
 	t.Parallel()
 
-	agesAStamp := regexp.MustCompile(`Date\.now\(\)\s*-|-\s*Date\.now\(\)|\bage\(`)
+	bad, unused := unguardedClockLines(string(indexHTML), ageAllowList)
+	for _, msg := range bad {
+		t.Errorf("index.html: %s", msg)
+	}
+	for _, piece := range unused {
+		t.Errorf("the allow-list entry %q matches no line of index.html; remove it", piece)
+	}
+
 	namesARead := regexp.MustCompile(`"[^"]*\bread\b[^"]*"|last ran|last scanned|checks:`)
+	callsAge := regexp.MustCompile(`\bage\(`)
 	comment := regexp.MustCompile(`^\s*//`)
 
 	lines := strings.Split(string(indexHTML), "\n")
 	for i, line := range lines {
-		if comment.MatchString(line) || !agesAStamp.MatchString(line) || !namesARead.MatchString(line) {
+		if comment.MatchString(line) || !callsAge.MatchString(line) || !namesARead.MatchString(line) {
 			continue
 		}
 		guarded := false
@@ -328,4 +404,73 @@ func TestPageAgeLinesUseTheHelper(t *testing.T) {
 			t.Errorf("index.html:%d draws a read's age without neverRead: %s", i+1, strings.TrimSpace(line))
 		}
 	}
+}
+
+// TestAgeScanFailsOnPlantedLines runs the subtraction scan over fixtures: each
+// unguarded spelling of a subtraction from the clock must fail it, and the guarded
+// lines and a comment must pass. It proves the scan can fail, so a pass on the page
+// means the page has no such line.
+func TestAgeScanFailsOnPlantedLines(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, src string
+		fails     bool
+	}{
+		{"Date.now() minus new Date", "const a = (Date.now() - new Date(x)) / 1000;", true},
+		{"now minus x", "const a = (now - x) / 1000;", true},
+		{"new Date() minus x", "const a = (new Date()-x) / 1000;", true},
+		{"spaced Date.now minus Date.parse", "const a = (Date . now ( ) -Date.parse(x)) / 1000;", true},
+		{"a stamp minus the clock", "const a = (x - Date.now()) / 1000;", true},
+		{"guarded on its line", "const a = neverRead(x) ? null : (Date.now() - new Date(x)) / 1000;", false},
+		{"a comment", "// Date.now() - new Date(x) is the age a read draws", false},
+		{"a guarded block", "const never = neverRead(x);\nconst a = neverRead(x) ? null : (now - x);\nconst b = 1;", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			bad, _ := unguardedClockLines(tc.src, nil)
+			if got := len(bad) > 0; got != tc.fails {
+				t.Errorf("the scan of %q reports %q, want a failure = %v", tc.src, bad, tc.fails)
+			}
+		})
+	}
+}
+
+// TestPageNeverReadForgejoSnapshotIsStale: a Forgejo snapshot nobody has read draws
+// "never read" in the class a never-read source takes (amber, red when its read
+// failed), and a fresh snapshot draws its age without that class.
+func TestPageNeverReadForgejoSnapshotIsStale(t *testing.T) {
+	t.Parallel()
+
+	event := map[string]any{"at": "2026-11-11T02:00:00Z", "actor": "a", "summary": "a push", "repo": "gastown"}
+	draw := func(t *testing.T, forgejo map[string]any) drawn {
+		t.Helper()
+		dom := newPageDOM(t)
+		dom.call(t, "renderForgejo", map[string]any{"forgejo": forgejo})
+		return dom.element(t, "forgejonote")
+	}
+
+	t.Run("never read", func(t *testing.T) {
+		t.Parallel()
+
+		got := draw(t, map[string]any{"at": neverStamp, "every_seconds": 300, "events": []any{event}})
+		if !strings.Contains(got.Text, "never read") {
+			t.Errorf("the snapshot note draws %q for a snapshot never read, want \"never read\"", got.Text)
+		}
+		if !strings.Contains(got.Class, "warnc") {
+			t.Errorf("the snapshot note has class %q for a snapshot never read, want the stale class warnc", got.Class)
+		}
+		assertNoBadAge(t, "Forgejo snapshot", got.Text)
+	})
+
+	t.Run("fresh", func(t *testing.T) {
+		t.Parallel()
+
+		got := draw(t, map[string]any{"at": freshStamp(), "every_seconds": 300, "events": []any{event}})
+		if strings.Contains(got.Class, "warnc") || strings.Contains(got.Class, "badc") {
+			t.Errorf("the snapshot note has class %q for a fresh snapshot, want no stale class", got.Class)
+		}
+		assertNoBadAge(t, "Forgejo snapshot", got.Text)
+	})
 }
