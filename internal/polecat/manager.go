@@ -2932,16 +2932,15 @@ func (m *Manager) reconcilePoolInternal() {
 	// Get names with tmux sessions
 	var namesWithSessions []string
 	if m.tmux != nil {
-		// An unresolved theme has no pool names to probe for a session. Allocate
-		// refuses while it stays unresolved, so no name is drawn meanwhile; the
-		// directories above still hold the names already in use.
-		if poolNames, err := m.namePool.themeNames(); err == nil {
-			for _, name := range poolNames {
-				sessionName := m.sessionName(name)
-				hasSession, _ := m.tmux.HasSession(sessionName)
-				if hasSession {
-					namesWithSessions = append(namesWithSessions, name)
-				}
+		// The probe list comes from the seat and binding records too, so an
+		// unresolved theme does not hide an orphan session (gt-pno1e6). Allocate
+		// refuses while the theme stays unresolved, so no name is drawn meanwhile;
+		// the directories above still hold the names already in use.
+		for _, name := range m.namePool.SessionProbeNames() {
+			sessionName := m.sessionName(name)
+			hasSession, _ := m.tmux.HasSession(sessionName)
+			if hasSession {
+				namesWithSessions = append(namesWithSessions, name)
 			}
 		}
 	}

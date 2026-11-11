@@ -466,11 +466,45 @@ func (p *NamePool) Release(name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Check if it's a themed name
-	if p.isThemedName(name) {
-		delete(p.InUse, name)
+	// InUse only ever holds names the pool drew from a theme or a seat list, and
+	// overflow names are never marked, so this clears exactly the released name.
+	// It does not check the theme: a theme that stopped resolving must not leave
+	// the name marked in use (gt-pno1e6).
+	delete(p.InUse, name)
+}
+
+// SessionProbeNames returns every name whose tmux session the pool may need to
+// reap: the names each seat lists and the names bound to a model, plus the theme
+// names when the theme resolves. A seat or binding record is read whether or not
+// the theme resolves, so an unresolved theme does not hide an orphan session
+// (gt-pno1e6). The result is sorted and holds each name once.
+func (p *NamePool) SessionProbeNames() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	var names []string
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
 	}
-	// Overflow names are not reusable, so we don't track them
+	for _, seatNames := range p.SeatNames {
+		for _, name := range seatNames {
+			add(name)
+		}
+	}
+	for name := range p.Bindings {
+		add(name)
+	}
+	if theme, err := p.themeNames(); err == nil {
+		for _, name := range theme {
+			add(name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // isThemedName checks if a name is in the theme pool or listed by a seat.

@@ -1307,6 +1307,35 @@ func TestThemeFile_DeletedRefusesAllocation(t *testing.T) {
 	}
 }
 
+// A name drawn while its theme resolved is freed by Release even after the theme
+// file goes missing: the theme is no longer needed to clear the in-use mark, and
+// a name left marked in use would stay unavailable for good (gt-pno1e6).
+func TestThemeFile_ReleaseClearsInUseWhenThemeIsUnresolved(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	themePath := filepath.Join(townRoot, "settings", "themes", "ephemeral.txt")
+	writeNamepoolFile(t, themePath, "alpha-one\nbeta-two\ngamma-three\n")
+
+	pool := NewNamePoolWithConfig(filepath.Join(townRoot, "alpha"), "alpha", "ephemeral", nil, 10)
+	pool.SetTownRoot(townRoot)
+	name, err := pool.Allocate()
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	if !pool.IsInUse(name) {
+		t.Fatalf("Allocate did not mark %q in use", name)
+	}
+
+	if err := os.Remove(themePath); err != nil {
+		t.Fatal(err)
+	}
+	pool.Release(name)
+
+	if pool.IsInUse(name) {
+		t.Errorf("Release left %q in use with its theme unresolved", name)
+	}
+}
+
 // A style with no theme file refuses, and the error names the rig, the style and
 // the file the pool looked for. A style that is not built-in and has no town
 // root to look in refuses too.
