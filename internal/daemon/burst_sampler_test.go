@@ -637,31 +637,49 @@ func burstSampleOnce(t *testing.T, d *Daemon) {
 	stop()
 }
 
-// burstCgroupStat stages a pod cgroup under a test's own directory, with the
-// given cpu.max beside a cpu.stat whose usage_usec is usage, and returns the
-// cpu.stat path the reader is built on.
-func burstCgroupStat(t *testing.T, cpuMax string, usageUS uint64) string {
-	t.Helper()
-	dir := t.TempDir()
-	writeBurstCgroupFile(t, filepath.Join(dir, "cpu.max"), cpuMax)
-	stat := filepath.Join(dir, "cpu.stat")
-	setBurstUsage(t, stat, usageUS)
-	return stat
+// burstProcStatFS is the sampler's ReadFile seam over a map of files: a path the
+// map holds reads as its text, and any other path is absent, as it is on a host
+// with no such file. A test moves the counter between samples by writing it again.
+type burstProcStatFS map[string]string
+
+// read is the ReadFile seam itself.
+func (fsys burstProcStatFS) read(name string) ([]byte, error) {
+	text, ok := fsys[name]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrNotExist}
+	}
+	return []byte(text), nil
 }
 
-// setBurstUsage writes a cpu.stat the way the kernel lays it out, with the
-// usage_usec line among the others. It stands in for the cgroup, so a test moves
-// the counter between reads by writing it again.
-func setBurstUsage(t *testing.T, statPath string, usageUS uint64) {
-	t.Helper()
-	writeBurstCgroupFile(t, statPath, fmt.Sprintf("usage_usec %d\nuser_usec %d\nsystem_usec 0\n", usageUS, usageUS))
+// burstProcStatText is /proc/stat as the kernel lays it out: a per-CPU line the
+// reader must skip, then the aggregate cpu line of the counters given, in the
+// order user nice system idle iowait irq softirq steal guest guest_nice.
+func burstProcStatText(counters ...uint64) string {
+	var b strings.Builder
+	b.WriteString("cpu0 9 9 9 9 9 9 9 9 9 9\n")
+	b.WriteString("cpu")
+	for _, c := range counters {
+		fmt.Fprintf(&b, " %d", c)
+	}
+	b.WriteString("\nintr 1 2 3\nctxt 4\n")
+	return b.String()
 }
 
-// writeBurstCgroupFile writes one of the cgroup's files.
-func writeBurstCgroupFile(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("writing %s: %v", filepath.Base(path), err)
+// burstCPUCounters lays out the aggregate counters a test sets, with the other
+// columns zero. The guest columns sit inside user and nice, so they stay zero
+// unless a test is about them.
+func burstCPUCounters(user, idle, iowait uint64) []uint64 {
+	return []uint64{user, 0, 0, idle, iowait, 0, 0, 0, 0, 0}
+}
+
+// burstProcStatTownEnv is burstTestTownEnv with the machine's /proc/stat held in
+// files, read through the Env's ReadFile as the sampler reads it.
+func burstProcStatTownEnv(clk clockwork.Clock, files burstProcStatFS) func(string) metrics.Env {
+	base := burstTestTownEnv(clk)
+	return func(town string) metrics.Env {
+		env := base(town)
+		env.ReadFile = files.read
+		return env
 	}
 }
 
@@ -683,36 +701,31 @@ func assertPodLeavesHostReadings(t *testing.T, r metrics.BurstHostReading) {
 	}
 }
 
-// TestBurstReadingFromCgroupCPU pins the pod's idle share: the busy share of the
-// pod's cores between two reads of its cgroup CPU counter. A counter the pod
-// cannot read is an error that leaves the share absent with its reason.
-func TestBurstReadingFromCgroupCPU(t *testing.T) {
+// TestBurstIdleFromProcStat pins the host's idle share: the idle time, iowait
+// included, over the total time between two reads of the aggregate cpu line of
+// /proc/stat. A counter the sampler cannot read or measure leaves the share absent
+// with its reason, and is never read as a calm machine.
+func TestBurstIdleFromProcStat(t *testing.T) {
 	t.Parallel()
-	t.Run("two samples measure the busy share of the pod's cores", func(t *testing.T) {
+	t.Run("two samples give the idle share of the machine", func(t *testing.T) {
 		t.Parallel()
 		tests := []struct {
-			name    string
-			cpuMax  string
-			ncpu    int
-			usageUS uint64
-			wall    time.Duration
-			want    float64
+			name   string
+			second []uint64
+			want   float64
 		}{
-			{name: "a pod half busy on its quota", cpuMax: "200000 100000\n", ncpu: 8,
-				usageUS: 1_000_000 + 7_500_000, wall: 15 * time.Second, want: 75},
-			{name: "a pod that did not run is fully idle", cpuMax: "200000 100000\n", ncpu: 8,
-				usageUS: 1_000_000, wall: 15 * time.Second, want: 100},
-			{name: "a pod with no quota is measured against the cores it sees", cpuMax: "max 100000\n", ncpu: 4,
-				usageUS: 1_000_000 + 30_000_000, wall: 15 * time.Second, want: 50},
-			{name: "a window that burned more than the quota clamps at no idle", cpuMax: "200000 100000\n", ncpu: 8,
-				usageUS: 1_000_000 + 45_000_000, wall: 15 * time.Second, want: 0},
+			{name: "the idle time over the window", second: burstCPUCounters(1150, 9750, 100), want: 85},
+			{name: "iowait counts as idle", second: burstCPUCounters(1500, 9000, 500), want: 50},
+			{name: "a fully busy machine has no idle share", second: burstCPUCounters(2000, 9000, 0), want: 0},
+			{name: "guest time sits inside user and is not counted twice",
+				second: []uint64{1150, 0, 0, 9750, 100, 0, 0, 0, 100, 0}, want: 85},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
-				stat := burstCgroupStat(t, tt.cpuMax, 1_000_000)
-				c := newBurstCgroupCPU(stat, tt.ncpu)
-				first, err := c.read(testEpoch)
+				files := burstProcStatFS{burstProcStatPath: burstProcStatText(burstCPUCounters(1000, 9000, 0)...)}
+				c := newBurstProcStatCPU(burstProcStatPath)
+				first, err := c.read(testEpoch, files.read)
 				if err != nil {
 					t.Fatalf("the first read: %v", err)
 				}
@@ -722,8 +735,8 @@ func TestBurstReadingFromCgroupCPU(t *testing.T) {
 				if first.Errors[burstIdleKey] == "" {
 					t.Errorf("the first read's errors = %v, want the reason its idle share is absent", first.Errors)
 				}
-				setBurstUsage(t, stat, tt.usageUS)
-				second, err := c.read(testEpoch.Add(tt.wall))
+				files[burstProcStatPath] = burstProcStatText(tt.second...)
+				second, err := c.read(testEpoch.Add(metrics.BurstFastInterval), files.read)
 				if err != nil {
 					t.Fatalf("the second read: %v", err)
 				}
@@ -740,73 +753,42 @@ func TestBurstReadingFromCgroupCPU(t *testing.T) {
 	t.Run("an unreadable file is an error with the share absent", func(t *testing.T) {
 		t.Parallel()
 		tests := []struct {
-			name   string
-			ncpu   int
-			stage  func(t *testing.T) string
-			reason string
+			name     string
+			readFile func(string) ([]byte, error)
+			reason   string
 		}{
+			{name: "a missing file", readFile: burstProcStatFS{}.read, reason: "file does not exist"},
 			{
-				name:   "a missing counter",
-				ncpu:   8,
-				stage:  func(t *testing.T) string { return filepath.Join(t.TempDir(), "cpu.stat") },
-				reason: "no such file",
-			},
-			{
-				name: "a counter with no usage line",
-				ncpu: 8,
-				stage: func(t *testing.T) string {
-					stat := filepath.Join(t.TempDir(), "cpu.stat")
-					writeBurstCgroupFile(t, stat, "nr_periods 3\nnr_throttled 0\n")
-					return stat
+				name: "a read that fails",
+				readFile: func(string) ([]byte, error) {
+					return nil, errors.New("input/output error")
 				},
-				reason: "no usage_usec line",
+				reason: "input/output error",
 			},
 			{
-				name: "a usage_usec that is not a count",
-				ncpu: 8,
-				stage: func(t *testing.T) string {
-					stat := filepath.Join(t.TempDir(), "cpu.stat")
-					writeBurstCgroupFile(t, stat, "usage_usec many\n")
-					return stat
-				},
-				reason: "not a count of microseconds",
+				name:     "no aggregate cpu line",
+				readFile: burstProcStatFS{burstProcStatPath: "cpu0 1 0 0 1 0 0 0 0\nintr 1\n"}.read,
+				reason:   "no aggregate cpu line",
 			},
 			{
-				name: "a missing cpu.max",
-				ncpu: 8,
-				stage: func(t *testing.T) string {
-					stat := filepath.Join(t.TempDir(), "cpu.stat")
-					setBurstUsage(t, stat, 1_000_000)
-					return stat
-				},
-				reason: "cpu.max",
+				name:     "an aggregate line without idle and iowait",
+				readFile: burstProcStatFS{burstProcStatPath: "cpu 1 2 3\n"}.read,
+				reason:   "no idle and iowait columns",
 			},
 			{
-				name:   "a quota the pod cannot read",
-				ncpu:   8,
-				stage:  func(t *testing.T) string { return burstCgroupStat(t, "garbage\n", 1_000_000) },
-				reason: "not a quota and a period",
+				name:     "a column that is not a count",
+				readFile: burstProcStatFS{burstProcStatPath: "cpu 1 0 0 many 0\n"}.read,
+				reason:   "not a count of ticks",
 			},
-			{
-				name:   "a zero quota",
-				ncpu:   8,
-				stage:  func(t *testing.T) string { return burstCgroupStat(t, "0 100000\n", 1_000_000) },
-				reason: "not positive numbers",
-			},
-			{
-				name:   "no quota and no cores to measure against",
-				ncpu:   0,
-				stage:  func(t *testing.T) string { return burstCgroupStat(t, "max 100000\n", 1_000_000) },
-				reason: "no cores to measure against",
-			},
+			{name: "no file reader wired into the sample", readFile: nil, reason: "has no file reader"},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
-				c := newBurstCgroupCPU(tt.stage(t), tt.ncpu)
-				r, err := c.read(testEpoch)
+				c := newBurstProcStatCPU(burstProcStatPath)
+				r, err := c.read(testEpoch, tt.readFile)
 				if err == nil {
-					t.Fatal("the read returned no error: a counter the pod cannot read must reach the sampler's log")
+					t.Fatal("the read returned no error: a counter the sampler cannot read must reach the sampler's log")
 				}
 				if !strings.Contains(err.Error(), tt.reason) {
 					t.Errorf("the error = %q, want it to name %q", err, tt.reason)
@@ -824,25 +806,30 @@ func TestBurstReadingFromCgroupCPU(t *testing.T) {
 	t.Run("a window that cannot be measured leaves the share absent with its reason", func(t *testing.T) {
 		t.Parallel()
 		tests := []struct {
-			name    string
-			usageUS uint64
-			at      time.Time
-			reason  string
+			name   string
+			second []uint64
+			at     time.Time
+			reason string
 		}{
-			{name: "a counter that went backwards", usageUS: 500_000, at: testEpoch.Add(15 * time.Second), reason: "went backwards"},
-			{name: "a clock that did not advance", usageUS: 2_000_000, at: testEpoch, reason: "did not advance"},
-			{name: "a last reading too old to measure over", usageUS: 2_000_000, at: testEpoch.Add(10 * time.Minute), reason: "too old"},
+			{name: "a counter that went backwards", second: burstCPUCounters(500, 8000, 0),
+				at: testEpoch.Add(metrics.BurstFastInterval), reason: "went backwards"},
+			{name: "a counter that did not move", second: burstCPUCounters(1000, 9000, 0),
+				at: testEpoch.Add(metrics.BurstFastInterval), reason: "did not move"},
+			{name: "a clock that did not advance", second: burstCPUCounters(1150, 9750, 100),
+				at: testEpoch, reason: "clock did not advance"},
+			{name: "a last reading too old to measure over", second: burstCPUCounters(1150, 9750, 100),
+				at: testEpoch.Add(10 * time.Minute), reason: "too old"},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
-				stat := burstCgroupStat(t, "200000 100000\n", 1_000_000)
-				c := newBurstCgroupCPU(stat, 8)
-				if _, err := c.read(testEpoch); err != nil {
+				files := burstProcStatFS{burstProcStatPath: burstProcStatText(burstCPUCounters(1000, 9000, 0)...)}
+				c := newBurstProcStatCPU(burstProcStatPath)
+				if _, err := c.read(testEpoch, files.read); err != nil {
 					t.Fatalf("the first read: %v", err)
 				}
-				setBurstUsage(t, stat, tt.usageUS)
-				r, err := c.read(tt.at)
+				files[burstProcStatPath] = burstProcStatText(tt.second...)
+				r, err := c.read(tt.at, files.read)
 				if err != nil {
 					t.Fatalf("the second read: %v", err)
 				}
@@ -884,22 +871,25 @@ func burstRunSamples(t *testing.T, d *Daemon, clk *clockwork.FakeClock, n int, e
 	stop()
 }
 
-// TestBurstSamplerReadsThePodsCPUInContainerMode pins the row end to end: the
-// pod's reading reaches the row. The first sample has no window and takes the
-// fast cadence; the second measures a quarter of the pod's two cores over the
-// fifteen seconds between the samples and takes the slow one. The consumers and
-// the exec tax are absent on both rows, with the pod's reason in host_errors.
-func TestBurstSamplerReadsThePodsCPUInContainerMode(t *testing.T) {
+// TestBurstSamplerReadsTheMachinesCPUInContainerMode pins the row end to end: the
+// machine's reading, read through the sample's ReadFile, reaches the row. The
+// first sample has no window and takes the fast cadence; the second measures 85
+// percent idle over the fifteen seconds between the samples and takes the slow
+// one. The consumers and the exec tax are absent on both rows, with the reasons
+// in host_errors, and host_age_s stays nil since both readings are taken at the
+// sample's instant.
+func TestBurstSamplerReadsTheMachinesCPUInContainerMode(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	clk := newFixedClock()
 	d := burstTestDaemon(t, town, clk, io.Discard)
-	stat := burstCgroupStat(t, "200000 100000\n", 1_000_000)
-	d.burstSeams.host = newBurstCgroupCPU(stat, 8).read
-	burstRunSamples(t, d, clk, 2, burstTestTownEnv(clk), func(sample int) {
+	files := burstProcStatFS{burstProcStatPath: burstProcStatText(burstCPUCounters(1000, 9000, 0)...)}
+	d.burstSeams.host = newBurstProcStatCPU(burstProcStatPath).read
+	burstRunSamples(t, d, clk, 2, burstProcStatTownEnv(clk, files), func(sample int) {
 		if sample == 1 {
-			// 7.5 CPU seconds over the 15 seconds between the samples, on two cores.
-			setBurstUsage(t, stat, 1_000_000+7_500_000)
+			// 850 of the 1000 ticks the machine counted over the 15 seconds between the
+			// samples were idle or iowait.
+			files[burstProcStatPath] = burstProcStatText(burstCPUCounters(1150, 9750, 100)...)
 		}
 	})
 
@@ -917,52 +907,51 @@ func TestBurstSamplerReadsThePodsCPUInContainerMode(t *testing.T) {
 	if want := metrics.BurstFastInterval.Seconds(); first.IntervalS != want {
 		t.Errorf("the first row's interval_s = %v, want %v: a host with no reading takes the fast cadence", first.IntervalS, want)
 	}
-	if second.IdlePct == nil || *second.IdlePct != 75 {
-		t.Errorf("the second row's idle_pct = %v, want 75", second.IdlePct)
+	if second.IdlePct == nil || *second.IdlePct != 85 {
+		t.Errorf("the second row's idle_pct = %v, want 85", second.IdlePct)
 	}
 	if _, ok := second.HostErrors[burstIdleKey]; ok {
 		t.Errorf("the second row's host_errors = %v, want no idle_pct reason on a measured window", second.HostErrors)
 	}
 	if want := metrics.BurstSlowInterval.Seconds(); second.IntervalS != want {
-		t.Errorf("the second row's interval_s = %v, want %v: 75 percent idle is a calm pod", second.IntervalS, want)
+		t.Errorf("the second row's interval_s = %v, want %v: 85 percent idle is a calm machine", second.IntervalS, want)
 	}
 	for i, row := range rows {
 		if row.TopConsumers != nil {
-			t.Errorf("row %d's top_consumers = %+v, want null: the pod cannot rank the host's processes", i, row.TopConsumers)
+			t.Errorf("row %d's top_consumers = %+v, want null: the container cannot rank the host's processes", i, row.TopConsumers)
 		}
 		if row.ExecTaxMS != nil {
-			t.Errorf("row %d's exec_tax_ms = %v, want null: the pod cannot see the host's exec tax", i, *row.ExecTaxMS)
+			t.Errorf("row %d's exec_tax_ms = %v, want null: the container cannot see the host's exec tax", i, *row.ExecTaxMS)
+		}
+		if row.HostAgeS != nil {
+			t.Errorf("row %d's host_age_s = %v, want null: no published host file is read, so both readings are taken at the sample's instant", i, *row.HostAgeS)
 		}
 		if row.HostErrors[burstConsumersKey] != burstConsumersPodReason || row.HostErrors[burstTaxKey] != burstTaxPodReason {
-			t.Errorf("row %d's host_errors = %v, want the pod's reasons for the consumers and the exec tax", i, row.HostErrors)
+			t.Errorf("row %d's host_errors = %v, want the reasons for the consumers and the exec tax", i, row.HostErrors)
 		}
 	}
 }
 
-// TestBurstSamplerUnreadableCgroupMarksTheRow pins the sampler's answer to a pod
-// counter it cannot read: every row is still written from the town's own
+// TestBurstSamplerUnreadableProcStatMarksTheRow pins the sampler's answer to a
+// machine counter it cannot read: every row is still written from the town's own
 // readings, the idle share is null with its reason in host_errors, the rows take
 // the fast cadence an unknown host takes, and the same failure logs once.
-func TestBurstSamplerUnreadableCgroupMarksTheRow(t *testing.T) {
+func TestBurstSamplerUnreadableProcStatMarksTheRow(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
-		stage  func(t *testing.T) string
+		files  burstProcStatFS
 		reason string
 	}{
 		{
-			name:   "a missing counter",
-			stage:  func(t *testing.T) string { return filepath.Join(t.TempDir(), "cpu.stat") },
-			reason: "no such file",
+			name:   "a missing file",
+			files:  burstProcStatFS{},
+			reason: "file does not exist",
 		},
 		{
-			name: "a counter with no usage line",
-			stage: func(t *testing.T) string {
-				stat := filepath.Join(t.TempDir(), "cpu.stat")
-				writeBurstCgroupFile(t, stat, "nr_periods 3\nnr_throttled 0\n")
-				return stat
-			},
-			reason: "no usage_usec line",
+			name:   "a file with no aggregate cpu line",
+			files:  burstProcStatFS{burstProcStatPath: "intr 1\n"},
+			reason: "no aggregate cpu line",
 		},
 	}
 	for _, tt := range tests {
@@ -972,8 +961,8 @@ func TestBurstSamplerUnreadableCgroupMarksTheRow(t *testing.T) {
 			clk := newFixedClock()
 			sink := newCensusLogSink()
 			d := burstTestDaemon(t, town, clk, sink)
-			d.burstSeams.host = newBurstCgroupCPU(tt.stage(t), 8).read
-			burstRunSamples(t, d, clk, 3, burstTestTownEnv(clk), func(int) {})
+			d.burstSeams.host = newBurstProcStatCPU(burstProcStatPath).read
+			burstRunSamples(t, d, clk, 3, burstProcStatTownEnv(clk, tt.files), func(int) {})
 
 			rows := readBurstRows(t, town)
 			if len(rows) != 3 {
@@ -998,24 +987,24 @@ func TestBurstSamplerUnreadableCgroupMarksTheRow(t *testing.T) {
 	}
 }
 
-// TestBurstSamplerReadsThePodsCgroupOnlyInContainerMode pins the switch: a daemon
-// in the container takes its host readings from the pod's cgroup, and a daemon on
-// the host keeps reading the host's own commands.
-func TestBurstSamplerReadsThePodsCgroupOnlyInContainerMode(t *testing.T) {
+// TestBurstSamplerReadsTheMachineOnlyInContainerMode pins the switch: a daemon in
+// the container takes its host readings from the machine's CPU counter, and a
+// daemon on the host keeps reading the host's own commands.
+func TestBurstSamplerReadsTheMachineOnlyInContainerMode(t *testing.T) {
 	t.Parallel()
 	clk := newFixedClock()
 	inContainer := burstInContainer(burstTestDaemon(t, t.TempDir(), clk, io.Discard))
 	if inContainer.burstSampler().seams.host == nil {
-		t.Error("in container mode the sampler takes no host readings: the pod's cgroup is not wired in")
+		t.Error("in container mode the sampler takes no host readings: the machine's CPU counter is not wired in")
 	}
 	onHost := burstTestDaemon(t, t.TempDir(), clk, io.Discard)
 	if onHost.burstSampler().seams.host != nil {
-		t.Error("outside container mode the sampler takes its host readings from the pod's cgroup, not the host's commands")
+		t.Error("outside container mode the sampler takes its host readings from the machine's CPU counter, not the host's commands")
 	}
 }
 
 // TestBurstSamplerOutsideContainerModeUsesTheHostsCommands pins the host's own
-// readings: a daemon outside the container samples top, and reads no pod cgroup.
+// readings: a daemon outside the container samples top, and reads no /proc/stat.
 func TestBurstSamplerOutsideContainerModeUsesTheHostsCommands(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()

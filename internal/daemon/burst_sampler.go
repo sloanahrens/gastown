@@ -3,10 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -50,17 +47,17 @@ var (
 	burstFailurePID   = regexp.MustCompile(`(?i)\bpid[=: ]?\s*\d+\b`)
 )
 
-// burstCgroupStatPath is the pod's CPU counter. With a private cgroup namespace,
-// as the container runs with, the file is the pod's own cgroup and not the
-// node's, so its usage is the pod's, and it is the one CPU reading the pod can
-// take.
-const burstCgroupStatPath = "/sys/fs/cgroup/cpu.stat"
+// burstProcStatPath is the kernel's aggregate CPU counter. In the container it is
+// the counter of the machine the daemon runs on, the control VM's kernel, which
+// the container shares, so the idle share is the machine's and not the pod's
+// quota's.
+const burstProcStatPath = "/proc/stat"
 
-// burstCgroupWindowMax is the longest window a share is measured over: two slow
+// burstIdleWindowMax is the longest window a share is measured over: two slow
 // cadences. A sampler at its own pace always measures inside it. A window that
-// spans a failure streak does not, since no good read of the pod was taken in
+// spans a failure streak does not, since no good read of the machine was taken in
 // between, so its share would average the outage and not describe now.
-const burstCgroupWindowMax = 2 * metrics.BurstSlowInterval
+const burstIdleWindowMax = 2 * metrics.BurstSlowInterval
 
 // The row fields the pod's readings fill or leave absent, keyed as the row names
 // them. A field the pod cannot read is absent with its reason under its key.
@@ -95,11 +92,12 @@ type burstSamplerSeams struct {
 	wait func(ctx context.Context, d time.Duration)
 	// env builds a sample's Env; nil is metrics.OSEnv.
 	env func(town string) metrics.Env
-	// host takes a sample's host readings from the pod's own cgroup rather than
-	// this process's own commands. nil outside container mode, where top and ps
+	// host takes a sample's host readings from the machine's CPU counter rather
+	// than this process's own commands, reading the counter through the sample's
+	// readFile (its Env's ReadFile). nil outside container mode, where top and ps
 	// read the host the daemon runs on. A reading returned with an error names
 	// each field it leaves absent in its Errors.
-	host func(now time.Time) (metrics.BurstHostReading, error)
+	host func(now time.Time, readFile func(string) ([]byte, error)) (metrics.BurstHostReading, error)
 }
 
 // burstSampler paces metrics.RunBurst for one town. started keeps the loop
@@ -179,16 +177,16 @@ func (d *Daemon) burstSampler() *burstSampler {
 	// In container mode top and ps read this process's own process table, which
 	// is the container's and not the Mac's, and the health file's exec tax is
 	// measured in that same tree, so none of those readings describes the host.
-	// The pod's cgroup CPU counter is the one host reading the pod can see, so the
-	// sampler's idle share comes from there.
+	// The machine's aggregate CPU counter is the one host reading the container
+	// can take, so the sampler's idle share comes from there.
 	//
 	// The answer is the daemon's (Daemon.containerMode), settled once in New
 	// from the environment the container sets, and not read here: a test that
 	// builds a daemon by hand is on the host whatever the process running the
 	// tests says, so a gate run inside a container cannot move an existing
-	// burst test onto the cgroup.
+	// burst test onto the counter.
 	if s.seams.host == nil && d.containerMode {
-		s.seams.host = newBurstCgroupCPU(burstCgroupStatPath, runtime.NumCPU()).read
+		s.seams.host = newBurstProcStatCPU(burstProcStatPath).read
 	}
 	d.burst = s
 	return s
@@ -248,11 +246,11 @@ func (s *burstSampler) run(ctx context.Context) {
 	}
 }
 
-// sampleEnv builds one sample's Env and, in container mode, the pod's host
-// readings for it.
+// sampleEnv builds one sample's Env and, in container mode, the host readings
+// for it, read through the Env's ReadFile.
 //
-// A reading the pod cannot take leaves its field absent rather than failing the
-// sample: the row is still written from the town's own readings, the field is
+// A reading the sampler cannot take leaves its field absent rather than failing
+// the sample: the row is still written from the town's own readings, the field is
 // null with the reason in the row's host_errors, and the returned error is
 // logged. With no host reading to set its cadence, the row takes the fast one
 // (metrics.BurstInterval).
@@ -266,129 +264,113 @@ func (s *burstSampler) sampleEnv() (metrics.Env, error) {
 	if env.Now != nil {
 		now = env.Now()
 	}
-	reading, err := s.seams.host(now)
+	reading, err := s.seams.host(now, env.ReadFile)
 	env.BurstHost = func(time.Time) metrics.BurstHostReading { return reading }
 	return env, err
 }
 
-// burstCgroupCPU reads the pod's idle share from its cgroup's CPU counter. The
-// counter only grows, so the share is the busy time between two reads over the
-// wall time between them, measured against the pod's cores.
-type burstCgroupCPU struct {
-	// statPath is the cgroup's cpu.stat; its cpu.max sits beside it.
-	statPath string
-	// ncpu is the core count a pod with no quota is measured against.
-	ncpu int
+// burstProcStatCPU reads the host's idle share from the aggregate cpu line of
+// /proc/stat. The counters only grow, so the share is the idle time between two
+// reads over the total time between them.
+type burstProcStatCPU struct {
+	// path is the counter's file, read through the sample's readFile seam.
+	path string
 	// last is the previous good read, the baseline the next share is measured
 	// from, and have says whether there is one.
-	last burstCgroupRead
+	last burstProcStatRead
 	have bool
 }
 
-// burstCgroupRead is one read of the counter and the time it was taken at.
-type burstCgroupRead struct {
-	usageUS uint64
-	at      time.Time
+// burstProcStatRead is one read of the counters and the time it was taken at.
+type burstProcStatRead struct {
+	idle, total uint64
+	at          time.Time
 }
 
-// newBurstCgroupCPU reads the counter at statPath. The core count is passed in
-// so a test measures against its own, not the host's.
-func newBurstCgroupCPU(statPath string, ncpu int) *burstCgroupCPU {
-	return &burstCgroupCPU{statPath: statPath, ncpu: ncpu}
+// newBurstProcStatCPU reads the counter at path. The path is passed in so a test
+// reads its own.
+func newBurstProcStatCPU(path string) *burstProcStatCPU {
+	return &burstProcStatCPU{path: path}
 }
 
-// read takes the pod's host readings as of now. The idle share is absent until
-// a second read gives a window to measure, and whenever the window cannot give
-// one: the counter went backwards, the clock did not advance, or the last good
-// read is older than burstCgroupWindowMax. The consumers
-// and the exec tax are always absent, since the pod cannot see the host's
-// processes. A read that fails returns the error, and the reading names the
-// idle share's failure too, so the sampler logs it and the row says why the
-// share is missing.
-func (c *burstCgroupCPU) read(now time.Time) (metrics.BurstHostReading, error) {
+// read takes the host's readings as of now, reading the counter through readFile.
+// The idle share is absent until a second read gives a window to measure, and
+// whenever the window cannot give one: the counter went backwards or did not
+// move, the clock did not advance, or the last good read is older than
+// burstIdleWindowMax. The consumers and the exec tax are always absent, since the
+// container cannot see the host's processes. A read that fails returns the error,
+// and the reading names the idle share's failure too, so the sampler logs it and
+// the row says why the share is missing.
+func (c *burstProcStatCPU) read(now time.Time, readFile func(string) ([]byte, error)) (metrics.BurstHostReading, error) {
 	r := metrics.BurstHostReading{Errors: map[string]string{
 		burstConsumersKey: burstConsumersPodReason,
 		burstTaxKey:       burstTaxPodReason,
 	}}
-	usage, err := readBurstCgroupUsage(c.statPath)
-	if err != nil {
+	if readFile == nil {
+		err := fmt.Errorf("%s: the sample's Env has no file reader", c.path)
 		r.Errors[burstIdleKey] = err.Error()
 		return r, err
 	}
-	cores, err := readBurstCgroupCores(filepath.Join(filepath.Dir(c.statPath), "cpu.max"), c.ncpu)
+	idle, total, err := readBurstProcStat(c.path, readFile)
 	if err != nil {
 		r.Errors[burstIdleKey] = err.Error()
 		return r, err
 	}
 	prev, had := c.last, c.have
-	c.last, c.have = burstCgroupRead{usageUS: usage, at: now}, true
+	c.last, c.have = burstProcStatRead{idle: idle, total: total, at: now}, true
 	switch {
 	case !had:
-		r.Errors[burstIdleKey] = "the pod's first sample has no earlier reading of its CPU to measure against"
-	case usage < prev.usageUS:
-		r.Errors[burstIdleKey] = "the pod's CPU counter went backwards since the last sample: the cgroup was reset"
+		r.Errors[burstIdleKey] = "the first sample has no earlier reading of the host's CPU to measure against"
+	case idle < prev.idle || total < prev.total:
+		r.Errors[burstIdleKey] = "the host's CPU counter went backwards since the last sample: /proc/stat was reset"
+	case total == prev.total:
+		r.Errors[burstIdleKey] = "the host's CPU counter did not move since the last sample: no time to measure a share over"
 	case !now.After(prev.at):
-		r.Errors[burstIdleKey] = "the clock did not advance since the pod's last CPU reading"
-	case now.Sub(prev.at) > burstCgroupWindowMax:
-		r.Errors[burstIdleKey] = fmt.Sprintf("the pod's last CPU reading was %v before this one: too old to measure a share over",
+		r.Errors[burstIdleKey] = "the clock did not advance since the host's last CPU reading"
+	case now.Sub(prev.at) > burstIdleWindowMax:
+		r.Errors[burstIdleKey] = fmt.Sprintf("the host's last CPU reading was %v before this one: too old to measure a share over",
 			now.Sub(prev.at).Round(time.Second))
 	default:
-		busy := float64(usage-prev.usageUS) / 1e6 / now.Sub(prev.at).Seconds() / cores
-		idle := 100 * (1 - busy)
-		if idle < 0 {
-			// A window that burned more than the pod's cores is a pod with none
-			// idle, not a negative share.
-			idle = 0
-		}
-		r.IdlePct = &idle
+		share := 100 * float64(idle-prev.idle) / float64(total-prev.total)
+		r.IdlePct = &share
 	}
 	return r, nil
 }
 
-// readBurstCgroupUsage returns the counter's usage_usec: the CPU time the cgroup
-// has used, in microseconds.
-func readBurstCgroupUsage(path string) (uint64, error) {
-	data, err := os.ReadFile(path)
+// readBurstProcStat returns the aggregate cpu line's idle counters, idle and
+// iowait together, and the total of its time columns, both in clock ticks. The
+// line lays out user nice system idle iowait irq softirq steal guest guest_nice.
+// The guest columns are already counted in user and nice, so the total stops at
+// steal, and a per-CPU line (cpu0, cpu1) is not the machine's counter.
+func readBurstProcStat(path string, readFile func(string) ([]byte, error)) (idle, total uint64, err error) {
+	data, err := readFile(path)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		key, value, ok := strings.Cut(line, " ")
-		if !ok || key != "usage_usec" {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "cpu" {
 			continue
 		}
-		usage, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
-		if err != nil {
-			return 0, fmt.Errorf("%s: usage_usec is not a count of microseconds", path)
+		if len(fields) < 6 {
+			return 0, 0, fmt.Errorf("%s: the aggregate cpu line has no idle and iowait columns", path)
 		}
-		return usage, nil
-	}
-	return 0, fmt.Errorf("%s: no usage_usec line", path)
-}
-
-// readBurstCgroupCores returns the cores the pod's CPU is measured against: the
-// quota cpu.max sets over its period, or ncpu when cpu.max names no quota.
-func readBurstCgroupCores(path string, ncpu int) (float64, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, err
-	}
-	fields := strings.Fields(string(data))
-	if len(fields) != 2 {
-		return 0, fmt.Errorf("%s: not a quota and a period", path)
-	}
-	if fields[0] == "max" {
-		if ncpu <= 0 {
-			return 0, fmt.Errorf("%s: no quota, and no cores to measure against", path)
+		columns := fields[1:]
+		if len(columns) > 8 {
+			columns = columns[:8]
 		}
-		return float64(ncpu), nil
+		counts := make([]uint64, len(columns))
+		for i, column := range columns {
+			count, err := strconv.ParseUint(column, 10, 64)
+			if err != nil {
+				return 0, 0, fmt.Errorf("%s: the aggregate cpu line has a column that is not a count of ticks", path)
+			}
+			counts[i] = count
+			total += count
+		}
+		return counts[3] + counts[4], total, nil
 	}
-	quota, errQuota := strconv.ParseFloat(fields[0], 64)
-	period, errPeriod := strconv.ParseFloat(fields[1], 64)
-	if errQuota != nil || errPeriod != nil || quota <= 0 || period <= 0 {
-		return 0, fmt.Errorf("%s: the quota and the period are not positive numbers", path)
-	}
-	return quota / period, nil
+	return 0, 0, fmt.Errorf("%s: no aggregate cpu line", path)
 }
 
 // burstFailureWait is the gap after the consecutive-th failed sample in a run:

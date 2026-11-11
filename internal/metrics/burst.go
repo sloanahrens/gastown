@@ -75,11 +75,11 @@ func BurstInterval(idlePct, execTaxMS *float64) time.Duration {
 // BurstInterval's slow cadence keeps from being paid all day.
 //
 // A daemon in a container cannot take the host readings with top and ps, so in
-// container mode they come from the host agent's probe file instead: IdlePct,
-// TopConsumers and ExecTaxMS hold the file's readings, HostAgeS says how far
-// before TS the file was stamped, and a reading the file could not give is null
-// with its reason in HostErrors. Outside container mode those two fields are
-// absent and the three readings are taken from the host at TS.
+// container mode the idle share is read from the CPU counter of the machine the
+// daemon runs on, and TopConsumers and ExecTaxMS are null with their reasons in
+// HostErrors. No published host file is read, so HostAgeS stays nil. Outside
+// container mode HostErrors and HostAgeS are absent and the three readings are
+// taken from the host at TS.
 type BurstRow struct {
 	// V is the schema version, BurstVersion.
 	V int `json:"v"`
@@ -87,7 +87,8 @@ type BurstRow struct {
 	TS string `json:"ts"`
 	// IntervalS is the gap the next sample should wait, from BurstInterval.
 	IntervalS float64 `json:"interval_s"`
-	// IdlePct is the host's idle share, nil when top could not be read.
+	// IdlePct is the idle share of the machine the daemon runs on, nil when that
+	// share could not be read.
 	IdlePct *float64 `json:"idle_pct"`
 	// ExecTaxMS is the daemon's last median exec cost, nil when the health file
 	// holds none or one too old to be a reading of now.
@@ -113,12 +114,11 @@ type BurstRow struct {
 	// absent outside container mode, where the host's own commands answer for
 	// a failed reading with the sampler's log line alone.
 	HostErrors map[string]string `json:"host_errors,omitempty"`
-	// HostAgeS is how many seconds before TS the host agent read the idle
-	// share and the consumers this row holds (BurstHostReading.AgeS): the two
-	// describe the host then, not at TS, and IntervalS is taken from the idle
-	// share at that age. It is absent outside container mode, where both
-	// readings are taken at TS, and on a row the file answered no reading for,
-	// which HostErrors explains.
+	// HostAgeS is how many seconds before TS a host source read the idle share and
+	// the consumers this row holds (BurstHostReading.AgeS), and IntervalS is taken
+	// from the idle share at that age. No published host file is read, so the
+	// field stays nil in container mode, where both readings are taken at TS; it
+	// is absent outside container mode for the same reason.
 	HostAgeS *float64 `json:"host_age_s,omitempty"`
 }
 
@@ -126,7 +126,7 @@ type BurstRow struct {
 // process: the three a sample otherwise takes from top, ps and the daemon's
 // health file, each absent when it could not be read.
 type BurstHostReading struct {
-	// IdlePct is the host's idle share.
+	// IdlePct is the idle share of the machine the daemon runs on.
 	IdlePct *float64
 	// Consumers are the busiest processes in cores, empty when the sample was
 	// taken and nothing burned a core and nil when it could not be taken.
