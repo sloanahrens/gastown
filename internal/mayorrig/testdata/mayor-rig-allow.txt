@@ -26,7 +26,7 @@ internal/cmd/plugin.go	1	pending-retirement	gt plugin: help text naming the mayo
 internal/cmd/polecat.go	1	pending-retirement	gt polecat: opens the beads and git handles at the rig's mayor/rig checkout
 internal/cmd/report.go	1	pending-retirement	gt report: help text saying the mayor/rig canonical clone is never fetched
 internal/cmd/rig.go	3	pending-retirement	gt rig: the help and status output, and the mayor/rig checkout and .beads paths it opens
-internal/cmd/rig_adopt_prefix.go	2	pending-retirement	gt rig adopt-prefix: reads the rig's mayor/rig/.beads and writes its route
+internal/cmd/rig_adopt_prefix.go	1	pending-retirement	gt rig adopt-prefix: reads the rig's mayor/rig/.beads and writes its route
 internal/cmd/rig_dock.go	1	pending-retirement	gt rig dock: the mayor/rig checkout as the beads working directory
 internal/cmd/rig_helpers.go	1	pending-retirement	rig helpers: the mayor/rig beads path the rig commands open
 internal/cmd/sling_helpers.go	1	pending-retirement	gt sling: the mayor/rig path used as a rig's work directory

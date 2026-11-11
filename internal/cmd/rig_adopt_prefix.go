@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -168,7 +169,7 @@ func adoptRegisterIn(townRoot string, req rigAdoptRequest, configGet func(workDi
 		rigDir := filepath.Join(townRoot, req.name)
 		if constants.RigBeadsPath(rigDir) == constants.LegacyRigBeadsPath(rigDir) {
 			if _, err := os.Stat(constants.LegacyRigBeadsPath(rigDir)); err == nil {
-				routePath = req.name + "/mayor/rig"
+				routePath = req.name + "/" + path.Dir(constants.RigLegacyBeadsRelPath())
 			}
 		}
 		route := beads.Route{

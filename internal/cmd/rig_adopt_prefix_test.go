@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // adoptPrefixTown writes a town holding one unregistered rig directory whose
@@ -123,6 +124,64 @@ func TestAdoptRouteNamesTheDirectoryHoldingTheBeads(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Adopt-prefix creates no beads directory. Whichever of <rig>/.beads and the
+// legacy mayor/rig/.beads held the rig's data, the same beads directories exist
+// after the command as before it, so nothing is created at either location.
+func TestAdoptPrefixCreatesNoBeadsDirectory(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		legacy bool
+	}{
+		{name: "beads at the rig level"},
+		{name: "beads at the legacy mayor/rig", legacy: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := adoptPrefixTown(t, "my_project", "xx")
+			rigDir := filepath.Join(town, "my_project")
+			if tt.legacy {
+				if err := os.MkdirAll(filepath.Join(rigDir, "mayor", "rig"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(rigDir, ".beads"), filepath.Join(rigDir, "mayor", "rig", ".beads")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			dirs := []string{constants.RigBeadsWritePath(rigDir), constants.LegacyRigBeadsPath(rigDir)}
+			before := presentDirs(t, dirs...)
+
+			if _, _, err := adoptRegisterIn(town, rigAdoptRequest{
+				name:   "my_project",
+				gitURL: "file:///nonexistent",
+			}, noBdPrefix); err != nil {
+				t.Fatalf("adoptRegisterIn: %v", err)
+			}
+
+			if after := presentDirs(t, dirs...); strings.Join(after, ",") != strings.Join(before, ",") {
+				t.Errorf("beads directories after adopt = %q, want %q", after, before)
+			}
+		})
+	}
+}
+
+// presentDirs returns the subset of dirs that exist, in the order given.
+func presentDirs(t *testing.T, dirs ...string) []string {
+	t.Helper()
+	var present []string
+	for _, dir := range dirs {
+		_, err := os.Stat(dir)
+		switch {
+		case err == nil:
+			present = append(present, dir)
+		case !os.IsNotExist(err):
+			t.Fatal(err)
+		}
+	}
+	return present
 }
 
 // bd's issue_prefix answer wins over the database name in metadata.json.
