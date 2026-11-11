@@ -199,7 +199,7 @@ type containerEntrypoint struct {
 	// deployDirectives writes the town's central directives from the gastown bare
 	// repo at the image's commit; it runs after installMango and before the daemon
 	// is exec'd. Its missing-commit error is a warning, not a refusal.
-	deployDirectives func(townRoot string) ([]string, error)
+	deployDirectives func(townRoot string) error
 	// logf writes one line of start-up progress to the container's log.
 	logf    func(format string, args ...any)
 	scratch bool // --scratch-town: the scratch project asked for a scratch town
@@ -254,8 +254,8 @@ func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 		installMango: func(townRoot string) error {
 			return installMangoBinary(containerImageMangoDir, townRoot)
 		},
-		deployDirectives: func(townRoot string) ([]string, error) {
-			return config.DeployCentralDirectives(townRoot, "", version.BuildCommit)
+		deployDirectives: func(townRoot string) error {
+			return deployImageDirectives(config.DeployCentralDirectives, townRoot)
 		},
 		logf:        entrypointLogf,
 		scratch:     flags.scratch,
@@ -440,7 +440,7 @@ func (e containerEntrypoint) deployTownDirectives(townRoot string) error {
 		e.logf("no gastown rig yet, central directives not deployed")
 		return nil
 	}
-	_, err = e.deployDirectives(townRoot)
+	err = e.deployDirectives(townRoot)
 	switch {
 	case err == nil:
 		return nil
@@ -450,6 +450,14 @@ func (e containerEntrypoint) deployTownDirectives(townRoot string) error {
 	default:
 		return fmt.Errorf("deploy the central directives under %s: %w; the daemon was not started", townRoot, err)
 	}
+}
+
+// deployImageDirectives is the deployDirectives seam's real value. It passes an
+// empty commit, which the deploy resolves to the image's own build commit, and
+// drops the paths it wrote, which the entrypoint does not use.
+func deployImageDirectives(deploy func(townRoot, commit string, buildCommit func() string) ([]string, error), townRoot string) error {
+	_, err := deploy(townRoot, "", version.BuildCommit)
+	return err
 }
 
 // refuseDoltHost refuses a --dolt-host that no install would act on. Only the
