@@ -4,6 +4,24 @@ The daemon's `scheduled_maintenance` window takes a backup of every Dolt
 database each night, before its gc (gt-8z769.5,
 `internal/daemon/maintenance_backup.go`). This page is how to get one back.
 
+## Where the backups are written
+
+The Dolt server runs in the `gt-dolt` container on the Mac. Its bind mount
+puts the Mac's `~/gt-backups/dolt` at the same path inside the container, so
+each night's copy lands on the Mac's disk. The daemon runs in the pod, and the
+pod mounts that same Mac directory as a hostPath at the same path, with
+`GT_DOLT_BACKUP_ROOT` set to it. The daemon and the server share one directory.
+
+Who does what:
+
+- The server writes each database's copy into `<date>.partial/<db>`, through
+  the `CALL dolt_backup(...)` the daemon sends it.
+- The daemon, not the server, writes `backup.json`, renames `<date>.partial`
+  to `<date>`, and keeps the newest fourteen nights. Rotation also removes any
+  `.partial` directory left behind. It touches nothing else under the root.
+- A restore reads the same directory on the Mac. The commands below use
+  `~/gt-backups/dolt`, which is that directory when run on the Mac.
+
 ## What is on disk
 
 ```

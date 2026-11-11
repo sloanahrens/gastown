@@ -149,6 +149,11 @@ func healthTown(t *testing.T, now time.Time) (*Daemon, *labelBeads) {
 	t.Helper()
 	town := t.TempDir()
 	writeJSONFile(t, filepath.Join(town, "mayor", "rigs.json"), map[string]any{"version": 1, "rigs": map[string]any{"gastown": map[string]any{}}})
+	// The backup root stubHealthProbes names is an empty, readable directory:
+	// a missing one reads as an error, not as "none" (gt-n5mipp).
+	if err := os.MkdirAll(filepath.Join(town, "no-backups"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	writeJSONFile(t, StateFile(town), State{StartedAt: now.Add(-3 * time.Hour), LastHeartbeat: now.Add(-3 * time.Minute), HeartbeatCount: 12})
 	for _, p := range []string{"git_hygiene", "events_prune"} {
 		if err := savePatrolLastRun(town, p, now.Add(-50*time.Minute)); err != nil {
@@ -1050,6 +1055,49 @@ func TestWriteTownHealth_FailedReadsAreUnknown(t *testing.T) {
 	}
 	if r.Landed != nil {
 		t.Errorf("Landed = %d with a rig unread, want nil", *r.Landed)
+	}
+}
+
+// A backup root that is missing, or is not a directory, is not an empty one:
+// the backup field names the path, and only a readable empty root reads "none"
+// (gt-n5mipp).
+func TestWriteTownHealth_BackupRootMissingAndEmptyReadAsDifferentTexts(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	notADir := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	for name, tc := range map[string]struct {
+		root    string
+		tag     townhealth.Tag
+		verdict townhealth.Verdict
+		value   string
+		detail  string
+	}{
+		"missing root":   {root: missing, tag: townhealth.Unknown, verdict: townhealth.VerdictUnknown, value: "?", detail: "backup root " + missing + " not readable"},
+		"root is a file": {root: notADir, tag: townhealth.Unknown, verdict: townhealth.VerdictUnknown, value: "?", detail: "backup root " + notADir + " not readable"},
+		"empty root":     {root: t.TempDir(), tag: townhealth.Recorded, verdict: townhealth.Red, value: "none", detail: "no complete backup"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, _ := healthTown(t, now)
+			d.townHealthSources = func(s *healthSources) {
+				stubHealthProbes(s, d.config.TownRoot, now)
+				s.backupRoot = func() (string, error) { return tc.root, nil }
+			}
+
+			d.writeTownHealth()
+
+			r, err := townhealth.Read(d.config.TownRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := healthField(t, r, "backup")
+			if got.Tag != tc.tag || got.Verdict != tc.verdict || got.Value != tc.value || !strings.Contains(got.Detail, tc.detail) {
+				t.Errorf("backup = %+v, want %s %s %q with detail containing %q", got, tc.tag, tc.verdict, tc.value, tc.detail)
+			}
+		})
 	}
 }
 
