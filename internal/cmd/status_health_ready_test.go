@@ -199,6 +199,19 @@ func TestStatusHelpNamesNewRig(t *testing.T) {
 	}
 }
 
+// TestStatusHelpNamesTheReadyRule holds the Long help to the readiness rule
+// gt-pittz6 set: a non-green attention row is ready too, because it asks a
+// person to look rather than reporting that the daemon cannot serve
+// (gt-oxicgh). The help is compared as one sentence, so rewrapping the prose
+// does not fail the test.
+func TestStatusHelpNamesTheReadyRule(t *testing.T) {
+	t.Parallel()
+	want := "exit 0 when the report is fresh and every non-green field is [R] (RECORDED, a state the town accepts, such as dispatch off or a backup not yet taken) or an attention row (needs-overseer, needs-operator, needs-human, escalation), which says a person should look, not that the daemon cannot serve."
+	if got := strings.Join(strings.Fields(statusCmd.Long), " "); !strings.Contains(got, want) {
+		t.Errorf("status help does not state the current --ready rule; want %q in Long, got:\n%s", want, statusCmd.Long)
+	}
+}
+
 // TestStatusLineReadyNeedsLine refuses --ready without --line through the
 // command's dispatch, naming both flags, before any town state is read.
 func TestStatusLineReadyNeedsLine(t *testing.T) {

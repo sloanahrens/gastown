@@ -55,7 +55,9 @@ UNKNOWN, since no run of its check recorded one.
 Use --line --ready to ask whether the town can take traffic rather than
 whether it is green: exit 0 when the report is fresh and every non-green
 field is [R] (RECORDED, a state the town accepts, such as dispatch off or a
-backup not yet taken). Otherwise the exit code is the verdict's, as without
+backup not yet taken) or an attention row (needs-overseer, needs-operator,
+needs-human, escalation), which says a person should look, not that the
+daemon cannot serve. Otherwise the exit code is the verdict's, as without
 --ready, and the reason is printed to stderr.`,
 	RunE: runStatus,
 }
