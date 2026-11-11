@@ -128,6 +128,10 @@ const (
 	// commit, a rig's green branches or its images, so it judged nothing
 	// (gt-4nlpw8).
 	KindDeployPairUnreadable Kind = "deploy-pair-unreadable"
+	// KindImagesFailed: the images workflow's newest run for a green commit
+	// finished failed or canceled, so that commit's daemon and polecat images
+	// were never published and no roll can start from it (gt-3vafwr).
+	KindImagesFailed Kind = "images-failed"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -143,7 +147,7 @@ func Kinds() []Kind {
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
-		KindDeployPairReady, KindDeployPairUnreadable,
+		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed,
 	}
 }
 

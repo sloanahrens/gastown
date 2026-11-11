@@ -45,9 +45,10 @@ func digestOf(body []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-// fakePairAPI is the viewer's Forgejo read: the branches a listing returns and
-// the commit counts a comparison returns, keyed "base...head". A comparison with
-// no entry is an error, so a test that drops one exercises that refusal.
+// fakePairAPI is the viewer's Forgejo read: the branches a listing returns, the
+// commit counts a comparison returns (keyed "base...head"), and the images
+// workflow runs with their jobs and logs. A comparison with no entry is an
+// error, so a test that drops one exercises that refusal.
 type fakePairAPI struct {
 	branches  []forgejo.Branch
 	branchErr error
@@ -58,6 +59,24 @@ type fakePairAPI struct {
 	// green, so the listing never ends.
 	endless  bool
 	compares map[string]int
+	// runs is what a run listing returns, filtered by the commit and workflow
+	// the filter names. runErr fails every run listing, and the listing an
+	// ignored filter returns is modelled by filling runs with another commit's.
+	runs   []forgejo.ActionRun
+	runErr error
+	// ignoreFilter makes the run listing answer runs.runs as they are: a
+	// server that honours none of the filter's fields. nilList answers no list
+	// and no error, which no Forgejo does and every caller must still survive.
+	ignoreFilter bool
+	nilList      bool
+	// jobs and logs answer by run id and job id, as the API does. jobsErr and
+	// logErr fail those reads.
+	jobs    map[int64][]forgejo.ActionRunJob
+	jobsErr error
+	logs    map[int64]string
+	logErr  error
+	// runsQueries records the filter each run listing was asked with.
+	runsQueries []forgejo.RunFilter
 }
 
 func (f *fakePairAPI) ListBranches(_ context.Context, _, _ string, page, limit int) ([]forgejo.Branch, error) {
@@ -86,6 +105,41 @@ func (f *fakePairAPI) CompareCommits(_ context.Context, _, _, base, head string)
 		return nil, fmt.Errorf("no comparison fixture for %s...%s", base, head)
 	}
 	return &forgejo.CompareInfo{TotalCommits: total}, nil
+}
+
+func (f *fakePairAPI) ListRuns(_ context.Context, _, _ string, filter forgejo.RunFilter) (*forgejo.RunList, error) {
+	f.runsQueries = append(f.runsQueries, filter)
+	if f.runErr != nil {
+		return nil, f.runErr
+	}
+	if f.nilList {
+		return nil, nil
+	}
+	out := forgejo.RunList{}
+	for _, run := range f.runs {
+		if !f.ignoreFilter && filter.HeadSHA != "" && run.CommitSHA != filter.HeadSHA {
+			continue
+		}
+		if !f.ignoreFilter && filter.WorkflowID != "" && run.WorkflowID != filter.WorkflowID {
+			continue
+		}
+		out.Runs = append(out.Runs, run)
+	}
+	return &out, nil
+}
+
+func (f *fakePairAPI) ListRunJobs(_ context.Context, _, _ string, runID int64) ([]forgejo.ActionRunJob, error) {
+	if f.jobsErr != nil {
+		return nil, f.jobsErr
+	}
+	return f.jobs[runID], nil
+}
+
+func (f *fakePairAPI) JobLogs(_ context.Context, _, _ string, jobID int64) (string, error) {
+	if f.logErr != nil {
+		return "", f.logErr
+	}
+	return f.logs[jobID], nil
 }
 
 // fakePairRegistry is the registry a test fills with the tags it holds, keyed
@@ -372,6 +426,22 @@ func TestPairReadyFailedReadAlarmsTheQueue(t *testing.T) {
 			},
 			wantKey: "deploy-pair-unreadable:rig:gastown",
 			want:    "HTTP 503",
+		},
+		{
+			name: "the images run list fails",
+			apply: func(_ *testing.T, fx *pairFixture) {
+				fx.api.runErr = errors.New("forgejo answered 500 on the run list")
+			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "forgejo answered 500 on the run list",
+		},
+		{
+			name: "the images run list answers nothing",
+			apply: func(_ *testing.T, fx *pairFixture) {
+				fx.api.nilList = true
+			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "the list is not there",
 		},
 		{
 			name: "the branch listing never ends",
@@ -824,4 +894,214 @@ func TestPairReadyTokenNeverReachesLogOrItem(t *testing.T) {
 		require.NotEmpty(t, fx.logs, "the failed read was not logged")
 		assert.NotContains(t, strings.Join(fx.logs, "\n"), pairToken)
 	})
+}
+
+const (
+	pairImagesRun  = int64(14757)
+	pairImagesJob  = int64(311)
+	pairImagesLine = "Error: rig devops pin fc7615ec3b0b is 44 commits behind main, over the 40-commit bound"
+)
+
+// setImagesRun makes the fixture's images workflow hold one run for sha: the
+// run is the newest, and its only job reports the same status, so a succeeded
+// run clears what a failed one raised.
+func (fx *pairFixture) setImagesRun(sha, status string) {
+	if fx.api.jobs == nil {
+		fx.api.jobs = map[int64][]forgejo.ActionRunJob{}
+	}
+	if fx.api.logs == nil {
+		fx.api.logs = map[int64]string{}
+	}
+	run := forgejo.ActionRun{
+		ID: pairImagesRun, CommitSHA: sha, WorkflowID: pairReadyImagesWorkflow, Status: status,
+	}
+	// Runs are listed newest first, so the run this helper set is the one the
+	// scan judges even when a case adds more behind it.
+	fx.api.runs = append([]forgejo.ActionRun{run}, fx.api.runs...)
+	fx.api.jobs[pairImagesRun] = []forgejo.ActionRunJob{
+		{ID: pairImagesJob, RunID: pairImagesRun, Name: "images", Status: status},
+	}
+	fx.api.logs[pairImagesJob] = "[preflight] checking the pins\n" + pairImagesLine + "\n"
+}
+
+// TestImagesFailedRaisesAnItemForAFailedRun: an images run that ended failed or
+// canceled for a green commit newer than the running one raises one item
+// naming the commit and the first Error: line of the job it ran. The registry
+// holds nothing, which is what a failed build leaves behind.
+func TestImagesFailedRaisesAnItemForAFailedRun(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{deployRunFailed, deployRunCancelled} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.reg = &fakePairRegistry{}
+			fx.setImagesRun(pairGreen, status)
+
+			fx.run(pairT0)
+
+			items := fx.check.observed()
+			require.Len(t, items, 1)
+			it := items[0]
+			assert.Equal(t, attention.KindImagesFailed, it.Kind)
+			assert.Equal(t, "images-failed:gastown:"+pairGreen12, it.Key)
+			assert.Equal(t, "gastown", it.Rig)
+			assert.Equal(t, pairGreen, it.SHA)
+			assert.Contains(t, it.Summary, pairGreen12, "the item does not name the commit")
+			assert.Contains(t, it.Summary, pairImagesLine, "the item does not carry the Error line")
+			assert.Equal(t, attention.RuleImagesFailed, attention.RuleFor(it))
+			require.NotEmpty(t, fx.api.runsQueries, "the images runs were not read")
+			assert.Equal(t, pairReadyImagesWorkflow, fx.api.runsQueries[0].WorkflowID)
+			assert.Equal(t, pairGreen, fx.api.runsQueries[0].HeadSHA)
+		})
+	}
+}
+
+// TestImagesFailedIsOneItemAndASuccessClearsIt: the item is keyed by the
+// commit, so a second scan keeps one and does not duplicate it, and a later
+// green run of the same commit clears it.
+func TestImagesFailedIsOneItemAndASuccessClearsIt(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+
+	fx.run(pairT0.Add(pairReadyInterval))
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a second scan duplicated the failed build")
+	assert.Equal(t, "images-failed:gastown:"+pairGreen12, items[0].Key)
+
+	fx.setImagesRun(pairGreen, deployRunSucceeded)
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+
+	assert.Empty(t, fx.check.observed(), "a green run for the commit did not clear the item")
+}
+
+// TestImagesFailedStandsWhileTheRerunIsInFlight: a new run that has not
+// finished is no answer, so the failure the check last raised for the commit
+// stands until the run settles. Clearing it when the re-run starts would report
+// a fix nobody has seen yet.
+func TestImagesFailedStandsWhileTheRerunIsInFlight(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+
+	fx.setImagesRun(pairGreen, forgejo.RunStatusRunning)
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "an in-flight re-run cleared the item it has not answered yet")
+	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+
+	fx.setImagesRun(pairGreen, deployRunSucceeded)
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+	assert.Empty(t, fx.check.observed())
+}
+
+// TestImagesFailedWithAnUnreadableLogStillRaises: the run ended failed, which
+// the scan knows whatever the log says, so every way of not reading the log
+// still raises the item and says the log could not be read rather than passing
+// for a build that did not fail.
+func TestImagesFailedWithAnUnreadableLogStillRaises(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		apply func(fx *pairFixture)
+		want  string
+	}{
+		{
+			name:  "the run's jobs cannot be listed",
+			apply: func(fx *pairFixture) { fx.api.jobsErr = errors.New("forgejo answered 500 on the job list") },
+			want:  "the job log could not be read: forgejo answered 500 on the job list",
+		},
+		{
+			name:  "the job's log cannot be read",
+			apply: func(fx *pairFixture) { fx.api.logErr = errors.New("forgejo answered 404 on the log") },
+			want:  "the job log could not be read: forgejo answered 404 on the log",
+		},
+		{
+			name:  "the run names no job",
+			apply: func(fx *pairFixture) { fx.api.jobs = nil },
+			want:  "the run names no job to read, so its log could not be read",
+		},
+		{
+			name:  "the log names no Error: line",
+			apply: func(fx *pairFixture) { fx.api.logs[pairImagesJob] = "step failed\n" },
+			want:  "the job log names no Error: line",
+		},
+		{
+			// The run failed but the API marked no job failed: the workflow has
+			// one job, and its log is still the one that carries the reason.
+			name: "the run marks no job failed",
+			apply: func(fx *pairFixture) {
+				fx.api.jobs[pairImagesRun] = []forgejo.ActionRunJob{
+					{ID: pairImagesJob, RunID: pairImagesRun, Name: "images", Status: deployRunSucceeded},
+				}
+			},
+			want: "Error: rig devops pin fc7615ec3b0b is 44 commits behind main, over the 40-commit bound",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.reg = &fakePairRegistry{}
+			fx.setImagesRun(pairGreen, deployRunFailed)
+			tc.apply(fx)
+
+			fx.run(pairT0)
+
+			items := fx.check.observed()
+			require.Len(t, items, 1)
+			assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+			assert.Contains(t, items[0].Summary, tc.want)
+			assert.Contains(t, items[0].Summary, pairGreen12)
+		})
+	}
+}
+
+// TestImagesFailedRefusesARunForAnotherCommit: the run list is asked for one
+// commit, and a run it returns for another is not that commit's verdict. A
+// filter a server ignores must not put another commit's failure in the queue.
+func TestImagesFailedRefusesARunForAnotherCommit(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairOther, deployRunFailed)
+	// A server that ignores the filter answers this commit's listing with the
+	// other commit's failed run.
+	fx.api.ignoreFilter = true
+
+	fx.run(pairT0)
+
+	assert.Empty(t, fx.check.observed(), "a failed run for another commit raised an item for this one")
+}
+
+// TestImagesFailedHasItsOwnCollector: a failed build is a third kind from the
+// pair check's one read, so it needs a collector of its own to reach the queue
+// and to survive a failed collector beside it.
+func TestImagesFailedHasItsOwnCollector(t *testing.T) {
+	t.Parallel()
+	failed := attention.Item{Key: "images-failed:gastown:" + pairGreen12, Kind: attention.KindImagesFailed}
+	s := &attentionSources{pairReady: func() []attention.Item { return []attention.Item{failed} }}
+
+	var found bool
+	for _, c := range s.collectors() {
+		if c.kind != attention.KindImagesFailed {
+			continue
+		}
+		found = true
+		items, err := c.collect(context.Background())
+		require.NoError(t, err)
+		require.Len(t, items, 1)
+		assert.Equal(t, failed, items[0])
+		kept := c.kept(attention.State{Items: []attention.Item{failed}})
+		require.Len(t, kept, 1)
+		assert.Equal(t, attention.KindImagesFailed, kept[0].Kind)
+	}
+	assert.True(t, found, "no collector raises the images-failed kind, so its items never reach the queue")
 }

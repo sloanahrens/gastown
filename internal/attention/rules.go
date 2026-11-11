@@ -112,6 +112,11 @@ const (
 	// read the running commit or a rig's images, so it judged no pair
 	// (gt-4nlpw8).
 	RuleDeployPairUnreadable = "deploy.pair_unreadable"
+
+	// RuleImagesFailed is the failed-image-build rule: the images workflow's
+	// newest run for a green commit ended failed or canceled, so the commit
+	// has no daemon and polecat images to roll onto (gt-3vafwr).
+	RuleImagesFailed = "images.failed"
 )
 
 var (
@@ -190,6 +195,10 @@ var ruleFlags = map[string]RuleFlags{
 	// failure: it is queued for the overseer's next look, the same way a green
 	// ref the image build cannot read is (gt-4nlpw8).
 	RuleDeployPairUnreadable: flagsAsk,
+	// A green commit whose image build failed never gets the pair the roll
+	// waits on, and nothing retries it by itself: the overseer is woken to
+	// re-run the build or fix what broke it (gt-3vafwr).
+	RuleImagesFailed: flagsWake,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -294,6 +303,7 @@ var kindRules = map[Kind]string{
 	KindDoltImageBehind:          RuleDoltImageBehind,
 	KindDeployPairReady:          RuleDeployPairReady,
 	KindDeployPairUnreadable:     RuleDeployPairUnreadable,
+	KindImagesFailed:             RuleImagesFailed,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule

@@ -118,6 +118,10 @@ var ruleOwners = map[string]Owner{
 	// A pair check that cannot read is the overseer's to look at: while it is
 	// broken, no roll is reported as ready (gt-4nlpw8).
 	RuleDeployPairUnreadable: OwnerOverseer,
+	// A green commit whose image build failed is the town's own workflow to
+	// look at: the overseer re-runs it or finds what stopped it before a person
+	// is woken (gt-3vafwr).
+	RuleImagesFailed: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
