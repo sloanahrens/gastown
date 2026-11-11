@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -37,6 +38,9 @@ func tailBareRepoDir(t *testing.T, townRoot string) string {
 	if err := os.MkdirAll(bare, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(bare, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return bare
 }
 
@@ -46,14 +50,59 @@ func tailStatFails(err error) func(string) (fs.FileInfo, error) {
 	return func(string) (fs.FileInfo, error) { return nil, err }
 }
 
+// tailBarePath is where the rig's bare repo would be under townRoot; the fake
+// filesystem looks below answer for it without a directory on disk.
+func tailBarePath(townRoot string) string {
+	return filepath.Join(townRoot, "gastown", ".repo.git")
+}
+
+// tailFakeInfo is the fs.FileInfo a fake filesystem look answers with: a
+// directory or a plain file, nothing else about it.
+type tailFakeInfo struct {
+	name string
+	dir  bool
+}
+
+func (i tailFakeInfo) Name() string { return i.name }
+func (i tailFakeInfo) Size() int64  { return 0 }
+func (i tailFakeInfo) Mode() fs.FileMode {
+	return map[bool]fs.FileMode{true: fs.ModeDir | 0o755, false: 0o644}[i.dir]
+}
+func (i tailFakeInfo) ModTime() time.Time { return time.Time{} }
+func (i tailFakeInfo) IsDir() bool        { return i.dir }
+func (i tailFakeInfo) Sys() any           { return nil }
+
+// tailStatOf is a filesystem look over the named directories only: each is a
+// directory, every other path does not exist. A bare repo the tracker should
+// accept is its directory and its HEAD (a file).
+func tailStatOf(dirs ...string) func(string) (fs.FileInfo, error) {
+	present := map[string]bool{}
+	for _, d := range dirs {
+		present[d] = true
+	}
+	return func(path string) (fs.FileInfo, error) {
+		if !present[path] {
+			return nil, fs.ErrNotExist
+		}
+		return tailFakeInfo{name: filepath.Base(path), dir: filepath.Base(path) != "HEAD"}, nil
+	}
+}
+
+// tailStatBare is tailStatOf for a town whose rig holds a real bare repo: the
+// directory and its HEAD.
+func tailStatBare(townRoot string) func(string) (fs.FileInfo, error) {
+	bare := tailBarePath(townRoot)
+	return tailStatOf(bare, filepath.Join(bare, "HEAD"))
+}
+
 // TestTailDeployRepo_UsesTheBareRepoWhenItIsThere: the rig's bare repo answers
 // for the deploy tracker and the main picture, not the checkout beside it.
 func TestTailDeployRepo_UsesTheBareRepoWhenItIsThere(t *testing.T) {
 	t.Parallel()
 	townRoot, _ := tailDeployTown(t)
-	bare := tailBareRepoDir(t, townRoot)
+	bare := tailBarePath(townRoot)
 
-	repo, fellBack, err := tailDeployRepo(townRoot, os.Stat)
+	repo, fellBack, err := tailDeployRepo(townRoot, tailStatBare(townRoot))
 	if err != nil {
 		t.Fatalf("tailDeployRepo: %v", err)
 	}
@@ -172,7 +221,7 @@ func TestTailGitAncestry_AsksTheBareRepo(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			townRoot, _ := tailDeployTown(t)
-			bare := tailBareRepoDir(t, townRoot)
+			bare := tailBarePath(townRoot)
 			var dirs []string
 			var args []string
 			run := func(dir string, a ...string) (int, error) {
@@ -181,7 +230,7 @@ func TestTailGitAncestry_AsksTheBareRepo(t *testing.T) {
 				return tc.code, tc.err
 			}
 
-			ancestor := tailGitAncestryIn(townRoot, nil, os.Stat, run)
+			ancestor := tailGitAncestryIn(townRoot, nil, tailStatBare(townRoot), run)
 			ok, known := ancestor("c1", "c2")
 			if ok != tc.want || known != tc.wantKnown {
 				t.Errorf("ancestor(c1, c2) = (%v, %v), want (%v, %v)", ok, known, tc.want, tc.wantKnown)
@@ -262,7 +311,7 @@ func TestTailGitAncestry_LogsAnUnreadableDeployRepo(t *testing.T) {
 func TestTailMainPicture_ReadsTheBareRepo(t *testing.T) {
 	t.Parallel()
 	townRoot, _ := tailDeployTown(t)
-	bare := tailBareRepoDir(t, townRoot)
+	bare := tailBarePath(townRoot)
 	binary := strings.Repeat("a", 40)
 	tip := strings.Repeat("b", 40)
 	var repos []string
@@ -274,7 +323,7 @@ func TestTailMainPicture_ReadsTheBareRepo(t *testing.T) {
 		return &version.StaleBinaryInfo{BinaryCommit: binary, RepoCommit: tip, CommitsBehind: 2}
 	}
 
-	gotTip, installed, behind, err := tailMainPictureIn(townRoot, binary, nil, os.Stat, check)
+	gotTip, installed, behind, err := tailMainPictureIn(townRoot, binary, nil, tailStatBare(townRoot), check)
 	if err != nil {
 		t.Fatalf("tailMainPictureIn: %v", err)
 	}
@@ -395,7 +444,7 @@ func TestTailDeployRepo_UnreadableBareRepoLogsOnceThroughWhyLog(t *testing.T) {
 // TestTailGitAncestry_AGitThatDidNotStartIsAnError: a git run that never started
 // is an error, not an exit code, so the ancestry check reads it as unknown. The
 // integration tier runs the real start failure; this drives the classification.
-func TestTailGitAncestry_AGitThatDidNotStartIsAnError(t *testing.T) {
+func TestTailGitExit_AGitThatDidNotStartIsAnError(t *testing.T) {
 	t.Parallel()
 	start := errors.New("chdir: no such file or directory")
 	code, err := tailGitExit(start)
@@ -404,5 +453,89 @@ func TestTailGitAncestry_AGitThatDidNotStartIsAnError(t *testing.T) {
 	}
 	if code != 0 {
 		t.Errorf("tailGitExit(start failure) code = %d, want 0 with the error", code)
+	}
+}
+
+// TestTailDeployRepo_ADirectoryWithoutHEADIsNotARepository: a directory at the
+// bare path that holds no HEAD (empty, or half copied) is an error the why-log
+// shows, never a silent fallback to the checkout and never a repository.
+func TestTailDeployRepo_ADirectoryWithoutHEADIsNotARepository(t *testing.T) {
+	t.Parallel()
+	townRoot, _ := tailDeployTown(t)
+	bare := tailBarePath(townRoot)
+
+	repo, fellBack, err := tailDeployRepo(townRoot, tailStatOf(bare))
+	if err == nil || !strings.Contains(err.Error(), "no HEAD") {
+		t.Fatalf("tailDeployRepo(bare dir without HEAD) = (%q, %q, %v), want an error naming the missing HEAD", repo, fellBack, err)
+	}
+	if !strings.Contains(err.Error(), bare) {
+		t.Errorf("error %q does not name the directory %q", err, bare)
+	}
+}
+
+// TestTailGitAncestry_ReadsTheRepoOnEveryCall: the repository is picked as each
+// question is asked, not once when the tracker is built. A town whose bare repo
+// appears after the hub starts answers the next question from the bare repo,
+// and the why-log records the change once.
+func TestTailGitAncestry_ReadsTheRepoOnEveryCall(t *testing.T) {
+	t.Parallel()
+	townRoot, checkout := tailDeployTown(t)
+	bare := tailBarePath(townRoot)
+	bareIsThere := false
+	stat := func(path string) (fs.FileInfo, error) {
+		if !bareIsThere {
+			return nil, fs.ErrNotExist
+		}
+		return tailStatBare(townRoot)(path)
+	}
+	var dirs []string
+	run := func(dir string, _ ...string) (int, error) {
+		dirs = append(dirs, dir)
+		return 0, nil
+	}
+	var lines []string
+	why := newDashWhyLog(func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) })
+
+	ancestor := tailGitAncestryIn(townRoot, why, stat, run)
+	ancestor("c1", "c2")
+	bareIsThere = true
+	ancestor("c1", "c2")
+	ancestor("c1", "c2")
+
+	if want := []string{checkout, bare, bare}; strings.Join(dirs, ",") != strings.Join(want, ",") {
+		t.Errorf("git ran in %q, want the checkout first and the bare repo once it is there: %q", dirs, want)
+	}
+	var fallbacks, returns int
+	for _, l := range lines {
+		if strings.Contains(l, "reading the source checkout") {
+			fallbacks++
+		}
+		if strings.Contains(l, "bare repo again") {
+			returns++
+		}
+	}
+	if fallbacks != 1 || returns != 1 {
+		t.Errorf("why-log = %q, want one fallback line and one return to the bare repo", lines)
+	}
+}
+
+// TestTailDeployRepo_AnUnreadableHEADIsAnError: the bare directory is there but
+// its HEAD cannot be looked at (a permission fault, not absence): that is the
+// filesystem's error, returned as it is, never a fallback to the checkout.
+func TestTailDeployRepo_AnUnreadableHEADIsAnError(t *testing.T) {
+	t.Parallel()
+	townRoot, _ := tailDeployTown(t)
+	bare := tailBarePath(townRoot)
+	denied := errors.New("stat HEAD: permission denied")
+	stat := func(path string) (fs.FileInfo, error) {
+		if path == bare {
+			return tailFakeInfo{name: ".repo.git", dir: true}, nil
+		}
+		return nil, denied
+	}
+
+	repo, fellBack, err := tailDeployRepo(townRoot, stat)
+	if !errors.Is(err, denied) {
+		t.Fatalf("tailDeployRepo(unreadable HEAD) = (%q, %q, %v), want the stat error returned", repo, fellBack, err)
 	}
 }

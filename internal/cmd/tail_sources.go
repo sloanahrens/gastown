@@ -1137,7 +1137,7 @@ const (
 //
 // listAgent lists one rig's agent beads (tailRigAgentBeads in production), so a
 // test can drive a rig's read failure without a store.
-func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string]*beads.Issue, error), deploys *tailDeploys) tailSummaryFields {
+func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string]*beads.Issue, error), deploys *tailDeploys, why *dashWhyLog) tailSummaryFields {
 	var f tailSummaryFields
 	if seats, cap, pairs, err := tailSeatPicture(townRoot, listAgent); err == nil {
 		f.HasSeats, f.SeatsUsed, f.SeatsCap, f.Seats = true, seats, cap, pairs
@@ -1145,7 +1145,7 @@ func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string
 	if n, err := tailReadyToLand(townRoot); err == nil {
 		f.HasReady, f.ReadyToLand = true, n
 	}
-	if tip, installed, behind, err := tailMainPicture(townRoot, nil); err == nil {
+	if tip, installed, behind, err := tailMainPicture(townRoot, why); err == nil {
 		f.HasMain, f.MainTip, f.InstalledGT, f.Behind = true, tip, installed, behind
 	}
 	if n, err := tailOpenEscalations(townRoot); err == nil {
@@ -2028,16 +2028,21 @@ func tailGitAncestry(townRoot string, why *dashWhyLog) tailAncestry {
 }
 
 // tailGitAncestryIn is tailGitAncestry with the filesystem look and the git
-// runner injected. Every ancestry call runs in the repository tailDeployRepo
-// picks.
+// runner injected. Every ancestry call picks its repository through
+// tailDeployRepo as it is asked, so the answer follows the town as it is now.
 func tailGitAncestryIn(townRoot string, why *dashWhyLog, stat func(string) (fs.FileInfo, error), run tailGitRun) tailAncestry {
-	repo, fellBack, err := tailDeployRepo(townRoot, stat)
-	why.note(dashDeployReadSource, dashWhy(err))
-	if err != nil {
-		return func(string, string) (bool, bool) { return false, false }
+	return func(commit, of string) (bool, bool) {
+		// Resolved on every question, not once at construction: a bare repo
+		// that appears, or goes unreadable, after the hub starts is read at the
+		// next question, and the why-log says so once per change.
+		repo, fellBack, err := tailDeployRepo(townRoot, stat)
+		why.note(dashDeployReadSource, dashWhy(err))
+		if err != nil {
+			return false, false
+		}
+		why.deployRepo(fellBack)
+		return tailGitIsAncestor(run, repo, commit, of)
 	}
-	why.deployRepo(fellBack)
-	return func(commit, of string) (bool, bool) { return tailGitIsAncestor(run, repo, commit, of) }
 }
 
 // tailDeployRepo is the repository the deploy tracker's ancestry check and the
@@ -2052,6 +2057,15 @@ func tailDeployRepo(townRoot string, stat func(string) (fs.FileInfo, error)) (re
 	if err == nil {
 		if !info.IsDir() {
 			return "", "", fmt.Errorf("%s is not a directory", bare)
+		}
+		// A directory at the bare path is a repository only when it holds
+		// HEAD; an empty or half-copied directory is an error the why-log
+		// shows, never a silent fallback to the checkout.
+		if _, err := stat(filepath.Join(bare, "HEAD")); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return "", "", fmt.Errorf("%s is a directory but not a git repository: no HEAD", bare)
+			}
+			return "", "", err
 		}
 		return bare, "", nil
 	}

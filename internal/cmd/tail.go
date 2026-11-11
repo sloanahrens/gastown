@@ -227,7 +227,8 @@ func runTail(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	beadReads := openTailBeads(townRoot, tailTitleCacheSize)
-	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot, tailWhyLog(cmd.ErrOrStderr())), cutoff)
+	why := tailWhyLog(cmd.ErrOrStderr())
+	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot, why), cutoff)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, rig: tailRig, kinds: kinds, cutoff: cutoff, loc: loc, now: time.Now,
 		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
@@ -268,7 +269,7 @@ func runTail(cmd *cobra.Command, _ []string) error {
 	var summary *tailSummaryTracker
 	if tailFollow {
 		summary = &tailSummaryTracker{
-			read:     func() tailSummaryFields { return readTailSummary(townRoot, tailRigAgentBeads, deploys) },
+			read:     func() tailSummaryFields { return readTailSummary(townRoot, tailRigAgentBeads, deploys, why) },
 			now:      time.Now,
 			interval: tailSummaryFresh,
 			width:    view.Width,
