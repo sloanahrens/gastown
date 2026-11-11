@@ -50,7 +50,7 @@ func TestSubmitRefusesUncheckedCriteriaNamingEach(t *testing.T) {
 		"- [ ] tests for refuse and pass paths",
 		"- [ ] make lint && make gate pass",
 		"bd show bd-source",
-		`gt bead update bd-source --acceptance="`,
+		`gt bead tick bd-source "<the box text>"`,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q lacks %q", err, want)
