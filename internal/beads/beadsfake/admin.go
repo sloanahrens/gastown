@@ -102,6 +102,10 @@ func (f *Fake) Version() (beads.VersionInfo, error) {
 	return *f.version, nil
 }
 
+// UpdateOffersFlag answers true for every flag: the fake stands in for a bd
+// built with the tree, which offers whatever the tree's callers ask for.
+func (f *Fake) UpdateOffersFlag(string) (bool, error) { return true, nil }
+
 // SchemaLevel returns the migration level the fake's database is at, which is
 // the level its bd report names unless a test scripts otherwise.
 func (f *Fake) SchemaLevel() (int, error) {

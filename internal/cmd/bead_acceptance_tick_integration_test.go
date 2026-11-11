@@ -38,8 +38,12 @@ func (s *amendingStore) Update(id string, opts beads.UpdateOptions) error {
 // once more, so the owner's boxes survive.
 func TestIntegrationAcceptanceTickRetriesAGuardMissOnRealBd(t *testing.T) {
 	t.Parallel()
+	// bd grew --if-acceptance in beads be-uhxt (b7e5e9ce); a sweep image whose
+	// bd predates it skips here with the reason, instead of holding the sweep
+	// red until the pair that carries the newer bd can be published.
 	requireBd(t)
 	_, b := setupPatrolTestDB(t)
+	requireUpdateFlag(t, b, "--if-acceptance", "b7e5e9ce (be-uhxt)")
 	original := "- [ ] first\n- [ ] second"
 	is, err := b.Create(beads.CreateOptions{Title: "tick guard", Acceptance: original, Priority: -1})
 	if err != nil {
