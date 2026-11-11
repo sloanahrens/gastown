@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // Beads is what the worker reads and writes work beads through (ADR 0001:
@@ -999,6 +1000,10 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		if !wasRepair {
 			w.afterLanding(ctx, work, res)
 		}
+		// The label needs the landing's complete record, and a repair is the pass
+		// that completes a record an earlier pass left unfinished, so this runs
+		// on a repair too. The write is idempotent: a stale sp-actual is replaced.
+		w.writeSPActual(work.BeadID, res.LandedCommit)
 		// The record is complete now, which is the proof the seat's end reads.
 		// A repair that finishes a record left unfinished reaches it here, so
 		// the seat its earlier pass kept is ended once the record can prove it.
@@ -1334,6 +1339,70 @@ func (w *Worker) annotate(id, key, what, msg string) {
 	}
 	st.annotated[key] = true
 	st.wrote = true
+}
+
+// writeSPActual writes the landed bead's measured points, sp-actual:N, from the
+// polecat time its complete landing record holds (gt-5d9k2f, SP14). It writes
+// only an exact measurement: a record with a lower or upper bound, no time, a
+// time FromMinutes rejects, or a bead with no sp: estimate is skipped, and each
+// skip logs one line naming the reason. A failed read or write is logged and
+// changes nothing about the landing or the report.
+func (w *Worker) writeSPActual(beadID, landedCommit string) {
+	rec, found, err := w.Landings.LatestForBead(beadID)
+	if err != nil {
+		w.logf("%s: reading the landing record for sp-actual: %v", beadID, err)
+		return
+	}
+	if !found || rec.LandedCommit != landedCommit {
+		w.logf("%s: sp-actual skipped: no landing record for this landing", beadID)
+		return
+	}
+	switch {
+	case rec.PolecatLowerBound:
+		w.logf("%s: sp-actual skipped: polecat time is a lower bound", beadID)
+		return
+	case rec.PolecatUpperBound:
+		w.logf("%s: sp-actual skipped: polecat time is an upper bound", beadID)
+		return
+	case rec.PolecatSecs == 0 && len(rec.PolecatAttempts) == 0:
+		w.logf("%s: sp-actual skipped: polecat time absent", beadID)
+		return
+	}
+	points, err := storypoints.FromMinutes(rec.PolecatSecs / 60)
+	if err != nil {
+		w.logf("%s: sp-actual skipped: polecat time %g seconds has no points: %v", beadID, rec.PolecatSecs, err)
+		return
+	}
+	want := storypoints.ActualLabel(points)
+	issue, err := w.Beads.Show(beadID)
+	if err != nil {
+		w.logf("%s: reading the bead for sp-actual: %v", beadID, err)
+		return
+	}
+	estimated := false
+	var stale []string
+	for _, l := range issue.Labels {
+		p, err := storypoints.ParseLabel(l)
+		if err != nil {
+			continue
+		}
+		switch p.Kind {
+		case storypoints.KindEstimate:
+			estimated = true
+		case storypoints.KindActual:
+			if l != want {
+				stale = append(stale, l)
+			}
+		}
+	}
+	if !estimated {
+		w.logf("%s: sp-actual skipped: no sp: estimate label", beadID)
+		return
+	}
+	opts := beads.UpdateOptions{AddLabels: []string{want}, RemoveLabels: stale}
+	if err := w.Beads.Update(beadID, opts); err != nil {
+		w.logf("%s: writing %s: %v", beadID, want, err)
+	}
 }
 
 // afterLanding starts the post-landing verdict for a new landing (a command run
