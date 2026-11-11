@@ -485,6 +485,13 @@ func TestDarwinTaggedFileFails(t *testing.T) {
 			want:   []string{"pkg/run_darwin_arm64.go:1 is macOS-only"},
 		},
 		{
+			name:   "a negated constraint that still requires darwin fails",
+			path:   "pkg/run.go",
+			source: "//go:build !(linux || !darwin)\n\npackage pkg\n",
+			allow:  "# no entries\n",
+			want:   []string{"pkg/run.go:1 is macOS-only"},
+		},
+		{
 			name:   "a listed darwin file passes beside a host-tool line",
 			path:   "pkg/run_darwin.go",
 			source: plainSource,
@@ -570,6 +577,11 @@ func TestDarwinFilesNotCounted(t *testing.T) {
 			path:   "pkg/run_arm64.go",
 			source: "package pkg\n",
 		},
+		{
+			name:   "a negated darwin conjunction is not macOS-only",
+			path:   "pkg/run.go",
+			source: "//go:build !(darwin && linux)\n\npackage pkg\n",
+		},
 	}
 
 	for _, tc := range cases {
@@ -603,6 +615,10 @@ func TestDarwinUnreadableFileIsAnError(t *testing.T) {
 			name:   "a second go:build line",
 			source: "//go:build darwin\n//go:build linux\n\npackage pkg\n",
 		},
+		{
+			name:   "a constraint naming more tags than the scan classifies",
+			source: manyTagsConstraint(maxDarwinConstraintTags) + "\n\npackage pkg\n",
+		},
 	}
 
 	for _, tc := range cases {
@@ -621,6 +637,17 @@ func TestDarwinUnreadableFileIsAnError(t *testing.T) {
 			}
 		})
 	}
+}
+
+// manyTagsConstraint returns a go:build line that names n tags besides darwin.
+// With darwin counted, n equal to maxDarwinConstraintTags is one past the cap.
+func manyTagsConstraint(n int) string {
+	var b strings.Builder
+	b.WriteString("//go:build t0")
+	for i := 1; i < n; i++ {
+		fmt.Fprintf(&b, " || t%d", i)
+	}
+	return b.String()
 }
 
 // TestRepoDarwinFiles is the gate on the real tree: every macOS-only non-test
@@ -1018,7 +1045,11 @@ func darwinBuildTag(path string) (line int, requires bool, err error) {
 	if expr == nil {
 		return 0, false, nil
 	}
-	return line, requiresDarwin(expr), nil
+	requires, err = requiresDarwin(expr)
+	if err != nil {
+		return 0, false, err
+	}
+	return line, requires, nil
 }
 
 // parseBuildConstraint returns the file's build expression, the line of its
@@ -1082,23 +1113,65 @@ header:
 }
 
 // requiresDarwin reports whether every build that satisfies expr sets the darwin
-// tag. darwin and darwin&&cgo do; darwin||linux, !darwin and !linux&&!windows do
-// not, so the portable fallbacks stay portable.
-func requiresDarwin(expr constraint.Expr) bool {
+// tag: no build without darwin satisfies it. It tries each assignment of the tags
+// expr names, so a negated or nested constraint reads the same as its plain
+// form. darwin and darwin&&cgo do; darwin||linux, !darwin, !(darwin&&linux) and
+// !linux&&!windows do not, so the portable forms stay portable. A constraint that
+// names more tags than maxDarwinConstraintTags, darwin counted, is an error, not
+// a guess.
+func requiresDarwin(expr constraint.Expr) (bool, error) {
+	tags := map[string]bool{darwinName: true}
+	if err := collectConstraintTags(expr, tags); err != nil {
+		return false, err
+	}
+	if len(tags) > maxDarwinConstraintTags {
+		return false, fmt.Errorf("build constraint names %d tags, more than the %d the scan classifies", len(tags), maxDarwinConstraintTags)
+	}
+	names := make([]string, 0, len(tags))
+	for name := range tags {
+		names = append(names, name)
+	}
+	for assign := 0; assign < 1<<len(names); assign++ {
+		set := map[string]bool{}
+		for i, name := range names {
+			set[name] = assign&(1<<i) != 0
+		}
+		if set[darwinName] {
+			continue
+		}
+		if expr.Eval(func(tag string) bool { return set[tag] }) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// maxDarwinConstraintTags bounds requiresDarwin's enumeration, which doubles per
+// tag. A header past it fails the scan rather than being classified slowly.
+const maxDarwinConstraintTags = 16
+
+// collectConstraintTags adds every tag expr names to tags. An expression form
+// the walk does not know is an error, so it cannot be classified as portable.
+func collectConstraintTags(expr constraint.Expr, tags map[string]bool) error {
 	switch e := expr.(type) {
 	case *constraint.TagExpr:
-		return e.Tag == darwinName
+		tags[e.Tag] = true
 	case *constraint.NotExpr:
-		return false
+		return collectConstraintTags(e.X, tags)
 	case *constraint.AndExpr:
-		return requiresDarwin(e.X) || requiresDarwin(e.Y)
+		if err := collectConstraintTags(e.X, tags); err != nil {
+			return err
+		}
+		return collectConstraintTags(e.Y, tags)
 	case *constraint.OrExpr:
-		return requiresDarwin(e.X) && requiresDarwin(e.Y)
+		if err := collectConstraintTags(e.X, tags); err != nil {
+			return err
+		}
+		return collectConstraintTags(e.Y, tags)
 	default:
-		// constraint.Parse builds only the four nodes above; refusing an unknown
-		// one keeps a future form from reading as portable.
-		return true
+		return fmt.Errorf("build constraint has an unknown form %T", expr)
 	}
+	return nil
 }
 
 // unlistedDarwinFiles reports the macOS-only files the allowlist does not list.
