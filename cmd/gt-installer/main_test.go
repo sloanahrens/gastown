@@ -49,7 +49,6 @@ func newTestEnv(t *testing.T) (environment, string, *fakeRun) {
 		getenv: func(key string) string { return values[key] },
 		getwd:  func() (string, error) { return root, nil },
 		home:   func() (string, error) { return root, nil },
-		exe:    func() (string, error) { return filepath.Join(root, "gt-installer"), nil },
 		newRun: f.newRun,
 	}
 	return env, root, f
@@ -262,8 +261,8 @@ func TestRunWithoutABuildCheckout(t *testing.T) {
 	}
 }
 
-// --dry-run plans the gateway and changes nothing, not even a receipt: it
-// states its own result and exits 0 (gt-tpg0p.9).
+// --dry-run changes nothing, not even a receipt: it states its own result and
+// exits 0.
 func TestRunDryRunTouchesNothing(t *testing.T) {
 	t.Parallel()
 	env, root := testEnv(t)
@@ -278,48 +277,11 @@ func TestRunDryRunTouchesNothing(t *testing.T) {
 	if code != 0 {
 		t.Errorf("run(--dry-run) = %d, want 0", code)
 	}
-	want := "[install-gt] gateway: skipped, no " +
-		filepath.Join(root, ".config", "openshell", "gateway.toml") + "\n" +
-		"install-gt: RESULT dry-run origin/main - -\n"
-	if out.String() != want {
+	if want := "install-gt: RESULT dry-run origin/main - -\n"; out.String() != want {
 		t.Errorf("stdout = %q, want %q", out.String(), want)
 	}
 	if errOut.Len() != 0 {
 		t.Errorf("stderr = %q, want nothing", errOut.String())
-	}
-	if after := snapshot(t, root); !reflect.DeepEqual(after, before) {
-		t.Errorf("the tree changed:\nbefore %v\nafter  %v", before, after)
-	}
-}
-
-// A program that cannot name its own directory has no gateway template to fall
-// back on: the step warns about the checkout's missing template and the run
-// still reports its dry-run (gt-tpg0p.9).
-func TestRunDryRunWithoutAProgramDirectory(t *testing.T) {
-	t.Parallel()
-	env, root := testEnv(t)
-	env.exe = func() (string, error) { return "", fs.ErrNotExist }
-	toml := filepath.Join(root, ".config", "openshell", "gateway.toml")
-	if err := os.MkdirAll(filepath.Dir(toml), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(toml, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	before := snapshot(t, root)
-	var out, errOut strings.Builder
-
-	code := runWith([]string{"--dry-run"}, &out, &errOut, env)
-
-	if code != 0 {
-		t.Errorf("run(--dry-run) = %d, want 0", code)
-	}
-	if want := "install-gt: RESULT dry-run origin/main - -\n"; out.String() != want {
-		t.Errorf("stdout = %q, want %q", out.String(), want)
-	}
-	tmpl := filepath.Join(root, "rig", "scripts", "launchd", "com.gastown.openshell-gateway.plist.tmpl")
-	if want := "[install-gt] WARNING: gateway: no template at " + tmpl + "\n"; errOut.String() != want {
-		t.Errorf("stderr = %q, want %q", errOut.String(), want)
 	}
 	if after := snapshot(t, root); !reflect.DeepEqual(after, before) {
 		t.Errorf("the tree changed:\nbefore %v\nafter  %v", before, after)
@@ -422,8 +384,7 @@ func TestRunInstallsEndToEnd(t *testing.T) {
 			t.Errorf("command %d argv %q holds the password, want it only on the unlock's stdin", i, cmd)
 		}
 	}
-	// Nothing ran through the exit contract either: no escalation and no
-	// gateway, which this run skips for want of a gateway.toml.
+	// Nothing ran through the exit contract either: no escalation.
 	if len(f.execs) != 0 {
 		t.Errorf("contract commands = %q, want none", f.execs)
 	}

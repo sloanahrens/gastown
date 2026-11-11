@@ -43,9 +43,6 @@ func (r *Run) Noop() (Exit, bool) {
 	} else {
 		r.C.Log("Installed " + prev + " already contains " + fullSHA + "; nothing to do.")
 	}
-	// The script runs the gateway step on this path too, before the receipt; it
-	// reports its own failures and never changes the outcome (gt-tpg0p.9).
-	r.GatewayStep(GatewayInstall)
 	r.C.Receipt("noop", fullSHA, prev, "already-installed")
 	return r.C.Finish(Result{Event: "noop", Commit: fullSHA, Prev: prev, Reason: "already-installed"}, ExitOK), true
 }

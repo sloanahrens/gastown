@@ -16,7 +16,7 @@
 # TestSweepHostNamesOnlyExistingPackages, so that paragraph is checked, not
 # asserted.
 internal/cmd # "find /Library" in the dangerous-command guard; darwin steps in git_fixture_clone_darwin_test.go
-internal/doctor # launchctl calls in openshell_gateway_check_test.go; sdk_check_test.go fakes the darwin path
+internal/doctor # sdk_check_test.go fakes the darwin path
 internal/daemon # /Library tool paths and launchd supervisor states in the unit tests
 internal/binaryinstall # codesign signing of the installed binary
 internal/installer # codesign; sign_darwin_integration_test.go builds only for darwin
