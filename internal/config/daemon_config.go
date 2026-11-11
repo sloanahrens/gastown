@@ -78,6 +78,58 @@ type DaemonPatrolConfig struct {
 	// toolchain or engine (gt-1oz0t). The launchd daemon ignores it and runs
 	// everything. The host agent runs the same names on the host.
 	ContainerOffSetting []string `json:"container_off,omitempty"`
+	// PolecatImageSourceSetting names the CI registry repository the daemon's
+	// dev-tag step copies the polecat image from: a bare host:port and a
+	// repository path, such as forgejo:3000/bot-registry/gastown-polecat. Read
+	// through PolecatImageSource, so the default lives in one place (gt-f1igu0).
+	PolecatImageSourceSetting string `json:"polecat_image_source,omitempty"`
+}
+
+// DefaultPolecatImageSource is the CI registry repository the polecat image is
+// pushed to by the images workflow, tagged with each commit's 12-character stamp.
+const DefaultPolecatImageSource = "forgejo:3000/bot-registry/gastown-polecat"
+
+// polecatImageRepoShape is the repository path a polecat image source names:
+// lowercase path components, the same shape a registry accepts.
+var polecatImageRepoShape = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
+
+// PolecatImageSource returns the CI registry repository the polecat image is
+// copied from: the setting, or DefaultPolecatImageSource when it is unset.
+func (c *DaemonPatrolConfig) PolecatImageSource() string {
+	if c == nil || c.PolecatImageSourceSetting == "" {
+		return DefaultPolecatImageSource
+	}
+	return c.PolecatImageSourceSetting
+}
+
+// ValidatePolecatImageSource refuses a polecat_image_source that is not a bare
+// host:port followed by a repository path. A scheme is refused first, since a
+// URL pasted where a host belongs is the likely mistake.
+func (c *DaemonPatrolConfig) ValidatePolecatImageSource() error {
+	if c == nil || c.PolecatImageSourceSetting == "" {
+		return nil
+	}
+	s := c.PolecatImageSourceSetting
+	bad := func(why string) error {
+		return fmt.Errorf("daemon.polecat_image_source %q: %s", s, why)
+	}
+	switch {
+	case strings.Contains(s, "://"):
+		return bad("want a bare host:port and a repository path, not a URL with a scheme")
+	case strings.ContainsFunc(s, unicode.IsSpace):
+		return bad("want no whitespace")
+	}
+	host, repo, ok := strings.Cut(s, "/")
+	if !ok || repo == "" {
+		return bad("want a repository path after host:port, such as forgejo:3000/bot-registry/gastown-polecat")
+	}
+	if err := validImageRegistry(host); err != nil {
+		return bad(err.Error())
+	}
+	if !polecatImageRepoShape.MatchString(repo) {
+		return bad("want a repository path of lowercase letters, digits, dots, dashes and underscores")
+	}
+	return nil
 }
 
 // The supervisor kinds daemon.supervisor accepts, and the names the container
