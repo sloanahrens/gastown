@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -30,6 +31,26 @@ func TestRunBuildsTheKubernetesTargetFromItsFields(t *testing.T) {
 	}
 	if !h.fake.launched {
 		t.Fatal("the wrapper launched nothing through the kubernetes target")
+	}
+}
+
+// TestRunKubernetesTargetRunsFromAnyDirectory: the kubernetes target maps onto
+// $HOME/gt and needs no town marker, so a working directory outside any town is
+// launched with its own path, and the target maps it with a note, not a refusal.
+func TestRunKubernetesTargetRunsFromAnyDirectory(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.writeConfig(t, kubernetesConfig)
+	outside := t.TempDir()
+	h.surface.getwd = func() (string, error) { return outside, nil }
+	if exit := h.run("gt", "status", "--line"); exit != 0 {
+		t.Fatalf("run = %d, want 0; stderr: %s", exit, h.stderr)
+	}
+	if want := filepath.Join(h.home, "gt"); h.builtTown != want {
+		t.Fatalf("kubernetes target built for %q, want $HOME/gt %q", h.builtTown, want)
+	}
+	if !h.fake.launched || h.fake.call.Dir != outside {
+		t.Fatalf("launched = %v with dir %q; want the call run from %q", h.fake.launched, h.fake.call.Dir, outside)
 	}
 }
 

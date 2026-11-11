@@ -127,7 +127,7 @@ func run(argv []string, s surface) int {
 		return fail(s.stderr, err)
 	}
 	args := argv[1:]
-	town, err := findTown(s)
+	town, err := townFor(cfg, s)
 	if err != nil {
 		// --doctor still answers when there is no town: a diagnosis of down with
 		// the town error as its reason, rather than a refusal with no report.
@@ -234,6 +234,22 @@ func openTarget(cfg targetConfig, town, tool string, s surface) (target, error) 
 		return s.newKubectl(town, cfg.Kube, tool), nil
 	}
 	return nil, fmt.Errorf("gtwrap: the target config names %q; the targets are docker and kubernetes", cfg.Target)
+}
+
+// townFor is the town root the target is built for. The docker target runs from
+// the town's compose file, so it finds the town. The kubernetes target only maps
+// the working directory onto the pod, and the path it maps under is $HOME/gt. That
+// needs no town marker, and a directory outside it is mapped with a note, not
+// refused, so the target runs from any directory.
+func townFor(cfg targetConfig, s surface) (string, error) {
+	if cfg.Target != kubernetesTarget {
+		return findTown(s)
+	}
+	home := s.getenv("HOME")
+	if home == "" {
+		return "", errors.New("gtwrap: HOME is not set, so the kubernetes target cannot map the working directory")
+	}
+	return filepath.Join(home, "gt"), nil
 }
 
 // findTown is the town root the wrapper reads the compose file from and mounts:
