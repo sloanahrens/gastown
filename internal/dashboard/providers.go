@@ -96,6 +96,9 @@ type deepSeekSpend struct {
 	// WatcherPID is null or empty when the spend watcher is not running.
 	WatcherPID any    `json:"watcher_pid"`
 	LastSample string `json:"last_sample"`
+	// Error is set, and empty or not, when the spend read failed and the report
+	// carries no figures: its first line is the reason the row gives.
+	Error *string `json:"error"`
 }
 
 // deepSeekPace is a spend window's rate, in dollars an hour.
@@ -110,13 +113,26 @@ type deepSeekCredit struct {
 	Kind   string  `json:"kind"`
 }
 
+// deepSeekUnreadWhy is the DeepSeek row's reason when the spend report could not
+// be read and the report does not say why.
+const deepSeekUnreadWhy = "the spend report could not be read"
+
 // deepSeekCostProvider is the DeepSeek row: the cash balance, its spend rates,
-// the days the report's per-day spend reads, and the runway.
+// the days the report's per-day spend reads, and the runway. A failed read
+// gives the first line of its error as the reason, and the fixed text when that
+// line is empty.
 func deepSeekCostProvider(_ time.Time, spend json.RawMessage, _ *ClaudePlan, _ *CostCharts, _ *JevSpend) CostProvider {
 	p := CostProvider{ID: costProviderDeepSeek, Label: "DeepSeek", Kind: "cash", Status: "none"}
 	var d *deepSeekSpend
 	if len(spend) == 0 || json.Unmarshal(spend, &d) != nil || d == nil {
-		p.Why = "the spend report could not be read"
+		p.Why = deepSeekUnreadWhy
+		return p
+	}
+	if d.Error != nil {
+		p.Why = deepSeekUnreadWhy
+		if line, _, _ := strings.Cut(*d.Error, "\n"); strings.TrimSpace(line) != "" {
+			p.Why = line
+		}
 		return p
 	}
 	p.Balance = d.Balance

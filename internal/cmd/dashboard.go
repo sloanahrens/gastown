@@ -919,7 +919,8 @@ const (
 // balance ledger when that file exists, or nothing. The tool comes before the
 // ledger so a Mac keeps the live balance the tool reads. The reason is set when
 // there is no source because this host has none to offer: no home, or no
-// ledger or tool. A failed read of the ledger is logged through whyLog.
+// ledger or tool. A failed read of the ledger is logged through whyLog and served
+// as an unavailable state, not as no source.
 func resolveSpend(flagValue string, whyLog *dashWhyLog) (func() json.RawMessage, string) {
 	return resolveSpendIn(flagValue, os.UserHomeDir, os.Stat, execSpend, whyLog)
 }
@@ -1299,15 +1300,31 @@ func dashboardSpend(argv []string, run spendRunner) func() json.RawMessage {
 
 // dashboardSpendLedger builds the spend report in process from the watcher's
 // files in dir: the tool's report without its live call. The reader keeps what
-// it parsed between polls. A read that fails gives no report, and the error's
-// first line goes to whyLog once per change.
+// it parsed between polls. A read that fails gives an unavailable state, whose
+// error field is the error's first line, and the same line goes to whyLog once
+// per change.
 func dashboardSpendLedger(dir string, whyLog *dashWhyLog) func() json.RawMessage {
 	reader := deepseekspend.NewReader(filepath.Join(dir, spendLedgerName), filepath.Join(dir, spendEventsName), time.Local, deepseekspend.CurrentConstants(time.Local), deepseekspend.DefaultDays, deepseekspend.OpenFile)
 	return func() json.RawMessage {
 		out, err := spendLedgerPoll(reader, time.Now())
 		whyLog.note(dashboard.SourceSpend, dashWhy(err))
+		if err != nil {
+			return spendUnavailable(err)
+		}
 		return out
 	}
+}
+
+// spendUnavailable is the spend JSON of a failed read: no report, and the error's
+// first line in its error field, which the Cost row shows as its reason.
+func spendUnavailable(err error) json.RawMessage {
+	out, marshalErr := json.Marshal(struct {
+		Error string `json:"error"`
+	}{Error: dashWhy(err)})
+	if marshalErr != nil {
+		return json.RawMessage(`{"error":"` + dashWhyNoText + `"}`)
+	}
+	return out
 }
 
 // spendLedgerPoll is the report JSON the reader gives at now, or the error the

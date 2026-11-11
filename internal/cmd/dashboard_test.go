@@ -144,8 +144,9 @@ func TestDashboardSpendRefusesAFailedCommand(t *testing.T) {
 }
 
 // A missing ledger is no spend source. An empty ledger is a zero report with no
-// balance. A ledger or events log that cannot be read is a failed read: no report,
-// and the error's first line goes to the log without the path.
+// balance. A ledger or events log that cannot be read is a failed read: an
+// unavailable state whose error field is the error's first line, with no path, and
+// the same line goes to the log.
 func TestDashboardSpendLedgerStates(t *testing.T) {
 	t.Parallel()
 	noLedger := t.TempDir()
@@ -179,20 +180,31 @@ func TestDashboardSpendLedgerStates(t *testing.T) {
 	}
 	var logged []string
 	whyLog := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
-	if out := dashboardSpendLedger(failed, whyLog)(); out != nil {
-		t.Errorf("failed read: got report %s, want none", out)
+	out = dashboardSpendLedger(failed, whyLog)()
+	var unavailable struct {
+		Error   string `json:"error"`
+		Samples *int   `json:"samples"`
+	}
+	if err := json.Unmarshal(out, &unavailable); out == nil || err != nil {
+		t.Fatalf("failed read: state %q (err %v), want a non-nil unavailable state", out, err)
+	}
+	if unavailable.Samples != nil {
+		t.Errorf("failed read: state %s carries a report, want none", out)
 	}
 	if len(logged) != 1 || !strings.HasPrefix(logged[0], "spend read failed: ") {
 		t.Fatalf("failed read logged %q, want one spend read failure", logged)
 	}
-	if why := strings.TrimPrefix(logged[0], "spend read failed: "); strings.Contains(why, "\n") || strings.Contains(why, failed) || !strings.Contains(why, "is a directory") {
+	why := strings.TrimPrefix(logged[0], "spend read failed: ")
+	if strings.Contains(why, "\n") || strings.Contains(why, failed) || !strings.Contains(why, "is a directory") {
 		t.Errorf("failed read reason = %q, want the error's first line with no path", why)
+	}
+	if unavailable.Error != why {
+		t.Errorf("failed read: error field = %q, want the logged reason %q", unavailable.Error, why)
 	}
 }
 
 // A ledger or events log that cannot be read, or a report that cannot be encoded,
-// is no report: the dashboard shows the read failed, not a report built from part
-// of the files.
+// is an unavailable state, never a report built from part of the files.
 func TestDashboardSpendLedgerRefusesUnreadableFiles(t *testing.T) {
 	t.Parallel()
 	ledgerIsDir := t.TempDir()
@@ -217,8 +229,17 @@ func TestDashboardSpendLedgerRefusesUnreadableFiles(t *testing.T) {
 		"report not encodable": notEncodable,
 	}
 	for name, dir := range cases {
-		if out := dashboardSpendLedger(dir, nil)(); out != nil {
-			t.Errorf("%s: got report %s, want none", name, out)
+		out := dashboardSpendLedger(dir, nil)()
+		var state map[string]any
+		if err := json.Unmarshal(out, &state); err != nil {
+			t.Errorf("%s: state %q is not JSON: %v", name, out, err)
+			continue
+		}
+		if msg, _ := state["error"].(string); msg == "" {
+			t.Errorf("%s: state %s, want an unavailable state with its error", name, out)
+		}
+		if _, ok := state["samples"]; ok {
+			t.Errorf("%s: state %s carries a report, want none", name, out)
 		}
 	}
 }
