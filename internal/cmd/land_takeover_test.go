@@ -46,12 +46,14 @@ func (f *fakeTakeoverRemote) ListRemoteRefsWithHashes(remote, prefix string) ([]
 
 // recordingTakeoverBeads records every Update the takeover makes, in order.
 // failOn fails the nth Update (1-based) without writing it; dropLabels makes
-// a label write report success without persisting it.
+// a label write report success without persisting it; omitNotesOn makes the
+// nth Update report success without persisting its note.
 type recordingTakeoverBeads struct {
 	*beadsfake.Fake
-	updates    []beads.UpdateOptions
-	failOn     int
-	dropLabels bool
+	updates     []beads.UpdateOptions
+	failOn      int
+	dropLabels  bool
+	omitNotesOn int
 }
 
 func (r *recordingTakeoverBeads) Update(id string, opts beads.UpdateOptions) error {
@@ -61,6 +63,9 @@ func (r *recordingTakeoverBeads) Update(id string, opts beads.UpdateOptions) err
 	}
 	if r.dropLabels {
 		opts.AddLabels, opts.RemoveLabels = nil, nil
+	}
+	if len(r.updates) == r.omitNotesOn {
+		opts.AppendNotes = ""
 	}
 	return r.Fake.Update(id, opts)
 }
@@ -164,6 +169,9 @@ func TestLandTakeoverRefusesWithoutWriting(t *testing.T) {
 		{name: "branch not on origin", labels: escalated, tip: "", wantText: "is not on origin"},
 		{name: "remote read fails", labels: escalated, remoteErr: errors.New("ls-remote timed out"), wantText: "reading refs/heads/"},
 		{name: "bead not escalated and no force", labels: nil, tip: takeoverTip, wantText: "pass --force"},
+		// A bead held for a person by another spelling is not escalated for
+		// this command: gt:needs-overseer is the label the spec names.
+		{name: "only gt:needs-human is not escalated", labels: []string{land.LabelNeedsHuman}, tip: takeoverTip, wantText: "pass --force"},
 		{name: "force names no reason", labels: nil, tip: takeoverTip, edit: func(r *takeoverRequest) { r.Force = "   " }, wantText: "pass --force"},
 		{name: "caller is the human", labels: escalated, tip: takeoverTip, edit: func(r *takeoverRequest) { r.Actor = takeoverHuman }, wantText: "the human's own identity"},
 		{name: "human identity is empty", labels: escalated, tip: takeoverTip, edit: func(r *takeoverRequest) { r.Human = "" }, wantText: "human identity is empty"},
@@ -210,11 +218,60 @@ func TestLandTakeoverForceTakesOverAnUnescalatedBead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("takeover with --force: %v", err)
 	}
-	if len(bd.updates) != 3 {
-		t.Errorf("wrote %d updates, want 3", len(bd.updates))
+	if len(bd.updates) != 4 {
+		t.Fatalf("wrote %d updates, want 4 (the force reason, the READY block, the waiver, the labels)", len(bd.updates))
+	}
+	if got, want := strings.TrimSpace(bd.updates[0].AppendNotes), landTakeoverForceMarker+": "+takeoverReason; got != want {
+		t.Errorf("first write %q is not the forced reason %q", got, want)
+	}
+	after, err := bd.Show(takeoverBeadID)
+	if err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if !takeoverForceRecorded(after, takeoverReason) {
+		t.Errorf("the bead's notes do not record the forced reason: %q", after.Notes)
 	}
 	if !strings.Contains(out.String(), takeoverReason) {
 		t.Errorf("output %q does not print the forced reason", out.String())
+	}
+}
+
+// TestLandTakeoverStopsWhenTheForceReasonCannotBeWritten: the force note is the
+// first write of a forced takeover, so its failure leaves the bead without the
+// block or the ready label.
+func TestLandTakeoverStopsWhenTheForceReasonCannotBeWritten(t *testing.T) {
+	t.Parallel()
+	bd := newTakeoverBeads(beads.StatusOpen, nil)
+	bd.failOn = 1
+	remote := &fakeTakeoverRemote{tip: takeoverTip}
+
+	err := takeOverLanding(bd, remote, "origin", takeoverRequestFor(func(r *takeoverRequest) { r.Force = takeoverReason }), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "recording the --force reason") {
+		t.Fatalf("takeover whose force note failed error = %v, want it to name the force reason", err)
+	}
+	if len(bd.updates) != 1 {
+		t.Errorf("made %d writes, want 1: no write runs after the failed one", len(bd.updates))
+	}
+	after, err := bd.Show(takeoverBeadID)
+	if err != nil {
+		t.Fatalf("Show: %v", err)
+	}
+	if beads.HasLabel(after, land.LabelReadyToLand) {
+		t.Errorf("labels %v carry %s although the force note failed", after.Labels, land.LabelReadyToLand)
+	}
+}
+
+// TestLandTakeoverFailsWhenTheForceReasonDoesNotPersist: bd reporting success
+// is not proof the note landed, so the read-back checks the forced reason.
+func TestLandTakeoverFailsWhenTheForceReasonDoesNotPersist(t *testing.T) {
+	t.Parallel()
+	bd := newTakeoverBeads(beads.StatusOpen, nil)
+	bd.omitNotesOn = 1
+	remote := &fakeTakeoverRemote{tip: takeoverTip}
+
+	err := takeOverLanding(bd, remote, "origin", takeoverRequestFor(func(r *takeoverRequest) { r.Force = takeoverReason }), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "does not read back as recording the --force reason") {
+		t.Fatalf("takeover whose force note did not persist error = %v, want the read-back to name it", err)
 	}
 }
 

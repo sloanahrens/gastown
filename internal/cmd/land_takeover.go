@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/callercwd"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/git"
@@ -48,7 +49,8 @@ head it reviewed.
 
 It refuses, writing nothing, when the branch is not on origin, when the bead
 is closed, when the bead is not escalated (unless --force names why), and when
-the caller is the human's own identity. Any read it cannot make fails closed.
+the caller is the human's own identity. A forced takeover writes its reason to
+the bead's notes. Any read it cannot make fails closed.
 
 It never runs gt done, and it does not change the rig's landing rules.
 
@@ -62,9 +64,14 @@ Examples:
 func init() {
 	landTakeoverCmd.Flags().StringVar(&landTakeoverBranch, "branch", "", "the polecat branch on origin whose tip the overseer reviewed (required)")
 	landTakeoverCmd.Flags().StringVar(&landTakeoverTarget, "target", "", "the branch to land on (default: the rig's default branch)")
-	landTakeoverCmd.Flags().StringVar(&landTakeoverForce, "force", "", "take over a bead that is not escalated; the reason is required and printed")
+	landTakeoverCmd.Flags().StringVar(&landTakeoverForce, "force", "", "take over a bead that is not escalated; the reason is required and recorded on the bead")
 	landCmd.AddCommand(landTakeoverCmd)
 }
+
+// landTakeoverForceMarker opens the note line recording why a takeover
+// bypassed the escalation check. The overseer reads the reason there, not only
+// in the output of the run that wrote it.
+const landTakeoverForceMarker = "TAKEOVER FORCED"
 
 // landTakeoverBeads is the bead surface a takeover needs. *beads.Beads
 // satisfies it; tests pass a fake.
@@ -79,8 +86,8 @@ type landTakeoverRemote interface {
 }
 
 // landTakeoverHost is what gt land takeover reads from its process: the town
-// it runs in, its working directory and environment, the rig's landing remote,
-// and the rig's repository and bead store. Tests pass fakes for each.
+// it runs in, the caller's working directory and environment, the rig's landing
+// remote, and the rig's repository and bead store. Tests pass fakes for each.
 type landTakeoverHost struct {
 	findTown      func() (string, error)
 	getwd         func() (string, error)
@@ -94,7 +101,7 @@ type landTakeoverHost struct {
 func landTakeoverProcessHost() landTakeoverHost {
 	return landTakeoverHost{
 		findTown:      workspace.FindFromCwdOrError,
-		getwd:         os.Getwd,
+		getwd:         callercwd.Require,
 		getenv:        os.Getenv,
 		landingRemote: rig.ResolveLandingRemote,
 		repo: func(townRoot, rigName string) landTakeoverRemote {
@@ -200,9 +207,10 @@ func takeoverActor(getenv func(string) string) (string, error) {
 
 // takeOverLanding is gt land takeover's decision, over the interfaces so a test
 // drives it without a town, a remote or a live bd. Every refusal comes before
-// the first write. The writes then go in order: the READY TO LAND block, the
-// OVERSEER REVIEWED note, and last the labels, so the landing worker never sees
-// the ready label without the block and the waiver it reads beside it.
+// the first write. The writes then go in order: the --force reason when there
+// is one, the READY TO LAND block, the OVERSEER REVIEWED note, and last the
+// labels, so the landing worker never sees the ready label without the block
+// and the waiver it reads beside it.
 func takeOverLanding(bd landTakeoverBeads, remote landTakeoverRemote, remoteName string, req takeoverRequest, out io.Writer) error {
 	branch := strings.TrimSpace(req.Branch)
 	target := strings.TrimSpace(req.Target)
@@ -232,7 +240,7 @@ func takeOverLanding(bd landTakeoverBeads, remote landTakeoverRemote, remoteName
 	if beads.IssueStatus(strings.TrimSpace(issue.Status)).IsTerminal() {
 		return fmt.Errorf("refusing takeover of %s: it is %s, so it is not waiting to land", req.BeadID, issue.Status)
 	}
-	forced := !land.HasNeedsPerson(issue)
+	forced := !beads.HasLabel(issue, land.LabelNeedsOverseer)
 	if forced && force == "" {
 		return fmt.Errorf("refusing takeover of %s: it is not escalated (no %s label); pass --force <reason> to take it over anyway", req.BeadID, land.LabelNeedsOverseer)
 	}
@@ -253,6 +261,14 @@ func takeOverLanding(bd landTakeoverBeads, remote landTakeoverRemote, remoteName
 		return fmt.Errorf("refusing takeover of %s: branch %s is not on %s", req.BeadID, branch, remoteName)
 	}
 
+	if forced {
+		// The reason goes on the bead before the block: the overseer can read
+		// why a bead that was not escalated was taken over, and a failed write
+		// stops the takeover before anything else is written.
+		if err := bd.Update(req.BeadID, beads.UpdateOptions{AppendNotes: landTakeoverForceNote(force)}); err != nil {
+			return fmt.Errorf("recording the --force reason on %s: %w", req.BeadID, err)
+		}
+	}
 	w := land.Work{BeadID: req.BeadID, Branch: branch, Head: tip, Target: target, Worker: actor, Submitted: time.Now().UTC()}
 	if err := bd.Update(req.BeadID, beads.UpdateOptions{AppendNotes: land.FormatReadyNote(w)}); err != nil {
 		return fmt.Errorf("writing the %s block on %s: %w", land.ReadyNoteMarker, req.BeadID, err)
@@ -275,6 +291,9 @@ func takeOverLanding(bd landTakeoverBeads, remote landTakeoverRemote, remoteName
 		beads.HasLabel(after, land.LabelRework) || land.HasNeedsPerson(after) {
 		return fmt.Errorf("%s does not read back as taken over after the writes (%s, %s, the takeover labels); re-run the takeover", req.BeadID, land.ReadyNoteMarker, land.OverseerReviewedMarker)
 	}
+	if forced && !takeoverForceRecorded(after, force) {
+		return fmt.Errorf("%s does not read back as recording the --force reason (%s); re-run the takeover", req.BeadID, landTakeoverForceMarker)
+	}
 
 	if forced {
 		style.FprintWarning(out, "%s was not escalated; taking it over anyway: %s", req.BeadID, force)
@@ -286,4 +305,27 @@ func takeOverLanding(bd landTakeoverBeads, remote landTakeoverRemote, remoteName
 	fmt.Fprintf(out, "  By:     %s\n", actor)
 	fmt.Fprintf(out, "  %s\n", style.Dim.Render("The daemon's landing worker will review and merge this head."))
 	return nil
+}
+
+// landTakeoverForceNote renders the note line recording why a takeover bypassed
+// the escalation check. The reason is collapsed onto one line, so it cannot
+// start a note line of its own.
+func landTakeoverForceNote(reason string) string {
+	return landTakeoverForceMarker + ": " + land.NoteField(reason)
+}
+
+// takeoverForceRecorded reports whether issue's notes carry the force line for
+// reason. The read-back asks it because bd reporting success is not proof the
+// note persisted (GH#1945).
+func takeoverForceRecorded(issue *beads.Issue, reason string) bool {
+	if issue == nil {
+		return false
+	}
+	line := landTakeoverForceNote(reason)
+	for _, l := range strings.Split(issue.Notes, "\n") {
+		if strings.TrimSpace(l) == line {
+			return true
+		}
+	}
+	return false
 }
