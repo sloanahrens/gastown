@@ -1607,23 +1607,9 @@ func (d *Daemon) cleanupLegacySocketSessions() {
 // for a job still loaded (gt-2gctr, gt-swsqm).
 const unrequestedStopLogLine = "Stop was not requested through gt: exiting 75; this was a bootout or a signal from outside gt, and launchd relaunches only under KeepAlive"
 
-// recordStopForHeal leaves the trace the upgrade heal helper reads, before the
-// shutdown so the record is on disk whichever way the stop was requested. The
-// stop marker is read here, not consumed: StopDaemon wrote it before the
-// signal, and exitAfterSignal takes it only after the shutdown (gt-518hq). A
-// failure costs the helper its one clue about a bootout, never the stop
-// (gt-r8ux8).
-func (d *Daemon) recordStopForHeal(now time.Time) {
-	requested := stopRequested(d.config.TownRoot, os.Getpid(), now)
-	if err := recordSignalStop(d.config.TownRoot, now, requested); err != nil {
-		d.logger.Printf("could not record the signal stop for the upgrade heal helper: %v", err)
-	}
-}
-
 // shutdownForSignal ends the daemon on a signal and returns what Run should
 // exit with: nil when gt requested the stop, ErrUnrequestedStop otherwise. The
-// record goes down before the shutdown, and the exit reads the marker after it
-// (gt-518hq, gt-swsqm).
+// stop marker the exit reads was written before the signal (gt-518hq, gt-swsqm).
 func (d *Daemon) shutdownForSignal(sig os.Signal, state *State) error {
 	d.logger.Printf("Received signal %v, shutting down", sig)
 	return d.finishSignalShutdown(state)
@@ -1633,7 +1619,6 @@ func (d *Daemon) shutdownForSignal(sig os.Signal, state *State) error {
 // a signal that arrived during a heartbeat logged it at once, with the step it
 // interrupted (heartbeat_signal.go).
 func (d *Daemon) finishSignalShutdown(state *State) error {
-	d.recordStopForHeal(time.Now())
 	// Exit 0 only when gt asked for this stop; any other signal exits 75,
 	// which launchd turns into a relaunch only for a job still loaded under
 	// KeepAlive (gt-swsqm, gt-2gctr).
@@ -1642,13 +1627,6 @@ func (d *Daemon) finishSignalShutdown(state *State) error {
 		d.logger.Println(unrequestedStopLogLine)
 	}
 	return err
-}
-
-// clearSpentSignalStop drops the record of the daemon that ran before this
-// one: a record says the town was stopped, and a daemon starting says it is
-// not (gt-r8ux8).
-func (d *Daemon) clearSpentSignalStop() {
-	clearSignalStop(d.config.TownRoot)
 }
 
 // daemonLockWaitBudget is how long Run keeps trying daemon.lock before it
@@ -1794,7 +1772,6 @@ func (d *Daemon) Run() (err error) {
 	// been restarted onto it by launchd or an operator). Covered-only: startup
 	// never exits for an upgrade; a newer marker waits for the heartbeat.
 	d.clearCoveredRestartMarker(time.Now())
-	d.clearSpentSignalStop()
 
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)

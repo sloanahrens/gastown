@@ -673,9 +673,10 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 // enableSupervisor installs the town's supervisor file through provision
 // (templates.ProvisionSupervisor) unless a daemon already runs.
 //
-// guard is the startup guard (gt-qpeei.28): provisioning loads a job with
-// RunAtLoad, which starts a daemon, so a town another owner holds is refused
-// before the file is written.
+// guard is the startup guard (gt-qpeei.28): the systemd provision enables and
+// starts the unit, and a launchd job is already loaded from an earlier
+// provision, so a town another owner holds is refused before the file is
+// written.
 func enableSupervisor(townRoot string, provision func(townRoot string, shutdownBudget time.Duration) (string, error), guard func(townRoot string) error) error {
 	// Refuse while a manual daemon holds the lock. RunAtLoad + KeepAlive.Crashed
 	// means launchd would immediately spawn a second daemon that loses the

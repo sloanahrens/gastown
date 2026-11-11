@@ -116,7 +116,6 @@ These runners are in the daemon's closure. Each runs the program its caller pass
 - `internal/daemon/hm_sync.go` `Daemon.hmSyncRun`
 - `internal/daemon/om_skew.go` `Daemon.omSkewInstalledSHA`
 - `internal/daemon/rebuild_hm.go` `Daemon.rebuildHMBuiltSHA`
-- `internal/daemon/upgrade_heal.go` `runUpgradeHealCommand`
 - `internal/doltserver/doltserver.go` `NewSQLServerCommand`
 - `internal/exectax/exectax.go` `runFile`
 - `internal/imagebuild/supervisor.go` `realSystem`

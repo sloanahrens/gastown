@@ -7,16 +7,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/townhealth"
 	"github.com/steveyegge/gastown/internal/townstatus"
 )
-
-// notLooping is a supervisor that is running the daemon, so the health file
-// alone decides the view. The test never reads the host's launchctl.
-func notLooping(string) (templates.SupervisorState, bool) {
-	return templates.SupervisorState{}, false
-}
 
 // TestStatusLineReadyExitCodes runs the health line over a report a test wrote
 // into a temp town, at a clock the test fixes, and reads the exit code, the
@@ -41,10 +34,10 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 		{Name: townhealth.FieldConfig, Tag: townhealth.Live, Verdict: townhealth.Green, Value: "valid"},
 		{Name: townhealth.FieldNeedsOverseer, Tag: townhealth.Live, Verdict: townhealth.Degraded, Value: "1", Detail: "1 waiting for overseer"},
 	}
-	// view reads the health file with the supervisor stubbed, so the answer
-	// depends only on the report the test wrote.
+	// view reads the health file, so the answer depends only on the report the
+	// test wrote.
 	view := func(townRoot string, at time.Time) ([]string, townhealth.Verdict, *townhealth.Report) {
-		return townstatus.HealthViewWith(townRoot, at, notLooping)
+		return townstatus.HealthView(townRoot, at)
 	}
 	tests := []struct {
 		name         string
@@ -128,13 +121,13 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 }
 
 // TestStatusLineReadyNilReport runs the health line over a town with no health
-// file, so HealthViewWith reads nothing and returns a nil report. With --ready
+// file, so HealthView reads nothing and returns a nil report. With --ready
 // that is not ready and says why; without it the view's exit code stands.
 func TestStatusLineReadyNilReport(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 	view := func(townRoot string, at time.Time) ([]string, townhealth.Verdict, *townhealth.Report) {
-		return townstatus.HealthViewWith(townRoot, at, notLooping)
+		return townstatus.HealthView(townRoot, at)
 	}
 	tests := []struct {
 		name       string

@@ -191,7 +191,8 @@ func StaleCommands(workspacePath string) []string {
 }
 
 // ProvisionSupervisor creates and configures supervisor files for the daemon.
-// On macOS: creates and loads a launchd plist.
+// On macOS: writes a launchd plist, which launchd loads at the next login; gt
+// does not load it.
 // On Linux: creates and enables a systemd user unit.
 // Returns a message indicating what action was taken (or skipped).
 //
@@ -477,7 +478,9 @@ func (h supervisorHost) status() string {
 	return "none"
 }
 
-// provisionLaunchd creates and loads a launchd plist on macOS.
+// provisionLaunchd writes the launchd plist on macOS. launchd loads a
+// LaunchAgent from the user's LaunchAgents directory at login; gt writes the
+// file and does not load it.
 func provisionLaunchd(data SupervisorData) (string, error) {
 	plistPath, err := LaunchdPlistPath()
 	if err != nil {
@@ -498,15 +501,7 @@ func provisionLaunchd(data SupervisorData) (string, error) {
 		return "", fmt.Errorf("writing plist file: %w", err)
 	}
 
-	// Unload if already loaded (ignore errors)
-	_ = exec.Command("launchctl", "unload", plistPath).Run()
-
-	// Load the service
-	if output, err := exec.Command("launchctl", "load", plistPath).CombinedOutput(); err != nil {
-		return "", fmt.Errorf("loading launchd service: %s", string(output))
-	}
-
-	return "Created and loaded launchd service: com.gastown.daemon", nil
+	return "Wrote launchd plist " + plistPath + "; launchd loads it at the next login", nil
 }
 
 // provisionSystemd creates and enables a systemd user unit on Linux.

@@ -43,9 +43,9 @@ func writeStopRequested(townRoot string, pid int, now time.Time) error {
 }
 
 // stopRequested reports whether a valid stop request for pid exists. It does
-// not touch the marker: the signal branch reads it before the shutdown, and
-// exitAfterSignal consumes it after. A marker for another pid, one older than
-// stopMarkerTTL, or one that cannot be parsed is not a request.
+// not touch the marker: exitAfterSignal consumes it after the shutdown. A
+// marker for another pid, one older than stopMarkerTTL, or one that cannot be
+// parsed is not a request.
 func stopRequested(townRoot string, pid int, now time.Time) bool {
 	data, err := os.ReadFile(stopMarkerPath(townRoot))
 	if err != nil {
@@ -75,48 +75,6 @@ func consumeStopRequested(townRoot string, pid int, now time.Time) bool {
 // removeStopRequested drops the marker after a stop that could not be sent.
 func removeStopRequested(townRoot string) {
 	_ = os.Remove(stopMarkerPath(townRoot))
-}
-
-// signalStopPath is where a daemon records that a signal ended it, for the
-// upgrade heal helper to read.
-func signalStopPath(townRoot string) string {
-	return filepath.Join(townRoot, "daemon", "stopped-by-signal")
-}
-
-// recordSignalStop leaves a durable trace that a signal ended the daemon. The
-// stop marker above is consumed by the exit it excuses, and a supervised
-// `gt daemon stop` is a launchctl bootout that writes no marker at all, so
-// this record is the only trace a bootout inside the upgrade heal helper's
-// wait leaves (gt-r8ux8). Its second line says whether gt requested the stop:
-// gt down signals the daemon without a bootout, the daemon exits 0, and
-// launchd leaves the job loaded with no pid, which is the shape a respawn that
-// failed also has. Only an unrequested stop is for the helper to heal
-// (gt-518hq).
-func recordSignalStop(townRoot string, now time.Time, requested bool) error {
-	path := signalStopPath(townRoot)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	kind := signalStopUnrequested
-	if requested {
-		kind = signalStopRequested
-	}
-	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n%s\n", now.Unix(), kind)), 0o644)
-}
-
-// The second line of the signal-stop record. The heal helper matches the
-// requested line exactly, so a record from before this line existed reads as
-// unrequested.
-const (
-	signalStopRequested   = "requested"
-	signalStopUnrequested = "unrequested"
-)
-
-// clearSignalStop drops a signal-stop record left by an earlier stop, so the
-// helper armed by an upgrade exit only sees stops that happen after it, and a
-// daemon that starts does not leave the record of the daemon before it.
-func clearSignalStop(townRoot string) {
-	_ = os.Remove(signalStopPath(townRoot))
 }
 
 // exitAfterSignal is what Run returns once the graceful shutdown for a signal
