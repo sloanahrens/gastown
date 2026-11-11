@@ -8,6 +8,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -81,7 +82,7 @@ func runKillAll(cmd *cobra.Command, args []string) error {
 		Crew:     killAllCrew,
 		Yes:      killAllYes,
 	}
-	return killAll(cmd.OutOrStdout(), req, reg, collectGTSessions(reg, t, townRoot), sup)
+	return killAll(cmd.Context(), cmd.OutOrStdout(), req, reg, collectGTSessions(reg, t, townRoot), sup)
 }
 
 // killAllRequest is one gt kill-all invocation.
@@ -120,7 +121,7 @@ func killAllPlan(reg *session.PrefixRegistry, sessions []string, rig string, cre
 // killAll sets the E-stop and kills the planned seats through sup, or only
 // prints the plan when req.Yes is false. A failed kill is reported and the
 // rest still run; the command fails if any did.
-func killAll(w io.Writer, req killAllRequest, reg *session.PrefixRegistry, sessions []string, sup *supervisor.Supervisor) error {
+func killAll(ctx context.Context, w io.Writer, req killAllRequest, reg *session.PrefixRegistry, sessions []string, sup *supervisor.Supervisor) error {
 	kill, skip := killAllPlan(reg, sessions, req.Rig, req.Crew)
 	for _, s := range skip {
 		fmt.Fprintf(w, "   %s %s (skipped)\n", style.Dim.Render("⏭"), s)
@@ -133,7 +134,7 @@ func killAll(w io.Writer, req killAllRequest, reg *session.PrefixRegistry, sessi
 		return nil
 	}
 
-	if err := activateEstop(w, req.TownRoot, req.Rig, req.Reason); err != nil {
+	if err := activateEstop(ctx, w, req.TownRoot, req.Rig, req.Reason); err != nil {
 		return err
 	}
 	reason := "kill-all"

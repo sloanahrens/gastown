@@ -12,6 +12,8 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/holdclaim"
 	"github.com/steveyegge/gastown/internal/ring"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -191,7 +193,7 @@ func Full(ctx context.Context, o Options) error {
 		return err
 	}
 	e.say("-> full")
-	if err := e.setHold(); err != nil {
+	if err := e.setHold(ctx); err != nil {
 		return err
 	}
 	if err := e.ensureInfra(ctx); err != nil {
@@ -213,7 +215,7 @@ func Full(ctx context.Context, o Options) error {
 	if err := e.clearEstop(ctx); err != nil {
 		return err
 	}
-	if err := e.clearHold(); err != nil {
+	if err := e.clearHold(ctx); err != nil {
 		return err
 	}
 	if err := e.record(string(StateFull)); err != nil {
@@ -250,7 +252,7 @@ func healthLine(out string) string {
 func Standby(ctx context.Context, o Options) error {
 	e := newEngine(o)
 	e.say("-> standby")
-	if err := e.setHold(); err != nil {
+	if err := e.setHold(ctx); err != nil {
 		return err
 	}
 	if err := e.ensureInfra(ctx); err != nil {
@@ -292,7 +294,7 @@ func Off(ctx context.Context, o Options) error {
 		}
 	}
 	e.say("-> off")
-	if err := e.setHold(); err != nil {
+	if err := e.setHold(ctx); err != nil {
 		return err
 	}
 	// This refusal also runs under --dry-run: a preview that walked past it
@@ -351,7 +353,7 @@ func Off(ctx context.Context, o Options) error {
 // standby.
 func BootHold(ctx context.Context, o Options) error {
 	e := newEngine(o)
-	if err := e.setHold(); err != nil {
+	if err := e.setHold(ctx); err != nil {
 		return err
 	}
 	if err := e.record("standby (boot)"); err != nil {
@@ -519,11 +521,31 @@ func (e *engine) reportStrandedSandboxes() {
 		len(e.stranded), strings.Join(e.stranded, ", "))
 }
 
-// clearEstop clears a town ESTOP through gt thaw, which also nudges the
-// sessions the stop held.
+// clearEstop clears a town ESTOP. While the Mac's sentinel is up, gt thaw clears
+// it on the Mac and in the pod's claim, and nudges the sessions the stop held.
+// Once the Mac's sentinel is gone, a town with a pod setting may still hold the
+// pod's copy from a partial thaw, so that copy is lifted through the same
+// ordered helper; a lift that cannot finish refuses the resume.
 func (e *engine) clearEstop(ctx context.Context) error {
-	if !e.estopOn() {
+	pod, err := e.podClaim()
+	if err != nil {
+		return fmt.Errorf("resume refused, the ESTOP was not cleared, because the pod setting cannot be read: %w", err)
+	}
+	if e.estopOn() {
+		if err := e.run(ctx, e.o.TownRoot, e.o.GTCommand, "thaw"); err != nil {
+			return fmt.Errorf("resume refused, the ESTOP is not fully cleared and the pod may still be STOPPED: %w", err)
+		}
 		return nil
 	}
-	return e.run(ctx, e.o.TownRoot, e.o.GTCommand, "thaw")
+	if pod == nil {
+		return nil
+	}
+	if e.o.DryRun {
+		fmt.Fprintf(e.o.Out, "  [dry-run] remove the E-stop from the pod's claim\n")
+		return nil
+	}
+	if err := holdclaim.Lift(ctx, pod, "E-stop", estop.FilePath(e.o.TownRoot)); err != nil {
+		return fmt.Errorf("resume refused, the hold is left in place: %w", err)
+	}
+	return nil
 }

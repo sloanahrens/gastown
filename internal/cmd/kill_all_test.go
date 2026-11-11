@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"strings"
 	"sync"
@@ -39,7 +40,7 @@ func TestKillAllWithoutYesOnlyPrintsThePlan(t *testing.T) {
 	town, k, sup := killAllHarness(t)
 	var out strings.Builder
 	req := killAllRequest{TownRoot: town, Actor: "gt kill-all/overseer"}
-	if err := killAll(&out, req, cmdTestRegistry(), killAllSessions, sup); err != nil {
+	if err := killAll(context.Background(), &out, req, cmdTestRegistry(), killAllSessions, sup); err != nil {
 		t.Fatalf("killAll: %v", err)
 	}
 	if len(k.killed) != 0 {
@@ -69,7 +70,7 @@ func TestKillAllTownSetsEstopAndKillsThroughTheSupervisor(t *testing.T) {
 	}
 	var out strings.Builder
 	req := killAllRequest{TownRoot: town, Reason: "runaway", Actor: "gt kill-all/overseer", Crew: true, Yes: true}
-	if err := killAll(&out, req, cmdTestRegistry(), killAllSessions, sup); err != nil {
+	if err := killAll(context.Background(), &out, req, cmdTestRegistry(), killAllSessions, sup); err != nil {
 		t.Fatalf("killAll: %v\n%s", err, out.String())
 	}
 	// The hq-mayor fixture session is a leftover: its role retired, so it no
@@ -99,7 +100,7 @@ func TestKillAllRigScoped(t *testing.T) {
 	town, k, sup := killAllHarness(t)
 	var out strings.Builder
 	req := killAllRequest{TownRoot: town, Rig: "gastown", Actor: "gt kill-all/overseer", Yes: true}
-	if err := killAll(&out, req, cmdTestRegistry(), killAllSessions, sup); err != nil {
+	if err := killAll(context.Background(), &out, req, cmdTestRegistry(), killAllSessions, sup); err != nil {
 		t.Fatalf("killAll: %v", err)
 	}
 	if got := strings.Join(k.killed, ","); got != "gt-flint" {
@@ -114,7 +115,7 @@ func TestActivateEstopWritesOnlyTheSentinel(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	var out strings.Builder
-	if err := activateEstop(&out, town, "", "closing laptop"); err != nil {
+	if err := activateEstop(context.Background(), &out, town, "", "closing laptop"); err != nil {
 		t.Fatal(err)
 	}
 	if info := estop.Read(town); info == nil || info.Reason != "closing laptop" {

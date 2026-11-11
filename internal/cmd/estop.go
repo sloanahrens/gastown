@@ -7,6 +7,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/holdclaim"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -134,32 +136,49 @@ func runEstop(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	return activateEstop(cmd.OutOrStdout(), townRoot, estopRig, estopReason)
+	return activateEstop(cmd.Context(), cmd.OutOrStdout(), townRoot, estopRig, estopReason)
 }
 
 // activateEstop writes the town (rig == "") or per-rig ESTOP sentinel and
 // reports it to w. It touches no session: the sentinel alone is what the
-// dispatch hold and the supervisor read.
-func activateEstop(w io.Writer, townRoot, rig, reason string) error {
+// dispatch hold and the supervisor read. With a pod setting the sentinel is
+// also written into the daemon pod's claim, before the Mac's file.
+func activateEstop(ctx context.Context, w io.Writer, townRoot, rig, reason string) error {
+	pod, err := holdclaim.FromTown(townRoot, holdclaim.Kubectl)
+	if err != nil {
+		return fmt.Errorf("the E-stop was not set, because the pod setting cannot be read: %w", err)
+	}
+	return activateEstopWith(ctx, w, townRoot, rig, reason, pod)
+}
+
+// activateEstopWith is activateEstop with the pod's claim writer given: nil for
+// a town with no pod setting. With a pod setting the sentinel goes into the
+// pod's claim first, then onto the Mac, so a partial run never leaves the pod
+// running.
+func activateEstopWith(ctx context.Context, w io.Writer, townRoot, rig, reason string, pod *holdclaim.Writer) error {
+	path := estop.FilePath(townRoot)
+	info := estop.Read(townRoot)
 	if rig != "" {
-		if info := estop.ReadRig(townRoot, rig); info != nil {
+		path = estop.RigFilePath(townRoot, rig)
+		info = estop.ReadRig(townRoot, rig)
+	}
+	if info != nil {
+		if rig != "" {
 			fmt.Fprintf(w, "%s E-stop already active for %s (triggered %s: %s)\n",
 				style.Error.Render("⛔"), rig, info.Trigger, info.Reason)
-			return nil
-		}
-		if err := estop.ActivateRig(townRoot, rig, estop.TriggerManual, reason); err != nil {
-			return fmt.Errorf("failed to create ESTOP file for %s: %w", rig, err)
-		}
-		fmt.Fprintf(w, "%s EMERGENCY STOP: %s\n", style.Error.Render("⛔"), style.Bold.Render(rig))
-	} else {
-		if info := estop.Read(townRoot); info != nil {
+		} else {
 			fmt.Fprintf(w, "%s E-stop already active (triggered %s: %s)\n",
 				style.Error.Render("⛔"), info.Trigger, info.Reason)
-			return nil
 		}
-		if err := estop.Activate(townRoot, estop.TriggerManual, reason); err != nil {
-			return fmt.Errorf("failed to create ESTOP file: %w", err)
-		}
+		return holdclaim.Mirror(ctx, pod, "E-stop", path)
+	}
+	content := estop.Render(estop.TriggerManual, reason, time.Now())
+	if err := holdclaim.Activate(ctx, pod, "E-stop", path, content); err != nil {
+		return err
+	}
+	if rig != "" {
+		fmt.Fprintf(w, "%s EMERGENCY STOP: %s\n", style.Error.Render("⛔"), style.Bold.Render(rig))
+	} else {
 		fmt.Fprintf(w, "%s EMERGENCY STOP\n", style.Error.Render("⛔"))
 	}
 	if reason != "" {
@@ -184,43 +203,67 @@ func runThaw(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return thawEstop(cmd.Context(), townRoot, thawRig, holdclaim.Kubectl)
+}
+
+// thawEstop clears the town (rig == "") or per-rig E-stop on the Mac and in the
+// pod's claim, then nudges the sessions it covered. run reaches the pod; a test
+// fakes it.
+func thawEstop(ctx context.Context, townRoot, rig string, run holdclaim.Exec) error {
+	pod, err := holdclaim.FromTown(townRoot, run)
+	if err != nil {
+		return fmt.Errorf("the E-stop was not cleared, because the pod setting cannot be read: %w", err)
+	}
 
 	var info *estop.Info
-	if thawRig != "" {
-		info = estop.ReadRig(townRoot, thawRig)
+	if rig != "" {
+		info = estop.ReadRig(townRoot, rig)
 	} else {
 		info = estop.Read(townRoot)
 	}
 	if info == nil {
-		if thawRig != "" {
-			fmt.Printf("No E-stop active for %s.\n", thawRig)
+		// A town with a pod setting may still hold the copy of an E-stop the
+		// Mac has already cleared, so the pod's copy is lifted too.
+		if pod != nil {
+			if err := liftEstop(ctx, townRoot, rig, pod); err != nil {
+				return err
+			}
+		}
+		if rig != "" {
+			fmt.Printf("No E-stop active for %s.\n", rig)
 		} else {
 			fmt.Println("No E-stop active.")
 		}
 		return nil
 	}
 
-	if thawRig != "" {
-		err = estop.DeactivateRig(townRoot, thawRig)
-	} else {
-		err = estop.Deactivate(townRoot, false)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to remove ESTOP file: %w", err)
+	if err := liftEstop(ctx, townRoot, rig, pod); err != nil {
+		return err
 	}
 	scope := ""
-	if thawRig != "" {
-		scope = " for " + thawRig
+	if rig != "" {
+		scope = " for " + rig
 	}
 	fmt.Printf("%s E-stop cleared%s (was active for %s)\n", style.Success.Render("✓"),
 		scope, time.Since(info.Timestamp).Round(time.Second))
 
 	if t := tmux.NewTmux(); t.IsAvailable() {
-		if nudged := nudgeAllSessions(townRegistry(), t, townRoot, thawRig); nudged > 0 {
+		if nudged := nudgeAllSessions(townRegistry(), t, townRoot, rig); nudged > 0 {
 			fmt.Printf("   Nudged %d session(s)\n", nudged)
 		}
 	}
 	return nil
+}
+
+// liftEstop clears the town (rig == "") or per-rig ESTOP sentinel on the Mac and
+// in the pod's claim, through holdclaim.Lift: the Mac's file goes first, so a
+// partial lift leaves the pod stopped.
+func liftEstop(ctx context.Context, townRoot, rig string, pod *holdclaim.Writer) error {
+	path := estop.FilePath(townRoot)
+	if rig != "" {
+		path = estop.RigFilePath(townRoot, rig)
+	}
+	return holdclaim.Lift(ctx, pod, "E-stop", path)
 }
 
 // exemptSessions are not nudged when an E-stop clears: they coordinate the

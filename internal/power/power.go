@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/holdclaim"
 	"github.com/steveyegge/gastown/internal/ring"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -130,6 +131,10 @@ type Options struct {
 	Glob       func(pattern string) ([]string, error)
 	Now        func() time.Time
 	Sleep      func(ctx context.Context, d time.Duration) error
+	// PodExec runs the kubectl calls that mirror the hold and ESTOP into the
+	// daemon pod's claim, when the town has a pod setting. Nil is
+	// holdclaim.Kubectl; a test fakes the pod here.
+	PodExec holdclaim.Exec
 	// NewSandboxBackend builds the backend a sandboxed polecat is stopped
 	// through, from its registry record's profile. RealSeams fills it with
 	// session.NewOpenShellBackend; nil leaves a sandbox unstopped and
@@ -454,49 +459,92 @@ func (e *engine) estopOn() bool {
 	return err == nil
 }
 
-// setHold writes the operator hold.
-func (e *engine) setHold() error {
-	if e.holdOn() {
-		return nil
+// podClaim returns the writer for the daemon pod's claim, or nil for a town
+// with no pod setting. A setting that cannot be read is an error, so the
+// caller refuses before it writes anything on the Mac.
+func (e *engine) podClaim() (*holdclaim.Writer, error) {
+	run := e.o.PodExec
+	if run == nil {
+		run = holdclaim.Kubectl
 	}
-	path := dispatch.HoldFilePath(e.o.TownRoot)
-	if e.o.DryRun {
-		fmt.Fprintf(e.o.Out, "  [dry-run] touch %s\n", path)
-		return nil
-	}
-	fmt.Fprintf(e.o.Out, "  + touch %s\n", path)
-	if err := os.WriteFile(path, nil, 0o644); err != nil {
-		return fmt.Errorf("writing the hold %s: %w", path, err)
-	}
-	return nil
+	return holdclaim.FromTown(e.o.TownRoot, run)
 }
 
-// clearHold removes the operator hold.
-func (e *engine) clearHold() error {
+// setHold puts the operator hold up, the pod's claim first so a partial set
+// never leaves the pod running.
+func (e *engine) setHold(ctx context.Context) error {
+	pod, err := e.podClaim()
+	if err != nil {
+		return fmt.Errorf("the hold was not set, because the pod setting cannot be read: %w", err)
+	}
+	path := dispatch.HoldFilePath(e.o.TownRoot)
+	on := e.holdOn()
+	if on && pod == nil {
+		return nil
+	}
+	if e.o.DryRun {
+		if !on {
+			fmt.Fprintf(e.o.Out, "  [dry-run] touch %s\n", path)
+		}
+		if pod != nil {
+			fmt.Fprintf(e.o.Out, "  [dry-run] write the hold into the pod's claim, before the Mac file\n")
+		}
+		return nil
+	}
+	if !on {
+		fmt.Fprintf(e.o.Out, "  + touch %s\n", path)
+	}
+	return holdclaim.Activate(ctx, pod, "hold", path, nil)
+}
+
+// clearHold lifts the operator hold, the Mac file first so a partial lift
+// leaves the pod held.
+func (e *engine) clearHold(ctx context.Context) error {
+	pod, err := e.podClaim()
+	if err != nil {
+		return fmt.Errorf("the hold was not lifted, because the pod setting cannot be read: %w", err)
+	}
 	path := dispatch.HoldFilePath(e.o.TownRoot)
 	if e.o.DryRun {
 		// The caller sets the hold before it clears it, so a preview names
 		// the removal even though the dry run never wrote the file.
 		fmt.Fprintf(e.o.Out, "  [dry-run] rm -f %s\n", path)
+		if pod != nil {
+			fmt.Fprintf(e.o.Out, "  [dry-run] remove the hold from the pod's claim, after the Mac file\n")
+		}
 		return nil
 	}
-	// Remove without asking holdOn first: a hold path that cannot be read
-	// must surface the removal error rather than leave the hold up while the
-	// state reports success.
 	fmt.Fprintf(e.o.Out, "  + rm -f %s\n", path)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing the hold %s: %w", path, err)
-	}
-	return nil
+	return holdclaim.Lift(ctx, pod, "hold", path)
 }
 
 // setEstop sets the town ESTOP through gt estop, whose sentinel format the
-// dispatch hold and the supervisor read.
+// dispatch hold and the supervisor read. gt estop sets the sentinel in the
+// pod's claim itself when the town has a pod setting; this covers the case
+// where the Mac's sentinel is already up and gt estop does nothing.
 func (e *engine) setEstop(ctx context.Context, state State) error {
 	if e.estopOn() {
-		return nil
+		return e.mirrorEstop(ctx)
 	}
 	return e.run(ctx, e.o.TownRoot, e.o.GTCommand, "estop", "-r", "gt-power: "+string(state))
+}
+
+// mirrorEstop sets the town ESTOP that is already up on the Mac into the pod's
+// claim, when the town has a pod setting.
+func (e *engine) mirrorEstop(ctx context.Context) error {
+	pod, err := e.podClaim()
+	if err != nil {
+		return fmt.Errorf("the ESTOP was not set, because the pod setting cannot be read: %w", err)
+	}
+	if pod == nil {
+		return nil
+	}
+	path := estop.FilePath(e.o.TownRoot)
+	if e.o.DryRun {
+		fmt.Fprintf(e.o.Out, "  [dry-run] write the ESTOP into the pod's claim\n")
+		return nil
+	}
+	return holdclaim.Mirror(ctx, pod, "E-stop", path)
 }
 
 // record writes the last requested state.
