@@ -532,10 +532,9 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 				t.Errorf("docker %s argv = %q, want %q", verb, got, want)
 			}
 		}
-		cutoff := ciCacheTestStart.Add(-ciEngineUnusedAge).Format(time.RFC3339)
 		prunes := engineDockerExecs(f, "builder prune")
-		if len(prunes) != 1 || !slices.Contains(prunes[0].args, "until="+cutoff) {
-			t.Errorf("build cache prune = %q, want one run with until=%s", prunes, cutoff)
+		if len(prunes) != 1 || !slices.Contains(prunes[0].args, "until=24h") {
+			t.Errorf("build cache prune = %q, want one run with until=24h", prunes)
 		}
 		// The list program is shell by design; no removal is.
 		for _, c := range engineDockerExecs(f, "") {
@@ -563,7 +562,7 @@ func TestCIEnginePruneApplyRemovesThePlannedIds(t *testing.T) {
 		},
 		"a removal exec fails and the object stays": {
 			remove:  engineRemoveAnswers{fail: true, stderr: "volume is in use"},
-			wantLog: "(the removal ended: exit status 1)",
+			wantLog: "(the removal ended: exit status 1, stderr: volume is in use)",
 		},
 		"the presence check cannot run": {
 			remove:  engineRemoveAnswers{garbage: true, noInspect: true},
@@ -726,44 +725,191 @@ func TestCIEnginePruneScriptsHoldNoKeepLogic(t *testing.T) {
 	}
 }
 
-// TestCIEnginePruneExecErrorLogsNoEngineStderr: a failed list or remove exec is
-// logged with its exit status only. The engine's stderr can carry what the engine
-// holds, so it reaches neither the log nor an attention item.
-func TestCIEnginePruneExecErrorLogsNoEngineStderr(t *testing.T) {
-	t.Parallel()
-	const engineStderr = "Error response from daemon: secret-engine-detail-7f3a"
-	listing := engListing(t,
+// replaceEngineReply answers the calls whose verb contains match with reply, and every
+// other call as the fixture does.
+func replaceEngineReply(f *ciCacheFixture, match string, reply cliReply) {
+	answer := f.cli.answer
+	f.cli.answer = func(c cliCall) cliReply {
+		if strings.Contains(cacheTrimVerb(c.args), match) {
+			return reply
+		}
+		return answer(c)
+	}
+}
+
+// engineLogLine returns the first logged line that contains marker, or "".
+func engineLogLine(logs, marker string) string {
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.Contains(line, marker) {
+			return line
+		}
+	}
+	return ""
+}
+
+// engineStderrField returns the text a failure line logs after "stderr: ", up to the
+// line's last ")", which closes the parenthesis the stderr sits in. It is "" when the
+// line logs no stderr.
+func engineStderrField(line string) string {
+	const open = "stderr: "
+	i := strings.Index(line, open)
+	j := strings.LastIndex(line, ")")
+	if i < 0 || j < i+len(open) {
+		return ""
+	}
+	return line[i+len(open) : j]
+}
+
+// engineFailureListing is the listing the failure tests prune: one container, one
+// image and one anonymous volume, all old enough to go, so every removal runs.
+func engineFailureListing(t *testing.T) []byte {
+	t.Helper()
+	return engListing(t,
 		[]map[string]any{engCtr('4', 'e', "exited", 100*time.Hour)},
 		[]map[string]any{engImg('e', 100*time.Hour, []string{"sha256:layer-h"}, "gastown-daemon:ci-1")},
 		[]map[string]any{engVol(engHex64('1'), 30*time.Hour)},
 	)
-	for name, tc := range map[string]struct {
-		list   cliReply
+}
+
+// TestCIEnginePruneFailureLineCarriesTheFirstStderrLine: a failed step's log line names
+// its exit status and the first line of the program's stderr, from every exec that
+// logs a failure. The lines after the first are not logged.
+func TestCIEnginePruneFailureLineCarriesTheFirstStderrLine(t *testing.T) {
+	t.Parallel()
+	const first = "Error response from daemon: conflict: unable to delete"
+	const later = "a later stderr line"
+	stderr := first + "\n" + later + "\n"
+	for name, setup := range map[string]struct {
+		match  string
+		reply  cliReply
 		remove engineRemoveAnswers
+		marker string
 	}{
-		"list exec fails":   {list: cliReply{code: 1, stderr: engineStderr}},
-		"remove exec fails": {remove: engineRemoveAnswers{fail: true, stderr: engineStderr}},
+		"list exec":         {match: "ci-engine-list", reply: cliReply{code: 1, stderr: stderr}, marker: "the listing exec"},
+		"build cache prune": {match: "-- docker builder prune", reply: cliReply{code: 1, stderr: stderr}, marker: "the build cache prune"},
+		"size read":         {match: "-- du -sk", reply: cliReply{code: 1, stderr: stderr}, marker: "data root's size after"},
+		"removal":           {remove: engineRemoveAnswers{fail: true, stderr: stderr}, marker: "planned image(s)"},
+		"presence check":    {match: "-- docker image inspect", reply: cliReply{startErr: errors.New("exec stream broke"), stderr: stderr}, remove: engineRemoveAnswers{fail: true}, marker: "presence check could not run"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, listing, tc.remove)
-			if tc.list != (cliReply{}) {
-				answer := f.cli.answer
-				f.cli.answer = func(c cliCall) cliReply {
-					if strings.Contains(cacheTrimVerb(c.args), "ci-engine-list") {
-						return tc.list
-					}
-					return answer(c)
-				}
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineFailureListing(t), setup.remove)
+			if setup.match != "" {
+				replaceEngineReply(f, setup.match, setup.reply)
 			}
 			f.tick()
 			f.drain()
 			logs := f.logs.String()
-			if strings.Contains(logs, "secret-engine-detail") {
-				t.Errorf("the engine's stderr reached the log:\n%s", logs)
+			line := engineLogLine(logs, setup.marker)
+			if line == "" {
+				t.Fatalf("no failure line for %q in:\n%s", setup.marker, logs)
 			}
-			if !strings.Contains(logs, "exit status 1") {
-				t.Errorf("the failed exec is not logged with its exit status:\n%s", logs)
+			if got := engineStderrField(line); got != first {
+				t.Errorf("the failure line's stderr = %q, want the first line %q:\n%s", got, first, line)
+			}
+			if strings.Contains(logs, later) {
+				t.Errorf("a stderr line after the first reached the log:\n%s", logs)
+			}
+			if !strings.Contains(line, "exit status 1, stderr: ") && !strings.Contains(line, "no exit status, stderr: ") {
+				t.Errorf("the failure line does not name the exit status before its stderr:\n%s", line)
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneFailureLineStderrIsBounded: the stderr a failure line carries is
+// at most 200 characters, control characters and newlines are spaces, and a cut never
+// splits a character.
+func TestCIEnginePruneFailureLineStderrIsBounded(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		stderr string
+		want   string
+	}{
+		"a long line is cut at 200 characters": {
+			stderr: strings.Repeat("x", 300) + "\nnext",
+			want:   strings.Repeat("x", 200),
+		},
+		"control characters and tabs become spaces": {
+			stderr: "one\x1b[2J\ttwo\rthree\nnext",
+			want:   "one [2J two three",
+		},
+		"blank lines before the first line are skipped": {
+			stderr: "\n \nfirst real line\nlater",
+			want:   "first real line",
+		},
+		"a cut counts characters, not bytes": {
+			stderr: strings.Repeat("é", 250),
+			want:   strings.Repeat("é", 200),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineFailureListing(t), engineRemoveAnswers{})
+			replaceEngineReply(f, "-- docker builder prune", cliReply{code: 1, stderr: tc.stderr})
+			f.tick()
+			f.drain()
+			logs := f.logs.String()
+			line := engineLogLine(logs, "the build cache prune")
+			if line == "" {
+				t.Fatalf("no build cache prune failure line in:\n%s", logs)
+			}
+			if got := engineStderrField(line); got != tc.want {
+				t.Errorf("the failure line's stderr = %q (%d characters), want %q (%d)", got, len([]rune(got)), tc.want, len([]rune(tc.want)))
+			}
+			if strings.ContainsRune(line, '\x1b') || strings.Contains(line, "next") {
+				t.Errorf("the failure line holds a control character or a later line:\n%s", line)
+			}
+		})
+	}
+}
+
+// TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr: kubectl's own errors
+// about the pod, the context or the connection are not the engine's stderr. A failed
+// exec whose stderr is only kubectl's is logged with its exit status alone, and when
+// kubectl's line comes before the program's, the program's line is the one logged.
+func TestCIEnginePruneClusterExecErrorsAreNotLoggedAsEngineStderr(t *testing.T) {
+	t.Parallel()
+	const kubectlNotFound = `Error from server (NotFound): pods "runner-1" not found`
+	const kubectlUpgrade = "error: unable to upgrade connection: container not found"
+	for name, tc := range map[string]struct {
+		match  string
+		reply  cliReply
+		marker string
+		want   string
+	}{
+		"list exec, kubectl's error only": {
+			match: "ci-engine-list", reply: cliReply{code: 1, stderr: kubectlNotFound + "\n"},
+			marker: "the listing exec", want: "",
+		},
+		"build cache prune, kubectl's error only": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlUpgrade + "\n"},
+			marker: "the build cache prune", want: "",
+		},
+		"kubectl's line before the program's": {
+			match: "-- docker builder prune", reply: cliReply{code: 1, stderr: kubectlUpgrade + "\nprogram line\n"},
+			marker: "the build cache prune", want: "program line",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := newCIEngineFixture(t, agentconfig.DiskMaintenanceModeApply, engineFailureListing(t), engineRemoveAnswers{})
+			replaceEngineReply(f, tc.match, tc.reply)
+			f.tick()
+			f.drain()
+			logs := f.logs.String()
+			if strings.Contains(logs, "pods \"runner-1\"") || strings.Contains(logs, "unable to upgrade") {
+				t.Errorf("kubectl's own error reached the log:\n%s", logs)
+			}
+			line := engineLogLine(logs, tc.marker)
+			if line == "" {
+				t.Fatalf("no failure line for %q in:\n%s", tc.marker, logs)
+			}
+			if got := engineStderrField(line); got != tc.want {
+				t.Errorf("the failure line's stderr = %q, want %q:\n%s", got, tc.want, line)
+			}
+			if !strings.Contains(line, "exit status 1") {
+				t.Errorf("the failure line does not name the exit status:\n%s", line)
 			}
 		})
 	}
@@ -829,8 +975,22 @@ func TestCIEngineRemovalsAreOneDockerCommandPerKind(t *testing.T) {
 	if len(ciEngineRemovals(ciEnginePlan{})) != 0 {
 		t.Errorf("an empty plan still has removals")
 	}
-	if argv := ciEngineBuildCachePruneArgv("2026-11-09T00:00:00Z"); !slices.Equal(argv, []string{"docker", "builder", "prune", "-af", "--filter", "until=2026-11-09T00:00:00Z"}) {
-		t.Errorf("build cache prune argv = %q", argv)
+}
+
+// TestCIEngineBuildCachePruneArgvUsesADuration: docker's until filter takes a duration,
+// so the build cache prune spells its unused age as one: 24h for the engine's age,
+// never a timestamp.
+func TestCIEngineBuildCachePruneArgvUsesADuration(t *testing.T) {
+	t.Parallel()
+	for age, want := range map[time.Duration]string{
+		ciEngineUnusedAge: "24h",
+		48 * time.Hour:    "48h",
+		90 * time.Minute:  "90m",
+	} {
+		got := ciEngineBuildCachePruneArgv(age)
+		if wantArgv := []string{"docker", "builder", "prune", "-af", "--filter", "until=" + want}; !slices.Equal(got, wantArgv) {
+			t.Errorf("build cache prune argv for %v = %q, want %q", age, got, wantArgv)
+		}
 	}
 }
 
@@ -954,7 +1114,7 @@ func TestCIEngineSizeAfterIsReadFromDu(t *testing.T) {
 		remove  engineRemoveAnswers
 		wantLog string
 	}{
-		"du fails":            {engineRemoveAnswers{duFail: true}, "du of the data root failed (exit status 1)"},
+		"du fails":            {engineRemoveAnswers{duFail: true}, "du of the data root failed (exit status 1, stderr: du: cannot read)"},
 		"du prints nothing":   {engineRemoveAnswers{duSet: true, duOut: "\n"}, "du printed no figure"},
 		"du prints a non-KiB": {engineRemoveAnswers{duSet: true, duOut: "lots\t/var/lib/docker\n"}, `du printed "lots", not a KiB figure`},
 		"du prints negative":  {engineRemoveAnswers{duSet: true, duOut: "-4\t/var/lib/docker\n"}, `du printed "-4", not a KiB figure`},

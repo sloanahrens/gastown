@@ -32,6 +32,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecatimage"
@@ -124,10 +125,19 @@ func (r ciEngineRemoval) presenceArgv(ids []string) []string {
 	return append([]string{"docker", r.kind, "inspect", "--format", format}, ids...)
 }
 
-// ciEngineBuildCachePruneArgv is the build cache prune: everything unused since
-// cutoff, an RFC 3339 time.
-func ciEngineBuildCachePruneArgv(cutoff string) []string {
-	return []string{"docker", "builder", "prune", "-af", "--filter", "until=" + cutoff}
+// ciEngineBuildCachePruneArgv is the build cache prune: everything unused for
+// unusedAge. docker's until filter takes a duration, not a time.
+func ciEngineBuildCachePruneArgv(unusedAge time.Duration) []string {
+	return []string{"docker", "builder", "prune", "-af", "--filter", "until=" + ciEngineUntil(unusedAge)}
+}
+
+// ciEngineUntil spells an age as the duration docker's until filter parses: whole
+// hours as "24h", otherwise whole minutes as "90m".
+func ciEngineUntil(age time.Duration) string {
+	if age%time.Hour == 0 {
+		return strconv.FormatInt(int64(age/time.Hour), 10) + "h"
+	}
+	return strconv.FormatInt(int64(age/time.Minute), 10) + "m"
 }
 
 // ciEngineRemoved reads what docker reported removed. docker rm and docker volume
@@ -492,9 +502,9 @@ func parseCIEngineListing(out []byte) (ciEngineListing, error) {
 	return l, nil
 }
 
-// ciEngineExitStatus names a failed exec by its exit status alone. An engine
-// command's stderr can carry what the engine holds, so no part of its output
-// reaches the log or an attention item.
+// ciEngineExitStatus names a failed exec by its exit status alone. ciEngineFailure
+// starts with it and adds the bounded first stderr line; the pod lookup logs no
+// more than this, since kubectl's stderr there is never logged.
 func ciEngineExitStatus(err error) string {
 	var status interface{ ExitCode() int }
 	if errors.As(err, &status) {
@@ -619,14 +629,14 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 		return false
 	}
 
-	// The captured output stays out of the log: a program's stderr can carry what
-	// the engine holds, so the line names the exec and its exit status only.
-	stdout, _, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
+	// A failed exec's log line names its exit status and the first line of its
+	// stderr, bounded; ciEngineFailure never lets stdout or a second line through.
+	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
 		"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--",
 		"sh", "-c", ciEngineListScript, "ci-engine-list", ciEngineRoot)
 	if err != nil {
 		d.ciEnginePruneLogf("list failed", "disk_maintenance: ci engine prune: the listing exec into the %s container failed (%s); nothing pruned",
-			ciCacheContainer, ciEngineExitStatus(err))
+			ciCacheContainer, ciEngineFailure(err, stderr))
 		return false
 	}
 	listing, err := parseCIEngineListing(stdout)
@@ -666,10 +676,9 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 			failed = true
 		}
 	}
-	cutoff := now.Add(-ciEngineUnusedAge).Format(time.RFC3339)
-	if _, _, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(cutoff)...); err != nil {
+	if _, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, ciEngineBuildCachePruneArgv(ciEngineUnusedAge)...); err != nil {
 		d.ciEnginePruneLogf("build cache prune failed", "disk_maintenance: ci engine prune: the build cache prune in the %s container failed (%s); the run is retried",
-			ciCacheContainer, ciEngineExitStatus(err))
+			ciCacheContainer, ciEngineFailure(err, stderr))
 		failed = true
 	}
 	afterKiB, err := d.ciEngineDataRootKiB(ctx, kubeconfig, kubeContext, pod)
@@ -690,18 +699,19 @@ func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
 // is gone from the engine afterwards. The command's exit status is not the
 // answer: docker rmi -f exits 1 over an id an earlier argument already freed. The
 // answer is docker's own report, then one presence inspect over the ids it did
-// not print. A failure is logged here, naming the kind and the exit status only.
+// not print. A failure is logged here, naming the kind, the exit status and the
+// first line of docker's stderr.
 func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext, pod string, r ciEngineRemoval) bool {
-	stdout, _, runErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.argv...)
+	stdout, stderr, runErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.argv...)
 	missing := ciEngineMissing(r, stdout)
 	if len(missing) == 0 {
 		return true
 	}
 	// The inspect exits 1 whenever one of the ids is gone, so only a failure to run
 	// it at all, not a status, stops the answer.
-	seen, _, inspectErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.presenceArgv(missing)...)
+	seen, seenErr, inspectErr := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, r.presenceArgv(missing)...)
 	if !ciEngineRan(inspectErr) {
-		d.ciEnginePruneLogf("presence "+r.kind, "disk_maintenance: ci engine prune: the %s presence check could not run (%s); the run is retried", r.kind, ciEngineExitStatus(inspectErr))
+		d.ciEnginePruneLogf("presence "+r.kind, "disk_maintenance: ci engine prune: the %s presence check could not run (%s); the run is retried", r.kind, ciEngineFailure(inspectErr, seenErr))
 		return false
 	}
 	present := ciEnginePresent(r.kind, seen)
@@ -715,7 +725,7 @@ func (d *Daemon) ciEngineRemoveKind(ctx context.Context, kubeconfig, kubeContext
 		return true
 	}
 	d.ciEnginePruneLogf("not removed "+r.kind, "disk_maintenance: ci engine prune: docker left %d of %d planned %s(s) in the %s container (the removal ended: %s); the run is retried",
-		left, len(r.ids), r.kind, ciCacheContainer, ciEngineRunEnd(runErr))
+		left, len(r.ids), r.kind, ciCacheContainer, ciEngineFailure(runErr, stderr))
 	return false
 }
 
@@ -726,12 +736,68 @@ func ciEngineRan(err error) bool {
 	return err == nil || errors.As(err, &status)
 }
 
-// ciEngineRunEnd names how a removal command ended, by its exit status alone.
-func ciEngineRunEnd(err error) string {
+// ciEngineStderrMax is the longest first stderr line a failure line carries, in
+// characters.
+const ciEngineStderrMax = 200
+
+// ciEngineKubectlErrorPrefixes are the lines kubectl prints for its own failures
+// about the pod, the context or the connection. kubectl relays the engine's stderr
+// on the same stream, so these are skipped to reach the program's own line.
+var ciEngineKubectlErrorPrefixes = []string{
+	"error: ",
+	"Error from server",
+	"Unable to connect to the server",
+	"The connection to the server",
+}
+
+// ciEngineFailure names how an engine exec ended for the log: its exit status, then,
+// for a failed exec, the first line of its stderr. A nil error is exit status 0 with
+// no stderr, since a command that succeeded has nothing to say about a failure.
+func ciEngineFailure(err error, stderr []byte) string {
 	if err == nil {
 		return "exit status 0"
 	}
-	return ciEngineExitStatus(err)
+	status := ciEngineExitStatus(err)
+	if line := ciEngineStderrLine(stderr); line != "" {
+		return status + ", stderr: " + line
+	}
+	return status
+}
+
+// ciEngineStderrLine is the first line of an engine program's stderr, bounded for the
+// log. kubectl's own error lines and blank lines are skipped; control characters,
+// newlines among them, become spaces; the line is cut at ciEngineStderrMax
+// characters.
+func ciEngineStderrLine(stderr []byte) string {
+	for _, raw := range strings.Split(string(stderr), "\n") {
+		if ciEngineKubectlLine(raw) {
+			continue
+		}
+		line := strings.TrimSpace(strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return ' '
+			}
+			return r
+		}, raw))
+		if line == "" {
+			continue
+		}
+		if runes := []rune(line); len(runes) > ciEngineStderrMax {
+			return string(runes[:ciEngineStderrMax])
+		}
+		return line
+	}
+	return ""
+}
+
+// ciEngineKubectlLine reports whether a stderr line is one kubectl printed itself.
+func ciEngineKubectlLine(line string) bool {
+	for _, prefix := range ciEngineKubectlErrorPrefixes {
+		if strings.HasPrefix(line, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // ciEngineExec runs one program in the runner's engine container with argv as
@@ -742,12 +808,12 @@ func (d *Daemon) ciEngineExec(ctx context.Context, kubeconfig, kubeContext, pod 
 }
 
 // ciEngineDataRootKiB reads the data root's size in KiB through du -sk, whose
-// first field is the figure. The error names the exit status only, never the
-// output, as every engine exec's does.
+// first field is the figure. The error names the failure the way every engine exec
+// does: the exit status and the first bounded stderr line, never stdout.
 func (d *Daemon) ciEngineDataRootKiB(ctx context.Context, kubeconfig, kubeContext, pod string) (int64, error) {
-	out, _, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "du", "-sk", ciEngineRoot)
+	out, stderr, err := d.ciEngineExec(ctx, kubeconfig, kubeContext, pod, "du", "-sk", ciEngineRoot)
 	if err != nil {
-		return 0, fmt.Errorf("du of the data root failed (%s)", ciEngineExitStatus(err))
+		return 0, fmt.Errorf("du of the data root failed (%s)", ciEngineFailure(err, stderr))
 	}
 	fields := strings.Fields(string(out))
 	if len(fields) == 0 {
