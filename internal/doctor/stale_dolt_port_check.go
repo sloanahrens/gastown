@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // StaleDoltPortCheck detects stale Dolt port files that point to wrong ports.
@@ -178,9 +179,10 @@ func (c *StaleDoltPortCheck) findPortFiles(townRoot string) []string {
 
 	// Rig .beads directories (same discovery pattern as findMetadataFiles)
 	for rigName := range loadRigNames(filepath.Join(townRoot, "mayor", "rigs.json")) {
+		rigPath := filepath.Join(townRoot, rigName)
 		locations = append(locations,
-			filepath.Join(townRoot, rigName, "mayor", "rig", ".beads", "dolt-server.port"),
-			filepath.Join(townRoot, rigName, ".beads", "dolt-server.port"),
+			filepath.Join(constants.RigBeadsWritePath(rigPath), "dolt-server.port"),
+			filepath.Join(constants.LegacyRigBeadsPath(rigPath), "dolt-server.port"),
 		)
 	}
 
@@ -225,9 +227,12 @@ func (c *StaleDoltPortCheck) findMetadataFiles(townRoot string) []string {
 
 	// Rig metadata files
 	for rigName := range loadRigNames(filepath.Join(townRoot, "mayor", "rigs.json")) {
-		rigMeta := filepath.Join(townRoot, rigName, "mayor", "rig", ".beads", "metadata.json")
-		if _, err := os.Stat(rigMeta); err == nil {
-			files = append(files, rigMeta)
+		rigPath := filepath.Join(townRoot, rigName)
+		for _, beadsDir := range []string{constants.RigBeadsWritePath(rigPath), constants.LegacyRigBeadsPath(rigPath)} {
+			rigMeta := filepath.Join(beadsDir, "metadata.json")
+			if _, err := os.Stat(rigMeta); err == nil {
+				files = append(files, rigMeta)
+			}
 		}
 	}
 

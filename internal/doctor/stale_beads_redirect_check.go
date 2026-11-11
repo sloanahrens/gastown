@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // StaleBeadsRedirectCheck detects .beads directories that have both a redirect
@@ -28,6 +30,8 @@ type StaleBeadsRedirectCheck struct {
 	staleLocations     []string        // Cached for Fix - dirs with stale files
 	missingRedirects   []redirectIssue // Cached for Fix - worktrees missing redirects
 	incorrectRedirects []redirectIssue // Cached for Fix - worktrees with wrong redirect target
+	// setupRedirect writes a worktree's redirect; nil is beads.SetupRedirect.
+	setupRedirect func(townRoot, worktreePath string) error
 }
 
 // redirectIssue represents a missing or incorrect redirect.
@@ -164,23 +168,39 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
+	// A legacy refusal is collected rather than returned, so the other worktrees
+	// are still repaired; every refusal is reported at the end.
+	var refusals []error
+	setupRedirect := c.setupRedirect
+	if setupRedirect == nil {
+		setupRedirect = beads.SetupRedirect
+	}
+
 	// Create missing redirects
 	for _, issue := range c.missingRedirects {
-		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
-			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
-			return fmt.Errorf("creating redirect for %s: %w", relPath, err)
+		relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
+		if err := refuseLegacyRedirect(issue.townRoot, issue.worktreePath, issue.expectedTarget); err != nil {
+			refusals = append(refusals, fmt.Errorf("creating redirect for %s: %w", relPath, err))
+			continue
+		}
+		if err := setupRedirect(issue.townRoot, issue.worktreePath); err != nil {
+			return errors.Join(append(refusals, fmt.Errorf("creating redirect for %s: %w", relPath, err))...)
 		}
 	}
 
 	// Fix incorrect redirects (same as creating - SetupRedirect overwrites)
 	for _, issue := range c.incorrectRedirects {
-		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
-			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
-			return fmt.Errorf("fixing redirect for %s: %w", relPath, err)
+		relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
+		if err := refuseLegacyRedirect(issue.townRoot, issue.worktreePath, issue.expectedTarget); err != nil {
+			refusals = append(refusals, fmt.Errorf("fixing redirect for %s: %w", relPath, err))
+			continue
+		}
+		if err := setupRedirect(issue.townRoot, issue.worktreePath); err != nil {
+			return errors.Join(append(refusals, fmt.Errorf("fixing redirect for %s: %w", relPath, err))...)
 		}
 	}
 
-	return nil
+	return errors.Join(refusals...)
 }
 
 // findRigDirs returns all rig directories in the town.
@@ -386,8 +406,8 @@ func (c *StaleBeadsRedirectCheck) verifyRedirectTopology(ctx *CheckContext, rigD
 	townRoot := ctx.TownRoot
 
 	// Check if rig has beads configured at all
-	rigBeadsPath := filepath.Join(rigDir, ".beads")
-	mayorBeadsPath := filepath.Join(rigDir, "mayor", "rig", ".beads")
+	rigBeadsPath := constants.RigBeadsWritePath(rigDir)
+	mayorBeadsPath := constants.LegacyRigBeadsPath(rigDir)
 
 	// If neither location has beads, skip this rig (not configured)
 	if !dirExists(rigBeadsPath) && !dirExists(mayorBeadsPath) {

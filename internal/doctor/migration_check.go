@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
@@ -413,11 +414,9 @@ func (c *DoltServerReachableCheck) findServerModeRigs(townRoot string) map[strin
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigs := loadRigNames(rigsPath)
 	for rigName := range rigs {
-		// Check mayor/rig/.beads first (canonical), then rig/.beads
-		beadsDir := filepath.Join(townRoot, rigName, "mayor", "rig", ".beads")
-		if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
-			beadsDir = filepath.Join(townRoot, rigName, ".beads")
-		}
+		// The rig's beads directory as the readers resolve it: <rig>/.beads once
+		// it owns the data, the legacy mayor/rig/.beads otherwise.
+		beadsDir := constants.RigBeadsPath(filepath.Join(townRoot, rigName))
 		if addr, ok := c.getServerAddr(beadsDir, townRoot); ok {
 			result[addr] = append(result[addr], serverModeRig{name: rigName, database: c.getDoltDatabase(beadsDir, rigName)})
 		}

@@ -348,7 +348,7 @@ func TestRoutesCheck_DirectLayoutRig(t *testing.T) {
 
 func TestDetermineRigBeadsPath_Containment(t *testing.T) {
 	t.Parallel()
-	t.Run("redirect escaping town root falls back to default", func(t *testing.T) {
+	t.Run("redirect escaping town root falls back to the rig root", func(t *testing.T) {
 		tmpDir := t.TempDir()
 
 		// Create rig with redirect that escapes the town root
@@ -363,7 +363,7 @@ func TestDetermineRigBeadsPath_Containment(t *testing.T) {
 		}
 
 		result := determineRigBeadsPath(tmpDir, "myrig")
-		expected := "myrig/mayor/rig"
+		expected := "myrig"
 		if result != expected {
 			t.Errorf("expected fallback %q for escaped redirect, got %q", expected, result)
 		}
@@ -406,6 +406,22 @@ func TestDetermineRigBeadsPath_Containment(t *testing.T) {
 		expected := "myrig"
 		if result != expected {
 			t.Errorf("expected %q for direct layout, got %q", expected, result)
+		}
+	})
+
+	// A legacy-only rig has no <rig>/.beads, so ResolveBeadsDir's default answer is not a
+	// route: the rig root would name a directory with no beads.
+	t.Run("legacy-only rig with no redirect names the legacy path, not the rig root", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mayorBeadsDir := filepath.Join(tmpDir, "myrig", "mayor", "rig", ".beads")
+		if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		result := determineRigBeadsPath(tmpDir, "myrig")
+		expected := "myrig/mayor/rig"
+		if result != expected {
+			t.Errorf("expected %q for legacy-only rig, got %q", expected, result)
 		}
 	})
 }
@@ -519,10 +535,10 @@ func TestRoutesCheck_SuboptimalRoutes(t *testing.T) {
 			t.Errorf("fix dropped the existing hq-cv- route:\n%s", contentStr)
 		}
 
-		// Run should now pass
+		// The route now names the legacy mayor/rig path, which warns until the move is done
 		result := check.Run(ctx)
-		if result.Status != StatusOK {
-			t.Errorf("expected StatusOK after fix, got %v: %s (details: %v)", result.Status, result.Message, result.Details)
+		if result.Status != StatusWarning {
+			t.Errorf("expected StatusWarning after fix to the legacy path, got %v: %s (details: %v)", result.Status, result.Message, result.Details)
 		}
 	})
 

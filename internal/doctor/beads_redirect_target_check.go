@@ -8,7 +8,13 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 )
+
+// legacyRedirectReason is the reason a worktree redirect to the legacy
+// mayor/rig/.beads is reported with. Run lists it with the warnings, and Fix
+// leaves it alone.
+var legacyRedirectReason = "redirect points at the legacy " + constants.RigLegacyBeadsRelPath() + ", the move to .beads/ is not done"
 
 // BeadsRedirectTargetCheck validates that .beads/redirect files in crew/polecat
 // worktrees point to targets that actually exist and have a working beads setup.
@@ -29,6 +35,8 @@ type brokenTarget struct {
 	target       string // Raw content of the redirect file
 	resolvedPath string // Resolved absolute path of the target
 	reason       string // Why the target is broken
+	// legacy marks a redirect to the legacy mayor/rig/.beads: a warning that Fix leaves alone.
+	legacy bool
 }
 
 // NewBeadsRedirectTargetCheck creates a new beads redirect target check.
@@ -130,6 +138,20 @@ func (c *BeadsRedirectTargetCheck) Run(ctx *CheckContext) *CheckResult {
 					resolvedPath: resolved,
 					reason:       fmt.Sprintf("target has no beads setup: %s", relWt),
 				})
+				continue
+			}
+
+			// Check 4: A redirect to the legacy mayor/rig/.beads is a warning: the
+			// move to <rig>/.beads is not done while it stands.
+			if filepath.Clean(resolved) == filepath.Clean(constants.LegacyRigBeadsPath(rigDir)) {
+				relWt, _ := filepath.Rel(ctx.TownRoot, wt)
+				broken = append(broken, brokenTarget{
+					worktreePath: wt,
+					target:       target,
+					resolvedPath: resolved,
+					reason:       fmt.Sprintf("%s: %s", legacyRedirectReason, relWt),
+					legacy:       true,
+				})
 			}
 		}
 	}
@@ -170,6 +192,12 @@ func (c *BeadsRedirectTargetCheck) Fix(ctx *CheckContext) error {
 	var unfixable []string
 
 	for _, bt := range c.brokenTargets {
+		// A legacy redirect is a warning, and Fix leaves it: recomputing it
+		// would write the legacy path back while the move is not done.
+		if bt.legacy {
+			continue
+		}
+
 		// If the redirect target directory exists but lacks beads setup,
 		// try to create config.yaml from metadata.json before giving up.
 		// This handles the case where gt rig add partially completed: the
@@ -201,8 +229,8 @@ func (c *BeadsRedirectTargetCheck) Fix(ctx *CheckContext) error {
 		}
 
 		rigRoot := filepath.Join(ctx.TownRoot, parts[0])
-		rigBeads := filepath.Join(rigRoot, ".beads")
-		mayorBeads := filepath.Join(rigRoot, "mayor", "rig", ".beads")
+		rigBeads := constants.RigBeadsWritePath(rigRoot)
+		mayorBeads := constants.LegacyRigBeadsPath(rigRoot)
 
 		// Check if either canonical location exists and has beads
 		canonicalExists := false
@@ -221,7 +249,7 @@ func (c *BeadsRedirectTargetCheck) Fix(ctx *CheckContext) error {
 		// Canonical location exists — recompute and rewrite the redirect
 		if err := recomputeRedirect(ctx.TownRoot, bt.worktreePath); err != nil {
 			relWt, _ := filepath.Rel(ctx.TownRoot, bt.worktreePath)
-			unfixable = append(unfixable, relWt)
+			unfixable = append(unfixable, fmt.Sprintf("%s (%v)", relWt, err))
 		}
 	}
 
@@ -262,11 +290,27 @@ func hasBeadsSetup(beadsDir string) bool {
 	return false
 }
 
+// refuseLegacyRedirect returns an error when a worktree redirect with the given
+// content would point at the legacy mayor/rig/.beads of a rig whose files are
+// at <rig>/.beads: no Fix writes that path back while the move is not done.
+// beads.ComputeRedirectTarget can still name the legacy path for such a rig,
+// so the refusal is checked on its answer rather than trusted.
+func refuseLegacyRedirect(townRoot, worktreePath, redirectContent string) error {
+	rigRoot := filepath.Join(townRoot, extractRigName(townRoot, worktreePath))
+	if rigBeadsAtRigRoot(rigRoot) && redirectResolvesTo(worktreePath, redirectContent, constants.LegacyRigBeadsPath(rigRoot)) {
+		return fmt.Errorf("refusing a redirect to the legacy %s: the rig's beads are at .beads/", constants.RigLegacyBeadsRelPath())
+	}
+	return nil
+}
+
 // recomputeRedirect rewrites a worktree's .beads/redirect to the target
 // beads.ComputeRedirectTarget gives, so this check and the stale-redirect check agree (gt-7po79).
 func recomputeRedirect(townRoot, worktreePath string) error {
 	redirectContent, err := beads.ComputeRedirectTarget(townRoot, worktreePath)
 	if err != nil {
+		return err
+	}
+	if err := refuseLegacyRedirect(townRoot, worktreePath, redirectContent); err != nil {
 		return err
 	}
 

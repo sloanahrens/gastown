@@ -38,7 +38,6 @@ internal/daemon/hm_skew.go	1	pending-retirement	daemon hm skew probe: the hm rig
 internal/daemon/om_skew.go	1	pending-retirement	daemon om skew probe: the om rig worktree path, om/mayor/rig
 internal/daemon/types.go	1	pending-retirement	daemon types: the daemon.json path under constants.DirMayor
 internal/daemonimage/build.go	1	pending-retirement	daemonimage build: the error text that refuses a mayor/rig clone as a build source
-internal/doctor/beads_redirect_target_check.go	1	pending-retirement	doctor beads redirect check: the mayor/rig/.beads target it compares against
 internal/doctor/branch_check.go	1	pending-retirement	doctor branch check: the mayor/rig path in its checkout list
 internal/doctor/dolt_stray_servers_check.go	1	pending-retirement	doctor dolt stray servers check: the rig's mayor/rig/.beads path it scans
 internal/doctor/editorial_required_check.go	1	pending-retirement	doctor editorial check: message naming the mayor/rig clone's .om.json
@@ -46,12 +45,10 @@ internal/doctor/foreign_remote_check.go	1	pending-retirement	doctor foreign remo
 internal/doctor/hooks_path_all_rigs_check.go	1	pending-retirement	doctor hooks path check: the mayor/rig clone it checks for each rig
 internal/doctor/migration_check.go	1	pending-retirement	doctor migration check: the rig's mayor/rig/.beads directory
 internal/doctor/patrol_check.go	1	pending-retirement	doctor patrol check: the fix hint naming the gastown mayor/rig checkout
-internal/doctor/rig_check.go	20	pending-retirement	doctor rig check: the mayor/rig clone, its git state and beads redirect, and the messages and fix hints naming it
+internal/doctor/rig_check.go	14	pending-retirement	doctor rig check: the mayor/rig clone, its git state and beads redirect, and the messages and fix hints naming it
 internal/doctor/rig_config_sync_check.go	1	pending-retirement	doctor rig config sync check: the mayor/rig checkout whose config it syncs
-internal/doctor/routes_check.go	1	pending-retirement	doctor routes check: the default route path rig/mayor/rig
 internal/doctor/sparse_checkout_check.go	1	pending-retirement	doctor sparse checkout check: the mayor/rig path it inspects
-internal/doctor/stale_beads_redirect_check.go	2	pending-retirement	doctor stale beads redirect check: the mayor/rig existence test and its .beads path
-internal/doctor/stale_dolt_port_check.go	2	pending-retirement	doctor stale dolt port check: reads the mayor/rig/.beads port and metadata files
+internal/doctor/stale_beads_redirect_check.go	1	pending-retirement	doctor stale beads redirect check: the mayor/rig existence test and its .beads path
 internal/doctor/testutil_symlink_check.go	5	pending-retirement	doctor testutil symlink check: the mayor/rig canonical testutil path and its messages
 internal/doctor/unregistered_beads_check.go	1	pending-retirement	doctor unregistered beads check: the constants.DirMayor directory name it skips
 internal/doltserver/doltserver.go	4	pending-retirement	dolt server: reads the rig's mayor/rig/.beads database and port

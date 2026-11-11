@@ -690,7 +690,9 @@ func NewBeadsRedirectCheck() *BeadsRedirectCheck {
 // DestructiveFix marks this repair as destructive (gt-638go.3): it removes a local rig .beads directory.
 func (c *BeadsRedirectCheck) DestructiveFix() bool { return true }
 
-// Run checks if the rig-level beads redirect exists when needed.
+// Run checks the rig-level beads redirect. Beads at <rig>/.beads need no
+// redirect; a redirect to the legacy mayor/rig/.beads is a warning, since the
+// move to <rig>/.beads is not done while it stands.
 func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 	// Only applies when checking a specific rig
 	if ctx.RigName == "" {
@@ -702,56 +704,84 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	rigPath := ctx.RigPath()
-	mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
-	rigBeadsDir := filepath.Join(rigPath, ".beads")
+	rigBeadsDir := constants.RigBeadsWritePath(rigPath)
+	legacyBeadsDir := constants.LegacyRigBeadsPath(rigPath)
 	redirectPath := filepath.Join(rigBeadsDir, "redirect")
 
-	// Check if this rig has tracked beads (mayor/rig/.beads exists)
-	if _, err := os.Stat(mayorRigBeads); os.IsNotExist(err) {
-		// No tracked beads - check if rig/.beads exists (local beads)
-		if _, err := os.Stat(rigBeadsDir); os.IsNotExist(err) {
+	if _, err := os.Stat(redirectPath); err == nil {
+		content, err := os.ReadFile(redirectPath)
+		if err != nil {
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusWarning,
+				Message: fmt.Sprintf("Could not read redirect file: %v", err),
+			}
+		}
+
+		target := strings.TrimSpace(string(content))
+		if !redirectTargetsLegacyBeads(rigPath, target) {
+			// Fix never rewrites a redirect for a rig whose files are at
+			// <rig>/.beads, so the repair there is removing the redirect.
+			fixHint := "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to correct the redirect"
+			if rigBeadsAtRigRoot(rigPath) {
+				fixHint = "Remove .beads/redirect: the rig's beads are at .beads/"
+			}
 			return &CheckResult{
 				Name:    c.Name(),
 				Status:  StatusError,
-				Message: "No .beads directory found at rig root",
+				Message: fmt.Sprintf("Redirect points to %q, expected none or %s", target, constants.RigLegacyBeadsRelPath()),
+				FixHint: fixHint,
+			}
+		}
+		if !dirExists(legacyBeadsDir) {
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusError,
+				Message: "Redirect points to " + constants.RigLegacyBeadsRelPath() + ", which does not exist",
 				Details: []string{
-					"Beads database not initialized for this rig",
-					"This prevents issue tracking for this rig",
+					"Missing legacy beads at: " + constants.RigLegacyBeadsRelPath(),
 				},
-				FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to initialize beads",
+				FixHint: "Remove .beads/redirect if the beads are at .beads/, or restore " + constants.RigLegacyBeadsRelPath(),
 			}
 		}
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusOK,
-			Message: "Rig uses local beads (no redirect needed)",
+			Status:  StatusWarning,
+			Message: "Rig-level redirect still points at the legacy " + constants.RigLegacyBeadsRelPath(),
+			Details: []string{
+				"Beads are at: " + constants.RigLegacyBeadsRelPath(),
+				"The move to .beads/ at the rig root is not done",
+			},
+			FixHint: "Move the beads to <rig>/.beads, then remove .beads/redirect",
 		}
 	}
 
-	// Tracked beads exist - check for conflicting local beads
-	hasLocalData := hasBeadsData(rigBeadsDir)
-	redirectExists := false
-	if _, err := os.Stat(redirectPath); err == nil {
-		redirectExists = true
-	}
-
-	// Case: Local beads directory has actual data (not just redirect)
-	if hasLocalData && !redirectExists {
+	// No redirect: the rig's beads at <rig>/.beads are used directly.
+	if rigBeadsAtRigRoot(rigPath) {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusError,
-			Message: "Conflicting local beads found with tracked beads",
-			Details: []string{
-				"Tracked beads exist at: mayor/rig/.beads",
-				"Local beads with data exist at: .beads/",
-				"Fix will remove local beads and create redirect to tracked beads",
-			},
-			FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to fix",
+			Status:  StatusOK,
+			Message: "Rig beads live at .beads/ (no redirect needed)",
 		}
 	}
 
-	// Case: No redirect file (but no conflicting data)
-	if !redirectExists {
+	// Tracked beads exist at the legacy location, with no redirect. Local
+	// beads with data here are a conflict: the directory has to go for bd to
+	// follow the tracked beads, which constants.RigBeadsPath also answers.
+	if dirExists(legacyBeadsDir) {
+		if hasBeadsData(rigBeadsDir) {
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusError,
+				Message: "Conflicting local beads found with tracked beads",
+				Details: []string{
+					"Tracked beads exist at: " + constants.RigLegacyBeadsRelPath(),
+					"Local beads with data exist at: .beads/",
+					"Fix will remove local beads and create redirect to tracked beads",
+				},
+				FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to fix",
+			}
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
@@ -765,30 +795,22 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Verify redirect points to correct location
-	content, err := os.ReadFile(redirectPath)
-	if err != nil {
-		return &CheckResult{
-			Name:    c.Name(),
-			Status:  StatusWarning,
-			Message: fmt.Sprintf("Could not read redirect file: %v", err),
-		}
-	}
-
-	target := strings.TrimSpace(string(content))
-	if target != "mayor/rig/.beads" {
+	if !dirExists(rigBeadsDir) {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusError,
-			Message: fmt.Sprintf("Redirect points to %q, expected mayor/rig/.beads", target),
-			FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to correct the redirect",
+			Message: "No .beads directory found at rig root",
+			Details: []string{
+				"Beads database not initialized for this rig",
+				"This prevents issue tracking for this rig",
+			},
+			FixHint: "Run 'gt doctor fix beads-redirect --rig " + ctx.RigName + "' to initialize beads",
 		}
 	}
-
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusOK,
-		Message: "Rig-level beads redirect is correctly configured",
+		Message: "Rig uses local beads (no redirect needed)",
 	}
 }
 
@@ -799,21 +821,26 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 	}
 
 	rigPath := ctx.RigPath()
-	mayorRigBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
-	rigBeadsDir := filepath.Join(rigPath, ".beads")
+	// The rig's beads live at <rig>/.beads: nothing here is rewritten to the
+	// legacy mayor/rig/.beads, and the local beads are not removed. Fix changes
+	// nothing in this case, so a state Run still reports as an error fails here
+	// rather than reporting success; a warning (a legacy redirect) is left as it is.
+	if rigBeadsAtRigRoot(rigPath) {
+		if res := c.Run(ctx); res.Status == StatusError {
+			return fmt.Errorf("%s: %s", res.Message, res.FixHint)
+		}
+		return nil
+	}
+
+	legacyBeadsDir := constants.LegacyRigBeadsPath(rigPath)
+	rigBeadsDir := constants.RigBeadsWritePath(rigPath)
 	redirectPath := filepath.Join(rigBeadsDir, "redirect")
 
 	// Check if tracked beads exist
-	hasTrackedBeads := true
-	if _, err := os.Stat(mayorRigBeads); os.IsNotExist(err) {
-		hasTrackedBeads = false
-	}
+	hasTrackedBeads := dirExists(legacyBeadsDir)
 
 	// Check if local beads exist
-	hasLocalBeads := true
-	if _, err := os.Stat(rigBeadsDir); os.IsNotExist(err) {
-		hasLocalBeads = false
-	}
+	hasLocalBeads := dirExists(rigBeadsDir)
 
 	// Case 1: No beads at all - initialize with bd init
 	if !hasTrackedBeads && !hasLocalBeads {
@@ -868,12 +895,12 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
-	// Case 2: Tracked beads exist - create redirect (may need to remove conflicting local beads)
+	// Case 2: Tracked beads exist and the rig's files are not at <rig>/.beads -
+	// create the redirect to the legacy copy. A local beads database with no
+	// redirect is a genuine conflict: the directory has to go for bd to follow
+	// the tracked beads. When a redirect is already present, only its target
+	// is wrong, so rewriting it must leave metadata.json and local data in place.
 	if hasTrackedBeads {
-		// A local beads database with no redirect is a genuine conflict: the
-		// directory has to go for bd to follow the tracked beads. When a
-		// redirect is already present, only its target is wrong, so rewriting
-		// it must leave metadata.json and any local data in place.
 		_, redirectErr := os.Stat(redirectPath)
 		if hasLocalBeads && errors.Is(redirectErr, fs.ErrNotExist) && hasBeadsData(rigBeadsDir) {
 			// Remove conflicting local beads directory
@@ -888,12 +915,42 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		}
 
 		// Write redirect file
-		if err := os.WriteFile(redirectPath, []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		if err := os.WriteFile(redirectPath, []byte(constants.RigLegacyBeadsRelPath()+"\n"), 0644); err != nil {
 			return fmt.Errorf("writing redirect file: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// rigBeadsAtRigRoot reports whether a rig's real beads files are at
+// <rig>/.beads: the directory holds metadata.json, the file
+// constants.RigBeadsPath takes as the data's home. A redirect file does not
+// change the answer, so a stale legacy redirect beside metadata at the rig root
+// is still a rig whose files moved. A config.yaml alone is not the data: the
+// database it belongs to may still be at the legacy location.
+func rigBeadsAtRigRoot(rigPath string) bool {
+	return fileExists(filepath.Join(constants.RigBeadsWritePath(rigPath), "metadata.json"))
+}
+
+// redirectTargetsLegacyBeads reports whether a rig-root redirect's content
+// resolves to the legacy mayor/rig/.beads. A relative target resolves from the
+// rig root, as beads.ResolveBeadsDir resolves it.
+func redirectTargetsLegacyBeads(rigPath, target string) bool {
+	return redirectResolvesTo(rigPath, target, constants.LegacyRigBeadsPath(rigPath))
+}
+
+// redirectResolvesTo reports whether a redirect's content, resolved from
+// workDir when relative, names dest.
+func redirectResolvesTo(workDir, target, dest string) bool {
+	if target == "" {
+		return false
+	}
+	resolved := target
+	if !filepath.IsAbs(target) {
+		resolved = filepath.Join(workDir, target)
+	}
+	return filepath.Clean(resolved) == filepath.Clean(dest)
 }
 
 // ensureOwnedDir creates dir when it is absent and reports whether this call
