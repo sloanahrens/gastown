@@ -83,6 +83,14 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 		fmt.Fprintln(stderr, err)
 		return int(installer.ExitFailed)
 	}
+	// The installer's gateway step is gone (gt-a2uug4.18), so nothing uses the
+	// home or LaunchAgents directory these name. A run that sets one says so
+	// rather than taking it silently (gt-rb4sf4).
+	for _, name := range []string{"INSTALL_GT_GATEWAY_HOME", "INSTALL_GT_LAUNCHD_DIR"} {
+		if env.getenv(name) != "" {
+			c.Warn(name + " is ignored: the Mac OpenShell gateway is retired (gt-2kerwq)")
+		}
+	}
 	home, err := env.home()
 	if err != nil {
 		fmt.Fprintln(stderr, err)

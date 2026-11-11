@@ -82,7 +82,7 @@ func TestForgejoHostAgrees(t *testing.T) {
 		{"https://forgejo.example/owner/gastown.git", ""},
 	}
 	for _, host := range []string{"forgejo", "forgejo.internal", "Forgejo-1.example.test", "host.docker.internal", "127.0.0.1"} {
-		p := config.SandboxProfile{Image: "i", Policy: "deploy/p.yaml", ForgejoHost: host}
+		p := config.SandboxProfile{Gateway: "k8s", Image: "i", Policy: "deploy/p.yaml", ForgejoHost: host}
 		if err := p.Validate("p"); err != nil {
 			t.Fatalf("Validate(%q) = %v; want the host accepted", host, err)
 		}

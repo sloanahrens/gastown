@@ -17,35 +17,35 @@ func TestSandboxProfileKubernetesCacheClaim(t *testing.T) {
 	}{
 		{
 			name:    "a valid DNS-1123 claim on a kubernetes profile validates",
-			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Driver: SandboxDriverKubernetes, KubernetesCacheClaim: "gt-shared-cache"},
+			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Gateway: "k8s", Driver: SandboxDriverKubernetes, KubernetesCacheClaim: "gt-shared-cache"},
 		},
 		{
 			name:    "no claim on a kubernetes profile is no cache mount, as today",
-			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Driver: SandboxDriverKubernetes},
+			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Gateway: "k8s", Driver: SandboxDriverKubernetes},
 		},
 		{
 			name:    "an uppercase name fails and names the field",
-			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Driver: SandboxDriverKubernetes, KubernetesCacheClaim: "Gt_Cache"},
+			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Gateway: "k8s", Driver: SandboxDriverKubernetes, KubernetesCacheClaim: "Gt_Cache"},
 			wantErr: "kubernetes_cache_claim",
 		},
 		{
 			name:    "a name longer than 63 characters fails and names the field",
-			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Driver: SandboxDriverKubernetes, KubernetesCacheClaim: strings.Repeat("a", 64)},
+			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Gateway: "k8s", Driver: SandboxDriverKubernetes, KubernetesCacheClaim: strings.Repeat("a", 64)},
 			wantErr: "kubernetes_cache_claim",
 		},
 		{
 			name:    "a claim on a docker profile fails",
-			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Driver: SandboxDriverDocker, KubernetesCacheClaim: "gt-shared-cache"},
+			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Gateway: "k8s", Driver: SandboxDriverDocker, KubernetesCacheClaim: "gt-shared-cache"},
 			wantErr: "kubernetes_cache_claim",
 		},
 		{
 			name:    "a claim on an unset-driver profile fails",
-			profile: SandboxProfile{Image: "img", Policy: "p.yaml", KubernetesCacheClaim: "gt-shared-cache"},
+			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Gateway: "k8s", KubernetesCacheClaim: "gt-shared-cache"},
 			wantErr: "kubernetes_cache_claim",
 		},
 		{
 			name:    "cache_volume on a kubernetes profile still fails",
-			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Driver: SandboxDriverKubernetes, CacheVolume: "{rig}"},
+			profile: SandboxProfile{Image: "img", Policy: "p.yaml", Gateway: "k8s", Driver: SandboxDriverKubernetes, CacheVolume: "{rig}"},
 			wantErr: "cache_volume",
 		},
 	}
