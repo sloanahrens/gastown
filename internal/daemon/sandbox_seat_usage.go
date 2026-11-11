@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -23,11 +22,11 @@ import (
 // they are removed. A reused worktree keeps its predecessor's transcripts: those
 // last written before the seat started are left out.
 
-// seatUsageHook holds the seams of the seat-end usage record. A nil function
-// is the production one.
+// seatUsageHook holds the seams of the seat-end usage record.
 type seatUsageHook struct {
-	// list names the transcripts under a worktree; nil is
-	// agentlog.ProjectTranscripts.
+	// list names the transcripts under a worktree. It has no default: a nil list
+	// is refused, so a seat end never reads the host's Claude config and home
+	// unless it was wired to. sandboxSeatEnder wires agentlog.ProjectTranscripts.
 	list func(townRoot, workDir string) ([]string, error)
 	// write merges a record into the usage tree; nil is usageattrib.Write.
 	write func(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error
@@ -36,6 +35,10 @@ type seatUsageHook struct {
 // errNoSeatStart is the refusal when a seat has transcripts but no record names
 // when it started: they cannot be told from a predecessor's, so none is counted.
 var errNoSeatStart = errors.New("its sandbox record is gone, so its start is unknown and its transcripts cannot be told from its predecessor's")
+
+// errSeatUsageUnlisted is the refusal when no transcript lister is wired: the
+// seat's transcripts are not read, and no record is written.
+var errSeatUsageUnlisted = errors.New("no transcript lister is wired, so its transcripts are not read")
 
 // seatStartedAt is when the seat started: the creation stamp of its sandbox
 // record. A seat whose record is gone has no start, and the zero time says so.
@@ -54,12 +57,12 @@ func (h *patrolScanHost) seatStartedAt(rig, name string) (time.Time, error) {
 // writeSeatUsage writes the usage record of the seat rig/name, which ends now
 // and started at start, before its directories are removed. startErr is what
 // seatStartedAt reported. A seat with no transcript written since it started
-// writes nothing. The error is for the caller to log once: the removal goes on
-// either way.
+// writes nothing. A seat with no lister wired is refused before anything is
+// read. The error is for the caller to log once: the removal goes on either way.
 func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLanding, start time.Time, startErr error) error {
 	list := h.seatUsage.list
 	if list == nil {
-		list = agentlog.ProjectTranscripts
+		return errSeatUsageUnlisted
 	}
 	write := h.seatUsage.write
 	if write == nil {

@@ -424,3 +424,42 @@ func TestSandboxSeatEndUsageReadsTheStartBeforeAnErroredSandboxGoes(t *testing.T
 		t.Error("the seat's directories are still there after the removal")
 	}
 }
+
+// TestSeatEndUsageUnlistedSeamRefuses: a seat end with no transcript lister wired
+// reads no transcripts from the host's Claude config and home, writes no usage
+// record, logs the refusal once, and still removes the seat.
+func TestSeatEndUsageUnlistedSeamRefuses(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	f.host.d.clock = clockwork.NewFakeClockAt(end)
+	f.writeSeatRecordAt(start)
+	var logs bytes.Buffer
+	f.host.d.logger = log.New(&logs, "", 0)
+	writes := 0
+	f.host.seatUsage.write = func(string, dashboard.UsageRecord, []string) error {
+		writes++
+		return nil
+	}
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("a seat with no transcript lister wired was not removed")
+	}
+	if writes != 0 {
+		t.Errorf("usage writes = %d, want 0", writes)
+	}
+	if got := strings.Count(logs.String(), "usage record is not written"); got != 1 {
+		t.Errorf("usage failures logged %d times, want 1; log:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), errSeatUsageUnlisted.Error()) {
+		t.Errorf("log does not name the refusal %q:\n%s", errSeatUsageUnlisted, logs.String())
+	}
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat's directories are still there after the removal")
+	}
+}

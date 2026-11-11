@@ -407,7 +407,8 @@ type patrolScanHost struct {
 	// need not produce.
 	writePendingSeatEnd func(townRoot, rig, name string, landing sandboxSeatLanding) error
 	// seatUsage is the seam of the work usage record a sandbox seat's end
-	// writes (sandbox_seat_usage.go). Its zero value is the production one.
+	// writes (sandbox_seat_usage.go). Its zero value reads no transcripts: the
+	// production seat end wires the lister (sandboxSeatEnder).
 	seatUsage seatUsageHook
 	// sandboxRecordBudget is the records one record pass may check, each a tmux
 	// probe and, unless a live session answers, a gateway question: 20
