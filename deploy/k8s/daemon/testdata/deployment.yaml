@@ -118,6 +118,10 @@ spec:
               mountPath: /run/gt/xdg/gt/ledger-reader.dsn
               subPath: ledger-reader.dsn
               readOnly: true
+            - name: daemon-dolt-archive-key
+              mountPath: /run/gt/xdg/gt/dolt-archive.key
+              subPath: dolt-archive.key
+              readOnly: true
             - name: daemon-om-daemon-token
               mountPath: /run/secrets/om-token
               subPath: om-daemon-token
@@ -237,6 +241,10 @@ spec:
         - name: daemon-ledger-reader-dsn
           secret:
             secretName: daemon-ledger-reader.dsn
+            defaultMode: 384
+        - name: daemon-dolt-archive-key
+          secret:
+            secretName: daemon-dolt-archive.key
             defaultMode: 384
         - name: daemon-openshell
           secret:

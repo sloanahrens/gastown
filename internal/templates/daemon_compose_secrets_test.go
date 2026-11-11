@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -325,6 +326,96 @@ func TestDaemonComposeSecretsEnforcesTheMode(t *testing.T) {
 			}
 		}
 		t.Errorf("daemon volumes = %+v, want the read-only mount %+v", f.Services["daemon"].Volumes, want)
+	})
+}
+
+// shippedSecretEntry is the shipped manifest's files entry for name, read from
+// deploy/daemon/secrets.yaml, so a test drives the entry the daemon ships and not
+// a stand-in with the same name.
+func shippedSecretEntry(t *testing.T, name string) templates.SecretFile {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "daemon", "secrets.yaml"))
+	if err != nil {
+		t.Fatalf("reading the shipped manifest: %v", err)
+	}
+	manifest, err := templates.ParseSecretsManifest(data)
+	if err != nil {
+		t.Fatalf("the shipped manifest does not parse: %v", err)
+	}
+	for _, f := range manifest.Files {
+		if f.Name == name {
+			return f
+		}
+	}
+	t.Fatalf("the shipped manifest lists no files entry %s", name)
+	return templates.SecretFile{}
+}
+
+// The backup repository's deploy key is an optional files entry at mode 0600,
+// read by the repo-local core.sshCommand rather than by daemon code. With the key
+// present the daemon mounts it read-only at its own path and at the XDG path; with
+// it absent the render succeeds and mounts nothing for it; with it readable by
+// group or other the render is refused, naming the entry and the mode (gt-l6h72l).
+func TestDaemonComposeSecretsDoltArchiveKey(t *testing.T) {
+	t.Parallel()
+	const name = "dolt-archive.key"
+
+	t.Run("present is mounted at its own path and the XDG path", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := secretConfigDir(t, name)
+		s := liveSpec()
+		s.ConfigDir = dir
+		s.Secrets = []templates.SecretFile{shippedSecretEntry(t, name)}
+
+		_, f := render(t, s)
+		host := filepath.Join(dir, name)
+		for _, want := range []composeVolume{
+			{Type: "bind", Source: host, Target: host, ReadOnly: true},
+			{Type: "bind", Source: host, Target: filepath.Join(templates.LiveConfigDirPath, name), ReadOnly: true},
+		} {
+			if !slices.Contains(f.Services["daemon"].Volumes, want) {
+				t.Errorf("daemon volumes = %+v, want the read-only mount %+v", f.Services["daemon"].Volumes, want)
+			}
+		}
+	})
+
+	t.Run("absent is skipped with a note and not mounted", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		s := liveSpec()
+		s.ConfigDir = dir
+		s.Secrets = []templates.SecretFile{shippedSecretEntry(t, name)}
+
+		out, f := render(t, s)
+		if !strings.Contains(out, `# secrets manifest: optional file "dolt-archive.key" is not present, so it is not mounted`) {
+			t.Errorf("the render carries no note that the optional key was skipped:\n%s", out)
+		}
+		for _, v := range f.Services["daemon"].Volumes {
+			if inside(dir, v.Source) {
+				t.Errorf("the daemon mounts %s from a config directory that holds no key, want no mount for the absent optional key", v.Source)
+			}
+		}
+	})
+
+	t.Run("readable by group or other is refused naming the entry and the mode", func(t *testing.T) {
+		t.Parallel()
+		dir, _ := secretConfigDir(t, name)
+		if err := os.Chmod(filepath.Join(dir, name), 0o640); err != nil {
+			t.Fatalf("chmod: %v", err)
+		}
+		s := liveSpec()
+		s.ConfigDir = dir
+		s.Secrets = []templates.SecretFile{shippedSecretEntry(t, name)}
+
+		out, err := templates.RenderDaemonCompose(s)
+		if err == nil {
+			t.Fatalf("RenderDaemonCompose over a 0640 key = a render, want a refusal:\n%s", out)
+		}
+		for _, want := range []string{`"dolt-archive.key"`, "0640", "group or other"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to name %q", err, want)
+			}
+		}
 	})
 }
 
