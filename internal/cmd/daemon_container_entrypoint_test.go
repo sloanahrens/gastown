@@ -80,7 +80,14 @@ type entrypointRig struct {
 	installs       []string
 	mangoTownRoots []string
 	mangoErr       error
-	calls          [][]string
+	// deployTownRoots is the town root each directive deploy was given, deployRanAt
+	// is len(calls) when the last one ran, and deployErr fails it. logs holds each
+	// line the entrypoint logged.
+	deployTownRoots []string
+	deployRanAt     int
+	deployErr       error
+	logs            []string
+	calls           [][]string
 }
 
 // scratchRig is a container whose town root is the scratch town: every
@@ -171,6 +178,15 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 			r.installs = append(r.installs, "mango")
 			r.mangoTownRoots = append(r.mangoTownRoots, townRoot)
 			return r.mangoErr
+		},
+		deployDirectives: func(townRoot string) ([]string, error) {
+			r.installs = append(r.installs, "directives")
+			r.deployTownRoots = append(r.deployTownRoots, townRoot)
+			r.deployRanAt = len(r.calls)
+			return nil, r.deployErr
+		},
+		logf: func(format string, args ...any) {
+			r.logs = append(r.logs, fmt.Sprintf(format, args...))
 		},
 		scratch:     r.scratch,
 		omTokenFile: r.omTokenFile,
@@ -2525,5 +2541,123 @@ func TestEntrypointMangoFailureStopsBeforeTheDaemonExec(t *testing.T) {
 	}
 	if n := r.execCalls(); n != 0 {
 		t.Errorf("the daemon was exec'd %d times after a failed mango install, want none", n)
+	}
+}
+
+// The central directives deploy from the gastown bare repo after the mango
+// install and before the daemon is exec'd: the call order is plugins, mango,
+// directives, and the exec is the next command run after the deploy.
+func TestEntrypointDirectivesDeployAfterTheMangoBeforeTheDaemonExec(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	r.exists[config.CentralDirectiveRepo(entrypointTown)] = true
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	if !slices.Equal(r.installs, []string{"plugins", "mango", "directives"}) {
+		t.Errorf("installers ran in order %v, want plugins, mango and then directives", r.installs)
+	}
+	if !slices.Equal(r.deployTownRoots, []string{entrypointTown}) {
+		t.Errorf("directive deploys ran for %v, want the town root once", r.deployTownRoots)
+	}
+	if r.deployRanAt >= len(r.calls) || len(r.calls[r.deployRanAt]) < 2 || r.calls[r.deployRanAt][1] != "daemon" {
+		t.Errorf("the command after the directive deploy is not the daemon exec; calls from %d: %v", r.deployRanAt, r.calls[r.deployRanAt:])
+	}
+	if n := r.execCalls(); n != 1 {
+		t.Errorf("recorded %d daemon exec argv, want one", n)
+	}
+}
+
+// A commit the bare repo does not hold yet is a warning that names it, and the
+// daemon still starts. Any other deploy error refuses before the exec.
+func TestEntrypointDirectivesDeployFailurePolicy(t *testing.T) {
+	t.Parallel()
+	const commit = "2222222"
+	tests := []struct {
+		name      string
+		deployErr error
+		wantErr   bool
+		wantExec  int
+		wantWarn  bool
+	}{
+		{
+			name:      "a commit the repo lacks warns and the daemon starts",
+			deployErr: fmt.Errorf("central directives: commit %s is not in the repo: %w", commit, config.ErrDirectiveCommitMissing),
+			wantExec:  1,
+			wantWarn:  true,
+		},
+		{
+			name:      "a write failure refuses before the exec",
+			deployErr: errors.New("central directives: writing directives/a.md: permission denied"),
+			wantErr:   true,
+			wantExec:  0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := townRig()
+			r.exists[config.CentralDirectiveRepo(entrypointTown)] = true
+			r.deployErr = tc.deployErr
+			err := runContainerEntrypoint(r.entrypoint())
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "the daemon was not started") {
+					t.Errorf("error = %v, want a refusal ending in the daemon was not started", err)
+				}
+			} else if err != nil {
+				t.Errorf("runContainerEntrypoint: %v, want nil", err)
+			}
+			if n := r.execCalls(); n != tc.wantExec {
+				t.Errorf("recorded %d daemon exec argv, want %d", n, tc.wantExec)
+			}
+			warned := 0
+			for _, line := range r.logs {
+				if strings.Contains(line, "warning") && strings.Contains(line, commit) {
+					warned++
+				}
+			}
+			if tc.wantWarn && warned != 1 {
+				t.Errorf("logs = %q, want one warning naming commit %s", r.logs, commit)
+			}
+			if !tc.wantWarn && warned != 0 {
+				t.Errorf("logs = %q, want no commit warning", r.logs)
+			}
+		})
+	}
+}
+
+// A repo that cannot be checked refuses: the entrypoint does not guess that the
+// repo is absent, and the deploy does not run.
+func TestEntrypointDirectivesRefuseAnUnreadableRepo(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	r.brokenPath = config.CentralDirectiveRepo(entrypointTown)
+	err := runContainerEntrypoint(r.entrypoint())
+	if err == nil || !strings.Contains(err.Error(), "the daemon was not started") {
+		t.Fatalf("error = %v, want a refusal ending in the daemon was not started", err)
+	}
+	if len(r.deployTownRoots) != 0 {
+		t.Errorf("directive deploy ran for %v, want none", r.deployTownRoots)
+	}
+	if n := r.execCalls(); n != 0 {
+		t.Errorf("the daemon was exec'd %d times after an unreadable repo, want none", n)
+	}
+}
+
+// A town with no gastown rig skips the deploy with one log line and starts.
+func TestEntrypointDirectivesSkipATownWithNoGastownRig(t *testing.T) {
+	t.Parallel()
+	r := townRig()
+	if err := runContainerEntrypoint(r.entrypoint()); err != nil {
+		t.Fatalf("runContainerEntrypoint: %v", err)
+	}
+	if len(r.deployTownRoots) != 0 {
+		t.Errorf("directive deploy ran for %v, want none without a gastown rig", r.deployTownRoots)
+	}
+	if len(r.logs) != 1 {
+		t.Errorf("logs = %q, want exactly one skip line", r.logs)
+	}
+	if n := r.execCalls(); n != 1 {
+		t.Errorf("recorded %d daemon exec argv, want one", n)
 	}
 }

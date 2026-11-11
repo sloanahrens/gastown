@@ -217,8 +217,15 @@ type gitDirectiveSource struct {
 	run  gitRunner
 }
 
+// hasCommit returns ErrDirectiveCommitMissing when the repo is readable and does
+// not hold commit. cat-file fails the same way for a missing commit and for an
+// unreadable repo, so the repo is probed before the commit is called missing: an
+// unreadable repo is not a commit it lacks, and must not read as one.
 func (s gitDirectiveSource) hasCommit(commit string) error {
 	if _, err := s.run(s.repo, "cat-file", "-e", commit+"^{commit}"); err != nil {
+		if _, rerr := s.run(s.repo, "rev-parse", "--git-dir"); rerr != nil {
+			return fmt.Errorf("commit %s: reading %s: %w", commit, s.repo, rerr)
+		}
 		return fmt.Errorf("commit %s is not in %s: %w (%w)", commit, s.repo, ErrDirectiveCommitMissing, err)
 	}
 	return nil
