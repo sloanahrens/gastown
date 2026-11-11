@@ -15,25 +15,34 @@ import (
 // determineRigBeadsPath returns the correct route path for a rig based on its actual layout.
 // Uses ResolveBeadsDir to follow any redirects (e.g., rig/.beads/redirect -> mayor/rig/.beads).
 // Falls back to the rig root, where the rig's beads live, if the resolved path is invalid or escapes the town root.
+// The rig root is only an answer when <rig>/.beads exists: ResolveBeadsDir answers with
+// <rig>/.beads for a rig with no redirect, so a legacy-only rig would otherwise get a route
+// to a directory with no beads, and that rig gets the legacy <rig>/mayor/rig path instead.
 func determineRigBeadsPath(townRoot, rigName string) string {
-	defaultPath := rigName
+	routePath := rigName
 	rigPath := filepath.Join(townRoot, rigName)
 	resolved := beads.ResolveBeadsDir(rigPath)
 
-	rel, err := filepath.Rel(townRoot, resolved)
-	if err != nil {
-		return defaultPath
+	if rel, err := filepath.Rel(townRoot, resolved); err == nil {
+		// Normalize to forward slashes for consistent string operations on all platforms
+		rel = filepath.ToSlash(rel)
+
+		// Validate the resolved path stays within the town root
+		if rel != ".." && !strings.HasPrefix(rel, "../") {
+			routePath = strings.TrimSuffix(rel, "/.beads")
+		}
 	}
 
-	// Normalize to forward slashes for consistent string operations on all platforms
-	rel = filepath.ToSlash(rel)
-
-	// Validate the resolved path stays within the town root
-	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return defaultPath
+	if rootRouteWithoutBeads(townRoot, rigName, routePath) {
+		return rigName + "/" + legacyRouteRel()
 	}
+	return routePath
+}
 
-	return strings.TrimSuffix(rel, "/.beads")
+// rootRouteWithoutBeads reports whether a route names the rig root of a rig whose beads
+// are not at <rig>/.beads. Such a route is not accepted: it points at a directory with no beads.
+func rootRouteWithoutBeads(townRoot, rigName, routePath string) bool {
+	return routePath == rigName && !dirExists(constants.RigBeadsWritePath(filepath.Join(townRoot, rigName)))
 }
 
 // RoutesCheck verifies that beads routing is properly configured.
@@ -409,10 +418,13 @@ func (c *RoutesCheck) Fix(ctx *CheckContext) error {
 		canonicalPath := filepath.Join(ctx.TownRoot, rigRoutePath)
 
 		if idx, exists := routeMap[prefix]; exists {
-			// Route exists — only rewrite if current path is redirect-dependent
-			// or names the legacy mayor/rig, and canonical target has a real
-			// .beads directory (not a redirect).
-			if routes[idx].Path != rigRoutePath && (isRedirectDependent(ctx.TownRoot, routes[idx].Path) || isLegacyRoutePath(routes[idx].Path)) {
+			// Route exists — only rewrite if current path is redirect-dependent,
+			// names the legacy mayor/rig, or names a rig root with no beads, and
+			// canonical target has a real .beads directory (not a redirect).
+			notAccepted := isRedirectDependent(ctx.TownRoot, routes[idx].Path) ||
+				isLegacyRoutePath(routes[idx].Path) ||
+				rootRouteWithoutBeads(ctx.TownRoot, rigName, routes[idx].Path)
+			if routes[idx].Path != rigRoutePath && notAccepted {
 				if hasRealBeadsDir(canonicalPath) {
 					routes[idx].Path = rigRoutePath
 					modified = true

@@ -729,7 +729,7 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 			return &CheckResult{
 				Name:    c.Name(),
 				Status:  StatusError,
-				Message: fmt.Sprintf("Redirect points to %q, expected none or mayor/rig/.beads", target),
+				Message: fmt.Sprintf("Redirect points to %q, expected none or %s", target, constants.RigLegacyBeadsRelPath()),
 				FixHint: fixHint,
 			}
 		}
@@ -737,19 +737,19 @@ func (c *BeadsRedirectCheck) Run(ctx *CheckContext) *CheckResult {
 			return &CheckResult{
 				Name:    c.Name(),
 				Status:  StatusError,
-				Message: "Redirect points to mayor/rig/.beads, which does not exist",
+				Message: "Redirect points to " + constants.RigLegacyBeadsRelPath() + ", which does not exist",
 				Details: []string{
-					"Missing legacy beads at: mayor/rig/.beads",
+					"Missing legacy beads at: " + constants.RigLegacyBeadsRelPath(),
 				},
-				FixHint: "Remove .beads/redirect if the beads are at .beads/, or restore mayor/rig/.beads",
+				FixHint: "Remove .beads/redirect if the beads are at .beads/, or restore " + constants.RigLegacyBeadsRelPath(),
 			}
 		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: "Rig-level redirect still points at the legacy mayor/rig/.beads",
+			Message: "Rig-level redirect still points at the legacy " + constants.RigLegacyBeadsRelPath(),
 			Details: []string{
-				"Beads are at: mayor/rig/.beads",
+				"Beads are at: " + constants.RigLegacyBeadsRelPath(),
 				"The move to .beads/ at the rig root is not done",
 			},
 			FixHint: "Move the beads to <rig>/.beads, then remove .beads/redirect",
@@ -822,8 +822,13 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 	rigPath := ctx.RigPath()
 	// The rig's beads live at <rig>/.beads: nothing here is rewritten to the
-	// legacy mayor/rig/.beads, and the local beads are not removed.
+	// legacy mayor/rig/.beads, and the local beads are not removed. Fix changes
+	// nothing in this case, so a state Run still reports as an error fails here
+	// rather than reporting success; a warning (a legacy redirect) is left as it is.
 	if rigBeadsAtRigRoot(rigPath) {
+		if res := c.Run(ctx); res.Status == StatusError {
+			return fmt.Errorf("%s: %s", res.Message, res.FixHint)
+		}
 		return nil
 	}
 

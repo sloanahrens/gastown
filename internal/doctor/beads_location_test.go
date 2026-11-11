@@ -307,6 +307,24 @@ func TestRoutesCheck_BeadsLocationTable(t *testing.T) {
 			},
 		},
 		{
+			name: "rig-root route for a legacy-only rig is not accepted and Fix moves it to the legacy path",
+			setup: func(t *testing.T, rigPath string) string {
+				writeBeadsLocationFiles(t, filepath.Join(rigPath, "mayor", "rig", ".beads"), beadsLocationRigFiles)
+				return `{"prefix":"cr-","path":"crom"}`
+			},
+			wantStatus: StatusWarning,
+			wantDetail: "no .beads directory",
+			afterFix: func(t *testing.T, routesPath string) {
+				content, err := os.ReadFile(routesPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(content), `"path":"crom/mayor/rig"`) {
+					t.Errorf("routes after Fix = %s, want the route moved to the legacy path", content)
+				}
+			},
+		},
+		{
 			name: "route to a missing legacy target is invalid",
 			setup: func(t *testing.T, rigPath string) string {
 				writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), map[string]string{

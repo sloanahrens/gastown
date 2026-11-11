@@ -45,7 +45,7 @@ internal/doctor/foreign_remote_check.go	1	pending-retirement	doctor foreign remo
 internal/doctor/hooks_path_all_rigs_check.go	1	pending-retirement	doctor hooks path check: the mayor/rig clone it checks for each rig
 internal/doctor/migration_check.go	1	pending-retirement	doctor migration check: the rig's mayor/rig/.beads directory
 internal/doctor/patrol_check.go	1	pending-retirement	doctor patrol check: the fix hint naming the gastown mayor/rig checkout
-internal/doctor/rig_check.go	20	pending-retirement	doctor rig check: the mayor/rig clone, its git state and beads redirect, and the messages and fix hints naming it
+internal/doctor/rig_check.go	14	pending-retirement	doctor rig check: the mayor/rig clone, its git state and beads redirect, and the messages and fix hints naming it
 internal/doctor/rig_config_sync_check.go	1	pending-retirement	doctor rig config sync check: the mayor/rig checkout whose config it syncs
 internal/doctor/sparse_checkout_check.go	1	pending-retirement	doctor sparse checkout check: the mayor/rig path it inspects
 internal/doctor/stale_beads_redirect_check.go	1	pending-retirement	doctor stale beads redirect check: the mayor/rig existence test and its .beads path

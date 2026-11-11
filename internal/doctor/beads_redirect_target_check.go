@@ -35,6 +35,8 @@ type brokenTarget struct {
 	target       string // Raw content of the redirect file
 	resolvedPath string // Resolved absolute path of the target
 	reason       string // Why the target is broken
+	// legacy marks a redirect to the legacy mayor/rig/.beads: a warning that Fix leaves alone.
+	legacy bool
 }
 
 // NewBeadsRedirectTargetCheck creates a new beads redirect target check.
@@ -148,6 +150,7 @@ func (c *BeadsRedirectTargetCheck) Run(ctx *CheckContext) *CheckResult {
 					target:       target,
 					resolvedPath: resolved,
 					reason:       fmt.Sprintf("%s: %s", legacyRedirectReason, relWt),
+					legacy:       true,
 				})
 			}
 		}
@@ -191,7 +194,7 @@ func (c *BeadsRedirectTargetCheck) Fix(ctx *CheckContext) error {
 	for _, bt := range c.brokenTargets {
 		// A legacy redirect is a warning, and Fix leaves it: recomputing it
 		// would write the legacy path back while the move is not done.
-		if strings.Contains(bt.reason, legacyRedirectReason) {
+		if bt.legacy {
 			continue
 		}
 

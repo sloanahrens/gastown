@@ -408,6 +408,22 @@ func TestDetermineRigBeadsPath_Containment(t *testing.T) {
 			t.Errorf("expected %q for direct layout, got %q", expected, result)
 		}
 	})
+
+	// A legacy-only rig has no <rig>/.beads, so ResolveBeadsDir's default answer is not a
+	// route: the rig root would name a directory with no beads.
+	t.Run("legacy-only rig with no redirect names the legacy path, not the rig root", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		mayorBeadsDir := filepath.Join(tmpDir, "myrig", "mayor", "rig", ".beads")
+		if err := os.MkdirAll(mayorBeadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		result := determineRigBeadsPath(tmpDir, "myrig")
+		expected := "myrig/mayor/rig"
+		if result != expected {
+			t.Errorf("expected %q for legacy-only rig, got %q", expected, result)
+		}
+	})
 }
 
 func TestRoutesCheck_SuboptimalRoutes(t *testing.T) {

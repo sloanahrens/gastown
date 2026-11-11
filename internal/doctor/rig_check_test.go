@@ -379,8 +379,9 @@ func TestBeadsRedirectFixKeepsMetadataOnWrongRedirect(t *testing.T) {
 		t.Fatalf("wrong redirect before fix: %v %q, want StatusError", result.Status, result.Message)
 	}
 
-	if err := check.Fix(ctx); err != nil {
-		t.Fatalf("Fix failed: %v", err)
+	// Fix changes nothing here, and Run still reports the error, so Fix fails.
+	if err := check.Fix(ctx); err == nil {
+		t.Fatal("Fix = nil, want an error: the wrong redirect beside metadata.json is still there")
 	}
 
 	if _, err := os.Stat(filepath.Join(rigBeads, "metadata.json")); err != nil {

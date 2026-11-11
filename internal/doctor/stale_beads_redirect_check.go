@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -165,31 +166,35 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
+	// A legacy refusal is collected rather than returned, so the other worktrees
+	// are still repaired; every refusal is reported at the end.
+	var refusals []error
+
 	// Create missing redirects
 	for _, issue := range c.missingRedirects {
+		relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
 		if err := refuseLegacyRedirect(issue.townRoot, issue.worktreePath, issue.expectedTarget); err != nil {
-			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
-			return fmt.Errorf("creating redirect for %s: %w", relPath, err)
+			refusals = append(refusals, fmt.Errorf("creating redirect for %s: %w", relPath, err))
+			continue
 		}
 		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
-			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
-			return fmt.Errorf("creating redirect for %s: %w", relPath, err)
+			return errors.Join(append(refusals, fmt.Errorf("creating redirect for %s: %w", relPath, err))...)
 		}
 	}
 
 	// Fix incorrect redirects (same as creating - SetupRedirect overwrites)
 	for _, issue := range c.incorrectRedirects {
+		relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
 		if err := refuseLegacyRedirect(issue.townRoot, issue.worktreePath, issue.expectedTarget); err != nil {
-			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
-			return fmt.Errorf("fixing redirect for %s: %w", relPath, err)
+			refusals = append(refusals, fmt.Errorf("fixing redirect for %s: %w", relPath, err))
+			continue
 		}
 		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
-			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
-			return fmt.Errorf("fixing redirect for %s: %w", relPath, err)
+			return errors.Join(append(refusals, fmt.Errorf("fixing redirect for %s: %w", relPath, err))...)
 		}
 	}
 
-	return nil
+	return errors.Join(refusals...)
 }
 
 // findRigDirs returns all rig directories in the town.
