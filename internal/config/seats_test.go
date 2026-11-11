@@ -448,6 +448,47 @@ func TestSeatsSandboxProfileGateway(t *testing.T) {
 	}
 }
 
+// With no polecat pool there are no seats, but a profile still must name its
+// gateway: the refusal reaches the nil-pool path too (gt-rb4sf4).
+func TestSeatsNoPoolSandboxProfileGateway(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		profiles map[string]SandboxProfile
+		wantErr  string
+	}{
+		{
+			name:     "a profile with no pool must name its gateway",
+			profiles: map[string]SandboxProfile{"orphan": {Image: "i", Policy: "deploy/p.yaml"}},
+			wantErr:  "sandboxes.orphan.gateway: required; name the gateway the profile runs on",
+		},
+		{
+			name:     "a profile with no pool that names its gateway is accepted",
+			profiles: map[string]SandboxProfile{"orphan": {Gateway: "k8s", Image: "i", Policy: "deploy/p.yaml"}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ts := &TownSettings{Sandboxes: c.profiles}
+			got, err := Seats(ts, nil)
+			if c.wantErr != "" {
+				if err == nil || err.Error() != c.wantErr {
+					t.Fatalf("err = %v, want %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Seats: %v", err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("seats = %+v, want none", got)
+			}
+		})
+	}
+}
+
 // pinned_only decodes from a seat entry as a boolean and defaults to false, so
 // a seat map without it reads as it did before the key existed (gt-zor86).
 func TestSeatsPinnedOnlyFromSettingsFile(t *testing.T) {
