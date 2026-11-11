@@ -236,6 +236,10 @@ type attentionSources struct {
 	// related_bead field: the owner the item names comes from it.
 	escalationBead func(ctx context.Context, id string) (*beads.Issue, error)
 
+	// envShadowed is the daemon.env keys the container's environment shadowed
+	// at start (applyDaemonEnv), which the config.env_shadowed collector names.
+	envShadowed []string
+
 	// refusals is gt done's refusal ledger; refusalBead reads one refused
 	// bead in its own rig.
 	refusals    func() ([]attention.Refusal, error)
@@ -674,6 +678,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// The unknown build status is a fourth kind from the same read, with a
 		// collector of its own for the same reason (gt-3vafwr).
 		{kind: attention.KindImagesUnknown, collect: s.collectImagesUnknown},
+		{kind: attention.KindConfigEnvShadowed, collect: s.collectConfigEnvShadowed},
 	}, s.questionCollectors()...)
 }
 
@@ -687,6 +692,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		report:      d.lastTownHealth,
 		reworkNotes: map[string]reworkNote{},
 		host:        d.hostProbes,
+		envShadowed: d.envShadowed,
 	}
 	if s.host == nil {
 		forgejoBaseURL := d.forgejoBaseURL
