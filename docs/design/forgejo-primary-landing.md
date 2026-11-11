@@ -178,11 +178,12 @@ retry budget, exactly as a local lint timeout does today.
 This is a deletion slice, and it is larger than one file. Removing the policy
 means removing:
 
-- The flake file is gone from `internal/land`: nothing there defines `GateBead`,
-  `GateBeads`, `Flake`, `applyFlakePolicy` or `flakeVerdict`, so a failed
-  candidate gate has no flake branch to take. It is rejected (`RejectGate`)
-  with the failed step's command and output tail, and the bead returns for
-  rework.
+- `internal/land/flake.go` whole, already deleted from main: `GateBead`,
+  `GateBeadKind` and its three constants, `GateBeads`, `Flake`, `NoTestNamed`,
+  `MinPackageFlakeTests`, `applyFlakePolicy`, `flakeVerdict`, `fileGateBead`,
+  `failedPackages`, `flakyTests`. With them gone a failed candidate gate has no
+  flake branch to take: it is rejected (`RejectGate`) with the failed step's
+  command and output tail, and the bead returns for rework.
 - From `internal/land/land.go`: the `Rerun` and `GateBeads` fields on `Lander`,
   `Result.Rerun`, `Result.Flaky`, and the whole flake branch (`Land`'s
   `!gateRes.Passed` arm) that calls `applyFlakePolicy`.
