@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // spLanded is the commit the fake lander reports and the landing record holds,
@@ -103,25 +104,31 @@ func TestPassWritesSPActualFromTheLandingTime(t *testing.T) {
 }
 
 // TestPassSPActualSkipsUnmeasuredOrUnestimatedBeads: each row is a landing the
-// measure cannot judge, so no sp-actual label is written and the landing stands.
+// measure cannot judge, so no sp-actual label is written, one log line names
+// the reason, and the landing stands.
 func TestPassSPActualSkipsUnmeasuredOrUnestimatedBeads(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name   string
 		rec    land.LandingRecord
 		labels []string
+		reason string
 	}{
-		{"absent time", land.LandingRecord{}, []string{"sp:5"}},
-		{"lower bound", land.LandingRecord{PolecatSecs: 600, PolecatLowerBound: true}, []string{"sp:5"}},
-		{"zero seconds", land.LandingRecord{PolecatAttempts: []land.PolecatAttempt{{Seat: "opal", Secs: 0}}}, []string{"sp:5"}},
-		{"no sp label", land.LandingRecord{PolecatSecs: 600}, nil},
-		{"sp label off the scale", land.LandingRecord{PolecatSecs: 600}, []string{"sp:4"}},
+		{"absent time", land.LandingRecord{}, []string{"sp:5"}, "polecat time absent"},
+		{"lower bound", land.LandingRecord{PolecatSecs: 600, PolecatLowerBound: true}, []string{"sp:5"}, "polecat time is a lower bound"},
+		{"upper bound", land.LandingRecord{PolecatSecs: 600, PolecatUpperBound: true}, []string{"sp:5"}, "polecat time is an upper bound"},
+		// The seat ran (attempts present) but the time the worker reads is
+		// zero, so the skip must come from FromMinutes' error, not an absent record.
+		{"zero seconds", land.LandingRecord{PolecatSecs: 0, PolecatAttempts: []land.PolecatAttempt{{Seat: "opal", Secs: 0}}}, []string{"sp:5"}, storypoints.ErrNoMinutes.Error()},
+		{"no sp label", land.LandingRecord{PolecatSecs: 600}, nil, "no sp: estimate label"},
+		{"sp label off the scale", land.LandingRecord{PolecatSecs: 600}, []string{"sp:4"}, "no sp: estimate label"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newHarness(t)
 			h.seedLabelled(t, "gt-abc", tc.labels...)
+			logs := h.captureLogs()
 			h.landingRecords(tc.rec)
 			rep := h.w.Pass(context.Background())
 			if rep.Landed != 1 || rep.Failed != 0 {
@@ -129,6 +136,10 @@ func TestPassSPActualSkipsUnmeasuredOrUnestimatedBeads(t *testing.T) {
 			}
 			if got := actualLabelsOf(h.labelsOf(t, "gt-abc")); len(got) != 0 {
 				t.Fatalf("sp-actual labels %v written for an unmeasured or unestimated bead; want none", got)
+			}
+			skips := spSkipLines(*logs)
+			if len(skips) != 1 || !strings.Contains(skips[0], tc.reason) {
+				t.Fatalf("sp-actual skip lines %q; want one line naming %q", skips, tc.reason)
 			}
 		})
 	}
@@ -295,6 +306,17 @@ func TestPassSPActualBeadReadFailureIsLoggedAndLandingUnchanged(t *testing.T) {
 	if !spLogged(*logs, "reading the bead for sp-actual") {
 		t.Fatalf("logs %q; want the unreadable bead logged", *logs)
 	}
+}
+
+// spSkipLines returns the log lines that record an sp-actual skip.
+func spSkipLines(logs []string) []string {
+	var out []string
+	for _, l := range logs {
+		if strings.Contains(l, "sp-actual skipped") {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 func spLogged(logs []string, want string) bool {

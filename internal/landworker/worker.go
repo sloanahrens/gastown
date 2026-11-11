@@ -1340,22 +1340,35 @@ func (w *Worker) annotate(id, key, what, msg string) {
 }
 
 // writeSPActual writes the landed bead's measured points, sp-actual:N, from the
-// polecat time its complete landing record holds (gt-5d9k2f, SP14). It is
-// skipped when the record has no time or only a lower bound, when the time is
-// zero, and when the bead carries no sp: estimate, so the shadow report counts
-// only estimated beads. A failed read or write is logged and changes nothing
-// about the landing or the report.
+// polecat time its complete landing record holds (gt-5d9k2f, SP14). It writes
+// only an exact measurement: a record with a lower or upper bound, no time, a
+// time FromMinutes rejects, or a bead with no sp: estimate is skipped, and each
+// skip logs one line naming the reason. A failed read or write is logged and
+// changes nothing about the landing or the report.
 func (w *Worker) writeSPActual(beadID, landedCommit string) {
 	rec, found, err := w.Landings.LatestForBead(beadID)
 	if err != nil {
 		w.logf("%s: reading the landing record for sp-actual: %v", beadID, err)
 		return
 	}
-	if !found || rec.LandedCommit != landedCommit || rec.PolecatLowerBound {
+	if !found || rec.LandedCommit != landedCommit {
+		w.logf("%s: sp-actual skipped: no landing record for this landing", beadID)
+		return
+	}
+	switch {
+	case rec.PolecatLowerBound:
+		w.logf("%s: sp-actual skipped: polecat time is a lower bound", beadID)
+		return
+	case rec.PolecatUpperBound:
+		w.logf("%s: sp-actual skipped: polecat time is an upper bound", beadID)
+		return
+	case rec.PolecatSecs == 0 && len(rec.PolecatAttempts) == 0:
+		w.logf("%s: sp-actual skipped: polecat time absent", beadID)
 		return
 	}
 	points, err := storypoints.FromMinutes(rec.PolecatSecs / 60)
 	if err != nil {
+		w.logf("%s: sp-actual skipped: polecat time %g seconds has no points: %v", beadID, rec.PolecatSecs, err)
 		return
 	}
 	want := storypoints.ActualLabel(points)
@@ -1381,6 +1394,7 @@ func (w *Worker) writeSPActual(beadID, landedCommit string) {
 		}
 	}
 	if !estimated {
+		w.logf("%s: sp-actual skipped: no sp: estimate label", beadID)
 		return
 	}
 	opts := beads.UpdateOptions{AddLabels: []string{want}, RemoveLabels: stale}
