@@ -313,9 +313,11 @@ localhost would reach the container itself. The Mac's file is
 <config-dir>/hm-config.json when --config-dir names the directory, else
 $XDG_CONFIG_HOME/gt's, else ~/.config/gt's. The derived file is
 <town>/.runtime/container/hm-config.json, mode 0600; the render mounts it
-read-only where the container's HM_CONFIG points and sets that variable. A file
-that cannot be read or parsed refuses the write, and its contents never reach
-this command's output or an error; --print derives it and writes nothing.
+read-only where the container's HM_CONFIG points and sets that variable. The
+embedder's and the reranker's loopback URLs are rewritten to the same host, and
+a URL the Mac's file does not name takes hm's default, rewritten. A file that
+cannot be read or parsed refuses the write, and its contents never reach this
+command's output or an error; --print derives it and writes nothing.
 
 --forge-host and --forge-token-file give the container's git the Forgejo
 credential helper, so the landing worker's pushes carry the landing bot's token.

@@ -1240,6 +1240,103 @@ func TestCloudCheckKeyIsOptional(t *testing.T) {
 	})
 }
 
+// TestHMConfigIsAnOptionalSecretReference: hm reads its database and its
+// embedder and reranker from the one JSON file HM_CONFIG names, so the pod
+// mounts the gt-hm-config Secret's key as that file, and sets HM_CONFIG to it,
+// only when the render says the derived file exists. The manifest carries no
+// password: the Secret's placeholder is empty (gt-7vrjuo).
+func TestHMConfigIsAnOptionalSecretReference(t *testing.T) {
+	t.Parallel()
+	envValue := func(m Manifests, name string) (string, bool) {
+		for _, e := range m.Deployment.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == name {
+				return e.Value, true
+			}
+		}
+		return "", false
+	}
+	secretNamed := func(m Manifests) (Secret, bool) {
+		for _, s := range m.Secrets {
+			if s.Metadata.Name == HMConfigSecretName {
+				return s, true
+			}
+		}
+		return Secret{}, false
+	}
+
+	t.Run("configured", func(t *testing.T) {
+		t.Parallel()
+		v := goldenValues(t)
+		v.HMConfig = true
+		m := mustBuild(t, v)
+
+		mount := volumeMountAt(m.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, HMConfigPath)
+		if mount == nil {
+			t.Fatalf("the pod does not mount %s", HMConfigPath)
+		}
+		if mount.Name != HMConfigSecretName || mount.SubPath != HMConfigKey || !mount.ReadOnly {
+			t.Errorf("the mount = %+v, want a read-only subPath of %s from %s", *mount, HMConfigKey, HMConfigSecretName)
+		}
+		var vol *Volume
+		for i, candidate := range m.Deployment.Spec.Template.Spec.Volumes {
+			if candidate.Name == HMConfigSecretName {
+				vol = &m.Deployment.Spec.Template.Spec.Volumes[i]
+			}
+		}
+		if vol == nil || vol.Secret == nil || vol.Secret.SecretName != HMConfigSecretName {
+			t.Fatalf("the hm config volume = %+v, want the %s Secret", vol, HMConfigSecretName)
+		}
+		if len(vol.Secret.Items) != 1 || vol.Secret.Items[0].Key != HMConfigKey || vol.Secret.Items[0].Path != HMConfigKey {
+			t.Errorf("the hm config volume items = %+v, want the %s key", vol.Secret.Items, HMConfigKey)
+		}
+		if got, ok := envValue(m, hmConfigEnv); !ok || got != HMConfigPath {
+			t.Errorf("%s = %q (present %t), want the mounted path %s", hmConfigEnv, got, ok, HMConfigPath)
+		}
+		// The derived file names the embedder and the reranker at DoltHostName, the
+		// name the pod's hostAliases maps to the host gateway, so those URLs reach
+		// the host at the gateway address the render was given.
+		aliases := m.Deployment.Spec.Template.Spec.HostAliases
+		if len(aliases) != 1 || aliases[0].IP != v.HostGatewayIP || !slices.Contains(aliases[0].Hostnames, DoltHostName) {
+			t.Errorf("hostAliases = %+v, want %s mapped to the host gateway %s", aliases, DoltHostName, v.HostGatewayIP)
+		}
+		s, ok := secretNamed(m)
+		if !ok {
+			t.Fatalf("the render writes no %s Secret", HMConfigSecretName)
+		}
+		if got := s.Metadata.Annotations[SourceFileAnnotation]; got != HMConfigSource {
+			t.Errorf("the Secret's source = %q, want %q", got, HMConfigSource)
+		}
+		for key, value := range s.StringData {
+			if value != "" {
+				t.Errorf("the Secret's %s placeholder carries a value; the manifest must hold no config", key)
+			}
+		}
+	})
+
+	t.Run("not configured", func(t *testing.T) {
+		t.Parallel()
+		m := mustBuild(t, goldenValues(t))
+		if mount := volumeMountAt(m.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, HMConfigPath); mount != nil {
+			t.Errorf("the pod mounts %s with no derived hm config", HMConfigPath)
+		}
+		if _, ok := envValue(m, hmConfigEnv); ok {
+			t.Errorf("the pod sets %s with no derived hm config mounted, so hm would read a path no Secret fills", hmConfigEnv)
+		}
+		if _, ok := secretNamed(m); ok {
+			t.Error("the render writes the hm config Secret with no derived hm config")
+		}
+	})
+
+	t.Run("a rehearsal refuses it", func(t *testing.T) {
+		t.Parallel()
+		v := rehearsalValues(t)
+		v.HMConfig = true
+		if _, err := Build(v); err == nil || !strings.Contains(err.Error(), "Values.HMConfig") {
+			t.Errorf("Build with a rehearsal and HMConfig: err = %v, want a refusal naming Values.HMConfig", err)
+		}
+	})
+}
+
 // mountFor returns the mount of one volume.
 func mountFor(volume string) (Mount, bool) {
 	for _, m := range Mounts {

@@ -127,6 +127,18 @@ const (
 	// CloudCheckKeyFile is the name of the operator's config-directory file the
 	// Secret is created from, and the annotation the create line reads.
 	CloudCheckKeyFile = CloudCheckKeySecretName
+	// HMConfigSecretName is the operator's Secret holding the derived hm config:
+	// the file `gt daemon compose write` derives under the town's .runtime, with
+	// the database, the embedder and the reranker at the host. hm reads its config
+	// as one JSON file named by HM_CONFIG, so the render mounts the Secret's key at
+	// HMConfigPath and sets HM_CONFIG to it, only when Values.HMConfig says the
+	// derived file exists (gt-7vrjuo). HMConfigSource is that file's path under the
+	// town root, the annotation the create line reads; a test pins it to the path
+	// the compose write derives.
+	HMConfigSecretName = "gt-hm-config" //nolint:gosec // a Secret name, not a credential
+	HMConfigKey        = "hm-config.json"
+	HMConfigPath       = "/var/run/secrets/gt-hm/hm-config.json"
+	HMConfigSource     = ".runtime/container/hm-config.json"
 	// The sweep's roles in deploy/k8s/sweep-rbac.yaml. The render binds the
 	// pod's service account to them and copies no rule from them.
 	SweepNamespace     = "gt-sweeps"
@@ -418,7 +430,7 @@ var podEnvDecisions = map[string]podEnvDecision{
 	dockerHostEnv:    {drop: "the pod has no Docker engine; the tier sweep runs as a gt-sweeps Job (gt-cd5rqa)"},
 	TakeoverEnv:      {drop: "the pod's rollout is the Deployment's, and a standing takeover would pass an owner the pod's probe cannot ask an engine about (gt-wgr6ck)"},
 	kubeconfigEnv:    {drop: "the files are written on the Mac under the town root and point at Mac-side API addresses; the pod uses its service account"},
-	hmConfigEnv:      {drop: "the pod render writes no derived hm config, so the path would name no file"},
+	hmConfigEnv:      {drop: "the Mac's HM_CONFIG names a Mac path the pod does not mount; the pod sets it to the gt-hm-config Secret's file only when Values.HMConfig mounts it"},
 	cloudReportsEnv:  {drop: "the pod mounts no /Users/Shared/gt-cloud directory; the cloud step selects the Postgres source (gt-nlf1i6)"},
 	cloudReleasesEnv: {drop: "the pod mounts no /Users/Shared/gt-cloud directory; the cloud step selects the Postgres source (gt-nlf1i6)"},
 	cloudOffEnv:      {drop: "the off markers belong to the host wrapper's directory, which the pod does not mount"},
@@ -588,6 +600,12 @@ type Values struct {
 	// never waits on a Secret that was not created (gt-c57pax). A rehearsal
 	// never mounts it.
 	CloudCheckKey bool
+	// HMConfig mounts the gt-hm-config Secret at HMConfigPath and sets HM_CONFIG to
+	// that path, so hm reads the derived config whose database and embedder and
+	// reranker URLs name the host. The command render sets it only when the derived
+	// file exists under the town root, so the pod never waits on a Secret that was
+	// not created, and a rehearsal never mounts it (gt-7vrjuo).
+	HMConfig bool
 	// ForgeHost is the forge host:port the pod's git asks. Set, the pod mounts
 	// the ForgeTokenFile Secret and passes --forge-host and
 	// --forge-token-file, as a live compose spec with ForgeHost does.
@@ -734,6 +752,9 @@ func Build(v Values) (Manifests, error) {
 	if v.CloudCheckKey {
 		m.Secrets = append(m.Secrets, cloudCheckKeySecret(namespace))
 	}
+	if v.HMConfig {
+		m.Secrets = append(m.Secrets, hmConfigSecret(namespace))
+	}
 	// A rehearsal carries no openshell config: its gateway calls are not the live
 	// seats', and rehearsalSecrets keeps it to the fewest credentials.
 	if !v.Rehearsal {
@@ -808,6 +829,24 @@ func cloudCheckKeySecret(namespace string) Secret {
 		},
 		Type:       "Opaque",
 		StringData: map[string]string{CloudCheckKeyKey: ""},
+	}
+}
+
+// hmConfigSecret is the placeholder Secret for the derived hm config: the
+// operator's own gt-hm-config Secret is created outside the render from
+// HMConfigSource, and the source annotation lets the command print that create
+// line. The key's content is never in the manifest.
+func hmConfigSecret(namespace string) Secret {
+	return Secret{
+		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		Metadata: ObjectMeta{
+			Name:        HMConfigSecretName,
+			Namespace:   namespace,
+			Labels:      labels(),
+			Annotations: map[string]string{SourceFileAnnotation: HMConfigSource},
+		},
+		Type:       "Opaque",
+		StringData: map[string]string{HMConfigKey: ""},
 	}
 }
 
@@ -1112,6 +1151,11 @@ func containerEnvironment(v Values) []EnvVar {
 		}
 		env = append(env, EnvVar{Name: name, Value: kept[name]})
 	}
+	// HM_CONFIG names the derived hm config only when the render mounts it, so the
+	// pod never points hm at a path no Secret fills.
+	if v.HMConfig {
+		env = append(env, EnvVar{Name: hmConfigEnv, Value: HMConfigPath})
+	}
 	return env
 }
 
@@ -1323,6 +1367,17 @@ func volumes(v Values) ([]Volume, error) {
 			},
 		})
 	}
+	if v.HMConfig {
+		mode := int32(0o400)
+		vols = append(vols, Volume{
+			Name: HMConfigSecretName,
+			Secret: &SecretVolumeSource{
+				SecretName:  HMConfigSecretName,
+				DefaultMode: &mode,
+				Items:       []KeyToPath{{Key: HMConfigKey, Path: HMConfigKey}},
+			},
+		})
+	}
 	return vols, nil
 }
 
@@ -1447,6 +1502,14 @@ func mounts(v Values) []VolumeMount {
 			ReadOnly:  true,
 		})
 	}
+	if v.HMConfig {
+		m = append(m, VolumeMount{
+			Name:      HMConfigSecretName,
+			MountPath: HMConfigPath,
+			SubPath:   HMConfigKey,
+			ReadOnly:  true,
+		})
+	}
 	if v.OMToken {
 		// The om config names the token's container path, so it is mounted beside
 		// the token. It is read from the town-state volume, whose .runtime/container
@@ -1539,6 +1602,9 @@ func (v Values) validate() error {
 		if err := v.validateRehearsal(); err != nil {
 			return err
 		}
+	}
+	if v.HMConfig && v.Rehearsal {
+		return errors.New("Values.HMConfig is for a live render: a rehearsal mounts no derived hm config, so drop one of them")
 	}
 	if v.Namespace != "" && !validDNS1123Label(v.Namespace) {
 		return fmt.Errorf("Values.Namespace %q: want a DNS-1123 label of at most 63 characters, such as gt", v.Namespace)

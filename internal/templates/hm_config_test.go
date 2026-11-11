@@ -11,13 +11,13 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
-// hmHostConfig is the Mac's hm config as the dry run read it: the database URL
-// on the Mac's loopback, and the embed and rerank services already reachable by
-// the container's name for the Mac.
+// hmHostConfig is the Mac's hm config: the database URL, the embedder and the
+// reranker, all on the Mac's loopback, in the fields hm reads (config.go:86,
+// :91-92 at the pinned commit).
 const hmHostConfig = `{
   "database_url": "postgres://hm:s3cret-pa55@localhost:5433/hm?sslmode=disable",
-  "embed_url": "http://host.docker.internal:8080/embed",
-  "rerank_url": "http://host.docker.internal:8080/rerank",
+  "embed": {"provider": "ollama", "url": "http://localhost:11434"},
+  "rerank": {"provider": "llamacpp", "url": "http://localhost:8012"},
   "top_k": 6
 }`
 
@@ -107,6 +107,130 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 				}
 				if jsonValue(got[field]) != jsonValue(want) {
 					t.Errorf("%s = %v, want it copied unchanged as %v", field, got[field], want)
+				}
+			}
+		})
+	}
+}
+
+// hmField reads the value at path in a decoded config, and whether it is there.
+func hmField(got map[string]any, path ...string) (any, bool) {
+	var cur any = got
+	for _, p := range path {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if cur, ok = m[p]; !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+// The embedder and the reranker are read from the blocks hm reads (config.go:
+// embed.url, rerank.url, rerank.rerank_fallback.url). A loopback URL in them is
+// rewritten to the name the container reaches the host by; a URL the file does
+// not name takes hm's default for it, rewritten, where hm would use one; a hosted
+// URL is kept. A block the derivation cannot read is refused naming the field.
+func TestHMContainerConfigRewritesServiceURLs(t *testing.T) {
+	t.Parallel()
+	const db = `"database_url": "postgres://hm@host.docker.internal:5433/hm"`
+	cases := []struct {
+		name   string
+		config string
+		// want maps a dotted path to the value the derived config holds there;
+		// absent maps a path to a value the derived config must not hold.
+		want   map[string]any
+		absent []string
+		reason string
+	}{
+		{
+			name:   "loopback embedder and reranker",
+			config: hmHostConfig,
+			want: map[string]any{
+				"embed.url":      "http://host.docker.internal:11434",
+				"rerank.url":     "http://host.docker.internal:8012",
+				"embed.provider": "ollama",
+			},
+		},
+		{
+			name:   "an absent embed block gains hm's default, rewritten",
+			config: "{" + db + "}",
+			want:   map[string]any{"embed.url": "http://host.docker.internal:11434"},
+		},
+		{
+			// hm reads an absent rerank block as jev+llamacpp, whose fallback is the
+			// local reranker; the primary is hosted and names no URL here.
+			name:   "an absent rerank block: the local fallback is rewritten, the primary names none",
+			config: "{" + db + "}",
+			want:   map[string]any{"rerank.rerank_fallback.url": "http://host.docker.internal:8012"},
+			absent: []string{"rerank.url", "rerank.provider"},
+		},
+		{
+			name:   "jev+llamacpp with a loopback fallback",
+			config: `{` + db + `, "rerank": {"provider": "jev+llamacpp", "rerank_fallback": {"url": "http://127.0.0.1:9000"}}}`,
+			want:   map[string]any{"rerank.rerank_fallback.url": "http://host.docker.internal:9000"},
+		},
+		{
+			name:   "a hosted reranker keeps its own URL and gains no fallback",
+			config: `{` + db + `, "rerank": {"provider": "jev", "url": "https://jev.example.test/v1"}}`,
+			want:   map[string]any{"rerank.url": "https://jev.example.test/v1"},
+			absent: []string{"rerank.rerank_fallback"},
+		},
+		{
+			// The block's other fields are copied with the URL rewritten.
+			name:   "a service block keeps its other fields",
+			config: `{` + db + `, "embed": {"provider": "ollama", "model": "qwen3-embedding:4b-q8_0", "url": "http://localhost:11434"}, "rerank": {"provider": "jev", "model": "jev-1.13.0"}}`,
+			want: map[string]any{
+				"embed.model":  "qwen3-embedding:4b-q8_0",
+				"embed.url":    "http://host.docker.internal:11434",
+				"rerank.model": "jev-1.13.0",
+			},
+		},
+		{
+			name:   "a remote embedder is unchanged",
+			config: `{` + db + `, "embed": {"provider": "ollama", "url": "http://ollama.lan:11434"}}`,
+			want:   map[string]any{"embed.url": "http://ollama.lan:11434"},
+		},
+		{name: "embed is not an object", config: `{` + db + `, "embed": 5}`, reason: "embed is not an object"},
+		{name: "embed url is not a string", config: `{` + db + `, "embed": {"url": 11434}}`, reason: "embed url is not a string"},
+		{name: "embed url does not parse", config: `{` + db + `, "embed": {"url": "http://a b"}}`, reason: "embed url does not parse"},
+		{name: "rerank provider is not a string", config: `{` + db + `, "rerank": {"provider": 1}}`, reason: "rerank.provider is not a string"},
+		{name: "rerank is not an object", config: `{` + db + `, "rerank": 5}`, reason: "rerank is not an object"},
+		{name: "rerank_fallback is not an object", config: `{` + db + `, "rerank": {"rerank_fallback": 5}}`, reason: "rerank.rerank_fallback is not an object"},
+		{name: "rerank_fallback provider is not a string", config: `{` + db + `, "rerank": {"rerank_fallback": {"provider": 1}}}`, reason: "rerank.rerank_fallback.provider is not a string"},
+		{name: "rerank_fallback url is not a string", config: `{` + db + `, "rerank": {"rerank_fallback": {"url": 5}}}`, reason: "rerank.rerank_fallback url is not a string"},
+		{name: "rerank url is not a string under jev+llamacpp", config: `{` + db + `, "rerank": {"provider": "jev+llamacpp", "url": 5}}`, reason: "rerank url is not a string"},
+		{name: "rerank url is not a string under a hosted provider", config: `{` + db + `, "rerank": {"provider": "jev", "url": 5}}`, reason: "rerank url is not a string"},
+		{name: "rerank url does not parse under llamacpp", config: `{` + db + `, "rerank": {"provider": "llamacpp", "url": "http://a b"}}`, reason: "rerank url does not parse"},
+		{name: "a control character in an embed field name", config: `{` + db + `, "embed": {"\u0001": 1}}`, reason: "control character"},
+		{name: "a control character in a rerank_fallback field name", config: `{` + db + `, "rerank": {"rerank_fallback": {"\u0001": 1}}}`, reason: "control character"},
+		{name: "a control character in a rerank field name", config: `{` + db + `, "rerank": {"provider": "jev", "\u0001": 1}}`, reason: "control character"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			out, err := templates.RenderHMConfig([]byte(tc.config))
+			if tc.reason != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.reason) {
+					t.Fatalf("RenderHMConfig error = %v, want it to contain %q", err, tc.reason)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RenderHMConfig: %v", err)
+			}
+			got := decodeHMConfig(t, out)
+			for path, want := range tc.want {
+				v, ok := hmField(got, strings.Split(path, ".")...)
+				if !ok || v != want {
+					t.Errorf("%s = %v (present %t), want %v", path, v, ok, want)
+				}
+			}
+			for _, path := range tc.absent {
+				if v, ok := hmField(got, strings.Split(path, ".")...); ok {
+					t.Errorf("%s = %v, want it absent", path, v)
 				}
 			}
 		})
