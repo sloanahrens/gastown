@@ -353,12 +353,10 @@ can be rebased into 1. The data survives; the intermediate history doesn't.
 ### History Compaction Operations
 
 **Who compacts.** Nobody, routinely. `gt maint` is disk maintenance only and
-never compacts Dolt history. The old Dolt maintenance verb, the compactor-dog
-plugin and scheduled_maintenance's `monitor` and `flatten` modes were deleted
-(gt-8z769.3): the 2026-09-29 measurement (gt-8z769) showed the databases'
-size is commit history, not garbage, so a routine rewrite bought little and
-risked the history `bd history` reads. Flatten is an offline operator
-procedure with a single trigger, a database past 2 GB:
+never compacts Dolt history. The 2026-09-29 measurement (gt-8z769) showed the
+databases' size is commit history, not garbage, so a routine rewrite bought
+little and risked the history `bd history` reads (gt-8z769.3). Flatten is an
+offline operator procedure with a single trigger, a database past 2 GB:
 [dolt-history-offline.md](../dolt-history-offline.md). The Compactor patrol
 counts commits and measures store size, escalating on either.
 
