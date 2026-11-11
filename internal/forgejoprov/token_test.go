@@ -264,6 +264,35 @@ func TestEnsureTokenRefusesWhatItCannotStore(t *testing.T) {
 	})
 }
 
+// TestEnsureTokenRefusesATokenNameOutsideTheFileFormat checks a name that would
+// break the TOKEN_NAME line is refused before the mint, so no live token is left
+// with a file that records it on an injected or broken line.
+func TestEnsureTokenRefusesATokenNameOutsideTheFileFormat(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"bad\nname", "with space", "eq=uals", ""} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := forgejotest.New()
+			withBot(t, f, "polecat")
+			files := newMemFiles()
+			f.ClearCalls()
+			var logs []string
+			p := tokenProvisioner(f, files, false, false, &logs)
+			p.TokenName = name
+			err := p.EnsureToken("polecat")
+			if err == nil || !strings.Contains(err.Error(), "must match [A-Za-z0-9._-]+") {
+				t.Fatalf("err = %v, want the token-name rule", masked(errString(err)))
+			}
+			if calls := sentCalls(f); len(calls) != 0 {
+				t.Errorf("a request was sent though the name was refused: %v", calls)
+			}
+			if len(files.ops) != 0 {
+				t.Errorf("a file was written though the name was refused: %v", files.ops)
+			}
+		})
+	}
+}
+
 // TestTokenFileIsMode0600ThroughTheSeam checks the run asks for mode 0600 on the
 // write and again on the final path.
 func TestTokenFileIsMode0600ThroughTheSeam(t *testing.T) {
@@ -1548,6 +1577,92 @@ func TestRotateWarnsOnAnUnnamedTokenAndRevokesNothing(t *testing.T) {
 		if strings.HasPrefix(c, "DELETE ") {
 			t.Errorf("a DELETE was sent after an unnamed token: %s", c)
 		}
+	}
+}
+
+// tokenListTransport answers the token list with list, a create-token POST with
+// mintStatus when it is set, and passes everything else to next.
+type tokenListTransport struct {
+	next       http.RoundTripper
+	list       string
+	mintStatus int
+}
+
+func (l tokenListTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/tokens") {
+		return respond(req, http.StatusOK, l.list)
+	}
+	if l.mintStatus != 0 && req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/tokens") {
+		return respond(req, l.mintStatus, `{"message":"refused"}`)
+	}
+	return l.next.RoundTrip(req)
+}
+
+// TestRotateNamesTheOtherTokensPastAnUnnamedItem checks an item whose name cannot
+// be read does not end the rotation's reading of the list: the warning is logged and
+// every other live token is still named with the route to revoke it.
+func TestRotateNamesTheOtherTokensPastAnUnnamedItem(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	files := newMemFiles()
+	files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "FORGEJO_TOKEN=old\n", 0o600)
+	var logs []string
+	f.ClearCalls()
+	list := tokenListTransport{next: f, list: `[{"id":7},{"name":"viewer-old"}]`}
+	if err := tokenProvisioner(list, files, true, false, &logs).EnsureToken("polecat"); err != nil {
+		t.Fatalf("rotate: %v", masked(errString(err)))
+	}
+	want := "token 'viewer-old' of bot-polecat is still live and was not revoked; revoke it in the web UI"
+	if !strings.Contains(strings.Join(logs, "\n"), want) {
+		t.Errorf("logs lack %q: %v", want, masked(strings.Join(logs, " | ")))
+	}
+	for _, c := range sentCalls(f) {
+		if strings.HasPrefix(c, "DELETE ") {
+			t.Errorf("a DELETE was sent though no readable token carried the old name: %s", c)
+		}
+	}
+}
+
+// TestRotateUnnamedItemLeavesTheOldTokenPotentiallyLive checks a mint that fails after
+// an item whose name could not be read says the old token may still be live, since
+// the unreadable item could be it.
+func TestRotateUnnamedItemLeavesTheOldTokenPotentiallyLive(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	files := newMemFiles()
+	files.seed(path, "FORGEJO_TOKEN=old\n", 0o600)
+	var logs []string
+	f.ClearCalls()
+	list := tokenListTransport{next: f, list: `[{"id":7},{"name":"viewer-old"}]`, mintStatus: http.StatusInternalServerError}
+	err := tokenProvisioner(list, files, true, false, &logs).EnsureToken("polecat")
+	if err == nil || !strings.Contains(err.Error(), "may still be live") {
+		t.Fatalf("err = %v, want the may-still-be-live explanation", masked(errString(err)))
+	}
+	if string(files.files[path]) != "FORGEJO_TOKEN=old\n" {
+		t.Errorf("the file changed though the mint failed")
+	}
+}
+
+// TestRotateReadsTheRecordedNameTheWayTheEnvReadersDo checks the TOKEN_NAME line is
+// read by the same parser the token file readers use: an export prefix and quotes
+// are stripped, so the name the file records is the token that is revoked.
+func TestRotateReadsTheRecordedNameTheWayTheEnvReadersDo(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	mintNamed(t, f, "polecat", "other")
+	files := newMemFiles()
+	files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "# landing bot\nexport TOKEN_NAME=\"other\"\n", 0o600)
+	var logs []string
+	f.ClearCalls()
+	if err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat"); err != nil {
+		t.Fatalf("rotate: %v", masked(errString(err)))
+	}
+	if !slices.Contains(sentCalls(f), "DELETE /api/v1/admin/users/bot-polecat/tokens/other") {
+		t.Errorf("calls = %v, want a DELETE of the recorded name", sentCalls(f))
 	}
 }
 

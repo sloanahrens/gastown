@@ -72,7 +72,7 @@ func ReadCredentialFile(path string) (user, token string, err error) {
 	if !ok || token == "" {
 		return "", "", fmt.Errorf("forgejo: token file %s has no %s value", path, EnvKey)
 	}
-	user, ok = parseKey(data, UserKey)
+	user, ok = ParseKey(data, UserKey)
 	if !ok || user == "" {
 		return "", "", fmt.Errorf("forgejo: token file %s has no %s value", path, UserKey)
 	}
@@ -105,11 +105,13 @@ func readPrivateFileWith(path string, readFile func(string) ([]byte, error)) (st
 
 // parseToken returns the value of the FORGEJO_TOKEN line: its first
 // KEY=value line, with a leading "export " and surrounding quotes stripped.
-func parseToken(data string) (string, bool) { return parseKey(data, EnvKey) }
+func parseToken(data string) (string, bool) { return ParseKey(data, EnvKey) }
 
-// parseKey returns the value of the first KEY=value line for key, with a
-// leading "export " and surrounding quotes stripped.
-func parseKey(data, wantKey string) (string, bool) {
+// ParseKey returns the value of the first KEY=value line for key, with a
+// leading "export " and surrounding quotes stripped. It is the one parser for a
+// token file's lines: the readers here and the provisioner that writes
+// TOKEN_NAME beside FORGEJO_TOKEN read a line the same way.
+func ParseKey(data, wantKey string) (string, bool) {
 	for _, line := range strings.Split(data, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
