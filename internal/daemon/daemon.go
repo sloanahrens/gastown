@@ -536,22 +536,6 @@ type Daemon struct {
 	// way the Go installer does. Tests point it at their own temp file, so
 	// no test can reach the operator's marker through that variable (gt-vc34c).
 	rebuildGTPendingFn func() installpending.Store
-	// rebuildGTRigSyncTimeoutFn answers how long one rig checkout's sync may
-	// run, asked with the rig it is about to sync; nil is
-	// rebuildGTRigSyncTimeout for every rig. It takes the rig so a test can
-	// give one rig a short bound and the others a bound no loaded machine can
-	// cross, making the timeout path depend on the rig and not on speed
-	// (gt-f91o8, gt-gg9hv.51).
-	rebuildGTRigSyncTimeoutFn func(rig string) time.Duration
-	// rebuildGTRigSyncBudgetFn answers how long the whole rig sweep may run;
-	// nil is rebuildGTRigSyncBudget. Tests set a spent budget to drive the
-	// branch that counts the rigs the sweep never reached (gt-f91o8).
-	rebuildGTRigSyncBudgetFn func() time.Duration
-	// rebuildGTRigGitFn runs one git call in a rig's canonical checkout under
-	// the sync's per-rig bound; nil is rebuildGTGitCtx. It carries the context
-	// because a fake runner that starts no process is the only way a unit test
-	// can drive that bound, and exec.Cmd does not expose its context (gt-f91o8).
-	rebuildGTRigGitFn func(ctx context.Context, checkout string, args ...string) (string, error)
 
 	// omVersionFn reads the installed om's version sha and omHeadFn reads the
 	// om rig's origin/main tip, the two readings the om-skew check compares
