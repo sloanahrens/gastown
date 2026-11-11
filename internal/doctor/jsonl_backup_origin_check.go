@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
 )
 
@@ -87,6 +88,6 @@ func (c *JsonlBackupOriginCheck) Run(ctx *CheckContext) *CheckResult {
 			"The jsonl_git_backup patrol pushes its exports to origin.",
 			"Without one, every cycle exports and then fails to push offsite.",
 		},
-		FixHint: fmt.Sprintf("Add an origin to %s: git -C %s remote add origin <url>", repo, repo),
+		FixHint: fmt.Sprintf("Add an origin to %s: git -C %s remote add origin <url>", repo, config.ShellQuote(repo)),
 	}
 }
