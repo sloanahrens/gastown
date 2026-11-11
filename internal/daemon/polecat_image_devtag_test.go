@@ -582,10 +582,10 @@ func TestPolecatImageDevTagEscalatesUnknownAncestry(t *testing.T) {
 	}
 }
 
-// TestPolecatImageDevTagReachesRegistryAtSettingScheme: the step reaches the
+// TestPolecatImageDevTagReachesRegistryOverHTTPForBareHost: the step reaches the
 // registry over http for a bare host:port setting. The validator refuses a
 // setting with a scheme, so the step has no https branch (gt-vv9ir0).
-func TestPolecatImageDevTagReachesRegistryAtSettingScheme(t *testing.T) {
+func TestPolecatImageDevTagReachesRegistryOverHTTPForBareHost(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
