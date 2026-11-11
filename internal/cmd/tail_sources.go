@@ -41,11 +41,19 @@ type tailOnce struct{ last string }
 const tailTitleCacheSize = 512
 
 // dashboardTitleCacheSize bounds the titles the dashboard's reader keeps. The
-// landings page fills each row's title over polls, a few at a time, so a bound
-// under the page's row count evicts each title before the next poll reads it
-// and the fill never settles (gt-bjhc3r). Twice the page leaves room for the
-// running landings that sit above the row bound.
+// landings page shows at most recentLandingRows rows and reads one title per
+// row, a few at a time over polls. A bound under that row count evicts titles
+// the page still shows before the fill reads them, so the fill never settles
+// (gt-bjhc3r). The bound is twice the row count, which leaves room to spare
+// for rows that change between polls.
 const dashboardTitleCacheSize = 2 * recentLandingRows
+
+// boundDashboardTitles sets the dashboard's title bound on a reader. The
+// landings page reads its titles through the reader newDashboardHub builds, so
+// the bound is set there, not left at the default tailTitleCacheSize.
+func boundDashboardTitles(b *tailBeads) {
+	b.max = dashboardTitleCacheSize
+}
 
 // tailMissingCacheSize bounds the not-found ids one run remembers. A bead
 // deleted a moment after it was created is asked about once per journal record

@@ -402,17 +402,17 @@ func TestRecentLandingsFillTitlesOverPolls(t *testing.T) {
 }
 
 // TestRecentLandingsConvergeOnFullPage: a page of recentLandingRows rows, the
-// most the dashboard shows, takes every title over polls from a reader sized
-// for that page. Each bead is read once, and every row is titled once the
-// fill has had the polls it needs at recentExtraTitleLookups a poll. A reader
-// bounded below the page evicts the titles it fetched and never settles
-// (gt-bjhc3r).
+// most the dashboard shows, takes every title over polls from the dashboard's
+// reader, bounded by boundDashboardTitles. Each bead is read once, and every
+// row is titled once the fill has had the polls it needs at
+// recentExtraTitleLookups a poll. A reader bounded below the page evicts the
+// titles it fetched and never settles (gt-bjhc3r).
 func TestRecentLandingsConvergeOnFullPage(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
 	shown := map[string]int{}
 	reads := titleReads(shown)
-	reads.max = dashboardTitleCacheSize
+	boundDashboardTitles(reads)
 	title := func(rig, id string) string { return reads.title(rig, id) }
 	cached := func(rig, id string) (string, bool) { return reads.cachedTitle(id) }
 	// Seconds apart, so the whole page sits inside the day the dashboard keeps.
