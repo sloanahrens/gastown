@@ -25,7 +25,7 @@ internal/cmd/hooks_install.go	1	pending-retirement	gt hooks install: skips the c
 internal/cmd/plugin.go	1	pending-retirement	gt plugin: help text naming the mayor/rig plugins search path
 internal/cmd/polecat.go	1	pending-retirement	gt polecat: opens the beads and git handles at the rig's mayor/rig checkout
 internal/cmd/report.go	1	pending-retirement	gt report: help text saying the mayor/rig canonical clone is never fetched
-internal/cmd/rig.go	7	pending-retirement	gt rig: the help and status output, and the mayor/rig checkout and .beads paths it opens
+internal/cmd/rig.go	5	pending-retirement	gt rig: the help and status output, and the mayor/rig checkout and .beads paths it opens
 internal/cmd/rig_adopt_prefix.go	2	pending-retirement	gt rig adopt-prefix: reads the rig's mayor/rig/.beads and writes its route
 internal/cmd/rig_dock.go	1	pending-retirement	gt rig dock: the mayor/rig checkout as the beads working directory
 internal/cmd/rig_helpers.go	1	pending-retirement	rig helpers: the mayor/rig beads path the rig commands open
@@ -74,7 +74,7 @@ internal/polecat/seed/guard.go	1	pending-retirement	seed guard: the mayor/rig ch
 internal/polecat/seed/seed.go	2	pending-retirement	seed: the build rig and source rig mayor/rig checkout paths
 internal/polecat/surviving_branch.go	2	pending-retirement	surviving branch: the legacy mayor/rig git base and its error text
 internal/polecat/surviving_work.go	1	pending-retirement	surviving work: the ErrNoRigRepo text naming mayor/rig
-internal/rig/manager.go	10	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
+internal/rig/manager.go	7	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
 internal/rig/repofile.go	2	pending-retirement	rig repo file: reads files from the rig's mayor/rig clone, and its warning text
 internal/rig/types.go	2	pending-retirement	rig types: the mayor/rig entry in the rig directory list, and the RigMayorPath call that builds the checkout path
 internal/sandbox/skeleton.go	1	pending-retirement	sandbox skeleton: the mayor/rig/.beads paths in the sandbox layout
