@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -25,8 +24,8 @@ const (
 	defaultLockTimeout = 5 * time.Second
 	// lockRetry is how often a waiter tries the lock again while it waits.
 	lockRetry = 10 * time.Millisecond
-	// defaultReservationTTL is how long a name Pick handed out stays reserved
-	// when nothing binds it.
+	// defaultReservationTTL is how long a reservation in the state file holds
+	// its name when nothing binds it.
 	defaultReservationTTL = 5 * time.Minute
 )
 
@@ -34,7 +33,7 @@ const (
 // reach a session name, a git identity and a bead label unchanged.
 var ErrInvalidName = errors.New("a bird name must match " + nameShape.String())
 
-// Registry is one state file, the pool Pick draws from and the polecat
+// Registry is one state file, the pool Plan draws from and the polecat
 // directories whose names count as taken, read and written only under an flock
 // on a sibling lock file.
 type Registry struct {
@@ -42,7 +41,7 @@ type Registry struct {
 	Path string
 	// LockPath is the file flock guards; empty means Path + ".lock".
 	LockPath string
-	// Pool is the names Pick chooses from; nil means the embedded pool.
+	// Pool is the names Plan chooses from; nil means the embedded pool.
 	Pool []string
 	// PolecatRoot is the town root holding the rigs whose polecat directories
 	// count as taken. It is read as the literal path it is, so a root whose
@@ -54,8 +53,6 @@ type Registry struct {
 	PolecatGlob string
 	// Now is the clock the registry stamps records with; nil means time.Now.
 	Now func() time.Time
-	// Rand returns a number in [0, n); nil means the math/rand/v2 source.
-	Rand func(n int) int
 	// ProcStart reads a pid's start token and says whether the kernel still
 	// has the process. A live process with no token is one the kernel will not
 	// give a token for, and an error means the process table itself could not
@@ -68,8 +65,8 @@ type Registry struct {
 	// LockTimeout bounds a wait for the state lock; zero means
 	// defaultLockTimeout.
 	LockTimeout time.Duration
-	// ReservationTTL is how long a name Pick handed out stays reserved when
-	// nothing binds it; zero means defaultReservationTTL.
+	// ReservationTTL is how long a reservation in the state file holds its
+	// name when nothing binds it; zero means defaultReservationTTL.
 	ReservationTTL time.Duration
 	// Write replaces the state file; nil means atomicfile.EnsureDirAndWriteJSON,
 	// which writes a temp file beside Path and renames it over it.
@@ -197,8 +194,8 @@ func (r *Registry) Bind(name, bead string) (bool, error) {
 	err := r.mutate(func(st *State) (bool, error) {
 		reserved := len(st.Reservations)
 		added = st.Bind(name, bead, r.now())
-		// The pair may have been bound already, but Bind also drops a
-		// reservation Pick made for the name, which is a change of its own.
+		// The pair may have been bound already, but Bind also drops any
+		// reservation recorded for the name, which is a change of its own.
 		return added || len(st.Reservations) != reserved, nil
 	})
 	if err != nil {
@@ -209,7 +206,7 @@ func (r *Registry) Bind(name, bead string) (bool, error) {
 }
 
 // Record writes a as the agent holding its name, replacing the record of that
-// name and dropping the reservation Pick made for it, so the name reads as
+// name and dropping any reservation recorded for it, so the name reads as
 // held by a process rather than as free. A zero Started is stamped from the
 // registry's clock. A record whose Start is empty is kept while its pid lives:
 // see Live.
@@ -231,10 +228,11 @@ func (r *Registry) Record(a Agent) error {
 }
 
 // Claim records a as the agent holding its name, writing it only when no
-// running process and no live reservation holds that name, and reports whether
-// it took it (gt-qipl5). The check and the write are one pass under the lock,
-// so two launches racing for a name leave one winner; the loser asks Plan again
-// for a free name. A binding does not refuse a claim: see State.HeldLive.
+// running process and no live reservation in the state file holds that name,
+// and reports whether it took it (gt-qipl5). The check and the write are one
+// pass under the lock, so two launches racing for a name leave one winner; the
+// loser asks Plan again for a free name. A binding does not refuse a claim: see
+// State.HeldLive.
 //
 // A recorded agent whose process is gone is pruned first, since its name is
 // free. A zero Started is stamped from the registry's clock.
@@ -243,8 +241,8 @@ func (r *Registry) Claim(a Agent) (bool, error) {
 }
 
 // ClaimPinned records a as the agent holding its name for a launch whose caller
-// chose the name, taking it over from the reservation a spawn made for that
-// launch; a live process still refuses it (gt-b58mk).
+// chose the name, taking it over from any reservation the state file records
+// for that name; a live process still refuses it (gt-b58mk).
 func (r *Registry) ClaimPinned(a Agent) (bool, error) {
 	return r.claim(a, true)
 }
@@ -334,8 +332,7 @@ func (r *Registry) Owns(name string) (bool, error) {
 	return false, nil
 }
 
-// Names returns the pool Pick chooses from, which is also the pool Plan picks a
-// free name out of.
+// Names returns the pool Plan picks a free name out of.
 func (r *Registry) Names() []string {
 	return slices.Clone(r.pool())
 }
@@ -456,149 +453,6 @@ func hasWildcard(part string) bool {
 	return strings.ContainsAny(part, "*?[\\")
 }
 
-// Skip is one pool name Pick passed over, and why.
-type Skip struct {
-	// Name is the pool entry.
-	Name string
-	// Reason is why Pick did not draw the name.
-	Reason SkipReason
-}
-
-// SkipReason is why Pick passed a pool name over.
-type SkipReason string
-
-const (
-	// SkipUnusable is a pool entry ValidName refuses, so no session could hold
-	// the name.
-	SkipUnusable SkipReason = "a name no session could use"
-	// SkipBound is a name a binding records for a bead, which holds it for good.
-	SkipBound SkipReason = "bound to a bead"
-	// SkipReserved is a name an earlier Pick handed out that nothing has bound
-	// yet; it frees itself once its reservation ages past the TTL.
-	SkipReserved SkipReason = "reserved by an earlier pick"
-	// SkipLiveProcess is a name a live process holds, and a process whose start
-	// token cannot be read counts as live (see Live), so its name is held until
-	// the process exits.
-	SkipLiveProcess SkipReason = "held by a live process"
-	// SkipPolecatDirectory is a name a polecat directory holds.
-	SkipPolecatDirectory SkipReason = "a polecat directory holds the name"
-)
-
-// PickResult is what Pick found: the name it reserved, and every pool name it
-// passed over on the way.
-type PickResult struct {
-	// Name is the name Pick reserved, empty when the pool held none free.
-	Name string
-	// Skips are the pool names Pick did not draw, in pool order, each with the
-	// reason, so a launch that gets its second choice can say why.
-	Skips []Skip
-}
-
-// Pick returns a random free name from the pool and reserves it under the
-// lock, so two launches never receive the same name before either binds it. The
-// result says which name it took and which it passed over, and why; a
-// reservation nothing binds expires after ReservationTTL.
-func (r *Registry) Pick() (PickResult, error) {
-	var picked PickResult
-	err := r.mutate(func(st *State) (bool, error) {
-		now := r.now()
-		ttl := r.ttl()
-		dropped, err := st.PruneDead(r.Live)
-		if err != nil {
-			return false, err
-		}
-		dropped += st.PruneReservations(now, ttl)
-		polecats, err := r.PolecatNames()
-		if err != nil {
-			return false, err
-		}
-		seated := make(map[string]bool, len(polecats))
-		for _, name := range polecats {
-			seated[name] = true
-		}
-		picked = PickResult{Skips: []Skip{}}
-		candidates := make([]string, 0, len(r.pool()))
-		for _, name := range r.pool() {
-			if reason, skipped := skipReason(st, name, now, ttl, seated); skipped {
-				picked.Skips = append(picked.Skips, Skip{Name: name, Reason: reason})
-				continue
-			}
-			candidates = append(candidates, name)
-		}
-		if len(candidates) == 0 {
-			return dropped > 0, nil
-		}
-		picked.Name = candidates[r.index(len(candidates))]
-		st.Reserve(picked.Name, now)
-		return true, nil
-	})
-	if err != nil {
-		return PickResult{}, err
-	}
-	return picked, nil
-}
-
-// ReserveName reserves a name the caller chose, as Pick reserves one it draws,
-// so two spawns never hand out the same name at once; held is why it could not
-// and empty when it did (gt-b58mk).
-func (r *Registry) ReserveName(name string) (held SkipReason, err error) {
-	if !ValidName(name) {
-		return SkipUnusable, fmt.Errorf("reserving %q: %w", name, ErrInvalidName)
-	}
-	err = r.mutate(func(st *State) (bool, error) {
-		now := r.now()
-		ttl := r.ttl()
-		dropped, err := st.PruneDead(r.Live)
-		if err != nil {
-			return false, err
-		}
-		dropped += st.PruneReservations(now, ttl)
-		polecats, err := r.PolecatNames()
-		if err != nil {
-			return false, err
-		}
-		seated := make(map[string]bool, len(polecats))
-		for _, seatedName := range polecats {
-			seated[seatedName] = true
-		}
-		if reason, taken := skipReason(st, name, now, ttl, seated); taken {
-			held = reason
-			return dropped > 0, nil
-		}
-		st.Reserve(name, now)
-		return true, nil
-	})
-	if err != nil {
-		return "", err
-	}
-	return held, nil
-}
-
-// ReleaseName drops name's reservation, for a spawn that reserved a name and
-// then opened no tab for it (gt-b58mk).
-func (r *Registry) ReleaseName(name string) error {
-	return r.Update(func(st *State) error {
-		st.DropReservation(name)
-		return nil
-	})
-}
-
-// skipReason says why Pick passes name over, and false when it may draw it. It
-// answers with the first of: a name no session could hold, an entry of the state
-// that holds it, or a polecat directory seated under it.
-func skipReason(st *State, name string, now time.Time, ttl time.Duration, seated map[string]bool) (SkipReason, bool) {
-	if !ValidName(name) {
-		return SkipUnusable, true
-	}
-	if reason := st.HoldReason(name, now, ttl); reason != "" {
-		return reason, true
-	}
-	if seated[name] {
-		return SkipPolecatDirectory, true
-	}
-	return "", false
-}
-
 func (r *Registry) pool() []string {
 	if r.Pool != nil {
 		return r.Pool
@@ -633,13 +487,6 @@ func (r *Registry) sleep(d time.Duration) {
 		return
 	}
 	time.Sleep(d)
-}
-
-func (r *Registry) index(n int) int {
-	if r.Rand != nil {
-		return r.Rand(n)
-	}
-	return rand.IntN(n)
 }
 
 func (r *Registry) procStart() func(int) (string, bool, error) {

@@ -28,9 +28,10 @@ type Binding struct {
 	Time time.Time `json:"time"`
 }
 
-// Reservation is a name Pick handed out that nothing has bound yet, held until
-// it ages past the registry's TTL, so a launcher that dies between Pick and
-// Bind does not hold a name for good.
+// Reservation is a name a state file written by an older gt reserved and
+// nothing has bound, held until it ages past the registry's TTL. No current
+// code writes one; the registry still reads them so a name reserved before an
+// upgrade keeps holding until it expires.
 type Reservation struct {
 	Name string    `json:"name"`
 	Time time.Time `json:"time"`
@@ -42,7 +43,7 @@ func (res Reservation) Expired(now time.Time, ttl time.Duration) bool {
 }
 
 // State is the registry file: the agents holding names, the names bound to
-// beads, and the names Pick has handed out that nothing bound yet.
+// beads, and the names an older gt reserved that nothing bound yet.
 type State struct {
 	Agents       []Agent       `json:"agents"`
 	Bindings     []Binding     `json:"bindings"`
@@ -66,8 +67,8 @@ func (s *State) Bound(bead string) (string, bool) {
 	return s.Bindings[best].Name, true
 }
 
-// Bind records name bound to bead, dropping the reservation Pick may have made
-// for it, and reports whether it added a pair that was not bound already.
+// Bind records name bound to bead, dropping any reservation recorded for it,
+// and reports whether it added a pair that was not bound already.
 func (s *State) Bind(name, bead string, at time.Time) bool {
 	s.DropReservation(name)
 	for _, b := range s.Bindings {
@@ -111,13 +112,6 @@ func (s *State) SetAgent(a Agent) {
 		}
 	}
 	s.Agents = append(s.Agents, a)
-}
-
-// Reserve records that Pick handed out name at now, replacing any reservation
-// the name already had.
-func (s *State) Reserve(name string, now time.Time) {
-	s.DropReservation(name)
-	s.Reservations = append(s.Reservations, Reservation{Name: name, Time: now})
 }
 
 // DropReservation removes every reservation for name, if any.
@@ -179,29 +173,6 @@ func (s *State) Taken(now time.Time, ttl time.Duration, isLive func(Agent) (bool
 		}
 	}
 	return taken, nil
-}
-
-// HoldReason returns why the state holds name at now, or the empty reason when
-// no entry of it does: a binding, which holds its name for good; a reservation
-// younger than ttl; or a recorded agent, which is a live one where the caller
-// pruned the dead agents first.
-func (s *State) HoldReason(name string, now time.Time, ttl time.Duration) SkipReason {
-	for _, b := range s.Bindings {
-		if b.Name == name {
-			return SkipBound
-		}
-	}
-	for _, res := range s.Reservations {
-		if res.Name == name && !res.Expired(now, ttl) {
-			return SkipReserved
-		}
-	}
-	for _, a := range s.Agents {
-		if a.Name == name {
-			return SkipLiveProcess
-		}
-	}
-	return ""
 }
 
 // HeldLive returns the names a process holds at now — a recorded agent, or a

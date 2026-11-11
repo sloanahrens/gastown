@@ -82,7 +82,7 @@ Each item is a candidate sized on main at design time; each deletion bead proves
 - The host agent and `probes.json` (`internal/cmd` host agent, `internal/hostprobe`, about 3,200 lines with tests). `gt host load` and `internal/hostload` are already deleted (gt-yjzepk.17).
 - `gt power` (`internal/power`, about 3,900 lines with tests).
 - The installer and update commands (`internal/installer`, about 8,800 lines with tests; the install is an image rollout).
-- The `cmux` bird spawner (`internal/bird`, about 5,700 lines with tests): it moves to the operator's own tools next to `claude-agent`; `gt` never calls `cmux`.
+- The `cmux` bird spawner: deleted with its `gt bird spawn` command and the name-picking helpers it alone used (gt-a2uug4.19). The rest of `internal/bird` stays; `gt` never calls `cmux`.
 - The `lsof` orphan sweeps (`internal/util`), since polecats live in sandboxes. `diskutil` disk-space reads become portable `df`.
 - Then, as separate beads each with its own proof: the remaining launchd and launchctl references (about 50 non-test files at design time), the local session and tmux management that polecats no longer use (`internal/tmux`, `internal/session`), and the host-side shell scripts under `scripts/` that only served the local daemon.
 
