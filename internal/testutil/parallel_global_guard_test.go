@@ -43,6 +43,23 @@ const parallelGlobalWaiver = "parallel-global-ok"
 // Two ways out, both fine: keep the test sequential, or make its seam
 // install-once and never restore (TestMain, sync.Once), which is what
 // internal/refinery's TestMain does and what makes t.Parallel safe there.
+//
+// The shapes it reads: a write to a package variable (an assignment, or a
+// Swap, Store or CompareAndSwap with no key argument) that is restored or takes
+// a caller's value; a reset-named helper (Reset*, Clear*, Invalidate*, *AndReset)
+// that zeroes, clears or deletes a package variable; a call into another
+// package's seam; and a method call, matched by name and argument count to a
+// method of this package that writes a package variable.
+//
+// Residual, not seen: state a parallel test shares through a fixed filesystem
+// path, a port, the environment, the working directory, or a reset reached
+// through another package's exported function. Method calls are unresolved:
+// a call is matched by name and argument count to a direct writer, so a method
+// that writes a package variable only through a further call is not followed.
+// Each such chain is logged by name as unfollowed in the test log, and is not
+// a failure. The guard reads package variables and helper calls only, with no
+// type information, so a clean verdict does not prove a parallel test safe on
+// those.
 func TestNoParallelTestsReachProcessGlobalSwaps(t *testing.T) {
 	t.Parallel()
 	scanner := newSeamScanner(sharedRepoTree(t))
@@ -105,9 +122,50 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 		// pkg.Nudge, where only the free functions are what the call names.
 		"TestParallelCallsOtherStore": false,
 		"TestParallelCallsOtherNudge": true,
+		// Shape 1: a package-level atomic value swapped, then restored in
+		// t.Cleanup. The sequential and waived twins are the supported answers.
+		"TestParallelSwapsAtomicSlot":   true,
+		"TestSequentialSwapsAtomicSlot": false,
+		"TestParallelWaivedAtomicSlot":  false,
+		// Shape 2: a reset that empties a package map and counter, named as a
+		// reset, with no parameter and no restore.
+		"TestParallelResetsCensus":       true,
+		"TestSequentialResetsCensus":     false,
+		"TestParallelWaivedResetsCensus": false,
+		// A delete keyed by a parameter is a per-key write unless the function
+		// is named as a reset, which Invalidate is.
+		"TestParallelInvalidatesKey": true,
+		// A lazy cache fill in a function not named as a reset is no seam.
+		"TestParallelLazyFill": false,
+		// A parallel test that only increments counters writes no seam.
+		"TestParallelIncrementsCounter": false,
+		// A sync.Map keyed by a per-test value is isolated: its Store takes a key
+		// and a value, so the unkeyed rule does not match it, and the argument
+		// count rules out Box.Store, the same-named writer in this package.
+		"TestParallelKeysSyncMap": false,
+		// A method call that the guard resolves by name and argument count to a
+		// writer method of this package is reported by name.
+		"TestParallelCallsResetMethod": true,
+		// A bare Swap with no restore is a setter, not a seam (the spec's shape
+		// restores what it swapped).
+		"TestParallelSetsSlotNoRestore": false,
+		// An environment writer reached by a method name is out of scope.
+		"TestParallelCallsEnvSetter": false,
+		// A method that writes only through a further call is not followed: the
+		// test is not reported, and the log names its chain (checked below).
+		"TestParallelCallsRelayForward": false,
+		// A reset in another package is the residual, not a seam.
+		"TestParallelCallsOtherReset": false,
 	}
 	seen := map[string]bool{}
+	sawParseError := false
 	for _, line := range got {
+		// A file this package cannot parse is reported by its path, not as a
+		// test. The fixture's broken package must be among the reports.
+		if strings.Contains(line, "broken"+string(filepath.Separator)+"broken.go: ") {
+			sawParseError = true
+			continue
+		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 || !strings.HasPrefix(fields[1], "Test") {
 			t.Errorf("unparseable violation %q", line)
@@ -121,11 +179,27 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 			t.Errorf("scanner reported %s, but the fixture marks it safe:\n%s", name, line)
 		}
 	}
+	if !sawParseError {
+		t.Errorf("scanner did not report the fixture's unparseable package; a package it cannot read must not read as clean.\nScanned %d violation(s):\n%s",
+			len(got), strings.Join(got, "\n"))
+	}
 	for name, expect := range want {
 		if expect && !seen[name] {
 			t.Errorf("scanner missed %s; the fixture expects it reported.\nScanned %d violation(s):\n%s",
 				name, len(got), strings.Join(got, "\n"))
 		}
+	}
+	// The unfollowed method call is not a violation, but it must be named by
+	// test and method in the log, never read as clean in silence.
+	var sawUnfollowed bool
+	for _, line := range scanner.unfollowed {
+		if strings.Contains(line, " TestParallelCallsRelayForward — unfollowed: reaches method relay.Forward at ") {
+			sawUnfollowed = true
+		}
+	}
+	if !sawUnfollowed {
+		t.Errorf("scanner did not log the unfollowed method call relay.Forward reached from TestParallelCallsRelayForward.\nUnfollowed:\n%s",
+			strings.Join(scanner.unfollowed, "\n"))
 	}
 }
 
@@ -161,7 +235,17 @@ type Nudger struct{}
 func (Nudger) Nudge() {}
 
 func Nudge(v int) { Seam = v }
+
+// Holder's Reset writes the seam from its argument. A parallel test calling
+// h.Reset(3) reaches it by name and argument count, with no type information.
+type Holder struct{}
+
+func (Holder) Reset(v int) { Seam = v }
 `,
+		// A package the parser cannot read, with no test file. Its seam would be
+		// invisible to every package that calls it, so the guard reports it by
+		// path rather than read the package as clean.
+		"broken/broken.go": "package broken\n\nfunc (\n",
 		"other/other_test.go": `package other
 
 import (
@@ -179,12 +263,20 @@ func TestParallelCallsOtherNudge(t *testing.T) {
 	t.Parallel()
 	pkg.Nudge(8)
 }
+
+// A reset in another package is the residual: the guard reads a package's own
+// resets, not an exported one a caller in another package reaches.
+func TestParallelCallsOtherReset(t *testing.T) {
+	t.Parallel()
+	pkg.ResetCensus()
+}
 `,
 		"pkg/seam_test.go": `package pkg
 
 import (
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -313,6 +405,153 @@ func TestParallelCallsFreePoke(t *testing.T) {
 	t.Parallel()
 	Poke(7)
 }
+
+// Shape 1: a package-level atomic value swapped, then restored in t.Cleanup.
+var slot atomic.Pointer[int]
+
+func useSlot(t *testing.T) {
+	s := new(int)
+	prev := slot.Swap(s)
+	t.Cleanup(func() { slot.Store(prev) })
+}
+
+func TestParallelSwapsAtomicSlot(t *testing.T) {
+	t.Parallel()
+	useSlot(t)
+}
+
+func TestSequentialSwapsAtomicSlot(t *testing.T) {
+	useSlot(t)
+}
+
+//parallel-global-ok: the slot is read only by this test's own goroutine.
+func TestParallelWaivedAtomicSlot(t *testing.T) {
+	t.Parallel()
+	useSlot(t)
+}
+
+// Shape 2: a reset that empties process state. It has no parameter and no
+// restore, and is a seam because it is named as a reset and clears or zeroes
+// a package variable.
+var census = map[string]int{}
+
+var censusTotal int
+
+func ResetCensus() {
+	clear(census)
+	censusTotal = 0
+}
+
+func TestParallelResetsCensus(t *testing.T) {
+	t.Parallel()
+	ResetCensus()
+}
+
+func TestSequentialResetsCensus(t *testing.T) {
+	ResetCensus()
+}
+
+//parallel-global-ok: only this test's own goroutine reads the census.
+func TestParallelWaivedResetsCensus(t *testing.T) {
+	t.Parallel()
+	ResetCensus()
+}
+
+// A delete keyed by a parameter, in a function named as a reset.
+func InvalidateCensus(key string) {
+	delete(census, key)
+}
+
+func TestParallelInvalidatesKey(t *testing.T) {
+	t.Parallel()
+	InvalidateCensus(t.Name())
+}
+
+// A lazy fill in a function not named as a reset is no seam.
+var lazy map[string]int
+
+func lazyFill() {
+	if lazy == nil {
+		lazy = make(map[string]int)
+	}
+	lazy["k"] = 1
+}
+
+func TestParallelLazyFill(t *testing.T) {
+	t.Parallel()
+	lazyFill()
+}
+
+// Counters: an atomic Add and a plain increment are not seams.
+var hits atomic.Int64
+
+var birds int
+
+func TestParallelIncrementsCounter(t *testing.T) {
+	t.Parallel()
+	hits.Add(1)
+	birds++
+}
+
+// A sync.Map keyed by a per-test value: the key is a parameter, and the Store
+// takes a key and a value, so it is isolated, not shared.
+var townDown sync.Map
+
+func useTownDown(t *testing.T, root string) {
+	townDown.Store(root, true)
+	t.Cleanup(func() { townDown.Delete(root) })
+}
+
+func TestParallelKeysSyncMap(t *testing.T) {
+	t.Parallel()
+	useTownDown(t, t.TempDir())
+}
+
+// A method call by name: h.Reset(3) matches Holder.Reset, which writes the seam.
+func TestParallelCallsResetMethod(t *testing.T) {
+	t.Parallel()
+	var h Holder
+	h.Reset(3)
+}
+
+// relay.Forward writes the seam only through SetSeam, so it is no direct writer
+// and the guard cannot follow a call to it past its own body. The test is not
+// reported, and its chain is logged by name as unfollowed.
+type relay struct{}
+
+func (relay) Forward() { SetSeam(9) }
+
+func TestParallelCallsRelayForward(t *testing.T) {
+	t.Parallel()
+	var r relay
+	r.Forward()
+}
+
+// A bare Swap with a parameter and no restore is a setter, not a swap: the
+// spec's shape restores what it swapped, so this is no seam here.
+func setSlotNoRestore(v *int) {
+	slot.Swap(v)
+}
+
+func TestParallelSetsSlotNoRestore(t *testing.T) {
+	t.Parallel()
+	setSlotNoRestore(new(int))
+}
+
+// A method that writes the environment is out of scope, so a parallel test that
+// calls it by name is not reported.
+type envHolder struct{}
+
+func (envHolder) Setenv(key, value string) {
+	os.Setenv(key, value)
+}
+
+var env envHolder
+
+func TestParallelCallsEnvSetter(t *testing.T) {
+	t.Parallel()
+	env.Setenv("K", "V")
+}
 `,
 	}
 	for name, body := range files {
@@ -351,6 +590,9 @@ type seamScanner struct {
 	dirs    []string
 	pkgs    map[string]*pkgAnalysis // dir -> analysis
 	mutator map[string]map[string]bool
+	// unfollowed names each method call the guard could not follow past, from a
+	// parallel test it reads as clean. It is logged, not failed.
+	unfollowed []string
 }
 
 func newSeamScanner(tree *repoTree) *seamScanner {
@@ -391,9 +633,15 @@ func (s *seamScanner) scan(t *testing.T) []string {
 		if pa == nil {
 			continue
 		}
+		// A reset is left out: the cross-package check reads a package's
+		// exported seams, and a reset that empties another package's state is
+		// the residual, not a seam a caller opts into. The same package's own
+		// tests still see it through pa.direct.
 		mut := map[string]bool{}
-		for name := range pa.direct {
-			mut[name] = true
+		for name, w := range pa.direct {
+			if !w.reset {
+				mut[name] = true
+			}
 		}
 		if len(mut) > 0 {
 			s.mutator[pa.importPath] = mut
@@ -408,12 +656,24 @@ func (s *seamScanner) scan(t *testing.T) []string {
 	var violations []string
 	for _, dir := range s.dirs {
 		pa := s.pkgs[dir]
-		if pa == nil || !pa.hasTestFiles {
+		if pa == nil {
+			continue
+		}
+		// A package with no test files has no parallel test to report, but its
+		// unparsed files may hold a seam other packages call: report the parse
+		// error rather than read the package as clean.
+		if !pa.hasTestFiles {
+			violations = append(violations, pa.parseErrors...)
 			continue
 		}
 		violations = append(violations, pa.parallelSwaps()...)
+		s.unfollowed = append(s.unfollowed, pa.unfollowedCalls()...)
 	}
 	sort.Strings(violations)
+	sort.Strings(s.unfollowed)
+	for _, line := range s.unfollowed {
+		t.Logf("%s", line)
+	}
 	return violations
 }
 
@@ -429,8 +689,17 @@ func (s *seamScanner) analysis(dir string) *pkgAnalysis {
 // globalWrite is one direct write to process-global state, with enough context
 // to name it in a failure message.
 type globalWrite struct {
-	pos  token.Position
-	what string
+	pos   token.Position
+	what  string
+	reset bool // a reset that empties package state: not an exported seam
+}
+
+// isPackageVar reports whether a write is to a package variable, as opposed to
+// an os stream or the process environment. Only package-variable writers are
+// seams a method call can be matched to: the environment and working directory
+// are out of this guard's scope.
+func isPackageVar(what string) bool {
+	return strings.HasPrefix(what, "package variable ")
 }
 
 // pkgAnalysis holds one directory's parsed package. Test and non-test files are
@@ -451,11 +720,16 @@ type pkgAnalysis struct {
 	crossTargets map[string]map[string]string // file path -> alias -> import path
 	parseErrors  []string
 	hasTestFiles bool
+	writerSet    map[string]bool     // memo of writers(), built on first use
+	unfollowSet  map[string]bool     // memo of unfollowReach(), built on first use
+	indirect     map[string][]string // memo of indirectMethods(), built on first use
+	fset         *token.FileSet
 }
 
 func parseDir(s *seamScanner, dir string) *pkgAnalysis {
 	pa := &pkgAnalysis{
 		root:         s.root,
+		fset:         s.fset,
 		importPath:   s.importPath(dir),
 		pkgLevel:     map[string]bool{},
 		funcs:        map[string]*ast.FuncDecl{},
@@ -632,6 +906,8 @@ type candidateWrite struct {
 	what      string
 	fromParam bool // the new value is a parameter the caller chose
 	process   bool // os.Stdout and friends: global by definition
+	reset     bool // a reset-named function zeroes, clears or deletes it
+	swap      bool // a Swap, Store or CompareAndSwap call: a seam only when restored
 }
 
 // directWrite reports this function's own swap of process-global state, if it
@@ -648,7 +924,17 @@ type candidateWrite struct {
 //     does it races every parallel reader just the same: gt witness's
 //     nudgeRefinery swap), or
 //   - it is os.Stdout/os.Stderr/os.Stdin, which are process-global whatever
-//     the value and cannot be made safe by construction.
+//     the value and cannot be made safe by construction, or
+//   - it is a Swap, Store or CompareAndSwap on a package-level value with no
+//     key argument (atomic.Value, atomic.Pointer), and a t.Cleanup or defer in
+//     this function restores that same value. A sync.Map takes a key, so its
+//     Store and Swap are not counted, and neither is its Delete. A bare Store
+//     with no restore is a setter, not a swap, and is not a seam here, and
+//   - the function is named as a reset (resetName) and zeroes, clears or
+//     deletes a package variable. This is a seam with no parameter and no
+//     restore: it empties process state that every parallel reader shares. A
+//     delete keyed by a parameter counts here because of the name; the same
+//     delete in a function not named a reset is a per-key write and is not.
 //
 // Locals are collected first so a shadowing `:=` inside the function is not
 // mistaken for a write to the package-scope name it shadows.
@@ -720,7 +1006,9 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 
 	var candidates []candidateWrite
 	withCleanup := false
-	deferRestored := map[string]bool{} // globals a deferred call writes back
+	deferRestored := map[string]bool{}   // globals a deferred call writes back
+	cleanupRestored := map[string]bool{} // swapped globals a t.Cleanup stores back
+	resetNamed := resetName(fd.Name.Name)
 	once := onceRanges(fd, pa.pkgLevel)
 	ast.Inspect(fd, func(n ast.Node) bool {
 		switch node := n.(type) {
@@ -730,13 +1018,19 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 			// the function instead of the test. A parallel test that swaps
 			// this way races every parallel reader of X for its whole body.
 			// Only a defer that writes a global back counts; a defer that
-			// unlocks a mutex says nothing about the writes around it.
+			// unlocks a mutex says nothing about the writes around it. A
+			// `defer X.Store(old)` restores an atomic value the same way.
 			ast.Inspect(node.Call, func(m ast.Node) bool {
 				if as, ok := m.(*ast.AssignStmt); ok && as.Tok != token.DEFINE {
 					for _, lhs := range as.Lhs {
 						if what, _, ok := pa.globalTarget(lhs, locals); ok {
 							deferRestored[what] = true
 						}
+					}
+				}
+				if call, ok := m.(*ast.CallExpr); ok {
+					if what, ok := pa.swapCall(call, locals); ok {
+						deferRestored[what] = true
 					}
 				}
 				return true
@@ -759,6 +1053,7 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 					what:      what,
 					fromParam: rhs != nil && mentionsAny(rhs, params),
 					process:   process,
+					reset:     resetNamed && rhs != nil && isZeroValue(rhs),
 				})
 			}
 		case *ast.CallExpr:
@@ -776,8 +1071,31 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 					fromParam: mentionsAny(node, params),
 				})
 			}
+			if what, ok := pa.swapCall(node, locals); ok {
+				candidates = append(candidates, candidateWrite{
+					pos:  s.fset.Position(node.Pos()),
+					what: what,
+					swap: true,
+				})
+			}
+			if what, ok := pa.resetCall(node, locals); ok && resetNamed {
+				candidates = append(candidates, candidateWrite{
+					pos:   s.fset.Position(node.Pos()),
+					what:  what,
+					reset: true,
+				})
+			}
 			if sel, ok := node.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Cleanup" && len(node.Args) == 1 {
 				withCleanup = true
+				// A swap is restored when the cleanup stores the same value back.
+				ast.Inspect(node.Args[0], func(m ast.Node) bool {
+					if call, ok := m.(*ast.CallExpr); ok {
+						if what, ok := pa.swapCall(call, locals); ok {
+							cleanupRestored[what] = true
+						}
+					}
+					return true
+				})
 			}
 		}
 		return true
@@ -786,14 +1104,25 @@ func (pa *pkgAnalysis) directWrite(s *seamScanner, path string, fd *ast.FuncDecl
 		return nil
 	}
 	for _, c := range candidates {
-		if c.process || c.fromParam || deferRestored[c.what] {
-			return &globalWrite{pos: c.pos, what: c.what}
+		if c.swap {
+			if deferRestored[c.what] || cleanupRestored[c.what] {
+				return &globalWrite{pos: c.pos, what: c.what}
+			}
+			continue
+		}
+		if c.process || c.fromParam || c.reset || deferRestored[c.what] {
+			return &globalWrite{pos: c.pos, what: c.what, reset: c.reset}
 		}
 	}
 	if withCleanup {
 		// A swap nothing restores still hands process state to the caller, so
-		// it is a seam on the same terms as a restored one.
-		return &globalWrite{pos: candidates[0].pos, what: candidates[0].what}
+		// it is a seam on the same terms as a restored one. A method-form swap
+		// is judged above, by its own restore, so it is not the fallback.
+		for _, c := range candidates {
+			if !c.swap {
+				return &globalWrite{pos: c.pos, what: c.what}
+			}
+		}
 	}
 	return nil
 }
@@ -879,6 +1208,86 @@ func (pa *pkgAnalysis) globalTarget(lhs ast.Expr, locals map[string]bool) (what 
 	return "", false, false
 }
 
+// swapCall names a Swap, Store or CompareAndSwap on a package-level value with
+// no key: atomic.Value and atomic.Pointer, the shape useTestContainerInitSlots
+// swaps and restores. The argument count is what tells the keyed forms apart:
+// sync.Map's Store and Swap take a key and a value, and its CompareAndSwap a key
+// and two values, so only one argument (two for CompareAndSwap) is unkeyed.
+func (pa *pkgAnalysis) swapCall(call *ast.CallExpr, locals map[string]bool) (string, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return "", false
+	}
+	base, ok := sel.X.(*ast.Ident)
+	if !ok || locals[base.Name] || !pa.pkgLevel[base.Name] {
+		return "", false
+	}
+	switch sel.Sel.Name {
+	case "Swap", "Store":
+		if len(call.Args) != 1 {
+			return "", false
+		}
+	case "CompareAndSwap":
+		if len(call.Args) != 2 {
+			return "", false
+		}
+	default:
+		return "", false
+	}
+	return "package variable " + base.Name, true
+}
+
+// resetCall names clear(v) or delete(v, k) on a package-level map or slice: the
+// builtins that empty process state. directWrite counts them only in a
+// reset-named function.
+func (pa *pkgAnalysis) resetCall(call *ast.CallExpr, locals map[string]bool) (string, bool) {
+	fn, ok := call.Fun.(*ast.Ident)
+	if !ok || (fn.Name != "clear" && fn.Name != "delete") || len(call.Args) == 0 {
+		return "", false
+	}
+	base, ok := call.Args[0].(*ast.Ident)
+	if !ok || locals[base.Name] || !pa.pkgLevel[base.Name] {
+		return "", false
+	}
+	return "package variable " + base.Name, true
+}
+
+// resetName reports whether a function is named as one that resets process
+// state. Only such a function's zeroing, clearing or deleting of a package
+// variable is a seam: elsewhere those writes are lazy fills and per-key
+// bookkeeping, which the guard deliberately ignores.
+func resetName(name string) bool {
+	return strings.HasPrefix(name, "Reset") ||
+		strings.HasPrefix(name, "Clear") ||
+		strings.HasPrefix(name, "Invalidate") ||
+		strings.HasSuffix(name, "AndReset")
+}
+
+// isZeroValue reports whether an expression is an empty value: nil, false, 0,
+// "", an empty composite literal, or make with no size (or a zero size).
+func isZeroValue(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.Name == "nil" || e.Name == "false"
+	case *ast.BasicLit:
+		return e.Value == "0" || e.Value == `""`
+	case *ast.CompositeLit:
+		return len(e.Elts) == 0
+	case *ast.CallExpr:
+		fn, ok := e.Fun.(*ast.Ident)
+		if !ok || fn.Name != "make" || len(e.Args) == 0 {
+			return false
+		}
+		for _, size := range e.Args[1:] {
+			if lit, ok := size.(*ast.BasicLit); !ok || lit.Value != "0" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // processEnvMutation catches the process-wide calls that are writes without
 // being assignments. testing.T.Setenv is deliberately absent: the testing
 // package panics when it is called from a parallel test, so the runtime
@@ -939,26 +1348,53 @@ func (pa *pkgAnalysis) crossWrites(s *seamScanner, path string, body *ast.BlockS
 }
 
 // mutates answers transitively: this function writes a global, or calls one
-// that does. The stack breaks cycles, which the call graph can have.
-func (pa *pkgAnalysis) mutates(name string, stack map[string]bool) bool {
-	if stack[name] {
-		return false
+// that does. The answer comes from writers, so cycles in the call graph need
+// no special handling.
+func (pa *pkgAnalysis) mutates(name string) bool {
+	return pa.writers()[name]
+}
+
+// writers is the set of this package's functions that reach a global write:
+// a direct writer, a caller of another package's seam, or a caller of a member
+// of the set. It is the least fixed point of that rule over the call graph,
+// computed once per package, so each parallel test's reach is a lookup instead
+// of a fresh walk of the callees (which made the guard too slow under -race).
+func (pa *pkgAnalysis) writers() map[string]bool {
+	if pa.writerSet != nil {
+		return pa.writerSet
 	}
-	if _, ok := pa.direct[name]; ok {
-		return true
+	set := map[string]bool{}
+	for name := range pa.direct {
+		set[name] = true
 	}
-	if len(pa.crossSeam[name]) > 0 {
-		return true
+	for name := range pa.funcs {
+		if len(pa.crossSeam[name]) > 0 {
+			set[name] = true
+		}
 	}
-	fd, ok := pa.funcs[name]
-	if !ok || fd == nil || fd.Body == nil {
-		return false
+	for changed := true; changed; {
+		changed = false
+		for name, fd := range pa.funcs {
+			if set[name] || fd == nil || fd.Body == nil {
+				continue
+			}
+			if pa.callsWriter(name, set) {
+				set[name] = true
+				changed = true
+			}
+		}
 	}
-	stack[name] = true
-	defer delete(stack, name)
-	once := onceRanges(fd.Body, pa.pkgLevel)
+	pa.writerSet = set
+	return set
+}
+
+// callsWriter reports whether name's body calls a function in set, outside a
+// package-level sync.Once body, which runs at most once and so cannot race.
+func (pa *pkgAnalysis) callsWriter(name string, set map[string]bool) bool {
+	body := pa.funcs[name].Body
+	once := onceRanges(body, pa.pkgLevel)
 	found := false
-	ast.Inspect(fd.Body, func(n ast.Node) bool {
+	ast.Inspect(body, func(n ast.Node) bool {
 		if found {
 			return false
 		}
@@ -969,8 +1405,8 @@ func (pa *pkgAnalysis) mutates(name string, stack map[string]bool) bool {
 		if within(call.Pos(), once) {
 			return true
 		}
-		for _, callee := range calleeNames(call, pa.imports[pa.fileOf[name]]) {
-			if pa.mutates(callee, stack) {
+		for _, callee := range pa.calleeNames(call, pa.fileOf[name]) {
+			if set[callee] {
 				found = true
 				return false
 			}
@@ -984,22 +1420,68 @@ func (pa *pkgAnalysis) mutates(name string, stack map[string]bool) bool {
 // `f()` names a free function, whose key is its bare name; it never names a
 // method, whose key is Recv.Name.
 //
-// Method calls are deliberately not followed. Without type information a
-// `x.Run()` can only be matched by the name "Run", and every package in this
-// repo has several unrelated ones — following them connects a test to half the
-// package and buries the real seams. Test helpers are free functions in
-// practice, and the cost of missing a method-shaped one is a missed finding,
-// not a wrong one. Calls into other packages are crossWrites' job.
-func calleeNames(call *ast.CallExpr, ourAliases map[string]bool) []string {
+// A method call `x.M(...)` has no receiver type without type information, so
+// it names each method of this package that writes a package variable, is
+// called M, and takes a compatible argument count (methodsNamed). Matching only that set keeps
+// the call graph from connecting a test to every unrelated M in the package. A
+// call on an import alias is another package's function, which crossWrites
+// handles, so it names nothing here.
+func (pa *pkgAnalysis) calleeNames(call *ast.CallExpr, file string) []string {
 	switch fun := call.Fun.(type) {
 	case *ast.Ident:
 		return []string{fun.Name}
 	case *ast.SelectorExpr:
-		if base, ok := fun.X.(*ast.Ident); ok && ourAliases[base.Name] {
-			return nil
+		if base, ok := fun.X.(*ast.Ident); ok {
+			if _, isImport := pa.imports[file][base.Name]; isImport {
+				return nil
+			}
 		}
+		return pa.methodsNamed(fun.Sel.Name, call)
 	}
 	return nil
+}
+
+// methodsNamed lists this package's methods named name that write a package
+// variable, and whose parameter list the call's argument count fits. The count
+// filter is sound for what it rules out: a call with the wrong number of
+// arguments cannot be that method. It is not resolution: a same-named method of
+// another type with a fitting count still matches, and a variable written only
+// through a further call is not listed (the residual). Methods that write the
+// environment are not listed, since that case is out of scope.
+func (pa *pkgAnalysis) methodsNamed(name string, call *ast.CallExpr) []string {
+	var out []string
+	for key, w := range pa.direct {
+		fd := pa.funcs[key]
+		if fd == nil || fd.Recv == nil || !strings.HasSuffix(key, "."+name) || !isPackageVar(w.what) {
+			continue
+		}
+		if fitsArgs(fd.Type, call) {
+			out = append(out, key)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// fitsArgs reports whether call could pass the arguments ft declares. A single
+// call argument may spread a multi-value result, so it fits any count.
+func fitsArgs(ft *ast.FuncType, call *ast.CallExpr) bool {
+	if len(call.Args) == 1 {
+		if _, spread := call.Args[0].(*ast.CallExpr); spread {
+			return true
+		}
+	}
+	n, variadic := 0, false
+	for _, field := range ft.Params.List {
+		n += max(len(field.Names), 1)
+		if _, ok := field.Type.(*ast.Ellipsis); ok {
+			variadic = true
+		}
+	}
+	if variadic {
+		return len(call.Args) >= n-1
+	}
+	return len(call.Args) == n
 }
 
 // parallelSwaps is the guard's verdict for one directory: every test in it
@@ -1010,7 +1492,7 @@ func (pa *pkgAnalysis) parallelSwaps() []string {
 		if fd == nil || fd.Recv != nil || !strings.HasPrefix(name, "Test") || pa.waived[name] || fd.Body == nil {
 			continue
 		}
-		if !callsParallel(fd.Body) || !pa.mutates(name, map[string]bool{}) {
+		if !callsParallel(fd.Body) || !pa.mutates(name) {
 			continue
 		}
 		rel, err := filepath.Rel(pa.root, pa.fileOf[name])
@@ -1020,6 +1502,174 @@ func (pa *pkgAnalysis) parallelSwaps() []string {
 		out = append(out, rel+":"+strconv.Itoa(pa.lineOf[name])+" "+name+" — "+pa.why(name))
 	}
 	return out
+}
+
+// unfollowedCalls names, for each t.Parallel test in this package that the guard
+// reads as clean, the first method call in its chain that the guard cannot
+// follow past. methodsNamed resolves a method call to direct writers only, so a
+// method that writes a global through a further call ends the chain there, and
+// without this line the test would read clean in silence.
+func (pa *pkgAnalysis) unfollowedCalls() []string {
+	reach := pa.unfollowReach()
+	var out []string
+	for name, fd := range pa.funcs {
+		if fd == nil || fd.Recv != nil || !strings.HasPrefix(name, "Test") || pa.waived[name] || fd.Body == nil {
+			continue
+		}
+		if !callsParallel(fd.Body) || pa.mutates(name) || !reach[name] {
+			continue
+		}
+		site := pa.unfollowedSite(name, reach, map[string]bool{})
+		rel, err := filepath.Rel(pa.root, pa.fileOf[name])
+		if err != nil {
+			rel = pa.fileOf[name]
+		}
+		out = append(out, rel+":"+strconv.Itoa(pa.lineOf[name])+" "+name+" — unfollowed: reaches method "+site+
+			", which writes a process global only through a further call the guard does not follow")
+	}
+	return out
+}
+
+// unfollowedSite names the first unfollowable method call reached from fn, going
+// only through same-package callees in reach. It returns the method and the
+// call's position, or "" when none is reached.
+func (pa *pkgAnalysis) unfollowedSite(fn string, reach, seen map[string]bool) string {
+	if seen[fn] {
+		return ""
+	}
+	seen[fn] = true
+	fd := pa.funcs[fn]
+	if fd == nil || fd.Body == nil {
+		return ""
+	}
+	once := onceRanges(fd.Body, pa.pkgLevel)
+	var calls []*ast.CallExpr
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && !within(call.Pos(), once) {
+			calls = append(calls, call)
+		}
+		return true
+	})
+	for _, call := range calls {
+		if key := pa.unfollowedMethod(call, pa.fileOf[fn]); key != "" {
+			return key + " at " + pa.fset.Position(call.Pos()).String()
+		}
+	}
+	for _, call := range calls {
+		for _, callee := range pa.calleeNames(call, pa.fileOf[fn]) {
+			if !reach[callee] {
+				continue
+			}
+			if site := pa.unfollowedSite(callee, reach, seen); site != "" {
+				return site
+			}
+		}
+	}
+	return ""
+}
+
+// unfollowedMethod names the method a call could be when that method writes a
+// package variable only through a further call, and no direct writer matches
+// the call. Such a method is the one the guard cannot follow past. It returns ""
+// for every other call, including calls into another package.
+func (pa *pkgAnalysis) unfollowedMethod(call *ast.CallExpr, file string) string {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	if base, ok := sel.X.(*ast.Ident); ok {
+		if _, isImport := pa.imports[file][base.Name]; isImport {
+			return ""
+		}
+	}
+	if len(pa.methodsNamed(sel.Sel.Name, call)) > 0 {
+		return ""
+	}
+	for _, key := range pa.indirectMethods()[sel.Sel.Name] {
+		if fitsArgs(pa.funcs[key].Type, call) {
+			return key
+		}
+	}
+	return ""
+}
+
+// indirectMethods indexes, by method name, this package's methods that reach a
+// global write without being a direct writer: the ones the guard cannot follow
+// past. Each list is sorted, so the named method is the same on every run.
+func (pa *pkgAnalysis) indirectMethods() map[string][]string {
+	if pa.indirect != nil {
+		return pa.indirect
+	}
+	idx := map[string][]string{}
+	for key := range pa.writers() {
+		fd := pa.funcs[key]
+		if fd == nil || fd.Recv == nil || pa.direct[key] != nil {
+			continue
+		}
+		name := key[strings.LastIndex(key, ".")+1:]
+		idx[name] = append(idx[name], key)
+	}
+	for _, keys := range idx {
+		sort.Strings(keys)
+	}
+	pa.indirect = idx
+	return idx
+}
+
+// unfollowReach is the set of this package's functions whose same-package chain
+// reaches an unfollowable method call. A function is in it when it makes one
+// directly, or calls a member, the same least fixed point writers() computes.
+// It is memoized, so each parallel test's chain is a lookup, not a fresh walk.
+func (pa *pkgAnalysis) unfollowReach() map[string]bool {
+	if pa.unfollowSet != nil {
+		return pa.unfollowSet
+	}
+	set := map[string]bool{}
+	for name, fd := range pa.funcs {
+		if fd == nil || fd.Body == nil {
+			continue
+		}
+		if pa.hasUnfollowedCall(name) {
+			set[name] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for name, fd := range pa.funcs {
+			if set[name] || fd == nil || fd.Body == nil {
+				continue
+			}
+			if pa.callsWriter(name, set) {
+				set[name] = true
+				changed = true
+			}
+		}
+	}
+	pa.unfollowSet = set
+	return set
+}
+
+// hasUnfollowedCall reports whether name's own body makes an unfollowable method
+// call, outside a package-level sync.Once body.
+func (pa *pkgAnalysis) hasUnfollowedCall(name string) bool {
+	body := pa.funcs[name].Body
+	once := onceRanges(body, pa.pkgLevel)
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || within(call.Pos(), once) {
+			return true
+		}
+		if pa.unfollowedMethod(call, pa.fileOf[name]) != "" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func callsParallel(body *ast.BlockStmt) bool {
@@ -1090,11 +1740,11 @@ func (pa *pkgAnalysis) nextMutator(name string, seen map[string]bool) string {
 		if within(call.Pos(), once) {
 			return true
 		}
-		for _, callee := range calleeNames(call, pa.imports[pa.fileOf[name]]) {
+		for _, callee := range pa.calleeNames(call, pa.fileOf[name]) {
 			if seen[callee] {
 				continue
 			}
-			if pa.mutates(callee, map[string]bool{}) {
+			if pa.mutates(callee) {
 				out = callee
 				return false
 			}
