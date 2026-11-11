@@ -36,7 +36,7 @@ func TestAttentionEveryCollectorRuleHasFlags(t *testing.T) {
 			t.Errorf("collector %s: rule %q has no flags row", c.kind, rule)
 		}
 	}
-	for _, key := range []string{hostRuleMemLow, hostRuleDockerDown} {
+	for _, key := range []string{hostRuleMemLow, hostRuleForgejoDown} {
 		if _, ok := attention.Flags(key); !ok {
 			t.Errorf("host rule %q has no flags row", key)
 		}
@@ -53,7 +53,7 @@ func TestAttentionTickEventsCarryRuleFlags(t *testing.T) {
 	f := newAttentionFixture(t, now)
 	h := healthyHost()
 	h.memFree = 9
-	h.containersErr = errors.New("docker.sock: connection refused")
+	h.forgejoErr = errors.New("forgejo health: connection refused")
 	f.src.host = h
 	f.tick(t, now)
 
@@ -65,7 +65,7 @@ func TestAttentionTickEventsCarryRuleFlags(t *testing.T) {
 	if mem.Rule != attention.RuleHostMemLow || mem.Handled != attention.HandledOperatorAction || !mem.Wake {
 		t.Errorf("mem_low event = %+v, want operator_action and wake", mem)
 	}
-	probe := byKey[hostProbeFailedPrefix+hostProbeDocker]
+	probe := byKey[hostProbeFailedPrefix+hostProbeForgejo]
 	if probe.Rule != attention.RuleHostProbe || probe.Handled != attention.HandledInfo || probe.Wake {
 		t.Errorf("probe event = %+v, want info and no wake", probe)
 	}

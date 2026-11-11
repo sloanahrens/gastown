@@ -169,8 +169,6 @@ type attentionCache struct {
 	state         attention.State
 	reworkNotes   map[string]reworkNote
 	diskWarnBeats int
-	// dockerProbeFails is how many consecutive ticks docker ps has failed.
-	dockerProbeFails int
 	// forgejoProbeFails is how many consecutive ticks the town's Forgejo has
 	// not answered its health endpoint.
 	forgejoProbeFails int
@@ -323,9 +321,6 @@ type attentionSources struct {
 	// diskWarnBeats is how many consecutive ticks host.disk_warn has held,
 	// carried across ticks by the daemon. attentionTick updates it.
 	diskWarnBeats int
-	// dockerProbeFails is how many consecutive ticks docker ps has failed,
-	// carried across ticks by the daemon. collectHostDocker updates it.
-	dockerProbeFails int
 	// forgejoProbeFails is how many consecutive ticks the town's Forgejo has
 	// not answered its health endpoint, carried across ticks by the daemon.
 	// collectHostForgejo updates it.
@@ -403,7 +398,6 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 		src.reworkNotes = cache.reworkNotes
 	}
 	src.diskWarnBeats = cache.diskWarnBeats
-	src.dockerProbeFails = cache.dockerProbeFails
 	src.forgejoProbeFails = cache.forgejoProbeFails
 	src.repeatedAt = cache.repeatedAt
 	src.backlogSamples = cache.backlogSamples
@@ -438,7 +432,7 @@ func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.
 		d.logger.Printf("attention: auditing resolved risk-path FAILs: %v", err)
 	}
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, forgejoProbeFails: src.forgejoProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped, auditNext: src.auditNext, escalationLogs: src.escalationLogs}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, forgejoProbeFails: src.forgejoProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped, auditNext: src.auditNext, escalationLogs: src.escalationLogs}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
@@ -652,7 +646,6 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindHostDisk, collect: s.collectHostDisk},
 		{kind: attention.KindHostNodeDisk, collect: s.collectHostNodeDisk},
 		{kind: attention.KindHostMem, collect: s.collectHostMem},
-		{kind: attention.KindHostDocker, collect: s.collectHostDocker},
 		{kind: attention.KindHostForgejo, collect: s.collectHostForgejo},
 		{kind: attention.KindDispatchIdle, collect: s.collectDispatchIdle},
 		{kind: attention.KindDeployFailed, collect: s.collectDeployFailures},

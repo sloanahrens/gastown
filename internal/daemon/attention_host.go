@@ -15,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/townconfig"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -33,11 +32,11 @@ const (
 	// attentionHostProbeTimeout bounds one external host probe, so a wedged
 	// docker daemon costs one tick's probe and not the whole tick.
 	attentionHostProbeTimeout = 20 * time.Second
-	// attentionDockerProbeDownBeats is how many consecutive ticks docker ps
-	// must fail, or the Forgejo health endpoint must not answer, before the
-	// stack or the instance is reported down. One failed tick stays an info
-	// line: a probe that times out once is not an outage.
-	attentionDockerProbeDownBeats = 3
+	// attentionForgejoProbeDownBeats is how many consecutive ticks the Forgejo
+	// health endpoint must not answer before the instance is reported down. One
+	// failed tick stays an info line: a probe that times out once is not an
+	// outage.
+	attentionForgejoProbeDownBeats = 3
 	// attentionForgejoHealthTimeout bounds the health request. Forgejo answers
 	// its health endpoint at once, so five seconds of silence is the instance
 	// not answering rather than a slow one.
@@ -52,44 +51,11 @@ const (
 	hostRuleNodeDiskWarn = attention.RuleHostNodeDiskWarn
 	hostRuleNodeDiskCrit = attention.RuleHostNodeDiskCrit
 	hostRuleMemLow       = attention.RuleHostMemLow
-	hostRuleDockerDown   = attention.RuleHostDockerDown
 	hostRuleForgejoDown  = attention.RuleHostForgejoDown
 	// hostProbeFailedPrefix keys the item a failed probe raises; the probe's
 	// name follows.
 	hostProbeFailedPrefix = "host.probe_failed:"
 )
-
-// hostStackContainers are the Docker Desktop containers the town cannot run
-// without (gt-gg9hv.36): Forgejo's database, and Dolt, which every rig's beads
-// live in. Forgejo and its CI runner run in the gt-control cluster now:
-// Forgejo is watched by its health endpoint (ForgejoHealthy) and the runner by
-// the landing_infra patrol's run-queue probe, so neither is a container name
-// here.
-var hostStackContainers = []string{
-	"forgejo-db-1",
-	// Dolt, through the same constant the disk patrol reads, so the two
-	// probers cannot name different containers.
-	hostprobe.DockerDiskContainer,
-}
-
-// The history-man database is required only while its rig is live: the operator
-// turns hm-postgres off on purpose when the hm rig is parked.
-const (
-	hostHMRig       = "hm"
-	hostHMContainer = "hm-postgres"
-)
-
-// requiredStackContainers is the containers in force this tick: hostStackContainers,
-// plus hm-postgres unless the hm rig is parked. A park state that cannot
-// be read counts as parked, because a false alarm for a container whose rig may
-// be parked costs more than a missed one.
-func (s *attentionSources) requiredStackContainers() []string {
-	req := append([]string(nil), hostStackContainers...)
-	if parked, err := s.host.RigParked(hostHMRig); err == nil && !parked {
-		req = append(req, hostHMContainer)
-	}
-	return req
-}
 
 // The names a failed probe is reported under, as the operator would type the
 // command.
@@ -97,7 +63,6 @@ const (
 	hostProbeDisk     = "disk usage"
 	hostProbeNodeDisk = "control node disk"
 	hostProbeMem      = "memory_pressure"
-	hostProbeDocker   = "docker ps"
 	hostProbeForgejo  = "forgejo /api/healthz"
 )
 
@@ -129,11 +94,6 @@ type hostProbes interface {
 	NodeDisks(ctx context.Context) ([]hostNodeRead, error)
 	// MemFreePct is the host's free memory as a percentage of total.
 	MemFreePct(ctx context.Context) (float64, error)
-	// Containers are the names of the running Docker containers.
-	Containers(ctx context.Context) ([]string, error)
-	// RigParked reports whether the rig is parked. An error means the state
-	// could not be read.
-	RigParked(rig string) (bool, error)
 	// ForgejoHealthy asks the town's Forgejo its health endpoint. A nil error
 	// is a healthy answer; errForgejoNotConfigured says the town runs no
 	// Forgejo to watch; errForgejoSettingUnreadable says the origin could not
@@ -186,11 +146,6 @@ func (systemHostProbes) NodeDisks(context.Context) ([]hostNodeRead, error) {
 	return nil, errHostNodeNotConfigured
 }
 
-func (p systemHostProbes) RigParked(rig string) (bool, error) {
-	rec, err := townconfig.ParkState(p.townRoot, rig)
-	return rec != nil, err
-}
-
 func (systemHostProbes) MemFreePct(ctx context.Context) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
 	defer cancel()
@@ -206,6 +161,9 @@ func memFreePctFrom(out []byte, err error) (float64, error) {
 	return hostprobe.ParseMemoryPressure(string(out))
 }
 
+// Containers are the names of the running Docker containers. Only the boot
+// gate's docker probe reads them now (newBootProbes), outside container mode;
+// the attention collectors do not.
 func (systemHostProbes) Containers(ctx context.Context) ([]string, error) {
 	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
 	defer cancel()
@@ -602,70 +560,9 @@ func (s *attentionSources) collectHostMem(ctx context.Context) ([]attention.Item
 	}}, nil
 }
 
-// collectHostDocker raises host.docker_stack_down when any required container
-// (requiredStackContainers) is not among the running ones, naming the missing.
-//
-// A docker ps that fails cannot name the missing containers, and a failure that
-// held for attentionDockerProbeDownBeats ticks in a row is the stack down in
-// all but name: Docker Desktop has quit or the daemon is wedged. Such a failure
-// raises host.docker_stack_down itself, because the info-only probe item never
-// wakes anyone. A failure that comes and goes stays a probe item.
-func (s *attentionSources) collectHostDocker(ctx context.Context) ([]attention.Item, error) {
-	running, err := s.host.Containers(ctx)
-	if err != nil {
-		// A docker ps that died with the tick's own context (the heartbeat ran
-		// out of time) says nothing about docker, so it is a probe failure but
-		// not a beat toward the stack being down.
-		if ctx.Err() == nil {
-			s.dockerProbeFails++
-		}
-		items := s.hostProbeFailed(hostProbeDocker, err, attention.KindHostDocker)
-		if s.dockerProbeFails < attentionDockerProbeDownBeats {
-			return items, nil
-		}
-		// The stack-down item the probe kept from an earlier tick is replaced,
-		// not joined: one key, one item.
-		kept := items[:0]
-		for _, it := range items {
-			if it.Key != hostRuleDockerDown {
-				kept = append(kept, it)
-			}
-		}
-		return append(kept, attention.Item{
-			Key:      hostRuleDockerDown,
-			Kind:     attention.KindHostDocker,
-			Severity: attention.SeverityHigh,
-			Summary: fmt.Sprintf("docker ps has failed for %d heartbeats, so the stack is unreachable: %s",
-				s.dockerProbeFails, oneLine(err.Error())),
-		}), nil
-	}
-	s.dockerProbeFails = 0
-	up := make(map[string]bool, len(running))
-	for _, n := range running {
-		up[n] = true
-	}
-	required := s.requiredStackContainers()
-	var missing []string
-	for _, n := range required {
-		if !up[n] {
-			missing = append(missing, n)
-		}
-	}
-	if len(missing) == 0 {
-		return nil, nil
-	}
-	return []attention.Item{{
-		Key:      hostRuleDockerDown,
-		Kind:     attention.KindHostDocker,
-		Severity: attention.SeverityHigh,
-		Summary:  fmt.Sprintf("%d of %d stack containers not running: %s", len(missing), len(required), strings.Join(missing, ", ")),
-	}}, nil
-}
-
 // collectHostForgejo raises host.forgejo_down when the town's Forgejo has not
-// answered its health endpoint for attentionDockerProbeDownBeats ticks in a
-// row. It reads the health answer the same way collectHostDocker reads docker
-// ps: one unanswered tick is an info probe line, because a single timeout is
+// answered its health endpoint for attentionForgejoProbeDownBeats ticks in a
+// row. One unanswered tick is an info probe line, because a single timeout is
 // not an outage, and a run of them is the instance down, which wakes because
 // the info line never does. A healthy answer, or a town that runs no Forgejo,
 // returns nothing, so an item either condition cleared is dropped.
@@ -692,7 +589,7 @@ func (s *attentionSources) collectHostForgejo(ctx context.Context) ([]attention.
 		s.forgejoProbeFails++
 	}
 	items := s.hostProbeFailed(hostProbeForgejo, err, attention.KindHostForgejo)
-	if s.forgejoProbeFails < attentionDockerProbeDownBeats {
+	if s.forgejoProbeFails < attentionForgejoProbeDownBeats {
 		return items, nil
 	}
 	// The instance-down item the probe kept from an earlier tick is replaced,

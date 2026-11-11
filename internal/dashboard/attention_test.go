@@ -119,13 +119,13 @@ func TestAttentionPanelSortsTheAlarmsAboveReviewDebt(t *testing.T) {
 			Rule: attention.RuleRiskPath},
 		{ID: "alert-2", At: attentionNow.Add(-2 * time.Minute), Level: attentionLevel(attention.SeverityHigh), Key: "red-main:gastown:internal/cmd",
 			Title: attention.RuleRedMain, Text: "internal/cmd is red on main", Rule: attention.RuleRedMain},
-		{ID: "alert-3", At: attentionNow.Add(-time.Minute), Level: attentionLevel(attention.SeverityHigh), Key: "host.docker_stack_down",
-			Title: attention.RuleHostDockerDown, Text: "3 of 4 stack containers not running", Rule: attention.RuleHostDockerDown},
+		{ID: "alert-3", At: attentionNow.Add(-time.Minute), Level: attentionLevel(attention.SeverityHigh), Key: "host.forgejo_down",
+			Title: attention.RuleHostForgejoDown, Text: "forgejo health has failed 3 heartbeats in a row", Rule: attention.RuleHostForgejoDown},
 	}
 	ask := &Questions{Rows: []QuestionRow{{ID: "gt-q1", Title: "retry policy", Priority: 0, State: QuestionAwaiting}}}
 
 	at := buildAttention(nil, ask, items, AttentionQueue{}, ScoresRead{}, LandingRiskRead{}, attentionNow)
-	want := []string{"gt-q1", "host.docker_stack_down", "red-main:gastown:internal/cmd", "risk:gt-abc:deadbeef"}
+	want := []string{"gt-q1", "host.forgejo_down", "red-main:gastown:internal/cmd", "risk:gt-abc:deadbeef"}
 	if len(at.Rows) != len(want) {
 		t.Fatalf("the list holds %+v, want the question and the three queue items", at.Rows)
 	}

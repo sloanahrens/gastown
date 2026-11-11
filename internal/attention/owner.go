@@ -48,7 +48,6 @@ var ruleOwners = map[string]Owner{
 	RuleHostNodeDiskWarn: OwnerOperator,
 	RuleHostNodeDiskCrit: OwnerOperator,
 	RuleHostMemLow:       OwnerOperator,
-	RuleHostDockerDown:   OwnerOperator,
 	RuleHostForgejoDown:  OwnerOperator,
 	RuleHostProbe:        OwnerOperator,
 	// A silent overseer cannot wake itself; the daemon pushes to the human
