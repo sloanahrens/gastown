@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -30,6 +32,7 @@ import (
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
+	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -66,6 +69,9 @@ type installSteps struct {
 	initTownBeads      func(townRoot string) error
 	configureTownBeads func(townRoot string)
 	clearTownDoltHost  func(townPath string) error
+	// deployDirectives writes the central directives from the gastown rig's
+	// bare repo (gt-3lvcjz.13).
+	deployDirectives func(townRoot string) ([]string, error)
 }
 
 // resolved fills in every step the caller left nil.
@@ -97,7 +103,40 @@ func (s installSteps) resolved() installSteps {
 	if s.clearTownDoltHost == nil {
 		s.clearTownDoltHost = clearTownDoltHost
 	}
+	if s.deployDirectives == nil {
+		// config cannot import version (version imports config), so the build
+		// commit comes in as a function; an empty commit resolves to it.
+		s.deployDirectives = func(townRoot string) ([]string, error) {
+			return config.DeployCentralDirectives(townRoot, version.BuildCommit(), version.BuildCommit)
+		}
+	}
 	return s
+}
+
+// deployInstallDirectives writes the town's central directives from the gastown
+// rig's bare repo through deploy. A town with no gastown rig yet is skipped with
+// one line. A rig path that cannot be checked, or a deploy that fails, is a
+// warning on w that names the error, and the install goes on: a town that
+// already exists keeps its install. A nil w prints to stdout.
+func deployInstallDirectives(townRoot string, deploy func(string) ([]string, error), w io.Writer) {
+	if w == nil {
+		w = os.Stdout
+	}
+	repo := config.CentralDirectiveRepo(townRoot)
+	if _, err := os.Stat(repo); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(w, "   • no gastown rig yet, central directives not deployed\n")
+			return
+		}
+		fmt.Fprintf(w, "   %s Could not check the gastown rig for central directives: %v\n", style.Dim.Render("⚠"), err)
+		return
+	}
+	written, err := deploy(townRoot)
+	if err != nil {
+		fmt.Fprintf(w, "   %s Could not deploy central directives: %v\n", style.Dim.Render("⚠"), err)
+		return
+	}
+	fmt.Fprintf(w, "   ✓ Deployed central directives from the gastown rig (%d written)\n", len(written))
 }
 
 var installCmd = &cobra.Command{
@@ -166,6 +205,9 @@ type installOptions struct {
 	// doltHostSet is whether the flag was given at all: an empty value is a
 	// refusal, and it cannot be told from no flag by the string alone.
 	doltHostSet bool
+	// warn is where the central-directive warning prints; nil is stdout, as the
+	// install's other warnings do.
+	warn io.Writer
 	// steps are the install's external steps; the zero value runs the real
 	// ones (see installSteps).
 	steps installSteps
@@ -580,6 +622,10 @@ func runInstallWith(opts installOptions, args []string) error {
 			fmt.Printf("   ✓ Synced %d hook target(s)\n", synced)
 		}
 	}
+
+	// The central directives come from the gastown rig's bare repo, after the
+	// town files exist (gt-3lvcjz.13).
+	deployInstallDirectives(absPath, steps.deployDirectives, opts.warn)
 
 	if opts.shell {
 		fmt.Println()
