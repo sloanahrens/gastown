@@ -607,3 +607,74 @@ func maintenanceCatchUpRunsUnderTheDispatchHoldFile(t *testing.T) {
 		t.Errorf("catch-up gc calls = %s, want gt", got)
 	}
 }
+
+// TestStandbyBackupArchivesOnALocalServer: under a standby the night's backup
+// still runs, and it takes the history archive first on a local server too,
+// since the archive reads over SQL and the gc that normally calls it is held
+// (gt-il6fuf). No gc runs.
+func TestStandbyBackupArchivesOnALocalServer(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"gt": {633 * mib, 0}}
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	commits := []archiveCommit{
+		{Hash: "h1", Committer: "gastown/crew/overseer", Date: gcTestNow.Add(-time.Hour), Message: "first"},
+	}
+	withArchiveFakes(d, f, map[string][]archiveCommit{"gt": commits}, nil)
+	if err := estop.Activate(d.config.TownRoot, estop.TriggerManual, "drill"); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	want := [][]string{
+		archiveCSVHeader,
+		{"h1", "gastown/crew/overseer", commits[0].Date.UTC().Format(time.RFC3339), "first"},
+	}
+	if got := readArchiveCSV(t, archiveFile(dir, "gt")); !csvRowsEqual(got, want) {
+		t.Errorf("archive rows = %v\nwant %v", got, want)
+	}
+	if strings.Join(f.backupCalls, ",") != "gt" {
+		t.Errorf("backup calls = %v, want gt", f.backupCalls)
+	}
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v under a standby, want none", f.gcCalls)
+	}
+	archiveAt, backupAt := slices.Index(f.events, "archive gt"), slices.Index(f.events, "backup gt")
+	if archiveAt < 0 || backupAt < 0 || archiveAt > backupAt {
+		t.Errorf("events = %v; want the archive of gt before its backup", f.events)
+	}
+}
+
+// TestStandbyBackupArchiveFailureEscalatesAndStillBacksUp: a history archive
+// that cannot run on an external server is raised, and the backup behind it
+// still runs, since the backup does not depend on the archive (gt-il6fuf).
+func TestStandbyBackupArchiveFailureEscalatesAndStillBacksUp(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.serverDBs = []string{"gt", "hq"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	d.patrolConfig = archiveConfig("relative/archive") // refused: not absolute
+	d.maint.archiveRead = func(context.Context, *Daemon, string, map[string]struct{}) ([]archiveCommit, error) {
+		t.Error("the dolt_log read ran with a relative archive_dir")
+		return nil, nil
+	}
+	if err := estop.Activate(d.config.TownRoot, estop.TriggerManual, "drill"); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "maintenance.archive_dir") {
+		t.Errorf("escalations = %v, want one naming maintenance.archive_dir", f.escalations)
+	}
+	if got := strings.Join(f.backupCalls, ","); got != "gt,hq" {
+		t.Errorf("backup calls = %v, want gt,hq: an archive failure must not stop the backup", f.backupCalls)
+	}
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc calls = %v under a standby, want none", f.gcCalls)
+	}
+}
