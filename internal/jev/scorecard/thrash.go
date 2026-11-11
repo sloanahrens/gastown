@@ -275,14 +275,14 @@ func overrunGuardRecord(town, bead string) (overrunStop, error) {
 		return stopAbsent, nil
 	}
 	if err != nil {
-		return stopAbsent, err
+		return stopAbsent, fmt.Errorf("reading the overrun record for %s: %w", bead, err)
 	}
 	var rec struct {
 		StopBeganAt time.Time `json:"stop_began_at"`
 		StoppedAt   time.Time `json:"stopped_at"`
 	}
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return stopAbsent, err
+		return stopAbsent, fmt.Errorf("parsing the overrun record for %s: %w", bead, err)
 	}
 	switch {
 	case !rec.StoppedAt.IsZero():
