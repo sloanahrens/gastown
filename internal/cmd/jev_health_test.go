@@ -704,6 +704,20 @@ func TestJevCopyAgeCountsOnlyEnabledBatteriesAndNeverReturnsAnError(t *testing.T
 		assert.True(t, note.Stale)
 	})
 
+	t.Run("an unreadable ledger is the warning, not a quiet copy", func(t *testing.T) {
+		t.Parallel()
+		town := newJevHealthTown(t, now, 5*time.Minute)
+		ledger := jev.UsageLedgerPath(town)
+		require.NoError(t, os.Remove(ledger))
+		// A symlink to itself: the stat fails with ELOOP, not with "not there".
+		require.NoError(t, os.Symlink(filepath.Base(ledger), ledger))
+
+		note := jevCopyAge(town, now, os.Stat, "")
+		assert.Contains(t, note.Warning, filepath.Base(ledger))
+		assert.Nil(t, note.Doc)
+		assert.True(t, note.Stale)
+	})
+
 	t.Run("a scorecard names only the one log it read", func(t *testing.T) {
 		t.Parallel()
 		town := t.TempDir()
