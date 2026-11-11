@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -18,6 +19,9 @@ import (
 // errPodDown is the failure a fake pod returns for a call it refuses.
 var errPodDown = errors.New("pod unreachable")
 
+// ctxKey marks the caller's context, so a test can see it reach the exec.
+type ctxKey struct{}
+
 // podClaimFor returns the claim writer for town over a fresh fake pod.
 func podClaimFor(t *testing.T, town string) (*holdclaim.Writer, *holdclaimtest.Pod) {
 	t.Helper()
@@ -29,13 +33,24 @@ func podClaimFor(t *testing.T, town string) (*holdclaim.Writer, *holdclaimtest.P
 	return w, pod
 }
 
+// podCall is the kubectl call the test target makes for command and args.
+func podCall(command string, args ...string) []string {
+	argv := []string{"kubectl", "--context", "kind-gt", "-n", "gt", "exec", "-i", "deploy/" + k8sdaemon.Name, "--", command}
+	return append(argv, args...)
+}
+
+// reachCall is the probe a set or a lift makes before its first step.
+func reachCall() []string {
+	return podCall("test", "-d", k8sdaemon.TownRootPath)
+}
+
 func TestActivateEstopMirrorsTheTownSentinelIntoThePod(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	pod, fake := podClaimFor(t, town)
 	var out bytes.Buffer
 
-	if err := activateEstopWith(&out, town, "", "closing laptop", pod); err != nil {
+	if err := activateEstopWith(context.Background(), &out, town, "", "closing laptop", pod); err != nil {
 		t.Fatalf("activateEstopWith: %v", err)
 	}
 	local, err := os.ReadFile(estop.FilePath(town))
@@ -46,12 +61,49 @@ func TestActivateEstopMirrorsTheTownSentinelIntoThePod(t *testing.T) {
 		t.Fatalf("ESTOP in the pod = %q, want the Mac's %q", got, local)
 	}
 	podFile := k8sdaemon.TownRootPath + "/" + estop.FileName
-	want := [][]string{
-		{"kubectl", "--context", "kind-gt", "-n", "gt", "exec", "-i", "deploy/" + k8sdaemon.Name, "--", "tee", podFile},
-		{"kubectl", "--context", "kind-gt", "-n", "gt", "exec", "-i", "deploy/" + k8sdaemon.Name, "--", "cat", podFile},
-	}
+	want := [][]string{reachCall(), podCall("tee", podFile), podCall("cat", podFile)}
 	if !reflect.DeepEqual(fake.Calls, want) {
 		t.Fatalf("pod calls:\n got %q\nwant %q", fake.Calls, want)
+	}
+}
+
+// TestActivateEstopPassesTheCallersContextToThePod pins that the context the
+// command runs under reaches every pod call the ESTOP set makes.
+func TestActivateEstopPassesTheCallersContextToThePod(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	pod, fake := podClaimFor(t, town)
+	var out bytes.Buffer
+	ctx := context.WithValue(context.Background(), ctxKey{}, "caller")
+
+	if err := activateEstopWith(ctx, &out, town, "", "", pod); err != nil {
+		t.Fatalf("activateEstopWith: %v", err)
+	}
+	if len(fake.Contexts) == 0 {
+		t.Fatal("no pod calls were made")
+	}
+	for i, got := range fake.Contexts {
+		if got.Value(ctxKey{}) != "caller" {
+			t.Fatalf("pod call %d ran without the caller's context", i)
+		}
+	}
+}
+
+// TestActivateEstopUnreachablePodChangesNothing pins that an ESTOP set against a
+// pod that does not answer writes neither side and says nothing changed.
+func TestActivateEstopUnreachablePodChangesNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	pod, fake := podClaimFor(t, town)
+	fake.Down = true
+	var out bytes.Buffer
+
+	err := activateEstopWith(context.Background(), &out, town, "", "", pod)
+	if err == nil || !strings.Contains(err.Error(), "the pod is unreachable and nothing changed") {
+		t.Fatalf("activateEstopWith error = %v, want the unreachable-pod refusal", err)
+	}
+	if _, statErr := os.Stat(estop.FilePath(town)); !os.IsNotExist(statErr) {
+		t.Fatalf("the Mac sentinel was written against an unreachable pod: stat err = %v", statErr)
 	}
 }
 
@@ -62,7 +114,7 @@ func TestLiftEstopWithNoPodWriterRemovesOnlyTheMacSentinel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := liftEstop(town, "", nil); err != nil {
+	if err := liftEstop(context.Background(), town, "", nil); err != nil {
 		t.Fatalf("liftEstop: %v", err)
 	}
 	if estop.IsActive(town) {
@@ -76,7 +128,7 @@ func TestActivateEstopMirrorsTheRigSentinelIntoThePod(t *testing.T) {
 	pod, fake := podClaimFor(t, town)
 	var out bytes.Buffer
 
-	if err := activateEstopWith(&out, town, "gastown", "maintenance", pod); err != nil {
+	if err := activateEstopWith(context.Background(), &out, town, "gastown", "maintenance", pod); err != nil {
 		t.Fatalf("activateEstopWith: %v", err)
 	}
 	rigFile := estop.RigFileName("gastown")
@@ -84,10 +136,7 @@ func TestActivateEstopMirrorsTheRigSentinelIntoThePod(t *testing.T) {
 	if _, ok := fake.Files[podFile]; !ok {
 		t.Fatalf("rig ESTOP %s is not in the pod's claim; files = %v", rigFile, keysOf(fake.Files))
 	}
-	want := [][]string{
-		{"kubectl", "--context", "kind-gt", "-n", "gt", "exec", "-i", "deploy/" + k8sdaemon.Name, "--", "tee", podFile},
-		{"kubectl", "--context", "kind-gt", "-n", "gt", "exec", "-i", "deploy/" + k8sdaemon.Name, "--", "cat", podFile},
-	}
+	want := [][]string{reachCall(), podCall("tee", podFile), podCall("cat", podFile)}
 	if !reflect.DeepEqual(fake.Calls, want) {
 		t.Fatalf("pod calls:\n got %q\nwant %q", fake.Calls, want)
 	}
@@ -100,7 +149,7 @@ func TestActivateEstopRefusesWhenThePodWriteFails(t *testing.T) {
 	fake.Fail["tee"] = errPodDown
 	var out bytes.Buffer
 
-	err := activateEstopWith(&out, town, "", "", pod)
+	err := activateEstopWith(context.Background(), &out, town, "", "", pod)
 	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
 		t.Fatalf("activateEstopWith error = %v, want the NOT-in-the-pod refusal", err)
 	}
@@ -114,7 +163,7 @@ func TestActivateEstopWithNoPodWriterIsMacOnly(t *testing.T) {
 	town := t.TempDir()
 	var out bytes.Buffer
 
-	if err := activateEstopWith(&out, town, "", "", nil); err != nil {
+	if err := activateEstopWith(context.Background(), &out, town, "", "", nil); err != nil {
 		t.Fatalf("activateEstopWith: %v", err)
 	}
 	if _, err := os.Stat(estop.FilePath(town)); err != nil {
@@ -131,7 +180,7 @@ func TestActivateEstopAlreadyActiveStillMirrorsIntoThePod(t *testing.T) {
 	pod, fake := podClaimFor(t, town)
 	var out bytes.Buffer
 
-	if err := activateEstopWith(&out, town, "", "", pod); err != nil {
+	if err := activateEstopWith(context.Background(), &out, town, "", "", pod); err != nil {
 		t.Fatalf("activateEstopWith: %v", err)
 	}
 	if !strings.Contains(out.String(), "already active") {
@@ -145,16 +194,10 @@ func TestActivateEstopAlreadyActiveStillMirrorsIntoThePod(t *testing.T) {
 func TestActivateEstopRefusesAHalfGivenPodSettingBeforeWriting(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := holdclaim.NamespaceEnv + "=gt\n"
-	if err := os.WriteFile(filepath.Join(town, "settings", "daemon.env"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	holdclaimtest.WritePodSetting(t, town, "", "gt")
 	var out bytes.Buffer
 
-	err := activateEstop(&out, town, "", "")
+	err := activateEstop(context.Background(), &out, town, "", "")
 	if err == nil || !strings.Contains(err.Error(), "pod setting") {
 		t.Fatalf("activateEstop error = %v, want a refusal naming the pod setting", err)
 	}
@@ -172,7 +215,7 @@ func TestLiftEstopRemovesTheMacSentinelThenThePodCopy(t *testing.T) {
 	pod, fake := podClaimFor(t, town)
 	fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName] = []byte("copy")
 
-	if err := liftEstop(town, "", pod); err != nil {
+	if err := liftEstop(context.Background(), town, "", pod); err != nil {
 		t.Fatalf("liftEstop: %v", err)
 	}
 	if _, ok := fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName]; ok {
@@ -196,7 +239,7 @@ func TestLiftEstopReportsAPodCopyStillPresentAfterTheMacRemoval(t *testing.T) {
 	fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName] = []byte("copy")
 	fake.Fail["rm"] = errPodDown
 
-	err := liftEstop(town, "", pod)
+	err := liftEstop(context.Background(), town, "", pod)
 	if err == nil || !strings.Contains(err.Error(), "pod copy still present") || !strings.Contains(err.Error(), "the pod stays STOPPED") {
 		t.Fatalf("liftEstop error = %v, want the pod-copy-still-present report saying the pod stays STOPPED", err)
 	}
@@ -221,15 +264,35 @@ func TestLiftEstopKeepsThePodCopyWhenTheMacRemovalFails(t *testing.T) {
 	pod, fake := podClaimFor(t, town)
 	fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName] = []byte("copy")
 
-	err := liftEstop(town, "", pod)
+	err := liftEstop(context.Background(), town, "", pod)
 	if err == nil || !strings.Contains(err.Error(), "the pod stays STOPPED") {
 		t.Fatalf("liftEstop error = %v, want the report that the pod stays STOPPED", err)
 	}
-	if len(fake.Calls) != 0 {
-		t.Fatalf("pod calls = %q, want none while the Mac sentinel is still up", fake.Calls)
+	if want := [][]string{reachCall()}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Fatalf("pod calls = %q, want only the probe while the Mac sentinel is still up", fake.Calls)
 	}
 	if _, ok := fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName]; !ok {
 		t.Fatal("the pod copy was removed although the Mac sentinel was not")
+	}
+}
+
+// TestLiftEstopUnreachablePodKeepsTheMacSentinel pins that a lift against a pod
+// that does not answer leaves the Mac's sentinel in place and says nothing changed.
+func TestLiftEstopUnreachablePodKeepsTheMacSentinel(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := estop.Activate(town, estop.TriggerManual, "x"); err != nil {
+		t.Fatal(err)
+	}
+	pod, fake := podClaimFor(t, town)
+	fake.Down = true
+
+	err := liftEstop(context.Background(), town, "", pod)
+	if err == nil || !strings.Contains(err.Error(), "the pod is unreachable and nothing changed") {
+		t.Fatalf("liftEstop error = %v, want the unreachable-pod refusal", err)
+	}
+	if !estop.IsActive(town) {
+		t.Fatal("the Mac ESTOP was lifted against an unreachable pod")
 	}
 }
 
@@ -242,7 +305,7 @@ func TestLiftEstopRigRemovesOnlyThatRigsSentinel(t *testing.T) {
 	pod, fake := podClaimFor(t, town)
 	fake.Files[k8sdaemon.TownRootPath+"/"+estop.RigFileName("gastown")] = []byte("copy")
 
-	if err := liftEstop(town, "gastown", pod); err != nil {
+	if err := liftEstop(context.Background(), town, "gastown", pod); err != nil {
 		t.Fatalf("liftEstop rig: %v", err)
 	}
 	if estop.ReadRig(town, "gastown") != nil {
@@ -268,7 +331,7 @@ func TestActivateEstopRigRefusesWhenThePodWriteFails(t *testing.T) {
 	fake.Fail["tee"] = errPodDown
 	var out bytes.Buffer
 
-	err := activateEstopWith(&out, town, "gastown", "", pod)
+	err := activateEstopWith(context.Background(), &out, town, "gastown", "", pod)
 	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
 		t.Fatalf("activateEstopWith rig error = %v, want the NOT-in-the-pod refusal", err)
 	}
@@ -283,15 +346,10 @@ func TestThawEstopRefusesAHalfGivenPodSettingBeforeLifting(t *testing.T) {
 	if err := estop.Activate(town, estop.TriggerManual, "x"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(town, "settings", "daemon.env"), []byte(holdclaim.ContextEnv+"=kind-gt\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	holdclaimtest.WritePodSetting(t, town, "kind-gt", "")
 	fake := holdclaimtest.New()
 
-	err := thawEstop(town, "", fake.Exec)
+	err := thawEstop(context.Background(), town, "", fake.Exec)
 	if err == nil || !strings.Contains(err.Error(), "pod setting") {
 		t.Fatalf("thawEstop error = %v, want a refusal naming the pod setting", err)
 	}
@@ -306,12 +364,12 @@ func TestThawEstopReportsAPodCopyStillPresentAfterTheMacLift(t *testing.T) {
 	if err := estop.Activate(town, estop.TriggerManual, "x"); err != nil {
 		t.Fatal(err)
 	}
-	writePodEnv(t, town)
+	holdclaimtest.WritePodSetting(t, town, "kind-gt", "gt")
 	fake := holdclaimtest.New()
 	fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName] = []byte("copy")
 	fake.Fail["rm"] = errPodDown
 
-	err := thawEstop(town, "", fake.Exec)
+	err := thawEstop(context.Background(), town, "", fake.Exec)
 	if err == nil || !strings.Contains(err.Error(), "pod copy still present") {
 		t.Fatalf("thawEstop error = %v, want the pod-copy-still-present report", err)
 	}
@@ -326,11 +384,11 @@ func TestThawEstopReportsAPodCopyStillPresentAfterTheMacLift(t *testing.T) {
 func TestThawEstopWithNoMacEstopReportsAPodCopyThatCannotBeLifted(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writePodEnv(t, town)
+	holdclaimtest.WritePodSetting(t, town, "kind-gt", "gt")
 	fake := holdclaimtest.New()
 	fake.Fail["rm"] = errPodDown
 
-	err := thawEstop(town, "", fake.Exec)
+	err := thawEstop(context.Background(), town, "", fake.Exec)
 	if err == nil || !strings.Contains(err.Error(), "pod copy still present") {
 		t.Fatalf("thawEstop error = %v, want the pod-copy-still-present report", err)
 	}
@@ -350,20 +408,8 @@ func TestLiftEstopReportsALocalSentinelThatCannotBeRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := liftEstop(town, "", nil)
+	err := liftEstop(context.Background(), town, "", nil)
 	if err == nil || !strings.Contains(err.Error(), "failed to remove the E-stop file") {
 		t.Fatalf("liftEstop error = %v, want the local removal failure", err)
-	}
-}
-
-// writePodEnv writes a complete pod setting into the town's daemon.env.
-func writePodEnv(t *testing.T, town string) {
-	t.Helper()
-	if err := os.MkdirAll(filepath.Join(town, "settings"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	body := holdclaim.ContextEnv + "=kind-gt\n" + holdclaim.NamespaceEnv + "=gt\n"
-	if err := os.WriteFile(filepath.Join(town, "settings", "daemon.env"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
 	}
 }

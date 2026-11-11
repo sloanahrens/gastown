@@ -472,7 +472,7 @@ func (e *engine) podClaim() (*holdclaim.Writer, error) {
 
 // setHold puts the operator hold up, the pod's claim first so a partial set
 // never leaves the pod running.
-func (e *engine) setHold() error {
+func (e *engine) setHold(ctx context.Context) error {
 	pod, err := e.podClaim()
 	if err != nil {
 		return fmt.Errorf("the hold was not set, because the pod setting cannot be read: %w", err)
@@ -494,12 +494,12 @@ func (e *engine) setHold() error {
 	if !on {
 		fmt.Fprintf(e.o.Out, "  + touch %s\n", path)
 	}
-	return holdclaim.Activate(pod, "hold", path, nil)
+	return holdclaim.Activate(ctx, pod, "hold", path, nil)
 }
 
 // clearHold lifts the operator hold, the Mac file first so a partial lift
 // leaves the pod held.
-func (e *engine) clearHold() error {
+func (e *engine) clearHold(ctx context.Context) error {
 	pod, err := e.podClaim()
 	if err != nil {
 		return fmt.Errorf("the hold was not lifted, because the pod setting cannot be read: %w", err)
@@ -515,7 +515,7 @@ func (e *engine) clearHold() error {
 		return nil
 	}
 	fmt.Fprintf(e.o.Out, "  + rm -f %s\n", path)
-	return holdclaim.Lift(pod, "hold", path)
+	return holdclaim.Lift(ctx, pod, "hold", path)
 }
 
 // setEstop sets the town ESTOP through gt estop, whose sentinel format the
@@ -524,14 +524,14 @@ func (e *engine) clearHold() error {
 // where the Mac's sentinel is already up and gt estop does nothing.
 func (e *engine) setEstop(ctx context.Context, state State) error {
 	if e.estopOn() {
-		return e.mirrorEstop()
+		return e.mirrorEstop(ctx)
 	}
 	return e.run(ctx, e.o.TownRoot, e.o.GTCommand, "estop", "-r", "gt-power: "+string(state))
 }
 
 // mirrorEstop sets the town ESTOP that is already up on the Mac into the pod's
 // claim, when the town has a pod setting.
-func (e *engine) mirrorEstop() error {
+func (e *engine) mirrorEstop(ctx context.Context) error {
 	pod, err := e.podClaim()
 	if err != nil {
 		return fmt.Errorf("the ESTOP was not set, because the pod setting cannot be read: %w", err)
@@ -544,7 +544,7 @@ func (e *engine) mirrorEstop() error {
 		fmt.Fprintf(e.o.Out, "  [dry-run] write the ESTOP into the pod's claim\n")
 		return nil
 	}
-	return holdclaim.Mirror(pod, "E-stop", path)
+	return holdclaim.Mirror(ctx, pod, "E-stop", path)
 }
 
 // record writes the last requested state.

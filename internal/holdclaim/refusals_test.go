@@ -54,7 +54,7 @@ func TestPodPathRefusesALocalPathThatCannotBeRelativised(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	abs := filepath.Join(t.TempDir(), "seat-refill.hold")
-	if err := w.Set(abs, nil); err == nil {
+	if err := w.Set(context.Background(), abs, nil); err == nil {
 		t.Fatal("Set of an absolute path under a relative town root returned nil, want a refusal")
 	}
 	if len(fake.Calls) != 0 {

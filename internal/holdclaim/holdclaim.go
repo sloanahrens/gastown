@@ -1,6 +1,6 @@
 // Package holdclaim writes the operator's hold and ESTOP sentinels into the
 // daemon pod's claim as well as the Mac's town tree. The pod reads its dispatch
-// hold and ESTOP from the town-state claim it mounts at TownRootPath, so a
+// hold and ESTOP from the town-state claim it mounts at podMount, so a
 // sentinel that stays only on the Mac never stops the pod's dispatchers.
 //
 // The pod setting is read from settings/daemon.env: GT_DAEMON_POD_CONTEXT and
@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -31,6 +30,15 @@ import (
 const (
 	ContextEnv   = "GT_DAEMON_POD_CONTEXT"
 	NamespaceEnv = "GT_DAEMON_POD_NAMESPACE"
+)
+
+// deployName and podMount are the daemon Deployment's name and the path its
+// town-state claim is mounted at, as deploy/k8s/daemon sets them. They are kept
+// here, not imported, so the writer does not link the manifest package; the
+// holdclaim tests fail if they drift from it.
+const (
+	deployName = "daemon"
+	podMount   = "/Users/sloan/gt"
 )
 
 // kubectlTimeout bounds one kubectl call, so a pod that stops answering fails
@@ -93,11 +101,11 @@ func New(townRoot string, target Target, run Exec) (*Writer, error) {
 	}
 	return &Writer{
 		townRoot: townRoot,
-		podRoot:  k8sdaemon.TownRootPath,
+		podRoot:  podMount,
 		run:      run,
 		prefix: []string{
 			"kubectl", "--context", target.Context, "-n", target.Namespace,
-			"exec", "-i", "deploy/" + k8sdaemon.Name, "--",
+			"exec", "-i", "deploy/" + deployName, "--",
 		},
 	}, nil
 }
@@ -129,60 +137,88 @@ func FromTown(townRoot string, run Exec) (*Writer, error) {
 	return New(townRoot, Target{Context: kubeContext, Namespace: namespace}, run)
 }
 
-// Set writes content to the claim file that mirrors path, then reads it back
+// Reach asks the pod one cheap question before any step is taken: whether its
+// claim mount is there. A pod that does not answer is refused here, so a set or
+// a lift never touches the Mac's copy while the pod cannot be reached.
+func (w *Writer) Reach(ctx context.Context) error {
+	if _, err := w.run(ctx, w.argv("test", "-d", w.podRoot), nil); err != nil {
+		return fmt.Errorf("probing the pod: %w", err)
+	}
+	return nil
+}
+
+// Set writes content to the claim file that mirrors local, then reads it back
 // through the pod and refuses the write when the bytes differ.
-func (w *Writer) Set(local string, content []byte) error {
+func (w *Writer) Set(ctx context.Context, local string, content []byte) error {
 	podPath, err := w.podPath(local)
 	if err != nil {
 		return err
 	}
-	if _, err := w.run(context.Background(), w.argv("tee", podPath), content); err != nil {
+	if _, err := w.run(ctx, w.argv("tee", podPath), content); err != nil {
 		return fmt.Errorf("writing %s in the pod: %w", podPath, err)
 	}
-	got, err := w.run(context.Background(), w.argv("cat", podPath), nil)
+	got, err := w.run(ctx, w.argv("cat", podPath), nil)
 	if err != nil {
 		return fmt.Errorf("reading %s back from the pod: %w", podPath, err)
 	}
 	if !bytes.Equal(got, content) {
-
 		return fmt.Errorf("read-back of %s in the pod differs from the bytes written", podPath)
 	}
 	return nil
 }
 
-// removalProbe is the script the removal read-back runs in the pod. It prints
-// present or absent, so a probe that fails to reach the pod is never read as
-// absent.
-const removalProbe = `if [ -e "$1" ]; then echo present; else echo absent; fi`
-
 // Remove deletes the claim file that mirrors local and reads back that it is
 // gone. A file already gone is not an error, so a repeated lift succeeds.
-func (w *Writer) Remove(local string) error {
+func (w *Writer) Remove(ctx context.Context, local string) error {
 	podPath, err := w.podPath(local)
 	if err != nil {
 		return err
 	}
-	if _, err := w.run(context.Background(), w.argv("rm", "-f", podPath), nil); err != nil {
+	if _, err := w.run(ctx, w.argv("rm", "-f", podPath), nil); err != nil {
 		return fmt.Errorf("removing %s from the pod: %w", podPath, err)
 	}
-	got, err := w.run(context.Background(), w.argv("sh", "-c", removalProbe, "sh", podPath), nil)
-	if err != nil {
-		return fmt.Errorf("reading %s back from the pod: %w", podPath, err)
-	}
-	switch strings.TrimSpace(string(got)) {
-	case "absent":
-		return nil
-	case "present":
+	// test -e exits 0 when the path is there and 1 when it is not. Its exit is
+	// read only after rm -f has succeeded, so a 1 that kubectl itself printed
+	// cannot hide a copy: the rm just removed it.
+	_, err = w.run(ctx, w.argv("test", "-e", podPath), nil)
+	if err == nil {
 		return fmt.Errorf("%s is still present in the pod after the removal", podPath)
 	}
-	return fmt.Errorf("read-back of %s in the pod is neither present nor absent", podPath)
+	code, ok := exitCode(err)
+	if !ok {
+		return fmt.Errorf("reading %s back from the pod: %w", podPath, err)
+	}
+	if code != 1 {
+		return fmt.Errorf("read-back of %s in the pod is neither present nor absent (exit %d): %w", podPath, code, err)
+	}
+	return nil
+}
+
+// exitCoder is what an Exec error carries when the pod ran the command and it
+// exited non-zero. os/exec's ExitError has it, and so does the fake pod's error.
+type exitCoder interface {
+	ExitCode() int
+}
+
+// exitCode returns the exit status an Exec error carries, and false when the
+// error carries none, so the caller reads it as a failed call.
+func exitCode(err error) (int, bool) {
+	var ec exitCoder
+	if errors.As(err, &ec) {
+		return ec.ExitCode(), true
+	}
+	return 0, false
 }
 
 // Activate sets the sentinel at local, the pod's claim first and the Mac after,
-// so a partial set never leaves the pod running. A nil pod is the Mac-only town.
-func Activate(pod *Writer, what, local string, content []byte) error {
+// so a partial set never leaves the pod running. A pod that does not answer is
+// refused before any step. A nil pod is the Mac-only town.
+func Activate(ctx context.Context, pod *Writer, what, local string, content []byte) error {
 	if pod != nil {
-		if err := pod.Set(local, content); err != nil {
+		if err := pod.Reach(ctx); err != nil {
+			return fmt.Errorf("%s NOT set, the pod is unreachable and nothing changed: %w", what, err)
+		}
+		if err := pod.Set(ctx, local, content); err != nil {
 			return fmt.Errorf("%s NOT in the pod, so it is not set on the Mac either: %w", what, err)
 		}
 	}
@@ -196,7 +232,7 @@ func Activate(pod *Writer, what, local string, content []byte) error {
 }
 
 // Mirror sets the sentinel already up at local into the claim, through Activate.
-func Mirror(pod *Writer, what, local string) error {
+func Mirror(ctx context.Context, pod *Writer, what, local string) error {
 	if pod == nil {
 		return nil
 	}
@@ -204,21 +240,25 @@ func Mirror(pod *Writer, what, local string) error {
 	if err != nil {
 		return fmt.Errorf("reading the %s %s to set it in the pod: %w", what, local, err)
 	}
-	return Activate(pod, what, local, content)
+	return Activate(ctx, pod, what, local, content)
 }
 
 // Lift clears the sentinel at local, the Mac's file first and the pod's claim
-// last, so a partial lift leaves the pod STOPPED. A nil pod is the Mac-only town.
-func Lift(pod *Writer, what, local string) error {
-	return liftWith(pod, what, local, os.Remove)
+// last, so a partial lift leaves the pod STOPPED. A pod that does not answer is
+// refused before any step. A nil pod is the Mac-only town.
+func Lift(ctx context.Context, pod *Writer, what, local string) error {
+	return liftWith(ctx, pod, what, local, os.Remove)
 }
 
 // liftWith is Lift with the Mac's removal given, so a test can make the removal
 // fail or report success without the file going.
-func liftWith(pod *Writer, what, local string, remove func(string) error) error {
+func liftWith(ctx context.Context, pod *Writer, what, local string, remove func(string) error) error {
 	if pod != nil {
 		if _, err := pod.podPath(local); err != nil {
 			return fmt.Errorf("%s lift refused, nothing removed: %w", what, err)
+		}
+		if err := pod.Reach(ctx); err != nil {
+			return fmt.Errorf("%s lift refused, the pod is unreachable and nothing changed, so the pod stays STOPPED: %w", what, err)
 		}
 	}
 	// Remove without asking whether the sentinel is up: a path that cannot be
@@ -242,7 +282,7 @@ func liftWith(pod *Writer, what, local string, remove func(string) error) error 
 	if pod == nil {
 		return nil
 	}
-	if err := pod.Remove(local); err != nil {
+	if err := pod.Remove(ctx, local); err != nil {
 		return fmt.Errorf("%s lift: Mac copy gone, pod copy still present or not confirmed gone: the pod stays STOPPED: %w", what, err)
 	}
 	return nil

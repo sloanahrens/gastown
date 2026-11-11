@@ -2,10 +2,12 @@ package holdclaim
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -15,10 +17,23 @@ import (
 
 var testTarget = Target{Context: "kind-gt", Namespace: "gt"}
 
+// ctxKey marks the caller's context, so a test can see it reach the exec.
+type ctxKey struct{}
+
 // podCommand is the kubectl prefix the test target produces, then the command.
 func podCommand(command string, args ...string) []string {
-	argv := []string{"kubectl", "--context", "kind-gt", "-n", "gt", "exec", "-i", "deploy/" + k8sdaemon.Name, "--", command}
+	argv := []string{"kubectl", "--context", "kind-gt", "-n", "gt", "exec", "-i", "deploy/" + deployName, "--", command}
 	return append(argv, args...)
+}
+
+// claimPath is where the sentinel named name lands in the pod's claim.
+func claimPath(name string) string {
+	return podMount + "/" + name
+}
+
+// reachCall is the one call a set or a lift makes before its first step.
+func reachCall() []string {
+	return podCommand("test", "-d", podMount)
 }
 
 func newTestWriter(t *testing.T, town string, fake *holdclaimtest.Pod) *Writer {
@@ -30,6 +45,26 @@ func newTestWriter(t *testing.T, town string, fake *holdclaimtest.Pod) *Writer {
 	return w
 }
 
+// writeMacFile writes the Mac's copy of a sentinel.
+func writeMacFile(t *testing.T, local string) {
+	t.Helper()
+	if err := os.WriteFile(local, []byte("manual\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPodConstantsMatchTheManifest keeps the writer's copy of the daemon's name
+// and claim mount equal to the manifest it does not import.
+func TestPodConstantsMatchTheManifest(t *testing.T) {
+	t.Parallel()
+	if deployName != k8sdaemon.Name {
+		t.Fatalf("deployName = %q, want the manifest's %q", deployName, k8sdaemon.Name)
+	}
+	if podMount != k8sdaemon.TownRootPath {
+		t.Fatalf("podMount = %q, want the manifest's %q", podMount, k8sdaemon.TownRootPath)
+	}
+}
+
 func TestSetWritesThenReadsBackThroughThePod(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -37,11 +72,11 @@ func TestSetWritesThenReadsBackThroughThePod(t *testing.T) {
 	fake := holdclaimtest.New()
 	w := newTestWriter(t, town, fake)
 
-	if err := w.Set(local, []byte("manual\t2026-11-10T12:00:00Z\tstop\n")); err != nil {
+	if err := w.Set(context.Background(), local, []byte("manual\t2026-11-10T12:00:00Z\tstop\n")); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 
-	podFile := k8sdaemon.TownRootPath + "/ESTOP"
+	podFile := claimPath("ESTOP")
 	want := [][]string{
 		podCommand("tee", podFile),
 		podCommand("cat", podFile),
@@ -54,6 +89,28 @@ func TestSetWritesThenReadsBackThroughThePod(t *testing.T) {
 	}
 }
 
+// TestSetPassesTheCallersContextToEachCall pins that the caller's context reaches
+// every exec the write makes, so a cancelled command stops the pod call too.
+func TestSetPassesTheCallersContextToEachCall(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	fake := holdclaimtest.New()
+	w := newTestWriter(t, town, fake)
+	ctx := context.WithValue(context.Background(), ctxKey{}, "caller")
+
+	if err := w.Set(ctx, filepath.Join(town, "ESTOP"), nil); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if len(fake.Contexts) != 2 {
+		t.Fatalf("pod calls with a context = %d, want the write and the read-back", len(fake.Contexts))
+	}
+	for i, got := range fake.Contexts {
+		if got.Value(ctxKey{}) != "caller" {
+			t.Fatalf("call %d ran without the caller's context", i)
+		}
+	}
+}
+
 func TestSetRefusesReadBackThatDiffers(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -61,7 +118,7 @@ func TestSetRefusesReadBackThatDiffers(t *testing.T) {
 	fake.Corrupt = true
 	w := newTestWriter(t, town, fake)
 
-	err := w.Set(filepath.Join(town, "seat-refill.hold"), nil)
+	err := w.Set(context.Background(), filepath.Join(town, "seat-refill.hold"), nil)
 	if err == nil {
 		t.Fatal("Set with a differing read-back returned nil, want an error")
 	}
@@ -80,7 +137,7 @@ func TestSetReportsFailedWriteWithoutReadBack(t *testing.T) {
 	fake.Fail["tee"] = errors.New("pod gone")
 	w := newTestWriter(t, town, fake)
 
-	err := w.Set(filepath.Join(town, "seat-refill.hold"), nil)
+	err := w.Set(context.Background(), filepath.Join(town, "seat-refill.hold"), nil)
 	if err == nil || !strings.Contains(err.Error(), "writing") {
 		t.Fatalf("Set error = %v, want a write failure", err)
 	}
@@ -96,14 +153,14 @@ func TestSetReportsFailedReadBack(t *testing.T) {
 	fake.Fail["cat"] = errors.New("read refused")
 	w := newTestWriter(t, town, fake)
 
-	err := w.Set(filepath.Join(town, "seat-refill.hold"), nil)
+	err := w.Set(context.Background(), filepath.Join(town, "seat-refill.hold"), nil)
 	if err == nil || !strings.Contains(err.Error(), "back") {
 		t.Fatalf("Set error = %v, want a read-back failure", err)
 	}
 }
 
-// TestActivateHoldWritesThePodCopyAndReadsItBack pins the calls a set makes:
-// one write into the claim, then one read-back of it.
+// TestActivateHoldWritesThePodCopyAndReadsItBack pins the calls a set makes: the
+// reachability probe, one write into the claim, then one read-back of it.
 func TestActivateHoldWritesThePodCopyAndReadsItBack(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -111,11 +168,11 @@ func TestActivateHoldWritesThePodCopyAndReadsItBack(t *testing.T) {
 	fake := holdclaimtest.New()
 	w := newTestWriter(t, town, fake)
 
-	if err := Activate(w, "hold", local, []byte{}); err != nil {
+	if err := Activate(context.Background(), w, "hold", local, []byte{}); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
-	podFile := k8sdaemon.TownRootPath + "/seat-refill.hold"
-	want := [][]string{podCommand("tee", podFile), podCommand("cat", podFile)}
+	podFile := claimPath("seat-refill.hold")
+	want := [][]string{reachCall(), podCommand("tee", podFile), podCommand("cat", podFile)}
 	if !reflect.DeepEqual(fake.Calls, want) {
 		t.Fatalf("pod calls:\n got %q\nwant %q", fake.Calls, want)
 	}
@@ -141,7 +198,7 @@ func TestActivateEstopLeavesTheMacFileUnwrittenWhenThePodRefuses(t *testing.T) {
 			setup(fake)
 			w := newTestWriter(t, town, fake)
 
-			err := Activate(w, "E-stop", local, []byte("manual\n"))
+			err := Activate(context.Background(), w, "E-stop", local, []byte("manual\n"))
 			if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
 				t.Fatalf("Activate error = %v, want the NOT-in-the-pod refusal", err)
 			}
@@ -162,12 +219,35 @@ func TestActivateEstopReportsAPodCopyWhoseMacWriteFails(t *testing.T) {
 	fake := holdclaimtest.New()
 	w := newTestWriter(t, town, fake)
 
-	err := Activate(w, "E-stop", local, []byte("manual\n"))
+	err := Activate(context.Background(), w, "E-stop", local, []byte("manual\n"))
 	if err == nil || !strings.Contains(err.Error(), "NOT on the Mac") || !strings.Contains(err.Error(), "the pod is STOPPED") {
 		t.Fatalf("Activate error = %v, want the pod-STOPPED, Mac-not-written report", err)
 	}
-	if _, ok := fake.Files[k8sdaemon.TownRootPath+"/no-such-dir/ESTOP"]; !ok {
+	if _, ok := fake.Files[claimPath("no-such-dir/ESTOP")]; !ok {
 		t.Fatal("the pod copy was not written before the Mac write failed")
+	}
+}
+
+// TestActivateRefusesAnUnreachablePodBeforeAnyStep pins that a set against a pod
+// that does not answer writes nothing: the probe is the only call, the Mac file
+// is not written, and the error says nothing changed.
+func TestActivateRefusesAnUnreachablePodBeforeAnyStep(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	local := filepath.Join(town, "ESTOP")
+	fake := holdclaimtest.New()
+	fake.Down = true
+	w := newTestWriter(t, town, fake)
+
+	err := Activate(context.Background(), w, "E-stop", local, []byte("manual\n"))
+	if err == nil || !strings.Contains(err.Error(), "the pod is unreachable and nothing changed") {
+		t.Fatalf("Activate error = %v, want the unreachable-pod refusal", err)
+	}
+	if want := [][]string{reachCall()}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Fatalf("pod calls = %q, want only the probe %q", fake.Calls, want)
+	}
+	if _, statErr := os.Stat(local); !os.IsNotExist(statErr) {
+		t.Fatalf("the Mac file was written against an unreachable pod: stat err = %v", statErr)
 	}
 }
 
@@ -177,7 +257,7 @@ func TestActivateWithNoPodWritesTheMacFileAlone(t *testing.T) {
 	t.Parallel()
 	local := filepath.Join(t.TempDir(), "ESTOP")
 
-	if err := Activate(nil, "E-stop", local, []byte("manual\n")); err != nil {
+	if err := Activate(context.Background(), nil, "E-stop", local, []byte("manual\n")); err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
 	got, err := os.ReadFile(local)
@@ -198,10 +278,10 @@ func TestMirrorEstopSetsTheSentinelAlreadyUpIntoThePod(t *testing.T) {
 	fake := holdclaimtest.New()
 	w := newTestWriter(t, town, fake)
 
-	if err := Mirror(w, "E-stop", local); err != nil {
+	if err := Mirror(context.Background(), w, "E-stop", local); err != nil {
 		t.Fatalf("Mirror: %v", err)
 	}
-	if got := string(fake.Files[k8sdaemon.TownRootPath+"/ESTOP.gastown"]); got != "rig reason\n" {
+	if got := string(fake.Files[claimPath("ESTOP.gastown")]); got != "rig reason\n" {
 		t.Fatalf("claim file = %q, want the local bytes", got)
 	}
 }
@@ -214,7 +294,7 @@ func TestMirrorEstopReportsAMissingLocalFileWithoutTouchingThePod(t *testing.T) 
 	fake := holdclaimtest.New()
 	w := newTestWriter(t, town, fake)
 
-	if err := Mirror(w, "E-stop", filepath.Join(town, "ESTOP")); err == nil {
+	if err := Mirror(context.Background(), w, "E-stop", filepath.Join(town, "ESTOP")); err == nil {
 		t.Fatal("Mirror of a missing file returned nil, want an error")
 	}
 	if len(fake.Calls) != 0 {
@@ -222,21 +302,19 @@ func TestMirrorEstopReportsAMissingLocalFileWithoutTouchingThePod(t *testing.T) 
 	}
 }
 
-// TestLiftEstopRemovesTheMacFileThenThePodCopy pins the lift order: the Mac
-// file goes, then the claim's copy is removed and read back as gone.
+// TestLiftEstopRemovesTheMacFileThenThePodCopy pins the lift's calls: the
+// reachability probe, the claim's removal, then the read-back that it is gone.
 func TestLiftEstopRemovesTheMacFileThenThePodCopy(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	local := filepath.Join(town, "ESTOP")
-	if err := os.WriteFile(local, []byte("manual\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeMacFile(t, local)
 	fake := holdclaimtest.New()
-	podFile := k8sdaemon.TownRootPath + "/ESTOP"
+	podFile := claimPath("ESTOP")
 	fake.Files[podFile] = []byte("manual\n")
 	w := newTestWriter(t, town, fake)
 
-	if err := Lift(w, "E-stop", local); err != nil {
+	if err := Lift(context.Background(), w, "E-stop", local); err != nil {
 		t.Fatalf("Lift: %v", err)
 	}
 	if _, err := os.Stat(local); !os.IsNotExist(err) {
@@ -245,9 +323,36 @@ func TestLiftEstopRemovesTheMacFileThenThePodCopy(t *testing.T) {
 	if _, ok := fake.Files[podFile]; ok {
 		t.Fatal("the pod kept its copy after the lift")
 	}
-	want := [][]string{podCommand("rm", "-f", podFile), podCommand("sh", "-c", removalProbe, "sh", podFile)}
+	want := [][]string{reachCall(), podCommand("rm", "-f", podFile), podCommand("test", "-e", podFile)}
 	if !reflect.DeepEqual(fake.Calls, want) {
 		t.Fatalf("pod calls:\n got %q\nwant %q", fake.Calls, want)
+	}
+}
+
+// TestLiftEstopRemovesTheMacFileBeforeThePodCopy pins the order by what the pod
+// sees: when the pod's removal runs, the Mac's file is already gone.
+func TestLiftEstopRemovesTheMacFileBeforeThePodCopy(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	local := filepath.Join(town, "ESTOP")
+	writeMacFile(t, local)
+	fake := holdclaimtest.New()
+	fake.Files[claimPath("ESTOP")] = []byte("manual\n")
+	run := func(ctx context.Context, argv []string, stdin []byte) ([]byte, error) {
+		if slices.Contains(argv, "rm") {
+			if _, err := os.Stat(local); !os.IsNotExist(err) {
+				t.Errorf("the pod copy was removed while the Mac file was still there: stat err = %v", err)
+			}
+		}
+		return fake.Exec(ctx, argv, stdin)
+	}
+	w, err := New(town, testTarget, run)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := Lift(context.Background(), w, "E-stop", local); err != nil {
+		t.Fatalf("Lift: %v", err)
 	}
 }
 
@@ -265,16 +370,16 @@ func TestLiftEstopKeepsThePodCopyWhenTheMacRemovalFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := holdclaimtest.New()
-	podFile := k8sdaemon.TownRootPath + "/ESTOP"
+	podFile := claimPath("ESTOP")
 	fake.Files[podFile] = []byte("manual\n")
 	w := newTestWriter(t, town, fake)
 
-	err := Lift(w, "E-stop", local)
+	err := Lift(context.Background(), w, "E-stop", local)
 	if err == nil || !strings.Contains(err.Error(), "Mac copy NOT removed") || !strings.Contains(err.Error(), "the pod stays STOPPED") {
 		t.Fatalf("Lift error = %v, want the Mac-removal refusal saying the pod stays STOPPED", err)
 	}
-	if len(fake.Calls) != 0 {
-		t.Fatalf("pod calls = %q, want none while the Mac copy is still up", fake.Calls)
+	if want := [][]string{reachCall()}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Fatalf("pod calls = %q, want only the probe while the Mac copy is still up", fake.Calls)
 	}
 	if _, ok := fake.Files[podFile]; !ok {
 		t.Fatal("the pod copy was removed although the Mac copy was not")
@@ -289,15 +394,13 @@ func TestLiftEstopReportsAPodCopyStillPresentAfterTheMacRemoval(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	local := filepath.Join(town, "ESTOP")
-	if err := os.WriteFile(local, []byte("manual\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeMacFile(t, local)
 	fake := holdclaimtest.New()
-	fake.Files[k8sdaemon.TownRootPath+"/ESTOP"] = []byte("manual\n")
+	fake.Files[claimPath("ESTOP")] = []byte("manual\n")
 	fake.Fail["rm"] = errors.New("pod unreachable")
 	w := newTestWriter(t, town, fake)
 
-	err := Lift(w, "E-stop", local)
+	err := Lift(context.Background(), w, "E-stop", local)
 	if err == nil || !strings.Contains(err.Error(), "pod copy still present") || !strings.Contains(err.Error(), "the pod stays STOPPED") {
 		t.Fatalf("Lift error = %v, want the pod-copy-still-present report", err)
 	}
@@ -307,9 +410,9 @@ func TestLiftEstopReportsAPodCopyStillPresentAfterTheMacRemoval(t *testing.T) {
 }
 
 // TestLiftEstopRefusesAPodCopyThatIsNotConfirmedGone covers the read-back after
-// the pod's removal: a copy that reads back present, or with output that is
-// neither present nor absent, is refused, and so is a probe that cannot reach
-// the pod.
+// the pod's removal: a copy that reads back present, a read-back that exits
+// with neither 0 nor 1, and a probe that cannot reach the pod are all refused,
+// and each says the pod stays STOPPED.
 func TestLiftEstopRefusesAPodCopyThatIsNotConfirmedGone(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
@@ -317,15 +420,15 @@ func TestLiftEstopRefusesAPodCopyThatIsNotConfirmedGone(t *testing.T) {
 		want  string
 	}{
 		"still present": {
-			setup: func(p *holdclaimtest.Pod) { p.ProbeOut = []byte("present\n") },
+			setup: func(p *holdclaimtest.Pod) { p.KeepOnRemove = true },
 			want:  "still present",
 		},
-		"unclear answer": {
-			setup: func(p *holdclaimtest.Pod) { p.ProbeOut = []byte("maybe\n") },
+		"unclear exit": {
+			setup: func(p *holdclaimtest.Pod) { p.ProbeFail = &holdclaimtest.ExitError{Code: 2} },
 			want:  "neither present nor absent",
 		},
 		"probe refused": {
-			setup: func(p *holdclaimtest.Pod) { p.Fail["sh"] = errors.New("probe refused") },
+			setup: func(p *holdclaimtest.Pod) { p.ProbeFail = errors.New("probe refused") },
 			want:  "back from the pod",
 		},
 	}
@@ -334,14 +437,40 @@ func TestLiftEstopRefusesAPodCopyThatIsNotConfirmedGone(t *testing.T) {
 			town := t.TempDir()
 			local := filepath.Join(town, "ESTOP")
 			fake := holdclaimtest.New()
+			fake.Files[claimPath("ESTOP")] = []byte("manual\n")
 			tc.setup(fake)
 			w := newTestWriter(t, town, fake)
 
-			err := Lift(w, "E-stop", local)
+			err := Lift(context.Background(), w, "E-stop", local)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "the pod stays STOPPED") {
 				t.Fatalf("Lift error = %v, want it to contain %q and say the pod stays STOPPED", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestLiftEstopRefusesAnUnreachablePodBeforeAnyStep pins that a lift against a
+// pod that does not answer removes nothing: the Mac file stays, the probe is the
+// only call, and the error says nothing changed and the pod stays STOPPED.
+func TestLiftEstopRefusesAnUnreachablePodBeforeAnyStep(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	local := filepath.Join(town, "ESTOP")
+	writeMacFile(t, local)
+	fake := holdclaimtest.New()
+	fake.Files[claimPath("ESTOP")] = []byte("manual\n")
+	fake.Down = true
+	w := newTestWriter(t, town, fake)
+
+	err := Lift(context.Background(), w, "E-stop", local)
+	if err == nil || !strings.Contains(err.Error(), "the pod is unreachable and nothing changed") || !strings.Contains(err.Error(), "the pod stays STOPPED") {
+		t.Fatalf("Lift error = %v, want the unreachable-pod refusal", err)
+	}
+	if want := [][]string{reachCall()}; !reflect.DeepEqual(fake.Calls, want) {
+		t.Fatalf("pod calls = %q, want only the probe", fake.Calls)
+	}
+	if _, statErr := os.Stat(local); statErr != nil {
+		t.Fatalf("the Mac file was removed against an unreachable pod: %v", statErr)
 	}
 }
 
@@ -366,20 +495,18 @@ func TestLiftEstopRefusesAMacFileNotConfirmedGone(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			if tc.present {
-				if err := os.WriteFile(tc.local, []byte("manual\n"), 0o644); err != nil {
-					t.Fatal(err)
-				}
+				writeMacFile(t, tc.local)
 			}
 			fake := holdclaimtest.New()
-			fake.Files[k8sdaemon.TownRootPath+"/ESTOP"] = []byte("manual\n")
+			fake.Files[claimPath("ESTOP")] = []byte("manual\n")
 			w := newTestWriter(t, town, fake)
 
-			err := liftWith(w, "E-stop", tc.local, func(string) error { return nil })
+			err := liftWith(context.Background(), w, "E-stop", tc.local, func(string) error { return nil })
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("liftWith error = %v, want %q", err, tc.want)
 			}
-			if len(fake.Calls) != 0 {
-				t.Fatalf("pod calls = %q, want none while the Mac file is not confirmed gone", fake.Calls)
+			if want := [][]string{reachCall()}; !reflect.DeepEqual(fake.Calls, want) {
+				t.Fatalf("pod calls = %q, want only the probe while the Mac file is not confirmed gone", fake.Calls)
 			}
 		})
 	}
@@ -391,13 +518,11 @@ func TestLiftEstopRefusesAPathOutsideTheTownBeforeAnyRemoval(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "ESTOP")
-	if err := os.WriteFile(outside, []byte("manual\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeMacFile(t, outside)
 	fake := holdclaimtest.New()
 	w := newTestWriter(t, town, fake)
 
-	if err := Lift(w, "E-stop", outside); err == nil || !strings.Contains(err.Error(), "nothing removed") {
+	if err := Lift(context.Background(), w, "E-stop", outside); err == nil || !strings.Contains(err.Error(), "nothing removed") {
 		t.Fatalf("Lift error = %v, want the refusal with nothing removed", err)
 	}
 	if _, err := os.Stat(outside); err != nil {
@@ -418,7 +543,7 @@ func TestLiftHoldWithNoPodRemovesOnlyTheMacFile(t *testing.T) {
 	}
 
 	for range 2 {
-		if err := Lift(nil, "hold", local); err != nil {
+		if err := Lift(context.Background(), nil, "hold", local); err != nil {
 			t.Fatalf("Lift: %v", err)
 		}
 	}
@@ -434,7 +559,7 @@ func TestActivateHoldWithNoPodReportsAMacWriteThatFails(t *testing.T) {
 	t.Parallel()
 	local := filepath.Join(t.TempDir(), "no-such-dir", "seat-refill.hold")
 
-	if err := Activate(nil, "hold", local, nil); err == nil || !strings.Contains(err.Error(), "writing the hold") {
+	if err := Activate(context.Background(), nil, "hold", local, nil); err == nil || !strings.Contains(err.Error(), "writing the hold") {
 		t.Fatalf("Activate error = %v, want the Mac write refusal", err)
 	}
 }
@@ -452,34 +577,34 @@ func TestLiftEstopWithNoPodReportsAMacFileThatCannotBeRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := Lift(nil, "E-stop", local); err == nil || !strings.Contains(err.Error(), "failed to remove the E-stop file") {
+	if err := Lift(context.Background(), nil, "E-stop", local); err == nil || !strings.Contains(err.Error(), "failed to remove the E-stop file") {
 		t.Fatalf("Lift error = %v, want the Mac-only removal refusal", err)
 	}
 }
 
 // TestRemoveDeletesTheClaimFileAndReadsItBack pins the removal of one claim
-// file: rm -f, then the probe that reads back that it is gone.
+// file: rm -f, then the test -e that reads back that it is gone.
 func TestRemoveDeletesTheClaimFileAndReadsItBack(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	fake := holdclaimtest.New()
 	local := filepath.Join(town, "seat-refill.hold")
 	w := newTestWriter(t, town, fake)
-	if err := w.Set(local, nil); err != nil {
+	if err := w.Set(context.Background(), local, nil); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
 
-	if err := w.Remove(local); err != nil {
+	if err := w.Remove(context.Background(), local); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	podFile := k8sdaemon.TownRootPath + "/seat-refill.hold"
+	podFile := claimPath("seat-refill.hold")
 	if _, ok := fake.Files[podFile]; ok {
 		t.Fatal("claim file survived Remove")
 	}
 	tail := fake.Calls[len(fake.Calls)-2:]
-	want := [][]string{podCommand("rm", "-f", podFile), podCommand("sh", "-c", removalProbe, "sh", podFile)}
+	want := [][]string{podCommand("rm", "-f", podFile), podCommand("test", "-e", podFile)}
 	if !reflect.DeepEqual(tail, want) {
-		t.Fatalf("remove calls = %q, want rm -f then the read-back probe %q", tail, want)
+		t.Fatalf("remove calls = %q, want rm -f then the read-back test %q", tail, want)
 	}
 }
 
@@ -491,22 +616,48 @@ func TestRemoveFailsLoudOnEachPodStep(t *testing.T) {
 		want  string
 	}{
 		"rm refused":        {setup: func(p *holdclaimtest.Pod) { p.Fail["rm"] = errors.New("claim busy") }, want: "removing"},
-		"probe refused":     {setup: func(p *holdclaimtest.Pod) { p.Fail["sh"] = errors.New("probe refused") }, want: "back from the pod"},
-		"still present":     {setup: func(p *holdclaimtest.Pod) { p.ProbeOut = []byte("present\n") }, want: "still present"},
-		"unclear read-back": {setup: func(p *holdclaimtest.Pod) { p.ProbeOut = []byte("maybe\n") }, want: "neither present nor absent"},
+		"probe refused":     {setup: func(p *holdclaimtest.Pod) { p.ProbeFail = errors.New("probe refused") }, want: "back from the pod"},
+		"still present":     {setup: func(p *holdclaimtest.Pod) { p.KeepOnRemove = true }, want: "still present"},
+		"unclear read-back": {setup: func(p *holdclaimtest.Pod) { p.ProbeFail = &holdclaimtest.ExitError{Code: 2} }, want: "neither present nor absent"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			town := t.TempDir()
 			fake := holdclaimtest.New()
+			fake.Files[claimPath("seat-refill.hold")] = nil
 			tc.setup(fake)
 			w := newTestWriter(t, town, fake)
 
-			err := w.Remove(filepath.Join(town, "seat-refill.hold"))
+			err := w.Remove(context.Background(), filepath.Join(town, "seat-refill.hold"))
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("Remove error = %v, want it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestNoPodCallRunsAShell pins that every call the writers make is a plain
+// command: no sh, and no -c string that a shell would read.
+func TestNoPodCallRunsAShell(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	fake := holdclaimtest.New()
+	w := newTestWriter(t, town, fake)
+	local := filepath.Join(town, "ESTOP")
+
+	if err := Activate(context.Background(), w, "E-stop", local, []byte("manual\n")); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	if err := Lift(context.Background(), w, "E-stop", local); err != nil {
+		t.Fatalf("Lift: %v", err)
+	}
+	if len(fake.Calls) == 0 {
+		t.Fatal("no pod calls were made, so the check read nothing")
+	}
+	for _, argv := range fake.Calls {
+		if slices.Contains(argv, "sh") || slices.Contains(argv, "-c") {
+			t.Fatalf("pod call %q runs a shell", argv)
+		}
 	}
 }
 
@@ -520,10 +671,10 @@ func TestPathOutsideTownRootIsRefusedWithNoPodCall(t *testing.T) {
 		filepath.Join(town, "..", "elsewhere", "ESTOP"),
 		town,
 	} {
-		if err := w.Set(local, nil); err == nil {
+		if err := w.Set(context.Background(), local, nil); err == nil {
 			t.Fatalf("Set(%q) returned nil, want a refusal", local)
 		}
-		if err := w.Remove(local); err == nil {
+		if err := w.Remove(context.Background(), local); err == nil {
 			t.Fatalf("Remove(%q) returned nil, want a refusal", local)
 		}
 	}
@@ -557,21 +708,10 @@ func TestNewRefusesABadTargetWithNoPodCall(t *testing.T) {
 	}
 }
 
-func writeDaemonEnv(t *testing.T, town, body string) {
-	t.Helper()
-	dir := filepath.Join(town, "settings")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "daemon.env"), []byte(body), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestFromTownWithNoPodSettingIsMacOnly(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeDaemonEnv(t, town, "SDKROOT=/x\n")
+	holdclaimtest.WritePodSetting(t, town, "", "")
 	fake := holdclaimtest.New()
 
 	w, err := FromTown(town, fake.Exec)
@@ -589,7 +729,7 @@ func TestFromTownWithNoPodSettingIsMacOnly(t *testing.T) {
 func TestFromTownReadsThePodSettingIntoTheTarget(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeDaemonEnv(t, town, ContextEnv+"=kind-gt\n"+NamespaceEnv+"=gt\n")
+	holdclaimtest.WritePodSetting(t, town, "kind-gt", "gt")
 	fake := holdclaimtest.New()
 
 	w, err := FromTown(town, fake.Exec)
@@ -599,10 +739,10 @@ func TestFromTownReadsThePodSettingIntoTheTarget(t *testing.T) {
 	if w == nil {
 		t.Fatal("FromTown with a pod setting returned nil, want a writer")
 	}
-	if err := w.Remove(filepath.Join(town, "seat-refill.hold")); err != nil {
+	if err := w.Remove(context.Background(), filepath.Join(town, "seat-refill.hold")); err != nil {
 		t.Fatalf("Remove through the town's writer: %v", err)
 	}
-	if got := fake.Calls[0]; !reflect.DeepEqual(got, podCommand("rm", "-f", k8sdaemon.TownRootPath+"/seat-refill.hold")) {
+	if got := fake.Calls[0]; !reflect.DeepEqual(got, podCommand("rm", "-f", claimPath("seat-refill.hold"))) {
 		t.Fatalf("argv = %q, want the setting's context and namespace", got)
 	}
 }
@@ -616,13 +756,13 @@ func TestFromTownRefusesAnEmptyTownRoot(t *testing.T) {
 
 func TestFromTownRefusesAHalfGivenOrUnreadableSetting(t *testing.T) {
 	t.Parallel()
-	cases := map[string]string{
-		"context only":   ContextEnv + "=kind-gt\n",
-		"namespace only": NamespaceEnv + "=gt\n",
+	cases := map[string][2]string{
+		"context only":   {"kind-gt", ""},
+		"namespace only": {"", "gt"},
 	}
-	for name, body := range cases {
+	for name, setting := range cases {
 		town := t.TempDir()
-		writeDaemonEnv(t, town, body)
+		holdclaimtest.WritePodSetting(t, town, setting[0], setting[1])
 		w, err := FromTown(town, holdclaimtest.New().Exec)
 		if err == nil || w != nil {
 			t.Errorf("%s: FromTown = (%v, %v), want a refusal with no writer", name, w, err)
@@ -647,10 +787,10 @@ func TestSetAcceptsAnEmptySentinel(t *testing.T) {
 	fake := holdclaimtest.New()
 	w := newTestWriter(t, town, fake)
 
-	if err := w.Set(filepath.Join(town, "seat-refill.hold"), []byte{}); err != nil {
+	if err := w.Set(context.Background(), filepath.Join(town, "seat-refill.hold"), []byte{}); err != nil {
 		t.Fatalf("Set of an empty sentinel: %v", err)
 	}
-	if !bytes.Equal(fake.Files[k8sdaemon.TownRootPath+"/seat-refill.hold"], []byte{}) {
+	if !bytes.Equal(fake.Files[claimPath("seat-refill.hold")], []byte{}) {
 		t.Fatal("empty sentinel was not written as empty")
 	}
 }
