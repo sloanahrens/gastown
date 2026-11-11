@@ -5,7 +5,7 @@
 > **Date:** 2026-03-02
 > **Author:** mayor
 > **Status:** Proposal
-> **Related:** polecat-lifecycle-patrol.md, architecture.md
+> **Related:** polecat-lifecycle-patrol.md, [architecture.md](../architecture.md)
 
 ---
 

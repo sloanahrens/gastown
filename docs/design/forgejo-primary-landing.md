@@ -1,7 +1,7 @@
 # Forgejo-primary landing
 
 Ref: gt-fn9e6.1 (epic gt-fn9e6). Companion: [mayor-retirement.md](mayor-retirement.md),
-[architecture.md](architecture.md), [escalation.md](escalation.md).
+[architecture.md](../architecture.md), [escalation.md](escalation.md).
 
 The landing path moves its gate from a daemon-side function to Forgejo CI. A
 polecat still pushes its branch and labels the bead; the landing worker still

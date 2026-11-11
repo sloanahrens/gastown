@@ -110,7 +110,7 @@ retired mayor role; no mayor process runs) and per-project rigs.
 Each rig holds a bare repo (`.repo.git/`), a canonical beads database
 (`mayor/rig/.beads/`), and agent directories (`crew/`, `polecats/`).
 
-> For the full directory tree, see [architecture.md](design/architecture.md).
+> For the full directory tree, see [architecture.md](architecture.md).
 
 ## Identity and Attribution
 
