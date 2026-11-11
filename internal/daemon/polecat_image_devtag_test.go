@@ -64,6 +64,10 @@ type devTagRegistry struct {
 	// want, when set, is the login every request must carry; any other request
 	// answers 401 and is not served.
 	want *registry.Credential
+	// anonymousOnly, when set, refuses every request that carries a credential and
+	// serves the rest: a registry that accepts anonymous uploads and is asked
+	// without a login.
+	anonymousOnly bool
 }
 
 // devTagAuthorized reports whether req carries the login want names.
@@ -137,6 +141,10 @@ func (r *devTagRegistry) serve(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.want != nil && !devTagAuthorized(req, *r.want) {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if r.anonymousOnly && req.Header.Get("Authorization") != "" {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}

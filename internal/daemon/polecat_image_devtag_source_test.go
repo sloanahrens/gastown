@@ -234,6 +234,34 @@ func TestPolecatImageDevTagReadsSourceWithViewerLogin(t *testing.T) {
 	}
 }
 
+// TestPolecatImageDevTagCopiesToSandboxWithoutCredential: the source is read with
+// the viewer's login, but the copy into the sandbox registry carries no credential.
+// The sandbox fake accepts anonymous uploads and refuses a request that carries a
+// login, so the publish only moves dev if the copy writes anonymously; it files
+// nothing.
+func TestPolecatImageDevTagCopiesToSandboxWithoutCredential(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.want = &devTagViewer
+	source := ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.anonymousOnly = true
+	sandbox.addImage("dev", devTagOldCommit)
+	d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+
+	d.publishPolecatDevTag()
+
+	if got := sandbox.tagBytes("dev"); !bytes.Equal(got, source) {
+		t.Fatalf("sandbox dev tag was not moved by an anonymous copy")
+	}
+	if sandbox.uploads != 1 {
+		t.Fatalf("sandbox uploads = %d, want the one config blob uploaded anonymously", sandbox.uploads)
+	}
+	if got := n.got(); len(got) != 0 {
+		t.Fatalf("escalations = %+v, want none", got)
+	}
+}
+
 // TestPolecatImageDevTagEscalatesRefusedViewerLogin: a viewer login the CI registry
 // refuses fails the source read. The step files one escalation naming the source
 // tag and the 401, writes nothing to the sandbox registry, and neither the
