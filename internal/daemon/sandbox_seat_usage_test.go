@@ -549,6 +549,9 @@ func TestSeatEndUsageSurvivesTheRecordTeardown(t *testing.T) {
 	if rec.Totals.Calls != 1 {
 		t.Errorf("record calls = %d, want the seat's one call", rec.Totals.Calls)
 	}
+	if len(calls[0].ids) != 1 || calls[0].ids[0] != "new-session" {
+		t.Errorf("session ids = %q, want the seat's own session", calls[0].ids)
+	}
 	recordPath := usageattrib.WorkRecordPath(calls[0].usageDir, endBead)
 	if want := "wrote its usage record " + recordPath + " for bead " + endBead; !strings.Contains(logs.String(), want) {
 		t.Errorf("log does not name the written record %q:\n%s", want, logs.String())
