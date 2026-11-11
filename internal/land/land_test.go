@@ -3316,3 +3316,64 @@ func TestPolicyRejectionCountsDescriptionAcceptance(t *testing.T) {
 		t.Errorf("bead with no boxes: rejection = %+v", rej)
 	}
 }
+
+// TestReviewUsageHookCalledOnceWithRunBounds: the usage hook is told of each om
+// review once, after its verdict is final, whatever that verdict is. The bead,
+// rig and tree it judged are named, and the window it ran in is the run's own:
+// a retried execution error is one review, not two (gt-6qc3nw.13).
+func TestReviewUsageHookCalledOnceWithRunBounds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		review func(f *landFixture)
+	}{
+		{name: "approve", review: func(f *landFixture) {}},
+		{name: "request changes", review: func(f *landFixture) {
+			f.review.fn = func(string) (Verdict, error) {
+				return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+			}
+		}},
+		{name: "retried execution error", review: omFailsThenApprove},
+		{name: "no verdict", review: func(f *landFixture) {
+			f.review.fn = func(string) (Verdict, error) { return Verdict{}, omError("the backend exited 1") }
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			tc.review(f)
+			l := f.lander()
+			var got []ReviewUsage
+			l.UsageSink = func(_ context.Context, u ReviewUsage) { got = append(got, u) }
+			// The landing's own result is not what this test asserts: a refused
+			// or verdict-less review returns its error, and the hook is the
+			// subject here.
+			_, _ = l.Land(context.Background(), f.work)
+			if len(got) != 1 {
+				t.Fatalf("usage hook calls = %d, want 1 for one om review", len(got))
+			}
+			u := got[0]
+			if u.BeadID != "gt-abc" || u.Rig != "gastown" {
+				t.Errorf("usage names bead %q rig %q, want gt-abc gastown", u.BeadID, u.Rig)
+			}
+			if len(f.review.calls) == 0 || u.Dir != f.review.calls[0][0] {
+				t.Errorf("usage dir = %q, want the tree om reviewed %v", u.Dir, f.review.calls)
+			}
+			if u.Start.IsZero() || u.End.Before(u.Start) {
+				t.Errorf("usage window [%v, %v] is not a run's bounds", u.Start, u.End)
+			}
+		})
+	}
+	t.Run("nil sink lands unchanged", func(t *testing.T) {
+		t.Parallel()
+		f := newLandFixture(t)
+		res, err := f.lander().Land(context.Background(), f.work)
+		if err != nil {
+			t.Fatalf("Land with no usage sink: %v", err)
+		}
+		if got := f.originMain(); got != res.LandedCommit {
+			t.Errorf("origin/main is %s, want the landed commit %s", got, res.LandedCommit)
+		}
+	})
+}

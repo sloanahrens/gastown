@@ -186,6 +186,11 @@ type Lander struct {
 	// one item. An error is logged and never fails the landing. Nil reports
 	// nothing.
 	AcceptedRiskAlert func(key, message string) error
+	// UsageSink, when set, is called once each time an om review returns, with
+	// the window the review ran in (gt-6qc3nw.13). It runs after the verdict
+	// is final, whatever the verdict, and cannot change the landing: what it
+	// does with its own errors is its business. Nil reports nothing.
+	UsageSink func(ctx context.Context, u ReviewUsage)
 	// BirdOwned, when set, reports whether a bead's assignee is a bird — a
 	// crew or operator identity, not a polecat seat — and so keeps the bead
 	// when its landing is rejected (gt-h4cvi). Nil reports no bead bird-owned,
@@ -293,6 +298,17 @@ const (
 	// never merged (gt-fn9e6.7).
 	RejectForgedStatus RejectionKind = "forged_status"
 )
+
+// ReviewUsage is one om review run as UsageSink is told of it: the work bead
+// and rig the review judged, the tree it ran in, and the window it ran in.
+// Start and End bound the run: the transcripts it wrote are the ones
+// last modified at or after Start.
+type ReviewUsage struct {
+	BeadID     string
+	Rig        string
+	Dir        string
+	Start, End time.Time
+}
 
 // Rejection is a landing refused because of the work itself. Land has
 // already written it to the work bead (a MERGE REJECTION block), swapped the
@@ -1538,6 +1554,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		omDone()
 		omTime = time.Since(reviewStart)
 		l.recordAcceptedRisks(w, used)
+		if l.UsageSink != nil {
+			l.UsageSink(ctx, ReviewUsage{BeadID: w.BeadID, Rig: w.Rig, Dir: dir, Start: reviewStart, End: time.Now()})
+		}
 	}
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base,
 		RiskPaths: riskPaths, RiskPathReviewSkippedBy: skippedBy}
