@@ -69,6 +69,19 @@ td.n,th.n{text-align:right}
 .hrej{background:var(--red);border-radius:2px 2px 0 0}
 .hpts{background:var(--violet);border-radius:2px 2px 0 0}
 .hcap{height:4px;background:repeating-linear-gradient(45deg,var(--violet) 0 2px,transparent 2px 4px)}
+/* The velocity's differences, D1 and D2: thin signed rows over the feed's own
+   window, one column per hour. A bar grows from the row's zero line, up for a
+   positive difference and down for a negative one, and a bar whose difference
+   is within noise is muted (gt-vd91ny.7). */
+.dbars{display:flex;align-items:center;gap:4px;margin:2px 0}
+.dlabel{flex:0 0 2ch;color:var(--dim);font-size:11px}
+.dbody{position:relative;flex:1;display:flex;gap:2px;height:32px}
+.dbody::before{content:"";position:absolute;left:0;right:0;top:50%;border-top:1px solid var(--line)}
+.dcol{position:relative;flex:1;min-width:1px}
+.dbar{position:absolute;left:15%;right:15%;display:block;background:var(--violet)}
+.dup{bottom:50%;border-radius:2px 2px 0 0}
+.ddn{top:50%;border-radius:0 0 2px 2px}
+.dmute{opacity:.4}
 /* The landings head folds the day's figures and the per-hour bars away
    together, as the Actions feed folds under its own section; the table below
    never folds (gt-q4cac). */
@@ -1797,6 +1810,22 @@ function renderTrend(s) {
   if (t.velocity) lhbody.append(el("div", "k title", "points per hour, hatched cap = landings without time"), velocityBars(hours, t.velocity, hhmm));
   lhbody.append(timeAxis(t0, t1));
 
+  // The velocity's differences sit under the points row, over the whole window
+  // the feed holds (up to 72 hours) rather than the trend's 24: the feed judges
+  // each difference against the signal and noise of its whole series, and the
+  // earliest hours it draws need the smoothing history before the trend window
+  // (gt-vd91ny.7). D1 says whether velocity is rising or falling and D2 is its
+  // acceleration.
+  if (t.velocity) {
+    const vh = t.velocity.hours || [];
+    lhbody.append(differenceBars("D1", "d1", "points/h", "the points per hour's change over 3h: up when velocity is rising", vh, hhmm));
+    lhbody.append(differenceBars("D2", "d2", "points/h²", "the acceleration: the change in D1 over 3h", vh, hhmm));
+    lhbody.append(legend([
+      ["var(--violet)", "D1 = the points per hour's change over 3h, up when rising · D2 = the change in D1 (acceleration)"],
+      ["var(--dim)", "a muted bar is within noise"],
+    ]));
+  }
+
   // The gate, om and load readings are one compact stats line each, off the
   // same reading the chart above draws.
   const stageLines = [stageSummary("gate", stages.map(p => p.gate_secs)), stageSummary("om", stages.map(p => p.om_secs))].filter(Boolean);
@@ -1835,6 +1864,50 @@ function velocityBars(hours, velocity, hhmm) {
     bars.append(col);
   });
   return bars;
+}
+
+// The height of a difference bar, as a share of its row. The largest signal
+// value fills the row's half above (or below) the zero line, so DIFF_ROW_FULL
+// is the most a bar may take; a row with no signal value draws every defined
+// bar at DIFF_ROW_FIXED. Scaling to the signals and never to the row's largest
+// value keeps noise small: it is muted and, when it is larger than every
+// signal, capped rather than allowed to stretch the row (gt-vd91ny.7).
+const DIFF_ROW_FULL = 50;
+const DIFF_ROW_FIXED = 10;
+
+// differenceBars draws one of the velocity's differences: a thin row over the
+// feed's hours, one column per hour, each bar signed about the zero line (up
+// for positive, down for negative). key names the value and its state ("d1"
+// reads d1 and d1_state). A value whose state is noise is muted; one whose
+// state is anything else, or that is not defined, draws no bar at all and its
+// tooltip says there is not enough data. A defined value of zero draws no bar
+// either: a zero-height bar would read as a tiny change.
+function differenceBars(name, key, unit, what, hours, hhmm) {
+  const signal = hours.filter(v => v[key + "_state"] === "signal" && v[key] != null).map(v => Math.abs(v[key]));
+  const scale = signal.length ? Math.max(...signal) : 0;
+  const row = el("div", "dbars");
+  row.title = name + ": " + what;
+  row.append(el("span", "dlabel", name));
+  const body = el("div", "dbody");
+  for (const v of hours) {
+    const col = el("div", "dcol");
+    const state = v[key + "_state"], val = v[key];
+    if ((state !== "signal" && state !== "noise") || val == null) {
+      col.title = hhmm(v.hour) + " · " + name + " not enough data";
+      body.append(col);
+      continue;
+    }
+    col.title = hhmm(v.hour) + " · " + name + " " + (val > 0 ? "+" : "") + val.toFixed(2) + " " + unit + " · " + state;
+    if (val) {
+      const h = scale ? Math.min(DIFF_ROW_FULL, Math.abs(val) / scale * DIFF_ROW_FULL) : DIFF_ROW_FIXED;
+      const bar = el("i", "dbar " + (val > 0 ? "dup" : "ddn") + (state === "noise" ? " dmute" : ""));
+      bar.style.height = h + "%";
+      col.append(bar);
+    }
+    body.append(col);
+  }
+  row.append(body);
+  return row;
 }
 
 // holderCell is the Landings table's By column for one row: the holder's short
