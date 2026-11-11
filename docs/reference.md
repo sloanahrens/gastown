@@ -545,6 +545,14 @@ A check that cannot run — a `max_age` the patrol cannot parse — raises
 and it replaces the reporter items of the previous check, because none of them
 was verified by this one.
 
+A town the daemon cannot see is also a check that cannot run. When no reporter's
+report directory exists under the town root, every report would read as missing,
+so the patrol does not check: it replaces the previous check's items with one
+`bird-report-check-failed` item at high severity, whose summary says the reports
+directory is not visible to this daemon, and raises no `bird-report-stale` items.
+A single report directory present is enough for the check to run, and the birds
+whose reports are absent are then late as above.
+
 The block is decoded strictly: an unknown key, an hour outside 0 to 23, an age
 that is not a positive duration, or a reporter name that is not one directory
 name refuses the config load rather than being ignored.
