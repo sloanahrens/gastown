@@ -107,7 +107,7 @@ Depends: SP2, SP3. Gate: `go test ./internal/metrics -count=1`.
 
 ### SP5. Shape features
 
-New `internal/storypoints/shape.go`: `EstimateText(issue)` building the text above from a `beads.Issue`, and `Features(text, rig string, seat Seat) Shape` (`Seat` is Haiku, Flash or Unknown; Unknown sets `is_haiku` to the training mean from the weights) with the twelve features. Test table from the fixture file (read it with a relative path from the test), plus edge cases: empty description, no Acceptance heading, a bead with labels and one without, a text with a path in a backtick.
+New `internal/storypoints/shape.go`: `EstimateText(issue)` building the text above from a `beads.Issue`, and `Features(text, rig string, seat Seat) Shape` (`Seat` is Haiku, Flash or Unknown; Unknown sets `is_haiku` to the training mean from the weights) with the twelve features. Test table from the fixture file (read it with a relative path from the test; its `paths` and `pkgs` counts were produced by the Python equivalents of the regexes above, and the Go test is the arbiter: if the Go count for a fixture bead differs, as it may for gt-hgt9j.14 where the fixture says 5 by counting the bare `lint.go` beside `internal/specdispatch/lint.go`, the polecat checks the regex, fixes the fixture file in the same change and says so in a bead comment), plus edge cases: empty description, no Acceptance heading, a bead with labels and one without, a text with a path in a backtick.
 Depends: none. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP6. The linear model and the weights file
@@ -127,7 +127,7 @@ Depends: none. Gate: `go test ./internal/jev/dispatch -count=1`.
 
 ### SP9. The blend and the fallback ladder
 
-New `internal/storypoints/blend.go`: `Blend(in Inputs) (Blended, error)` where `Inputs` holds optional minutes from shape, embedding and Jev (Jev as the `fits_twenty_minutes` probability, mapped to minutes by the weights' monotone table with linear interpolation and clipping at the ends). It averages the logs of the inputs present with equal weight, returns minutes, the points from `FromMinutes`, and the list of inputs used and the rung; no input at all is an error. It also returns the rung: `all`, `shape-jev`, `shape-embed` or `shape`. Tests: each rung of the ladder, the interpolation at the table's ends, a probability outside 0 to 1 rejected.
+New `internal/storypoints/blend.go`: `Blend(in Inputs) (Blended, error)` where `Inputs` holds optional minutes from shape, embedding and Jev (Jev as the `fits_twenty_minutes` probability, mapped to minutes by the weights' monotone table with linear interpolation and clipping at the ends). It averages the logs of the inputs present with equal weight, returns minutes, the points from `FromMinutes` (an input of zero or negative minutes is rejected before the average), the list of inputs used, and the rung: `all`, `shape-jev`, `shape-embed` or `shape`; no input at all is an error. Tests: each rung of the ladder, the interpolation at the table's ends, a probability outside 0 to 1 rejected.
 Depends: SP1, SP6. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP10. Nearest past beads
@@ -152,7 +152,7 @@ Depends: SP12. Gate: `go test ./internal/cmd -run 'SpecDispatch.*StoryPoint' -co
 
 ### SP14. `sp-actual` at landing
 
-In the landing worker (see `internal/landworker/worker.go`, after the landing record is written): compute `sp-actual:N` from the record's `polecat_secs` and add the label to the work bead; skip when the time is absent, zero or a lower bound, and when the bead has no `sp:` label (so shadow mode's report counts only estimated beads). A label write failure is logged and does not undo or retry the landing. Tests with the worker's fakes.
+In the landing worker (see `internal/landworker/worker.go`, after the landing record is written): compute `sp-actual:N` from the record's `polecat_secs` and add the label to the work bead; skip when the time is absent or a lower bound, or when `FromMinutes` returns an error (zero seconds), and when the bead has no `sp:` label (so shadow mode's report counts only estimated beads). A label write failure is logged and does not undo or retry the landing. Tests with the worker's fakes.
 Depends: SP1. Gate: `go test ./internal/landworker -count=1`.
 
 ### SP15. The shadow report
