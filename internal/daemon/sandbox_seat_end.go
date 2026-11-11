@@ -207,6 +207,9 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 			}
 			return nil
 		}
+		// The seat's start is read before the errored sandbox below is deleted,
+		// since its record is the only place the start is kept (gt-6qc3nw.12).
+		start, startErr := h.seatStartedAt(rig, name)
 		// Every guard has let the seat go, so its errored sandbox holds no work
 		// the landing does not already have. It is deleted before the host
 		// directories, so the seat name is free once they are gone (gt-jhoi1).
@@ -216,6 +219,11 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 				h.clearPendingSeatEnd(rig, name)
 				return nil
 			}
+		}
+		// The usage record is written before the transcripts' worktree goes. A
+		// failure is logged and the removal goes on (gt-6qc3nw.12).
+		if err := h.writeSeatUsage(rig, name, landing, start, startErr); err != nil {
+			log("its usage record is not written: %v", err)
 		}
 		deleted, err := h.removeSeatDirs(rigPath, rig, name)
 		if err != nil {

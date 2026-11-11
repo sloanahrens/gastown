@@ -406,6 +406,9 @@ type patrolScanHost struct {
 	// (gt-381oj). A seam for the write that fails, which a town's filesystem
 	// need not produce.
 	writePendingSeatEnd func(townRoot, rig, name string, landing sandboxSeatLanding) error
+	// seatUsage is the seam of the work usage record a sandbox seat's end
+	// writes (sandbox_seat_usage.go). Its zero value is the production one.
+	seatUsage seatUsageHook
 	// sandboxRecordBudget is the records one record pass may check, each a tmux
 	// probe and, unless a live session answers, a gateway question: 20
 	// (sandboxRecordsPerTick) when zero. A seam so the bound test writes few
