@@ -20,12 +20,15 @@ type testEvent struct {
 
 // TestTime is a top-level test's terminal event: its package and name, the
 // seconds it took, and whether it passed, failed or was skipped. A subtest is
-// not listed; its time is inside the Elapsed of the test that holds it.
+// not listed; its time is inside the Elapsed of the test that holds it. Raw is
+// the event's line as the stream carried it, without its line break, so a
+// report can quote the figure's source (gt-5bkkl8).
 type TestTime struct {
 	Test    string
 	Package string
 	Elapsed float64
 	Action  string
+	Raw     string
 }
 
 // ParseTestJSON reads a go test -json stream and returns the plain log text the
@@ -59,6 +62,7 @@ func ParseTestJSON(r io.Reader) (text string, tests []TestTime, err error) {
 						Package: ev.Package,
 						Elapsed: ev.Elapsed,
 						Action:  ev.Action,
+						Raw:     strings.TrimRight(line, "\r\n"),
 					})
 				}
 			}

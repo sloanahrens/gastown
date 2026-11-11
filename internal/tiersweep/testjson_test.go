@@ -80,23 +80,28 @@ func TestParseTestJSONTimes(t *testing.T) {
 			name:    "passing test",
 			fixture: "testjson_pass.jsonl",
 			want: []TestTime{
-				{Test: "TestAdd", Package: "example.com/fixture/a", Elapsed: 0, Action: "pass"},
+				{Test: "TestAdd", Package: "example.com/fixture/a", Elapsed: 0, Action: "pass",
+					Raw: `{"Time":"2026-10-30T10:00:00.002Z","Action":"pass","Package":"example.com/fixture/a","Test":"TestAdd","Elapsed":0}`},
 			},
 		},
 		{
 			name:    "failing test",
 			fixture: "testjson_fail.jsonl",
 			want: []TestTime{
-				{Test: "TestBoom", Package: "example.com/fixture/b", Elapsed: 0.01, Action: "fail"},
+				{Test: "TestBoom", Package: "example.com/fixture/b", Elapsed: 0.01, Action: "fail",
+					Raw: `{"Time":"2026-10-30T10:00:00.015Z","Action":"fail","Package":"example.com/fixture/b","Test":"TestBoom","Elapsed":0.01}`},
 			},
 		},
 		{
 			name:    "interleaved tests with a subtest and a skip",
 			fixture: "testjson_interleave.jsonl",
 			want: []TestTime{
-				{Test: "TestFast", Package: "example.com/fixture/c", Elapsed: 0.1, Action: "pass"},
-				{Test: "TestSkipped", Package: "example.com/fixture/c", Elapsed: 0, Action: "skip"},
-				{Test: "TestSlow", Package: "example.com/fixture/c", Elapsed: 2.5, Action: "pass"},
+				{Test: "TestFast", Package: "example.com/fixture/c", Elapsed: 0.1, Action: "pass",
+					Raw: `{"Time":"2026-10-30T10:00:00.105Z","Action":"pass","Package":"example.com/fixture/c","Test":"TestFast","Elapsed":0.1}`},
+				{Test: "TestSkipped", Package: "example.com/fixture/c", Elapsed: 0, Action: "skip",
+					Raw: `{"Time":"2026-10-30T10:00:00.611Z","Action":"skip","Package":"example.com/fixture/c","Test":"TestSkipped","Elapsed":0}`},
+				{Test: "TestSlow", Package: "example.com/fixture/c", Elapsed: 2.5, Action: "pass",
+					Raw: `{"Time":"2026-10-30T10:00:02.600Z","Action":"pass","Package":"example.com/fixture/c","Test":"TestSlow","Elapsed":2.5}`},
 			},
 		},
 	}
@@ -108,6 +113,32 @@ func TestParseTestJSONTimes(t *testing.T) {
 				t.Errorf("tests = %+v, want %+v", tests, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseTestJSONKeepsTheRawTerminalLine: the Raw of each top-level test is
+// the terminal event's line exactly as the stream carried it, without the line
+// break, and the fields the parse reads are the same as before. A subtest's
+// line is not listed, so it sets no Raw. Mutation: leave Raw unset, and the
+// exact-line check fails.
+func TestParseTestJSONKeepsTheRawTerminalLine(t *testing.T) {
+	t.Parallel()
+	terminal := `{"Time":"2026-11-01T09:00:03.000Z","Action":"pass","Package":"example.com/fixture/g","Test":"TestTop","Elapsed":39.4}`
+	stream := strings.Join([]string{
+		`{"Action":"run","Package":"example.com/fixture/g","Test":"TestTop"}`,
+		`{"Action":"pass","Package":"example.com/fixture/g","Test":"TestTop/child","Elapsed":0.1}`,
+		terminal,
+		"",
+	}, "\n")
+	_, tests, err := ParseTestJSON(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("ParseTestJSON: %v", err)
+	}
+	want := []TestTime{
+		{Test: "TestTop", Package: "example.com/fixture/g", Elapsed: 39.4, Action: "pass", Raw: terminal},
+	}
+	if !reflect.DeepEqual(tests, want) {
+		t.Errorf("tests = %+v, want %+v", tests, want)
 	}
 }
 
@@ -141,7 +172,8 @@ func TestParseTestJSONBuildFailureAndNoise(t *testing.T) {
 			t.Errorf("text = %q, want %q", text, want)
 		}
 		wantTests := []TestTime{
-			{Test: "TestAfterNoise", Package: "example.com/fixture/d", Elapsed: 0.01, Action: "pass"},
+			{Test: "TestAfterNoise", Package: "example.com/fixture/d", Elapsed: 0.01, Action: "pass",
+				Raw: `{"Time":"2026-10-30T10:00:00.011Z","Action":"pass","Package":"example.com/fixture/d","Test":"TestAfterNoise","Elapsed":0.01}`},
 		}
 		if !reflect.DeepEqual(tests, wantTests) {
 			t.Errorf("tests = %+v, want %+v", tests, wantTests)
@@ -169,7 +201,8 @@ func TestParseTestJSONUnfinishedTest(t *testing.T) {
 		t.Errorf("text = %q, want %q", text, want)
 	}
 	wantTests := []TestTime{
-		{Test: "TestDone", Package: "example.com/fixture/f", Elapsed: 0.2, Action: "pass"},
+		{Test: "TestDone", Package: "example.com/fixture/f", Elapsed: 0.2, Action: "pass",
+			Raw: `{"Action":"pass","Package":"example.com/fixture/f","Test":"TestDone","Elapsed":0.2}`},
 	}
 	if !reflect.DeepEqual(tests, wantTests) {
 		t.Errorf("tests = %+v, want %+v", tests, wantTests)

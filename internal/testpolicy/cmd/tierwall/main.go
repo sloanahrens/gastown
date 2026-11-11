@@ -18,6 +18,12 @@
 // tiersweep.SlowTest (5s) or more, under the package that ran it, so a slow
 // package can be explained test by test from the gate's log alone (gt-vijwck).
 // With -jsonl the same tests are appended to the series as timings lines.
+// A test cannot outlast the package that ran it, so a test whose elapsed is
+// larger than its package's is kept out of that list and out of the series.
+// Instead, after the list, `tierwall: warning: <package> <test> reports <x>s
+// inside a package of <y>s` names it, and the line after is the raw go test
+// -json event the figure came from, so the gate log shows what the stream
+// carried (gt-5bkkl8).
 //
 // -slow-tests also prints, after that list, a phases line for each of the three
 // slowest packages: `tierwall: phases <package> serial <a>s parallel <b>s`. go
@@ -158,6 +164,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	in := stdin
 	r := newReport(stdout)
 	var slowErr error
+	var slow []tiersweep.TestTime
 	if *slowTests {
 		data, err := io.ReadAll(stdin)
 		if err != nil {
@@ -175,13 +182,16 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 			slowErr = err
 		} else {
 			r.listSlow = true
-			r.slow = tiersweep.SlowTests(tests)
+			slow = tiersweep.SlowTests(tests)
 		}
 	}
 	if err := r.read(in); err != nil {
 		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
+	// The package walls are known only once the stream is read, so the slow
+	// tests are checked against them after it.
+	r.keepSlow(slow)
 	seriesFailed := false
 	if *jsonl != "" {
 		// A series that cannot be written is reported on stderr and by exit
@@ -242,9 +252,11 @@ type report struct {
 	tested map[string]bool
 
 	// listSlow is set by -slow-tests; slow then holds the tests of SlowTest or
-	// longer that the list and the series name.
+	// longer that the list and the series name. overlong holds the slow tests
+	// that ran longer than their package, which are warned about instead.
 	listSlow bool
 	slow     []tiersweep.TestTime
+	overlong []tiersweep.TestTime
 }
 
 func newReport(out io.Writer) *report {
@@ -269,6 +281,21 @@ func (r *report) write(s string) {
 		return
 	}
 	_, r.err = io.WriteString(r.out, s)
+}
+
+// keepSlow sorts the slow tests the stream named into the list and the
+// overlong set. A test whose package reported an elapsed, and whose own elapsed
+// is larger, cannot be a real figure: it is warned about, not listed. A test
+// whose package reported no elapsed has nothing to be checked against, so it
+// stays in the list.
+func (r *report) keepSlow(slow []tiersweep.TestTime) {
+	for _, tt := range slow {
+		if pkgWall, ok := r.elapsed[tt.Package]; ok && tt.Elapsed > pkgWall {
+			r.overlong = append(r.overlong, tt)
+			continue
+		}
+		r.slow = append(r.slow, tt)
+	}
 }
 
 func (r *report) read(in io.Reader) error {
@@ -391,6 +418,11 @@ func (r *report) print(bar time.Duration, cpus string) error {
 		r.write("tierwall: slow tests\n")
 		for _, tt := range slowest(r.slow) {
 			r.write(fmt.Sprintf("tierwall:   %s %s %s\n", tt.Package, tt.Test, secs(seconds(tt.Elapsed))))
+		}
+		for _, tt := range slowest(r.overlong) {
+			r.write(fmt.Sprintf("tierwall: warning: %s %s reports %s inside a package of %s\n",
+				tt.Package, tt.Test, secs(seconds(tt.Elapsed)), secs(seconds(r.elapsed[tt.Package]))))
+			r.write(tt.Raw + "\n")
 		}
 		r.phases(pkgs)
 	}
