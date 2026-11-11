@@ -302,7 +302,7 @@ const (
 // ReviewUsage is one om review run as UsageSink is told of it: the work bead
 // and rig the review judged, the tree it ran in, and the window it ran in.
 // Start and End bound the run: the transcripts it wrote are the ones
-// last modified at or after Start.
+// last modified at or after Start and at or before End.
 type ReviewUsage struct {
 	BeadID     string
 	Rig        string
@@ -1536,6 +1536,9 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			AcceptedRisksText: accepted,
 			BriefText:         BeadBrief(issue.Description, comments, op), PolicyText: policy.PolicyBlock(),
 			Round: reviewAttempt(issue.Notes), RoundsText: l.roundsText(w.BeadID)}
+		// The usage window opens with the review it measures (gt-6qc3nw.13); it
+		// is read from the landing's clock, so a test can fix it.
+		usageStart := l.now()
 		verdict, reviewErr = l.review(omCtx, in)
 		// One flaky om run must not cost an escalation and a hand review
 		// (gt-q241r): an execution error on an ordinary tree is retried once,
@@ -1553,9 +1556,10 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		omDone()
 		omTime = time.Since(reviewStart)
+		usageEnd := l.now()
 		l.recordAcceptedRisks(w, used)
 		if l.UsageSink != nil {
-			l.UsageSink(ctx, ReviewUsage{BeadID: w.BeadID, Rig: w.Rig, Dir: dir, Start: reviewStart, End: time.Now()})
+			l.UsageSink(ctx, ReviewUsage{BeadID: w.BeadID, Rig: w.Rig, Dir: dir, Start: usageStart, End: usageEnd})
 		}
 	}
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base,

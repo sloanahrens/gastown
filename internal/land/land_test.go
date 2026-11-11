@@ -3377,3 +3377,30 @@ func TestReviewUsageHookCalledOnceWithRunBounds(t *testing.T) {
 		}
 	})
 }
+
+// TestReviewUsageWindowIsInjectedClock: the window the usage hook is told of is
+// read from the landing's clock, not the wall clock. The clock is fixed before
+// the review and moved while it runs, so the hook must receive exactly the
+// start the review opened with and the end it closed at (gt-6qc3nw.13).
+func TestReviewUsageWindowIsInjectedClock(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := start.Add(7 * time.Minute)
+	now := start
+	f.review.fn = func(string) (Verdict, error) {
+		now = end
+		return Verdict{Verdict: VerdictApprove, Score: 0.9}, nil
+	}
+	l := f.lander()
+	l.Now = func() time.Time { return now }
+	var got []ReviewUsage
+	l.UsageSink = func(_ context.Context, u ReviewUsage) { got = append(got, u) }
+	_, _ = l.Land(context.Background(), f.work)
+	if len(got) != 1 {
+		t.Fatalf("usage hook calls = %d, want 1", len(got))
+	}
+	if !got[0].Start.Equal(start) || !got[0].End.Equal(end) {
+		t.Errorf("usage window = [%v, %v], want the injected clock's [%v, %v]", got[0].Start, got[0].End, start, end)
+	}
+}
