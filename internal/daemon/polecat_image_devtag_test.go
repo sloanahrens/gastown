@@ -6,14 +6,18 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -194,6 +198,9 @@ func devTagDaemon(t *testing.T, reg *devTagRegistry) (*Daemon, *devTagNotifier, 
 	d.buildCommitFn = func() string { return devTagRevision }
 	d.polecatDevTagSeams.runningCommit = func() string { return devTagRunningCommit }
 	d.polecatDevTagSeams.http = &http.Client{Transport: devTagTransport(reg.serve)}
+	// No dev tag in these tests descends from the running commit, so the copy
+	// goes ahead; the descendant test replaces this.
+	d.polecatDevTagSeams.ancestor = func(string, string) (bool, error) { return false, nil }
 	n := &devTagNotifier{}
 	d.notifier = n
 	return d, n, logs
@@ -451,29 +458,23 @@ func TestPolecatImageDevTagOffWithoutRegistry(t *testing.T) {
 	}
 }
 
-// devTagWithContext gives d the daemon context a running daemon has, cancelled
-// when the test ends.
-func devTagWithContext(t *testing.T, d *Daemon) context.CancelFunc {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	d.ctx = ctx
-	return cancel
-}
-
-// TestPolecatImageDevTagStartRunsInBackground: startPolecatDevTag returns while the
-// step is still parked on the registry, so the supervision steps are not held
-// by it. The dispatch wait ends once the step has moved the tag.
-func TestPolecatImageDevTagStartRunsInBackground(t *testing.T) {
+// TestPolecatImageDevTagRunsBesideTheLoop: Run starts the copy and goes on to its
+// supervisor loop while the copy is still parked on the registry. The daemon
+// context ends the run, so Run returns with the copy in flight. A start that
+// waited for the copy would park Run inside it and fail the bound.
+func TestPolecatImageDevTagRunsBesideTheLoop(t *testing.T) {
 	t.Parallel()
 	reg := newDevTagRegistry()
 	reg.addImage("dev", devTagOldCommit)
 	reg.addImage(devTagRevision, devTagRunningCommit)
-	source := reg.tagBytes(devTagRevision)
-	d, n, _ := devTagDaemon(t, reg)
-	devTagWithContext(t, d)
+	d, _, _ := devTagDaemon(t, reg)
+	d.config = DefaultConfig(d.config.TownRoot)
+	if err := os.MkdirAll(filepath.Join(d.config.TownRoot, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	entered := make(chan struct{}, 1)
 	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
 	d.polecatDevTagSeams.http = &http.Client{Transport: devTagTransport(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case entered <- struct{}{}:
@@ -482,67 +483,150 @@ func TestPolecatImageDevTagStartRunsInBackground(t *testing.T) {
 		<-release
 		reg.serve(w, r)
 	})}
+	d.getenv = ownerEnv(nil)
+	d.hostname = fixtureHostname("fixture-host")
+	d.clock = clockwork.NewFakeClockAt(time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC))
+	d.ownerProbe = unreachableProbe(t)
+	d.disabledPatrols = map[string]bool{
+		"landing_infra":    true,
+		"resource_sampler": true,
+		"spec_dispatch":    true,
+	}
+	d.seams.heartbeatWork = func(*Daemon, *State, bool) {}
+	d.seams.cleanupLegacySockets = func(string) (int, int) { return 0, 0 }
+	useGitfake(t, d)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d.ctx, d.cancel = ctx, cancel
 
-	d.startPolecatDevTag()
-	<-entered
-	close(release)
-	d.waitPolecatDevTag()
+	bounded, stop := context.WithTimeout(t.Context(), 10*time.Second)
+	defer stop()
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
+	select {
+	case <-entered:
+	case err := <-done:
+		t.Fatalf("Run returned before the dev tag copy started: %v", err)
+	case <-bounded.Done():
+		t.Fatal("Run never started the dev tag copy")
+	}
+	cancel()
 
-	if got := reg.tagBytes("dev"); !bytes.Equal(got, source) {
-		t.Fatalf("dev tag was not moved to the running commit's image before the dispatch wait ended")
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run = %v, want a clean shutdown with the copy still in flight", err)
+		}
+	case <-bounded.Done():
+		t.Fatal("Run did not return: the supervisor loop is not serving while the dev tag copy is in flight")
+	}
+}
+
+// TestPolecatImageDevTagLeavesDescendantAlone: a dev tag at a descendant of the
+// running commit is newer than this build, so the copy does not move it back. The
+// step logs the decision and writes nothing.
+func TestPolecatImageDevTagLeavesDescendantAlone(t *testing.T) {
+	t.Parallel()
+	reg := newDevTagRegistry()
+	reg.addImage("dev", devTagOtherCommit)
+	reg.addImage(devTagRevision, devTagRunningCommit)
+	d, n, logs := devTagDaemon(t, reg)
+	d.polecatDevTagSeams.ancestor = func(ancestor, descendant string) (bool, error) {
+		return ancestor == devTagRunningCommit && descendant == devTagOtherCommit, nil
+	}
+
+	d.publishPolecatDevTag()
+
+	if _, puts := reg.requests(); len(puts) != 0 {
+		t.Fatalf("PUTs = %v, want none for a dev tag at a descendant", puts)
 	}
 	if got := n.got(); len(got) != 0 {
 		t.Fatalf("escalations = %+v, want none", got)
 	}
+	if !strings.Contains(logs.String(), "left alone") {
+		t.Fatalf("log = %q, want a line saying the descendant dev tag was left alone", logs.String())
+	}
 }
 
-// TestPolecatImageDevTagStartWithoutRegistryMakesNoRequest: a daemon with no
-// image_registry starts a step that ends at once and touches no registry.
-func TestPolecatImageDevTagStartWithoutRegistryMakesNoRequest(t *testing.T) {
+// TestPolecatImageDevTagEscalatesUnknownAncestry: when the repository cannot say
+// whether dev's commit descends from the running commit, the step does not guess.
+// It files one escalation naming the registry and both commits, and dev keeps its
+// tag.
+func TestPolecatImageDevTagEscalatesUnknownAncestry(t *testing.T) {
 	t.Parallel()
 	reg := newDevTagRegistry()
 	reg.addImage("dev", devTagOldCommit)
+	reg.addImage(devTagRevision, devTagRunningCommit)
+	before := reg.tagBytes("dev")
 	d, n, _ := devTagDaemon(t, reg)
-	devTagWithContext(t, d)
-	d.patrolConfig.Patrols.TierSweep.Runner.ImageRegistry = ""
-
-	d.startPolecatDevTag()
-	d.waitPolecatDevTag()
-
-	if gets, puts := reg.requests(); len(gets)+len(puts) != 0 {
-		t.Fatalf("registry requests gets=%v puts=%v, want none without image_registry", gets, puts)
+	d.polecatDevTagSeams.ancestor = func(string, string) (bool, error) {
+		return false, errors.New("the gastown repository cannot answer for commit " + devTagOldCommit)
 	}
-	if got := n.got(); len(got) != 0 {
-		t.Fatalf("escalations = %+v, want none", got)
+
+	d.publishPolecatDevTag()
+
+	if _, puts := reg.requests(); len(puts) != 0 {
+		t.Fatalf("PUTs = %v, want none when the ancestry is unknown", puts)
+	}
+	if got := reg.tagBytes("dev"); !bytes.Equal(got, before) {
+		t.Fatalf("dev tag changed although the ancestry is unknown")
+	}
+	got := n.got()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want exactly one", got)
+	}
+	for _, want := range []string{devTagHost, devTagOldCommit, devTagRunningCommit} {
+		if !strings.Contains(got[0].Reason, want) {
+			t.Fatalf("escalation reason %q does not name %s", got[0].Reason, want)
+		}
 	}
 }
 
-// TestPolecatImageDevTagWaitReturns: the dispatch wait holds only while the step is
-// running. It returns at once before a step starts, once the step has ended, and
-// when the daemon shuts down under a step that has not ended.
-func TestPolecatImageDevTagWaitReturns(t *testing.T) {
+// TestPolecatImageDevTagReachesRegistryAtSettingScheme: the step reaches the
+// registry over http for a bare host:port setting, and over the scheme a setting
+// carries when it has one.
+func TestPolecatImageDevTagReachesRegistryAtSettingScheme(t *testing.T) {
 	t.Parallel()
-	open := make(chan struct{})
-	closed := make(chan struct{})
-	close(closed)
 	tests := []struct {
-		name string
-		done chan struct{}
-		stop bool
+		name    string
+		setting string
+		scheme  string
 	}{
-		{name: "no step started", done: nil},
-		{name: "step ended", done: closed},
-		{name: "daemon stopped under a running step", done: open, stop: true},
+		{name: "bare host:port over http", setting: devTagHost, scheme: "http"},
+		{name: "https setting over https", setting: "https://" + devTagHost, scheme: "https"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d := &Daemon{polecatDevTagDone: tc.done}
-			cancel := devTagWithContext(t, d)
-			if tc.stop {
-				cancel()
+			reg := newDevTagRegistry()
+			reg.addImage("dev", devTagOldCommit)
+			reg.addImage(devTagRevision, devTagRunningCommit)
+			d, n, _ := devTagDaemon(t, reg)
+			d.patrolConfig.Patrols.TierSweep.Runner.ImageRegistry = tc.setting
+			var mu sync.Mutex
+			var schemes []string
+			d.polecatDevTagSeams.http = &http.Client{Transport: devTagTransport(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				schemes = append(schemes, r.URL.Scheme)
+				mu.Unlock()
+				reg.serve(w, r)
+			})}
+
+			d.publishPolecatDevTag()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if len(schemes) == 0 {
+				t.Fatal("the step made no registry request")
 			}
-			d.waitPolecatDevTag()
+			for _, s := range schemes {
+				if s != tc.scheme {
+					t.Fatalf("registry request scheme = %q, want %q", s, tc.scheme)
+				}
+			}
+			if got := n.got(); len(got) != 0 {
+				t.Fatalf("escalations = %+v, want none", got)
+			}
 		})
 	}
 }

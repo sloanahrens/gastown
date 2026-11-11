@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
@@ -20,8 +22,8 @@ const (
 	// on, the same pair the spawn reads the image for.
 	polecatDevTagOS   = "linux"
 	polecatDevTagArch = "arm64"
-	// polecatDevTagBudget bounds the step. The dispatch step waits for it, so a
-	// registry that never answers ends it rather than holding dispatch.
+	// polecatDevTagBudget bounds the step's registry calls, so a registry that
+	// never answers ends the step rather than leaving the tag in doubt.
 	polecatDevTagBudget = 2 * time.Minute
 	// polecatDevTagSource names the step in its escalation.
 	polecatDevTagSource = "polecat_image"
@@ -35,6 +37,9 @@ type polecatDevTagSeams struct {
 	// http is the client the registry is asked through. Nil is the registry
 	// client's default.
 	http *http.Client
+	// ancestor says whether the first commit is an ancestor of the second in the
+	// gastown rig's repository. Nil is that repository's git.
+	ancestor func(ancestor, descendant string) (bool, error)
 }
 
 // publishPolecatDevTag is the start-time step (gt-llx27r). When image_registry is
@@ -56,32 +61,12 @@ func (d *Daemon) publishPolecatDevTag() {
 	}
 }
 
-// startPolecatDevTag runs publishPolecatDevTag on its own goroutine, so a slow
-// registry does not hold the supervision steps of the first heartbeat. The
-// dispatch step waits on polecatDevTagDone (waitPolecatDevTag), so the first spawn
-// still meets the moved tag. A daemon with no image_registry starts a step that
-// does nothing and ends at once.
+// startPolecatDevTag runs publishPolecatDevTag on its own goroutine. Run calls it
+// once the supervisor loop is up, so a slow registry holds no supervision step.
+// Until the copy lands, a spawn the lagging tag would refuse is deferred by the
+// dispatcher (spec dispatch's "sling deferred" line), not failed.
 func (d *Daemon) startPolecatDevTag() {
-	done := make(chan struct{})
-	d.polecatDevTagDone = done
-	go func() {
-		defer close(done)
-		d.publishPolecatDevTag()
-	}()
-}
-
-// waitPolecatDevTag holds the caller until the start-time step ends, or the
-// daemon's context does. The copy is bounded by the step's budget and an
-// escalation by its own timeouts, so the wait is bounded too. Before
-// startPolecatDevTag has run it returns at once.
-func (d *Daemon) waitPolecatDevTag() {
-	if d.polecatDevTagDone == nil {
-		return
-	}
-	select {
-	case <-d.polecatDevTagDone:
-	case <-d.ctx.Done():
-	}
+	go d.publishPolecatDevTag()
 }
 
 // devTagState is what the registry holds for the dev tag as the step read it:
@@ -143,13 +128,26 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 		return devTagFailure(host, running, devTagState{}, fmt.Sprintf("the installed gt's build commit %s is not the start of the running commit", rev))
 	}
 
-	c := &registry.Client{Base: "http://" + host, HTTP: d.polecatDevTagSeams.http}
+	c := &registry.Client{Base: registryBase(host), HTTP: d.polecatDevTagSeams.http}
 	dev := readDevTag(ctx, c, repo)
 	if dev.readErr != nil {
 		return devTagFailure(host, running, dev, dev.readErr.Error())
 	}
 	if dev.present && dev.label == running {
 		return nil
+	}
+	// A dev tag at a descendant of the running commit is newer than this build, so
+	// it is left alone: a daemon at an older commit never moves it back.
+	if dev.present {
+		ahead, err := d.polecatDevTagAncestor(running, dev.label)
+		if err != nil {
+			return devTagFailure(host, running, dev, err.Error())
+		}
+		if ahead {
+			d.logger.Printf("polecat image: %s/%s:%s carries gt commit %s, a descendant of the running commit %s; left alone",
+				host, repo, polecatDevTagName, dev.label, running)
+			return nil
+		}
 	}
 
 	src, err := c.InspectImage(ctx, repo, rev, polecatDevTagOS, polecatDevTagArch)
@@ -198,6 +196,39 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 		}
 	}
 	return devTagFailure(host, running, dev, why)
+}
+
+// registryBase is the URL the step reaches image_registry at. A setting that
+// carries an http:// or https:// scheme is used as it is; a bare host:port is
+// reached over http, as every other registry client in the tree reaches it.
+func registryBase(setting string) string {
+	if strings.HasPrefix(setting, "https://") || strings.HasPrefix(setting, "http://") {
+		return setting
+	}
+	return "http://" + setting
+}
+
+// polecatDevTagAncestor reports whether ancestor is an ancestor of descendant in
+// the gastown rig's repository. A commit that repository does not hold is an
+// error, not an answer, and so is a repository that cannot answer: the error
+// names the commit and carries no git output.
+func (d *Daemon) polecatDevTagAncestor(ancestor, descendant string) (bool, error) {
+	if d.polecatDevTagSeams.ancestor != nil {
+		return d.polecatDevTagSeams.ancestor(ancestor, descendant)
+	}
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, "gastown"))
+	g := d.gitAt(repo)
+	for _, sha := range []string{ancestor, descendant} {
+		held, err := g.HasObject(sha)
+		if err != nil || !held {
+			return false, fmt.Errorf("the gastown repository cannot answer for commit %s", sha)
+		}
+	}
+	ahead, err := g.IsAncestor(ancestor, descendant)
+	if err != nil {
+		return false, fmt.Errorf("the gastown repository cannot answer whether commit %s descends from %s", descendant, ancestor)
+	}
+	return ahead, nil
 }
 
 // polecatDevTagRunningCommit is the full commit of the running gt.
