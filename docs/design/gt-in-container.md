@@ -48,7 +48,8 @@ Measured cost: `gt status --line` takes 74 ms through `docker exec` and 41 ms na
 | Docker Desktop VM disk | host agent `docker exec ... df` | `df /` inside the daemon container (the overlay root is the VM disk; measured 131 GB, 74%, equal to the host agent's reading) |
 | Mac data volume | `diskutil` | `df` on the mounted town path inside the container (measured equal to the Mac volume to the byte) |
 | Colima VM disks | `colima ssh` | kubelet node stats, as the sandbox and control disk alerts already read them |
-| Mac memory, CPU, exec tax, kalloc, launchd job state | host agent probes | dropped: the town's limits are the VMs, which the container and the kubelet see |
+| Host CPU idle share | host agent probes (`top` on the Mac) | read from the container's own cgroup: `cpu.stat` `usage_usec` sampled over one second, against the cores `cpu.max` allows |
+| Mac memory, exec tax, kalloc, launchd job state | host agent probes | dropped: the town's limits are the VMs, which the container and the kubelet see |
 | Stop and start the town | `gt power` and launchd | `docker compose down` and `up -d`, documented; the Mac keeps one launchd job that starts the Colima VMs |
 
 ## What is deleted

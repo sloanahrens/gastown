@@ -3,9 +3,11 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -567,7 +569,7 @@ func writeHostProbesFile(t *testing.T, town string, p hostprobe.Probes) {
 
 // containerEnv is the fixture's env for a snapshot in the town's container: the
 // host facts come from the file under town, and a host command is a failure.
-func containerEnv(t *testing.T, fake *hostFake, town string) Env {
+func containerEnv(t *testing.T, fake *hostFake, town string, cgroup podCgroup) Env {
 	t.Helper()
 	env := fake.env()
 	env.Town = town
@@ -576,7 +578,61 @@ func containerEnv(t *testing.T, fake *hostFake, town string) Env {
 		t.Errorf("container mode ran the host command %q", strings.Join(argv, " "))
 		return nil, errors.New("no host command may run in container mode")
 	}
+	cgroup.install(&env, fake)
 	return env
+}
+
+// podCgroup is the pod's cgroup as the CPU sample reads it. An empty cpuMax or
+// stat entry is a file that does not exist. The first cpu.stat read answers
+// stat[0]; once the window has passed, the next answers stat[1]. The window
+// moves the fake clock by its length, unless frozen, which leaves the clock
+// where it was. The noWait and noReadFile flags leave those seams unwired.
+type podCgroup struct {
+	cpuMax     string
+	stat       [2]string
+	frozen     bool
+	noWait     bool
+	noReadFile bool
+}
+
+// hostPodCgroupHalfBusy is one core over a one-second window in which half a
+// second of CPU was burned: the pod reads 50% idle.
+var hostPodCgroupHalfBusy = podCgroup{
+	cpuMax: "100000 100000",
+	stat:   [2]string{"usage_usec 1000000\n", "usage_usec 1500000\n"},
+}
+
+// install wires the cgroup files and the window onto env.
+func (c podCgroup) install(env *Env, f *hostFake) {
+	sampled := false
+	env.ReadFile = func(path string) ([]byte, error) {
+		var body string
+		switch path {
+		case podCPUMaxPath:
+			body = c.cpuMax
+		case podCPUStatPath:
+			body = c.stat[0]
+			if sampled {
+				body = c.stat[1]
+			}
+		}
+		if body == "" {
+			return nil, os.ErrNotExist
+		}
+		return []byte(body), nil
+	}
+	env.Wait = func(d time.Duration) {
+		sampled = true
+		if !c.frozen {
+			f.now = f.now.Add(d)
+		}
+	}
+	if c.noWait {
+		env.Wait = nil
+	}
+	if c.noReadFile {
+		env.ReadFile = nil
+	}
 }
 
 // TestSnapshotReadsHostFactsFromProbesInContainerMode: with the town's
@@ -587,22 +643,23 @@ func TestSnapshotReadsHostFactsFromProbesInContainerMode(t *testing.T) {
 	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
 	town := t.TempDir()
 	writeHostProbesFile(t, town, hostProbeFileFixture(at))
-	env := containerEnv(t, hostFixtureEnv(at), town)
+	env := containerEnv(t, hostFixtureEnv(at), town, hostPodCgroupHalfBusy)
 
 	rec := Collect(context.Background(), env, []Source{newHostSource()}, noDeadline)
 	got := rec.Groups["host"]
 	// load1 and dolt_conns have no fact in the file and the container's own
-	// would name the container, so they stay unknown.
+	// would name the container, so they stay unknown. cpu_idle_pct is the pod's
+	// cgroup's 50%, not the file's 71.5, which the host agent measured on the Mac.
 	want := map[string]any{
 		"load1":               nil,
-		"cpu_idle_pct":        71.5,
+		"cpu_idle_pct":        50.0,
 		"bd_latency_ms":       float64(37),
 		"dolt_conns":          nil,
 		"docker_disk_pct":     83.0,
 		"host_probe_failures": 0,
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("host group = %v, want the probe file's facts %v", got, want)
+		t.Fatalf("host group = %v, want the pod cgroup's CPU and the probe file's disk %v", got, want)
 	}
 }
 
@@ -645,32 +702,45 @@ func TestSnapshotProbesMissingIsUnknown(t *testing.T) {
 		name         string
 		write        bool
 		probes       hostprobe.Probes
+		cgroup       podCgroup
 		wantCPUIdle  any
 		wantDiskUsed any
 		wantFailures int
 	}{
-		{name: "missing file", wantCPUIdle: nil, wantDiskUsed: nil, wantFailures: 2},
+		{name: "missing file", cgroup: hostPodCgroupHalfBusy, wantCPUIdle: 50.0, wantDiskUsed: nil, wantFailures: 1},
 		{
 			name:         "stale file",
 			write:        true,
 			probes:       hostProbeFileFixture(at.Add(-4 * time.Minute)),
-			wantCPUIdle:  nil,
+			cgroup:       hostPodCgroupHalfBusy,
+			wantCPUIdle:  50.0,
 			wantDiskUsed: nil,
-			wantFailures: 2,
+			wantFailures: 1,
 		},
 		{
-			name:         "cpu idle field failed",
+			name:         "pod cpu.stat unreadable",
 			write:        true,
-			probes:       cpuFailed,
+			probes:       hostProbeFileFixture(at),
+			cgroup:       podCgroup{cpuMax: "100000 100000"},
 			wantCPUIdle:  nil,
 			wantDiskUsed: 83.0,
 			wantFailures: 1,
 		},
 		{
+			name:         "probe file cpu field failed is not read",
+			write:        true,
+			probes:       cpuFailed,
+			cgroup:       hostPodCgroupHalfBusy,
+			wantCPUIdle:  50.0,
+			wantDiskUsed: 83.0,
+			wantFailures: 0,
+		},
+		{
 			name:         "docker disk field failed",
 			write:        true,
 			probes:       dockerFailed,
-			wantCPUIdle:  71.5,
+			cgroup:       hostPodCgroupHalfBusy,
+			wantCPUIdle:  50.0,
 			wantDiskUsed: nil,
 			wantFailures: 1,
 		},
@@ -682,7 +752,7 @@ func TestSnapshotProbesMissingIsUnknown(t *testing.T) {
 			if tc.write {
 				writeHostProbesFile(t, town, tc.probes)
 			}
-			env := containerEnv(t, hostFixtureEnv(at), town)
+			env := containerEnv(t, hostFixtureEnv(at), town, tc.cgroup)
 
 			got, err := newHostSource().Collect(context.Background(), env)
 			if err != nil {
@@ -700,4 +770,214 @@ func TestSnapshotProbesMissingIsUnknown(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHostCPUReadsThePodCgroup: in container mode the host CPU share is the
+// pod's cgroup, not the probe file's. The file says 71.5% idle, which is the
+// host agent's reading of the Mac; the pod burned half a second of its one core
+// in the window, so the column reads 50%. The disk is still the file's.
+func TestHostCPUReadsThePodCgroup(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+	town := t.TempDir()
+	writeHostProbesFile(t, town, hostProbeFileFixture(at))
+	env := containerEnv(t, hostFixtureEnv(at), town, hostPodCgroupHalfBusy)
+
+	got, err := newHostSource().Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["cpu_idle_pct"] != 50.0 {
+		t.Errorf("cpu_idle_pct = %v, want 50 from the pod's cgroup, not the probe file's 71.5", got["cpu_idle_pct"])
+	}
+	if got["docker_disk_pct"] != 83.0 {
+		t.Errorf("docker_disk_pct = %v, want 83 from the probe file", got["docker_disk_pct"])
+	}
+}
+
+// TestHostCPUIdleFromThePodCgroupSamples: the idle share is the window's burn
+// over the cores the pod may use. Two cores with a quarter second burned are
+// 87.5% idle; a burn past every core reads fully busy, never negative idle; a
+// pod with no quota may use every core the node has.
+func TestHostCPUIdleFromThePodCgroupSamples(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		cgroup podCgroup
+		want   float64
+	}{
+		{name: "one core half burned", cgroup: hostPodCgroupHalfBusy, want: 50},
+		{
+			name:   "two cores a quarter burned",
+			cgroup: podCgroup{cpuMax: "200000 100000", stat: [2]string{"usage_usec 0\n", "usage_usec 250000\n"}},
+			want:   87.5,
+		},
+		{
+			name:   "a burn within the rounding tolerance reads fully busy",
+			cgroup: podCgroup{cpuMax: "100000 100000", stat: [2]string{"usage_usec 0\n", "usage_usec 1010000\n"}},
+			want:   0,
+		},
+		{
+			name:   "no quota uses every core the node has",
+			cgroup: podCgroup{cpuMax: "max 100000", stat: [2]string{"usage_usec 0\n", fmt.Sprintf("usage_usec %d\n", 500000*runtime.NumCPU())}},
+			want:   50,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+			town := t.TempDir()
+			env := containerEnv(t, hostFixtureEnv(at), town, tc.cgroup)
+
+			got, err := newHostSource().Collect(context.Background(), env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if got["cpu_idle_pct"] != tc.want {
+				t.Errorf("cpu_idle_pct = %v, want %v", got["cpu_idle_pct"], tc.want)
+			}
+		})
+	}
+}
+
+// TestHostCPUIdleRefusesWhatItCannotRead: a pod CPU sample the cgroup cannot
+// give is a nil column counted in host_probe_failures, never an idle share read
+// from nothing. The disk column is the probe file's and is unaffected.
+func TestHostCPUIdleRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	const halfStat = "usage_usec 1000000\n"
+	tests := []struct {
+		name   string
+		cgroup podCgroup
+		cancel bool
+	}{
+		{name: "cpu.max missing", cgroup: podCgroup{stat: hostPodCgroupHalfBusy.stat}},
+		{name: "cpu.max names one field", cgroup: podCgroup{cpuMax: "100000", stat: hostPodCgroupHalfBusy.stat}},
+		{name: "cpu.max quota is not a number", cgroup: podCgroup{cpuMax: "fast 100000", stat: hostPodCgroupHalfBusy.stat}},
+		{name: "cpu.max period is not a number", cgroup: podCgroup{cpuMax: "100000 slow", stat: hostPodCgroupHalfBusy.stat}},
+		{name: "cpu.max quota is zero", cgroup: podCgroup{cpuMax: "0 100000", stat: hostPodCgroupHalfBusy.stat}},
+		{name: "cpu.stat missing", cgroup: podCgroup{cpuMax: "100000 100000"}},
+		{name: "cpu.stat names no usage_usec", cgroup: podCgroup{cpuMax: "100000 100000", stat: [2]string{"usage_bytes 5\n", "usage_bytes 9\n"}}},
+		{name: "usage_usec is not a number", cgroup: podCgroup{cpuMax: "100000 100000", stat: [2]string{"usage_usec many\n", "usage_usec 1500000\n"}}},
+		{name: "cpu.stat unreadable after the window", cgroup: podCgroup{cpuMax: "100000 100000", stat: [2]string{"usage_usec 1000000\n", ""}}},
+		{name: "usage fell between samples", cgroup: podCgroup{cpuMax: "100000 100000", stat: [2]string{"usage_usec 1500000\n", "usage_usec 1000000\n"}}},
+		{name: "the window did not move", cgroup: podCgroup{cpuMax: "100000 100000", stat: [2]string{halfStat, "usage_usec 1500000\n"}, frozen: true}},
+		{name: "no wait seam", cgroup: podCgroup{cpuMax: "100000 100000", stat: hostPodCgroupHalfBusy.stat, noWait: true}},
+		{name: "no file seam", cgroup: podCgroup{cpuMax: "100000 100000", stat: hostPodCgroupHalfBusy.stat, noReadFile: true}},
+		{name: "cancelled during the window", cgroup: hostPodCgroupHalfBusy, cancel: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+			town := t.TempDir()
+			writeHostProbesFile(t, town, hostProbeFileFixture(at))
+			env := containerEnv(t, hostFixtureEnv(at), town, tc.cgroup)
+			ctx := context.Background()
+			if tc.cancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+
+			got, err := newHostSource().Collect(ctx, env)
+			if err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			if got["cpu_idle_pct"] != nil {
+				t.Errorf("cpu_idle_pct = %v, want nil: an unread pod CPU is unknown, not a reading", got["cpu_idle_pct"])
+			}
+			if got["docker_disk_pct"] != 83.0 {
+				t.Errorf("docker_disk_pct = %v, want the probe file's 83", got["docker_disk_pct"])
+			}
+			if got["host_probe_failures"] != 1 {
+				t.Errorf("host_probe_failures = %v, want 1: the unread CPU is counted", got["host_probe_failures"])
+			}
+		})
+	}
+}
+
+// TestHostCPUContainerWindowTheDeadlineCannotHoldFailsTheGroup: a deadline that
+// leaves less than the window refuses the container's CPU reading before any
+// cgroup file is read or any wait runs, as the host CPU group refuses it. The
+// deadline is half a window away, so the refusal is the window's, not the
+// probes' own timeout.
+func TestHostCPUContainerWindowTheDeadlineCannotHoldFailsTheGroup(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+	town := t.TempDir()
+	writeHostProbesFile(t, town, hostProbeFileFixture(at))
+	env := containerEnv(t, hostFixtureEnv(at), town, hostPodCgroupHalfBusy)
+	readFile := env.ReadFile
+	var statReads int
+	env.ReadFile = func(path string) ([]byte, error) {
+		if path == podCPUStatPath {
+			statReads++
+		}
+		return readFile(path)
+	}
+	waited := false
+	wait := env.Wait
+	env.Wait = func(d time.Duration) {
+		waited = true
+		wait(d)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(hostCPUWindow/2))
+	defer cancel()
+
+	got, err := newHostSource().Collect(ctx, env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["cpu_idle_pct"] != nil {
+		t.Errorf("cpu_idle_pct = %v, want nil: a window the deadline cannot hold is no reading", got["cpu_idle_pct"])
+	}
+	if got["host_probe_failures"] != 1 {
+		t.Errorf("host_probe_failures = %v, want 1: the refused CPU reading is counted", got["host_probe_failures"])
+	}
+	if waited || statReads != 0 {
+		t.Errorf("waited = %v, cpu.stat reads = %d, want neither: the wait cannot be cut short past the deadline", waited, statReads)
+	}
+}
+
+// TestHostCPUContainerOvershootBeyondToleranceFails: a burn one point past fully
+// busy is rounding and reads fully busy. A burn 50 points past it means the
+// counter and the wall clock disagree, so the reading is an error that names
+// both counters, and the column is nil rather than a clamped zero.
+func TestHostCPUContainerOvershootBeyondToleranceFails(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+	t.Run("one point past every core clamps to fully busy", func(t *testing.T) {
+		t.Parallel()
+		env := containerEnv(t, hostFixtureEnv(at), t.TempDir(), podCgroup{
+			cpuMax: "100000 100000",
+			stat:   [2]string{"usage_usec 0\n", "usage_usec 1010000\n"},
+		})
+
+		got, err := podCPUIdlePct(context.Background(), env)
+		if err != nil {
+			t.Fatalf("podCPUIdlePct: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("podCPUIdlePct = %v, want 0: the rounding overshoot is fully busy", got)
+		}
+	})
+	t.Run("fifty points past every core is an error naming both counters", func(t *testing.T) {
+		t.Parallel()
+		env := containerEnv(t, hostFixtureEnv(at), t.TempDir(), podCgroup{
+			cpuMax: "100000 100000",
+			stat:   [2]string{"usage_usec 1000000\n", "usage_usec 2500000\n"},
+		})
+
+		got, err := podCPUIdlePct(context.Background(), env)
+		if err == nil {
+			t.Fatalf("podCPUIdlePct = %v, want an error: a burn 50 points past fully busy is not rounding", got)
+		}
+		for _, counter := range []string{"usage_usec", "wall clock"} {
+			if !strings.Contains(err.Error(), counter) {
+				t.Errorf("error %q does not name the %q counter", err, counter)
+			}
+		}
+	})
 }
