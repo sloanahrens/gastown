@@ -255,7 +255,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir, cmd.OutOrStdout())
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay, dashboardMangoDir, os.UserHomeDir, cmd.OutOrStdout())
 	if err != nil {
 		return err
 	}
@@ -383,9 +383,8 @@ func dashboardClaudePlanPath(townRoot string) string {
 // the dashboard pod the home is /root, where the Mac's ~/.claude is mounted
 // read-only; the town's copy there is a stale snapshot. The home lookup and the
 // file check are injected so a test drives each case without the real home. A
-// check that fails for a reason other than the file's absence counts as present,
-// so the reader reports the failed read rather than an absent meter. A home
-// lookup that fails falls back to the town's series and the reason goes to
+// home lookup that fails, or a check that fails for a reason other than the
+// file's absence, falls back to the town's series and the reason goes to
 // whyLog. The path is resolved once when the hub is built.
 func resolveClaudePlanPath(townRoot string, home func() (string, error), stat func(string) (fs.FileInfo, error), whyLog *dashWhyLog) string {
 	town := dashboardClaudePlanPath(townRoot)
@@ -395,18 +394,24 @@ func resolveClaudePlanPath(townRoot string, home func() (string, error), stat fu
 		return town
 	}
 	homePath := filepath.Join(h, ".claude", ".runtime", "claude-plan", "samples.jsonl")
-	if _, err := stat(homePath); !errors.Is(err, fs.ErrNotExist) {
+	_, err = stat(homePath)
+	switch {
+	case err == nil:
 		whyLog.claudePlanSeries(homePath, "")
 		return homePath
+	case errors.Is(err, fs.ErrNotExist):
+		whyLog.claudePlanSeries(town, "")
+		return town
+	default:
+		whyLog.claudePlanSeries(town, fmt.Sprintf("cannot stat %s: %v", homePath, err))
+		return town
 	}
-	whyLog.claudePlanSeries(town, "")
-	return town
 }
 
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, out io.Writer) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int, mangoDir string, home func() (string, error), out io.Writer) (*dashboard.Hub, func(), error) {
 	// The cloud step's source comes from these settings, so a file that does
 	// not parse stops the hub here rather than showing a pane read from a step
 	// the town meant to configure differently.
@@ -515,7 +520,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	})
 	deepReview := newDashDeepReviewReader(townRoot)
 	usage := newDashUsageReader(townRoot)
-	claudePlan := newDashboardClaudePlanReader(resolveClaudePlanPath(townRoot, os.UserHomeDir, os.Stat, whyLog), usage, claudePlanUSD).
+	claudePlan := newDashboardClaudePlanReader(resolveClaudePlanPath(townRoot, home, os.Stat, whyLog), usage, claudePlanUSD).
 		WithRenewalDay(claudePlanRenewalDay)
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)

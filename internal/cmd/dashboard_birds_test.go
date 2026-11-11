@@ -73,7 +73,7 @@ func TestDashboardHubServesTheBirdsRuntimeDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, 0, 0, "", io.Discard)
+	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, 0, 0, "", emptyHome(t), io.Discard)
 	if err != nil {
 		t.Fatalf("building the dashboard's hub: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestDashboardHubMarksTheOverseerHeadline(t *testing.T) {
 		}
 	}
 
-	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, 0, 0, "", io.Discard)
+	hub, closeSources, err := newDashboardHub(root, birdsNow, time.UTC, "", nil, 0, 0, "", emptyHome(t), io.Discard)
 	if err != nil {
 		t.Fatalf("building the dashboard's hub: %v", err)
 	}

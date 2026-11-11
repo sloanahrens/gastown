@@ -22,7 +22,7 @@ func TestNewDashboardHubRefusesUnreadableSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err := newDashboardHub(townRoot, time.Now(), time.UTC, "", nil, 0, 1, "", io.Discard)
+	_, _, err := newDashboardHub(townRoot, time.Now(), time.UTC, "", nil, 0, 1, "", emptyHome(t), io.Discard)
 	if err == nil {
 		t.Fatal("a settings file that does not parse built the hub")
 	}

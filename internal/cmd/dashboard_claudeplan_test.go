@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -13,10 +14,12 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
-// resolveClaudePlanPath reads the status line's series under the home directory
-// when it exists and the town's own series when it does not, and the why-log
-// names the one that answered. The home lookup, the file check and the log are
-// injected, so no case reads the real home.
+// TestResolveClaudePlanPath checks that the plan meter reads the status line's
+// series under the home directory when it exists and the town's own series when
+// it does not, falling back to the town's series when the home lookup or the
+// file check fails, and that the why-log names the one that answered. The home
+// lookup, the file check and the log are injected, so no case reads the real
+// home.
 func TestResolveClaudePlanPath(t *testing.T) {
 	t.Parallel()
 
@@ -44,7 +47,7 @@ func TestResolveClaudePlanPath(t *testing.T) {
 		{"the home series exists", homeFn, onlyHome, homePath, homePath},
 		{"no home series yet", homeFn, allAbsent, townPath, townPath},
 		{"the home lookup fails", func() (string, error) { return "", errors.New("$HOME is not defined") }, allAbsent, townPath, "no home directory: $HOME is not defined"},
-		{"the check fails for another reason", homeFn, func(string) (fs.FileInfo, error) { return nil, errors.New("permission denied") }, homePath, homePath},
+		{"the check fails for another reason", homeFn, func(string) (fs.FileInfo, error) { return nil, errors.New("permission denied") }, townPath, "permission denied"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -62,8 +65,39 @@ func TestResolveClaudePlanPath(t *testing.T) {
 	}
 }
 
-// The plan meter's flag defaults to the price the status line's percentages are
-// drawn against, and the reader the command wires reads the town's own series.
+// emptyHome is a home lookup over a fresh directory, so a hub built in a test
+// finds no series under the real home.
+func emptyHome(t *testing.T) func() (string, error) {
+	t.Helper()
+	home := t.TempDir()
+	return func() (string, error) { return home, nil }
+}
+
+// TestNewDashboardHubLooksUpHomeThroughTheSeam checks that the hub takes the
+// home lookup from its caller: a lookup that fails is logged on the hub's output
+// with the town's series it fell back to, which only happens when the hub reads
+// the lookup it was given rather than the real home.
+func TestNewDashboardHubLooksUpHomeThroughTheSeam(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	var out bytes.Buffer
+	noHome := func() (string, error) { return "", errors.New("$HOME is not defined") }
+	_, closeSources, err := newDashboardHub(root, time.Now(), time.UTC, "", nil, 0, 0, "", noHome, &out)
+	if err != nil {
+		t.Fatalf("building the dashboard's hub: %v", err)
+	}
+	defer closeSources()
+
+	want := dashboardClaudePlanPath(root) + " (no home directory: $HOME is not defined)"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("the hub's log is %q, want the plan series fallback %q", out.String(), want)
+	}
+}
+
+// TestDashboardClaudePlanWiring checks that the plan meter's flag defaults to the
+// price the status line's percentages are drawn against, and that a reader over
+// the town's fallback series reads that price's reading from the file.
 func TestDashboardClaudePlanWiring(t *testing.T) {
 	t.Parallel()
 
