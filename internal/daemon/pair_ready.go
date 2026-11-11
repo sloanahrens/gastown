@@ -9,6 +9,11 @@ package daemon
 // of when someone notices. The item clears when the running commit reaches the
 // green commit, or when the commit is no longer newer.
 //
+// A read the check could not make keeps what its rig held and raises a second,
+// low item saying the check is unmeasured (deploy.pair_unreadable), so a broken
+// check cannot pass for a town with no pair. After a run of failed reads the
+// stale pairs are dropped and only that item remains.
+//
 // It reads through the viewer's credential and never rolls, pulls or changes a
 // branch, so it is not a lifecycle step.
 
@@ -48,6 +53,19 @@ const (
 	pairReadyBranchPrefix = "green/"
 	// pairReadyKeyPrefix keys one item: deploy-pair-ready:<rig>:<sha12>.
 	pairReadyKeyPrefix = "deploy-pair-ready:"
+	// pairReadyUnreadablePrefix keys the check's own failure item,
+	// deploy-pair-unreadable:<what>. A rig's is "rig:<rig>"; the town read's is
+	// "town:<what the check could not read>". The category keeps a rig named
+	// like a town key from sharing its item.
+	pairReadyUnreadablePrefix = "deploy-pair-unreadable:"
+	// pairReadyTownState is the state entry of a read the check makes for every
+	// rig at once: the running commit and the rig list. It is not a rig name.
+	pairReadyTownState = "<town>"
+	// pairReadyForgetAfter is the consecutive failed reads after which a rig's
+	// pair items are dropped: a pair the check could not confirm or deny that
+	// many times in a row is stale, and the check's unreadable item is what
+	// remains to be looked at.
+	pairReadyForgetAfter = 3
 )
 
 // pairReadyAPI is the viewer's read of a rig's Forgejo repository: its green
@@ -78,19 +96,25 @@ type pairReadyRig struct {
 	Err      error
 }
 
-// pairReadyCheck holds, per rig, the items the rig's last complete read raised,
-// and when the next read is due. The heartbeat writes it and the attention tick
-// reads it, so a mutex guards it.
+// pairReadyCheck holds, per rig, the items the rig's last read raised, the
+// consecutive failed reads each rig has had, and when the next read is due. The
+// heartbeat writes it and the attention tick reads it, so a mutex guards it.
 type pairReadyCheck struct {
 	mu   sync.Mutex
 	held map[string][]attention.Item
-	next time.Time
+	// fails counts a rig's consecutive failed reads, keyed like held, with
+	// pairReadyTownState for the reads made for every rig at once.
+	fails map[string]int
+	next  time.Time
 }
 
 // run makes the check when it is due at now, and does nothing otherwise. A
-// rig whose read fails keeps the items it held: an unanswered read says nothing
-// about whether a pair exists, so it neither raises nor clears one. The failures
-// are logged through logf, and never with the viewer's credential.
+// rig whose read fails neither raises nor clears a pair: an unanswered read says
+// nothing about whether one exists. It keeps the items it held, and raises the
+// check's own unreadable item so the queue can tell this town from a town whose
+// check answered and found nothing. After pairReadyForgetAfter consecutive
+// failures the stale pairs are dropped. The failures are logged through logf,
+// and never with the viewer's credential.
 func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time, rigs func() ([]pairReadyRig, error), logf func(string, ...any)) {
 	if now.Before(c.next) {
 		return
@@ -99,44 +123,98 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 	running, err := pairReadyRunningCommit(townRoot)
 	if err != nil {
 		logf("deploy pair check: %v", err)
+		c.townFailed(pairReadyUnreadablePrefix+"town:running-commit", err)
 		return
 	}
 	list, err := rigs()
 	if err != nil {
 		logf("deploy pair check: %v", err)
+		c.townFailed(pairReadyUnreadablePrefix+"town:rigs", err)
 		return
 	}
-	prev := c.snapshot()
+	prev, fails := c.snapshot()
 	out := make(map[string][]attention.Item, len(list))
+	next := make(map[string]int, len(list))
 	for _, r := range list {
 		if r.Err != nil {
 			logf("deploy pair check: %s: %v", r.Rig, r.Err)
-			out[r.Rig] = prev[r.Rig]
+			next[r.Rig] = fails[r.Rig] + 1
+			out[r.Rig] = pairReadyKept(prev[r.Rig], next[r.Rig], pairReadyUnreadableItem(r.Rig, r.Err))
 			continue
 		}
-		items, err := pairReadyItems(ctx, r, running)
-		if err != nil {
+		items, scanErr, err := pairReadyItems(ctx, r, running, prev[r.Rig])
+		switch {
+		case err != nil:
 			logf("deploy pair check: %s: %v", r.Rig, err)
-			out[r.Rig] = prev[r.Rig]
-			continue
+			next[r.Rig] = fails[r.Rig] + 1
+			out[r.Rig] = pairReadyKept(prev[r.Rig], next[r.Rig], pairReadyUnreadableItem(r.Rig, err))
+		case scanErr != nil:
+			logf("deploy pair check: %s: %v", r.Rig, scanErr)
+			next[r.Rig] = fails[r.Rig] + 1
+			out[r.Rig] = pairReadyKept(items, next[r.Rig], pairReadyUnreadableItem(r.Rig, scanErr))
+		default:
+			out[r.Rig] = items
 		}
-		out[r.Rig] = items
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.held = out
+	c.fails = next
 }
 
-// snapshot is a copy of the items each rig holds, read before a pass so a rig
-// whose read fails can keep them.
-func (c *pairReadyCheck) snapshot() map[string][]attention.Item {
+// townFailed records a read the check could not make for every rig at once.
+// Every rig's items are kept until the same read has failed
+// pairReadyForgetAfter times in a row, and the unreadable item names what could
+// not be read meanwhile.
+func (c *pairReadyCheck) townFailed(key string, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	out := make(map[string][]attention.Item, len(c.held))
-	for rigName, items := range c.held {
-		out[rigName] = items
+	fails := c.fails[pairReadyTownState] + 1
+	held := make(map[string][]attention.Item, len(c.held)+1)
+	if fails < pairReadyForgetAfter {
+		for rigName, items := range c.held {
+			held[rigName] = items
+		}
 	}
-	return out
+	held[pairReadyTownState] = []attention.Item{pairReadyUnreadableItemAt(key, "", err)}
+	c.held = held
+	if c.fails == nil {
+		c.fails = map[string]int{}
+	}
+	c.fails[pairReadyTownState] = fails
+}
+
+// pairReadyKept is what a rig holds after a read that did not answer: what the
+// read still confirms, with the check's unreadable item naming why. Before the
+// failure bound that is a partial scan's items or what the rig held; past it the
+// stale pairs are dropped, so an item the check cannot confirm for good does not
+// outlive the check that raised it.
+func pairReadyKept(prev []attention.Item, fails int, unreadable attention.Item) []attention.Item {
+	var out []attention.Item
+	if fails < pairReadyForgetAfter {
+		for _, it := range prev {
+			if it.Kind == attention.KindDeployPairReady {
+				out = append(out, it)
+			}
+		}
+	}
+	return append(out, unreadable)
+}
+
+// snapshot is a copy of the items and failure counts the check holds, read
+// before a pass so a rig whose read fails can keep them.
+func (c *pairReadyCheck) snapshot() (map[string][]attention.Item, map[string]int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	held := make(map[string][]attention.Item, len(c.held))
+	for rigName, items := range c.held {
+		held[rigName] = items
+	}
+	fails := make(map[string]int, len(c.fails))
+	for name, n := range c.fails {
+		fails[name] = n
+	}
+	return held, fails
 }
 
 // observed is every item the check holds, ordered by key, for the attention
@@ -162,15 +240,22 @@ type pairReadyGreen struct {
 // pairReadyItems reads one rig and returns the items it raises: one for each
 // green commit newer than running whose daemon and polecat images are both in
 // the registry at its stamp. A read that fails returns an error, so the caller
-// keeps what the rig held. An image that is not there is not an error: one
-// image alone raises nothing.
-func pairReadyItems(ctx context.Context, r pairReadyRig, running string) ([]attention.Item, error) {
-	greens, err := pairReadyGreenCommits(ctx, r)
+// keeps what the rig held until the failure bound. A listing that ended early
+// (the budget ran out or the pages ran past their bound) returns a non-nil
+// scanErr with the items it did confirm plus the items from prev whose branch it
+// never reached: a scan that did not see a branch cannot say its pair is gone.
+// An image that is not there is not an error: one image alone raises nothing.
+func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []attention.Item) (items []attention.Item, scanErr error, err error) {
+	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var out []attention.Item
-	for _, g := range greens {
+	seen := make(map[string]bool, len(scan.greens))
+	for _, g := range scan.greens {
+		// Every branch the scan reached is seen, so a stale item for one that
+		// no longer has a pair is cleared even when the scan is incomplete.
+		seen[pairReadyKey(r.Rig, g.sha12)] = true
 		if g.sha == running {
 			continue
 		}
@@ -178,43 +263,63 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string) ([]atte
 		// is missing from it: the comparison of green against running counts none.
 		behind, err := r.API.CompareCommits(ctx, r.Owner, r.Repo, g.sha, running)
 		if err != nil {
-			return nil, fmt.Errorf("comparing green/%s with the running commit %s: %w", g.sha12, greenRefShortSHA(running), err)
+			return nil, nil, fmt.Errorf("comparing green/%s with the running commit %s: %w", g.sha12, greenRefShortSHA(running), err)
 		}
 		if behind.TotalCommits != 0 {
 			continue
 		}
 		ahead, err := r.API.CompareCommits(ctx, r.Owner, r.Repo, running, g.sha)
 		if err != nil {
-			return nil, fmt.Errorf("counting the commits of green/%s ahead of the running commit: %w", g.sha12, err)
+			return nil, nil, fmt.Errorf("counting the commits of green/%s ahead of the running commit: %w", g.sha12, err)
 		}
 		if ahead.TotalCommits == 0 {
 			continue
 		}
 		daemon, daemonFound, err := r.Registry.TagDigest(ctx, imagevalues.DaemonImage, g.sha12)
 		if err != nil {
-			return nil, fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.DaemonImage, g.sha12, err)
+			return nil, nil, fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.DaemonImage, g.sha12, err)
 		}
 		polecat, polecatFound, err := r.Registry.TagDigest(ctx, imagevalues.PolecatImage, g.sha12)
 		if err != nil {
-			return nil, fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.PolecatImage, g.sha12, err)
+			return nil, nil, fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.PolecatImage, g.sha12, err)
 		}
 		if !daemonFound || !polecatFound {
 			continue
 		}
 		out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, ahead.TotalCommits))
 	}
-	return out, nil
+	if scan.err != nil {
+		for _, it := range prev {
+			if it.Kind == attention.KindDeployPairReady && !seen[it.Key] {
+				out = append(out, it)
+			}
+		}
+		return out, scan.err, nil
+	}
+	return out, nil, nil
+}
+
+// pairReadyScan is one rig's branch listing. complete says the listing reached
+// its end. An incomplete listing raises the branches it read and cannot clear a
+// pair on one it did not reach; err says why it ended early.
+type pairReadyScan struct {
+	greens   []pairReadyGreen
+	complete bool
+	err      error
 }
 
 // pairReadyGreenCommits lists every green/<sha12> branch of the rig's
 // repository. A branch whose name does not match the commit it points at is an
-// error: the stamp the registry is read by would be wrong.
-func pairReadyGreenCommits(ctx context.Context, r pairReadyRig) ([]pairReadyGreen, error) {
+// error: the stamp the registry is read by would be wrong. A listing that fails
+// on a page, or runs past pairReadyBranchPages, is incomplete rather than
+// failed: the pages already read are kept, and the ones not reached are named
+// in the scan's err.
+func pairReadyGreenCommits(ctx context.Context, r pairReadyRig) (pairReadyScan, error) {
 	var out []pairReadyGreen
 	for page := 1; page <= pairReadyBranchPages; page++ {
 		branches, err := r.API.ListBranches(ctx, r.Owner, r.Repo, page, pairReadyBranchLimit)
 		if err != nil {
-			return nil, fmt.Errorf("listing the branches of %s/%s: %w", r.Owner, r.Repo, err)
+			return pairReadyScan{greens: out, err: fmt.Errorf("listing page %d of %s/%s: %w", page, r.Owner, r.Repo, err)}, nil
 		}
 		for _, b := range branches {
 			stamp, ok := strings.CutPrefix(b.Name, pairReadyBranchPrefix)
@@ -222,15 +327,20 @@ func pairReadyGreenCommits(ctx context.Context, r pairReadyRig) ([]pairReadyGree
 				continue
 			}
 			if !imagevalues.ValidCommit(b.Commit.ID) || greenRefShortSHA(b.Commit.ID) != stamp {
-				return nil, fmt.Errorf("the branch %s points at commit %q, which its name does not carry", b.Name, b.Commit.ID)
+				return pairReadyScan{}, fmt.Errorf("the branch %s points at commit %q, which its name does not carry", b.Name, b.Commit.ID)
 			}
 			out = append(out, pairReadyGreen{sha: b.Commit.ID, sha12: stamp})
 		}
 		if len(branches) < pairReadyBranchLimit {
-			return out, nil
+			return pairReadyScan{greens: out, complete: true}, nil
 		}
 	}
-	return nil, fmt.Errorf("the branch listing of %s/%s runs past %d pages", r.Owner, r.Repo, pairReadyBranchPages)
+	return pairReadyScan{greens: out, err: fmt.Errorf("the branch listing of %s/%s runs past %d pages", r.Owner, r.Repo, pairReadyBranchPages)}, nil
+}
+
+// pairReadyKey is one pair item's key: deploy-pair-ready:<rig>:<sha12>.
+func pairReadyKey(rig, sha12 string) string {
+	return pairReadyKeyPrefix + rig + ":" + sha12
 }
 
 // pairReadyItem is the item for one green commit with both images published.
@@ -238,7 +348,7 @@ func pairReadyGreenCommits(ctx context.Context, r pairReadyRig) ([]pairReadyGree
 // commit is ahead of the running one.
 func pairReadyItem(rig string, g pairReadyGreen, running, daemonDigest, polecatDigest string, ahead int) attention.Item {
 	return attention.Item{
-		Key:      pairReadyKeyPrefix + rig + ":" + g.sha12,
+		Key:      pairReadyKey(rig, g.sha12),
 		Kind:     attention.KindDeployPairReady,
 		Severity: attention.SeverityLow,
 		Rig:      rig,
@@ -248,10 +358,37 @@ func pairReadyItem(rig string, g pairReadyGreen, running, daemonDigest, polecatD
 	}
 }
 
+// pairReadyUnreadableItem is the check's own item for a read it could not make:
+// rig names the rig, or "" for a read made for every rig at once. It says the
+// check is unmeasured, which is a low severity record and not a wake: the queue
+// row is how the overseer tells this town from a town whose check answered and
+// found no pair.
+func pairReadyUnreadableItem(rig string, err error) attention.Item {
+	return pairReadyUnreadableItemAt(pairReadyUnreadablePrefix+"rig:"+rig, rig, err)
+}
+
+// pairReadyUnreadableItemAt builds the unreadable item at key, for rig or, when
+// rig is "", for the town read key names.
+func pairReadyUnreadableItemAt(key, rig string, err error) attention.Item {
+	summary := fmt.Sprintf("the pair check could not finish a read it makes for every rig: %s", oneLine(err.Error()))
+	if rig != "" {
+		summary = fmt.Sprintf("the pair check could not finish reading %s's green images: %s", rig, oneLine(err.Error()))
+	}
+	return attention.Item{
+		Key:      key,
+		Kind:     attention.KindDeployPairUnreadable,
+		Severity: attention.SeverityLow,
+		Rig:      rig,
+		Summary:  summary,
+	}
+}
+
 // pairReadyRunningCommit is the commit the running daemon was rendered from:
 // the commit line of the values file under the town's gastown directory. With
 // no file there is no running commit to judge a green one against, so that is
-// an error, not a commit the check can assume.
+// an error, not a commit the check can assume. imagevalues refuses a file whose
+// commit line is not a full lowercase commit, so the commit read here is one a
+// green branch name can carry; a file that will not parse is that same error.
 func pairReadyRunningCommit(townRoot string) (string, error) {
 	v, ok, err := imagevalues.LoadIn(filepath.Join(townRoot, "gastown"))
 	if err != nil {

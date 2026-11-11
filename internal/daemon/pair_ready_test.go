@@ -50,6 +50,9 @@ func digestOf(body []byte) string {
 type fakePairAPI struct {
 	branches  []forgejo.Branch
 	branchErr error
+	// pageErrAt makes the listing fail on that page, after the pages before it
+	// answered: a scan that ended early, not one that never started.
+	pageErrAt int
 	// endless makes every listing page a full page of branches that are not
 	// green, so the listing never ends.
 	endless  bool
@@ -59,6 +62,9 @@ type fakePairAPI struct {
 func (f *fakePairAPI) ListBranches(_ context.Context, _, _ string, page, limit int) ([]forgejo.Branch, error) {
 	if f.branchErr != nil {
 		return nil, f.branchErr
+	}
+	if f.pageErrAt != 0 && page == f.pageErrAt {
+		return nil, errors.New("forgejo answered 500 on that page")
 	}
 	if f.endless {
 		out := make([]forgejo.Branch, limit)
@@ -105,6 +111,7 @@ type pairFixture struct {
 	api     *fakePairAPI
 	reg     pairReadyRegistry
 	rigErr  error
+	rigsErr error
 	check   pairReadyCheck
 	logs    []string
 	daemon  string
@@ -149,9 +156,24 @@ func (fx *pairFixture) writeRunning(t *testing.T, commit string) {
 	require.NoError(t, imagevalues.Write(imagevalues.PathIn(filepath.Join(fx.town, "gastown")), v))
 }
 
+// writeRunningRaw writes the values file with commitLine as its commit line, so
+// a test can write a commit imagevalues.Write would refuse.
+func (fx *pairFixture) writeRunningRaw(t *testing.T, commitLine string) {
+	t.Helper()
+	reg := imagevalues.Registry{Scheme: "https", Host: "registry.test:5000", Owner: "town"}
+	body := fmt.Sprintf("daemon: %s\npolecat: %s\ncommit: %s\n",
+		reg.Ref(imagevalues.DaemonImage, digestOf([]byte("running daemon"))),
+		reg.Ref(imagevalues.PolecatImage, digestOf([]byte("running polecat"))),
+		commitLine)
+	require.NoError(t, os.WriteFile(imagevalues.PathIn(filepath.Join(fx.town, "gastown")), []byte(body), 0o600))
+}
+
 // run makes the check at now, with the fixture's one rig.
 func (fx *pairFixture) run(now time.Time) {
 	rigs := func() ([]pairReadyRig, error) {
+		if fx.rigsErr != nil {
+			return nil, fx.rigsErr
+		}
 		return []pairReadyRig{{
 			Rig: "gastown", Owner: pairOwner, Repo: pairRepo,
 			API: fx.api, Registry: fx.reg, Err: fx.rigErr,
@@ -282,38 +304,49 @@ func TestPairReadyOlderOrEqualGreenRaisesNothing(t *testing.T) {
 	}
 }
 
-// TestPairReadyRefusalKeepsWhatTheRigHeld: a read that fails keeps the item the
-// rig held, since an unanswered read says nothing about whether a pair exists.
-// Each refusal is logged.
-func TestPairReadyRefusalKeepsWhatTheRigHeld(t *testing.T) {
+// TestPairReadyFailedReadAlarmsTheQueue: every way a read can fail keeps the
+// pair the rig held (an unanswered read is not an absent pair), logs why, and
+// raises the check's own unreadable item. A failed read that only logged would
+// leave a broken check reading in the queue exactly like a town with no pair.
+func TestPairReadyFailedReadAlarmsTheQueue(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
-		name  string
-		apply func(t *testing.T, fx *pairFixture)
+		name    string
+		apply   func(t *testing.T, fx *pairFixture)
+		wantKey string
+		want    string // what the unreadable item's summary says failed
 	}{
 		{
 			name: "the registry read fails",
 			apply: func(_ *testing.T, fx *pairFixture) {
 				fx.reg = &fakePairRegistry{err: errors.New("the registry answered HTTP 503")}
 			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "HTTP 503",
 		},
 		{
 			name: "the branch listing fails",
 			apply: func(_ *testing.T, fx *pairFixture) {
 				fx.api.branchErr = errors.New("forgejo answered 500")
 			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "forgejo answered 500",
 		},
 		{
 			name: "a comparison fails",
 			apply: func(_ *testing.T, fx *pairFixture) {
 				delete(fx.api.compares, pairRunning+"..."+pairGreen)
 			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "green/" + pairGreen12,
 		},
 		{
 			name: "the comparison that says green is newer fails",
 			apply: func(_ *testing.T, fx *pairFixture) {
 				delete(fx.api.compares, pairGreen+"..."+pairRunning)
 			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "green/" + pairGreen12,
 		},
 		{
 			name: "the polecat image read fails",
@@ -324,12 +357,16 @@ func TestPairReadyRefusalKeepsWhatTheRigHeld(t *testing.T) {
 					failImage: imagevalues.PolecatImage,
 				}
 			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "HTTP 503",
 		},
 		{
 			name: "the branch listing never ends",
 			apply: func(_ *testing.T, fx *pairFixture) {
 				fx.api.endless = true
 			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "runs past",
 		},
 		{
 			name: "the values file does not parse",
@@ -337,24 +374,48 @@ func TestPairReadyRefusalKeepsWhatTheRigHeld(t *testing.T) {
 				path := imagevalues.PathIn(filepath.Join(fx.town, "gastown"))
 				require.NoError(t, os.WriteFile(path, []byte("commit: [unclosed\n"), 0o600))
 			},
+			wantKey: "deploy-pair-unreadable:town:running-commit",
+			want:    "values file",
+		},
+		{
+			name: "the commit line is not a full commit",
+			apply: func(t *testing.T, fx *pairFixture) {
+				fx.writeRunningRaw(t, pairGreen12)
+			},
+			wantKey: "deploy-pair-unreadable:town:running-commit",
+			want:    "not a full 40-character lowercase commit",
 		},
 		{
 			name: "a green branch names another commit",
 			apply: func(_ *testing.T, fx *pairFixture) {
 				fx.api.branches[0].Commit.ID = pairOther
 			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "which its name does not carry",
 		},
 		{
 			name: "the rig cannot be resolved",
 			apply: func(_ *testing.T, fx *pairFixture) {
 				fx.rigErr = errors.New("rig gastown names no merge_queue.forgejo remote_url")
 			},
+			wantKey: "deploy-pair-unreadable:rig:gastown",
+			want:    "names no merge_queue.forgejo remote_url",
 		},
 		{
 			name: "the values file is gone",
 			apply: func(t *testing.T, fx *pairFixture) {
 				require.NoError(t, os.Remove(imagevalues.PathIn(filepath.Join(fx.town, "gastown"))))
 			},
+			wantKey: "deploy-pair-unreadable:town:running-commit",
+			want:    "no values file",
+		},
+		{
+			name: "the image rigs cannot be named",
+			apply: func(_ *testing.T, fx *pairFixture) {
+				fx.rigsErr = errors.New("image rig ghost is not a known rig")
+			},
+			wantKey: "deploy-pair-unreadable:town:rigs",
+			want:    "is not a known rig",
 		},
 	}
 	for _, tc := range cases {
@@ -369,9 +430,192 @@ func TestPairReadyRefusalKeepsWhatTheRigHeld(t *testing.T) {
 			fx.run(pairT0.Add(pairReadyInterval))
 
 			items := fx.check.observed()
-			require.Len(t, items, 1, "a failed read cleared the item the rig held")
-			assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key)
+			require.Len(t, items, 2, "a failed read must keep the pair and raise its own item")
+			assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key, "a failed read cleared the pair the rig held")
+			unreadable := items[1]
+			assert.Equal(t, tc.wantKey, unreadable.Key)
+			assert.Equal(t, attention.KindDeployPairUnreadable, unreadable.Kind)
+			assert.Equal(t, attention.SeverityLow, unreadable.Severity)
+			assert.Contains(t, unreadable.Summary, tc.want, "the unreadable item does not say what failed")
+			assert.NotContains(t, unreadable.Summary, pairToken)
 			assert.NotEmpty(t, fx.logs, "a failed read was not logged")
+		})
+	}
+}
+
+// TestPairReadyFailedReadsForgetWhatItHeld: a read that keeps failing stops
+// vouching for the pair it last raised. Before the bound the pair is kept and
+// the unreadable item explains why it is not being judged; at the bound the
+// stale pair is dropped, so an item that is never confirmed does not outlive
+// the check that raised it.
+func TestPairReadyFailedReadsForgetWhatItHeld(t *testing.T) {
+	t.Parallel()
+	t.Run("a rig's failed reads", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		fx.run(pairT0)
+		require.Len(t, fx.check.observed(), 1)
+		fx.reg = &fakePairRegistry{err: errors.New("the registry answered HTTP 503")}
+
+		for i := 1; i < pairReadyForgetAfter; i++ {
+			fx.run(pairT0.Add(time.Duration(i) * pairReadyInterval))
+			items := fx.check.observed()
+			require.Len(t, items, 2, "the pair was dropped before the failure bound")
+			assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key)
+		}
+
+		fx.run(pairT0.Add(pairReadyForgetAfter * pairReadyInterval))
+		items := fx.check.observed()
+		require.Len(t, items, 1, "a stale pair outlived the failure bound")
+		assert.Equal(t, "deploy-pair-unreadable:rig:gastown", items[0].Key)
+	})
+
+	t.Run("the town's failed reads", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		fx.run(pairT0)
+		require.Len(t, fx.check.observed(), 1)
+		require.NoError(t, os.Remove(imagevalues.PathIn(filepath.Join(fx.town, "gastown"))))
+
+		for i := 1; i < pairReadyForgetAfter; i++ {
+			fx.run(pairT0.Add(time.Duration(i) * pairReadyInterval))
+			assert.Len(t, fx.check.observed(), 2, "the pair was dropped before the failure bound")
+		}
+
+		fx.run(pairT0.Add(pairReadyForgetAfter * pairReadyInterval))
+		items := fx.check.observed()
+		require.Len(t, items, 1, "a stale pair outlived the failure bound")
+		assert.Equal(t, "deploy-pair-unreadable:town:running-commit", items[0].Key)
+	})
+
+	// A read that answers resets the count: failures on either side of a success
+	// do not add up to the bound.
+	t.Run("a success resets the count", func(t *testing.T) {
+		t.Parallel()
+		fx := newPairFixture(t)
+		good := fx.reg
+		fx.run(pairT0)
+		fx.reg = &fakePairRegistry{err: errors.New("the registry answered HTTP 503")}
+		fx.run(pairT0.Add(pairReadyInterval))
+		fx.run(pairT0.Add(2 * pairReadyInterval))
+		require.Len(t, fx.check.observed(), 2)
+
+		fx.reg = good
+		fx.run(pairT0.Add(3 * pairReadyInterval))
+		require.Len(t, fx.check.observed(), 1, "a successful read did not clear the unreadable item")
+
+		fx.reg = &fakePairRegistry{err: errors.New("the registry answered HTTP 503")}
+		fx.run(pairT0.Add(4 * pairReadyInterval))
+		fx.run(pairT0.Add(5 * pairReadyInterval))
+		assert.Len(t, fx.check.observed(), 2, "the failure count did not reset on a successful read")
+	})
+}
+
+// TestPairReadyPartialScanRaisesWhatItRead: a listing that fills its first page
+// and then fails leaves the scan incomplete, not failed. The pairs it read are
+// still raised, so a slow listing cannot discard the whole rig's scan.
+func TestPairReadyPartialScanRaisesWhatItRead(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	pages := make([]forgejo.Branch, pairReadyBranchLimit)
+	pages[0] = fx.api.branches[0]
+	for i := 1; i < len(pages); i++ {
+		pages[i].Name = "feature/" + strconv.Itoa(i)
+	}
+	fx.api.branches = pages
+	fx.api.pageErrAt = 2
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 2)
+	assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key, "a pair read before the listing failed was discarded")
+	assert.Equal(t, attention.KindDeployPairUnreadable, items[1].Kind)
+	assert.Contains(t, items[1].Summary, "listing page 2")
+	require.NotEmpty(t, fx.logs)
+	assert.Contains(t, fx.logs[0], "listing page 2")
+}
+
+// TestPairReadyPartialScanKeepsThePairItDidNotReach: an incomplete scan says
+// nothing about a branch it never read, so the pair last raised for that branch
+// stays until a scan reaches it.
+func TestPairReadyPartialScanKeepsThePairItDidNotReach(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+
+	// The next listing reads one full page of non-green branches and never
+	// reaches the green one.
+	pages := make([]forgejo.Branch, pairReadyBranchLimit)
+	for i := range pages {
+		pages[i].Name = "feature/" + strconv.Itoa(i)
+	}
+	fx.api.branches = pages
+	fx.api.pageErrAt = 2
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	items := fx.check.observed()
+	require.Len(t, items, 2)
+	assert.Equal(t, "deploy-pair-ready:gastown:"+pairGreen12, items[0].Key, "a pair the partial scan did not reach was cleared")
+	assert.Equal(t, attention.KindDeployPairUnreadable, items[1].Kind)
+}
+
+// TestPairReadyPartialScanClearsThePairItReached: a branch the incomplete scan
+// did reach is judged. Its polecat image gone, the pair item clears even though
+// the listing ended early, because the scan looked at that branch.
+func TestPairReadyPartialScanClearsThePairItReached(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+
+	pages := make([]forgejo.Branch, pairReadyBranchLimit)
+	pages[0] = fx.api.branches[0]
+	for i := 1; i < len(pages); i++ {
+		pages[i].Name = "feature/" + strconv.Itoa(i)
+	}
+	fx.api.branches = pages
+	fx.api.pageErrAt = 2
+	delete(fx.reg.(*fakePairRegistry).digests, imagevalues.PolecatImage+"@"+pairGreen12)
+	fx.run(pairT0.Add(pairReadyInterval))
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a pair the incomplete scan reached was not cleared")
+	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+}
+
+// TestPairReadyRunningCommitRefusesAnInvalidCommit: the commit line is compared
+// against green branch names, so a value that is not a full lowercase commit
+// matches nothing and would raise silence. imagevalues refuses such a file at
+// parse time, and the check raises its unreadable item rather than comparing
+// the value.
+func TestPairReadyRunningCommitRefusesAnInvalidCommit(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		commitLine string
+		want       string
+	}{
+		{name: "a short commit", commitLine: pairGreen12, want: "not a full 40-character lowercase commit"},
+		{name: "an upper-case commit", commitLine: strings.ToUpper(pairGreen), want: "not a full 40-character lowercase commit"},
+		{name: "an empty commit", commitLine: `""`, want: "has no commit line"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.writeRunningRaw(t, tc.commitLine)
+
+			_, err := pairReadyRunningCommit(fx.town)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+
+			fx.run(pairT0)
+			items := fx.check.observed()
+			require.Len(t, items, 1)
+			assert.Equal(t, "deploy-pair-unreadable:town:running-commit", items[0].Key)
+			assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
 		})
 	}
 }
@@ -390,25 +634,6 @@ func TestPairReadyIsDueOnTheIntervalOnly(t *testing.T) {
 
 	fx.run(pairT0.Add(pairReadyInterval))
 	assert.Empty(t, fx.check.observed(), "the check did not read once its interval was up")
-}
-
-// TestPairReadyKeepsWhatItHeldWhenTheRigListFails: when the image rigs cannot be
-// named, no rig is read and every item the check held stays, with the failure
-// logged.
-func TestPairReadyKeepsWhatItHeldWhenTheRigListFails(t *testing.T) {
-	t.Parallel()
-	fx := newPairFixture(t)
-	fx.run(pairT0)
-	require.Len(t, fx.check.observed(), 1)
-
-	var logs []string
-	fx.check.run(context.Background(), fx.town, pairT0.Add(pairReadyInterval),
-		func() ([]pairReadyRig, error) { return nil, errors.New("image rig ghost is not a known rig") },
-		func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) })
-
-	require.Len(t, fx.check.observed(), 1, "a failed rig list cleared the item")
-	require.NotEmpty(t, logs, "the failed rig list was not logged")
-	assert.Contains(t, logs[0], "is not a known rig")
 }
 
 // pairHandlerTransport answers each request in process, so the registry fixture
@@ -495,7 +720,10 @@ func TestPairReadyTokenNeverReachesLogOrItem(t *testing.T) {
 
 		fx.run(pairT0)
 
-		assert.Empty(t, fx.check.observed())
+		items := fx.check.observed()
+		require.Len(t, items, 1, "a failed registry read raised no unreadable item")
+		assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+		assert.NotContains(t, items[0].Summary, pairToken)
 		require.NotEmpty(t, fx.logs, "the failed read was not logged")
 		assert.NotContains(t, strings.Join(fx.logs, "\n"), pairToken)
 	})
