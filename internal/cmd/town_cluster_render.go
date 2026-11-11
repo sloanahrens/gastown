@@ -83,6 +83,7 @@ type clusterRenderFlags struct {
 	doltBackupHostPath string
 	dashboard          bool
 	dashboardClaudeDir string
+	daemonClaudeDir    string
 }
 
 var clusterRender clusterRenderFlags
@@ -163,6 +164,8 @@ func init() {
 		"also write the dashboard's Service and Deployment beside the daemon's; the secrets manifest must name "+k8sdaemon.ViewerTokenFile+" (a live render only)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.dashboardClaudeDir, "dashboard-claude-dir", "",
 		"the Mac's ~/.claude directory, an absolute path, mounted read-only in the dashboard at /root/.claude; it needs --dashboard")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonClaudeDir, "daemon-claude-dir", "",
+		"the Mac's ~/.claude directory, an absolute path, mounted read-only in the daemon at /root/.claude, where the usage scan reads the transcripts")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)
@@ -215,6 +218,8 @@ func (f clusterRenderFlags) validate() error {
 		return errors.New("--dashboard-claude-dir is for the dashboard: name --dashboard with it, or drop the flag")
 	case f.dashboardClaudeDir != "" && !filepath.IsAbs(f.dashboardClaudeDir):
 		return fmt.Errorf("--dashboard-claude-dir %q must be an absolute path: the pod names the host directory", f.dashboardClaudeDir)
+	case f.daemonClaudeDir != "" && !filepath.IsAbs(f.daemonClaudeDir):
+		return fmt.Errorf("--daemon-claude-dir %q must be an absolute path: the pod names the host directory", f.daemonClaudeDir)
 	case !filepath.IsAbs(f.configDir):
 		return fmt.Errorf("--config-dir %q must be an absolute path: the create commands are run from another directory", f.configDir)
 	case !filepath.IsAbs(f.openShellConfigDir):
@@ -311,6 +316,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		HostGatewayIP:           f.hostGateway,
 		Dashboard:               f.dashboard,
 		DashboardClaudeDir:      f.dashboardClaudeDir,
+		DaemonClaudeDir:         f.daemonClaudeDir,
 	}
 	if !f.rehearsal {
 		// The live pod's arguments equal the live compose command's: the om token

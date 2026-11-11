@@ -353,6 +353,48 @@ func TestDashboardMountsTheClaimReadOnly(t *testing.T) {
 	}
 }
 
+// TestDaemonClaudeMountIsReadOnlyDirectory holds the daemon's claude directory to
+// the golden that shows it: one host path, the Mac's ~/.claude as a Directory, mounted
+// read-only at /root/.claude in the daemon container, and no other host path.
+func TestDaemonClaudeMountIsReadOnlyDirectory(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	v.DaemonClaudeDir = "/Users/sloan/.claude"
+	built := mustBuild(t, v)
+	compareGolden(t, filepath.Join(packageDir(t), "testdata"), "deployment-daemon-claude.yaml", document(t, built.Deployment))
+
+	pod := built.Deployment.Spec.Template.Spec
+	var host *Volume
+	hostPaths := 0
+	for i := range pod.Volumes {
+		if pod.Volumes[i].HostPath != nil {
+			hostPaths++
+			host = &pod.Volumes[i]
+		}
+	}
+	if hostPaths != 1 || host.Name != DaemonClaudeVolume || host.HostPath.Path != v.DaemonClaudeDir || host.HostPath.Type != "Directory" {
+		t.Fatalf("the daemon pod has %d host paths, want the claude directory alone: %s of type Directory", hostPaths, v.DaemonClaudeDir)
+	}
+	if m := volumeMountAt(pod.Containers[0].VolumeMounts, DaemonClaudePath); m == nil || m.Name != DaemonClaudeVolume || !m.ReadOnly {
+		t.Errorf("the claude mount = %+v, want %s from %s read-only", m, DaemonClaudePath, DaemonClaudeVolume)
+	}
+}
+
+// TestDaemonClaudeDirRefusesARelativePath holds a relative claude directory to a
+// refusal that names the value, since the pod names the host directory.
+func TestDaemonClaudeDirRefusesARelativePath(t *testing.T) {
+	t.Parallel()
+	v := goldenValues(t)
+	v.DaemonClaudeDir = "Users/sloan/.claude"
+	_, err := Build(v)
+	if err == nil {
+		t.Fatal("Build accepted a relative DaemonClaudeDir")
+	}
+	if !strings.Contains(err.Error(), "Values.DaemonClaudeDir") || !strings.Contains(err.Error(), "absolute") {
+		t.Errorf("Build refused with %q, want Values.DaemonClaudeDir and absolute named", err)
+	}
+}
+
 // TestDashboardCommandAndProbe holds the command, the two probes and the Service:
 // `gt dashboard` on the port with no --bind, both probes curl -f on the index with
 // the numbers the bead names, liveness no stricter than readiness, and a

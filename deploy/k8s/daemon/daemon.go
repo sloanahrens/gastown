@@ -228,6 +228,12 @@ const (
 	// DashboardClaudePath is the Mac's ~/.claude as the dashboard reads it: the
 	// image's HOME is /root, so the transcripts and the spend ledger sit there.
 	DashboardClaudePath = "/root/.claude"
+	// DaemonClaudeVolume carries the Mac's ~/.claude into the daemon container, for
+	// the usage_attrib patrol that reads the transcripts there.
+	DaemonClaudeVolume = "daemon-claude"
+	// DaemonClaudePath is the Mac's ~/.claude as the daemon reads it: the image's
+	// HOME is /root, the same path the dashboard reads it at.
+	DaemonClaudePath = "/root/.claude"
 	// ViewerTokenFile is the read-only Forgejo token the dashboard page reads from
 	// $XDG_CONFIG_HOME/gt, the same Secret entry a rehearsal mounts.
 	ViewerTokenFile = RehearsalForgeTokenFile
@@ -605,6 +611,11 @@ type Values struct {
 	// nothing. Set, it must be absolute and Dashboard must be set. The mount is the
 	// whole directory, wider than the panes read; a narrower list is a later bead.
 	DashboardClaudeDir string
+	// DaemonClaudeDir is the Mac's ~/.claude directory the daemon container mounts
+	// read-only at DaemonClaudePath, as a hostPath of type Directory so a missing
+	// directory fails the pod rather than creating one. Empty mounts nothing. Set,
+	// it must be absolute. The mount is the whole directory, as the dashboard's is.
+	DaemonClaudeDir string
 }
 
 // Manifests is what Build returns, in the order Render writes it. The dashboard
@@ -1188,9 +1199,16 @@ func dashboardVolumes(v Values) ([]Volume, error) {
 		token,
 	}
 	if v.DashboardClaudeDir != "" {
-		vols = append(vols, Volume{Name: DashboardClaudeVolume, HostPath: &HostPathVolumeSource{Path: v.DashboardClaudeDir, Type: hostPathDirectory}})
+		vols = append(vols, claudeDirVolume(DashboardClaudeVolume, v.DashboardClaudeDir))
 	}
 	return vols, nil
+}
+
+// claudeDirVolume is the hostPath volume that carries a Mac ~/.claude directory
+// under name. The type is Directory, so a missing directory fails the pod rather
+// than creating one on the Mac.
+func claudeDirVolume(name, dir string) Volume {
+	return Volume{Name: name, HostPath: &HostPathVolumeSource{Path: dir, Type: hostPathDirectory}}
 }
 
 // dashboardSelectorLabels are what the dashboard's Deployment and Service select
@@ -1242,6 +1260,9 @@ func volumes(v Values) ([]Volume, error) {
 	}
 	if v.PolecatImage != "" {
 		vols = append(vols, polecatImageVolume())
+	}
+	if v.DaemonClaudeDir != "" {
+		vols = append(vols, claudeDirVolume(DaemonClaudeVolume, v.DaemonClaudeDir))
 	}
 	if !v.Rehearsal {
 		vols = append(vols, openShellVolume())
@@ -1350,6 +1371,9 @@ func mounts(v Values) []VolumeMount {
 			SubPath:   PolecatImageFile,
 			ReadOnly:  true,
 		})
+	}
+	if v.DaemonClaudeDir != "" {
+		m = append(m, VolumeMount{Name: DaemonClaudeVolume, MountPath: DaemonClaudePath, ReadOnly: true})
 	}
 	if !v.Rehearsal {
 		m = append(m, openShellMount())
@@ -1476,7 +1500,19 @@ func (v Values) validate() error {
 	if err := v.validateDashboard(); err != nil {
 		return err
 	}
+	if err := v.validateDaemonClaudeDir(); err != nil {
+		return err
+	}
 	return v.validateDaemon()
+}
+
+// validateDaemonClaudeDir refuses a claude directory the pod cannot name: the
+// pod's hostPath takes a host path, so a relative one is no directory at all.
+func (v Values) validateDaemonClaudeDir() error {
+	if v.DaemonClaudeDir != "" && !filepath.IsAbs(v.DaemonClaudeDir) {
+		return fmt.Errorf("Values.DaemonClaudeDir %q: want an absolute path, since the pod names the host directory", v.DaemonClaudeDir)
+	}
+	return nil
 }
 
 // validateDashboard refuses the dashboard values the pair cannot render. The
