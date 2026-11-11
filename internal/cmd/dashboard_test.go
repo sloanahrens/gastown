@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -27,11 +28,89 @@ func TestDashboardClassName(t *testing.T) {
 	}
 }
 
-func TestResolveSpendCmdPrefersFlag(t *testing.T) {
+func TestResolveSpendPrefersFlag(t *testing.T) {
 	t.Parallel()
-	got, reason := resolveSpendCmd("/bin/echo {}")
-	if len(got) != 2 || got[0] != "/bin/echo" || reason != "" {
-		t.Errorf("flag not honored: %v, reason %q", got, reason)
+	spend, reason := resolveSpend("/bin/echo {}")
+	if spend == nil || reason != "" {
+		t.Fatalf("flag not honored: spend nil %v, reason %q", spend == nil, reason)
+	}
+	if got := strings.TrimSpace(string(spend())); got != "{}" {
+		t.Errorf("flag's command output = %q, want {}", got)
+	}
+}
+
+// With no --spend-cmd and the ledger present, the report is built in process.
+// The home has no tool, so only the in-process build can answer; the flag still
+// runs its own command and wins over the ledger.
+func TestDashboardSpendUsesLedgerInProcess(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	homeFn := func() (string, error) { return home, nil }
+	dir := spendDirIn(home)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ledger := "2026-11-09T01:10:00 balance=51.50 granted=15.00 topped=36.50\n" +
+		"2026-11-09T01:12:00 balance=51.00 granted=15.00 topped=36.00\n"
+	if err := os.WriteFile(filepath.Join(dir, spendLedgerName), []byte(ledger), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	spend, reason := resolveSpendIn("", homeFn, os.Stat)
+	if spend == nil || reason != "" {
+		t.Fatalf("ledger present: spend nil %v, reason %q; want a source and no reason", spend == nil, reason)
+	}
+	var report struct {
+		Samples int     `json:"samples"`
+		Balance float64 `json:"balance"`
+		Live    struct {
+			OK bool `json:"ok"`
+		} `json:"live"`
+	}
+	out := spend()
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("in-process report is not JSON: %v (%q)", err, out)
+	}
+	if report.Samples != 2 || report.Balance != 51 || report.Live.OK {
+		t.Errorf("report = %+v, want the two ledger rows, balance 51 and no live read", report)
+	}
+
+	flagSpend, _ := resolveSpendIn("/bin/echo {}", homeFn, os.Stat)
+	if got := strings.TrimSpace(string(flagSpend())); got != "{}" {
+		t.Errorf("--spend-cmd output = %q, want the command's {}", got)
+	}
+}
+
+// A ledger or events log that cannot be read, or a report that cannot be encoded,
+// is no report: the dashboard shows the read failed, not a report built from part
+// of the files.
+func TestDashboardSpendLedgerRefusesUnreadableFiles(t *testing.T) {
+	t.Parallel()
+	ledgerIsDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(ledgerIsDir, spendLedgerName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	eventsIsDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(eventsIsDir, spendLedgerName), []byte("2026-11-09T01:12:00 balance=51.50\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(eventsIsDir, spendEventsName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	notEncodable := t.TempDir()
+	if err := os.WriteFile(filepath.Join(notEncodable, spendLedgerName), []byte("2026-11-09T01:12:00 balance=NaN\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]string{
+		"ledger unreadable":    ledgerIsDir,
+		"events unreadable":    eventsIsDir,
+		"report not encodable": notEncodable,
+	}
+	for name, dir := range cases {
+		if out := dashboardSpendLedger(dir)(); out != nil {
+			t.Errorf("%s: got report %s, want none", name, out)
+		}
 	}
 }
 
@@ -45,18 +124,27 @@ func TestDashboardSpendAbsentSaysNotInCluster(t *testing.T) {
 	absent := func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
 	present := func(string) (fs.FileInfo, error) { return nil, nil }
 	denied := func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }
+	noLedger := func(p string) (fs.FileInfo, error) {
+		if strings.HasSuffix(p, spendLedgerName) {
+			return nil, fs.ErrNotExist
+		}
+		return nil, nil
+	}
 
-	if argv, reason := resolveSpendCmdIn("", noHome, present); argv != nil || reason != dashboard.NotInClusterReason {
-		t.Errorf("no home: argv %v, reason %q; want no argv and %q", argv, reason, dashboard.NotInClusterReason)
+	if spend, reason := resolveSpendIn("", noHome, present); spend != nil || reason != dashboard.NotInClusterReason {
+		t.Errorf("no home: spend nil %v, reason %q; want no source and %q", spend == nil, reason, dashboard.NotInClusterReason)
 	}
-	if argv, reason := resolveSpendCmdIn("", home, absent); argv != nil || reason != dashboard.NotInClusterReason {
-		t.Errorf("no tool file: argv %v, reason %q; want no argv and %q", argv, reason, dashboard.NotInClusterReason)
+	if spend, reason := resolveSpendIn("", home, absent); spend != nil || reason != dashboard.NotInClusterReason {
+		t.Errorf("no ledger or tool: spend nil %v, reason %q; want no source and %q", spend == nil, reason, dashboard.NotInClusterReason)
 	}
-	if argv, reason := resolveSpendCmdIn("", home, present); len(argv) != 2 || reason != "" {
-		t.Errorf("tool present: argv %v, reason %q; want the tool and no reason", argv, reason)
+	if spend, reason := resolveSpendIn("", home, noLedger); spend == nil || reason != "" {
+		t.Errorf("tool only: spend nil %v, reason %q; want the tool and no reason", spend == nil, reason)
 	}
-	if argv, reason := resolveSpendCmdIn("", home, denied); len(argv) != 2 || reason != "" {
-		t.Errorf("tool unreadable: argv %v, reason %q; want the tool run and no reason", argv, reason)
+	if spend, reason := resolveSpendIn("", home, present); spend == nil || reason != "" {
+		t.Errorf("ledger present: spend nil %v, reason %q; want a source and no reason", spend == nil, reason)
+	}
+	if spend, reason := resolveSpendIn("", home, denied); spend == nil || reason != "" {
+		t.Errorf("ledger unreadable: spend nil %v, reason %q; want a source and no reason", spend == nil, reason)
 	}
 
 	if read := dashboardSpendHoursIn(noHome)(); read.Reason != dashboard.NotInClusterReason || read.Hours != nil {
