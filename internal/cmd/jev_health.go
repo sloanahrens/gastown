@@ -251,11 +251,11 @@ func jevHealthReport(out io.Writer, townRoot string, asJSON bool, now time.Time)
 	if err != nil {
 		return err
 	}
-	inputs, err := jevHealthInputs(townRoot)
+	logCopy, err := jevReadLogCopy(townRoot)
 	if err != nil {
 		return err
 	}
-	logCopy, err := jevReadLogCopy(townRoot)
+	inputs, err := jevHealthInputs(townRoot)
 	if err != nil {
 		return err
 	}

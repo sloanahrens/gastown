@@ -591,3 +591,17 @@ func TestJevJSONCarriesCopyFieldsAndKeepsTheOldOnes(t *testing.T) {
 		assert.True(t, doc.CopyStale, "a copy with no file written is not fresh")
 	})
 }
+
+// TestJevHealthRefusesAnUnreadableCopyFile covers the copy read's failure paths:
+// a log path that cannot be statted fails the command rather than leaving the
+// line without a file to name.
+func TestJevHealthRefusesAnUnreadableCopyFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A symlink to itself: the stat fails with ELOOP, not with "not there".
+	require.NoError(t, os.Symlink("attention.jsonl", filepath.Join(jevHealthDir(t, town), "attention.jsonl")))
+
+	err := runJevHealthError(t, townFinder(town), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attention.jsonl")
+}

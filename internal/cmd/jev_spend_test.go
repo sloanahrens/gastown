@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/jev"
 )
 
@@ -222,4 +223,32 @@ func TestJevSpendRefusesANonRegularLogCopyFile(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "attention.jsonl")
 	assert.Contains(t, err.Error(), "not a regular file")
+}
+
+// TestJevSpendRefusesABrokenPatrolConfig covers the config read the copy's
+// warning needs: a config that does not parse must fail the command, not read
+// as a town with every battery off.
+func TestJevSpendRefusesABrokenPatrolConfig(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := daemon.PatrolConfigFile(town)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("{"), 0o644))
+
+	var out bytes.Buffer
+	err := jevSpendWithFlags(&out, town, 24, 1e9, false, time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reading the patrol config")
+}
+
+// TestJevSpendReportsAWriteFailure covers the copy line's write: a writer that
+// refuses is an error, not a table printed without the copy it came from.
+func TestJevSpendReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeJevSpendLedger(t, town, jevSpendLine(time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC), "attention", 10, 5))
+
+	err := jevSpendWithFlags(jevHealthFailingWriter{}, town, 24, 1e9, false,
+		time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC))
+	require.Error(t, err)
 }

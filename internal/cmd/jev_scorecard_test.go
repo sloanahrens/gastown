@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/jev/testsel"
 )
@@ -281,5 +282,61 @@ func TestJevScorecardPrintsTheLogCopyAge(t *testing.T) {
 	want := "log copy: newest write 2026-10-20 11:55Z (5m ago) at " + logPath
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("output does not carry %q:\n%s", want, out.String())
+	}
+}
+
+// TestJevScorecardRefusesABrokenPatrolConfig covers the config read the copy's
+// warning needs: a config that does not parse must fail the report.
+func TestJevScorecardRefusesABrokenPatrolConfig(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeScorecardFixture(t, town)
+	path := daemon.PatrolConfigFile(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", false, false,
+		time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "reading the patrol config") {
+		t.Fatalf("err = %v, want the patrol config failure", err)
+	}
+}
+
+// TestJevScorecardRefusesAnUnreadableCopyFile covers the copy read's failure
+// path: a log path that cannot be statted fails the report rather than leaving
+// the line without a file to name.
+func TestJevScorecardRefusesAnUnreadableCopyFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeScorecardFixture(t, town)
+	// A symlink to itself: the stat fails with ELOOP, not with "not there".
+	if err := os.Symlink("attention.jsonl", filepath.Join(town, ".runtime", "jev", "attention.jsonl")); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", false, false,
+		time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "attention.jsonl") {
+		t.Fatalf("err = %v, want the copy read's failure", err)
+	}
+}
+
+// TestJevScorecardReportsAWriteFailure covers the copy line's write: a writer
+// that refuses is an error, not a report printed without the copy it came from.
+func TestJevScorecardReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeScorecardFixture(t, town)
+
+	err := jevScorecardWithFlags(context.Background(), jevHealthFailingWriter{}, town, scorecard.FixtureBattery, "", false, false,
+		time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
+	if err == nil {
+		t.Fatal("want the writer's failure")
 	}
 }
