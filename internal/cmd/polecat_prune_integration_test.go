@@ -25,9 +25,9 @@ func TestIntegrationRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch(t *
 	t.Chdir(townRoot)
 	localDir := filepath.Join(t.TempDir(), "work")
 	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
+	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("prunecmdpatch", "", oldEnoughSuffix())
-	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	createPatchEquivalentRemoteBranch(t, repoGit, localDir, mainBranch, branch)
 
 	oldRemote, oldDryRun := polecatPruneRemote, polecatPruneDryRun
@@ -55,9 +55,9 @@ func TestIntegrationRunPolecatPruneReportsRemoteBranchKeptForOpenPR(t *testing.T
 	t.Chdir(townRoot)
 	localDir := filepath.Join(t.TempDir(), "work")
 	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
+	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("prcmdcat", "", oldEnoughSuffix())
-	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	createPatchEquivalentRemoteBranch(t, repoGit, localDir, mainBranch, branch)
 	stubRemotePolecatBranchOpenPR(t, branch)
 
