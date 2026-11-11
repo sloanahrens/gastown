@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,55 @@ import (
 
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
+
+// resolveClaudePlanPath reads the status line's series under the home directory
+// when it exists and the town's own series when it does not, and the why-log
+// names the one that answered. The home lookup, the file check and the log are
+// injected, so no case reads the real home.
+func TestResolveClaudePlanPath(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	home := t.TempDir()
+	homePath := filepath.Join(home, ".claude", ".runtime", "claude-plan", "samples.jsonl")
+	townPath := dashboardClaudePlanPath(town)
+	homeFn := func() (string, error) { return home, nil }
+	// onlyHome reports the home series present and everything else absent.
+	onlyHome := func(p string) (fs.FileInfo, error) {
+		if p == homePath {
+			return nil, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	allAbsent := func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+
+	cases := []struct {
+		name    string
+		home    func() (string, error)
+		stat    func(string) (fs.FileInfo, error)
+		want    string
+		logWant string
+	}{
+		{"the home series exists", homeFn, onlyHome, homePath, homePath},
+		{"no home series yet", homeFn, allAbsent, townPath, townPath},
+		{"the home lookup fails", func() (string, error) { return "", errors.New("$HOME is not defined") }, allAbsent, townPath, "no home directory: $HOME is not defined"},
+		{"the check fails for another reason", homeFn, func(string) (fs.FileInfo, error) { return nil, errors.New("permission denied") }, homePath, homePath},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logged []string
+			whyLog := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+			if got := resolveClaudePlanPath(town, tc.home, tc.stat, whyLog); got != tc.want {
+				t.Errorf("the plan meter reads %q, want %q", got, tc.want)
+			}
+			if len(logged) != 1 || !strings.Contains(logged[0], tc.logWant) {
+				t.Errorf("the why-log says %q, want one line naming %q", logged, tc.logWant)
+			}
+		})
+	}
+}
 
 // The plan meter's flag defaults to the price the status line's percentages are
 // drawn against, and the reader the command wires reads the town's own series.
@@ -90,7 +141,7 @@ func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := newDashboardClaudePlanReader(root, newDashUsageReader(root), dashboardClaudePlanUSD).Read(now)
+	p := newDashboardClaudePlanReader(dashboardClaudePlanPath(root), newDashUsageReader(root), dashboardClaudePlanUSD).Read(now)
 
 	prices, err := dashboard.EmbeddedClaudePrices()
 	if err != nil {
@@ -117,7 +168,7 @@ func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
 	// month at $0.00. Its series is there, so the plan line is still drawn.
 	noRecords := t.TempDir()
 	writeClaudePlanSeries(t, noRecords, now)
-	unread := newDashboardClaudePlanReader(noRecords, newDashUsageReader(noRecords), dashboardClaudePlanUSD).Read(now)
+	unread := newDashboardClaudePlanReader(dashboardClaudePlanPath(noRecords), newDashUsageReader(noRecords), dashboardClaudePlanUSD).Read(now)
 	if unread.APIEquivalentWeekUSD != nil || unread.APIEquivalentMonthUSD != nil {
 		t.Errorf("records that could not be read gave %+v, want no figures", unread)
 	}
@@ -129,7 +180,7 @@ func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(emptyRoot, ".runtime", "usage", usageRecordsSubdir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	empty := newDashboardClaudePlanReader(emptyRoot, newDashUsageReader(emptyRoot), dashboardClaudePlanUSD).Read(now)
+	empty := newDashboardClaudePlanReader(dashboardClaudePlanPath(emptyRoot), newDashUsageReader(emptyRoot), dashboardClaudePlanUSD).Read(now)
 	if empty.APIEquivalentWeekUSD == nil || *empty.APIEquivalentWeekUSD != 0 {
 		t.Errorf("an empty records directory gave %v, want a figure of zero", empty.APIEquivalentWeekUSD)
 	}
