@@ -1082,8 +1082,8 @@ func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, h
 
 // diskMaintCollectUnavailable is why the container's registry target records a
 // collect as skipped: the container has no engine socket to the registry, and
-// the garbage collect runs from the Mac's registry-collect job instead.
-const diskMaintCollectUnavailable = "the garbage collect runs from the Mac's registry-collect job, which this container cannot reach"
+// no job runs the registry's garbage collect until one is given a home.
+const diskMaintCollectUnavailable = "no job runs the registry's garbage collect until one is given a home, and this container cannot reach the registry"
 
 // diskMaintHostKubeconfig is the town's sandbox kubeconfig, relative to the
 // town root: the file the host reads the sandbox cluster through. The container

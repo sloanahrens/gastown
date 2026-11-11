@@ -313,16 +313,14 @@ container is not visible across the mount (shown directly: the container's
 is fixed, read "running" from the Supervised line and from the checks in Step 7,
 which read the container and `state.json` and were correct.
 
-**Step 6. Start the host agent for the scratch town.**
-In its own terminal tab, with the scratch root as the working directory, leave
-this running for the rest of L1:
-
-```
-gt host agent run
-```
-
-It writes `<scratch-root>/.runtime/host/probes.json` at once and every 60
-seconds after. Stop it with Ctrl-C when L1 ends; that is a clean stop.
+**Step 6. Check the host probes for the scratch town.** gt runs no host agent.
+The Mac's probes come from gt-mac-watch, a devops launchd job that publishes
+`probes.json` into the daemon pod with `kubectl exec`. Before Step 7, confirm
+the scratch root's `.runtime/host/probes.json` is being written; if no
+publisher writes it, the file goes stale and the daemon refuses it after 180
+seconds.
+Nothing in this step starts or stops gt-mac-watch, and it stays loaded for the
+rest of L1.
 
 **Step 7. Sample the health checks.** From the scratch root, now and every 5
 minutes for 30 minutes (seven samples):
@@ -337,7 +335,8 @@ Expected, each sample: the two checks report OK (for a container town they
 read the container and `state.json`, not a pid; the first sample of a run
 reports `daemon-liveness` as `unknown: no baseline yet` and records one, which is
 a skip, not a failure); `probes.json` was modified in
-the last 180 seconds (the daemon refuses a file older than three intervals);
+the last 180 seconds (the daemon refuses an older file: that check is the alarm
+when gt-mac-watch stops);
 `state.json` names owner `container` / `gt-scratch-daemon-1`, `"running": true`,
 and `heartbeat_count` larger than in the previous sample. Once, at any sample:
 
@@ -409,7 +408,8 @@ and nothing else; the scratch root and the compose file's directory are removed
 by hand in Step 4. Never use `docker system prune` or `docker volume prune`: they reach every
 project on the host.
 
-1. Stop the host agent (Ctrl-C in its tab).
+1. Nothing to stop on the host: gt-mac-watch is devops' launchd job, not the
+   scratch town's.
 2. Remove the project and its volumes. From `<scratch-parent>`:
 
    ```
@@ -496,8 +496,8 @@ Still not observed:
   (gt-fwoso's three beads).
 - The first-sample `daemon-liveness` result when the count has a baseline from an
   earlier run on the same town.
-- The behaviour of the probe file when the host agent is stopped for more than
-  three intervals.
+- The behaviour of the probe file when gt-mac-watch stops publishing for more
+  than 180 seconds.
 - `gt daemon scratch up` with `--om-token-file`.
 
 ## L2: landing through a throwaway Forgejo
@@ -1133,12 +1133,11 @@ day.
       `daemon.supervisor` stays `launchd`: `daemon.container_name` and
       `daemon.compose_project`, never one without the other. The cutover builds
       the container side from them and refuses a town that sets neither.
-- [ ] **The host agent runs for the live town.** `gt host agent run`, as in L1
-      Step 6 but with the live town as the working directory, is running in its
-      own terminal tab, and `<live-town>/.runtime/host/probes.json` was
+- [ ] **gt-mac-watch publishes for the live town.** The devops launchd job
+      gt-mac-watch is loaded, and `<live-town>/.runtime/host/probes.json` was
       modified in the last 180 seconds. The container daemon refuses a probe
-      file older than three intervals. A permanent service for it is not part of
-      this window.
+      file older than 180 seconds, so that check is the alarm when gt-mac-watch
+      stops. gt does not start or stop the job.
 - [ ] **The dispatch hold is on.** The operator creates it, never an agent:
       `<live-town>/seat-refill.hold` exists. It is a shared row
       (`deploy/daemon/town-state.yaml`): the operator writes it on the Mac, and
@@ -1250,7 +1249,7 @@ at the first sign of trouble.
       container's name, `"running": true`, and a `heartbeat_count` larger than
       at the previous check (it counts from 0 in the new process).
 - [ ] `<live-town>/.runtime/host/probes.json` was modified in the last 180
-      seconds, and the host agent tab is still running.
+      seconds, and gt-mac-watch is still loaded.
 - [ ] `docker --context desktop-linux ps --format '{{.Names}} {{.Status}}'`
       shows the live container and `sweep-dind` up and not restarting, and
       matches the baseline otherwise.
