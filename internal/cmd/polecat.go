@@ -455,8 +455,8 @@ type PolecatListItem struct {
 	Name  string        `json:"name"`
 	State polecat.State `json:"state"`
 	Issue string        `json:"issue,omitempty"`
-	// Agent is the coding agent the live session runs (the session's GT_AGENT,
-	// written at spawn). Empty for a polecat with no live session.
+	// Agent is the coding agent the seat runs, from the seat's intent record
+	// (written at sling time). Empty for a seat whose record names none.
 	Agent string `json:"agent,omitempty"`
 	// MRID and MRStatus are the polecat's merge request from one bulk
 	// rig-wide query: MRID is the MR bead — the agent bead's active_mr when
