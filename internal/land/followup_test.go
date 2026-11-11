@@ -371,6 +371,29 @@ func TestFollowupAcceptanceStatesTheFix(t *testing.T) {
 	}
 }
 
+// TestFollowupFiledAcceptanceFieldIsTheSectionBoxes: the filed bead's acceptance
+// field holds the same box lines as its body's Acceptance section. gt done reads
+// the field, so a field left empty leaves the worker no boxes to tick (gt-ejsl5v).
+func TestFollowupFiledAcceptanceFieldIsTheSectionBoxes(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{
+		minorAt("internal/land/note.go", 230, "swap the nil check"),
+		{ID: "4", Severity: "minor", Path: "internal/land/hook.go", Title: "document the hook"},
+	})
+	f.run()
+	if len(f.fake.created) != 1 {
+		t.Fatalf("filed %d beads, want one", len(f.fake.created))
+	}
+	filed := f.fake.created[0]
+	section := strings.TrimSpace(specdispatch.Sections(filed.Body)["acceptance"])
+	if section == "" {
+		t.Fatalf("the filed body has no acceptance section:\n%s", filed.Body)
+	}
+	if filed.Acceptance != section {
+		t.Errorf("acceptance field =\n%q\nwant the section's boxes\n%q", filed.Acceptance, section)
+	}
+}
+
 // TestFollowupFingerprintIsUnchangedByTheAcceptanceWording: the om-fp label
 // comes from the finding's path and raw title, not from the acceptance box, so
 // a bead filed before the "Finding resolved:" wording and one filed after it are

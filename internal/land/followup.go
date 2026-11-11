@@ -52,10 +52,14 @@ const (
 
 // FollowupSpec is one follow-up bead to file.
 type FollowupSpec struct {
-	Title    string
-	Body     string
-	Labels   []string
-	Priority int
+	Title string
+	Body  string
+	// Acceptance is the box lines of the body's Acceptance section. It is set
+	// on the bead's acceptance field, which gt done reads, so the boxes the
+	// worker ticks are the ones the body lists (gt-ejsl5v).
+	Acceptance string
+	Labels     []string
+	Priority   int
 }
 
 // FollowupBeads is the beads surface the feed reads and writes.
@@ -533,11 +537,13 @@ func followupSpec(w Work, res Result, g followupGroup) FollowupSpec {
 	for _, c := range g.Findings {
 		labels = append(labels, Fingerprint(c.Path, c.Title))
 	}
+	acceptance := followupAcceptance(g.Findings)
 	return FollowupSpec{
-		Title:    followupTitle(w, res, g),
-		Body:     followupBody(w, res, g),
-		Labels:   labels,
-		Priority: followUpPriority,
+		Title:      followupTitle(w, res, g),
+		Body:       followupBody(w, res, g, acceptance),
+		Acceptance: acceptance,
+		Labels:     labels,
+		Priority:   followUpPriority,
 	}
 }
 
@@ -564,7 +570,7 @@ func followupTitle(w Work, res Result, g followupGroup) string {
 // followupBody is the filed bead's description in the shape the spec
 // dispatcher lints: the findings with their location and om's id, and the five
 // sections a bead must carry to be dispatchable at all.
-func followupBody(w Work, res Result, g followupGroup) string {
+func followupBody(w Work, res Result, g followupGroup, acceptance string) string {
 	var b strings.Builder
 	in := ""
 	if g.Package != "" {
@@ -582,10 +588,21 @@ func followupBody(w Work, res Result, g followupGroup) string {
 	b.WriteString("\n## Gate\ngt done presubmit; the landing runs make gate\n")
 	b.WriteString("\n## Size\none worker, one landing\n")
 	b.WriteString("\n## Acceptance\n")
-	for _, item := range acceptanceItems(g.Findings) {
-		fmt.Fprintf(&b, "- [ ] %s\n", item)
-	}
+	b.WriteString(acceptance)
+	b.WriteString("\n")
 	return b.String()
+}
+
+// followupAcceptance is the box lines of a filed bead's Acceptance section, one
+// per item and no trailing newline. The body's section and the bead's
+// acceptance field are both this text, so the two cannot drift apart (gt-ejsl5v).
+func followupAcceptance(findings []FollowupCandidate) string {
+	items := acceptanceItems(findings)
+	lines := make([]string, 0, len(items))
+	for _, item := range items {
+		lines = append(lines, "- [ ] "+item)
+	}
+	return strings.Join(lines, "\n")
 }
 
 // followupRevertNote is the paragraph every generated bead carries in its
