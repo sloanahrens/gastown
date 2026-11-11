@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -461,5 +462,180 @@ func TestSeatEndUsageUnlistedSeamRefuses(t *testing.T) {
 	}
 	if dirExists(t, dirs.PolecatDir) {
 		t.Error("the seat's directories are still there after the removal")
+	}
+}
+
+// seatLedgerLine is one seat-end line as a removal appends it, for a test that
+// stages the ledger a teardown leaves behind.
+type seatLedgerLine struct {
+	Session   string    `json:"session"`
+	Rig       string    `json:"rig"`
+	Polecat   string    `json:"polecat"`
+	CreatedAt time.Time `json:"created_at"`
+	EndedAt   time.Time `json:"ended_at"`
+}
+
+// seatLedgerText is the seat-end ledger holding lines, one JSON object a line.
+func seatLedgerText(t *testing.T, lines ...seatLedgerLine) string {
+	t.Helper()
+	var text string
+	for _, line := range lines {
+		data, err := json.Marshal(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text += string(data) + "\n"
+	}
+	return text
+}
+
+// writeSeatLedgerText stages the town's seat-end ledger with text.
+func writeSeatLedgerText(t *testing.T, town, text string) {
+	t.Helper()
+	path := session.SandboxSeatLedgerPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSeatEndUsageSurvivesTheRecordTeardown: the teardown every path runs removes
+// the seat's sandbox record before the landing's seat end, and the usage record
+// still counts from the seat's start, which the removal handed on in the ledger.
+func TestSeatEndUsageSurvivesTheRecordTeardown(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	submitted := start.Add(30 * time.Minute)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	f.host.d.clock = clockwork.NewFakeClockAt(end)
+	f.writeSeatRecordAt(start)
+	if err := session.RemoveSandboxRecord(f.town, f.host.sessionName(endRig, endPolecat)); err != nil {
+		t.Fatalf("the teardown's removal: %v", err)
+	}
+	if _, ok, _ := session.ReadSandboxRecord(f.town, f.host.sessionName(endRig, endPolecat)); ok {
+		t.Fatal("the seat's record survived the teardown")
+	}
+	seat := filepath.Join(f.town, "transcripts", "new-session.jsonl")
+	writeUsageTranscript(t, seat, start.Add(time.Hour), seatCallLine("new", 100, 50, 20))
+	f.host.seatUsage.list = func(_, _ string) ([]string, error) { return []string{seat}, nil }
+	var calls []usageCall
+	f.host.seatUsage.write = func(usageDir string, rec dashboard.UsageRecord, ids []string) error {
+		calls = append(calls, usageCall{usageDir: usageDir, rec: rec, ids: ids})
+		return nil
+	}
+	var logs bytes.Buffer
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: submitted, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("the finished seat was not removed")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("usage writes = %d, want 1", len(calls))
+	}
+	rec := calls[0].rec
+	if !rec.Start.Equal(start) {
+		t.Errorf("record start = %v, want the seat's start %v", rec.Start, start)
+	}
+	if rec.Seat == nil || *rec.Seat != endPolecat || rec.Bead != endBead {
+		t.Errorf("record names seat %v bead %q, want %q %q", rec.Seat, rec.Bead, endPolecat, endBead)
+	}
+	if rec.Totals.Calls != 1 {
+		t.Errorf("record calls = %d, want the seat's one call", rec.Totals.Calls)
+	}
+	recordPath := usageattrib.WorkRecordPath(calls[0].usageDir, endBead)
+	if want := "wrote its usage record " + recordPath + " for bead " + endBead; !strings.Contains(logs.String(), want) {
+		t.Errorf("log does not name the written record %q:\n%s", want, logs.String())
+	}
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat's directories are still there after the removal")
+	}
+}
+
+// TestSeatEndUsageRefusesAStartItCannotMatch: when the record is gone and the
+// ledger cannot name the seat's start, no usage record is written, the failure
+// is logged once, and the seat is still removed.
+func TestSeatEndUsageRefusesAStartItCannotMatch(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	submitted := start.Add(30 * time.Minute)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	// own is the seat's line: the record that was alive at the submission.
+	own := func(name string, created, ended time.Time) seatLedgerLine {
+		return seatLedgerLine{Session: name, Rig: endRig, Polecat: endPolecat, CreatedAt: created, EndedAt: ended}
+	}
+	tests := []struct {
+		name string
+		// ledger is the seat-end ledger the teardown left, given the seat's session name.
+		ledger    func(t *testing.T, name string) string
+		submitted time.Time
+	}{
+		{
+			name: "a predecessor's line ended before the submission",
+			ledger: func(t *testing.T, name string) string {
+				return seatLedgerText(t, own(name, start.Add(-3*time.Hour), start.Add(-2*time.Hour)))
+			},
+			submitted: submitted,
+		},
+		{
+			name: "two records alive at the submission",
+			ledger: func(t *testing.T, name string) string {
+				return seatLedgerText(t, own(name, start, start.Add(2*time.Hour)), own(name, start.Add(-time.Hour), start.Add(2*time.Hour)))
+			},
+			submitted: submitted,
+		},
+		{
+			name:      "a line that does not parse",
+			ledger:    func(*testing.T, string) string { return "not json\n" },
+			submitted: submitted,
+		},
+		{
+			name: "a submission with no stamp",
+			ledger: func(t *testing.T, name string) string {
+				return seatLedgerText(t, own(name, start, start.Add(2*time.Hour)))
+			},
+			submitted: time.Time{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			dirs := f.seatDirs()
+			f.host.d.clock = clockwork.NewFakeClockAt(end)
+			writeSeatLedgerText(t, f.town, tt.ledger(t, f.host.sessionName(endRig, endPolecat)))
+			seat := filepath.Join(f.town, "transcripts", "new-session.jsonl")
+			writeUsageTranscript(t, seat, start.Add(time.Hour), seatCallLine("new", 100, 50, 20))
+			f.host.seatUsage.list = func(_, _ string) ([]string, error) { return []string{seat}, nil }
+			writes := 0
+			f.host.seatUsage.write = func(string, dashboard.UsageRecord, []string) error {
+				writes++
+				return nil
+			}
+			var logs bytes.Buffer
+			f.host.d.logger = log.New(&logs, "", 0)
+
+			finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: tt.submitted, Landed: true}
+			if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+				t.Fatal("a seat whose start cannot be matched was not removed")
+			}
+			if writes != 0 {
+				t.Errorf("usage writes = %d, want 0", writes)
+			}
+			if got := strings.Count(logs.String(), "usage record is not written"); got != 1 {
+				t.Errorf("usage failures logged %d times, want 1; log:\n%s", got, logs.String())
+			}
+			if dirExists(t, dirs.PolecatDir) {
+				t.Error("the seat's directories are still there after the removal")
+			}
+		})
 	}
 }

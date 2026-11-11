@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -129,6 +130,59 @@ func writeSeatLine(f *os.File, line []byte) error {
 		return err
 	}
 	return f.Close()
+}
+
+// SandboxSeatStartFromLedger is when the sandbox record of session started, for a
+// seat whose record a removal has already deleted. The removal wrote that record's
+// seat-end line, so the line is the start it handed on: the one line of session
+// whose record was alive when the seat submitted at submitted (created at or
+// before it, ended at or after it). A line for an earlier seat of the same name
+// ended before the submission and is left out. ok is false when no line matches,
+// which is a record that never existed. A stamp-less submission, a line that
+// does not parse, and two matches that name different records are errors: the
+// start is unknown, never guessed.
+func SandboxSeatStartFromLedger(townRoot, session string, submitted time.Time) (start time.Time, ok bool, err error) {
+	if submitted.IsZero() {
+		return time.Time{}, false, errors.New("its submission has no stamp, so its record cannot be told from a predecessor's")
+	}
+	data, err := os.ReadFile(SandboxSeatLedgerPath(townRoot))
+	if errors.Is(err, os.ErrNotExist) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("reading the seat-end ledger: %w", err)
+	}
+	var found []time.Time
+	for i, raw := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		var line sandboxSeatEndLine
+		if err := json.Unmarshal(raw, &line); err != nil {
+			return time.Time{}, false, fmt.Errorf("seat-end ledger line %d does not parse: %w", i+1, err)
+		}
+		if line.Session != session || line.CreatedAt.After(submitted) || line.EndedAt.Before(submitted) {
+			continue
+		}
+		found = append(found, line.CreatedAt)
+	}
+	switch {
+	case len(found) == 0:
+		return time.Time{}, false, nil
+	case len(found) > 1 && !allSameTime(found):
+		return time.Time{}, false, fmt.Errorf("seat-end ledger names %d records of %s alive at its submission", len(found), session)
+	}
+	return found[0], true, nil
+}
+
+// allSameTime reports whether every stamp in ts is the same instant.
+func allSameTime(ts []time.Time) bool {
+	for _, t := range ts[1:] {
+		if !t.Equal(ts[0]) {
+			return false
+		}
+	}
+	return true
 }
 
 // sandboxRecordWorkspace is the workspace id a record for rig carries. The

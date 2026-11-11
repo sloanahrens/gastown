@@ -41,28 +41,36 @@ var errNoSeatStart = errors.New("its sandbox record is gone, so its start is unk
 var errSeatUsageUnlisted = errors.New("no transcript lister is wired, so its transcripts are not read")
 
 // seatStartedAt is when the seat started: the creation stamp of its sandbox
-// record. A seat whose record is gone has no start, and the zero time says so.
-// The caller reads it before anything below removes the record.
-func (h *patrolScanHost) seatStartedAt(rig, name string) (time.Time, error) {
-	rec, ok, err := session.ReadSandboxRecord(h.town(), h.sessionName(rig, name))
+// record. When a teardown has already removed that record, the removal left the
+// stamp on the seat-end ledger line it wrote, so the start is read from the line
+// whose record was alive at submitted (gt-kovllv). A seat that has neither has no
+// start, and the zero time says so.
+func (h *patrolScanHost) seatStartedAt(rig, name string, submitted time.Time) (time.Time, error) {
+	sessionName := h.sessionName(rig, name)
+	rec, ok, err := session.ReadSandboxRecord(h.town(), sessionName)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("reading its sandbox record for its start: %w", err)
 	}
-	if !ok {
-		return time.Time{}, nil
+	if ok {
+		return rec.CreatedAt, nil
 	}
-	return rec.CreatedAt, nil
+	start, _, err := session.SandboxSeatStartFromLedger(h.town(), sessionName, submitted)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("reading its start from the seat-end ledger: %w", err)
+	}
+	return start, nil
 }
 
 // writeSeatUsage writes the usage record of the seat rig/name, which ends now
 // and started at start, before its directories are removed. startErr is what
 // seatStartedAt reported. A seat with no transcript written since it started
 // writes nothing. A seat with no lister wired is refused before anything is
-// read. The error is for the caller to log once: the removal goes on either way.
-func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLanding, start time.Time, startErr error) error {
+// read. It returns the path of the record when one was written, and the error for
+// the caller to log once: the removal goes on either way.
+func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLanding, start time.Time, startErr error) (string, error) {
 	list := h.seatUsage.list
 	if list == nil {
-		return errSeatUsageUnlisted
+		return "", errSeatUsageUnlisted
 	}
 	write := h.seatUsage.write
 	if write == nil {
@@ -71,16 +79,16 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 	clone := polecat.SandboxSeatHostDirsFor(filepath.Join(h.town(), rig), rig, name).ClonePath
 	paths, err := list(h.town(), clone)
 	if err != nil {
-		return fmt.Errorf("listing its transcripts: %w", err)
+		return "", fmt.Errorf("listing its transcripts: %w", err)
 	}
 	if len(paths) == 0 {
-		return startErr
+		return "", startErr
 	}
 	if startErr != nil {
-		return startErr
+		return "", startErr
 	}
 	if start.IsZero() {
-		return errNoSeatStart
+		return "", errNoSeatStart
 	}
 
 	var sessions []usageattrib.SessionUsage
@@ -95,11 +103,11 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		}
 	}
 	if len(sessions) == 0 {
-		return errors.Join(readErrs...)
+		return "", errors.Join(readErrs...)
 	}
 	workspace, err := usageattrib.WorkspaceOf(h.town(), landing.BeadID)
 	if err != nil {
-		return errors.Join(err, errors.Join(readErrs...))
+		return "", errors.Join(err, errors.Join(readErrs...))
 	}
 	ids := make([]string, 0, len(sessions))
 	for _, s := range sessions {
@@ -118,7 +126,10 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		Complete: true,
 	}, sessions)
 	usageDir := filepath.Join(constants.TownRuntimePath(h.town()), "usage")
-	return errors.Join(write(usageDir, rec, ids), errors.Join(readErrs...))
+	if err := write(usageDir, rec, ids); err != nil {
+		return "", errors.Join(err, errors.Join(readErrs...))
+	}
+	return usageattrib.WorkRecordPath(usageDir, landing.BeadID), errors.Join(readErrs...)
 }
 
 // seatSession reads one transcript the seat's sessions wrote, with the messages
