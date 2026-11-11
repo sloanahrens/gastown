@@ -111,9 +111,9 @@ TOKEN_NAME=gt-provision
 
 `internal/forgejo` reads the `FORGEJO_TOKEN` line and refuses a file any group
 or other user can read. `TOKEN_NAME` names the token the value belongs to; a
-file minted before that line existed has none. A token never belongs in a rig's committed settings or
-in `settings/config.json`: the config names the role, the client reads the
-file.
+file minted before that line existed has none. A token never belongs in a
+rig's committed settings or in `settings/config.json`: the config names the
+role, the client reads the file.
 
 ## After the bots exist
 
