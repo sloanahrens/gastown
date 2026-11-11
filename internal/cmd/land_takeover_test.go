@@ -275,6 +275,55 @@ func TestLandTakeoverFailsWhenTheForceReasonDoesNotPersist(t *testing.T) {
 	}
 }
 
+// TestLandTakeoverFailsWhenANoteDoesNotPersist: the store reports success and
+// drops a note, so the read-back must refuse. Dropping the READY block (write 1
+// of an unforced takeover) leaves the waiver and the labels in place, so only
+// the block check catches it.
+func TestLandTakeoverFailsWhenANoteDoesNotPersist(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		dropped  int
+		wantText string
+	}{
+		{dropped: 1, wantText: "READY TO LAND block"},
+		{dropped: 2, wantText: "does not read back as taken over"},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("write %d drops its note", tc.dropped), func(t *testing.T) {
+			t.Parallel()
+			bd := newTakeoverBeads(beads.StatusOpen, []string{land.LabelNeedsOverseer})
+			bd.omitNotesOn = tc.dropped
+			remote := &fakeTakeoverRemote{tip: takeoverTip}
+
+			err := takeOverLanding(bd, remote, "origin", takeoverRequestFor(nil), &bytes.Buffer{})
+			if err == nil || !strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("takeover whose write %d dropped its note error = %v, want %q", tc.dropped, err, tc.wantText)
+			}
+		})
+	}
+}
+
+// TestLandTakeoverRejectsAnEarlierBlockForAnotherHead: the landing worker reads
+// the last READY TO LAND block, so a block an earlier attempt left for another
+// head must not stand in for the block this takeover failed to write.
+func TestLandTakeoverRejectsAnEarlierBlockForAnotherHead(t *testing.T) {
+	t.Parallel()
+	bd := newTakeoverBeads(beads.StatusOpen, []string{land.LabelNeedsOverseer})
+	earlier := land.FormatReadyNote(land.Work{
+		Branch: takeoverBranch, Head: "1111111111111111111111111111111111111111", Target: "main", Worker: "nux",
+	})
+	if err := bd.Fake.Update(takeoverBeadID, beads.UpdateOptions{AppendNotes: earlier}); err != nil {
+		t.Fatalf("seeding the earlier block: %v", err)
+	}
+	bd.omitNotesOn = 1
+	remote := &fakeTakeoverRemote{tip: takeoverTip}
+
+	err := takeOverLanding(bd, remote, "origin", takeoverRequestFor(nil), &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "READY TO LAND block") {
+		t.Fatalf("takeover over an earlier block for another head error = %v, want the read-back to name the READY TO LAND block", err)
+	}
+}
+
 // TestLandTakeoverStopsWhenAWriteFails: a failed write ends the takeover at
 // that write, so no later write runs. The label write is last, so a failure
 // before it leaves the bead without the ready label.

@@ -291,6 +291,9 @@ func takeOverLanding(bd landTakeoverBeads, remote landTakeoverRemote, remoteName
 		beads.HasLabel(after, land.LabelRework) || land.HasNeedsPerson(after) {
 		return fmt.Errorf("%s does not read back as taken over after the writes (%s, %s, the takeover labels); re-run the takeover", req.BeadID, land.ReadyNoteMarker, land.OverseerReviewedMarker)
 	}
+	if !takeoverBlockRecorded(after, branch, tip) {
+		return fmt.Errorf("%s does not read back its %s block for %s at %s; re-run the takeover", req.BeadID, land.ReadyNoteMarker, branch, tip)
+	}
 	if forced && !takeoverForceRecorded(after, force) {
 		return fmt.Errorf("%s does not read back as recording the --force reason (%s); re-run the takeover", req.BeadID, landTakeoverForceMarker)
 	}
@@ -312,6 +315,18 @@ func takeOverLanding(bd landTakeoverBeads, remote landTakeoverRemote, remoteName
 // start a note line of its own.
 func landTakeoverForceNote(reason string) string {
 	return landTakeoverForceMarker + ": " + land.NoteField(reason)
+}
+
+// takeoverBlockRecorded reports whether issue's last READY TO LAND block, the
+// one the landing worker reads, names branch at head. The read-back asks it
+// because bd reporting success is not proof the block persisted (GH#1945), and
+// a block an earlier attempt left for another head does not stand in for it.
+func takeoverBlockRecorded(issue *beads.Issue, branch, head string) bool {
+	if issue == nil {
+		return false
+	}
+	ready, ok := land.ParseReadyNote(issue.Notes)
+	return ok && ready.Branch == branch && ready.Head == head
 }
 
 // takeoverForceRecorded reports whether issue's notes carry the force line for
