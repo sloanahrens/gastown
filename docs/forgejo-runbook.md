@@ -106,10 +106,12 @@ role's env file, mode 600, in this shape:
 FORGEJO_URL=http://127.0.0.1:3000
 FORGEJO_USER=bot-landing
 FORGEJO_TOKEN=<the value>
+TOKEN_NAME=gt-provision
 ```
 
 `internal/forgejo` reads the `FORGEJO_TOKEN` line and refuses a file any group
-or other user can read. A token never belongs in a rig's committed settings or
+or other user can read. `TOKEN_NAME` names the token the value belongs to; a
+file minted before that line existed has none. A token never belongs in a rig's committed settings or
 in `settings/config.json`: the config names the role, the client reads the
 file.
 
@@ -361,8 +363,10 @@ replaced, never recovered:
 sudo -u gt-forge gt-approve run forgejo-provision -- --rotate
 ```
 
-Rotation revokes the previous token of the same name and mints a replacement
-into the same file. Nothing else needs the value copied anywhere — every
+Rotation revokes the token the file's `TOKEN_NAME` line names (or, for a file
+without that line, the token named by `--token-name`) and mints a replacement
+into the same file. Any other live token of the role is listed on stderr with
+its name, and is left for an operator to revoke in the web UI. Nothing else needs the value copied anywhere — every
 consumer reads the file — but a process that read it before the rotation holds
 the revoked value until it restarts.
 

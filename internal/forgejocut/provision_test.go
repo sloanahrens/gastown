@@ -288,6 +288,14 @@ func (f *provisionFiles) Stat(path string) (fs.FileInfo, error) {
 	return provisionInfo{mode: f.modes[path]}, nil
 }
 
+func (f *provisionFiles) ReadFile(path string) ([]byte, error) {
+	data, ok := f.written[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	return append([]byte(nil), data...), nil
+}
+
 // provisionInfo is the fs.FileInfo of a token file the in-memory filesystem holds.
 type provisionInfo struct{ mode fs.FileMode }
 

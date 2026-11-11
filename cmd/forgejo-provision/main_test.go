@@ -76,6 +76,8 @@ func TestMainHelpExitsZero(t *testing.T) {
 				"(default: " + forgejoprov.DefaultBotPrefix + ")",
 				"(default: " + forgejoprov.DefaultBotEmailDomain + ")",
 				"(default: " + forgejoprov.DefaultTokenName + ")",
+				"file records it on a TOKEN_NAME line",
+				"revoke the token the file records (its TOKEN_NAME",
 				`(default: "ci / gate (push)" and "om / review")`,
 				"(default: " + forgejoprov.DefaultMainBranch + ")",
 				"(default: " + forgejoprov.DefaultLandBranch + ")",
