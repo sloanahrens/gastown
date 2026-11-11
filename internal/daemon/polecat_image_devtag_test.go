@@ -631,6 +631,79 @@ func TestPolecatImageDevTagReachesRegistryAtSettingScheme(t *testing.T) {
 	}
 }
 
+// ancestryFailsGit is the gastown repository for a test that holds every commit
+// but cannot answer the ancestry question, as a repository that cannot be read
+// does not.
+type ancestryFailsGit struct{ daemonGit }
+
+// HasObject says every commit is held.
+func (ancestryFailsGit) HasObject(string) (bool, error) { return true, nil }
+
+// IsAncestor fails the way a repository that cannot be read does.
+func (ancestryFailsGit) IsAncestor(string, string) (bool, error) {
+	return false, errors.New("git: cannot read the repository")
+}
+
+// assertRefusedDevTag checks one refused copy: no write, one escalation naming the
+// registry and both commits, and dev still holds the tag it held before.
+func assertRefusedDevTag(t *testing.T, reg *devTagRegistry, n *devTagNotifier, before []byte) {
+	t.Helper()
+	if _, puts := reg.requests(); len(puts) != 0 {
+		t.Fatalf("PUTs = %v, want none for a refused copy", puts)
+	}
+	if got := reg.tagBytes("dev"); !bytes.Equal(got, before) {
+		t.Fatalf("dev tag changed although the copy was refused")
+	}
+	got := n.got()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want exactly one", got)
+	}
+	for _, want := range []string{devTagHost, devTagOldCommit, devTagRunningCommit} {
+		if !strings.Contains(got[0].Reason, want) {
+			t.Fatalf("escalation reason %q does not name %s", got[0].Reason, want)
+		}
+	}
+}
+
+// TestPolecatImageDevTagEscalatesUnheldCommit: the ancestry check reads the gastown
+// repository, and a repository that does not hold the running commit or dev's
+// commit cannot say whether dev descends from the running commit. The step files one
+// escalation and leaves dev.
+func TestPolecatImageDevTagEscalatesUnheldCommit(t *testing.T) {
+	t.Parallel()
+	reg := newDevTagRegistry()
+	reg.addImage("dev", devTagOldCommit)
+	reg.addImage(devTagRevision, devTagRunningCommit)
+	before := reg.tagBytes("dev")
+	d, n, _ := devTagDaemon(t, reg)
+	d.polecatDevTagSeams.ancestor = nil
+	useGitfake(t, d)
+
+	d.publishPolecatDevTag()
+
+	assertRefusedDevTag(t, reg, n, before)
+}
+
+// TestPolecatImageDevTagEscalatesUnreadableRepository: a repository that holds
+// the commits but cannot answer whether one descends from the other files one
+// escalation and leaves dev.
+func TestPolecatImageDevTagEscalatesUnreadableRepository(t *testing.T) {
+	t.Parallel()
+	reg := newDevTagRegistry()
+	reg.addImage("dev", devTagOldCommit)
+	reg.addImage(devTagRevision, devTagRunningCommit)
+	before := reg.tagBytes("dev")
+	d, n, _ := devTagDaemon(t, reg)
+	d.polecatDevTagSeams.ancestor = nil
+	useGitfake(t, d)
+	open := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit { return ancestryFailsGit{open(dir)} }
+
+	d.publishPolecatDevTag()
+
+	assertRefusedDevTag(t, reg, n, before)
+}
+
 // containsString reports whether want is one of values.
 func containsString(values []string, want string) bool {
 	for _, v := range values {
