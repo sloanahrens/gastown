@@ -37,7 +37,8 @@ const maintenanceCatchUpGCAge = 8 * 24 * time.Hour
 // a landing gate; a working polecat — or a soft hold the next tick reruns — does
 // not block it, or a town busy with its own ticks would never catch up. It runs
 // on the gc cycle's goroutine and flag, so it cannot overlap a window run.
-func (d *Daemon) maybeCatchUpBackup(now time.Time) {
+// external is the tick's one gcExternal answer.
+func (d *Daemon) maybeCatchUpBackup(now time.Time, external bool) {
 	if d.maintenanceGCRunning.Load() {
 		return
 	}
@@ -65,7 +66,17 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 	// The backup runs whether the server is local or external: the server writes
 	// the copy into the backup root, and backupDatabases lists the databases
 	// from wherever the server's data is.
-	databases, err := d.backupDatabases()
+	databases, err := d.backupDatabases(external)
+	if external {
+		// An external server that cannot list, or serves none, fails the
+		// catch-up and escalates. The throttle is set as catchUpUnknown sets it,
+		// so the escalation repeats once per retry gap, not once per tick.
+		if err = externalDatabasesError(databases, err); err != nil {
+			d.catchUpAttemptAt.Store(now.UnixNano())
+			d.maintenanceBackupFailed(err, "")
+			return
+		}
+	}
 	if err != nil || len(databases) == 0 {
 		d.logger.Printf("scheduled_maintenance: catch-up: no databases discovered (err=%v)", err)
 		return
@@ -186,7 +197,7 @@ func catchUpBackedUp(now time.Time, root string, due []string) (ready, unbacked 
 // Nothing here counts toward the skipped-window streak and nothing sets the
 // cycle-completion time the window folds into lastMaintenanceRun: the next
 // window still takes its own backup and runs its own gc.
-func (d *Daemon) maybeCatchUpGC(now time.Time) {
+func (d *Daemon) maybeCatchUpGC(now time.Time, external bool) {
 	if d.maintenanceGCRunning.Load() {
 		// A window run, a catch-up backup or a catch-up gc holds the cycle.
 		return
@@ -221,7 +232,7 @@ func (d *Daemon) maybeCatchUpGC(now time.Time) {
 		// runs on its own goroutine, so the gc waits for a later tick.
 		return
 	}
-	if external, _ := s.gcExternal(d); external {
+	if external {
 		return
 	}
 	dataDir := d.maintenanceDataDir()

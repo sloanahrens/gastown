@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
+	"github.com/steveyegge/gastown/internal/estop"
 )
 
 // The nightly backup runs through the same fakes as the gc (withGCFakes):
@@ -287,9 +288,37 @@ func TestMaintenanceBackupRefusesAnUnsharedRoot(t *testing.T) {
 	}
 }
 
+// backupVisible is a directory check in this daemon's own view of the root: the
+// copy is visible when a directory sits at its path. A missing copy, or a plain
+// file where the copy belongs, is refused and names the root.
+func TestMaintenanceBackupVisibleNeedsADirectory(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	partial := filepath.Join(root, "2026-10-01.partial")
+	visible := filepath.Join(partial, "gt")
+	if err := os.MkdirAll(visible, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	asFile := filepath.Join(partial, "hq")
+	if err := os.WriteFile(asFile, []byte("not a copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(partial, "missing")
+
+	if err := backupVisible(root, visible); err != nil {
+		t.Errorf("visible copy refused: %v", err)
+	}
+	for _, dest := range []string{missing, asFile} {
+		err := backupVisible(root, dest)
+		if err == nil || !strings.Contains(err.Error(), root) || !strings.Contains(err.Error(), "not shared with the Dolt server") {
+			t.Errorf("backupVisible(%s) = %v, want a refusal naming the root %s", dest, err, root)
+		}
+	}
+}
+
 // The databases of an external server come from the server; a local server's
 // come from its data dir. The backup root is the same either way.
-func TestBackupDatabasesFollowsTheServer(t *testing.T) {
+func TestMaintenanceBackupDatabasesFollowsTheServer(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name            string
@@ -307,9 +336,8 @@ func TestBackupDatabasesFollowsTheServer(t *testing.T) {
 			f := withGCFakes(t, d)
 			f.sizes = map[string]gcMeasure{"hq": {1 * mib, 0}}
 			f.serverDBs = []string{"gt"}
-			d.maint.gcExternal = func(*Daemon) (bool, string) { return tc.external, "Dolt server is externally managed" }
 
-			got, err := d.backupDatabases()
+			got, err := d.backupDatabases(tc.external)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -463,7 +491,7 @@ func TestScheduledMaintenanceExternalServerDeferredBackupKeepsWindowOpen(t *test
 // its place.
 func TestScheduledMaintenanceExternalServerListFailureKeepsWindowOpen(t *testing.T) {
 	t.Parallel()
-	d, logs := gcTestDaemon(t)
+	d, _ := gcTestDaemon(t)
 	f := withGCFakes(t, d)
 	f.sizes = map[string]gcMeasure{"hq": {1 * mib, 0}}
 	f.serverErr = errors.New("dolt is not answering")
@@ -478,8 +506,96 @@ func TestScheduledMaintenanceExternalServerListFailureKeepsWindowOpen(t *testing
 	if !d.lastMaintenanceRun.IsZero() {
 		t.Errorf("window consumed with no backup: lastMaintenanceRun = %v", d.lastMaintenanceRun)
 	}
-	if !strings.Contains(logs.String(), "listing databases: dolt is not answering") {
-		t.Errorf("list failure not logged:\n%s", logs.String())
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "listing the databases the Dolt server serves: dolt is not answering") {
+		t.Errorf("escalations = %v, want one naming the list failure", f.escalations)
+	}
+}
+
+// An external server that serves no database fails the night and escalates; the
+// window stays open and the data dir is not read in its place.
+func TestScheduledMaintenanceExternalServerWithNoDatabasesFailsAndKeepsWindowOpen(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {1 * mib, 0}}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	d.patrolConfig = gcModeConfig()
+
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 0 || len(f.gcCalls) != 0 {
+		t.Errorf("backup calls %v, gc calls %v; want neither for a server with no databases", f.backupCalls, f.gcCalls)
+	}
+	if !d.lastMaintenanceRun.IsZero() {
+		t.Errorf("window consumed by a failed backup: lastMaintenanceRun = %v", d.lastMaintenanceRun)
+	}
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "the Dolt server serves no databases") {
+		t.Errorf("escalations = %v, want one naming the empty server", f.escalations)
+	}
+	if !strings.Contains(logs.String(), "nightly backup FAILED") {
+		t.Errorf("failed backup not logged:\n%s", logs.String())
+	}
+}
+
+// gcExternal is asked once per tick and that one answer serves every branch:
+// an in-window tick takes its backup from the server, and an out-of-window
+// tick's catch-ups read the same answer without asking again.
+func TestScheduledMaintenanceProbesExternalServerOncePerTick(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.serverDBs = []string{"hq"}
+	probes := 0
+	d.maint.gcExternal = func(*Daemon) (bool, string) {
+		probes++
+		return true, "Dolt server is externally managed"
+	}
+	d.patrolConfig = gcModeConfig()
+
+	d.runScheduledMaintenance()
+	if probes != 1 {
+		t.Errorf("in-window tick probed gcExternal %d times, want 1", probes)
+	}
+	if strings.Join(f.backupCalls, ",") != "hq" {
+		t.Errorf("in-window backup calls = %v, want hq", f.backupCalls)
+	}
+
+	probes = 0
+	d.maint.now = func() time.Time { return gcTestNow.Add(5 * time.Hour) }
+	d.runScheduledMaintenance()
+	if probes != 1 {
+		t.Errorf("out-of-window tick probed gcExternal %d times, want 1", probes)
+	}
+}
+
+// A standby holds the window's gc, not its backup: an external server's night is
+// taken from the server's list, and the window is consumed only once it ends.
+func TestScheduledMaintenanceStandbyTakesExternalBackupWithoutGC(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.serverDBs = []string{"gt"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	d.patrolConfig = gcModeConfig()
+	if err := estop.Activate(d.config.TownRoot, "test", "standby for the test"); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runScheduledMaintenance()
+
+	if strings.Join(f.backupCalls, ",") != "gt" || len(f.gcCalls) != 0 {
+		t.Errorf("backup calls %v, gc calls %v; want gt from the server and no gc", f.backupCalls, f.gcCalls)
+	}
+	if !d.lastMaintenanceRun.IsZero() {
+		t.Errorf("window consumed before the backup was read back: lastMaintenanceRun = %v", d.lastMaintenanceRun)
+	}
+
+	d.runScheduledMaintenance()
+	if strings.Join(f.backupCalls, ",") != "gt" || len(f.gcCalls) != 0 {
+		t.Errorf("second tick: backup calls %v, gc calls %v; want the one backup and no gc", f.backupCalls, f.gcCalls)
+	}
+	if !d.lastMaintenanceRun.Equal(gcTestNow) {
+		t.Errorf("lastMaintenanceRun = %v, want the window consumed at %v", d.lastMaintenanceRun, gcTestNow)
 	}
 }
 

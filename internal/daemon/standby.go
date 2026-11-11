@@ -36,18 +36,29 @@ func (d *Daemon) bootReason() string {
 	return d.bootGate.reason()
 }
 
-// startBackupOnly takes the window's backup, and no gc. It runs while a standby
+// startStandbyBackup takes the window's backup, and no gc, while a standby
 // holds the window's cycle (gt-6mlik.6), and while an external Dolt server keeps
-// the gc from running on this host. source names the caller in the log.
+// the gc from running on this host. external is the tick's one gcExternal
+// answer, which picks the database list. source names the caller in the log.
 // maintenanceBackup is idempotent per day, and a deferral retries on the next
 // tick. Any other end consumes the window through maintenanceGCFinishedAt, as
 // a finished cycle does, so a failed backup escalates once per window rather
-// than once per tick.
-func (d *Daemon) startBackupOnly(window, source string) {
+// than once per tick. A list the external server cannot give, or an empty one,
+// ends the backup failed and leaves the window open.
+func (d *Daemon) startStandbyBackup(window, source string, external bool) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		return
 	}
-	databases, err := d.backupDatabases()
+	databases, err := d.backupDatabases(external)
+	if external {
+		// The external server's list is the whole backup's database set, so a
+		// failed or empty one fails the night and escalates.
+		if err = externalDatabasesError(databases, err); err != nil {
+			d.maintenanceGCRunning.Store(false)
+			d.maintenanceBackupFailed(err, "")
+			return
+		}
+	}
 	if err != nil {
 		d.maintenanceGCRunning.Store(false)
 		d.logger.Printf("scheduled_maintenance: %s for window %s skipped: listing databases: %v", source, window, err)

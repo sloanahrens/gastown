@@ -124,21 +124,39 @@ func (d *Daemon) maintenanceBackup(databases []string) maintenanceGCResult {
 // daemon cannot read it. The partial night is then not kept: its manifest would
 // mark a night taken that this host cannot restore from.
 func backupVisible(root, dest string) error {
-	if _, err := os.Stat(dest); err != nil {
+	fi, err := os.Stat(dest)
+	if err != nil {
 		return fmt.Errorf("backup root %s is not shared with the Dolt server: sync-url wrote no %s in this daemon's view: %w", root, dest, err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("backup root %s is not shared with the Dolt server: %s is not a directory in this daemon's view", root, dest)
 	}
 	return nil
 }
 
-// backupDatabases lists the databases a backup covers. An external server's
-// data dir is not this host's, so its list comes from the server; a local
-// server's list is discovered in the data dir.
-func (d *Daemon) backupDatabases() ([]string, error) {
+// backupDatabases lists the databases a backup covers. external is the tick's
+// one gcExternal answer: an external server's data dir is not this host's, so
+// its list comes from the server; a local server's list is discovered in the
+// data dir.
+func (d *Daemon) backupDatabases(external bool) ([]string, error) {
 	s := d.maintenance()
-	if external, _ := s.gcExternal(d); external {
+	if external {
 		return s.serverDatabases(d)
 	}
 	return s.gcDatabases(d.maintenanceDataDir())
+}
+
+// externalDatabasesError is the failure an external server's database list ends
+// a backup with: the list's own error, or a server that serves no database. It
+// is nil when the list names at least one.
+func externalDatabasesError(databases []string, err error) error {
+	if err != nil {
+		return fmt.Errorf("listing the databases the Dolt server serves: %w", err)
+	}
+	if len(databases) == 0 {
+		return errors.New("the Dolt server serves no databases")
+	}
+	return nil
 }
 
 // maintenanceServerDatabases lists the databases the Dolt server serves through
