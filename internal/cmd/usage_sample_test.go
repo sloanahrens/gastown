@@ -28,7 +28,18 @@ func (s *usageSampleStore) NewestClaudePlan(context.Context) (*usage.ClaudePlan,
 	return &p, nil
 }
 
-func (s *usageSampleStore) WriteClaudePlan(_ context.Context, p usage.ClaudePlan) error {
+func (s *usageSampleStore) WriteClaudePlanAfter(ctx context.Context, p usage.ClaudePlan, prev *usage.ClaudePlan) error {
+	newest, err := s.NewestClaudePlan(ctx)
+	if err != nil {
+		return err
+	}
+	switch {
+	case newest == nil && prev == nil:
+	case newest == nil || prev == nil:
+		return usage.ErrNewestChanged
+	case !newest.At.Equal(prev.At) || !newest.SameValues(*prev):
+		return usage.ErrNewestChanged
+	}
 	s.rows = append(s.rows, p)
 	return nil
 }

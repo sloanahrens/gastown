@@ -14,9 +14,9 @@ import (
 )
 
 // DedupeWindow is how long a reading with unchanged values is held back. The
-// status line writes a row when a reading moves, and at most one row per
-// window when it does not, so the series stays a record of changes plus a
-// heartbeat.
+// gt usage sample command, which the status-line hook runs, writes a row when a
+// reading moves, and at most one row per window when it does not, so the series
+// stays a record of changes plus a heartbeat.
 const DedupeWindow = 10 * time.Minute
 
 // ClaudePlan is one claude_plan cost sample: the two limit windows the
@@ -38,14 +38,22 @@ func (p ClaudePlan) SameValues(o ClaudePlan) bool {
 		p.SevenDayResetsAt.Equal(o.SevenDayResetsAt)
 }
 
+// ErrNewestChanged is returned by WriteClaudePlanAfter when the newest row is
+// no longer the one the caller read: another writer appended first.
+var ErrNewestChanged = errors.New("newest claude_plan row changed since it was read")
+
 // Store reads and writes claude_plan rows. The production store is the beads
 // cost_samples table; a test supplies an in-memory one.
 type Store interface {
 	// NewestClaudePlan returns the newest claude_plan row, or nil when the
 	// table holds none. A read that fails is an error, never "no row".
 	NewestClaudePlan(ctx context.Context) (*ClaudePlan, error)
-	// WriteClaudePlan appends one claude_plan row.
-	WriteClaudePlan(ctx context.Context, p ClaudePlan) error
+	// WriteClaudePlanAfter appends p only while the newest row still matches
+	// prev (nil when the table held no row when the caller read it). A newest
+	// row that differs is ErrNewestChanged and nothing is written. The store
+	// must make the comparison and the append one step; a store that checks
+	// and then writes in two steps reopens the race Record guards against.
+	WriteClaudePlanAfter(ctx context.Context, p ClaudePlan, prev *ClaudePlan) error
 }
 
 // statusLine is the part of the status-line payload this package reads. Only
@@ -139,18 +147,30 @@ func ShouldWrite(newest *ClaudePlan, next ClaudePlan) bool {
 // so the command can name the missing piece instead of failing silently.
 var ErrNoStore = errors.New("no cost_samples store is wired")
 
+// recordAttempts bounds how often Record re-reads the newest row after another
+// writer appended first. Past it Record returns an error instead of retrying.
+const recordAttempts = 3
+
 // Record appends next to the store unless ShouldWrite says the newest row
-// already covers it. It reports whether a row was written.
+// already covers it. It reports whether a row was written. When another writer
+// appends between the read and the write, Record reads again and decides
+// against the row that writer left.
 func Record(ctx context.Context, store Store, next ClaudePlan) (bool, error) {
-	newest, err := store.NewestClaudePlan(ctx)
-	if err != nil {
-		return false, fmt.Errorf("read newest claude_plan row: %w", err)
+	for attempt := 0; attempt < recordAttempts; attempt++ {
+		newest, err := store.NewestClaudePlan(ctx)
+		if err != nil {
+			return false, fmt.Errorf("read newest claude_plan row: %w", err)
+		}
+		if !ShouldWrite(newest, next) {
+			return false, nil
+		}
+		err = store.WriteClaudePlanAfter(ctx, next, newest)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, ErrNewestChanged) {
+			return false, fmt.Errorf("write claude_plan row: %w", err)
+		}
 	}
-	if !ShouldWrite(newest, next) {
-		return false, nil
-	}
-	if err := store.WriteClaudePlan(ctx, next); err != nil {
-		return false, fmt.Errorf("write claude_plan row: %w", err)
-	}
-	return true, nil
+	return false, fmt.Errorf("write claude_plan row: newest row changed on each of %d reads", recordAttempts)
 }

@@ -10,30 +10,52 @@ import (
 var t0 = time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
 
 // memStore is an in-memory Store. Its failures are switches, so a test drives
-// a read or write error without any other behaviour changing.
+// a read or write error without any other behaviour changing. beforeWrite runs
+// at the start of every WriteClaudePlanAfter, standing in for another writer
+// that appends between this caller's read and its write.
 type memStore struct {
-	rows     []ClaudePlan
-	readErr  error
-	writeErr error
+	rows        []ClaudePlan
+	readErr     error
+	writeErr    error
+	beforeWrite func(m *memStore)
 }
 
 func (m *memStore) NewestClaudePlan(context.Context) (*ClaudePlan, error) {
 	if m.readErr != nil {
 		return nil, m.readErr
 	}
-	if len(m.rows) == 0 {
-		return nil, nil
-	}
-	p := m.rows[len(m.rows)-1]
-	return &p, nil
+	return m.newest(), nil
 }
 
-func (m *memStore) WriteClaudePlan(_ context.Context, p ClaudePlan) error {
+func (m *memStore) newest() *ClaudePlan {
+	if len(m.rows) == 0 {
+		return nil
+	}
+	p := m.rows[len(m.rows)-1]
+	return &p
+}
+
+func (m *memStore) WriteClaudePlanAfter(_ context.Context, p ClaudePlan, prev *ClaudePlan) error {
 	if m.writeErr != nil {
 		return m.writeErr
 	}
+	if m.beforeWrite != nil {
+		m.beforeWrite(m)
+	}
+	if !sameRow(m.newest(), prev) {
+		return ErrNewestChanged
+	}
 	m.rows = append(m.rows, p)
 	return nil
+}
+
+// sameRow reports whether two newest-row reads name the same row: both absent,
+// or both present with the same sample time and values.
+func sameRow(a, b *ClaudePlan) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.At.Equal(b.At) && a.SameValues(*b)
 }
 
 func plan(at time.Time, five, seven float64) ClaudePlan {
@@ -208,5 +230,45 @@ func TestRecordReportsWriteFailure(t *testing.T) {
 	}
 	if wrote {
 		t.Error("wrote = true alongside a write error")
+	}
+}
+
+func TestRecordDoesNotDuplicateWhenAnotherWriterAppendsFirst(t *testing.T) {
+	t.Parallel()
+	// The competing sample lands between our read of the empty table and our
+	// write, with the same values a minute before our reading.
+	store := &memStore{beforeWrite: func(m *memStore) {
+		if len(m.rows) == 0 {
+			m.rows = append(m.rows, plan(t0, 40, 25))
+		}
+	}}
+	wrote, err := Record(context.Background(), store, plan(t0.Add(time.Minute), 40, 25))
+	if err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if wrote {
+		t.Error("wrote = true, want no row: the competing row already covers this reading")
+	}
+	if len(store.rows) != 1 {
+		t.Errorf("rows = %d, want 1 (the competing writer's row only)", len(store.rows))
+	}
+}
+
+func TestRecordRefusesWhenNewestKeepsChanging(t *testing.T) {
+	t.Parallel()
+	competing := 0
+	store := &memStore{beforeWrite: func(m *memStore) {
+		competing++
+		m.rows = append(m.rows, plan(t0.Add(time.Duration(competing)*time.Hour), float64(competing), 25))
+	}}
+	wrote, err := Record(context.Background(), store, plan(t0, 40, 25))
+	if err == nil {
+		t.Fatal("err = nil, want a refusal after the newest row changed on every read")
+	}
+	if wrote {
+		t.Error("wrote = true alongside a refusal")
+	}
+	if len(store.rows) != competing {
+		t.Errorf("rows = %d, want only the %d competing rows: Record must not append its own", len(store.rows), competing)
 	}
 }
