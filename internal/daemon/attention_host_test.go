@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -12,7 +11,6 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
-	"github.com/steveyegge/gastown/internal/hostprobe"
 )
 
 // fakeHost is a hostProbes whose answers a test sets. The zero value is not
@@ -30,28 +28,9 @@ type fakeHost struct {
 	nodeCalls           int
 	memFree             float64
 	memErr              error
-	containers          []string
-	containersErr       error
 	forgejoErr          error
 	diskCalls, memCalls int
-	containerCalls      int
 	forgejoCalls        int
-	// parked and parkedErr are the hm rig's park state; the zero value is a
-	// live rig.
-	parked    bool
-	parkedErr error
-}
-
-// allStackContainers is every container a live hm rig requires.
-func allStackContainers() []string {
-	return append(append([]string(nil), hostStackContainers...), hostHMContainer)
-}
-
-func (f *fakeHost) RigParked(rig string) (bool, error) {
-	if rig != hostHMRig {
-		return false, errors.New("unexpected rig " + rig)
-	}
-	return f.parked, f.parkedErr
 }
 
 // noForgejo is a town that runs no Forgejo: the production health probe built
@@ -68,10 +47,9 @@ func noNodeDisk(context.Context) ([]hostNodeRead, error) {
 // healthyHost is a host no rule fires on.
 func healthyHost() *fakeHost {
 	return &fakeHost{
-		disk:       hostDisk{UsedPct: 40, FreeGB: 300},
-		node:       hostNodeDisk{Node: "colima-gt-control", Disk: hostDisk{UsedPct: 40, FreeGB: 300}},
-		memFree:    60,
-		containers: allStackContainers(),
+		disk:    hostDisk{UsedPct: 40, FreeGB: 300},
+		node:    hostNodeDisk{Node: "colima-gt-control", Disk: hostDisk{UsedPct: 40, FreeGB: 300}},
+		memFree: 60,
 	}
 }
 
@@ -99,11 +77,6 @@ func (f *fakeHost) NodeDisks(context.Context) ([]hostNodeRead, error) {
 func (f *fakeHost) MemFreePct(context.Context) (float64, error) {
 	f.memCalls++
 	return f.memFree, f.memErr
-}
-
-func (f *fakeHost) Containers(context.Context) ([]string, error) {
-	f.containerCalls++
-	return f.containers, f.containersErr
 }
 
 func (f *fakeHost) ForgejoHealthy(context.Context) error {
@@ -229,166 +202,6 @@ func TestAttentionHostMem(t *testing.T) {
 	}
 }
 
-// The stack is down when any of the containers the town cannot run without is
-// not running, and the event names which.
-func TestHostStackRequiresTheRealContainers(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
-	without := func(drop ...string) []string {
-		var out []string
-		for _, n := range allStackContainers() {
-			keep := true
-			for _, d := range drop {
-				if n == d {
-					keep = false
-				}
-			}
-			if keep {
-				out = append(out, n)
-			}
-		}
-		return out
-	}
-	tests := []struct {
-		name    string
-		running []string
-		missing string // substring of the summary, "" for silence
-	}{
-		{"all running", without(), ""},
-		{"extra containers are fine", append(without(), "unrelated-1"), ""},
-		{"db down", without("forgejo-db-1"), "forgejo-db-1"},
-		{"dolt down", without(hostprobe.DockerDiskContainer), hostprobe.DockerDiskContainer},
-		{"hm-postgres down", without("hm-postgres"), "hm-postgres"},
-		{"two down", without(hostprobe.DockerDiskContainer, "hm-postgres"), "2 of 3"},
-		{"nothing running", nil, "3 of 3"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			f := newAttentionFixture(t, now)
-			h := healthyHost()
-			h.containers = tt.running
-			f.src.host = h
-			items := f.collect(t, f.src.collectHostDocker)
-			if tt.missing == "" {
-				if len(items) != 0 {
-					t.Fatalf("items = %+v, want none", items)
-				}
-				return
-			}
-			if len(items) != 1 {
-				t.Fatalf("items = %+v, want one", items)
-			}
-			it := items[0]
-			if it.Key != hostRuleDockerDown || it.Kind != attention.KindHostDocker || it.Severity != attention.SeverityHigh {
-				t.Errorf("item = %+v", it)
-			}
-			if !strings.Contains(it.Summary, tt.missing) {
-				t.Errorf("summary = %q, want it to contain %q", it.Summary, tt.missing)
-			}
-		})
-	}
-}
-
-// The three containers the retired Docker Forgejo stack ran appear in no item
-// and in no production string: Forgejo and its runner are watched by the
-// health endpoint now, and forgejo-docker-in-docker-1 is the operator's to
-// retire.
-func TestHostStackNeverNamesTheRetiredContainers(t *testing.T) {
-	t.Parallel()
-	retired := []string{"forgejo-forgejo-1", "forgejo-runner-daemon-1", "forgejo-docker-in-docker-1"}
-
-	f := newAttentionFixture(t, time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC))
-	h := healthyHost()
-	h.containers = nil
-	f.src.host = h
-	items := f.collect(t, f.src.collectHostDocker)
-	if len(items) != 1 {
-		t.Fatalf("items = %+v, want the one stack-down item", items)
-	}
-	want := fmt.Sprintf("3 of 3 stack containers not running: forgejo-db-1, %s, hm-postgres", hostprobe.DockerDiskContainer)
-	if got := items[0].Summary; got != want {
-		t.Errorf("summary = %q, want %q", got, want)
-	}
-	for _, name := range retired {
-		for _, it := range items {
-			if strings.Contains(it.Summary, name) || strings.Contains(it.Key, name) {
-				t.Errorf("item %+v names the retired container %s", it, name)
-			}
-		}
-	}
-}
-
-// hm-postgres is required only while the hm rig is live. A parked rig, or a
-// park state that cannot be read, drops it from the required set; the two
-// containers the town cannot run without stay required in every case.
-func TestHostHMContainerStaysConditionalOnTheRig(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
-	stackOnly := func(drop ...string) []string {
-		var out []string
-		for _, n := range hostStackContainers {
-			dropped := false
-			for _, d := range drop {
-				dropped = dropped || n == d
-			}
-			if !dropped {
-				out = append(out, n)
-			}
-		}
-		return out
-	}
-	unreadable := errors.New("rig hm is not registered")
-	tests := []struct {
-		name      string
-		parked    bool
-		parkedErr error
-		running   []string
-		summary   string // exact summary, "" for silence
-	}{
-		{"parked, hm-postgres off, stack up", true, nil, stackOnly(), ""},
-		{"parked, hm-postgres on, stack up", true, nil, allStackContainers(), ""},
-		{"parked, forgejo-db-1 missing", true, nil, stackOnly("forgejo-db-1"),
-			"1 of 2 stack containers not running: forgejo-db-1"},
-		{"parked, both stack containers missing, hm-postgres off", true, nil, stackOnly("forgejo-db-1", hostprobe.DockerDiskContainer),
-			"2 of 2 stack containers not running: forgejo-db-1, " + hostprobe.DockerDiskContainer},
-		{"live, hm-postgres missing", false, nil, stackOnly(),
-			"1 of 3 stack containers not running: hm-postgres"},
-		{"live, all up", false, nil, allStackContainers(), ""},
-		{"live, forgejo-db-1 and hm-postgres missing", false, nil, stackOnly("forgejo-db-1"),
-			"2 of 3 stack containers not running: forgejo-db-1, hm-postgres"},
-		{"unreadable park state treats hm-postgres as not required", false, unreadable, stackOnly(), ""},
-		{"unreadable park state still requires the stack", false, unreadable, stackOnly(hostprobe.DockerDiskContainer),
-			"1 of 2 stack containers not running: " + hostprobe.DockerDiskContainer},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			f := newAttentionFixture(t, now)
-			h := healthyHost()
-			h.parked, h.parkedErr, h.containers = tt.parked, tt.parkedErr, tt.running
-			f.src.host = h
-			items := f.collect(t, f.src.collectHostDocker)
-			if tt.summary == "" {
-				if len(items) != 0 {
-					t.Fatalf("items = %+v, want none", items)
-				}
-				return
-			}
-			if len(items) != 1 {
-				t.Fatalf("items = %+v, want one", items)
-			}
-			it := items[0]
-			if it.Key != hostRuleDockerDown || it.Kind != attention.KindHostDocker || it.Severity != attention.SeverityHigh {
-				t.Errorf("item = %+v", it)
-			}
-			if it.Summary != tt.summary {
-				t.Errorf("summary = %q, want %q", it.Summary, tt.summary)
-			}
-		})
-	}
-}
-
 // A healthy host raises nothing and a tick on it writes no host events.
 func TestAttentionHostHealthyProducesNoEvents(t *testing.T) {
 	t.Parallel()
@@ -416,7 +229,6 @@ func TestAttentionHostFailingProbeIsNamedAndIsolated(t *testing.T) {
 	}{
 		{"disk", func(h *fakeHost) { h.diskErr = errors.New("statfs /town: no such file") }, hostProbeDisk},
 		{"memory", func(h *fakeHost) { h.memErr = errors.New("exec: \"memory_pressure\": not found") }, hostProbeMem},
-		{"docker", func(h *fakeHost) { h.containersErr = errors.New("Cannot connect to the Docker daemon\nIs it running?") }, hostProbeDocker},
 		{"forgejo", func(h *fakeHost) {
 			h.forgejoErr = errors.New("forgejo health https://forgejo.example/api/healthz: no route to host")
 		}, hostProbeForgejo},
@@ -425,13 +237,12 @@ func TestAttentionHostFailingProbeIsNamedAndIsolated(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			f := newAttentionFixture(t, now)
-			// The three probes with a rule to fire each have it firing, so the
+			// The two probes with a rule to fire each have it firing, so the
 			// test can see they were not hidden by the failure. The Forgejo
 			// probe has none of its own: a healthy instance raises nothing.
 			h := &fakeHost{
-				disk:       hostDisk{UsedPct: 95, FreeGB: 3},
-				memFree:    5,
-				containers: nil,
+				disk:    hostDisk{UsedPct: 95, FreeGB: 3},
+				memFree: 5,
 			}
 			tt.break_(h)
 			f.src.host = h
@@ -456,7 +267,7 @@ func TestAttentionHostFailingProbeIsNamedAndIsolated(t *testing.T) {
 			if failed != 1 {
 				t.Errorf("host items = %v, want exactly one failed-probe item", hostKeys(st))
 			}
-			rules := map[string]string{hostProbeDisk: hostRuleDiskCrit, hostProbeMem: hostRuleMemLow, hostProbeDocker: hostRuleDockerDown}
+			rules := map[string]string{hostProbeDisk: hostRuleDiskCrit, hostProbeMem: hostRuleMemLow}
 			for probe, rule := range rules {
 				_, ok := attention.Find(st, rule)
 				if probe == tt.probe && ok {
@@ -477,23 +288,23 @@ func TestAttentionHostFailedProbeKeepsTheRuleItHeld(t *testing.T) {
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	f := newAttentionFixture(t, now)
 	h := healthyHost()
-	h.containers = nil
+	h.memFree = 5
 	f.src.host = h
 	st := f.tick(t, now)
-	first := itemByKey(t, st, hostRuleDockerDown)
+	first := itemByKey(t, st, hostRuleMemLow)
 
-	h.containers, h.containersErr = nil, errors.New("docker.sock: connection refused")
+	h.memFree, h.memErr = 0, errors.New("exec: \"memory_pressure\": not found")
 	st = f.tick(t, now.Add(time.Minute))
-	kept := itemByKey(t, st, hostRuleDockerDown)
+	kept := itemByKey(t, st, hostRuleMemLow)
 	if !kept.FirstSeen.Equal(first.FirstSeen) {
 		t.Errorf("FirstSeen = %v, want the original %v", kept.FirstSeen, first.FirstSeen)
 	}
-	itemByKey(t, st, hostProbeFailedPrefix+hostProbeDocker)
+	itemByKey(t, st, hostProbeFailedPrefix+hostProbeMem)
 
-	h.containers, h.containersErr = allStackContainers(), nil
+	h.memFree, h.memErr = 60, nil
 	st = f.tick(t, now.Add(2*time.Minute))
 	if keys := hostKeys(st); len(keys) != 0 {
-		t.Errorf("host items = %v, want both cleared once docker answers healthy", keys)
+		t.Errorf("host items = %v, want both cleared once memory reads healthy", keys)
 	}
 }
 
@@ -504,9 +315,8 @@ func TestAttentionHostCollectorsAreRegistered(t *testing.T) {
 	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
 	town := t.TempDir()
 	h := &fakeHost{
-		disk:       hostDisk{UsedPct: 82, FreeGB: 80},
-		memFree:    9,
-		containers: []string{"forgejo-db-1"},
+		disk:    hostDisk{UsedPct: 82, FreeGB: 80},
+		memFree: 9,
 	}
 	logs := &bytes.Buffer{}
 	d := &Daemon{
@@ -524,7 +334,7 @@ func TestAttentionHostCollectorsAreRegistered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, key := range []string{hostRuleDiskWarn, hostRuleMemLow, hostRuleDockerDown} {
+	for _, key := range []string{hostRuleDiskWarn, hostRuleMemLow} {
 		itemByKey(t, st, key)
 	}
 	events, err := attention.ReadEvents(town)
@@ -537,12 +347,12 @@ func TestAttentionHostCollectorsAreRegistered(t *testing.T) {
 			classes = append(classes, e.Class)
 		}
 	}
-	if len(classes) != 3 {
-		t.Errorf("event classes = %v, want the three host rules raised", classes)
+	if len(classes) != 2 {
+		t.Errorf("event classes = %v, want the two host rules raised", classes)
 	}
-	if h.diskCalls != 1 || h.memCalls != 1 || h.containerCalls != 1 || h.forgejoCalls != 1 {
-		t.Errorf("probe calls = disk %d mem %d docker %d forgejo %d, want one each per tick",
-			h.diskCalls, h.memCalls, h.containerCalls, h.forgejoCalls)
+	if h.diskCalls != 1 || h.memCalls != 1 || h.forgejoCalls != 1 {
+		t.Errorf("probe calls = disk %d mem %d forgejo %d, want one each per tick",
+			h.diskCalls, h.memCalls, h.forgejoCalls)
 	}
 }
 
@@ -568,160 +378,5 @@ func TestAttentionHostMemFreePctReadsSharedParser(t *testing.T) {
 				t.Errorf("memFreePctFrom = %v, %v; want %v, err %v", got, err, tt.want, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestAttentionHostParseContainerNames(t *testing.T) {
-	t.Parallel()
-	got := parseContainerNames("forgejo-db-1\n  hm-postgres \n\ngt-dolt\n")
-	want := []string{"forgejo-db-1", "hm-postgres", "gt-dolt"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("names = %v, want %v", got, want)
-	}
-	if got := parseContainerNames(""); len(got) != 0 {
-		t.Errorf("names = %v, want none", got)
-	}
-}
-
-// A docker ps that errors on one tick is an info line; one that errors on three
-// ticks in a row is the stack down, and wakes once. A good probe in between
-// starts the count again.
-func TestHostDockerProbeFailurePersistsWakes(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
-	f := newAttentionFixture(t, now)
-	h := healthyHost()
-	f.src.host = h
-	wakes := func() []attention.Event {
-		var out []attention.Event
-		for _, e := range f.events(t) {
-			if e.Wake {
-				out = append(out, e)
-			}
-		}
-		return out
-	}
-	beat := 0
-	tick := func() attention.State {
-		beat++
-		return f.tick(t, now.Add(time.Duration(beat)*time.Minute))
-	}
-
-	h.containersErr = errors.New("Cannot connect to the Docker daemon")
-	tick()
-	if got := wakes(); len(got) != 0 {
-		t.Fatalf("one failed tick wake events = %+v, want none", got)
-	}
-
-	// The probe recovers, so the next failures count from one again.
-	h.containersErr = nil
-	tick()
-	h.containersErr = errors.New("Cannot connect to the Docker daemon")
-	tick()
-	st := tick()
-	if got := wakes(); len(got) != 0 {
-		t.Fatalf("two failed ticks after a good one wake events = %+v, want none", got)
-	}
-	if _, ok := attention.Find(st, hostRuleDockerDown); ok {
-		t.Fatalf("host items = %v, want no stack-down item before the third failure", hostKeys(st))
-	}
-
-	st = tick()
-	got := wakes()
-	if len(got) != 1 {
-		t.Fatalf("third consecutive failed tick wake events = %+v, want one", got)
-	}
-	if got[0].Key != hostRuleDockerDown || got[0].Handled != attention.HandledOperatorAction || got[0].State != attention.EventNew {
-		t.Errorf("wake event = %+v, want a raised host.docker_stack_down", got[0])
-	}
-	down := itemByKey(t, st, hostRuleDockerDown)
-	if !strings.Contains(down.Summary, "Cannot connect to the Docker daemon") || strings.Contains(down.Summary, "\n") {
-		t.Errorf("summary = %q, want the one-line probe error", down.Summary)
-	}
-	itemByKey(t, st, hostProbeFailedPrefix+hostProbeDocker)
-
-	tick()
-	tick()
-	if n := len(wakes()); n != 1 {
-		t.Errorf("wake events after five failed ticks = %d, want the one", n)
-	}
-
-	h.containersErr = nil
-	st = tick()
-	if keys := hostKeys(st); len(keys) != 0 {
-		t.Errorf("host items = %v, want both cleared once docker answers healthy", keys)
-	}
-}
-
-// A stack-down item the probe kept from a real missing-container tick is
-// replaced by the unreachable one when the failure persists, never doubled.
-func TestHostDockerProbeFailureReplacesKeptStackDown(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
-	f := newAttentionFixture(t, now)
-	h := healthyHost()
-	h.containers = nil
-	f.src.host = h
-	f.tick(t, now)
-
-	h.containersErr = errors.New("docker.sock: connection refused")
-	var st attention.State
-	for beat := 1; beat <= attentionDockerProbeDownBeats; beat++ {
-		st = f.tick(t, now.Add(time.Duration(beat)*time.Minute))
-	}
-	n := 0
-	for _, it := range st.Items {
-		if it.Key == hostRuleDockerDown {
-			n++
-			if !strings.Contains(it.Summary, "connection refused") {
-				t.Errorf("summary = %q, want the unreachable wording", it.Summary)
-			}
-		}
-	}
-	if n != 1 {
-		t.Errorf("stack-down items = %d, want 1", n)
-	}
-}
-
-// A docker ps that fails because the tick's own context is spent says nothing
-// about docker, so three such ticks are not three beats toward the stack being
-// down.
-func TestHostDockerProbeExpiredContextNotCounted(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
-	f := newAttentionFixture(t, now)
-	h := healthyHost()
-	h.containersErr = context.DeadlineExceeded
-	f.src.host = h
-
-	expired, cancel := context.WithCancel(context.Background())
-	cancel()
-	for beat := 0; beat < attentionDockerProbeDownBeats+1; beat++ {
-		items, err := f.src.collectHostDocker(expired)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, it := range items {
-			if it.Key == hostRuleDockerDown {
-				t.Fatalf("beat %d raised %s on a context that was already expired", beat+1, hostRuleDockerDown)
-			}
-		}
-	}
-	if f.src.dockerProbeFails != 0 {
-		t.Errorf("dockerProbeFails = %d, want the expired ticks uncounted", f.src.dockerProbeFails)
-	}
-
-	// A docker ps that fails on a live context still counts.
-	h.containersErr = errors.New("Cannot connect to the Docker daemon")
-	var items []attention.Item
-	for beat := 0; beat < attentionDockerProbeDownBeats; beat++ {
-		items, _ = f.src.collectHostDocker(context.Background())
-	}
-	found := false
-	for _, it := range items {
-		found = found || it.Key == hostRuleDockerDown
-	}
-	if !found {
-		t.Errorf("items = %+v, want %s after %d real failures", items, hostRuleDockerDown, attentionDockerProbeDownBeats)
 	}
 }

@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/hostprobe"
@@ -15,19 +18,27 @@ import (
 // are refused rather than served unrefreshed.
 const fileHostProbeMaxAge = 180 * time.Second
 
+// cgroupMountDir is the cgroup v2 mount the daemon container sees. In the pod
+// that mount is the pod's own cgroup, so its memory.max is the pod's limit.
+const cgroupMountDir = "/sys/fs/cgroup"
+
+// cgroupUnlimited is what a cgroup's memory.max reads when it has no limit.
+const cgroupUnlimited = "max"
+
 // errProbeFileRefused marks a probe file this daemon will not serve. Its cause
 // is wrapped alongside it, so the event keeps the reader's reason while a
 // caller tells a refused file from a field a probe recorded as failed without
 // matching the reader's message.
 var errProbeFileRefused = errors.New("host probe file refused")
 
-// fileHostProbes serves the attention host rules from the probe file a host
-// agent publishes, for a daemon inside a container: memory_pressure and docker
-// ps name the host, and from the container they would name its own namespace.
-// Build it with newFileHostProbes; the zero value has no path or clock.
+// fileHostProbes serves the attention host rules for a daemon inside a
+// container. The disk comes from the probe file a host agent publishes: the
+// Mac's volume is the one the town lives on, and the container cannot measure
+// it. Memory is the pod's own cgroup, because the Mac's memory is not the
+// pod's. Build it with newFileHostProbes; the zero value has no path or clock.
 type fileHostProbes struct {
-	// systemHostProbes answers RigParked: the park record is a town config
-	// file, which the town root bind mount makes readable from the container.
+	// systemHostProbes answers the Forgejo health read: the instance is a
+	// network request, which the container makes as the host does.
 	systemHostProbes
 	path string
 	// now is the reader's clock, so a test decides what the file's age is.
@@ -37,6 +48,10 @@ type fileHostProbes struct {
 	// nodes are not on the host's probe file: the daemon container reads them
 	// through the cluster API, as the control-disk patrol does.
 	nodeDisks func(context.Context) ([]hostNodeRead, error)
+	// cgroupDir is the cgroup whose memory is read, and rootCgroupDir the root
+	// cgroup its limit falls back to when cgroupDir has none. Both are the
+	// mount in production; a test points them at a temp dir.
+	cgroupDir, rootCgroupDir string
 }
 
 // newFileHostProbes returns the file-backed host reads for the town rooted at
@@ -50,6 +65,8 @@ func newFileHostProbes(townRoot string, forgejoBaseURL func() (string, error), n
 		now:              time.Now,
 		maxAge:           fileHostProbeMaxAge,
 		nodeDisks:        nodeDisks,
+		cgroupDir:        cgroupMountDir,
+		rootCgroupDir:    cgroupMountDir,
 	}
 }
 
@@ -100,32 +117,79 @@ func (p fileHostProbes) NodeDisks(ctx context.Context) ([]hostNodeRead, error) {
 	return reads, err
 }
 
-func (p fileHostProbes) MemFreePct(context.Context) (float64, error) {
-	pr, err := p.probes()
-	if err != nil {
-		return 0, err
-	}
-	if err := fieldErr(p.path, hostProbeMem, pr.MemFreePct.Err); err != nil {
-		return 0, err
-	}
-	return pr.MemFreePct.Value, nil
-}
-
 // ForgejoHealthy asks the town's Forgejo itself. The health read is one HTTP
-// request, which the container makes as the host does, so unlike
-// memory_pressure and docker ps it is not the host's namespace the probe is
-// about and the published file has nothing to answer for it.
+// request, which the container makes as the host does, so unlike the disk read
+// it is not the host's namespace the probe is about and the published file has
+// nothing to answer for it.
 func (p fileHostProbes) ForgejoHealthy(ctx context.Context) error {
 	return p.systemHostProbes.ForgejoHealthy(ctx)
 }
 
-func (p fileHostProbes) Containers(context.Context) ([]string, error) {
-	pr, err := p.probes()
+// memFreePctFromCgroup is the free share of cgroupDir's memory as a percentage
+// of its limit: the limit less memory.current, over the limit. The limit is the
+// cgroup's memory.max. When that reads max the cgroup has no limit of its own,
+// so the limit is rootDir's memory.max; when that reads max too there is no
+// limit to measure against, and the reading is an error, never a free share.
+// A file that is unreadable or holds neither a byte count nor max is an error.
+func memFreePctFromCgroup(cgroupDir, rootDir string) (float64, error) {
+	currentPath := filepath.Join(cgroupDir, "memory.current")
+	current, err := readCgroupBytes(currentPath)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	if err := fieldErr(p.path, hostProbeDocker, pr.Containers.Err); err != nil {
-		return nil, err
+	limitPath := filepath.Join(cgroupDir, "memory.max")
+	limit, unlimited, err := readCgroupValue(limitPath)
+	if err != nil {
+		return 0, err
 	}
-	return pr.Containers.Value, nil
+	if unlimited {
+		limitPath = filepath.Join(rootDir, "memory.max")
+		limit, unlimited, err = readCgroupValue(limitPath)
+		if err != nil {
+			return 0, err
+		}
+		if unlimited {
+			return 0, fmt.Errorf("%s and %s both read max, so there is no memory limit to measure against",
+				filepath.Join(cgroupDir, "memory.max"), limitPath)
+		}
+	}
+	if limit == 0 {
+		return 0, fmt.Errorf("%s reads a zero limit, so there is no free share to measure", limitPath)
+	}
+	if current >= limit {
+		return 0, nil
+	}
+	return float64(limit-current) / float64(limit) * 100, nil
+}
+
+// readCgroupBytes reads a cgroup file that must hold a byte count. max is an
+// error here: memory.current is never unlimited.
+func readCgroupBytes(path string) (uint64, error) {
+	n, unlimited, err := readCgroupValue(path)
+	if err != nil {
+		return 0, err
+	}
+	if unlimited {
+		return 0, fmt.Errorf("%s reads max, want a byte count", path)
+	}
+	return n, nil
+}
+
+// readCgroupValue reads a cgroup memory file: a byte count, or max for no
+// limit. The error names the file and never its contents, so whatever the file
+// holds cannot reach an error or a log.
+func readCgroupValue(path string) (uint64, bool, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false, fmt.Errorf("reading the cgroup memory file %s: %w", path, err)
+	}
+	s := strings.TrimSpace(string(raw))
+	if s == cgroupUnlimited {
+		return 0, true, nil
+	}
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, false, fmt.Errorf("%s holds neither a byte count nor max", path)
+	}
+	return n, false, nil
 }

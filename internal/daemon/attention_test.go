@@ -1709,18 +1709,15 @@ func TestAttentionRiskPathItemIsQuieterThanTheAlarms(t *testing.T) {
 	f.src.redMain = func(context.Context, string) ([]*beads.Issue, error) {
 		return []*beads.Issue{{ID: "gt-red", Title: "internal/cmd is red"}}, nil
 	}
-	// A host with no stack container running: the daemon's docker rule fires.
-	f.src.host = &fakeHost{disk: hostDisk{UsedPct: 40, FreeGB: 300}, memFree: 60}
-
 	severity := map[attention.Kind]attention.Severity{}
 	for _, collect := range []func(context.Context) ([]attention.Item, error){
-		f.src.collectRiskPaths, f.src.collectEscalations, f.src.collectRedMain, f.src.collectHostDocker,
+		f.src.collectRiskPaths, f.src.collectEscalations, f.src.collectRedMain,
 	} {
 		for _, it := range f.collect(t, collect) {
 			severity[it.Kind] = it.Severity
 		}
 	}
-	for _, kind := range []attention.Kind{attention.KindEscalation, attention.KindRedMain, attention.KindHostDocker} {
+	for _, kind := range []attention.Kind{attention.KindEscalation, attention.KindRedMain} {
 		if got := severity[kind]; got != attention.SeverityHigh {
 			t.Errorf("the %s item is severity %q, want the high an incident carries", kind, got)
 		}
