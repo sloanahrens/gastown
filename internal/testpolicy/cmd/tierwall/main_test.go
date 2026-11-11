@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -14,15 +15,18 @@ import (
 )
 
 // fixedHost is the seam run reads outside the stream: one fixed clock, no
-// load, no town, and real files under the test's own temporary directory, so
-// no test reads the host.
+// load, no town, real files under the test's own temporary directory, and a
+// fixed 16 CPUs with no cgroup quota file, so no test reads the host.
 func fixedHost() host {
 	return host{
-		now:   func() time.Time { return time.Date(2026, 11, 1, 14, 42, 0, 0, time.UTC) },
-		load1: func() (float64, bool) { return 0, false },
-		town:  func() string { return "" },
-		mkdir: func(string) error { return nil },
-		open:  openAppend,
+		now:      func() time.Time { return time.Date(2026, 11, 1, 14, 42, 0, 0, time.UTC) },
+		load1:    func() (float64, bool) { return 0, false },
+		town:     func() string { return "" },
+		mkdir:    func(string) error { return nil },
+		open:     openAppend,
+		numCPU:   func() int { return 16 },
+		maxProcs: func() int { return 16 },
+		readFile: func(string) ([]byte, error) { return nil, fs.ErrNotExist },
 	}
 }
 
@@ -68,6 +72,7 @@ func TestReport_PrintsEveryPackageSlowestFirstThenTheTier(t *testing.T) {
 		"tierwall: github.com/steveyegge/gastown/internal/tmux 19s",
 		"tierwall: github.com/steveyegge/gastown/internal/slot 0.1s",
 		"tierwall: tier 245.6s bar 90s OVER",
+		"tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable",
 		"",
 	}, "\n")
 	if stdout != want {
@@ -103,6 +108,7 @@ func TestReport_FailingStreamKeepsTheFailureAndExitsOne(t *testing.T) {
 		"tierwall: github.com/steveyegge/gastown/internal/notify 39.2s",
 		"tierwall: github.com/steveyegge/gastown/internal/broken 0s",
 		"tierwall: tier 40.6s bar 90s OK",
+		"tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable",
 		"",
 	}, "\n")
 	if stdout != want {
@@ -163,7 +169,7 @@ func TestReport_PassesUnknownLinesThrough(t *testing.T) {
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0: no event failed", code)
 	}
-	want := "go: downloading something\nnot json at all\ntierwall: tier 0s bar 90s OK\n"
+	want := "go: downloading something\nnot json at all\ntierwall: tier 0s bar 90s OK\ntierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable\n"
 	if out.String() != want {
 		t.Errorf("stdout = %q, want %q", out.String(), want)
 	}
@@ -621,6 +627,7 @@ func TestSlowTestsListedFromTheStream(t *testing.T) {
 		"tierwall:   github.com/steveyegge/gastown/internal/daemon TestFive 5s",
 		"tierwall: phases github.com/steveyegge/gastown/internal/daemon serial 37s parallel 0s",
 		"tierwall: tier 37s bar 90s OK",
+		"tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable",
 		"",
 	}, "\n")
 	if stdout != want {
@@ -719,6 +726,7 @@ func TestSlowTestsTiesGoByPackageThenName(t *testing.T) {
 		"tierwall:   example.com/fx/a TestB 6s",
 		"tierwall:   example.com/fx/b TestZ 6s",
 		"tierwall: tier 0s bar 90s OK",
+		"tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable",
 		"",
 	}, "\n")
 	if out.String() != want {
@@ -849,5 +857,100 @@ func TestPhasesOnlyForTheSlowestThree(t *testing.T) {
 	}
 	if got := phaseLines(out.String()); got != "" {
 		t.Errorf("phase lines without -slow-tests = %q, want none", got)
+	}
+}
+
+// fileReader serves the files a test names and reports every other path as
+// absent, so the cgroup reads never touch the host's /sys.
+func fileReader(files map[string]string) func(string) ([]byte, error) {
+	return func(path string) ([]byte, error) {
+		if s, ok := files[path]; ok {
+			return []byte(s), nil
+		}
+		return nil, fs.ErrNotExist
+	}
+}
+
+// TestCPULineReportsTheQuota pins the cpus line on a passing run: NumCPU and
+// GOMAXPROCS as the host reports them, and the cgroup quota as its file states
+// it. A v2 cpu.max is reported as given, max included. Without it the v1 quota
+// and period are joined in that order, and a v2 file outranks v1. Mutation:
+// drop the v1 read and the third row reads unreadable; swap the two runtime
+// fields in cpuLine and the fourth row prints NumCPU=16 GOMAXPROCS=4.
+func TestCPULineReportsTheQuota(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		cpus  int
+		procs int
+		files map[string]string
+		want  string
+	}{
+		{name: "v2 quota", cpus: 16, procs: 16, files: map[string]string{cgroupV2Max: "400000 100000\n"}, want: "400000 100000"},
+		{name: "v2 without a quota", cpus: 16, procs: 16, files: map[string]string{cgroupV2Max: "max 100000\n"}, want: "max 100000"},
+		{name: "v1 quota and period", cpus: 16, procs: 16, files: map[string]string{cgroupV1Quota: "400000\n", cgroupV1Period: "100000\n"}, want: "400000 100000"},
+		{name: "GOMAXPROCS is its own field", cpus: 4, procs: 16, files: map[string]string{cgroupV2Max: "max 100000"}, want: "max 100000"},
+		{name: "v2 outranks v1", cpus: 16, procs: 16, files: map[string]string{cgroupV2Max: "200000 100000", cgroupV1Quota: "400000", cgroupV1Period: "100000"}, want: "200000 100000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := fixedHost()
+			h.numCPU = func() int { return tc.cpus }
+			h.maxProcs = func() int { return tc.procs }
+			h.readFile = fileReader(tc.files)
+			code, stdout, stderr := runFileWith(t, "pass.jsonl", h)
+			if code != 0 {
+				t.Errorf("exit code = %d, want 0: the cpus line fails nothing", code)
+			}
+			if stderr != "" {
+				t.Errorf("stderr = %q, want nothing", stderr)
+			}
+			want := fmt.Sprintf("tierwall: cpus: NumCPU=%d GOMAXPROCS=%d cgroup=%s\n", tc.cpus, tc.procs, tc.want)
+			if !strings.HasSuffix(stdout, want) {
+				t.Errorf("stdout = %q, want it to end with %q", stdout, want)
+			}
+		})
+	}
+}
+
+// TestCPULineWhenTheQuotaIsUnreadable pins the refusal: a quota that cannot be
+// read prints cgroup=unreadable and fails nothing, so the exit code stays go
+// test's verdict, 0 on a pass and 1 on a fail. A failed read, an empty file and
+// a v1 quota without its period all count as unreadable. Mutation: let an
+// empty v2 file through and the line reads cgroup= with nothing after it; take
+// the v1 quota alone and the half-v1 row prints a quota with no period.
+func TestCPULineWhenTheQuotaIsUnreadable(t *testing.T) {
+	t.Parallel()
+	denied := func(string) ([]byte, error) { return nil, errors.New("permission denied") }
+	for _, tc := range []struct {
+		name string
+		read func(string) ([]byte, error)
+	}{
+		{name: "every read fails", read: denied},
+		{name: "no files", read: fileReader(nil)},
+		{name: "empty v2 file", read: fileReader(map[string]string{cgroupV2Max: " \n"})},
+		{name: "v1 quota without a period", read: fileReader(map[string]string{cgroupV1Quota: "400000\n"})},
+		{name: "v1 period with an empty quota", read: fileReader(map[string]string{cgroupV1Quota: "\n", cgroupV1Period: "100000\n"})},
+	} {
+		for _, fx := range []struct {
+			file string
+			want int
+		}{{"pass.jsonl", 0}, {"fail.jsonl", 1}} {
+			t.Run(tc.name+"/"+fx.file, func(t *testing.T) {
+				t.Parallel()
+				h := fixedHost()
+				h.readFile = tc.read
+				code, stdout, stderr := runFileWith(t, fx.file, h)
+				if code != fx.want {
+					t.Errorf("exit code = %d, want %d: the cpus line leaves go test's verdict alone", code, fx.want)
+				}
+				if stderr != "" {
+					t.Errorf("stderr = %q, want nothing: an unreadable quota fails nothing", stderr)
+				}
+				if !strings.HasSuffix(stdout, "tierwall: cpus: NumCPU=16 GOMAXPROCS=16 cgroup=unreadable\n") {
+					t.Errorf("stdout = %q, want it to end with the unreadable cpus line", stdout)
+				}
+			})
+		}
 	}
 }
