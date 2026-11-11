@@ -889,3 +889,59 @@ func TestPageHarnessKeepsAScrollWithinTheRangeItsRowsAllow(t *testing.T) {
 		}
 	}
 }
+
+// TestPageHarnessRemoveTakesTheNodeOutOfItsParent: the Landings redraw clears
+// the box around one child with remove(), so the stub takes the node out of its
+// parent, as the browser does, and leaves its siblings where they were.
+func TestPageHarnessRemoveTakesTheNodeOutOfItsParent(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	v, err := p.vm.RunString(`(function () {
+  var box = document.createElement("div");
+  var a = document.createElement("span"), b = document.createElement("span"), c = document.createElement("span");
+  box.append(a, b, c);
+  b.remove();
+  return JSON.stringify({
+    kids: box.childElementCount,
+    first: box.firstChild === a,
+    second: box.children.item(1) === c,
+    detached: b.parentNode === null
+  });
+})()`)
+	if err != nil {
+		t.Fatalf("removing a child from a stub box: %v", err)
+	}
+	var got struct {
+		Kids     int  `json:"kids"`
+		First    bool `json:"first"`
+		Second   bool `json:"second"`
+		Detached bool `json:"detached"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the stub box back: %v", err)
+	}
+	if got.Kids != 2 {
+		t.Errorf("the box holds %d children after one was removed, want 2", got.Kids)
+	}
+	if !got.First {
+		t.Error("the first sibling is not the first child after a removal")
+	}
+	if !got.Second {
+		t.Error("the last sibling moved after a removal, want it to keep its place")
+	}
+	if !got.Detached {
+		t.Error("the removed child still names the box as its parent")
+	}
+}
+
+// TestPageHarnessRemoveOfAParentlessNodeIsANoOp: a node that was never appended
+// has no parent to leave, so remove() returns without throwing.
+func TestPageHarnessRemoveOfAParentlessNodeIsANoOp(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	if _, err := p.vm.RunString(`document.createElement("span").remove();`); err != nil {
+		t.Errorf("removing a node with no parent: %v", err)
+	}
+}

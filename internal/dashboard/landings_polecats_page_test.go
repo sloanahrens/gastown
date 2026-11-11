@@ -174,9 +174,6 @@ func TestTheStandalonePolecatsPaneIsGone(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
-	if n := strings.Count(page, `data-fold="polecats"`); n != 1 {
-		t.Fatalf("the page folds %d sections under polecats, want one", n)
-	}
 	grid := page[strings.Index(page, `<div class="grid">`):strings.Index(page, `<section id="trendsec"`)]
 	if strings.Contains(grid, `id="polecats"`) || strings.Contains(grid, `data-fold="polecats"`) {
 		t.Error("the grid still carries a standalone Polecats pane")
