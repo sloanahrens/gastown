@@ -49,12 +49,40 @@ func sortAlertsNewestFirst(alerts []Alert) {
 	sort.SliceStable(alerts, func(i, j int) bool { return alertNewer(alerts[i], alerts[j]) })
 }
 
-// alertNewer reports whether a comes before b in the EVENTS order.
+// alertNewer reports whether a comes before b in the EVENTS order. A tie in time
+// is neither newer, so the sort keeps the source order for it.
 func alertNewer(a, b Alert) bool {
 	if a.At.IsZero() || b.At.IsZero() {
 		return !a.At.IsZero() && b.At.IsZero()
 	}
 	return a.At.After(b.At)
+}
+
+// keepNewestAlerts returns the n newest of arrived, in the order they arrived.
+// Newest is alertNewer, and on a tie in time the later arrival is the newer one,
+// so a burst at one instant keeps its last alerts.
+func keepNewestAlerts(arrived []Alert, n int) []Alert {
+	if len(arrived) <= n {
+		return arrived
+	}
+	order := make([]int, len(arrived))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(x, y int) bool {
+		a, b := arrived[order[x]], arrived[order[y]]
+		if a.At.Equal(b.At) {
+			return order[x] > order[y]
+		}
+		return alertNewer(a, b)
+	})
+	keep := append([]int(nil), order[:n]...)
+	sort.Ints(keep)
+	out := make([]Alert, 0, n)
+	for _, i := range keep {
+		out = append(out, arrived[i])
+	}
+	return out
 }
 
 const (

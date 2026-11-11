@@ -4560,20 +4560,47 @@ let eventsUnread = 0;
 let eventsPrimed = false; // the first reading is a baseline: what was raised before the page opened is read
 
 function eventsOpen() { const s = $("eventssec"); return !!s && !s.classList.contains("collapsed"); }
-// takeEvent adds one alert to the top of the feed unless it is there already, and
-// reports whether it did. fresh says whether it is news: an alert off the stream
-// always is, and a reading's alerts are once the baseline has been taken. The
-// stream's alert goes on top as it arrives; the state the hub sends behind it puts
-// the recent list in the order the hub serves (renderEvents).
+// takeEvent adds one alert to the feed unless it is there already, and reports
+// whether it did. fresh says whether it is news: an alert off the stream always
+// is, and a reading's alerts are once the baseline has been taken. The alert goes
+// to the place its time says (placeEvent).
 function takeEvent(a, fresh) {
+  if (!noteEvent(a, fresh)) return false;
+  placeEvent(eventLines, a);
+  keepEvents();
+  return true;
+}
+// noteEvent records an alert the feed has not held before, counts it as news when
+// fresh says so, and reports whether it was new. Its id stays until it leaves the
+// feed.
+function noteEvent(a, fresh) {
   if (!a || eventIDs.has(a.id)) return false;
   eventIDs.add(a.id);
-  eventLines.unshift(a);
-  // The hub's recent list holds fewer alerts than the feed keeps, so an alert
-  // that has left the feed is never sent again and its id can go.
-  while (eventLines.length > EVENTS_KEPT) eventIDs.delete(eventLines.pop().id);
   if (fresh && !eventsOpen()) eventsUnread++;
   return true;
+}
+// alertNewerThan is the hub's EVENTS order (alertNewer in alerts.go): an alert with
+// a time comes before one without, and of two timed alerts the newer comes first.
+// Neither comes before the other on a tie.
+function alertNewerThan(a, b) {
+  const ta = a.at ? new Date(a.at).getTime() : NaN;
+  const tb = b.at ? new Date(b.at).getTime() : NaN;
+  if (!isFinite(ta) || !isFinite(tb)) return isFinite(ta) && !isFinite(tb);
+  return ta > tb;
+}
+// placeEvent puts a into the list above the first row it is not older than, so it
+// lands among the rows of its time, and on a tie it goes above them.
+function placeEvent(list, a) {
+  let i = 0;
+  while (i < list.length && alertNewerThan(list[i], a)) i++;
+  list.splice(i, 0, a);
+}
+// keepEvents drops the rows past EVENTS_KEPT off the bottom, and their ids with
+// them. The bottom is the oldest by time, and the state's recent list holds fewer
+// alerts than the feed keeps, so a row dropped here is one the state has moved on
+// from.
+function keepEvents() {
+  while (eventLines.length > EVENTS_KEPT) eventIDs.delete(eventLines.pop().id);
 }
 function eventRow(a) {
   const r = el("div", "evrow " + (a.level || "info"));
@@ -4634,23 +4661,19 @@ function paintEvents() {
   paintEventStats(Date.now());
   paintFolds(state);
 }
-// renderEvents takes the state's recent alerts into the feed in the order the hub
-// serves them, newest first, and draws the feed in that order: the served list
-// takes the top, and the alerts the feed holds that the served list has dropped
-// follow it. The hub keeps its last twenty arrivals, so a dropped alert arrived
-// before every alert the list still serves. The state repeats alerts the stream
-// has already delivered; each id is taken once.
+// renderEvents draws the state's recent alerts in the order the hub serves them,
+// newest first, and keeps that order. A row the stream brought that the list does
+// not carry goes among them at the place its time says. The state repeats alerts
+// the stream has already delivered; each id is taken once.
 function renderEvents(s) {
   if (pushSkip("events", s)) return;
   const served = ((s && s.alerts) || []).filter(a => a);
   const ids = new Set(served.map(a => a.id));
-  served.forEach(a => {
-    if (eventIDs.has(a.id)) return;
-    eventIDs.add(a.id);
-    if (eventsPrimed && !eventsOpen()) eventsUnread++;
-  });
-  eventLines = served.concat(eventLines.filter(a => !ids.has(a.id)));
-  while (eventLines.length > EVENTS_KEPT) eventIDs.delete(eventLines.pop().id);
+  const streamOnly = eventLines.filter(a => !ids.has(a.id));
+  served.forEach(a => noteEvent(a, eventsPrimed));
+  eventLines = served.slice();
+  streamOnly.forEach(a => placeEvent(eventLines, a));
+  keepEvents();
   eventsPrimed = true;
   paintEvents();
 }
