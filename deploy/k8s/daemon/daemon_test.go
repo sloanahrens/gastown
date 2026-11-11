@@ -665,12 +665,12 @@ func TestDoltBackupHostPathReplacesTheClaim(t *testing.T) {
 			v.DoltBackupHostPath = tc.hostPath
 			m := mustBuild(t, v)
 
-			// The claim is rendered only without a host path: a zero claim is
+			// The claim is rendered only without a host path: a nil claim is
 			// the one Render skips.
-			if tc.hostPath == "" && m.DoltBackupClaim.Kind != "PersistentVolumeClaim" {
+			if tc.hostPath == "" && (m.DoltBackupClaim == nil || m.DoltBackupClaim.Kind != "PersistentVolumeClaim") {
 				t.Errorf("the render carries no %s claim, want one without a host path", DoltBackupClaim)
 			}
-			if tc.hostPath != "" && m.DoltBackupClaim.Kind != "" {
+			if tc.hostPath != "" && m.DoltBackupClaim != nil {
 				t.Errorf("the render carries the %s claim %q, want none with a host path", DoltBackupClaim, m.DoltBackupClaim.Metadata.Name)
 			}
 			var out bytes.Buffer
@@ -711,6 +711,42 @@ func TestDoltBackupHostPathReplacesTheClaim(t *testing.T) {
 				t.Errorf("the %s volume = %+v, want a Directory host path %s", DoltBackupClaim, vol.HostPath, tc.hostPath)
 			}
 		})
+	}
+}
+
+// TestRenderWritesTheDoltBackupClaimWhateverItsTypeMeta holds the render's choice
+// to whether Build set the claim, not to a field the claim may leave zero: a
+// claim with no TypeMeta is still written, so one document carries its name
+// (gt-1i5hjv).
+func TestRenderWritesTheDoltBackupClaimWhateverItsTypeMeta(t *testing.T) {
+	t.Parallel()
+
+	m := mustBuild(t, goldenValues(t))
+	m.DoltBackupClaim.TypeMeta = TypeMeta{}
+	var out bytes.Buffer
+	if err := Render(&out, m); err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+
+	written := 0
+	dec := yaml.NewDecoder(&out)
+	for {
+		var doc struct {
+			Metadata struct {
+				Name string `yaml:"name"`
+			} `yaml:"metadata"`
+		}
+		if err := dec.Decode(&doc); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatalf("decoding the rendered stream: %v", err)
+		}
+		if doc.Metadata.Name == DoltBackupClaim {
+			written++
+		}
+	}
+	if written != 1 {
+		t.Errorf("Render wrote %d documents named %s, want 1 for a claim with no TypeMeta", written, DoltBackupClaim)
 	}
 }
 
@@ -982,7 +1018,7 @@ func TestClaimsCarryTheDefaults(t *testing.T) {
 	}{
 		{TownStateClaim, m.TownStateClaim},
 		{LandingWorkClaim, m.LandingWorkClaim},
-		{DoltBackupClaim, m.DoltBackupClaim},
+		{DoltBackupClaim, *m.DoltBackupClaim},
 	} {
 		claim := tc.claim
 		if claim.Metadata.Name != tc.name || claim.Metadata.Namespace != DefaultNamespace {
@@ -1011,7 +1047,7 @@ func TestSizeAnnotationOnlyOnTheUnenforcedClass(t *testing.T) {
 	v := goldenValues(t)
 	v.StorageClass = "standard-rwo"
 	m := mustBuild(t, v)
-	for _, claim := range []PersistentVolumeClaim{m.TownStateClaim, m.LandingWorkClaim, m.DoltBackupClaim} {
+	for _, claim := range []PersistentVolumeClaim{m.TownStateClaim, m.LandingWorkClaim, *m.DoltBackupClaim} {
 		if got := claim.Spec.StorageClassName; got != "standard-rwo" {
 			t.Errorf("the %s claim's class = %q, want standard-rwo", claim.Metadata.Name, got)
 		}

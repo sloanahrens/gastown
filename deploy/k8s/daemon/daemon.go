@@ -608,13 +608,14 @@ type Values struct {
 }
 
 // Manifests is what Build returns, in the order Render writes it. The dashboard
-// objects are zero unless Values.Dashboard is set.
+// objects are zero unless Values.Dashboard is set. The dolt-backup claim is nil
+// when Values.DoltBackupHostPath replaces it.
 type Manifests struct {
 	Namespace            Namespace
 	ServiceAccount       ServiceAccount
 	TownStateClaim       PersistentVolumeClaim
 	LandingWorkClaim     PersistentVolumeClaim
-	DoltBackupClaim      PersistentVolumeClaim
+	DoltBackupClaim      *PersistentVolumeClaim
 	ForgejoService       Service
 	DashboardService     Service
 	Secrets              []Secret
@@ -683,7 +684,8 @@ func Build(v Values) (Manifests, error) {
 	// A host path replaces the dolt-backup claim, so the claim is not rendered:
 	// the pod mounts the directory the backups are written to (gt-cbsx3k).
 	if v.DoltBackupHostPath == "" {
-		m.DoltBackupClaim = claim(DoltBackupClaim, namespace, v.DoltBackupStorage, v.StorageClass)
+		c := claim(DoltBackupClaim, namespace, v.DoltBackupStorage, v.StorageClass)
+		m.DoltBackupClaim = &c
 	}
 	// A rehearsal binds no sweep or cache-trim role, so the render grants its pod
 	// no Job in gt-sweeps and no CI cache access. Its bindings stay zero, and
@@ -1900,10 +1902,10 @@ func validDNS1123Subdomain(name string) bool {
 func Render(w io.Writer, m Manifests) error {
 	docs := make([]any, 0, 10+len(m.Secrets))
 	docs = append(docs, m.Namespace, m.ServiceAccount, m.TownStateClaim, m.LandingWorkClaim)
-	// Build leaves the dolt-backup claim zero when a host path replaces it, so
-	// a zero claim is one that was not rendered and is not written.
-	if m.DoltBackupClaim.Kind != "" {
-		docs = append(docs, m.DoltBackupClaim)
+	// Build leaves the dolt-backup claim nil when a host path replaces it, so a
+	// nil claim is one that was not rendered and is not written.
+	if m.DoltBackupClaim != nil {
+		docs = append(docs, *m.DoltBackupClaim)
 	}
 	docs = append(docs, m.ForgejoService)
 	// Build leaves the dashboard objects zero unless Values.Dashboard is set, so a
