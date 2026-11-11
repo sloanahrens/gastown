@@ -592,7 +592,10 @@ func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
 // seat's class is unknown, so counting it on no class would under-count the
 // pool and let a sling take a seat the cap has no room for; the read returns
 // the error instead, and the caller refuses.
-func TestPoolSeatSessionsRefusesAnUnreadableSeatRecord(t *testing.T) {
+// An unreadable seat record counts its seat under config.UnknownSeatAgent: the
+// seat still takes its place in the pool's total, no class is credited with it,
+// and it is not a refusal. The session's own GT_AGENT is not the fallback.
+func TestPoolSeatSessionsCountsAnUnreadableSeatRecordUnderUnknown(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
@@ -617,9 +620,11 @@ func TestPoolSeatSessionsRefusesAnUnreadableSeatRecord(t *testing.T) {
 
 	got, err := poolOccupiedSessions(live, town, disposition, hookHeldOf(disposition), nil,
 		seatPool("deepseek-flash", 3), time.Now, sandboxSeatDeathsFor(town))
-	var occ *poolOccupancyError
-	if !errors.As(err, &occ) || !occ.sessions {
-		t.Fatalf("poolOccupiedSessions = %+v, err %v; want a sessions occupancy error, not a count", got, err)
+	if err != nil {
+		t.Fatalf("poolOccupiedSessions err = %v; want the seat counted, not a refusal", err)
+	}
+	if len(got) != 1 || got[0].agent != config.UnknownSeatAgent {
+		t.Fatalf("poolOccupiedSessions = %+v; want one seat under %s, not the session's GT_AGENT", got, config.UnknownSeatAgent)
 	}
 }
 

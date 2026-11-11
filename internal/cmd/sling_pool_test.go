@@ -201,6 +201,21 @@ func TestListPolecatSessions(t *testing.T) {
 	}
 }
 
+// gtAgentCountingLister counts the GT_AGENT reads a reader asks its sessions
+// for, so a test can assert the answer came from the seat record instead of
+// the live session.
+type gtAgentCountingLister struct {
+	fakeSessionLister
+	gtAgentReads int
+}
+
+func (l *gtAgentCountingLister) GetEnvironment(session, key string) (string, error) {
+	if key == "GT_AGENT" {
+		l.gtAgentReads++
+	}
+	return l.fakeSessionLister.GetEnvironment(session, key)
+}
+
 // TestPoolCountsASandboxSeatOnItsRecordedClass is gt-5h87d7, the reading that
 // put sbx-flash at 4/3 on 2026-11-11: a sandboxed seat's environment cannot be
 // read from the host, so GT_AGENT came back empty for 8 of 13 working seats and
