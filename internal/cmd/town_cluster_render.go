@@ -78,6 +78,7 @@ type clusterRenderFlags struct {
 	configDir          string
 	openShellConfigDir string
 	forgeHost          string
+	doltBackupHostPath string
 }
 
 var clusterRender clusterRenderFlags
@@ -152,6 +153,8 @@ func init() {
 		"the operator's openshell config directory, an absolute path (default $XDG_CONFIG_HOME/openshell or ~/.config/openshell)")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.forgeHost, config.ForgeHostFlag, "",
 		"the forge's host:port the pod's git asks for a credential (required for a live render, the flag `gt daemon compose write` takes); a rehearsal takes none")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.doltBackupHostPath, "dolt-backup-host-path", "",
+		"the host directory the live pod mounts at the Dolt backup path, read-write, in place of the dolt-backup claim; it must be "+k8sdaemon.DoltBackupPath+" (a live render only)")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)
@@ -192,6 +195,12 @@ func (f clusterRenderFlags) validate() error {
 		return fmt.Errorf("--%s is required for a live render: the pod's git has no credential helper without it, and every Forgejo call fails (the live compose command passes the same flag)", config.ForgeHostFlag)
 	case f.rehearsal && strings.TrimSpace(f.forgeHost) != "":
 		return fmt.Errorf("--%s is for a live render: a rehearsal mounts only the read-only viewer token and carries no forge host", config.ForgeHostFlag)
+	case f.rehearsal && f.doltBackupHostPath != "":
+		return errors.New("--dolt-backup-host-path is for a live render: a rehearsal mounts the dolt-backup claim read-only and never owns the live backups")
+	case f.doltBackupHostPath != "" && !filepath.IsAbs(f.doltBackupHostPath):
+		return fmt.Errorf("--dolt-backup-host-path %q must be an absolute path", f.doltBackupHostPath)
+	case f.doltBackupHostPath != "" && f.doltBackupHostPath != k8sdaemon.DoltBackupPath:
+		return fmt.Errorf("--dolt-backup-host-path %q: want %q, the host directory the Dolt container writes its backups to", f.doltBackupHostPath, k8sdaemon.DoltBackupPath)
 	case !filepath.IsAbs(f.configDir):
 		return fmt.Errorf("--config-dir %q must be an absolute path: the create commands are run from another directory", f.configDir)
 	case !filepath.IsAbs(f.openShellConfigDir):
@@ -284,6 +293,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		// file and the forge host with the landing bot's token (gt-22wubb).
 		v.OMToken = true
 		v.ForgeHost = strings.TrimSpace(f.forgeHost)
+		v.DoltBackupHostPath = f.doltBackupHostPath
 	}
 	m, err := d.build(v)
 	if err != nil {

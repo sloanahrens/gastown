@@ -312,9 +312,9 @@ const (
 	// letting it burst into a neighbor.
 	proxyCPU    = "10m"
 	proxyMemory = "64Mi"
-	// DoltBackupPath is where the compose file mounts the host's Dolt backups;
-	// the dolt-backup claim is mounted there, so GT_DOLT_BACKUP_ROOT keeps the
-	// compose value.
+	// DoltBackupPath is where the compose file mounts the host's Dolt backups.
+	// The pod mounts the same path: the dolt-backup claim, or the host directory
+	// DoltBackupHostPath names. GT_DOLT_BACKUP_ROOT names it in the live pod.
 	DoltBackupPath = "/Users/sloan/gt-backups/dolt"
 	// OMConfigSubPath is the om config's path inside the town-state volume, which
 	// the pod mounts at manifestdata.LiveOMConfigPath. It is no Secret: the config
@@ -488,6 +488,12 @@ type Values struct {
 	// DoltBackupStorage is the dolt-backup claim's requested size;
 	// DefaultDoltBackupStorage when empty.
 	DoltBackupStorage string
+	// DoltBackupHostPath is the host directory the live pod mounts at
+	// DoltBackupPath, read-write, in place of the dolt-backup claim. Set, the
+	// render writes no dolt-backup claim, since the pod reads the directory the
+	// Dolt container writes its backups to (gt-cbsx3k). Empty, the claim carries
+	// the backups. It must equal DoltBackupPath, and a rehearsal refuses it.
+	DoltBackupHostPath string
 	// StorageClass is the claims' storage class; DefaultStorageClass when
 	// empty.
 	StorageClass string
@@ -611,7 +617,6 @@ func Build(v Values) (Manifests, error) {
 		},
 		TownStateClaim:   claim(TownStateClaim, namespace, v.TownStateStorage, v.StorageClass),
 		LandingWorkClaim: claim(LandingWorkClaim, namespace, v.LandingWorkStorage, v.StorageClass),
-		DoltBackupClaim:  claim(DoltBackupClaim, namespace, v.DoltBackupStorage, v.StorageClass),
 		ForgejoService: Service{
 			TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Service"},
 			Metadata: objectMeta(ForgejoName, namespace),
@@ -623,6 +628,11 @@ func Build(v Values) (Manifests, error) {
 		},
 		Secrets:    make([]Secret, 0, len(v.Secrets)),
 		Deployment: deploy,
+	}
+	// A host path replaces the dolt-backup claim, so the claim is not rendered:
+	// the pod mounts the directory the backups are written to (gt-cbsx3k).
+	if v.DoltBackupHostPath == "" {
+		m.DoltBackupClaim = claim(DoltBackupClaim, namespace, v.DoltBackupStorage, v.StorageClass)
 	}
 	// A rehearsal binds no sweep or cache-trim role, so the render grants its pod
 	// no Job in gt-sweeps and no CI cache access. Its bindings stay zero, and
@@ -980,11 +990,22 @@ func containerEnvironment(v Values) []EnvVar {
 	if v.ForgeHost != "" {
 		env = append(env, EnvVar{Name: forgejoAPIURLEnv, Value: "http://" + v.ForgeHost + "/api/v1"})
 	}
-	for _, name := range sortedKeys(v.Env) {
+	kept := make(map[string]string, len(v.Env)+1)
+	for name, value := range v.Env {
+		kept[name] = value
+	}
+	// The live pod always names the backup root it mounts. The daemon falls back
+	// to a path that does not exist in the pod when the name is unset, and the
+	// town reads backup=none (gt-cbsx3k). validateEnv already holds a caller's
+	// value to DoltBackupPath, so this overwrites nothing the caller chose.
+	if !v.Rehearsal {
+		kept[doltBackupRootEnv] = DoltBackupPath
+	}
+	for _, name := range sortedKeys(kept) {
 		if _, dropped := composeOnlyEnv[name]; dropped {
 			continue
 		}
-		env = append(env, EnvVar{Name: name, Value: v.Env[name]})
+		env = append(env, EnvVar{Name: name, Value: kept[name]})
 	}
 	return env
 }
@@ -1012,7 +1033,7 @@ func volumes(v Values) ([]Volume, error) {
 		vols = append(vols, Volume{Name: LandingWorkClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: LandingWorkClaim}})
 	}
 	vols = append(vols,
-		Volume{Name: DoltBackupClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: DoltBackupClaim}},
+		doltBackupVolume(v),
 		Volume{Name: TempVolume, EmptyDir: &EmptyDirVolumeSource{}},
 	)
 	for i, file := range v.Secrets {
@@ -1032,6 +1053,17 @@ func volumes(v Values) ([]Volume, error) {
 		vols = append(vols, openShellVolume())
 	}
 	return vols, nil
+}
+
+// doltBackupVolume is the volume the pod mounts at DoltBackupPath: the host
+// directory Values.DoltBackupHostPath names, when it is set, else the dolt-backup
+// claim. The volume keeps the claim's name, so the mount names the same volume
+// either way.
+func doltBackupVolume(v Values) Volume {
+	if v.DoltBackupHostPath != "" {
+		return Volume{Name: DoltBackupClaim, HostPath: &HostPathVolumeSource{Path: v.DoltBackupHostPath, Type: hostPathDirectory}}
+	}
+	return Volume{Name: DoltBackupClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: DoltBackupClaim}}
 }
 
 // polecatImageVolume projects the pod template's polecat-image annotation to the
@@ -1228,10 +1260,29 @@ func (v Values) validate() error {
 	case !validDNS1123Label(v.ForgejoNamespace):
 		return fmt.Errorf("Values.ForgejoNamespace %q: want a DNS-1123 label of at most 63 characters, such as forgejo", v.ForgejoNamespace)
 	}
+	if err := v.validateDoltBackupHostPath(); err != nil {
+		return err
+	}
 	if err := v.validateSecrets(); err != nil {
 		return err
 	}
 	return v.validateDaemon()
+}
+
+// validateDoltBackupHostPath refuses a host path the pod could not use in
+// place of the claim: a rehearsal, whose claim is read-only and never owns the
+// live backups, and any directory but the one the Dolt container writes its
+// backups to, which is what DoltBackupPath names (gt-cbsx3k).
+func (v Values) validateDoltBackupHostPath() error {
+	switch {
+	case v.DoltBackupHostPath == "":
+		return nil
+	case v.Rehearsal:
+		return errors.New("Values.DoltBackupHostPath is for a live render: a rehearsal mounts the dolt-backup claim read-only")
+	case v.DoltBackupHostPath != DoltBackupPath:
+		return fmt.Errorf("Values.DoltBackupHostPath %q: want %q, the host directory the Dolt container writes its backups to", v.DoltBackupHostPath, DoltBackupPath)
+	}
+	return nil
 }
 
 // validateRehearsal refuses a rehearsal that could render into a namespace the
@@ -1605,7 +1656,13 @@ func validDNS1123Subdomain(name string) bool {
 // the stream could not be written.
 func Render(w io.Writer, m Manifests) error {
 	docs := make([]any, 0, 10+len(m.Secrets))
-	docs = append(docs, m.Namespace, m.ServiceAccount, m.TownStateClaim, m.LandingWorkClaim, m.DoltBackupClaim, m.ForgejoService)
+	docs = append(docs, m.Namespace, m.ServiceAccount, m.TownStateClaim, m.LandingWorkClaim)
+	// Build leaves the dolt-backup claim zero when a host path replaces it, so
+	// a zero claim is one that was not rendered and is not written.
+	if m.DoltBackupClaim.Kind != "" {
+		docs = append(docs, m.DoltBackupClaim)
+	}
+	docs = append(docs, m.ForgejoService)
 	for _, s := range m.Secrets {
 		docs = append(docs, s)
 	}
@@ -1898,9 +1955,20 @@ type VolumeMount struct {
 type Volume struct {
 	Name                  string                   `yaml:"name"`
 	PersistentVolumeClaim *PVCVolumeSource         `yaml:"persistentVolumeClaim,omitempty"`
+	HostPath              *HostPathVolumeSource    `yaml:"hostPath,omitempty"`
 	EmptyDir              *EmptyDirVolumeSource    `yaml:"emptyDir,omitempty"`
 	Secret                *SecretVolumeSource      `yaml:"secret,omitempty"`
 	DownwardAPI           *DownwardAPIVolumeSource `yaml:"downwardAPI,omitempty"`
+}
+
+// hostPathDirectory is the hostPath type that requires the path to be an
+// existing directory, so the pod never starts on a path the host lacks.
+const hostPathDirectory = "Directory"
+
+// HostPathVolumeSource is a directory on the node the pod runs on.
+type HostPathVolumeSource struct {
+	Path string `yaml:"path"`
+	Type string `yaml:"type"`
 }
 
 // DownwardAPIVolumeSource projects pod metadata into files: each item is one

@@ -386,6 +386,135 @@ func TestDoltBackupClaim(t *testing.T) {
 	}
 }
 
+// TestDoltBackupHostPathReplacesTheClaim holds the live pod to the host's Dolt
+// backup directory. With DoltBackupHostPath set, the pod mounts that directory
+// read-write at DoltBackupPath and the render writes no dolt-backup claim; with
+// it empty, the claim carries the backups as before (gt-cbsx3k).
+func TestDoltBackupHostPathReplacesTheClaim(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		hostPath string
+	}{
+		{"the claim", ""},
+		{"the host path", DoltBackupPath},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := goldenValues(t)
+			v.DoltBackupHostPath = tc.hostPath
+			m := mustBuild(t, v)
+
+			// The claim is rendered only without a host path: a zero claim is
+			// the one Render skips.
+			if tc.hostPath == "" && m.DoltBackupClaim.Kind != "PersistentVolumeClaim" {
+				t.Errorf("the render carries no %s claim, want one without a host path", DoltBackupClaim)
+			}
+			if tc.hostPath != "" && m.DoltBackupClaim.Kind != "" {
+				t.Errorf("the render carries the %s claim %q, want none with a host path", DoltBackupClaim, m.DoltBackupClaim.Metadata.Name)
+			}
+			var out bytes.Buffer
+			if err := Render(&out, m); err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			claims := strings.Count(out.String(), "kind: PersistentVolumeClaim")
+			wantClaims := 3
+			if tc.hostPath != "" {
+				wantClaims = 2
+			}
+			if claims != wantClaims {
+				t.Errorf("Render wrote %d PersistentVolumeClaims, want %d", claims, wantClaims)
+			}
+
+			pod := m.Deployment.Spec.Template.Spec
+			mount := volumeMountAt(pod.Containers[0].VolumeMounts, DoltBackupPath)
+			if mount == nil {
+				t.Fatalf("the pod mounts nothing at %s", DoltBackupPath)
+			}
+			if mount.Name != DoltBackupClaim || mount.ReadOnly {
+				t.Errorf("the mount at %s is volume %q readOnly %t, want %q read-write", DoltBackupPath, mount.Name, mount.ReadOnly, DoltBackupClaim)
+			}
+			vol := volumeNamed(pod.Volumes, mount.Name)
+			if vol == nil {
+				t.Fatalf("the pod has no volume %q", mount.Name)
+			}
+			if tc.hostPath == "" {
+				if vol.HostPath != nil || volumeClaim(pod.Volumes, DoltBackupClaim) != DoltBackupClaim {
+					t.Errorf("the %s volume = %+v, want the %s claim and no host path", DoltBackupClaim, vol, DoltBackupClaim)
+				}
+				return
+			}
+			if vol.PersistentVolumeClaim != nil {
+				t.Errorf("the %s volume still carries a claim %q, want the host path alone", DoltBackupClaim, vol.PersistentVolumeClaim.ClaimName)
+			}
+			if vol.HostPath == nil || vol.HostPath.Path != tc.hostPath || vol.HostPath.Type != "Directory" {
+				t.Errorf("the %s volume = %+v, want a Directory host path %s", DoltBackupClaim, vol.HostPath, tc.hostPath)
+			}
+		})
+	}
+}
+
+// TestDoltBackupRootIsAlwaysSetOnTheLivePod holds GT_DOLT_BACKUP_ROOT to the
+// path the pod mounts the backups at, in every live render: with the claim or
+// the host path, and whether or not the caller's environment names it. An unset
+// root makes the daemon fall back to /root/gt-backups/dolt, which the pod does
+// not have, so the town reads backup=none (gt-cbsx3k).
+func TestDoltBackupRootIsAlwaysSetOnTheLivePod(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name   string
+		change func(*Values)
+	}{
+		{"the claim, env unset", func(*Values) {}},
+		{"the host path, env unset", func(v *Values) { v.DoltBackupHostPath = DoltBackupPath }},
+		{"the claim, env named", func(v *Values) { v.Env = liveEnv() }},
+		{"the host path, env named", func(v *Values) {
+			v.Env = liveEnv()
+			v.DoltBackupHostPath = DoltBackupPath
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			v := goldenValues(t)
+			tc.change(&v)
+			pod := mustBuild(t, v).Deployment.Spec.Template.Spec.Containers[0]
+			if got := envValuesNamed(pod, doltBackupRootEnv); !slices.Equal(got, []string{DoltBackupPath}) {
+				t.Errorf("%s = %q, want exactly one value %q", doltBackupRootEnv, got, DoltBackupPath)
+			}
+		})
+	}
+}
+
+// TestDoltBackupHostPathRefusesTheWrongMount holds the two host paths the render
+// cannot use: a rehearsal, whose claim is read-only and owns no live backups, and
+// a directory other than the one the Dolt container writes its backups to.
+func TestDoltBackupHostPathRefusesTheWrongMount(t *testing.T) {
+	t.Parallel()
+
+	rehearsal := rehearsalValues(t)
+	rehearsal.DoltBackupHostPath = DoltBackupPath
+	elsewhere := goldenValues(t)
+	elsewhere.DoltBackupHostPath = "/Users/sloan/elsewhere"
+
+	for _, tc := range []struct {
+		name string
+		v    Values
+	}{
+		{"a rehearsal", rehearsal},
+		{"another directory", elsewhere},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Build(tc.v)
+			if err == nil || !strings.Contains(err.Error(), "Values.DoltBackupHostPath") {
+				t.Errorf("Build = %v, want a refusal naming Values.DoltBackupHostPath", err)
+			}
+		})
+	}
+}
+
 // TestHostGatewayAlias holds the pod's route to the host's Dolt server: a
 // gateway IPv4 address renders one hostAlias for DoltHostName, every address
 // that names no other machine is refused with the value named, and an empty

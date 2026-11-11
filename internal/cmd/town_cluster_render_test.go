@@ -920,3 +920,86 @@ func TestTownClusterRenderRehearsalCarriesNeitherToken(t *testing.T) {
 		t.Fatalf("a rehearsal daemon carries FORGEJO_API_URL = %q, want none: it has no forge host", got)
 	}
 }
+
+// TestTownClusterRenderRefusesTheDoltBackupHostPath drives each refusal of
+// --dolt-backup-host-path: a rehearsal, a relative path, and an absolute path
+// that is not the Dolt backup directory. Each names the flag and writes nothing.
+func TestTownClusterRenderRefusesTheDoltBackupHostPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(f *clusterRenderFlags)
+	}{
+		{"a rehearsal", func(f *clusterRenderFlags) {
+			f.rehearsal = true
+			f.forgeHost = ""
+			f.confirmStopped = false
+			f.namespace = "gt-rehearsal"
+			f.doltBackupHostPath = k8sdaemon.DoltBackupPath
+		}},
+		{"a relative path", func(f *clusterRenderFlags) { f.doltBackupHostPath = "gt-backups/dolt" }},
+		{"another directory", func(f *clusterRenderFlags) { f.doltBackupHostPath = "/Users/sloan/elsewhere" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			tt.mutate(&f)
+			before := outState(f.out)
+			var out bytes.Buffer
+			err := runClusterRender(clusterRenderTestDeps(&out), f)
+			if err == nil {
+				t.Fatal("render succeeded, want a refusal naming --dolt-backup-host-path")
+			}
+			if !strings.Contains(err.Error(), "--dolt-backup-host-path") {
+				t.Fatalf("refusal = %q, want it to name --dolt-backup-host-path", err)
+			}
+			if out.Len() != 0 {
+				t.Fatalf("a refused render printed %q", out.String())
+			}
+			if after := outState(f.out); after != before {
+				t.Fatalf("a refused render changed --out: before %q, after %q", before, after)
+			}
+		})
+	}
+}
+
+// TestTownClusterRenderLiveMountsTheDoltBackupHostPath holds a live render given
+// the host path to the host's backup directory: no dolt-backup claim is written.
+// Without the flag the claim is written. Either way the daemon names the backup
+// root the pod mounts the backups at (gt-cbsx3k).
+func TestTownClusterRenderLiveMountsTheDoltBackupHostPath(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		hostPath  string
+		wantClaim bool
+	}{
+		{"without the flag", "", true},
+		{"with the flag", k8sdaemon.DoltBackupPath, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := clusterRenderFixture(t)
+			f.doltBackupHostPath = tc.hostPath
+			var out bytes.Buffer
+			if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			_, _, env := daemonContainer(t, f.out)
+			if got := env["GT_DOLT_BACKUP_ROOT"]; got != k8sdaemon.DoltBackupPath {
+				t.Errorf("daemon env GT_DOLT_BACKUP_ROOT = %q, want %q", got, k8sdaemon.DoltBackupPath)
+			}
+			wantFile := "persistentvolumeclaim-" + k8sdaemon.DoltBackupClaim
+			hasClaim := false
+			for _, name := range dirNames(t, f.out) {
+				if strings.Contains(name, wantFile) {
+					hasClaim = true
+				}
+			}
+			if hasClaim != tc.wantClaim {
+				t.Errorf("a %s claim written = %t, want %t: files %v", k8sdaemon.DoltBackupClaim, hasClaim, tc.wantClaim, dirNames(t, f.out))
+			}
+		})
+	}
+}
