@@ -1,6 +1,7 @@
 package constants
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -217,6 +218,98 @@ func TestRigBeadsWritePath(t *testing.T) {
 	want := filepath.Join(rig, DirBeads)
 	if got := RigBeadsWritePath(rig); got != want {
 		t.Errorf("RigBeadsWritePath = %q, want %q", got, want)
+	}
+}
+
+// TestRigBeadsPathWarnsOnUnreadableState pins the signal for a Stat error other
+// than not-exist: the answer is <rig>/.beads and a warning reaches the stream.
+// An absent state answers the legacy directory and stays silent. Each row
+// builds its rig under t.TempDir().
+func TestRigBeadsPathWarnsOnUnreadableState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, newDir string)
+		// wantNew is true when RigBeadsPath answers <rig>/.beads.
+		wantNew  bool
+		wantWarn bool
+	}{
+		{
+			// <rig>/.beads is a regular file, so Stat of metadata.json under it
+			// fails with ENOTDIR.
+			name: "metadata entry unreadable",
+			setup: func(t *testing.T, newDir string) {
+				if err := os.WriteFile(newDir, []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantNew:  true,
+			wantWarn: true,
+		},
+		{
+			// redirect is a symlink to itself, so Stat fails with ELOOP after
+			// metadata.json has been read as present.
+			name: "redirect entry unreadable",
+			setup: func(t *testing.T, newDir string) {
+				if err := os.MkdirAll(newDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(newDir, "metadata.json"), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("redirect", filepath.Join(newDir, "redirect")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantNew:  true,
+			wantWarn: true,
+		},
+		{
+			name:     "absent state is silent",
+			setup:    func(t *testing.T, newDir string) {},
+			wantNew:  false,
+			wantWarn: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rig := t.TempDir()
+			newDir := RigBeadsWritePath(rig)
+			tt.setup(t, newDir)
+			want := filepath.Join(rig, DirMayor, DirRig, DirBeads)
+			if tt.wantNew {
+				want = newDir
+			}
+			var warn bytes.Buffer
+			if got := rigBeadsPath(rig, &warn); got != want {
+				t.Errorf("rigBeadsPath = %q, want %q", got, want)
+			}
+			if gotWarn := warn.Len() > 0; gotWarn != tt.wantWarn {
+				t.Errorf("warning written = %q, want a warning: %v", warn.String(), tt.wantWarn)
+			}
+		})
+	}
+}
+
+// TestLegacyRigBeadsPathIgnoresTheNewDirectory pins that LegacyRigBeadsPath
+// names mayor/rig/.beads even when <rig>/.beads holds the rig's data, so a
+// caller that tries both locations still reaches the legacy one.
+func TestLegacyRigBeadsPathIgnoresTheNewDirectory(t *testing.T) {
+	t.Parallel()
+	rig := t.TempDir()
+	if err := os.MkdirAll(RigBeadsWritePath(rig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(RigBeadsWritePath(rig), "metadata.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(rig, DirMayor, DirRig, DirBeads)
+	if got := LegacyRigBeadsPath(rig); got != want {
+		t.Errorf("LegacyRigBeadsPath = %q, want %q", got, want)
+	}
+	if got := RigBeadsPath(rig); got != RigBeadsWritePath(rig) {
+		t.Errorf("RigBeadsPath = %q, want the new directory %q", got, RigBeadsWritePath(rig))
 	}
 }
 
