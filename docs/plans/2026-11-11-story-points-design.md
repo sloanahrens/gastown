@@ -123,7 +123,7 @@ Below 60 estimated landings it prints the count and stops. The overseer brings t
 
 ## The split route
 
-The route is behind a setting, `patrols.spec_dispatch.story_points.split_over`, default off (0), and its bead is held for the operator's word.
+The route is behind a setting, `patrols.spec_dispatch.story_points.split_over_minutes`, default off (0), and its bead is held for the operator's word.
 
 The operator's rule reads "over 21 points splits". The retrospective shows that no estimate reaches 21 points, so the route is built on a minutes trigger, and the setting holds that trigger. When the trigger fires, the dispatcher does not sling the bead; it adds the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`, which already keeps a bead off the dispatcher) and a comment with the estimate and the nearest beads, for the overseer or a bird to split. It never splits a bead by itself. The route acts only on an estimate from the rungs with at least two inputs (`sp-rung:all`, `shape-jev`, `shape-embed`); it does not act on `sp-rung:shape` until the shadow recompute shows that rung clears 0.4 on its own.
 
