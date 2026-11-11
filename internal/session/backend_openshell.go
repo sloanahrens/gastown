@@ -688,6 +688,8 @@ type pushGit interface {
 	FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error
 	Rev(ref string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+	MergeBase(a, b string) (string, error)
+	CommitsAhead(base, branch string) (int, error)
 }
 
 // The production push step hands in *git.Git, so this fails the build if its
@@ -707,10 +709,12 @@ func isNonFastForwardRejection(err error) bool {
 
 // pushOrAcceptRemoteAhead pushes branch to origin. A sandbox pushes its commits
 // straight to Forgejo, so a seat that is started again finds the host branch
-// behind its remote counterpart and the push is rejected non-fast-forward. When
-// the local tip is an ancestor of the remote one the remote is simply ahead and
-// the clone inside the sandbox will fetch it, so that counts as pushed. Every
-// other outcome returns the push's own error, and nothing is forced (gt-gii34).
+// behind its remote counterpart and the push is rejected non-fast-forward. After
+// the fetch, the rejected branch is classified (branchRelation): an equal or
+// behind remote counts as pushed, since the clone inside the sandbox fetches
+// what origin holds ahead of the host. A local head that is ahead means the
+// refusal is stale, so the plain push runs again. A diverged branch is refused
+// with the divergence named, and nothing is forced (gt-gii34).
 func pushOrAcceptRemoteAhead(g pushGit, branch string) error {
 	pushErr := g.Push("origin", branch, false)
 	if pushErr == nil {
@@ -730,10 +734,39 @@ func pushOrAcceptRemoteAhead(g pushGit, branch string) error {
 	if err != nil {
 		return pushErr
 	}
-	if ahead, err := g.IsAncestor(local, remote); err != nil || !ahead {
+	rel, err := classifyBranchRelation(local, remote, g.IsAncestor)
+	if err != nil {
 		return pushErr
 	}
-	return nil
+	switch rel {
+	case relationEqual, relationBehind:
+		return nil
+	case relationAhead:
+		return g.Push("origin", branch, false)
+	}
+	d, err := divergenceOf(g, branch, local, remote)
+	if err != nil {
+		return fmt.Errorf("branch %s diverged from origin, and its divergence could not be read (%v); nothing is forced: %s", branch, err, refusalLine(pushErr.Error()))
+	}
+	return divergedRefusal(d, pushErr)
+}
+
+// divergenceOf reads the merge-base of a diverged branch and the commits each
+// side holds that the other lacks.
+func divergenceOf(g pushGit, branch, local, remote string) (divergence, error) {
+	base, err := g.MergeBase(local, remote)
+	if err != nil {
+		return divergence{}, err
+	}
+	localOnly, err := g.CommitsAhead(remote, local)
+	if err != nil {
+		return divergence{}, err
+	}
+	remoteOnly, err := g.CommitsAhead(local, remote)
+	if err != nil {
+		return divergence{}, err
+	}
+	return divergence{Branch: branch, Local: local, Remote: remote, MergeBase: base, LocalOnly: localOnly, RemoteOnly: remoteOnly}, nil
 }
 
 func (b *openshellBackend) Name() string     { return BackendOpenShell }
