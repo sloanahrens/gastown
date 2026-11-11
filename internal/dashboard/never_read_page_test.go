@@ -49,7 +49,7 @@ func assertNoBadAge(t *testing.T, what, text string) {
 type agePane struct {
 	name  string
 	never string
-	fresh string
+	fresh string // a pattern the age a fresh read draws matches
 	draw  func(t *testing.T, dom *pageDOM, stamp string)
 	text  func(t *testing.T, dom *pageDOM) string
 }
@@ -79,7 +79,7 @@ func agePanes() []agePane {
 		{
 			name:  "COST header",
 			never: "never read",
-			fresh: "read ",
+			fresh: `read \S+ ago`,
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderCost", map[string]any{
 					"spend": liveSpend(),
@@ -91,7 +91,7 @@ func agePanes() []agePane {
 		{
 			name:  "Machine",
 			never: "never read",
-			fresh: "read ",
+			fresh: `read \S+ ago`,
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderMachine", map[string]any{
 					"machine": map[string]any{},
@@ -103,7 +103,7 @@ func agePanes() []agePane {
 		{
 			name:  "News",
 			never: "never read",
-			fresh: "read ",
+			fresh: `read \S+ ago`,
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderNews", map[string]any{
 					"news": map[string]any{"at": stamp, "stories": []any{story}},
@@ -114,7 +114,7 @@ func agePanes() []agePane {
 		{
 			name:  "Polecats seats",
 			never: "never read",
-			fresh: "read ",
+			fresh: `read \S+ ago`,
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderPolecats", map[string]any{
 					"summary_at": stamp,
@@ -125,9 +125,22 @@ func agePanes() []agePane {
 			text: func(t *testing.T, dom *pageDOM) string { return dom.element(t, "polecatsnote").Text },
 		},
 		{
+			name:  "Forgejo snapshot",
+			never: "never read",
+			fresh: `snapshot \S+ old`,
+			draw: func(t *testing.T, dom *pageDOM, stamp string) {
+				// The snapshot's note is drawn with the feed: an empty feed returns before it.
+				event := map[string]any{"at": "2026-11-11T02:00:00Z", "actor": "a", "summary": "a push", "repo": "gastown"}
+				dom.call(t, "renderForgejo", map[string]any{
+					"forgejo": map[string]any{"at": stamp, "every_seconds": 300, "events": []any{event}},
+				})
+			},
+			text: func(t *testing.T, dom *pageDOM) string { return dom.element(t, "forgejonote").Text },
+		},
+		{
 			name:  "cloud checks",
 			never: "never read",
-			fresh: "last ran ",
+			fresh: `last ran \S+ ago`,
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderCloud", map[string]any{
 					"cloud": map[string]any{"checks": map[string]any{"at": stamp, "state": "stale", "every_sec": 300}},
@@ -140,7 +153,7 @@ func agePanes() []agePane {
 			// "never scanned" for it, and the helper decides only when.
 			name:  "data quality",
 			never: "never scanned",
-			fresh: "last scanned ",
+			fresh: `last scanned \S+ ago`,
 			draw: func(t *testing.T, dom *pageDOM, stamp string) {
 				dom.call(t, "renderCost", costUsageState(stamp))
 			},
@@ -187,8 +200,8 @@ func TestPageNeverReadAge(t *testing.T) {
 			dom := newPageDOM(t)
 			pane.draw(t, dom, freshStamp())
 			got := pane.text(t, dom)
-			if !regexp.MustCompile(regexp.QuoteMeta(pane.fresh) + `\S+ ago`).MatchString(got) {
-				t.Errorf("%s draws %q for a read taken four minutes ago, want its age after %q", pane.name, got, pane.fresh)
+			if !regexp.MustCompile(pane.fresh).MatchString(got) {
+				t.Errorf("%s draws %q for a read taken four minutes ago, want its age as %q", pane.name, got, pane.fresh)
 			}
 			for _, bad := range []string{"never read", "never scanned"} {
 				if strings.Contains(got, bad) {
