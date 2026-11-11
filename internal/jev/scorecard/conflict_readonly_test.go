@@ -42,6 +42,27 @@ func TestConflictReadOnlyLabelFailsWhenTheCloneCannotOpen(t *testing.T) {
 	}
 }
 
+// The production read-only adapter needs the rig's registry entry to open its
+// clone. A town without one fails the label rather than reading the clone some
+// other way.
+func TestOpenReadOnlyLabelFailsWithoutARigRegistry(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeReadOnlyLandings(t, town,
+		land.LandingRecord{BeadID: "x", Rig: conflict.RigName, Base: readOnlyBase, Head: readOnlyHead, LandedCommit: readOnlyHead, LandedAt: time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)},
+		land.LandingRecord{BeadID: "y", Rig: conflict.RigName, Base: readOnlyBase, Head: readOnlyHead, LandedCommit: readOnlyHead, LandedAt: time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)},
+	)
+	a, err := OpenReadOnly(ConflictBattery, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	item := Item{ID: "x+y", Refs: map[string]string{refConflictBead: "x", refConflictOther: "y"}}
+	if _, err := a.Label(context.Background(), item); err == nil {
+		t.Fatal("a town with no rig registry labeled the pair")
+	}
+}
+
 // Commit ids the read-only label test names. The clone is never asked about
 // them, since it cannot open.
 const (
