@@ -143,6 +143,13 @@ type diskMaintSeams struct {
 	// dispatch runs a pass off the calling goroutine, so a slow registry does
 	// not hold the heartbeat. Nil means one goroutine per pass.
 	dispatch func(fn func())
+	// actionsRepos lists the repositories the Actions retention step plans for;
+	// nil is the landing worker's Forgejo repositories (actionsRetentionRepos).
+	actionsRepos func() ([]actionsRetentionRepo, error)
+	// actionsTokenDir is the directory the landing bot's token is read from by
+	// the Actions retention step; nil is the landing worker's configured directory
+	// or the default, which fails only when no home directory resolves.
+	actionsTokenDir func() (string, error)
 }
 
 // diskMaintenanceSeams returns d's patrol seams with every unset one filled in
@@ -186,6 +193,12 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 	}
 	if s.dispatch == nil {
 		s.dispatch = func(fn func()) { go fn() }
+	}
+	if s.actionsRepos == nil {
+		s.actionsRepos = d.actionsRetentionRepos
+	}
+	if s.actionsTokenDir == nil {
+		s.actionsTokenDir = func() (string, error) { return landingWorkerConfig(d.patrolConfig).ForgejoTokenDir() }
 	}
 	return s
 }
@@ -894,6 +907,10 @@ func (d *Daemon) diskMaintenancePass(now time.Time, mode string, due diskMaintDu
 		return
 	}
 	if due.daily {
+		// The Actions retention step runs once per window, after the targets
+		// have concluded. A deferred pass returns above and leaves it to the
+		// retry, so a held lock never repeats the listing (gt-573420).
+		d.runActionsRetention(s.now(), apply)
 		d.settleDiskMaintenanceWindow(s.now())
 	}
 }

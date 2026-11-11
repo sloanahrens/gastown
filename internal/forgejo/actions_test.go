@@ -2,6 +2,7 @@ package forgejo
 
 import (
 	"context"
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -66,4 +67,31 @@ func TestListRunsQueuedRunHasNoTimingYet(t *testing.T) {
 	assert.Empty(t, got.Runs[0].Started)
 	assert.Empty(t, got.Runs[0].Stopped)
 	assert.Zero(t, got.Runs[0].Duration)
+}
+
+// DeleteRun sends one DELETE to the run's own path with the token, so the
+// retention step removes exactly the run it planned.
+func TestDeleteRunSendsDeleteToTheRunPath(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{status: http.StatusNoContent}
+	c := newTestClient(t, rec)
+
+	require.NoError(t, c.DeleteRun(context.Background(), "sloan", "gastown", 4217))
+	assert.Equal(t, http.MethodDelete, rec.req.Method)
+	assert.Equal(t, "/api/v1/repos/sloan/gastown/actions/runs/4217", rec.req.URL.Path)
+	assert.Equal(t, "token test-token", rec.req.Header.Get("Authorization"))
+}
+
+// A refused delete surfaces as the API error with its status, so the caller
+// can tell a run Forgejo would not remove from a transport failure.
+func TestDeleteRunReturnsTheRefusalAsAnAPIError(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{status: http.StatusConflict, body: []byte(`{"message":"conflict"}`)}
+	c := newTestClient(t, rec)
+
+	err := c.DeleteRun(context.Background(), "sloan", "gastown", 4217)
+	var apiErr *APIError
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, http.StatusConflict, apiErr.StatusCode)
+	assert.True(t, apiErr.IsConflict())
 }

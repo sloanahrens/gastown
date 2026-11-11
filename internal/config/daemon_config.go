@@ -1230,9 +1230,57 @@ type DiskMaintenanceConfig struct {
 	// DiskMaintenanceDefaultCIEngineKeepRepos; an explicit empty list is refused,
 	// because it would leave the base images unprotected.
 	CIEngineKeepRepos []string `json:"ci_engine_keep_repos,omitempty"`
+	// ActionsRetention is the Forgejo Actions run retention step. Nil means the
+	// step does not run at all; a block with enabled false is a dry run.
+	ActionsRetention *DiskMaintenanceActionsRetention `json:"actions_retention,omitempty"`
 	// Targets holds the targets with a cadence of their own. A target absent
 	// here keeps the daily window.
 	Targets map[string]DiskMaintenanceTarget `json:"targets,omitempty"`
+}
+
+// DiskMaintenanceActionsRetention is the Forgejo Actions run retention step. It
+// deletes a repository's workflow runs older than Days, beyond its newest
+// KeepNewest, through the landing bot's token. A run still in progress, and a
+// run on the installed pair's green/ ref, is never deleted. Enabled false logs
+// the plan and deletes nothing; a delete also needs the patrol's mode to be
+// apply, since the patrol changes nothing outside apply.
+type DiskMaintenanceActionsRetention struct {
+	Enabled bool `json:"enabled"`
+	// Days is how old a run must be before it may be deleted. Nil means
+	// DiskMaintenanceDefaultActionsRetentionDays; zero or less is refused.
+	Days *int `json:"days,omitempty"`
+	// KeepNewest is how many of a repository's newest runs are kept whatever
+	// their age. Nil means DiskMaintenanceDefaultActionsKeepNewest; zero or less
+	// is refused.
+	KeepNewest *int `json:"keep_newest,omitempty"`
+}
+
+// RetentionDays returns the age a run must reach before it may be deleted: the
+// default when unset, and an error naming the setting for a value outside one to
+// DiskMaintenanceMaxActionsRetentionDays. It never falls back to the default on
+// an error.
+func (c DiskMaintenanceActionsRetention) RetentionDays() (int, error) {
+	if c.Days == nil {
+		return DiskMaintenanceDefaultActionsRetentionDays, nil
+	}
+	if *c.Days < 1 || *c.Days > DiskMaintenanceMaxActionsRetentionDays {
+		return 0, fmt.Errorf("patrols.disk_maintenance.actions_retention.days = %d: want from 1 to %d",
+			*c.Days, DiskMaintenanceMaxActionsRetentionDays)
+	}
+	return *c.Days, nil
+}
+
+// RetentionKeepNewest returns how many of a repository's newest runs are kept:
+// the default when unset, and an error naming the setting for a value below
+// one. It never falls back to the default on an error.
+func (c DiskMaintenanceActionsRetention) RetentionKeepNewest() (int, error) {
+	if c.KeepNewest == nil {
+		return DiskMaintenanceDefaultActionsKeepNewest, nil
+	}
+	if *c.KeepNewest < 1 {
+		return 0, fmt.Errorf("patrols.disk_maintenance.actions_retention.keep_newest = %d: want at least 1", *c.KeepNewest)
+	}
+	return *c.KeepNewest, nil
 }
 
 // CacheTrimEvery returns the cadence the cache trim runs on: the default when
@@ -1505,6 +1553,17 @@ const (
 	// DiskMaintenanceDefaultCIEnginePruneAge is how long an unused image may sit
 	// before the engine prune removes it (gt-i02983).
 	DiskMaintenanceDefaultCIEnginePruneAge = "48h"
+	// DiskMaintenanceDefaultActionsRetentionDays is how old a Forgejo Actions run
+	// must be before the retention step may delete it: the runs table grows
+	// without bound otherwise (gt-573420).
+	DiskMaintenanceDefaultActionsRetentionDays = 30
+	// DiskMaintenanceMaxActionsRetentionDays bounds the window. The step's cutoff
+	// is a time.Duration, which holds about 292 years; a longer window would
+	// overflow it into a cutoff in the future, and every run would read as old.
+	DiskMaintenanceMaxActionsRetentionDays = 36500
+	// DiskMaintenanceDefaultActionsKeepNewest is how many of a repository's newest
+	// runs the retention step keeps whatever their age (gt-573420).
+	DiskMaintenanceDefaultActionsKeepNewest = 200
 )
 
 // DiskMaintenanceDefaultCIEngineKeepRepos is the default keep list: ci-base, the
@@ -1571,6 +1630,14 @@ func (c *DiskMaintenanceConfig) validate() error {
 	}
 	if _, err := c.CIEnginePruneEvery(); err != nil {
 		return err
+	}
+	if c.ActionsRetention != nil {
+		if _, err := c.ActionsRetention.RetentionDays(); err != nil {
+			return err
+		}
+		if _, err := c.ActionsRetention.RetentionKeepNewest(); err != nil {
+			return err
+		}
 	}
 	if _, err := c.CIEnginePruneAgeDuration(); err != nil {
 		return err

@@ -443,6 +443,17 @@ from `50` to `95`, and a value outside that range is refused when the config is
 read. The early run starts no sooner than fifteen minutes after the last trim
 began, and a sandbox disk reading that fails runs no trim.
 
+`actions_retention` prunes Forgejo Actions runs once per daily window, after
+the targets, for each rig the landing worker serves. A run is deleted only when
+it is older than `days` (default `30`), is not among the newest `keep_newest`
+of its repository (default `200`), has ended, and is not on the green/ ref of
+the installed image pair. A run that is waiting, running or blocked is kept, as
+is any status the step does not know. A block with `enabled` false logs the plan
+and deletes nothing; a delete also needs `mode` to be `apply`. A failed listing
+refuses that repository's plan, and at most 1000 runs a repository are deleted
+per pass. A `days` outside 1 to 36500, or a `keep_newest` below 1, is refused
+when the config is read.
+
 The two environment knobs are read from the environment of the run: the
 daemon's for the plugin and the patrol, the shell's for a hand-run `gt maint`.
 None of the three applies anything by default. A value the run cannot act on

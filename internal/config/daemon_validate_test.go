@@ -147,6 +147,22 @@ func TestValidateDaemonPatrolConfig(t *testing.T) {
 			},
 			want: "cache_trim_early_percent = 20: want a percent from 50 to 95",
 		},
+		{
+			name: "an actions retention window below one day",
+			mutate: func(c *DaemonPatrolConfig) {
+				zero := 0
+				c.Patrols.DiskMaintenance.ActionsRetention = &DiskMaintenanceActionsRetention{Enabled: true, Days: &zero}
+			},
+			want: "actions_retention.days = 0: want from 1 to 36500",
+		},
+		{
+			name: "an actions retention keep count below one",
+			mutate: func(c *DaemonPatrolConfig) {
+				zero := 0
+				c.Patrols.DiskMaintenance.ActionsRetention = &DiskMaintenanceActionsRetention{Enabled: true, KeepNewest: &zero}
+			},
+			want: "actions_retention.keep_newest = 0: want at least 1",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
