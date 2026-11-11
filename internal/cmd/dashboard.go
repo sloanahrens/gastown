@@ -679,7 +679,7 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 	}
 	dashboardPolecats(&s, townRoot, names, sessions, sessionsKnown, ready, recs, seatCache, dispatches, newPoolSessionLister())
 	why.summary(&s)
-	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
+	if tip, installed, behind, err := tailMainPicture(townRoot, why); err == nil {
 		s.MainTip, s.InstalledGT, s.Behind = tip, installed, &behind
 	}
 	if n, err := tailOpenEscalations(townRoot); err == nil {
@@ -904,6 +904,29 @@ func (l *dashWhyLog) note(source, why string) {
 func (l *dashWhyLog) summary(s *dashboard.Summary) {
 	l.note(dashboard.SourceSeats, s.SeatsWhy)
 	l.note(dashboard.SourceReady, s.ReadyWhy)
+}
+
+// dashDeployRepoSource keys the deploy repository's answer in the log's last map.
+const dashDeployRepoSource = "deploy repo"
+
+// deployRepo logs which repository the deploy tracker and the main picture
+// read, once per change: fellBack is "" while the rig's bare repo answers, else
+// the reason it did not and the checkout that did. A nil log records nothing.
+func (l *dashWhyLog) deployRepo(fellBack string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last[dashDeployRepoSource] == fellBack {
+		return
+	}
+	l.last[dashDeployRepoSource] = fellBack
+	if fellBack == "" {
+		l.logf("deploy repo is the rig's bare repo again")
+		return
+	}
+	l.logf("deploy repo: %s", fellBack)
 }
 
 const dashboardSpendTimeout = 25 * time.Second

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1144,7 +1145,7 @@ func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string
 	if n, err := tailReadyToLand(townRoot); err == nil {
 		f.HasReady, f.ReadyToLand = true, n
 	}
-	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
+	if tip, installed, behind, err := tailMainPicture(townRoot, nil); err == nil {
 		f.HasMain, f.MainTip, f.InstalledGT, f.Behind = true, tip, installed, behind
 	}
 	if n, err := tailOpenEscalations(townRoot); err == nil {
@@ -1246,16 +1247,22 @@ func tailReadyToLand(townRoot string) (int, error) {
 	return total, nil
 }
 
-// tailMainPicture is origin/main against the binary running this stream: the
-// two short shas and how many commits the binary is behind. It reads the local
+// tailMainPicture is main against the binary running this stream: the two
+// short shas and how many commits the binary is behind. It reads the local
 // refs only — the summary line must not put a fetch in front of the operator
-// every five minutes.
-func tailMainPicture(townRoot string) (tip, installed string, behind int, err error) {
-	repo, err := version.GetRepoRootForTown(townRoot)
+// every five minutes. why logs which repository answered; nil logs nothing.
+func tailMainPicture(townRoot string, why *dashWhyLog) (tip, installed string, behind int, err error) {
+	return tailMainPictureOf(townRoot, version.BuildCommit(), why)
+}
+
+// tailMainPictureOf is tailMainPicture for the binary built from binary.
+func tailMainPictureOf(townRoot, binary string, why *dashWhyLog) (tip, installed string, behind int, err error) {
+	repo, fellBack, err := tailDeployRepo(townRoot)
 	if err != nil {
 		return "", "", 0, err
 	}
-	info := version.CheckStaleBinary(repo)
+	why.deployRepo(fellBack)
+	info := version.CheckStaleBinaryOf(repo, binary)
 	if info == nil || info.Error != nil || info.Skipped {
 		return "", "", 0, fmt.Errorf("staleness of the installed gt is unknown")
 	}
@@ -2008,15 +2015,40 @@ func (s *tailDeploySource) Poll() []tailLine {
 	return append(out, s.track.observe(lines)...)
 }
 
-// tailGitAncestry answers the tracker's ancestry question in the town's gt
-// source checkout. A town with no checkout answers unknown to every question,
-// so no bead is ever called deployed on a guess.
+// tailGitAncestry answers the tracker's ancestry question in the town's rig
+// repository (see tailDeployRepo). A town with no repository answers unknown to
+// every question, so no bead is ever called deployed on a guess.
 func tailGitAncestry(townRoot string) tailAncestry {
-	repo, err := version.GetRepoRootForTown(townRoot)
+	repo, _, err := tailDeployRepo(townRoot)
 	if err != nil {
 		return func(string, string) (bool, bool) { return false, false }
 	}
 	return func(commit, of string) (bool, bool) { return tailGitIsAncestor(repo, commit, of) }
+}
+
+// tailDeployRepo is the repository the deploy tracker's ancestry check and the
+// main picture read: <town>/gastown/.repo.git, the bare repo every landing
+// refreshes, whose refs/heads/main is main. A town without one reads the source
+// checkout GetRepoRootForTown finds instead, and fellBack names that checkout
+// and the reason. Any other failure to look at the bare repo is an error, not
+// a fallback: an unreadable path is unknown, not absent.
+func tailDeployRepo(townRoot string) (repo, fellBack string, err error) {
+	bare := constants.RigBareRepoPath(filepath.Join(townRoot, "gastown"))
+	info, err := os.Stat(bare)
+	if err == nil {
+		if !info.IsDir() {
+			return "", "", fmt.Errorf("%s is not a directory", bare)
+		}
+		return bare, "", nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", "", err
+	}
+	checkout, err := version.GetRepoRootForTown(townRoot)
+	if err != nil {
+		return "", "", err
+	}
+	return checkout, fmt.Sprintf("%s is absent; reading the source checkout %s", bare, checkout), nil
 }
 
 // tailGitIsAncestor runs git merge-base --is-ancestor in repo: exit 0 is an
