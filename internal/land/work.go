@@ -360,6 +360,13 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 	return false
 }
 
+// FormatOverseerReviewedNote renders the note line OverseerReviewed reads for
+// head: the overseer's waiver for that one head (gt-g8t3m). head is collapsed
+// onto one line like every other note field.
+func FormatOverseerReviewedNote(head string) string {
+	return OverseerReviewedMarker + " " + NoteField(head)
+}
+
 // overseerReviewLine matches "OVERSEER REVIEW <sha> PASS", "OVERSEER REVIEW
 // <sha> FAIL" with an optional " findings=<bead>[,<bead>]" naming the finding
 // beads that failed the landing, or "OVERSEER REVIEW <sha> WAIVED|AUDITED:
