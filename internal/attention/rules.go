@@ -122,6 +122,11 @@ const (
 	// run list for a green commit with no pair could not be read, so whether the
 	// build failed is not known (gt-3vafwr).
 	RuleImagesUnknown = "images.unknown"
+
+	// RuleConfigEnvShadowed is a settings daemon.env key the container's
+	// environment shadowed at start: the pod's value is kept, and the stale
+	// settings entry is what the overseer removes (gt-ih19g6).
+	RuleConfigEnvShadowed = "config.env_shadowed"
 )
 
 var (
@@ -208,6 +213,9 @@ var ruleFlags = map[string]RuleFlags{
 	// overseer's next look, the way the unreadable pair check is, and is not
 	// reported as a clean commit (gt-3vafwr).
 	RuleImagesUnknown: flagsAsk,
+	// The pod's value is already in force, so nothing is broken; the stale
+	// settings entry is for the overseer's next look (gt-ih19g6).
+	RuleConfigEnvShadowed: flagsAsk,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -298,6 +306,7 @@ var kindRules = map[Kind]string{
 	KindScheduledGate:            RuleScheduledGate,
 	KindHostMem:                  RuleHostMemLow,
 	KindHostForgejo:              RuleHostForgejoDown,
+	KindConfigEnvShadowed:        RuleConfigEnvShadowed,
 	KindHostProbe:                RuleHostProbe,
 	KindQuestionNew:              RuleQuestionNew,
 	KindQuestionAnswered:         RuleQuestionAnswered,

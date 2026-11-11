@@ -125,6 +125,9 @@ var ruleOwners = map[string]Owner{
 	// A green commit whose build status could not be read is the overseer's to
 	// look at, the same as the unreadable pair check (gt-3vafwr).
 	RuleImagesUnknown: OwnerOverseer,
+	// A stale daemon.env entry the container shadows is the overseer's to
+	// remove from settings; the person is not woken for it (gt-ih19g6).
+	RuleConfigEnvShadowed: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

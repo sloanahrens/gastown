@@ -1220,6 +1220,12 @@ type Daemon struct {
 	// samples (burst_sampler.go).
 	containerMode bool
 
+	// envShadowed is the daemon.env keys applyDaemonEnv left out at start
+	// because the container's environment already set them (gt-ih19g6). The
+	// config.env_shadowed collector raises them each tick; nil outside container
+	// mode.
+	envShadowed []string
+
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up
@@ -1460,20 +1466,17 @@ func New(config *Config) (*Daemon, error) {
 		logger.Printf("Warning: failed to ensure lifecycle config: %v", err)
 	}
 	patrolConfig := LoadPatrolConfig(config.TownRoot)
+	var envShadowed []string
 	if patrolConfig != nil {
 		// Name the file the config was read from: on a migrated town it is
 		// settings/config.json, not the retired mayor/daemon.json (gt-y3pgh.12).
 		source := PatrolConfigSource(config.TownRoot)
 		logger.Printf("Loaded patrol config from %s", source)
 		// Propagate the daemon config's env to this process and all spawned sessions.
-		for k, v := range patrolConfig.Env {
-			processEnv{}.Setenv(k, v)
-			if agentconfig.LooksLikeSecret(k, v) {
-				logger.Printf("Set env %s=<redacted> from %s", k, source)
-			} else {
-				logger.Printf("Set env %s=%s from %s", k, v, source)
-			}
-		}
+		// In container mode a key the pod already sets differently is kept as the
+		// pod has it (gt-ih19g6); the keys left out are raised as an attention item.
+		envShadowed = applyDaemonEnv(patrolConfig.Env, source, containerModeFromEnv(os.Getenv),
+			daemonEnvSeams{lookup: os.LookupEnv, set: processEnv{}.Setenv}, logger.Printf)
 	}
 	doltEnv := agentconfig.ConfiguredDoltEnv(config.TownRoot)
 	for _, key := range agentconfig.DoltEndpointEnvKeys {
@@ -1543,6 +1546,7 @@ func New(config *Config) (*Daemon, error) {
 		// process environment here, in the one constructor production runs,
 		// keeps the burst sampler from reading it (burst_sampler.go).
 		containerMode: containerModeFromEnv(os.Getenv),
+		envShadowed:   envShadowed,
 	}
 
 	// A rig whose docked/parked status cannot be read is treated as not

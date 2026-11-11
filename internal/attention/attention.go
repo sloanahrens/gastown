@@ -136,6 +136,10 @@ const (
 	// pair is missing could not be read, so whether its build failed is unknown
 	// (gt-3vafwr). It is not a clean commit, and the next readable list clears it.
 	KindImagesUnknown Kind = "images-unknown"
+	// KindConfigEnvShadowed: a settings daemon.env key was not applied at
+	// start, because the container's environment already sets it to another
+	// value (gt-ih19g6).
+	KindConfigEnvShadowed Kind = "config-env-shadowed"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -152,6 +156,7 @@ func Kinds() []Kind {
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
+		KindConfigEnvShadowed,
 	}
 }
 
