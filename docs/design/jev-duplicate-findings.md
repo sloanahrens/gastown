@@ -10,7 +10,7 @@ When a Found, review-deep or om-followup bead is filed, retrieve the closest exi
 
 Nothing reads the answer until an offline replay over history has been reported to the operator. A live hook into filing is a separate design that waits on that report.
 
-Before changing the spend cap, the 429 retry or the fail-safe rules, read `internal/attention/jevreplay/jevreplay.go`, the live implementation of the cap and the one retry that the replay reuses unchanged in meaning, and `internal/jev` for `Client.Choice` (design history: gt-sxg5u).
+Before changing the spend cap, the 429 retry or the fail-safe rules, read the live code: the cap in `internal/spendcap`, the 429 wait-and-retry in `internal/jev/dedupe` (`askJev`), and `internal/jev` for `Client.Choice` (design history: gt-sxg5u). The offline replay that would reuse that retry unchanged is designed but not built; no package on main holds it.
 
 ## What the data allows
 

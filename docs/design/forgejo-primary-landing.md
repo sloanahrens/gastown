@@ -21,7 +21,7 @@ files, and ends with the slice list the operator files beads from.
 
 > **Superseded in part (gt-fn9e6.32).** The local gate and the
 > `--force-with-lease` push this doc kept as a fallback are removed;
-> `merge_queue.forgejo` is mandatory, `scripts/forgejo-rollback.sh` is gone, and
+> `merge_queue.forgejo` is mandatory, the rollback script is gone, and
 > `scripts/forgejo-resync.sh` is the one recovery. The flake policy ("No flake
 > policy", Slice 2) is deleted with it: no reruns, no flake or test-budget
 > beads, and a red candidate gate is a rejection. `land.LandGate`, the local
@@ -179,10 +179,11 @@ retry budget, exactly as a local lint timeout does today.
 This is a deletion slice, and it is larger than one file. Removing the policy
 means removing:
 
-- `internal/land/flake.go` whole: `GateBead`, `GateBeadKind` and its three
-  constants, `GateBeads`, `Flake`, `NoTestNamed`, `MinPackageFlakeTests`,
-  `applyFlakePolicy`, `flakeVerdict`, `fileGateBead`, `failedPackages`,
-  `flakyTests`.
+- The flake file is gone from `internal/land`: nothing there defines `GateBead`,
+  `GateBeads`, `Flake`, `applyFlakePolicy` or `flakeVerdict`, so a failed
+  candidate gate has no flake branch to take. It is rejected (`RejectGate`)
+  with the failed step's command and output tail, and the bead returns for
+  rework.
 - From `internal/land/land.go`: the `Rerun` and `GateBeads` fields on `Lander`,
   `Result.Rerun`, `Result.Flaky`, and the whole flake branch (`Land`'s
   `!gateRes.Passed` arm) that calls `applyFlakePolicy`.
@@ -191,10 +192,10 @@ means removing:
   `BudgetOverrun` and `PackageResult` types, and the parsers
   `parseGoTestOutput`, `parseTestDuration`, `parseBudgetOverruns` with their
   regexes.
-- `internal/landworker/gatebeads.go` whole (`GateBeads`, `FileGateBead`,
-  `LabelFlake`, `LabelTestBudget`, `FlakeTitle`, `PackageFlakeTitle`,
-  `BudgetTitle`), plus the daemon wiring in `internal/daemon/landing_worker.go`
-  that builds it and the `landRerun`/`rerunCommand` helpers.
+- The gate-bead code is gone from `internal/landworker`: nothing files a flake
+  or test-budget bead. The daemon's landing worker
+  (`internal/daemon/landing_worker.go`) builds no gate-bead filer and has no
+  `landRerun` or `rerunCommand` helper.
 - `gateRecord` must stay in some form: `Lander.record` uses it to fill
   `LandingRecord.GateResult`. Replace it with a non-flake step summary, do not
   delete the call.
@@ -401,11 +402,10 @@ logs, bots/tokens)".
 The deletion in "No flake policy" above, and nothing else. It changes the live
 path, so it lands on its own and is called out in the landing note.
 
-Files: `internal/land/flake.go` (delete), `internal/land/flake_test.go`
-(delete), `internal/land/land.go`, `internal/land/gate.go`,
-`internal/landworker/gatebeads.go` (delete), `internal/landworker/gatebeads_test.go`
-(delete), `internal/daemon/landing_worker.go`, and every test that names
-`Rerun`, `GateBeads` or `applyFlakePolicy`.
+Files: the flake and gate-bead files are already gone from main, and nothing
+in the code names `GateBeads` or `applyFlakePolicy`. The slice's other files
+were `internal/land/land.go`, `internal/land/gate.go` and
+`internal/daemon/landing_worker.go`.
 
 Needs: none. Covers: "removal of flake policy".
 
@@ -540,7 +540,8 @@ Pause landing, preflight `GitHub main == Forgejo main`, repoint `.repo.git`
 origins, `rig.git_url` and crew clones, enable the mirror, resume. Rollback is
 the reverse, triggered by two consecutive infra failures.
 
-Files: `scripts/forgejo-cutover.sh` (new), `scripts/forgejo-rollback.sh` (new),
+Files: `scripts/forgejo-cutover.sh` (new), the rollback script (planned here,
+now gone; see the note at the top),
 `docs/forgejo-runbook.md` (the runbook from slice 4 grows the cutover section).
 
 Needs: 9, 10, 11. Covers: "cutover tooling".
