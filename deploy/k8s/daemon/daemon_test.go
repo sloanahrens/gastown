@@ -1745,8 +1745,9 @@ func daemonDeclaration(t *testing.T, data []byte, file, name string) string {
 
 // TestReadinessProbeUsesTheReadyAnswer holds the readiness probe to the ready
 // answer in the standard and the rehearsal render: gt status --line --ready
-// exits 0 for a fresh report with every non-green field recorded, so a pod
-// with an accepted non-green state becomes Ready. The timings stay as they were.
+// exits 0 for a fresh report with every non-green field recorded or an
+// attention row, so a pod with an accepted non-green state or a person's queue
+// becomes Ready. The timings stay as they were.
 func TestReadinessProbeUsesTheReadyAnswer(t *testing.T) {
 	t.Parallel()
 	renders := []struct {
