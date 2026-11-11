@@ -245,7 +245,7 @@ func (a *conflictAdapter) Label(ctx context.Context, item Item) (Labeling, error
 		if err != nil {
 			return Labeling{}, err
 		}
-		known = heldBead && heldOther
+		known = heldBead.IsPass() && heldOther.IsPass()
 	}
 	if known {
 		fb, err := a.landedFiles(ctx, bead, landedBead)
@@ -364,27 +364,26 @@ func (a *conflictAdapter) landedFiles(ctx context.Context, bead string, rec *lan
 	return files, nil
 }
 
-// holdsLanding reports whether the clone holds both commits of a landing, the
-// base and the head its changed files are read between. A read-only adapter
-// asks first, and a commit it lacks reads as not held, which leaves the pair
-// unlabeled. A rev-parse failure reads the same way, as isAncestor does, so
-// it never becomes a negative label. A fetching adapter reports every landing
-// as held, since its clone fetches on the first read. A ref that fails the
-// safety check reports held, so landedFiles refuses it as before.
-func (a *conflictAdapter) holdsLanding(ctx context.Context, rec *land.LandingRecord) (bool, error) {
+// holdsLanding says whether the clone holds both commits of a landing, the base
+// and the head its changed files are read between. A read-only adapter asks
+// first. A commit it lacks is Unknown, which leaves the pair unlabeled, as
+// isAncestor leaves a commit the clone cannot trace. A fetching adapter reports
+// Pass for every landing, since its clone fetches on the first read. A ref that
+// fails the safety check reports Pass, so landedFiles refuses it as before.
+func (a *conflictAdapter) holdsLanding(ctx context.Context, rec *land.LandingRecord) (guard.Result, error) {
 	if !a.readOnly || !safeRef(rec.Base) || !safeRef(rec.Head) {
-		return true, nil
+		return guard.Pass(), nil
 	}
 	repo, err := a.clone(ctx)
 	if err != nil {
-		return false, err
+		return guard.Result{}, err
 	}
 	for _, ref := range []string{rec.Base, rec.Head} {
 		if _, err := repo.Run(ctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
-			return false, nil
+			return guard.Unknown(fmt.Errorf("resolving %s: %w", ref, err)), nil
 		}
 	}
-	return true, nil
+	return guard.Pass(), nil
 }
 
 // isAncestor reports whether commit anc is an ancestor of desc. The merge base of
