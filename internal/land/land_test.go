@@ -3316,3 +3316,92 @@ func TestPolicyRejectionCountsDescriptionAcceptance(t *testing.T) {
 		t.Errorf("bead with no boxes: rejection = %+v", rej)
 	}
 }
+
+// TestReviewUsageHookCalledOnceWithRunBounds: the usage hook is told of each om
+// review once, after its verdict is final, whatever that verdict is. The bead,
+// rig and tree it judged are named, and the window it ran in is the run's own:
+// a retried execution error is one review, not two (gt-6qc3nw.13).
+func TestReviewUsageHookCalledOnceWithRunBounds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		review func(f *landFixture)
+	}{
+		{name: "approve", review: func(f *landFixture) {}},
+		{name: "request changes", review: func(f *landFixture) {
+			f.review.fn = func(string) (Verdict, error) {
+				return Verdict{Verdict: VerdictRequestChanges, Score: 0.4}, nil
+			}
+		}},
+		{name: "retried execution error", review: omFailsThenApprove},
+		{name: "no verdict", review: func(f *landFixture) {
+			f.review.fn = func(string) (Verdict, error) { return Verdict{}, omError("the backend exited 1") }
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			tc.review(f)
+			l := f.lander()
+			var got []ReviewUsage
+			l.UsageSink = func(_ context.Context, u ReviewUsage) { got = append(got, u) }
+			// The landing's own result is not what this test asserts: a refused
+			// or verdict-less review returns its error, and the hook is the
+			// subject here.
+			_, _ = l.Land(context.Background(), f.work)
+			if len(got) != 1 {
+				t.Fatalf("usage hook calls = %d, want 1 for one om review", len(got))
+			}
+			u := got[0]
+			if u.BeadID != "gt-abc" || u.Rig != "gastown" {
+				t.Errorf("usage names bead %q rig %q, want gt-abc gastown", u.BeadID, u.Rig)
+			}
+			if len(f.review.calls) == 0 || u.Dir != f.review.calls[0][0] {
+				t.Errorf("usage dir = %q, want the tree om reviewed %v", u.Dir, f.review.calls)
+			}
+			if u.Start.IsZero() || u.End.Before(u.Start) {
+				t.Errorf("usage window [%v, %v] is not a run's bounds", u.Start, u.End)
+			}
+		})
+	}
+	t.Run("nil sink lands unchanged", func(t *testing.T) {
+		t.Parallel()
+		f := newLandFixture(t)
+		res, err := f.lander().Land(context.Background(), f.work)
+		if err != nil {
+			t.Fatalf("Land with no usage sink: %v", err)
+		}
+		if got := f.originMain(); got != res.LandedCommit {
+			t.Errorf("origin/main is %s, want the landed commit %s", got, res.LandedCommit)
+		}
+	})
+}
+
+// TestReviewUsageWindowIsInjectedClock: the window the usage hook is told of is
+// read from the landing's clock, not the wall clock. The clock is fixed before
+// the review and moved while it runs, so the hook must receive exactly the
+// start the review opened with and the end it closed at (gt-6qc3nw.13).
+func TestReviewUsageWindowIsInjectedClock(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := start.Add(7 * time.Minute)
+	now := start
+	f.review.fn = func(string) (Verdict, error) {
+		now = end
+		return Verdict{Verdict: VerdictApprove, Score: 0.9}, nil
+	}
+	l := f.lander()
+	l.Now = func() time.Time { return now }
+	var got []ReviewUsage
+	l.UsageSink = func(_ context.Context, u ReviewUsage) { got = append(got, u) }
+	// The landing's own result is not asserted here: the hook's window is.
+	_, _ = l.Land(context.Background(), f.work)
+	if len(got) != 1 {
+		t.Fatalf("usage hook calls = %d, want 1", len(got))
+	}
+	if !got[0].Start.Equal(start) || !got[0].End.Equal(end) {
+		t.Errorf("usage window = [%v, %v], want the injected clock's [%v, %v]", got[0].Start, got[0].End, start, end)
+	}
+}

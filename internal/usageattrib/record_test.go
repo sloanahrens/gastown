@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -303,6 +304,157 @@ func TestWriteRefusesRecordWithNoWorkspace(t *testing.T) {
 	if _, err := os.Stat(recordPathFor(t, dir)); !os.IsNotExist(err) {
 		t.Errorf("refused write created the record (stat error %v)", err)
 	}
+}
+
+// A run whose transcripts could not be listed leaves a record file: no session, incomplete,
+// and the reason in its error field. A reason is required.
+func TestMarkIncompleteWritesRecordWithReason(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := MarkIncomplete(dir, factsIn("ws-a"), "reading project directory: permission denied"); err != nil {
+		t.Fatalf("mark of a run with no record: %v", err)
+	}
+	var got storedRecord
+	if err := json.Unmarshal(mustRead(t, recordPathFor(t, dir)), &got); err != nil {
+		t.Fatalf("decoding the record: %v", err)
+	}
+	if got.Complete || got.Error != "reading project directory: permission denied" || len(got.Sessions) != 0 {
+		t.Errorf("record complete %v error %q sessions %v, want incomplete, the reason, and no session",
+			got.Complete, got.Error, got.Sessions)
+	}
+	if err := MarkIncomplete(dir, factsIn("ws-a"), ""); err == nil {
+		t.Error("mark with no reason: no error")
+	}
+}
+
+// A file that already counts sessions keeps them and its totals when a run is marked
+// incomplete, and a later write of new sessions keeps the mark.
+func TestMarkIncompleteKeepsCountedSessions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	f := factsIn("ws-a")
+	if err := Write(dir, Build(f, []SessionUsage{sessA}), []string{"s-a"}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	var before storedRecord
+	if err := json.Unmarshal(mustRead(t, recordPathFor(t, dir)), &before); err != nil {
+		t.Fatalf("decoding the record: %v", err)
+	}
+	if err := MarkIncomplete(dir, f, "boom"); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	var marked storedRecord
+	if err := json.Unmarshal(mustRead(t, recordPathFor(t, dir)), &marked); err != nil {
+		t.Fatalf("decoding the marked record: %v", err)
+	}
+	if marked.Complete || marked.Error != "boom" || !equalStrings(marked.Sessions, []string{"s-a"}) ||
+		!reflect.DeepEqual(marked.Totals, before.Totals) {
+		t.Errorf("marked record complete %v error %q sessions %v totals %+v, want incomplete with s-a and its totals %+v",
+			marked.Complete, marked.Error, marked.Sessions, marked.Totals, before.Totals)
+	}
+
+	if err := Write(dir, Build(f, []SessionUsage{sessB}), []string{"s-b"}); err != nil {
+		t.Fatalf("write of a later session: %v", err)
+	}
+	var after storedRecord
+	if err := json.Unmarshal(mustRead(t, recordPathFor(t, dir)), &after); err != nil {
+		t.Fatalf("decoding the record after the write: %v", err)
+	}
+	if after.Complete || after.Error != "boom" || !equalStrings(after.Sessions, []string{"s-a", "s-b"}) {
+		t.Errorf("after a later write complete %v error %q sessions %v, want incomplete, boom, and both sessions",
+			after.Complete, after.Error, after.Sessions)
+	}
+}
+
+// MarkIncomplete refuses a run with no workspace, and a file it cannot merge into:
+// one it did not write, one with no sessions list, one of another workspace, or a
+// path it cannot read. Each refusal leaves the file as it was.
+func TestMarkIncompleteRefusesWhatItCannotMerge(t *testing.T) {
+	t.Parallel()
+	t.Run("run with no workspace", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := MarkIncomplete(dir, factsIn(""), "boom"); err == nil {
+			t.Fatal("mark of a run with no workspace: no error")
+		}
+		if _, err := os.Stat(recordPathFor(t, dir)); !os.IsNotExist(err) {
+			t.Errorf("refused mark created the record (stat error %v)", err)
+		}
+	})
+	for _, c := range []struct{ name, content string }{
+		{"file this package did not write", "{not json"},
+		{"file with no sessions list", "{}"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := recordPathFor(t, dir)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(c.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := MarkIncomplete(dir, factsIn("ws-a"), "boom"); err == nil {
+				t.Error("mark over the file: no error")
+			}
+			if got := mustRead(t, path); string(got) != c.content {
+				t.Errorf("refused mark changed the file to %q", got)
+			}
+		})
+	}
+	t.Run("file of another workspace", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"}); err != nil {
+			t.Fatalf("first write: %v", err)
+		}
+		path := recordPathFor(t, dir)
+		before := mustRead(t, path)
+		if err := MarkIncomplete(dir, factsIn("ws-b"), "boom"); err == nil {
+			t.Error("mark of another workspace's record: no error")
+		}
+		if got := mustRead(t, path); string(got) != string(before) {
+			t.Error("refused mark changed another workspace's record")
+		}
+	})
+	t.Run("path that cannot be read", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := recordPathFor(t, dir)
+		if err := os.MkdirAll(path, 0o755); err != nil { // a directory where the record file goes
+			t.Fatal(err)
+		}
+		if err := MarkIncomplete(dir, factsIn("ws-a"), "boom"); err == nil {
+			t.Error("mark over an unreadable path: no error")
+		}
+	})
+	t.Run("record that will not encode", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		f := factsIn("ws-a")
+		f.Start = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC) // a year JSON cannot encode
+		if err := MarkIncomplete(dir, f, "boom"); err == nil {
+			t.Fatal("mark of a record that will not encode: no error")
+		}
+		if _, err := os.Stat(recordPathFor(t, dir)); !os.IsNotExist(err) {
+			t.Errorf("a record that did not encode left a file behind: %v", err)
+		}
+	})
+	t.Run("beads directory that cannot be made", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		beads := filepath.Join(dir, "beads")
+		if err := os.Symlink(filepath.Join(dir, "nowhere"), beads); err != nil { // a dangling symlink
+			t.Fatal(err)
+		}
+		if err := MarkIncomplete(dir, factsIn("ws-a"), "boom"); err == nil {
+			t.Fatal("mark with no beads directory it can make: no error")
+		}
+		if _, err := os.Lstat(beads); err != nil {
+			t.Errorf("the beads symlink was changed: %v", err)
+		}
+	})
 }
 
 // Eight runs for one bead end at once. Each merges into the file the others have just

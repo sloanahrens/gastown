@@ -576,6 +576,10 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	} else {
 		d.logger.Printf("landing_worker: %s: om review OFF (patrols.landing_worker.review=false); landings record om_verdict skipped", rigName)
 	}
+	// The om review's usage record is written as each review returns, from the
+	// transcripts its run wrote (gt-6qc3nw.13). The sink lives as long as this
+	// rig's worker, so a bead's no-transcript note is logged once for it.
+	usage := &omUsageSink{townRoot: townRoot, logf: d.logger.Printf}
 	lander := &land.Lander{
 		Repo:               repo,
 		Remote:             landingRemote,
@@ -604,6 +608,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		// (gt-h4cvi).
 		BirdOwned:      birdOwnedAssignee,
 		RejectionAlert: d.rejectionAlert(),
+		UsageSink:      usage.record,
 	}
 	// A rig lands through its Forgejo CI: the candidate gate runs the merged
 	// tree and the PR merger writes the target. merge_queue.forgejo is

@@ -226,6 +226,12 @@ func ProjectTranscripts(townRoot, workDir string) ([]string, error) {
 	return projectTranscriptsWith(townRoot, workDir, config.ClaudeConfigDir, os.UserHomeDir)
 }
 
+// ProjectTranscriptsFrom is ProjectTranscripts with the config dir and home the caller
+// names, for a caller that carries its environment as arguments, as a test does.
+func ProjectTranscriptsFrom(townRoot, workDir string, configDirFor, userHomeDir func() (string, error)) ([]string, error) {
+	return projectTranscriptsWith(townRoot, workDir, configDirFor, userHomeDir)
+}
+
 // projectTranscriptsWith is ProjectTranscripts over the config dir and home the
 // caller names, as claudeProjectDirsWith is, so a test does not read the process
 // environment.
