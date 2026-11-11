@@ -255,6 +255,25 @@ button.jvfold{cursor:pointer}
 button.jvfold:hover{color:var(--text)}
 .jvmore{margin-top:2px}
 .jvstale td{color:var(--dim)}
+/* The JEV header, the spend bar, and the groups under it. The bar's track is
+   the panel's line colour and its fill the good colour; a day at or over the cap
+   fills red. A group's heading is small and dim, so the figures carry the panel. */
+.jvhead{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;margin-bottom:4px}
+.jvtitle{font-weight:600}
+.jvspend{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;margin-bottom:8px}
+.jvbar{position:relative;display:inline-block;width:160px;max-width:100%;height:8px;border-radius:4px;background:var(--line);overflow:hidden}
+.jvbar i{position:absolute;left:0;top:0;bottom:0;background:var(--green);border-radius:4px}
+.jvbar.over i{background:var(--red)}
+.jvgroup{margin:8px 0 2px}
+.jvgh{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim)}
+.jvearn{border-collapse:collapse;max-width:100%}
+.jvearn th,.jvearn td{padding:2px 10px 2px 0;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+.jvearn th.n,.jvearn td.n{text-align:right}
+.jvcauses{display:flex;flex-wrap:wrap;gap:2px 8px}
+.jvcauses>section>h2{padding:2px 8px;border-bottom:0;text-transform:none;letter-spacing:0;font-size:11px}
+.jvretire{margin-top:2px;overflow-wrap:anywhere}
+section[data-fold="jev.batteries"]>.body{overflow-x:auto}
+@media (max-width:640px){.jvbar{width:100px}.jvtable td,.jvearn td{overflow-wrap:anywhere}}
 /* A Mango row is a multi-line block, so every cell aligns to its top and only
    the first body row drops the rule under the header. */
 .mgtable td{vertical-align:top;padding:6px 10px 6px 0;border-top:1px solid var(--line)}
@@ -3551,10 +3570,10 @@ function costUsage(box, u, s) {
 }
 
 // panelFolds keeps each folded block of a panel by its key — the Cost panel's
-// usage blocks and the om review panel's rework table — built once like the
-// chart folds: a redraw refills the fold's body and its heading's chip and date,
-// so a reading that arrives every few seconds does not stack a second fold on
-// the same key.
+// usage blocks, the om review panel's rework table, and the JEV panel's battery
+// table and STUCK causes — built once like the chart folds: a redraw refills the
+// fold's body and its heading's chip and date, so a reading that arrives every
+// few seconds does not stack a second fold on the same key.
 const panelFolds = {};
 // panelFold draws a closed fold under key into box, titled title, with line as
 // the one line its heading shows while closed, and returns it. Its heading holds
@@ -3729,31 +3748,35 @@ function costGCP(box, c) {
   if (!rows.length && late) box.append(el("div", "warnc", "GCP budget · patrol overdue, no alert on its last report"));
 }
 
-// The JEV panel, under the Tier sweeps and folded until opened. The title line
-// carries the totals, the scorecard window with the oldest score's age, and a
-// chip per verdict; each battery is a table row, its score's age under its name
-// and its not-yet questions folded behind their count. The scorecard is the
-// cache a refresh writes, so both ages come from the score blocks' scored_at
-// and never from the read: the file is re-read every minute however old the
-// scores it carries are. A failed or stale read says unavailable on the title
-// line and draws no rows, since the last window's verdicts would pass as
+// The JEV panel, under the Tier sweeps and folded until opened. The panel reads
+// as the operator's glance: a header line with the scores' age, the batteries
+// ok and off, and the spend bar against the cap with the top caller; then
+// EARNING with each question's lift, labeled count and consumer; WATCHING; STUCK
+// with the three causes, each opening its question list; RETIRE CANDIDATES; and
+// the battery table folded under "all batteries". The groups come from the
+// server's summary, so the page sorts nothing itself. The scorecard is the
+// cache a refresh writes, so the ages come from the scored_at stamps and never
+// from the read: the file is re-read every minute however old the scores it
+// carries are. A failed or stale read says unavailable on the title line and
+// draws no groups or rows, since the last window's verdicts would pass as
 // current. A battery whose refresh failed draws the last good block the cache
-// kept and says so, or its name alone when there was none. No value and no
-// status means the panel is left out; a value with no_scorecard means no
+// kept and says so, or its name alone when there was none. A reused battery
+// says when its log was last unchanged, and is never drawn as stale. No value
+// and no status means the panel is left out; a value with no_scorecard means no
 // refresh has run, and the title says how to make one. The chips take the
-// tokens every other panel colours with, so both themes read them; the title's
-// tooltip gives each verdict's meaning.
+// tokens every other panel colours with, so both themes read them.
 const JV_VERDICTS = ["earning", "no-signal", "not-yet"];
 const JV_CLASS = {earning: "jv-earning", "no-signal": "jv-nosignal", "not-yet": "jv-notyet"};
-const JV_MEANING = {
-  earning: "enough labels and a signal",
-  "no-signal": "enough labels, nothing beyond the base rate",
-  "not-yet": "under 30 labels",
-};
 // The batteries whose not-yet questions the operator opened. The panel is drawn
 // again on every event, so a row that folded itself back would lose the place
 // the operator had opened it at.
 const jevOpened = new Set();
+// The STUCK causes, in the order the panel draws them.
+const JV_CAUSES = [
+  {key: "no_label_rule", label: "no label rule"},
+  {key: "only_positive", label: "only positive labels"},
+  {key: "zero_positives", label: "zero positives"},
+];
 
 function jevPct(v) { return (v * 100).toFixed(1) + "%"; }
 
@@ -3774,15 +3797,21 @@ function jevQuestionChip(q) {
 }
 
 // jevRow draws one battery: its name with the age of its score, its counts,
-// then its questions as chips. A battery with no log in the window is a dash
-// row; a kept or lost line says so in the questions cell. A battery counting
-// something other than items says its own unit after the count, and one whose
-// report skipped lines says how many went unanswered.
-function jevRow(b) {
+// then its questions as chips. A battery the refresh reused says when its log
+// was last unchanged instead of an age, since an old block is not a stale one.
+// A battery with no log in the window is a dash row; a kept or lost line says
+// so in the questions cell. A battery counting something other than items says
+// its own unit after the count, and one whose report skipped lines says how
+// many went unanswered.
+function jevRow(b, reusedAt) {
   const tr = el("tr", b.failed ? "jvstale" : "");
   const name = el("td", "jvname");
   name.append(el("span", "", b.name));
-  if (b.scored_at) {
+  if (reusedAt) {
+    const kept = el("div", "empty", "unchanged since " + reusedAt.slice(0, 10));
+    kept.title = "the refresh kept this block: its log is unchanged since it was scored";
+    name.append(kept);
+  } else if (b.scored_at) {
     const scored = el("div", "empty", "scored " + age(b.scored_at) + " ago");
     scored.title = "when this battery's score was computed";
     name.append(scored);
@@ -3829,13 +3858,184 @@ function jevRow(b) {
   return tr;
 }
 
-// renderJev draws the JEV panel: the totals as the title line with the
-// scorecard's window and the oldest score's age (or that the age cannot be
-// known), three verdict counts as chips beside them, then one table row per
-// battery in name order, its score's age under its name, its earning and
-// no-signal questions as chips and the not-yet ones folded. A cache no refresh
-// has written yet says how to make one. The counts come from the server's
-// Tally, so the page never adds them up.
+// jevGroup draws one heading of the panel's groups, with its name in capitals.
+function jevGroup(title) {
+  const g = el("div", "jvgroup");
+  g.append(el("div", "jvgh", title));
+  return g;
+}
+
+// jevSpendLine draws the spend bar: today's dollars against the daily cap, with
+// the top caller of the spend window beside it. Without a summary the window's
+// dollars come from the Jev spend row. A figure no read gave is said, not drawn
+// as zero.
+function jevSpendLine(sum, jev) {
+  const line = el("div", "jvspend");
+  const sp = (sum && sum.spend) || {};
+  const win = sp.window_usd != null ? sp.window_usd : (jev ? jev.usd : null);
+  if (sp.cap_unreadable) {
+    line.append(el("span", "badc", "the daily cap could not be read"));
+  } else if (sp.today_usd != null && sp.cap_usd != null && sp.cap_usd > 0) {
+    const over = sp.today_usd >= sp.cap_usd;
+    const bar = el("span", "jvbar" + (over ? " over" : ""));
+    const fill = el("i");
+    fill.style.width = Math.min(100, sp.today_usd / sp.cap_usd * 100).toFixed(1) + "%";
+    bar.append(fill);
+    bar.title = "today's spend against the daily cap";
+    line.append(bar, el("span", over ? "badc" : "", "$" + sp.today_usd.toFixed(2) + " of $" + sp.cap_usd.toFixed(2)));
+  } else if (sp.today_usd != null) {
+    line.append(el("span", "", "$" + sp.today_usd.toFixed(2) + " today · no cap set"));
+  } else if (win != null) {
+    line.append(el("span", "", "$" + win.toFixed(2) + " in " + (sp.window || (jev && jev.window) || "the window")));
+  } else {
+    line.append(el("span", "empty", "spend unavailable"));
+  }
+  if (jev && jev.top_caller) {
+    const n = jev.top_caller_calls || 0;
+    line.append(el("span", "empty", " · top caller " + jev.top_caller + " (" + n + (n === 1 ? " call)" : " calls)")));
+  }
+  return line;
+}
+
+// jevHeader draws the header line: when the scores were computed, the batteries
+// that are ok, and how many are off. A battery that is off is not counted as ok.
+// The off list is the summary's, so without a summary the header says it is
+// unavailable rather than counting every battery as ok and reporting none off,
+// which would read as a healthy town.
+function jevHeader(sum, sc, off, jev) {
+  const box = el("div", "jvhead");
+  let line;
+  if (!sum) {
+    line = "Jev summary unavailable";
+  } else {
+    const at = sum.refreshed ? sum.refreshed : sc.scored_at;
+    const ok = (sc.batteries || []).filter(b => !off.has(b.name) && !b.failed).length;
+    line = (at ? "scored " + age(at) + " ago" : "score time unknown") +
+      " · " + ok + (ok === 1 ? " battery ok" : " batteries ok") + " · " + off.size + " off";
+  }
+  box.append(el("div", "jvtitle", line));
+  box.append(jevSpendLine(sum, jev));
+  return box;
+}
+
+// jevEarningRow draws one earning question: its name, its lift over the base
+// rate, its labeled count and its consumer. A question with no consumer is the
+// row that asks for one, so its consumer is drawn in the warning colour.
+function jevEarningRow(e) {
+  const tr = el("tr");
+  tr.append(el("td", "jvname", e.battery + "." + e.id));
+  if (e.lift != null) {
+    const lift = el("td", "n", (e.lift >= 0 ? "+" : "") + jevPct(e.lift));
+    lift.title = "precision at the cut minus the base rate";
+    tr.append(lift);
+  } else {
+    tr.append(el("td", "empty", e.no_lift || "-"));
+  }
+  tr.append(el("td", "n", String(e.labeled)));
+  const none = e.used_by === "none";
+  const used = el("td", none ? "warnc" : "", e.used_by);
+  if (none) used.title = "no gate or queue reads this question: it needs a consumer";
+  tr.append(used);
+  return tr;
+}
+
+// jevEarningGroup draws EARNING: the earning questions in the summary's order,
+// each with its lift, labeled count and consumer.
+function jevEarningGroup(list) {
+  const g = jevGroup("EARNING");
+  if (!list.length) {
+    g.append(el("div", "empty", "no question earns yet"));
+    return g;
+  }
+  const table = el("table", "jvearn");
+  const head = el("tr");
+  head.append(el("th", "", "question"), el("th", "n", "lift"), el("th", "n", "labeled"), el("th", "", "used by"));
+  const thead = document.createElement("thead"); thead.append(head); table.append(thead);
+  const body = document.createElement("tbody"); table.append(body);
+  for (const e of list) body.append(jevEarningRow(e));
+  g.append(table);
+  return g;
+}
+
+// jevWatchingGroup draws WATCHING: the not-yet questions with labels of both
+// classes, each with its counts.
+function jevWatchingGroup(list) {
+  const g = jevGroup("WATCHING");
+  if (!list.length) {
+    g.append(el("div", "empty", "none"));
+    return g;
+  }
+  for (const w of list) {
+    g.append(el("div", "", w.name + " · labeled " + w.labeled + " · " + w.positives + " positive, " + w.negatives + " negative"));
+  }
+  return g;
+}
+
+// jevCauseFold draws one STUCK cause as the page's shared fold: its count in
+// the heading and the names of the questions it holds in the body. It starts
+// folded, and the foldable remembers the reader's choice across a redraw.
+function jevCauseFold(box, c, cause) {
+  const n = cause.count || 0;
+  const f = panelFold(box, "jev.cause." + c.key, c.label, "");
+  f.bits.textContent = " · " + n;
+  for (const name of cause.names || []) f.body.append(el("div", "empty", name));
+}
+
+// jevStuckGroup draws STUCK: the not-yet questions that cannot earn for want of
+// labels, counted by cause.
+function jevStuckGroup(stuck) {
+  const g = jevGroup("STUCK");
+  const line = el("div", "jvcauses");
+  for (const c of JV_CAUSES) jevCauseFold(line, c, (stuck && stuck[c.key]) || {});
+  g.append(line);
+  return g;
+}
+
+// jevRetireGroup draws RETIRE CANDIDATES: each battery's no-signal questions.
+function jevRetireGroup(list) {
+  const g = jevGroup("RETIRE CANDIDATES");
+  if (!list.length) {
+    g.append(el("div", "empty", "none"));
+    return g;
+  }
+  for (const r of list) {
+    const line = el("div", "jvretire");
+    line.append(el("span", "", r.battery + " "));
+    for (const q of r.questions || []) line.append(jevChip("no-signal", q, "enough labels, nothing beyond the base rate"));
+    g.append(line);
+  }
+  return g;
+}
+
+// jevBatteryTable draws the battery table in name order, without the batteries
+// the summary lists as off. A reused battery's line says when it was unchanged.
+function jevBatteryTable(batteries, off, reused) {
+  const table = el("table", "jvtable");
+  const head = el("tr");
+  head.append(el("th", "", "battery"), el("th", "n", "items"), el("th", "n", "labeled"), el("th", "", "questions"));
+  const thead = document.createElement("thead"); thead.append(head); table.append(thead);
+  const body = document.createElement("tbody"); table.append(body);
+  const shown = batteries.filter(b => !off.has(b.name)).slice().sort((a, b) => {
+    const x = a.name || "", y = b.name || "";
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+  for (const b of shown) body.append(jevRow(b, reused.get(b.name)));
+  return table;
+}
+
+// jevAllBatteries folds the battery table under "all batteries", closed until
+// it is opened, as the page's shared fold so its caret, saved choice and header
+// behave as every other panel fold.
+function jevAllBatteries(box, table, n) {
+  const f = panelFold(box, "jev.batteries", "all batteries", n + (n === 1 ? " battery" : " batteries"));
+  f.body.append(table);
+}
+
+// renderJev draws the JEV panel: the title line with the scorecard's totals,
+// window and any battery the read lost, then the header, the summary's groups
+// and the battery table folded under "all batteries". A cache no refresh has
+// written yet says how to make one. A missing summary leaves the groups out
+// and says so, rather than drawing their counts as zero.
 function renderJev(s) {
   if (pushSkip("jev", s)) return;
   const sec = $("jevsec"), box = $("jev"), note = $("jevnote");
@@ -3858,37 +4058,23 @@ function renderJev(s) {
   const lost = sc.unavailable || [];
   const parts = [(t.batteries || 0) + (t.batteries === 1 ? " battery" : " batteries"), (t.items || 0) + " items", (t.labeled || 0) + " labeled"];
   if (sc.window) parts.push("last " + sc.window);
-  // The title line dates the scores it sums, not the read that carried them: a
-  // battery's score can be days old while the read is a minute old, so the line
-  // states its oldest score and says the age cannot be known when any battery
-  // carries none, rather than passing the read's age off as the scores'. A
-  // battery with no stamp, or one whose stamp the page cannot read, makes the
-  // age unknown rather than leaving that battery out, which would read younger
-  // than a score the line cannot date.
-  const stamps = (sc.batteries || []).map(b => b.scored_at ? new Date(b.scored_at).getTime() : NaN);
-  const oldest = stamps.length && stamps.every(t => !isNaN(t)) ? (Date.now() - Math.min(...stamps)) / 1000 : null;
-  parts.push(oldest != null ? "oldest score " + fmtDur(oldest) + " ago" : "score age unknown");
   note.append(document.createTextNode(parts.join(" · ")));
-  const counts = {earning: t.earning || 0, "no-signal": t.no_signal || 0, "not-yet": t.not_yet || 0};
-  for (const v of JV_VERDICTS) note.append(document.createTextNode(" "), jevChip(v, counts[v] + " " + v, JV_MEANING[v]));
-  note.title = JV_VERDICTS.map(v => v + ": " + JV_MEANING[v] + ".").join(" ");
   if (lost.length) {
     note.append(document.createTextNode(" · " + lost.length + " unavailable: " + lost.join(", ")));
     note.className = "r warnc";
   }
 
-  const table = el("table", "jvtable");
-  const head = el("tr");
-  head.append(el("th", "", "battery"), el("th", "n", "items"), el("th", "n", "labeled"), el("th", "", "questions"));
-  const thead = document.createElement("thead"); thead.append(head); table.append(thead);
-  const body = document.createElement("tbody"); table.append(body);
-  box.append(table);
-
-  const batteries = (sc.batteries || []).slice().sort((a, b) => {
-    const x = a.name || "", y = b.name || "";
-    return x < y ? -1 : x > y ? 1 : 0;
-  });
-  for (const b of batteries) body.append(jevRow(b));
+  const sum = s.jev_summary;
+  const off = new Set((sum && sum.off) || []);
+  const reused = new Map(((sum && sum.reused) || []).map(x => [x.battery, x.scored_at]));
+  box.append(jevHeader(sum, sc, off, s.jev_spend));
+  if (sum) {
+    box.append(jevEarningGroup(sum.earning || []), jevWatchingGroup(sum.watching || []), jevStuckGroup(sum.stuck), jevRetireGroup(sum.retire || []));
+  } else {
+    box.append(el("div", "warnc", "the JEV summary could not be read: the groups are left out"));
+  }
+  const batteries = sc.batteries || [];
+  jevAllBatteries(box, jevBatteryTable(batteries, off, reused), batteries.filter(b => !off.has(b.name)).length);
 }
 
 // MG_WORDS gives the title line a word to count each verdict by, where a target
@@ -5164,7 +5350,7 @@ const PANES = {
   deploys: {sec: "cloud", body: ["deploys"], read: s => s.deploys, draw: s => renderDeploys(s)},
   forgejo: {sec: "forgejo", body: ["forgejoacts", "forgejo"], read: s => s.forgejo, draw: s => renderForgejo(s)},
   tiersweep: {sec: "tiersweep", body: ["tiersweep"], read: s => s.tiersweep, draw: s => renderTierSweep(s)},
-  jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
+  jev: {sec: "jev", body: ["jev"], read: s => [s.jev_scorecard, s.jev_summary, s.jev_spend, readInput(s, "jev_scorecard")], draw: s => renderJev(s)},
   mango: {sec: "mango", body: ["mango"], read: s => s.mango, draw: s => renderMango(s)},
   // The om note and its rework fold both carry the review log's figures, so a
   // rework reading that moves draws the pane even when the om read has not

@@ -401,26 +401,11 @@ func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("JEV rows = %q, want %q", got, want)
 	}
-	if wantNote := "2 batteries · 216 items · 141 labeled · last 7d · score age unknown 0 earning 0 no-signal 0 not-yet · 2 unavailable: dispatch, drift"; note.Text != wantNote {
+	if wantNote := "2 batteries · 216 items · 141 labeled · last 7d · 2 unavailable: dispatch, drift"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
 	}
 	if note.Class != "r warnc" {
 		t.Errorf("a title line naming lost batteries wears %q, want the amber class", note.Class)
-	}
-}
-
-// A scorecard the state carries without a read record still dates its scores:
-// the title line's age comes from the battery blocks, not the read.
-func TestJevPanelDatesTheScoresWithoutAReadRecord(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	s := jevScorecardState(now, nil)
-	delete(s["reads"].(map[string]any), "jev_scorecard")
-
-	_, note, _ := drawJevAt(t, now, s)
-	if want := "3 batteries · 221 items · 140 labeled · last 7d · oldest score 5h00m ago 1 earning 1 no-signal 1 not-yet"; note.Text != want {
-		t.Errorf("JEV title line = %q, want %q", note.Text, want)
 	}
 }
 
@@ -449,11 +434,23 @@ func jevScorecardState(now time.Time, read map[string]any) map[string]any {
 	return jevStateAt(now, over)
 }
 
+// jevFindTableJS is the battery table's finder: the panel's header, groups and
+// fold sit around the table, so it is found by its class, not its place.
+const jevFindTableJS = `function jevFindTable(n) {
+  if (n.tagName === "TABLE" && n.className === "jvtable") return n;
+  for (var i = 0; i < n.children.length; i++) {
+    var f = jevFindTable(n.children[i]);
+    if (f) return f;
+  }
+  return null;
+}`
+
 // jevTableJS reads the panel's table back as rows of cells, each cell with what
 // it holds. A panel that drew no table reads as no rows.
 const jevTableJS = `JSON.stringify((function () {
-  var box = __byId["jev"], t = box.children[0], rows = [];
-  if (!t || t.tagName !== "TABLE") return rows;
+  ` + jevFindTableJS + `
+  var t = jevFindTable(__byId["jev"]), rows = [];
+  if (!t) return rows;
   for (var i = 0; i < t.children.length; i++) {
     var g = t.children[i];
     if (g.tagName === "THEAD") continue;
@@ -512,7 +509,8 @@ func drawJevIn(t *testing.T, dom *pageDOM, s map[string]any) (rows []jevRowDrawn
 func jevHeadCells(t *testing.T, dom *pageDOM) []string {
 	t.Helper()
 	v, err := dom.vm.RunString(`JSON.stringify((function () {
-  var t = __byId["jev"].children[0], out = [];
+  ` + jevFindTableJS + `
+  var t = jevFindTable(__byId["jev"]), out = [];
   for (var i = 0; i < t.children.length; i++) {
     if (t.children[i].tagName !== "THEAD") continue;
     var head = t.children[i].children[0];
@@ -561,7 +559,8 @@ func jevNoteChips(t *testing.T, dom *pageDOM) []jevDrawn {
 func jevFoldTitle(t *testing.T, dom *pageDOM, row int) string {
 	t.Helper()
 	v, err := dom.vm.RunString(fmt.Sprintf(`(function () {
-  var td = __byId["jev"].children[0].children[1].children[%d].children[3];
+  `+jevFindTableJS+`
+  var td = jevFindTable(__byId["jev"]).children[1].children[%d].children[3];
   for (var i = 0; i < td.children.length; i++) {
     if (td.children[i].tagName === "BUTTON") return td.children[i].title;
   }
@@ -578,7 +577,8 @@ func jevFoldTitle(t *testing.T, dom *pageDOM, row int) string {
 func jevClickFold(t *testing.T, dom *pageDOM, row int) bool {
 	t.Helper()
 	v, err := dom.vm.RunString(fmt.Sprintf(`(function () {
-  var td = __byId["jev"].children[0].children[1].children[%d].children[3], btn = null, more = null;
+  `+jevFindTableJS+`
+  var td = jevFindTable(__byId["jev"]).children[1].children[%d].children[3], btn = null, more = null;
   for (var i = 0; i < td.children.length; i++) {
     if (td.children[i].tagName === "BUTTON") btn = td.children[i];
     if (td.children[i].className === "jvmore") more = td.children[i];
@@ -648,11 +648,10 @@ func TestJevPanelDrawsOneRowPerBatteryInNameOrder(t *testing.T) {
 		t.Errorf("a battery with no log drew %+v, want a dash row", landing)
 	}
 
-	// The three verdicts are chips beside the totals, green, amber and dim.
 	if got, want := (jevRowTexts(rows))[2], "targets90needs_review"; got != want {
 		t.Errorf("targets' row = %q, want %q", got, want)
 	}
-	if wantNote := "3 batteries · 221 items · 140 labeled · last 7d · score age unknown 1 earning 1 no-signal 1 not-yet"; note.Text != wantNote {
+	if wantNote := "3 batteries · 221 items · 140 labeled · last 7d"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
 	}
 }
@@ -681,7 +680,7 @@ func TestJevPanelSaysThePackagesBatteryInItsOwnRow(t *testing.T) {
 	if got, want := jevHeadCells(t, dom), []string{"battery", "items", "labeled", "questions"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("the table's headings = %q, want %q", got, want)
 	}
-	if wantNote := "1 battery · 212 items · 140 labeled · last 7d · score age unknown 1 earning 0 no-signal 0 not-yet"; note.Text != wantNote {
+	if wantNote := "1 battery · 212 items · 140 labeled · last 7d"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
 	}
 	if strings.Contains(note.Text, "39858") {
@@ -689,10 +688,10 @@ func TestJevPanelSaysThePackagesBatteryInItsOwnRow(t *testing.T) {
 	}
 }
 
-// The title line says which window the scorecard scored and how old its oldest
-// score is, both off the data: a 36h scorecard says 36h, and nothing says 7d on
-// its own.
-func TestJevTitleLineStatesTheWindowAndScoreAge(t *testing.T) {
+// The title line says which window the scorecard scored, both off the data: a
+// 36h scorecard says 36h, and nothing says 7d on its own. The scores' age is
+// the header's, read off the summary, not the title's.
+func TestJevTitleLineStatesTheWindow(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -700,72 +699,11 @@ func TestJevTitleLineStatesTheWindowAndScoreAge(t *testing.T) {
 	s["jev_scorecard"].(map[string]any)["window"] = "36h"
 
 	_, note, _ := drawJevAt(t, now, s)
-	for _, want := range []string{"last 36h", "oldest score 5h00m ago"} {
-		if !strings.Contains(note.Text, want) {
-			t.Errorf("the title line %q does not say %q", note.Text, want)
-		}
+	if !strings.Contains(note.Text, "last 36h") {
+		t.Errorf("the title line %q does not say last 36h", note.Text)
 	}
 	if strings.Contains(note.Text, "7d") {
 		t.Errorf("the title line %q states a window the scorecard was not read over", note.Text)
-	}
-}
-
-// The title line dates the oldest score among the batteries it sums, not the
-// newest and not the read: a battery's score can be hours older than the read
-// that carried it, and the line must not read fresher than its oldest number.
-func TestJevTitleLineDatesTheOldestScoreNotTheRead(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	s := jevScorecardState(now, nil)
-	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
-		map[string]any{"name": "finding", "scored_at": now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)},
-		map[string]any{"name": "landing", "scored_at": now.Add(-time.Hour).UTC().Format(time.RFC3339)},
-	}
-
-	_, note, _ := drawJevAt(t, now, s)
-	if !strings.Contains(note.Text, "oldest score 5h00m ago") {
-		t.Errorf("the title line %q does not date the oldest score", note.Text)
-	}
-	if strings.Contains(note.Text, "read ") {
-		t.Errorf("the title line %q dates the read instead of the scores", note.Text)
-	}
-}
-
-// A score stamp the page cannot read leaves the title line's age unknown: the
-// line must not read younger than a battery it cannot date.
-func TestJevTitleLineLeavesAnUnreadableScoreStampUnknown(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	s := jevScorecardState(now, nil)
-	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
-		map[string]any{"name": "finding", "scored_at": now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)},
-		map[string]any{"name": "landing", "scored_at": "not a time"},
-	}
-
-	_, note, _ := drawJevAt(t, now, s)
-	if !strings.Contains(note.Text, "score age unknown") {
-		t.Errorf("the title line %q states an age though it cannot read one score stamp", note.Text)
-	}
-}
-
-// A battery carrying no score stamp is not dropped from the age: the line
-// cannot date it, so it says unknown rather than reading younger than that
-// battery's score.
-func TestJevTitleLineLeavesAMissingScoreStampUnknown(t *testing.T) {
-	t.Parallel()
-
-	now := time.Now()
-	s := jevScorecardState(now, nil)
-	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
-		map[string]any{"name": "finding", "scored_at": now.Add(-5 * time.Hour).UTC().Format(time.RFC3339)},
-		map[string]any{"name": "landing"},
-	}
-
-	_, note, _ := drawJevAt(t, now, s)
-	if !strings.Contains(note.Text, "score age unknown") {
-		t.Errorf("the title line %q states an age though one battery carries no score stamp", note.Text)
 	}
 }
 
@@ -789,34 +727,6 @@ func TestJevPanelSaysHowManyLinesWentUnanswered(t *testing.T) {
 	}
 	if kids := cells["landing"][3].Kids; len(kids) != 0 {
 		t.Errorf("a battery with no skipped lines drew %+v, want nothing", kids)
-	}
-}
-
-// The title line's verdict counts are chips coloured from the page's tokens,
-// and its tooltip says what each verdict means.
-func TestJevTitleLineCountsTheVerdictsAsChips(t *testing.T) {
-	t.Parallel()
-
-	dom := newPageDOM(t)
-	_, note, _ := drawJevIn(t, dom, jevScorecardState(time.Now(), nil))
-	chips := jevNoteChips(t, dom)
-	want := []struct{ text, class, title string }{
-		{"1 earning", "jvchip jv-earning", "enough labels and a signal"},
-		{"1 no-signal", "jvchip jv-nosignal", "enough labels, nothing beyond the base rate"},
-		{"1 not-yet", "jvchip jv-notyet", "under 30 labels"},
-	}
-	if len(chips) != len(want) {
-		t.Fatalf("the title line drew %d chips, want %d: %+v", len(chips), len(want), chips)
-	}
-	for i, w := range want {
-		if chips[i].Text != w.text || chips[i].Class != w.class || chips[i].Title != w.title {
-			t.Errorf("title chip %d = %+v, want %q in %q saying %q", i, chips[i], w.text, w.class, w.title)
-		}
-	}
-	for _, w := range want {
-		if !strings.Contains(note.Title, w.title) {
-			t.Errorf("the title line's tooltip %q does not say %q", note.Title, w.title)
-		}
 	}
 }
 
@@ -919,6 +829,397 @@ func TestJevPanelShowsTheCountAloneWhenEveryQuestionIsNotYet(t *testing.T) {
 	kids := rows[0].Cells[3].Kids
 	if len(kids) != 2 || kids[0].Text != "2 not yet" || kids[1].Class != "jvmore" || len(kids[1].Kids) != 2 {
 		t.Errorf("a battery with only not-yet questions drew %+v, want \"2 not yet\" over its two chips", kids)
+	}
+}
+
+// jevFindClassJS finds the first element under n whose class is cls. The groups
+// sit in divs around the battery table, so the page's groups are found by class.
+const jevFindClassJS = `function jevFindClass(n, cls) {
+  if (n.className === cls) return n;
+  for (var i = 0; i < n.children.length; i++) {
+    var f = jevFindClass(n.children[i], cls);
+    if (f) return f;
+  }
+  return null;
+}`
+
+// jevSummaryState is the three-battery panel with the server's summary over it:
+// finding's earning question and its watching question, three stuck questions
+// under their causes, targets' no-signal question for retirement, and a battery
+// the summary lists as off. Today's spend is 55 cents of a dollar cap, and the
+// scores were computed five hours ago.
+func jevSummaryState(now time.Time) map[string]any {
+	s := jevScorecardState(now, nil)
+	sc := s["jev_scorecard"].(map[string]any)
+	sc["batteries"] = append(sc["batteries"].([]any), map[string]any{"name": "retired", "items": 3, "labeled": 3})
+	s["jev_summary"] = map[string]any{
+		"refreshed": now.Add(-5 * time.Hour).UTC().Format(time.RFC3339),
+		"off":       []any{"retired"},
+		"earning": []any{
+			map[string]any{"battery": "finding", "id": "fix_worthy", "labeled": 140, "positives": 70, "base_rate": 0.5, "precision_at_cut": 0.75, "lift": 0.25, "used_by": "gt attention and dashboard queue order"},
+		},
+		"watching": []any{
+			map[string]any{"name": "finding.any_duplicate", "labeled": 40, "positives": 4, "negatives": 36},
+		},
+		"stuck": map[string]any{
+			"no_label_rule":  map[string]any{"count": 1, "names": []any{"landing.risk"}},
+			"only_positive":  map[string]any{"count": 0},
+			"zero_positives": map[string]any{"count": 2, "names": []any{"rework.all_no", "rework.dup"}},
+		},
+		"retire": []any{map[string]any{"battery": "targets", "questions": []any{"needs_review"}}},
+		"spend":  map[string]any{"window": "24h", "calls": 14, "window_usd": 1.75, "today_usd": 0.55, "cap_usd": 1.0},
+	}
+	return s
+}
+
+// jevClassText is the text of the first element of the JEV panel with class cls,
+// or "<none>" when the panel draws no such element.
+func jevClassText(t *testing.T, dom *pageDOM, cls string) string {
+	t.Helper()
+	v, err := dom.vm.RunString(`(function () {
+  ` + jevFindClassJS + `
+  var n = jevFindClass(__byId["jev"], "` + cls + `");
+  return n ? n.textContent : "<none>";
+})()`)
+	if err != nil {
+		t.Fatalf("reading the JEV panel's %s: %v", cls, err)
+	}
+	return v.String()
+}
+
+// jevEarnCells reads the EARNING table back: each row's cells with their text,
+// class and tooltip. A panel that drew no earning table reads as no rows.
+func jevEarnCells(t *testing.T, dom *pageDOM) [][]jevDrawn {
+	t.Helper()
+	v, err := dom.vm.RunString(`JSON.stringify((function () {
+  ` + jevFindClassJS + `
+  var tbl = jevFindClass(__byId["jev"], "jvearn"), out = [];
+  if (!tbl) return out;
+  var body = tbl.children[1];
+  for (var i = 0; i < body.children.length; i++) {
+    var tr = body.children[i], cells = [];
+    for (var j = 0; j < tr.children.length; j++) {
+      var td = tr.children[j];
+      cells.push({tag: td.tagName, class: td.className, text: td.textContent, title: td.title, hidden: false, kids: []});
+    }
+    out.push(cells);
+  }
+  return out;
+})())`)
+	if err != nil {
+		t.Fatalf("reading the JEV earning table: %v", err)
+	}
+	var out [][]jevDrawn
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the JEV earning table: %v", err)
+	}
+	return out
+}
+
+// jevInnerFoldTitle reads the title a JEV inner fold's heading was created
+// with. The heading is the h2 the shared foldable adds its caret and summary to,
+// so the title is the heading's own text, not its textContent.
+func jevInnerFoldTitle(t *testing.T, dom *pageDOM, key string) string {
+	t.Helper()
+	v, err := dom.vm.RunString(`String(panelFolds[` + quoteJS(key) + `].head._text || "")`)
+	if err != nil {
+		t.Fatalf("reading the %s fold's title: %v", key, err)
+	}
+	return v.String()
+}
+
+// jevInnerClick clicks the heading of the JEV inner fold under key, as a reader
+// opens it, and fails when the panel keeps no such fold.
+func jevInnerClick(t *testing.T, dom *pageDOM, key string) {
+	t.Helper()
+	if _, err := dom.vm.RunString(`(function () {
+  const f = folds.filter(x => x.key === ` + quoteJS(key) + `)[0];
+  if (!f) throw new Error("the JEV panel keeps no fold under " + ` + quoteJS(key) + `);
+  const h = __find(f.el, ":scope > h2");
+  __fireOn(h, "click", {type: "click", target: h});
+})()`); err != nil {
+		t.Fatalf("clicking the %s fold: %v", key, err)
+	}
+}
+
+// The header line says when the scores were computed, how many batteries are ok
+// and how many are off. The spend bar draws today's dollars against the cap
+// with the top caller beside it. EARNING draws each earning question with its
+// lift, labeled count and consumer, and a battery the summary lists as off takes
+// no row.
+func TestJevPageShowsHeaderSpendAndEarningTable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	rows, _, _ := drawJevIn(t, dom, jevSummaryState(now))
+
+	if got, want := jevClassText(t, dom, "jvtitle"), "scored 5h00m ago · 3 batteries ok · 1 off"; got != want {
+		t.Errorf("the header line = %q, want %q", got, want)
+	}
+	if got, want := jevClassText(t, dom, "jvspend"), "$0.55 of $1.00 · top caller overseer (10 calls)"; got != want {
+		t.Errorf("the spend line = %q, want %q", got, want)
+	}
+	v, err := dom.vm.RunString(`(function () { ` + jevFindClassJS + ` return jevFindClass(__byId["jev"], "jvbar").children[0].style.width; })()`)
+	if err != nil {
+		t.Fatalf("reading the spend bar: %v", err)
+	}
+	if got, want := v.String(), "55.0%"; got != want {
+		t.Errorf("the spend bar fills %q, want %q", got, want)
+	}
+
+	cells := jevEarnCells(t, dom)
+	if len(cells) != 1 {
+		t.Fatalf("EARNING drew %d rows, want the one earning question", len(cells))
+	}
+	var got []string
+	for _, c := range cells[0] {
+		got = append(got, c.Text)
+	}
+	if want := []string{"finding.fix_worthy", "+25.0%", "140", "gt attention and dashboard queue order"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("EARNING row = %q, want %q", got, want)
+	}
+
+	if len(rows) != 3 {
+		t.Fatalf("the battery table drew %d rows, want the three batteries that are not off", len(rows))
+	}
+	for _, r := range rows {
+		if r.Cells[0].Text == "retired" {
+			t.Errorf("the battery the summary lists as off drew a row: %q", jevRowTexts(rows))
+		}
+	}
+}
+
+// The battery table is folded under "all batteries" through the page's shared
+// foldable and closed until it is opened. The STUCK causes are folds of the
+// same mechanism, their counts in the heading, and a choice survives the redraw
+// the panel gets on every event. The WATCHING group is not folded.
+func TestJevPageFoldsTheBatteryTableAndNotYetGroups(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	drawJevIn(t, dom, jevSummaryState(now))
+
+	if all := readPanelFold(t, dom, "jev.batteries"); !all.Closed || all.Summary != "3 batteries" {
+		t.Errorf("the battery table's fold = %+v, want closed under all batteries", all)
+	}
+	if got := jevInnerFoldTitle(t, dom, "jev.batteries"); got != "all batteries" {
+		t.Errorf("the battery table's fold is titled %q, want all batteries", got)
+	}
+	for i, want := range []struct{ key, label, count string }{
+		{"jev.cause.no_label_rule", "no label rule", " · 1"},
+		{"jev.cause.only_positive", "only positive labels", " · 0"},
+		{"jev.cause.zero_positives", "zero positives", " · 2"},
+	} {
+		got := readPanelFold(t, dom, want.key)
+		if !got.Closed || got.Bits != want.count {
+			t.Errorf("STUCK cause %d = %+v, want closed with the count %q", i, got, want.count)
+		}
+		if label := jevInnerFoldTitle(t, dom, want.key); label != want.label {
+			t.Errorf("STUCK cause %d is titled %q, want %q", i, label, want.label)
+		}
+	}
+
+	jevInnerClick(t, dom, "jev.cause.zero_positives")
+	if got := readPanelFold(t, dom, "jev.cause.zero_positives"); got.Closed {
+		t.Error("clicking zero positives did not open its question list")
+	}
+	if lines := panelFoldLines(t, dom, "jev.cause.zero_positives"); len(lines) != 2 || lines[0].Text != "rework.all_no" || lines[1].Text != "rework.dup" {
+		t.Errorf("zero positives opened to %+v, want its two questions", lines)
+	}
+	if got := readPanelFold(t, dom, "jev.cause.no_label_rule"); !got.Closed {
+		t.Error("opening zero positives also opened no label rule")
+	}
+
+	drawJevIn(t, dom, jevSummaryState(now))
+	if got := readPanelFold(t, dom, "jev.cause.zero_positives"); got.Closed {
+		t.Error("the zero positives list folded itself back on the next draw")
+	}
+	jevInnerClick(t, dom, "jev.batteries")
+	if all := readPanelFold(t, dom, "jev.batteries"); all.Closed {
+		t.Error("clicking all batteries did not open the battery table")
+	}
+	drawJevIn(t, dom, jevSummaryState(now))
+	if all := readPanelFold(t, dom, "jev.batteries"); all.Closed {
+		t.Error("the battery table folded itself back on the next draw")
+	}
+
+	v, err := dom.vm.RunString(`__byId["jev"].textContent`)
+	if err != nil {
+		t.Fatalf("reading the JEV panel: %v", err)
+	}
+	if !strings.Contains(v.String(), "finding.any_duplicate · labeled 40 · 4 positive, 36 negative") {
+		t.Errorf("WATCHING does not draw its question in the open: %q", v.String())
+	}
+}
+
+// The title line keeps the totals and the window, and drops the oldest score's
+// age and the verdict counts: the header carries the age, the groups the verdicts.
+func TestJevPageDropsTheOldestScoreTitleAndVerdictChips(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	_, note, _ := drawJevIn(t, dom, jevSummaryState(now))
+
+	if want := "3 batteries · 221 items · 140 labeled · last 7d"; note.Text != want {
+		t.Errorf("JEV title line = %q, want %q", note.Text, want)
+	}
+	if chips := jevNoteChips(t, dom); len(chips) != 0 {
+		t.Errorf("the title line draws %d verdict chips, want none: %+v", len(chips), chips)
+	}
+	for _, word := range []string{"oldest", "score age"} {
+		if strings.Contains(note.Text, word) || strings.Contains(jevClassText(t, dom, "jvtitle"), word) {
+			t.Errorf("the JEV panel says %q: title %q", word, note.Text)
+		}
+	}
+}
+
+// An earning question with no consumer is the row that asks for one: its used-by
+// cell is drawn in the warning colour, with the reason as its tooltip. A consumer
+// is drawn plain, and a score question has no lift and says why.
+func TestJevPageMarksAnEarningRowWithNoConsumer(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	s := jevSummaryState(now)
+	s["jev_summary"].(map[string]any)["earning"] = []any{
+		map[string]any{"battery": "finding", "id": "fix_worthy", "labeled": 140, "positives": 70, "base_rate": 0.5, "precision_at_cut": 0.75, "lift": 0.25, "used_by": "none"},
+		map[string]any{"battery": "landing", "id": "risk", "labeled": 80, "positives": 30, "base_rate": 0.4, "precision_at_cut": 0.55, "lift": 0.15, "used_by": "risk-path order"},
+		map[string]any{"battery": "progress", "id": "looping", "labeled": 50, "positives": 25, "no_lift": "a score question has no base rate to lift over", "used_by": "none"},
+	}
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	drawJevIn(t, dom, s)
+
+	cells := jevEarnCells(t, dom)
+	if len(cells) != 3 {
+		t.Fatalf("EARNING drew %d rows, want 3", len(cells))
+	}
+	if used := cells[0][3]; used.Class != "warnc" || used.Text != "none" || used.Title != "no gate or queue reads this question: it needs a consumer" {
+		t.Errorf("the row with no consumer drew its used-by cell as %+v, want the warning colour and the reason", used)
+	}
+	if used := cells[1][3]; used.Class != "" || used.Text != "risk-path order" {
+		t.Errorf("the row with a consumer drew its used-by cell as %+v, want it plain", used)
+	}
+	if lift := cells[2][1]; lift.Class != "empty" || lift.Text != "a score question has no base rate to lift over" {
+		t.Errorf("a score question's lift cell = %+v, want the reason it has no lift", lift)
+	}
+	if used := cells[2][3]; used.Class != "warnc" {
+		t.Errorf("a score question with no consumer is not in the warning colour: %+v", used)
+	}
+}
+
+// A battery the refresh reused says when its log was last unchanged beside its
+// name, and is never drawn as stale or old.
+func TestJevPageDrawsAReusedBatteryAsUnchangedNotStale(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	s := jevSummaryState(now)
+	reusedAt := now.Add(-48 * time.Hour).UTC()
+	s["jev_summary"].(map[string]any)["reused"] = []any{
+		map[string]any{"battery": "finding", "scored_at": reusedAt.Format(time.RFC3339), "reason": "log unchanged"},
+	}
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	rows, _, _ := drawJevIn(t, dom, s)
+
+	finding := rows[0]
+	if got, want := finding.Cells[0].Kids[1].Text, "unchanged since "+reusedAt.Format("2006-01-02"); got != want {
+		t.Errorf("the reused battery's name line = %q, want %q", got, want)
+	}
+	if strings.Contains(finding.Cells[0].Text, "scored") {
+		t.Errorf("the reused battery says it was scored an age ago: %q", finding.Cells[0].Text)
+	}
+	if finding.Class == "jvstale" {
+		t.Error("the reused battery is drawn as stale")
+	}
+}
+
+// Without the summary the groups are left out and the page says so, while the
+// battery table still draws from the scorecard, the header says the summary is
+// unavailable, and the spend line falls back to what the reads carry.
+func TestJevPageWithoutTheSummaryLeavesTheGroupsOut(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	rows, _, _ := drawJevIn(t, dom, jevScorecardState(now, nil))
+
+	if got := jevClassText(t, dom, "jvearn"); got != "<none>" {
+		t.Errorf("the earning table is drawn without a summary: %q", got)
+	}
+	if all := readPanelFold(t, dom, "jev.batteries"); all.Summary != "3 batteries" {
+		t.Errorf("the battery table's fold = %+v, want the three batteries without a summary", all)
+	}
+	if len(rows) != 3 {
+		t.Errorf("the battery table drew %d rows, want the three batteries", len(rows))
+	}
+	if got, want := jevClassText(t, dom, "jvtitle"), "Jev summary unavailable"; got != want {
+		t.Errorf("the header line = %q, want %q", got, want)
+	}
+	if got, want := jevClassText(t, dom, "jvspend"), "$1.75 in 24h · top caller overseer (10 calls)"; got != want {
+		t.Errorf("the spend line = %q, want %q", got, want)
+	}
+	if v, err := dom.vm.RunString(`__byId["jev"].textContent`); err != nil || !strings.Contains(v.String(), "the JEV summary could not be read: the groups are left out") {
+		t.Errorf("the panel does not say the summary is missing: %v %q", err, v)
+	}
+}
+
+// A summary the server did not send is said on the header line, and no battery
+// is counted: the off list is the summary's, so counting every battery ok and
+// none off would draw a healthy town out of a missing read.
+func TestJevPageSaysSummaryUnavailableWithNoCountsWhenSummaryIsAbsent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	drawJevIn(t, dom, jevScorecardState(now, nil))
+
+	title := jevClassText(t, dom, "jvtitle")
+	if title != "Jev summary unavailable" {
+		t.Errorf("the header line = %q, want it to say the summary is unavailable", title)
+	}
+	for _, word := range []string{"battery ok", "batteries ok", " off"} {
+		if strings.Contains(title, word) {
+			t.Errorf("the header line counts a battery without a summary: %q", title)
+		}
+	}
+}
+
+// A cap that is zero or missing is no cap at all: the spend line says so rather
+// than dividing by zero and drawing a red bar filled to nothing.
+func TestJevPageDrawsNoCapLineForAZeroOrMissingCap(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := map[string]func(map[string]any){
+		"zero cap":    func(sp map[string]any) { sp["cap_usd"] = 0 },
+		"missing cap": func(sp map[string]any) { delete(sp, "cap_usd") },
+	}
+	for name, setCap := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := jevSummaryState(now)
+			setCap(s["jev_summary"].(map[string]any)["spend"].(map[string]any))
+			dom := newPageDOM(t)
+			pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+			drawJevIn(t, dom, s)
+
+			if got, want := jevClassText(t, dom, "jvspend"), "$0.55 today · no cap set · top caller overseer (10 calls)"; got != want {
+				t.Errorf("the spend line = %q, want %q", got, want)
+			}
+			if got := jevClassText(t, dom, "jvbar"); got != "<none>" {
+				t.Errorf("a spend bar is drawn for a cap that is not set: %q", got)
+			}
+		})
 	}
 }
 
