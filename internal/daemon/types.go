@@ -145,6 +145,7 @@ type (
 	FindingsFilerConfig        = agentconfig.FindingsFilerConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
 	EventsPruneConfig          = agentconfig.EventsPruneConfig
+	TownStateBackupConfig      = agentconfig.TownStateBackupConfig
 	JevDedupeConfig            = agentconfig.JevDedupeConfig
 	JevAttentionConfig         = agentconfig.JevAttentionConfig
 	JevLandingConfig           = agentconfig.JevLandingConfig
@@ -275,6 +276,12 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.JsonlGitBackup.Enabled
+	}
+	if patrol == "town_state_backup" {
+		if config == nil || config.Patrols == nil || config.Patrols.TownStateBackup == nil {
+			return false
+		}
+		return config.Patrols.TownStateBackup.Enabled
 	}
 	if patrol == "wisp_reaper" {
 		if config == nil || config.Patrols == nil || config.Patrols.WispReaper == nil {

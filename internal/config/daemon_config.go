@@ -340,6 +340,7 @@ type PatrolsConfig struct {
 	FindingsFiler        *FindingsFilerConfig        `json:"findings_filer,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
+	TownStateBackup      *TownStateBackupConfig      `json:"town_state_backup,omitempty"`
 
 	// ResourceSampler appends the host's CPU and memory rows every interval,
 	// which the metrics snapshot's resources group reads
@@ -2030,6 +2031,19 @@ type EventsPruneConfig struct {
 
 	// MaxBytes caps the file size; over it, the newest half of the cap is kept.
 	MaxBytes int64 `json:"max_bytes,omitempty"`
+}
+
+// TownStateBackupConfig configures the town_state_backup patrol, which copies
+// the town's configuration files into the JSONL backup repository under
+// town-state/ (internal/daemon/town_state_backup.go). Off unless the block is
+// present and enabled is true.
+type TownStateBackupConfig struct {
+	// Enabled controls whether the patrol runs.
+	Enabled bool `json:"enabled"`
+
+	// IntervalStr is how often to back up, as a string (e.g., "1h"). Empty
+	// takes the hourly default.
+	IntervalStr string `json:"interval,omitempty"`
 }
 
 // OverseerReportConfig configures the overseer_report patrol (gt-a6fg7): every

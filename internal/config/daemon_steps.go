@@ -82,6 +82,7 @@ var daemonSteps = []DaemonStep{
 	{"tier_sweep", DaemonStepPatrol, DaemonStepRuns, []string{"docker"}, "drives the sweep engine over DOCKER_HOST"},
 	{"spec_dispatch", DaemonStepPatrol, DaemonStepRuns, []string{"openshell", "kubectl"}, "gt sling through the gateway and the cluster"},
 	{"jsonl_git_backup", DaemonStepPatrol, DaemonStepRuns, []string{"dolt", "git"}, "dolt and git"},
+	{"town_state_backup", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "git in the JSONL backup repository; reads the town's files through io/fs"},
 	{"patrol_scan", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "git and gt"},
 	{"checkpoint_dog", DaemonStepPatrol, DaemonStepRuns, []string{"git"}, "git"},
 	{"overrun_guard", DaemonStepPatrol, DaemonStepRuns, []string{"ps"}, "ps"},
