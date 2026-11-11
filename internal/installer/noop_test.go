@@ -53,7 +53,6 @@ func TestNoop(t *testing.T) {
 			exit:  ExitOK,
 			lines: []string{
 				"[install-gt] Installed " + installed + " already contains " + full + "; nothing to do.",
-				"[install-gt] gateway: skipped, no HOME/.config/openshell/gateway.toml",
 				"install-gt: RESULT noop " + full + " " + installed + " already-installed",
 			},
 		},
@@ -67,7 +66,6 @@ func TestNoop(t *testing.T) {
 			exit:  ExitOK,
 			lines: []string{
 				"[install-gt] Installed " + installed + " already contains " + full + "; nothing to do.",
-				"[install-gt] gateway: skipped, no HOME/.config/openshell/gateway.toml",
 				"install-gt: RESULT noop " + full + " " + installed + " already-installed",
 			},
 		},
@@ -82,7 +80,6 @@ func TestNoop(t *testing.T) {
 			exit:  ExitOK,
 			lines: []string{
 				"[install-gt] Installed " + installed + " already contains " + full + ", but the daemon is running " + daemonBehind + "; writing the restart marker.",
-				"[install-gt] gateway: skipped, no HOME/.config/openshell/gateway.toml",
 				"install-gt: RESULT noop " + full + " " + installed + " already-installed",
 			},
 			marker: `{
@@ -104,7 +101,6 @@ func TestNoop(t *testing.T) {
 			exit:  ExitOK,
 			lines: []string{
 				"[install-gt] A pending restart marker for " + pendingAhead + " already contains " + full + "; leaving it in place.",
-				"[install-gt] gateway: skipped, no HOME/.config/openshell/gateway.toml",
 				"install-gt: RESULT noop " + full + " " + installed + " already-installed",
 			},
 			marker: `{"commit": "` + pendingAhead + `"}`,
@@ -121,7 +117,6 @@ func TestNoop(t *testing.T) {
 			exit:  ExitOK,
 			lines: []string{
 				"[install-gt] Installed " + installed + " already contains " + full + ", but the daemon is running " + daemonBehind + "; writing the restart marker.",
-				"[install-gt] gateway: skipped, no HOME/.config/openshell/gateway.toml",
 				"install-gt: RESULT noop " + full + " " + installed + " already-installed",
 			},
 			marker: `{
@@ -159,7 +154,6 @@ func TestNoop(t *testing.T) {
 			exit:  ExitOK,
 			lines: []string{
 				"[install-gt] Installed " + installed + " already contains " + full + "; nothing to do.",
-				"[install-gt] gateway: skipped, no HOME/.config/openshell/gateway.toml",
 				"install-gt: RESULT noop " + full + " " + installed + " already-installed",
 			},
 		},

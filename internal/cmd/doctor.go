@@ -50,7 +50,7 @@ Infrastructure checks:
   - stale-binary             Check if gt binary is up to date with repo
   - beads-binary             Check that beads (bd) is installed and meets minimum version
   - daemon                   Check if daemon is running (fixable)
-  - openshell-gateway        Check the OpenShell gateway, images, providers and launchd agent for openshell seats (report only)
+  - openshell-gateway        Check the OpenShell gateway, images and providers for openshell seats (report only)
   - town-beads-config        Verify town .beads/config.yaml exists (fixable)
   - dolt-remote-leftovers    Warn on Dolt remotes, git-remote-cache dirs and sync.remote (report only)
   - dolt-commit-rate         Warn when a Dolt database made more commits in 24h than the configured limit
@@ -377,7 +377,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewPatrolPluginsAccessibleCheck())
 	d.Register(doctor.NewPatrolPluginDriftCheck())
 	d.Register(doctor.NewAgentBeadsCheck())
-	// Openshell seats need a connected gateway, their images and providers, and the launchd agent.
+	// Openshell seats need a connected gateway, their images and providers.
 	d.Register(doctor.NewOpenShellGatewayCheck())
 	d.Register(doctor.NewStaleAgentBeadsCheck())
 	d.Register(doctor.NewAgentBeadsShadowCheck())

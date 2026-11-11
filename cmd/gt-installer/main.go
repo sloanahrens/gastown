@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/installer"
@@ -30,13 +29,12 @@ func main() {
 }
 
 // environment is what a run reads from the process: its variables, its working
-// directory, its home and its own executable. A test supplies its own, so it
-// never rewrites the test process's environment.
+// directory and its home. A test supplies its own, so it never rewrites the test
+// process's environment.
 type environment struct {
 	getenv func(string) string
 	getwd  func() (string, error)
 	home   func() (string, error)
-	exe    func() (string, error)
 	// newRun builds the run itself, so a test hands the whole flow commands
 	// that are recorded rather than started and a filesystem under a temporary
 	// directory. Without it any test that reached the build, install, signing or
@@ -54,7 +52,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 		getenv: os.Getenv,
 		getwd:  os.Getwd,
 		home:   os.UserHomeDir,
-		exe:    os.Executable,
 	})
 }
 
@@ -101,13 +98,6 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 		fmt.Fprintln(stderr, err)
 		return int(installer.ExitFailed)
 	}
-	// The gateway template falls back to the directory beside this program (the
-	// script's $SCRIPT_DIR). A program that cannot name its own leaves the
-	// fallback unset rather than guessing: the step then has only the checkout's
-	// template and warns when that is missing too (gt-tpg0p.9).
-	if exe, err := env.exe(); err == nil {
-		paths.SelfDir = filepath.Dir(exe)
-	}
 	c.Receipts = paths.Receipts()
 	c.GT = paths.GT()
 
@@ -118,10 +108,7 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 	r := newRun(cfg, c, paths)
 	r.Getenv = env.getenv
 	r.Signing = installer.ResolveSigning(env.getenv, paths.TownRoot)
-	// --dry-run prints the gateway plan and changes nothing, before the checkout
-	// is read.
 	if cfg.DryRun {
-		r.GatewayStep(installer.GatewayDryRun)
 		return int(c.Finish(installer.Result{Event: "dry-run", Commit: cfg.SHA}, installer.ExitOK))
 	}
 	if code, ended := r.ResolveTarget(); ended {
@@ -158,10 +145,5 @@ func runWith(args []string, stdout, stderr io.Writer, env environment) (code int
 		return int(code)
 	}
 	r.Syncs()
-	// A gateway that fails is a failed install: the binary stays in force, but
-	// the result says the gateway step did not complete.
-	if !r.GatewayStep(installer.GatewayInstall) {
-		return int(c.Finish(installer.Result{Event: "failed", Commit: cfg.SHA, Reason: "gateway"}, installer.ExitFailed))
-	}
 	return int(r.Finalize())
 }

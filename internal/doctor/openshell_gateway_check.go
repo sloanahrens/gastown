@@ -6,9 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -16,21 +14,17 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// openShellLaunchdLabel is the launchd agent that keeps the OpenShell gateway
-// running; the installer installs it beside the daemon unit.
-const openShellLaunchdLabel = "com.gastown.openshell-gateway"
-
 // openShellCheckTimeout bounds each command the check runs.
 const openShellCheckTimeout = 30 * time.Second
 
 // openShellRunner runs argv (argv[0] is the program) and returns its stdout. A
 // non-nil error means the command failed or did not start; tests inject one so
-// no openshell, docker or launchctl process runs.
+// no openshell or docker process runs.
 type openShellRunner func(argv []string) ([]byte, error)
 
-// OpenShellGatewayCheck reports the gateway, image, provider and launchd gaps
-// that openshell seats would hit, and passes without running anything when the
-// town has no openshell seat.
+// OpenShellGatewayCheck reports the gateway, image and provider gaps that
+// openshell seats would hit, and passes without running anything when the town
+// has no openshell seat.
 type OpenShellGatewayCheck struct {
 	BaseCheck
 
@@ -39,10 +33,6 @@ type OpenShellGatewayCheck struct {
 	// settings reads the town settings; nil is config.LoadOrCreateTownSettings,
 	// which reads and never writes.
 	settings func(townRoot string) (*config.TownSettings, error)
-	// goos is the host OS; "" is runtime.GOOS. The launchd agent is macOS only.
-	goos string
-	// uid is the user id of the launchd gui domain; nil is os.Getuid.
-	uid func() int
 }
 
 // NewOpenShellGatewayCheck creates a new openshell-gateway check.
@@ -50,7 +40,7 @@ func NewOpenShellGatewayCheck() *OpenShellGatewayCheck {
 	return &OpenShellGatewayCheck{
 		BaseCheck: BaseCheck{
 			CheckName:        "openshell-gateway",
-			CheckDescription: "Verify the OpenShell gateway, sandbox images, providers and launchd agent serve the openshell seats",
+			CheckDescription: "Verify the OpenShell gateway, sandbox images and providers serve the openshell seats",
 			CheckCategory:    CategoryInfrastructure,
 		},
 	}
@@ -103,13 +93,6 @@ func (c *OpenShellGatewayCheck) Run(ctx *CheckContext) *CheckResult {
 	var problems []string
 	problems = append(problems, checkGateways(run, profiles)...)
 	problems = append(problems, checkImages(run, profiles)...)
-	goos := c.goos
-	if goos == "" {
-		goos = runtime.GOOS
-	}
-	if goos == "darwin" {
-		problems = append(problems, c.checkLaunchd(run)...)
-	}
 
 	if len(problems) > 0 {
 		return &CheckResult{
@@ -117,13 +100,12 @@ func (c *OpenShellGatewayCheck) Run(ctx *CheckContext) *CheckResult {
 			Status:  StatusWarning,
 			Message: fmt.Sprintf("%d openshell gateway problem(s) for %d profile(s)", len(problems), len(profiles)),
 			Details: problems,
-			FixHint: "Restart the gateway with: launchctl kickstart -k gui/$(id -u)/" + openShellLaunchdLabel + ", then rerun gt doctor",
 		}
 	}
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusOK,
-		Message: fmt.Sprintf("openshell gateway serves %d profile(s): connected, providers and images present, launchd agent loaded", len(profiles)),
+		Message: fmt.Sprintf("openshell gateway serves %d profile(s): connected, providers and images present", len(profiles)),
 	}
 }
 
@@ -249,20 +231,6 @@ func checkImages(run openShellRunner, profiles []openShellProfile) []string {
 		}
 	}
 	return problems
-}
-
-// checkLaunchd reports the gateway's launchd agent when launchctl does not
-// print it as loaded.
-func (c *OpenShellGatewayCheck) checkLaunchd(run openShellRunner) []string {
-	uid := c.uid
-	if uid == nil {
-		uid = os.Getuid
-	}
-	target := fmt.Sprintf("gui/%d/%s", uid(), openShellLaunchdLabel)
-	if _, err := run([]string{"launchctl", "print", target}); err != nil {
-		return []string{fmt.Sprintf("launchctl print %s: agent is not loaded: %v", target, err)}
-	}
-	return nil
 }
 
 // runOpenShellCommand is the real runner: it executes argv under

@@ -16,7 +16,6 @@ const (
 	osStatus    = "openshell -g openshell status --output json"
 	osProviders = "openshell -g openshell provider list --output json"
 	dockerImage = "docker image inspect gastown-polecat:dev"
-	launchd     = "launchctl print gui/501/com.gastown.openshell-gateway"
 )
 
 // openShellFake answers commands by their joined argv. A command with no reply
@@ -34,7 +33,6 @@ func healthyOpenShell() *openShellFake {
 			osStatus:    `{"status":"connected","gateway":"openshell"}`,
 			osProviders: `{"providers":[{"name":"deepseek"}]}`,
 			dockerImage: `[]`,
-			launchd:     `state = running`,
 		},
 		errs: map[string]error{},
 	}
@@ -67,12 +65,10 @@ func defaultProfile() config.SandboxProfile {
 	return config.SandboxProfile{Image: "gastown-polecat:dev", Policy: "deploy/polecat/policy.yaml", Providers: []string{"deepseek"}}
 }
 
-func openShellCheck(f *openShellFake, ts *config.TownSettings, goos string) *OpenShellGatewayCheck {
+func openShellCheck(f *openShellFake, ts *config.TownSettings) *OpenShellGatewayCheck {
 	c := NewOpenShellGatewayCheck()
 	c.run = f.run
 	c.settings = func(string) (*config.TownSettings, error) { return ts, nil }
-	c.goos = goos
-	c.uid = func() int { return 501 }
 	return c
 }
 
@@ -80,13 +76,13 @@ func TestOpenShellGatewayCheck_AllGood_OK(t *testing.T) {
 	t.Parallel()
 	f := healthyOpenShell()
 
-	result := openShellCheck(f, openShellTown(defaultProfile()), "darwin").Run(&CheckContext{TownRoot: t.TempDir()})
+	result := openShellCheck(f, openShellTown(defaultProfile())).Run(&CheckContext{TownRoot: t.TempDir()})
 
 	if result.Status != StatusOK {
 		t.Fatalf("Status = %v, want StatusOK; message: %s; details: %v", result.Status, result.Message, result.Details)
 	}
-	if len(f.calls) != 4 {
-		t.Errorf("ran %d commands, want 4: %v", len(f.calls), f.calls)
+	if len(f.calls) != 3 {
+		t.Errorf("ran %d commands, want 3: %v", len(f.calls), f.calls)
 	}
 }
 
@@ -97,7 +93,7 @@ func TestOpenShellGatewayCheck_NoOpenShellSeats_OKWithoutRunning(t *testing.T) {
 		"deepseek-flash": {Cap: 1},
 	}}}
 
-	result := openShellCheck(f, ts, "darwin").Run(&CheckContext{TownRoot: t.TempDir()})
+	result := openShellCheck(f, ts).Run(&CheckContext{TownRoot: t.TempDir()})
 
 	if result.Status != StatusOK || result.Message != "no openshell seats" {
 		t.Fatalf("Status = %v, Message = %q; want StatusOK no-op", result.Status, result.Message)
@@ -110,10 +106,8 @@ func TestOpenShellGatewayCheck_NoOpenShellSeats_OKWithoutRunning(t *testing.T) {
 func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		profile config.SandboxProfile
-		setup   func(f *openShellFake)
-		goos    string
+		name  string
+		setup func(f *openShellFake)
 		// want is a substring each of these detail lines must contain.
 		want []string
 	}{
@@ -122,7 +116,6 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			setup: func(f *openShellFake) {
 				f.replies[osStatus] = `{"status":"unreachable"}`
 			},
-			goos: "darwin",
 			want: []string{"openshell status: gateway openshell reports \"unreachable\", not connected"},
 		},
 		{
@@ -130,7 +123,6 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			setup: func(f *openShellFake) {
 				f.errs[osStatus] = errors.New("exit status 1: connection refused")
 			},
-			goos: "darwin",
 			want: []string{"openshell status: gateway openshell did not answer"},
 		},
 		{
@@ -138,7 +130,6 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			setup: func(f *openShellFake) {
 				f.replies[osStatus] = `connected`
 			},
-			goos: "darwin",
 			want: []string{"openshell status: gateway openshell: decode"},
 		},
 		{
@@ -146,7 +137,6 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			setup: func(f *openShellFake) {
 				f.replies[osProviders] = `{"providers":[{"name":"forgejo-polecat"}]}`
 			},
-			goos: "darwin",
 			want: []string{`provider "deepseek"`},
 		},
 		{
@@ -154,7 +144,6 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			setup: func(f *openShellFake) {
 				f.errs[osProviders] = errors.New("exit status 1")
 			},
-			goos: "darwin",
 			want: []string{"openshell provider list: gateway openshell"},
 		},
 		{
@@ -162,7 +151,6 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			setup: func(f *openShellFake) {
 				f.replies[osProviders] = `deepseek`
 			},
-			goos: "darwin",
 			want: []string{"openshell provider list: gateway openshell: decode"},
 		},
 		{
@@ -170,16 +158,7 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			setup: func(f *openShellFake) {
 				f.errs[dockerImage] = errors.New("exit status 1: No such image")
 			},
-			goos: "darwin",
 			want: []string{"docker image inspect: image gastown-polecat:dev"},
-		},
-		{
-			name: "launchd agent not loaded is named",
-			setup: func(f *openShellFake) {
-				f.errs[launchd] = errors.New("exit status 113")
-			},
-			goos: "darwin",
-			want: []string{"com.gastown.openshell-gateway: agent is not loaded"},
 		},
 		{
 			name: "unreachable gateway skips its provider list and reports the rest",
@@ -187,7 +166,6 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 				f.replies[osStatus] = `{"status":"unreachable"}`
 				f.errs[dockerImage] = errors.New("exit status 1")
 			},
-			goos: "darwin",
 			want: []string{"openshell status: gateway openshell", "docker image inspect: image gastown-polecat:dev"},
 		},
 	}
@@ -197,7 +175,7 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			f := healthyOpenShell()
 			tt.setup(f)
 
-			result := openShellCheck(f, openShellTown(defaultProfile()), tt.goos).Run(&CheckContext{TownRoot: t.TempDir()})
+			result := openShellCheck(f, openShellTown(defaultProfile())).Run(&CheckContext{TownRoot: t.TempDir()})
 
 			if result.Status != StatusWarning {
 				t.Fatalf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
@@ -211,23 +189,6 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestOpenShellGatewayCheck_LaunchdNotCheckedOffDarwin(t *testing.T) {
-	t.Parallel()
-	f := healthyOpenShell()
-	f.errs[launchd] = errors.New("no such command")
-
-	result := openShellCheck(f, openShellTown(defaultProfile()), "linux").Run(&CheckContext{TownRoot: t.TempDir()})
-
-	if result.Status != StatusOK {
-		t.Fatalf("Status = %v, want StatusOK; details: %v", result.Status, result.Details)
-	}
-	for _, call := range f.calls {
-		if strings.HasPrefix(call, "launchctl") {
-			t.Errorf("ran %q off darwin", call)
-		}
 	}
 }
 
@@ -252,7 +213,7 @@ func TestOpenShellGatewayCheck_UnreadableSeats_Warns(t *testing.T) {
 	ts := openShellTown(defaultProfile())
 	ts.PolecatPool.Timezone = "Not/AZone"
 
-	result := openShellCheck(f, ts, "darwin").Run(&CheckContext{TownRoot: t.TempDir()})
+	result := openShellCheck(f, ts).Run(&CheckContext{TownRoot: t.TempDir()})
 
 	if result.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
@@ -270,7 +231,7 @@ func TestOpenShellGatewayCheck_NoDocker_WarnsOnceNotOK(t *testing.T) {
 	f := healthyOpenShell()
 	f.errs[dockerImage] = fmt.Errorf("docker: %w", exec.ErrNotFound)
 
-	result := openShellCheck(f, openShellTown(defaultProfile()), "darwin").Run(&CheckContext{TownRoot: t.TempDir()})
+	result := openShellCheck(f, openShellTown(defaultProfile())).Run(&CheckContext{TownRoot: t.TempDir()})
 
 	if result.Status != StatusWarning {
 		t.Fatalf("Status = %v, want StatusWarning so the skipped image check is visible; message: %s", result.Status, result.Message)

@@ -4,20 +4,18 @@ The OpenShell gateway is the long-lived service behind the `openshell` session b
 
 ## Install
 
-The agent is installed by the Go installer (`cmd/gt-installer`), the same run that installs `gt` (`make install`, and the daemon's rebuild_gt job). The install writes `~/Library/LaunchAgents/com.gastown.openshell-gateway.plist` from `scripts/launchd/com.gastown.openshell-gateway.plist.tmpl`, with `$HOME` filled in, and loads it with `launchctl bootstrap gui/$(id -u)` when launchd has not loaded it yet.
+gt no longer installs this agent: the installer's gateway step was deleted (gt-a2uug4.18), so the plist and its launchd load are managed outside gt. The commands below operate an agent that is already installed on the Mac.
 
-Two things must exist first; the install does not create either:
+Two things must exist first; nothing creates either:
 
 - the `openshell-gateway` binary at `/opt/homebrew/bin` (the brew formula);
-- `~/.config/openshell/gateway.toml`, which the operator writes. Without it the install skips the agent, so a machine with no OpenShell seats is unaffected.
+- `~/.config/openshell/gateway.toml`, which the operator writes. Without it nothing starts the agent, so a machine with no OpenShell seats is unaffected.
 
 To see what an install would do without building or changing anything:
 
 ```bash
 make gt-installer && ./gt-installer --dry-run
 ```
-
-It prints `gateway: skipped, no <gateway.toml>` when the file is missing. Otherwise it prints `would write <plist>` when the unit differs from the template, and `would run: launchctl bootstrap gui/<uid> <plist>` when launchd has not loaded the unit.
 
 The unit sets `OPENSHELL_TELEMETRY_ENABLED=false` and `OPENSHELL_LOCAL_TLS_DIR`, keeps the gateway alive (`KeepAlive`), and logs to `~/gt/.runtime/openshell/gateway.log`.
 
@@ -57,7 +55,7 @@ If the agent is not loaded at all, bootstrap it:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gastown.openshell-gateway.plist
 ```
 
-To remove it, `launchctl bootout gui/$(id -u)/com.gastown.openshell-gateway` and delete the plist; the next install writes it again while `gateway.toml` exists.
+To remove it, `launchctl bootout gui/$(id -u)/com.gastown.openshell-gateway` and delete the plist.
 
 ## Where state lives
 
@@ -85,7 +83,7 @@ openshell status
 
 ## Doctor
 
-`gt doctor` runs the `openshell-gateway` check on the sandbox profiles the openshell seats use. It warns, and names each missing piece, when the gateway does not report connected, a provider a profile names is not registered, a profile image is not present, or (on macOS) the launchd agent is not loaded. It also warns when the town settings or `polecat_pool.seats` cannot be read, and when the docker CLI is not on PATH: the image check cannot run then, so the warning says the images are unverified. A town with no openshell seats passes without running any command.
+`gt doctor` runs the `openshell-gateway` check on the sandbox profiles the openshell seats use. It warns, and names each missing piece, when the gateway does not report connected, a provider a profile names is not registered, or a profile image is not present. It also warns when the town settings or `polecat_pool.seats` cannot be read, and when the docker CLI is not on PATH: the image check cannot run then, so the warning says the images are unverified. A town with no openshell seats passes without running any command.
 
 ## What a sandbox polecat cannot do
 
