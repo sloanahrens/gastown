@@ -680,28 +680,23 @@ func dashboardHealth(townRoot string) dashboard.Health {
 // line for the first cause; the rest ride its title.
 const dashboardHealthCauseMax = 3
 
-// dashboardHealthCauses is rep's non-green fields, worst verdict first, then
-// its NEW fields (green, a rig with no landing yet, gt-30ehe8), capped at
-// dashboardHealthCauseMax. Ordering and rank match townhealth.Line, so the
-// pill's first cause is the line's first token for a reader cross-checking
-// (gt-70aa6). A NEW field never outranks a non-green one. A missing report
-// reads as no causes.
+// dashboardHealthCauses is rep's non-green fields and its NEW fields (green,
+// a rig with no landing yet, gt-30ehe8), worst verdict first and capped at
+// dashboardHealthCauseMax. One sort orders them together, so a NEW field sorts
+// behind every fault and is capped away before one. Ordering and rank match
+// townhealth.Line, so the pill's first cause is the line's first token for a
+// reader cross-checking (gt-70aa6). A missing report reads as no causes.
 func dashboardHealthCauses(rep *townhealth.Report) []dashboard.HealthCause {
 	if rep == nil {
 		return nil
 	}
 	bad := make([]townhealth.Field, 0, len(rep.Fields))
 	for _, f := range rep.Fields {
-		if f.Verdict != townhealth.Green {
+		if f.Verdict != townhealth.Green || f.Tag == townhealth.New {
 			bad = append(bad, f)
 		}
 	}
 	sort.SliceStable(bad, func(i, j int) bool { return bad[i].Verdict.ExitCode() > bad[j].Verdict.ExitCode() })
-	for _, f := range rep.Fields {
-		if f.Tag == townhealth.New {
-			bad = append(bad, f)
-		}
-	}
 	if len(bad) > dashboardHealthCauseMax {
 		bad = bad[:dashboardHealthCauseMax]
 	}

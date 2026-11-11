@@ -738,10 +738,11 @@ func TestPersonFieldsUnknownOnFailedRead(t *testing.T) {
 }
 
 // TestMains covers the per-rig main field: a recorded verdict is red or
-// green, a rig with a post-landing check and no verdict yet is NEW (green, not
-// landed since it was added: gt-30ehe8), an unreadable record is UNKNOWN, and a
-// rig with no check at all is n/a, so a misconfiguration is distinguishable
-// from nothing to check (gt-fn9e6.34).
+// green, a rig with a post-landing check, no verdict and no landing record is
+// NEW (green, not landed since it was added: gt-30ehe8), the same rig with a
+// landing record is UNKNOWN (the check never ran), an unreadable record is
+// UNKNOWN, and a rig with no check at all is n/a, so a misconfiguration is
+// distinguishable from nothing to check (gt-fn9e6.34).
 func TestMains(t *testing.T) {
 	t.Parallel()
 	f := healthy()
@@ -751,11 +752,12 @@ func TestMains(t *testing.T) {
 		{Rig: "c", PostLand: PostLandCheck{Context: "ci / post-land"}},
 		{Rig: "d", Err: errors.New("corrupt state")},
 		{Rig: "no-check"},
+		{Rig: "landed", Landed: true, PostLand: PostLandCheck{Context: "ci / post-land"}},
 	}
 	r := Compute(context.Background(), inputs(f))
 	for key, want := range map[string]Verdict{
 		"main/a": Green, "main/b": Red, "main/c": Green,
-		"main/d": VerdictUnknown, "main/no-check": Green,
+		"main/d": VerdictUnknown, "main/no-check": Green, "main/landed": VerdictUnknown,
 	} {
 		if got := field(t, r, key); got.Verdict != want {
 			t.Errorf("%s = %+v, want %s", key, got, want)
@@ -766,6 +768,9 @@ func TestMains(t *testing.T) {
 	}
 	if got := field(t, r, "main/c"); got.Tag != New || got.Detail != "no post-landing verdict recorded yet" {
 		t.Errorf("main/c = %+v, want a NEW field for the rig that has not landed", got)
+	}
+	if got := field(t, r, "main/landed"); got.Tag != Unknown || got.Detail != "landed, but no post-landing verdict recorded" {
+		t.Errorf("main/landed = %+v, want UNKNOWN naming the landing with no recorded verdict", got)
 	}
 	if got := field(t, r, "main/no-check"); got.Tag != Recorded || got.Value != "n/a" || got.Detail != "no post_land_command configured" {
 		t.Errorf("main/no-check = %+v, want a recorded n/a naming the missing command", got)
@@ -780,8 +785,9 @@ func TestMains(t *testing.T) {
 }
 
 // With a status context configured (gt-gg9hv.7.1) the verdict is the recorded
-// one: green, red naming the short sha, and NEW when the context is configured
-// but no verdict has been recorded yet (gt-gg9hv.7.2, gt-30ehe8).
+// one: green, red naming the short sha, NEW when the context is configured but
+// the rig has not landed yet, and UNKNOWN when it has landed with no verdict
+// recorded (gt-gg9hv.7.2, gt-30ehe8).
 func TestMainFieldWithAStatusContext(t *testing.T) {
 	t.Parallel()
 	f := healthy()
@@ -790,6 +796,7 @@ func TestMainFieldWithAStatusContext(t *testing.T) {
 		{Rig: "green", LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: check},
 		{Rig: "red", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: check},
 		{Rig: "unrecorded", PostLand: check},
+		{Rig: "landed-unrecorded", Landed: true, PostLand: check},
 	}
 	r := Compute(context.Background(), inputs(f))
 	if got := field(t, r, "main/green"); got.Verdict != Green || got.Tag != Recorded {
@@ -800,6 +807,9 @@ func TestMainFieldWithAStatusContext(t *testing.T) {
 	}
 	if got := field(t, r, "main/unrecorded"); got.Verdict != Green || got.Tag != New || got.Value != "no landing yet" {
 		t.Errorf("main/unrecorded = %+v, want a green NEW field for a rig with no landing yet", got)
+	}
+	if got := field(t, r, "main/landed-unrecorded"); got.Verdict != VerdictUnknown || got.Tag != Unknown {
+		t.Errorf("main/landed-unrecorded = %+v, want UNKNOWN: a landed rig with no verdict has a check that never ran", got)
 	}
 }
 
@@ -828,6 +838,30 @@ func TestNewRigLeavesTheTownGreenAndReady(t *testing.T) {
 	}
 	if line := Line(r, now, DefaultStaleAfter); !strings.HasPrefix(line, "GREEN ") {
 		t.Errorf("Line = %q, want a green line", line)
+	}
+}
+
+// The other side of the NEW tag: a rig that has landed but recorded no
+// post-land verdict reads UNKNOWN and is not ready. A configured check that
+// never records a verdict must not read green forever, or its silence would
+// mask the very thing the field is for (gt-30ehe8).
+func TestLandedRigWithNoPostLandVerdictIsUnknown(t *testing.T) {
+	t.Parallel()
+	check := PostLandCheck{Context: "ci / post-land"}
+	f := healthy()
+	for i := range 9 {
+		f.mains = append(f.mains, RigMain{Rig: fmt.Sprintf("rig%d", i), LastRun: "1111111111", LastGreen: "1111111111", LastGreenAt: ago(time.Hour), PostLand: check})
+	}
+	f.mains = append(f.mains, RigMain{Rig: "toolbox", Landed: true, PostLand: check})
+	r := Compute(context.Background(), inputs(f))
+	if r.Verdict != VerdictUnknown {
+		t.Fatalf("report verdict = %s, want unknown: a landed rig with no post-land verdict must not read green", r.Verdict)
+	}
+	if got := field(t, r, "main/toolbox"); got.Verdict != VerdictUnknown || got.Tag != Unknown || got.Detail != "landed, but no post-landing verdict recorded" {
+		t.Errorf("main/toolbox = %+v, want UNKNOWN naming the unrun check", got)
+	}
+	if ok, reason := Ready(r, now, DefaultStaleAfter); ok || reason != "verdict is unknown" {
+		t.Errorf("Ready = %v (%q), want not ready for the unknown main field", ok, reason)
 	}
 }
 
@@ -898,8 +932,9 @@ func TestMainFieldPlaceholderCommandIsUnknown(t *testing.T) {
 // A recorded green stays green however old it is (gt-f701fm): its verdict
 // stands until a newer one moves LastRun.
 // Past PostLandAgeShownAfter its age rides in the value. A red stands at any
-// age, a never-recorded rig stays UNKNOWN, and a status green with no recorded
-// time stays UNKNOWN because its age cannot be shown (gt-gg9hv.7.2). A
+// age, a rig that has landed with no verdict stays UNKNOWN, a rig that never
+// landed is NEW, and a status green with no recorded time stays UNKNOWN
+// because its age cannot be shown (gt-gg9hv.7.2, gt-30ehe8). A
 // command-configured rig records its verdict synchronously, so its green is
 // never aged.
 func TestMainFieldRecordedGreenStaysGreen(t *testing.T) {
@@ -920,7 +955,8 @@ func TestMainFieldRecordedGreenStaysGreen(t *testing.T) {
 		{"green-30h", green(30*time.Hour, status), Green, "green 30h", ""},
 		{"green-10d", green(10*24*time.Hour, status), Green, "green 10d", ""},
 		{"red-30h", RigMain{Rig: "mango", LastRun: "2222222222", LastGreen: "1111111111", LastGreenAt: ago(30 * time.Hour), PostLand: status}, Red, "red", "main red at 22222222"},
-		{"never-recorded", RigMain{Rig: "mango", PostLand: status}, Green, "no landing yet", "no post-landing verdict recorded yet"},
+		{"never-landed", RigMain{Rig: "mango", PostLand: status}, Green, "no landing yet", "no post-landing verdict recorded yet"},
+		{"landed-no-verdict", RigMain{Rig: "mango", Landed: true, PostLand: status}, VerdictUnknown, "?", "landed, but no post-landing verdict recorded"},
 		{"untimed-green", RigMain{Rig: "mango", LastRun: "1111111111", LastGreen: "1111111111", PostLand: status}, VerdictUnknown, "?", "green verdict has no recorded time"},
 		{"command-green-30h", green(30*time.Hour, command), Green, "green", ""},
 		{"command-untimed", RigMain{Rig: "mango", LastRun: "1111111111", LastGreen: "1111111111", PostLand: command}, Green, "green", ""},

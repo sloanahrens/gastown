@@ -166,13 +166,15 @@ func TestStatusFlagUsageIsOneLine(t *testing.T) {
 }
 
 // TestStatusHelpNamesNewRig holds the Long help to the NEW tag: a rig with no
-// landing yet is green and reads NEW in gt status, so the help must say so
-// rather than leave the tag unexplained (gt-30ehe8).
+// landing record is green and reads NEW in gt status, one that landed with no
+// verdict stays UNKNOWN, and the help must say both rather than leave the tag
+// unexplained (gt-30ehe8). The help is compared as one sentence, so rewrapping
+// the prose does not fail the test.
 func TestStatusHelpNamesNewRig(t *testing.T) {
 	t.Parallel()
-	want := "A rig with no landing yet is green\nand reads NEW in gt status, not UNKNOWN"
-	if !strings.Contains(statusCmd.Long, want) {
-		t.Errorf("status help does not explain the NEW tag; want %q in Long", want)
+	want := "A rig with no landing record yet is green and reads NEW in gt status, not UNKNOWN, so a rig just added does not hold the town back; a rig that has landed with no post-land verdict reads UNKNOWN, since no run of its check recorded one."
+	if got := strings.Join(strings.Fields(statusCmd.Long), " "); !strings.Contains(got, want) {
+		t.Errorf("status help does not explain the NEW tag; want %q in Long, got:\n%s", want, statusCmd.Long)
 	}
 }
 

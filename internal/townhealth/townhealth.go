@@ -486,7 +486,13 @@ type RigMain struct {
 	// rig without one never runs a post-landing check, so having no verdict
 	// is its normal state rather than an open question (gt-fn9e6.34).
 	PostLand PostLandCheck
-	Err      error
+	// Landed reports whether the landing worker has a landing record for the
+	// rig at all. A rig with none has not landed since it was added, so its
+	// missing verdict reads NEW; one that has landed with no verdict reads
+	// UNKNOWN, because a configured check that never runs must not read green
+	// (gt-30ehe8).
+	Landed bool
+	Err    error
 }
 
 // Mains reports every landing rig's main state.
@@ -1153,13 +1159,18 @@ func mains(in Inputs) []Field {
 			// that should have run (gt-fn9e6.34). A rig that once ran a check
 			// keeps its recorded verdict either way.
 			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "n/a", Detail: "no post_land_command configured"})
-		case m.LastRun == "":
-			// No verdict has ever been recorded for this rig, so there is no
-			// record to read. A record that failed to read is the m.Err case
-			// above. The field reads NEW and green, so the town and the
-			// readiness probe are not held by a rig that has not landed yet
+		case m.LastRun == "" && !m.Landed:
+			// The landing worker has no landing record for this rig, so it has
+			// not landed since it was added and there is no verdict to have
+			// missed. The field reads NEW and green, so the town and the
+			// readiness probe are not held back by a rig just added
 			// (gt-30ehe8).
 			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: New, Verdict: Green, Value: "no landing yet", Detail: "no post-landing verdict recorded yet"})
+		case m.LastRun == "":
+			// The rig has a landing record but no post-land verdict: no run of
+			// its check recorded one. Reading that green would hide a check
+			// that silently does nothing, so it stays UNKNOWN (gt-30ehe8).
+			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("landed, but no post-landing verdict recorded")))
 		case m.LastRun != m.LastGreen:
 			// A red verdict is a standing fact about LastRun, recorded at some
 			// time after LastGreenAt, so its age cannot be judged from that

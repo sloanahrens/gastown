@@ -34,8 +34,9 @@ type Health struct {
 	Line    string    `json:"line"`
 	Verdict string    `json:"verdict"` // green, degraded, red, unknown
 	ReadAt  time.Time `json:"read_at"`
-	// Causes are the report's non-green fields, worst first, capped: the
-	// verdict's why without a gt status --line run (gt-70aa6).
+	// Causes are the report's non-green fields and its NEW ones, worst first,
+	// capped: the verdict's why without a gt status --line run (gt-70aa6,
+	// gt-30ehe8).
 	Causes []HealthCause `json:"causes,omitempty"`
 }
 
