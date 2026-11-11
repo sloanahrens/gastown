@@ -510,6 +510,11 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	// <rig>/.beads, so the add needs no mayor clone for them (gt-3lvcjz.16). A
 	// read that fails for any reason but "not at ref" fails the add, since an
 	// unreadable repository cannot be told from one that tracks no beads.
+	//
+	// Only config.yaml and metadata.json are copied, so a redirect is never
+	// written or carried into <rig>/.beads. The old one-time removal of a tracked
+	// redirect is gone for that reason. The doctor (gt-3lvcjz.19) owns warning on
+	// a legacy redirect.
 	tracked, err := adoptTrackedBeads(bareGit, defaultBranch, constants.RigBeadsWritePath(rigPath))
 	if err != nil {
 		return nil, err
@@ -920,6 +925,11 @@ func mayorCloneNeeded(opts AddRigOptions) string {
 	return ""
 }
 
+// adoptedBeadsMarker is written into an adopted rig's beads directory and into
+// no other. InitBeads reads it to tell adopted files from an untracked rig's
+// own metadata.json, which bd init writes at the same path (gt-3lvcjz.16).
+const adoptedBeadsMarker = ".gt-adopted"
+
 // adoptTrackedBeads copies the beads files bareGit tracks at branch, config.yaml
 // and metadata.json, byte for byte into dir, and reports whether the repo tracks
 // any. A file the repo does not track is not written. A bare repo has no working
@@ -928,7 +938,7 @@ func mayorCloneNeeded(opts AddRigOptions) string {
 // before anything is written: it is not read as "not tracked" (gt-3lvcjz.16).
 //
 // The copy is per-town state in dir, not a checkout of the repo's .beads/: later
-// steps of AddRig rewrite it.
+// steps of AddRig rewrite it. A tracked repo also gets adoptedBeadsMarker in dir.
 func adoptTrackedBeads(bareGit Repo, branch, dir string) (bool, error) {
 	refFiles, ok := bareGit.(refFileReader)
 	if !ok {
@@ -956,6 +966,9 @@ func adoptTrackedBeads(bareGit Repo, branch, dir string) (bool, error) {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0644); err != nil {
 			return false, fmt.Errorf("writing %s from the source repo: %w", name, err)
 		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, adoptedBeadsMarker), nil, 0644); err != nil {
+		return false, fmt.Errorf("writing the adopted-beads marker: %w", err)
 	}
 	return true, nil
 }
@@ -1636,10 +1649,11 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 
 	// A source repo that tracks .beads/ was adopted by AddRig: its config.yaml
 	// and metadata.json are the rig's database, already in <rig>/.beads, so no
-	// redirect is written for it, here or under mayor/rig (gt-3lvcjz.16). This
-	// check runs before the mayor clone check: a redirect written for an
-	// adopted rig would point its own database at mayor/rig.
-	_, adoptedErr := os.Stat(filepath.Join(beadsDir, "metadata.json"))
+	// redirect is written for it, here or under mayor/rig (gt-3lvcjz.16). Only
+	// adoptTrackedBeads writes the marker, so an untracked rig's own metadata.json
+	// does not count. This check runs before the mayor clone check: a redirect
+	// written for an adopted rig would point its own database at mayor/rig.
+	_, adoptedErr := os.Stat(filepath.Join(beadsDir, adoptedBeadsMarker))
 	if adoptedErr != nil && !os.IsNotExist(adoptedErr) {
 		return fmt.Errorf("checking for adopted beads in %s: %w", beadsDir, adoptedErr)
 	}

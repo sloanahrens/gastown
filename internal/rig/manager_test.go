@@ -554,8 +554,9 @@ func TestInitBeads_AdoptedBeads_InitsWithoutRedirect(t *testing.T) {
 		t.Fatalf("mkdir .beads: %v", err)
 	}
 	for name, body := range map[string]string{
-		"config.yaml":   "issue-prefix: tk\n",
-		"metadata.json": "{}\n",
+		"config.yaml":      "issue-prefix: tk\n",
+		"metadata.json":    "{}\n",
+		adoptedBeadsMarker: "",
 	} {
 		if err := os.WriteFile(filepath.Join(rigBeads, name), []byte(body), 0644); err != nil {
 			t.Fatalf("writing adopted %s: %v", name, err)
@@ -583,6 +584,34 @@ func TestInitBeads_AdoptedBeads_InitsWithoutRedirect(t *testing.T) {
 		if _, err := os.Stat(redirect); !os.IsNotExist(err) {
 			t.Errorf("%s = %v, want no redirect", redirect, err)
 		}
+	}
+}
+
+// An untracked rig's own metadata.json at <rig>/.beads is not an adopted
+// database: without the adoption marker InitBeads keeps the mayor redirect, so
+// the untracked path still writes mayor/rig/.beads/redirect (gt-3lvcjz.16).
+func TestInitBeads_MetadataWithoutAdoptionMarkerKeepsMayorRedirect(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	rigBeads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatalf("writing metadata.json: %v", err)
+	}
+
+	manager, _, _ := testManager("", nil)
+	if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
+		t.Fatalf("InitBeads: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect"))
+	if err != nil {
+		t.Fatalf("reading mayor redirect: %v; want the untracked path to write it", err)
+	}
+	if string(got) != "../../.beads\n" {
+		t.Errorf("mayor redirect = %q, want %q", got, "../../.beads\n")
 	}
 }
 
@@ -2191,7 +2220,11 @@ func TestAdoptTrackedBeads(t *testing.T) {
 		"tracks .beads/": {
 			repo:        bareOf(withBeads),
 			wantTracked: true,
-			wantFiles:   map[string]string{"config.yaml": "prefix: wb\n\n", "metadata.json": "{}\n"},
+			wantFiles: map[string]string{
+				"config.yaml":      "prefix: wb\n\n",
+				"metadata.json":    "{}\n",
+				adoptedBeadsMarker: "",
+			},
 		},
 		"no .beads/": {
 			repo:        bareOf(withoutBeads),
