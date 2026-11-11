@@ -7,28 +7,72 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
-// landingColumns is the header landings.csv is written with, in its order.
-// Columns are append-only: an existing column keeps its name and its place, so
-// a reader of an older file reads the new one under the same names.
-var landingColumns = []string{
+// legacyLandingColumns is the header landings.csv was written with before the
+// stage join and the polecat time appended theirs.
+var legacyLandingColumns = []string{
 	"bead", "rig", "landed_at", "week", "route", "om_verdict", "gate_result",
 	"lines_added", "lines_deleted", "lines_total", "files_touched",
 	"file_entropy", "package_entropy", "attempts", "rejected_before_landing",
 	"manual_rescue", "reached_overrun_stop", "unreadable", "type", "priority",
 	"shaped", "label_count", "model", "om_threshold", "dominant_model",
-	"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
 }
 
 // landingStageStamps are the columns a landing's stage clock fills, in the
 // order the footer counts them.
 var landingStageStamps = []string{"created_at", "dispatched_at", "submitted_at"}
 
-// appendedLandingColumns are the columns the stage join adds after the header
-// the ported extract wrote. The Python reference stays at that header: a script
-// does not take the join logic Go owns, so the contract extends it append-only.
-var appendedLandingColumns = []string{"created_at", "dispatched_at", "submitted_at", "time_to_land_s"}
+// appendedLandingColumns are the columns the stage join and the polecat time
+// add after the ported extract's header. The Python reference stays at that
+// header: a script does not take the join logic Go owns, so the contract
+// extends it append-only.
+var appendedLandingColumns = []string{
+	"created_at", "dispatched_at", "submitted_at", "time_to_land_s",
+	"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
+}
+
+// landingColumns is the header landings.csv is written with: the legacy header
+// then the appended columns. Columns are append-only: an existing column keeps
+// its name and its place, so a reader of an older file reads the new one under
+// the same names.
+var landingColumns = append(append([]string{}, legacyLandingColumns...), appendedLandingColumns...)
+
+// polecatSecsCell is a landing's polecat time in seconds, "" when the ledger
+// line carries none. The writer omits a zero time, so a zero or negative value
+// is a line from before the field or a corrupt one, and both read as absent.
+func polecatSecsCell(l LedgerRow) string {
+	if l.PolecatSecs <= 0 {
+		return ""
+	}
+	return strconv.FormatFloat(l.PolecatSecs, 'f', -1, 64)
+}
+
+// polecatLowerBoundCell is the lower-bound flag of a landing's polecat time. A
+// line with no time and no bound is a line from before the fields existed (or a
+// landing with no seat), so its cell is empty rather than a false flag.
+func polecatLowerBoundCell(l LedgerRow) string {
+	if l.PolecatSecs <= 0 && !l.PolecatLowerBound {
+		return ""
+	}
+	return boolCell(l.PolecatLowerBound)
+}
+
+// spActualCell is the points a landing's measured polecat time is worth, the
+// sp_actual cell. A lower-bound time, zero seconds and a time FromMinutes
+// refuses have no points, so the cell is empty.
+func spActualCell(l LedgerRow) string {
+	if l.PolecatSecs <= 0 || l.PolecatLowerBound {
+		return ""
+	}
+	points, err := storypoints.FromMinutes(l.PolecatSecs / 60)
+	if err != nil {
+		return ""
+	}
+	return strconv.Itoa(points)
+}
 
 // LandingGaps is what the joined landings do not cover: the rows no seat record
 // gave a model, and the rows whose stage stamp is empty, by stamp name.

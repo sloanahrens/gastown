@@ -7,15 +7,19 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // explainOnlyColumns are the landings.csv columns known only after the landing:
-// never a predictor, only joined back to explain a box. They are kept in the
-// sorted order the sidecar writes.
+// never a predictor, only joined back to explain a box. The polecat time and the
+// seat are written by the landing record, so they are known only after it too.
+// They are kept in the sorted order the sidecar writes.
 var explainOnlyColumns = []string{
-	"attempts", "created_at", "dispatched_at", "file_entropy", "files_touched",
+	"agent", "attempts", "created_at", "dispatched_at", "file_entropy", "files_touched",
 	"gate_result", "lines_added", "lines_deleted", "lines_total", "om_verdict",
-	"package_entropy", "submitted_at", "time_to_land_s", "unreadable",
+	"package_entropy", "polecat_lower_bound", "polecat_secs", "seat_class", "sp_actual",
+	"submitted_at", "time_to_land_s", "unreadable",
 }
 
 // DiffSource is where a landing's size and spread columns come from: Stats
@@ -113,6 +117,11 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"dispatched_at":           dispatchedAt,
 			"submitted_at":            submittedAt,
 			"time_to_land_s":          timeToLandSeconds(createdAt, l.LandedAt),
+			"polecat_secs":            polecatSecsCell(l),
+			"polecat_lower_bound":     polecatLowerBoundCell(l),
+			"agent":                   l.Agent,
+			"seat_class":              storypoints.SeatClass(l.Agent),
+			"sp_actual":               spActualCell(l),
 		})
 	}
 	return rows, nil
