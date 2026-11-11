@@ -1044,7 +1044,7 @@ func (d *Daemon) diskMaintRegistryConfig(mode string, cfg polecatimage.Config, h
 		now: func() time.Time { return d.clk().Now() },
 	}
 	regCfg := registry.Config{
-		Base:         "http://" + cfg.Registry,
+		Base:         agentconfig.ImageRegistryBase(cfg.Registry),
 		Kubeconfig:   diskMaintKubeconfig(town, getenv),
 		Context:      diskMaintSandboxContext,
 		RecordsDir:   cfg.SandboxRecords,

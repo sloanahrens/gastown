@@ -2746,10 +2746,21 @@ func validImageRegistry(registry string) error {
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
 		return errors.New("want host:port with a port from 1 to 65535")
 	}
-	if _, err := url.Parse("http://" + registry); err != nil {
+	if _, err := url.Parse(ImageRegistryBase(registry)); err != nil {
 		return errors.New("want a host:port the registry address parses as")
 	}
 	return nil
+}
+
+// ImageRegistryBase is the base URL of the registry image_registry names: the
+// bare host:port with http:// in front. Every consumer of the setting builds its
+// URL here, so they cannot disagree on what the setting means. When the setting
+// is loaded, validImageRegistry refuses a scheme, so a consumer holds a bare
+// host:port. Whether a registry is reached over https is decided in the cloud
+// phase, when a remote registry exists; until then the setting carries no scheme
+// and every consumer reaches it over plain http.
+func ImageRegistryBase(setting string) string {
+	return "http://" + setting
 }
 
 // LandingWorkerConfig holds configuration for the landing_worker patrol.

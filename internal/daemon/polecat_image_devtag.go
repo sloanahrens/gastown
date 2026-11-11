@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -128,7 +129,7 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 		return devTagFailure(host, running, devTagState{}, fmt.Sprintf("the installed gt's build commit %s is not the start of the running commit", rev))
 	}
 
-	c := &registry.Client{Base: registryBase(host), HTTP: d.polecatDevTagSeams.http}
+	c := &registry.Client{Base: config.ImageRegistryBase(host), HTTP: d.polecatDevTagSeams.http}
 	dev := readDevTag(ctx, c, repo)
 	if dev.readErr != nil {
 		return devTagFailure(host, running, dev, dev.readErr.Error())
@@ -196,16 +197,6 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 		}
 	}
 	return devTagFailure(host, running, dev, why)
-}
-
-// registryBase is the URL the step reaches image_registry at. A setting that
-// carries an http:// or https:// scheme is used as it is; a bare host:port is
-// reached over http, as every other registry client in the tree reaches it.
-func registryBase(setting string) string {
-	if strings.HasPrefix(setting, "https://") || strings.HasPrefix(setting, "http://") {
-		return setting
-	}
-	return "http://" + setting
 }
 
 // polecatDevTagAncestor reports whether ancestor is an ancestor of descendant in

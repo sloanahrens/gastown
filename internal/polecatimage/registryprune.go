@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
 )
@@ -139,7 +140,7 @@ func (r *Run) pruneContext() (context.Context, context.CancelFunc) {
 // garbage collect inherits this process's DOCKER_HOST, as the pushes do.
 func (r *Run) registryTarget(ctx context.Context, keep int) *registry.Target {
 	return registry.NewTarget(registry.Config{
-		Base:         "http://" + r.Cfg.Registry,
+		Base:         config.ImageRegistryBase(r.Cfg.Registry),
 		Kubeconfig:   r.Cfg.RegistryKubeconfig,
 		Context:      diskmaint.SandboxContext,
 		RecordsDir:   r.Cfg.SandboxRecords,

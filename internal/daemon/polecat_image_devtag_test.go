@@ -583,8 +583,8 @@ func TestPolecatImageDevTagEscalatesUnknownAncestry(t *testing.T) {
 }
 
 // TestPolecatImageDevTagReachesRegistryAtSettingScheme: the step reaches the
-// registry over http for a bare host:port setting, and over the scheme a setting
-// carries when it has one.
+// registry over http for a bare host:port setting. The validator refuses a
+// setting with a scheme, so the step has no https branch (gt-vv9ir0).
 func TestPolecatImageDevTagReachesRegistryAtSettingScheme(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -593,7 +593,6 @@ func TestPolecatImageDevTagReachesRegistryAtSettingScheme(t *testing.T) {
 		scheme  string
 	}{
 		{name: "bare host:port over http", setting: devTagHost, scheme: "http"},
-		{name: "https setting over https", setting: "https://" + devTagHost, scheme: "https"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

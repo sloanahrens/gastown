@@ -784,6 +784,26 @@ func TestTierSweepRunnerImageRegistrySetting(t *testing.T) {
 	}
 }
 
+// TestImageRegistryBase: the base URL of a bare image_registry setting is the
+// setting under http://. Every consumer builds its URL here, so none of them
+// can read the setting as a different registry (gt-vv9ir0).
+func TestImageRegistryBase(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct{ setting, want string }{
+		"localhost":     {"localhost:5001", "http://localhost:5001"},
+		"address":       {"10.0.0.5:5000", "http://10.0.0.5:5000"},
+		"ipv6 loopback": {"[::1]:5001", "http://[::1]:5001"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := ImageRegistryBase(tt.setting); got != tt.want {
+				t.Errorf("ImageRegistryBase(%q) = %q, want %q", tt.setting, got, tt.want)
+			}
+		})
+	}
+}
+
 // image_rigs names the rigs whose green sweep publishes an image ref. It
 // defaults to none, so a town that never sets it pushes nothing; a named rig
 // is returned; and a name the town does not register is refused with the name,

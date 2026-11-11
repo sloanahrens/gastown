@@ -398,7 +398,7 @@ func maintRegistryTargets(ctx context.Context, town string, cfg polecatimage.Con
 	}
 	gate := &maintPushGate{cfg: cfg, out: out, now: time.Now}
 	regCfg := registry.Config{
-		Base:         "http://" + cfg.Registry,
+		Base:         config.ImageRegistryBase(cfg.Registry),
 		Kubeconfig:   filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig"),
 		Context:      diskmaint.SandboxContext,
 		RecordsDir:   cfg.SandboxRecords,
