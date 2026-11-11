@@ -10,15 +10,15 @@ Every idea goes through the same seven steps, in this order. A step that cannot 
 
 1. **Hypothesis.** One sentence a result can contradict: "Jev's answer to Q predicts outcome O better than the base rate."
 2. **Log-only collection.** The battery asks and writes its answers to its log. Nothing reads them to act. A new battery or question is a bead of its own.
-3. **Metric and floor.** The scorecard's rule, applied per question. The floors are the constants `minPositives`, `minNegatives`, `minPrecisionAtBest`, `minFlaggedAtBest`, `minLabeled` and `earnMargin` in `internal/jev/scorecard/scorecard.go`; this page does not restate their values, so read them there. A question earns only when it clears each floor that applies to its kind (the precision and flagged-count floors do not apply to score questions).
+3. **Metric and floor.** The scorecard's rule, applied per question. The floors are the constants `minPositives`, `minNegatives`, `minFlaggedAtBest`, `minLabeled`, `minLift`, `rareBase`, `liftRatio`, `flaggedShare` and `earnMargin` in `internal/jev/scorecard/scorecard.go`; this page does not restate their values, so read them there. A noul or choice earns on lift: its precision at the best cut must beat the base rate by `minLift`, or by `liftRatio` times the base when the base is under `rareBase`, and the best cut must flag under `flaggedShare` of the labeled lines. A score question earns on the best F1 beating the base rate by `earnMargin`. Both kinds also clear the count floors.
 4. **Cost per day.** Calls per day times the ledger's average, from `gt jev spend --usd-per-billion-tokens 42`. The patrol cap of 1 USD a day is shared; patrols peaked at 0.53 USD on 2026-10-29.
 5. **Privacy flag.** What text leaves the machine (see "Privacy" below). An idea that sends passages, transcripts or secrets that the existing batteries do not already send waits for the scrub bead.
 6. **Review date and decider.** The date the row is read. The overseer reads results and reports. The operator decides anything that acts, and sets its threshold.
 7. **Decision rule.** Earning: the floor is met, so the idea may be proposed as a consumer. No-signal: enough data, no lift, so the battery is retired or reworded. Not-yet: not enough data, so keep collecting to the next review date. Three reviews of not-yet with no growth in labeled items retire the idea. The index table has no decision column, so the decision is written as a dated review comment on the row's bead (see "Adding a row", step 5).
 
-### Acting-threshold policy (proposed; the operator sets the numbers)
+### Acting-threshold policy (confirmed by the operator, 2026-11-11)
 
-A question that earns still needs a threshold before anything acts on it. The vendor's guidance is that the threshold "scales with risk" and should be set from labeled examples and the cost of a wrong decision. Proposed classes:
+A question that earns still needs a threshold before anything acts on it. The vendor's guidance is that the threshold "scales with risk" and should be set from labeled examples and the cost of a wrong decision. The classes:
 
 | Class | What a wrong answer costs | Bar |
 |---|---|---|
@@ -27,7 +27,7 @@ A question that earns still needs a threshold before anything acts on it. The ve
 | Extra review | Reviewer time | At least 0.6, only ever adds review, never skips it |
 | Block, stop or skip | Lost or wrong work | At least 0.85, and a human confirms |
 
-The bars are our own starting choice and need the operator's confirmation; they are precision at a cut, a different quantity from the vendor's examples. The vendor's examples use confidence cut-offs: route to a human below 0.5 (https://docs.typesafe.ai/confidence.md), a 0.6 floor and 0.85 for money transfers (https://docs.typesafe.ai/patterns/confidence-routing.md); neither page shows a date, both read 2026-10-30. Calibration (I1) replaces our bars with measured values.
+The operator confirmed these bars on 2026-11-11. They are precision at a cut, a different quantity from the vendor's examples. The vendor's examples use confidence cut-offs: route to a human below 0.5 (https://docs.typesafe.ai/confidence.md), a 0.6 floor and 0.85 for money transfers (https://docs.typesafe.ai/patterns/confidence-routing.md); neither page shows a date, both read 2026-10-30. Calibration (I1) replaces our bars with measured values.
 
 ## Privacy
 

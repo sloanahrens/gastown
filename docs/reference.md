@@ -2029,13 +2029,20 @@ score has no cut at 0.5; it reports the mean score by label and the best cut.
 
 The verdict for each question:
 
-- `not-yet`: fewer than 30 labeled lines.
-- `earning`: on at least 30 labeled lines, the best F1 beats the label base
-  rate (positives over labeled lines) by 0.1 or more.
-- `no-signal`: anything else.
+- `not-yet`: fewer than 30 labeled lines, fewer than 10 positives or 10
+  negatives, or, for a noul or choice whose best cut flags a line, fewer than
+  10 labeled lines flagged there.
+- `earning`: on at least 30 labeled lines and the count floors above. A noul or
+  choice earns when its precision at the best cut beats the label base rate
+  (positives over labeled lines) by 0.1 or more, or by twice the base rate when
+  the base is under 0.1, and the best cut flags under 90% of the labeled lines.
+  A score earns when the best F1 beats the base rate by 0.1 or more.
+- `no-signal`: anything else, including a noul or choice whose best cut has no
+  precision to read or flags nearly every line.
 
 The best F1 is taken over every distinct value as a cut, predicting yes at or
-above it; a tie keeps the higher cut. `--json` names the rule that labeled each
+above it; a tie keeps the higher cut. The precision a noul or choice is judged
+on is taken at that same cut. `--json` names the rule that labeled each
 line in its `lines` array, and the label's source where it has one.
 
 Every battery is registered with `Register` in `internal/jev/scorecard/`. The

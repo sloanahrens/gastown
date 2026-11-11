@@ -39,8 +39,6 @@ const (
 	minPositives = 10
 	// minNegatives is the same judgement as minPositives, guarding the label a precision needs as its denominator (gt-1nxhm).
 	minNegatives = 10
-	// minPrecisionAtBest is a judgement call, vetted 2026-10-29 as the floor for "not worth reading as a signal": finding.any_duplicate (0.018) and finding.report_only (0.053) read earning (gt-1nxhm).
-	minPrecisionAtBest = 0.3
 	// minFlaggedAtBest is the same judgement as minPositives, guarding the count a precision is measured on: finding.report_only read earning on a precision of 1.0 measured over one flagged item, and a precision over fewer than ten labeled items is an anecdote (gt-dx8t2).
 	minFlaggedAtBest = 10
 )
@@ -49,8 +47,16 @@ const (
 	// minLabeled is how many labeled lines a question needs before it can
 	// earn; fewer is not-yet, whatever the metrics say.
 	minLabeled = 30
-	// earnMargin is how far the best F1 must beat the label base rate.
+	// earnMargin is how far the best F1 must beat the label base rate for a score question; a noul or choice earns on lift instead.
 	earnMargin = 0.1
+	// minLift is how far a yes's precision at the best cut must beat the base rate: the margin the score rule uses, and progress.looping read earning on 4 points of lift in the 2026-11-11 cache (gt-mjj5c7).
+	minLift = 0.1
+	// rareBase is the base rate under which lift is read as a multiple of the base: a 0.1 margin would refuse a precision of 0.05 over a base of 0.011, several times the base (gt-mjj5c7).
+	rareBase = 0.1
+	// liftRatio is the least multiple of the base that counts as lift under rareBase: auto_remediable's precision of 0.261 is 24 times its base of 0.011 on 2026-11-11 (gt-mjj5c7).
+	liftRatio = 2
+	// flaggedShare is the share of labeled lines the best cut must flag under to measure a lift: claims_verified flagged 666 of 666 on 2026-11-11, so its precision is the base rate and not a cut (gt-mjj5c7).
+	flaggedShare = 0.9
 	// eps absorbs float error at the margin, where 0.6 - 0.5 is not exactly 0.1.
 	eps = 1e-9
 	// noulCut is the probability at which a noul counts as a yes.
@@ -551,9 +557,12 @@ func meanByLabel(samples []sample) (positive, negative *float64) {
 // to act on: too few positives or negatives is not-yet whatever the metrics
 // say, and a noul or choice whose best cut flags too few labeled items to
 // measure a precision on is not-yet too, since that precision is an anecdote.
-// A noul or choice whose precision at the best cut is under the floor or
-// cannot be read is no-signal, since a yes it answers cannot be trusted. A
-// score kind has no precision, so only the count floors apply to it.
+// A noul or choice earns only when its best cut lifts precision over the base
+// rate (see lifts) and flags under flaggedShare of the labeled lines, since a
+// cut that flags nearly everything measures the base rate and not a cut. One
+// with no precision to read is no-signal, since a yes it answers cannot be
+// trusted. A score kind has no precision, so only the count floors and the
+// best F1 over the base rate apply to it.
 func verdict(kind string, positives, negatives, labeled int, bestF1, baseRate float64, precisionAtBest *float64, flaggedAtBest int) string {
 	switch {
 	case positives < minPositives || negatives < minNegatives:
@@ -562,12 +571,26 @@ func verdict(kind string, positives, negatives, labeled int, bestF1, baseRate fl
 		return VerdictNotYet
 	case labeled < minLabeled:
 		return VerdictNotYet
-	case kind != KindScore && (precisionAtBest == nil || *precisionAtBest < minPrecisionAtBest-eps):
+	case kind == KindScore:
+		if bestF1-baseRate >= earnMargin-eps {
+			return VerdictEarning
+		}
 		return VerdictNoSignal
-	case bestF1-baseRate >= earnMargin-eps:
-		return VerdictEarning
+	case precisionAtBest == nil || float64(flaggedAtBest) >= flaggedShare*float64(labeled)-eps:
+		return VerdictNoSignal
+	case !lifts(*precisionAtBest, baseRate):
+		return VerdictNoSignal
 	}
-	return VerdictNoSignal
+	return VerdictEarning
+}
+
+// lifts reports whether a yes's precision beats the base rate by enough to act
+// on: minLift over the base, or, when the base is rare, liftRatio times it.
+func lifts(precision, baseRate float64) bool {
+	if precision-baseRate >= minLift-eps {
+		return true
+	}
+	return baseRate < rareBase && precision >= liftRatio*baseRate-eps
 }
 
 func ratio(num, den int) *float64 {

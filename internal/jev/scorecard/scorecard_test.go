@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -225,17 +226,20 @@ func TestScorecardVerdictBoundaries(t *testing.T) {
 	}{
 		{"one line short of 30 is not-yet even when F1 is perfect", KindNoul, 14, 15, 29, 1, 0.5, prec(1), 10, VerdictNotYet},
 		{"exactly 30 with the margin met earns, though 0.6 - 0.5 is not exactly 0.1", KindNoul, 15, 15, 30, 0.6, 0.5, prec(0.6), 10, VerdictEarning},
-		{"exactly 30 with the margin just missed is no-signal", KindNoul, 15, 15, 30, 0.5999, 0.5, prec(0.6), 20, VerdictNoSignal},
-		{"an F1 equal to the base rate is no-signal", KindNoul, 15, 15, 30, 0.5, 0.5, prec(0.5), 20, VerdictNoSignal},
-		{"a margin of 0.15 earns on 100 lines", KindNoul, 50, 50, 100, 0.95, 0.8, prec(0.95), 10, VerdictEarning},
-		{"a margin of 0.1 on 100 lines earns, though 0.85 - 0.75 is not exactly 0.1", KindNoul, 50, 50, 100, 0.85, 0.75, prec(0.8), 10, VerdictEarning},
-		{"a margin just under 0.1 on 100 lines is no-signal", KindNoul, 50, 50, 100, 0.8499, 0.75, prec(0.8), 20, VerdictNoSignal},
+		{"exactly 30 with the lift just missed is no-signal", KindNoul, 15, 15, 30, 0.5999, 0.5, prec(0.5999), 20, VerdictNoSignal},
+		{"a precision equal to the base rate is no-signal, however high the F1", KindNoul, 15, 15, 30, 1, 0.5, prec(0.5), 20, VerdictNoSignal},
+		{"a lift of 0.15 earns on 100 lines", KindNoul, 50, 50, 100, 0.95, 0.8, prec(0.95), 10, VerdictEarning},
+		{"a lift of 0.1 on 100 lines earns, though 0.8 - 0.7 is not exactly 0.1", KindNoul, 50, 50, 100, 0.85, 0.7, prec(0.8), 10, VerdictEarning},
+		{"a lift just under 0.1 on 100 lines is no-signal", KindNoul, 50, 50, 100, 0.8499, 0.75, prec(0.8499), 20, VerdictNoSignal},
 		{"nine positives is not-yet however well the metrics read", KindNoul, 9, 21, 30, 1, 0.3, prec(1), 10, VerdictNotYet},
 		{"ten positives is not held back", KindNoul, 10, 20, 30, 0.9, 0.33, prec(0.9), 10, VerdictEarning},
 		{"nine negatives is not-yet however well the metrics read", KindNoul, 21, 9, 30, 1, 0.7, prec(1), 10, VerdictNotYet},
 		{"ten negatives is not held back", KindNoul, 20, 10, 30, 0.9, 0.67, prec(0.9), 10, VerdictEarning},
-		{"precision just under 0.3 at the best cut is no-signal", KindNoul, 20, 20, 40, 1, 0.5, prec(0.2999), 20, VerdictNoSignal},
-		{"precision exactly 0.3 at the best cut earns", KindNoul, 20, 20, 40, 1, 0.5, prec(0.3), 10, VerdictEarning},
+		{"a precision of 0.2999 is not held back by an absolute floor: its lift earns", KindNoul, 20, 20, 40, 1, 0.05, prec(0.2999), 10, VerdictEarning},
+		{"a rare base earns on twice its rate: 0.1 over a base of 0.05", KindNoul, 10, 190, 200, 0.5, 0.05, prec(0.1), 10, VerdictEarning},
+		{"a rare base under twice its rate is no-signal: 0.09 over a base of 0.05", KindNoul, 10, 190, 200, 0.5, 0.05, prec(0.09), 10, VerdictNoSignal},
+		{"a base of 0.1 is not rare, so 0.15 over it is no-signal on the margin", KindNoul, 20, 180, 200, 0.5, 0.1, prec(0.15), 10, VerdictNoSignal},
+		{"a choice earns on the same lift as a noul", KindChoice, 20, 20, 40, 0.9, 0.5, prec(0.8), 10, VerdictEarning},
 		{"a score with nine positives is not-yet", KindScore, 9, 21, 30, 1, 0.3, nil, 0, VerdictNotYet},
 		{"a score with ten positives is not held back", KindScore, 10, 20, 30, 0.9, 0.3, nil, 0, VerdictEarning},
 		{"a score with nine negatives is not-yet", KindScore, 21, 9, 30, 1, 0.7, nil, 0, VerdictNotYet},
@@ -252,6 +256,124 @@ func TestScorecardVerdictBoundaries(t *testing.T) {
 					tc.kind, tc.positives, tc.negatives, tc.labeled, tc.bestF1, tc.base, num(tc.precision), tc.flagged, got, tc.want)
 			}
 		})
+	}
+}
+
+// A cut that flags nearly every labeled line measures the base rate, not a cut:
+// claims_verified flagged 666 of 666 on 2026-11-11 with precision equal to its
+// base, and no lift can earn it even when the precision clears the lift rule.
+func TestVerdictFlagAllIsNotEarning(t *testing.T) {
+	t.Parallel()
+	prec := func(v float64) *float64 { return &v }
+	cases := []struct {
+		name      string
+		positives int
+		negatives int
+		labeled   int
+		base      float64
+		precision *float64
+		flagged   int
+		want      string
+	}{
+		{"flagging every line at the base rate is no-signal", 365, 301, 666, 365.0 / 666, prec(365.0 / 666), 666, VerdictNoSignal},
+		{"flagging every line at a lift is still no-signal", 100, 100, 200, 0.5, prec(0.9), 200, VerdictNoSignal},
+		{"flagging 90 percent of the lines is no-signal, though the lift is there", 100, 100, 200, 0.5, prec(0.9), 180, VerdictNoSignal},
+		{"flagging 89 percent of the lines earns on the same lift", 100, 100, 200, 0.5, prec(0.9), 178, VerdictEarning},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := verdict(KindNoul, tc.positives, tc.negatives, tc.labeled, 1, tc.base, tc.precision, tc.flagged); got != tc.want {
+				t.Errorf("verdict(%d positives, %d negatives, %d labeled, base %v, precision %s, %d flagged) = %s, want %s",
+					tc.positives, tc.negatives, tc.labeled, tc.base, num(tc.precision), tc.flagged, got, tc.want)
+			}
+		})
+	}
+}
+
+// A rare question earns on a multiple of its base, not on the margin.
+// logtriage.auto_remediable had 139 positives in 12,816 lines (base 0.011) and
+// precision 0.261 at 88 flagged on 2026-11-11: 24 times its base, which earns,
+// though the old absolute floor of 0.3 read it no-signal.
+func TestVerdictRareHighLiftEarnsUnderTheOldPrecisionFloor(t *testing.T) {
+	t.Parallel()
+	const (
+		positives = 139
+		labeled   = 12816
+		flagged   = 88
+		precision = 0.261
+	)
+	base := float64(positives) / float64(labeled)
+	if got := verdict(KindNoul, positives, labeled-positives, labeled, 0.3, base, ptr(precision), flagged); got != VerdictEarning {
+		t.Errorf("verdict at precision %v over base %.4f = %s, want earning on 24 times the base", precision, base, got)
+	}
+}
+
+// A lift a reader cannot act on is no-signal, whatever the best F1 is: a
+// precision of 0.55 over a base of 0.5 is 5 points, and an F1 of 0.9 does not
+// change that, since the rule for a noul or choice reads lift and not F1.
+func TestVerdictWeakLiftIsNoSignal(t *testing.T) {
+	t.Parallel()
+	const (
+		positives = 100
+		negatives = 100
+		labeled   = 200
+		flagged   = 100
+		bestF1    = 0.9
+		base      = 0.5
+		precision = 0.55
+	)
+	if got := verdict(KindChoice, positives, negatives, labeled, bestF1, base, ptr(precision), flagged); got != VerdictNoSignal {
+		t.Errorf("verdict at precision %v over base %v with F1 %v = %s, want no-signal on 5 points of lift", precision, base, bestF1, got)
+	}
+}
+
+// Real lift still earns: a precision of 0.8 over a base of 0.5 on 200 lines,
+// with 100 flagged, is the 30 points that earn.
+func TestVerdictRealLiftStillEarns(t *testing.T) {
+	t.Parallel()
+	const (
+		positives = 100
+		negatives = 100
+		labeled   = 200
+		flagged   = 100
+		base      = 0.5
+		precision = 0.8
+	)
+	for _, kind := range []string{KindNoul, KindChoice} {
+		if got := verdict(kind, positives, negatives, labeled, 0.8, base, ptr(precision), flagged); got != VerdictEarning {
+			t.Errorf("%s verdict at precision %v over base %v = %s, want earning", kind, precision, base, got)
+		}
+	}
+}
+
+// The protocol page states the policy the operator confirmed on 2026-11-11,
+// and protocol step 3 names the lift rule the verdict applies.
+func TestJevExperimentsDocStatesTheConfirmedPolicy(t *testing.T) {
+	t.Parallel()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "jev-experiments.md"))
+	if err != nil {
+		t.Fatalf("reading the protocol page: %v", err)
+	}
+	doc := string(raw)
+	const heading = "### Acting-threshold policy (confirmed by the operator, 2026-11-11)"
+	if !strings.Contains(doc, heading) {
+		t.Errorf("protocol page has no heading %q", heading)
+	}
+	if strings.Contains(doc, "need the operator's confirmation") {
+		t.Errorf("protocol page still says the bars need the operator's confirmation")
+	}
+	var step3 string
+	for line := range strings.SplitSeq(doc, "\n") {
+		if strings.HasPrefix(line, "3. **Metric and floor.**") {
+			step3 = line
+		}
+	}
+	if !strings.Contains(step3, "earns on lift") {
+		t.Errorf("protocol step 3 does not name the lift rule: %q", step3)
+	}
+	if strings.Contains(step3, "minPrecisionAtBest") {
+		t.Errorf("protocol step 3 still names the removed minPrecisionAtBest floor: %q", step3)
 	}
 }
 
@@ -326,41 +448,33 @@ func TestScorecardVerdictRarePositivesStayNotYet(t *testing.T) {
 	}
 }
 
-// Enough positives can still answer yes wrongly most of the time: at the best
-// cut this log is 20 true against 180 false, so it reads no-signal.
-func TestScorecardVerdictPrecisionFloorHoldsEarningBack(t *testing.T) {
+// A battery that answers yes to every line has a best cut that flags all of
+// them: its precision is the base rate, so it reads no-signal however many
+// positives it holds. 60 positives in 600 lines, all answered 0.9.
+func TestScorecardVerdictFlagAllStaysNoSignal(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	var lines []string
 	labels := map[string]map[QuestionID]bool{}
 	for i := range 600 {
-		id := fmt.Sprintf("noisy-%03d", i)
-		// 20 positives and 180 negatives share the top value, so the best cut
-		// carries 200 yes answers of which 20 are right; the rest rank low.
-		value, label := "0.1", false
-		if i < 200 {
-			value = "0.9"
-		}
-		if i < 20 {
-			label = true
-		}
-		lines = append(lines, fmt.Sprintf(`{"ts":"2026-10-18T09:00:00Z","id":%q,"answers":{"needs":{"noul":%s}}}`, id, value))
-		labels[id] = map[QuestionID]bool{"needs": label}
+		id := fmt.Sprintf("flag-all-%03d", i)
+		lines = append(lines, fmt.Sprintf(`{"ts":"2026-10-18T09:00:00Z","id":%q,"answers":{"needs":{"noul":0.9}}}`, id))
+		labels[id] = map[QuestionID]bool{"needs": i < 60}
 	}
 	writeFixture(t, town, lines, labels)
 
 	needs := question(t, buildFixture(t, town, time.Time{}), "needs")
-	if needs.Positives != 20 || needs.Negatives != 580 {
-		t.Fatalf("needs positives %d negatives %d, want 20 and 580", needs.Positives, needs.Negatives)
+	if needs.Positives != 60 || needs.Negatives != 540 {
+		t.Fatalf("needs positives %d negatives %d, want 60 and 540", needs.Positives, needs.Negatives)
 	}
-	if needs.BestF1 == nil || needs.BaseRate == nil || *needs.BestF1-*needs.BaseRate < earnMargin {
-		t.Fatalf("fixture does not clear the F1 margin, so no-signal would not show the precision rule: F1 %s base %s", num(needs.BestF1), num(needs.BaseRate))
+	if needs.FlaggedAtBest != 600 {
+		t.Fatalf("flagged_at_best = %d, want 600: the fixture must flag every line", needs.FlaggedAtBest)
 	}
 	if needs.PrecisionAtBest == nil || *needs.PrecisionAtBest != 0.1 {
-		t.Fatalf("precision_at_best = %s, want 0.1", num(needs.PrecisionAtBest))
+		t.Fatalf("precision_at_best = %s, want 0.1, the base rate", num(needs.PrecisionAtBest))
 	}
 	if needs.Verdict != VerdictNoSignal {
-		t.Errorf("needs verdict = %s, want no-signal at 0.1 precision", needs.Verdict)
+		t.Errorf("needs verdict = %s, want no-signal when the best cut flags every line", needs.Verdict)
 	}
 }
 
