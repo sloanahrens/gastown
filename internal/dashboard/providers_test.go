@@ -910,3 +910,18 @@ func TestCostProvidersOmitsAReaderThatIsNotConfigured(t *testing.T) {
 		t.Errorf("providers with only the spend reader = %q, want %q", ids, want)
 	}
 }
+
+// The Claude row of the Cost table says the reason an absent plan has no figures,
+// so a Mac-only status line reads as not in the cluster rather than as unread.
+func TestClaudePlanAbsentIsNotInCluster(t *testing.T) {
+	t.Parallel()
+
+	plan := &ClaudePlan{Unavailable: true, Stale: true, Reason: NotInClusterReason}
+	if row := claudeCostProvider(time.Now(), nil, plan, nil, nil); row.Why != NotInClusterReason {
+		t.Errorf("the Claude row says %q, want %q", row.Why, NotInClusterReason)
+	}
+	plan.Reason = ""
+	if row := claudeCostProvider(time.Now(), nil, plan, nil, nil); row.Why == NotInClusterReason || row.Why == "" {
+		t.Errorf("a failed read says %q, want its own reason and not the cluster's", row.Why)
+	}
+}

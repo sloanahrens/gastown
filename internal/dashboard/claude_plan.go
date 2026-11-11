@@ -145,6 +145,10 @@ type ClaudePlan struct {
 	// Unavailable says the series could not be read, which the page draws as
 	// itself and never as a week at 0%.
 	Unavailable bool `json:"unavailable,omitempty"`
+	// Reason is the NotInClusterReason when the status line's series and the
+	// usage records are both absent where the dashboard runs, so the pane has
+	// nothing to read and is not a failed read. Unavailable is set with it.
+	Reason string `json:"reason,omitempty"`
 	// StateError names what the poll could not do: the closeout history or trim
 	// write that failed, or the price table the API-equivalent figures could not
 	// use. The numbers above are still the poll's best answer; the page shows the
@@ -174,6 +178,10 @@ type ClaudePlanReader struct {
 	// scan's records, read at the same instant the week is measured at. A reader
 	// without one draws the plan line alone.
 	usage func(now time.Time) []UsageRecord
+	// usageAbsent says the usage records directory is not there at all, which
+	// with a missing series is the cluster's absence of both, not a failed read.
+	// Nil leaves every unavailable block unreasoned.
+	usageAbsent func() bool
 	// prices is the table the figures' rates come from, read on each poll so a
 	// table this process cannot decode is reported rather than assumed away. It
 	// is EmbeddedClaudePrices unless a test points it elsewhere.
@@ -213,6 +221,14 @@ func (r *ClaudePlanReader) WithUsage(records func(now time.Time) []UsageRecord) 
 	return r
 }
 
+// WithUsageAbsent says how the reader learns the usage records directory is not
+// there, so an unavailable block whose series and records are both absent is
+// drawn as NotInClusterReason rather than as a failed read.
+func (r *ClaudePlanReader) WithUsageAbsent(absent func() bool) *ClaudePlanReader {
+	r.usageAbsent = absent
+	return r
+}
+
 // Read returns the block's payload from the series as it stands at now: a file
 // that is missing or unreadable is an unavailable block, never an empty week.
 //
@@ -227,6 +243,9 @@ func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 	var stateErrs []error
 	if err != nil {
 		p = ClaudePlan{PlanUSDMonth: planUSD(r.planUSDMonth), Stale: true, Unavailable: true}
+		if errors.Is(err, fs.ErrNotExist) && r.usageAbsent != nil && r.usageAbsent() {
+			p.Reason = NotInClusterReason
+		}
 	} else {
 		if err := trimClaudePlanSamples(r.path, now.Add(-claudePlanRetentionDays*24*time.Hour)); err != nil {
 			stateErrs = append(stateErrs, fmt.Errorf("series trim: %w", err))

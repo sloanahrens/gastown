@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math"
 	"net"
 	"net/http"
@@ -351,7 +352,8 @@ func dashboardMangoPath(townRoot, mangoDir string) string {
 // files is decoded once for both panels.
 func newDashboardClaudePlanReader(townRoot string, usage *dashUsageReader, planUSDMonth float64) *dashboard.ClaudePlanReader {
 	return dashboard.NewClaudePlanReader(dashboardClaudePlanPath(townRoot), planUSDMonth).
-		WithUsage(usage.monthRecords)
+		WithUsage(usage.monthRecords).
+		WithUsageAbsent(usage.absent)
 }
 
 // closeCloudLedger releases the cloud step's database pool when the source holds
@@ -495,6 +497,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// so the dashboard does not reach into the battery's own (gt-b9j3o.2).
 	attentionScoreReader := attention.NewScoreReader(attention.AnswersPath(townRoot))
 	landingRiskReader := attention.NewLandingRiskReader(attention.LandingRiskPath(townRoot))
+	spendArgv, spendReason := resolveSpendCmd(spendCmd)
 	return dashboard.NewHub(dashboard.Config{
 		Feed: feed,
 		Summary: func() dashboard.Summary {
@@ -504,7 +507,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Machine:        dashboard.SampleMachine,
 		Cloud:          func() *dashboard.Cloud { return cloud.Read(time.Now()) },
 		Mango:          func() *dashboard.Mango { return dashboard.ReadMango(mango, time.Now()) },
-		Spend:          dashboardSpend(resolveSpendCmd(spendCmd)),
+		Spend:          dashboardSpend(spendArgv),
+		SpendReason:    spendReason,
 		WatchDir:       dashboardWatchDir(townRoot),
 		SpendHours:     dashboardSpendHours(),
 		JevSpend:       dashboardJevSpend(jevSpendArgv),
@@ -902,20 +906,30 @@ func (l *dashWhyLog) summary(s *dashboard.Summary) {
 const dashboardSpendTimeout = 25 * time.Second
 
 // resolveSpendCmd is the command that prints the spend report: the flag's, or
-// the ~/.claude tool when it exists, or nothing.
-func resolveSpendCmd(flagValue string) []string {
+// the ~/.claude tool when it exists, or nothing. The reason is set when there is
+// no tool because this host has none to offer: no home, or no tool file.
+func resolveSpendCmd(flagValue string) ([]string, string) {
+	return resolveSpendCmdIn(flagValue, os.UserHomeDir, os.Stat)
+}
+
+// resolveSpendCmdIn is resolveSpendCmd with the home directory and the file
+// check injected, so a test drives absent and present without the real home. A
+// tool the check cannot stat for a reason other than its absence is still
+// returned, so the poll that runs it reports a failed read rather than an
+// absent pane.
+func resolveSpendCmdIn(flagValue string, home func() (string, error), stat func(string) (fs.FileInfo, error)) ([]string, string) {
 	if f := strings.Fields(flagValue); len(f) > 0 {
-		return f
+		return f, ""
 	}
-	home, err := os.UserHomeDir()
+	h, err := home()
 	if err != nil {
-		return nil
+		return nil, dashboard.NotInClusterReason
 	}
-	tool := filepath.Join(home, ".claude", "tools", "deepseek-spend.py")
-	if _, err := os.Stat(tool); err != nil {
-		return nil
+	tool := filepath.Join(h, ".claude", "tools", "deepseek-spend.py")
+	if _, err := stat(tool); errors.Is(err, fs.ErrNotExist) {
+		return nil, dashboard.NotInClusterReason
 	}
-	return []string{tool, "--json"}
+	return []string{tool, "--json"}, ""
 }
 
 // defaultJevSpendCmd is --jev-spend-cmd's default: the last day of the Jev
@@ -1203,20 +1217,30 @@ func dashboardForgejoBase(townRoot string, remoteOf func(townRoot, rig string) (
 
 // dashboardSpendHours reads the day's spend by hour from the balance ledger the
 // spend watcher appends to, the same file the spend command reads its history
-// from. Without a home directory there is no ledger, so there is no read.
+// from. Without a home directory there is no ledger, which is the cluster's
+// absence, so every read says so.
 func dashboardSpendHours() func() dashboard.SpendRead {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	return dashboardSpendHoursFrom(filepath.Join(home, ".claude", "docs", "research", "deepseek-spend", "balance.log"))
+	return dashboardSpendHoursIn(os.UserHomeDir)
 }
 
-// dashboardSpendHoursFrom is the ledger read for the given path. A read that
-// fails is an empty read, so the hourly chart is absent instead of drawing a day
-// of zeros, and the malformed lines it skipped are carried to the chart.
+// dashboardSpendHoursIn is dashboardSpendHours with the home directory injected.
+func dashboardSpendHoursIn(home func() (string, error)) func() dashboard.SpendRead {
+	h, err := home()
+	if err != nil {
+		return func() dashboard.SpendRead { return dashboard.SpendRead{Reason: dashboard.NotInClusterReason} }
+	}
+	return dashboardSpendHoursFrom(filepath.Join(h, ".claude", "docs", "research", "deepseek-spend", "balance.log"))
+}
+
+// dashboardSpendHoursFrom is the ledger read for the given path. A ledger that
+// is not there is the cluster's absence and says so; a read that fails is an
+// empty read, so the hourly chart is absent instead of drawing a day of zeros,
+// and the malformed lines it skipped are carried to the chart.
 func dashboardSpendHoursFrom(ledger string) func() dashboard.SpendRead {
 	return func() dashboard.SpendRead {
+		if _, err := os.Stat(ledger); errors.Is(err, fs.ErrNotExist) {
+			return dashboard.SpendRead{Reason: dashboard.NotInClusterReason}
+		}
 		hours, skipped, err := dashboard.ReadSpendHours(ledger, time.Now())
 		if err != nil {
 			return dashboard.SpendRead{}

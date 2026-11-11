@@ -11,6 +11,9 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
+	"syscall"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
@@ -137,6 +140,22 @@ type Polecat struct {
 	Landed24h   int      `json:"landed_24h"`
 	Approved24h int      `json:"approved_24h"`
 	AvgScore24h *float64 `json:"avg_score_24h,omitempty"`
+}
+
+// NotInClusterReason is what a pane whose source exists only on the operator's
+// Mac says in place of its body when the dashboard runs where that source is
+// absent: no tool file, no home directory, no ledger, no usage directory. It is
+// not a failed read; a source that is there and does not read keeps its failed
+// mark and carries no reason.
+const NotInClusterReason = "not available in the cluster"
+
+// IsReadOnlyErr says a create was refused because the filesystem is read-only
+// (EROFS) or this process may not create there (EACCES; fs.ErrPermission also
+// matches EPERM). A dashboard run in a
+// pod whose town mount is read-only gets that refusal on every write; it is a
+// state the writer stops on and reports once, not a failure of the data it holds.
+func IsReadOnlyErr(err error) bool {
+	return errors.Is(err, syscall.EROFS) || errors.Is(err, fs.ErrPermission)
 }
 
 // Read sources, the keys of State.Reads. They name the panes whose reader keeps
@@ -778,6 +797,12 @@ type State struct {
 	// worker's review log. It is nil until the reader first reports.
 	Rework *Rework         `json:"rework,omitempty"`
 	Spend  json.RawMessage `json:"spend,omitempty"`
+	// SpendReason says why the spend pane has no report because its tool is
+	// absent where the dashboard runs, the NotInClusterReason; empty otherwise.
+	SpendReason string `json:"spend_reason,omitempty"`
+	// SpendHoursReason is the same for the spend-by-hour chart, whose ledger is
+	// absent where the dashboard runs.
+	SpendHoursReason string `json:"spend_hours_reason,omitempty"`
 	// SpendHours is the last day's DeepSeek spend by hour, from the balance
 	// ledger. The page does not read it; the charts below are built from it.
 	SpendHours []SpendHour `json:"-"`
@@ -875,6 +900,10 @@ type Config struct {
 	// SpendHours returns the last day's spend by hour from the balance ledger,
 	// with the malformed lines it skipped. It is read with the spend report.
 	SpendHours func() SpendRead
+	// SpendReason is the NotInClusterReason when the spend tool is absent where
+	// the dashboard runs. Spend is then nil and the pane carries the reason
+	// instead of a failed read.
+	SpendReason string
 	// JevSpend returns the Jev spend row, nil when the read failed.
 	JevSpend func() *JevSpend
 	// JevScorecard reads the cached scorecard, nil when the cache could not be
@@ -1093,4 +1122,8 @@ func (c *Config) defaults() {
 type SpendRead struct {
 	Hours   []SpendHour
 	Skipped int
+	// Reason is the NotInClusterReason when the ledger is absent where the
+	// dashboard runs. Hours and Skipped are then empty, and the read is not a
+	// failure.
+	Reason string
 }

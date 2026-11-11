@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,11 +80,30 @@ func newDashUsageReader(townRoot string) *dashUsageReader {
 func (r *dashUsageReader) read(now time.Time) *dashboard.Usage {
 	entries, err := os.ReadDir(r.recordsDir())
 	if err != nil {
-		return &dashboard.Usage{Unavailable: true}
+		return unavailableUsage(err)
 	}
 	u := dashboard.AggregateUsage(r.records(entries, now.Add(-usageStaleRecord)), now, r.unmatched())
 	u.AsOf = r.asOf()
 	return &u
+}
+
+// unavailableUsage is the panel when the records directory cannot be listed. A
+// directory that is not there is the cluster's absence of the usage scan, named
+// by its reason; any other failure, such as a directory the process cannot read,
+// is a failed read and carries no reason.
+func unavailableUsage(err error) *dashboard.Usage {
+	if errors.Is(err, fs.ErrNotExist) {
+		return &dashboard.Usage{Unavailable: true, Reason: dashboard.NotInClusterReason}
+	}
+	return &dashboard.Usage{Unavailable: true}
+}
+
+// absent says the records directory is not there at all, the test the Claude
+// plan reader makes before it draws its own absence. Any other stat failure is
+// not absence, so it is not reported as one.
+func (r *dashUsageReader) absent() bool {
+	_, err := os.Stat(r.recordsDir())
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // monthRecords is the record set the Claude plan's API-equivalent figures are

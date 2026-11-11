@@ -63,6 +63,12 @@ type ForgejoSizeWriter struct {
 	// test drives a mapping failure the real map cannot produce: its only error
 	// is the empty prefix, which workspaceByRig skips rather than reports.
 	forRig func(ids *workspaceid.Map, prefix string) (string, error)
+	// logf writes the one line a read-only report directory earns. It is a field
+	// so a test counts the lines.
+	logf func(format string, args ...any)
+	// readOnly is set by the first create the filesystem refuses as read-only.
+	// The writer stops writing until the dashboard restarts.
+	readOnly bool
 }
 
 // NewForgejoSizeWriter builds a writer over api for the town at townRoot.
@@ -73,6 +79,7 @@ func NewForgejoSizeWriter(api forgejoFeeds, townRoot string) *ForgejoSizeWriter 
 		now:      time.Now,
 		openTemp: openTempFile,
 		forRig:   rigWorkspace,
+		logf:     warnf,
 	}
 }
 
@@ -229,9 +236,15 @@ func repoWorkspace(byRepo map[string]string, fullName string) (string, error) {
 // The rename is what makes a run all-or-nothing: a reader sees the previous
 // snapshot or this run's complete one, never a half-written report.
 func (w *ForgejoSizeWriter) writeRows(rows []ForgejoSizeRow, now time.Time) error {
+	if w.readOnly {
+		return nil
+	}
 	dir := ForgejoSizesDir(w.townRoot)
 	path := filepath.Join(dir, now.Format(sizeDayLayout)+".jsonl")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
+		if w.latchReadOnly(dir, err) {
+			return nil
+		}
 		return fmt.Errorf("forgejo sizes: creating %s: %w", dir, err)
 	}
 	tmp := path + ".tmp"
@@ -241,6 +254,9 @@ func (w *ForgejoSizeWriter) writeRows(rows []ForgejoSizeRow, now time.Time) erro
 	removeTemp(tmp)
 	f, err := w.openTemp(tmp)
 	if err != nil {
+		if w.latchReadOnly(dir, err) {
+			return nil
+		}
 		return fmt.Errorf("forgejo sizes: opening %s: %w", tmp, err)
 	}
 	enc := json.NewEncoder(f)
@@ -260,6 +276,30 @@ func (w *ForgejoSizeWriter) writeRows(rows []ForgejoSizeRow, now time.Time) erro
 		return fmt.Errorf("forgejo sizes: replacing %s: %w", path, err)
 	}
 	return nil
+}
+
+// warnf writes one line of the dashboard's own warnings to stderr, the only
+// place a writer that has given up on its file can say so.
+func warnf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "dashboard: "+format+"\n", args...)
+}
+
+// latchReadOnly reports whether err is the filesystem refusing the write as
+// read-only. The first such refusal latches the writer and logs one line naming
+// the directory; a later refusal is silent, since the writer no longer tries.
+// Reporting it as a state rather than an error is what keeps the run from
+// failing the same way every night. A nil logf latches without the line.
+func (w *ForgejoSizeWriter) latchReadOnly(dir string, err error) bool {
+	if !IsReadOnlyErr(err) {
+		return false
+	}
+	if !w.readOnly {
+		w.readOnly = true
+		if w.logf != nil {
+			w.logf("the forgejo size reports in %s are read-only (%v); they are not written until the dashboard restarts", dir, err)
+		}
+	}
+	return true
 }
 
 // removeTemp drops a temporary file after a failed run, so the next run's

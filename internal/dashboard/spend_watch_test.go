@@ -322,3 +322,26 @@ func TestPollSpendWriteFailureDoesNotStopThePoll(t *testing.T) {
 	require.NotNil(t, doc.Balance)
 	assert.InDelta(t, 74.55, *doc.Balance, 1e-9)
 }
+
+// A spend tool or ledger absent where the dashboard runs gives the pane its
+// reason and is not a failed read. A tool that is there and gives no report is
+// the failed read, with no reason: the two are never confused.
+func TestSpendAbsentIsNotAFailedRead(t *testing.T) {
+	t.Parallel()
+
+	absent := NewHub(Config{
+		SpendReason: NotInClusterReason,
+		SpendHours:  func() SpendRead { return SpendRead{Reason: NotInClusterReason} },
+	})
+	absent.pollSpend()
+	st := absent.State()
+	assert.Equal(t, NotInClusterReason, st.SpendReason, "the spend pane has no reason")
+	assert.Equal(t, NotInClusterReason, st.SpendHoursReason, "the spend-by-hour pane has no reason")
+	assert.False(t, st.Reads[SourceSpend].Error, "an absent tool is marked as a failed read")
+
+	failed := NewHub(Config{Spend: func() json.RawMessage { return nil }})
+	failed.pollSpend()
+	st = failed.State()
+	assert.True(t, st.Reads[SourceSpend].Error, "a tool that gives no report lost its failed-read mark")
+	assert.Empty(t, st.SpendReason, "a tool that is there and fails was given the not-in-cluster reason")
+}

@@ -608,3 +608,27 @@ func TestCostBarChartWithNoSeriesFieldDrawsBarsAndSaysWhyClaudeIsAbsent(t *testi
 		t.Errorf("the panel does not say %q:\n%s", want, got.Text)
 	}
 }
+
+// A source absent where the dashboard runs is drawn as its reason in place of
+// the body: the spend part, the spend-by-hour part and the usage block each draw
+// it, and none of them draws the failed-read words for it.
+func TestPaneDrawsNotAvailableInCluster(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	p.call(t, "renderCost", jsonValue(t, map[string]any{
+		"spend_reason":       NotInClusterReason,
+		"spend_hours_reason": NotInClusterReason,
+		"usage":              map[string]any{"unavailable": true, "reason": NotInClusterReason},
+	}))
+	got := p.element(t, "cost").Text
+
+	if n := strings.Count(got, NotInClusterReason); n != 3 {
+		t.Errorf("the panel draws the reason %d times, want once for each of the spend, hourly and usage parts:\n%s", n, got)
+	}
+	for _, failed := range []string{"usage records unreadable", "the spend read failed", "no spend report"} {
+		if strings.Contains(got, failed) {
+			t.Errorf("an absent source is drawn as the failed read %q:\n%s", failed, got)
+		}
+	}
+}

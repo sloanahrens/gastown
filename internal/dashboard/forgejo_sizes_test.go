@@ -5,11 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -539,4 +542,143 @@ func TestForgejoSizeStaleTempFromACrashedRunDoesNotBlock(t *testing.T) {
 	require.Len(t, lines, 1, "the day holds this run's one row, none of the dead run's")
 	_, statErr := os.Stat(stale)
 	assert.True(t, os.IsNotExist(statErr), "the temporary file is gone after the run")
+}
+
+// On a read-only town the size reports and the spend watch file are a state, not a
+// failure: the first refused create latches the writer and logs one line, the
+// writer stops trying until the dashboard restarts, and the pane keeps its
+// in-memory data. The load series is covered in internal/cmd, where its writer
+// lives. The report files are written by internal/daemon, not this package, so it
+// has no case for them.
+func TestWriterReadOnly(t *testing.T) {
+	t.Parallel()
+
+	t.Run("size_reports", func(t *testing.T) {
+		t.Parallel()
+
+		w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
+		var opens int
+		var logs []string
+		w.openTemp = func(string) (io.WriteCloser, error) {
+			opens++
+			return nil, &fs.PathError{Op: "open", Path: "day.jsonl.tmp", Err: syscall.EROFS}
+		}
+		w.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+		for range 2 {
+			rows, err := w.Write(context.Background())
+			require.NoError(t, err)
+			require.Len(t, rows, 1, "a read-only run did not answer with its rows")
+		}
+		assert.Equal(t, 1, opens, "a read-only report directory was tried again after its refusal")
+		assert.Len(t, logs, 1, "a read-only report directory logs one line: %q", logs)
+	})
+
+	t.Run("spend_watch", func(t *testing.T) {
+		t.Parallel()
+
+		report := spendReport(t, 74.55, 1.25, 2.5)
+		h := NewHub(Config{
+			Now:      func() time.Time { return spendWatchNow },
+			Spend:    func() json.RawMessage { return report },
+			WatchDir: filepath.Join(t.TempDir(), "watch"),
+		})
+		var creates int
+		var logs []string
+		h.spendWatch.create = func(string) (spendTempFile, error) {
+			creates++
+			return nil, &fs.PathError{Op: "open", Path: "spend.json", Err: syscall.EROFS}
+		}
+		h.spendWatch.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+		h.pollSpend()
+		h.pollSpend()
+
+		st := h.State()
+		assert.Equal(t, 1, creates, "a read-only watch directory was tried again after its refusal")
+		assert.Len(t, logs, 1, "a read-only watch directory logs one line: %q", logs)
+		assert.False(t, st.Reads[SourceSpend].Error, "a read-only watch file is a state, not a failed read")
+		assert.NotEmpty(t, st.Spend, "the page lost its in-memory report to the refusal")
+	})
+}
+
+// A writer built with no logf still latches on a read-only refusal: it stops
+// trying and does not panic on the line it would have written.
+func TestLatchReadOnlyNilLogger(t *testing.T) {
+	t.Parallel()
+
+	t.Run("size_reports", func(t *testing.T) {
+		t.Parallel()
+
+		w := newForgejoSizeWriter(t, `[{"full_name":"operator/gastown","size":1280}]`)
+		w.logf = nil
+		var opens int
+		w.openTemp = func(string) (io.WriteCloser, error) {
+			opens++
+			return nil, &fs.PathError{Op: "open", Path: "day.jsonl.tmp", Err: syscall.EROFS}
+		}
+
+		for range 2 {
+			rows, err := w.Write(context.Background())
+			require.NoError(t, err)
+			require.Len(t, rows, 1, "a read-only run did not answer with its rows")
+		}
+		assert.Equal(t, 1, opens, "a nil logf let the read-only report directory be tried again")
+	})
+
+	t.Run("spend_watch", func(t *testing.T) {
+		t.Parallel()
+
+		report := spendReport(t, 74.55, 1.25, 2.5)
+		h := NewHub(Config{
+			Now:      func() time.Time { return spendWatchNow },
+			Spend:    func() json.RawMessage { return report },
+			WatchDir: filepath.Join(t.TempDir(), "watch"),
+		})
+		var creates int
+		h.spendWatch.create = func(string) (spendTempFile, error) {
+			creates++
+			return nil, &fs.PathError{Op: "open", Path: "spend.json", Err: syscall.EROFS}
+		}
+		h.spendWatch.logf = nil
+
+		h.pollSpend()
+		h.pollSpend()
+
+		assert.Equal(t, 1, creates, "a nil logf let the read-only watch directory be tried again")
+		assert.NotEmpty(t, h.State().Spend, "the page lost its in-memory report to the refusal")
+	})
+}
+
+// IsReadOnlyErr matches the refusals a read-only town gives a create: EROFS, and
+// EACCES and EPERM, which fs.ErrPermission also matches. Each is tested bare and
+// wrapped the way the writers return it. ENOSPC is a full disk, not a read-only
+// one, and is refused.
+func TestIsReadOnlyErr(t *testing.T) {
+	t.Parallel()
+
+	rows := []struct {
+		name  string
+		errno syscall.Errno
+		want  bool
+	}{
+		{"EROFS", syscall.EROFS, true},
+		{"EACCES", syscall.EACCES, true},
+		{"EPERM", syscall.EPERM, true},
+		{"ENOSPC", syscall.ENOSPC, false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			t.Parallel()
+
+			bare := &os.PathError{Op: "open", Path: "day.jsonl.tmp", Err: row.errno}
+			assert.Equal(t, row.want, IsReadOnlyErr(bare), "bare *os.PathError")
+
+			asFS := &fs.PathError{Op: "open", Path: "day.jsonl.tmp", Err: row.errno}
+			assert.Equal(t, row.want, IsReadOnlyErr(asFS), "bare *fs.PathError")
+
+			wrapped := fmt.Errorf("forgejo sizes: opening day.jsonl.tmp: %w", bare)
+			assert.Equal(t, row.want, IsReadOnlyErr(wrapped), "wrapped *os.PathError")
+		})
+	}
 }

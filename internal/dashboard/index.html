@@ -3410,7 +3410,11 @@ function panelTable(heads, rows) {
 function costUsage(box, u, s) {
   if (!u) { box.append(el("div", "empty", "reading…")); return; }
   if (u.unavailable) {
-    box.append(el("div", "badc", "usage records unreadable"));
+    // The records directory is absent where the dashboard runs: its reason is
+    // drawn in place of the body, and only a directory that is there and does
+    // not read is "unreadable".
+    if (u.reason) box.append(el("div", "empty", u.reason));
+    else box.append(el("div", "badc", "usage records unreadable"));
     return;
   }
   const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
@@ -4478,11 +4482,15 @@ function renderCost(s) {
   // paintsRead colours the header from the same read the figures are read from.
   paintsRead(spendBox, note, r);
   // A usage scan that has not answered yet is reading, not missing.
-  if (!d) spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + (u ? "" : "; usage still reading…")));
+  // A spend tool or ledger that is absent where the dashboard runs is drawn as
+  // its reason, in place of the body; a read that failed is still a failed read.
+  if (!d && s.spend_reason) spendBox.append(el("div", "empty", s.spend_reason));
+  else if (!d) spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + (u ? "" : "; usage still reading…")));
   if (!d && !u) return;
   const charts = s.cost_charts || {};
   costChartFold(spendBox, "daily", charts.daily, s.cost_providers);
-  costChartFold(spendBox, "hourly", charts.hourly, s.cost_providers);
+  if (s.spend_hours_reason) spendBox.append(el("div", "empty", s.spend_hours_reason));
+  else costChartFold(spendBox, "hourly", charts.hourly, s.cost_providers);
   costUsage(box, u, s);
   costJevFold(box, s);
 }
@@ -5059,7 +5067,7 @@ const PANES = {
   healthmark: {read: s => s.deploys, draw: s => renderHealthMark(s)},
   attention: {sec: "attention", body: ["attention"], read: s => [s.attention, s.questions], draw: s => renderAttention(s)},
   birds: {sec: "birds", body: ["birds"], read: s => [s.birds, readInput(s, "birds")], draw: s => renderBirds(s)},
-  cost: {sec: "cost", body: ["cost"], read: s => [s.spend, s.usage, s.cost_providers, s.cloud, s.cost_charts, s.jev_spend, s.deepreview, readInput(s, "spend")], draw: s => renderCost(s)},
+  cost: {sec: "cost", body: ["cost"], read: s => [s.spend, s.spend_reason, s.spend_hours_reason, s.usage, s.cost_providers, s.cloud, s.cost_charts, s.jev_spend, s.deepreview, readInput(s, "spend")], draw: s => renderCost(s)},
   rigs: {sec: "rigs", body: ["rigs"], read: s => [s.rigs, s.queue, readInput(s, "queue")], draw: s => renderRigs(s)},
   // The work pane's own key holds the list's filters and the rows a reader has
   // opened, so a section opened after a blind draw asks for the body it never

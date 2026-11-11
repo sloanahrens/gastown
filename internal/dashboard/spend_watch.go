@@ -33,6 +33,42 @@ type spendWatch struct {
 // temporary file beside the target and is renamed over it, so a reader sees the
 // previous reading or this one and never a half-written document.
 func writeSpendWatch(dir string, report json.RawMessage, now time.Time) error {
+	return writeSpendWatchWith(dir, report, now, createSpendTemp)
+}
+
+// spendWatchWriter is the hub's copy of writeSpendWatch, with the state a
+// read-only directory needs. The first refusal the filesystem gives as read-only
+// latches it: the writer logs one line and stops trying until the dashboard
+// restarts. The reading the page holds is in memory and is not affected, so the
+// latch is not a failed read.
+type spendWatchWriter struct {
+	// create makes the temporary file a reading is written to. It is a field so
+	// a test refuses the create the way a read-only town does.
+	create func(dir string) (spendTempFile, error)
+	// logf writes the one line a read-only directory earns.
+	logf     func(format string, args ...any)
+	readOnly bool
+}
+
+// write rewrites the watch file from one spend report, as writeSpendWatch does.
+// A read-only refusal is reported as nil, after the latch.
+func (w *spendWatchWriter) write(dir string, report json.RawMessage, now time.Time) error {
+	if w.readOnly {
+		return nil
+	}
+	err := writeSpendWatchWith(dir, report, now, w.create)
+	if !IsReadOnlyErr(err) {
+		return err
+	}
+	w.readOnly = true
+	if w.logf != nil {
+		w.logf("the spend watch file in %s is read-only (%v); it is not rewritten until the dashboard restarts", dir, err)
+	}
+	return nil
+}
+
+// writeSpendWatchWith is writeSpendWatch with its temporary-file create injected.
+func writeSpendWatchWith(dir string, report json.RawMessage, now time.Time, create func(dir string) (spendTempFile, error)) error {
 	if dir == "" {
 		return nil
 	}
@@ -53,7 +89,7 @@ func writeSpendWatch(dir string, report json.RawMessage, now time.Time) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("spend watch: creating %s: %w", dir, err)
 	}
-	return writeSpendWatchVia(dir, data, createSpendTemp)
+	return writeSpendWatchVia(dir, data, create)
 }
 
 // spendTempFile is the temporary file a reading is written to. An *os.File is
