@@ -35,6 +35,7 @@ const (
 	RuleRiskPath         = "landing.risk_path"
 	RuleRedMain          = "main.red"
 	RuleRejectedTwice    = "landing.rejected_twice"
+	RuleReviewRejected   = "landing.review_rejected"
 	RuleEscalation       = "escalation.open"
 	RulePolecatStall     = "polecat.stall"
 	RuleLandingStuck     = "landing.stuck_inflight"
@@ -116,6 +117,7 @@ var (
 var ruleFlags = map[string]RuleFlags{
 	RuleRedMain:        flagsWake,
 	RuleRejectedTwice:  flagsWake,
+	RuleReviewRejected: flagsWake,
 	RuleEscalation:     flagsWake,
 	RulePolecatStall:   flagsWake,
 	RuleLandingStuck:   flagsWake,
@@ -240,6 +242,7 @@ var kindRules = map[Kind]string{
 	KindRiskPath:                 RuleRiskPath,
 	KindRedMain:                  RuleRedMain,
 	KindRejectedTwice:            RuleRejectedTwice,
+	KindReviewRejected:           RuleReviewRejected,
 	KindEscalation:               RuleEscalation,
 	KindPolecatStall:             RulePolecatStall,
 	KindLandingStuck:             RuleLandingStuck,

@@ -58,6 +58,9 @@ var ruleOwners = map[string]Owner{
 	// escalation the third rejection raises that the overseer cannot settle
 	// reaches the human through EscalationOwner (gt-few2w).
 	RuleRejectedTwice: OwnerOverseer,
+	// The first om refusal of a bead wakes the overseer, which relays the
+	// findings to the bird that owns the bead the same hour (gt-r3vmgc).
+	RuleReviewRejected: OwnerOverseer,
 	// An escalation is the human's only when the overseer cannot resolve it, and
 	// only the escalation says whether that is so. EscalationOwner reads that
 	// off it; this row is the family default, for the escalation.open item that
