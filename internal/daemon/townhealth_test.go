@@ -376,7 +376,10 @@ func TestWriteTownHealth_NoPostLandCommandIsNotApplicable(t *testing.T) {
 		t.Errorf("main/gastown detail = %q, want it to name the missing command", got.Detail)
 	}
 
-	// The rig configures the check: no verdict is now an unanswered question.
+	// The rig configures the check after landing with no verdict recorded: no
+	// run of the check recorded one, so the field is UNKNOWN and the town is
+	// not ready, not a green a broken check could hide behind (gt-30ehe8).
+	// healthTown records three landings for gastown.
 	writeTownFile(t, d.config.TownRoot, filepath.Join("gastown", "settings", "config.json"),
 		`{"type":"rig-settings","version":1,"merge_queue":{"post_land_command":"make test-slow"}}`)
 	d.writeTownHealth()
@@ -385,8 +388,95 @@ func TestWriteTownHealth_NoPostLandCommandIsNotApplicable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := healthField(t, second, "main/gastown"); got.Verdict != townhealth.VerdictUnknown {
-		t.Errorf("main/gastown with a post_land_command and no verdict = %+v, want UNKNOWN", got)
+	if got := healthField(t, second, "main/gastown"); got.Tag != townhealth.Unknown || got.Verdict != townhealth.VerdictUnknown {
+		t.Errorf("main/gastown with a landing record and no verdict = %+v, want UNKNOWN", got)
+	}
+	if ok, _ := townhealth.Ready(second, now, townhealth.DefaultStaleAfter); ok {
+		t.Error("Ready = true for a landed rig whose post-landing check recorded no verdict")
+	}
+}
+
+// A rig whose landings file holds no record at all has not landed since it
+// was added: its missing post-land verdict is NEW and green, so adding a rig
+// does not make the town UNKNOWN or leave the daemon pod not-ready
+// (gt-30ehe8).
+func TestTownHealthRigWithNoLandingRecordIsNew(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	writeJSONFile(t, RedMainStatePath(d.config.TownRoot, "gastown"), landworker.MainState{})
+	writeTownFile(t, d.config.TownRoot, filepath.Join("gastown", "settings", "config.json"),
+		`{"type":"rig-settings","version":1,"merge_queue":{"post_land_command":"make test-slow"}}`)
+	lpath, err := landings.Path(d.config.TownRoot, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(lpath); err != nil {
+		t.Fatal(err)
+	}
+
+	d.writeTownHealth()
+
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := healthField(t, r, "main/gastown")
+	if got.Tag != townhealth.New || got.Verdict != townhealth.Green || got.Value != "no landing yet" {
+		t.Errorf("main/gastown with no landing record = %+v, want a green NEW field", got)
+	}
+}
+
+// A landings file that cannot be read leaves the main field UNKNOWN: whether
+// a rig ever landed decides NEW against UNKNOWN, so a failed read must not
+// pass as a rig that never landed (gt-30ehe8).
+func TestTownHealthUnreadableLandingsFileIsUnknown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	writeJSONFile(t, RedMainStatePath(d.config.TownRoot, "gastown"), landworker.MainState{})
+	lpath, err := landings.Path(d.config.TownRoot, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(lpath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(lpath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	d.writeTownHealth()
+
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := healthField(t, r, "main/gastown")
+	if got.Verdict != townhealth.VerdictUnknown || !strings.Contains(got.Detail, "landings file") {
+		t.Errorf("main/gastown with an unreadable landings file = %+v, want UNKNOWN naming the landings file", got)
+	}
+}
+
+// A registry rig name that would leave the landings directory is refused by
+// the landings reader, and the main field reads UNKNOWN: a name the reader
+// will not resolve is never taken as a rig that never landed (gt-30ehe8).
+func TestTownHealthRigNameThatEscapesTheLandingsDirIsUnknown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	d, _ := healthTown(t, now)
+	writeJSONFile(t, filepath.Join(d.config.TownRoot, "mayor", "rigs.json"),
+		map[string]any{"version": 1, "rigs": map[string]any{"bad/name": map[string]any{}}})
+
+	d.writeTownHealth()
+
+	r, err := townhealth.Read(d.config.TownRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := healthField(t, r, "main/bad/name")
+	if got.Verdict != townhealth.VerdictUnknown || !strings.Contains(got.Detail, "invalid rig name") {
+		t.Errorf("main/bad/name = %+v, want UNKNOWN naming the refused rig name", got)
 	}
 }
 

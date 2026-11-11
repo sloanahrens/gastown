@@ -522,12 +522,43 @@ func (s *healthSources) Mains() ([]townhealth.RigMain, error) {
 			Context: postLandCtx,
 			Command: rigPostLandCommand(rigPath),
 		}
+		// Only a rig with no verdict reads its landings file: the record
+		// decides NEW against UNKNOWN, while a recorded verdict answers the
+		// field on its own.
+		var landed bool
+		if st.LastRun == "" {
+			var landErr error
+			landed, landErr = s.hasLandingRecord(rig)
+			if landErr != nil {
+				// A landings file that cannot be read leaves the field
+				// UNKNOWN rather than passing as a rig that never landed
+				// (gt-30ehe8).
+				err = errors.Join(err, landErr)
+			}
+		}
 		out = append(out, townhealth.RigMain{
 			Rig: rig, LastRun: st.LastRun, LastGreen: st.LastGreen, LastGreenAt: st.LastGreenAt,
-			PostLand: postLand, Err: err,
+			PostLand: postLand, Landed: landed, Err: err,
 		})
 	}
 	return out, nil
+}
+
+// hasLandingRecord reports whether the landing worker has a record of any
+// landing for the rig, read from the append-only file the landing count reads.
+// A missing file, or one holding no complete line, is no landing yet; any
+// complete line, parseable or not, is one, so a corrupt record never passes as
+// a rig that never landed (gt-30ehe8).
+func (s *healthSources) hasLandingRecord(rig string) (bool, error) {
+	path, err := landings.Path(s.townRoot(), rig)
+	if err != nil {
+		return false, err
+	}
+	recs, bad, err := (&landings.Reader{Path: path}).ReadNew()
+	if err != nil {
+		return false, fmt.Errorf("reading landings file: %w", err)
+	}
+	return len(recs) > 0 || len(bad) > 0, nil
 }
 
 // Promotions answers townhealth's promote field (gt-fn9e6.39): every landing

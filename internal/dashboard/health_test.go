@@ -35,6 +35,20 @@ func TestHealthPillNamesTheFirstCause(t *testing.T) {
 			wantLine:  "2 rigs need a human",
 		},
 		{
+			name: "a new rig is a neutral cause",
+			health: map[string]any{
+				"verdict": "green",
+				"line":    "GREEN tick 1s ago, 3 landed/24h",
+				"causes": []any{
+					map[string]any{"name": "main", "rig": "toolbox", "tag": "NEW", "detail": "no post-landing verdict recorded yet"},
+				},
+			},
+			wantPill:  "GREEN · NEW main/toolbox: no post-landing verdict recorded yet",
+			wantClass: "pill green",
+			wantTitle: "NEW main/toolbox: no post-landing verdict recorded yet",
+			wantLine:  "GREEN tick 1s ago, 3 landed/24h",
+		},
+		{
 			name:      "a green town names no cause",
 			health:    map[string]any{"verdict": "green", "line": "all rigs green"},
 			wantPill:  "GREEN",

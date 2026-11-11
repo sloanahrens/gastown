@@ -34,17 +34,21 @@ type Health struct {
 	Line    string    `json:"line"`
 	Verdict string    `json:"verdict"` // green, degraded, red, unknown
 	ReadAt  time.Time `json:"read_at"`
-	// Causes are the report's non-green fields, worst first, capped: the
-	// verdict's why without a gt status --line run (gt-70aa6).
+	// Causes are the report's non-green fields and its NEW ones, worst first,
+	// capped: the verdict's why without a gt status --line run (gt-70aa6,
+	// gt-30ehe8).
 	Causes []HealthCause `json:"causes,omitempty"`
 }
 
 // HealthCause is one field that held the verdict back: the townhealth field's
-// identity, plus the phrase that explains it.
+// identity, plus the phrase that explains it. A NEW cause is green and holds
+// nothing back; it is listed so the pill says a rig has no landing yet
+// (gt-30ehe8), and Tag is how the page tells it from a fault.
 type HealthCause struct {
 	Name    string `json:"name"`
 	Rig     string `json:"rig,omitempty"`
 	Subject string `json:"subject,omitempty"`
+	Tag     string `json:"tag,omitempty"`
 	Detail  string `json:"detail,omitempty"`
 }
 

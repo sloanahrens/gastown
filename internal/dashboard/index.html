@@ -668,13 +668,17 @@ function fact(box, value, name, opts) {
   return x;
 }
 
-// causeText keys one non-green health field the way the health line does —
-// name, /rig, :subject — then the detail that explains it.
+// causeText keys one health field the way the health line does — name, /rig,
+// :subject — then the detail that explains it. A NEW cause is a rig with no
+// landing yet, not a fault, so it is marked NEW and the pill keeps the town
+// verdict's colour: the reader sees which rig is new without reading green as
+// broken (gt-30ehe8).
 function causeText(c) {
   let k = c.name || "";
   if (c.rig) k += "/" + c.rig;
   if (c.subject) k += ":" + c.subject;
-  return c.detail ? k + ": " + c.detail : k;
+  const text = c.detail ? k + ": " + c.detail : k;
+  return c.tag === "NEW" ? "NEW " + text : text;
 }
 
 // renderHealthMark draws the strip's pill as the deploys reader decided it
