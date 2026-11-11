@@ -813,11 +813,12 @@ type JsonlGitBackupConfig struct {
 	SpikeThreshold *float64 `json:"spike_threshold,omitempty"`
 
 	// SpikeFloor is the record count a database's baseline must reach before a
-	// percentage change is judged. A database with fewer records swings past any
-	// ratio on a handful of them — a new rig's first few beads were read as a
-	// 104.8% jump — so below the floor the change is exported without a spike
-	// check. 0 judges every change, the behavior before the floor existed;
-	// unset or negative uses the default (500 records).
+	// jump (a rise in records) is judged. A database with fewer records swings
+	// past any ratio on a handful of them — a new rig's first few beads were read
+	// as a 104.8% jump — so below the floor a jump is exported without a spike
+	// check. Drops are judged at any size: a lost export must never pass as
+	// small. 0 judges every jump, the behavior before the floor existed; unset or
+	// negative uses the default (500 records).
 	SpikeFloor *int `json:"spike_floor,omitempty"`
 }
 

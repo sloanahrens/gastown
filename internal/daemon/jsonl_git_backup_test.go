@@ -1346,11 +1346,12 @@ func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
 	}
 }
 
-// TestVerifyExportCounts_SpikeFloor is gt-5tpas2: a percentage change is judged
-// only when the baseline holds at least spike_floor records. 21 -> 43 and
-// 500 -> 1024 are the same 104.8% increase; only the second is a spike, because
-// its baseline reaches the 500-record floor. A drop from a large baseline is
-// still judged, and a zero baseline keeps its own absolute-growth guard.
+// TestVerifyExportCounts_SpikeFloor is gt-5tpas2: the floor gates jumps only. A
+// jump is judged when its baseline holds at least spike_floor records. 21 -> 43
+// and 500 -> 1024 are the same 104.8% increase; only the second is a spike,
+// because its baseline reaches the 500-record floor. A drop is judged at any
+// baseline, so a database that loses its records halts whatever its size, and a
+// zero baseline keeps its own absolute-growth guard.
 func TestVerifyExportCounts_SpikeFloor(t *testing.T) {
 	t.Parallel()
 	const floor = defaultSpikeFloor
@@ -1363,8 +1364,10 @@ func TestVerifyExportCounts_SpikeFloor(t *testing.T) {
 		{name: "21 to 43 under the floor", prev: 21, current: 43, wantSpike: false},
 		{name: "500 to 1024 at the floor, same ratio", prev: 500, current: 1024, wantSpike: true},
 		{name: "600 to 1300 over the floor", prev: 600, current: 1300, wantSpike: true},
-		{name: "400 to 800, baseline under the floor", prev: 400, current: 800, wantSpike: false},
+		{name: "400 to 800, jump under the floor", prev: 400, current: 800, wantSpike: false},
 		{name: "600 to 100, drop from a large baseline", prev: 600, current: 100, wantSpike: true},
+		{name: "400 to 50, drop from under the floor", prev: 400, current: 50, wantSpike: true},
+		{name: "15 to 0, drop to zero from under the floor", prev: 15, current: 0, wantSpike: true},
 		{name: "0 to 25, zero baseline is exempt", prev: 0, current: 25, wantSpike: true},
 	}
 	for _, tt := range tests {
@@ -3903,10 +3906,12 @@ func TestSyncJsonlGitBackupSpikeWithinVersionStillHalts(t *testing.T) {
 	t.Parallel()
 	lines := 5000
 	var logs strings.Builder
-	// The baseline is above the record-count floor: a tiny database's swing is
-	// not judged at all (gt-5tpas2), so this test needs a baseline the guard
-	// actually measures.
-	d, rec, gitRepo := metricChangeDaemon(t, seedSubjectPrefix+"hq=1000", &lines, &logs)
+	d, rec, gitRepo := metricChangeDaemon(t, seedSubjectPrefix+"hq=100", &lines, &logs)
+	// A jump from 100 sits under the default floor and would not be judged
+	// (gt-5tpas2). This test is about the ratio rule within a version, so it
+	// judges every jump.
+	zero := 0
+	d.patrolConfig.Patrols.JsonlGitBackup.SpikeFloor = &zero
 
 	d.syncJsonlGitBackup()
 
@@ -3983,6 +3988,8 @@ func TestSyncJsonlGitBackupOneSpikeDoesNotStopTheOtherDatabases(t *testing.T) {
 	d.logger = log.New(&logs, "", 0)
 	d.config = &Config{TownRoot: townRoot}
 	d.notifier = rec
+	feed := &feedCapture{}
+	d.dogFeedFn = feed.record
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: databases},
 	}}
@@ -4044,6 +4051,18 @@ func TestSyncJsonlGitBackupOneSpikeDoesNotStopTheOtherDatabases(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), spikingDB) {
 		t.Errorf("the halt log line does not name %s:\n%s", spikingDB, logs.String())
+	}
+
+	// The cycle is not clean: the spiking database is reported failed in the
+	// receipt, and the others are not named as failed.
+	if len(feed.payloads) != 1 {
+		t.Fatalf("dog feed payloads = %v, want one failed cycle receipt", feed.payloads)
+	}
+	if got := feed.payloads[0]["outcome"]; got != string(dogCycleFailed) {
+		t.Errorf("cycle outcome = %v, want %s", got, dogCycleFailed)
+	}
+	if reason := fmt.Sprint(feed.payloads[0]["reason"]); reason != "push: spike detected: "+spikingDB {
+		t.Errorf("cycle reason = %q, want only the spiking database named as failed", reason)
 	}
 }
 
