@@ -763,6 +763,24 @@ func TestUpdateImagesCredentialTransport(t *testing.T) {
 		}
 	})
 
+	// The refusal is what a user reads when gt update images stops, so its text
+	// is pinned: a change that rewords it has to say so here (gt-4nlpw8).
+	t.Run("the refusal names the rule", func(t *testing.T) {
+		t.Parallel()
+		u, err := url.Parse("http://evil:3000/v2/town/gastown-daemon/manifests/" + testUpdateImagesTag)
+		if err != nil {
+			t.Fatalf("parsing the refused URL: %v", err)
+		}
+		err = checkCredentialTransport(u, plaintextHostOf(imagevalues.Registry{Scheme: "http", Host: u.Host}))
+		if err == nil {
+			t.Fatal("checkCredentialTransport(http://evil:3000) = nil, want a refusal")
+		}
+		const want = "refusing to send the viewer credential over http to evil:3000: http is allowed only to a loopback address or the town's own Forgejo, every other host is read over https"
+		if err.Error() != want {
+			t.Errorf("refusal = %q, want %q", err.Error(), want)
+		}
+	})
+
 	t.Run("http to the town's Forgejo sends the credential", func(t *testing.T) {
 		t.Parallel()
 		var seen []fakeCredential

@@ -102,6 +102,16 @@ const (
 	// container runs an image more than one patch release behind the newest
 	// release (gt-goda5m).
 	RuleDoltImageBehind = "dolt.image_behind"
+
+	// RuleDeployPairReady is the pair-ready rule: the images workflow published
+	// both images for a green commit newer than the running daemon, so a roll
+	// can start (gt-4nlpw8).
+	RuleDeployPairReady = "deploy.pair_ready"
+
+	// RuleDeployPairUnreadable is the pair check's own failure: it could not
+	// read the running commit or a rig's images, so it judged no pair
+	// (gt-4nlpw8).
+	RuleDeployPairUnreadable = "deploy.pair_unreadable"
 )
 
 var (
@@ -172,6 +182,14 @@ var ruleFlags = map[string]RuleFlags{
 	// pull at the next restart: it is for the overseer's next look, not a page
 	// (gt-goda5m).
 	RuleDoltImageBehind: flagsAsk,
+	// A pair ready to roll is the one thing the overseer acts on sooner than
+	// the next look: the roll starts when it can, not when someone notices
+	// (gt-4nlpw8).
+	RuleDeployPairReady: flagsWake,
+	// A pair check that cannot read is a measurement that stopped, not a
+	// failure: it is queued for the overseer's next look, the same way a green
+	// ref the image build cannot read is (gt-4nlpw8).
+	RuleDeployPairUnreadable: flagsAsk,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -274,6 +292,8 @@ var kindRules = map[Kind]string{
 	KindPostLandUnknown:          RulePostLandUnknown,
 	KindGreenRef:                 RuleGreenRef,
 	KindDoltImageBehind:          RuleDoltImageBehind,
+	KindDeployPairReady:          RuleDeployPairReady,
+	KindDeployPairUnreadable:     RuleDeployPairUnreadable,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule

@@ -120,6 +120,14 @@ const (
 	// image more than one patch release behind the newest stable release on
 	// Docker Hub (gt-goda5m).
 	KindDoltImageBehind Kind = "dolt-image-behind"
+	// KindDeployPairReady: the images workflow published a daemon and polecat
+	// image for a green commit newer than the one the running daemon was
+	// rendered from, so a roll can start (gt-4nlpw8).
+	KindDeployPairReady Kind = "deploy-pair-ready"
+	// KindDeployPairUnreadable: the pair check could not read the running
+	// commit, a rig's green branches or its images, so it judged nothing
+	// (gt-4nlpw8).
+	KindDeployPairUnreadable Kind = "deploy-pair-unreadable"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -135,6 +143,7 @@ func Kinds() []Kind {
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
+		KindDeployPairReady, KindDeployPairUnreadable,
 	}
 }
 

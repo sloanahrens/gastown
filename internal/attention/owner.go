@@ -112,6 +112,12 @@ var ruleOwners = map[string]Owner{
 	// A Dolt image behind the newest release is the town's own container to
 	// pull, which the overseer chases before a person is woken (gt-goda5m).
 	RuleDoltImageBehind: OwnerOverseer,
+	// A pair ready to roll is the overseer's to act on: the wake names the pair
+	// and the commit it is for (gt-4nlpw8).
+	RuleDeployPairReady: OwnerOverseer,
+	// A pair check that cannot read is the overseer's to look at: while it is
+	// broken, no roll is reported as ready (gt-4nlpw8).
+	RuleDeployPairUnreadable: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

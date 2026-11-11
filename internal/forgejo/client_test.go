@@ -3,9 +3,11 @@ package forgejo
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -81,6 +83,53 @@ func TestNewClient_Defaults(t *testing.T) {
 	assert.Equal(t, defaultBaseURL, c.baseURL)
 	assert.Equal(t, http.DefaultClient, c.httpClient)
 	assert.Equal(t, "t", c.token)
+}
+
+// TestClientRequestGuardRefusesBeforeTheRequest: the guard sees every request's
+// URL before the request is sent, and a refusal is returned as an error the
+// transport never sees, so a token the request carries cannot leave for an
+// endpoint the caller's rule refuses.
+func TestClientRequestGuardRefusesBeforeTheRequest(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{body: []byte("[]")}
+	refusal := errors.New("refusing to send the viewer credential")
+	var checked []string
+	c, err := NewClient("viewer",
+		WithToken("test-token"),
+		WithBaseURL("http://public.example/api/v1"),
+		WithHTTPClient(&http.Client{Transport: handlerTransport{rec}}),
+		WithRequestGuard(func(u *url.URL) error {
+			checked = append(checked, u.String())
+			return refusal
+		}),
+	)
+	require.NoError(t, err)
+
+	_, err = c.ListBranches(context.Background(), "town", "gastown", 1, 10)
+	require.ErrorIs(t, err, refusal)
+	require.Len(t, checked, 1, "the guard did not see the request URL")
+	assert.Equal(t, "http://public.example/api/v1/repos/town/gastown/branches?limit=10&page=1", checked[0])
+	assert.Nil(t, rec.req, "a request the guard refused reached the transport")
+}
+
+// TestClientRequestGuardAllowsARequestTheCheckAccepts: the guard is a refusal
+// rule, not a block. A request it accepts is sent with the client's token, so
+// the pair check still reads the hosts its rule allows.
+func TestClientRequestGuardAllowsARequestTheCheckAccepts(t *testing.T) {
+	t.Parallel()
+	rec := &recorder{body: []byte("[]")}
+	c, err := NewClient("viewer",
+		WithToken("test-token"),
+		WithBaseURL(testBase),
+		WithHTTPClient(&http.Client{Transport: handlerTransport{rec}}),
+		WithRequestGuard(func(*url.URL) error { return nil }),
+	)
+	require.NoError(t, err)
+
+	_, err = c.ListBranches(context.Background(), "town", "gastown", 1, 10)
+	require.NoError(t, err)
+	require.NotNil(t, rec.req, "a request the guard accepted did not reach the transport")
+	assert.Equal(t, "token test-token", rec.req.Header.Get("Authorization"))
 }
 
 func TestNewClient_RequiresToken(t *testing.T) {

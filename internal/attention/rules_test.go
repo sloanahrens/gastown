@@ -56,6 +56,7 @@ func TestRuleFlagsAssignments(t *testing.T) {
 		RuleQuestionNew, RuleQuestionAnswered, RuleDispatchIdle,
 		RuleDeployFailed,
 		RuleReviewBacklog,
+		RuleDeployPairReady,
 	}
 	for _, r := range wake {
 		f, _ := Flags(r)
@@ -72,7 +73,7 @@ func TestRuleFlagsAssignments(t *testing.T) {
 	if f, _ := Flags(RuleOverrunStopped); f.Wake || f.Handled != HandledSelfHealed {
 		t.Errorf("%s = %+v, want self_healed and no wake", RuleOverrunStopped, f)
 	}
-	for _, r := range []string{RuleTierSweepStarved, RulePostLandUnknown} {
+	for _, r := range []string{RuleTierSweepStarved, RulePostLandUnknown, RuleDeployPairUnreadable} {
 		if f, _ := Flags(r); f.Wake || f.Handled != HandledOperatorAction {
 			t.Errorf("%s = %+v, want operator_action and no wake", r, f)
 		}

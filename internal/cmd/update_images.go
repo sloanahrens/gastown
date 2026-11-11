@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -272,24 +271,11 @@ func runUpdateImages(cmd *cobra.Command, seams updateImagesSeams, sha, out strin
 	return writeUpdateImagesValues(cmd, seams, out, next)
 }
 
-// plaintextForgejoHost is the town's own Forgejo service name and port, the one
-// non-loopback case where the viewer credential may cross the network in clear
-// text: inside the town network no https endpoint exists, and the host is a
-// service name this town controls.
-const plaintextForgejoHost = "forgejo:3000"
-
 // plaintextHostOf is the one non-loopback host the viewer credential may reach
-// over http: the town's own Forgejo at forgejo:3000, when the town reaches it
-// in plaintext because it has no https endpoint. The host matches without
-// regard to case, as a host name does, but the port must be 3000: any other
-// host, including another dotless service name, a look-alike such as
-// forgejo.example.com, or forgejo on another port, is refused the credential
-// and must be read over https.
+// over http for r. The rule lives in forgejo, where the daemon's pair check
+// shares it.
 func plaintextHostOf(r imagevalues.Registry) string {
-	if r.Scheme == "http" && strings.EqualFold(r.Host, plaintextForgejoHost) {
-		return plaintextForgejoHost
-	}
-	return ""
+	return forgejo.PlaintextHostOf(r.Scheme, r.Host)
 }
 
 // refuseToReplaceARecordedPair answers nil when the file is absent or records
@@ -559,43 +545,13 @@ func (r registryReader) getJSON(ctx context.Context, rawURL string, limit int64,
 // request never follows a Location to another endpoint.
 func (r registryReader) client() *http.Client {
 	c := *r.http
-	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) == 0 {
-			return nil
-		}
-		prev := via[len(via)-1].URL
-		if req.URL.Scheme != prev.Scheme || req.URL.Host != prev.Host {
-			return fmt.Errorf("the registry redirected from %s://%s to %s://%s; a redirect that changes the scheme or the host is refused, so the credential stays with the registry",
-				prev.Scheme, prev.Host, req.URL.Scheme, req.URL.Host)
-		}
-		return nil
-	}
+	c.CheckRedirect = imagevalues.SameEndpointRedirect
 	return &c
 }
 
-// checkCredentialTransport refuses an http URL whose host is neither a loopback
-// address nor the town's own Forgejo at forgejo:3000, because the viewer
-// credential would otherwise cross a network in clear text to whoever answers
-// there.
+// checkCredentialTransport refuses an http URL the viewer credential may not
+// reach. The check lives in imagevalues, shared with the daemon's pair check;
+// plaintextHost is the town's own Forgejo, from forgejo.PlaintextHostOf.
 func checkCredentialTransport(u *url.URL, plaintextHost string) error {
-	if u.Scheme == "https" {
-		return nil
-	}
-	if u.Scheme == "http" && (isLoopbackHost(u.Host) || (plaintextHost != "" && strings.EqualFold(u.Host, plaintextHost))) {
-		return nil
-	}
-	return fmt.Errorf("refusing to send the registry credential over %s to %s: http is allowed only to a loopback address or the town's own Forgejo at %s, every other registry is read over https", u.Scheme, u.Host, plaintextForgejoHost)
-}
-
-// isLoopbackHost reports whether host, with an optional port, is a loopback
-// address this host answers on.
-func isLoopbackHost(host string) bool {
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	switch strings.Trim(host, "[]") {
-	case "127.0.0.1", "::1", "localhost":
-		return true
-	}
-	return false
+	return imagevalues.CheckCredentialTransport(u, plaintextHost)
 }
