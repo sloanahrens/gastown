@@ -352,8 +352,9 @@ can be rebased into 1. The data survives; the intermediate history doesn't.
 
 ### History Compaction Operations
 
-**Who compacts.** Nobody, routinely. `gt maintain`, the compactor-dog plugin
-and scheduled_maintenance's `monitor` and `flatten` modes were deleted
+**Who compacts.** Nobody, routinely. `gt maint` is disk maintenance only and
+never compacts Dolt history. The old Dolt maintenance verb, the compactor-dog
+plugin and scheduled_maintenance's `monitor` and `flatten` modes were deleted
 (gt-8z769.3): the 2026-09-29 measurement (gt-8z769) showed the databases'
 size is commit history, not garbage, so a routine rewrite bought little and
 risked the history `bd history` reads. Flatten is an offline operator
@@ -642,7 +643,7 @@ Pollution enters Dolt via four vectors:
 
 1. **Commit graph growth**: Every mutation = a commit. Rebase compacts.
 2. **Mail pollution**: Agents overuse `gt mail send` for routine comms.
-   Use `gt nudge` (ephemeral, zero Dolt cost) instead. See mail-protocol.md.
+   Use `gt nudge` (ephemeral, zero Dolt cost) instead.
 3. **Test artifacts**: Test code creating issues on production server.
    Firewall in store.go refuses test-prefixed CREATE DATABASE on port 3307.
 4. **Zombie processes**: Test dolt-server processes that outlive tests.
@@ -690,9 +691,9 @@ versioning capabilities.
 Gas Town does not push, pull or fetch Dolt remotes (ADR 0002,
 `docs/adr/0002-no-dolt-remote-sync.md`). The daemon's `dolt_remotes` patrol,
 `gt dolt sync`, `gt dolt pull`, the DoltHub remote that `gt rig add` created,
-`gt maintain`'s remote-divergence pre-flight, and the fetch and push steps in
-the compactor-dog and dolt-archive plugins are all gone. Nothing syncs
-`refs/dolt/data` any more.
+the old Dolt maintenance verb's remote-divergence pre-flight, and the fetch
+and push steps in the compactor-dog and dolt-archive plugins are all gone.
+Nothing syncs `refs/dolt/data` any more.
 
 The backup is local: scheduled_maintenance takes a nightly backup of every
 database in `~/gt/.dolt-data` into `~/gt-backups/dolt/<date>/` before its gc,
