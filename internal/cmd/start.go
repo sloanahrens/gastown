@@ -479,10 +479,9 @@ func cleanupPolecats(townRoot string) {
 			}
 
 			// Delete the polecat branch from the rig's bare repo
-			branchName := fmt.Sprintf("polecat/%s", p.Name)
-			if err := deleteRigPolecatBranch(r.Path, branchName); err != nil {
-				fmt.Printf("  %s %s/%s: branch %s not deleted: %v\n",
-					style.Dim.Render("○"), r.Name, p.Name, branchName, err)
+			if !deletePolecatBranchReport(os.Stdout, r.Path, r.Name, p.Name) {
+				totalSkipped++
+				continue
 			}
 
 			fmt.Printf("  %s %s/%s: cleaned up\n", style.Bold.Render("✓"), r.Name, p.Name)
@@ -515,6 +514,19 @@ func deleteRigPolecatBranch(rigPath, branch string) error {
 		return err
 	}
 	return repoGit.DeleteBranch(branch, true)
+}
+
+// deletePolecatBranchReport deletes a polecat's branch from the rig's bare repo
+// and reports a failure on w. It returns false when the branch was not deleted,
+// so the caller does not count the polecat as cleaned up.
+func deletePolecatBranchReport(w io.Writer, rigPath, rigName, polecatName string) bool {
+	branchName := fmt.Sprintf("polecat/%s", polecatName)
+	if err := deleteRigPolecatBranch(rigPath, branchName); err != nil {
+		fmt.Fprintf(w, "  %s %s/%s: branch %s not deleted: %v\n",
+			style.Dim.Render("○"), rigName, polecatName, branchName, err)
+		return false
+	}
+	return true
 }
 
 // stopDaemonIfRunning stops the daemon if it is running.
