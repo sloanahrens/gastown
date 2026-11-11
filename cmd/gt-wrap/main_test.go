@@ -50,6 +50,10 @@ type harness struct {
 	home      string
 	builtTown string
 	targetSet bool
+	// kubeBuilt, kubeCfg and kubeTool record the kubernetes target's build.
+	kubeBuilt bool
+	kubeCfg   kubeConfig
+	kubeTool  string
 	stdout    *bytes.Buffer
 	stderr    *bytes.Buffer
 }
@@ -82,6 +86,11 @@ func newHarness(t *testing.T) *harness {
 		files:    h.files,
 		newDocker: func(town string) target {
 			h.builtTown, h.targetSet = town, true
+			return h.fake
+		},
+		newKubectl: func(town string, kube kubeConfig, tool string) target {
+			h.builtTown = town
+			h.kubeBuilt, h.kubeCfg, h.kubeTool = true, kube, tool
 			return h.fake
 		},
 	}

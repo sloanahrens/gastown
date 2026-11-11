@@ -61,8 +61,8 @@ const exitDown = 1
 // that signal killed, as a shell reports it.
 const signalExitBase = 128
 
-// Shell runs the docker command lines the Docker runner plans. The real one runs
-// the docker binary; a test one records the lines. Each argv starts with "docker".
+// Shell runs the docker and kubectl command lines the targets plan. The real one
+// runs the binary each argv names; a test one records the lines.
 type Shell interface {
 	// Attach runs argv with the caller's stdin, stdout and stderr attached and
 	// returns the status it exited with. env holds KEY=VALUE entries for the
