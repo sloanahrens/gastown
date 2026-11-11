@@ -11,11 +11,6 @@ import (
 	"github.com/steveyegge/gastown/internal/openshellprov"
 )
 
-// restoreTokenEnv is the variable the provisioner reads the admin token from before
-// any file. The restore hands the token over through it in memory, so the token
-// never reaches argv.
-const restoreTokenEnv = "GT_AUTH_FORGEJO_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
-
 // defaultRestoreTimeout bounds the provisioner run that restores protection. The restore
 // is a short run of HTTP calls, so two minutes is ample; the bound only ends a hung connection.
 const defaultRestoreTimeout = 2 * time.Minute
@@ -61,9 +56,11 @@ func (r *Resync) restore(token forgejoprov.Secret) error {
 	}()
 	ctx, cancel := context.WithTimeout(context.Background(), r.restoreTimeout())
 	defer cancel()
+	// The restore hands the token over through the broker's variable in memory, so the
+	// token never reaches argv.
 	env := forgejoprov.Env{
 		Getenv: func(name string) string {
-			if name == restoreTokenEnv {
+			if name == forgejoprov.BrokerTokenEnv {
 				return token.Reveal()
 			}
 			return ""

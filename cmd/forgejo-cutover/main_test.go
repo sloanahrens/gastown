@@ -229,7 +229,7 @@ func TestMainExecRunnerBuildsEachChildInProcess(t *testing.T) {
 			t.Errorf("child %d lost an unrelated variable: %q", i, cmd.Env)
 		}
 	}
-	probeEntry := probeTokenEnv + "=" + probeToken
+	probeEntry := forgejoprov.BrokerTokenEnv + "=" + probeToken
 	if !slices.Contains(start.cmds[2].Env, probeEntry) {
 		t.Errorf("the probe's child did not receive the resolved token: %q", start.cmds[2].Env)
 	}

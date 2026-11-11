@@ -13,8 +13,9 @@ import (
 // The environment variables and the file key the admin token resolves from,
 // in the order the script reads them.
 const (
-	// brokerTokenEnv is the variable the auth broker's run act sets.
-	brokerTokenEnv = "GT_AUTH_FORGEJO_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
+	// BrokerTokenEnv is the variable the auth broker's run act sets. Every command that
+	// reads the broker's token names it here.
+	BrokerTokenEnv = "GT_AUTH_FORGEJO_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
 	// adminTokenEnv is the stand-in variable set by hand.
 	adminTokenEnv = "FORGEJO_ADMIN_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
 )
@@ -97,7 +98,7 @@ func (s Secret) Scrub(text string) string {
 // $HOME/forgejo/.env is never looked at. A token holding whitespace, a quote or
 // a backslash is refused, and no error text echoes the token.
 func ResolveAdminToken(getenv func(string) string, readFile func(string) ([]byte, error), tokenFile string) (Secret, error) {
-	token := firstNonEmpty(getenv(brokerTokenEnv), getenv(adminTokenEnv))
+	token := firstNonEmpty(getenv(BrokerTokenEnv), getenv(adminTokenEnv))
 	if token == "" && tokenFile != "" {
 		fromFile, err := adminTokenFromFile(readFile, tokenFile)
 		if err != nil {

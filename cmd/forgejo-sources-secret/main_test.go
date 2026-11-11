@@ -365,7 +365,7 @@ func noEnv(string) string { return "" }
 // to value, and no other variable.
 func tokenFromEnv(value string) func(string) string {
 	return func(name string) string {
-		if name == brokerTokenEnv {
+		if name == forgejoprov.BrokerTokenEnv {
 			return value
 		}
 		return ""
@@ -720,6 +720,25 @@ func TestSourcesSecretRefusesWithNoTokenSource(t *testing.T) {
 	}
 	if n := len(f.CallLog()); n != 0 {
 		t.Fatalf("a run with no token source made %d request(s)", n)
+	}
+}
+
+// TestSourcesSecretUsageNamesEveryTokenSourceForTheFile asks for the usage with -h. The
+// --admin-token-file line must name both variables that stand in for the file, the
+// broker's and the hand-set one, since either one makes the file optional.
+func TestSourcesSecretUsageNamesEveryTokenSourceForTheFile(t *testing.T) {
+	t.Parallel()
+	f := newSourcesFake(t, "")
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"-h"}, env{Now: testClock, Getenv: noEnv, ReadFile: adminReader(t), HTTP: &http.Client{Transport: f}}, &stdout, &stderr)
+	if code != forgejoprov.ExitOK {
+		t.Fatalf("exit %d, want %d for -h; stderr: %s", code, forgejoprov.ExitOK, stderr.String())
+	}
+
+	for _, want := range []string{"$" + forgejoprov.BrokerTokenEnv, "$FORGEJO_ADMIN_TOKEN"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("usage does not name %q:\n%s", want, stderr.String())
+		}
 	}
 }
 

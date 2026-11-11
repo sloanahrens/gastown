@@ -178,13 +178,9 @@ func (bareGit) OriginURL(bareRepo string) (string, error) {
 // the probe's own children inherit it from there; no other child of the cutover
 // carries a token.
 var tokenEnvNames = []string{
-	"GT_AUTH_FORGEJO_TOKEN", //nolint:gosec // G101: the variable's name, not a credential
-	"FORGEJO_ADMIN_TOKEN",   //nolint:gosec // G101: the variable's name, not a credential
+	forgejoprov.BrokerTokenEnv,
+	"FORGEJO_ADMIN_TOKEN", //nolint:gosec // G101: the variable's name, not a credential
 }
-
-// probeTokenEnv is the variable the probe resolves its token from, as the old
-// shell cutover's probe did.
-const probeTokenEnv = "GT_AUTH_FORGEJO_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
 
 // execRunner is forgejocut.Runner over the operating system: Output captures a
 // read's stdout, and Run lets a child's own output reach the operator's streams —
@@ -264,7 +260,7 @@ func (r execRunner) Run(argv []string) error {
 // RunWithToken runs argv with the admin token in its environment: the probe's
 // channel. Every other variable the token could hide in is still removed.
 func (r execRunner) RunWithToken(argv []string, token forgejoprov.Secret) error {
-	return r.runStreaming(argv, []string{probeTokenEnv + "=" + token.Reveal()})
+	return r.runStreaming(argv, []string{forgejoprov.BrokerTokenEnv + "=" + token.Reveal()})
 }
 
 // runStreaming builds the child once, adds extra to its scrubbed environment and

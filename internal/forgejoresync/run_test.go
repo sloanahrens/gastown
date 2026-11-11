@@ -206,7 +206,7 @@ func newRunFixture(t *testing.T, setup runSetup) *runFixture {
 		},
 		Provision: func(_ context.Context, opts *forgejoprov.Options, env forgejoprov.Env) int {
 			fx.events = append(fx.events, "restore")
-			fx.calls = append(fx.calls, restoreCall{opts: *opts, token: env.Getenv(restoreTokenEnv)})
+			fx.calls = append(fx.calls, restoreCall{opts: *opts, token: env.Getenv(forgejoprov.BrokerTokenEnv)})
 			return forgejoprov.ExitOK
 		},
 	}
@@ -252,7 +252,7 @@ func assertNoTokenAnywhere(t *testing.T, fx *runFixture) {
 // changes nothing. Mutation: drop the prune and the stale branch survives, so this goes red.
 func TestRunConvergesAndIsIdempotent(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 	if rc := fx.resync.Run(); rc != ExitOK {
 		t.Fatalf("first run = %d, want 0; logs %q", rc, fx.logs)
 	}
@@ -317,7 +317,7 @@ func TestRunConvergesAndIsIdempotent(t *testing.T) {
 // in a dry run and the push count goes red.
 func TestRunDryRunWritesNothing(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv, dryRun: true})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv, dryRun: true})
 	if rc := fx.resync.Run(); rc != ExitOK {
 		t.Fatalf("dry run = %d, want 0; logs %q", rc, fx.logs)
 	}
@@ -359,7 +359,7 @@ func TestRunDryRunWritesNothing(t *testing.T) {
 // Mutation: skip the restore on the verify path and the restore count goes red.
 func TestRunVerifyFailureExitsOneAndStillRestores(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 	fx.mirror.noPush = true
 	if rc := fx.resync.Run(); rc != ExitFailure {
 		t.Fatalf("Run = %d, want 1; logs %q", rc, fx.logs)
@@ -410,7 +410,7 @@ func TestRunStepFailureRestoresAndCleansUp(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+			fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 			fx.mirror.failAt = c.failAt
 			fx.mirror.failAfterPush = c.failAfterPush
 			if c.noScratch {
@@ -446,7 +446,7 @@ func TestRunStepFailureRestoresAndCleansUp(t *testing.T) {
 // exits 0. Mutation: drop the log line in removeWork and the log check goes red.
 func TestRunScratchRemovalFailureIsLogged(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 	fx.resync.RemoveAll = func(path string) error {
 		fx.removed = append(fx.removed, path)
 		return errors.New("permission denied")
@@ -483,7 +483,7 @@ func TestRunRefusesAListingThatWouldEmptyTheForgejoCopy(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
-			fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+			fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 			fx.mirror.remotes[runGitHub] = c.github
 			if rc := fx.resync.Run(); rc != ExitFailure {
 				t.Fatalf("Run = %d, want 1; logs %q", rc, fx.logs)
@@ -534,7 +534,7 @@ func TestRunGuardRefusesAPlanThatDeletesMain(t *testing.T) {
 // the provisioner count goes red, which is the unprotected main this bead is about.
 func TestRunCanceledMidStageRestoresAndFails(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fx.resync.Context = ctx
@@ -564,7 +564,7 @@ func TestRunCanceledMidStageRestoresAndFails(t *testing.T) {
 // context.Canceled, the unprotected main this bead is about.
 func TestRunRestoresUnderItsOwnContextAfterCancellation(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fx.resync.Context = ctx
@@ -576,7 +576,7 @@ func TestRunRestoresUnderItsOwnContextAfterCancellation(t *testing.T) {
 	fx.resync.Provision = func(provCtx context.Context, opts *forgejoprov.Options, env forgejoprov.Env) int {
 		_, bounded := provCtx.Deadline()
 		seen <- restoreSeen{ctxErr: provCtx.Err(), bounded: bounded}
-		fx.calls = append(fx.calls, restoreCall{opts: *opts, token: env.Getenv(restoreTokenEnv)})
+		fx.calls = append(fx.calls, restoreCall{opts: *opts, token: env.Getenv(forgejoprov.BrokerTokenEnv)})
 		return forgejoprov.ExitOK
 	}
 	fx.resync.Steps = []Step{
@@ -606,7 +606,7 @@ func TestRunRestoresUnderItsOwnContextAfterCancellation(t *testing.T) {
 // push stage runs.
 func TestRunCanceledBetweenStagesRunsNoFurtherStage(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fx.resync.Context = ctx
@@ -635,7 +635,7 @@ func TestRunCanceledBetweenStagesRunsNoFurtherStage(t *testing.T) {
 // Run returns 0.
 func TestRunCanceledOnTheLastStageStillFails(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	fx.resync.Context = ctx
@@ -659,7 +659,7 @@ func TestRunCanceledOnTheLastStageStillFails(t *testing.T) {
 // the stages run.
 func TestRunCanceledBeforeTheTokenSendsNothing(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	fx.resync.Context = ctx
@@ -710,7 +710,7 @@ func TestRunPresentsTheResolvedTokenOnEveryCall(t *testing.T) {
 		name     string
 		tokenVar string
 	}{
-		{name: "broker token", tokenVar: restoreTokenEnv},
+		{name: "broker token", tokenVar: forgejoprov.BrokerTokenEnv},
 		{name: "stand-in override", tokenVar: "FORGEJO_ADMIN_TOKEN"},
 	}
 	for _, c := range cases {
@@ -746,7 +746,7 @@ func TestRunPresentsTheResolvedTokenOnEveryCall(t *testing.T) {
 func TestRunRestoreTakesItsConfigDirFromTheEnvironment(t *testing.T) {
 	t.Parallel()
 	fx := newRunFixture(t, runSetup{
-		tokenVar: restoreTokenEnv,
+		tokenVar: forgejoprov.BrokerTokenEnv,
 		env:      map[string]string{"XDG_CONFIG_HOME": "/cfg", "HOME": "/home/operator"},
 	})
 	if rc := fx.resync.Run(); rc != ExitOK {
@@ -765,7 +765,7 @@ func TestRunRestoreTakesItsConfigDirFromTheEnvironment(t *testing.T) {
 // a missing rule as a failure and the exit code goes red.
 func TestRunWithNoRuleLiftsNothingAndRestores(t *testing.T) {
 	t.Parallel()
-	fx := newRunFixture(t, runSetup{tokenVar: restoreTokenEnv, noRule: true})
+	fx := newRunFixture(t, runSetup{tokenVar: forgejoprov.BrokerTokenEnv, noRule: true})
 	if rc := fx.resync.Run(); rc != ExitOK {
 		t.Fatalf("Run = %d, want 0; logs %q", rc, fx.logs)
 	}
