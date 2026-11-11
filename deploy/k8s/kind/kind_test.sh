@@ -561,6 +561,16 @@ touch "$S/state/colima-running"
 run "$UP" GT_K8S_GATEWAY_PORT=29001 --
 check "GT_K8S_GATEWAY_PORT moves the mapping to a free port" contains "hostPort: 29001" "$(cat "$S/state/kind-config.yaml")"
 
+echo "a cluster name with sed metacharacters is written literally"
+scenario cluster_escape
+touch "$S/state/colima-running"
+run "$UP" 'GT_K8S_CLUSTER=gt&sbx|x\y' --
+check "up exits 0 with metacharacters in the cluster name" test "$RC" -eq 0
+escaped_cfg="$(cat "$S/state/kind-config.yaml" 2>/dev/null || true)"
+check "the cluster name reaches the kind config literally" contains 'name: gt&sbx|x\y' "$escaped_cfg"
+check "no cluster placeholder survives the render" lacks "__CLUSTER__" "$escaped_cfg"
+check "no gateway placeholder survives the render" lacks "__GATEWAY_PORT__" "$escaped_cfg"
+
 echo "the port probe cannot run"
 scenario probe_error
 touch "$S/state/colima-running"
