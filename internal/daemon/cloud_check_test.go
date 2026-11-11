@@ -38,6 +38,9 @@ type cloudCheckFakes struct {
 	// statusBody is what the fake binary writes through --json; empty writes a
 	// healthy report stamped with the fake clock.
 	statusBody string
+	// noStatus makes the next run write no status at all, as a run that exits 0
+	// without reaching its report does.
+	noStatus bool
 	// err is what the next run returns.
 	err            error
 	escalations    []string
@@ -61,7 +64,7 @@ func cloudCheckTestDaemon(t *testing.T, cfg *DaemonPatrolConfig, keyFile func(*a
 		f.calls = append(f.calls, cloudCheckCall{name: name, args: slices.Clone(args), env: slices.Clone(env)})
 		// The real binary writes the status through --json; the fake does the
 		// same, so a tick's output is the file a reader would see.
-		if i := slices.Index(args, cloudCheckJSONArg); i >= 0 && i+1 < len(args) {
+		if i := slices.Index(args, cloudCheckJSONArg); i >= 0 && i+1 < len(args) && !f.noStatus {
 			path := args[i+1]
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatalf("making the status directory: %v", err)
@@ -72,6 +75,11 @@ func cloudCheckTestDaemon(t *testing.T, cfg *DaemonPatrolConfig, keyFile func(*a
 			}
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatalf("writing the status: %v", err)
+			}
+			// The file's mtime is the fake clock's, so "written this run" is
+			// decided by the test's clock, not the host's.
+			if err := os.Chtimes(path, f.now, f.now); err != nil {
+				t.Fatalf("stamping the status: %v", err)
 			}
 		}
 		return f.err
@@ -320,6 +328,73 @@ func TestCloudCheckRefusesAnIntervalItCannotSchedule(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "cloud_check: not running") {
 		t.Errorf("log = %q, want the interval refusal named", logs.String())
+	}
+}
+
+// TestCloudCheckExitZeroWithoutANewStatusKeepsTheAlert: an exit 0 that leaves
+// the status file as the last run wrote it is a failed run. It must not clear
+// the alert the failure raised, and it must refresh that alert as a failure.
+func TestCloudCheckExitZeroWithoutANewStatusKeepsTheAlert(t *testing.T) {
+	t.Parallel()
+	key, stat := cloudCheckPresentKey()
+	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", key),
+		func(*agentconfig.CloudCheckConfig) string { return key }, stat)
+
+	f.err = cloudCheckExitErr(3)
+	d.runCloudCheckPatrol()
+	if len(f.escalationKeys) != 1 {
+		t.Fatalf("the failing run escalated %d times, want 1", len(f.escalationKeys))
+	}
+
+	f.now = f.now.Add(10 * time.Minute)
+	f.err = nil
+	f.noStatus = true
+	d.runCloudCheckPatrol()
+
+	if len(f.clears) != 0 {
+		t.Errorf("clears = %q after an exit 0 that wrote no status, want none", f.clears)
+	}
+	if !slices.Equal(f.escalationKeys, []string{cloudCheckAlertKey, cloudCheckAlertKey}) {
+		t.Errorf("escalations under keys %q, want the alert refreshed as a failure", f.escalationKeys)
+	}
+	if !strings.Contains(logs.String(), "without a new status") {
+		t.Errorf("log = %q, want the run reported as exit 0 without a new status", logs.String())
+	}
+}
+
+// TestCloudCheckStatusWrittenByARun: the status file counts as written by a run
+// only when it reads back and its modification time is not before the run's
+// start.
+func TestCloudCheckStatusWrittenByARun(t *testing.T) {
+	t.Parallel()
+	start := cloudCheckNow
+	cases := []struct {
+		name    string
+		modTime time.Time
+		absent  bool
+		want    bool
+	}{
+		{"absent", time.Time{}, true, false},
+		{"left by an earlier run", start.Add(-time.Minute), false, false},
+		{"written at the start", start, false, true},
+		{"written after the start", start.Add(time.Second), false, true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "status.json")
+			if !tt.absent {
+				if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+					t.Fatalf("writing the status: %v", err)
+				}
+				if err := os.Chtimes(path, tt.modTime, tt.modTime); err != nil {
+					t.Fatalf("stamping the status: %v", err)
+				}
+			}
+			if got := cloudCheckWritten(path, start); got != tt.want {
+				t.Errorf("cloudCheckWritten = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
