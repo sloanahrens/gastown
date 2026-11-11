@@ -40,11 +40,14 @@ type Health struct {
 }
 
 // HealthCause is one field that held the verdict back: the townhealth field's
-// identity, plus the phrase that explains it.
+// identity, plus the phrase that explains it. A NEW cause is green and holds
+// nothing back; it is listed so the pill says a rig has no landing yet
+// (gt-30ehe8), and Tag is how the page tells it from a fault.
 type HealthCause struct {
 	Name    string `json:"name"`
 	Rig     string `json:"rig,omitempty"`
 	Subject string `json:"subject,omitempty"`
+	Tag     string `json:"tag,omitempty"`
 	Detail  string `json:"detail,omitempty"`
 }
 

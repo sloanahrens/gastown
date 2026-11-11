@@ -376,7 +376,9 @@ func TestWriteTownHealth_NoPostLandCommandIsNotApplicable(t *testing.T) {
 		t.Errorf("main/gastown detail = %q, want it to name the missing command", got.Detail)
 	}
 
-	// The rig configures the check: no verdict is now an unanswered question.
+	// The rig configures the check but has not landed since: no verdict yet is
+	// a rig that is new to the check, green and NEW, not an unknown town
+	// (gt-30ehe8).
 	writeTownFile(t, d.config.TownRoot, filepath.Join("gastown", "settings", "config.json"),
 		`{"type":"rig-settings","version":1,"merge_queue":{"post_land_command":"make test-slow"}}`)
 	d.writeTownHealth()
@@ -385,8 +387,8 @@ func TestWriteTownHealth_NoPostLandCommandIsNotApplicable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := healthField(t, second, "main/gastown"); got.Verdict != townhealth.VerdictUnknown {
-		t.Errorf("main/gastown with a post_land_command and no verdict = %+v, want UNKNOWN", got)
+	if got := healthField(t, second, "main/gastown"); got.Tag != townhealth.New || got.Verdict != townhealth.Green {
+		t.Errorf("main/gastown with a post_land_command and no verdict = %+v, want a green NEW field", got)
 	}
 }
 

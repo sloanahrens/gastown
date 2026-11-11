@@ -47,7 +47,9 @@ writes every heartbeat, with the verdict as the exit code: 0 green,
 operational.health.stale_after, default 10m). A green line is the verdict,
 the report's age and the day's landings; any other line lists the non-green
 fields worst first as key=value, where [R] marks a RECORDED field and [?] an
-UNKNOWN one. gt status prints every field.
+UNKNOWN one. gt status prints every field. A rig with no landing yet is green
+and reads NEW in gt status, not UNKNOWN, so a rig just added does not hold the
+town back.
 
 Use --line --ready to ask whether the town can take traffic rather than
 whether it is green: exit 0 when the report is fresh and every non-green

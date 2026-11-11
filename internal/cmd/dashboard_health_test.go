@@ -46,8 +46,43 @@ func TestDashboardHealthCauses(t *testing.T) {
 			t.Fatalf("verdict = %q, want unknown", h.Verdict)
 		}
 		want := []dashboard.HealthCause{
-			{Name: townhealth.FieldDolt, Detail: "not wired"},
-			{Name: townhealth.FieldMain, Rig: "mango", Detail: "no post-landing verdict recorded"},
+			{Name: townhealth.FieldDolt, Tag: string(townhealth.Unknown), Detail: "not wired"},
+			{Name: townhealth.FieldMain, Rig: "mango", Tag: string(townhealth.Unknown), Detail: "no post-landing verdict recorded"},
+		}
+		if !equalCauses(h.Causes, want) {
+			t.Fatalf("causes = %+v, want %+v", h.Causes, want)
+		}
+	})
+
+	t.Run("a NEW rig is a neutral cause that never holds the verdict", func(t *testing.T) {
+		t.Parallel()
+		h := dashboardHealth(writeHealth(t, townhealth.Degraded,
+			townhealth.Field{Name: townhealth.FieldLanding, Rig: "gastown", Tag: townhealth.Recorded, Verdict: townhealth.Degraded, Value: "1 pending", Detail: "waiting 20m"},
+			townhealth.Field{Name: townhealth.FieldMain, Rig: "toolbox", Tag: townhealth.New, Verdict: townhealth.Green, Value: "no landing yet", Detail: "no post-landing verdict recorded yet"},
+		))
+		if h.Verdict != "degraded" {
+			t.Fatalf("verdict = %q, want degraded: the NEW rig holds nothing back", h.Verdict)
+		}
+		want := []dashboard.HealthCause{
+			{Name: townhealth.FieldLanding, Rig: "gastown", Tag: string(townhealth.Recorded), Detail: "waiting 20m"},
+			{Name: townhealth.FieldMain, Rig: "toolbox", Tag: string(townhealth.New), Detail: "no post-landing verdict recorded yet"},
+		}
+		if !equalCauses(h.Causes, want) {
+			t.Fatalf("causes = %+v, want %+v", h.Causes, want)
+		}
+	})
+
+	t.Run("a green town names its NEW rig and nothing else", func(t *testing.T) {
+		t.Parallel()
+		h := dashboardHealth(writeHealth(t, townhealth.Green,
+			townhealth.Field{Name: townhealth.FieldDolt, Tag: townhealth.Recorded, Verdict: townhealth.Green, Value: "3ms"},
+			townhealth.Field{Name: townhealth.FieldMain, Rig: "toolbox", Tag: townhealth.New, Verdict: townhealth.Green, Value: "no landing yet", Detail: "no post-landing verdict recorded yet"},
+		))
+		if h.Verdict != "green" {
+			t.Fatalf("verdict = %q, want green", h.Verdict)
+		}
+		want := []dashboard.HealthCause{
+			{Name: townhealth.FieldMain, Rig: "toolbox", Tag: string(townhealth.New), Detail: "no post-landing verdict recorded yet"},
 		}
 		if !equalCauses(h.Causes, want) {
 			t.Fatalf("causes = %+v, want %+v", h.Causes, want)

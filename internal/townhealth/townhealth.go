@@ -43,6 +43,11 @@ const (
 	Live     Tag = "LIVE"
 	Recorded Tag = "RECORDED"
 	Unknown  Tag = "UNKNOWN"
+	// New is a green field whose subject has no verdict recorded yet, such as
+	// a rig that has not landed since it was added (gt-30ehe8). It is green,
+	// so it does not hold the town back, and it says so instead of reading as
+	// an unknown.
+	New Tag = "NEW"
 )
 
 // Verdict is one field's health, or the town's.
@@ -1149,7 +1154,12 @@ func mains(in Inputs) []Field {
 			// keeps its recorded verdict either way.
 			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: Recorded, Verdict: Green, Value: "n/a", Detail: "no post_land_command configured"})
 		case m.LastRun == "":
-			fs = append(fs, unknown(FieldMain, m.Rig, "", errors.New("no post-landing verdict recorded")))
+			// No verdict has ever been recorded for this rig, so there is no
+			// record to read. A record that failed to read is the m.Err case
+			// above. The field reads NEW and green, so the town and the
+			// readiness probe are not held by a rig that has not landed yet
+			// (gt-30ehe8).
+			fs = append(fs, Field{Name: FieldMain, Rig: m.Rig, Tag: New, Verdict: Green, Value: "no landing yet", Detail: "no post-landing verdict recorded yet"})
 		case m.LastRun != m.LastGreen:
 			// A red verdict is a standing fact about LastRun, recorded at some
 			// time after LastGreenAt, so its age cannot be judged from that

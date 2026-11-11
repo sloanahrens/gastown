@@ -165,6 +165,17 @@ func TestStatusFlagUsageIsOneLine(t *testing.T) {
 	}
 }
 
+// TestStatusHelpNamesNewRig holds the Long help to the NEW tag: a rig with no
+// landing yet is green and reads NEW in gt status, so the help must say so
+// rather than leave the tag unexplained (gt-30ehe8).
+func TestStatusHelpNamesNewRig(t *testing.T) {
+	t.Parallel()
+	want := "A rig with no landing yet is green\nand reads NEW in gt status, not UNKNOWN"
+	if !strings.Contains(statusCmd.Long, want) {
+		t.Errorf("status help does not explain the NEW tag; want %q in Long", want)
+	}
+}
+
 // TestStatusLineReadyNeedsLine refuses --ready without --line through the
 // command's dispatch, naming both flags, before any town state is read.
 func TestStatusLineReadyNeedsLine(t *testing.T) {
