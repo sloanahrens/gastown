@@ -52,7 +52,7 @@ flowchart TB
     subgraph MAC["The Mac (macOS)"]
         direction TB
         SESS["Agent sessions<br/>overseer, birds, crew<br/>(claude in terminals)"]
-        LAUNCHD["launchd jobs<br/>colima VMs, OpenShell gateway,<br/>stats and spend watchers"]
+        LAUNCHD["launchd jobs<br/>colima VMs,<br/>stats and spend watchers"]
         TUN["Port 3000 relay<br/>(ssh tunnel to Forgejo)"]
         RET["hm retrieval models<br/>embedder and reranker<br/>(ollama, llama-server)"]
 
@@ -165,7 +165,7 @@ Each credential is a Kubernetes Secret created from a file named in a manifest (
 - the jev environment, a ledger reader connection string and a Dolt archive key;
 - the read-only cloud auditor key used by the cloud check.
 
-Agents' model access is a plan sign-in held by the provider, never a raw Anthropic API key placed in a file an agent can read.
+Model access is concrete. The Claude seats (`sbx-haiku`), the om reviews, the overseer and the birds run on the Claude Pro Max plan's OAuth sign-in. The DeepSeek seat uses the DeepSeek key, held as a Secret. No raw Anthropic API key exists anywhere in the town.
 
 ### Forgejo and its runner
 
@@ -238,7 +238,7 @@ flowchart TB
 ```
 
 - **Polecats** do the building. A polecat is created for one bead, works in a sandbox pod, finishes with `gt done` and is removed. Polecats run on *seats*: a seat class names a model, a sandbox profile and how many may run at once. The seat classes are defined in `settings/config.json` under `polecat_pool`. Today the classes are a DeepSeek-model class (`sbx-flash`) and a Claude Haiku class (`sbx-haiku`). Read the file for the current classes and caps.
-- **The overseer** is a Claude session that runs the town: it releases held beads, reads rejections, decides what a hold or a freeze means, and keeps the dispatch hold and emergency stop files. It is a role, not a supervised process: nothing restarts it. A heartbeat file says whether it is alive, and a patrol raises an attention item if it falls silent.
+- **The overseer** is a Claude session that runs the town: it releases held beads, reads rejections, decides what a hold or a freeze means, and keeps the dispatch hold file. The emergency stop files are the operator's alone. It is a role, not a supervised process: nothing restarts it. A heartbeat file says whether it is alive, and a patrol raises an attention item if it falls silent.
 - **Birds** are long-lived named sessions that work for the operator under the overseer. Each has a handoff bead that holds its mission and where it stopped. Birds research, write designs and docs, shape beads, review work and build work in their own worktrees. A bird follows the same landing path as everyone else and never pushes to `main`.
 - **Crew sessions** are a person's own working sessions, each in its own worktree under a rig.
 - **om** is the reviewer. It reads a branch or a diff and returns a structured verdict: a score, findings, approve or request changes. The landing path calls it, and the directives it enforces are the same text a polecat reads when it starts.
@@ -342,7 +342,7 @@ sequenceDiagram
 
 **1. Shape.** A bead is *shaped* when it has these sections: Goal, Constraints, Out of scope, Gate, Size and Acceptance (one to six checkboxes). `gt spec lint` checks the shape and also checks claims the text makes, such as whether the files it names exist. The spec dispatcher only takes beads that pass.
 
-**2. Dispatch.** Each tick the dispatcher looks for ready beads, lints them, and slings the clean ones to a free seat of the right class. It refuses when a dispatch hold file exists or when an emergency stop file exists for the town or the rig. Labels such as `overseer-only` keep a bead off the dispatcher entirely, so a person can hold a bead until it is released.
+**2. Dispatch.** Each tick the dispatcher looks for ready beads, lints them, and slings the clean ones to a free seat of the right class. It refuses when a dispatch hold file exists or when an emergency stop file exists for the town or the rig. A bead is kept back when it is unshaped (lint fails, so the dispatcher skips it), when it is deferred, or when the dispatch hold is on. Beads meant for a person or a bird, such as operator-only and overseer-only beads, are left unshaped on purpose.
 
 **3. Work.** A polecat in a sandbox reads the bead, edits files in its worktree, runs the gate commands the bead names and writes tests. It talks to the town only through `bd` and git.
 
@@ -370,7 +370,7 @@ sequenceDiagram
 
 The path is automatic except at four places:
 
-- a person shapes or approves what enters it (a hold, `overseer-only`);
+- a person shapes or approves what enters it (an unshaped or deferred bead is never dispatched, and the dispatch hold stops everything);
 - a landing that touches a risk path is reviewed by a human afterwards, through the attention queue;
 - changing a CI workflow file is a human act (see [The security model](#the-security-model));
 - the roll of a new image onto the cluster is a person's step.
@@ -439,7 +439,7 @@ flowchart TB
 
 **Guards against silent failure.** Safety checks return one of three answers: pass, fail or unknown. A check that could not read its input never reports pass. This rule closes the old class of defects where "could not check" looked the same as "checked and fine".
 
-**Stop switches.** The *dispatch hold* file stops new work from being handed out. The *ESTOP* files stop dispatch and restarts for the whole town or for one rig. Neither signals a running session. They are the overseer's and the operator's tools; no other agent creates or removes them.
+**Stop switches.** The *dispatch hold* file stops new work from being handed out. The *ESTOP* files stop dispatch and restarts for the whole town or for one rig. Neither signals a running session. The dispatch hold is the overseer's tool. The ESTOP files are the operator's alone: the overseer never creates or removes them, and no other agent does either.
 
 **What humans do by hand.** Some acts are reserved for a person on purpose: changing a CI workflow file, pushing release and teardown tags, holding and rotating the Forgejo admin and cloud admin credentials, copying the reviewed `images` workflow into place, and applying new cluster manifests. Some of these acts go through the *auth broker*, `gt-approve`, which runs as its own macOS user, `gt-forge`. Each run is for one named rule: the broker mints one token for it, the operator types the confirmation, the broker revokes the token when the run ends, and the run is logged. The rules in use cover Forgejo provisioning and resync, the cutover and probe programs, and the sources secret. An agent never holds the admin credential.
 
@@ -452,7 +452,7 @@ These are stated plans and open questions, not running systems.
 - **What the gt-cloud deployer becomes.** The deployer is still a Colima profile on the Mac with its own macOS account and launchd jobs, while the rest of the town now runs in the control cluster. What it becomes is undecided: its own Kubernetes cluster, an isolated namespace in the control cluster with its credentials kept apart, or a cloud-side runner. The answer decides where the release bot and the per-app deploy runners live. It is tracked as devops bead `dv-8qse`.
 - **Retiring `<rig>/mayor/rig`.** Each rig used to keep a working clone under `mayor/rig` that held its beads directory, directives and plugin source. These are moving to the bare repository, `<rig>/.beads`, `<town>/directives` and a build checkout under `.runtime/`. Until the work is complete a rig may still hold the old directory.
 
-Dolt, the Postgres databases and the retrieval models stay on the Mac by the operator's rule. The deploy values already separate a `cloud` environment from the local one (`deploy/k8s/values/cloud`), so the manifests name an environment in one place.
+Dolt, the Postgres databases and the retrieval models stay on the Mac by the operator's rule. That rule belongs to the local era. Open question, not a plan: when the town moves to the cloud, where Dolt, Postgres and the retrieval models live is undecided (`~/.claude` bead `claude-q3f.12`). The deploy values already separate a `cloud` environment from the local one (`deploy/k8s/values/cloud`), so the manifests name an environment in one place.
 
 ## Reading the live town
 
@@ -486,4 +486,4 @@ Facts that change are read, not written down.
 - **Green ref.** The `green/<sha12>` branch published when a whole sweep cycle is green.
 - **Promotion.** The fast-forward push of a green commit to GitHub.
 - **Attention queue.** The derived list of conditions that need a human.
-- **Hold and ESTOP.** The files that stop dispatch, kept by the overseer and operator.
+- **Hold and ESTOP.** The files that stop dispatch. The overseer keeps the hold; the operator alone keeps the ESTOP files.
