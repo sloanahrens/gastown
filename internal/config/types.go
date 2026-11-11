@@ -1833,13 +1833,11 @@ func NewEscalationConfig() *EscalationConfig {
 // SandboxProfile is one entry of TownSettings.Sandboxes: how an openshell seat's
 // sandbox is created. WithDefaults fills Gateway and ControlPlaneHost, and
 // leaves ForgejoHost empty so the backend falls back to ControlPlaneHost;
-// Validate checks the rest and requires Gateway.
+// Validate checks the rest.
 type SandboxProfile struct {
-	// Gateway is required by Validate; a seat profile that names none keeps the
-	// default it has always run on (gt-rb4sf4).
-	Gateway          string   `json:"gateway"`
-	Image            string   `json:"image"`  // OCI reference, required
-	Policy           string   `json:"policy"` // path relative to the rig repo root, required
+	Gateway          string   `json:"gateway"` // openshell gateway name, required outside a seat; a seat defaults to "openshell"
+	Image            string   `json:"image"`   // OCI reference, required
+	Policy           string   `json:"policy"`  // path relative to the rig repo root, required
 	Providers        []string `json:"providers,omitempty"`
 	CPU              string   `json:"cpu,omitempty"`          // k8s quantity, e.g. "4"
 	Memory           string   `json:"memory,omitempty"`       // e.g. "8Gi"
@@ -1912,13 +1910,12 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 // Validate reports the first field of p that is unset or malformed, naming the
 // profile by its key name in TownSettings.Sandboxes. Image, Policy and Gateway
 // are required; Policy must stay inside the rig repo root (relative, no ".."
-// escape); each provider must be
-// named; CPU and Memory, when set, must be k8s quantities; ForgejoHost, when
-// set, must be a bare host name; Driver, when set, is docker or kubernetes,
-// and a kubernetes profile sets no CacheVolume (a Docker volume does not exist
-// there; a k8s cache is a separate design), and a kubernetes profile may name a
-// KubernetesCacheClaim that is a DNS-1123 name, which a docker profile may not
-// (gt-jofne). The kubernetes scheduling fields
+// escape); each provider must be named; CPU and Memory, when set, must be k8s
+// quantities; ForgejoHost, when set, must be a bare host name; Driver, when
+// set, is docker or kubernetes, and a kubernetes profile sets no CacheVolume (a
+// Docker volume does not exist there; a k8s cache is a separate design), and a
+// kubernetes profile may name a KubernetesCacheClaim that is a DNS-1123 name,
+// which a docker profile may not (gt-jofne). The kubernetes scheduling fields
 // are refused on a docker profile and checked for the pod and resources the
 // gateway accepts.
 func (p SandboxProfile) Validate(name string) error {
