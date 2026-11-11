@@ -210,7 +210,7 @@ The scale spreads the work well; points 3 to 21 hold about 85% of beads. The bea
 |---|---|---|---|---|
 | shape + `fits_twenty_minutes` + embedding | 11 | 23% | 0.19 | 0.55 |
 | | 13 | 11% | 0.31 | 0.41 |
-| | 15 | 4% | 0.40 | 0.21 |
+| | 15 (the operator's trigger) | 4% | 0.40 | 0.21 |
 | shape + `fits_twenty_minutes` | 13 | 15% | 0.18 | 0.34 |
 | | 15 | 8% | 0.25 | 0.24 |
 

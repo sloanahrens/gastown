@@ -40,7 +40,7 @@ SP1, SP3, SP5, SP8 and SP10 have no dependencies and can run in parallel. Everyt
 
 **Package.** New package `internal/storypoints`. It imports no other internal package except `internal/hmhints` (SP10) and standard library; the command code lives in `internal/cmd`.
 
-**Scale.** `FromMinutes(m float64) int` returns the nearest Fibonacci number from this list, by the edge values; a value exactly on an edge belongs to the lower point (the edge is the inclusive upper bound): 1 up to and including 1.5; 2 up to 2.5; 3 up to 4; 5 up to 6.5; 8 up to 10.5; 13 up to 17; 21 up to 27.5; 34 up to 44.5; 55 up to 72; 89 above. Zero or negative minutes is an error, not point 1.
+**Scale.** `FromMinutes(m float64) (int, error)` returns the nearest Fibonacci number from this list, by the edge values; a value exactly on an edge belongs to the lower point (the edge is the inclusive upper bound): 1 up to and including 1.5; 2 up to 2.5; 3 up to 4; 5 up to 6.5; 8 up to 10.5; 13 up to 17; 21 up to 27.5; 34 up to 44.5; 55 up to 72; 89 above. Zero or negative minutes returns `ErrNoMinutes` and no points, not point 1.
 
 **Labels.** `sp:N` and `sp-actual:N`, N a Fibonacci number from the list, and `sp-rung:<rung>` with rung one of `all`, `shape-jev`, `shape-embed`, `shape`, naming which inputs made the estimate.
 
@@ -65,7 +65,7 @@ The `labels:` part is left out when there are no labels. The weights were fitted
 | Feature | Definition |
 |---|---|
 | `boxes` | number of lines starting `- [ ]`, `- [x]` or `- [X]` in the text from the last `## Acceptance` heading to the end (0 when there is none) |
-| `paths` | number of distinct matches of `[\w][\w./-]*\.(go\|md\|yaml\|yml\|sh\|json\|txt\|html\|py\|ts\|tsx\|sql\|mod)\b` |
+| `paths` | number of distinct matches (a bare name such as `lint.go` that also appears as the tail of a longer path counts as its own match) of `[\w][\w./-]*\.(go\|md\|yaml\|yml\|sh\|json\|txt\|html\|py\|ts\|tsx\|sql\|mod)\b` |
 | `pkgs` | number of distinct matches of `\b(internal\|cmd\|deploy\|docs)/[\w-]+` |
 | `dlen` | natural log of (1 + number of characters of `t`) |
 | `ncons` | number of lines starting `- ` in the section from `## Constraints` to the next line starting `## ` (0 when there is none) |
@@ -87,12 +87,12 @@ Before dispatch the seat is unknown, so the seat term (a small negative coeffici
 
 ### SP1. The scale
 
-New `internal/storypoints/points.go`: `FromMinutes`, `Edges`, `Valid(n)`, `SPLabel(n)`, `ActualLabel(n)` and `RungLabel(rung)` returning `sp:N`, `sp-actual:N` and `sp-rung:<rung>`, `ParseLabel(s)` returning kind and value, and `ErrNoMinutes`. Table tests over every edge and the value just below and above it, and over parse round trips and rejects (`sp:4`, `sp:`, `sp-actual:0`).
+New `internal/storypoints/points.go`: `FromMinutes` (returning `(int, error)`, with `ErrNoMinutes` for zero or negative minutes), `Edges`, `Valid(n)`, `SPLabel(n)`, `ActualLabel(n)` and `RungLabel(rung)` returning `sp:N`, `sp-actual:N` and `sp-rung:<rung>`, `ParseLabel(s)` returning kind and value, and `ErrNoMinutes`. Table tests over every edge and the value just below and above it, and over parse round trips and rejects (`sp:4`, `sp:`, `sp-actual:0`).
 Depends: none. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP2. Landings table columns for polecat time
 
-In `internal/metrics`: `LedgerRow` (see `loaders_ledger.go`) gains `polecat_secs`, `polecat_lower_bound` and `agent` read from the landing ledger line (they are written by the landing worker since 10-26); `landingColumns` in `landings.go` is append-only and gains `polecat_secs`, `polecat_lower_bound`, `agent`, `seat_class` and `sp_actual`. `seat_class` is `haiku` for agents `sbx-haiku` and `claude-haiku`, `flash` for `sbx-flash` and names starting `deepseek`, `sonnet` for `claude-sonnet`, and empty otherwise. `sp_actual` is `storypoints.FromMinutes(polecat_secs/60)` when the time is present, not a lower bound and positive, else empty. Golden files and the footer counts follow.
+In `internal/metrics`: `LedgerRow` (see `loaders_ledger.go`) gains `polecat_secs`, `polecat_lower_bound` and `agent` read from the landing ledger line (they are written by the landing worker since 10-26); `landingColumns` in `landings.go` is append-only and gains `polecat_secs`, `polecat_lower_bound`, `agent`, `seat_class` and `sp_actual`. `seat_class` is `haiku` for agents `sbx-haiku` and `claude-haiku`, `flash` for `sbx-flash` and names starting `deepseek`, `sonnet` for `claude-sonnet`, and empty otherwise. `sp_actual` is the points from `storypoints.FromMinutes(polecat_secs/60)` when the time is present and not a lower bound and `FromMinutes` returns no error (zero seconds returns the error), else empty. Golden files and the footer counts follow.
 Depends: SP1. Gate: `go test ./internal/metrics -count=1`.
 
 ### SP3. A reader for the whole Jev dispatch log
@@ -184,4 +184,4 @@ Depends: SP12. Gate: `go run ./cmd/docs-lint`.
 
 ## Decisions on the open questions
 
-The operator decided on 2026-11-11 at 13:12: ollama is exposed to the pod at the host gateway (gt-7vrjuo), so SP7's embedder is reachable from the pod; the pre-dispatch Jev ask in SP8 is accepted; the split trigger is 15 minutes (13 points) in SP17. Setting names are mine; rename them before SP13 if the patrol config has a convention.
+The operator decided on 2026-11-11 at 13:12: ollama is exposed to the pod at the host gateway (gt-7vrjuo), so SP7's embedder is reachable from the pod; the pre-dispatch Jev ask in SP8 is accepted; the split trigger is an estimated 15 minutes or more in SP17 (stated in minutes; it lies inside the 13-point bucket, 10.5 to 17 minutes). Setting names are mine; rename them before SP13 if the patrol config has a convention.

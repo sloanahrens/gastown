@@ -24,7 +24,7 @@ The operator decided these on 2026-11-11, through the overseer. They are not reo
 4. The shape model is a small model in Go with its weights in a checked-in JSON file, retrained monthly by `gt metrics`. A linear model first, kept if it clears 0.4; boosted trees only if it does not.
 5. Shadow mode lasts a few hours. The live rank correlation is recomputed once 60 estimated beads have landed. The over-21 split turns on only at the operator's word.
 6. The actual is the landing record's `polecat_secs`.
-7. (13:12, after the retrospective's findings) The split triggers on an estimate of 13 points or more, which is 15 minutes or more, through a minutes setting that is off by default. It applies the split label and never splits by itself.
+7. (13:12, corrected later that day) The split triggers on an estimated 15 minutes or more, through a minutes setting that is off by default. The trigger is stated in minutes; it falls inside the 13-point bucket (10.5 to 17 minutes), so it is not a point threshold. It applies the split label and never splits by itself.
 8. Jev is asked before dispatch (task SP8).
 9. ollama is exposed to the daemon pod at the host gateway (folded into gt-7vrjuo). The embedding ridge joins the blend; until the pod reaches ollama, shape plus Jev is the rung.
 
@@ -42,7 +42,7 @@ The retrospective was written before decisions 3 to 5 and was extended afterward
 
 ## The scale
 
-A bead's points are `FromMinutes(m)`: the nearest Fibonacci number to the minutes, with the edges above. Against the 2,297 span-era beads of the Haiku and DeepSeek seats the scale spreads work well: points 3 to 21 hold about 85% of beads, and 11.8% of beads run over 21 points (over 27.5 minutes) and carry 51% of polecat time. The table is in the retrospective, section 7.
+A bead's points are `FromMinutes(m)`, which returns the points and an error (zero or negative minutes is an error, not point 1): the nearest Fibonacci number to the minutes, with the edges above. Against the 2,297 span-era beads of the Haiku and DeepSeek seats the scale spreads work well: points 3 to 21 hold about 85% of beads, and 11.8% of beads run over 21 points (over 27.5 minutes) and carry 51% of polecat time. The table is in the retrospective, section 7.
 
 Two labels carry the values on a bead:
 
@@ -127,7 +127,7 @@ The route is behind a setting, `patrols.spec_dispatch.story_points.split_over`, 
 
 The operator's rule reads "over 21 points splits". The retrospective shows that no estimate reaches 21 points, so the route is built on a minutes trigger, and the setting holds that trigger. When the trigger fires, the dispatcher does not sling the bead; it adds the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`, which already keeps a bead off the dispatcher) and a comment with the estimate and the nearest beads, for the overseer or a bird to split. It never splits a bead by itself. The route acts only on an estimate from the rungs with at least two inputs (`sp-rung:all`, `shape-jev`, `shape-embed`); it does not act on `sp-rung:shape` until the shadow recompute shows that rung clears 0.4 on its own.
 
-The operator set the trigger at an estimate of 13 points or more, which is 15 estimated minutes or more (13 points begins at 10.5 minutes, so the minutes setting, 15, is the binding one). The setting stays off until the operator's word after the shadow report, and the report recomputes the trigger table on live estimates in case he moves it. The retrospective's sweep gives the shape: at 15 estimated minutes about 4% of beads are flagged, four in ten of them run long and one long bead in five is caught; at 13 minutes 11% are flagged, three in ten run long and four in ten of the long beads are caught. The shadow report recomputes this table on live estimates.
+The operator set the trigger at an estimated 15 minutes or more. That value is inside the 13-point bucket (10.5 to 17 minutes), so about half of the 13-point beads are flagged and the rest are not; the trigger is a number of minutes, not a number of points. The setting stays off until the operator's word after the shadow report, and the report recomputes the trigger table on live estimates in case he moves it. The retrospective's sweep gives the shape: at 15 estimated minutes about 4% of beads are flagged, four in ten of them run long and one long bead in five is caught; at 13 minutes 11% are flagged, three in ten run long and four in ten of the long beads are caught. The shadow report recomputes this table on live estimates.
 
 ## Risks
 
