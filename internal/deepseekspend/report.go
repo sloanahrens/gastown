@@ -402,18 +402,28 @@ func OpenFile(name string) (File, error) {
 	return f, nil
 }
 
-// cursor is how far a watcher file has been read: the file it was read from,
-// and the offset just past its last complete line.
+// headBytes is how much of a watcher file's start the reader keeps. Each poll
+// reads these bytes again: a file rewritten in place that grew past the old
+// offset has a different start, and is read from the top.
+const headBytes = 64
+
+// cursor is how far a watcher file has been read: the file it was read from, its
+// size and modification time at the last poll, the offset just past its last
+// complete line, and the first bytes of the file as they were read.
 type cursor struct {
 	info   fs.FileInfo
+	size   int64
 	offset int64
+	head   []byte
 }
 
 // Reader is the spend report read incrementally across polls. It keeps the
 // parsed ledger rows and the latest events, and each poll reads only the bytes
-// appended since the last one. A file that shrank or was replaced is read from
-// its start. A line still being written, with no newline yet, waits for the
-// poll that finds its newline. The reader is not safe for concurrent use.
+// appended since the last one. A file that shrank, was replaced, or was rewritten
+// in place is read from its start. A line still being written waits for its
+// newline; a final line with no newline is reported, without being kept, once
+// the file has not grown since the poll before, and is kept once its newline
+// arrives. The reader is not safe for concurrent use.
 type Reader struct {
 	ledgerPath, eventsPath string
 	loc                    *time.Location
@@ -442,7 +452,7 @@ func NewReader(ledgerPath, eventsPath string, loc *time.Location, c Constants, d
 // now. A ledger that cannot be read is an error. A missing events log has no
 // alerts; one that exists and cannot be read is an error.
 func (r *Reader) Report(now time.Time) (Report, error) {
-	text, next, restarted, err := readAppended(r.ledgerPath, r.open, r.ledger)
+	text, pending, next, restarted, err := readAppended(r.ledgerPath, r.open, r.ledger)
 	if err != nil {
 		return Report{}, err
 	}
@@ -451,11 +461,18 @@ func (r *Reader) Report(now time.Time) (Report, error) {
 	}
 	r.ledger = next
 	r.rows = append(r.rows, ParseLedger(text, r.loc)...)
+	rows := r.rows
+	if pending != "" {
+		// The pending row is shown for this poll only: it is kept once its newline
+		// arrives, so it is never counted twice.
+		rows = append(rows[:len(rows):len(rows)], ParseLedger(pending, r.loc)...)
+	}
 
-	text, next, restarted, err = readAppended(r.eventsPath, r.open, r.events)
+	text, pending, next, restarted, err = readAppended(r.eventsPath, r.open, r.events)
+	events := r.alerts
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		r.events, r.alerts = cursor{}, nil
+		r.events, r.alerts, events = cursor{}, nil, nil
 	case err != nil:
 		return Report{}, err
 	default:
@@ -463,47 +480,95 @@ func (r *Reader) Report(now time.Time) (Report, error) {
 			r.alerts = nil
 		}
 		r.events = next
-		r.alerts = append(r.alerts, splitLines(text)...)
-		if over := len(r.alerts) - alertKeep; over > 0 {
-			r.alerts = r.alerts[over:]
+		r.alerts = keepLatestAlerts(append(r.alerts, splitLines(text)...))
+		events = r.alerts
+		if pending != "" {
+			events = keepLatestAlerts(append(events[:len(events):len(events)], splitLines(pending)...))
 		}
 	}
-	return Build(Input{Constants: r.constants, Rows: r.rows, Events: r.alerts, Now: now, Days: r.days}), nil
+	return Build(Input{Constants: r.constants, Rows: rows, Events: events, Now: now, Days: r.days}), nil
+}
+
+// keepLatestAlerts keeps the latest alertKeep events.
+func keepLatestAlerts(events []string) []string {
+	if over := len(events) - alertKeep; over > 0 {
+		return events[over:]
+	}
+	return events
 }
 
 // readAppended reads the complete lines the file at path has past from's offset,
 // and returns their text with the cursor just past them. restarted is set when
-// the file is not the one from was read from, or is shorter than its offset: the
-// read starts at the top, and the caller drops what it had kept. The text is
-// empty for a file that has no complete line past the offset.
-func readAppended(path string, open Opener, from cursor) (text string, next cursor, restarted bool, err error) {
+// the file is not the one from was read from, is shorter than its offset, has
+// first bytes that changed, or has an earlier modification time: the read starts
+// at the top, and the caller drops what it had kept. The text is empty for a file
+// that has no complete line past the offset.
+//
+// pending is a final line with no newline. It is returned only when the file has
+// not grown since from was read: a line still being written is left for the poll
+// that finds its newline.
+func readAppended(path string, open Opener, from cursor) (text, pending string, next cursor, restarted bool, err error) {
 	f, err := open(path)
 	if err != nil {
-		return "", from, false, err
+		return "", "", from, false, err
 	}
 	defer func() {
 		if closeErr := f.Close(); closeErr != nil && err == nil {
-			text, next, restarted, err = "", from, false, closeErr
+			text, pending, next, restarted, err = "", "", from, false, closeErr
 		}
 	}()
 	info, err := f.Stat()
 	if err != nil {
-		return "", from, false, err
+		return "", "", from, false, err
+	}
+	rewritten := from.info == nil || !os.SameFile(from.info, info) || info.Size() < from.offset || info.ModTime().Before(from.info.ModTime())
+	if !rewritten {
+		same, err := headMatches(f, from.head)
+		if err != nil {
+			return "", "", from, false, err
+		}
+		rewritten = !same
 	}
 	next = from
-	if from.info == nil || !os.SameFile(from.info, info) || info.Size() < from.offset {
+	if rewritten {
 		next = cursor{}
 		restarted = true
 	}
 	if _, err := f.Seek(next.offset, io.SeekStart); err != nil {
-		return "", from, false, err
+		return "", "", from, false, err
 	}
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return "", from, false, err
+		return "", "", from, false, err
 	}
 	end := bytes.LastIndexByte(data, '\n') + 1
+	if end < len(data) && !restarted && info.Size() == from.size {
+		pending = string(data[end:])
+	}
+	head := append(append([]byte(nil), next.head...), data[:end]...)
+	if len(head) > headBytes {
+		head = head[:headBytes]
+	}
 	next.info = info
+	next.size = info.Size()
 	next.offset += int64(end)
-	return string(data[:end]), next, restarted, nil
+	next.head = head
+	return string(data[:end]), pending, next, restarted, nil
+}
+
+// headMatches reports whether the file's first bytes are head, the bytes a read
+// kept. An empty head matches any file.
+func headMatches(f File, head []byte) (bool, error) {
+	if len(head) == 0 {
+		return true, nil
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return false, err
+	}
+	buf := make([]byte, len(head))
+	n, err := io.ReadFull(f, buf)
+	if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		return false, err
+	}
+	return n == len(head) && bytes.Equal(buf, head), nil
 }

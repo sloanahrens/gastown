@@ -90,8 +90,7 @@ func TestBuildReportFromFixture(t *testing.T) {
 		Alerts: []string{"e2", "e3", "e4", "e5", "e6"},
 	}
 	if !reflect.DeepEqual(got, want) {
-		gotJSON, _ := json.MarshalIndent(got, "", "  ")
-		t.Errorf("report differs from the hand-computed fixture:\n%s", gotJSON)
+		t.Errorf("report differs from the hand-computed fixture:\n%+v", got)
 	}
 }
 
@@ -250,6 +249,21 @@ func (f countingFile) Read(p []byte) (int, error) {
 	return n, err
 }
 
+// countLedgerBytes opens files as OpenFile does, and counts the bytes read from
+// the ledger into bytes. The events log is read too, and is not counted.
+func countLedgerBytes(ledger string, bytes *int64) Opener {
+	return func(name string) (File, error) {
+		f, err := OpenFile(name)
+		if err != nil {
+			return nil, err
+		}
+		if name != ledger {
+			return f, nil
+		}
+		return countingFile{File: f, bytes: bytes}, nil
+	}
+}
+
 // appendText adds text to the end of the file at path.
 func appendText(t *testing.T, path, text string) {
 	t.Helper()
@@ -275,14 +289,7 @@ func TestIncrementalRead(t *testing.T) {
 	constants := Constants{TopUpAt: time.Date(2026, time.November, 8, 23, 0, 0, 0, loc), TopUp: 114.05}
 
 	var read int64
-	open := func(name string) (File, error) {
-		f, err := OpenFile(name)
-		if err != nil {
-			return nil, err
-		}
-		return countingFile{File: f, bytes: &read}, nil
-	}
-	reader := NewReader(ledger, events, loc, constants, DefaultDays, open)
+	reader := NewReader(ledger, events, loc, constants, DefaultDays, countLedgerBytes(ledger, &read))
 	fullRead := func() Report {
 		t.Helper()
 		report, err := NewReader(ledger, events, loc, constants, DefaultDays, OpenFile).Report(now)
@@ -319,8 +326,10 @@ func TestIncrementalRead(t *testing.T) {
 	if got := poll("two appended rows").Samples; got != 4 {
 		t.Errorf("after appending two rows: samples = %d, want 4", got)
 	}
-	if read != int64(len(appended)) {
-		t.Errorf("second poll read %d bytes, want only the %d appended", read, len(appended))
+	// The appended bytes, and the file's first bytes read again to tell that the
+	// file was not rewritten.
+	if want := int64(len(appended)) + headBytes; read != want {
+		t.Errorf("second poll read %d bytes, want the %d appended and the %d-byte head", read, len(appended), headBytes)
 	}
 
 	appendText(t, ledger, "2026-11-09T01:30:00 balance=5")
@@ -358,6 +367,155 @@ func TestIncrementalRead(t *testing.T) {
 	}
 	if read != int64(len(replacement)) {
 		t.Errorf("replaced file: read %d bytes, want the whole %d", read, len(replacement))
+	}
+}
+
+// A file rewritten in place keeps its inode, so only its first bytes and its
+// modification time show the rewrite. One that grows past the old offset with a
+// different start is read from the top; so is one whose modification time moved
+// back.
+func TestReaderDetectsInPlaceRewrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ledger := filepath.Join(dir, "balance.log")
+	events := filepath.Join(dir, "events.log")
+	now := time.Date(2026, time.November, 9, 3, 0, 0, 0, loc)
+	constants := Constants{TopUpAt: time.Date(2026, time.November, 8, 23, 0, 0, 0, loc), TopUp: 114.05}
+
+	var read int64
+	reader := NewReader(ledger, events, loc, constants, DefaultDays, countLedgerBytes(ledger, &read))
+	poll := func(step string) Report {
+		t.Helper()
+		report, err := reader.Report(now)
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		return report
+	}
+	fullRead := func() Report {
+		t.Helper()
+		report, err := NewReader(ledger, events, loc, constants, DefaultDays, OpenFile).Report(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+
+	before := "2026-11-09T01:00:00 balance=52.00\n2026-11-09T01:10:00 balance=51.50\n2026-11-09T01:20:00 balance=51.00\n"
+	if err := os.WriteFile(ledger, []byte(before), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := poll("first read").Samples; got != 3 {
+		t.Fatalf("first read samples = %d, want 3", got)
+	}
+
+	// The rewrite changes the first row and is longer than the old file.
+	rewritten := "2026-11-09T00:30:00 balance=60.00\n" + before + "2026-11-09T01:30:00 balance=50.00\n"
+	if err := os.WriteFile(ledger, []byte(rewritten), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read = 0
+	report := poll("rewritten in place")
+	if report.Samples != 5 || *report.Balance != 50 {
+		t.Errorf("after the in-place rewrite: samples %d, balance %v; want 5 and 50", report.Samples, *report.Balance)
+	}
+	if want := fullRead(); !reflect.DeepEqual(report, want) {
+		t.Errorf("after the in-place rewrite: report differs from a full re-read")
+	}
+	// The file's first bytes are read and found changed, then the whole file.
+	if want := int64(len(rewritten)) + headBytes; read != want {
+		t.Errorf("after the in-place rewrite: read %d bytes, want the %d-byte head and the whole %d", read, headBytes, len(rewritten))
+	}
+
+	// Appended, then the modification time is set back: the file is read again
+	// from the top, though its first bytes are unchanged.
+	appended := "2026-11-09T01:40:00 balance=49.50\n"
+	appendText(t, ledger, appended)
+	past := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(ledger, past, past); err != nil {
+		t.Fatal(err)
+	}
+	read = 0
+	report = poll("modification time moved back")
+	if report.Samples != 6 {
+		t.Errorf("after the modification time moved back: samples = %d, want 6", report.Samples)
+	}
+	if want := fullRead(); !reflect.DeepEqual(report, want) {
+		t.Errorf("after the modification time moved back: report differs from a full re-read")
+	}
+	if whole := int64(len(rewritten) + len(appended)); read != whole {
+		t.Errorf("after the modification time moved back: read %d bytes, want the whole %d", read, whole)
+	}
+}
+
+// A final row with no newline is reported once the file has not grown since the
+// poll before, and is kept once its newline arrives, so it counts once.
+func TestReaderFinalRowWithoutNewline(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ledger := filepath.Join(dir, "balance.log")
+	events := filepath.Join(dir, "events.log")
+	now := time.Date(2026, time.November, 9, 3, 0, 0, 0, loc)
+	constants := Constants{TopUpAt: time.Date(2026, time.November, 8, 23, 0, 0, 0, loc), TopUp: 114.05}
+
+	complete := "2026-11-09T01:00:00 balance=52.00\n"
+	if err := os.WriteFile(ledger, []byte(complete+"2026-11-09T01:10:00 balance=51.50"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewReader(ledger, events, loc, constants, DefaultDays, OpenFile)
+	poll := func(step string) Report {
+		t.Helper()
+		report, err := reader.Report(now)
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		return report
+	}
+	// settled is a fresh reader's report after two polls with no growth between
+	// them: the final row without a newline is reported by the second.
+	settled := func() Report {
+		t.Helper()
+		fresh := NewReader(ledger, events, loc, constants, DefaultDays, OpenFile)
+		if _, err := fresh.Report(now); err != nil {
+			t.Fatal(err)
+		}
+		report, err := fresh.Report(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+
+	if got := poll("file just grew").Samples; got != 1 {
+		t.Errorf("the file grew since the last poll, so its final line waits: samples = %d, want 1", got)
+	}
+	if report := poll("no growth"); report.Samples != 2 || !reflect.DeepEqual(report, settled()) {
+		t.Errorf("no growth: samples = %d, want the final row reported as 2", report.Samples)
+	}
+	if report := poll("still no growth"); report.Samples != 2 || !reflect.DeepEqual(report, settled()) {
+		t.Errorf("still no growth: samples = %d, want 2 and no double count", report.Samples)
+	}
+
+	// The newline completes the 01:10 row, which is kept. A new partial line is
+	// still being written: the file grew, so the poll does not report it.
+	appendText(t, ledger, "\n2026-11-09T01:20:00 balance=51.00")
+	if report := poll("partial line after growth"); report.Samples != 2 || *report.Balance != 51.50 {
+		t.Errorf("a partial line on a poll that grew: samples %d, balance %v; want 2 and 51.50", report.Samples, *report.Balance)
+	}
+
+	// The partial line is final now the file stopped growing, so it is reported.
+	if report := poll("partial line, no growth"); report.Samples != 3 || *report.Balance != 51 || !reflect.DeepEqual(report, settled()) {
+		t.Errorf("the final line with no newline: samples %d, balance %v; want 3 and 51", report.Samples, *report.Balance)
+	}
+
+	// Its newline arrives: the row is kept once, not counted again.
+	appendText(t, ledger, "\n")
+	report := poll("newline arrives")
+	if report.Samples != 3 || *report.Balance != 51 {
+		t.Errorf("after the newline: samples %d, balance %v; want 3 and 51 with the row counted once", report.Samples, *report.Balance)
+	}
+	if !reflect.DeepEqual(report, settled()) {
+		t.Errorf("after the newline: report differs from a full re-read")
 	}
 }
 
