@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/steveyegge/gastown/internal/callercwd"
 )
 
 // The policy tests (TestPolicy, TestDockerTier, TestUnitTierMain, TestAllowedTools,
@@ -67,19 +69,68 @@ var tempRoots = sync.OnceValue(func() []string {
 	return roots
 })
 
-// cacheable reports whether dir is part of the checkout: not under the temporary
-// directory, where tests build their fixtures.
+// checkoutRoot is the module root the tests run in: the nearest directory at or
+// above the working directory that holds go.mod, or "" when there is none. A test
+// binary runs in its package's directory, so this is the checkout being scanned.
+// The directory comes from callercwd.Getwd, so GT_CALLER_CWD names it when set.
+var checkoutRoot = sync.OnceValue(func() string {
+	dir, err := callercwd.Getwd()
+	if err != nil {
+		return ""
+	}
+	return moduleRootAbove(dir)
+})
+
+// moduleRootAbove returns the nearest directory at or above dir that holds go.mod,
+// or "" when none does.
+func moduleRootAbove(dir string) string {
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return filepath.Clean(dir)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+}
+
+// cacheable reports whether dir is part of the checkout rather than a test's own
+// fixture. A fixture lives under the temporary directory; but the checkout may
+// live under it too (a sweep or CI container whose TMPDIR holds the workspace), so
+// being under the temporary directory decides nothing by itself. The more specific
+// of the two wins: dir is a fixture when the temporary directory is the checkout
+// root or nested inside it and dir is under it, and is the checkout when it is
+// under the checkout root and no temporary directory nested in that root holds it.
+// When the temporary directory is the checkout root, a fixture and a checkout
+// directory are both under it and cannot be told apart, so both are read fresh:
+// the scan is slower, and a fixture is never read stale.
 func cacheable(dir string) bool {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return false
 	}
-	for _, root := range tempRoots() {
-		if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
-			return false
+	return cacheableUnder(checkoutRoot(), tempRoots(), abs)
+}
+
+// cacheableUnder is cacheable for an absolute dir, over a checkout root and the
+// temporary directory's spellings.
+func cacheableUnder(root string, temps []string, dir string) bool {
+	if root == "" || !within(root, dir) {
+		return false
+	}
+	for _, t := range temps {
+		if within(root, t) && within(t, dir) {
+			return false // the temporary directory is the checkout or inside it: dir is a fixture
 		}
 	}
 	return true
+}
+
+// within reports whether path is dir or below it.
+func within(dir, path string) bool {
+	return path == dir || strings.HasPrefix(path, dir+string(filepath.Separator))
 }
 
 // sourceSet is how one scan of a directory reads its files: the FileSet its
