@@ -99,6 +99,43 @@ Usage:
 	}
 }
 
+// The error is its paragraph: the lines after a blank line are not the cause,
+// so a child that prints a tail after its error without a usage block has only
+// the error's own lines logged (gt-0361s2).
+func TestPatrolScanRestartStopsTheErrorAtItsBlankLine(t *testing.T) {
+	t.Parallel()
+	const output = `Error: starting session: pushing polecat branch: refused: non-fast-forward
+
+goroutine 1 [running]:
+main.trailing()
+	/tmp/trailing.go:12 +0x1d
+`
+	gt := newFakeCLI(cliBySub(map[string]cliReply{
+		"session restart": {code: 1, stderr: output},
+	}))
+	d := &Daemon{
+		logger:  discardLogger,
+		config:  &Config{TownRoot: t.TempDir()},
+		gtPath:  "gt",
+		execCmd: gt.run,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			PatrolScan: &PatrolScanConfig{Enabled: true, Rigs: []string{"gastown"}},
+		}},
+	}
+
+	err := d.restartPolecatSession(supervisor.SeatFor("gastown", constants.RolePolecat, "toast"))
+	if err == nil {
+		t.Fatal("restart of a gt that exited non-zero = success, want its error")
+	}
+	const want = "exit status 1: starting session: pushing polecat branch: refused: non-fast-forward"
+	if !strings.HasSuffix(err.Error(), want) {
+		t.Errorf("restart error = %q, want it to end %q", err.Error(), want)
+	}
+	if strings.Contains(err.Error(), "goroutine") {
+		t.Errorf("restart error carries the output after the blank line: %q", err.Error())
+	}
+}
+
 // A seat whose restart fails with the same cause on two consecutive patrol
 // scans raises one escalation naming the seat and the cause, keeps it to one
 // however many scans follow, and clears it when a restart succeeds (gt-6hhp8).

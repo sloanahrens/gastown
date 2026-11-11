@@ -371,7 +371,10 @@ type overrunState struct {
 	// sentence naming the sandbox and both heads. Once set, the stop never asks
 	// the sandbox again: a later read that finds the sandbox gone must not
 	// delete the commits only it holds, so the sandbox, the worktree and the
-	// pause are kept, and the bead is handed back with this note.
+	// pause are kept, and the bead is handed back with this note. The note lasts
+	// for that stop: once it has handed the bead back (StoppedAt is set), the
+	// next stop starts from a fresh state (overrunStop, overrunScheduledStop),
+	// which clears it; overrunStop then asks the sandbox again.
 	SandboxDiverged string `json:"sandbox_diverged,omitempty"`
 
 	// ReworkSHA is the commit the kept branch held on origin before the stop's
