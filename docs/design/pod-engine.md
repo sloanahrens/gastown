@@ -144,7 +144,6 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 
 - `internal/bdshim/osmain.go` `realCommand`
 - `internal/bdshim/recordexec.go` `execRunner`
-- `internal/bird/spawn.go` `runCmux`
 - `internal/ci/cmd/imagepreflight/main.go` `jqVersion`
 - `internal/cmd/agents.go` `runAgents`
 - `internal/cmd/daemon.go` `spawnDaemonProcess`

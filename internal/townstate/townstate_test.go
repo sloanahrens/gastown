@@ -485,7 +485,7 @@ func TestTownStateRigPathsAreTheProductionNames(t *testing.T) {
 func TestTownStateBirdNamesStayInTheCommandPackages(t *testing.T) {
 	t.Parallel()
 	allowed := map[string]string{
-		"internal/bird":        "the pool and the bird spawner itself",
+		"internal/bird":        "the pool and the registry themselves",
 		"internal/birdreports": "the reader of the reports a bird publishes; read-only",
 		"internal/cmd":         "the bird commands and the dashboard reader; they run as the operator's commands, never from the daemon's loops",
 		"internal/townstate":   "classifies the bird directories as session-owned",
