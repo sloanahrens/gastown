@@ -16,11 +16,12 @@ import (
 	"github.com/steveyegge/gastown/internal/usageattrib"
 )
 
-// A sandbox seat's work usage is read from the transcripts its own Claude
-// sessions wrote in its host worktree, and written as the seat ends. The
-// worktree goes with the seat's directories, so the record is written before
+// A sandbox seat's work usage is read from the transcripts on the host that its
+// own Claude sessions wrote for its host worktree, and written as the seat ends.
+// The worktree goes with the seat's directories, so the record is written before
 // they are removed. A reused worktree keeps its predecessor's transcripts: those
-// last written before the seat started are left out.
+// last written before the seat started are left out. A seat with none on the
+// host writes no record, and its end logs why.
 
 // seatUsageHook holds the seams of the seat-end usage record.
 type seatUsageHook struct {
@@ -40,11 +41,10 @@ var errNoSeatStart = errors.New("its sandbox record is gone, so its start is unk
 // seat's transcripts are not read, and no record is written.
 var errSeatUsageUnlisted = errors.New("no transcript lister is wired, so its transcripts are not read")
 
-// errSeatTranscriptsUnreachable is the refusal when the host holds no transcript of
-// the seat. A sandbox seat's sessions write theirs inside the sandbox, under
-// /sandbox/.claude/projects, which the host's Claude project directories do not
-// hold: copying them out before the sandbox is deleted would bring them in.
-var errSeatTranscriptsUnreachable = errors.New("no transcript of its sessions is on the host: its sessions write theirs inside the sandbox, under /sandbox/.claude/projects, and copying them out before the sandbox is deleted would bring them in")
+// errSeatNoTranscriptOnHost is the refusal when the host's Claude project
+// directories hold no transcript for the seat's worktree. The lister does not say
+// why none is there, so the reason offers the sandbox location as a possibility only.
+var errSeatNoTranscriptOnHost = errors.New("no transcript of its sessions is in the host's Claude project directories for its worktree, so none is read; if its sessions ran in a sandbox, they may have written theirs under /sandbox/.claude/projects, which the host does not hold, and they would need copying out before the sandbox is deleted")
 
 // seatStartedAt is when the seat started: the creation stamp of its sandbox
 // record. When a teardown has already removed that record, the removal left the
@@ -98,7 +98,7 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		if startErr != nil {
 			return "", nil, startErr
 		}
-		return "", nil, errSeatTranscriptsUnreachable
+		return "", nil, errSeatNoTranscriptOnHost
 	}
 	if startErr != nil {
 		return "", nil, startErr
