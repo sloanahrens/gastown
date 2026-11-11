@@ -52,7 +52,7 @@ func TestRuleFlagsAssignments(t *testing.T) {
 	wake := []string{
 		RuleLandingStuck, RuleQueueStuck, RuleRedMain, RuleRejectedTwice, RuleTierSweepRed,
 		RuleEscalation, RuleSlotHeld, RuleSlotDeadHolder, RulePolecatStall, RuleBDSlow,
-		RuleHostDiskCrit, RuleHostMemLow, RuleHostDockerDown, RuleHostForgejoDown,
+		RuleHostDiskCrit, RuleHostMemLow, RuleHostForgejoDown,
 		RuleQuestionNew, RuleQuestionAnswered, RuleDispatchIdle,
 		RuleDeployFailed,
 		RuleReviewBacklog,

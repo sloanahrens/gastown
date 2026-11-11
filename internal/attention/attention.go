@@ -75,9 +75,6 @@ const (
 	KindHostNodeDisk Kind = "host-node-disk"
 	// KindHostMem: the host's free memory is low.
 	KindHostMem Kind = "host-mem"
-	// KindHostDocker: a Docker Desktop container the town cannot run without
-	// is not running.
-	KindHostDocker Kind = "host-docker"
 	// KindHostForgejo: the town's Forgejo has not answered its health endpoint
 	// for several heartbeats in a row (gt-gg9hv.36).
 	KindHostForgejo Kind = "host-forgejo"
@@ -131,7 +128,7 @@ func Kinds() []Kind {
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindTierSweepStarved, KindTierSweepStuck, KindTierSweepGuardUnreadable,
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
-		KindHostDisk, KindHostNodeDisk, KindHostMem, KindHostDocker, KindHostForgejo, KindHostProbe,
+		KindHostDisk, KindHostNodeDisk, KindHostMem, KindHostForgejo, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,

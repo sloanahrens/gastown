@@ -618,13 +618,13 @@ func TestAttentionFollowWakeOnlyFilters(t *testing.T) {
 	legacy := attention.Event{TS: time.Now(), Class: attention.KindBDSlow, Severity: attention.SeverityLow, Text: "legacy line", Key: "bd-slow", State: attention.EventNew}
 	appendAttention(t, town,
 		raised(attention.RuleHostDiskWarn, "host.disk_warn", "disk 82% used"),
-		raised(attention.RuleHostDockerDown, "host.docker_stack_down", "1 of 5 stack containers not running"),
+		raised(attention.RuleHostForgejoDown, "host.forgejo_down", "forgejo health has failed 3 heartbeats in a row"),
 		raised(attention.RuleOverrunStopped, "overrun:x", "stopped a polecat"),
 		cleared, legacy)
 	h.poll()
 
 	out := h.finish()
-	if !strings.Contains(out, "host.docker_stack_down 1 of 5 stack containers not running") {
+	if !strings.Contains(out, "host.forgejo_down forgejo health has failed 3 heartbeats in a row") {
 		t.Errorf("wake-only dropped the wake event:\n%s", out)
 	}
 	for _, drop := range []string{"disk 82%", "stopped a polecat", "cleared", "legacy line"} {

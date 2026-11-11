@@ -44,6 +44,27 @@ func cgroupFiles(t *testing.T, files map[string]string) string {
 	return dir
 }
 
+// meminfoTable is a memory table with 10% of memory available. A test whose
+// cgroup has a limit never reads it, so a read from the wrong source shows as a
+// wrong free share instead of passing by coincidence.
+const meminfoTable = "MemTotal: 1000 kB\nMemAvailable: 100 kB\n"
+
+// meminfoFile writes content as a memory table in a fresh temp dir and returns
+// its path: the table a test points the fallback read at, so the read never
+// touches the machine's own /proc. A test that wants no table passes "" and gets
+// a path that does not exist.
+func meminfoFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "meminfo")
+	if content == "" {
+		return path
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestFileHostProbesServeAFreshFile(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
@@ -57,7 +78,7 @@ func TestFileHostProbesServeAFreshFile(t *testing.T) {
 	})
 	p.now = func() time.Time { return now.Add(time.Second) }
 	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250"})
-	p.rootCgroupDir = t.TempDir()
+	p.meminfoPath = meminfoFile(t, meminfoTable)
 
 	disk, err := p.Disk()
 	if err != nil || disk != (hostDisk{UsedPct: 71.5, FreeGB: 22.25}) {
@@ -123,7 +144,7 @@ func TestFileHostProbesReturnOneFieldsErrorOnly(t *testing.T) {
 	})
 	p.now = func() time.Time { return now }
 	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250"})
-	p.rootCgroupDir = t.TempDir()
+	p.meminfoPath = meminfoFile(t, meminfoTable)
 
 	if _, err := p.Disk(); err == nil || !strings.Contains(err.Error(), recorded) {
 		t.Errorf("Disk error = %v; want the recorded failure", err)
@@ -133,60 +154,66 @@ func TestFileHostProbesReturnOneFieldsErrorOnly(t *testing.T) {
 	}
 }
 
-// A probe built without its cgroup refuses the memory read. Without the guard,
-// an empty dir would read memory.current from the working directory.
-func TestFileHostProbesMemoryNeedsItsCgroup(t *testing.T) {
+// A probe built without its cgroup or its memory table refuses the memory read.
+// Without the guard, an empty dir would read memory.current from the working
+// directory, and an empty path would read nothing and report an error that
+// does not name the cause.
+func TestFileHostProbesMemoryNeedsItsSources(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		pod     string
-		root    string
-		wantErr bool
+		meminfo string
 	}{
-		{"no cgroup dir", "", t.TempDir(), true},
-		{"no root cgroup dir with a pod limit fallback", t.TempDir(), "", true},
+		{"no cgroup dir", "", meminfoFile(t, meminfoTable)},
+		{"no meminfo path with the pod at its limit", cgroupFiles(t, map[string]string{"memory.max": "max"}), ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			p := fileHostProbes{cgroupDir: tt.pod, rootCgroupDir: tt.root}
+			p := fileHostProbes{cgroupDir: tt.pod, meminfoPath: tt.meminfo}
 			if _, err := p.MemFreePct(context.Background()); err == nil || !strings.Contains(err.Error(), "no cgroup") {
-				t.Errorf("MemFreePct error = %v, want the missing cgroup named", err)
+				t.Errorf("MemFreePct error = %v, want the missing source named", err)
 			}
 		})
 	}
 }
 
-// The memory reading is the pod's cgroup: free share of memory.max less
-// memory.current, with the root cgroup's limit when the pod has none. Anything
-// that cannot be measured is an error, never a reading of 0 or 100.
+// The memory reading is the pod's cgroup: the free share of memory.max less
+// memory.current. When the cgroup has no limit the share comes from the memory
+// table instead (TestMemFreePctFallsBackToMeminfoWhenNoLimit). Anything that
+// cannot be measured is an error, never a reading of 0 or 100.
 func TestMemFreePctFromCgroup(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		pod     map[string]string
-		root    map[string]string
+		meminfo string
 		want    float64
 		wantErr bool
 	}{
-		{"limit set", map[string]string{"memory.max": "1000", "memory.current": "250"}, nil, 75, false},
-		{"limit set, trailing newline", map[string]string{"memory.max": "1000\n", "memory.current": "250\n"}, nil, 75, false},
-		{"limit set, nothing free", map[string]string{"memory.max": "1000", "memory.current": "1000"}, nil, 0, false},
-		{"limit set, over the limit is nothing free", map[string]string{"memory.max": "1000", "memory.current": "1200"}, nil, 0, false},
-		{"limit max falls back to the root limit", map[string]string{"memory.max": "max", "memory.current": "250"}, map[string]string{"memory.max": "1000"}, 75, false},
-		{"limit max and root limit max", map[string]string{"memory.max": "max", "memory.current": "250"}, map[string]string{"memory.max": "max"}, 0, true},
-		{"limit max and no root limit file", map[string]string{"memory.max": "max", "memory.current": "250"}, nil, 0, true},
-		{"limit file unreadable", map[string]string{"memory.current": "250"}, nil, 0, true},
-		{"current file unreadable", map[string]string{"memory.max": "1000"}, nil, 0, true},
-		{"limit neither a count nor max", map[string]string{"memory.max": "lots", "memory.current": "250"}, nil, 0, true},
-		{"current neither a count nor max", map[string]string{"memory.max": "1000", "memory.current": "lots"}, nil, 0, true},
-		{"current reads max", map[string]string{"memory.max": "1000", "memory.current": "max"}, nil, 0, true},
-		{"zero limit is no measure", map[string]string{"memory.max": "0", "memory.current": "0"}, nil, 0, true},
+		// The table would give 10% if it were read, so a 75 shows the cgroup
+		// alone answered.
+		{"limit set", map[string]string{"memory.max": "1000", "memory.current": "250"}, meminfoTable, 75, false},
+		{"limit set, trailing newline", map[string]string{"memory.max": "1000\n", "memory.current": "250\n"}, meminfoTable, 75, false},
+		{"limit set, nothing free", map[string]string{"memory.max": "1000", "memory.current": "1000"}, meminfoTable, 0, false},
+		{"limit set, over the limit is nothing free", map[string]string{"memory.max": "1000", "memory.current": "1200"}, meminfoTable, 0, false},
+		{"limit max, memory table has no MemAvailable", map[string]string{"memory.max": "max", "memory.current": "250"}, "MemTotal: 1000 kB\n", 0, true},
+		{"limit max, memory table has no MemTotal", map[string]string{"memory.max": "max", "memory.current": "250"}, "MemAvailable: 100 kB\n", 0, true},
+		{"limit max, memory table unreadable", map[string]string{"memory.max": "max", "memory.current": "250"}, "", 0, true},
+		{"limit max, memory table holds no count", map[string]string{"memory.max": "max", "memory.current": "250"}, "MemTotal: lots kB\nMemAvailable: 100 kB\n", 0, true},
+		{"limit max, memory table reports zero total", map[string]string{"memory.max": "max", "memory.current": "250"}, "MemTotal: 0 kB\nMemAvailable: 0 kB\n", 0, true},
+		{"limit file unreadable", map[string]string{"memory.current": "250"}, meminfoTable, 0, true},
+		{"current file unreadable", map[string]string{"memory.max": "1000"}, meminfoTable, 0, true},
+		{"limit neither a count nor max", map[string]string{"memory.max": "lots", "memory.current": "250"}, meminfoTable, 0, true},
+		{"current neither a count nor max", map[string]string{"memory.max": "1000", "memory.current": "lots"}, meminfoTable, 0, true},
+		{"current reads max", map[string]string{"memory.max": "1000", "memory.current": "max"}, meminfoTable, 0, true},
+		{"zero limit is no measure", map[string]string{"memory.max": "0", "memory.current": "0"}, meminfoTable, 0, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := memFreePctFromCgroup(cgroupFiles(t, tt.pod), cgroupFiles(t, tt.root))
+			got, err := memFreePctFromCgroup(cgroupFiles(t, tt.pod), meminfoFile(t, tt.meminfo))
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("memFreePctFromCgroup error = %v, want error %v", err, tt.wantErr)
 			}
@@ -194,6 +221,22 @@ func TestMemFreePctFromCgroup(t *testing.T) {
 				t.Errorf("memFreePctFromCgroup = %v; want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// With no limit on the pod the reading comes from the memory table, a second
+// source. The cgroup here has memory.max of max, so no share can be taken from
+// it, and newFileHostProbes must point the two reads at different places.
+func TestMemFreePctFallsBackToMeminfoWhenNoLimit(t *testing.T) {
+	t.Parallel()
+	p := newFileHostProbes(t.TempDir(), nil, nil)
+	if p.cgroupDir == p.meminfoPath {
+		t.Fatalf("newFileHostProbes reads the cgroup and the memory table from the same place %q", p.cgroupDir)
+	}
+	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "max", "memory.current": "250"})
+	p.meminfoPath = meminfoFile(t, "MemTotal: 1000 kB\nMemAvailable: 400 kB\n")
+	if free, err := p.MemFreePct(context.Background()); err != nil || free != 40 {
+		t.Errorf("MemFreePct = %v, %v; want 40 from the memory table", free, err)
 	}
 }
 
@@ -225,7 +268,7 @@ func TestHostDiskStillReadsTheProbeFile(t *testing.T) {
 	})
 	p.now = func() time.Time { return now.Add(time.Second) }
 	p.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250"})
-	p.rootCgroupDir = t.TempDir()
+	p.meminfoPath = meminfoFile(t, meminfoTable)
 
 	f := newAttentionFixture(t, now)
 	f.src.host = p
@@ -275,7 +318,7 @@ func TestAttentionHostRefusedProbeFileRaisesProbeAlarms(t *testing.T) {
 	// Memory is read from the cgroup, which this test points at a healthy one
 	// so the memory reading is served and cannot stand in for the refusal.
 	fp.cgroupDir = cgroupFiles(t, map[string]string{"memory.max": "1000", "memory.current": "250"})
-	fp.rootCgroupDir = t.TempDir()
+	fp.meminfoPath = meminfoFile(t, meminfoTable)
 	d.hostProbes = fp
 
 	d.writeAttention()

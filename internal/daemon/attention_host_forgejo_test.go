@@ -59,7 +59,7 @@ func (h forgejoProbeHost) ForgejoHealthy(ctx context.Context) error {
 	return h.health.ForgejoHealthy(ctx)
 }
 
-// One unanswered health read is an info line; attentionDockerProbeDownBeats in
+// One unanswered health read is an info line; attentionForgejoProbeDownBeats in
 // a row raises the High host.forgejo_down naming the origin and no credential,
 // and a healthy read clears both.
 func TestHostForgejoHealthRaisesAfterConsecutiveFailures(t *testing.T) {
@@ -94,14 +94,14 @@ func TestHostForgejoHealthRaisesAfterConsecutiveFailures(t *testing.T) {
 		t.Fatalf("one failed read wake events = %+v, want none", got)
 	}
 
-	for beat := 2; beat < attentionDockerProbeDownBeats; beat++ {
+	for beat := 2; beat < attentionForgejoProbeDownBeats; beat++ {
 		st = f.tick(t, now.Add(time.Duration(beat)*time.Minute))
 		if _, ok := attention.Find(st, hostRuleForgejoDown); ok {
 			t.Fatalf("beat %d raised %s before the configured run", beat, hostRuleForgejoDown)
 		}
 	}
 
-	st = f.tick(t, now.Add(time.Duration(attentionDockerProbeDownBeats)*time.Minute))
+	st = f.tick(t, now.Add(time.Duration(attentionForgejoProbeDownBeats)*time.Minute))
 	down := itemByKey(t, st, hostRuleForgejoDown)
 	if down.Severity != attention.SeverityHigh || down.Kind != attention.KindHostForgejo {
 		t.Errorf("%s = %+v, want a high host-forgejo item", hostRuleForgejoDown, down)
@@ -109,7 +109,7 @@ func TestHostForgejoHealthRaisesAfterConsecutiveFailures(t *testing.T) {
 	if !strings.Contains(down.Summary, "https://forgejo.example/api/healthz") {
 		t.Errorf("summary = %q, want it to name the origin", down.Summary)
 	}
-	if !strings.Contains(down.Summary, fmt.Sprintf("%d heartbeats", attentionDockerProbeDownBeats)) {
+	if !strings.Contains(down.Summary, fmt.Sprintf("%d heartbeats", attentionForgejoProbeDownBeats)) {
 		t.Errorf("summary = %q, want it to name the run length", down.Summary)
 	}
 	if strings.Contains(down.Summary, "@") || strings.Contains(down.Summary, "\n") {
@@ -120,13 +120,13 @@ func TestHostForgejoHealthRaisesAfterConsecutiveFailures(t *testing.T) {
 		t.Fatalf("wake events = %+v, want one raised host.forgejo_down", got)
 	}
 
-	f.tick(t, now.Add(time.Duration(attentionDockerProbeDownBeats+1)*time.Minute))
+	f.tick(t, now.Add(time.Duration(attentionForgejoProbeDownBeats+1)*time.Minute))
 	if n := len(wakes()); n != 1 {
 		t.Errorf("wake events after a further failed tick = %d, want the one", n)
 	}
 
 	h.forgejoErr = nil
-	st = f.tick(t, now.Add(time.Duration(attentionDockerProbeDownBeats+2)*time.Minute))
+	st = f.tick(t, now.Add(time.Duration(attentionForgejoProbeDownBeats+2)*time.Minute))
 	if items := hostItems(st); len(items) != 0 {
 		t.Errorf("host items = %v, want both cleared once the instance answers", hostKeys(st))
 	}
@@ -148,13 +148,13 @@ func TestHostForgejoNotConfiguredRaisesNothing(t *testing.T) {
 	}
 
 	h.forgejoErr = errors.New("forgejo health https://forgejo.example/api/healthz: connection refused")
-	for beat := 1; beat <= attentionDockerProbeDownBeats; beat++ {
+	for beat := 1; beat <= attentionForgejoProbeDownBeats; beat++ {
 		st = f.tick(t, now.Add(time.Duration(beat)*time.Minute))
 	}
 	itemByKey(t, st, hostRuleForgejoDown)
 
 	h.forgejoErr = errForgejoNotConfigured
-	st = f.tick(t, now.Add(time.Duration(attentionDockerProbeDownBeats+1)*time.Minute))
+	st = f.tick(t, now.Add(time.Duration(attentionForgejoProbeDownBeats+1)*time.Minute))
 	if items := hostItems(st); len(items) != 0 {
 		t.Errorf("host items = %v, want the raised item cleared when the town runs no Forgejo", hostKeys(st))
 	}
@@ -571,7 +571,7 @@ func TestHostForgejoUnreadableSettingKeepsTheAlarm(t *testing.T) {
 			// The instance stops answering, so the alarm opens.
 			tr.status = http.StatusServiceUnavailable
 			var st attention.State
-			for beat := 1; beat <= attentionDockerProbeDownBeats; beat++ {
+			for beat := 1; beat <= attentionForgejoProbeDownBeats; beat++ {
 				st = f.tick(t, now.Add(time.Duration(beat)*time.Minute))
 			}
 			itemByKey(t, st, hostRuleForgejoDown)
@@ -584,7 +584,7 @@ func TestHostForgejoUnreadableSettingKeepsTheAlarm(t *testing.T) {
 			// absent.
 			tr.status = http.StatusOK
 			bc.break_(t, path)
-			at := now.Add(time.Duration(attentionDockerProbeDownBeats+1) * time.Minute)
+			at := now.Add(time.Duration(attentionForgejoProbeDownBeats+1) * time.Minute)
 			st = f.tick(t, at)
 			down := itemByKey(t, st, hostRuleForgejoDown)
 			if !strings.Contains(down.Summary, forgejoUnreadableReason) || !strings.Contains(down.Summary, "rig alpha") {
@@ -616,7 +616,7 @@ func TestHostForgejoUnreadableSettingKeepsTheAlarm(t *testing.T) {
 		if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		for beat := 1; beat <= attentionDockerProbeDownBeats+1; beat++ {
+		for beat := 1; beat <= attentionForgejoProbeDownBeats+1; beat++ {
 			st := f.tick(t, now.Add(time.Duration(beat)*time.Minute))
 			if _, ok := attention.Find(st, hostRuleForgejoDown); ok {
 				t.Fatalf("beat %d raised %s for a setting it could not read: %v", beat, hostRuleForgejoDown, hostKeys(st))
@@ -687,7 +687,7 @@ func TestHostForgejoEmptyRigListKeepsTheAlarm(t *testing.T) {
 			// The instance stops answering, so the alarm opens.
 			tr.status = http.StatusServiceUnavailable
 			var st attention.State
-			for beat := 1; beat <= attentionDockerProbeDownBeats; beat++ {
+			for beat := 1; beat <= attentionForgejoProbeDownBeats; beat++ {
 				st = f.tick(t, now.Add(time.Duration(beat)*time.Minute))
 			}
 			itemByKey(t, st, hostRuleForgejoDown)
@@ -701,7 +701,7 @@ func TestHostForgejoEmptyRigListKeepsTheAlarm(t *testing.T) {
 			tr.status = http.StatusOK
 			bc.break_(t, f.d.config.TownRoot, registry)
 			f.d.invalidateKnownRigsCache()
-			at := now.Add(time.Duration(attentionDockerProbeDownBeats+1) * time.Minute)
+			at := now.Add(time.Duration(attentionForgejoProbeDownBeats+1) * time.Minute)
 			st = f.tick(t, at)
 			down := itemByKey(t, st, hostRuleForgejoDown)
 			if !strings.Contains(down.Summary, forgejoUnreadableReason) || !strings.Contains(down.Summary, "rig list is unreadable or empty") {
@@ -759,7 +759,7 @@ func TestHostForgejoOriginParseErrorLeaksNoCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	tr.status = http.StatusServiceUnavailable
-	for beat := 2; beat <= attentionDockerProbeDownBeats+1; beat++ {
+	for beat := 2; beat <= attentionForgejoProbeDownBeats+1; beat++ {
 		st = f.tick(t, now.Add(time.Duration(beat)*time.Minute))
 	}
 	itemByKey(t, st, hostRuleForgejoDown)
@@ -769,7 +769,7 @@ func TestHostForgejoOriginParseErrorLeaksNoCredential(t *testing.T) {
 	if err := os.WriteFile(path, []byte(rigForgejoSettings(broken)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	at := now.Add(time.Duration(attentionDockerProbeDownBeats+2) * time.Minute)
+	at := now.Add(time.Duration(attentionForgejoProbeDownBeats+2) * time.Minute)
 	st = f.tick(t, at)
 
 	_, err := f.d.townForgejoBaseURL()

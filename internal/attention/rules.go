@@ -54,7 +54,6 @@ const (
 	RuleHostNodeDiskWarn = "host.node_disk_warn"
 	RuleHostNodeDiskCrit = "host.node_disk_crit"
 	RuleHostMemLow       = "host.mem_low"
-	RuleHostDockerDown   = "host.docker_stack_down"
 	RuleHostForgejoDown  = "host.forgejo_down"
 	RuleHostProbe        = "host.probe_failed"
 	// RuleTierSweepStuck is the tier sweep's own key: the guard's cycle, not a
@@ -135,7 +134,6 @@ var ruleFlags = map[string]RuleFlags{
 	RuleHostDiskCrit:     flagsWake,
 	RuleHostNodeDiskCrit: flagsWake,
 	RuleHostMemLow:       flagsWake,
-	RuleHostDockerDown:   flagsWake,
 	// A Forgejo that does not answer its health endpoint is every landing
 	// stopped: the candidate gate waits on a CI verdict that cannot come.
 	RuleHostForgejoDown: flagsWake,
@@ -260,7 +258,6 @@ var kindRules = map[Kind]string{
 	KindOverrunStopped:           RuleOverrunStopped,
 	KindScheduledGate:            RuleScheduledGate,
 	KindHostMem:                  RuleHostMemLow,
-	KindHostDocker:               RuleHostDockerDown,
 	KindHostForgejo:              RuleHostForgejoDown,
 	KindHostProbe:                RuleHostProbe,
 	KindQuestionNew:              RuleQuestionNew,

@@ -32,11 +32,11 @@ const (
 	// attentionHostProbeTimeout bounds one external host probe, so a wedged
 	// docker daemon costs one tick's probe and not the whole tick.
 	attentionHostProbeTimeout = 20 * time.Second
-	// attentionDockerProbeDownBeats is how many consecutive ticks the Forgejo
+	// attentionForgejoProbeDownBeats is how many consecutive ticks the Forgejo
 	// health endpoint must not answer before the instance is reported down. One
 	// failed tick stays an info line: a probe that times out once is not an
 	// outage.
-	attentionDockerProbeDownBeats = 3
+	attentionForgejoProbeDownBeats = 3
 	// attentionForgejoHealthTimeout bounds the health request. Forgejo answers
 	// its health endpoint at once, so five seconds of silence is the instance
 	// not answering rather than a slow one.
@@ -51,7 +51,6 @@ const (
 	hostRuleNodeDiskWarn = attention.RuleHostNodeDiskWarn
 	hostRuleNodeDiskCrit = attention.RuleHostNodeDiskCrit
 	hostRuleMemLow       = attention.RuleHostMemLow
-	hostRuleDockerDown   = attention.RuleHostDockerDown
 	hostRuleForgejoDown  = attention.RuleHostForgejoDown
 	// hostProbeFailedPrefix keys the item a failed probe raises; the probe's
 	// name follows.
@@ -151,17 +150,6 @@ func (systemHostProbes) MemFreePct(ctx context.Context) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, attentionHostProbeTimeout)
 	defer cancel()
 	return memFreePctFrom(exec.CommandContext(ctx, "memory_pressure").Output())
-}
-
-// MemFreePct is the free share of the pod's own cgroup memory
-// (memFreePctFromCgroup). The probe file's memory field describes the Mac, not
-// the pod, so container mode does not read it; the pod's limit is what the
-// daemon can be short of.
-func (p fileHostProbes) MemFreePct(context.Context) (float64, error) {
-	if p.cgroupDir == "" || p.rootCgroupDir == "" {
-		return 0, errors.New("the file host probes were built with no cgroup to read the memory from")
-	}
-	return memFreePctFromCgroup(p.cgroupDir, p.rootCgroupDir)
 }
 
 // memFreePctFrom reads the free-memory figure from memory_pressure's result. A
@@ -573,7 +561,7 @@ func (s *attentionSources) collectHostMem(ctx context.Context) ([]attention.Item
 }
 
 // collectHostForgejo raises host.forgejo_down when the town's Forgejo has not
-// answered its health endpoint for attentionDockerProbeDownBeats ticks in a
+// answered its health endpoint for attentionForgejoProbeDownBeats ticks in a
 // row. One unanswered tick is an info probe line, because a single timeout is
 // not an outage, and a run of them is the instance down, which wakes because
 // the info line never does. A healthy answer, or a town that runs no Forgejo,
@@ -601,7 +589,7 @@ func (s *attentionSources) collectHostForgejo(ctx context.Context) ([]attention.
 		s.forgejoProbeFails++
 	}
 	items := s.hostProbeFailed(hostProbeForgejo, err, attention.KindHostForgejo)
-	if s.forgejoProbeFails < attentionDockerProbeDownBeats {
+	if s.forgejoProbeFails < attentionForgejoProbeDownBeats {
 		return items, nil
 	}
 	// The instance-down item the probe kept from an earlier tick is replaced,

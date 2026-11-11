@@ -32,7 +32,6 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 		RuleHostNodeDiskWarn: true,
 		RuleHostNodeDiskCrit: true,
 		RuleHostMemLow:       true,
-		RuleHostDockerDown:   true,
 		RuleHostForgejoDown:  true,
 		RuleHostProbe:        true,
 	}
