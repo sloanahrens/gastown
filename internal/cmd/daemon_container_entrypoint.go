@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/metrics"
+	"github.com/steveyegge/gastown/internal/version"
 )
 
 // The environment the entrypoint reads beyond the container-mode flag.
@@ -195,7 +196,13 @@ type containerEntrypoint struct {
 	// town's runtime directory for this platform; it runs after installPlugins
 	// and before the daemon is exec'd.
 	installMango func(townRoot string) error
-	scratch      bool // --scratch-town: the scratch project asked for a scratch town
+	// deployDirectives writes the town's central directives from the gastown bare
+	// repo at the image's commit; it runs after installMango and before the daemon
+	// is exec'd. Its unknown-commit error is a warning, not a refusal.
+	deployDirectives func(townRoot string) ([]string, error)
+	// logf writes one line of start-up progress to the container's log.
+	logf    func(format string, args ...any)
+	scratch bool // --scratch-town: the scratch project asked for a scratch town
 	// omTokenFile is --om-token-file: the file the om subscription token is read
 	// from; "" loads no token.
 	omTokenFile string
@@ -242,13 +249,15 @@ func runDaemonContainerEntrypoint(flags entrypointFlags) error {
 		create:    entrypointCreateExclusive,
 		remove:    os.RemoveAll,
 		installPlugins: func(townRoot string) error {
-			return installPluginBinaries(containerImagePluginsDir, townRoot, func(format string, args ...any) {
-				fmt.Fprintf(os.Stderr, format+"\n", args...)
-			})
+			return installPluginBinaries(containerImagePluginsDir, townRoot, entrypointLogf)
 		},
 		installMango: func(townRoot string) error {
 			return installMangoBinary(containerImageMangoDir, townRoot)
 		},
+		deployDirectives: func(townRoot string) ([]string, error) {
+			return config.DeployCentralDirectives(townRoot, "", version.BuildCommit)
+		},
+		logf:        entrypointLogf,
 		scratch:     flags.scratch,
 		omTokenFile: flags.omTokenFile,
 		doltHost:    flags.doltHost,
@@ -287,6 +296,12 @@ func entrypointCreateExclusive(path string) error {
 		return err
 	}
 	return f.Close()
+}
+
+// entrypointLogf writes one line of start-up progress to stderr, where the
+// container's log collects it.
+func entrypointLogf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
 // readTextFile returns the text of one file.
@@ -402,10 +417,39 @@ func runContainerEntrypoint(e containerEntrypoint) error {
 	if err := e.installMango(townRoot); err != nil {
 		return fmt.Errorf("install the image's mango under %s: %w; the daemon was not started", townRoot, err)
 	}
+	if err := e.deployTownDirectives(townRoot); err != nil {
+		return err
+	}
 	if err := e.exec([]string{self, "daemon", "run"}, daemonEnv); err != nil {
 		return fmt.Errorf("exec gt daemon run: %w", err)
 	}
 	return nil
+}
+
+// deployTownDirectives writes the town's central directives from the gastown
+// bare repo at the image's commit. A town with no gastown rig yet has no repo to
+// deploy from, so the step is skipped with one line. A commit the repo does not
+// hold yet is a warning that names it: the previous deployed copy stays. Any
+// other failure refuses, as the plugin install does.
+func (e containerEntrypoint) deployTownDirectives(townRoot string) error {
+	present, err := e.exists(config.CentralDirectiveRepo(townRoot))
+	if err != nil {
+		return fmt.Errorf("check the gastown rig under %s for central directives: %w; the daemon was not started", townRoot, err)
+	}
+	if !present {
+		e.logf("no gastown rig yet, central directives not deployed")
+		return nil
+	}
+	_, err = e.deployDirectives(townRoot)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, config.ErrDirectiveCommitUnknown):
+		e.logf("warning: central directives not redeployed: %v; the previous copy stays until the bare repo fetches the image's commit", err)
+		return nil
+	default:
+		return fmt.Errorf("deploy the central directives under %s: %w; the daemon was not started", townRoot, err)
+	}
 }
 
 // refuseDoltHost refuses a --dolt-host that no install would act on. Only the
