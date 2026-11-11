@@ -15,7 +15,7 @@ import (
 
 // testBDURL is the bd pin fetchBuilder fetches: a repository URL with no
 // credential, the only form checkPinURL accepts.
-const testBDURL = "http://forgejo:3000/sloan/beads.git"
+const testBDURL = "http://forgejo:3000/owner/beads.git"
 
 // fetchedGit is a git that answers HEAD with head in any directory gitHolding
 // does not know as a checkout, so the tree a fetch leaves reads as head. It
@@ -264,10 +264,10 @@ func TestFetchedPinsAreStalenessChecked(t *testing.T) {
 			BDCommit: testBDCommit, OMCommit: testOMCommit,
 			HMCommit: testHMCommit, DevopsCommit: testDevopsCommit,
 			Pins: []Pin{
-				{Name: "bd", URL: "http://forgejo:3000/sloan/beads.git", Commit: testBDCommit},
-				{Name: "om", URL: "http://forgejo:3000/sloan/organic-mechanic.git", Commit: testOMCommit},
-				{Name: "hm", URL: "http://forgejo:3000/sloan/history-man.git", Commit: testHMCommit},
-				{Name: "devops", URL: "http://forgejo:3000/sloan/devops.git", Commit: testDevopsCommit},
+				{Name: "bd", URL: "http://forgejo:3000/owner/beads.git", Commit: testBDCommit},
+				{Name: "om", URL: "http://forgejo:3000/owner/organic-mechanic.git", Commit: testOMCommit},
+				{Name: "hm", URL: "http://forgejo:3000/owner/history-man.git", Commit: testHMCommit},
+				{Name: "devops", URL: "http://forgejo:3000/owner/devops.git", Commit: testDevopsCommit},
 			},
 		}
 
@@ -459,7 +459,7 @@ func hasPlanLine(lines []string, prefix string) bool {
 // the URL. A credential-free pin's argv and plan line hold no "@" at all.
 func TestNoCredentialInAnyArgv(t *testing.T) {
 	t.Parallel()
-	const credentialURL = "http://user:s3cret@forgejo:3000/sloan/beads.git"
+	const credentialURL = "http://user:s3cret@forgejo:3000/owner/beads.git"
 
 	b := planBuilder(t)
 	b.BDSrc = ""
@@ -551,7 +551,7 @@ func TestFetchSourceRefusesWhatItCannotFetch(t *testing.T) {
 			name: "a URL that is not http",
 			run:  func(r *fakeRunner) Runner { return r.run },
 			git:  func(r *fakeRunner) bdbuild.Git { return fetchedGit(r, nil, "") },
-			pin:  Pin{Name: "bd", URL: "ssh://forgejo/sloan/beads.git", Commit: testBDCommit},
+			pin:  Pin{Name: "bd", URL: "ssh://forgejo/owner/beads.git", Commit: testBDCommit},
 			want: "not http:// or https://",
 		},
 		{
