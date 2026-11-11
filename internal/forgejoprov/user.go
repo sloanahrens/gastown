@@ -38,6 +38,9 @@ type Provisioner struct {
 	ConfigDir string
 	// Rotate mints a new token where a token file exists, revoking the old one.
 	Rotate bool
+	// SkipTokens leaves every bot token alone, so a bot whose first token would
+	// have to be minted is refused rather than created without one.
+	SkipTokens bool
 	// ViewerRequested says the run provisions the viewer role itself, so its role
 	// loop grants the viewer's repository access and EnsureViewerAccess does nothing.
 	// Nothing in this package sets it: the run command (gt-tpg0p.35) sets it from the
@@ -49,7 +52,9 @@ type Provisioner struct {
 }
 
 // EnsureUser creates the bot account of role when it is missing and leaves an
-// existing one alone, so a second run writes nothing.
+// existing one alone, so a second run writes nothing; a run with SkipTokens
+// refuses a missing account instead, since creating it would need its first
+// token.
 func (p *Provisioner) EnsureUser(role string) error {
 	user := p.BotPrefix + role
 	path := "/users/" + user
@@ -62,6 +67,9 @@ func (p *Provisioner) EnsureUser(role string) error {
 		p.logf("user %s exists", user)
 		return nil
 	case http.StatusNotFound:
+		if p.SkipTokens {
+			return fmt.Errorf("bot user %s does not exist and --skip-tokens never mints a bot's first token: create %s with its token before this run, or run without --skip-tokens", user, user)
+		}
 		return p.createUser(user)
 	default:
 		return p.Client.Unexpected(http.MethodGet, path, status, resp)

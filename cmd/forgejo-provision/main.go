@@ -91,6 +91,9 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
                          revoke the token the file records (its TOKEN_NAME
                          line, else the token named by --token-name)
   --dry-run              read but never write
+  --skip-tokens          mint, list and revoke no bot token, for a broker run
+                         with no HOME onboarding a repository whose bots
+                         already hold theirs
   -h, --help             this text
 `,
 	forgejoprov.DefaultAPIURL,

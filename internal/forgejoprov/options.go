@@ -54,6 +54,9 @@ type Options struct {
 	LandBranch     string   // --land-branch: candidate branch pattern kept unprotected
 	Rotate         bool     // --rotate: mint a new token where one exists, revoking the old
 	DryRun         bool     // --dry-run: read and report without writing
+	// SkipTokens mints, lists and revokes no bot token, for a broker run with no
+	// HOME onboarding bots that already hold theirs.
+	SkipTokens bool
 }
 
 // The defaults a command line that names no value falls back to. The usage text
@@ -174,6 +177,9 @@ func (o *Options) parseFlags(args []string) error {
 			continue
 		case "--dry-run":
 			o.DryRun = true
+			continue
+		case "--skip-tokens":
+			o.SkipTokens = true
 			continue
 		}
 		set, ok := valueFlags[flag]

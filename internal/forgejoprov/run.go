@@ -35,10 +35,11 @@ type Env struct {
 }
 
 // Run provisions what opts names, in the order the shell script did: each role's bot
-// and token, then for each repository its access, the viewer grant, the main rule and
-// the removal of the candidate-branch rule. It returns ExitOK when the run finished (a
-// dry run included, which sends no write) and ExitFailure when a step failed. Progress
-// and failures go to env.Log; no admin or minted token reaches it.
+// and token (no token under --skip-tokens), then for each repository its access, the
+// viewer grant, the main rule and the removal of the candidate-branch rule. It returns
+// ExitOK when the run finished (a dry run included, which sends no write) and ExitFailure
+// when a step failed. Progress and failures go to env.Log; no admin or minted token
+// reaches it.
 func Run(ctx context.Context, opts *Options, env Env) int {
 	logOut := env.Log
 	if logOut == nil {
@@ -78,6 +79,7 @@ func Run(ctx context.Context, opts *Options, env Env) int {
 		WebURL:          opts.WebURL,
 		ConfigDir:       opts.ConfigDir,
 		Rotate:          opts.Rotate,
+		SkipTokens:      opts.SkipTokens,
 		ViewerRequested: slices.Contains(opts.Roles, "viewer"),
 		Files:           env.Files,
 	}
@@ -97,9 +99,15 @@ func Run(ctx context.Context, opts *Options, env Env) int {
 // protection steps for every repository. A failure stops the run where it is: each
 // step converges on its own, so a repeat picks up where this one stopped.
 func provision(p *Provisioner, opts *Options) error {
+	if opts.SkipTokens {
+		p.logf("tokens: skipped (--skip-tokens)")
+	}
 	for _, role := range opts.Roles {
 		if err := p.EnsureUser(role); err != nil {
 			return err
+		}
+		if opts.SkipTokens {
+			continue
 		}
 		if err := p.EnsureToken(role); err != nil {
 			return err
