@@ -603,6 +603,8 @@ func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
 		name   string
 		mutate func(f *ciCacheFixture)
 		want   string
+		// retry is whether the refused run is tried again in fifteen minutes.
+		retry bool
 	}{
 		{
 			name: "a zero interval",
@@ -644,14 +646,16 @@ func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
 			mutate: func(f *ciCacheFixture) {
 				f.d.patrolConfig.Patrols.TierSweep.Runner.Context = ""
 			},
-			want: "names no control cluster",
+			want:  "names no control cluster",
+			retry: true,
 		},
 		{
 			name: "a context that reads as a flag is refused",
 			mutate: func(f *ciCacheFixture) {
 				f.d.patrolConfig.Patrols.TierSweep.Runner.Context = "--kubeconfig=/tmp/x"
 			},
-			want: "names no control cluster",
+			want:  "names no control cluster",
+			retry: true,
 		},
 	}
 	for _, tt := range cases {
@@ -673,6 +677,9 @@ func TestCICacheTrimRefusesASettingItCannotActOn(t *testing.T) {
 			}
 			if !strings.Contains(f.logs.String(), tt.want) {
 				t.Errorf("logs do not name the refusal %q:\n%s", tt.want, f.logs.String())
+			}
+			if got, want := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])), ciCacheTestStart.Add(cacheTrimRetryInterval); tt.retry && !got.Equal(want) {
+				t.Errorf("retry at %v, want %v: a refused run is tried again in fifteen minutes", got, want)
 			}
 		})
 	}
