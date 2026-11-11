@@ -186,48 +186,307 @@ func TestRenderGolden(t *testing.T) {
 // Service.
 func TestRenderWritesTheObjectsInOrder(t *testing.T) {
 	t.Parallel()
-	m := mustBuild(t, goldenValues(t))
-	var out bytes.Buffer
-	if err := Render(&out, m); err != nil {
-		t.Fatalf("Render: %v", err)
+	for _, tc := range []struct {
+		name      string
+		v         Values
+		dashboard bool
+	}{
+		{"the live pod", goldenValues(t), false},
+		{"with the dashboard", dashboardValues(t), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := mustBuild(t, tc.v)
+			var out bytes.Buffer
+			if err := Render(&out, m); err != nil {
+				t.Fatalf("Render: %v", err)
+			}
+			var got []string
+			dec := yaml.NewDecoder(&out)
+			for {
+				var obj struct {
+					Kind     string `yaml:"kind"`
+					Metadata struct {
+						Name string `yaml:"name"`
+					} `yaml:"metadata"`
+				}
+				err := dec.Decode(&obj)
+				if errors.Is(err, io.EOF) {
+					break
+				}
+				if err != nil {
+					t.Fatalf("decoding the stream: %v", err)
+				}
+				got = append(got, obj.Kind+"/"+obj.Metadata.Name)
+			}
+			want := []string{
+				"Namespace/" + DefaultNamespace,
+				"ServiceAccount/" + ServiceAccountName,
+				"PersistentVolumeClaim/" + TownStateClaim,
+				"PersistentVolumeClaim/" + LandingWorkClaim,
+				"PersistentVolumeClaim/" + DoltBackupClaim,
+				"Service/" + ForgejoName,
+			}
+			if tc.dashboard {
+				want = append(want, "Service/"+DashboardName)
+			}
+			for _, file := range m.Secrets {
+				want = append(want, "Secret/"+file.Metadata.Name)
+			}
+			want = append(want, "Deployment/"+Name)
+			if tc.dashboard {
+				want = append(want, "Deployment/"+DashboardName)
+			}
+			want = append(want,
+				"RoleBinding/"+m.SweepRoleBinding.Metadata.Name,
+				"RoleBinding/"+m.CacheTrimRoleBinding.Metadata.Name,
+				"ClusterRoleBinding/"+m.SweepReaderBinding.Metadata.Name,
+			)
+			if !slices.Equal(got, want) {
+				t.Errorf("Render wrote %q, want %q", got, want)
+			}
+		})
 	}
-	var got []string
-	dec := yaml.NewDecoder(&out)
-	for {
-		var obj struct {
-			Kind     string `yaml:"kind"`
-			Metadata struct {
-				Name string `yaml:"name"`
-			} `yaml:"metadata"`
+}
+
+// dashboardValues is the configuration the dashboard goldens record: the golden
+// values with the dashboard on, and the Dolt endpoint the daemon carries, so the
+// golden shows the two names the pod's environment keeps.
+func dashboardValues(t *testing.T) Values {
+	t.Helper()
+	v := goldenValues(t)
+	v.Dashboard = true
+	v.Env = map[string]string{
+		awsRegionEnv:      "us-east-1",
+		doltServerHostEnv: DoltHostName,
+		doltServerPortEnv: "3307",
+	}
+	return v
+}
+
+// TestDashboardGolden holds the two objects the dashboard adds, built from
+// dashboardValues: the Deployment and the Service.
+func TestDashboardGolden(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, dashboardValues(t))
+	dir := filepath.Join(packageDir(t), "testdata")
+	compareGolden(t, dir, "deployment-dashboard.yaml", document(t, m.DashboardDeployment))
+	compareGolden(t, dir, "service-dashboard.yaml", document(t, m.DashboardService))
+}
+
+// TestDashboardMountsTheClaimReadOnly walks the dashboard pod: the town state is
+// the only claim and it is read-only, the /tmp emptyDir is the only writable
+// mount, the ServiceAccount token is not mounted, the viewer token is the only
+// Secret, and the claude directory is the only host path, read-only, as a
+// Directory.
+func TestDashboardMountsTheClaimReadOnly(t *testing.T) {
+	t.Parallel()
+	pod := mustBuild(t, dashboardValues(t)).DashboardDeployment.Spec.Template.Spec
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Fatalf("the dashboard pod sets automountServiceAccountToken to %v, want false", pod.AutomountServiceAccountToken)
+	}
+	if len(pod.Containers) != 1 {
+		t.Fatalf("the dashboard pod has %d containers, want the dashboard alone", len(pod.Containers))
+	}
+	ctr := pod.Containers[0]
+	volumes := make(map[string]Volume, len(pod.Volumes))
+	for _, vol := range pod.Volumes {
+		volumes[vol.Name] = vol
+	}
+	for _, mount := range ctr.VolumeMounts {
+		if mount.ReadOnly {
+			continue
 		}
-		err := dec.Decode(&obj)
-		if errors.Is(err, io.EOF) {
-			break
+		if mount.MountPath != DashboardTmpPath || volumes[mount.Name].EmptyDir == nil {
+			t.Errorf("the dashboard mounts %s at %s writable; only the emptyDir at %s may be", mount.Name, mount.MountPath, DashboardTmpPath)
 		}
-		if err != nil {
-			t.Fatalf("decoding the stream: %v", err)
+	}
+	if m := volumeMountAt(ctr.VolumeMounts, TownRootPath); m == nil || m.Name != TownStateClaim || !m.ReadOnly {
+		t.Errorf("the town root mount = %+v, want %s read-only", m, TownStateClaim)
+	}
+	if got := volumeClaim(pod.Volumes, TownStateClaim); got != TownStateClaim {
+		t.Errorf("the town-state volume carries claim %q, want %q", got, TownStateClaim)
+	}
+	viewer := volumeMountAt(ctr.VolumeMounts, dashboardViewerPath)
+	if viewer == nil || viewer.SubPath != ViewerTokenFile || !viewer.ReadOnly || viewer.Name != secretVolumeName(ViewerTokenFile) {
+		t.Errorf("the viewer mount = %+v, want %s from %s read-only", viewer, ViewerTokenFile, secretVolumeName(ViewerTokenFile))
+	}
+	if got := volumeSecret(pod.Volumes, secretVolumeName(ViewerTokenFile)); got != SecretNamePrefix+ViewerTokenFile {
+		t.Errorf("the viewer volume carries Secret %q, want %q", got, SecretNamePrefix+ViewerTokenFile)
+	}
+	secrets, hostPaths := 0, 0
+	for _, vol := range pod.Volumes {
+		if vol.Secret != nil {
+			secrets++
 		}
-		got = append(got, obj.Kind+"/"+obj.Metadata.Name)
+		if vol.HostPath != nil {
+			hostPaths++
+		}
 	}
-	want := []string{
-		"Namespace/" + DefaultNamespace,
-		"ServiceAccount/" + ServiceAccountName,
-		"PersistentVolumeClaim/" + TownStateClaim,
-		"PersistentVolumeClaim/" + LandingWorkClaim,
-		"PersistentVolumeClaim/" + DoltBackupClaim,
-		"Service/" + ForgejoName,
+	if secrets != 1 {
+		t.Errorf("the dashboard pod mounts %d Secrets, want the viewer token alone", secrets)
 	}
-	for _, file := range m.Secrets {
-		want = append(want, "Secret/"+file.Metadata.Name)
+	if hostPaths != 0 {
+		t.Errorf("the dashboard pod has %d host paths with no Values.DashboardClaudeDir, want none", hostPaths)
 	}
-	want = append(want,
-		"Deployment/"+Name,
-		"RoleBinding/"+m.SweepRoleBinding.Metadata.Name,
-		"RoleBinding/"+m.CacheTrimRoleBinding.Metadata.Name,
-		"ClusterRoleBinding/"+m.SweepReaderBinding.Metadata.Name,
-	)
-	if !slices.Equal(got, want) {
-		t.Errorf("Render wrote %q, want %q", got, want)
+	if got := podEnvMap(ctr)[ConfigHomeEnv]; got != manifestdata.LiveOpenShellConfigHome {
+		t.Errorf("XDG_CONFIG_HOME = %q, want %q, where the viewer token is mounted", got, manifestdata.LiveOpenShellConfigHome)
+	}
+
+	v := dashboardValues(t)
+	v.DashboardClaudeDir = "/Users/sloan/.claude"
+	pod = mustBuild(t, v).DashboardDeployment.Spec.Template.Spec
+	ctr = pod.Containers[0]
+	var host *HostPathVolumeSource
+	for _, vol := range pod.Volumes {
+		if vol.HostPath != nil {
+			if host != nil {
+				t.Fatalf("the dashboard pod has two host paths, want the claude directory alone")
+			}
+			host = vol.HostPath
+		}
+	}
+	if host == nil || host.Path != v.DashboardClaudeDir || host.Type != "Directory" {
+		t.Fatalf("the claude host path = %+v, want %s of type Directory, never DirectoryOrCreate", host, v.DashboardClaudeDir)
+	}
+	if m := volumeMountAt(ctr.VolumeMounts, DashboardClaudePath); m == nil || !m.ReadOnly {
+		t.Errorf("the claude mount = %+v, want %s read-only", m, DashboardClaudePath)
+	}
+}
+
+// TestDashboardCommandAndProbe holds the command, the two probes and the Service:
+// `gt dashboard` on the port with no --bind, both probes curl -f on the index with
+// the numbers the bead names, liveness no stricter than readiness, and a
+// ClusterIP Service that selects only the dashboard pod and publishes the port.
+func TestDashboardCommandAndProbe(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, dashboardValues(t))
+	ctr := m.DashboardDeployment.Spec.Template.Spec.Containers[0]
+	if !slices.Equal(ctr.Command, []string{"gt"}) {
+		t.Errorf("the command = %q, want [gt] so the daemon entrypoint is replaced", ctr.Command)
+	}
+	if want := []string{"dashboard", "--port", "8787"}; !slices.Equal(ctr.Args, want) {
+		t.Errorf("the args = %q, want %q: no --bind, so the page stays on loopback", ctr.Args, want)
+	}
+	curl := []string{"curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8787/"}
+	readiness, liveness := ctr.ReadinessProbe, ctr.LivenessProbe
+	if readiness == nil || liveness == nil {
+		t.Fatalf("the probes = %+v and %+v, want both set", readiness, liveness)
+	}
+	if !slices.Equal(readiness.Exec.Command, curl) || !slices.Equal(liveness.Exec.Command, curl) {
+		t.Errorf("the probes run %q and %q, want %q for both", readiness.Exec.Command, liveness.Exec.Command, curl)
+	}
+	if *readiness != (Probe{Exec: readiness.Exec, InitialDelaySeconds: 20, PeriodSeconds: 15, TimeoutSeconds: 10, FailureThreshold: 3}) {
+		t.Errorf("the readiness numbers = %+v, want initial 20, period 15, timeout 10, failure 3", *readiness)
+	}
+	if *liveness != (Probe{Exec: liveness.Exec, InitialDelaySeconds: 60, PeriodSeconds: 60, TimeoutSeconds: 15, FailureThreshold: 5}) {
+		t.Errorf("the liveness numbers = %+v, want initial 60, period 60, timeout 15, failure 5", *liveness)
+	}
+	if liveness.InitialDelaySeconds < readiness.InitialDelaySeconds || liveness.PeriodSeconds < readiness.PeriodSeconds ||
+		liveness.TimeoutSeconds < readiness.TimeoutSeconds || liveness.FailureThreshold < readiness.FailureThreshold {
+		t.Errorf("liveness %+v is stricter than readiness %+v", *liveness, *readiness)
+	}
+
+	svc := m.DashboardService
+	if svc.Kind != "Service" || svc.Spec.Type != "ClusterIP" || svc.Spec.ExternalName != "" {
+		t.Errorf("the dashboard Service = %+v, want a ClusterIP Service with no external name", svc.Spec)
+	}
+	if len(svc.Spec.Ports) != 1 || svc.Spec.Ports[0].Port != DashboardPort {
+		t.Errorf("the dashboard Service publishes %+v, want port %d", svc.Spec.Ports, DashboardPort)
+	}
+	pod := m.DashboardDeployment.Spec.Template.Metadata.Labels
+	for k, want := range svc.Spec.Selector {
+		if pod[k] != want {
+			t.Errorf("the Service selects %s=%s, which the dashboard pod (%v) does not carry", k, want, pod)
+		}
+	}
+	// The daemon's pods must not carry the dashboard's selector, or its Service
+	// would publish the daemon too, and the daemon's Deployment would adopt the pod.
+	daemonPod := m.Deployment.Spec.Template.Metadata.Labels
+	for k, want := range svc.Spec.Selector {
+		if daemonPod[k] == want {
+			t.Errorf("the daemon pod carries the Service's selector %s=%s", k, want)
+		}
+	}
+	for k, want := range m.Deployment.Spec.Selector.MatchLabels {
+		if pod[k] == want {
+			t.Errorf("the dashboard pod carries the daemon's selector %s=%s", k, want)
+		}
+	}
+}
+
+// TestDashboardEnvEqualsTheDaemonEnv holds the dashboard's environment to the
+// daemon's: both come from the one environment helper, so every name and value
+// agrees, and both carry the container mode that resolves Dolt to the container
+// host.
+func TestDashboardEnvEqualsTheDaemonEnv(t *testing.T) {
+	t.Parallel()
+	m := mustBuild(t, dashboardValues(t))
+	daemon := m.Deployment.Spec.Template.Spec.Containers[0]
+	dash := m.DashboardDeployment.Spec.Template.Spec.Containers[0]
+	if !slices.Equal(daemon.Env, dash.Env) {
+		t.Errorf("the dashboard environment = %+v, want the daemon's %+v", dash.Env, daemon.Env)
+	}
+	for _, name := range []string{ContainerModeEnv, doltServerHostEnv, doltServerPortEnv} {
+		if got := envValuesNamed(dash, name); len(got) != 1 {
+			t.Errorf("the dashboard carries %s %q, want one value", name, got)
+		}
+	}
+	if got := podEnvMap(dash)[ContainerModeEnv]; got != SupervisorContainer {
+		t.Errorf("the dashboard sets %s=%q, want %q", ContainerModeEnv, got, SupervisorContainer)
+	}
+	if got := podEnvMap(dash)[doltServerHostEnv]; got != DoltHostName {
+		t.Errorf("the dashboard sets %s=%q, want %q", doltServerHostEnv, got, DoltHostName)
+	}
+	if got := podEnvMap(dash)[doltServerPortEnv]; got != "3307" {
+		t.Errorf("the dashboard sets %s=%q, want 3307", doltServerPortEnv, got)
+	}
+}
+
+// TestDashboardRefusals drives each refusal the dashboard values have: the
+// dashboard with a rehearsal, with no viewer entry, and a claude directory that
+// is relative or given without the dashboard. Each names the value at fault.
+func TestDashboardRefusals(t *testing.T) {
+	t.Parallel()
+	rehearsal := rehearsalValues(t)
+	rehearsal.Dashboard = true
+	noViewer := dashboardValues(t)
+	noViewer.Secrets = withoutSecret(noViewer.Secrets, ViewerTokenFile)
+	badMode := dashboardValues(t)
+	for i := range badMode.Secrets {
+		if badMode.Secrets[i].Name == ViewerTokenFile {
+			badMode.Secrets[i].Mode = "0644"
+		}
+	}
+	relative := dashboardValues(t)
+	relative.DashboardClaudeDir = "Users/sloan/.claude"
+	orphan := goldenValues(t)
+	orphan.DashboardClaudeDir = "/Users/sloan/.claude"
+	for _, tc := range []struct {
+		name string
+		v    Values
+		want string
+	}{
+		{"a rehearsal", rehearsal, "Values.Rehearsal"},
+		{"no viewer entry", noViewer, ViewerTokenFile},
+		{"a viewer entry with a mode that is not private", badMode, ViewerTokenFile},
+		{"a relative claude directory", relative, "absolute"},
+		{"a claude directory without the dashboard", orphan, "Values.Dashboard"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Build(tc.v)
+			if err == nil {
+				t.Fatalf("Build accepted %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Build refused %s with %q, want the error to name %q", tc.name, err, tc.want)
+			}
+		})
+	}
+	// Build validates before it builds, so the dashboard's own volume builder is
+	// the one place a missing viewer entry reaches it.
+	if _, err := dashboardVolumes(noViewer); err == nil || !strings.Contains(err.Error(), ViewerTokenFile) {
+		t.Errorf("dashboardVolumes without the viewer entry = %v, want a refusal naming %s", err, ViewerTokenFile)
 	}
 }
 

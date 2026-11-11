@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -41,7 +42,8 @@ var townClusterRenderCmd = &cobra.Command{
 	Short: "Write the daemon's manifests in apply order and print the Secret commands",
 	Long: `Write one numbered file per object into --out, in apply order: the namespace,
 the claims, the service account, the Forgejo Service, the bindings, the seed
-helper Pod (with --with-helper) and the Deployment.
+helper Pod (with --with-helper) and the Deployment. With --dashboard, the
+dashboard's Service and Deployment are written too, in the same order.
 
 Secret documents are not written. The command prints, for each Secret the
 Deployment mounts, one kubectl line that creates it from the operator's existing
@@ -79,6 +81,8 @@ type clusterRenderFlags struct {
 	openShellConfigDir string
 	forgeHost          string
 	doltBackupHostPath string
+	dashboard          bool
+	dashboardClaudeDir string
 }
 
 var clusterRender clusterRenderFlags
@@ -155,6 +159,10 @@ func init() {
 		"the forge's host:port the pod's git asks for a credential (required for a live render, the flag `gt daemon compose write` takes); a rehearsal takes none")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.doltBackupHostPath, "dolt-backup-host-path", "",
 		"the host directory the live pod mounts at the Dolt backup path, read-write, in place of the dolt-backup claim; it must be "+k8sdaemon.DoltBackupPath+" (a live render only)")
+	townClusterRenderCmd.Flags().BoolVar(&clusterRender.dashboard, "dashboard", false,
+		"also write the dashboard's Service and Deployment beside the daemon's; the secrets manifest must name "+k8sdaemon.ViewerTokenFile+" (a live render only)")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.dashboardClaudeDir, "dashboard-claude-dir", "",
+		"the Mac's ~/.claude directory, an absolute path, mounted read-only in the dashboard at /root/.claude; it needs --dashboard")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)
@@ -201,6 +209,12 @@ func (f clusterRenderFlags) validate() error {
 		return fmt.Errorf("--dolt-backup-host-path %q must be an absolute path", f.doltBackupHostPath)
 	case f.doltBackupHostPath != "" && f.doltBackupHostPath != k8sdaemon.DoltBackupPath:
 		return fmt.Errorf("--dolt-backup-host-path %q: want %q, the host directory the Dolt container writes its backups to", f.doltBackupHostPath, k8sdaemon.DoltBackupPath)
+	case f.rehearsal && f.dashboard:
+		return errors.New("--dashboard is for a live render: a rehearsal renders no dashboard, so drop --rehearsal or --dashboard")
+	case f.dashboardClaudeDir != "" && !f.dashboard:
+		return errors.New("--dashboard-claude-dir is for the dashboard: name --dashboard with it, or drop the flag")
+	case f.dashboardClaudeDir != "" && !filepath.IsAbs(f.dashboardClaudeDir):
+		return fmt.Errorf("--dashboard-claude-dir %q must be an absolute path: the pod names the host directory", f.dashboardClaudeDir)
 	case !filepath.IsAbs(f.configDir):
 		return fmt.Errorf("--config-dir %q must be an absolute path: the create commands are run from another directory", f.configDir)
 	case !filepath.IsAbs(f.openShellConfigDir):
@@ -271,6 +285,14 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if err != nil {
 		return fmt.Errorf("the secrets manifest %s is refused: %w", manifestPath, err)
 	}
+	// The dashboard's token is the viewer entry's Secret. The manifest marks that
+	// entry optional, and a pod that mounts a Secret that does not exist stays in
+	// ContainerCreating, so the render refuses before it writes anything.
+	if f.dashboard && !slices.ContainsFunc(secrets.Files, func(s manifestdata.SecretFile) bool {
+		return s.Name == k8sdaemon.ViewerTokenFile
+	}) {
+		return fmt.Errorf("--dashboard needs the %s entry in %s: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating; no file was written", k8sdaemon.ViewerTokenFile, manifestPath)
+	}
 	namespace := f.namespace
 	if namespace == "" {
 		namespace = k8sdaemon.DefaultNamespace
@@ -287,6 +309,8 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		Memory:                  f.memory,
 		ConfirmContainerStopped: f.confirmStopped,
 		HostGatewayIP:           f.hostGateway,
+		Dashboard:               f.dashboard,
+		DashboardClaudeDir:      f.dashboardClaudeDir,
 	}
 	if !f.rehearsal {
 		// The live pod's arguments equal the live compose command's: the om token
