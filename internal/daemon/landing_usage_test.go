@@ -460,6 +460,56 @@ func TestLandingUsageRealLayout(t *testing.T) {
 	}
 }
 
+// TestLandingUsagePodOMLayout: in the daemon pod om's claude child runs with
+// CLAUDE_CONFIG_DIR unset (internal/land/review.go omUnsetEnv, applied at the
+// review run) and HOME the container's (/root), so its transcript is written
+// under $HOME/.claude/projects/<hash of the review directory> (Claude Code's
+// project naming). A review whose transcript sits exactly there writes its
+// usage record; a review with no transcript writes nothing and keeps the one
+// reason line (gt-xxhzf6).
+func TestLandingUsagePodOMLayout(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// The pod's HOME and the config dir Claude resolves with CLAUDE_CONFIG_DIR
+	// unset (internal/config.ClaudeConfigDir).
+	home := t.TempDir()
+	configDir := filepath.Join(home, ".claude")
+	reviewDir := filepath.Join(town, "gastown", "review", "gt-abc")
+	projDir, err := agentlog.ClaudeProjectDirIn(configDir, reviewDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	end := start.Add(time.Hour)
+	writeUsageTranscript(t, filepath.Join(projDir, "session.jsonl"), start.Add(10*time.Minute), seatCallLine("session", 120, 0, 12))
+	var logged []string
+	sink := &omUsageSink{townRoot: town,
+		configDirFor: func() (string, error) { return configDir, nil },
+		userHomeDir:  func() (string, error) { return home, nil },
+		logf: func(f string, a ...any) {
+			logged = append(logged, fmt.Sprintf(f, a...))
+		}}
+
+	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: reviewDir,
+		Start: start, End: end})
+
+	rec := readOMUsage(t, town, "gt-abc")
+	if len(rec.Sessions) != 1 || rec.Sessions[0] != "session" || rec.Totals.Calls != 1 {
+		t.Errorf("record sessions = %v calls = %d, want the review's own session written at $HOME/.claude/projects", rec.Sessions, rec.Totals.Calls)
+	}
+
+	// A review that wrote no transcript still writes no record and says so once.
+	quietDir := filepath.Join(town, "gastown", "review", "gt-def")
+	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-def", Rig: "gastown", Dir: quietDir,
+		Start: start, End: end})
+	if _, err := os.Stat(filepath.Join(constants.TownRuntimePath(town), "usage", "beads", "gt-def.om.json")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a review with no transcript wrote a record (stat err %v), want none", err)
+	}
+	if n := loggedLinesWith(logged, "wrote no transcript"); n != 1 {
+		t.Errorf("no-transcript note logged %d times, want once: %q", n, logged)
+	}
+}
+
 // TestLandingUsageRefusesUnsafeBeadID: a bead id that could name a file outside
 // the usage directory, or is not a plain id, is refused with a logged error
 // before any transcript is listed, and no file is written. A plain id writes

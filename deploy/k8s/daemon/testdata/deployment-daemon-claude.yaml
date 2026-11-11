@@ -133,7 +133,7 @@ spec:
               subPath: forgejo-landing.env
               readOnly: true
             - name: daemon-claude
-              mountPath: /root/.claude/projects
+              mountPath: /root/.claude-host/projects
               subPath: projects
               readOnly: true
             - name: daemon-openshell

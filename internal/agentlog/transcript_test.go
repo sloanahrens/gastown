@@ -122,14 +122,17 @@ func TestLatestTranscript_NoTranscriptIsEmptyNotAnError(t *testing.T) {
 	}
 }
 
-// TestClaudeProjectDirsFor covers both roots, and their collapse to one when
-// CLAUDE_CONFIG_DIR is unset (where the "configured" dir IS ~/.claude).
+// TestClaudeProjectDirsFor covers every root, their collapse when
+// CLAUDE_CONFIG_DIR is unset (where the "configured" dir IS ~/.claude), and the
+// host root a container mounts the host's projects directory at, beside its own
+// config dir (gt-xxhzf6).
 func TestClaudeProjectDirsFor(t *testing.T) {
 	t.Parallel()
 	home := t.TempDir()
 	hash := "-some-work-dir"
+	hostRoot := filepath.Join(home, hostClaudeDir, claudeProjectsSubdir, hash)
 
-	t.Run("config dir set: configured root first, legacy root second", func(t *testing.T) {
+	t.Run("config dir set: configured, legacy, then host", func(t *testing.T) {
 		t.Parallel()
 		configDir := filepath.Join(t.TempDir(), "claude-town")
 
@@ -137,6 +140,7 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 		want := []string{
 			filepath.Join(configDir, claudeProjectsSubdir, hash),
 			filepath.Join(home, claudeProjectsDir, hash),
+			hostRoot,
 		}
 		if len(got) != len(want) {
 			t.Fatalf("claudeProjectDirsFor = %q, want %q", got, want)
@@ -148,12 +152,12 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 		}
 	})
 
-	t.Run("config dir unset: one root, not the same path twice", func(t *testing.T) {
+	t.Run("config dir unset: the configured root and the legacy one collapse, the host root stays", func(t *testing.T) {
 		t.Parallel()
 		// config.ClaudeConfigDir resolves an unset CLAUDE_CONFIG_DIR to ~/.claude.
 		got := claudeProjectRoots(hash, filepath.Join(home, ".claude"), home, "")
-		want := []string{filepath.Join(home, claudeProjectsDir, hash)}
-		if len(got) != len(want) || got[0] != want[0] {
+		want := []string{filepath.Join(home, claudeProjectsDir, hash), hostRoot}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
 			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
 		}
 	})
@@ -176,6 +180,7 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 		want := []string{
 			filepath.Join(configDir, claudeProjectsSubdir, hash),
 			filepath.Join(home, claudeProjectsDir, hash),
+			hostRoot,
 			filepath.Join(townRoot, townConfigDir, claudeProjectsSubdir, hash),
 		}
 		if strings.Join(got, "\n") != strings.Join(want, "\n") {
@@ -191,6 +196,7 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 		want := []string{
 			filepath.Join(configDir, claudeProjectsSubdir, hash),
 			filepath.Join(home, claudeProjectsDir, hash),
+			hostRoot,
 		}
 		if strings.Join(got, "\n") != strings.Join(want, "\n") {
 			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
@@ -346,8 +352,10 @@ func writeTranscript(t *testing.T, path string, mtime time.Time) {
 }
 
 // TestProjectTranscripts lists every transcript under the project directories
-// the three roots resolve to, skips what is not a transcript, and treats a
-// project directory that is not there as holding none.
+// the four roots resolve to, skips what is not a transcript, and treats a
+// project directory that is not there as holding none. The host root is the
+// container's mount of the host's projects directory, $HOME/.claude-host/projects,
+// which must be searched beside the container's own $HOME/.claude (gt-xxhzf6).
 func TestProjectTranscripts(t *testing.T) {
 	t.Parallel()
 	base := t.TempDir()
@@ -361,8 +369,9 @@ func TestProjectTranscripts(t *testing.T) {
 	}
 	cfgDir := filepath.Join(configDir, "projects", hash)
 	legacyDir := filepath.Join(home, ".claude", "projects", hash)
+	hostDir := filepath.Join(HostClaudeProjectsDir(home), hash)
 	townDir := filepath.Join(town, ".claude-town", "projects", hash)
-	for _, dir := range []string{cfgDir, legacyDir, townDir, filepath.Join(cfgDir, "sub.jsonl")} {
+	for _, dir := range []string{cfgDir, legacyDir, hostDir, townDir, filepath.Join(cfgDir, "sub.jsonl")} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -370,6 +379,7 @@ func TestProjectTranscripts(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(cfgDir, "a.jsonl"),
 		filepath.Join(legacyDir, "b.jsonl"),
+		filepath.Join(hostDir, "h.jsonl"),
 		filepath.Join(townDir, "c.jsonl"),
 		filepath.Join(cfgDir, "notes.txt"),
 	} {
@@ -387,6 +397,7 @@ func TestProjectTranscripts(t *testing.T) {
 	want := []string{
 		filepath.Join(cfgDir, "a.jsonl"),
 		filepath.Join(legacyDir, "b.jsonl"),
+		filepath.Join(hostDir, "h.jsonl"),
 		filepath.Join(townDir, "c.jsonl"),
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
