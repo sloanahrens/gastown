@@ -500,6 +500,12 @@ func TestUpdateImagesRefusesAPairThatDoesNotBelongTogether(t *testing.T) {
 			want:    []string{"gastown-daemon", "has no child manifest"},
 		},
 		{
+			name:    "an index child the registry refuses",
+			daemon:  &fakeRegistryImage{Children: []fakeIndexChild{{OS: "linux", Arch: "arm64", Image: &fakeRegistryImage{Commit: testUpdateImagesSHA, Status: http.StatusInternalServerError}}}},
+			polecat: matchingContents(testUpdateImagesSHA),
+			want:    []string{"gastown-daemon", "child", "HTTP 500"},
+		},
+		{
 			name:    "an index whose child is itself an index",
 			daemon:  &fakeRegistryImage{Children: []fakeIndexChild{{OS: "linux", Arch: "arm64", Image: &fakeRegistryImage{Children: []fakeIndexChild{linuxChild(testUpdateImagesSHA)}}}}},
 			polecat: matchingContents(testUpdateImagesSHA),
