@@ -87,7 +87,7 @@ func TestIntegrationSeedStopsOnAPinTheCheckoutDoesNotHold(t *testing.T) {
 	if err == nil {
 		t.Fatalf("polecat-seed-stage exited 0 on a pin the checkout does not hold\n%s", out)
 	}
-	if want := "rig fx pin 000000000000 is not readable in its canonical checkout"; !strings.Contains(out, want) {
+	if want := "rig fx pin 000000000000 is not readable in the .repo.git bare repo"; !strings.Contains(out, want) {
 		t.Fatalf("stage does not name %q\n%s", want, out)
 	}
 }
@@ -210,9 +210,11 @@ func TestIntegrationSeedAStalePinStopsTheStageBeforeAnythingIsStaged(t *testing.
 		"b.txt":  "two\n",
 	})
 	s.git(fx, "update-ref", "refs/remotes/origin/main", s.git(fx, "rev-parse", "HEAD"))
+	s.Bare("fx")
 
 	gastown := s.Checkout("gastown")
 	build := s.Commit(gastown, "build", map[string]string{"g.txt": "g\n"})
+	s.Bare("gastown")
 	s.WriteFile("pins", "fx "+pin+"\n")
 
 	out, err := s.SeedMake(build, "polecat-seed-stage")
