@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -655,11 +656,17 @@ func (d *Daemon) runSandboxSeatEnd(rigName string, landings *land.LandingsFile, 
 
 // sandboxSeatEnder is the step that ends one sandbox seat: patrolScanHost's
 // endFinishedSandboxSeat when the daemon was not given one, over the daemon's
-// own agent-bead and gateway seams.
+// own agent-bead and gateway seams. It is the production wiring of the seat's
+// transcript lister (seatUsageHook.list), which the host does not default.
 func (d *Daemon) sandboxSeatEnder() func(rig, name string, landing sandboxSeatLanding) bool {
 	if d.endSandboxSeat != nil {
 		return d.endSandboxSeat
 	}
-	h := &patrolScanHost{d: d, sandboxExists: d.sandboxExists, openRecoveryBeads: d.openRecoveryBeads}
+	h := &patrolScanHost{
+		d:                 d,
+		sandboxExists:     d.sandboxExists,
+		openRecoveryBeads: d.openRecoveryBeads,
+		seatUsage:         seatUsageHook{list: agentlog.ProjectTranscripts},
+	}
 	return h.endFinishedSandboxSeat
 }
