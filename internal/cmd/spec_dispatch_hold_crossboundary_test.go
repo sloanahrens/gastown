@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/estop"
@@ -107,14 +106,14 @@ var crossSentinels = []crossSentinel{
 		name:     "town ESTOP",
 		what:     "E-stop",
 		local:    estop.FilePath,
-		content:  estop.Render(estop.TriggerManual, "spec dispatch cross-boundary test", time.Now()),
+		content:  estop.Render(estop.TriggerManual, "spec dispatch cross-boundary test", specTestNow),
 		townWide: true,
 	},
 	{
 		name:    "rig ESTOP",
 		what:    "E-stop",
 		local:   func(root string) string { return estop.RigFilePath(root, "gastown") },
-		content: estop.Render(estop.TriggerManual, "spec dispatch cross-boundary test", time.Now()),
+		content: estop.Render(estop.TriggerManual, "spec dispatch cross-boundary test", specTestNow),
 	},
 }
 
