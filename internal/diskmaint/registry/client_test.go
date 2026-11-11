@@ -332,12 +332,47 @@ func TestCatalogFollowsAbsoluteLinkOnOwnOrigin(t *testing.T) {
 	}
 }
 
+func TestCatalogFollowsLinkSpellingTheDefaultPort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, base, link string
+	}{
+		{"link spells the http default port", "http://registry.test", "http://registry.test:80/v2/_catalog?n=100&last=a"},
+		{"base spells the http default port", "http://registry.test:80", "http://registry.test/v2/_catalog?n=100&last=a"},
+		{"link spells the https default port", "https://registry.test", "https://registry.test:443/v2/_catalog?n=100&last=a"},
+		{"ipv6 link spells the http default port", "http://[::1]", "http://[::1]:80/v2/_catalog?n=100&last=a"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := &Client{Base: tc.base, HTTP: &http.Client{Transport: roundTrip(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("last") == "" {
+					w.Header().Set("Link", `<`+tc.link+`>; rel="next"`)
+					_, _ = w.Write([]byte(`{"repositories":["a"]}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"repositories":["b"]}`))
+			})}}
+
+			repos, err := c.Catalog(context.Background())
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			if want := []string{"a", "b"}; !slices.Equal(repos, want) {
+				t.Errorf("Catalog = %v, want %v", repos, want)
+			}
+		})
+	}
+}
+
 func TestCatalogRefusesUnusableNextLink(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name, link string
 	}{
 		{"another origin", `<http://elsewhere.test/v2/_catalog?n=100&last=evil>; rel="next"`},
+		{"another port", `<http://registry.test:8080/v2/_catalog?n=100&last=evil>; rel="next"`},
+		{"default port of another scheme", `<https://registry.test:443/v2/_catalog?n=100&last=evil>; rel="next"`},
 		{"not a path", `<v2/_catalog?n=100>; rel="next"`},
 		{"unparseable", `<http:// registry.test/v2/_catalog>; rel="next"`},
 	}

@@ -18,6 +18,7 @@ func TestCredentialFollowsTheClientsOrigin(t *testing.T) {
 	cred := &Credential{User: user, Token: token}
 	tests := []struct {
 		name   string
+		base   string
 		cred   *Credential
 		target string
 		want   string
@@ -25,7 +26,10 @@ func TestCredentialFollowsTheClientsOrigin(t *testing.T) {
 		{name: "own origin carries the login", cred: cred, target: "http://registry.test/v2/", want: basic},
 		{name: "other origin goes without it", cred: cred, target: "http://elsewhere.test/v2/", want: ""},
 		{name: "other scheme goes without it", cred: cred, target: "https://registry.test/v2/", want: ""},
+		{name: "other port goes without it", cred: cred, target: "http://registry.test:8080/v2/", want: ""},
 		{name: "no credential sends none", cred: nil, target: "http://registry.test/v2/", want: ""},
+		{name: "target spelling the default port carries the login", cred: cred, target: "http://registry.test:80/v2/", want: basic},
+		{name: "base spelling the default port carries the login", base: "http://registry.test:80", cred: cred, target: "http://registry.test/v2/", want: basic},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -35,7 +39,11 @@ func TestCredentialFollowsTheClientsOrigin(t *testing.T) {
 				got = r.Header.Get("Authorization")
 				w.WriteHeader(http.StatusOK)
 			}
-			c := &Client{Base: "http://registry.test", HTTP: &http.Client{Transport: roundTrip(handler)}, Credential: tc.cred}
+			base := tc.base
+			if base == "" {
+				base = "http://registry.test"
+			}
+			c := &Client{Base: base, HTTP: &http.Client{Transport: roundTrip(handler)}, Credential: tc.cred}
 			u, err := url.Parse(tc.target)
 			if err != nil {
 				t.Fatal(err)
