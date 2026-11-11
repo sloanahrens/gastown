@@ -38,7 +38,7 @@ func TestResolveSpendInClusterReadsTheLedgerAndNeverRunsTheTool(t *testing.T) {
 	homeFn := func() (string, error) { return home, nil }
 
 	var calls [][]string
-	spend, reason := resolveSpendFrom(true, "", homeFn, os.Stat, spendFake(&calls, `{"from":"tool"}`), nil)
+	spend, reason := resolveSpendIn(true, "", homeFn, os.Stat, spendFake(&calls, `{"from":"tool"}`), nil)
 	if spend == nil || reason != "" {
 		t.Fatalf("in cluster with the ledger: spend nil %v, reason %q; want the ledger and no reason", spend == nil, reason)
 	}
@@ -63,7 +63,7 @@ func TestResolveSpendInClusterWithoutTheLedgerSaysNotInCluster(t *testing.T) {
 	neither := t.TempDir()
 	for name, home := range map[string]string{"tool only": withTool, "neither": neither} {
 		homeFn := func() (string, error) { return home, nil }
-		spend, reason := resolveSpendFrom(true, "", homeFn, os.Stat, spendUnused, nil)
+		spend, reason := resolveSpendIn(true, "", homeFn, os.Stat, spendUnused, nil)
 		if spend != nil || reason != dashboard.NotInClusterReason {
 			t.Errorf("in cluster, %s: spend nil %v, reason %q; want no source and %q", name, spend == nil, reason, dashboard.NotInClusterReason)
 		}
@@ -86,7 +86,7 @@ func TestResolveSpendOnAMacFallsBackToTheLedgerWhenTheToolFails(t *testing.T) {
 		calls = append(calls, argv)
 		return nil, errors.New("exit status 1")
 	}
-	spend, reason := resolveSpendFrom(false, "", homeFn, os.Stat, failing, whyLog)
+	spend, reason := resolveSpendIn(false, "", homeFn, os.Stat, failing, whyLog)
 	if spend == nil || reason != "" {
 		t.Fatalf("on a Mac with the tool: spend nil %v, reason %q; want a source and no reason", spend == nil, reason)
 	}
@@ -118,7 +118,7 @@ func TestResolveSpendOnAMacServesTheToolWhenItAnswers(t *testing.T) {
 	var logged []string
 	whyLog := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
 	var calls [][]string
-	spend, reason := resolveSpendFrom(false, "", homeFn, os.Stat, spendFake(&calls, `{"from":"tool"}`), whyLog)
+	spend, reason := resolveSpendIn(false, "", homeFn, os.Stat, spendFake(&calls, `{"from":"tool"}`), whyLog)
 	if spend == nil || reason != "" {
 		t.Fatalf("on a Mac with the tool: spend nil %v, reason %q; want a source and no reason", spend == nil, reason)
 	}
@@ -139,7 +139,7 @@ func TestResolveSpendOnAMacWithoutTheLedgerKeepsAFailedToolUnavailable(t *testin
 	homeFn := func() (string, error) { return home, nil }
 
 	failing := func(context.Context, []string) ([]byte, error) { return nil, errors.New("exit status 1") }
-	spend, reason := resolveSpendFrom(false, "", homeFn, os.Stat, failing, nil)
+	spend, reason := resolveSpendIn(false, "", homeFn, os.Stat, failing, nil)
 	if spend == nil || reason != "" {
 		t.Fatalf("tool only: spend nil %v, reason %q; want the tool and no reason", spend == nil, reason)
 	}
