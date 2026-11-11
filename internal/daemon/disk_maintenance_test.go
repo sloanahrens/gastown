@@ -197,11 +197,8 @@ func TestDiskMaintenanceShippedDefaultDoesNotEnableIt(t *testing.T) {
 	if dm.Window != "04:30" {
 		t.Errorf("window = %q, want 04:30 (after the 03:00 Dolt window)", dm.Window)
 	}
-	if got := dm.Targets[agentconfig.DiskMaintenanceTargetCivol].Interval; got != "2h" {
-		t.Errorf("civol interval = %q, want 2h: the CI cache volumes grow too fast for the daily window", got)
-	}
-	if len(dm.Targets) != 1 {
-		t.Errorf("targets = %+v, want civol alone: every other target keeps the daily window", dm.Targets)
+	if len(dm.Targets) != 0 {
+		t.Errorf("targets = %+v, want none: every target keeps the daily window", dm.Targets)
 	}
 	// The install writes this block into a town's config and the daemon reads it
 	// back through the strict decoder, so a default it refuses would poison the
@@ -213,9 +210,6 @@ func TestDiskMaintenanceShippedDefaultDoesNotEnableIt(t *testing.T) {
 	var back PatrolsConfig
 	if err := json.Unmarshal(data, &back); err != nil {
 		t.Fatalf("the shipped default does not decode: %v", err)
-	}
-	if got := back.DiskMaintenance.Targets[agentconfig.DiskMaintenanceTargetCivol].Interval; got != "2h" {
-		t.Errorf("civol interval decoded back as %q, want 2h", got)
 	}
 	if IsPatrolEnabled(cfg, "disk_maintenance") {
 		t.Error("IsPatrolEnabled says the shipped default runs the patrol")
@@ -272,30 +266,27 @@ func TestDiskMaintenanceRunsOncePerWindow(t *testing.T) {
 func TestDiskMaintenanceCadenceRunsOutsideTheWindow(t *testing.T) {
 	t.Parallel()
 	d, _, f := diskMaintTestDaemon(t)
-	civol := &diskMaintFakeTarget{}
-	f.extra = map[string]*diskMaintFakeTarget{"civol": civol}
-	d.patrolConfig = diskMaintCadence("civol", "2h")
+	cadenced := &diskMaintFakeTarget{}
+	f.extra = map[string]*diskMaintFakeTarget{"registry": cadenced}
+	d.patrolConfig = diskMaintCadence("registry", "2h")
 	now := diskMaintNow.Add(8 * time.Hour) // 12:45, well outside the 04:30 window
 	d.diskMaint.now = func() time.Time { return now }
 
 	d.runDiskMaintenance()
-	if len(civol.policies) != 1 {
-		t.Fatalf("civol planned %d times at 12:45, want 1: a 2h interval does not wait for the window", len(civol.policies))
-	}
-	if len(f.target.policies) != 0 {
-		t.Errorf("registry planned %d times at 12:45, want 0: a target with no interval keeps the window", len(f.target.policies))
+	if len(cadenced.policies) != 1 {
+		t.Fatalf("cadenced planned %d times at 12:45, want 1: a 2h interval does not wait for the window", len(cadenced.policies))
 	}
 
 	now = now.Add(2*time.Hour - time.Minute)
 	d.runDiskMaintenance()
-	if len(civol.policies) != 1 {
-		t.Fatalf("civol planned %d times a minute before its interval was up, want 1", len(civol.policies))
+	if len(cadenced.policies) != 1 {
+		t.Fatalf("cadenced planned %d times a minute before its interval was up, want 1", len(cadenced.policies))
 	}
 
 	now = now.Add(time.Minute)
 	d.runDiskMaintenance()
-	if len(civol.policies) != 2 {
-		t.Fatalf("civol planned %d times once its interval was up, want 2", len(civol.policies))
+	if len(cadenced.policies) != 2 {
+		t.Fatalf("cadenced planned %d times once its interval was up, want 2", len(cadenced.policies))
 	}
 }
 
@@ -305,29 +296,29 @@ func TestDiskMaintenanceCadenceRunsOutsideTheWindow(t *testing.T) {
 func TestDiskMaintenanceCadenceCountsFromTheConclusion(t *testing.T) {
 	t.Parallel()
 	d, _, f := diskMaintTestDaemon(t)
-	civol := &diskMaintFakeTarget{}
-	f.extra = map[string]*diskMaintFakeTarget{"civol": civol}
-	d.patrolConfig = diskMaintCadence("civol", "2h")
+	cadenced := &diskMaintFakeTarget{}
+	f.extra = map[string]*diskMaintFakeTarget{"registry": cadenced}
+	d.patrolConfig = diskMaintCadence("registry", "2h")
 	now := diskMaintNow.Add(8 * time.Hour) // 12:45
 	d.diskMaint.now = func() time.Time { return now }
-	civol.during = func() { now = now.Add(3 * time.Minute) } // the plan takes three minutes
+	cadenced.during = func() { now = now.Add(3 * time.Minute) } // the plan takes three minutes
 
 	d.runDiskMaintenance()
-	if len(civol.policies) != 1 {
-		t.Fatalf("civol planned %d times at 12:45, want 1", len(civol.policies))
+	if len(cadenced.policies) != 1 {
+		t.Fatalf("cadenced planned %d times at 12:45, want 1", len(cadenced.policies))
 	}
 
 	now = diskMaintNow.Add(10*time.Hour + time.Minute) // 14:46: two hours after the tick, not the conclusion
-	civol.during = nil
+	cadenced.during = nil
 	d.runDiskMaintenance()
-	if len(civol.policies) != 1 {
-		t.Fatalf("civol planned %d times at 14:46, want 1: the 2h interval runs from the 12:48 conclusion, not the 12:45 tick", len(civol.policies))
+	if len(cadenced.policies) != 1 {
+		t.Fatalf("cadenced planned %d times at 14:46, want 1: the 2h interval runs from the 12:48 conclusion, not the 12:45 tick", len(cadenced.policies))
 	}
 
 	now = diskMaintNow.Add(10*time.Hour + 3*time.Minute) // 14:48: two hours after the conclusion
 	d.runDiskMaintenance()
-	if len(civol.policies) != 2 {
-		t.Fatalf("civol planned %d times at 14:48, want 2: its interval was up at the 12:48 conclusion", len(civol.policies))
+	if len(cadenced.policies) != 2 {
+		t.Fatalf("cadenced planned %d times at 14:48, want 2: its interval was up at the 12:48 conclusion", len(cadenced.policies))
 	}
 }
 
@@ -348,24 +339,23 @@ func TestDiskMaintenanceWindowSettlesAtTheConclusion(t *testing.T) {
 	}
 }
 
-// TestDiskMaintenanceCadenceLeavesTheDailyWindowToTheOthers: giving one target
-// a cadence does not move the others onto it, and a cadence set for a target
-// this build does not produce is said once and looked for per interval, not
-// per tick.
-func TestDiskMaintenanceCadenceLeavesTheDailyWindowToTheOthers(t *testing.T) {
+// TestDiskMaintenanceCadenceForAnAbsentTargetIsSaidOncePerInterval: a cadence
+// set for a target the build does not produce is said once and looked for per
+// interval, not per tick.
+func TestDiskMaintenanceCadenceForAnAbsentTargetIsSaidOncePerInterval(t *testing.T) {
 	t.Parallel()
 	d, logs, f := diskMaintTestDaemon(t)
-	d.patrolConfig = diskMaintCadence("civol", "2h")
+	d.diskMaint.targets = func(context.Context, *Daemon, string) (map[string]diskmaint.Target, error) {
+		return map[string]diskmaint.Target{"other": f.target}, nil
+	}
+	d.patrolConfig = diskMaintCadence("registry", "2h")
 	now := diskMaintNow.Add(8 * time.Hour) // 12:45, outside the window
 	d.diskMaint.now = func() time.Time { return now }
 
 	d.runDiskMaintenance()
 
-	if len(f.target.policies) != 0 {
-		t.Fatalf("registry planned %d times at 12:45, want 0: it has no interval", len(f.target.policies))
-	}
 	if got := strings.Count(logs.String(), "has no such target"); got != 1 {
-		t.Errorf("said the civol target is absent %d times, want 1: %q", got, logs.String())
+		t.Errorf("said the cadenced target is absent %d times, want 1: %q", got, logs.String())
 	}
 
 	now = diskMaintNow.Add(24*time.Hour + 15*time.Minute) // 05:00, inside the next window
@@ -373,11 +363,8 @@ func TestDiskMaintenanceCadenceLeavesTheDailyWindowToTheOthers(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		d.runDiskMaintenance()
 	}
-	if len(f.target.policies) != 1 {
-		t.Fatalf("registry planned %d times in one window, want 1", len(f.target.policies))
-	}
 	if got := strings.Count(logs.String(), "has no such target"); got != 1 {
-		t.Errorf("said the civol target is absent %d times, want 1: the report is not repeated per tick", got)
+		t.Errorf("said the cadenced target is absent %d times, want 1: the report is not repeated per tick", got)
 	}
 }
 
@@ -387,16 +374,16 @@ func TestDiskMaintenanceCadenceLeavesTheDailyWindowToTheOthers(t *testing.T) {
 func TestDiskMaintenanceCadenceSkipsWhenNotQuiet(t *testing.T) {
 	t.Parallel()
 	d, logs, f := diskMaintTestDaemon(t)
-	civol := &diskMaintFakeTarget{}
-	f.extra = map[string]*diskMaintFakeTarget{"civol": civol}
-	d.patrolConfig = diskMaintCadence("civol", "2h")
+	cadenced := &diskMaintFakeTarget{}
+	f.extra = map[string]*diskMaintFakeTarget{"registry": cadenced}
+	d.patrolConfig = diskMaintCadence("registry", "2h")
 	d.diskMaint.now = func() time.Time { return diskMaintNow.Add(8 * time.Hour) }
 	f.quiet, f.quietWhy = false, "slot held by gastown/polecats/corpus"
 
 	d.runDiskMaintenance()
 
-	if len(civol.policies) != 0 {
-		t.Errorf("civol planned %d times while the town was busy, want 0", len(civol.policies))
+	if len(cadenced.policies) != 0 {
+		t.Errorf("cadenced planned %d times while the town was busy, want 0", len(cadenced.policies))
 	}
 	if !strings.Contains(logs.String(), "slot held by gastown/polecats/corpus") {
 		t.Errorf("log = %q, want the reason the run was skipped", logs.String())
@@ -404,8 +391,8 @@ func TestDiskMaintenanceCadenceSkipsWhenNotQuiet(t *testing.T) {
 
 	f.quiet = true
 	d.runDiskMaintenance()
-	if len(civol.policies) != 1 {
-		t.Errorf("civol planned %d times once the town went quiet, want 1: a skipped tick must not spend the interval", len(civol.policies))
+	if len(cadenced.policies) != 1 {
+		t.Errorf("cadenced planned %d times once the town went quiet, want 1: a skipped tick must not spend the interval", len(cadenced.policies))
 	}
 }
 
@@ -415,35 +402,35 @@ func TestDiskMaintenanceCadenceSkipsWhenNotQuiet(t *testing.T) {
 func TestDiskMaintenanceCadenceAppliesAndRetriesADeferral(t *testing.T) {
 	t.Parallel()
 	d, logs, f := diskMaintTestDaemon(t)
-	civol := &diskMaintFakeTarget{}
-	f.extra = map[string]*diskMaintFakeTarget{"civol": civol}
-	cfg := diskMaintCadence("civol", "2h")
+	cadenced := &diskMaintFakeTarget{}
+	f.extra = map[string]*diskMaintFakeTarget{"registry": cadenced}
+	cfg := diskMaintCadence("registry", "2h")
 	cfg.Patrols.DiskMaintenance.Mode = agentconfig.DiskMaintenanceModeApply
 	d.patrolConfig = cfg
 	now := diskMaintNow.Add(8 * time.Hour)
 	d.diskMaint.now = func() time.Time { return now }
-	civol.plan = diskmaint.Plan{Actions: []diskmaint.Action{{Kind: "delete-path", Ref: "ci-gocache/x"}}}
-	civol.result = diskmaint.Result{Deferred: "polecat-image lock is held"}
+	cadenced.plan = diskmaint.Plan{Actions: []diskmaint.Action{{Kind: "delete-path", Ref: "ci-gocache/x"}}}
+	cadenced.result = diskmaint.Result{Deferred: "polecat-image lock is held"}
 
 	d.runDiskMaintenance()
-	if len(civol.applied) != 1 {
-		t.Fatalf("applied %d times, want 1: an interval target applies in apply mode", len(civol.applied))
+	if len(cadenced.applied) != 1 {
+		t.Fatalf("applied %d times, want 1: an interval target applies in apply mode", len(cadenced.applied))
 	}
 	if !strings.Contains(logs.String(), "deferred") {
 		t.Errorf("log = %q, want the deferral named", logs.String())
 	}
 
-	civol.result = diskmaint.Result{}
+	cadenced.result = diskmaint.Result{}
 	now = now.Add(5 * time.Minute)
 	d.runDiskMaintenance()
-	if len(civol.applied) != 2 {
-		t.Fatalf("applied %d times, want 2: a deferral leaves the target due", len(civol.applied))
+	if len(cadenced.applied) != 2 {
+		t.Fatalf("applied %d times, want 2: a deferral leaves the target due", len(cadenced.applied))
 	}
 
 	now = now.Add(5 * time.Minute)
 	d.runDiskMaintenance()
-	if len(civol.applied) != 2 {
-		t.Fatalf("applied %d times, want 2: a completed run spends the interval", len(civol.applied))
+	if len(cadenced.applied) != 2 {
+		t.Fatalf("applied %d times, want 2: a completed run spends the interval", len(cadenced.applied))
 	}
 }
 
@@ -1939,7 +1926,7 @@ func TestDiskMaintenanceConfigDecodes(t *testing.T) {
 	t.Parallel()
 
 	var cfg PatrolsConfig
-	design := `{"disk_maintenance": {"enabled": true, "interval": "daily", "window": "04:30", "mode": "dry_run", "targets": {"civol": {"interval": "2h"}}}}`
+	design := `{"disk_maintenance": {"enabled": true, "interval": "daily", "window": "04:30", "mode": "dry_run", "targets": {"registry": {"interval": "2h"}}}}`
 	if err := json.Unmarshal([]byte(design), &cfg); err != nil {
 		t.Fatalf("the design's block does not decode: %v", err)
 	}
@@ -1950,8 +1937,8 @@ func TestDiskMaintenanceConfigDecodes(t *testing.T) {
 	if !dm.Enabled || dm.Interval != "daily" || dm.Window != "04:30" || dm.Mode != "dry_run" {
 		t.Errorf("decoded %+v, want the block as written", dm)
 	}
-	if got := dm.Targets[agentconfig.DiskMaintenanceTargetCivol].Interval; got != "2h" {
-		t.Errorf("civol interval decoded as %q, want 2h", got)
+	if got := dm.Targets[agentconfig.DiskMaintenanceTargetRegistry].Interval; got != "2h" {
+		t.Errorf("registry interval decoded as %q, want 2h", got)
 	}
 
 	bad := map[string]string{
@@ -1960,11 +1947,11 @@ func TestDiskMaintenanceConfigDecodes(t *testing.T) {
 		"malformed window":   `{"disk_maintenance": {"window": "4:30pm"}}`,
 		"unknown key":        `{"disk_maintenance": {"enable": true}}`,
 		"unknown target":     `{"disk_maintenance": {"targets": {"go-build": {"interval": "2h"}}}}`,
-		"malformed cadence":  `{"disk_maintenance": {"targets": {"civol": {"interval": "soon"}}}}`,
-		"zero cadence":       `{"disk_maintenance": {"targets": {"civol": {"interval": "0s"}}}}`,
-		"negative cadence":   `{"disk_maintenance": {"targets": {"civol": {"interval": "-2h"}}}}`,
-		"sub-minute cadence": `{"disk_maintenance": {"targets": {"civol": {"interval": "30s"}}}}`,
-		"unknown target key": `{"disk_maintenance": {"targets": {"civol": {"every": "2h"}}}}`,
+		"malformed cadence":  `{"disk_maintenance": {"targets": {"registry": {"interval": "soon"}}}}`,
+		"zero cadence":       `{"disk_maintenance": {"targets": {"registry": {"interval": "0s"}}}}`,
+		"negative cadence":   `{"disk_maintenance": {"targets": {"registry": {"interval": "-2h"}}}}`,
+		"sub-minute cadence": `{"disk_maintenance": {"targets": {"registry": {"interval": "30s"}}}}`,
+		"unknown target key": `{"disk_maintenance": {"targets": {"registry": {"every": "2h"}}}}`,
 	}
 	for name, doc := range bad {
 		t.Run(name, func(t *testing.T) {

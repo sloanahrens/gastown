@@ -20,7 +20,6 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/baks"
-	"github.com/steveyegge/gastown/internal/diskmaint/civol"
 	"github.com/steveyegge/gastown/internal/diskmaint/colima"
 	"github.com/steveyegge/gastown/internal/diskmaint/nodes"
 	"github.com/steveyegge/gastown/internal/diskmaint/registry"
@@ -44,12 +43,10 @@ const (
 	maintTargetBaks     = "baks"
 	maintTargetSizes    = "sizes"
 
-	// maintTargetNodes, maintTargetColima and maintTargetCivol are the names the
-	// docker targets answer to: the sandbox cluster's kind nodes, the colima
-	// daemon's images and the CI cache volumes.
+	// maintTargetNodes and maintTargetColima are the names the docker targets
+	// answer to: the sandbox cluster's kind nodes and the colima daemon's images.
 	maintTargetNodes  = "nodes"
 	maintTargetColima = "colima"
-	maintTargetCivol  = "civol"
 
 	// maintTargetRegistryCollect is the registry's garbage collect on its own:
 	// the Mac's registry-collect job applies it whether or not a delete ran,
@@ -90,7 +87,7 @@ lock held defers and says to retry. The other targets keep no lock: the local
 ones touch only the worktrees, backups and directories this machine owns, and
 the docker ones only the images and volumes their daemons list.
 
-A target names what to maintain: baks, civol, colima, nodes, registry and
+A target names what to maintain: baks, colima, nodes, registry and
 registry-collect (both only when the town configures a registry), sizes or
 worktree. registry-collect runs the registry's garbage collect without deleting
 anything, so a night's collect can reclaim what an earlier run's deletes freed.
@@ -465,13 +462,11 @@ func maintLocalTargets(town, home string, run diskmaint.Runner, ledger *diskmain
 }
 
 // maintDockerTargets builds the targets that maintain the sandbox's docker
-// daemons: the kind node images, the colima daemon's dangling images and the CI
-// cache volumes. Each shares the run's ledger. The nodes and civol targets take
-// the container names and limits their packages default to, the same ones the
-// nodeprune command and the CI runner use: civol's container names are
-// unexported there, and TestMaintCivolTargetReadsTheCIContainers pins them
-// through the runner. They carry no dry-run gate of their own: runMaintContext
-// calls Apply only in apply mode, and Plan never does.
+// daemons: the kind node images and the colima daemon's dangling images. Each
+// shares the run's ledger. The nodes target takes the container names and
+// limits its package defaults to, the same ones the nodeprune command uses.
+// They carry no dry-run gate of their own: runMaintContext calls Apply only in
+// apply mode, and Plan never does.
 func maintDockerTargets(home string, run diskmaint.Runner, ledger *diskmaint.Ledger) map[string]diskmaint.Target {
 	return map[string]diskmaint.Target{
 		maintTargetNodes: nodes.NewTarget(nodes.Config{
@@ -484,10 +479,6 @@ func maintDockerTargets(home string, run diskmaint.Runner, ledger *diskmaint.Led
 			DockerHost: maintColimaHost(home),
 			Run:        run,
 			Ledger:     ledger,
-		}),
-		maintTargetCivol: civol.NewTarget(civol.Config{
-			Run:    run,
-			Ledger: ledger,
 		}),
 	}
 }

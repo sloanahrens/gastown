@@ -5,12 +5,10 @@ package daemon
 // plan under the polecat-image lock so a delete never races an image push
 // (gt-dl4nv.15).
 //
-// A target may set a cadence of its own, and the CI cache volumes do: they grow
-// faster than a daily window can hold, so civol runs on its interval
-// (agentconfig.DiskMaintenanceDefaultCivolInterval by default) in any window
-// while the rest keep the daily pass (gt-z6qre.17). The shared Go cache trim is
-// on the same footing: it runs on cache_trim_interval (2h by default) in any
-// window, not in the daily pass (gt-gg9hv.24.2). Between those runs, a tick
+// A target may set a cadence of its own and then runs on that interval in any
+// window, while the rest keep the daily pass (gt-z6qre.17). The shared Go cache
+// trim is on the same footing: it runs on cache_trim_interval (2h by default) in
+// any window, not in the daily pass (gt-gg9hv.24.2). Between those runs, a tick
 // reads the disks and trims early when the sandbox disk is at or over
 // cache_trim_early_percent, no sooner than fifteen minutes after the last trim
 // began (gt-gg9hv.43).

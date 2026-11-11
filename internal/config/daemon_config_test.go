@@ -701,7 +701,7 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	t.Parallel()
 
 	var cfg PatrolsConfig
-	design := `{"disk_maintenance": {"enabled": true, "interval": "daily", "window": "04:30", "mode": "apply", "targets": {"civol": {"interval": "2h"}}}}`
+	design := `{"disk_maintenance": {"enabled": true, "interval": "daily", "window": "04:30", "mode": "apply", "targets": {"registry": {"interval": "2h"}}}}`
 	if err := json.Unmarshal([]byte(design), &cfg); err != nil {
 		t.Fatalf("the design's block does not decode: %v", err)
 	}
@@ -709,8 +709,8 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	if dm == nil || !dm.Enabled || dm.Interval != "daily" || dm.Window != "04:30" || dm.Mode != "apply" {
 		t.Fatalf("decoded %+v, want the block as written", dm)
 	}
-	if got := dm.Targets[DiskMaintenanceTargetCivol].Interval; got != "2h" {
-		t.Errorf("civol interval decoded as %q, want 2h", got)
+	if got := dm.Targets[DiskMaintenanceTargetRegistry].Interval; got != "2h" {
+		t.Errorf("registry interval decoded as %q, want 2h", got)
 	}
 
 	bad := map[string]string{
@@ -720,8 +720,8 @@ func TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 		"malformed window":   `{"disk_maintenance": {"window": "4:30pm"}}`,
 		"unknown key":        `{"disk_maintenance": {"enable": true}}`,
 		"unknown target":     `{"disk_maintenance": {"targets": {"go-build": {"interval": "2h"}}}}`,
-		"malformed cadence":  `{"disk_maintenance": {"targets": {"civol": {"interval": "soon"}}}}`,
-		"sub-minute cadence": `{"disk_maintenance": {"targets": {"civol": {"interval": "30s"}}}}`,
+		"malformed cadence":  `{"disk_maintenance": {"targets": {"registry": {"interval": "soon"}}}}`,
+		"sub-minute cadence": `{"disk_maintenance": {"targets": {"registry": {"interval": "30s"}}}}`,
 	}
 	for name, doc := range bad {
 		t.Run(name, func(t *testing.T) {

@@ -1363,17 +1363,15 @@ func parseDiskMaintenanceCadence(raw string) (time.Duration, error) {
 }
 
 // The maintenance targets the patrol knows, so a per-target interval applies
-// to one that exists. The registry prune is built today; the CI cache volume
-// trim (internal/diskmaint/civol) joins it, which is why the shipped default
-// gives it an interval before the patrol builds it (gt-z6qre.17).
+// to one that exists. The registry prune is the only one the patrol builds; the
+// CI cache volumes are trimmed by the daemon's CI cache trim, not by a target
+// here (gt-qoqs74).
 const (
-	DiskMaintenanceTargetCivol    = "civol"
 	DiskMaintenanceTargetRegistry = "registry"
 )
 
 // diskMaintenanceTargets is the set Target names are checked against.
 var diskMaintenanceTargets = []string{
-	DiskMaintenanceTargetCivol,
 	DiskMaintenanceTargetRegistry,
 }
 
@@ -1409,10 +1407,6 @@ const (
 	DiskMaintenanceModeDryRun    = "dry_run"
 	DiskMaintenanceModeApply     = "apply"
 	DiskMaintenanceDefaultWindow = "04:30"
-	// DiskMaintenanceDefaultCivolInterval is the CI cache volumes' cadence:
-	// they grow about 3 GB an hour, so the daily window cannot hold them. It
-	// matches the shell job the patrol replaces (gt-z6qre.17).
-	DiskMaintenanceDefaultCivolInterval = "2h"
 	// DiskMaintenanceDefaultCacheTrimInterval is the shared Go cache's cadence:
 	// it grows about 3 GB an hour, so one trim a day cannot hold the 10 GB cap
 	// (gt-gg9hv.24.2).
