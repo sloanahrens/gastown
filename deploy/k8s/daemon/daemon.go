@@ -121,7 +121,7 @@ const (
 	// key. The Secret is created outside this render; the render mounts it at
 	// CloudCheckKeyPath only when Values.CloudCheckKey says the operator has
 	// the key file (gt-c57pax).
-	CloudCheckKeySecretName = "gt-cloud-check-gcp"
+	CloudCheckKeySecretName = "gt-cloud-check-gcp" //nolint:gosec // a Secret name, not a credential
 	CloudCheckKeyKey        = "key.json"
 	CloudCheckKeyPath       = "/var/run/secrets/gt-cloud-check/key.json"
 	// CloudCheckKeyFile is the name of the operator's config-directory file the
