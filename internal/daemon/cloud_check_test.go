@@ -439,3 +439,40 @@ func TestCloudCheckFailedRunEscalatesWithItsExitStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestCloudCheckRunStoppedByShutdownRaisesNoEscalation: shutdown cancels the
+// daemon's context, which is the parent of the run's, and the run dies with it.
+// The check did not fail, so no failure escalation is raised, and one log line
+// says the run stopped for the shutdown.
+func TestCloudCheckRunStoppedByShutdownRaisesNoEscalation(t *testing.T) {
+	t.Parallel()
+	key, stat := cloudCheckPresentKey()
+	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", key),
+		func(*agentconfig.CloudCheckConfig) string { return key }, stat)
+	ctx, shutdown := context.WithCancel(context.Background())
+	defer shutdown()
+	d.ctx = ctx
+	d.cloudCheck.run = func(runCtx context.Context, name string, _ []string, _ []string) error {
+		shutdown()
+		<-runCtx.Done()
+		return fmt.Errorf("%s: signal: killed", name)
+	}
+
+	d.runCloudCheckPatrol()
+
+	if len(f.escalationKeys) != 0 {
+		t.Errorf("a run stopped by shutdown escalated under %q, want none", f.escalationKeys)
+	}
+	if len(f.clears) != 0 {
+		t.Errorf("a run stopped by shutdown cleared %q, want none", f.clears)
+	}
+	var lines []string
+	for line := range strings.SplitSeq(strings.TrimSpace(logs.String()), "\n") {
+		if strings.Contains(line, "cloud_check:") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "shutdown") {
+		t.Errorf("cloud_check log lines = %q, want one line naming the shutdown", lines)
+	}
+}
