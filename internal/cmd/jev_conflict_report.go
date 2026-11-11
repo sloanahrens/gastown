@@ -95,9 +95,9 @@ type jevLandedAt func(bead string) (time.Time, bool, error)
 // against. It is a parameter so a test can put fixed landings behind it.
 type jevConflictLandingsOpener func(townRoot string) (jevLandedAt, error)
 
-// jevConflictReportWith runs the report for the window ending at now. Every
-// read that fails fails the report: a label or landing that cannot be read is
-// not a pair that does not count.
+// jevConflictReportWith runs the report for the window ending at now. A read
+// that fails fails the whole report, so a label or landing that cannot be read
+// is never taken as clean.
 func jevConflictReportWith(ctx context.Context, w io.Writer, townRoot, since string, asJSON bool, now time.Time,
 	open jevConflictOpener, landings jevConflictLandingsOpener) error {
 	if since == "" {
