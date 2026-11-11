@@ -925,3 +925,42 @@ func TestClaudePlanAbsentIsNotInCluster(t *testing.T) {
 		t.Errorf("a failed read says %q, want its own reason and not the cluster's", row.Why)
 	}
 }
+
+// A spend read that failed gives its error's first line as the DeepSeek row's
+// reason, with no figures. An empty error, or no report at all, keeps the fixed
+// text.
+func TestDeepSeekCostProviderFailedReadWhy(t *testing.T) {
+	t.Parallel()
+	failed := func(errText string) json.RawMessage {
+		t.Helper()
+		raw, err := json.Marshal(map[string]any{"error": errText})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	cases := map[string]struct {
+		spend json.RawMessage
+		want  string
+	}{
+		"error's first line is the reason": {
+			spend: failed("open balance.log: permission denied\nthe second line is not shown"),
+			want:  "open balance.log: permission denied",
+		},
+		"empty error keeps the fixed text": {spend: failed(""), want: "the spend report could not be read"},
+		"blank first line keeps the fixed text": {
+			spend: failed("\nthe detail after the break"),
+			want:  "the spend report could not be read",
+		},
+		"no report keeps the fixed text": {spend: nil, want: "the spend report could not be read"},
+	}
+	for name, tc := range cases {
+		p := deepSeekCostProvider(costProvidersNow, tc.spend, nil, nil, nil)
+		if p.Why != tc.want {
+			t.Errorf("%s: why = %q, want %q", name, p.Why, tc.want)
+		}
+		if p.Balance != nil || p.Today != nil || p.PerHour24h != nil {
+			t.Errorf("%s: a failed read draws figures, want none", name)
+		}
+	}
+}

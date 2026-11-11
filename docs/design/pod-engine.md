@@ -164,7 +164,7 @@ These unresolved programs are in packages the daemon does not reach, so the daem
 - `internal/cmd/daemon_supervisor.go` `commandWithEnv`
 - `internal/cmd/daemon_supervisor.go` `realDaemonControl`
 - `internal/cmd/dashboard.go` `dashboardJevSpend`
-- `internal/cmd/dashboard.go` `dashboardSpend`
+- `internal/cmd/dashboard.go` `execSpend`
 - `internal/cmd/dashboard_reexec.go` `verifyBinary`
 - `internal/cmd/editor.go` `openInEditor`
 - `internal/cmd/maint.go` `maintExecRun`
