@@ -311,8 +311,9 @@ func (d *Daemon) runScheduledMaintenance() {
 		// disk; against a remote server it would read the wrong one, so the
 		// gc is skipped. The night's backup does not read that disk: the
 		// server writes it into the backup root, so a scheduled tick still
-		// takes it (startStandbyBackup) and consumes the window once it ends. A
-		// request that fails here changed nothing a later request must wait
+		// takes it (startStandbyBackup) and consumes the window once it ends.
+		// The history archive reads over SQL, so that dispatch runs it first.
+		// A request that fails here changed nothing a later request must wait
 		// on.
 		d.logger.Printf("scheduled_maintenance: skipped: %s — gc needs a local server", why)
 		if requested {

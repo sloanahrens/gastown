@@ -3440,3 +3440,89 @@ func TestArchiveLimitsRefuseABadSettingAtTheRead(t *testing.T) {
 		}
 	})
 }
+
+// With an external Dolt server the gc is skipped with one log line, and the
+// history archive still runs before the night's backup: the new commits are in
+// the archive file when the backup starts (gt-il6fuf).
+func TestMaintenanceArchiveRunsOnAnExternalServerAndSkipsGC(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.serverDBs = []string{"gt", "hq"} // the local data dir holds nothing
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	commits := []archiveCommit{
+		{Hash: "h1", Committer: "gastown/crew/overseer", Date: gcTestNow.Add(-time.Hour), Message: "first"},
+	}
+	withArchiveFakes(d, f, map[string][]archiveCommit{"gt": commits}, nil)
+
+	d.runScheduledMaintenance()
+
+	if len(f.gcCalls) != 0 {
+		t.Errorf("gc ran against an external server: %v", f.gcCalls)
+	}
+	if n := strings.Count(logs.String(), "gc needs a local server"); n != 1 {
+		t.Errorf("gc skip lines = %d, want exactly one:\n%s", n, logs.String())
+	}
+	want := [][]string{
+		archiveCSVHeader,
+		{"h1", "gastown/crew/overseer", commits[0].Date.UTC().Format(time.RFC3339), "first"},
+	}
+	if got := readArchiveCSV(t, archiveFile(dir, "gt")); !csvRowsEqual(got, want) {
+		t.Errorf("archive rows = %v\nwant %v", got, want)
+	}
+	if strings.Join(f.backupCalls, ",") != "gt,hq" {
+		t.Errorf("backup calls = %v, want gt,hq", f.backupCalls)
+	}
+	archiveAt, backupAt := slices.Index(f.events, "archive gt"), slices.Index(f.events, "backup gt")
+	if archiveAt < 0 || backupAt < 0 || archiveAt > backupAt {
+		t.Errorf("events = %v; want the archive of gt before its backup", f.events)
+	}
+}
+
+// A run that follows nights with no archive catches up: every commit past the
+// stored watermark is written once, in order, and the watermark moves to the
+// newest one (gt-il6fuf).
+func TestMaintenanceArchiveRemoteRunAfterSkippedNightsCatchesUp(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.serverDBs = []string{"gt"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+	dir := t.TempDir()
+	d.patrolConfig = archiveConfig(dir)
+	commit := func(hash string, at time.Duration) archiveCommit {
+		return archiveCommit{Hash: hash, Committer: "gastown/crew/overseer", Date: gcTestNow.Add(at), Message: hash}
+	}
+	fake := withArchiveFakes(d, f, map[string][]archiveCommit{"gt": {commit("h1", -72*time.Hour), commit("h2", -48*time.Hour)}}, nil)
+
+	d.runScheduledMaintenance() // the first night: archives h1 and h2
+
+	// Two days pass with the watermark stale; commits land meanwhile.
+	fake.commits["gt"] = append(fake.commits["gt"],
+		commit("h3", -24*time.Hour), commit("h4", -12*time.Hour), commit("h5", -time.Hour))
+	later := gcTestNow.Add(48 * time.Hour)
+	d.maint.now = func() time.Time { return later }
+
+	d.runScheduledMaintenance() // the catch-up night
+
+	first := readArchiveCSV(t, filepath.Join(dir, archiveFileName("dolt-log", "gt", gcTestNow)))
+	second := readArchiveCSV(t, filepath.Join(dir, archiveFileName("dolt-log", "gt", later)))
+	got := append(first, second[1:]...) // the second file repeats the header
+	if len(got) != 6 {
+		t.Fatalf("archive holds %d row(s) and a header, want h1 through h5 once each: %v", len(got)-1, got)
+	}
+	for i, row := range got[1:] {
+		if want := fmt.Sprintf("h%d", i+1); row[0] != want {
+			t.Errorf("row %d = %s, want %s", i, row[0], want)
+		}
+	}
+	st, err := loadMaintenanceGCState(d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("loading state: %v", err)
+	}
+	if wm := st.ArchiveWatermarks["gt"]; !wm.Date.Equal(gcTestNow.Add(-time.Hour)) || !slices.Equal(wm.Hashes, []string{"h5"}) {
+		t.Errorf("gt watermark = %+v, want the date of h5 with hashes [h5]", wm)
+	}
+}
