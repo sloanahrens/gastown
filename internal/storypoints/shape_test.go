@@ -4,49 +4,69 @@ import (
 	"encoding/json"
 	"math"
 	"os"
-	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
 )
 
 const shapeFixturesPath = "../../docs/plans/2026-11-11-story-points-shape-fixtures.json"
 
-func TestEstimateTextWithLabels(t *testing.T) {
+func TestEstimateTextLabels(t *testing.T) {
 	t.Parallel()
-	issue := &beads.Issue{
-		Title:              "Add shape",
-		Status:             "open",
-		Type:               "task",
-		Priority:           2,
-		Labels:             []string{"sp", "rig:gastown"},
-		Description:        "## Goal\nDo it.\n",
-		AcceptanceCriteria: "- [ ] one\n- [ ] two\n",
+	tests := []struct {
+		name   string
+		labels []string
+		head   string
+	}{
+		{"with labels", []string{"sp", "rig:gastown"}, "# Add shape [open task P2] labels: sp, rig:gastown\n\n"},
+		{"without labels", nil, "# Add shape [open task P2]\n\n"},
 	}
-	want := "# Add shape [open task P2] labels: sp, rig:gastown\n\n" +
-		"## Description\n\n## Goal\nDo it.\n\n" +
-		"## Acceptance\n\n- [ ] one\n- [ ] two\n"
-	if got := EstimateText(issue); got != want {
-		t.Errorf("EstimateText() =\n%q\nwant\n%q", got, want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			issue := &beads.Issue{
+				Title:              "Add shape",
+				Status:             "open",
+				Type:               "task",
+				Priority:           2,
+				Labels:             tc.labels,
+				Description:        "## Goal\nDo it.\n",
+				AcceptanceCriteria: "- [ ] one\n- [ ] two\n",
+			}
+			want := tc.head +
+				"## Description\n\n## Goal\nDo it.\n\n" +
+				"## Acceptance\n\n- [ ] one\n- [ ] two\n"
+			if got := EstimateText(issue); got != want {
+				t.Errorf("EstimateText() =\n%q\nwant\n%q", got, want)
+			}
+		})
 	}
 }
 
-func TestEstimateTextWithoutLabelsOrAcceptance(t *testing.T) {
+func TestEstimateTextEmptyDescription(t *testing.T) {
 	t.Parallel()
 	issue := &beads.Issue{
-		Title:       "T",
-		Status:      "open",
-		Type:        "task",
-		Priority:    1,
-		Description: "D",
+		Title:    "T",
+		Status:   "open",
+		Type:     "task",
+		Priority: 2,
 	}
-	want := "# T [open task P1]\n\n## Description\n\nD\n"
-	if got := EstimateText(issue); got != want {
-		t.Errorf("EstimateText() = %q, want %q", got, want)
+	text := EstimateText(issue)
+	want := "# T [open task P2]\n\n## Description\n\n\n"
+	if text != want {
+		t.Fatalf("EstimateText() = %q, want %q", text, want)
+	}
+	f := Features(text, "gastown", SeatHaiku)
+	if f.Boxes != 0 || f.Paths != 0 || f.Pkgs != 0 || f.NCons != 0 || f.Tests != 0 || f.NBt != 0 {
+		t.Errorf("Features(empty description) = %+v, want zero counts", f)
+	}
+	if wantDLen := math.Log(1 + float64(utf8.RuneCountInString(text))); math.Abs(f.DLen-wantDLen) > 1e-9 {
+		t.Errorf("DLen = %v, want %v", f.DLen, wantDLen)
 	}
 }
 
-func TestEstimateTextOmitsEmptyAcceptance(t *testing.T) {
+func TestEstimateTextWhitespaceAcceptance(t *testing.T) {
 	t.Parallel()
 	issue := &beads.Issue{
 		Title:              "T",
@@ -54,10 +74,11 @@ func TestEstimateTextOmitsEmptyAcceptance(t *testing.T) {
 		Type:               "task",
 		Priority:           2,
 		Description:        "D",
-		AcceptanceCriteria: "  \n",
+		AcceptanceCriteria: "  \n\t\n",
 	}
-	if got := EstimateText(issue); strings.Contains(got, "## Acceptance") {
-		t.Errorf("EstimateText() has an Acceptance heading for a blank field: %q", got)
+	want := "# T [open task P2]\n\n## Description\n\nD\n"
+	if got := EstimateText(issue); got != want {
+		t.Errorf("EstimateText() = %q, want %q: a whitespace-only acceptance field adds nothing", got, want)
 	}
 }
 
