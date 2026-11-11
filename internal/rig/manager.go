@@ -673,15 +673,13 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 
 	// Initialize beads at rig level BEFORE creating worktrees.
 	// This ensures rig/.beads exists so worktree redirects can point to it.
-	// A tracked source repo's beads are already in <rig>/.beads, so InitBeads is
-	// skipped for it: its tracked branch only writes the mayor/rig redirect.
-	if !tracked {
-		fmt.Printf("  Initializing beads database...\n")
-		if err := m.InitBeads(rigPath, opts.BeadsPrefix, opts.Name); err != nil {
-			return nil, fmt.Errorf("initializing beads: %w", err)
-		}
-		fmt.Printf("   ✓ Initialized beads (prefix: %s)\n", opts.BeadsPrefix)
+	// For a tracked source repo InitBeads finds the adopted files in <rig>/.beads
+	// and writes no redirect (gt-3lvcjz.16).
+	fmt.Printf("  Initializing beads database...\n")
+	if err := m.InitBeads(rigPath, opts.BeadsPrefix, opts.Name); err != nil {
+		return nil, fmt.Errorf("initializing beads: %w", err)
 	}
+	fmt.Printf("   ✓ Initialized beads (prefix: %s)\n", opts.BeadsPrefix)
 
 	// Ensure metadata.json has dolt_mode=server and dolt_database=<rigName>.
 	// bd init --server sets dolt_mode but not dolt_database. EnsureMetadata
@@ -1636,12 +1634,23 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	beadsDir := filepath.Join(rigPath, ".beads")
 	mayorRigBeads := constants.LegacyRigBeadsPath(rigPath)
 
+	// A source repo that tracks .beads/ was adopted by AddRig: its config.yaml
+	// and metadata.json are the rig's database, already in <rig>/.beads, so no
+	// redirect is written for it, here or under mayor/rig (gt-3lvcjz.16). This
+	// check runs before the mayor clone check: a redirect written for an
+	// adopted rig would point its own database at mayor/rig.
+	_, adoptedErr := os.Stat(filepath.Join(beadsDir, "metadata.json"))
+	if adoptedErr != nil && !os.IsNotExist(adoptedErr) {
+		return fmt.Errorf("checking for adopted beads in %s: %w", beadsDir, adoptedErr)
+	}
+	adopted := adoptedErr == nil
+
 	// Check if source repo has tracked .beads/ (cloned into mayor/rig).
 	// We detect this by checking for metadata.json (a real beads database marker),
 	// not just the directory existence. This avoids false positives when we
 	// create mayorRigBeads for the untracked case (just a redirect container).
 	mayorRigMetadata := filepath.Join(mayorRigBeads, "metadata.json")
-	if _, err := os.Stat(mayorRigMetadata); err == nil {
+	if _, err := os.Stat(mayorRigMetadata); err == nil && !adopted {
 		// Tracked beads exist - create redirect to mayor/rig/.beads
 		if err := os.MkdirAll(beadsDir, 0755); err != nil {
 			return err
@@ -1663,12 +1672,16 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 	// the beads database. We create only the redirect file (not the DB directory)
 	// to avoid interfering with the tracked-beads detection logic.
 	// The directory must exist for WriteFile to create the redirect file.
-	if err := os.MkdirAll(mayorRigBeads, 0755); err != nil {
-		return fmt.Errorf("creating mayor/rig/.beads directory: %w", err)
-	}
-	mayorRedirectPath := filepath.Join(mayorRigBeads, "redirect")
-	if err := os.WriteFile(mayorRedirectPath, []byte("../../.beads\n"), 0644); err != nil {
-		return fmt.Errorf("creating mayor redirect file: %w", err)
+	// mayor/rig/.beads of an adopted rig is the clone's own tracked files, or
+	// absent when the clone was refused, so the adopted rig gets no redirect there.
+	if !adopted {
+		if err := os.MkdirAll(mayorRigBeads, 0755); err != nil {
+			return fmt.Errorf("creating mayor/rig/.beads directory: %w", err)
+		}
+		mayorRedirectPath := filepath.Join(mayorRigBeads, "redirect")
+		if err := os.WriteFile(mayorRedirectPath, []byte("../../.beads\n"), 0644); err != nil {
+			return fmt.Errorf("creating mayor redirect file: %w", err)
+		}
 	}
 
 	// Pin bd to the intended .beads directory/database through the shared

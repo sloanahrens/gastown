@@ -479,6 +479,69 @@ func TestInitBeads_TrackedBeads_CreatesRedirect(t *testing.T) {
 	}
 }
 
+// A beads path that cannot be checked is not read as untracked: InitBeads fails
+// before it writes a redirect (gt-3lvcjz.16). A regular file named .beads makes
+// the metadata.json check fail with ENOTDIR, which is not "not exist".
+func TestInitBeads_UncheckableBeadsDirFails(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads"), []byte("not a dir\n"), 0644); err != nil {
+		t.Fatalf("writing .beads file: %v", err)
+	}
+
+	manager, _, _ := testManager("", nil)
+	if err := manager.InitBeads(rigPath, "tk", ""); err == nil {
+		t.Fatal("InitBeads succeeded, want an error for a .beads path it cannot check")
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect")); !os.IsNotExist(err) {
+		t.Errorf("mayor redirect = %v, want none written", err)
+	}
+}
+
+// An adopted rig's beads files are its own database (gt-3lvcjz.16): InitBeads
+// runs bd init at the rig root against them and writes no redirect, neither in
+// <rig>/.beads, which would point the database at itself, nor under mayor/rig,
+// which a tracked rig may not have.
+func TestInitBeads_AdoptedBeads_InitsWithoutRedirect(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	rigBeads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	for name, body := range map[string]string{
+		"config.yaml":   "issue-prefix: tk\n",
+		"metadata.json": "{}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(rigBeads, name), []byte(body), 0644); err != nil {
+			t.Fatalf("writing adopted %s: %v", name, err)
+		}
+	}
+
+	manager, _, bd := testManager("", nil)
+	if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
+		t.Fatalf("InitBeads: %v", err)
+	}
+
+	var initAtRoot bool
+	for _, c := range bd.recorded() {
+		if c.Verb == "init" && c.Dir == rigPath {
+			initAtRoot = true
+		}
+	}
+	if !initAtRoot {
+		t.Errorf("bd init did not run at the rig root; calls:\n%s", strings.Join(bd.argvs(), "\n"))
+	}
+	for _, redirect := range []string{
+		filepath.Join(rigBeads, "redirect"),
+		filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect"),
+	} {
+		if _, err := os.Stat(redirect); !os.IsNotExist(err) {
+			t.Errorf("%s = %v, want no redirect", redirect, err)
+		}
+	}
+}
+
 func TestInitBeads_LocalBeads_CreatesDatabase(t *testing.T) {
 	t.Parallel()
 	// When the cloned repo does NOT have tracked beads (no mayor/rig/.beads),
@@ -1987,12 +2050,16 @@ func TestAddRig_InvalidPrefixFailsTheBeadsInit(t *testing.T) {
 // (gt-3lvcjz.16).
 func TestMayorCloneNeeded(t *testing.T) {
 	t.Parallel()
+	// mayorCloneNeeded reads only the options, so a tracked-beads row has the
+	// same input as a plain one. What proves the beads reason is gone is that
+	// the tracked add succeeds with the clone refused, in the end-to-end test.
 	for name, tc := range map[string]struct {
 		opts AddRigOptions
 		want string
 	}{
-		"no --sparse-checkout needs no clone": {AddRigOptions{Name: "plain"}, ""},
-		"--sparse-checkout needs a clone":     {AddRigOptions{Name: "sparse", SparseCheckout: []string{"docs"}}, "--sparse-checkout configures the mayor clone"},
+		"no --sparse-checkout needs no clone":    {AddRigOptions{Name: "plain"}, ""},
+		"--sparse-checkout needs a clone":        {AddRigOptions{Name: "sparse", SparseCheckout: []string{"docs"}}, "--sparse-checkout configures the mayor clone"},
+		"a repo tracking .beads/ needs no clone": {AddRigOptions{Name: "tracked", GitURL: "https://example.com/tracked.git"}, ""},
 	} {
 		if got := mayorCloneNeeded(tc.opts); got != tc.want {
 			t.Errorf("%s: mayorCloneNeeded = %q, want %q", name, got, tc.want)
@@ -2279,11 +2346,15 @@ func TestAddRig_TrackedBeadsWithSyncRemote_PassesReinitFlags(t *testing.T) {
 		t.Fatalf("AddRig: %v", err)
 	}
 
+	// The first bd init at the rig root is the adopt's workspace init, the one
+	// that carries the reinit flags. InitBeads runs a Force init after it, which
+	// takes no reinit flags, so the last init is not the one under test.
 	rigPath := filepath.Join(root, "testrip")
 	var sourceInit *beads.InitOptions
 	for _, c := range bd.withVerb("init") {
 		if c.Dir == rigPath {
 			sourceInit = &c.Init
+			break
 		}
 	}
 	if sourceInit == nil {
