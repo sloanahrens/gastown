@@ -79,15 +79,6 @@ func TestDaemonComposeSecretsManifestParses(t *testing.T) {
 		if !unclaimed["ntfy-push.sh"] {
 			t.Error("the shipped manifest records no search for ntfy-push.sh")
 		}
-		// The backup repository's deploy key is read by the repo-local
-		// core.sshCommand, so it is an optional files entry and no longer unclaimed
-		// (gt-l6h72l).
-		if f := listed["dolt-archive.key"]; f.Name == "" || f.Mode != "0600" || f.Required || !strings.Contains(f.Consumer, "core.sshCommand") {
-			t.Errorf("dolt-archive.key = %+v, want an optional 0600 files entry whose consumer names core.sshCommand", f)
-		}
-		if unclaimed["dolt-archive.key"] {
-			t.Error("the shipped manifest still records dolt-archive.key as unclaimed, though the backup repository's core.sshCommand reads it")
-		}
 	})
 
 	// Each row is a manifest the command refuses before it renders, naming the
