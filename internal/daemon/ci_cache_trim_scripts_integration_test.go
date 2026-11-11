@@ -504,21 +504,29 @@ func TestIntegrationCICacheTrimModuleScripts(t *testing.T) {
 		}
 	})
 
-	t.Run("a module name with a line break is removed whole, as one entry", func(t *testing.T) {
+	t.Run("module names with a space or a line break are removed whole, one entry each", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		// A line break in a module's name must not split it into two entries: the
-		// apply would then remove neither directory and report two.
-		dir := filepath.Join(root, "pkg", "mod", "odd\nname@v1.0.0")
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("making the module directory: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "file.go"), []byte("package odd\n"), 0o644); err != nil {
-			t.Fatalf("writing into the module directory: %v", err)
-		}
-		old := time.Now().Add(-ciCacheScriptOldAge)
-		if err := os.Chtimes(dir, old, old); err != nil {
-			t.Fatalf("dating the module directory: %v", err)
+		// A space or a line break in a module's name must not split it into two
+		// entries: the apply would then remove neither directory and report more.
+		// The fresh module is the neighbour the apply must leave alone.
+		modules := filepath.Join(root, "pkg", "mod")
+		now := time.Now()
+		for name, mtime := range map[string]time.Time{
+			"odd name@v1.0.0":  now.Add(-ciCacheScriptOldAge),
+			"odd\nname@v1.0.0": now.Add(-ciCacheScriptOldAge),
+			"keep@v1.0.0":      now.Add(-time.Minute),
+		} {
+			dir := filepath.Join(modules, name)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("making the module directory %q: %v", name, err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "file.go"), []byte("package odd\n"), 0o644); err != nil {
+				t.Fatalf("writing into the module directory %q: %v", name, err)
+			}
+			if err := os.Chtimes(dir, mtime, mtime); err != nil {
+				t.Fatalf("dating the module directory %q: %v", name, err)
+			}
 		}
 
 		stdout, stderr, status := ciCacheScriptRun(t, ciCacheModuleTrimScript, root, ciCacheScriptAgeMinutes, "1")
@@ -529,11 +537,16 @@ func TestIntegrationCICacheTrimModuleScripts(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the module apply's reply does not parse: %v:\n%s", err, stdout)
 		}
-		if reply.removed != 1 {
-			t.Errorf("the module apply reports %d directories removed, want 1:\n%s", reply.removed, stdout)
+		if reply.removed != 2 {
+			t.Errorf("the module apply reports %d directories removed, want 2:\n%s", reply.removed, stdout)
 		}
-		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
-			t.Errorf("the module directory with a line break in its name is still present (stat error %v)", err)
+		for _, name := range []string{"odd name@v1.0.0", "odd\nname@v1.0.0"} {
+			if _, err := os.Stat(filepath.Join(modules, name)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the old module directory %q is still present (stat error %v)", name, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(modules, "keep@v1.0.0")); err != nil {
+			t.Errorf("the fresh module directory was touched: %v", err)
 		}
 	})
 }

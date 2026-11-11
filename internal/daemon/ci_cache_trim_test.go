@@ -1054,6 +1054,24 @@ func TestCICacheTrimModuleScriptNeverNamesTheDownloadCache(t *testing.T) {
 	}
 }
 
+// TestCICacheTrimModuleScriptRemovesNULSafely: the module apply lists its
+// directories NUL-terminated and removes them with xargs -0, so a name holding a
+// space or a line break is one entry. A loop over the list would split a name at
+// a line break, so the apply has none.
+func TestCICacheTrimModuleScriptRemovesNULSafely(t *testing.T) {
+	t.Parallel()
+	for _, want := range []string{"-print0", "xargs -0 rm -rf"} {
+		if !strings.Contains(ciCacheModuleTrimScript, want) {
+			t.Errorf("the module apply does not contain %q", want)
+		}
+	}
+	for _, loop := range []string{"while ", "for "} {
+		if strings.Contains(ciCacheModuleTrimScript, loop) {
+			t.Errorf("the module apply loops with %q over its list, which splits a name at a line break", loop)
+		}
+	}
+}
+
 // TestCICacheTrimModuleVolumeReadings: the module volume's apply logs the count
 // of module directories it removed, and raises its own no-op item over its cap
 // when it removed none, keyed apart from the other volumes' items.

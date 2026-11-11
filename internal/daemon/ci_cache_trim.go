@@ -225,9 +225,7 @@ fi
 // root, the age in minutes and the cap in KiB. The module path is the constant
 // pkg/mod under the root, and the program refuses a root or module path that is
 // not there. At or under the cap it reports the size and stops, as the capped
-// script does: the walk below runs only over the cap. The walk is a shell program
-// because it runs under sh -c in the dind container, which has no gt binary; the
-// Go side owns the table, the argv and the reply.
+// script does: the walk below runs only over the cap.
 const ciCacheModuleOpen = `set -eu
 root=$1; age=$2; cap=$3
 mod="$root/pkg/mod"
@@ -267,7 +265,9 @@ echo "after_kib=$before"
 // cache (pkg/mod/cache) on its next use, so removing it whole costs a re-extract
 // and nothing else; removing one of its files would leave a module that breaks
 // the next build. That is why the age is the module directory's own time and not
-// its files': the directory's time is when a build last extracted into it.
+// its files': the directory's time is when a build last extracted into it. It is
+// shell because the program runs under sh -c in the dind container, which has
+// no gt binary.
 const ciCacheModuleTrimScript = ciCacheModuleOpen + ciCacheModuleFind + ` > "$tmp/list"
 removed=$(tr -cd '\000' < "$tmp/list" | wc -c | tr -d ' ')
 if [ "$removed" -gt 0 ]; then xargs -0 rm -rf < "$tmp/list"; fi
