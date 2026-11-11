@@ -27,7 +27,10 @@ func TestPaneColumns(t *testing.T) {
 		{"attentionnote", "left", "", "costnote"},
 		{"costnote", "left", "attentionnote", "rigsnote"},
 		{"rigsnote", "left", "costnote", "tiersweepnote"},
-		{"tiersweepnote", "left", "rigsnote", ""},
+		{"tiersweepnote", "left", "rigsnote", "beadsnote"},
+		// The Beads pane sits directly under the tier sweeps
+		// (TestBeadsPaneSitsDirectlyUnderTierSweeps reads the exact order).
+		{"beadsnote", "left", "tiersweepnote", ""},
 		// The Polecats note is not a column pane: it sits in the Landings block
 		// (TestPolecatsIsInLandingsBetweenItsFiguresAndRows).
 		{"machnote", "right", "", "cloudnote"},
@@ -36,7 +39,6 @@ func TestPaneColumns(t *testing.T) {
 		{"omnote", "right", "forgejonote", "jevnote"},
 		{"jevnote", "right", "omnote", "mangonote"},
 		{"mangonote", "right", "jevnote", ""},
-		{"beadsnote", "right", "mangonote", ""},
 	} {
 		got := left
 		other := right
