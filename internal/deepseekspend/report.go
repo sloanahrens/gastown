@@ -481,7 +481,11 @@ func readAppended(path string, open Opener, from cursor) (text string, next curs
 	if err != nil {
 		return "", from, false, err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil && err == nil {
+			text, next, restarted, err = "", from, false, closeErr
+		}
+	}()
 	info, err := f.Stat()
 	if err != nil {
 		return "", from, false, err
