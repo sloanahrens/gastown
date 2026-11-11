@@ -38,7 +38,6 @@ internal/daemon/daemon.go	1	pending-retirement	daemon: the rig beads directory u
 internal/daemon/hm_skew.go	1	pending-retirement	daemon hm skew probe: the hm rig worktree path, hm/mayor/rig
 internal/daemon/om_skew.go	1	pending-retirement	daemon om skew probe: the om rig worktree path, om/mayor/rig
 internal/daemon/rebuild_gt.go	1	pending-retirement	daemon rebuild_gt: builds the gt binary from the rig's mayor/rig checkout
-internal/daemon/scheduled_slings_gate.go	1	pending-retirement	daemon scheduled slings gate: runs the gate command in the rig's mayor/rig checkout
 internal/daemon/types.go	1	pending-retirement	daemon types: the daemon.json path under constants.DirMayor
 internal/daemonimage/build.go	1	pending-retirement	daemonimage build: the error text that refuses a mayor/rig clone as a build source
 internal/doctor/beads_redirect_target_check.go	1	pending-retirement	doctor beads redirect check: the mayor/rig/.beads target it compares against
