@@ -47,11 +47,13 @@ const (
 // The host rules' stable ids. They are the item keys, so an ack and a reader
 // find a rule by the same name.
 const (
-	hostRuleDiskWarn    = attention.RuleHostDiskWarn
-	hostRuleDiskCrit    = attention.RuleHostDiskCrit
-	hostRuleMemLow      = attention.RuleHostMemLow
-	hostRuleDockerDown  = attention.RuleHostDockerDown
-	hostRuleForgejoDown = attention.RuleHostForgejoDown
+	hostRuleDiskWarn     = attention.RuleHostDiskWarn
+	hostRuleDiskCrit     = attention.RuleHostDiskCrit
+	hostRuleNodeDiskWarn = attention.RuleHostNodeDiskWarn
+	hostRuleNodeDiskCrit = attention.RuleHostNodeDiskCrit
+	hostRuleMemLow       = attention.RuleHostMemLow
+	hostRuleDockerDown   = attention.RuleHostDockerDown
+	hostRuleForgejoDown  = attention.RuleHostForgejoDown
 	// hostProbeFailedPrefix keys the item a failed probe raises; the probe's
 	// name follows.
 	hostProbeFailedPrefix = "host.probe_failed:"
@@ -92,10 +94,11 @@ func (s *attentionSources) requiredStackContainers() []string {
 // The names a failed probe is reported under, as the operator would type the
 // command.
 const (
-	hostProbeDisk    = "disk usage"
-	hostProbeMem     = "memory_pressure"
-	hostProbeDocker  = "docker ps"
-	hostProbeForgejo = "forgejo /api/healthz"
+	hostProbeDisk     = "disk usage"
+	hostProbeNodeDisk = "control node disk"
+	hostProbeMem      = "memory_pressure"
+	hostProbeDocker   = "docker ps"
+	hostProbeForgejo  = "forgejo /api/healthz"
 )
 
 // hostDisk is one volume's usage as the rules read it.
@@ -104,12 +107,26 @@ type hostDisk struct {
 	FreeGB  float64
 }
 
+// errHostNodeNotConfigured says the town runs no control cluster whose node
+// disk could be read, so there is nothing to watch. It is not a probe failure:
+// a host with no control cluster is not an outage, and the rules raise nothing.
+// Container mode runs in the control cluster, so there the same answer is a
+// failed read (fileHostProbes.NodeDisks).
+var errHostNodeNotConfigured = errors.New("the town runs no control cluster, so there is no control node disk to read")
+
 // hostProbes are the host reads the collectors make. attentionHostProbes
 // selects the production one: fileHostProbes (attention_host_file.go) in
 // container mode, systemHostProbes otherwise. Tests inject fakes.
 type hostProbes interface {
 	// Disk is the usage of the volume holding the town root.
 	Disk() (hostDisk, error)
+	// NodeDisks are the control nodes' data disks, one read per node
+	// (controlNodeDisk). A nil error is a set of reads: each is a reading, or
+	// its own failure in hostNodeRead.Err, and each node is ruled on alone.
+	// errHostNodeNotConfigured says the town runs no control cluster to read,
+	// and is only returned outside container mode; any other error is a read
+	// that failed as a whole.
+	NodeDisks(ctx context.Context) ([]hostNodeRead, error)
 	// MemFreePct is the host's free memory as a percentage of total.
 	MemFreePct(ctx context.Context) (float64, error)
 	// Containers are the names of the running Docker containers.
@@ -130,10 +147,12 @@ type hostProbes interface {
 // every other mode the machine the daemon runs on. getenv is a seam so a test
 // sets the mode without touching the process environment. forgejoBaseURL is
 // the town's Forgejo origin (townForgejoBaseURL), which both modes ask over
-// the network rather than read from the host.
-func attentionHostProbes(townRoot string, getenv func(string) string, forgejoBaseURL func() (string, error)) hostProbes {
+// the network rather than read from the host. nodeDisks reads the control
+// nodes' disks; only container mode uses it, and every other mode reports the
+// node disk not configured.
+func attentionHostProbes(townRoot string, getenv func(string) string, forgejoBaseURL func() (string, error), nodeDisks func(context.Context) ([]hostNodeRead, error)) hostProbes {
 	if getenv(config.ContainerModeEnv) == config.SupervisorContainer {
-		return newFileHostProbes(townRoot, forgejoBaseURL)
+		return newFileHostProbes(townRoot, forgejoBaseURL, nodeDisks)
 	}
 	return systemHostProbes{townRoot: townRoot, forgejoBaseURL: forgejoBaseURL}
 }
@@ -158,6 +177,13 @@ func (p systemHostProbes) Disk() (hostDisk, error) {
 		return hostDisk{}, err
 	}
 	return hostDisk{UsedPct: info.UsedPercent, FreeGB: info.AvailableGB()}, nil
+}
+
+// NodeDisks reports the control nodes' disks as not configured: the nodes are
+// read only in container mode, through the control cluster
+// (fileHostProbes.NodeDisks).
+func (systemHostProbes) NodeDisks(context.Context) ([]hostNodeRead, error) {
+	return nil, errHostNodeNotConfigured
 }
 
 func (p systemHostProbes) RigParked(rig string) (bool, error) {
@@ -420,6 +446,144 @@ func (s *attentionSources) collectHostDisk(ctx context.Context) ([]attention.Ite
 	}}, nil
 }
 
+// collectHostNodeDisk raises host.node_disk_crit or host.node_disk_warn, whichever
+// the control nodes' data disks are at (never both for one item), with the
+// thresholds of the town root's disk rule. The node's image filesystem holds the
+// container runtime's store and the local-path claims, so a full one gets the
+// node's pods evicted (gt-x1po96).
+//
+// Each node is ruled on its own figures. The one rule item names the node at
+// the highest level, the fullest first among equals, since the rule's key is
+// one item. A node that could not be read is its own info item, keyed by the
+// node, and the other nodes are still ruled. A town with no control cluster
+// raises nothing; a read that failed as a whole, including a container-mode town
+// with no kubernetes runner, is an info item.
+func (s *attentionSources) collectHostNodeDisk(ctx context.Context) ([]attention.Item, error) {
+	reads, err := s.host.NodeDisks(ctx)
+	if errors.Is(err, errHostNodeNotConfigured) {
+		return nil, nil
+	}
+	if err != nil {
+		return s.hostProbeFailed(hostProbeNodeDisk, err, attention.KindHostNodeDisk), nil
+	}
+	var (
+		worst  *hostNodeDisk
+		probes []attention.Item
+	)
+	for i := range reads {
+		r := &reads[i]
+		if r.Err != nil {
+			probes = append(probes, hostProbeItem(hostProbeNodeDisk+" "+r.Node, r.Err))
+			continue
+		}
+		if worst == nil || nodeDiskWorse(r.Disk, worst.Disk) {
+			worst = &r.hostNodeDisk
+		}
+	}
+	var rated []attention.Item
+	if worst != nil {
+		if it, ok := nodeDiskItem(*worst); ok {
+			rated = append(rated, it)
+		}
+	}
+	// A node that could not be read may hold a rule it raised on an earlier
+	// tick, and its last reading is not a clear. One rule stands at a time: of
+	// the fresh rule and the held ones, the worst level is kept, so a held
+	// warning never sits beside a fresh critical, nor a fresh warning beside a
+	// held critical (gt-x1po96, review round 3).
+	if len(probes) > 0 {
+		for _, held := range prevOfKind(s.prev, attention.KindHostNodeDisk) {
+			rated = worseNodeDiskRule(rated, held)
+		}
+	}
+	return append(rated, probes...), nil
+}
+
+// worseNodeDiskRule returns rated with candidate folded in: the single rule item
+// at the worse level of the two (critical over warning), the existing one on a
+// tie, so the result never holds two node-disk rules.
+func worseNodeDiskRule(rated []attention.Item, candidate attention.Item) []attention.Item {
+	if len(rated) == 0 {
+		return []attention.Item{candidate}
+	}
+	if nodeDiskRuleLevel(candidate.Key) > nodeDiskRuleLevel(rated[0].Key) {
+		return []attention.Item{candidate}
+	}
+	return rated
+}
+
+// nodeDiskRuleLevel is the level a node-disk rule key stands for.
+func nodeDiskRuleLevel(key string) int {
+	switch key {
+	case hostRuleNodeDiskCrit:
+		return nodeDiskLevelCrit
+	case hostRuleNodeDiskWarn:
+		return nodeDiskLevelWarn
+	}
+	return nodeDiskLevelQuiet
+}
+
+// nodeDiskItem is the rule item a node's disk raises, if its level is over a
+// threshold: host.node_disk_crit at the critical level, host.node_disk_warn at
+// the warning level, and none for a quiet disk.
+func nodeDiskItem(n hostNodeDisk) (attention.Item, bool) {
+	switch nodeDiskLevel(n.Disk) {
+	case nodeDiskLevelCrit:
+		return nodeDiskRuleItem(hostRuleNodeDiskCrit, attention.SeverityHigh, n), true
+	case nodeDiskLevelWarn:
+		return nodeDiskRuleItem(hostRuleNodeDiskWarn, attention.SeverityLow, n), true
+	}
+	return attention.Item{}, false
+}
+
+// nodeDiskRuleItem is the rule item for node n under key rule.
+func nodeDiskRuleItem(rule string, sev attention.Severity, n hostNodeDisk) attention.Item {
+	return attention.Item{
+		Key:      rule,
+		Kind:     attention.KindHostNodeDisk,
+		Severity: sev,
+		Summary: fmt.Sprintf("control node %s data disk %.0f%% used, %.1f GB free; see docs/guides/control-cluster-disk.md",
+			n.Node, n.Disk.UsedPct, n.Disk.FreeGB),
+	}
+}
+
+// The levels a control node's disk is at, by the town root's thresholds. The
+// rule item is the level's rule.
+const (
+	nodeDiskLevelQuiet = iota
+	nodeDiskLevelWarn
+	nodeDiskLevelCrit
+)
+
+// nodeDiskLevel is how far a disk is past the thresholds: critical at 90% used
+// or under 5 GB free, a warning at 80% used or under 12 GB free.
+func nodeDiskLevel(d hostDisk) int {
+	switch {
+	case d.UsedPct >= attentionDiskCritUsedPct || d.FreeGB < attentionDiskCritFreeGB:
+		return nodeDiskLevelCrit
+	case d.UsedPct >= attentionDiskWarnUsedPct || d.FreeGB < attentionDiskWarnFreeGB:
+		return nodeDiskLevelWarn
+	}
+	return nodeDiskLevelQuiet
+}
+
+// nodeDiskWorse reports whether disk a is at a higher level than b, or at the
+// same level and fuller.
+func nodeDiskWorse(a, b hostDisk) bool {
+	la, lb := nodeDiskLevel(a), nodeDiskLevel(b)
+	return la > lb || (la == lb && a.UsedPct > b.UsedPct)
+}
+
+// hasItemKey reports whether items holds an item with key.
+func hasItemKey(items []attention.Item, key string) bool {
+	for _, it := range items {
+		if it.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
 // collectHostMem raises host.mem_low when less than 15% of the host's memory
 // is free.
 func (s *attentionSources) collectHostMem(ctx context.Context) ([]attention.Item, error) {
@@ -584,13 +748,19 @@ func withForgejoUnreadableReason(summary, reason string) string {
 // whatever it last held rather than clearing a real alarm (townhealth's
 // UNKNOWN rule). The other probes are other collectors and are unaffected.
 func (s *attentionSources) hostProbeFailed(probe string, err error, kind attention.Kind) []attention.Item {
-	out := prevOfKind(s.prev, kind)
-	return append(out, attention.Item{
+	return append(prevOfKind(s.prev, kind), hostProbeItem(probe, err))
+}
+
+// hostProbeItem is the info item a failed probe raises, keyed by the probe's
+// name. A probe that fails on several nodes names each node in its own probe
+// name, so each failure is its own item.
+func hostProbeItem(probe string, err error) attention.Item {
+	return attention.Item{
 		Key:      hostProbeFailedPrefix + probe,
 		Kind:     attention.KindHostProbe,
 		Severity: attention.SeverityLow,
 		Summary:  fmt.Sprintf("host probe %s failed: %s", probe, oneLine(err.Error())),
-	})
+	}
 }
 
 // oneLine collapses s to its first line, capped, for a queue row.

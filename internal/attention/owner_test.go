@@ -24,15 +24,17 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 	// other row is the overseer's, which the loop below pins so a rule moving
 	// between the two is a test failure rather than a quiet retag.
 	operator := map[string]bool{
-		RuleQuestionNew:     true,
-		RuleQuestionStale:   true,
-		RuleOverseerSilent:  true,
-		RuleHostDiskWarn:    true,
-		RuleHostDiskCrit:    true,
-		RuleHostMemLow:      true,
-		RuleHostDockerDown:  true,
-		RuleHostForgejoDown: true,
-		RuleHostProbe:       true,
+		RuleQuestionNew:      true,
+		RuleQuestionStale:    true,
+		RuleOverseerSilent:   true,
+		RuleHostDiskWarn:     true,
+		RuleHostDiskCrit:     true,
+		RuleHostNodeDiskWarn: true,
+		RuleHostNodeDiskCrit: true,
+		RuleHostMemLow:       true,
+		RuleHostDockerDown:   true,
+		RuleHostForgejoDown:  true,
+		RuleHostProbe:        true,
 	}
 	for _, rule := range Rules() {
 		want := OwnerOverseer

@@ -248,6 +248,11 @@ type Daemon struct {
 	// only.
 	lastAttention *attentionCache
 
+	// controlNodes holds the control cluster's node names between attention
+	// ticks, for controlNodeNameReuse (see controlNodeNames). Readings are never
+	// held here.
+	controlNodes controlNodeNames
+
 	// hostProbes replaces the production reads of the attention host
 	// collectors (attention_host.go); nil is production.
 	hostProbes hostProbes
@@ -317,6 +322,9 @@ type Daemon struct {
 	// buildCommitFn replaces the daemon's own build commit (see buildCommit)
 	// in tests; nil reads the version package's.
 	buildCommitFn func() string
+	// hostNodeReadContextFn replaces hostNodeReadContext, the per-run deadline of
+	// the node-disk read, so a test can count the deadlines a read creates.
+	hostNodeReadContextFn func(context.Context) (context.Context, context.CancelFunc)
 
 	// seams replaces the heartbeat, upgrade and main-branch
 	// collaborators in tests (see daemonSeams); the zero value is production.

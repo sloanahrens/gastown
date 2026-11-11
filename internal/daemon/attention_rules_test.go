@@ -19,10 +19,14 @@ func TestAttentionEveryCollectorRuleHasFlags(t *testing.T) {
 	f := newAttentionFixture(t, time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC))
 	for _, c := range f.src.collectors() {
 		it := attention.Item{Kind: c.kind, Key: "k"}
-		if c.kind == attention.KindHostDisk {
-			for _, key := range []string{hostRuleDiskWarn, hostRuleDiskCrit} {
+		if c.kind == attention.KindHostDisk || c.kind == attention.KindHostNodeDisk {
+			keys := []string{hostRuleDiskWarn, hostRuleDiskCrit}
+			if c.kind == attention.KindHostNodeDisk {
+				keys = []string{hostRuleNodeDiskWarn, hostRuleNodeDiskCrit}
+			}
+			for _, key := range keys {
 				if _, ok := attention.Flags(attention.RuleFor(attention.Item{Kind: c.kind, Key: key})); !ok {
-					t.Errorf("host disk rule %q has no flags row", key)
+					t.Errorf("%s rule %q has no flags row", c.kind, key)
 				}
 			}
 			continue

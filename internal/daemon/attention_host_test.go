@@ -18,8 +18,16 @@ import (
 // fakeHost is a hostProbes whose answers a test sets. The zero value is not
 // healthy; healthyHost is.
 type fakeHost struct {
-	disk                hostDisk
-	diskErr             error
+	disk    hostDisk
+	diskErr error
+	// node is the control node's disk and nodeErr the read's failure. A zero
+	// node with no error is a town with no control cluster: a reading always
+	// names its node. nodeReads, when set, is the per-node reads in full, for a
+	// test where one node fails and another reads.
+	node                hostNodeDisk
+	nodeErr             error
+	nodeReads           []hostNodeRead
+	nodeCalls           int
 	memFree             float64
 	memErr              error
 	containers          []string
@@ -51,10 +59,17 @@ func (f *fakeHost) RigParked(rig string) (bool, error) {
 // reaches no network.
 func noForgejo() (string, error) { return "", nil }
 
+// noNodeDisk is a town with no control node read: the production probe built
+// over it reports the node disk not configured.
+func noNodeDisk(context.Context) ([]hostNodeRead, error) {
+	return nil, errHostNodeNotConfigured
+}
+
 // healthyHost is a host no rule fires on.
 func healthyHost() *fakeHost {
 	return &fakeHost{
 		disk:       hostDisk{UsedPct: 40, FreeGB: 300},
+		node:       hostNodeDisk{Node: "colima-gt-control", Disk: hostDisk{UsedPct: 40, FreeGB: 300}},
 		memFree:    60,
 		containers: allStackContainers(),
 	}
@@ -63,6 +78,22 @@ func healthyHost() *fakeHost {
 func (f *fakeHost) Disk() (hostDisk, error) {
 	f.diskCalls++
 	return f.disk, f.diskErr
+}
+
+// NodeDisks answers with nodeReads when a test sets them, and otherwise with the
+// one node in node: a zero node with no error is a town with no control cluster.
+func (f *fakeHost) NodeDisks(context.Context) ([]hostNodeRead, error) {
+	f.nodeCalls++
+	if f.nodeReads != nil {
+		return f.nodeReads, nil
+	}
+	if f.nodeErr != nil {
+		return nil, f.nodeErr
+	}
+	if f.node.Node == "" {
+		return nil, errHostNodeNotConfigured
+	}
+	return []hostNodeRead{{hostNodeDisk: f.node}}, nil
 }
 
 func (f *fakeHost) MemFreePct(context.Context) (float64, error) {
