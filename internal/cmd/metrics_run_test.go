@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,5 +37,131 @@ func TestMetricsRunSkipsAnHourWhenAnotherRunHoldsTheLock(t *testing.T) {
 	}
 	if _, err := os.Stat(metrics.SnapshotPath(town)); !os.IsNotExist(err) {
 		t.Errorf("a snapshot was appended while the lock was held (stat err = %v)", err)
+	}
+}
+
+// The hour runs the snapshot, the regime step and the analysis in that order,
+// every step runs even when an earlier one fails, and the snapshot's error is
+// the one reported when several fail.
+func TestMetricsHourRunsEveryStepAndReportsTheFirstFailure(t *testing.T) {
+	t.Parallel()
+	errSnapshot := errors.New("snapshot failed")
+	errRegime := errors.New("regime failed")
+	errAnalyse := errors.New("analyse failed")
+	tests := []struct {
+		name                               string
+		snapshotErr, regimeErr, analyseErr error
+		want                               error
+	}{
+		{name: "all succeed", want: nil},
+		{name: "the snapshot fails", snapshotErr: errSnapshot, want: errSnapshot},
+		{name: "the regime step fails", regimeErr: errRegime, want: errRegime},
+		{name: "the analysis fails", analyseErr: errAnalyse, want: errAnalyse},
+		{name: "the snapshot and the regime step fail", snapshotErr: errSnapshot, regimeErr: errRegime, want: errSnapshot},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []string
+			steps := metricsHourSteps{
+				snapshot: func(context.Context, io.Writer, string) error {
+					calls = append(calls, "snapshot")
+					return tc.snapshotErr
+				},
+				regime: func(io.Writer, string) error {
+					calls = append(calls, "regime")
+					return tc.regimeErr
+				},
+				analyse: func(context.Context, io.Writer, string) error {
+					calls = append(calls, "analyse")
+					return tc.analyseErr
+				},
+			}
+			err := runMetricsHourWith(context.Background(), io.Discard, t.TempDir(), steps)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if got := strings.Join(calls, ","); got != "snapshot,regime,analyse" {
+				t.Fatalf("steps ran %s, want every step in order", got)
+			}
+		})
+	}
+}
+
+// writeHourFile writes content at the town-relative path under town.
+func writeHourFile(t *testing.T, town, rel, content string) {
+	t.Helper()
+	path := filepath.Join(town, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The hour records the install receipts into the regime log under the process
+// actor, and a second step over the same receipts prints nothing because the
+// log holds every event.
+func TestRecordInstallRegimeEventsRecordsTheReceipts(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeHourFile(t, town, "daemon/install-receipts.jsonl",
+		`{"commit":"abc123","event":"installed","ts":"2026-11-10T12:00:00Z"}`+"\n")
+
+	var out bytes.Buffer
+	if err := recordInstallRegimeEvents(&out, metrics.OSEnv(town), townMetricsActor); err != nil {
+		t.Fatalf("recordInstallRegimeEvents: %v", err)
+	}
+	if !strings.Contains(out.String(), "recorded 1 install regime events") {
+		t.Fatalf("output = %q, want the receipt counted", out.String())
+	}
+	data, err := os.ReadFile(metrics.RegimeEventsPath(town))
+	if err != nil {
+		t.Fatalf("reading the record: %v", err)
+	}
+	if !strings.Contains(string(data), `"actor":"town-metrics"`) || !strings.Contains(string(data), `"after_ref":"abc123"`) {
+		t.Fatalf("record = %q, want the install event under the process actor", data)
+	}
+
+	out.Reset()
+	if err := recordInstallRegimeEvents(&out, metrics.OSEnv(town), townMetricsActor); err != nil {
+		t.Fatalf("second recordInstallRegimeEvents: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("second step printed %q, want nothing recorded", out.String())
+	}
+}
+
+// A receipts file the hour cannot read prints one line and does not fail the
+// step: the other receipts still record.
+func TestRecordInstallRegimeEventsReportsAnUnreadableFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the installer's receipts file would be is a read the
+	// host refuses, which is what a broken copy of the file looks like.
+	if err := os.MkdirAll(filepath.Join(town, "daemon", "install-receipts.jsonl"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeHourFile(t, town, "daemon/install-om-receipts.jsonl",
+		`{"commit":"om987","event":"noop","ts":"2026-11-11T01:30:00Z"}`+"\n")
+
+	var out bytes.Buffer
+	if err := recordInstallRegimeEvents(&out, metrics.OSEnv(town), townMetricsActor); err != nil {
+		t.Fatalf("recordInstallRegimeEvents: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("output = %q, want the one report line and the recorded line", out.String())
+	}
+	if !strings.Contains(lines[0], "install-receipts.jsonl") {
+		t.Fatalf("first line = %q, want it to name the unreadable receipts file", lines[0])
+	}
+	data, err := os.ReadFile(metrics.RegimeEventsPath(town))
+	if err != nil {
+		t.Fatalf("reading the record: %v", err)
+	}
+	if !strings.Contains(string(data), `"after_ref":"om987"`) {
+		t.Fatalf("record = %q, want the readable receipt recorded", data)
 	}
 }

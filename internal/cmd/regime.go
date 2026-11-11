@@ -55,6 +55,35 @@ func runRegimeRecord(d regimeDeps, in regimeFlags, out io.Writer) error {
 	return nil
 }
 
+// runRegimeBackfill records every install receipt the regime log does not hold
+// yet and writes the day's backfill file: the moves the town made before the
+// runtime record and the seat models settings put in force at the sandbox move.
+// One command covers the history the review found missing (gt-b2pgqo): the
+// installs from the receipts, the 2026-10-29 sandbox move, the 2026-11-10 pod
+// move, and the seat classes.
+func runRegimeBackfill(d regimeDeps, actorFlag string, out io.Writer) error {
+	actor := strings.TrimSpace(actorFlag)
+	if actor == "" {
+		actor = strings.TrimSpace(d.actor)
+	}
+	if actor == "" {
+		actor = "backfill"
+	}
+	env := metrics.OSEnv(d.townRoot)
+	logLine := func(line string) { fmt.Fprintln(out, line) }
+	res, err := metrics.RecordInstallReceipts(env, actor, logLine)
+	if err != nil {
+		return err
+	}
+	path, n, err := metrics.RegimeBackfill(env, d.now, actor)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "recorded %d install events (%d already recorded) and wrote %d backfilled events to %s\n",
+		res.Recorded, res.Skipped, n, path)
+	return nil
+}
+
 // runRegimeCheck reads the town's regime events with the same reader the metrics
 // analysis uses and reports how many it found, or why it cannot: one record the
 // reader rejects costs the analysis every runtime record in every file, the main
@@ -119,14 +148,43 @@ func newRegimeCommand(find func() (string, error), now func() time.Time, actor f
 			return runRegimeCheck(townRoot, cmd.OutOrStdout())
 		},
 	}
+	var backfillActor string
+	backfill := &cobra.Command{
+		Use:   "backfill",
+		Short: "Record the install receipts and the changes known before the regime record",
+		Long: `Record the town's regime history that no one typed into the record.
+
+The install receipts under the town's daemon directory become one install event
+each in .runtime/metrics/regime-events.jsonl, and a receipt the log already
+holds is skipped, so the command records nothing on a second run.
+.runtime/metrics/regime-events-backfill-<day>.jsonl then holds the changes no
+receipt carries: the 2026-10-29 move of the seats into sandboxes, the 2026-11-10
+move of the daemon into the control cluster, and a seat_model event for each seat
+in settings/config.json's polecat_pool.seats, naming the model its agent config
+gives at the sandbox move.
+
+The town-metrics hour runs the receipts half on its own, so the log stays current
+in the pod; this command is for the history before it.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			townRoot, err := find()
+			if err != nil {
+				return fmt.Errorf("not in a Gas Town workspace: %w", err)
+			}
+			return runRegimeBackfill(regimeDeps{townRoot: townRoot, now: now(), actor: actor()},
+				backfillActor, cmd.OutOrStdout())
+		},
+	}
+	backfill.Flags().StringVar(&backfillActor, "actor", "", "Who recorded the change; the session's actor when unset")
 	regime := &cobra.Command{
 		Use:     "regime",
 		GroupID: GroupConfig,
 		Short:   "Record a regime change so the metrics analysis marks it",
 		Long: `Record a regime change in the town's append-only regime events file.
 
-  gt regime record   Append one change to .runtime/metrics/regime-events.jsonl
-  gt regime check    Read every regime events file with the analysis's reader
+  gt regime record     Append one change to .runtime/metrics/regime-events.jsonl
+  gt regime check      Read every regime events file with the analysis's reader
+  gt regime backfill   Record the install receipts and the changes before the record
 
 The metrics analysis reads that file with settings/regime-events.json and marks
 every series at each change. Run it at an install, directive, gate, seat-model
@@ -134,7 +192,7 @@ or pool change: the reason, and the refs either side of it, are what a reader
 has to judge the change by.`,
 		RunE: requireSubcommand,
 	}
-	regime.AddCommand(record, check)
+	regime.AddCommand(record, check, backfill)
 	return regime
 }
 
