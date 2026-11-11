@@ -2,12 +2,16 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/agentlog"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/land"
@@ -21,16 +25,32 @@ import (
 // or a later run's; both are left out. A second review of the same bead adds its
 // own sessions to the record, and a repeat of the same sessions changes nothing.
 
+// usageReadBound caps how long the landing path waits for one review's transcript
+// read. The read is synchronous on the post-verdict landing path, so it must end.
+const usageReadBound = 10 * time.Second
+
+// errReadTimedOut is the cause a read that outlasts usageReadBound is recorded with.
+var errReadTimedOut = errors.New("transcript read timed out")
+
 // omUsageSink writes the usage record of each om review the landing worker of
 // one rig runs. A nil function is the production one.
 type omUsageSink struct {
 	townRoot string
-	// list names the transcripts under a review directory; nil is
-	// agentlog.ProjectTranscripts.
-	list func(townRoot, workDir string) ([]string, error)
+	// list names the transcripts under a review directory; nil lists the Claude
+	// project directories of townRoot through configDirFor and userHomeDir.
+	list func(ctx context.Context, townRoot, workDir string) ([]string, error)
+	// configDirFor and userHomeDir resolve the Claude config dir and the home the
+	// production lister reads; nil is config.ClaudeConfigDir and os.UserHomeDir.
+	configDirFor func() (string, error)
+	userHomeDir  func() (string, error)
+	// bound returns the context one read runs under; nil is a usageReadBound timeout.
+	bound func(ctx context.Context) (context.Context, context.CancelFunc)
 	// write merges a record into the usage tree; nil is usageattrib.Write.
 	write func(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error
-	logf  func(format string, args ...any)
+	// mark writes the incomplete record of a run whose transcripts could not be
+	// listed; nil is usageattrib.MarkIncomplete.
+	mark func(usageDir string, f usageattrib.Facts, reason string) error
+	logf func(format string, args ...any)
 
 	mu sync.Mutex
 	// quiet holds the beads whose review ran with no transcript, so that is
@@ -40,46 +60,11 @@ type omUsageSink struct {
 
 // record writes the usage record of one om review. It returns nothing: a
 // failure is logged here and never reaches the landing, which has its verdict.
-func (s *omUsageSink) record(_ context.Context, u land.ReviewUsage) {
+func (s *omUsageSink) record(ctx context.Context, u land.ReviewUsage) {
 	// The bead id names the record file, so it is checked before anything is
 	// read or written.
 	if !plainBeadID(u.BeadID) {
 		s.logf("landing_worker: om usage record not written: bead id %q is not a plain id", u.BeadID)
-		return
-	}
-	list := s.list
-	if list == nil {
-		list = agentlog.ProjectTranscripts
-	}
-	write := s.write
-	if write == nil {
-		write = usageattrib.Write
-	}
-	paths, err := list(s.townRoot, u.Dir)
-	if err != nil {
-		// A directory that cannot be read may hide this run's transcripts, and
-		// a record with no session cannot be written, so nothing is counted.
-		s.logf("landing_worker: %s: om usage: its review transcripts cannot be listed, so no usage record is written: %v", u.BeadID, err)
-		return
-	}
-	var sessions []usageattrib.SessionUsage
-	readErrs := 0
-	for _, path := range paths {
-		sess, err := reviewSession(path, u)
-		if err != nil {
-			readErrs++
-			s.logf("landing_worker: %s: om usage: transcript %s cannot be read, so its record is incomplete: %v", u.BeadID, path, err)
-		}
-		if sess != nil {
-			sessions = append(sessions, *sess)
-		}
-	}
-	if len(sessions) == 0 {
-		if readErrs == 0 {
-			s.noTranscript(u.BeadID)
-			return
-		}
-		s.logf("landing_worker: %s: om usage record not written: none of its review transcripts could be read", u.BeadID)
 		return
 	}
 	workspace, err := usageattrib.WorkspaceOf(s.townRoot, u.BeadID)
@@ -87,11 +72,7 @@ func (s *omUsageSink) record(_ context.Context, u land.ReviewUsage) {
 		s.logf("landing_worker: %s: om usage record not written: %v", u.BeadID, err)
 		return
 	}
-	ids := make([]string, 0, len(sessions))
-	for _, sess := range sessions {
-		ids = append(ids, sess.ID)
-	}
-	rec := usageattrib.Build(usageattrib.Facts{
+	facts := usageattrib.Facts{
 		Bead:      u.BeadID,
 		Kind:      dashboard.UsageKindOM,
 		Class:     dashboard.UsageClassOMReview,
@@ -101,12 +82,138 @@ func (s *omUsageSink) record(_ context.Context, u land.ReviewUsage) {
 		End:       u.End,
 		// The review returned, so its run finished. A transcript that could not
 		// be read whole leaves the record incomplete.
-		Complete: readErrs == 0,
-	}, sessions)
-	usageDir := filepath.Join(constants.TownRuntimePath(s.townRoot), "usage")
-	if err := write(usageDir, rec, ids); err != nil {
+		Complete: true,
+	}
+	run, err := s.readRun(ctx, u)
+	if err != nil {
+		// A directory that cannot be read may hide this run's transcripts. No
+		// session is counted, but the review still leaves a record that says so.
+		s.logf("landing_worker: %s: om usage: its review transcripts cannot be read, so its record is marked incomplete: %v", u.BeadID, err)
+		s.markIncomplete(facts, err)
+		return
+	}
+	for _, e := range run.readErrs {
+		s.logf("landing_worker: %s: om usage: %v", u.BeadID, e)
+	}
+	if len(run.sessions) == 0 {
+		if len(run.readErrs) == 0 {
+			s.noTranscript(u.BeadID)
+			return
+		}
+		s.logf("landing_worker: %s: om usage record not written: none of its review transcripts could be read", u.BeadID)
+		return
+	}
+	facts.Complete = len(run.readErrs) == 0
+	ids := make([]string, 0, len(run.sessions))
+	for _, sess := range run.sessions {
+		ids = append(ids, sess.ID)
+	}
+	rec := usageattrib.Build(facts, run.sessions)
+	write := s.write
+	if write == nil {
+		write = usageattrib.Write
+	}
+	if err := write(s.usageDir(), rec, ids); err != nil {
 		s.logf("landing_worker: %s: om usage record: %v", u.BeadID, err)
 	}
+}
+
+// reviewRead is what one review run's transcripts held: the sessions read, and
+// one error for each transcript that could not be read whole, naming its path.
+type reviewRead struct {
+	sessions []usageattrib.SessionUsage
+	readErrs []error
+}
+
+// readRun lists and reads the review run's transcripts under one bound. The read
+// is synchronous on the landing path, so one that outlasts the bound is abandoned
+// and reported as errReadTimedOut; it finishes in the background and its result
+// is dropped.
+func (s *omUsageSink) readRun(ctx context.Context, u land.ReviewUsage) (reviewRead, error) {
+	bctx, cancel := s.boundOf(ctx)
+	defer cancel()
+	type result struct {
+		read reviewRead
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		read, err := s.readTranscripts(bctx, u)
+		done <- result{read, err}
+	}()
+	select {
+	case r := <-done:
+		// A read that finished after the bound passed is still a timeout: its
+		// transcripts may have been cut short.
+		if bctx.Err() == nil {
+			return r.read, r.err
+		}
+	case <-bctx.Done():
+	}
+	return reviewRead{}, errReadTimedOut
+}
+
+// readTranscripts lists the review directory's transcripts and reads each one.
+// A listing error is returned; a transcript that cannot be read is an entry in
+// readErrs, and its readable sibling is still counted.
+func (s *omUsageSink) readTranscripts(ctx context.Context, u land.ReviewUsage) (reviewRead, error) {
+	paths, err := s.lister(ctx, u.Dir)
+	if err != nil {
+		return reviewRead{}, err
+	}
+	var read reviewRead
+	for _, path := range paths {
+		sess, err := reviewSession(path, u)
+		if err != nil {
+			read.readErrs = append(read.readErrs, fmt.Errorf("transcript %s cannot be read, so its record is incomplete: %w", path, err))
+		}
+		if sess != nil {
+			read.sessions = append(read.sessions, *sess)
+		}
+	}
+	return read, nil
+}
+
+// lister lists the transcripts of one review directory.
+func (s *omUsageSink) lister(ctx context.Context, dir string) ([]string, error) {
+	if s.list != nil {
+		return s.list(ctx, s.townRoot, dir)
+	}
+	configDirFor := s.configDirFor
+	if configDirFor == nil {
+		configDirFor = config.ClaudeConfigDir
+	}
+	userHomeDir := s.userHomeDir
+	if userHomeDir == nil {
+		userHomeDir = os.UserHomeDir
+	}
+	return agentlog.ProjectTranscriptsFrom(s.townRoot, dir, configDirFor, userHomeDir)
+}
+
+// boundOf returns the context one read runs under.
+func (s *omUsageSink) boundOf(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s.bound != nil {
+		return s.bound(ctx)
+	}
+	return context.WithTimeout(ctx, usageReadBound)
+}
+
+// markIncomplete writes the incomplete record of a run whose transcripts could
+// not be read at all. Its error field holds the first line of cause.
+func (s *omUsageSink) markIncomplete(f usageattrib.Facts, cause error) {
+	mark := s.mark
+	if mark == nil {
+		mark = usageattrib.MarkIncomplete
+	}
+	reason, _, _ := strings.Cut(cause.Error(), "\n")
+	if err := mark(s.usageDir(), f, reason); err != nil {
+		s.logf("landing_worker: %s: om usage record: %v", f.Bead, err)
+	}
+}
+
+// usageDir is the tree the usage records of this town are kept in.
+func (s *omUsageSink) usageDir() string {
+	return filepath.Join(constants.TownRuntimePath(s.townRoot), "usage")
 }
 
 // reviewSession reads one transcript of the review's run. A transcript last

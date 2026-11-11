@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -302,6 +303,66 @@ func TestWriteRefusesRecordWithNoWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(recordPathFor(t, dir)); !os.IsNotExist(err) {
 		t.Errorf("refused write created the record (stat error %v)", err)
+	}
+}
+
+// A run whose transcripts could not be listed leaves a record file: no session, incomplete,
+// and the reason in its error field. A reason is required.
+func TestMarkIncompleteWritesRecordWithReason(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := MarkIncomplete(dir, factsIn("ws-a"), "reading project directory: permission denied"); err != nil {
+		t.Fatalf("mark of a run with no record: %v", err)
+	}
+	var got storedRecord
+	if err := json.Unmarshal(mustRead(t, recordPathFor(t, dir)), &got); err != nil {
+		t.Fatalf("decoding the record: %v", err)
+	}
+	if got.Complete || got.Error != "reading project directory: permission denied" || len(got.Sessions) != 0 {
+		t.Errorf("record complete %v error %q sessions %v, want incomplete, the reason, and no session",
+			got.Complete, got.Error, got.Sessions)
+	}
+	if err := MarkIncomplete(dir, factsIn("ws-a"), ""); err == nil {
+		t.Error("mark with no reason: no error")
+	}
+}
+
+// A file that already counts sessions keeps them and its totals when a run is marked
+// incomplete, and a later write of new sessions keeps the mark.
+func TestMarkIncompleteKeepsCountedSessions(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	f := factsIn("ws-a")
+	if err := Write(dir, Build(f, []SessionUsage{sessA}), []string{"s-a"}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	var before storedRecord
+	if err := json.Unmarshal(mustRead(t, recordPathFor(t, dir)), &before); err != nil {
+		t.Fatalf("decoding the record: %v", err)
+	}
+	if err := MarkIncomplete(dir, f, "boom"); err != nil {
+		t.Fatalf("mark: %v", err)
+	}
+	var marked storedRecord
+	if err := json.Unmarshal(mustRead(t, recordPathFor(t, dir)), &marked); err != nil {
+		t.Fatalf("decoding the marked record: %v", err)
+	}
+	if marked.Complete || marked.Error != "boom" || !equalStrings(marked.Sessions, []string{"s-a"}) ||
+		!reflect.DeepEqual(marked.Totals, before.Totals) {
+		t.Errorf("marked record complete %v error %q sessions %v totals %+v, want incomplete with s-a and its totals %+v",
+			marked.Complete, marked.Error, marked.Sessions, marked.Totals, before.Totals)
+	}
+
+	if err := Write(dir, Build(f, []SessionUsage{sessB}), []string{"s-b"}); err != nil {
+		t.Fatalf("write of a later session: %v", err)
+	}
+	var after storedRecord
+	if err := json.Unmarshal(mustRead(t, recordPathFor(t, dir)), &after); err != nil {
+		t.Fatalf("decoding the record after the write: %v", err)
+	}
+	if after.Complete || after.Error != "boom" || !equalStrings(after.Sessions, []string{"s-a", "s-b"}) {
+		t.Errorf("after a later write complete %v error %q sessions %v, want incomplete, boom, and both sessions",
+			after.Complete, after.Error, after.Sessions)
 	}
 }
 

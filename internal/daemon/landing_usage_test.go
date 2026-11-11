@@ -24,6 +24,7 @@ import (
 type omUsageOnDisk struct {
 	dashboard.UsageRecord
 	Sessions []string `json:"sessions"`
+	Error    string   `json:"error"`
 }
 
 func readOMUsage(t *testing.T, town, bead string) omUsageOnDisk {
@@ -42,8 +43,8 @@ func readOMUsage(t *testing.T, town, bead string) omUsageOnDisk {
 
 // fixedList is the transcript lister a test gives the sink: whatever the review
 // directory, these are the files its project directories hold.
-func fixedList(paths ...string) func(string, string) ([]string, error) {
-	return func(string, string) ([]string, error) { return paths, nil }
+func fixedList(paths ...string) func(context.Context, string, string) ([]string, error) {
+	return func(context.Context, string, string) ([]string, error) { return paths, nil }
 }
 
 // TestLandingUsageSumsTranscriptsOfTheRun: a review's record sums the transcripts
@@ -138,23 +139,6 @@ func TestLandingUsageNoTranscriptWritesNothing(t *testing.T) {
 		sink.record(context.Background(), window)
 		if n := loggedLinesWith(logged, "disk full"); n != 1 {
 			t.Errorf("the write failure logged %d times, want once: %q", n, logged)
-		}
-	})
-
-	t.Run("a listing error writes nothing and is logged", func(t *testing.T) {
-		var logged []string
-		writes := 0
-		sink := &omUsageSink{townRoot: t.TempDir(), list: func(string, string) ([]string, error) {
-			return nil, errors.New("unreadable project directory")
-		}, logf: func(f string, a ...any) {
-			logged = append(logged, fmt.Sprintf(f, a...))
-		}, write: func(string, dashboard.UsageRecord, []string) error {
-			writes++
-			return nil
-		}}
-		sink.record(context.Background(), window)
-		if writes != 0 || loggedLinesWith(logged, "unreadable project directory") != 1 {
-			t.Errorf("writes = %d, logged %q; want no write and the listing error logged once", writes, logged)
 		}
 	})
 
@@ -273,38 +257,78 @@ func TestLandingUsageHonoursEndBound(t *testing.T) {
 	}
 }
 
-// TestLandingUsageReadErrorIsSurfaced: a read error is logged with its text and
-// its path, never as a review that wrote no transcript. An unreadable directory
-// writes nothing, since no session is counted. An unreadable transcript is
-// counted, and its record is marked incomplete.
-func TestLandingUsageReadErrorIsSurfaced(t *testing.T) {
+// TestLandingUsageUnreadableDirWritesIncompleteRecord: an unreadable review
+// directory still leaves a record file. It is incomplete, names the error's first
+// line in its error field, and counts no session. The error is logged with its
+// path, on a line that is not the no-transcript note.
+func TestLandingUsageUnreadableDirWritesIncompleteRecord(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
 	window := land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: t.TempDir(), Start: start, End: start.Add(time.Hour)}
+	town := t.TempDir()
+	var logged []string
+	sink := &omUsageSink{townRoot: town, list: func(context.Context, string, string) ([]string, error) {
+		return nil, errors.New("reading Claude project directory /x/projects/h: permission denied\nsecond line")
+	}, logf: func(f string, a ...any) {
+		logged = append(logged, fmt.Sprintf(f, a...))
+	}}
 
-	t.Run("unreadable directory is logged, not read as no transcript", func(t *testing.T) {
-		t.Parallel()
-		var logged []string
-		writes := 0
-		sink := &omUsageSink{townRoot: t.TempDir(), list: func(string, string) ([]string, error) {
-			return nil, errors.New("reading Claude project directory /x/projects/h: permission denied")
-		}, logf: func(f string, a ...any) {
-			logged = append(logged, fmt.Sprintf(f, a...))
-		}, write: func(string, dashboard.UsageRecord, []string) error {
-			writes++
-			return nil
-		}}
-		sink.record(context.Background(), window)
-		if writes != 0 {
-			t.Errorf("writes = %d, want none: no session of an unreadable directory is counted", writes)
-		}
-		if n := loggedLinesWith(logged, "/x/projects/h: permission denied"); n != 1 {
-			t.Errorf("listing error logged %d times, want once with its path: %q", n, logged)
-		}
-		if n := loggedLinesWith(logged, "wrote no transcript"); n != 0 {
-			t.Errorf("unreadable directory logged as no transcript: %q", logged)
-		}
-	})
+	sink.record(context.Background(), window)
+
+	rec := readOMUsage(t, town, "gt-abc")
+	if rec.Complete {
+		t.Errorf("record is complete, want incomplete: its review directory could not be read")
+	}
+	if want := "reading Claude project directory /x/projects/h: permission denied"; rec.Error != want {
+		t.Errorf("record error = %q, want the error's first line %q", rec.Error, want)
+	}
+	if len(rec.Sessions) != 0 || rec.Totals.Calls != 0 {
+		t.Errorf("record counts %d sessions and %d calls, want none", len(rec.Sessions), rec.Totals.Calls)
+	}
+	if n := loggedLinesWith(logged, "/x/projects/h: permission denied"); n != 1 {
+		t.Errorf("listing error logged %d times, want once with its path: %q", n, logged)
+	}
+	if n := loggedLinesWith(logged, "wrote no transcript"); n != 0 {
+		t.Errorf("unreadable directory logged as no transcript: %q", logged)
+	}
+}
+
+// TestLandingUsageStalledReadIsBounded: a read that blocks until its context ends
+// is cut at the bound. The record is incomplete with the timeout as its reason,
+// and the timeout is logged once. The bound has already passed, so nothing waits.
+func TestLandingUsageStalledReadIsBounded(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	var logged []string
+	sink := &omUsageSink{townRoot: town, list: func(ctx context.Context, _, _ string) ([]string, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}, bound: func(ctx context.Context) (context.Context, context.CancelFunc) {
+		return context.WithDeadline(ctx, time.Unix(0, 0))
+	}, logf: func(f string, a ...any) {
+		logged = append(logged, fmt.Sprintf(f, a...))
+	}}
+
+	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: t.TempDir(),
+		Start: start, End: start.Add(time.Hour)})
+
+	rec := readOMUsage(t, town, "gt-abc")
+	if rec.Complete || rec.Error != "transcript read timed out" {
+		t.Errorf("record complete %v error %q, want incomplete with the timeout as its error", rec.Complete, rec.Error)
+	}
+	if n := loggedLinesWith(logged, "transcript read timed out"); n != 1 {
+		t.Errorf("timeout logged %d times, want once: %q", n, logged)
+	}
+}
+
+// TestLandingUsageUnreadableFileKeepsReadableSum: a transcript that cannot be read
+// is logged with its path and marks the record incomplete, while the readable
+// transcripts are still counted.
+func TestLandingUsageUnreadableFileKeepsReadableSum(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	window := land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: t.TempDir(), Start: start, End: start.Add(time.Hour)}
 
 	t.Run("unreadable transcript is logged with its path and marks the record incomplete", func(t *testing.T) {
 		t.Parallel()
@@ -352,6 +376,14 @@ func TestLandingUsageReadErrorIsSurfaced(t *testing.T) {
 			t.Errorf("writes = %d complete = %v, want one incomplete record for the transcript that could not be read", writes, got.Complete)
 		}
 	})
+}
+
+// TestLandingUsageReadErrorIsSurfaced: a transcript with no session id is logged
+// as a read error, never as a review that wrote no transcript, and writes nothing.
+func TestLandingUsageReadErrorIsSurfaced(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	window := land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: t.TempDir(), Start: start, End: start.Add(time.Hour)}
 
 	t.Run("a transcript with no session id writes nothing and says so", func(t *testing.T) {
 		t.Parallel()
@@ -397,10 +429,17 @@ func TestLandingUsageRealLayout(t *testing.T) {
 	writeUsageTranscript(t, filepath.Join(projDir, "run-b.jsonl"), start.Add(20*time.Minute), seatCallLine("run-b", 200, 50, 20))
 	writeUsageTranscript(t, filepath.Join(projDir, "earlier.jsonl"), start.Add(-time.Hour), seatCallLine("earlier", 9000, 0, 9000))
 	writeUsageTranscript(t, filepath.Join(projDir, "later.jsonl"), end.Add(time.Hour), seatCallLine("later", 9000, 0, 9000))
+	// The Claude config dir and home are the test's own, so the production lister
+	// reads nothing of the host's environment.
+	configDir := t.TempDir()
+	home := t.TempDir()
 	var logged []string
-	sink := &omUsageSink{townRoot: town, logf: func(f string, a ...any) {
-		logged = append(logged, fmt.Sprintf(f, a...))
-	}}
+	sink := &omUsageSink{townRoot: town,
+		configDirFor: func() (string, error) { return configDir, nil },
+		userHomeDir:  func() (string, error) { return home, nil },
+		logf: func(f string, a ...any) {
+			logged = append(logged, fmt.Sprintf(f, a...))
+		}}
 
 	sink.record(context.Background(), land.ReviewUsage{BeadID: "gt-abc", Rig: "gastown", Dir: reviewDir,
 		Start: start, End: end})
@@ -434,7 +473,7 @@ func TestLandingUsageRefusesUnsafeBeadID(t *testing.T) {
 			town := t.TempDir()
 			listed := 0
 			var logged []string
-			sink := &omUsageSink{townRoot: town, list: func(string, string) ([]string, error) {
+			sink := &omUsageSink{townRoot: town, list: func(context.Context, string, string) ([]string, error) {
 				listed++
 				return []string{filepath.Join(t.TempDir(), "run.jsonl")}, nil
 			}, logf: func(f string, a ...any) {

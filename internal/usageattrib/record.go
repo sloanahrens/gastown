@@ -54,6 +54,9 @@ type storedRecord struct {
 	// Batches holds one entry per Write that added sessions: the ids it counted and the
 	// accounting it wrote for them. A repeat of those ids is checked against it.
 	Batches []countedBatch `json:"batches,omitempty"`
+	// Error names why the run's transcripts could not be listed, set by MarkIncomplete.
+	// A record with an Error is incomplete.
+	Error string `json:"error,omitempty"`
 }
 
 // countedBatch is the accounting one Write counted for its sessions.
@@ -238,7 +241,9 @@ func Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) erro
 	return writer{create: os.CreateTemp}.Write(usageDir, rec, sessionIDs)
 }
 
-func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
+// checkRecord refuses a record that cannot be filed: no bead, no workspace, or a kind neither
+// work nor om.
+func checkRecord(rec dashboard.UsageRecord) error {
 	if rec.Bead == "" {
 		return errors.New("usageattrib: record has no bead")
 	}
@@ -248,6 +253,66 @@ func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []s
 	}
 	if rec.Kind != dashboard.UsageKindWork && rec.Kind != dashboard.UsageKindOM {
 		return fmt.Errorf("usageattrib: %s: kind %q is neither %q nor %q", rec.Bead, rec.Kind, dashboard.UsageKindWork, dashboard.UsageKindOM)
+	}
+	return nil
+}
+
+// MarkIncomplete writes the record of a run whose transcripts could not be listed, so no
+// session of it can be counted. The record is incomplete and names reason in its error field.
+// A record the file already holds keeps its counted sessions and totals; only its completeness
+// and error change. f must match the file's facts, as Write requires.
+func MarkIncomplete(usageDir string, f Facts, reason string) error {
+	return writer{create: os.CreateTemp}.MarkIncomplete(usageDir, f, reason)
+}
+
+func (w writer) MarkIncomplete(usageDir string, f Facts, reason string) error {
+	rec := Build(f, nil)
+	if err := checkRecord(rec); err != nil {
+		return err
+	}
+	if reason == "" {
+		return fmt.Errorf("usageattrib: %s: incomplete record has no reason", rec.Bead)
+	}
+
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
+	path := recordPath(usageDir, rec.Bead, rec.Kind)
+	stored := storedRecord{UsageRecord: rec, Sessions: []string{}}
+	data, err := os.ReadFile(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		// The first record for this bead and kind.
+	case err != nil:
+		return fmt.Errorf("usageattrib: reading %s: %w", path, err)
+	default:
+		var cur storedRecord
+		if err := json.Unmarshal(data, &cur); err != nil {
+			return fmt.Errorf("usageattrib: %s is not a record this package wrote, left as it is: %w", path, err)
+		}
+		if cur.Sessions == nil {
+			return fmt.Errorf("usageattrib: %s has no sessions list, so its sessions cannot be told apart: left as it is", path)
+		}
+		if err := sameRun(cur.UsageRecord, rec); err != nil {
+			return err
+		}
+		stored = cur
+		stored.Complete = false
+	}
+	stored.Error = reason
+	out, err := json.MarshalIndent(stored, "", " ")
+	if err != nil {
+		return fmt.Errorf("usageattrib: encoding the record for %s: %w", rec.Bead, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("usageattrib: creating the beads directory: %w", err)
+	}
+	return w.writeFileAtomic(path, append(out, '\n'))
+}
+
+func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
+	if err := checkRecord(rec); err != nil {
+		return err
 	}
 	var ids []string
 	for _, id := range sessionIDs {
@@ -307,6 +372,7 @@ func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []s
 			UsageRecord: mergeRecords(cur.UsageRecord, rec),
 			Sessions:    append(slices.Clone(cur.Sessions), ids...),
 			Batches:     append(slices.Clone(cur.Batches), countedBatch{Sessions: ids, Accounting: acct}),
+			Error:       cur.Error,
 		}
 	}
 
