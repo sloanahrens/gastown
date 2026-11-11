@@ -1,7 +1,6 @@
 package usageattrib
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -58,21 +58,23 @@ type storedRecord struct {
 
 // countedBatch is the accounting one Write counted for its sessions.
 type countedBatch struct {
-	Sessions   []string        `json:"sessions"`
-	Accounting json.RawMessage `json:"accounting"`
+	Sessions   []string   `json:"sessions"`
+	Accounting accounting `json:"accounting"`
 }
 
-// accountingOf is the part of a record that depends on the sessions counted in it. Two
-// records of the same sessions have the same accounting.
-func accountingOf(rec dashboard.UsageRecord) (json.RawMessage, error) {
-	return json.Marshal(struct {
-		Totals     dashboard.UsageTotals
-		Models     map[string]dashboard.UsageModel
-		EstCostUSD float64
-		WallS      int64
-		Subagents  dashboard.UsageSubagents
-		Activity   dashboard.UsageActivity
-	}{rec.Totals, rec.Models, rec.EstCostUSD, rec.WallS, rec.Subagents, rec.Activity})
+// accounting is the part of a record that depends on the sessions counted in it. Two records of
+// the same sessions have equal accounting.
+type accounting struct {
+	Totals     dashboard.UsageTotals           `json:"totals"`
+	Models     map[string]dashboard.UsageModel `json:"models"`
+	EstCostUSD float64                         `json:"est_cost_usd"`
+	WallS      int64                           `json:"wall_s"`
+	Subagents  dashboard.UsageSubagents        `json:"subagents"`
+	Activity   dashboard.UsageActivity         `json:"activity"`
+}
+
+func accountingOf(rec dashboard.UsageRecord) accounting {
+	return accounting{rec.Totals, rec.Models, rec.EstCostUSD, rec.WallS, rec.Subagents, rec.Activity}
 }
 
 // Build sums sessions into the usage record for one run. A session counts once however many
@@ -262,10 +264,7 @@ func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []s
 		}
 		return fmt.Errorf("usageattrib: %s: no sessions to count", rec.Bead)
 	}
-	acct, err := accountingOf(rec)
-	if err != nil {
-		return fmt.Errorf("usageattrib: encoding the accounting for %s: %w", rec.Bead, err)
-	}
+	acct := accountingOf(rec)
 
 	// Read, merge and rename must not interleave: two runs for one bead ending together would
 	// otherwise each merge into the old file and one run's sessions would be lost.
@@ -324,17 +323,12 @@ func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []s
 // repeatMatches is the write of sessions the record has already counted: it is a no-op when
 // the accounting equals what was counted for exactly these sessions, and a mismatch otherwise.
 // A file whose batches do not say what these sessions counted is refused, not assumed to match.
-func repeatMatches(cur storedRecord, bead string, ids []string, acct json.RawMessage) error {
+func repeatMatches(cur storedRecord, bead string, ids []string, acct accounting) error {
 	for _, b := range cur.Batches {
 		if !sameSet(b.Sessions, ids) {
 			continue
 		}
-		// The file is indented on write, which reindents the stored accounting: compare compacted.
-		var stored bytes.Buffer
-		if err := json.Compact(&stored, b.Accounting); err != nil {
-			return fmt.Errorf("usageattrib: %s: the accounting counted for sessions %v does not decode: %w", bead, ids, err)
-		}
-		if !bytes.Equal(stored.Bytes(), acct) {
+		if !reflect.DeepEqual(b.Accounting, acct) {
 			return fmt.Errorf("usageattrib: %s: mismatch: sessions %v were counted with different accounting, left as it is", bead, ids)
 		}
 		return nil

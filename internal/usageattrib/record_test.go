@@ -574,6 +574,7 @@ func TestWriteRefusesBadInput(t *testing.T) {
 		{"no bead", noBead, []string{"s-a"}},
 		{"kind is neither work nor om", badKind, []string{"s-a"}},
 		{"no sessions", recA, nil},
+		{"no sessions and no calls", Build(factsIn("ws-a"), nil), nil},
 		{"empty session id", recA, []string{"s-b", ""}},
 		{"record mixes counted and new sessions", Build(factsIn("ws-a"), []SessionUsage{sessA, sessB}), []string{"s-a", "s-b"}},
 		{"another workspace's record", otherWorkspace, []string{"s-b"}},
