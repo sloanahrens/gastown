@@ -25,6 +25,10 @@ const centralDirectiveRig = "gastown"
 // directiveGitTimeout bounds one git call the deploy makes against the bare repo.
 const directiveGitTimeout = 30 * time.Second
 
+// ErrDirectiveCommitMissing is wrapped when the bare repo does not hold the
+// commit asked for. The doctor reports it as a warning, not a failed check.
+var ErrDirectiveCommitMissing = errors.New("no such commit")
+
 // directiveCommitPattern is a commit id as the deploy accepts it: hex, so it
 // cannot start with "-" or carry anything but an object name into argv.
 var directiveCommitPattern = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
@@ -82,42 +86,22 @@ func defaultDirectiveSource(townRoot string) directiveSource {
 	return gitDirectiveSource{repo: CentralDirectiveRepo(townRoot), run: execGit}
 }
 
+// ReadCentralDirectives returns the directives/*.md files at commit in the
+// gastown bare repo, name to bytes. It makes the same checks as the deploy (a
+// commit id, a commit the repo holds, flat names, no symlinks) and writes
+// nothing; the doctor compares its result with the deployed copy. An empty
+// commit resolves to buildCommit(), as in DeployCentralDirectives.
+func ReadCentralDirectives(townRoot, commit string, buildCommit func() string) (map[string][]byte, error) {
+	return readDirectives(commit, buildCommit, defaultDirectiveSource(townRoot))
+}
+
 // deployFrom is DeployCentralDirectives over an explicit source, build commit
 // and filesystem. Every read happens before the first write, so a refused or
 // unreadable entry leaves the deployed directory as it was.
 func deployFrom(townRoot, commit string, buildCommit func() string, src directiveSource, fsys dirFS) ([]string, error) {
-	if commit == "" && buildCommit != nil {
-		commit = buildCommit()
-	}
-	if commit == "" {
-		return nil, errors.New("central directives: no commit to deploy from (the build has none, and none was given)")
-	}
-	if !directiveCommitPattern.MatchString(commit) {
-		return nil, fmt.Errorf("central directives: %q is not a commit id", commit)
-	}
-	if err := src.hasCommit(commit); err != nil {
-		return nil, fmt.Errorf("central directives: %w", err)
-	}
-	entries, err := src.listDirectives(commit)
+	want, err := readDirectives(commit, buildCommit, src)
 	if err != nil {
-		return nil, fmt.Errorf("central directives: %w", err)
-	}
-
-	want := make(map[string][]byte, len(entries))
-	for _, e := range entries {
-		if !validDirectiveName(e.name) {
-			return nil, fmt.Errorf("central directives: %q at commit %s is not a directive file name", e.name, commit)
-		}
-		if e.symlink {
-			return nil, fmt.Errorf("central directives: directives/%s at commit %s is a symlink; refusing to deploy it", e.name, commit)
-		}
-	}
-	for _, e := range entries {
-		data, err := src.readDirective(commit, e.name)
-		if err != nil {
-			return nil, fmt.Errorf("central directives: reading directives/%s at commit %s: %w", e.name, commit, err)
-		}
-		want[e.name] = data
+		return nil, err
 	}
 
 	dir := CentralDirectiveDir(townRoot)
@@ -161,6 +145,46 @@ func deployFrom(townRoot, commit string, buildCommit func() string, src directiv
 	return written, nil
 }
 
+// readDirectives returns the directives/*.md files at commit from src, name to
+// bytes. It refuses the whole commit on the first bad entry, so no caller ever
+// holds a partial set.
+func readDirectives(commit string, buildCommit func() string, src directiveSource) (map[string][]byte, error) {
+	if commit == "" && buildCommit != nil {
+		commit = buildCommit()
+	}
+	if commit == "" {
+		return nil, errors.New("central directives: no commit to deploy from (the build has none, and none was given)")
+	}
+	if !directiveCommitPattern.MatchString(commit) {
+		return nil, fmt.Errorf("central directives: %q is not a commit id", commit)
+	}
+	if err := src.hasCommit(commit); err != nil {
+		return nil, fmt.Errorf("central directives: %w", err)
+	}
+	entries, err := src.listDirectives(commit)
+	if err != nil {
+		return nil, fmt.Errorf("central directives: %w", err)
+	}
+
+	for _, e := range entries {
+		if !validDirectiveName(e.name) {
+			return nil, fmt.Errorf("central directives: %q at commit %s is not a directive file name", e.name, commit)
+		}
+		if e.symlink {
+			return nil, fmt.Errorf("central directives: directives/%s at commit %s is a symlink; refusing to deploy it", e.name, commit)
+		}
+	}
+	want := make(map[string][]byte, len(entries))
+	for _, e := range entries {
+		data, err := src.readDirective(commit, e.name)
+		if err != nil {
+			return nil, fmt.Errorf("central directives: reading directives/%s at commit %s: %w", e.name, commit, err)
+		}
+		want[e.name] = data
+	}
+	return want, nil
+}
+
 // validDirectiveName reports whether name is a flat *.md file name, the only
 // shape the deploy writes into <town>/directives.
 func validDirectiveName(name string) bool {
@@ -195,7 +219,7 @@ type gitDirectiveSource struct {
 
 func (s gitDirectiveSource) hasCommit(commit string) error {
 	if _, err := s.run(s.repo, "cat-file", "-e", commit+"^{commit}"); err != nil {
-		return fmt.Errorf("commit %s is not in %s: %w", commit, s.repo, err)
+		return fmt.Errorf("commit %s is not in %s: %w (%w)", commit, s.repo, ErrDirectiveCommitMissing, err)
 	}
 	return nil
 }

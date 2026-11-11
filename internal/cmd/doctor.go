@@ -302,6 +302,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewFormulaCheck())
 	d.Register(doctor.NewOverlayHealthCheck())
 	d.Register(doctor.NewUnusedDirectiveCheck())
+	d.Register(doctor.NewDirectiveDriftCheck()) // Deployed central directives vs the repo at the installed commit (gt-3lvcjz.14)
 	d.Register(doctor.NewPrefixConflictCheck())
 	d.Register(doctor.NewRigNameMismatchCheck())
 	d.Register(doctor.NewEventsJournalCheck())      // gt tail needs the events journal on in every store (gt-7iwy0.7)
