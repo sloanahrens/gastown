@@ -148,6 +148,30 @@ func townStateScanDirs(rigs []string) []string {
 	return dirs
 }
 
+// townStateNoSymlink refuses name when any component of it is a symbolic link.
+// The export reads the town's own files: a link under the town root can point
+// anywhere on the pod, and reading through it would back up a file the town
+// does not hold. Each component is checked with Lstat, so a link in a directory
+// on the way to a file is caught as well as a link at the file itself. A
+// missing component returns its fs.ErrNotExist.
+func townStateNoSymlink(fsys fs.FS, name string) error {
+	if name == "." {
+		return nil
+	}
+	parts := strings.Split(name, "/")
+	for i := range parts {
+		prefix := strings.Join(parts[:i+1], "/")
+		info, err := fs.Lstat(fsys, prefix)
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symbolic link; the backup does not follow links out of the town", prefix)
+		}
+	}
+	return nil
+}
+
 // collectTownState reads the town through fsys: every file the export table
 // names, and every secret-looking file in the directories the table reads. A
 // directory that does not exist holds nothing; any other read error fails the
@@ -156,6 +180,12 @@ func townStateScanDirs(rigs []string) []string {
 func collectTownState(fsys fs.FS, rigs []string) (townStateSnapshot, error) {
 	snap := townStateSnapshot{Files: map[string][]byte{}}
 	for _, dir := range townStateScanDirs(rigs) {
+		if err := townStateNoSymlink(fsys, dir); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return townStateSnapshot{}, err
+		}
 		entries, err := fs.ReadDir(fsys, dir)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
@@ -174,6 +204,9 @@ func collectTownState(fsys fs.FS, rigs []string) (townStateSnapshot, error) {
 			}
 			if !townStateExported(name, rigs) {
 				continue
+			}
+			if err := townStateNoSymlink(fsys, name); err != nil {
+				return townStateSnapshot{}, err
 			}
 			data, err := fs.ReadFile(fsys, name)
 			if err != nil {
