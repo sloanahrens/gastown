@@ -62,13 +62,101 @@ func (b *openshellBackend) pushWork(rec SandboxRecord) error {
 		return fmt.Errorf("sandbox %s: clone branch %q is not a branch name, so nothing is pushed", rec.Session, branch)
 	}
 	if _, err := b.cloneGit(ctx, rec, dir, "push", "origin", branch); err != nil {
-		return fmt.Errorf("pushing %s: %w", branch, err)
+		if !isNonFastForwardRejection(err) {
+			return fmt.Errorf("pushing %s: %w", branch, err)
+		}
+		return b.refusedPush(ctx, rec, dir, branch, err)
 	}
 	return nil
 }
 
+// refusedPush decides a stop's push of branch that origin refused as
+// non-fast-forward. The clone fetches origin's head and classifies it against
+// its own (branchRelation). An origin head that holds the clone's commits
+// already loses nothing, so the stop goes on. A clone head that is ahead means
+// the refusal is stale, so the plain push runs again. A diverged branch keeps
+// the sandbox, and its error names the heads that differ. Nothing is forced
+// (gt-0361s2).
+func (b *openshellBackend) refusedPush(ctx context.Context, rec SandboxRecord, dir, branch string, pushErr error) error {
+	if _, err := b.cloneGit(ctx, rec, dir, "fetch", "origin", branch); err != nil {
+		return fmt.Errorf("pushing %s: %w; fetching origin's head to compare failed: %v", branch, pushErr, err)
+	}
+	local, err := b.cloneText(ctx, rec, dir, "rev-parse", "--verify", "refs/heads/"+branch)
+	if err != nil {
+		return fmt.Errorf("pushing %s: %w; reading the clone's head failed: %v", branch, pushErr, err)
+	}
+	remote, err := b.cloneText(ctx, rec, dir, "rev-parse", "--verify", "FETCH_HEAD")
+	if err != nil {
+		return fmt.Errorf("pushing %s: %w; reading origin's fetched head failed: %v", branch, pushErr, err)
+	}
+	rel, err := classifyBranchRelation(local, remote, func(ancestor, descendant string) (bool, error) {
+		base, err := b.cloneText(ctx, rec, dir, "merge-base", ancestor, descendant)
+		return base == ancestor, err
+	})
+	if err != nil {
+		return fmt.Errorf("pushing %s: %w; comparing it with origin's head failed: %v", branch, pushErr, err)
+	}
+	switch rel {
+	case relationEqual, relationBehind:
+		return nil
+	case relationAhead:
+		if _, err := b.cloneGit(ctx, rec, dir, "push", "origin", branch); err != nil {
+			return fmt.Errorf("pushing %s: %w", branch, err)
+		}
+		return nil
+	}
+	d, err := b.divergenceIn(ctx, rec, dir, branch, local, remote)
+	if err != nil {
+		return fmt.Errorf("branch %s diverged from origin, and its divergence could not be read (%v); nothing is forced: %s", branch, err, refusalLine(pushErr.Error()))
+	}
+	return divergedRefusal(d, pushErr)
+}
+
+// divergenceIn reads the merge-base of a diverged branch in the clone, and the
+// commits each side holds that the other lacks.
+func (b *openshellBackend) divergenceIn(ctx context.Context, rec SandboxRecord, dir, branch, local, remote string) (divergence, error) {
+	base, err := b.cloneText(ctx, rec, dir, "merge-base", local, remote)
+	if err != nil {
+		return divergence{}, err
+	}
+	localOnly, err := b.cloneCount(ctx, rec, dir, remote+".."+local)
+	if err != nil {
+		return divergence{}, err
+	}
+	remoteOnly, err := b.cloneCount(ctx, rec, dir, local+".."+remote)
+	if err != nil {
+		return divergence{}, err
+	}
+	return divergence{Branch: branch, Local: local, Remote: remote, MergeBase: base, LocalOnly: localOnly, RemoteOnly: remoteOnly}, nil
+}
+
+// cloneCount is the number of commits in revRange, counted by git in the clone.
+func (b *openshellBackend) cloneCount(ctx context.Context, rec SandboxRecord, dir, revRange string) (int, error) {
+	out, err := b.cloneText(ctx, rec, dir, "rev-list", "--count", revRange)
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(out)
+	if err != nil {
+		return 0, fmt.Errorf("parsing commit count %q: %w", out, err)
+	}
+	return n, nil
+}
+
+// cloneText is the stdout of a git command in the clone, trimmed.
+func (b *openshellBackend) cloneText(ctx context.Context, rec SandboxRecord, dir string, args ...string) (string, error) {
+	out, err := b.cloneGit(ctx, rec, dir, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // cloneGit runs git in the clone at dir inside rec's sandbox. A sandbox that is
 // already gone maps to ErrNothingToPush; any other failure names the git verb.
+// The CLI's error already carries the command's stderr, so the stderr it returns
+// is not added again; stdout is, since git can print a refusal there. Both are
+// joined on one line, so a multi-line refusal reads whole in the log.
 func (b *openshellBackend) cloneGit(ctx context.Context, rec SandboxRecord, dir string, args ...string) ([]byte, error) {
 	argv := append([]string{"git", "-C", dir}, args...)
 	out, _, err := b.cli.Exec(ctx, rec.Session, nil, argv, nil)
@@ -76,7 +164,7 @@ func (b *openshellBackend) cloneGit(ctx context.Context, rec SandboxRecord, dir 
 		return nil, ErrNothingToPush
 	}
 	if err != nil {
-		return nil, fmt.Errorf("git %s in sandbox %s: %w", args[0], rec.Session, err)
+		return nil, fmt.Errorf("git %s in sandbox %s: %s", args[0], rec.Session, refusalLine(err.Error()+"\n"+string(out)))
 	}
 	return out, nil
 }

@@ -58,6 +58,47 @@ func TestPatrolScanRestartReportsTheChildsErrorLine(t *testing.T) {
 	}
 }
 
+// A child whose error spans lines, as a refused push does, has every line in
+// the log line, joined with " | ", and not the usage block after them
+// (gt-0361s2).
+func TestPatrolScanRestartJoinsEveryLineOfTheChildsError(t *testing.T) {
+	t.Parallel()
+	const output = `Starting session for gastown/toast...
+Error: preparing openshell session for toast: pushing polecat/toast/gt-3lvcjz.4 to forgejo: git push: To http://forgejo:3000/sloan/gastown.git
+ ! [rejected]        polecat/toast/gt-3lvcjz.4 -> polecat/toast/gt-3lvcjz.4 (non-fast-forward)
+error: failed to push some refs to 'http://forgejo:3000/sloan/gastown.git'
+Usage:
+  gt session restart <rig>/<polecat> [flags]
+`
+	gt := newFakeCLI(cliBySub(map[string]cliReply{
+		"session restart": {code: 1, stderr: output},
+	}))
+	d := &Daemon{
+		logger:  discardLogger,
+		config:  &Config{TownRoot: t.TempDir()},
+		gtPath:  "gt",
+		execCmd: gt.run,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+			PatrolScan: &PatrolScanConfig{Enabled: true, Rigs: []string{"gastown"}},
+		}},
+	}
+
+	err := d.restartPolecatSession(supervisor.SeatFor("gastown", constants.RolePolecat, "toast"))
+	if err == nil {
+		t.Fatal("restart of a gt that exited non-zero = success, want its error")
+	}
+	const want = "preparing openshell session for toast: pushing polecat/toast/gt-3lvcjz.4 to forgejo: git push: " +
+		"To http://forgejo:3000/sloan/gastown.git | " +
+		"! [rejected]        polecat/toast/gt-3lvcjz.4 -> polecat/toast/gt-3lvcjz.4 (non-fast-forward) | " +
+		"error: failed to push some refs to 'http://forgejo:3000/sloan/gastown.git'"
+	if !strings.HasSuffix(err.Error(), want) {
+		t.Errorf("restart error = %q, want it to end %q", err.Error(), want)
+	}
+	if strings.Contains(err.Error(), "Usage:") {
+		t.Errorf("restart error carries the usage block: %q", err.Error())
+	}
+}
+
 // A seat whose restart fails with the same cause on two consecutive patrol
 // scans raises one escalation naming the seat and the cause, keeps it to one
 // however many scans follow, and clears it when a restart succeeds (gt-6hhp8).
