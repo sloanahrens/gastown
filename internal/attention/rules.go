@@ -102,6 +102,11 @@ const (
 	// container runs an image more than one patch release behind the newest
 	// release (gt-goda5m).
 	RuleDoltImageBehind = "dolt.image_behind"
+
+	// RuleDeployPairReady is the pair-ready rule: the images workflow published
+	// both images for a green commit newer than the running daemon, so a roll
+	// can start (gt-4nlpw8).
+	RuleDeployPairReady = "deploy.pair_ready"
 )
 
 var (
@@ -172,6 +177,10 @@ var ruleFlags = map[string]RuleFlags{
 	// pull at the next restart: it is for the overseer's next look, not a page
 	// (gt-goda5m).
 	RuleDoltImageBehind: flagsAsk,
+	// A pair ready to roll is the one thing the overseer acts on sooner than
+	// the next look: the roll starts when it can, not when someone notices
+	// (gt-4nlpw8).
+	RuleDeployPairReady: flagsWake,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -274,6 +283,7 @@ var kindRules = map[Kind]string{
 	KindPostLandUnknown:          RulePostLandUnknown,
 	KindGreenRef:                 RuleGreenRef,
 	KindDoltImageBehind:          RuleDoltImageBehind,
+	KindDeployPairReady:          RuleDeployPairReady,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule

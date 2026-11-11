@@ -349,6 +349,9 @@ type attentionSources struct {
 	// doltImage is the Dolt image check's held item, or nil when none is held
 	// (dolt_version_check.go).
 	doltImage func() []attention.Item
+	// pairReady is the pair check's held items, or nil when the check is not
+	// wired (pair_ready.go).
+	pairReady func() []attention.Item
 	// repeatedAt is when each repeating item was last said, carried across
 	// ticks by the daemon. attentionTick updates it.
 	repeatedAt map[string]time.Time
@@ -658,6 +661,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindPostLandUnknown, collect: s.collectPostLandUnknown},
 		{kind: attention.KindCacheTrimNoOp, collect: s.collectCacheTrimNoOp},
 		{kind: attention.KindDoltImageBehind, collect: s.collectDoltImage},
+		{kind: attention.KindDeployPairReady, collect: s.collectPairReady},
 	}, s.questionCollectors()...)
 }
 
@@ -693,6 +697,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	}
 	s.cacheTrimNoOp = d.cacheTrimNoOp.observed
 	s.doltImage = d.doltImage.observed
+	s.pairReady = d.pairReady.observed
 	s.redMain = func(ctx context.Context, rig string) ([]*beads.Issue, error) {
 		return d.rigWorkBeads(rig).List(beads.ListOptions{
 			Status: "open", Label: landworker.LabelRedMain, Priority: -1, Limit: 0,

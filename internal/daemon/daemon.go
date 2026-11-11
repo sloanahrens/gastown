@@ -376,6 +376,10 @@ type Daemon struct {
 	// an image more than one patch release behind the newest release, which the
 	// attention queue raises (gt-goda5m).
 	doltImage doltImageCheck
+	// pairReady is the pair check's items: a green commit newer than the running
+	// daemon whose daemon and polecat images are both published, so a roll can
+	// start (gt-4nlpw8).
+	pairReady pairReadyCheck
 	// doltImageDB opens the pool the image check's server read uses, replacing
 	// sql.Open in a test so the read's failure paths need no server (gt-w9wdav).
 	doltImageDB doltImageOpenDB
@@ -2401,6 +2405,11 @@ var heartbeatSteps = []heartbeatStep{
 	// hour (gt-goda5m). It reads only, so it is not lifecycle: an E-stopped town
 	// still gets the report.
 	{name: "dolt-image", run: (*Daemon).checkDoltImage},
+
+	// Compare the published image pair with the running commit, every quarter
+	// hour (gt-4nlpw8). It reads only, so it is not lifecycle: an E-stopped town
+	// still gets the report.
+	{name: "pair-ready", run: (*Daemon).checkPairReady},
 
 	// Kill ghost sessions left over from stale registry (default "gt" prefix).
 	{name: "ghost-sessions", lifecycle: true, run: (*Daemon).killDefaultPrefixGhosts},
