@@ -615,10 +615,7 @@ func TestLandingsIsFullWidthAndOnlyOpenPanel(t *testing.T) {
 	if opens, closes := strings.Count(between, "<div"), strings.Count(between, "</div>"); opens != closes {
 		t.Errorf("%d divs open and %d close between the grid and the Landings section: it sits inside the grid", opens, closes)
 	}
-	tail := page[at+len("<section"):]
-	if end := strings.Index(tail, "<script>"); end < 0 || strings.Contains(tail[:end], "<section") {
-		t.Error("a section follows the Landings section: it is not the last block")
-	}
+	checkLandingsIsLastBlock(t, page)
 	for _, prop := range []string{"width", "max-width", "grid-column", "float"} {
 		if got, ok := cssDecls(t, "wide")[prop]; ok {
 			t.Errorf("the .wide rule sets %s:%s, want the section to take the page's full width as a block", prop, got)

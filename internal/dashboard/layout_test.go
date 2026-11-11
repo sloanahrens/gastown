@@ -28,7 +28,8 @@ func TestPaneColumns(t *testing.T) {
 		{"costnote", "left", "attentionnote", "rigsnote"},
 		{"rigsnote", "left", "costnote", "tiersweepnote"},
 		{"tiersweepnote", "left", "rigsnote", ""},
-		{"polecatsnote", "left", "tiersweepnote", ""},
+		// The Polecats note is not a column pane: it sits in the Landings block
+		// (TestPolecatsIsInLandingsBetweenItsFiguresAndRows).
 		{"machnote", "right", "", "cloudnote"},
 		{"cloudnote", "right", "machnote", "forgejonote"},
 		{"forgejonote", "right", "cloudnote", "omnote"},

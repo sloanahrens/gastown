@@ -68,6 +68,9 @@ __sectionSpec.forEach(function (sp) {
   sec.append(h);
   __sections.push(sec);
 });
+// The markup nests the Polecats section in the Landings body, so the stub nests
+// it there too: the body's own children are drawn around it, as in the browser.
+__byId["trend"].append(__byId["polecatssec"]);
 function __cls(e, c) { return (" " + (e.className || "") + " ").indexOf(" " + c + " ") >= 0; }
 function __walk(e, fn) {
   for (var i = 0; i < (e._kids || []).length; i++) { fn(e._kids[i]); __walk(e._kids[i], fn); }
@@ -161,7 +164,13 @@ function __el(tag) {
       this._text = "";
       for (var i = 0; i < arguments.length; i++) { arguments[i].parentNode = this; this._kids.push(arguments[i]); }
     },
-    remove: function () {},
+    // remove takes the element out of its parent, as the browser does, so a
+    // redraw that clears a box around one child leaves that child in place.
+    remove: function () {
+      var p = this.parentNode;
+      if (p) p._kids = p._kids.filter(function (k) { return k !== this; }, this);
+      this.parentNode = null;
+    },
     focus: function () { document.activeElement = this; },
     setAttribute: function (k, v) { this["attr_" + k] = v; },
     getAttribute: function (k) { return this["attr_" + k]; },

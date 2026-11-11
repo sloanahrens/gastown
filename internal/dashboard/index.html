@@ -159,6 +159,9 @@ section>h2 .foldsum{margin-left:auto;text-transform:none;letter-spacing:0;white-
    already takes the free space and pushes both right, so the summary beside it
    must not take a share as well. */
 section>h2 .r:not([hidden])+.foldsum{margin-left:0}
+/* The Polecats section sits inside the Landings body, between its figures and
+   its landing rows: a card of its own, spaced from both. */
+#trend>#polecatssec{margin:10px 0}
 /* The News pane: one line per story, the title taking what the comments link
    leaves. Both tracks may shrink, so a long title is ellipsed rather than
    widening the panel. */
@@ -482,7 +485,6 @@ a.hrow:hover{background:#19212b}
     <section data-fold="cost"><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section data-fold="rigs"><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section data-fold="tiersweep"><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
-    <section data-fold="polecats"><h2>Polecats <span class="r" id="polecatsnote"></span></h2><div class="body" id="polecats"></div></section>
   </div>
   <div class="col">
     <section id="newssec" data-fold="news" hidden><h2>Hacker News <span class="r" id="newsnote"></span></h2><div class="body" id="news"></div></section>
@@ -495,8 +497,10 @@ a.hrow:hover{background:#19212b}
     <section data-fold="beads"><h2>Beads <span class="r" id="beadsnote"></span></h2><div class="body" id="beads"></div></section>
   </div>
 </div>
-<!-- Below the grid, full width: Landings, the pane the operator reads daily. -->
-<section id="trendsec" class="wide" data-fold="landings" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"></div></section>
+<!-- Below the grid, full width: Landings, the pane the operator reads daily. Its
+     body reads top to bottom: the figures and notes, the Polecats section (kept
+     in place by renderTrend, which draws around it), then the landing rows. -->
+<section id="trendsec" class="wide" data-fold="landings" hidden><h2>Landings <span class="r" id="trendnote"></span></h2><div class="body" id="trend"><section id="polecatssec" data-fold="polecats"><h2>Polecats <span class="r" id="polecatsnote"></span></h2><div class="body" id="polecats"></div></section></div></section>
 
 <script>
 "use strict";
@@ -1662,6 +1666,17 @@ function loadSummary(loads) {
   return "load · now " + now.toFixed(1) + " · 24 hour average " + avg.toFixed(1) + " · peak " + Math.max(...vals).toFixed(1) + " · " + vals.length + " of 24 hours recorded (only while a page is open)";
 }
 
+// trendClear empties the Landings body except the Polecats section. That section
+// is part of the page's markup and renderPolecats draws it, so a landings redraw
+// leaves it attached: a redraw that moved it would drop a reader's text selection
+// and focus inside the seats table.
+function trendClear(box) {
+  const pol = $("polecatssec");
+  Array.from(box.children).forEach(c => { if (c !== pol) c.remove(); });
+}
+
+// renderTrend draws the Landings body: the figures and notes above the Polecats
+// section, and the landing rows below it.
 function renderTrend(s) {
   if (pushSkip("trend", s)) return;
   const sec = $("trendsec"), box = $("trend");
@@ -1671,11 +1686,12 @@ function renderTrend(s) {
   const recent = (t && t.recent) || [];
   // A bead waiting for the worker has no row of its own in the trend: nothing
   // has landed. It comes from the Queue reader's list, and a queue alone is
-  // reason to show the section (gt-zc45r).
+  // reason to show the section (gt-zc45r). The Polecats section lives in this
+  // block too, so a seats reading alone is reason to show it.
   const waiting = queuedLandings(s, recent);
-  if (!hours.length && !waiting.length) { sec.hidden = true; box.replaceChildren(); return; }
+  if (!hours.length && !waiting.length && !s.polecats) { sec.hidden = true; trendClear(box); return; }
   sec.hidden = false;
-  box.replaceChildren();
+  trendClear(box);
   const names = polecatNames(s.polecats);
   // Nothing has landed in the window: the pane is the queue alone, rather than
   // the day's figures and charts drawn from a reading nobody has made yet.
@@ -1686,6 +1702,8 @@ function renderTrend(s) {
     keepLandingsScroll(box, top);
     return;
   }
+  // The figures and notes gather here and go in above the Polecats section.
+  const figs = [];
   const hhmm = iso => new Date(iso).toLocaleTimeString([], {hour12: false}).slice(0, 5);
   const t0 = new Date(hours[0].hour).getTime();
   const t1 = new Date(hours[hours.length - 1].hour).getTime() + 3600e3;
@@ -1712,7 +1730,7 @@ function renderTrend(s) {
     try { localStorage.setItem(LANDINGS_HEAD_KEY, landingsHeadFolded ? "folded" : "open"); } catch (e) {}
   });
   lhead.append(lhbtn, lhbody);
-  box.append(lhead);
+  figs.push(lhead);
 
   // the day in numbers
   const kv = el("div", "kv");
@@ -1745,15 +1763,16 @@ function renderTrend(s) {
   // The gate, om and load readings are one compact stats line each, off the
   // same reading the chart above draws.
   const stageLines = [stageSummary("gate", stages.map(p => p.gate_secs)), stageSummary("om", stages.map(p => p.om_secs))].filter(Boolean);
-  if (stageLines.length) box.append(el("div", "k title", stageLines.join("  ")));
-  else box.append(el("div", "empty", "no stage lines in the last 24 hours"));
+  if (stageLines.length) figs.push(el("div", "k title", stageLines.join("  ")));
+  else figs.push(el("div", "empty", "no stage lines in the last 24 hours"));
 
   // hourly load average (recorded only while a page is open)
   const loads = hours.filter(h => h.load_avg != null).map(h => ({t: new Date(h.hour).getTime() + 1800e3, v: h.load_avg}));
   const loadLine = loadSummary(loads);
-  if (loadLine) box.append(el("div", "k title", loadLine));
-  else box.append(el("div", "empty", "no load history yet (it fills while a page is open)"));
+  if (loadLine) figs.push(el("div", "k title", loadLine));
+  else figs.push(el("div", "empty", "no load history yet (it fills while a page is open)"));
 
+  box.prepend(...figs);
   const tbl = landingTable(s, names, recent, waiting);
   if (tbl) box.append(tbl);
   keepLandingsScroll(box, top);
@@ -5488,8 +5507,9 @@ function foldSummaryLine(fold, s, note) {
 // markup declares.
 function setupCollapse() {
   // section.wide is the Landings block below the grid, which no .grid section
-  // selector reaches; "main section" is not on the page and is kept as it was.
-  document.querySelectorAll("main section, .grid section, section.wide").forEach(sec => {
+  // selector reaches, and "section.wide section" is the Polecats section nested
+  // in it; "main section" is not on the page and is kept as it was.
+  document.querySelectorAll("main section, .grid section, section.wide, section.wide section").forEach(sec => {
     const head = sec.querySelector(":scope > h2");
     if (!head) return;
     const key = sec.dataset.fold;
