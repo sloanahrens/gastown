@@ -151,6 +151,7 @@ func TestPassSPActualIgnoresAnotherLandingsRecord(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedLabelled(t, "gt-abc", "sp:5")
+	logs := h.captureLogs()
 	h.lander.fn = func(_ int, w land.Work) (land.Result, error) {
 		h.files.recs = append(h.files.recs, land.LandingRecord{BeadID: w.BeadID, LandedCommit: "dddddddddd", PolecatSecs: 600})
 		return land.Result{LandedCommit: spLanded, PatchID: "pppppppppp"}, nil
@@ -161,6 +162,9 @@ func TestPassSPActualIgnoresAnotherLandingsRecord(t *testing.T) {
 	if got := actualLabelsOf(h.labelsOf(t, "gt-abc")); len(got) != 0 {
 		t.Fatalf("sp-actual labels %v read from another landing's record; want none", got)
 	}
+	if skips := spSkipLines(*logs); len(skips) != 1 || !strings.Contains(skips[0], "no landing record for this landing") {
+		t.Fatalf("sp-actual skip lines %q; want one line naming the missing landing record", skips)
+	}
 }
 
 // TestPassSPActualWritesNothingWithNoRecordOfTheLanding: a landing the store
@@ -169,6 +173,7 @@ func TestPassSPActualWritesNothingWithNoRecordOfTheLanding(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.seedLabelled(t, "gt-abc", "sp:5")
+	logs := h.captureLogs()
 	h.lander.fn = func(_ int, _ land.Work) (land.Result, error) {
 		return land.Result{LandedCommit: spLanded, PatchID: "pppppppppp"}, nil
 	}
@@ -177,6 +182,9 @@ func TestPassSPActualWritesNothingWithNoRecordOfTheLanding(t *testing.T) {
 	}
 	if got := actualLabelsOf(h.labelsOf(t, "gt-abc")); len(got) != 0 {
 		t.Fatalf("sp-actual labels %v with no landing record; want none", got)
+	}
+	if skips := spSkipLines(*logs); len(skips) != 1 || !strings.Contains(skips[0], "no landing record for this landing") {
+		t.Fatalf("sp-actual skip lines %q; want one line naming the missing landing record", skips)
 	}
 }
 
@@ -302,6 +310,9 @@ func TestPassSPActualBeadReadFailureIsLoggedAndLandingUnchanged(t *testing.T) {
 	rep := h.w.Pass(context.Background())
 	if rep.Landed != 1 || rep.Failed != 0 {
 		t.Fatalf("report %v; want the landing counted and nothing failed", rep)
+	}
+	if got := actualLabelsOf(h.labelsOf(t, "gt-abc")); len(got) != 0 {
+		t.Fatalf("sp-actual labels %v; the bead was unreadable so want none", got)
 	}
 	if !spLogged(*logs, "reading the bead for sp-actual") {
 		t.Fatalf("logs %q; want the unreadable bead logged", *logs)

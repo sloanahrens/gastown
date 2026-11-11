@@ -1000,7 +1000,9 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		if !wasRepair {
 			w.afterLanding(ctx, work, res)
 		}
-		// Write the measured points from the landing's complete record (SP14).
+		// The label needs the landing's complete record, and a repair is the pass
+		// that completes a record an earlier pass left unfinished, so this runs
+		// on a repair too. The write is idempotent: a stale sp-actual is replaced.
 		w.writeSPActual(work.BeadID, res.LandedCommit)
 		// The record is complete now, which is the proof the seat's end reads.
 		// A repair that finishes a record left unfinished reaches it here, so
