@@ -123,6 +123,20 @@ func TestSandboxSeatStartFromLedgerNoLedgerIsNoRecord(t *testing.T) {
 	}
 }
 
+// TestSandboxSeatStartFromLedgerReportsAnUnreadableLedger: a ledger that exists
+// but cannot be read is an error, never a town with no record.
+func TestSandboxSeatStartFromLedgerReportsAnUnreadableLedger(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(SandboxSeatLedgerPath(town), 0o755); err != nil {
+		t.Fatalf("putting a directory at the ledger path: %v", err)
+	}
+	_, ok, err := SandboxSeatStartFromLedger(town, "gt-gastown-box", time.Now())
+	if err == nil || ok {
+		t.Fatalf("ok=%v err=%v, want an unreadable ledger reported as an error", ok, err)
+	}
+}
+
 // TestSandboxSeatStartSurvivesTheRemoval: the removal every teardown runs writes
 // the line the start is read from, so the start of a record gone since the seat
 // submitted comes back exactly.
