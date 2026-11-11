@@ -98,6 +98,7 @@ func mustRead(t *testing.T, path string) []byte {
 }
 
 func TestBuildRecord(t *testing.T) {
+	t.Parallel()
 	rec := Build(factsIn("ws-a"), []SessionUsage{sessA, sessB})
 
 	if rec.Bead != "gt-abc12" || rec.Kind != "work" || rec.Class != "polecat" || rec.Rig != "gastown" || rec.Workspace != "ws-a" {
@@ -146,6 +147,7 @@ func TestBuildRecord(t *testing.T) {
 }
 
 func TestBuildRecordIncomplete(t *testing.T) {
+	t.Parallel()
 	badTS := SessionUsage{ID: "s-bad", Complete: true, Main: []Message{
 		msg("x1", "deepseek-flash", "not-a-time", 1000000, 0, 0, 0),
 	}}
@@ -188,6 +190,7 @@ func TestBuildRecordIncomplete(t *testing.T) {
 }
 
 func TestWriteMergesBySession(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir() // the beads directory does not exist yet: Write creates it
 	path := recordPathFor(t, dir)
 
@@ -252,6 +255,7 @@ func TestWriteMergesBySession(t *testing.T) {
 }
 
 func TestMergeTakesWidestBoundsAndNamesNoSeatWhenSeatsDiffer(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := recordPathFor(t, dir)
 	if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"}); err != nil {
@@ -291,6 +295,7 @@ func TestMergeTakesWidestBoundsAndNamesNoSeatWhenSeatsDiffer(t *testing.T) {
 // A record with no workspace is refused even with no record on disk to compare against, so
 // its spend can never total as unattributed.
 func TestWriteRefusesRecordWithNoWorkspace(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := Write(dir, Build(factsIn(""), []SessionUsage{sessB}), []string{"s-b"}); err == nil {
 		t.Fatal("write of a record with no workspace: no error")
@@ -303,6 +308,7 @@ func TestWriteRefusesRecordWithNoWorkspace(t *testing.T) {
 // Eight runs for one bead end at once. Each merges into the file the others have just
 // written, so the lock must hold every read-merge-write whole: all eight sessions counted.
 func TestWriteConcurrentSessionsAllCounted(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	const n = 8
 	errs := make([]error, n)
@@ -335,6 +341,7 @@ func TestWriteConcurrentSessionsAllCounted(t *testing.T) {
 }
 
 func TestRecordPathCleansBeadName(t *testing.T) {
+	t.Parallel()
 	got := recordPath("/usage", "gt/../x y", dashboard.UsageKindWork)
 	want := filepath.Join("/usage", "beads", "gt_.._x_y.work.json")
 	if got != want {
@@ -343,28 +350,33 @@ func TestRecordPathCleansBeadName(t *testing.T) {
 }
 
 // checkFailedWriteKeepsRecord needs the record already on disk at path, and a new session to write.
+// The write must fail: for a user the beads directory is made read-only; root writes into a
+// directory whatever its mode, so there the write is refused for a record of another workspace.
 func checkFailedWriteKeepsRecord(t *testing.T, dir, path string) {
 	t.Helper()
-	if os.Geteuid() == 0 {
-		t.Skip("root writes into a directory whatever its mode, so this refusal cannot be provoked")
-	}
 	before := mustRead(t, path)
 
 	beads := filepath.Join(dir, "beads")
-	if err := os.Chmod(beads, 0o555); err != nil {
-		t.Fatalf("making the beads directory read-only: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := os.Chmod(beads, 0o755); err != nil {
-			t.Errorf("restoring the beads directory's mode: %v", err)
-		}
-	})
-
 	// A session not yet counted, so the write has something to do and must fail.
 	fresh := sessA
 	fresh.ID = "s-c"
-	if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{fresh}), []string{"s-c"}); err == nil {
-		t.Fatal("write into an unwritable directory: no error")
+	rec := Build(factsIn("ws-a"), []SessionUsage{fresh})
+	if os.Geteuid() == 0 {
+		rec = Build(factsIn("ws-b"), []SessionUsage{fresh})
+	} else {
+		//testpolicy:allow no-exec-files — the target is the beads directory: a read-only dir needs its search bit to be listed
+		if err := os.Chmod(beads, 0o555); err != nil {
+			t.Fatalf("making the beads directory read-only: %v", err)
+		}
+		t.Cleanup(func() {
+			//testpolicy:allow no-exec-files — the target is the beads directory: cleanup must restore its search bit
+			if err := os.Chmod(beads, 0o755); err != nil {
+				t.Errorf("restoring the beads directory's mode: %v", err)
+			}
+		})
+	}
+	if err := Write(dir, rec, []string{"s-c"}); err == nil {
+		t.Fatal("a failed write: no error")
 	}
 	if got := mustRead(t, path); string(got) != string(before) {
 		t.Errorf("failed write changed the earlier record")
@@ -379,6 +391,7 @@ func checkFailedWriteKeepsRecord(t *testing.T, dir, path string) {
 }
 
 func TestWriteRefusesUnreadableOrForeignRecord(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		existing string
@@ -408,6 +421,7 @@ func TestWriteRefusesUnreadableOrForeignRecord(t *testing.T) {
 }
 
 func TestWriteRefusesBadInput(t *testing.T) {
+	t.Parallel()
 	recA := Build(factsIn("ws-a"), []SessionUsage{sessA})
 	noBead := recA
 	noBead.Bead = ""
@@ -455,6 +469,7 @@ func TestWriteRefusesBadInput(t *testing.T) {
 }
 
 func TestWorkspaceMapping(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		file    *string // nil: no settings file
@@ -501,6 +516,7 @@ func TestWorkspaceMapping(t *testing.T) {
 }
 
 func TestRecordIsReadByTheConsumers(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	rec := Build(factsIn("ws-a"), []SessionUsage{sessA, sessB})
 	if err := Write(dir, rec, []string{"s-a", "s-b"}); err != nil {
