@@ -107,7 +107,7 @@ func TestPolecatImageDevTagSourceFallsBackToValuesDigest(t *testing.T) {
 			sandbox := newDevTagRegistry()
 			sandbox.addImage("dev", devTagOldCommit)
 			before := sandbox.tagBytes("dev")
-			d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+			d, n, logs := devTagSplitDaemon(t, ci, sandbox)
 			writeDevTagValues(t, d, tc.values, tc.garbage, digest)
 
 			d.publishPolecatDevTag()
@@ -120,6 +120,11 @@ func TestPolecatImageDevTagSourceFallsBackToValuesDigest(t *testing.T) {
 			if tc.wantGet {
 				if !bytes.Equal(sandbox.tagBytes("dev"), manifest) {
 					t.Fatalf("sandbox dev tag was not moved to the digest the values file names")
+				}
+				// A digest is a reference of its own: the log names it with an at sign,
+				// never as a tag after a colon.
+				if want := "copied from " + devTagCIHost + "/" + devTagCIRepo + "@" + digest; !strings.Contains(logs.String(), want) {
+					t.Fatalf("log = %q, want the move to name the digest reference %q", logs.String(), want)
 				}
 				if len(got) != 0 {
 					t.Fatalf("escalations = %+v, want none", got)

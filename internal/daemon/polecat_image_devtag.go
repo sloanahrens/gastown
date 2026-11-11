@@ -193,7 +193,7 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 	after := readDevTag(ctx, c, repo)
 	if putErr == nil && after.readErr == nil && after.present && after.digest == source.Digest && after.label == running {
 		d.logger.Printf("polecat image: %s/%s:%s moved to gt commit %s from %s, copied from %s; the label reads back %s",
-			host, repo, polecatDevTagName, running, dev.describe(), ciRepo+":"+ref, after.label)
+			host, repo, polecatDevTagName, running, dev.describe(), polecatDevTagSourceName(ciRepo, ref), after.label)
 		return nil
 	}
 
@@ -212,6 +212,17 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 		}
 	}
 	return devTagFailure(host, running, dev, why)
+}
+
+// polecatDevTagSourceName names the source the copy read: repo:tag for a tag, and
+// repo@digest for the digest the values file fallback reads. A digest holds a
+// colon of its own, so the separator is chosen by what ref is, and a tag never
+// holds one.
+func polecatDevTagSourceName(repo, ref string) string {
+	if strings.Contains(ref, ":") {
+		return repo + "@" + ref
+	}
+	return repo + ":" + ref
 }
 
 // readPolecatDevTagSource inspects the source image in the CI registry. It asks
