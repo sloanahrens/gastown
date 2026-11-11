@@ -496,7 +496,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	// to avoid "no route found" warnings (#1424). Determine beadsWorkDir for rig identity bead.
 	var beadsWorkDir string
 	if newRig.Config.Prefix != "" {
-		mayorRigBeads := constants.RigBeadsPath(filepath.Join(townRoot, name))
+		mayorRigBeads := constants.LegacyRigBeadsPath(filepath.Join(townRoot, name))
 		if _, err := os.Stat(mayorRigBeads); err == nil {
 			beadsWorkDir = filepath.Join(townRoot, name, "mayor", "rig")
 		} else {
@@ -1133,7 +1133,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 
 	// Create rig identity bead if prefix is set
 	if result.BeadsPrefix != "" {
-		mayorRigBeads := constants.RigBeadsPath(rigPath)
+		mayorRigBeads := constants.LegacyRigBeadsPath(rigPath)
 		beadsWorkDir := rigPath
 		if _, err := os.Stat(mayorRigBeads); err == nil {
 			beadsWorkDir = filepath.Join(rigPath, "mayor", "rig")
