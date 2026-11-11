@@ -278,12 +278,14 @@ func deploymentAnnotations(t *testing.T, out string) map[string]string {
 	return nil
 }
 
-// createLines returns the kubectl lines the render printed.
+// createLines returns the create-secret lines the render printed. The pod's
+// town-copy line is a kubectl line too, so it is not one of these.
 func createLines(output string) []string {
 	var lines []string
 	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(line), "kubectl ") {
-			lines = append(lines, strings.TrimSpace(line))
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "kubectl ") && strings.Contains(line, " create secret generic ") {
+			lines = append(lines, line)
 		}
 	}
 	return lines
@@ -1496,4 +1498,119 @@ func requireErrorNames(t *testing.T, err error, want ...string) {
 			t.Errorf("the refusal %q does not name %q", err, w)
 		}
 	}
+}
+
+// TestTownClusterRenderWritesTheRunningValuesFile holds a live render to the
+// town's own values file, the one the pair-ready check reads the running commit
+// from (gt-tju7oo).
+func TestTownClusterRenderWritesTheRunningValuesFile(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	d := clusterRenderTestDeps(t, io.Discard)
+	town, err := d.findTown()
+	if err != nil {
+		t.Fatalf("finding the town: %v", err)
+	}
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	want, err := os.ReadFile(imagevalues.PathIn(f.dir))
+	if err != nil {
+		t.Fatalf("reading the render's values file: %v", err)
+	}
+	got, err := os.ReadFile(imagevalues.PathIn(filepath.Join(town, "gastown")))
+	if err != nil {
+		t.Fatalf("the render wrote no running values file under the town: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("the town's values file = %q, want the render's %q", got, want)
+	}
+	if !strings.Contains(string(got), "commit: "+strings.Repeat("a", 40)+"\n") {
+		t.Fatalf("the town's values file does not hold the commit line:\n%s", got)
+	}
+}
+
+// TestTownClusterRenderRehearsalWritesNoRunningValuesFile holds a rehearsal to
+// writing nothing under the town, and to printing no copy step for the live pod.
+func TestTownClusterRenderRehearsalWritesNoRunningValuesFile(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	f.rehearsal = true
+	f.forgeHost = ""
+	f.confirmStopped = false
+	f.namespace = "gt-rehearsal"
+	d := clusterRenderTestDeps(t, io.Discard)
+	town, err := d.findTown()
+	if err != nil {
+		t.Fatalf("finding the town: %v", err)
+	}
+	var out bytes.Buffer
+	d.out = &out
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if _, err := os.Stat(imagevalues.PathIn(filepath.Join(town, "gastown"))); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a rehearsal wrote the running values file under the town (stat: %v)", err)
+	}
+	if strings.Contains(out.String(), "kubectl -n gt-rehearsal exec") {
+		t.Fatalf("a rehearsal prints a copy step for the live pod:\n%s", out.String())
+	}
+}
+
+// TestTownClusterRenderPrintsThePodsTownCopyStep names the command that copies
+// the values file into the daemon pod's town copy: the pod's town root is
+// TownRootPath, so the copy lands at TownRootPath/gastown, and the line is
+// printed, never run.
+func TestTownClusterRenderPrintsThePodsTownCopyStep(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	d := clusterRenderTestDeps(t, io.Discard)
+	town, err := d.findTown()
+	if err != nil {
+		t.Fatalf("finding the town: %v", err)
+	}
+	var out bytes.Buffer
+	d.out = &out
+	if err := runClusterRender(d, f); err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	townValues := imagevalues.PathIn(filepath.Join(town, "gastown"))
+	podPath := k8sdaemon.TownRootPath + "/gastown/deploy/values/images.yaml"
+	var copyLines []string
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.Contains(line, " exec ") {
+			copyLines = append(copyLines, strings.TrimSpace(line))
+		}
+	}
+	if len(copyLines) != 1 {
+		t.Fatalf("printed %d copy lines, want exactly 1:\n%s", len(copyLines), out.String())
+	}
+	line := copyLines[0]
+	if !strings.HasPrefix(line, "kubectl -n gt exec -i deploy/daemon -c daemon -- sh -c ") {
+		t.Errorf("the copy line does not exec into the daemon container: %s", line)
+	}
+	if !strings.Contains(line, podPath) {
+		t.Errorf("the copy line does not name the pod's town copy %s: %s", podPath, line)
+	}
+	if !strings.HasSuffix(line, "< "+townValues) {
+		t.Errorf("the copy line does not copy from the town's values file %s: %s", townValues, line)
+	}
+}
+
+// TestTownClusterRenderRefusesAnUnwritableRunningValuesFile holds a failed write
+// of the town's values file to a named refusal, not a silent success.
+func TestTownClusterRenderRefusesAnUnwritableRunningValuesFile(t *testing.T) {
+	t.Parallel()
+	f := clusterRenderFixture(t)
+	d := clusterRenderTestDeps(t, io.Discard)
+	town, err := d.findTown()
+	if err != nil {
+		t.Fatalf("finding the town: %v", err)
+	}
+	// A regular file where the town's gastown directory belongs makes the write fail.
+	if err := os.WriteFile(filepath.Join(town, "gastown"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatalf("writing the blocking file: %v", err)
+	}
+	err = runClusterRender(d, f)
+	requireErrorNames(t, err, "running values file", imagevalues.PathIn(filepath.Join(town, "gastown")))
 }
