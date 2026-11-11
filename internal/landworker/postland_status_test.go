@@ -299,6 +299,32 @@ func TestPostLandStatusVerdictRules(t *testing.T) {
 			wantTail: "one job failed",
 			wantLog:  "RED at",
 		},
+		{
+			name: "a cancelled run is unknown, not red",
+			read: fakeStatusRead{status: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{{
+				Context: statusContext, Status: forgejo.StateFailure, Description: "Has been cancelled",
+			}}}},
+			wantLog: "is now canceled",
+		},
+		{
+			name: "a real failure beside a cancelled run still reads red",
+			read: fakeStatusRead{status: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
+				{Context: statusContext, Status: forgejo.StateFailure, Description: "Has been cancelled"},
+				{Context: statusContext, Status: forgejo.StateFailure, Description: "gate: 2 tests failed"},
+			}}},
+			wantRed:  1,
+			wantTail: "gate: 2 tests failed",
+			wantLog:  "RED at",
+		},
+		{
+			name: "a success beside a cancelled run reads green",
+			read: fakeStatusRead{status: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
+				{Context: statusContext, Status: forgejo.StateFailure, Description: "Has been cancelled"},
+				{Context: statusContext, Status: forgejo.StateSuccess},
+			}}},
+			wantGreen: 1,
+			wantLog:   "is success",
+		},
 		{name: "pending is unknown", read: fakeStatusRead{status: combinedFor(statusContext, forgejo.StatePending)}, wantLog: "is now pending"},
 		{name: "warning is unknown", read: fakeStatusRead{status: combinedFor(statusContext, forgejo.StateWarning)}, wantLog: "is now warning"},
 		{name: "skipped is unknown", read: fakeStatusRead{status: combinedFor(statusContext, forgejo.StateSkipped)}, wantLog: "is now skipped"},
@@ -346,6 +372,62 @@ func TestPostLandStatusVerdictRules(t *testing.T) {
 				t.Fatalf("logs do not name the reason %q:\n%s", tc.wantLog, logs)
 			}
 		})
+	}
+}
+
+// TestPostLandStatusCancelledRunIsUnknownNotRed pins the canceled-run branch:
+// Forgejo wrote run 9957's terminal state over the post-land context as
+// failure with the description postLandCancelledDescription (gt-ybeeqc). It
+// reads as UNKNOWN, one log line names it, it raises no red-main item, and
+// main is judged by the next commit's status.
+func TestPostLandStatusCancelledRunIsUnknownNotRed(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	cancelled := PostLand{BeadID: "gt-pittz6", Commit: "8d30e0bb9a69d9865b32027b1149686c4f039c7c", Target: "main"}
+	next := PostLand{BeadID: "gt-next", Commit: "883012769898002d24045f8ec18bc6aa56952352", Target: "main"}
+	reads := map[string]*fakeStatusReads{
+		cancelled.Commit: {responses: []fakeStatusRead{{status: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{{
+			Context: statusContext, Status: forgejo.StateFailure, Description: "Has been cancelled",
+		}}}}}},
+		next.Commit: {responses: []fakeStatusRead{{status: combinedFor(statusContext, forgejo.StateSuccess)}}},
+	}
+	v := &statusVerdicts{}
+	store := &MemoryMainState{}
+	clk := &manualClock{now: statusT0}
+	r := v.runner(byCommit(reads), store, clk, 0)
+	r.Trigger(ctx, cancelled)
+	r.PollPending(ctx)
+
+	greens, reds, unknowns := v.counts()
+	if greens != 0 || reds != 0 || unknowns != 0 {
+		t.Fatalf("cancelled run: green %d red %d unknown %d, want no verdict and no red-main item", greens, reds, unknowns)
+	}
+	v.mu.Lock()
+	comments := append([]string(nil), v.comments...)
+	logs := append([]string(nil), v.logs...)
+	v.mu.Unlock()
+	if len(comments) != 0 {
+		t.Fatalf("comments = %q, want none: a cancelled run is not a red", comments)
+	}
+	naming := 0
+	for _, line := range logs {
+		if strings.Contains(line, "canceled") {
+			naming++
+		}
+	}
+	if naming != 1 {
+		t.Fatalf("log lines naming the cancellation = %d, want one:\n%s", naming, strings.Join(logs, "\n"))
+	}
+	if pending := pendingOf(t, store); len(pending) != 1 || pending[0].Land.Commit != cancelled.Commit {
+		t.Fatalf("pending = %+v, want the cancelled commit still waiting for the next commit's verdict", pending)
+	}
+
+	// Main is judged by the next commit's status, not the canceled run.
+	clk.Advance(time.Minute)
+	r.Trigger(ctx, next)
+	r.PollPending(ctx)
+	if greens, reds, _ := v.counts(); greens != 1 || reds != 0 {
+		t.Fatalf("after the next commit: green %d red %d, want only its green", greens, reds)
 	}
 }
 

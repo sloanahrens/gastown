@@ -87,19 +87,40 @@ const (
 type PostLandStatusResult struct {
 	Verdict PostLandStatusVerdict
 	// State is the last state seen for the context: "missing", "unreadable",
-	// "pending", "success", "failure", "error", "warning", "skipped" or
-	// "posted by hand".
+	// "pending", "success", "failure", "error", "warning", "skipped",
+	// "canceled" or "posted by hand".
 	State string
 	// Description is the failing status's description on red, and the reason
 	// an UNKNOWN is unknown.
 	Description string
 }
 
+// postLandCancelledDescription is what a status says when its run was canceled
+// before it judged the work: run 9957's post-land status read failure with
+// this description (gt-ybeeqc). It names no failing test, so it is not a
+// verdict on the commit.
+const postLandCancelledDescription = "has been cancelled" //nolint:misspell // the exact description Forgejo writes
+
+// postLandStatusCancelled reports whether st is a run canceled before it
+// judged the work rather than a failure of the work. The description match is
+// exact (case-insensitive, trimmed) so a real failure whose text merely
+// mentions a cancellation still reads red.
+func postLandStatusCancelled(st forgejo.CommitStatus) bool {
+	if st.Status != forgejo.StateFailure && st.Status != forgejo.StateError {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(st.Description), postLandCancelledDescription)
+}
+
 // postLandStatusRead turns one combined-status read into a verdict. Every
 // status carrying context is read: one a user posted makes the read UNKNOWN,
 // because Forgejo attributes a workflow-posted status to no user
 // (gt-fn9e6.7), and with no creator on any of them one failure or error is red
-// even beside a success.
+// even beside a success. A canceled run contributes no verdict: it never
+// judged the work, so reading it as red raised a false red main (gt-ybeeqc).
+// Another status carrying the context still decides, and a commit whose only
+// status is canceled before it judged the work is UNKNOWN, so main is judged
+// by the next commit's status.
 func postLandStatusRead(cs *forgejo.CombinedStatus, err error, name, sha string) PostLandStatusResult {
 	if err != nil {
 		return PostLandStatusResult{
@@ -133,6 +154,25 @@ func postLandStatusRead(cs *forgejo.CombinedStatus, err error, name, sha string)
 			}
 		}
 	}
+	var canceled *forgejo.CommitStatus
+	decided := make([]forgejo.CommitStatus, 0, len(statuses))
+	for i := range statuses {
+		if postLandStatusCancelled(statuses[i]) {
+			if canceled == nil {
+				canceled = &statuses[i]
+			}
+			continue
+		}
+		decided = append(decided, statuses[i])
+	}
+	if len(decided) == 0 {
+		return PostLandStatusResult{
+			Verdict:     PostLandStatusUnknown,
+			State:       "canceled",
+			Description: fmt.Sprintf("the run was canceled before it judged %s: %s", short(sha), strings.TrimSpace(canceled.Description)),
+		}
+	}
+	statuses = decided
 	for i := range statuses {
 		st := statuses[i]
 		if st.Status != forgejo.StateFailure && st.Status != forgejo.StateError {
