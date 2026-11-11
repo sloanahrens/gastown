@@ -719,7 +719,7 @@ out. Run it directly: the broker's run act is for the live Forgejo.
 ```
 cd <scratch-parent>
 mkdir -p <scratch-root>/forge-tokens && chmod 700 <scratch-root>/forge-tokens
-<gt checkout>/scripts/forgejo-provision.sh --dry-run \
+go run <gt checkout>/cmd/forgejo-provision --dry-run \
   --api-url http://127.0.0.1:3100/api/v1 --web-url http://scratch-forgejo:3000 \
   --admin-token-file <scratch-parent>/forge/admin.env \
   --config-dir <scratch-root>/forge-tokens \
@@ -868,7 +868,7 @@ docker --context desktop-linux exec -w <scratch-root>/l2rig/mayor/rig gt-scratch
 ```
 
 The variable `FORGEJO_TOKEN` is the one the provisioned `forgejo-polecat.env`
-file holds (checked in the file `forgejo-provision.sh` wrote during L2).
+file holds (checked in the file `forgejo-provision` wrote during L2).
 
 Then submit it. `gt done` in the container needs the crew actor named for that
 one command (observed: without it, `gt done requires BD_ACTOR to identify the

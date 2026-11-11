@@ -1,6 +1,6 @@
-// Package forgejoresync is scripts/forgejo-resync.sh as Go: the command line here,
-// the run in run.go, and the lift and restore around it. The shell script stays
-// in place until the port's deletion bead removes it.
+// Package forgejoresync is the forgejo-resync command: the command line here,
+// the run in run.go, and the lift and restore around it. It replaced a shell
+// script, deleted in gt-tpg0p.52.
 package forgejoresync
 
 import (

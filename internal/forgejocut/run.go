@@ -193,5 +193,5 @@ func cutoverNoAdminTokenError(tokenFile string) error {
 	if tokenFile != "" {
 		standIn = fmt.Sprintf(" (or FORGEJO_ADMIN_TOKEN= in %s)", tokenFile)
 	}
-	return fmt.Errorf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run forgejo-cutover-go -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", standIn)
+	return fmt.Errorf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run %s -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", forgejoprov.CutoverRule, standIn)
 }

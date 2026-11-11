@@ -175,6 +175,18 @@ func (e noAdminToken) Error() string { return e.text }
 // Unwrap returns ErrNoAdminToken, so errors.Is recognizes the case.
 func (e noAdminToken) Unwrap() error { return ErrNoAdminToken }
 
+// The auth broker's run rules for the three forgejo commands. Go code reads
+// the names only from these constants: the no-admin-token messages and the
+// tests use them. Human-facing docs (docs/forgejo-runbook.md, docs/reference.md
+// and the design and plugin docs) spell the names out on purpose, because an
+// operator types them at gt-approve; when a name changes here, those docs
+// change in the same commit.
+const (
+	ProvisionRule = "forgejo-provision-go"
+	ResyncRule    = "forgejo-resync-go"
+	CutoverRule   = "forgejo-cutover-go"
+)
+
 // noAdminTokenError is the error ResolveAdminToken returns when no source holds
 // a token. It points the operator at the auth broker.
 func noAdminTokenError(tokenFile string) error {
@@ -182,5 +194,5 @@ func noAdminTokenError(tokenFile string) error {
 	if tokenFile != "" {
 		standIn = fmt.Sprintf(" (or FORGEJO_ADMIN_TOKEN= in %s)", tokenFile)
 	}
-	return noAdminToken{text: fmt.Sprintf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run forgejo-provision -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", standIn)}
+	return noAdminToken{text: fmt.Sprintf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run %s -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", ProvisionRule, standIn)}
 }

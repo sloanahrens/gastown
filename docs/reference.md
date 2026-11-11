@@ -194,7 +194,7 @@ only landing path: the local gate and the force-with-lease push to the target
 were removed once every rig was cut over (gt-fn9e6.32). A rig with no block
 gets no landing worker at all — construction fails closed with an escalation
 naming the rig and its `settings/config.json` — rather than silently falling
-back to a path that no longer exists. `scripts/forgejo-resync.sh` is the
+back to a path that no longer exists. `forgejo-resync` (broker rule `forgejo-resync-go`) is the
 recovery if the block must be removed or a Forgejo repository has to be rebuilt
 from GitHub; there is no rollback to a local gate.
 
