@@ -1283,7 +1283,7 @@ func truncateRunes(s string, n int) string {
 }
 
 // trendInputs returns the stage lines and rejections the review scan has
-// collected at or after since, for the trend panel's window.
+// collected at or after since, for the trend panel and the velocity series.
 func (r *omReader) trendInputs(since time.Time) ([]omStage, []omRejection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
