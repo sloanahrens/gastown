@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/health"
+	"github.com/steveyegge/gastown/internal/jev/scorecard"
 )
 
 // newJevHealthTown writes a fixture town whose only enabled battery is
@@ -40,7 +43,9 @@ func newJevHealthTown(t *testing.T, now time.Time, cursorAge time.Duration) stri
 	require.NoError(t, os.Chtimes(cursor, at, at))
 
 	line := fmt.Sprintf(`{"ts":%q,"answers":{"q":"a"}}`, now.Add(-time.Minute).UTC().Format(time.RFC3339))
-	require.NoError(t, os.WriteFile(filepath.Join(jevDir, "dedupe.jsonl"), []byte(line+"\n"), 0o600))
+	logPath := filepath.Join(jevDir, "dedupe.jsonl")
+	require.NoError(t, os.WriteFile(logPath, []byte(line+"\n"), 0o600))
+	jevSetModTime(t, logPath, now.Add(-time.Minute))
 
 	// The daemon's last-run record: dedupe's patrol ran as often as the cursor
 	// was last written, so a stale cursor here is also a stale patrol.
@@ -86,8 +91,15 @@ func jevHealthDir(t *testing.T, town string) string {
 // clocks it at now, as gt would.
 func runJevHealthCommand(t *testing.T, town string, now time.Time, asJSON bool) (string, error) {
 	t.Helper()
+	return runJevHealthCommandWithStat(t, town, now, asJSON, os.Stat)
+}
+
+// runJevHealthCommandWithStat is runJevHealthCommand with the copy's stat
+// replaced, so a test can fail the copy's read of one file and no other.
+func runJevHealthCommandWithStat(t *testing.T, town string, now time.Time, asJSON bool, stat jevStatFunc) (string, error) {
+	t.Helper()
 	var out bytes.Buffer
-	cmd := newJevHealthCmd(townFinder(town), func() time.Time { return now })
+	cmd := newJevHealthCmd(townFinder(town), func() time.Time { return now }, stat)
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 	if asJSON {
@@ -107,7 +119,7 @@ func runJevHealthError(t *testing.T, findTown func() (string, error), out io.Wri
 	if out == nil {
 		out = &bytes.Buffer{}
 	}
-	cmd := newJevHealthCmd(findTown, jevHealthFixedNow)
+	cmd := newJevHealthCmd(findTown, jevHealthFixedNow, os.Stat)
 	cmd.SetOut(out)
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs(args)
@@ -430,4 +442,289 @@ func TestJevHealthPatrolRuns(t *testing.T) {
 			assert.WithinDuration(t, now.Add(-3*time.Minute), runs.at["jev_dedupe"], time.Second)
 		})
 	}
+}
+
+// jevSetModTime stamps a fixture file with the time the test judges it at, so
+// no verdict rests on when the test happened to write it.
+func jevSetModTime(t *testing.T, path string, at time.Time) {
+	t.Helper()
+	require.NoError(t, os.Chtimes(path, at, at))
+}
+
+// TestJevHealthPrintsTheLogCopyAge prints the newest write among the town's Jev
+// files above the table, so a reader can tell which copy the rows describe.
+func TestJevHealthPrintsTheLogCopyAge(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	town := newJevHealthTown(t, now, 5*time.Minute)
+	// The ledger's write is the newest, a minute after the dedupe log's.
+	jevSetModTime(t, filepath.Join(jevHealthDir(t, town), "dedupe.jsonl"), now.Add(-3*time.Minute))
+	ledger := jev.UsageLedgerPath(town)
+	jevSetModTime(t, ledger, now.Add(-2*time.Minute))
+
+	out, err := runJevHealthCommand(t, town, now, false)
+	require.NoError(t, err)
+	assert.Contains(t, out, "log copy: newest write 2026-10-30 11:58Z (2m ago) at "+ledger)
+	assert.NotContains(t, out, "WARNING")
+	assert.Less(t, strings.Index(out, "log copy:"), strings.Index(out, "BATTERY"), "the line sits above the table")
+}
+
+// TestJevHealthWarnsWhenTheCopyHasGoneQuiet warns when the newest write is
+// older than three passes of an enabled quarter-hour battery, and keeps the
+// rows' verdicts as they were: the Mac's 26-hour-old copy read as a stale town
+// without saying the copy was the wrong one (gt-bgimh9).
+func TestJevHealthWarnsWhenTheCopyHasGoneQuiet(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	town := newJevHealthTown(t, now, 5*time.Minute)
+	quiet := now.Add(-26 * time.Hour)
+	jevSetModTime(t, filepath.Join(jevHealthDir(t, town), "dedupe.jsonl"), quiet)
+	jevSetModTime(t, jev.UsageLedgerPath(town), quiet)
+
+	out, err := runJevHealthCommand(t, town, now, false)
+	require.NoError(t, err, "the copy's age is not a row's verdict")
+	assert.Contains(t, out, "log copy: WARNING: newest write 2026-10-29 10:00Z (26h ago)")
+	assert.Contains(t, out, "may not be the one the daemon writes")
+	assert.Contains(t, jevHealthTableRow(t, out, "dedupe"), " ok", "health keeps its rows as today")
+}
+
+// TestJevHealthSaysWhenNoScheduledBatteryExistsToJudgeTheCopy covers the town
+// whose enabled batteries all write only on their own item, event or landing:
+// with no quarter-hour battery there is no age to judge, so the line says that
+// in place of a verdict and does not warn.
+func TestJevHealthSaysWhenNoScheduledBatteryExistsToJudgeTheCopy(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	town := t.TempDir()
+	writeJevSpendLedger(t, town, jevSpendLine(now.Add(-3*time.Hour), "jev-notes", 10, 5))
+	ledger := jev.UsageLedgerPath(town)
+	jevSetModTime(t, ledger, now.Add(-2*time.Hour))
+
+	out, err := runJevHealthCommand(t, town, now, false)
+	require.NoError(t, err)
+	assert.Contains(t, out, "log copy: newest write 2026-10-30 10:00Z (2h ago) at "+ledger+
+		" — no scheduled battery, so the copy's age cannot be judged")
+	assert.NotContains(t, out, "WARNING")
+}
+
+// TestJevLogCopyWarnsWhenNothingHasBeenWritten covers the empty copy: no log
+// file and no ledger is not a fresh copy, so the line warns and --json says so.
+func TestJevLogCopyWarnsWhenNothingHasBeenWritten(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+	var out bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, false, now))
+	assert.Contains(t, out.String(), "log copy: WARNING: no file of the copy has been written")
+
+	var doc jevSpendDoc
+	var buf bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&buf, town, 24, 1e9, true, now))
+	require.NoError(t, json.Unmarshal(buf.Bytes(), &doc))
+	assert.Nil(t, doc.CopyNewestWrite)
+	assert.True(t, doc.CopyStale)
+}
+
+// TestJevJSONCarriesCopyFieldsAndKeepsTheOldOnes reads each command's --json
+// document for the two copy fields beside the fields it already printed.
+func TestJevJSONCarriesCopyFieldsAndKeepsTheOldOnes(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+	decode := func(t *testing.T, data []byte) map[string]json.RawMessage {
+		t.Helper()
+		var raw map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(data, &raw))
+		_, hasCopy := raw["copy_newest_write"]
+		assert.True(t, hasCopy, "the document names the copy it read")
+		_, hasStale := raw["copy_stale"]
+		assert.True(t, hasStale, "the document carries the copy's verdict")
+		return raw
+	}
+
+	t.Run("health", func(t *testing.T) {
+		t.Parallel()
+		town := newJevHealthTown(t, now, 5*time.Minute)
+		jevSetModTime(t, filepath.Join(jevHealthDir(t, town), "dedupe.jsonl"), now.Add(-6*time.Minute))
+		ledger := jev.UsageLedgerPath(town)
+		jevSetModTime(t, ledger, now.Add(-2*time.Minute))
+
+		out, err := runJevHealthCommand(t, town, now, true)
+		require.NoError(t, err)
+		raw := decode(t, []byte(out))
+		assert.Contains(t, raw, "batteries")
+
+		var doc jevHealthDoc
+		require.NoError(t, json.Unmarshal([]byte(out), &doc))
+		require.NotNil(t, doc.CopyNewestWrite)
+		require.NotNil(t, doc.CopyNewestWrite.At)
+		assert.True(t, doc.CopyNewestWrite.At.Equal(now.Add(-2*time.Minute)))
+		assert.Equal(t, ledger, doc.CopyNewestWrite.Path)
+		assert.False(t, doc.CopyStale)
+	})
+
+	t.Run("spend", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeJevSpendLedger(t, town, jevSpendLine(now.Add(-time.Hour), "attention", 10, 5))
+		ledger := jev.UsageLedgerPath(town)
+		jevSetModTime(t, ledger, now.Add(-10*time.Minute))
+
+		var out bytes.Buffer
+		require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, true, now))
+		raw := decode(t, out.Bytes())
+		for _, key := range []string{"calls", "usd", "by_caller", "periods"} {
+			assert.Contains(t, raw, key, "the old field %q stays", key)
+		}
+
+		var doc jevSpendDoc
+		require.NoError(t, json.Unmarshal(out.Bytes(), &doc))
+		require.NotNil(t, doc.CopyNewestWrite)
+		assert.Equal(t, ledger, doc.CopyNewestWrite.Path)
+		assert.False(t, doc.CopyStale)
+		assert.Empty(t, doc.CopyWarning, "a copy that was read carries no warning")
+	})
+
+	t.Run("scorecard", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeScorecardFixture(t, town)
+
+		var out bytes.Buffer
+		require.NoError(t, jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", true, false, now))
+		raw := decode(t, out.Bytes())
+		assert.Contains(t, raw, "battery")
+
+		var doc jevScorecardDoc
+		require.NoError(t, json.Unmarshal(out.Bytes(), &doc))
+		assert.Equal(t, scorecard.FixtureBattery, doc.Battery)
+		require.NotNil(t, doc.CopyNewestWrite)
+		assert.Equal(t, scorecard.FixtureLogPath(town), doc.CopyNewestWrite.Path, "the copy is the log the report read")
+		assert.False(t, doc.CopyStale)
+	})
+}
+
+// TestJevHealthRefusesAnUnreadableBatteryLog covers a battery log that cannot be
+// read: the rows cannot be judged without it, so health fails. The copy line is
+// advisory and does not decide this; the rows do.
+func TestJevHealthRefusesAnUnreadableBatteryLog(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A symlink to itself: the read fails with ELOOP, not with "not there".
+	require.NoError(t, os.Symlink("attention.jsonl", filepath.Join(jevHealthDir(t, town), "attention.jsonl")))
+
+	err := runJevHealthError(t, townFinder(town), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attention.jsonl")
+}
+
+// TestJevHealthStillPrintsNormalOutputWhenTheAgeReadFails fails the copy's stat
+// of the one enabled battery's log. The copy is advisory: the line warns with the
+// reason, and every row is printed as it is without the failure, with the copy
+// fields in --json naming it.
+func TestJevHealthStillPrintsNormalOutputWhenTheAgeReadFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	town := newJevHealthTown(t, now, 5*time.Minute)
+	logPath := filepath.Join(jevHealthDir(t, town), "dedupe.jsonl")
+	failing := func(name string) (fs.FileInfo, error) {
+		if name == logPath {
+			return nil, errors.New("the stat was refused")
+		}
+		return os.Stat(name)
+	}
+
+	out, err := runJevHealthCommandWithStat(t, town, now, false, failing)
+	require.NoError(t, err, "the copy's read is not a row's verdict")
+	assert.Contains(t, out, "log copy: WARNING: cannot be read: reading "+logPath+": the stat was refused")
+	assert.Contains(t, jevHealthTableRow(t, out, "dedupe"), " ok", "health keeps its rows as today")
+	assert.Contains(t, out, "BATTERY", "the table is printed")
+
+	js, err := runJevHealthCommandWithStat(t, town, now, true, failing)
+	require.NoError(t, err)
+	var doc jevHealthDoc
+	require.NoError(t, json.Unmarshal([]byte(js), &doc))
+	assert.Nil(t, doc.CopyNewestWrite)
+	assert.True(t, doc.CopyStale, "a copy that cannot be read is not called fresh")
+	assert.Contains(t, doc.CopyWarning, "the stat was refused")
+	assert.NotEmpty(t, doc.Batteries, "the rows are in the document")
+}
+
+// TestJevCopyAgeCountsOnlyEnabledBatteriesAndNeverReturnsAnError covers the one
+// helper all three commands call. A disabled battery's newer log does not
+// become the copy's newest write, and a patrol config or a file that cannot be
+// read is the note's warning, never an error the caller must handle.
+func TestJevCopyAgeCountsOnlyEnabledBatteriesAndNeverReturnsAnError(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+
+	t.Run("a disabled battery's log is left out of the copy", func(t *testing.T) {
+		t.Parallel()
+		town := newJevHealthTown(t, now, 5*time.Minute)
+		dedupe := filepath.Join(jevHealthDir(t, town), "dedupe.jsonl")
+		jevSetModTime(t, dedupe, now.Add(-3*time.Hour))
+		// attention is not enabled in the fixture, so its fresh write is not the copy.
+		attention := filepath.Join(jevHealthDir(t, town), "attention.jsonl")
+		require.NoError(t, os.WriteFile(attention, nil, 0o600))
+		jevSetModTime(t, attention, now.Add(-time.Minute))
+		jevSetModTime(t, jev.UsageLedgerPath(town), now.Add(-4*time.Hour))
+
+		note := jevCopyAge(town, now, os.Stat, "")
+		require.NotNil(t, note.Doc)
+		assert.Equal(t, dedupe, note.Doc.Path, "the enabled dedupe log is the copy's newest write")
+		assert.True(t, note.Doc.At.Equal(now.Add(-3*time.Hour)), "the dedupe log's write, not the attention log's")
+		assert.True(t, note.Stale, "three hours old is past three passes")
+	})
+
+	t.Run("a patrol config that does not parse is the warning", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Dir(daemon.PatrolConfigFile(town)), 0o755))
+		require.NoError(t, os.WriteFile(daemon.PatrolConfigFile(town), []byte("{"), 0o644))
+
+		note := jevCopyAge(town, now, os.Stat, "")
+		assert.Contains(t, note.Warning, "reading the patrol config")
+		assert.Contains(t, note.Line, "log copy: WARNING: cannot be read: reading the patrol config")
+		assert.Nil(t, note.Doc)
+		assert.True(t, note.Stale)
+	})
+
+	t.Run("a file that cannot be read is the warning, and the other files still count", func(t *testing.T) {
+		t.Parallel()
+		town := newJevHealthTown(t, now, 5*time.Minute)
+		dedupe := filepath.Join(jevHealthDir(t, town), "dedupe.jsonl")
+		require.NoError(t, os.Remove(dedupe))
+		// A symlink to itself: the stat fails with ELOOP, not with "not there".
+		require.NoError(t, os.Symlink("dedupe.jsonl", dedupe))
+
+		note := jevCopyAge(town, now, os.Stat, "")
+		assert.Contains(t, note.Warning, "dedupe.jsonl")
+		assert.Nil(t, note.Doc)
+		assert.True(t, note.Stale)
+	})
+
+	t.Run("an unreadable ledger is the warning, not a quiet copy", func(t *testing.T) {
+		t.Parallel()
+		town := newJevHealthTown(t, now, 5*time.Minute)
+		ledger := jev.UsageLedgerPath(town)
+		require.NoError(t, os.Remove(ledger))
+		// A symlink to itself: the stat fails with ELOOP, not with "not there".
+		require.NoError(t, os.Symlink(filepath.Base(ledger), ledger))
+
+		note := jevCopyAge(town, now, os.Stat, "")
+		assert.Contains(t, note.Warning, filepath.Base(ledger))
+		assert.Nil(t, note.Doc)
+		assert.True(t, note.Stale)
+	})
+
+	t.Run("a scorecard names only the one log it read", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		writeScorecardFixture(t, town)
+		logPath := scorecard.FixtureLogPath(town)
+		note := jevCopyAge(town, now, os.Stat, logPath)
+		require.NotNil(t, note.Doc)
+		assert.Equal(t, logPath, note.Doc.Path)
+	})
 }

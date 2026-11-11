@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -301,6 +302,11 @@ func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery,
 	if err != nil {
 		return err
 	}
+	// The report reads this battery's log and nothing else, so the copy line
+	// names that file rather than the newest write across the town's logs. The
+	// copy is advisory: a copy that cannot be read is the line's warning, and the
+	// report prints beside it.
+	note := jevCopyAge(townRoot, now, os.Stat, a.LogPath())
 	rep, err := scorecard.Build(ctx, a, from)
 	if err != nil {
 		return err
@@ -311,9 +317,27 @@ func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery,
 		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(rep)
+		return enc.Encode(jevScorecardDoc{
+			Report:          rep,
+			CopyNewestWrite: note.Doc,
+			CopyStale:       note.Stale,
+			CopyWarning:     note.Warning,
+		})
+	}
+	if _, err := fmt.Fprintln(w, note.Line); err != nil {
+		return err
 	}
 	return scorecard.WriteText(w, rep)
+}
+
+// jevScorecardDoc is the --json document: the battery's report, the copy its
+// log was read from, and whether that copy looks older than a live one may.
+type jevScorecardDoc struct {
+	scorecard.Report
+	CopyNewestWrite *jevCopyWrite `json:"copy_newest_write"`
+	CopyStale       bool          `json:"copy_stale"`
+	// CopyWarning names why the copy could not be read; absent when it was.
+	CopyWarning string `json:"copy_warning,omitempty"`
 }
 
 // parseSince returns the start of the --since window ending at now. An empty

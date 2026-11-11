@@ -190,3 +190,107 @@ func TestJevSpendCommandRefusesBadFlags(t *testing.T) {
 		assert.InDelta(t, 4.5e-6, got.USD, 1e-12, "1500 tokens at $3 per billion")
 	})
 }
+
+// TestJevSpendPrintsTheLogCopyAge prints the newest write among the town's Jev
+// files above the table, the same line health prints, so a reader of 0.12 USD
+// can tell which copy it came from (gt-bgimh9).
+func TestJevSpendPrintsTheLogCopyAge(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	writeJevSpendLedger(t, town, jevSpendLine(now.Add(-time.Hour), "attention", 10, 5))
+	ledger := jev.UsageLedgerPath(town)
+	jevSetModTime(t, ledger, now.Add(-10*time.Minute))
+
+	var out bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, false, now))
+	assert.Contains(t, out.String(), "log copy: newest write 2026-10-19 11:50Z (10m ago) at "+ledger)
+	assert.Less(t, strings.Index(out.String(), "log copy:"), strings.Index(out.String(), "Calls"),
+		"the line sits above the table")
+}
+
+// TestJevSpendWarnsWhenTheCopyHasGoneQuiet warns when the enabled battery's log
+// and the ledger were last written more than three passes ago: the copy may not
+// be the daemon's, and the spend is printed as it is either way (gt-bgimh9).
+func TestJevSpendWarnsWhenTheCopyHasGoneQuiet(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	town := newJevHealthTown(t, now, 5*time.Minute)
+	quiet := now.Add(-26 * time.Hour)
+	jevSetModTime(t, filepath.Join(jevHealthDir(t, town), "dedupe.jsonl"), quiet)
+	jevSetModTime(t, jev.UsageLedgerPath(town), quiet)
+
+	var out bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, false, now))
+	assert.Contains(t, out.String(), "log copy: WARNING: newest write 2026-10-29 10:00Z (26h ago)")
+	assert.Contains(t, out.String(), "Calls", "the table is printed as before")
+
+	var js bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&js, town, 24, 1e9, true, now))
+	var doc jevSpendDoc
+	require.NoError(t, json.Unmarshal(js.Bytes(), &doc))
+	assert.True(t, doc.CopyStale)
+	assert.Empty(t, doc.CopyWarning, "a copy that was read carries no read warning")
+	assert.Equal(t, 2, doc.Calls, "the spend is printed as before")
+}
+
+// TestJevSpendStillPrintsNormalOutputWhenTheAgeReadFails covers the copy read's
+// advisory path. Spend's numbers come from the ledger, so a patrol config or a
+// log path that cannot be read is named as copy_warning and the command still
+// prints the spend it printed before the copy line existed.
+func TestJevSpendStillPrintsNormalOutputWhenTheAgeReadFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	cases := map[string]struct {
+		breakTown func(t *testing.T, town string)
+		reason    string
+	}{
+		"patrol config does not parse": {
+			breakTown: func(t *testing.T, town string) {
+				require.NoError(t, os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte("{"), 0o644))
+			},
+			reason: "reading the patrol config",
+		},
+		"enabled battery's log path is a directory": {
+			breakTown: func(t *testing.T, town string) {
+				logPath := filepath.Join(jevHealthDir(t, town), "dedupe.jsonl")
+				require.NoError(t, os.Remove(logPath))
+				require.NoError(t, os.MkdirAll(logPath, 0o700))
+			},
+			reason: "not a regular file",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			// newJevHealthTown enables dedupe and writes two ledger calls in the window.
+			town := newJevHealthTown(t, now, 5*time.Minute)
+			tc.breakTown(t, town)
+
+			var out bytes.Buffer
+			require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, true, now))
+			var doc jevSpendDoc
+			require.NoError(t, json.Unmarshal(out.Bytes(), &doc))
+			assert.Equal(t, 2, doc.Calls, "the spend is printed as before")
+			assert.Contains(t, doc.CopyWarning, tc.reason)
+			assert.True(t, doc.CopyStale, "a copy that cannot be read is not called fresh")
+
+			var text bytes.Buffer
+			require.NoError(t, jevSpendWithFlags(&text, town, 24, 1e9, false, now))
+			assert.Contains(t, text.String(), "log copy: WARNING: ")
+			assert.Contains(t, text.String(), "Calls", "the table is printed as before")
+		})
+	}
+}
+
+// TestJevSpendReportsAWriteFailure covers the copy line's write: a writer that
+// refuses is an error, not a table printed without the copy it came from.
+func TestJevSpendReportsAWriteFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeJevSpendLedger(t, town, jevSpendLine(time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC), "attention", 10, 5))
+
+	err := jevSpendWithFlags(jevHealthFailingWriter{}, town, 24, 1e9, false,
+		time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC))
+	require.Error(t, err)
+}
