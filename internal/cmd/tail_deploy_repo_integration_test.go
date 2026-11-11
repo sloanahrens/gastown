@@ -146,3 +146,15 @@ func TestIntegrationTailGitAncestry_AnswersFromTheBareRepo(t *testing.T) {
 		t.Errorf("tip is ancestor of binary = (%v, %v), want (false, true)", ok, known)
 	}
 }
+
+// TestIntegrationTailExecGit_AGitThatCannotStartIsAnError: the production runner
+// reports a git that cannot start as an error, not as an exit code, so the
+// ancestry check reads it as unknown. The working directory does not exist, so
+// the run fails before git starts.
+func TestIntegrationTailExecGit_AGitThatCannotStartIsAnError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-dir")
+	code, err := tailExecGit(missing, "merge-base", "--is-ancestor", "c1", "c2")
+	if err == nil {
+		t.Fatalf("tailExecGit in a missing directory = (%d, nil), want an error", code)
+	}
+}

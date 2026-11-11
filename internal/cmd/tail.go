@@ -197,6 +197,14 @@ func init() {
 	rootCmd.AddCommand(tailCmd)
 }
 
+// tailWhyLog is the why-log gt tail keeps on errOut. The stream goes to stdout,
+// so the reasons a read failed go to stderr, tagged with the command.
+func tailWhyLog(errOut io.Writer) *dashWhyLog {
+	return newDashWhyLog(func(format string, args ...any) {
+		fmt.Fprintf(errOut, "gt tail: "+format+"\n", args...)
+	})
+}
+
 func runTail(cmd *cobra.Command, _ []string) error {
 	kinds, err := parseTailKinds(tailKind)
 	if err != nil {
@@ -219,7 +227,7 @@ func runTail(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	beadReads := openTailBeads(townRoot, tailTitleCacheSize)
-	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot, nil), cutoff)
+	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot, tailWhyLog(cmd.ErrOrStderr())), cutoff)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, rig: tailRig, kinds: kinds, cutoff: cutoff, loc: loc, now: time.Now,
 		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,

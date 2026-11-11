@@ -196,19 +196,6 @@ func TestTailGitAncestry_AsksTheBareRepo(t *testing.T) {
 	}
 }
 
-// TestTailGitAncestry_AGitThatCannotRunReturnsItsError: the production runner
-// reports a git that cannot run as an error, not as an exit code, so the
-// ancestry check reads it as unknown. The working directory does not exist, so
-// the run fails before git starts.
-func TestTailGitAncestry_AGitThatCannotRunReturnsItsError(t *testing.T) {
-	t.Parallel()
-	missing := filepath.Join(t.TempDir(), "no-such-dir")
-	code, err := tailExecGit(missing, "merge-base", "--is-ancestor", "c1", "c2")
-	if err == nil {
-		t.Fatalf("tailExecGit in a missing directory = (%d, nil), want an error", code)
-	}
-}
-
 // TestTailGitAncestry_FallsBackToTheCheckoutAndSaysSo: a town with no bare repo
 // asks the checkout, and the why-log names the checkout that answered, once.
 func TestTailGitAncestry_FallsBackToTheCheckoutAndSaysSo(t *testing.T) {
@@ -352,10 +339,10 @@ func TestTailMainPicture_RefusesAnUnreadableDeployRepo(t *testing.T) {
 	}
 }
 
-// TestDashWhyLogDeployRepo_LogsOnlyAChangeOfRepo: the fallback is logged once
+// TestTailDeployRepo_WhyLogLogsOnlyAChangeOfRepo: the fallback is logged once
 // and not on every poll, and its return to the bare repo is logged once too.
 // A nil log records nothing.
-func TestDashWhyLogDeployRepo_LogsOnlyAChangeOfRepo(t *testing.T) {
+func TestTailDeployRepo_WhyLogLogsOnlyAChangeOfRepo(t *testing.T) {
 	t.Parallel()
 	var lines []string
 	why := newDashWhyLog(func(format string, args ...any) {
@@ -378,4 +365,28 @@ func TestDashWhyLogDeployRepo_LogsOnlyAChangeOfRepo(t *testing.T) {
 	}
 	var nilLog *dashWhyLog
 	nilLog.deployRepo("absent") // must not panic
+}
+
+// TestTailDeployRepo_UnreadableBareRepoLogsOnceThroughWhyLog: gt tail's ancestry
+// check logs an unreadable bare repo once on its stderr and answers unknown. The
+// .repo.git here is a file, so tailDeployRepo refuses before any git runs.
+func TestTailDeployRepo_UnreadableBareRepoLogsOnceThroughWhyLog(t *testing.T) {
+	t.Parallel()
+	townRoot, _ := tailDeployTown(t)
+	bare := filepath.Join(townRoot, "gastown", ".repo.git")
+	if err := os.WriteFile(bare, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	why := tailWhyLog(&stderr)
+	for i := 0; i < 2; i++ {
+		ancestor := tailGitAncestry(townRoot, why)
+		if ok, known := ancestor("c1", "c2"); ok || known {
+			t.Errorf("ancestor(c1, c2) = (%v, %v), want unknown (false, false)", ok, known)
+		}
+	}
+	lines := strings.Split(strings.TrimSuffix(stderr.String(), "\n"), "\n")
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "gt tail: deploy repo read failed: ") {
+		t.Errorf("why-log = %q, want exactly one gt tail line naming the unreadable bare repo", stderr.String())
+	}
 }
