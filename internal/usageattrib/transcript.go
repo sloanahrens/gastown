@@ -56,14 +56,14 @@ func IterAssistantUsage(path string) ([]Message, int, error) {
 // output_tokens cumulatively per content block, so the maximum is the final count.
 //
 // Lines without a usage block are skipped. Lines that are not JSON objects are counted in bad and
-// do not stop the read. A read error returns no messages and the error.
+// do not stop the read. A read error, or a line over maxLineBytes, returns no messages and the error.
 func ReadAssistantUsage(r io.Reader) ([]Message, int, error) {
 	var msgs []Message
 	byID := map[string]int{}
 	bad := 0
-	br := bufio.NewReader(r) // ReadBytes, not Scanner: a long tool-output line has no size cap
+	br := bufio.NewReader(r)
 	for {
-		line, readErr := br.ReadBytes('\n')
+		line, readErr := readLine(br)
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			return nil, 0, readErr
 		}
@@ -88,6 +88,30 @@ func ReadAssistantUsage(r io.Reader) ([]Message, int, error) {
 		}
 		if readErr != nil { // io.EOF: the last line, if any, was handled above
 			return msgs, bad, nil
+		}
+	}
+}
+
+// maxLineBytes caps one transcript line, newline included. A longer line is an error, not a skipped
+// line: skipping it would drop its usage and undercount. Python's reader has no cap, so this is the
+// one input where the port refuses what the reference reads.
+const maxLineBytes = 64 << 20
+
+// errLineTooLong is returned by ReadAssistantUsage for a line over maxLineBytes.
+var errLineTooLong = errors.New("transcript line exceeds maxLineBytes")
+
+// readLine returns the next line, newline included, as ReadBytes does. It reads buffer-sized chunks
+// and returns errLineTooLong once the line passes maxLineBytes, so one line never grows without bound.
+func readLine(br *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if len(line)+len(chunk) > maxLineBytes {
+			return nil, errLineTooLong
+		}
+		line = append(line, chunk...)
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			return line, err
 		}
 	}
 }
