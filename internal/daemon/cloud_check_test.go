@@ -196,9 +196,22 @@ func TestCloudCheckRefusesAnUnreadableKeyFile(t *testing.T) {
 	}
 }
 
+// cloudCheckKeyPathOf returns the key path the patrol put in the child's
+// environment, or "" when it put none.
+func cloudCheckKeyPathOf(env []string) string {
+	for _, e := range env {
+		if path, ok := strings.CutPrefix(e, cloudCheckKeyEnv+"="); ok {
+			return path
+		}
+	}
+	return ""
+}
+
 // TestCloudCheckKeyNeverReachesALogEscalationOrStatus: the key's value stays in
-// the file. A failing run escalates once under one key, a repeat refreshes that
-// key, and a good run clears it.
+// the file. The runner reads the key from the path the patrol passes in its
+// environment, as the binary does, and its failing run's error quotes the key it
+// read: the patrol must forward neither. A failing run escalates once under one
+// key, a repeat refreshes that key, and a good run clears it.
 func TestCloudCheckKeyNeverReachesALogEscalationOrStatus(t *testing.T) {
 	t.Parallel()
 	const keyValue = "gcp-service-account-private-key"
@@ -210,12 +223,29 @@ func TestCloudCheckKeyNeverReachesALogEscalationOrStatus(t *testing.T) {
 	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", key),
 		func(*agentconfig.CloudCheckConfig) string { return key }, os.Stat)
 	f.err = errors.New("exit status 1")
+	inner := d.cloudCheck.run
+	var read string
+	d.cloudCheck.run = func(ctx context.Context, name string, args, env []string) error {
+		body, err := os.ReadFile(cloudCheckKeyPathOf(env))
+		if err != nil {
+			return fmt.Errorf("the runner cannot read its key: %w", err)
+		}
+		read = string(body)
+		err = inner(ctx, name, args, env)
+		if err != nil {
+			return fmt.Errorf("%w (key %s)", err, body)
+		}
+		return nil
+	}
 
 	d.runCloudCheckPatrol()
 	f.now = f.now.Add(10 * time.Minute)
 	d.runCloudCheckPatrol()
 	if len(f.calls) != 2 {
 		t.Fatalf("ran %d checks, want 2", len(f.calls))
+	}
+	if read != keyValue {
+		t.Fatalf("the runner read the key as %q, want the key file's text", read)
 	}
 	if len(f.escalations) != 2 || !slices.Equal(f.escalationKeys, []string{cloudCheckAlertKey, cloudCheckAlertKey}) {
 		t.Fatalf("escalations = %q under keys %q, want two refreshes of %q", f.escalations, f.escalationKeys, cloudCheckAlertKey)
