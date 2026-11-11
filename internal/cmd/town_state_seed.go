@@ -783,47 +783,15 @@ type seedCutoverFile struct {
 }
 
 // seedCutoverPrepare reads what the live copy's settings step writes, before the
-// claim is touched: the town's settings file with its supervisor removed, and each
-// registered rig's settings file byte for byte. The host is only read. The town's
-// file is required, because a pod without it runs on compiled-in defaults. A rig
-// with no settings file is listed in absent, not refused.
+// claim is touched: the town copy's shared rows, whose list is
+// internal/townstate.TownCopyRows, with the town's settings file's supervisor
+// removed. The host is only read. The town's file is required, because a pod
+// without it runs on compiled-in defaults. A row with no file on the host is
+// listed in absent, not refused.
 func seedCutoverPrepare(town string, read func(string) ([]byte, error)) (seedCutover, error) {
 	if read == nil {
 		read = os.ReadFile
 	}
-	var c seedCutover
-	data, found, err := seedHostSettings(town, seedCutoverTownRel, read)
-	if err != nil {
-		return seedCutover{}, err
-	}
-	if !found {
-		return seedCutover{}, fmt.Errorf("the town's settings file %s is not on the host: the pod would run on compiled-in defaults, and no claim is written", seedCutoverTownRel)
-	}
-	townOut, _, err := townstate.RemoveSupervisor(data)
-	if err != nil {
-		return seedCutover{}, fmt.Errorf("the town's settings file %s: %w", seedCutoverTownRel, err)
-	}
-	c.files = append(c.files, newSeedCutoverFile(seedCutoverTownRel, townOut))
-
-	// The town's other settings files (models, placement, regime events, the
-	// custom themes) are read as they are: a pod without them runs on other
-	// defaults and names its polecats from the wrong theme (gt-pno1e6).
-	others, err := seedCutoverSettingNames(town, os.ReadDir)
-	if err != nil {
-		return seedCutover{}, err
-	}
-	for _, rel := range others {
-		data, found, err := seedHostSettings(town, rel, read)
-		if err != nil {
-			return seedCutover{}, err
-		}
-		if !found {
-			c.absent = append(c.absent, rel)
-			continue
-		}
-		c.files = append(c.files, newSeedCutoverFile(rel, data))
-	}
-
 	rigs, err := townstate.RegisteredRigs(town)
 	if err != nil {
 		return seedCutover{}, fmt.Errorf("reading the town's rigs: %w", err)
@@ -832,7 +800,33 @@ func seedCutoverPrepare(town string, read func(string) ([]byte, error)) (seedCut
 		if !seedRigNamePattern.MatchString(rig) {
 			return seedCutover{}, fmt.Errorf("registered rig %q is not a plain name, and no claim is written", rig)
 		}
-		rel := path.Join(rig, constants.DirSettings, "config.json")
+	}
+
+	// The live copy sends the table's shared rows; its daemon rows are the
+	// town-state export's. A settings file the table does not name stays on the
+	// host, so a new secret under settings/ cannot reach the pod by existing.
+	var shared []townstate.TownCopyRow
+	for _, row := range townstate.TownCopyRows(rigs) {
+		if row.Shared() {
+			shared = append(shared, row)
+		}
+	}
+	paths, err := townstate.TownCopyPaths(os.DirFS(town), shared)
+	if err != nil {
+		return seedCutover{}, err
+	}
+
+	var c seedCutover
+	present := make(map[string]bool, len(paths))
+	for _, rel := range paths {
+		present[rel] = true
+	}
+	for _, row := range shared {
+		if row.File() && !present[row.Path] {
+			c.absent = append(c.absent, row.Path)
+		}
+	}
+	for _, rel := range paths {
 		data, found, err := seedHostSettings(town, rel, read)
 		if err != nil {
 			return seedCutover{}, err
@@ -841,7 +835,17 @@ func seedCutoverPrepare(town string, read func(string) ([]byte, error)) (seedCut
 			c.absent = append(c.absent, rel)
 			continue
 		}
+		if rel == seedCutoverTownRel {
+			townOut, _, err := townstate.RemoveSupervisor(data)
+			if err != nil {
+				return seedCutover{}, fmt.Errorf("the town's settings file %s: %w", rel, err)
+			}
+			data = townOut
+		}
 		c.files = append(c.files, newSeedCutoverFile(rel, data))
+	}
+	if !slices.ContainsFunc(c.files, func(f seedCutoverFile) bool { return f.rel == seedCutoverTownRel }) {
+		return seedCutover{}, fmt.Errorf("the town's settings file %s is not on the host: the pod would run on compiled-in defaults, and no claim is written", seedCutoverTownRel)
 	}
 	return c, nil
 }
@@ -862,66 +866,9 @@ func newSeedHoldFile(rel string) seedCutoverFile {
 	return f
 }
 
-// seedCutoverSettingNames lists the town settings the live copy sends beside
-// config.json, relative to the town root, in directory order: every file under
-// settings/ except config.json (the caller sends that one itself), daemon.env (its
-// secrets live in the pod's Secrets and are never copied), the .bak and .lock
-// copies, and every custom theme file under settings/themes/. A subdirectory other
-// than themes is not a settings file and is left out. A file that is not a regular
-// file is listed too, so seedHostSettings refuses it rather than the copy skipping it.
-func seedCutoverSettingNames(town string, readDir func(string) ([]fs.DirEntry, error)) ([]string, error) {
-	dir := filepath.Join(town, constants.DirSettings)
-	entries, err := readDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("listing the town's settings directory: %w", err)
-	}
-	var rels []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() {
-			if name == "themes" {
-				themes, err := seedCutoverThemeNames(filepath.Join(dir, name), readDir)
-				if err != nil {
-					return nil, err
-				}
-				rels = append(rels, themes...)
-			}
-			continue
-		}
-		if name == "config.json" || name == "daemon.env" || strings.Contains(name, ".bak") || strings.HasSuffix(name, ".lock") {
-			continue
-		}
-		rels = append(rels, path.Join(constants.DirSettings, name))
-	}
-	return rels, nil
-}
-
-// seedCutoverThemeNames lists the custom theme files (<name>.txt) under the host's
-// settings/themes directory as settings-relative paths. A theme directory that is
-// not there holds no custom theme.
-func seedCutoverThemeNames(themesDir string, readDir func(string) ([]fs.DirEntry, error)) ([]string, error) {
-	entries, err := readDir(themesDir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("listing the host's custom themes: %w", err)
-	}
-	var rels []string
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".txt") {
-			continue
-		}
-		rels = append(rels, path.Join(constants.DirSettings, "themes", e.Name()))
-	}
-	return rels, nil
-}
-
 // seedHostSettings reads the host file at rel under town. A file that is not there
-// is reported as not found; one that is not a regular file is an error.
+// is reported as not found; one that is not a regular file is an error, so a link
+// outside the town is refused rather than followed.
 func seedHostSettings(town, rel string, read func(string) ([]byte, error)) ([]byte, bool, error) {
 	p := filepath.Join(town, filepath.FromSlash(rel))
 	info, err := os.Lstat(p)
@@ -929,10 +876,10 @@ func seedHostSettings(town, rel string, read func(string) ([]byte, error)) ([]by
 		return nil, false, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("the settings file %s cannot be read on the host: %w", rel, err)
+		return nil, false, fmt.Errorf("the town file %s cannot be read on the host: %w", rel, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, false, fmt.Errorf("the settings file %s is not a regular file on the host, and no claim is written", rel)
+		return nil, false, fmt.Errorf("the town file %s is not a regular file on the host, and no claim is written", rel)
 	}
 	data, err := read(p)
 	if err != nil {
