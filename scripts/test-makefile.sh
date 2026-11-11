@@ -14,14 +14,8 @@ bash scripts/install-local_test.sh
 bash -n scripts/deep-review.sh
 bash scripts/deep-review_test.sh
 bash scripts/gate-vs-load_test.sh
-bash -n scripts/forgejo-provision.sh
-bash scripts/forgejo-provision_test.sh
 bash -n scripts/forgejo-probe.sh
 bash scripts/forgejo-probe_test.sh
-bash -n scripts/forgejo-resync.sh
-bash scripts/forgejo-resync_test.sh
-bash -n scripts/forgejo-cutover.sh
-bash scripts/forgejo-cutover_test.sh
 bash -n deploy/k8s/kind/common.sh
 bash -n deploy/k8s/kind/up.sh
 bash -n deploy/k8s/kind/down.sh

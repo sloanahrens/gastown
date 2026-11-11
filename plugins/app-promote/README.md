@@ -12,7 +12,7 @@ plugin refuses and how it reports a failure. This file covers installing it.
 - **A promote target per rig.** The rig's `merge_queue.forgejo` block
   (`<rig>/settings/config.json`, the operator tier) must name `promote_target`
   and `promote_key_file`, or `gt promote` refuses every sha and the plugin fails
-  its run naming the rig. `bash scripts/forgejo-cutover.sh <rig>` writes both.
+  its run naming the rig. the forgejo-cutover command (broker rule `forgejo-cutover-go`) writes both.
 - **The app repo's `deploy.yml`** with the prod integration job `plugin.md`
   names. A repo whose `deploy.yml` lacks it is never promoted.
 

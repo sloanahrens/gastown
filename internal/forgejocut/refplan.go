@@ -15,7 +15,7 @@ import (
 // forces: only a ref Forgejo lacks or is behind on is pushed.
 type Action int
 
-// The five outcomes of the import, as scripts/forgejo-cutover.sh settles them.
+// The five outcomes of the import, as the cutover settles them.
 const (
 	// ActionSame leaves the ref alone: both sides name the same commit.
 	ActionSame Action = iota

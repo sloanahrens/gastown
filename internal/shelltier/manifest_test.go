@@ -77,7 +77,7 @@ func TestManifestEntriesExist(t *testing.T) {
 
 func TestManifestOrderIsToday(t *testing.T) {
 	t.Parallel()
-	// The first 12 are the scripts/test-makefile.sh order, ending with
+	// The first 9 are the scripts/test-makefile.sh order, ending with
 	// makefile-gate_test.sh; the last two are the extras the shell tier adds.
 	want := []string{
 		"scripts/check-install-path_test.sh",
@@ -85,10 +85,7 @@ func TestManifestOrderIsToday(t *testing.T) {
 		"scripts/install-local_test.sh",
 		"scripts/deep-review_test.sh",
 		"scripts/gate-vs-load_test.sh",
-		"scripts/forgejo-provision_test.sh",
 		"scripts/forgejo-probe_test.sh",
-		"scripts/forgejo-resync_test.sh",
-		"scripts/forgejo-cutover_test.sh",
 		"deploy/k8s/kind/kind_test.sh",
 		"scripts/resource-sampler_test.sh",
 		"scripts/makefile-gate_test.sh",
@@ -104,23 +101,18 @@ func TestManifestOrderIsToday(t *testing.T) {
 	}
 }
 
-// forgejoParallelScripts are the scripts whose own bead proved they can share
-// a pool (gt-u560q.12, proven by
-// TestIntegrationForgejoTestsRunConcurrentlyThreeTimesGreen in the integration
-// build). A further script becomes Parallel only in its own bead, with the same
-// proof. scripts/forgejo-provision_test.sh is not here: its token-mode checks
-// fail on GNU stat even when the script runs alone, so it stays Serial.
-var forgejoParallelScripts = []string{
-	"scripts/forgejo-cutover_test.sh",
-	"scripts/forgejo-probe_test.sh",
-	"scripts/forgejo-resync_test.sh",
-}
+// provenParallelScripts are the scripts whose own bead proved they can share a
+// pool with a concurrent-run test. None is left: the proof ran the forgejo
+// provision, resync and cutover tests together, and those scripts are deleted
+// (gt-tpg0p.52). A script becomes Parallel only in its own bead, with its own
+// proof, and is added here in the same change.
+var provenParallelScripts = []string{}
 
 func TestManifestMarksExactlyTheProvenScriptsParallel(t *testing.T) {
 	t.Parallel()
 	for _, e := range Manifest() {
 		want := Serial
-		if slices.Contains(forgejoParallelScripts, e.Path) {
+		if slices.Contains(provenParallelScripts, e.Path) {
 			want = Parallel
 		}
 		if e.Mode != want {

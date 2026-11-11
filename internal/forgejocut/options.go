@@ -1,7 +1,6 @@
-// Package forgejocut is scripts/forgejo-cutover.sh as Go: the command line here,
-// and the derived values the run reads from it. The run itself arrives in later
-// beads; the shell script stays in place until the port's deletion bead removes
-// it.
+// Package forgejocut is the forgejo-cutover command: the command line here,
+// and the derived values the run reads from it. The shell script it ports is
+// deleted (gt-tpg0p.52).
 package forgejocut
 
 import (

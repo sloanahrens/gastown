@@ -39,7 +39,7 @@ const (
 	skippedMarker = "[plugin-result skipped]"
 
 	// defaultAPIURL is the API root internal/forgejo defaults to, and the one
-	// scripts/forgejo-cutover.sh honors an override of.
+	// forgejo-cutover honors an override of.
 	defaultAPIURL = "http://127.0.0.1:3000/api/v1"
 
 	// defaultTownDir is the town root under the home directory when neither

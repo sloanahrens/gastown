@@ -22,7 +22,7 @@ files, and ends with the slice list the operator files beads from.
 > **Superseded in part (gt-fn9e6.32).** The local gate and the
 > `--force-with-lease` push this doc kept as a fallback are removed;
 > `merge_queue.forgejo` is mandatory, the rollback script is gone, and
-> `scripts/forgejo-resync.sh` is the one recovery. The flake policy ("No flake
+> `forgejo-resync` (broker rule `forgejo-resync-go`) is the one recovery. The flake policy ("No flake
 > policy", Slice 2) is deleted with it: no reruns, no flake or test-budget
 > beads, and a red candidate gate is a rejection. `land.LandGate`, the local
 > gate function this doc names throughout, is deleted too (gt-8wbpp), and
@@ -430,7 +430,7 @@ contexts, `block_on_outdated_branch`), and leave `land/**` unprotected so the
 worker can delete the candidate branch after each merge. Idempotent script plus
 a runbook.
 
-Files: `scripts/forgejo-provision.sh` (new), `docs/forgejo-runbook.md` (new;
+Files: `internal/forgejoprov` and `cmd/forgejo-provision` (the shell script `scripts/forgejo-provision.sh` was ported and deleted, gt-tpg0p.52), `docs/forgejo-runbook.md` (new;
 a `> Status:` header is not used — this is a live runbook, not a historical
 doc).
 
@@ -540,7 +540,7 @@ Pause landing, preflight `GitHub main == Forgejo main`, repoint `.repo.git`
 origins, `rig.git_url` and crew clones, enable the mirror, resume. Rollback is
 the reverse, triggered by two consecutive infra failures.
 
-Files: `scripts/forgejo-cutover.sh` (new), the rollback script (planned here,
+Files: `internal/forgejocut` and `cmd/forgejo-cutover` (the shell script `scripts/forgejo-cutover.sh` was ported and deleted, gt-tpg0p.52), the rollback script (planned here,
 now gone; see the note at the top),
 `docs/forgejo-runbook.md` (the runbook from slice 4 grows the cutover section).
 
