@@ -218,10 +218,10 @@ func latestTranscriptIn(dirs []string) string {
 }
 
 // ProjectTranscripts lists every transcript (JSONL file) Claude Code keeps for
-// workDir under the project directories ProjectDirsFor names, as full paths, in
-// search order. A directory that does not exist holds none. A directory that
-// exists but cannot be read is an error, not an empty list: a transcript it
-// hides may be one the caller is asked about.
+// workDir under the project directories ProjectDirsFor names, as full paths in
+// search order, where a missing directory holds none and an unreadable one is an
+// error, not an empty list, because a transcript it hides may be one the caller
+// is asked about.
 func ProjectTranscripts(townRoot, workDir string) ([]string, error) {
 	return projectTranscriptsWith(townRoot, workDir, config.ClaudeConfigDir, os.UserHomeDir)
 }
