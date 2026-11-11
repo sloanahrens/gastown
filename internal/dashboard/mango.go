@@ -55,6 +55,12 @@ const (
 	// strings the page draws whose length the writer does not bound, in runes.
 	mangoFreeTextMax = 120
 
+	// The footer's caps: one missing column's name, and how many the footer
+	// names. The analysis needs a handful of columns, so a panel naming more is
+	// not the writer's.
+	mangoColumnNameMax     = 40
+	mangoMissingColumnsMax = 8
+
 	// mangoDayLayout is the writer's date format for a week, an event and a
 	// target's last positive: a calendar day with no time of day.
 	mangoDayLayout = "2006-01-02"
@@ -104,13 +110,24 @@ var errMangoOversize = errors.New("mango: panel over the size cap")
 // the writer's own: a panel from another shape is this reader's error state,
 // not a set of fields to rename here.
 type mangoPanel struct {
-	SchemaVersion int           `json:"schema_version"`
-	GeneratedAt   string        `json:"generated_at"`
-	Items         int           `json:"items"`
-	SnapshotHours int           `json:"snapshot_hours"`
-	Weekly        []mangoWeek   `json:"weekly"`
-	Events        []mangoEvent  `json:"events"`
-	Targets       []mangoTarget `json:"targets"`
+	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
+	Items         int    `json:"items"`
+	SnapshotHours int    `json:"snapshot_hours"`
+	// MissingColumns and the split's spans are the writer's additive footer
+	// keys: a panel from before they existed carries none.
+	MissingColumns []string      `json:"missing_columns"`
+	Train          *mangoSpan    `json:"train"`
+	Holdout        *mangoSpan    `json:"holdout"`
+	Weekly         []mangoWeek   `json:"weekly"`
+	Events         []mangoEvent  `json:"events"`
+	Targets        []mangoTarget `json:"targets"`
+}
+
+// mangoSpan is one side of the split's day range as the file writes it.
+type mangoSpan struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 // mangoWeek is one week of the panel's trend as the file writes it: the landings
@@ -213,6 +230,13 @@ type MangoEvent struct {
 	What string `json:"what"`
 }
 
+// MangoSpan is one side of the split's day range as the page draws it: both
+// ends are calendar days, since a lone end is not a range.
+type MangoSpan struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
 // MangoCounts is how many targets carry each verdict, which is the panel's
 // title line.
 type MangoCounts struct {
@@ -236,6 +260,14 @@ type Mango struct {
 	// hours of snapshots joined to them.
 	Items         int `json:"items"`
 	SnapshotHours int `json:"snapshot_hours"`
+	// MissingColumns names the landings columns the analysis needed and the
+	// table lacked, in the page's words, so the pane's footer can say why a
+	// target is not testable. Empty when the table carried every column.
+	MissingColumns []string `json:"missing_columns,omitempty"`
+	// Train and Holdout are the day ranges the split cut, absent when the panel
+	// carried no usable range for that side.
+	Train   *MangoSpan `json:"train,omitempty"`
+	Holdout *MangoSpan `json:"holdout,omitempty"`
 	// Weekly is the rejected-share trend, oldest first, and Events the regime
 	// changes drawn against it. Both are empty lists, never null, on a panel
 	// that carried neither.
@@ -286,10 +318,44 @@ func ReadMango(dir string, now time.Time) *Mango {
 	}
 	m.GeneratedAt = &gen
 	m.Items, m.SnapshotHours = p.Items, p.SnapshotHours
+	m.MissingColumns = mangoColumnNames(p.MissingColumns)
+	m.Train, m.Holdout = mangoSpanOf(p.Train), mangoSpanOf(p.Holdout)
 	m.Weekly, m.Events = mangoWeeks(p.Weekly), mangoEvents(p.Events)
 	m.Targets, m.Counts = targets, counts
 	m.State, m.Note = mangoFreshness(gen, now)
 	return m
+}
+
+// mangoColumnNames builds the footer's missing-column names: each stripped and
+// capped like every other string from the panel, a blank one dropped since it
+// names nothing, and the list capped so a panel from another hand cannot fill
+// the footer.
+func mangoColumnNames(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, c := range in {
+		name := cloudText(c, mangoColumnNameMax)
+		if name == "" {
+			continue
+		}
+		out = append(out, name)
+		if len(out) == mangoMissingColumnsMax {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// mangoSpanOf is one side of the split's day range when both ends are calendar
+// days, and nil otherwise: a lone end is not a range, and the page omits the
+// dates rather than drawing half of them.
+func mangoSpanOf(in *mangoSpan) *MangoSpan {
+	if in == nil || !mangoDay(in.From) || !mangoDay(in.To) {
+		return nil
+	}
+	return &MangoSpan{From: in.From, To: in.To}
 }
 
 // mangoFreshness names a panel the reader could use by its generation time: fresh

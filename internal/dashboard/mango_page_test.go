@@ -423,6 +423,86 @@ func TestMangoNotCheckableKeepsAReasonItCannotName(t *testing.T) {
 	}
 }
 
+// A target with no box carries the panel's footer: the columns the landings
+// table lacks, the days the train and holdout split covers, and the no-box
+// line naming the target, so a no-signal row reads as "no box found" rather
+// than as nothing there (review F8). A target the panel could not check was
+// never searched, so it is not named as boxless.
+func TestMangoFooterNamesWhatTheTableCannotShow(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	boxless := mangoPageTarget("rejected_before_landing", 48, false, "", 0, 0, 0.25, MangoNoSignal)
+	boxless["label"] = "Landings rejected before they land"
+	unchecked := mangoPageTarget("reached_overrun_stop", 12, true, "", 0, 0, 0.03, MangoNotYet)
+	unchecked["label"] = "Beads stopped by the overrun guard"
+	m := mangoPageState(MangoFresh, "fresh", boxless, unchecked)
+	m["missing_columns"] = []string{"seat class", "polecat minutes"}
+	m["train"] = map[string]any{"from": "2026-09-05", "to": "2026-10-17"}
+	m["holdout"] = map[string]any{"from": "2026-10-17", "to": "2026-10-24"}
+	dom.call(t, "renderMango", map[string]any{"mango": m})
+
+	foot := mangoTexts(t, dom, "mgfoot")
+	if len(foot) != 1 {
+		t.Fatalf("the panel draws %d footers, want one", len(foot))
+	}
+	for _, want := range []string{
+		"the table lacks seat class, polecat minutes",
+		"train 2026-09-05 to 2026-10-17",
+		"holdout 2026-10-17 to 2026-10-24",
+		"no box found for Landings rejected before they land",
+	} {
+		if !strings.Contains(foot[0], want) {
+			t.Errorf("the footer %q has no %q", foot[0], want)
+		}
+	}
+	if strings.Contains(foot[0], "Beads stopped by the overrun guard") {
+		t.Errorf("the footer %q names a target that was never searched as boxless", foot[0])
+	}
+}
+
+// A table that carries every column the analysis needs draws no
+// missing-columns line: the footer says only what the panel actually lacks, and
+// still dates the split it drew (review F8).
+func TestMangoFooterOmitsTheColumnsItHas(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	m := mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("manual_rescue", 37, false, "attempts in q3", 54, 0.11, 0.09, MangoNoSignal))
+	m["train"] = map[string]any{"from": "2026-09-05", "to": "2026-10-17"}
+	m["holdout"] = map[string]any{"from": "2026-10-17"}
+	dom.call(t, "renderMango", map[string]any{"mango": m})
+
+	foot := mangoTexts(t, dom, "mgfoot")
+	if len(foot) != 1 {
+		t.Fatalf("the panel draws %d footers, want the dates alone", len(foot))
+	}
+	if strings.Contains(foot[0], "lacks") {
+		t.Errorf("the footer %q names missing columns for a table that carries them all", foot[0])
+	}
+	if !strings.Contains(foot[0], "train 2026-09-05 to 2026-10-17") {
+		t.Errorf("the footer %q has no train dates", foot[0])
+	}
+	if strings.Contains(foot[0], "holdout") {
+		t.Errorf("the footer %q dates a side from half a range", foot[0])
+	}
+}
+
+// A panel carrying none of the footer's facts draws no footer line at all: an
+// older panel keeps the pane it had.
+func TestMangoFooterIsAbsentWithoutFacts(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderMango", map[string]any{"mango": mangoPageState(MangoFresh, "fresh",
+		mangoPageTarget("manual_rescue", 37, false, "attempts in q3", 54, 0.11, 0.09, MangoNoSignal))})
+
+	if foot := mangoTexts(t, dom, "mgfoot"); len(foot) != 0 {
+		t.Errorf("the panel draws the footer %q with no fact to say", foot)
+	}
+}
+
 // The title line counts each verdict in the panel's counts: the two verdicts it
 // calls by name and the not-yet targets it calls not checkable.
 func TestMangoTitleLineCountsVerdictsForAMixedPanel(t *testing.T) {
