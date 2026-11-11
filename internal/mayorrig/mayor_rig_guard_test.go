@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
@@ -32,9 +33,23 @@ const mayorRigAllowPath = "internal/mayorrig/testdata/mayor-rig-allow.txt"
 // retirement bead that removes the use deletes its line.
 const mayorRigAllowClass = "pending-retirement"
 
+// constantsImportPath is the package whose DirMayor, DirRig, RigMayorPath and
+// RigBeadsPath a file must import, under its own name or an alias, for those names
+// to count as uses.
+const constantsImportPath = "github.com/steveyegge/gastown/internal/constants"
+
+// maxPossibleStrings caps the strings one expression or one name can take. A set
+// reaching the cap is cut there, so the collector returns within a fixed bound.
+const maxPossibleStrings = 64
+
+// maxStringPasses is the fixed depth of the string-set collector: each pass carries
+// a value one assignment further, so a name is read through at most this many
+// assignments.
+const maxStringPasses = 8
+
 // The segments of the path. A use is a string that holds the path, a concatenation
-// that spells it, a call whose arguments include both segments, or an identifier
-// that names one of the constants that hold or build the path.
+// that spells it, a call whose arguments include both segments, or a constants
+// identifier that names one of the constants that hold or build the path.
 const (
 	mayorSegment = "mayor"
 	rigSegment   = "rig"
@@ -45,8 +60,9 @@ const (
 var mayorRigPathPattern = regexp.MustCompile(`(^|[^A-Za-z0-9_-])mayor/rig($|[^A-Za-z0-9_-])`)
 
 // mayorRigIdents are the constants that name the path: DirMayor and DirRig name its
-// segments, and RigMayorPath and RigBeadsPath build it. Every occurrence counts,
-// including the definitions in internal/constants.
+// segments, and RigMayorPath and RigBeadsPath build it. A file counts one where it
+// can reach the constant: qualified by its internal/constants import, or inside
+// internal/constants itself, where the definitions are.
 var mayorRigIdents = map[string]bool{"DirMayor": true, "DirRig": true, "RigMayorPath": true, "RigBeadsPath": true}
 
 // skippedScanDirs are the directories the scan does not descend into. No other
@@ -57,6 +73,15 @@ var skippedScanDirs = map[string]bool{
 	"vendor":       true,
 	"node_modules": true,
 	"testdata":     true,
+}
+
+// repoScan is the one walk and parse of the real tree. Every test that reads the
+// real tree reads this result, so the tree is walked and parsed once per run.
+var repoScan struct {
+	once sync.Once
+	hits []mayorRigHit
+	err  error
+	runs int
 }
 
 // mayorRigHit is the number of uses one non-test file makes, and the line of the
@@ -281,11 +306,16 @@ func TestMayorRigAllowlistRules(t *testing.T) {
 	}
 }
 
-// TestMayorRigUseCount fixes what one use is. A string literal that contains the
-// path is one use however often it repeats it, a call with both segments as
-// arguments is one use (a segment may be a literal or a name the file gives the
-// value), a concatenation that spells the path is one use, and each
-// constants.DirMayor, DirRig, RigMayorPath or RigBeadsPath identifier is one use.
+// constantsImport is the import line a fixture needs before it can name a constants
+// identifier as a use.
+const constantsImport = "import \"github.com/steveyegge/gastown/internal/constants\"\n\n"
+
+// TestMayorRigUseCount fixes what one use is. An expression is one use however
+// many forms it holds: a string literal that holds the path, a concatenation that
+// spells it, or a call with both segments as arguments (a segment may be a literal
+// or a name the file gives the value) counts once, and a literal or a name inside
+// it is not counted again. Each constants identifier is one use, and it counts only
+// when the file imports internal/constants under the name it is written with.
 func TestMayorRigUseCount(t *testing.T) {
 	t.Parallel()
 
@@ -312,6 +342,11 @@ func TestMayorRigUseCount(t *testing.T) {
 		{
 			name:   "a filepath.Join with mayor and rig arguments is one use",
 			source: "package pkg\n\nfunc run(root string) string {\n\treturn filepath.Join(root, \"mayor\", \"rig\", \"x\")\n}\n",
+			want:   1,
+		},
+		{
+			name:   "a literal and a call in one expression are one use",
+			source: "package pkg\n\nfunc run(root string) []string {\n\treturn []string{filepath.Join(\"mayor/rig\", \"mayor\", \"rig\")}\n}\n",
 			want:   1,
 		},
 		{
@@ -346,8 +381,33 @@ func TestMayorRigUseCount(t *testing.T) {
 		},
 		{
 			name:   "constants.DirMayor and constants.DirRig are a use each",
-			source: "package pkg\n\nfunc run(p string) string {\n\treturn p + constants.DirMayor + constants.DirRig\n}\n",
+			source: "package pkg\n\n" + constantsImport + "func run(p string) string {\n\treturn p + constants.DirMayor + constants.DirRig\n}\n",
 			want:   2,
+		},
+		{
+			name:   "an aliased import of internal/constants is counted",
+			source: "package pkg\n\nimport cfg \"github.com/steveyegge/gastown/internal/constants\"\n\nfunc run() string {\n\treturn cfg.DirMayor\n}\n",
+			want:   1,
+		},
+		{
+			name:   "a dot import of internal/constants counts its bare names",
+			source: "package pkg\n\nimport . \"github.com/steveyegge/gastown/internal/constants\"\n\nfunc run() string {\n\treturn DirMayor\n}\n",
+			want:   1,
+		},
+		{
+			name:   "a field named DirMayor in the constants package is not a use",
+			source: "package constants\n\nfunc run(x *Other) string {\n\treturn x.DirMayor\n}\n",
+			want:   0,
+		},
+		{
+			name:   "an unrelated variable named constants is not counted",
+			source: "package pkg\n\nfunc run() string {\n\tconstants := struct{ DirMayor string }{\"x\"}\n\treturn constants.DirMayor\n}\n",
+			want:   0,
+		},
+		{
+			name:   "a constants identifier without the import is not counted",
+			source: "package pkg\n\nfunc run() string {\n\treturn constants.DirMayor\n}\n",
+			want:   0,
 		},
 		{
 			name:   "the definitions in the constants package are uses",
@@ -395,13 +455,23 @@ func TestMayorRigUseCount(t *testing.T) {
 			want:   1,
 		},
 		{
+			name:   "a three-operand concatenation that spells the path is one use",
+			source: "package pkg\n\nvar p = \"x/mayor/\" + \"rig/\" + \"y\"\n",
+			want:   1,
+		},
+		{
+			name:   "a three-operand concatenation holding the path as a literal is one use",
+			source: "package pkg\n\nvar p = \"x/mayor/rig/\" + \"y\" + \"z\"\n",
+			want:   1,
+		},
+		{
 			name:   "a call of constants.RigMayorPath is one use",
-			source: "package pkg\n\nfunc run(rig string) string {\n\treturn constants.RigMayorPath(rig)\n}\n",
+			source: "package pkg\n\n" + constantsImport + "func run(rig string) string {\n\treturn constants.RigMayorPath(rig)\n}\n",
 			want:   1,
 		},
 		{
 			name:   "a call of constants.RigBeadsPath is one use",
-			source: "package pkg\n\nfunc run(rig string) string {\n\treturn constants.RigBeadsPath(rig)\n}\n",
+			source: "package pkg\n\n" + constantsImport + "func run(rig string) string {\n\treturn constants.RigBeadsPath(rig)\n}\n",
 			want:   1,
 		},
 		{
@@ -429,6 +499,50 @@ func TestMayorRigUseCount(t *testing.T) {
 				t.Fatalf("mayorRigHits counted %d uses, want %d (hits %+v)", got, tc.want, hits)
 			}
 		})
+	}
+}
+
+// TestMayorRigStringNamesIsBounded feeds the string-set collector a chain that
+// squares a name's set at each step: unbounded, s10 would hold 2^1024 strings. A
+// set within the cap is kept whole, and a set past it is cut at the cap, so the
+// collector returns.
+func TestMayorRigStringNamesIsBounded(t *testing.T) {
+	t.Parallel()
+
+	var b strings.Builder
+	b.WriteString("package pkg\n\nfunc run() {\n\ts0 := \"a\"\n\ts0 = \"b\"\n")
+	for i := 1; i <= 10; i++ {
+		fmt.Fprintf(&b, "\ts%d := s%d + s%d\n", i, i-1, i-1)
+	}
+	b.WriteString("}\n")
+	file, err := parser.ParseFile(token.NewFileSet(), "pkg/run.go", b.String(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	names := stringNames(file)
+	if got := len(names["s2"]); got != 16 {
+		t.Fatalf("s2 holds %d strings, want 16: two values squared twice", got)
+	}
+	for _, name := range []string{"s3", "s10"} {
+		if got := len(names[name]); got != maxPossibleStrings {
+			t.Fatalf("%s holds %d strings, want the cap %d", name, got, maxPossibleStrings)
+		}
+	}
+
+	// A name that takes its value from many assignments is cut at the cap too.
+	var many strings.Builder
+	many.WriteString("package pkg\n\nfunc run() {\n\tx := \"v0\"\n")
+	for i := 1; i <= 70; i++ {
+		fmt.Fprintf(&many, "\tx = \"v%d\"\n", i)
+	}
+	many.WriteString("}\n")
+	manyFile, err := parser.ParseFile(token.NewFileSet(), "pkg/many.go", many.String(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(stringNames(manyFile)["x"]); got != maxPossibleStrings {
+		t.Fatalf("x holds %d strings from 71 assignments, want the cap %d", got, maxPossibleStrings)
 	}
 }
 
@@ -608,9 +722,53 @@ func TestMayorRigWalkErrorIsReturned(t *testing.T) {
 func TestRepoMayorRig(t *testing.T) {
 	t.Parallel()
 	root := repoRoot(t)
-	if err := checkMayorRigAt(root, filepath.Join(root, mayorRigAllowPath)); err != nil {
+	allowPath := filepath.Join(root, mayorRigAllowPath)
+	entries, err := loadMayorRigAllowlist(allowPath)
+	if err != nil {
 		t.Fatal(err)
 	}
+	hits, err := repoMayorRigHits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkMayorRigEntries(entries, hits, allowPath); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRepoMayorRigScanRunsOnce holds the real tree to one walk and parse: two reads
+// of it run the scan once and return the same uses.
+func TestRepoMayorRigScanRunsOnce(t *testing.T) {
+	t.Parallel()
+	first, err := repoMayorRigHits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := repoMayorRigHits()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repoScan.runs != 1 {
+		t.Fatalf("the real tree was walked and parsed %d times, want once", repoScan.runs)
+	}
+	if !slices.Equal(first, second) {
+		t.Fatalf("second read of the real tree = %+v, want the first read %+v", second, first)
+	}
+}
+
+// repoMayorRigHits returns the uses in the real tree. The first call walks and
+// parses the tree; every later call reads that result.
+func repoMayorRigHits() ([]mayorRigHit, error) {
+	repoScan.once.Do(func() {
+		repoScan.runs++
+		root, err := repoRootDir()
+		if err != nil {
+			repoScan.err = err
+			return
+		}
+		repoScan.hits, repoScan.err = mayorRigHits(root)
+	})
+	return repoScan.hits, repoScan.err
 }
 
 // checkMayorRigAt fails for a non-test Go file under root that uses the path more
@@ -626,6 +784,11 @@ func checkMayorRigAt(root, allowPath string) error {
 	if err != nil {
 		return err
 	}
+	return checkMayorRigEntries(entries, hits, allowPath)
+}
+
+// checkMayorRigEntries compares the uses the scan found with the allowlist.
+func checkMayorRigEntries(entries []mayorRigEntry, hits []mayorRigHit, allowPath string) error {
 	if err := unlistedMayorRigHits(hits, entries, allowPath); err != nil {
 		return err
 	}
@@ -693,66 +856,127 @@ func mayorRigHitInFile(fsys fs.FS, rel string) (mayorRigHit, error) {
 		return mayorRigHit{}, fmt.Errorf("parse %s: %w", rel, err)
 	}
 	names := stringNames(file)
-	hit := mayorRigHit{file: rel}
-	note := func(pos token.Pos) {
-		hit.count++
-		if hit.line == 0 {
-			hit.line = fset.Position(pos).Line
-		}
+	qualifier := constantsQualifier(file)
+	c := &useCounter{
+		fset:      fset,
+		rel:       rel,
+		names:     names,
+		qualifier: qualifier,
+		bare:      file.Name.Name == "constants" || qualifier == ".",
+		selectors: selectorIdents(file),
 	}
-	var unquoteErr error
-	ast.Inspect(file, func(n ast.Node) bool {
-		if unquoteErr != nil {
-			return false
+	ast.Inspect(file, c.visit)
+	if c.err != nil {
+		return mayorRigHit{}, c.err
+	}
+	return mayorRigHit{file: rel, line: c.line, count: c.count}, nil
+}
+
+// useCounter counts the uses of one file. A use is one expression: once visit counts
+// a node it returns false, so the forms inside it are not counted again.
+type useCounter struct {
+	fset      *token.FileSet
+	rel       string
+	names     map[string][]string
+	qualifier string              // the name the file gives internal/constants, "" when it does not import it
+	bare      bool                // the constants names need no qualifier: the file is package constants or dot-imports it
+	selectors map[*ast.Ident]bool // the Sel of each selector, which is never a bare name
+	count     int
+	line      int
+	err       error
+}
+
+// visit counts n when it is a use and tells ast.Inspect whether to descend into n.
+func (c *useCounter) visit(n ast.Node) bool {
+	if c.err != nil {
+		return false
+	}
+	counted, err := c.isUse(n)
+	if err != nil {
+		c.err = err
+		return false
+	}
+	if !counted {
+		return true
+	}
+	c.count++
+	if c.line == 0 {
+		c.line = c.fset.Position(n.Pos()).Line
+	}
+	return false
+}
+
+// isUse reports whether n is one use of the path.
+func (c *useCounter) isUse(n ast.Node) (bool, error) {
+	switch n := n.(type) {
+	case *ast.BasicLit:
+		if n.Kind != token.STRING {
+			return false, nil
 		}
-		switch n := n.(type) {
-		case *ast.BasicLit:
-			if n.Kind != token.STRING {
-				return true
+		value, err := unquoteLiteral(c.fset, c.rel, n)
+		if err != nil {
+			return false, err
+		}
+		return mayorRigPathPattern.MatchString(value), nil
+	case *ast.BinaryExpr:
+		// A concatenation that spells the path across its operands. The whole
+		// concatenation is one use, so its operands are not counted again.
+		if n.Op != token.ADD {
+			return false, nil
+		}
+		return anyMayorRigPath(possibleStrings(n, c.names)), nil
+	case *ast.CallExpr:
+		var hasMayor, hasRig bool
+		for _, arg := range n.Args {
+			for _, value := range possibleStrings(arg, c.names) {
+				hasMayor = hasMayor || value == mayorSegment
+				hasRig = hasRig || value == rigSegment
 			}
-			value, err := unquoteLiteral(fset, rel, n)
-			if err != nil {
-				unquoteErr = err
-				return false
-			}
-			if mayorRigPathPattern.MatchString(value) {
-				note(n.Pos())
-			}
-		case *ast.BinaryExpr:
-			// A concatenation that spells the path across its operands. A literal
-			// operand that holds the path alone is already counted, so it is not
-			// counted again.
-			if anyMayorRigPath(possibleStrings(n, names)) && !literalHoldsPath(n) {
-				note(n.Pos())
-			}
-		case *ast.CallExpr:
-			var hasMayor, hasRig bool
-			for _, arg := range n.Args {
-				for _, value := range possibleStrings(arg, names) {
-					hasMayor = hasMayor || value == mayorSegment
-					hasRig = hasRig || value == rigSegment
-				}
-			}
-			if hasMayor && hasRig {
-				note(n.Pos())
-			}
-		case *ast.Ident:
-			if mayorRigIdents[n.Name] {
-				note(n.Pos())
-			}
+		}
+		return hasMayor && hasRig, nil
+	case *ast.SelectorExpr:
+		id, ok := n.X.(*ast.Ident)
+		return ok && c.qualifier != "" && id.Name == c.qualifier && mayorRigIdents[n.Sel.Name], nil
+	case *ast.Ident:
+		return c.bare && !c.selectors[n] && mayorRigIdents[n.Name], nil
+	}
+	return false, nil
+}
+
+// constantsQualifier returns the name the file gives the internal/constants import:
+// its alias, or constants. It returns "" when the file does not import the package.
+func constantsQualifier(file *ast.File) string {
+	for _, imp := range file.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil || path != constantsImportPath {
+			continue
+		}
+		if imp.Name != nil {
+			return imp.Name.Name
+		}
+		return "constants"
+	}
+	return ""
+}
+
+// selectorIdents returns the Sel identifier of every selector in file.
+func selectorIdents(file *ast.File) map[*ast.Ident]bool {
+	sel := map[*ast.Ident]bool{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if s, ok := n.(*ast.SelectorExpr); ok {
+			sel[s.Sel] = true
 		}
 		return true
 	})
-	if unquoteErr != nil {
-		return mayorRigHit{}, unquoteErr
-	}
-	return hit, nil
+	return sel
 }
 
-// stringNames maps each name the file assigns a string to every string it can
-// hold: a const or var with a value, or a name assigned in a statement. A name
-// may take its value from one declared later, so the pass repeats until no name
-// gains a value. The repeat is bounded by the number of declarations.
+// stringNames maps each name the file assigns a string to the strings it can hold:
+// a const or var with a value, or a name assigned in a statement. A name may take
+// its value from one declared later, so the pass repeats until no name gains a
+// value. The collector stops at maxStringPasses passes and at maxPossibleStrings
+// values for a name, so a chain of concatenations that repeats a name is read to a
+// fixed depth and a fixed size.
 func stringNames(file *ast.File) map[string][]string {
 	type binding struct {
 		name  string
@@ -781,11 +1005,11 @@ func stringNames(file *ast.File) map[string][]string {
 	})
 	names := map[string][]string{}
 	changed := true
-	for pass := 0; changed && pass <= len(bindings); pass++ {
+	for pass := 0; changed && pass < maxStringPasses; pass++ {
 		changed = false
 		for _, b := range bindings {
 			for _, value := range possibleStrings(b.value, names) {
-				if !slices.Contains(names[b.name], value) {
+				if len(names[b.name]) < maxPossibleStrings && !slices.Contains(names[b.name], value) {
 					names[b.name] = append(names[b.name], value)
 					changed = true
 				}
@@ -798,7 +1022,8 @@ func stringNames(file *ast.File) map[string][]string {
 // possibleStrings returns the strings expr can evaluate to: a string literal, a
 // name in names, a parenthesised expression, or a + of two of these. Any other
 // expression, such as a call or a field read, gives none. A literal that does not
-// unquote gives none too: the scan reports that literal when it visits it.
+// unquote gives none too: the scan reports that literal when it visits it. A +
+// stops at maxPossibleStrings values.
 func possibleStrings(expr ast.Expr, names map[string][]string) []string {
 	switch e := expr.(type) {
 	case *ast.BasicLit:
@@ -813,34 +1038,25 @@ func possibleStrings(expr ast.Expr, names map[string][]string) []string {
 	case *ast.ParenExpr:
 		return possibleStrings(e.X, names)
 	case *ast.Ident:
-		return names[e.Name]
+		return slices.Clone(names[e.Name])
 	case *ast.BinaryExpr:
 		if e.Op != token.ADD {
 			return nil
 		}
+		left := possibleStrings(e.X, names)
+		right := possibleStrings(e.Y, names)
 		var out []string
-		for _, left := range possibleStrings(e.X, names) {
-			for _, right := range possibleStrings(e.Y, names) {
-				out = append(out, left+right)
+		for _, l := range left {
+			for _, r := range right {
+				if len(out) == maxPossibleStrings {
+					return out
+				}
+				out = append(out, l+r)
 			}
 		}
 		return out
 	}
 	return nil
-}
-
-// literalHoldsPath reports whether a string literal among the operands of a
-// concatenation holds the path on its own.
-func literalHoldsPath(expr ast.Expr) bool {
-	switch e := expr.(type) {
-	case *ast.BasicLit:
-		return anyMayorRigPath(possibleStrings(e, nil))
-	case *ast.ParenExpr:
-		return literalHoldsPath(e.X)
-	case *ast.BinaryExpr:
-		return literalHoldsPath(e.X) || literalHoldsPath(e.Y)
-	}
-	return false
 }
 
 // anyMayorRigPath reports whether one of the strings holds the path as whole segments.
@@ -976,17 +1192,26 @@ func writeFixture(t *testing.T, root, name, content string) string {
 // repoRoot returns the directory above this package that holds go.mod.
 func repoRoot(t *testing.T) string {
 	t.Helper()
+	root, err := repoRootDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// repoRootDir returns the directory above this package that holds go.mod.
+func repoRootDir() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
-		t.Fatalf("Getwd: %v", err)
+		return "", fmt.Errorf("getwd: %w", err)
 	}
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
+			return dir, nil
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			t.Fatalf("no go.mod above %s", dir)
+			return "", fmt.Errorf("no go.mod above %s", dir)
 		}
 		dir = parent
 	}

@@ -1,39 +1,32 @@
-# Non-test Go files that use the <rig>/mayor/rig path (gt-3lvcjz.1).
+# Non-test Go files that name the <rig>/mayor/rig path in code (gt-3lvcjz.1).
 #
 # Each line is: path<TAB>count<TAB>class<TAB>reason
-#   count   the number of uses the file makes: a string literal that holds the path as
-#           whole segments (mayor/rigs.json is not a use), a concatenation that spells
-#           it, a call whose arguments include both "mayor" and "rig", or one of the
-#           constants.DirMayor, DirRig, RigMayorPath and RigBeadsPath identifiers. A
-#           file with more uses fails; a count the file no longer reaches fails as
-#           stale, so lower it.
-#   class   pending-retirement, the only class: the reason names the reader of the
-#           path, and the retirement that removes the use deletes the line.
+#   count   the number of uses of the path in the file: a string literal that holds it,
+#           a call with both segments as arguments, a concatenation that spells it, or a
+#           constants identifier. One expression that holds several forms counts once. A
+#           file with more uses fails; a count the file no longer reaches fails as stale,
+#           so lower it.
+#   class   pending-retirement, the only class: the reason names the reader of the path
+#           and the retirement that removes the use deletes the line.
 #
-# The list is a ratchet. TestRepoMayorRig fails on a use this file does not allow,
-# and on a line whose file no longer has a use or has fewer uses than its count: fix
-# the line in the change that removes the use. Do not add a line for new code; use
-# the replacement instead.
-internal/beads/beads_redirect.go	5	pending-retirement	beads redirect: writes and checks the rig's mayor/rig/.beads redirect target and its error text
+# The list is a ratchet. TestRepoMayorRig fails on a use this file does not allow, and on a
+# line whose file no longer has a use or has fewer uses than its count: fix the line in the
+# retirement that removes the use. Do not add a line for new code; remove the use instead.
+internal/beads/beads_redirect.go	4	pending-retirement	beads redirect: writes and checks the rig's mayor/rig/.beads redirect target and its error text
 internal/beads/sling_context_scan.go	1	pending-retirement	sling context scan: looks for the mayor/rig checkout under a rig directory
 internal/cmd/crew_fresh.go	1	pending-retirement	gt crew fresh: help text saying where the fetch runs, in mayor/rig or a polecat worktree
-internal/cmd/crew_lifecycle.go	1	pending-retirement	gt crew remove: runs git worktree remove from the rig's mayor/rig checkout, built by constants.RigMayorPath
 internal/cmd/daemon_image.go	2	pending-retirement	gt daemon image: refuses a canonical mayor/rig clone as a source, in the flag help and the error text
 internal/cmd/doctor.go	1	pending-retirement	gt doctor: the check list text that names the mayor-clone-exists check's mayor/rig clone
 internal/cmd/gitinit.go	1	pending-retirement	gt init: the .gitignore template entry for mayor/rig
 internal/cmd/hooks_install.go	1	pending-retirement	gt hooks install: skips the constants.DirMayor directory name when it walks the rig directories
 internal/cmd/plugin.go	1	pending-retirement	gt plugin: help text naming the mayor/rig plugins search path
-internal/cmd/polecat.go	2	pending-retirement	gt polecat: opens the beads and git handles at the rig's mayor/rig checkout
-internal/cmd/polecat_prune_local.go	2	pending-retirement	gt polecat prune: the legacy mayor/rig fallback for the git base, and its skip reason
-internal/cmd/polecat_spawn.go	2	pending-retirement	gt polecat spawn: the legacy mayor/rig fallback for the repo base, and its error text
+internal/cmd/polecat.go	1	pending-retirement	gt polecat: opens the beads and git handles at the rig's mayor/rig checkout
 internal/cmd/report.go	1	pending-retirement	gt report: help text saying the mayor/rig canonical clone is never fetched
 internal/cmd/rig.go	8	pending-retirement	gt rig: the help and status output, and the mayor/rig checkout and .beads paths it opens
 internal/cmd/rig_adopt_prefix.go	3	pending-retirement	gt rig adopt-prefix: reads the rig's mayor/rig/.beads and writes its route
 internal/cmd/rig_dock.go	1	pending-retirement	gt rig dock: the mayor/rig checkout as the beads working directory
 internal/cmd/rig_helpers.go	1	pending-retirement	rig helpers: the mayor/rig beads path the rig commands open
-internal/cmd/sling_batch.go	1	pending-retirement	gt sling batch: the git handle at the rig's mayor/rig checkout
 internal/cmd/sling_helpers.go	1	pending-retirement	gt sling: the mayor/rig path used as a rig's work directory
-internal/cmd/start.go	1	pending-retirement	gt start: the mayor/rig path it checks for the rig's clone
 internal/config/bd_metadata.go	1	pending-retirement	bd metadata: the beads directory list that names rig/mayor/rig/.beads
 internal/config/directives.go	4	pending-retirement	directives loader: reads the central and per-rig directives under mayor/rig
 internal/config/loader.go	1	pending-retirement	config loader: the daemon patrol config path under constants.DirMayor
@@ -45,7 +38,6 @@ internal/daemon/om_skew.go	1	pending-retirement	daemon om skew probe: the om rig
 internal/daemon/rebuild_gt.go	1	pending-retirement	daemon rebuild_gt: builds the gt binary from the rig's mayor/rig checkout
 internal/daemon/scheduled_slings_gate.go	1	pending-retirement	daemon scheduled slings gate: runs the gate command in the rig's mayor/rig checkout
 internal/daemon/types.go	1	pending-retirement	daemon types: the daemon.json path under constants.DirMayor
-internal/daemon/upgrade_idle.go	1	pending-retirement	daemon upgrade: the gastown mayor/rig repo the idle upgrade check reads
 internal/daemonimage/build.go	1	pending-retirement	daemonimage build: the error text that refuses a mayor/rig clone as a build source
 internal/doctor/beads_redirect_target_check.go	1	pending-retirement	doctor beads redirect check: the mayor/rig/.beads target it compares against
 internal/doctor/branch_check.go	1	pending-retirement	doctor branch check: the mayor/rig path in its checkout list
@@ -66,7 +58,6 @@ internal/doctor/unregistered_beads_check.go	1	pending-retirement	doctor unregist
 internal/doltserver/doltserver.go	4	pending-retirement	dolt server: reads the rig's mayor/rig/.beads database and port
 internal/done/done.go	1	pending-retirement	gt done: the rig work directory under mayor/rig
 internal/forgejocut/repoint.go	2	pending-retirement	forgejo cutover repoint: rewrites remotes in the rig's mayor/rig checkout
-internal/git/git.go	2	pending-retirement	git helper: finds the rig's mayor/rig checkout as a submodule reference
 internal/installer/paths.go	1	pending-retirement	installer: the gastown rig directory default under mayor/rig
 internal/jev/landing/wire.go	2	pending-retirement	landing wiring: the git base candidates .repo.git and mayor/rig, and the error text
 internal/jev/rework/wire.go	2	pending-retirement	rework wiring: the git base candidates .repo.git and mayor/rig, and the error text
@@ -83,7 +74,7 @@ internal/polecat/seed/guard.go	1	pending-retirement	seed guard: the mayor/rig ch
 internal/polecat/seed/seed.go	2	pending-retirement	seed: the build rig and source rig mayor/rig checkout paths
 internal/polecat/surviving_branch.go	2	pending-retirement	surviving branch: the legacy mayor/rig git base and its error text
 internal/polecat/surviving_work.go	1	pending-retirement	surviving work: the ErrNoRigRepo text naming mayor/rig
-internal/rig/manager.go	10	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
+internal/rig/manager.go	11	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
 internal/rig/repofile.go	2	pending-retirement	rig repo file: reads files from the rig's mayor/rig clone, and its warning text
 internal/rig/types.go	2	pending-retirement	rig types: the mayor/rig entry in the rig directory list, and the RigMayorPath call that builds the checkout path
 internal/sandbox/skeleton.go	3	pending-retirement	sandbox skeleton: the mayor/rig/.beads paths in the sandbox layout
