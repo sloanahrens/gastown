@@ -1229,6 +1229,9 @@ type Daemon struct {
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams
+	// polecatDevTagSeams replace the start-time dev tag step's read of the
+	// running build in tests; the zero value is production (gt-llx27r).
+	polecatDevTagSeams polecatDevTagSeams
 	// tierSweepImageFileLast is the reason each runner image file path last
 	// logged as unused, keyed by path. It lives on the daemon, not in the
 	// package, so one daemon's log latch never silences another's; a reason logs
@@ -2088,6 +2091,12 @@ func (d *Daemon) Run() (err error) {
 	// The landing workers wake the loop here when a drained pass ends, so a
 	// pending upgrade restart fires at that moment (gt-fzwcd).
 	landingDrainedChan := d.landingDrained()
+
+	// The sandbox registry's dev tag of the polecat image follows this build, so
+	// a pod roll does not leave the gateway refusing spawns against a stale image
+	// (gt-llx27r). The copy runs beside the loop, which is up now; the dispatcher
+	// defers a spawn that the lagging tag would refuse until the copy lands.
+	d.startPolecatDevTag()
 
 	for {
 		select {
