@@ -237,6 +237,14 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	elapsed := s.now().Sub(started).Round(time.Millisecond)
 	d.cloudCheckLastRun.Store(s.now().UnixNano())
 
+	// Shutdown cancels the run's context through its parent, which kills the
+	// child. The check did not fail, and the daemon is leaving, so the run
+	// raises nothing and clears nothing: the next daemon run checks again.
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+		d.logger.Printf("cloud_check: %s: stopped by daemon shutdown after %v", command, elapsed)
+		return
+	}
+
 	status := runExitStatus(err)
 	if err == nil && !cloudCheckWritten(statusPath, started) {
 		err = errCloudCheckNoStatus
