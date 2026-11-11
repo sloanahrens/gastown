@@ -562,13 +562,31 @@ const money = v => v == null ? "–" : "$" + Number(v).toFixed(2);
 // rather than letting it pass as current. The server stamps the same thing
 // (readStaleFactor, internal/dashboard/types.go); the age is measured again here
 // because it drifts between pushes, and the two factors must agree (gt-q6h8e).
+// A read that has never happened has no age (neverRead): it is stale, and the
+// pane says "never read" where an age would be.
 function readOf(s, source) {
   const x = (s && s.reads && s.reads[source]) || null;
   if (!x) return null;
-  const ageSec = x.at ? (Date.now() - new Date(x.at).getTime()) / 1000 : null;
+  const never = neverRead(x.at);
+  const ageSec = never ? null : (Date.now() - new Date(x.at).getTime()) / 1000;
   const every = x.every_sec || 0;
   const stale = !!x.stale || ageSec == null || (every > 0 && ageSec > every * 3);
-  return {ageSec: ageSec, error: !!x.error, stale: stale};
+  return {ageSec: ageSec, error: !!x.error, stale: stale, never: never};
+}
+// neverRead is the one decider of "never read": a read stamp that is empty, does
+// not parse, or is before the year 2000. The server sends a zero time
+// (0001-01-01T00:00:00Z) for a source that has never been read, and subtracting
+// that from now prints an age in centuries. readOf asks this for a pane's read,
+// and every other read-age line asks it for the stamp it draws.
+const NEVER_READ_BEFORE = Date.UTC(2000, 0, 1);
+const neverRead = at => !at || !(new Date(at).getTime() >= NEVER_READ_BEFORE);
+// readAgeWords is the age a pane draws beside one read: "never read" for a read
+// that has not happened, "read 4m ago" for one that has, and null when there is
+// no read to age (the caller then says so in its own words).
+function readAgeWords(r) {
+  if (!r) return null;
+  if (r.never) return "never read";
+  return r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null;
 }
 // readInput is the status fields readOf turns into what a pane draws: its stamp,
 // its interval and its two flags. A pane that calls readOf names this in its
@@ -585,10 +603,12 @@ function paintsRead(box, note, r) {
   note.className = "r" + (r && r.stale ? (r.error ? " badc" : " warnc") : "");
 }
 // readCaption joins a pane's own words with the reason its reading is not
-// current, so every pane says which of its numbers are live.
+// current, so every pane says which of its numbers are live. A read that has
+// never happened says so before the reason it is not current.
 function readCaption(r, parts) {
+  const never = r && r.never ? "never read" : null;
   const why = r && r.stale ? (r.error ? "read failed" : "stale") : null;
-  return parts.filter(Boolean).concat(why ? [why] : []).join(" · ");
+  return parts.filter(Boolean).concat(never ? [never] : [], why ? [why] : []).join(" · ");
 }
 // failWhy is the reason the server named for a read that failed, held to the
 // WHY_MAX characters a reason is drawn at. A read that named none is "".
@@ -1131,7 +1151,7 @@ function renderRigs(s) {
   box.append(t);
   const parked = rows.filter(r => r.parked).length;
   const at = s.queue && s.queue.at;
-  $("rigsnote").textContent = readCaption(qr, [rows.length + " rigs" + (parked ? " · " + parked + " parked" : ""), at ? "read " + age(at) + " ago" : null]);
+  $("rigsnote").textContent = readCaption(qr, [rows.length + " rigs" + (parked ? " · " + parked + " parked" : ""), at && !neverRead(at) ? "read " + age(at) + " ago" : null]);
 }
 // The Work panel: a row per seat holding something, the queue's
 // dispatchable/ready/landing summary, the blocked line, and the whole queue
@@ -1436,8 +1456,9 @@ function renderPolecats(s, force) {
   const rSeats = readOf(s, "seats");
   paintsRead(box, $("polecatsnote"), rSeats);
   const parts = [];
-  if (s.summary_at) parts.push("seats read " + age(s.summary_at) + " ago");
-  if (rSeats && rSeats.stale) {
+  if (s.summary_at || (rSeats && rSeats.never)) parts.push(neverRead(s.summary_at) ? "seats never read" : "seats read " + age(s.summary_at) + " ago");
+  // A seats read that never happened is named "never read" above, so it is not also called "old".
+  if (rSeats && rSeats.stale && (rSeats.error || !rSeats.never)) {
     const seatsWhy = failWhy(s, "seats");
     parts.push(rSeats.error ? "the seats read failed" + (seatsWhy ? ": " + seatsWhy : "") : "the seats read is old");
   }
@@ -1464,7 +1485,7 @@ function renderBeads(s, force) {
   const rQueue = readOf(s, "queue");
   paintsRead(box, $("beadsnote"), rQueue);
   const parts = [];
-  if (q) parts.push("queue read " + age(q.at) + " ago");
+  if (q) parts.push(neverRead(q.at) ? "queue never read" : "queue read " + age(q.at) + " ago");
   if (rQueue && rQueue.stale) parts.push(rQueue.error ? "the queue read failed" : "the queue read is old");
   $("beadsnote").textContent = parts.join(" · ");
 
@@ -1914,9 +1935,10 @@ function renderNews(s) {
   // The note ages the snapshot, which is what the pane's staleness turns on: a
   // story's own age is in its hover and says nothing about the read behind it.
   // age() answers for an instant the server left out, so the note spells no
-  // null where an age belongs.
-  const read = age(f.at);
-  note.textContent = stale ? "stale " + read + " · " + f.error : "read " + read + " ago";
+  // null where an age belongs. A news read that has never happened says "never
+  // read" where its age would be, inside the stale mark when it failed.
+  const read = neverRead(f.at) ? "never read" : age(f.at);
+  note.textContent = stale ? "stale " + read + " · " + f.error : neverRead(f.at) ? "never read" : "read " + read + " ago";
   note.className = "r" + (stale ? " badc" : "");
 }
 
@@ -1975,12 +1997,12 @@ function drawCloudChecks(box, checks) {
   if (!checks) return;
   if (checks.state === "error") { box.append(el("div", "empty", "cloud checks: unreadable")); return; }
   if (checks.state !== "fresh") {
-    box.append(el("div", "ccheck warnc", "cloud checks: last ran " + age(checks.at) + " ago (not running?)"));
+    box.append(el("div", "ccheck warnc", neverRead(checks.at) ? "cloud checks: last ran never read (not running?)" : "cloud checks: last ran " + age(checks.at) + " ago (not running?)"));
     return;
   }
   const worst = checks.failed > 0 ? "badc" : (checks.warnings > 0 ? "warnc" : "");
   const counts = [checks.ok + " ok", checks.warnings + " warning" + (checks.warnings === 1 ? "" : "s"), checks.failed + " failed"];
-  box.append(el("div", "ccheck" + (worst ? " " + worst : ""), "checks: " + counts.join(" · ") + " · " + age(checks.at) + " ago"));
+  box.append(el("div", "ccheck" + (worst ? " " + worst : ""), neverRead(checks.at) ? "checks: " + counts.join(" · ") + " · never read" : "checks: " + counts.join(" · ") + " · " + age(checks.at) + " ago"));
   for (const it of checks.items || []) {
     const row = el("div", "ccrow");
     if (it.section) row.append(el("span", "ccsection", it.section));
@@ -2792,13 +2814,17 @@ function renderForgejo(s) {
   // round, so the event's age cannot tell them apart (gt-faml5).
   const read = Date.parse(f.at || "");
   const every = f.every_seconds || 0;
-  const age = read > 0 ? (Date.now() - read) / 1000 : null;
-  const stale = age != null && every > 0 && age > 2 * every;
+  const never = neverRead(f.at);
+  const age = never ? null : (Date.now() - read) / 1000;
+  const stale = never || (age != null && every > 0 && age > 2 * every);
   let note = (f.error ? "stale (" + f.error + ") · " : "") + events.length + " events";
-  if (age != null) note += " · snapshot " + fmtDur(age) + " old";
-  if (stale) note += " · STALE";
+  if (never) note += " · snapshot never read";
+  else note += " · snapshot " + fmtDur(age) + " old";
+  if (stale && !never) note += " · STALE";
   $("forgejonote").textContent = note;
-  if (stale) $("forgejonote").className = "r badc";
+  // A snapshot never read is stale the way readOf marks a source: amber, or red
+  // when its read failed. An aged snapshot stays red.
+  if (stale) $("forgejonote").className = "r " + (never && !f.error ? "warnc" : "badc");
   if (follow) box.scrollTop = box.scrollHeight;
 }
 
@@ -3493,10 +3519,9 @@ function costUsage(box, u, s) {
   // the numbers in the folds are a past day's, and the fold says so.
   const counts = (u.unmatched || 0) + " unmatched · " + (u.incomplete || 0) + " incomplete · " + (u.skipped || 0) + " skipped";
   const quality = panelFold(box, "cost.quality", "Data quality", counts);
-  const scanned = u.as_of ? new Date(u.as_of).getTime() : NaN;
-  if (isNaN(scanned)) quality.body.append(el("div", "empty warnc", "never scanned"));
+  if (neverRead(u.as_of)) quality.body.append(el("div", "empty warnc", "never scanned"));
   else {
-    const old = (Date.now() - scanned) / 1000 > USAGE_STALE_SEC;
+    const old = (Date.now() - new Date(u.as_of).getTime()) / 1000 > USAGE_STALE_SEC;
     quality.body.append(el("div", "empty" + (old ? " warnc" : ""), "records last scanned " + age(u.as_of) + " ago" + (old ? " (stale)" : "")));
   }
   quality.body.append(el("div", "empty", counts));
@@ -4382,7 +4407,7 @@ function costHeaderParts(s, d, r) {
       title: (claude && (claude.why || claude.status_text)) || "",
     });
   }
-  const ago = r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : "read ?";
+  const ago = readAgeWords(r) || "read ?";
   if (r && r.stale && r.error) parts.push({text: ago + " · read failed" + (deep && deep.why ? ": " + deep.why : ""), cls: "badc"});
   else if (!d) parts.push({text: "no spend read", cls: "warnc"});
   else if (r && r.stale) parts.push({text: ago + " · stale", cls: "warnc"});
@@ -4954,8 +4979,7 @@ function drawQueueList(box, s) {
     // A ledger the server could not read carries no time, and one it sent with
     // a zero time has no age to give: both say the ledger could not be read
     // rather than age year 1 into a billion minutes.
-    const at = q.verdicts_at ? new Date(q.verdicts_at).getTime() : NaN;
-    const mins = Number.isFinite(at) && at > 0 ? Math.max(0, Math.round((Date.now() - at) / 60000)) : null;
+    const mins = neverRead(q.verdicts_at) ? null : Math.max(0, Math.round((Date.now() - new Date(q.verdicts_at).getTime()) / 60000));
     box.append(el("div", "warnc", mins == null
       ? "the dispatcher's verdict ledger could not be read, so no row says what its last tick decided"
       : "the dispatcher's verdicts are " + mins + (mins === 1 ? " minute" : " minutes") + " old, so no row shows a current skip"));
