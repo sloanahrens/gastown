@@ -76,7 +76,7 @@ func BootHold(townRoot string) string {
 // A hold path or ESTOP sentinel that cannot be stat'ed for any reason other
 // than not existing fails closed: the hold cannot be ruled out, and
 // dispatching through a hold is the outcome it exists to prevent (gt-ifijm,
-// gt-e7lqk).
+// gt-e7lqk). A town root that does not exist holds too (HoldView).
 func OperatorHold(townRoot string) string {
 	return operatorHold(townRoot, ring.TownKey(os.Getenv), time.Now())
 }
@@ -84,22 +84,163 @@ func OperatorHold(townRoot string) string {
 // operatorHold is OperatorHold over the Ring's key resolver and clock, so a
 // test judges the Ring without reading the process environment.
 func operatorHold(townRoot string, key ring.KeyFunc, now time.Time) string {
-	if townRoot == "" {
-		return ""
+	return holdView(townRoot, key, now, noRigs).Held()
+}
+
+// HoldSource is one hold the dispatcher honors, and what it reads for it.
+type HoldSource struct {
+	// Name is the source's name in the view, as the tests and the reasons
+	// refer to it.
+	Name string
+	// Reason says why the source holds, or is "" when it does not.
+	Reason string
+}
+
+// HoldState is what the dispatcher reads from a town's hold sources on one
+// call: the state of each source, and the summary the operator reads.
+type HoldState struct {
+	// Sources are the town-wide holds, in the order OperatorHold checks them.
+	Sources []HoldSource
+	// Rigs are the rig ESTOPs the town directory lists that are active. A rig
+	// ESTOP holds its own rig (RigHold), not the town, so Held does not read
+	// it; Summary does.
+	Rigs []HoldSource
+	// RigsNote says why the rig ESTOPs are unknown rather than listed: the
+	// town root is missing, or the town directory cannot be read. "" when
+	// Rigs is the complete listing.
+	RigsNote string
+}
+
+// Held returns the reason the first town-wide hold gives, or "" when none
+// holds. It is the answer OperatorHold gives.
+func (s HoldState) Held() string {
+	for _, source := range s.Sources {
+		if source.Reason != "" {
+			return source.Reason
+		}
 	}
+	return ""
+}
+
+// Summary is one line for the operator. It is the held reason when a
+// town-wide hold holds. It says clear only when Held is "" and no rig ESTOP
+// is active and the rig listing is complete, so "clear" always means
+// OperatorHold would return "". An active rig ESTOP reads as not clear, with
+// the note that the town itself is open.
+func (s HoldState) Summary() string {
+	if reason := s.Held(); reason != "" {
+		return reason
+	}
+	if s.RigsNote != "" {
+		return "not clear: " + s.RigsNote
+	}
+	if len(s.Rigs) > 0 {
+		reasons := make([]string, 0, len(s.Rigs))
+		for _, rig := range s.Rigs {
+			reasons = append(reasons, rig.Reason)
+		}
+		return "not clear: " + strings.Join(reasons, "; ") + "; the town itself is not held"
+	}
+	return "clear"
+}
+
+// HoldView reports the hold sources the dispatcher reads for townRoot right
+// now: each town-wide hold, and each rig ESTOP the town directory lists. Every
+// call reads the paths again; nothing is cached. The Summary it gives is clear
+// only when OperatorHold would return "".
+func HoldView(townRoot string) HoldState {
+	return holdView(townRoot, ring.TownKey(os.Getenv), time.Now(), listRigESTOPs)
+}
+
+// rigLister returns the rig names that have an ESTOP.<rig> file in the town
+// directory. A view calls it once.
+type rigLister func(townRoot string) ([]string, error)
+
+// listRigESTOPs reads the town directory once and returns the rig names of its
+// ESTOP.<rig> files.
+func listRigESTOPs(townRoot string) ([]string, error) {
+	entries, err := os.ReadDir(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	prefix := estop.RigFileName("")
+	var rigs []string
+	for _, entry := range entries {
+		if rig, ok := strings.CutPrefix(entry.Name(), prefix); ok && rig != "" {
+			rigs = append(rigs, rig)
+		}
+	}
+	return rigs, nil
+}
+
+// noRigs lists no rigs. OperatorHold uses it: a rig ESTOP holds its own rig
+// and not the town, so the town-wide answer does not read the directory.
+func noRigs(string) ([]string, error) { return nil, nil }
+
+// holdView is the one reading of a town's hold sources, shared by HoldView and
+// OperatorHold. It takes the Ring's key resolver, the clock and the rig lister
+// so a test judges each source without reading the process environment or a
+// real town directory.
+func holdView(townRoot string, key ring.KeyFunc, now time.Time, rigs rigLister) HoldState {
+	var state HoldState
+	if townRoot == "" {
+		return state
+	}
+	if _, err := os.Stat(townRoot); errors.Is(err, fs.ErrNotExist) {
+		// Its sources cannot be read under a missing town root, so no hold
+		// under it can be ruled out, and its rig ESTOPs are unknown, not clear.
+		state.Sources = []HoldSource{{
+			Name:   "town root",
+			Reason: fmt.Sprintf("town root missing (%s); treating as held", townRoot),
+		}}
+		state.RigsNote = "town root missing; rig ESTOPs unknown"
+		return state
+	}
+	state.Sources = []HoldSource{
+		{Name: "operator hold file", Reason: operatorHoldFileReason(townRoot)},
+		{Name: "town ESTOP", Reason: estopHold(townRoot, "")},
+		{Name: "boot hold", Reason: BootHold(townRoot)},
+		{Name: "Ring", Reason: ring.Hold(townRoot, key, now)},
+	}
+	names, err := rigs(townRoot)
+	if err != nil {
+		state.RigsNote = fmt.Sprintf("rig ESTOPs unlisted (%v)", err)
+		return state
+	}
+	for _, rig := range names {
+		if reason := rigEstopReason(townRoot, rig); reason != "" {
+			state.Rigs = append(state.Rigs, HoldSource{Name: "rig ESTOP " + rig, Reason: reason})
+		}
+	}
+	return state
+}
+
+// operatorHoldFileReason is the operator hold file's reason, or "" when the
+// file does not exist. A path that cannot be stat'ed for another reason holds.
+func operatorHoldFileReason(townRoot string) string {
 	path := HoldFilePath(townRoot)
 	if _, err := os.Stat(path); err == nil {
 		return fmt.Sprintf("operator dispatch hold present (%s); remove it to resume", path)
 	} else if !os.IsNotExist(err) {
 		return fmt.Sprintf("operator dispatch hold unreadable (%v); treating as held", err)
 	}
-	if reason := estopHold(townRoot, ""); reason != "" {
-		return reason
+	return ""
+}
+
+// rigEstopReason is the reason rig's own ESTOP file holds that rig, or "" when
+// the file does not exist. A file that cannot be stat'ed for another reason
+// holds, as estopHold does.
+func rigEstopReason(townRoot, rig string) string {
+	path := estop.RigFilePath(townRoot, rig)
+	_, err := os.Stat(path)
+	switch {
+	case err == nil:
+		return fmt.Sprintf("rig ESTOP active (%s)", path)
+	case os.IsNotExist(err):
+		return ""
+	default:
+		return fmt.Sprintf("rig ESTOP unreadable (%v); treating as held", err)
 	}
-	if reason := BootHold(townRoot); reason != "" {
-		return reason
-	}
-	return ring.Hold(townRoot, key, now)
 }
 
 // estopHold reports the e-stop that covers rig ("" for the town sentinel

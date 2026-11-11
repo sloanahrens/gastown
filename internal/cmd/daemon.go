@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/util"
@@ -454,6 +455,7 @@ func (c *daemonControl) daemonStatus(w io.Writer, townRoot string) error {
 		// holding the lock while the provisioned job crash-loops behind it is
 		// the state this line has to name (gt-sq9e).
 		fmt.Fprintf(w, "  Supervised: %s\n", c.statusLine(townRoot, pid))
+		fmt.Fprintf(w, "  Dispatch hold: %s\n", dispatch.HoldView(townRoot).Summary())
 
 		// Load state for more details
 		state, err := daemon.LoadState(townRoot)
@@ -476,22 +478,24 @@ func (c *daemonControl) daemonStatus(w io.Writer, townRoot string) error {
 			}
 		}
 	} else {
-		return daemonNotRunning(w, c.statusLine(townRoot, 0))
+		return daemonNotRunning(w, townRoot, c.statusLine(townRoot, 0))
 	}
 
 	return nil
 }
 
 // daemonNotRunning prints the not-running form of gt daemon status, with the
-// Supervised: value the caller read, and is the exit-3 result that form ends
-// in. Exit 3 (LSB "program is not running") so scripts can use status as the
-// running probe: make install restarts only a running daemon and
-// mol-gastown-boot runs `status || start` (gt-o848l).
-func daemonNotRunning(w io.Writer, supervised string) error {
+// Supervised: value the caller read and the dispatch hold the town reads now,
+// and is the exit-3 result that form ends in. Exit 3 (LSB "program is not
+// running") so scripts can use status as the running probe: make install
+// restarts only a running daemon and mol-gastown-boot runs `status || start`
+// (gt-o848l).
+func daemonNotRunning(w io.Writer, townRoot, supervised string) error {
 	fmt.Fprintf(w, "%s Daemon is %s\n",
 		style.Dim.Render("○"),
 		"not running")
 	fmt.Fprintf(w, "  Supervised: %s\n", supervised)
+	fmt.Fprintf(w, "  Dispatch hold: %s\n", dispatch.HoldView(townRoot).Summary())
 	fmt.Fprintf(w, "\nStart with: %s\n", style.Dim.Render("gt daemon start"))
 	return NewSilentExit(3)
 }
@@ -524,7 +528,7 @@ func (c *daemonControl) containerDaemonStatus(w io.Writer, townRoot string, cfg 
 		// No container of that name is the town's daemon not running, and so
 		// is one docker reports created, exited or dead: no process of its is
 		// running (containerStopped is the package's reading of that).
-		return daemonNotRunning(w, job.StatusLine(0))
+		return daemonNotRunning(w, townRoot, job.StatusLine(0))
 	case job.Status != "running":
 		// Restarting or paused: the container exists and may hold a live
 		// daemon, so not running would be a claim this read cannot make. Only
@@ -546,7 +550,7 @@ func (c *daemonControl) containerDaemonStatus(w io.Writer, townRoot string, cfg 
 	// it records that it runs, and a container whose daemon has not recorded a
 	// run yet runs none.
 	if state == nil || !state.Running {
-		return daemonNotRunning(w, job.StatusLine(0))
+		return daemonNotRunning(w, townRoot, job.StatusLine(0))
 	}
 
 	fmt.Fprintf(w, "%s Daemon is %s\n",
@@ -554,6 +558,7 @@ func (c *daemonControl) containerDaemonStatus(w io.Writer, townRoot string, cfg 
 		style.Bold.Render("running"))
 	fmt.Fprintf(w, "  Town: %s\n", townRoot)
 	fmt.Fprintf(w, "  Supervised: %s\n", job.StatusLine(0))
+	fmt.Fprintf(w, "  Dispatch hold: %s\n", dispatch.HoldView(townRoot).Summary())
 	if !state.StartedAt.IsZero() {
 		fmt.Fprintf(w, "  Started: %s\n", state.StartedAt.Format("2006-01-02 15:04:05"))
 	}
