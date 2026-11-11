@@ -80,7 +80,7 @@ func TestInspectImageRefusals(t *testing.T) {
 		blobs     map[string]string
 		want      string
 	}{
-		{"an index with no linux/arm64 entry", map[string]string{"/v2/r/manifests/dev": noArm}, nil, "linux/arm64"},
+		{"an index with no linux/arm64 entry", map[string]string{"/v2/r/manifests/dev": noArm}, nil, `manifest dev in "r": the index at dev holds no linux/arm64 entry`},
 		{"a config blob that does not hash to its digest", map[string]string{"/v2/r/manifests/dev": image}, map[string]string{"/v2/r/blobs/" + cfgDigest: configWithLabel("other")}, "not the digest the manifest names"},
 		{"a missing config blob", map[string]string{"/v2/r/manifests/dev": image}, nil, "blobs"},
 	}
