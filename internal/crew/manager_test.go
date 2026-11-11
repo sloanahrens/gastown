@@ -414,14 +414,14 @@ func TestManagerAddSyncsRemotesFromRig(t *testing.T) {
 		t.Fatalf("Add failed: %v", err)
 	}
 
-	// Verify crew clone's origin was updated to match mayor/rig's origin (the fork)
+	// Verify crew clone's origin was updated to match the rig's .repo.git origin (the fork)
 	crewGit := f.Open(worker.ClonePath)
 	originURL, err := crewGit.RemoteURL("origin")
 	if err != nil {
 		t.Fatalf("failed to get crew origin URL: %v", err)
 	}
 	if originURL != forkRepoPath {
-		t.Errorf("crew origin = %q, want %q (should match mayor/rig)", originURL, forkRepoPath)
+		t.Errorf("crew origin = %q, want %q (should match the rig's .repo.git)", originURL, forkRepoPath)
 	}
 
 	// Verify upstream remote was added
@@ -990,7 +990,7 @@ func TestManagerAddClearsStalePushURLOnSync(t *testing.T) {
 }
 
 // fakeManager returns r's crew manager with its git answered by gitfake
-// world f: the clones, the crew checkouts and mayor/rig all live there.
+// world f: the clones, the rig's .repo.git and the crew checkouts all live there.
 func fakeManager(t *testing.T, f *gitfake.Fake, r *rig.Rig) *Manager {
 	t.Helper()
 	open := func(dir string) crewRepo {

@@ -2109,20 +2109,15 @@ func TestAddWithOptions_RollbackReleasesName(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 
-	// Create mayor/rig directory structure (acts as repo base)
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	if err := os.MkdirAll(mayorRig, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// A repo with one commit whose origin is a path with no repository, so
-	// the fetch fails and origin/main is never created. This causes
-	// AddWithOptions to fail at ref validation, testing rollback.
+	// The rig's shared bare repo is the repo base. It has one commit whose
+	// origin is a path with no repository, so the fetch fails and origin/main
+	// is never created. This causes AddWithOptions to fail at ref validation,
+	// testing rollback.
 	w := newWorld()
-	w.InitRepo(t, mayorRig)
-	w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
-	w.checkout(t, mayorRig)
-	w.AddRemote(t, mayorRig, "origin", "/nonexistent/repo")
+	bare := constants.RigBareRepoPath(root)
+	w.InitBare(t, bare)
+	w.Commit(t, bare, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.AddRemote(t, bare, "origin", "/nonexistent/repo")
 
 	r := &rig.Rig{
 		Name: "rig",

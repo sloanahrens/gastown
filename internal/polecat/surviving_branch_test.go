@@ -87,6 +87,40 @@ func TestLegacyCloneWithoutBareRepoIsUnknownForEachReader(t *testing.T) {
 	}
 }
 
+// A rig with neither a shared .repo.git nor a mayor/rig clone has no git state
+// at all, so every survival reader answers ErrNoRigRepo: there is no polecat
+// branch to judge, and the caller may treat the rig as having nothing to
+// protect.
+func TestRigWithNoGitStateIsErrNoRigRepoForEachReader(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	gits := newWorld().opener()
+	for _, tc := range []struct {
+		name string
+		read func() error
+	}{
+		{name: "origin polecat branches", read: func() error {
+			_, err := listOriginPolecatBranches(gits, root)
+			return err
+		}},
+		{name: "branch on origin", read: func() error {
+			_, err := branchOnOrigin(gits, root, "polecat/agate/gt-a+mu1")
+			return err
+		}},
+		{name: "work survival", read: func() error {
+			_, err := newWorkSurvival(gits, root, time.Second)
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if err := tc.read(); !errors.Is(err, ErrNoRigRepo) {
+				t.Fatalf("err = %v, want ErrNoRigRepo for a rig with no git state", err)
+			}
+		})
+	}
+}
+
 func TestMatchSurvivingBranches(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

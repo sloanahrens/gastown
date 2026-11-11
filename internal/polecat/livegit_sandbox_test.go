@@ -311,6 +311,50 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 	})
 }
 
+// A gone sandbox seat's recorded branch is read from the rig's shared .repo.git,
+// the second copy of the seat's work. A rig with no .repo.git, whether it has
+// neither repo or only a legacy mayor/rig clone, cannot prove that copy is
+// clean, so the seat is unknown, never clean, through both readers that open
+// the shared repository: a present host worktree and a gone one (gt-3lvcjz.4).
+func TestLiveGitRigWithNoSharedRepoIsUnknownForASandboxSeat(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		legacyClone bool
+	}{
+		{name: "a rig with neither repo is unknown", legacyClone: false},
+		{name: "a rig with only a mayor/rig clone is unknown", legacyClone: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, hostDir, branch := sandboxHostRepo(t)
+			rigRoot := t.TempDir()
+			if tc.legacyClone {
+				if err := os.MkdirAll(filepath.Join(rigRoot, "mayor", "rig"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			goneDir := filepath.Join(rigRoot, "polecats", "toast", "gastown")
+			for _, seat := range []struct {
+				name string
+				path string
+			}{
+				{name: "host worktree present", path: hostDir},
+				{name: "host worktree gone", path: goneDir},
+			} {
+				t.Run(seat.name, func(t *testing.T) {
+					t.Parallel()
+					st := judgeGoneIn(w, seat.path, rigRoot, branch)
+					want := "no .repo.git under " + rigRoot
+					if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, want) {
+						t.Errorf("state = %+v, want unknown naming %q", st, want)
+					}
+				})
+			}
+		})
+	}
+}
+
 const sharedRepoBranch = "polecat/toast/gt-a+x"
 
 // sharedRepoRig builds a rig whose shared .repo.git holds the

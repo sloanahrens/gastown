@@ -67,15 +67,15 @@ func TestRigRepoReadsOnlyTheBareRepo(t *testing.T) {
 	}
 }
 
-// writeSyntheticKey puts a synthetic API key where the client's key search
-// finds one under the hermetic harness's GT_TOWN_ROOT, so Open builds its
-// client without reading a key from the host.
-func writeSyntheticKey(t *testing.T) {
+// writeSyntheticKey points GT_TOWN_ROOT at a fresh town under t and puts a
+// synthetic API key in its settings, where the client's key search finds one,
+// so Open builds its client without reading a key from the host or from a
+// town the parallel tests share. It sets the environment, so the calling test
+// must not run in parallel.
+func writeSyntheticKey(t *testing.T) string {
 	t.Helper()
-	town := os.Getenv("GT_TOWN_ROOT")
-	if town == "" {
-		t.Fatal("the hermetic harness sets GT_TOWN_ROOT to its sandbox town")
-	}
+	town := t.TempDir()
+	t.Setenv("GT_TOWN_ROOT", town)
 	path := filepath.Join(town, "settings", "daemon.env")
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
@@ -83,15 +83,14 @@ func writeSyntheticKey(t *testing.T) {
 	if err := os.WriteFile(path, []byte(jev.EnvKey+"=synthetic-test-key\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return town
 }
 
 // Open wires the rig's git base too: a town whose rig has its beads and a
 // mayor/rig clone but no .repo.git is refused with an error naming the bare
 // path, not opened over the clone.
 func TestOpenRefusesARigWithoutBareRepo(t *testing.T) {
-	t.Parallel()
-	writeSyntheticKey(t)
-	town := t.TempDir()
+	town := writeSyntheticKey(t)
 	rigDir := filepath.Join(town, RigName)
 	for _, dir := range []string{
 		filepath.Join(rigDir, ".beads"),
