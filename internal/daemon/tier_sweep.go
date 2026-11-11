@@ -2546,6 +2546,21 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		if started.stop != nil {
 			stop = started.stop
 		}
+		started = d.tierSweepWaitForActiveJob(ctx, st, spec, launch, started)
+		// A running Job of the rig that outlived the stage budget is not this
+		// run's to take down, and nothing was applied: the stage defers with no
+		// verdict, so the cycle is retried rather than recorded RED (gt-pihhr4).
+		// A cycle canceled while it waited defers the same way. A launch that
+		// went ahead is not judged here, so its record is still written below.
+		var busy *sweeprunner.ActiveJob
+		if errors.As(started.err, &busy) {
+			if ctx.Err() != nil {
+				return tierSweepStageResult{exitCode: -1, err: ctx.Err()}
+			}
+			d.logger.Printf("tier_sweep: %s: sweep job %s is still running after %s; deferring the cycle, the next run is due %s (no verdict recorded)",
+				spec.Rig, busy.Name, st.budget, d.clk().Now().Add(tierSweepInterval(d.patrolConfig)).Format(time.RFC3339))
+			return tierSweepStageResult{exitCode: -1, err: busy}
+		}
 		// A guard whose read failed answered nothing: no decline stands, no
 		// verdict is taken, and nothing was applied, so there is nothing to
 		// take down. The cycle defers, one line an hour while the reason
@@ -2671,6 +2686,47 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 			// did not run, and the cycle defers it. Its teardown is not run.
 			return tierSweepStageResult{exitCode: -1, err: ctx.Err()}
 		case <-tick.C:
+		}
+	}
+}
+
+// tierSweepWaitForActiveJob holds a launch that a running sweep Job of the rig
+// refused, for as long as the stage budget allows. The Job reads the repo claim
+// this run would rewrite, so nothing is applied while it runs; the launch is
+// asked again on each poll tick, which applies the run once the Job has ended.
+// A launch that is refused for another reason, or that the budget or the
+// cycle's context ends, is returned as it stands for the caller to judge.
+func (d *Daemon) tierSweepWaitForActiveJob(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec, launch func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch, started tierSweepLaunch) tierSweepLaunch {
+	var busy *sweeprunner.ActiveJob
+	if !errors.As(started.err, &busy) {
+		return started
+	}
+	newBudget := d.tierSweepSeams.budgetTimer
+	if newBudget == nil {
+		newBudget = func(wait time.Duration) (<-chan time.Time, func()) {
+			timer := time.NewTimer(wait)
+			return timer.C, func() { timer.Stop() }
+		}
+	}
+	budget, stopBudget := newBudget(st.budget)
+	defer stopBudget()
+	interval := d.tierSweepSeams.pollInterval
+	if interval == 0 {
+		interval = tierSweepRunnerPollInterval
+	}
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-budget:
+			return started
+		case <-ctx.Done():
+			return started
+		case <-tick.C:
+		}
+		started = launch(ctx, st, spec)
+		if !errors.As(started.err, &busy) {
+			return started
 		}
 	}
 }
@@ -2862,7 +2918,6 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	if err != nil {
 		return tierSweepLaunch{exitCode: -1, err: err}
 	}
-	d.logger.Printf("tier_sweep: %s: launching %s on %s (run %s)", spec.Rig, strings.Join(st.tiers, ", "), cfg.Backend, spec.RunID)
 	plan, err := backend.Render(spec)
 	if err != nil {
 		return tierSweepLaunch{exitCode: -1, err: err}
@@ -2878,6 +2933,14 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 	if !errors.As(guardErr, &unreadable) {
 		d.tierSweepGuardReads.clear(spec.Rig)
 		d.tierSweepGuardLog.Clear()
+	}
+	var active *sweeprunner.ActiveJob
+	if errors.As(guardErr, &active) && active.Name == sweeprunner.JobName(spec) {
+		// The running Job is this run: same sha and same tiers, so its repo
+		// claim is the one this run would fill and its output claim is the one
+		// this run reads. Nothing is applied; the caller waits on it.
+		d.logger.Printf("tier_sweep: %s: adopting run %s: sweep job %s is already running it", spec.Rig, spec.RunID, active.Name)
+		return launch
 	}
 	if guardErr != nil {
 		launch.output, launch.exitCode, launch.err = guardOut, code, guardErr
@@ -2903,6 +2966,10 @@ func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, s
 			start = append(start, step)
 		}
 	}
+	// Logged here, once the guards and the preflight have let the launch
+	// through: a launch the claim guard holds is retried each poll, and a line
+	// per retry would read as a run started each time.
+	d.logger.Printf("tier_sweep: %s: launching %s on %s (run %s)", spec.Rig, strings.Join(st.tiers, ", "), cfg.Backend, spec.RunID)
 	out, code := tierSweepRunSteps(ctx, d, start)
 	launch.output, launch.exitCode = out, code
 	if code != 0 {

@@ -2,6 +2,7 @@ package sweeprunner
 
 import (
 	"encoding/json"
+	"errors"
 	"github.com/steveyegge/gastown/internal/buildstamp"
 	"github.com/steveyegge/gastown/internal/templates"
 	"os"
@@ -514,6 +515,37 @@ func TestSyncPodHasNoServiceAccountToken(t *testing.T) {
 	}
 	if *pod.Spec.AutomountServiceAccountToken {
 		t.Errorf("the sync pod's automountServiceAccountToken is true; it needs no API access")
+	}
+}
+
+// TestSyncGuardRefusalNamesTheRunningJob: a Job of the rig that has not ended is
+// refused as an *ActiveJob that carries its name, so the daemon can tell this
+// run's own Job, which it adopts, from another run's, which it waits on. A
+// listing with no such Job passes.
+func TestSyncGuardRefusalNamesTheRunningJob(t *testing.T) {
+	t.Parallel()
+	spec := goldenSpec()
+	plan, err := Kubernetes{}.Render(spec)
+	if err != nil {
+		t.Fatalf("rendering the golden spec: %v", err)
+	}
+	guard := plan.Guards[0]
+	const running = "gt-sweep-gastown-deadbeef-otherrun"
+
+	err = guard.Refuse([]byte(running + " \n" + "gt-sweep-gastown-cafe0000-done Complete\n"))
+	var active *ActiveJob
+	if !errors.As(err, &active) {
+		t.Fatalf("Refuse = %v, want an *ActiveJob", err)
+	}
+	if active.Name != running {
+		t.Errorf("ActiveJob names %q, want the running Job %q", active.Name, running)
+	}
+	if want := "sweep job " + running + " has not ended"; !strings.HasPrefix(err.Error(), want) {
+		t.Errorf("Error() = %q, want it to keep the refusal sentence %q", err.Error(), want)
+	}
+
+	if err := guard.Refuse([]byte("gt-sweep-gastown-cafe0000-done Complete\n")); err != nil {
+		t.Errorf("Refuse with only an ended Job = %v, want it to pass", err)
 	}
 }
 
