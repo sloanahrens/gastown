@@ -1745,8 +1745,12 @@ func (d *Daemon) Run() (err error) {
 		defer func() { _ = os.Remove(d.config.PidFile) }() // best-effort cleanup
 	}
 
-	// Update state
-	state := startState(os.Getpid(), time.Now(), d.resolveOwnCommit())
+	// Update state. The start line names the commit this process runs in: a pod
+	// image roll writes no upgrade-restart line, so the deploy tracker reads
+	// this one to ship the landings the new build carries (gt-6qc3nw.17).
+	own := d.resolveOwnCommit()
+	d.logger.Printf("daemon-start: running %s", own)
+	state := startState(os.Getpid(), time.Now(), own)
 	if err := d.saveState(state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}

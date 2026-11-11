@@ -1520,7 +1520,11 @@ var (
 	tailDeployDispatchRe = regexp.MustCompile(`spec_dispatch: dispatched: (\S+): slung`)
 	tailDeployMergeRe    = regexp.MustCompile(`\[land\] (\S+): merged `)
 	tailDeployLandedRe   = regexp.MustCompile(`\[land\] (\S+): (?:already )?landed (?:as )?([0-9a-f]{7,40})`)
-	tailDeployRestartRe  = regexp.MustCompile(`upgrade-restart: running (\S+) covers marker`)
+	// A restart names the commit it installed in one of two lines: the upgrade
+	// restart's "covers marker" line, or the daemon's start line. Every start
+	// writes the start line, so a pod image roll, which writes no restart line,
+	// still ships the landings its build carries (gt-6qc3nw.17).
+	tailDeployRestartRe = regexp.MustCompile(`(?:upgrade-restart: running (\S+) covers marker|daemon-start: running (\S+))`)
 )
 
 // tailAncestry answers whether commit is an ancestor of of. ok is false when
@@ -1717,7 +1721,12 @@ func (t *tailDeploys) feed(ln tailLine) (time.Time, string, bool) {
 			r.merged = ln.At
 		}
 	} else if m := tailDeployRestartRe.FindStringSubmatch(ln.Text); m != nil {
-		return ln.At, m[1], true
+		// Only one of the two groups matched: the wording names the commit.
+		installed := m[1]
+		if installed == "" {
+			installed = m[2]
+		}
+		return ln.At, installed, true
 	}
 	return time.Time{}, "", false
 }

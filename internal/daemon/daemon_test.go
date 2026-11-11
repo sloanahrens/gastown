@@ -876,6 +876,13 @@ func startParkedRun(t *testing.T, env map[string]string) (*Config, func() error)
 // the real supervisors from a test.
 func startParkedRunIn(t *testing.T, town string, env map[string]string, probe OwnerProbe) (*Config, func() error) {
 	t.Helper()
+	return startParkedRunWith(t, town, env, probe, func(*Daemon) {})
+}
+
+// startParkedRunWith is startParkedRunIn with configure applied to the daemon
+// before Run starts, for a test that needs its logger, build commit or git seam.
+func startParkedRunWith(t *testing.T, town string, env map[string]string, probe OwnerProbe, configure func(*Daemon)) (*Config, func() error) {
+	t.Helper()
 	if probe == nil {
 		t.Fatal("startParkedRunIn needs a probe: a nil probe reads the real supervisors")
 	}
@@ -891,6 +898,7 @@ func startParkedRunIn(t *testing.T, town string, env map[string]string, probe Ow
 		clock:      clockwork.NewFakeClockAt(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)),
 		ownerProbe: probe,
 	}
+	configure(d)
 	// The rest of the startup does real host work: the heartbeat dispatches
 	// and restarts sessions, the sweep touches the tmux socket directory, and
 	// the probes reach the network.
@@ -935,6 +943,32 @@ func startParkedRunIn(t *testing.T, town string, env map[string]string, probe Ow
 	}
 	t.Cleanup(func() { _ = finish() })
 	return cfg, finish
+}
+
+// TestDaemonStartLogsItsCommit: each start names the commit it runs in one
+// "daemon-start: running <commit>" line, the line the deploy tracker reads as
+// the install a pod image roll made (gt-6qc3nw.17).
+func TestDaemonStartLogsItsCommit(t *testing.T) {
+	t.Parallel()
+	var logs lockedBuffer
+	_, finish := startParkedRunWith(t, t.TempDir(), nil, unreachableProbe(t), func(d *Daemon) {
+		d.logger = log.New(&logs, "", 0)
+		withOwnCommit(d, "3f2a9c1d")
+		useGitfake(t, d)
+	})
+	if err := finish(); err != nil {
+		t.Fatalf("Run after the daemon context ended = %v, want a clean shutdown", err)
+	}
+
+	var starts []string
+	for _, ln := range strings.Split(logs.String(), "\n") {
+		if strings.HasPrefix(ln, "daemon-start:") {
+			starts = append(starts, ln)
+		}
+	}
+	if want := []string{"daemon-start: running 3f2a9c1d"}; !slices.Equal(starts, want) {
+		t.Fatalf("start lines = %q, want %q", starts, want)
+	}
 }
 
 // TestRunWritesLaunchdOwner pins the owner at the call site that gives it
