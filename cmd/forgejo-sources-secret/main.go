@@ -1,7 +1,10 @@
 // Command forgejo-sources-secret stores the SOURCES_TOKEN Actions secret on
 // sloan/gastown without any person seeing the token. It mints a read:repository
 // token for bot-viewer, checks that the token reads every repository the image
-// build fetches, and stores it only when all of them answer 200. With --check it
+// build fetches, and stores it only when all of them answer 200. The site-admin
+// token comes from the environment the auth broker sets ($GT_AUTH_FORGEJO_TOKEN,
+// or $FORGEJO_ADMIN_TOKEN for a stand-in) or, when the environment holds neither,
+// from the FORGEJO_ADMIN_TOKEN= line of --admin-token-file. With --check it
 // mints, revokes and stores nothing: it reads whether SOURCES_TOKEN is listed,
 // whether bot-viewer is a collaborator on each read repository, and the names of its
 // sources-token- tokens; checkState says what a check reads, prints and judges.
@@ -71,11 +74,18 @@ const revokeTimeout = 30 * time.Second
 // live: the token's name and the account, never its value. It is printed last.
 const stillLiveLine = "token still live: revoke token %s for %s by hand"
 
+// brokerTokenEnv is the variable the auth broker's run act sets with the
+// site-admin token. It names the first source ResolveAdminToken reads, and the one
+// a no-argument run under the broker takes its token from.
+const brokerTokenEnv = "GT_AUTH_FORGEJO_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
+
 // env is what the command reads and writes through: the clock the token's name is
-// taken from, the file the admin token is read from, and the HTTP client Forgejo is
-// reached through (nil means the client's default, with a timeout).
+// taken from, the environment and the file the admin token is read from, and the
+// HTTP client Forgejo is reached through (nil means the client's default, with a
+// timeout).
 type env struct {
 	Now      func() time.Time
+	Getenv   func(string) string
 	ReadFile func(string) ([]byte, error)
 	HTTP     *http.Client
 }
@@ -90,7 +100,7 @@ type options struct {
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], env{Now: time.Now, ReadFile: os.ReadFile}, os.Stdout, os.Stderr)
+	code := run(ctx, os.Args[1:], env{Now: time.Now, Getenv: os.Getenv, ReadFile: os.ReadFile}, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
 }
@@ -106,7 +116,11 @@ func run(ctx context.Context, args []string, env env, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "forgejo-sources-secret: %v\n", err)
 		return forgejoprov.ExitUsage
 	}
-	secret, err := readAdminToken(env.ReadFile, opts.AdminTokenFile)
+	secret, err := readAdminToken(env.Getenv, env.ReadFile, opts.AdminTokenFile)
+	if errors.Is(err, errNoTokenSource) {
+		fmt.Fprintf(stderr, "forgejo-sources-secret: %v\n", err)
+		return forgejoprov.ExitUsage
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "forgejo-sources-secret: %v\n", err)
 		return forgejoprov.ExitFailure
@@ -193,7 +207,7 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	fs := flag.NewFlagSet("forgejo-sources-secret", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&opts.APIURL, "api-url", forgejoprov.DefaultAPIURL, "Forgejo API root")
-	fs.StringVar(&opts.AdminTokenFile, "admin-token-file", "", "file holding FORGEJO_ADMIN_TOKEN=... (the broker hands it over)")
+	fs.StringVar(&opts.AdminTokenFile, "admin-token-file", "", "file holding FORGEJO_ADMIN_TOKEN=...; optional when $"+brokerTokenEnv+" is set")
 	fs.BoolVar(&opts.DryRun, "dry-run", false, "print the plan; mint and store nothing")
 	fs.BoolVar(&opts.Check, "check", false, "read the secret, the collaborators and the tokens; mint, revoke and store nothing")
 	if err := fs.Parse(args); err != nil {
@@ -202,27 +216,30 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	if fs.NArg() > 0 {
 		return options{}, fmt.Errorf("unexpected argument %q", fs.Arg(0))
 	}
-	if opts.AdminTokenFile == "" {
-		return options{}, errors.New("--admin-token-file is required")
-	}
 	if opts.Check && opts.DryRun {
 		return options{}, errors.New("--check and --dry-run cannot be combined")
 	}
 	return opts, nil
 }
 
-// noEnv is the environment the admin token is not read from: the command takes the
-// token from its --admin-token-file alone.
-func noEnv(string) string { return "" }
+// errNoTokenSource is the refusal when the command line names no token file and the
+// environment holds no token either: no source names a token, so the command line is
+// incomplete and the run exits with the usage code.
+var errNoTokenSource = errors.New("no admin token: set $" + brokerTokenEnv + " (the auth broker sets it), or pass --admin-token-file <file>")
 
-// readAdminToken reads the site-admin token from path, the way forgejo-provision
-// does, with the environment left out.
-func readAdminToken(readFile func(string) ([]byte, error), path string) (forgejoprov.Secret, error) {
-	secret, err := forgejoprov.ResolveAdminToken(noEnv, readFile, path)
-	if errors.Is(err, forgejoprov.ErrNoAdminToken) {
-		return forgejoprov.Secret{}, fmt.Errorf("no admin token in %s", path)
+// readAdminToken reads the site-admin token from the environment, then from path, in
+// the order forgejoprov.ResolveAdminToken uses. A run that names no file and finds no
+// environment token is refused as a command line, because no source names a token at
+// all; a named file that holds no token is a run failure.
+func readAdminToken(getenv func(string) string, readFile func(string) ([]byte, error), path string) (forgejoprov.Secret, error) {
+	secret, err := forgejoprov.ResolveAdminToken(getenv, readFile, path)
+	if !errors.Is(err, forgejoprov.ErrNoAdminToken) {
+		return secret, err
 	}
-	return secret, err
+	if path == "" {
+		return forgejoprov.Secret{}, errNoTokenSource
+	}
+	return forgejoprov.Secret{}, fmt.Errorf("no admin token in %s", path)
 }
 
 // tokenName is the name of the token a run mints: the UTC time it was minted at.
