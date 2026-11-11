@@ -22,9 +22,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
@@ -2149,11 +2149,6 @@ type cacheTrimCeilingListing struct {
 	room    int64
 }
 
-// cacheTrimCeilingBuilds counts runs of the ceiling builder. The memo below
-// runs it once per test binary, so the count stays at one however many tests
-// ask for the listing.
-var cacheTrimCeilingBuilds atomic.Int32
-
 // cacheTrimCeilingOnce memoizes the builder. The listing is a string no caller
 // mutates, and the room is a number, so the tests can share the one pair
 // (gt-t89628).
@@ -2165,7 +2160,6 @@ var cacheTrimCeilingOnce = sync.OnceValues(buildCacheTrimCeilingListing)
 // so a df -Pk reply can name exactly the room the writer needs and the fit,
 // equal and no-fit cases are each one KiB apart.
 func buildCacheTrimCeilingListing() (cacheTrimCeilingListing, error) {
-	cacheTrimCeilingBuilds.Add(1)
 	return findCacheTrimCeilingPad(cacheTrimCeilingAtPad)
 }
 
@@ -2238,18 +2232,20 @@ func cacheTrimListingAcrossTheCeilingOnAKiBGrid(t *testing.T) (string, int64) {
 	return c.listing, c.room
 }
 
-// TestCeilingListingIsBuiltOnce: the callers share one build of the ceiling
-// listing. Two calls return the same listing and room, and the builder ran once
-// (gt-t89628).
-func TestCeilingListingIsBuiltOnce(t *testing.T) {
+// TestCacheTrimCeilingListingIsBuiltOnce: the callers share one build of the
+// ceiling listing. Two calls return the same listing and room, and both listings
+// are the one allocation: a second build would hold its own bytes at another
+// address, so the shared backing array is the proof of a single build
+// (gt-t89628). The name starts with TestCacheTrim, so -run TestCacheTrim runs it.
+func TestCacheTrimCeilingListingIsBuiltOnce(t *testing.T) {
 	t.Parallel()
 	listing, room := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
 	again, againRoom := cacheTrimListingAcrossTheCeilingOnAKiBGrid(t)
 	if again != listing || againRoom != room {
 		t.Errorf("the second call returned room %d, the first room %d; the listings equal: %t", againRoom, room, again == listing)
 	}
-	if n := cacheTrimCeilingBuilds.Load(); n != 1 {
-		t.Errorf("the ceiling listing was built %d times, want 1", n)
+	if unsafe.StringData(again) != unsafe.StringData(listing) {
+		t.Errorf("the second call's listing is a separate build of %d bytes, want the first call's", len(again))
 	}
 }
 
