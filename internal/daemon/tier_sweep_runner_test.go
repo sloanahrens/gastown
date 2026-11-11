@@ -17,6 +17,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
@@ -927,6 +928,10 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 	// at its first look; the copy path reads its result without waiting on it.
 	// A test that polls through a failed read sets runnerBudgetNeverEnds.
 	d.tierSweepSeams.budgetTimer = runnerBudgetSpent
+	// A run deferred behind a foreign Job past its budget escalates (gt-pihhr4);
+	// the fake notifier takes that delivery, so no runner test reaches the real
+	// one and waits on it.
+	d.notifier = notifyfake.New()
 	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Second}
 	spec, ok, err := d.tierSweepRunnerSpec(st)
 	if err != nil || !ok {
