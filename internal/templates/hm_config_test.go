@@ -157,7 +157,10 @@ func TestHMContainerConfigRewritesServiceURLs(t *testing.T) {
 		{
 			name:   "an absent embed block gains hm's default, rewritten",
 			config: "{" + db + "}",
-			want:   map[string]any{"embed.url": "http://host.docker.internal:11434"},
+			want: map[string]any{
+				"embed.provider": "ollama",
+				"embed.url":      "http://host.docker.internal:11434",
+			},
 		},
 		{
 			// hm reads an absent rerank block as jev+llamacpp, whose fallback is the
