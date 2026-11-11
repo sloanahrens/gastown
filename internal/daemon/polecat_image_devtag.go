@@ -49,6 +49,9 @@ type polecatDevTagSeams struct {
 	// viewerCredential is the login the source is read with. Nil reads the
 	// viewer's token file from the token directory.
 	viewerCredential func() (registry.Credential, error)
+	// tokenDir is the directory the viewer's token file lives in. Nil reads the
+	// landing worker's ForgejoTokenDir.
+	tokenDir func() (string, error)
 }
 
 // publishPolecatDevTag is the start-time step (gt-llx27r). When image_registry is
@@ -305,7 +308,7 @@ func (d *Daemon) polecatDevTagViewerCredential() (registry.Credential, error) {
 	if d.polecatDevTagSeams.viewerCredential != nil {
 		return d.polecatDevTagSeams.viewerCredential()
 	}
-	tokenDir, err := landingWorkerConfig(d.patrolConfig).ForgejoTokenDir()
+	tokenDir, err := d.polecatDevTagTokenDir()
 	if err != nil {
 		return registry.Credential{}, err
 	}
@@ -314,6 +317,16 @@ func (d *Daemon) polecatDevTagViewerCredential() (registry.Credential, error) {
 		return registry.Credential{}, err
 	}
 	return registry.Credential{User: user, Token: token}, nil
+}
+
+// polecatDevTagTokenDir is the directory the viewer's token file lives in: the
+// landing worker's, whose config names it or defaults it, unless a test set the
+// seam.
+func (d *Daemon) polecatDevTagTokenDir() (string, error) {
+	if d.polecatDevTagSeams.tokenDir != nil {
+		return d.polecatDevTagSeams.tokenDir()
+	}
+	return landingWorkerConfig(d.patrolConfig).ForgejoTokenDir()
 }
 
 // devTagFailure is the escalation for a dev tag the step did not move. It names

@@ -327,6 +327,66 @@ func TestPolecatImageDevTagEscalatesUnreadableViewerLogin(t *testing.T) {
 	}
 }
 
+// TestPolecatImageDevTagEscalatesUnresolvableTokenDir: the directory the viewer's
+// token file lives in cannot be named, so the login cannot be read. The step files
+// one escalation naming the credential read and asks the CI registry nothing.
+func TestPolecatImageDevTagEscalatesUnresolvableTokenDir(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.want = &devTagViewer
+	ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.addImage("dev", devTagOldCommit)
+	before := sandbox.tagBytes("dev")
+	d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+	d.polecatDevTagSeams.viewerCredential = nil
+	d.polecatDevTagSeams.tokenDir = func() (string, error) {
+		return "", errors.New("neither XDG_CONFIG_HOME nor a home directory names a token directory")
+	}
+
+	d.publishPolecatDevTag()
+
+	if gets, _ := ci.requests(); len(gets) != 0 {
+		t.Fatalf("CI GETs = %v, want none without a token directory", gets)
+	}
+	if !bytes.Equal(sandbox.tagBytes("dev"), before) {
+		t.Fatalf("sandbox dev tag moved although the token directory could not be named")
+	}
+	got := n.got()
+	if len(got) != 1 || !strings.Contains(got[0].Reason, "cannot read the viewer credential the source is read with") || !strings.Contains(got[0].Reason, "names a token directory") {
+		t.Fatalf("escalations = %+v, want one naming the viewer credential read and the token directory failure", got)
+	}
+}
+
+// TestPolecatImageDevTagEscalatesMissingViewerTokenFile: the token directory names
+// a file that is not there, so the login cannot be read. The step files one
+// escalation naming the credential read and asks the CI registry nothing.
+func TestPolecatImageDevTagEscalatesMissingViewerTokenFile(t *testing.T) {
+	t.Parallel()
+	ci := newDevTagRegistryAt(devTagCIRepo)
+	ci.want = &devTagViewer
+	ci.addImage(devTagRevision, devTagRunningCommit)
+	sandbox := newDevTagRegistry()
+	sandbox.addImage("dev", devTagOldCommit)
+	before := sandbox.tagBytes("dev")
+	d, n, _ := devTagSplitDaemon(t, ci, sandbox)
+	d.polecatDevTagSeams.viewerCredential = nil
+	d.polecatDevTagSeams.tokenDir = func() (string, error) { return t.TempDir(), nil }
+
+	d.publishPolecatDevTag()
+
+	if gets, _ := ci.requests(); len(gets) != 0 {
+		t.Fatalf("CI GETs = %v, want none without the viewer token file", gets)
+	}
+	if !bytes.Equal(sandbox.tagBytes("dev"), before) {
+		t.Fatalf("sandbox dev tag moved although the viewer token file was missing")
+	}
+	got := n.got()
+	if len(got) != 1 || !strings.Contains(got[0].Reason, "cannot read the viewer credential the source is read with") {
+		t.Fatalf("escalations = %+v, want one naming the viewer credential read", got)
+	}
+}
+
 // writeDevTagValues writes the values file the fallback reads into the town's
 // gastown directory: one that pairs values, one that does not parse, or none.
 func writeDevTagValues(t *testing.T, d *Daemon, values string, garbage bool, digest string) {
