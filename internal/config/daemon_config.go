@@ -809,8 +809,16 @@ type JsonlGitBackupConfig struct {
 
 	// SpikeThreshold is the maximum allowed percentage change in record counts
 	// between consecutive exports. If the delta exceeds this threshold (in either
-	// direction), the export is halted and escalated. Default: 0.20 (20%).
+	// direction), the export is halted and escalated. Default: 0.50 (50%).
 	SpikeThreshold *float64 `json:"spike_threshold,omitempty"`
+
+	// SpikeFloor is the record count a database's baseline must reach before a
+	// percentage change is judged. A database with fewer records swings past any
+	// ratio on a handful of them — a new rig's first few beads were read as a
+	// 104.8% jump — so below the floor the change is exported without a spike
+	// check. 0 judges every change, the behaviour before the floor existed;
+	// unset or negative uses the default (500 records).
+	SpikeFloor *int `json:"spike_floor,omitempty"`
 }
 
 // WispReaperConfig holds configuration for the wisp_reaper patrol.

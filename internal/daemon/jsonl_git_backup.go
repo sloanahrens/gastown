@@ -63,6 +63,13 @@ const (
 
 	defaultSpikeThreshold = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
 
+	// defaultSpikeFloor is the baseline size below which a percentage change is
+	// not judged. A database under it swings past any ratio on a few records —
+	// a new rig's first wisps (21 to 43) read as a 104.8% jump — and halting on
+	// that stopped every rig's backup push. A zero baseline is exempt: it has no
+	// ratio, and its growth is what the small-change floor guards (gt-ttqq8).
+	defaultSpikeFloor = 500
+
 	// defaultEscalationTimeout is the per-attempt timeout for the gt escalate
 	// child process.  Kept at 60 s so that, even under slot-starvation or
 	// Dolt contention (the conditions that produced the gt-tlwv drops on
@@ -451,7 +458,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// Phase D: Spike detection — compare current counts against the rolling
 	// baseline derived from recent backup commit history.
 	threshold := spikeThreshold(config)
-	spikes, baselineErr := d.verifyExportCounts(gitRepo, databases, counts, threshold)
+	spikes, baselineErr := d.verifyExportCounts(gitRepo, databases, counts, threshold, spikeFloor(config))
 	if baselineErr != nil {
 		// History exists but yields no baseline. Fail loud (gt-tj-he):
 		// committing would anchor an unchecked baseline, and silently
@@ -470,19 +477,39 @@ func (d *Daemon) syncJsonlGitBackup() {
 		cycle.failStep("push", baselineErr.Error())
 		return // Do NOT commit — no baseline to verify against.
 	}
+	var spiking []string
 	if len(spikes) > 0 {
 		report := formatSpikeReport(spikes)
-		d.logger.Printf("jsonl_git_backup: HALTING — spike detected:\n%s", report)
-		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report+"\n\n"+d.spikeAcceptHint(gitRepo, databases, counts))
-		cycle.failStep("push", "spike detected")
-		return // Do NOT commit — spike detected.
+		// The accept command names the whole run's counts, so build it before
+		// the spiking databases are dropped from the subject below.
+		accept := d.spikeAcceptHint(gitRepo, databases, counts)
+		for _, s := range spikes {
+			spiking = append(spiking, s.DB)
+		}
+		names := strings.Join(spiking, ", ")
+		// The spiking databases are withheld from the commit: their committed
+		// files stay the last verified copy and their counts stay out of the
+		// subject, so this run cannot advance the baseline past the halt. The
+		// other databases are within bounds, and a tiny or single database's
+		// spike must not stop every rig's backup push (gt-5tpas2).
+		for _, db := range spiking {
+			delete(counts, db)
+		}
+		halt := fmt.Sprintf("jsonl_git_backup: HALTING — spike detected in %s:\n%s", names, report)
+		d.logger.Printf("%s\n%s", halt, spikeHaltHint(accept))
+		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report+"\n\n"+accept)
+		if len(counts) == 0 {
+			cycle.failStep("push", "spike detected")
+			return // Nothing this run verified is safe to push.
+		}
+	} else {
+		d.clearAlerts("no export spike", alertKeyJSONLSpike)
 	}
-	d.clearAlerts("no export spike", alertKeyJSONLSpike)
 
 	// Commit and push if anything changed.
 	// Include failed databases in commit message so staleness is visible.
 	pushStatus := "ok"
-	if err := d.commitAndPushJsonlBackup(gitRepo, databases, counts, failed); err != nil {
+	if err := d.commitAndPushJsonlBackup(gitRepo, databases, counts, failed, spiking); err != nil {
 		d.logger.Printf("jsonl_git_backup: git operations failed: %v", err)
 		pushStatus = "failed"
 		cycle.failStep("push", err.Error())
@@ -499,7 +526,13 @@ func (d *Daemon) syncJsonlGitBackup() {
 		}
 	} else {
 		d.jsonlPushFailures = 0
-		cycle.closeStep("push")
+		if len(spiking) > 0 {
+			// The push succeeded for the databases within bounds, but the cycle
+			// is not clean: the spiking databases are missing from it.
+			cycle.failStep("push", "spike detected: "+strings.Join(spiking, ", "))
+		} else {
+			cycle.closeStep("push")
+		}
 		d.clearAlerts("backup push succeeded", alertKeyJSONLPush)
 	}
 
@@ -1283,13 +1316,17 @@ func capEventRowValues(row json.RawMessage, limit int) (json.RawMessage, error) 
 }
 
 // commitAndPushJsonlBackup stages, commits, and pushes JSONL files. The commit
-// message includes counts for successful exports AND names of failed databases,
-// so partial failures are visible in git history.
+// message includes counts for successful exports AND names of failed or
+// spike-withheld databases, so partial cycles are visible in git history.
 //
 // A tick with nothing to commit still pushes (see pushJsonlBackup), so an
 // earlier tick's commit that failed to reach origin is retried rather than
 // reported as success (gt-fxm2i).
-func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, counts map[string]int, failed []string) error {
+//
+// failed and spiked are both unstaged whole, leaving the last verified copy in
+// the repo; spiked gets its own marker because an export that succeeded is not
+// a failed one (gt-5tpas2).
+func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, counts map[string]int, failed, spiked []string) error {
 	// The local commands below share one deadline, so a single slow one can use
 	// the whole phase without the rest stacking past a tick.
 	localDeadline := time.Now().Add(d.jsonlLocalPhaseBudget())
@@ -1306,17 +1343,20 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	// A failed database never reached the spike guard, and verifyExportCounts
 	// skips a database without a count, so its freshly written issues.jsonl
 	// (the issues table is written before a supplemental table fails) is
-	// unchecked and must not be committed. Unstage the whole database: its
-	// committed files stay as the last verified copy.
-	if len(failed) > 0 {
+	// unchecked and must not be committed. A spiking database's count was
+	// checked and rejected: committing its files would advance its baseline past
+	// the halt. Unstage both kinds whole: their committed files stay as the last
+	// verified copy.
+	withheld := append(append([]string{}, failed...), spiked...)
+	if len(withheld) > 0 {
 		var paths []string
-		for _, db := range failed {
+		for _, db := range withheld {
 			paths = append(paths, db, db+".jsonl")
 		}
-		if err := d.stageGit(gitRepo, "git reset (failed databases)", remaining, func(g daemonGit) error {
+		if err := d.stageGit(gitRepo, "git reset (withheld databases)", remaining, func(g daemonGit) error {
 			return g.ResetFiles(paths...)
 		}); err != nil {
-			return fmt.Errorf("unstaging failed databases: %w", err)
+			return fmt.Errorf("unstaging withheld databases: %w", err)
 		}
 	}
 
@@ -1342,6 +1382,12 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	if len(failed) > 0 {
 		sort.Strings(failed)
 		msg += fmt.Sprintf(" [FAILED: %s]", strings.Join(failed, ", "))
+	}
+	if len(spiked) > 0 {
+		// Name the withheld database in history so a reader of the backup repo
+		// can tell the copy in it is stale, and why (gt-5tpas2).
+		sort.Strings(spiked)
+		msg += fmt.Sprintf(" [SPIKE: %s]", strings.Join(spiked, ", "))
 	}
 
 	if hasStaged {
@@ -2115,7 +2161,7 @@ func (d *Daemon) clearAlertsCtx(ctx context.Context, reason string, keys ...stri
 	return nil
 }
 
-// spikeThreshold returns the configured spike threshold or the default (20%).
+// spikeThreshold returns the configured spike threshold or the default (50%).
 func spikeThreshold(config *JsonlGitBackupConfig) float64 {
 	if config != nil && config.SpikeThreshold != nil {
 		t := *config.SpikeThreshold
@@ -2124,6 +2170,16 @@ func spikeThreshold(config *JsonlGitBackupConfig) float64 {
 		}
 	}
 	return defaultSpikeThreshold
+}
+
+// spikeFloor returns the configured record-count floor or the default (500).
+// A negative value is invalid and reads as the default; 0 is valid and judges
+// every nonzero baseline, which is the pre-floor behaviour.
+func spikeFloor(config *JsonlGitBackupConfig) int {
+	if config != nil && config.SpikeFloor != nil && *config.SpikeFloor >= 0 {
+		return *config.SpikeFloor
+	}
+	return defaultSpikeFloor
 }
 
 // isTestPollution checks if a JSONL record looks like test data that leaked into
@@ -2658,9 +2714,9 @@ func withoutStaleLevels(sb *spikeBaseline) *spikeBaseline {
 
 // parseCommitCounts extracts the "db=NNN" count pairs from a git commit's
 // subject line. Backup commits are always titled
-// "backup <timestamp> m<V>: db1=N1 db2=N2 [FAILED: ...]" (see commitAndPushJsonlBackup),
-// so the subject is the only count record surviving an unpushed or halted
-// cycle. Returns nil when no pairs are present.
+// "backup <timestamp> m<V>: db1=N1 db2=N2 [FAILED: ...] [SPIKE: ...]" (see
+// commitAndPushJsonlBackup), so the subject is the only count record surviving
+// an unpushed or halted cycle. Returns nil when no pairs are present.
 // jsonlBackupSubject is the subject a backup commit carries and the spike
 // baseline parses: "backup <ts> m<version>: <db>=<N> ...". The commit and the
 // accept hint both build it here, so neither can drift from what
@@ -2806,14 +2862,19 @@ func ensureGitIgnore(gitRepo, entry string) {
 // normal. Small absolute changes (<20 records) are always allowed to avoid
 // false alarms on small databases.
 //
+// A nonzero baseline under floor records is not judged at all: a database that
+// small moves by a large fraction on a few records, and the ratio says nothing
+// about data loss (gt-5tpas2). A zero baseline is still judged against the
+// small-change floor, since it has no ratio to check and its growth is the bulk
+// load an operator confirms (gt-ttqq8).
+//
 // A database absent from the baseline window is a first export and is skipped;
-// there is no level to compare against. A baseline of zero is checked against
-// the small-change floor, since a ratio against zero measures nothing
-// (gt-ttqq8). A database whose newest level was measured from another store —
-// the tracker export rather than Dolt, or back — is rebaselined the same way a
-// changed count metric is: the two count different tables, so the level this
-// run commits is the first of the new kind and no spike is possible.
-func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts map[string]int, threshold float64) ([]spikeInfo, error) {
+// there is no level to compare against. A database whose newest level was
+// measured from another store — the tracker export rather than Dolt, or back —
+// is rebaselined the same way a changed count metric is: the two count
+// different tables, so the level this run commits is the first of the new kind
+// and no spike is possible.
+func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts map[string]int, threshold float64, floor int) ([]spikeInfo, error) {
 	const minAbsoluteDelta = 20 // ignore changes smaller than this many records
 
 	var spikes []spikeInfo
@@ -2900,6 +2961,16 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 			continue
 		}
 		compared = append(compared, alertKeyJSONLStoreFlip+db)
+
+		// A ratio against a tiny baseline is noise (gt-5tpas2): a new rig's
+		// first 21 wisps growing to 43 read as a 104.8% jump. Only a baseline
+		// of at least floor records is judged. A zero baseline is exempt — it
+		// has no ratio, and the minAbsoluteDelta guard below is what catches a
+		// bulk load into an empty database (gt-ttqq8).
+		if prevCount > 0 && prevCount < floor {
+			continue
+		}
+
 		absDelta := currentCount - prevCount
 		if absDelta < 0 {
 			absDelta = -absDelta
@@ -2993,6 +3064,17 @@ func (d *Daemon) spikeAcceptHint(gitRepo string, databases []string, counts map[
 	subject := jsonlBackupSubject(time.Now().Format("2006-01-02 15:04"), parts)
 	return fmt.Sprintf("To accept the export and resume the backup, land its counts as the new baseline:\n  git -C %q commit --allow-empty -m %q",
 		gitRepo, subject)
+}
+
+// spikeHaltHint names what clears a spike halt, for the halt log line: the next
+// count coming back within bounds, a wider guard under the patrol's own config
+// keys, or accepting this run's counts as the new baseline (accept is the
+// command spikeAcceptHint builds). A halted database commits nothing, so its
+// baseline holds the level the next run compares against.
+func spikeHaltHint(accept string) string {
+	return "Clears on the next run when the count is within bounds again, when spike_threshold or " +
+		"spike_floor (daemon.patrols.jsonl_git_backup) is widened so this change is within bounds, " +
+		"or when these counts are accepted as the new baseline:\n" + accept
 }
 
 // countFileLines counts the number of non-empty lines in a file. It reads

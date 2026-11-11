@@ -890,7 +890,7 @@ func TestVerifyExportCountsRebaselinesARigThatMovesToTheTracker(t *testing.T) {
 	commitBackup(t, d, gitRepo, "al", 100)
 
 	d.jsonlTrackerDBs = map[string]bool{"al": true}
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"al"}, map[string]int{"al": 4}, 0.20)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"al"}, map[string]int{"al": 4}, 0.20, 0)
 	if err != nil {
 		t.Fatalf("verifyExportCounts: %v", err)
 	}
@@ -908,7 +908,7 @@ func TestVerifyExportCountsRebaselinesARigThatMovesToTheTracker(t *testing.T) {
 	// A tracker-measured level and a tracker-measured count are the same
 	// measure: a drop is checked, and halts.
 	commitAll(t, d, gitRepo, seedSubjectPrefix+"al=100 [TRACKER: al]")
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"al"}, map[string]int{"al": 40}, 0.20)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"al"}, map[string]int{"al": 40}, 0.20, 0)
 	if err != nil {
 		t.Fatalf("verifyExportCounts: %v", err)
 	}
@@ -945,7 +945,7 @@ func TestVerifyExportCountsHaltsAnEmptyExportOnAStoreFlip(t *testing.T) {
 	commitBackup(t, d, gitRepo, "empty", 0)
 
 	d.jsonlTrackerDBs = map[string]bool{"al": true, "empty": true}
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"al", "empty"}, map[string]int{"al": 0, "empty": 0}, 0.20)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"al", "empty"}, map[string]int{"al": 0, "empty": 0}, 0.20, 0)
 	if err != nil {
 		t.Fatalf("verifyExportCounts: %v", err)
 	}
