@@ -334,3 +334,22 @@ func TestLockRigStopsPollingWhenItsCtxIsCancelledMidWait(t *testing.T) {
 		t.Errorf("lockRig tried %d times, want the cancel on the third try to be reached", tries)
 	}
 }
+
+// A lock that cannot be taken at all (not merely held) is an error that names
+// the rig and wraps the cause, not a wait.
+func TestLockRigReportsALockErrorNamingTheRig(t *testing.T) {
+	t.Parallel()
+	cause := errors.New("flock: permission denied")
+	try := func(string) (func(), bool, error) { return nil, false, cause }
+	unlock, err := lockRig(context.Background(), try, "unused.lock", "gastown")
+	if unlock != nil {
+		unlock()
+		t.Fatal("lockRig returned a lock after the lock call failed")
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("lockRig error = %v, want one wrapping the lock error", err)
+	}
+	if !strings.Contains(err.Error(), "gastown") {
+		t.Errorf("lockRig error %q does not name the rig", err)
+	}
+}
