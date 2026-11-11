@@ -693,6 +693,43 @@ func TestHMSyncConfigRefusesWhatThePatrolCannotActOn(t *testing.T) {
 	}
 }
 
+// TestHMSyncIntervalDuration: an empty block or one with no interval is the
+// 30m default, a set interval is that duration, and a value the patrol cannot
+// schedule is refused with its key named rather than read as the default.
+func TestHMSyncIntervalDuration(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		block *HMSyncConfig
+		want  time.Duration
+	}{
+		{"no block", nil, 30 * time.Minute},
+		{"no interval", &HMSyncConfig{}, 30 * time.Minute},
+		{"a set interval", &HMSyncConfig{Interval: "45s"}, 45 * time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.block.IntervalDuration()
+			if err != nil || got != tt.want {
+				t.Errorf("IntervalDuration = %v, %v; want %v and no error", got, err, tt.want)
+			}
+		})
+	}
+	for _, tt := range []struct{ name, interval string }{
+		{"unparseable", "every half hour"},
+		{"zero", "0s"},
+		{"negative", "-5m"},
+	} {
+		t.Run("refused: "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := (&HMSyncConfig{Interval: tt.interval}).IntervalDuration()
+			if err == nil || got != 0 || !strings.Contains(err.Error(), "patrols.hm_sync.interval") {
+				t.Errorf("IntervalDuration(%q) = %v, %v; want a refusal naming the key", tt.interval, got, err)
+			}
+		})
+	}
+}
+
 // TestDiskMaintenanceConfigRefusesWhatThePatrolCannotActOn: the design's block
 // decodes as written, and a value the patrol cannot act on is an error when the
 // document is decoded rather than a default later. A mistyped mode must not

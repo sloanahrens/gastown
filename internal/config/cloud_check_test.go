@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestCloudCheckConfigDecodesAndRefusesMistakes: the block decodes its four
@@ -43,6 +44,44 @@ func TestCloudCheckConfigDecodesAndRefusesMistakes(t *testing.T) {
 			err := json.Unmarshal([]byte(tt.body), &c)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Errorf("decode = %v, want a refusal naming %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCloudCheckIntervalDuration: an empty block or one with no interval is
+// the ten-minute default, a set interval is that duration, and a value the
+// patrol cannot schedule is refused with its key named rather than read as the
+// default.
+func TestCloudCheckIntervalDuration(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		block *CloudCheckConfig
+		want  time.Duration
+	}{
+		{"no block", nil, 10 * time.Minute},
+		{"no interval", &CloudCheckConfig{}, 10 * time.Minute},
+		{"a set interval", &CloudCheckConfig{Interval: "90s"}, 90 * time.Second},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := tt.block.IntervalDuration()
+			if err != nil || got != tt.want {
+				t.Errorf("IntervalDuration = %v, %v; want %v and no error", got, err, tt.want)
+			}
+		})
+	}
+	for _, tt := range []struct{ name, interval string }{
+		{"unparseable", "soon"},
+		{"zero", "0s"},
+		{"negative", "-5m"},
+	} {
+		t.Run("refused: "+tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := (&CloudCheckConfig{Interval: tt.interval}).IntervalDuration()
+			if err == nil || got != 0 || !strings.Contains(err.Error(), "patrols.cloud_check.interval") {
+				t.Errorf("IntervalDuration(%q) = %v, %v; want a refusal naming the key", tt.interval, got, err)
 			}
 		})
 	}

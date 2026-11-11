@@ -22,12 +22,6 @@ const (
 	// hmSyncRunTimeout bounds one sync. The command indexes a repository, so a
 	// sync still running after ten minutes is stuck rather than slow.
 	hmSyncRunTimeout = 10 * time.Minute
-
-	// hmSyncDefaultInterval is the run interval when the town names none.
-	// config.HMSyncDefaultInterval is the same default as the config file
-	// spells it, and TestHMSyncDefaultsItsIntervalAndCommand holds the two
-	// together.
-	hmSyncDefaultInterval = 30 * time.Minute
 )
 
 // hmSyncSeams are the patrol's clock and side effect, replaceable in tests
@@ -82,23 +76,10 @@ func hmSyncSettings(cfg *DaemonPatrolConfig) *HMSyncConfig {
 }
 
 // hmSyncInterval returns how often the patrol runs, or the refusal for a
-// setting it cannot schedule. An empty setting is the default rather than no
-// schedule: a town that enabled the patrol without repeating the default still
-// gets one. A value that is not a positive Go duration is refused, never read
-// as the default: decoding refuses one from the config file, and this is the
-// same refusal for a config built in code, so a mistyped interval cannot put
-// the patrol on a cadence the town never asked for.
+// setting it cannot schedule. The default and the refusal are the config
+// block's, so a config built in code is judged the way a decoded file is.
 func hmSyncInterval(cfg *DaemonPatrolConfig) (time.Duration, error) {
-	c := hmSyncSettings(cfg)
-	if c == nil || c.Interval == "" {
-		return hmSyncDefaultInterval, nil
-	}
-	every, err := time.ParseDuration(c.Interval)
-	if err != nil || every <= 0 {
-		return 0, fmt.Errorf("patrols.hm_sync.interval = %q: want a positive Go duration such as %q",
-			c.Interval, agentconfig.HMSyncDefaultInterval)
-	}
-	return every, nil
+	return hmSyncSettings(cfg).IntervalDuration()
 }
 
 // hmSyncCommand returns the program the patrol runs, or the default when the
