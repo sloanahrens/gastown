@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/durable"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -245,7 +246,7 @@ func createMigratedSettings(path string, mutate func(tree map[string]any) (bool,
 	if err := tmp.Chmod(0o600); err != nil {
 		return fail(err)
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := durable.File(tmp); err != nil {
 		return fail(err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -256,10 +257,7 @@ func createMigratedSettings(path string, mutate func(tree map[string]any) (bool,
 	if err := os.Link(tmpName, path); err != nil {
 		return false, err
 	}
-	if d, err := os.Open(dir); err == nil { //nolint:gosec // G304: directory of an internal config path
-		_ = d.Sync()
-		_ = d.Close()
-	}
+	_ = durable.Dir(dir) // best effort: the link already stands
 	return true, nil
 }
 

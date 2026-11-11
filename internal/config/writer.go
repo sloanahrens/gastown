@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+
+	"github.com/steveyegge/gastown/internal/durable"
 )
 
 // ErrConfigLocked reports a town config file whose lock another writer holds,
@@ -212,7 +214,7 @@ func replaceFile(path string, data []byte, mode os.FileMode) error {
 	if err := tmp.Chmod(mode); err != nil {
 		return fail(err)
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := durable.File(tmp); err != nil {
 		return fail(err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -223,9 +225,6 @@ func replaceFile(path string, data []byte, mode os.FileMode) error {
 		_ = os.Remove(tmpName)
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
-	if d, err := os.Open(dir); err == nil { //nolint:gosec // G304: directory of an internal config path
-		_ = d.Sync()
-		_ = d.Close()
-	}
+	_ = durable.Dir(dir) // best effort: the rename already stands
 	return nil
 }

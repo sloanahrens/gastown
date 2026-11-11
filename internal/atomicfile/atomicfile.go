@@ -1,5 +1,5 @@
 // Package atomicfile provides atomic file-write primitives (write-to-temp +
-// rename). Kept as a leaf package with no internal dependencies so any other
+// rename). Kept as a leaf package whose one import, durable, is a leaf, so any other
 // package — including low-level ones that util/ transitively depends on — can
 // use it without creating an import cycle.
 package atomicfile
@@ -10,20 +10,15 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/steveyegge/gastown/internal/durable"
 )
 
 // osSyncFile flushes the temp file's contents and metadata to the disk.
-func osSyncFile(f *os.File) error { return f.Sync() }
+func osSyncFile(f *os.File) error { return durable.File(f) }
 
 // osSyncDir flushes the directory entry the rename added.
-func osSyncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
+func osSyncDir(dir string) error { return durable.Dir(dir) }
 
 // dirSyncUnsupported reports whether err is a filesystem declining to sync a
 // directory, which is not a durability failure: the rename itself is atomic,

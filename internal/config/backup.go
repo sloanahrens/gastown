@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/durable"
 )
 
 // BackupNameAttempts bounds the -N search for a free backup name. A directory
@@ -159,7 +161,7 @@ func writeBackupCopy(dst string, data []byte, mode os.FileMode) error {
 func writeAndSync(out *os.File, dst string, data []byte) error {
 	_, err := out.Write(data)
 	if err == nil {
-		err = out.Sync()
+		err = durable.File(out)
 	}
 	if closeErr := out.Close(); err == nil {
 		err = closeErr
