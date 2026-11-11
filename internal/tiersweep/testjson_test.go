@@ -104,10 +104,50 @@ func TestParseTestJSONTimes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			_, tests := parseFixture(t, tc.fixture)
-			if !reflect.DeepEqual(tests, tc.want) {
+			if !reflect.DeepEqual(withoutRaw(tests), tc.want) {
 				t.Errorf("tests = %+v, want %+v", tests, tc.want)
 			}
 		})
+	}
+}
+
+// withoutRaw copies tests with each Raw line cleared, so a comparison of the
+// fields that predate Raw reads the same as it did before the field existed.
+func withoutRaw(tests []TestTime) []TestTime {
+	if tests == nil {
+		return nil
+	}
+	out := make([]TestTime, len(tests))
+	for i, tt := range tests {
+		tt.Raw = ""
+		out[i] = tt
+	}
+	return out
+}
+
+// TestParseTestJSONKeepsTheRawTerminalLine: the Raw of each top-level test is
+// the terminal event's line exactly as the stream carried it, without the line
+// break, and the fields the parse reads are the same as before. A subtest's
+// line is not listed, so it sets no Raw. Mutation: leave Raw unset, and the
+// exact-line check fails.
+func TestParseTestJSONKeepsTheRawTerminalLine(t *testing.T) {
+	t.Parallel()
+	terminal := `{"Time":"2026-11-01T09:00:03.000Z","Action":"pass","Package":"example.com/fixture/g","Test":"TestTop","Elapsed":39.4}`
+	stream := strings.Join([]string{
+		`{"Action":"run","Package":"example.com/fixture/g","Test":"TestTop"}`,
+		`{"Action":"pass","Package":"example.com/fixture/g","Test":"TestTop/child","Elapsed":0.1}`,
+		terminal,
+		"",
+	}, "\n")
+	_, tests, err := ParseTestJSON(strings.NewReader(stream))
+	if err != nil {
+		t.Fatalf("ParseTestJSON: %v", err)
+	}
+	want := []TestTime{
+		{Test: "TestTop", Package: "example.com/fixture/g", Elapsed: 39.4, Action: "pass", Raw: terminal},
+	}
+	if !reflect.DeepEqual(tests, want) {
+		t.Errorf("tests = %+v, want %+v", tests, want)
 	}
 }
 
@@ -143,7 +183,7 @@ func TestParseTestJSONBuildFailureAndNoise(t *testing.T) {
 		wantTests := []TestTime{
 			{Test: "TestAfterNoise", Package: "example.com/fixture/d", Elapsed: 0.01, Action: "pass"},
 		}
-		if !reflect.DeepEqual(tests, wantTests) {
+		if !reflect.DeepEqual(withoutRaw(tests), wantTests) {
 			t.Errorf("tests = %+v, want %+v", tests, wantTests)
 		}
 	})
@@ -171,7 +211,7 @@ func TestParseTestJSONUnfinishedTest(t *testing.T) {
 	wantTests := []TestTime{
 		{Test: "TestDone", Package: "example.com/fixture/f", Elapsed: 0.2, Action: "pass"},
 	}
-	if !reflect.DeepEqual(tests, wantTests) {
+	if !reflect.DeepEqual(withoutRaw(tests), wantTests) {
 		t.Errorf("tests = %+v, want %+v", tests, wantTests)
 	}
 }

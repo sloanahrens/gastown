@@ -794,6 +794,89 @@ func TestSlowTestsTiesGoByPackageThenName(t *testing.T) {
 	}
 }
 
+// TestTestLongerThanItsPackageIsWarnedNotListed pins the check on a fixed
+// stream where a package passes in 1.2s and one of its tests reports 39.4s. The
+// test cannot outlast its package, so it is not listed: the report warns with
+// the package and both figures, and the line after the warning is the raw
+// terminal event the figure came from. The exit code stays go test's verdict.
+// Mutation: drop the comparison in keepSlow, and the test is listed with no
+// warning, so the header is followed by the test line.
+func TestTestLongerThanItsPackageIsWarnedNotListed(t *testing.T) {
+	t.Parallel()
+	const over = `{"Action":"pass","Package":"example.com/fx/a","Test":"TestOver","Elapsed":39.4}`
+	stream := strings.Join([]string{
+		`{"Action":"run","Package":"example.com/fx/a","Test":"TestOver"}`,
+		over,
+		`{"Action":"pass","Package":"example.com/fx/a","Elapsed":1.2}`,
+		"",
+	}, "\n")
+	var out, errOut bytes.Buffer
+	code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost())
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: a warning fails nothing", code)
+	}
+	if errOut.String() != "" {
+		t.Errorf("stderr = %q, want nothing", errOut.String())
+	}
+	want := strings.Join([]string{
+		"tierwall: slow tests",
+		"tierwall: warning: example.com/fx/a TestOver reports 39.4s inside a package of 1.2s",
+		over,
+	}, "\n") + "\n"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("stdout = %q, want it to hold %q right after the slow-test header", out.String(), want)
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "tierwall:   ") {
+			t.Errorf("stdout lists %q as a slow test; a test longer than its package must not be listed", line)
+		}
+	}
+}
+
+// TestSlowTestWithNoPackageElapsedStaysListed pins the case the check cannot
+// judge: a slow test whose package never reported an elapsed has nothing to be
+// measured against, so it is listed as before, not warned about. Mutation:
+// treat a missing package elapsed as zero, and the test is warned about.
+func TestSlowTestWithNoPackageElapsedStaysListed(t *testing.T) {
+	t.Parallel()
+	stream := `{"Action":"pass","Package":"example.com/fx/a","Test":"TestSlow","Elapsed":6}` + "\n"
+	var out, errOut bytes.Buffer
+	if code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost()); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr %q", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "tierwall: warning:") {
+		t.Errorf("stdout = %q, want no warning without a package elapsed", out.String())
+	}
+	if !strings.Contains(out.String(), "tierwall:   example.com/fx/a TestSlow 6s\n") {
+		t.Errorf("stdout = %q, want TestSlow listed under its package", out.String())
+	}
+}
+
+// TestCachedPackageIsNeverWarnedOverlong pins the cached shape: go test replays
+// a cached package with its tests' old elapsed and a package Elapsed of 0, so
+// the package's wall is no measure of them. A 12s test in such a package is
+// listed as before and draws no warning. Mutation: drop the cached skip in
+// keepSlow, and the 12s test is warned about against a package of 0s.
+func TestCachedPackageIsNeverWarnedOverlong(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`{"Action":"pass","Package":"example.com/fx/a","Test":"TestSlow","Elapsed":12}`,
+		`{"Action":"output","Package":"example.com/fx/a","Output":"ok  \texample.com/fx/a\t(cached)\n"}`,
+		`{"Action":"pass","Package":"example.com/fx/a","Elapsed":0}`,
+		"",
+	}, "\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost()); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr %q", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "tierwall: warning:") {
+		t.Errorf("stdout = %q, want no overlong warning for a cached package", out.String())
+	}
+	if !strings.Contains(out.String(), "tierwall:   example.com/fx/a TestSlow 12s\n") {
+		t.Errorf("stdout = %q, want TestSlow listed under its cached package", out.String())
+	}
+}
+
 // phaseStream is one package's go test -json stream for the phases tests: the
 // serial lines given, then three tests that pause, run and pass, then the
 // package's own pass with a 25s wall.
