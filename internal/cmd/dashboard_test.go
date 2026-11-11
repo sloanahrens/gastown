@@ -64,7 +64,7 @@ func TestResolveSpendPrefersFlag(t *testing.T) {
 	var calls [][]string
 	home := t.TempDir()
 	homeFn := func() (string, error) { return home, nil }
-	spend, reason := resolveSpendIn("/usr/bin/spend-report --json", homeFn, os.Stat, spendFake(&calls, `{"from":"flag"}`), nil)
+	spend, reason := resolveSpendIn(false, "/usr/bin/spend-report --json", homeFn, os.Stat, spendFake(&calls, `{"from":"flag"}`), nil)
 	if spend == nil || reason != "" {
 		t.Fatalf("flag not honored: spend nil %v, reason %q", spend == nil, reason)
 	}
@@ -98,7 +98,7 @@ func TestDashboardSpendRunnerSeam(t *testing.T) {
 	ledgerOnlyFn := func() (string, error) { return ledgerOnly, nil }
 
 	var calls [][]string
-	spend, _ := resolveSpendIn("/usr/bin/spend-report --json", withToolFn, os.Stat, spendFake(&calls, printed), nil)
+	spend, _ := resolveSpendIn(false, "/usr/bin/spend-report --json", withToolFn, os.Stat, spendFake(&calls, printed), nil)
 	if got := string(spend()); got != printed {
 		t.Errorf("--spend-cmd: served %q, want the runner's JSON", got)
 	}
@@ -107,7 +107,7 @@ func TestDashboardSpendRunnerSeam(t *testing.T) {
 	}
 
 	calls = nil
-	spend, _ = resolveSpendIn("", withToolFn, os.Stat, spendFake(&calls, printed), nil)
+	spend, _ = resolveSpendIn(false, "", withToolFn, os.Stat, spendFake(&calls, printed), nil)
 	if got := string(spend()); got != printed {
 		t.Errorf("tool present: served %q, want the runner's JSON", got)
 	}
@@ -116,7 +116,7 @@ func TestDashboardSpendRunnerSeam(t *testing.T) {
 	}
 
 	calls = nil
-	spend, _ = resolveSpendIn("", ledgerOnlyFn, os.Stat, spendFake(&calls, printed), nil)
+	spend, _ = resolveSpendIn(false, "", ledgerOnlyFn, os.Stat, spendFake(&calls, printed), nil)
 	out := spend()
 	var report struct {
 		Samples int `json:"samples"`
@@ -151,7 +151,7 @@ func TestDashboardSpendLedgerStates(t *testing.T) {
 	t.Parallel()
 	noLedger := t.TempDir()
 	homeFn := func() (string, error) { return noLedger, nil }
-	if spend, reason := resolveSpendIn("", homeFn, os.Stat, spendUnused, nil); spend != nil || reason != dashboard.NotInClusterReason {
+	if spend, reason := resolveSpendIn(false, "", homeFn, os.Stat, spendUnused, nil); spend != nil || reason != dashboard.NotInClusterReason {
 		t.Errorf("missing ledger: spend nil %v, reason %q; want no source and %q", spend == nil, reason, dashboard.NotInClusterReason)
 	}
 
@@ -284,22 +284,22 @@ func TestDashboardSpendAbsentSaysNotInCluster(t *testing.T) {
 		return nil, nil
 	}
 
-	if spend, reason := resolveSpendIn("", noHome, present, spendUnused, nil); spend != nil || reason != dashboard.NotInClusterReason {
+	if spend, reason := resolveSpendIn(false, "", noHome, present, spendUnused, nil); spend != nil || reason != dashboard.NotInClusterReason {
 		t.Errorf("no home: spend nil %v, reason %q; want no source and %q", spend == nil, reason, dashboard.NotInClusterReason)
 	}
-	if spend, reason := resolveSpendIn("", home, absent, spendUnused, nil); spend != nil || reason != dashboard.NotInClusterReason {
+	if spend, reason := resolveSpendIn(false, "", home, absent, spendUnused, nil); spend != nil || reason != dashboard.NotInClusterReason {
 		t.Errorf("no ledger or tool: spend nil %v, reason %q; want no source and %q", spend == nil, reason, dashboard.NotInClusterReason)
 	}
-	if spend, reason := resolveSpendIn("", home, noLedger, spendUnused, nil); spend == nil || reason != "" {
+	if spend, reason := resolveSpendIn(false, "", home, noLedger, spendUnused, nil); spend == nil || reason != "" {
 		t.Errorf("tool only: spend nil %v, reason %q; want the tool and no reason", spend == nil, reason)
 	}
-	if spend, reason := resolveSpendIn("", home, noTool, spendUnused, nil); spend == nil || reason != "" {
+	if spend, reason := resolveSpendIn(false, "", home, noTool, spendUnused, nil); spend == nil || reason != "" {
 		t.Errorf("ledger only: spend nil %v, reason %q; want the ledger and no reason", spend == nil, reason)
 	}
-	if spend, reason := resolveSpendIn("", home, present, spendUnused, nil); spend == nil || reason != "" {
+	if spend, reason := resolveSpendIn(false, "", home, present, spendUnused, nil); spend == nil || reason != "" {
 		t.Errorf("tool and ledger: spend nil %v, reason %q; want a source and no reason", spend == nil, reason)
 	}
-	if spend, reason := resolveSpendIn("", home, denied, spendUnused, nil); spend == nil || reason != "" {
+	if spend, reason := resolveSpendIn(false, "", home, denied, spendUnused, nil); spend == nil || reason != "" {
 		t.Errorf("tool unreadable: spend nil %v, reason %q; want a source and no reason", spend == nil, reason)
 	}
 
