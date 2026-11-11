@@ -179,12 +179,37 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 		writeErr error
 		// badWorkspace replaces the town's workspace map with one that does not parse.
 		badWorkspace bool
-		wantWrites   int
-		wantLogs     int
+		// corruptRecord leaves the seat's sandbox record unreadable.
+		corruptRecord bool
+		wantWrites    int
+		wantLogs      int
 	}{
 		{
 			name:  "a seat with no transcript writes no record and logs nothing",
 			files: func(*testing.T, string) []string { return nil },
+		},
+		{
+			name: "a transcript with no session id is logged once and writes nothing",
+			files: func(_ *testing.T, town string) []string {
+				return []string{filepath.Join(town, "transcripts", ".jsonl")}
+			},
+			wantWrites: 0, wantLogs: 1,
+		},
+		{
+			name:          "an unreadable sandbox record is logged once and writes nothing",
+			corruptRecord: true,
+			files: func(t *testing.T, town string) []string {
+				path := filepath.Join(town, "transcripts", "seat.jsonl")
+				writeUsageTranscript(t, path, start.Add(time.Hour), seatCallLine("ok", 1, 0, 1))
+				return []string{path}
+			},
+			wantWrites: 0, wantLogs: 1,
+		},
+		{
+			name:          "an unreadable sandbox record with no transcript is logged once and writes nothing",
+			corruptRecord: true,
+			files:         func(*testing.T, string) []string { return nil },
+			wantWrites:    0, wantLogs: 1,
 		},
 		{
 			name: "a missing transcript is logged once and its record is incomplete",
@@ -272,6 +297,10 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 			f.host.d.clock = clockwork.NewFakeClockAt(end)
 			if !tt.noRecord {
 				f.writeSeatRecordAt(start)
+			}
+			if tt.corruptRecord {
+				record := filepath.Join(session.SandboxRegistryDir(f.town), f.host.sessionName(endRig, endPolecat)+".json")
+				writeUsageTranscript(t, record, start, "{not json")
 			}
 			if tt.badWorkspace {
 				writeTownFile(t, f.town, workspaceid.File, "{not json")

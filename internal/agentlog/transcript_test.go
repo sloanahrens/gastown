@@ -393,6 +393,11 @@ func TestProjectTranscripts(t *testing.T) {
 		t.Errorf("projectTranscriptsWith = %q, want %q", got, want)
 	}
 
+	// A config dir that cannot be resolved is an error, not a guess.
+	if _, err := projectTranscriptsWith(town, workDir, func() (string, error) { return "", errNoConfigDir }, homeFn); err == nil {
+		t.Error("projectTranscriptsWith listed transcripts with an unreadable config dir")
+	}
+
 	// No project directory exists: the answer is none, not an error.
 	empty := filepath.Join(t.TempDir(), "empty")
 	got, err = projectTranscriptsWith(empty, workDir, func() (string, error) { return empty, nil }, func() (string, error) { return empty, nil })
