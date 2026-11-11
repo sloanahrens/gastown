@@ -2,7 +2,10 @@ package deepseekspend
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -60,21 +63,18 @@ func fixtureInput(t *testing.T) Input {
 func TestBuildReportFromFixture(t *testing.T) {
 	t.Parallel()
 	got := Build(fixtureInput(t))
-	if got == nil {
-		t.Fatal("Build returned no report for a ledger with rows")
-	}
-	want := &Report{
+	want := Report{
 		Live:        Live{OK: false, Error: "no live balance in the dashboard"},
-		Balance:     51.5,
+		Balance:     ptr(51.5),
 		TopUp:       114.05,
 		SpentTotal:  8.5,
 		SpentLedger: 9.5,
-		LedgerSince: "2026-11-08T17:00",
+		LedgerSince: ptr("2026-11-08T17:00"),
 		Credits: []Credit{
 			{At: "2026-11-08T23:50", Amount: 10, Kind: "credit"},
 		},
 		Samples:    11,
-		LastSample: "2026-11-09T01:12",
+		LastSample: ptr("2026-11-09T01:12"),
 		Pace1h:     &Pace{Spent: 3, PerHour: ptr(3.6)},
 		Pace6h:     &Pace{Spent: 8.5, PerHour: ptr(4.554)},
 		Pace24h:    &Pace{Spent: 9.5, PerHour: ptr(1.159)},
@@ -142,8 +142,9 @@ func TestLedgerParsing(t *testing.T) {
 				t.Fatalf("rows = %d, want %d", len(rows), tc.wantRows)
 			}
 			if tc.wantRows == 0 {
-				if Build(Input{Rows: rows}) != nil {
-					t.Error("an empty ledger gave a report, want none")
+				report := Build(Input{Rows: rows})
+				if report.Samples != 0 || report.Balance != nil || report.LastSample != nil || report.Live.OK {
+					t.Errorf("an empty ledger gave %+v, want a zero report with no balance", report)
 				}
 				return
 			}
@@ -234,5 +235,138 @@ func TestGapIsMoreThanFifteenMinutes(t *testing.T) {
 	want := []Gap{{From: "2026-11-09T01:15", To: "2026-11-09T01:31", Minutes: 16, Spent: 0.5}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("gaps = %+v, want only the 16-minute pair", got)
+	}
+}
+
+// countingFile counts the bytes a poll reads through it.
+type countingFile struct {
+	File
+	bytes *int64
+}
+
+func (f countingFile) Read(p []byte) (int, error) {
+	n, err := f.File.Read(p)
+	*f.bytes += int64(n)
+	return n, err
+}
+
+// appendText adds text to the end of the file at path.
+func appendText(t *testing.T, path, text string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(text); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIncrementalRead drives one reader through appends, a partial line, a file
+// that shrank and a file that was replaced. Each poll's report equals a fresh
+// reader's full read, and an append costs only its own bytes.
+func TestIncrementalRead(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ledger := filepath.Join(dir, "balance.log")
+	events := filepath.Join(dir, "events.log")
+	now := time.Date(2026, time.November, 9, 1, 30, 0, 0, loc)
+	constants := Constants{TopUpAt: time.Date(2026, time.November, 8, 23, 0, 0, 0, loc), TopUp: 114.05}
+
+	var read int64
+	open := func(name string) (File, error) {
+		f, err := OpenFile(name)
+		if err != nil {
+			return nil, err
+		}
+		return countingFile{File: f, bytes: &read}, nil
+	}
+	reader := NewReader(ledger, events, loc, constants, DefaultDays, open)
+	fullRead := func() Report {
+		t.Helper()
+		report, err := NewReader(ledger, events, loc, constants, DefaultDays, OpenFile).Report(now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return report
+	}
+	poll := func(step string) Report {
+		t.Helper()
+		report, err := reader.Report(now)
+		if err != nil {
+			t.Fatalf("%s: %v", step, err)
+		}
+		if want := fullRead(); !reflect.DeepEqual(report, want) {
+			t.Fatalf("%s: report differs from a full re-read", step)
+		}
+		return report
+	}
+
+	if err := os.WriteFile(ledger, []byte("2026-11-09T01:00:00 balance=52.00\n2026-11-09T01:10:00 balance=51.50\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(events, []byte("e1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := poll("first read").Samples; got != 2 {
+		t.Fatalf("first read samples = %d, want 2", got)
+	}
+
+	appended := "2026-11-09T01:20:00 balance=51.00\n2026-11-09T01:25:00 balance=50.50\n"
+	appendText(t, ledger, appended)
+	read = 0
+	if got := poll("two appended rows").Samples; got != 4 {
+		t.Errorf("after appending two rows: samples = %d, want 4", got)
+	}
+	if read != int64(len(appended)) {
+		t.Errorf("second poll read %d bytes, want only the %d appended", read, len(appended))
+	}
+
+	appendText(t, ledger, "2026-11-09T01:30:00 balance=5")
+	if got := poll("partial line").Samples; got != 4 {
+		t.Errorf("a line with no newline yet: samples = %d, want 4", got)
+	}
+	appendText(t, ledger, "0.00\n")
+	if report := poll("completed line"); report.Samples != 5 || *report.Balance != 50 {
+		t.Errorf("after the newline: samples %d, balance %v; want 5 and 50", report.Samples, *report.Balance)
+	}
+
+	shrunk := "2026-11-09T01:40:00 balance=49.00\n"
+	if err := os.WriteFile(ledger, []byte(shrunk), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	read = 0
+	if got := poll("shrunk file").Samples; got != 1 {
+		t.Errorf("after the file shrank: samples = %d, want 1 (re-read from the start)", got)
+	}
+	if read != int64(len(shrunk)) {
+		t.Errorf("shrunk file: read %d bytes, want the whole %d", read, len(shrunk))
+	}
+
+	replacement := "2026-11-09T02:00:00 balance=48.00\n2026-11-09T02:10:00 balance=47.00\n2026-11-09T02:20:00 balance=46.50\n"
+	next := filepath.Join(dir, "balance.log.next")
+	if err := os.WriteFile(next, []byte(replacement), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(next, ledger); err != nil {
+		t.Fatal(err)
+	}
+	read = 0
+	if got := poll("replaced file").Samples; got != 3 {
+		t.Errorf("after the file was replaced: samples = %d, want 3", got)
+	}
+	if read != int64(len(replacement)) {
+		t.Errorf("replaced file: read %d bytes, want the whole %d", read, len(replacement))
+	}
+}
+
+// A ledger that cannot be opened is a failed read, not an empty report.
+func TestReadFailsOnMissingLedger(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	reader := NewReader(filepath.Join(dir, "balance.log"), filepath.Join(dir, "events.log"), loc, Constants{}, DefaultDays, OpenFile)
+	if _, err := reader.Report(time.Now()); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("missing ledger: err = %v, want a not-exist error", err)
 	}
 }

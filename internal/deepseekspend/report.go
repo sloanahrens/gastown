@@ -5,7 +5,12 @@
 package deepseekspend
 
 import (
+	"bytes"
+	"errors"
+	"io"
+	"io/fs"
 	"math"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +22,9 @@ const DefaultDays = 7
 
 // gapAfter is the silence between two samples the report lists as a gap.
 const gapAfter = 15 * time.Minute
+
+// alertKeep is how many of the latest events the report's alerts list.
+const alertKeep = 5
 
 // ledgerLayout is the naive local timestamp the watcher writes.
 const ledgerLayout = "2006-01-02T15:04:05"
@@ -61,21 +69,22 @@ type Input struct {
 	Days int
 }
 
-// Report is the --json report of deepseek-spend.py, with the same keys.
+// Report is the --json report of deepseek-spend.py, with the same keys. A ledger
+// with no rows is a zero report: the balance and the sample stamps are null.
 type Report struct {
 	Live        Live     `json:"live"`
-	Balance     float64  `json:"balance"`
+	Balance     *float64 `json:"balance"`
 	TopUp       float64  `json:"topup"`
 	SpentTotal  float64  `json:"spent_total"`
 	Cash        *float64 `json:"cash"`
 	Credit      *float64 `json:"credit"`
 	SpentLedger float64  `json:"spent_ledger"`
-	LedgerSince string   `json:"ledger_since"`
+	LedgerSince *string  `json:"ledger_since"`
 	Credits     []Credit `json:"credits"`
 	Samples     int      `json:"samples"`
 	// WatcherPID is always null: the pod runs no watcher to ask.
 	WatcherPID *int     `json:"watcher_pid"`
-	LastSample string   `json:"last_sample"`
+	LastSample *string  `json:"last_sample"`
 	Pace1h     *Pace    `json:"pace_1h"`
 	Pace6h     *Pace    `json:"pace_6h"`
 	Pace24h    *Pace    `json:"pace_24h"`
@@ -127,32 +136,40 @@ type Gap struct {
 // drops only the split: the row keeps its balance, as the tool does.
 func ParseLedger(text string, loc *time.Location) []Row {
 	var rows []Row
-	for _, line := range Lines(text) {
-		parts := strings.Split(line, " balance=")
-		if len(parts) != 2 {
-			continue
+	for _, line := range splitLines(text) {
+		if row, ok := parseRow(line, loc); ok {
+			rows = append(rows, row)
 		}
-		at, err := time.ParseInLocation(ledgerLayout, strings.TrimSpace(parts[0]), loc)
-		if err != nil {
-			continue
-		}
-		fields := strings.Fields(parts[1])
-		if len(fields) == 0 {
-			continue
-		}
-		bal, err := strconv.ParseFloat(fields[0], 64)
-		if err != nil {
-			continue
-		}
-		granted, topped := parseSplit(fields[1:])
-		rows = append(rows, Row{At: at, Balance: bal, Granted: granted, Topped: topped})
 	}
 	return rows
 }
 
-// Lines splits a file's text into its lines, without a final empty line for a
-// trailing newline, as reading the file line by line does.
-func Lines(text string) []string {
+// parseRow reads one balance.log line, and reports false for a line that is not
+// a row.
+func parseRow(line string, loc *time.Location) (Row, bool) {
+	parts := strings.Split(line, " balance=")
+	if len(parts) != 2 {
+		return Row{}, false
+	}
+	at, err := time.ParseInLocation(ledgerLayout, strings.TrimSpace(parts[0]), loc)
+	if err != nil {
+		return Row{}, false
+	}
+	fields := strings.Fields(parts[1])
+	if len(fields) == 0 {
+		return Row{}, false
+	}
+	bal, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return Row{}, false
+	}
+	granted, topped := parseSplit(fields[1:])
+	return Row{At: at, Balance: bal, Granted: granted, Topped: topped}, true
+}
+
+// splitLines splits a file's text into its lines, without a final empty line for
+// a trailing newline, as reading the file line by line does.
+func splitLines(text string) []string {
 	if text == "" {
 		return nil
 	}
@@ -182,28 +199,29 @@ func parseSplit(fields []string) (granted, topped *float64) {
 	return &gv, &tv
 }
 
-// Build returns the report for the ledger, or nil when there are no rows: a
-// ledger with nothing in it has no figures to report.
-func Build(in Input) *Report {
-	if len(in.Rows) == 0 {
-		return nil
+// Build returns the report for the ledger rows. A ledger with no rows is a zero
+// report, not an absent one: it has no balance, and its figures are zero or null.
+func Build(in Input) Report {
+	r := Report{
+		Live:    Live{OK: false, Error: noLiveBalance},
+		TopUp:   in.TopUp,
+		Credits: []Credit{},
+		Alerts:  alertLines(in.Events),
+		PerDay:  map[string]Day{},
+		Gaps:    []Gap{},
 	}
 	rows := in.Rows
-	last := rows[len(rows)-1]
-	r := &Report{
-		Live:        Live{OK: false, Error: noLiveBalance},
-		Balance:     last.Balance,
-		TopUp:       in.TopUp,
-		SpentTotal:  round(drops(since(rows, in.TopUpAt)), 2),
-		SpentLedger: round(drops(rows), 2),
-		LedgerSince: stamp(rows[0].At),
-		Credits:     lastCredits(rises(rows), 5),
-		Samples:     len(rows),
-		LastSample:  stamp(last.At),
-		Alerts:      alertLines(in.Events),
-		PerDay:      perDay(rows, in.Days),
-		Gaps:        gapList(rows),
+	if len(rows) == 0 {
+		return r
 	}
+	last := rows[len(rows)-1]
+	r.Balance = ptr(last.Balance)
+	r.SpentTotal = round(drops(since(rows, in.TopUpAt)), 2)
+	r.SpentLedger = round(drops(rows), 2)
+	r.LedgerSince = ptr(stamp(rows[0].At))
+	r.Credits = lastCredits(rises(rows), 5)
+	r.Samples = len(rows)
+	r.LastSample = ptr(stamp(last.At))
 	r.Pace1h = pace(rows, in.Now, time.Hour)
 	r.Pace6h = pace(rows, in.Now, 6*time.Hour)
 	r.Pace24h = pace(rows, in.Now, 24*time.Hour)
@@ -211,6 +229,8 @@ func Build(in Input) *Report {
 	if p := r.Pace24h; p != nil && p.PerHour != nil && *p.PerHour > 0 && last.Balance != 0 {
 		r.RunwayDays = ptr(round(last.Balance/(*p.PerHour*24), 1))
 	}
+	r.PerDay = perDay(rows, in.Days)
+	r.Gaps = gapList(rows)
 	return r
 }
 
@@ -332,10 +352,10 @@ func gapList(rows []Row) []Gap {
 	return out
 }
 
-// alertLines keeps the latest five events, right-trimmed, as the tool does.
+// alertLines keeps the latest events, right-trimmed, as the tool does.
 func alertLines(events []string) []string {
-	if len(events) > 5 {
-		events = events[len(events)-5:]
+	if len(events) > alertKeep {
+		events = events[len(events)-alertKeep:]
 	}
 	out := []string{}
 	for _, e := range events {
@@ -359,6 +379,131 @@ func round(x float64, places int) float64 {
 	return v
 }
 
-func ptr(f float64) *float64 {
-	return &f
+func ptr[T any](v T) *T {
+	return &v
+}
+
+// File is an open watcher file: the part of it the reader reads. *os.File is one.
+type File interface {
+	fs.File
+	io.Seeker
+}
+
+// Opener opens the watcher file at name. OpenFile is the default; a test passes
+// one that counts the bytes it reads.
+type Opener func(name string) (File, error)
+
+// OpenFile opens name from the operating system.
+func OpenFile(name string) (File, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+// cursor is how far a watcher file has been read: the file it was read from,
+// and the offset just past its last complete line.
+type cursor struct {
+	info   fs.FileInfo
+	offset int64
+}
+
+// Reader is the spend report read incrementally across polls. It keeps the
+// parsed ledger rows and the latest events, and each poll reads only the bytes
+// appended since the last one. A file that shrank or was replaced is read from
+// its start. A line still being written, with no newline yet, waits for the
+// poll that finds its newline. The reader is not safe for concurrent use.
+type Reader struct {
+	ledgerPath, eventsPath string
+	loc                    *time.Location
+	open                   Opener
+	constants              Constants
+	days                   int
+	ledger, events         cursor
+	rows                   []Row
+	alerts                 []string
+}
+
+// NewReader reads the ledger at ledgerPath and the events log at eventsPath, with
+// naive timestamps in loc. days is how many days per_day lists; 0 lists all.
+func NewReader(ledgerPath, eventsPath string, loc *time.Location, c Constants, days int, open Opener) *Reader {
+	return &Reader{
+		ledgerPath: ledgerPath,
+		eventsPath: eventsPath,
+		loc:        loc,
+		open:       open,
+		constants:  c,
+		days:       days,
+	}
+}
+
+// Report reads what was appended since the last call and returns the report at
+// now. A ledger that cannot be read is an error. A missing events log has no
+// alerts; one that exists and cannot be read is an error.
+func (r *Reader) Report(now time.Time) (Report, error) {
+	lines, next, restarted, err := readAppended(r.ledgerPath, r.open, r.ledger)
+	if err != nil {
+		return Report{}, err
+	}
+	if restarted {
+		r.rows = nil
+	}
+	r.ledger = next
+	for _, line := range lines {
+		if row, ok := parseRow(line, r.loc); ok {
+			r.rows = append(r.rows, row)
+		}
+	}
+
+	lines, next, restarted, err = readAppended(r.eventsPath, r.open, r.events)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		r.events, r.alerts = cursor{}, nil
+	case err != nil:
+		return Report{}, err
+	default:
+		if restarted {
+			r.alerts = nil
+		}
+		r.events = next
+		r.alerts = append(r.alerts, lines...)
+		if over := len(r.alerts) - alertKeep; over > 0 {
+			r.alerts = r.alerts[over:]
+		}
+	}
+	return Build(Input{Constants: r.constants, Rows: r.rows, Events: r.alerts, Now: now, Days: r.days}), nil
+}
+
+// readAppended reads the complete lines the file at path has past from's offset,
+// and returns them with the cursor just past them. restarted is set when the
+// file is not the one from was read from, or is shorter than its offset: the
+// read starts at the top, and the caller drops what it had kept. Nothing is
+// returned for a file that has no complete line past the offset.
+func readAppended(path string, open Opener, from cursor) (lines []string, next cursor, restarted bool, err error) {
+	f, err := open(path)
+	if err != nil {
+		return nil, from, false, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, from, false, err
+	}
+	next = from
+	if from.info == nil || !os.SameFile(from.info, info) || info.Size() < from.offset {
+		next = cursor{}
+		restarted = true
+	}
+	if _, err := f.Seek(next.offset, io.SeekStart); err != nil {
+		return nil, from, false, err
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, from, false, err
+	}
+	end := bytes.LastIndexByte(data, '\n') + 1
+	next.info = info
+	next.offset += int64(end)
+	return splitLines(string(data[:end])), next, restarted, nil
 }
