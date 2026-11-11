@@ -225,15 +225,18 @@ const (
 	DashboardTmpVolume    = "dashboard-tmp"
 	DashboardTmpPath      = "/tmp"
 	DashboardClaudeVolume = "dashboard-claude"
-	// DashboardClaudePath is the Mac's ~/.claude as the dashboard reads it: the
-	// image's HOME is /root, so the transcripts and the spend ledger sit there.
-	DashboardClaudePath = "/root/.claude"
+	// ClaudeHomePath is where the Mac's ~/.claude sits in the image: its HOME is
+	// /root, so the transcripts and the spend ledger sit there. The dashboard mounts
+	// the whole directory here; the daemon mounts only the projects subtree below it.
+	ClaudeHomePath = "/root/.claude"
 	// DaemonClaudeVolume carries the Mac's ~/.claude into the daemon container, for
 	// the usage_attrib patrol that reads the transcripts there.
 	DaemonClaudeVolume = "daemon-claude"
-	// DaemonClaudePath is the Mac's ~/.claude as the daemon reads it: the image's
-	// HOME is /root, the same path the dashboard reads it at.
-	DaemonClaudePath = "/root/.claude"
+	// DaemonClaudeProjectsPath is the one subtree of ~/.claude the daemon container
+	// sees: the patrol reads only the projects directory of transcripts, so the
+	// mount is narrowed to it with a subPath (gt-w9eca2).
+	DaemonClaudeProjectsPath = ClaudeHomePath + "/projects"
+	DaemonClaudeProjectsSub  = "projects"
 	// ViewerTokenFile is the read-only Forgejo token the dashboard page reads from
 	// $XDG_CONFIG_HOME/gt, the same Secret entry a rehearsal mounts.
 	ViewerTokenFile = RehearsalForgeTokenFile
@@ -606,15 +609,17 @@ type Values struct {
 	// live-pod piece.
 	Dashboard bool
 	// DashboardClaudeDir is the Mac's ~/.claude directory the dashboard container
-	// mounts read-only at DashboardClaudePath, as a hostPath of type Directory so a
+	// mounts read-only at ClaudeHomePath, as a hostPath of type Directory so a
 	// missing directory fails the pod rather than creating one. Empty mounts
 	// nothing. Set, it must be absolute and Dashboard must be set. The mount is the
 	// whole directory, wider than the panes read; a narrower list is a later bead.
 	DashboardClaudeDir string
-	// DaemonClaudeDir is the Mac's ~/.claude directory the daemon container mounts
-	// read-only at DaemonClaudePath, as a hostPath of type Directory so a missing
-	// directory fails the pod rather than creating one. Empty mounts nothing. Set,
-	// it must be absolute. The mount is the whole directory, as the dashboard's is.
+	// DaemonClaudeDir is the Mac's ~/.claude directory the daemon container reads
+	// read-only, as a hostPath of type Directory so a missing directory fails the
+	// pod rather than creating one. Empty mounts nothing. Set, it must be absolute.
+	// The volume is the whole directory, but the container mounts only its
+	// projects subtree at ClaudeHomePath/projects, the one the usage scan reads, so
+	// the rest of ~/.claude is not visible in the pod (gt-w9eca2).
 	DaemonClaudeDir string
 }
 
@@ -1176,7 +1181,7 @@ func dashboardMounts(v Values) []VolumeMount {
 		{Name: DashboardTmpVolume, MountPath: DashboardTmpPath},
 	}
 	if v.DashboardClaudeDir != "" {
-		m = append(m, VolumeMount{Name: DashboardClaudeVolume, MountPath: DashboardClaudePath, ReadOnly: true})
+		m = append(m, VolumeMount{Name: DashboardClaudeVolume, MountPath: ClaudeHomePath, ReadOnly: true})
 	}
 	return m
 }
@@ -1373,7 +1378,12 @@ func mounts(v Values) []VolumeMount {
 		})
 	}
 	if v.DaemonClaudeDir != "" {
-		m = append(m, VolumeMount{Name: DaemonClaudeVolume, MountPath: DaemonClaudePath, ReadOnly: true})
+		m = append(m, VolumeMount{
+			Name:      DaemonClaudeVolume,
+			MountPath: DaemonClaudeProjectsPath,
+			SubPath:   DaemonClaudeProjectsSub,
+			ReadOnly:  true,
+		})
 	}
 	if !v.Rehearsal {
 		m = append(m, openShellMount())
