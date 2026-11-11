@@ -51,14 +51,13 @@ file, so no agent reads a secret. No file is opened to print those lines.
 
 The image values file is read from under --dir, where imagevalues places it;
 a missing file is refused, since a render needs a digest. A live render also
-writes that pair to the town's own values file, where the pair-ready check reads
-the running commit, and prints the one kubectl line that copies it into the
-daemon pod's town copy. The line is printed, never run. A rehearsal writes no
-values file. --cpu and --memory
-are required: no source records a measured share. A live render also reads the
-derived hm config the compose write leaves under the town root, and refuses
-when it is absent: the pod's hm would read its defaults, which name its own
-loopback, so run gt daemon compose write first.
+writes that pair to the town's own values file, where the pair-ready check
+reads the running commit, and prints the one kubectl line that copies it into
+the daemon pod's town copy. The line is printed, never run. A rehearsal writes
+no values file. --cpu and --memory are required: no source records a measured
+share. A live render also reads the derived hm config the compose write leaves
+under the town root, and refuses when it is absent: the pod's hm would read its
+defaults, which name its own loopback, so run gt daemon compose write first.
 
 Examples:
   gt town cluster render --dir ~/gt/gastown --out ./manifests \
@@ -419,12 +418,16 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 
 // podValuesCopyLine is the one command that copies the town's values file into
 // the daemon pod's town copy. The daemon container runs with the town root at
-// TownRootPath, so the pod reads the file at TownRootPath/gastown. The line is
-// printed for the operator and never run.
+// TownRootPath, so the pod reads the file at TownRootPath/gastown. The copy
+// goes to a .tmp file first; test -s refuses an empty copy, which is what a
+// missing -i leaves, and mv replaces the pod's file only after that check. The
+// line is printed for the operator and never run.
 func podValuesCopyLine(namespace, src string) string {
 	dst := k8sdaemon.TownRootPath + "/gastown/" + imagevalues.DefaultRelPath
 	dir := k8sdaemon.TownRootPath + "/gastown/" + filepath.Dir(imagevalues.DefaultRelPath)
-	inner := fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(dir), shellQuote(dst))
+	tmp := dst + ".tmp"
+	inner := fmt.Sprintf("mkdir -p %s && cat > %s && test -s %s && mv %s %s",
+		shellQuote(dir), shellQuote(tmp), shellQuote(tmp), shellQuote(tmp), shellQuote(dst))
 	return fmt.Sprintf("kubectl -n %s exec -i deploy/%s -c %s -- sh -c %s < %s",
 		shellQuote(namespace), k8sdaemon.Name, k8sdaemon.Name, shellQuote(inner), shellQuote(src))
 }

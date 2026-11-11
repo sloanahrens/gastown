@@ -1595,6 +1595,13 @@ func TestTownClusterRenderPrintsThePodsTownCopyStep(t *testing.T) {
 	if !strings.HasSuffix(line, "< "+townValues) {
 		t.Errorf("the copy line does not copy from the town's values file %s: %s", townValues, line)
 	}
+	// The pod's file is replaced only by a move from a non-empty .tmp copy, so
+	// a copy that loses its stdin (no -i) leaves the pod's file as it was.
+	for _, step := range []string{" -i ", podPath + ".tmp", "test -s " + podPath + ".tmp && mv " + podPath + ".tmp " + podPath} {
+		if !strings.Contains(line, step) {
+			t.Errorf("the copy line lacks %q, so a failed copy could empty the pod's file: %s", step, line)
+		}
+	}
 }
 
 // TestTownClusterRenderRefusesAnUnwritableRunningValuesFile holds a failed write
