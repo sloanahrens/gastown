@@ -52,16 +52,16 @@ var (
 	landRejectTipRe = regexp.MustCompile(` \(target tip ([0-9a-f]+)\)$`)
 )
 
-// conflictRepo is the part of the submission battery's bare clone the adapter
+// ConflictRepo is the part of the submission battery's bare clone the adapter
 // reads through. *submission.Clone satisfies it.
-type conflictRepo interface {
+type ConflictRepo interface {
 	Sync(ctx context.Context) error
 	Run(ctx context.Context, args ...string) (string, error)
 }
 
 func init() {
 	Register(ConflictBattery, func(townRoot string) Adapter {
-		return newConflictAdapter(townRoot, func() (conflictRepo, error) {
+		return newConflictAdapter(townRoot, func() (ConflictRepo, error) {
 			c, err := submission.OpenClone(townRoot)
 			if err != nil {
 				return nil, err
@@ -71,15 +71,44 @@ func init() {
 	})
 }
 
+// OpenReadOnly opens battery's adapter for a read that must not fetch. The
+// conflict battery is the only one with a read-only form; another battery is
+// refused rather than opened with a fetch.
+func OpenReadOnly(battery, townRoot string) (Adapter, error) {
+	if battery != ConflictBattery {
+		return nil, fmt.Errorf("battery %q has no read-only form", battery)
+	}
+	return NewConflictReadOnly(townRoot, func() (ConflictRepo, error) {
+		c, err := submission.OpenClone(townRoot)
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
+	}), nil
+}
+
+// NewConflictReadOnly returns the conflict adapter over the clone openClone
+// returns, read as it stands. Its Sync is never called, so the clone is never
+// fetched. A landing whose commits the clone does not hold is unknown, and the
+// pair it belongs to is left unlabeled.
+func NewConflictReadOnly(town string, openClone func() (ConflictRepo, error)) Adapter {
+	a := newConflictAdapter(town, openClone)
+	a.readOnly = true
+	return a
+}
+
 // conflictAdapter scores the conflict log. Its labels come from two sources:
 // the rig's landing records and the bare clone they name, and the daemon log's
 // conflict rejections. The clone is opened and synced only when a pair has a
 // landing to read, so a scorecard over a log of unlanded pairs never fetches.
 type conflictAdapter struct {
 	town      string
-	openClone func() (conflictRepo, error)
+	openClone func() (ConflictRepo, error)
+	// readOnly reads the clone as it stands and never syncs it. See
+	// NewConflictReadOnly.
+	readOnly bool
 
-	repo    conflictRepo
+	repo    ConflictRepo
 	synced  bool
 	landing *land.LandingsFile
 	// landed is each bead's latest landing record, nil for a bead that never
@@ -106,7 +135,7 @@ type conflictAdapter struct {
 	rejectionsRead          bool
 }
 
-func newConflictAdapter(town string, openClone func() (conflictRepo, error)) *conflictAdapter {
+func newConflictAdapter(town string, openClone func() (ConflictRepo, error)) *conflictAdapter {
 	return &conflictAdapter{
 		town:       town,
 		openClone:  openClone,
@@ -166,7 +195,8 @@ func (a *conflictAdapter) Context() []string {
 // ancestry test cannot attribute is evidence of a conflict with *something*,
 // and calling the pair disjoint on it would be a wrong negative. Otherwise the
 // pair is unlabeled, and so is the same_function question, which no landing
-// shows.
+// shows. A read-only adapter also leaves the pair unlabeled, rather than
+// negative, when a landing's commits are not in the clone.
 func (a *conflictAdapter) Label(ctx context.Context, item Item) (Labeling, error) {
 	bead, other := item.Refs[refConflictBead], item.Refs[refConflictOther]
 	landedBead, err := a.landingOf(bead)
@@ -202,7 +232,22 @@ func (a *conflictAdapter) Label(ctx context.Context, item Item) (Labeling, error
 	rejectedSomewhere := a.hasRejection(bead) || a.hasRejection(other)
 
 	shared := false
+	// known is whether both beads' changed files were read. A read-only adapter
+	// may not hold a landing's commits, and then neither shared nor disjoint
+	// can be said.
+	known := false
 	if landedBead != nil && landedOther != nil {
+		heldBead, err := a.holdsLanding(ctx, landedBead)
+		if err != nil {
+			return Labeling{}, err
+		}
+		heldOther, err := a.holdsLanding(ctx, landedOther)
+		if err != nil {
+			return Labeling{}, err
+		}
+		known = heldBead && heldOther
+	}
+	if known {
 		fb, err := a.landedFiles(ctx, bead, landedBead)
 		if err != nil {
 			return Labeling{}, err
@@ -225,7 +270,7 @@ func (a *conflictAdapter) Label(ctx context.Context, item Item) (Labeling, error
 	switch {
 	case rejected || shared:
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: true}, Rule: strings.Join(rules, "+")}, nil
-	case landedBead != nil && landedOther != nil && !rejectedSomewhere:
+	case known && !rejectedSomewhere:
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: false}, Rule: ruleConflictDisjointFiles}, nil
 	}
 	return Labeling{}, nil
@@ -319,6 +364,29 @@ func (a *conflictAdapter) landedFiles(ctx context.Context, bead string, rec *lan
 	return files, nil
 }
 
+// holdsLanding reports whether the clone holds both commits of a landing, the
+// base and the head its changed files are read between. A read-only adapter
+// asks first, and a commit it lacks reads as not held, which leaves the pair
+// unlabeled. A rev-parse failure reads the same way, as isAncestor does, so
+// it never becomes a negative label. A fetching adapter reports every landing
+// as held, since its clone fetches on the first read. A ref that fails the
+// safety check reports held, so landedFiles refuses it as before.
+func (a *conflictAdapter) holdsLanding(ctx context.Context, rec *land.LandingRecord) (bool, error) {
+	if !a.readOnly || !safeRef(rec.Base) || !safeRef(rec.Head) {
+		return true, nil
+	}
+	repo, err := a.clone(ctx)
+	if err != nil {
+		return false, err
+	}
+	for _, ref := range []string{rec.Base, rec.Head} {
+		if _, err := repo.Run(ctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // isAncestor reports whether commit anc is an ancestor of desc. The merge base of
 // the two is anc exactly when it is.
 //
@@ -356,8 +424,9 @@ func (a *conflictAdapter) isAncestor(ctx context.Context, anc, desc string) (gua
 }
 
 // clone opens the bare clone on first use and fetches its branches once, so the
-// reads after it see the rig's current heads.
-func (a *conflictAdapter) clone(ctx context.Context) (conflictRepo, error) {
+// reads after it see the rig's current heads. A read-only adapter opens it and
+// never fetches.
+func (a *conflictAdapter) clone(ctx context.Context) (ConflictRepo, error) {
 	if a.repo == nil {
 		r, err := a.openClone()
 		if err != nil {
@@ -365,7 +434,7 @@ func (a *conflictAdapter) clone(ctx context.Context) (conflictRepo, error) {
 		}
 		a.repo = r
 	}
-	if !a.synced {
+	if !a.synced && !a.readOnly {
 		if err := a.repo.Sync(ctx); err != nil {
 			return nil, fmt.Errorf("fetching the bare clone: %w", err)
 		}

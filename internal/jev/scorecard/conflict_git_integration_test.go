@@ -78,7 +78,7 @@ func TestIntegrationConflictLandedFilesReadsARealFork(t *testing.T) {
 	}
 
 	town := t.TempDir()
-	real := newConflictAdapter(town, func() (conflictRepo, error) { return git, nil })
+	real := newConflictAdapter(town, func() (ConflictRepo, error) { return git, nil })
 	realFiles, err := real.landedFiles(ctx, "gt-b", &land.LandingRecord{Base: landed, Head: head})
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestIntegrationConflictLandedFilesReadsARealFork(t *testing.T) {
 	// The same history in the fake the unit tests read.
 	fake, sha := linearHistory([]map[string]string{{"base.txt": "base"}, {"a.go": "a"}})
 	fakeHead := fake.fork(t, sha[0], map[string]string{"b.go": "b"})
-	fakeAdapter := newConflictAdapter(t.TempDir(), func() (conflictRepo, error) { return fake, nil })
+	fakeAdapter := newConflictAdapter(t.TempDir(), func() (ConflictRepo, error) { return fake, nil })
 	fakeFiles, err := fakeAdapter.landedFiles(ctx, "gt-b", &land.LandingRecord{Base: sha[1], Head: fakeHead})
 	if err != nil {
 		t.Fatal(err)

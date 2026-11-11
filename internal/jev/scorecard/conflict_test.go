@@ -246,7 +246,7 @@ func TestConflictAdapterLabelsAPair(t *testing.T) {
 			if c.log != nil {
 				writeDaemonLog(t, town, c.log(sha))
 			}
-			a := newConflictAdapter(town, func() (conflictRepo, error) { return repo, nil })
+			a := newConflictAdapter(town, func() (ConflictRepo, error) { return repo, nil })
 			item, err := a.Parse(conflictLine(t, "gt-b", "gt-a", 0.5, 0.5, 1))
 			if err != nil {
 				t.Fatal(err)
@@ -285,7 +285,7 @@ func TestConflictAdapterLabelsATargetThatAdvancedAfterFork(t *testing.T) {
 	// gt-b merged onto the tip gt-o left, so its base holds gt-o's landing.
 	appendLanding(t, f, "gt-b", sha[1], b)
 
-	a := newConflictAdapter(town, func() (conflictRepo, error) { return repo, nil })
+	a := newConflictAdapter(town, func() (ConflictRepo, error) { return repo, nil })
 	item, err := a.Parse(conflictLine(t, "gt-b", "gt-o", 0.5, 0.5, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -419,7 +419,7 @@ func TestConflictLabelTiplessRejectionNeverDisjoint(t *testing.T) {
 			writeLandings(t, town, sha, map[string]int{"gt-b": 1, "gt-a": 2})
 			writeDaemonLog(t, town, rejectLine(rejected, "conflict"))
 
-			a := newConflictAdapter(town, func() (conflictRepo, error) { return repo, nil })
+			a := newConflictAdapter(town, func() (ConflictRepo, error) { return repo, nil })
 			item, err := a.Parse(conflictLine(t, "gt-a", "gt-b", 0.5, 0.5, 1))
 			if err != nil {
 				t.Fatal(err)
@@ -443,7 +443,7 @@ func TestConflictLabelTiplessRejectionNeverDisjoint(t *testing.T) {
 func TestConflictAdapterLeavesAnUnlandedPairAloneWithoutTheClone(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	a := newConflictAdapter(town, func() (conflictRepo, error) {
+	a := newConflictAdapter(town, func() (ConflictRepo, error) {
 		t.Error("the clone was opened for a pair with no landing and no rejection")
 		return nil, fmt.Errorf("not opened")
 	})
@@ -663,13 +663,13 @@ func rejectLineTip(bead, kind, tip string) string {
 
 // syncCounter counts the fetches a conflict repo is asked for.
 type syncCounter struct {
-	conflictRepo
+	ConflictRepo
 	synced int
 }
 
 func (s *syncCounter) Sync(ctx context.Context) error {
 	s.synced++
-	return s.conflictRepo.Sync(ctx)
+	return s.ConflictRepo.Sync(ctx)
 }
 
 // A fetch into the submission battery's shared clone waits out the clone's
@@ -680,8 +680,8 @@ func TestConflictAdapterFetchTakesTheCloneFetchLock(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	repo, _ := linearHistory([]map[string]string{{"base.txt": "base"}})
-	counted := &syncCounter{conflictRepo: repo}
-	a := newConflictAdapter(town, func() (conflictRepo, error) {
+	counted := &syncCounter{ConflictRepo: repo}
+	a := newConflictAdapter(town, func() (ConflictRepo, error) {
 		return submission.FetchLocked{Cloner: counted, TownRoot: town}, nil
 	})
 
@@ -724,7 +724,7 @@ func TestRejectedAfterNeedsMoreThanAncestry(t *testing.T) {
 	writeLandings(t, town, sha, map[string]int{"gt-b": 1, "gt-a": 2})
 	writeDaemonLog(t, town, mergeLine("gt-a", sha[2], sha[1], "cand1")+rejectLine("gt-a", "conflict"))
 
-	a := newConflictAdapter(town, func() (conflictRepo, error) { return repo, nil })
+	a := newConflictAdapter(town, func() (ConflictRepo, error) { return repo, nil })
 	item, err := a.Parse(conflictLine(t, "gt-b", "gt-a", 0.5, 0.5, 1))
 	if err != nil {
 		t.Fatal(err)
