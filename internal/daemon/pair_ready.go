@@ -14,12 +14,13 @@ package daemon
 // check cannot pass for a town with no pair. After a run of failed reads the
 // stale pairs are dropped and only that item remains.
 //
-// The same scan reads the images workflow's newest run for each green commit
-// newer than the running one: a run that ended failed or canceled means the
-// commit's pair will never arrive by itself, so the scan raises an item for it
-// naming the commit and the first "Error:" line of the job it ran (images.failed).
-// One item per commit: a re-scan keeps it, and a later green run for the commit
-// clears it (gt-3vafwr).
+// For a green commit newer than the running one whose pair is not published, the
+// same scan reads the images workflow's newest run for that commit: a run that
+// ended failed or canceled means the pair will never arrive by itself, so the
+// scan raises an item for it naming the commit and the first "Error:" line of the
+// job it ran (images.failed). One item per commit: a re-scan keeps it, and a
+// later green run for the commit clears it (gt-3vafwr). A failed run's answer is
+// reused while it stays the commit's newest run, so its job log is read once.
 //
 // It reads through the viewer's credential and never rolls, pulls or changes a
 // branch, so it is not a lifecycle step.
@@ -35,6 +36,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
@@ -118,6 +120,14 @@ type pairReadyRig struct {
 	Err      error
 }
 
+// pairReadyFailedRun is a failed images run a read found for a green commit: its
+// run ID and the item it raised. The item is reused while the commit's newest
+// run is still that run.
+type pairReadyFailedRun struct {
+	runID int64
+	item  attention.Item
+}
+
 // pairReadyCheck holds, per rig, the items the rig's last read raised, the
 // consecutive failed reads each rig has had, and when the next read is due. The
 // heartbeat writes it and the attention tick reads it, so a mutex guards it.
@@ -127,7 +137,11 @@ type pairReadyCheck struct {
 	// fails counts a rig's consecutive failed reads, keyed like held, with
 	// pairReadyTownState for the reads made for every rig at once.
 	fails map[string]int
-	next  time.Time
+	// failed holds, per images-failed key, the failed run the last read found for
+	// that commit. A read that finds the same run as the commit's newest one reuses
+	// its item rather than reading the job and its log again.
+	failed map[string]pairReadyFailedRun
+	next   time.Time
 }
 
 // run makes the check when it is due at now, and does nothing otherwise. A
@@ -154,9 +168,10 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 		c.townFailed(pairReadyUnreadablePrefix+"town:rigs", err)
 		return
 	}
-	prev, fails := c.snapshot()
+	prev, fails, failed := c.snapshot()
 	out := make(map[string][]attention.Item, len(list))
 	next := make(map[string]int, len(list))
+	nextFailed := make(map[string]pairReadyFailedRun)
 	for _, r := range list {
 		if r.Err != nil {
 			logf("deploy pair check: %s: %v", r.Rig, r.Err)
@@ -164,7 +179,10 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 			out[r.Rig] = pairReadyKept(prev[r.Rig], next[r.Rig], pairReadyUnreadableItem(r.Rig, r.Err))
 			continue
 		}
-		items, scanErr, err := pairReadyItems(ctx, r, running, prev[r.Rig])
+		items, found, scanErr, err := pairReadyItems(ctx, r, running, prev[r.Rig], failed, logf)
+		for key, f := range found {
+			nextFailed[key] = f
+		}
 		switch {
 		case err != nil:
 			logf("deploy pair check: %s: %v", r.Rig, err)
@@ -182,6 +200,7 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 	defer c.mu.Unlock()
 	c.held = out
 	c.fails = next
+	c.failed = nextFailed
 }
 
 // townFailed records a read the check could not make for every rig at once.
@@ -231,8 +250,10 @@ func pairReadyKept(prev []attention.Item, fails int, unreadable attention.Item) 
 }
 
 // snapshot is a copy of the items and failure counts the check holds, read
-// before a pass so a rig whose read fails can keep them.
-func (c *pairReadyCheck) snapshot() (map[string][]attention.Item, map[string]int) {
+// before a pass so a rig whose read fails can keep them. The failed runs are
+// returned as they are: run replaces the map rather than writing to it, so a
+// pass reads them without a copy.
+func (c *pairReadyCheck) snapshot() (map[string][]attention.Item, map[string]int, map[string]pairReadyFailedRun) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	held := make(map[string][]attention.Item, len(c.held))
@@ -243,7 +264,7 @@ func (c *pairReadyCheck) snapshot() (map[string][]attention.Item, map[string]int
 	for name, n := range c.fails {
 		fails[name] = n
 	}
-	return held, fails
+	return held, fails, c.failed
 }
 
 // observed is every item the check holds, ordered by key, for the attention
@@ -268,21 +289,24 @@ type pairReadyGreen struct {
 
 // pairReadyItems reads one rig and returns the items it raises: one for each
 // green commit newer than running whose daemon and polecat images are both in
-// the registry at its stamp, and one for each of those commits whose images
-// workflow run ended failed or canceled. A read that cannot list the branches
-// returns an error, so the caller keeps what the rig held until the failure
-// bound. A listing that ended early or a branch whose comparison, run read or
+// the registry at its stamp, and one for each commit whose pair is missing and
+// whose images workflow run ended failed or canceled. A read that cannot list
+// the branches returns an error, so the caller keeps what the rig held until the
+// failure bound. A listing that ended early or a branch whose comparison or
 // image read did not answer returns a non-nil scanErr with the items it did
 // confirm plus the items from prev whose branch it did not judge: a scan that
-// could not read a branch cannot say its pair is gone, and one branch's
-// failure does not discard the pass. An image that is not there is not an
-// error: one image alone raises nothing.
-func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []attention.Item) (items []attention.Item, scanErr error, err error) {
+// could not read a branch cannot say its pair is gone, and one branch's failure
+// does not discard the pass. An image that is not there is not an error: one
+// image alone raises nothing. A failed run list does not stop the pass either:
+// that commit keeps the item it held and the read is logged. found is the failed
+// runs this read found, for the next read to reuse.
+func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []attention.Item, runs map[string]pairReadyFailedRun, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
 	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	var out []attention.Item
+	found = make(map[string]pairReadyFailedRun)
 	// seen holds the items this pass judged: both the pair and the failed build
 	// of a commit it read to a verdict. A branch a failed read stopped at is not
 	// seen, so its previous items are kept and a stale one is only cleared by a
@@ -318,17 +342,6 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 			mark(g.sha12)
 			continue
 		}
-		// The images workflow is what publishes this commit's pair, so a run of
-		// it that failed is why no pair can arrive. An unread run list leaves the
-		// commit unjudged.
-		failed, err := pairReadyImagesFailed(ctx, r, g, prev)
-		if err != nil {
-			incomplete = err
-			break
-		}
-		if failed != nil {
-			out = append(out, *failed)
-		}
 		daemon, daemonFound, err := r.Registry.TagDigest(ctx, imagevalues.DaemonImage, g.sha12)
 		if err != nil {
 			incomplete = fmt.Errorf("reading the %s image at green/%s: %w", imagevalues.DaemonImage, g.sha12, err)
@@ -340,10 +353,21 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 			break
 		}
 		mark(g.sha12)
-		if !daemonFound || !polecatFound {
+		if daemonFound && polecatFound {
+			out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, ahead.TotalCommits))
 			continue
 		}
-		out = append(out, pairReadyItem(r.Rig, g, running, daemon, polecat, ahead.TotalCommits))
+		// The pair is missing, so the commit's images run is what says whether one
+		// can still arrive. Only such a commit asks Forgejo about its run. The
+		// check settles the commit's failed-build item here, so the incomplete
+		// path below never has to.
+		failed, failedRun := pairReadyImagesFailed(ctx, r, g, prev, runs, logf)
+		if failed != nil {
+			out = append(out, *failed)
+		}
+		if failedRun != 0 {
+			found[imagesFailedKey(r.Rig, g.sha12)] = pairReadyFailedRun{runID: failedRun, item: *failed}
+		}
 	}
 	if incomplete != nil {
 		for _, it := range prev {
@@ -351,9 +375,9 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 				out = append(out, it)
 			}
 		}
-		return out, incomplete, nil
+		return out, found, incomplete, nil
 	}
-	return out, nil, nil
+	return out, found, nil, nil
 }
 
 // pairReadyScan is one rig's branch listing. complete says the listing reached
@@ -424,23 +448,35 @@ func imagesFailedKey(rig, sha12 string) string {
 }
 
 // pairReadyImagesFailed judges the images workflow's newest run for a green
-// commit against the items the rig last held. A run that ended failed or
-// canceled raises the item naming the commit and the first "Error:" line of
-// the job it ran; a successful run raises nothing, which is what clears an item
-// raised for the commit before. A run still in flight is no answer, so the item
-// the check last raised stands until the run settles. An error is a run list
-// the check could not read: it says nothing about the commit, so the commit is
-// left unjudged and its previous items are kept.
-func pairReadyImagesFailed(ctx context.Context, r pairReadyRig, g pairReadyGreen, prev []attention.Item) (*attention.Item, error) {
+// commit whose pair is missing. A run that ended failed or canceled raises the
+// item naming the commit and the first "Error:" line of the job it ran; a
+// successful run raises nothing, which is what clears an item raised for the
+// commit before. A run still in flight is no answer, and neither is a run list
+// the check could not read or a commit with no run in the list: in each case the
+// item the check last raised for the commit stands. A failed run whose log the
+// check read is returned with its run ID, so the next read reuses the item; the
+// ID is 0 otherwise.
+func pairReadyImagesFailed(ctx context.Context, r pairReadyRig, g pairReadyGreen, prev []attention.Item, runs map[string]pairReadyFailedRun, logf func(string, ...any)) (item *attention.Item, runID int64) {
 	key := imagesFailedKey(r.Rig, g.sha12)
+	kept := func() *attention.Item {
+		for i := range prev {
+			if prev[i].Key == key && prev[i].Kind == attention.KindImagesFailed {
+				it := prev[i]
+				return &it
+			}
+		}
+		return nil
+	}
 	list, err := r.API.ListRuns(ctx, r.Owner, r.Repo, forgejo.RunFilter{
 		Event: []string{"push"}, WorkflowID: pairReadyImagesWorkflow, HeadSHA: g.sha, Limit: pairReadyRunLimit,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("reading the %s runs for green/%s: %w", pairReadyImagesWorkflow, g.sha12, err)
+	if err == nil && list == nil {
+		err = errors.New("the list is not there")
 	}
-	if list == nil {
-		return nil, fmt.Errorf("reading the %s runs for green/%s: the list is not there", pairReadyImagesWorkflow, g.sha12)
+	if err != nil {
+		logf("deploy pair check: %s: reading the %s runs for green/%s, the failed-build check keeps what it held for that commit: %v",
+			r.Rig, pairReadyImagesWorkflow, g.sha12, err)
+		return kept(), 0
 	}
 	// The route lists runs newest first, so the first one carrying this commit
 	// is the run that decides it. The filter asks for the commit and the run's
@@ -454,68 +490,85 @@ func pairReadyImagesFailed(ctx context.Context, r pairReadyRig, g pairReadyGreen
 		}
 	}
 	if run == nil {
-		return nil, nil
+		return kept(), 0
 	}
 	switch run.Status {
 	case deployRunFailed, deployRunCancelled:
+		if c, ok := runs[key]; ok && c.runID == run.ID {
+			it := c.item
+			return &it, run.ID
+		}
+		line, settled := pairReadyImagesErrorLine(ctx, r, *run)
 		it := attention.Item{
 			Key:      key,
 			Kind:     attention.KindImagesFailed,
 			Severity: attention.SeverityHigh,
 			Rig:      r.Rig,
 			SHA:      g.sha,
-			Summary: fmt.Sprintf("images workflow failed for %s: %s",
-				g.sha12, pairReadyImagesErrorLine(ctx, r, *run)),
+			Summary:  fmt.Sprintf("images workflow failed for %s: %s", g.sha12, line),
 		}
-		return &it, nil
+		if !settled {
+			return &it, 0
+		}
+		return &it, run.ID
 	case deployRunSucceeded:
-		return nil, nil
+		return nil, 0
 	}
-	for i := range prev {
-		if prev[i].Key == key && prev[i].Kind == attention.KindImagesFailed {
-			kept := prev[i]
-			return &kept, nil
-		}
-	}
-	return nil, nil
+	return kept(), 0
 }
 
 // pairReadyImagesErrorLine is what a failed images run says went wrong: the
-// first line of the run's failed job's log matching "Error:". A log the check
-// cannot read is said to be unreadable rather than left out, so the item names
-// the failure it does know about (the run ended failed) and says which part it
-// does not.
-func pairReadyImagesErrorLine(ctx context.Context, r pairReadyRig, run forgejo.ActionRun) string {
+// first line of the run's failed job's log matching "Error:", as quoted CI
+// output. A log the check cannot read is said to be unreadable rather than left
+// out, so the item names the failure it does know about (the run ended failed)
+// and says which part it does not. settled is false when a read failed, so that
+// answer is not kept for the next read.
+func pairReadyImagesErrorLine(ctx context.Context, r pairReadyRig, run forgejo.ActionRun) (line string, settled bool) {
 	jobs, err := r.API.ListRunJobs(ctx, r.Owner, r.Repo, run.ID)
 	if err != nil {
-		return "the job log could not be read: " + oneLine(err.Error())
+		return "the job log could not be read: " + oneLine(err.Error()), false
 	}
 	jobID, ok := pairReadyFailedJob(jobs)
 	if !ok {
-		return "the run names no job to read, so its log could not be read"
+		return "no failed job found, so no log was read", true
 	}
 	log, err := r.API.JobLogs(ctx, r.Owner, r.Repo, jobID)
 	if err != nil {
-		return "the job log could not be read: " + oneLine(err.Error())
+		return "the job log could not be read: " + oneLine(err.Error()), false
 	}
-	if line := imagesErrorLine(log); line != "" {
-		return oneLine(line)
+	if errLine := imagesErrorLine(log); errLine != "" {
+		return imagesLogText(errLine), true
 	}
-	return "the job log names no Error: line"
+	return "the job log names no Error: line", true
+}
+
+// imagesLogText is a job-log line as the summary states it. The log is text a
+// build writes, so it is untrusted: whitespace becomes a space, other control and
+// non-printing characters are dropped, the line keeps the 160-character cap, and
+// it is quoted as CI output so it reads as data. A double quote in the line
+// becomes a single one, so the quoting stays unambiguous.
+func imagesLogText(line string) string {
+	clean := strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return ' '
+		case unicode.IsPrint(r):
+			return r
+		}
+		return -1
+	}, line)
+	clean = strings.ReplaceAll(clean, `"`, "'")
+	return `log: "` + oneLine(clean) + `"`
 }
 
 // pairReadyFailedJob is the job whose log carries a failed run's reason: the
-// first job the API reports as failed or canceled, or the run's only job when
-// none is marked, since a run that failed with no failed job still ran the one
-// job its workflow has.
+// first job the API reports as failed or canceled. A run that marks no such job
+// has none to read, so the check does not guess at one.
 func pairReadyFailedJob(jobs []forgejo.ActionRunJob) (int64, bool) {
 	for _, job := range jobs {
 		if job.Status == deployRunFailed || job.Status == deployRunCancelled {
 			return job.ID, true
 		}
-	}
-	if len(jobs) > 0 {
-		return jobs[0].ID, true
 	}
 	return 0, false
 }
