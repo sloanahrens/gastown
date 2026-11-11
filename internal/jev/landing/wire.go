@@ -91,8 +91,8 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 }
 
 // rigRepo is the rig's git repo: the shared bare .repo.git. A rig without one,
-// including one that still has only a mayor/rig clone, is an error naming the
-// bare path.
+// including one that still has only a legacy clone beside it, is an error
+// naming the bare path.
 func rigRepo(rigRoot string) (string, error) {
 	dir := constants.RigBareRepoPath(rigRoot)
 	if info, err := os.Stat(dir); err != nil || !info.IsDir() {

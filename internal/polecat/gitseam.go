@@ -8,9 +8,9 @@ import (
 )
 
 // gitRepo is the part of *git.Git polecat works through: the rig's repo base
-// (the shared .repo.git), each polecat worktree, and the holders of branches
-// it claims (docs/testing.md, "Seams for external tools"). Unit tests open
-// gitfake repositories instead.
+// (the shared .repo.git), each polecat worktree, and the
+// holders of branches it claims (docs/testing.md, "Seams for external
+// tools"). Unit tests open gitfake repositories instead.
 type gitRepo interface {
 	git.IndexSkewClassifier
 

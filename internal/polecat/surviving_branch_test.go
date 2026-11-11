@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
 )
@@ -44,80 +43,56 @@ func TestBranchOnOrigin(t *testing.T) {
 		}
 	}
 
-	if _, err := branchOnOrigin(w.opener(), t.TempDir(), "polecat/agate/gt-a+mu1"); !errors.Is(err, ErrNoRigRepo) {
-		t.Errorf("no-repo error = %v, want ErrNoRigRepo", err)
+	if _, err := branchOnOrigin(w.opener(), t.TempDir(), "polecat/agate/gt-a+mu1"); !errors.Is(err, ErrNoBareRepo) {
+		t.Errorf("no-repo error = %v, want ErrNoBareRepo", err)
 	}
 }
 
-// A rig with a legacy mayor/rig clone and no .repo.git is an unknown answer
-// that names the bare path from every survival reader: its polecat branches
-// are unreadable here, so it must never read as the nothing-to-protect
-// ErrNoRigRepo.
-func TestLegacyCloneWithoutBareRepoIsUnknownForEachReader(t *testing.T) {
+// A rig root with no .repo.git fails closed from every public survival reader,
+// with or without a legacy mayor/rig clone beside it: the polecat branches are
+// not read from anywhere else, so the answer is the unknown ErrNoBareRepo, never
+// a rig with nothing to protect. None of these readers runs git before this
+// refusal, so the rows are hermetic.
+func TestRigWithNoBareRepoFailsClosedForEachReader(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	gits := newWorld().opener()
 	for _, tc := range []struct {
-		name string
-		read func() error
+		name   string
+		legacy bool // a mayor/rig clone with no .repo.git beside it
 	}{
-		{name: "origin polecat branches", read: func() error {
-			_, err := listOriginPolecatBranches(gits, root)
-			return err
-		}},
-		{name: "branch on origin", read: func() error {
-			_, err := branchOnOrigin(gits, root, "polecat/agate/gt-a+mu1")
-			return err
-		}},
-		{name: "work survival", read: func() error {
-			_, err := newWorkSurvival(gits, root, time.Second)
-			return err
-		}},
+		{name: "no git state"},
+		{name: "legacy mayor/rig clone", legacy: true},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := tc.read()
-			if err == nil || errors.Is(err, ErrNoRigRepo) || !strings.Contains(err.Error(), "no .repo.git under "+root) {
-				t.Fatalf("err = %v, want an unknown error naming no .repo.git under %s", err, root)
-			}
-		})
-	}
-}
-
-// A rig with neither a shared .repo.git nor a mayor/rig clone has no git state
-// at all, so every survival reader answers ErrNoRigRepo: there is no polecat
-// branch to judge, and the caller may treat the rig as having nothing to
-// protect.
-func TestRigWithNoGitStateIsErrNoRigRepoForEachReader(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	gits := newWorld().opener()
-	for _, tc := range []struct {
-		name string
-		read func() error
-	}{
-		{name: "origin polecat branches", read: func() error {
-			_, err := listOriginPolecatBranches(gits, root)
-			return err
-		}},
-		{name: "branch on origin", read: func() error {
-			_, err := branchOnOrigin(gits, root, "polecat/agate/gt-a+mu1")
-			return err
-		}},
-		{name: "work survival", read: func() error {
-			_, err := newWorkSurvival(gits, root, time.Second)
-			return err
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if err := tc.read(); !errors.Is(err, ErrNoRigRepo) {
-				t.Fatalf("err = %v, want ErrNoRigRepo for a rig with no git state", err)
-			}
-		})
+		for _, r := range []struct {
+			name string
+			read func(root string) error
+		}{
+			{name: "ListOriginPolecatBranches", read: func(root string) error {
+				_, err := ListOriginPolecatBranches(root)
+				return err
+			}},
+			{name: "BranchOnOrigin", read: func(root string) error {
+				_, err := BranchOnOrigin(root, "polecat/agate/gt-a+mu1")
+				return err
+			}},
+			{name: "NewWorkSurvival", read: func(root string) error {
+				_, err := NewWorkSurvival(root)
+				return err
+			}},
+		} {
+			t.Run(tc.name+"/"+r.name, func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				if tc.legacy {
+					if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				err := r.read(root)
+				if !errors.Is(err, ErrNoBareRepo) || !strings.Contains(err.Error(), "no .repo.git under "+root) {
+					t.Fatalf("err = %v, want ErrNoBareRepo naming no .repo.git under %s", err, root)
+				}
+			})
+		}
 	}
 }
 

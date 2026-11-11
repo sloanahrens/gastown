@@ -355,6 +355,50 @@ func TestLiveGitRigWithNoSharedRepoIsUnknownForASandboxSeat(t *testing.T) {
 	}
 }
 
+// sharedRepoSeatRef fails closed for a rig root with no .repo.git, with or
+// without a legacy mayor/rig clone: the answer is ErrNoBareRepo, never the
+// not-found of a repository that holds no ref. An empty rig root names no
+// repository, so it is not found.
+func TestSharedRepoSeatRefWithoutBareRepo(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		legacy  bool // a mayor/rig clone with no .repo.git beside it
+		empty   bool // the caller names no rig root
+		wantErr bool
+	}{
+		{name: "a rig with no git state fails closed", wantErr: true},
+		{name: "a rig with only a mayor/rig clone fails closed", legacy: true, wantErr: true},
+		{name: "an empty rig root is not found", empty: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			if tc.empty {
+				root = " "
+			}
+			if tc.legacy {
+				if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			g, ref, ok, err := sharedRepoSeatRef(gitOpener{}, root, "polecat/toast/gt-a+x")
+			if !tc.wantErr {
+				if err != nil || ok || g != nil || ref != "" {
+					t.Fatalf("sharedRepoSeatRef = (%v, %q, %v, %v), want not found with no error", g, ref, ok, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrNoBareRepo) || !strings.Contains(err.Error(), "no .repo.git under "+root) {
+				t.Fatalf("err = %v, want ErrNoBareRepo naming no .repo.git under %s", err, root)
+			}
+			if ok {
+				t.Fatalf("ok = true for a rig with no .repo.git, want false")
+			}
+		})
+	}
+}
+
 const sharedRepoBranch = "polecat/toast/gt-a+x"
 
 // sharedRepoRig builds a rig whose shared .repo.git holds the

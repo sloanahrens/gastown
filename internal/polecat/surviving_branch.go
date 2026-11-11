@@ -3,7 +3,6 @@ package polecat
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -13,8 +12,8 @@ import (
 
 // rigGitRepo returns the shared bare repo (<rigRoot>/.repo.git) that holds a
 // rig's shared refs, mirroring Manager.repoBase. Returns "" when the rig has
-// none, which callers must treat as "cannot determine" (fail closed) through
-// noBareRepoErr.
+// none; callers return noBareRepoErr for that, which fails closed: a rig root
+// with no .repo.git is an unknown error, never nothing to protect.
 func rigGitRepo(rigRoot string) string {
 	bare := constants.RigBareRepoPath(rigRoot)
 	if info, err := os.Stat(bare); err == nil && info.IsDir() {
@@ -28,16 +27,11 @@ func openRigRepo(gits gitOpener, root string) gitRepo {
 	return gits.OpenDir(root, "")
 }
 
-// noBareRepoErr is the error for a rig root with no shared .repo.git. A rig
-// with neither .repo.git nor a legacy mayor/rig clone has no git state, which
-// is ErrNoRigRepo. A rig with a mayor/rig clone holds polecat branches this
-// predicate no longer reads, so its answer is unknown, never ErrNoRigRepo: the
-// caller would read that as nothing to protect and release the bead.
+// noBareRepoErr is the error for a rig root with no shared .repo.git. It is an
+// unknown answer, never nothing to protect: the rig's polecat branches are not
+// read from anywhere else, so a caller that released on it would hand off work.
 func noBareRepoErr(rigRoot string) error {
-	if info, err := os.Stat(filepath.Join(rigRoot, "mayor", "rig")); err == nil && info.IsDir() {
-		return fmt.Errorf("no .repo.git under %s", rigRoot)
-	}
-	return fmt.Errorf("%w: no .repo.git under %s", ErrNoRigRepo, rigRoot)
+	return fmt.Errorf("%w under %s", ErrNoBareRepo, rigRoot)
 }
 
 // ListOriginPolecatBranches returns the polecat branch names present on the

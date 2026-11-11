@@ -214,10 +214,10 @@ func TestSurvivingWorkForIssue(t *testing.T) {
 		}
 	})
 
-	t.Run("no rig repo", func(t *testing.T) {
+	t.Run("no .repo.git", func(t *testing.T) {
 		t.Parallel()
-		if _, err := newSurvivalFixture(t).survivingWork(t.TempDir()); !errors.Is(err, ErrNoRigRepo) {
-			t.Fatalf("err = %v, want ErrNoRigRepo", err)
+		if _, err := newSurvivalFixture(t).survivingWork(t.TempDir()); !errors.Is(err, ErrNoBareRepo) {
+			t.Fatalf("err = %v, want ErrNoBareRepo", err)
 		}
 	})
 }
@@ -237,7 +237,7 @@ func TestVerdictFromClassifiesTheAnswer(t *testing.T) {
 		{name: "a branch survives", branch: branch, wantSurvives: branch},
 		{name: "nothing survives"},
 		{name: "an unreachable origin is unknown", err: errors.New("origin unreachable"), wantUnknown: true},
-		{name: "no repo to protect is nothing survives", err: ErrNoRigRepo},
+		{name: "no .repo.git is unknown", err: ErrNoBareRepo, wantUnknown: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

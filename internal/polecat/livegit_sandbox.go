@@ -256,9 +256,10 @@ func sandboxSeatGoneSharedRepoGitState(gits gitOpener, worktreePath, rigRoot, br
 }
 
 // sharedRepoSeatRef locates the shared repository's local ref for a recorded
-// branch. ok is false when the rig holds no ref for the branch; a rig with no
-// .repo.git, or a repository or ref that cannot be read, is an error, so a
-// missing repository is never read as a ref that holds nothing.
+// branch. ok is false when the rig holds no ref for the branch; a rig root with
+// no .repo.git is ErrNoBareRepo (fails closed), and a repository or ref that
+// cannot be read is an error, so a missing repository is never read as a ref
+// that holds nothing.
 func sharedRepoSeatRef(gits gitOpener, rigRoot, branch string) (g gitRepo, localRef string, ok bool, err error) {
 	root := strings.TrimSpace(rigRoot)
 	if root == "" {
