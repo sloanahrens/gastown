@@ -1,4 +1,4 @@
-> Status: finished 2026-11-11 (evidence for the design; numbers are a four-day holdout).
+> Status: historical (2026-11). Merged in: docs/plans/2026-11-11-story-points-design.md. Not maintained.
 
 # Story points retrospective (eagle, 2026-11-11)
 
@@ -202,7 +202,7 @@ The operator decided a point is polecat-minutes rounded to the nearest Fibonacci
 | Share of beads, Haiku | 0.2% | 3.5% | 19.4% | 23.7% | 20.6% | 12.6% | 9.5% | 7.2% | 2.2% | 1.1% |
 | Share of beads, DeepSeek | 0.3% | 2.1% | 10.1% | 22.8% | 23.3% | 17.8% | 10.5% | 7.3% | 3.9% | 1.8% |
 
-The scale spreads the work well; points 3 to 21 hold about 90% of beads. The beads that actually take more than 21 points (over 27.5 minutes) are 11.8% of beads (Haiku 10.5%, DeepSeek 13.1%) and carry 51% of polecat time.
+The scale spreads the work well; points 3 to 21 hold about 85% of beads. The beads that actually take more than 21 points (over 27.5 minutes) are 11.8% of beads (Haiku 10.5%, DeepSeek 13.1%) and carry 51% of polecat time.
 
 **The split rule cannot work as worded.** A regression averages toward the middle, so no estimate is a long one: in the 371 common beads, the blends' largest estimate is 20 to 23 minutes, and none is above 27.5. Of the same 371 beads, 29 (7.8%) actually ran over 27.5 minutes. Treating a lower estimate as the split trigger:
 
@@ -240,5 +240,8 @@ I ran the analysis in Python as scratch (it is hand-run, off any town path). Not
 - I did not re-run on the Mac's copy of the ledgers, and I did not read the 1,528 beads with no minutes.
 
 ## Reproduce
+
+The harness is not in the repository. The Go retrain step in the plan (SP16) re-derives the weights, so the Python is the seed and the evidence, not a dependency. Every model above was fitted on beads landed before 11-03 and scored on later ones; the initial weights file in `docs/plans/` was refitted on all 1,797 beads including the holdout.
+
 
 Scratch files under `~/gt/.runtime/eagle/sp/`: `build.py` (joins the ledgers, reviews, usage records and Jev log into `beads.csv`), `est.py` (the shape, hm and Jev estimators and the backtest), `est2.py` (the embedding ridge), `final.py` (the blends, bucket tables and split sweep), `gen.py` (the initial weights file), `hm_beads.tsv` (the hm export; 343 MB), `pod/` (the copied ledgers), `backtest_hm_testset.csv`. The pod ledgers were copied on 2026-11-11 about 12:30.

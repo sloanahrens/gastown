@@ -1,4 +1,4 @@
-> Status: proposed 2026-11-11, awaiting the operator's approval (epic gt-5d9k2f).
+> Status: proposed (2026-11), awaiting the operator's approval (gt-5d9k2f). Historical once the story points work is built; not maintained.
 
 # Story points: design
 
@@ -19,7 +19,7 @@ The town hands each shaped bead to one polecat. Some beads take three minutes an
 The operator decided these on 2026-11-11, through the overseer. They are not reopened here.
 
 1. A point is polecat-minutes rounded to the nearest Fibonacci number (1, 2, 3, 5, 8, 13, 21, 34, 55, 89). The edges are the arithmetic midpoints between neighbours: 1.5, 2.5, 4, 6.5, 10.5, 17, 27.5, 44.5 and 72 minutes. No calibration is needed.
-2. A bead whose a-priori estimate is over 21 points is split before dispatch. About 28 minutes is the edge.
+2. (Superseded by decision 7.) A bead whose a-priori estimate is over 21 points is split before dispatch. About 28 minutes is the edge.
 3. The estimate is a blend of a shape-features model and Jev's `fits_twenty_minutes` answer. hm only names the nearest past beads in the estimate's note. If Jev is unavailable the shape model alone is used.
 4. The shape model is a small model in Go with its weights in a checked-in JSON file, retrained monthly by `gt metrics`. A linear model first, kept if it clears 0.4; boosted trees only if it does not.
 5. Shadow mode lasts a few hours. The live rank correlation is recomputed once 60 estimated beads have landed. The over-21 split turns on only at the operator's word.
@@ -32,7 +32,7 @@ The operator decided these on 2026-11-11, through the overseer. They are not reo
 
 The retrospective was written before decisions 3 to 5 and was extended afterwards at the operator's request. Four findings matter for this design.
 
-**1. The linear shape model is enough.** On the holdout (beads landed 11-03 to 11-06) a ridge-regression linear model on the shape features reaches rank correlation 0.49 against 0.50 for boosted trees. Decision 4 is met by the linear model; boosted trees are not needed.
+**1. The linear shape model is enough.** On the holdout (beads landed 11-03 to 11-06; every model in the retrospective was fitted on beads landed before 11-03 only) a ridge-regression linear model on the shape features reaches rank correlation 0.49 against 0.50 for boosted trees. Decision 4 is met by the linear model; boosted trees are not needed.
 
 **2. A ridge regression on an embedding earns a place, and it can replace Jev.** The operator asked whether a vector embedding could estimate complexity. Nearest-neighbour analogy cannot (0.29: topic dominates). A ridge regression from the embedding of the bead's Constraints and Acceptance text to log minutes can: 0.57 overall, 0.54 on the Haiku seat and 0.58 on the DeepSeek seat, as good as Jev's `fits_twenty_minutes` (0.57). Averaging the three estimators reaches 0.67 [0.61, 0.72]; shape plus embedding without Jev reaches 0.62; shape plus Jev reaches 0.64. The gains between blends sit inside the bootstrap interval, so none of the three blends is proven better than another. The embedding needs no model call and no spend.
 
@@ -42,7 +42,7 @@ The retrospective was written before decisions 3 to 5 and was extended afterward
 
 ## The scale
 
-A bead's points are `FromMinutes(m)`: the nearest Fibonacci number to the minutes, with the edges above. Against the 2,297 span-era beads of the Haiku and DeepSeek seats the scale spreads work well: points 3 to 21 hold about 90% of beads, and 11.8% of beads run over 21 points (over 27.5 minutes) and carry 51% of polecat time. The table is in the retrospective, section 7.
+A bead's points are `FromMinutes(m)`: the nearest Fibonacci number to the minutes, with the edges above. Against the 2,297 span-era beads of the Haiku and DeepSeek seats the scale spreads work well: points 3 to 21 hold about 85% of beads, and 11.8% of beads run over 21 points (over 27.5 minutes) and carry 51% of polecat time. The table is in the retrospective, section 7.
 
 Two labels carry the values on a bead:
 
@@ -67,11 +67,11 @@ flowchart LR
     PTS --> NOTE
 ```
 
-`gt spec estimate <bead>` computes the estimate once and writes `sp:N` and a note.
+`gt spec estimate <bead>` computes the estimate once and writes `sp:N`, a label `sp-rung:<rung>` that names which inputs produced it, and a note.
 
 **Inputs.**
 
-- **Shape features.** Twelve numbers computed from the bead's text in the hm document layout (title line, then `## Description`, then any `## Acceptance` field): acceptance box count, distinct file names, distinct package paths, the log of the text length, constraint bullets, label count, a pod-engine flag, `test` mentions, backtick count, and indicators for the gastown and devops rigs and the Haiku seat. The exact definitions are in the plan, task SP5, and a fixture file of real beads pins the Go implementation to the Python that fitted the weights.
+- **Shape features.** Twelve numbers computed from the bead's text in the hm document layout (title line, then `## Description`, then any `## Acceptance` field): acceptance box count, distinct file names, distinct package paths, the log of the text length, constraint bullets, label count, a pod-engine flag, `test` mentions, backtick count, and indicators for the gastown and devops rigs and the Haiku seat. The seat is unknown before dispatch, so at estimate time the seat indicator is set to its training mean and contributes nothing; the holdout figures used the real seat, so live estimates can differ from the holdout, and the shadow recompute measures that. The exact definitions are in the plan, task SP5, and a fixture file of real beads pins the Go implementation to the Python that fitted the weights.
 - **Embedding ridge.** The Constraints and Acceptance sections, headed `Constraints:` and `Acceptance:`, cut at 6,000 characters, embedded by `qwen3-embedding:4b-q8_0` (2,560 numbers), dotted with a weight vector, plus an intercept, exponentiated to minutes.
 - **Jev.** The dispatch battery's `fits_twenty_minutes` probability, asked before dispatch with an empty agent, mapped to minutes by a monotone table fitted on the training period.
 
@@ -84,7 +84,7 @@ flowchart LR
 | no Jev | shape + embedding | 0.62 / 0.60 |
 | neither | shape alone | 0.50 / 0.39 |
 
-The correlations are on the 371-bead common holdout; the last row's DeepSeek figure is below the 0.4 bar, so an estimate made from shape alone is marked low-confidence in its note.
+The correlations are on the 371-bead common holdout. The rung is recorded on the bead as the label `sp-rung:all`, `sp-rung:shape-jev`, `sp-rung:shape-embed` or `sp-rung:shape`, and in the note. The shape-only rung is the weakest: its DeepSeek correlation is below the 0.4 bar, and the single-input rung is the one the split route must not act on (see [The split route](#the-split-route)).
 
 **hm's part.** `hm query` over the bead's title and Goal, limit five, gives the nearest past beads; their ids, titles and (when known) points go in the note. hm does not change the number.
 
@@ -100,7 +100,11 @@ The correlations are on the 371-bead common holdout; the last row's DeepSeek fig
 - the `fits_twenty_minutes` to minutes table (a monotone list of points);
 - the embedding ridge: model name, dimension, input description, intercept and the 2,560 coefficients (about 25 KB in all).
 
-The first version is produced by the retrospective's harness and committed with this design as `docs/plans/2026-11-11-story-points-initial-weights.json`. It was trained on the 1,797 landed beads (10-26 to 11-06) that have hm text and a landing-record time. `gt metrics` retrains it monthly from the landings table and the bead text, writes the proposed file and a comparison with the checked-in one to the runtime directory, and never replaces the checked-in file itself: a person commits the change as a bead. A retrained model that does not clear 0.4 on its own holdout is reported, not adopted.
+The first version is produced by the retrospective's harness and committed with this design as `docs/plans/2026-11-11-story-points-initial-weights.json`. It was trained on all 1,797 landed beads (10-26 to 11-06) that have hm text and a landing-record time, which includes the beads of the retrospective's holdout. The holdout figures in this design therefore come from fits on the beads before 11-03 only, by the same method, and are not a test of the shipped file; the shipped file's first out-of-sample test is the shadow recompute. `gt metrics` retrains it monthly from the landings table and the bead text, writes the proposed file and a comparison with the checked-in one to the runtime directory, and never replaces the checked-in file itself: a person commits the change as a bead. A retrained model that does not clear 0.4 on its own holdout is reported, not adopted.
+
+## Where the weights come from
+
+The initial weights and the fixtures were produced by a Python harness that is not in the repository: `build.py`, `est.py`, `est2.py`, `final.py` and `gen.py` under `~/gt/.runtime/eagle/sp/`, reading the pod's copies of the landing ledgers, the usage records, the Jev dispatch log and hm's Postgres. The file is a seed. The Go retrain step (SP16) re-derives the weights from the landings table and the bead text, and the Go feature code (SP5) is pinned to the Python by the fixture file, so after the first monthly retrain nothing depends on the harness.
 
 ## The actual
 
@@ -121,7 +125,7 @@ Below 60 estimated landings it prints the count and stops. The overseer brings t
 
 The route is behind a setting, `patrols.spec_dispatch.story_points.split_over`, default off (0), and its bead is held for the operator's word.
 
-The operator's rule reads "over 21 points splits". The retrospective shows that no estimate reaches 21 points, so the route is built on a minutes trigger, and the setting holds that trigger. When the trigger fires, the dispatcher does not sling the bead; it adds the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`, which already keeps a bead off the dispatcher) and a comment with the estimate and the nearest beads, for the overseer or a bird to split. It never splits a bead by itself.
+The operator's rule reads "over 21 points splits". The retrospective shows that no estimate reaches 21 points, so the route is built on a minutes trigger, and the setting holds that trigger. When the trigger fires, the dispatcher does not sling the bead; it adds the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`, which already keeps a bead off the dispatcher) and a comment with the estimate and the nearest beads, for the overseer or a bird to split. It never splits a bead by itself. The route acts only on an estimate from the rungs with at least two inputs (`sp-rung:all`, `shape-jev`, `shape-embed`); it does not act on `sp-rung:shape` until the shadow recompute shows that rung clears 0.4 on its own.
 
 The operator set the trigger at an estimate of 13 points or more, which is 15 estimated minutes or more (13 points begins at 10.5 minutes, so the minutes setting, 15, is the binding one). The setting stays off until the operator's word after the shadow report, and the report recomputes the trigger table on live estimates in case he moves it. The retrospective's sweep gives the shape: at 15 estimated minutes about 4% of beads are flagged, four in ten of them run long and one long bead in five is caught; at 13 minutes 11% are flagged, three in ten run long and four in ten of the long beads are caught. The shadow report recomputes this table on live estimates.
 

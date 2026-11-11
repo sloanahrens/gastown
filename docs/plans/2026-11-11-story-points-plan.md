@@ -1,4 +1,4 @@
-> Status: proposed 2026-11-11; the tasks are filed held until the design is approved.
+> Status: proposed (2026-11), awaiting the operator's approval (gt-5d9k2f). Historical once the story points work is built; not maintained.
 
 # Story points: plan
 
@@ -40,9 +40,9 @@ SP1, SP3, SP5, SP8 and SP10 have no dependencies and can run in parallel. Everyt
 
 **Package.** New package `internal/storypoints`. It imports no other internal package except `internal/hmhints` (SP10) and standard library; the command code lives in `internal/cmd`.
 
-**Scale.** `FromMinutes(m float64) int` returns the nearest Fibonacci number from this list, by the edge values, rounding a value exactly on an edge up: 1 up to 1.5; 2 up to 2.5; 3 up to 4; 5 up to 6.5; 8 up to 10.5; 13 up to 17; 21 up to 27.5; 34 up to 44.5; 55 up to 72; 89 above. Zero or negative minutes is an error, not point 1.
+**Scale.** `FromMinutes(m float64) int` returns the nearest Fibonacci number from this list, by the edge values; a value exactly on an edge belongs to the lower point (the edge is the inclusive upper bound): 1 up to and including 1.5; 2 up to 2.5; 3 up to 4; 5 up to 6.5; 8 up to 10.5; 13 up to 17; 21 up to 27.5; 34 up to 44.5; 55 up to 72; 89 above. Zero or negative minutes is an error, not point 1.
 
-**Labels.** `sp:N` and `sp-actual:N`, N a Fibonacci number from the list.
+**Labels.** `sp:N` and `sp-actual:N`, N a Fibonacci number from the list, and `sp-rung:<rung>` with rung one of `all`, `shape-jev`, `shape-embed`, `shape`, naming which inputs made the estimate.
 
 **The estimate text.** The text the features and the embedding are computed from is the bead as hm lays it out, cut before the first note or comment:
 
@@ -75,9 +75,9 @@ The `labels:` part is left out when there are no labels. The weights were fitted
 | `nbt` | number of backtick characters |
 | `rig_gt` | 1 when the bead's rig is gastown |
 | `rig_dv` | 1 when the bead's rig is devops |
-| `is_haiku` | 1 when the seat class is the Haiku class; at estimate time, before a seat is chosen, 0 |
+| `is_haiku` | 1 when the seat class is the Haiku class, 0 when it is another class; before a seat is chosen it is set to the weights' training mean for this feature, so its term is zero |
 
-Before dispatch the seat is unknown, so `is_haiku` is 0 and the model's seat term (a small negative coefficient) is not applied.
+Before dispatch the seat is unknown, so the seat term (a small negative coefficient) is neutralised by the training mean, not by 0, which would read as the DeepSeek seat.
 
 **Fixtures.** `docs/plans/2026-11-11-story-points-shape-fixtures.json` holds six real beads: their estimate text, the features the fitting harness computed, and the linear model's predicted minutes. SP5 and SP6 test against it.
 
@@ -87,7 +87,7 @@ Before dispatch the seat is unknown, so `is_haiku` is 0 and the model's seat ter
 
 ### SP1. The scale
 
-New `internal/storypoints/points.go`: `FromMinutes`, `Edges`, `Valid(n)`, `SPLabel(n)` and `ActualLabel(n)` returning `sp:N` and `sp-actual:N`, `ParseLabel(s)` returning kind and N, and `ErrNoMinutes`. Table tests over every edge and the value just below and above it, and over parse round trips and rejects (`sp:4`, `sp:`, `sp-actual:0`).
+New `internal/storypoints/points.go`: `FromMinutes`, `Edges`, `Valid(n)`, `SPLabel(n)`, `ActualLabel(n)` and `RungLabel(rung)` returning `sp:N`, `sp-actual:N` and `sp-rung:<rung>`, `ParseLabel(s)` returning kind and value, and `ErrNoMinutes`. Table tests over every edge and the value just below and above it, and over parse round trips and rejects (`sp:4`, `sp:`, `sp-actual:0`).
 Depends: none. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP2. Landings table columns for polecat time
@@ -107,7 +107,7 @@ Depends: SP2, SP3. Gate: `go test ./internal/metrics -count=1`.
 
 ### SP5. Shape features
 
-New `internal/storypoints/shape.go`: `EstimateText(issue)` building the text above from a `beads.Issue`, and `Features(text, rig string, haiku bool) Shape` with the twelve features. Test table from the fixture file (read it with a relative path from the test), plus edge cases: empty description, no Acceptance heading, a bead with labels and one without, a text with a path in a backtick.
+New `internal/storypoints/shape.go`: `EstimateText(issue)` building the text above from a `beads.Issue`, and `Features(text, rig string, seat Seat) Shape` (`Seat` is Haiku, Flash or Unknown; Unknown sets `is_haiku` to the training mean from the weights) with the twelve features. Test table from the fixture file (read it with a relative path from the test), plus edge cases: empty description, no Acceptance heading, a bead with labels and one without, a text with a path in a backtick.
 Depends: none. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP6. The linear model and the weights file
@@ -127,7 +127,7 @@ Depends: none. Gate: `go test ./internal/jev/dispatch -count=1`.
 
 ### SP9. The blend and the fallback ladder
 
-New `internal/storypoints/blend.go`: `Blend(in Inputs) (Blended, error)` where `Inputs` holds optional minutes from shape, embedding and Jev (Jev as the `fits_twenty_minutes` probability, mapped to minutes by the weights' monotone table with linear interpolation and clipping at the ends). It averages the logs of the inputs present with equal weight, returns minutes, the points from `FromMinutes`, and the list of inputs used; no input at all is an error. `Confidence` is `low` when only the shape input is present. Tests: each rung of the ladder, the interpolation at the table's ends, a probability outside 0 to 1 rejected.
+New `internal/storypoints/blend.go`: `Blend(in Inputs) (Blended, error)` where `Inputs` holds optional minutes from shape, embedding and Jev (Jev as the `fits_twenty_minutes` probability, mapped to minutes by the weights' monotone table with linear interpolation and clipping at the ends). It averages the logs of the inputs present with equal weight, returns minutes, the points from `FromMinutes`, and the list of inputs used and the rung; no input at all is an error. It also returns the rung: `all`, `shape-jev`, `shape-embed` or `shape`. Tests: each rung of the ladder, the interpolation at the table's ends, a probability outside 0 to 1 rejected.
 Depends: SP1, SP6. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP10. Nearest past beads
@@ -137,12 +137,12 @@ Depends: none. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP11. The Estimate function
 
-New `internal/storypoints/estimate.go`: `Estimate(ctx, deps Deps, issue) (Result, error)` where `Deps` holds the weights, an `Embedder`, a Jev asker function and an hm runner (each optional). It builds the inputs that can be built (an input whose dependency is nil or fails is skipped and the reason recorded), blends, finds the neighbours, and returns the points, minutes, inputs used, skipped reasons, neighbours, and a `Hash` of the section text. `Note(Result)` renders the comment text: first line `SP ESTIMATE v1 sp:N hash:<hash>`, then the minutes, the inputs used, the skipped inputs and the nearest beads. Tests with fakes for every dependency, including all dependencies failing (shape only, low confidence).
+New `internal/storypoints/estimate.go`: `Estimate(ctx, deps Deps, issue) (Result, error)` where `Deps` holds the weights, an `Embedder`, a Jev asker function and an hm runner (each optional). It builds the inputs that can be built (an input whose dependency is nil or fails is skipped and the reason recorded), blends, finds the neighbours, and returns the points, minutes, inputs used, skipped reasons, neighbours, and a `Hash` of the section text. `Note(Result)` renders the comment text: first line `SP ESTIMATE v1 sp:N rung:<rung> hash:<hash>`, then the minutes, the inputs used, the skipped inputs and the nearest beads. Tests with fakes for every dependency, including all dependencies failing (shape only, low confidence).
 Depends: SP6, SP7, SP8, SP9, SP10. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP12. `gt spec estimate`
 
-New `internal/cmd/spec_estimate.go`: `gt spec estimate <bead-id> [--force] [--dry-run] [--json]`. It reads the bead, finds the latest comment beginning `SP ESTIMATE v1` and its hash, and does nothing when the bead's section hash is unchanged (unless `--force`). Otherwise it runs `Estimate`, removes any existing `sp:` label, adds the new one, and adds the note as a comment. `--dry-run` prints and writes nothing. Every bead write goes through the `bd` wrapper the other spec commands use (see `internal/cmd/spec.go`). Tests with the command's existing fake bead store.
+New `internal/cmd/spec_estimate.go`: `gt spec estimate <bead-id> [--force] [--dry-run] [--json]`. It reads the bead, finds the latest comment beginning `SP ESTIMATE v1` and its hash, and does nothing when the bead's section hash is unchanged (unless `--force`). Otherwise it runs `Estimate`, removes any existing `sp:` and `sp-rung:` labels, adds the new `sp:N` and `sp-rung:<rung>`, and adds the note as a comment. `--dry-run` prints and writes nothing. Every bead write goes through the `bd` wrapper the other spec commands use (see `internal/cmd/spec.go`). Tests with the command's existing fake bead store.
 Depends: SP11. Gate: `go test ./internal/cmd -run 'SpecEstimate' -count=1`.
 
 ### SP13. The shadow hook in the dispatcher tick
@@ -157,7 +157,7 @@ Depends: SP1. Gate: `go test ./internal/landworker -count=1`.
 
 ### SP15. The shadow report
 
-New `gt metrics storypoints` step (see `townMetricsCommands` in `internal/cmd/metrics.go`; logic in `internal/metrics`): read the landings table, keep rows with both `sp` and `sp_actual`, and when there are at least 60, print per seat class the count, Spearman rank correlation with a bootstrap 95% interval (fixed seed, 400 resamples), the exact and within-one shares, and for trigger minutes 11, 13, 15 and 17 the number flagged, precision and recall against actual points over 21; below 60 print the count and stop. Add the `sp` column to the landings table from the bead's label. Tests with a synthetic table of known correlation.
+New `gt metrics storypoints` step (see `townMetricsCommands` in `internal/cmd/metrics.go`; logic in `internal/metrics`): read the landings table, keep rows with both `sp` and `sp_actual`, and when there are at least 60, print per seat class and per rung the count, Spearman rank correlation with a bootstrap 95% interval (fixed seed, 400 resamples), the exact and within-one shares, and for trigger minutes 11, 13, 15 and 17 the number flagged, precision and recall against actual points over 21; below 60 print the count and stop. Add the `sp` column to the landings table from the bead's label. Tests with a synthetic table of known correlation.
 Depends: SP4, SP14. Gate: `go test ./internal/metrics -count=1`.
 
 ### SP16. The monthly retrain step
@@ -167,7 +167,7 @@ Depends: SP2, SP5, SP7. Gate: `go test ./internal/metrics ./internal/storypoints
 
 ### SP17. The split route (held for the operator)
 
-In the spec dispatcher tick, behind `patrols.spec_dispatch.story_points.split_over_minutes` (default 0, meaning off): when set (the operator's value is 15) and a bead's blended minutes are at least the setting, do not sling it; add the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`) and a comment with the estimate and the nearest beads; log one line. A bead already carrying `sp:` and the label is not touched again. Tests: off does nothing, on flags, an estimate below the trigger is slung.
+In the spec dispatcher tick, behind `patrols.spec_dispatch.story_points.split_over_minutes` (default 0, meaning off): when set (the operator's value is 15), the bead's `sp-rung` is `all`, `shape-jev` or `shape-embed` (never `shape`), and its blended minutes are at least the setting, do not sling it; add the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`) and a comment with the estimate and the nearest beads; log one line. A bead already carrying `sp:` and the label is not touched again. Tests: off does nothing, on flags, an estimate below the trigger is slung, a shape-only estimate above the trigger is slung.
 Depends: SP13, SP15, and the operator's word after the shadow report. Gate: `go test ./internal/cmd -run 'SpecDispatch.*Split' -count=1`.
 
 ### SP18. Documentation
