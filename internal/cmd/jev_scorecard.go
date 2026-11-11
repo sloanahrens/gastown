@@ -17,11 +17,13 @@ import (
 )
 
 var (
-	jevScorecardBattery string
-	jevScorecardSince   string
-	jevScorecardJSON    bool
-	jevScorecardLines   bool
-	jevScorecardRefresh bool
+	jevScorecardBattery  string
+	jevScorecardSince    string
+	jevScorecardJSON     bool
+	jevScorecardLines    bool
+	jevScorecardRefresh  bool
+	jevScorecardHistory  bool
+	jevScorecardQuestion string
 )
 
 var jevScorecardCmd = &cobra.Command{
@@ -57,10 +59,25 @@ leaves the previous file as it was. A refresh that wrote the file exits zero
 only when every battery scored or was reused; otherwise it names the failed
 batteries and exits non-zero with their last good blocks kept in the file.
 
+Each refresh also appends one line to <town>/.runtime/jev/scorecard.history.jsonl:
+the refresh time, the window, and each freshly scored battery's labeled count,
+positives and verdict per question. A battery that was reused or kept from a
+failed refresh is left out of its line, so it never reads as growth. The file
+keeps the last 90 days; a history write that fails is logged and does not fail
+the refresh.
+
+--history reads that file instead of scoring. It prints, for each question
+(all of them, or those of --battery and --question), one row per refresh that
+scored it: the date, labeled, positives, verdict, and the change in labeled since
+the previous row. It ends a question with "no growth in N refreshes" when the
+last N or more rows share a labeled count. --history takes no other flag but
+--battery and --question.
+
 Examples:
   gt jev scorecard --battery fixture
   gt jev scorecard --battery fixture --since 14d --json
-  gt jev scorecard --refresh`,
+  gt jev scorecard --refresh
+  gt jev scorecard --history --battery logtriage --question severity`,
 	Args: cobra.NoArgs,
 	RunE: runJevScorecard,
 }
@@ -72,6 +89,8 @@ func init() {
 	f.BoolVar(&jevScorecardJSON, "json", false, "Print the report as JSON")
 	f.BoolVar(&jevScorecardLines, "lines", false, "With --json, print every item's labeling for a battery that leaves them out by default")
 	f.BoolVar(&jevScorecardRefresh, "refresh", false, "Score every registered battery and write <town>/.runtime/jev/scorecard.json")
+	f.BoolVar(&jevScorecardHistory, "history", false, "Print each question's counts and verdicts across the refreshes in <town>/.runtime/jev/scorecard.history.jsonl")
+	f.StringVar(&jevScorecardQuestion, "question", "", "With --history, show only this question")
 	jevCmd.AddCommand(jevScorecardCmd)
 }
 
@@ -81,11 +100,13 @@ func runJevScorecard(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
 	o := jevScorecardOptions{
-		Battery: jevScorecardBattery,
-		Since:   jevScorecardSince,
-		JSON:    jevScorecardJSON,
-		Lines:   jevScorecardLines,
-		Refresh: jevScorecardRefresh,
+		Battery:  jevScorecardBattery,
+		Since:    jevScorecardSince,
+		JSON:     jevScorecardJSON,
+		Lines:    jevScorecardLines,
+		Refresh:  jevScorecardRefresh,
+		History:  jevScorecardHistory,
+		Question: jevScorecardQuestion,
 	}
 	return jevScorecardRun(cmd.Context(), cmd.OutOrStdout(), townRoot, o, time.Now(), scoreJevBattery, scorecard.Cache{})
 }
@@ -93,11 +114,13 @@ func runJevScorecard(cmd *cobra.Command, _ []string) error {
 // jevScorecardOptions is the command's flags, passed as values so the dispatch
 // below can be tested without the process's globals.
 type jevScorecardOptions struct {
-	Battery string
-	Since   string
-	JSON    bool
-	Lines   bool
-	Refresh bool
+	Battery  string
+	Since    string
+	JSON     bool
+	Lines    bool
+	Refresh  bool
+	History  bool
+	Question string
 }
 
 // jevBatteryScorer builds one battery's report over the window starting at
@@ -108,6 +131,12 @@ type jevBatteryScorer func(ctx context.Context, name, townRoot string, from time
 // report, or a refresh of every registered battery into the cache.
 func jevScorecardRun(ctx context.Context, w io.Writer, townRoot string, o jevScorecardOptions, now time.Time,
 	score jevBatteryScorer, cache scorecard.Cache) error {
+	if o.History {
+		return jevScorecardHistoryRun(w, townRoot, o, cache)
+	}
+	if o.Question != "" {
+		return fmt.Errorf("--question applies to --history")
+	}
 	if !o.Refresh {
 		if o.Battery == "" {
 			return fmt.Errorf("--battery is required unless --refresh is given")
@@ -127,6 +156,30 @@ func jevScorecardRun(ctx context.Context, w io.Writer, townRoot string, o jevSco
 		return err
 	}
 	return jevScorecardRefreshWith(ctx, w, townRoot, o.Since, now, score, cache)
+}
+
+// jevScorecardHistoryRun prints the refresh history for the battery and question
+// named in o, an empty name matching all. It scores nothing and reads only the
+// history file, so the flags that shape a scoring run are refused.
+func jevScorecardHistoryRun(w io.Writer, townRoot string, o jevScorecardOptions, cache scorecard.Cache) error {
+	if o.Refresh {
+		return fmt.Errorf("--history reads the scorecard history; drop --refresh")
+	}
+	if o.JSON || o.Lines {
+		return fmt.Errorf("--history prints a text view; drop --json and --lines")
+	}
+	if o.Since != "" {
+		return fmt.Errorf("--history reads every refresh on record; drop --since")
+	}
+	rows, err := cache.ReadHistory(scorecard.HistoryPath(townRoot))
+	if errors.Is(err, scorecard.ErrNoHistory) {
+		fmt.Fprintln(w, "no scorecard history yet: run gt jev scorecard --refresh")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return scorecard.WriteHistory(w, rows, o.Battery, o.Question)
 }
 
 // scoreJevBattery scores one registered battery through its adapter over the
@@ -180,6 +233,9 @@ func jevScorecardRefreshWith(ctx context.Context, w io.Writer, townRoot, since s
 	}
 	doc := scorecard.CacheDoc{ScoredAt: now, Since: window, Batteries: make([]scorecard.BatteryBlock, 0, len(scorecard.Registered()))}
 	var failed, reused []string
+	// fresh names the batteries this refresh scored successfully: the only
+	// ones the history records, so a reused or kept block never reads as growth.
+	fresh := map[string]bool{}
 	for _, name := range scorecard.Registered() {
 		// The fingerprint is taken before scoring: a line appended while the
 		// battery is being scored then leaves the fingerprint smaller than
@@ -209,12 +265,16 @@ func jevScorecardRefreshWith(ctx context.Context, w io.Writer, townRoot, since s
 			failed = append(failed, name)
 		} else {
 			block.Report = &rep
+			fresh[name] = true
 		}
 		doc.Batteries = append(doc.Batteries, scorecard.KeepFailed(prev, block))
 	}
 	if err := cache.Write(path, doc); err != nil {
 		return err
 	}
+	// The history is written once per refresh, after the cache it describes.
+	// A write that fails is logged by AppendHistory and never fails the refresh.
+	cache.AppendHistory(scorecard.HistoryPath(townRoot), scorecard.HistoryRowFor(now, window, doc, fresh), now, w)
 	fmt.Fprintf(w, "wrote %s: %d batteries, %d reused, %d failed\n", path, len(doc.Batteries), len(reused), len(failed))
 	if len(failed) > 0 {
 		return fmt.Errorf("scoring failed for %s; the cache keeps each battery's last good block", strings.Join(failed, ", "))
