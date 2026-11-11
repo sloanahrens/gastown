@@ -104,6 +104,41 @@ func TestIntegrationEnsureFollowsBareMainAcrossCalls(t *testing.T) {
 	}
 }
 
+// TestIntegrationEnsureRefreshesStaleOriginMainOnTheFastPath pins the refresh on
+// the fast path: a checkout already at the bare main, whose origin/main still
+// names an older commit, has origin/main brought to the bare main by the call,
+// with no checkout. The checkout's origin remote is pointed at nowhere, so a
+// refresh that read the origin remote would fail; this one reads the bare path.
+func TestIntegrationEnsureRefreshesStaleOriginMainOnTheFastPath(t *testing.T) {
+	t.Parallel()
+	town := newTown(t)
+	bare := filepath.Join(town, "gastown", ".repo.git")
+	first := seedBare(t, bare)
+
+	dir, err := Ensure(context.Background(), town, "gastown", "")
+	if err != nil {
+		t.Fatalf("first Ensure: %v", err)
+	}
+	second := advance(t, bare, "refs/heads/main", "second")
+	if _, err := Ensure(context.Background(), town, "gastown", ""); err != nil {
+		t.Fatalf("second Ensure: %v", err)
+	}
+	// The state an older checkout is left in: HEAD at the bare main, origin/main
+	// behind it.
+	runGit(t, "-C", dir, "update-ref", "refs/remotes/origin/main", first)
+	runGit(t, "-C", dir, "remote", "set-url", "origin", filepath.Join(town, "unreachable.git"))
+
+	if _, err := Ensure(context.Background(), town, "gastown", ""); err != nil {
+		t.Fatalf("Ensure on the fast path: %v", err)
+	}
+	if got := runGit(t, "-C", dir, "rev-parse", "refs/remotes/origin/main"); got != second {
+		t.Fatalf("origin/main = %s, want the bare main %s", got, second)
+	}
+	if got, _ := headOf(t, dir); got != second {
+		t.Fatalf("HEAD = %s, want the bare main %s", got, second)
+	}
+}
+
 func TestIntegrationEnsureChecksOutNamedCommitDetached(t *testing.T) {
 	t.Parallel()
 	town := newTown(t)

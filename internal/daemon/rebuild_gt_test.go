@@ -36,6 +36,11 @@ func rebuildGTTown(t *testing.T) (*Daemon, *notifyfake.Recorder) {
 	// is inert text: a shebang here would make the file look like an executable,
 	// which the test policy forbids (no-exec-files).
 	writeFile(t, filepath.Join(repoRoot, "cmd", "gt-installer", "main.go"), "package main\n")
+	// The cycle builds from the checkout buildsrc.Ensure returns; the fixture
+	// hands it this tree instead of cloning a bare repo the test does not make.
+	d.rebuildGTEnsureFn = func(context.Context, string, string, string) (string, error) {
+		return repoRoot, nil
+	}
 	// The pending-install marker stays in the town's own temp dir: resolving it
 	// from the environment would let a test reach whatever INSTALL_GT_DAEMON_DIR
 	// names on the operator's machine (gt-vc34c).

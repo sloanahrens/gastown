@@ -23,15 +23,22 @@ func newTown(t *testing.T) string {
 
 // fakeGit answers the git calls Ensure makes without running git. clone is what
 // a clone does on disk, and fail is a verb whose calls fail; every other call
-// succeeds. calls records the verb of each call, in order.
+// succeeds, with no output unless replies gives one. calls records the verb of
+// each call, in order.
 type fakeGit struct {
-	calls []string
-	clone func(dir string) error
-	fail  string
+	calls   []string
+	argv    [][]string // the full arguments of each call, in order
+	clone   func(dir string) error
+	fail    string
+	replies map[string]error // by the call's arguments joined with spaces; a listed call answers with its error
 }
 
 func (f *fakeGit) run(_ context.Context, _ time.Duration, _ string, args ...string) error {
 	f.calls = append(f.calls, args[0])
+	f.argv = append(f.argv, append([]string(nil), args...))
+	if err, ok := f.replies[strings.Join(args, " ")]; ok {
+		return err
+	}
 	if args[0] == "clone" {
 		return f.clone(args[len(args)-1])
 	}
@@ -41,10 +48,156 @@ func (f *fakeGit) run(_ context.Context, _ time.Duration, _ string, args ...stri
 	return nil
 }
 
+// hasVerb reports whether the call verb was made.
+func hasVerb(calls []string, verb string) bool {
+	for _, c := range calls {
+		if c == verb {
+			return true
+		}
+	}
+	return false
+}
+
+// TestEnsureRefreshesOriginMainFromTheBareRepo pins the refresh on every call
+// for the bare repo's main. The checkout's origin/main is fetched from the bare
+// repo's path before anything else, the fast path included, so it is the only
+// fetch a call for main makes. Only the full path checks out, and every other
+// state takes it.
+func TestEnsureRefreshesOriginMainFromTheBareRepo(t *testing.T) {
+	t.Parallel()
+	// notRef answers a call that exits non-zero, as git does for a failed check.
+	notRef := errors.New("exit status 1")
+	const (
+		detached = "symbolic-ref --quiet HEAD"
+		headIn   = "merge-base --is-ancestor HEAD refs/remotes/origin/main"
+		mainIn   = "merge-base --is-ancestor refs/remotes/origin/main HEAD"
+	)
+	cases := []struct {
+		name         string
+		replies      map[string]error
+		wantCheckout bool
+	}{
+		{
+			name:    "detached at the bare main is returned without a checkout",
+			replies: map[string]error{detached: notRef},
+		},
+		{
+			name:         "a branch at the bare main is checked out again",
+			replies:      map[string]error{},
+			wantCheckout: true,
+		},
+		{
+			name:         "detached at an ancestor of the bare main is checked out again",
+			replies:      map[string]error{detached: notRef, mainIn: notRef},
+			wantCheckout: true,
+		},
+		{
+			name:         "detached at a commit the bare main does not contain is checked out again",
+			replies:      map[string]error{detached: notRef, headIn: notRef},
+			wantCheckout: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := newTown(t)
+			bare := filepath.Join(town, "gastown", ".repo.git")
+			if err := os.MkdirAll(bare, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(town, BaseDirRel(), "gastown")
+			git := &fakeGit{clone: cloneWithGit, replies: tc.replies}
+
+			got, err := ensure(context.Background(), git.run, town, "gastown", "")
+			if err != nil {
+				t.Fatalf("ensure: %v", err)
+			}
+			if got != dir {
+				t.Fatalf("ensure returned %s, want %s", got, dir)
+			}
+			fetches := argvWithVerb(git.argv, "fetch")
+			wantFetch := []string{"fetch", "--quiet", "--no-tags", "--", bare, "+refs/heads/main:refs/remotes/origin/main"}
+			if len(fetches) != 1 || !slices.Equal(fetches[0], wantFetch) {
+				t.Fatalf("fetches %v, want exactly one %v", fetches, wantFetch)
+			}
+			if got := hasVerb(git.calls, "checkout"); got != tc.wantCheckout {
+				t.Fatalf("checkout made = %v, want %v; calls %v", got, tc.wantCheckout, git.calls)
+			}
+		})
+	}
+}
+
+// argvWithVerb returns the argument lists of the calls whose verb is verb.
+func argvWithVerb(argv [][]string, verb string) [][]string {
+	var out [][]string
+	for _, a := range argv {
+		if a[0] == verb {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // cloneWithGit is what a clone that succeeded leaves behind: a checkout directory
 // with a .git in it.
 func cloneWithGit(dir string) error {
 	return os.MkdirAll(filepath.Join(dir, ".git"), 0o755)
+}
+
+// TestIsBuildCheckoutIsADirectChildOfTheBase pins the layout test: a rig's
+// checkout is the one directory directly under <town>/.runtime/build-src. The
+// base itself, anything nested deeper, and a rig's mayor/rig are not.
+func TestIsBuildCheckoutIsADirectChildOfTheBase(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		dir  string
+		want bool
+	}{
+		{dir: "/town/.runtime/build-src/gastown", want: true},
+		{dir: "/town/.runtime/build-src/gastown/", want: true},
+		{dir: "/town/.runtime/build-src", want: false},
+		{dir: "/town/.runtime/build-src/gastown/sub", want: false},
+		{dir: "/town/.runtime/build-src-other/gastown", want: false},
+		{dir: "/town/gastown/mayor/rig", want: false},
+		{dir: "gastown", want: false},
+	}
+	for _, tc := range cases {
+		if got := IsBuildCheckout(tc.dir); got != tc.want {
+			t.Errorf("IsBuildCheckout(%q) = %v, want %v", tc.dir, got, tc.want)
+		}
+	}
+}
+
+// TestBareRepoOfIsTheRigsBareRepo pins the bare repo a build checkout clones
+// from: the rig's .repo.git beside its rig directory under the same town. A
+// directory that is not a build checkout has none.
+func TestBareRepoOfIsTheRigsBareRepo(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		dir  string
+		want string
+		ok   bool
+	}{
+		{dir: "/town/.runtime/build-src/gastown", want: "/town/gastown/.repo.git", ok: true},
+		{dir: "/town/.runtime/build-src/gastown/", want: "/town/gastown/.repo.git", ok: true},
+		{dir: "/town/.runtime/build-src/gastown/sub"},
+		{dir: "/town/gastown/mayor/rig"},
+	}
+	for _, tc := range cases {
+		got, ok := BareRepoOf(tc.dir)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("BareRepoOf(%q) = (%q, %v), want (%q, %v)", tc.dir, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// TestBaseDirRelIsTheCheckoutBase pins the exported base: the directory under a
+// town root where ensure puts each rig's checkout, in the platform's separator.
+func TestBaseDirRelIsTheCheckoutBase(t *testing.T) {
+	t.Parallel()
+	if got, want := BaseDirRel(), filepath.FromSlash(".runtime/build-src"); got != want {
+		t.Fatalf("BaseDirRel() = %q, want %q", got, want)
+	}
 }
 
 func TestEnsureRefusesBadInputBeforeGit(t *testing.T) {

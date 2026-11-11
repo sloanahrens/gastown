@@ -14,6 +14,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/buildpaths"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/installpending"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/slot"
@@ -94,6 +95,9 @@ const (
 	// log keeps. The whole build log is unbounded and unread; what a failure is
 	// read back from is its end.
 	rebuildGTLogTailLines = 20
+
+	// rebuildGTSourceRig is the rig whose build checkout the job builds from.
+	rebuildGTSourceRig = "gastown"
 )
 
 // Alert keys this job owns. Each is the stable identity of one condition, so
@@ -418,12 +422,18 @@ func (d *Daemon) runRebuildGT() bool {
 	defer cycle.close()
 
 	now := d.clk().Now()
-	repoRoot, err := version.GetRepoRootForTown(d.config.TownRoot)
+	// The job builds from its own checkout of the gastown rig (buildsrc.Ensure),
+	// not from whatever mayor/rig holds.
+	ensure := d.rebuildGTEnsureFn
+	if ensure == nil {
+		ensure = buildsrc.Ensure
+	}
+	repoRoot, err := ensure(ctx, d.config.TownRoot, rebuildGTSourceRig, "")
 	if err != nil {
 		// Nothing to rebuild and nothing to watch: a checkout that is not
 		// there cannot be stale.
 		cycle.skipStep("repo", "no gt source checkout under the town")
-		d.logger.Printf("rebuild_gt: no gt source checkout under %s; nothing to rebuild", d.config.TownRoot)
+		d.logger.Printf("rebuild_gt: no gt source checkout under %s (%v); nothing to rebuild", d.config.TownRoot, err)
 		d.rebuildGTClearPending()
 		return true
 	}
@@ -479,14 +489,14 @@ func (d *Daemon) rebuildGTCycle(ctx context.Context, cycle *dogCycle, repoRoot s
 		return true
 	}
 
-	branch, err := d.rebuildGTGit(repoRoot, "branch", "--show-current")
+	onMain, why, err := d.rebuildGTOnMain(repoRoot)
 	if err != nil {
-		cycle.skipStep("preflight", "git branch failed: "+err.Error())
-		d.logger.Printf("rebuild_gt: git branch failed (%v); deferring", err)
+		cycle.skipStep("preflight", "branch check failed: "+err.Error())
+		d.logger.Printf("rebuild_gt: branch check failed (%v); deferring", err)
 		return false
 	}
-	if strings.TrimSpace(branch) != "main" {
-		cycle.skipStep("preflight", "not on main branch (on "+strings.TrimSpace(branch)+")")
+	if !onMain {
+		cycle.skipStep("preflight", why)
 		d.rebuildGTNoteBlocked(cycle, due, "not on main branch")
 		return true
 	}
@@ -1259,6 +1269,41 @@ func (d *Daemon) rebuildGTWaitForGate(ctx context.Context, deadline time.Time) b
 		case <-d.clk().After(rebuildGTGatePoll):
 		}
 	}
+}
+
+// rebuildGTOnMain is the preflight's branch check. The checkout is on main, or
+// detached at origin/main's tip: the shape buildsrc.Ensure leaves the job-owned
+// checkout in. why names a refusal. A git call that cannot be read is an error,
+// not a refusal, so the caller defers.
+//
+// origin/main is read as buildsrc.Ensure left it: Ensure points it at the bare
+// repo's main on every call, so this read needs no network.
+func (d *Daemon) rebuildGTOnMain(repoRoot string) (onMain bool, why string, err error) {
+	out, err := d.rebuildGTGit(repoRoot, "branch", "--show-current")
+	if err != nil {
+		return false, "", err
+	}
+	branch := strings.TrimSpace(out)
+	if branch == "main" {
+		return true, "", nil
+	}
+	if branch != "" {
+		return false, "not on main branch (on " + branch + ")", nil
+	}
+	head, err := d.rebuildGTGit(repoRoot, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+	if err != nil {
+		return false, "", err
+	}
+	// origin/main that cannot be read is an error like the reads above: the
+	// cycle defers, and the next one reads the ref again.
+	tip, err := d.rebuildGTGit(repoRoot, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/main^{commit}")
+	if err != nil {
+		return false, "", err
+	}
+	if strings.TrimSpace(head) != strings.TrimSpace(tip) {
+		return false, "not on main branch (detached at " + shortSHA(strings.TrimSpace(head)) + ", not origin/main)", nil
+	}
+	return true, "", nil
 }
 
 // rebuildGTGit runs one git command in the source checkout, returning stdout.
