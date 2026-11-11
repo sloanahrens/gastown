@@ -1,11 +1,7 @@
 // Command forgejo-create-repo creates the private, empty repository OWNER/NAME on the
 // broker's Forgejo, with default branch main and no initialisation, and seeds it with
 // every file under a seed directory as one commit through the contents API. A dry run
-// prints the plan and sends nothing. The exit codes are 0 when the repository is created
-// and seeded or a dry run finishes; 1 when a step fails, or a seed or repository refusal
-// applies; and 2 when the command line is refused. The admin token is read from
-// GT_AUTH_FORGEJO_TOKEN, then FORGEJO_ADMIN_TOKEN, then the admin token file; it is never
-// printed.
+// prints the plan and sends nothing.
 package main
 
 import (
@@ -38,8 +34,7 @@ contents API. A dry run prints the files and the commit message and sends nothin
   --author NAME         the name the seed commit's author and committer carry
   --dry-run             print the plan (files and commit message); send no write
   --api-url URL         Forgejo API root (default $FORGEJO_API_URL, else the built-in root)
-  --admin-token-file F  file holding FORGEJO_ADMIN_TOKEN=... (default $FORGEJO_ADMIN_ENV);
-                        optional, read only when no token is in the environment
+  --admin-token-file F  file holding FORGEJO_ADMIN_TOKEN=... (default $FORGEJO_ADMIN_ENV)
 
 The admin token comes from the environment first: GT_AUTH_FORGEJO_TOKEN (the auth
 broker's), then FORGEJO_ADMIN_TOKEN. The token file is the fallback. No token is printed.

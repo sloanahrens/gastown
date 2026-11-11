@@ -5,16 +5,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/forgejoprov"
+	"github.com/steveyegge/gastown/internal/forgejotest"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
@@ -29,97 +27,6 @@ const (
 	testOwner = "sloan"
 	testName  = "notes"
 )
-
-// request is one call the fake Forgejo received.
-type request struct {
-	method string
-	path   string
-	auth   string
-	body   []byte
-}
-
-// fakeForgejo is an httptest Forgejo for the three routes the command uses.
-type fakeForgejo struct {
-	repoStatus   int    // GET of the repository; 404 means it does not exist
-	createStatus int    // POST /admin/users/{owner}/repos
-	seedStatus   int    // POST /repos/{owner}/{name}/contents
-	seedReply    string // the contents reply body
-
-	mu   sync.Mutex
-	reqs []request
-}
-
-// newFake starts a fake that answers the way a healthy Forgejo does, with the overrides set by
-// configure.
-func newFake(t *testing.T, configure func(*fakeForgejo)) *fakeForgejo {
-	t.Helper()
-	f := &fakeForgejo{
-		repoStatus:   http.StatusNotFound,
-		createStatus: http.StatusCreated,
-		seedStatus:   http.StatusCreated,
-		seedReply:    `{"commit":{"sha":"abc123"}}`,
-	}
-	if configure != nil {
-		configure(f)
-	}
-	return f
-}
-
-// fakeAPI is the API root the command is pointed at with --api-url. No socket is opened: RoundTrip
-// hands each request to the fake's handler in-process.
-const fakeAPI = "http://forgejo.test/api/v1"
-
-// apiURL is the API root the command is pointed at with --api-url.
-func (f *fakeForgejo) apiURL() string { return fakeAPI }
-
-// RoundTrip answers a request in-process, so the unit tier opens no listener.
-func (f *fakeForgejo) RoundTrip(r *http.Request) (*http.Response, error) {
-	rec := httptest.NewRecorder()
-	f.serve(rec, r)
-	return rec.Result(), nil
-}
-
-// requests returns a copy of every call received, in order.
-func (f *fakeForgejo) requests() []request {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]request(nil), f.reqs...)
-}
-
-// writes returns the calls that are not GET.
-func (f *fakeForgejo) writes() []request {
-	var out []request
-	for _, r := range f.requests() {
-		if r.method != http.MethodGet {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-func (f *fakeForgejo) serve(w http.ResponseWriter, r *http.Request) {
-	var body []byte
-	if r.Body != nil {
-		body, _ = io.ReadAll(r.Body)
-	}
-	f.mu.Lock()
-	f.reqs = append(f.reqs, request{method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"), body: body})
-	f.mu.Unlock()
-
-	repoPath := "/api/v1/repos/" + testRepo
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == repoPath:
-		w.WriteHeader(f.repoStatus)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/users/"+testOwner+"/repos":
-		w.WriteHeader(f.createStatus)
-		_, _ = io.WriteString(w, `{"name":"`+testName+`"}`)
-	case r.Method == http.MethodPost && r.URL.Path == repoPath+"/contents":
-		w.WriteHeader(f.seedStatus)
-		_, _ = io.WriteString(w, f.seedReply)
-	default:
-		w.WriteHeader(http.StatusNotFound)
-	}
-}
 
 // seedDir writes a two-file seed under a fresh temporary directory and returns its absolute
 // path: a text README and a binary file.
@@ -144,7 +51,7 @@ func environ(vars map[string]string) func(string) string {
 }
 
 // testEnv is the env seam a run reads through, reaching the fake through its HTTP client.
-func testEnv(vars map[string]string, f *fakeForgejo) env {
+func testEnv(vars map[string]string, f *forgejotest.RepoFake) env {
 	e := env{Getenv: environ(vars), ReadFile: os.ReadFile}
 	if f != nil {
 		e.HTTP = &http.Client{Transport: f}
@@ -168,8 +75,8 @@ func runCmd(t *testing.T, e env, args ...string) result {
 }
 
 // realArgs is the command line of a real run against the fake.
-func realArgs(f *fakeForgejo, seed string) []string {
-	return []string{"--api-url", f.apiURL(), "--repo", testRepo, "--seed-dir", seed, "--author", "Ada Lovelace"}
+func realArgs(f *forgejotest.RepoFake, seed string) []string {
+	return []string{"--api-url", f.API(), "--repo", testRepo, "--seed-dir", seed, "--author", "Ada Lovelace"}
 }
 
 func TestHelpDocumentsFlagsAndTokenSource(t *testing.T) {
@@ -205,15 +112,15 @@ func TestUsageRefusalsExitTwo(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFake(t, nil)
-			got := runCmd(t, testEnv(map[string]string{"GT_AUTH_FORGEJO_TOKEN": testToken}, f), append([]string{"--api-url", f.apiURL()}, tc.args...)...)
+			f := forgejotest.NewRepoFake(testOwner, testName)
+			got := runCmd(t, testEnv(map[string]string{"GT_AUTH_FORGEJO_TOKEN": testToken}, f), append([]string{"--api-url", f.API()}, tc.args...)...)
 			if got.code != forgejoprov.ExitUsage {
 				t.Fatalf("exit = %d, want ExitUsage %d; stderr %q", got.code, forgejoprov.ExitUsage, got.stderr)
 			}
 			if !strings.Contains(got.stderr, tc.wantText) {
 				t.Fatalf("stderr %q does not name %q", got.stderr, tc.wantText)
 			}
-			if n := len(f.requests()); n != 0 {
+			if n := len(f.Requests()); n != 0 {
 				t.Fatalf("refused command line sent %d requests", n)
 			}
 		})
@@ -227,7 +134,7 @@ func TestSeedAndRepoRefusalsSendNoWrite(t *testing.T) {
 	cases := []struct {
 		name     string
 		seed     func(t *testing.T) string
-		fake     func(*fakeForgejo)
+		fake     func(*forgejotest.RepoFake)
 		wantText string
 	}{
 		{
@@ -244,14 +151,17 @@ func TestSeedAndRepoRefusalsSendNoWrite(t *testing.T) {
 		{
 			name:     "existing repository",
 			seed:     func(t *testing.T) string { return seedDir(t) },
-			fake:     func(f *fakeForgejo) { f.repoStatus = http.StatusOK },
+			fake:     func(f *forgejotest.RepoFake) { f.RepoStatus = http.StatusOK },
 			wantText: "already exists",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFake(t, tc.fake)
+			f := forgejotest.NewRepoFake(testOwner, testName)
+			if tc.fake != nil {
+				tc.fake(f)
+			}
 			got := runCmd(t, testEnv(map[string]string{"GT_AUTH_FORGEJO_TOKEN": testToken}, f), realArgs(f, tc.seed(t))...)
 			if got.code != forgejoprov.ExitFailure {
 				t.Fatalf("exit = %d, want ExitFailure %d; stderr %q", got.code, forgejoprov.ExitFailure, got.stderr)
@@ -259,7 +169,7 @@ func TestSeedAndRepoRefusalsSendNoWrite(t *testing.T) {
 			if !strings.Contains(got.stderr, tc.wantText) {
 				t.Fatalf("stderr %q does not name %q", got.stderr, tc.wantText)
 			}
-			if w := f.writes(); len(w) != 0 {
+			if w := f.Writes(); len(w) != 0 {
 				t.Fatalf("refused run sent %d writes: %+v", len(w), w)
 			}
 		})
@@ -270,7 +180,7 @@ func TestSeedAndRepoRefusalsSendNoWrite(t *testing.T) {
 // is sent. The dry run needs no token, so the environment is empty.
 func TestDryRunPrintsPlanAndSendsNothing(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, nil)
+	f := forgejotest.NewRepoFake(testOwner, testName)
 	args := append(realArgs(f, seedDir(t)), "--dry-run")
 	got := runCmd(t, testEnv(nil, f), args...)
 	if got.code != forgejoprov.ExitOK {
@@ -281,8 +191,8 @@ func TestDryRunPrintsPlanAndSendsNothing(t *testing.T) {
 			t.Errorf("dry-run plan does not contain %q:\n%s", want, got.stdout)
 		}
 	}
-	if n := len(f.requests()); n != 0 {
-		t.Fatalf("dry run sent %d requests: %+v", n, f.requests())
+	if n := len(f.Requests()); n != 0 {
+		t.Fatalf("dry run sent %d requests: %+v", n, f.Requests())
 	}
 }
 
@@ -290,24 +200,24 @@ func TestDryRunPrintsPlanAndSendsNothing(t *testing.T) {
 // the commit SHA.
 func TestRealRunCreatesThenSeeds(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, nil)
+	f := forgejotest.NewRepoFake(testOwner, testName)
 	got := runCmd(t, testEnv(map[string]string{"GT_AUTH_FORGEJO_TOKEN": testToken}, f), realArgs(f, seedDir(t))...)
 	if got.code != forgejoprov.ExitOK {
 		t.Fatalf("exit = %d, want ExitOK; stderr %q", got.code, got.stderr)
 	}
-	reqs := f.requests()
+	reqs := f.Requests()
 	if len(reqs) != 3 {
 		t.Fatalf("sent %d requests, want read, create, contents: %+v", len(reqs), reqs)
 	}
-	if reqs[1].path != "/api/v1/admin/users/sloan/repos" || reqs[2].path != "/api/v1/repos/sloan/notes/contents" {
-		t.Fatalf("request order = %s %s, want the create then the contents route", reqs[1].path, reqs[2].path)
+	if reqs[1].Path != "/api/v1/admin/users/sloan/repos" || reqs[2].Path != "/api/v1/repos/sloan/notes/contents" {
+		t.Fatalf("request order = %s %s, want the create then the contents route", reqs[1].Path, reqs[2].Path)
 	}
 	var seed struct {
 		Files []struct {
 			Content string `json:"content"`
 		} `json:"files"`
 	}
-	if err := json.Unmarshal(reqs[2].body, &seed); err != nil {
+	if err := json.Unmarshal(reqs[2].Body, &seed); err != nil {
 		t.Fatalf("contents body is not JSON: %v", err)
 	}
 	if len(seed.Files) != 2 {
@@ -329,15 +239,15 @@ func TestTokenFromEnvironmentBeforeFile(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("FORGEJO_ADMIN_TOKEN="+fileToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f := newFake(t, nil)
+	f := forgejotest.NewRepoFake(testOwner, testName)
 	args := append(realArgs(f, seedDir(t)), "--admin-token-file", tokenFile)
 	got := runCmd(t, testEnv(map[string]string{"GT_AUTH_FORGEJO_TOKEN": testToken}, f), args...)
 	if got.code != forgejoprov.ExitOK {
 		t.Fatalf("exit = %d, want ExitOK; stderr %q", got.code, got.stderr)
 	}
-	for _, r := range f.requests() {
-		if r.auth != "token "+testToken {
-			t.Fatalf("%s %s sent Authorization %q, want the environment token", r.method, r.path, r.auth)
+	for _, r := range f.Requests() {
+		if r.Auth != "token "+testToken {
+			t.Fatalf("%s %s sent Authorization %q, want the environment token", r.Method, r.Path, r.Auth)
 		}
 	}
 }
@@ -350,15 +260,15 @@ func TestTokenFromFileWhenEnvironmentHoldsNone(t *testing.T) {
 	if err := os.WriteFile(tokenFile, []byte("FORGEJO_ADMIN_TOKEN="+fileToken+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	f := newFake(t, nil)
+	f := forgejotest.NewRepoFake(testOwner, testName)
 	args := append(realArgs(f, seedDir(t)), "--admin-token-file", tokenFile)
 	got := runCmd(t, testEnv(nil, f), args...)
 	if got.code != forgejoprov.ExitOK {
 		t.Fatalf("exit = %d, want ExitOK; stderr %q", got.code, got.stderr)
 	}
-	for _, r := range f.requests() {
-		if r.auth != "token "+fileToken {
-			t.Fatalf("%s %s sent Authorization %q, want the file token", r.method, r.path, r.auth)
+	for _, r := range f.Requests() {
+		if r.Auth != "token "+fileToken {
+			t.Fatalf("%s %s sent Authorization %q, want the file token", r.Method, r.Path, r.Auth)
 		}
 	}
 }
@@ -367,7 +277,7 @@ func TestTokenFromFileWhenEnvironmentHoldsNone(t *testing.T) {
 // sends nothing.
 func TestNoTokenRefusesBeforeAnyRequest(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, nil)
+	f := forgejotest.NewRepoFake(testOwner, testName)
 	got := runCmd(t, testEnv(nil, f), realArgs(f, seedDir(t))...)
 	if got.code != forgejoprov.ExitFailure {
 		t.Fatalf("exit = %d, want ExitFailure; stderr %q", got.code, got.stderr)
@@ -375,7 +285,7 @@ func TestNoTokenRefusesBeforeAnyRequest(t *testing.T) {
 	if !strings.Contains(got.stderr, "no admin token") {
 		t.Fatalf("stderr %q does not name the missing token", got.stderr)
 	}
-	if n := len(f.requests()); n != 0 {
+	if n := len(f.Requests()); n != 0 {
 		t.Fatalf("a run with no token sent %d requests", n)
 	}
 }
@@ -384,7 +294,8 @@ func TestNoTokenRefusesBeforeAnyRequest(t *testing.T) {
 // says the repository is still empty, and prints no RESULT line.
 func TestSeedFailureSaysTheRepoIsEmpty(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, func(f *fakeForgejo) { f.seedStatus = http.StatusInternalServerError })
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	f.SeedStatus = http.StatusInternalServerError
 	got := runCmd(t, testEnv(map[string]string{"GT_AUTH_FORGEJO_TOKEN": testToken}, f), realArgs(f, seedDir(t))...)
 	if got.code != forgejoprov.ExitFailure {
 		t.Fatalf("exit = %d, want ExitFailure; stderr %q", got.code, got.stderr)
@@ -400,10 +311,9 @@ func TestSeedFailureSaysTheRepoIsEmpty(t *testing.T) {
 // TestOutputNeverCarriesTheToken: a refusal whose reply echoes the token prints no token.
 func TestOutputNeverCarriesTheToken(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, func(f *fakeForgejo) {
-		f.seedStatus = http.StatusForbidden
-		f.seedReply = `{"message":"rejected ` + testToken + `"}`
-	})
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	f.SeedStatus = http.StatusForbidden
+	f.SeedReply = `{"message":"rejected ` + testToken + `"}`
 	got := runCmd(t, testEnv(map[string]string{"GT_AUTH_FORGEJO_TOKEN": testToken}, f), realArgs(f, seedDir(t))...)
 	if got.code != forgejoprov.ExitFailure {
 		t.Fatalf("exit = %d, want ExitFailure", got.code)

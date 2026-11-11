@@ -8,6 +8,7 @@ import (
 	"testing/fstest"
 
 	"github.com/steveyegge/gastown/internal/forgejoprov"
+	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
 // faultFS is a seed filesystem that fails one name on Open and one name on Read. A real disk
@@ -105,22 +106,22 @@ func TestUnreachableForgejoRefusesTheRun(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name      string
-		configure func(*fakeForgejo)
+		configure func(*forgejotest.RepoFake)
 		run       func(*forgejoprov.Client) error
 	}{
 		{
 			name:      "the read before the create fails",
-			configure: func(f *fakeForgejo) { f.down = true },
+			configure: func(f *forgejotest.RepoFake) { f.Down = true },
 			run:       func(c *forgejoprov.Client) error { return CreateRepo(c, testOwner, testName) },
 		},
 		{
 			name:      "the create fails",
-			configure: func(f *fakeForgejo) { f.writesDown = true },
+			configure: func(f *forgejotest.RepoFake) { f.WritesDown = true },
 			run:       func(c *forgejoprov.Client) error { return CreateRepo(c, testOwner, testName) },
 		},
 		{
 			name:      "the seed commit fails",
-			configure: func(f *fakeForgejo) { f.writesDown = true },
+			configure: func(f *forgejotest.RepoFake) { f.WritesDown = true },
 			run: func(c *forgejoprov.Client) error {
 				_, err := Seed(c, testOwner, testName, testAuthor, []File{{Path: "a", Data: []byte("a")}})
 				return err
@@ -130,8 +131,11 @@ func TestUnreachableForgejoRefusesTheRun(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := newFake(t, tc.configure)
-			err := tc.run(f.client(t))
+			f := forgejotest.NewRepoFake(testOwner, testName)
+			if tc.configure != nil {
+				tc.configure(f)
+			}
+			err := tc.run(client(t, f))
 			if err == nil || !strings.Contains(err.Error(), "request failed") {
 				t.Fatalf("error = %v, want the transport failure named", err)
 			}

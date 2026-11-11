@@ -4,18 +4,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/forgejoprov"
+	"github.com/steveyegge/gastown/internal/forgejotest"
 	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
 
@@ -30,62 +27,8 @@ const (
 	testToken  = "tok-admin-value"
 )
 
-// request is one call the fake Forgejo received.
-type request struct {
-	method string
-	path   string
-	auth   string
-	body   []byte
-}
-
-// fakeForgejo is an httptest Forgejo for the three routes the command uses. Each status and the
-// seed reply can be overridden before the test starts.
-type fakeForgejo struct {
-	repoStatus   int    // GET of the repository; 404 means it does not exist
-	createStatus int    // POST /admin/users/{owner}/repos
-	seedStatus   int    // POST /repos/{owner}/{name}/contents
-	seedReply    string // the contents reply body
-	down         bool   // every request fails at the transport, as an unreachable Forgejo does
-	writesDown   bool   // every non-GET request fails at the transport
-
-	mu   sync.Mutex
-	reqs []request
-}
-
-// newFake starts a fake whose routes answer with the defaults a healthy Forgejo gives.
-func newFake(t *testing.T, configure func(*fakeForgejo)) *fakeForgejo {
-	t.Helper()
-	f := &fakeForgejo{
-		repoStatus:   http.StatusNotFound,
-		createStatus: http.StatusCreated,
-		seedStatus:   http.StatusCreated,
-		seedReply:    `{"commit":{"sha":"abc123"}}`,
-	}
-	if configure != nil {
-		configure(f)
-	}
-	return f
-}
-
-// fakeAPI is the API root the fake answers for. No socket is opened: RoundTrip hands each request
-// to the fake's handler in-process.
-const fakeAPI = "http://forgejo.test/api/v1"
-
-// api is the API root the client is pointed at.
-func (f *fakeForgejo) api() string { return fakeAPI }
-
-// RoundTrip answers a request in-process, so the unit tier opens no listener.
-func (f *fakeForgejo) RoundTrip(r *http.Request) (*http.Response, error) {
-	if f.down || (f.writesDown && r.Method != http.MethodGet) {
-		return nil, errors.New("connection refused")
-	}
-	rec := httptest.NewRecorder()
-	f.serve(rec, r)
-	return rec.Result(), nil
-}
-
 // client is a forgejoprov.Client signed in with testToken, reaching the fake.
-func (f *fakeForgejo) client(t *testing.T) *forgejoprov.Client {
+func client(t *testing.T, f *forgejotest.RepoFake) *forgejoprov.Client {
 	t.Helper()
 	secret, err := forgejoprov.ResolveAdminToken(
 		func(key string) string {
@@ -100,49 +43,7 @@ func (f *fakeForgejo) client(t *testing.T) *forgejoprov.Client {
 	if err != nil {
 		t.Fatalf("resolve token: %v", err)
 	}
-	return &forgejoprov.Client{API: f.api(), HTTP: &http.Client{Transport: f}, Token: secret, Ctx: context.Background()}
-}
-
-// requests returns a copy of every call received, in order.
-func (f *fakeForgejo) requests() []request {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]request(nil), f.reqs...)
-}
-
-// writes returns the calls that are not GET.
-func (f *fakeForgejo) writes() []request {
-	var out []request
-	for _, r := range f.requests() {
-		if r.method != http.MethodGet {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-func (f *fakeForgejo) serve(w http.ResponseWriter, r *http.Request) {
-	var body []byte
-	if r.Body != nil {
-		body, _ = io.ReadAll(r.Body)
-	}
-	f.mu.Lock()
-	f.reqs = append(f.reqs, request{method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"), body: body})
-	f.mu.Unlock()
-
-	repoPath := "/api/v1/repos/" + testOwner + "/" + testName
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == repoPath:
-		w.WriteHeader(f.repoStatus)
-	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/admin/users/"+testOwner+"/repos":
-		w.WriteHeader(f.createStatus)
-		_, _ = io.WriteString(w, `{"name":"`+testName+`"}`)
-	case r.Method == http.MethodPost && r.URL.Path == repoPath+"/contents":
-		w.WriteHeader(f.seedStatus)
-		_, _ = io.WriteString(w, f.seedReply)
-	default:
-		w.WriteHeader(http.StatusNotFound)
-	}
+	return &forgejoprov.Client{API: f.API(), HTTP: &http.Client{Transport: f}, Token: secret, Ctx: context.Background()}
 }
 
 // seedDir writes files under a fresh temporary directory and returns its absolute path.
@@ -345,61 +246,64 @@ func TestLoadSeedAcceptsExactlyTheTotalLimit(t *testing.T) {
 
 func TestCreateRepoSendsPrivateEmptyMainRepository(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, nil)
-	if err := CreateRepo(f.client(t), testOwner, testName); err != nil {
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	if err := CreateRepo(client(t, f), testOwner, testName); err != nil {
 		t.Fatalf("CreateRepo: %v", err)
 	}
-	reqs := f.requests()
+	reqs := f.Requests()
 	if len(reqs) != 2 {
 		t.Fatalf("CreateRepo sent %d requests, want a read then a create: %+v", len(reqs), reqs)
 	}
-	if reqs[0].method != http.MethodGet || reqs[0].path != "/api/v1/repos/sloan/notes" {
-		t.Errorf("first request = %s %s, want the read of the repository", reqs[0].method, reqs[0].path)
+	if reqs[0].Method != http.MethodGet || reqs[0].Path != "/api/v1/repos/sloan/notes" {
+		t.Errorf("first request = %s %s, want the read of the repository", reqs[0].Method, reqs[0].Path)
 	}
 	create := reqs[1]
-	if create.method != http.MethodPost || create.path != "/api/v1/admin/users/sloan/repos" {
-		t.Fatalf("second request = %s %s, want POST to the admin create route", create.method, create.path)
+	if create.Method != http.MethodPost || create.Path != "/api/v1/admin/users/sloan/repos" {
+		t.Fatalf("second request = %s %s, want POST to the admin create route", create.Method, create.Path)
 	}
 	var body map[string]any
-	if err := json.Unmarshal(create.body, &body); err != nil {
+	if err := json.Unmarshal(create.Body, &body); err != nil {
 		t.Fatalf("create body is not JSON: %v", err)
 	}
 	if body["name"] != testName || body["private"] != true || body["auto_init"] != false || body["default_branch"] != "main" {
 		t.Errorf("create body = %v, want name notes, private true, auto_init false, default_branch main", body)
 	}
-	if create.auth != "token "+testToken {
-		t.Errorf("Authorization = %q, want the admin token in the header", create.auth)
+	if create.Auth != "token "+testToken {
+		t.Errorf("Authorization = %q, want the admin token in the header", create.Auth)
 	}
 }
 
 func TestCreateRepoRefusesExistingRepositoryBeforeAnyWrite(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, func(f *fakeForgejo) { f.repoStatus = http.StatusOK })
-	err := CreateRepo(f.client(t), testOwner, testName)
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	f.RepoStatus = http.StatusOK
+	err := CreateRepo(client(t, f), testOwner, testName)
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("CreateRepo error = %v, want an already-exists refusal", err)
 	}
-	if w := f.writes(); len(w) != 0 {
+	if w := f.Writes(); len(w) != 0 {
 		t.Fatalf("CreateRepo sent %d writes for an existing repository: %+v", len(w), w)
 	}
 }
 
 func TestCreateRepoRefusesUnexpectedReadBeforeAnyWrite(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, func(f *fakeForgejo) { f.repoStatus = http.StatusInternalServerError })
-	err := CreateRepo(f.client(t), testOwner, testName)
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	f.RepoStatus = http.StatusInternalServerError
+	err := CreateRepo(client(t, f), testOwner, testName)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
 		t.Fatalf("CreateRepo error = %v, want the unexpected HTTP 500 named", err)
 	}
-	if w := f.writes(); len(w) != 0 {
+	if w := f.Writes(); len(w) != 0 {
 		t.Fatalf("CreateRepo sent %d writes after a failed read: %+v", len(w), w)
 	}
 }
 
 func TestCreateRepoRefusesRejectedCreate(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, func(f *fakeForgejo) { f.createStatus = http.StatusForbidden })
-	err := CreateRepo(f.client(t), testOwner, testName)
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	f.CreateStatus = http.StatusForbidden
+	err := CreateRepo(client(t, f), testOwner, testName)
 	if err == nil || !strings.Contains(err.Error(), "HTTP 403") {
 		t.Fatalf("CreateRepo error = %v, want the rejected create's HTTP 403 named", err)
 	}
@@ -407,20 +311,20 @@ func TestCreateRepoRefusesRejectedCreate(t *testing.T) {
 
 func TestSeedSendsEveryFileInOneCommit(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, nil)
+	f := forgejotest.NewRepoFake(testOwner, testName)
 	files := []File{
 		{Path: "README.md", Data: []byte("# notes\n")},
 		{Path: "bin/tool.bin", Data: []byte{0, 255, 10}},
 	}
-	sha, err := Seed(f.client(t), testOwner, testName, testAuthor, files)
+	sha, err := Seed(client(t, f), testOwner, testName, testAuthor, files)
 	if err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
 	if sha != "abc123" {
 		t.Errorf("Seed returned %q, want the commit SHA abc123", sha)
 	}
-	w := f.writes()
-	if len(w) != 1 || w[0].path != "/api/v1/repos/sloan/notes/contents" {
+	w := f.Writes()
+	if len(w) != 1 || w[0].Path != "/api/v1/repos/sloan/notes/contents" {
 		t.Fatalf("Seed sent writes %+v, want one POST to the contents route", w)
 	}
 	var body struct {
@@ -434,7 +338,7 @@ func TestSeedSendsEveryFileInOneCommit(t *testing.T) {
 			Content   string `json:"content"`
 		} `json:"files"`
 	}
-	if err := json.Unmarshal(w[0].body, &body); err != nil {
+	if err := json.Unmarshal(w[0].Body, &body); err != nil {
 		t.Fatalf("contents body is not JSON: %v", err)
 	}
 	if body.Branch != "main" || body.Message != "Seed sloan/notes" {
@@ -459,8 +363,9 @@ func TestSeedSendsEveryFileInOneCommit(t *testing.T) {
 
 func TestSeedRefusesRejectedCommit(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, func(f *fakeForgejo) { f.seedStatus = http.StatusInternalServerError })
-	_, err := Seed(f.client(t), testOwner, testName, testAuthor, []File{{Path: "a", Data: []byte("a")}})
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	f.SeedStatus = http.StatusInternalServerError
+	_, err := Seed(client(t, f), testOwner, testName, testAuthor, []File{{Path: "a", Data: []byte("a")}})
 	if err == nil || !strings.Contains(err.Error(), "HTTP 500") {
 		t.Fatalf("Seed error = %v, want the rejected commit's HTTP 500 named", err)
 	}
@@ -468,8 +373,9 @@ func TestSeedRefusesRejectedCommit(t *testing.T) {
 
 func TestSeedRefusesReplyWithoutACommit(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, func(f *fakeForgejo) { f.seedReply = `{}` })
-	_, err := Seed(f.client(t), testOwner, testName, testAuthor, []File{{Path: "a", Data: []byte("a")}})
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	f.SeedReply = `{}`
+	_, err := Seed(client(t, f), testOwner, testName, testAuthor, []File{{Path: "a", Data: []byte("a")}})
 	if err == nil || !strings.Contains(err.Error(), "no commit") {
 		t.Fatalf("Seed error = %v, want a refusal naming the missing commit", err)
 	}
@@ -479,17 +385,17 @@ func TestSeedRefusesReplyWithoutACommit(t *testing.T) {
 // total cap refuses.
 func TestSeedRefusesASeedOverTheTotalLimitBeforeAnyRequest(t *testing.T) {
 	t.Parallel()
-	f := newFake(t, nil)
+	f := forgejotest.NewRepoFake(testOwner, testName)
 	buf := make([]byte, MaxFileBytes)
 	files := make([]File, 0, MaxSeedBytes/MaxFileBytes+1)
 	for i := 0; i <= MaxSeedBytes/MaxFileBytes; i++ {
 		files = append(files, File{Path: fmt.Sprintf("f%04d", i), Data: buf})
 	}
-	_, err := Seed(f.client(t), testOwner, testName, testAuthor, files)
+	_, err := Seed(client(t, f), testOwner, testName, testAuthor, files)
 	if err == nil || !strings.Contains(err.Error(), "total limit") {
 		t.Fatalf("Seed error = %v, want a refusal naming the total limit", err)
 	}
-	if w := f.writes(); len(w) != 0 {
+	if w := f.Writes(); len(w) != 0 {
 		t.Fatalf("Seed sent %d writes for a seed over the total limit: %+v", len(w), w)
 	}
 }
@@ -498,14 +404,13 @@ func TestSeedRefusesASeedOverTheTotalLimitBeforeAnyRequest(t *testing.T) {
 func TestErrorsNeverCarryTheToken(t *testing.T) {
 	t.Parallel()
 	echo := `{"message":"rejected token ` + testToken + `"}`
-	f := newFake(t, func(f *fakeForgejo) {
-		f.createStatus = http.StatusForbidden
-		f.seedStatus = http.StatusForbidden
-		f.seedReply = echo
-	})
-	client := f.client(t)
-	errs := []error{CreateRepo(client, testOwner, testName)}
-	_, err := Seed(client, testOwner, testName, testAuthor, []File{{Path: "a", Data: []byte("a")}})
+	f := forgejotest.NewRepoFake(testOwner, testName)
+	f.CreateStatus = http.StatusForbidden
+	f.SeedStatus = http.StatusForbidden
+	f.SeedReply = echo
+	c := client(t, f)
+	errs := []error{CreateRepo(c, testOwner, testName)}
+	_, err := Seed(c, testOwner, testName, testAuthor, []File{{Path: "a", Data: []byte("a")}})
 	errs = append(errs, err)
 	for _, e := range errs {
 		if e == nil {
