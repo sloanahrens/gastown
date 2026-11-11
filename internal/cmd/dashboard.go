@@ -957,22 +957,16 @@ const spendToolSource = "spend tool"
 // no tool either. A failed read of the ledger is logged through whyLog and served
 // as an unavailable state, not as no source.
 func resolveSpend(flagValue string, whyLog *dashWhyLog) (func() json.RawMessage, string) {
-	return resolveSpendIn(flagValue, os.UserHomeDir, os.Stat, execSpend, whyLog)
+	return resolveSpendFrom(config.InContainerMode(), flagValue, os.UserHomeDir, os.Stat, execSpend, whyLog)
 }
 
-// resolveSpendIn is resolveSpend with the home directory, the file check and the
-// command runner injected, so a test drives absent and present without the real
-// home and runs no process. The in-cluster signal is read the way the daemon
-// reads it (config.InContainerMode).
-func resolveSpendIn(flagValue string, home func() (string, error), stat func(string) (fs.FileInfo, error), run spendRunner, whyLog *dashWhyLog) (func() json.RawMessage, string) {
-	return resolveSpendFrom(config.InContainerMode(), flagValue, home, stat, run, whyLog)
-}
-
-// resolveSpendFrom is resolveSpendIn with the in-cluster signal injected too, so a
-// test drives either host without setting the process environment. A tool or
-// ledger the check cannot stat for a reason other than its absence still counts
-// as present, so the poll that reads it reports a failed read rather than an
-// absent pane.
+// resolveSpendFrom is resolveSpend with the in-cluster signal, the home directory,
+// the file check and the command runner injected, so a test drives either host
+// and absent and present without the real home, the process environment or a
+// process. The in-cluster signal is read the way the daemon reads it
+// (config.InContainerMode), by resolveSpend alone. A tool or ledger the check
+// cannot stat for a reason other than its absence still counts as present, so
+// the poll that reads it reports a failed read rather than an absent pane.
 func resolveSpendFrom(inCluster bool, flagValue string, home func() (string, error), stat func(string) (fs.FileInfo, error), run spendRunner, whyLog *dashWhyLog) (func() json.RawMessage, string) {
 	if f := strings.Fields(flagValue); len(f) > 0 {
 		return dashboardSpend(f, run), ""
