@@ -20,6 +20,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -63,6 +64,10 @@ func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *
 		clock:            clockwork.NewFakeClockAt(now),
 		dogFeedFn:        (&feedCapture{}).record,
 		tierSweepSeams:   tierSweepSeams{run: rec.run, beads: func(string) tierSweepBeadStore { return bd }, treeHas: goTree},
+		// A cycle's first launch since start clears the rig's busy escalation
+		// (gt-pihhr4); the fake notifier takes that and every other send, so no
+		// tier sweep test starts gt escalate.
+		notifier: notifyfake.New(),
 	}
 	useGitfake(t, d)
 	return d, rec, bd, &logs

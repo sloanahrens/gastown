@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
@@ -299,8 +300,8 @@ func TestTierSweepBusyJobPastBudgetEscalatesOnce(t *testing.T) {
 		t.Fatalf("escalations = %+v, want exactly one for the Job that outlasted the budget", got)
 	}
 	e := got[0].Escalation
-	if e.Fingerprint != tierSweepBusyAlertKey(running) {
-		t.Errorf("escalation key = %q, want %q", e.Fingerprint, tierSweepBusyAlertKey(running))
+	if e.Fingerprint != tierSweepBusyAlertKey(g.spec.Rig) {
+		t.Errorf("escalation key = %q, want %q", e.Fingerprint, tierSweepBusyAlertKey(g.spec.Rig))
 	}
 	if !strings.Contains(e.Reason, "gastown") || !strings.Contains(e.Reason, running) {
 		t.Errorf("escalation reason = %q, want the rig and the Job named", e.Reason)
@@ -331,7 +332,7 @@ func TestTierSweepBusyJobEscalationClearsWhenJobEnds(t *testing.T) {
 		t.Fatalf("stage = %+v, want the run launched once the Job ended", stage)
 	}
 	clears := g.notes.Clears()
-	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, tierSweepBusyAlertKey(running)) {
+	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, tierSweepBusyAlertKey(g.spec.Rig)) {
 		t.Errorf("clears = %+v, want the escalation for %q closed", clears, running)
 	}
 }
@@ -383,11 +384,11 @@ func TestTierSweepBusyJobReplacedRaisesItsOwnEscalation(t *testing.T) {
 	}
 
 	got := g.notes.Escalations()
-	if len(got) != 2 || got[1].Escalation.Fingerprint != tierSweepBusyAlertKey(second) {
+	if len(got) != 2 || got[1].Escalation.Fingerprint != tierSweepBusyAlertKey(g.spec.Rig) {
 		t.Fatalf("escalations = %+v, want one for %q after the first", got, second)
 	}
 	clears := g.notes.Clears()
-	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, tierSweepBusyAlertKey(first)) {
+	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, tierSweepBusyAlertKey(g.spec.Rig)) {
 		t.Errorf("clears = %+v, want the first Job's escalation closed", clears)
 	}
 }
@@ -427,5 +428,110 @@ func TestTierSweepBusyWaitStartsAtStageStart(t *testing.T) {
 	}
 	if want := 10 * time.Second; waits[0] != want {
 		t.Errorf("wait for the foreign Job = %v, want %v: the stage budget counts from stage start", waits[0], want)
+	}
+}
+
+// TestTierSweepBusyEscalationDeliveryFailureIsRetried: an escalation the
+// notifier refuses leaves no record and is logged with the Job named, so the
+// next cycle that meets the same Job raises it again; once delivered, the cycle
+// after that raises nothing more (gt-pihhr4).
+func TestTierSweepBusyEscalationDeliveryFailureIsRetried(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	running := otherRunJob(g)
+	g.cluster.jobs = running + "\n"
+	g.d.tierSweepSeams.pollInterval = time.Hour
+	g.d.tierSweepSeams.budgetTimer = runnerBudgetSpent
+
+	g.notes.Fail(notifyfake.KindEscalate, errors.New("the escalation store is down"))
+	// The refused delivery is retried through the daemon's clock (1 s, 2 s), so
+	// the cycle runs on a driven clock.
+	var stage tierSweepStageResult
+	runOnClock(t, g.d.clock.(*clockwork.FakeClock), time.Second, func() { stage = g.cycle() })
+	if stage.ran {
+		t.Fatalf("stage = %+v, want the cycle deferred behind %q", stage, running)
+	}
+	if !strings.Contains(g.logs.String(), "the escalation for sweep job "+running+" was not delivered") {
+		t.Fatalf("log = %q, want the refused delivery named with its Job", g.logs.String())
+	}
+	if _, open := g.d.tierSweepBusy.openFor(g.spec.Rig); open {
+		t.Fatalf("a refused escalation left a record open for %s; the next cycle would never retry it", g.spec.Rig)
+	}
+
+	g.notes.Fail(notifyfake.KindEscalate, nil)
+	for range 2 {
+		if stage := g.cycle(); stage.ran {
+			t.Fatalf("stage = %+v, want the cycle deferred behind %q", stage, running)
+		}
+	}
+	// The recorder keeps the refused attempts (the retries of the first cycle)
+	// beside the delivered one; what matters is one delivery for the rig.
+	delivered := 0
+	for _, c := range g.notes.Escalations() {
+		if c.Err == nil && c.Escalation.Fingerprint == tierSweepBusyAlertKey(g.spec.Rig) {
+			delivered++
+		}
+	}
+	if delivered != 1 {
+		t.Errorf("delivered escalations after the store came back = %d (%+v), want exactly one for the rig", delivered, g.notes.Escalations())
+	}
+}
+
+// TestTierSweepBusyEscalationLeftByAPreviousDaemonIsClearedOnce: a daemon that
+// starts with no record of an open escalation cannot know whether its
+// predecessor left one for the rig, so the first launch since start clears the
+// rig's key once; the launch after it sends no further clear (gt-pihhr4).
+func TestTierSweepBusyEscalationLeftByAPreviousDaemonIsClearedOnce(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	g.cluster.jobs = ""
+	boundWaits(g, 5)
+
+	for range 2 {
+		if stage := g.cycle(); stage.reason != "" || !stage.ran {
+			t.Fatalf("stage = %+v, want the run launched with no foreign Job", stage)
+		}
+		// The next cycle must launch again rather than adopt this run's result.
+		if err := os.RemoveAll(g.spec.OutDir); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	clears := g.notes.Clears()
+	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, tierSweepBusyAlertKey(g.spec.Rig)) {
+		t.Errorf("clears = %+v, want exactly one for the rig's key on the first launch since start", clears)
+	}
+}
+
+// TestTierSweepBusyFirstClearFailureIsOwedAgain: the first clear since start that
+// the notifier refuses is logged and owed again, so the next launch sends it.
+func TestTierSweepBusyFirstClearFailureIsOwedAgain(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	g.cluster.jobs = ""
+	boundWaits(g, 5)
+	g.notes.Fail(notifyfake.KindClear, errors.New("the escalation store refused the clear"))
+	if stage := g.cycle(); !stage.ran {
+		t.Fatalf("stage = %+v, want the run launched even though the clear was refused", stage)
+	}
+	if !strings.Contains(g.logs.String(), "a previous daemon may have left") {
+		t.Fatalf("log = %q, want the refused first clear named", g.logs.String())
+	}
+	g.notes.Fail(notifyfake.KindClear, nil)
+	// The next cycle must launch again rather than adopt the first run's result.
+	if err := os.RemoveAll(g.spec.OutDir); err != nil {
+		t.Fatal(err)
+	}
+	if stage := g.cycle(); !stage.ran {
+		t.Fatalf("second stage = %+v, want the run launched", stage)
+	}
+	delivered := 0
+	for _, c := range g.notes.Clears() {
+		if c.Err == nil && slices.Contains(c.Fingerprints, tierSweepBusyAlertKey(g.spec.Rig)) {
+			delivered++
+		}
+	}
+	if delivered != 1 {
+		t.Errorf("delivered clears = %d (%+v), want the retry after the refused one", delivered, g.notes.Clears())
 	}
 }

@@ -2749,6 +2749,33 @@ func (d *Daemon) tierSweepWaitForActiveJob(ctx context.Context, st tierSweepStag
 type tierSweepBusyAlerts struct {
 	mu    sync.Mutex
 	byRig map[string]string
+	// swept holds the rigs whose first launch since this daemon started has
+	// sent a clear: a previous daemon's open escalation has no record here, so
+	// that first launch closes it once (gt-pihhr4).
+	swept map[string]bool
+}
+
+// firstClearDue reports whether rig's first clear since the daemon started is
+// still owed, and marks it sent. A clear that fails calls firstClearRetry so
+// the next launch sends it again.
+func (a *tierSweepBusyAlerts) firstClearDue(rig string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.swept[rig] {
+		return false
+	}
+	if a.swept == nil {
+		a.swept = map[string]bool{}
+	}
+	a.swept[rig] = true
+	return true
+}
+
+// firstClearRetry makes rig's first clear owed again after one that failed.
+func (a *tierSweepBusyAlerts) firstClearRetry(rig string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.swept, rig)
 }
 
 // openFor returns the Job whose escalation is open for rig, and whether one is.
@@ -2776,11 +2803,13 @@ func (a *tierSweepBusyAlerts) forget(rig string) {
 	delete(a.byRig, rig)
 }
 
-// tierSweepBusyAlertKey is the alert key of the escalation for one foreign Job.
-// The key names the Job, so a Job that replaces the one a rig waited on raises an
-// escalation of its own rather than a repeat that still names the old Job.
-func tierSweepBusyAlertKey(job string) string {
-	return "tier_sweep:busy:" + job
+// tierSweepBusyAlertKey is the alert key of the escalation for the foreign Job
+// holding a rig's sweep. The key names the rig and the message names the Job: a
+// Job that replaces the one the rig waited on is a clear and a new escalation
+// under the same key, and a daemon that starts with no record can still close
+// the escalation its predecessor left open for the rig (gt-pihhr4).
+func tierSweepBusyAlertKey(rig string) string {
+	return "tier_sweep:busy:" + rig
 }
 
 // tierSweepBusyEscalate raises the escalation for a foreign sweep Job that held a
@@ -2801,7 +2830,7 @@ func (d *Daemon) tierSweepBusyEscalate(rig, job string, budget time.Duration) {
 	}
 	message := fmt.Sprintf("tier sweep on %s: sweep job %s is still running after its %s stage budget; the cycle defers with no verdict and retries on its next run. The job is not deleted; this escalation closes when it ends.",
 		rig, job, budget)
-	if err := d.escalateAlertErr(tierSweepBusyAlertKey(job), "tier_sweep", message); err != nil {
+	if err := d.escalateAlertErr(tierSweepBusyAlertKey(rig), "tier_sweep", message); err != nil {
 		d.logger.Printf("tier_sweep: %s: the escalation for sweep job %s was not delivered: %v", rig, job, err)
 		return
 	}
@@ -2814,14 +2843,27 @@ func (d *Daemon) tierSweepBusyEscalate(rig, job string, budget time.Duration) {
 func (d *Daemon) tierSweepBusyClear(rig string) {
 	job, open := d.tierSweepBusy.openFor(rig)
 	if !open {
+		// No record: either nothing was raised, or a previous daemon raised it
+		// and the record died with it. The first launch since this daemon
+		// started closes the rig's key once, so an escalation left open by a
+		// restart does not stand forever; a clear that fails is owed again.
+		if !d.tierSweepBusy.firstClearDue(rig) {
+			return
+		}
+		reason := "a sweep of " + rig + " launched; no foreign sweep job holds the rig"
+		if err := d.clearAlertsErr(reason, tierSweepBusyAlertKey(rig)); err != nil {
+			d.logger.Printf("tier_sweep: %s: the escalation a previous daemon may have left for a foreign sweep job was not cleared: %v", rig, err)
+			d.tierSweepBusy.firstClearRetry(rig)
+		}
 		return
 	}
 	reason := "sweep job " + job + " is no longer holding the rig's sweep"
-	if err := d.clearAlertsErr(reason, tierSweepBusyAlertKey(job)); err != nil {
+	if err := d.clearAlertsErr(reason, tierSweepBusyAlertKey(rig)); err != nil {
 		d.logger.Printf("tier_sweep: %s: the escalation for sweep job %s was not cleared: %v", rig, job, err)
 		return
 	}
 	d.tierSweepBusy.forget(rig)
+	d.tierSweepBusy.firstClearDue(rig)
 }
 
 // errTierSweepStatusUnread is the error tierSweepRunnerCollect returns when it
