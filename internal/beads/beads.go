@@ -963,6 +963,11 @@ type UpdateOptions struct {
 	// --acceptance semantics: ticking one line means resending the block
 	// with '- [x]' on it (gt-n623a).
 	Acceptance *string
+	// IfAcceptance guards the Acceptance write (bd update --if-acceptance): the
+	// hex sha256 of the criteria block the caller read. bd writes nothing and
+	// exits 13 (ErrGuardNotHeld) when the field no longer hashes to it. Empty
+	// sends no guard, and a guard needs Acceptance set (gt-xmogc2).
+	IfAcceptance string
 
 	// AppendNotes is appended to the existing notes, bd's own --append-notes
 	// semantics (a newline separates it from what is there). It rides in the
@@ -4218,6 +4223,14 @@ func (b *Beads) Update(id string, opts UpdateOptions) error {
 	}
 	if opts.Assignee != nil {
 		args = append(args, "--assignee="+*opts.Assignee)
+	}
+	if opts.IfAcceptance != "" {
+		// The guard is for the criteria write. Without one there is nothing to
+		// guard, so refuse here rather than hand bd a guard it has no write for.
+		if opts.Acceptance == nil {
+			return fmt.Errorf("update %s: IfAcceptance needs Acceptance set: a guard with no criteria write", id)
+		}
+		args = append(args, "--if-acceptance="+opts.IfAcceptance)
 	}
 	if opts.Acceptance != nil {
 		args = append(args, "--acceptance="+*opts.Acceptance)

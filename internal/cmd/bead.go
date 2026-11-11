@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -190,7 +193,9 @@ var beadTickCmd = &cobra.Command{
 	Long: `Tick one unchecked acceptance box. The box is named by its text (what
 follows its '[ ] '), and the field is re-read when the tick runs, so a box
 another writer added since you read the criteria is kept. Every other line
-keeps its bytes.
+keeps its bytes. If another writer changes the criteria between that read and
+the write, the tick re-reads and tries again, up to three writes, then reports
+the conflict and writes nothing more.
 
 A box whose text is no longer in the field refuses, and the refusal prints
 the criteria as they now stand. A box already ticked is left as it is.
@@ -506,39 +511,56 @@ func (v *beadVerbs) update(id string, opts beads.UpdateOptions) error {
 	return err
 }
 
-// tick flips the one unchecked acceptance box whose text is box. It reads the
-// field now, not at any earlier read, so a box another writer added since the
-// caller started is kept, and it names the box by text, not position. A box
-// that is no longer in the field refuses with the field as it stands now. The
-// write is not conditional on this read: a writer that lands between the Show
-// and the Update is overwritten, and the store offers no compare-and-set.
+// tickAttempts bounds the guarded write of tick: a block amended between the
+// read and the write is re-read and re-ticked, up to this many writes in all,
+// then the conflict is reported (gt-xmogc2).
+const tickAttempts = 3
+
+// tick flips the one unchecked acceptance box whose text is box. Each attempt
+// reads the field now, not at any earlier read, so a box another writer added
+// since the caller started is kept, and it names the box by text, not
+// position. A box that is no longer in the field refuses with the field as it
+// stands now. The write carries bd's --if-acceptance guard: the sha256 of the
+// block this attempt read. A writer that landed between the read and the write
+// makes bd refuse (ErrGuardNotHeld), so the amendment is never overwritten; the
+// next attempt re-reads and re-ticks. After tickAttempts refusals the conflict
+// is reported and nothing more is written.
 func (v *beadVerbs) tick(id, box string) error {
-	is, err := v.client.Show(id)
-	if err != nil {
-		return err
+	for attempt := 1; ; attempt++ {
+		is, err := v.client.Show(id)
+		if err != nil {
+			return err
+		}
+		// A bead whose criteria sit only in its description has no field to
+		// tick. Say so, and name the one write that gives the field its block,
+		// rather than refuse as if a box had gone missing.
+		if strings.TrimSpace(is.AcceptanceCriteria) == "" {
+			return fmt.Errorf("not ticking %s: its acceptance field is empty, so no box is in it; "+
+				"the criteria may sit in the description's Acceptance section, which tick does not edit. "+
+				"Set the field once with gt bead update %s --acceptance=\"<the block, those lines ticked>\", then tick", id, id)
+		}
+		next, err := beads.TickAcceptanceBox(is.AcceptanceCriteria, box)
+		if err != nil {
+			return fmt.Errorf("not ticking %s: %q: %w; its criteria now read:\n%s",
+				id, box, err, is.AcceptanceCriteria)
+		}
+		if next == is.AcceptanceCriteria {
+			_, err = fmt.Fprintf(v.out, "✓ %s already has %q ticked\n", id, box)
+			return err
+		}
+		sum := sha256.Sum256([]byte(is.AcceptanceCriteria))
+		err = v.client.Update(id, beads.UpdateOptions{Acceptance: &next, IfAcceptance: hex.EncodeToString(sum[:])})
+		switch {
+		case err == nil:
+			_, err = fmt.Fprintf(v.out, "✓ Ticked %q on %s\n", box, id)
+			return err
+		case !errors.Is(err, beads.ErrGuardNotHeld):
+			return fmt.Errorf("not ticking %s: the guarded write (bd update --if-acceptance) failed: %w", id, err)
+		case attempt == tickAttempts:
+			return fmt.Errorf("not ticking %s: %q: its criteria changed between every read and write over %d tries; "+
+				"nothing was written. Re-run gt bead tick once the amendment has settled", id, box, tickAttempts)
+		}
 	}
-	// A bead whose criteria sit only in its description has no field to tick.
-	// Say so, and name the one write that gives the field its block, rather
-	// than refuse as if a box had gone missing.
-	if strings.TrimSpace(is.AcceptanceCriteria) == "" {
-		return fmt.Errorf("not ticking %s: its acceptance field is empty, so no box is in it; "+
-			"the criteria may sit in the description's Acceptance section, which tick does not edit. "+
-			"Set the field once with gt bead update %s --acceptance=\"<the block, those lines ticked>\", then tick", id, id)
-	}
-	next, err := beads.TickAcceptanceBox(is.AcceptanceCriteria, box)
-	if err != nil {
-		return fmt.Errorf("not ticking %s: %q: %w; its criteria now read:\n%s",
-			id, box, err, is.AcceptanceCriteria)
-	}
-	if next == is.AcceptanceCriteria {
-		_, err = fmt.Fprintf(v.out, "✓ %s already has %q ticked\n", id, box)
-		return err
-	}
-	if err := v.client.Update(id, beads.UpdateOptions{Acceptance: &next}); err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(v.out, "✓ Ticked %q on %s\n", box, id)
-	return err
 }
 
 func (v *beadVerbs) claim(id string) error {
