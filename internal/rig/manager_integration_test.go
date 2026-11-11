@@ -99,33 +99,30 @@ func TestIntegrationAddRigWithoutAMayorClone(t *testing.T) {
 	}
 }
 
-// The mayor clone is not optional for a repo that tracks .beads/: the rig
-// adopts that database through the clone's working tree, so a clone real git
-// refuses fails the add instead of leaving a rig that runs its own beside it
-// (gt-jmqc5).
-func TestIntegrationAddRigRefusesATrackedBeadsRepoWithoutAMayorClone(t *testing.T) {
+// A repo that tracks .beads/ adds without a mayor clone: its beads files are
+// read from the bare repo at the default branch with real git, and the rig
+// adopts them into <rig>/.beads (gt-3lvcjz.16).
+func TestIntegrationAddRigAdoptsTrackedBeadsWithoutAMayorClone(t *testing.T) {
 	m, root, _ := realGitManager(t)
 	m.git = mayorCloneRefused{m.git}
 	source := sourceRepo(t, "tracked-source")
 	commitFiles(t, source, map[string]string{
-		".beads/config.yaml":   "prefix: tb\n",
-		".beads/metadata.json": `{"database":"beads_tb"}`,
+		".beads/config.yaml":   "prefix: tb\n\n",
+		".beads/metadata.json": `{"database":"beads_tb"}` + "\n",
 	})
 
-	_, err := m.AddRig(AddRigOptions{
+	if _, err := m.AddRig(AddRigOptions{
 		Name:          "tracked",
 		GitURL:        source,
 		BeadsPrefix:   "tb",
 		SkipDoltCheck: true,
-	})
-	if err == nil {
-		t.Fatal("AddRig succeeded, want a failure: the tracked .beads/ is read through the clone")
+	}); err != nil {
+		t.Fatalf("AddRig: %v", err)
 	}
-	if !strings.Contains(err.Error(), ".beads/") {
-		t.Errorf("error = %q, want it to name .beads/", err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "tracked")); !os.IsNotExist(err) {
-		t.Errorf("rig directory = %v, want the failed add rolled back", err)
+	for _, name := range []string{"config.yaml", "metadata.json"} {
+		if _, err := os.Stat(filepath.Join(root, "tracked", ".beads", name)); err != nil {
+			t.Errorf("rig has no adopted %s: %v", name, err)
+		}
 	}
 }
 
