@@ -109,6 +109,18 @@ type fakeEnv struct {
 	cleared     []string // "rig/polecat=workBead" per ClearSubmission
 	clearErr    map[string]error
 
+	// blockers answers BlockingDeps per bead; a missing bead has none and
+	// blockerErr makes the read fail.
+	blockers     map[string][]WorkRef
+	blockerErr   map[string]error
+	blockerReads []string // beads BlockingDeps was asked about
+	// deferErr makes DeferBlocked fail for a bead, and deferStale names beads
+	// whose guarded deferral no longer holds (another actor took them).
+	deferErr   map[string]error
+	deferStale map[string]bool
+	deferred   []string // "bead=assignee" per DeferBlocked
+	deferNotes []string // the note handed to each successful deferral
+
 	// raised are the escalation records the rig's polecats raised, and
 	// raisedErr makes the read fail.
 	raised    []Escalation
@@ -158,6 +170,8 @@ func newFake() *fakeEnv {
 		clearErr:  map[string]error{},
 		gitStates: map[string]GitState{}, gitErr: map[string]error{},
 		clearSeatErr: map[string]error{},
+		blockers:     map[string][]WorkRef{}, blockerErr: map[string]error{},
+		deferErr: map[string]error{}, deferStale: map[string]bool{},
 	}
 }
 
@@ -183,7 +197,49 @@ func (f *fakeEnv) CloseDeadSpan(bead, seat string, reason spans.Reason, lastSeen
 }
 func (f *fakeEnv) AssignedWork(_, p string) (*Work, error) {
 	f.workReads = append(f.workReads, p)
-	return f.work[p], f.workErr[p]
+	if err := f.workErr[p]; err != nil {
+		return nil, err
+	}
+	// The host lists hooked, in_progress and open, so a bead the tick deferred
+	// is no longer the seat's work.
+	if w := f.work[p]; w != nil && strings.EqualFold(strings.TrimSpace(w.Status), "deferred") {
+		return nil, nil
+	}
+	return f.work[p], nil
+}
+
+func (f *fakeEnv) BlockingDeps(_, id string) ([]WorkRef, error) {
+	f.blockerReads = append(f.blockerReads, id)
+	if err := f.blockerErr[id]; err != nil {
+		return nil, err
+	}
+	return f.blockers[id], nil
+}
+
+// DeferBlocked mirrors the host's write: the note lands on the bead, then the
+// guarded transfer sets it deferred and clears its assignment.
+func (f *fakeEnv) DeferBlocked(_, id, assignee, note string) (bool, error) {
+	if err := f.deferErr[id]; err != nil {
+		return false, err
+	}
+	if f.deferStale[id] {
+		return false, nil
+	}
+	f.deferred = append(f.deferred, id+"="+assignee)
+	f.deferNotes = append(f.deferNotes, note)
+	for _, w := range f.work {
+		if w.ID != id {
+			continue
+		}
+		w.Status, w.Assignee = "deferred", ""
+		if note != "" {
+			if w.Notes != "" {
+				w.Notes += "\n"
+			}
+			w.Notes += note
+		}
+	}
+	return true, nil
 }
 func (f *fakeEnv) WorkBead(_, id string) (*Work, error) {
 	if err := f.workBeadErr[id]; err != nil {

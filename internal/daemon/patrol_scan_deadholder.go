@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -69,6 +71,30 @@ func (h *patrolScanHost) Reopen(rig, beadID, assignee string) (bool, error) {
 		return false, fmt.Errorf("bd update %s --if-assignee: %w", beadID, err)
 	}
 	return reopened, nil
+}
+
+// DeferBlocked implements patrolscan.Env: it defers a bead whose seat cannot
+// proceed on it. The note is written first, so a deferral that lands always
+// carries the reason it sits, and the status transfer is bd's --if-assignee
+// guard, so a bead another actor took since the tick's read is left to that
+// actor (gt-otb5m3). An empty expected assignee is refused: the guard reads
+// empty as "still unassigned", which would defer a bead no seat holds.
+func (h *patrolScanHost) DeferBlocked(rig, beadID, assignee, note string) (bool, error) {
+	expected := strings.TrimSpace(assignee)
+	if expected == "" {
+		return false, errors.New("refusing to defer with no expected assignee")
+	}
+	bd := h.recoveryBeads()
+	if note != "" {
+		if err := bd.AppendNotes(beadID, note); err != nil {
+			return false, fmt.Errorf("recording why %s is deferred: %w", beadID, err)
+		}
+	}
+	moved, err := bd.TransferIfAssignee(beadID, expected, string(beads.StatusDeferred), "")
+	if err != nil {
+		return false, fmt.Errorf("bd update %s --status=deferred: %w", beadID, err)
+	}
+	return moved, nil
 }
 
 // recoveryBeads is the mutating bd client for one recovery write, routed by

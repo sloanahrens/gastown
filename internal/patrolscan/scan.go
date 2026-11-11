@@ -10,7 +10,11 @@
 //     comes back to a session it no longer has (gt-xs1ni). A seat whose
 //     agent bead reads stuck after a DEFERRED exit is restarted the same
 //     way, on its preserved branch: that bead is a finished turn left behind
-//     by gt done, not a polecat holding the seat (gt-ks62m);
+//     by gt done, not a polecat holding the seat (gt-ks62m). A DEFERRED or
+//     ESCALATED seat is released instead when a blocking dependency of its
+//     bead is unresolved: the bead's assignment is cleared and the bead
+//     deferred with the blocker named, because a restart only spawns a
+//     session that defers again (gt-otb5m3);
 //   - orphaned molecules: a polecat that is gone (no session and no
 //     directory) leaves its work bead's bonded mol-polecat-work wisp and step
 //     wisps open; they are closed so the base bead is not blocked by them;
@@ -460,6 +464,83 @@ type WorkRef struct {
 	Status string
 }
 
+// RestartStep is what the tick does with a dead seat that still holds its work
+// bead after a DEFERRED or ESCALATED exit.
+type RestartStep string
+
+const (
+	// RestartWait leaves the seat for a later tick: the death is not confirmed
+	// across the configured samples yet.
+	RestartWait RestartStep = "wait"
+	// RestartResume restarts the seat on its preserved branch.
+	RestartResume RestartStep = "resume"
+	// RestartRelease frees the seat and defers the bead, because a blocking
+	// dependency of the bead is unresolved and a fresh session could only end
+	// the way the last one did.
+	RestartRelease RestartStep = "release"
+)
+
+// RestartPlan is DecideRestart's answer.
+type RestartPlan struct {
+	Step RestartStep
+	// Blocker is the dependency that holds the bead, set with RestartRelease
+	// and the first in ID order when several do.
+	Blocker WorkRef
+}
+
+// DecideRestart decides the restart of a dead seat whose last turn exited
+// DEFERRED or ESCALATED and still holds bead: it waits until the death is
+// confirmed, releases the seat and defers the bead while one of the bead's
+// blocking dependencies is unresolved, and otherwise restarts the seat on its
+// preserved branch (gt-otb5m3).
+//
+// blockers is BlockingDeps' answer, read by the caller; samples is the seat's
+// streak of dead samples and confirmedAt the count the patrol acts on.
+func DecideRestart(blockers []WorkRef, samples, confirmedAt int) RestartPlan {
+	if !deadseats.Confirmed(samples, confirmedAt) {
+		return RestartPlan{Step: RestartWait}
+	}
+	if blocker, held := firstBlocker(blockers); held {
+		return RestartPlan{Step: RestartRelease, Blocker: blocker}
+	}
+	return RestartPlan{Step: RestartResume}
+}
+
+// firstBlocker returns the blocker the decision names: the first in ID order,
+// so the same set of dependencies answers the same way on every tick.
+func firstBlocker(blockers []WorkRef) (WorkRef, bool) {
+	if len(blockers) == 0 {
+		return WorkRef{}, false
+	}
+	sorted := append([]WorkRef(nil), blockers...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	return sorted[0], true
+}
+
+// DeferredBlockerNote is the notes line the tick leaves on a bead it deferred
+// because a blocking dependency holds it: what holds it, the exit the seat's
+// last turn ended on, and what lets the bead resume. It carries no time, so a
+// retried release writes the same line and the tick can tell it is there.
+func DeferredBlockerNote(blocker WorkRef, exit string) string {
+	return fmt.Sprintf("patrol_scan: deferred: blocked by unresolved dependency %s (%s); the seat's last turn exited %s and was released instead of restarted. Undefer this bead once %s lands.",
+		blocker.ID, blockerStatus(blocker), exit, blocker.ID)
+}
+
+// blockerStatus names the status a read reported for a blocker, and says it
+// was unread rather than leaving a gap.
+func blockerStatus(blocker WorkRef) string {
+	if status := strings.TrimSpace(blocker.Status); status != "" {
+		return status
+	}
+	return "status unread"
+}
+
+// hasDeferredBlockerNote reports whether notes already carry the line, so a
+// retry after a failed deferral does not append it a second time.
+func hasDeferredBlockerNote(notes, note string) bool {
+	return note != "" && strings.Contains(notes, note)
+}
+
 // Heartbeat is a polecat's self-reported session heartbeat (heartbeat v2).
 type Heartbeat struct {
 	State string // working, idle, exiting, stuck
@@ -484,6 +565,17 @@ type Env interface {
 	// is gone. It reads one bead a submitted seat's record names, to tell a
 	// real landing wait from a record its landing outlived (gt-xs1ni).
 	WorkBead(rig, id string) (*Work, error)
+	// BlockingDeps returns the bead's unresolved blocking dependencies — the
+	// edges the dispatcher's own admission refuses the bead for — each with
+	// the status the read reported. An error means the read could not answer,
+	// and the tick acts on nothing.
+	BlockingDeps(rig, beadID string) ([]WorkRef, error)
+	// DeferBlocked defers a bead whose seat cannot proceed on it: it appends
+	// note to the bead's notes (when note is not empty), then sets the bead
+	// deferred and clears its assignment, but only while it is still assigned
+	// to assignee. It reports whether the bead changed; false with no error
+	// means another actor took the bead since the read.
+	DeferBlocked(rig, beadID, assignee, note string) (bool, error)
 	// ClearSubmission ends a submitted seat's wait whose work bead is no
 	// longer submitted for landing, so the ordinary path can decide what the
 	// seat needs. It reports whether the record changed.
@@ -694,7 +786,7 @@ const (
 	OutcomeUnknown   Outcome = "unknown"    // a read failed; nothing done
 	OutcomeWaiting   Outcome = "waiting"    // dead, but not confirmed yet
 	OutcomeStalled   Outcome = "stalled"    // reported only
-	OutcomeReleased  Outcome = "released"   // stalled seat on finished work stopped and retired
+	OutcomeReleased  Outcome = "released"   // a seat freed: a stalled one on finished work, or a recovery whose blocked bead was deferred
 	OutcomeClosed    Outcome = "closed"     // orphaned molecule closed
 	OutcomeReopened  Outcome = "reopened"   // dead holder's bead returned to the queue
 	OutcomeIdled     Outcome = "idled"      // idle seat's record retired to stop
@@ -1049,7 +1141,28 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		}
 	}
 
-	if !deadseats.Confirmed(samples, s.o.DeadSamples) {
+	// plan is the decision for a recovery — a DEFERRED or ESCALATED turn that
+	// still holds its bead. It reads the bead's unresolved blocking
+	// dependencies, because a fresh session cannot resume work something else
+	// holds back: it would read the bead and end the same way the last turn did
+	// (gt-otb5m3). The read is gated on the confirmed death, so a seat that may
+	// still come back costs no bd call. A crash relaunch (recovery "") reads
+	// nothing and restarts as it always did.
+	plan := RestartPlan{Step: RestartResume}
+	switch {
+	case recovery != "":
+		blockers := []WorkRef(nil)
+		if deadseats.Confirmed(samples, s.o.DeadSamples) {
+			blockers, err = s.env.BlockingDeps(rig, work.ID)
+			if err != nil {
+				return unknown("blocking dependencies unreadable", err)
+			}
+		}
+		plan = DecideRestart(blockers, samples, s.o.DeadSamples)
+	case !deadseats.Confirmed(samples, s.o.DeadSamples):
+		plan.Step = RestartWait
+	}
+	if plan.Step == RestartWait {
 		f.Outcome = OutcomeWaiting
 		f.Detail = fmt.Sprintf("%s with %s hooked; dead sample %d of %d", res.Reason, work.ID, samples, s.o.DeadSamples)
 		return f, true
@@ -1078,6 +1191,10 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	// the sling path, so the two never overlap (gt-dz78b).
 	if err := s.closeDeadSpan(rig, name, work.ID, spanAt, spanReason); err != nil {
 		spanNote = "; dead span not closed: " + err.Error()
+	}
+
+	if plan.Step == RestartRelease {
+		return s.releaseBlocked(rig, name, work, recovery, plan.Blocker, spanNote)
 	}
 
 	// A DEFERRED seat's done may trail the bead's close: a report-only run
@@ -1143,6 +1260,42 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		return f, true
 	}
 	f.Outcome, f.Detail = OutcomeRestarted, reason+spanNote
+	return f, true
+}
+
+// releaseBlocked frees the seat and defers the bead when the bead cannot
+// proceed: an unresolved blocking dependency of the bead the seat holds means a
+// restart only spawns a session that would end the turn the way the last one
+// did (gt-otb5m3). The seat is released through the path a finished seat uses,
+// so the pool can allocate it again, and the bead is deferred to nobody with a
+// note naming the blocker, so a human reading it knows why it sits.
+//
+// Every write fails closed. The note goes in with the deferral so a deferral
+// that lands always carries its reason; a guarded deferral that no longer holds
+// means another actor took the bead, and the seat is left to that actor.
+func (s *Scanner) releaseBlocked(rig, name string, work *Work, exit string, blocker WorkRef, spanNote string) (Finding, bool) {
+	f := Finding{Kind: "seat", Subject: name}
+	note := DeferredBlockerNote(blocker, exit)
+	if hasDeferredBlockerNote(work.Notes, note) {
+		note = ""
+	}
+	moved, err := s.env.DeferBlocked(rig, work.ID, work.Assignee, note)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeFailed, "deferring "+work.ID+": "+err.Error()+spanNote
+		return f, true
+	}
+	if !moved {
+		f.Outcome, f.Detail = OutcomeSkipped,
+			work.ID+" moved to another holder since it was read; the seat is left to it"+spanNote
+		return f, true
+	}
+	if _, err := s.env.MarkIdle(rig, name); err != nil {
+		f.Outcome, f.Detail = OutcomeFailed, work.ID+" is deferred, but releasing the seat: "+err.Error()+spanNote
+		return f, true
+	}
+	f.Outcome, f.Detail = OutcomeReleased, fmt.Sprintf(
+		"%s is blocked by unresolved dependency %s (%s); exit %s, so the bead was deferred and the seat released",
+		work.ID, blocker.ID, blockerStatus(blocker), exit)+spanNote
 	return f, true
 }
 
