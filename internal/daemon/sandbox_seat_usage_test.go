@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -181,8 +182,14 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 		badWorkspace bool
 		// corruptRecord leaves the seat's sandbox record unreadable.
 		corruptRecord bool
-		wantWrites    int
-		wantLogs      int
+		// unreadableLedger makes the seat-end ledger a directory, so the start of a
+		// seat whose record is gone cannot be read.
+		unreadableLedger bool
+		wantWrites       int
+		// wantNotWritten and wantIncomplete count the two outcome lines: a refusal
+		// that wrote nothing, and a record written with transcripts not read in full.
+		wantNotWritten int
+		wantIncomplete int
 	}{
 		{
 			name:  "a seat with no transcript writes no record and logs nothing",
@@ -193,7 +200,7 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 			files: func(_ *testing.T, town string) []string {
 				return []string{filepath.Join(town, "transcripts", ".jsonl")}
 			},
-			wantWrites: 0, wantLogs: 1,
+			wantWrites: 0, wantNotWritten: 1,
 		},
 		{
 			name:          "an unreadable sandbox record is logged once and writes nothing",
@@ -203,20 +210,31 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 				writeUsageTranscript(t, path, start.Add(time.Hour), seatCallLine("ok", 1, 0, 1))
 				return []string{path}
 			},
-			wantWrites: 0, wantLogs: 1,
+			wantWrites: 0, wantNotWritten: 1,
 		},
 		{
 			name:          "an unreadable sandbox record with no transcript is logged once and writes nothing",
 			corruptRecord: true,
 			files:         func(*testing.T, string) []string { return nil },
-			wantWrites:    0, wantLogs: 1,
+			wantWrites:    0, wantNotWritten: 1,
 		},
 		{
-			name: "a missing transcript is logged once and its record is incomplete",
+			name:             "an unreadable ledger for a seat whose record is gone is logged once and writes nothing",
+			noRecord:         true,
+			unreadableLedger: true,
+			files: func(t *testing.T, town string) []string {
+				path := filepath.Join(town, "transcripts", "seat.jsonl")
+				writeUsageTranscript(t, path, start.Add(time.Hour), seatCallLine("ok", 1, 0, 1))
+				return []string{path}
+			},
+			wantWrites: 0, wantNotWritten: 1,
+		},
+		{
+			name: "a missing transcript is not a refusal: its record is written incomplete",
 			files: func(_ *testing.T, town string) []string {
 				return []string{filepath.Join(town, "transcripts", "gone.jsonl")}
 			},
-			wantWrites: 1, wantLogs: 1,
+			wantWrites: 1, wantIncomplete: 1,
 		},
 		{
 			name: "an unreadable transcript is logged once and its record is incomplete",
@@ -230,32 +248,32 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 				}
 				return []string{bad}
 			},
-			wantWrites: 1, wantLogs: 1,
+			wantWrites: 1, wantIncomplete: 1,
 		},
 		{
-			name: "a transcript line that does not parse is logged once",
+			name: "a transcript line that does not parse is written incomplete",
 			files: func(t *testing.T, town string) []string {
 				path := filepath.Join(town, "transcripts", "torn.jsonl")
 				writeUsageTranscript(t, path, start.Add(time.Hour), "not json\n"+seatCallLine("ok", 1, 0, 1))
 				return []string{path}
 			},
-			wantWrites: 1, wantLogs: 1,
+			wantWrites: 1, wantIncomplete: 1,
 		},
 		{
 			name:       "a listing that fails is logged once and writes nothing",
 			files:      func(*testing.T, string) []string { return nil },
 			listErr:    errors.New("project directory unreadable"),
-			wantWrites: 0, wantLogs: 1,
+			wantWrites: 0, wantNotWritten: 1,
 		},
 		{
-			name: "a failing write is logged once",
+			name: "a failing write is logged once as not written",
 			files: func(t *testing.T, town string) []string {
 				path := filepath.Join(town, "transcripts", "seat.jsonl")
 				writeUsageTranscript(t, path, start.Add(time.Hour), seatCallLine("ok", 1, 0, 1))
 				return []string{path}
 			},
 			writeErr:   errors.New("usage tree read-only"),
-			wantWrites: 1, wantLogs: 1,
+			wantWrites: 1, wantNotWritten: 1,
 		},
 		{
 			name:     "a seat whose sandbox record is gone is logged once and writes nothing",
@@ -265,7 +283,7 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 				writeUsageTranscript(t, path, start.Add(time.Hour), seatCallLine("ok", 1, 0, 1))
 				return []string{path}
 			},
-			wantWrites: 0, wantLogs: 1,
+			wantWrites: 0, wantNotWritten: 1,
 		},
 		{
 			name: "a town whose workspace map does not parse is logged once and writes nothing",
@@ -275,16 +293,16 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 				return []string{path}
 			},
 			badWorkspace: true,
-			wantWrites:   0, wantLogs: 1,
+			wantWrites:   0, wantNotWritten: 1,
 		},
 		{
-			name: "a readable seat writes its record and logs nothing",
+			name: "a readable seat writes its record and logs it as written",
 			files: func(t *testing.T, town string) []string {
 				path := filepath.Join(town, "transcripts", "seat.jsonl")
 				writeUsageTranscript(t, path, start.Add(time.Hour), seatCallLine("ok", 1, 0, 1))
 				return []string{path}
 			},
-			wantWrites: 1, wantLogs: 0,
+			wantWrites: 1,
 		},
 	}
 	for _, tt := range tests {
@@ -304,6 +322,11 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 			}
 			if tt.badWorkspace {
 				writeTownFile(t, f.town, workspaceid.File, "{not json")
+			}
+			if tt.unreadableLedger {
+				if err := os.MkdirAll(session.SandboxSeatLedgerPath(f.town), 0o755); err != nil {
+					t.Fatal(err)
+				}
 			}
 			var logs bytes.Buffer
 			f.host.d.logger = log.New(&logs, "", 0)
@@ -331,8 +354,19 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 			if writes != tt.wantWrites {
 				t.Errorf("usage writes = %d, want %d", writes, tt.wantWrites)
 			}
-			if got := strings.Count(logs.String(), "usage record is not written"); got != tt.wantLogs {
-				t.Errorf("usage failures logged %d times, want %d; log:\n%s", got, tt.wantLogs, logs.String())
+			if got := strings.Count(logs.String(), "usage record is not written"); got != tt.wantNotWritten {
+				t.Errorf("not-written lines = %d, want %d; log:\n%s", got, tt.wantNotWritten, logs.String())
+			}
+			if got := strings.Count(logs.String(), "were not read in full"); got != tt.wantIncomplete {
+				t.Errorf("incomplete lines = %d, want %d; log:\n%s", got, tt.wantIncomplete, logs.String())
+			}
+			// A record is logged as written exactly when the writer accepted it.
+			wantWrote := 0
+			if tt.wantWrites == 1 && tt.writeErr == nil {
+				wantWrote = 1
+			}
+			if got := strings.Count(logs.String(), "wrote its usage record"); got != wantWrote {
+				t.Errorf("written lines = %d, want %d; log:\n%s", got, wantWrote, logs.String())
 			}
 		})
 	}
@@ -461,5 +495,240 @@ func TestSeatEndUsageUnlistedSeamRefuses(t *testing.T) {
 	}
 	if dirExists(t, dirs.PolecatDir) {
 		t.Error("the seat's directories are still there after the removal")
+	}
+}
+
+// seatLedgerLine is one seat-end line as a removal appends it, for a test that
+// stages the ledger a teardown leaves behind.
+type seatLedgerLine struct {
+	Session   string    `json:"session"`
+	Rig       string    `json:"rig"`
+	Polecat   string    `json:"polecat"`
+	CreatedAt time.Time `json:"created_at"`
+	EndedAt   time.Time `json:"ended_at"`
+}
+
+// seatLedgerText is the seat-end ledger holding lines, one JSON object a line.
+func seatLedgerText(t *testing.T, lines ...seatLedgerLine) string {
+	t.Helper()
+	var text string
+	for _, line := range lines {
+		data, err := json.Marshal(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text += string(data) + "\n"
+	}
+	return text
+}
+
+// writeSeatLedgerText stages the town's seat-end ledger with text.
+func writeSeatLedgerText(t *testing.T, town, text string) {
+	t.Helper()
+	path := session.SandboxSeatLedgerPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSeatEndUsageSurvivesTheRecordTeardown: the teardown every path runs removes
+// the seat's sandbox record before the landing's seat end, and the usage record
+// still counts from the seat's start, which the removal handed on in the ledger.
+func TestSeatEndUsageSurvivesTheRecordTeardown(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	submitted := start.Add(30 * time.Minute)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	f.host.d.clock = clockwork.NewFakeClockAt(end)
+	f.writeSeatRecordAt(start)
+	if err := session.RemoveSandboxRecordAt(f.town, f.host.sessionName(endRig, endPolecat), f.host.d.clk().Now); err != nil {
+		t.Fatalf("the teardown's removal: %v", err)
+	}
+	if _, ok, _ := session.ReadSandboxRecord(f.town, f.host.sessionName(endRig, endPolecat)); ok {
+		t.Fatal("the seat's record survived the teardown")
+	}
+	ledger, err := os.ReadFile(session.SandboxSeatLedgerPath(f.town))
+	if err != nil {
+		t.Fatalf("reading the seat-end ledger: %v", err)
+	}
+	var removed seatLedgerLine
+	if err := json.Unmarshal(ledger, &removed); err != nil {
+		t.Fatalf("the seat-end line: %v", err)
+	}
+	if !removed.EndedAt.Equal(end) {
+		t.Errorf("the removal's ended_at = %v, want the daemon's clock %v", removed.EndedAt, end)
+	}
+	seat := filepath.Join(f.town, "transcripts", "new-session.jsonl")
+	writeUsageTranscript(t, seat, start.Add(time.Hour), seatCallLine("new", 100, 50, 20))
+	f.host.seatUsage.list = func(_, _ string) ([]string, error) { return []string{seat}, nil }
+	var calls []usageCall
+	f.host.seatUsage.write = func(usageDir string, rec dashboard.UsageRecord, ids []string) error {
+		calls = append(calls, usageCall{usageDir: usageDir, rec: rec, ids: ids})
+		return nil
+	}
+	var logs bytes.Buffer
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: submitted, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("the finished seat was not removed")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("usage writes = %d, want 1", len(calls))
+	}
+	rec := calls[0].rec
+	if !rec.Start.Equal(start) {
+		t.Errorf("record start = %v, want the seat's start %v", rec.Start, start)
+	}
+	if rec.Seat == nil || *rec.Seat != endPolecat || rec.Bead != endBead {
+		t.Errorf("record names seat %v bead %q, want %q %q", rec.Seat, rec.Bead, endPolecat, endBead)
+	}
+	if rec.Totals.Calls != 1 {
+		t.Errorf("record calls = %d, want the seat's one call", rec.Totals.Calls)
+	}
+	if len(calls[0].ids) != 1 || calls[0].ids[0] != "new-session" {
+		t.Errorf("session ids = %q, want the seat's own session", calls[0].ids)
+	}
+	recordPath := usageattrib.WorkRecordPath(calls[0].usageDir, endBead)
+	if want := "wrote its usage record " + recordPath + " for bead " + endBead; !strings.Contains(logs.String(), want) {
+		t.Errorf("log does not name the written record %q:\n%s", want, logs.String())
+	}
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat's directories are still there after the removal")
+	}
+}
+
+// TestSeatEndUsageSkipsAnUnrelatedUnparseableLine: a ledger line that does not
+// parse and names no seat is skipped, and the log names its line. It does not
+// stop this seat, whose own line still gives its start.
+func TestSeatEndUsageSkipsAnUnrelatedUnparseableLine(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	submitted := start.Add(30 * time.Minute)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	f.host.d.clock = clockwork.NewFakeClockAt(end)
+	own := seatLedgerLine{Session: f.host.sessionName(endRig, endPolecat), Rig: endRig, Polecat: endPolecat, CreatedAt: start, EndedAt: end}
+	writeSeatLedgerText(t, f.town, "not json\n"+seatLedgerText(t, own))
+	seat := filepath.Join(f.town, "transcripts", "new-session.jsonl")
+	writeUsageTranscript(t, seat, start.Add(time.Hour), seatCallLine("new", 100, 50, 20))
+	f.host.seatUsage.list = func(_, _ string) ([]string, error) { return []string{seat}, nil }
+	var calls []usageCall
+	f.host.seatUsage.write = func(usageDir string, rec dashboard.UsageRecord, ids []string) error {
+		calls = append(calls, usageCall{usageDir: usageDir, rec: rec, ids: ids})
+		return nil
+	}
+	var logs bytes.Buffer
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: submitted, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("the finished seat was not removed")
+	}
+	if len(calls) != 1 {
+		t.Fatalf("usage writes = %d, want 1: an unrelated bad line stopped this seat; log:\n%s", len(calls), logs.String())
+	}
+	if !calls[0].rec.Start.Equal(start) {
+		t.Errorf("record start = %v, want the seat's start %v", calls[0].rec.Start, start)
+	}
+	if !strings.Contains(logs.String(), "seat-end ledger line 1 does not parse") {
+		t.Errorf("log does not name the skipped line 1:\n%s", logs.String())
+	}
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat's directories are still there after the removal")
+	}
+}
+
+// TestSeatEndUsageRefusesAStartItCannotMatch: when the record is gone and the
+// ledger cannot name the seat's start, no usage record is written, the failure
+// is logged once, and the seat is still removed.
+func TestSeatEndUsageRefusesAStartItCannotMatch(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	submitted := start.Add(30 * time.Minute)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	// own is the seat's line: the record that was alive at the submission.
+	own := func(name string, created, ended time.Time) seatLedgerLine {
+		return seatLedgerLine{Session: name, Rig: endRig, Polecat: endPolecat, CreatedAt: created, EndedAt: ended}
+	}
+	tests := []struct {
+		name string
+		// ledger is the seat-end ledger the teardown left, given the seat's session name.
+		ledger    func(t *testing.T, name string) string
+		submitted time.Time
+	}{
+		{
+			name: "a predecessor's line ended before the submission",
+			ledger: func(t *testing.T, name string) string {
+				return seatLedgerText(t, own(name, start.Add(-3*time.Hour), start.Add(-2*time.Hour)))
+			},
+			submitted: submitted,
+		},
+		{
+			name: "two records alive at the submission",
+			ledger: func(t *testing.T, name string) string {
+				return seatLedgerText(t, own(name, start, start.Add(2*time.Hour)), own(name, start.Add(-time.Hour), start.Add(2*time.Hour)))
+			},
+			submitted: submitted,
+		},
+		{
+			name: "a line that does not parse and names this seat",
+			ledger: func(_ *testing.T, name string) string {
+				return `{"session":"` + name + `",` + "\n"
+			},
+			submitted: submitted,
+		},
+		{
+			name: "a submission with no stamp",
+			ledger: func(t *testing.T, name string) string {
+				return seatLedgerText(t, own(name, start, start.Add(2*time.Hour)))
+			},
+			submitted: time.Time{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			dirs := f.seatDirs()
+			f.host.d.clock = clockwork.NewFakeClockAt(end)
+			writeSeatLedgerText(t, f.town, tt.ledger(t, f.host.sessionName(endRig, endPolecat)))
+			seat := filepath.Join(f.town, "transcripts", "new-session.jsonl")
+			writeUsageTranscript(t, seat, start.Add(time.Hour), seatCallLine("new", 100, 50, 20))
+			f.host.seatUsage.list = func(_, _ string) ([]string, error) { return []string{seat}, nil }
+			writes := 0
+			f.host.seatUsage.write = func(string, dashboard.UsageRecord, []string) error {
+				writes++
+				return nil
+			}
+			var logs bytes.Buffer
+			f.host.d.logger = log.New(&logs, "", 0)
+
+			finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Submitted: tt.submitted, Landed: true}
+			if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+				t.Fatal("a seat whose start cannot be matched was not removed")
+			}
+			if writes != 0 {
+				t.Errorf("usage writes = %d, want 0", writes)
+			}
+			if got := strings.Count(logs.String(), "usage record is not written"); got != 1 {
+				t.Errorf("usage failures logged %d times, want 1; log:\n%s", got, logs.String())
+			}
+			if dirExists(t, dirs.PolecatDir) {
+				t.Error("the seat's directories are still there after the removal")
+			}
+		})
 	}
 }

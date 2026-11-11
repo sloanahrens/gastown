@@ -214,6 +214,11 @@ func subagentShare(sub, total int64) float64 {
 // unsafeFileChars matches the characters usage-attrib's safe() replaces in a bead name (gt-6qc3nw).
 var unsafeFileChars = regexp.MustCompile(`[^A-Za-z0-9._-]`)
 
+// WorkRecordPath is the file a bead's work usage record is written to under usageDir.
+func WorkRecordPath(usageDir, bead string) string {
+	return recordPath(usageDir, bead, dashboard.UsageKindWork)
+}
+
 // recordPath is <usageDir>/beads/<bead>.<kind>.json, with the bead cleaned so no bead name
 // can reach outside the beads directory.
 func recordPath(usageDir, bead, kind string) string {

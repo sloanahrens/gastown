@@ -210,7 +210,9 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		}
 		// The seat's start is read before the errored sandbox below is deleted,
 		// since its record is the only place the start is kept (gt-6qc3nw.12).
-		start, startErr := h.seatStartedAt(rig, name)
+		// A record the teardown removed earlier leaves its start on the ledger
+		// (gt-kovllv).
+		start, startErr := h.seatStartedAt(rig, name, landing.Submitted)
 		// Every guard has let the seat go, so its errored sandbox holds no work
 		// the landing does not already have. It is deleted before the host
 		// directories, so the seat name is free once they are gone (gt-jhoi1).
@@ -223,8 +225,14 @@ func (h *patrolScanHost) endFinishedSandboxSeat(rig, name string, landing sandbo
 		}
 		// The usage record is written before the transcripts' worktree goes. A
 		// failure is logged and the removal goes on (gt-6qc3nw.12).
-		if err := h.writeSeatUsage(rig, name, landing, start, startErr); err != nil {
-			log("its usage record is not written: %v", err)
+		written, incomplete, usageErr := h.writeSeatUsage(rig, name, landing, start, startErr)
+		switch {
+		case usageErr != nil:
+			log("its usage record is not written: %v", usageErr)
+		case written != "" && incomplete != nil:
+			log("wrote its usage record %s for bead %s, but its transcripts were not read in full: %v", written, landing.BeadID, incomplete)
+		case written != "":
+			log("wrote its usage record %s for bead %s", written, landing.BeadID)
 		}
 		deleted, err := h.removeSeatDirs(rigPath, rig, name)
 		if err != nil {
