@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/imagevalues"
@@ -430,6 +431,87 @@ func TestPairReadyUnreadableCloneRaisesTheUnreadableItem(t *testing.T) {
 		assert.Contains(t, items[0].Summary, tc.want, tc.name)
 		assert.Zero(t, fx.api.compareCalls, "%s: an unreadable clone fell back to Forgejo", tc.name)
 	}
+}
+
+// pairReadyTownDaemon is a daemon over town whose git seam records every
+// directory it opens.
+func pairReadyTownDaemon(town string) (*Daemon, map[string]daemonGit) {
+	f := gitfake.New()
+	opened := map[string]daemonGit{}
+	d := &Daemon{config: &Config{TownRoot: town}}
+	d.openGitFn = func(dir string) daemonGit {
+		g := f.Open(dir).(daemonGit)
+		opened[dir] = g
+		return g
+	}
+	return d, opened
+}
+
+// TestPairReadyRigReadsTheRigBareClone: the production rig resolver reads the
+// rig's bare clone at the one name for it, so the judge reads the daemon's own
+// repository rather than one opened somewhere else.
+func TestPairReadyRigReadsTheRigBareClone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	require.NoError(t, os.MkdirAll(constants.RigBareRepoPath(filepath.Join(town, "gastown")), 0o755))
+	d, opened := pairReadyTownDaemon(town)
+
+	got := d.pairReadyRig("gastown", town, nil)
+
+	bare := constants.RigBareRepoPath(filepath.Join(town, "gastown"))
+	require.NotNil(t, got.Git, "the rig's bare clone was not opened")
+	assert.Equal(t, opened[bare], got.Git, "the rig does not read its bare clone")
+}
+
+// TestPairReadyRigWithoutABareCloneHasNoClone: a rig the daemon keeps no clone
+// for resolves with no clone, so the check compares through the API instead of
+// calling every green unreadable.
+func TestPairReadyRigWithoutABareCloneHasNoClone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d, opened := pairReadyTownDaemon(town)
+
+	got := d.pairReadyRig("gastown", town, nil)
+
+	bare := constants.RigBareRepoPath(filepath.Join(town, "gastown"))
+	assert.Nil(t, got.Git, "a rig with no bare clone resolved to one")
+	_, openedClone := opened[bare]
+	assert.False(t, openedClone, "a rig with no bare clone had its clone opened")
+}
+
+// TestPairReadyJudgesThroughForgejoWithNoClone: a rig with no local clone is
+// judged by the Forgejo comparison, and the item says the comparison was read
+// there.
+func TestPairReadyJudgesThroughForgejoWithNoClone(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.git = nil
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "the check raised %d items, want one", len(items))
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
+	assert.Contains(t, items[0].Summary, "3 commits ahead of the running commit")
+	assert.Contains(t, items[0].Summary, pairReadyNoCloneNote, "the item does not say it was compared with Forgejo")
+	assert.Equal(t, 2, fx.api.compareCalls, "the fallback made %d comparisons, want 2", fx.api.compareCalls)
+}
+
+// TestPairReadyNoCloneComparisonFailureRaisesTheUnreadableItem: a rig with no
+// clone whose Forgejo comparison fails is unreadable, not read as no pair.
+func TestPairReadyNoCloneComparisonFailureRaisesTheUnreadableItem(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.git = nil
+	fx.api.compares = nil // no comparison fixture: every comparison fails
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "the check raised %d items, want the unreadable item only", len(items))
+	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+	assert.Contains(t, items[0].Summary, "comparing green/"+pairGreen12+" with the running commit")
+	assert.Equal(t, 1, fx.api.compareCalls, "a failed comparison was made %d times, want one", fx.api.compareCalls)
 }
 
 // TestPairReadyOneImageAloneRaisesNothing: a green commit with only one of its

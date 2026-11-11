@@ -26,8 +26,8 @@ package daemon
 //
 // Whether a green commit is newer than the running one is read from the rig's
 // bare clone, with no fetch: running is an ancestor of green. The Forgejo
-// comparison answers only when the clone lacks one of the two commits, and the
-// item then says so (gt-enj8p3).
+// comparison answers only when the clone lacks one of the two commits, or when
+// the rig has no clone at all, and the item then says so (gt-enj8p3).
 //
 // It reads through the viewer's credential and never rolls, pulls or changes a
 // branch, so it is not a lifecycle step.
@@ -36,8 +36,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,6 +49,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 	"github.com/steveyegge/gastown/internal/land"
@@ -136,7 +139,8 @@ type pairReadyRig struct {
 	// published under, which may differ from the repository's owner.
 	Registry pairReadyRegistry
 	// Git is the rig's bare clone, which judges whether a green commit is newer
-	// than the running one without a Forgejo call.
+	// than the running one without a Forgejo call. A rig the daemon has no clone
+	// for has nil, and every green is compared through the API instead.
 	Git pairReadyGit
 	Err error
 }
@@ -462,14 +466,26 @@ type pairReadyVerdict struct {
 	note  string
 }
 
+// pairReadyNoCloneNote is on a verdict the Forgejo comparison answered because
+// the rig has no bare clone to read.
+const pairReadyNoCloneNote = "; the comparison was read from Forgejo, since the rig has no local clone"
+
 // pairReadyJudge decides whether green is newer than running. Both commits in
 // the rig's bare clone answer it locally: running is an ancestor of green, and
 // they differ (the caller has ruled out equal). An older or diverged green is
 // not newer, with no Forgejo call. A commit the clone lacks falls back to the
-// Forgejo comparison, and the verdict's note names that commit. A clone that
-// cannot be read is an error, not a fallback, so a broken clone is not read as
-// no pair.
+// Forgejo comparison, and the verdict's note names that commit. A rig with no
+// clone at all also falls back, and its note says so. A clone that cannot be
+// read is an error, not a fallback, so a broken clone is not read as no pair.
 func pairReadyJudge(ctx context.Context, r pairReadyRig, g pairReadyGreen, running string) (pairReadyVerdict, error) {
+	if r.Git == nil {
+		v, err := pairReadyCompareAPI(ctx, r, g, running)
+		if err != nil {
+			return pairReadyVerdict{}, err
+		}
+		v.note = pairReadyNoCloneNote
+		return v, nil
+	}
 	for _, sha := range []string{running, g.sha} {
 		has, err := r.Git.HasObject(sha)
 		if err != nil {
@@ -514,7 +530,7 @@ func pairReadyCompareAPI(ctx context.Context, r pairReadyRig, g pairReadyGreen, 
 // Its summary names the stamp, both digests and how the green commit is newer
 // than the running one: the commits it is ahead by when the API counted them, or
 // that the local clone judged it. A comparison the API answered for a missing
-// commit says so in the note.
+// commit, or for a rig with no clone, says so in the note.
 func pairReadyItem(rig string, g pairReadyGreen, running, daemonDigest, polecatDigest string, v pairReadyVerdict) attention.Item {
 	newer := "newer than the running commit " + greenRefShortSHA(running) + ", judged from the local clone"
 	if v.ahead >= 0 {
@@ -815,9 +831,21 @@ func pairReadyTokenDir(cfg *DaemonPatrolConfig) (string, error) {
 func (d *Daemon) pairReadyRig(name, tokenDir string, tokenErr error) pairReadyRig {
 	fc, err := rig.ResolveForgejoConfigWithError(d.repoFileOpener(), d.config.TownRoot, name)
 	out := pairReadyRigFrom(name, fc, err, tokenDir, tokenErr)
-	// The rig's bare clone, which the daemon keeps and this check only reads.
-	out.Git = d.gitAt(filepath.Join(d.config.TownRoot, name, ".repo.git"))
+	out.Git = d.pairReadyBareClone(name)
 	return out
+}
+
+// pairReadyBareClone opens the rig's bare clone, which the daemon keeps and
+// this check only reads. A rig with no clone there has none: the check falls
+// back to the Forgejo comparison rather than calling every green unreadable. A
+// stat failure other than not-exist opens the git anyway, so a clone that is
+// there but cannot be read still fails closed.
+func (d *Daemon) pairReadyBareClone(name string) pairReadyGit {
+	repo := constants.RigBareRepoPath(filepath.Join(d.config.TownRoot, name))
+	if _, err := os.Stat(repo); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return d.gitAt(repo)
 }
 
 // pairReadyRigFrom resolves one image rig over its settings as the config
