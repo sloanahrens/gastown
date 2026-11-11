@@ -138,3 +138,56 @@ func TestStop_DivergedSandboxStaysKeptWhenTheHandBackFails(t *testing.T) {
 		t.Errorf("hand-backs = %q, want the repeated hand-back once", f.handedBack)
 	}
 }
+
+// A diverged sandbox is kept for the stop that found it. Once that stop has
+// handed the bead back, the bead's next sling starts clean: the next stop asks
+// the sandbox again, and a sandbox that now pushes is removed with no note
+// carried over from the diverged stop.
+func TestStop_DivergedSandboxIsAskedAgainByTheNextStop(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seedStopSandbox(t, d)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+
+	pushes := 0
+	var deleted []string
+	f.removeSandbox = func(seat overrunSeat) error {
+		return d.overrunRemoveSandbox(seat, func(string, session.SandboxRecord) error {
+			pushes++
+			if pushes == 1 {
+				return divergedSandboxError()
+			}
+			return session.ErrNothingToPush
+		}, func(_ string, rec session.SandboxRecord) error {
+			deleted = append(deleted, rec.Session)
+			return nil
+		})
+	}
+	f.resetWorktree = func(overrunSeat) error { return nil }
+
+	d.runOverrunGuard(f.seams())
+	if pushes != 1 || len(f.handBackNotes) != 1 {
+		t.Fatalf("first stop: sandbox asked %d times, hand-back notes %q; want one ask and one hand-back", pushes, f.handBackNotes)
+	}
+
+	// The operator reconciles the heads and resumes the seat; the bead is
+	// slung again and its new run overruns.
+	resling := f.now.Add(time.Hour)
+	f.slung[stopSeat.Bead] = resling
+	f.now = resling.Add(20 * time.Minute)
+	f.seats, f.calls = []overrunSeat{stopSeat}, nil
+	d.runOverrunGuard(f.seams())
+
+	if pushes != 2 {
+		t.Errorf("sandbox asked %d times after the re-sling, want the new stop to ask it again", pushes)
+	}
+	if !reflect.DeepEqual(deleted, []string{overrunStopSessionName}) {
+		t.Errorf("sandbox deleted = %q, want the reconciled sandbox removed by the new stop", deleted)
+	}
+	if len(f.handBackNotes) != 2 {
+		t.Fatalf("hand-back notes = %q, want one more for the new stop", f.handBackNotes)
+	}
+	if strings.Contains(f.handBackNotes[1], "diverged") {
+		t.Errorf("the new stop's hand-back carries the old diverged note: %q", f.handBackNotes[1])
+	}
+}
