@@ -237,15 +237,11 @@ func (a *conflictAdapter) Label(ctx context.Context, item Item) (Labeling, error
 	// can be said.
 	known := false
 	if landedBead != nil && landedOther != nil {
-		heldBead, err := a.holdsLanding(ctx, landedBead)
+		held, err := a.holdsLandings(ctx, landedBead, landedOther)
 		if err != nil {
 			return Labeling{}, err
 		}
-		heldOther, err := a.holdsLanding(ctx, landedOther)
-		if err != nil {
-			return Labeling{}, err
-		}
-		known = heldBead.IsPass() && heldOther.IsPass()
+		known = held.IsPass()
 	}
 	if known {
 		fb, err := a.landedFiles(ctx, bead, landedBead)
@@ -364,23 +360,28 @@ func (a *conflictAdapter) landedFiles(ctx context.Context, bead string, rec *lan
 	return files, nil
 }
 
-// holdsLanding says whether the clone holds both commits of a landing, the base
-// and the head its changed files are read between. A read-only adapter asks
-// first. A commit it lacks is Unknown, which leaves the pair unlabeled, as
-// isAncestor leaves a commit the clone cannot trace. A fetching adapter reports
-// Pass for every landing, since its clone fetches on the first read. A ref that
-// fails the safety check reports Pass, so landedFiles refuses it as before.
-func (a *conflictAdapter) holdsLanding(ctx context.Context, rec *land.LandingRecord) (guard.Result, error) {
-	if !a.readOnly || !safeRef(rec.Base) || !safeRef(rec.Head) {
+// holdsLandings says whether the clone holds the base and head commits of every
+// landing given, the commits their changed files are read between. A read-only
+// adapter asks first. A commit it lacks is Unknown, which leaves the pair
+// unlabeled, as isAncestor leaves a commit the clone cannot trace. A fetching
+// adapter reports Pass, since its clone fetches on the first read. A ref that
+// fails the safety check is skipped, so landedFiles refuses it as before.
+func (a *conflictAdapter) holdsLandings(ctx context.Context, recs ...*land.LandingRecord) (guard.Result, error) {
+	if !a.readOnly {
 		return guard.Pass(), nil
 	}
 	repo, err := a.clone(ctx)
 	if err != nil {
 		return guard.Result{}, err
 	}
-	for _, ref := range []string{rec.Base, rec.Head} {
-		if _, err := repo.Run(ctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
-			return guard.Unknown(fmt.Errorf("resolving %s: %w", ref, err)), nil
+	for _, rec := range recs {
+		for _, ref := range []string{rec.Base, rec.Head} {
+			if !safeRef(ref) {
+				continue
+			}
+			if _, err := repo.Run(ctx, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+				return guard.Unknown(fmt.Errorf("resolving %s: %w", ref, err)), nil
+			}
 		}
 	}
 	return guard.Pass(), nil

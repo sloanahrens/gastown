@@ -512,6 +512,33 @@ func TestJevConflictReportRunFailsOutsideATown(t *testing.T) {
 	}
 }
 
+// A landings path the stat cannot read for a reason other than a missing file
+// fails with that path named, rather than as a missing file. Here a regular
+// file holds the directory the landings file should be in.
+func TestJevConflictLandingsRefusesAStatFailure(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	file, err := land.RigLandingsFile(town, conflict.RigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := file.Path
+	if err := os.MkdirAll(filepath.Dir(filepath.Dir(path)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Dir(path), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = jevConflictLandings(town)
+	if err == nil {
+		t.Fatal("a landings path that cannot be stat-ed was read as a landings file")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the landings file %s", err, path)
+	}
+}
+
 func TestJevConflictReportLandingsOpenErrorFailsTheReport(t *testing.T) {
 	t.Parallel()
 	landings := func(string) (jevLandedAt, error) { return nil, context.DeadlineExceeded }
