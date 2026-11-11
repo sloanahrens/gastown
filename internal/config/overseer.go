@@ -26,8 +26,8 @@ func runOverseerDetection(dir, name string, args ...string) ([]byte, error) {
 
 // runDetectionCommand runs one detection command to completion or ctx's
 // deadline, whichever comes first. A call the deadline ended reports ctx's
-// error rather than the kill signal exec returns for the child, the way
-// runUpgradeHealCommand does: the deadline is what ended the call.
+// error rather than the kill signal exec returns for the child: the deadline
+// is what ended the call.
 func runDetectionCommand(ctx context.Context, dir, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir

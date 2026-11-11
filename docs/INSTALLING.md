@@ -333,6 +333,11 @@ gt daemon stop
 gt daemon enable-supervisor
 ```
 
+On macOS, `gt daemon enable-supervisor` writes
+`~/Library/LaunchAgents/com.gastown.daemon.plist` and does not load it;
+launchd loads the file at the next login. On Linux it enables and starts the
+systemd user unit.
+
 Host-specific environment variables the daemon needs (e.g. `SDKROOT` on
 machines with a custom CLT/SDK setup) can be supplied via
 `settings/daemon.env` — see [Reference](reference.md#daemon-environment-settingsdaemonenv).
@@ -359,9 +364,8 @@ A job launchd cannot initialize respawns forever without the daemon ever
 reaching `daemon.log`. `launchctl print` reports no pid, a `runs` count that
 keeps climbing and `last exit code = 78` (EX_CONFIG, "Service could not
 initialize"), and `launchctl kickstart` does not clear it — the failure is in
-launchd's own load of the job, before the program starts. `gt status --line`
-names that state, and neither repairs it. Boot the job out, bootstrap it
-again, and confirm launchd took it:
+launchd's own load of the job, before the program starts. Boot the job out,
+bootstrap it again, and confirm launchd took it:
 
 ```bash
 launchctl bootout gui/$(id -u)/com.gastown.daemon
