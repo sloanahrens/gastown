@@ -22,8 +22,14 @@ func writeBeadsLocationFiles(t *testing.T, dir string, files map[string]string) 
 
 // beadsLocationRigFiles are the files of a rig's beads directory with data.
 var beadsLocationRigFiles = map[string]string{
-	"metadata.json": `{"database":"testrig"}`,
+	"metadata.json": `{"dolt_database":"testrig"}`,
 	"config.yaml":   "prefix: tr\n",
+}
+
+// beadsLocationConfigOnlyFiles are a rig's beads files with no metadata.json, so
+// beads.ComputeRedirectTarget finds no database and takes its mayor/rig fallback.
+var beadsLocationConfigOnlyFiles = map[string]string{
+	"config.yaml": "prefix: tr\n",
 }
 
 // The rows below cover the four cases each beads-location check must tell
@@ -402,7 +408,7 @@ func TestBeadsRedirectTargetCheck_FixRefusesLegacyRecompute(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
-	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationRigFiles)
+	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationConfigOnlyFiles)
 	writeBeadsLocationFiles(t, filepath.Join(rigPath, "mayor", "rig", ".beads"), beadsLocationRigFiles)
 	crewBeads := filepath.Join(rigPath, "crew", "max", ".beads")
 	writeBeadsLocationFiles(t, crewBeads, map[string]string{"redirect": "../../missing/.beads\n"})
@@ -429,7 +435,7 @@ func TestStaleBeadsRedirectCheck_FixRefusesLegacyRedirect(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigPath := filepath.Join(tmpDir, "testrig")
-	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationRigFiles)
+	writeBeadsLocationFiles(t, filepath.Join(rigPath, ".beads"), beadsLocationConfigOnlyFiles)
 	writeBeadsLocationFiles(t, filepath.Join(rigPath, "mayor", "rig", ".beads"), beadsLocationRigFiles)
 	crewBeads := filepath.Join(rigPath, "crew", "max", ".beads")
 	writeBeadsLocationFiles(t, crewBeads, map[string]string{"redirect": "../../missing/.beads\n"})
