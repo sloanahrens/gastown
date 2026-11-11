@@ -1,4 +1,4 @@
-log copy: WARNING: no log file or ledger has been written — this copy may not be the one the daemon writes
+log copy: newest write 2026-10-20 11:55Z (5m ago) at <town>/.runtime/jev/fixture.jsonl — no scheduled battery, so the copy's age cannot be judged
 Scorecard for battery fixture, all time
 Items: 4 parsed, 1 line(s) skipped
 

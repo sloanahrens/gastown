@@ -23,11 +23,17 @@ const jevScorecardGoldenPath = "jev_scorecard_fixture.golden"
 
 // writeScorecardFixture puts the scorecard package's fixture under town, the
 // layout the fixture adapter reads.
+// scorecardFixtureWritten stamps the fixture log five minutes before the clock
+// the scorecard tests judge it at, so its copy line never carries the wall-clock
+// time the file was written.
+var scorecardFixtureWritten = time.Date(2026, 10, 20, 11, 55, 0, 0, time.UTC)
+
 func writeScorecardFixture(t *testing.T, town string) {
 	t.Helper()
 	if err := scorecard.WriteFixture(town, scorecard.FixtureLines, scorecard.FixtureLabels); err != nil {
 		t.Fatal(err)
 	}
+	jevSetModTime(t, scorecard.FixtureLogPath(town), scorecardFixtureWritten)
 }
 
 // The text report prints one block per question in a fixed layout.
@@ -41,10 +47,13 @@ func TestScorecardFixtureGolden(t *testing.T) {
 	if err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", false, false, now); err != nil {
 		t.Fatal(err)
 	}
+	// The copy line names the absolute fixture log path, and the town is a temp
+	// directory, so the golden holds the town as <town>.
+	got := strings.ReplaceAll(out.String(), town, "<town>")
 
 	golden := filepath.Join("testdata", jevScorecardGoldenPath)
 	if *updateJevScorecardGolden {
-		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+		if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -52,8 +61,8 @@ func TestScorecardFixtureGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.String() != string(want) {
-		t.Errorf("output differs from %s (rewrite with -update-jev-scorecard-golden):\n%s\nwant:\n%s", golden, out.String(), want)
+	if got != string(want) {
+		t.Errorf("output differs from %s (rewrite with -update-jev-scorecard-golden):\n%s\nwant:\n%s", golden, got, want)
 	}
 }
 
@@ -261,27 +270,48 @@ func TestScorecardJSONLabeledTotalMatchesRows(t *testing.T) {
 	}
 }
 
-// TestJevScorecardPrintsTheLogCopyAge prints the newest write among the town's
-// Jev files above the report, so a score read from a copy other than the
-// daemon's says so (gt-bgimh9).
+// TestJevScorecardPrintsTheLogCopyAge names the one log the report read, not the
+// newest write across the town's logs, so a score read from a copy other than
+// the daemon's says which file it came from (gt-bgimh9).
 func TestJevScorecardPrintsTheLogCopyAge(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeScorecardFixture(t, town)
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
-	logPath := filepath.Join(town, ".runtime", "jev", "dedupe.jsonl")
-	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+	// A newer write in another battery's log must not become the copy line.
+	other := filepath.Join(town, ".runtime", "jev", "dedupe.jsonl")
+	if err := os.WriteFile(other, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	jevSetModTime(t, logPath, now.Add(-5*time.Minute))
+	jevSetModTime(t, other, now.Add(-time.Minute))
 
 	var out bytes.Buffer
 	if err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", false, false, now); err != nil {
 		t.Fatal(err)
 	}
-	want := "log copy: newest write 2026-10-20 11:55Z (5m ago) at " + logPath
+	want := "log copy: newest write 2026-10-20 11:55Z (5m ago) at " + scorecard.FixtureLogPath(town)
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("output does not carry %q:\n%s", want, out.String())
+	}
+}
+
+// TestJevScorecardWarnsWhenItsLogHasNeverBeenWritten covers the battery that has
+// written nothing: no file is the warning form, with copy_newest_write null.
+func TestJevScorecardWarnsWhenItsLogHasNeverBeenWritten(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+
+	var out bytes.Buffer
+	if err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", true, false, now); err != nil {
+		t.Fatal(err)
+	}
+	var doc jevScorecardDoc
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.CopyNewestWrite != nil || !doc.CopyStale {
+		t.Errorf("copy_newest_write = %+v, copy_stale = %v; want null and true", doc.CopyNewestWrite, doc.CopyStale)
 	}
 }
 
@@ -314,15 +344,20 @@ func TestJevScorecardRefusesAnUnreadableCopyFile(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeScorecardFixture(t, town)
-	// A symlink to itself: the stat fails with ELOOP, not with "not there".
-	if err := os.Symlink("attention.jsonl", filepath.Join(town, ".runtime", "jev", "attention.jsonl")); err != nil {
+	// The fixture's own log becomes a symlink to itself: the stat fails with
+	// ELOOP, not with "not there".
+	logPath := scorecard.FixtureLogPath(town)
+	if err := os.Remove(logPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Base(logPath), logPath); err != nil {
 		t.Fatal(err)
 	}
 
 	var out bytes.Buffer
 	err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", false, false,
 		time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
-	if err == nil || !strings.Contains(err.Error(), "attention.jsonl") {
+	if err == nil || !strings.Contains(err.Error(), filepath.Base(logPath)) {
 		t.Fatalf("err = %v, want the copy read's failure", err)
 	}
 }

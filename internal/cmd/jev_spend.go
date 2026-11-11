@@ -44,15 +44,16 @@ ledger stores tokens and never dollars. A missing ledger prints zeros; a line
 that does not parse is skipped and counted in lines_skipped.
 
 The first line names the copy the numbers came from: the newest write among the
-batteries' logs and the ledger, warning when that copy looks older than a live
-one may.
+batteries' logs and the ledger. It warns when that write is older than a live
+copy may be, or when the copy cannot be read; the numbers are printed either way.
 
 --json prints {calls, input_tokens, output_tokens, usd, lines_skipped,
-by_caller, periods, copy_newest_write, copy_stale}, where by_caller maps each
-caller to its {calls, usd}, periods holds the dollars of the last hour, today
-(since local midnight), yesterday and the last 168 hours, for a dashboard that
-draws Jev spend beside DeepSeek's and Claude's, and copy_newest_write is
-{at, path} of the copy's newest write, null when nothing has been written.
+by_caller, periods, copy_newest_write, copy_stale, copy_warning}, where by_caller
+maps each caller to its {calls, usd}, periods holds the dollars of the last hour,
+today (since local midnight), yesterday and the last 168 hours, for a dashboard
+that draws Jev spend beside DeepSeek's and Claude's. copy_newest_write is {at,
+path} of the copy's newest write, null when nothing has been written.
+copy_warning is set only when the copy could not be read, naming why.
 
 Examples:
   gt jev spend --usd-per-billion-tokens 3 --json
@@ -93,15 +94,7 @@ func jevSpendWithFlags(w io.Writer, townRoot string, hours int, usdPerBillion fl
 	if err != nil {
 		return err
 	}
-	cfg, err := daemon.ReadPatrolConfig(townRoot)
-	if err != nil {
-		return fmt.Errorf("reading the patrol config: %w", err)
-	}
-	logCopy, err := jevReadLogCopy(townRoot)
-	if err != nil {
-		return err
-	}
-	line, copyStale := jevLogCopyText(logCopy, jevHealthConfig(cfg), now)
+	note := jevSpendCopy(townRoot, now)
 	if asJSON {
 		// The periods ride beside the window's own fields, for the dashboard's
 		// Jev row (today, yesterday, 7 days, last hour); a reader that does not
@@ -115,14 +108,33 @@ func jevSpendWithFlags(w io.Writer, townRoot string, hours int, usdPerBillion fl
 		return enc.Encode(jevSpendDoc{
 			SpendReport:     rep,
 			Periods:         periods,
-			CopyNewestWrite: logCopy.doc(),
-			CopyStale:       copyStale,
+			CopyNewestWrite: note.Doc,
+			CopyStale:       note.Stale,
+			CopyWarning:     note.Warning,
 		})
 	}
-	if _, err := fmt.Fprintln(w, line); err != nil {
+	if _, err := fmt.Fprintln(w, note.Line); err != nil {
 		return err
 	}
 	return writeJevSpendTable(w, rep)
+}
+
+// jevSpendCopy reads the copy line spend prints. Spend's numbers come from the
+// usage ledger alone, so a patrol config or log path that cannot be read is the
+// copy's warning and never fails the command: spend's output is the same as
+// before the copy line existed.
+func jevSpendCopy(townRoot string, now time.Time) jevCopyNote {
+	logCopy, err := jevReadLogCopy(townRoot)
+	if err != nil {
+		return jevCopyNote{Line: jevCopyWarningLine(err.Error()), Stale: true, Warning: err.Error()}
+	}
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		reason := fmt.Sprintf("reading the patrol config: %v", err)
+		return jevCopyNote{Line: jevCopyWarningLine(reason), Doc: logCopy.doc(), Stale: true, Warning: reason}
+	}
+	line, stale := jevLogCopyText(logCopy, jevHealthConfig(cfg), now)
+	return jevCopyNote{Line: line, Doc: logCopy.doc(), Stale: stale}
 }
 
 // jevSpendDoc is the --json document: the window's report, the periods the
@@ -133,6 +145,8 @@ type jevSpendDoc struct {
 	Periods         jev.SpendPeriods `json:"periods"`
 	CopyNewestWrite *jevCopyWrite    `json:"copy_newest_write"`
 	CopyStale       bool             `json:"copy_stale"`
+	// CopyWarning names why the copy could not be read; absent when it was.
+	CopyWarning string `json:"copy_warning,omitempty"`
 }
 
 // writeJevSpendTable prints the totals and then one row per caller, in name

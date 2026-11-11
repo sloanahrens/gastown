@@ -210,35 +210,53 @@ func TestJevSpendPrintsTheLogCopyAge(t *testing.T) {
 		"the line sits above the table")
 }
 
-// TestJevSpendRefusesANonRegularLogCopyFile covers the copy read's failure
-// path: a log path that is a directory has an mtime, but its mtime is not a
-// write, so the command refuses rather than measuring it.
-func TestJevSpendRefusesANonRegularLogCopyFile(t *testing.T) {
+// TestJevSpendJSONWarnsInsteadOfFailingOnABadPatrolConfigOrLogPath covers the
+// copy read's advisory path. Spend's numbers come from the ledger, so a patrol
+// config or a log path that cannot be read is named as copy_warning and the
+// command still prints the spend it printed before the copy line existed.
+func TestJevSpendJSONWarnsInsteadOfFailingOnABadPatrolConfigOrLogPath(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(town, ".runtime", "jev", "attention.jsonl"), 0o700))
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	cases := map[string]struct {
+		breakTown func(t *testing.T, town string)
+		reason    string
+	}{
+		"patrol config does not parse": {
+			breakTown: func(t *testing.T, town string) {
+				path := daemon.PatrolConfigFile(town)
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, []byte("{"), 0o644))
+			},
+			reason: "reading the patrol config",
+		},
+		"log path is a directory": {
+			breakTown: func(t *testing.T, town string) {
+				require.NoError(t, os.MkdirAll(filepath.Join(town, ".runtime", "jev", "attention.jsonl"), 0o700))
+			},
+			reason: "not a regular file",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeJevSpendLedger(t, town, jevSpendLine(now.Add(-time.Hour), "attention", 10, 5))
+			tc.breakTown(t, town)
 
-	var out bytes.Buffer
-	err := jevSpendWithFlags(&out, town, 24, 1e9, false, time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "attention.jsonl")
-	assert.Contains(t, err.Error(), "not a regular file")
-}
+			var out bytes.Buffer
+			require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, true, now))
+			var doc jevSpendDoc
+			require.NoError(t, json.Unmarshal(out.Bytes(), &doc))
+			assert.Equal(t, 1, doc.Calls, "the spend is printed as before")
+			assert.Contains(t, doc.CopyWarning, tc.reason)
+			assert.True(t, doc.CopyStale, "a copy that cannot be read is not called fresh")
 
-// TestJevSpendRefusesABrokenPatrolConfig covers the config read the copy's
-// warning needs: a config that does not parse must fail the command, not read
-// as a town with every battery off.
-func TestJevSpendRefusesABrokenPatrolConfig(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	path := daemon.PatrolConfigFile(town)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	require.NoError(t, os.WriteFile(path, []byte("{"), 0o644))
-
-	var out bytes.Buffer
-	err := jevSpendWithFlags(&out, town, 24, 1e9, false, time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "reading the patrol config")
+			var text bytes.Buffer
+			require.NoError(t, jevSpendWithFlags(&text, town, 24, 1e9, false, now))
+			assert.Contains(t, text.String(), "log copy: WARNING: ")
+			assert.Contains(t, text.String(), "Calls", "the table is printed as before")
+		})
+	}
 }
 
 // TestJevSpendReportsAWriteFailure covers the copy line's write: a writer that

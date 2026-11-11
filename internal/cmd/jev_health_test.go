@@ -43,7 +43,9 @@ func newJevHealthTown(t *testing.T, now time.Time, cursorAge time.Duration) stri
 	require.NoError(t, os.Chtimes(cursor, at, at))
 
 	line := fmt.Sprintf(`{"ts":%q,"answers":{"q":"a"}}`, now.Add(-time.Minute).UTC().Format(time.RFC3339))
-	require.NoError(t, os.WriteFile(filepath.Join(jevDir, "dedupe.jsonl"), []byte(line+"\n"), 0o600))
+	logPath := filepath.Join(jevDir, "dedupe.jsonl")
+	require.NoError(t, os.WriteFile(logPath, []byte(line+"\n"), 0o600))
+	jevSetModTime(t, logPath, now.Add(-time.Minute))
 
 	// The daemon's last-run record: dedupe's patrol ran as often as the cursor
 	// was last written, so a stale cursor here is also a stale patrol.
@@ -479,10 +481,11 @@ func TestJevHealthWarnsWhenTheCopyHasGoneQuiet(t *testing.T) {
 	assert.Contains(t, jevHealthTableRow(t, out, "dedupe"), " ok", "health keeps its rows as today")
 }
 
-// TestJevHealthDoesNotWarnWithoutEveryPassBattery covers the town whose
-// enabled batteries all write only on their own item, event or landing: with no
-// cadence that writes every pass, no age makes the copy stale.
-func TestJevHealthDoesNotWarnWithoutEveryPassBattery(t *testing.T) {
+// TestJevHealthSaysWhenNoScheduledBatteryExistsToJudgeTheCopy covers the town
+// whose enabled batteries all write only on their own item, event or landing:
+// with no quarter-hour battery there is no age to judge, so the line says that
+// in place of a verdict and does not warn.
+func TestJevHealthSaysWhenNoScheduledBatteryExistsToJudgeTheCopy(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	town := t.TempDir()
@@ -492,7 +495,8 @@ func TestJevHealthDoesNotWarnWithoutEveryPassBattery(t *testing.T) {
 
 	out, err := runJevHealthCommand(t, town, now, false)
 	require.NoError(t, err)
-	assert.Contains(t, out, "log copy: newest write 2026-10-30 10:00Z (2h ago) at "+ledger)
+	assert.Contains(t, out, "log copy: newest write 2026-10-30 10:00Z (2h ago) at "+ledger+
+		" — no scheduled battery, so the copy's age cannot be judged")
 	assert.NotContains(t, out, "WARNING")
 }
 
@@ -572,6 +576,7 @@ func TestJevJSONCarriesCopyFieldsAndKeepsTheOldOnes(t *testing.T) {
 		require.NotNil(t, doc.CopyNewestWrite)
 		assert.Equal(t, ledger, doc.CopyNewestWrite.Path)
 		assert.False(t, doc.CopyStale)
+		assert.Empty(t, doc.CopyWarning, "a copy that was read carries no warning")
 	})
 
 	t.Run("scorecard", func(t *testing.T) {
@@ -587,8 +592,9 @@ func TestJevJSONCarriesCopyFieldsAndKeepsTheOldOnes(t *testing.T) {
 		var doc jevScorecardDoc
 		require.NoError(t, json.Unmarshal(out.Bytes(), &doc))
 		assert.Equal(t, scorecard.FixtureBattery, doc.Battery)
-		assert.Nil(t, doc.CopyNewestWrite, "the fixture town holds no file of the copy")
-		assert.True(t, doc.CopyStale, "a copy with no file written is not fresh")
+		require.NotNil(t, doc.CopyNewestWrite)
+		assert.Equal(t, scorecard.FixtureLogPath(town), doc.CopyNewestWrite.Path, "the copy is the log the report read")
+		assert.False(t, doc.CopyStale)
 	})
 }
 

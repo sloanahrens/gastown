@@ -72,11 +72,10 @@ The exit status is 1 when any enabled battery that is not idle by design is
 stale, late, low, unanswered, unparseable or unknown, and 0 otherwise, so one
 command answers whether Jev is collecting today.
 
-The table's first line names the copy the rows were read from: the newest write
-among the batteries' logs and the ledger, warning when that copy looks older
-than %s, three quarter-hour passes, so it may not be the one the daemon writes.
---json prints the same rows, the copy as copy_newest_write {at, path} and
-copy_stale.
+The first line names the copy the rows were read from: the newest write among
+the batteries' logs and the ledger. It warns when that write is older than %s,
+three quarter-hour passes, so the copy may not be the daemon's. --json adds
+copy_newest_write {at, path} and copy_stale.
 
 Examples:
   gt jev health
@@ -125,11 +124,21 @@ type jevCopyWrite struct {
 	Path string     `json:"path,omitempty"`
 }
 
-// jevLogCopy is the newest write among every battery's log and the usage
-// ledger: the copy of the Jev logs a command read.
+// jevLogCopy is the newest write among the files of the copy a command read:
+// every battery's log and the usage ledger, or the one log a scorecard read.
 type jevLogCopy struct {
 	Newest *time.Time
 	Path   string
+}
+
+// jevCopyNote is what a command reports about its copy beside its own output:
+// the line above its table and the --json fields that carry the same verdict.
+// Warning names why the copy could not be read, and is empty when it was.
+type jevCopyNote struct {
+	Line    string
+	Doc     *jevCopyWrite
+	Stale   bool
+	Warning string
 }
 
 // doc is the copy's --json form, nil when no file of the copy has been written.
@@ -140,45 +149,60 @@ func (c jevLogCopy) doc() *jevCopyWrite {
 	return &jevCopyWrite{At: c.Newest, Path: c.Path}
 }
 
-// jevReadLogCopy finds the newest write among every battery's log and the usage
-// ledger. A file that does not exist is a battery that never wrote; any other
-// failure stops the command, so a copy it could not measure never reads as a
-// quiet one.
-func jevReadLogCopy(townRoot string) (jevLogCopy, error) {
-	paths := make([]string, 0, len(health.Batteries)+1)
-	for _, b := range health.Batteries {
-		paths = append(paths, b.LogPath(townRoot))
+// observe folds one file's write into the copy. A file that does not exist is a
+// battery that never wrote; any other failure stops the read, so a copy it could
+// not measure never reads as a quiet one.
+func (c *jevLogCopy) observe(path string) error {
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
-	paths = append(paths, jev.UsageLedgerPath(townRoot))
+	if err != nil {
+		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	// A directory's mtime says nothing about what the daemon wrote, so a log
+	// path that is not a file is refused rather than measured.
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("reading %s: not a regular file", path)
+	}
+	if at := info.ModTime(); c.Newest == nil || at.After(*c.Newest) {
+		c.Newest, c.Path = &at, path
+	}
+	return nil
+}
+
+// jevReadLogCopy finds the newest write among every battery's log and the usage
+// ledger, the copy health and the Jev totals read.
+func jevReadLogCopy(townRoot string) (jevLogCopy, error) {
 	var newest jevLogCopy
-	for _, path := range paths {
-		info, err := os.Stat(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
+	for _, b := range health.Batteries {
+		if err := newest.observe(b.LogPath(townRoot)); err != nil {
+			return jevLogCopy{}, err
 		}
-		if err != nil {
-			return jevLogCopy{}, fmt.Errorf("reading %s: %w", path, err)
-		}
-		// A directory's mtime says nothing about what the daemon wrote, so a
-		// log path that is not a file is refused rather than measured.
-		if !info.Mode().IsRegular() {
-			return jevLogCopy{}, fmt.Errorf("reading %s: not a regular file", path)
-		}
-		if at := info.ModTime(); newest.Newest == nil || at.After(*newest.Newest) {
-			newest.Newest, newest.Path = &at, path
-		}
+	}
+	if err := newest.observe(jev.UsageLedgerPath(townRoot)); err != nil {
+		return jevLogCopy{}, err
 	}
 	return newest, nil
 }
 
-// jevCopyStaleAfter is three times the slowest cadence among the enabled
-// batteries that write a line every pass. Only the quarter-hour patrols do: a
-// weekly battery writes only the notes or beads it has not asked about yet, an
-// event battery only when its event arrives, and a landing battery only when
-// the town lands, so none of them bounds how old a live copy may look.
-// health.StaleAfter is already three quarter-hour passes. ok is false when no
-// enabled battery writes every pass, and then the town expects no steady writes
-// and no age makes the copy stale.
+// jevReadOneLogCopy reads the copy of the one log a command read, so its line
+// names that file and no other.
+func jevReadOneLogCopy(path string) (jevLogCopy, error) {
+	c := jevLogCopy{Path: path}
+	if err := c.observe(path); err != nil {
+		return jevLogCopy{}, err
+	}
+	return c, nil
+}
+
+// jevCopyStaleAfter is how old a live copy may look: health.StaleAfter, three
+// quarter-hour passes, when an enabled battery is a quarter-hour one. Only the
+// quarter-hour patrols write a line every pass. A weekly battery writes only the
+// notes or beads it has not asked about yet, an event battery writes when its
+// event arrives, and a landing battery writes when the town lands, so none of
+// them bounds a live copy's age and none is counted. ok is false when no enabled
+// battery is a quarter-hour one, and then no age makes the copy stale.
 func jevCopyStaleAfter(cfg health.Config) (time.Duration, bool) {
 	for _, b := range health.Batteries {
 		if cfg.Enabled[b.ConfigKey] && b.Cadence == health.QuarterHour {
@@ -188,11 +212,13 @@ func jevCopyStaleAfter(cfg health.Config) (time.Duration, bool) {
 	return 0, false
 }
 
-// jevLogCopyText renders the line a command prints above its table, and reports
-// whether it is the warning form: the copy looks older than a live one may.
+// jevLogCopyText renders the line a command prints above its output, and reports
+// whether it is the warning form: the copy looks older than a live one may. With
+// no quarter-hour battery enabled there is no age to judge, and the line says so
+// in place of a verdict.
 func jevLogCopyText(c jevLogCopy, cfg health.Config, now time.Time) (line string, stale bool) {
 	if c.Newest == nil {
-		return "log copy: WARNING: no log file or ledger has been written — this copy may not be the one the daemon writes", true
+		return jevCopyWarningLine("no log file or ledger has been written"), true
 	}
 	age := now.Sub(*c.Newest)
 	if age < 0 {
@@ -200,14 +226,22 @@ func jevLogCopyText(c jevLogCopy, cfg health.Config, now time.Time) (line string
 		// ago it was written is unknown.
 		age = 0
 	}
-	if after, ok := jevCopyStaleAfter(cfg); ok && age > after {
-		stale = true
-	}
+	after, bounded := jevCopyStaleAfter(cfg)
+	stale = bounded && age > after
 	body := fmt.Sprintf("newest write %s (%s ago) at %s", jevCopyStamp(*c.Newest), jevCopyAge(age), c.Path)
-	if stale {
-		return "log copy: WARNING: " + body + " — this copy may not be the one the daemon writes", true
+	switch {
+	case stale:
+		return jevCopyWarningLine(body), true
+	case !bounded:
+		return "log copy: " + body + " — no scheduled battery, so the copy's age cannot be judged", false
 	}
 	return "log copy: " + body, false
+}
+
+// jevCopyWarningLine is the warning form of the copy line, naming why the copy
+// may not be the one the daemon writes.
+func jevCopyWarningLine(reason string) string {
+	return "log copy: WARNING: " + reason + " — this copy may not be the one the daemon writes"
 }
 
 // jevCopyStamp prints a write time in UTC, the format the tables print times in.
