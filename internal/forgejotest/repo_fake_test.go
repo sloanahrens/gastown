@@ -1,10 +1,12 @@
 package forgejotest
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"testing/iotest"
 )
 
 // roundTrip sends one request to route (the path below the API root) through the fake and
@@ -107,6 +109,23 @@ func TestRepoFakeTransportFailures(t *testing.T) {
 	}
 	if _, err := writesDown.RoundTrip(write); err == nil {
 		t.Error("a write to a WritesDown fake answered; want a transport error")
+	}
+}
+
+// TestRepoFakeRefusesAnUnreadableBody: a request body that fails mid-read is an error, not
+// an empty body answered as if it had arrived.
+func TestRepoFakeRefusesAnUnreadableBody(t *testing.T) {
+	t.Parallel()
+	f := NewRepoFake("sloan", "notes")
+	req, err := http.NewRequest(http.MethodPost, f.API()+"/repos/sloan/notes/contents", iotest.ErrReader(errors.New("body failed")))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	if _, err := f.RoundTrip(req); err == nil {
+		t.Error("a request with an unreadable body answered; want the read failure")
+	}
+	if n := len(f.Requests()); n != 0 {
+		t.Errorf("recorded %d requests for an unreadable body, want 0", n)
 	}
 }
 
