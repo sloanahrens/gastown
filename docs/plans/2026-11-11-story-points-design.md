@@ -1,4 +1,4 @@
-> Status: proposed (2026-11), awaiting the operator's approval (gt-5d9k2f). Historical once the story points work is built; not maintained.
+> Status: historical (2026-11). Merged in: gt-5d9k2f (the operator approved its decisions 2026-11-11). Not maintained.
 
 # Story points: design
 
@@ -104,7 +104,7 @@ The first version is produced by the retrospective's harness and committed with 
 
 ## Where the weights come from
 
-The initial weights and the fixtures were produced by a Python harness that is not in the repository: `build.py`, `est.py`, `est2.py`, `final.py` and `gen.py` under `~/gt/.runtime/eagle/sp/`, reading the pod's copies of the landing ledgers, the usage records, the Jev dispatch log and hm's Postgres. The file is a seed. The Go retrain step (SP16) re-derives the weights from the landings table and the bead text, and the Go feature code (SP5) is pinned to the Python by the fixture file, so after the first monthly retrain nothing depends on the harness.
+The initial weights and the fixtures were produced by a Python harness that is not in the repository: `build.py`, `est.py`, `est2.py`, `final.py` and `gen.py` under `~/gt/.runtime/eagle/sp/`, reading the pod's copies of the landing ledgers, the usage records, the Jev dispatch log and hm's Postgres. The file is a seed. The Go retrain step (SP16) re-derives the weights from the landings table and the bead text, and the Go shape-feature code (SP5) is pinned to the Python by the fixture file. The fixtures cover the shape features and the shape model's minutes only: the embedding input (the Constraints and Acceptance text, the 6,000-character cut, the qwen3 embedding) and the Jev knot mapping have no fixture, so SP7 and SP9 are checked against the format this plan specifies, and their first live check is the shadow report. After the first monthly retrain the shipped weights no longer depend on the harness.
 
 ## The actual
 
@@ -127,7 +127,7 @@ The route is behind a setting, `patrols.spec_dispatch.story_points.split_over`, 
 
 The operator's rule reads "over 21 points splits". The retrospective shows that no estimate reaches 21 points, so the route is built on a minutes trigger, and the setting holds that trigger. When the trigger fires, the dispatcher does not sling the bead; it adds the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`, which already keeps a bead off the dispatcher) and a comment with the estimate and the nearest beads, for the overseer or a bird to split. It never splits a bead by itself. The route acts only on an estimate from the rungs with at least two inputs (`sp-rung:all`, `shape-jev`, `shape-embed`); it does not act on `sp-rung:shape` until the shadow recompute shows that rung clears 0.4 on its own.
 
-The operator set the trigger at an estimated 15 minutes or more. That value is inside the 13-point bucket (10.5 to 17 minutes), so about half of the 13-point beads are flagged and the rest are not; the trigger is a number of minutes, not a number of points. The setting stays off until the operator's word after the shadow report, and the report recomputes the trigger table on live estimates in case he moves it. The retrospective's sweep gives the shape: at 15 estimated minutes about 4% of beads are flagged, four in ten of them run long and one long bead in five is caught; at 13 minutes 11% are flagged, three in ten run long and four in ten of the long beads are caught. The shadow report recomputes this table on live estimates.
+The operator set the trigger at an estimated 15 minutes or more. That value is inside the 13-point bucket (10.5 to 17 minutes), so only the upper part of the 13-point bucket is flagged (the retrospective gives no in-bucket split, and the shadow report measures it); the trigger is a number of minutes, not a number of points. The setting stays off until the operator's word after the shadow report, and the report recomputes the trigger table on live estimates in case he moves it. The retrospective's sweep gives the shape: at 15 estimated minutes about 4% of beads are flagged, four in ten of them run long and one long bead in five is caught; at 13 minutes 11% are flagged, three in ten run long and four in ten of the long beads are caught. The shadow report recomputes this table on live estimates.
 
 ## Risks
 

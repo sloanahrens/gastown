@@ -1,4 +1,4 @@
-> Status: proposed (2026-11), awaiting the operator's approval (gt-5d9k2f). Historical once the story points work is built; not maintained.
+> Status: historical (2026-11). Merged in: gt-5d9k2f (the operator approved its decisions 2026-11-11). Not maintained.
 
 # Story points: plan
 
@@ -107,7 +107,7 @@ Depends: SP2, SP3. Gate: `go test ./internal/metrics -count=1`.
 
 ### SP5. Shape features
 
-New `internal/storypoints/shape.go`: `EstimateText(issue)` building the text above from a `beads.Issue`, and `Features(text, rig string, seat Seat) Shape` (`Seat` is Haiku, Flash or Unknown; Unknown sets `is_haiku` to the training mean from the weights) with the twelve features. Test table from the fixture file (read it with a relative path from the test; its `paths` and `pkgs` counts were produced by the Python equivalents of the regexes above, and the Go test is the arbiter: if the Go count for a fixture bead differs, as it may for gt-hgt9j.14 where the fixture says 5 by counting the bare `lint.go` beside `internal/specdispatch/lint.go`, the polecat checks the regex, fixes the fixture file in the same change and says so in a bead comment), plus edge cases: empty description, no Acceptance heading, a bead with labels and one without, a text with a path in a backtick.
+New `internal/storypoints/shape.go`: `EstimateText(issue)` building the text above from a `beads.Issue`, and `Features(text, rig string, seat Seat) Shape` (`Seat` is Haiku, Flash or Unknown; Unknown sets `is_haiku` to the training mean from the weights) with the twelve features. Test table from the fixture file (read it with a relative path from the test; its `paths` and `pkgs` counts were produced by the Python equivalents of the regexes above, and they match the regexes above: gt-hgt9j.14's `paths` count is 5, because the bare `lint.go` beside `internal/specdispatch/lint.go` is its own match; if a Go count still differs, the Go regex is wrong, not the fixture), plus edge cases: empty description, no Acceptance heading, a bead with labels and one without, a text with a path in a backtick.
 Depends: none. Gate: `go test ./internal/storypoints -count=1`.
 
 ### SP6. The linear model and the weights file
@@ -167,7 +167,7 @@ Depends: SP2, SP5, SP7. Gate: `go test ./internal/metrics ./internal/storypoints
 
 ### SP17. The split route (held for the operator)
 
-In the spec dispatcher tick, behind `patrols.spec_dispatch.story_points.split_over_minutes` (default 0, meaning off): when set (the operator's value is 15), the bead's `sp-rung` is `all`, `shape-jev` or `shape-embed` (never `shape`), and its blended minutes are at least the setting, do not sling it; add the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`) and a comment with the estimate and the nearest beads; log one line. A bead already carrying `sp:` and the label is not touched again. Tests: off does nothing, on flags, an estimate below the trigger is slung, a shape-only estimate above the trigger is slung.
+In the spec dispatcher tick, behind `patrols.spec_dispatch.story_points.split_over_minutes` (default 0, meaning off): when set (the operator's value is 15), the bead's `sp-rung` is `all`, `shape-jev` or `shape-embed` (never `shape`), and its blended minutes are at least the setting, do not sling it; add the existing split label (`SplitLabel` in `internal/specdispatch/dispatch.go`) and a comment with the estimate and the nearest beads; log one line. A bead already carrying `sp:` and the label is not touched again. A bead with no usable estimate (the estimate errored or timed out, or hm and Jev were both unreachable so no rung was produced) is never read as a small bead: the tick logs one line naming the bead and the reason, the estimate records `sp-rung:none`, and the bead is slung only because the route cannot judge it; the shadow report counts these. Tests: off does nothing, on flags, an estimate below the trigger is slung, a shape-only estimate above the trigger is slung, and an Estimate error or timeout logs the one line, records `sp-rung:none` and is not counted as below the trigger.
 Depends: SP13, SP15, and the operator's word after the shadow report. Gate: `go test ./internal/cmd -run 'SpecDispatch.*Split' -count=1`.
 
 ### SP18. Documentation
