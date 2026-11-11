@@ -3,8 +3,8 @@
 // Each builds on testRegistry(t), which takes its own t.TempDir (or calls
 // t.TempDir itself), so no test shares a directory, a state file or a lock with
 // another. The seams a test drives in place of the kernel are the clock (Now and
-// Sleep), the process table (ProcStart), the dice (Rand), the writer (Write) and
-// the stat expandGlobStat reads a literal component with; nothing else is faked.
+// Sleep), the process table (ProcStart), the writer (Write) and the stat
+// expandGlobStat reads a literal component with; nothing else is faked.
 package bird
 
 import (
@@ -13,7 +13,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,9 +22,8 @@ import (
 )
 
 // testRegistry returns a Registry over a fresh directory, with a scripted
-// clock, a Rand that picks the first free name and no live processes. Sleep
-// advances the clock instead of waiting, so a lock the test holds is waited
-// out just as fast with no real time passing.
+// clock and no live processes. Sleep advances the clock instead of waiting, so
+// a lock the test holds is waited out just as fast with no real time passing.
 func testRegistry(t *testing.T, names ...string) *Registry {
 	t.Helper()
 	dir := t.TempDir()
@@ -47,7 +45,6 @@ func testRegistry(t *testing.T, names ...string) *Registry {
 			defer mu.Unlock()
 			now = now.Add(d)
 		},
-		Rand:      func(int) int { return 0 },
 		ProcStart: starts(nil),
 	}
 	return reg
@@ -79,248 +76,16 @@ func seedAgent(t *testing.T, reg *Registry, a Agent) {
 	}
 }
 
-func TestPickSkipsBoundNames(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren", "robin")
+// seedReservation writes the reservation an older gt left for name, which no
+// current code creates: the tests below drive the claim and record paths that
+// still read one from the state file.
+func seedReservation(t *testing.T, reg *Registry, name string, at time.Time) {
+	t.Helper()
 	if err := reg.Update(func(st *State) error {
-		st.Bind("wren", "gt-a", at(0))
+		st.Reservations = append(st.Reservations, Reservation{Name: name, Time: at})
 		return nil
 	}); err != nil {
-		t.Fatalf("seeding a binding: %v", err)
-	}
-	got, err := reg.Pick()
-	if err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
-	if got.Name != "robin" {
-		t.Errorf("Pick = %q, want the unbound robin", got.Name)
-	}
-}
-
-func TestPickSkipsLiveAgents(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "robin", "wren")
-	reg.ProcStart = starts(map[int]string{10: "tok"})
-	seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
-	got, err := reg.Pick()
-	if err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
-	if got.Name != "wren" {
-		t.Errorf("Pick = %q, want the name of no live process", got.Name)
-	}
-}
-
-func TestPickSkipsPolecatDirectories(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "lark", "wren")
-	seated := filepath.Join(townDir(reg), "gastown", "polecats", "lark")
-	if err := os.MkdirAll(seated, 0o755); err != nil {
-		t.Fatalf("creating a polecat directory: %v", err)
-	}
-	got, err := reg.Pick()
-	if err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
-	if got.Name != "wren" {
-		t.Errorf("Pick = %q, want a name no polecat directory holds", got.Name)
-	}
-}
-
-func TestPickDrawsFromTheEmbeddedPoolByDefault(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t)
-	got, err := reg.Pick()
-	if err != nil || got.Name == "" {
-		t.Fatalf("Pick = %+v, %v, want a name from the embedded pool", got, err)
-	}
-	if want := Pool()[0]; got.Name != want {
-		t.Errorf("Pick = %q, want the first embedded name %q", got.Name, want)
-	}
-}
-
-func TestPickChoosesThroughTheInjectedSource(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren", "robin", "lark")
-	reg.Rand = func(n int) int {
-		if n != 3 {
-			t.Errorf("Rand called with %d free names, want 3", n)
-		}
-		return 2
-	}
-	got, err := reg.Pick()
-	if err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
-	if got.Name != "lark" {
-		t.Errorf("Pick = %q, want the name the source selected", got.Name)
-	}
-}
-
-func TestPickSkipsNamesNoSessionCouldUse(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "not a name", "wren")
-	got, err := reg.Pick()
-	if err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
-	if got.Name != "wren" {
-		t.Errorf("Pick = %q, want the one usable name", got.Name)
-	}
-}
-
-// TestPickReportsWhyItPassedANameOver is the explanation Pick owes a launch
-// that got its second choice: each case takes one name out of a pool of two, and
-// the result must name the free one it took and the taken one with the reason.
-func TestPickReportsWhyItPassedANameOver(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		taken   string
-		arrange func(t *testing.T, reg *Registry)
-		want    SkipReason
-	}{
-		{
-			name:  "a name no session could use",
-			taken: "not a name",
-			want:  SkipUnusable,
-		},
-		{
-			name:  "a name bound to a bead",
-			taken: "robin",
-			arrange: func(t *testing.T, reg *Registry) {
-				t.Helper()
-				if _, err := reg.Bind("robin", "gt-a"); err != nil {
-					t.Fatalf("binding robin: %v", err)
-				}
-			},
-			want: SkipBound,
-		},
-		{
-			name:  "a name an earlier pick reserved",
-			taken: "robin",
-			arrange: func(t *testing.T, reg *Registry) {
-				t.Helper()
-				if got, err := reg.Pick(); err != nil || got.Name != "robin" {
-					t.Fatalf("the first Pick = %+v, %v, want robin reserved", got, err)
-				}
-			},
-			want: SkipReserved,
-		},
-		{
-			name:  "a name a live process holds",
-			taken: "robin",
-			arrange: func(t *testing.T, reg *Registry) {
-				t.Helper()
-				reg.ProcStart = starts(map[int]string{10: "tok"})
-				seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
-			},
-			want: SkipLiveProcess,
-		},
-		{
-			name:  "a name a process holds that no start token is matched to",
-			taken: "robin",
-			arrange: func(t *testing.T, reg *Registry) {
-				t.Helper()
-				reg.ProcStart = func(int) (string, bool, error) { return "", true, nil }
-				seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
-			},
-			want: SkipLiveProcess,
-		},
-		{
-			name:  "a name a polecat directory holds",
-			taken: "robin",
-			arrange: func(t *testing.T, reg *Registry) {
-				t.Helper()
-				seated := filepath.Join(townDir(reg), "gastown", "polecats", "robin")
-				if err := os.MkdirAll(seated, 0o755); err != nil {
-					t.Fatalf("creating a polecat directory: %v", err)
-				}
-			},
-			want: SkipPolecatDirectory,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			reg := testRegistry(t, tc.taken, "wren")
-			if tc.arrange != nil {
-				tc.arrange(t, reg)
-			}
-			got, err := reg.Pick()
-			if err != nil {
-				t.Fatalf("Pick: %v", err)
-			}
-			if got.Name != "wren" {
-				t.Errorf("Pick took %q, want the free wren", got.Name)
-			}
-			want := []Skip{{Name: tc.taken, Reason: tc.want}}
-			if !slices.Equal(got.Skips, want) {
-				t.Errorf("Pick skips = %+v, want %+v", got.Skips, want)
-			}
-		})
-	}
-}
-
-// TestPickKeepsAProcessWhoseStartTokenItCannotRead pins the decision Live
-// documents: a live pid whose start token this process cannot read (a process
-// under another uid) reads as live, so Pick passes its name over and the record
-// survives until the pid exits. A registry that pruned it would free the name
-// for a second launch while the first bird may still be running.
-func TestPickKeepsAProcessWhoseStartTokenItCannotRead(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "robin", "wren")
-	reg.ProcStart = func(int) (string, bool, error) { return "", true, nil }
-	seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
-	got, err := reg.Pick()
-	if err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
-	if got.Name != "wren" {
-		t.Errorf("Pick took %q, want wren: robin is held by a live process whose start token cannot be read", got.Name)
-	}
-	if want := []Skip{{Name: "robin", Reason: SkipLiveProcess}}; !slices.Equal(got.Skips, want) {
-		t.Errorf("Pick skips = %+v, want %+v", got.Skips, want)
-	}
-	st, err := reg.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(st.Agents) != 1 || st.Agents[0].Name != "robin" {
-		t.Errorf("agents on disk = %+v, want robin kept until its process exits", st.Agents)
-	}
-}
-
-func TestPickReservesTheNameItReturns(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren", "robin")
-	first, err := reg.Pick()
-	if err != nil || first.Name == "" {
-		t.Fatalf("first Pick = %+v, %v, want a name", first, err)
-	}
-	second, err := reg.Pick()
-	if err != nil || second.Name == "" {
-		t.Fatalf("second Pick = %+v, %v, want a name", second, err)
-	}
-	if second.Name == first.Name {
-		t.Errorf("two Picks returned %q, want the first one reserved so a second launch gets another name", first.Name)
-	}
-}
-
-func TestPickHandsOutANameAgainOnceItsReservationExpires(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren")
-	reg.ReservationTTL = 5 * time.Minute
-	if got, err := reg.Pick(); err != nil || got.Name != "wren" {
-		t.Fatalf("Pick = %+v, %v, want wren from a pool of one", got, err)
-	}
-	reg.Now = func() time.Time { return at(10) }
-	got, err := reg.Pick()
-	if err != nil {
-		t.Fatalf("Pick after the ttl: %v", err)
-	}
-	if got.Name != "wren" {
-		t.Errorf("Pick = %q, want a launcher that died to leave no name held", got.Name)
+		t.Fatalf("seeding a reservation: %v", err)
 	}
 }
 
@@ -373,26 +138,6 @@ func TestRegistryTakenReportsALivenessItCannotRead(t *testing.T) {
 	}
 }
 
-func TestPickRefusesABadPolecatGlob(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren")
-	reg.PolecatGlob = "["
-	if _, err := reg.Pick(); err == nil {
-		t.Fatal("Pick accepted a polecat glob that cannot match")
-	}
-}
-
-func TestPickReportsALivenessItCannotRead(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren")
-	unreadable := errors.New("no process table")
-	reg.ProcStart = func(int) (string, bool, error) { return "", false, unreadable }
-	seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
-	if got, err := reg.Pick(); !errors.Is(err, unreadable) {
-		t.Fatalf("Pick = %+v, %v, want the read error rather than a guess", got, err)
-	}
-}
-
 func TestNewReadsTheTownRootLiterally(t *testing.T) {
 	t.Parallel()
 	root := filepath.Join(t.TempDir(), "gt [x] *?")
@@ -401,15 +146,13 @@ func TestNewReadsTheTownRootLiterally(t *testing.T) {
 		t.Fatalf("creating a polecat directory: %v", err)
 	}
 	reg := New(root)
-	reg.Pool = []string{"wren", "robin"}
-	reg.Rand = func(int) int { return 0 }
 	reg.ProcStart = starts(nil)
-	got, err := reg.Pick()
+	taken, err := reg.Taken()
 	if err != nil {
-		t.Fatalf("Pick: %v", err)
+		t.Fatalf("Taken: %v", err)
 	}
-	if got.Name != "robin" {
-		t.Errorf("Pick = %q, want robin: the root's metacharacters must not hide the polecat directory wren", got.Name)
+	if !taken["wren"] {
+		t.Error("Taken does not hold wren: the root's metacharacters must not hide the polecat directory")
 	}
 }
 
@@ -525,12 +268,8 @@ func TestRecordWritesTheAgentOfItsName(t *testing.T) {
 func TestRecordDropsTheReservationForItsName(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")
-	picked, err := reg.Pick()
-	if err != nil || picked.Name == "" {
-		t.Fatalf("Pick = %+v, %v, want a name", picked, err)
-	}
-	name := picked.Name
-	if err := reg.Record(Agent{Name: name, PID: 10, Start: "tok"}); err != nil {
+	seedReservation(t, reg, "wren", at(0))
+	if err := reg.Record(Agent{Name: "wren", PID: 10, Start: "tok"}); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	st, err := reg.Load()
@@ -540,8 +279,8 @@ func TestRecordDropsTheReservationForItsName(t *testing.T) {
 	if len(st.Reservations) != 0 {
 		t.Errorf("reservations = %+v, want none for a name a process now holds", st.Reservations)
 	}
-	if len(st.Agents) != 1 || st.Agents[0].Name != name {
-		t.Errorf("agents = %+v, want the record for %s", st.Agents, name)
+	if len(st.Agents) != 1 || st.Agents[0].Name != "wren" {
+		t.Errorf("agents = %+v, want the record for wren", st.Agents)
 	}
 }
 
@@ -601,15 +340,13 @@ func TestClaimRefusesANameALiveSessionHolds(t *testing.T) {
 	}
 }
 
-// TestClaimRefusesANameAnotherLaunchReserved pins that a reservation holds its
-// name against a claim: a name Pick handed out to one launch is not free for
-// another to claim before that launch binds it.
+// TestClaimRefusesANameAnotherLaunchReserved pins that a reservation in the
+// state file holds its name against a claim: a name an older gt reserved for
+// one launch is not free for another to claim before that launch binds it.
 func TestClaimRefusesANameAnotherLaunchReserved(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")
-	if _, err := reg.Pick(); err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
+	seedReservation(t, reg, "wren", at(0))
 	reg.ProcStart = starts(map[int]string{11: "tok11"})
 
 	claimed, err := reg.Claim(Agent{Name: "wren", PID: 11, Start: "tok11"})
@@ -622,14 +359,12 @@ func TestClaimRefusesANameAnotherLaunchReserved(t *testing.T) {
 }
 
 // TestClaimPinnedTakesOverAReservation: a launch whose caller chose the name
-// is the process a spawn's reservation was made for, so it claims the name and
+// claims the name over the reservation the state file records for it, and
 // leaves no reservation holding it.
 func TestClaimPinnedTakesOverAReservation(t *testing.T) {
 	t.Parallel()
 	reg := testRegistry(t, "wren")
-	if _, err := reg.ReserveName("wren"); err != nil {
-		t.Fatalf("ReserveName: %v", err)
-	}
+	seedReservation(t, reg, "wren", at(0))
 	reg.ProcStart = starts(map[int]string{11: "tok11"})
 
 	claimed, err := reg.ClaimPinned(Agent{Name: "wren", PID: 11, Start: "tok11"})
@@ -662,157 +397,6 @@ func TestClaimPinnedRefusesANameALiveSessionHolds(t *testing.T) {
 	}
 	if claimed {
 		t.Error("ClaimPinned took a name a live session holds")
-	}
-}
-
-// TestReserveNameRefusesANameNoSessionCouldUse: a name with a space in it
-// never reaches the state file, and the reason says why.
-func TestReserveNameRefusesANameNoSessionCouldUse(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren")
-
-	held, err := reg.ReserveName("not a name")
-	if !errors.Is(err, ErrInvalidName) || held != SkipUnusable {
-		t.Fatalf("ReserveName = %q, %v, want the invalid-name refusal", held, err)
-	}
-}
-
-// TestReserveNameReportsWhatItCannotRead: a process table or polecat glob it
-// cannot read is an error, not a name reserved on a guess.
-func TestReserveNameReportsWhatItCannotRead(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		arrange func(t *testing.T, reg *Registry)
-	}{
-		{
-			name: "a liveness it cannot read",
-			arrange: func(t *testing.T, reg *Registry) {
-				reg.ProcStart = func(int) (string, bool, error) { return "", false, errors.New("no process table") }
-				seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok", Started: at(0)})
-			},
-		},
-		{
-			name:    "a polecat glob that cannot match",
-			arrange: func(t *testing.T, reg *Registry) { reg.PolecatGlob = "[" },
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			reg := testRegistry(t, "wren")
-			tc.arrange(t, reg)
-
-			if held, err := reg.ReserveName("wren"); err == nil {
-				t.Fatalf("ReserveName = %q, nil; want the read failure", held)
-			}
-			st, err := reg.Load()
-			if err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-			if len(st.Reservations) != 0 {
-				t.Errorf("reservations = %+v, want none for a read that failed", st.Reservations)
-			}
-		})
-	}
-}
-
-func TestReserveNameReportsAWriteFailure(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren")
-	reg.Write = func(string, any) error { return errors.New("disk full") }
-
-	if _, err := reg.ReserveName("wren"); err == nil {
-		t.Fatal("ReserveName accepted a write that failed")
-	}
-}
-
-func TestReserveNameTakesAFreeName(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren", "robin")
-
-	held, err := reg.ReserveName("robin")
-	if err != nil || held != "" {
-		t.Fatalf("ReserveName = %q, %v, want robin reserved", held, err)
-	}
-	st, err := reg.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(st.Reservations) != 1 || st.Reservations[0].Name != "robin" {
-		t.Errorf("reservations = %+v, want one on robin", st.Reservations)
-	}
-}
-
-// TestReserveNameRefusesATakenName says why a name the caller chose cannot be
-// reserved, and reserves nothing.
-func TestReserveNameRefusesATakenName(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name    string
-		arrange func(t *testing.T, reg *Registry)
-		want    SkipReason
-	}{
-		{
-			name: "bound to a bead",
-			arrange: func(t *testing.T, reg *Registry) {
-				if _, err := reg.Bind("robin", "gt-abc"); err != nil {
-					t.Fatalf("Bind: %v", err)
-				}
-			},
-			want: SkipBound,
-		},
-		{
-			name: "held by a live session",
-			arrange: func(t *testing.T, reg *Registry) {
-				reg.ProcStart = starts(map[int]string{10: "tok10"})
-				seedAgent(t, reg, Agent{Name: "robin", PID: 10, Start: "tok10", Started: at(0)})
-			},
-			want: SkipLiveProcess,
-		},
-		{
-			name: "reserved already",
-			arrange: func(t *testing.T, reg *Registry) {
-				if _, err := reg.ReserveName("robin"); err != nil {
-					t.Fatalf("ReserveName: %v", err)
-				}
-			},
-			want: SkipReserved,
-		},
-		{
-			name: "a polecat directory holds it",
-			arrange: func(t *testing.T, reg *Registry) {
-				seated := filepath.Join(townDir(reg), "gastown", "polecats", "robin")
-				if err := os.MkdirAll(seated, 0o755); err != nil {
-					t.Fatalf("creating a polecat directory: %v", err)
-				}
-			},
-			want: SkipPolecatDirectory,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			reg := testRegistry(t, "wren", "robin")
-			tc.arrange(t, reg)
-
-			held, err := reg.ReserveName("robin")
-			if err != nil {
-				t.Fatalf("ReserveName: %v", err)
-			}
-			if held != tc.want {
-				t.Errorf("ReserveName = %q, want the reason %q", held, tc.want)
-			}
-			st, err := reg.Load()
-			if err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-			for _, res := range st.Reservations {
-				if res.Name == "robin" && tc.want != SkipReserved {
-					t.Errorf("reservations = %+v, want none written for a refused name", st.Reservations)
-				}
-			}
-		})
 	}
 }
 
@@ -952,25 +536,6 @@ func TestOwnsAcceptsPoolAndBoundNames(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("Owns(%q) = %v, want %v", tc.name, got, tc.want)
 		}
-	}
-}
-
-func TestPickReturnsNoNameWhenThePoolIsExhausted(t *testing.T) {
-	t.Parallel()
-	reg := testRegistry(t, "wren", "robin")
-	if err := reg.Update(func(st *State) error {
-		st.Bind("wren", "gt-a", at(0))
-		st.Bind("robin", "gt-b", at(0))
-		return nil
-	}); err != nil {
-		t.Fatalf("seeding bindings: %v", err)
-	}
-	got, err := reg.Pick()
-	if err != nil {
-		t.Fatalf("Pick: %v", err)
-	}
-	if got.Name != "" {
-		t.Errorf("Pick = %q, want no name from an exhausted pool", got.Name)
 	}
 }
 
@@ -1355,9 +920,6 @@ func TestEveryReadOfABrokenStateFails(t *testing.T) {
 	if _, err := reg.Taken(); err == nil {
 		t.Error("Taken accepted a broken state file")
 	}
-	if _, err := reg.Pick(); err == nil {
-		t.Error("Pick accepted a broken state file")
-	}
 }
 
 func TestStartTokenAnswersFromTheTwoKernelCalls(t *testing.T) {
@@ -1452,17 +1014,11 @@ func TestLivenessReadsFailWithoutAPlatformProbe(t *testing.T) {
 	if _, err := reg.Taken(); !errors.Is(err, ErrUnsupportedPlatform) {
 		t.Errorf("Taken = %v, want the platform's own answer", err)
 	}
-	if got, err := reg.Pick(); !errors.Is(err, ErrUnsupportedPlatform) {
-		t.Errorf("Pick = %+v, %v, want the platform's own answer", got, err)
-	}
 	st, err := reg.Load()
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(st.Agents) != 1 || st.Agents[0].Name != "robin" {
 		t.Errorf("agents on disk = %+v, want the record kept: an unreadable process is not a dead one", st.Agents)
-	}
-	if len(st.Reservations) != 0 {
-		t.Errorf("reservations = %+v, want none: a Pick that failed reserves no name", st.Reservations)
 	}
 }

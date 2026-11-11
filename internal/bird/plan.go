@@ -64,8 +64,8 @@ type Launch struct {
 	// the bead the name is bound to and labeled with once the launch is real.
 	Bead string
 	// Pinned is true when the caller chose the name itself, with --name or with
-	// --resume of a bird of ours, so the launch may take the name over from the
-	// reservation a spawn made for it (gt-b58mk).
+	// --resume of a bird of ours, so the launch may take the name over from a
+	// reservation the state file holds (gt-b58mk).
 	Pinned bool
 }
 

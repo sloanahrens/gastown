@@ -26,9 +26,10 @@ func TestBindStoresOneBindingPerNameAndBead(t *testing.T) {
 
 func TestBindDropsTheReservationForItsName(t *testing.T) {
 	t.Parallel()
-	var st State
-	st.Reserve("wren", at(1))
-	st.Reserve("robin", at(1))
+	st := State{Reservations: []Reservation{
+		{Name: "wren", Time: at(1)},
+		{Name: "robin", Time: at(1)},
+	}}
 	st.Bind("wren", "gt-a", at(2))
 	if len(st.Reservations) != 1 || st.Reservations[0].Name != "robin" {
 		t.Errorf("reservations = %+v, want only the one no binding claimed", st.Reservations)
@@ -151,15 +152,5 @@ func TestTakenReportsALivenessItCannotRead(t *testing.T) {
 	read := func(Agent) (bool, error) { return false, unreadable }
 	if _, err := st.Taken(at(0), 5*time.Minute, read); !errors.Is(err, unreadable) {
 		t.Fatalf("Taken = %v, want the read error", err)
-	}
-}
-
-func TestReserveReplacesTheEarlierReservationForAName(t *testing.T) {
-	t.Parallel()
-	var st State
-	st.Reserve("wren", at(0))
-	st.Reserve("wren", at(4))
-	if len(st.Reservations) != 1 || !st.Reservations[0].Time.Equal(at(4)) {
-		t.Errorf("reservations = %+v, want one for wren stamped at(4)", st.Reservations)
 	}
 }

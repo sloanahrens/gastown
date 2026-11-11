@@ -203,7 +203,8 @@ func (r *Runner) launch(args []string) (Decision, error) {
 // bead it runs and the directory it runs in. It fails rather than record a
 // process the kernel does not report as running, or one it gives no start token
 // for, since such a record names no process. A launch whose name the caller
-// chose takes the name over from the reservation a spawn made for it.
+// chose claims it pinned, so a reservation the state file holds does not
+// refuse it.
 func (r *Runner) claim(l *Launch) (bool, error) {
 	pid := r.pid()
 	start, live, err := r.procStart()(pid)
