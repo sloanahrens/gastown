@@ -73,7 +73,7 @@ Every `{{cmd}} mail send` creates a permanent bead + Dolt commit. Every `{{cmd}}
 creates nothing. **Default to nudge for routine agent-to-agent communication.**
 
 Only use mail when the message MUST survive the recipient's session death
-(handoffs, structured protocol messages, escalations). See `mail-protocol.md`.
+(handoffs, structured protocol messages, escalations).
 
 ## Agent Memory
 

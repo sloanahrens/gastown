@@ -2388,7 +2388,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 // ReuseIdlePolecat prepares an idle polecat for new work using branch-only operations.
 // Unlike RepairWorktreeWithOptions, this does NOT create/remove git worktrees.
 // It simply creates a fresh branch on the existing worktree, which eliminates the
-// ~5s overhead of worktree creation. Phase 3 of persistent-polecat-pool.md.
+// ~5s overhead of worktree creation.
 //
 // Steps:
 //  1. Verify polecat exists and worktree is accessible
