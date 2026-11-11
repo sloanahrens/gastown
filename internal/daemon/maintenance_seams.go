@@ -29,6 +29,10 @@ type maintenanceSeams struct {
 	// gcExternal reports whether the Dolt server is not one this daemon can
 	// measure on local disk.
 	gcExternal func(d *Daemon) (bool, string)
+	// serverDatabases lists the databases an external server serves (SHOW
+	// DATABASES). The data dir is not this host's then, so gcDatabases cannot
+	// list them.
+	serverDatabases func(d *Daemon) ([]string, error)
 	// mountInfo reads the process's mount table, which gcExternal parses to
 	// prove the town root is the container's bind mount. A test supplies its
 	// own table.
@@ -103,6 +107,9 @@ func (d *Daemon) maintenance() maintenanceSeams {
 	}
 	if s.gcExternal == nil {
 		s.gcExternal = (*Daemon).maintenanceGCExternal
+	}
+	if s.serverDatabases == nil {
+		s.serverDatabases = (*Daemon).maintenanceServerDatabases
 	}
 	if s.mountInfo == nil {
 		path := s.mountInfoPath

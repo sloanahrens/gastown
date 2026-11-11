@@ -276,7 +276,7 @@ func (d *Daemon) runScheduledMaintenance() {
 	}
 
 	// A standby (the town ESTOP or a Waned Ring) starts no gc, but the
-	// night's backup still runs (startStandbyBackup). The window is consumed
+	// night's backup still runs (startBackupOnly). The window is consumed
 	// only once that backup ends, so the gc waits for the catch-up. A request
 	// is answered at once instead of being left to the job's timeout.
 	reason := d.standbyReason(now)
@@ -286,7 +286,7 @@ func (d *Daemon) runScheduledMaintenance() {
 			d.deferRequest(request, reason)
 		}
 		if window != "" {
-			d.startStandbyBackup(window)
+			d.startBackupOnly(window, "standby backup")
 		}
 		return
 	}
@@ -303,16 +303,18 @@ func (d *Daemon) runScheduledMaintenance() {
 	}
 	if external, why := d.maintenance().gcExternal(d); external {
 		// The old-gen trigger reads the server's data dir from this host's
-		// disk; against a remote server it would read the wrong one. The skip
-		// is the scheduled window's, so only a scheduled tick consumes it: a
+		// disk; against a remote server it would read the wrong one, so the
+		// gc is skipped. The night's backup does not read that disk: the
+		// server writes it into the backup root, so a scheduled tick still
+		// takes it (startBackupOnly) and consumes the window once it ends. A
 		// request that fails here changed nothing a later request must wait
 		// on.
 		d.logger.Printf("scheduled_maintenance: skipped: %s — gc needs a local server", why)
 		if requested {
 			d.answerRequest(request, gcOutcomeFailed, "no local server can run the cycle: "+why)
-		} else {
-			d.lastMaintenanceRun = now
+			return
 		}
+		d.startBackupOnly(window, "backup")
 		return
 	}
 	dataDir := d.maintenanceDataDir()

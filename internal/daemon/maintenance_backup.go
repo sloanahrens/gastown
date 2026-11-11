@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // scheduled_maintenance's nightly backup (gt-8z769.5): once per night, in the
@@ -84,7 +85,12 @@ func (d *Daemon) maintenanceBackup(databases []string) maintenanceGCResult {
 		parent = context.Background()
 	}
 	for _, db := range databases {
-		if err := d.maintenanceBackupOne(parent, db, filepath.Join(partial, db)); err != nil {
+		dest := filepath.Join(partial, db)
+		err := d.maintenanceBackupOne(parent, db, dest)
+		if err == nil {
+			err = backupVisible(root, dest)
+		}
+		if err != nil {
 			if rmErr := os.RemoveAll(partial); rmErr != nil {
 				d.logger.Printf("scheduled_maintenance: WARNING: cannot remove failed backup %s: %v", partial, rmErr)
 			}
@@ -110,6 +116,52 @@ func (d *Daemon) maintenanceBackup(databases []string) maintenanceGCResult {
 		d.logger.Printf("scheduled_maintenance: WARNING: backup rotation: %v", err)
 	}
 	return maintenanceGCResult{outcome: gcOutcomeCompleted}
+}
+
+// backupVisible confirms that the copy sync-url reported as written is in this
+// daemon's own view of the backup root. The Dolt server writes to its own view
+// of the path; when the root is not shared with it, the copy lands where this
+// daemon cannot read it. The partial night is then not kept: its manifest would
+// mark a night taken that this host cannot restore from.
+func backupVisible(root, dest string) error {
+	if _, err := os.Stat(dest); err != nil {
+		return fmt.Errorf("backup root %s is not shared with the Dolt server: sync-url wrote no %s in this daemon's view: %w", root, dest, err)
+	}
+	return nil
+}
+
+// backupDatabases lists the databases a backup covers. An external server's
+// data dir is not this host's, so its list comes from the server; a local
+// server's list is discovered in the data dir.
+func (d *Daemon) backupDatabases() ([]string, error) {
+	s := d.maintenance()
+	if external, _ := s.gcExternal(d); external {
+		return s.serverDatabases(d)
+	}
+	return s.gcDatabases(d.maintenanceDataDir())
+}
+
+// maintenanceServerDatabases lists the databases the Dolt server serves through
+// the lister the offsite backup uses (listServerJsonlDatabases), so the two read
+// one server. The town's Dolt endpoint is read once for the list. A name that
+// is not a valid database name never reaches a backup path, as in the data-dir
+// discovery (discoverMaintenanceDatabases).
+func (d *Daemon) maintenanceServerDatabases() ([]string, error) {
+	workDir, err := doltserver.ClientWorkDir(&doltserver.Config{DataDir: d.maintenanceDataDir(), TownRoot: d.config.TownRoot})
+	if err != nil {
+		return nil, err
+	}
+	served, err := d.listServerJsonlDatabases(workDir, d.resolveJsonlTarget())
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, db := range served {
+		if validMaintenanceDBName(db) == nil {
+			out = append(out, db)
+		}
+	}
+	return out, nil
 }
 
 // maintenanceBackupOne copies one database under its own pause marker. The
