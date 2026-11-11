@@ -1571,6 +1571,50 @@ func TestVerifyExportCounts_SmallAbsoluteChangeIgnored(t *testing.T) {
 	}
 }
 
+// TestVerifyExportCounts_NearZeroDropIsJudged is gt-5tpas2: the small-change
+// guard never excuses a drop that keeps under a tenth of its baseline, even
+// when the baseline is under minAbsoluteDelta. 19 -> 1 keeps 5% and is judged;
+// 19 -> 2 keeps just over a tenth and stays under the small-change guard.
+func TestVerifyExportCounts_NearZeroDropIsJudged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		prev      int
+		current   int
+		wantSpike bool
+	}{
+		{name: "19 to 1, keeps under a tenth", prev: 19, current: 1, wantSpike: true},
+		{name: "19 to 2, keeps a tenth, small change", prev: 19, current: 2, wantSpike: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := backupTestDaemon(t)
+			gitRepo := t.TempDir()
+			initGitRepo(t, d, gitRepo)
+			os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
+			commitBackup(t, d, gitRepo, "testdb", tt.prev)
+
+			spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": tt.current}, defaultSpikeThreshold, 0)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.wantSpike {
+				if len(spikes) != 0 {
+					t.Fatalf("%d -> %d = %+v, want no spike under the small-change guard", tt.prev, tt.current, spikes)
+				}
+				return
+			}
+			if len(spikes) != 1 {
+				t.Fatalf("%d -> %d = %+v, want one spike", tt.prev, tt.current, spikes)
+			}
+			if spikes[0].Previous != tt.prev || spikes[0].Current != tt.current {
+				t.Errorf("spike = %+v, want %d -> %d", spikes[0], tt.prev, tt.current)
+			}
+		})
+	}
+}
+
 func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
 	t.Parallel()
 	d, _ := backupTestDaemon(t)

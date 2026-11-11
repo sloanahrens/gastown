@@ -64,11 +64,10 @@ const (
 	defaultSpikeThreshold = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
 
 	// defaultSpikeFloor is the baseline size below which a jump (a rise in
-	// records) is not judged. A database under it swings past any ratio on a few
-	// records — a new rig's first wisps (21 to 43) read as a 104.8% jump — and
-	// halting on that stopped every rig's backup push. Drops are judged at any
-	// size. A zero baseline is exempt: it has no ratio, and its growth is what
-	// the small-change floor guards (gt-ttqq8).
+	// records) is not judged. A database that small swings past any ratio on a
+	// few records, so halting on one stopped every rig's backup push (gt-5tpas2).
+	// Drops are judged at any size. A zero baseline is exempt: it has no ratio,
+	// and its growth is what the small-change floor guards (gt-ttqq8).
 	defaultSpikeFloor = 500
 
 	// defaultEscalationTimeout is the per-attempt timeout for the gt escalate
@@ -2861,13 +2860,15 @@ func ensureGitIgnore(gitRepo, entry string) {
 // Asymmetric thresholds: drops (possible data loss) use the configured
 // threshold; increases (new issues filed) use 2x the threshold since growth is
 // normal. Small absolute changes (<20 records) are always allowed to avoid
-// false alarms on small databases, except a drop to zero (see below).
+// false alarms on small databases, except a drop that keeps under a tenth of
+// its baseline (see below).
 //
 // The floor gates jumps only. A jump from a nonzero baseline under floor
 // records is not judged at all: a database that small moves by a large fraction
 // on a few records, and the ratio says nothing about growth (gt-5tpas2). A drop
 // is judged at any baseline, since a lost export must never pass as small, and
-// a drop to zero is never excused by the small-change guard. A zero baseline is
+// a drop that keeps under a tenth of its baseline (zero included) is never
+// excused by the small-change guard. A zero baseline is
 // still judged against the small-change floor, since it has no ratio to check
 // and its growth is the bulk load an operator confirms (gt-ttqq8).
 //
@@ -2965,8 +2966,7 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		}
 		compared = append(compared, alertKeyJSONLStoreFlip+db)
 
-		// A ratio against a tiny baseline is noise (gt-5tpas2): a new rig's
-		// first 21 wisps growing to 43 read as a 104.8% jump. The floor gates
+		// A ratio against a tiny baseline is noise (gt-5tpas2). The floor gates
 		// jumps only: a jump is judged when its baseline holds at least floor
 		// records. A drop is judged at any size, so a small database that
 		// loses its records halts rather than passing as small. A zero baseline
@@ -2982,9 +2982,11 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		}
 		// Small absolute changes are always fine — avoids false alarms on
 		// small databases where a few issues cause large percentage swings. A
-		// drop to zero is never small: an export that came back empty of a
-		// database that had records is the loss this guard must not excuse.
-		if absDelta < minAbsoluteDelta && currentCount != 0 {
+		// drop that keeps under a tenth of its baseline is near zero and is
+		// never small: an export that came back nearly empty of a database that
+		// had records is the loss this guard must not excuse (gt-5tpas2).
+		nearZeroDrop := currentCount < prevCount && currentCount*10 < prevCount
+		if absDelta < minAbsoluteDelta && !nearZeroDrop {
 			continue
 		}
 
