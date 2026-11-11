@@ -1,0 +1,128 @@
+[
+ {
+  "bead": "gt-w346j",
+  "rig": "gastown",
+  "seat_class": "haiku",
+  "text": "# Found: List marshal failure is published as null, which the page reads as an empty list and 1 more (om minor on gt-6ecd0 approved at 0.85) (gt-w346j) [closed task P3] labels: om-followup, om-fp:1e523e1c99be, om-fp:f13c85d1cf90\n\n## Description\n\n## Goal\nFixed: the 2 findings om raised on gt-6ecd0 and did not block on, from the landing approved at 0.85 (landed commit 8225a3b59c4f92c51f278d32a333e019dbc70eeb).\n\n- List marshal failure is published as null, which the page reads as an empty list (at internal/dashboard/hub.go, om finding d68852927894, minor)\n- Garbled doc comment on TestHubLateSubscriberGetsBothListsAndTheStateWithoutThem (at internal/dashboard/hub_test.go:173, om finding 46450b73c352, minor)\n\n## Constraints\nOnly the files the findings name. Keep the rig's gate green. Do not widen the change.\nIf the fix removes or rewrites a line an earlier landing added, gt done's revert check will refuse it. Do not work around the refusal: say so in a comment on this bead, naming each file the fix deletes (or a directory of at least two path components, with a trailing slash), and ask the operator for a deletes-by-spec waiver.\n\n## Out of scope\nAnything the findings do not name.\n\n## Gate\ngt done presubmit; the landing runs make gate\n\n## Size\none worker, one landing\n\n## Acceptance\n\n- [x] Finding resolved: List marshal failure is published as null, which the page reads as an empty list (internal/dashboard/hub.go)\n- [x] Finding resolved: Garbled doc comment on TestHubLateSubscriberGetsBothListsAndTheStateWithoutThem (internal/dashboard/hub_test.go:173)\n\n## Acceptance\n\n- [x] Finding resolved: List marshal failure is published as null, which the page reads as an empty list (internal/dashboard/hub.go)\n- [x] Finding resolved: Garbled doc comment on TestHubLateSubscriberGetsBothListsAndTheStateWithoutThem (internal/dashboard/hub_test.go:173)\n",
+  "features": {
+   "boxes": 2.0,
+   "paths": 2.0,
+   "pkgs": 1.0,
+   "dlen": 7.529406,
+   "ncons": 0.0,
+   "nlab": 3.0,
+   "podeng": 0.0,
+   "tests": 0.0,
+   "nbt": 0.0,
+   "rig_gt": 1.0,
+   "rig_dv": 0.0,
+   "is_haiku": 1.0
+  },
+  "predicted_minutes": 6.0811
+ },
+ {
+  "bead": "gt-l9nbv",
+  "rig": "gastown",
+  "seat_class": "haiku",
+  "text": "# Found: Kept AIza fixture is still a detector-shaped value, against the bead's stated goal (om minor on gt-pcufs approved at 0.88) (gt-l9nbv) [closed task P3] labels: om-followup, om-fp:1630503ba00e\n\n## Description\n\n## Goal\nFixed: the 1 finding om raised on gt-pcufs and did not block on, from the landing approved at 0.88 (landed commit 67c6f00ffc1d1a583e6079c94f89c608d101a405).\n\n- Kept AIza fixture is still a detector-shaped value, against the bead's stated goal (at internal/sandbox/skeleton_test.go:666, om finding 466e8c6ace0f, minor)\n\n## Constraints\nOnly the files the findings name. Keep the rig's gate green. Do not widen the change.\nIf the fix removes or rewrites a line an earlier landing added, gt done's revert check will refuse it. Do not work around the refusal: say so in a comment on this bead, naming each file the fix deletes (or a directory of at least two path components, with a trailing slash), and ask the operator for a deletes-by-spec waiver.\n\n## Out of scope\nAnything the findings do not name.\n\n## Gate\ngt done presubmit; the landing runs make gate\n\n## Size\none worker, one landing\n\n## Acceptance\n\n- [x] Finding resolved: Kept AIza fixture is still a detector-shaped value, against the bead's stated goal (internal/sandbox/skeleton_test.go:666)\n\n## Acceptance\n\n- [x] Finding resolved: Kept AIza fixture is still a detector-shaped value, against the bead's stated goal (internal/sandbox/skeleton_test.go:666)\n",
+  "features": {
+   "boxes": 1.0,
+   "paths": 1.0,
+   "pkgs": 1.0,
+   "dlen": 7.271009,
+   "ncons": 0.0,
+   "nlab": 2.0,
+   "podeng": 0.0,
+   "tests": 0.0,
+   "nbt": 0.0,
+   "rig_gt": 1.0,
+   "rig_dv": 0.0,
+   "is_haiku": 1.0
+  },
+  "predicted_minutes": 5.0391
+ },
+ {
+  "bead": "gt-w3213",
+  "rig": "gastown",
+  "seat_class": "haiku",
+  "text": "# Found: Schema test ignores ALTER TABLE migrations its comment says it covers and 1 more (om minor on gt-p8inx approved at 0.88) (gt-w3213) [closed task P3] labels: om-followup, om-fp:40ce7792d450, om-fp:889325e4353e\n\n## Description\n\n## Goal\nFixed: the 2 findings om raised on gt-p8inx and did not block on, from the landing approved at 0.88 (landed commit 40d53844d12517b5d0af85cdd288f56f71a21e0f).\n\n- Schema test ignores ALTER TABLE migrations its comment says it covers (at tracker/cmd/trackersize/pg_test.go:13, om finding 04645a7b956c, minor)\n- No-DSN-in-error claim is untested on the connect path (at tracker/cmd/trackersize/pg.go:50, om finding 89b9941e5127, minor)\n\n## Constraints\nOnly the files the findings name. Keep the rig's gate green. Do not widen the change.\nIf the fix removes or rewrites a line an earlier landing added, gt done's revert check will refuse it. Do not work around the refusal: say so in a comment on this bead, naming each file the fix deletes (or a directory of at least two path components, with a trailing slash), and ask the operator for a deletes-by-spec waiver.\n\n## Out of scope\nAnything the findings do not name.\n\n## Gate\ngt done presubmit; the landing runs make gate\n\n## Size\none worker, one landing\n\n## Acceptance\n\n- [x] Finding resolved: Schema test ignores ALTER TABLE migrations its comment says it covers (tracker/cmd/trackersize/pg_test.go:13)\n- [x] Finding resolved: No-DSN-in-error claim is untested on the connect path (tracker/cmd/trackersize/pg.go:50)\n\n## Acceptance\n\n- [x] Finding resolved: Schema test ignores ALTER TABLE migrations its comment says it covers (tracker/cmd/trackersize/pg_test.go:13)\n- [x] Finding resolved: No-DSN-in-error claim is untested on the connect path (tracker/cmd/trackersize/pg.go:50)\n",
+  "features": {
+   "boxes": 2.0,
+   "paths": 2.0,
+   "pkgs": 1.0,
+   "dlen": 7.478735,
+   "ncons": 0.0,
+   "nlab": 3.0,
+   "podeng": 0.0,
+   "tests": 4.0,
+   "nbt": 0.0,
+   "rig_gt": 1.0,
+   "rig_dv": 0.0,
+   "is_haiku": 1.0
+  },
+  "predicted_minutes": 6.2437
+ },
+ {
+  "bead": "gt-m0shy",
+  "rig": "gastown",
+  "seat_class": "flash",
+  "text": "# gt birds due: print the late daily reports and the exact request to send (gt-m0shy) [closed task P2]\n\n## Description\n\n## Goal\nOne command, gt birds due, prints which reporters' daily reports are due or stale and, for each, the exact request to send, so the overseer's 30-minute check runs one command instead of remembering the process. The request text moves from ~/gt/.runtime/overseer/birds/daily-profile.txt into the gastown repo (docs/birds/daily-request.md) as the single source.\n\n## Constraints\n- Go with unit tests: internal/cmd (gt birds due) reading the same reporter list and daily.json files as the bird_reports patrol (share one small package, internal/birdreports, that both use).\n- Output: one line per due reporter with its age, then the request text with <NAME> replaced; exit 0 when nothing is due, exit 1 when any is due (so a prompt can branch on it). The request text file is embedded with go:embed.\n- Update ~/.claude/docs/overseer-check-prompt.md in the same change set is NOT possible from a rig; instead state in the bead comment the one line the overseer adds there. Do not edit ~/.claude.\n- No sending: the command prints, the overseer sends with SendMessage.\n\n## Out of scope\nThe patrol (the sibling bead), the dashboard page, publishing artifacts.\n\n## Gate\ngo test ./internal/birdreports and go test ./internal/cmd -run BirdsDue.\n\n## Size\none worker, one landing\n\n## Acceptance\n\n- [x] internal/birdreports reads a reporter's daily.json written_at and reports fresh, stale or missing against an injected clock. Run: go test ./internal/birdreports\n- [x] gt birds due prints one line per due reporter and the request text with the name filled in, exits 1 when any are due and 0 when none. Run: go test ./internal/cmd -run BirdsDue\n- [x] docs/birds/daily-request.md holds the request text (the eight sections of the DAILY profile, the daily.json fields, the fixed slug) and the command embeds it; a test fails if the file is empty. Run: go test ./internal/birdreports -run Embedded\n\n## Acceptance\n\n- [x] internal/birdreports reads a reporter's daily.json written_at and reports fresh, stale or missing against an injected clock. Run: go test ./internal/birdreports\n- [x] gt birds due prints one line per due reporter and the request text with the name filled in, exits 1 when any are due and 0 when none. Run: go test ./internal/cmd -run BirdsDue\n- [x] docs/birds/daily-request.md holds the request text (the eight sections of the DAILY profile, the daily.json fields, the fixed slug) and the command embeds it; a test fails if the file is empty. Run: go test ./internal/birdreports -run Embedded\n",
+  "features": {
+   "boxes": 3.0,
+   "paths": 4.0,
+   "pkgs": 4.0,
+   "dlen": 7.872836,
+   "ncons": 4.0,
+   "nlab": 0.0,
+   "podeng": 0.0,
+   "tests": 11.0,
+   "nbt": 0.0,
+   "rig_gt": 1.0,
+   "rig_dv": 0.0,
+   "is_haiku": 0.0
+  },
+  "predicted_minutes": 10.5182
+ },
+ {
+  "bead": "gt-2pejx",
+  "rig": "gastown",
+  "seat_class": "flash",
+  "text": "# Found: Exported ScanReviewLines doc comment is longer than the one-sentence contract rule (om minor on gt-qksmj approved at 0.90) (gt-2pejx) [closed task P3] labels: om-followup, om-fp:78bd29d6c3e5\n\n## Description\n\n## Goal\nFixed: the 1 finding om raised on gt-qksmj and did not block on, from the landing approved at 0.90 (landed commit 1b77bcbb30bc1a9d0420428e5a46ea545a46ed5c).\n\n- Exported ScanReviewLines doc comment is longer than the one-sentence contract rule (at internal/land/reviewlog.go:334, om finding a2c91fe20740, minor)\n\n## Constraints\nOnly the files the findings name. Keep the rig's gate green. Do not widen the change.\nIf the fix removes or rewrites a line an earlier landing added, gt done's revert check will refuse it. Do not work around the refusal: say so in a comment on this bead, naming each file the fix deletes (or a directory of at least two path components, with a trailing slash), and ask the operator for a deletes-by-spec waiver.\n\n## Out of scope\nAnything the findings do not name.\n\n## Gate\ngt done presubmit; the landing runs make gate\n\n## Size\none worker, one landing\n\n## Acceptance\n\n- [x] Finding resolved: Exported ScanReviewLines doc comment is longer than the one-sentence contract rule (internal/land/reviewlog.go:334)\n\n## Acceptance\n\n- [x] Finding resolved: Exported ScanReviewLines doc comment is longer than the one-sentence contract rule (internal/land/reviewlog.go:334)\n",
+  "features": {
+   "boxes": 1.0,
+   "paths": 1.0,
+   "pkgs": 1.0,
+   "dlen": 7.256297,
+   "ncons": 0.0,
+   "nlab": 2.0,
+   "podeng": 0.0,
+   "tests": 0.0,
+   "nbt": 0.0,
+   "rig_gt": 1.0,
+   "rig_dv": 0.0,
+   "is_haiku": 0.0
+  },
+  "predicted_minutes": 6.2982
+ },
+ {
+  "bead": "gt-hgt9j.14",
+  "rig": "gastown",
+  "seat_class": "flash",
+  "text": "# lint: parse the optional ## Interfaces section (gt-hgt9j.14) [closed task P2]\n\n## Description\n\n## Goal\nParse an optional `## Interfaces` section so the epic-level lint can compare the names beads define and use. The section holds `Defines:` and `Uses:` lines, each a comma-separated list of identifiers. This bead only parses; the graph checks come later (docs/plans/2026-11-03-bead-lint-v2-design.md, decision 3).\n\n## Constraints\nCreate internal/specdispatch/graph.go and create internal/specdispatch/graph_test.go. Use the existing Sections helper in internal/specdispatch/lint.go to find the section (key `interfaces`); do not write a second section splitter. Exact names:\n```go\ntype InterfacesBlock struct { Defines, Uses []string }\n// ParseInterfaces returns (block, present, err). present is false when the bead has no Interfaces section (not an error). A line that is not blank, not \"Defines: ...\" and not \"Uses: ...\" is an error naming the 1-based line within the section and its text. Each list item is trimmed and must be an identifier: letters, digits, underscore and dot, starting with a letter or underscore (a dot allows Type.Method); anything else is an error naming the item. Repeated lines of one kind merge, in order, without duplicates.\nfunc ParseInterfaces(description string) (InterfacesBlock, bool, error)\n```\nA leading `- ` bullet and backticks around an item are stripped. Bead gt-hgt9j.12 must have landed; the K1 bead before this one in the chain edits lint.go, so it lands first.\n\n## Out of scope\nThe graph checks, the command, and the lint verdict.\n\n## Gate\n`go test ./internal/specdispatch -run 'InterfacesParse' -count=1`.\n\n## Size\nOne worker, one landing, about 20 minutes.\n\n## Acceptance\n\n- [x] TestInterfacesParseDefinesAndUses: both line kinds parse into the two lists in order\n- [x] TestInterfacesParseRejectsBadLine: a line `Provides: X` returns an error naming the line number and text\n- [x] TestInterfacesParseRejectsNonIdentifier: an item `3rd` or `a b` returns an error naming the item, and `Store.Mutate` is accepted\n- [x] TestInterfacesParseAbsentSection: no Interfaces section returns present false and a nil error\n- [x] TestInterfacesParseMergesRepeatedLines: two Defines lines merge without duplicates\n\n## Acceptance\n\n- [x] TestInterfacesParseDefinesAndUses: both line kinds parse into the two lists in order\n- [x] TestInterfacesParseRejectsBadLine: a line `Provides: X` returns an error naming the line number and text\n- [x] TestInterfacesParseRejectsNonIdentifier: an item `3rd` or `a b` returns an error naming the item, and `Store.Mutate` is accepted\n- [x] TestInterfacesParseAbsentSection: no Interfaces section returns present false and a nil error\n- [x] TestInterfacesParseMergesRepeatedLines: two Defines lines merge without duplicates\n",
+  "features": {
+   "boxes": 5.0,
+   "paths": 5.0,
+   "pkgs": 2.0,
+   "dlen": 7.934513,
+   "ncons": 0.0,
+   "nlab": 0.0,
+   "podeng": 0.0,
+   "tests": 1.0,
+   "nbt": 34.0,
+   "rig_gt": 1.0,
+   "rig_dv": 0.0,
+   "is_haiku": 0.0
+  },
+  "predicted_minutes": 10.796
+ }
+]
