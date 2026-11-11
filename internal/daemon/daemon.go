@@ -755,6 +755,11 @@ type Daemon struct {
 	standbyTierSweep   dispatch.HoldLatch
 	standbyMaintenance dispatch.HoldLatch
 
+	// dispatchHoldView remembers the summary of the hold view the last
+	// heartbeat read, so a change in what the daemon sees of the dispatch hold
+	// is logged once (dispatch_hold_view.go).
+	dispatchHoldView dispatch.HoldLatch
+
 	// specDispatchRunning / specDispatchCycles are the spec_dispatch ticker's
 	// single-flight guard and cycle count (gt-4k3fj.5, spec_dispatch.go), and
 	// specDispatchHold remembers the town hold the ticker last saw so a
@@ -2277,6 +2282,8 @@ func (d *Daemon) heartbeat(state *State) {
 		d.logger.Println("Shutdown in progress, skipping heartbeat")
 		return
 	}
+
+	d.logDispatchHoldView()
 
 	// The standby (the town E-stop, a Waned Ring, or the boot gate while
 	// infrastructure is not answering) holds dispatch and restarts, not upkeep:
