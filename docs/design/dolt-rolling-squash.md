@@ -58,7 +58,7 @@ R9 [overseer] Record the measured numbers (rebase duration, disk peak, commits b
 
 ## Backup plan for the first run
 
-Where the copies sit (docs/dolt-restore.md, "Where the backups are written"): the Dolt server runs in the `gt-dolt` container on the Mac and writes each night under `~/gt-backups/dolt` through its bind mount. The daemon in the pod mounts the same Mac directory as a hostPath and sets `GT_DOLT_BACKUP_ROOT` to it. The daemon, not the server, renames `<date>.partial` to `<date>`, writes `backup.json`, and keeps the newest 14 nights; rotation removes only dated nights and `.partial` directories under that root, so a copy made under step 2 must not take either name there.
+Before step 2, read docs/dolt-restore.md, "Where the backups are written": it sets where the copies sit and which names rotation removes, and a step 2 copy must avoid those names.
 
 1. The restore path is docs/dolt-restore.md; read it before the run and confirm the nightly backup of the day holds the database: `cat ~/gt-backups/dolt/<date>/backup.json` lists `gt` and `finished` is under 6 hours old, the daemon step's bound. The source keeps fourteen nights (gt-9fcui, landed 2026-11-01; the installed daemon may still keep seven until the next install), so the night before the run is still there after the run either way.
 2. If the nightly backup is older than 6 hours, take one by the daemon's own method into a directory outside the rotation (so Rotate never removes it): `CALL dolt_backup('sync-url', 'file://<dir>/gt')` through the running server (internal/daemon/maintenance_backup.go, doltBackupSyncURL), under a pause marker (`gt dolt pause --reason "pre-squash backup" --until 30m`, then `gt dolt unpause`).
