@@ -6,8 +6,8 @@ import (
 )
 
 // TestActual pins the points a landing's polecat time earns, and the weighted
-// flag that says whether it earns any. A time that is absent, not positive, or
-// a bound is unweighted and carries no points.
+// flag that says whether it earns any. A time that is absent, not positive, not
+// finite, or a bound is unweighted and carries no points.
 func TestActual(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -24,6 +24,8 @@ func TestActual(t *testing.T) {
 		{"zero seconds is unweighted", 0, false, false, 0, false},
 		{"negative seconds is unweighted", -60, false, false, 0, false},
 		{"NaN is unweighted", math.NaN(), false, false, 0, false},
+		{"positive infinity is unweighted", math.Inf(1), false, false, 0, false},
+		{"negative infinity is unweighted", math.Inf(-1), false, false, 0, false},
 		{"lower-bound time is unweighted", 600, true, false, 0, false},
 		{"upper-bound time is unweighted", 600, false, true, 0, false},
 	}
