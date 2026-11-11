@@ -10,12 +10,15 @@ import (
 // question from whether it is green. A degraded or red report is ready when
 // every non-green field is RECORDED: the condition is a known, accepted state
 // (a rehearsal with dispatch off, a backup not yet taken) and not a fault a
-// measurement found. Anything else is not ready: a stale or unknown report, a
-// measured non-green field, an UNKNOWN field, and a red or degraded report with
-// no non-green field to account for it.
+// measurement found. A non-green attention row is ready too: it says a person
+// should look, not that the daemon cannot serve, and a person's queue must not
+// take a working daemon's Service endpoints away (gt-pittz6). Anything else is
+// not ready: a stale or unknown report, a measured non-green serving field, an
+// UNKNOWN field, and a red or degraded report with no non-green field to
+// account for it.
 //
-// reason names the first blocking field, worst first as Line orders them, so it
-// names the same field the line leads with.
+// reason names the worst blocking field, in the order Line lists the fields; an
+// attention row is never the reason.
 func Ready(r Report, now time.Time, staleAfter time.Duration) (ok bool, reason string) {
 	v := Effective(r, now, staleAfter)
 	if v != r.Verdict {
@@ -36,11 +39,24 @@ func Ready(r Report, now time.Time, staleAfter time.Duration) (ok bool, reason s
 		if f.Verdict == VerdictUnknown {
 			return false, fmt.Sprintf("%s verdict is unknown", f.Key())
 		}
-		if f.Tag != Recorded {
+		if f.Tag != Recorded && !attention(f) {
 			return false, fmt.Sprintf("%s is %s, not RECORDED", f.Key(), f.Tag)
 		}
 	}
 	return true, ""
+}
+
+// attention reports whether f is a row that says a person should look, not that
+// the daemon cannot serve: a bead waiting under a person label, or an open
+// escalation. Such a row stays in the status line but does not fail readiness
+// (gt-pittz6). Every other name is a serving row, and one this function does
+// not know is not excused.
+func attention(f Field) bool {
+	switch f.Name {
+	case FieldNeedsOverseer, FieldNeedsOperator, FieldNeedsHuman, FieldEscalation:
+		return true
+	}
+	return false
 }
 
 // nonGreen returns the non-green fields, worst first, as Line orders them; ties keep report order.

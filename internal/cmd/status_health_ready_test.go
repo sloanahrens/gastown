@@ -32,18 +32,28 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 		{Name: townhealth.FieldDolt, Tag: townhealth.Live, Verdict: townhealth.Red, Value: "p50 900ms"},
 		{Name: townhealth.FieldDispatch, Tag: townhealth.Recorded, Verdict: townhealth.Red, Value: "off"},
 	}
+	// needsOverseer is the incident the --ready flag is for (gt-pittz6): every
+	// serving row is healthy, and a bead waiting for the overseer is the only
+	// non-green row.
+	needsOverseer := []townhealth.Field{
+		{Name: townhealth.FieldDolt, Tag: townhealth.Live, Verdict: townhealth.Green, Value: "3ms"},
+		{Name: townhealth.FieldDaemon, Tag: townhealth.Live, Verdict: townhealth.Green, Value: "heartbeat 1s ago"},
+		{Name: townhealth.FieldConfig, Tag: townhealth.Live, Verdict: townhealth.Green, Value: "valid"},
+		{Name: townhealth.FieldNeedsOverseer, Tag: townhealth.Live, Verdict: townhealth.Degraded, Value: "1", Detail: "1 waiting for overseer"},
+	}
 	// view reads the health file with the supervisor stubbed, so the answer
 	// depends only on the report the test wrote.
 	view := func(townRoot string, at time.Time) ([]string, townhealth.Verdict, *townhealth.Report) {
 		return townstatus.HealthViewWith(townRoot, at, notLooping)
 	}
 	tests := []struct {
-		name       string
-		ready      bool
-		report     townhealth.Report
-		wantCode   int
-		wantLine   string
-		wantReason string // a substring of stderr; "" means stderr is empty
+		name         string
+		ready        bool
+		report       townhealth.Report
+		wantCode     int
+		wantLine     string
+		wantLinePart string // a substring of the printed line; "" means unchecked
+		wantReason   string // a substring of stderr; "" means stderr is empty
 	}{
 		{
 			name:     "ready: red with only recorded fields exits 0 and prints its line",
@@ -59,6 +69,14 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 			wantCode:   2,
 			wantLine:   "RED tick",
 			wantReason: "not ready: dolt is LIVE, not RECORDED",
+		},
+		{
+			name:         "ready: a live needs-overseer row exits 0 and still shows in the line",
+			ready:        true,
+			report:       townhealth.Report{At: now, Verdict: townhealth.Degraded, Fields: needsOverseer},
+			wantCode:     0,
+			wantLine:     "DEGRADED tick",
+			wantLinePart: "needs-overseer=1",
 		},
 		{
 			name:       "ready: a stale report exits 3 and says so",
@@ -94,6 +112,9 @@ func TestStatusLineReadyExitCodes(t *testing.T) {
 			}
 			if !strings.HasPrefix(out.String(), tt.wantLine) {
 				t.Errorf("line = %q, want it to start with %q", out.String(), tt.wantLine)
+			}
+			if tt.wantLinePart != "" && !strings.Contains(out.String(), tt.wantLinePart) {
+				t.Errorf("line = %q, want it to contain %q", out.String(), tt.wantLinePart)
 			}
 			if tt.wantReason == "" {
 				if errOut.Len() != 0 {

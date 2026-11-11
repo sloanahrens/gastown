@@ -96,3 +96,103 @@ func TestReadyTable(t *testing.T) {
 		})
 	}
 }
+
+// TestReadyAttentionRowDoesNotBlock is the reported incident (gt-pittz6): a
+// bead waits for the overseer, so that row is LIVE and needs no RECORDED tag,
+// and beside healthy serving rows it must leave the town ready. The row keeps
+// showing in the line.
+func TestReadyAttentionRowDoesNotBlock(t *testing.T) {
+	t.Parallel()
+	report := Report{At: ago(time.Minute), Verdict: Degraded, Fields: []Field{
+		{Name: FieldDolt, Tag: Live, Verdict: Green, Value: "3ms"},
+		{Name: FieldConfig, Tag: Live, Verdict: Green, Value: "valid"},
+		{Name: FieldNeedsOverseer, Tag: Live, Verdict: Degraded, Value: "1", Detail: "1 waiting for overseer"},
+	}}
+	if ok, reason := Ready(report, now, DefaultStaleAfter); !ok || reason != "" {
+		t.Fatalf("Ready = %v (%q), want ready: a person's queue must not fail readiness", ok, reason)
+	}
+	if line := Line(report, now, DefaultStaleAfter); !strings.Contains(line, "needs-overseer=1") {
+		t.Errorf("Line = %q, want it to keep showing the person row", line)
+	}
+}
+
+// TestReadyAttentionRowDoesNotMaskAServingFault: excusing the attention rows
+// must not excuse a measured serving row beside them, and the reason names the
+// serving row, not the person row it skips.
+func TestReadyAttentionRowDoesNotMaskAServingFault(t *testing.T) {
+	t.Parallel()
+	report := Report{At: ago(time.Minute), Verdict: Red, Fields: []Field{
+		{Name: FieldNeedsOverseer, Tag: Live, Verdict: Red, Value: "1"},
+		{Name: FieldDolt, Tag: Live, Verdict: Degraded, Value: "p50 900ms"},
+	}}
+	ok, reason := Ready(report, now, DefaultStaleAfter)
+	if ok {
+		t.Fatal("Ready = true, want not ready: a measured serving row is non-green")
+	}
+	if !strings.Contains(reason, FieldDolt) {
+		t.Errorf("reason = %q, want it to name %s", reason, FieldDolt)
+	}
+	if strings.Contains(reason, FieldNeedsOverseer) {
+		t.Errorf("reason = %q, want it to skip the attention row", reason)
+	}
+}
+
+// TestReadyFieldTable names every health row and whether a non-green one
+// blocks the readiness answer (gt-pittz6). The tag is the one Compute gives
+// the row. A RECORDED row is a state the readiness rule accepts; a LIVE row
+// blocks unless it is an attention row, which says a person should look rather
+// than that the daemon cannot serve; host is green whenever it is read, so it
+// never blocks.
+func TestReadyFieldTable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		tag     Tag
+		verdict Verdict
+		wantOK  bool
+		// why states the reason the row does or does not block.
+		why string
+	}{
+		// Serving rows measured now: the daemon cannot serve.
+		{FieldDolt, Live, Degraded, false, "the datastore answers too slowly"},
+		{FieldExecTax, Live, Degraded, false, "every fresh executable pays too much to start"},
+		{FieldDaemon, Live, Degraded, false, "the heartbeat count stopped advancing"},
+		{FieldConfig, Live, Red, false, "the town config does not validate"},
+		// Host is green whenever the host could be read: it has no non-green
+		// verdict to block readiness with.
+		{FieldHost, Live, Green, true, "green whenever the host is readable"},
+		// Serving rows the computation records: a non-green one is a known,
+		// accepted state.
+		{FieldTick, Recorded, Degraded, true, "a tick ran late, recorded"},
+		{FieldLanding, Recorded, Red, true, "a landing queue is stuck, recorded"},
+		{FieldSlot, Recorded, Red, true, "a container slot is held, recorded"},
+		{FieldBackup, Recorded, Red, true, "no recent backup, recorded"},
+		{FieldMain, Recorded, Red, true, "main is red, recorded"},
+		{FieldSeat, Recorded, Red, true, "a seat is dead or stalled, recorded"},
+		{FieldPromote, Recorded, Red, true, "a promotion diverged, recorded"},
+		{FieldDispatch, Recorded, Red, true, "the dispatcher is off or stalled, recorded"},
+		{FieldForgejo, Recorded, Red, true, "the forge is down, recorded"},
+		{FieldRunner, Recorded, Red, true, "no runner picks runs up, recorded"},
+		// Attention rows: a person should look, so they stay in the line but
+		// do not fail readiness.
+		{FieldNeedsOverseer, Live, Red, true, "a bead waits for the overseer"},
+		{FieldNeedsOperator, Live, Red, true, "a bead waits for the operator"},
+		{FieldNeedsHuman, Live, Red, true, "a bead waits under the old person label"},
+		{FieldEscalation, Live, Red, true, "an escalation waits for a person"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			report := Report{At: ago(time.Minute), Verdict: tt.verdict, Fields: []Field{
+				{Name: tt.name, Tag: tt.tag, Verdict: tt.verdict, Value: "non-green"},
+			}}
+			ok, reason := Ready(report, now, DefaultStaleAfter)
+			if ok != tt.wantOK {
+				t.Fatalf("Ready = %v (%q), want %v: %s", ok, reason, tt.wantOK, tt.why)
+			}
+			if !ok && !strings.Contains(reason, tt.name) {
+				t.Errorf("reason = %q, want it to name the blocking row %s", reason, tt.name)
+			}
+		})
+	}
+}
