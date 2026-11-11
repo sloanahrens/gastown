@@ -4,6 +4,7 @@ package templates
 import (
 	"bytes"
 	"embed"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -388,6 +389,19 @@ func renderLaunchdPlist(data SupervisorData) (string, error) {
 	}
 
 	return buf.String(), nil
+}
+
+// xmlText escapes s for XML character data. The template writes paths straight
+// into the plist, and a town whose path holds & or < would otherwise render a
+// file launchd cannot parse — or, with a path crafted as </string><key>...,
+// one that carries keys nobody wrote. Every value the template interpolates
+// goes through this.
+func xmlText(s string) string {
+	var buf strings.Builder
+	// EscapeText only reports its writer's failure, and strings.Builder's
+	// Write never fails, so this escape has no error to carry back.
+	_ = xml.EscapeText(&buf, []byte(s))
+	return buf.String()
 }
 
 // renderSystemdUnit renders the systemd user unit template for the given data.

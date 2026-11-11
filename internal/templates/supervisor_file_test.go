@@ -94,16 +94,16 @@ func TestSupervisorFileIsFor(t *testing.T) {
 	// fileOf writes content to a supervisor file under a temporary directory.
 	fileOf := func(t *testing.T, content string) string {
 		t.Helper()
-		path := filepath.Join(t.TempDir(), "com.gastown.host-agent.plist")
+		path := filepath.Join(t.TempDir(), launchdPlistName)
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatalf("writing the supervisor file: %v", err)
 		}
 		return path
 	}
-	// rendered is the plist a host agent install would leave for townRoot.
+	// rendered is the daemon plist an install would leave for townRoot.
 	rendered := func(t *testing.T, townRoot string) string {
 		t.Helper()
-		content, err := HostAgentPlist(hostAgentGTPath, townRoot)
+		content, err := renderLaunchdPlist(SupervisorData{GTPath: "/usr/local/bin/gt", TownRoot: townRoot})
 		if err != nil {
 			t.Fatalf("rendering the plist: %v", err)
 		}

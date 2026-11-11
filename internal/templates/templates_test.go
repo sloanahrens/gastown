@@ -13,6 +13,20 @@ import (
 	"time"
 )
 
+// assertWellFormedXML fails the test unless s parses as XML from start to end.
+func assertWellFormedXML(t *testing.T, s string) {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(s))
+	for {
+		if _, err := dec.Token(); err != nil {
+			if errors.Is(err, io.EOF) {
+				return
+			}
+			t.Fatalf("rendered plist is not well-formed XML: %v", err)
+		}
+	}
+}
+
 func TestNew(t *testing.T) {
 	t.Parallel()
 	tmpl, err := New()
