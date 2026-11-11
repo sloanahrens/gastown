@@ -162,3 +162,14 @@ func TestIntegrationGateNeverTakesTheSlot(t *testing.T) {
 		t.Fatalf("gate takes the container-gate slot (%q)\n%s", slot, out)
 	}
 }
+
+// TestIntegrationGateListsTheSlowTests checks "gate's tierwall run lists each
+// test of 5s or more under its package (-slow-tests)".
+// Mutation: drop -slow-tests from gate's tierwall line, and the gate log stops
+// naming the slow tests (gt-vijwck).
+func TestIntegrationGateListsTheSlowTests(t *testing.T) {
+	out := dryGate(t, RealMake(repoRoot(t)))
+	if !strings.Contains(out, "cmd/tierwall -slow-tests") {
+		t.Fatalf("gate's tierwall run does not pass -slow-tests, so the gate log does not list the slow tests\n%s", out)
+	}
+}
