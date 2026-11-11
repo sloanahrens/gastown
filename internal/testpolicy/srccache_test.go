@@ -90,3 +90,65 @@ func TestAFileWhoseBuildConstraintCannotBeReadFailsTheScan(t *testing.T) {
 		})
 	}
 }
+
+// TestCacheableUnderTellsTheCheckoutFromAFixture: a directory is cached when it is
+// inside the checkout, whether or not the checkout sits under the temporary
+// directory; a fixture is read fresh. The more specific of the checkout root and
+// the temporary directory decides.
+func TestCacheableUnderTellsTheCheckoutFromAFixture(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		root  string
+		temps []string
+		dir   string
+		want  bool
+	}{
+		"checkout beside the temp dir":                 {"/work/repo", []string{"/tmp"}, "/work/repo/internal/a", true},
+		"fixture under the temp dir":                   {"/work/repo", []string{"/tmp"}, "/tmp/TestA/001", false},
+		"checkout under the temp dir (sweep, CI)":      {"/tmp/ws/repo", []string{"/tmp"}, "/tmp/ws/repo/internal/a", true},
+		"fixture beside a checkout under the temp dir": {"/tmp/ws/repo", []string{"/tmp"}, "/tmp/TestA/001", false},
+		"temp dir is the checkout's parent":            {"/tmp/ws/repo", []string{"/tmp/ws"}, "/tmp/ws/repo/internal/a", true},
+		"temp dir nested inside the checkout":          {"/r", []string{"/r/.tmp"}, "/r/.tmp/TestA/001", false},
+		"temp dir is the checkout root itself":         {"/work/repo", []string{"/work/repo"}, "/work/repo/internal/a", false},
+		"checkout dir with a nested temp dir":          {"/r", []string{"/r/.tmp"}, "/r/internal/a", true},
+		"temp dir spelled two ways":                    {"/work/repo", []string{"/var/f", "/private/var/f"}, "/private/var/f/TestA/001", false},
+		"no checkout root found":                       {"", []string{"/tmp"}, "/work/repo", false},
+		"a sibling that shares the root's prefix":      {"/work/repo", []string{"/tmp"}, "/work/repo2/a", false},
+	} {
+		if got := cacheableUnder(tc.root, tc.temps, tc.dir); got != tc.want {
+			t.Errorf("%s: cacheableUnder(%q, %q, %q) = %v, want %v", name, tc.root, tc.temps, tc.dir, got, tc.want)
+		}
+	}
+}
+
+// TestModuleRootIsTheNearestGoModAbove: the checkout root is the directory of the
+// nearest go.mod at or above the working directory, so a nested module is its own
+// root. The walk runs over a fresh temporary tree, and stops at the nearest go.mod
+// inside it, so it never reads the host's directories.
+func TestModuleRootIsTheNearestGoModAbove(t *testing.T) {
+	t.Parallel()
+	tree := t.TempDir()
+	outer := filepath.Join(tree, "repo")
+	inner := filepath.Join(outer, "tools")
+	deep := filepath.Join(inner, "internal", "a")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, mod := range []string{outer, inner} {
+		if err := os.WriteFile(filepath.Join(mod, "go.mod"), []byte("module x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, tc := range map[string]struct {
+		dir  string
+		want string
+	}{
+		"the module itself":          {outer, outer},
+		"a package under the module": {filepath.Join(outer, "cmd"), outer},
+		"a nested module wins":       {deep, inner},
+	} {
+		if got := moduleRootAbove(tc.dir); got != tc.want {
+			t.Errorf("%s: moduleRootAbove(%q) = %q, want %q", name, tc.dir, got, tc.want)
+		}
+	}
+}
