@@ -179,7 +179,7 @@ func recordPath(usageDir, bead, kind string) string {
 	return filepath.Join(usageDir, "beads", unsafeFileChars.ReplaceAllString(bead, "_")+"."+kind+".json")
 }
 
-// writeMu serialises Write within the process, the only writer of these files.
+// writeMu serializes Write within the process, the only writer of these files.
 var writeMu sync.Mutex
 
 // Write merges rec into its bead's record file under usageDir and adds sessionIDs to the
