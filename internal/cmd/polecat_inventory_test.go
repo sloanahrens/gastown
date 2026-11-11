@@ -39,6 +39,23 @@ type fakeSessionLister struct {
 	created  map[string]time.Time
 }
 
+// recordingSessionLister records the environment reads made through it, so a
+// test can assert which variables the inventory asks for.
+type recordingSessionLister struct {
+	fakeSessionLister
+	reads []sessionEnvRead
+}
+
+type sessionEnvRead struct {
+	session string
+	key     string
+}
+
+func (f *recordingSessionLister) GetEnvironment(session, key string) (string, error) {
+	f.reads = append(f.reads, sessionEnvRead{session: session, key: key})
+	return f.fakeSessionLister.GetEnvironment(session, key)
+}
+
 func (f fakeSessionLister) ListSessions() ([]string, error) { return f.sessions, nil }
 
 func (f fakeSessionLister) GetEnvironment(session, key string) (string, error) {
@@ -55,21 +72,19 @@ func (f fakeSessionLister) GetSessionCreatedTime(name string) (time.Time, error)
 	return time.Time{}, errors.New("no such session")
 }
 
-// TestLoadPolecatSessionSetReadsAgent is the agent half of gt-2540: the list
-// command reports the agent a polecat runs from the session environment
-// (GT_AGENT, written at spawn), resolved once per list — not per polecat from
-// the agent bead, which does not carry it.
-func TestLoadPolecatSessionSetReadsAgent(t *testing.T) {
+// TestPolecatSessionSetReadsNoAgent is gt-kztn5c: a seat's agent is not taken
+// from the live session's environment. GT_AGENT comes back empty for a sandbox
+// seat, whose session the host cannot inspect, so the intent record is the one
+// source (see polecatSeatAgent). The lister answers GT_AGENT; the set must not
+// ask for it, and still reads the session's creation time.
+func TestPolecatSessionSetReadsNoAgent(t *testing.T) {
 	t.Parallel()
 	created := time.Date(2026, 9, 19, 16, 0, 0, 0, time.UTC)
-	lister := fakeSessionLister{
-		sessions: []string{"gt-topaz", "gt-thunder"},
-		env: map[string]map[string]string{
-			"gt-topaz":   {"GT_AGENT": "flash"},
-			"gt-thunder": {}, // session predates GT_AGENT
-		},
-		created: map[string]time.Time{"gt-topaz": created},
-	}
+	lister := &recordingSessionLister{fakeSessionLister: fakeSessionLister{
+		sessions: []string{"gt-topaz"},
+		env:      map[string]map[string]string{"gt-topaz": {"GT_AGENT": "flash"}},
+		created:  map[string]time.Time{"gt-topaz": created},
+	}}
 
 	sessions, err := loadPolecatSessionSet(polecatTestRegistry(), lister)
 	if err != nil {
@@ -79,18 +94,13 @@ func TestLoadPolecatSessionSetReadsAgent(t *testing.T) {
 	if !ok {
 		t.Fatal("gastown/topaz missing from session set")
 	}
-	if entry.Agent != "flash" {
-		t.Errorf("agent = %q, want flash", entry.Agent)
-	}
 	if !entry.Created.Equal(created) {
 		t.Errorf("created = %s, want %s", entry.Created, created)
 	}
-	missing, ok := sessions.session("gastown", "thunder")
-	if !ok {
-		t.Fatal("gastown/thunder missing from session set")
-	}
-	if missing.Agent != "" {
-		t.Errorf("agent = %q, want empty for a session with no GT_AGENT", missing.Agent)
+	for _, read := range lister.reads {
+		if read.key == "GT_AGENT" {
+			t.Errorf("the inventory read GT_AGENT from session %s; the seat's agent comes from its intent record", read.session)
+		}
 	}
 }
 

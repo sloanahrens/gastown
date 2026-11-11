@@ -338,9 +338,6 @@ func TestDashSeatSessionsCountsTheSandboxRegistry(t *testing.T) {
 	if _, ok := got.session("gastown", "zombie"); ok {
 		t.Error("a seat the patrol recorded dead must not read as running")
 	}
-	if entry, _ := got.session("gastown", "ember"); entry.Agent != "" {
-		t.Errorf("a registry entry carries agent %q; the seat's agent comes from its agent bead", entry.Agent)
-	}
 }
 
 // A sandbox seat is never shown stalled on the host tmux's silence: a live one

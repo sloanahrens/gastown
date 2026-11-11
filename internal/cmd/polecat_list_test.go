@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // fakePolecatMRLister is the one bulk merge-request source, faked so the join
@@ -343,6 +345,52 @@ func TestPolecatListJSONAddsAgentAndMRFields(t *testing.T) {
 			t.Errorf("json %s should omit %s for a polecat with none", encoded, unwanted)
 		}
 	}
+}
+
+// TestPolecatListReportsSeatAgentFromIntentRecord is gt-kztn5c: `gt polecat
+// list --json` names the agent the seat's intent record says it was slung on,
+// never the live session's GT_AGENT. A sandbox seat's session environment
+// cannot be read from the host (8 of 13 working seats showed no agent while
+// their records named one), so the lister here answers no GT_AGENT at all and
+// the record names sbx-haiku.
+func TestPolecatListReportsSeatAgentFromIntentRecord(t *testing.T) {
+	t.Parallel()
+	rigPath := routeRigTown(t, beads.BackendTracker)
+	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", "ember"), 0o755); err != nil {
+		t.Fatalf("lay out the polecat: %v", err)
+	}
+	townRoot := filepath.Dir(rigPath)
+	recordDir := filepath.Join(townRoot, ".runtime", "agents", "gastown")
+	if err := os.MkdirAll(recordDir, 0o755); err != nil {
+		t.Fatalf("lay out the intent record directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(recordDir, "polecat.ember.json"), []byte(`{"agent":"sbx-haiku"}`), 0o644); err != nil {
+		t.Fatalf("write the intent record: %v", err)
+	}
+
+	bd := beads.New(rigPath, beads.WithDirRunner((&seatCallLog{}).run))
+	lister := &recordingSessionLister{fakeSessionLister: fakeSessionLister{sessions: []string{"gt-ember"}}}
+	sessions := newPolecatSessionSetFromNames(polecatTestRegistry(), lister, []string{"gt-ember"})
+	seats := buildRigSeatsOn(&bytes.Buffer{}, bd, &rig.Rig{Name: "gastown", Path: rigPath}, sessions, time.Minute, time.Now(), "")
+
+	payload, err := json.Marshal(resolvePolecatSeats(seats))
+	if err != nil {
+		t.Fatalf("marshal the list: %v", err)
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(payload, &rows); err != nil {
+		t.Fatalf("unmarshal the list: %v", err)
+	}
+	for _, row := range rows {
+		if row["name"] != "ember" {
+			continue
+		}
+		if got := row["agent"]; got != "sbx-haiku" {
+			t.Fatalf("gt polecat list --json reports agent %v for ember, want sbx-haiku from its intent record: %s", got, payload)
+		}
+		return
+	}
+	t.Fatalf("gt polecat list --json reported no ember row: %s", payload)
 }
 
 // TestPolecatStatusAgreesWithListOnStaleAgentState pins gt-aj7: an agent bead

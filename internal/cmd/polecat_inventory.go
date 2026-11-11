@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -20,13 +21,13 @@ import (
 const polecatSessionKeySep = "\x00"
 
 // polecatSessionSet indexes live polecat sessions by rig and polecat name.
-// Agent and Created are only populated when the set was built with a session
-// lister (see newPolecatSessionSetFromNames).
+// Created is only populated when the set was built with a session lister (see
+// newPolecatSessionSetFromNames); a seat's agent comes from its intent record,
+// never from the session.
 type polecatSessionSet map[string]polecatSessionEntry
 
 type polecatSessionEntry struct {
 	Name    string
-	Agent   string
 	Created time.Time
 }
 
@@ -61,11 +62,16 @@ type polecatInventoryItem struct {
 }
 
 // polecatInventoryEnv carries the per-rig facts the list path has and the
-// capacity path does not: one rig-wide merge-request index, and the agent-bead
-// facts the spawn grace is measured against. The zero value means "no MR
-// source, no grace" and reproduces the pre-gt-2540 states.
+// capacity path does not: one rig-wide merge-request index, the agent-bead
+// facts the spawn grace is measured against, and the seat's agent. The zero
+// value means "no MR source, no grace, no agent" and reproduces the
+// pre-gt-2540 states.
 type polecatInventoryEnv struct {
-	MRs   polecatMRIndex
+	MRs polecatMRIndex
+	// Agent is the agent the seat's intent record names — the one source for a
+	// seat's facts — read by polecatListInventoryEnv. The capacity path passes
+	// the zero value: it reports counts, not rows, and names no agent.
+	Agent string
 	Spawn polecatSpawnFacts
 	// WorktreePath is the polecat's git worktree, probed live so the reuse
 	// verdict re-derives from measured git state instead of the recorded
@@ -196,10 +202,10 @@ func newPolecatSessionSet(reg *session.PrefixRegistry, sessionNames []string) po
 }
 
 // newPolecatSessionSetFromNames indexes sessions by rig/polecat and, when a
-// lister is supplied, records the agent each session was spawned with.
-// GT_AGENT is written into the session environment at spawn
-// (SessionStartOptions.Agent / AgentEnv fallback) — the same read sling_pool
-// already pays for. Callers that only need liveness (capacity) pass a nil
+// lister is supplied, records when each session was created. A seat's agent is
+// not read from the session: the intent record is its one source (see
+// polecatSeatAgent), so a sandbox seat whose environment the host cannot read
+// still names one. Callers that only need liveness (capacity) pass a nil
 // lister and skip the per-session tmux reads. reg supplies the rig prefixes
 // session names are parsed with.
 func newPolecatSessionSetFromNames(reg *session.PrefixRegistry, t sessionLister, sessionNames []string) polecatSessionSet {
@@ -211,9 +217,6 @@ func newPolecatSessionSetFromNames(reg *session.PrefixRegistry, t sessionLister,
 		}
 		entry := polecatSessionEntry{Name: sessionName}
 		if t != nil {
-			if agent, err := t.GetEnvironment(sessionName, "GT_AGENT"); err == nil {
-				entry.Agent = strings.TrimSpace(agent)
-			}
 			if created, err := t.GetSessionCreatedTime(sessionName); err == nil {
 				entry.Created = created
 			}
@@ -224,7 +227,7 @@ func newPolecatSessionSetFromNames(reg *session.PrefixRegistry, t sessionLister,
 }
 
 // loadPolecatSessionSet lists live sessions once and enriches every polecat
-// session with its agent and creation time.
+// session with its creation time.
 func loadPolecatSessionSet(reg *session.PrefixRegistry, t sessionLister) (polecatSessionSet, error) {
 	names, err := t.ListSessions()
 	if err != nil {
@@ -383,7 +386,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	item := polecatInventoryItem{
 		Rig:            rigName,
 		Name:           polecatName,
-		Agent:          entry.Agent,
+		Agent:          env.Agent,
 		State:          polecat.StateIdle,
 		SessionRunning: running,
 		SessionName:    entry.Name,
@@ -574,6 +577,9 @@ func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polec
 		// A sandbox seat's host worktree is a stale leftover: its git state
 		// comes from the gateway (gt-a0x2w).
 		SandboxSeat: sandboxSeatProbeFor(filepath.Dir(rigPath), nil),
+		// A rig lives directly under the town root, which is where the seat's
+		// intent record lives.
+		Agent: polecatSeatAgent(filepath.Dir(rigPath), rigName, polecatName),
 		// Status consumers poll this command, so it must not pay a network
 		// round trip per seat: the probe reads branch preservation from the
 		// rig's local refs instead of running an ls-remote per seat (gt-8q0s).
@@ -595,6 +601,20 @@ func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polec
 		// applyRigOccupancyToCapacitySnapshot, which joins them the same way).
 		Parked: parkedReason(filepath.Dir(rigPath), rigName, polecatName),
 	}
+}
+
+// polecatSeatAgent is the agent a seat runs, from its intent record — the one
+// source for a seat's facts, written when the sling starts the session
+// (intent.MarkSlung). The live session's GT_AGENT is deliberately not read: it
+// comes back empty for a sandbox seat, whose session the host cannot inspect,
+// while the record still names the agent.
+//
+// An unreadable record reads as one naming no agent: the list has no log to
+// warn through, and the row (and the dashboard's dash) already displays an
+// unknown agent that way.
+func polecatSeatAgent(townRoot, rigName, polecatName string) string {
+	rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
+	return strings.TrimSpace(rec.Agent)
 }
 
 // parkedReason is polecat.ParkedReuseBlocker without the boolean: "" means the

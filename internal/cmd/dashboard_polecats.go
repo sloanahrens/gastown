@@ -486,8 +486,9 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 		return nil, err
 	}
 	reg := townRegistry()
-	// The lister reads each live session's recorded GT_AGENT, which the pane
-	// names as the polecat's model.
+	// The lister proves which seats have a live session. The agent a row names
+	// is read from the seat's intent record (see polecatSeatAgent), not from
+	// the session environment.
 	host := newPolecatSessionSetFromNames(reg, lister, sessionNames)
 	sessions := dashSeatSessions(host, reg, session.ListSandboxSessions(townRoot), sandboxSeatDeathsFor(townRoot))
 	sandboxAgents, sandboxErr := dashSandboxSeatAgents(townRoot)
@@ -554,13 +555,11 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 					cache.put(id, key, item)
 				}
 			}
-			// The agent is the live session's own record, read on every poll
-			// and never taken from the cache, so a session left over from
-			// before a model switch keeps showing its own model. With no
-			// session (the seat ran gt done and waits for its bead to land)
-			// the agent the sling recorded on the seat's agent bead stands in;
-			// that bead is already in hand, so it costs no read.
-			item.Agent = dashSeatAgent(host, rig, name, agentBead)
+			// The agent is read from the seat's intent record on every poll and
+			// never taken from the cache, so a model switch shows as soon as
+			// the new sling records it. The read fails soft to an empty agent,
+			// which the row already renders as a dash.
+			item.Agent = polecatSeatAgent(townRoot, rig, name)
 			sandbox := dashSandboxStatus(sandboxAgents, sandboxErr, item.Agent, func() bool { return dashSandboxSampled(townRoot, rig, name) })
 			var keptAt *time.Time
 			if at, ok := kept[id]; ok {
@@ -593,19 +592,6 @@ func dashKeptSeats(townRoot string) (map[string]time.Time, error) {
 	return kept, nil
 }
 
-// dashSeatAgent is the agent a seat's row names: its live session's own record
-// when a session exists, else the agent the sling stored on the seat's agent
-// bead, else "" (an older agent bead carries no agent line).
-func dashSeatAgent(sessions polecatSessionSet, rig, name string, agentBead *beads.Issue) string {
-	if entry, ok := sessions.session(rig, name); ok {
-		return entry.Agent
-	}
-	if fields := parsePolecatAgentFields(agentBead); fields != nil {
-		return fields.Agent
-	}
-	return ""
-}
-
 // dashSeatSessions is the live-session set the polecat table classifies seats
 // with: the host tmux's sessions plus the sandbox registry's, minus the seats
 // the patrol has recorded dead. gt polecat list counts the registry's
@@ -614,9 +600,9 @@ func dashSeatAgent(sessions polecatSessionSet, rig, name string, agentBead *bead
 // sessionless (gt-43k7c).
 //
 // The registry's entries carry liveness alone — no agent, no creation time — so
-// a poll costs no exec into a sandbox. The seat's agent is read from host
-// sessions only (see dashSeatAgent), so a sandboxed seat keeps the agent its
-// sling recorded.
+// a poll costs no exec into a sandbox. The seat's agent comes from its intent
+// record (see polecatSeatAgent), so a sandboxed seat names the one its sling
+// recorded.
 func dashSeatSessions(host polecatSessionSet, reg *session.PrefixRegistry, sandboxNames []string, dead sandboxSeatDeadFunc) polecatSessionSet {
 	sessions := make(polecatSessionSet, len(host)+len(sandboxNames))
 	for key, entry := range host {
