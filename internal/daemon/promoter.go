@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"os"
+
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/promote"
@@ -21,9 +23,16 @@ func PromoteDivergedAlertKey(rigName string) string {
 // (gt-fn9e6.38).
 //
 // It returns nil for a rig that does not promote — no promote_target, or a
-// target with no deploy key — so a caller has nothing to wire. escalate and
-// logf may be nil.
+// target with no deploy key — so a caller has nothing to wire. The key path
+// goes through promote.ResolveKeyFile, so a key mounted under XDG_CONFIG_HOME
+// is used when the configured path is absent. escalate and logf may be nil.
 func NewRigPromoter(townRoot, rigName string, fj *config.ForgejoConfig, repo promote.Repo, escalate func(message string), logf func(format string, args ...any)) *promote.Promoter {
+	return newRigPromoter(townRoot, rigName, fj, repo, escalate, logf, os.Getenv, statPath)
+}
+
+// newRigPromoter is NewRigPromoter with the environment and file-existence
+// reads injected, so a test answers XDG_CONFIG_HOME and stat from fakes.
+func newRigPromoter(townRoot, rigName string, fj *config.ForgejoConfig, repo promote.Repo, escalate func(message string), logf func(format string, args ...any), getenv func(string) string, stat func(string) error) *promote.Promoter {
 	if fj == nil || fj.PromoteTarget == "" {
 		return nil
 	}
@@ -33,15 +42,26 @@ func NewRigPromoter(townRoot, rigName string, fj *config.ForgejoConfig, repo pro
 		}
 		return nil
 	}
+	keyFile := promote.ResolveKeyFile(fj.PromoteKeyFile, getenv, stat, func(format string, args ...any) {
+		if logf != nil {
+			logf(format, args...)
+		}
+	})
 	return &promote.Promoter{
 		Rig:      rigName,
 		Target:   fj.PromoteTarget,
-		KeyFile:  fj.PromoteKeyFile,
+		KeyFile:  keyFile,
 		Repo:     repo,
 		LockPath: promote.LockPath(townRoot, rigName),
 		Escalate: escalate,
 		Logf:     logf,
 	}
+}
+
+// statPath is the file-existence seam promote.ResolveKeyFile reads through.
+func statPath(path string) error {
+	_, err := os.Stat(path)
+	return err
 }
 
 // RedMainStateStore is the file holding a rig's red-main state
