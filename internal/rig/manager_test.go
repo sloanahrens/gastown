@@ -1914,6 +1914,15 @@ func TestAddRig_AdoptsTrackedBeadsFilesIntoRigBeads(t *testing.T) {
 			t.Errorf("rig has no adopted %s: %v", name, err)
 		}
 	}
+	// The adopted config.yaml is the repo's "prefix: tk" bytes until the rig
+	// setup rewrites it: the issue-prefix step is the rewrite the rig keeps.
+	config, err := os.ReadFile(filepath.Join(rigBeads, "config.yaml"))
+	if err != nil {
+		t.Fatalf("reading config.yaml: %v", err)
+	}
+	if !strings.Contains(string(config), "issue-prefix: tk\n") {
+		t.Errorf("config.yaml after the add = %q, want the issue-prefix step's rewrite", config)
+	}
 	for _, dir := range []string{rigBeads, filepath.Join(root, "tracked", "mayor", "rig", ".beads")} {
 		if _, err := os.Stat(filepath.Join(dir, "redirect")); !os.IsNotExist(err) {
 			t.Errorf("%s/redirect = %v, want no redirect", dir, err)
