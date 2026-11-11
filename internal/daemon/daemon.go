@@ -1732,6 +1732,10 @@ func (d *Daemon) Run() (err error) {
 		return err
 	}
 
+	// A rig whose namepool theme file is missing refuses slings: list it now,
+	// rather than leave the operator to find the first refused sling (gt-pno1e6).
+	d.warnUnresolvedThemes()
+
 	d.warnPressureScale(d.loadOperationalConfig().GetDaemonConfig().PressureCPUThresholdV())
 
 	// Repair metadata.json for all rigs on startup.

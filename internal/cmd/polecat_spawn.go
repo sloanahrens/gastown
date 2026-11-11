@@ -763,6 +763,12 @@ type polecatAllocator interface {
 func allocatePolecatForSling(polecatMgr polecatAllocator, rigName, name string, addOpts polecat.AddOptions) (string, error) {
 	if name == "" {
 		allocated, _, err := polecatMgr.AllocateAndAdd(addOpts)
+		if errors.Is(err, polecat.ErrThemeUnresolved) {
+			// The rig's theme file is missing: that is the rig's state, not the
+			// bead's, and no name is drawn in its place. The refusal marker makes
+			// an automatic dispatcher defer the bead rather than fail it.
+			return "", fmt.Errorf("%s %w", dispatch.SlingRefusalMarker, err)
+		}
 		return allocated, err
 	}
 	if _, err := polecatMgr.AddNamedWithOptions(name, addOpts); err != nil {

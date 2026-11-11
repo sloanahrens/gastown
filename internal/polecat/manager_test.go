@@ -888,6 +888,35 @@ func TestReconcilePoolWith_OrphanDoesNotBlockAllocation(t *testing.T) {
 	}
 }
 
+// TestReconcilePool_ReapsOrphanUnderUnresolvedTheme: a rig whose theme file is
+// missing still reaps the orphan session of a name a seat lists. Reaping reads
+// the seat records, not the theme, so an unresolved theme does not keep a dead
+// polecat's session alive (gt-pno1e6).
+func TestReconcilePool_ReapsOrphanUnderUnresolvedTheme(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "alpha")
+	writeNamepoolFile(t, filepath.Join(rigPath, "settings", "config.json"), `{"namepool":{"style":"gone"}}`)
+	tm := newFakeProbe()
+	m := newTestManager(&rig.Rig{Name: "alpha", Path: rigPath}, nil, tm, newNoDatabaseDB())
+	m.namePool.SetSeatNames(map[string][]string{"opus": {"nux"}})
+	orphan := m.sessionName("nux")
+	if err := tm.NewSession(orphan, t.TempDir()); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+
+	m.ReconcilePool()
+
+	alive, err := tm.HasSession(orphan)
+	if err != nil {
+		t.Fatalf("HasSession(%s): %v", orphan, err)
+	}
+	if alive {
+		t.Errorf("orphan session %s survived reconcile under an unresolved theme", orphan)
+	}
+}
+
 func TestIsDoltConfigError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

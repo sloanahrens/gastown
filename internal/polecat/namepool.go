@@ -3,6 +3,7 @@ package polecat
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -175,32 +176,56 @@ func (p *NamePool) SetTownRoot(townRoot string) {
 	p.townRoot = townRoot
 }
 
-// getNames returns the list of names to use for the pool.
-// Reserved infrastructure agent names are filtered out.
-func (p *NamePool) getNames() []string {
-	var names []string
+// ErrThemeUnresolved is what a name allocation returns when the pool's style is
+// neither a built-in theme nor a custom theme file that resolves. The pool never
+// substitutes the built-in names in its place: those names are shared across
+// rigs, so a rig with a missing theme file gets no name until the file is back.
+var ErrThemeUnresolved = errors.New("namepool theme unresolved")
 
-	// Custom names take precedence
+// themeNames returns the names the pool's theme draws from, reserved
+// infrastructure agent names filtered out. Custom names take precedence over the
+// theme. A style that is neither built-in nor a resolving theme file is an error
+// naming the rig, the style and the file it looked for (ErrThemeUnresolved).
+func (p *NamePool) themeNames() ([]string, error) {
 	if len(p.CustomNames) > 0 {
-		names = p.CustomNames
-	} else if themeNames, ok := BuiltinThemes[p.Theme]; ok {
-		// Look up built-in theme
-		names = themeNames
-	} else if p.townRoot != "" {
-		// Try resolving as a custom theme file
-		if resolved, err := ResolveThemeNames(p.townRoot, p.Theme); err == nil {
-			names = resolved
-		} else {
-			fmt.Fprintf(os.Stderr, "Warning: namepool theme %q not found (not built-in, no custom theme file); using default\n", p.Theme)
-			names = BuiltinThemes[DefaultTheme]
-		}
-	} else {
-		// Fall back to default theme
-		names = BuiltinThemes[DefaultTheme]
+		return filterReservedNames(p.CustomNames), nil
 	}
+	if names, ok := BuiltinThemes[p.Theme]; ok {
+		return filterReservedNames(names), nil
+	}
+	if p.townRoot == "" {
+		return nil, fmt.Errorf("%w: rig %s: namepool style %q is not built-in and no town root is set to find its theme file",
+			ErrThemeUnresolved, p.RigName, p.Theme)
+	}
+	resolved, err := ResolveThemeNames(p.townRoot, p.Theme)
+	if err != nil {
+		return nil, fmt.Errorf("%w: rig %s: namepool style %q is not built-in and its theme file %s does not resolve: %w",
+			ErrThemeUnresolved, p.RigName, p.Theme, themeFilePath(p.townRoot, p.Theme), err)
+	}
+	return filterReservedNames(resolved), nil
+}
 
-	// Filter out reserved infrastructure agent names
-	return filterReservedNames(names)
+// themeFilePath is the custom theme file a style resolves to under townRoot.
+func themeFilePath(townRoot, theme string) string {
+	return filepath.Join(townRoot, "settings", "themes", theme+".txt")
+}
+
+// UnresolvedTheme reports the namepool style a rig draws its polecat names from
+// when that style does not resolve, with the error the pool refuses with. It
+// returns "" and nil for a rig on a built-in theme, on an explicit name list, or
+// on a custom theme file that resolves. The style is read through EffectiveTheme
+// and the error is the pool's own (themeNames), so the startup check and a
+// refused sling say the same thing.
+func UnresolvedTheme(townRoot, rigPath, rigName string) (string, error) {
+	theme := EffectiveTheme(rigPath, rigName)
+	if theme == "" || IsBuiltinTheme(theme) {
+		return "", nil
+	}
+	p := &NamePool{RigName: rigName, Theme: theme, townRoot: townRoot}
+	if _, err := p.themeNames(); err != nil {
+		return theme, err
+	}
+	return "", nil
 }
 
 // filterReservedNames removes reserved infrastructure agent names from a name list.
@@ -317,7 +342,13 @@ func (p *NamePool) AllocateFor(model string) (string, error) {
 		return name, nil
 	}
 
-	names := p.getNames()
+	// Only a draw from the theme needs it resolved: a seat's own list above is
+	// explicit configuration, and an unresolved theme refuses here rather than
+	// handing out an overflow number or a built-in name.
+	names, err := p.themeNames()
+	if err != nil {
+		return "", err
+	}
 
 	// Try to find first available name from the theme
 	for i := 0; i < len(names) && i < p.MaxSize; i++ {
@@ -435,19 +466,56 @@ func (p *NamePool) Release(name string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Check if it's a themed name
-	if p.isThemedName(name) {
-		delete(p.InUse, name)
+	// InUse only ever holds names the pool drew from a theme or a seat list, and
+	// overflow names are never marked, so this clears exactly the released name.
+	// It does not check the theme: a theme that stopped resolving must not leave
+	// the name marked in use (gt-pno1e6).
+	delete(p.InUse, name)
+}
+
+// SessionProbeNames returns every name whose tmux session the pool may need to
+// reap: the names each seat lists and the names bound to a model, plus the theme
+// names when the theme resolves. A seat or binding record is read whether or not
+// the theme resolves, so an unresolved theme does not hide an orphan session
+// (gt-pno1e6). The result is sorted and holds each name once.
+func (p *NamePool) SessionProbeNames() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	seen := make(map[string]bool)
+	var names []string
+	add := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
 	}
-	// Overflow names are not reusable, so we don't track them
+	for _, seatNames := range p.SeatNames {
+		for _, name := range seatNames {
+			add(name)
+		}
+	}
+	for name := range p.Bindings {
+		add(name)
+	}
+	if theme, err := p.themeNames(); err == nil {
+		for _, name := range theme {
+			add(name)
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // isThemedName checks if a name is in the theme pool or listed by a seat.
 func (p *NamePool) isThemedName(name string) bool {
-	names := p.getNames()
-	for _, n := range names {
-		if n == name {
-			return true
+	// An unresolved theme has no names to match. Allocate refuses it, so a
+	// name is never handed out from it; the seat lists still match below.
+	if names, err := p.themeNames(); err == nil {
+		for _, n := range names {
+			if n == name {
+				return true
+			}
 		}
 	}
 	for _, seatNames := range p.SeatNames {
