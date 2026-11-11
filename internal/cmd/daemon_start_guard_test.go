@@ -83,15 +83,15 @@ func freshHeartbeatOf(owner daemon.Owner) daemon.State {
 	return daemon.State{Running: true, Owner: &owner, LastHeartbeat: startGuardNow.Add(-time.Minute)}
 }
 
-// writeCurrentSupervisorFile writes the plist this binary would render for
-// town, so a start finds the file current and rewrites nothing.
+// writeCurrentSupervisorFile writes the systemd unit this binary would render
+// for town, so a start finds the file current and rewrites nothing.
 func writeCurrentSupervisorFile(t *testing.T, town string) string {
 	t.Helper()
-	body, ok, err := templates.SupervisorFileContent("launchd", town, daemon.ShutdownBudget)
+	body, ok, err := templates.SupervisorFileContent("systemd", town, daemon.ShutdownBudget)
 	if err != nil || !ok {
-		t.Fatalf("SupervisorFileContent(launchd, %q) = (ok=%v, err=%v)", town, ok, err)
+		t.Fatalf("SupervisorFileContent(systemd, %q) = (ok=%v, err=%v)", town, ok, err)
 	}
-	p := filepath.Join(t.TempDir(), "com.gastown.daemon.plist")
+	p := filepath.Join(t.TempDir(), "gastown-daemon.service")
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -108,19 +108,18 @@ type startPath struct {
 }
 
 // startPaths are the CLI start paths R1 lists (gt-qpeei.28): gt daemon start
-// under each kind of supervisor and by hand, gt daemon restart over a running
-// daemon, the job reload gt up makes (gt up's ensureDaemon calls startDaemon
-// for a stopped daemon, which is the first three rows, and
-// reconcileSupervisorJob for a running one), and enable-supervisor.
+// under a supervisor and by hand, gt daemon restart over a running daemon (gt
+// up's ensureDaemon calls startDaemon for a stopped daemon, which covers the
+// first three rows), and enable-supervisor.
 func startPaths() []startPath {
 	supervised := func(c *daemonControl, calls *supervisorCalls) func() bool {
 		return func() bool { return len(calls.argv) > 0 || calls.spawned }
 	}
 	return []startPath{
 		{
-			name: "gt daemon start under launchd",
+			name: "gt daemon start under systemd",
 			build: func(t *testing.T, town string, probe daemon.OwnerProbe) (func() error, func() bool) {
-				c, calls := stubSupervisor(t, "darwin", writeSupervisorFile(t, "com.gastown.daemon.plist", town), loadedJob(), nil)
+				c, calls := stubSupervisor(t, "linux", writeSupervisorFile(t, "gastown-daemon.service", town), loadedJob(), nil)
 				c.guard = guardProbe(probe)
 				return func() error { _, _, err := c.startDaemon(town); return err }, supervised(c, calls)
 			},
@@ -145,23 +144,15 @@ func startPaths() []startPath {
 		{
 			name: "gt daemon restart over a running daemon",
 			build: func(t *testing.T, town string, probe daemon.OwnerProbe) (func() error, func() bool) {
-				c, calls := stubRestart(t, "darwin", writeCurrentSupervisorFile(t, town), 1111, 4242)
+				c, calls := stubRestart(t, "linux", writeCurrentSupervisorFile(t, town), 1111, 4242)
 				c.guard = guardProbe(probe)
 				return func() error { _, _, err := c.restartDaemon(town); return err }, supervised(c, calls)
 			},
 		},
 		{
-			name: "gt up reloading a stale job",
-			build: func(t *testing.T, town string, probe daemon.OwnerProbe) (func() error, func() bool) {
-				c, calls := stubRestart(t, "darwin", writeStaleSupervisorFile(t, town), 1111, 4242)
-				c.guard = guardProbe(probe)
-				return func() error { _, err := c.reconcileSupervisorJob(town, 1111); return err }, supervised(c, calls)
-			},
-		},
-		{
 			name: "gt daemon enable-supervisor",
 			build: func(t *testing.T, town string, probe daemon.OwnerProbe) (func() error, func() bool) {
-				c, _ := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "com.gastown.daemon.plist"), templates.SupervisorState{}, nil)
+				c, _ := stubSupervisor(t, "linux", filepath.Join(t.TempDir(), "gastown-daemon.service"), templates.SupervisorState{}, nil)
 				c.guard = guardProbe(probe)
 				provisioned := false
 				provision := func(string, time.Duration) (string, error) { provisioned = true; return "", nil }
@@ -259,7 +250,7 @@ func TestStartDaemonSupervisorErrorNeverFallsBackToASpawn(t *testing.T) {
 		{
 			name: "the supervisor command fails",
 			build: func(t *testing.T, town string) (*daemonControl, *supervisorCalls) {
-				return stubSupervisor(t, "darwin", writeSupervisorFile(t, "com.gastown.daemon.plist", town), loadedJob(), errors.New("launchctl: boom"))
+				return stubSupervisor(t, "linux", writeSupervisorFile(t, "gastown-daemon.service", town), loadedJob(), errors.New("systemctl: boom"))
 			},
 		},
 		{
@@ -320,20 +311,15 @@ func TestRestartAndReloadSupervisorErrorNeverFallBackToASpawn(t *testing.T) {
 			file: writeCurrentSupervisorFile,
 			run:  func(c *daemonControl, town string) error { _, _, err := c.restartDaemon(town); return err },
 		},
-		{
-			name: "gt up reloading a stale job",
-			file: writeStaleSupervisorFile,
-			run:  func(c *daemonControl, town string) error { _, err := c.reconcileSupervisorJob(town, 1111); return err },
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			town := startGuardTown(t)
-			c, calls := stubRestart(t, "darwin", tc.file(t, town), 1111)
+			c, calls := stubRestart(t, "linux", tc.file(t, town), 1111)
 			c.run = func(a []string) error {
 				calls.argv = append(calls.argv, a)
-				return errors.New("launchctl: boom")
+				return errors.New("systemctl: boom")
 			}
 			c.guard = guardProbe(neverProbed(t))
 
@@ -359,12 +345,12 @@ func TestStartGuardNamesTheOwnerTheStartedDaemonWillBe(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "launchd",
+			name: "systemd",
 			build: func(t *testing.T, town string) *daemonControl {
-				c, _ := stubSupervisor(t, "darwin", writeSupervisorFile(t, "com.gastown.daemon.plist", town), loadedJob(), nil)
+				c, _ := stubSupervisor(t, "linux", writeSupervisorFile(t, "gastown-daemon.service", town), loadedJob(), nil)
 				return c
 			},
-			want: startGuardLaunchd,
+			want: daemon.Owner{Kind: config.SupervisorSystemd},
 		},
 		{
 			name: "a container naming its own container",
@@ -504,10 +490,10 @@ func TestStartDaemonWithoutTakeoverCarriesNoEnvironment(t *testing.T) {
 	}
 }
 
-// --takeover is refused under launchd and systemd, whatever the owner: the job
-// cannot carry the variable into the daemon and loading it beside a recorded
-// owner is what a takeover must not do. The message says how to boot the job
-// out, and nothing runs.
+// --takeover is refused under systemd, whatever the owner: the unit cannot
+// carry the variable into the daemon and loading it beside a recorded owner is
+// what a takeover must not do. The message says how to stop the job, and
+// nothing runs.
 func TestStartDaemonTakeoverRefusedUnderAFileSupervisor(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -516,7 +502,6 @@ func TestStartDaemonTakeoverRefusedUnderAFileSupervisor(t *testing.T) {
 		file string
 		want string
 	}{
-		{"launchd", "darwin", "com.gastown.daemon.plist", "launchctl bootout gui/"},
 		{"systemd", "linux", "gastown-daemon.service", "systemctl --user stop"},
 	}
 	for _, tc := range cases {

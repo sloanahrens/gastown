@@ -43,8 +43,8 @@ var daemonStartCmd = &cobra.Command{
 The daemon will run until stopped with 'gt daemon stop'.
 
 Exit codes of 'gt daemon run': 0 after 'gt daemon stop' or 'gt down'; 75 after
-an upgrade restart or after any signal gt did not send, so a launchd job with
-KeepAlive SuccessfulExit=false relaunches it.`,
+an upgrade restart or after any signal gt did not send, so a supervisor that
+restarts on an unclean exit relaunches it.`,
 	RunE: runDaemonStart,
 }
 
@@ -55,10 +55,10 @@ var daemonStopCmd = &cobra.Command{
 
 The daemon must be running or this command returns an error.
 
-When a supervisor (launchd / systemd) is provisioned for this town, the job is
-stopped through it rather than by signaling the process, so the daemon does not
-come back; 'gt daemon start' loads the job again. Without one, the daemon
-process is signaled and waited for.
+When a systemd supervisor is provisioned for this town, the unit is stopped
+through it rather than by signaling the process, so the daemon does not come
+back; 'gt daemon start' loads the unit again. Without one, the daemon process
+is signaled and waited for.
 
 Examples:
   gt daemon stop`,
@@ -75,11 +75,11 @@ so it keeps executing the program it was started from — including the script
 plugins it runs in-process — until it is restarted. A restart that finds no
 daemon running starts one.
 
-When a supervisor (launchd / systemd) is provisioned for this town, the job is
-restarted through it (launchctl kickstart -k), which reloads the program the
-job points at. Do not use 'gt daemon stop' followed by 'gt daemon start' for
-this: stop unloads the job, so the daemon is unsupervised until the start
-lands and stays down if that start fails.
+When a systemd supervisor is provisioned for this town, the unit is restarted
+through it (systemctl --user restart), which reloads the program the unit
+points at. Do not use 'gt daemon stop' followed by 'gt daemon start' for this:
+stop unloads the unit, so the daemon is unsupervised until the start lands and
+stays down if that start fails.
 
 Examples:
   gt daemon restart`,
@@ -126,8 +126,8 @@ var daemonRunCmd = &cobra.Command{
 	Short: "Run daemon in foreground (internal)",
 	Long: `Run the Gas Town daemon in the foreground.
 
-This is called internally by the daemon start process and supervisor
-services (launchd/systemd). Use 'gt daemon start' to start the daemon
+This is called internally by the daemon start process, the container
+entrypoint and the systemd unit. Use 'gt daemon start' to start the daemon
 normally in the background.`,
 	Hidden: true,
 	RunE:   runDaemonRun,
@@ -135,15 +135,15 @@ normally in the background.`,
 
 var daemonEnableSupervisorCmd = &cobra.Command{
 	Use:   "enable-supervisor",
-	Short: "Configure launchd/systemd for daemon auto-restart",
+	Short: "Configure systemd for daemon auto-restart",
 	Long: `Configure external supervision for the Gas Town daemon.
 
-This command creates and enables a supervisor service (launchd on macOS,
-systemd on Linux) that will automatically restart the daemon if it crashes
-or terminates. The daemon will also start automatically on login/boot.
+This command creates and enables a systemd user unit (Linux only) that will
+automatically restart the daemon if it crashes or terminates. The daemon will
+also start automatically on login/boot.
 
 Examples:
-  gt daemon enable-supervisor    # Configure launchd/systemd`,
+  gt daemon enable-supervisor    # Configure systemd`,
 	RunE: runDaemonEnableSupervisor,
 }
 
@@ -322,13 +322,13 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 	// it is not a license to signal a host PID.
 	cfg, containerTown, settingsErr := c.townDaemonKind(townRoot)
 
-	// A signal alone does not stop a supervised daemon: the loaded KeepAlive
-	// job respawns the process it manages, and one it does not manage takes
-	// the lock the moment the signal lands. Stop the job through the
-	// supervisor so the job is left unloaded, then mop up whatever still
-	// holds the lock (gt-sq9e).
+	// A signal alone does not stop a supervised daemon: the running unit
+	// respawns the process it manages, and one it does not manage takes the
+	// lock the moment the signal lands. Stop the job through the supervisor so
+	// the job is left stopped, then mop up whatever still holds the lock
+	// (gt-sq9e).
 	//
-	// A probe or bootout that fails leaves the job's state unestablished, and
+	// A probe or stop that fails leaves the job's state unestablished, and
 	// "a signal was sent" is not "the daemon is stopped": that case is carried
 	// out of here as an error, after the mop-up has run, so the operator gets
 	// the uncertainty and the mechanism that was used instead (gt-ojbb).
@@ -368,8 +368,8 @@ func (c *daemonControl) stopDaemon(w io.Writer, townRoot string) error {
 	if stillRunning {
 		// A container town's daemon runs in another namespace, so the lock's
 		// PID is not a host process to signal: the stop is its supervisor's
-		// argv or an error (containerStopError), never the mop-up the launchd
-		// and systemd kinds may fall back on (gt-qpeei.10).
+		// argv or an error (containerStopError), never the mop-up the systemd
+		// kind may fall back on (gt-qpeei.10).
 		if containerTown {
 			if absentContainer != "" {
 				return fmt.Errorf("daemon.lock holds PID %d, but docker reports no container %s: the daemon is not running there, so the lock is stale and its PID was not signaled", pid, absentContainer)
@@ -540,7 +540,7 @@ func (c *daemonControl) containerDaemonStatus(w io.Writer, townRoot string, cfg 
 
 	read := c.readState
 	if read == nil {
-		read = readCutoverState
+		read = readDaemonState
 	}
 	state, err := read(townRoot)
 	if err != nil {
@@ -664,7 +664,18 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
-	c := realDaemonControl()
+	return enableSupervisorOn(realDaemonControl(), townRoot)
+}
+
+// enableSupervisorOn provisions this host's supervisor for townRoot. A host
+// with no supervisor kind refuses before anything is written: gt configures
+// systemd on Linux, and a macOS town runs its daemon in the container
+// (gt-a2uug4.15 removed the launchd commands), so a plist there would be a
+// job no gt command could start, stop or read.
+func enableSupervisorOn(c *daemonControl, townRoot string) error {
+	if _, kind := c.hostSupervisorFile(); kind == "" {
+		return fmt.Errorf("this host has no supervisor gt can configure: got %q, want a host with systemd (Linux); a macOS town runs its daemon in the container", c.goos)
+	}
 	return enableSupervisor(townRoot, templates.ProvisionSupervisor, func(townRoot string) error {
 		return c.guardStart(townRoot, c.hostSupervisorJob(), false)
 	})
@@ -678,8 +689,8 @@ func runDaemonEnableSupervisor(cmd *cobra.Command, args []string) error {
 // provision, so a town another owner holds is refused before the file is
 // written.
 func enableSupervisor(townRoot string, provision func(townRoot string, shutdownBudget time.Duration) (string, error), guard func(townRoot string) error) error {
-	// Refuse while a manual daemon holds the lock. RunAtLoad + KeepAlive.Crashed
-	// means launchd would immediately spawn a second daemon that loses the
+	// Refuse while a manual daemon holds the lock. RunAtLoad + Restart=always
+	// means systemd would immediately spawn a second daemon that loses the
 	// flock on daemon.lock and exits non-zero, then gets respawned every ~10s
 	// for as long as the manual daemon lives.
 	running, _, err := daemon.IsRunning(townRoot)
@@ -806,9 +817,9 @@ func runDaemonRotateLogs(cmd *cobra.Command, args []string) error {
 }
 
 // daemonRunExit maps daemon.ErrRestartForUpgrade and daemon.ErrUnrequestedStop
-// to exit code 75 so launchd (KeepAlive SuccessfulExit=false) restarts the
-// daemon: on the installed binary after an upgrade, or after a signal gt did
-// not send. A plain nil return would exit 0 and leave the daemon down. Exit
+// to exit code 75 so a supervisor that restarts on an unclean exit relaunches
+// the daemon: on the installed binary after an upgrade, or after a signal gt
+// did not send. A plain nil return would exit 0 and leave the daemon down. Exit
 // codes: 0 = stopped by gt daemon stop / gt down, 75 = relaunch me. exit is
 // os.Exit.
 func daemonRunExit(err error, exit func(code int)) error {

@@ -72,6 +72,7 @@ var deletedCommands = [][]string{
 	{"feed"},              // gt-3vdcx: replaced by gt tail
 	{"session", "health"}, // gt-dj3xv: always exit 0; townhealth and gt status carry the seat evidence
 	{"session", "check"},  // gt-dj3xv: always exit 0; gt status prints the same polecat rows
+	{"daemon", "cutover"}, // gt-a2uug4.15: it drove the launchd supervisor commands, which left gt
 }
 
 // TestDeletedCommandsGone fails if any deleted command path resolves in the

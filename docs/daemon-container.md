@@ -1175,24 +1175,23 @@ day.
 
 ### The cutover
 
-From `<live-town>`:
+> The `gt daemon cutover` command this section describes was removed by
+> gt-a2uug4.15: the launchd supervisor commands left gt with the rest of its
+> macOS code. The window it ran on 2026-11-04 is recorded below as history;
+> there is no cutover command to run today.
 
-```
-gt daemon cutover --to container
-```
-
-It runs five steps, each with a budget, and prints what state the town is left
-in whenever one ends badly. Nothing is rolled back by itself.
+It ran five steps, each with a budget, and printed what state the town is left
+in whenever one ended badly. Nothing was rolled back by itself.
 
 1. **Wait for a quiet town**, up to 30 minutes: the dispatch hold on, no
-   `gt sling` running, no container-gate job running (any held slot counts, whatever the pool size). This is the command's own
-   wait for a quiet gate; it reads the three and changes nothing. If it gives up
-   it prints `not cutting over to container, nothing was changed:` and names the
-   first blocker standing at the last read.
+   `gt sling` running, no container-gate job running (any held slot counts, whatever the pool size). This was the command's own
+   wait for a quiet gate; it read the three and changed nothing. If it gave up
+   it printed `not cutting over to container, nothing was changed:` and named
+   the first blocker standing at the last read.
 2. **Check quiet again** immediately before touching the old daemon. If the town
-   stopped being quiet it ends with `the town stopped being quiet`, and nothing
+   stopped being quiet it ended with `the town stopped being quiet`, and nothing
    was changed.
-3. **Stop the launchd daemon, just after it completes a heartbeat (the wait is `cutoverBoundaryBudget` in `daemon_cutover.go`), and wait for proof it stopped**. Proof: `state.json`
+3. **Stop the launchd daemon, just after it completes a heartbeat, and wait for proof it stopped**. Proof: `state.json`
    records a clean stop (`running` false) and the launchd job reads as not
    loaded. If the proof does not come within a minute (the daemon's 30-second
    shutdown budget and 30 seconds more), it
@@ -1268,60 +1267,54 @@ If any check fails and the cause is not understood within minutes, roll back.
 
 ### Rollback
 
-The rollback is the reverse cutover, and it is rehearsed here before the window
-because the window's safety rests on it:
+> The reverse cutover command this section describes was removed by
+> gt-a2uug4.15, and gt no longer supports a launchd-supervised town: the
+> launchd supervisor commands left gt with the rest of its macOS code. The
+> record below says what the reverse cutover did on 2026-11-04. It is history,
+> not a procedure to run today.
 
-```
-gt daemon cutover --to launchd
-```
+The rollback was the reverse cutover, and it was rehearsed here before the
+window because the window's safety rested on it.
 
-Before it, these must be true:
+Before it, these had to be true:
 
 - The container daemon is the owner, or has just failed: `state.json` names
   `container` as owner, or the container is down and `state.json` shows a clean
   stop. A `state.json` that names launchd as owner needs no rollback.
 - The launchd job's plist is still on disk. This is why it stays installed:
-  `launchctl bootstrap` loads the job from that file, and the cutover's
-  restore command names it. Check: the plist file exists (`launchctl print
-  gui/$(id -u)/com.gastown.daemon` reports not found while the job is booted
-  out, which is expected).
-- The dispatch hold is still on, since the reverse cutover waits for the same
+  `launchctl bootstrap` loads the job from that file. Check: the plist file
+  exists (`launchctl print gui/$(id -u)/com.gastown.daemon` reports not found
+  while the job is booted out, which is expected).
+- The dispatch hold is still on, since the reverse cutover waited for the same
   quiet town: no `gt sling` running and no container-gate job running.
-- Run it from `<live-town>`. It stops the container, proves it stopped, starts
-  launchd through the startup guard, and waits for `state.json` to name
-  `launchd` / `com.gastown.daemon` and for the second heartbeat. Then it runs
+- Run from `<live-town>`. It stopped the container, proved it stopped, started
+  launchd through the startup guard, and waited for `state.json` to name
+  `launchd` / `com.gastown.daemon` and for the second heartbeat. Then it ran
   `compose down` on the container's project, which removes both containers and
   keeps their volumes.
 
 Expected on success: `launchd owns the town and has beaten twice.`, then
 `Removed the container side's containers with compose down; their volumes are
-kept.`, then `✓ Cutover to launchd done.` If a step fails, the command prints
-the state it left and the command to restore the other side, as it does
-going forward.
+kept.`, then `✓ Cutover to launchd done.`
 
-The cutover removes both containers, the daemon's and `sweep-dind`'s. It stops
-the daemon container, then, once launchd has beaten twice, runs
+It removed both containers, the daemon's and `sweep-dind`'s. It stopped the
+daemon container, then, once launchd had beaten twice, ran
 `docker --context desktop-linux compose -p gt-live -f <live-town>/daemon/container/compose.yml down`.
-That is `down` without `-v`, so the volumes are kept. If the `down` fails, the
-cutover prints the same command for the operator to run by hand. launchd still
-owns the town, so the rollback has succeeded and the cutover exits zero.
-Never add `-v` without the overseer.
+That is `down` without `-v`, so the volumes are kept. Never add `-v` without
+the overseer.
 
-If the `down` cannot be built, nothing is run. That happens when the container
+If the `down` could not be built, nothing ran. That happens when the container
 settings do not name a compose project: both `daemon.container_name` and
 `daemon.compose_project` must be set, and a name that fails validation is
-refused the same way. The cutover then prints that the containers were not
-removed, with the reason, and asks for them to be removed by hand, keeping the
-volumes. launchd still owns the town, so the cutover exits zero.
+refused the same way. It then printed that the containers were not removed,
+with the reason, and asked for them to be removed by hand, keeping the volumes.
 
-**After the rollback, switch the setting back.** The rollback does not switch
-`daemon.supervisor` either. Make the switch described in the cutover section
-above, in the same live settings, with `"supervisor": "launchd"` in place of
-`container`, keeping the container fields so a later window needs no edit. Then
-run `gt daemon status`. Expected: a `Supervised:` line that names launchd. Then
-compare `docker --context desktop-linux ps` and `<live-town>/daemon/state.json`
-with the baseline recorded before the window. Leave the container's compose
-file and image in place; they cost nothing and the next window uses them.
+**After the rollback, switch the setting back.** The rollback did not switch
+`daemon.supervisor`; the operator set `"supervisor": "launchd"` in the live
+settings in place of `container`, keeping the container fields so a later
+window needed no edit. Then it compared `docker --context desktop-linux ps` and
+`<live-town>/daemon/state.json` with the baseline recorded before the window.
+The container's compose file and image stayed in place; they cost nothing.
 
 Record the rollback on the program bead whether it was rehearsed or used, with
 the time and the output.
