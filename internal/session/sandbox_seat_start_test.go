@@ -41,9 +41,9 @@ func TestSandboxSeatStartFromLedgerMatchesTheRecordAliveAtSubmission(t *testing.
 	created := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
 	submitted := created.Add(time.Hour)
 	tests := []struct {
-		name      string
-		lines     []sandboxSeatEndLine
-		raw       string
+		name        string
+		lines       []sandboxSeatEndLine
+		raw         string
 		submitted   time.Time
 		wantStart   time.Time
 		wantOK      bool
