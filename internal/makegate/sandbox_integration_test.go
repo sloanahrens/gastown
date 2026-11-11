@@ -78,7 +78,18 @@ func (s *Sandbox) Rig(name string) (first, second string) {
 	first = s.Commit(dir, "first", map[string]string{"first.txt": "one\n"})
 	s.git(dir, "update-ref", "refs/remotes/origin/main", first)
 	second = s.Commit(dir, "second", map[string]string{"second.txt": "two\n"})
+	s.Bare(name)
 	return first, second
+}
+
+// Bare clones the rig's checkout into <town>/<rig>/.repo.git, the bare
+// repository a real rig carries and the seed reads each rig's history from
+// (gt-3lvcjz.20), with main at the checkout's HEAD as the landing worker leaves
+// it. Call it after the checkout's last commit.
+func (s *Sandbox) Bare(rig string) string {
+	bare := s.Path(rig, ".repo.git")
+	s.git(s.root, "clone", "-q", "--bare", s.Path(rig, "mayor", "rig"), bare)
+	return bare
 }
 
 // WriteFile writes body at the sandbox path rel, creating its parent.
