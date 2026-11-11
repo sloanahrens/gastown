@@ -97,6 +97,7 @@ type clusterRenderDeps struct {
 	findTown     func() (string, error)
 	containerEnv func(townRoot string) (map[string]string, error)
 	readFile     func(path string) ([]byte, error)
+	lstat        func(path string) (fs.FileInfo, error)
 	getenv       func(key string) string
 	userHome     func() (string, error)
 	build        func(k8sdaemon.Values) (k8sdaemon.Manifests, error)
@@ -115,6 +116,7 @@ func realClusterRenderDeps(out io.Writer) clusterRenderDeps {
 		findTown:     workspace.FindFromCwdOrError,
 		containerEnv: realDaemonComposeDeps(out).containerEnv,
 		readFile:     os.ReadFile,
+		lstat:        os.Lstat,
 		getenv:       os.Getenv,
 		userHome:     os.UserHomeDir,
 		build:        k8sdaemon.Build,
@@ -298,6 +300,10 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	}) {
 		return fmt.Errorf("--dashboard needs the %s entry in %s: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating; no file was written", k8sdaemon.ViewerTokenFile, manifestPath)
 	}
+	cloudCheckKey, err := cloudCheckKeyConfigured(f.configDir, d.lstat)
+	if err != nil {
+		return err
+	}
 	namespace := f.namespace
 	if namespace == "" {
 		namespace = k8sdaemon.DefaultNamespace
@@ -306,6 +312,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		Namespace:               f.namespace,
 		Rehearsal:               f.rehearsal,
 		Secrets:                 secrets.Files,
+		CloudCheckKey:           cloudCheckKey,
 		Image:                   pair.Daemon,
 		ProxyImage:              f.proxyImage,
 		PolecatImage:            f.polecatImage,
@@ -398,6 +405,23 @@ type applyObject struct {
 	body []byte
 }
 
+// cloudCheckKeyConfigured reports whether the operator's config directory holds
+// the key file the gt-cloud-check-gcp Secret is created from. The patrol runs
+// without the key (one log line), and the pod must not mount a Secret that was
+// never created, so the mount and its create line are rendered only for a
+// configured key. A path that cannot be read for any other reason refuses the
+// render rather than guessing the file away.
+func cloudCheckKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, error)) (bool, error) {
+	path := filepath.Join(configDir, k8sdaemon.CloudCheckKeyFile)
+	switch _, err := lstat(path); {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("the cloud check's key file %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
+	}
+	return true, nil
+}
+
 // applyObjects splits a rendered stream into its documents, dropping the Secrets:
 // an applied placeholder would make the operator's `kubectl create secret` fail
 // with AlreadyExists, so the Secrets are created from the operator's files.
@@ -470,6 +494,10 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 			for _, item := range vol.Secret.Items {
 				froms = append(froms, fromFileArg(item.Key, filepath.Join(openShellDir, item.Path)))
 			}
+		} else if source == k8sdaemon.CloudCheckKeyFile {
+			// The Secret's data key is the file name the pod mounts, not the
+			// operator's config-directory file name it is created from.
+			froms = append(froms, fromFileArg(k8sdaemon.CloudCheckKeyKey, filepath.Join(configDir, source)))
 		} else {
 			froms = append(froms, fromFileArg(source, filepath.Join(configDir, source)))
 		}

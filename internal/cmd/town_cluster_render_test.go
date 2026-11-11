@@ -89,6 +89,7 @@ func clusterRenderTestDeps(out io.Writer) clusterRenderDeps {
 		findTown:     func() (string, error) { return "/fake/town", nil },
 		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
 		readFile:     os.ReadFile,
+		lstat:        os.Lstat,
 		getenv:       func(string) string { return "" },
 		userHome:     func() (string, error) { return "/fake/home", nil },
 		build:        k8sdaemon.Build,
@@ -168,6 +169,24 @@ func renderedKinds(t *testing.T, out string) []string {
 		kinds = append(kinds, renderedKind(t, filepath.Join(out, name)))
 	}
 	return kinds
+}
+
+// deploymentBody is the rendered daemon Deployment's text, for a test that reads
+// a mount path or a volume name the typed helpers do not expose.
+func deploymentBody(t *testing.T, out string) string {
+	t.Helper()
+	for _, name := range dirNames(t, out) {
+		if !strings.HasSuffix(name, "-deployment-daemon.yaml") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Fatalf("reading the Deployment: %v", err)
+		}
+		return string(data)
+	}
+	t.Fatalf("no Deployment file in %s", out)
+	return ""
 }
 
 // deploymentSecretVolumes is the Secret each volume of the rendered Deployment
@@ -309,6 +328,76 @@ func TestTownClusterRenderPrintsOneCreateLinePerMountedSecret(t *testing.T) {
 	if !strings.Contains(out.String(), clusterRenderDaemonDigest) {
 		t.Fatalf("the output does not name the daemon digest used:\n%s", out.String())
 	}
+}
+
+// TestTownClusterRenderMountsTheCloudCheckKeyOnlyWhenPresent: the cloud_check
+// patrol runs without its key and says so once, and a pod that mounts a Secret
+// the operator never created stays in ContainerCreating, so the render mounts
+// gt-cloud-check-gcp and prints its create line only when the config directory
+// holds the file (gt-c57pax).
+func TestTownClusterRenderMountsTheCloudCheckKeyOnlyWhenPresent(t *testing.T) {
+	t.Parallel()
+
+	render := func(t *testing.T, withKey bool) (body, configDir string, lines []string) {
+		t.Helper()
+		f := clusterRenderFixture(t)
+		f.configDir = t.TempDir()
+		if withKey {
+			if err := os.WriteFile(filepath.Join(f.configDir, k8sdaemon.CloudCheckKeyFile), []byte("{}"), 0o600); err != nil {
+				t.Fatalf("writing the key file: %v", err)
+			}
+		}
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return deploymentBody(t, f.out), f.configDir, createLines(out.String())
+	}
+
+	t.Run("present", func(t *testing.T) {
+		t.Parallel()
+		body, configDir, lines := render(t, true)
+		for _, want := range []string{
+			"secretName: " + k8sdaemon.CloudCheckKeySecretName,
+			"mountPath: " + k8sdaemon.CloudCheckKeyPath,
+			"subPath: " + k8sdaemon.CloudCheckKeyKey,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the Deployment does not carry %q:\n%s", want, body)
+			}
+		}
+		want := "kubectl -n gt create secret generic " + k8sdaemon.CloudCheckKeySecretName +
+			" --from-file=" + k8sdaemon.CloudCheckKeyKey + "=" + filepath.Join(configDir, k8sdaemon.CloudCheckKeyFile)
+		if !slices.Contains(lines, want) {
+			t.Errorf("create lines do not carry %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		body, _, lines := render(t, false)
+		if strings.Contains(body, k8sdaemon.CloudCheckKeySecretName) {
+			t.Errorf("the Deployment names %s with no key file in the config directory", k8sdaemon.CloudCheckKeySecretName)
+		}
+		for _, line := range lines {
+			if strings.Contains(line, k8sdaemon.CloudCheckKeySecretName) {
+				t.Errorf("a create line names %s with no key file in the config directory: %s", k8sdaemon.CloudCheckKeySecretName, line)
+			}
+		}
+	})
+
+	t.Run("an unreadable path refuses before a write", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRenderFixture(t)
+		var out bytes.Buffer
+		deps := clusterRenderTestDeps(&out)
+		deps.lstat = func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }
+		err := runClusterRender(deps, f)
+		requireErrorNames(t, err, k8sdaemon.CloudCheckKeyFile, "cannot be read")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left --out %s, want it untouched", got)
+		}
+	})
 }
 
 func TestTownClusterRenderRefusesWithoutADigestOrAShare(t *testing.T) {

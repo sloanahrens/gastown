@@ -52,7 +52,7 @@ func imageBuilder(t *testing.T) (Builder, *fakeRunner) {
 
 // imageBinaryNames is the binaries the image copies from the root of its build
 // context.
-var imageBinaryNames = []string{"gt", "bd", "om", "claude", "hm", "devops-reporter", "release-reporter", "openshell", "docker", "kubectl"}
+var imageBinaryNames = []string{"gt", "bd", "om", "claude", "hm", "devops-reporter", "release-reporter", "cloudcheck", "cloud-check.apps", "openshell", "docker", "kubectl"}
 
 // imageBinaries is the list of the image's binaries, plugin binaries and mango
 // files in b.Out, in the order the Dockerfile copies them from its context.

@@ -1083,7 +1083,7 @@ func (b Builder) checkImageBinaries(bins []string) error {
 	// the same names in the order the refusal messages use.
 	rels := make(map[string]string)
 	var want []string
-	for _, name := range append(append([]string{"gt", "bd", "om", claudeCLIName}, toolNames...), ClientToolNames()...) {
+	for _, name := range append(append([]string{"gt", "bd", "om", claudeCLIName}, toolNames...), append([]string{CloudCheckAppsName}, ClientToolNames()...)...) {
 		rels[name] = name
 		want = append(want, name)
 	}

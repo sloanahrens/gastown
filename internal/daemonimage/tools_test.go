@@ -38,6 +38,10 @@ type checkout struct {
 type toolsGit struct {
 	checkouts map[string]checkout
 	adds      []worktreeAdd
+	// showErr is what a `git show` returns instead of the app list; onShow runs
+	// first, so a test can change the build context before the list is staged.
+	showErr error
+	onShow  func()
 }
 
 func (g *toolsGit) git(dir string, args ...string) ([]byte, error) {
@@ -51,6 +55,17 @@ func (g *toolsGit) git(dir string, args ...string) ([]byte, error) {
 			g.adds = append(g.adds, worktreeAdd{src: dir, dir: args[3], commit: args[4]})
 		}
 		return nil, nil
+	case args[0] == "show":
+		if g.onShow != nil {
+			g.onShow()
+		}
+		if g.showErr != nil {
+			return nil, g.showErr
+		}
+		if strings.HasSuffix(args[1], ":"+CloudCheckAppsPath) {
+			return []byte("fractals-prod=https://example.test app=fractals\n"), nil
+		}
+		return nil, errors.New("fake git: unexpected show " + args[1])
 	case args[0] == "rev-parse" && args[1] == "--verify":
 		rev := strings.TrimSuffix(args[2], "^{commit}")
 		if rev == "HEAD" {
@@ -145,7 +160,7 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildTools: %v", err)
 	}
-	want := []string{filepath.Join(b.Out, "hm"), filepath.Join(b.Out, "devops-reporter"), filepath.Join(b.Out, "release-reporter")}
+	want := []string{filepath.Join(b.Out, "hm"), filepath.Join(b.Out, "devops-reporter"), filepath.Join(b.Out, "release-reporter"), filepath.Join(b.Out, "cloudcheck")}
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("BuildTools paths = %q, want %q", paths, want)
 	}
@@ -156,14 +171,21 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 	}
 	got := outEntries(t, b.Out)
 	slices.Sort(got)
-	if !reflect.DeepEqual(got, []string{"devops-reporter", "hm", "release-reporter"}) {
-		t.Errorf("the build context holds %v after a build, want the three tools only", got)
+	if !reflect.DeepEqual(got, []string{"cloud-check.apps", "cloudcheck", "devops-reporter", "hm", "release-reporter"}) {
+		t.Errorf("the build context holds %v after a build, want the four tools and their app list only", got)
+	}
+	apps, err := os.ReadFile(filepath.Join(b.Out, CloudCheckAppsName))
+	if err != nil {
+		t.Fatalf("reading the staged app list: %v", err)
+	}
+	if !strings.Contains(string(apps), "fractals-prod=") {
+		t.Errorf("the staged app list = %q, want the file at the pinned commit", apps)
 	}
 
-	if len(run.calls) != 3 {
-		t.Fatalf("ran %d builds, want 3", len(run.calls))
+	if len(run.calls) != 4 {
+		t.Fatalf("ran %d builds, want 4", len(run.calls))
 	}
-	for i, pkg := range []string{HMPackage, DevopsReporterPackage, ReleaseReporterPackage} {
+	for i, pkg := range []string{HMPackage, DevopsReporterPackage, ReleaseReporterPackage, DevopsCloudCheckPackage} {
 		c := run.calls[i]
 		if got := c.argv[len(c.argv)-1]; got != pkg {
 			t.Errorf("build %d compiles %q, want %q", i, got, pkg)
@@ -176,11 +198,12 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 		t.Errorf("hm ldflags = %q, want none", got)
 	}
 
-	if len(g.adds) != 3 {
-		t.Fatalf("made %d worktrees, want 3", len(g.adds))
+	if len(g.adds) != 4 {
+		t.Fatalf("made %d worktrees, want 4", len(g.adds))
 	}
 	wantAdds := []struct{ src, commit string }{
 		{"/src/hm", testHMCommit},
+		{"/src/devops", testDevopsCommit},
 		{"/src/devops", testDevopsCommit},
 		{"/src/devops", testDevopsCommit},
 	}
@@ -315,6 +338,64 @@ func TestDeployBuildFailureLeavesNothing(t *testing.T) {
 	}
 }
 
+// TestDeployRefusesAnAppListItCannotReadAtItsPin: a pin that holds no app list
+// is refused, the error names the path, and no tool is left in the context.
+func TestDeployRefusesAnAppListItCannotReadAtItsPin(t *testing.T) {
+	t.Parallel()
+	b, _, g := toolsBuilder(t)
+	g.showErr = errors.New("fatal: path 'ops/cloud-check.apps' does not exist in the commit")
+	paths, err := b.BuildTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+CloudCheckAppsPath) {
+		t.Fatalf("BuildTools = %q, %v; want an error naming the app list", paths, err)
+	}
+	if paths != nil {
+		t.Errorf("a refused app list returned paths %q", paths)
+	}
+	if got := outEntries(t, b.Out); len(got) != 0 {
+		t.Errorf("a refused app list left %v in the build context", got)
+	}
+}
+
+// TestDeployNamesAnAppListItCannotStage: a staging path that is already a
+// directory cannot take the app list, and the error names the file.
+func TestDeployNamesAnAppListItCannotStage(t *testing.T) {
+	t.Parallel()
+	b, _, g := toolsBuilder(t)
+	g.onShow = func() {
+		stages, err := filepath.Glob(filepath.Join(b.Out, ".daemonimage-tools-*"))
+		if err != nil || len(stages) != 1 {
+			t.Fatalf("staging directories = %q, %v; want the one build stage", stages, err)
+		}
+		if err := os.Mkdir(filepath.Join(stages[0], CloudCheckAppsName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, err := b.BuildTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cannot stage "+CloudCheckAppsName) {
+		t.Fatalf("BuildTools = %q, %v; want an error naming the staged app list", paths, err)
+	}
+	if paths != nil {
+		t.Errorf("an unstaged app list returned paths %q", paths)
+	}
+}
+
+// TestDeployNamesAnAppListItCannotMoveIntoTheContext: a path already holding a
+// directory cannot take the app list, and the error names the file.
+func TestDeployNamesAnAppListItCannotMoveIntoTheContext(t *testing.T) {
+	t.Parallel()
+	b, _, _ := toolsBuilder(t)
+	if err := os.Mkdir(filepath.Join(b.Out, CloudCheckAppsName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := b.BuildTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cannot move "+CloudCheckAppsName+" into") {
+		t.Fatalf("BuildTools = %q, %v; want an error naming the app list's move", paths, err)
+	}
+	if paths != nil {
+		t.Errorf("a failed move returned paths %q", paths)
+	}
+}
+
 // TestDockerfileCopiesHMAndReporters: the image copies each tool from the build
 // context root to /usr/local/bin, once, with mode 0755.
 func TestDockerfileCopiesHMAndReporters(t *testing.T) {
@@ -348,8 +429,8 @@ func TestReleaseReporterBuildStampsNoLinkerVariable(t *testing.T) {
 	if _, err := b.BuildTools(context.Background()); err != nil {
 		t.Fatalf("BuildTools: %v", err)
 	}
-	if len(run.calls) != 3 {
-		t.Fatalf("ran %d builds, want 3", len(run.calls))
+	if len(run.calls) != 4 {
+		t.Fatalf("ran %d builds, want 4", len(run.calls))
 	}
 	argv := run.calls[2].argv
 	if got := argv[len(argv)-1]; got != ReleaseReporterPackage {
@@ -404,8 +485,8 @@ func TestReleaseReporterVersionIsReadFromTheBinary(t *testing.T) {
 				if err != nil {
 					t.Fatalf("BuildTools: %v", err)
 				}
-				if len(paths) != 3 {
-					t.Errorf("BuildTools returned %q, want the three tools", paths)
+				if len(paths) != 4 {
+					t.Errorf("BuildTools returned %q, want the four tools", paths)
 				}
 				return
 			}

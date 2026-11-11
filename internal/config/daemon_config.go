@@ -334,6 +334,7 @@ type PatrolsConfig struct {
 	ScheduledMaintenance *ScheduledMaintenanceConfig `json:"scheduled_maintenance,omitempty"`
 	DiskMaintenance      *DiskMaintenanceConfig      `json:"disk_maintenance,omitempty"`
 	HMSync               *HMSyncConfig               `json:"hm_sync,omitempty"`
+	CloudCheck           *CloudCheckConfig           `json:"cloud_check,omitempty"`
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	OverseerReport       *OverseerReportConfig       `json:"overseer_report,omitempty"`
 	BirdReports          *BirdReportsConfig          `json:"bird_reports,omitempty"`
@@ -1693,6 +1694,69 @@ func (c *HMSyncConfig) UnmarshalJSON(data []byte) error {
 	}
 	*c = HMSyncConfig(p)
 	return nil
+}
+
+// CloudCheckConfig configures the cloud_check patrol: the interval run of the
+// devops cloudcheck binary that writes the Cloud pane's status file
+// (internal/daemon/cloud_check.go).
+//
+// The patrol is opt-in. It runs a program on a timer, so a town that has not
+// asked for it must not get it from a default.
+type CloudCheckConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Interval string `json:"interval"` // Go duration, default "10m"
+	// Command is the binary to run. Its default is the name the daemon image
+	// carries on PATH; a host whose binary is elsewhere names the path here.
+	Command string `json:"command"` // default "cloudcheck"
+	// KeyFile is the GCP service-account key the child reads through
+	// GOOGLE_APPLICATION_CREDENTIALS. The key's value never leaves the file:
+	// the patrol only stats it and passes the path. Empty means
+	// CloudCheckDefaultKeyFile, the path the daemon pod mounts it at.
+	KeyFile string `json:"key_file"`
+}
+
+// The values CloudCheckConfig accepts. An empty field means the default, so a
+// town that sets only enabled still gets an interval, a command and a key path.
+const (
+	CloudCheckDefaultInterval = "10m"
+	CloudCheckDefaultCommand  = "cloudcheck"
+	// CloudCheckDefaultKeyFile is where the daemon pod mounts the operator's
+	// gt-cloud-check-gcp Secret (deploy/k8s/daemon CloudCheckKeyPath). A host
+	// whose key is elsewhere names the path in key_file.
+	CloudCheckDefaultKeyFile = "/var/run/secrets/gt-cloud-check/key.json"
+)
+
+// UnmarshalJSON decodes the patrol's block strictly, refusing an interval the
+// patrol cannot schedule: a mistyped one must not read as the default, or the
+// town would run the check on a cadence it never asked for.
+//
+// The unknown-field check is repeated here because a type that decodes itself
+// is decoded by the config kernel's strict decoder opaquely.
+func (c *CloudCheckConfig) UnmarshalJSON(data []byte) error {
+	type plain CloudCheckConfig
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("patrols.cloud_check: %w", err)
+	}
+	if p.Interval != "" {
+		every, err := time.ParseDuration(p.Interval)
+		if err != nil || every <= 0 {
+			return fmt.Errorf("patrols.cloud_check.interval = %q: want a positive Go duration such as %q", p.Interval, CloudCheckDefaultInterval)
+		}
+	}
+	*c = CloudCheckConfig(p)
+	return nil
+}
+
+// KeyFilePath returns the key file the patrol reads: the setting, or the path
+// the daemon pod mounts it at.
+func (c *CloudCheckConfig) KeyFilePath() string {
+	if c != nil && c.KeyFile != "" {
+		return c.KeyFile
+	}
+	return CloudCheckDefaultKeyFile
 }
 
 // JevScrub turns on the state scrubber for one Jev battery: secret-shaped text
