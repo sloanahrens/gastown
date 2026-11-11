@@ -17,6 +17,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -1274,8 +1275,8 @@ func checkAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T, beadsFor addBeads
 	// follow redirects correctly, it may create PRIME.md locally instead
 	// of at the rig-level beads location.
 
-	m, _, mayorRig := addRig(t, beadsFor, map[string]string{"README.md": "# Test\n"})
-	mayorBeads := filepath.Join(mayorRig, ".beads")
+	m, _, bare := addRig(t, beadsFor, map[string]string{"README.md": "# Test\n"})
+	mayorBeads := filepath.Join(filepath.Dir(bare), "mayor", "rig", ".beads")
 
 	// Create polecat
 	polecat, err := m.AddWithOptions("TestNoLocal", AddOptions{})
@@ -1305,14 +1306,14 @@ func checkAddWithOptions_NoPrimeMDCreatedLocally(t *testing.T, beadsFor addBeads
 
 func TestAddWithOptions_UsesCanonicalOriginDefaultBranch(t *testing.T) {
 	t.Parallel()
-	mgr, mayorRig, _, w := canonicalRig(t)
+	mgr, bare, _, w := canonicalRig(t)
 
-	mayorGit := w.repo(mayorRig)
-	baseSHA, err := mayorGit.Rev("origin/main")
+	bareGit := w.repo(bare)
+	baseSHA, err := bareGit.Rev("origin/main")
 	if err != nil {
 		t.Fatalf("resolve origin/main: %v", err)
 	}
-	staleSHA := createStalePolecatCommit(t, w, mayorRig, "main", "polecat/stale-source")
+	staleSHA := w.branchAtNewCommit(t, bare, "polecat/stale-source", w.rev(t, bare, "main"), "Create stale polecat branch")
 
 	polecat, err := mgr.AddWithOptions("toast", AddOptions{})
 	if err != nil {
@@ -2108,20 +2109,15 @@ func TestAddWithOptions_RollbackReleasesName(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 
-	// Create mayor/rig directory structure (acts as repo base)
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	if err := os.MkdirAll(mayorRig, 0755); err != nil {
-		t.Fatalf("mkdir mayor/rig: %v", err)
-	}
-
-	// A repo with one commit whose origin is a path with no repository, so
-	// the fetch fails and origin/main is never created. This causes
-	// AddWithOptions to fail at ref validation, testing rollback.
+	// The rig's shared bare repo is the repo base. It has one commit whose
+	// origin is a path with no repository, so the fetch fails and origin/main
+	// is never created. This causes AddWithOptions to fail at ref validation,
+	// testing rollback.
 	w := newWorld()
-	w.InitRepo(t, mayorRig)
-	w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
-	w.checkout(t, mayorRig)
-	w.AddRemote(t, mayorRig, "origin", "/nonexistent/repo")
+	bare := constants.RigBareRepoPath(root)
+	w.InitBare(t, bare)
+	w.Commit(t, bare, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
+	w.AddRemote(t, bare, "origin", "/nonexistent/repo")
 
 	r := &rig.Rig{
 		Name: "rig",
@@ -2547,23 +2543,9 @@ func TestRepairWorktreeMoveFailureClearsPolecatDirAndKeepsHook(t *testing.T) {
 	townRoot := t.TempDir()
 	rigName := "testrepair"
 	rigPath := filepath.Join(townRoot, rigName)
-	mayorRig := filepath.Join(rigPath, "mayor", "rig")
-	for _, dir := range []string{mayorRig, filepath.Join(rigPath, ".beads"), filepath.Join(mayorRig, ".beads")} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
-		t.Fatalf("write beads redirect: %v", err)
-	}
-
 	w := newWorld()
-	w.InitRepo(t, mayorRig)
-	head := w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
-	w.checkout(t, mayorRig)
-	w.AddRemote(t, mayorRig, "origin", mayorRig)
-	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
-	mayorGit := w.repo(mayorRig)
+	buildRigIn(t, w, rigPath, map[string]string{"README.md": "# Test\n"})
+	mayorGit := w.repo(constants.RigBareRepoPath(rigPath))
 
 	polecatName := "toast"
 	oldClonePath := filepath.Join(rigPath, "polecats", polecatName)
@@ -2575,8 +2557,9 @@ func TestRepairWorktreeMoveFailureClearsPolecatDirAndKeepsHook(t *testing.T) {
 	mgr := newTestManager(&rig.Rig{Name: rigName, Path: rigPath}, w, newFakeProbe(), db)
 	base := w.opener()
 	mgr.gits = gitOpener{
-		open:    func(dir string) gitRepo { return moveFailsRepo{base.open(dir)} },
-		openDir: func(gitDir, workDir string) gitRepo { return moveFailsRepo{base.openDir(gitDir, workDir)} },
+		open:     func(dir string) gitRepo { return moveFailsRepo{base.open(dir)} },
+		openDir:  func(gitDir, workDir string) gitRepo { return moveFailsRepo{base.openDir(gitDir, workDir)} },
+		repoFile: base.repoFile,
 	}
 
 	agentID := mgr.agentBeadID(polecatName)
@@ -2618,26 +2601,12 @@ func TestRepairWorktreeWithOptions_LegacyLayout(t *testing.T) {
 	townRoot := t.TempDir()
 	rigName := "testrepair"
 	rigPath := filepath.Join(townRoot, rigName)
-	mayorRig := filepath.Join(rigPath, "mayor", "rig")
-	for _, dir := range []string{mayorRig, filepath.Join(rigPath, ".beads"), filepath.Join(mayorRig, ".beads")} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", dir, err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
-		t.Fatalf("write beads redirect: %v", err)
-	}
-
 	w := newWorld()
-	w.InitRepo(t, mayorRig)
-	head := w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
-	w.checkout(t, mayorRig)
-	w.AddRemote(t, mayorRig, "origin", mayorRig)
-	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
+	buildRigIn(t, w, rigPath, map[string]string{"README.md": "# Test\n"})
 
 	polecatName := "toast"
 	legacyPath := filepath.Join(rigPath, "polecats", polecatName)
-	if err := w.repo(mayorRig).WorktreeAddFromRef(legacyPath, "old-toast", "HEAD"); err != nil {
+	if err := w.repo(constants.RigBareRepoPath(rigPath)).WorktreeAddFromRef(legacyPath, "old-toast", "HEAD"); err != nil {
 		t.Fatalf("create legacy worktree: %v", err)
 	}
 
@@ -2669,27 +2638,9 @@ func TestRepairWorktreeWithOptions_KillsLiveSession(t *testing.T) {
 	townRoot := t.TempDir()
 	rigName := "testrepair"
 	rigPath := filepath.Join(townRoot, rigName)
-	mayorRig := filepath.Join(rigPath, "mayor", "rig")
-	if err := os.MkdirAll(mayorRig, 0755); err != nil {
-		t.Fatalf("mkdir mayor rig: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir rig beads: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(mayorRig, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir mayor beads: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
-		t.Fatalf("write beads redirect: %v", err)
-	}
-
 	w := newWorld()
-	w.InitRepo(t, mayorRig)
-	head := w.Commit(t, mayorRig, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
-	w.checkout(t, mayorRig)
-	w.AddRemote(t, mayorRig, "origin", mayorRig)
-	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
-	mayorGit := w.repo(mayorRig)
+	buildRigIn(t, w, rigPath, map[string]string{"README.md": "# Test\n"})
+	mayorGit := w.repo(constants.RigBareRepoPath(rigPath))
 
 	polecatName := "toast"
 	oldClonePath := filepath.Join(rigPath, "polecats", polecatName, rigName)
@@ -3546,8 +3497,9 @@ func unjudgeableOpener(w *world, dir string, facts git.UncommittedWorkStatus) gi
 		return unjudgeableProbe{gitRepo: opened, facts: facts}
 	}
 	return gitOpener{
-		open:    func(d string) gitRepo { return wrap(base.open(d), d) },
-		openDir: func(gitDir, workDir string) gitRepo { return wrap(base.openDir(gitDir, workDir), workDir) },
+		open:     func(d string) gitRepo { return wrap(base.open(d), d) },
+		openDir:  func(gitDir, workDir string) gitRepo { return wrap(base.openDir(gitDir, workDir), workDir) },
+		repoFile: base.repoFile,
 	}
 }
 

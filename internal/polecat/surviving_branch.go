@@ -3,35 +3,35 @@ package polecat
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
-// rigGitRepo returns the git directory holding a rig's shared refs, mirroring
-// Manager.repoBase: the shared bare repo (<rigRoot>/.repo.git) when present,
-// otherwise the legacy <rigRoot>/mayor/rig clone. Returns "" when neither
-// exists, which callers must treat as "cannot determine" (fail open).
-// openRigRepo opens the repo rigGitRepo found: the bare .repo.git by its git
-// directory, mayor/rig as a working directory.
-func openRigRepo(gits gitOpener, root string) gitRepo {
-	if filepath.Base(root) == ".repo.git" {
-		return gits.OpenDir(root, "")
-	}
-	return gits.Open(root)
-}
-
+// rigGitRepo returns the shared bare repo (<rigRoot>/.repo.git) that holds a
+// rig's shared refs, mirroring Manager.repoBase. Returns "" when the rig has
+// none; callers return noBareRepoErr for that, which fails closed: a rig root
+// with no .repo.git is an unknown error, never nothing to protect.
 func rigGitRepo(rigRoot string) string {
-	bare := filepath.Join(rigRoot, ".repo.git")
+	bare := constants.RigBareRepoPath(rigRoot)
 	if info, err := os.Stat(bare); err == nil && info.IsDir() {
 		return bare
 	}
-	legacy := filepath.Join(rigRoot, "mayor", "rig")
-	if info, err := os.Stat(legacy); err == nil && info.IsDir() {
-		return legacy
-	}
 	return ""
+}
+
+// openRigRepo opens the shared bare repo rigGitRepo found by its git directory.
+func openRigRepo(gits gitOpener, root string) gitRepo {
+	return gits.OpenDir(root, "")
+}
+
+// noBareRepoErr is the error for a rig root with no shared .repo.git. It is an
+// unknown answer, never nothing to protect: the rig's polecat branches are not
+// read from anywhere else, so a caller that released on it would hand off work.
+func noBareRepoErr(rigRoot string) error {
+	return fmt.Errorf("%w under %s", ErrNoBareRepo, rigRoot)
 }
 
 // ListOriginPolecatBranches returns the polecat branch names present on the
@@ -46,7 +46,7 @@ func ListOriginPolecatBranches(rigRoot string) ([]string, error) {
 func listOriginPolecatBranches(gits gitOpener, rigRoot string) ([]string, error) {
 	root := rigGitRepo(rigRoot)
 	if root == "" {
-		return nil, fmt.Errorf("no git repo under %s (neither .repo.git nor mayor/rig)", rigRoot)
+		return nil, noBareRepoErr(rigRoot)
 	}
 	g := openRigRepo(gits, root)
 
@@ -75,7 +75,7 @@ func branchOnOrigin(gits gitOpener, rigRoot, branch string) (bool, error) {
 	}
 	root := rigGitRepo(rigRoot)
 	if root == "" {
-		return false, ErrNoRigRepo
+		return false, noBareRepoErr(rigRoot)
 	}
 	// The listing globs the prefix, so an exact compare is what separates
 	// refs/heads/x from refs/heads/x-suffix.

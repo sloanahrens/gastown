@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -53,19 +54,20 @@ func (w *world) writeAndCommit(t *testing.T, dir, message string, files map[stri
 	return w.CommitWorktree(t, dir, message)
 }
 
-// buildCanonicalRigIn lays out the canonical rig at root in w: a mayor/rig
-// repository with one commit on main, origin pointing at itself with an
+// buildCanonicalRigIn lays out the canonical rig at root in w: a shared
+// .repo.git with one commit on main, origin pointing at itself with an
 // origin/main tracking ref, and a .beads redirect to mayor/rig/.beads.
 func buildCanonicalRigIn(t *testing.T, w *world, root string) {
 	t.Helper()
 	buildRigIn(t, w, root, map[string]string{"README.md": "# Test\n"})
 }
 
-// buildRigIn is buildCanonicalRigIn with files as mayor/rig's first commit.
+// buildRigIn is buildCanonicalRigIn with files as the .repo.git's first commit.
+// No mayor/rig clone is made: mayor/rig holds only the beads directory.
 func buildRigIn(t *testing.T, w *world, root string, files map[string]string) {
 	t.Helper()
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	for _, dir := range []string{filepath.Join(root, ".beads"), filepath.Join(mayorRig, ".beads")} {
+	mayorRigBeads := filepath.Join(root, "mayor", "rig", ".beads")
+	for _, dir := range []string{filepath.Join(root, ".beads"), mayorRigBeads} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -73,15 +75,15 @@ func buildRigIn(t *testing.T, w *world, root string, files map[string]string) {
 	if err := os.WriteFile(filepath.Join(root, ".beads", "redirect"), []byte("mayor/rig/.beads\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	w.InitRepo(t, mayorRig)
-	head := w.Commit(t, mayorRig, "main", "Initial commit", files)
-	w.checkout(t, mayorRig)
-	w.AddRemote(t, mayorRig, "origin", mayorRig)
-	w.SetRef(t, mayorRig, "refs/remotes/origin/main", head)
+	bare := constants.RigBareRepoPath(root)
+	w.InitBare(t, bare)
+	head := w.Commit(t, bare, "main", "Initial commit", files)
+	w.AddRemote(t, bare, "origin", bare)
+	w.SetRef(t, bare, "refs/remotes/origin/main", head)
 }
 
 // canonicalRig builds the canonical rig in a new world and returns its
-// manager (with the fake agent bd), the mayor/rig path, the bd and the world.
+// manager (with the fake agent bd), the shared .repo.git path, the bd and the world.
 func canonicalRig(t *testing.T) (*Manager, string, *polecatDB, *world) {
 	t.Helper()
 	w := newWorld()
@@ -90,7 +92,7 @@ func canonicalRig(t *testing.T) (*Manager, string, *polecatDB, *world) {
 	buildCanonicalRigIn(t, w, root)
 	bd := newPolecatDB()
 	mgr := newTestManager(&rig.Rig{Name: "rig", Path: root}, w, nil, bd)
-	return mgr, filepath.Join(root, "mayor", "rig"), bd, w
+	return mgr, constants.RigBareRepoPath(root), bd, w
 }
 
 // canonicalWithPolecats is canonicalRig with the named polecats added
@@ -163,13 +165,14 @@ func (w *world) branchAtNewCommit(t *testing.T, repo, branch, parent, message st
 }
 
 // addRig is the rig the AddWithOptions tests build at a fresh root: files as
-// mayor/rig's first commit, and beads readied by beadsFor.
+// the .repo.git's first commit, and beads readied by beadsFor. It returns the
+// shared .repo.git path.
 func addRig(t *testing.T, beadsFor addBeads, files map[string]string) (*Manager, *world, string) {
 	t.Helper()
 	w := newWorld()
 	root := t.TempDir()
 	buildRigIn(t, w, root, files)
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	bd := beadsFor(t, mayorRig, filepath.Join(mayorRig, ".beads"))
-	return newTestManager(&rig.Rig{Name: "rig", Path: root}, w, nil, bd), w, mayorRig
+	bare := constants.RigBareRepoPath(root)
+	bd := beadsFor(t, bare, filepath.Join(root, "mayor", "rig", ".beads"))
+	return newTestManager(&rig.Rig{Name: "rig", Path: root}, w, nil, bd), w, bare
 }

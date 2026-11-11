@@ -10,9 +10,11 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// ErrNoRigRepo means the rig has neither a shared bare repo nor a mayor/rig
-// clone, so there is no git state to judge surviving work from.
-var ErrNoRigRepo = errors.New("rig has no git repo (neither .repo.git nor mayor/rig)")
+// ErrNoBareRepo means the rig root has no shared bare repo at
+// <rig>/.repo.git, the only git base the survival readers open. Its answer is
+// unknown, never nothing to protect: a rig whose polecat branches are not read
+// here must keep the hook, not release the bead.
+var ErrNoBareRepo = errors.New("no .repo.git")
 
 // SurvivalVerdict is one answer from the surviving-work predicate: the branch
 // carrying work found on no base branch, or why that could not be determined.
@@ -21,10 +23,10 @@ type SurvivalVerdict struct {
 	Err    error
 }
 
-// VerdictFrom classifies a (branch, err) pair from a survival predicate; a rig
-// with no repo to protect is a definite "nothing survives", not an unknown.
+// VerdictFrom classifies a (branch, err) pair from a survival predicate. Any
+// error, ErrNoBareRepo included, is an unknown answer.
 func VerdictFrom(branch string, err error) SurvivalVerdict {
-	if err != nil && !errors.Is(err, ErrNoRigRepo) {
+	if err != nil {
 		return SurvivalVerdict{Err: err}
 	}
 	return SurvivalVerdict{Branch: branch}
@@ -78,8 +80,8 @@ type WorkSurvival struct {
 	originErr    error
 }
 
-// NewWorkSurvival prepares the predicate for one rig. It returns ErrNoRigRepo
-// when the rig has no git repo.
+// NewWorkSurvival prepares the predicate for one rig. It returns ErrNoBareRepo
+// when the rig has no .repo.git.
 func NewWorkSurvival(rigRoot string) (*WorkSurvival, error) {
 	return newWorkSurvival(gitOpener{}, rigRoot, git.RemoteQueryTimeout)
 }
@@ -89,7 +91,7 @@ func NewWorkSurvival(rigRoot string) (*WorkSurvival, error) {
 func newWorkSurvival(gits gitOpener, rigRoot string, fetchTimeout time.Duration) (*WorkSurvival, error) {
 	root := rigGitRepo(rigRoot)
 	if root == "" {
-		return nil, ErrNoRigRepo
+		return nil, noBareRepoErr(rigRoot)
 	}
 	g := openRigRepo(gits, root)
 	defaultBranch := "main"

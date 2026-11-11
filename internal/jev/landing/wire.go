@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
@@ -73,9 +74,9 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	if err != nil {
 		return nil, err
 	}
-	repo := rigRepo(filepath.Join(townRoot, RigName))
-	if repo == "" {
-		return nil, fmt.Errorf("rig %s has no git repo (neither .repo.git nor mayor/rig)", RigName)
+	repo, err := rigRepo(filepath.Join(townRoot, RigName))
+	if err != nil {
+		return nil, err
 	}
 
 	return &Pass{
@@ -89,16 +90,15 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	}, nil
 }
 
-// rigRepo is the rig's git repo: the shared bare .repo.git, else mayor/rig.
-// It is empty when the rig has neither.
-func rigRepo(rigRoot string) string {
-	for _, rel := range []string{".repo.git", filepath.Join("mayor", "rig")} {
-		dir := filepath.Join(rigRoot, rel)
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			return dir
-		}
+// rigRepo is the rig's git repo: the shared bare .repo.git. A rig without one,
+// including one that still has only a legacy clone beside it, is an error
+// naming the bare path.
+func rigRepo(rigRoot string) (string, error) {
+	dir := constants.RigBareRepoPath(rigRoot)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("no .repo.git under %s", rigRoot)
 	}
-	return ""
+	return dir, nil
 }
 
 // gitDiffer runs git diff in the rig's repo.

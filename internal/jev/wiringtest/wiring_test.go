@@ -52,7 +52,7 @@ func newTown(t *testing.T) string {
 	require.NoError(t, os.MkdirAll(filepath.Dir(constants.MayorRigsPath(town)), 0o700))
 	registry := `{"version":1,"rigs":{"` + dedupe.RigName + `":{"git_url":"https://example.invalid/gastown.git"}}}`
 	require.NoError(t, os.WriteFile(constants.MayorRigsPath(town), []byte(registry), 0o600))
-	for _, dir := range []string{".beads", filepath.Join("mayor", "rig")} {
+	for _, dir := range []string{".beads", filepath.Join("mayor", "rig"), ".repo.git"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(town, dedupe.RigName, dir), 0o700))
 	}
 	return town

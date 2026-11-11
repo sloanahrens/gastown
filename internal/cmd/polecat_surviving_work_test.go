@@ -22,7 +22,7 @@ func TestReportSurvivingWorkExitContract(t *testing.T) {
 	}{
 		{name: "work survives", branch: "polecat/basalt/gt-elvf4+mu5wzd6q", wantOut: "polecat/basalt/gt-elvf4+mu5wzd6q\n"},
 		{name: "no surviving work", wantCode: 3},
-		{name: "rig has no git repo", err: polecat.ErrNoRigRepo, wantCode: 3},
+		{name: "rig has no .repo.git", err: polecat.ErrNoBareRepo, wantCode: 2},
 		{name: "bead routes to no rig", err: fmt.Errorf("gt-elvf4: %w", errBeadRoutesToNoRig), wantCode: 3},
 		{name: "cannot tell", err: errors.New("origin unreachable"), wantCode: 2},
 	} {

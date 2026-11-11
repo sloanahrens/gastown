@@ -1245,8 +1245,8 @@ var errBeadRoutesToNoRig = errors.New("bead routes to no rig")
 // (polecat.WorkSurvival) for beadID: the newest polecat branch — local in the
 // rig repo or on origin — carrying a patch that is on neither the rig's
 // default branch nor an integration branch, or "" when none does. A non-nil
-// error means the answer is unknown, except for polecat.ErrNoRigRepo and
-// errBeadRoutesToNoRig, which mean there is no repo, so no branch to protect.
+// error means the answer is unknown, except for errBeadRoutesToNoRig, which
+// means there is no repo, so no branch to protect.
 func survivingWorkForBead(townRoot, beadID string) (string, error) {
 	rigRoot := rigRootForBead(townRoot, beadID)
 	if rigRoot == "" {
@@ -1259,9 +1259,10 @@ func survivingWorkForBead(townRoot, beadID string) (string, error) {
 var survivingWorkForBeadFn = survivingWorkForBead
 
 // noRepoToProtect reports whether a survival error only says there is no repo
-// (and therefore no branch) for the bead.
+// (and therefore no branch) for the bead. A rig with no .repo.git is not this:
+// polecat.ErrNoBareRepo is unknown, so the hook is kept.
 func noRepoToProtect(err error) bool {
-	return errors.Is(err, polecat.ErrNoRigRepo) || errors.Is(err, errBeadRoutesToNoRig)
+	return errors.Is(err, errBeadRoutesToNoRig)
 }
 
 // reslingSurvivingWorkGuard is sling's re-sling guard for a bead whose

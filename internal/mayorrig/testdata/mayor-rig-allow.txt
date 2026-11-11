@@ -33,7 +33,6 @@ internal/cmd/sling_helpers.go	1	pending-retirement	gt sling: the mayor/rig path 
 internal/config/directives.go	3	pending-retirement	directives loader: reads the central and per-rig directives under mayor/rig
 internal/config/loader.go	1	pending-retirement	config loader: the daemon patrol config path under constants.DirMayor
 internal/constants/constants.go	11	pending-retirement	constants: the DirMayor and DirRig definitions and the RigMayorPath and RigBeadsPath helpers built from them
-internal/crew/manager.go	1	pending-retirement	crew manager: the rig's mayor/rig path as the crew's git base
 internal/daemon/daemon.go	1	pending-retirement	daemon: the rig beads directory under mayor/rig/.beads
 internal/daemon/hm_skew.go	1	pending-retirement	daemon hm skew probe: the hm rig worktree path, hm/mayor/rig
 internal/daemon/om_skew.go	1	pending-retirement	daemon om skew probe: the om rig worktree path, om/mayor/rig
@@ -59,7 +58,6 @@ internal/doltserver/doltserver.go	4	pending-retirement	dolt server: reads the ri
 internal/done/done.go	1	pending-retirement	gt done: the rig work directory under mayor/rig
 internal/forgejocut/repoint.go	2	pending-retirement	forgejo cutover repoint: rewrites remotes in the rig's mayor/rig checkout
 internal/installer/paths.go	1	pending-retirement	installer: the gastown rig directory default under mayor/rig
-internal/jev/landing/wire.go	2	pending-retirement	landing wiring: the git base candidates .repo.git and mayor/rig, and the error text
 internal/jev/rework/wire.go	2	pending-retirement	rework wiring: the git base candidates .repo.git and mayor/rig, and the error text
 internal/jev/scorecard/finding.go	2	pending-retirement	scorecard finding: the git base candidates .repo.git and mayor/rig, and the error text
 internal/mail/address_policy.go	2	pending-retirement	mail address policy: the constants.DirMayor address prefix, which is not the clone path
@@ -67,13 +65,9 @@ internal/mail/router.go	1	pending-retirement	mail router: the constants.DirMayor
 internal/metrics/source_config.go	1	pending-retirement	metrics source config: the .om.json path under the rig's mayor/rig checkout
 internal/nudge/deliver/town.go	1	pending-retirement	nudge delivery: the constants.DirMayor target prefix, which is not the clone path
 internal/plugin/sync.go	1	pending-retirement	plugin sync: the mayor/rig plugins directory it syncs from
-internal/polecat/livegit_sandbox.go	1	pending-retirement	polecat live git sandbox: error text naming .repo.git or mayor/rig
-internal/polecat/manager.go	3	pending-retirement	polecat manager: the legacy mayor/rig git base and its error text
 internal/polecat/seed/cmd/stage/main.go	2	pending-retirement	seed stage command: flag help naming the <rig>/mayor/rig checkouts and the default build source
 internal/polecat/seed/guard.go	1	pending-retirement	seed guard: the mayor/rig checkout it checks for the seed source
 internal/polecat/seed/seed.go	2	pending-retirement	seed: the build rig and source rig mayor/rig checkout paths
-internal/polecat/surviving_branch.go	2	pending-retirement	surviving branch: the legacy mayor/rig git base and its error text
-internal/polecat/surviving_work.go	1	pending-retirement	surviving work: the ErrNoRigRepo text naming mayor/rig
 internal/rig/manager.go	7	pending-retirement	rig manager: the mayor/rig clone, its beads redirect and the route it writes
 internal/rig/repofile.go	2	pending-retirement	rig repo file: reads files from the rig's mayor/rig clone, and its warning text
 internal/rig/types.go	2	pending-retirement	rig types: the mayor/rig entry in the rig directory list, and the RigMayorPath call that builds the checkout path

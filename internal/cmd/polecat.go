@@ -3501,15 +3501,22 @@ func startNukeHookedWork(rel polecatWorkReleaser, survives func(beadID string) (
 	}
 	h.verdict = polecat.VerdictFrom(survives(beadID))
 	if h.verdict.NothingToProtect() {
+		// Released before removal, but the verdict still rides into removal
+		// through judged(): unassignWorkBeads then replays it instead of asking
+		// the rig's git a second time, which for a rig with no .repo.git would
+		// fail closed and keep the hook the nuke has just released (gt-3lvcjz.4).
+		// finish() sees the bead is no longer held and does nothing.
 		h.release()
-		return nil
 	}
 	return h
 }
 
 // judged reports the verdict this nuke reached for its hooked bead before
 // removal, so removal's unassignWorkBeads replays it instead of asking about
-// the same bead a second time (gt-kud90).
+// the same bead a second time (gt-kud90). A nothing-to-protect verdict rides
+// too: the bead was released already, and the replay is what lets removal
+// record the reassignment without opening the rig's git, which for a rig with
+// no .repo.git would fail closed and keep a hook the nuke has released.
 func (h *nukeHookedWork) judged() map[string]polecat.SurvivalVerdict {
 	if h == nil {
 		return nil
@@ -3529,7 +3536,9 @@ func (h *nukeHookedWork) release() {
 // work — and the hook that stays gets a comment built from the final answer:
 // the resume command for a branch, or the command to re-check an unknown one.
 func (h *nukeHookedWork) finish() {
-	if h == nil {
+	if h == nil || h.verdict.NothingToProtect() {
+		// Nothing was kept: the bead was released before removal and removal
+		// replayed that verdict, so there is no hook to settle.
 		return
 	}
 	if held, _ := heldBy(h.rel, h.agentID, h.beadID); !held {

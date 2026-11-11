@@ -201,8 +201,9 @@ func TestNukeHookedWorkEndToEnd(t *testing.T) {
 		{name: "survival unknown: kept, unknown comment", status: "in_progress", who: me, p: working,
 			survives: survivesWith("", unreachable), wantHeld: true, wantAsks: 2,
 			wantComment: "hook kept: could not verify surviving work; run gt polecat surviving-work gt-elvf4"},
-		{name: "rig with no git repo: released", status: "hooked", who: me, p: working,
-			survives: survivesWith("", polecat.ErrNoRigRepo), wantAttempts: 1, wantAsks: 1},
+		{name: "rig with no .repo.git: kept, unknown comment", status: "hooked", who: me, p: working,
+			survives: survivesWith("", polecat.ErrNoBareRepo), wantHeld: true, wantAsks: 2,
+			wantComment: "could not verify surviving work"},
 		{name: "survived before removal, gone after the branch delete: released at finish", status: "hooked", who: me, p: working,
 			survives: survivesSeq([2]any{branch}, [2]any{""}), wantAttempts: 1, wantAsks: 2},
 		{name: "survived before removal, unknown after: kept, unknown comment", status: "hooked", who: me, p: working,
@@ -268,7 +269,7 @@ func TestNukeHandsItsVerdictToRemoval(t *testing.T) {
 		survives     func(string) (string, error)
 		wantSurvives string
 		wantUnknown  bool
-		wantNothing  bool // released at the start: there is no hook left to hand on
+		wantNothing  bool // released at the start; the verdict still rides to removal so it replays, not re-asks
 	}{
 		{name: "surviving work hands the branch on", survives: survivesWith(branch, nil), wantSurvives: branch},
 		{name: "an unknown answer hands the unknown on", survives: survivesWith("", errors.New("origin unreachable")), wantUnknown: true},
@@ -281,8 +282,12 @@ func TestNukeHandsItsVerdictToRemoval(t *testing.T) {
 
 			judged := h.judged()
 			if tc.wantNothing {
-				if judged != nil {
-					t.Fatalf("judged = %v, want none: the hook was released", judged)
+				v, ok := judged["gt-elvf4"]
+				if !ok || !v.NothingToProtect() {
+					t.Fatalf("judged = %v, want the nothing-to-protect verdict handed on so removal replays it", judged)
+				}
+				if got := rel.beads["gt-elvf4"]; got != [2]string{"open", ""} {
+					t.Fatalf("bead after the start = %v, want it released already", got)
 				}
 				return
 			}

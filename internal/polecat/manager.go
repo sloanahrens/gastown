@@ -752,23 +752,15 @@ func workRefusal(name string, status *git.UncommittedWorkStatus, err error) erro
 	return &UncommittedWorkError{PolecatName: name, Status: status}
 }
 
-// repoBase returns the git directory and Git object to use for worktree operations.
-// Prefers the shared bare repo (.repo.git) if it exists, otherwise falls back to mayor/rig.
-// The bare repo architecture allows all worktrees (refinery, polecats) to share branch visibility.
+// repoBase returns the git directory and Git object to use for worktree operations:
+// the rig's shared bare repo (.repo.git). The bare repo architecture allows all
+// worktrees (refinery, polecats) to share branch visibility.
 func (m *Manager) repoBase() (gitRepo, error) {
-	// First check for shared bare repo (new architecture)
-	bareRepoPath := filepath.Join(m.rig.Path, ".repo.git")
-	if info, err := os.Stat(bareRepoPath); err == nil && info.IsDir() {
-		// Bare repo exists - use it
-		return m.gits.OpenDir(bareRepoPath, ""), nil
+	bareRepoPath := constants.RigBareRepoPath(m.rig.Path)
+	if info, err := os.Stat(bareRepoPath); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("no .repo.git under %s", m.rig.Path)
 	}
-
-	// Fall back to mayor/rig (legacy architecture)
-	mayorPath := filepath.Join(m.rig.Path, "mayor", "rig")
-	if _, err := os.Stat(mayorPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("no repo base found (neither .repo.git nor mayor/rig exists)")
-	}
-	return m.gits.Open(mayorPath), nil
+	return m.gits.OpenDir(bareRepoPath, ""), nil
 }
 
 // polecatDir returns the parent directory for a polecat.
@@ -841,7 +833,7 @@ type AddOptions struct {
 }
 
 // Add creates a new polecat as a git worktree from the repo base.
-// Uses the shared bare repo (.repo.git) if available, otherwise mayor/rig.
+// Uses the shared bare repo (.repo.git).
 // This is much faster than a full clone and shares objects with all worktrees.
 // buildBranchName creates a branch name using the configured template or default format.
 // Supported template variables:
@@ -1363,7 +1355,7 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 		_ = m.namePool.Save()
 	}
 
-	// Get the repo base (bare repo or mayor/rig)
+	// Get the repo base (the shared bare repo)
 	repoGit, err := m.repoBase()
 	if err != nil {
 		cleanupOnError()
@@ -1732,19 +1724,8 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 	// Get repo base to remove the worktree properly
 	repoGit, err := m.repoBase()
 	if err != nil {
-		// Best-effort: try to prune stale worktree entries from both possible repo locations.
-		// This handles edge cases where the repo base is corrupted but worktree entries exist.
-		bareRepoPath := filepath.Join(m.rig.Path, ".repo.git")
-		if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
-			bareGit := m.gits.OpenDir(bareRepoPath, "")
-			_ = bareGit.WorktreePrune()
-		}
-		mayorRigPath := filepath.Join(m.rig.Path, "mayor", "rig")
-		if info, statErr := os.Stat(mayorRigPath); statErr == nil && info.IsDir() {
-			mayorGit := m.gits.Open(mayorRigPath)
-			_ = mayorGit.WorktreePrune()
-		}
-		// Fall back to direct removal if repo base not found
+		// Fall back to direct removal if repo base not found: with no .repo.git
+		// there is no repository to prune worktree entries from.
 		if rmErr := os.RemoveAll(polecatDir); rmErr != nil {
 			return rmErr
 		}
@@ -2199,7 +2180,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 	polecatDir := m.polecatDir(name)
 	newClonePath := filepath.Join(polecatDir, m.rig.Name)
 
-	// Get the repo base (bare repo or mayor/rig)
+	// Get the repo base (the shared bare repo)
 	repoGit, err := m.repoBase()
 	if err != nil {
 		return nil, fmt.Errorf("finding repo base: %w", err)
@@ -4233,8 +4214,9 @@ func (m *Manager) resolveSetupCommand(worktreePath string) string { //nolint:unp
 	}
 
 	// Resolved across rig root -> repo -> rig-local (gt-egiv), the same
-	// precedence every gate-command call site must use.
-	mq := rig.ResolveMergeQueueConfig(m.townRoot, m.rig.Name)
+	// precedence every gate-command call site must use. The repo tier is read
+	// through the manager's opener, so a unit test's rig reads its fixture repo.
+	mq := rig.ResolveMergeQueueConfigIn(m.gits.RepoFile, m.townRoot, m.rig.Name)
 	if mq == nil {
 		return ""
 	}

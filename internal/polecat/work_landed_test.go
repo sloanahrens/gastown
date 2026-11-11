@@ -41,12 +41,12 @@ func TestSeatBeadID(t *testing.T) {
 // head is that commit.
 func landedSeatRig(t *testing.T) (w *world, repoPath string, head string, db *polecatDB) {
 	t.Helper()
-	_, mayorRig, bd, world := canonicalRig(t)
+	_, bare, bd, world := canonicalRig(t)
 	for _, id := range []string{"gt-seat", "gt-hook", "gt-other"} {
 		bd.Seed(beads.Issue{ID: id, Title: id, Status: "open"})
 	}
-	head = world.writeAndCommit(t, mayorRig, "feat: seat work", map[string]string{"seat.txt": "work\n"})
-	return world, mayorRig, head, bd
+	head = world.Commit(t, bare, "main", "feat: seat work", map[string]string{"seat.txt": "work\n"})
+	return world, bare, head, bd
 }
 
 // ApplyWorkLanded asks the one predicate with the bead the seat's hook or

@@ -166,7 +166,8 @@ func TestReslingSurvivingWorkGuard(t *testing.T) {
 		{name: "work survives", branch: branch, want: []string{"refusing to re-sling gt-ibt8", branch, "--branch " + branch, "--force"}},
 		{name: "survival unknown", err: errors.New("origin unreachable"),
 			want: []string{"cannot verify surviving work (origin unreachable)", "resume with --branch or override with --force"}},
-		{name: "no rig repo", err: polecat.ErrNoRigRepo},
+		{name: "no .repo.git", err: fmt.Errorf("%w under /town/gastown", polecat.ErrNoBareRepo),
+			want: []string{"cannot verify surviving work (no .repo.git under /town/gastown)", "resume with --branch or override with --force"}},
 		{name: "routes to no rig", err: fmt.Errorf("gt-ibt8: %w", errBeadRoutesToNoRig)},
 		{name: "nothing survives"},
 	}

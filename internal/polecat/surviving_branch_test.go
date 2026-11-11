@@ -2,9 +2,12 @@ package polecat
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // TestBranchOnOrigin: the spec dispatcher's resume-branch check reads the
@@ -16,10 +19,10 @@ func TestBranchOnOrigin(t *testing.T) {
 	w := newWorld()
 	root := t.TempDir()
 	buildCanonicalRigIn(t, w, root)
-	mayorRig := filepath.Join(root, "mayor", "rig")
-	head := w.rev(t, mayorRig, "main")
-	w.SetRef(t, mayorRig, "refs/heads/polecat/agate/gt-a+mu1", head)
-	w.SetRef(t, mayorRig, "refs/heads/polecat/agate/gt-a+mu1-suffix", head)
+	bare := constants.RigBareRepoPath(root)
+	head := w.rev(t, bare, "main")
+	w.SetRef(t, bare, "refs/heads/polecat/agate/gt-a+mu1", head)
+	w.SetRef(t, bare, "refs/heads/polecat/agate/gt-a+mu1-suffix", head)
 
 	for _, tc := range []struct {
 		branch string
@@ -40,8 +43,56 @@ func TestBranchOnOrigin(t *testing.T) {
 		}
 	}
 
-	if _, err := branchOnOrigin(w.opener(), t.TempDir(), "polecat/agate/gt-a+mu1"); !errors.Is(err, ErrNoRigRepo) {
-		t.Errorf("no-repo error = %v, want ErrNoRigRepo", err)
+	if _, err := branchOnOrigin(w.opener(), t.TempDir(), "polecat/agate/gt-a+mu1"); !errors.Is(err, ErrNoBareRepo) {
+		t.Errorf("no-repo error = %v, want ErrNoBareRepo", err)
+	}
+}
+
+// A rig root with no .repo.git fails closed from every public survival reader,
+// with or without a legacy mayor/rig clone beside it: the polecat branches are
+// not read from anywhere else, so the answer is the unknown ErrNoBareRepo, never
+// a rig with nothing to protect. None of these readers runs git before this
+// refusal, so the rows are hermetic.
+func TestRigWithNoBareRepoFailsClosedForEachReader(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		legacy bool // a mayor/rig clone with no .repo.git beside it
+	}{
+		{name: "no git state"},
+		{name: "legacy mayor/rig clone", legacy: true},
+	} {
+		for _, r := range []struct {
+			name string
+			read func(root string) error
+		}{
+			{name: "ListOriginPolecatBranches", read: func(root string) error {
+				_, err := ListOriginPolecatBranches(root)
+				return err
+			}},
+			{name: "BranchOnOrigin", read: func(root string) error {
+				_, err := BranchOnOrigin(root, "polecat/agate/gt-a+mu1")
+				return err
+			}},
+			{name: "NewWorkSurvival", read: func(root string) error {
+				_, err := NewWorkSurvival(root)
+				return err
+			}},
+		} {
+			t.Run(tc.name+"/"+r.name, func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				if tc.legacy {
+					if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				err := r.read(root)
+				if !errors.Is(err, ErrNoBareRepo) || !strings.Contains(err.Error(), "no .repo.git under "+root) {
+					t.Fatalf("err = %v, want ErrNoBareRepo naming no .repo.git under %s", err, root)
+				}
+			})
+		}
 	}
 }
 

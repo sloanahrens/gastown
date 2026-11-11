@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 func TestSandboxSeatGitStateRunningSandboxIsUnknown(t *testing.T) {
@@ -269,7 +271,7 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 		w, dir, branch := sandboxHostRepo(t)
 		rigRoot := t.TempDir()
 		buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
-		shared := filepath.Join(rigRoot, "mayor", "rig")
+		shared := constants.RigBareRepoPath(rigRoot)
 		// The shared repository kept the seat's branch at a commit the worktree
 		// never reached.
 		w.SetRef(t, shared, "refs/heads/"+branch, w.rev(t, shared, "refs/heads/main"))
@@ -285,7 +287,7 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 		w, dir, branch := sandboxHostRepo(t)
 		rigRoot := t.TempDir()
 		buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
-		shared := filepath.Join(rigRoot, "mayor", "rig")
+		shared := constants.RigBareRepoPath(rigRoot)
 		w.SetRef(t, shared, "refs/heads/"+branch, w.rev(t, shared, "refs/heads/main"))
 		w.DeleteRef(t, shared, "refs/remotes/origin/main")
 		st := judgeGoneIn(w, dir, rigRoot, branch)
@@ -298,7 +300,7 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 		t.Parallel()
 		w, dir, branch := sandboxHostRepo(t)
 		rigRoot := t.TempDir()
-		// A rig root whose mayor/rig is not a repository the seam can read.
+		// A rig root with a legacy mayor/rig clone and no .repo.git: the shared repository cannot be read.
 		if err := os.MkdirAll(filepath.Join(rigRoot, "mayor", "rig"), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -309,9 +311,97 @@ func TestSandboxSeatGitStateGoneSandboxJudgesTheHostWorktree(t *testing.T) {
 	})
 }
 
+// A gone sandbox seat's recorded branch is read from the rig's shared .repo.git,
+// the second copy of the seat's work. A rig with no .repo.git, whether it has
+// neither repo or only a legacy mayor/rig clone, cannot prove that copy is
+// clean, so the seat is unknown, never clean, through both readers that open
+// the shared repository: a present host worktree and a gone one (gt-3lvcjz.4).
+func TestLiveGitRigWithNoSharedRepoIsUnknownForASandboxSeat(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		legacyClone bool
+	}{
+		{name: "a rig with neither repo is unknown", legacyClone: false},
+		{name: "a rig with only a mayor/rig clone is unknown", legacyClone: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			w, hostDir, branch := sandboxHostRepo(t)
+			rigRoot := t.TempDir()
+			if tc.legacyClone {
+				if err := os.MkdirAll(filepath.Join(rigRoot, "mayor", "rig"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			goneDir := filepath.Join(rigRoot, "polecats", "toast", "gastown")
+			for _, seat := range []struct {
+				name string
+				path string
+			}{
+				{name: "host worktree present", path: hostDir},
+				{name: "host worktree gone", path: goneDir},
+			} {
+				t.Run(seat.name, func(t *testing.T) {
+					t.Parallel()
+					st := judgeGoneIn(w, seat.path, rigRoot, branch)
+					want := "no .repo.git under " + rigRoot
+					if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, want) {
+						t.Errorf("state = %+v, want unknown naming %q", st, want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// sharedRepoSeatRef fails closed for a rig root with no .repo.git, with or
+// without a legacy mayor/rig clone: the answer is ErrNoBareRepo, never the
+// not-found of a repository that holds no ref. An empty rig root names no
+// repository, so it is not found.
+func TestSharedRepoSeatRefWithoutBareRepo(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		legacy  bool // a mayor/rig clone with no .repo.git beside it
+		empty   bool // the caller names no rig root
+		wantErr bool
+	}{
+		{name: "a rig with no git state fails closed", wantErr: true},
+		{name: "a rig with only a mayor/rig clone fails closed", legacy: true, wantErr: true},
+		{name: "an empty rig root is not found", empty: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			if tc.empty {
+				root = " "
+			}
+			if tc.legacy {
+				if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			g, ref, ok, err := sharedRepoSeatRef(gitOpener{}, root, "polecat/toast/gt-a+x")
+			if !tc.wantErr {
+				if err != nil || ok || g != nil || ref != "" {
+					t.Fatalf("sharedRepoSeatRef = (%v, %q, %v, %v), want not found with no error", g, ref, ok, err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrNoBareRepo) || !strings.Contains(err.Error(), "no .repo.git under "+root) {
+				t.Fatalf("err = %v, want ErrNoBareRepo naming no .repo.git under %s", err, root)
+			}
+			if ok {
+				t.Fatalf("ok = true for a rig with no .repo.git, want false")
+			}
+		})
+	}
+}
+
 const sharedRepoBranch = "polecat/toast/gt-a+x"
 
-// sharedRepoRig builds a rig whose mayor/rig shared repository holds the
+// sharedRepoRig builds a rig whose shared .repo.git holds the
 // seat's branch with one commit, and returns the world, the rig root, and the
 // path the seat's gone worktree directory is named by.
 func sharedRepoRig(t *testing.T) (*world, string, string) {
@@ -319,7 +409,7 @@ func sharedRepoRig(t *testing.T) (*world, string, string) {
 	w := newWorld()
 	rigRoot := t.TempDir()
 	buildRigIn(t, w, rigRoot, map[string]string{"README.md": "# Test\n"})
-	shared := filepath.Join(rigRoot, "mayor", "rig")
+	shared := constants.RigBareRepoPath(rigRoot)
 	w.SetRef(t, shared, "refs/heads/"+sharedRepoBranch, w.rev(t, shared, "refs/heads/main"))
 	w.Commit(t, shared, sharedRepoBranch, "the seat's commit", map[string]string{"fix.txt": "x\n"})
 	return w, rigRoot, filepath.Join(rigRoot, "polecats", "toast", "gastown")
@@ -351,7 +441,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("a local branch already pushed reads clean", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		shared := filepath.Join(rigRoot, "mayor", "rig")
+		shared := constants.RigBareRepoPath(rigRoot)
 		pushed := w.rev(t, shared, "refs/heads/"+sharedRepoBranch)
 		mainTip := w.rev(t, shared, "refs/heads/main")
 		w.SetRef(t, shared, "refs/remotes/origin/"+sharedRepoBranch, pushed)
@@ -369,7 +459,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("no local branch reads clean", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/heads/"+sharedRepoBranch)
+		w.DeleteRef(t, constants.RigBareRepoPath(rigRoot), "refs/heads/"+sharedRepoBranch)
 		st := judgeGoneIn(w, gone, rigRoot, sharedRepoBranch)
 		if st.Source != GitStateSourceLive || st.UnpushedCommits != 0 {
 			t.Errorf("state = %+v, want live clean for a branch the shared repo never held", st)
@@ -379,7 +469,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("an unreadable comparison is unknown", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/remotes/origin/main")
+		w.DeleteRef(t, constants.RigBareRepoPath(rigRoot), "refs/remotes/origin/main")
 		st := judgeGoneIn(w, gone, rigRoot, sharedRepoBranch)
 		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "comparing refs/heads/") {
 			t.Errorf("state = %+v, want unknown naming the comparison", st)
@@ -410,7 +500,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("no recorded branch and no local branch for the seat reads clean", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		shared := filepath.Join(rigRoot, "mayor", "rig")
+		shared := constants.RigBareRepoPath(rigRoot)
 		w.DeleteRef(t, shared, "refs/heads/"+sharedRepoBranch)
 		// Another seat's branch in the repository is not this seat's work.
 		w.SetRef(t, shared, "refs/heads/polecat/other/gt-b+x", w.rev(t, shared, "refs/heads/main"))
@@ -432,7 +522,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("no recorded branch with an unreadable branch list is unknown", func(t *testing.T) {
 		t.Parallel()
 		root := t.TempDir()
-		if err := os.MkdirAll(filepath.Join(root, "mayor", "rig"), 0o755); err != nil {
+		if err := os.MkdirAll(constants.RigBareRepoPath(root), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		st := judgeGoneIn(newWorld(), filepath.Join(root, "polecats", "toast", "gastown"), root, "")
@@ -444,7 +534,7 @@ func TestSandboxSeatGoneSeatMissingWorktreeJudgesTheSharedRepo(t *testing.T) {
 	t.Run("no recorded branch with an unreadable comparison is unknown", func(t *testing.T) {
 		t.Parallel()
 		w, rigRoot, gone := sharedRepoRig(t)
-		w.DeleteRef(t, filepath.Join(rigRoot, "mayor", "rig"), "refs/remotes/origin/main")
+		w.DeleteRef(t, constants.RigBareRepoPath(rigRoot), "refs/remotes/origin/main")
 		st := judgeGoneIn(w, gone, rigRoot, "")
 		if st.Source != GitStateSourceUnknown || !strings.Contains(st.FailedReason, "judging refs/heads/") {
 			t.Errorf("state = %+v, want unknown naming the comparison", st)

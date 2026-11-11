@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -18,6 +19,16 @@ import (
 type mrlessBeads struct{ *beadsfake.Fake }
 
 func (mrlessBeads) FindMRForBranchAny(string) (*beads.Issue, error) { return nil, nil }
+
+// rigWithBareRepo is the rig at town/gastown with the shared bare repo every
+// polecat git read opens, <rig>/.repo.git, as a real rig has one. No mayor/rig
+// clone stands in for it.
+func rigWithBareRepo(t *testing.T, town string) *rig.Rig {
+	t.Helper()
+	r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+	gitfake.New().InitBare(t, constants.RigBareRepoPath(r.Path))
+	return r
+}
 
 // gatewayOnlySeat passes a seat's gateway answer through as its host
 // measurement, so a test that models no repository still drives the gateway
@@ -61,7 +72,7 @@ func TestCheckRecoveryOfASandboxSeat(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
-			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			r := rigWithBareRepo(t, town)
 			db := mrlessBeads{beadsfake.New()}
 			agentID := polecatBeadIDForRig(r, "gastown", "ember")
 			if _, err := db.Create(beads.CreateOptions{
@@ -164,7 +175,7 @@ func TestCheckRecoveryOfAGoneSandboxSeatTellsLostWork(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
-			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			r := rigWithBareRepo(t, town)
 			db := mrlessBeads{beadsfake.New()}
 			agentID := polecatBeadIDForRig(r, "gastown", "ember")
 			if _, err := db.Create(beads.CreateOptions{
@@ -579,7 +590,7 @@ func TestCheckRecoveryOfASandboxSeatWithNoRecordedBranchTellsItsLanding(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
-			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			r := rigWithBareRepo(t, town)
 			fake := mrlessBeads{beadsfake.New()}
 			var db recoveryBeads = fake
 			switch {
@@ -760,7 +771,7 @@ func TestCheckRecoveryReconcilesCleanupOfALandedSandboxSeatWithNoBranch(t *testi
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			town := t.TempDir()
-			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+			r := rigWithBareRepo(t, town)
 			db := mrlessBeads{beadsfake.New()}
 			agentID := polecatBeadIDForRig(r, "gastown", "ember")
 			if _, err := db.Create(beads.CreateOptions{
@@ -840,12 +851,15 @@ func TestCheckRecoveryGoneSandboxWithHostWorktreeThroughTheSeam(t *testing.T) {
 			r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
 			clonePath := filepath.Join(r.Path, "polecats", "ember", "gastown")
 
-			// The seat's host worktree is a checkout of a modeled repository:
-			// one commit on its polecat branch, pushed or not as the case says.
+			// The seat's host worktree is a checkout of the rig's shared bare repo,
+			// <rig>/.repo.git, as a real polecat worktree is: one commit on its
+			// polecat branch, pushed or not as the case says. That bare repo is the
+			// origin the push lands in and the repo the shared-ref read opens.
 			fakeGit := gitfake.New()
-			origin := filepath.Join(town, "origin.git")
+			origin := constants.RigBareRepoPath(r.Path)
 			fakeGit.InitBare(t, origin)
 			base := fakeGit.Commit(t, origin, "main", "initial", map[string]string{"README.md": "# Test\n"})
+			fakeGit.SetRef(t, origin, "refs/remotes/origin/main", base)
 			fakeGit.SetRef(t, origin, "refs/heads/"+branch, base)
 			fakeGit.Clone(t, origin, clonePath)
 			if err := fakeGit.OpenBranchRepo(clonePath).CheckoutNewBranch(branch, "HEAD"); err != nil {
@@ -856,9 +870,17 @@ func TestCheckRecoveryGoneSandboxWithHostWorktreeThroughTheSeam(t *testing.T) {
 			}
 			fakeGit.CommitWorktree(t, clonePath, "the seat's fix")
 			if tt.push {
-				if err := fakeGit.OpenBranchRepo(clonePath).Push("origin", branch, false); err != nil {
+				host := fakeGit.OpenBranchRepo(clonePath)
+				if err := host.Push("origin", branch, false); err != nil {
 					t.Fatalf("push %s: %v", branch, err)
 				}
+				// A worktree's remote-tracking refs live in the rig's shared repo,
+				// so the push shows there as origin/<branch> at the pushed commit.
+				pushed, err := host.Rev("HEAD")
+				if err != nil {
+					t.Fatalf("rev HEAD: %v", err)
+				}
+				fakeGit.SetRef(t, origin, "refs/remotes/origin/"+branch, pushed)
 			}
 
 			db := mrlessBeads{beadsfake.New()}
@@ -885,6 +907,9 @@ func TestCheckRecoveryGoneSandboxWithHostWorktreeThroughTheSeam(t *testing.T) {
 					Open: func(dir string) polecat.SandboxSeatGitRepo {
 						opened = append(opened, dir)
 						return fakeGit.OpenBranchRepo(dir)
+					},
+					OpenDir: func(gitDir, _ string) polecat.SandboxSeatGitRepo {
+						return fakeGit.OpenBranchRepo(gitDir)
 					},
 				},
 			}
