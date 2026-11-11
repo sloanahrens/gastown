@@ -55,7 +55,6 @@ var deletedCommands = [][]string{
 	{"cleanup"},
 	{"vitals"},
 	{"health"}, // gt-s3rec.4: townhealth and gt status --line replace it
-	{"host"},   // gt-a2uug4.10: the Mac host agent is gt-mac-watch's, not gt's
 	{"start"},
 	{"crew", "next"},
 	{"crew", "prev"},
