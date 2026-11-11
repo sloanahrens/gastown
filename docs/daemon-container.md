@@ -314,9 +314,9 @@ is fixed, read "running" from the Supervised line and from the checks in Step 7,
 which read the container and `state.json` and were correct.
 
 **Step 6. Check the host probes for the scratch town.** gt runs no host agent.
-The Mac's probes come from gt-mac-watch, a devops launchd job that publishes
-`probes.json` into the daemon pod with `kubectl exec`. Before Step 7, confirm
-the scratch root's `.runtime/host/probes.json` is being written; if no
+Before relying on the file, read [Host probes in the pod](design/pod-host-probes.md)
+for what the Mac's gt-mac-watch is and how it publishes. This step checks only
+that the scratch root's `.runtime/host/probes.json` is being written; if no
 publisher writes it, the file goes stale and the daemon refuses it after 180
 seconds.
 Nothing in this step starts or stops gt-mac-watch, and it stays loaded for the
