@@ -182,10 +182,10 @@ type Env struct {
 	BurstHost func(now time.Time) BurstHostReading
 	// HostProbes, when set, is where the host group reads the Docker Desktop
 	// disk from: the probe file the host agent publishes, for a snapshot whose
-	// process is the town's container. The CPU share comes from the pod's cgroup
-	// then. sysctl, top, lsof and docker inside a container read the container,
-	// so nil runs those commands, which is what a snapshot on the host (launchd)
-	// does.
+	// process is the town's container. The CPU share comes from the container's
+	// own cgroup then. sysctl, top, lsof and docker inside a container read the
+	// container, so nil runs those commands, which is what a snapshot on the host
+	// (launchd) does.
 	HostProbes func(now time.Time) (hostprobe.Probes, error)
 }
 

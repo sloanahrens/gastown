@@ -21,15 +21,15 @@ const hostCommandTimeout = 5 * time.Second
 
 // hostSource is the host group: the machine the snapshot describes, read with
 // the macOS commands the operator uses by hand, plus one timed bead read for
-// what bd costs it. In container mode the CPU share comes from the pod's cgroup
-// and the Docker Desktop disk from the host agent's probe file, because sysctl,
-// top, lsof and docker inside a container read the container (gt-jd1fcj). A
-// probe that cannot give a reading leaves its column nil rather than inventing
-// a number, and the failure is counted in
-// host_probe_failures so a column that is nil because its command failed, hung,
-// printed nothing or printed something the parser could not read is a number in
-// the record and not a silent absence. The other columns are untouched: one
-// broken command costs one reading, never the group.
+// what bd costs it. In container mode the CPU share comes from the container's
+// own cgroup and the Docker Desktop disk from the host agent's probe file,
+// because sysctl, top, lsof and docker inside a container read the container
+// (gt-jd1fcj). A probe that cannot give a reading leaves its column nil rather
+// than inventing a number, and the failure is counted in host_probe_failures so
+// a column that is nil because its command failed, hung, printed nothing or
+// printed something the parser could not read is a number in the record and not
+// a silent absence. The other columns are untouched: one broken command costs
+// one reading, never the group.
 type hostSource struct {
 	// timeout bounds each probe; zero means hostCommandTimeout. Tests set it
 	// short to exercise the deadline itself.
@@ -58,9 +58,10 @@ func newHostSource() hostSource {
 
 func (hostSource) Group() string { return "host" }
 
-// Collect fills the host group: in container mode from the pod's cgroup and the
-// host agent's file, from the Mac's own commands otherwise. A probe that cannot
-// give a reading is a nil column counted in host_probe_failures; only an Env
+// Collect fills the host group: in container mode from the container's own
+// cgroup and the host agent's file, from the Mac's own commands otherwise. A
+// probe that cannot give a reading is a nil column counted in
+// host_probe_failures; only an Env
 // with no bead store, which is a wiring error rather than a host that could not
 // answer, is an error.
 func (s hostSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
@@ -94,7 +95,7 @@ func (s hostSource) probeTimeout() time.Duration {
 
 // collectInContainer fills the group for a process inside the town's container.
 // None of the macOS commands runs: their answer would describe the container.
-// cpu_idle_pct is the pod's own CPU, sampled from its cgroup, because the host
+// cpu_idle_pct is the container's own CPU, sampled from its cgroup, because the host
 // agent's idle share is the Mac's and the container cannot see it. docker_disk_pct
 // is the one field still read from the host agent's probe file, since only the
 // Mac can ask Docker Desktop for its VM disk. The bead read stays, because it
@@ -144,26 +145,38 @@ func hostProbesFromFile(town string) func(now time.Time) (hostprobe.Probes, erro
 	}
 }
 
-// The pod's cgroup v2 files. The pod's CPU is accounted to its own cgroup, so
-// the counter and the quota describe the pod the daemon runs in, which is the
-// CPU the container can see, not the Mac under it.
+// The container's cgroup v2 files. The container's CPU is accounted to its own
+// cgroup, so the counter and the quota describe the container the daemon runs
+// in, which is the CPU the container can see, not the Mac under it.
 const (
 	podCPUStatPath = "/sys/fs/cgroup/cpu.stat"
 	podCPUMaxPath  = "/sys/fs/cgroup/cpu.max"
 )
 
-// podCPUIdlePct reads the idle share of the pod's CPU over one window. The
-// cumulative usage counter is read on either side of the window, and the burn
-// is the share of the pod's cores (cpu.max, or every core the node has when the
-// pod has no quota) that the window's wall time could have used. The window is
-// hostCPUWindow, waited through env.Wait, so the group takes that second too.
+// podCPUOvershoot is how many points past fully busy a sample may read and
+// still be rounding. The counter and the wall clock are read at different
+// instants, so a short window can read a little over every core busy.
+const podCPUOvershoot = 2
+
+// podCPUIdlePct reads the idle share of the container's own CPU over one window.
+// The cumulative usage counter is read on either side of the window, and the
+// burn is the share of the container's cores (cpu.max, or every core the node
+// has when there is no quota) that the window's wall time could have used. The
+// window is hostCPUWindow, waited through env.Wait, so the group takes that
+// second too.
 //
-// A cgroup file that cannot be read, a counter that fell between the samples and
-// a window that did not move are errors: each would make the idle share a number
-// nothing measured.
+// A window the group's deadline cannot hold is refused before anything is read,
+// as the host CPU group refuses it: the wait cannot be interrupted. A cgroup
+// file that cannot be read, a counter that fell between the samples and a window
+// that did not move are errors: each would make the idle share a number nothing
+// measured. A burn past fully busy by more than podCPUOvershoot is an error too:
+// clamping it would hide a counter that disagrees with the clock.
 func podCPUIdlePct(ctx context.Context, env Env) (float64, error) {
 	if env.Wait == nil || env.ReadFile == nil {
-		return 0, errors.New("no cgroup read or wait seam, so the pod's CPU cannot be sampled")
+		return 0, errors.New("no cgroup read or wait seam, so the container's CPU cannot be sampled")
+	}
+	if err := hostCPUWindowFits(ctx, hostCPUWindow); err != nil {
+		return 0, err
 	}
 	cores, err := podCPUCores(env)
 	if err != nil {
@@ -190,24 +203,26 @@ func podCPUIdlePct(ctx context.Context, env Env) (float64, error) {
 		return 0, errors.New("the two samples share a timestamp, so there is no window to divide by")
 	}
 	if second < first {
-		return 0, errors.New("the pod's cpu.stat usage fell between samples, so it is not one cgroup's counter")
+		return 0, errors.New("the container's cpu.stat usage fell between samples, so it is not one cgroup's counter")
 	}
 	busy := 100 * (float64(second-first) / 1e6) / (window * cores)
-	// The counter and the wall clock round against each other, so a sample can
-	// read a little past every core busy. That is fully busy, not negative idle.
+	if busy > 100+podCPUOvershoot {
+		return 0, fmt.Errorf("the container's cpu.stat usage_usec rose from %d to %d while the wall clock read %.3fs over %g cores, %.1f%% busy, past the rounding tolerance",
+			first, second, window, cores, busy)
+	}
 	if busy > 100 {
 		busy = 100
 	}
 	return 100 - busy, nil
 }
 
-// podCPUCores is how many cores the pod may use: the quota over the period in
-// cpu.max, which reads "max <period>" when the pod has no quota. A pod with no
-// quota may use every core the node has.
+// podCPUCores is how many cores the container may use: the quota over the
+// period in cpu.max, which reads "max <period>" when the container has no quota.
+// A container with no quota may use every core the node has.
 func podCPUCores(env Env) (float64, error) {
 	raw, err := env.ReadFile(podCPUMaxPath)
 	if err != nil {
-		return 0, fmt.Errorf("reading the pod's cpu.max: %w", err)
+		return 0, fmt.Errorf("reading the container's cpu.max: %w", err)
 	}
 	fields := strings.Fields(string(raw))
 	if len(fields) != 2 {
@@ -230,12 +245,12 @@ func podCPUCores(env Env) (float64, error) {
 	return quota / period, nil
 }
 
-// podCPUUsage reads the pod's cumulative CPU time, in microseconds, from the
-// usage_usec line of cpu.stat.
+// podCPUUsage reads the container's cumulative CPU time, in microseconds, from
+// the usage_usec line of cpu.stat.
 func podCPUUsage(env Env) (int64, error) {
 	raw, err := env.ReadFile(podCPUStatPath)
 	if err != nil {
-		return 0, fmt.Errorf("reading the pod's cpu.stat: %w", err)
+		return 0, fmt.Errorf("reading the container's cpu.stat: %w", err)
 	}
 	for _, line := range strings.Split(string(raw), "\n") {
 		fields := strings.Fields(line)

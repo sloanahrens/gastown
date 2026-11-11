@@ -813,8 +813,8 @@ func TestHostCPUIdleFromThePodCgroupSamples(t *testing.T) {
 			want:   87.5,
 		},
 		{
-			name:   "burn past every core reads fully busy",
-			cgroup: podCgroup{cpuMax: "100000 100000", stat: [2]string{"usage_usec 0\n", "usage_usec 1500000\n"}},
+			name:   "a burn within the rounding tolerance reads fully busy",
+			cgroup: podCgroup{cpuMax: "100000 100000", stat: [2]string{"usage_usec 0\n", "usage_usec 1010000\n"}},
 			want:   0,
 		},
 		{
@@ -896,4 +896,88 @@ func TestHostCPUIdleRefusesWhatItCannotRead(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestHostCPUContainerWindowTheDeadlineCannotHoldFailsTheGroup: a deadline that
+// leaves less than the window refuses the container's CPU reading before any
+// cgroup file is read or any wait runs, as the host CPU group refuses it. The
+// deadline is half a window away, so the refusal is the window's, not the
+// probes' own timeout.
+func TestHostCPUContainerWindowTheDeadlineCannotHoldFailsTheGroup(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+	town := t.TempDir()
+	writeHostProbesFile(t, town, hostProbeFileFixture(at))
+	env := containerEnv(t, hostFixtureEnv(at), town, hostPodCgroupHalfBusy)
+	readFile := env.ReadFile
+	var statReads int
+	env.ReadFile = func(path string) ([]byte, error) {
+		if path == podCPUStatPath {
+			statReads++
+		}
+		return readFile(path)
+	}
+	waited := false
+	wait := env.Wait
+	env.Wait = func(d time.Duration) {
+		waited = true
+		wait(d)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(hostCPUWindow/2))
+	defer cancel()
+
+	got, err := newHostSource().Collect(ctx, env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if got["cpu_idle_pct"] != nil {
+		t.Errorf("cpu_idle_pct = %v, want nil: a window the deadline cannot hold is no reading", got["cpu_idle_pct"])
+	}
+	if got["host_probe_failures"] != 1 {
+		t.Errorf("host_probe_failures = %v, want 1: the refused CPU reading is counted", got["host_probe_failures"])
+	}
+	if waited || statReads != 0 {
+		t.Errorf("waited = %v, cpu.stat reads = %d, want neither: the wait cannot be cut short past the deadline", waited, statReads)
+	}
+}
+
+// TestHostCPUContainerOvershootBeyondToleranceFails: a burn one point past fully
+// busy is rounding and reads fully busy. A burn 50 points past it means the
+// counter and the wall clock disagree, so the reading is an error that names
+// both counters, and the column is nil rather than a clamped zero.
+func TestHostCPUContainerOvershootBeyondToleranceFails(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 24, 13, 4, 2, 0, time.UTC)
+	t.Run("one point past every core clamps to fully busy", func(t *testing.T) {
+		t.Parallel()
+		env := containerEnv(t, hostFixtureEnv(at), t.TempDir(), podCgroup{
+			cpuMax: "100000 100000",
+			stat:   [2]string{"usage_usec 0\n", "usage_usec 1010000\n"},
+		})
+
+		got, err := podCPUIdlePct(context.Background(), env)
+		if err != nil {
+			t.Fatalf("podCPUIdlePct: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("podCPUIdlePct = %v, want 0: the rounding overshoot is fully busy", got)
+		}
+	})
+	t.Run("fifty points past every core is an error naming both counters", func(t *testing.T) {
+		t.Parallel()
+		env := containerEnv(t, hostFixtureEnv(at), t.TempDir(), podCgroup{
+			cpuMax: "100000 100000",
+			stat:   [2]string{"usage_usec 1000000\n", "usage_usec 2500000\n"},
+		})
+
+		got, err := podCPUIdlePct(context.Background(), env)
+		if err == nil {
+			t.Fatalf("podCPUIdlePct = %v, want an error: a burn 50 points past fully busy is not rounding", got)
+		}
+		for _, counter := range []string{"usage_usec", "wall clock"} {
+			if !strings.Contains(err.Error(), counter) {
+				t.Errorf("error %q does not name the %q counter", err, counter)
+			}
+		}
+	})
 }
