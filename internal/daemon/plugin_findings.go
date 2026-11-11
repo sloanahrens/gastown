@@ -21,13 +21,13 @@ import (
 )
 
 // cloudDSNWatch is what the daemon keeps of the Postgres ledger's DSN file
-// between cloud-check runs: whether its attention item is open, and when its
-// refusal line was last logged. Runs of one plugin do not overlap, and the lock
-// keeps the state honest if that ever changes.
+// between cloud-check runs: whether its attention item is open, and when each
+// kind of its check line was last logged. Runs of one plugin do not overlap, and
+// the lock keeps the state honest if that ever changes.
 type cloudDSNWatch struct {
 	mu     sync.Mutex
 	raised bool
-	logAt  time.Time
+	logAt  map[string]time.Time
 }
 
 // isRaised reports whether the item this watch raised is still open.
@@ -44,15 +44,19 @@ func (w *cloudDSNWatch) setRaised(raised bool) {
 	w.raised = raised
 }
 
-// allowLog reports whether a refusal line may be logged at now: the first in
-// each cloudDSNLogInterval, and no other.
-func (w *cloudDSNWatch) allowLog(now time.Time) bool {
+// allowLog reports whether the line under key may be logged at now: the first
+// in each cloudDSNLogInterval for that key, and no other. A line under one key
+// never holds back a line under another.
+func (w *cloudDSNWatch) allowLog(key string, now time.Time) bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if !w.logAt.IsZero() && now.Sub(w.logAt) < cloudDSNLogInterval {
+	if last, ok := w.logAt[key]; ok && now.Sub(last) < cloudDSNLogInterval {
 		return false
 	}
-	w.logAt = now
+	if w.logAt == nil {
+		w.logAt = map[string]time.Time{}
+	}
+	w.logAt[key] = now
 	return true
 }
 
@@ -101,11 +105,18 @@ const (
 	cloudNotConfiguredKey = "cloud-step-not-configured"
 
 	// cloudDSNEmptyKey keys the attention item for a Postgres ledger whose DSN
-	// file has no content: the patrol's findings reach no bead until it does.
+	// file has no content: the patrol's findings reach no bead until it does. It
+	// also keys that state's log hold, so no other DSN line holds it back.
 	cloudDSNEmptyKey = "dsn-empty"
 
-	// cloudDSNLogInterval holds the DSN refusal line to once an hour, the same
-	// hold the cache trim's refusals get.
+	// cloudDSNUncheckedLogKey and cloudDSNSettingsLogKey key the log holds of
+	// the DSN check's other refusals: a DSN file it cannot check (missing,
+	// loosened past 0600, or unreadable), and town settings it cannot load.
+	cloudDSNUncheckedLogKey = "dsn-unchecked"
+	cloudDSNSettingsLogKey  = "dsn-settings"
+
+	// cloudDSNLogInterval holds each DSN check line to once an hour for its key,
+	// the same hold the cache trim's refusals get.
 	cloudDSNLogInterval = time.Hour
 
 	// cloudKindMax caps a finding kind in the escalation text, in runes.
@@ -268,9 +279,10 @@ func (d *Daemon) cloudCheckAlert(p *plugin.Plugin) (key, summary string) {
 			return pluginFailureAlertKey(p.Name) + ":" + cloudNotConfiguredKey, config.CloudNotConfigured
 		}
 		if errors.Is(err, cloudledger.ErrEmptyDSN) {
-			// checkCloudDSN owns the empty-DSN item and raises it after every run. A
-			// failed run keeps the plugin's own key: an item under a key the plugin
-			// tracks is closed by the next passing run, and raised again after it.
+			// checkCloudDSN owns the empty-DSN item and raises it after every run, so
+			// a failed run raises no escalation under the plugin's own key. An item
+			// under that key would be closed by the next passing run and raised again
+			// after it.
 			return "", ""
 		}
 		d.logger.Printf("Handler: cloud-check: %v; keying the escalation by the unreadable report", err)
@@ -342,7 +354,7 @@ func (d *Daemon) checkCloudDSN() {
 	}
 	settings, err := config.LoadTownSettings(config.TownSettingsPath(d.config.TownRoot))
 	if err != nil {
-		d.logCloudDSN("cloud-check: reading town settings for the ledger DSN: %v; the DSN's state is not known this run", err)
+		d.logCloudDSN(cloudDSNSettingsLogKey, "cloud-check: reading town settings for the ledger DSN: %v; the DSN's state is not known this run", err)
 		return
 	}
 	cs := settings.ResolveCloud(os.Getenv)
@@ -356,7 +368,7 @@ func (d *Daemon) checkCloudDSN() {
 	case errors.Is(err, cloudledger.ErrEmptyDSN):
 		d.raiseCloudDSN(err)
 	default:
-		d.logCloudDSN("cloud-check: the ledger DSN file cannot be checked: %v; the attention item is left as it was", err)
+		d.logCloudDSN(cloudDSNUncheckedLogKey, "cloud-check: the ledger DSN file cannot be checked: %v; the attention item is left as it was", err)
 	}
 }
 
@@ -366,15 +378,15 @@ func (d *Daemon) checkCloudDSN() {
 func (d *Daemon) raiseCloudDSN(err error) {
 	key := pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudDSNEmptyKey
 	if d.pluginEscalationClosedRecently(key) {
-		d.logCloudDSN("cloud-check: %v; its escalation was closed within %s, not raising another", err, pluginEscalationReopenWindow)
+		d.logCloudDSN(cloudDSNEmptyKey, "cloud-check: %v; its escalation was closed within %s, not raising another", err, pluginEscalationReopenWindow)
 		return
 	}
 	if err := d.escalateAlertErr(key, "plugin:"+cloudCheckPlugin, cloudDSNEmptySummary(err)); err != nil {
-		d.logCloudDSN("cloud-check: raising the empty ledger DSN escalation: %v", err)
+		d.logCloudDSN(cloudDSNEmptyKey, "cloud-check: raising the empty ledger DSN escalation: %v", err)
 		return
 	}
 	d.cloudDSN.setRaised(true)
-	d.logCloudDSN("cloud-check: %v", err)
+	d.logCloudDSN(cloudDSNEmptyKey, "cloud-check: %v", err)
 }
 
 // clearCloudDSN closes the empty-DSN item when this check raised it. A clear
@@ -390,9 +402,9 @@ func (d *Daemon) clearCloudDSN(reason string) {
 	d.cloudDSN.setRaised(false)
 }
 
-// logCloudDSN logs one DSN check line, at most once an hour.
-func (d *Daemon) logCloudDSN(format string, args ...any) {
-	if d.cloudDSN.allowLog(d.clk().Now()) {
+// logCloudDSN logs one DSN check line, at most once an hour for its key.
+func (d *Daemon) logCloudDSN(key, format string, args ...any) {
+	if d.cloudDSN.allowLog(key, d.clk().Now()) {
 		d.logger.Printf("Handler: "+format, args...)
 	}
 }

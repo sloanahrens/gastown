@@ -25,7 +25,8 @@ func TestCloudLedgerNamesAnEmptyDSNFile(t *testing.T) {
 	}{
 		{name: "zero bytes, owner only", body: "", mode: 0o600, wantEmpty: true},
 		{name: "zero bytes, readable by others", body: "", mode: 0o644, wantEmpty: true},
-		{name: "whitespace only", body: " \n\t\n", mode: 0o600, wantEmpty: true},
+		{name: "whitespace only, owner only", body: " \n\t\n", mode: 0o600, wantEmpty: true},
+		{name: "whitespace only, readable by others", body: " \n\t\n", mode: 0o644, wantEmpty: true},
 		{name: "a DSN", body: "postgres://reader:pw@db/ledger\n", mode: 0o600},
 	}
 	for _, tc := range cases {

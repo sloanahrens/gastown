@@ -119,6 +119,35 @@ func TestCloudLedgerDSNEmptyLogsOncePerHour(t *testing.T) {
 	}
 }
 
+// The empty-file line has a log hold of its own. A refusal of another kind
+// logged within the hour does not hold it back, so the operator still sees the
+// file named as empty.
+func TestCloudLedgerDSNEmptyLineIsNotHeldByAnotherRefusal(t *testing.T) {
+	t.Parallel()
+
+	// A DSN the check refuses for its mode, not for being empty: that refusal is
+	// logged under its own key, and it comes first.
+	dsnPath := cloudDSNFile(t, cloudDSNBody)
+	if err := os.Chmod(dsnPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	notes := notifyfake.New()
+	d, logs := cloudDSNDaemon(t, townWithCloud(t, map[string]string{"ledger_dsn_file": dsnPath}), notes, newFixedClock(), nil)
+
+	d.checkCloudDSN()
+	if !strings.Contains(logs.String(), "cannot be checked") {
+		t.Fatalf("log = %q, want the mode refusal logged first", logs.String())
+	}
+
+	if err := os.WriteFile(dsnPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.checkCloudDSN()
+	if !strings.Contains(logs.String(), "is empty") || !strings.Contains(logs.String(), dsnPath) {
+		t.Errorf("log = %q, want the empty file named after the other refusal", logs.String())
+	}
+}
+
 // A file that holds a DSN again clears the item this check raised, once.
 func TestCloudLedgerDSNWithContentClearsTheRaisedItem(t *testing.T) {
 	t.Parallel()
@@ -128,7 +157,8 @@ func TestCloudLedgerDSNWithContentClearsTheRaisedItem(t *testing.T) {
 	d, _ := cloudDSNDaemon(t, townWithCloud(t, map[string]string{"ledger_dsn_file": dsnPath}), notes, newFixedClock(), nil)
 	d.checkCloudDSN()
 
-	// The empty file was 0644; a rewrite keeps that mode, which the check refuses.
+	// The empty file was 0644, and WriteFile keeps an existing file's mode, so
+	// the chmod below is what makes the check accept the content.
 	if err := os.WriteFile(dsnPath, []byte(cloudDSNBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +425,8 @@ func TestCloudLedgerDSNItemSurvivesAFailedThenPassingRun(t *testing.T) {
 	}
 }
 
-// A failed run over an empty DSN file keeps the plugin's own failure key: the
+// A failed run over an empty DSN file raises nothing under the plugin's own
+// failure key: cloudCheckAlert returns no key and no summary, because the
 // empty-DSN item is the check's to raise and clear, not the failure's. The empty
 // file is never read as a DSN, so the ledger is not opened.
 func TestCloudLedgerDaemonLeavesAnEmptyDSNToTheCheck(t *testing.T) {

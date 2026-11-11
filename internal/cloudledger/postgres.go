@@ -286,10 +286,13 @@ func checkReaderRole(ctx context.Context, tx *sql.Tx) error {
 
 // readDSN reads the DSN the setting names. A file that is missing, not a
 // regular file, empty, or readable by group or others is an error naming the
-// file, never the DSN. A file with no bytes is ErrEmptyDSN whatever its mode:
-// the mode refusal would hide the state the operator has to fill, and an empty
-// file holds nothing to leak. readFile is injected so a test can drive the read
-// failure a readable regular file cannot be made to produce.
+// file, never the DSN. A file with no content after trimming whitespace is
+// ErrEmptyDSN whatever its mode: the content is read before the mode check, so
+// a whitespace-only file the Secret mount makes 0644 is named empty and not
+// refused as readable, which would hide the state the operator has to fill. The
+// content is dropped on a mode refusal and never put in an error. readFile is
+// injected so a test can drive the read failure a readable regular file cannot
+// be made to produce.
 func readDSN(path string, readFile func(string) ([]byte, error)) (string, error) {
 	if path == "" {
 		return "", errors.New("cloudledger: postgres source: no DSN file is set")
@@ -304,9 +307,6 @@ func readDSN(path string, readFile func(string) ([]byte, error)) (string, error)
 	if fi.Size() == 0 {
 		return "", fmt.Errorf("%w: %s", ErrEmptyDSN, path)
 	}
-	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
-		return "", fmt.Errorf("cloudledger: postgres source: DSN file %s is readable by group or others (mode %04o); want 0600 or stricter", path, perm)
-	}
 	b, err := readFile(path)
 	if err != nil {
 		return "", fmt.Errorf("cloudledger: postgres source: reading DSN file %s: %w", path, err)
@@ -314,6 +314,9 @@ func readDSN(path string, readFile func(string) ([]byte, error)) (string, error)
 	dsn := strings.TrimSpace(string(b))
 	if dsn == "" {
 		return "", fmt.Errorf("%w: %s", ErrEmptyDSN, path)
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		return "", fmt.Errorf("cloudledger: postgres source: DSN file %s is readable by group or others (mode %04o); want 0600 or stricter", path, perm)
 	}
 	return dsn, nil
 }
