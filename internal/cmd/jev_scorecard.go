@@ -34,9 +34,11 @@ noul, at the chosen option for a choice), the cut with the best F1, five
 calibration bands, and a verdict. A score question reports the mean score by
 label and the best cut on the score in place of precision, recall and bands.
 
-The verdict is earning when the best F1 beats the label base rate by 0.1 or
-more on at least 30 labeled lines, not-yet below 30 labeled lines, and
-no-signal otherwise. Scoring one battery is read-only; only --refresh writes.
+The verdict is earning on at least 30 labeled lines, not-yet below 30 labeled
+lines, and no-signal otherwise. A noul or choice earns when its precision at
+the best cut beats the base rate by 0.1 (twice the base under 0.1) and the cut
+flags under 90% of the lines; a score earns when the best F1 beats the base
+rate by 0.1. Scoring one battery is read-only; only --refresh writes.
 
 --battery is required, and an unknown name is an error that lists the
 registered batteries. --since keeps only the lines stamped in the window ending
