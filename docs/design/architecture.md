@@ -10,7 +10,7 @@ from project implementation work.
 | Level | Location | Prefix | Purpose |
 |-------|----------|--------|---------|
 | **Town** | `~/gt/.beads/` | `hq-*` | Cross-rig coordination, Mayor mail, agent identity |
-| **Rig** | `<rig>/mayor/rig/.beads/` | project prefix | Implementation work, landing records, project issues |
+| **Rig** | `<rig>/.beads/` | project prefix | Implementation work, landing records, project issues |
 
 ### Town-Level Beads (`~/gt/.beads/`)
 
@@ -20,7 +20,7 @@ Organizational chain for cross-rig coordination:
 - **Town-level agent beads** (Mayor)
 - **Role definition beads** (global templates)
 
-### Rig-Level Beads (`<rig>/mayor/rig/.beads/`)
+### Rig-Level Beads (`<rig>/.beads/`)
 
 Project chain for implementation work:
 - Bugs, features, tasks for the project
