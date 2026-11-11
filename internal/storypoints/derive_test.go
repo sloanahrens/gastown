@@ -39,7 +39,7 @@ func near(a, b float64) bool {
 	return math.Abs(a-b) < 1e-9
 }
 
-func TestDeriveConstantSeriesHasNoDifferenceAndNoSignal(t *testing.T) {
+func TestDeriveConstantSeriesHasNoDifferenceAndNoise(t *testing.T) {
 	t.Parallel()
 	const n = 30
 	points, weighted := constant(n, 10, 2)
@@ -60,8 +60,11 @@ func TestDeriveConstantSeriesHasNoDifferenceAndNoSignal(t *testing.T) {
 		if hr.D2 != nil && *hr.D2 != 0 {
 			t.Errorf("hour %d: D2 = %v, want 0", h, *hr.D2)
 		}
-		if hr.D1Signal || hr.D2Signal {
-			t.Errorf("hour %d: signal on a constant series (D1 %v, D2 %v)", h, hr.D1Signal, hr.D2Signal)
+		if hr.D1 != nil && hr.D1State != StateNoise {
+			t.Errorf("hour %d: D1State = %v on a constant series, want StateNoise", h, hr.D1State)
+		}
+		if hr.D2 != nil && hr.D2State != StateNoise {
+			t.Errorf("hour %d: D2State = %v on a constant series, want StateNoise", h, hr.D2State)
 		}
 	}
 }
@@ -82,28 +85,29 @@ func TestDeriveStepChangeGivesD1SignalAtTheStep(t *testing.T) {
 	if got.Hours[step].D1 == nil || !near(*got.Hours[step].D1, 10.0/9) {
 		t.Fatalf("hour %d: D1 = %v, want 10/9", step, got.Hours[step].D1)
 	}
-	if !got.Hours[step].D1Signal {
-		t.Errorf("hour %d: no D1 signal at the step", step)
+	if got.Hours[step].D1State != StateSignal {
+		t.Errorf("hour %d: D1State = %v at the step, want StateSignal", step, got.Hours[step].D1State)
 	}
 	for h := 0; h < step; h++ {
-		if got.Hours[h].D1Signal {
+		if got.Hours[h].D1State == StateSignal {
 			t.Errorf("hour %d: D1 signal before the step", h)
 		}
 	}
 }
 
-func TestDeriveNeedsTwelveDefinedDifferencesToSignal(t *testing.T) {
+func TestDeriveNeedsTwelveDefinedDifferencesToJudge(t *testing.T) {
 	t.Parallel()
 	// D1 is first defined at hour 8, so n hours give n-8 defined values. The
-	// step is at the last complete hour, so one difference is nonzero and the
-	// median absolute deviation is zero: only the count can refuse the signal.
+	// step is at the last complete hour, so the one nonzero difference is the
+	// largest value in the series. Eleven defined values are not enough to
+	// judge it; twelve are, and then it is a signal.
 	cases := []struct {
-		name   string
-		n      int
-		signal bool
+		name  string
+		n     int
+		state State
 	}{
-		{name: "eleven defined differences", n: 19, signal: false},
-		{name: "twelve defined differences", n: 20, signal: true},
+		{name: "eleven defined differences", n: 19, state: StateInsufficient},
+		{name: "twelve defined differences", n: 20, state: StateSignal},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -115,8 +119,8 @@ func TestDeriveNeedsTwelveDefinedDifferencesToSignal(t *testing.T) {
 			if got.Err != nil {
 				t.Fatalf("Derive: %v", got.Err)
 			}
-			if hr := got.Hours[step]; hr.D1 == nil || hr.D1Signal != tc.signal {
-				t.Fatalf("hour %d: D1 %v, D1Signal %v, want signal %v", step, hr.D1, hr.D1Signal, tc.signal)
+			if hr := got.Hours[step]; hr.D1 == nil || hr.D1State != tc.state {
+				t.Fatalf("hour %d: D1 %v, D1State %v, want state %v", step, hr.D1, hr.D1State, tc.state)
 			}
 		})
 	}
@@ -141,13 +145,13 @@ func TestDeriveNoiseSignalsAtMostTenPercentOfDefinedHours(t *testing.T) {
 		if hr.D1 != nil {
 			d1Defined++
 		}
-		if hr.D1Signal {
+		if hr.D1State == StateSignal {
 			d1Signal++
 		}
 		if hr.D2 != nil {
 			d2Defined++
 		}
-		if hr.D2Signal {
+		if hr.D2State == StateSignal {
 			d2Signal++
 		}
 	}
@@ -159,6 +163,49 @@ func TestDeriveNoiseSignalsAtMostTenPercentOfDefinedHours(t *testing.T) {
 	}
 	if float64(d2Signal) > 0.10*float64(d2Defined) {
 		t.Errorf("D2 signal on %d of %d defined hours, want at most 10%%", d2Signal, d2Defined)
+	}
+}
+
+func TestDeriveMostlyZeroSeriesOnePointStepIsNoise(t *testing.T) {
+	t.Parallel()
+	// Zero in every hour but one, so the median absolute deviation of each
+	// difference is zero. A single one-point hour moves the smoothed series by
+	// one point's worth, which is exactly the floor of D1 and D2.
+	const n, impulse = 40, 20
+	points, weighted := constant(n, 0, 2)
+	points[impulse] = 1
+	got := Derive(points, weighted, closed(n), hourly(n))
+	if got.Err != nil {
+		t.Fatalf("Derive: %v", got.Err)
+	}
+	var nonzero int
+	for h, hr := range got.Hours {
+		if hr.D1 != nil && *hr.D1 != 0 {
+			nonzero++
+		}
+		if hr.D1 != nil && hr.D1State != StateNoise {
+			t.Errorf("hour %d: D1 %v has state %v, want StateNoise", h, *hr.D1, hr.D1State)
+		}
+		if hr.D2 != nil && hr.D2State != StateNoise {
+			t.Errorf("hour %d: D2 %v has state %v, want StateNoise", h, *hr.D2, hr.D2State)
+		}
+	}
+	if nonzero == 0 {
+		t.Fatal("the one-point hour moved no difference, so the floor is untested")
+	}
+}
+
+func TestDeriveMostlyZeroSeriesSeveralPointStepIsSignal(t *testing.T) {
+	t.Parallel()
+	const n, impulse = 40, 20
+	points, weighted := constant(n, 0, 2)
+	points[impulse] = 3
+	got := Derive(points, weighted, closed(n), hourly(n))
+	if got.Err != nil {
+		t.Fatalf("Derive: %v", got.Err)
+	}
+	if hr := got.Hours[impulse]; hr.D1State != StateSignal {
+		t.Fatalf("hour %d: D1 %v has state %v, want StateSignal", impulse, hr.D1, hr.D1State)
 	}
 }
 
@@ -199,7 +246,30 @@ func TestDeriveRefusesWindowsWithFewerThanTwelveWeightedLandings(t *testing.T) {
 			if hr.D1 != nil || hr.D2 != nil {
 				t.Errorf("hour %d: D1 %v and D2 %v, want both nil", h, hr.D1, hr.D2)
 			}
+			if hr.D1State != StateInsufficient || hr.D2State != StateInsufficient {
+				t.Errorf("hour %d: states %v and %v, want StateInsufficient for both", h, hr.D1State, hr.D2State)
+			}
 		})
+	}
+}
+
+func TestDeriveRefusesDifferencesWithFewerThanTwelveDefinedValues(t *testing.T) {
+	t.Parallel()
+	// Eleven defined D1 values: the values are present, but the state is
+	// insufficient rather than noise, so a short series cannot read as quiet.
+	const n = 19
+	points, weighted := constant(n, 10, 2)
+	got := Derive(points, weighted, closed(n), hourly(n))
+	if got.Err != nil {
+		t.Fatalf("Derive: %v", got.Err)
+	}
+	for h, hr := range got.Hours {
+		if hr.D1 != nil && hr.D1State != StateInsufficient {
+			t.Errorf("hour %d: D1State = %v with eleven defined values, want StateInsufficient", h, hr.D1State)
+		}
+	}
+	if got.Hours[n-1].D1 == nil {
+		t.Fatal("the last hour's D1 is nil, so the state check did not run")
 	}
 }
 
@@ -215,8 +285,12 @@ func TestDeriveIgnoresThePartialCurrentHour(t *testing.T) {
 	}
 	// Its window holds twelve weighted landings, so it would be defined if the
 	// partial hour were counted.
-	if hr := got.Hours[n]; hr.Smoothed != nil || hr.D1 != nil || hr.D2 != nil || hr.D1Signal || hr.D2Signal {
+	hr := got.Hours[n]
+	if hr.Smoothed != nil || hr.D1 != nil || hr.D2 != nil {
 		t.Fatalf("partial hour %d has values: %+v", n, hr)
+	}
+	if hr.D1State != StateInsufficient || hr.D2State != StateInsufficient {
+		t.Fatalf("partial hour %d has states %v and %v, want StateInsufficient", n, hr.D1State, hr.D2State)
 	}
 	points[n], weighted[n] = 1000, 50
 	changed := Derive(points, weighted, now, hourly(n+1))
@@ -240,10 +314,15 @@ func TestDeriveRecoversTheSlopeOfARamp(t *testing.T) {
 		t.Fatalf("Derive: %v", got.Err)
 	}
 	// A ramp of one point an hour has a first difference of one and a second
-	// difference of zero.
+	// difference of zero. The steady first difference is a signal; the second
+	// difference, which is zero, is noise.
 	for h := 11; h < n; h++ {
-		if hr := got.Hours[h]; !near(*hr.D1, 1) || !near(*hr.D2, 0) {
+		hr := got.Hours[h]
+		if !near(*hr.D1, 1) || !near(*hr.D2, 0) {
 			t.Fatalf("hour %d: D1 = %v, D2 = %v, want 1 and 0", h, *hr.D1, *hr.D2)
+		}
+		if hr.D1State != StateSignal || hr.D2State != StateNoise {
+			t.Fatalf("hour %d: D1State %v and D2State %v, want StateSignal and StateNoise", h, hr.D1State, hr.D2State)
 		}
 	}
 }

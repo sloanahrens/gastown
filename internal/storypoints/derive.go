@@ -18,25 +18,54 @@ const (
 	smoothMinWeight = 12
 	// diffHours is the distance between the two ends of a difference.
 	diffHours = 3
-	// minDefined is the defined values a difference needs before it can signal.
+	// minDefined is the defined values a difference needs before it can be
+	// judged signal or noise.
 	minDefined = 12
 	// madScale turns a median absolute deviation into a standard deviation
 	// for normal data.
 	madScale = 1.4826
 	// signalDeviations is how many robust standard deviations a difference
-	// must reach to be a signal.
+	// must exceed to be a signal.
 	signalDeviations = 2
+)
+
+// The smallest change each series can show: one point, carried through the
+// six-hour smoothing and then divided by the step of each difference. A
+// series that is zero in most hours has a median absolute deviation of zero,
+// so these floors are what stop every nonzero difference from being a signal.
+// They are variables, not constants, so each division rounds the way the
+// differences computed in Derive do, and a one-point change equals its floor
+// exactly.
+var (
+	smoothFloor = 1.0 / smoothHours
+	d1Floor     = smoothFloor / diffHours
+	d2Floor     = d1Floor / diffHours
+)
+
+// State is what a velocity value says about the series at one hour. The zero
+// value is StateInsufficient, so an unset state reads as not enough data and
+// never as quiet.
+type State int
+
+const (
+	// StateInsufficient is a nil difference, or one whose series has fewer
+	// than minDefined defined values. It is not noise.
+	StateInsufficient State = iota
+	// StateNoise is a defined difference that does not exceed its limit.
+	StateNoise
+	// StateSignal is a defined difference that exceeds its limit.
+	StateSignal
 )
 
 // Hour is the velocity at one hour. A nil value is not defined: the hour is
 // partial, its window holds too few weighted landings, or a value it needs is
-// undefined. Signal is false for an undefined value.
+// undefined. Its state is StateInsufficient wherever the value is nil.
 type Hour struct {
 	Smoothed *float64
 	D1       *float64
 	D2       *float64
-	D1Signal bool
-	D2Signal bool
+	D1State  State
+	D2State  State
 }
 
 // Derived is the velocity for each hour given to Derive, in the same order.
@@ -54,9 +83,12 @@ type Derived struct {
 // consecutive. The hour that contains now is partial and is left out of every
 // calculation, and so is any hour that has not ended.
 //
-// A difference is a signal when its size is at least twice 1.4826 times the
-// median absolute deviation of the defined values of that difference over the
-// hours given, when at least 12 values are defined, and when it is not zero.
+// A difference is a signal when its absolute value is more than the larger of
+// twice 1.4826 times the median absolute deviation of its defined values over
+// the hours given, and its floor. It is noise when it does not exceed that
+// limit, and insufficient when fewer than 12 of its values are defined. The
+// comparison is strict: a change exactly at the floor is the smallest change
+// the series can show, and it is not a signal.
 func Derive(points []float64, weighted []int, now time.Time, hourStarts []time.Time) Derived {
 	if err := checkDeriveInputs(points, weighted, hourStarts); err != nil {
 		return Derived{Err: err}
@@ -78,8 +110,8 @@ func Derive(points []float64, weighted []int, now time.Time, hourStarts []time.T
 	}
 	d1 := difference(smoothed)
 	d2 := difference(d1)
-	d1Signal := signals(d1)
-	d2Signal := signals(d2)
+	d1States := states(d1, d1Floor)
+	d2States := states(d2, d2Floor)
 
 	hours := make([]Hour, n)
 	for h := range hours {
@@ -87,8 +119,8 @@ func Derive(points []float64, weighted []int, now time.Time, hourStarts []time.T
 			Smoothed: smoothed[h],
 			D1:       d1[h],
 			D2:       d2[h],
-			D1Signal: d1Signal[h],
-			D2Signal: d2Signal[h],
+			D1State:  d1States[h],
+			D2State:  d2States[h],
 		}
 	}
 	return Derived{Hours: hours}
@@ -131,12 +163,13 @@ func difference(series []*float64) []*float64 {
 	return out
 }
 
-// signals marks each defined value of d that is a signal. The median absolute
-// deviation is taken over every defined value of d, so the hours a signal is
-// judged against are the hours Derive was given. A zero is never a signal, so
-// a flat series gives none even when its deviation is zero.
-func signals(d []*float64) []bool {
-	out := make([]bool, len(d))
+// states classifies each value of d against its limit, the larger of the
+// scaled median absolute deviation and floor. The median absolute deviation is
+// taken over every defined value of d, so the hours a value is judged against
+// are the hours Derive was given. A series with fewer than minDefined defined
+// values is StateInsufficient throughout.
+func states(d []*float64, floor float64) []State {
+	out := make([]State, len(d))
 	var defined []float64
 	for _, v := range d {
 		if v != nil {
@@ -151,12 +184,16 @@ func signals(d []*float64) []bool {
 	for i, v := range defined {
 		devs[i] = math.Abs(v - mid)
 	}
-	limit := signalDeviations * madScale * median(devs)
+	limit := max(signalDeviations*madScale*median(devs), floor)
 	for h, v := range d {
-		if v == nil || *v == 0 {
+		if v == nil {
 			continue
 		}
-		out[h] = math.Abs(*v) >= limit
+		if math.Abs(*v) > limit {
+			out[h] = StateSignal
+		} else {
+			out[h] = StateNoise
+		}
 	}
 	return out
 }
