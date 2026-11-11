@@ -391,7 +391,7 @@ func TestTailDeploys_LogCutoffReachesTheHorizon(t *testing.T) {
 func TestDashboardDeploys_ReadsBackToTheLandingsTable(t *testing.T) {
 	t.Parallel()
 	cutoff := time.Now().Add(-2 * time.Hour)
-	track := dashboardDeploys(t.TempDir(), shipRigOf(nil), cutoff, nil)
+	track := dashboardDeploys(t.TempDir(), shipRigOf(nil), cutoff, nil, nil)
 	if got := track.horizon; got != trendHours*time.Hour {
 		t.Fatalf("horizon = %v; want the Landings table's %v", got, trendHours*time.Hour)
 	}

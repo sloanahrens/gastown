@@ -403,7 +403,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	if err != nil {
 		return nil, nil, err
 	}
-	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip)
+	whyLog := newDashWhyLog(dashboardLogf(out))
+	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip, whyLog)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, kinds: allTailKinds(), cutoff: cutoff, loc: loc, now: time.Now,
 		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
@@ -482,7 +483,6 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	birds := dashboard.NewBirdReportsReader(dashboardRuntimeDir(townRoot)).WithHeadline(dashboardHeadlineBird(townRoot))
 	// The reasons behind a failed seats, ready or questions read are logged
 	// once per change, so a read that stays down is one line (gt-6qc3nw.2).
-	whyLog := newDashWhyLog(dashboardLogf(out))
 	questions := newDashQuestionsReader(townRoot).withWhy(whyLog)
 	overseerPane := newDashOverseerReader(townRoot, func() (int, error) {
 		open, err := questions.list()
@@ -568,9 +568,9 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 // The table spans a whole day of landings while the feed's own window is the
 // --since it was started with. Without the horizon a row older than that
 // window has no record, so its Ship cell draws a dash however it shipped
-// (gt-b5hw2).
-func dashboardDeploys(townRoot string, rigOf func(bead string) string, cutoff time.Time, staging tailShipStaging) *tailDeploys {
-	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot), cutoff)
+// (gt-b5hw2). why logs which repository the ancestry check reads; nil logs nothing.
+func dashboardDeploys(townRoot string, rigOf func(bead string) string, cutoff time.Time, staging tailShipStaging, why *dashWhyLog) *tailDeploys {
+	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot, why), cutoff)
 	deploys.setShipDefinitions(tailRestartRig(townRoot), rigOf, staging)
 	deploys.setHorizon(trendHours * time.Hour)
 	return deploys
@@ -679,7 +679,7 @@ func dashboardSummary(townRoot string, deploys *tailDeploys, recs *dashLandings,
 	}
 	dashboardPolecats(&s, townRoot, names, sessions, sessionsKnown, ready, recs, seatCache, dispatches, newPoolSessionLister())
 	why.summary(&s)
-	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
+	if tip, installed, behind, err := tailMainPicture(townRoot, why); err == nil {
 		s.MainTip, s.InstalledGT, s.Behind = tip, installed, &behind
 	}
 	if n, err := tailOpenEscalations(townRoot); err == nil {
@@ -904,6 +904,34 @@ func (l *dashWhyLog) note(source, why string) {
 func (l *dashWhyLog) summary(s *dashboard.Summary) {
 	l.note(dashboard.SourceSeats, s.SeatsWhy)
 	l.note(dashboard.SourceReady, s.ReadyWhy)
+}
+
+// dashDeployRepoSource keys the deploy repository's answer in the log's last map.
+const dashDeployRepoSource = "deploy repo answer"
+
+// dashDeployReadSource names the failure to find that repository in its read
+// line ("deploy repo read failed: ..."). It keys the log's last map apart from
+// dashDeployRepoSource, so the answer and the failure dedupe on their own.
+const dashDeployReadSource = "deploy repo"
+
+// deployRepo logs which repository the deploy tracker and the main picture
+// read, once per change: fellBack is "" while the rig's bare repo answers, else
+// the reason it did not and the checkout that did. A nil log records nothing.
+func (l *dashWhyLog) deployRepo(fellBack string) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.last[dashDeployRepoSource] == fellBack {
+		return
+	}
+	l.last[dashDeployRepoSource] = fellBack
+	if fellBack == "" {
+		l.logf("deploy repo is the rig's bare repo again")
+		return
+	}
+	l.logf("deploy repo: %s", fellBack)
 }
 
 const dashboardSpendTimeout = 25 * time.Second

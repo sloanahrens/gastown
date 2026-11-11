@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1136,7 +1137,7 @@ const (
 //
 // listAgent lists one rig's agent beads (tailRigAgentBeads in production), so a
 // test can drive a rig's read failure without a store.
-func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string]*beads.Issue, error), deploys *tailDeploys) tailSummaryFields {
+func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string]*beads.Issue, error), deploys *tailDeploys, why *dashWhyLog) tailSummaryFields {
 	var f tailSummaryFields
 	if seats, cap, pairs, err := tailSeatPicture(townRoot, listAgent); err == nil {
 		f.HasSeats, f.SeatsUsed, f.SeatsCap, f.Seats = true, seats, cap, pairs
@@ -1144,7 +1145,7 @@ func readTailSummary(townRoot string, listAgent func(rigPath string) (map[string
 	if n, err := tailReadyToLand(townRoot); err == nil {
 		f.HasReady, f.ReadyToLand = true, n
 	}
-	if tip, installed, behind, err := tailMainPicture(townRoot); err == nil {
+	if tip, installed, behind, err := tailMainPicture(townRoot, why); err == nil {
 		f.HasMain, f.MainTip, f.InstalledGT, f.Behind = true, tip, installed, behind
 	}
 	if n, err := tailOpenEscalations(townRoot); err == nil {
@@ -1246,16 +1247,25 @@ func tailReadyToLand(townRoot string) (int, error) {
 	return total, nil
 }
 
-// tailMainPicture is origin/main against the binary running this stream: the
-// two short shas and how many commits the binary is behind. It reads the local
+// tailMainPicture is main against the binary running this stream: the two
+// short shas and how many commits the binary is behind. It reads the local
 // refs only — the summary line must not put a fetch in front of the operator
-// every five minutes.
-func tailMainPicture(townRoot string) (tip, installed string, behind int, err error) {
-	repo, err := version.GetRepoRootForTown(townRoot)
+// every five minutes. why logs which repository answered; nil logs nothing.
+func tailMainPicture(townRoot string, why *dashWhyLog) (tip, installed string, behind int, err error) {
+	return tailMainPictureIn(townRoot, version.BuildCommit(), why, os.Stat, version.CheckStaleBinaryOf)
+}
+
+// tailMainPictureIn is tailMainPicture for the binary built from binary, with
+// the filesystem look and the staleness check injected. The check is asked about
+// the repository tailDeployRepo picks.
+func tailMainPictureIn(townRoot, binary string, why *dashWhyLog, stat func(string) (fs.FileInfo, error), check func(repo, binary string) *version.StaleBinaryInfo) (tip, installed string, behind int, err error) {
+	repo, fellBack, err := tailDeployRepo(townRoot, stat)
+	why.note(dashDeployReadSource, dashWhy(err))
 	if err != nil {
 		return "", "", 0, err
 	}
-	info := version.CheckStaleBinary(repo)
+	why.deployRepo(fellBack)
+	info := check(repo, binary)
 	if info == nil || info.Error != nil || info.Skipped {
 		return "", "", 0, fmt.Errorf("staleness of the installed gt is unknown")
 	}
@@ -2008,34 +2018,110 @@ func (s *tailDeploySource) Poll() []tailLine {
 	return append(out, s.track.observe(lines)...)
 }
 
-// tailGitAncestry answers the tracker's ancestry question in the town's gt
-// source checkout. A town with no checkout answers unknown to every question,
-// so no bead is ever called deployed on a guess.
-func tailGitAncestry(townRoot string) tailAncestry {
-	repo, err := version.GetRepoRootForTown(townRoot)
-	if err != nil {
-		return func(string, string) (bool, bool) { return false, false }
-	}
-	return func(commit, of string) (bool, bool) { return tailGitIsAncestor(repo, commit, of) }
+// tailGitAncestry answers the tracker's ancestry question in the town's rig
+// repository (see tailDeployRepo). why logs which repository answered, and the
+// failure when the bare repo cannot be read; nil logs nothing. A town with no
+// repository answers unknown to every question, so no bead is ever called
+// deployed on a guess.
+func tailGitAncestry(townRoot string, why *dashWhyLog) tailAncestry {
+	return tailGitAncestryIn(townRoot, why, os.Stat, tailExecGit)
 }
 
-// tailGitIsAncestor runs git merge-base --is-ancestor in repo: exit 0 is an
-// ancestor, exit 1 is not, and any other failure — a bad object, a timeout —
-// is unknown.
-func tailGitIsAncestor(repo, commit, of string) (ancestor, ok bool) {
+// tailGitAncestryIn is tailGitAncestry with the filesystem look and the git
+// runner injected. Every ancestry call picks its repository through
+// tailDeployRepo as it is asked, so the answer follows the town as it is now.
+func tailGitAncestryIn(townRoot string, why *dashWhyLog, stat func(string) (fs.FileInfo, error), run tailGitRun) tailAncestry {
+	return func(commit, of string) (bool, bool) {
+		// Resolved on every question, not once at construction: a bare repo
+		// that appears, or goes unreadable, after the hub starts is read at the
+		// next question, and the why-log says so once per change.
+		repo, fellBack, err := tailDeployRepo(townRoot, stat)
+		why.note(dashDeployReadSource, dashWhy(err))
+		if err != nil {
+			return false, false
+		}
+		why.deployRepo(fellBack)
+		return tailGitIsAncestor(run, repo, commit, of)
+	}
+}
+
+// tailDeployRepo is the repository the deploy tracker's ancestry check and the
+// main picture read: <town>/gastown/.repo.git, the bare repo every landing
+// refreshes, whose refs/heads/main is main. A town without one reads the source
+// checkout GetRepoRootForTown finds instead, and fellBack names that checkout
+// and the reason. Any other failure to look at the bare repo is an error, not
+// a fallback: an unreadable path is unknown, not absent.
+func tailDeployRepo(townRoot string, stat func(string) (fs.FileInfo, error)) (repo, fellBack string, err error) {
+	bare := constants.RigBareRepoPath(filepath.Join(townRoot, "gastown"))
+	info, err := stat(bare)
+	if err == nil {
+		if !info.IsDir() {
+			return "", "", fmt.Errorf("%s is not a directory", bare)
+		}
+		// A directory at the bare path is a repository only when it holds
+		// HEAD; an empty or half-copied directory is an error the why-log
+		// shows, never a silent fallback to the checkout.
+		if _, err := stat(filepath.Join(bare, "HEAD")); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return "", "", fmt.Errorf("%s is a directory but not a git repository: no HEAD", bare)
+			}
+			return "", "", err
+		}
+		return bare, "", nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return "", "", err
+	}
+	checkout, err := version.GetRepoRootForTown(townRoot)
+	if err != nil {
+		return "", "", err
+	}
+	return checkout, fmt.Sprintf("%s is absent; reading the source checkout %s", bare, checkout), nil
+}
+
+// tailGitRun runs git with args in dir and returns its exit code. A git that was
+// killed, such as on timeout, returns code -1. err is set only when git did not
+// start, so the caller can tell an answer from no answer.
+type tailGitRun func(dir string, args ...string) (code int, err error)
+
+// tailExecGit is the tailGitRun the tracker uses: real git under
+// tailDeployGitTimeout.
+func tailExecGit(dir string, args ...string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), tailDeployGitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "merge-base", "--is-ancestor", commit, of)
-	cmd.Dir = repo
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
 	// The same detached process group internal/version gives its git calls:
 	// the context is the only thing that ends this one.
 	util.SetDetachedProcessGroup(cmd)
-	err := cmd.Run()
+	return tailGitExit(cmd.Run())
+}
+
+// tailGitExit reads the outcome of a git run: its exit code, or err when git did
+// not start, so the caller can tell an answer from no answer.
+func tailGitExit(err error) (int, error) {
 	if err == nil {
-		return true, true
+		return 0, nil
 	}
 	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+	if errors.As(err, &exit) {
+		return exit.ExitCode(), nil
+	}
+	return 0, err
+}
+
+// tailGitIsAncestor runs git merge-base --is-ancestor in repo through run: exit 0
+// is an ancestor, exit 1 is not, and any other failure — a bad object, a timeout
+// — is unknown.
+func tailGitIsAncestor(run tailGitRun, repo, commit, of string) (ancestor, ok bool) {
+	code, err := run(repo, "merge-base", "--is-ancestor", commit, of)
+	if err != nil {
+		return false, false
+	}
+	switch code {
+	case 0:
+		return true, true
+	case 1:
 		return false, true
 	}
 	return false, false

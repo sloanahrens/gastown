@@ -146,6 +146,13 @@ func CheckStaleBinary(repoDir string) *StaleBinaryInfo {
 	return newChecker().checkStale(repoDir)
 }
 
+// CheckStaleBinaryOf is CheckStaleBinary for a binary built from binaryCommit,
+// for a caller that already holds the commit and must not read it from the
+// running binary. repoDir may be a worktree or a bare repository.
+func CheckStaleBinaryOf(repoDir, binaryCommit string) *StaleBinaryInfo {
+	return checker{git: realGit, commit: binaryCommit}.checkStale(repoDir)
+}
+
 // checker runs the staleness checks. git runs every git command and commit is
 // the build commit of the binary being judged; the exported functions build one
 // with the real git and this binary's own commit, and tests inject both.
@@ -650,9 +657,16 @@ func GetRepoRoot() (string, error) {
 	return "", fmt.Errorf("cannot locate gt source repository")
 }
 
-// isGitRepo checks if a directory is a git repository.
+// isGitRepo checks if a directory is a git repository: a worktree, or a bare
+// repository such as a rig's .repo.git, whose refs/heads/main is the build
+// branch. A worktree answers --is-inside-work-tree and a bare repository
+// answers --is-bare-repository; the first is false for the second.
 func (c checker) isGitRepo(dir string) bool {
 	output, err := c.output(dir, "rev-parse", "--is-inside-work-tree")
+	if err == nil && strings.TrimSpace(string(output)) == "true" {
+		return true
+	}
+	output, err = c.output(dir, "rev-parse", "--is-bare-repository")
 	return err == nil && strings.TrimSpace(string(output)) == "true"
 }
 
