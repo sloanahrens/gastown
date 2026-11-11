@@ -5,8 +5,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
@@ -279,6 +281,37 @@ func newPatrolRestartDaemonOn(t *testing.T, rec *notifyfake.Recorder, budget int
 		Logf:     func(string, ...any) {},
 	})
 	return d
+}
+
+// A patrol restart leaves the seat's recorded agent where it was: the restart
+// carries the seat's identity forward, so the intent record names the same
+// agent once the executor has run (gt-gl6o0v).
+func TestPatrolScanRestartKeepsTheSeatsAgent(t *testing.T) {
+	t.Parallel()
+	ran := 0
+	d, _ := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error {
+		ran++
+		return nil
+	})
+	seat := supervisor.IntentSeat(supervisor.SeatIn(d.prefixRegistry(), "gastown", constants.RolePolecat, "nux"))
+	if err := intent.MarkSlung(d.config.TownRoot, seat, "claude-haiku", "gt sling", time.Now()); err != nil {
+		t.Fatalf("MarkSlung: %v", err)
+	}
+
+	h := &patrolScanHost{d: d}
+	if err := h.Restart("gastown", "nux", "dead"); err != nil {
+		t.Fatalf("Restart: %v", err)
+	}
+	if ran != 1 {
+		t.Fatalf("the restart executor ran %d times, want 1", ran)
+	}
+	rec, err := intent.Read(d.config.TownRoot, seat)
+	if err != nil {
+		t.Fatalf("reading the seat record: %v", err)
+	}
+	if rec.Agent != "claude-haiku" {
+		t.Errorf("the restart left the seat's agent %q, want claude-haiku", rec.Agent)
+	}
 }
 
 // patrolRestartEscalations returns the escalations filed under a seat's
