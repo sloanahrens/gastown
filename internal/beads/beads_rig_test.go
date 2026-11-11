@@ -410,7 +410,6 @@ exit 0
 
 // TestInvalidateTypeConfigCache verifies both cache levels are dropped.
 func TestInvalidateTypeConfigCache(t *testing.T) {
-	t.Parallel()
 	beadsDir := t.TempDir()
 	sentinel := filepath.Join(beadsDir, ".gt-types-configured")
 	if err := os.WriteFile(sentinel, []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {

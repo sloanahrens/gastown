@@ -307,7 +307,6 @@ func TestInitSlotsPanicReleases(t *testing.T) {
 }
 
 func TestAcquireTestContainerInitSlotUsesProcessPool(t *testing.T) {
-	t.Parallel()
 	s := useTestContainerInitSlots(t, 1)
 	release, err := AcquireTestContainerInitSlot(context.Background())
 	if err != nil {
@@ -615,7 +614,6 @@ func TestRunTestContainerInitWaitIsBounded(t *testing.T) {
 }
 
 func TestRunTestContainerInitRejectsNonInit(t *testing.T) {
-	t.Parallel()
 	useTestContainerInitSlots(t, 1)
 	for _, args := range [][]string{nil, {"list", "--json"}} {
 		if _, err := RunTestContainerInit(context.Background(), t.TempDir(), args, nil); err == nil {
