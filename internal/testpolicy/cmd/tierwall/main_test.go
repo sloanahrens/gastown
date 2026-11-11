@@ -683,25 +683,46 @@ func TestSlowTestsSeriesTagsTheTests(t *testing.T) {
 	}
 }
 
-// TestSlowTestsMalformedEventIsARunnerFailure pins the refusal: a JSON object
-// line that is not a go test event stops -slow-tests with exit 2, names the
-// line number on stderr, and prints no report, so no list is short of tests
-// and no event text is echoed. Mutation: fall back to the tolerant parse on a
-// parse error, and the run exits 0 with a list missing the tests after it.
-func TestSlowTestsMalformedEventIsARunnerFailure(t *testing.T) {
+// TestSlowTestsMalformedEventKeepsTheWalls pins the refusal: a JSON object line
+// that is not a go test event exits 2 and names the line number on stderr, and
+// the package walls and the tier line still print, so one bad line does not
+// drop every wall. No slow-test list prints, so no list is short of tests, and
+// no event text reaches stderr. Mutation: return before the report on a parse
+// error, and stdout loses the wall lines.
+func TestSlowTestsMalformedEventKeepsTheWalls(t *testing.T) {
 	t.Parallel()
 	stream := `{"Action":"pass","Package":"example.com/fx/a","Test":"TestA","Elapsed":6}` + "\n" +
+		`{"Action":"pass","Package":"example.com/fx/a","Elapsed":7}` + "\n" +
 		`{"Action":5,"Package":"example.com/fx/a","Output":"secret-ish text"}` + "\n"
 	var out, errOut bytes.Buffer
 	code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost())
 	if code != 2 {
 		t.Errorf("exit code = %d, want 2: a malformed event is the runner's failure", code)
 	}
-	if out.String() != "" {
-		t.Errorf("stdout = %q, want no report after a malformed event", out.String())
+	for _, want := range []string{"tierwall: example.com/fx/a 7s\n", "tierwall: tier 0s bar 90s OK\n"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout = %q, want it to hold %q", out.String(), want)
+		}
 	}
-	if want := "tierwall: slow tests: line 2: malformed go test -json event\n"; errOut.String() != want {
+	if strings.Contains(out.String(), "tierwall: slow tests") {
+		t.Errorf("stdout = %q, want no slow-test list after a malformed event", out.String())
+	}
+	if want := "tierwall: slow tests: line 3: malformed go test -json event\n"; errOut.String() != want {
 		t.Errorf("stderr = %q, want %q", errOut.String(), want)
+	}
+}
+
+// TestJSONLUsageNamesTheSlowTestLines pins the -jsonl usage: with -slow-tests
+// the series also takes one timings line per slow test, so the help must not
+// say it takes one line per package only. Mutation: restore the old wording.
+func TestJSONLUsageNamesTheSlowTestLines(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	if code := run([]string{"-h"}, strings.NewReader(""), &out, &errOut, fixedHost()); code != 0 {
+		t.Fatalf("exit code = %d, want 0 for -h", code)
+	}
+	if want := "one per slow test with -slow-tests"; !strings.Contains(errOut.String(), want) {
+		t.Errorf("usage = %q, want it to say %q", errOut.String(), want)
 	}
 }
 

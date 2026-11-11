@@ -127,7 +127,9 @@ type host struct {
 // run reads a go test -json stream from stdin and writes the report to
 // stdout. The exit code is 1 when any package or test failed, else 3 when
 // -max-wall is set and the tier is over it, else 4 when the -jsonl series could
-// not be written, else 0; 2 means the runner itself failed. The series code is
+// not be written, else 0; 2 means the runner itself failed. A slow-test list
+// that could not be read is one such failure: it exits 2 after the report even
+// when a package failed, so the list's failure is not hidden. The series code is
 // last in that order so it never hides a verdict: the gate, which keeps go
 // test's verdict, reads it as the alarm that the wall series is incomplete.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
@@ -135,7 +137,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	fs.SetOutput(stderr)
 	bar := fs.Duration("bar", 90*time.Second, "the wall the tier line is judged against (OK or OVER); it fails nothing")
 	maxWall := fs.Duration("max-wall", 0, "exit 3 when the tier is over this wall; 0 turns the check off")
-	jsonl := fs.String("jsonl", "", "append one JSON line per package to this file (needs -run); a relative path is taken from the town root")
+	jsonl := fs.String("jsonl", "", "append one JSON line per package, and one per slow test with -slow-tests, to this file (needs -run); a relative path is taken from the town root")
 	runID := fs.String("run", "", "the run id each -jsonl line carries")
 	slowTests := fs.Bool("slow-tests", false, "list each test of 5s or more under its package, and tag them in -jsonl")
 	if err := fs.Parse(args); err != nil {
@@ -154,22 +156,25 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	// packages, once for the tests. Without the flag it streams, as before.
 	in := stdin
 	r := newReport(stdout)
+	var slowErr error
 	if *slowTests {
 		data, err := io.ReadAll(stdin)
 		if err != nil {
 			fmt.Fprintln(stderr, "tierwall:", err)
 			return 2
 		}
+		in = bytes.NewReader(data)
 		_, tests, err := tiersweep.ParseTestJSON(bytes.NewReader(data))
 		if err != nil {
-			// The error names a line number, never the line, so no event text is
-			// echoed, and the run stops rather than print a list short of tests.
-			fmt.Fprintln(stderr, "tierwall: slow tests:", err)
-			return 2
+			// The walls still print from the tolerant read below, so one bad line
+			// drops no wall. The run exits 2 once the report is out, and the list
+			// is not printed short of tests. The error names a line number, never
+			// the line, so no event text is echoed.
+			slowErr = err
+		} else {
+			r.listSlow = true
+			r.slow = tiersweep.SlowTests(tests)
 		}
-		r.listSlow = true
-		r.slow = tiersweep.SlowTests(tests)
-		in = bytes.NewReader(data)
 	}
 	if err := r.read(in); err != nil {
 		fmt.Fprintln(stderr, "tierwall:", err)
@@ -188,6 +193,10 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	}
 	if err := r.print(*bar, cpuLine(h)); err != nil {
 		fmt.Fprintln(stderr, "tierwall:", err)
+		return 2
+	}
+	if slowErr != nil {
+		fmt.Fprintln(stderr, "tierwall: slow tests:", slowErr)
 		return 2
 	}
 	switch {
