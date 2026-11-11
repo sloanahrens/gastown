@@ -174,14 +174,16 @@ func (c *jevLogCopy) observe(path string) error {
 // jevReadLogCopy finds the newest write among every battery's log and the usage
 // ledger, the copy health and the Jev totals read.
 func jevReadLogCopy(townRoot string) (jevLogCopy, error) {
-	var newest jevLogCopy
+	paths := make([]string, 0, len(health.Batteries)+1)
 	for _, b := range health.Batteries {
-		if err := newest.observe(b.LogPath(townRoot)); err != nil {
+		paths = append(paths, b.LogPath(townRoot))
+	}
+	paths = append(paths, jev.UsageLedgerPath(townRoot))
+	var newest jevLogCopy
+	for _, path := range paths {
+		if err := newest.observe(path); err != nil {
 			return jevLogCopy{}, err
 		}
-	}
-	if err := newest.observe(jev.UsageLedgerPath(townRoot)); err != nil {
-		return jevLogCopy{}, err
 	}
 	return newest, nil
 }
