@@ -3,6 +3,7 @@ package dashboard
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -38,15 +39,20 @@ func feedEvent(at time.Time, actor, summary, repo string) map[string]any {
 	return map[string]any{"at": at.UTC().Format(time.RFC3339Nano), "actor": actor, "summary": summary, "repo": repo}
 }
 
+// feedTimeCell is what the time cell may hold: a clock time for an event from
+// today, or a date for one from an earlier day. Which one depends on the wall
+// clock, so the check takes either and rejects only text that is neither.
+var feedTimeCell = regexp.MustCompile(`^(\d{2}:\d{2}|[^:]*\d[^:]*)$`)
+
 // The pane lists each event it was served as one row: the time, the actor, the
 // summary and the repo, in that order, and nothing it was not served.
 func TestForgejoFeedDrawsOneRowPerEventWithItsFields(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
-	// Seconds back, not minutes: the pane stamps an event from today with a
-	// clock time and an older one with a date, and a three-minute offset would
-	// push the first event over midnight on a run that starts just after it.
+	// Seconds back, not minutes, so the events are from today in nearly every
+	// run. A run that crosses local midnight draws the first event as a date,
+	// which the time cell check below accepts.
 	events := []any{
 		feedEvent(now.Add(-3*time.Second), "bot-polecat", "push to main", "gastown"),
 		feedEvent(now.Add(-2*time.Second), "bot-landing", "delete branch land/gt-1", "beads"),
@@ -75,8 +81,8 @@ func TestForgejoFeedDrawsOneRowPerEventWithItsFields(t *testing.T) {
 				t.Errorf("row %d cell %d is class %q, want %q", i, j, row[j].Class, class)
 			}
 		}
-		if !strings.Contains(row[0].Text, ":") {
-			t.Errorf("row %d shows %q for its time, want a clock time", i, row[0].Text)
+		if !feedTimeCell.MatchString(row[0].Text) {
+			t.Errorf("row %d shows %q for its time, want a clock time or a date", i, row[0].Text)
 		}
 		if row[1].Text != want[i].actor || row[2].Text != want[i].summary || row[3].Text != want[i].repo {
 			t.Errorf("row %d shows %q %q %q, want %q %q %q", i,
