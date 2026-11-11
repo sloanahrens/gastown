@@ -50,11 +50,14 @@ Deployment mounts, one kubectl line that creates it from the operator's existing
 file, so no agent reads a secret. No file is opened to print those lines.
 
 The image values file is read from under --dir, where imagevalues places it;
-a missing file is refused, since a render needs a digest. --cpu and --memory
-are required: no source records a measured share. A live render also reads the
-derived hm config the compose write leaves under the town root, and refuses
-when it is absent: the pod's hm would read its defaults, which name its own
-loopback, so run gt daemon compose write first.
+a missing file is refused, since a render needs a digest. A live render also
+writes that pair to the town's own values file, where the pair-ready check
+reads the running commit, and prints the one kubectl line that copies it into
+the daemon pod's town copy. The line is printed, never run. A rehearsal writes
+no values file. --cpu and --memory are required: no source records a measured
+share. A live render also reads the derived hm config the compose write leaves
+under the town root, and refuses when it is absent: the pod's hm would read its
+defaults, which name its own loopback, so run gt daemon compose write first.
 
 Examples:
   gt town cluster render --dir ~/gt/gastown --out ./manifests \
@@ -388,6 +391,15 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 			return fmt.Errorf("cannot write %s: %w", path, err)
 		}
 	}
+	// The pair-ready check reads the running commit from the town's own values
+	// file, and nothing else writes it. A live render writes it after the
+	// manifests, so a failed manifest write leaves the running commit as it was.
+	townValues := imagevalues.PathIn(filepath.Join(townRoot, "gastown"))
+	if !f.rehearsal {
+		if err := imagevalues.Write(townValues, pair); err != nil {
+			return fmt.Errorf("cannot write the running values file %s, and the manifests are written: %w", townValues, err)
+		}
+	}
 	fmt.Fprintf(d.out, "Wrote %d manifests to %s, in apply order:\n", len(objects), f.out)
 	for _, o := range objects {
 		fmt.Fprintf(d.out, "  %s\n", o.file)
@@ -397,7 +409,27 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	for _, l := range lines {
 		fmt.Fprintf(d.out, "  %s\n", l)
 	}
+	if !f.rehearsal {
+		fmt.Fprintf(d.out, "Wrote the running values file to %s. The daemon pod reads its own town copy, so copy it there too:\n", townValues)
+		fmt.Fprintf(d.out, "  %s\n", podValuesCopyLine(namespace, townValues))
+	}
 	return nil
+}
+
+// podValuesCopyLine is the one command that copies the town's values file into
+// the daemon pod's town copy. The daemon container runs with the town root at
+// TownRootPath, so the pod reads the file at TownRootPath/gastown. The copy
+// goes to a .tmp file first; test -s refuses an empty copy, which is what a
+// missing -i leaves, and mv replaces the pod's file only after that check. The
+// line is printed for the operator and never run.
+func podValuesCopyLine(namespace, src string) string {
+	dst := k8sdaemon.TownRootPath + "/gastown/" + imagevalues.DefaultRelPath
+	dir := k8sdaemon.TownRootPath + "/gastown/" + filepath.Dir(imagevalues.DefaultRelPath)
+	tmp := dst + ".tmp"
+	inner := fmt.Sprintf("mkdir -p %s && cat > %s && test -s %s && mv %s %s",
+		shellQuote(dir), shellQuote(tmp), shellQuote(tmp), shellQuote(tmp), shellQuote(dst))
+	return fmt.Sprintf("kubectl -n %s exec -i deploy/%s -c %s -- sh -c %s < %s",
+		shellQuote(namespace), k8sdaemon.Name, k8sdaemon.Name, shellQuote(inner), shellQuote(src))
 }
 
 // applyRank orders the kinds a render writes. A seed helper Pod fills the
