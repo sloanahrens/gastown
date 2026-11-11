@@ -66,6 +66,8 @@ func seatTown(t *testing.T, polecats int) (town string, db *beadsfake.Fake, list
 		beads.Issue{ID: "gt-dead", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/p04"},
 		beads.Issue{ID: "gt-done", Status: "closed", Assignee: "gastown/polecats/p05"},
 	)
+	// A live seat's class comes from its record, not its session (gt-5h87d7).
+	recordSlungSeats(t, town, lister)
 	return town, db, lister
 }
 

@@ -12,6 +12,8 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
 )
 
 // drainingTickRoster is the roster read of the gt-97ppg tick: capable is a live
@@ -188,6 +190,12 @@ func TestSpecTickRosterReadsSlingSideOnceAndCountsTheSpawn(t *testing.T) {
 	store := func(string) beads.Client { return db }
 	capable := map[string]string{"GT_ROLE": "gastown/polecats/capable", "GT_AGENT": "claude-sonnet"}
 	spawn := map[string]string{"GT_ROLE": "gastown/polecats/spawn", "GT_AGENT": "claude-sonnet"}
+	// Both seats were slung on claude-sonnet, so each has the record a sling
+	// leaves: the roster reads a live seat's agent from it (gt-5h87d7).
+	for _, name := range []string{"capable", "spawn"} {
+		writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: name}, town,
+			intent.Record{Agent: "claude-sonnet"})
+	}
 	cases := []struct {
 		name         string
 		failAt       int

@@ -34,7 +34,7 @@ func TestSpecRosterCountsWhatTheSlingHolds(t *testing.T) {
 		at:       at.Add(-time.Minute),
 	}
 	occupied := func() ([]poolSession, error) {
-		return snapshotOccupied(seats, func() sessionLister { return lister }, nil, func() time.Time { return at })()
+		return snapshotOccupied(seats, seatAgentAnswering(map[string]string{"gastown/capable": "claude-sonnet", "gastown/flash": "claude-sonnet", "gastown/old": "claude-sonnet"}), func() sessionLister { return lister }, nil, func() time.Time { return at })()
 	}
 
 	roster, err := specRosterOf(seats, nil, occupied)
@@ -140,7 +140,7 @@ func TestSpecSlingSideOccupancyHoldsNoClaim(t *testing.T) {
 		at:       at.Add(-time.Minute),
 	}
 	lister := &fakeLister{sessions: map[string]map[string]string{}}
-	held, err := snapshotOccupied(seats, func() sessionLister { return lister }, nil, func() time.Time { return at })()
+	held, err := snapshotOccupied(seats, seatAgentAnswering(map[string]string{"gastown/capable": "claude-sonnet", "gastown/flash": "claude-sonnet", "gastown/old": "claude-sonnet"}), func() sessionLister { return lister }, nil, func() time.Time { return at })()
 	if err != nil {
 		t.Fatal(err)
 	}

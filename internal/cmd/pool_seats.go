@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -126,7 +127,7 @@ func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatD
 // poolOccupiedSessionsProbed is poolOccupiedSessions with the number of seats
 // the dead-hooked walk probed returned beside the seats (gt-gg9hv.73).
 func poolOccupiedSessionsProbed(t sessionLister, townRoot string, disposition polecatDispositionFunc, hookHeld polecatHookHeldFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time, deadSandbox sandboxSeatDeadFunc) ([]poolSession, int, error) {
-	live, err := listPolecatSessionsWith(t, disposition, now())
+	live, err := listPolecatSessionsWith(t, poolSeatAgentFor(townRoot), disposition, now())
 	if err != nil {
 		return nil, 0, &poolOccupancyError{sessions: true, err: err}
 	}
@@ -788,6 +789,68 @@ func slungAgent(rec intent.Record, fallback string) string {
 		return agent
 	}
 	return fallback
+}
+
+// poolSeatAgentFunc reads the agent a seat's record names. It is the pool's one
+// read of that fact for a live seat too: a sandboxed seat's GT_AGENT cannot be
+// read from the host, while the record outlives any session (gt-5h87d7). An
+// error means the record cannot be read.
+type poolSeatAgentFunc func(rigName, polecatName string) (string, error)
+
+// poolSeatAgentFor is the seat-record read a caller in townRoot wants, its
+// warnings on stderr; nil when there is no town to read (a test), which leaves
+// every seat unrecorded.
+func poolSeatAgentFor(townRoot string) poolSeatAgentFunc {
+	return poolSeatAgentTo(townRoot, os.Stderr)
+}
+
+// poolSeatAgentTo is poolSeatAgentFor with the writer its warning goes to.
+//
+// The record is the one source for a live seat's class. A record that names no
+// agent leaves the agent empty, which the roster counts as unrecorded and
+// never on a class the record does not say (gt-mukgk). A record that does not
+// exist is different: the seat is live, so it holds a seat the pool must
+// count, and nothing in the town says which class it is. That seat is counted
+// under config.UnknownSeatAgent, which fills no seat and keeps its place in
+// the pool's total, rather than on no class at all, which would leave its seat
+// uncounted against every cap.
+//
+// A record that cannot be read is returned as the error, which
+// listPolecatSessionsWith counts under config.UnknownSeatAgent, and the reader
+// logs it once per reader: a reader serves one occupancy read, so a bad record
+// warns once per read rather than once per session.
+func poolSeatAgentTo(townRoot string, warnOut io.Writer) poolSeatAgentFunc {
+	if townRoot == "" {
+		return nil
+	}
+	warn := &onceWriter{w: warnOut}
+	return func(rigName, polecatName string) (string, error) {
+		seat := polecatIntentSeat(rigName, polecatName)
+		rec, err := intent.Read(townRoot, seat)
+		if err != nil {
+			fmt.Fprintf(warn, "warning: %s/%s's seat record cannot be read, counting the seat under %s: %v\n",
+				rigName, polecatName, config.UnknownSeatAgent, err)
+			return "", err
+		}
+		if agent := strings.TrimSpace(rec.Agent); agent != "" {
+			return agent, nil
+		}
+		// Read answers an empty record for a file that does not exist, so a
+		// live seat with no record reaches here too: its class is unknown.
+		if _, statErr := os.Stat(seat.Path(townRoot)); errors.Is(statErr, os.ErrNotExist) {
+			return config.UnknownSeatAgent, nil
+		}
+		return "", nil
+	}
+}
+
+// poolSeatAgent answers one seat's agent through a reader that may be nil: a
+// caller with no town to read counts the seat as unrecorded.
+func poolSeatAgent(read poolSeatAgentFunc, rigName, polecatName string) (string, error) {
+	if read == nil {
+		return "", nil
+	}
+	return read(rigName, polecatName)
 }
 
 // polecatStarter is the one SessionManager verb restartPolecatOnSlungAgent
