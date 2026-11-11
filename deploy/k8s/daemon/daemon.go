@@ -30,8 +30,9 @@
 // TestPodEnvEqualsTheComposeEnv holds the two services equal but for the names
 // composeOnlyEnv lists, and TestPodCommandEqualsTheComposeCommand holds the
 // arguments. The container carries no preStop hook:
-// SIGTERM plus terminationGracePeriodSeconds is the drain, which is DrainBound's
-// sum of the daemon's shutdown budget and the landing-pass drain bound.
+// SIGTERM plus terminationGracePeriodSeconds is the drain, which is DrainBound:
+// the landing-step drain, the heartbeat grace and the Dolt stop, named once in
+// manifestdata.
 //
 // Values.Image is the digest reference read from deploy/values/images.yaml,
 // which `gt update images` writes (gt-gg9hv.63); the render refuses a tag, so
@@ -146,28 +147,20 @@ const (
 	SweepReaderRole    = "gt-sweep-reader"
 	CacheTrimNamespace = "forgejo"
 	CacheTrimRole      = "gt-ci-cache-trim"
-	// daemonShutdownBudget is the daemon's own graceful-shutdown ceiling,
-	// internal/daemon.ShutdownBudget (internal/daemon/dolt.go). It is named here
-	// because the import rule keeps internal/daemon out of the renderer.
-	daemonShutdownBudget = 30 * time.Second
-	// landingPassDrainBound is internal/daemon's postLandRestartCap
-	// (internal/daemon/upgrade_restart.go): how long a pending upgrade restart
-	// waits for a landing pass already in flight.
-	landingPassDrainBound = 2 * time.Minute
 	// terminationGraceMargin keeps the pod alive past the drain, so the kubelet's
 	// SIGKILL lands after the daemon has finished stopping.
 	terminationGraceMargin = 30 * time.Second
-	// DrainBound is the longest a daemon pod needs to stop: the daemon's shutdown
-	// budget plus the landing-pass drain bound, 30s + 2m = 2m30s.
-	DrainBound = daemonShutdownBudget + landingPassDrainBound
+	// DrainBound is the longest the daemon's SIGTERM drain can take to stop: the
+	// landing-step drain, the heartbeat grace and the Dolt stop, summed in
+	// manifestdata (shutdown.go). The pod's grace is sized from the same sum.
+	DrainBound = manifestdata.ShutdownDrainSum
 	// MinimumTerminationGraceSeconds is the shortest grace period the render
-	// accepts: DrainBound in whole seconds, 150. A shorter grace SIGKILLs the
-	// pod while its drain still runs.
-	MinimumTerminationGraceSeconds = int(DrainBound / time.Second)
+	// accepts: DrainBound plus terminationGraceMargin, in whole seconds. A shorter
+	// grace SIGKILLs the pod while its drain still runs.
+	MinimumTerminationGraceSeconds = int((DrainBound + terminationGraceMargin) / time.Second)
 	// DefaultTerminationGraceSeconds is the grace period when Values names none:
-	// DrainBound plus terminationGraceMargin, 150 + 30 = 180 seconds, so the
-	// drain finishes before the kubelet's SIGKILL.
-	DefaultTerminationGraceSeconds = int((DrainBound + terminationGraceMargin) / time.Second)
+	// the minimum, so the drain and its margin finish before the kubelet's SIGKILL.
+	DefaultTerminationGraceSeconds = MinimumTerminationGraceSeconds
 	// TownStateClaim is the claim carrying the daemon-owned town root, and the
 	// pod volume name it is mounted by.
 	TownStateClaim = "town-state"
@@ -1776,7 +1769,7 @@ func (v Values) validateDaemon() error {
 	case !storageRE.MatchString(v.Memory):
 		return fmt.Errorf("Values.Memory %q: want a non-zero whole number and one of Ki, Mi, Gi or Ti, such as 4Gi", v.Memory)
 	case v.TerminationGraceSeconds < MinimumTerminationGraceSeconds:
-		return fmt.Errorf("Values.TerminationGraceSeconds %d: want at least %d, the daemon's shutdown budget plus its landing-pass drain bound, or the pod is SIGKILLed mid-drain", v.TerminationGraceSeconds, MinimumTerminationGraceSeconds)
+		return fmt.Errorf("Values.TerminationGraceSeconds %d: want at least %d, the daemon's drain (the landing-step bound, the heartbeat grace and the Dolt stop) plus the margin, or the pod is SIGKILLed mid-drain", v.TerminationGraceSeconds, MinimumTerminationGraceSeconds)
 	}
 	if err := v.validateHostGateway(); err != nil {
 		return err

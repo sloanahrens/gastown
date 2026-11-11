@@ -67,4 +67,4 @@ regexp/syntax|slices sort strconv strings sync unicode unicode/utf8
 regexp|bytes io iter regexp/syntax slices strconv strings sync unicode unicode/utf8
 gopkg.in/yaml.v3|bytes encoding encoding/base64 errors fmt io math reflect regexp sort strconv strings sync time unicode unicode/utf8
 path/filepath|errors internal/bytealg internal/filepathlite io/fs os runtime slices strings syscall unicode/utf8
-github.com/steveyegge/gastown/internal/manifestdata|bytes errors fmt gopkg.in/yaml.v3 io path path/filepath regexp slices strings
+github.com/steveyegge/gastown/internal/manifestdata|bytes errors fmt gopkg.in/yaml.v3 io path path/filepath regexp slices strings time

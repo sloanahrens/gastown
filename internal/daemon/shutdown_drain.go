@@ -4,13 +4,15 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // ShutdownDrainBound is how long a SIGTERM waits for the landing pass in flight
-// before the daemon shuts down without it. The pod's terminationGracePeriodSeconds
-// covers it: deploy/k8s/daemon names the same 2 minutes as landingPassDrainBound,
-// and its grace is that bound plus ShutdownBudget plus a margin (gt-99ys4n).
-const ShutdownDrainBound = 2 * time.Minute
+// before the daemon shuts down without it. The value is manifestdata's: the pod's
+// terminationGracePeriodSeconds is sized from the drain's sum of the bound, the
+// heartbeat grace and the Dolt stop budget (manifestdata/shutdown.go, gt-99ys4n).
+const ShutdownDrainBound = manifestdata.LandingStepDrainBound
 
 // shutdownDrainBound is the bound a drain waits for: ShutdownDrainBound, unless a
 // test set drainBound (a test seam on the Daemon, so the bound runs in

@@ -5,12 +5,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // heartbeatSignalGrace bounds how long a shutdown signal waits for a heartbeat
 // step that does not stop on the canceled daemon context (gt-lbqgz). It stays
-// well inside launchd's 30 s stop.
-const heartbeatSignalGrace = 5 * time.Second
+// well inside launchd's 30 s stop. The value is manifestdata's, which sizes the
+// pod's grace period (gt-99ys4n).
+const heartbeatSignalGrace = manifestdata.HeartbeatSignalGrace
 
 // heartbeatRun is the state one heartbeat shares with the signal wait: the
 // name of the step in flight and the lock that keeps an abandoned heartbeat
