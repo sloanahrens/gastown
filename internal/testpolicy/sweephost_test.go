@@ -13,7 +13,7 @@ import (
 // runner, and the line and this pin move in the same change. A count under
 // the pin is how a forgotten pin shows, so CheckSweepHostCount fails both
 // directions.
-const maxSweepHost = 12
+const maxSweepHost = 11
 
 // generatedSeed is the directory make polecat-image stages whole rig
 // checkouts in. It mirrors internal/testpolicy/cmd/integrationvet: those are
