@@ -501,6 +501,211 @@ func reworkNotes(n int) string {
 	return b.String()
 }
 
+// reviewRejection is one om review rejection block, the kind a landing review
+// writes, carrying the findings om raised.
+func reviewRejection(attempt int, findings ...land.Finding) string {
+	return land.FormatRejectionNote(land.RejectionNote{
+		Attempt: attempt, Kind: string(land.RejectReview), Reason: "om requested changes",
+		Branch: "polecat/x/gt-r", Target: "main", MR: "gt-r", Head: "abc123",
+		Findings: findings,
+	}) + "\n"
+}
+
+func TestAttentionCollector_ReviewRejected(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	major := land.Finding{ID: "f1", Severity: "major", Path: "internal/x.go", Line: 12, Title: "nil map write in lander"}
+	f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-first", Status: "open", UpdatedAt: "t1", CreatedBy: "town/crew/dipper", Assignee: "gastown/polecats/furiosa", Notes: reviewRejection(1, major)},
+			// A gate refusal is not an om review rejection.
+			{ID: "gt-gate", Status: "open", UpdatedAt: "t2", CreatedBy: "town/crew/dipper", Notes: reworkNotes(1)},
+			// A closed bead is no longer actionable.
+			{ID: "gt-closed", Status: "closed", UpdatedAt: "t3", CreatedBy: "town/crew/dipper", Notes: reviewRejection(1, major)},
+		}, nil
+	}
+
+	items := f.collect(t, f.src.collectReviewRejected)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want only the first review rejection of gt-first", items)
+	}
+	it := items[0]
+	if it.Key != "review-rejected:gt-first:1" || it.Kind != attention.KindReviewRejected {
+		t.Errorf("item key %q kind %q, want review-rejected:gt-first:1 and review-rejected", it.Key, it.Kind)
+	}
+	if it.Owner != "dipper" {
+		t.Errorf("item owner %q, want dipper", it.Owner)
+	}
+	for _, want := range []string{"gt-first", "count 1", "owner dipper", "nil map write in lander"} {
+		if !strings.Contains(it.Summary, want) {
+			t.Errorf("summary %q lacks %q", it.Summary, want)
+		}
+	}
+}
+
+// TestAttentionTickRaisesReviewRejected runs the whole collector set, so the
+// review-rejection collector is registered and its item reaches the queue.
+func TestAttentionTickRaisesReviewRejected(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	major := land.Finding{ID: "f1", Severity: "major", Path: "internal/x.go", Line: 12, Title: "nil map write in lander"}
+	f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-r", Status: "open", UpdatedAt: "t1", CreatedBy: "town/crew/dipper", Notes: reviewRejection(1, major)},
+		}, nil
+	}
+
+	st := f.tick(t, now)
+	var raised []attention.Item
+	for _, it := range st.Items {
+		if it.Kind == attention.KindReviewRejected {
+			raised = append(raised, it)
+		}
+	}
+	if len(raised) != 1 || raised[0].Key != "review-rejected:gt-r:1" {
+		t.Fatalf("queue holds %+v, want one review-rejected item gt-r:1", raised)
+	}
+}
+
+func TestAttentionCollector_ReviewRejectedOwnerUnknown(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	major := land.Finding{ID: "f1", Severity: "major", Path: "internal/x.go", Line: 12, Title: "nil map write in lander"}
+	cases := []struct {
+		name      string
+		createdBy string
+		assignee  string
+	}{
+		{name: "created by the overseer", createdBy: "town/crew/overseer"},
+		{name: "created by a polecat", createdBy: "gastown/polecats/furiosa"},
+		{name: "assigned to a polecat", assignee: "gastown/polecats/furiosa"},
+		{name: "no actor at all"},
+	}
+	for _, c := range cases {
+		f := newAttentionFixture(t, now)
+		f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+			return []*beads.Issue{
+				{ID: "gt-r", Status: "open", UpdatedAt: "t1", CreatedBy: c.createdBy, Assignee: c.assignee, Notes: reviewRejection(1, major)},
+			}, nil
+		}
+		items := f.collect(t, f.src.collectReviewRejected)
+		if len(items) != 1 {
+			t.Fatalf("%s: items = %+v, want one review rejection", c.name, items)
+		}
+		if items[0].Owner != "" || !strings.Contains(items[0].Summary, "owner unknown") {
+			t.Errorf("%s: owner %q summary %q, want no owner and owner unknown", c.name, items[0].Owner, items[0].Summary)
+		}
+	}
+}
+
+func TestAttentionCollector_ReviewRejectedKeyPerRejection(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	major := land.Finding{ID: "f1", Severity: "major", Path: "internal/x.go", Line: 12, Title: "nil map write in lander"}
+	first := reviewRejection(1, major)
+	second := first + reviewRejection(2, major)
+	notes := first
+	f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+		return []*beads.Issue{
+			{ID: "gt-r", Status: "open", UpdatedAt: "t1", CreatedBy: "town/crew/dipper", Notes: notes},
+		}, nil
+	}
+
+	keyOf := func() string {
+		items := f.collect(t, f.src.collectReviewRejected)
+		if len(items) != 1 {
+			t.Fatalf("items = %+v, want one review rejection", items)
+		}
+		return items[0].Key
+	}
+	firstKey := keyOf()
+	if again := keyOf(); again != firstKey {
+		t.Errorf("the same rejection raised key %q then %q, want one key", firstKey, again)
+	}
+	notes = second
+	if next := keyOf(); next == firstKey || next != "review-rejected:gt-r:2" {
+		t.Errorf("a second rejection raised key %q, want a new key review-rejected:gt-r:2", next)
+	}
+}
+
+func TestAttentionCollector_ReviewRejectedTitle(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	major := land.Finding{ID: "f1", Severity: "major", Path: "a.go", Line: 1, Title: "major title"}
+	critical := land.Finding{ID: "f2", Severity: "critical", Path: "b.go", Line: 2, Title: "critical title"}
+	minor := land.Finding{ID: "f3", Severity: "minor", Path: "c.go", Line: 3, Title: "minor title"}
+	cases := []struct {
+		name     string
+		findings []land.Finding
+		want     string
+	}{
+		{name: "the major finding is named", findings: []land.Finding{minor, major}, want: "major title"},
+		{name: "a critical finding is named when there is no major", findings: []land.Finding{minor, critical}, want: "critical title"},
+		{name: "a minor-only refusal names no title", findings: []land.Finding{minor}, want: ""},
+	}
+	for _, c := range cases {
+		f := newAttentionFixture(t, now)
+		f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+			return []*beads.Issue{
+				{ID: "gt-r", Status: "open", UpdatedAt: "t1", CreatedBy: "town/crew/dipper", Notes: reviewRejection(1, c.findings...)},
+			}, nil
+		}
+		items := f.collect(t, f.src.collectReviewRejected)
+		if len(items) != 1 {
+			t.Fatalf("%s: items = %+v, want one review rejection", c.name, items)
+		}
+		if c.want == "" {
+			if strings.Contains(items[0].Summary, ": ") {
+				t.Errorf("%s: summary %q names a title, want none", c.name, items[0].Summary)
+			}
+			continue
+		}
+		if !strings.HasSuffix(items[0].Summary, ": "+c.want) {
+			t.Errorf("%s: summary %q, want it to end with %q", c.name, items[0].Summary, c.want)
+		}
+	}
+}
+
+// TestAttentionCollector_ReviewRejectedReadFailure: a failed read is the
+// collector's error, so the queue keeps the previous tick's items rather than
+// reading a bead it could not see as clean.
+func TestAttentionCollector_ReviewRejectedReadFailure(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		setup func(f *attentionFixture)
+	}{
+		{name: "the rework list fails", setup: func(f *attentionFixture) {
+			f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+				return nil, errors.New("bd list failed")
+			}
+		}},
+		{name: "a bead's notes cannot be read", setup: func(f *attentionFixture) {
+			f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+				return []*beads.Issue{{ID: "gt-r", Status: "open", UpdatedAt: "t1", CreatedBy: "town/crew/dipper"}}, nil
+			}
+			f.src.reworkNote = func(context.Context, string, string) (string, error) {
+				return "", errors.New("bd show failed")
+			}
+		}},
+	}
+	for _, c := range cases {
+		f := newAttentionFixture(t, now)
+		c.setup(f)
+		items, err := f.src.collectReviewRejected(context.Background())
+		if err == nil {
+			t.Errorf("%s: err nil with items %+v, want the read error", c.name, items)
+		}
+		if len(items) != 0 {
+			t.Errorf("%s: items %+v, want none on a failed read", c.name, items)
+		}
+	}
+}
+
 func TestAttentionCollector_RejectedTwice(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)

@@ -30,6 +30,9 @@ const (
 	KindCacheTrimNoOp Kind = "cache-trim-noop"
 	// KindRejectedTwice: a bead was rejected by landing twice.
 	KindRejectedTwice Kind = "rejected-twice"
+	// KindReviewRejected: om refused a bead's review, so the bead's owner
+	// bird has findings to act on (gt-r3vmgc).
+	KindReviewRejected Kind = "review-rejected"
 	// KindEscalation: an open escalation awaits the overseer.
 	KindEscalation Kind = "escalation"
 	// KindPolecatStall: a polecat has not reported progress for its bound.
@@ -123,7 +126,7 @@ const (
 // that must know the full set.
 func Kinds() []Kind {
 	return []Kind{
-		KindRiskPath, KindRedMain, KindCacheTrimNoOp, KindRejectedTwice, KindEscalation,
+		KindRiskPath, KindRedMain, KindCacheTrimNoOp, KindRejectedTwice, KindReviewRejected, KindEscalation,
 		KindPolecatStall, KindLandingStuck, KindQueueStuck, KindDirectPush,
 		KindSlotHeld, KindSlotDeadHolder, KindBDSlow, KindTierSweepRed,
 		KindTierSweepStarved, KindTierSweepStuck, KindTierSweepGuardUnreadable,

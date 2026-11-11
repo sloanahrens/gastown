@@ -188,12 +188,16 @@ type attentionCache struct {
 	escalationLogs map[string]string
 }
 
-// reworkNote is one rework bead's cached rejection count, keyed by the
-// updated_at the notes were read at so a collector re-reads only a bead that
-// changed since.
+// reworkNote is one rework bead's rejection digest, keyed by the updated_at the
+// notes were read at so a collector re-reads only a bead that changed since.
 type reworkNote struct {
 	updatedAt string
-	count     int
+	// count is every rejection block, whatever its kind: the loop's count.
+	count int
+	// review is the om review rejections among them, and finding the one-line
+	// title of the first major (else critical) finding on the latest one.
+	review  int
+	finding string
 }
 
 // attentionCollector is one source of items: the kind it reports, and the
@@ -617,6 +621,7 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindRedMain, collect: s.collectRedMain},
 		{kind: attention.KindEscalation, collect: s.collectEscalations},
 		{kind: attention.KindRejectedTwice, collect: s.collectRejectedTwice},
+		{kind: attention.KindReviewRejected, collect: s.collectReviewRejected},
 		{kind: attention.KindSlotHeld, collect: s.collectSlotHeld},
 		{kind: attention.KindSlotDeadHolder, collect: s.collectSlotDeadHolder},
 		{kind: attention.KindBDSlow, collect: s.collectBDSlow},
@@ -1136,10 +1141,11 @@ func (s *attentionSources) collectRejectedTwice(ctx context.Context) ([]attentio
 			if is == nil || !beads.IssueStatus(strings.TrimSpace(is.Status)).IsActionable() {
 				continue
 			}
-			n, err := s.rejectionCount(ctx, rig, is)
+			d, err := s.rejectionDigest(ctx, rig, is)
 			if err != nil {
 				return nil, err
 			}
+			n := d.count
 			if n < attentionRejectedTwice {
 				continue
 			}
@@ -1165,26 +1171,119 @@ func (s *attentionSources) collectRejectedTwice(ctx context.Context) ([]attentio
 	return out, nil
 }
 
-// rejectionCount is one candidate's rejection count, from notes the list
+// collectReviewRejected raises one item per actionable rework bead whose notes
+// record an om review rejection: the bead's owner bird has findings to act on,
+// and the overseer relays them the same hour instead of reading the pod log
+// (gt-r3vmgc). The key is per bead and rejection, so a rejection is one item
+// and the next rejection is a new one. It clears when the bead lands or closes.
+func (s *attentionSources) collectReviewRejected(ctx context.Context) ([]attention.Item, error) {
+	var out []attention.Item
+	for _, rig := range s.landingRigs() {
+		issues, err := s.rework(ctx, rig)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rig, err)
+		}
+		for _, is := range issues {
+			if is == nil || !beads.IssueStatus(strings.TrimSpace(is.Status)).IsActionable() {
+				continue
+			}
+			d, err := s.rejectionDigest(ctx, rig, is)
+			if err != nil {
+				return nil, err
+			}
+			if d.review == 0 {
+				continue
+			}
+			// The owner is the bird that filed the bead, else the bird it is
+			// assigned to. Neither names one, so the summary says unknown.
+			owner := birdOwner(is.CreatedBy)
+			if owner == "" {
+				owner = birdOwner(is.Assignee)
+			}
+			ownerText := owner
+			if owner == "" {
+				ownerText = "unknown"
+			}
+			summary := fmt.Sprintf("%s review rejected (count %d), owner %s", is.ID, d.review, ownerText)
+			if d.finding != "" {
+				summary += ": " + d.finding
+			}
+			out = append(out, attention.Item{
+				Key:      fmt.Sprintf("review-rejected:%s:%d", is.ID, d.review),
+				Kind:     attention.KindReviewRejected,
+				Severity: attention.SeverityHigh,
+				Rig:      rig,
+				Bead:     is.ID,
+				Owner:    owner,
+				Summary:  summary,
+			})
+		}
+	}
+	return out, nil
+}
+
+// birdOwner is the bird an actor names when it has the form town/crew/NAME and
+// NAME is not the overseer. Any other actor, a polecat's or the overseer's, is
+// no bird, so an owner is never guessed from it (gt-r3vmgc).
+func birdOwner(actor string) string {
+	parts := strings.Split(strings.TrimSpace(actor), "/")
+	if len(parts) != 3 || parts[0] != "town" || parts[1] != "crew" {
+		return ""
+	}
+	if parts[2] == "" || parts[2] == attention.HumanAddress {
+		return ""
+	}
+	return parts[2]
+}
+
+// rejectionDigest is one candidate's rejection digest, from notes the list
 // already carried when it has them, else from the cache, else from one bd
 // show recorded in the cache.
-func (s *attentionSources) rejectionCount(ctx context.Context, rig string, is *beads.Issue) (int, error) {
+func (s *attentionSources) rejectionDigest(ctx context.Context, rig string, is *beads.Issue) (reworkNote, error) {
 	if is.Notes != "" {
-		return land.RejectionBlocks(is.Notes), nil
+		return digestRejections(is.Notes), nil
 	}
 	if c, ok := s.reworkNotes[is.ID]; ok && c.updatedAt == is.UpdatedAt {
-		return c.count, nil
+		return c, nil
 	}
 	notes, err := s.reworkNote(ctx, rig, is.ID)
 	if err != nil {
-		return 0, fmt.Errorf("%s: %w", is.ID, err)
+		return reworkNote{}, fmt.Errorf("%s: %w", is.ID, err)
 	}
-	n := land.RejectionBlocks(notes)
+	d := digestRejections(notes)
+	d.updatedAt = is.UpdatedAt
 	if s.reworkNotes == nil {
 		s.reworkNotes = map[string]reworkNote{}
 	}
-	s.reworkNotes[is.ID] = reworkNote{updatedAt: is.UpdatedAt, count: n}
-	return n, nil
+	s.reworkNotes[is.ID] = d
+	return d, nil
+}
+
+// digestRejections reads notes' rejection blocks: every block for the loop's
+// count, the om review ones for the review count, and the first major finding's
+// title off the latest review block.
+func digestRejections(notes string) reworkNote {
+	d := reworkNote{count: land.RejectionBlocks(notes)}
+	reviews := land.RejectionsOfKind(notes, string(land.RejectReview))
+	d.review = len(reviews)
+	if d.review > 0 {
+		d.finding = reviewTitle(reviews[d.review-1].Findings)
+	}
+	return d
+}
+
+// reviewTitle is the title of the first finding om graded major, or else the
+// first critical one (a critical finding refuses a landing at any score). It is
+// "" when the block carries neither.
+func reviewTitle(findings []land.Finding) string {
+	for _, want := range []string{"major", "critical"} {
+		for _, f := range findings {
+			if strings.EqualFold(strings.TrimSpace(f.Severity), want) {
+				return strings.TrimSpace(f.Title)
+			}
+		}
+	}
+	return ""
 }
 
 // collectSlotHeld raises one item per container-build slot held longer than

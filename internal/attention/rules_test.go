@@ -50,8 +50,8 @@ func TestEveryRuleHasFlags(t *testing.T) {
 func TestRuleFlagsAssignments(t *testing.T) {
 	t.Parallel()
 	wake := []string{
-		RuleLandingStuck, RuleQueueStuck, RuleRedMain, RuleRejectedTwice, RuleTierSweepRed,
-		RuleEscalation, RuleSlotHeld, RuleSlotDeadHolder, RulePolecatStall, RuleBDSlow,
+		RuleLandingStuck, RuleQueueStuck, RuleRedMain, RuleRejectedTwice, RuleReviewRejected,
+		RuleTierSweepRed, RuleEscalation, RuleSlotHeld, RuleSlotDeadHolder, RulePolecatStall, RuleBDSlow,
 		RuleHostDiskCrit, RuleHostMemLow, RuleHostForgejoDown,
 		RuleQuestionNew, RuleQuestionAnswered, RuleDispatchIdle,
 		RuleDeployFailed,
