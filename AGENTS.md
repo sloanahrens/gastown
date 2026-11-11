@@ -91,11 +91,11 @@ with other agents using `gt` commands — never by printing text or using raw tm
 
 ```bash
 gt nudge laneassist/crew/dom "Status update: PR review complete"
-gt nudge laneassist/witness "Check your mail — PR ready for review"
+gt nudge laneassist/crew/dom "Check your mail — PR ready for review"
 ```
 
 **Target formats:**
-- Full path: `<rig>/crew/<name>`, `<rig>/polecats/<name>`, `<rig>/<role>` (e.g. `<rig>/witness`)
+- Full path: `<rig>/crew/<name>`, `<rig>/polecats/<name>`, or `<rig>/<name>` for a polecat (e.g. `<rig>/ruby`)
 
 **Important:** `gt nudge` is the ONLY way to send text to another agent's session.
 Never print "Hey @name" — the other agent cannot see your terminal output.
@@ -110,7 +110,7 @@ gt mail inbox                    # List messages
 gt mail read <id>                # Read a specific message
 
 # Sending (use --stdin for multi-line content)
-gt mail send laneassist/witness -s "Subject" -m "Short message"
+gt mail send laneassist/crew/dom -s "Subject" -m "Short message"
 gt mail send laneassist/crew/dom -s "PR Review" --stdin <<'BODY'
 Multi-line message content here.
 Details about the PR and what to look for.
