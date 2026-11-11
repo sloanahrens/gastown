@@ -190,18 +190,18 @@ func beadUpdateOptions(f *pflag.FlagSet) beads.UpdateOptions {
 var beadTickCmd = &cobra.Command{
 	Use:   "tick <id> <box text>",
 	Short: "Tick one acceptance box, named by its text",
-	Long: `Tick one unchecked acceptance box. The box is named by its text (what
+	Long: fmt.Sprintf(`Tick one unchecked acceptance box. The box is named by its text (what
 follows its '[ ] '), and the field is re-read when the tick runs, so a box
 another writer added since you read the criteria is kept. Every other line
 keeps its bytes. If another writer changes the criteria between that read and
-the write, the tick re-reads and tries again, up to three writes, then reports
+the write, the tick re-reads and tries again, up to %d writes, then reports
 the conflict and writes nothing more.
 
 A box whose text is no longer in the field refuses, and the refusal prints
 the criteria as they now stand. A box already ticked is left as it is.
 
 Example:
-  gt bead tick gt-abc "make lint && make gate pass"`,
+  gt bead tick gt-abc "make lint && make gate pass"`, tickAttempts),
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return withBeadVerbs(cmd, func(bv *beadVerbs) error { return bv.tick(args[0], args[1]) })
@@ -555,7 +555,7 @@ func (v *beadVerbs) tick(id, box string) error {
 			_, err = fmt.Fprintf(v.out, "✓ Ticked %q on %s\n", box, id)
 			return err
 		case !errors.Is(err, beads.ErrGuardNotHeld):
-			return fmt.Errorf("not ticking %s: the guarded write (bd update --if-acceptance) failed: %w", id, err)
+			return fmt.Errorf("not ticking %s: the guarded write failed: %w", id, err)
 		case attempt == tickAttempts:
 			return fmt.Errorf("not ticking %s: %q: its criteria changed between every read and write over %d tries; "+
 				"nothing was written. Re-run gt bead tick once the amendment has settled", id, box, tickAttempts)
