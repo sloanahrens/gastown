@@ -1613,6 +1613,51 @@ func TestTailBeads_NotFoundIsRemembered(t *testing.T) {
 	}
 }
 
+// TestTailBeads_CachedTitleNeverReads: the cache-only answer starts no bd read.
+// A bead never read, or whose read failed, is unsettled; a title that was read
+// and a not-found answer are settled, and asking for them again reads nothing.
+func TestTailBeads_CachedTitleNeverReads(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{
+		issues: map[string]*beads.Issue{"gt-ok": {ID: "gt-ok", Title: "the title"}},
+		errs: map[string]error{
+			"gt-gone": beads.ErrNotFound,
+			"gt-slow": errors.New("bd show: timed out"),
+		},
+	}
+	b := newTailBeads(store.show)
+
+	if title, settled := b.cachedTitle("gt-ok"); title != "" || settled {
+		t.Fatalf("unread bead: cachedTitle = (%q, %v), want (\"\", false)", title, settled)
+	}
+	if n := len(store.reads); n != 0 {
+		t.Fatalf("cachedTitle on an unread bead made %d reads, want 0", n)
+	}
+
+	b.title("gastown", "gt-ok")
+	b.title("gastown", "gt-gone")
+	b.title("gastown", "gt-slow")
+	reads := len(store.reads)
+
+	if title, settled := b.cachedTitle("gt-ok"); title != "the title" || !settled {
+		t.Fatalf("read bead: cachedTitle = (%q, %v), want (\"the title\", true)", title, settled)
+	}
+	if title, settled := b.cachedTitle("gt-gone"); title != "" || !settled {
+		t.Fatalf("not-found bead: cachedTitle = (%q, %v), want (\"\", true)", title, settled)
+	}
+	if title, settled := b.cachedTitle("gt-slow"); title != "" || settled {
+		t.Fatalf("failed read: cachedTitle = (%q, %v), want (\"\", false): a failure is not a final answer", title, settled)
+	}
+	if n := len(store.reads); n != reads {
+		t.Fatalf("cachedTitle made %d reads, want none", n-reads)
+	}
+
+	var nilReader *tailBeads
+	if title, settled := nilReader.cachedTitle("gt-ok"); title != "" || settled {
+		t.Fatalf("nil reader: cachedTitle = (%q, %v), want (\"\", false)", title, settled)
+	}
+}
+
 // TestTailBeads_NotFoundCacheIsBounded: the set drops its oldest id when full,
 // so a run never grows past tailMissingCacheSize.
 func TestTailBeads_NotFoundCacheIsBounded(t *testing.T) {

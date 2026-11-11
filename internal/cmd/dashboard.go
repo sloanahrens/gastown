@@ -546,7 +546,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 			crew := submitters.crewLookup()
 			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, livePolecatName(polecatFor, names.who))
 			title := func(rig, id string) string { return beadReads.title(rig, id) }
-			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, names, crew, polecatTimes, rigOfBead, recentLandingRows)
+			cachedTitle := func(rig, id string) (string, bool) { return beadReads.cachedTitle(id) }
+			recent := buildRecentLandings(now, recs.get(), stages, rejects, live, deploys.shipStatus, title, names, crew, polecatTimes, rigOfBead, cachedTitle, recentLandingRows)
 			tr.Recent = withBackoffRows(recent, backoff.get(), title, names.who)
 			return tr
 		},
