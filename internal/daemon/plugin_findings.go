@@ -25,12 +25,13 @@ import (
 // kind of its check line was last logged. Runs of one plugin do not overlap, and
 // the lock keeps the state honest if that ever changes.
 type cloudDSNWatch struct {
-	mu     sync.Mutex
-	raised bool
-	logAt  map[string]time.Time
+	mu      sync.Mutex
+	adopted bool
+	raised  bool
+	logAt   map[string]time.Time
 }
 
-// isRaised reports whether the item this watch raised is still open.
+// isRaised reports whether the item is open.
 func (w *cloudDSNWatch) isRaised() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -42,6 +43,23 @@ func (w *cloudDSNWatch) setRaised(raised bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.raised = raised
+}
+
+// isAdopted reports whether the item's state was read back from the record.
+func (w *cloudDSNWatch) isAdopted() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.adopted
+}
+
+// adopt records that the item's state was read back from the record, and that
+// it is open there. An item this process raised stays open even if that read
+// does not show it.
+func (w *cloudDSNWatch) adopt(open bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.adopted = true
+	w.raised = w.raised || open
 }
 
 // allowLog reports whether the line under key may be logged at now: the first
@@ -109,11 +127,13 @@ const (
 	// also keys that state's log hold, so no other DSN line holds it back.
 	cloudDSNEmptyKey = "dsn-empty"
 
-	// cloudDSNUncheckedLogKey and cloudDSNSettingsLogKey key the log holds of
-	// the DSN check's other refusals: a DSN file it cannot check (missing,
-	// loosened past 0600, or unreadable), and town settings it cannot load.
+	// cloudDSNUncheckedLogKey, cloudDSNSettingsLogKey and cloudDSNRecordLogKey
+	// key the log holds of the DSN check's other refusals: a DSN file it cannot
+	// check (missing, loosened past 0600, or unreadable), town settings it cannot
+	// load, and the escalation record it cannot read to learn the item's state.
 	cloudDSNUncheckedLogKey = "dsn-unchecked"
 	cloudDSNSettingsLogKey  = "dsn-settings"
+	cloudDSNRecordLogKey    = "dsn-record"
 
 	// cloudDSNLogInterval holds each DSN check line to once an hour for its key,
 	// the same hold the cache trim's refusals get.
@@ -345,9 +365,10 @@ func cloudDSNEmptySummary(err error) string {
 // when the check fails, so a check that passes over an unread ledger would
 // otherwise say nothing. An empty Postgres DSN file raises one attention item
 // under cloudDSNEmptyKey and logs the refusal at most once an hour. A file that
-// holds a DSN again clears the item this check raised. Any other refusal of the
-// file (missing, loosened, unreadable) leaves the item as it was: an unknown
-// state is not a clear.
+// holds a DSN again clears the open item. Any other refusal of the file
+// (missing, loosened, unreadable) leaves the item as it was: an unknown state is
+// not a clear. A clear can close an item an earlier daemon raised, once the
+// record shows it open (see adoptCloudDSN).
 func (d *Daemon) checkCloudDSN() {
 	if d.cloudReportsDir != nil {
 		return // an injected report directory is read as files, with no DSN in play
@@ -376,7 +397,7 @@ func (d *Daemon) checkCloudDSN() {
 // item the operator closed within the reopen window is not raised again, as a
 // plugin failure's would not be.
 func (d *Daemon) raiseCloudDSN(err error) {
-	key := pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudDSNEmptyKey
+	key := cloudDSNAlertKey()
 	if d.pluginEscalationClosedRecently(key) {
 		d.logCloudDSN(cloudDSNEmptyKey, "cloud-check: %v; its escalation was closed within %s, not raising another", err, pluginEscalationReopenWindow)
 		return
@@ -389,17 +410,65 @@ func (d *Daemon) raiseCloudDSN(err error) {
 	d.logCloudDSN(cloudDSNEmptyKey, "cloud-check: %v", err)
 }
 
-// clearCloudDSN closes the empty-DSN item when this check raised it. A clear
-// that fails leaves the item raised, so the next run tries again.
+// cloudDSNAlertKey is the escalation key of the empty-DSN item.
+func cloudDSNAlertKey() string {
+	return pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudDSNEmptyKey
+}
+
+// clearCloudDSN closes the empty-DSN item when it is open. A clear that fails
+// leaves the item raised, so the next run tries again.
 func (d *Daemon) clearCloudDSN(reason string) {
-	if !d.cloudDSN.isRaised() {
+	if !d.adoptCloudDSN() || !d.cloudDSN.isRaised() {
 		return
 	}
-	key := pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudDSNEmptyKey
-	if err := d.clearAlertsErr(reason, key); err != nil {
+	if err := d.clearAlertsErr(reason, cloudDSNAlertKey()); err != nil {
 		return
 	}
 	d.cloudDSN.setRaised(false)
+}
+
+// adoptCloudDSN reads the item's state from the record on the first clear in
+// this process, so a daemon that starts over an item an earlier daemon raised
+// can clear it once the file has content. A read that fails is logged and
+// returns false: the state is unknown, and the next run asks again.
+func (d *Daemon) adoptCloudDSN() bool {
+	if d.cloudDSN.isAdopted() {
+		return true
+	}
+	open, err := d.cloudDSNEscalationOpen()
+	if err != nil {
+		d.logCloudDSN(cloudDSNRecordLogKey, "cloud-check: reading the empty ledger DSN escalation: %v; the item's state is not known this run", err)
+		return false
+	}
+	d.cloudDSN.adopt(open)
+	return true
+}
+
+// cloudDSNEscalationOpen reports whether an escalation under the empty-DSN key
+// is open on the record. Escalations are wisps, so a read that finds no plane
+// tries the other, as pluginEscalationClosedRecently does.
+func (d *Daemon) cloudDSNEscalationOpen() (bool, error) {
+	opts := beads.ListOptions{
+		Label:        "gt:escalation",
+		Labels:       []string{notify.FingerprintLabel(cloudDSNAlertKey())},
+		Status:       "open",
+		IncludeInfra: true,
+		Priority:     -1,
+	}
+	bd := d.escalationBeads()
+	for _, ephemeral := range []bool{false, true} {
+		opts.Ephemeral = ephemeral
+		issues, err := bd.List(opts)
+		if err != nil {
+			return false, err
+		}
+		for _, is := range issues {
+			if beads.IsEscalationRecord(is) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // logCloudDSN logs one DSN check line, at most once an hour for its key.

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/cloudledger/ledgertest"
 	"github.com/steveyegge/gastown/internal/config"
@@ -80,7 +81,7 @@ func TestCloudLedgerDSNEmptyRaisesOneItem(t *testing.T) {
 		t.Errorf("reason = %q, want the file named and the word empty", reason)
 	}
 	if !d.cloudDSN.isRaised() {
-		t.Error("the item is not recorded as raised, so a later file with content would not clear it")
+		t.Errorf("raised = %v, want true: a later file with content would not clear the item", d.cloudDSN.isRaised())
 	}
 	if !strings.Contains(logs.String(), dsnPath) {
 		t.Errorf("log = %q, want the refusal logged", logs.String())
@@ -175,7 +176,7 @@ func TestCloudLedgerDSNWithContentClearsTheRaisedItem(t *testing.T) {
 		t.Errorf("clear = %q %v, want %q for the item", clears[0].Reason, clears[0].Fingerprints, cloudDSNClearedReason)
 	}
 	if d.cloudDSN.isRaised() {
-		t.Error("the item is still recorded as raised after its clear")
+		t.Errorf("raised = %v after its clear, want false", d.cloudDSN.isRaised())
 	}
 	d.checkCloudDSN()
 	if got := len(notes.Clears()); got != 1 {
@@ -220,13 +221,13 @@ func TestCloudLedgerDSNRefusedClearIsRetried(t *testing.T) {
 	notes.Fail(notifyfake.KindClear, errors.New("notifier down"))
 	d.checkCloudDSN()
 	if !d.cloudDSN.isRaised() {
-		t.Fatal("a refused clear was recorded as cleared")
+		t.Fatalf("raised = %v after a refused clear, want true", d.cloudDSN.isRaised())
 	}
 
 	notes.Fail(notifyfake.KindClear, nil)
 	d.checkCloudDSN()
 	if d.cloudDSN.isRaised() {
-		t.Error("the retried clear did not land")
+		t.Errorf("raised = %v after the retried clear, want false", d.cloudDSN.isRaised())
 	}
 }
 
@@ -268,7 +269,7 @@ func TestCloudLedgerDSNUnknownStateLeavesTheItem(t *testing.T) {
 		t.Errorf("clears = %d, want none: a missing file is not a clear", got)
 	}
 	if !d.cloudDSN.isRaised() {
-		t.Error("the item was forgotten when the file went missing")
+		t.Errorf("raised = %v after the file went missing, want true", d.cloudDSN.isRaised())
 	}
 	if !strings.Contains(logs.String(), "cannot be checked") {
 		t.Errorf("log = %q, want the missing file named", logs.String())
@@ -296,7 +297,7 @@ func TestCloudLedgerDSNUnreadableSettingsLeaveTheItem(t *testing.T) {
 		t.Errorf("clears = %d, want none while the settings are unreadable", got)
 	}
 	if !d.cloudDSN.isRaised() {
-		t.Error("the item was forgotten when the settings could not be read")
+		t.Errorf("raised = %v after the settings could not be read, want true", d.cloudDSN.isRaised())
 	}
 	if !strings.Contains(logs.String(), "reading town settings") {
 		t.Errorf("log = %q, want the settings read named", logs.String())
@@ -364,13 +365,13 @@ func TestCloudLedgerDSNRefusedRaiseIsRetried(t *testing.T) {
 	driveClock(t, clk, time.Second, done)
 
 	if d.cloudDSN.isRaised() {
-		t.Fatal("a refused raise was recorded as raised")
+		t.Fatalf("raised = %v after a refused raise, want false", d.cloudDSN.isRaised())
 	}
 
 	notes.Fail(notifyfake.KindEscalate, nil)
 	d.checkCloudDSN()
 	if !d.cloudDSN.isRaised() {
-		t.Error("the retried raise did not land")
+		t.Errorf("raised = %v after the retried raise, want true", d.cloudDSN.isRaised())
 	}
 }
 
@@ -421,7 +422,7 @@ func TestCloudLedgerDSNItemSurvivesAFailedThenPassingRun(t *testing.T) {
 		}
 	}
 	if !d.cloudDSN.isRaised() {
-		t.Error("the DSN item is no longer recorded as raised")
+		t.Errorf("raised = %v after a failed then passing run, want true", d.cloudDSN.isRaised())
 	}
 }
 
@@ -440,9 +441,93 @@ func TestCloudLedgerDaemonLeavesAnEmptyDSNToTheCheck(t *testing.T) {
 
 	key, summary := cloudCheckAlertFor(t, townWithCloud(t, map[string]string{"ledger_dsn_file": path}))
 	if key != "" || summary != "" {
-		t.Errorf("key %q summary %q, want the plugin's own key and no finding set", key, summary)
+		t.Errorf("key %q summary %q, want both empty: no escalation under the plugin's own key", key, summary)
 	}
 	if l.Opens() != 0 {
 		t.Errorf("the ledger was opened %d time(s) for an empty file", l.Opens())
+	}
+}
+
+// downRecords is the escalation record, with its reads refused while down is
+// set, so a test can hold the daemon's view of the record unreadable.
+type downRecords struct {
+	*beadsfake.Fake
+	down bool
+}
+
+func (r *downRecords) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if r.down {
+		return nil, errors.New("bd is down")
+	}
+	return r.Fake.List(opts)
+}
+
+// A daemon that starts over an empty-DSN item an earlier daemon raised clears
+// the item on its first reading once the file has content. The record is the
+// only place the new daemon can learn the item is open.
+func TestCloudLedgerDSNRestartClearsTheOpenItem(t *testing.T) {
+	t.Parallel()
+
+	dsnPath := cloudDSNFile(t, "")
+	clk := newFixedClock()
+	bd := beadsfake.New(beadsfake.WithClock(clk))
+	seedOpenEscalation(t, bd, cloudDSNKey())
+	notes := notifyfake.New()
+	d, _ := cloudDSNDaemon(t, townWithCloud(t, map[string]string{"ledger_dsn_file": dsnPath}), notes, clk, bd)
+	if d.cloudDSN.isRaised() {
+		t.Fatalf("raised = %v on a fresh daemon, want false before any reading", d.cloudDSN.isRaised())
+	}
+
+	if err := os.WriteFile(dsnPath, []byte(cloudDSNBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dsnPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.checkCloudDSN()
+
+	clears := notes.Clears()
+	if len(clears) != 1 || clears[0].Reason != cloudDSNClearedReason || !slices.Equal(clears[0].Fingerprints, []string{cloudDSNKey()}) {
+		t.Fatalf("clears = %+v, want one under %q for the item", clears, cloudDSNClearedReason)
+	}
+	if d.cloudDSN.isRaised() {
+		t.Errorf("raised = %v after the clear, want false", d.cloudDSN.isRaised())
+	}
+}
+
+// A record that cannot be read leaves the item's state unknown: the content of
+// the file does not clear it, the failed read is logged, and the next run that
+// can read the record clears it.
+func TestCloudLedgerDSNRestartRetriesARefusedRecordRead(t *testing.T) {
+	t.Parallel()
+
+	dsnPath := cloudDSNFile(t, "")
+	clk := newFixedClock()
+	bd := beadsfake.New(beadsfake.WithClock(clk))
+	seedOpenEscalation(t, bd, cloudDSNKey())
+	records := &downRecords{Fake: bd, down: true}
+	notes := notifyfake.New()
+	d, logs := cloudDSNDaemon(t, townWithCloud(t, map[string]string{"ledger_dsn_file": dsnPath}), notes, clk, records)
+
+	if err := os.WriteFile(dsnPath, []byte(cloudDSNBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dsnPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.checkCloudDSN()
+
+	if got := len(notes.Clears()); got != 0 {
+		t.Fatalf("clears = %d while the record cannot be read, want none", got)
+	}
+	if !strings.Contains(logs.String(), "reading the empty ledger DSN escalation") {
+		t.Errorf("log = %q, want the failed record read named", logs.String())
+	}
+
+	records.down = false
+	d.checkCloudDSN()
+	clears := notes.Clears()
+	if len(clears) != 1 || clears[0].Reason != cloudDSNClearedReason {
+		t.Fatalf("clears = %+v, want one under %q once the record is readable", clears, cloudDSNClearedReason)
 	}
 }
