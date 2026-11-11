@@ -2,13 +2,181 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
+
+// guardedStore runs bd's --if-acceptance guard over the fake, the part of bd
+// the tick's retry depends on. Before each guarded write, amend (when set)
+// changes the field, as an owner's write landing between the tick's read and
+// its write would. The write then goes through only while the field still
+// hashes to the guard; otherwise it returns beads.ErrGuardNotHeld and writes
+// nothing, as bd does on exit 13. reject, when set, is returned instead of
+// any write. guards records the guard of each guarded write, in order.
+type guardedStore struct {
+	beads.Client
+	t      *testing.T
+	amend  func(write int)
+	reject error
+	guards []string
+}
+
+func (s *guardedStore) Update(id string, opts beads.UpdateOptions) error {
+	if opts.Acceptance != nil && opts.IfAcceptance == "" {
+		s.t.Errorf("criteria of %s written without a guard", id)
+	}
+	if opts.IfAcceptance == "" {
+		return s.Client.Update(id, opts)
+	}
+	s.guards = append(s.guards, opts.IfAcceptance)
+	if len(s.guards) > tickAttempts {
+		s.t.Fatalf("tick made %d guarded writes, past its bound of %d", len(s.guards), tickAttempts)
+	}
+	if s.reject != nil {
+		return s.reject
+	}
+	if s.amend != nil {
+		s.amend(len(s.guards))
+	}
+	current, err := s.Client.Show(id)
+	if err != nil {
+		return err
+	}
+	if shaHex(current.AcceptanceCriteria) != opts.IfAcceptance {
+		return fmt.Errorf("bd update %s: guard no longer held: %w", id, beads.ErrGuardNotHeld)
+	}
+	opts.IfAcceptance = ""
+	return s.Client.Update(id, opts)
+}
+
+// shaHex is the guard value for a criteria block: the hex sha256 of its text.
+func shaHex(block string) string {
+	sum := sha256.Sum256([]byte(block))
+	return hex.EncodeToString(sum[:])
+}
+
+// setAcceptance rewrites the field through the fake, as another writer would.
+func setAcceptance(t *testing.T, fake *beadsfake.Fake, id, block string) {
+	t.Helper()
+	if err := fake.Update(id, beads.UpdateOptions{Acceptance: &block}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestAcceptanceTickSendsTheGuardOfTheBlockItRead: the write carries
+// --if-acceptance as the sha256 of the exact block the tick read.
+func TestAcceptanceTickSendsTheGuardOfTheBlockItRead(t *testing.T) {
+	t.Parallel()
+	fake := beadsfake.New()
+	block := "- [ ] first\n- [ ] second\r\n"
+	id := seedAcceptance(t, fake, block)
+	store := &guardedStore{Client: fake, t: t}
+	v := &beadVerbs{client: store, actor: "me", out: &bytes.Buffer{}}
+
+	if err := v.tick(id, "second"); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(store.guards) != 1 || store.guards[0] != shaHex(block) {
+		t.Errorf("guards = %q, want one guard %s", store.guards, shaHex(block))
+	}
+}
+
+// TestAcceptanceTickRetriesAGuardMissAndKeepsTheAmendment: the owner amends the
+// field after the tick reads it, so bd refuses the first write. The tick
+// re-reads, re-ticks the same box by its text in the amended block, and writes
+// once more; the owner's boxes survive.
+func TestAcceptanceTickRetriesAGuardMissAndKeepsTheAmendment(t *testing.T) {
+	t.Parallel()
+	fake := beadsfake.New()
+	original := "- [ ] first\n- [ ] second"
+	id := seedAcceptance(t, fake, original)
+	amended := "- [ ] added before\n- [ ] first\n- [ ] second\n- [ ] added after"
+	store := &guardedStore{Client: fake, t: t, amend: func(write int) {
+		if write == 1 {
+			setAcceptance(t, fake, id, amended)
+		}
+	}}
+	var out bytes.Buffer
+	v := &beadVerbs{client: store, actor: "me", out: &out}
+
+	if err := v.tick(id, "second"); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(store.guards) != 2 || store.guards[0] != shaHex(original) || store.guards[1] != shaHex(amended) {
+		t.Errorf("guards = %q, want the first read then the amended block", store.guards)
+	}
+	want := "- [ ] added before\n- [ ] first\n- [x] second\n- [ ] added after"
+	if got := mustShowBead(t, fake, id).AcceptanceCriteria; got != want {
+		t.Errorf("after the retried tick, criteria = %q, want %q", got, want)
+	}
+	if !strings.Contains(out.String(), `Ticked "second"`) {
+		t.Errorf("output %q does not confirm the tick", out.String())
+	}
+}
+
+// TestAcceptanceTickReportsAConflictPastTheBound: the owner amends the field
+// before every write, so each guarded write is refused. After tickAttempts
+// writes the tick reports the conflict, prints nothing as ticked, and leaves
+// the field as the owner last wrote it.
+func TestAcceptanceTickReportsAConflictPastTheBound(t *testing.T) {
+	t.Parallel()
+	fake := beadsfake.New()
+	id := seedAcceptance(t, fake, "- [ ] first\n- [ ] second")
+	store := &guardedStore{Client: fake, t: t, amend: func(write int) {
+		setAcceptance(t, fake, id, fmt.Sprintf("- [ ] first\n- [ ] second\n- [ ] amendment %d", write))
+	}}
+	var out bytes.Buffer
+	v := &beadVerbs{client: store, actor: "me", out: &out}
+
+	err := v.tick(id, "second")
+	if err == nil || !strings.Contains(err.Error(), "changed between every read and write") {
+		t.Fatalf("tick error = %v, want the conflict", err)
+	}
+	if len(store.guards) != tickAttempts {
+		t.Errorf("guarded writes = %d, want %d", len(store.guards), tickAttempts)
+	}
+	if out.Len() != 0 {
+		t.Errorf("conflicted tick printed %q", out.String())
+	}
+	want := fmt.Sprintf("- [ ] first\n- [ ] second\n- [ ] amendment %d", tickAttempts)
+	if got := mustShowBead(t, fake, id).AcceptanceCriteria; got != want {
+		t.Errorf("criteria = %q, want the owner's last write %q", got, want)
+	}
+}
+
+// TestAcceptanceTickNamesTheFlagWhenBdRejectsIt: a bd without --if-acceptance
+// fails the guarded write. The tick returns that failure naming the flag, does
+// not retry it, and never writes the field without the guard.
+func TestAcceptanceTickNamesTheFlagWhenBdRejectsIt(t *testing.T) {
+	t.Parallel()
+	fake := beadsfake.New()
+	id := seedAcceptance(t, fake, "- [ ] first")
+	bdErr := errors.New("exit status 1: unknown flag")
+	store := &guardedStore{Client: fake, t: t, reject: bdErr}
+	var out bytes.Buffer
+	v := &beadVerbs{client: store, actor: "me", out: &out}
+
+	err := v.tick(id, "first")
+	if !errors.Is(err, bdErr) || !strings.Contains(err.Error(), "--if-acceptance") {
+		t.Fatalf("tick error = %v, want bd's refusal naming --if-acceptance", err)
+	}
+	if len(store.guards) != 1 {
+		t.Errorf("guarded writes = %d, want 1: a non-guard failure is not retried", len(store.guards))
+	}
+	if out.Len() != 0 {
+		t.Errorf("failed tick printed %q", out.String())
+	}
+	if got := mustShowBead(t, fake, id).AcceptanceCriteria; got != "- [ ] first" {
+		t.Errorf("criteria = %q, want unchanged", got)
+	}
+}
 
 // tickFailingStore fails Show or Update with the error it is given, and passes
 // every other call to the fake.
