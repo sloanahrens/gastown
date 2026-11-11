@@ -294,7 +294,7 @@ func TestEnsureReturnsWhenItsCtxEndsWhileTheRigLockIsHeld(t *testing.T) {
 		if len(git.calls) != 0 {
 			t.Errorf("git calls = %v, want none while the lock is held", git.calls)
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard only: ensure returns once its ctx ends, so this fires only when it keeps waiting for the holder
 		t.Fatal("ensure still waits for the rig lock after its ctx ended")
 	}
 }

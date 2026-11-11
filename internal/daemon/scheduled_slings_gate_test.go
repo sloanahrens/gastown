@@ -263,7 +263,7 @@ func TestScheduledGate_BuildCheckoutWaitPastTheGateDeadlineTimesOut(t *testing.T
 			select {
 			case <-ctx.Done():
 				return "", fmt.Errorf("waiting for the build checkout lock: %w", ctx.Err())
-			case <-time.After(10 * time.Second):
+			case <-time.After(10 * time.Second): //testpolicy:allow no-sleep — a hang guard only: Ensure returns once the gate deadline ends, so this fires only when the deadline never reaches it
 				t.Error("ensure was not given the gate deadline")
 				return "", errors.New("ensure was not given the gate deadline")
 			}
