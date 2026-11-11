@@ -101,10 +101,11 @@ func TestDeployCentralDirectivesReportsAStaleFileThatCannotBeRemoved(t *testing.
 // The git-backed source asks git for the commit, its directives tree and each
 // file; a scripted git stands in so the unit tier runs no git.
 type scriptedGit struct {
-	catFileErr error
-	lsTree     []byte
-	lsTreeErr  error
-	blobs      map[string]string
+	catFileErr  error
+	revParseErr error
+	lsTree      []byte
+	lsTreeErr   error
+	blobs       map[string]string
 }
 
 func (g scriptedGit) run(_ string, args ...string) ([]byte, error) {
@@ -116,6 +117,8 @@ func (g scriptedGit) run(_ string, args ...string) ([]byte, error) {
 		return []byte(g.blobs[args[2]]), nil
 	case "ls-tree":
 		return g.lsTree, g.lsTreeErr
+	case "rev-parse":
+		return []byte(".\n"), g.revParseErr
 	}
 	return nil, fmt.Errorf("unexpected git %s", args[0])
 }
@@ -177,6 +180,49 @@ func TestDeployCentralDirectivesGitSourceRefusesAFailingGit(t *testing.T) {
 			src := gitDirectiveSource{repo: "/x.git", run: tc.g.run}
 			err := tc.call(src)
 			if err == nil || !strings.Contains(err.Error(), commit) {
+				t.Errorf("error = %v, want one naming commit %s", err, commit)
+			}
+		})
+	}
+}
+
+// A missing commit is ErrDirectiveCommitMissing only when the repo is readable.
+// cat-file fails for both, so an unreadable repo must not read as a commit the
+// repo lacks: that would let the entrypoint warn past a repo it could not read.
+func TestDeployCentralDirectivesGitSourceClassifiesAMissingCommit(t *testing.T) {
+	t.Parallel()
+	const commit = "2222222"
+	tests := []struct {
+		name        string
+		g           scriptedGit
+		wantMissing bool
+	}{
+		{
+			name:        "a readable repo that lacks the commit",
+			g:           scriptedGit{catFileErr: errors.New("exit status 128")},
+			wantMissing: true,
+		},
+		{
+			name: "a repo that cannot be read",
+			g: scriptedGit{
+				catFileErr:  errors.New("exit status 128"),
+				revParseErr: errors.New("exit status 128"),
+			},
+			wantMissing: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			src := gitDirectiveSource{repo: "/x.git", run: tc.g.run}
+			err := src.hasCommit(commit)
+			if err == nil {
+				t.Fatal("hasCommit returned nil, want an error")
+			}
+			if got := errors.Is(err, ErrDirectiveCommitMissing); got != tc.wantMissing {
+				t.Errorf("errors.Is(ErrDirectiveCommitMissing) = %v, want %v (error: %v)", got, tc.wantMissing, err)
+			}
+			if !strings.Contains(err.Error(), commit) {
 				t.Errorf("error = %v, want one naming commit %s", err, commit)
 			}
 		})
