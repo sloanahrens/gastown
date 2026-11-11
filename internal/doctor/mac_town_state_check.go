@@ -3,9 +3,11 @@ package doctor
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -20,15 +22,19 @@ import (
 // MacTownStateCheckName is the name 'gt doctor --check' takes for MacTownStateCheck.
 const MacTownStateCheckName = "mac-town-state"
 
+// PodTownListingFormat describes one line of the pod claim listing. It is the
+// text --pod-town's help and the check's refusals both show.
+const PodTownListingFormat = "'<sha256 hex>', a tab, '<mtime unix seconds>', a tab, and a path relative to the town root"
+
 // MacTownStateCheck compares the town files a Mac town would need with the pod
 // claim's listing, so a file the claim lacks is found before the cutover rather
 // than by accident.
 //
 // The file list is the town copy's table (townstate.TownCopyRows), so the two
-// cannot drift. The listing holds one line per file in the claim:
-// '<sha256 hex>', a tab, '<mtime unix seconds>', a tab, and the path relative to
-// the town root. A file the claim lacks is an error; a file whose bytes differ is
-// a warning that names the newer side.
+// cannot drift. The listing holds one line per file in the claim, in the format
+// PodTownListingFormat names. A file the claim lacks is an error; a file whose
+// bytes differ is a warning that names the newer side. A required file the Mac
+// lacks is an error too: a town without it cannot run on the pod.
 type MacTownStateCheck struct {
 	BaseCheck
 
@@ -58,7 +64,7 @@ func (c *MacTownStateCheck) Run(ctx *CheckContext) *CheckResult {
 	pod, err := parsePodTownListing(data)
 	if err != nil {
 		return c.result(StatusError, "The pod claim listing is malformed", []string{err.Error()},
-			"Each line is '<sha256>', a tab, '<mtime unix seconds>', a tab, and a path relative to the town root")
+			"Each line is "+PodTownListingFormat)
 	}
 
 	registry, err := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(ctx.TownRoot))
@@ -76,8 +82,9 @@ func (c *MacTownStateCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	sort.Strings(rigs)
 
+	rows := townstate.TownCopyRows(rigs)
 	root := os.DirFS(ctx.TownRoot)
-	names, err := townstate.TownCopyPaths(root, townstate.TownCopyRows(rigs))
+	names, err := townstate.TownCopyPaths(root, rows)
 	if err != nil {
 		return c.result(StatusError, "Cannot list the Mac town's copy rows", []string{err.Error()},
 			"Repair the unlistable directory under the Mac town and re-run the check")
@@ -87,7 +94,22 @@ func (c *MacTownStateCheck) Run(ctx *CheckContext) *CheckResult {
 			[]string{"town root " + ctx.TownRoot}, "Check that --rig and the town root point at the Mac town")
 	}
 
+	// TownCopyPaths lists only the rows the Mac holds, so a required row the Mac
+	// lacks would contribute nothing. Check each one by its own row.
 	var missing, differ []string
+	for _, row := range rows {
+		if !macTownRequired(row) {
+			continue
+		}
+		_, err := os.Stat(filepath.Join(ctx.TownRoot, filepath.FromSlash(row.Path)))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+			missing = append(missing, "missing on Mac: "+row.Path)
+		case err != nil:
+			return c.result(StatusError, "Cannot read a Mac town file the copy carries", []string{err.Error()},
+				"Make the file a regular file and re-run the check")
+		}
+	}
 	for _, name := range names {
 		mac, err := readMacTownFile(ctx.TownRoot, name)
 		if err != nil {
@@ -108,9 +130,9 @@ func (c *MacTownStateCheck) Run(ctx *CheckContext) *CheckResult {
 	switch {
 	case len(missing) > 0:
 		return c.result(StatusError,
-			fmt.Sprintf("%d town file(s) the pod claim lacks", len(missing)),
+			fmt.Sprintf("%d town file(s) missing from the Mac town or the pod claim", len(missing)),
 			append(missing, differ...),
-			"Copy the listed files into the pod claim before the cutover, then re-run with --pod-town")
+			"Restore each 'missing on Mac' file on the Mac, copy each 'missing on pod' file into the pod claim, then re-run with --pod-town")
 	case len(differ) > 0:
 		return c.result(StatusWarning,
 			fmt.Sprintf("%d town file(s) differ from the pod claim", len(differ)),
@@ -216,4 +238,18 @@ func newerSide(mac, claim time.Time) string {
 // table joins it to the town root.
 func validRigSegment(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, `/\`)
+}
+
+// macTownRequired reports whether a town cannot run on the pod without the row's
+// file: the town config the daemon reads, and the behavioral settings the town and
+// each rig read. The live copy refuses a town without the town's settings file. A
+// row not named here is reported only when the Mac holds it.
+func macTownRequired(row townstate.TownCopyRow) bool {
+	if !row.File() {
+		return false
+	}
+	townJSON := path.Join("mayor", constants.FileTownJSON)
+	settingsConfig := path.Join(constants.DirSettings, "config.json")
+	return row.Path == townJSON || row.Path == settingsConfig ||
+		strings.HasSuffix(row.Path, "/"+settingsConfig)
 }

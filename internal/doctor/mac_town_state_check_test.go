@@ -112,8 +112,14 @@ func TestMacTownStateNamesNewerSideWhenBytesDiffer(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			root := macTownFixture(t, tc.macTime, map[string]string{"mayor/town.json": `{"mac":true}`})
-			listing := podListingFile(t, podListingLine(`{"pod":true}`, tc.podTime, "mayor/town.json"))
+			root := macTownFixture(t, tc.macTime, map[string]string{
+				"mayor/town.json":      `{"mac":true}`,
+				"settings/config.json": "{}",
+			})
+			listing := podListingFile(t,
+				podListingLine(`{"pod":true}`, tc.podTime, "mayor/town.json"),
+				podListingLine("{}", tc.podTime, "settings/config.json"),
+			)
 
 			res := NewMacTownStateCheck(listing).Run(&CheckContext{TownRoot: root})
 			if res.Status != StatusWarning {
@@ -176,15 +182,75 @@ func TestMacTownStateComparesTheTableExpansion(t *testing.T) {
 	if res.Status != StatusError {
 		t.Fatalf("Status = %v, want StatusError: %+v", res.Status, res)
 	}
-	want, err := townstate.TownCopyPaths(os.DirFS(root), townstate.TownCopyRows([]string{"alpha"}))
+	rows := townstate.TownCopyRows([]string{"alpha"})
+	want, err := townstate.TownCopyPaths(os.DirFS(root), rows)
 	if err != nil {
 		t.Fatalf("TownCopyPaths: %v", err)
 	}
 	if got := missingNames(res.Details); !slices.Equal(got, want) {
 		t.Errorf("reported missing = %v, want the table expansion %v", got, want)
 	}
+	// Walk the table's own exact rows: each one the Mac holds must be reported, so
+	// a check that drops a row of the table cannot pass on the expansion alone.
+	for _, row := range rows {
+		if !row.File() {
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(root, filepath.FromSlash(row.Path))); statErr != nil {
+			continue
+		}
+		if !slices.Contains(missingNames(res.Details), row.Path) {
+			t.Errorf("table row %s is on the Mac but was not reported", row.Path)
+		}
+	}
 	if slices.Contains(missingNames(res.Details), "settings/daemon.env") {
 		t.Error("an unlisted file was reported as a town file")
+	}
+}
+
+// TestMacTownStateNamesRequiredFileAbsentOnMac: a required town file the Mac lacks
+// is named as missing on the Mac, even when the pod claim holds the rest. Without
+// it the Mac copy passes with the file gone.
+func TestMacTownStateNamesRequiredFileAbsentOnMac(t *testing.T) {
+	t.Parallel()
+	root := macTownFixture(t, macTownOlder, map[string]string{
+		"mayor/town.json":      "{}",
+		"settings/models.json": "{}",
+	})
+	listing := podListingFile(t,
+		podListingLine("{}", macTownOlder, "mayor/town.json"),
+		podListingLine("{}", macTownOlder, "settings/models.json"),
+	)
+
+	res := NewMacTownStateCheck(listing).Run(&CheckContext{TownRoot: root})
+	if res.Status != StatusError {
+		t.Fatalf("Status = %v, want StatusError: %+v", res.Status, res)
+	}
+	if !slices.Equal(res.Details, []string{"missing on Mac: settings/config.json"}) {
+		t.Errorf("Details = %v, want [missing on Mac: settings/config.json]", res.Details)
+	}
+}
+
+// TestMacTownStateNamesRequiredRigFileAbsentOnMac: a registered rig whose settings
+// file the Mac lacks is named as missing on the Mac.
+func TestMacTownStateNamesRequiredRigFileAbsentOnMac(t *testing.T) {
+	t.Parallel()
+	root := macTownFixture(t, macTownOlder, map[string]string{
+		"mayor/town.json":      "{}",
+		"settings/config.json": "{}",
+		"mayor/rigs.json":      `{"version":1,"rigs":{"alpha":{"git_url":"x"}}}`,
+	})
+	listing := podListingFile(t,
+		podListingLine("{}", macTownOlder, "mayor/town.json"),
+		podListingLine("{}", macTownOlder, "settings/config.json"),
+	)
+
+	res := NewMacTownStateCheck(listing).Run(&CheckContext{TownRoot: root})
+	if res.Status != StatusError {
+		t.Fatalf("Status = %v, want StatusError: %+v", res.Status, res)
+	}
+	if !slices.Equal(res.Details, []string{"missing on Mac: alpha/settings/config.json"}) {
+		t.Errorf("Details = %v, want [missing on Mac: alpha/settings/config.json]", res.Details)
 	}
 }
 

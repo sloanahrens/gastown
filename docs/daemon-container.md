@@ -31,10 +31,10 @@ the Secrets in from the operator's own copy. The restore is done when
 
 ## Mac crew and bird clones
 
-Before cloning a repository on the Mac for a crew or bird clone, use a plain git
-clone, not `gt crew add`. The claim is the only town copy, so the Mac keeps no
-town state the pod could lack. `gt crew add` still works on the Mac until the
-cutover; after it, the wrapper runs `gt crew add` in the pod.
+A crew or bird clone on the Mac is a plain git clone, not `gt crew add`. The
+pod claim is the only town copy, so the Mac keeps no town state the pod could
+lack. `gt crew add` runs in the pod through the wrapper, so the plain clone is the
+Mac form.
 
 ```bash
 git clone http://forgejo:3000/sloan/<repo>.git ~/gt/<rig>/crew/<name>
@@ -43,9 +43,9 @@ git -C ~/gt/<rig>/crew/<name> config user.email <name>@gastown.local
 ```
 
 `<repo>` is the rig's Forgejo repository and `<name>` is the agent. A bird clone
-takes the same commands at the path its rig gives it. Before the cutover, run
-`gt doctor --check mac-town-state --pod-town <listing>`: it lists each town file
-the claim lacks. `gt doctor --help` gives the listing's format.
+takes the same commands at the path its rig gives it. To list each town file the
+claim lacks, run `gt doctor --check mac-town-state --pod-town <listing>`;
+`gt doctor --help` gives the listing's format.
 
 ## L1: the scratch town
 

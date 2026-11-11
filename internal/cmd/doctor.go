@@ -140,8 +140,7 @@ blocks end-to-end — slow, token-cost-bearing, not run by default).
 
 Use --check mac-town-state --pod-town <listing> to compare the Mac town's
 configuration files with the pod claim. The listing has one line per file in
-the claim: the file's sha256, a tab, its mtime in unix seconds, a tab, and its
-path relative to the town root. The check refuses to run without --pod-town.`,
+the claim, each line ` + doctor.PodTownListingFormat + `. The check refuses to run without --pod-town.`,
 	RunE: runDoctor,
 }
 

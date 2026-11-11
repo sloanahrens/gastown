@@ -80,11 +80,18 @@ func TestRunDoctorMacTownStateComparesTheListing(t *testing.T) {
 	if err := os.WriteFile(townJSON, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "settings", "config.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	//testpolicy:allow no-chdir — the cwd is the input under test: runDoctor finds the town from the working directory
 	t.Chdir(townRoot)
 
 	sum := sha256.Sum256([]byte("{}"))
-	present := fmt.Sprintf("%s\t%d\tmayor/town.json\n", hex.EncodeToString(sum[:]), time.Now().Unix())
+	present := fmt.Sprintf("%s\t%d\tmayor/town.json\n", hex.EncodeToString(sum[:]), time.Now().Unix()) +
+		fmt.Sprintf("%s\t%d\tsettings/config.json\n", hex.EncodeToString(sum[:]), time.Now().Unix())
 	cases := []struct {
 		name    string
 		listing string
