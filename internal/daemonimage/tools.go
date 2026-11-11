@@ -13,12 +13,22 @@ import (
 )
 
 // The packages the tools are built from, inside their checkouts. hm is the hm
-// repo's cmd/hm (the repo root has no Go files); the two reporters are the
-// devops repo's cmd/reporter and cmd/release-reporter.
+// repo's cmd/hm (the repo root has no Go files); the reporters and the cloud
+// check are the devops repo's cmd/reporter, cmd/release-reporter and
+// cmd/cloudcheck.
 const (
-	HMPackage              = "./cmd/hm"
-	DevopsReporterPackage  = "./cmd/reporter"
-	ReleaseReporterPackage = "./cmd/release-reporter"
+	HMPackage               = "./cmd/hm"
+	DevopsReporterPackage   = "./cmd/reporter"
+	ReleaseReporterPackage  = "./cmd/release-reporter"
+	DevopsCloudCheckPackage = "./cmd/cloudcheck"
+)
+
+// CloudCheckAppsName is the app list the cloud check reads from beside its
+// binary (cmd/cloudcheck resolvePaths), staged from the devops checkout at the
+// pinned commit. CloudCheckAppsPath is where that checkout holds it.
+const (
+	CloudCheckAppsName = "cloud-check.apps"
+	CloudCheckAppsPath = "ops/cloud-check.apps"
 )
 
 // releaseReporterVersionShape is the form of version run.sh accepts from
@@ -29,18 +39,19 @@ var releaseReporterVersionShape = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-
 
 // toolNames are the tools BuildTools builds, in the order it writes them. Each is
 // a binary in the build context root and a COPY into /usr/local/bin.
-var toolNames = []string{"hm", "devops-reporter", "release-reporter"}
+var toolNames = []string{"hm", "devops-reporter", "release-reporter", "cloudcheck"}
 
-// BuildTools writes hm, devops-reporter and release-reporter to b.Out and returns
-// their paths in that order. Each is built for linux/arm64 in a clean worktree of
+// BuildTools writes hm, devops-reporter, release-reporter and cloudcheck to
+// b.Out and returns their paths in that order, and stages the cloud check's app
+// list beside its binary. Each is built for linux/arm64 in a clean worktree of
 // its pinned commit, as BuildBinaries builds gt, bd and om: hm from HMSrc at
-// HMCommit, and both reporters from DevopsSrc at DevopsCommit. A source with no
-// checkout named is fetched from its pin into b.Out first, and the fetched tree is
-// removed when the call returns. A checkout that is not at its commit, or has
-// uncommitted changes, is refused before any build runs. release-reporter's
-// version is the one the go command stamps from the checkout; it is read back from
-// the built binary and refused unless it has the form run.sh accepts. Staging and
-// the move into b.Out follow BuildBinaries.
+// HMCommit, and the devops binaries from DevopsSrc at DevopsCommit. A source
+// with no checkout named is fetched from its pin into b.Out first, and the
+// fetched tree is removed when the call returns. A checkout that is not at its
+// commit, or has uncommitted changes, is refused before any build runs.
+// release-reporter's version is the one the go command stamps from the
+// checkout; it is read back from the built binary and refused unless it has the
+// form run.sh accepts. Staging and the move into b.Out follow BuildBinaries.
 func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if b.Run == nil {
 		return nil, errors.New("daemonimage: no runner to build the tools with")
@@ -76,6 +87,7 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 		{name: "hm", src: hmSrc, commit: hmCommit, pkg: HMPackage},
 		{name: "devops-reporter", src: devopsSrc, commit: devopsCommit, pkg: DevopsReporterPackage},
 		{name: "release-reporter", src: devopsSrc, commit: devopsCommit, pkg: ReleaseReporterPackage},
+		{name: "cloudcheck", src: devopsSrc, commit: devopsCommit, pkg: DevopsCloudCheckPackage},
 	}
 	stage, err := os.MkdirTemp(b.Out, ".daemonimage-tools-")
 	if err != nil {
@@ -91,6 +103,16 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 	if err := b.checkReleaseReporterVersion(stage, env); err != nil {
 		return nil, err
 	}
+	// The app list is data, not a build: it is read from the pinned commit so
+	// it moves with the binary, and it lands beside the binary because that is
+	// where cmd/cloudcheck looks for it.
+	apps, err := b.Git(devopsSrc, "show", devopsCommit+":"+CloudCheckAppsPath)
+	if err != nil {
+		return nil, fmt.Errorf("daemonimage: cannot read %s at %s: %w", CloudCheckAppsPath, devopsCommit, err)
+	}
+	if err := os.WriteFile(filepath.Join(stage, CloudCheckAppsName), apps, 0o644); err != nil { //nolint:gosec // the app list is public configuration, not a credential
+		return nil, fmt.Errorf("daemonimage: cannot stage %s: %w", CloudCheckAppsName, err)
+	}
 	paths := make([]string, 0, len(builds))
 	for _, build := range builds {
 		path := filepath.Join(b.Out, build.name)
@@ -98,6 +120,9 @@ func (b Builder) BuildTools(ctx context.Context) ([]string, error) {
 			return nil, fmt.Errorf("daemonimage: cannot move %s into %s: %w", build.name, b.Out, err)
 		}
 		paths = append(paths, path)
+	}
+	if err := os.Rename(filepath.Join(stage, CloudCheckAppsName), filepath.Join(b.Out, CloudCheckAppsName)); err != nil {
+		return nil, fmt.Errorf("daemonimage: cannot move %s into %s: %w", CloudCheckAppsName, b.Out, err)
 	}
 	return paths, nil
 }
@@ -224,10 +249,13 @@ func (b Builder) toolPlanLines(hmSrc, devopsSrc string) []string {
 	hm := strings.Join(goBuildArgv(filepath.Join(b.Out, "hm"), HMPackage, ""), " ")
 	devops := strings.Join(goBuildArgv(filepath.Join(b.Out, "devops-reporter"), DevopsReporterPackage, ""), " ")
 	release := strings.Join(goBuildArgv(filepath.Join(b.Out, "release-reporter"), ReleaseReporterPackage, ""), " ")
+	cloud := strings.Join(goBuildArgv(filepath.Join(b.Out, "cloudcheck"), DevopsCloudCheckPackage, ""), " ")
 	return []string{
 		fmt.Sprintf("build hm: %s   (clean worktree of %s at %s)", hm, hmSrc, strings.TrimSpace(b.HMCommit)),
 		fmt.Sprintf("build devops-reporter: %s   (clean worktree of %s at %s)", devops, devopsSrc, strings.TrimSpace(b.DevopsCommit)),
 		fmt.Sprintf("build release-reporter: %s   (clean worktree of %s at %s)", release, devopsSrc, strings.TrimSpace(b.DevopsCommit)),
+		fmt.Sprintf("build cloudcheck: %s   (clean worktree of %s at %s)", cloud, devopsSrc, strings.TrimSpace(b.DevopsCommit)),
 		fmt.Sprintf("check release-reporter: go version -m %s   (refused unless vMAJOR.MINOR.PATCH[-pre])", filepath.Join(b.Out, "release-reporter")),
+		fmt.Sprintf("stage %s: git show %s:%s -> %s", CloudCheckAppsName, strings.TrimSpace(b.DevopsCommit), CloudCheckAppsPath, filepath.Join(b.Out, CloudCheckAppsName)),
 	}
 }

@@ -51,6 +51,11 @@ func (g *toolsGit) git(dir string, args ...string) ([]byte, error) {
 			g.adds = append(g.adds, worktreeAdd{src: dir, dir: args[3], commit: args[4]})
 		}
 		return nil, nil
+	case args[0] == "show":
+		if strings.HasSuffix(args[1], ":"+CloudCheckAppsPath) {
+			return []byte("fractals-prod=https://example.test app=fractals\n"), nil
+		}
+		return nil, errors.New("fake git: unexpected show " + args[1])
 	case args[0] == "rev-parse" && args[1] == "--verify":
 		rev := strings.TrimSuffix(args[2], "^{commit}")
 		if rev == "HEAD" {
@@ -145,7 +150,7 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildTools: %v", err)
 	}
-	want := []string{filepath.Join(b.Out, "hm"), filepath.Join(b.Out, "devops-reporter"), filepath.Join(b.Out, "release-reporter")}
+	want := []string{filepath.Join(b.Out, "hm"), filepath.Join(b.Out, "devops-reporter"), filepath.Join(b.Out, "release-reporter"), filepath.Join(b.Out, "cloudcheck")}
 	if !reflect.DeepEqual(paths, want) {
 		t.Errorf("BuildTools paths = %q, want %q", paths, want)
 	}
@@ -156,14 +161,21 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 	}
 	got := outEntries(t, b.Out)
 	slices.Sort(got)
-	if !reflect.DeepEqual(got, []string{"devops-reporter", "hm", "release-reporter"}) {
-		t.Errorf("the build context holds %v after a build, want the three tools only", got)
+	if !reflect.DeepEqual(got, []string{"cloud-check.apps", "cloudcheck", "devops-reporter", "hm", "release-reporter"}) {
+		t.Errorf("the build context holds %v after a build, want the four tools and their app list only", got)
+	}
+	apps, err := os.ReadFile(filepath.Join(b.Out, CloudCheckAppsName))
+	if err != nil {
+		t.Fatalf("reading the staged app list: %v", err)
+	}
+	if !strings.Contains(string(apps), "fractals-prod=") {
+		t.Errorf("the staged app list = %q, want the file at the pinned commit", apps)
 	}
 
-	if len(run.calls) != 3 {
-		t.Fatalf("ran %d builds, want 3", len(run.calls))
+	if len(run.calls) != 4 {
+		t.Fatalf("ran %d builds, want 4", len(run.calls))
 	}
-	for i, pkg := range []string{HMPackage, DevopsReporterPackage, ReleaseReporterPackage} {
+	for i, pkg := range []string{HMPackage, DevopsReporterPackage, ReleaseReporterPackage, DevopsCloudCheckPackage} {
 		c := run.calls[i]
 		if got := c.argv[len(c.argv)-1]; got != pkg {
 			t.Errorf("build %d compiles %q, want %q", i, got, pkg)
@@ -176,11 +188,12 @@ func TestDeployBuildsHMAndReporters(t *testing.T) {
 		t.Errorf("hm ldflags = %q, want none", got)
 	}
 
-	if len(g.adds) != 3 {
-		t.Fatalf("made %d worktrees, want 3", len(g.adds))
+	if len(g.adds) != 4 {
+		t.Fatalf("made %d worktrees, want 4", len(g.adds))
 	}
 	wantAdds := []struct{ src, commit string }{
 		{"/src/hm", testHMCommit},
+		{"/src/devops", testDevopsCommit},
 		{"/src/devops", testDevopsCommit},
 		{"/src/devops", testDevopsCommit},
 	}
@@ -348,8 +361,8 @@ func TestReleaseReporterBuildStampsNoLinkerVariable(t *testing.T) {
 	if _, err := b.BuildTools(context.Background()); err != nil {
 		t.Fatalf("BuildTools: %v", err)
 	}
-	if len(run.calls) != 3 {
-		t.Fatalf("ran %d builds, want 3", len(run.calls))
+	if len(run.calls) != 4 {
+		t.Fatalf("ran %d builds, want 4", len(run.calls))
 	}
 	argv := run.calls[2].argv
 	if got := argv[len(argv)-1]; got != ReleaseReporterPackage {
@@ -404,8 +417,8 @@ func TestReleaseReporterVersionIsReadFromTheBinary(t *testing.T) {
 				if err != nil {
 					t.Fatalf("BuildTools: %v", err)
 				}
-				if len(paths) != 3 {
-					t.Errorf("BuildTools returned %q, want the three tools", paths)
+				if len(paths) != 4 {
+					t.Errorf("BuildTools returned %q, want the four tools", paths)
 				}
 				return
 			}
