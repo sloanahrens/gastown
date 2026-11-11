@@ -1114,6 +1114,8 @@ day.
       (`ESTOP` and `ESTOP.<rig>`) are shared rows the same way: the operator
       writes them on the Mac, the pod reads them, and the cutover neither creates,
       removes nor edits them.
+      The Mac writes both into the claim, the pod's town root, through the
+      writer bead gt-4obt95, which reads each write back.
 - [ ] **No install is pending.** `ls <live-town>/daemon/install-pending.json`
       reports no such file. The marker is written while an install is in flight
       and removed when the cycle reaches a verdict (`docs/INSTALLING.md`); a
