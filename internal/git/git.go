@@ -3440,7 +3440,7 @@ func (g *Git) WorktreeAdd(path, branch string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path)
 }
 
 // WorktreeAddFromRef creates a new worktree at the given path with a new branch
@@ -3455,7 +3455,7 @@ func (g *Git) WorktreeAddFromRef(path, branch, startPoint string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path)
 }
 
 // WorktreeAddDetached creates a new worktree at the given path with a detached HEAD.
@@ -3467,7 +3467,7 @@ func (g *Git) WorktreeAddDetached(path, ref string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path)
 }
 
 // WorktreeAddExisting creates a new worktree at the given path for an existing branch.
@@ -3479,7 +3479,7 @@ func (g *Git) WorktreeAddExisting(path, branch string) error {
 	); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
+	return initSubmodules(g.runner(), path)
 }
 
 // WorktreeAddExistingNoSubmodules creates a worktree on an existing branch
@@ -3502,14 +3502,7 @@ func (g *Git) WorktreeAddExistingForce(path, branch string) error {
 	if _, err := g.run("worktree", "add", "--force", path, branch); err != nil {
 		return err
 	}
-	return initSubmodules(g.runner(), path, g.submoduleReferencePath())
-}
-
-// submoduleReferencePath returns the --reference path for submodule init. It
-// is always empty: a rig's retired reference clone is no longer offered, so
-// submodule update runs without --reference and fetches from the remote.
-func (g *Git) submoduleReferencePath() string {
-	return ""
+	return initSubmodules(g.runner(), path)
 }
 
 // WorktreeRemove removes a worktree.
