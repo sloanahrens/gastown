@@ -1170,12 +1170,12 @@ func TestWorkQueueHelpStaysOpenAcrossRedraw(t *testing.T) {
 	}
 }
 
-// TestPolecatsAndBeadsAreGridPanels reads the embedded page: the Work panel's
-// two halves are ordinary panels of the dashboard's grid now — Polecats the
-// left column's last section below the tier sweeps, Beads the right column's
-// last below Mango — with no .pair wrapper or rule left, and Landings still the
-// page's last block (gt-sfpm6, gt-vcr3z, gt-lpo20).
-func TestPolecatsAndBeadsAreGridPanels(t *testing.T) {
+// TestBeadsIsAGridPanelAndLandingsStaysLast reads the embedded page: Beads is an
+// ordinary panel of the dashboard's grid, the right column's last section below
+// Mango, with no .pair wrapper or rule left, and Landings still the page's last
+// block. The Polecats half moved into the Landings block
+// (TestPolecatsIsInLandingsBetweenItsFiguresAndRows) (gt-sfpm6, gt-vcr3z, gt-lpo20).
+func TestBeadsIsAGridPanelAndLandingsStaysLast(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
@@ -1194,11 +1194,12 @@ func TestPolecatsAndBeadsAreGridPanels(t *testing.T) {
 	if end := strings.Index(right, `<section id="trendsec"`); end >= 0 {
 		right = right[:end]
 	}
+	// The Polecats section is no longer a grid panel: it sits in the Landings
+	// body (TestPolecatsIsInLandingsBetweenItsFiguresAndRows).
 	for _, tc := range []struct {
 		key, before string
 		column      string
 	}{
-		{"polecats", "tiersweep", cols[1]},
 		{"beads", "mango", right},
 	} {
 		at := strings.Index(tc.column, `data-fold="`+tc.key+`"`)
@@ -1233,10 +1234,7 @@ func TestPolecatsAndBeadsAreGridPanels(t *testing.T) {
 	if gridAt := strings.Index(page, `<div class="grid">`); gridAt < 0 || gridAt > at {
 		t.Fatal("the Landings section does not follow the panel grid")
 	}
-	tail := page[at+len("<section"):]
-	if end := strings.Index(tail, "<script>"); end < 0 || strings.Contains(tail[:end], "<section") {
-		t.Error("a section follows the Landings section: it is not the last block")
-	}
+	checkLandingsIsLastBlock(t, page)
 	// Each panel draws its own half.
 	if !strings.Contains(page, "workSeats(box, s, pcs, rSeats);") || !strings.Contains(page, "workQueue(box, s, q, rQueue);") {
 		t.Error("the panels do not draw the seats and the queue they replaced")
@@ -1390,10 +1388,10 @@ func TestTheQueuedRowAgesTheWaitTheLandingsPanelShows(t *testing.T) {
 	if len(cells) != 1 {
 		t.Fatalf("the panel drew %d age cells, want 1", len(cells))
 	}
-	// The Landings pane draws the waiting bead's When cell first: the panel's
-	// caption, then the scroll box that holds the table, then the header row,
-	// then this bead.
-	when := dom.descend(t, "trend", 0, 1, 0, 1, 0)
+	// The Landings body holds the Polecats section first, then the waiting
+	// bead's When cell: the panel's caption, then the scroll box that holds the
+	// table, then the header row, then this bead.
+	when := dom.descend(t, "trend", 1, 1, 0, 1, 0)
 	if cells[0].Text != "3m" || when.Text != "waiting 3m" {
 		t.Errorf("the Work row reads %q and the Landings row %q, want the same 3m wait", cells[0].Text, when.Text)
 	}

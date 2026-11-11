@@ -255,8 +255,9 @@ func TestQueuedLandingsDrawEveryCellAsText(t *testing.T) {
 
 // A queue of beads waiting to land is reason enough to show the section: with no
 // landings in the window the pane is the queue alone rather than the day's
-// figures drawn from a reading nobody has made yet, and with neither the section
-// stays hidden as it was (gt-zc45r).
+// figures drawn from a reading nobody has made yet. The Polecats section in the
+// same block shows once the seats have been read, and with none of the three the
+// section stays hidden as it was (gt-zc45r).
 func TestLandingsSectionShowsForAQueueAlone(t *testing.T) {
 	t.Parallel()
 
@@ -264,7 +265,7 @@ func TestLandingsSectionShowsForAQueueAlone(t *testing.T) {
 	for _, want := range []string{
 		"const hours = (t && t.hours) || [];",
 		"const waiting = queuedLandings(s, recent);",
-		"if (!hours.length && !waiting.length) { sec.hidden = true; box.replaceChildren(); return; }",
+		"if (!hours.length && !waiting.length && !s.polecats) { sec.hidden = true; trendClear(box); return; }",
 		"if (!hours.length) {",
 		"const q = landingTable(s, names, recent, waiting);",
 	} {
