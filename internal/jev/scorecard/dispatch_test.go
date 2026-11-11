@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/landings"
 )
 
 var updateDispatchGolden = flag.Bool("update-dispatch-scorecard-golden", false, "rewrite testdata/dispatch_scorecard.golden")
@@ -718,6 +719,153 @@ func TestScorecardDispatchNeedsSplitIgnoresCase(t *testing.T) {
 	}
 	if got, want := strings.Join(rules, "+"), "landed:no-review+label:needs-split"; got != want {
 		t.Errorf("rules = %q, want %q", got, want)
+	}
+}
+
+// writeLandingsFixture writes the rig's landings file under town, one record
+// per line, built from the landings package's own Record so the fixture cannot
+// drift from the writer's field names.
+func writeLandingsFixture(t *testing.T, town string, recs []landings.Record) {
+	t.Helper()
+	path, err := landings.Path(town, dispatch.RigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, r := range recs {
+		data, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, string(data))
+	}
+	writeFile(t, path, strings.Join(lines, "\n")+"\n")
+}
+
+// A polecat landing measured at 30 minutes is 34 points on the story-points
+// scale, which is over 27.5 minutes, so its size is labeled large.
+func TestDispatchSizeLabeledLargeAtThirtyFourPoints(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeLandingsFixture(t, town, []landings.Record{
+		{Bead: "gt-z1", Agent: "sbx-haiku", PolecatSecs: 30 * 60},
+	})
+	got, err := dispatchAdapterFor(town, dispatchBeadStore{}).Label(context.Background(), Item{ID: "gt-z1"})
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	large, ok := got.Labels[qSize]
+	if !ok || !large {
+		t.Errorf("size = %v (labeled %v), want large on a 30-minute landing", large, ok)
+	}
+	if got.Rule != "landing:points" {
+		t.Errorf("rule = %q, want %q", got.Rule, "landing:points")
+	}
+}
+
+// A polecat landing measured at 20 minutes is 21 points, below 34, so its size
+// is labeled small.
+func TestDispatchSizeLabeledSmallBelowThirtyFourPoints(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeLandingsFixture(t, town, []landings.Record{
+		{Bead: "gt-z2", Agent: "sbx-haiku", PolecatSecs: 20 * 60},
+	})
+	got, err := dispatchAdapterFor(town, dispatchBeadStore{}).Label(context.Background(), Item{ID: "gt-z2"})
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	large, ok := got.Labels[qSize]
+	if !ok || large {
+		t.Errorf("size = %v (labeled %v), want small on a 20-minute landing", large, ok)
+	}
+}
+
+// A crew landing has no seat, a zero time or a bound time has no measurement,
+// and a bead with no landing record has nothing to label. Each leaves size
+// unlabeled rather than reading as small.
+func TestDispatchSizeUnlabeledForCrewLandingsAndUnknownBounds(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		rec  *landings.Record
+	}{
+		{name: "crew landing with no time", rec: &landings.Record{Bead: "gt-u", PolecatSecs: 0}},
+		{name: "crew landing that carries a time", rec: &landings.Record{Bead: "gt-u", PolecatSecs: 30 * 60}},
+		{name: "polecat landing with a zero time", rec: &landings.Record{Bead: "gt-u", Agent: "sbx-haiku"}},
+		{name: "polecat landing with a lower bound", rec: &landings.Record{Bead: "gt-u", Agent: "sbx-haiku", PolecatSecs: 30 * 60, PolecatLowerBound: true}},
+		{name: "polecat landing with an upper bound", rec: &landings.Record{Bead: "gt-u", Agent: "sbx-haiku", PolecatSecs: 30 * 60, PolecatUpperBound: true}},
+		{name: "bead with no landing record", rec: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			var recs []landings.Record
+			if tc.rec != nil {
+				recs = append(recs, *tc.rec)
+			}
+			writeLandingsFixture(t, town, recs)
+			got, err := dispatchAdapterFor(town, dispatchBeadStore{}).Label(context.Background(), Item{ID: "gt-u"})
+			if err != nil {
+				t.Fatalf("Label: %v", err)
+			}
+			if _, ok := got.Labels[qSize]; ok {
+				t.Errorf("size labeled %v, want unlabeled", got.Labels[qSize])
+			}
+		})
+	}
+}
+
+// Two records for one bead are two landings of it; the later one carries the
+// bead's whole polecat time, so its points decide the label.
+func TestDispatchSizeUsesTheBeadsLatestLandingRecord(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeLandingsFixture(t, town, []landings.Record{
+		{Bead: "gt-l1", Agent: "sbx-haiku", PolecatSecs: 20 * 60},
+		{Bead: "gt-l1", Agent: "sbx-haiku", PolecatSecs: 30 * 60},
+	})
+	got, err := dispatchAdapterFor(town, dispatchBeadStore{}).Label(context.Background(), Item{ID: "gt-l1"})
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	large, ok := got.Labels[qSize]
+	if !ok || !large {
+		t.Errorf("size = %v (labeled %v), want large from the later record", large, ok)
+	}
+}
+
+// A landings line that is not a record could be the bead's own record, so the
+// label fails rather than reading the bead as unlabeled.
+func TestDispatchSizeUnreadableLandingLineFailsLabel(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path, err := landings.Path(town, dispatch.RigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, `{"bead":"gt-b1","agent":"sbx-haiku","polecat_secs":1800}`+"\n"+`{not json`+"\n")
+	if _, err := dispatchAdapterFor(town, dispatchBeadStore{}).Label(context.Background(), Item{ID: "gt-b1"}); err == nil {
+		t.Error("Label returned no error for an unreadable landings line, want the report to fail")
+	}
+}
+
+// A landings file that cannot be read at all fails the label too: the size of a
+// bead is unknown, so the report must not read it as unlabeled. A directory at
+// the file's path is a file the reader cannot read.
+func TestDispatchSizeUnreadableLandingsFileFailsLabel(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path, err := landings.Path(town, dispatch.RigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dispatchAdapterFor(town, dispatchBeadStore{}).Label(context.Background(), Item{ID: "gt-d1"}); err == nil {
+		t.Error("Label returned no error for an unreadable landings file, want the report to fail")
 	}
 }
 
