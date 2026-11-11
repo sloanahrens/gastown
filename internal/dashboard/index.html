@@ -67,6 +67,8 @@ td.n,th.n{text-align:right}
 .hbar i{display:block;min-height:1px}
 .hok{background:var(--blue);border-radius:0 0 2px 2px}
 .hrej{background:var(--red);border-radius:2px 2px 0 0}
+.hpts{background:var(--violet);border-radius:2px 2px 0 0}
+.hcap{height:4px;background:repeating-linear-gradient(45deg,var(--violet) 0 2px,transparent 2px 4px)}
 /* The landings head folds the day's figures and the per-hour bars away
    together, as the Actions feed folds under its own section; the table below
    never folds (gt-q4cac). */
@@ -1766,6 +1768,17 @@ function renderTrend(s) {
   if (mt != null) add(fmtDur(mt), "median total", "lint + gate + om, per landing");
   const slow = stages.length ? Math.max(...stages.map(p => p.lint_secs + p.gate_secs + (p.om_secs || 0))) : null;
   if (slow != null) add(fmtDur(slow), "slowest", "the longest landing in the window", slow > 600 ? "warnc" : "");
+  // The velocity figures, when the feed carries them: the points landed in the
+  // last day, the rate now against the day's average, and the median landing's
+  // points. A figure the feed leaves undefined reads as a dash, never as zero.
+  if (t.velocity) {
+    const f = t.velocity.figures || {};
+    const u = f.unweighted_24h || 0;
+    add(f.points_24h != null ? String(f.points_24h) : "–", "points 24h", u ? u + (u === 1 ? " landing" : " landings") + " in the last 24 hours without a measured time, not counted" : "every landing in the last 24 hours has a measured time");
+    const avg = f.avg_per_hour != null ? "24-hour average " + f.avg_per_hour.toFixed(1) + " points/h" : "no 24-hour average yet";
+    add(f.now_per_hour != null ? f.now_per_hour.toFixed(1) : "–", "points/h now", "mean of the last 3 complete hours · " + avg);
+    add(f.median_per_landing != null ? String(f.median_per_landing) : "–", "median points", "median points a weighted landing carried, over the last 24 hours");
+  }
   lhbody.append(kv);
 
   // landings per hour: the blue part landed, the red part is rejections
@@ -1778,7 +1791,11 @@ function renderTrend(s) {
     if (h.landed) { const l = el("i", "hok"); l.style.height = h.landed / max * 100 + "%"; col.append(l); }
     bars.append(col);
   }
-  lhbody.append(el("div", "k title", "landings per hour, red = rejected"), bars, timeAxis(t0, t1));
+  lhbody.append(el("div", "k title", "landings per hour, red = rejected"), bars);
+  // With a velocity feed, the points per hour sit in a second row under the
+  // landings bars, on the same hours, and the one axis labels both (gt-vd91ny.6).
+  if (t.velocity) lhbody.append(el("div", "k title", "points per hour, hatched cap = landings without time"), velocityBars(hours, t.velocity, hhmm));
+  lhbody.append(timeAxis(t0, t1));
 
   // The gate, om and load readings are one compact stats line each, off the
   // same reading the chart above draws.
@@ -1796,6 +1813,28 @@ function renderTrend(s) {
   const tbl = landingTable(s, names, recent, waiting);
   if (tbl) box.append(tbl);
   keepLandingsScroll(box, top);
+}
+
+// velocityBars draws the points per hour under the landings bars: one column per
+// trend hour, matched to the velocity hour with the same start, its height the
+// hour's points against the largest hour's. An unweighted landing is a small
+// hatched cap on its column and never a zero-height bar, so an hour with only
+// unweighted landings draws the cap alone and says no points were measured.
+function velocityBars(hours, velocity, hhmm) {
+  const byHour = new Map((velocity.hours || []).map(v => [new Date(v.hour).getTime(), v]));
+  const at = hours.map(h => byHour.get(new Date(h.hour).getTime()) || null);
+  const max = Math.max(1, ...at.map(v => v ? v.points : 0));
+  const bars = el("div", "hbars vbars");
+  hours.forEach((h, i) => {
+    const v = at[i];
+    const col = el("div", "hbar");
+    if (!v) { col.title = hhmm(h.hour) + " · no points reading"; bars.append(col); return; }
+    col.title = hhmm(h.hour) + (v.weighted || !v.unweighted ? " · " + v.points + " points" : " · no points measured") + (v.unweighted ? " · " + v.unweighted + (v.unweighted === 1 ? " landing" : " landings") + " without time" : "");
+    if (v.unweighted) col.append(el("i", "hcap"));
+    if (v.points) { const p = el("i", "hpts"); p.style.height = v.points / max * 100 + "%"; col.append(p); }
+    bars.append(col);
+  });
+  return bars;
 }
 
 // holderCell is the Landings table's By column for one row: the holder's short
