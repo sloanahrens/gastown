@@ -355,10 +355,32 @@ func runCommand(t *testing.T, f *forgejotest.Fake, statuses map[string]int, extr
 // admin token file.
 func runNetwork(t *testing.T, ctx context.Context, net *viewerNetwork, extra ...string) runResult {
 	t.Helper()
-	args := append([]string{"--api-url", forgejotest.APIRoot + forgejotest.APIPath, "--admin-token-file", adminFile}, extra...)
+	return runNetworkEnv(t, ctx, net, noEnv, append([]string{"--admin-token-file", adminFile}, extra...)...)
+}
+
+// noEnv is the empty environment: these runs take their admin token from the file.
+func noEnv(string) string { return "" }
+
+// tokenFromEnv returns the environment a broker run meets: $GT_AUTH_FORGEJO_TOKEN set
+// to value, and no other variable.
+func tokenFromEnv(value string) func(string) string {
+	return func(name string) string {
+		if name == brokerTokenEnv {
+			return value
+		}
+		return ""
+	}
+}
+
+// runNetworkEnv runs the command under ctx against net, reading the admin token from
+// getenv, with extra as the arguments after the API URL.
+func runNetworkEnv(t *testing.T, ctx context.Context, net *viewerNetwork, getenv func(string) string, extra ...string) runResult {
+	t.Helper()
+	args := append([]string{"--api-url", forgejotest.APIRoot + forgejotest.APIPath}, extra...)
 	var stdout, stderr bytes.Buffer
 	code := run(ctx, args, env{
 		Now:      testClock,
+		Getenv:   getenv,
 		ReadFile: adminReader(t),
 		HTTP:     &http.Client{Transport: net},
 	}, &stdout, &stderr)
@@ -632,6 +654,7 @@ func TestSourcesSecretRefusesAnAdminFileWithNoToken(t *testing.T) {
 	readFile := func(string) ([]byte, error) { return []byte("# no token here\n"), nil }
 	code := run(context.Background(), []string{"--admin-token-file", adminFile}, env{
 		Now:      testClock,
+		Getenv:   noEnv,
 		ReadFile: readFile,
 		HTTP:     &http.Client{Transport: f},
 	}, &stdout, &stderr)
@@ -644,6 +667,115 @@ func TestSourcesSecretRefusesAnAdminFileWithNoToken(t *testing.T) {
 	}
 	if n := len(f.CallLog()); n != 0 {
 		t.Fatalf("a run with no admin token made %d request(s)", n)
+	}
+}
+
+// TestSourcesSecretTakesTheBrokerTokenFromTheEnvironment starts the command the way the
+// auth broker does: $GT_AUTH_FORGEJO_TOKEN holds the site-admin token and no
+// --admin-token-file is passed. Each mode runs instead of being refused: the dry run
+// prints its plan, the check reads the state, and the real run mints, reads and stores,
+// each exiting 0.
+func TestSourcesSecretTakesTheBrokerTokenFromTheEnvironment(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		extra   []string
+		wantOut string
+	}{
+		{name: "dry run", extra: []string{"--dry-run"}, wantOut: "token name: " + testName},
+		{name: "check", extra: []string{"--check"}, wantOut: "RESULT: checked"},
+		{name: "real run", wantOut: "RESULT: stored " + secretName},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSourcesFake(t, "")
+			res := runNetworkEnv(t, context.Background(), &viewerNetwork{fake: f}, tokenFromEnv(forgejotest.AdminToken), tc.extra...)
+
+			if res.code != forgejoprov.ExitOK {
+				t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitOK, res.stderr)
+			}
+			if !strings.Contains(res.stdout, tc.wantOut) {
+				t.Fatalf("stdout lacks %q:\n%s", tc.wantOut, res.stdout)
+			}
+		})
+	}
+}
+
+// TestSourcesSecretRefusesWithNoTokenSource runs the broker's no-argument command line
+// with an empty environment: no source names a token. The run exits 2 before any request,
+// and the message names both ways to give one.
+func TestSourcesSecretRefusesWithNoTokenSource(t *testing.T) {
+	t.Parallel()
+	f := newSourcesFake(t, "")
+	res := runNetworkEnv(t, context.Background(), &viewerNetwork{fake: f}, noEnv)
+
+	if res.code != forgejoprov.ExitUsage {
+		t.Fatalf("exit %d, want %d; stderr: %s", res.code, forgejoprov.ExitUsage, res.stderr)
+	}
+	for _, want := range []string{"$GT_AUTH_FORGEJO_TOKEN", "--admin-token-file"} {
+		if !strings.Contains(res.stderr, want) {
+			t.Fatalf("stderr does not name %q:\n%s", want, res.stderr)
+		}
+	}
+	if n := len(f.CallLog()); n != 0 {
+		t.Fatalf("a run with no token source made %d request(s)", n)
+	}
+}
+
+// authRecorder records the Authorization header of every request it forwards to net.
+type authRecorder struct {
+	net   http.RoundTripper
+	auths []string
+}
+
+func (r *authRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.auths = append(r.auths, req.Header.Get("Authorization"))
+	return r.net.RoundTrip(req)
+}
+
+// TestSourcesSecretPrefersTheEnvironmentOverTheFile sets both sources to different values.
+// The environment's token is the one the first request carries, the file's value reaches
+// no request and is printed nowhere, and the run stores the secret.
+func TestSourcesSecretPrefersTheEnvironmentOverTheFile(t *testing.T) {
+	t.Parallel()
+	f := newSourcesFake(t, "")
+	// The file's value is never the fake's accepted token, so a run that read the file
+	// instead of the environment would answer 401 and exit 1 instead of storing.
+	const fileToken = "fixture-file-0f0f"
+	record := &authRecorder{net: &viewerNetwork{fake: f}}
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{
+		"--api-url", forgejotest.APIRoot + forgejotest.APIPath,
+		"--admin-token-file", adminFile,
+	}, env{
+		Now:    testClock,
+		Getenv: tokenFromEnv(forgejotest.AdminToken),
+		ReadFile: func(path string) ([]byte, error) {
+			if path != adminFile {
+				return nil, fs.ErrNotExist
+			}
+			return []byte("FORGEJO_ADMIN_TOKEN=" + fileToken + "\n"), nil
+		},
+		HTTP: &http.Client{Transport: record},
+	}, &stdout, &stderr)
+
+	if code != forgejoprov.ExitOK {
+		t.Fatalf("exit %d, want %d; stderr: %s", code, forgejoprov.ExitOK, stderr.String())
+	}
+	if len(record.auths) == 0 {
+		t.Fatal("the run made no request")
+	}
+	if want := "token " + forgejotest.AdminToken; record.auths[0] != want {
+		t.Fatal("the first request did not carry the environment's token")
+	}
+	for _, auth := range record.auths {
+		if strings.Contains(auth, fileToken) {
+			t.Fatal("a request carried the file's token value, so the file beat the environment")
+		}
+	}
+	if strings.Contains(stdout.String()+stderr.String(), fileToken) {
+		t.Fatal("the output carries the file's token value")
 	}
 }
 
@@ -740,22 +872,21 @@ func TestSourcesSecretStoresTheLeakyValueUnchanged(t *testing.T) {
 	}
 }
 
-// TestSourcesSecretRefusesBadCommandLines checks a command line that names no admin
-// token file, or passes an argument the command does not take, exits 2 and mints nothing.
+// TestSourcesSecretRefusesBadCommandLines checks a command line that passes an argument
+// the command does not take, or --check with --dry-run, exits 2 and mints nothing.
 func TestSourcesSecretRefusesBadCommandLines(t *testing.T) {
 	t.Parallel()
 	cases := map[string][]string{
-		"no admin token file": {"--api-url", forgejotest.APIRoot + forgejotest.APIPath},
-		"a positional":        {"--admin-token-file", adminFile, "extra"},
-		"an unknown flag":     {"--admin-token-file", adminFile, "--nope"},
-		"check with dry run":  {"--admin-token-file", adminFile, "--check", "--dry-run"},
+		"a positional":       {"--admin-token-file", adminFile, "extra"},
+		"an unknown flag":    {"--admin-token-file", adminFile, "--nope"},
+		"check with dry run": {"--admin-token-file", adminFile, "--check", "--dry-run"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			f := newSourcesFake(t, "")
 			var stdout, stderr bytes.Buffer
-			code := run(context.Background(), args, env{Now: testClock, ReadFile: adminReader(t), HTTP: &http.Client{Transport: f}}, &stdout, &stderr)
+			code := run(context.Background(), args, env{Now: testClock, Getenv: noEnv, ReadFile: adminReader(t), HTTP: &http.Client{Transport: f}}, &stdout, &stderr)
 			if code != forgejoprov.ExitUsage {
 				t.Fatalf("exit %d, want %d; stderr: %s", code, forgejoprov.ExitUsage, stderr.String())
 			}
@@ -808,7 +939,7 @@ func runCheckNetwork(t *testing.T, net http.RoundTripper, extra ...string) check
 	t.Helper()
 	args := append([]string{"--api-url", forgejotest.APIRoot + forgejotest.APIPath, "--admin-token-file", adminFile, "--check"}, extra...)
 	var stdout, stderr bytes.Buffer
-	code := run(t.Context(), args, env{Now: testClock, ReadFile: adminReader(t), HTTP: &http.Client{Transport: net}}, &stdout, &stderr)
+	code := run(t.Context(), args, env{Now: testClock, Getenv: noEnv, ReadFile: adminReader(t), HTTP: &http.Client{Transport: net}}, &stdout, &stderr)
 	return checkResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
