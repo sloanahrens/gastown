@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/cloudledger/ledgertest"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/plugin"
 )
 
 // cloudDSNBody is a DSN as the Secret holds it, with the newline a file ends in.
@@ -146,6 +147,34 @@ func TestCloudLedgerDSNEmptyLineIsNotHeldByAnotherRefusal(t *testing.T) {
 	d.checkCloudDSN()
 	if !strings.Contains(logs.String(), "is empty") || !strings.Contains(logs.String(), dsnPath) {
 		t.Errorf("log = %q, want the empty file named after the other refusal", logs.String())
+	}
+}
+
+// A connection failure logged within the hour does not hold back the empty-file
+// line. The run's failure is logged on its own path, not under the DSN check's
+// holds, so the empty file is still named when the check finds it.
+func TestCloudLedgerDSNEmptyLineIsNotHeldByAConnectionFailure(t *testing.T) {
+	t.Parallel()
+
+	l := &ledgertest.Ledger{QueryErr: errors.New("dialing the ledger: connection refused")}
+	_, dsnPath := ledgertest.Register(t, l)
+	notes := notifyfake.New()
+	d, logs := cloudDSNDaemon(t, townWithCloud(t, map[string]string{"ledger_dsn_file": dsnPath}), notes, newFixedClock(), nil)
+
+	key, _ := d.cloudCheckAlert(&plugin.Plugin{Name: cloudCheckPlugin})
+	if want := pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudUnreadableKey; key != want {
+		t.Fatalf("key = %q, want %q: the connection failure is the run's failure", key, want)
+	}
+	if !strings.Contains(logs.String(), "connection refused") {
+		t.Fatalf("log = %q, want the connection failure logged first", logs.String())
+	}
+
+	if err := os.WriteFile(dsnPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.checkCloudDSN()
+	if !strings.Contains(logs.String(), "is empty") || !strings.Contains(logs.String(), dsnPath) {
+		t.Errorf("log = %q, want the empty file named after the connection failure", logs.String())
 	}
 }
 
