@@ -287,10 +287,11 @@ func (r *report) write(s string) {
 // overlong set. A test whose package reported an elapsed, and whose own elapsed
 // is larger, cannot be a real figure: it is warned about, not listed. A test
 // whose package reported no elapsed has nothing to be checked against, so it
-// stays in the list.
+// stays in the list. A cached package's elapsed is 0 by go test's rule, not a
+// wall, so its tests are never checked against it.
 func (r *report) keepSlow(slow []tiersweep.TestTime) {
 	for _, tt := range slow {
-		if pkgWall, ok := r.elapsed[tt.Package]; ok && tt.Elapsed > pkgWall {
+		if pkgWall, ok := r.elapsed[tt.Package]; ok && !r.cached[tt.Package] && tt.Elapsed > pkgWall {
 			r.overlong = append(r.overlong, tt)
 			continue
 		}

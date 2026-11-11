@@ -852,6 +852,31 @@ func TestSlowTestWithNoPackageElapsedStaysListed(t *testing.T) {
 	}
 }
 
+// TestCachedPackageIsNeverWarnedOverlong pins the cached shape: go test replays
+// a cached package with its tests' old elapsed and a package Elapsed of 0, so
+// the package's wall is no measure of them. A 12s test in such a package is
+// listed as before and draws no warning. Mutation: drop the cached skip in
+// keepSlow, and the 12s test is warned about against a package of 0s.
+func TestCachedPackageIsNeverWarnedOverlong(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`{"Action":"pass","Package":"example.com/fx/a","Test":"TestSlow","Elapsed":12}`,
+		`{"Action":"output","Package":"example.com/fx/a","Output":"ok  \texample.com/fx/a\t(cached)\n"}`,
+		`{"Action":"pass","Package":"example.com/fx/a","Elapsed":0}`,
+		"",
+	}, "\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost()); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr %q", code, errOut.String())
+	}
+	if strings.Contains(out.String(), "tierwall: warning:") {
+		t.Errorf("stdout = %q, want no overlong warning for a cached package", out.String())
+	}
+	if !strings.Contains(out.String(), "tierwall:   example.com/fx/a TestSlow 12s\n") {
+		t.Errorf("stdout = %q, want TestSlow listed under its cached package", out.String())
+	}
+}
+
 // phaseStream is one package's go test -json stream for the phases tests: the
 // serial lines given, then three tests that pause, run and pass, then the
 // package's own pass with a 25s wall.
