@@ -274,6 +274,10 @@ mkrig() {
   echo two >"$dir/second.txt"
   git -C "$dir" add second.txt
   git -C "$dir" -c user.name=t -c user.email=t@example.invalid commit -q -m second
+  # The seed reads each rig's history from <rig>/.repo.git (gt-3lvcjz.20), so the
+  # fixture rig carries the bare repo a real rig has, with main at the checkout's
+  # HEAD as the landing worker leaves it.
+  git clone -q --bare "$dir" "$seedtown/$1/.repo.git"
   echo "$first $(git -C "$dir" rev-parse HEAD)"
 }
 read -r gastown_first _ < <(mkrig gastown)
@@ -296,7 +300,7 @@ fi
 printf 'fx %s\n' "0000000000000000000000000000000000000000" >"$seedtown/pins"
 if sout=$(seedmk polecat-seed-stage 2>&1); then
   fail "polecat-seed-stage stops on a pin the checkout does not hold" "exited 0: $sout"
-elif grep -q -F 'rig fx pin 000000000000 is not readable in its canonical checkout' <<<"$sout"; then
+elif grep -q -F 'rig fx pin 000000000000 is not readable in the .repo.git bare repo' <<<"$sout"; then
   pass "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha"
 else
   fail "polecat-seed-stage stops on a pin the checkout does not hold, naming the rig and sha" "$sout"
@@ -360,11 +364,13 @@ echo two >"$gtown2/fx/mayor/rig/b.txt"
 git -C "$gtown2/fx/mayor/rig" add go.mod b.txt
 git -C "$gtown2/fx/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m second
 git -C "$gtown2/fx/mayor/rig" update-ref refs/remotes/origin/main "$(git -C "$gtown2/fx/mayor/rig" rev-parse HEAD)"
+git clone -q --bare "$gtown2/fx/mayor/rig" "$gtown2/fx/.repo.git"
 mkdir -p "$gtown2/gastown/mayor/rig"
 git -C "$gtown2/gastown/mayor/rig" init -q -b main
 echo g >"$gtown2/gastown/mayor/rig/g.txt"
 git -C "$gtown2/gastown/mayor/rig" add g.txt
 git -C "$gtown2/gastown/mayor/rig" -c user.name=t -c user.email=t@example.invalid commit -q -m build
+git clone -q --bare "$gtown2/gastown/mayor/rig" "$gtown2/gastown/.repo.git"
 gbuild2=$(git -C "$gtown2/gastown/mayor/rig" rev-parse HEAD)
 printf 'fx %s\n' "$bpin" >"$gtown2/pins"
 if bout=$(make -C "$ROOT" --no-print-directory polecat-seed-stage POLE_TOWN="$gtown2" POLE_BUILD_SRC="$gtown2/gastown/mayor/rig" POLE_SEED_PINS="$gtown2/pins" POLE_SEED_DIR="$gtown2/out" POLE_SEED_RIGS=fx POLE_COMMIT="$gbuild2" 2>&1); then
