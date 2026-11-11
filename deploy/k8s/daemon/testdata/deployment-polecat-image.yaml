@@ -56,6 +56,8 @@ spec:
               value: http://forgejo:3000/api/v1
             - name: AWS_REGION
               value: us-east-1
+            - name: GT_DOLT_BACKUP_ROOT
+              value: /Users/sloan/gt-backups/dolt
           resources:
             requests:
               cpu: "2"
