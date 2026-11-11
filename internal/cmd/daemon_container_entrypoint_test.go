@@ -179,11 +179,11 @@ func (r *entrypointRig) entrypoint() containerEntrypoint {
 			r.mangoTownRoots = append(r.mangoTownRoots, townRoot)
 			return r.mangoErr
 		},
-		deployDirectives: func(townRoot string) ([]string, error) {
+		deployDirectives: func(townRoot string) error {
 			r.installs = append(r.installs, "directives")
 			r.deployTownRoots = append(r.deployTownRoots, townRoot)
 			r.deployRanAt = len(r.calls)
-			return nil, r.deployErr
+			return r.deployErr
 		},
 		logf: func(format string, args ...any) {
 			r.logs = append(r.logs, fmt.Sprintf(format, args...))
@@ -2623,6 +2623,26 @@ func TestEntrypointDirectivesDeployFailurePolicy(t *testing.T) {
 				t.Errorf("logs = %q, want no commit warning", r.logs)
 			}
 		})
+	}
+}
+
+// The real deployDirectives value deploys at the empty commit for the town root
+// and returns the deploy's error unchanged: the entrypoint, not the seam, decides
+// what a failure means.
+func TestDeployImageDirectivesReturnsTheDeployError(t *testing.T) {
+	t.Parallel()
+	deployErr := errors.New("central directives: writing directives/a.md: permission denied")
+	var gotTown, gotCommit string
+	deploy := func(townRoot, commit string, buildCommit func() string) ([]string, error) {
+		gotTown, gotCommit = townRoot, commit
+		return nil, deployErr
+	}
+	err := deployImageDirectives(deploy, entrypointTown)
+	if !errors.Is(err, deployErr) {
+		t.Errorf("deployImageDirectives = %v, want the deploy error", err)
+	}
+	if gotTown != entrypointTown || gotCommit != "" {
+		t.Errorf("deploy ran for town %q at commit %q, want town %q at the empty commit", gotTown, gotCommit, entrypointTown)
 	}
 }
 
