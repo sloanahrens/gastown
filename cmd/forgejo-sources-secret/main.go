@@ -1,18 +1,19 @@
-// Command forgejo-sources-secret stores the SOURCES_TOKEN Actions secret on
-// the owning account/gastown without any person seeing the token. It mints a read:repository
-// token for bot-viewer, checks that the token reads every repository the image
-// build fetches, and stores it only when all of them answer 200. The site-admin
-// token comes from the environment the auth broker sets ($GT_AUTH_FORGEJO_TOKEN,
-// or $FORGEJO_ADMIN_TOKEN for a stand-in) or, when the environment holds neither,
-// from the FORGEJO_ADMIN_TOKEN= line of --admin-token-file. With --check it
-// mints, revokes and stores nothing: it reads whether SOURCES_TOKEN is listed,
-// whether bot-viewer is a collaborator on each read repository, and the names of its
-// sources-token- tokens; checkState says what a check reads, prints and judges.
-// The exit codes are 0 when the secret is stored, a dry run finishes or a check
-// reads everything and every read repository is readable; 1 when a step fails, a
-// read fails or a required repository is unreadable; and 2 when the command line
-// is refused. An unlisted secret is a state a check reports, not a failure,
-// because the check runs before the first real run, when the secret is absent.
+// Command forgejo-sources-secret stores the SOURCES_TOKEN Actions secret on the
+// owning account/gastown without any person seeing the token. It mints a
+// read:repository token for bot-viewer, checks that the token reads every
+// repository the image build fetches, and stores it only when all of them
+// answer 200. The site-admin token comes from the environment the auth broker
+// sets ($GT_AUTH_FORGEJO_TOKEN, or $FORGEJO_ADMIN_TOKEN for a stand-in) or,
+// when the environment holds neither, from the FORGEJO_ADMIN_TOKEN= line of
+// --admin-token-file. With --check it mints, revokes and stores nothing: it
+// reads whether SOURCES_TOKEN is listed, whether bot-viewer is a collaborator
+// on each read repository, and the names of its sources-token- tokens;
+// checkState says what a check reads, prints and judges. The exit codes are 0
+// when the secret is stored, a dry run finishes or a check reads everything and
+// every read repository is readable; 1 when a step fails, a read fails or a
+// required repository is unreadable; and 2 when the command line is refused. An
+// unlisted secret is a state a check reports, not a failure, because the check
+// runs before the first real run, when the secret is absent.
 package main
 
 import (
