@@ -91,9 +91,10 @@ type Promoter struct {
 	// Target is the target repository's URL (merge_queue.forgejo.promote_target),
 	// any git URL from tests to the production ssh form.
 	Target string
-	// KeyFile is the private deploy key ssh authenticates with
-	// (merge_queue.forgejo.promote_key_file). Its path reaches ssh as the one
-	// -i argument and nowhere else: never logged, never stored.
+	// KeyFile is the private deploy key ssh authenticates with: the path
+	// ResolveKeyFile gives merge_queue.forgejo.promote_key_file. Its path
+	// reaches ssh as the one -i argument and nowhere else: never logged, never
+	// stored.
 	KeyFile string
 	// Repo reads the target and pushes to it from the rig's repository.
 	Repo Repo
