@@ -1,6 +1,7 @@
 package usageattrib
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,10 +47,32 @@ type Facts struct {
 }
 
 // storedRecord is a record file as Write keeps it: the usage record plus the ids of the
-// sessions already counted in it. The dashboard and tokensrc decoders ignore the extra field.
+// sessions already counted in it. The dashboard and tokensrc decoders ignore the extra fields.
 type storedRecord struct {
 	dashboard.UsageRecord
 	Sessions []string `json:"sessions"`
+	// Batches holds one entry per Write that added sessions: the ids it counted and the
+	// accounting it wrote for them. A repeat of those ids is checked against it.
+	Batches []countedBatch `json:"batches,omitempty"`
+}
+
+// countedBatch is the accounting one Write counted for its sessions.
+type countedBatch struct {
+	Sessions   []string        `json:"sessions"`
+	Accounting json.RawMessage `json:"accounting"`
+}
+
+// accountingOf is the part of a record that depends on the sessions counted in it. Two
+// records of the same sessions have the same accounting.
+func accountingOf(rec dashboard.UsageRecord) (json.RawMessage, error) {
+	return json.Marshal(struct {
+		Totals     dashboard.UsageTotals
+		Models     map[string]dashboard.UsageModel
+		EstCostUSD float64
+		WallS      int64
+		Subagents  dashboard.UsageSubagents
+		Activity   dashboard.UsageActivity
+	}{rec.Totals, rec.Models, rec.EstCostUSD, rec.WallS, rec.Subagents, rec.Activity})
 }
 
 // Build sums sessions into the usage record for one run. A session counts once however many
@@ -161,6 +184,19 @@ func totalsOf(models map[string]dashboard.UsageModel) dashboard.UsageTotals {
 	return t
 }
 
+// addTotals sums two runs' totals field by field; Uncached is recomputed from its parts.
+func addTotals(a, b dashboard.UsageTotals) dashboard.UsageTotals {
+	t := dashboard.UsageTotals{
+		Calls:         a.Calls + b.Calls,
+		Input:         a.Input + b.Input,
+		Output:        a.Output + b.Output,
+		CacheCreation: a.CacheCreation + b.CacheCreation,
+		CacheRead:     a.CacheRead + b.CacheRead,
+	}
+	t.Uncached = t.Input + t.CacheCreation + t.Output
+	return t
+}
+
 // subagentShare is the fraction of the run's uncached tokens spent in subagents, zero for a
 // run that spent none.
 func subagentShare(sub, total int64) float64 {
@@ -179,15 +215,28 @@ func recordPath(usageDir, bead, kind string) string {
 	return filepath.Join(usageDir, "beads", unsafeFileChars.ReplaceAllString(bead, "_")+"."+kind+".json")
 }
 
-// writeMu serializes Write within the process, the only writer of these files.
+// writeMu serializes Write within this process, so two goroutines of one daemon cannot
+// interleave a read-merge-write of the same file. It does not guard against another process
+// writing the same file.
 var writeMu sync.Mutex
+
+// writer writes record files. create makes the temporary file each write goes through; a test
+// replaces it to make the write fail, which does not depend on who runs the test.
+type writer struct {
+	create func(dir, pattern string) (*os.File, error)
+}
 
 // Write merges rec into its bead's record file under usageDir and adds sessionIDs to the
 // file's counted sessions. rec must be built from exactly sessionIDs. Sessions already in
 // the file make the write a no-op, so writing the same session twice leaves the file as it
-// was. A record that mixes counted and new sessions is refused, since its totals cannot be
-// split.
+// was; a repeat whose accounting differs from what was counted for those sessions is
+// refused. A record that mixes counted and new sessions is refused, since its totals cannot
+// be split.
 func Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
+	return writer{create: os.CreateTemp}.Write(usageDir, rec, sessionIDs)
+}
+
+func (w writer) Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) error {
 	if rec.Bead == "" {
 		return errors.New("usageattrib: record has no bead")
 	}
@@ -208,7 +257,14 @@ func Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) erro
 		}
 	}
 	if len(ids) == 0 {
+		if rec.Totals.Calls != 0 {
+			return fmt.Errorf("usageattrib: %s: mismatch: the record counts %d calls but names no session", rec.Bead, rec.Totals.Calls)
+		}
 		return fmt.Errorf("usageattrib: %s: no sessions to count", rec.Bead)
+	}
+	acct, err := accountingOf(rec)
+	if err != nil {
+		return fmt.Errorf("usageattrib: encoding the accounting for %s: %w", rec.Bead, err)
 	}
 
 	// Read, merge and rename must not interleave: two runs for one bead ending together would
@@ -217,7 +273,7 @@ func Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) erro
 	defer writeMu.Unlock()
 
 	path := recordPath(usageDir, rec.Bead, rec.Kind)
-	merged, counted := rec, ids
+	merged := storedRecord{UsageRecord: rec, Sessions: ids, Batches: []countedBatch{{Sessions: ids, Accounting: acct}}}
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -242,24 +298,61 @@ func Write(usageDir string, rec dashboard.UsageRecord, sessionIDs []string) erro
 			}
 		}
 		if len(fresh) == 0 {
-			return nil
+			return repeatMatches(cur, rec.Bead, ids, acct)
 		}
 		if len(fresh) != len(ids) {
 			return fmt.Errorf("usageattrib: %s: %d of %d sessions are already counted; build the record from the new sessions only",
 				rec.Bead, len(ids)-len(fresh), len(ids))
 		}
-		merged = mergeRecords(cur.UsageRecord, rec)
-		counted = append(slices.Clone(cur.Sessions), ids...)
+		merged = storedRecord{
+			UsageRecord: mergeRecords(cur.UsageRecord, rec),
+			Sessions:    append(slices.Clone(cur.Sessions), ids...),
+			Batches:     append(slices.Clone(cur.Batches), countedBatch{Sessions: ids, Accounting: acct}),
+		}
 	}
 
-	out, err := json.MarshalIndent(storedRecord{UsageRecord: merged, Sessions: counted}, "", " ")
+	out, err := json.MarshalIndent(merged, "", " ")
 	if err != nil {
 		return fmt.Errorf("usageattrib: encoding the record for %s: %w", rec.Bead, err)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("usageattrib: creating the beads directory: %w", err)
 	}
-	return writeFileAtomic(path, append(out, '\n'))
+	return w.writeFileAtomic(path, append(out, '\n'))
+}
+
+// repeatMatches is the write of sessions the record has already counted: it is a no-op when
+// the accounting equals what was counted for exactly these sessions, and a mismatch otherwise.
+// A file whose batches do not say what these sessions counted is refused, not assumed to match.
+func repeatMatches(cur storedRecord, bead string, ids []string, acct json.RawMessage) error {
+	for _, b := range cur.Batches {
+		if !sameSet(b.Sessions, ids) {
+			continue
+		}
+		// The file is indented on write, which reindents the stored accounting: compare compacted.
+		var stored bytes.Buffer
+		if err := json.Compact(&stored, b.Accounting); err != nil {
+			return fmt.Errorf("usageattrib: %s: the accounting counted for sessions %v does not decode: %w", bead, ids, err)
+		}
+		if !bytes.Equal(stored.Bytes(), acct) {
+			return fmt.Errorf("usageattrib: %s: mismatch: sessions %v were counted with different accounting, left as it is", bead, ids)
+		}
+		return nil
+	}
+	return fmt.Errorf("usageattrib: %s: sessions %v are already counted but no earlier write counted exactly them, so they cannot be checked: left as it is", bead, ids)
+}
+
+// sameSet reports whether a and b hold the same ids, ignoring order.
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, id := range a {
+		if !slices.Contains(b, id) {
+			return false
+		}
+	}
+	return true
 }
 
 // sameRun refuses a merge into a record of a different run. Every field here is set by the
@@ -289,7 +382,13 @@ func mergeRecords(a, b dashboard.UsageRecord) dashboard.UsageRecord {
 	m.End = latest(a.End, b.End)
 	m.WallS += b.WallS
 	m.EstCostUSD += b.EstCostUSD
+	// A stored record may lack a models map (an older file, or one the Python tool wrote):
+	// it is read with the map initialised, and its totals are kept rather than rebuilt from
+	// the models, which it does not have.
 	m.Models = maps.Clone(a.Models)
+	if m.Models == nil {
+		m.Models = map[string]dashboard.UsageModel{}
+	}
 	for name, row := range b.Models {
 		s := m.Models[name]
 		s.Calls += row.Calls
@@ -300,7 +399,7 @@ func mergeRecords(a, b dashboard.UsageRecord) dashboard.UsageRecord {
 		s.EstCostUSD += row.EstCostUSD
 		m.Models[name] = s
 	}
-	m.Totals = totalsOf(m.Models)
+	m.Totals = addTotals(a.Totals, b.Totals)
 	m.Subagents = dashboard.UsageSubagents{
 		Calls:    a.Subagents.Calls + b.Subagents.Calls,
 		Uncached: a.Subagents.Uncached + b.Subagents.Uncached,
@@ -352,8 +451,8 @@ func latest(a, b time.Time) time.Time {
 
 // writeFileAtomic replaces path with data through a temporary file in the same directory, so
 // a reader sees the old record or the new one, never a partial file.
-func writeFileAtomic(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*.tmp")
+func (w writer) writeFileAtomic(path string, data []byte) error {
+	f, err := w.create(filepath.Dir(path), filepath.Base(path)+".*.tmp")
 	if err != nil {
 		return fmt.Errorf("usageattrib: writing %s: %w", path, err)
 	}

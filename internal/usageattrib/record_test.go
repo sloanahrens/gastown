@@ -2,10 +2,14 @@ package usageattrib
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
@@ -248,10 +252,6 @@ func TestWriteMergesBySession(t *testing.T) {
 	if string(mustRead(t, path)) != string(before) {
 		t.Errorf("rewriting a session counted by the merge changed the file")
 	}
-
-	t.Run("failed write keeps the earlier record", func(t *testing.T) {
-		checkFailedWriteKeepsRecord(t, dir, path)
-	})
 }
 
 func TestMergeTakesWidestBoundsAndNamesNoSeatWhenSeatsDiffer(t *testing.T) {
@@ -349,44 +349,180 @@ func TestRecordPathCleansBeadName(t *testing.T) {
 	}
 }
 
-// checkFailedWriteKeepsRecord needs the record already on disk at path, and a new session to write.
-// The write must fail: for a user the beads directory is made read-only; root writes into a
-// directory whatever its mode, so there the write is refused for a record of another workspace.
-func checkFailedWriteKeepsRecord(t *testing.T, dir, path string) {
+// treeListing is every entry under root with its size and modification time, or "absent" when
+// root does not exist. Two listings are equal only when nothing under root was written.
+func treeListing(t *testing.T, root string) string {
 	t.Helper()
-	before := mustRead(t, path)
-
-	beads := filepath.Join(dir, "beads")
-	// A session not yet counted, so the write has something to do and must fail.
-	fresh := sessA
-	fresh.ID = "s-c"
-	rec := Build(factsIn("ws-a"), []SessionUsage{fresh})
-	if os.Geteuid() == 0 {
-		rec = Build(factsIn("ws-b"), []SessionUsage{fresh})
-	} else {
-		//testpolicy:allow no-exec-files — the target is the beads directory: a read-only dir needs its search bit to be listed
-		if err := os.Chmod(beads, 0o555); err != nil {
-			t.Fatalf("making the beads directory read-only: %v", err)
+	if _, err := os.Stat(root); errors.Is(err, fs.ErrNotExist) {
+		return "absent"
+	}
+	var b strings.Builder
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		t.Cleanup(func() {
-			//testpolicy:allow no-exec-files — the target is the beads directory: cleanup must restore its search bit
-			if err := os.Chmod(beads, 0o755); err != nil {
-				t.Errorf("restoring the beads directory's mode: %v", err)
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&b, "%s\t%d\t%d\n", rel, fi.Size(), fi.ModTime().UnixNano())
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("listing %s: %v", root, err)
+	}
+	return b.String()
+}
+
+var errInjectedCreate = errors.New("injected create failure")
+
+// A write whose temporary file cannot be created fails and leaves the earlier record and the
+// directory as they were. The failure is injected, so it is the same for root and for a user.
+func TestWriteFailureKeepsEarlierRecord(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := recordPathFor(t, dir)
+	if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	before := mustRead(t, path)
+	listing := treeListing(t, dir)
+
+	failing := writer{create: func(string, string) (*os.File, error) { return nil, errInjectedCreate }}
+	if err := failing.Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessB}), []string{"s-b"}); !errors.Is(err, errInjectedCreate) {
+		t.Fatalf("write with a failing create: error = %v, want the injected failure", err)
+	}
+	if got := mustRead(t, path); string(got) != string(before) {
+		t.Errorf("failed write changed the earlier record:\nbefore:\n%s\nafter:\n%s", before, got)
+	}
+	if got := treeListing(t, dir); got != listing {
+		t.Errorf("failed write changed the directory:\nbefore:\n%s\nafter:\n%s", listing, got)
+	}
+}
+
+// A write that is refused returns an error naming the mismatch or the sessions already counted,
+// and leaves the record and the directory as they were.
+func TestWriteRefusesSessionMismatch(t *testing.T) {
+	t.Parallel()
+	// The same session id with one more message: its accounting differs from what was counted.
+	changed := sessA
+	changed.Main = append(slices.Clone(sessA.Main), msg("a9", "claude-opus-5-5", "2026-10-12T18:56:00Z", 7, 0, 0, 7))
+	tests := []struct {
+		name    string
+		rec     dashboard.UsageRecord
+		ids     []string
+		wantErr string
+	}{
+		{"calls but no session named", Build(factsIn("ws-a"), []SessionUsage{sessB}), nil, "mismatch"},
+		{"counted session with other accounting", Build(factsIn("ws-a"), []SessionUsage{changed}), []string{"s-a"}, "mismatch"},
+		{"counted and new sessions mixed", Build(factsIn("ws-a"), []SessionUsage{sessA, sessB}), []string{"s-a", "s-b"}, "already counted"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := recordPathFor(t, dir)
+			if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"}); err != nil {
+				t.Fatalf("first write: %v", err)
+			}
+			before := mustRead(t, path)
+			listing := treeListing(t, dir)
+
+			err := Write(dir, tt.rec, tt.ids)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("write error = %v, want one containing %q", err, tt.wantErr)
+			}
+			if got := mustRead(t, path); string(got) != string(before) {
+				t.Errorf("refused write changed the record")
+			}
+			if got := treeListing(t, dir); got != listing {
+				t.Errorf("refused write changed the directory")
 			}
 		})
 	}
-	if err := Write(dir, rec, []string{"s-c"}); err == nil {
-		t.Fatal("a failed write: no error")
+}
+
+// A repeat of counted sessions is refused when no earlier write counted exactly those sessions,
+// since their accounting cannot be checked. The record is left as it is.
+func TestWriteRefusesRepeatWithoutItsBatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := recordPathFor(t, dir)
+	if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"}); err != nil {
+		t.Fatalf("first write: %v", err)
 	}
-	if got := mustRead(t, path); string(got) != string(before) {
-		t.Errorf("failed write changed the earlier record")
+	// Drop the batches, as a file written before they were kept would lack them.
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(mustRead(t, path), &stored); err != nil {
+		t.Fatalf("decoding the record: %v", err)
 	}
-	entries, err := os.ReadDir(beads)
+	delete(stored, "batches")
+	data, err := json.Marshal(stored)
 	if err != nil {
-		t.Fatalf("listing the beads directory: %v", err)
+		t.Fatalf("encoding the record: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("failed write left %d entries, want only the record", len(entries))
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("rewriting the record: %v", err)
+	}
+	listing := treeListing(t, dir)
+
+	err = Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"})
+	if err == nil || !strings.Contains(err.Error(), "cannot be checked") {
+		t.Fatalf("repeat without a batch: error = %v, want one saying it cannot be checked", err)
+	}
+	if got := treeListing(t, dir); got != listing {
+		t.Errorf("refused repeat changed the directory")
+	}
+}
+
+// A stored record with no models map merges without a panic: its totals are kept, and the new
+// session's models are added to the map.
+func TestMergeIntoRecordWithoutModels(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := recordPathFor(t, dir)
+	if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"}); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	var stored map[string]json.RawMessage
+	if err := json.Unmarshal(mustRead(t, path), &stored); err != nil {
+		t.Fatalf("decoding the record: %v", err)
+	}
+	delete(stored, "models")
+	data, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("encoding the record: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("rewriting the record: %v", err)
+	}
+
+	recB := Build(factsIn("ws-a"), []SessionUsage{sessB})
+	if err := Write(dir, recB, []string{"s-b"}); err != nil {
+		t.Fatalf("write into a record without models: %v", err)
+	}
+	var after storedRecord
+	if err := json.Unmarshal(mustRead(t, path), &after); err != nil {
+		t.Fatalf("decoding the merged record: %v", err)
+	}
+	wantTotals := addTotals(Build(factsIn("ws-a"), []SessionUsage{sessA}).Totals, recB.Totals)
+	if after.Totals != wantTotals {
+		t.Errorf("merged totals = %+v, want the stored totals plus the new session's %+v", after.Totals, wantTotals)
+	}
+	if len(after.Models) != len(recB.Models) {
+		t.Fatalf("merged models = %v, want the new session's %d rows", after.Models, len(recB.Models))
+	}
+	for name, row := range recB.Models {
+		if after.Models[name] != row {
+			t.Errorf("model %s = %+v, want %+v", name, after.Models[name], row)
+		}
+	}
+	if want := []string{"s-a", "s-b"}; !equalStrings(after.Sessions, want) {
+		t.Errorf("counted sessions = %v, want %v", after.Sessions, want)
 	}
 }
 
@@ -498,6 +634,7 @@ func TestWorkspaceMapping(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			listing := treeListing(t, town)
 			ws, err := WorkspaceOf(town, tt.bead)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("WorkspaceOf error = %v, want error %v", err, tt.wantErr)
@@ -505,8 +642,11 @@ func TestWorkspaceMapping(t *testing.T) {
 			if ws != tt.want {
 				t.Errorf("workspace = %q, want %q", ws, tt.want)
 			}
+			// The lookup only reads: the settings file, and any usage directory, are as they were.
+			if got := treeListing(t, town); got != listing {
+				t.Errorf("workspace lookup changed %s:\nbefore:\n%s\nafter:\n%s", town, listing, got)
+			}
 			if tt.wantErr {
-				// The caller stops at the error and never reaches Write, so nothing is created.
 				if _, statErr := os.Stat(usageDir); !os.IsNotExist(statErr) {
 					t.Errorf("a failed workspace lookup created %s", usageDir)
 				}
@@ -622,7 +762,7 @@ func TestWriteFileAtomicRemovesItsTempFileOnFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := writeFileAtomic(target, []byte("{}\n")); err == nil {
+	if err := (writer{create: os.CreateTemp}).writeFileAtomic(target, []byte("{}\n")); err == nil {
 		t.Fatal("replacing a directory: no error")
 	}
 	entries, err := os.ReadDir(dir)
