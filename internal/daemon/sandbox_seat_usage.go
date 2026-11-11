@@ -83,12 +83,12 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 	var sessions []usageattrib.SessionUsage
 	var readErrs []error
 	for _, path := range paths {
-		s, counted, err := seatSession(path, start)
+		s, err := seatSession(path, start)
 		if err != nil {
 			readErrs = append(readErrs, err)
 		}
-		if counted {
-			sessions = append(sessions, s)
+		if s != nil {
+			sessions = append(sessions, *s)
 		}
 	}
 	if len(sessions) == 0 {
@@ -119,23 +119,23 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 }
 
 // seatSession reads one transcript the seat's sessions wrote, with the messages
-// of the subagents that session started. counted is false when the transcript
-// was last written before start, so it is a predecessor's and is left out. A
+// of the subagents that session started. It returns nil, and no error, when the
+// transcript was last written before start: a predecessor's, left out. A
 // transcript that cannot be read is returned incomplete, with the reasons as
 // err, so its record says its totals may understate the run.
-func seatSession(path string, start time.Time) (s usageattrib.SessionUsage, counted bool, err error) {
+func seatSession(path string, start time.Time) (*usageattrib.SessionUsage, error) {
 	id := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 	if id == "" {
-		return usageattrib.SessionUsage{}, false, fmt.Errorf("a transcript with no session id, left out: %s", filepath.Base(path))
+		return nil, fmt.Errorf("a transcript with no session id, left out: %s", filepath.Base(path))
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return usageattrib.SessionUsage{ID: id}, true, fmt.Errorf("statting its transcript: %w", err)
+		return &usageattrib.SessionUsage{ID: id}, fmt.Errorf("statting its transcript: %w", err)
 	}
 	if info.ModTime().Before(start) {
-		return usageattrib.SessionUsage{}, false, nil
+		return nil, nil
 	}
-	s = usageattrib.SessionUsage{ID: id, Complete: true}
+	s := usageattrib.SessionUsage{ID: id, Complete: true}
 	var errs []error
 	own, err := readSeatUsage(path)
 	s.Main = own
@@ -160,7 +160,7 @@ func seatSession(path string, start time.Time) (s usageattrib.SessionUsage, coun
 			errs = append(errs, err)
 		}
 	}
-	return s, true, errors.Join(errs...)
+	return &s, errors.Join(errs...)
 }
 
 // readSeatUsage reads the assistant messages of one transcript file. A file
