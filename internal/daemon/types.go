@@ -170,6 +170,8 @@ type (
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
 	LandingInfraConfig         = agentconfig.LandingInfraConfig
 	TierSweepConfig            = agentconfig.TierSweepConfig
+
+	DiskMaintenanceActionsRetention = agentconfig.DiskMaintenanceActionsRetention
 )
 
 // PatrolConfigFile returns the path to the patrol config file: the legacy

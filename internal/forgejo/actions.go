@@ -96,6 +96,13 @@ func (c *Client) ListRuns(ctx context.Context, owner, repo string, f RunFilter) 
 	return &out, nil
 }
 
+// DeleteRun removes workflow run runID. A non-2xx answer comes back as an
+// *APIError.
+func (c *Client) DeleteRun(ctx context.Context, owner, repo string, runID int64) error {
+	path := repoPath(owner, repo, "/actions/runs/"+strconv.FormatInt(runID, 10))
+	return c.call(ctx, http.MethodDelete, path, nil, nil, nil)
+}
+
 // ListRunJobs returns the jobs of run runID.
 func (c *Client) ListRunJobs(ctx context.Context, owner, repo string, runID int64) ([]ActionRunJob, error) {
 	var out []ActionRunJob
