@@ -561,6 +561,79 @@ func TestRecordIsReadByTheConsumers(t *testing.T) {
 	}
 }
 
+// A record path that cannot be read is an error, and the thing at that path is left alone.
+func TestWriteReturnsAReadErrorAndLeavesThePathAlone(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := recordPathFor(t, dir)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"})
+	if err == nil {
+		t.Fatal("write over an unreadable record path: no error")
+	}
+	if info, statErr := os.Stat(path); statErr != nil || !info.IsDir() {
+		t.Errorf("the unreadable path was changed: stat %v, err %v", info, statErr)
+	}
+}
+
+// A record that cannot be encoded is an error before anything is put in place.
+func TestWriteRefusesARecordThatWillNotEncode(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rec := Build(factsIn("ws-a"), []SessionUsage{sessA})
+	rec.EstCostUSD = math.Inf(1)
+
+	if err := Write(dir, rec, []string{"s-a"}); err == nil {
+		t.Fatal("a record with an infinite cost: no error")
+	}
+	if _, err := os.Stat(recordPathFor(t, dir)); !os.IsNotExist(err) {
+		t.Errorf("a record that did not encode left a file behind: %v", err)
+	}
+}
+
+// A beads directory that cannot be made is an error. A dangling symlink is one: the record
+// reads as absent through it, and the mkdir that follows fails on the link.
+func TestWriteReturnsAnErrorWhenTheBeadsDirectoryCannotBeMade(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	beads := filepath.Join(dir, "beads")
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), beads); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"}); err == nil {
+		t.Fatal("write with no beads directory it can make: no error")
+	}
+	if _, err := os.Lstat(beads); err != nil {
+		t.Errorf("the beads symlink was changed: %v", err)
+	}
+}
+
+// A failed atomic replace returns its error and removes the temp file it made.
+func TestWriteFileAtomicRemovesItsTempFileOnFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A non-empty directory at the target: the rename over it fails whoever writes.
+	target := filepath.Join(dir, "gt-abc12.work.json")
+	if err := os.MkdirAll(filepath.Join(target, "inside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeFileAtomic(target, []byte("{}\n")); err == nil {
+		t.Fatal("replacing a directory: no error")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "gt-abc12.work.json" {
+		t.Errorf("failed replace left %d entries in the directory, want only the target", len(entries))
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
