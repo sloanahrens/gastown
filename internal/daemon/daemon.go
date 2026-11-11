@@ -1247,6 +1247,9 @@ type Daemon struct {
 	// tierSweepGuardReads is the failed guard read per rig, which the attention
 	// tick raises an item from (gt-gg9hv.56).
 	tierSweepGuardReads tierSweepGuardReads
+	// tierSweepBusy is the escalation open per rig for a foreign sweep Job that
+	// outlasted the stage budget, cleared when the Job ends (gt-pihhr4).
+	tierSweepBusy tierSweepBusyAlerts
 
 	// goos is the platform the platform-gated patrols decide on (see
 	// platform); "" is runtime.GOOS. Tests set it to reach a gated path.

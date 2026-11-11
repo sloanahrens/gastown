@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
@@ -17,8 +18,13 @@ import (
 // another sha: the Job a previous daemon's run left running, which holds the
 // repo claim this run would rewrite (gt-pihhr4).
 func otherRunJob(g *guardFixture) string {
+	return otherRunJobAt(g, "fedcba9876543210fedcba9876543210fedcba98")
+}
+
+// otherRunJobAt is the name of the Job a run at sha makes for the rig's tiers.
+func otherRunJobAt(g *guardFixture, sha string) string {
 	other := g.spec
-	other.SHA = "fedcba9876543210fedcba9876543210fedcba98"
+	other.SHA = sha
 	other.RunID = tierSweepRunnerRunID(other.Rig, other.SHA, g.st.tiers)
 	return sweeprunner.JobName(other)
 }
@@ -98,6 +104,7 @@ func TestTierSweepCycleDefersWhileAnotherRunsJobIsRunning(t *testing.T) {
 	// The same wiring as runnerCycleDaemon, with the log kept for the assertions.
 	d, _, bd, logs := newTierSweepDaemon(t, now, "gastown")
 	d.patrolConfig.Patrols.TierSweep.Runner = cfg
+	d.notifier = notifyfake.New()
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return runnerTestSHA, nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 	d.tierSweepSeams.run = func(ctx context.Context, dir string, st tierSweepStage) tierSweepStageResult {
@@ -267,5 +274,158 @@ func TestTierSweepSameRunRecordPastBudgetIsReplaced(t *testing.T) {
 	}
 	if recordAtStatus == nil || recordAtStatus.RunID != g.spec.RunID || !recordAtStatus.Started.Equal(now) {
 		t.Errorf("launch record while the replacement ran = %+v, want this run started now", recordAtStatus)
+	}
+}
+
+// TestTierSweepBusyJobPastBudgetEscalatesOnce: a foreign Job that outlasts the
+// stage budget raises one escalation naming the rig and the Job. The next cycle,
+// which meets the same Job again, defers and raises nothing more.
+func TestTierSweepBusyJobPastBudgetEscalatesOnce(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	running := otherRunJob(g)
+	g.cluster.jobs = running + "\n"
+	g.d.tierSweepSeams.pollInterval = time.Hour
+	g.d.tierSweepSeams.budgetTimer = runnerBudgetSpent
+
+	for range 2 {
+		if stage := g.cycle(); stage.ran {
+			t.Fatalf("stage = %+v, want the cycle deferred behind %q", stage, running)
+		}
+	}
+
+	got := g.notes.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want exactly one for the Job that outlasted the budget", got)
+	}
+	e := got[0].Escalation
+	if e.Fingerprint != tierSweepBusyAlertKey(running) {
+		t.Errorf("escalation key = %q, want %q", e.Fingerprint, tierSweepBusyAlertKey(running))
+	}
+	if !strings.Contains(e.Reason, "gastown") || !strings.Contains(e.Reason, running) {
+		t.Errorf("escalation reason = %q, want the rig and the Job named", e.Reason)
+	}
+}
+
+// TestTierSweepBusyJobEscalationClearsWhenJobEnds: the escalation raised for a
+// foreign Job is closed once the Job has ended and the cycle launches its run.
+func TestTierSweepBusyJobEscalationClearsWhenJobEnds(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	running := otherRunJob(g)
+	g.cluster.jobs = running + "\n"
+	g.d.tierSweepSeams.pollInterval = time.Hour
+	g.d.tierSweepSeams.budgetTimer = runnerBudgetSpent
+	if stage := g.cycle(); stage.ran {
+		t.Fatalf("stage = %+v, want the cycle deferred behind %q", stage, running)
+	}
+	if n := len(g.notes.Escalations()); n != 1 {
+		t.Fatalf("escalations before the Job ends = %d, want 1", n)
+	}
+
+	g.cluster.jobs = ""
+	boundWaits(g, 5)
+	stage := g.cycle()
+
+	if stage.reason != "" || !stage.ran {
+		t.Fatalf("stage = %+v, want the run launched once the Job ended", stage)
+	}
+	clears := g.notes.Clears()
+	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, tierSweepBusyAlertKey(running)) {
+		t.Errorf("clears = %+v, want the escalation for %q closed", clears, running)
+	}
+}
+
+// TestTierSweepBusyClearFailureIsLogged: a clear the notifier refuses is logged
+// with the Job named, and the launch that followed still goes ahead.
+func TestTierSweepBusyClearFailureIsLogged(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	running := otherRunJob(g)
+	g.cluster.jobs = running + "\n"
+	g.d.tierSweepSeams.pollInterval = time.Hour
+	g.d.tierSweepSeams.budgetTimer = runnerBudgetSpent
+	if stage := g.cycle(); stage.ran {
+		t.Fatalf("stage = %+v, want the cycle deferred behind %q", stage, running)
+	}
+
+	g.notes.Fail(notifyfake.KindClear, errors.New("the escalation store refused the clear"))
+	g.cluster.jobs = ""
+	boundWaits(g, 5)
+	stage := g.cycle()
+
+	if stage.reason != "" || !stage.ran {
+		t.Fatalf("stage = %+v, want the run launched even though the clear was refused", stage)
+	}
+	if !strings.Contains(g.logs.String(), "the escalation for sweep job "+running+" was not cleared") {
+		t.Errorf("log = %q, want the refused clear named with its Job", g.logs.String())
+	}
+}
+
+// TestTierSweepBusyJobReplacedRaisesItsOwnEscalation: when a second foreign Job
+// holds the rig after the first, the first Job's escalation is closed and the
+// second raises its own, naming it.
+func TestTierSweepBusyJobReplacedRaisesItsOwnEscalation(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	first := otherRunJob(g)
+	g.cluster.jobs = first + "\n"
+	g.d.tierSweepSeams.pollInterval = time.Hour
+	g.d.tierSweepSeams.budgetTimer = runnerBudgetSpent
+	if stage := g.cycle(); stage.ran {
+		t.Fatalf("stage = %+v, want the cycle deferred behind %q", stage, first)
+	}
+
+	second := otherRunJobAt(g, "89abcdef0123456789abcdef0123456789abcdef")
+	g.cluster.jobs = second + "\n"
+	if stage := g.cycle(); stage.ran {
+		t.Fatalf("stage = %+v, want the cycle deferred behind %q", stage, second)
+	}
+
+	got := g.notes.Escalations()
+	if len(got) != 2 || got[1].Escalation.Fingerprint != tierSweepBusyAlertKey(second) {
+		t.Fatalf("escalations = %+v, want one for %q after the first", got, second)
+	}
+	clears := g.notes.Clears()
+	if len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, tierSweepBusyAlertKey(first)) {
+		t.Errorf("clears = %+v, want the first Job's escalation closed", clears)
+	}
+}
+
+// TestTierSweepBusyWaitStartsAtStageStart: the wait for a foreign Job is the
+// stage budget left after the launch's own reads, not a fresh budget started at
+// the first launch. The first listing takes 50s of the 1m stage budget, so the
+// cycle waits 10s for the Job.
+func TestTierSweepBusyWaitStartsAtStageStart(t *testing.T) {
+	t.Parallel()
+	g := newGuardFixture(t, atHour(time.Now(), 15))
+	running := otherRunJob(g)
+	g.cluster.jobs = running + "\n"
+	clk := g.clock(t)
+	listed := false
+	g.cmds.answer = func(argv []string) ([]byte, []byte, error) {
+		if !listed && slices.Contains(argv, "get") && slices.Contains(argv, "jobs") {
+			listed = true
+			clk.Advance(50 * time.Second)
+		}
+		return g.answer(argv)
+	}
+	var waits []time.Duration
+	g.d.tierSweepSeams.pollInterval = time.Hour
+	g.d.tierSweepSeams.budgetTimer = func(wait time.Duration) (<-chan time.Time, func()) {
+		waits = append(waits, wait)
+		return runnerBudgetSpent(wait)
+	}
+
+	stage := g.cycle()
+
+	if stage.ran {
+		t.Fatalf("stage = %+v, want the cycle deferred behind %q", stage, running)
+	}
+	if len(waits) == 0 {
+		t.Fatal("no wait was started for the foreign Job")
+	}
+	if want := 10 * time.Second; waits[0] != want {
+		t.Errorf("wait for the foreign Job = %v, want %v: the stage budget counts from stage start", waits[0], want)
 	}
 }

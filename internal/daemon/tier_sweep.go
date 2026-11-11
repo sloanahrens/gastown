@@ -2474,6 +2474,9 @@ type tierSweepLaunch struct {
 // flag cleared.
 func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepStageResult {
 	st.slot = false
+	// The stage budget is measured from here: the image load and the first
+	// launch spend part of it before a foreign Job's wait begins (gt-pihhr4).
+	stageStart := d.clk().Now()
 	// A stage that asked for no tier can fold nothing, and a run started for
 	// it would write a result refusing to convert: RED before anything runs
 	// (gt-z4ppb).
@@ -2546,7 +2549,10 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 		if started.stop != nil {
 			stop = started.stop
 		}
-		started = d.tierSweepWaitForActiveJob(ctx, st, spec, launch, started)
+		// The wait for a foreign Job ends at the stage budget measured from
+		// stageStart, so what the image load and the first launch spent is not
+		// granted again (gt-pihhr4).
+		started = d.tierSweepWaitForActiveJob(ctx, st, spec, launch, started, st.budget-d.clk().Now().Sub(stageStart))
 		// A running Job of the rig that outlived the stage budget is not this
 		// run's to take down, and nothing was applied: the stage defers with no
 		// verdict, so the cycle is retried rather than recorded RED (gt-pihhr4).
@@ -2557,10 +2563,14 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 			if ctx.Err() != nil {
 				return tierSweepStageResult{exitCode: -1, err: ctx.Err()}
 			}
+			d.tierSweepBusyEscalate(spec.Rig, busy.Name, st.budget)
 			d.logger.Printf("tier_sweep: %s: sweep job %s is still running after %s; deferring the cycle, the next run is due %s (no verdict recorded)",
 				spec.Rig, busy.Name, st.budget, d.clk().Now().Add(tierSweepInterval(d.patrolConfig)).Format(time.RFC3339))
 			return tierSweepStageResult{exitCode: -1, err: busy}
 		}
+		// The launch got past the foreign Job, so the escalation raised for one
+		// that held the rig before is closed (gt-pihhr4).
+		d.tierSweepBusyClear(spec.Rig)
 		// A guard whose read failed answered nothing: no decline stands, no
 		// verdict is taken, and nothing was applied, so there is nothing to
 		// take down. The cycle defers, one line an hour while the reason
@@ -2691,12 +2701,13 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 }
 
 // tierSweepWaitForActiveJob holds a launch that a running sweep Job of the rig
-// refused, for as long as the stage budget allows. The Job reads the repo claim
-// this run would rewrite, so nothing is applied while it runs; the launch is
-// asked again on each poll tick, which applies the run once the Job has ended.
-// A launch that is refused for another reason, or that the budget or the
-// cycle's context ends, is returned as it stands for the caller to judge.
-func (d *Daemon) tierSweepWaitForActiveJob(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec, launch func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch, started tierSweepLaunch) tierSweepLaunch {
+// refused, for the wait it is given: the rest of the stage budget, measured from
+// stage start. The Job reads the repo claim this run would rewrite, so nothing is
+// applied while it runs; the launch is asked again on each poll tick, which
+// applies the run once the Job has ended. A launch that is refused for another
+// reason, or that the budget or the cycle's context ends, is returned as it
+// stands for the caller to judge.
+func (d *Daemon) tierSweepWaitForActiveJob(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec, launch func(context.Context, tierSweepStage, sweeprunner.Spec) tierSweepLaunch, started tierSweepLaunch, wait time.Duration) tierSweepLaunch {
 	var busy *sweeprunner.ActiveJob
 	if !errors.As(started.err, &busy) {
 		return started
@@ -2708,7 +2719,7 @@ func (d *Daemon) tierSweepWaitForActiveJob(ctx context.Context, st tierSweepStag
 			return timer.C, func() { timer.Stop() }
 		}
 	}
-	budget, stopBudget := newBudget(st.budget)
+	budget, stopBudget := newBudget(wait)
 	defer stopBudget()
 	interval := d.tierSweepSeams.pollInterval
 	if interval == 0 {
@@ -2729,6 +2740,88 @@ func (d *Daemon) tierSweepWaitForActiveJob(ctx context.Context, st tierSweepStag
 			return started
 		}
 	}
+}
+
+// tierSweepBusyAlerts is the escalation open for a foreign sweep Job per rig: the
+// Job it was raised for. A rig's cycles defer behind one Job at a time, so the
+// record holds one name per rig. Cycles of different rigs may run at once, so it
+// is locked.
+type tierSweepBusyAlerts struct {
+	mu    sync.Mutex
+	byRig map[string]string
+}
+
+// openFor returns the Job whose escalation is open for rig, and whether one is.
+func (a *tierSweepBusyAlerts) openFor(rig string) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	job, ok := a.byRig[rig]
+	return job, ok
+}
+
+// set records job as the one whose escalation is open for rig.
+func (a *tierSweepBusyAlerts) set(rig, job string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.byRig == nil {
+		a.byRig = map[string]string{}
+	}
+	a.byRig[rig] = job
+}
+
+// forget removes rig's record once its escalation is closed.
+func (a *tierSweepBusyAlerts) forget(rig string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.byRig, rig)
+}
+
+// tierSweepBusyAlertKey is the alert key of the escalation for one foreign Job.
+// The key names the Job, so a Job that replaces the one a rig waited on raises an
+// escalation of its own rather than a repeat that still names the old Job.
+func tierSweepBusyAlertKey(job string) string {
+	return "tier_sweep:busy:" + job
+}
+
+// tierSweepBusyEscalate raises the escalation for a foreign sweep Job that held a
+// rig's cycle past the stage budget. The cycle asks on every heartbeat, so the
+// same Job raises it once: a repeat with the record already open is no change.
+// A Job that replaces the one open for the rig closes that escalation first. A
+// failed delivery leaves no record, so the next cycle raises it again (gt-pihhr4).
+func (d *Daemon) tierSweepBusyEscalate(rig, job string, budget time.Duration) {
+	prev, open := d.tierSweepBusy.openFor(rig)
+	if open && prev == job {
+		return
+	}
+	if open {
+		d.tierSweepBusyClear(rig)
+		if _, still := d.tierSweepBusy.openFor(rig); still {
+			return
+		}
+	}
+	message := fmt.Sprintf("tier sweep on %s: sweep job %s is still running after its %s stage budget; the cycle defers with no verdict and retries on its next run. The job is not deleted; this escalation closes when it ends.",
+		rig, job, budget)
+	if err := d.escalateAlertErr(tierSweepBusyAlertKey(job), "tier_sweep", message); err != nil {
+		d.logger.Printf("tier_sweep: %s: the escalation for sweep job %s was not delivered: %v", rig, job, err)
+		return
+	}
+	d.tierSweepBusy.set(rig, job)
+}
+
+// tierSweepBusyClear closes the escalation open for rig, once the Job it names has
+// ended or has been replaced. A clear that fails keeps the record, so the next
+// cycle clears it again.
+func (d *Daemon) tierSweepBusyClear(rig string) {
+	job, open := d.tierSweepBusy.openFor(rig)
+	if !open {
+		return
+	}
+	reason := "sweep job " + job + " is no longer holding the rig's sweep"
+	if err := d.clearAlertsErr(reason, tierSweepBusyAlertKey(job)); err != nil {
+		d.logger.Printf("tier_sweep: %s: the escalation for sweep job %s was not cleared: %v", rig, job, err)
+		return
+	}
+	d.tierSweepBusy.forget(rig)
 }
 
 // errTierSweepStatusUnread is the error tierSweepRunnerCollect returns when it

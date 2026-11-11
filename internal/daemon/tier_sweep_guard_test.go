@@ -15,6 +15,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
@@ -40,6 +41,9 @@ type guardFixture struct {
 	fail    map[string][]byte
 	logs    *bytes.Buffer
 	beads   *tierSweepFakeBeads
+	// notes receives the escalations and clears the cycle sends, so a deferral
+	// past the budget never reaches a real gt.
+	notes *notifyfake.Recorder
 }
 
 func newGuardFixture(t *testing.T, now time.Time) *guardFixture {
@@ -48,6 +52,8 @@ func newGuardFixture(t *testing.T, now time.Time) *guardFixture {
 	cfg.Backend = config.TierSweepRunnerKubernetes
 	d, _, bd, logs := newTierSweepDaemon(t, now, "gastown")
 	d.patrolConfig.Patrols.TierSweep.Runner = cfg
+	notes := notifyfake.New()
+	d.notifier = notes
 	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Minute}
 	spec, ok, err := d.tierSweepRunnerSpec(st)
 	if err != nil || !ok {
@@ -61,6 +67,7 @@ func newGuardFixture(t *testing.T, now time.Time) *guardFixture {
 		cluster: &runnerCluster{t: t, status: "Complete", result: &result},
 		logs:    logs,
 		beads:   bd,
+		notes:   notes,
 	}
 	g.cmds = &runnerFakeCmds{answer: g.answer}
 	d.execCmd = g.cmds.run
