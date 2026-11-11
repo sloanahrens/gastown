@@ -451,6 +451,102 @@ func TestPolecatImageDevTagOffWithoutRegistry(t *testing.T) {
 	}
 }
 
+// devTagWithContext gives d the daemon context a running daemon has, cancelled
+// when the test ends.
+func devTagWithContext(t *testing.T, d *Daemon) context.CancelFunc {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d.ctx = ctx
+	return cancel
+}
+
+// TestPolecatImageDevTagStartRunsInBackground: startPolecatDevTag returns while the
+// step is still parked on the registry, so the supervision steps are not held
+// by it. The dispatch wait ends once the step has moved the tag.
+func TestPolecatImageDevTagStartRunsInBackground(t *testing.T) {
+	t.Parallel()
+	reg := newDevTagRegistry()
+	reg.addImage("dev", devTagOldCommit)
+	reg.addImage(devTagRevision, devTagRunningCommit)
+	source := reg.tagBytes(devTagRevision)
+	d, n, _ := devTagDaemon(t, reg)
+	devTagWithContext(t, d)
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	d.polecatDevTagSeams.http = &http.Client{Transport: devTagTransport(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release
+		reg.serve(w, r)
+	})}
+
+	d.startPolecatDevTag()
+	<-entered
+	close(release)
+	d.waitPolecatDevTag()
+
+	if got := reg.tagBytes("dev"); !bytes.Equal(got, source) {
+		t.Fatalf("dev tag was not moved to the running commit's image before the dispatch wait ended")
+	}
+	if got := n.got(); len(got) != 0 {
+		t.Fatalf("escalations = %+v, want none", got)
+	}
+}
+
+// TestPolecatImageDevTagStartWithoutRegistryMakesNoRequest: a daemon with no
+// image_registry starts a step that ends at once and touches no registry.
+func TestPolecatImageDevTagStartWithoutRegistryMakesNoRequest(t *testing.T) {
+	t.Parallel()
+	reg := newDevTagRegistry()
+	reg.addImage("dev", devTagOldCommit)
+	d, n, _ := devTagDaemon(t, reg)
+	devTagWithContext(t, d)
+	d.patrolConfig.Patrols.TierSweep.Runner.ImageRegistry = ""
+
+	d.startPolecatDevTag()
+	d.waitPolecatDevTag()
+
+	if gets, puts := reg.requests(); len(gets)+len(puts) != 0 {
+		t.Fatalf("registry requests gets=%v puts=%v, want none without image_registry", gets, puts)
+	}
+	if got := n.got(); len(got) != 0 {
+		t.Fatalf("escalations = %+v, want none", got)
+	}
+}
+
+// TestPolecatImageDevTagWaitReturns: the dispatch wait holds only while the step is
+// running. It returns at once before a step starts, once the step has ended, and
+// when the daemon shuts down under a step that has not ended.
+func TestPolecatImageDevTagWaitReturns(t *testing.T) {
+	t.Parallel()
+	open := make(chan struct{})
+	closed := make(chan struct{})
+	close(closed)
+	tests := []struct {
+		name string
+		done chan struct{}
+		stop bool
+	}{
+		{name: "no step started", done: nil},
+		{name: "step ended", done: closed},
+		{name: "daemon stopped under a running step", done: open, stop: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := &Daemon{polecatDevTagDone: tc.done}
+			cancel := devTagWithContext(t, d)
+			if tc.stop {
+				cancel()
+			}
+			d.waitPolecatDevTag()
+		})
+	}
+}
+
 // containsString reports whether want is one of values.
 func containsString(values []string, want string) bool {
 	for _, v := range values {

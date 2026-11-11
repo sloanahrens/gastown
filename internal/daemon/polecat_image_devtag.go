@@ -20,7 +20,7 @@ const (
 	// on, the same pair the spawn reads the image for.
 	polecatDevTagOS   = "linux"
 	polecatDevTagArch = "arm64"
-	// polecatDevTagBudget bounds the step. It runs before the first tick, so a
+	// polecatDevTagBudget bounds the step. The dispatch step waits for it, so a
 	// registry that never answers ends it rather than holding dispatch.
 	polecatDevTagBudget = 2 * time.Minute
 	// polecatDevTagSource names the step in its escalation.
@@ -53,6 +53,34 @@ func (d *Daemon) publishPolecatDevTag() {
 	defer cancel()
 	if err := d.copyPolecatDevTag(ctx, cfg.ImageRegistry); err != nil {
 		d.escalate(polecatDevTagSource, err.Error())
+	}
+}
+
+// startPolecatDevTag runs publishPolecatDevTag on its own goroutine, so a slow
+// registry does not hold the supervision steps of the first heartbeat. The
+// dispatch step waits on polecatDevTagDone (waitPolecatDevTag), so the first spawn
+// still meets the moved tag. A daemon with no image_registry starts a step that
+// does nothing and ends at once.
+func (d *Daemon) startPolecatDevTag() {
+	done := make(chan struct{})
+	d.polecatDevTagDone = done
+	go func() {
+		defer close(done)
+		d.publishPolecatDevTag()
+	}()
+}
+
+// waitPolecatDevTag holds the caller until the start-time step ends, or the
+// daemon's context does. The copy is bounded by the step's budget and an
+// escalation by its own timeouts, so the wait is bounded too. Before
+// startPolecatDevTag has run it returns at once.
+func (d *Daemon) waitPolecatDevTag() {
+	if d.polecatDevTagDone == nil {
+		return
+	}
+	select {
+	case <-d.polecatDevTagDone:
+	case <-d.ctx.Done():
 	}
 }
 

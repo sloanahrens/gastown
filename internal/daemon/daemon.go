@@ -1232,6 +1232,9 @@ type Daemon struct {
 	// polecatDevTagSeams replace the start-time dev tag step's read of the
 	// running build in tests; the zero value is production (gt-llx27r).
 	polecatDevTagSeams polecatDevTagSeams
+	// polecatDevTagDone is closed when the start-time dev tag step ends; the
+	// dispatch step waits on it. Nil until startPolecatDevTag runs (gt-llx27r).
+	polecatDevTagDone chan struct{}
 	// tierSweepImageFileLast is the reason each runner image file path last
 	// logged as unused, keyed by path. It lives on the daemon, not in the
 	// package, so one daemon's log latch never silences another's; a reason logs
@@ -1753,8 +1756,9 @@ func (d *Daemon) Run() (err error) {
 
 	// Move the sandbox registry's dev tag of the polecat image to this build
 	// before the first dispatch, so a pod roll does not leave the gateway
-	// refusing spawns against a stale image (gt-llx27r).
-	d.publishPolecatDevTag()
+	// refusing spawns against a stale image. The step runs beside the
+	// supervision loop; the dispatch step waits for it (gt-llx27r).
+	d.startPolecatDevTag()
 
 	// Clear a restart marker this binary already covers (the daemon may have
 	// been restarted onto it by launchd or an operator). Covered-only: startup
@@ -2406,6 +2410,9 @@ var heartbeatSteps = []heartbeatStep{
 	// Runs internal/schedulerrun in process; package cmd installs the deps.
 	// Pressure-gated: polecats are the primary resource consumers.
 	{name: "dispatch", lifecycle: true, run: func(d *Daemon) {
+		// The first spawn waits for the start-time dev tag step, so it does not
+		// meet the image that step is moving (gt-llx27r).
+		d.waitPolecatDevTag()
 		if p := d.checkPressure("polecat"); !p.OK {
 			d.logger.Printf("Deferring polecat dispatch: %s", p.Reason)
 			return
