@@ -59,6 +59,11 @@ func TestSubmitRefusesUncheckedCriteriaNamingEach(t *testing.T) {
 	if strings.Contains(err.Error(), "gt done refuses") {
 		t.Errorf("refusal %q names a ticked criterion", err)
 	}
+	// The usage is given once, on the command line; gt bead tick --help
+	// explains how a box is named, so the refusal does not restate it.
+	if strings.Contains(err.Error(), "what follows") {
+		t.Errorf("refusal %q restates how a box is named", err)
+	}
 	wantNothingSubmitted(t, h)
 }
 
