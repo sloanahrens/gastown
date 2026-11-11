@@ -65,6 +65,16 @@ const (
 	// tierSweepFindingLineLen caps each quoted finding. slowcheck's line ends
 	// with the reason it judged the test slow, which can run long.
 	tierSweepFindingLineLen = 160
+
+	// tierSweepFailureLines caps the failing-test excerpt of one package. A
+	// failing test takes two lines (its --- FAIL line and its assertion), so a
+	// package with more failing tests than this is cut, and the bead says so
+	// (gt-1comao).
+	tierSweepFailureLines = 40
+
+	// tierSweepAssertionLineLen caps each quoted assertion line, the way
+	// tierSweepFindingLineLen caps a finding.
+	tierSweepAssertionLineLen = 160
 )
 
 // tierSweepUnitRE is what a failing unit from a summary line must look like
@@ -271,10 +281,102 @@ func tierSweepSlowcheckFindings(log string) []string {
 	return tierSweepUnique(lines)
 }
 
+// tierSweepFailure is one failing top-level test a unit's run named, with the
+// first assertion line the unit's own log holds under it. Assertion is empty
+// when no log holds one for the test.
+type tierSweepFailure struct {
+	Name      string
+	Assertion string
+}
+
+// tierSweepAssertionRE is the line go test prints for a failed check:
+// "file.go:line: message", indented under the test that logged it.
+var tierSweepAssertionRE = regexp.MustCompile(`^\s*[^\s:]+\.go:\d+: \S`)
+
+// tierSweepLogFailures reads the failing top-level tests a unit's own log names,
+// in log order, each with the first assertion line under it. go test prints a
+// test's output before its --- FAIL line in a -v run, and after it otherwise, so
+// an assertion since the test's "=== RUN" line belongs to the next --- FAIL line,
+// and an assertion right after a --- FAIL line belongs to that test. A subtest's
+// failure belongs to the top-level test it runs under, which is named once.
+func tierSweepLogFailures(log string) []tierSweepFailure {
+	var out []tierSweepFailure
+	seen := map[string]bool{}
+	// pending is the first assertion since the last "=== RUN" that no --- FAIL
+	// line has taken yet. open is the failure awaiting an assertion printed after
+	// its --- FAIL line; a line at the left margin closes it.
+	var pending string
+	open := -1
+	for _, line := range strings.Split(log, "\n") {
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			open = -1
+		}
+		if strings.HasPrefix(strings.TrimSpace(line), "=== RUN") {
+			pending = ""
+			continue
+		}
+		if tierSweepAssertionRE.MatchString(line) {
+			switch {
+			case open >= 0:
+				out[open].Assertion = strings.TrimSpace(line)
+				open = -1
+			case pending == "":
+				pending = strings.TrimSpace(line)
+			}
+			continue
+		}
+		m := tierSweepFailLineRE.FindStringSubmatch(line)
+		if m == nil {
+			continue
+		}
+		name := m[1]
+		if i := strings.IndexByte(name, '/'); i >= 0 {
+			name = name[:i]
+		}
+		if tierSweepTestNameRE.MatchString(name) && !seen[name] {
+			seen[name] = true
+			out = append(out, tierSweepFailure{Name: name, Assertion: pending})
+			if pending == "" {
+				open = len(out) - 1
+			}
+		}
+		pending = ""
+	}
+	return out
+}
+
+// tierSweepMergeFailures keeps the first entry for each test name, then adds each
+// name the stage log names that no unit log did, with no assertion line.
+func tierSweepMergeFailures(failures []tierSweepFailure, names []string) []tierSweepFailure {
+	var out []tierSweepFailure
+	seen := map[string]bool{}
+	for _, f := range failures {
+		if !seen[f.Name] {
+			seen[f.Name] = true
+			out = append(out, f)
+		}
+	}
+	for _, name := range names {
+		if !seen[name] {
+			seen[name] = true
+			out = append(out, tierSweepFailure{Name: name})
+		}
+	}
+	return out
+}
+
 // tierSweepUnitRed is what a red run of one unit left in the sweep's logs.
 type tierSweepUnitRed struct {
 	// Names are the top-level tests the stage log's FAIL lines name.
 	Names []string
+	// Failures are the failing tests the unit's own logs name, with the first
+	// assertion under each, and any name only the stage log names.
+	Failures []tierSweepFailure
+	// LogRead is whether one of the unit's own logs could be read.
+	LogRead bool
+	// Mixed is whether the unit ran both tagged and untagged in this tier. No one
+	// command re-runs both, so none of its failures is reported as one run's.
+	Mixed bool
 	// Findings are slowcheck's finding lines, read from the unit's own log.
 	Findings []string
 	// BuildTag is the build tag the unit's runs used, empty for the untagged
@@ -288,7 +390,8 @@ type tierSweepUnitRed struct {
 }
 
 // tierSweepReadUnitRed reads what a red run of one unit left in the sweep's
-// logs: the top-level tests the stage log's FAIL lines name, the slowcheck
+// logs: the top-level tests the stage log's FAIL lines name, the failing tests
+// and their first assertion lines the unit's own logs hold, the slowcheck
 // findings that unit's own log holds, and the build tag the runs used. A
 // finding is evidence of its own: a cap trip writes no FAIL line, so the stage
 // log names nothing for it and only the unit log does (gt-j6vlz). Both logs are
@@ -296,7 +399,7 @@ type tierSweepUnitRed struct {
 //
 // A log that cannot be read contributes nothing, so filing a shaped bead never
 // depends on a log surviving. A unit the script ran both tagged and untagged
-// names nothing, because no single command re-runs both.
+// names nothing, because no single command re-runs both, and is marked Mixed.
 func tierSweepReadUnitRed(ts tierSweepTierResult, tier, unit string) tierSweepUnitRed {
 	var red tierSweepUnitRed
 	stage := ""
@@ -306,28 +409,34 @@ func tierSweepReadUnitRed(ts tierSweepTierResult, tier, unit string) tierSweepUn
 		}
 	}
 	units := tierSweepLogUnits(stage)
+	var failures []tierSweepFailure
 	tagged := false
 	for _, mtier := range tierSweepLogMarkerTiers(tier) {
 		names := append([]string(nil), units[mtier+"\x00"+unit]...)
 		var findings []string
+		var logFailures []tierSweepFailure
 		if path := tierSweepUnitLogPath(ts.LogDir, mtier, unit); path != "" {
 			if log, err := tierSweepReadLog(path); err == nil {
+				red.LogRead = true
 				findings = tierSweepSlowcheckFindings(log)
+				logFailures = tierSweepLogFailures(log)
 			}
 		}
-		if len(names) == 0 && len(findings) == 0 {
+		if len(names) == 0 && len(findings) == 0 && len(logFailures) == 0 {
 			continue
 		}
 		mtag := tierSweepMarkerBuildTag(mtier)
 		if tagged && mtag != red.BuildTag {
-			return tierSweepUnitRed{}
+			return tierSweepUnitRed{Mixed: true}
 		}
 		red.BuildTag, tagged = mtag, true
 		red.Names = append(red.Names, names...)
 		red.Findings = append(red.Findings, findings...)
+		failures = append(failures, logFailures...)
 	}
 	red.Names = tierSweepUnique(red.Names)
 	red.Findings = tierSweepUnique(red.Findings)
+	red.Failures = tierSweepMergeFailures(failures, red.Names)
 	return red
 }
 
@@ -534,6 +643,50 @@ func tierSweepClip(line string, n int) string {
 	return quoted + "..."
 }
 
+// tierSweepFailuresBlock renders the failing tests of the bead's own unit: each
+// --- FAIL name with the first assertion line under it, so a polecat that cannot
+// open the host's unit log can reproduce the failure from the bead alone. The
+// excerpt is capped at tierSweepFailureLines lines and says how many it cut. A
+// unit whose logs name no test and no finding says why, so the bead never leaves
+// a red package without a reason (gt-1comao). The no-test-name line is left out
+// for the shell tier, whose logs are not a go test stream, and for a unit a
+// finding already explains.
+func tierSweepFailuresBlock(tier string, red tierSweepUnitRed) string {
+	if red.Mixed {
+		return "This unit ran both tagged and untagged in this tier, so its failures are not one run's: read the tier log for them."
+	}
+	if len(red.Failures) == 0 {
+		switch {
+		case tier == tiersweep.TierShell || len(red.Findings) > 0:
+			return ""
+		case red.LogRead:
+			return "no test names: runner produced no result"
+		default:
+			return "no test names: the unit's log could not be read"
+		}
+	}
+	var lines []string
+	for _, f := range red.Failures {
+		lines = append(lines, "  --- FAIL: "+f.Name)
+		assertion := "no file:line assertion line in the unit's log"
+		if f.Assertion != "" {
+			assertion = tierSweepClip(f.Assertion, tierSweepAssertionLineLen)
+		}
+		lines = append(lines, "      "+assertion)
+	}
+	var b strings.Builder
+	b.WriteString("Failing tests in this unit's log (each --- FAIL name, then the first assertion line under it):\n")
+	if len(lines) > tierSweepFailureLines {
+		cut := len(lines) - tierSweepFailureLines
+		lines = lines[:tierSweepFailureLines]
+		lines = append(lines, fmt.Sprintf("  ... excerpt cut at %d lines: %d more not shown", tierSweepFailureLines, cut))
+	}
+	for _, line := range lines {
+		b.WriteString(line + "\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // tierSweepFindingsBlock renders slowcheck's findings for the bead's own unit
 // inline, so a polecat that cannot open the host's unit log can tell a cap trip
 // from a real failure and still name the test it must re-run. Each line is
@@ -656,10 +809,13 @@ func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult, tmpl spe
 		parts = append(parts, "## "+name+"\n\n"+body)
 	}
 	detail := tierSweepBeadIntro + tierSweepRedDetail(tier, sha, ts)
-	// The findings follow the one-line detail, so a polecat that cannot read
-	// the host's unit log still learns what tripped the cap.
-	if block := tierSweepFindingsBlock(red); block != "" {
-		detail += "\n\n" + block
+	// The failing tests and the findings follow the one-line detail, so a polecat
+	// that cannot read the host's unit log still has the names it must re-run and
+	// learns what tripped the cap (gt-1comao, gt-j6vlz).
+	for _, block := range []string{tierSweepFailuresBlock(tier, red), tierSweepFindingsBlock(red)} {
+		if block != "" {
+			detail += "\n\n" + block
+		}
 	}
 	return detail + "\n\n" + strings.Join(parts, "\n\n") + "\n", item
 }
