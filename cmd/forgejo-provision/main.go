@@ -77,7 +77,8 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
   --bot-email-domain D   email domain for new bots (default: %s)
   --config-dir DIR       where the role token files go (default
                          $XDG_CONFIG_HOME/gt, else $HOME/.config/gt)
-  --token-name NAME      name of the minted token (default: %s)
+  --token-name NAME      name of the minted token (default: %s); the token
+                         file records it on a TOKEN_NAME line
   --repo OWNER/NAME      repository to protect; repeatable
   --landing-bot LOGIN    login on the merge whitelist (default: --bot-prefix
                          followed by landing)
@@ -87,7 +88,8 @@ var usage = fmt.Sprintf(`Usage: forgejo-provision [options]
   --land-branch PATTERN  candidate branch pattern, which the run makes sure is
                          unprotected (default: %s)
   --rotate               mint a new token even where a token file exists, and
-                         revoke the previous token of the same name
+                         revoke the token the file records (its TOKEN_NAME
+                         line, else the token named by --token-name)
   --dry-run              read but never write
   -h, --help             this text
 `,

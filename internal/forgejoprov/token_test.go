@@ -8,11 +8,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/forgejotest"
 )
 
@@ -39,6 +41,19 @@ type memFiles struct {
 	writeErr error
 	chmodErr error
 	statErr  error
+	readErr  error
+}
+
+// ReadFile returns the content of an in-memory file, or the read error a test set.
+func (m *memFiles) ReadFile(path string) ([]byte, error) {
+	if m.readErr != nil {
+		return nil, m.readErr
+	}
+	data, ok := m.files[path]
+	if !ok {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
+	}
+	return append([]byte(nil), data...), nil
 }
 
 func newMemFiles() *memFiles {
@@ -145,9 +160,10 @@ func withBot(t *testing.T, f *forgejotest.Fake, role string) {
 	}
 }
 
-// tokenFileText is the exact file the run writes for user and value.
+// tokenFileText is the exact file the run writes for user and value: the token's
+// name is the default one, which the file records on its TOKEN_NAME line.
 func tokenFileText(user, value string) string {
-	return "FORGEJO_URL=http://forgejo.fake.invalid\nFORGEJO_USER=" + user + "\nFORGEJO_TOKEN=" + value + "\n"
+	return "FORGEJO_URL=http://forgejo.fake.invalid\nFORGEJO_USER=" + user + "\nFORGEJO_TOKEN=" + value + "\nTOKEN_NAME=" + DefaultTokenName + "\n"
 }
 
 // TestEnsureTokenMintsWithTheRoleScopes mints for every role and checks the fake
@@ -1264,5 +1280,299 @@ func TestFailureMessagesNeverPrintATokenValue(t *testing.T) {
 	compareSecretText(&r, "equal", "x"+minted, "x"+minted)
 	if len(r.msgs) != 0 {
 		t.Errorf("equal texts failed: %v", r.msgs)
+	}
+}
+
+// fileRecording is a role's token file that records name on its TOKEN_NAME line,
+// holding the value "old".
+func fileRecording(name string) string {
+	return "FORGEJO_URL=http://forgejo.fake.invalid\nFORGEJO_USER=bot-polecat\nFORGEJO_TOKEN=old\nTOKEN_NAME=" + name + "\n"
+}
+
+// mintNamed mints a token named name for role straight to the server, into a file set
+// the test throws away, so the server holds a token the file under test does not.
+func mintNamed(t *testing.T, f *forgejotest.Fake, role, name string) {
+	t.Helper()
+	var logs []string
+	p := tokenProvisioner(f, newMemFiles(), false, false, &logs)
+	p.TokenName = name
+	if err := p.EnsureToken(role); err != nil {
+		t.Fatalf("mint %s: %v", name, masked(errString(err)))
+	}
+}
+
+// sentCalls returns the method and path of each call the fake took since its last
+// ClearCalls, as "METHOD path".
+func sentCalls(f *forgejotest.Fake) []string {
+	var out []string
+	for _, c := range f.CallLog() {
+		out = append(out, c.Method+" "+c.Path)
+	}
+	return out
+}
+
+// TestRotateRevokesTheTokenTheFileRecords checks a rotation revokes the token the file
+// names on its TOKEN_NAME line, not the default name, and that the file then records
+// the default name of the token it mints.
+func TestRotateRevokesTheTokenTheFileRecords(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	mintNamed(t, f, "polecat", "other")
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	files := newMemFiles()
+	files.seed(path, fileRecording("other"), 0o600)
+	var logs []string
+	f.ClearCalls()
+	if err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat"); err != nil {
+		t.Fatalf("rotate: %v", masked(errString(err)))
+	}
+	if f.Token("bot-polecat", "other") != "" {
+		t.Errorf("the token the file records, other, is still live")
+	}
+	if !slices.Contains(sentCalls(f), "DELETE /api/v1/admin/users/bot-polecat/tokens/other") {
+		t.Errorf("calls = %v, want a DELETE of the recorded name", sentCalls(f))
+	}
+	value := f.Token("bot-polecat", DefaultTokenName)
+	if value == "" {
+		t.Fatalf("no %s token was minted", DefaultTokenName)
+	}
+	compareSecretText(t, "token file", string(files.files[path]), tokenFileText("bot-polecat", value))
+	if !strings.Contains(strings.Join(logs, "\n"), "revoked the previous 'other' token") {
+		t.Errorf("logs lack the revoke of other: %v", masked(strings.Join(logs, " | ")))
+	}
+}
+
+// TestRotateWithoutARecordRevokesTheDefaultAndNamesTheRest checks a file that records
+// no name rotates the default-named token, and names every other live token on stderr
+// with the route to revoke it, leaving that token alone.
+func TestRotateWithoutARecordRevokesTheDefaultAndNamesTheRest(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	mintNamed(t, f, "polecat", DefaultTokenName)
+	mintNamed(t, f, "polecat", "viewer-old")
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	files := newMemFiles()
+	files.seed(path, "FORGEJO_URL=http://forgejo.fake.invalid\nFORGEJO_USER=bot-polecat\nFORGEJO_TOKEN=old\n", 0o600)
+	var logs []string
+	f.ClearCalls()
+	if err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat"); err != nil {
+		t.Fatalf("rotate: %v", masked(errString(err)))
+	}
+	if !slices.Contains(sentCalls(f), "DELETE /api/v1/admin/users/bot-polecat/tokens/"+DefaultTokenName) {
+		t.Errorf("calls = %v, want a DELETE of the default name", sentCalls(f))
+	}
+	for _, c := range sentCalls(f) {
+		if strings.HasPrefix(c, "DELETE ") && strings.HasSuffix(c, "/viewer-old") {
+			t.Errorf("the other token was revoked: %s", c)
+		}
+	}
+	if f.Token("bot-polecat", "viewer-old") == "" {
+		t.Errorf("the other token is gone; it must be left for the operator")
+	}
+	want := "token 'viewer-old' of bot-polecat is still live and was not revoked; revoke it in the web UI"
+	if !strings.Contains(strings.Join(logs, "\n"), want) {
+		t.Errorf("logs lack %q: %v", want, masked(strings.Join(logs, " | ")))
+	}
+}
+
+// TestRotateRecordedNameNotOnTheServerSaysItMayBeRevoked checks a file that records a
+// name the user no longer holds gets a line that says the record may be stale, not the
+// hint for a file that records nothing, and that nothing is revoked.
+func TestRotateRecordedNameNotOnTheServerSaysItMayBeRevoked(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	files := newMemFiles()
+	files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), fileRecording("gone"), 0o600)
+	var logs []string
+	f.ClearCalls()
+	if err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat"); err != nil {
+		t.Fatalf("rotate: %v", masked(errString(err)))
+	}
+	want := "no token named 'gone' to revoke, though the token file records that name; it may already be revoked"
+	if !strings.Contains(strings.Join(logs, "\n"), want) {
+		t.Errorf("logs lack %q: %v", want, masked(strings.Join(logs, " | ")))
+	}
+	for _, c := range sentCalls(f) {
+		if strings.HasPrefix(c, "DELETE ") {
+			t.Errorf("a DELETE was sent for a name the user does not hold: %s", c)
+		}
+	}
+}
+
+// TestRotateRefusesBeforeRevokingWhenTheRecordCannotBeRead covers the file states a
+// rotation cannot act on: a file it cannot read and a TOKEN_NAME line with no name.
+// Each refuses before any revoke or mint, so the server and the file are unchanged.
+func TestRotateRefusesBeforeRevokingWhenTheRecordCannotBeRead(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	cases := map[string]struct {
+		content string
+		readErr error
+		want    string
+	}{
+		"unreadable file":  {content: fileRecording("other"), readErr: errors.New("disk fault"), want: "cannot read " + path},
+		"empty TOKEN_NAME": {content: fileRecording(""), want: path + " has an empty TOKEN_NAME line"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := forgejotest.New()
+			withBot(t, f, "polecat")
+			mintNamed(t, f, "polecat", DefaultTokenName)
+			files := newMemFiles()
+			files.seed(path, tc.content, 0o600)
+			files.readErr = tc.readErr
+			var logs []string
+			f.ClearCalls()
+			err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to hold %q", masked(errString(err)), tc.want)
+			}
+			for _, c := range sentCalls(f) {
+				if strings.HasPrefix(c, "DELETE ") || strings.HasPrefix(c, "POST ") {
+					t.Errorf("a write was sent though the rotation refused: %s", c)
+				}
+			}
+			if string(files.files[path]) != tc.content {
+				t.Errorf("the file changed though the rotation refused")
+			}
+		})
+	}
+}
+
+// TestRotateRefusesARecordedNameThatCollidesWithTheDefault checks a rotation whose file
+// records another name refuses, before it revokes anything, when a token already holds
+// the default name the new mint would take.
+func TestRotateRefusesARecordedNameThatCollidesWithTheDefault(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	mintNamed(t, f, "polecat", "other")
+	mintNamed(t, f, "polecat", DefaultTokenName)
+	files := newMemFiles()
+	path := filepath.Join(tokenDir, "forgejo-polecat.env")
+	files.seed(path, fileRecording("other"), 0o600)
+	var logs []string
+	f.ClearCalls()
+	err := tokenProvisioner(f, files, true, false, &logs).EnsureToken("polecat")
+	if err == nil || !strings.Contains(err.Error(), "nothing was revoked") {
+		t.Fatalf("err = %v, want a refusal that revoked nothing", masked(errString(err)))
+	}
+	for _, c := range sentCalls(f) {
+		if strings.HasPrefix(c, "DELETE ") || strings.HasPrefix(c, "POST ") {
+			t.Errorf("a write was sent on a refused rotation: %s", c)
+		}
+	}
+	if f.Token("bot-polecat", "other") == "" {
+		t.Errorf("the recorded token was revoked on a refused rotation")
+	}
+}
+
+// TestMintRecordsTheTokenNameForTheEnvReaders writes a real token file and reads it
+// back with the readers the rest of the tooling uses, after a mint and after a
+// rotation, to check the TOKEN_NAME line is one those readers skip.
+func TestMintRecordsTheTokenNameForTheEnvReaders(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "forgejo-polecat.env")
+	var logs []string
+	p := tokenProvisioner(f, nil, false, false, &logs)
+	p.ConfigDir = dir
+	check := func(stage string) {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s: read token file: %v", stage, err)
+		}
+		if !strings.Contains(string(data), "\nTOKEN_NAME="+DefaultTokenName+"\n") {
+			t.Errorf("%s: the file does not record %s on a TOKEN_NAME line", stage, DefaultTokenName)
+		}
+		token := f.Token("bot-polecat", DefaultTokenName)
+		user, got, err := forgejo.ReadCredentialFile(path)
+		if err != nil {
+			t.Fatalf("%s: ReadCredentialFile: %v", stage, err)
+		}
+		if user != "bot-polecat" {
+			t.Errorf("%s: user = %q, want bot-polecat", stage, user)
+		}
+		compareSecretText(t, stage+" credential token", got, token)
+		tokenOnly, err := forgejo.ReadTokenFile(path)
+		if err != nil {
+			t.Fatalf("%s: ReadTokenFile: %v", stage, err)
+		}
+		compareSecretText(t, stage+" token file token", tokenOnly, token)
+	}
+	if err := p.EnsureToken("polecat"); err != nil {
+		t.Fatalf("mint: %v", masked(errString(err)))
+	}
+	check("mint")
+	p.Rotate = true
+	if err := p.EnsureToken("polecat"); err != nil {
+		t.Fatalf("rotate: %v", masked(errString(err)))
+	}
+	check("rotate")
+}
+
+// unnamedTokenList answers a token list with one item that carries no name, and passes
+// everything else to next.
+type unnamedTokenList struct{ next http.RoundTripper }
+
+func (u unnamedTokenList) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method == http.MethodGet && strings.HasSuffix(req.URL.Path, "/tokens") {
+		return respond(req, http.StatusOK, `[{"id":7}]`)
+	}
+	return u.next.RoundTrip(req)
+}
+
+// TestRotateWarnsOnAnUnnamedTokenAndRevokesNothing checks a token list with an item
+// that carries no name is a warning: the rotation cannot tell which item is the old
+// token, so it sends no DELETE.
+func TestRotateWarnsOnAnUnnamedTokenAndRevokesNothing(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	files := newMemFiles()
+	files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
+	var logs []string
+	f.ClearCalls()
+	_ = tokenProvisioner(unnamedTokenList{next: f}, files, true, false, &logs).EnsureToken("polecat")
+	if !strings.Contains(strings.Join(logs, "\n"), "warning: cannot read the name of a token of bot-polecat") {
+		t.Errorf("logs lack the unnamed-token warning: %v", logs)
+	}
+	for _, c := range sentCalls(f) {
+		if strings.HasPrefix(c, "DELETE ") {
+			t.Errorf("a DELETE was sent after an unnamed token: %s", c)
+		}
+	}
+}
+
+// TestRotateBoundWithTheOldTokenFoundStillRevokesIt checks that a list longer than the
+// bound still revokes the old token when it is among the pages read, and says the
+// tokens past the bound are not named.
+func TestRotateBoundWithTheOldTokenFoundStillRevokesIt(t *testing.T) {
+	t.Parallel()
+	f := forgejotest.New()
+	withBot(t, f, "polecat")
+	full := make([]int, maxTokenPages)
+	for i := range full {
+		full[i] = tokenPageSize
+	}
+	pt := &pagedTokens{next: f, pages: full, targetPage: 1}
+	files := newMemFiles()
+	files.seed(filepath.Join(tokenDir, "forgejo-polecat.env"), "old", 0o600)
+	var logs []string
+	f.ClearCalls()
+	_ = tokenProvisioner(pt, files, true, false, &logs).EnsureToken("polecat")
+	if !slices.Contains(sentCalls(f), "DELETE /api/v1/admin/users/bot-polecat/tokens/"+DefaultTokenName) {
+		t.Errorf("calls = %v, want the old token deleted", sentCalls(f))
+	}
+	want := fmt.Sprintf("warning: stopped listing bot-polecat's tokens after %d pages of %d (the bound); tokens past it are not named", maxTokenPages, tokenPageSize)
+	if !strings.Contains(strings.Join(logs, "\n"), want) {
+		t.Errorf("logs lack %q: %v", want, logs)
 	}
 }

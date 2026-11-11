@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -33,6 +34,9 @@ type Files interface {
 	// Stat describes path; an absent path is an error that satisfies
 	// errors.Is(err, fs.ErrNotExist).
 	Stat(path string) (fs.FileInfo, error)
+	// ReadFile reads the whole of path. An absent path is an error that satisfies
+	// errors.Is(err, fs.ErrNotExist).
+	ReadFile(path string) ([]byte, error)
 }
 
 // tempFile is the file WriteFileAtomic writes through: *os.File in production, a
@@ -123,6 +127,9 @@ func (osFiles) Chmod(path string, mode fs.FileMode) error { return os.Chmod(path
 // Stat describes path.
 func (osFiles) Stat(path string) (fs.FileInfo, error) { return os.Stat(path) }
 
+// ReadFile reads path.
+func (osFiles) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) }
+
 func (p *Provisioner) files() Files {
 	if p.Files != nil {
 		return p.Files
@@ -171,21 +178,34 @@ func (p *Provisioner) EnsureToken(role string) error {
 	// A rotation revokes the old token BEFORE it mints: Forgejo refuses a second
 	// token of the same name, so the order cannot be reversed. A mint that then
 	// fails leaves the file holding a token that no longer works, and the error
-	// says so.
+	// says so. The old token is the one the file records, or the previous default
+	// name when the file records none.
 	outcome := revokeNone
+	old := p.TokenName
 	if p.Rotate {
-		outcome = p.revokeOldToken(user)
+		var recorded string
+		recorded, err = p.recordedTokenName(path, exists)
+		if err != nil {
+			return err
+		}
+		if recorded != "" {
+			old = recorded
+		}
+		outcome, err = p.revokeOldToken(user, old)
+		if err != nil {
+			return err
+		}
 	}
 
 	token, duplicate, err := p.mintToken(user, scopes)
 	if err != nil {
 		switch {
 		case outcome == revokeDone:
-			return fmt.Errorf("%w; the previous '%s' token for %s was already revoked, so the token in %s no longer works: run again with --rotate to mint a new one", err, p.TokenName, user, path)
+			return fmt.Errorf("%w; the previous '%s' token for %s was already revoked, so the token in %s no longer works: run again with --rotate to mint a new one", err, old, user, path)
 		case outcome == revokeFailed:
 			// The revoke warned and did not take (or could not be tried), so the
 			// old token may still be live whatever the mint says.
-			return fmt.Errorf("%w; the previous '%s' token for %s could not be revoked and may still be live (%s still holds it): revoke it by hand in the web UI, then run again with --rotate", err, p.TokenName, user, path)
+			return fmt.Errorf("%w; the previous '%s' token for %s could not be revoked and may still be live (%s still holds it): revoke it by hand in the web UI, then run again with --rotate", err, old, user, path)
 		case duplicate:
 			// A token with this name exists but there is no file: the value came
 			// back once, at creation, and is lost.
@@ -193,7 +213,7 @@ func (p *Provisioner) EnsureToken(role string) error {
 		}
 		return err
 	}
-	data := []byte("FORGEJO_URL=" + p.WebURL + "\nFORGEJO_USER=" + user + "\nFORGEJO_TOKEN=" + token + "\n")
+	data := []byte("FORGEJO_URL=" + p.WebURL + "\nFORGEJO_USER=" + user + "\nFORGEJO_TOKEN=" + token + "\n" + tokenNameKey + "=" + p.TokenName + "\n")
 	if err := p.files().WriteFileAtomic(path, data, tokenFileMode); err != nil {
 		// The error names the path and never the value. The token now exists on
 		// the server and was stored nowhere, so the operator is told how to
@@ -284,50 +304,143 @@ const (
 	revokeFailed
 )
 
-// revokeOldToken removes the token of this run's name so a rotation does not
-// leave the previous credential live. Every failure to list or delete is a
-// warning, not an abort: the file may hold a token the operator made by hand,
-// replacing the file is what matters, and the mint is still attempted.
-func (p *Provisioner) revokeOldToken(user string) revokeOutcome {
+// tokenNameKey is the env-file line that names the token a mint created. A rotation
+// revokes the token the line names, so a token minted under another name is revoked
+// too; a file without the line names the previous default.
+const tokenNameKey = "TOKEN_NAME"
+
+// recordedTokenName returns the name of the token the file at path records: its
+// TOKEN_NAME line, or "" when the file records none. It reads only a file that
+// exists. A file that cannot be read, or a TOKEN_NAME line with no value, is an
+// error: a rotation that cannot tell which token the file holds would revoke the
+// wrong one or none, so it stops before it revokes anything.
+func (p *Provisioner) recordedTokenName(path string, exists bool) (string, error) {
+	if !exists {
+		return "", nil
+	}
+	data, err := p.files().ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("cannot read %s to find the token it records (%w); nothing was revoked", path, err)
+	}
+	name, ok := envValue(string(data), tokenNameKey)
+	if !ok {
+		return "", nil
+	}
+	if name == "" {
+		return "", fmt.Errorf("%s has an empty %s line; nothing was revoked: set it to the name of the token the file holds", path, tokenNameKey)
+	}
+	return name, nil
+}
+
+// envValue returns the value of the first key=value line for key in data, with a
+// leading "export " and one pair of surrounding quotes stripped. It reads a line the
+// way the token file readers in internal/forgejo do, so a key they read is the one
+// this reads.
+func envValue(data, key string) (string, bool) {
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(k) != key {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
+			v = v[1 : len(v)-1]
+		}
+		return v, true
+	}
+	return "", false
+}
+
+// revokeOldToken removes the user's token named old so a rotation does not leave
+// the previous credential live, then names every other token the user still holds:
+// the operator revokes those by hand. Every failure to list or delete is a warning,
+// not an abort: the file may hold a token the operator made by hand, replacing the
+// file is what matters, and the mint is still attempted. The one refusal is a mint
+// the server would collide with: a token already holds the new name, so nothing is
+// revoked and the error says why.
+func (p *Provisioner) revokeOldToken(user, old string) (revokeOutcome, error) {
 	base := "/admin/users/" + url.PathEscape(user) + "/tokens"
-	for page := 1; page <= maxTokenPages; page++ {
+	var names []string
+	complete := false
+	for page := 1; page <= maxTokenPages && !complete; page++ {
 		status, resp, err := p.Client.Do(http.MethodGet, fmt.Sprintf("%s?page=%d&limit=%d", base, page, tokenPageSize), nil)
 		if err != nil {
-			p.logf("warning: cannot list %s's tokens (%v); revoke the old '%s' token by hand", user, err, p.TokenName)
-			return revokeFailed
+			p.logf("warning: cannot list %s's tokens (%v); revoke the old '%s' token by hand", user, err, old)
+			return revokeFailed, nil
 		}
 		if status != http.StatusOK {
-			p.logf("warning: cannot list %s's tokens (HTTP %d)%s; revoke the old '%s' token by hand", user, status, p.Client.BodyTail(resp), p.TokenName)
-			return revokeFailed
+			p.logf("warning: cannot list %s's tokens (HTTP %d)%s; revoke the old '%s' token by hand", user, status, p.Client.BodyTail(resp), old)
+			return revokeFailed, nil
 		}
 		var items []json.RawMessage
 		if err := json.Unmarshal(resp, &items); err != nil {
-			p.logf("warning: cannot read %s's token list (not a JSON array); revoke the old '%s' token by hand", user, p.TokenName)
-			return revokeFailed
+			p.logf("warning: cannot read %s's token list (not a JSON array); revoke the old '%s' token by hand", user, old)
+			return revokeFailed, nil
 		}
-		if _, found := FindObject(resp, "name", p.TokenName); found {
-			return p.deleteToken(base)
+		for _, item := range items {
+			name, ok := tokenItemName(item)
+			if !ok {
+				p.logf("warning: cannot read the name of a token of %s; revoke the old '%s' token by hand", user, old)
+				return revokeFailed, nil
+			}
+			names = append(names, name)
 		}
-		if len(items) < tokenPageSize {
-			p.logf("no token named '%s' to revoke; if the file held a token minted under another name, revoke it in the web UI", p.TokenName)
-			return revokeNone
+		complete = len(items) < tokenPageSize
+	}
+	found := slices.Contains(names, old)
+	if !complete && !found {
+		p.logf("warning: stopped looking for the '%s' token of %s after %d pages of %d (the bound); revoke it by hand in the web UI", old, user, maxTokenPages, tokenPageSize)
+		return revokeFailed, nil
+	}
+	if old != p.TokenName && slices.Contains(names, p.TokenName) {
+		return revokeNone, fmt.Errorf("a '%s' token for %s already exists and is not the one the token file records ('%s'); nothing was revoked: revoke the '%s' token in the web UI, then run again with --rotate", p.TokenName, user, old, p.TokenName)
+	}
+	outcome := revokeNone
+	if found {
+		outcome = p.deleteToken(base, old)
+	} else if old == p.TokenName {
+		p.logf("no token named '%s' to revoke; if the file held a token minted under another name, revoke it in the web UI", old)
+	} else {
+		p.logf("no token named '%s' to revoke, though the token file records that name; it may already be revoked", old)
+	}
+	if !complete {
+		p.logf("warning: stopped listing %s's tokens after %d pages of %d (the bound); tokens past it are not named", user, maxTokenPages, tokenPageSize)
+	}
+	for _, name := range names {
+		if name != old {
+			p.logf("token '%s' of %s is still live and was not revoked; revoke it in the web UI", name, user)
 		}
 	}
-	p.logf("warning: stopped looking for the '%s' token of %s after %d pages of %d (the bound); revoke it by hand in the web UI", p.TokenName, user, maxTokenPages, tokenPageSize)
-	return revokeFailed
+	return outcome, nil
 }
 
-// deleteToken deletes the token of this run's name from the user's list at base.
-func (p *Provisioner) deleteToken(base string) revokeOutcome {
-	status, resp, err := p.Client.Do(http.MethodDelete, base+"/"+url.PathEscape(p.TokenName), nil)
+// tokenItemName returns the name of one item of a token list, and false when the item
+// is not an object with a non-empty string name.
+func tokenItemName(item json.RawMessage) (string, bool) {
+	var obj map[string]any
+	if err := json.Unmarshal(item, &obj); err != nil {
+		return "", false
+	}
+	name, ok := obj["name"].(string)
+	return name, ok && name != ""
+}
+
+// deleteToken deletes the token named name from the user's list at base.
+func (p *Provisioner) deleteToken(base, name string) revokeOutcome {
+	status, resp, err := p.Client.Do(http.MethodDelete, base+"/"+url.PathEscape(name), nil)
 	if err != nil {
-		p.logf("warning: could not revoke the previous '%s' token (%v); revoke it in the web UI", p.TokenName, err)
+		p.logf("warning: could not revoke the previous '%s' token (%v); revoke it in the web UI", name, err)
 		return revokeFailed
 	}
 	if status == http.StatusNoContent {
-		p.logf("revoked the previous '%s' token", p.TokenName)
+		p.logf("revoked the previous '%s' token", name)
 		return revokeDone
 	}
-	p.logf("warning: could not revoke the previous '%s' token (HTTP %d)%s; revoke it in the web UI", p.TokenName, status, p.Client.BodyTail(resp))
+	p.logf("warning: could not revoke the previous '%s' token (HTTP %d)%s; revoke it in the web UI", name, status, p.Client.BodyTail(resp))
 	return revokeFailed
 }
