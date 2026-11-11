@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
 // Beads is what the worker reads and writes work beads through (ADR 0001:
@@ -999,6 +1000,8 @@ func (w *Worker) landOne(ctx context.Context, work land.Work, rep *Report) {
 		if !wasRepair {
 			w.afterLanding(ctx, work, res)
 		}
+		// Write the measured points from the landing's complete record (SP14).
+		w.writeSPActual(work.BeadID, res.LandedCommit)
 		// The record is complete now, which is the proof the seat's end reads.
 		// A repair that finishes a record left unfinished reaches it here, so
 		// the seat its earlier pass kept is ended once the record can prove it.
@@ -1334,6 +1337,56 @@ func (w *Worker) annotate(id, key, what, msg string) {
 	}
 	st.annotated[key] = true
 	st.wrote = true
+}
+
+// writeSPActual writes the landed bead's measured points, sp-actual:N, from the
+// polecat time its complete landing record holds (gt-5d9k2f, SP14). It is
+// skipped when the record has no time or only a lower bound, when the time is
+// zero, and when the bead carries no sp: estimate, so the shadow report counts
+// only estimated beads. A failed read or write is logged and changes nothing
+// about the landing or the report.
+func (w *Worker) writeSPActual(beadID, landedCommit string) {
+	rec, found, err := w.Landings.LatestForBead(beadID)
+	if err != nil {
+		w.logf("%s: reading the landing record for sp-actual: %v", beadID, err)
+		return
+	}
+	if !found || rec.LandedCommit != landedCommit || rec.PolecatLowerBound {
+		return
+	}
+	points, err := storypoints.FromMinutes(rec.PolecatSecs / 60)
+	if err != nil {
+		return
+	}
+	want := storypoints.ActualLabel(points)
+	issue, err := w.Beads.Show(beadID)
+	if err != nil {
+		w.logf("%s: reading the bead for sp-actual: %v", beadID, err)
+		return
+	}
+	estimated := false
+	var stale []string
+	for _, l := range issue.Labels {
+		p, err := storypoints.ParseLabel(l)
+		if err != nil {
+			continue
+		}
+		switch p.Kind {
+		case storypoints.KindEstimate:
+			estimated = true
+		case storypoints.KindActual:
+			if l != want {
+				stale = append(stale, l)
+			}
+		}
+	}
+	if !estimated {
+		return
+	}
+	opts := beads.UpdateOptions{AddLabels: []string{want}, RemoveLabels: stale}
+	if err := w.Beads.Update(beadID, opts); err != nil {
+		w.logf("%s: writing %s: %v", beadID, want, err)
+	}
 }
 
 // afterLanding starts the post-landing verdict for a new landing (a command run
