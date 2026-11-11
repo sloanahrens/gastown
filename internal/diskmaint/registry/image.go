@@ -64,7 +64,7 @@ func (c *Client) InspectImage(ctx context.Context, repo, ref, osName, arch strin
 	if doc.isIndex() {
 		child, err := ChildForPlatform(ref, body, osName, arch)
 		if err != nil {
-			return ImageInfo{}, fmt.Errorf("in %q: %w", repo, err)
+			return ImageInfo{}, fmt.Errorf("manifest %s in %q: %w", ref, repo, err)
 		}
 		childPath := "/v2/" + repo + "/manifests/" + child
 		_, childBody, err := c.getBody(ctx, childPath, manifestAccept, walk)
