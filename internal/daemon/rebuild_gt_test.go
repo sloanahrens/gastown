@@ -1247,3 +1247,50 @@ func TestRebuildGTGitCtxNamesItsBound(t *testing.T) {
 		t.Fatalf("err = %v, want the expired bound named", err)
 	}
 }
+
+// TestRebuildGTCycle_LeavesOtherRigCheckoutsAlone pins that the cycle works
+// only in the gastown source checkout. Other rigs are registered and have
+// checkouts under the town, and an install that reaches its verdict must run
+// no git or make call in or against any of them (gt-3lvcjz.8 removed the rig
+// sweep).
+func TestRebuildGTCycle_LeavesOtherRigCheckoutsAlone(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+	otherRigs := []string{"beads", "om"}
+	d.knownRigsCache, d.knownRigsCacheValid = append([]string{rebuildGTSourceRig}, otherRigs...), true
+	var otherRoots []string
+	for _, rig := range otherRigs {
+		root := filepath.Join(d.config.TownRoot, rig)
+		mkdirs(t, filepath.Join(root, "mayor", "rig", ".git"))
+		otherRoots = append(otherRoots, root)
+	}
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case c.name == "gt-installer":
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+
+	if settled := d.runRebuildGT(); !settled {
+		t.Fatal("a completed install must hold the interval")
+	}
+	if installs := gtInstallerCalls(cli); len(installs) != 1 {
+		t.Fatalf("install calls = %v, want one: the cycle must reach its install for this pin to mean anything", installs)
+	}
+	for _, c := range cli.recorded() {
+		for _, arg := range append([]string{c.dir}, c.args...) {
+			for _, root := range otherRoots {
+				if arg == root || strings.HasPrefix(arg, root+string(filepath.Separator)) {
+					t.Errorf("%s %v ran against %q, under another rig's checkout %q", c.name, c.args, c.dir, root)
+				}
+			}
+		}
+	}
+}
