@@ -40,6 +40,10 @@ func (d *Daemon) bootReason() string {
 // holds the window's cycle (gt-6mlik.6), and while an external Dolt server keeps
 // the gc from running on this host. external is the tick's one gcExternal
 // answer, which picks the database list. source names the caller in the log.
+// With an external server the history archive (gt-7nxj4) runs first, in the
+// same dispatch: it reads over SQL and needs no local disk, and without this it
+// would never run there, since the gc that normally calls it is skipped. Its
+// outcome does not gate the backup, which does not depend on it.
 // maintenanceBackup is idempotent per day, and a deferral retries on the next
 // tick. Any other end consumes the window through maintenanceGCFinishedAt, as
 // a finished cycle does, so a failed backup escalates once per window rather
@@ -70,6 +74,11 @@ func (d *Daemon) startStandbyBackup(window, source string, external bool) {
 	}
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
+		if external {
+			// The outcomes feed the gc's skip decision, and no gc runs here.
+			// maintenanceArchive logs its own stops and failures.
+			d.maintenanceArchive(databases)
+		}
 		res := d.maintenanceBackup(databases)
 		d.logger.Printf("scheduled_maintenance: %s %s (window %s)", source, res.outcome, window)
 		if res.outcome == gcOutcomeDeferred || res.outcome == gcOutcomeInterrupted {
