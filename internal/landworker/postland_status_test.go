@@ -317,13 +317,26 @@ func TestPostLandStatusVerdictRules(t *testing.T) {
 			wantLog:  "RED at",
 		},
 		{
-			name: "a success beside a cancelled run reads green",
+			// The description is the only mark of a cancelled run, so the same
+			// status may be a real failure wearing that text. A success beside
+			// it must not prove the commit green (gt-gwwbua).
+			name: "a success beside a cancelled run is unknown, not green",
 			read: fakeStatusRead{status: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
 				{Context: statusContext, Status: forgejo.StateFailure, Description: "Has been cancelled"},
 				{Context: statusContext, Status: forgejo.StateSuccess},
 			}}},
-			wantGreen: 1,
-			wantLog:   "is success",
+			wantLog: "is now canceled",
+		},
+		{
+			name: "a real failure beside a cancelled run and a success still reads red",
+			read: fakeStatusRead{status: &forgejo.CombinedStatus{Statuses: []forgejo.CommitStatus{
+				{Context: statusContext, Status: forgejo.StateFailure, Description: "Has been cancelled"},
+				{Context: statusContext, Status: forgejo.StateSuccess},
+				{Context: statusContext, Status: forgejo.StateFailure, Description: "gate: 2 tests failed"},
+			}}},
+			wantRed:  1,
+			wantTail: "gate: 2 tests failed",
+			wantLog:  "RED at",
 		},
 		{name: "pending is unknown", read: fakeStatusRead{status: combinedFor(statusContext, forgejo.StatePending)}, wantLog: "is now pending"},
 		{name: "warning is unknown", read: fakeStatusRead{status: combinedFor(statusContext, forgejo.StateWarning)}, wantLog: "is now warning"},
