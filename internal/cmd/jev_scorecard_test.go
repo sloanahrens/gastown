@@ -28,6 +28,8 @@ const jevScorecardGoldenPath = "jev_scorecard_fixture.golden"
 // time the file was written.
 var scorecardFixtureWritten = time.Date(2026, 10, 20, 11, 55, 0, 0, time.UTC)
 
+// writeScorecardFixture writes the fixture battery's log and stamps it at
+// scorecardFixtureWritten.
 func writeScorecardFixture(t *testing.T, town string) {
 	t.Helper()
 	if err := scorecard.WriteFixture(town, scorecard.FixtureLines, scorecard.FixtureLabels); err != nil {
@@ -315,13 +317,48 @@ func TestJevScorecardWarnsWhenItsLogHasNeverBeenWritten(t *testing.T) {
 	}
 }
 
-// TestJevScorecardRefusesABrokenPatrolConfig covers the config read the copy's
-// warning needs: a config that does not parse must fail the report.
-func TestJevScorecardRefusesABrokenPatrolConfig(t *testing.T) {
+// TestJevScorecardWarnsWhenTheCopyHasGoneQuiet warns when the battery's log is
+// older than three passes of an enabled quarter-hour battery. The score is
+// printed as it is, and --json names the copy as stale (gt-bgimh9).
+func TestJevScorecardWarnsWhenTheCopyHasGoneQuiet(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	town := newJevHealthTown(t, now, 5*time.Minute)
 	writeScorecardFixture(t, town)
-	path := daemon.PatrolConfigFile(town)
+
+	var out bytes.Buffer
+	if err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", false, false, now); err != nil {
+		t.Fatal(err)
+	}
+	want := "log copy: WARNING: newest write 2026-10-20 11:55Z (24h ago) at " + scorecard.FixtureLogPath(town)
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("output does not carry %q:\n%s", want, out.String())
+	}
+
+	var js bytes.Buffer
+	if err := jevScorecardWithFlags(context.Background(), &js, town, scorecard.FixtureBattery, "", true, false, now); err != nil {
+		t.Fatal(err)
+	}
+	var doc jevScorecardDoc
+	if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if !doc.CopyStale || doc.CopyWarning != "" {
+		t.Errorf("copy_stale = %v, copy_warning = %q; want true and no read warning", doc.CopyStale, doc.CopyWarning)
+	}
+}
+
+// TestJevScorecardStillPrintsNormalOutputWhenTheAgeReadFails covers the copy's
+// advisory path: a patrol config that does not parse is the line's warning and
+// the copy_warning field, and the report prints as it does with a good config.
+func TestJevScorecardStillPrintsNormalOutputWhenTheAgeReadFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	clean := t.TempDir()
+	writeScorecardFixture(t, clean)
+	broken := t.TempDir()
+	writeScorecardFixture(t, broken)
+	path := daemon.PatrolConfigFile(broken)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -329,18 +366,42 @@ func TestJevScorecardRefusesABrokenPatrolConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	var out bytes.Buffer
-	err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FixtureBattery, "", false, false,
-		time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
-	if err == nil || !strings.Contains(err.Error(), "reading the patrol config") {
-		t.Fatalf("err = %v, want the patrol config failure", err)
+	var want, got bytes.Buffer
+	if err := jevScorecardWithFlags(context.Background(), &want, clean, scorecard.FixtureBattery, "", false, false, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := jevScorecardWithFlags(context.Background(), &got, broken, scorecard.FixtureBattery, "", false, false, now); err != nil {
+		t.Fatalf("the report must still print: %v", err)
+	}
+	firstLine, rest, _ := strings.Cut(got.String(), "\n")
+	if !strings.Contains(firstLine, "log copy: WARNING: cannot be read: reading the patrol config") {
+		t.Errorf("first line = %q, want the copy warning", firstLine)
+	}
+	_, wantRest, _ := strings.Cut(want.String(), "\n")
+	if rest != wantRest {
+		t.Errorf("report differs from the clean run beneath the copy line:\n--- clean\n%s\n--- broken\n%s", wantRest, rest)
+	}
+
+	var js bytes.Buffer
+	if err := jevScorecardWithFlags(context.Background(), &js, broken, scorecard.FixtureBattery, "", true, false, now); err != nil {
+		t.Fatal(err)
+	}
+	var doc jevScorecardDoc
+	if err := json.Unmarshal(js.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.CopyNewestWrite != nil || !doc.CopyStale || !strings.Contains(doc.CopyWarning, "reading the patrol config") {
+		t.Errorf("copy fields = %+v, stale %v, warning %q; want null, true and the config warning", doc.CopyNewestWrite, doc.CopyStale, doc.CopyWarning)
+	}
+	if doc.Battery != scorecard.FixtureBattery {
+		t.Errorf("battery = %q, want the report's own field", doc.Battery)
 	}
 }
 
-// TestJevScorecardRefusesAnUnreadableCopyFile covers the copy read's failure
-// path: a log path that cannot be statted fails the report rather than leaving
-// the line without a file to name.
-func TestJevScorecardRefusesAnUnreadableCopyFile(t *testing.T) {
+// TestJevScorecardRefusesAnUnreadableBatteryLog covers the battery's own log
+// being unreadable: the report is built from that log, so the report fails. The
+// copy line does not decide this; the score does.
+func TestJevScorecardRefusesAnUnreadableBatteryLog(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	writeScorecardFixture(t, town)

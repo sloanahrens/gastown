@@ -24,7 +24,7 @@ var errJevHealthLedger = errors.New("reading the usage ledger")
 
 // newJevHealthCmd builds the subcommand over the town lookup and the clock it
 // reads, which the test supplies so a fixture is judged at a fixed instant.
-func newJevHealthCmd(findTown func() (string, error), now func() time.Time) *cobra.Command {
+func newJevHealthCmd(findTown func() (string, error), now func() time.Time, stat jevStatFunc) *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "health",
@@ -32,7 +32,7 @@ func newJevHealthCmd(findTown func() (string, error), now func() time.Time) *cob
 		Long:  jevHealthLong(),
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			err := jevHealthInTown(cmd.OutOrStdout(), findTown, asJSON, now())
+			err := jevHealthInTown(cmd.OutOrStdout(), findTown, asJSON, now(), stat)
 			if _, ok := IsSilentExit(err); ok {
 				// The exit status is the verdict; cobra must not print it as an error.
 				cmd.SilenceUsage, cmd.SilenceErrors = true, true
@@ -45,7 +45,7 @@ func newJevHealthCmd(findTown func() (string, error), now func() time.Time) *cob
 }
 
 func init() {
-	jevCmd.AddCommand(newJevHealthCmd(workspace.FindFromCwdOrError, time.Now))
+	jevCmd.AddCommand(newJevHealthCmd(workspace.FindFromCwdOrError, time.Now, os.Stat))
 }
 
 // jevHealthLong states the rules, rendering each threshold from the constant
@@ -73,16 +73,16 @@ stale, late, low, unanswered, unparseable or unknown, and 0 otherwise, so one
 command answers whether Jev is collecting today.
 
 The first line names the copy the rows were read from: the newest write among
-the batteries' logs and the ledger. It warns when that write is older than %s,
-three quarter-hour passes, so the copy may not be the daemon's. --json adds
-copy_newest_write {at, path} and copy_stale.
+the enabled batteries' logs and the ledger. It warns when that write is older
+than %s, %d quarter-hour passes, so the copy may not be the daemon's. --json
+adds copy_newest_write {at, path}, copy_stale and copy_warning.
 
 Examples:
   gt jev health
   gt jev health --json`,
 		briefDuration(health.StaleAfter), briefDuration(health.LateAfter),
 		health.LowMedian, shareText(health.LowShare), shareText(health.UnansweredShare),
-		briefDuration(health.StaleAfter))
+		briefDuration(health.StaleAfter), int(health.StaleAfter/(15*time.Minute)))
 }
 
 // briefDuration renders a threshold in the help's words.
@@ -108,13 +108,18 @@ func shareText(share float64) string {
 }
 
 // jevHealthInTown resolves the town through findTown and prints the report.
-func jevHealthInTown(out io.Writer, findTown func() (string, error), asJSON bool, now time.Time) error {
+func jevHealthInTown(out io.Writer, findTown func() (string, error), asJSON bool, now time.Time, stat jevStatFunc) error {
 	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevHealthReport(out, townRoot, asJSON, now)
+	return jevHealthReport(out, townRoot, asJSON, now, stat)
 }
+
+// jevStatFunc is the stat the copy read uses. The commands pass os.Stat; a test
+// passes one that fails on a path, since the health rows read the same files and
+// no real path fails the copy alone.
+type jevStatFunc func(name string) (fs.FileInfo, error)
 
 // jevCopyWrite is the newest write of the Jev log copy a command read: when the
 // file was last written and which file, so a --json reader can tell which copy
@@ -125,7 +130,8 @@ type jevCopyWrite struct {
 }
 
 // jevLogCopy is the newest write among the files of the copy a command read:
-// every battery's log and the usage ledger, or the one log a scorecard read.
+// the enabled batteries' logs and the usage ledger, or the one log a scorecard
+// read.
 type jevLogCopy struct {
 	Newest *time.Time
 	Path   string
@@ -152,8 +158,8 @@ func (c jevLogCopy) doc() *jevCopyWrite {
 // observe folds one file's write into the copy. A file that does not exist is a
 // battery that never wrote; any other failure stops the read, so a copy it could
 // not measure never reads as a quiet one.
-func (c *jevLogCopy) observe(path string) error {
-	info, err := os.Stat(path)
+func (c *jevLogCopy) observe(stat jevStatFunc, path string) error {
+	info, err := stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -171,31 +177,30 @@ func (c *jevLogCopy) observe(path string) error {
 	return nil
 }
 
-// jevReadLogCopy finds the newest write among every battery's log and the usage
-// ledger, the copy health and the Jev totals read.
-func jevReadLogCopy(townRoot string) (jevLogCopy, error) {
-	paths := make([]string, 0, len(health.Batteries)+1)
-	for _, b := range health.Batteries {
-		paths = append(paths, b.LogPath(townRoot))
+// jevReadCopy finds the newest write in the copy: the logs of the batteries cfg
+// enables and the usage ledger, or only the one log a command read when only is
+// set. A disabled battery's log is not the daemon's live copy, so it is left out.
+func jevReadCopy(townRoot string, cfg health.Config, stat jevStatFunc, only string) (jevLogCopy, error) {
+	if only != "" {
+		c := jevLogCopy{Path: only}
+		if err := c.observe(stat, only); err != nil {
+			return jevLogCopy{}, err
+		}
+		return c, nil
 	}
-	paths = append(paths, jev.UsageLedgerPath(townRoot))
 	var newest jevLogCopy
-	for _, path := range paths {
-		if err := newest.observe(path); err != nil {
+	for _, b := range health.Batteries {
+		if !cfg.Enabled[b.ConfigKey] {
+			continue
+		}
+		if err := newest.observe(stat, b.LogPath(townRoot)); err != nil {
 			return jevLogCopy{}, err
 		}
 	}
-	return newest, nil
-}
-
-// jevReadOneLogCopy reads the copy of the one log a command read, so its line
-// names that file and no other.
-func jevReadOneLogCopy(path string) (jevLogCopy, error) {
-	c := jevLogCopy{Path: path}
-	if err := c.observe(path); err != nil {
+	if err := newest.observe(stat, jev.UsageLedgerPath(townRoot)); err != nil {
 		return jevLogCopy{}, err
 	}
-	return c, nil
+	return newest, nil
 }
 
 // jevCopyStaleAfter is how old a live copy may look: health.StaleAfter, three
@@ -214,13 +219,44 @@ func jevCopyStaleAfter(cfg health.Config) (time.Duration, bool) {
 	return 0, false
 }
 
+// jevCopyAge reads the copy a Jev command prints beside its output and judges how
+// old it is at now. The copy is jevReadCopy's: the enabled batteries' logs and
+// the ledger, or the one log only when a command reads just that file. It never
+// returns an error. A patrol config or a file that cannot be read becomes the
+// warning, and the copy is not called fresh; the command still prints its normal
+// output beside it.
+func jevCopyAge(townRoot string, now time.Time, stat jevStatFunc, only string) jevCopyNote {
+	cfg, err := daemon.ReadPatrolConfig(townRoot)
+	if err != nil {
+		return jevCopyUnread(fmt.Sprintf("reading the patrol config: %v", err))
+	}
+	cfgOut := jevHealthConfig(cfg)
+	c, err := jevReadCopy(townRoot, cfgOut, stat, only)
+	if err != nil {
+		return jevCopyUnread(err.Error())
+	}
+	line, stale := jevLogCopyText(c, cfgOut, now)
+	return jevCopyNote{Line: line, Doc: c.doc(), Stale: stale}
+}
+
+// jevCopyUnread is the note for a copy that could not be read: the line warns
+// with the reason, the --json fields carry it as copy_warning, and the copy is
+// not called fresh.
+func jevCopyUnread(reason string) jevCopyNote {
+	return jevCopyNote{
+		Line:    "log copy: WARNING: cannot be read: " + reason,
+		Stale:   true,
+		Warning: reason,
+	}
+}
+
 // jevLogCopyText renders the line a command prints above its output, and reports
 // whether it is the warning form: the copy looks older than a live one may. With
 // no quarter-hour battery enabled there is no age to judge, and the line says so
 // in place of a verdict.
 func jevLogCopyText(c jevLogCopy, cfg health.Config, now time.Time) (line string, stale bool) {
 	if c.Newest == nil {
-		return jevCopyWarningLine("no log file or ledger has been written"), true
+		return jevCopyWarningLine("no file of the copy has been written"), true
 	}
 	age := now.Sub(*c.Newest)
 	if age < 0 {
@@ -230,7 +266,7 @@ func jevLogCopyText(c jevLogCopy, cfg health.Config, now time.Time) (line string
 	}
 	after, bounded := jevCopyStaleAfter(cfg)
 	stale = bounded && age > after
-	body := fmt.Sprintf("newest write %s (%s ago) at %s", jevCopyStamp(*c.Newest), jevCopyAge(age), c.Path)
+	body := fmt.Sprintf("newest write %s (%s ago) at %s", jevCopyStamp(*c.Newest), jevAgeText(age), c.Path)
 	switch {
 	case stale:
 		return jevCopyWarningLine(body), true
@@ -251,9 +287,9 @@ func jevCopyStamp(t time.Time) string {
 	return t.UTC().Format("2006-01-02 15:04Z")
 }
 
-// jevCopyAge prints how long ago a write landed at the coarsest unit that still
+// jevAgeText prints how long ago a write landed at the coarsest unit that still
 // says something.
-func jevCopyAge(d time.Duration) string {
+func jevAgeText(d time.Duration) string {
 	switch {
 	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d/time.Second))
@@ -274,20 +310,18 @@ type jevHealthDoc struct {
 	// CopyStale is whether that copy looks older than a live one may, the same
 	// verdict the text line warns with.
 	CopyStale bool `json:"copy_stale"`
+	// CopyWarning names why the copy could not be read; absent when it was.
+	CopyWarning string `json:"copy_warning,omitempty"`
 }
 
 // jevHealthReport reads the town's patrol config, Jev logs, cursors and usage
 // ledger, then prints and judges every battery.
-func jevHealthReport(out io.Writer, townRoot string, asJSON bool, now time.Time) error {
+func jevHealthReport(out io.Writer, townRoot string, asJSON bool, now time.Time, stat jevStatFunc) error {
 	cfg, err := daemon.ReadPatrolConfig(townRoot)
 	if err != nil {
 		return fmt.Errorf("reading the patrol config: %w", err)
 	}
 	ledger, err := jevHealthLedger(townRoot, now)
-	if err != nil {
-		return err
-	}
-	logCopy, err := jevReadLogCopy(townRoot)
 	if err != nil {
 		return err
 	}
@@ -297,15 +331,18 @@ func jevHealthReport(out io.Writer, townRoot string, asJSON bool, now time.Time)
 	}
 	cfgOut := jevHealthConfig(cfg)
 	rows := health.Report(cfgOut, inputs, ledger, now)
-	line, copyStale := jevLogCopyText(logCopy, cfgOut, now)
+	// The copy is advisory: a copy that cannot be read is the line's warning, and
+	// the rows the command judged are printed beside it.
+	note := jevCopyAge(townRoot, now, stat, "")
 	if asJSON {
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(jevHealthDoc{Batteries: rows, CopyNewestWrite: logCopy.doc(), CopyStale: copyStale}); err != nil {
+		doc := jevHealthDoc{Batteries: rows, CopyNewestWrite: note.Doc, CopyStale: note.Stale, CopyWarning: note.Warning}
+		if err := enc.Encode(doc); err != nil {
 			return err
 		}
 	} else {
-		if _, err := fmt.Fprintln(out, line); err != nil {
+		if _, err := fmt.Fprintln(out, note.Line); err != nil {
 			return err
 		}
 		if err := writeJevHealthTable(out, rows); err != nil {

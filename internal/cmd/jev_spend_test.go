@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/jev"
 )
 
@@ -210,11 +209,36 @@ func TestJevSpendPrintsTheLogCopyAge(t *testing.T) {
 		"the line sits above the table")
 }
 
-// TestJevSpendJSONWarnsInsteadOfFailingOnABadPatrolConfigOrLogPath covers the
-// copy read's advisory path. Spend's numbers come from the ledger, so a patrol
-// config or a log path that cannot be read is named as copy_warning and the
-// command still prints the spend it printed before the copy line existed.
-func TestJevSpendJSONWarnsInsteadOfFailingOnABadPatrolConfigOrLogPath(t *testing.T) {
+// TestJevSpendWarnsWhenTheCopyHasGoneQuiet warns when the enabled battery's log
+// and the ledger were last written more than three passes ago: the copy may not
+// be the daemon's, and the spend is printed as it is either way (gt-bgimh9).
+func TestJevSpendWarnsWhenTheCopyHasGoneQuiet(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	town := newJevHealthTown(t, now, 5*time.Minute)
+	quiet := now.Add(-26 * time.Hour)
+	jevSetModTime(t, filepath.Join(jevHealthDir(t, town), "dedupe.jsonl"), quiet)
+	jevSetModTime(t, jev.UsageLedgerPath(town), quiet)
+
+	var out bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, false, now))
+	assert.Contains(t, out.String(), "log copy: WARNING: newest write 2026-10-29 10:00Z (26h ago)")
+	assert.Contains(t, out.String(), "Calls", "the table is printed as before")
+
+	var js bytes.Buffer
+	require.NoError(t, jevSpendWithFlags(&js, town, 24, 1e9, true, now))
+	var doc jevSpendDoc
+	require.NoError(t, json.Unmarshal(js.Bytes(), &doc))
+	assert.True(t, doc.CopyStale)
+	assert.Empty(t, doc.CopyWarning, "a copy that was read carries no read warning")
+	assert.Equal(t, 2, doc.Calls, "the spend is printed as before")
+}
+
+// TestJevSpendStillPrintsNormalOutputWhenTheAgeReadFails covers the copy read's
+// advisory path. Spend's numbers come from the ledger, so a patrol config or a
+// log path that cannot be read is named as copy_warning and the command still
+// prints the spend it printed before the copy line existed.
+func TestJevSpendStillPrintsNormalOutputWhenTheAgeReadFails(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 	cases := map[string]struct {
@@ -223,15 +247,15 @@ func TestJevSpendJSONWarnsInsteadOfFailingOnABadPatrolConfigOrLogPath(t *testing
 	}{
 		"patrol config does not parse": {
 			breakTown: func(t *testing.T, town string) {
-				path := daemon.PatrolConfigFile(town)
-				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-				require.NoError(t, os.WriteFile(path, []byte("{"), 0o644))
+				require.NoError(t, os.WriteFile(filepath.Join(town, "settings", "config.json"), []byte("{"), 0o644))
 			},
 			reason: "reading the patrol config",
 		},
-		"log path is a directory": {
+		"enabled battery's log path is a directory": {
 			breakTown: func(t *testing.T, town string) {
-				require.NoError(t, os.MkdirAll(filepath.Join(town, ".runtime", "jev", "attention.jsonl"), 0o700))
+				logPath := filepath.Join(jevHealthDir(t, town), "dedupe.jsonl")
+				require.NoError(t, os.Remove(logPath))
+				require.NoError(t, os.MkdirAll(logPath, 0o700))
 			},
 			reason: "not a regular file",
 		},
@@ -239,15 +263,15 @@ func TestJevSpendJSONWarnsInsteadOfFailingOnABadPatrolConfigOrLogPath(t *testing
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			town := t.TempDir()
-			writeJevSpendLedger(t, town, jevSpendLine(now.Add(-time.Hour), "attention", 10, 5))
+			// newJevHealthTown enables dedupe and writes two ledger calls in the window.
+			town := newJevHealthTown(t, now, 5*time.Minute)
 			tc.breakTown(t, town)
 
 			var out bytes.Buffer
 			require.NoError(t, jevSpendWithFlags(&out, town, 24, 1e9, true, now))
 			var doc jevSpendDoc
 			require.NoError(t, json.Unmarshal(out.Bytes(), &doc))
-			assert.Equal(t, 1, doc.Calls, "the spend is printed as before")
+			assert.Equal(t, 2, doc.Calls, "the spend is printed as before")
 			assert.Contains(t, doc.CopyWarning, tc.reason)
 			assert.True(t, doc.CopyStale, "a copy that cannot be read is not called fresh")
 

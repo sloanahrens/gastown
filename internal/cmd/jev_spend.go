@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"sort"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -44,8 +44,8 @@ ledger stores tokens and never dollars. A missing ledger prints zeros; a line
 that does not parse is skipped and counted in lines_skipped.
 
 The first line names the copy the numbers came from: the newest write among the
-batteries' logs and the ledger. It warns when that write is older than a live
-copy may be, or when the copy cannot be read; the numbers are printed either way.
+enabled batteries' logs and the ledger. It warns when that write is older than a
+live copy may be, or when the copy cannot be read; the numbers are printed either way.
 
 --json prints {calls, input_tokens, output_tokens, usd, lines_skipped,
 by_caller, periods, copy_newest_write, copy_stale, copy_warning}, where by_caller
@@ -94,7 +94,7 @@ func jevSpendWithFlags(w io.Writer, townRoot string, hours int, usdPerBillion fl
 	if err != nil {
 		return err
 	}
-	note := jevSpendCopy(townRoot, now)
+	note := jevCopyAge(townRoot, now, os.Stat, "")
 	if asJSON {
 		// The periods ride beside the window's own fields, for the dashboard's
 		// Jev row (today, yesterday, 7 days, last hour); a reader that does not
@@ -117,24 +117,6 @@ func jevSpendWithFlags(w io.Writer, townRoot string, hours int, usdPerBillion fl
 		return err
 	}
 	return writeJevSpendTable(w, rep)
-}
-
-// jevSpendCopy reads the copy line spend prints. Spend's numbers come from the
-// usage ledger alone, so a patrol config or log path that cannot be read is the
-// copy's warning and never fails the command: spend's output is the same as
-// before the copy line existed.
-func jevSpendCopy(townRoot string, now time.Time) jevCopyNote {
-	logCopy, err := jevReadLogCopy(townRoot)
-	if err != nil {
-		return jevCopyNote{Line: jevCopyWarningLine(err.Error()), Stale: true, Warning: err.Error()}
-	}
-	cfg, err := daemon.ReadPatrolConfig(townRoot)
-	if err != nil {
-		reason := fmt.Sprintf("reading the patrol config: %v", err)
-		return jevCopyNote{Line: jevCopyWarningLine(reason), Doc: logCopy.doc(), Stale: true, Warning: reason}
-	}
-	line, stale := jevLogCopyText(logCopy, jevHealthConfig(cfg), now)
-	return jevCopyNote{Line: line, Doc: logCopy.doc(), Stale: stale}
 }
 
 // jevSpendDoc is the --json document: the window's report, the periods the

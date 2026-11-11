@@ -6,13 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -45,12 +45,10 @@ rate by 0.1. Scoring one battery is read-only; only --refresh writes.
 
 --battery is required, and an unknown name is an error that lists the
 registered batteries. --since keeps only the lines stamped in the window ending
-now, given as Nd for days or a Go duration such as 36h. The first line names the
-battery's log the report read and its newest write, warning when that write is
-older than a live copy may be. --json prints the same report as JSON, with
-copy_newest_write and copy_stale. The testsel battery asks about every package
-of every change, so its --json report leaves out the per-item rows (the totals
-stay); --lines prints them.
+now, given as Nd for days or a Go duration such as 36h. --json prints the same
+report as JSON. The testsel battery asks about every package of every change, so
+its --json report leaves out the per-item rows (the totals stay); --lines prints
+them.
 
 --refresh replaces --battery, --json and --lines: it scores every registered
 battery over --since (7d when empty), except that it reuses a battery's cached
@@ -304,21 +302,15 @@ func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery,
 	if err != nil {
 		return err
 	}
-	cfg, err := daemon.ReadPatrolConfig(townRoot)
-	if err != nil {
-		return fmt.Errorf("reading the patrol config: %w", err)
-	}
 	// The report reads this battery's log and nothing else, so the copy line
-	// names that file rather than the newest write across the town's logs.
-	logCopy, err := jevReadOneLogCopy(a.LogPath())
-	if err != nil {
-		return err
-	}
+	// names that file rather than the newest write across the town's logs. The
+	// copy is advisory: a copy that cannot be read is the line's warning, and the
+	// report prints beside it.
+	note := jevCopyAge(townRoot, now, os.Stat, a.LogPath())
 	rep, err := scorecard.Build(ctx, a, from)
 	if err != nil {
 		return err
 	}
-	line, copyStale := jevLogCopyText(logCopy, jevHealthConfig(cfg), now)
 	if asJSON {
 		if _, bulky := a.(scorecard.Bulky); bulky && !withLines {
 			rep.Lines, rep.LinesOmitted = nil, true
@@ -327,11 +319,12 @@ func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery,
 		enc.SetIndent("", "  ")
 		return enc.Encode(jevScorecardDoc{
 			Report:          rep,
-			CopyNewestWrite: logCopy.doc(),
-			CopyStale:       copyStale,
+			CopyNewestWrite: note.Doc,
+			CopyStale:       note.Stale,
+			CopyWarning:     note.Warning,
 		})
 	}
-	if _, err := fmt.Fprintln(w, line); err != nil {
+	if _, err := fmt.Fprintln(w, note.Line); err != nil {
 		return err
 	}
 	return scorecard.WriteText(w, rep)
@@ -343,6 +336,8 @@ type jevScorecardDoc struct {
 	scorecard.Report
 	CopyNewestWrite *jevCopyWrite `json:"copy_newest_write"`
 	CopyStale       bool          `json:"copy_stale"`
+	// CopyWarning names why the copy could not be read; absent when it was.
+	CopyWarning string `json:"copy_warning,omitempty"`
 }
 
 // parseSince returns the start of the --since window ending at now. An empty
