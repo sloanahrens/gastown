@@ -23,8 +23,9 @@ func TestIntegrationRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch(t *
 	stubRemotePolecatBranchOpenPR(t)
 	townRoot, rigName := setupTestRigForSettings(t)
 	t.Chdir(townRoot)
-	localDir := filepath.Join(townRoot, rigName, "mayor", "rig")
+	localDir := filepath.Join(t.TempDir(), "work")
 	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
+	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("prunecmdpatch", "", oldEnoughSuffix())
 	createPatchEquivalentRemoteBranch(t, repoGit, localDir, mainBranch, branch)
@@ -52,8 +53,9 @@ func TestIntegrationRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch(t *
 func TestIntegrationRunPolecatPruneReportsRemoteBranchKeptForOpenPR(t *testing.T) {
 	townRoot, rigName := setupTestRigForSettings(t)
 	t.Chdir(townRoot)
-	localDir := filepath.Join(townRoot, rigName, "mayor", "rig")
+	localDir := filepath.Join(t.TempDir(), "work")
 	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
+	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("prcmdcat", "", oldEnoughSuffix())
 	createPatchEquivalentRemoteBranch(t, repoGit, localDir, mainBranch, branch)
@@ -409,6 +411,19 @@ func initPolecatPruneTestRepoAt(t *testing.T, localDir string) string {
 	runGit(t, localDir, "push", "-u", "origin", mainBranch)
 
 	return mainBranch
+}
+
+// bareRigRepoFromClone gives a rig the shared .repo.git a real rig has: a bare
+// clone of the work clone's origin, the repo the prune reads and writes.
+func bareRigRepoFromClone(t *testing.T, rigPath, workDir string) string {
+	t.Helper()
+	remote := strings.TrimSpace(runGitForMQSubmitTest(t, workDir, "remote", "get-url", "origin"))
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("mkdir rig: %v", err)
+	}
+	bare := filepath.Join(rigPath, ".repo.git")
+	runGit(t, rigPath, "clone", "--bare", remote, bare)
+	return bare
 }
 
 func initPolecatPruneOriginForkRepo(t *testing.T) (string, string) {

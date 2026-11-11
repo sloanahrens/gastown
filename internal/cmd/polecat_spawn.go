@@ -1518,16 +1518,12 @@ func verifyWorktreeExists(clonePath string) error {
 	return polecat.VerifyWorktreeExists(clonePath)
 }
 
-// getRigGit returns a Git object for the rig's repository.
-// Prefers .repo.git (bare repo) if it exists, falls back to mayor/rig.
+// getRigGit returns a Git object for the rig's shared bare repo, .repo.git.
+// A rig without one is an error, and no other directory stands in for it.
 func getRigGit(rigPath string) (*git.Git, error) {
-	bareRepoPath := filepath.Join(rigPath, ".repo.git")
-	if info, err := os.Stat(bareRepoPath); err == nil && info.IsDir() {
-		return git.NewGitWithDir(bareRepoPath, ""), nil
+	bareRepoPath := constants.RigBareRepoPath(rigPath)
+	if info, err := os.Stat(bareRepoPath); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("no .repo.git under %s", rigPath)
 	}
-	mayorPath := filepath.Join(rigPath, "mayor", "rig")
-	if _, err := os.Stat(mayorPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("no repo base found (neither .repo.git nor mayor/rig exists)")
-	}
-	return git.NewGit(mayorPath), nil
+	return git.NewGitWithDir(bareRepoPath, ""), nil
 }

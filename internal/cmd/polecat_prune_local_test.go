@@ -3,8 +3,6 @@ package cmd
 import (
 	"bytes"
 	"errors"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -257,15 +255,15 @@ func TestPruneLocalPolecatBranchBacklogReportsEveryRigAndItsTotals(t *testing.T)
 			merged:   []string{"polecat/a/gt-1+1"},
 			held:     []string{"polecat/b/gt-2+2"},
 		},
-		"/town/gamma/mayor/rig": {
+		"/town/gamma/.repo.git": {
 			branches: []string{"polecat/c/gt-3+3"},
 			merged:   []string{"polecat/c/gt-3+3"},
 		},
 	}
 	targets := []localPruneTarget{
-		{Name: "alpha", RepoDir: "/town/alpha/.repo.git"},
-		{Name: "beta"},
-		{Name: "gamma", RepoDir: "/town/gamma/mayor/rig"},
+		{Name: "alpha", RigPath: "/town/alpha", RepoDir: "/town/alpha/.repo.git"},
+		{Name: "beta", RigPath: "/town/beta"},
+		{Name: "gamma", RigPath: "/town/gamma", RepoDir: "/town/gamma/.repo.git"},
 	}
 
 	var out bytes.Buffer
@@ -282,13 +280,13 @@ func TestPruneLocalPolecatBranchBacklogReportsEveryRigAndItsTotals(t *testing.T)
 	if totals != want {
 		t.Errorf("totals %+v, want %+v", totals, want)
 	}
-	for _, want := range []string{"alpha", "beta", "gamma", "skipped: no git repo (neither .repo.git nor mayor/rig)"} {
+	for _, want := range []string{"alpha", "beta", "gamma", "skipped: no .repo.git under /town/beta"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("report %q lacks %q", out.String(), want)
 		}
 	}
-	if !slices.Contains(repos["/town/gamma/mayor/rig"].deleted, "polecat/c/gt-3+3") {
-		t.Errorf("rig after the skipped one was not swept: deleted %v", repos["/town/gamma/mayor/rig"].deleted)
+	if !slices.Contains(repos["/town/gamma/.repo.git"].deleted, "polecat/c/gt-3+3") {
+		t.Errorf("rig after the skipped one was not swept: deleted %v", repos["/town/gamma/.repo.git"].deleted)
 	}
 }
 
@@ -397,38 +395,5 @@ func TestLocalPruneRunErrorFailsOnlyOnUnsweptBranches(t *testing.T) {
 				t.Errorf("localPruneRunError(%+v) = %v, want error=%v", tc.totals, err, tc.want)
 			}
 		})
-	}
-}
-
-// TestRigPruneRepoDirPrefersTheBareRepoAndFallsBackToTheMayorClone pins the
-// repo choice the single-rig prune already makes, on directories only — no
-// git runs here.
-func TestRigPruneRepoDirPrefersTheBareRepoAndFallsBackToTheMayorClone(t *testing.T) {
-	t.Parallel()
-	rigRoot := t.TempDir()
-	bare := filepath.Join(rigRoot, ".repo.git")
-	if err := os.MkdirAll(bare, 0755); err != nil {
-		t.Fatalf("mkdir bare repo: %v", err)
-	}
-	if got := rigPruneRepoDir(rigRoot); got != bare {
-		t.Errorf("rigPruneRepoDir = %q, want the bare repo %q", got, bare)
-	}
-
-	if err := os.RemoveAll(bare); err != nil {
-		t.Fatalf("remove bare repo: %v", err)
-	}
-	legacy := filepath.Join(rigRoot, "mayor", "rig")
-	if err := os.MkdirAll(legacy, 0755); err != nil {
-		t.Fatalf("mkdir mayor clone: %v", err)
-	}
-	if got := rigPruneRepoDir(rigRoot); got != legacy {
-		t.Errorf("rigPruneRepoDir = %q, want the mayor clone %q", got, legacy)
-	}
-
-	if err := os.RemoveAll(legacy); err != nil {
-		t.Fatalf("remove mayor clone: %v", err)
-	}
-	if got := rigPruneRepoDir(rigRoot); got != "" {
-		t.Errorf("rigPruneRepoDir = %q, want empty for a rig with no repo", got)
 	}
 }

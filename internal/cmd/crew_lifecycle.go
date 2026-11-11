@@ -133,13 +133,13 @@ func runCrewRemoveWith(args []string, rigFlag string, force, purge bool, env cre
 		// Remove the workspace
 		if isWorktree {
 			// For worktrees, use git worktree remove
-			mayorRigPath := constants.RigMayorPath(r.Path)
+			bareRepoPath := constants.RigBareRepoPath(r.Path)
 			removeArgs := []string{"worktree", "remove", crewPath}
 			if forceRemove {
 				removeArgs = []string{"worktree", "remove", "--force", crewPath}
 			}
 			removeCmd := exec.Command("git", removeArgs...)
-			removeCmd.Dir = mayorRigPath
+			removeCmd.Dir = bareRepoPath
 			if output, err := removeCmd.CombinedOutput(); err != nil {
 				fmt.Printf("Error removing worktree %s: %v\n%s", arg, err, string(output))
 				lastErr = err

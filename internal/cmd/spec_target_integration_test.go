@@ -124,7 +124,7 @@ func TestIntegrationSpecLintTargetReadsTheBeadsRig(t *testing.T) {
 		t.Fatal(err)
 	}
 	work := specTargetWork(t, "internal/cmd/spec.go")
-	specTargetBare(t, work, filepath.Join(townRoot, "gastown", "mayor", "rig"), "main")
+	specTargetBare(t, work, filepath.Join(townRoot, "gastown", ".repo.git"), "main")
 
 	target := specLintTarget(townRoot, "gt-bead", openRigTree)
 	if target.Err != "" {

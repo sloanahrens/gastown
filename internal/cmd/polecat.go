@@ -3414,9 +3414,9 @@ func nukePolecatFullWithOptions(polecatName, rigName string, mgr *polecat.Manage
 	// post-merge, now removed). This prevents the race where nuke deletes the
 	// branch before the merge has landed. (gt-v5ku)
 	if branchToDelete != "" {
-		repoGit := getRepoGitForRig(r.Path)
-		if err := repoGit.DeleteBranch(branchToDelete, true); err != nil {
-			fmt.Printf("  %s branch delete: %v\n", style.Dim.Render("○"), err)
+		deleteErr := deleteRigPolecatBranch(r.Path, branchToDelete)
+		if deleteErr != nil {
+			fmt.Printf("  %s branch delete: %v\n", style.Dim.Render("○"), deleteErr)
 		} else {
 			fmt.Printf("  %s deleted local branch %s\n", style.Success.Render("✓"), branchToDelete)
 		}
@@ -3866,14 +3866,16 @@ func runPolecatPrune(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	return pruneRigPolecatBranches(mgr, r)
+}
 
-	// Use the mayor/rig clone (or bare repo) for branch operations
-	var repoGit *git.Git
-	bareRepoPath := filepath.Join(r.Path, ".repo.git")
-	if info, statErr := os.Stat(bareRepoPath); statErr == nil && info.IsDir() {
-		repoGit = git.NewGitWithDir(bareRepoPath, "")
-	} else {
-		repoGit = git.NewGit(filepath.Join(r.Path, "mayor", "rig"))
+// pruneRigPolecatBranches prunes one rig's stale polecat branches in the
+// rig's shared bare repo, the repo gt polecat prune runs its branch
+// operations in.
+func pruneRigPolecatBranches(mgr *polecat.Manager, r *rig.Rig) error {
+	repoGit, err := getRigGit(r.Path)
+	if err != nil {
+		return err
 	}
 
 	fmt.Printf("Pruning stale polecat branches in %s...\n", r.Name)
