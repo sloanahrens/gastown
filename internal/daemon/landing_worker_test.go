@@ -682,6 +682,31 @@ func TestFollowupBeadsFilesAndListsOverTheClient(t *testing.T) {
 	}
 }
 
+// TestFollowupBeadsFilesTheAcceptanceField: the filed bead's acceptance field is
+// the spec's Acceptance, the box lines gt done reads, so a follow-up filed
+// without it leaves the worker nothing to tick (gt-ejsl5v).
+func TestFollowupBeadsFilesTheAcceptanceField(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New(beadsfake.WithPrefix("gt"))
+	var feed land.FollowupBeads = followupBeads{client: bd}
+	const acceptance = "- [ ] Finding resolved: swap the nil check (internal/land/note.go:230)\n" +
+		"- [ ] Finding resolved: name the error (internal/land/note.go)"
+	id, err := feed.CreateFollowup(land.FollowupSpec{
+		Title: "Found: swap the nil check", Body: "## Acceptance\n" + acceptance + "\n",
+		Acceptance: acceptance, Labels: []string{land.FollowUpLabel}, Priority: 3,
+	})
+	if err != nil {
+		t.Fatalf("CreateFollowup: %v", err)
+	}
+	issue, err := bd.Show(id)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", id, err)
+	}
+	if issue.AcceptanceCriteria != acceptance {
+		t.Errorf("filed acceptance field = %q, want %q", issue.AcceptanceCriteria, acceptance)
+	}
+}
+
 // The landing work root must never be under the town root: internal/git
 // refuses worktree targets there, which failed every landing on 2026-09-30.
 func TestLandingWorkRootIsOutsideTheTownRoot(t *testing.T) {

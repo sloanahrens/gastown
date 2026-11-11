@@ -1389,6 +1389,7 @@ func (b followupBeads) CreateFollowup(spec land.FollowupSpec) (string, error) {
 	issue, err := b.client.Create(beads.CreateOptions{
 		Title:       spec.Title,
 		Description: spec.Body,
+		Acceptance:  spec.Acceptance,
 		Labels:      spec.Labels,
 		Priority:    spec.Priority,
 	})
