@@ -9,13 +9,14 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // determineRigBeadsPath returns the correct route path for a rig based on its actual layout.
 // Uses ResolveBeadsDir to follow any redirects (e.g., rig/.beads/redirect -> mayor/rig/.beads).
-// Falls back to the default mayor layout path if the resolved path is invalid or escapes the town root.
+// Falls back to the rig root, where the rig's beads live, if the resolved path is invalid or escapes the town root.
 func determineRigBeadsPath(townRoot, rigName string) string {
-	defaultPath := rigName + "/mayor/rig"
+	defaultPath := rigName
 	rigPath := filepath.Join(townRoot, rigName)
 	resolved := beads.ResolveBeadsDir(rigPath)
 
@@ -214,8 +215,18 @@ func (c *RoutesCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	// A route naming a rig's legacy mayor/rig path is a warning: the move of
+	// the rig's beads to the rig root is not done while the route stands.
+	var legacyRoutes []string
+	for _, r := range routes {
+		if isLegacyRoutePath(r.Path) {
+			legacyRoutes = append(legacyRoutes, r.Prefix)
+			details = append(details, fmt.Sprintf("Route %s -> %s names the legacy per-rig path; the beads move to %s", r.Prefix, r.Path, strings.TrimSuffix(r.Path, "/"+legacyRouteRel())))
+		}
+	}
+
 	// Determine result
-	if missingTownRoute || len(missingRigs) > 0 || len(invalidRoutes) > 0 || len(suboptimalRoutes) > 0 {
+	if missingTownRoute || len(missingRigs) > 0 || len(invalidRoutes) > 0 || len(suboptimalRoutes) > 0 || len(legacyRoutes) > 0 {
 		status := StatusWarning
 		var messageParts []string
 
@@ -230,6 +241,9 @@ func (c *RoutesCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		if len(suboptimalRoutes) > 0 {
 			messageParts = append(messageParts, fmt.Sprintf("%d route(s) using redirect instead of canonical path", len(suboptimalRoutes)))
+		}
+		if len(legacyRoutes) > 0 {
+			messageParts = append(messageParts, fmt.Sprintf("%d route(s) naming the legacy %s path", len(legacyRoutes), legacyRouteRel()))
 		}
 
 		return &CheckResult{
@@ -301,6 +315,18 @@ func isRedirectDependent(townRoot, routePath string) bool {
 	redirectPath := filepath.Join(fullPath, ".beads", "redirect")
 	_, err := os.Stat(redirectPath)
 	return err == nil
+}
+
+// legacyRouteRel returns the legacy per-rig directory, mayor/rig, relative to
+// the rig root: a route path is <rig>/<legacyRouteRel>.
+func legacyRouteRel() string {
+	return filepath.ToSlash(filepath.Dir(constants.RigLegacyBeadsRelPath()))
+}
+
+// isLegacyRoutePath reports whether a route path names a rig's legacy
+// mayor/rig directory rather than the rig root.
+func isLegacyRoutePath(routePath string) bool {
+	return strings.HasSuffix(filepath.ToSlash(routePath), "/"+legacyRouteRel())
 }
 
 // Fix attempts to add missing routing entries and rewrite suboptimal ones.
@@ -384,8 +410,9 @@ func (c *RoutesCheck) Fix(ctx *CheckContext) error {
 
 		if idx, exists := routeMap[prefix]; exists {
 			// Route exists — only rewrite if current path is redirect-dependent
-			// and canonical target has a real .beads directory (not a redirect).
-			if routes[idx].Path != rigRoutePath && isRedirectDependent(ctx.TownRoot, routes[idx].Path) {
+			// or names the legacy mayor/rig, and canonical target has a real
+			// .beads directory (not a redirect).
+			if routes[idx].Path != rigRoutePath && (isRedirectDependent(ctx.TownRoot, routes[idx].Path) || isLegacyRoutePath(routes[idx].Path)) {
 				if hasRealBeadsDir(canonicalPath) {
 					routes[idx].Path = rigRoutePath
 					modified = true

@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 )
 
 // StaleBeadsRedirectCheck detects .beads directories that have both a redirect
@@ -166,6 +167,10 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 	// Create missing redirects
 	for _, issue := range c.missingRedirects {
+		if err := refuseLegacyRedirect(issue.townRoot, issue.worktreePath, issue.expectedTarget); err != nil {
+			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
+			return fmt.Errorf("creating redirect for %s: %w", relPath, err)
+		}
 		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
 			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
 			return fmt.Errorf("creating redirect for %s: %w", relPath, err)
@@ -174,6 +179,10 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 	// Fix incorrect redirects (same as creating - SetupRedirect overwrites)
 	for _, issue := range c.incorrectRedirects {
+		if err := refuseLegacyRedirect(issue.townRoot, issue.worktreePath, issue.expectedTarget); err != nil {
+			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
+			return fmt.Errorf("fixing redirect for %s: %w", relPath, err)
+		}
 		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
 			relPath, _ := filepath.Rel(ctx.TownRoot, issue.worktreePath)
 			return fmt.Errorf("fixing redirect for %s: %w", relPath, err)
@@ -386,8 +395,8 @@ func (c *StaleBeadsRedirectCheck) verifyRedirectTopology(ctx *CheckContext, rigD
 	townRoot := ctx.TownRoot
 
 	// Check if rig has beads configured at all
-	rigBeadsPath := filepath.Join(rigDir, ".beads")
-	mayorBeadsPath := filepath.Join(rigDir, "mayor", "rig", ".beads")
+	rigBeadsPath := constants.RigBeadsWritePath(rigDir)
+	mayorBeadsPath := constants.LegacyRigBeadsPath(rigDir)
 
 	// If neither location has beads, skip this rig (not configured)
 	if !dirExists(rigBeadsPath) && !dirExists(mayorBeadsPath) {
