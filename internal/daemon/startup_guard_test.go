@@ -228,8 +228,8 @@ func TestGuardStartup(t *testing.T) {
 }
 
 // TestStartupCandidates pins the owners a legacy takeover must show stopped
-// (gt-kpan5): the launchd job always, and the town's container only when the
-// town's daemon settings name one, never from the default name.
+// (gt-kpan5): the town's container only when the town's daemon settings name
+// one, never from the default name. The launchd job is never a candidate.
 func TestStartupCandidates(t *testing.T) {
 	t.Parallel()
 	const named = "scratch-town-daemon-1"
@@ -240,21 +240,21 @@ func TestStartupCandidates(t *testing.T) {
 		wantErr  string // "" means the candidates are returned
 	}{
 		{
-			name: "a town that names its container adds it after launchd",
+			name: "a town that names its container names that container alone",
 			settings: `{"type":"daemon-patrol-config","version":1,` +
 				`"container_name":"` + named + `","compose_project":"scratch-town"}`,
-			want: []Owner{guardLaunchd, {Kind: agentconfig.SupervisorContainer, ID: named}},
+			want: []Owner{{Kind: agentconfig.SupervisorContainer, ID: named}},
 		},
 		{
 			// The default name could be another town's container, so settings
-			// that set other fields but no container_name name launchd alone.
-			name:     "settings that name no container leave launchd alone",
+			// that set other fields but no container_name name no candidate.
+			name:     "settings that name no container name no candidate",
 			settings: `{"type":"daemon-patrol-config","version":1,"env":{"GT_SEAT_REFILL_MAX_PRIORITY":"50"}}`,
-			want:     []Owner{guardLaunchd},
+			want:     nil,
 		},
 		{
-			name: "a town with no settings file names launchd alone",
-			want: []Owner{guardLaunchd},
+			name: "a town with no settings file names no candidate",
+			want: nil,
 		},
 		{
 			name:     "a settings file that does not parse refuses",
@@ -321,7 +321,6 @@ func jobAnswers(st templates.SupervisorState) templates.SupervisorReader {
 func TestStartupOwnerProbe(t *testing.T) {
 	t.Parallel()
 	container := Owner{Kind: agentconfig.SupervisorContainer, ID: "scratch-town-daemon-1"}
-	launchd := guardLaunchd
 	dockerAnswers := func(out string, err error) templates.ContainerDocker {
 		return func(context.Context, []string) ([]byte, error) { return []byte(out), err }
 	}
@@ -370,27 +369,10 @@ func TestStartupOwnerProbe(t *testing.T) {
 			known: true,
 		},
 		{
-			name: "a launchd job with a pid is running", owner: launchd,
+			// The pod cannot see launchd, so the probe never reads the job and
+			// the owner is unknown, which refuses.
+			name: "a launchd job is unknown and its job is never read", owner: guardLaunchd,
 			docker: dockerAnswers("", nil), host: host,
-			job:     jobAnswers(templates.SupervisorState{Kind: "launchd", Loaded: true, PID: 4242, LastExit: -1}),
-			running: true, known: true,
-		},
-		{
-			name: "a loaded launchd job without a pid is stopped", owner: launchd,
-			docker: dockerAnswers("", nil), host: host,
-			job:   jobAnswers(templates.SupervisorState{Kind: "launchd", Loaded: true, LastExit: 0}),
-			known: true,
-		},
-		{
-			name: "a launchd job the manager does not know is stopped", owner: launchd,
-			docker: dockerAnswers("", nil), host: host,
-			job:   jobAnswers(templates.SupervisorState{Kind: "launchd", LastExit: -1}),
-			known: true,
-		},
-		{
-			name: "a launchd job the probe cannot read is unknown", owner: launchd,
-			docker: dockerAnswers("", nil), host: host,
-			job: jobAnswers(templates.SupervisorState{Kind: "launchd", LastExit: -1, Err: errors.New("launchctl unavailable")}),
 		},
 		{
 			name:   "a manual owner whose host cannot be named is unknown",

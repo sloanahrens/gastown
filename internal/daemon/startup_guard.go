@@ -14,7 +14,6 @@ import (
 	"time"
 
 	agentconfig "github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/hostprobe"
 	"github.com/steveyegge/gastown/internal/procid"
 	"github.com/steveyegge/gastown/internal/templates"
 )
@@ -57,16 +56,15 @@ func guardStartup(townRoot string, self Owner, takeover bool, probe OwnerProbe, 
 // (gt-qpeei.28): the same decision Run makes in the process that is about to
 // become the daemon, asked from the command that is about to start it. self is
 // the owner the started daemon will name (the CLI is not it); takeover is the
-// operator's --takeover; probe nil reads docker, launchd and systemd for real.
-// now is the clock the decision reads, including the age of the host agent's
-// launchd reading. daemon.log existing is the prior-run evidence Run takes from
-// New, since the CLI has written nothing to it. logger receives the takeover
-// line when a takeover passes a recorded container owner. A nil logger has no
-// log to write that line to, so it leaves the takeover without a callback and
-// CheckTakeover refuses it: a takeover is never allowed to pass unlogged.
+// operator's --takeover; probe nil reads docker and systemd for real. now is the
+// clock the decision reads. daemon.log existing is the prior-run evidence Run
+// takes from New, since the CLI has written nothing to it. logger receives the
+// takeover line when a takeover passes a recorded container owner. A nil logger
+// has no log to write that line to, so it leaves the takeover without a callback
+// and CheckTakeover refuses it: a takeover is never allowed to pass unlogged.
 func GuardStart(townRoot string, self Owner, takeover bool, probe OwnerProbe, now time.Time, logger *log.Logger) error {
 	if probe == nil {
-		probe = startupOwnerProbeForTown(townRoot, templates.RunDockerInspect, os.Hostname, templates.SupervisorJobState, func() time.Time { return now })
+		probe = startupOwnerProbe(templates.RunDockerInspect, os.Hostname, templates.SupervisorJobState)
 	}
 	var tookOver func(Owner)
 	if logger != nil {
@@ -116,68 +114,31 @@ func priorRunEvidence(townRoot string, logPreexisted bool) bool {
 }
 
 // startupCandidates names the owners this town could have, which a legacy
-// takeover must show stopped: the launchd job and, when the town's settings
-// name one, its container. The container is never named from a default, since
-// an inherited name could be another town's container.
+// takeover must show stopped: the town's container when its settings name one.
+// The container is never named from a default, since an inherited name could be
+// another town's container. The launchd job is not a candidate: the daemon runs
+// in the pod, which cannot see launchd, so a legacy takeover with no container
+// named has no candidate and refuses (checkLegacyStart).
 func startupCandidates(townRoot string) ([]Owner, error) {
 	cfg, err := ReadPatrolConfig(townRoot)
 	if err != nil {
 		return nil, fmt.Errorf("refusing to start: reading %s: %w", PatrolConfigSource(townRoot), err)
 	}
-	candidates := []Owner{{Kind: agentconfig.SupervisorLaunchd, ID: templates.LaunchdLabel}}
+	var candidates []Owner
 	if cfg != nil && cfg.ContainerNameSetting != "" {
 		candidates = append(candidates, Owner{Kind: agentconfig.SupervisorContainer, ID: cfg.ContainerName()})
 	}
 	return candidates, nil
 }
 
-// hostLaunchdMaxAge is how old the host agent's reading of the launchd job may
-// be when the guard relies on it. The agent writes every 60 seconds, so two
-// intervals leave one write of slack; an older file reads as unknown and the
-// guard refuses.
-const hostLaunchdMaxAge = 2 * time.Minute
-
-// hostLaunchdFallback answers a launchd job read from the host agent's probe
-// file when the job cannot be read here: a container has no launchctl, so the
-// direct read fails and the guard could never show the old launchd owner
-// stopped. Only an unreadable launchd job is replaced, and only by a fresh
-// reading that itself succeeded; a missing, stale, failed or absent (no launchd
-// key) reading leaves the original unknown, which refuses.
-func hostLaunchdFallback(townRoot string, now func() time.Time, inner templates.SupervisorReader) templates.SupervisorReader {
-	return func(kind string) templates.SupervisorState {
-		st := inner(kind)
-		if kind != agentconfig.SupervisorLaunchd || st.Err == nil {
-			return st
-		}
-		p, err := hostprobe.Read(hostprobe.Path(townRoot), now(), hostLaunchdMaxAge)
-		if err != nil || p.Launchd == nil || p.Launchd.Err != "" {
-			return st
-		}
-		return templates.SupervisorState{
-			Kind:     kind,
-			Loaded:   p.Launchd.Value.Loaded,
-			PID:      p.Launchd.Value.PID,
-			LastExit: -1,
-		}
-	}
-}
-
-// startupOwnerProbeForTown is the probe the guard's production callers use: the
-// real readers, with the launchd job read from the host agent's probe file when
-// launchctl is unavailable. now is the clock the file's age is judged against;
-// callers pass the clock they give the guard, so one clock decides the start.
-// read reads the launchd job here, templates.SupervisorJobState in production.
-func startupOwnerProbeForTown(townRoot string, run templates.ContainerDocker, hostname func() (string, error), read templates.SupervisorReader, now func() time.Time) OwnerProbe {
-	return startupOwnerProbe(run, hostname, hostLaunchdFallback(townRoot, now, read))
-}
-
 // startupOwnerProbe builds the probe the guard asks about a recorded owner from
 // the readers the supervisor status already uses: docker inspect for a
 // container (run, templates.RunDockerInspect in production), the service
-// manager's job for launchd and systemd, and a same-host process check for a
-// manual owner (hostname names this host). Whatever it cannot read is unknown,
-// and unknown refuses. read reads a supervisor job; nil reads the service
-// manager for real.
+// manager's job for systemd, and a same-host process check for a manual owner
+// (hostname names this host). A launchd owner is unknown, since launchd is not
+// visible from the pod and its job is not read. Whatever it cannot read is
+// unknown, and unknown refuses. read reads a supervisor job; nil reads the
+// service manager for real.
 func startupOwnerProbe(run templates.ContainerDocker, hostname func() (string, error), read templates.SupervisorReader) OwnerProbe {
 	if read == nil {
 		read = templates.SupervisorJobState
@@ -186,11 +147,6 @@ func startupOwnerProbe(run templates.ContainerDocker, hostname func() (string, e
 		switch owner.Kind {
 		case agentconfig.SupervisorContainer:
 			return containerOwnerRunning(templates.ContainerJobState(run, templates.ContainerDockerContext, owner.ID)(owner.Kind))
-		case agentconfig.SupervisorLaunchd:
-			if owner.ID != templates.LaunchdLabel {
-				return false, false
-			}
-			return jobOwnerRunning(read(owner.Kind))
 		case agentconfig.SupervisorSystemd:
 			return systemdOwnerRunning(owner.ID, read(owner.Kind))
 		case OwnerKindManual:
