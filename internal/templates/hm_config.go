@@ -52,6 +52,10 @@ const (
 	hmLocalRerankerName = "llamacpp"               // config.go:40, the local reranker's provider
 )
 
+// hmDefaultEmbedProvider is the embedder hm reads an absent embed block as: the
+// Ollama one hmDefaultEmbedURL addresses (config.go:128).
+const hmDefaultEmbedProvider = "ollama"
+
 // hmConfigFileMode is the mode the derived hm config is written with: its
 // database URL holds the database password, so its owner alone reads it.
 const hmConfigFileMode fs.FileMode = 0o600
@@ -478,12 +482,17 @@ func rewriteHMURL(block map[string]json.RawMessage, what, def string) error {
 }
 
 // rewriteHMEmbed returns the embed block with its url in the container's address.
-// hm reads the embed block over its defaults, so a block that names no url gains
-// the default one, rewritten.
+// hm reads an absent embed block as its default embedder, a provider and a URL
+// together. An absent block is written with both, the URL rewritten, so the
+// derived block reads as that default and not as a URL alone; a block that
+// names no url gains the default one, rewritten.
 func rewriteHMEmbed(raw json.RawMessage) (json.RawMessage, error) {
 	block, err := hmBlock(raw, hmEmbedField)
 	if err != nil {
 		return nil, err
+	}
+	if raw == nil || string(raw) == "null" {
+		block["provider"] = json.RawMessage(jsonString(hmDefaultEmbedProvider))
 	}
 	if err := rewriteHMURL(block, hmEmbedField, hmDefaultEmbedURL); err != nil {
 		return nil, err
