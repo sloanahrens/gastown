@@ -52,11 +52,14 @@ const parallelGlobalWaiver = "parallel-global-ok"
 // method of this package that writes a package variable.
 //
 // Residual, not seen: state a parallel test shares through a fixed filesystem
-// path, a port, the environment, the working directory, a method call whose
-// name matches no writer in its package, or a reset reached through another
-// package's exported function. The guard reads package variables and helper
-// calls only, with no type information, so a clean verdict does not prove a
-// parallel test safe on those.
+// path, a port, the environment, the working directory, or a reset reached
+// through another package's exported function. Method calls are unresolved:
+// a call is matched by name and argument count to a direct writer, so a method
+// that writes a package variable only through a further call is not followed.
+// Each such chain is logged by name as unfollowed in the test log, and is not
+// a failure. The guard reads package variables and helper calls only, with no
+// type information, so a clean verdict does not prove a parallel test safe on
+// those.
 func TestNoParallelTestsReachProcessGlobalSwaps(t *testing.T) {
 	t.Parallel()
 	scanner := newSeamScanner(sharedRepoTree(t))
@@ -148,6 +151,9 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 		"TestParallelSetsSlotNoRestore": false,
 		// An environment writer reached by a method name is out of scope.
 		"TestParallelCallsEnvSetter": false,
+		// A method that writes only through a further call is not followed: the
+		// test is not reported, and the log names its chain (checked below).
+		"TestParallelCallsRelayForward": false,
 		// A reset in another package is the residual, not a seam.
 		"TestParallelCallsOtherReset": false,
 	}
@@ -182,6 +188,18 @@ func TestParallelGlobalGuardSeesItsTarget(t *testing.T) {
 			t.Errorf("scanner missed %s; the fixture expects it reported.\nScanned %d violation(s):\n%s",
 				name, len(got), strings.Join(got, "\n"))
 		}
+	}
+	// The unfollowed method call is not a violation, but it must be named by
+	// test and method in the log, never read as clean in silence.
+	var sawUnfollowed bool
+	for _, line := range scanner.unfollowed {
+		if strings.Contains(line, " TestParallelCallsRelayForward — unfollowed: reaches method relay.Forward at ") {
+			sawUnfollowed = true
+		}
+	}
+	if !sawUnfollowed {
+		t.Errorf("scanner did not log the unfollowed method call relay.Forward reached from TestParallelCallsRelayForward.\nUnfollowed:\n%s",
+			strings.Join(scanner.unfollowed, "\n"))
 	}
 }
 
@@ -496,6 +514,19 @@ func TestParallelCallsResetMethod(t *testing.T) {
 	h.Reset(3)
 }
 
+// relay.Forward writes the seam only through SetSeam, so it is no direct writer
+// and the guard cannot follow a call to it past its own body. The test is not
+// reported, and its chain is logged by name as unfollowed.
+type relay struct{}
+
+func (relay) Forward() { SetSeam(9) }
+
+func TestParallelCallsRelayForward(t *testing.T) {
+	t.Parallel()
+	var r relay
+	r.Forward()
+}
+
 // A bare Swap with a parameter and no restore is a setter, not a swap: the
 // spec's shape restores what it swapped, so this is no seam here.
 func setSlotNoRestore(v *int) {
@@ -559,6 +590,9 @@ type seamScanner struct {
 	dirs    []string
 	pkgs    map[string]*pkgAnalysis // dir -> analysis
 	mutator map[string]map[string]bool
+	// unfollowed names each method call the guard could not follow past, from a
+	// parallel test it reads as clean. It is logged, not failed.
+	unfollowed []string
 }
 
 func newSeamScanner(tree *repoTree) *seamScanner {
@@ -633,8 +667,13 @@ func (s *seamScanner) scan(t *testing.T) []string {
 			continue
 		}
 		violations = append(violations, pa.parallelSwaps()...)
+		s.unfollowed = append(s.unfollowed, pa.unfollowedCalls()...)
 	}
 	sort.Strings(violations)
+	sort.Strings(s.unfollowed)
+	for _, line := range s.unfollowed {
+		t.Logf("%s", line)
+	}
 	return violations
 }
 
@@ -681,12 +720,16 @@ type pkgAnalysis struct {
 	crossTargets map[string]map[string]string // file path -> alias -> import path
 	parseErrors  []string
 	hasTestFiles bool
-	writerSet    map[string]bool // memo of writers(), built on first use
+	writerSet    map[string]bool     // memo of writers(), built on first use
+	unfollowSet  map[string]bool     // memo of unfollowReach(), built on first use
+	indirect     map[string][]string // memo of indirectMethods(), built on first use
+	fset         *token.FileSet
 }
 
 func parseDir(s *seamScanner, dir string) *pkgAnalysis {
 	pa := &pkgAnalysis{
 		root:         s.root,
+		fset:         s.fset,
 		importPath:   s.importPath(dir),
 		pkgLevel:     map[string]bool{},
 		funcs:        map[string]*ast.FuncDecl{},
@@ -1459,6 +1502,174 @@ func (pa *pkgAnalysis) parallelSwaps() []string {
 		out = append(out, rel+":"+strconv.Itoa(pa.lineOf[name])+" "+name+" — "+pa.why(name))
 	}
 	return out
+}
+
+// unfollowedCalls names, for each t.Parallel test in this package that the guard
+// reads as clean, the first method call in its chain that the guard cannot
+// follow past. methodsNamed resolves a method call to direct writers only, so a
+// method that writes a global through a further call ends the chain there, and
+// without this line the test would read clean in silence.
+func (pa *pkgAnalysis) unfollowedCalls() []string {
+	reach := pa.unfollowReach()
+	var out []string
+	for name, fd := range pa.funcs {
+		if fd == nil || fd.Recv != nil || !strings.HasPrefix(name, "Test") || pa.waived[name] || fd.Body == nil {
+			continue
+		}
+		if !callsParallel(fd.Body) || pa.mutates(name) || !reach[name] {
+			continue
+		}
+		site := pa.unfollowedSite(name, reach, map[string]bool{})
+		rel, err := filepath.Rel(pa.root, pa.fileOf[name])
+		if err != nil {
+			rel = pa.fileOf[name]
+		}
+		out = append(out, rel+":"+strconv.Itoa(pa.lineOf[name])+" "+name+" — unfollowed: reaches method "+site+
+			", which writes a process global only through a further call the guard does not follow")
+	}
+	return out
+}
+
+// unfollowedSite names the first unfollowable method call reached from fn, going
+// only through same-package callees in reach. It returns the method and the
+// call's position, or "" when none is reached.
+func (pa *pkgAnalysis) unfollowedSite(fn string, reach, seen map[string]bool) string {
+	if seen[fn] {
+		return ""
+	}
+	seen[fn] = true
+	fd := pa.funcs[fn]
+	if fd == nil || fd.Body == nil {
+		return ""
+	}
+	once := onceRanges(fd.Body, pa.pkgLevel)
+	var calls []*ast.CallExpr
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && !within(call.Pos(), once) {
+			calls = append(calls, call)
+		}
+		return true
+	})
+	for _, call := range calls {
+		if key := pa.unfollowedMethod(call, pa.fileOf[fn]); key != "" {
+			return key + " at " + pa.fset.Position(call.Pos()).String()
+		}
+	}
+	for _, call := range calls {
+		for _, callee := range pa.calleeNames(call, pa.fileOf[fn]) {
+			if !reach[callee] {
+				continue
+			}
+			if site := pa.unfollowedSite(callee, reach, seen); site != "" {
+				return site
+			}
+		}
+	}
+	return ""
+}
+
+// unfollowedMethod names the method a call could be when that method writes a
+// package variable only through a further call, and no direct writer matches
+// the call. Such a method is the one the guard cannot follow past. It returns ""
+// for every other call, including calls into another package.
+func (pa *pkgAnalysis) unfollowedMethod(call *ast.CallExpr, file string) string {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	if base, ok := sel.X.(*ast.Ident); ok {
+		if _, isImport := pa.imports[file][base.Name]; isImport {
+			return ""
+		}
+	}
+	if len(pa.methodsNamed(sel.Sel.Name, call)) > 0 {
+		return ""
+	}
+	for _, key := range pa.indirectMethods()[sel.Sel.Name] {
+		if fitsArgs(pa.funcs[key].Type, call) {
+			return key
+		}
+	}
+	return ""
+}
+
+// indirectMethods indexes, by method name, this package's methods that reach a
+// global write without being a direct writer: the ones the guard cannot follow
+// past. Each list is sorted, so the named method is the same on every run.
+func (pa *pkgAnalysis) indirectMethods() map[string][]string {
+	if pa.indirect != nil {
+		return pa.indirect
+	}
+	idx := map[string][]string{}
+	for key := range pa.writers() {
+		fd := pa.funcs[key]
+		if fd == nil || fd.Recv == nil || pa.direct[key] != nil {
+			continue
+		}
+		name := key[strings.LastIndex(key, ".")+1:]
+		idx[name] = append(idx[name], key)
+	}
+	for _, keys := range idx {
+		sort.Strings(keys)
+	}
+	pa.indirect = idx
+	return idx
+}
+
+// unfollowReach is the set of this package's functions whose same-package chain
+// reaches an unfollowable method call. A function is in it when it makes one
+// directly, or calls a member, the same least fixed point writers() computes.
+// It is memoized, so each parallel test's chain is a lookup, not a fresh walk.
+func (pa *pkgAnalysis) unfollowReach() map[string]bool {
+	if pa.unfollowSet != nil {
+		return pa.unfollowSet
+	}
+	set := map[string]bool{}
+	for name, fd := range pa.funcs {
+		if fd == nil || fd.Body == nil {
+			continue
+		}
+		if pa.hasUnfollowedCall(name) {
+			set[name] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		for name, fd := range pa.funcs {
+			if set[name] || fd == nil || fd.Body == nil {
+				continue
+			}
+			if pa.callsWriter(name, set) {
+				set[name] = true
+				changed = true
+			}
+		}
+	}
+	pa.unfollowSet = set
+	return set
+}
+
+// hasUnfollowedCall reports whether name's own body makes an unfollowable method
+// call, outside a package-level sync.Once body.
+func (pa *pkgAnalysis) hasUnfollowedCall(name string) bool {
+	body := pa.funcs[name].Body
+	once := onceRanges(body, pa.pkgLevel)
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		call, ok := n.(*ast.CallExpr)
+		if !ok || within(call.Pos(), once) {
+			return true
+		}
+		if pa.unfollowedMethod(call, pa.fileOf[name]) != "" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 func callsParallel(body *ast.BlockStmt) bool {
