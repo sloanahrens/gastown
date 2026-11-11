@@ -155,6 +155,14 @@ func TestRecordInstallReceiptsReportsAnUnusableReceiptAndRecordsTheRest(t *testi
 			},
 			wantMsg: []string{"install-receipts.jsonl line 1", "no timestamp"},
 		},
+		{
+			name: "a line whose timestamp does not parse",
+			files: map[string]string{
+				"daemon/install-receipts.jsonl": `{"commit":"ccc333","event":"installed","ts":"yesterday"}` + "\n" +
+					`{"commit":"ddd444","event":"installed","ts":"2026-11-10T13:00:00Z"}` + "\n",
+			},
+			wantMsg: []string{"install-receipts.jsonl line 1", "invalid ISO timestamp"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -229,6 +237,33 @@ func TestRecordInstallReceiptsRefusesAnUnreadableRecord(t *testing.T) {
 	}
 	if string(data) != "not a record\n" {
 		t.Fatalf("record = %q, want it left as it was", data)
+	}
+}
+
+// A record the log refuses to take ends the run with the writer's error: the
+// receipts it already wrote keep their lines, and a later run picks up from
+// there.
+func TestRecordInstallReceiptsReturnsTheWriterError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	files := map[string]string{"daemon/install-receipts.jsonl": installReceiptLine + "\n"}
+	_, err := recordInstallReceipts(installReceiptsEnv(town, files, nil), RegimeEventsPath(town), "ace", nil,
+		func(RegimeEventRecord) error { return errors.New("disk full") })
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("err = %v, want the writer's error", err)
+	}
+}
+
+// A record the run cannot read for a reason other than being absent is an
+// error, not an empty record it replays into.
+func TestRecordInstallReceiptsRefusesAnUnreadableRecordRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	files := map[string]string{"daemon/install-receipts.jsonl": installReceiptLine + "\n"}
+	fail := map[string]error{".runtime/metrics/regime-events.jsonl": errors.New("input/output error")}
+	_, err := RecordInstallReceipts(installReceiptsEnv(town, files, fail), "ace", nil)
+	if err == nil || !strings.Contains(err.Error(), "input/output error") {
+		t.Fatalf("err = %v, want the unreadable record's error", err)
 	}
 }
 

@@ -72,6 +72,15 @@ func regimeRecordKeyOf(rec RegimeEventRecord) regimeRecordKey {
 // and the receipts it already wrote keep their lines: the record is
 // append-only, so a later run picks up where this one stopped.
 func RecordInstallReceipts(env Env, actor string, logLine func(string)) (ReceiptsResult, error) {
+	path := RegimeEventsPath(env.Town)
+	return recordInstallReceipts(env, path, actor, logLine, func(rec RegimeEventRecord) error {
+		return RecordRegimeEvent(path, rec)
+	})
+}
+
+// recordInstallReceipts is RecordInstallReceipts through the record's writer, so
+// a test drives a log the append is refused by.
+func recordInstallReceipts(env Env, path, actor string, logLine func(string), record func(RegimeEventRecord) error) (ReceiptsResult, error) {
 	var res ReceiptsResult
 	if env.ReadFile == nil {
 		return res, errors.New("install receipts: Env.ReadFile is unset")
@@ -83,7 +92,6 @@ func RecordInstallReceipts(env Env, actor string, logLine func(string)) (Receipt
 	if logLine == nil {
 		logLine = func(string) {}
 	}
-	path := RegimeEventsPath(env.Town)
 	seen, err := recordedEventKeys(env.ReadFile, path)
 	if err != nil {
 		return res, err
@@ -112,7 +120,7 @@ func RecordInstallReceipts(env Env, actor string, logLine func(string)) (Receipt
 				continue
 			}
 			seen[key] = struct{}{}
-			if err := RecordRegimeEvent(path, rec); err != nil {
+			if err := record(rec); err != nil {
 				return res, err
 			}
 			res.Recorded++

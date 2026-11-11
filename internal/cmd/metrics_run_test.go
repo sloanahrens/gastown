@@ -133,6 +133,17 @@ func TestRecordInstallRegimeEventsRecordsTheReceipts(t *testing.T) {
 	}
 }
 
+// The hour's regime step fails with the sync's error, so the hour is escalated
+// rather than reading a town it could not record as clean.
+func TestRecordInstallRegimeEventsReturnsTheSyncError(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	err := recordInstallRegimeEvents(&out, metrics.Env{Town: t.TempDir()}, townMetricsActor)
+	if err == nil || !strings.Contains(err.Error(), "install regime events") || !strings.Contains(err.Error(), "ReadFile") {
+		t.Fatalf("err = %v, want the sync's wiring error under the step's name", err)
+	}
+}
+
 // A receipts file the hour cannot read prints one line and does not fail the
 // step: the other receipts still record.
 func TestRecordInstallRegimeEventsReportsAnUnreadableFile(t *testing.T) {

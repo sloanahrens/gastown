@@ -166,6 +166,30 @@ func TestRegimeBackfillRefusesUnreadableSettings(t *testing.T) {
 	}
 }
 
+// A backfill with no reader is a wiring error, not a town with no seats.
+func TestRegimeBackfillRequiresAReader(t *testing.T) {
+	t.Parallel()
+	_, _, err := RegimeBackfill(Env{Town: t.TempDir()}, time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC), "backfill")
+	if err == nil || !strings.Contains(err.Error(), "ReadFile") {
+		t.Fatalf("err = %v, want the unwired-reader refusal", err)
+	}
+}
+
+// A backfill file the host cannot create fails the call with the path named.
+func TestRegimeBackfillReturnsTheWriteError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A regular file where the runtime directory goes makes the directory
+	// creation fail.
+	if err := os.WriteFile(filepath.Join(town, ".runtime"), []byte("in the way\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := RegimeBackfill(Env{Town: town, ReadFile: os.ReadFile}, time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC), "backfill")
+	if err == nil || !strings.Contains(err.Error(), "creating") {
+		t.Fatalf("err = %v, want the failed write named", err)
+	}
+}
+
 // A backfill with no actor to record under is refused and writes no file.
 func TestRegimeBackfillRefusesNoActor(t *testing.T) {
 	t.Parallel()
@@ -244,5 +268,106 @@ func TestRegimeBackfillMovesValidate(t *testing.T) {
 		if !json.Valid(data) {
 			t.Fatalf("move %q is not valid JSON", move.Reason)
 		}
+	}
+}
+
+// backfillFakeFile is one open file a test decides the result of: the count
+// Write returns (-1 is len(p)), and the errors either call gives.
+type backfillFakeFile struct {
+	written  int
+	writeErr error
+	closeErr error
+}
+
+func (f *backfillFakeFile) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	if f.written < 0 {
+		return len(p), nil
+	}
+	return f.written, nil
+}
+
+func (f *backfillFakeFile) Close() error { return f.closeErr }
+
+// Every failure a host cannot be made to produce is an error naming the step:
+// the encoder, the open, the write, a short write and the close.
+func TestWriteRegimeBackfillDrivesItsFailures(t *testing.T) {
+	t.Parallel()
+	records := []RegimeEventRecord{{
+		TS: time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC), Kind: "platform", Reason: "moved", Actor: "backfill",
+	}}
+	file := func(f *backfillFakeFile) backfillWrite {
+		return backfillWrite{
+			encode: json.Marshal,
+			open:   func(string, int, os.FileMode) (backfillFile, error) { return f, nil },
+		}
+	}
+	tests := []struct {
+		name  string
+		seams backfillWrite
+		want  string
+	}{
+		{
+			name: "the encoder fails",
+			seams: backfillWrite{
+				encode: func(any) ([]byte, error) { return nil, errors.New("encode failed") },
+				open:   func(string, int, os.FileMode) (backfillFile, error) { return &backfillFakeFile{written: -1}, nil },
+			},
+			want: "encoding",
+		},
+		{
+			name: "the file cannot be opened",
+			seams: backfillWrite{
+				encode: json.Marshal,
+				open:   func(string, int, os.FileMode) (backfillFile, error) { return nil, errors.New("permission denied") },
+			},
+			want: "opening",
+		},
+		{name: "the write fails", seams: file(&backfillFakeFile{writeErr: errors.New("disk full")}), want: "writing"},
+		{name: "the write is short", seams: file(&backfillFakeFile{written: 1}), want: "short write"},
+		{name: "the close fails", seams: file(&backfillFakeFile{written: -1, closeErr: errors.New("flush failed")}), want: "closing"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "regime-events-backfill-20261111.jsonl")
+			_, err := writeRegimeBackfillWith(path, records, tc.seams)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want it to name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A directory the host cannot make is an error naming the creation.
+func TestWriteRegimeBackfillRefusesADirectoryItCannotMake(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.WriteFile(filepath.Join(town, ".runtime"), []byte("in the way\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(town, ".runtime", "metrics", "regime-events-backfill-20261111.jsonl")
+	_, err := writeRegimeBackfill(path, []RegimeEventRecord{{
+		TS: time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC), Kind: "platform", Reason: "moved", Actor: "backfill",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "creating") {
+		t.Fatalf("err = %v, want the failed directory creation named", err)
+	}
+}
+
+// A path that is already a directory cannot be opened for writing.
+func TestWriteRegimeBackfillRefusesAFileItCannotOpen(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "regime-events-backfill-20261111.jsonl")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := writeRegimeBackfill(path, []RegimeEventRecord{{
+		TS: time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC), Kind: "platform", Reason: "moved", Actor: "backfill",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "opening") {
+		t.Fatalf("err = %v, want the failed open named", err)
 	}
 }

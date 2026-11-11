@@ -350,6 +350,37 @@ func TestRegimeBackfillRecordsTheReceiptsAndWritesTheFile(t *testing.T) {
 	}
 }
 
+// A runtime record the backfill cannot read fails the command before it records
+// or writes anything.
+func TestRegimeBackfillReturnsTheReceiptsError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRegimeTownFile(t, town, ".runtime/metrics/regime-events.jsonl", "not a record\n")
+	writeRegimeTownFile(t, town, "daemon/install-receipts.jsonl",
+		`{"commit":"abc123","event":"installed","ts":"2026-10-31T09:00:00Z"}`+"\n")
+
+	_, err := regimeBackfillRun(t, town, "backfill")
+	if err == nil || !strings.Contains(err.Error(), metrics.RegimeEventsPath(town)) {
+		t.Fatalf("err = %v, want the unreadable record named", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(town, ".runtime", "metrics", "regime-events-backfill-20261101.jsonl")); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("a refused backfill left a backfill file behind (%v)", statErr)
+	}
+}
+
+// A settings file the backfill cannot read fails the command with the reader's
+// reason.
+func TestRegimeBackfillReturnsTheBackfillError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRegimeTownFile(t, town, "settings/config.json", `{"polecat_pool": `)
+
+	_, err := regimeBackfillRun(t, town, "backfill")
+	if err == nil || !strings.Contains(err.Error(), "settings/config.json") {
+		t.Fatalf("err = %v, want the unreadable settings file named", err)
+	}
+}
+
 // gt regime backfill outside a town refuses and writes nothing.
 func TestRegimeBackfillOutsideATown(t *testing.T) {
 	t.Parallel()

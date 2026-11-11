@@ -133,6 +133,32 @@ func seatModelRecords(env Env, actor string) ([]RegimeEventRecord, error) {
 	return records, nil
 }
 
+// backfillFile is what writing the backfill needs of the file it writes: one
+// write and a close.
+type backfillFile interface {
+	Write([]byte) (int, error)
+	Close() error
+}
+
+// backfillWrite is the file's way to the disk: it encodes the lines and opens
+// the file. The production values are json.Marshal and os.OpenFile. The struct
+// exists so a test drives the encode, write, short-write and close failures a
+// host cannot be made to produce.
+type backfillWrite struct {
+	encode func(any) ([]byte, error)
+	open   func(name string, flag int, perm os.FileMode) (backfillFile, error)
+}
+
+// hostBackfillWrite is the process's own encoder and filesystem.
+func hostBackfillWrite() backfillWrite {
+	return backfillWrite{encode: json.Marshal, open: openBackfillFile}
+}
+
+// openBackfillFile opens the backfill file for writing.
+func openBackfillFile(name string, flag int, perm os.FileMode) (backfillFile, error) {
+	return os.OpenFile(name, flag, perm)
+}
+
 // writeRegimeBackfill writes records to path as the backfill file: the events
 // trimmed and validated like the writer's, oldest first, a record repeated in
 // records counted once, and one JSON line each. The file is created 0600 and its
@@ -140,14 +166,21 @@ func seatModelRecords(env Env, actor string) ([]RegimeEventRecord, error) {
 // the same events however often the backfill runs. It returns the number of
 // lines written.
 func writeRegimeBackfill(path string, records []RegimeEventRecord) (int, error) {
-	lines, n, err := backfillLines(records)
+	return writeRegimeBackfillWith(path, records, hostBackfillWrite())
+}
+
+// writeRegimeBackfillWith is writeRegimeBackfill through seams. A failed write
+// still closes the file, and a close failure is an error so a backfill the host
+// did not keep is not reported as written.
+func writeRegimeBackfillWith(path string, records []RegimeEventRecord, seams backfillWrite) (int, error) {
+	lines, n, err := backfillLines(records, seams.encode)
 	if err != nil {
 		return 0, err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return 0, fmt.Errorf("regime backfill: creating %s: %w", filepath.Dir(path), err)
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := seams.open(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("regime backfill: opening %s: %w", path, err)
 	}
@@ -167,7 +200,7 @@ func writeRegimeBackfill(path string, records []RegimeEventRecord) (int, error) 
 
 // backfillLines encodes records as the file holds them and returns the bytes and
 // the line count.
-func backfillLines(records []RegimeEventRecord) ([]byte, int, error) {
+func backfillLines(records []RegimeEventRecord, encode func(any) ([]byte, error)) ([]byte, int, error) {
 	sorted := make([]RegimeEventRecord, len(records))
 	copy(sorted, records)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].TS.Before(sorted[j].TS) })
@@ -186,7 +219,7 @@ func backfillLines(records []RegimeEventRecord) ([]byte, int, error) {
 			continue
 		}
 		seen[key] = struct{}{}
-		line, err := json.Marshal(rec)
+		line, err := encode(rec)
 		if err != nil {
 			return nil, 0, fmt.Errorf("regime backfill: encoding: %w", err)
 		}
