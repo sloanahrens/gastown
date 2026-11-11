@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
@@ -127,10 +129,10 @@ func TestSlingBatchSandboxRefusesWithoutBareRepo(t *testing.T) {
 	}
 }
 
-// TestPolecatPruneRefusesARigWithoutBareRepo pins the prune's refusal: a rig
+// TestPruneLocalRefusesARigWithoutBareRepo pins the prune's refusal: a rig
 // with no .repo.git is an error that names the bare path, and the prune does
 // not fall back to a mayor/rig clone.
-func TestPolecatPruneRefusesARigWithoutBareRepo(t *testing.T) {
+func TestPruneLocalRefusesARigWithoutBareRepo(t *testing.T) {
 	t.Parallel()
 	rigPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0o755); err != nil {
@@ -162,5 +164,46 @@ func TestPruneLocalRigRepoDirIsTheBareRepoOnly(t *testing.T) {
 	}
 	if got := rigPruneRepoDir(rigRoot); got != "" {
 		t.Errorf("rigPruneRepoDir = %q, want empty for a rig with only a mayor clone", got)
+	}
+}
+
+// TestSpawnIntegrationDetectionWarnsWithoutRepoGit pins that a rig with no
+// .repo.git turns integration-branch detection off with a warning that names
+// the missing bare repo, not silently.
+func TestSpawnIntegrationDetectionWarnsWithoutRepoGit(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var warn bytes.Buffer
+	got := detectSpawnIntegrationBranchTo(&warn, townRoot, "testrig", &rig.Rig{Name: "testrig", Path: rigPath}, "gt-abc")
+	if got != "" {
+		t.Errorf("detectSpawnIntegrationBranchTo = %q, want no branch for a rig without .repo.git", got)
+	}
+	if want := "no .repo.git under " + rigPath; !strings.Contains(warn.String(), want) {
+		t.Errorf("warning = %q, want it to name %q", warn.String(), want)
+	}
+}
+
+// TestStartCleanupPolecatBranchReportsUndeletedBranch pins that a polecat whose
+// branch was not deleted is not reported as cleaned up.
+func TestStartCleanupPolecatBranchReportsUndeletedBranch(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if deletePolecatBranchReport(&out, rigPath, "testrig", "max") {
+		t.Fatal("deletePolecatBranchReport = true, want false: the branch was not deleted")
+	}
+	got := out.String()
+	if !strings.Contains(got, "not deleted") {
+		t.Errorf("output = %q, want it to report the branch not deleted", got)
+	}
+	if strings.Contains(got, "cleaned up") {
+		t.Errorf("output = %q, claims cleaned up after the branch was not deleted", got)
 	}
 }

@@ -386,17 +386,26 @@ func releaseReusedPolecatWork(townRoot, rigName, polecatName, hookBead string) {
 
 // detectSpawnIntegrationBranch auto-detects the integration branch of the
 // hooked bead's parent epic, when the rig has integration branches enabled.
-// It returns "" when none applies or detection fails.
+// It returns "" when none applies or detection fails; a failure is warned on
+// stderr, so a rig that lost its bare repo does not turn detection off silently.
 func detectSpawnIntegrationBranch(townRoot, rigName string, r *rig.Rig, hookBead string) string {
+	return detectSpawnIntegrationBranchTo(os.Stderr, townRoot, rigName, r, hookBead)
+}
+
+// detectSpawnIntegrationBranchTo is detectSpawnIntegrationBranch with its
+// failure warning written to w.
+func detectSpawnIntegrationBranchTo(w io.Writer, townRoot, rigName string, r *rig.Rig, hookBead string) string {
 	if !polecatIntegrationEnabled(townRoot, rigName) {
 		return ""
 	}
 	repoGit, repoErr := getRigGit(r.Path)
 	if repoErr != nil {
+		style.FprintWarning(w, "integration branch not detected for %s: %v", hookBead, repoErr)
 		return ""
 	}
 	detected, detectErr := beads.DetectIntegrationBranch(beads.New(r.Path), repoGit, hookBead)
 	if detectErr != nil {
+		style.FprintWarning(w, "integration branch not detected for %s: %v", hookBead, detectErr)
 		return ""
 	}
 	return detected
