@@ -2174,7 +2174,7 @@ func spikeThreshold(config *JsonlGitBackupConfig) float64 {
 
 // spikeFloor returns the configured record-count floor or the default (500).
 // A negative value is invalid and reads as the default; 0 is valid and judges
-// every nonzero baseline, which is the pre-floor behaviour.
+// every nonzero baseline, which is the pre-floor behavior.
 func spikeFloor(config *JsonlGitBackupConfig) int {
 	if config != nil && config.SpikeFloor != nil && *config.SpikeFloor >= 0 {
 		return *config.SpikeFloor
