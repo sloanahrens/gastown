@@ -1,31 +1,42 @@
-# Non-test Go files that name a host-only tool (launchctl, cmux, osascript, diskutil)
-# in a string literal (gt-v3sdr2).
+# Non-test Go files that carry Mac-only code (gt-a2uug4).
 #
-# Each line is: path<TAB>tool<TAB>count<TAB>class<TAB>reason
-#   count   the number of string literals in the file that name the tool; a literal
-#           that names it twice counts once. A file with more literals fails; a count
-#           the file no longer reaches fails as stale, so lower it.
-#   class   pending-deletion, the only class: the reason names the gt-in-container
-#           deletion area that removes the use.
+# Each line is: path<TAB>name<TAB>count<TAB>class<TAB>reason
+#   name    a host-only tool (launchctl, cmux, osascript, diskutil) named in a
+#           string literal, or darwin for a file that is macOS-only: a _darwin.go
+#           name, or a build constraint that cannot be satisfied without the
+#           darwin tag.
+#   count   for a host tool, the number of string literals in the file that name
+#           the tool; a literal that names it twice counts once. A file with more
+#           literals fails; a count the file no longer reaches fails as stale, so
+#           lower it. A darwin line carries 1: a file is macOS-only or it is not.
+#   class   pending-deletion, the only class: the reason names the removal bead or
+#           the deletion area that removes the use.
 #
-# The list is a ratchet. TestRepoHostTools fails on a host-tool literal this file does
-# not allow, and on a line whose file no longer names its tool or names it in fewer
-# literals than the count: fix the line in the deletion that removes the use. Do not
-# add a line for new code; remove the use instead.
+# The list is a ratchet. TestRepoHostTools fails on a host-tool literal this file
+# does not allow; TestRepoDarwinFiles fails on a macOS-only file it does not list.
+# Both fail on a stale line: delete a line whose file no longer carries the use or
+# the constraint, and lower a count the file no longer reaches. Do not add a line
+# for new code: macOS-only code lives in devops gt-mac-watch, not in gt.
 internal/bird/spawn.go	cmux	5	pending-deletion	bird spawner: opens the bird's cmux tab, deleted with the bird spawner
 internal/cmd/bird.go	cmux	2	pending-deletion	bird spawner: the bird command help names cmux, deleted with the bird spawner
 internal/cmd/daemon.go	launchctl	1	pending-deletion	remaining launchd references: the restart help says the restart reloads the program through launchctl kickstart
 internal/cmd/daemon_cutover.go	launchctl	1	pending-deletion	remaining launchd references: the cutover diagnosis names the launchd job it stops
 internal/cmd/daemon_supervisor.go	launchctl	4	pending-deletion	remaining launchd references: the launchd supervisor start, stop and bootstrap commands
+internal/cmd/process_start_darwin.go	darwin	1	pending-deletion	gt-a2uug4: the capacity scan's process start token reads sysctl; no removal bead filed
 internal/config/daemon_steps.go	launchctl	3	pending-deletion	remaining launchd references: the cloud-check step description names launchctl
+internal/daemon/pressure_darwin.go	darwin	1	pending-deletion	gt-a2uug4: the daemon's load average reads sysctl; no removal bead filed
 internal/daemon/upgrade_heal.go	launchctl	3	pending-deletion	remaining launchd references: the upgrade heal script bootouts and bootstraps the launchd job
 internal/doctor/openshell_gateway_check.go	launchctl	3	pending-deletion	host agent and probes: the gateway probe runs launchctl print and its fix hint kickstarts the agent
+internal/hoststat/top_darwin.go	darwin	1	pending-deletion	gt-a2uug4: the host CPU sample runs macOS top; no removal bead filed
 internal/installer/gateway.go	launchctl	5	pending-deletion	installer: the gateway install bootstraps its launchd job, deleted with the installer
+internal/polecatimage/stat_darwin.go	darwin	1	pending-deletion	gt-a2uug4: the image cache reads atime through Stat_t; no removal bead filed
 internal/power/power.go	launchctl	1	pending-deletion	gt power: the power engine asks launchd whether the daemon job is loaded
 internal/power/states.go	launchctl	2	pending-deletion	gt power: the power states bootout and bootstrap the launchd job
+internal/procid/start_darwin.go	darwin	1	pending-deletion	gt-a2uug4: StartToken reads kinfo_proc through sysctl; no removal bead filed
 internal/templates/supervisor_state.go	launchctl	2	pending-deletion	remaining launchd references: the supervisor state reads the launchd job and its repair command
 internal/templates/templates.go	launchctl	2	pending-deletion	remaining launchd references: the plist loader unloads and loads the launchd job
 internal/testpolicy/cmd/testtiming/main.go	launchctl	2	pending-deletion	remaining launchd references: the test-timing tool starts its tmux server through launchctl submit
 internal/testutil/unittier/tools.go	diskutil	1	pending-deletion	lsof and diskutil reads: the unit tier tool list names diskutil, which the disk-space read runs
 internal/testutil/unittier/tools.go	launchctl	1	pending-deletion	remaining launchd references: the unit tier tool list names launchctl, which the launchd references run
+internal/util/diskspace_darwin.go	darwin	1	pending-deletion	gt-a2uug4.21: the disk-space read runs diskutil; deleted with the read
 internal/util/diskspace_darwin.go	diskutil	3	pending-deletion	lsof and diskutil reads: the disk-space read runs diskutil info
