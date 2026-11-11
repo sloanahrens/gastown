@@ -174,6 +174,58 @@ func TestMangoReadsTheNewTargetKeys(t *testing.T) {
 	}
 }
 
+// The footer's facts — the columns the table lacks and the days each side of
+// the split covered — reach the page as the writer wrote them, each string
+// stripped and capped, and an end the page cannot place leaves no range rather
+// than half of one (review F8).
+func TestMangoReadsTheFooterFacts(t *testing.T) {
+	t.Parallel()
+
+	p := mangoPanelMap(mangoNow.Format(time.RFC3339),
+		mangoTargetMap("manual_rescue", 37, MangoNoSignal, ""))
+	p["missing_columns"] = []string{"  seat class  ", "   ", "polecat minutes"}
+	p["train"] = map[string]any{"from": "2026-09-05", "to": "2026-10-17"}
+	p["holdout"] = map[string]any{"from": "2026-10-17", "to": "not a day"}
+	m := ReadMango(mangoFixture(t, mangoJSON(t, p)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if want := []string{"seat class", "polecat minutes"}; !reflect.DeepEqual(m.MissingColumns, want) {
+		t.Errorf("missing columns = %v, want %v with the blank one dropped", m.MissingColumns, want)
+	}
+	if m.Train == nil || *m.Train != (MangoSpan{From: "2026-09-05", To: "2026-10-17"}) {
+		t.Errorf("train = %+v, want 2026-09-05..2026-10-17", m.Train)
+	}
+	if m.Holdout != nil {
+		t.Errorf("holdout = %+v, want no range when one end is not a calendar day", m.Holdout)
+	}
+}
+
+// The footer's column list is bounded: a panel from another hand naming more
+// columns than the analysis needs, or a name longer than the page draws, is
+// trimmed rather than handed to the pane as it came.
+func TestMangoCapsTheMissingColumnNames(t *testing.T) {
+	t.Parallel()
+
+	names := make([]string, mangoMissingColumnsMax+3)
+	names[0] = strings.Repeat("x", mangoColumnNameMax+10)
+	for i := 1; i < len(names); i++ {
+		names[i] = fmt.Sprintf("column %d", i)
+	}
+	p := mangoPanelMap(mangoNow.Format(time.RFC3339))
+	p["missing_columns"] = names
+	m := ReadMango(mangoFixture(t, mangoJSON(t, p)), mangoNow)
+	if m.State != MangoFresh {
+		t.Fatalf("state %q note %q", m.State, m.Note)
+	}
+	if len(m.MissingColumns) != mangoMissingColumnsMax {
+		t.Fatalf("%d missing columns, want the cap of %d", len(m.MissingColumns), mangoMissingColumnsMax)
+	}
+	if got := m.MissingColumns[0]; !strings.HasSuffix(got, "…") || len([]rune(got)) > mangoColumnNameMax+1 {
+		t.Errorf("a long column name %q is not clipped to the page's width", got)
+	}
+}
+
 // A panel from the writer before these keys existed reads exactly as it did:
 // every row is the keys it always had, and the new keys are absent from the
 // page's payload rather than present as zeroes the page would draw.
@@ -198,6 +250,9 @@ func TestMangoReadsAPanelWithoutTheNewKeys(t *testing.T) {
 	}
 	if m.Counts != (MangoCounts{NoSignal: 1}) {
 		t.Errorf("counts %+v", m.Counts)
+	}
+	if m.MissingColumns != nil || m.Train != nil || m.Holdout != nil {
+		t.Errorf("a panel without the footer keys reads %v %v %v, want none", m.MissingColumns, m.Train, m.Holdout)
 	}
 
 	b, err := json.Marshal(got)
@@ -1024,8 +1079,8 @@ func mangoFirstObject(t *testing.T, v any) map[string]any {
 
 // The page payload names the new keys as the writer's file does, so the reader
 // and the page speak one schema. Guards the json tags on Mango.Weekly,
-// MangoWeek, MangoEvent, MangoTarget.Conditions, MangoCondition and
-// MangoTarget.LastPositive.
+// MangoWeek, MangoEvent, MangoTarget.Conditions, MangoCondition,
+// MangoTarget.LastPositive, Mango.MissingColumns, Mango.Train and Mango.Holdout.
 func TestMangoPayloadCarriesTheWritersKeyNames(t *testing.T) {
 	t.Parallel()
 
@@ -1035,6 +1090,9 @@ func TestMangoPayloadCarriesTheWritersKeyNames(t *testing.T) {
 	p := mangoPanelMap(mangoNow.Format(time.RFC3339), row)
 	p["weekly"] = []map[string]any{mangoWeekRow("2026-10-05", 27, 0.25)}
 	p["events"] = []map[string]any{mangoEventRow("2026-10-10", "flash seats")}
+	p["missing_columns"] = []string{"seat class"}
+	p["train"] = map[string]any{"from": "2026-09-05", "to": "2026-10-17"}
+	p["holdout"] = map[string]any{"from": "2026-10-17", "to": "2026-10-24"}
 	m := ReadMango(mangoFixture(t, mangoJSON(t, p)), mangoNow)
 	if m.State != MangoFresh {
 		t.Fatalf("state %q note %q", m.State, m.Note)
@@ -1056,9 +1114,10 @@ func TestMangoPayloadCarriesTheWritersKeyNames(t *testing.T) {
 			}
 		}
 	}
-	keys("the panel", payload, "weekly", "events")
+	keys("the panel", payload, "weekly", "events", "missing_columns", "train", "holdout")
 	keys("a week", mangoFirstObject(t, payload["weekly"]), "week", "landings", "rejected_share")
 	keys("an event", mangoFirstObject(t, payload["events"]), "date", "what")
+	keys("the train span", mangoObject(t, payload["train"]), "from", "to")
 	target := mangoFirstObject(t, payload["targets"])
 	keys("a target", target, "conditions", "last_positive")
 	keys("a condition", mangoFirstObject(t, target["conditions"]), "text", "share", "narrows")

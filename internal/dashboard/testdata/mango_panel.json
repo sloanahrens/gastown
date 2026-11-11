@@ -3,6 +3,18 @@
   "generated_at": "2026-10-24T12:00:00Z",
   "items": 412,
   "snapshot_hours": 168,
+  "missing_columns": [
+    "seat class",
+    "polecat minutes"
+  ],
+  "train": {
+    "from": "2026-09-05",
+    "to": "2026-10-17"
+  },
+  "holdout": {
+    "from": "2026-10-17",
+    "to": "2026-10-24"
+  },
   "weekly": [
     {
       "week": "2026-10-05",

@@ -309,6 +309,7 @@ section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 .mgnot.jvstale .mgnotlabel{color:var(--dim)}
 .mgnotpos{margin-right:8px}
 .mgnotwhy{overflow-wrap:anywhere}
+.mgfoot{color:var(--dim);padding:6px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
 /* The Mango table takes its column widths from the shares below, not from what
    its cells hold, so a long target label or condition wraps inside its own
    column and the row never widens past the panel. The box carries the panel's
@@ -4142,8 +4143,35 @@ function renderMango(s) {
     else body.append(mangoRow(t, stale));
   }
   for (const t of unchecked) box.append(mangoUnchecked(t, stale));
+  const foot = mangoFooter(m);
+  if (foot) box.append(foot);
   const trend = mangoTrend(m, stale);
   if (trend) box.append(trend);
+}
+
+// mangoFooter says what the table cannot: the landings columns the analysis
+// needed and the table lacked, the days the train and holdout split covers,
+// and which targets had no box found. A target the panel could not check is
+// not named as boxless here: it was never searched, and its own line says why.
+// A panel that carries none of these facts draws no footer at all.
+function mangoFooter(m) {
+  const parts = [];
+  const cols = (Array.isArray(m.missing_columns) ? m.missing_columns : []).filter(c => typeof c === "string" && c);
+  if (cols.length) parts.push("the table lacks " + cols.join(", "));
+  // Both ends of a side are its range; half a range is not drawn.
+  const span = s => (s && typeof s.from === "string" && typeof s.to === "string" && s.from && s.to) ? (s.from === s.to ? s.from : s.from + " to " + s.to) : "";
+  const train = span(m.train), holdout = span(m.holdout);
+  if (train) parts.push("train " + train);
+  if (holdout) parts.push("holdout " + holdout);
+  const boxless = (Array.isArray(m.targets) ? m.targets : [])
+    .filter(t => t && t.verdict !== "not-yet" && !t.best_box)
+    .map(t => t.label || t.target)
+    .filter(n => typeof n === "string" && n);
+  if (boxless.length) parts.push("no box found for " + boxless.join(", "));
+  if (!parts.length) return null;
+  const line = el("div", "mgfoot");
+  line.textContent = parts.join(" · ");
+  return line;
 }
 
 // mangoTrend draws the rejected-share trend under the panel's targets: a line

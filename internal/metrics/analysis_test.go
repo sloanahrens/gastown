@@ -353,6 +353,18 @@ func TestAnalysePublishesThePanelOverTheRunners(t *testing.T) {
 	if got := published.Targets[1].LastPositive; got != "2026-10-12" {
 		t.Errorf("the skipped target's last positive = %q, want 2026-10-12", got)
 	}
+	// The footer's facts come from the joined header and the split: the columns
+	// the fixture's table lacks, and the first and last day of each side
+	// (review F8).
+	if want := []string{"seat class", "polecat minutes"}; !reflect.DeepEqual(published.MissingColumns, want) {
+		t.Errorf("panel.json missing columns = %v, want the columns the table lacks: %v", published.MissingColumns, want)
+	}
+	if published.Train == nil || *published.Train != (PanelSpan{From: "2026-09-14", To: "2026-09-28"}) {
+		t.Errorf("panel.json train = %+v, want 2026-09-14..2026-09-28", published.Train)
+	}
+	if published.Holdout == nil || *published.Holdout != (PanelSpan{From: "2026-09-28", To: "2026-10-12"}) {
+		t.Errorf("panel.json holdout = %+v, want 2026-09-28..2026-10-12", published.Holdout)
+	}
 	stamp, err := os.ReadFile(filepath.Join(dir, stampName))
 	if err != nil {
 		t.Fatalf("stamp: %v", err)
@@ -402,6 +414,28 @@ func TestAnalysePublishesThePanelOverTheRunners(t *testing.T) {
 	}
 	if len(*calls) != before {
 		t.Errorf("the not-due run ran %d commands, want none", len(*calls)-before)
+	}
+}
+
+// TestAnalyseTargetsReturnsTheMangoFailure drives the branch that stops the run
+// when the mango stage over one target fails: no panel is built, and the error
+// names the target whose stage stopped.
+func TestAnalyseTargetsReturnsTheMangoFailure(t *testing.T) {
+	t.Parallel()
+
+	header, rows := analysisLandings()
+	env := Env{
+		ReadFile: os.ReadFile,
+		Run: func(context.Context, []string) ([]byte, error) {
+			return nil, errors.New("the mango container exited 125")
+		},
+	}
+	_, _, err := analyseTargets(context.Background(), env, AnalysisOptions{MangoBin: "/mango"}, header, rows, nil)
+	if err == nil {
+		t.Fatal("analyseTargets reported no error with a mango stage that failed")
+	}
+	if !strings.Contains(err.Error(), "rejected_before_landing") {
+		t.Errorf("error = %q, want it to name the target whose stage failed", err)
 	}
 }
 

@@ -54,8 +54,9 @@ func panelGoldenResults() []TargetResult {
 	}
 }
 
-// panelGoldenMeta is the context the golden panel records: the coverage and the
-// trend the analysis read beside the targets.
+// panelGoldenMeta is the context the golden panel records: the coverage, the
+// trend, the columns the table lacked and the days the split covered, beside the
+// targets.
 func panelGoldenMeta() PanelMeta {
 	return PanelMeta{
 		Items:         412,
@@ -66,6 +67,11 @@ func panelGoldenMeta() PanelMeta {
 		},
 		Events: []PanelEvent{
 			{Date: "2026-10-10", What: "flash seats replaced by Sonnet seats"},
+		},
+		MissingColumns: []string{"seat class", "polecat minutes"},
+		Split: PanelSplit{
+			Train:   PanelSpan{From: "2026-09-05", To: "2026-10-17"},
+			Holdout: PanelSpan{From: "2026-10-17", To: "2026-10-24"},
 		},
 	}
 }
@@ -248,6 +254,126 @@ func TestPanelTargetLastPositive(t *testing.T) {
 				t.Errorf("last positive of %q = %q, want %q", tc.at, got.LastPositive, tc.want)
 			}
 		})
+	}
+}
+
+// TestPanelMissingColumns names the landings columns the analysis needs and
+// the table lacks, in the page's words, and names none when the table carries
+// them all: the footer's missing-columns line appears only for a column that is
+// actually absent (review F8).
+func TestPanelMissingColumns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		header []string
+		want   []string
+	}{
+		{"a table with neither column", []string{"bead", "rig", "landed_at"}, []string{"seat class", "polecat minutes"}},
+		{"only the seat class", []string{"bead", "seat_class"}, []string{"polecat minutes"}},
+		{"only the polecat minutes", []string{"bead", "polecat_secs"}, []string{"seat class"}},
+		{"every column present", []string{"bead", "seat_class", "polecat_secs"}, nil},
+		{"no table handed over", nil, []string{"seat class", "polecat minutes"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := panelMissingColumns(tc.header); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("panelMissingColumns(%v) = %v, want %v", tc.header, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPanelSplitDatesEachSide reads the first and last day of each side from
+// rows already ordered by landed_at. A side with no row, or one whose edge row
+// names no calendar day, gets no range rather than half of one.
+func TestPanelSplitDatesEachSide(t *testing.T) {
+	t.Parallel()
+
+	rows := func(days ...string) []Row {
+		out := make([]Row, 0, len(days))
+		for _, day := range days {
+			out = append(out, Row{"landed_at": day})
+		}
+		return out
+	}
+	tests := []struct {
+		name string
+		p    Prepared
+		want PanelSplit
+	}{
+		{
+			name: "both sides dated",
+			p: Prepared{
+				Train:   rows("2026-09-05T10:00:00Z", "2026-10-17T08:00:00Z"),
+				Holdout: rows("2026-10-17T09:00:00Z", "2026-10-24T12:00:00Z"),
+			},
+			want: PanelSplit{
+				Train:   PanelSpan{From: "2026-09-05", To: "2026-10-17"},
+				Holdout: PanelSpan{From: "2026-10-17", To: "2026-10-24"},
+			},
+		},
+		{
+			name: "a lone row dates both ends",
+			p:    Prepared{Train: rows("2026-10-01T00:00:00Z")},
+			want: PanelSplit{Train: PanelSpan{From: "2026-10-01", To: "2026-10-01"}},
+		},
+		{
+			name: "an empty side has no range",
+			p:    Prepared{Holdout: rows("2026-10-01T00:00:00Z")},
+			want: PanelSplit{Holdout: PanelSpan{From: "2026-10-01", To: "2026-10-01"}},
+		},
+		{
+			name: "an edge row with no day dates nothing",
+			p: Prepared{
+				Train:   rows("", "2026-10-17T08:00:00Z"),
+				Holdout: rows("2026-10-17T09:00:00Z"),
+			},
+			want: PanelSplit{Holdout: PanelSpan{From: "2026-10-17", To: "2026-10-17"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := panelSplit(tc.p); got != tc.want {
+				t.Errorf("panelSplit = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildPanelWritesTheFooterFacts writes the split's ranges and the missing
+// columns as additive keys, and leaves each out when there is nothing to say: a
+// panel of a table with every column and a split with no dated row carries no
+// missing_columns, train or holdout key.
+func TestBuildPanelWritesTheFooterFacts(t *testing.T) {
+	t.Parallel()
+
+	raw, err := json.Marshal(BuildPanel(nil, PanelMeta{}, panelGoldenNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, absent := range []string{`"missing_columns"`, `"train"`, `"holdout"`} {
+		if bytes.Contains(raw, []byte(absent)) {
+			t.Errorf("a panel with no footer facts writes %s: %s", absent, raw)
+		}
+	}
+
+	withFacts, err := json.Marshal(BuildPanel(nil, PanelMeta{
+		MissingColumns: []string{"seat class"},
+		Split:          PanelSplit{Train: PanelSpan{From: "2026-09-05", To: "2026-10-17"}},
+	}, panelGoldenNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"missing_columns":["seat class"]`, `"train":{"from":"2026-09-05","to":"2026-10-17"}`} {
+		if !bytes.Contains(withFacts, []byte(want)) {
+			t.Errorf("a panel with one side split writes no %s: %s", want, withFacts)
+		}
+	}
+	if bytes.Contains(withFacts, []byte(`"holdout"`)) {
+		t.Errorf("a panel whose holdout holds no dated row writes a holdout key: %s", withFacts)
 	}
 }
 

@@ -58,16 +58,40 @@ type PanelEvent struct {
 	What string `json:"what"`
 }
 
+// PanelSpan is one side of the split's day range: the calendar day of its
+// first and of its last landing. A side with no landing, or none whose
+// landed_at names a day, is the zero span and writes no range.
+type PanelSpan struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// empty reports whether the span names no day.
+func (s PanelSpan) empty() bool { return s.From == "" && s.To == "" }
+
+// PanelSplit is the day range each side of the analysis's split covered, so the
+// page can date the figures every verdict rests on.
+type PanelSplit struct {
+	Train, Holdout PanelSpan
+}
+
 // PanelMeta is the panel's context outside its targets: how many landings the
-// analysis read, how many hours of snapshots it joined, the weekly series and
-// the regime events. Weekly reads oldest first and BuildPanel keeps the newest
-// of it. Events need no order from the caller: BuildPanel establishes the order
-// it writes, so a caller may hand it all of history in any order.
+// analysis read, how many hours of snapshots it joined, the weekly series, the
+// regime events, the columns the table lacked and the days the split covered.
+// Weekly reads oldest first and BuildPanel keeps the newest of it. Events need
+// no order from the caller: BuildPanel establishes the order it writes, so a
+// caller may hand it all of history in any order.
 type PanelMeta struct {
 	Items         int
 	SnapshotHours int
 	Weekly        []PanelWeek
 	Events        []PanelEvent
+	// MissingColumns names the landings columns the analysis needed and the
+	// table lacked, in the words the page draws, so the pane can say why a
+	// target is not testable. Nil when the table carried every one.
+	MissingColumns []string
+	// Split is the day range each side of the split covered.
+	Split PanelSplit
 }
 
 // Panel is the panel.json the dashboard reads. Its keys are the dashboard
@@ -75,13 +99,22 @@ type PanelMeta struct {
 // of BuildPanel's output with internal/dashboard/testdata/mango_panel.json, so
 // the two files stay one schema.
 type Panel struct {
-	SchemaVersion int           `json:"schema_version"`
-	GeneratedAt   string        `json:"generated_at"`
-	Items         int           `json:"items"`
-	SnapshotHours int           `json:"snapshot_hours"`
-	Weekly        []PanelWeek   `json:"weekly"`
-	Events        []PanelEvent  `json:"events"`
-	Targets       []PanelTarget `json:"targets"`
+	SchemaVersion int    `json:"schema_version"`
+	GeneratedAt   string `json:"generated_at"`
+	Items         int    `json:"items"`
+	SnapshotHours int    `json:"snapshot_hours"`
+	// MissingColumns names the landings columns the analysis needed and the
+	// table lacked, in the words the page draws, so the pane can say a target
+	// is not testable for want of a column rather than for want of a pattern.
+	// Absent when the table carried every one.
+	MissingColumns []string `json:"missing_columns,omitempty"`
+	// Train and Holdout are the day ranges the split cut, so the page can date
+	// each verdict. Absent for a side with no dated landing.
+	Train   *PanelSpan    `json:"train,omitempty"`
+	Holdout *PanelSpan    `json:"holdout,omitempty"`
+	Weekly  []PanelWeek   `json:"weekly"`
+	Events  []PanelEvent  `json:"events"`
+	Targets []PanelTarget `json:"targets"`
 }
 
 // PanelTarget is one target's line in the panel. A skipped target carries its
@@ -131,18 +164,84 @@ func Verdict(t TargetResult, minPositives int) string {
 // from now in UTC, and the newest of the meta's weekly series and events.
 func BuildPanel(results []TargetResult, meta PanelMeta, now time.Time) Panel {
 	p := Panel{
-		SchemaVersion: panelSchema,
-		GeneratedAt:   now.UTC().Format(time.RFC3339),
-		Items:         meta.Items,
-		SnapshotHours: meta.SnapshotHours,
-		Weekly:        newest(meta.Weekly, panelWeeklyMax),
-		Events:        newest(panelEventList(meta.Events), panelEventsMax),
-		Targets:       make([]PanelTarget, 0, len(results)),
+		SchemaVersion:  panelSchema,
+		GeneratedAt:    now.UTC().Format(time.RFC3339),
+		Items:          meta.Items,
+		SnapshotHours:  meta.SnapshotHours,
+		MissingColumns: meta.MissingColumns,
+		Weekly:         newest(meta.Weekly, panelWeeklyMax),
+		Events:         newest(panelEventList(meta.Events), panelEventsMax),
+		Targets:        make([]PanelTarget, 0, len(results)),
+	}
+	if !meta.Split.Train.empty() {
+		p.Train = &meta.Split.Train
+	}
+	if !meta.Split.Holdout.empty() {
+		p.Holdout = &meta.Split.Holdout
 	}
 	for _, t := range results {
 		p.Targets = append(p.Targets, panelTarget(t))
 	}
 	return p
+}
+
+// panelNeededColumns are the landings columns the panel needs to ask which
+// beads run long or are reworked, with the words the page draws them by. The
+// analysis names each one the joined table lacks in the panel's footer, so a
+// thin result reads as "the table cannot say" rather than as nothing there
+// (review F8). Seat class and polecat minutes arrive with gt-gk99dq.
+var panelNeededColumns = []struct {
+	column, name string
+}{
+	{"seat_class", "seat class"},
+	{"polecat_secs", "polecat minutes"},
+}
+
+// panelMissingColumns names each column in panelNeededColumns that header does
+// not carry, in the page's words and in that order. A nil header names every
+// one: a caller that handed no table has not shown a column to be present.
+func panelMissingColumns(header []string) []string {
+	have := make(map[string]bool, len(header))
+	for _, c := range header {
+		have[c] = true
+	}
+	var missing []string
+	for _, need := range panelNeededColumns {
+		if !have[need.column] {
+			missing = append(missing, need.name)
+		}
+	}
+	return missing
+}
+
+// panelSplit is the day range each side of a prepared split covers. Its rows
+// are ordered by landed_at, so the first and last row date each side; a row
+// whose landed_at names no day leaves that side without a range rather than
+// with half of one.
+func panelSplit(p Prepared) PanelSplit {
+	return PanelSplit{Train: panelRowsSpan(p.Train), Holdout: panelRowsSpan(p.Holdout)}
+}
+
+// panelRowsSpan is the day range of rows already ordered by landed_at.
+func panelRowsSpan(rows []Row) PanelSpan {
+	if len(rows) == 0 {
+		return PanelSpan{}
+	}
+	from, to := panelDay(rows[0]["landed_at"]), panelDay(rows[len(rows)-1]["landed_at"])
+	if from == "" || to == "" {
+		return PanelSpan{}
+	}
+	return PanelSpan{From: from, To: to}
+}
+
+// panelDay is the calendar day a landed_at timestamp names, empty when the text
+// carries no day the page could place.
+func panelDay(at string) string {
+	day := panelLastPositive(at)
+	if _, err := time.Parse(regimeEventsDateLayout, day); err != nil {
+		return ""
+	}
+	return day
 }
 
 // newest is the last keep items of a series read oldest first, and an empty list

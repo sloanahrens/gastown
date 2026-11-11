@@ -218,15 +218,17 @@ func RunAnalysis(ctx context.Context, env Env, opts AnalysisOptions) (AnalysisRe
 	joinHeader, joined, cov := Join(columns, rows, snaps, o.MaxAge)
 	joinHeader, joined = JoinPeaks(joinHeader, joined, peaks)
 	weekly := panelWeekly(joined, o.Reportf)
-	targets, err := analyseTargets(ctx, env, o, joinHeader, joined, explainOnly)
+	targets, split, err := analyseTargets(ctx, env, o, joinHeader, joined, explainOnly)
 	if err != nil {
 		return res, err
 	}
 	panel := BuildPanel(targets, PanelMeta{
-		Items:         len(joined),
-		SnapshotHours: snapshotHours(snaps),
-		Weekly:        weekly,
-		Events:        panelEvents(env, o.Reportf),
+		Items:          len(joined),
+		SnapshotHours:  snapshotHours(snaps),
+		Weekly:         weekly,
+		Events:         panelEvents(env, o.Reportf),
+		MissingColumns: panelMissingColumns(joinHeader),
+		Split:          split,
 	}, now)
 	panelJSON, err := json.MarshalIndent(panel, "", "  ")
 	if err != nil {
@@ -536,22 +538,27 @@ func writeFile(path string, r io.Reader) error {
 
 // analyseTargets runs the mango stage for every target whose training split
 // holds MangoMinSupport positives, and reports every target's split counts
-// either way.
-func analyseTargets(ctx context.Context, env Env, o AnalysisOptions, header []string, rows []Row, explainOnly []string) ([]TargetResult, error) {
+// either way. It also reports the day range the split covered: every target
+// cuts the same landings, so the first target's split dates the panel.
+func analyseTargets(ctx context.Context, env Env, o AnalysisOptions, header []string, rows []Row, explainOnly []string) ([]TargetResult, PanelSplit, error) {
 	results := make([]TargetResult, 0, len(mangoTargets))
-	for _, target := range mangoTargets {
+	var split PanelSplit
+	for i, target := range mangoTargets {
 		p := Prepare(header, rows, explainOnly, target)
+		if i == 0 {
+			split = panelSplit(p)
+		}
 		if p.TrainPositives < MangoMinSupport {
 			results = append(results, skipTarget(target, p))
 			continue
 		}
 		res, err := analyseTarget(ctx, env, o, p, target)
 		if err != nil {
-			return nil, err
+			return nil, PanelSplit{}, err
 		}
 		results = append(results, res)
 	}
-	return results, nil
+	return results, split, nil
 }
 
 // skipTarget is a target's counts with no box: too few training positives is
