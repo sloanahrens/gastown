@@ -2259,6 +2259,17 @@ func TestAdoptTrackedBeads(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		"adopted marker that cannot be written fails": {
+			repo: bareOf(withBeads),
+			// The copied files are written first; a directory where the marker
+			// goes makes only the marker write fail.
+			setup: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, adoptedBeadsMarker), 0755); err != nil {
+					t.Fatalf("making the blocking directory: %v", err)
+				}
+			},
+			wantErr: true,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
