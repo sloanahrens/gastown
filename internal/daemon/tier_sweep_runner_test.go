@@ -17,6 +17,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/sweeprunner"
 )
 
@@ -927,6 +928,10 @@ func runnerKubernetesDaemon(t *testing.T, now time.Time) (*Daemon, sweeprunner.S
 	// at its first look; the copy path reads its result without waiting on it.
 	// A test that polls through a failed read sets runnerBudgetNeverEnds.
 	d.tierSweepSeams.budgetTimer = runnerBudgetSpent
+	// A run deferred behind a foreign Job past its budget escalates (gt-pihhr4);
+	// the fake notifier takes that delivery, so no runner test reaches the real
+	// one and waits on it.
+	d.notifier = notifyfake.New()
 	st := tierSweepStage{tiers: []string{"integration", "race"}, slot: true, rig: "gastown", tested: runnerTestSHA, budget: time.Second}
 	spec, ok, err := d.tierSweepRunnerSpec(st)
 	if err != nil || !ok {
@@ -1316,24 +1321,23 @@ func TestTierSweepRunnerGuardsRefuseAMalformedGuard(t *testing.T) {
 }
 
 // TestSyncRefusesWhileASweepJobReadsTheClaim drives the guard through a fake
-// kubectl: a rig sweep Job still active refuses the run, naming it, and nothing
-// is applied; a listing that cannot be read defers the run instead, since a
-// read that did not answer is no verdict on the sweep Job (gt-gg9hv.56). A Job
-// whose listing holds three true condition types ending in Complete is ended,
-// not refused, so the run goes on in its order.
+// kubectl: a rig sweep Job still active defers the run, naming it, with no RED
+// verdict and nothing applied; a listing that cannot be read defers the run
+// too, since a read that did not answer is no verdict on the sweep Job
+// (gt-gg9hv.56). A Job whose listing holds three true condition types ending in
+// Complete is ended, not refused, so the run goes on in its order.
 func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 	t.Parallel()
 	const activeJob = "gt-sweep-gastown-deadbeef-otherrun"
 	for _, tc := range []struct {
-		name     string
-		jobs     string
-		err      bool
-		want     string
-		deferred bool
+		name string
+		jobs string
+		err  bool
+		want string
 	}{
 		{name: "an unlabelled active Job", jobs: activeJob + "\n", want: activeJob},
 		{name: "a true condition neither ended type", jobs: activeJob + " Suspended\n", want: activeJob},
-		{name: "a listing that cannot be read", err: true, want: "the guard's read failed", deferred: true},
+		{name: "a listing that cannot be read", err: true, want: "the guard's read failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1346,7 +1350,7 @@ func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 
 			stage := d.tierSweepRunRunner(context.Background(), st, spec)
 
-			if tc.deferred {
+			if tc.err {
 				var unreadable *sweeprunner.GuardUnreadable
 				if stage.ran || !errors.As(stage.err, &unreadable) {
 					t.Fatalf("stage = %+v, want the run deferred on the guard's unreadable listing", stage)
@@ -1355,14 +1359,12 @@ func TestSyncRefusesWhileASweepJobReadsTheClaim(t *testing.T) {
 					t.Errorf("deferral line %q does not say %q", unreadable.Line(), tc.want)
 				}
 			} else {
-				if stage.reason != tierSweepRunnerNoResult {
-					t.Fatalf("stage = %+v, want RED with reason %q", stage, tierSweepRunnerNoResult)
+				var busy *sweeprunner.ActiveJob
+				if stage.ran || !errors.As(stage.err, &busy) || busy.Name != tc.want {
+					t.Fatalf("stage = %+v, want the run deferred on the running Job %q", stage, tc.want)
 				}
-				if stage.exitCode == 0 {
-					t.Error("exit code 0 for a run the guard refused")
-				}
-				if !strings.Contains(stage.output, tc.want) {
-					t.Errorf("stage output does not name %q:\n%s", tc.want, stage.output)
+				if stage.reason != "" || strings.Contains(stage.output, tierSweepRunnerNoResult) {
+					t.Errorf("stage = %+v, want no RED verdict and no %q reason", stage, tierSweepRunnerNoResult)
 				}
 			}
 			for _, argv := range cmds.ran {

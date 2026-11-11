@@ -946,12 +946,24 @@ func labelValue(v string) string {
 	return strings.TrimRight(part[:maxNameLength-1-len(digest)], "-") + "-" + digest
 }
 
+// ActiveJob is the claim guard's refusal: a sweep Job of the rig has not ended,
+// so the run that would rewrite the repo claim must wait for it or be adopted.
+// The daemon tells the two apart by Name, which is the Job's name as listed.
+type ActiveJob struct {
+	Name string
+}
+
+// Error is the refusal as the launch reports it.
+func (e *ActiveJob) Error() string {
+	return fmt.Sprintf("sweep job %s has not ended and may still be reading the repo claim", e.Name)
+}
+
 // refuseActiveSweepJobs reads the guard's listing of every Job — one
-// "<name> <true condition>..." line each — and refuses while a Job the renderer
-// made for spec's rig has not ended: that Job may still be reading the repo
-// claim this run is about to rewrite. A name belongs to the rig when the
-// renderer's structure says so, so a rig whose name extends this one's is not
-// counted by the shorter one. A Job has ended when any true condition is
+// "<name> <true condition>..." line each — and refuses with an *ActiveJob while a
+// Job the renderer made for spec's rig has not ended: that Job may still be
+// reading the repo claim this run is about to rewrite. A name belongs to the rig
+// when the renderer's structure says so, so a rig whose name extends this one's
+// is not counted by the shorter one. A Job has ended when any true condition is
 // Complete or Failed, whatever other conditions the cluster lists beside it and
 // in whatever order; a line naming no such condition refuses, because a Job
 // whose state is unknown is not a Job known to have ended.
@@ -966,7 +978,7 @@ func refuseActiveSweepJobs(spec Spec) func(stdout []byte) error {
 			if hasEndedCondition(fields[1:]) {
 				continue
 			}
-			return fmt.Errorf("sweep job %s has not ended and may still be reading the repo claim", fields[0])
+			return &ActiveJob{Name: fields[0]}
 		}
 		return nil
 	}
