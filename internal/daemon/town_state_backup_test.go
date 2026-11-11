@@ -151,6 +151,125 @@ func TestTownStateBackupRefusesPartialTown(t *testing.T) {
 	}
 }
 
+// townStateDiskTown writes the export set under a temporary town root, plus a
+// file outside it that a link could reach. MapFS cannot hold a symbolic link,
+// so the symlink tests read a real directory.
+func townStateDiskTown(t *testing.T) (town, outside string) {
+	t.Helper()
+	town = t.TempDir()
+	outside = t.TempDir()
+	for _, name := range []string{
+		"mayor/town.json",
+		"settings/config.json",
+		"settings/models.json",
+		"settings/placement.json",
+		"settings/regime-events.json",
+		"settings/themes/dark.json",
+		"gastown/settings/config.json",
+		"gastown/.beads/config.yaml",
+	} {
+		writeTownStateFile(t, filepath.Join(town, filepath.FromSlash(name)), "{}")
+	}
+	writeTownStateFile(t, filepath.Join(outside, "secret.json"), `{"token":"outside"}`)
+	return town, outside
+}
+
+// townStateLink replaces the town-relative path with a symbolic link to target.
+func townStateLink(t *testing.T, town, name, target string) {
+	t.Helper()
+	full := filepath.Join(town, filepath.FromSlash(name))
+	if err := os.RemoveAll(full); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, full); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestTownStateBackupRefusesSymlinksOutOfTheTown: a link on the way to an
+// exported file, or the directory it is read from, fails the snapshot. The
+// backup never reads the file the link points at.
+func TestTownStateBackupRefusesSymlinksOutOfTheTown(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, town, outside string)
+	}{
+		{
+			name: "exported file is a link",
+			setup: func(t *testing.T, town, outside string) {
+				townStateLink(t, town, "settings/models.json", filepath.Join(outside, "secret.json"))
+			},
+		},
+		{
+			name: "exported directory is a link",
+			setup: func(t *testing.T, town, outside string) {
+				townStateLink(t, town, "settings/themes", outside)
+			},
+		},
+		{
+			name: "directory on the way to an export is a link",
+			setup: func(t *testing.T, town, outside string) {
+				townStateLink(t, town, "settings", outside)
+			},
+		},
+		{
+			name: "rig directory is a link",
+			setup: func(t *testing.T, town, outside string) {
+				townStateLink(t, town, "gastown", outside)
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town, outside := townStateDiskTown(t)
+			tc.setup(t, town, outside)
+			snap, err := collectTownState(os.DirFS(town), []string{"gastown"})
+			if err == nil {
+				t.Fatalf("collectTownState returned %d files and no error; want the link refused", len(snap.Files))
+			}
+			if snap.Files != nil {
+				t.Errorf("a refused snapshot still carries files: %v", sortedFileKeys(snap.Files))
+			}
+		})
+	}
+}
+
+// TestTownStateBackupMissingRigDirectoryHoldsNothing: a registered rig with no
+// directory on disk holds nothing to back up; it is not an error.
+func TestTownStateBackupMissingRigDirectoryHoldsNothing(t *testing.T) {
+	t.Parallel()
+	snap, err := collectTownState(townStateTree(), []string{"gastown", "absent"})
+	if err != nil {
+		t.Fatalf("collectTownState: %v", err)
+	}
+	if _, ok := snap.Files["absent/settings/config.json"]; ok {
+		t.Errorf("a missing rig directory exported a file")
+	}
+	if !containsString(sortedFileKeys(snap.Files), "gastown/settings/config.json") {
+		t.Errorf("the present rig's configuration was not exported: %v", sortedFileKeys(snap.Files))
+	}
+}
+
+// TestTownStateBackupIgnoresAnUnexportedLink: a link that no export row names
+// is never read, so it does not fail the snapshot.
+func TestTownStateBackupIgnoresAnUnexportedLink(t *testing.T) {
+	t.Parallel()
+	town, outside := townStateDiskTown(t)
+	townStateLink(t, town, "settings/notes.txt", filepath.Join(outside, "secret.json"))
+	snap, err := collectTownState(os.DirFS(town), []string{"gastown"})
+	if err != nil {
+		t.Fatalf("collectTownState: %v", err)
+	}
+	if _, ok := snap.Files["settings/notes.txt"]; ok {
+		t.Errorf("an unexported link was exported")
+	}
+}
+
 // TestTownStateBackupCorruptRegistryIsAnError: a rig registry that exists but
 // does not load fails the tick. It is not zero rigs, which would back up no rig
 // configuration and report the run clean.
