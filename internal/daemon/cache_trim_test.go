@@ -2166,24 +2166,65 @@ var cacheTrimCeilingOnce = sync.OnceValues(buildCacheTrimCeilingListing)
 // equal and no-fit cases are each one KiB apart.
 func buildCacheTrimCeilingListing() (cacheTrimCeilingListing, error) {
 	cacheTrimCeilingBuilds.Add(1)
-	listing := cacheTrimClaimRouteListing(cachevol.TrimMaxShards+1, 0)
-	size, err := cacheTrimRemovalListSize(listing)
+	return findCacheTrimCeilingPad(cacheTrimCeilingAtPad)
+}
+
+// cacheTrimCeilingBuild makes the listing with pad extra bytes and the room it
+// needs.
+type cacheTrimCeilingBuild func(pad int) (string, int64, error)
+
+// findCacheTrimCeilingPad returns the listing whose room is a whole KiB. It
+// builds at pad 0, computes the pad from that room, and builds once more at the
+// pad to check it. Only when that check fails does the old 0..1023 search run
+// (gt-8c49k6).
+func findCacheTrimCeilingPad(build cacheTrimCeilingBuild) (cacheTrimCeilingListing, error) {
+	listing, room, err := build(0)
 	if err != nil {
 		return cacheTrimCeilingListing{}, err
 	}
-	room := polecatimage.TrimListRoom(size)
-	for pad := 0; room%1024 != 0 && pad < 1024; pad++ {
-		listing = cacheTrimClaimRouteListing(cachevol.TrimMaxShards+1, pad)
-		size, err = cacheTrimRemovalListSize(listing)
+	if pad := cacheTrimCeilingPad(room); pad != 0 {
+		listing, room, err = build(pad)
 		if err != nil {
 			return cacheTrimCeilingListing{}, err
 		}
-		room = polecatimage.TrimListRoom(size)
+	}
+	// Fallback: the one check failed, so search pad by pad.
+	for pad := 0; room%1024 != 0 && pad < 1024; pad++ {
+		listing, room, err = build(pad)
+		if err != nil {
+			return cacheTrimCeilingListing{}, err
+		}
 	}
 	if room%1024 != 0 {
 		return cacheTrimCeilingListing{}, fmt.Errorf("the writer's room is %d bytes, which a df -Pk reply cannot name", room)
 	}
 	return cacheTrimCeilingListing{listing: listing, room: room}, nil
+}
+
+// cacheTrimCeilingAtPad builds the ceiling listing with pad extra bytes on its
+// first path, and the writer room that listing needs.
+func cacheTrimCeilingAtPad(pad int) (string, int64, error) {
+	listing := cacheTrimClaimRouteListing(cachevol.TrimMaxShards+1, pad)
+	size, err := cacheTrimRemovalListSize(listing)
+	if err != nil {
+		return "", 0, err
+	}
+	return listing, polecatimage.TrimListRoom(size), nil
+}
+
+// cacheTrimCeilingPad is the smallest pad that makes a room a whole number of
+// KiB, given the room at pad 0. The room is TrimListRoom, which gains slope
+// bytes of room per pad byte, so the pad is the room's shortfall to the next
+// KiB divided by slope. A slope that is not positive gives pad 0. The caller
+// checks the result with one more build, so a pad that is wrong for the slope
+// is caught there, not here.
+func cacheTrimCeilingPad(room int64) int {
+	slope := polecatimage.TrimListRoom(1) - polecatimage.TrimListRoom(0)
+	if slope <= 0 {
+		return 0
+	}
+	shortfall := (1024 - room%1024) % 1024
+	return int(shortfall / slope)
 }
 
 // cacheTrimListingAcrossTheCeilingOnAKiBGrid returns the ceiling listing and its
@@ -2210,6 +2251,92 @@ func TestCeilingListingIsBuiltOnce(t *testing.T) {
 	if n := cacheTrimCeilingBuilds.Load(); n != 1 {
 		t.Errorf("the ceiling listing was built %d times, want 1", n)
 	}
+}
+
+// cacheTrimPadListing is a one-entry listing whose path is base bytes plus pad
+// more. Its entry is past the 1 KiB cap and the only one, so its one removal is
+// the path: the removal list grows by exactly pad bytes, as the ceiling's first
+// path does (gt-8c49k6).
+func cacheTrimPadListing(base, pad int) string {
+	return `[{"path":"gocache/` + strings.Repeat("a", base+pad) +
+		`","cache":"build","size":2048,"atime":"2026-10-29T01:00:00Z","mtime":"2026-10-29T01:00:00Z"}]`
+}
+
+// TestCeilingListingPadMatchesTheLoop: the pad from cacheTrimCeilingPad is the
+// pad the old 0..1023 search finds, and the listing and room at that pad are the
+// same. The search runs here only, on small listings: a search over the
+// ceiling's 16 MB listings runs hundreds of builds, seconds of CPU a test run
+// cannot spend (gt-8c49k6).
+func TestCeilingListingPadMatchesTheLoop(t *testing.T) {
+	t.Parallel()
+	build := func(base, pad int) (string, int64) {
+		listing := cacheTrimPadListing(base, pad)
+		return listing, polecatimage.TrimListRoom(cacheTrimRemovalListBytes(t, listing))
+	}
+	for _, base := range []int{0, 1, 2, 3, 7, 100, 511, 512, 1000} {
+		_, baseRoom := build(base, 0)
+		pad := cacheTrimCeilingPad(baseRoom)
+		listing, room := build(base, pad)
+
+		loopPad := -1
+		var loopListing string
+		var loopRoom int64
+		for p := 0; p < 1024; p++ {
+			l, r := build(base, p)
+			if r%1024 == 0 {
+				loopPad, loopListing, loopRoom = p, l, r
+				break
+			}
+		}
+		if loopPad < 0 {
+			t.Fatalf("base %d: the loop found no pad under 1024 that makes the room a whole KiB", base)
+		}
+		if pad != loopPad {
+			t.Errorf("base %d: cacheTrimCeilingPad = %d, the loop's pad = %d", base, pad, loopPad)
+		}
+		if listing != loopListing || room != loopRoom {
+			t.Errorf("base %d: the pad's room is %d, the loop's %d; listings equal: %t", base, room, loopRoom, listing == loopListing)
+		}
+	}
+}
+
+// TestCeilingPadFallsBackToTheSearch: when the room is not linear in the pad,
+// the one check fails and findCacheTrimCeilingPad searches pad by pad, returning
+// the first pad that makes the room a whole KiB. A room that is never a whole
+// KiB is refused (gt-8c49k6).
+func TestCeilingPadFallsBackToTheSearch(t *testing.T) {
+	t.Parallel()
+	nonLinear := func(room func(pad int) int64) cacheTrimCeilingBuild {
+		return func(pad int) (string, int64, error) {
+			return fmt.Sprint(pad), room(pad), nil
+		}
+	}
+	// The room moves 6 bytes a pad byte, not the 2 the formula takes, so the
+	// pad the formula picks misses and the search finds the first hit.
+	t.Run("the search finds the first pad", func(t *testing.T) {
+		t.Parallel()
+		got, err := findCacheTrimCeilingPad(nonLinear(func(pad int) int64 { return 200 + 6*int64(pad) }))
+		if err != nil {
+			t.Fatalf("findCacheTrimCeilingPad: %v", err)
+		}
+		want := -1
+		for p := 0; p < 1024; p++ {
+			if (200+6*int64(p))%1024 == 0 {
+				want = p
+				break
+			}
+		}
+		if got.listing != fmt.Sprint(want) || got.room%1024 != 0 {
+			t.Errorf("got listing %q room %d, want pad %d with a whole-KiB room", got.listing, got.room, want)
+		}
+	})
+	t.Run("a room that is never a whole KiB is refused", func(t *testing.T) {
+		t.Parallel()
+		_, err := findCacheTrimCeilingPad(nonLinear(func(pad int) int64 { return 1 + 2*int64(pad) }))
+		if err == nil || !strings.Contains(err.Error(), "cannot name") {
+			t.Fatalf("err = %v, want the room refused as one a df -Pk reply cannot name", err)
+		}
+	})
 }
 
 // TestCacheTrimCrossesTheShardCeilingByTheClaimRoute is the bead's gate: a
