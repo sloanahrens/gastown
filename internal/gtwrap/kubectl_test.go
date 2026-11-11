@@ -37,6 +37,8 @@ type fakeKube struct {
 	toolOut      string
 	toolExit     int
 	toolErr      error
+	dirExit      int
+	dirErr       error
 	attachExit   int
 	attachErr    error
 
@@ -69,6 +71,8 @@ func (f *fakeKube) Capture(_ context.Context, argv []string) (string, int, error
 		return f.selectorOut, f.selectorExit, f.selectorErr
 	case strings.Contains(line, " pods "):
 		return f.podsOut, f.podsExit, f.podsErr
+	case strings.Contains(line, " -- test -d "):
+		return "", f.dirExit, f.dirErr
 	case strings.Contains(line, " exec "):
 		return f.toolOut, f.toolExit, f.toolErr
 	}
@@ -164,6 +168,102 @@ func TestKubectlExecArgvOutsideTheTown(t *testing.T) {
 	}
 	if !strings.Contains(note.String(), outside) || !strings.Contains(note.String(), podTownRoot) {
 		t.Fatalf("note %q does not name the caller's directory and the pod town root", note.String())
+	}
+}
+
+// TestKubectlKeepsCredentialsOutOfTheExecArgv: kubectl exec puts each forwarded
+// value in argv, so a credential is dropped before argv is built, under any prefix,
+// and a plain GT_ name crosses. The call is built directly, not through Plan, so
+// the screen in Launch is what is under test.
+func TestKubectlKeepsCredentialsOutOfTheExecArgv(t *testing.T) {
+	t.Parallel()
+	secrets := []struct{ name, value string }{
+		{"GT_DOLT_PASSWORD", "placeholder-dolt-value"},
+		{"BEADS_DOLT_PASSWORD", "placeholder-beads-value"},
+		{"GT_API_KEY", "placeholder-key-value"},
+		{"CLAUDE_CODE_OAUTH_TOKEN", "placeholder-oauth-value"},
+	}
+	env := []string{"GT_ROLE=polecat"}
+	for _, s := range secrets {
+		env = append(env, s.name+"="+s.value)
+	}
+	f := healthyKube()
+	var note bytes.Buffer
+	exit, err := testKubectl(f, &note).Launch(Call{Argv: []string{"gt", "status", "--line"}, Env: env, Dir: kubeTown})
+	if err != nil || exit != 0 {
+		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+	}
+	argv := strings.Join(f.attached[0], "\n")
+	for _, s := range secrets {
+		if strings.Contains(argv, s.name) || strings.Contains(argv, s.value) {
+			t.Fatalf("the exec argv carries %s:\n%s", s.name, argv)
+		}
+		if !strings.Contains(note.String(), s.name) || strings.Contains(note.String(), s.value) {
+			t.Fatalf("note %q must name %s and not its value", note.String(), s.name)
+		}
+	}
+	if !slices.Contains(f.attached[0], "GT_ROLE=polecat") {
+		t.Fatalf("the plain GT_ name did not cross into the argv: %q", f.attached[0])
+	}
+}
+
+// TestKubectlRefusesAnEnvEntryWithNoValue: env would run a name with no "=" as a
+// command, so the call is refused before the pod is reached.
+func TestKubectlRefusesAnEnvEntryWithNoValue(t *testing.T) {
+	t.Parallel()
+	f := healthyKube()
+	var note bytes.Buffer
+	exit, err := testKubectl(f, &note).Launch(Call{Argv: []string{"gt", "status"}, Env: []string{"GT_ROLE"}, Dir: kubeTown})
+	if exit != 1 || err == nil {
+		t.Fatalf("Launch = %d, %v; want 1 and an error", exit, err)
+	}
+	if len(f.attached) != 0 {
+		t.Fatalf("a refused call attached %q", f.attached)
+	}
+}
+
+// TestKubectlChecksTheMappedDirectoryInThePod: before the tool runs, the directory
+// the call maps onto is checked as a directory in the pod's container.
+func TestKubectlChecksTheMappedDirectoryInThePod(t *testing.T) {
+	t.Parallel()
+	f := healthyKube()
+	var note bytes.Buffer
+	if _, err := testKubectl(f, &note).Launch(kubeCall(t, kubeTown+"/rig/polecats", false)); err != nil {
+		t.Fatalf("Launch returned an error: %v", err)
+	}
+	want := []string{"kubectl", "--context", kubeContext, "-n", kubeNamespace, "exec", kubePod, "-c", kubeContainer, "--", "test", "-d", podTownRoot + "/rig/polecats"}
+	if len(f.captured) == 0 || !slices.Equal(f.captured[len(f.captured)-1], want) {
+		t.Fatalf("the last probe was %q, want the directory check %q", f.captured, want)
+	}
+}
+
+// TestKubectlRefusesAMappedDirectoryMissingInThePod: a directory the pod does not
+// have is the wrapper's refusal with exit 1, and the tool never runs. A check that
+// does not run refuses too.
+func TestKubectlRefusesAMappedDirectoryMissingInThePod(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		setup     func(*fakeKube)
+		wantError string
+	}{
+		{name: "the directory is missing", setup: func(f *fakeKube) { f.dirExit = 1 }, wantError: "is not a directory in container daemon"},
+		{name: "the directory check does not run", setup: func(f *fakeKube) { f.dirErr = errors.New("exec: refused") }, wantError: "check that"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := healthyKube()
+			tt.setup(f)
+			var note bytes.Buffer
+			exit, err := testKubectl(f, &note).Launch(kubeCall(t, kubeTown+"/rig/gone", false))
+			if exit != 1 || err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("Launch = %d, %v; want 1 with an error containing %q", exit, err, tt.wantError)
+			}
+			if len(f.attached) != 0 {
+				t.Fatalf("a call with a missing directory attached %q", f.attached)
+			}
+		})
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // podTownRoot is the town root inside the daemon pod: the path the Deployment
@@ -27,8 +29,9 @@ var podNameRE = regexp.MustCompile(`^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$`)
 // It execs into the one Running pod of a Deployment, looked up on every call, and
 // has no throwaway rung: the pod is the only place the tool runs.
 type Kubectl struct {
-	// Town is the town root on the Mac. A working directory under it maps onto
-	// podTownRoot; any other directory maps to podTownRoot itself.
+	// Town is the town root on the Mac: the caller passes $HOME/gt, which needs no
+	// town marker, since the Mac is no longer a town. A working directory under it
+	// maps onto podTownRoot; any other directory maps to podTownRoot itself.
 	Town string
 	// Context names the kubectl context every command runs in.
 	Context string
@@ -62,7 +65,9 @@ type kubeLadder struct {
 
 // Launch runs call by exec into the pod the ladder finds, and refuses with the
 // doctor's reason when no rung holds. A working directory the pod cannot see is
-// mapped onto podTownRoot with a note on Note.
+// mapped onto podTownRoot with a note on Note. A directory the pod does not have
+// is refused here, before the tool runs, and a credential in the environment is
+// dropped with a note, since the environment travels in the kubectl argv.
 func (k Kubectl) Launch(call Call) (int, error) {
 	if err := k.validate(); err != nil {
 		return exitDown, err
@@ -74,11 +79,65 @@ func (k Kubectl) Launch(call Call) (int, error) {
 	if l.rung != RungExec {
 		return exitDown, fmt.Errorf("gtwrap: %s", l.reason)
 	}
+	env, dropped, err := screenEnv(call.Env)
+	if err != nil {
+		return exitDown, err
+	}
 	dir, under := podDir(k.Town, call.Dir)
+	if err := k.checkDir(l.pod, dir); err != nil {
+		return exitDown, err
+	}
 	if !under {
 		fmt.Fprintf(k.Note, "gt-wrap: %s is outside the town %s, which the pod cannot see, so the tool runs in %s\n", call.Dir, k.Town, podTownRoot)
 	}
+	if len(dropped) > 0 {
+		fmt.Fprintf(k.Note, "gt-wrap: not forwarding %s into the pod: a credential stays in the pod's own Secrets and never goes in the kubectl argv\n", strings.Join(dropped, ", "))
+	}
+	call.Env = env
 	return k.Shell.Attach(k.execArgv(l.pod, call, dir), nil)
+}
+
+// screenEnv drops the entries of env that carry a credential, and returns the names
+// it dropped, never their values. kubectl exec forwards no environment, so each
+// entry that crosses is an argument of the Mac's kubectl process and of the pod's
+// env process. An entry with no "=" names no value, and env would run its name as
+// a command, so the call is refused rather than passed on.
+func screenEnv(env []string) (kept, dropped []string, err error) {
+	kept = make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			return nil, nil, errors.New("gtwrap: an environment entry has no value, so it cannot cross into the pod; the call is refused")
+		}
+		if isCredential(name) {
+			dropped = append(dropped, name)
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return kept, dropped, nil
+}
+
+// isCredential reports whether name carries a credential. The docker target screens
+// only the CLAUDE_ family, because its values stay off the docker argv. Here every
+// forwarded value is in argv, so the credential words match under every prefix:
+// GT_DOLT_PASSWORD is dropped although the GT_ family forwards it for docker.
+func isCredential(name string) bool {
+	return slices.Contains(config.UnforwardedCredentialEnvVars(), name) || containsCredentialWord(strings.ToUpper(name))
+}
+
+// checkDir runs one check that dir is a directory in the pod's container. A
+// directory the pod lacks is the wrapper's refusal, so the tool never runs in a
+// place the shell could not cd to, and a check that does not run refuses too.
+func (k Kubectl) checkDir(pod, dir string) error {
+	_, exit, err := k.probe("-n", k.Namespace, "exec", pod, "-c", k.Container, "--", "test", "-d", dir)
+	if err != nil {
+		return fmt.Errorf("gtwrap: check that %s is a directory in container %s of pod %s: %w", dir, k.Container, pod, err)
+	}
+	if exit != 0 {
+		return fmt.Errorf("gtwrap: %s is not a directory in container %s of pod %s, so the tool did not run", dir, k.Container, pod)
+	}
+	return nil
 }
 
 // Doctor reports the rungs of the ladder for the tool the wrapper was invoked as:
