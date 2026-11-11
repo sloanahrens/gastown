@@ -54,6 +54,16 @@ func TestRunKubernetesTargetRunsFromAnyDirectory(t *testing.T) {
 	}
 }
 
+// TestTownForRefusesAnUnsetHomeForTheKubernetesTarget: the kubernetes target maps
+// onto $HOME/gt, so an unset HOME is refused rather than mapped from a relative gt.
+func TestTownForRefusesAnUnsetHomeForTheKubernetesTarget(t *testing.T) {
+	t.Parallel()
+	s := surface{getenv: func(string) string { return "" }}
+	if town, err := townFor(targetConfig{Target: kubernetesTarget}, s); err == nil {
+		t.Fatalf("townFor = %q, want an error for an unset HOME", town)
+	}
+}
+
 // TestRunRefusesAKubernetesTargetMissingAField: each field the kubernetes target
 // needs is refused by name, and no target is built for the refused config.
 func TestRunRefusesAKubernetesTargetMissingAField(t *testing.T) {
