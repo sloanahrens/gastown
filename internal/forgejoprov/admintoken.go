@@ -175,8 +175,14 @@ func (e noAdminToken) Error() string { return e.text }
 // Unwrap returns ErrNoAdminToken, so errors.Is recognizes the case.
 func (e noAdminToken) Unwrap() error { return ErrNoAdminToken }
 
-// provisionRule is the broker rule that runs this command with the admin token.
-const provisionRule = "forgejo-provision-go"
+// The auth broker's run rules for the three forgejo commands. This is the one
+// place the names are written: the no-admin-token messages, the tests and the
+// runbook (docs/forgejo-runbook.md) take them from here.
+const (
+	ProvisionRule = "forgejo-provision-go"
+	ResyncRule    = "forgejo-resync-go"
+	CutoverRule   = "forgejo-cutover-go"
+)
 
 // noAdminTokenError is the error ResolveAdminToken returns when no source holds
 // a token. It points the operator at the auth broker.
@@ -185,5 +191,5 @@ func noAdminTokenError(tokenFile string) error {
 	if tokenFile != "" {
 		standIn = fmt.Sprintf(" (or FORGEJO_ADMIN_TOKEN= in %s)", tokenFile)
 	}
-	return noAdminToken{text: fmt.Sprintf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run %s -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", provisionRule, standIn)}
+	return noAdminToken{text: fmt.Sprintf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run %s -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", ProvisionRule, standIn)}
 }

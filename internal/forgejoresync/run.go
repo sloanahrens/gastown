@@ -66,18 +66,14 @@ func (r *Resync) Run() (rc int) {
 	return ExitOK
 }
 
-// resyncRule is the broker rule that runs this command with the admin token.
-const resyncRule = "forgejo-resync-go"
-
 // noAdminTokenLine is the refusal for a run with no admin token. It names this command's
 // broker rule, which the provisioner's own refusal would not.
-
 func noAdminTokenLine(tokenFile string) string {
 	standIn := ""
 	if tokenFile != "" {
 		standIn = fmt.Sprintf(" (or FORGEJO_ADMIN_TOKEN= in %s)", tokenFile)
 	}
-	return fmt.Sprintf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run %s -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", resyncRule, standIn)
+	return fmt.Sprintf("no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run %s -- <its arguments>), or set FORGEJO_ADMIN_TOKEN%s for a stand-in", forgejoprov.ResyncRule, standIn)
 }
 
 // runSteps runs each stage in order and stops at the first error. A stage the

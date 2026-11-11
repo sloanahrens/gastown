@@ -290,7 +290,7 @@ func TestNoAdminTokenIsTheSentinel(t *testing.T) {
 		if !errors.Is(err, ErrNoAdminToken) {
 			t.Fatalf("no-source error does not wrap ErrNoAdminToken: %v", err)
 		}
-		const want = "no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run forgejo-provision-go -- <its arguments>), or set FORGEJO_ADMIN_TOKEN for a stand-in"
+		const want = "no admin token: run this command through the auth broker (sudo -u gt-forge gt-approve run " + ProvisionRule + " -- <its arguments>), or set FORGEJO_ADMIN_TOKEN for a stand-in"
 		if err.Error() != want {
 			t.Fatalf("no-source error text changed:\n got %q\nwant %q", err.Error(), want)
 		}

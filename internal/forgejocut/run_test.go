@@ -1066,7 +1066,7 @@ func TestRunExitCodes(t *testing.T) {
 		if code := w.run(t, context.Background()); code != ExitFailure {
 			t.Fatalf("Run = %d, want 1 (output: %s)", code, w.output())
 		}
-		if !strings.Contains(w.stderr.String(), "sudo -u gt-forge gt-approve run forgejo-cutover-go -- <its arguments>") {
+		if !strings.Contains(w.stderr.String(), "sudo -u gt-forge gt-approve run "+forgejoprov.CutoverRule+" -- <its arguments>") {
 			t.Errorf("the failure does not name this command's broker rule:\n%s", w.stderr.String())
 		}
 		if strings.Contains(w.stderr.String(), "run forgejo-cutover --") {

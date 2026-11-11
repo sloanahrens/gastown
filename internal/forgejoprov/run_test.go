@@ -417,7 +417,7 @@ func TestRunWithoutAdminToken(t *testing.T) {
 		env     map[string]string
 		wantLog string
 	}{
-		{"no admin token file named", map[string]string{"FORGEJO_ADMIN_ENV": ""}, "sudo -u gt-forge gt-approve run forgejo-provision-go"},
+		{"no admin token file named", map[string]string{"FORGEJO_ADMIN_ENV": ""}, "sudo -u gt-forge gt-approve run " + ProvisionRule},
 		{"the admin token file is absent", map[string]string{"FORGEJO_ADMIN_ENV": "/fixture/absent.env"}, "/fixture/absent.env"},
 	}
 	for _, tc := range cases {

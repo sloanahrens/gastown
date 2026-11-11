@@ -694,7 +694,7 @@ func TestRunWithoutAnAdminTokenSendsNothing(t *testing.T) {
 		t.Fatalf("refused run read %v; no token file was named", fx.readPaths)
 	}
 	if !slices.ContainsFunc(fx.logs, func(line string) bool {
-		return strings.Contains(line, "no admin token") && strings.Contains(line, "sudo -u gt-forge gt-approve run forgejo-resync-go")
+		return strings.Contains(line, "no admin token") && strings.Contains(line, "sudo -u gt-forge gt-approve run "+forgejoprov.ResyncRule)
 	}) {
 		t.Fatalf("logs %q do not name the broker command", fx.logs)
 	}

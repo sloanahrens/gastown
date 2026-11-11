@@ -11,7 +11,10 @@ this page is the operations.
 Provision, resync and cutover run as Go commands (`cmd/forgejo-provision`,
 `cmd/forgejo-resync`, `cmd/forgejo-cutover`) through the auth broker's run act —
 `sudo -u gt-forge gt-approve run <rule> -- <its own arguments>`, with the rules
-`forgejo-provision-go`, `forgejo-resync-go` and `forgejo-cutover-go`. The
+`forgejo-provision-go`, `forgejo-resync-go` and `forgejo-cutover-go` (the
+constants `ProvisionRule`, `ResyncRule` and `CutoverRule` in
+`internal/forgejoprov/admintoken.go` are the source of these names; below, the
+commands write `<provision rule>`, `<resync rule>` and `<cutover rule>`). The
 operator installed all four broker programs (those three and
 `forgejo-sources-secret-go`) and pinned their hashes in the broker policy at
 the 2026-11-11 sitting. The broker shows the program, its hash, the account, the
@@ -72,8 +75,8 @@ Bots and tokens are instance-wide; collaborator access and the protection rules
 are per repository, so a fresh instance is two commands:
 
 ```bash
-sudo -u gt-forge gt-approve run forgejo-provision-go --                    # bots and tokens
-sudo -u gt-forge gt-approve run forgejo-provision-go -- --repo OWNER/NAME  # one repo's access and rules
+sudo -u gt-forge gt-approve run <provision rule> --                    # bots and tokens
+sudo -u gt-forge gt-approve run <provision rule> -- --repo OWNER/NAME  # one repo's access and rules
 ```
 
 With `--repo`, each role's bot is granted the access it needs — `write` for
@@ -90,7 +93,7 @@ names that repo as one it cannot read rather than showing it as a rig with no
 landings. One run creates the bot and its token and grants the repo:
 
 ```bash
-sudo -u gt-forge gt-approve run forgejo-provision-go -- --role viewer --repo OWNER/NAME
+sudo -u gt-forge gt-approve run <provision rule> -- --role viewer --repo OWNER/NAME
 ```
 
 `--dry-run` reads the live state and prints what it would write without
@@ -185,7 +188,7 @@ The failures seen on the live rigs so far, each closed or ticketed:
 | A push to Forgejo has no git credentials | Operator | — | install the role-keyed credential helper (`~/forgejo/README.md`) |
 | The mirror prunes a GitHub-only ref | Operator | — | import every GitHub ref before the mirror exists (see "Cutting a rig over") |
 | A protected branch cannot be deleted | Operator | — | only `main` is protected (gt-fn9e6.21) |
-| The dashboard's Forgejo pane names a rig repo it cannot read | Operator | reads that repo's landings not at all, and says so in the panel instead of looking quiet (gt-faml5) | `sudo -u gt-forge gt-approve run forgejo-provision-go -- --role viewer --repo OWNER/NAME` |
+| The dashboard's Forgejo pane names a rig repo it cannot read | Operator | reads that repo's landings not at all, and says so in the panel instead of looking quiet (gt-faml5) | `sudo -u gt-forge gt-approve run <provision rule> -- --role viewer --repo OWNER/NAME` |
 | Provisioning a fresh repo never converges | Operator | — | the collaborator grant lands before the rule (gt-fn9e6.23) |
 | The startup context check alarms after a restart | Operator | raises `landing-forgejo-context:<rig>` | `gt escalate clear --fingerprint landing-forgejo-context:<rig>` once the landing is known good (gt-fn9e6.24) |
 | A rig's new Forgejo block is read only at daemon start | Operator | — | restart the daemon when no landing is in flight (see "Cutting a rig over") |
@@ -215,7 +218,7 @@ the time, with `epoch=` as the Unix time of the run in seconds and each green ru
 overwriting the last. A `--dry-run` writes no record, so it prints the probe
 instead of running it.
 
-`sudo -u gt-forge gt-approve run forgejo-cutover-go -- <rig> --repo OWNER/NAME`
+`sudo -u gt-forge gt-approve run <cutover rule> -- <rig> --repo OWNER/NAME`
 runs the procedure; `--help` lists the flags, and the `forgejocut` package comment gives the
 order and the reason for each step. It refuses while a `gt:ready-to-land` bead
 is queued. `--dry-run` prints every command and writes nothing.
@@ -336,7 +339,7 @@ Two failures that used to be rollback triggers have their own moves:
 
 ## Resyncing and break-glass
 
-`sudo -u gt-forge gt-approve run forgejo-resync-go -- OWNER/NAME` makes a Forgejo
+`sudo -u gt-forge gt-approve run <resync rule> -- OWNER/NAME` makes a Forgejo
 repository's refs match GitHub's and restores `main` protection. Two uses:
 
 - **GitHub moved while Forgejo was unreachable.** Forgejo can fall behind the
@@ -363,7 +366,7 @@ A token's value is returned once, at creation. A lost or leaked token is
 replaced, never recovered:
 
 ```bash
-sudo -u gt-forge gt-approve run forgejo-provision-go -- --rotate
+sudo -u gt-forge gt-approve run <provision rule> -- --rotate
 ```
 
 Rotation revokes the token the file's `TOKEN_NAME` line names (or, for a file
