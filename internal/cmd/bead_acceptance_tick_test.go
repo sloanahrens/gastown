@@ -220,9 +220,19 @@ func TestAcceptanceTickRefusesABlankBoxText(t *testing.T) {
 	fake := beadsfake.New()
 	id := seedAcceptance(t, fake, "- [ ] first")
 	for _, blank := range []string{"", "   ", "- [ ] "} {
-		v := &beadVerbs{client: untouchableStore{Client: fake, t: t}, actor: "me", out: &bytes.Buffer{}}
-		if err := v.tick(id, blank); err == nil {
-			t.Errorf("tick with box text %q succeeded", blank)
+		var out bytes.Buffer
+		v := &beadVerbs{client: untouchableStore{Client: fake, t: t}, actor: "me", out: &out}
+		err := v.tick(id, blank)
+		for _, want := range []string{"not ticking " + id, "the acceptance box text is empty"} {
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Errorf("tick with box text %q: error %v, want it to contain %q", blank, err, want)
+			}
+		}
+		if out.Len() != 0 {
+			t.Errorf("refused tick with box text %q printed %q", blank, out.String())
+		}
+		if got := mustShowBead(t, fake, id).AcceptanceCriteria; got != "- [ ] first" {
+			t.Errorf("criteria after blank tick %q = %q, want unchanged", blank, got)
 		}
 	}
 }
