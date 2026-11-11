@@ -313,19 +313,23 @@ Per-role Markdown files that modify agent behavior at prime time:
 SYSTEM LAYER:   Embedded role template (compiled in)
                         │ if directive exists
                         ▼
-CENTRAL LAYER:  <town>/gastown/mayor/rig/directives/_common.md  (every role, every rig)
-                <town>/gastown/mayor/rig/directives/<role>.md
+CENTRAL LAYER:  <town>/directives/_common.md  (every role, every rig)
+                <town>/directives/<role>.md
                         │ concatenated with
                         ▼
-RIG LAYER:      <town>/<rig>/mayor/rig/.gastown/directives/_common.md (every role in that rig)
-                <town>/<rig>/mayor/rig/.gastown/directives/<role>.md
+RIG LAYER:      <town>/<rig>/.gastown/directives/_common.md (every role in that rig)
+                <town>/<rig>/.gastown/directives/<role>.md
 ```
 
-`<town>` is the town root (`~/gt` on a default install). The central layer is
-the gastown repo's checkout; a rig's own layer sits in that rig's checkout. The
-pre-gt-oz73l directories `<town>/directives/` and `<town>/<rig>/directives/` are
-a fallback: a file there is read only when the layer's own path has no file of
-that name, and the reader logs the legacy path once.
+`<town>` is the town root (`~/gt` on a default install). `<town>/directives/` is
+the deployed copy of the repo file: the gastown repo's `directives/` is the
+source, and the install writes this copy, which is never edited by hand. A rig's
+own layer sits in that rig's own repo. The pre-gt-oz73l directories
+`<town>/gastown/mayor/rig/directives/` (central) and `<town>/<rig>/directives/`
+(rig) are a fallback: a file there is read only when the layer's own path has no
+file of that name, and the reader logs the legacy path once. A rig's old
+`<town>/<rig>/mayor/rig/.gastown/directives/` is no longer read; when it is there
+and the rig's own directory is not, the reader logs once, naming both paths.
 
 Every file that exists concatenates, broadest first: central `_common`, rig
 `_common`, central `<role>`, rig `<role>`. The most specific file appears last

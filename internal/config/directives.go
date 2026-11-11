@@ -149,6 +149,9 @@ func readDirectiveFile(path string) (string, error) {
 // the legacy path when that exists, which is warned about once per process
 // (gt-oz73l). Asking for the shared file yields it once rather than twice.
 func directivePaths(role, townRoot, rigName string) []string {
+	if rigName != "" {
+		warnOldRigDirectory(townRoot, rigName)
+	}
 	var paths []string
 	for _, name := range directiveFileNames(role) {
 		paths = append(paths, layerDirectivePath(CentralDirectiveDir(townRoot), centralLegacyDirectiveDir(townRoot), name))
@@ -204,6 +207,7 @@ func ReadRoleDirectiveFrom(role, townRoot, rigName string, read func(string) ([]
 func readDirectiveSources(read func(string) ([]byte, error), name, townRoot, rigName string) ([]string, error) {
 	layers := [][2]string{{CentralDirectiveDir(townRoot), centralLegacyDirectiveDir(townRoot)}}
 	if rigName != "" {
+		warnOldRigDirectory(townRoot, rigName)
 		layers = append(layers, [2]string{RigDirectiveDir(townRoot, rigName), rigLegacyDirectiveDir(townRoot, rigName)})
 	}
 	var texts []string
@@ -300,6 +304,32 @@ func centralLegacyDirectiveDir(townRoot string) string {
 // the rig's new file is not there (gt-oz73l).
 func rigLegacyDirectiveDir(townRoot, rig string) string {
 	return filepath.Join(townRoot, rig, "directives")
+}
+
+// oldRigDirectiveDir is a rig's first directive home, inside its old mayor/rig
+// checkout. No layer reads it any more, so its files are dropped (gt-3lvcjz.11).
+func oldRigDirectiveDir(townRoot, rig string) string {
+	return filepath.Join(townRoot, rig, "mayor", "rig", ".gastown", "directives")
+}
+
+// warnOldRigDirectory logs once per process when a rig's old directive directory
+// is there and the rig's own directory is not. The old files are not read, so
+// the line names both paths, and says where the files belong (gt-3lvcjz.11).
+func warnOldRigDirectory(townRoot, rig string) {
+	oldDir, newDir := oldRigDirectiveDir(townRoot, rig), RigDirectiveDir(townRoot, rig)
+	if !dirExists(oldDir) || dirExists(newDir) {
+		return
+	}
+	if _, done := legacyDirectiveWarned.LoadOrStore(oldDir, true); done {
+		return
+	}
+	log.Printf("directive directory %s is no longer read; move its files to %s (gt-3lvcjz.11)", oldDir, newDir)
+}
+
+// dirExists reports whether path is a directory that stat can see.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // layerDirectivePath is the file for name in one layer. The new directory's file

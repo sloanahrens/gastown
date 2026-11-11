@@ -217,6 +217,61 @@ func TestDirectiveLegacyReadWarnsOncePerFile(t *testing.T) {
 	}
 }
 
+// A rig's old directive directory, <rig>/mayor/rig/.gastown/directives, is no
+// longer read. When it is there and the rig's own directory is not, its files are
+// dropped and the reader logs one line naming both paths, however many reads
+// happen. Once the rig's own directory exists, nothing is logged (gt-3lvcjz.11).
+// The warning goes to the standard log, which this test captures; the log output
+// is process-wide, so the test is not parallel.
+//
+//testpolicy:allow parallel — captures the process-wide standard log output that the warning is written to
+func TestDirectiveOldRigDirectoryWarnsOnce(t *testing.T) {
+	const rig = "alpha"
+	rows := []struct {
+		name     string
+		writeOld bool
+		writeNew bool
+		wantText []string
+		wantWarn bool
+	}{
+		{name: "old only is dropped and warned", writeOld: true, wantWarn: true},
+		{name: "old and new: new wins, no warning", writeOld: true, writeNew: true, wantText: []string{"new"}},
+		{name: "new only: no warning", writeNew: true, wantText: []string{"new"}},
+		{name: "neither: no warning"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			town := t.TempDir()
+			oldDir := filepath.Join(town, rig, "mayor", "rig", ".gastown", "directives")
+			newDir := RigDirectiveDir(town, rig)
+			if row.writeOld {
+				writeDirective(t, filepath.Join(oldDir, "polecat.md"), "old")
+			}
+			if row.writeNew {
+				writeDirective(t, filepath.Join(newDir, "polecat.md"), "new")
+			}
+			var buf bytes.Buffer
+			log.SetOutput(&buf)
+			defer log.SetOutput(os.Stderr)
+			for i := 0; i < 3; i++ {
+				if got := directiveTexts(t, "polecat", town, rig); !slices.Equal(got, row.wantText) {
+					t.Fatalf("pass %d: directives = %q, want %q", i, got, row.wantText)
+				}
+			}
+			wantLines := 0
+			if row.wantWarn {
+				wantLines = 1
+			}
+			if lines := strings.Count(buf.String(), oldDir); lines != wantLines {
+				t.Errorf("warnings name %s %d time(s), want %d:\n%s", oldDir, lines, wantLines, buf.String())
+			}
+			if row.wantWarn && !strings.Contains(buf.String(), newDir) {
+				t.Errorf("warning does not name the new directory %s:\n%s", newDir, buf.String())
+			}
+		})
+	}
+}
+
 // ReadRoleDirectiveFrom resolves through the caller's reader the same text
 // LoadRoleDirective renders: both layers, the Changelog strip and the join.
 func TestReadRoleDirectiveFromMatchesTheReader(t *testing.T) {

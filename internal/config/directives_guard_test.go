@@ -14,18 +14,47 @@ import (
 )
 
 // A stat error that is not absence on a legacy directive file is an error the
-// read reports, not an absent file (gt-80rnu). The legacy town directory is a
-// regular file here, so stat of a file beneath it fails with ENOTDIR, not
-// ErrNotExist; a reader that treated that as absence would render no directive
-// and pass.
+// read reports, not an absent file (gt-80rnu). Here the new directory is absent
+// and the legacy directory is a regular file, so stat of a file beneath it fails
+// with ENOTDIR, not ErrNotExist; a reader that treated that as absence would
+// render no directive and pass. The error must name the legacy file, which shows
+// the read reached the legacy branch (gt-3lvcjz.11).
 func TestDirectiveLegacyStatErrorFailsClosed(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	if err := os.WriteFile(filepath.Join(town, "directives"), []byte("not a directory"), 0o644); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name   string
+		rig    string
+		legacy func(town string) string
+	}{
+		{
+			name:   "central legacy directory",
+			legacy: func(town string) string { return filepath.Join(town, "gastown", "mayor", "rig", "directives") },
+		},
+		{
+			name:   "rig legacy directory",
+			rig:    "alpha",
+			legacy: func(town string) string { return filepath.Join(town, "alpha", "directives") },
+		},
 	}
-	if _, err := ReadRoleDirectives("polecat", town, "alpha"); err == nil {
-		t.Fatal("ReadRoleDirectives returned no error for a legacy stat failure that is not absence")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			legacy := tc.legacy(town)
+			if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(legacy, []byte("not a directory"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			_, err := ReadRoleDirectives("polecat", town, tc.rig)
+			if err == nil {
+				t.Fatal("ReadRoleDirectives returned no error for a legacy stat failure that is not absence")
+			}
+			if !strings.Contains(err.Error(), legacy) {
+				t.Errorf("error %q does not name the legacy file under %s", err, legacy)
+			}
+		})
 	}
 }
 
