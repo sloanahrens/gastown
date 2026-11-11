@@ -44,8 +44,9 @@ func OSEnv(town string) Env {
 
 // osEnv is OSEnv for a process known to be the town's container or not, so the
 // host source's wiring is testable without a process environment. In the
-// container the host group reads the host agent's probe file, since the
-// container's own commands would describe the container; on the host the
+// container the host group reads the Docker Desktop disk from the host agent's
+// probe file and the CPU share from the pod's cgroup, since the container's own
+// commands would describe the container; on the host the
 // commands are unchanged.
 func osEnv(town string, inContainer bool) Env {
 	env := Env{

@@ -2,7 +2,9 @@ package metrics
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,10 +21,11 @@ const hostCommandTimeout = 5 * time.Second
 
 // hostSource is the host group: the machine the snapshot describes, read with
 // the macOS commands the operator uses by hand, plus one timed bead read for
-// what bd costs it. In container mode the host facts come from the host agent's
-// probe file instead, because sysctl, top, lsof and docker inside a container
-// read the container (gt-jd1fcj). A probe that cannot give a reading leaves
-// its column nil rather than inventing a number, and the failure is counted in
+// what bd costs it. In container mode the CPU share comes from the pod's cgroup
+// and the Docker Desktop disk from the host agent's probe file, because sysctl,
+// top, lsof and docker inside a container read the container (gt-jd1fcj). A
+// probe that cannot give a reading leaves its column nil rather than inventing
+// a number, and the failure is counted in
 // host_probe_failures so a column that is nil because its command failed, hung,
 // printed nothing or printed something the parser could not read is a number in
 // the record and not a silent absence. The other columns are untouched: one
@@ -55,17 +58,17 @@ func newHostSource() hostSource {
 
 func (hostSource) Group() string { return "host" }
 
-// Collect fills the host group: from the host agent's file when the Env names
-// one, from the Mac's own commands otherwise. A probe that cannot give a
-// reading is a nil column counted in host_probe_failures; only an Env with no
-// bead store, which is a wiring error rather than a host that could not answer,
-// is an error.
+// Collect fills the host group: in container mode from the pod's cgroup and the
+// host agent's file, from the Mac's own commands otherwise. A probe that cannot
+// give a reading is a nil column counted in host_probe_failures; only an Env
+// with no bead store, which is a wiring error rather than a host that could not
+// answer, is an error.
 func (s hostSource) Collect(ctx context.Context, env Env) (map[string]any, error) {
 	if env.Beads == nil {
 		return nil, fmt.Errorf("host: the environment has no bead store")
 	}
 	if env.HostProbes != nil {
-		return s.collectFromFile(ctx, env)
+		return s.collectInContainer(ctx, env)
 	}
 	probes := s.probes()
 	cols := make(map[string]any, len(probes)+1)
@@ -89,25 +92,31 @@ func (s hostSource) probeTimeout() time.Duration {
 	return hostCommandTimeout
 }
 
-// collectFromFile fills the group from the host agent's probe file, the host
-// source of a container. None of the macOS commands runs: their answer would
-// describe the container. The bead read stays, because it measures this
-// process's own path to the store, the one its other reads take.
+// collectInContainer fills the group for a process inside the town's container.
+// None of the macOS commands runs: their answer would describe the container.
+// cpu_idle_pct is the pod's own CPU, sampled from its cgroup, because the host
+// agent's idle share is the Mac's and the container cannot see it. docker_disk_pct
+// is the one field still read from the host agent's probe file, since only the
+// Mac can ask Docker Desktop for its VM disk. The bead read stays, because it
+// measures this process's own path to the store, the one its other reads take.
 //
-// load1 and dolt_conns are nil without being failures: the file carries
-// neither a load average nor an established-connection count, and the
-// container's own would name the container, so no probe for them runs and
-// host_probe_failures counts only the file-backed facts. A fact the file could
-// not give is nil and counted, never the zero the field decodes to.
-func (s hostSource) collectFromFile(ctx context.Context, env Env) (map[string]any, error) {
+// load1 and dolt_conns are nil without being failures: nothing in the container
+// or the file gives them, and the container's own would name the container, so
+// no probe for them runs and host_probe_failures counts only the facts read
+// here. A fact that could not be read is nil and counted, never the zero it
+// would decode to.
+func (s hostSource) collectInContainer(ctx context.Context, env Env) (map[string]any, error) {
 	p, err := env.HostProbes(env.now())
 	cols := map[string]any{"load1": nil, "dolt_conns": nil}
 	failures := 0
-	if err != nil || p.CPUIdlePct.Err != "" {
+	cpuCtx, cancel := context.WithTimeout(ctx, s.probeTimeout())
+	cpu, cpuErr := podCPUIdlePct(cpuCtx, env)
+	cancel()
+	if cpuErr != nil {
 		cols["cpu_idle_pct"] = nil
 		failures++
 	} else {
-		cols["cpu_idle_pct"] = p.CPUIdlePct.Value
+		cols["cpu_idle_pct"] = cpu
 	}
 	if err != nil || p.DockerDisk.Err != "" {
 		cols["docker_disk_pct"] = nil
@@ -125,13 +134,121 @@ func (s hostSource) collectFromFile(ctx context.Context, env Env) (map[string]an
 }
 
 // hostProbesFromFile reads the probe file the host agent publishes under town,
-// the host group's source in container mode. A file the reader refuses is an
-// error, so the group reports its facts as unknown rather than as zero.
+// the host group's source for the Docker Desktop disk in container mode. A file
+// the reader refuses is an error, so the group reports its disk as unknown
+// rather than as zero.
 func hostProbesFromFile(town string) func(now time.Time) (hostprobe.Probes, error) {
 	path := hostprobe.Path(town)
 	return func(now time.Time) (hostprobe.Probes, error) {
 		return hostprobe.Read(path, now, hostprobe.ProbeFileMaxAge)
 	}
+}
+
+// The pod's cgroup v2 files. The pod's CPU is accounted to its own cgroup, so
+// the counter and the quota describe the pod the daemon runs in, which is the
+// CPU the container can see, not the Mac under it.
+const (
+	podCPUStatPath = "/sys/fs/cgroup/cpu.stat"
+	podCPUMaxPath  = "/sys/fs/cgroup/cpu.max"
+)
+
+// podCPUIdlePct reads the idle share of the pod's CPU over one window. The
+// cumulative usage counter is read on either side of the window, and the burn
+// is the share of the pod's cores (cpu.max, or every core the node has when the
+// pod has no quota) that the window's wall time could have used. The window is
+// hostCPUWindow, waited through env.Wait, so the group takes that second too.
+//
+// A cgroup file that cannot be read, a counter that fell between the samples and
+// a window that did not move are errors: each would make the idle share a number
+// nothing measured.
+func podCPUIdlePct(ctx context.Context, env Env) (float64, error) {
+	if env.Wait == nil || env.ReadFile == nil {
+		return 0, errors.New("no cgroup read or wait seam, so the pod's CPU cannot be sampled")
+	}
+	cores, err := podCPUCores(env)
+	if err != nil {
+		return 0, err
+	}
+	start := env.now()
+	first, err := podCPUUsage(env)
+	if err != nil {
+		return 0, err
+	}
+	env.Wait(hostCPUWindow)
+	// The wait seam is a plain sleep, so the context can end inside it: the
+	// second sample would then read a counter for a record already discarded.
+	if err := ctx.Err(); err != nil {
+		return 0, fmt.Errorf("waiting out the sampling window: %w", err)
+	}
+	end := env.now()
+	second, err := podCPUUsage(env)
+	if err != nil {
+		return 0, err
+	}
+	window := end.Sub(start).Seconds()
+	if window <= 0 {
+		return 0, errors.New("the two samples share a timestamp, so there is no window to divide by")
+	}
+	if second < first {
+		return 0, errors.New("the pod's cpu.stat usage fell between samples, so it is not one cgroup's counter")
+	}
+	busy := 100 * (float64(second-first) / 1e6) / (window * cores)
+	// The counter and the wall clock round against each other, so a sample can
+	// read a little past every core busy. That is fully busy, not negative idle.
+	if busy > 100 {
+		busy = 100
+	}
+	return 100 - busy, nil
+}
+
+// podCPUCores is how many cores the pod may use: the quota over the period in
+// cpu.max, which reads "max <period>" when the pod has no quota. A pod with no
+// quota may use every core the node has.
+func podCPUCores(env Env) (float64, error) {
+	raw, err := env.ReadFile(podCPUMaxPath)
+	if err != nil {
+		return 0, fmt.Errorf("reading the pod's cpu.max: %w", err)
+	}
+	fields := strings.Fields(string(raw))
+	if len(fields) != 2 {
+		return 0, fmt.Errorf("cpu.max names %d fields, want a quota and a period", len(fields))
+	}
+	if fields[0] == "max" {
+		return float64(runtime.NumCPU()), nil
+	}
+	quota, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil {
+		return 0, fmt.Errorf("cpu.max quota %q: %w", fields[0], err)
+	}
+	period, err := strconv.ParseFloat(fields[1], 64)
+	if err != nil {
+		return 0, fmt.Errorf("cpu.max period %q: %w", fields[1], err)
+	}
+	if quota <= 0 || period <= 0 {
+		return 0, errors.New("cpu.max names no cores")
+	}
+	return quota / period, nil
+}
+
+// podCPUUsage reads the pod's cumulative CPU time, in microseconds, from the
+// usage_usec line of cpu.stat.
+func podCPUUsage(env Env) (int64, error) {
+	raw, err := env.ReadFile(podCPUStatPath)
+	if err != nil {
+		return 0, fmt.Errorf("reading the pod's cpu.stat: %w", err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "usage_usec" {
+			continue
+		}
+		usage, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0, fmt.Errorf("cpu.stat usage_usec %q: %w", fields[1], err)
+		}
+		return usage, nil
+	}
+	return 0, errors.New("cpu.stat names no usage_usec")
 }
 
 // hostProbe is one host column: the command that reads it and the parser that
