@@ -64,11 +64,14 @@ const (
 	defaultSpikeThreshold = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
 
 	// defaultSpikeFloor is the baseline size below which a jump (a rise in
-	// records) is not judged. A database that small swings past any ratio on a
-	// few records, so halting on one stopped every rig's backup push (gt-5tpas2).
-	// Drops are judged at any size. A zero baseline is exempt: it has no ratio,
-	// and its growth is what the small-change floor guards (gt-ttqq8).
+	// records) is not judged (gt-5tpas2). Drops are judged at any size. A zero
+	// baseline is exempt: it has no ratio, and its growth is what the
+	// small-change floor guards (gt-ttqq8).
 	defaultSpikeFloor = 500
+
+	// defaultSpikeGrowthCap is the record count a jump under the floor may add
+	// before it is judged anyway (gt-5tpas2).
+	defaultSpikeGrowthCap = 2000
 
 	// defaultEscalationTimeout is the per-attempt timeout for the gt escalate
 	// child process.  Kept at 60 s so that, even under slot-starvation or
@@ -458,7 +461,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// Phase D: Spike detection — compare current counts against the rolling
 	// baseline derived from recent backup commit history.
 	threshold := spikeThreshold(config)
-	spikes, baselineErr := d.verifyExportCounts(gitRepo, databases, counts, threshold, spikeFloor(config))
+	spikes, baselineErr := d.verifyExportCounts(gitRepo, databases, counts, threshold, spikeFloor(config), spikeGrowthCap(config))
 	if baselineErr != nil {
 		// History exists but yields no baseline. Fail loud (gt-tj-he):
 		// committing would anchor an unchecked baseline, and silently
@@ -2182,6 +2185,16 @@ func spikeFloor(config *JsonlGitBackupConfig) int {
 	return defaultSpikeFloor
 }
 
+// spikeGrowthCap returns the configured growth cap for jumps under the floor,
+// or the default (2000). A negative value reads as the default; 0 is valid and
+// judges every under-floor jump.
+func spikeGrowthCap(config *JsonlGitBackupConfig) int {
+	if config != nil && config.SpikeGrowthCap != nil && *config.SpikeGrowthCap >= 0 {
+		return *config.SpikeGrowthCap
+	}
+	return defaultSpikeGrowthCap
+}
+
 // isTestPollution checks if a JSONL record looks like test data that leaked into
 // production. Checks both "id" and "title" fields against known test patterns.
 func isTestPollution(record map[string]interface{}) bool {
@@ -2864,13 +2877,14 @@ func ensureGitIgnore(gitRepo, entry string) {
 // its baseline (see below).
 //
 // The floor gates jumps only. A jump from a nonzero baseline under floor
-// records is not judged at all: a database that small moves by a large fraction
-// on a few records, and the ratio says nothing about growth (gt-5tpas2). A drop
-// is judged at any baseline, since a lost export must never pass as small, and
-// a drop that keeps under a tenth of its baseline (zero included) is never
-// excused by the small-change guard. A zero baseline is
-// still judged against the small-change floor, since it has no ratio to check
-// and its growth is the bulk load an operator confirms (gt-ttqq8).
+// records is not judged unless it adds more than growthCap records: a database
+// that small moves by a large fraction on a few records, and the ratio says
+// nothing about growth (gt-5tpas2). A drop is judged at any baseline, since a
+// lost export must never pass as small. A drop that keeps under a tenth of its
+// baseline (zero included) halts whatever the threshold and is never excused by
+// the small-change guard. A zero baseline is still judged against the
+// small-change floor, since it has no ratio to check and its growth is the bulk
+// load an operator confirms (gt-ttqq8).
 //
 // A database absent from the baseline window is a first export and is skipped;
 // there is no level to compare against. A database whose newest level was
@@ -2878,7 +2892,7 @@ func ensureGitIgnore(gitRepo, entry string) {
 // is rebaselined the same way a changed count metric is: the two count
 // different tables, so the level this run commits is the first of the new kind
 // and no spike is possible.
-func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts map[string]int, threshold float64, floor int) ([]spikeInfo, error) {
+func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts map[string]int, threshold float64, floor, growthCap int) ([]spikeInfo, error) {
 	const minAbsoluteDelta = 20 // ignore changes smaller than this many records
 
 	var spikes []spikeInfo
@@ -2968,11 +2982,12 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 
 		// A ratio against a tiny baseline is noise (gt-5tpas2). The floor gates
 		// jumps only: a jump is judged when its baseline holds at least floor
-		// records. A drop is judged at any size, so a small database that
-		// loses its records halts rather than passing as small. A zero baseline
-		// is exempt — it has no ratio, and the minAbsoluteDelta guard below is
-		// what catches a bulk load into an empty database (gt-ttqq8).
-		if currentCount > prevCount && prevCount > 0 && prevCount < floor {
+		// records, or when it adds more than growthCap records. A drop is judged
+		// at any size, so a small database that loses its records halts rather
+		// than passing as small. A zero baseline is exempt — it has no ratio, and
+		// the minAbsoluteDelta guard below is what catches a bulk load into an
+		// empty database (gt-ttqq8).
+		if currentCount > prevCount && prevCount > 0 && prevCount < floor && currentCount-prevCount <= growthCap {
 			continue
 		}
 
@@ -2982,9 +2997,10 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		}
 		// Small absolute changes are always fine — avoids false alarms on
 		// small databases where a few issues cause large percentage swings. A
-		// drop that keeps under a tenth of its baseline is near zero and is
-		// never small: an export that came back nearly empty of a database that
-		// had records is the loss this guard must not excuse (gt-5tpas2).
+		// drop that keeps under a tenth of its baseline is near zero: an export
+		// that came back nearly empty of a database that had records is the loss
+		// this guard must not excuse, so it is judged past the guard and halts
+		// whatever the threshold (gt-5tpas2).
 		nearZeroDrop := currentCount < prevCount && currentCount*10 < prevCount
 		if absDelta < minAbsoluteDelta && !nearZeroDrop {
 			continue
@@ -3009,7 +3025,7 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 			effectiveThreshold = threshold * 2 // 2x tolerance for growth
 		}
 
-		if fractionalDelta > effectiveThreshold {
+		if nearZeroDrop || fractionalDelta > effectiveThreshold {
 			spike := spikeInfo{
 				DB:       db,
 				File:     filepath.Join(db, "issues.jsonl"),
@@ -3082,8 +3098,9 @@ func (d *Daemon) spikeAcceptHint(gitRepo string, databases []string, counts map[
 // baseline holds the level the next run compares against.
 func spikeHaltHint(accept string) string {
 	return "Clears on the next run when the count is within bounds again, when spike_threshold " +
-		"(daemon.patrols.jsonl_git_backup) is widened so this change is within bounds, when " +
-		"spike_floor (daemon.patrols.jsonl_git_backup) is raised above a jump's baseline, " +
+		"(daemon.patrols.jsonl_git_backup) is widened so this change is within bounds (a drop " +
+		"to under a tenth of its baseline halts at any threshold), when spike_floor or " +
+		"spike_growth_cap (daemon.patrols.jsonl_git_backup) is raised past a jump, " +
 		"or when these counts are accepted as the new baseline:\n" + accept
 }
 

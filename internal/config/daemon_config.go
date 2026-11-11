@@ -819,6 +819,12 @@ type JsonlGitBackupConfig struct {
 	// never pass as small. 0 judges every jump, the behavior before the floor
 	// existed; unset or negative uses the default (500 records).
 	SpikeFloor *int `json:"spike_floor,omitempty"`
+
+	// SpikeGrowthCap is the number of records a jump under spike_floor may add
+	// before it is judged anyway, so a bulk load into a small database still
+	// halts. 0 judges every jump under the floor; unset or negative uses the
+	// default (2000 records).
+	SpikeGrowthCap *int `json:"spike_growth_cap,omitempty"`
 }
 
 // WispReaperConfig holds configuration for the wisp_reaper patrol.

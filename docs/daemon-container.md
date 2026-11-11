@@ -1354,3 +1354,21 @@ program bead holds the output.
 - The plugin binaries were macOS builds; the image carries Linux builds
   installed under `bin/<goos>-<goarch>/` (gt-gg9hv.6, .9, .10, .14). Plugins
   that wrap Mac-installed tools still fail (gt-gg9hv.15).
+
+## The backup spike guard's keys
+
+The `jsonl_git_backup` patrol halts a database's export when its record count
+moves too far from the baseline its recent backup commits set. Three keys under
+`daemon.patrols.jsonl_git_backup` tune the check. They sit beside the other
+patrol keys (`patrols` in `mayor/daemon.json`, or `settings/config.json`'s
+`daemon` section, whichever the daemon reads):
+
+| Key | Default | What it does |
+|---|---|---|
+| `spike_threshold` | `0.50` | The fraction of the baseline a change may move before it halts. A jump is judged at twice this value. A drop that keeps under a tenth of its baseline halts at any value. |
+| `spike_floor` | `500` | The baseline size a database must reach before a jump is judged. Drops are judged at any size. `0` judges every jump. |
+| `spike_growth_cap` | `2000` | The records a jump under `spike_floor` may add before it is judged anyway. `0` judges every jump under the floor. |
+
+A halted database commits nothing, and the halt log line names what clears it:
+the next count back within bounds, one of the keys above raised or widened, or
+the counts accepted with the `git commit --allow-empty` command the line prints.

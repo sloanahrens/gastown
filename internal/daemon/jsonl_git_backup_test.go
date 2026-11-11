@@ -1193,7 +1193,7 @@ func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
 	gitRepo := t.TempDir()
 	initGitRepo(t, d, gitRepo)
 
-	_, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 100}, 0.20, 0)
+	_, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 100}, 0.20, 0, 0)
 	if err == nil {
 		t.Fatal("expected error when no spike baseline can be computed, got nil")
 	}
@@ -1229,7 +1229,7 @@ func TestVerifyExportCounts_FreshRepoBootstraps(t *testing.T) {
 	gitRepo := t.TempDir()
 	initEmptyGitRepo(t, d, gitRepo)
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq"}, map[string]int{"hq": 1271}, 0.50, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq"}, map[string]int{"hq": 1271}, 0.50, 0, 0)
 	if err != nil {
 		t.Fatalf("fresh repo must bootstrap, got error: %v", err)
 	}
@@ -1311,7 +1311,7 @@ func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
 	commitBackup(t, d, gitRepo, "testdb", 0)
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 25}, 0.20, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 25}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1327,7 +1327,7 @@ func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
 
 	// Below the floor the same growth is an ordinary small change, so a database
 	// that fills a few records at a time backs up unattended.
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 15}, 0.20, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 15}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1337,7 +1337,7 @@ func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
 
 	// Once a level is committed the guard measures as usual again.
 	commitBackup(t, d, gitRepo, "testdb", 25)
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 120}, 0.20, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 120}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1349,9 +1349,10 @@ func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
 // TestVerifyExportCounts_SpikeFloor is gt-5tpas2: the floor gates jumps only. A
 // jump is judged when its baseline holds at least spike_floor records. 21 -> 43
 // and 500 -> 1024 are the same 104.8% increase; only the second is a spike,
-// because its baseline reaches the 500-record floor. A drop is judged at any
-// baseline, so a database that loses its records halts whatever its size, and a
-// zero baseline keeps its own absolute-growth guard.
+// because its baseline reaches the 500-record floor. A jump under the floor is
+// still judged once it adds more than the growth cap (2000 records). A drop is
+// judged at any baseline, so a database that loses its records halts whatever
+// its size, and a zero baseline keeps its own absolute-growth guard.
 func TestVerifyExportCounts_SpikeFloor(t *testing.T) {
 	t.Parallel()
 	const floor = defaultSpikeFloor
@@ -1365,6 +1366,8 @@ func TestVerifyExportCounts_SpikeFloor(t *testing.T) {
 		{name: "500 to 1024 at the floor, same ratio", prev: 500, current: 1024, wantSpike: true},
 		{name: "600 to 1300 over the floor", prev: 600, current: 1300, wantSpike: true},
 		{name: "400 to 800, jump under the floor", prev: 400, current: 800, wantSpike: false},
+		{name: "400 to 2400, under the floor, growth at the cap", prev: 400, current: 2400, wantSpike: false},
+		{name: "400 to 2401, under the floor, growth past the cap", prev: 400, current: 2401, wantSpike: true},
 		{name: "600 to 100, drop from a large baseline", prev: 600, current: 100, wantSpike: true},
 		{name: "400 to 50, drop from under the floor", prev: 400, current: 50, wantSpike: true},
 		{name: "15 to 0, drop to zero from under the floor", prev: 15, current: 0, wantSpike: true},
@@ -1379,7 +1382,7 @@ func TestVerifyExportCounts_SpikeFloor(t *testing.T) {
 			os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
 			commitBackup(t, d, gitRepo, "testdb", tt.prev)
 
-			spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": tt.current}, defaultSpikeThreshold, floor)
+			spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": tt.current}, defaultSpikeThreshold, floor, defaultSpikeGrowthCap)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1419,6 +1422,67 @@ func TestSpikeFloor(t *testing.T) {
 	} {
 		if got := spikeFloor(tt.cfg); got != tt.want {
 			t.Errorf("%s: spikeFloor = %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}
+
+// TestVerifyExportCounts_DropBelowTenthAlwaysHalts is gt-5tpas2: a drop to under
+// a tenth of its baseline halts at any baseline size, whatever the threshold. The
+// 95% and 100% thresholds would pass a 90% drop on the ratio alone, so those rows
+// show the near-zero rule is what halts them.
+func TestVerifyExportCounts_DropBelowTenthAlwaysHalts(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		prev      int
+		current   int
+		threshold float64
+	}{
+		{name: "5 to 0 at the default threshold", prev: 5, current: 0, threshold: defaultSpikeThreshold},
+		{name: "50 to 4 at the default threshold", prev: 50, current: 4, threshold: defaultSpikeThreshold},
+		{name: "5000 to 499 at a 95% threshold", prev: 5000, current: 499, threshold: 0.95},
+		{name: "5000 to 0 at a 100% threshold", prev: 5000, current: 0, threshold: 1.0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := backupTestDaemon(t)
+			gitRepo := t.TempDir()
+			initGitRepo(t, d, gitRepo)
+			os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
+			commitBackup(t, d, gitRepo, "testdb", tt.prev)
+
+			spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": tt.current}, tt.threshold, defaultSpikeFloor, defaultSpikeGrowthCap)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(spikes) != 1 {
+				t.Fatalf("%d -> %d at threshold %.2f = %+v, want one spike", tt.prev, tt.current, tt.threshold, spikes)
+			}
+		})
+	}
+}
+
+// TestSpikeGrowthCap covers the config read: unset and invalid read as the
+// default, zero judges every under-floor jump.
+func TestSpikeGrowthCap(t *testing.T) {
+	t.Parallel()
+	if got := spikeGrowthCap(nil); got != defaultSpikeGrowthCap {
+		t.Errorf("spikeGrowthCap(nil) = %d, want %d", got, defaultSpikeGrowthCap)
+	}
+	negative, zero, configured := -1, 0, 300
+	for _, tt := range []struct {
+		name string
+		cfg  *JsonlGitBackupConfig
+		want int
+	}{
+		{name: "unset", cfg: &JsonlGitBackupConfig{}, want: defaultSpikeGrowthCap},
+		{name: "negative", cfg: &JsonlGitBackupConfig{SpikeGrowthCap: &negative}, want: defaultSpikeGrowthCap},
+		{name: "zero", cfg: &JsonlGitBackupConfig{SpikeGrowthCap: &zero}, want: 0},
+		{name: "configured", cfg: &JsonlGitBackupConfig{SpikeGrowthCap: &configured}, want: 300},
+	} {
+		if got := spikeGrowthCap(tt.cfg); got != tt.want {
+			t.Errorf("%s: spikeGrowthCap = %d, want %d", tt.name, got, tt.want)
 		}
 	}
 }
@@ -1477,7 +1541,7 @@ func TestVerifyExportCounts_FirstExport(t *testing.T) {
 	os.MkdirAll(filepath.Join(gitRepo, "db1"), 0755)
 	commitBackup(t, d, gitRepo, "db1", 100)
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"db2"}, map[string]int{"db2": 100}, 0.20, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"db2"}, map[string]int{"db2": 100}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1496,7 +1560,7 @@ func TestVerifyExportCounts_WithinThreshold(t *testing.T) {
 
 	// 130 records = 30% increase. With 0.20 threshold and 2x asymmetric
 	// multiplier for increases, effective threshold is 0.40, so 30% is fine.
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 130}, 0.20, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 130}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1515,7 +1579,7 @@ func TestVerifyExportCounts_ExceedsThreshold(t *testing.T) {
 
 	// 200 records = 100% jump. Even with 2x asymmetric multiplier (effective
 	// threshold 0.40), 100% exceeds it.
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 200}, 0.20, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 200}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1540,7 +1604,7 @@ func TestVerifyExportCounts_Drop(t *testing.T) {
 
 	// 60 records = 40% drop. Drops use the base threshold (no 2x multiplier)
 	// because losing data is more suspicious than gaining it.
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 60}, 0.20, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 60}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1562,7 +1626,7 @@ func TestVerifyExportCounts_SmallAbsoluteChangeIgnored(t *testing.T) {
 
 	// 5 records = 50% drop, but only 5 records absolute change.
 	// Below minAbsoluteDelta (20), so should NOT spike.
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, 0.20, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1595,7 +1659,7 @@ func TestVerifyExportCounts_NearZeroDropIsJudged(t *testing.T) {
 			os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
 			commitBackup(t, d, gitRepo, "testdb", tt.prev)
 
-			spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": tt.current}, defaultSpikeThreshold, 0)
+			spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": tt.current}, defaultSpikeThreshold, 0, 0)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -1624,7 +1688,7 @@ func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
 	commitBackup(t, d, gitRepo, "testdb", 100)
 
 	// 70 records = 30% drop at 0.20 threshold → should spike (drops use base threshold)
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 70}, 0.20, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 70}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1633,7 +1697,7 @@ func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
 	}
 
 	// 130 records = 30% increase at 0.20 threshold → should NOT spike (increases use 2x = 0.40)
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 130}, 0.20, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 130}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1657,7 +1721,7 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 
 	// First run after the halt: 400 vs committed 1000 = 60% drop → spikes.
 	counts := map[string]int{"testdb": 400}
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1683,7 +1747,7 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 	// every tick, so it is warm on the next run). The baseline is re-derived
 	// from history and now tracks the committed 400 → stable, no spike.
 	// Without the re-derivation this re-halts against the stale 1000 forever.
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1714,7 +1778,7 @@ func TestVerifyExportCounts_HaltWithoutCommitRebaselinesFromCache(t *testing.T) 
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
 	commitBackup(t, d, gitRepo, "testdb", 1000)
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1723,7 +1787,7 @@ func TestVerifyExportCounts_HaltWithoutCommitRebaselinesFromCache(t *testing.T) 
 	}
 
 	// Still halted: no new commit, cache carries the same window.
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3981,7 +4045,7 @@ func TestSyncJsonlGitBackupSpikeWithinVersionStillHalts(t *testing.T) {
 
 	// The halt log line itself names what clears it, for an operator reading
 	// the daemon log rather than the escalation bead (gt-5tpas2).
-	for _, want := range []string{"commit --allow-empty", "spike_threshold", "spike_floor"} {
+	for _, want := range []string{"commit --allow-empty", "spike_threshold", "spike_floor", "spike_growth_cap"} {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("the halt log line must name the clearing action, missing %q:\n%s", want, logs.String())
 		}
@@ -4165,7 +4229,7 @@ func TestVerifyExportCounts_RebaselinesOnlyTheChangedDatabase(t *testing.T) {
 	writeNLines(t, filepath.Join(gitRepo, "hq", "issues.jsonl"), 110)
 	commitAll(t, d, gitRepo, seedSubjectPrefix+"hq=110 [FAILED: gt]")
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq", "gt"}, map[string]int{"hq": 5000, "gt": 9000}, 0.20, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq", "gt"}, map[string]int{"hq": 5000, "gt": 9000}, 0.20, 0, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
