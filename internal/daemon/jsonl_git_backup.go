@@ -491,17 +491,22 @@ func (d *Daemon) syncJsonlGitBackup() {
 		}
 		names := strings.Join(spiking, ", ")
 		// The spiking databases are withheld from the commit: their committed
-		// files stay the last verified copy and their counts stay out of the
-		// subject, so this run cannot advance the baseline past the halt. The
-		// other databases are within bounds, and a tiny or single database's
-		// spike must not stop every rig's backup push (gt-5tpas2).
-		for _, db := range spiking {
-			delete(counts, db)
+		// files stay the last verified copy, and the subject records each one at
+		// its last verified level, not its spiking count, so this run cannot
+		// advance the baseline past the halt. Recording the level rather than
+		// dropping the database keeps it inside the baseline window: a database
+		// absent from the window reads as a first export and would be accepted
+		// unjudged once enough other commits rolled the window past the halt
+		// (gt-5tpas2, om round 3). The other databases are within bounds, and a
+		// tiny or single database's spike must not stop every rig's backup push.
+		allSpiking := len(spiking) == len(counts)
+		for _, s := range spikes {
+			counts[s.DB] = s.Previous
 		}
 		halt := fmt.Sprintf("jsonl_git_backup: HALTING — spike detected in %s:\n%s", names, report)
 		d.logger.Printf("%s\n%s", halt, spikeHaltHint(accept))
 		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report+"\n\n"+accept)
-		if len(counts) == 0 {
+		if allSpiking {
 			cycle.failStep("push", "spike detected")
 			return // Nothing this run verified is safe to push.
 		}
@@ -2175,7 +2180,7 @@ func spikeThreshold(config *JsonlGitBackupConfig) float64 {
 	return defaultSpikeThreshold
 }
 
-// spikeFloor returns the configured record-count floor or the default (500).
+// spikeFloor returns the configured record-count floor or defaultSpikeFloor.
 // A negative value is invalid and reads as the default; 0 is valid and judges
 // every nonzero baseline, which is the pre-floor behavior.
 func spikeFloor(config *JsonlGitBackupConfig) int {
@@ -2186,7 +2191,7 @@ func spikeFloor(config *JsonlGitBackupConfig) int {
 }
 
 // spikeGrowthCap returns the configured growth cap for jumps under the floor,
-// or the default (2000). A negative value reads as the default; 0 is valid and
+// or defaultSpikeGrowthCap. A negative value reads as the default; 0 is valid and
 // judges every under-floor jump.
 func spikeGrowthCap(config *JsonlGitBackupConfig) int {
 	if config != nil && config.SpikeGrowthCap != nil && *config.SpikeGrowthCap >= 0 {

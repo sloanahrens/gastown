@@ -1182,6 +1182,14 @@ func TestFormatSpikeReport(t *testing.T) {
 	}
 }
 
+// noFloor and noGrowthCap judge every jump: the threshold tests below use
+// baselines far under defaultSpikeFloor on purpose, so they pass the documented
+// zero values rather than the defaults (0 is valid: "judges every jump").
+const (
+	noFloor     = 0
+	noGrowthCap = 0
+)
+
 func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
 	t.Parallel()
 	d, _ := backupTestDaemon(t)
@@ -1193,7 +1201,7 @@ func TestVerifyExportCounts_NoBaselineFailsLoud(t *testing.T) {
 	gitRepo := t.TempDir()
 	initGitRepo(t, d, gitRepo)
 
-	_, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 100}, 0.20, 0, 0)
+	_, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 100}, 0.20, noFloor, noGrowthCap)
 	if err == nil {
 		t.Fatal("expected error when no spike baseline can be computed, got nil")
 	}
@@ -1229,7 +1237,7 @@ func TestVerifyExportCounts_FreshRepoBootstraps(t *testing.T) {
 	gitRepo := t.TempDir()
 	initEmptyGitRepo(t, d, gitRepo)
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq"}, map[string]int{"hq": 1271}, 0.50, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq"}, map[string]int{"hq": 1271}, 0.50, spikeFloor(nil), spikeGrowthCap(nil))
 	if err != nil {
 		t.Fatalf("fresh repo must bootstrap, got error: %v", err)
 	}
@@ -1311,7 +1319,7 @@ func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
 	commitBackup(t, d, gitRepo, "testdb", 0)
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 25}, 0.20, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 25}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1327,7 +1335,7 @@ func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
 
 	// Below the floor the same growth is an ordinary small change, so a database
 	// that fills a few records at a time backs up unattended.
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 15}, 0.20, 0, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 15}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1337,7 +1345,7 @@ func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
 
 	// Once a level is committed the guard measures as usual again.
 	commitBackup(t, d, gitRepo, "testdb", 25)
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 120}, 0.20, 0, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 120}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1541,7 +1549,7 @@ func TestVerifyExportCounts_FirstExport(t *testing.T) {
 	os.MkdirAll(filepath.Join(gitRepo, "db1"), 0755)
 	commitBackup(t, d, gitRepo, "db1", 100)
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"db2"}, map[string]int{"db2": 100}, 0.20, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"db2"}, map[string]int{"db2": 100}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1560,7 +1568,7 @@ func TestVerifyExportCounts_WithinThreshold(t *testing.T) {
 
 	// 130 records = 30% increase. With 0.20 threshold and 2x asymmetric
 	// multiplier for increases, effective threshold is 0.40, so 30% is fine.
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 130}, 0.20, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 130}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1579,7 +1587,7 @@ func TestVerifyExportCounts_ExceedsThreshold(t *testing.T) {
 
 	// 200 records = 100% jump. Even with 2x asymmetric multiplier (effective
 	// threshold 0.40), 100% exceeds it.
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 200}, 0.20, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 200}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1604,7 +1612,7 @@ func TestVerifyExportCounts_Drop(t *testing.T) {
 
 	// 60 records = 40% drop. Drops use the base threshold (no 2x multiplier)
 	// because losing data is more suspicious than gaining it.
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 60}, 0.20, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 60}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1626,7 +1634,7 @@ func TestVerifyExportCounts_SmallAbsoluteChangeIgnored(t *testing.T) {
 
 	// 5 records = 50% drop, but only 5 records absolute change.
 	// Below minAbsoluteDelta (20), so should NOT spike.
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, 0.20, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1688,7 +1696,7 @@ func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
 	commitBackup(t, d, gitRepo, "testdb", 100)
 
 	// 70 records = 30% drop at 0.20 threshold → should spike (drops use base threshold)
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 70}, 0.20, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 70}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1697,7 +1705,7 @@ func TestVerifyExportCounts_AsymmetricThreshold(t *testing.T) {
 	}
 
 	// 130 records = 30% increase at 0.20 threshold → should NOT spike (increases use 2x = 0.40)
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 130}, 0.20, 0, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 130}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1721,7 +1729,7 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 
 	// First run after the halt: 400 vs committed 1000 = 60% drop → spikes.
 	counts := map[string]int{"testdb": 400}
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1747,7 +1755,7 @@ func TestVerifyExportCounts_StaleBaselineRecovery(t *testing.T) {
 	// every tick, so it is warm on the next run). The baseline is re-derived
 	// from history and now tracks the committed 400 → stable, no spike.
 	// Without the re-derivation this re-halts against the stale 1000 forever.
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50, 0, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, counts, 0.50, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1778,7 +1786,7 @@ func TestVerifyExportCounts_HaltWithoutCommitRebaselinesFromCache(t *testing.T) 
 	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
 	commitBackup(t, d, gitRepo, "testdb", 1000)
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1787,7 +1795,7 @@ func TestVerifyExportCounts_HaltWithoutCommitRebaselinesFromCache(t *testing.T) 
 	}
 
 	// Still halted: no new commit, cache carries the same window.
-	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50, 0, 0)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 400}, 0.50, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4129,8 +4137,14 @@ func TestSyncJsonlGitBackupOneSpikeDoesNotStopTheOtherDatabases(t *testing.T) {
 	if !strings.Contains(subject, "[SPIKE: "+spikingDB+"]") {
 		t.Errorf("commit subject = %q, want the withheld database named", subject)
 	}
-	if strings.Contains(subject, spikingDB+"=") {
+	if strings.Contains(subject, fmt.Sprintf("%s=%d", spikingDB, spikedTo)) {
 		t.Errorf("commit subject = %q records the spiking count, which would advance its baseline", subject)
+	}
+	// The withheld database stays in the subject at its last verified level:
+	// a database absent from the window reads as a first export, so dropping
+	// it would let the halt clear itself once the window rolled past it.
+	if want := fmt.Sprintf("%s=%d", spikingDB, baseline); !strings.Contains(subject, want) {
+		t.Errorf("commit subject = %q, want the withheld database at its last verified level %q", subject, want)
 	}
 	for _, db := range databases[1:] {
 		if want := fmt.Sprintf("%s=%d", db, grown); !strings.Contains(subject, want) {
@@ -4229,7 +4243,7 @@ func TestVerifyExportCounts_RebaselinesOnlyTheChangedDatabase(t *testing.T) {
 	writeNLines(t, filepath.Join(gitRepo, "hq", "issues.jsonl"), 110)
 	commitAll(t, d, gitRepo, seedSubjectPrefix+"hq=110 [FAILED: gt]")
 
-	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq", "gt"}, map[string]int{"hq": 5000, "gt": 9000}, 0.20, 0, 0)
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq", "gt"}, map[string]int{"hq": 5000, "gt": 9000}, 0.20, noFloor, noGrowthCap)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
