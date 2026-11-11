@@ -29,12 +29,6 @@ const (
 	SeatFlash
 )
 
-// unknownSeatHaiku is the mean of is_haiku in the initial weights file
-// (docs/plans/2026-11-11-story-points-initial-weights.json). Before a seat is
-// chosen the term is neutralized by this mean, not by 0, which would read as
-// the non-Haiku seat.
-const unknownSeatHaiku = 0.389538
-
 // Shape holds the twelve shape features of one bead, in the order and under the
 // names the weights file uses.
 type Shape struct {
@@ -171,8 +165,21 @@ func isHaiku(seat Seat) float64 {
 	case SeatFlash:
 		return 0
 	default:
-		return unknownSeatHaiku
+		return isHaikuMean()
 	}
+}
+
+// isHaikuMean is the training mean of is_haiku, read from the weights. Before a
+// seat is chosen the term is neutralized by this mean, not by 0, which would
+// read as the non-Haiku seat.
+func isHaikuMean() float64 {
+	mean, ok := Default().ShapeMean("is_haiku")
+	if !ok {
+		// Unreachable: LoadWeights accepts only the shapeFeatureNames list,
+		// which includes is_haiku.
+		panic("storypoints: weights have no is_haiku mean")
+	}
+	return mean
 }
 
 func boolFloat(b bool) float64 {
