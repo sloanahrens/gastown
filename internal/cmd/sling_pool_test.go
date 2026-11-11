@@ -153,9 +153,9 @@ func (f *fakeLister) GetSessionCreatedTime(name string) (time.Time, error) {
 }
 
 // Only polecat sessions count, identified by GT_ROLE; witnesses, refineries
-// and dogs on the same server are ignored; a polecat whose seat record names no
-// agent is counted with an empty agent (so it never inflates the seat count).
-// The session's own GT_AGENT is never read for it (gt-5h87d7).
+// and dogs on the same server are ignored; a polecat whose seat has no record
+// is counted under config.UnknownSeatAgent (so it never inflates a seat's
+// count). The session's own GT_AGENT is never read for it (gt-5h87d7).
 func TestListPolecatSessions(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -187,7 +187,7 @@ func TestListPolecatSessions(t *testing.T) {
 	for _, s := range got {
 		agents[s.name] = s.agent
 	}
-	if agents["gt-marble"] != "local-coder-polecat" || agents["gt-slate"] != "deepseek-flash" || agents["gt-opal"] != "" {
+	if agents["gt-marble"] != "local-coder-polecat" || agents["gt-slate"] != "deepseek-flash" || agents["gt-opal"] != config.UnknownSeatAgent {
 		t.Errorf("agents: %v", agents)
 	}
 	// A polecat whose creation time tmux cannot report counts as just spawned.
@@ -234,9 +234,9 @@ func TestPoolCountsASandboxSeatOnItsRecordedClass(t *testing.T) {
 	}
 	env := map[string]map[string]string{}
 	for name, agent := range records {
-		writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: name}, town,
-			intent.Record{Agent: agent})
-		// A sandboxed seat: the session has a role and nothing else readable.
+		// A sandboxed seat: the registry records that the session lives in a
+		// sandbox, and the host can read only its role from the session.
+		writeSandboxSeat(t, town, "gt-"+name, "gastown", name, agent, nil)
 		env["gt-"+name] = map[string]string{"GT_ROLE": "gastown/polecats/" + name}
 	}
 	lister := &gtAgentCountingLister{fakeSessionLister: fakeSessionLister{

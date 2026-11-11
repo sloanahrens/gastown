@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -796,28 +797,50 @@ func slungAgent(rec intent.Record, fallback string) string {
 // error means the record cannot be read.
 type poolSeatAgentFunc func(rigName, polecatName string) (string, error)
 
-// poolSeatAgentFor is the seat-record read a caller in townRoot wants, or nil
-// when there is no town to read (a test), which leaves every seat unrecorded.
-//
-// A record that names no agent, or does not exist, is not an error: the seat is
-// counted as unrecorded, never on a class its record does not say. A record
-// that cannot be read is returned as the error, which listPolecatSessionsWith
-// counts under config.UnknownSeatAgent, and the reader logs it to stderr once
-// per reader: a reader serves one occupancy read, so a bad record warns once
-// per read rather than once per session.
+// poolSeatAgentFor is the seat-record read a caller in townRoot wants, its
+// warnings on stderr; nil when there is no town to read (a test), which leaves
+// every seat unrecorded.
 func poolSeatAgentFor(townRoot string) poolSeatAgentFunc {
+	return poolSeatAgentTo(townRoot, os.Stderr)
+}
+
+// poolSeatAgentTo is poolSeatAgentFor with the writer its warning goes to.
+//
+// The record is the one source for a live seat's class. A record that names no
+// agent leaves the agent empty, which the roster counts as unrecorded and
+// never on a class the record does not say (gt-mukgk). A record that does not
+// exist is different: the seat is live, so it holds a seat the pool must
+// count, and nothing in the town says which class it is. That seat is counted
+// under config.UnknownSeatAgent, which fills no seat and keeps its place in
+// the pool's total, rather than on no class at all, which would leave its seat
+// uncounted against every cap.
+//
+// A record that cannot be read is returned as the error, which
+// listPolecatSessionsWith counts under config.UnknownSeatAgent, and the reader
+// logs it once per reader: a reader serves one occupancy read, so a bad record
+// warns once per read rather than once per session.
+func poolSeatAgentTo(townRoot string, warnOut io.Writer) poolSeatAgentFunc {
 	if townRoot == "" {
 		return nil
 	}
-	warn := &onceWriter{w: os.Stderr}
+	warn := &onceWriter{w: warnOut}
 	return func(rigName, polecatName string) (string, error) {
-		rec, err := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
+		seat := polecatIntentSeat(rigName, polecatName)
+		rec, err := intent.Read(townRoot, seat)
 		if err != nil {
 			fmt.Fprintf(warn, "warning: %s/%s's seat record cannot be read, counting the seat under %s: %v\n",
 				rigName, polecatName, config.UnknownSeatAgent, err)
 			return "", err
 		}
-		return strings.TrimSpace(rec.Agent), nil
+		if agent := strings.TrimSpace(rec.Agent); agent != "" {
+			return agent, nil
+		}
+		// Read answers an empty record for a file that does not exist, so a
+		// live seat with no record reaches here too: its class is unknown.
+		if _, statErr := os.Stat(seat.Path(townRoot)); errors.Is(statErr, os.ErrNotExist) {
+			return config.UnknownSeatAgent, nil
+		}
+		return "", nil
 	}
 }
 

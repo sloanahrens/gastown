@@ -569,9 +569,9 @@ func poolHookHeldFor(townRoot string) polecatHookHeldFunc {
 // that read came back empty and the pool counted those seats on the wrong
 // class (gt-5h87d7). A record that names no agent leaves the agent empty,
 // which the roster counts as unrecorded rather than on a class the record does
-// not name. A record that cannot be read counts the seat under
-// config.UnknownSeatAgent (the reader logs the error): the seat still takes its
-// place in the pool's total, and no class is credited with it.
+// not name. A seat with no record, and a record that cannot be read, count the
+// seat under config.UnknownSeatAgent (the reader logs the read error): the seat
+// still takes its place in the pool's total, and no class is credited with it.
 //
 // disposition is the polecat's own bead state (poolDispositionFor); a nil one
 // fails open. now stands in for a session whose creation time tmux cannot
