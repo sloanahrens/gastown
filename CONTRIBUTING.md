@@ -37,15 +37,6 @@ What each flag does at the git-remote level:
   canonical repo, so rebases against `upstream/main` work without juggling
   URLs.
 
-> **Current limitation — the refinery is not yet fork-aware.** Until the
-> behavioral half of
-> [gastownhall/gastown#1794](https://github.com/gastownhall/gastown/issues/1794)
-> ships, even a correctly-configured fork rig will have its refinery attempt
-> to **merge polecat branches into the fork's `main`**, diverging it from
-> upstream. If you want strict PR-only behavior, do not start the refinery
-> (park the rig with `gt rig park <rig>`) and use the
-> polecat → branch → manual PR path instead.
-
 If you set up a rig **without** these flags and your fork's `main` has
 already been polluted, see
 [docs/guides/fork-rig-setup.md](docs/guides/fork-rig-setup.md) for
@@ -66,7 +57,7 @@ We use a direct-to-main workflow for trusted contributors. For external contribu
 
 ```bash
 # Good - dedicated branch per PR
-git checkout -b fix/deacon-startup upstream/main
+git checkout -b fix/daemon-startup upstream/main
 git checkout -b feat/auto-seance upstream/main
 
 # Bad - PR from main accumulates unrelated commits
