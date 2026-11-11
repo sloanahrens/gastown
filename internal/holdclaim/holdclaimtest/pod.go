@@ -19,7 +19,7 @@ type Pod struct {
 	Calls [][]string
 	// Contexts are the contexts the calls were made with, one per call.
 	Contexts []context.Context
-	// Fail maps a command the pod runs (tee, cat, rm, test) to the error it returns.
+	// Fail maps a command the pod runs (tee, cat, rm, test, find) to the error it returns.
 	Fail map[string]error
 	// Down makes every call fail as a pod that does not answer does.
 	Down bool
@@ -27,8 +27,8 @@ type Pod struct {
 	Corrupt bool
 	// KeepOnRemove makes rm report success and leave the file in the claim.
 	KeepOnRemove bool
-	// ProbeFail, when set, is the error the removal read-back (test -e) returns
-	// in place of the truth about the claim's file.
+	// ProbeFail, when set, is the error the removal read-back (the find of the
+	// claim file's name) returns in place of the listing.
 	ProbeFail error
 }
 
@@ -95,28 +95,34 @@ func (p *Pod) Exec(ctx context.Context, argv []string, stdin []byte) ([]byte, er
 		return nil, nil
 	case "test":
 		return p.test(args)
+	case "find":
+		return p.find(args)
 	}
 	return nil, fmt.Errorf("holdclaimtest: unexpected pod command %q", command)
 }
 
-// test answers the two tests the writer makes: -d asks whether the claim mount
-// is there, and -e asks whether a claim file is still present, exiting 1 when
-// it is not.
+// test answers the one test the writer makes: -d asks whether the claim mount
+// is there.
 func (p *Pod) test(args []string) ([]byte, error) {
-	if len(args) != 2 {
+	if len(args) != 2 || args[0] != "-d" {
 		return nil, fmt.Errorf("holdclaimtest: unexpected test call %q", args)
 	}
-	switch args[0] {
-	case "-d":
-		return nil, nil
-	case "-e":
-		if p.ProbeFail != nil {
-			return nil, p.ProbeFail
-		}
-		if _, ok := p.Files[args[1]]; ok {
-			return nil, nil
-		}
-		return nil, &ExitError{Code: 1}
+	return nil, nil
+}
+
+// find answers the removal read-back, "find DIR -maxdepth 1 -name NAME": the
+// path of the claim file when it is present, nothing when it is not, and exit 0
+// either way, as find does.
+func (p *Pod) find(args []string) ([]byte, error) {
+	if len(args) != 5 || args[1] != "-maxdepth" || args[2] != "1" || args[3] != "-name" {
+		return nil, fmt.Errorf("holdclaimtest: unexpected find call %q", args)
 	}
-	return nil, fmt.Errorf("holdclaimtest: unexpected test flag %q", args[0])
+	if p.ProbeFail != nil {
+		return nil, p.ProbeFail
+	}
+	full := args[0] + "/" + args[4]
+	if _, ok := p.Files[full]; ok {
+		return []byte(full + "\n"), nil
+	}
+	return nil, nil
 }

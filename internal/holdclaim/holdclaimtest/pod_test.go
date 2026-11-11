@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -57,28 +58,42 @@ func TestExecTeeThenCatReturnsTheWrittenBytes(t *testing.T) {
 	}
 }
 
-func TestExecTestEAnswersWhetherTheClaimFileIsPresent(t *testing.T) {
+func TestExecFindListsTheClaimFileOnlyWhenPresent(t *testing.T) {
 	t.Parallel()
 	p := New()
-	probe := []string{"kubectl", "--", "test", "-e", "/f"}
-	_, err := p.Exec(context.Background(), probe, nil)
-	var exit interface{ ExitCode() int }
-	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
-		t.Fatalf("test -e of a missing file = %v, want exit 1", err)
+	probe := []string{"kubectl", "--", "find", "/claim", "-maxdepth", "1", "-name", "f"}
+	out, err := p.Exec(context.Background(), probe, nil)
+	if err != nil || len(out) != 0 {
+		t.Fatalf("find of a missing file = %q, %v, want an empty listing and exit 0", out, err)
 	}
-	p.Files["/f"] = []byte("x")
-	if _, err := p.Exec(context.Background(), probe, nil); err != nil {
-		t.Fatalf("test -e of a present file = %v, want exit 0", err)
+	p.Files["/claim/f"] = []byte("x")
+	out, err = p.Exec(context.Background(), probe, nil)
+	if err != nil || string(out) != "/claim/f\n" {
+		t.Fatalf("find of a present file = %q, %v, want its path and exit 0", out, err)
 	}
 }
 
-func TestExecTestEFailureIsReturnedAsIs(t *testing.T) {
+func TestExecRefusesAFindThatIsNotTheReadBack(t *testing.T) {
 	t.Parallel()
 	p := New()
-	p.ProbeFail = &ExitError{Code: 2}
-	_, err := p.Exec(context.Background(), []string{"kubectl", "--", "test", "-e", "/f"}, nil)
+	for _, argv := range [][]string{
+		{"kubectl", "--", "find", "/claim"},
+		{"kubectl", "--", "find", "/claim", "-maxdepth", "2", "-name", "f"},
+		{"kubectl", "--", "find", "/claim", "-maxdepth", "1", "-type", "f"},
+	} {
+		if _, err := p.Exec(context.Background(), argv, nil); err == nil || !strings.Contains(err.Error(), "unexpected find call") {
+			t.Fatalf("find %q = %v, want the unexpected-call refusal", argv[3:], err)
+		}
+	}
+}
+
+func TestExecFindFailureIsReturnedAsIs(t *testing.T) {
+	t.Parallel()
+	p := New()
+	p.ProbeFail = &ExitError{Code: 1}
+	_, err := p.Exec(context.Background(), []string{"kubectl", "--", "find", "/claim", "-maxdepth", "1", "-name", "f"}, nil)
 	if !errors.Is(err, p.ProbeFail) {
-		t.Fatalf("test -e error = %v, want the probe failure the test set", err)
+		t.Fatalf("find error = %v, want the probe failure the test set", err)
 	}
 }
 
@@ -96,7 +111,7 @@ func TestExecRefusesATestThatIsNotTheProbe(t *testing.T) {
 	if _, err := p.Exec(context.Background(), []string{"kubectl", "--", "test", "-f", "/x"}, nil); err == nil {
 		t.Fatal("test -f returned nil, want an error")
 	}
-	if _, err := p.Exec(context.Background(), []string{"kubectl", "--", "test", "-e"}, nil); err == nil {
+	if _, err := p.Exec(context.Background(), []string{"kubectl", "--", "test", "-e", "/f"}, nil); err == nil {
 		t.Fatal("test -e with no path returned nil, want an error")
 	}
 }

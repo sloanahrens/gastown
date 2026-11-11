@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -34,6 +35,12 @@ func claimPath(name string) string {
 // reachCall is the one call a set or a lift makes before its first step.
 func reachCall() []string {
 	return podCommand("test", "-d", podMount)
+}
+
+// readBackCall is the removal read-back of one claim file: a find of its name
+// in its directory, which exits 0 whether or not the file is there.
+func readBackCall(podFile string) []string {
+	return podCommand("find", path.Dir(podFile), "-maxdepth", "1", "-name", path.Base(podFile))
 }
 
 func newTestWriter(t *testing.T, town string, fake *holdclaimtest.Pod) *Writer {
@@ -323,7 +330,7 @@ func TestLiftEstopRemovesTheMacFileThenThePodCopy(t *testing.T) {
 	if _, ok := fake.Files[podFile]; ok {
 		t.Fatal("the pod kept its copy after the lift")
 	}
-	want := [][]string{reachCall(), podCommand("rm", "-f", podFile), podCommand("test", "-e", podFile)}
+	want := [][]string{reachCall(), podCommand("rm", "-f", podFile), readBackCall(podFile)}
 	if !reflect.DeepEqual(fake.Calls, want) {
 		t.Fatalf("pod calls:\n got %q\nwant %q", fake.Calls, want)
 	}
@@ -410,9 +417,9 @@ func TestLiftEstopReportsAPodCopyStillPresentAfterTheMacRemoval(t *testing.T) {
 }
 
 // TestLiftEstopRefusesAPodCopyThatIsNotConfirmedGone covers the read-back after
-// the pod's removal: a copy that reads back present, a read-back that exits
-// with neither 0 nor 1, and a probe that cannot reach the pod are all refused,
-// and each says the pod stays STOPPED.
+// the pod's removal: a copy that reads back present, a read-back whose call
+// exits 1 (kubectl's own failure, never a report of absence), and a probe that
+// cannot reach the pod are all refused, and each says the pod stays STOPPED.
 func TestLiftEstopRefusesAPodCopyThatIsNotConfirmedGone(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
@@ -423,9 +430,9 @@ func TestLiftEstopRefusesAPodCopyThatIsNotConfirmedGone(t *testing.T) {
 			setup: func(p *holdclaimtest.Pod) { p.KeepOnRemove = true },
 			want:  "still present",
 		},
-		"unclear exit": {
-			setup: func(p *holdclaimtest.Pod) { p.ProbeFail = &holdclaimtest.ExitError{Code: 2} },
-			want:  "neither present nor absent",
+		"kubectl exit 1": {
+			setup: func(p *holdclaimtest.Pod) { p.ProbeFail = &holdclaimtest.ExitError{Code: 1} },
+			want:  "back from the pod",
 		},
 		"probe refused": {
 			setup: func(p *holdclaimtest.Pod) { p.ProbeFail = errors.New("probe refused") },
@@ -583,7 +590,7 @@ func TestLiftEstopWithNoPodReportsAMacFileThatCannotBeRemoved(t *testing.T) {
 }
 
 // TestRemoveDeletesTheClaimFileAndReadsItBack pins the removal of one claim
-// file: rm -f, then the test -e that reads back that it is gone.
+// file: rm -f, then the find that reads back that it is gone.
 func TestRemoveDeletesTheClaimFileAndReadsItBack(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -602,9 +609,9 @@ func TestRemoveDeletesTheClaimFileAndReadsItBack(t *testing.T) {
 		t.Fatal("claim file survived Remove")
 	}
 	tail := fake.Calls[len(fake.Calls)-2:]
-	want := [][]string{podCommand("rm", "-f", podFile), podCommand("test", "-e", podFile)}
+	want := [][]string{podCommand("rm", "-f", podFile), readBackCall(podFile)}
 	if !reflect.DeepEqual(tail, want) {
-		t.Fatalf("remove calls = %q, want rm -f then the read-back test %q", tail, want)
+		t.Fatalf("remove calls = %q, want rm -f then the read-back find %q", tail, want)
 	}
 }
 
@@ -615,10 +622,10 @@ func TestRemoveFailsLoudOnEachPodStep(t *testing.T) {
 		setup func(*holdclaimtest.Pod)
 		want  string
 	}{
-		"rm refused":        {setup: func(p *holdclaimtest.Pod) { p.Fail["rm"] = errors.New("claim busy") }, want: "removing"},
-		"probe refused":     {setup: func(p *holdclaimtest.Pod) { p.ProbeFail = errors.New("probe refused") }, want: "back from the pod"},
-		"still present":     {setup: func(p *holdclaimtest.Pod) { p.KeepOnRemove = true }, want: "still present"},
-		"unclear read-back": {setup: func(p *holdclaimtest.Pod) { p.ProbeFail = &holdclaimtest.ExitError{Code: 2} }, want: "neither present nor absent"},
+		"rm refused":     {setup: func(p *holdclaimtest.Pod) { p.Fail["rm"] = errors.New("claim busy") }, want: "removing"},
+		"probe refused":  {setup: func(p *holdclaimtest.Pod) { p.ProbeFail = errors.New("probe refused") }, want: "back from the pod"},
+		"still present":  {setup: func(p *holdclaimtest.Pod) { p.KeepOnRemove = true }, want: "still present"},
+		"kubectl exit 1": {setup: func(p *holdclaimtest.Pod) { p.ProbeFail = &holdclaimtest.ExitError{Code: 1} }, want: "back from the pod"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

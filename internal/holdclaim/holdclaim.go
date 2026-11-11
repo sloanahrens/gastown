@@ -177,37 +177,19 @@ func (w *Writer) Remove(ctx context.Context, local string) error {
 	if _, err := w.run(ctx, w.argv("rm", "-f", podPath), nil); err != nil {
 		return fmt.Errorf("removing %s from the pod: %w", podPath, err)
 	}
-	// test -e exits 0 when the path is there and 1 when it is not. Its exit is
-	// read only after rm -f has succeeded, so a 1 that kubectl itself printed
-	// cannot hide a copy: the rm just removed it.
-	_, err = w.run(ctx, w.argv("test", "-e", podPath), nil)
-	if err == nil {
-		return fmt.Errorf("%s is still present in the pod after the removal", podPath)
-	}
-	code, ok := exitCode(err)
-	if !ok {
+	// The read-back is a find of the file's own name in its directory: it exits 0
+	// whether the file is there or not, and prints the path only when it is. So
+	// any non-zero exit is the call failing (kubectl itself exits 1 when it cannot
+	// reach the pod), never a report that the copy is absent, and absence is read
+	// from an empty listing after a successful call.
+	out, err := w.run(ctx, w.argv("find", path.Dir(podPath), "-maxdepth", "1", "-name", path.Base(podPath)), nil)
+	if err != nil {
 		return fmt.Errorf("reading %s back from the pod: %w", podPath, err)
 	}
-	if code != 1 {
-		return fmt.Errorf("read-back of %s in the pod is neither present nor absent (exit %d): %w", podPath, code, err)
+	if strings.TrimSpace(string(out)) != "" {
+		return fmt.Errorf("%s is still present in the pod after the removal", podPath)
 	}
 	return nil
-}
-
-// exitCoder is what an Exec error carries when the pod ran the command and it
-// exited non-zero. os/exec's ExitError has it, and so does the fake pod's error.
-type exitCoder interface {
-	ExitCode() int
-}
-
-// exitCode returns the exit status an Exec error carries, and false when the
-// error carries none, so the caller reads it as a failed call.
-func exitCode(err error) (int, bool) {
-	var ec exitCoder
-	if errors.As(err, &ec) {
-		return ec.ExitCode(), true
-	}
-	return 0, false
 }
 
 // Activate sets the sentinel at local, the pod's claim first and the Mac after,
