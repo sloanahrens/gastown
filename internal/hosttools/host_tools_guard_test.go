@@ -30,14 +30,24 @@ func TestMain(m *testing.M) {
 // still names a host-only tool in a string literal.
 const hostToolsAllowPath = "internal/hosttools/testdata/host-tools-allow.txt"
 
-// hostToolsAllowClass is the only allowlist class. An entry stays until the
-// deletion area its reason names removes the use.
+// hostToolsAllowClass is the class of a host-tool line and of a darwin line that
+// its named bead deletes. An entry stays until the deletion area its reason names
+// removes the use.
 const hostToolsAllowClass = "pending-deletion"
+
+// darwinShimClass is the class of a darwin line the Mac's own gt still runs. It
+// stays until the exit bead its reason names, and a host-tool line may not carry
+// it.
+const darwinShimClass = "portable-shim"
 
 // darwinName is both the build tag and the allowlist name for a file that is
 // macOS-only: a _darwin.go or _darwin_<arch>.go name, or a build constraint that
 // cannot be satisfied without the tag.
 const darwinName = "darwin"
+
+// beadIDPattern matches a bead id such as gt-a2uug4 or gt-a2uug4.12. A darwin
+// line's reason must name one.
+var beadIDPattern = regexp.MustCompile(`\bgt-[a-z0-9]+(?:\.[0-9]+)?\b`)
 
 // hostTools are the Mac-only tools the gt-in-container design deletes. No commit
 // may add a use of one of them to the gt module.
@@ -122,7 +132,7 @@ func TestStaleHostToolEntryIsAnError(t *testing.T) {
 }
 
 // TestHostToolAllowlistRules refuses every line the format does not allow: a
-// wildcard path, a blank reason, any class but pending-deletion, a name that is
+// wildcard path, a blank reason, a class the tool does not take, a name that is
 // not a host tool, a count that is not a positive integer, a duplicate, and a
 // line that is not five fields.
 func TestHostToolAllowlistRules(t *testing.T) {
@@ -154,6 +164,11 @@ func TestHostToolAllowlistRules(t *testing.T) {
 			name: "a class other than pending-deletion is refused",
 			line: "pkg/run.go\tlaunchctl\t1\treal\t" + reason,
 			want: `class "real" is not pending-deletion`,
+		},
+		{
+			name: "a portable-shim class on a host tool is refused",
+			line: "pkg/run.go\tlaunchctl\t1\tportable-shim\t" + reason,
+			want: `class "portable-shim" is not pending-deletion`,
 		},
 		{
 			name: "a name that is not a host tool is refused",
@@ -485,17 +500,23 @@ func TestDarwinTaggedFileFails(t *testing.T) {
 			want:   []string{"pkg/run_darwin_arm64.go:1 is macOS-only"},
 		},
 		{
-			name:   "a negated constraint that still requires darwin fails",
-			path:   "pkg/run.go",
-			source: "//go:build !(linux || !darwin)\n\npackage pkg\n",
-			allow:  "# no entries\n",
-			want:   []string{"pkg/run.go:1 is macOS-only"},
-		},
-		{
-			name:   "a listed darwin file passes beside a host-tool line",
+			name:   "a listed darwin file with a bead id passes beside a host-tool line",
 			path:   "pkg/run_darwin.go",
 			source: plainSource,
 			allow:  "pkg/run_darwin.go\tdarwin\t1\tpending-deletion\tgt-a2uug4.21: the disk-space read runs diskutil\npkg/other.go\tlaunchctl\t1\tpending-deletion\tgt power\n",
+		},
+		{
+			name:   "a portable shim with a bead id passes",
+			path:   "pkg/run_darwin.go",
+			source: plainSource,
+			allow:  "pkg/run_darwin.go\tdarwin\t1\tportable-shim\tgt-a2uug4.23: the Mac's own gt runs the shim until the cutover\n",
+		},
+		{
+			name:   "a listed darwin line that names no bead id is refused",
+			path:   "pkg/run_darwin.go",
+			source: plainSource,
+			allow:  "pkg/run_darwin.go\tdarwin\t1\tpending-deletion\tthe disk-space read runs diskutil\n",
+			want:   []string{"darwin line for pkg/run_darwin.go names no bead id"},
 		},
 	}
 
@@ -598,6 +619,45 @@ func TestDarwinFilesNotCounted(t *testing.T) {
 	}
 }
 
+// TestRequiresDarwin fixes how a negated constraint is read. A file is macOS-only
+// when every build that satisfies its constraint sets darwin: one fixture per
+// form, each judged by the guard.
+func TestRequiresDarwin(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		constraint string
+		macOSOnly  bool
+	}{
+		{name: "!darwin is not macOS-only", constraint: "!darwin", macOSOnly: false},
+		{name: "!(darwin || linux) is not macOS-only", constraint: "!(darwin || linux)", macOSOnly: false},
+		{name: "!(!darwin) is macOS-only", constraint: "!(!darwin)", macOSOnly: true},
+		{name: "!linux && !windows is not macOS-only", constraint: "!linux && !windows", macOSOnly: false},
+		{name: "!(linux || !darwin) is macOS-only", constraint: "!(linux || !darwin)", macOSOnly: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeFixture(t, root, "pkg/run.go", "//go:build "+tc.constraint+"\n\npackage pkg\n")
+			allowPath := writeFixture(t, root, "allow.txt", "# no entries\n")
+
+			err := checkDarwinFilesAt(root, allowPath)
+			if !tc.macOSOnly {
+				if err != nil {
+					t.Fatalf("checkDarwinFilesAt = %v, want no refusal", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "pkg/run.go:1 is macOS-only") {
+				t.Fatalf("checkDarwinFilesAt = %v, want a refusal naming pkg/run.go:1", err)
+			}
+		})
+	}
+}
+
 // TestDarwinUnreadableFileIsAnError keeps a header the parser rejects from
 // reading as portable: the scan fails and names the file.
 func TestDarwinUnreadableFileIsAnError(t *testing.T) {
@@ -614,10 +674,6 @@ func TestDarwinUnreadableFileIsAnError(t *testing.T) {
 		{
 			name:   "a second go:build line",
 			source: "//go:build darwin\n//go:build linux\n\npackage pkg\n",
-		},
-		{
-			name:   "a constraint naming more tags than the scan classifies",
-			source: manyTagsConstraint(maxDarwinConstraintTags) + "\n\npackage pkg\n",
 		},
 	}
 
@@ -637,17 +693,6 @@ func TestDarwinUnreadableFileIsAnError(t *testing.T) {
 			}
 		})
 	}
-}
-
-// manyTagsConstraint returns a go:build line that names n tags besides darwin.
-// With darwin counted, n equal to maxDarwinConstraintTags is one past the cap.
-func manyTagsConstraint(n int) string {
-	var b strings.Builder
-	b.WriteString("//go:build t0")
-	for i := 1; i < n; i++ {
-		fmt.Fprintf(&b, " || t%d", i)
-	}
-	return b.String()
 }
 
 // TestRepoDarwinFiles is the gate on the real tree: every macOS-only non-test
@@ -830,11 +875,14 @@ func loadHostToolAllowlist(path string) ([]hostToolEntry, error) {
 		if tool == darwinName && count != 1 {
 			return nil, fmt.Errorf("%s: count %d for %s darwin is not 1; a file is either macOS-only or it is not", where, count, file)
 		}
-		if class != hostToolsAllowClass {
-			return nil, fmt.Errorf("%s: class %q is not pending-deletion; that is the only class", where, class)
+		if class != hostToolsAllowClass && !(class == darwinShimClass && tool == darwinName) {
+			return nil, fmt.Errorf("%s: class %q is not pending-deletion (or portable-shim for darwin)", where, class)
 		}
 		if reason == "" {
 			return nil, fmt.Errorf("%s: entry for %s %s has no reason", where, file, tool)
+		}
+		if tool == darwinName && !beadIDPattern.MatchString(reason) {
+			return nil, fmt.Errorf("%s: darwin line for %s names no bead id; name the bead that deletes the file or its exit bead", where, file)
 		}
 		key := hostToolKey{file: file, tool: tool}
 		if first, dup := seen[key]; dup {
@@ -1045,11 +1093,7 @@ func darwinBuildTag(path string) (line int, requires bool, err error) {
 	if expr == nil {
 		return 0, false, nil
 	}
-	requires, err = requiresDarwin(expr)
-	if err != nil {
-		return 0, false, err
-	}
-	return line, requires, nil
+	return line, requiresDarwin(expr), nil
 }
 
 // parseBuildConstraint returns the file's build expression, the line of its
@@ -1113,65 +1157,41 @@ header:
 }
 
 // requiresDarwin reports whether every build that satisfies expr sets the darwin
-// tag: no build without darwin satisfies it. It tries each assignment of the tags
-// expr names, so a negated or nested constraint reads the same as its plain
-// form. darwin and darwin&&cgo do; darwin||linux, !darwin, !(darwin&&linux) and
-// !linux&&!windows do not, so the portable forms stay portable. A constraint that
-// names more tags than maxDarwinConstraintTags, darwin counted, is an error, not
-// a guess.
-func requiresDarwin(expr constraint.Expr) (bool, error) {
-	tags := map[string]bool{darwinName: true}
-	if err := collectConstraintTags(expr, tags); err != nil {
-		return false, err
-	}
-	if len(tags) > maxDarwinConstraintTags {
-		return false, fmt.Errorf("build constraint names %d tags, more than the %d the scan classifies", len(tags), maxDarwinConstraintTags)
-	}
-	names := make([]string, 0, len(tags))
-	for name := range tags {
-		names = append(names, name)
-	}
-	for assign := 0; assign < 1<<len(names); assign++ {
-		set := map[string]bool{}
-		for i, name := range names {
-			set[name] = assign&(1<<i) != 0
-		}
-		if set[darwinName] {
-			continue
-		}
-		if expr.Eval(func(tag string) bool { return set[tag] }) {
-			return false, nil
-		}
-	}
-	return true, nil
+// tag. It reads the expression's shape: a negation flips which side of each
+// operator it reaches, so !(darwin || linux) reads as !darwin && !linux, which a
+// build without darwin satisfies. darwin and darwin&&cgo require the tag;
+// darwin||linux, !darwin, !(darwin&&linux) and !linux&&!windows do not, so the
+// portable forms stay portable. The walk reads each operand on its own, so a
+// constraint that needs darwin only through a tag its operands share reads as
+// portable.
+func requiresDarwin(expr constraint.Expr) bool {
+	return requiresDarwinAt(expr, true)
 }
 
-// maxDarwinConstraintTags bounds requiresDarwin's enumeration, which doubles per
-// tag. A header past it fails the scan rather than being classified slowly.
-const maxDarwinConstraintTags = 16
-
-// collectConstraintTags adds every tag expr names to tags. An expression form
-// the walk does not know is an error, so it cannot be classified as portable.
-func collectConstraintTags(expr constraint.Expr, tags map[string]bool) error {
+// requiresDarwinAt reports whether every build that makes expr hold (holds true)
+// or fail (holds false) sets the darwin tag.
+func requiresDarwinAt(expr constraint.Expr, holds bool) bool {
 	switch e := expr.(type) {
 	case *constraint.TagExpr:
-		tags[e.Tag] = true
+		return holds && e.Tag == darwinName
 	case *constraint.NotExpr:
-		return collectConstraintTags(e.X, tags)
+		return requiresDarwinAt(e.X, !holds)
 	case *constraint.AndExpr:
-		if err := collectConstraintTags(e.X, tags); err != nil {
-			return err
+		// X && Y holds when both hold; it fails when either fails.
+		if holds {
+			return requiresDarwinAt(e.X, true) || requiresDarwinAt(e.Y, true)
 		}
-		return collectConstraintTags(e.Y, tags)
+		return requiresDarwinAt(e.X, false) && requiresDarwinAt(e.Y, false)
 	case *constraint.OrExpr:
-		if err := collectConstraintTags(e.X, tags); err != nil {
-			return err
+		if holds {
+			return requiresDarwinAt(e.X, true) && requiresDarwinAt(e.Y, true)
 		}
-		return collectConstraintTags(e.Y, tags)
+		return requiresDarwinAt(e.X, false) || requiresDarwinAt(e.Y, false)
 	default:
-		return fmt.Errorf("build constraint has an unknown form %T", expr)
+		// constraint.Parse builds only the four nodes above; refusing an unknown
+		// one keeps a future form from reading as portable.
+		return true
 	}
-	return nil
 }
 
 // unlistedDarwinFiles reports the macOS-only files the allowlist does not list.
