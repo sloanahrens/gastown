@@ -60,7 +60,7 @@ func TestIntegrationCommitAndPushJsonlBackup_RecoversFromStaleIndexLock(t *testi
 	lockPath := ageIndexLock(t, gitRepo, 2*gitIndexLockGracePeriod)
 
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
-	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil); err != nil {
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil, nil); err != nil {
 		t.Fatalf("tick after a stale index lock should succeed, got: %v", err)
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
