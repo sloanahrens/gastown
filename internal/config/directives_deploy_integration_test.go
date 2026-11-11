@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -75,5 +76,44 @@ func TestIntegrationDeployCentralDirectivesFromTheBareRepo(t *testing.T) {
 	}
 	if got := dirContents(t, CentralDirectiveDir(town)); !reflect.DeepEqual(got, want) {
 		t.Errorf("symlink commit changed the deployed directives to %v", got)
+	}
+}
+
+// A commit the bare repo lacks is ErrDirectiveCommitMissing only when the repo
+// is readable. Real git fails cat-file for a missing repo as well, so a repo
+// that is not there must not read as a commit it lacks: the doctor would report
+// a warning where the repo could not be read at all.
+func TestIntegrationDeployClassifiesAMissingCommitWithRealGit(t *testing.T) {
+	t.Parallel()
+	const unknown = "1234567890abcdef1234567890abcdef12345678"
+	tests := []struct {
+		name        string
+		setup       func(t *testing.T, town string)
+		wantMissing bool
+	}{
+		{
+			name:        "a readable repo that lacks the commit",
+			setup:       func(t *testing.T, town string) { directivegit.NewBare(t, CentralDirectiveRepo(town)) },
+			wantMissing: true,
+		},
+		{
+			name:        "a repo that is not there",
+			setup:       func(*testing.T, string) {},
+			wantMissing: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			tc.setup(t, town)
+			_, err := DeployCentralDirectives(town, unknown, nil)
+			if err == nil {
+				t.Fatal("deploy of an unknown commit returned nil, want an error")
+			}
+			if got := errors.Is(err, ErrDirectiveCommitMissing); got != tc.wantMissing {
+				t.Errorf("errors.Is(ErrDirectiveCommitMissing) = %v, want %v (error: %v)", got, tc.wantMissing, err)
+			}
+		})
 	}
 }
