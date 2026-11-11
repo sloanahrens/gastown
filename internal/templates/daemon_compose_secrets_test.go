@@ -419,6 +419,31 @@ func TestDaemonComposeSecretsDoltArchiveKey(t *testing.T) {
 	})
 }
 
+// The shipped manifest's shape for the backup repository's deploy key: an optional
+// 0600 files entry whose consumer names core.sshCommand, and no unclaimed line. The
+// behaviour tests above drive this entry; this one holds its shape, so no other
+// package asserts it (gt-l6h72l).
+func TestDaemonComposeSecretsShippedDoltArchiveShape(t *testing.T) {
+	t.Parallel()
+	const name = "dolt-archive.key"
+	data, err := os.ReadFile(filepath.Join("..", "..", "deploy", "daemon", "secrets.yaml"))
+	if err != nil {
+		t.Fatalf("reading the shipped manifest: %v", err)
+	}
+	manifest, err := templates.ParseSecretsManifest(data)
+	if err != nil {
+		t.Fatalf("the shipped manifest does not parse: %v", err)
+	}
+	if f := shippedSecretEntry(t, name); f.Mode != "0600" || f.Required || !strings.Contains(f.Consumer, "core.sshCommand") {
+		t.Errorf("%s = %+v, want an optional 0600 files entry whose consumer names core.sshCommand", name, f)
+	}
+	for _, u := range manifest.Unclaimed {
+		if u.Name == name {
+			t.Errorf("the shipped manifest still records %s as unclaimed, though the backup repository's core.sshCommand reads it", name)
+		}
+	}
+}
+
 // The spec-side checks of a secrets manifest: the files cannot be resolved
 // without a config directory, a scratch spec carries none, an entry is checked
 // rather than trusted, and a BindRO directory that holds the config tree is
