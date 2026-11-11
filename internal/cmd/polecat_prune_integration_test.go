@@ -25,9 +25,9 @@ func TestIntegrationRunPolecatPruneRemoteDryRunIncludesPatchEquivalentBranch(t *
 	t.Chdir(townRoot)
 	localDir := filepath.Join(t.TempDir(), "work")
 	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
-	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("prunecmdpatch", "", oldEnoughSuffix())
+	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	createPatchEquivalentRemoteBranch(t, repoGit, localDir, mainBranch, branch)
 
 	oldRemote, oldDryRun := polecatPruneRemote, polecatPruneDryRun
@@ -55,9 +55,9 @@ func TestIntegrationRunPolecatPruneReportsRemoteBranchKeptForOpenPR(t *testing.T
 	t.Chdir(townRoot)
 	localDir := filepath.Join(t.TempDir(), "work")
 	mainBranch := initPolecatPruneTestRepoAt(t, localDir)
-	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	repoGit := git.NewGit(localDir)
 	branch := polecat.FormatGeneratedBranchName("prcmdcat", "", oldEnoughSuffix())
+	bareRigRepoFromClone(t, filepath.Join(townRoot, rigName), localDir)
 	createPatchEquivalentRemoteBranch(t, repoGit, localDir, mainBranch, branch)
 	stubRemotePolecatBranchOpenPR(t, branch)
 
@@ -414,7 +414,10 @@ func initPolecatPruneTestRepoAt(t *testing.T, localDir string) string {
 }
 
 // bareRigRepoFromClone gives a rig the shared .repo.git a real rig has: a bare
-// clone of the work clone's origin, the repo the prune reads and writes.
+// clone of the work clone's origin, the repo the prune reads and writes. Like
+// git.configureRefspec does for a rig's clone, it maps origin's heads onto
+// refs/remotes/origin/* and fetches, so the target ref "origin/main" exists;
+// a plain clone --bare has neither, and the prune would skip every branch.
 func bareRigRepoFromClone(t *testing.T, rigPath, workDir string) string {
 	t.Helper()
 	remote := strings.TrimSpace(runGitForMQSubmitTest(t, workDir, "remote", "get-url", "origin"))
@@ -423,6 +426,8 @@ func bareRigRepoFromClone(t *testing.T, rigPath, workDir string) string {
 	}
 	bare := filepath.Join(rigPath, ".repo.git")
 	runGit(t, rigPath, "clone", "--bare", remote, bare)
+	runGit(t, bare, "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+	runGit(t, bare, "fetch", "origin")
 	return bare
 }
 
