@@ -207,7 +207,6 @@ test_scope	polecat	"make -j4 test"	refuse	polecat 'make test' runs the whole sui
 test_scope	polecat	"make gate"	refuse	polecat 'make gate' runs the whole suite	seed
 test_scope	polecat	"make gate-test"	refuse	polecat 'make gate-test' runs the whole suite	seed
 test_scope	polecat	"make test-integration"	refuse	polecat 'make test-integration' runs the whole suite	seed
-test_scope	polecat	"make test-timing"	refuse	polecat 'make test-timing' runs the whole suite	seed
 test_scope	polecat	"gt slot run --role gastown/zircon -- make gate"	refuse	polecat 'make gate' runs the whole suite	seed
 test_scope	polecat	`make -C "$PWD/sub" test`	refuse	polecat 'make test' runs the whole suite	seed
 test_scope	polecat	`cd "$X" && go test .`	refuse	names a directory the guard cannot place	seed
@@ -235,6 +234,9 @@ test_scope	polecat	"make lint"	allow		seed
 test_scope	polecat	"make presubmit"	allow		seed
 test_scope	polecat	"make gate-lint"	allow		seed
 test_scope	polecat	"make test-timing PKGS=./internal/style"	allow		seed
+# gt-a2uug4.20 deleted the test-timing goal with its macOS-only tool, so the
+# name is no longer a whole-suite goal and the guard allows it.
+test_scope	polecat	"make test-timing"	allow		gt-a2uug4.20	0a363896bb624c1cb9e93ddfc4fae7aae8af63a8537dd2e4708600e6d3227745
 test_scope	crew	"go test ./internal/cmd/ -run TestFoo"	allow		seed
 test_scope	other	"go build ./..."	allow		seed
 test_scope	refinery	"go build ./..."	allow		seed
@@ -570,9 +572,9 @@ test_scope	polecat	"cat <<EOF\nrun \\\\$(make gate)\nEOF\n"	refuse	polecat 'make
 container_suite	polecat	"GT_TEST_DOCKER=1 cat <(go test ./internal/beads/...)"	refuse	targets testcontainers-backed package(s)	gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
 dangerous	polecat	"echo ${x:-<(git reset --hard HEAD)}"	refuse	Hard reset discards all uncommitted changes	gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
 test_scope	polecat	"go test ./internal/cmd -run TestSubstitutionBody -count=2"	allow		gt-8sg8to	2b1e927b02d732cebc595f73b4bc5584967e2628628db448645073c67c3d83df
-container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... > out"	refuse	targets testcontainers-backed package(s)	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
-test_scope	polecat	"go test ./... > out"	refuse	polecat 'go test' of the whole repo	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
-dangerous	polecat	"git push origin HEAD:main > out"	refuse	Polecats never push to main/master	gt-sh5v6g	69348cdda480c1d0dd57196aac4ce7da417a15d4fa40b0ecc77d3ca03d6464bc
+container_suite	polecat	"GT_TEST_DOCKER=1 go test ./internal/beads/... > out"	refuse	targets testcontainers-backed package(s)	gt-a2uug4.20	0a363896bb624c1cb9e93ddfc4fae7aae8af63a8537dd2e4708600e6d3227745
+test_scope	polecat	"go test ./... > out"	refuse	polecat 'go test' of the whole repo	gt-a2uug4.20	0a363896bb624c1cb9e93ddfc4fae7aae8af63a8537dd2e4708600e6d3227745
+dangerous	polecat	"git push origin HEAD:main > out"	refuse	Polecats never push to main/master	gt-a2uug4.20	0a363896bb624c1cb9e93ddfc4fae7aae8af63a8537dd2e4708600e6d3227745
 container_suite	polecat	"bd close gt-x && GT_TEST_DOCKER=1 go test ./internal/beads/..."	refuse	targets testcontainers-backed package(s)	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10
 dangerous	polecat	"bd close gt-x && git reset --hard"	refuse	Hard reset discards all uncommitted changes	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10
 test_scope	polecat	"bd close gt-x && go test ./..."	refuse	polecat 'go test' of the whole repo	gt-fixbl8	f9883dc49296de9324bf3674c959dc2b01ce82e0ab45c1e657ddb5ae14360d10

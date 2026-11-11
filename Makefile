@@ -1,4 +1,4 @@
-.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools golangci-lint-version ci-base-image docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches polecat-node-prune openshell-providers
+.PHONY: build install gt-installer install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-makefile test-e2e-container check-up-to-date lint lint-tools golangci-lint-version ci-base-image docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches polecat-node-prune openshell-providers
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -706,13 +706,6 @@ test-integration-wall:
 		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -json -count=1 -tags integration -timeout 20m ./...; \
 		GT_TEST_DOCKER=1 GT_TEST_DOLT_INIT_CONCURRENCY=8 $(INTEGRATION_GO_TEST) -json -count=1 -timeout 20m $(DOCKER_PKGS); \
 	} | go run ./internal/testpolicy/cmd/tierwall $(TIERWALL_FLAGS)
-
-# test-timing measures the unit tier in a tmux server started by launchd, which
-# macOS does not exempt from its first-run scan of new executables. It is the
-# acceptance measurement for the test-rewrite work.
-# PKGS narrows the run, e.g. make test-timing PKGS=./internal/tmux/...
-test-timing:
-	go run ./internal/testpolicy/cmd/testtiming -- $(PKGS)
 
 # test-makefile runs the shell tests alone: the same runner (SHELL_TESTS) that
 # test-slow runs too, so a second copy cannot drift from it and make

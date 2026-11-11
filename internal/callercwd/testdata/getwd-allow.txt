@@ -43,7 +43,6 @@ internal/openshellprov/options.go:package	real	trust decision: the openshell CLI
 internal/polecat/imagectx/cmd/build/main.go:run	real	trust decision: the build tool reads the checkout it stages an image from; the variable must not redirect it
 internal/slot/cmd/cpuslot/main.go:run	real	throttle: the CPU-slot decision queues or bypasses the command, so the variable must not steer the checkout it reads
 internal/testpolicy/cmd/budget/main.go:execTest	real	trust decision: the test tooling records CPU against the real host directory, never a caller target
-internal/testpolicy/cmd/testtiming/main.go:realHost	real	trust decision: the test tooling reads the real host directory, never a caller target
 internal/testpolicy/cmd/tierwall/main.go:townRoot	real	trust decision: the tier wall reads the real host checkout, never a caller target
 internal/tiertrigger/cmd/tiertrigger/main.go:goDeps	real	trust decision: the sweep tool reads the checkout it runs in; the variable must not redirect it
 internal/bdshim/osmain.go:osEnv	real	acts on the process's own worktree: a check, not an identity (decision gt-yjzepk.2, 2026-11-08: only prime, handoff, mail identity and hooks install convert)
