@@ -246,12 +246,17 @@ func TestIntegrationAddWithOptions_SettingsInstalledInPolecatsDir(t *testing.T) 
 
 // realAddBeads initializes a real beads database on the test Dolt container
 // in mayorRig and returns nil, so the manager runs the real bd.
-func realAddBeads(t *testing.T, mayorRig, _ string) *polecatDB {
+// realAddBeads initialises the rig's beads with the real bd where production
+// reads them: the mayor/rig directory that mayorBeads sits in, which the rig's
+// .beads redirect names. The first argument is the fixture's bare repo since
+// gt-3lvcjz.4 (the git base), not a beads workdir, so it is not used here.
+func realAddBeads(t *testing.T, _, mayorBeads string) *polecatDB {
 	t.Helper()
 	testutil.RequireDoltContainer(t)
 	port, _ := strconv.Atoi(testutil.DoltContainerPort())
+	mayorRig := filepath.Dir(mayorBeads)
 	if err := beads.InitForTest(beads.NewIsolatedWithPort(mayorRig, port), "gt"); err != nil {
-		t.Fatalf("bd init: %v", err)
+		t.Fatalf("bd init in %s: %v", mayorRig, err)
 	}
 	return nil
 }
