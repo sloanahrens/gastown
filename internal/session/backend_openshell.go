@@ -713,10 +713,18 @@ func isNonFastForwardRejection(err error) bool {
 // the fetch, the rejected branch is classified (branchRelation): an equal or
 // behind remote counts as pushed, since the clone inside the sandbox fetches
 // what origin holds ahead of the host. A local head that is ahead means the
-// refusal is stale, so the plain push runs again. A diverged branch is refused
-// with the divergence named, and nothing is forced (gt-gii34).
+// refusal is stale, so the plain push runs again, and a retry origin refuses
+// again is classified the same way, once. A diverged branch is refused with the
+// divergence named, and nothing is forced (gt-gii34).
 func pushOrAcceptRemoteAhead(g pushGit, branch string) error {
-	pushErr := g.Push("origin", branch, false)
+	return pushAfterRefusal(g, branch, g.Push("origin", branch, false), true)
+}
+
+// pushAfterRefusal classifies a push origin refused, pushErr, against the head
+// origin holds now. mayRetry allows one plain retry when the local head is ahead;
+// the classification of a refused retry runs with mayRetry false, so a local head
+// that is still ahead is refused rather than pushed a third time (gt-mqr7w1).
+func pushAfterRefusal(g pushGit, branch string, pushErr error, mayRetry bool) error {
 	if pushErr == nil {
 		return nil
 	}
@@ -742,7 +750,10 @@ func pushOrAcceptRemoteAhead(g pushGit, branch string) error {
 	case relationEqual, relationBehind:
 		return nil
 	case relationAhead:
-		return g.Push("origin", branch, false)
+		if !mayRetry {
+			return fmt.Errorf("branch %s is ahead of origin, and origin refused its plain push again; nothing is forced: %s", branch, refusalLine(pushErr.Error()))
+		}
+		return pushAfterRefusal(g, branch, g.Push("origin", branch, false), false)
 	}
 	d, err := divergenceOf(g, branch, local, remote)
 	if err != nil {
