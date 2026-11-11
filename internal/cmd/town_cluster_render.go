@@ -28,13 +28,6 @@ import (
 // mounts.
 var secretsManifestRelPath = filepath.Join("deploy", "daemon", "secrets.yaml")
 
-// cloudCheckKeyFile is the deploy/daemon/secrets.yaml entry the cloud_check
-// patrol's GCP key comes from. The patrol runs without it and says so once, and
-// a pod that mounts a Secret that was never created stays in ContainerCreating,
-// so the render mounts the entry and prints its create line only when the
-// operator's config directory holds the file (gt-c57pax).
-const cloudCheckKeyFile = "gcp-key"
-
 var townClusterCmd = &cobra.Command{
 	Use:   "cluster",
 	Short: "Render the daemon's control-cluster manifests",
@@ -307,7 +300,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	}) {
 		return fmt.Errorf("--dashboard needs the %s entry in %s: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating; no file was written", k8sdaemon.ViewerTokenFile, manifestPath)
 	}
-	secretFiles, err := withoutAnAbsentCloudCheckKey(secrets.Files, f.configDir, d.lstat)
+	cloudCheckKey, err := cloudCheckKeyConfigured(f.configDir, d.lstat)
 	if err != nil {
 		return err
 	}
@@ -318,7 +311,8 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	v := k8sdaemon.Values{
 		Namespace:               f.namespace,
 		Rehearsal:               f.rehearsal,
-		Secrets:                 secretFiles,
+		Secrets:                 secrets.Files,
+		CloudCheckKey:           cloudCheckKey,
 		Image:                   pair.Daemon,
 		ProxyImage:              f.proxyImage,
 		PolecatImage:            f.polecatImage,
@@ -411,26 +405,21 @@ type applyObject struct {
 	body []byte
 }
 
-// withoutAnAbsentCloudCheckKey drops the cloud-check key entry when the
-// operator's config directory does not hold it: the patrol runs without the key
-// and a Secret the render mounts but the operator cannot create would hold the
-// pod in ContainerCreating. A path that cannot be read for any other reason
-// refuses the render rather than guessing the file away.
-func withoutAnAbsentCloudCheckKey(files []manifestdata.SecretFile, configDir string, lstat func(string) (fs.FileInfo, error)) ([]manifestdata.SecretFile, error) {
-	out := make([]manifestdata.SecretFile, 0, len(files))
-	for _, file := range files {
-		if file.Name == cloudCheckKeyFile {
-			path := filepath.Join(configDir, file.Name)
-			switch _, err := lstat(path); {
-			case errors.Is(err, fs.ErrNotExist):
-				continue
-			case err != nil:
-				return nil, fmt.Errorf("the cloud check's key file %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
-			}
-		}
-		out = append(out, file)
+// cloudCheckKeyConfigured reports whether the operator's config directory holds
+// the key file the gt-cloud-check-gcp Secret is created from. The patrol runs
+// without the key (one log line), and the pod must not mount a Secret that was
+// never created, so the mount and its create line are rendered only for a
+// configured key. A path that cannot be read for any other reason refuses the
+// render rather than guessing the file away.
+func cloudCheckKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, error)) (bool, error) {
+	path := filepath.Join(configDir, k8sdaemon.CloudCheckKeyFile)
+	switch _, err := lstat(path); {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("the cloud check's key file %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
 	}
-	return out, nil
+	return true, nil
 }
 
 // applyObjects splits a rendered stream into its documents, dropping the Secrets:
@@ -505,6 +494,10 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 			for _, item := range vol.Secret.Items {
 				froms = append(froms, fromFileArg(item.Key, filepath.Join(openShellDir, item.Path)))
 			}
+		} else if source == k8sdaemon.CloudCheckKeyFile {
+			// The Secret's data key is the file name the pod mounts, not the
+			// operator's config-directory file name it is created from.
+			froms = append(froms, fromFileArg(k8sdaemon.CloudCheckKeyKey, filepath.Join(configDir, source)))
 		} else {
 			froms = append(froms, fromFileArg(source, filepath.Join(configDir, source)))
 		}

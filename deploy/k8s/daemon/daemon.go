@@ -116,6 +116,17 @@ const (
 	RehearsalForgeTokenFile = "forgejo-viewer.env" //nolint:gosec // a file name, not a credential
 	// OMTokenMetaFile is the om token's expiry sidecar (daemon.om_token_meta).
 	OMTokenMetaFile = "om-daemon-token.meta" //nolint:gosec // a file name, not a credential
+	// CloudCheckKeySecretName is the operator's Secret holding the cloud
+	// check's GCP service-account key, and CloudCheckKeyKey is its one data
+	// key. The Secret is created outside this render; the render mounts it at
+	// CloudCheckKeyPath only when Values.CloudCheckKey says the operator has
+	// the key file (gt-c57pax).
+	CloudCheckKeySecretName = "gt-cloud-check-gcp"
+	CloudCheckKeyKey        = "key.json"
+	CloudCheckKeyPath       = "/var/run/secrets/gt-cloud-check/key.json"
+	// CloudCheckKeyFile is the name of the operator's config-directory file the
+	// Secret is created from, and the annotation the create line reads.
+	CloudCheckKeyFile = CloudCheckKeySecretName
 	// The sweep's roles in deploy/k8s/sweep-rbac.yaml. The render binds the
 	// pod's service account to them and copies no rule from them.
 	SweepNamespace     = "gt-sweeps"
@@ -571,6 +582,12 @@ type Values struct {
 	// OMToken mounts the OMTokenFile Secret and passes --om-token-file at
 	// manifestdata.LiveOMTokenPath, as a live compose spec with OMTokenFile does.
 	OMToken bool
+	// CloudCheckKey mounts the operator's gt-cloud-check-gcp Secret at
+	// CloudCheckKeyPath. The command render sets it only when the operator's
+	// config directory holds the key file the Secret is created from, so a pod
+	// never waits on a Secret that was not created (gt-c57pax). A rehearsal
+	// never mounts it.
+	CloudCheckKey bool
 	// ForgeHost is the forge host:port the pod's git asks. Set, the pod mounts
 	// the ForgeTokenFile Secret and passes --forge-host and
 	// --forge-token-file, as a live compose spec with ForgeHost does.
@@ -714,6 +731,9 @@ func Build(v Values) (Manifests, error) {
 	for _, file := range v.Secrets {
 		m.Secrets = append(m.Secrets, secret(file, namespace))
 	}
+	if v.CloudCheckKey {
+		m.Secrets = append(m.Secrets, cloudCheckKeySecret(namespace))
+	}
 	// A rehearsal carries no openshell config: its gateway calls are not the live
 	// seats', and rehearsalSecrets keeps it to the fewest credentials.
 	if !v.Rehearsal {
@@ -770,6 +790,24 @@ func secret(file manifestdata.SecretFile, namespace string) Secret {
 		},
 		Type:       "Opaque",
 		StringData: map[string]string{file.Name: ""},
+	}
+}
+
+// cloudCheckKeySecret is the placeholder Secret for the cloud check's key: the
+// operator's own Secret (CloudCheckKeySecretName) is created outside the render
+// from CloudCheckKeyFile, and the source annotation lets the command print that
+// create line with the key the pod reads.
+func cloudCheckKeySecret(namespace string) Secret {
+	return Secret{
+		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Secret"},
+		Metadata: ObjectMeta{
+			Name:        CloudCheckKeySecretName,
+			Namespace:   namespace,
+			Labels:      labels(),
+			Annotations: map[string]string{SourceFileAnnotation: CloudCheckKeyFile},
+		},
+		Type:       "Opaque",
+		StringData: map[string]string{CloudCheckKeyKey: ""},
 	}
 }
 
@@ -1272,6 +1310,19 @@ func volumes(v Values) ([]Volume, error) {
 	if !v.Rehearsal {
 		vols = append(vols, openShellVolume())
 	}
+	if v.CloudCheckKey {
+		// KeyToPath keeps the key.json name: the Secret's key is the file name
+		// the operator created, and the mount is a subPath of it.
+		mode := int32(0o400)
+		vols = append(vols, Volume{
+			Name: CloudCheckKeySecretName,
+			Secret: &SecretVolumeSource{
+				SecretName:  CloudCheckKeySecretName,
+				DefaultMode: &mode,
+				Items:       []KeyToPath{{Key: CloudCheckKeyKey, Path: CloudCheckKeyKey}},
+			},
+		})
+	}
 	return vols, nil
 }
 
@@ -1388,6 +1439,14 @@ func mounts(v Values) []VolumeMount {
 	if !v.Rehearsal {
 		m = append(m, openShellMount())
 	}
+	if v.CloudCheckKey {
+		m = append(m, VolumeMount{
+			Name:      CloudCheckKeySecretName,
+			MountPath: CloudCheckKeyPath,
+			SubPath:   CloudCheckKeyKey,
+			ReadOnly:  true,
+		})
+	}
 	if v.OMToken {
 		// The om config names the token's container path, so it is mounted beside
 		// the token. It is read from the town-state volume, whose .runtime/container
@@ -1466,6 +1525,11 @@ func (v Values) withDefaults() Values {
 	}
 	if v.TerminationGraceSeconds == 0 {
 		v.TerminationGraceSeconds = DefaultTerminationGraceSeconds
+	}
+	// A rehearsal runs beside the live pod and mounts no live credential
+	// (validateRehearsal), so its cloud check key is never mounted.
+	if v.Rehearsal {
+		v.CloudCheckKey = false
 	}
 	return v
 }

@@ -126,10 +126,6 @@ spec:
               mountPath: /run/gt/xdg/gt/dolt-archive.key
               subPath: dolt-archive.key
               readOnly: true
-            - name: daemon-gcp-key
-              mountPath: /run/gt/xdg/gt/gcp-key
-              subPath: gcp-key
-              readOnly: true
             - name: daemon-om-daemon-token
               mountPath: /run/secrets/om-token
               subPath: om-daemon-token
@@ -144,6 +140,10 @@ spec:
               readOnly: true
             - name: daemon-openshell
               mountPath: /run/gt/xdg/openshell
+              readOnly: true
+            - name: gt-cloud-check-gcp
+              mountPath: /var/run/secrets/gt-cloud-check/key.json
+              subPath: key.json
               readOnly: true
             - name: town-state
               mountPath: /run/gt/xdg/om/config.json
@@ -258,10 +258,6 @@ spec:
           secret:
             secretName: daemon-dolt-archive.key
             defaultMode: 384
-        - name: daemon-gcp-key
-          secret:
-            secretName: daemon-gcp-key
-            defaultMode: 384
         - name: polecat-image
           downwardAPI:
             defaultMode: 292
@@ -296,3 +292,10 @@ spec:
                 path: gateways/openshell/mtls/tls.crt
               - key: gateways__openshell__mtls__tls.key
                 path: gateways/openshell/mtls/tls.key
+        - name: gt-cloud-check-gcp
+          secret:
+            secretName: gt-cloud-check-gcp
+            defaultMode: 256
+            items:
+              - key: key.json
+                path: key.json

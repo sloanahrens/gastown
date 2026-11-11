@@ -1711,7 +1711,7 @@ type CloudCheckConfig struct {
 	// KeyFile is the GCP service-account key the child reads through
 	// GOOGLE_APPLICATION_CREDENTIALS. The key's value never leaves the file:
 	// the patrol only stats it and passes the path. Empty means
-	// CloudCheckDefaultKeyFile in the daemon's config directory.
+	// CloudCheckDefaultKeyFile, the path the daemon pod mounts it at.
 	KeyFile string `json:"key_file"`
 }
 
@@ -1720,10 +1720,10 @@ type CloudCheckConfig struct {
 const (
 	CloudCheckDefaultInterval = "10m"
 	CloudCheckDefaultCommand  = "cloudcheck"
-	// CloudCheckDefaultKeyFile is the key's name in the daemon's config
-	// directory: it is the deploy/daemon/secrets.yaml entry the render mounts
-	// as the daemon-gcp-key Secret.
-	CloudCheckDefaultKeyFile = "gcp-key"
+	// CloudCheckDefaultKeyFile is where the daemon pod mounts the operator's
+	// gt-cloud-check-gcp Secret (deploy/k8s/daemon CloudCheckKeyPath). A host
+	// whose key is elsewhere names the path in key_file.
+	CloudCheckDefaultKeyFile = "/var/run/secrets/gt-cloud-check/key.json"
 )
 
 // UnmarshalJSON decodes the patrol's block strictly, refusing an interval the
@@ -1750,25 +1750,13 @@ func (c *CloudCheckConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// KeyFilePath returns the key file the patrol reads: the setting, or the
-// default name in the daemon's config directory. It reads the environment
-// through DefaultGtConfigDir, so the host daemon and the pod both resolve the
-// file the render mounts for them.
-func (c *CloudCheckConfig) KeyFilePath() (string, error) {
-	return c.keyFilePath(DefaultGtConfigDir)
-}
-
-// keyFilePath is KeyFilePath with the config-directory lookup injected, so a
-// test pins the directory without mutating the process environment.
-func (c *CloudCheckConfig) keyFilePath(configDir func() (string, error)) (string, error) {
+// KeyFilePath returns the key file the patrol reads: the setting, or the path
+// the daemon pod mounts it at.
+func (c *CloudCheckConfig) KeyFilePath() string {
 	if c != nil && c.KeyFile != "" {
-		return c.KeyFile, nil
+		return c.KeyFile
 	}
-	dir, err := configDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, CloudCheckDefaultKeyFile), nil
+	return CloudCheckDefaultKeyFile
 }
 
 // JevScrub turns on the state scrubber for one Jev battery: secret-shaped text
@@ -3084,21 +3072,13 @@ func (c *LandingWorkerConfig) ForgejoTokenDir() (string, error) {
 // $XDG_CONFIG_HOME/gt when set, else ~/.config/gt (the path the epic names
 // for forgejo-<role>.env).
 func DefaultForgejoTokenDir() (string, error) {
-	return DefaultGtConfigDir()
+	return forgejoTokenDir(os.Getenv, os.UserHomeDir)
 }
 
-// DefaultGtConfigDir returns the town's config directory: $XDG_CONFIG_HOME/gt
-// when set, else ~/.config/gt. The live container's Secrets are mounted under
-// it, so a setting that resolves a file through this function finds the mounted
-// copy in the pod and the operator's own on the host.
-func DefaultGtConfigDir() (string, error) {
-	return gtConfigDir(os.Getenv, os.UserHomeDir)
-}
-
-// gtConfigDir is DefaultGtConfigDir with its environment injected, the way
-// config.ClaudeConfigDir is, so a test can pin the directory without mutating
-// the process environment.
-func gtConfigDir(getenv func(string) string, userHomeDir func() (string, error)) (string, error) {
+// forgejoTokenDir is DefaultForgejoTokenDir with its environment injected,
+// the way config.ClaudeConfigDir is, so a test can pin the directory without
+// mutating the process environment.
+func forgejoTokenDir(getenv func(string) string, userHomeDir func() (string, error)) (string, error) {
 	if xdg := getenv("XDG_CONFIG_HOME"); xdg != "" {
 		return filepath.Join(xdg, "gt"), nil
 	}

@@ -2,8 +2,6 @@ package config
 
 import (
 	"encoding/json"
-	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -50,24 +48,17 @@ func TestCloudCheckConfigDecodesAndRefusesMistakes(t *testing.T) {
 	}
 }
 
-// TestCloudCheckKeyFilePath: the setting wins; empty is the default name in the
-// config directory, and a directory that cannot be resolved is an error, never a
-// path in no directory.
+// TestCloudCheckKeyFilePath: the setting wins, and empty is the path the daemon
+// pod mounts the operator's Secret at.
 func TestCloudCheckKeyFilePath(t *testing.T) {
 	t.Parallel()
-	dir := func() (string, error) { return "/cfg", nil }
-
-	got, err := (&CloudCheckConfig{KeyFile: "/keys/gcp-key"}).keyFilePath(dir)
-	if err != nil || got != "/keys/gcp-key" {
-		t.Errorf("a set key file = %q, %v; want the setting", got, err)
+	if got := (&CloudCheckConfig{KeyFile: "/keys/gcp-key"}).KeyFilePath(); got != "/keys/gcp-key" {
+		t.Errorf("a set key file = %q, want the setting", got)
 	}
-
-	got, err = (&CloudCheckConfig{}).keyFilePath(dir)
-	if err != nil || got != filepath.Join("/cfg", CloudCheckDefaultKeyFile) {
-		t.Errorf("an empty key file = %q, %v; want the default name in the config directory", got, err)
+	if got := (&CloudCheckConfig{}).KeyFilePath(); got != CloudCheckDefaultKeyFile {
+		t.Errorf("an empty key file = %q, want %q", got, CloudCheckDefaultKeyFile)
 	}
-
-	if _, err := (&CloudCheckConfig{}).keyFilePath(func() (string, error) { return "", errors.New("no home") }); err == nil {
-		t.Error("a failure to resolve the config directory returned no error")
+	if got := (*CloudCheckConfig)(nil).KeyFilePath(); got != CloudCheckDefaultKeyFile {
+		t.Errorf("a nil block = %q, want %q", got, CloudCheckDefaultKeyFile)
 	}
 }

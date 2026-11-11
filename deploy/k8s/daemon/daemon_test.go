@@ -75,6 +75,7 @@ func goldenValues(t *testing.T) Values {
 		Memory:                  "4Gi",
 		OMToken:                 true,
 		ForgeHost:               "forgejo:3000",
+		CloudCheckKey:           true,
 		ConfirmContainerStopped: true,
 		// A shape fixture: any gateway IPv4 renders the one hostAlias, and the
 		// address is the caller's (see Values.HostGatewayIP).
@@ -171,14 +172,16 @@ func TestRenderGolden(t *testing.T) {
 	} {
 		compareGolden(t, dir, doc.file, document(t, doc.value))
 	}
-	// One Secret per entry, then the daemon-openshell Secret.
-	if len(m.Secrets) != len(v.Secrets)+1 {
-		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries, want one each and the openshell Secret", len(m.Secrets), len(v.Secrets))
+	// One Secret per entry, then the cloud check key's Secret and the
+	// daemon-openshell Secret.
+	if len(m.Secrets) != len(v.Secrets)+2 {
+		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries, want one each, the cloud check key's and the openshell Secret", len(m.Secrets), len(v.Secrets))
 	}
 	for i, file := range v.Secrets {
 		compareGolden(t, dir, "secret-"+file.Name+".yaml", document(t, m.Secrets[i]))
 	}
-	compareGolden(t, dir, "secret-openshell.yaml", document(t, m.Secrets[len(v.Secrets)]))
+	compareGolden(t, dir, "secret-"+CloudCheckKeySecretName+".yaml", document(t, m.Secrets[len(v.Secrets)]))
+	compareGolden(t, dir, "secret-openshell.yaml", document(t, m.Secrets[len(v.Secrets)+1]))
 }
 
 // TestRenderWritesTheObjectsInOrder holds the stream's order, which an apply
@@ -1125,10 +1128,11 @@ func TestSecretsHoldNoBytes(t *testing.T) {
 	t.Parallel()
 	v := goldenValues(t)
 	m := mustBuild(t, v)
-	// The daemon-openshell Secret follows the entries; TestOpenShellSecretHasOneKeyPerFile
-	// holds its shape.
-	if len(m.Secrets) != len(v.Secrets)+1 {
-		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries and the openshell Secret", len(m.Secrets), len(v.Secrets))
+	// The cloud check key's Secret and the daemon-openshell Secret follow the
+	// entries; TestCloudCheckKeyIsOptional and TestOpenShellSecretHasOneKeyPerFile
+	// hold their shapes.
+	if len(m.Secrets) != len(v.Secrets)+2 {
+		t.Fatalf("the renderer wrote %d Secrets for %d manifest entries, the cloud check key's and the openshell Secret", len(m.Secrets), len(v.Secrets))
 	}
 	for i, file := range v.Secrets {
 		s := m.Secrets[i]
@@ -1148,6 +1152,92 @@ func TestSecretsHoldNoBytes(t *testing.T) {
 			t.Errorf("Secret %s's placeholder for %q = %q (present %t), want an empty string", s.Metadata.Name, file.Name, got, ok)
 		}
 	}
+}
+
+// TestCloudCheckKeyIsOptional: the operator's gt-cloud-check-gcp Secret is
+// mounted at the patrol's default key path, with key.json as its one data key,
+// only when Values.CloudCheckKey says the operator has the key file; a rehearsal
+// never mounts it (gt-c57pax).
+func TestCloudCheckKeyIsOptional(t *testing.T) {
+	t.Parallel()
+	mountAt := func(m Manifests) *VolumeMount {
+		return volumeMountAt(m.Deployment.Spec.Template.Spec.Containers[0].VolumeMounts, CloudCheckKeyPath)
+	}
+	volumeNamed := func(m Manifests) (Volume, bool) {
+		for _, v := range m.Deployment.Spec.Template.Spec.Volumes {
+			if v.Name == CloudCheckKeySecretName {
+				return v, true
+			}
+		}
+		return Volume{}, false
+	}
+	secretNamed := func(m Manifests) (Secret, bool) {
+		for _, s := range m.Secrets {
+			if s.Metadata.Name == CloudCheckKeySecretName {
+				return s, true
+			}
+		}
+		return Secret{}, false
+	}
+
+	t.Run("configured", func(t *testing.T) {
+		t.Parallel()
+		m := mustBuild(t, goldenValues(t))
+
+		mount := mountAt(m)
+		if mount == nil {
+			t.Fatalf("the pod does not mount %s", CloudCheckKeyPath)
+		}
+		if mount.Name != CloudCheckKeySecretName || mount.SubPath != CloudCheckKeyKey || !mount.ReadOnly {
+			t.Errorf("the mount = %+v, want a read-only subPath of %s from %s", *mount, CloudCheckKeyKey, CloudCheckKeySecretName)
+		}
+		vol, ok := volumeNamed(m)
+		if !ok || vol.Secret == nil || vol.Secret.SecretName != CloudCheckKeySecretName {
+			t.Fatalf("the cloud check key volume = %+v (present %t), want the %s Secret", vol, ok, CloudCheckKeySecretName)
+		}
+		if len(vol.Secret.Items) != 1 || vol.Secret.Items[0].Key != CloudCheckKeyKey || vol.Secret.Items[0].Path != CloudCheckKeyKey {
+			t.Errorf("the cloud check key volume items = %+v, want the %s key", vol.Secret.Items, CloudCheckKeyKey)
+		}
+		s, ok := secretNamed(m)
+		if !ok {
+			t.Fatalf("the render writes no %s Secret", CloudCheckKeySecretName)
+		}
+		if got := s.Metadata.Annotations[SourceFileAnnotation]; got != CloudCheckKeyFile {
+			t.Errorf("the Secret's source = %q, want %q", got, CloudCheckKeyFile)
+		}
+		if got, ok := s.StringData[CloudCheckKeyKey]; !ok || got != "" {
+			t.Errorf("the Secret's %s placeholder = %q (present %t), want an empty string", CloudCheckKeyKey, got, ok)
+		}
+	})
+
+	t.Run("not configured", func(t *testing.T) {
+		t.Parallel()
+		v := goldenValues(t)
+		v.CloudCheckKey = false
+		m := mustBuild(t, v)
+		if mount := mountAt(m); mount != nil {
+			t.Errorf("the pod mounts %s with no configured key", CloudCheckKeyPath)
+		}
+		if _, ok := volumeNamed(m); ok {
+			t.Error("the pod carries the cloud check key volume with no configured key")
+		}
+		if _, ok := secretNamed(m); ok {
+			t.Error("the render writes the cloud check key Secret with no configured key")
+		}
+	})
+
+	t.Run("a rehearsal never mounts it", func(t *testing.T) {
+		t.Parallel()
+		v := rehearsalValues(t)
+		v.CloudCheckKey = true
+		m := mustBuild(t, v)
+		if mount := mountAt(m); mount != nil {
+			t.Errorf("the rehearsal mounts %s", CloudCheckKeyPath)
+		}
+		if _, ok := volumeNamed(m); ok {
+			t.Error("the rehearsal carries the cloud check key volume")
+		}
+	})
 }
 
 // mountFor returns the mount of one volume.

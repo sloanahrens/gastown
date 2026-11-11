@@ -71,7 +71,7 @@ type cloudCheckSeams struct {
 	// stat reports the key file; nil is os.Stat.
 	stat func(name string) (fs.FileInfo, error)
 	// keyFile resolves the key path from the setting; nil is KeyFilePath.
-	keyFile func(c *agentconfig.CloudCheckConfig) (string, error)
+	keyFile func(c *agentconfig.CloudCheckConfig) string
 	// dispatch runs a check off the loop goroutine, so a slow run does not hold
 	// the heartbeat. Nil means one goroutine per check.
 	dispatch func(fn func())
@@ -96,7 +96,7 @@ func (d *Daemon) cloudCheckSeamsOf() cloudCheckSeams {
 		s.stat = os.Stat
 	}
 	if s.keyFile == nil {
-		s.keyFile = func(c *agentconfig.CloudCheckConfig) (string, error) { return c.KeyFilePath() }
+		s.keyFile = func(c *agentconfig.CloudCheckConfig) string { return c.KeyFilePath() }
 	}
 	if s.dispatch == nil {
 		s.dispatch = func(fn func()) { go fn() }
@@ -218,14 +218,10 @@ func (d *Daemon) runCloudCheckPatrol() {
 // check succeeded or not, so a failing run is retried at the next interval
 // rather than on every check tick.
 func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
-	keyFile, err := s.keyFile(cloudCheckSettings(d.patrolConfig))
-	if err != nil {
-		d.cloudCheckUnconfigured("cannot resolve the key file: " + err.Error())
-		return
-	}
+	keyFile := s.keyFile(cloudCheckSettings(d.patrolConfig))
 	// The check cannot reach the cloud without the key, and a run without it
 	// would report every project as unreachable. Say so once and run nothing.
-	_, err = s.stat(keyFile)
+	_, err := s.stat(keyFile)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		d.cloudCheckUnconfigured(fmt.Sprintf("no key file at %s; not running (mount the daemon-gcp-key Secret, or set patrols.cloud_check.key_file)", keyFile))

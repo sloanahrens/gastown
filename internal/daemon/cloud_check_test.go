@@ -46,7 +46,7 @@ type cloudCheckFakes struct {
 
 // cloudCheckTestDaemon builds a daemon whose patrol runs inline, on the fake
 // clock, with the given key lookup and stat.
-func cloudCheckTestDaemon(t *testing.T, cfg *DaemonPatrolConfig, keyFile func(*agentconfig.CloudCheckConfig) (string, error), stat func(string) (fs.FileInfo, error)) (*Daemon, *bytes.Buffer, *cloudCheckFakes) {
+func cloudCheckTestDaemon(t *testing.T, cfg *DaemonPatrolConfig, keyFile func(*agentconfig.CloudCheckConfig) string, stat func(string) (fs.FileInfo, error)) (*Daemon, *bytes.Buffer, *cloudCheckFakes) {
 	t.Helper()
 	f := &cloudCheckFakes{now: cloudCheckNow}
 	var buf bytes.Buffer
@@ -116,7 +116,7 @@ func TestCloudCheckRunsEachTickWithTheKeyAndRewritesTheStatus(t *testing.T) {
 	const command = "/usr/local/bin/cloudcheck"
 	key, stat := cloudCheckPresentKey()
 	d, _, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", command, key),
-		func(*agentconfig.CloudCheckConfig) (string, error) { return key, nil }, stat)
+		func(*agentconfig.CloudCheckConfig) string { return key }, stat)
 	status := cloudCheckStatusPath(d.config.TownRoot)
 
 	for i := 1; i <= 2; i++ {
@@ -158,7 +158,7 @@ func TestCloudCheckWithoutTheKeyLogsOnceAndRunsNothing(t *testing.T) {
 	t.Parallel()
 	key, _ := cloudCheckPresentKey()
 	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", key),
-		func(*agentconfig.CloudCheckConfig) (string, error) { return "/keys/absent-gcp-key", nil },
+		func(*agentconfig.CloudCheckConfig) string { return "/keys/absent-gcp-key" },
 		func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist })
 
 	d.runCloudCheckPatrol()
@@ -182,7 +182,7 @@ func TestCloudCheckRefusesAnUnreadableKeyFile(t *testing.T) {
 	t.Parallel()
 	key, _ := cloudCheckPresentKey()
 	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", key),
-		func(*agentconfig.CloudCheckConfig) (string, error) { return key, nil },
+		func(*agentconfig.CloudCheckConfig) string { return key },
 		func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission })
 
 	d.runCloudCheckPatrol()
@@ -207,7 +207,7 @@ func TestCloudCheckKeyNeverReachesALogEscalationOrStatus(t *testing.T) {
 		t.Fatalf("writing the key file: %v", err)
 	}
 	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", "", key),
-		func(*agentconfig.CloudCheckConfig) (string, error) { return key, nil }, os.Stat)
+		func(*agentconfig.CloudCheckConfig) string { return key }, os.Stat)
 	f.err = errors.New("exit status 1")
 
 	d.runCloudCheckPatrol()
@@ -260,7 +260,7 @@ func TestCloudCheckDisabledByDefault(t *testing.T) {
 			t.Parallel()
 			key, stat := cloudCheckPresentKey()
 			d, logs, f := cloudCheckTestDaemon(t, tt.config,
-				func(*agentconfig.CloudCheckConfig) (string, error) { return key, nil }, stat)
+				func(*agentconfig.CloudCheckConfig) string { return key }, stat)
 
 			d.runCloudCheckPatrol()
 
@@ -280,7 +280,7 @@ func TestCloudCheckRefusesAnIntervalItCannotSchedule(t *testing.T) {
 	t.Parallel()
 	key, stat := cloudCheckPresentKey()
 	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "soon", "", key),
-		func(*agentconfig.CloudCheckConfig) (string, error) { return key, nil }, stat)
+		func(*agentconfig.CloudCheckConfig) string { return key }, stat)
 
 	d.runCloudCheckPatrol()
 
