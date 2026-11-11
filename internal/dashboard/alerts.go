@@ -42,6 +42,21 @@ type Alert struct {
 	Rule string `json:"rule,omitempty"`
 }
 
+// sortAlertsNewestFirst orders the recent alerts the way the EVENTS feed draws
+// them: newest first. Equal times keep their source order, and an alert with no
+// time sorts after every timed one, keeping its place among those.
+func sortAlertsNewestFirst(alerts []Alert) {
+	sort.SliceStable(alerts, func(i, j int) bool { return alertNewer(alerts[i], alerts[j]) })
+}
+
+// alertNewer reports whether a comes before b in the EVENTS order.
+func alertNewer(a, b Alert) bool {
+	if a.At.IsZero() || b.At.IsZero() {
+		return !a.At.IsZero() && b.At.IsZero()
+	}
+	return a.At.After(b.At)
+}
+
 const (
 	// alertsKept is how many alerts the hub keeps in State.Alerts.
 	alertsKept = 20
