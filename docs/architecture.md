@@ -342,7 +342,7 @@ sequenceDiagram
 
 **1. Shape.** A bead is *shaped* when it has these sections: Goal, Constraints, Out of scope, Gate, Size and Acceptance (one to six checkboxes). `gt spec lint` checks the shape and also checks claims the text makes, such as whether the files it names exist. The spec dispatcher only takes beads that pass.
 
-**2. Dispatch.** Each tick the dispatcher looks for ready beads, lints them, and slings the clean ones to a free seat of the right class. It refuses when a dispatch hold file exists or when an emergency stop file exists for the town or the rig. Labels keep a bead off the dispatcher: `overseer-only`, `operator-only`, `needs-overseer`, `needs-operator`, `needs-human`, `crew-only`, `needs-split`, `gt:ready-to-land` and the dispatch-failed label (the list is `excludedLabels` in `internal/specdispatch/dispatch.go`). The dispatcher also skips an unshaped bead (lint refuses it), a deferred bead, and every bead while the dispatch hold is set. So a person can hold a bead until it is released.
+**2. Dispatch.** Each tick the dispatcher looks for ready beads, lints them, and slings the clean ones to a free seat of the right class. It refuses when a dispatch hold file exists or when an emergency stop file exists for the town or the rig. A fixed list of labels keeps a bead off the dispatcher, such as `overseer-only` and `needs-overseer`; the full list is `excludedLabels` in `internal/specdispatch/dispatch.go`. The dispatcher also skips an unshaped bead (lint refuses it), a deferred bead, and every bead while the dispatch hold is set. So a person can hold a bead until it is released.
 
 **3. Work.** A polecat in a sandbox reads the bead, edits files in its worktree, runs the gate commands the bead names and writes tests. It talks to the town only through `bd` and git.
 
@@ -370,7 +370,7 @@ sequenceDiagram
 
 The path is automatic except at four places:
 
-- a person shapes or approves what enters it (a label such as `overseer-only` keeps a bead off the dispatcher, as does being unshaped or deferred, and the dispatch hold stops every bead);
+- a person shapes or approves what enters it (see Dispatch for what keeps a bead off the dispatcher);
 - a landing that touches a risk path is reviewed by a human afterwards, through the attention queue;
 - changing a CI workflow file is a human act (see [The security model](#the-security-model));
 - the roll of a new image onto the cluster is a person's step.
@@ -439,7 +439,7 @@ flowchart TB
 
 **Guards against silent failure.** Safety checks return one of three answers: pass, fail or unknown. A check that could not read its input never reports pass. This rule closes the old class of defects where "could not check" looked the same as "checked and fine".
 
-**Stop switches.** The *dispatch hold* file stops new work from being handed out. The *ESTOP* files stop dispatch and restarts for the whole town or for one rig. Neither signals a running session. The dispatch hold is the overseer's tool. The ESTOP files are the operator's alone: the overseer never creates or removes them, and no other agent does either.
+**Stop switches.** The *dispatch hold* file stops new work from being handed out. The *ESTOP* files stop dispatch and restarts for the whole town or for one rig. Neither signals a running session. The overseer owns the hold and the operator alone owns the ESTOP files.
 
 **What humans do by hand.** Some acts are reserved for a person on purpose: changing a CI workflow file, pushing release and teardown tags, holding and rotating the Forgejo admin and cloud admin credentials, copying the reviewed `images` workflow into place, and applying new cluster manifests. Some of these acts go through the *auth broker*, `gt-approve`, which runs as its own macOS user, `gt-forge`. Each run is for one named rule: the broker mints one token for it, the operator types the confirmation, the broker revokes the token when the run ends, and the run is logged. The rules in use cover Forgejo provisioning and resync, the cutover and probe programs, and the sources secret. An agent never holds the admin credential.
 
@@ -486,4 +486,4 @@ Facts that change are read, not written down.
 - **Green ref.** The `green/<sha12>` branch published when a whole sweep cycle is green.
 - **Promotion.** The fast-forward push of a green commit to GitHub.
 - **Attention queue.** The derived list of conditions that need a human.
-- **Hold and ESTOP.** The files that stop dispatch. The overseer keeps the hold; the operator alone keeps the ESTOP files.
+- **Hold and ESTOP.** The files that stop dispatch. Owned by the overseer (hold) and the operator (ESTOP).
