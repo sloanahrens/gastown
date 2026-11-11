@@ -1,6 +1,7 @@
 // Package manifestdata holds the data the cluster renderer trusts: the town
-// root's ownership split, the daemon's secrets manifest, and the container
-// paths the live compose writer and the renderer both name. Its imports are
+// root's ownership split, the daemon's secrets manifest, the container paths
+// the live compose writer and the renderer both name, and the daemon's shutdown
+// budgets (shutdown.go). Its imports are
 // the standard library and the YAML module alone, so a package that renders
 // from it reaches no process and no socket through it (gt-t5tf9g).
 package manifestdata

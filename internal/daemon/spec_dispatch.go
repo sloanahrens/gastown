@@ -267,8 +267,10 @@ func (d *Daemon) triggerSpecDispatch() bool {
 // specDispatchParked reports whether an upgrade restart keeps the ticker from
 // starting a tick: the landing drain is on, or the restart waits on the tick in
 // flight, where a new one would start behind it and extend the wait (gt-u1fzb).
+// A SIGTERM drain parks it too: the daemon is stopping and starts no sling
+// (shutdown_drain.go).
 func (d *Daemon) specDispatchParked() bool {
-	return d.upgradeRestartDrains() || d.upgradeTickWaiting.Load()
+	return d.upgradeRestartDrains() || d.upgradeTickWaiting.Load() || d.draining.Load()
 }
 
 // specSeatsReady reads the seat settings the next tick will run with and

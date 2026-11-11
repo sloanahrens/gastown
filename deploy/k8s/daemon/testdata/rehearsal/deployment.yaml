@@ -24,7 +24,7 @@ spec:
         app.kubernetes.io/name: daemon
     spec:
       serviceAccountName: daemon
-      terminationGracePeriodSeconds: 180
+      terminationGracePeriodSeconds: 185
       containers:
         - name: daemon
           image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

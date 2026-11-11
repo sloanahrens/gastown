@@ -5,12 +5,15 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/manifestdata"
 )
 
 // heartbeatSignalGrace bounds how long a shutdown signal waits for a heartbeat
 // step that does not stop on the canceled daemon context (gt-lbqgz). It stays
-// well inside launchd's 30 s stop.
-const heartbeatSignalGrace = 5 * time.Second
+// well inside launchd's 30 s stop. The value is manifestdata's, which sizes the
+// pod's grace period (gt-99ys4n).
+const heartbeatSignalGrace = manifestdata.HeartbeatSignalGrace
 
 // heartbeatRun is the state one heartbeat shares with the signal wait: the
 // name of the step in flight and the lock that keeps an abandoned heartbeat
@@ -66,8 +69,16 @@ func (d *Daemon) runHeartbeat(sigChan <-chan os.Signal, run func()) os.Signal {
 				continue
 			}
 			d.logSignalDuringHeartbeat(sig)
+			// A SIGTERM drains the landing pass in flight before the cancel, so
+			// the cancel never cuts a landing step; a second signal during that
+			// wait ends it at once (shutdown_drain.go).
+			second := isDrainSignal(sig) && d.drainForShutdown(sigChan) != nil
 			if d.cancel != nil {
 				d.cancel()
+			}
+			if second {
+				d.logger.Printf("Second signal during the drain: not waiting for heartbeat step %q", d.heartbeatStepName())
+				return sig
 			}
 			grace := d.signalGrace()
 			wait := time.NewTimer(grace)

@@ -99,6 +99,13 @@ type Daemon struct {
 	// hbGrace overrides heartbeatSignalGrace in tests.
 	hb      heartbeatRun
 	hbGrace time.Duration
+	// draining is set by a SIGTERM drain (shutdown_drain.go): no spec-dispatch
+	// tick or tier sweep starts while the landing pass in flight finishes.
+	// drainBound and onDrainHold are test seams on the drain (drainBound
+	// overrides ShutdownDrainBound; onDrainHold runs once the hold is taken).
+	draining    atomic.Bool
+	drainBound  time.Duration
+	onDrainHold func()
 	// attention is the background attention tick (attention_background.go,
 	// gt-zszj0).
 	attention attentionRun
@@ -1610,8 +1617,12 @@ const unrequestedStopLogLine = "Stop was not requested through gt: exiting 75; t
 // shutdownForSignal ends the daemon on a signal and returns what Run should
 // exit with: nil when gt requested the stop, ErrUnrequestedStop otherwise. The
 // stop marker the exit reads was written before the signal (gt-518hq, gt-swsqm).
-func (d *Daemon) shutdownForSignal(sig os.Signal, state *State) error {
+// A SIGTERM drains the landing pass in flight first (shutdown_drain.go).
+func (d *Daemon) shutdownForSignal(sig os.Signal, state *State, sigChan <-chan os.Signal) error {
 	d.logger.Printf("Received signal %v, shutting down", sig)
+	if isDrainSignal(sig) {
+		d.drainForShutdown(sigChan)
+	}
 	return d.finishSignalShutdown(state)
 }
 
@@ -2158,7 +2169,7 @@ func (d *Daemon) Run() (err error) {
 				// every restart, so there is nothing to reload.
 				d.logger.Println("Received reload-restart signal: restart budgets are read from the intent records, nothing to reload")
 			} else {
-				return d.shutdownForSignal(sig, state)
+				return d.shutdownForSignal(sig, state, sigChan)
 			}
 
 		case <-doltHealthChan:

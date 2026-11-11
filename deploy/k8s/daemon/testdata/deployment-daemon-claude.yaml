@@ -27,7 +27,7 @@ spec:
         - ip: 192.168.5.2
           hostnames:
             - host.docker.internal
-      terminationGracePeriodSeconds: 180
+      terminationGracePeriodSeconds: 185
       containers:
         - name: daemon
           image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef

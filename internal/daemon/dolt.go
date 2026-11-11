@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltbackup"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/manifestdata"
 	"github.com/steveyegge/gastown/internal/notify"
 )
 
@@ -27,8 +28,9 @@ const doltCmdTimeout = 15 * time.Second
 // doltServerStopBudget bounds how long stopLocked waits for the Dolt SQL
 // server to exit on its own before sending SIGKILL. It is part of
 // ShutdownBudget — the real wall-clock ceiling a daemon restart has to account
-// for, not an estimate.
-const doltServerStopBudget = 30 * time.Second
+// for, not an estimate. The value is named once in manifestdata, which the pod's
+// grace period is sized from (gt-99ys4n).
+const doltServerStopBudget = manifestdata.DoltStopBudget
 
 // doltServerStopPoll is how often stopLocked checks that the server has exited.
 const doltServerStopPoll = 100 * time.Millisecond

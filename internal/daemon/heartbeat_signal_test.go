@@ -152,7 +152,7 @@ func TestSignalWhileIdleUnchanged(t *testing.T) {
 	d, logs := signalTestDaemon(t)
 	state := &State{Running: true}
 
-	if err := d.shutdownForSignal(syscall.SIGTERM, state); err != nil && !errors.Is(err, ErrUnrequestedStop) {
+	if err := d.shutdownForSignal(syscall.SIGTERM, state, make(chan os.Signal)); err != nil && !errors.Is(err, ErrUnrequestedStop) {
 		t.Fatalf("%s: shutdownForSignal: %v", t.Name(), err)
 	}
 	if state.Running {

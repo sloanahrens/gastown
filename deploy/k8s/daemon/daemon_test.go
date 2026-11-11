@@ -11,7 +11,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -1726,47 +1725,6 @@ func TestDeploymentGolden(t *testing.T) {
 	}
 }
 
-// daemonDuration returns the duration internal/daemon declares for name in the
-// given source file. It reads the declaration as text, because the import rule
-// keeps internal/daemon out of this package. The right-hand side is a literal
-// `N * time.Unit`, or the name of one other constant in the same file, which is
-// followed once (ShutdownBudget = doltServerStopBudget). Anything else fails the
-// test, so a declaration the test cannot read is never taken as a zero budget.
-func daemonDuration(t *testing.T, file, name string) time.Duration {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(packageDir(t), "..", "..", "..", "internal", "daemon", file))
-	if err != nil {
-		t.Fatalf("reading internal/daemon/%s: %v", file, err)
-	}
-	rhs := daemonDeclaration(t, data, file, name)
-	if alias := regexp.MustCompile(`^[A-Za-z_]\w*$`); alias.MatchString(rhs) {
-		rhs = daemonDeclaration(t, data, file, rhs)
-	}
-	lit := regexp.MustCompile(`^(\d+)\s*\*\s*time\.(Second|Minute)$`).FindStringSubmatch(rhs)
-	if lit == nil {
-		t.Fatalf("internal/daemon/%s: %s = %q, want a literal N * time.Second or time.Minute", file, name, rhs)
-	}
-	n, err := strconv.Atoi(lit[1])
-	if err != nil {
-		t.Fatalf("internal/daemon/%s: %s = %q: %v", file, name, rhs, err)
-	}
-	if lit[2] == "Minute" {
-		return time.Duration(n) * time.Minute
-	}
-	return time.Duration(n) * time.Second
-}
-
-// daemonDeclaration returns the right-hand side of the top-level declaration of
-// name in data, and fails the test when the file declares no such name.
-func daemonDeclaration(t *testing.T, data []byte, file, name string) string {
-	t.Helper()
-	m := regexp.MustCompile(`(?m)^\s*(?:const\s+)?` + regexp.QuoteMeta(name) + `\s*=\s*(.+?)\s*$`).FindSubmatch(data)
-	if m == nil {
-		t.Fatalf("internal/daemon/%s declares no %s", file, name)
-	}
-	return string(m[1])
-}
-
 // TestReadinessProbeUsesTheReadyAnswer holds the readiness probe to the ready
 // answer in the standard and the rehearsal render: gt status --line --ready
 // exits 0 for a fresh report with every non-green field recorded or an
@@ -1853,40 +1811,49 @@ func TestDeploymentRendersAZeroGracePeriod(t *testing.T) {
 	}
 }
 
+// TestShutdownDrainFitsTheRenderedGrace holds the pod's grace period above the
+// SIGTERM drain at both ends the render takes: the minimum it accepts, and the
+// default it takes when Values names none (0 below). The drain runs the landing
+// step's bound, then the heartbeat grace, then the Dolt stop, one after another,
+// so the grace must outlast all three or the kubelet's SIGKILL lands mid-drain
+// (gt-99ys4n). The drain is summed here from its three named budgets, not from
+// ShutdownDrainSum, so a wrong sum cannot pass the check that relies on it.
+func TestShutdownDrainFitsTheRenderedGrace(t *testing.T) {
+	t.Parallel()
+
+	drain := manifestdata.LandingStepDrainBound + manifestdata.HeartbeatSignalGrace + manifestdata.DoltStopBudget
+	for _, tc := range []struct {
+		name  string
+		grace int
+	}{
+		{"the minimum", MinimumTerminationGraceSeconds},
+		{"the default", 0},
+	} {
+		v := goldenValues(t)
+		v.TerminationGraceSeconds = tc.grace
+		grace := *mustBuild(t, v).Deployment.Spec.Template.Spec.TerminationGracePeriodSeconds
+		if grace < int64(drain/time.Second) {
+			t.Errorf("at %s the pod's grace period = %ds, under the drain %s (the landing-step bound, the heartbeat grace and the Dolt stop)", tc.name, grace, drain)
+		}
+	}
+}
+
 // TestPodHasNoPreStopAndGraceCoversTheDrain holds the shutdown contract: the pod
-// carries no preStop hook, so SIGTERM plus the grace period is the drain, and
-// the grace period is at least the drain bound the package computes from the
-// daemon's two named budgets. It also holds the arithmetic the comments state:
-// the drain bound is the shutdown budget plus the landing-pass drain bound, and
-// the default grace is that sum plus the margin.
+// carries no preStop hook, so SIGTERM plus the grace period is the drain. It also
+// holds the arithmetic the constants' comments state: DrainBound is the sum of
+// the three budgets, the minimum grace is DrainBound plus the margin, and the
+// default grace is the minimum.
 func TestPodHasNoPreStopAndGraceCoversTheDrain(t *testing.T) {
 	t.Parallel()
 
-	if got, want := DrainBound, daemonShutdownBudget+landingPassDrainBound; got != want {
-		t.Fatalf("DrainBound = %s, want the daemon's shutdown budget plus the landing-pass drain bound = %s", got, want)
+	if got, want := DrainBound, manifestdata.LandingStepDrainBound+manifestdata.HeartbeatSignalGrace+manifestdata.DoltStopBudget; got != want {
+		t.Errorf("DrainBound = %s, want the landing-step bound, the heartbeat grace and the Dolt stop = %s", got, want)
 	}
-	// The two budgets are declared in internal/daemon. The copies above must match
-	// those declarations, so a change to either budget there fails this test.
-	if got := daemonDuration(t, "dolt.go", "ShutdownBudget"); got != daemonShutdownBudget {
-		t.Errorf("internal/daemon ShutdownBudget is %s, but daemonShutdownBudget is %s", got, daemonShutdownBudget)
+	if got, want := MinimumTerminationGraceSeconds, int((DrainBound+terminationGraceMargin)/time.Second); got != want {
+		t.Errorf("MinimumTerminationGraceSeconds = %d, want DrainBound plus the margin = %d", got, want)
 	}
-	if got := daemonDuration(t, "upgrade_restart.go", "postLandRestartCap"); got != landingPassDrainBound {
-		t.Errorf("internal/daemon postLandRestartCap is %s, but landingPassDrainBound is %s", got, landingPassDrainBound)
-	}
-	if got, want := DefaultTerminationGraceSeconds, int((DrainBound+terminationGraceMargin)/time.Second); got != want {
-		t.Errorf("DefaultTerminationGraceSeconds = %d, want the drain bound plus the margin = %d", got, want)
-	}
-	if MinimumTerminationGraceSeconds < int(DrainBound/time.Second) {
-		t.Errorf("MinimumTerminationGraceSeconds = %d, under the drain bound %s", MinimumTerminationGraceSeconds, DrainBound)
-	}
-	// The sums the constants' comments state, so editing a constant without the
-	// comment it describes fails here: 30s + 2m = 2m30s is the floor, and
-	// 2m30s + 30s is the default.
-	if got, want := int(DrainBound/time.Second), 150; got != want {
-		t.Errorf("the drain bound is %d seconds, want the 30s + 2m = 150 the comments state", got)
-	}
-	if got, want := DefaultTerminationGraceSeconds, 180; got != want {
-		t.Errorf("the default grace is %d seconds, want the 150 + 30 = 180 the comments state", got)
+	if got, want := DefaultTerminationGraceSeconds, MinimumTerminationGraceSeconds; got != want {
+		t.Errorf("DefaultTerminationGraceSeconds = %d, want the minimum %d", got, want)
 	}
 
 	m := mustBuild(t, goldenValues(t))
@@ -1895,7 +1862,7 @@ func TestPodHasNoPreStopAndGraceCoversTheDrain(t *testing.T) {
 		t.Errorf("the pod's grace period = %ds, want the default %ds", got, want)
 	}
 	if got := *pod.TerminationGracePeriodSeconds; got < int64(MinimumTerminationGraceSeconds) {
-		t.Errorf("the pod's grace period = %ds, under the drain bound %ds", got, MinimumTerminationGraceSeconds)
+		t.Errorf("the pod's grace period = %ds, under the minimum %ds", got, MinimumTerminationGraceSeconds)
 	}
 
 	// The emitted Deployment is what an apply reads, so the hook check reads it:
