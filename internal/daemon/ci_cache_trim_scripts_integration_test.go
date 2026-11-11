@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -103,13 +104,15 @@ func ciCacheScriptFiles(t *testing.T, root string) []string {
 }
 
 // ciCacheScriptRun runs a trim program the way the daemon does — the constant
-// through sh, with the volume root and the age in minutes as argv data — and
-// returns its output and exit status. The command's environment is exactly
-// PATH and TMPDIR: nothing is inherited, so neither a tool on the caller's
-// PATH nor the shell itself can be swapped for the system's.
-func ciCacheScriptRun(t *testing.T, script, root, minutes string) (string, string, int) {
+// through sh, with the volume root, the age in minutes and any further argv data
+// (the capped script's cap) as arguments — and returns its output and exit
+// status. The command's environment is exactly PATH and TMPDIR: nothing is
+// inherited, so neither a tool on the caller's PATH nor the shell itself can be
+// swapped for the system's.
+func ciCacheScriptRun(t *testing.T, script, root, minutes string, extra ...string) (string, string, int) {
 	t.Helper()
-	cmd := exec.Command("/bin/sh", "-c", script, "ci-cache-trim", root, minutes)
+	args := append([]string{"-c", script, "ci-cache-trim", root, minutes}, extra...)
+	cmd := exec.Command("/bin/sh", args...)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "TMPDIR=" + t.TempDir()}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -132,13 +135,14 @@ func ciCacheScriptRun(t *testing.T, script, root, minutes string) (string, strin
 // empties; both keep the fresh file and the root's own file, replying with the
 // three lines the parser reads.
 //
-// Expected to fail under four changes to the programs, each run by hand on its
+// Expected to fail under five changes to the programs, each run by hand on its
 // bead: flipping the age test from older-than to newer-than (-mmin +age to
 // -mmin -age, so the newest files go), dropping the depth floor (-mindepth 2 to
 // -mindepth 0, so the root's own files go), and moving the missing-path exit
-// away from ciCacheMissingPathExit (gt-by8lm5); and restoring the depth-1
+// away from ciCacheMissingPathExit (gt-by8lm5); restoring the depth-1
 // empty-directory sweep (-mindepth 2 to -mindepth 1, so the cache's shard
-// directory goes) (gt-qaqvf4).
+// directory goes) (gt-qaqvf4); and comparing the capped script's size with -lt
+// instead of -le, so a volume exactly at its cap is trimmed (gt-lbtul0).
 func TestIntegrationCICacheTrimScripts(t *testing.T) {
 	t.Parallel()
 
@@ -220,16 +224,93 @@ func TestIntegrationCICacheTrimScripts(t *testing.T) {
 		}
 	})
 
-	t.Run("a missing root is the missing-path status", func(t *testing.T) {
+	t.Run("the capped apply at or under the cap removes nothing", func(t *testing.T) {
 		t.Parallel()
-		for name, script := range map[string]string{
-			"the dry run": ciCacheListScript,
-			"the apply":   ciCacheTrimScript,
+		// The cap is the tree's size as the dry run reads it, and one KiB more.
+		for name, capOf := range map[string]func(before int64) int64{
+			"at the cap":    func(before int64) int64 { return before },
+			"under the cap": func(before int64) int64 { return before + 1 },
 		} {
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
+				root := t.TempDir()
+				ciCacheScriptTree(t, root)
+				before := ciCacheScriptFiles(t, root)
+
+				listed, stderr, status := ciCacheScriptRun(t, ciCacheListScript, root, ciCacheScriptAgeMinutes)
+				if status != 0 {
+					t.Fatalf("the dry run exited %d: %s", status, stderr)
+				}
+				listedReply, err := parseCICacheTrimReply([]byte(listed))
+				if err != nil {
+					t.Fatalf("the dry run's reply does not parse: %v:\n%s", err, listed)
+				}
+
+				stdout, stderr, status := ciCacheScriptRun(t, ciCacheCappedTrimScript, root, ciCacheScriptAgeMinutes,
+					strconv.FormatInt(capOf(listedReply.beforeKiB), 10))
+				if status != 0 {
+					t.Fatalf("the capped apply exited %d: %s", status, stderr)
+				}
+				reply, err := parseCICacheTrimReply([]byte(stdout))
+				if err != nil {
+					t.Fatalf("the capped apply's reply does not parse: %v:\n%s", err, stdout)
+				}
+				if reply.removed != 0 {
+					t.Errorf("the capped apply reports %d files removed under its cap, want 0:\n%s", reply.removed, stdout)
+				}
+				if reply.afterKiB != reply.beforeKiB {
+					t.Errorf("the capped apply reports the volume changing under its cap, %d to %d KiB", reply.beforeKiB, reply.afterKiB)
+				}
+				if got := ciCacheScriptFiles(t, root); !slices.Equal(got, before) {
+					t.Errorf("the capped apply removed files under its cap: %v, before %v", got, before)
+				}
+			})
+		}
+	})
+
+	t.Run("the capped apply over the cap removes what the apply removes", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheScriptTree(t, root)
+
+		// A cap of 1 KiB: the tree is over it, so the capped apply runs the age rule.
+		stdout, stderr, status := ciCacheScriptRun(t, ciCacheCappedTrimScript, root, ciCacheScriptAgeMinutes, "1")
+		if status != 0 {
+			t.Fatalf("the capped apply exited %d: %s", status, stderr)
+		}
+		reply, err := parseCICacheTrimReply([]byte(stdout))
+		if err != nil {
+			t.Fatalf("the capped apply's reply does not parse: %v:\n%s", err, stdout)
+		}
+		if want := int64(len(ciCacheScriptRemoved)); reply.removed != want {
+			t.Errorf("the capped apply reports %d files removed, want %d:\n%s", reply.removed, want, stdout)
+		}
+
+		want := append([]string{"trim.txt"}, ciCacheScriptFresh...)
+		slices.Sort(want)
+		if got := ciCacheScriptFiles(t, root); !slices.Equal(got, want) {
+			t.Errorf("the volume holds %v after the capped apply, want %v", got, want)
+		}
+		if _, err := os.Stat(filepath.Join(root, "ab", "cd")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the directory the removal emptied is still present (stat error %v)", err)
+		}
+	})
+
+	t.Run("a missing root is the missing-path status", func(t *testing.T) {
+		t.Parallel()
+		for _, tt := range []struct {
+			name   string
+			script string
+			extra  []string
+		}{
+			{name: "the dry run", script: ciCacheListScript},
+			{name: "the apply", script: ciCacheTrimScript},
+			{name: "the capped apply", script: ciCacheCappedTrimScript, extra: []string{"1024"}},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 				root := filepath.Join(t.TempDir(), "absent")
-				stdout, stderr, status := ciCacheScriptRun(t, script, root, ciCacheScriptAgeMinutes)
+				stdout, stderr, status := ciCacheScriptRun(t, tt.script, root, ciCacheScriptAgeMinutes, tt.extra...)
 				if status != ciCacheMissingPathExit {
 					t.Fatalf("a missing root exited %d, want the missing-path status %d", status, ciCacheMissingPathExit)
 				}

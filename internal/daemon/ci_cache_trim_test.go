@@ -27,6 +27,12 @@ const (
 	ciCacheTestPod = "forgejo-runner-7d9f8c-abcde"
 	// ciCacheTestMinutes is the fixture's ci_cache_max_age, 12h, in minutes.
 	ciCacheTestMinutes = "720"
+	// ciCacheTestGocacheRoot is the ci-gocache volume's root, spelled out so the
+	// argv test pins the path the trim has always execed into.
+	ciCacheTestGocacheRoot = "/var/lib/docker/volumes/ci-gocache/_data"
+	// ciCacheTestNpmCapKiB is the npm volume's cap, 1 GiB in KiB, as the capped
+	// script's argv carries it.
+	ciCacheTestNpmCapKiB = "1048576"
 )
 
 // ciCacheTestStart is the fixture's first instant: midday, outside the daily
@@ -53,21 +59,27 @@ type ciCacheFixture struct {
 	now  time.Time
 	// pending holds the passes the patrol dispatched and the test has not run.
 	pending []func()
-	// pods and exec are the replies the pod list and the exec get.
-	pods cliReply
-	exec cliReply
+	// pods is the reply the pod list gets. exec is the reply the exec into the
+	// ci-gocache volume gets, and npmExec the one into the ci-npm volume; each
+	// exec is answered by the root it names.
+	pods    cliReply
+	exec    cliReply
+	npmExec cliReply
 }
 
 // newCICacheFixture builds the fixture for mode: a running runner pod and a
-// reply of an apply's figures, which a test may replace before it ticks.
+// reply of an apply's figures, which a test may replace before it ticks. The npm
+// volume reads under its cap by default, so it raises no item unless a test
+// makes it.
 func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 	t.Helper()
 	var logs bytes.Buffer
 	f := &ciCacheFixture{
-		logs: &logs,
-		now:  ciCacheTestStart,
-		pods: cliReply{stdout: ciCachePodsRunningJSON},
-		exec: ciCacheReply(40<<20, 3, 10<<20),
+		logs:    &logs,
+		now:     ciCacheTestStart,
+		pods:    cliReply{stdout: ciCachePodsRunningJSON},
+		exec:    ciCacheReply(40<<20, 3, 10<<20),
+		npmExec: ciCacheReply(512<<10, 0, 512<<10),
 	}
 	f.cli = newFakeCLIFor(func(c cliCall) cliReply {
 		verb := cacheTrimVerb(c.args)
@@ -75,6 +87,9 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 		case strings.HasPrefix(verb, "get pods "):
 			return f.pods
 		case strings.HasPrefix(verb, "exec "):
+			if slices.Contains(c.args, ciCacheVolumeRoot(ciCacheNpmVolume)) {
+				return f.npmExec
+			}
 			return f.exec
 		}
 		return cliReply{}
@@ -158,20 +173,22 @@ func (f *ciCacheFixture) callsWith(prefix string) []cliCall {
 	return out
 }
 
-// TestCICacheTrimArgv: the exec names the runner's dind container, the control
-// context, the one volume path and the age in minutes; a dry run sends no
-// deletion; and the kubectl calls name the kubeconfig and the context.
+// TestCICacheTrimArgv: each volume's exec names the runner's dind container, the
+// control context, the volume's path and the age in minutes; the uncapped
+// ci-gocache argv is the one the trim has always sent, and the capped ci-npm argv
+// adds the cap; a dry run sends no deletion; and the kubectl calls name the
+// kubeconfig and the context.
 func TestCICacheTrimArgv(t *testing.T) {
 	t.Parallel()
-	t.Run("apply removes under the volume with the age from the setting", func(t *testing.T) {
+	t.Run("apply removes under each volume with the age from the setting", func(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
 		f.tick()
 		f.drain()
 
 		execs := f.execs()
-		if len(execs) != 1 {
-			t.Fatalf("ran %d execs, want 1", len(execs))
+		if len(execs) != len(ciCacheVolumes) {
+			t.Fatalf("ran %d execs, want %d: one per volume", len(execs), len(ciCacheVolumes))
 		}
 		argv := execs[0].args
 		wantPrefix := diskmaint.KubectlArgs(diskMaintKubeconfig(f.d.config.TownRoot, func(string) string { return "" }), ciCacheTestContext)
@@ -179,9 +196,16 @@ func TestCICacheTrimArgv(t *testing.T) {
 			t.Fatalf("kubectl prefix = %q, want the kubeconfig and the control context %q", argv[:4], wantPrefix)
 		}
 		want := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
-			"sh", "-c", ciCacheTrimScript, "ci-cache-trim", ciCacheRoot, ciCacheTestMinutes}
+			"sh", "-c", ciCacheTrimScript, "ci-cache-trim", ciCacheTestGocacheRoot, ciCacheTestMinutes}
 		if !slices.Equal(argv[4:], want) {
 			t.Errorf("exec argv = %q\nwant %q", argv[4:], want)
+		}
+
+		npm := execs[1].args
+		wantNpm := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+			"sh", "-c", ciCacheCappedTrimScript, "ci-cache-trim", ciCacheVolumeRoot(ciCacheNpmVolume), ciCacheTestMinutes, ciCacheTestNpmCapKiB}
+		if !slices.Equal(npm[4:], wantNpm) {
+			t.Errorf("npm exec argv = %q\nwant %q", npm[4:], wantNpm)
 		}
 	})
 
@@ -192,8 +216,8 @@ func TestCICacheTrimArgv(t *testing.T) {
 		f.drain()
 
 		execs := f.execs()
-		if len(execs) != 1 {
-			t.Fatalf("ran %d execs, want 1", len(execs))
+		if len(execs) != len(ciCacheVolumes) {
+			t.Fatalf("ran %d execs, want %d: one per volume", len(execs), len(ciCacheVolumes))
 		}
 		for _, arg := range execs[0].args {
 			if strings.Contains(arg, "-delete") {
@@ -264,6 +288,27 @@ func TestCICacheTrimConstantsMatchTheRunnerManifest(t *testing.T) {
 	if !mounted {
 		t.Errorf("no %q container mounts %q; the trim's volume root is under it", ciCacheContainer, ciCacheDindMount)
 	}
+
+	// Each volume the trim runs over is one the runner's rendered config lists as a
+	// valid volume: the names are gocacheVolume and npmCacheVolume in runner.go,
+	// and the golden of its config is the file this test reads.
+	rawConfig, err := os.ReadFile(filepath.Join("..", "..", "deploy", "k8s", "forgejo-runner", "testdata", "config.yaml"))
+	if err != nil {
+		t.Fatalf("reading the runner's config: %v", err)
+	}
+	var cfg struct {
+		Container struct {
+			ValidVolumes []string `yaml:"valid_volumes"`
+		} `yaml:"container"`
+	}
+	if err := yaml.Unmarshal(rawConfig, &cfg); err != nil {
+		t.Fatalf("decoding the runner's config: %v", err)
+	}
+	for _, v := range ciCacheVolumes {
+		if !slices.Contains(cfg.Container.ValidVolumes, v.name) {
+			t.Errorf("the trim runs over volume %q, which the runner's valid_volumes %q do not name", v.name, cfg.Container.ValidVolumes)
+		}
+	}
 }
 
 // TestCICacheTrimSchedule: due an interval after the last verdict and not before,
@@ -284,8 +329,8 @@ func TestCICacheTrimSchedule(t *testing.T) {
 			t.Fatalf("a second tick while the pass runs dispatched %d passes, want 1", len(f.pending))
 		}
 		f.drain()
-		if n := len(f.execs()); n != 1 {
-			t.Fatalf("ran %d execs, want 1", n)
+		if n := len(f.execs()); n != len(ciCacheVolumes) {
+			t.Fatalf("ran %d execs, want %d: one per volume", n, len(ciCacheVolumes))
 		}
 
 		f.at(15 * time.Minute)
@@ -301,8 +346,8 @@ func TestCICacheTrimSchedule(t *testing.T) {
 		f.at(60 * time.Minute)
 		f.tick()
 		f.drain()
-		if n := len(f.execs()); n != 2 {
-			t.Fatalf("ran %d execs at 60m, want 2: due an hour after its last verdict", n)
+		if n := len(f.execs()); n != 2*len(ciCacheVolumes) {
+			t.Fatalf("ran %d execs at 60m, want %d: due an hour after its last verdict", n, 2*len(ciCacheVolumes))
 		}
 	})
 
@@ -312,8 +357,8 @@ func TestCICacheTrimSchedule(t *testing.T) {
 		f.d.maint.quiet = func(*Daemon) (bool, string) { return false, "a landing is in flight" }
 		f.tick()
 		f.drain()
-		if n := len(f.execs()); n != 1 {
-			t.Fatalf("a busy town ran %d execs, want 1: the CI trim is off the quiet guard", n)
+		if n := len(f.execs()); n != len(ciCacheVolumes) {
+			t.Fatalf("a busy town ran %d execs, want %d: the CI trim is off the quiet guard", n, len(ciCacheVolumes))
 		}
 		if strings.Contains(f.logs.String(), "skipped") {
 			t.Errorf("the busy tick logged a skip for the CI trim, which is not held back: %q", f.logs.String())
@@ -363,14 +408,15 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 		pods cliReply
 		exec cliReply
 		want string
-		// execs is how many exec calls the failure reaches.
+		// execs is how many exec calls the failure reaches: a fault on one volume
+		// does not stop the next, so the exec cases reach every volume.
 		execs int
 	}{
 		{
 			name:  "the volume path is not in the container",
 			exec:  cliReply{stderr: "volume path not found\n", code: ciCacheMissingPathExit},
 			want:  "is not in the dind container",
-			execs: 1,
+			execs: len(ciCacheVolumes),
 		},
 		{
 			name:  "the dind container is not running",
@@ -382,13 +428,13 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 			name:  "the exec fails",
 			exec:  cliReply{stderr: "error: unable to upgrade connection: container not found\n", code: 1},
 			want:  "the exec into the dind container failed",
-			execs: 1,
+			execs: len(ciCacheVolumes),
 		},
 		{
 			name:  "the reply cannot be read",
 			exec:  cliReply{stdout: "du: cannot access the path\n"},
 			want:  "the volume's reply could not be read",
-			execs: 1,
+			execs: len(ciCacheVolumes),
 		},
 		{
 			name:  "the runner's pods cannot be read",
@@ -428,8 +474,10 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 			if !strings.Contains(f.logs.String(), tt.want) {
 				t.Errorf("logs do not name the failure %q:\n%s", tt.want, f.logs.String())
 			}
-			if strings.Contains(f.logs.String(), "ci cache trim: removed") {
-				t.Errorf("a failed run reported a removal:\n%s", f.logs.String())
+			// The failure cases fault the ci-gocache volume; the ci-npm volume reads
+			// under its cap and may report its own removal line.
+			if strings.Contains(f.logs.String(), ciCacheVolumes[0].name+": removed ") {
+				t.Errorf("a failed volume reported a removal:\n%s", f.logs.String())
 			}
 			if n := len(f.d.cacheTrimNoOp.observed()); n != 0 {
 				t.Errorf("a failed run raised %d attention item(s): a failure is not a reading", n)
@@ -466,8 +514,8 @@ func TestCICacheTrimHoldsAFailureWhoseTextVaries(t *testing.T) {
 	f.tick()
 	f.drain()
 
-	if n := len(f.execs()); n != 2 {
-		t.Fatalf("ran %d execs, want 2: the retry must run", n)
+	if n := len(f.execs()); n != 2*len(ciCacheVolumes) {
+		t.Fatalf("ran %d execs, want %d: the retry must run", n, 2*len(ciCacheVolumes))
 	}
 	if n := strings.Count(f.logs.String(), want); n != 1 {
 		t.Errorf("the failure was logged %d times across two attempts with different output, want once an hour:\n%s", n, f.logs.String())
@@ -665,4 +713,169 @@ func TestCICacheTrimReplyMustBeExact(t *testing.T) {
 			t.Errorf("%s reply parsed without an error", name)
 		}
 	}
+}
+
+// TestCICacheTrimVolumesRunInTableOrderAndOneFailureDoesNotStopTheNext: a pass
+// execs once per volume in table order. A failed exec on the first volume is
+// logged under that volume, still leaves the second to run, and fails the pass.
+func TestCICacheTrimVolumesRunInTableOrderAndOneFailureDoesNotStopTheNext(t *testing.T) {
+	t.Parallel()
+	t.Run("a failed first exec still leaves the second, and the pass returns false", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.exec = cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
+
+		if ok := f.d.ciCacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); ok {
+			t.Errorf("the pass returned true with its first volume failed")
+		}
+		execs := f.execs()
+		if len(execs) != len(ciCacheVolumes) {
+			t.Fatalf("ran %d execs, want %d: a failure must not stop the next volume", len(execs), len(ciCacheVolumes))
+		}
+		for i, v := range ciCacheVolumes {
+			if !slices.Contains(execs[i].args, v.root) {
+				t.Errorf("exec %d does not name volume %s at %s: the pass runs in table order", i, v.name, v.root)
+			}
+		}
+		if want := ciCacheVolumes[0].name + ": the exec into the dind container failed"; !strings.Contains(f.logs.String(), want) {
+			t.Errorf("logs do not name the failed volume %q:\n%s", want, f.logs.String())
+		}
+	})
+
+	t.Run("every volume succeeds, logs one line each, and the pass returns true", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		if ok := f.d.ciCacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !ok {
+			t.Errorf("the pass returned false with every volume trimmed:\n%s", f.logs.String())
+		}
+		if n := strings.Count(f.logs.String(), ": removed "); n != len(ciCacheVolumes) {
+			t.Errorf("logged %d removal lines, want one per volume (%d):\n%s", n, len(ciCacheVolumes), f.logs.String())
+		}
+	})
+}
+
+// TestCICacheTrimCappedScriptReportsAndRemovesNothingUnderTheCap: the capped
+// volume's exec carries its cap in KiB. A reply at or under the cap is a verdict
+// that raises no item; a reply over the cap that removed nothing raises the
+// volume's item. That the script removes nothing at or under the cap is the
+// integration tier's: it runs the script.
+func TestCICacheTrimCappedScriptReportsAndRemovesNothingUnderTheCap(t *testing.T) {
+	t.Parallel()
+	const capKiB = ciCacheNpmCapKiB
+	npmRoot := ciCacheVolumeRoot(ciCacheNpmVolume)
+	cases := []struct {
+		name     string
+		afterKiB int64
+		raised   bool
+	}{
+		{name: "a reply at the cap", afterKiB: capKiB},
+		{name: "a reply under the cap", afterKiB: capKiB - 1024},
+		{name: "a reply over the cap", afterKiB: capKiB + 1024, raised: true},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+			f.npmExec = ciCacheReply(tt.afterKiB, 0, tt.afterKiB)
+			if ok := f.d.ciCacheTrim(context.Background(), agentconfig.DiskMaintenanceModeApply); !ok {
+				t.Fatalf("the pass returned false for a reply that parses:\n%s", f.logs.String())
+			}
+
+			var npm []string
+			for _, c := range f.execs() {
+				if slices.Contains(c.args, npmRoot) {
+					npm = c.args
+				}
+			}
+			if npm == nil {
+				t.Fatalf("the pass ran no exec into the %s volume", ciCacheNpmVolume)
+			}
+			want := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+				"sh", "-c", ciCacheCappedTrimScript, "ci-cache-trim", npmRoot, ciCacheTestMinutes, ciCacheTestNpmCapKiB}
+			if !slices.Equal(npm[4:], want) {
+				t.Errorf("npm exec argv = %q\nwant %q", npm[4:], want)
+			}
+
+			items := f.d.cacheTrimNoOp.observed()
+			if !tt.raised {
+				if len(items) != 0 {
+					t.Errorf("a reply %s raised %+v, want no item", tt.name, items)
+				}
+				return
+			}
+			if got := noopKeys(items); !slices.Equal(got, []string{ciCacheNoOpKeyOf(ciCacheVolumes[1])}) {
+				t.Errorf("items = %v, want the capped volume's item", got)
+			}
+		})
+	}
+}
+
+// TestCICacheTrimNoopItemPerVolume: the uncapped volume keeps the no-op item it
+// has always had, measured against the warn figure. A capped volume raises its
+// own item over its cap, even under the warn figure, clears it at or under the
+// cap, and leaves the other volume's item alone.
+func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
+	t.Parallel()
+	const overWarn = 40 << 20 // KiB: 40 GB, over the default 30 GB warn figure
+	const overCap = 2 << 20   // KiB: 2 GiB, over the 1 GiB npm cap and under the warn figure
+	const npmKey = "ci-cache-trim-noop-ci-npm"
+
+	t.Run("a capped volume raises its own item over its cap, under the warn figure", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.npmExec = ciCacheReply(overCap, 0, overCap)
+		f.tick()
+		f.drain()
+
+		items := f.d.cacheTrimNoOp.observed()
+		if got := noopKeys(items); !slices.Equal(got, []string{npmKey}) {
+			t.Fatalf("items = %v, want one item keyed %q", got, npmKey)
+		}
+		if items[0].Kind != attention.KindCacheTrimNoOp || items[0].Severity != attention.SeverityLow {
+			t.Errorf("item kind %q severity %q, want the cache trim kind at low severity", items[0].Kind, items[0].Severity)
+		}
+		if !strings.Contains(items[0].Summary, ciCacheNpmVolume) {
+			t.Errorf("summary %q does not name the volume", items[0].Summary)
+		}
+	})
+
+	t.Run("the uncapped item and the capped item clear apart", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.exec = ciCacheReply(overWarn, 0, overWarn)
+		f.npmExec = ciCacheReply(overCap, 0, overCap)
+		f.tick()
+		f.drain()
+		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{ciCacheNoOpKey, npmKey}) {
+			t.Fatalf("items = %v, want both volumes' items", got)
+		}
+
+		f.at(time.Hour)
+		f.npmExec = ciCacheReply(ciCacheNpmCapKiB, 0, ciCacheNpmCapKiB)
+		f.tick()
+		f.drain()
+		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{ciCacheNoOpKey}) {
+			t.Errorf("items after the npm volume is at its cap = %v, want only the uncapped volume's item", got)
+		}
+	})
+
+	t.Run("a capped volume that removed files raises nothing", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.npmExec = ciCacheReply(overCap, 5, overCap)
+		f.tick()
+		f.drain()
+		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
+			t.Errorf("a capped volume that removed files raised %+v", items)
+		}
+	})
+}
+
+// noopKeys returns the keys of the items, in the order observed returns them.
+func noopKeys(items []attention.Item) []string {
+	keys := make([]string, 0, len(items))
+	for _, it := range items {
+		keys = append(keys, it.Key)
+	}
+	return keys
 }
