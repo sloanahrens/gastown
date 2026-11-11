@@ -51,7 +51,10 @@ file, so no agent reads a secret. No file is opened to print those lines.
 
 The image values file is read from under --dir, where imagevalues places it;
 a missing file is refused, since a render needs a digest. --cpu and --memory
-are required: no source records a measured share.
+are required: no source records a measured share. A live render also reads the
+derived hm config the compose write leaves under the town root, and refuses
+when it is absent: the pod's hm would read its defaults, which name its own
+loopback, so run gt daemon compose write first.
 
 Examples:
   gt town cluster render --dir ~/gt/gastown --out ./manifests \
@@ -310,6 +313,13 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		if hmConfig, err = hmConfigConfigured(hmConfigPath, d.lstat); err != nil {
 			return err
 		}
+		// A pod whose hm mounts no config reads its defaults, which name the pod's
+		// own loopback, so it reaches neither the town's database nor the host's
+		// embedder and reranker. The render refuses rather than write a pod that
+		// cannot work (gt-fg6ami).
+		if !hmConfig {
+			return fmt.Errorf("the derived hm config is absent at %s: without it the pod's hm reads its defaults, which name the pod's own loopback; run gt daemon compose write first, and no file was written", hmConfigPath)
+		}
 	}
 	namespace := f.namespace
 	if namespace == "" {
@@ -383,9 +393,6 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		fmt.Fprintf(d.out, "  %s\n", o.file)
 	}
 	fmt.Fprintf(d.out, "Values: commit %s, daemon image %s\n", pair.Commit, pair.Daemon)
-	if !f.rehearsal && !hmConfig {
-		fmt.Fprintf(d.out, "No derived hm config at %s, so the pod mounts none and hm falls back to its defaults, which name the pod's own loopback: run gt daemon compose write first.\n", hmConfigPath)
-	}
 	fmt.Fprintln(d.out, "Apply the namespace file first so it exists. Then create each Secret from its file, and apply the rest in the order listed:")
 	for _, l := range lines {
 		fmt.Fprintf(d.out, "  %s\n", l)
@@ -435,10 +442,10 @@ func cloudCheckKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, 
 
 // hmConfigConfigured reports whether the derived hm config exists under the town
 // root, the file the Secret gt-hm-config is created from. The pod reads its
-// database and its embedder and reranker from that file, so the render mounts it
-// and sets HM_CONFIG only when the file is there; without it hm reads its
-// defaults, which name the pod's own loopback. A path that cannot be read for
-// any other reason refuses the render, as cloudCheckKeyConfigured does (gt-7vrjuo).
+// database and its embedder and reranker from that file, so a live render mounts
+// it and sets HM_CONFIG only when it is there, and refuses when it is absent: a
+// pod without it reads its defaults, which name the pod's own loopback. A path
+// that cannot be read for any other reason refuses the render too (gt-7vrjuo).
 func hmConfigConfigured(path string, lstat func(string) (fs.FileInfo, error)) (bool, error) {
 	switch _, err := lstat(path); {
 	case errors.Is(err, fs.ErrNotExist):

@@ -83,11 +83,29 @@ func writeClusterRenderManifest(t *testing.T, dir, text string) {
 	}
 }
 
-// clusterRenderTestDeps stands in the host: a fixed town, an empty daemon.env, a
-// fixed home, and the real build and write steps against the temporary repo.
-func clusterRenderTestDeps(out io.Writer) clusterRenderDeps {
+// clusterRenderTestTown is the host's town for a render: a temporary root with
+// the derived hm config the compose write leaves, which a live render requires.
+func clusterRenderTestTown(t *testing.T) string {
+	t.Helper()
+	town := t.TempDir()
+	derived := filepath.Join(town, filepath.FromSlash(templates.ContainerHMConfigRP))
+	if err := os.MkdirAll(filepath.Dir(derived), 0o755); err != nil {
+		t.Fatalf("making the derived hm config directory: %v", err)
+	}
+	if err := os.WriteFile(derived, []byte(`{"database_url": "postgres://hm:x@host.docker.internal:5433/hm"}`), 0o600); err != nil {
+		t.Fatalf("writing the derived hm config: %v", err)
+	}
+	return town
+}
+
+// clusterRenderTestDeps stands in the host: a town with the derived hm config, an
+// empty daemon.env, a fixed home, and the real build and write steps against the
+// temporary repo.
+func clusterRenderTestDeps(t *testing.T, out io.Writer) clusterRenderDeps {
+	t.Helper()
+	town := clusterRenderTestTown(t)
 	return clusterRenderDeps{
-		findTown:     func() (string, error) { return "/fake/town", nil },
+		findTown:     func() (string, error) { return town, nil },
 		containerEnv: func(string) (map[string]string, error) { return map[string]string{}, nil },
 		readFile:     os.ReadFile,
 		lstat:        os.Lstat,
@@ -275,7 +293,7 @@ func TestTownClusterRenderWritesTheObjectsInApplyOrder(t *testing.T) {
 	t.Parallel()
 	f := clusterRenderFixture(t)
 	var out bytes.Buffer
-	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	want := []string{
@@ -297,7 +315,7 @@ func TestTownClusterRenderPrintsOneCreateLinePerMountedSecret(t *testing.T) {
 	var out bytes.Buffer
 	// The config and openshell directories are absent: a render that opened a
 	// secret file would fail here, so success proves none is opened.
-	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	mounted := deploymentSecretVolumes(t, f.out)
@@ -349,7 +367,7 @@ func TestTownClusterRenderMountsTheCloudCheckKeyOnlyWhenPresent(t *testing.T) {
 			}
 		}
 		var out bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 			t.Fatalf("render: %v", err)
 		}
 		return deploymentBody(t, f.out), f.configDir, createLines(out.String())
@@ -391,7 +409,7 @@ func TestTownClusterRenderMountsTheCloudCheckKeyOnlyWhenPresent(t *testing.T) {
 		t.Parallel()
 		f := clusterRenderFixture(t)
 		var out bytes.Buffer
-		deps := clusterRenderTestDeps(&out)
+		deps := clusterRenderTestDeps(t, &out)
 		deps.lstat = func(string) (fs.FileInfo, error) { return nil, fs.ErrPermission }
 		err := runClusterRender(deps, f)
 		requireErrorNames(t, err, k8sdaemon.CloudCheckKeyFile, "cannot be read")
@@ -402,28 +420,32 @@ func TestTownClusterRenderMountsTheCloudCheckKeyOnlyWhenPresent(t *testing.T) {
 }
 
 // TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived: hm reads its database
-// and its embedder and reranker from the derived hm config, so the render mounts
-// the gt-hm-config Secret, sets HM_CONFIG to it, and prints the create line that
-// fills the Secret from the derived file under the town root, only when that file
-// exists and the render is live. The manifest never carries its content
-// (gt-7vrjuo).
+// and its embedder and reranker from the derived hm config, so a live render
+// mounts the gt-hm-config Secret, sets HM_CONFIG to it, and prints the create
+// line that fills the Secret from the derived file under the town root. A live
+// render with no derived file refuses before a write, since the pod's hm would
+// read its defaults, which name the pod's own loopback; a rehearsal mounts none.
+// The manifest never carries the content (gt-7vrjuo, gt-fg6ami).
 func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
 	t.Parallel()
 	derivedPath := func(town string) string {
 		return filepath.Join(town, filepath.FromSlash(templates.ContainerHMConfigRP))
 	}
-	render := func(t *testing.T, derived, rehearsal bool) (body, town, out string, lines []string) {
+	// writeDerived leaves the config `gt daemon compose write` derives under town.
+	writeDerived := func(t *testing.T, town string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(derivedPath(town)), 0o755); err != nil {
+			t.Fatalf("making the derived config directory: %v", err)
+		}
+		if err := os.WriteFile(derivedPath(town), []byte(`{"database_url": "postgres://hm:x@host.docker.internal:5433/hm"}`), 0o600); err != nil {
+			t.Fatalf("writing the derived config: %v", err)
+		}
+	}
+	render := func(t *testing.T, rehearsal bool) (body, town, out string, lines []string) {
 		t.Helper()
 		f := clusterRenderFixture(t)
 		town = t.TempDir()
-		if derived {
-			if err := os.MkdirAll(filepath.Dir(derivedPath(town)), 0o755); err != nil {
-				t.Fatalf("making the derived config directory: %v", err)
-			}
-			if err := os.WriteFile(derivedPath(town), []byte(`{"database_url": "postgres://hm:x@host.docker.internal:5433/hm"}`), 0o600); err != nil {
-				t.Fatalf("writing the derived config: %v", err)
-			}
-		}
+		writeDerived(t, town)
 		if rehearsal {
 			f.rehearsal = true
 			f.forgeHost = ""
@@ -431,7 +453,7 @@ func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
 			f.namespace = "gt-rehearsal"
 		}
 		var buf bytes.Buffer
-		deps := clusterRenderTestDeps(&buf)
+		deps := clusterRenderTestDeps(t, &buf)
 		deps.findTown = func() (string, error) { return town, nil }
 		if err := runClusterRender(deps, f); err != nil {
 			t.Fatalf("render: %v", err)
@@ -441,7 +463,7 @@ func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
 
 	t.Run("derived", func(t *testing.T) {
 		t.Parallel()
-		body, town, out, lines := render(t, true, false)
+		body, town, out, lines := render(t, false)
 		for _, want := range []string{
 			"secretName: " + k8sdaemon.HMConfigSecretName,
 			"mountPath: " + k8sdaemon.HMConfigPath,
@@ -457,30 +479,31 @@ func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
 		if !slices.Contains(lines, want) {
 			t.Errorf("create lines do not carry %q:\n%s", want, strings.Join(lines, "\n"))
 		}
-		if strings.Contains(out, "No derived hm config") {
-			t.Errorf("the render reports no derived hm config though one exists:\n%s", out)
+		if strings.Contains(out, "derived hm config") {
+			t.Errorf("the render reports a derived hm config problem though one exists:\n%s", out)
 		}
 	})
 
-	t.Run("absent", func(t *testing.T) {
+	t.Run("absent refuses before a write", func(t *testing.T) {
 		t.Parallel()
-		body, town, out, lines := render(t, false, false)
-		if strings.Contains(body, k8sdaemon.HMConfigSecretName) || strings.Contains(body, "HM_CONFIG") {
-			t.Errorf("the Deployment names the hm config with no derived file at %s:\n%s", derivedPath(town), body)
+		f := clusterRenderFixture(t)
+		town := t.TempDir()
+		var buf bytes.Buffer
+		deps := clusterRenderTestDeps(t, &buf)
+		deps.findTown = func() (string, error) { return town, nil }
+		err := runClusterRender(deps, f)
+		requireErrorNames(t, err, "derived hm config", derivedPath(town), "gt daemon compose write", "no file was written")
+		if buf.Len() != 0 {
+			t.Errorf("the refused render printed %q", buf.String())
 		}
-		for _, line := range lines {
-			if strings.Contains(line, k8sdaemon.HMConfigSecretName) {
-				t.Errorf("a create line names %s with no derived file: %s", k8sdaemon.HMConfigSecretName, line)
-			}
-		}
-		if !strings.Contains(out, "No derived hm config at "+derivedPath(town)) {
-			t.Errorf("the render does not say the derived config is missing:\n%s", out)
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left --out %s, want it untouched", got)
 		}
 	})
 
 	t.Run("a rehearsal mounts none", func(t *testing.T) {
 		t.Parallel()
-		body, _, _, lines := render(t, true, true)
+		body, _, _, lines := render(t, true)
 		if strings.Contains(body, k8sdaemon.HMConfigSecretName) || strings.Contains(body, "HM_CONFIG") {
 			t.Errorf("the rehearsal names the hm config:\n%s", body)
 		}
@@ -496,7 +519,7 @@ func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
 		f := clusterRenderFixture(t)
 		town := t.TempDir()
 		var buf bytes.Buffer
-		deps := clusterRenderTestDeps(&buf)
+		deps := clusterRenderTestDeps(t, &buf)
 		deps.findTown = func() (string, error) { return town, nil }
 		deps.lstat = func(path string) (fs.FileInfo, error) {
 			if strings.HasSuffix(path, "hm-config.json") {
@@ -631,7 +654,7 @@ func TestTownClusterRenderRefusesWithoutADigestOrAShare(t *testing.T) {
 			tt.mutate(t, &f)
 			before := outState(f.out)
 			var out bytes.Buffer
-			err := runClusterRender(clusterRenderTestDeps(&out), f)
+			err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 			if err == nil {
 				t.Fatalf("render succeeded, want a refusal naming %q", tt.cause)
 			}
@@ -791,7 +814,7 @@ func TestTownClusterRenderRefusesWhenAnInputOrStepFails(t *testing.T) {
 				f.openShellConfigDir = ""
 			}
 			var out bytes.Buffer
-			d := clusterRenderTestDeps(&out)
+			d := clusterRenderTestDeps(t, &out)
 			tt.mutate(t, f.dir, &d)
 			err := runClusterRender(d, f)
 			if err == nil {
@@ -831,7 +854,7 @@ func TestTownClusterRenderRehearsalOmitsPromoteAndSweep(t *testing.T) {
 	f.confirmStopped = false
 	f.namespace = "gt-rehearsal"
 	var out bytes.Buffer
-	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	for _, kind := range renderedKinds(t, f.out) {
@@ -862,7 +885,7 @@ func TestTownClusterRenderForwardsThePolecatImage(t *testing.T) {
 	f := clusterRenderFixture(t)
 	f.polecatImage = clusterRenderPolecatDigest
 	var out bytes.Buffer
-	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	if got := deploymentAnnotations(t, f.out)["gastown.dev/polecat-image"]; got != clusterRenderPolecatDigest {
@@ -875,7 +898,7 @@ func TestTownClusterRenderWithHelperAppliesTheSeedBeforeTheDeployment(t *testing
 	f := clusterRenderFixture(t)
 	f.withHelper = true
 	var out bytes.Buffer
-	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	kinds := renderedKinds(t, f.out)
@@ -1081,7 +1104,7 @@ func TestTownClusterRenderLiveCarriesTheEntrypointArguments(t *testing.T) {
 	t.Parallel()
 	f := clusterRenderFixture(t)
 	var out bytes.Buffer
-	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	args, mounts, env := daemonContainer(t, f.out)
@@ -1112,7 +1135,7 @@ func TestTownClusterRenderRehearsalCarriesNeitherToken(t *testing.T) {
 	f.confirmStopped = false
 	f.namespace = "gt-rehearsal"
 	var out bytes.Buffer
-	if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+	if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 		t.Fatalf("render: %v", err)
 	}
 	args, mounts, env := daemonContainer(t, f.out)
@@ -1155,7 +1178,7 @@ func TestTownClusterRenderRefusesTheDoltBackupHostPath(t *testing.T) {
 			tt.mutate(&f)
 			before := outState(f.out)
 			var out bytes.Buffer
-			err := runClusterRender(clusterRenderTestDeps(&out), f)
+			err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 			if err == nil {
 				t.Fatal("render succeeded, want a refusal naming --dolt-backup-host-path")
 			}
@@ -1191,7 +1214,7 @@ func TestTownClusterRenderLiveMountsTheDoltBackupHostPath(t *testing.T) {
 			f := clusterRenderFixture(t)
 			f.doltBackupHostPath = tc.hostPath
 			var out bytes.Buffer
-			if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+			if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 				t.Fatalf("render: %v", err)
 			}
 			_, _, env := daemonContainer(t, f.out)
@@ -1264,7 +1287,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 		f := clusterRenderFixture(t)
 		f.dashboard = true
 		var out bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 			t.Fatalf("render: %v", err)
 		}
 		want := []string{
@@ -1288,8 +1311,16 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 
 	t.Run("the flag off leaves the names and the Secret lines as they were", func(t *testing.T) {
 		f := clusterRenderFixture(t)
+		// Both renders read one town, so the derived hm config's create line
+		// carries the same path in each.
+		town := clusterRenderTestTown(t)
+		deps := func(out io.Writer) clusterRenderDeps {
+			d := clusterRenderTestDeps(t, out)
+			d.findTown = func() (string, error) { return town, nil }
+			return d
+		}
 		var off bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(&off), f); err != nil {
+		if err := runClusterRender(deps(&off), f); err != nil {
 			t.Fatalf("render without the flag: %v", err)
 		}
 		want := []string{
@@ -1313,7 +1344,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 		on.dashboard = true
 		on.out = filepath.Join(t.TempDir(), "out-with-dashboard")
 		var with bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(&with), on); err != nil {
+		if err := runClusterRender(deps(&with), on); err != nil {
 			t.Fatalf("render with the flag: %v", err)
 		}
 		if got, want := createLines(with.String()), createLines(off.String()); !slices.Equal(got, want) {
@@ -1327,7 +1358,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 		// Renaming the entry leaves the manifest with no forgejo-viewer.env.
 		writeClusterRenderManifest(t, f.dir, strings.Replace(clusterRenderSecretsManifest, "name: forgejo-viewer.env", "name: forgejo-viewer-retired.env", 1))
 		var out bytes.Buffer
-		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 		requireErrorNames(t, err, k8sdaemon.ViewerTokenFile, "--dashboard")
 		if got := outState(f.out); got != "absent" {
 			t.Errorf("the refused render left %s: %s", f.out, got)
@@ -1341,7 +1372,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 		f.namespace = "gt-rehearsal"
 		f.dashboard = true
 		var out bytes.Buffer
-		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 		requireErrorNames(t, err, "--dashboard", "--rehearsal")
 		if got := outState(f.out); got != "absent" {
 			t.Errorf("the refused render left %s: %s", f.out, got)
@@ -1353,7 +1384,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 		f.dashboard = true
 		f.dashboardClaudeDir = "Users/sloan/.claude"
 		var out bytes.Buffer
-		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 		requireErrorNames(t, err, "--dashboard-claude-dir", "absolute")
 		if got := outState(f.out); got != "absent" {
 			t.Errorf("the refused render left %s: %s", f.out, got)
@@ -1364,7 +1395,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 		f := clusterRenderFixture(t)
 		f.dashboardClaudeDir = "/Users/sloan/.claude"
 		var out bytes.Buffer
-		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 		requireErrorNames(t, err, "--dashboard-claude-dir", "--dashboard")
 		if got := outState(f.out); got != "absent" {
 			t.Errorf("the refused render left %s: %s", f.out, got)
@@ -1376,7 +1407,7 @@ func TestTownClusterRenderDashboardFlag(t *testing.T) {
 		f.dashboard = true
 		f.dashboardClaudeDir = "/Users/sloan/.claude"
 		var out bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 			t.Fatalf("render: %v", err)
 		}
 		if got, want := renderedHostPaths(t, f.out, "-deployment-dashboard.yaml"), []string{"/Users/sloan/.claude Directory"}; !slices.Equal(got, want) {
@@ -1398,7 +1429,7 @@ func TestTownClusterRenderDaemonClaudeDirFlag(t *testing.T) {
 		f := clusterRenderFixture(t)
 		f.daemonClaudeDir = "/Users/sloan/.claude"
 		var out bytes.Buffer
-		deps := clusterRenderTestDeps(&out)
+		deps := clusterRenderTestDeps(t, &out)
 		var seen k8sdaemon.Values
 		deps.build = func(v k8sdaemon.Values) (k8sdaemon.Manifests, error) {
 			seen = v
@@ -1418,7 +1449,7 @@ func TestTownClusterRenderDaemonClaudeDirFlag(t *testing.T) {
 	t.Run("the flag off leaves the names and the daemon's host paths as they were", func(t *testing.T) {
 		f := clusterRenderFixture(t)
 		var out bytes.Buffer
-		if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
 			t.Fatalf("render without the flag: %v", err)
 		}
 		want := []string{
@@ -1445,7 +1476,7 @@ func TestTownClusterRenderDaemonClaudeDirFlag(t *testing.T) {
 		f := clusterRenderFixture(t)
 		f.daemonClaudeDir = "Users/sloan/.claude"
 		var out bytes.Buffer
-		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		err := runClusterRender(clusterRenderTestDeps(t, &out), f)
 		requireErrorNames(t, err, "--daemon-claude-dir", "absolute")
 		if got := outState(f.out); got != "absent" {
 			t.Errorf("the refused render left %s: %s", f.out, got)
