@@ -1,10 +1,13 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // A worktree redirect still naming the legacy mayor/rig/.beads, in a rig whose
@@ -176,5 +179,62 @@ func TestStaleBeadsRedirectCheck_FixRepairsPastLegacyRefusal(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(healthyRig, "crew", "max", ".beads", "redirect")); statErr != nil {
 		t.Errorf("healthy rig's worktree was not repaired past the refusals: %v", statErr)
+	}
+}
+
+// A write that fails after a refusal is reported together with it, in either
+// loop: the refusal is collected, and the failed write is joined to the errors
+// already collected.
+func TestStaleBeadsRedirectCheck_FixJoinsWriteFailureWithRefusals(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		healthyRedirect string
+	}{
+		{name: "a missing redirect whose write fails", healthyRedirect: ""},
+		{name: "an incorrect redirect whose write fails", healthyRedirect: "wrong/path\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			halfMoved := filepath.Join(tmpDir, "aarig")
+			writeBeadsLocationFiles(t, filepath.Join(halfMoved, ".beads"), beadsLocationNoDatabaseFiles)
+			writeBeadsLocationFiles(t, filepath.Join(halfMoved, "mayor", "rig", ".beads"), beadsLocationRigFiles)
+			if err := os.MkdirAll(filepath.Join(halfMoved, "crew", "max"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			healthy := filepath.Join(tmpDir, "healthy")
+			writeBeadsLocationFiles(t, filepath.Join(healthy, ".beads"), beadsLocationRigFiles)
+			blocked := filepath.Join(healthy, "crew", "max")
+			if tc.healthyRedirect == "" {
+				if err := os.MkdirAll(blocked, 0755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeBeadsLocationFiles(t, filepath.Join(blocked, ".beads"), map[string]string{"redirect": tc.healthyRedirect})
+			}
+
+			check := NewStaleBeadsRedirectCheck()
+			check.setupRedirect = func(townRoot, worktreePath string) error {
+				if strings.HasSuffix(worktreePath, filepath.Join("healthy", "crew", "max")) {
+					return errors.New("injected write failure")
+				}
+				return beads.SetupRedirect(townRoot, worktreePath)
+			}
+			ctx := &CheckContext{TownRoot: tmpDir}
+			if got := check.Run(ctx); got.Status != StatusWarning {
+				t.Fatalf("Run status = %v (%s), want StatusWarning for the redirect issues", got.Status, got.Message)
+			}
+			err := check.Fix(ctx)
+			if err == nil {
+				t.Fatal("Fix = nil, want the refusal and the write failure reported together")
+			}
+			for _, want := range []string{"aarig/crew/max", "healthy/crew/max", "injected write failure"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Fix error = %v, want it to contain %q", err, want)
+				}
+			}
+		})
 	}
 }

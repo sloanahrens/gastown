@@ -30,6 +30,8 @@ type StaleBeadsRedirectCheck struct {
 	staleLocations     []string        // Cached for Fix - dirs with stale files
 	missingRedirects   []redirectIssue // Cached for Fix - worktrees missing redirects
 	incorrectRedirects []redirectIssue // Cached for Fix - worktrees with wrong redirect target
+	// setupRedirect writes a worktree's redirect; nil is beads.SetupRedirect.
+	setupRedirect func(townRoot, worktreePath string) error
 }
 
 // redirectIssue represents a missing or incorrect redirect.
@@ -169,6 +171,10 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 	// A legacy refusal is collected rather than returned, so the other worktrees
 	// are still repaired; every refusal is reported at the end.
 	var refusals []error
+	setupRedirect := c.setupRedirect
+	if setupRedirect == nil {
+		setupRedirect = beads.SetupRedirect
+	}
 
 	// Create missing redirects
 	for _, issue := range c.missingRedirects {
@@ -177,7 +183,7 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 			refusals = append(refusals, fmt.Errorf("creating redirect for %s: %w", relPath, err))
 			continue
 		}
-		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
+		if err := setupRedirect(issue.townRoot, issue.worktreePath); err != nil {
 			return errors.Join(append(refusals, fmt.Errorf("creating redirect for %s: %w", relPath, err))...)
 		}
 	}
@@ -189,7 +195,7 @@ func (c *StaleBeadsRedirectCheck) Fix(ctx *CheckContext) error {
 			refusals = append(refusals, fmt.Errorf("fixing redirect for %s: %w", relPath, err))
 			continue
 		}
-		if err := beads.SetupRedirect(issue.townRoot, issue.worktreePath); err != nil {
+		if err := setupRedirect(issue.townRoot, issue.worktreePath); err != nil {
 			return errors.Join(append(refusals, fmt.Errorf("fixing redirect for %s: %w", relPath, err))...)
 		}
 	}
