@@ -9,6 +9,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -18,6 +19,64 @@ import (
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/plugin"
 )
+
+// cloudDSNWatch is what the daemon keeps of the Postgres ledger's DSN file
+// between cloud-check runs: whether its attention item is open, and when each
+// kind of its check line was last logged. Runs of one plugin do not overlap, and
+// the lock keeps the state honest if that ever changes.
+type cloudDSNWatch struct {
+	mu      sync.Mutex
+	adopted bool
+	raised  bool
+	logAt   map[string]time.Time
+}
+
+// isRaised reports whether the item is open.
+func (w *cloudDSNWatch) isRaised() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.raised
+}
+
+// setRaised records whether the item is open.
+func (w *cloudDSNWatch) setRaised(raised bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.raised = raised
+}
+
+// isAdopted reports whether the item's state was read back from the record.
+func (w *cloudDSNWatch) isAdopted() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.adopted
+}
+
+// adopt records that the item's state was read back from the record, and that
+// it is open there. An item this process raised stays open even if that read
+// does not show it.
+func (w *cloudDSNWatch) adopt(open bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.adopted = true
+	w.raised = w.raised || open
+}
+
+// allowLog reports whether the line under key may be logged at now: the first
+// in each cloudDSNLogInterval for that key, and no other. A line under one key
+// never holds back a line under another.
+func (w *cloudDSNWatch) allowLog(key string, now time.Time) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if last, ok := w.logAt[key]; ok && now.Sub(last) < cloudDSNLogInterval {
+		return false
+	}
+	if w.logAt == nil {
+		w.logAt = map[string]time.Time{}
+	}
+	w.logAt[key] = now
+	return true
+}
 
 // The cloud-check plugin fails on every run while the cloud patrol's report
 // holds an urgent finding, and the operator closes the escalation each time it
@@ -62,6 +121,23 @@ const (
 	// present but empty, so an operator reads that the step is off rather than
 	// that its report is broken.
 	cloudNotConfiguredKey = "cloud-step-not-configured"
+
+	// cloudDSNEmptyKey keys the attention item for a Postgres ledger whose DSN
+	// file has no content: the patrol's findings reach no bead until it does. It
+	// also keys that state's log hold, so no other DSN line holds it back.
+	cloudDSNEmptyKey = "dsn-empty"
+
+	// cloudDSNUncheckedLogKey, cloudDSNSettingsLogKey and cloudDSNRecordLogKey
+	// key the log holds of the DSN check's other refusals: a DSN file it cannot
+	// check (missing, loosened past 0600, or unreadable), town settings it cannot
+	// load, and the escalation record it cannot read to learn the item's state.
+	cloudDSNUncheckedLogKey = "dsn-unchecked"
+	cloudDSNSettingsLogKey  = "dsn-settings"
+	cloudDSNRecordLogKey    = "dsn-record"
+
+	// cloudDSNLogInterval holds each DSN check line to once an hour for its key,
+	// the same hold the cache trim's refusals get.
+	cloudDSNLogInterval = time.Hour
 
 	// cloudKindMax caps a finding kind in the escalation text, in runes.
 	cloudKindMax = 40
@@ -222,6 +298,13 @@ func (d *Daemon) cloudCheckAlert(p *plugin.Plugin) (key, summary string) {
 			d.logger.Printf("Handler: cloud-check: %s", config.CloudNotConfigured)
 			return pluginFailureAlertKey(p.Name) + ":" + cloudNotConfiguredKey, config.CloudNotConfigured
 		}
+		if errors.Is(err, cloudledger.ErrEmptyDSN) {
+			// checkCloudDSN owns the empty-DSN item and raises it after every run, so
+			// a failed run raises no escalation under the plugin's own key. An item
+			// under that key would be closed by the next passing run and raised again
+			// after it.
+			return "", ""
+		}
 		d.logger.Printf("Handler: cloud-check: %v; keying the escalation by the unreadable report", err)
 		return pluginFailureAlertKey(p.Name) + ":" + cloudUnreadableKey, cloudUnreadableSummary(err)
 	}
@@ -272,6 +355,129 @@ func cloudUnreadableSummary(err error) string {
 	return "cloud report unreadable: " + err.Error()
 }
 
+// cloudDSNEmptySummary is the reason an empty ledger DSN file is raised with. The
+// error names the file; the file has no content to name.
+func cloudDSNEmptySummary(err error) string {
+	return "cloud ledger DSN file is empty, so the patrol's findings reach no bead until it has content: " + err.Error()
+}
+
+// checkCloudDSN runs after each cloud-check run. The findings reader runs only
+// when the check fails, so a check that passes over an unread ledger would
+// otherwise say nothing. An empty Postgres DSN file raises one attention item
+// under cloudDSNEmptyKey and logs the refusal at most once an hour. A file that
+// holds a DSN again clears the open item. Any other refusal of the file
+// (missing, loosened, unreadable) leaves the item as it was: an unknown state is
+// not a clear. A clear can close an item an earlier daemon raised, once the
+// record shows it open (see adoptCloudDSN).
+func (d *Daemon) checkCloudDSN() {
+	if d.cloudReportsDir != nil {
+		return // an injected report directory is read as files, with no DSN in play
+	}
+	settings, err := config.LoadTownSettings(config.TownSettingsPath(d.config.TownRoot))
+	if err != nil {
+		d.logCloudDSN(cloudDSNSettingsLogKey, "cloud-check: reading town settings for the ledger DSN: %v; the DSN's state is not known this run", err)
+		return
+	}
+	cs := settings.ResolveCloud(os.Getenv)
+	if !cs.Postgres {
+		d.clearCloudDSN(cloudDSNUnusedReason)
+		return
+	}
+	switch err := cloudledger.CheckDSNFile(cs.DSNFile); {
+	case err == nil:
+		d.clearCloudDSN(cloudDSNClearedReason)
+	case errors.Is(err, cloudledger.ErrEmptyDSN):
+		d.raiseCloudDSN(err)
+	default:
+		d.logCloudDSN(cloudDSNUncheckedLogKey, "cloud-check: the ledger DSN file cannot be checked: %v; the attention item is left as it was", err)
+	}
+}
+
+// raiseCloudDSN raises the empty-DSN item, or refreshes it when it is open. An
+// item the operator closed within the reopen window is not raised again, as a
+// plugin failure's would not be.
+func (d *Daemon) raiseCloudDSN(err error) {
+	key := cloudDSNAlertKey()
+	if d.pluginEscalationClosedRecently(key) {
+		d.logCloudDSN(cloudDSNEmptyKey, "cloud-check: %v; its escalation was closed within %s, not raising another", err, pluginEscalationReopenWindow)
+		return
+	}
+	if err := d.escalateAlertErr(key, "plugin:"+cloudCheckPlugin, cloudDSNEmptySummary(err)); err != nil {
+		d.logCloudDSN(cloudDSNEmptyKey, "cloud-check: raising the empty ledger DSN escalation: %v", err)
+		return
+	}
+	d.cloudDSN.setRaised(true)
+	d.logCloudDSN(cloudDSNEmptyKey, "cloud-check: %v", err)
+}
+
+// cloudDSNAlertKey is the escalation key of the empty-DSN item.
+func cloudDSNAlertKey() string {
+	return pluginFailureAlertKey(cloudCheckPlugin) + ":" + cloudDSNEmptyKey
+}
+
+// clearCloudDSN closes the empty-DSN item when it is open. A clear that fails
+// leaves the item raised, so the next run tries again.
+func (d *Daemon) clearCloudDSN(reason string) {
+	if !d.adoptCloudDSN() || !d.cloudDSN.isRaised() {
+		return
+	}
+	if err := d.clearAlertsErr(reason, cloudDSNAlertKey()); err != nil {
+		return
+	}
+	d.cloudDSN.setRaised(false)
+}
+
+// adoptCloudDSN reads the item's state from the record on the first clear in
+// this process, so a daemon that starts over an item an earlier daemon raised
+// can clear it once the file has content. A read that fails is logged and
+// returns false: the state is unknown, and the next run asks again.
+func (d *Daemon) adoptCloudDSN() bool {
+	if d.cloudDSN.isAdopted() {
+		return true
+	}
+	open, err := d.cloudDSNEscalationOpen()
+	if err != nil {
+		d.logCloudDSN(cloudDSNRecordLogKey, "cloud-check: reading the empty ledger DSN escalation: %v; the item's state is not known this run", err)
+		return false
+	}
+	d.cloudDSN.adopt(open)
+	return true
+}
+
+// cloudDSNEscalationOpen reports whether an escalation under the empty-DSN key
+// is open on the record. Escalations are wisps, so a read that finds no plane
+// tries the other, as pluginEscalationClosedRecently does.
+func (d *Daemon) cloudDSNEscalationOpen() (bool, error) {
+	opts := beads.ListOptions{
+		Label:        "gt:escalation",
+		Labels:       []string{notify.FingerprintLabel(cloudDSNAlertKey())},
+		Status:       "open",
+		IncludeInfra: true,
+		Priority:     -1,
+	}
+	bd := d.escalationBeads()
+	for _, ephemeral := range []bool{false, true} {
+		opts.Ephemeral = ephemeral
+		issues, err := bd.List(opts)
+		if err != nil {
+			return false, err
+		}
+		for _, is := range issues {
+			if beads.IsEscalationRecord(is) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// logCloudDSN logs one DSN check line, at most once an hour for its key.
+func (d *Daemon) logCloudDSN(key, format string, args ...any) {
+	if d.cloudDSN.allowLog(key, d.clk().Now()) {
+		d.logger.Printf("Handler: "+format, args...)
+	}
+}
+
 // The reasons the daemon closes a plugin escalation with itself. A close that
 // carries one of them is the daemon tidying its own escalation, not an operator
 // who read the failure and closed it, so it never counts toward the reopen
@@ -280,12 +486,22 @@ func cloudUnreadableSummary(err error) string {
 const (
 	pluginCloseSupersededPrefix = "superseded by "
 	pluginCloseCleared          = "cleared: the plugin passed"
+
+	// cloudDSNClearedReason and cloudDSNUnusedReason close the empty-DSN item
+	// when the file has content, or when the ledger is no longer read from Postgres.
+	cloudDSNClearedReason = "cleared: the ledger DSN file has content"
+	cloudDSNUnusedReason  = "cleared: the cloud ledger is no longer read from Postgres"
 )
 
 // daemonClosedEscalation reports whether an escalation was closed by the
-// daemon's own tidying (a superseded set, or a plugin that passed).
+// daemon's own tidying (a superseded set, a plugin that passed, or a DSN item
+// the check cleared).
 func daemonClosedEscalation(reason string) bool {
-	return strings.HasPrefix(reason, pluginCloseSupersededPrefix) || reason == pluginCloseCleared
+	switch reason {
+	case pluginCloseCleared, cloudDSNClearedReason, cloudDSNUnusedReason:
+		return true
+	}
+	return strings.HasPrefix(reason, pluginCloseSupersededPrefix)
 }
 
 // pluginEscalationClosedRecently reports whether the escalation for key was

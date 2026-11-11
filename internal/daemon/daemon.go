@@ -169,6 +169,11 @@ type Daemon struct {
 	// config.CloudReportsDir. Tests inject a fixture directory (gt-ggd75).
 	cloudReportsDir func() string
 
+	// cloudDSN is what the cloud-check run remembers of the Postgres ledger's
+	// DSN file: its empty-file attention item and the hour's log hold (see
+	// checkCloudDSN).
+	cloudDSN cloudDSNWatch
+
 	// getenv reads the environment the start names its owner from
 	// (DetectSelf); nil reads the process environment. Tests set it so a
 	// start runs under an environment fixture.

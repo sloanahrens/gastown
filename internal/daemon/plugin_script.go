@@ -468,6 +468,9 @@ func (d *Daemon) startScriptPlugin(p *plugin.Plugin, recorder runRecorder) {
 			onSuccess: d.clearPluginFailure,
 			logf:      d.logger.Printf,
 		})
+		if p.Name == cloudCheckPlugin {
+			d.checkCloudDSN()
+		}
 	}()
 }
 

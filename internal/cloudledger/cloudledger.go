@@ -47,6 +47,7 @@ var (
 	ErrBadRelease    = errors.New("cloudledger: release line is not JSON")
 	ErrLedgerRead    = errors.New("cloudledger: ledger could not be read")
 	ErrWriterRole    = errors.New("cloudledger: role can write the ledger")
+	ErrEmptyDSN      = errors.New("cloudledger: DSN file is empty")
 )
 
 // Source reads the cloud step's records.

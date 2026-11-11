@@ -286,8 +286,13 @@ func checkReaderRole(ctx context.Context, tx *sql.Tx) error {
 
 // readDSN reads the DSN the setting names. A file that is missing, not a
 // regular file, empty, or readable by group or others is an error naming the
-// file, never the DSN. readFile is injected so a test can drive the read
-// failure a readable regular file cannot be made to produce.
+// file, never the DSN. A zero-byte file is ErrEmptyDSN whatever its mode: it
+// holds no secret, and a Secret mount is 0644 by default, so the mode refusal
+// would hide the state the operator has to fill. The mode is checked before the
+// content is read, so a refused secret is never read; a file with content that
+// is only whitespace is ErrEmptyDSN once its mode passes. readFile is injected
+// so a test can drive the read failure a readable regular file cannot be made to
+// produce.
 func readDSN(path string, readFile func(string) ([]byte, error)) (string, error) {
 	if path == "" {
 		return "", errors.New("cloudledger: postgres source: no DSN file is set")
@@ -299,6 +304,9 @@ func readDSN(path string, readFile func(string) ([]byte, error)) (string, error)
 	if !fi.Mode().IsRegular() {
 		return "", fmt.Errorf("cloudledger: postgres source: DSN file %s: %w", path, ErrNotRegular)
 	}
+	if fi.Size() == 0 {
+		return "", fmt.Errorf("%w: %s", ErrEmptyDSN, path)
+	}
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		return "", fmt.Errorf("cloudledger: postgres source: DSN file %s is readable by group or others (mode %04o); want 0600 or stricter", path, perm)
 	}
@@ -308,9 +316,17 @@ func readDSN(path string, readFile func(string) ([]byte, error)) (string, error)
 	}
 	dsn := strings.TrimSpace(string(b))
 	if dsn == "" {
-		return "", fmt.Errorf("cloudledger: postgres source: DSN file %s is empty", path)
+		return "", fmt.Errorf("%w: %s", ErrEmptyDSN, path)
 	}
 	return dsn, nil
+}
+
+// CheckDSNFile applies the refusals a ledger read gives the DSN file at path and
+// returns the first one, or nil when the file holds a DSN. It opens no
+// connection, and its error never carries the DSN.
+func CheckDSNFile(path string) error {
+	_, err := readDSN(path, os.ReadFile)
+	return err
 }
 
 // postgresError wraps a driver or query error, removing the DSN from its text:
