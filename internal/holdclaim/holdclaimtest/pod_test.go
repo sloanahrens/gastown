@@ -56,3 +56,26 @@ func TestExecTeeThenCatReturnsTheWrittenBytes(t *testing.T) {
 		t.Fatalf("cat = %q, want the written bytes", got)
 	}
 }
+
+func TestExecProbeAnswersWhetherTheClaimFileIsPresent(t *testing.T) {
+	t.Parallel()
+	p := New()
+	probe := []string{"kubectl", "--", "sh", "-c", "script", "sh", "/f"}
+	got, err := p.Exec(context.Background(), probe, nil)
+	if err != nil || string(got) != "absent\n" {
+		t.Fatalf("probe of a missing file = %q, %v; want absent", got, err)
+	}
+	p.Files["/f"] = []byte("x")
+	got, err = p.Exec(context.Background(), probe, nil)
+	if err != nil || string(got) != "present\n" {
+		t.Fatalf("probe of a present file = %q, %v; want present", got, err)
+	}
+}
+
+func TestExecRefusesAnShCallThatIsNotTheProbe(t *testing.T) {
+	t.Parallel()
+	p := New()
+	if _, err := p.Exec(context.Background(), []string{"kubectl", "--", "sh", "-c", "x"}, nil); err == nil {
+		t.Fatal("an sh call with no path argument returned nil, want an error")
+	}
+}

@@ -54,11 +54,17 @@ func Read(townRoot string) *Info {
 	return parse(string(data))
 }
 
+// Render returns the bytes of an E-stop sentinel triggered at now. A caller
+// that writes the sentinel elsewhere too, such as the daemon pod's claim, takes
+// the bytes from here so every copy is the same file.
+func Render(trigger, reason string, now time.Time) []byte {
+	ts := now.Format(time.RFC3339)
+	return []byte(fmt.Sprintf("%s\t%s\t%s\n", trigger, ts, reason))
+}
+
 // Activate creates the ESTOP sentinel file with the given trigger and reason.
 func Activate(townRoot, trigger, reason string) error {
-	ts := time.Now().Format(time.RFC3339)
-	content := fmt.Sprintf("%s\t%s\t%s\n", trigger, ts, reason)
-	return os.WriteFile(FilePath(townRoot), []byte(content), 0644)
+	return os.WriteFile(FilePath(townRoot), Render(trigger, reason, time.Now()), 0644)
 }
 
 // Deactivate removes the ESTOP sentinel file.
@@ -104,9 +110,7 @@ func ReadRig(townRoot, rigName string) *Info {
 
 // ActivateRig creates a per-rig ESTOP sentinel file.
 func ActivateRig(townRoot, rigName, trigger, reason string) error {
-	ts := time.Now().Format(time.RFC3339)
-	content := fmt.Sprintf("%s\t%s\t%s\n", trigger, ts, reason)
-	return os.WriteFile(RigFilePath(townRoot, rigName), []byte(content), 0644)
+	return os.WriteFile(RigFilePath(townRoot, rigName), Render(trigger, reason, time.Now()), 0644)
 }
 
 // DeactivateRig removes a per-rig ESTOP sentinel file.

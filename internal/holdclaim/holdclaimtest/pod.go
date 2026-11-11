@@ -21,6 +21,9 @@ type Pod struct {
 	Fail map[string]error
 	// Corrupt makes cat return bytes other than the ones written.
 	Corrupt bool
+	// ProbeOut, when set, is what the removal probe answers in place of the
+	// truth about the claim's file: a test uses it to answer unclear output.
+	ProbeOut []byte
 }
 
 // New returns an empty pod with no failures.
@@ -63,6 +66,19 @@ func (p *Pod) Exec(_ context.Context, argv []string, stdin []byte) ([]byte, erro
 	case "rm":
 		delete(p.Files, args[len(args)-1])
 		return nil, nil
+	case "sh":
+		// The removal probe is sh -c <script> sh <path>: it answers whether the
+		// path is still in the claim. Any other sh call is refused.
+		if len(args) != 4 || args[0] != "-c" {
+			return nil, fmt.Errorf("holdclaimtest: unexpected sh call %q", args)
+		}
+		if p.ProbeOut != nil {
+			return p.ProbeOut, nil
+		}
+		if _, ok := p.Files[args[3]]; ok {
+			return []byte("present\n"), nil
+		}
+		return []byte("absent\n"), nil
 	}
 	return nil, fmt.Errorf("holdclaimtest: unexpected pod command %q", command)
 }

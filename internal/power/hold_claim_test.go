@@ -80,8 +80,11 @@ func TestStandbyRefusesBeforeTheEstopWhenThePodHoldWriteFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
 		t.Fatalf("Standby error = %v, want the NOT-in-the-pod refusal", err)
 	}
-	// The hold is up on the Mac, but the ESTOP follows the hold, so a failed
-	// pod write must stop Standby before the ESTOP is set.
+	// The pod's copy comes first, so a refused pod write leaves the hold off the
+	// Mac too; the ESTOP follows the hold, so Standby must stop before it.
+	if _, statErr := os.Stat(dispatch.HoldFilePath(f.town)); !os.IsNotExist(statErr) {
+		t.Fatalf("the hold was written on the Mac although the pod refused it: stat err = %v", statErr)
+	}
 	if estop.IsActive(f.town) {
 		t.Fatal("the ESTOP was set after the pod refused the hold")
 	}
@@ -154,7 +157,11 @@ func TestSetEstopMirrorsAnAlreadyActiveEstopIntoThePod(t *testing.T) {
 	}
 }
 
-func TestClearHoldKeepsTheMacHoldWhenThePodRemoveFails(t *testing.T) {
+// TestClearHoldReportsAPodCopyStillPresentAfterTheMacRemoval is the second
+// failure injection for the hold: the Mac file goes first, so when the pod's
+// removal fails the error says the pod copy is still present and the pod stays
+// held.
+func TestClearHoldReportsAPodCopyStillPresentAfterTheMacRemoval(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
 	writePodSetting(t, f.town, podSetting)
@@ -168,11 +175,39 @@ func TestClearHoldKeepsTheMacHoldWhenThePodRemoveFails(t *testing.T) {
 	o.PodExec = pod.Exec
 
 	err := newEngine(o).clearHold()
-	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
-		t.Fatalf("clearHold error = %v, want the NOT-in-the-pod refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "pod copy still present") || !strings.Contains(err.Error(), "the pod stays STOPPED") {
+		t.Fatalf("clearHold error = %v, want the pod-copy-still-present report saying the pod stays STOPPED", err)
 	}
-	if _, statErr := os.Stat(dispatch.HoldFilePath(f.town)); statErr != nil {
-		t.Fatalf("the Mac hold was removed although the pod kept its copy: %v", statErr)
+	if _, statErr := os.Stat(dispatch.HoldFilePath(f.town)); !os.IsNotExist(statErr) {
+		t.Fatalf("the Mac hold survived although the Mac is the first step of the lift: stat err = %v", statErr)
+	}
+}
+
+// TestClearHoldKeepsThePodCopyWhenTheMacRemovalFails is the first failure
+// injection for the hold: a Mac hold that cannot be removed leaves the pod's
+// copy untouched, so the pod stays held.
+func TestClearHoldKeepsThePodCopyWhenTheMacRemovalFails(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	writePodSetting(t, f.town, podSetting)
+	hold := dispatch.HoldFilePath(f.town)
+	if err := os.MkdirAll(filepath.Join(hold, "inside"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pod := holdclaimtest.New()
+	pod.Files[podHoldPath] = nil
+	o, _, _ := f.optsWithOut()
+	o.PodExec = pod.Exec
+
+	err := newEngine(o).clearHold()
+	if err == nil || !strings.Contains(err.Error(), "the pod stays STOPPED") {
+		t.Fatalf("clearHold error = %v, want the report that the pod stays held", err)
+	}
+	if len(pod.Calls) != 0 {
+		t.Fatalf("pod calls = %q, want none while the Mac hold is still up", pod.Calls)
+	}
+	if _, ok := pod.Files[podHoldPath]; !ok {
+		t.Fatal("the pod's hold copy was removed although the Mac hold was not")
 	}
 }
 

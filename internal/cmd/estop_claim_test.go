@@ -104,8 +104,8 @@ func TestActivateEstopRefusesWhenThePodWriteFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
 		t.Fatalf("activateEstopWith error = %v, want the NOT-in-the-pod refusal", err)
 	}
-	if _, statErr := os.Stat(estop.FilePath(town)); statErr != nil {
-		t.Fatalf("the Mac sentinel must stay after a failed pod write: %v", statErr)
+	if _, statErr := os.Stat(estop.FilePath(town)); !os.IsNotExist(statErr) {
+		t.Fatalf("the Mac sentinel was written although the pod refused it: stat err = %v", statErr)
 	}
 }
 
@@ -163,7 +163,7 @@ func TestActivateEstopRefusesAHalfGivenPodSettingBeforeWriting(t *testing.T) {
 	}
 }
 
-func TestLiftEstopRemovesThePodCopyThenTheMacSentinel(t *testing.T) {
+func TestLiftEstopRemovesTheMacSentinelThenThePodCopy(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	if err := estop.Activate(town, estop.TriggerManual, "x"); err != nil {
@@ -183,21 +183,53 @@ func TestLiftEstopRemovesThePodCopyThenTheMacSentinel(t *testing.T) {
 	}
 }
 
-func TestLiftEstopKeepsTheMacSentinelWhenThePodRemoveFails(t *testing.T) {
+// TestLiftEstopReportsAPodCopyStillPresentAfterTheMacRemoval is the second
+// failure injection: the Mac's sentinel goes first, so when the pod's removal
+// fails the error says the pod copy is still present and the pod stays STOPPED.
+func TestLiftEstopReportsAPodCopyStillPresentAfterTheMacRemoval(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	if err := estop.Activate(town, estop.TriggerManual, "x"); err != nil {
 		t.Fatal(err)
 	}
 	pod, fake := podClaimFor(t, town)
+	fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName] = []byte("copy")
 	fake.Fail["rm"] = errPodDown
 
 	err := liftEstop(town, "", pod)
-	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
-		t.Fatalf("liftEstop error = %v, want the NOT-in-the-pod refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "pod copy still present") || !strings.Contains(err.Error(), "the pod stays STOPPED") {
+		t.Fatalf("liftEstop error = %v, want the pod-copy-still-present report saying the pod stays STOPPED", err)
 	}
-	if !estop.IsActive(town) {
-		t.Fatal("the Mac ESTOP was removed although the pod kept its copy")
+	if estop.IsActive(town) {
+		t.Fatal("the Mac ESTOP survived although the Mac is the first step of the lift")
+	}
+}
+
+// TestLiftEstopKeepsThePodCopyWhenTheMacRemovalFails is the first failure
+// injection at the call site: a Mac sentinel that cannot be removed leaves the
+// pod's copy untouched, so the pod stays STOPPED.
+func TestLiftEstopKeepsThePodCopyWhenTheMacRemovalFails(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	sentinel := estop.FilePath(town)
+	if err := os.MkdirAll(sentinel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sentinel, "inside"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pod, fake := podClaimFor(t, town)
+	fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName] = []byte("copy")
+
+	err := liftEstop(town, "", pod)
+	if err == nil || !strings.Contains(err.Error(), "the pod stays STOPPED") {
+		t.Fatalf("liftEstop error = %v, want the report that the pod stays STOPPED", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("pod calls = %q, want none while the Mac sentinel is still up", fake.Calls)
+	}
+	if _, ok := fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName]; !ok {
+		t.Fatal("the pod copy was removed although the Mac sentinel was not")
 	}
 }
 
@@ -240,8 +272,8 @@ func TestActivateEstopRigRefusesWhenThePodWriteFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
 		t.Fatalf("activateEstopWith rig error = %v, want the NOT-in-the-pod refusal", err)
 	}
-	if estop.ReadRig(town, "gastown") == nil {
-		t.Fatal("the Mac rig ESTOP must stay after a failed pod write")
+	if _, statErr := os.Stat(estop.RigFilePath(town, "gastown")); !os.IsNotExist(statErr) {
+		t.Fatalf("the Mac rig ESTOP was written although the pod refused it: stat err = %v", statErr)
 	}
 }
 
@@ -268,7 +300,7 @@ func TestThawEstopRefusesAHalfGivenPodSettingBeforeLifting(t *testing.T) {
 	}
 }
 
-func TestThawEstopKeepsTheMacEstopWhenThePodRemoveFails(t *testing.T) {
+func TestThawEstopReportsAPodCopyStillPresentAfterTheMacLift(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	if err := estop.Activate(town, estop.TriggerManual, "x"); err != nil {
@@ -276,14 +308,15 @@ func TestThawEstopKeepsTheMacEstopWhenThePodRemoveFails(t *testing.T) {
 	}
 	writePodEnv(t, town)
 	fake := holdclaimtest.New()
+	fake.Files[k8sdaemon.TownRootPath+"/"+estop.FileName] = []byte("copy")
 	fake.Fail["rm"] = errPodDown
 
 	err := thawEstop(town, "", fake.Exec)
-	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
-		t.Fatalf("thawEstop error = %v, want the NOT-in-the-pod refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "pod copy still present") {
+		t.Fatalf("thawEstop error = %v, want the pod-copy-still-present report", err)
 	}
-	if !estop.IsActive(town) {
-		t.Fatal("the Mac ESTOP was removed although the pod kept its copy")
+	if estop.IsActive(town) {
+		t.Fatal("the Mac ESTOP survived the first step of the lift")
 	}
 }
 
@@ -298,8 +331,8 @@ func TestThawEstopWithNoMacEstopReportsAPodCopyThatCannotBeLifted(t *testing.T) 
 	fake.Fail["rm"] = errPodDown
 
 	err := thawEstop(town, "", fake.Exec)
-	if err == nil || !strings.Contains(err.Error(), "NOT in the pod") {
-		t.Fatalf("thawEstop error = %v, want the NOT-in-the-pod refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "pod copy still present") {
+		t.Fatalf("thawEstop error = %v, want the pod-copy-still-present report", err)
 	}
 }
 
@@ -318,7 +351,7 @@ func TestLiftEstopReportsALocalSentinelThatCannotBeRemoved(t *testing.T) {
 	}
 
 	err := liftEstop(town, "", nil)
-	if err == nil || !strings.Contains(err.Error(), "failed to remove ESTOP file") {
+	if err == nil || !strings.Contains(err.Error(), "failed to remove the E-stop file") {
 		t.Fatalf("liftEstop error = %v, want the local removal failure", err)
 	}
 }

@@ -151,35 +151,33 @@ func activateEstop(w io.Writer, townRoot, rig, reason string) error {
 }
 
 // activateEstopWith is activateEstop with the pod's claim writer given: nil for
-// a town with no pod setting.
+// a town with no pod setting. With a pod setting the sentinel goes into the
+// pod's claim first, then onto the Mac, so a partial run never leaves the pod
+// running.
 func activateEstopWith(w io.Writer, townRoot, rig, reason string, pod *holdclaim.Writer) error {
+	path := estop.FilePath(townRoot)
+	info := estop.Read(townRoot)
 	if rig != "" {
-		path := estop.RigFilePath(townRoot, rig)
-		if info := estop.ReadRig(townRoot, rig); info != nil {
+		path = estop.RigFilePath(townRoot, rig)
+		info = estop.ReadRig(townRoot, rig)
+	}
+	if info != nil {
+		if rig != "" {
 			fmt.Fprintf(w, "%s E-stop already active for %s (triggered %s: %s)\n",
 				style.Error.Render("⛔"), rig, info.Trigger, info.Reason)
-			return mirrorEstopClaim(pod, path)
-		}
-		if err := estop.ActivateRig(townRoot, rig, estop.TriggerManual, reason); err != nil {
-			return fmt.Errorf("failed to create ESTOP file for %s: %w", rig, err)
-		}
-		if err := mirrorEstopClaim(pod, path); err != nil {
-			return err
-		}
-		fmt.Fprintf(w, "%s EMERGENCY STOP: %s\n", style.Error.Render("⛔"), style.Bold.Render(rig))
-	} else {
-		path := estop.FilePath(townRoot)
-		if info := estop.Read(townRoot); info != nil {
+		} else {
 			fmt.Fprintf(w, "%s E-stop already active (triggered %s: %s)\n",
 				style.Error.Render("⛔"), info.Trigger, info.Reason)
-			return mirrorEstopClaim(pod, path)
 		}
-		if err := estop.Activate(townRoot, estop.TriggerManual, reason); err != nil {
-			return fmt.Errorf("failed to create ESTOP file: %w", err)
-		}
-		if err := mirrorEstopClaim(pod, path); err != nil {
-			return err
-		}
+		return holdclaim.Mirror(pod, "E-stop", path)
+	}
+	content := estop.Render(estop.TriggerManual, reason, time.Now())
+	if err := holdclaim.Activate(pod, "E-stop", path, content); err != nil {
+		return err
+	}
+	if rig != "" {
+		fmt.Fprintf(w, "%s EMERGENCY STOP: %s\n", style.Error.Render("⛔"), style.Bold.Render(rig))
+	} else {
 		fmt.Fprintf(w, "%s EMERGENCY STOP\n", style.Error.Render("⛔"))
 	}
 	if reason != "" {
@@ -256,42 +254,15 @@ func thawEstop(townRoot, rig string, run holdclaim.Exec) error {
 	return nil
 }
 
-// mirrorEstopClaim copies the Mac's ESTOP sentinel at path into the daemon
-// pod's claim. A nil pod is the Mac-only town, which has nothing to mirror.
-func mirrorEstopClaim(pod *holdclaim.Writer, path string) error {
-	if pod == nil {
-		return nil
-	}
-	if err := pod.Mirror(path); err != nil {
-		return fmt.Errorf("E-stop set on the Mac but NOT in the pod: %w", err)
-	}
-	return nil
-}
-
-// liftEstop clears the town (rig == "") or per-rig ESTOP sentinel on the Mac
-// and in the pod's claim. The claim goes first: when the pod cannot be reached
-// the Mac's sentinel stays, so the E-stop is still up on both sides rather than
-// cleared on the Mac alone.
+// liftEstop clears the town (rig == "") or per-rig ESTOP sentinel on the Mac and
+// in the pod's claim, through holdclaim.Lift: the Mac's file goes first, so a
+// partial lift leaves the pod stopped.
 func liftEstop(townRoot, rig string, pod *holdclaim.Writer) error {
 	path := estop.FilePath(townRoot)
 	if rig != "" {
 		path = estop.RigFilePath(townRoot, rig)
 	}
-	if pod != nil {
-		if err := pod.Remove(path); err != nil {
-			return fmt.Errorf("E-stop lift NOT in the pod: the claim copy could not be removed, so the Mac's E-stop was left in place: %w", err)
-		}
-	}
-	var err error
-	if rig != "" {
-		err = estop.DeactivateRig(townRoot, rig)
-	} else {
-		err = estop.Deactivate(townRoot, false)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to remove ESTOP file: %w", err)
-	}
-	return nil
+	return holdclaim.Lift(pod, "E-stop", path)
 }
 
 // exemptSessions are not nudged when an E-stop clears: they coordinate the

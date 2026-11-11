@@ -470,40 +470,35 @@ func (e *engine) podClaim() (*holdclaim.Writer, error) {
 	return holdclaim.FromTown(e.o.TownRoot, run)
 }
 
-// setHold writes the operator hold on the Mac and, when the town has a pod
-// setting, into the pod's claim after it.
+// setHold puts the operator hold up, the pod's claim first so a partial set
+// never leaves the pod running.
 func (e *engine) setHold() error {
 	pod, err := e.podClaim()
 	if err != nil {
 		return fmt.Errorf("the hold was not set, because the pod setting cannot be read: %w", err)
 	}
 	path := dispatch.HoldFilePath(e.o.TownRoot)
-	if !e.holdOn() {
-		if e.o.DryRun {
-			fmt.Fprintf(e.o.Out, "  [dry-run] touch %s\n", path)
-		} else {
-			fmt.Fprintf(e.o.Out, "  + touch %s\n", path)
-			if err := os.WriteFile(path, nil, 0o644); err != nil {
-				return fmt.Errorf("writing the hold %s: %w", path, err)
-			}
-		}
-	}
-	if pod == nil {
+	on := e.holdOn()
+	if on && pod == nil {
 		return nil
 	}
 	if e.o.DryRun {
-		fmt.Fprintf(e.o.Out, "  [dry-run] write the hold into the pod's claim\n")
+		if !on {
+			fmt.Fprintf(e.o.Out, "  [dry-run] touch %s\n", path)
+		}
+		if pod != nil {
+			fmt.Fprintf(e.o.Out, "  [dry-run] write the hold into the pod's claim, before the Mac file\n")
+		}
 		return nil
 	}
-	if err := pod.Mirror(path); err != nil {
-		return fmt.Errorf("hold set on the Mac but NOT in the pod: %w", err)
+	if !on {
+		fmt.Fprintf(e.o.Out, "  + touch %s\n", path)
 	}
-	return nil
+	return holdclaim.Activate(pod, "hold", path, nil)
 }
 
-// clearHold removes the operator hold. With a pod setting the claim's copy goes
-// first: when the pod cannot be reached the Mac's file stays, so the hold is
-// still up on both sides rather than lifted on the Mac alone.
+// clearHold lifts the operator hold, the Mac file first so a partial lift
+// leaves the pod held.
 func (e *engine) clearHold() error {
 	pod, err := e.podClaim()
 	if err != nil {
@@ -515,27 +510,16 @@ func (e *engine) clearHold() error {
 		// the removal even though the dry run never wrote the file.
 		fmt.Fprintf(e.o.Out, "  [dry-run] rm -f %s\n", path)
 		if pod != nil {
-			fmt.Fprintf(e.o.Out, "  [dry-run] remove the hold from the pod's claim\n")
+			fmt.Fprintf(e.o.Out, "  [dry-run] remove the hold from the pod's claim, after the Mac file\n")
 		}
 		return nil
 	}
-	if pod != nil {
-		if err := pod.Remove(path); err != nil {
-			return fmt.Errorf("hold lift NOT in the pod: the claim copy could not be removed, so the hold file was left in place on the Mac: %w", err)
-		}
-	}
-	// Remove without asking holdOn first: a hold path that cannot be read
-	// must surface the removal error rather than leave the hold up while the
-	// state reports success.
 	fmt.Fprintf(e.o.Out, "  + rm -f %s\n", path)
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("removing the hold %s: %w", path, err)
-	}
-	return nil
+	return holdclaim.Lift(pod, "hold", path)
 }
 
 // setEstop sets the town ESTOP through gt estop, whose sentinel format the
-// dispatch hold and the supervisor read. gt estop mirrors the sentinel into the
+// dispatch hold and the supervisor read. gt estop sets the sentinel in the
 // pod's claim itself when the town has a pod setting; this covers the case
 // where the Mac's sentinel is already up and gt estop does nothing.
 func (e *engine) setEstop(ctx context.Context, state State) error {
@@ -545,8 +529,8 @@ func (e *engine) setEstop(ctx context.Context, state State) error {
 	return e.run(ctx, e.o.TownRoot, e.o.GTCommand, "estop", "-r", "gt-power: "+string(state))
 }
 
-// mirrorEstop copies the Mac's town ESTOP into the pod's claim, when the town
-// has a pod setting.
+// mirrorEstop sets the town ESTOP that is already up on the Mac into the pod's
+// claim, when the town has a pod setting.
 func (e *engine) mirrorEstop() error {
 	pod, err := e.podClaim()
 	if err != nil {
@@ -560,10 +544,7 @@ func (e *engine) mirrorEstop() error {
 		fmt.Fprintf(e.o.Out, "  [dry-run] write the ESTOP into the pod's claim\n")
 		return nil
 	}
-	if err := pod.Mirror(path); err != nil {
-		return fmt.Errorf("ESTOP set on the Mac but NOT in the pod: %w", err)
-	}
-	return nil
+	return holdclaim.Mirror(pod, "E-stop", path)
 }
 
 // record writes the last requested state.

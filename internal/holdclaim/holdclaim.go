@@ -144,23 +144,19 @@ func (w *Writer) Set(local string, content []byte) error {
 		return fmt.Errorf("reading %s back from the pod: %w", podPath, err)
 	}
 	if !bytes.Equal(got, content) {
+
 		return fmt.Errorf("read-back of %s in the pod differs from the bytes written", podPath)
 	}
 	return nil
 }
 
-// Mirror copies the Mac's sentinel at path into the claim: it reads the local
-// file and writes the same bytes through Set.
-func (w *Writer) Mirror(local string) error {
-	content, err := os.ReadFile(local) //nolint:gosec // G304: local is a sentinel the caller built under the town root
-	if err != nil {
-		return fmt.Errorf("reading %s to mirror it into the pod: %w", local, err)
-	}
-	return w.Set(local, content)
-}
+// removalProbe is the script the removal read-back runs in the pod. It prints
+// present or absent, so a probe that fails to reach the pod is never read as
+// absent.
+const removalProbe = `if [ -e "$1" ]; then echo present; else echo absent; fi`
 
-// Remove deletes the claim file that mirrors path. A file that is already gone
-// is not an error, so a repeated lift succeeds.
+// Remove deletes the claim file that mirrors local and reads back that it is
+// gone. A file already gone is not an error, so a repeated lift succeeds.
 func (w *Writer) Remove(local string) error {
 	podPath, err := w.podPath(local)
 	if err != nil {
@@ -168,6 +164,86 @@ func (w *Writer) Remove(local string) error {
 	}
 	if _, err := w.run(context.Background(), w.argv("rm", "-f", podPath), nil); err != nil {
 		return fmt.Errorf("removing %s from the pod: %w", podPath, err)
+	}
+	got, err := w.run(context.Background(), w.argv("sh", "-c", removalProbe, "sh", podPath), nil)
+	if err != nil {
+		return fmt.Errorf("reading %s back from the pod: %w", podPath, err)
+	}
+	switch strings.TrimSpace(string(got)) {
+	case "absent":
+		return nil
+	case "present":
+		return fmt.Errorf("%s is still present in the pod after the removal", podPath)
+	}
+	return fmt.Errorf("read-back of %s in the pod is neither present nor absent", podPath)
+}
+
+// Activate sets the sentinel at local, the pod's claim first and the Mac after,
+// so a partial set never leaves the pod running. A nil pod is the Mac-only town.
+func Activate(pod *Writer, what, local string, content []byte) error {
+	if pod != nil {
+		if err := pod.Set(local, content); err != nil {
+			return fmt.Errorf("%s NOT in the pod, so it is not set on the Mac either: %w", what, err)
+		}
+	}
+	if err := os.WriteFile(local, content, 0o644); err != nil {
+		if pod != nil {
+			return fmt.Errorf("%s set in the pod but NOT on the Mac, so the pod is STOPPED: writing %s: %w", what, local, err)
+		}
+		return fmt.Errorf("writing the %s %s: %w", what, local, err)
+	}
+	return nil
+}
+
+// Mirror sets the sentinel already up at local into the claim, through Activate.
+func Mirror(pod *Writer, what, local string) error {
+	if pod == nil {
+		return nil
+	}
+	content, err := os.ReadFile(local) //nolint:gosec // G304: local is a sentinel the caller built under the town root
+	if err != nil {
+		return fmt.Errorf("reading the %s %s to set it in the pod: %w", what, local, err)
+	}
+	return Activate(pod, what, local, content)
+}
+
+// Lift clears the sentinel at local, the Mac's file first and the pod's claim
+// last, so a partial lift leaves the pod STOPPED. A nil pod is the Mac-only town.
+func Lift(pod *Writer, what, local string) error {
+	return liftWith(pod, what, local, os.Remove)
+}
+
+// liftWith is Lift with the Mac's removal given, so a test can make the removal
+// fail or report success without the file going.
+func liftWith(pod *Writer, what, local string, remove func(string) error) error {
+	if pod != nil {
+		if _, err := pod.podPath(local); err != nil {
+			return fmt.Errorf("%s lift refused, nothing removed: %w", what, err)
+		}
+	}
+	// Remove without asking whether the sentinel is up: a path that cannot be
+	// read must surface the removal error rather than read as lifted.
+	// kept names what a refused Mac step leaves on the pod, when there is one.
+	kept := ""
+	if pod != nil {
+		kept = ", pod copy untouched: the pod stays STOPPED"
+	}
+	if err := remove(local); err != nil && !os.IsNotExist(err) {
+		if pod == nil {
+			return fmt.Errorf("failed to remove the %s file %s: %w", what, local, err)
+		}
+		return fmt.Errorf("%s lift: Mac copy NOT removed%s: %w", what, kept, err)
+	}
+	if _, err := os.Lstat(local); err == nil {
+		return fmt.Errorf("%s lift: Mac copy still present after removal%s", what, kept)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("%s lift: Mac copy NOT confirmed removed%s: %w", what, kept, err)
+	}
+	if pod == nil {
+		return nil
+	}
+	if err := pod.Remove(local); err != nil {
+		return fmt.Errorf("%s lift: Mac copy gone, pod copy still present or not confirmed gone: the pod stays STOPPED: %w", what, err)
 	}
 	return nil
 }

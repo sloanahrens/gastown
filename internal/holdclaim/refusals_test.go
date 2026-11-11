@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/holdclaim/holdclaimtest"
 )
 
 // TestKubectlRefusesAnEmptyCommand drives the refusal Kubectl makes before it
@@ -33,12 +35,12 @@ func TestKubectlNamesTheProgramThatFailsAndNotItsOutput(t *testing.T) {
 
 func TestNewRefusesAnEmptyTownRoot(t *testing.T) {
 	t.Parallel()
-	fake := newFakePod()
-	if _, err := New("", testTarget, fake.exec); err == nil {
+	fake := holdclaimtest.New()
+	if _, err := New("", testTarget, fake.Exec); err == nil {
 		t.Fatal("New with an empty town root returned nil, want a refusal")
 	}
-	if len(fake.calls) != 0 {
-		t.Fatalf("pod calls = %d, want none", len(fake.calls))
+	if len(fake.Calls) != 0 {
+		t.Fatalf("pod calls = %d, want none", len(fake.Calls))
 	}
 }
 
@@ -46,8 +48,8 @@ func TestNewRefusesAnEmptyTownRoot(t *testing.T) {
 // a relative town root cannot be compared with an absolute sentinel path.
 func TestPodPathRefusesALocalPathThatCannotBeRelativised(t *testing.T) {
 	t.Parallel()
-	fake := newFakePod()
-	w, err := New("relative-town", testTarget, fake.exec)
+	fake := holdclaimtest.New()
+	w, err := New("relative-town", testTarget, fake.Exec)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -55,7 +57,7 @@ func TestPodPathRefusesALocalPathThatCannotBeRelativised(t *testing.T) {
 	if err := w.Set(abs, nil); err == nil {
 		t.Fatal("Set of an absolute path under a relative town root returned nil, want a refusal")
 	}
-	if len(fake.calls) != 0 {
-		t.Fatalf("pod calls = %d, want none", len(fake.calls))
+	if len(fake.Calls) != 0 {
+		t.Fatalf("pod calls = %d, want none", len(fake.Calls))
 	}
 }
