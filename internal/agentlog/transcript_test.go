@@ -344,3 +344,84 @@ func writeTranscript(t *testing.T, path string, mtime time.Time) {
 		t.Fatalf("aging transcript: %v", err)
 	}
 }
+
+// TestProjectTranscripts lists every transcript under the project directories
+// the three roots resolve to, skips what is not a transcript, and treats a
+// project directory that is not there as holding none.
+func TestProjectTranscripts(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	configDir := filepath.Join(base, "cfg")
+	home := filepath.Join(base, "home")
+	town := filepath.Join(base, "town")
+	workDir := filepath.Join(town, "gastown", "polecats", "agate", "gastown")
+	hash, err := claudeProjectHashFor(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(configDir, "projects", hash)
+	legacyDir := filepath.Join(home, ".claude", "projects", hash)
+	townDir := filepath.Join(town, ".claude-town", "projects", hash)
+	for _, dir := range []string{cfgDir, legacyDir, townDir, filepath.Join(cfgDir, "sub.jsonl")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{
+		filepath.Join(cfgDir, "a.jsonl"),
+		filepath.Join(legacyDir, "b.jsonl"),
+		filepath.Join(townDir, "c.jsonl"),
+		filepath.Join(cfgDir, "notes.txt"),
+	} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configFn := func() (string, error) { return configDir, nil }
+	homeFn := func() (string, error) { return home, nil }
+
+	got, err := projectTranscriptsWith(town, workDir, configFn, homeFn)
+	if err != nil {
+		t.Fatalf("projectTranscriptsWith: %v", err)
+	}
+	want := []string{
+		filepath.Join(cfgDir, "a.jsonl"),
+		filepath.Join(legacyDir, "b.jsonl"),
+		filepath.Join(townDir, "c.jsonl"),
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("projectTranscriptsWith = %q, want %q", got, want)
+	}
+
+	// A config dir that cannot be resolved is an error, not a guess.
+	if _, err := projectTranscriptsWith(town, workDir, func() (string, error) { return "", errNoConfigDir }, homeFn); err == nil {
+		t.Error("projectTranscriptsWith listed transcripts with an unreadable config dir")
+	}
+
+	// No project directory exists: the answer is none, not an error.
+	empty := filepath.Join(t.TempDir(), "empty")
+	got, err = projectTranscriptsWith(empty, workDir, func() (string, error) { return empty, nil }, func() (string, error) { return empty, nil })
+	if err != nil {
+		t.Fatalf("projectTranscriptsWith with no project directory: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("projectTranscriptsWith with no project directory = %q, want none", got)
+	}
+
+	// A project directory that exists but cannot be read is an error: the
+	// transcript it hides could be one the caller is asked about.
+	unreadable := t.TempDir()
+	unreadableDir, err := ClaudeProjectDirIn(unreadable, workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(unreadableDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unreadableDir, []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := projectTranscriptsWith(empty, workDir, func() (string, error) { return unreadable, nil }, func() (string, error) { return empty, nil }); err == nil {
+		t.Error("projectTranscriptsWith listed a project directory it could not read")
+	}
+}

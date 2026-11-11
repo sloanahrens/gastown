@@ -3,7 +3,9 @@
 package agentlog
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -213,4 +215,40 @@ func latestTranscriptIn(dirs []string) string {
 		}
 	}
 	return bestPath
+}
+
+// ProjectTranscripts lists every transcript (JSONL file) Claude Code keeps for
+// workDir under the project directories ProjectDirsFor names, as full paths, in
+// search order. A directory that does not exist holds none. A directory that
+// exists but cannot be read is an error, not an empty list: a transcript it
+// hides may be one the caller is asked about.
+func ProjectTranscripts(townRoot, workDir string) ([]string, error) {
+	return projectTranscriptsWith(townRoot, workDir, config.ClaudeConfigDir, os.UserHomeDir)
+}
+
+// projectTranscriptsWith is ProjectTranscripts over the config dir and home the
+// caller names, as claudeProjectDirsWith is, so a test does not read the process
+// environment.
+func projectTranscriptsWith(townRoot, workDir string, configDirFor, userHomeDir func() (string, error)) ([]string, error) {
+	dirs, err := claudeProjectDirsWith(townRoot, workDir, configDirFor, userHomeDir)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading Claude project directory %s: %w", dir, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
+				continue
+			}
+			paths = append(paths, filepath.Join(dir, e.Name()))
+		}
+	}
+	return paths, nil
 }
