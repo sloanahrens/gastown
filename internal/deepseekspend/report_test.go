@@ -617,3 +617,42 @@ func TestReadFailuresAreErrors(t *testing.T) {
 		})
 	}
 }
+
+// The first bytes a later poll reads to tell the file was not rewritten are a
+// read like any other: when they fail, the poll fails, and nothing is reported
+// from the file.
+func TestReadFailuresOnALaterPollAreErrors(t *testing.T) {
+	t.Parallel()
+	cases := map[string]faultyFile{
+		"head seek fails": {failSeek: true},
+		"head read fails": {failRead: true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			ledger := filepath.Join(dir, "balance.log")
+			if err := os.WriteFile(ledger, []byte("2026-11-09T01:12:00 balance=51.50\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			fault := tc
+			armed := false
+			open := func(name string) (File, error) {
+				f, err := OpenFile(name)
+				if err != nil || !armed || name != ledger {
+					return f, err
+				}
+				fault.File = f
+				return fault, nil
+			}
+			reader := NewReader(ledger, filepath.Join(dir, "events.log"), loc, Constants{}, DefaultDays, open)
+			if _, err := reader.Report(time.Now()); err != nil {
+				t.Fatalf("first poll: %v", err)
+			}
+			armed = true
+			if _, err := reader.Report(time.Now()); err == nil {
+				t.Error("a later poll whose first bytes cannot be read returned no error")
+			}
+		})
+	}
+}
