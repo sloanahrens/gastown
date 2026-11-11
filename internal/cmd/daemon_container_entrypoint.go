@@ -198,7 +198,7 @@ type containerEntrypoint struct {
 	installMango func(townRoot string) error
 	// deployDirectives writes the town's central directives from the gastown bare
 	// repo at the image's commit; it runs after installMango and before the daemon
-	// is exec'd. Its unknown-commit error is a warning, not a refusal.
+	// is exec'd. Its missing-commit error is a warning, not a refusal.
 	deployDirectives func(townRoot string) ([]string, error)
 	// logf writes one line of start-up progress to the container's log.
 	logf    func(format string, args ...any)
@@ -444,7 +444,7 @@ func (e containerEntrypoint) deployTownDirectives(townRoot string) error {
 	switch {
 	case err == nil:
 		return nil
-	case errors.Is(err, config.ErrDirectiveCommitUnknown):
+	case errors.Is(err, config.ErrDirectiveCommitMissing):
 		e.logf("warning: central directives not redeployed: %v; the previous copy stays until the bare repo fetches the image's commit", err)
 		return nil
 	default:

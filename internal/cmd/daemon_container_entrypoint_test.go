@@ -2581,8 +2581,8 @@ func TestEntrypointDirectivesDeployFailurePolicy(t *testing.T) {
 		wantWarn  bool
 	}{
 		{
-			name:      "an unknown commit warns and the daemon starts",
-			deployErr: fmt.Errorf("central directives: commit %s is not in the repo: %w", commit, config.ErrDirectiveCommitUnknown),
+			name:      "a commit the repo lacks warns and the daemon starts",
+			deployErr: fmt.Errorf("central directives: commit %s is not in the repo: %w", commit, config.ErrDirectiveCommitMissing),
 			wantExec:  1,
 			wantWarn:  true,
 		},
