@@ -158,7 +158,7 @@ func TestAcceptanceTickNamesTheFlagWhenBdRejectsIt(t *testing.T) {
 	t.Parallel()
 	fake := beadsfake.New()
 	id := seedAcceptance(t, fake, "- [ ] first")
-	bdErr := errors.New("exit status 1: unknown flag")
+	bdErr := errors.New("exit status 1: unknown flag: --if-acceptance")
 	store := &guardedStore{Client: fake, t: t, reject: bdErr}
 	var out bytes.Buffer
 	v := &beadVerbs{client: store, actor: "me", out: &out}
@@ -225,6 +225,42 @@ func TestAcceptanceTickReturnsAStoreFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestAcceptanceTickUpdateFailureDoesNotNameTheFlag: a failed write that is not
+// a guard miss is reported as the write that failed. It does not claim bd lacks
+// --if-acceptance, which is only what bd's own refusal says.
+func TestAcceptanceTickUpdateFailureDoesNotNameTheFlag(t *testing.T) {
+	t.Parallel()
+	fake := beadsfake.New()
+	id := seedAcceptance(t, fake, "- [ ] first")
+	boom := errors.New("store unreachable")
+	v := &beadVerbs{client: tickFailingStore{Client: fake, updateErr: boom}, actor: "me", out: &bytes.Buffer{}}
+
+	err := v.tick(id, "first")
+	if !errors.Is(err, boom) {
+		t.Fatalf("tick error = %v, want the store failure", err)
+	}
+	if strings.Contains(err.Error(), "--if-acceptance") {
+		t.Errorf("tick error %q names --if-acceptance for a failure bd did not report as the flag", err)
+	}
+}
+
+// TestAcceptanceTickHelpStatesTheWriteBound: the help names the write bound the
+// tick enforces, so the two cannot drift apart.
+func TestAcceptanceTickHelpStatesTheWriteBound(t *testing.T) {
+	t.Parallel()
+	for _, c := range beadCmd.Commands() {
+		if c.Name() != "tick" {
+			continue
+		}
+		want := fmt.Sprintf("up to %d writes", tickAttempts)
+		if !strings.Contains(c.Long, want) {
+			t.Errorf("tick help lacks %q:\n%s", want, c.Long)
+		}
+		return
+	}
+	t.Fatal("gt bead has no tick verb")
 }
 
 // seedAcceptance creates a bead whose acceptance field is criteria.
