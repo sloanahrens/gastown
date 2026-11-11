@@ -14,6 +14,22 @@ below is a summary.
 - [L3](#l3-the-live-cutover-window): the live launchd daemon is replaced by the
   container in a window the operator chooses, with launchd kept as the
   rollback.
+- [Restoring the town configuration](#restoring-the-town-configuration), when a
+  claim has lost its configuration.
+
+## Restoring the town configuration
+
+The `town_state_backup` patrol copies the town's configuration into the JSONL
+backup repository, under `town-state/`, and pushes that commit to the backup
+repository's origin. The copy holds `mayor/town.json`,
+`settings/config.json`, `settings/models.json`, `settings/placement.json`,
+`settings/regime-events.json`, the files in `settings/themes/`, and each
+registered rig's `settings/config.json` and `.beads/config.yaml`. It never holds
+`settings/daemon.env` or any `*.env`, `*.key` or `*token*` file: those are the
+Secrets. To seed a claim whose configuration is gone, clone the backup
+repository, copy its `town-state/` tree over the claim's town root, then copy
+the Secrets in from the operator's own copy. The restore is done when
+`gt config validate` passes against the claim.
 
 ## L1: the scratch town
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"os/exec"
@@ -920,6 +921,17 @@ type Daemon struct {
 	jsonlGitBackupRunning atomic.Bool
 	wispReaperRunning     atomic.Bool
 	checkpointDogRunning  atomic.Bool
+	// townStateBackupRunning is the town_state_backup patrol's single-flight
+	// guard. It also holds jsonlGitBackupRunning while it stages, so the two
+	// patrols never write the backup repository's index at once
+	// (town_state_backup.go).
+	townStateBackupRunning atomic.Bool
+
+	// townStateFS and townStateRigs are the test seams for the town_state_backup
+	// patrol's reads: the town's files and the rig names. Nil takes the town on
+	// disk and the registry (town_state_backup.go).
+	townStateFS   func(townRoot string) fs.FS
+	townStateRigs func(townRoot string) []string
 
 	// overrunGuardRunning is the overrun_guard patrol's single-flight guard
 	// (overrun_guard.go).
@@ -1134,25 +1146,26 @@ type Daemon struct {
 	// jev_dedupe's: each outranks the persisted record when a save failed, so
 	// an unwritable daemon directory cannot make the patrol due on every
 	// heartbeat (gt-th2am, gt-cekkh).
-	jevAttentionRun   patrolLastRunMemory
-	jevLandingRun     patrolLastRunMemory
-	jevLogtriageRun   patrolLastRunMemory
-	jevReworkRun      patrolLastRunMemory
-	jevConflictRun    patrolLastRunMemory
-	jevNotesRun       patrolLastRunMemory
-	jevRulesRun       patrolLastRunMemory
-	jevDispatchRun    patrolLastRunMemory
-	jevThrashRun      patrolLastRunMemory
-	wispReaperRun     patrolLastRunMemory
-	tierSweepRun      patrolLastRunMemory
-	rebuildOMRun      patrolLastRunMemory
-	rebuildHMRun      patrolLastRunMemory
-	jsonlGitBackupRun patrolLastRunMemory
-	overrunGuardRun   patrolLastRunMemory
-	eventsPruneRun    patrolLastRunMemory
-	gitHygieneRun     patrolLastRunMemory
-	checkpointDogRun  patrolLastRunMemory
-	rogueBDRun        patrolLastRunMemory
+	jevAttentionRun    patrolLastRunMemory
+	jevLandingRun      patrolLastRunMemory
+	jevLogtriageRun    patrolLastRunMemory
+	jevReworkRun       patrolLastRunMemory
+	jevConflictRun     patrolLastRunMemory
+	jevNotesRun        patrolLastRunMemory
+	jevRulesRun        patrolLastRunMemory
+	jevDispatchRun     patrolLastRunMemory
+	jevThrashRun       patrolLastRunMemory
+	wispReaperRun      patrolLastRunMemory
+	tierSweepRun       patrolLastRunMemory
+	rebuildOMRun       patrolLastRunMemory
+	rebuildHMRun       patrolLastRunMemory
+	jsonlGitBackupRun  patrolLastRunMemory
+	townStateBackupRun patrolLastRunMemory
+	overrunGuardRun    patrolLastRunMemory
+	eventsPruneRun     patrolLastRunMemory
+	gitHygieneRun      patrolLastRunMemory
+	checkpointDogRun   patrolLastRunMemory
+	rogueBDRun         patrolLastRunMemory
 	// ghGatesRun holds one *patrolLastRunMemory per database's gh gate check,
 	// keyed by its last-run key (patrol_scan.go).
 	ghGatesRun sync.Map
@@ -1823,6 +1836,19 @@ func (d *Daemon) Run() (err error) {
 		d.triggerJsonlGitBackup()
 	}
 
+	// Start the town-state backup ticker if configured. Same check-cadence
+	// shape as jsonl_git_backup: due-ness comes from the persisted last run.
+	var townStateBackupChan <-chan time.Time
+	if d.isPatrolActive("town_state_backup") {
+		interval := townStateBackupInterval(d.patrolConfig)
+		townStateTicker := time.NewTicker(shortPatrolCheckTick(interval))
+		townStateBackupChan = townStateTicker.C
+		defer townStateTicker.Stop()
+		d.logger.Printf("Town-state backup ticker started (check every %v, run interval %v)",
+			shortPatrolCheckTick(interval), interval)
+		d.triggerTownStateBackup()
+	}
+
 	// Start wisp reaper ticker if configured.
 	// Closes stale wisps (abandoned molecule steps, old patrol data) across all databases.
 	// The ticker is a check cadence — due-ness comes from a persisted
@@ -2133,6 +2159,14 @@ func (d *Daemon) Run() (err error) {
 			// persisted last run is a full interval old (gt-ima2, gt-gxpwc).
 			if !d.isShutdownInProgress() {
 				d.triggerJsonlGitBackup()
+			}
+
+		case <-townStateBackupChan:
+			// Periodic town-state backup check: copies the town's configuration
+			// into the backup repository. Fires only when the persisted last run
+			// is a full interval old.
+			if !d.isShutdownInProgress() {
+				d.triggerTownStateBackup()
 			}
 
 		case <-wispReaperChan:
