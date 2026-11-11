@@ -26,11 +26,10 @@ const (
 // value. Every cleanup_status in the system is a self-report written by
 // `gt done` onto the polecat's agent bead (internal/done selfReportCleanupStatus)
 // — a recorded hint about a moment in the past, never a live measurement.
-// claude-41j.1 D9 retires the "ZFC: trust polecat self-report" carve-out
-// (docs/design/polecat-lifecycle-patrol.md) that treated it as authoritative;
-// consumers must show which side of that line a field came from, and the tag
-// exists so the demotion is visible at the API boundary instead of only in a
-// doc comment.
+// claude-41j.1 D9 retires the "ZFC: trust polecat self-report" carve-out that
+// treated it as authoritative; consumers must show which side of that line a
+// field came from, and the tag exists so the demotion is visible at the API
+// boundary instead of only in a doc comment.
 const CleanupStatusSourceRecorded = "recorded"
 
 // GitStateSource labels where a WorkstateInput's git facts came from. The

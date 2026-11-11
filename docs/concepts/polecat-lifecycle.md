@@ -383,4 +383,3 @@ This distinction matters for:
 - [Overview](../overview.md) - Role taxonomy and architecture
 - [Molecules](molecules.md) - Molecule execution and polecat workflow
 - [Propulsion Principle](propulsion-principle.md) - Why work triggers immediate execution
-- [Persistent Polecat Pool](../design/persistent-polecat-pool.md) - Pool management design and shipping status
