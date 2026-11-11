@@ -30,6 +30,7 @@ type Repo interface {
 	DiffNameOnly(base, head string) ([]string, error)
 	DiffPathsNameOnly(a, b string, paths []string) ([]string, error)
 	ShowFileAtRev(ref, path string) (string, error)
+	ShowFileBytesAtRev(ref, path string) ([]byte, error)
 	PatchID(base, head string) (string, error)
 	PatchIDZeroContext(base, head string) (string, error)
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
@@ -349,22 +350,29 @@ func (h *handle) DiffPathsNameOnly(a, b string, paths []string) ([]string, error
 // tree has no such path. A ref that does not resolve stays an error, like
 // *git.Git: an absent path and a broken ref must not read the same.
 func (h *handle) ShowFileAtRev(ref, path string) (string, error) {
+	data, err := h.ShowFileBytesAtRev(ref, path)
+	return strings.TrimSpace(string(data)), err
+}
+
+// ShowFileBytesAtRev returns path's exact contents at ref, untrimmed, as
+// *git.Git's ShowFileBytesAtRev does, with the same ErrNotAtRef split.
+func (h *handle) ShowFileBytesAtRev(ref, path string) ([]byte, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
 	args := []string{"show", ref + ":" + path}
 	r, wt, err := h.locate(args...)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	id, ok := h.resolve(r, wt, ref)
 	if !ok {
-		return "", unknownRevision(ref, args...)
+		return nil, unknownRevision(ref, args...)
 	}
 	content, ok := h.f.treeOf(id)[path]
 	if !ok {
-		return "", git.ErrNotAtRef
+		return nil, git.ErrNotAtRef
 	}
-	return strings.TrimSpace(content), nil
+	return []byte(content), nil
 }
 
 // resolveRange resolves base..head for a log.

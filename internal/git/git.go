@@ -1936,13 +1936,25 @@ var ErrNotAtRef = errors.New("path does not exist at ref")
 // is verified first so a broken repository cannot read as an empty file
 // (land.RiskPaths relies on exactly that split).
 func (g *Git) ShowFileAtRev(ref, path string) (string, error) {
+	data, err := g.ShowFileBytesAtRev(ref, path)
+	return strings.TrimSpace(string(data)), err
+}
+
+// ShowFileBytesAtRev is ShowFileAtRev without the whitespace trim: it returns
+// path's exact bytes at ref, which a byte-for-byte copy of a tracked file needs.
+// The same ErrNotAtRef and resolve-error split applies.
+func (g *Git) ShowFileBytesAtRev(ref, path string) ([]byte, error) {
 	if _, err := g.run("rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
-		return "", fmt.Errorf("resolving %s: %w", ref, err)
+		return nil, fmt.Errorf("resolving %s: %w", ref, err)
 	}
 	if _, err := g.run("cat-file", "-e", ref+":"+path); err != nil {
-		return "", ErrNotAtRef
+		return nil, ErrNotAtRef
 	}
-	return g.ShowFile(ref, path)
+	out, err := g.runOutput("show", ref+":"+path)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(out), nil
 }
 
 // CheckoutFileFromRef restores a file from a given ref (e.g., "origin/main").

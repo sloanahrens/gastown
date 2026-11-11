@@ -239,6 +239,13 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		if got, err := g.ShowFileAtRev(fx.head, "b.txt"); err != nil || got != "work" {
 			t.Errorf("ShowFileAtRev(b.txt) = %q, %v; want work", got, err)
 		}
+		// The byte read keeps the file's trailing newline; the trimmed read does not.
+		if got, err := g.ShowFileBytesAtRev(fx.head, "b.txt"); err != nil || string(got) != "work\n" {
+			t.Errorf("ShowFileBytesAtRev(b.txt) = %q, %v; want the exact bytes work\\n", got, err)
+		}
+		if _, err := g.ShowFileBytesAtRev(fx.base, "b.txt"); !errors.Is(err, git.ErrNotAtRef) {
+			t.Errorf("ShowFileBytesAtRev of a missing path = %v; want ErrNotAtRef", err)
+		}
 		// A path not in the ref's tree is an answer, not a failure.
 		if got, err := g.ShowFileAtRev(fx.base, "b.txt"); !errors.Is(err, git.ErrNotAtRef) {
 			t.Errorf("ShowFileAtRev of a missing path = %q, %v; want ErrNotAtRef", got, err)

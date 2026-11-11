@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/townconfig"
 )
 
@@ -475,6 +476,142 @@ func TestInitBeads_TrackedBeads_CreatesRedirect(t *testing.T) {
 	rigConfigPath := filepath.Join(rigPath, ".beads", "config.yaml")
 	if _, err := os.Stat(rigConfigPath); !os.IsNotExist(err) {
 		t.Errorf("expected no config.yaml at rig level when using redirect, but it exists")
+	}
+}
+
+// A beads path that cannot be checked is not read as untracked: InitBeads fails
+// before it writes a redirect (gt-3lvcjz.16). A regular file named .beads makes
+// the metadata.json check fail with ENOTDIR, which is not "not exist".
+func TestInitBeads_UncheckableBeadsDirFails(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads"), []byte("not a dir\n"), 0644); err != nil {
+		t.Fatalf("writing .beads file: %v", err)
+	}
+
+	manager, _, _ := testManager("", nil)
+	if err := manager.InitBeads(rigPath, "tk", ""); err == nil {
+		t.Fatal("InitBeads succeeded, want an error for a .beads path it cannot check")
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect")); !os.IsNotExist(err) {
+		t.Errorf("mayor redirect = %v, want none written", err)
+	}
+}
+
+// The untracked path's mayor redirect is a write that can fail, and a failure
+// is an error, not a skipped redirect (gt-3lvcjz.16). Each row blocks one
+// write: a file where mayor/rig must be a directory, and a directory where the
+// redirect file goes.
+func TestInitBeads_MayorRedirectWriteFailuresFail(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		block func(t *testing.T, rigPath string)
+		want  string
+	}{
+		"mayor/rig is a file, so its .beads cannot be created": {
+			block: func(t *testing.T, rigPath string) {
+				if err := os.MkdirAll(filepath.Join(rigPath, "mayor"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(rigPath, "mayor", "rig"), []byte("x\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "creating mayor/rig/.beads directory",
+		},
+		"the redirect path is a directory, so the redirect cannot be written": {
+			block: func(t *testing.T, rigPath string) {
+				if err := os.MkdirAll(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "creating mayor redirect file",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			rigPath := t.TempDir()
+			tc.block(t, rigPath)
+
+			manager, _, _ := testManager("", nil)
+			err := manager.InitBeads(rigPath, "tk", "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("InitBeads error = %v, want one naming %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// An adopted rig's beads files are its own database (gt-3lvcjz.16): InitBeads
+// runs bd init at the rig root against them and writes no redirect, neither in
+// <rig>/.beads, which would point the database at itself, nor under mayor/rig,
+// which a tracked rig may not have.
+func TestInitBeads_AdoptedBeads_InitsWithoutRedirect(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	rigBeads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	for name, body := range map[string]string{
+		"config.yaml":      "issue-prefix: tk\n",
+		"metadata.json":    "{}\n",
+		adoptedBeadsMarker: "",
+	} {
+		if err := os.WriteFile(filepath.Join(rigBeads, name), []byte(body), 0644); err != nil {
+			t.Fatalf("writing adopted %s: %v", name, err)
+		}
+	}
+
+	manager, _, bd := testManager("", nil)
+	if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
+		t.Fatalf("InitBeads: %v", err)
+	}
+
+	var initAtRoot bool
+	for _, c := range bd.recorded() {
+		if c.Verb == "init" && c.Dir == rigPath {
+			initAtRoot = true
+		}
+	}
+	if !initAtRoot {
+		t.Errorf("bd init did not run at the rig root; calls:\n%s", strings.Join(bd.argvs(), "\n"))
+	}
+	for _, redirect := range []string{
+		filepath.Join(rigBeads, "redirect"),
+		filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect"),
+	} {
+		if _, err := os.Stat(redirect); !os.IsNotExist(err) {
+			t.Errorf("%s = %v, want no redirect", redirect, err)
+		}
+	}
+}
+
+// An untracked rig's own metadata.json at <rig>/.beads is not an adopted
+// database: without the adoption marker InitBeads keeps the mayor redirect, so
+// the untracked path still writes mayor/rig/.beads/redirect (gt-3lvcjz.16).
+func TestInitBeads_MetadataWithoutAdoptionMarkerKeepsMayorRedirect(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	rigBeads := filepath.Join(rigPath, ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte("{}\n"), 0644); err != nil {
+		t.Fatalf("writing metadata.json: %v", err)
+	}
+
+	manager, _, _ := testManager("", nil)
+	if err := manager.InitBeads(rigPath, "tk", ""); err != nil {
+		t.Fatalf("InitBeads: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(rigPath, "mayor", "rig", ".beads", "redirect"))
+	if err != nil {
+		t.Fatalf("reading mayor redirect: %v; want the untracked path to write it", err)
+	}
+	if string(got) != "../../.beads\n" {
+		t.Errorf("mayor redirect = %q, want %q", got, "../../.beads\n")
 	}
 }
 
@@ -1816,62 +1953,199 @@ func TestAddRig_FinishesWithoutAMayorClone(t *testing.T) {
 	}
 }
 
-// A repo that tracks .beads/ adopts its database through the mayor clone
-// (InitBeads points the rig's .beads/redirect at mayor/rig/.beads), so a clone
-// git refuses there fails the add rather than leaving a rig that quietly runs
-// its own database beside the repo's (gt-jmqc5).
-func TestAddRig_RefusesATrackedBeadsRepoWithoutAMayorClone(t *testing.T) {
+// trackedBeadsRepo is a source repo whose default branch tracks the two beads
+// files a rig adopts.
+func trackedBeadsRepo(t *testing.T, f *gitfake.Fake, name, prefix string) string {
+	t.Helper()
+	return remoteRepo(t, f, filepath.Join(t.TempDir(), name), map[string]string{
+		".beads/config.yaml":   "prefix: " + prefix + "\n\n",
+		".beads/metadata.json": `{"database":"beads_` + prefix + `"}` + "\n",
+	})
+}
+
+// A repo that tracks .beads/ hands its files to the rig: they land in
+// <rig>/.beads, and no redirect is written into either beads directory
+// (gt-3lvcjz.16). The bytes are checked at the adopt step, TestAdoptTrackedBeads:
+// later steps of the add rewrite the copy.
+func TestAddRig_AdoptsTrackedBeadsFilesIntoRigBeads(t *testing.T) {
 	t.Parallel()
 	root, rigsConfig := setupTestTown(t)
 	manager, f, _ := testManager(root, rigsConfig)
 
-	tracked := func(name, prefix string) string {
-		return remoteRepo(t, f, filepath.Join(t.TempDir(), name), map[string]string{
-			".beads/config.yaml":   "prefix: " + prefix + "\n",
-			".beads/metadata.json": `{"database":"beads_` + prefix + `"}`,
-		})
-	}
-	redirect := func(name string) string {
-		data, err := os.ReadFile(filepath.Join(root, name, ".beads", "redirect"))
-		if err != nil {
-			return ""
-		}
-		return strings.TrimSpace(string(data))
-	}
-
-	// The same repo adds with a clone: the refusal is what fails, not the rig.
 	if _, err := manager.AddRig(AddRigOptions{
 		Name:          "tracked",
-		GitURL:        tracked("withclone", "tk"),
+		GitURL:        trackedBeadsRepo(t, f, "tracked", "tk"),
 		BeadsPrefix:   "tk",
 		SkipDoltCheck: true,
 	}); err != nil {
-		t.Fatalf("AddRig with a mayor clone: %v", err)
-	}
-	if got := redirect("tracked"); got != "mayor/rig/.beads" {
-		t.Errorf("rig added with a clone: .beads/redirect = %q, want the clone's tracked beads", got)
+		t.Fatalf("AddRig: %v", err)
 	}
 
+	rigBeads := filepath.Join(root, "tracked", ".beads")
+	for _, name := range []string{"config.yaml", "metadata.json"} {
+		if _, err := os.Stat(filepath.Join(rigBeads, name)); err != nil {
+			t.Errorf("rig has no adopted %s: %v", name, err)
+		}
+	}
+	// The adopted config.yaml is the repo's "prefix: tk" bytes until the rig
+	// setup rewrites it: the issue-prefix step is the rewrite the rig keeps.
+	config, err := os.ReadFile(filepath.Join(rigBeads, "config.yaml"))
+	if err != nil {
+		t.Fatalf("reading config.yaml: %v", err)
+	}
+	if !strings.Contains(string(config), "issue-prefix: tk\n") {
+		t.Errorf("config.yaml after the add = %q, want the issue-prefix step's rewrite", config)
+	}
+	for _, dir := range []string{rigBeads, filepath.Join(root, "tracked", "mayor", "rig", ".beads")} {
+		if _, err := os.Stat(filepath.Join(dir, "redirect")); !os.IsNotExist(err) {
+			t.Errorf("%s/redirect = %v, want no redirect", dir, err)
+		}
+	}
+}
+
+// Without the mayor clone a tracked repo still adds: its beads files come from
+// the bare repo, not through a working tree.
+func TestAddRig_TrackedBeadsWithoutAMayorClone(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
 	manager.git = mayorCloneRefused{manager.git}
-	_, err := manager.AddRig(AddRigOptions{
-		Name:          "trackedless",
-		GitURL:        tracked("cloneless", "tl"),
+
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "cloneless",
+		GitURL:        trackedBeadsRepo(t, f, "cloneless", "tl"),
 		BeadsPrefix:   "tl",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig with a refused mayor clone: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(root, "cloneless", "mayor", "rig", ".git")); !os.IsNotExist(err) {
+		t.Errorf("mayor clone = %v, want the rig to have none", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "cloneless", ".beads", "metadata.json")); err != nil {
+		t.Errorf("rig has no adopted metadata.json: %v", err)
+	}
+	if _, ok := rigsConfig.Rigs["cloneless"]; !ok {
+		t.Error("rig was not registered in rigs.json")
+	}
+}
+
+// The prefix is the one config.yaml names, so an --prefix that disagrees is
+// refused, and one that matches or is absent is not (gt-3lvcjz.16).
+func TestAddRig_TrackedBeadsPrefix(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		prefix    string
+		wantErr   string
+		wantAdopt string
+	}{
+		"no --prefix takes the detected prefix": {"", "", "tk"},
+		"matching --prefix":                     {"tk", "", "tk"},
+		"mismatched --prefix is refused":        {"zz", "prefix mismatch", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root, rigsConfig := setupTestTown(t)
+			manager, f, _ := testManager(root, rigsConfig)
+			_, err := manager.AddRig(AddRigOptions{
+				Name:          "pfx",
+				GitURL:        trackedBeadsRepo(t, f, "pfx", "tk"),
+				BeadsPrefix:   tc.prefix,
+				SkipDoltCheck: true,
+			})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("AddRig error = %v, want it to name %q", err, tc.wantErr)
+				}
+				if _, err := os.Stat(filepath.Join(root, "pfx")); !os.IsNotExist(err) {
+					t.Errorf("rig directory = %v, want the failed add rolled back", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("AddRig: %v", err)
+			}
+			cfg, err := LoadRigConfig(filepath.Join(root, "pfx"))
+			if err != nil {
+				t.Fatalf("LoadRigConfig: %v", err)
+			}
+			if cfg.Beads == nil || cfg.Beads.Prefix != tc.wantAdopt {
+				t.Errorf("rig prefix = %+v, want %q", cfg.Beads, tc.wantAdopt)
+			}
+		})
+	}
+}
+
+// A tracked beads file that cannot be read fails the add and leaves no rig
+// behind: it is not taken for an untracked repo (gt-3lvcjz.16).
+func TestAddRig_UnreadableTrackedBeadsFailsTheAdd(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	openRepo := manager.openRepo
+	manager.openRepo = func(gitDir, workDir string) Repo {
+		return unreadableBeadsFile{openRepo(gitDir, workDir)}
+	}
+
+	_, err := manager.AddRig(AddRigOptions{
+		Name:          "unreadable",
+		GitURL:        trackedBeadsRepo(t, f, "unreadable", "ur"),
+		BeadsPrefix:   "ur",
 		SkipDoltCheck: true,
 	})
 	if err == nil {
-		t.Fatal("AddRig succeeded, want a failure: this repo's tracked .beads/ is read through the clone")
+		t.Fatal("AddRig succeeded, want the unreadable .beads/ file to fail the add")
 	}
-	for _, want := range []string{".beads/", "tracks", "refused the clone"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error = %q, want it to name %q", err, want)
-		}
+	if !strings.Contains(err.Error(), ".beads/") {
+		t.Errorf("error = %q, want it to name .beads/", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "trackedless")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(root, "unreadable")); !os.IsNotExist(err) {
 		t.Errorf("rig directory = %v, want the failed add rolled back", err)
 	}
-	if _, ok := rigsConfig.Rigs["trackedless"]; ok {
+	if _, ok := rigsConfig.Rigs["unreadable"]; ok {
 		t.Error("rig was registered in rigs.json despite the failed add")
+	}
+}
+
+// An untracked repo's beads init runs through InitBeads, and its refusal of a
+// bad prefix fails the add by name (gt-3lvcjz.16).
+func TestAddRig_InvalidPrefixFailsTheBeadsInit(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+
+	_, err := manager.AddRig(AddRigOptions{
+		Name:          "badprefix",
+		GitURL:        remoteRepo(t, f, filepath.Join(t.TempDir(), "badprefix"), nil),
+		BeadsPrefix:   "9x",
+		SkipDoltCheck: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "initializing beads") {
+		t.Fatalf("AddRig error = %v, want the beads init to refuse prefix 9x", err)
+	}
+}
+
+// mayorCloneNeeded names only the reasons a rig cannot be added without its
+// clone: --sparse-checkout. A tracked .beads/ is not one: its files are adopted
+// from the bare repo, which TestAddRig_TrackedBeadsWithoutAMayorClone drives
+// (gt-3lvcjz.16).
+func TestMayorCloneNeeded(t *testing.T) {
+	t.Parallel()
+	// mayorCloneNeeded reads only the options, so a tracked-beads row has the
+	// same input as a plain one. What proves the beads reason is gone is that
+	// the tracked add succeeds with the clone refused, in the end-to-end test.
+	for name, tc := range map[string]struct {
+		opts AddRigOptions
+		want string
+	}{
+		"no --sparse-checkout needs no clone":    {AddRigOptions{Name: "plain"}, ""},
+		"--sparse-checkout needs a clone":        {AddRigOptions{Name: "sparse", SparseCheckout: []string{"docs"}}, "--sparse-checkout configures the mayor clone"},
+		"a repo tracking .beads/ needs no clone": {AddRigOptions{Name: "tracked", GitURL: "https://example.com/tracked.git"}, ""},
+	} {
+		if got := mayorCloneNeeded(tc.opts); got != tc.want {
+			t.Errorf("%s: mayorCloneNeeded = %q, want %q", name, got, tc.want)
+		}
 	}
 }
 
@@ -1900,37 +2174,148 @@ func TestAddRig_RefusesToDropASparseCheckoutWithTheClone(t *testing.T) {
 	}
 }
 
-// TestRepoFilesTrackBeads reads a bare repo's tree for the files a beads
-// database keeps in git: no working tree holds them, and they are what decides
-// whether a rig added without a clone would run its own database (gt-jmqc5).
-func TestRepoFilesTrackBeads(t *testing.T) {
+// unreadableBeadsFile is a repository whose beads file cannot be read at all:
+// not absent, but a read that fails. The adopt must fail on it, not read it as
+// untracked (fail-open).
+type unreadableBeadsFile struct{ Repo }
+
+func (unreadableBeadsFile) ShowFileBytesAtRev(string, string) ([]byte, error) {
+	return nil, errors.New("object store unreadable")
+}
+
+// noRefFileReads is a repository that cannot read a file at a ref at all.
+type noRefFileReads struct{ Repo }
+
+// TestAdoptTrackedBeads adopts a bare repo's tracked beads files into a rig's
+// beads directory. The bytes are the repo's own, the trailing newline included,
+// and a read that fails writes nothing (gt-3lvcjz.16).
+func TestAdoptTrackedBeads(t *testing.T) {
 	t.Parallel()
 	root, rigsConfig := setupTestTown(t)
 	manager, f, _ := testManager(root, rigsConfig)
 	withBeads := remoteRepo(t, f, filepath.Join(t.TempDir(), "withbeads"), map[string]string{
-		".beads/config.yaml": "prefix: wb\n",
+		".beads/config.yaml":   "prefix: wb\n\n",
+		".beads/metadata.json": "{}\n",
 	})
 	withoutBeads := remoteRepo(t, f, filepath.Join(t.TempDir(), "withoutbeads"), nil)
+	bareOf := func(url string) Repo {
+		bare := filepath.Join(t.TempDir(), ".repo.git")
+		if err := manager.git.CloneBareWithBranch(url, bare, "main"); err != nil {
+			t.Fatalf("CloneBareWithBranch(%s): %v", url, err)
+		}
+		return manager.openGitDir(bare, "")
+	}
 
 	for name, tc := range map[string]struct {
-		url  string
-		want bool
+		repo        Repo
+		wantTracked bool
+		wantFiles   map[string]string
+		// setup makes the beads directory's path unwritable before the adopt.
+		setup func(t *testing.T, dir string)
+		// wantErr is an adopt that fails; wantNoDir also checks that the failed
+		// read wrote nothing.
+		wantErr   bool
+		wantNoDir bool
 	}{
-		"tracks .beads/": {withBeads, true},
-		"no .beads/":     {withoutBeads, false},
+		"tracks .beads/": {
+			repo:        bareOf(withBeads),
+			wantTracked: true,
+			wantFiles: map[string]string{
+				"config.yaml":      "prefix: wb\n\n",
+				"metadata.json":    "{}\n",
+				adoptedBeadsMarker: "",
+			},
+		},
+		"no .beads/": {
+			repo:        bareOf(withoutBeads),
+			wantTracked: false,
+		},
+		"unreadable file fails before writing": {
+			repo:      unreadableBeadsFile{bareOf(withBeads)},
+			wantErr:   true,
+			wantNoDir: true,
+		},
+		"repo that cannot read at a ref fails": {
+			repo:    noRefFileReads{bareOf(withBeads)},
+			wantErr: true,
+		},
+		"beads directory that cannot be created fails": {
+			repo: bareOf(withBeads),
+			// The rig path is a file, so the directory beneath it cannot exist.
+			setup: func(t *testing.T, dir string) {
+				if err := os.WriteFile(filepath.Dir(dir), []byte("not a directory"), 0644); err != nil {
+					t.Fatalf("writing the blocking file: %v", err)
+				}
+			},
+			wantErr: true,
+		},
+		"beads file that cannot be written fails": {
+			repo: bareOf(withBeads),
+			// A directory where config.yaml goes makes that write fail.
+			setup: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, "config.yaml"), 0755); err != nil {
+					t.Fatalf("making the blocking directory: %v", err)
+				}
+			},
+			wantErr: true,
+		},
+		"adopted marker that cannot be written fails": {
+			repo: bareOf(withBeads),
+			// The copied files are written first; a directory where the marker
+			// goes makes only the marker write fail.
+			setup: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, adoptedBeadsMarker), 0755); err != nil {
+					t.Fatalf("making the blocking directory: %v", err)
+				}
+			},
+			wantErr: true,
+		},
 	} {
-		bare := filepath.Join(t.TempDir(), ".repo.git")
-		if err := manager.git.CloneBareWithBranch(tc.url, bare, "main"); err != nil {
-			t.Fatalf("%s: CloneBareWithBranch: %v", name, err)
-		}
-		got, err := repoFilesTrackBeads(manager.openGitDir(bare, ""), "main")
-		if err != nil {
-			t.Errorf("%s: repoFilesTrackBeads: %v", name, err)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("repoFilesTrackBeads(%s) = %v, want %v", name, got, tc.want)
-		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := filepath.Join(t.TempDir(), "rig", ".beads")
+			if tc.setup != nil {
+				tc.setup(t, dir)
+			}
+			tracked, err := adoptTrackedBeads(tc.repo, "main", dir)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("adoptTrackedBeads succeeded, want an error")
+				}
+				if _, statErr := os.Stat(dir); tc.wantNoDir && !os.IsNotExist(statErr) {
+					t.Errorf("beads dir = %v, want nothing written on a failed read", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("adoptTrackedBeads: %v", err)
+			}
+			if tracked != tc.wantTracked {
+				t.Errorf("adoptTrackedBeads tracked = %v, want %v", tracked, tc.wantTracked)
+			}
+			if !tc.wantTracked {
+				if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+					t.Errorf("beads dir = %v, want no directory for an untracked repo", statErr)
+				}
+				return
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("reading beads dir: %v", err)
+			}
+			if len(entries) != len(tc.wantFiles) {
+				t.Errorf("beads dir has %d entries, want %d", len(entries), len(tc.wantFiles))
+			}
+			for file, want := range tc.wantFiles {
+				got, err := os.ReadFile(filepath.Join(dir, file))
+				if err != nil {
+					t.Fatalf("reading %s: %v", file, err)
+				}
+				if string(got) != want {
+					t.Errorf("%s = %q, want the source repo's bytes %q", file, got, want)
+				}
+			}
+		})
 	}
 }
 
@@ -2058,15 +2443,19 @@ func TestAddRig_TrackedBeadsWithSyncRemote_PassesReinitFlags(t *testing.T) {
 		t.Fatalf("AddRig: %v", err)
 	}
 
-	mayorRig := filepath.Join(root, "testrip", "mayor", "rig")
+	// The first bd init at the rig root is the adopt's workspace init, the one
+	// that carries the reinit flags. InitBeads runs a Force init after it, which
+	// takes no reinit flags, so the last init is not the one under test.
+	rigPath := filepath.Join(root, "testrip")
 	var sourceInit *beads.InitOptions
 	for _, c := range bd.withVerb("init") {
-		if c.Dir == mayorRig {
+		if c.Dir == rigPath {
 			sourceInit = &c.Init
+			break
 		}
 	}
 	if sourceInit == nil {
-		t.Fatalf("no bd init in the mayor clone; calls:\n%s", strings.Join(bd.argvs(), "\n"))
+		t.Fatalf("no bd init at the rig root; calls:\n%s", strings.Join(bd.argvs(), "\n"))
 	}
 	if !sourceInit.ReinitLocal || !sourceInit.DiscardRemote || sourceInit.DestroyToken != "DESTROY-gt" || !sourceInit.SkipAgents {
 		t.Errorf("bd init options = %+v, want reinit-local, discard-remote, destroy token DESTROY-gt, skip-agents", *sourceInit)
