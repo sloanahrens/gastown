@@ -1672,6 +1672,33 @@ const (
 	HMSyncDefaultCommand  = "hm"
 )
 
+// IntervalDuration returns how often the patrol runs, or the refusal for a
+// value it cannot schedule: an empty setting is the default, and a value that
+// is not a positive Go duration is refused rather than read as the default.
+// The decoder and the daemon both read the setting through this method, so a
+// config built in code is judged the way a decoded file is.
+func (c *HMSyncConfig) IntervalDuration() (time.Duration, error) {
+	var raw string
+	if c != nil {
+		raw = c.Interval
+	}
+	return patrolInterval("patrols.hm_sync.interval", raw, HMSyncDefaultInterval)
+}
+
+// patrolInterval parses the interval a patrol's block spells, or the default
+// when the block names none, and refuses a value the patrol cannot schedule
+// rather than read it as the default.
+func patrolInterval(key, raw, defaultText string) (time.Duration, error) {
+	if raw == "" {
+		raw = defaultText
+	}
+	every, err := time.ParseDuration(raw)
+	if err != nil || every <= 0 {
+		return 0, fmt.Errorf("%s = %q: want a positive Go duration such as %q", key, raw, defaultText)
+	}
+	return every, nil
+}
+
 // UnmarshalJSON decodes the patrol's block strictly, refusing an interval the
 // patrol cannot schedule: a mistyped one must not read as the default, or the
 // town would run hm on a cadence it never asked for.
@@ -1686,13 +1713,11 @@ func (c *HMSyncConfig) UnmarshalJSON(data []byte) error {
 	if err := dec.Decode(&p); err != nil {
 		return fmt.Errorf("patrols.hm_sync: %w", err)
 	}
-	if p.Interval != "" {
-		every, err := time.ParseDuration(p.Interval)
-		if err != nil || every <= 0 {
-			return fmt.Errorf("patrols.hm_sync.interval = %q: want a positive Go duration such as %q", p.Interval, HMSyncDefaultInterval)
-		}
+	decoded := HMSyncConfig(p)
+	if _, err := decoded.IntervalDuration(); err != nil {
+		return err
 	}
-	*c = HMSyncConfig(p)
+	*c = decoded
 	return nil
 }
 
@@ -1726,6 +1751,19 @@ const (
 	CloudCheckDefaultKeyFile = "/var/run/secrets/gt-cloud-check/key.json"
 )
 
+// IntervalDuration returns how often the patrol runs, or the refusal for a
+// value it cannot schedule: an empty setting is the default, and a value that
+// is not a positive Go duration is refused rather than read as the default.
+// The decoder and the daemon both read the setting through this method, so a
+// config built in code is judged the way a decoded file is.
+func (c *CloudCheckConfig) IntervalDuration() (time.Duration, error) {
+	var raw string
+	if c != nil {
+		raw = c.Interval
+	}
+	return patrolInterval("patrols.cloud_check.interval", raw, CloudCheckDefaultInterval)
+}
+
 // UnmarshalJSON decodes the patrol's block strictly, refusing an interval the
 // patrol cannot schedule: a mistyped one must not read as the default, or the
 // town would run the check on a cadence it never asked for.
@@ -1740,13 +1778,11 @@ func (c *CloudCheckConfig) UnmarshalJSON(data []byte) error {
 	if err := dec.Decode(&p); err != nil {
 		return fmt.Errorf("patrols.cloud_check: %w", err)
 	}
-	if p.Interval != "" {
-		every, err := time.ParseDuration(p.Interval)
-		if err != nil || every <= 0 {
-			return fmt.Errorf("patrols.cloud_check.interval = %q: want a positive Go duration such as %q", p.Interval, CloudCheckDefaultInterval)
-		}
+	decoded := CloudCheckConfig(p)
+	if _, err := decoded.IntervalDuration(); err != nil {
+		return err
 	}
-	*c = CloudCheckConfig(p)
+	*c = decoded
 	return nil
 }
 

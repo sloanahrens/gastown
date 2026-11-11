@@ -26,10 +26,6 @@ import (
 )
 
 const (
-	// cloudCheckDefaultInterval is the run interval when the town names none:
-	// the ten minutes the Mac plugin ran on (gt-im2c8).
-	cloudCheckDefaultInterval = 10 * time.Minute
-
 	// cloudCheckRunTimeout bounds one check. The binary probes one URL per app
 	// and reads the control cluster through kubectl, each with its own timeout,
 	// so a run still going after five minutes is stuck rather than slow.
@@ -135,21 +131,10 @@ func cloudCheckSettings(cfg *DaemonPatrolConfig) *agentconfig.CloudCheckConfig {
 }
 
 // cloudCheckInterval returns how often the patrol runs, or the refusal for a
-// setting it cannot schedule. An empty setting is the default. A value that is
-// not a positive Go duration is refused, never read as the default: decoding
-// refuses one from the config file, and this is the same refusal for a config
-// built in code.
+// setting it cannot schedule. The default and the refusal are the config
+// block's, so a config built in code is judged the way a decoded file is.
 func cloudCheckInterval(cfg *DaemonPatrolConfig) (time.Duration, error) {
-	c := cloudCheckSettings(cfg)
-	if c == nil || c.Interval == "" {
-		return cloudCheckDefaultInterval, nil
-	}
-	every, err := time.ParseDuration(c.Interval)
-	if err != nil || every <= 0 {
-		return 0, fmt.Errorf("patrols.cloud_check.interval = %q: want a positive Go duration such as %q",
-			c.Interval, agentconfig.CloudCheckDefaultInterval)
-	}
-	return every, nil
+	return cloudCheckSettings(cfg).IntervalDuration()
 }
 
 // cloudCheckCommand returns the program the patrol runs, or the default when the

@@ -189,8 +189,7 @@ func TestHMSyncRunsTheConfiguredCommand(t *testing.T) {
 }
 
 // TestHMSyncDefaultsItsIntervalAndCommand: a town that sets only enabled gets
-// a 30m interval and the hm command, and the schema's default interval is the
-// one the patrol runs on.
+// a 30m interval and the hm command, and the patrol's default is the schema's.
 func TestHMSyncDefaultsItsIntervalAndCommand(t *testing.T) {
 	t.Parallel()
 
@@ -198,14 +197,10 @@ func TestHMSyncDefaultsItsIntervalAndCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("config.HMSyncDefaultInterval %q is not a duration: %v", agentconfig.HMSyncDefaultInterval, err)
 	}
-	if def != hmSyncDefaultInterval {
-		t.Fatalf("config.HMSyncDefaultInterval = %v, the patrol runs on %v: the two defaults disagree",
-			def, hmSyncDefaultInterval)
-	}
 
 	d, _, f := hmSyncTestDaemon(t, hmSyncConfig(true, "", ""))
-	if got, err := hmSyncInterval(d.patrolConfig); err != nil || got != hmSyncDefaultInterval {
-		t.Errorf("interval = %v, %v, want the default %v and no error", got, err, hmSyncDefaultInterval)
+	if got, err := hmSyncInterval(d.patrolConfig); err != nil || got != def {
+		t.Errorf("interval = %v, %v, want the default %v and no error", got, err, def)
 	}
 	if got := hmSyncCommand(d.patrolConfig); got != "hm" {
 		t.Errorf("command = %q, want hm", got)
@@ -279,7 +274,11 @@ func TestHMSyncInvalidIntervalIsRefused(t *testing.T) {
 
 			// A whole default interval later the setting is still refused: no
 			// tick may fall back to the default the town did not ask for.
-			f.now = f.now.Add(hmSyncDefaultInterval)
+			def, err := time.ParseDuration(agentconfig.HMSyncDefaultInterval)
+			if err != nil {
+				t.Fatalf("config.HMSyncDefaultInterval %q is not a duration: %v", agentconfig.HMSyncDefaultInterval, err)
+			}
+			f.now = f.now.Add(def)
 			d.runHMSync()
 			if len(f.calls) != 0 {
 				t.Fatalf("ran %v a default interval later, want no sync", f.calls)
