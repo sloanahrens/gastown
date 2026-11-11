@@ -370,3 +370,92 @@ func TestReadFailsOnMissingLedger(t *testing.T) {
 		t.Errorf("missing ledger: err = %v, want a not-exist error", err)
 	}
 }
+
+// faultyFile is an open file whose named operations fail.
+type faultyFile struct {
+	File
+	failStat, failSeek, failRead, failClose bool
+}
+
+var errInjected = errors.New("injected failure")
+
+func (f faultyFile) Stat() (fs.FileInfo, error) {
+	if f.failStat {
+		return nil, errInjected
+	}
+	return f.File.Stat()
+}
+
+func (f faultyFile) Seek(offset int64, whence int) (int64, error) {
+	if f.failSeek {
+		return 0, errInjected
+	}
+	return f.File.Seek(offset, whence)
+}
+
+func (f faultyFile) Read(p []byte) (int, error) {
+	if f.failRead {
+		return 0, errInjected
+	}
+	return f.File.Read(p)
+}
+
+func (f faultyFile) Close() error {
+	if err := f.File.Close(); err != nil {
+		return err
+	}
+	if f.failClose {
+		return errInjected
+	}
+	return nil
+}
+
+// A failure at any step of a watcher file read is the read's error, never a
+// report built from part of the file, and a missing events log is not one.
+func TestReadFailuresAreErrors(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	ledger := filepath.Join(dir, "balance.log")
+	if err := os.WriteFile(ledger, []byte("2026-11-09T01:12:00 balance=51.50\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eventsIsDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(eventsIsDir, "events.log"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		fault  faultyFile
+		events string
+	}{
+		"stat fails":                {fault: faultyFile{failStat: true}},
+		"seek fails":                {fault: faultyFile{failSeek: true}},
+		"read fails":                {fault: faultyFile{failRead: true}},
+		"close fails":               {fault: faultyFile{failClose: true}},
+		"events log is a directory": {events: filepath.Join(eventsIsDir, "events.log")},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			open := func(name string) (File, error) {
+				f, err := OpenFile(name)
+				if err != nil {
+					return nil, err
+				}
+				if name != ledger {
+					return f, nil
+				}
+				fault := tc.fault
+				fault.File = f
+				return fault, nil
+			}
+			events := filepath.Join(dir, "events.log")
+			if tc.events != "" {
+				events = tc.events
+			}
+			reader := NewReader(ledger, events, loc, Constants{}, DefaultDays, open)
+			if _, err := reader.Report(time.Now()); err == nil {
+				t.Error("Report returned no error for a failed read")
+			}
+		})
+	}
+}
