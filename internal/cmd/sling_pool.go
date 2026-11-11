@@ -569,7 +569,8 @@ func poolHookHeldFor(townRoot string) polecatHookHeldFunc {
 // that read came back empty and the pool counted those seats on the wrong
 // class (gt-5h87d7). A record that names no agent leaves the agent empty,
 // which the roster counts as unrecorded rather than on a class the record does
-// not name.
+// not name. A record that cannot be read fails the listing with its error, so
+// the occupancy read refuses instead of counting the seat on no class.
 //
 // disposition is the polecat's own bead state (poolDispositionFor); a nil one
 // fails open. now stands in for a session whose creation time tmux cannot
@@ -610,7 +611,10 @@ func listPolecatSessionsWith(t sessionLister, seatAgent poolSeatAgentFunc, dispo
 		// A role that names no seat names no record to read either.
 		agent := ""
 		if ok {
-			agent = poolSeatAgent(seatAgent, rigName, polecatName)
+			agent, err = poolSeatAgent(seatAgent, rigName, polecatName)
+			if err != nil {
+				return nil, fmt.Errorf("reading the agent of %s/%s from its seat record: %w", rigName, polecatName, err)
+			}
 		}
 		out = append(out, poolSession{name: n, agent: agent, created: created, rig: rigName, polecat: polecatName})
 	}

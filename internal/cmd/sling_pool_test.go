@@ -298,7 +298,7 @@ func TestListPolecatSessionsExcludesDoneWithOpenMR(t *testing.T) {
 // subject is not where the agent came from. A seat the map does not name has no
 // recorded agent, as one with no record does.
 func seatAgentAnswering(agents map[string]string) poolSeatAgentFunc {
-	return func(rigName, polecatName string) string { return agents[rigName+"/"+polecatName] }
+	return func(rigName, polecatName string) (string, error) { return agents[rigName+"/"+polecatName], nil }
 }
 
 // TestListPolecatSessionsExcludesFinishedSeatWithPreservedCommits pins gt-b9ud0:

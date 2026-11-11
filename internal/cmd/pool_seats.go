@@ -792,41 +792,47 @@ func slungAgent(rec intent.Record, fallback string) string {
 
 // poolSeatAgentFunc reads the agent a seat's record names. It is the pool's one
 // read of that fact for a live seat too: a sandboxed seat's GT_AGENT cannot be
-// read from the host, while the record outlives any session (gt-5h87d7).
-type poolSeatAgentFunc func(rigName, polecatName string) string
+// read from the host, while the record outlives any session (gt-5h87d7). A
+// record that cannot be read is an error, never an empty agent.
+type poolSeatAgentFunc func(rigName, polecatName string) (string, error)
 
 // poolSeatAgentFor is the seat-record read a caller in townRoot wants, or nil
 // when there is no town to read (a test), which leaves every seat unrecorded.
 //
-// The read is best-effort, as the dead-hooked seat's is: it decides only which
-// seat the polecat is counted against, never whether it counts. A record that
-// cannot be read names no agent, so the seat is counted on no class and the
-// roster names it as unrecorded — never on a class its record does not say.
+// The read fails closed. A seat whose record cannot be read has an unknown
+// class, and counting it on no class would let the pool sling past its cap, so
+// the error refuses the occupancy read. A record that names no agent is not an
+// error: the seat is counted as unrecorded, never on a class its record does
+// not say.
 func poolSeatAgentFor(townRoot string) poolSeatAgentFunc {
 	if townRoot == "" {
 		return nil
 	}
-	return func(rigName, polecatName string) string {
+	return func(rigName, polecatName string) (string, error) {
 		return seatRecordAgent(townRoot, rigName, polecatName)
 	}
 }
 
 // poolSeatAgent answers one seat's agent through a reader that may be nil: a
 // caller with no town to read counts the seat as unrecorded.
-func poolSeatAgent(read poolSeatAgentFunc, rigName, polecatName string) string {
+func poolSeatAgent(read poolSeatAgentFunc, rigName, polecatName string) (string, error) {
 	if read == nil {
-		return ""
+		return "", nil
 	}
 	return read(rigName, polecatName)
 }
 
-// seatRecordAgent is the agent a seat's intent record names, or "" when the
-// record names none or cannot be read. A sling records it there (MarkSlung),
-// and it outlives the session that sling starts, so it is the one source both
-// the pool count and the seat inventory read (gt-5h87d7).
-func seatRecordAgent(townRoot, rigName, polecatName string) string {
-	rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
-	return strings.TrimSpace(rec.Agent)
+// seatRecordAgent is the agent a seat's intent record names: "" when the record
+// names none or does not exist, and an error when it cannot be read. A sling
+// records it there (MarkSlung), and it outlives the session that sling starts,
+// so it is the one source both the pool count and the seat inventory read
+// (gt-5h87d7).
+func seatRecordAgent(townRoot, rigName, polecatName string) (string, error) {
+	rec, err := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(rec.Agent), nil
 }
 
 // polecatStarter is the one SessionManager verb restartPolecatOnSlungAgent
