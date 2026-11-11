@@ -299,27 +299,27 @@ func (l *Lander) compactQueue(rig string, existing []ExistingFollowup) []string 
 // carrying the queue past it (gt-4ty22). It returns the beads it filed, the
 // findings the bound held back, and the lines it wants logged.
 func (l *Lander) fileFollowupBeads(w Work, res Result, fresh []FollowupCandidate, existing []ExistingFollowup) (filed []ExistingFollowup, held []FollowupCandidate, lines []string) {
-	groups := followupGroups(fresh)
+	plans := FollowupPlans(w, res, fresh)
 	bound := l.followupBackpressure()
 	open := openFollowups(existing)
 	var ids []string
-	for i, g := range groups {
+	for i, p := range plans {
 		if open+len(ids) >= bound {
-			for _, rest := range groups[i:] {
+			for _, rest := range plans[i:] {
 				held = append(held, rest.Findings...)
 			}
 			lines = append(lines, l.holdBack(open+len(ids), bound, len(held)))
 			break
 		}
-		spec := followupSpec(w, res, g)
+		spec := p.Spec
 		id, err := l.Followups.CreateFollowup(spec)
 		if err != nil {
-			lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(g.Findings)), err))
+			lines = append(lines, fmt.Sprintf("could not file the follow-up bead for %s (%v)", findingsPhrase(len(p.Findings)), err))
 			continue
 		}
 		ids = append(ids, id)
 		filed = append(filed, ExistingFollowup{ID: id, Title: spec.Title, Description: spec.Body, Status: "open", Labels: spec.Labels})
-		lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(g.Findings)), res.Verdict.Score))
+		lines = append(lines, fmt.Sprintf("filed %s for %s of the landing at %.2f", id, findingsPhrase(len(p.Findings)), res.Verdict.Score))
 	}
 	if len(ids) == 0 {
 		return filed, held, lines
@@ -527,6 +527,26 @@ func openFollowups(existing []ExistingFollowup) int {
 // the status as.
 func followupClosed(e ExistingFollowup) bool {
 	return strings.EqualFold(strings.TrimSpace(e.Status), "closed")
+}
+
+// FollowupPlan is one follow-up bead a landing files and the findings it
+// carries, so the held-back findings and the filed spec come from one group.
+type FollowupPlan struct {
+	Spec     FollowupSpec
+	Findings []FollowupCandidate
+}
+
+// FollowupPlans is the follow-up beads for the fresh findings of a landing, one
+// per group, in the order the feed files them. The feed files these plans, and
+// the daemon test drives its findings through the same function to the bead the
+// store holds (gt-4unmqk).
+func FollowupPlans(w Work, res Result, fresh []FollowupCandidate) []FollowupPlan {
+	groups := followupGroups(fresh)
+	plans := make([]FollowupPlan, 0, len(groups))
+	for _, g := range groups {
+		plans = append(plans, FollowupPlan{Spec: followupSpec(w, res, g), Findings: g.Findings})
+	}
+	return plans
 }
 
 // followupSpec is the one bead a group of a landing's findings files: the
