@@ -707,6 +707,44 @@ func TestFollowupBeadsFilesTheAcceptanceField(t *testing.T) {
 	}
 }
 
+// TestFollowupFindingsReachTheStoredAcceptanceField: the findings a landing earns
+// go through the feed's own spec path and the daemon's bead client, and the bead
+// the store holds carries the acceptance field its body's Acceptance section
+// lists. The two halves of gt-ejsl5v each have a test; this is the join between
+// them (gt-4unmqk).
+func TestFollowupFindingsReachTheStoredAcceptanceField(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New(beadsfake.WithPrefix("gt"))
+	var feed land.FollowupBeads = followupBeads{client: bd}
+	work := land.Work{BeadID: "gt-abc", Rig: "gastown"}
+	res := land.Result{LandedCommit: "0123abcd", Verdict: land.Verdict{Verdict: "approve", Score: 0.8}}
+	findings := []land.FollowupCandidate{
+		{ID: "3", Severity: "minor", Path: "internal/land/note.go", Line: 230, Title: "swap the nil check",
+			Detail: "internal/land/note.go:230 swap the nil check"},
+		{ID: "4", Severity: "minor", Path: "internal/land/hook.go", Title: "document the hook",
+			Detail: "internal/land/hook.go document the hook"},
+	}
+	plans := land.FollowupPlans(work, res, findings)
+	if len(plans) != 1 {
+		t.Fatalf("FollowupPlans built %d plans, want one for two findings in one package", len(plans))
+	}
+	id, err := feed.CreateFollowup(plans[0].Spec)
+	if err != nil {
+		t.Fatalf("CreateFollowup: %v", err)
+	}
+	issue, err := bd.Show(id)
+	if err != nil {
+		t.Fatalf("Show(%s): %v", id, err)
+	}
+	section := strings.TrimSpace(specdispatch.Sections(issue.Description)["acceptance"])
+	if section == "" {
+		t.Fatalf("the stored body has no acceptance section:\n%s", issue.Description)
+	}
+	if issue.AcceptanceCriteria != section {
+		t.Errorf("stored acceptance field = %q, want the body's acceptance section %q", issue.AcceptanceCriteria, section)
+	}
+}
+
 // The landing work root must never be under the town root: internal/git
 // refuses worktree targets there, which failed every landing on 2026-09-30.
 func TestLandingWorkRootIsOutsideTheTownRoot(t *testing.T) {
