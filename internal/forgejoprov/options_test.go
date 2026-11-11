@@ -3,6 +3,7 @@ package forgejoprov
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -255,7 +256,7 @@ func TestRoleScopes(t *testing.T) {
 		{"polecat", []string{"write:repository"}, true},
 		{"landing", []string{"write:repository", "read:user"}, true},
 		{"registry", []string{"write:package", "read:package"}, true},
-		{"viewer", []string{"read:repository", "read:user"}, true},
+		{"viewer", []string{"read:repository", "read:user", "read:package"}, true},
 		{"admin", nil, false},
 		{"", nil, false},
 	}
@@ -270,5 +271,26 @@ func TestRoleScopes(t *testing.T) {
 				t.Errorf("RoleScopes(%q) = %v, want %v", tc.role, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestRunbookNamesViewerScopes reads the runbook's role list and checks it names
+// the viewer's scopes exactly as the role table mints them. The runbook wraps
+// lines, so the check runs on the text with its whitespace collapsed. A runbook
+// that cannot be read fails the test rather than passing on nothing.
+func TestRunbookNamesViewerScopes(t *testing.T) {
+	t.Parallel()
+	scopes, known := RoleScopes("viewer")
+	if !known {
+		t.Fatalf("RoleScopes(viewer) reports no such role")
+	}
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "forgejo-runbook.md"))
+	if err != nil {
+		t.Fatalf("read the runbook: %v", err)
+	}
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	want := "`viewer` `" + strings.Join(scopes, ",") + "`"
+	if !strings.Contains(text, want) {
+		t.Errorf("the runbook's role list does not name the viewer's scopes: want %q", want)
 	}
 }

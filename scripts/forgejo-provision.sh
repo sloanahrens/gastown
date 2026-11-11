@@ -130,7 +130,7 @@ role_scopes() {
     polecat)  printf '["write:repository"]' ;;
     landing)  printf '["write:repository","read:user"]' ;;
     registry) printf '["write:package","read:package"]' ;;
-    viewer)   printf '["read:repository","read:user"]' ;;
+    viewer)   printf '["read:repository","read:user","read:package"]' ;;
     *) return 1 ;;
   esac
 }
