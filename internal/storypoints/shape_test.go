@@ -171,8 +171,8 @@ func TestFeaturesBacktickPath(t *testing.T) {
 
 func TestFeaturesUnknownSeatUsesMean(t *testing.T) {
 	t.Parallel()
-	if got := Features("", "gastown", SeatUnknown).IsHaiku; got != unknownSeatHaiku {
-		t.Errorf("IsHaiku for an unknown seat = %v, want the training mean %v", got, unknownSeatHaiku)
+	if got := Features("", "gastown", SeatUnknown).IsHaiku; got != trainingMeanIsHaiku {
+		t.Errorf("IsHaiku for an unknown seat = %v, want the training mean %v", got, trainingMeanIsHaiku)
 	}
 	if got := Features("", "gastown", SeatHaiku).IsHaiku; got != 1 {
 		t.Errorf("IsHaiku for the Haiku seat = %v, want 1", got)
