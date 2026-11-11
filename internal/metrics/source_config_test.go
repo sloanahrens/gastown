@@ -718,15 +718,16 @@ func TestSourceConfigDirectiveHashIgnoresTheChangelog(t *testing.T) {
 }
 
 // A directive file the town has not moved to the central layer yet is read
-// from the legacy town directory, as the prompt reader falls back to it.
+// from the central layer's legacy directory, the gastown repo's old mayor/rig
+// checkout, as the prompt reader falls back to it (gt-3lvcjz.11).
 func TestSourceConfigDirectiveHashReadsTheLegacyFallback(t *testing.T) {
 	t.Parallel()
 	settings, rigs, _, _ := configTestPaths()
 	files := map[string]string{
 		settings: `{"type": "town-settings", "version": 1}`,
 		rigs:     configRigsFixture("gastown"),
-		filepath.Join(configTestTown, "directives", "_common.md"):               "legacy policy\n",
-		filepath.Join(config.CentralDirectiveDir(configTestTown), "polecat.md"): "role policy\n",
+		filepath.Join(configTestTown, "gastown", "mayor", "rig", "directives", "_common.md"): "legacy policy\n",
+		filepath.Join(config.CentralDirectiveDir(configTestTown), "polecat.md"):              "role policy\n",
 	}
 	got, err := configSource{}.Collect(context.Background(), configTestEnv(t, files, nil, configRigList(t, `[]`)))
 	if err != nil {

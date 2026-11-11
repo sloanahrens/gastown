@@ -96,7 +96,7 @@ worker ([ADR 0004](../adr/0004-daemon-lands-work.md)).
 ├── settings/                   Town-level settings
 │   ├── config.json             Town settings (agents, themes, daemon patrols)
 │   └── escalation.json         Escalation routes and contacts
-├── gastown/mayor/rig/directives/  Central role directives, read for every rig
+├── directives/                 Central role directives (deployed copy of the gastown repo's), read for every rig
 │   └── <role>.md               Markdown injected at prime time
 ├── formula-overlays/           Town-level formula overlays
 │   └── <formula>.toml          TOML step overrides (replace/append/skip)
@@ -106,8 +106,8 @@ worker ([ADR 0004](../adr/0004-daemon-lands-work.md)).
     ├── config.json             Rig identity and beads prefix
     ├── formula-overlays/       Not read (overlays are town-wide); gt doctor flags a file here
     ├── mayor/rig/              Canonical clone (beads live here, NOT an agent)
-    │   ├── .beads/             Rig-level beads (redirected to Dolt)
-    │   └── .gastown/directives/  Rig-level role directives (override the central layer)
+    │   └── .beads/             Rig-level beads (redirected to Dolt)
+    ├── .gastown/directives/    Rig-level role directives (override the central layer)
     ├── crew/                   Crew parent
     │   └── <name>/             Human workspaces (full clones)
     └── polecats/               Polecats parent
@@ -317,19 +317,23 @@ before context files and handoff content. Operator policy that overrides formula
 instructions where they conflict.
 
 ```
-<town>/gastown/mayor/rig/directives/_common.md     # Central, every role, every rig
-<town>/gastown/mayor/rig/directives/<role>.md      # Central, one role, every rig
-<town>/<rig>/mayor/rig/.gastown/directives/_common.md   # That rig, every role
-<town>/<rig>/mayor/rig/.gastown/directives/<role>.md    # That rig, one role
+<town>/directives/_common.md                    # Central, every role, every rig
+<town>/directives/<role>.md                     # Central, one role, every rig
+<town>/<rig>/.gastown/directives/_common.md     # That rig, every role
+<town>/<rig>/.gastown/directives/<role>.md      # That rig, one role
 ```
 
-`<town>` is the town root (`~/gt` on a default install). The central layer is
-the gastown repo's own checkout, so a directive there is tracked with the code
-and lands through the landing pipeline; a rig's layer belongs to that rig's
-checkout and reaches that rig alone. A file left at a layer's legacy path
-(`<town>/directives/`, `<town>/<rig>/directives/`) is still read when the
-layer's own path holds no file of that name (gt-oz73l); the reader names each
-such file in the log once per process.
+`<town>` is the town root (`~/gt` on a default install). `<town>/directives/` is
+the deployed copy of the repo file: the gastown repo's `directives/` is the
+source, tracked with the code and landed through the landing pipeline, and the
+install writes this copy, which is never edited by hand. The per-rig overlay
+`<town>/<rig>/.gastown/directives/` lives in that rig's own repo and reaches
+that rig alone. A file left at a layer's legacy path (`<town>/gastown/mayor/rig/directives/`
+for the central layer, `<town>/<rig>/directives/` for a rig) is still read when
+the layer's own path holds no file of that name (gt-oz73l); the reader names each
+such file in the log once per process. A rig's old `<town>/<rig>/mayor/rig/.gastown/directives/`
+is no longer read: when it is there and the rig's own directory is not, the
+reader logs once, naming both paths.
 
 Every file that exists concatenates, broadest first, so the most specific
 appears last and wins conflicts: central `_common`, rig `_common`, central

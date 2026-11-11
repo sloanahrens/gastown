@@ -29,19 +29,23 @@ formula they are running.
 **File layout:**
 
 ```
-<town>/gastown/mayor/rig/directives/_common.md   # Central, every role, every rig
-<town>/<rig>/mayor/rig/.gastown/directives/_common.md  # That rig, every role
-<town>/gastown/mayor/rig/directives/<role>.md    # Central, one role, every rig
-<town>/<rig>/mayor/rig/.gastown/directives/<role>.md   # That rig, one role
+<town>/directives/_common.md                    # Central, every role, every rig
+<town>/<rig>/.gastown/directives/_common.md     # That rig, every role
+<town>/directives/<role>.md                     # Central, one role, every rig
+<town>/<rig>/.gastown/directives/<role>.md      # That rig, one role
 ```
 
-`<town>` is the town root (`~/gt` on a default install). The central layer is
-the gastown repo's own checkout, so a directive there is tracked with the code
-and lands through the landing pipeline; a rig's layer sits in that rig's
-checkout and reaches that rig alone. The pre-gt-oz73l directories
-`<town>/directives/` and `<town>/<rig>/directives/` remain a fallback: a file
-there is read only where the layer's own path has no file of that name, and the
-reader logs the legacy path once.
+`<town>` is the town root (`~/gt` on a default install). `<town>/directives/` is
+the deployed copy of the repo file: the gastown repo's `directives/` is the
+source, tracked with the code and landed through the landing pipeline, and the
+install writes this copy, which is never edited by hand. A rig's overlay
+`<town>/<rig>/.gastown/directives/` sits in that rig's own repo and reaches that
+rig alone. The pre-gt-oz73l directories `<town>/gastown/mayor/rig/directives/`
+(central) and `<town>/<rig>/directives/` (rig) remain a fallback: a file there is
+read only where the layer's own path has no file of that name, and the reader
+logs the legacy path once. A rig's old `<town>/<rig>/mayor/rig/.gastown/directives/`
+is no longer read; when it is there and the rig's own directory is not, the
+reader logs once, naming both paths.
 
 `_common.md` is reserved for policy that is not role-specific — host rules,
 testing norms. It exists so that such policy has one home rather than a copy in

@@ -114,10 +114,10 @@ func outputRoleDirectivesWith(ctx RoleContext, w io.Writer, explainEnabled, capp
 	townRoot := ctx.TownRoot
 	rigName := ctx.Rig
 
-	townPath := config.DirectiveEditPath(role, townRoot, rigName, true)
+	townPath := config.DirectiveLayerPath(role, townRoot, rigName, true)
 	rigPath := ""
 	if rigName != "" {
-		rigPath = config.DirectiveEditPath(role, townRoot, rigName, false)
+		rigPath = config.DirectiveLayerPath(role, townRoot, rigName, false)
 	}
 
 	explainf := func(format string, args ...any) {

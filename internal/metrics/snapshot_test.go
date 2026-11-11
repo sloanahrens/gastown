@@ -125,9 +125,9 @@ func regimeTestTown(town string) map[string]string {
 				"claude-opus": {"args": ["--model=haiku[1m]"]}}}`,
 		filepath.Join(town, "mayor", "rigs.json"): `{"version": 1, "rigs": {"gastown": {}, "beads": {}, "docs": {}, "mango": {}}}`,
 		// The installer's record names the build it put in place.
-		filepath.Join(town, "daemon", "install-receipts.jsonl"):                    `{"event": "installed", "commit": "abc1234def", "prev_commit": "fff0000"}` + "\n",
-		filepath.Join(town, "gastown", "mayor", "rig", "directives", "_common.md"): "shared policy\n",
-		filepath.Join(town, "gastown", "mayor", "rig", "directives", "polecat.md"): "role policy\n",
+		filepath.Join(town, "daemon", "install-receipts.jsonl"): `{"event": "installed", "commit": "abc1234def", "prev_commit": "fff0000"}` + "\n",
+		filepath.Join(town, "directives", "_common.md"):         "shared policy\n",
+		filepath.Join(town, "directives", "polecat.md"):         "role policy\n",
 		filepath.Join(town, "gastown", "settings", "config.json"): `{"type": "rig-settings", "version": 1,
 			"merge_queue": {"lint_command": "make lint", "build_command": "make build", "test_command": "make gate"}}`,
 		// docs sets a merge policy but names no gate command, so it has no gate
@@ -254,7 +254,7 @@ func TestSnapshotRegimeFieldsMissingWhenUnreadable(t *testing.T) {
 		},
 		{
 			name:         "a directive file cannot be read",
-			gaps:         []string{filepath.Join("gastown", "mayor", "rig", "directives", "polecat.md")},
+			gaps:         []string{filepath.Join("directives", "polecat.md")},
 			wantNil:      []string{"directive_hash"},
 			wantFailures: 1,
 		},
@@ -304,7 +304,7 @@ func TestSnapshotRegimeFieldsMissingWhenUnreadable(t *testing.T) {
 			name: "every regime source at once",
 			gaps: []string{
 				filepath.Join("daemon", "install-receipts.jsonl"),
-				filepath.Join("gastown", "mayor", "rig", "directives", "polecat.md"),
+				filepath.Join("directives", "polecat.md"),
 				filepath.Join("gastown", "settings", "config.json"),
 			},
 			repoErr: fs.ErrPermission,

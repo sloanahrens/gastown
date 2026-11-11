@@ -68,14 +68,38 @@ func TestDirectiveEdit_RegisteredRigStillWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("registered rig: %v", err)
 	}
-	// An edit writes the new path of the rig's layer: the rig's canonical checkout
-	// (gt-80rnu).
-	want := filepath.Join(townRoot, "myrig", "mayor", "rig", ".gastown", "directives", "polecat.md")
+	// An edit writes the new path of the rig's layer: <rig>/.gastown/directives
+	// (gt-80rnu, gt-3lvcjz.11).
+	want := filepath.Join(townRoot, "myrig", ".gastown", "directives", "polecat.md")
 	if len(opened) != 1 || opened[0] != want {
 		t.Errorf("editor opened %v, want [%s]", opened, want)
 	}
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("directive file not created: %v", err)
+	}
+}
+
+// A town-level edit refuses and writes nothing: the central layer is the deployed
+// copy of the gastown repo's directives/, so no editor opens and no directory is
+// created (gt-3lvcjz.11).
+func TestDirectiveEdit_TownLevelRefusesAndWritesNothing(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	writeTestRigsConfig(t, townRoot, "myrig")
+	var opened []string
+	err := runDirectiveEditIn(&bytes.Buffer{}, townRoot, townRoot, "myrig", "polecat", true, func(path string) error {
+		opened = append(opened, path)
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "directives/polecat.md") {
+		t.Fatalf("town-level edit error = %v, want a refusal naming the repo file", err)
+	}
+	if len(opened) != 0 {
+		t.Errorf("editor opened for a refused town-level edit: %v", opened)
+	}
+	if _, statErr := os.Stat(filepath.Join(townRoot, "directives")); !os.IsNotExist(statErr) {
+		t.Errorf("the town directory was created by a refused edit (stat err: %v)", statErr)
 	}
 }
 

@@ -21,8 +21,8 @@ var (
 // (gt-v1ln5).
 var helpLegacyFallback = fmt.Sprintf(`Legacy fallback: a legacy file stands in for the new file of its own layer,
 and is read only where that new file does not exist.
-  <townRoot>/directives/<role>.md, the central layer's predecessor, stands
-    in for %s/<role>.md.
+  <townRoot>/gastown/mayor/rig/directives/<role>.md, the central layer's
+    predecessor, stands in for %s/<role>.md.
   <townRoot>/<rig>/directives/<role>.md, the rig layer's predecessor, stands
     in for %s/<role>.md.
 The reader logs a warning naming each legacy file it reads.`, helpCentralDir, helpRigDir)

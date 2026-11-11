@@ -19,14 +19,15 @@ var directiveEditCmd = &cobra.Command{
 Creates the directory and file if they do not exist. By default, edits the
 rig-level directive (if a rig is detected) or the town-level directive.
 
-Use --town to explicitly edit the town-level directive. The town-level directive
-is the central layer in the gastown repo's checkout: an edit there is a change to
-that checkout, and it lands through the pipeline rather than taking effect at once.
+Use --town to ask for the town-level directive. That layer is the deployed copy
+of the gastown repo's directives/, so it is not edited here: the command refuses,
+names the repo file to edit, and writes nothing. Edit the repo file, then run
+'gt install' to deploy it.
 
 Examples:
   gt directive edit polecat             # Edit rig-level polecat directive
   gt directive edit crew --rig sky      # Edit sky rig crew directive
-  gt directive edit witness --town      # Edit town-level witness directive`,
+  gt directive edit witness --town      # Refused: edit directives/witness.md in the gastown repo`,
 	Args: cobra.ExactArgs(1),
 	RunE: runDirectiveEdit,
 }
@@ -67,7 +68,10 @@ func runDirectiveEditIn(out io.Writer, townRoot, cwd, explicitRig, role string, 
 		return err
 	}
 
-	path := config.DirectiveEditPath(role, townRoot, rigName, townLevel)
+	path, err := config.DirectiveEditPath(role, townRoot, rigName, townLevel)
+	if err != nil {
+		return err
+	}
 
 	// Create directory and file if needed
 	dir := filepath.Dir(path)
