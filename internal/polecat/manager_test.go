@@ -908,7 +908,11 @@ func TestReconcilePool_ReapsOrphanUnderUnresolvedTheme(t *testing.T) {
 
 	m.ReconcilePool()
 
-	if alive, _ := tm.HasSession(orphan); alive {
+	alive, err := tm.HasSession(orphan)
+	if err != nil {
+		t.Fatalf("HasSession(%s): %v", orphan, err)
+	}
+	if alive {
 		t.Errorf("orphan session %s survived reconcile under an unresolved theme", orphan)
 	}
 }
