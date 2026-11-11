@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/tiersweep"
 )
 
 // tierSweepWriteTestLog writes a tier log the sweep could have written and
@@ -684,6 +686,220 @@ func TestTierSweepBead_NamesTheFailingTests(t *testing.T) {
 	}
 	if strings.Contains(bd.created[0].Acceptance, "-run '^(TestAlpha|TestAlpha") {
 		t.Errorf("acceptance names TestAlpha twice: %q", bd.created[0].Acceptance)
+	}
+}
+
+// A failing package's bead quotes that package's own failing tests, each with
+// the first assertion line under it, and no other package's. The two logs are
+// one verbose run, where a test's output comes before its --- FAIL line, and one
+// non-verbose run, where it comes after, so both orders are read (gt-1comao).
+func TestTierSweepBead_ListsEachFailingPackagesTests(t *testing.T) {
+	t.Parallel()
+	const (
+		alpha    = "./internal/alpha"
+		beta     = "./internal/beta"
+		alphaLog = "=== RUN   TestAlphaOne\n" +
+			"    alpha_test.go:11: want 2, got 3\n" +
+			"--- FAIL: TestAlphaOne (0.00s)\n" +
+			"=== RUN   TestAlphaTwo\n" +
+			"=== RUN   TestAlphaTwo/sub\n" +
+			"    alpha_test.go:27: sub: want \"a\", got \"b\"\n" +
+			"    --- FAIL: TestAlphaTwo/sub (0.00s)\n" +
+			"--- FAIL: TestAlphaTwo (0.00s)\n" +
+			"FAIL\n" +
+			"FAIL\texample.com/alpha\t0.021s\n"
+		betaLog = "--- FAIL: TestBeta (0.00s)\n" +
+			"    beta_test.go:5: nope\n" +
+			"FAIL\n" +
+			"FAIL\texample.com/beta\t0.004s\n"
+	)
+	dir := t.TempDir()
+	for pkg, body := range map[string]string{alpha: alphaLog, beta: betaLog} {
+		if err := os.WriteFile(filepath.Join(dir, tiersweep.LogName("integration", pkg)), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stageLog := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration "+alpha+" ...\n"+
+		"    --- FAIL: TestAlphaOne (0.00s)\n"+
+		"    --- FAIL: TestAlphaTwo (0.00s)\n"+
+		"tier-sweep: integration "+beta+" ...\n"+
+		"    --- FAIL: TestBeta (0.00s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 9, Failed: 2, FailedNames: []string{alpha, beta}, Log: stageLog, LogDir: dir},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 2 {
+		t.Fatalf("created = %+v, want one bead per failing package", bd.created)
+	}
+	byPkg := map[string]string{}
+	for _, c := range bd.created {
+		if v := lintTierSweepBead(c); !v.Clean() {
+			t.Fatalf("the bead for %q fails the spec lint: %s\ndescription:\n%s", c.Title, v.ShapeNote(), c.Description)
+		}
+		for _, pkg := range []string{alpha, beta} {
+			if strings.HasSuffix(c.Title, pkg) {
+				byPkg[pkg] = c.Description
+			}
+		}
+	}
+	alphaDesc, betaDesc := byPkg[alpha], byPkg[beta]
+	for _, pair := range []string{
+		"  --- FAIL: TestAlphaOne\n      alpha_test.go:11: want 2, got 3",
+		"  --- FAIL: TestAlphaTwo\n      alpha_test.go:27: sub: want \"a\", got \"b\"",
+	} {
+		if !strings.Contains(alphaDesc, pair) {
+			t.Errorf("alpha's bead lacks %q:\n%s", pair, alphaDesc)
+		}
+	}
+	if !strings.Contains(betaDesc, "  --- FAIL: TestBeta\n      beta_test.go:5: nope") {
+		t.Errorf("beta's bead lacks its failing test and assertion:\n%s", betaDesc)
+	}
+	if strings.Contains(alphaDesc, "beta_test.go") || strings.Contains(betaDesc, "alpha_test.go") {
+		t.Errorf("a bead quotes another package's failures:\nalpha:\n%s\nbeta:\n%s", alphaDesc, betaDesc)
+	}
+	if strings.Contains(alphaDesc, "excerpt cut") {
+		t.Errorf("a package under the cap says the excerpt was cut:\n%s", alphaDesc)
+	}
+}
+
+// A unit whose logs name no failing test says why, rather than leaving the bead
+// without a reason. A unit whose log is not on disk says that instead. A unit a
+// slowcheck finding explains names no test and needs no such line (gt-1comao).
+func TestTierSweepBead_SaysWhyAUnitNamesNoTest(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/alpha"
+	for _, tc := range []struct {
+		name    string
+		log     string
+		missing bool
+		want    string
+	}{
+		{
+			name: "a log with no --- FAIL line",
+			log:  "build failed: cannot find package\n",
+			want: "no test names: runner produced no result",
+		},
+		{
+			name:    "a log that is not on disk",
+			missing: true,
+			want:    "no test names: the unit's log could not be read",
+		},
+		{
+			name: "a slowcheck finding in place of a test",
+			log:  "slowcheck: the harness gave up before it named one\n",
+			want: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			if !tc.missing {
+				if err := os.WriteFile(filepath.Join(dir, tiersweep.LogName("integration", pkg)), []byte(tc.log), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
+			d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+			red := map[string]tierSweepTierResult{
+				"integration": {Verdict: tierSweepRed, Passed: 9, Failed: 1, FailedNames: []string{pkg}, Log: stageLog, LogDir: dir},
+			}
+			d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+			if len(bd.created) != 1 {
+				t.Fatalf("created = %+v, want one bead", bd.created)
+			}
+			opts := bd.created[0]
+			if v := lintTierSweepBead(opts); !v.Clean() {
+				t.Fatalf("the bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+			}
+			if tc.want == "" {
+				if strings.Contains(opts.Description, "no test names:") {
+					t.Errorf("a finding explains the red, but the bead says no test names:\n%s", opts.Description)
+				}
+				return
+			}
+			if !strings.Contains(opts.Description, tc.want) {
+				t.Errorf("description lacks %q:\n%s", tc.want, opts.Description)
+			}
+		})
+	}
+}
+
+// The failing-test excerpt of one package is capped at tierSweepFailureLines
+// lines, and the bead says how many it cut, so a package that failed in bulk
+// does not bury the rest of its bead (gt-1comao).
+func TestTierSweepBead_FailureExcerptIsCapped(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/many"
+	var log strings.Builder
+	for i := 1; i <= 30; i++ {
+		fmt.Fprintf(&log, "=== RUN   TestMany%02d\n    many_test.go:%d: failed %d\n--- FAIL: TestMany%02d (0.00s)\n", i, i, i, i)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, tiersweep.LogName("integration", pkg)), []byte(log.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 0, Failed: 30, FailedNames: []string{pkg}, Log: stageLog, LogDir: dir},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	desc := bd.created[0].Description
+	if got := strings.Count(desc, "  --- FAIL: "); got != tierSweepFailureLines/2 {
+		t.Errorf("excerpt quotes %d failing tests, want %d (the cap is %d lines):\n%s", got, tierSweepFailureLines/2, tierSweepFailureLines, desc)
+	}
+	if !strings.Contains(desc, "  --- FAIL: TestMany20\n") || strings.Contains(desc, "TestMany21") {
+		t.Errorf("excerpt does not stop at the twentieth failing test:\n%s", desc)
+	}
+	if want := "excerpt cut at 40 lines: 20 more not shown"; !strings.Contains(desc, want) {
+		t.Errorf("description does not say the excerpt was cut (%q):\n%s", want, desc)
+	}
+}
+
+// A unit the sweep ran both tagged and untagged names no test to re-run, since no
+// one command runs both, and its bead says so instead of quoting either run's
+// failures (gt-1comao).
+func TestTierSweepBead_MixedTagsQuotesNoFailure(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/mix"
+	stageLog := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration "+pkg+" ...\n"+
+		"    --- FAIL: TestTagged (0.01s)\n"+
+		"tier-sweep: integration-docker "+pkg+" ...\n"+
+		"    --- FAIL: TestUntagged (0.01s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 9, Failed: 2, FailedNames: []string{pkg}, Log: stageLog},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	opts := bd.created[0]
+	if !strings.Contains(opts.Description, "ran both tagged and untagged") {
+		t.Errorf("description does not say the unit ran both ways:\n%s", opts.Description)
+	}
+	for _, name := range []string{"TestTagged", "TestUntagged"} {
+		if strings.Contains(opts.Description, name) || strings.Contains(opts.Acceptance, name) {
+			t.Errorf("bead names %s, which no one re-run covers:\ndescription:\n%s\nacceptance: %s", name, opts.Description, opts.Acceptance)
+		}
 	}
 }
 
