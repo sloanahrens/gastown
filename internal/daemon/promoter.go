@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"io/fs"
 	"os"
 
 	"github.com/steveyegge/gastown/internal/config"
@@ -30,9 +31,9 @@ func NewRigPromoter(townRoot, rigName string, fj *config.ForgejoConfig, repo pro
 	return newRigPromoter(townRoot, rigName, fj, repo, escalate, logf, os.Getenv, statPath)
 }
 
-// newRigPromoter is NewRigPromoter with the environment and file-existence
-// reads injected, so a test answers XDG_CONFIG_HOME and stat from fakes.
-func newRigPromoter(townRoot, rigName string, fj *config.ForgejoConfig, repo promote.Repo, escalate func(message string), logf func(format string, args ...any), getenv func(string) string, stat func(string) error) *promote.Promoter {
+// newRigPromoter is NewRigPromoter with the environment and file-info reads
+// injected, so a test answers XDG_CONFIG_HOME and stat from fakes.
+func newRigPromoter(townRoot, rigName string, fj *config.ForgejoConfig, repo promote.Repo, escalate func(message string), logf func(format string, args ...any), getenv func(string) string, stat func(string) (fs.FileInfo, error)) *promote.Promoter {
 	if fj == nil || fj.PromoteTarget == "" {
 		return nil
 	}
@@ -48,20 +49,20 @@ func newRigPromoter(townRoot, rigName string, fj *config.ForgejoConfig, repo pro
 		}
 	})
 	return &promote.Promoter{
-		Rig:      rigName,
-		Target:   fj.PromoteTarget,
-		KeyFile:  keyFile,
-		Repo:     repo,
-		LockPath: promote.LockPath(townRoot, rigName),
-		Escalate: escalate,
-		Logf:     logf,
+		Rig:               rigName,
+		Target:            fj.PromoteTarget,
+		KeyFile:           keyFile,
+		KeyFileConfigured: fj.PromoteKeyFile,
+		Repo:              repo,
+		LockPath:          promote.LockPath(townRoot, rigName),
+		Escalate:          escalate,
+		Logf:              logf,
 	}
 }
 
-// statPath is the file-existence seam promote.ResolveKeyFile reads through.
-func statPath(path string) error {
-	_, err := os.Stat(path)
-	return err
+// statPath is the file-info seam promote.ResolveKeyFile reads through.
+func statPath(path string) (fs.FileInfo, error) {
+	return os.Stat(path)
 }
 
 // RedMainStateStore is the file holding a rig's red-main state

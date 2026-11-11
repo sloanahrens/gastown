@@ -449,6 +449,32 @@ func TestPromoteKeepsTheKeyFilePathOutOfLogsAndState(t *testing.T) {
 	}
 }
 
+// TestPromoteScrubsTheConfiguredKeyPathWhenTheKeyWasSubstituted: when
+// ResolveKeyFile swapped the configured path for a config-home copy, a message
+// that names the configured path is scrubbed as well as the resolved one.
+func TestPromoteScrubsTheConfiguredKeyPathWhenTheKeyWasSubstituted(t *testing.T) {
+	t.Parallel()
+	fx := newPromoterFixture(t)
+	fx.repo.tip = "aaaa1111"
+	configured := filepath.Join(t.TempDir(), "mac", "promote-gastown.key")
+	fx.p.KeyFileConfigured = configured
+	fx.repo.pushErr = errors.New(`Load key "` + configured + `": No such file or directory`)
+
+	st := fx.p.Promote(State{}, "bbbb2222")
+	if strings.Contains(st.LastError, configured) || !strings.Contains(st.LastError, KeyPlaceholder) {
+		t.Errorf("LastError = %q, want the configured key path scrubbed", st.LastError)
+	}
+	data, err := json.Marshal(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range append(append([]string{}, fx.logs...), string(data)) {
+		if strings.Contains(line, configured) {
+			t.Errorf("recorded %q, want the configured key path scrubbed", line)
+		}
+	}
+}
+
 func TestPromoteSkipsWhileAnotherPromotionHoldsTheLock(t *testing.T) {
 	t.Parallel()
 	fx := newPromoterFixture(t)
