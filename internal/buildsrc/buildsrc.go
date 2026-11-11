@@ -70,7 +70,7 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 	}
 	// The flock is taken before the checkout is looked at, so two callers cannot
 	// both find none and clone. It is released on every return.
-	unlock, err := lockRig(ctx, filepath.Join(base, rig+".lock"), rig)
+	unlock, err := lockRig(ctx, lock.FlockTryAcquire, filepath.Join(base, rig+".lock"), rig)
 	if err != nil {
 		return "", err
 	}
@@ -98,15 +98,15 @@ func ensure(ctx context.Context, run gitFunc, townRoot, rig, rev string) (string
 	return dir, nil
 }
 
-// lockRig takes the exclusive flock at path for rig. It polls
-// lock.FlockTryAcquire every lockPollInterval rather than blocking in
-// FlockAcquire, so a ctx that ends while another holder has the lock returns
+// lockRig takes the exclusive flock at path for rig through try, which is
+// lock.FlockTryAcquire. It polls try every lockPollInterval rather than blocking
+// in FlockAcquire, so a ctx that ends while another holder has the lock returns
 // ctx's error instead of waiting for the holder.
-func lockRig(ctx context.Context, path, rig string) (func(), error) {
+func lockRig(ctx context.Context, try func(string) (func(), bool, error), path, rig string) (func(), error) {
 	ticker := time.NewTicker(lockPollInterval)
 	defer ticker.Stop()
 	for {
-		unlock, ok, err := lock.FlockTryAcquire(path)
+		unlock, ok, err := try(path)
 		if err != nil {
 			return nil, fmt.Errorf("locking the build checkout of rig %s: %w", rig, err)
 		}

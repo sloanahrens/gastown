@@ -298,3 +298,39 @@ func TestEnsureReturnsWhenItsCtxEndsWhileTheRigLockIsHeld(t *testing.T) {
 		t.Fatal("ensure still waits for the rig lock after its ctx ended")
 	}
 }
+
+// A ctx that ends while the lock wait is polling, after the holder has already
+// refused the lock, ends the wait with ctx's error. The fake try cancels the ctx
+// on its third refusal, so the cancel lands mid-poll with no sleep or deadline.
+func TestLockRigStopsPollingWhenItsCtxIsCancelledMidWait(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tries := 0
+	try := func(string) (func(), bool, error) {
+		tries++
+		if tries == 3 {
+			cancel()
+		}
+		if tries > 10 {
+			// A wait that ignores ctx keeps polling; granting the lock here makes
+			// that fail the test below instead of looping forever.
+			return func() {}, true, nil
+		}
+		return nil, false, nil
+	}
+	unlock, err := lockRig(ctx, try, "unused.lock", "gastown")
+	if unlock != nil {
+		unlock()
+		t.Fatal("lockRig returned a lock although every try was refused")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("lockRig error = %v, want one wrapping context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "gastown") {
+		t.Errorf("lockRig error %q does not name the rig", err)
+	}
+	if tries < 3 {
+		t.Errorf("lockRig tried %d times, want the cancel on the third try to be reached", tries)
+	}
+}
