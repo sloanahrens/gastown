@@ -726,6 +726,45 @@ func TestJSONLUsageNamesTheSlowTestLines(t *testing.T) {
 	}
 }
 
+// TestSlowTestsMalformedEventOverridesTheVerdicts pins the precedence the run
+// doc states: a slow-test list that cannot be read exits 2 even when a verdict
+// would exit 1, 3 or 4, so no verdict hides the runner's failure. Each row
+// exits with its verdict's code when the malformed line is removed. Mutation:
+// drop the check that returns 2 before the verdicts, and each row exits with
+// its verdict instead.
+func TestSlowTestsMalformedEventOverridesTheVerdicts(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		action string
+		args   []string
+		setup  func(h *host)
+	}{
+		{"a failed package would exit 1", "fail", nil, nil},
+		{"a tier over -max-wall would exit 3", "pass", []string{"-max-wall", "1m"}, nil},
+		{"an unwritable series would exit 4", "pass", nil, func(h *host) {
+			h.open = func(string) (io.WriteCloser, error) { return nil, errors.New("no such device") }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stream := `{"Time":"2026-11-01T14:00:00Z","Action":"pass","Package":"example.com/fx/a","Test":"TestA","Elapsed":6}` + "\n" +
+				`{"Action":5,"Package":"example.com/fx/a","Output":"secret-ish text"}` + "\n" +
+				`{"Time":"2026-11-01T14:02:00Z","Action":"` + tc.action + `","Package":"example.com/fx/a","Elapsed":7}` + "\n"
+			h := fixedHost()
+			if tc.setup != nil {
+				tc.setup(&h)
+			}
+			args := []string{"-slow-tests", "-jsonl", filepath.Join(t.TempDir(), "gate-walls.jsonl"), "-run", "r1"}
+			args = append(args, tc.args...)
+			var out, errOut bytes.Buffer
+			if code := run(args, strings.NewReader(stream), &out, &errOut, h); code != 2 {
+				t.Errorf("exit code = %d, want 2: a runner failure overrides the verdict", code)
+			}
+		})
+	}
+}
+
 // TestSlowTestsTiesGoByPackageThenName pins the order of equal walls: the
 // package first, then the test name, so one stream always prints one list.
 // Mutation: sort by elapsed alone, and the tie prints in stream order.

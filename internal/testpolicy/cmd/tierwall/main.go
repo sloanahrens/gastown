@@ -26,16 +26,16 @@
 // of the elapsed of the top-level tests that never reported pause, and parallel
 // is the package wall minus that sum, floored at 0 (gt-0vbi8h).
 //
-// -jsonl <path> -run <id> also appends one line per package to a series, so
-// "where does the gate's time go" can be read over weeks rather than from one
-// run's report (gt-u0up0). An absolute path is used as given; a relative one
-// is taken from the town root the checkout sits in, so the gate names the
-// town's series without being told where the town is. A package go test
-// served from its result cache is still recorded, with "cached": true and no
-// wall_s, because a cache hit measured nothing. The report and the exit code
-// do not change: a series the tool cannot write, or a run it finds no town
-// for, is reported on stderr and fails nothing, because the gate's verdict is
-// go test's alone.
+// -jsonl <path> -run <id> also appends one line per package to a series, and
+// one per slow test with -slow-tests, so "where does the gate's time go" can be
+// read over weeks rather than from one run's report (gt-u0up0). An absolute
+// path is used as given; a relative one is taken from the town root the
+// checkout sits in, so the gate names the town's series without being told
+// where the town is. A package go test served from its result cache is still
+// recorded, with "cached": true and no wall_s, because a cache hit measured
+// nothing. The report and the exit code do not change: a series the tool
+// cannot write, or a run it finds no town for, is reported on stderr and fails
+// nothing, because the gate's verdict is go test's alone.
 //
 // The last line of the report, `tierwall: cpus: NumCPU=<n> GOMAXPROCS=<n>
 // cgroup=<value>`, says what CPUs the run had: the count Go saw, the Go scheduler
@@ -127,10 +127,11 @@ type host struct {
 // run reads a go test -json stream from stdin and writes the report to
 // stdout. The exit code is 1 when any package or test failed, else 3 when
 // -max-wall is set and the tier is over it, else 4 when the -jsonl series could
-// not be written, else 0; 2 means the runner itself failed. A slow-test list
-// that could not be read is one such failure: it exits 2 after the report even
-// when a package failed, so the list's failure is not hidden. The series code is
-// last in that order so it never hides a verdict: the gate, which keeps go
+// not be written, else 0. 2 means the runner itself failed, and it overrides
+// all of those: a slow-test list that could not be read exits 2 after the
+// report, even when a package failed, the tier is over -max-wall, or the series
+// could not be written, so the list's failure is not hidden. The series code is
+// last among the verdicts so it never hides one: the gate, which keeps go
 // test's verdict, reads it as the alarm that the wall series is incomplete.
 func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 	fs := flag.NewFlagSet("tierwall", flag.ContinueOnError)
@@ -169,7 +170,8 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 			// The walls still print from the tolerant read below, so one bad line
 			// drops no wall. The run exits 2 once the report is out, and the list
 			// is not printed short of tests. The error names a line number, never
-			// the line, so no event text is echoed.
+			// the line, so stderr carries no event text. The tolerant read passes
+			// the raw line to stdout, as it does without -slow-tests.
 			slowErr = err
 		} else {
 			r.listSlow = true
