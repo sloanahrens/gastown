@@ -2243,7 +2243,7 @@ func (d *Daemon) tierSweepRegistryImageCheck(ctx context.Context, registry, imag
 	if !ok {
 		return fmt.Errorf("runner image %s is not named inside the image registry %s", image, registry)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodHead, "http://"+registry+"/v2/"+repo+"/manifests/"+tag, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, config.ImageRegistryBase(registry)+"/v2/"+repo+"/manifests/"+tag, nil)
 	if err != nil {
 		return fmt.Errorf("asking the image registry %s for %s: %w", registry, image, err)
 	}
