@@ -1,0 +1,56 @@
+div
+  div class="lhead"
+    button class="lheadbtn"
+      span class="caret"
+        "▾"
+      span
+        "figures and landings per hour"
+    div class="lheadbody"
+      div class="kv"
+        div
+          b
+            "6"
+          span
+            "landed"
+        div title="rejections in the last 24 hours, whatever the reason"
+          b class="warnc"
+            "1"
+          span
+            "rejected"
+        div title="landings as a share of landing attempts (landed + rejected)"
+          b
+            "86%"
+          span
+            "first-pass"
+      div class="k title"
+        "landings per hour, red = rejected"
+      div class="hbars"
+        div class="hbar" title="HH:MM · 3 landed"
+          i class="hok" height="100%"
+        div class="hbar" title="HH:MM · 2 landed · 1 rejected"
+          i class="hrej" height="33.33333333333333%"
+          i class="hok" height="66.66666666666666%"
+        div class="hbar" title="HH:MM · 1 landed"
+          i class="hok" height="33.33333333333333%"
+      div class="axis"
+        span
+          "HH:MM"
+        span
+          "HH:MM"
+        span
+          "HH:MM"
+        span
+          "HH:MM"
+        span
+          "now"
+  div class="empty"
+    "no stage lines in the last 24 hours"
+  div class="empty"
+    "no load history yet (it fills while a page is open)"
+  section
+    h2
+      span class="caret"
+        "▾"
+      "Polecats "
+      div class="r"
+      span class="foldsum" hidden
