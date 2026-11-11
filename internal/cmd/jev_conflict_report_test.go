@@ -49,14 +49,20 @@ func jevConflictOpenWith(labels map[string]scorecard.Labeling, readErr error) je
 }
 
 // jevConflictLandingsAt puts fixed landing stamps behind the report: a bead in
-// landed landed at its stamp. readErr, when set, fails every read.
-func jevConflictLandingsAt(landed map[string]time.Time, readErr error) jevConflictLandingsOpener {
+// landed landed at its stamp, and any other bead never landed.
+func jevConflictLandingsAt(landed map[string]time.Time) jevConflictLandingsOpener {
+	return jevConflictLandingsFailing(landed, "", nil)
+}
+
+// jevConflictLandingsFailing is jevConflictLandingsAt where reading the landing
+// of bead fails with readErr.
+func jevConflictLandingsFailing(landed map[string]time.Time, bead string, readErr error) jevConflictLandingsOpener {
 	return func(string) (jevLandedAt, error) {
-		return func(bead string) (time.Time, bool, error) {
-			if readErr != nil {
+		return func(b string) (time.Time, bool, error) {
+			if b == bead && readErr != nil {
 				return time.Time{}, false, readErr
 			}
-			at, ok := landed[bead]
+			at, ok := landed[b]
 			return at, ok, nil
 		}, nil
 	}
@@ -145,7 +151,7 @@ func TestJevConflictReportCountsPairsPerDayAtEachCut(t *testing.T) {
 		jevConflictLogLine(t, "i", "j", time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC), 0.95),
 	)
 
-	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil, nil))
+	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil))
 
 	low := jevConflictCutAt(t, rep, 0.6)
 	// A pair at exactly the cut is at it.
@@ -197,7 +203,7 @@ func TestJevConflictReportCountsABeadPairOnce(t *testing.T) {
 		"y": time.Date(2026, 11, 11, 11, 0, 0, 0, time.UTC),
 	}
 
-	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(landed, nil))
+	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(landed))
 
 	low := jevConflictCutAt(t, rep, 0.6)
 	if low.Total.Pairs != 1 {
@@ -222,7 +228,7 @@ func TestJevConflictReportDropsAPairAnsweredOnlyAfterLanding(t *testing.T) {
 		"y": time.Date(2026, 11, 11, 11, 0, 0, 0, time.UTC),
 	}
 
-	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(landed, nil))
+	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(landed))
 
 	if rep.Pairs != 0 || jevConflictCutAt(t, rep, 0.6).Total.Pairs != 0 {
 		t.Errorf("a pair answered only after both beads landed counted: pairs %d", rep.Pairs)
@@ -238,7 +244,7 @@ func TestJevConflictReportCountsAPairWithAnUnlandedBead(t *testing.T) {
 	// Only x landed, so the pair has no cutoff and its answer counts.
 	landed := map[string]time.Time{"x": time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)}
 
-	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(landed, nil))
+	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(landed))
 
 	if got, want := jevConflictDayPairs(jevConflictCutAt(t, rep, 0.6).Days), map[string]int{"2026-11-11": 1}; !sameIntMap(got, want) {
 		t.Errorf("cut 0.6 pairs per day = %v, want %v", got, want)
@@ -271,7 +277,7 @@ func TestJevConflictReportPrecisionAndIntervalOnAFixture(t *testing.T) {
 	label("r", "s", false)
 	writeJevConflictLog(t, town, lines...)
 
-	rep := runJevConflictJSON(t, town, jevConflictOpenWith(labels, nil), jevConflictLandingsAt(nil, nil))
+	rep := runJevConflictJSON(t, town, jevConflictOpenWith(labels, nil), jevConflictLandingsAt(nil))
 
 	low := jevConflictCutAt(t, rep, 0.6)
 	if low.Total.Pairs != 10 || low.Total.Labeled != 9 || low.Total.Overlapped != 6 {
@@ -316,7 +322,7 @@ func TestJevConflictReportJSONShape(t *testing.T) {
 
 	var out bytes.Buffer
 	if err := jevConflictReportWith(context.Background(), &out, town, "", true, jevConflictNow,
-		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil, nil)); err != nil {
+		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil)); err != nil {
 		t.Fatal(err)
 	}
 	var doc map[string]any
@@ -367,7 +373,7 @@ func TestJevConflictReportLabelErrorFailsTheReport(t *testing.T) {
 
 	var out bytes.Buffer
 	err := jevConflictReportWith(context.Background(), &out, town, "", false, jevConflictNow,
-		jevConflictOpenWith(nil, context.DeadlineExceeded), jevConflictLandingsAt(nil, nil))
+		jevConflictOpenWith(nil, context.DeadlineExceeded), jevConflictLandingsAt(nil))
 	if err == nil {
 		t.Fatalf("a label that cannot be read returned a report:\n%s", out.String())
 	}
@@ -376,16 +382,63 @@ func TestJevConflictReportLabelErrorFailsTheReport(t *testing.T) {
 	}
 }
 
+// Each bead's landing is read on its own, so a failure on either one fails the
+// report.
 func TestJevConflictReportLandingReadErrorFailsTheReport(t *testing.T) {
 	t.Parallel()
+	for _, failing := range []string{"x", "y"} {
+		town := t.TempDir()
+		writeJevConflictLog(t, town, jevConflictLogLine(t, "x", "y", time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC), 0.9))
+		landed := map[string]time.Time{"x": time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC), "y": time.Date(2026, 11, 10, 8, 0, 0, 0, time.UTC)}
+
+		var out bytes.Buffer
+		err := jevConflictReportWith(context.Background(), &out, town, "", false, jevConflictNow,
+			jevConflictOpenWith(nil, nil), jevConflictLandingsFailing(landed, failing, context.DeadlineExceeded))
+		if err == nil {
+			t.Errorf("a landing of %s that cannot be read returned a report:\n%s", failing, out.String())
+		}
+	}
+}
+
+func TestJevConflictReportOpenErrorFailsTheReport(t *testing.T) {
+	t.Parallel()
+	open := func(string, string) (scorecard.Adapter, error) { return nil, context.DeadlineExceeded }
+
+	var out bytes.Buffer
+	err := jevConflictReportWith(context.Background(), &out, t.TempDir(), "", false, jevConflictNow,
+		open, jevConflictLandingsAt(nil))
+	if err == nil {
+		t.Fatal("an adapter that cannot be opened returned a report")
+	}
+}
+
+func TestJevConflictReportUnreadableLogFailsTheReport(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
-	writeJevConflictLog(t, town, jevConflictLogLine(t, "a", "b", time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC), 0.9))
+	// A directory where the log should be opens but cannot be read.
+	if err := os.MkdirAll(conflict.LogPath(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	var out bytes.Buffer
 	err := jevConflictReportWith(context.Background(), &out, town, "", false, jevConflictNow,
-		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil, context.DeadlineExceeded))
+		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil))
 	if err == nil {
-		t.Fatalf("a landing that cannot be read returned a report:\n%s", out.String())
+		t.Fatal("an unreadable conflict log returned a report")
+	}
+}
+
+// jevConflictRefusingWriter refuses every write.
+type jevConflictRefusingWriter struct{}
+
+func (jevConflictRefusingWriter) Write([]byte) (int, error) { return 0, context.DeadlineExceeded }
+
+func TestJevConflictReportWriteErrorIsReturned(t *testing.T) {
+	t.Parallel()
+	err := jevConflictReportWith(context.Background(), jevConflictRefusingWriter{}, t.TempDir(), "", false, jevConflictNow,
+		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil))
+	if err == nil {
+		t.Fatal("a report that could not be written returned no error")
 	}
 }
 
@@ -448,7 +501,7 @@ func TestJevConflictReportMissingLogIsEmpty(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 
-	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil, nil))
+	rep := runJevConflictJSON(t, town, jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil))
 
 	if rep.Pairs != 0 || rep.LinesSkipped != 0 {
 		t.Errorf("missing log reported pairs %d, skipped %d; want none", rep.Pairs, rep.LinesSkipped)
@@ -459,7 +512,7 @@ func TestJevConflictReportRejectsABadSince(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	err := jevConflictReportWith(context.Background(), &out, t.TempDir(), "0d", false, jevConflictNow,
-		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil, nil))
+		jevConflictOpenWith(nil, nil), jevConflictLandingsAt(nil))
 	if err == nil {
 		t.Fatal("--since 0d was accepted")
 	}
