@@ -9,9 +9,24 @@ The daemon runs in a pod and cannot measure the Mac it sits on. This page record
 3. **The contract stays in gt.** `internal/hostprobe` keeps the schema, `Read`, `Write`, `Path` and the output parsers (`probes.go`, `memory.go`). The schema version stays 3 and gt-mac-watch writes the same document. The daemon's readers do not change: `attention_host_file.go` and `disk_maintenance_disks.go` read it with the 180 second bound (`fileHostProbeMaxAge`), which stays as the alarm for a stopped publisher (`errProbeFileRefused`).
 4. **macOS-only code leaves gt.** Not only no new code: the existing launchd supervisor, installer, `gt power`, the cmux bird spawner and the diskutil read each get a removal bead, and a guard in `internal/hosttools` keeps new macOS-only files out, with the existing ones listed so the list only shrinks.
 
-## What this replaced
+## Options it replaced
 
-The first design had a gastown binary write the file on the Mac and the pod read the Mac's directory through a read-only hostPath mount. The ruling chose the publisher that already exists and writes into the pod, so the mount, the `host` manifest owner, the build and publish of a Mac binary and the install of `gt-host` are not built.
+The bead asked for a comparison; the operator then decided. For the record, the ways considered, on the four points asked (design arguments, not measurements). "Agent" means the Mac program that measures the host.
+
+| Way | Credentials the agent needs | Staleness | Who owns the file | When the agent is down |
+| --- | --- | --- | --- | --- |
+| **A. Agent execs into the pod and writes the file** (chosen, gt-mac-watch) | a kubeconfig on the Mac with exec rights on the daemon pod | the daemon's 180 second bound | the daemon's claim holds the file; the agent writes through the daemon container | file ages out, rules report a failing probe |
+| B. Pod reads a Mac directory through a read-only hostPath mount (the first design, with a gastown `gt-host`) | none for the pod's read; the agent needs none on the cluster | same bound | the Mac user owns the file, the pod reads it | same |
+| C. Pod calls a small Service the agent serves | a listener on the Mac the VM can reach | the reply's stamp plus the same bound | the agent | the call fails; same alarm |
+| D. Probes published as a Kubernetes object the daemon reads | write rights on the cluster for the agent, read rights for the daemon | the object's stamp | the cluster | same; a rewrite each minute is etcd churn for 700 bytes |
+
+A needs a cluster credential on the Mac, which B avoids. The operator chose A because gt-mac-watch (devops dv-dgnb) already exists, publishes today, and carries the Mac-only prune too, so one Mac binary replaces a second one in gastown.
+
+## Credential scope of the publish path
+
+gt-mac-watch runs as the operator's login user. It calls `kubectl --context colima-gt-control -n gt exec -i deploy/daemon -c daemon -- sh -c 'cat > P.tmp && mv P.tmp P'` (devops `cmd/gt-mac-watch/watch.go`, the `kubectl` argv near line 208; the context is a flag defaulting to `colima-gt-control`, `main.go:64`). That context is the Mac's own kubeconfig entry for the control cluster, which is cluster admin. The program uses it only to write `probes.json`, but the credential it holds can do anything in the cluster, and a bug or a compromised job on the Mac inherits all of it. The daemon container also gets a shell command run inside it by that path.
+
+Narrower, as a follow-up: a ServiceAccount `mac-watch` whose Role in namespace gt allows `get` and `list` on pods and `create` on pods/exec, and nothing else, with a kubeconfig minted from it for the launchd job (gt-a2uug4.22, held). A rule by pod name is not possible because the Deployment generates the daemon pod's name. This was not tested against the cluster.
 
 ## Failure modes
 
@@ -29,7 +44,10 @@ The cost of this path against the mount: the pod's file has a writer inside the 
 
 - Delete the Mac host agent, its collectors (`internal/hostprobe/collect.go`) and templates, the `macMaintJobs` table and the host-agent and host-maint plists, after the overseer confirms gt-mac-watch is installed and the pod's file is fresh (gt-a2uug4.10, which merges gt-vg2mn1).
 - Rewrite the docs and the daemon message that name the host agent or the Mac's `registry-collect` job. That job was never installed, so no job runs the registry's garbage collect until one is given a home (.11).
-- The guard and one removal bead per allow-listed area (.12, .15 to .21), all held.
+- The follow-up beads, all held under epic gt-a2uug4, each shaped and lint-clean:
+  - gt-a2uug4.10 removes the host agent, collectors, templates and the nodes LaunchAgent table; gt-a2uug4.11 rewrites the docs and the registry-collect message; gt-a2uug4.12 is the guard.
+  - Removal beads, one per allow-listed area: gt-a2uug4.15 (launchd supervisor commands), .16 (upgrade heal, supervisor state, plist loader), .17 (gt power), .18 (installer gateway and doctor check), .19 (cmux bird spawner), .20 (test tooling names), .21 (the diskutil read).
+  - gt-a2uug4.22 narrows the kubectl credential.
 - The launchd field of the probe file stays in the schema as an unwritten pointer: a search of `internal/` finds no reader of it, and gt-mac-watch does not write it.
 
 ## What was read in code, and what was not
