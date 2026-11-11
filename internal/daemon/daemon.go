@@ -1229,6 +1229,9 @@ type Daemon struct {
 	// tierSweepSeams replace the tier_sweep job's outside effects in tests;
 	// the zero value is production (see tier_sweep.go).
 	tierSweepSeams tierSweepSeams
+	// polecatDevTagSeams replace the start-time dev tag step's read of the
+	// running build in tests; the zero value is production (gt-llx27r).
+	polecatDevTagSeams polecatDevTagSeams
 	// tierSweepImageFileLast is the reason each runner image file path last
 	// logged as unused, keyed by path. It lives on the daemon, not in the
 	// package, so one daemon's log latch never silences another's; a reason logs
@@ -1747,6 +1750,11 @@ func (d *Daemon) Run() (err error) {
 	if err := d.saveState(state); err != nil {
 		d.logger.Printf("Warning: failed to save state: %v", err)
 	}
+
+	// Move the sandbox registry's dev tag of the polecat image to this build
+	// before the first dispatch, so a pod roll does not leave the gateway
+	// refusing spawns against a stale image (gt-llx27r).
+	d.publishPolecatDevTag()
 
 	// Clear a restart marker this binary already covers (the daemon may have
 	// been restarted onto it by launchd or an operator). Covered-only: startup
