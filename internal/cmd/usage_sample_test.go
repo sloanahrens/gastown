@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -186,21 +188,49 @@ func TestUsageSampleMalformedJSONExitsNonZeroWithStrict(t *testing.T) {
 	}
 }
 
-func TestUsageSampleReportsStoreNotWiredByName(t *testing.T) {
+func TestUsageSampleReportsRefusedStoreOnStderr(t *testing.T) {
 	t.Parallel()
 	r := newUsageSampleRig()
-	// The production wiring, with only the clock fixed: the opener must refuse
-	// by name rather than report a row written.
-	deps := defaultUsageSampleDeps()
-	deps.now = r.deps().now
+	deps := r.deps()
+	deps.openStore = func() (usage.Store, error) {
+		return nil, errors.New("store refused by test")
+	}
 
 	stderr, err := runUsageSampleCmd(t, deps, statusLinePayload("41", "12"))
 	if err != nil {
 		t.Fatalf("exit err = %v, want nil without --strict", err)
 	}
 	assertOneStderrLine(t, stderr)
-	if !strings.Contains(stderr, "gt-8r17fp") {
-		t.Errorf("stderr = %q, want it to name the missing store bead", stderr)
+	if !strings.Contains(stderr, "store refused by test") {
+		t.Errorf("stderr = %q, want it to carry the opener's error", stderr)
+	}
+	if len(r.store.rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(r.store.rows))
+	}
+}
+
+func TestUsageSampleRefusedStoreExitsNonZeroWithStrict(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	deps := r.deps()
+	deps.openStore = func() (usage.Store, error) {
+		return nil, errors.New("store refused by test")
+	}
+
+	_, err := runUsageSampleCmd(t, deps, statusLinePayload("41", "12"), "--strict")
+	if code := exitCodeForError(err); code != 1 {
+		t.Errorf("exit code = %d, want 1", code)
+	}
+	if len(r.store.rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(r.store.rows))
+	}
+}
+
+func TestDefaultUsageSampleStoreRefusesAsUnwired(t *testing.T) {
+	t.Parallel()
+	_, err := defaultUsageSampleDeps().openStore()
+	if !errors.Is(err, usage.ErrNoStore) {
+		t.Errorf("openStore err = %v, want it to wrap usage.ErrNoStore", err)
 	}
 }
 
@@ -258,6 +288,86 @@ func TestUsageSampleStdinReadFailureIsRefused(t *testing.T) {
 	if len(r.store.rows) != 0 {
 		t.Errorf("rows = %d, want 0", len(r.store.rows))
 	}
+}
+
+func TestUsageSampleRefusesOversizedPayload(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	// The padding field sits ahead of a valid reading, so the refusal comes from
+	// the size check and not from a parse error.
+	payload := `{"pad":"` + strings.Repeat("x", maxStatusLineBytes) + `",` + statusLinePayload("41", "12")[1:]
+
+	stderr, err := runUsageSampleCmd(t, r.deps(), payload, "--strict")
+	if err == nil {
+		t.Fatal("exit err = nil, want non-zero: an oversized payload must not be read in full")
+	}
+	assertOneStderrLine(t, stderr)
+	if !strings.Contains(stderr, strconv.Itoa(maxStatusLineBytes)) {
+		t.Errorf("stderr = %q, want it to name the %d-byte cap", stderr, maxStatusLineBytes)
+	}
+	if len(r.store.rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(r.store.rows))
+	}
+}
+
+func TestUsageSampleStopsReadingPastCap(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	in := &countingStdin{left: 4 * maxStatusLineBytes}
+	var stderr bytes.Buffer
+	c := newUsageSampleCmd(r.deps())
+	c.SetArgs([]string{"--strict"})
+	c.SetIn(in)
+	c.SetOut(&bytes.Buffer{})
+	c.SetErr(&stderr)
+
+	if err := c.Execute(); err == nil {
+		t.Fatal("exit err = nil, want non-zero: an oversized payload must be refused")
+	}
+	if in.read > maxStatusLineBytes+1 {
+		t.Errorf("read %d bytes of a %d-byte payload, want at most %d: the read must stop at the cap",
+			in.read, in.left+in.read, maxStatusLineBytes+1)
+	}
+}
+
+func TestUsageSampleAcceptsPayloadAtCap(t *testing.T) {
+	t.Parallel()
+	r := newUsageSampleRig()
+	const prefix = `{"pad":"`
+	rest := statusLinePayload("41", "12")[1:]
+	pad := strings.Repeat("x", maxStatusLineBytes-len(prefix)-len(`",`)-len(rest))
+	payload := prefix + pad + `",` + rest
+	if len(payload) != maxStatusLineBytes {
+		t.Fatalf("payload = %d bytes, want exactly the cap %d", len(payload), maxStatusLineBytes)
+	}
+
+	stderr, err := runUsageSampleCmd(t, r.deps(), payload, "--strict")
+	if err != nil {
+		t.Fatalf("exit err = %v, want nil at exactly the cap; stderr = %q", err, stderr)
+	}
+	if len(r.store.rows) != 1 {
+		t.Errorf("rows = %d, want 1", len(r.store.rows))
+	}
+}
+
+// countingStdin yields left bytes of padding and counts what was read, so a
+// test can tell a bounded read from a read of the whole payload.
+type countingStdin struct {
+	left int
+	read int
+}
+
+func (c *countingStdin) Read(p []byte) (int, error) {
+	if c.left == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), c.left)
+	for i := range n {
+		p[i] = 'x'
+	}
+	c.left -= n
+	c.read += n
+	return n, nil
 }
 
 // unreadableStdin is a stdin that cannot be read.

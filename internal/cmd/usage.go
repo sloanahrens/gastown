@@ -85,12 +85,21 @@ tests and hand runs.`,
 	return cmd
 }
 
+// maxStatusLineBytes caps the stdin payload. A payload over this cap is refused
+// after reading at most one byte past it, so an oversized payload is never
+// read in full.
+const maxStatusLineBytes = 64 << 10
+
 // runUsageSample is one status-line reading end to end: parse, then record.
 // It returns an error for every failure, and the caller decides the exit.
 func runUsageSample(ctx context.Context, in io.Reader, deps usageSampleDeps) error {
+	in = io.LimitReader(in, maxStatusLineBytes+1)
 	data, err := io.ReadAll(in)
 	if err != nil {
 		return fmt.Errorf("read stdin: %w", err)
+	}
+	if len(data) > maxStatusLineBytes {
+		return fmt.Errorf("stdin is over %d bytes: not a status-line payload", maxStatusLineBytes)
 	}
 	reading, ok, err := usage.ParseStatusLine(data)
 	if err != nil {
