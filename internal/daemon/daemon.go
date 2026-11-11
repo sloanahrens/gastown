@@ -1164,6 +1164,9 @@ type Daemon struct {
 	// keyed by its last-run key (patrol_scan.go).
 	ghGatesRun sync.Map
 
+	// jsonlRepoLogOnce logs the resolved offsite backup repo path on the first cycle only.
+	jsonlRepoLogOnce sync.Once
+
 	// samplerPatrol is the resource_sampler patrol's sampler and pacing,
 	// built on its first tick. newResourceSampler builds it: nil means the
 	// host's own ps, and a test sets it to hand the patrol a fake
