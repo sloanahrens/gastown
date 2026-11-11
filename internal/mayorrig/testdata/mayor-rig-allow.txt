@@ -1,11 +1,13 @@
 # Non-test Go files that name the <rig>/mayor/rig path in code (gt-3lvcjz.1).
 #
 # Each line is: path<TAB>count<TAB>class<TAB>reason
-#   count   the number of uses of the path in the file: a string literal that holds it,
-#           a call with both segments as arguments, a concatenation that spells it, or a
-#           constants identifier. One expression that holds several forms counts once. A
-#           file with more uses fails; a count the file no longer reaches fails as stale,
-#           so lower it.
+#   count   the number of uses of the path in the file: a string literal that holds it, a
+#           same-file const or var that holds it, a call whose arguments include both
+#           segments (mayor and rig, literal or same-file name), a concatenation that spells
+#           it, or a constants identifier (DirMayor, DirRig, RigMayorPath, RigBeadsPath) of
+#           an internal/constants import. One expression that holds several forms counts
+#           once. A file with more uses fails; a count the file no longer reaches fails as
+#           stale, so lower it.
 #   class   pending-retirement, the only class: the reason names the reader of the path
 #           and the retirement that removes the use deletes the line.
 #
