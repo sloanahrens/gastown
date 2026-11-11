@@ -366,6 +366,14 @@ type overrunState struct {
 	SaveFailedLate bool      `json:"save_failed_late,omitempty"`
 	SaveGaveUp     bool      `json:"save_gave_up,omitempty"`
 
+	// SandboxDiverged is set when the sandbox's push was refused because its
+	// branch diverged from origin (overrunStop, step 2b). It holds the hand-back
+	// sentence naming the sandbox and both heads. Once set, the stop never asks
+	// the sandbox again: a later read that finds the sandbox gone must not
+	// delete the commits only it holds, so the sandbox, the worktree and the
+	// pause are kept, and the bead is handed back with this note.
+	SandboxDiverged string `json:"sandbox_diverged,omitempty"`
+
 	// ReworkSHA is the commit the kept branch held on origin before the stop's
 	// own push, when it was the worktree's head too: the finished work was
 	// already there, so the hand-back is rework (overrunStop, step 5).

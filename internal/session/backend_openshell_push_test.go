@@ -24,7 +24,10 @@ type fakePushGit struct {
 	localOnly   int // commits aaa holds that bbb lacks
 	remoteOnly  int // commits bbb holds that aaa lacks
 	countEr     error
-	forced      bool
+	// remoteCountEr is the failure of the count of commits bbb holds that aaa
+	// lacks, so the two counts can fail one at a time.
+	remoteCountEr error
+	forced        bool
 }
 
 func (f *fakePushGit) Push(_, _ string, force bool) error {
@@ -54,7 +57,7 @@ func (f *fakePushGit) CommitsAhead(base, branch string) (int, error) {
 	case base == "bbb" && branch == "aaa":
 		return f.localOnly, f.countEr
 	case base == "aaa" && branch == "bbb":
-		return f.remoteOnly, f.countEr
+		return f.remoteOnly, f.remoteCountEr
 	}
 	return 0, errors.New("counted commits between the wrong heads " + base + ".." + branch)
 }
@@ -89,6 +92,10 @@ func TestPushOrAcceptRemoteAhead(t *testing.T) {
 			[]string{"branch b diverged from origin", "local aaa", "origin bbb", "merge-base mmm", "local holds 2 commits origin lacks", "origin holds 1 local lacks", "error: failed to push some refs", "hint: Updates were rejected", "nothing is forced"}},
 		{"diverged_base_unreadable", fakePushGit{pushErr: rejected, revs: revs, mergeBaseEr: errors.New("no merge base")}, false, nil,
 			[]string{"branch b diverged from origin", "divergence could not be read (no merge base)", "[rejected]", "nothing is forced"}},
+		{"diverged_local_count_unreadable", fakePushGit{pushErr: rejected, revs: revs, mergeBase: "mmm", countEr: errors.New("rev-list failed")}, false, nil,
+			[]string{"branch b diverged from origin", "divergence could not be read (rev-list failed)", "[rejected]", "nothing is forced"}},
+		{"diverged_remote_count_unreadable", fakePushGit{pushErr: rejected, revs: revs, mergeBase: "mmm", remoteCountEr: errors.New("rev-list failed")}, false, nil,
+			[]string{"branch b diverged from origin", "divergence could not be read (rev-list failed)", "[rejected]", "nothing is forced"}},
 		{"no_remote_branch", fakePushGit{pushErr: rejected, fetchErr: errors.New("couldn't find remote ref"), revs: revs, ancestors: behind}, false, rejected, nil},
 		{"no_remote_tracking_ref", fakePushGit{pushErr: rejected, revs: map[string]string{"refs/heads/b": "aaa"}, ancestors: behind}, false, rejected, nil},
 		{"no_local_branch", fakePushGit{pushErr: rejected, revs: map[string]string{"refs/remotes/origin/b": "bbb"}, ancestors: behind}, false, rejected, nil},

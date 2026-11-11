@@ -310,10 +310,16 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// record's rig and polecat, and a lookup that cannot tell holds the stop.
 	// A save that gave up (SaveGaveUp, step 1b or 2a) keeps the sandbox too: its
 	// work is not known to be on origin, so nothing removes it. A refusal short
-	// of the cap holds the stop before the sandbox is touched.
+	// of the cap holds the stop before the sandbox is touched. A push refused as
+	// diverged is not held: the stop records it (SandboxDiverged), keeps the
+	// sandbox, and hands the bead back once, because a later read that finds the
+	// sandbox gone would otherwise delete the commits only it holds.
 	saveKept := st.SaveGaveUp
-	sandboxKept := false
-	if s.removeSandbox != nil && !saveKept {
+	// A sandbox whose push origin refused as diverged is kept for good: the
+	// stop never asks it again, because a later read that finds it gone would
+	// otherwise delete the commits only it holds (SandboxDiverged).
+	sandboxKept := st.SandboxDiverged != ""
+	if s.removeSandbox != nil && !saveKept && !sandboxKept {
 		// 2a. Re-check the worktree before the sandbox goes: the save (1b) ran
 		// before the session stop, so an edit made since is not in it. A check
 		// that cannot read the worktree is refused like a save, toward the same
@@ -368,13 +374,25 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			}
 		}
 	}
-	if s.removeSandbox != nil && !saveKept {
+	if s.removeSandbox != nil && !saveKept && !sandboxKept {
 		err := s.removeSandbox(seat)
+		var diverged *session.BranchDivergedError
 		switch {
 		case err == nil:
 		case errors.Is(err, errSandboxRecordCorrupt):
 			sandboxKept = true
 			d.logger.Printf("overrun_guard: WARNING: stop %s on %s: sandbox record unreadable, sandbox kept; handing the bead back with a note: %v", who, st.Bead, err)
+		case errors.As(err, &diverged):
+			// The sandbox holds commits origin lacks and origin holds commits it
+			// lacks. Nothing is forced, so both are kept and the bead is handed
+			// back once, with the note naming both heads; the seat stays paused.
+			st.SandboxDiverged = overrunSandboxDivergedNote(diverged, who)
+			sandboxKept = true
+			d.logger.Printf("overrun_guard: stop %s on %s: sandbox %s diverged from origin, sandbox and worktree kept; handing the bead back with a note: %v",
+				who, st.Bead, diverged.Sandbox, err)
+			if !save() {
+				return
+			}
 		default:
 			d.logger.Printf("overrun_guard: stop %s on %s waits, sandbox kept: %v", who, st.Bead, err)
 			return
@@ -502,7 +520,9 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.",
 			st.SaveFailure, branch, who))
 	}
-	if sandboxKept {
+	if st.SandboxDiverged != "" {
+		notes = append(notes, st.SandboxDiverged)
+	} else if sandboxKept {
 		notes = append(notes, fmt.Sprintf("The seat's sandbox could not be removed: its record is unreadable, so it may hold commits that were never pushed. "+
 			"The sandbox is kept as it was, and %s stays paused until an operator checks it and runs gt agent resume.", who))
 	}
@@ -1300,6 +1320,20 @@ func (d *Daemon) overrunSubmittedNow(seat overrunSeat) bool {
 func (d *Daemon) overrunStopSession(seat overrunSeat) error {
 	supSeat := supervisor.SeatIn(d.prefixRegistry(), seat.Rig, constants.RolePolecat, seat.Polecat)
 	return d.sup().KillOwnPark(supSeat, overrunStopReason(seat), overrunActor)
+}
+
+// overrunSandboxDivergedNote is the hand-back sentence for a sandbox whose push
+// origin refused as diverged: it names the sandbox and both heads, and says
+// what is kept and who releases the seat.
+func overrunSandboxDivergedNote(diverged *session.BranchDivergedError, who string) string {
+	sandbox := diverged.Sandbox
+	if sandbox == "" {
+		sandbox = "(unnamed)"
+	}
+	return fmt.Sprintf("The seat's sandbox %s holds branch %s diverged from origin: the sandbox's head is %s and origin's is %s, "+
+		"and nothing is forced. The sandbox and the worktree are kept as they were, and %s stays paused until an operator "+
+		"reconciles the two heads and runs gt agent resume.",
+		sandbox, diverged.Branch, diverged.Local, diverged.Remote, who)
 }
 
 // errSandboxRecordCorrupt is a sandbox record that does not parse. The stop

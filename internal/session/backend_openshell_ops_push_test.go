@@ -141,12 +141,21 @@ func TestOpenShellOpsPushWorkDivergedKeepsTheSandbox(t *testing.T) {
 		"rev-list --count aaa..bbb":       {{stdout: "1\n"}},
 	})
 
-	err := b.pushWork(pushRec("b"))
+	rec := pushRec("b")
+	err := b.pushWork(rec)
 	if err == nil {
 		t.Fatal("pushWork of a diverged branch = nil, want an error so the sandbox is kept")
 	}
 	if errors.Is(err, ErrNothingToPush) {
 		t.Fatalf("pushWork of a diverged branch = %v: a sandbox that is kept is not nothing to push", err)
+	}
+	var diverged *BranchDivergedError
+	if !errors.As(err, &diverged) {
+		t.Fatalf("pushWork of a diverged branch = %T %v, want a *BranchDivergedError", err, err)
+	}
+	if diverged.Sandbox != rec.Session || diverged.Local != "aaa" || diverged.Remote != "bbb" {
+		t.Errorf("diverged error = sandbox %q local %q origin %q, want sandbox %q local aaa origin bbb",
+			diverged.Sandbox, diverged.Local, diverged.Remote, rec.Session)
 	}
 	for _, want := range []string{
 		"branch b diverged from origin", "local aaa", "origin bbb", "merge-base mmm",

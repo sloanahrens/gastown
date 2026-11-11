@@ -109,7 +109,9 @@ func (b *openshellBackend) refusedPush(ctx context.Context, rec SandboxRecord, d
 	if err != nil {
 		return fmt.Errorf("branch %s diverged from origin, and its divergence could not be read (%v); nothing is forced: %s", branch, err, refusalLine(pushErr.Error()))
 	}
-	return divergedRefusal(d, pushErr)
+	diverged := divergedRefusal(d, pushErr)
+	diverged.Sandbox = rec.Session
+	return diverged
 }
 
 // divergenceIn reads the merge-base of a diverged branch in the clone, and the

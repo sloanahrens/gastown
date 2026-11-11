@@ -84,6 +84,25 @@ func TestBranchRelationReturnsAnAncestryError(t *testing.T) {
 	}
 }
 
+// The second ancestry question is asked only when the first answers no, and its
+// failure is returned too, never read as diverged.
+func TestBranchRelationReturnsASecondAncestryError(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("git merge-base failed")
+	asked := 0
+	secondFails := func(string, string) (bool, error) {
+		asked++
+		if asked == 1 {
+			return false, nil
+		}
+		return false, boom
+	}
+
+	if _, err := classifyBranchRelation("local", "remote", secondFails); !errors.Is(err, boom) {
+		t.Fatalf("classifyBranchRelation with a failing second ancestry = %v, want the ancestry error", err)
+	}
+}
+
 // The diverged refusal names the branch, both heads, the merge-base and the
 // commit counts, and carries git's refusal on one line.
 func TestBranchRelationDivergedRefusalNamesTheDivergenceOnOneLine(t *testing.T) {
