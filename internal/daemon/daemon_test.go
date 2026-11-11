@@ -971,6 +971,32 @@ func TestDaemonStartLogsItsCommit(t *testing.T) {
 	}
 }
 
+// TestDaemonStartWithoutBuildCommitSaysSo: a daemon with no build commit logs
+// one warning before its start line, so the empty "daemon-start: running" line
+// that follows is not an unmatched line with no signal (gt-jym69z).
+func TestDaemonStartWithoutBuildCommitSaysSo(t *testing.T) {
+	t.Parallel()
+	var logs lockedBuffer
+	_, finish := startParkedRunWith(t, t.TempDir(), nil, unreachableProbe(t), func(d *Daemon) {
+		d.logger = log.New(&logs, "", 0)
+		withOwnCommit(d, "")
+		useGitfake(t, d)
+	})
+	if err := finish(); err != nil {
+		t.Fatalf("Run after the daemon context ended = %v, want a clean shutdown", err)
+	}
+
+	var warnings []string
+	for _, ln := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(ln, "Warning:") && strings.Contains(ln, "build commit unknown") {
+			warnings = append(warnings, ln)
+		}
+	}
+	if len(warnings) != 1 {
+		t.Fatalf("warning lines = %q, want one naming the unknown build commit", warnings)
+	}
+}
+
 // TestRunWritesLaunchdOwner pins the owner at the call site that gives it
 // meaning: a daemon launchd started records the job label as its id, at start
 // and again at the shutdown save (gt-qpeei.12).

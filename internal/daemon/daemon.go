@@ -1737,6 +1737,11 @@ func (d *Daemon) Run() (err error) {
 	// image roll writes no upgrade-restart line, so the deploy tracker reads
 	// this one to ship the landings the new build carries (gt-6qc3nw.17).
 	own := d.resolveOwnCommit()
+	if own == "" {
+		// An empty start line matches nothing in the deploy tracker, so the
+		// warning says why this start ships no landings (gt-jym69z).
+		d.logger.Printf("Warning: build commit unknown; the daemon-start line below names no install, so no landing ships at it")
+	}
 	d.logger.Printf("daemon-start: running %s", own)
 	state := startState(os.Getpid(), time.Now(), own)
 	if err := d.saveState(state); err != nil {
