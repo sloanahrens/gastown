@@ -643,16 +643,15 @@ func archiveStopLeftBehind(stop archiveStop) bool {
 // fails (archiveStopFailed), when now() is at or past deadline
 // (archiveStopBudget), or at maxBatches (archiveStopCapped). The stop counts
 // rows the read returned, not rows written: the events read re-reads its
-// lookback window, so a full page can carry rows the watermark already
-// holds. The events export moves such a page
-// out of the way itself (maintenanceArchiveEvents), so a page short only after
-// filtering never ends the loop with rows still behind (gt-o4sk8.1). The first
-// batch always runs, even past the deadline, so every database gets its one
-// batch in a cycle; the deadline only stops the extra ones. The caller marks
-// the database unarchived and logs the reason on archiveStopBudget and
-// archiveStopCapped, so the gc waits and an operator can tell the database is
-// still behind. The batch itself has already kept the watermark unchanged on a
-// failure (gt-7nxj4).
+// lookback window, so a full page can carry rows the watermark already holds.
+// The events export moves such a page out of the way itself
+// (maintenanceArchiveEvents), so a page short only after filtering never ends
+// the loop with rows still behind (gt-o4sk8.1). The first batch always runs,
+// even past the deadline, so every database gets its one batch in a cycle; the
+// deadline only stops the extra ones. The caller marks the database unarchived
+// and logs the reason on archiveStopBudget and archiveStopCapped, so the gc
+// waits and an operator can tell the database is still behind. The batch
+// itself has already kept the watermark unchanged on a failure (gt-7nxj4).
 //
 // archived sums the rows the batches wrote, which the request path reports and
 // the 03:00 cycle ignores. read is what a batch's read returned and decides the
