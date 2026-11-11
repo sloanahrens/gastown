@@ -1130,10 +1130,10 @@ func (d *Daemon) restartPolecatSession(seat supervisor.Seat) error {
 
 // childErrorLine is the reason a failed gt child gave: the text after
 // "Error:" on the last line carrying it, through the lines that follow it up
-// to the usage block. cobra prints the child's own error that way and follows
-// it with its usage block, whose last line describes a flag rather than the
-// failure (gt-6hhp8). An error that spans lines, such as a git refusal, is
-// joined with " | " so the log line carries all of it (gt-0361s2).
+// to the usage block or a blank line. cobra prints the child's own error that
+// way and follows it with its usage block, whose last line describes a flag
+// rather than the failure (gt-6hhp8). An error that spans lines, such as a git
+// refusal, is joined with " | " so the log line carries all of it (gt-0361s2).
 //
 // When no line carries "Error:", the last line printed before the usage
 // block is the best the output offers, and failing that the last line of all.
@@ -1162,8 +1162,9 @@ func childErrorLine(out string) string {
 }
 
 // errorBlock is a child's error block: its "Error:" line (first) and the lines
-// after it, up to the usage block cobra prints last. The non-empty lines are
-// joined with " | ".
+// after it, up to the first blank line or the usage block cobra prints last.
+// A blank line ends the error's paragraph, so output the child prints after it
+// is not logged as the cause. The non-empty lines are joined with " | ".
 func errorBlock(block []string) string {
 	var parts []string
 	for i, line := range block {
@@ -1174,9 +1175,10 @@ func errorBlock(block []string) string {
 		if strings.HasPrefix(line, "Usage:") {
 			break
 		}
-		if line != "" {
-			parts = append(parts, line)
+		if line == "" {
+			break
 		}
+		parts = append(parts, line)
 	}
 	return strings.Join(parts, " | ")
 }
