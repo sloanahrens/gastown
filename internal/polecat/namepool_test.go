@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1257,9 +1258,9 @@ func TestParseThemeFile_MaxSize(t *testing.T) {
 	}
 }
 
-func TestGetNames_FallbackOnDeletedThemeFile(t *testing.T) {
+func TestThemeFile_DeletedRefusesAllocation(t *testing.T) {
 	t.Parallel()
-	tmpDir, err := os.MkdirTemp("", "namepool-fallback-*")
+	tmpDir, err := os.MkdirTemp("", "namepool-deleted-theme-*")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1294,40 +1295,86 @@ func TestGetNames_FallbackOnDeletedThemeFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pool should silently fall back to default theme
+	// The pool refuses: a built-in name is shared across rigs, so it is never
+	// drawn in place of the missing theme.
 	pool.Reset()
 	name, err = pool.Allocate()
-	if err != nil {
-		t.Fatalf("Allocate error after fallback: %v", err)
+	if !errors.Is(err, ErrThemeUnresolved) {
+		t.Fatalf("Allocate after the theme file was deleted = %q, %v; want ErrThemeUnresolved", name, err)
 	}
-
-	// Should get the first name from the default theme (mad-max), which is "furiosa"
-	if name != "furiosa" {
-		t.Errorf("expected fallback to default theme (furiosa), got %s", name)
+	if name != "" {
+		t.Errorf("Allocate drew %q with the theme unresolved, want no name", name)
 	}
 }
 
-func TestGetNames_UnresolvableTheme_FallsBackToDefault(t *testing.T) {
+// A style with no theme file refuses, and the error names the rig, the style and
+// the file the pool looked for. A style that is not built-in and has no town
+// root to look in refuses too.
+func TestThemeFile_MissingStyleRefusesNamingRigStyleAndPath(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
+	wantPath := filepath.Join(tmpDir, "settings", "themes", "gone.txt")
 
-	pool := NewNamePoolWithConfig(tmpDir, "testrig", "nonexistent-theme", nil, 10)
-	pool.SetTownRoot(tmpDir)
-
-	name, err := pool.Allocate()
-	if err != nil {
-		t.Fatalf("Allocate error: %v", err)
-	}
-	defaultNames := BuiltinThemes[DefaultTheme]
-	found := false
-	for _, dn := range defaultNames {
-		if dn == name {
-			found = true
-			break
+	t.Run("theme file absent", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(tmpDir, "alpha", "gone", nil, 10)
+		pool.SetTownRoot(tmpDir)
+		_, err := pool.Allocate()
+		if !errors.Is(err, ErrThemeUnresolved) {
+			t.Fatalf("Allocate = %v, want ErrThemeUnresolved", err)
 		}
-	}
-	if !found {
-		t.Errorf("expected name from default theme, got %q", name)
+		for _, want := range []string{"alpha", `"gone"`, wantPath} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error %q does not name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("theme file has no valid names", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		themesDir := filepath.Join(townRoot, "settings", "themes")
+		if err := os.MkdirAll(themesDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(themesDir, "empty.txt"), []byte("# nothing here\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		pool := NewNamePoolWithConfig(townRoot, "alpha", "empty", nil, 10)
+		pool.SetTownRoot(townRoot)
+		if _, err := pool.Allocate(); !errors.Is(err, ErrThemeUnresolved) {
+			t.Fatalf("Allocate = %v, want ErrThemeUnresolved for a theme file with no names", err)
+		}
+	})
+
+	t.Run("no town root to look in", func(t *testing.T) {
+		t.Parallel()
+		pool := NewNamePoolWithConfig(tmpDir, "alpha", "gone", nil, 10)
+		_, err := pool.Allocate()
+		if !errors.Is(err, ErrThemeUnresolved) {
+			t.Fatalf("Allocate = %v, want ErrThemeUnresolved", err)
+		}
+		if !strings.Contains(err.Error(), "no town root") {
+			t.Errorf("error %q does not say the town root is missing", err)
+		}
+	})
+}
+
+// A built-in style still resolves, with or without a town root or a theme file.
+func TestThemeFile_BuiltinStillResolves(t *testing.T) {
+	t.Parallel()
+	for _, theme := range []string{"mad-max", "minerals", "wasteland"} {
+		t.Run(theme, func(t *testing.T) {
+			t.Parallel()
+			pool := NewNamePoolWithConfig(t.TempDir(), "alpha", theme, nil, 10)
+			name, err := pool.Allocate()
+			if err != nil {
+				t.Fatalf("Allocate: %v", err)
+			}
+			if want := BuiltinThemes[theme][0]; name != want {
+				t.Errorf("Allocate = %q, want the first %s name %q", name, theme, want)
+			}
+		})
 	}
 }
 
@@ -1475,7 +1522,11 @@ func TestEffectiveTheme(t *testing.T) {
 				}
 				wantNames = names
 			}
-			if got, wantList := strings.Join(pool.getNames(), ","), strings.Join(filterReservedNames(wantNames), ","); got != wantList {
+			draws, err := pool.themeNames()
+			if err != nil {
+				t.Fatalf("themeNames: %v", err)
+			}
+			if got, wantList := strings.Join(draws, ","), strings.Join(filterReservedNames(wantNames), ","); got != wantList {
 				t.Errorf("pool draws %q, want %q", got, wantList)
 			}
 		})
@@ -1884,5 +1935,56 @@ func TestSameModel(t *testing.T) {
 		if got := sameModel(tt.a, tt.b); got != tt.want {
 			t.Errorf("sameModel(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
 		}
+	}
+}
+
+// UnresolvedTheme names the style a rig's polecat names cannot be drawn from, with
+// the pool's own refusal. A rig on a built-in style, on an explicit name list, or
+// on a custom style whose file resolves has nothing unresolved.
+func TestThemeFile_UnresolvedThemeReportsOnlyAMissingStyle(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		settings  string
+		themeFile string
+		wantTheme string
+		wantErr   bool
+	}{
+		{"missing custom style", `{"namepool":{"style":"gone"}}`, "", "gone", true},
+		{"custom style with its file", `{"namepool":{"style":"here"}}`, "here", "", false},
+		{"built-in style", `{"namepool":{"style":"minerals"}}`, "", "", false},
+		{"explicit name list", `{"namepool":{"names":["alpha-one"]}}`, "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			rigPath := filepath.Join(townRoot, "alpha")
+			writeNamepoolFile(t, filepath.Join(rigPath, "settings", "config.json"), tc.settings)
+			if tc.themeFile != "" {
+				writeNamepoolFile(t, filepath.Join(townRoot, "settings", "themes", tc.themeFile+".txt"), "alpha-one\n")
+			}
+
+			theme, err := UnresolvedTheme(townRoot, rigPath, "alpha")
+			if theme != tc.wantTheme {
+				t.Errorf("UnresolvedTheme theme = %q, want %q", theme, tc.wantTheme)
+			}
+			if got := err != nil; got != tc.wantErr {
+				t.Fatalf("UnresolvedTheme err = %v, want an error: %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, ErrThemeUnresolved) {
+				t.Errorf("err = %v, want ErrThemeUnresolved", err)
+			}
+		})
+	}
+}
+
+func writeNamepoolFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

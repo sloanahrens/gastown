@@ -805,6 +805,25 @@ func seedCutoverPrepare(town string, read func(string) ([]byte, error)) (seedCut
 	}
 	c.files = append(c.files, newSeedCutoverFile(seedCutoverTownRel, townOut))
 
+	// The town's other settings files (models, placement, regime events, the
+	// custom themes) are read as they are: a pod without them runs on other
+	// defaults and names its polecats from the wrong theme (gt-pno1e6).
+	others, err := seedCutoverSettingNames(town, os.ReadDir)
+	if err != nil {
+		return seedCutover{}, err
+	}
+	for _, rel := range others {
+		data, found, err := seedHostSettings(town, rel, read)
+		if err != nil {
+			return seedCutover{}, err
+		}
+		if !found {
+			c.absent = append(c.absent, rel)
+			continue
+		}
+		c.files = append(c.files, newSeedCutoverFile(rel, data))
+	}
+
 	rigs, err := townstate.RegisteredRigs(town)
 	if err != nil {
 		return seedCutover{}, fmt.Errorf("reading the town's rigs: %w", err)
@@ -841,6 +860,64 @@ func newSeedHoldFile(rel string) seedCutoverFile {
 	f.mode = 0o600
 	f.checkMode = true
 	return f
+}
+
+// seedCutoverSettingNames lists the town settings the live copy sends beside
+// config.json, relative to the town root, in directory order: every file under
+// settings/ except config.json (the caller sends that one itself), daemon.env (its
+// secrets live in the pod's Secrets and are never copied), the .bak and .lock
+// copies, and every custom theme file under settings/themes/. A subdirectory other
+// than themes is not a settings file and is left out. A file that is not a regular
+// file is listed too, so seedHostSettings refuses it rather than the copy skipping it.
+func seedCutoverSettingNames(town string, readDir func(string) ([]fs.DirEntry, error)) ([]string, error) {
+	dir := filepath.Join(town, constants.DirSettings)
+	entries, err := readDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("listing the town's settings directory: %w", err)
+	}
+	var rels []string
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			if name == "themes" {
+				themes, err := seedCutoverThemeNames(filepath.Join(dir, name), readDir)
+				if err != nil {
+					return nil, err
+				}
+				rels = append(rels, themes...)
+			}
+			continue
+		}
+		if name == "config.json" || name == "daemon.env" || strings.Contains(name, ".bak") || strings.HasSuffix(name, ".lock") {
+			continue
+		}
+		rels = append(rels, path.Join(constants.DirSettings, name))
+	}
+	return rels, nil
+}
+
+// seedCutoverThemeNames lists the custom theme files (<name>.txt) under the host's
+// settings/themes directory as settings-relative paths. A theme directory that is
+// not there holds no custom theme.
+func seedCutoverThemeNames(themesDir string, readDir func(string) ([]fs.DirEntry, error)) ([]string, error) {
+	entries, err := readDir(themesDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("listing the host's custom themes: %w", err)
+	}
+	var rels []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".txt") {
+			continue
+		}
+		rels = append(rels, path.Join(constants.DirSettings, "themes", e.Name()))
+	}
+	return rels, nil
 }
 
 // seedHostSettings reads the host file at rel under town. A file that is not there

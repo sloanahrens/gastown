@@ -430,7 +430,7 @@ func newManager(r *rig.Rig, g gitRepo, t sessionProbe, open func(beadsSite) pole
 		}
 	}
 
-	// Set town root for custom theme resolution in getNames()
+	// Set town root for custom theme resolution in themeNames()
 	pool.SetTownRoot(townRoot)
 
 	_ = pool.Load() // non-fatal: state file may not exist for new rigs
@@ -2932,12 +2932,16 @@ func (m *Manager) reconcilePoolInternal() {
 	// Get names with tmux sessions
 	var namesWithSessions []string
 	if m.tmux != nil {
-		poolNames := m.namePool.getNames()
-		for _, name := range poolNames {
-			sessionName := m.sessionName(name)
-			hasSession, _ := m.tmux.HasSession(sessionName)
-			if hasSession {
-				namesWithSessions = append(namesWithSessions, name)
+		// An unresolved theme has no pool names to probe for a session. Allocate
+		// refuses while it stays unresolved, so no name is drawn meanwhile; the
+		// directories above still hold the names already in use.
+		if poolNames, err := m.namePool.themeNames(); err == nil {
+			for _, name := range poolNames {
+				sessionName := m.sessionName(name)
+				hasSession, _ := m.tmux.HasSession(sessionName)
+				if hasSession {
+					namesWithSessions = append(namesWithSessions, name)
+				}
 			}
 		}
 	}
