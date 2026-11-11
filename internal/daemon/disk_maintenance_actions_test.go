@@ -278,6 +278,68 @@ func TestActionsRetentionDeletesOnlyWhenEnabledAndApply(t *testing.T) {
 	}
 }
 
+// TestActionsRetentionRunsNothingWhenNoRigServesARepository: a pass with no
+// repository to plan for lists nothing, deletes nothing, and reports nothing.
+func TestActionsRetentionRunsNothingWhenNoRigServesARepository(t *testing.T) {
+	t.Parallel()
+	fake := newFakeActionsForgejo(actionsFixtureRuns())
+	d, buf := actionsTestDaemon(t, &DiskMaintenanceActionsRetention{Enabled: true},
+		agentconfig.DiskMaintenanceModeApply, newActionsServer(t, fake))
+	d.diskMaint.actionsRepos = func() ([]actionsRetentionRepo, error) { return nil, nil }
+
+	d.runActionsRetention(diskMaintNow, true)
+
+	assert.Zero(t, fake.listings())
+	assert.Empty(t, fake.deletedIDs())
+	assert.NotContains(t, buf.String(), "actions_retention")
+}
+
+// TestActionsRetentionStopsWhenTheDaemonsContextEnds: the step's context derives
+// from the daemon's, so a shutdown that cancels it stops the deletes. The stub's
+// listing succeeds whatever the context says, so only the step's own context
+// check can stop the pass.
+func TestActionsRetentionStopsWhenTheDaemonsContextEnds(t *testing.T) {
+	t.Parallel()
+	api := &stubActionsAPI{runs: []forgejo.ActionRun{
+		{ID: 1, Status: "success", PrettyRef: "main", Created: actionsOld},
+		{ID: 2, Status: "success", PrettyRef: "main", Created: actionsOld},
+		{ID: 3, Status: "success", PrettyRef: "main", Created: actionsOld},
+	}}
+	keepTwo := 2
+	d, _ := actionsTestDaemon(t, &DiskMaintenanceActionsRetention{Enabled: true, KeepNewest: &keepTwo},
+		agentconfig.DiskMaintenanceModeApply, api)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.ctx = ctx
+
+	d.runActionsRetention(diskMaintNow, true)
+
+	assert.Positive(t, api.listings, "the plan was built, so the deletes were the step's to make")
+	assert.Zero(t, api.deletes, "a cancelled daemon context stops the deletes")
+}
+
+// stubActionsAPI answers the retention step's two calls without a socket. Its
+// listing ignores the context, which is what the shutdown test needs: the plan
+// is built and only the delete loop's own context check can stop it.
+type stubActionsAPI struct {
+	runs     []forgejo.ActionRun
+	listings int
+	deletes  int
+}
+
+func (s *stubActionsAPI) ListRuns(context.Context, string, string, forgejo.RunFilter) (*forgejo.RunList, error) {
+	s.listings++
+	if s.listings > 1 {
+		return &forgejo.RunList{}, nil
+	}
+	return &forgejo.RunList{TotalCount: len(s.runs), Runs: s.runs}, nil
+}
+
+func (s *stubActionsAPI) DeleteRun(context.Context, string, string, int64) error {
+	s.deletes++
+	return nil
+}
+
 // TestActionsRetentionRefusesAFailedListing: a listing that fails on any page
 // refuses the repository's plan. A partial listing would name the wrong newest
 // runs, so nothing is deleted from it.
@@ -453,6 +515,52 @@ func TestActionsRetentionReposRefusesATokenDirThatDoesNotResolve(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "the landing bot token directory could not be resolved: no home directory")
+	assert.Nil(t, repos)
+}
+
+// TestActionsRetentionSkipsARigWithoutAForgejoBlockWithALine: a landing rig
+// whose settings name no merge_queue.forgejo block serves no repository, so the
+// step lists nothing, and it says which rig it left out instead of skipping it
+// silently.
+func TestActionsRetentionSkipsARigWithoutAForgejoBlockWithALine(t *testing.T) {
+	t.Parallel()
+	d, buf, _ := diskMaintTestDaemon(t)
+	f := useGitfake(t, d)
+	d.knownRigsCache, d.knownRigsCacheValid = []string{"gastown"}, true
+	cfg := diskMaintEnabled("", agentconfig.DiskMaintenanceModeApply)
+	cfg.Patrols.DiskMaintenance.ActionsRetention = &DiskMaintenanceActionsRetention{Enabled: true}
+	cfg.Patrols.LandingWorker = &LandingWorkerConfig{
+		Rigs:    []string{"gastown"},
+		Forgejo: &agentconfig.ForgejoWorkerConfig{TokenDir: t.TempDir()},
+	}
+	d.patrolConfig = cfg
+	f.InitBare(t, filepath.Join(d.config.TownRoot, "gastown", ".repo.git"))
+	writeActionsPair(t, d.config.TownRoot)
+
+	d.runActionsRetention(diskMaintNow, true)
+
+	assert.Contains(t, buf.String(), "disk_maintenance: actions_retention: gastown: skipped, it names no merge_queue.forgejo block")
+}
+
+// TestActionsRetentionReposRefusesARigConfigItCannotRead: a settings tier that
+// exists but cannot be read is an error, never "this rig names no block", so the
+// whole list is refused rather than that rig's runs being left out silently.
+func TestActionsRetentionReposRefusesARigConfigItCannotRead(t *testing.T) {
+	t.Parallel()
+	d, _ := daemonWithRecorder(t)
+	f := useGitfake(t, d)
+	d.knownRigsCache, d.knownRigsCacheValid = []string{"gastown"}, true
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+		Forgejo: &agentconfig.ForgejoWorkerConfig{TokenDir: t.TempDir()},
+	}}}
+	rigPath := filepath.Join(d.config.TownRoot, "gastown")
+	writeDaemonRigConfigFile(t, rigPath, "{not json")
+	f.InitBare(t, filepath.Join(rigPath, ".repo.git"))
+
+	repos, err := d.actionsRetentionRepos()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rig gastown: its merge_queue.forgejo settings could not be read")
 	assert.Nil(t, repos)
 }
 

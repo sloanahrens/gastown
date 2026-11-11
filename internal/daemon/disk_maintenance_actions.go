@@ -158,9 +158,11 @@ func installedGreenRef(townRoot string) (string, error) {
 
 // actionsRetentionRepos resolves the repositories the step plans for: each rig
 // the landing worker serves whose merge_queue.forgejo block resolves, read
-// through the landing bot's token. A rig whose remote does not resolve refuses
-// the whole list, rather than planning the rest and leaving that rig's runs out
-// of the pass without a line.
+// through the landing bot's token. A rig that names no block is skipped with a
+// line, since it has no repository whose runs the step may prune. A block the
+// run cannot read, or a remote that does not resolve, refuses the whole list,
+// rather than planning the rest and leaving that rig's runs out of the pass
+// without a line.
 func (d *Daemon) actionsRetentionRepos() ([]actionsRetentionRepo, error) {
 	tokenDir, err := d.diskMaintenanceSeams().actionsTokenDir()
 	if err != nil {
@@ -168,8 +170,12 @@ func (d *Daemon) actionsRetentionRepos() ([]actionsRetentionRepo, error) {
 	}
 	var out []actionsRetentionRepo
 	for _, name := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
-		fj := rig.ResolveForgejoConfigIn(d.repoFileOpener(), d.config.TownRoot, name)
+		fj, err := rig.ResolveForgejoConfigWithError(d.repoFileOpener(), d.config.TownRoot, name)
+		if err != nil {
+			return nil, fmt.Errorf("rig %s: its merge_queue.forgejo settings could not be read: %w", name, err)
+		}
 		if fj == nil {
+			d.logger.Printf("disk_maintenance: actions_retention: %s: skipped, it names no merge_queue.forgejo block", name)
 			continue
 		}
 		// Both parsers refuse a remote without a scheme and host, and their errors
