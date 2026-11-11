@@ -284,13 +284,28 @@ func newPatrolRestartDaemonOn(t *testing.T, rec *notifyfake.Recorder, budget int
 }
 
 // A patrol restart leaves the seat's recorded agent where it was: the restart
-// carries the seat's identity forward, so the intent record names the same
+// carries the seat's identity forward, so the executor that starts the session
+// finds the agent the seat was slung on, and the intent record names the same
 // agent once the executor has run (gt-gl6o0v).
+//
+// The production executor is `gt session restart`, a subprocess a unit test
+// cannot run. Its start reads the agent from this same record
+// (restartPolecatOnSlungAgent, pinned in internal/cmd), so the executor here
+// reads the record at the point the start would. This pins the restart's
+// record write; it does not reproduce the reported "–" after a restart, which
+// was not seen in the record.
 func TestPatrolScanRestartKeepsTheSeatsAgent(t *testing.T) {
 	t.Parallel()
+	var d *Daemon
 	ran := 0
-	d, _ := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error {
+	seenByExecutor := ""
+	d, _ = newPatrolRestartDaemon(t, 10, func(s supervisor.Seat) error {
 		ran++
+		rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(s))
+		if err != nil {
+			return err
+		}
+		seenByExecutor = rec.Agent
 		return nil
 	})
 	seat := supervisor.IntentSeat(supervisor.SeatIn(d.prefixRegistry(), "gastown", constants.RolePolecat, "nux"))
@@ -304,6 +319,9 @@ func TestPatrolScanRestartKeepsTheSeatsAgent(t *testing.T) {
 	}
 	if ran != 1 {
 		t.Fatalf("the restart executor ran %d times, want 1", ran)
+	}
+	if seenByExecutor != "claude-haiku" {
+		t.Errorf("the executor that starts the session read agent %q, want claude-haiku", seenByExecutor)
 	}
 	rec, err := intent.Read(d.config.TownRoot, seat)
 	if err != nil {

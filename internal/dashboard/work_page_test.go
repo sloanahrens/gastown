@@ -1281,10 +1281,10 @@ func workCells(t *testing.T, dom *pageDOM, cls string) []drawn {
 	return out
 }
 
-// TestTheWorkPanelColumnIsModel: the Polecats table names its agent column
-// Model, a seat holding a bead draws the model its agent names, and a seat with
-// a session that recorded no agent draws "–" with the tooltip saying so
-// (gt-gl6o0v).
+// TestTheWorkPanelColumnIsModel: a seat holding a bead draws the model its agent
+// names, and a seat with a session that recorded no agent draws "–" with the
+// tooltip saying so (gt-gl6o0v). The Model heading is asserted by
+// TestTheWorkPanelDrawsARowPerSeat.
 func TestTheWorkPanelColumnIsModel(t *testing.T) {
 	t.Parallel()
 
@@ -1293,11 +1293,6 @@ func TestTheWorkPanelColumnIsModel(t *testing.T) {
 
 	dom := newPageDOM(t)
 	callWork(t, dom, workState([]any{withAgent, noAgent}, workQueueReading(1, 0, 0, 0)))
-
-	heads := workHeads(t, dom)
-	if len(heads) < 2 || heads[1] != "Model" {
-		t.Fatalf("the Polecats heading row = %q, want its second column named Model", heads)
-	}
 
 	agents := workCells(t, dom, "wagent")
 	if len(agents) != 2 {
@@ -1312,35 +1307,6 @@ func TestTheWorkPanelColumnIsModel(t *testing.T) {
 	if agents[1].Text != "sonnet" {
 		t.Errorf("a seat holding a bead draws %q, want the model name sonnet", agents[1].Text)
 	}
-}
-
-// workHeads reads the Polecats table's heading row, in column order.
-func workHeads(t *testing.T, dom *pageDOM) []string {
-	t.Helper()
-
-	v, err := dom.vm.RunString(`JSON.stringify((() => {
-		const out = [];
-		(function walk(n) {
-			for (const c of (n.children || [])) {
-				if (String(c.className).split(" ").indexOf("whead") >= 0) {
-					out.push(c.children.__arr.map(k => k.textContent));
-				}
-				walk(c);
-			}
-		})(__byId["polecats"]);
-		return out;
-	})())`)
-	if err != nil {
-		t.Fatalf("reading the Polecats heading row: %v", err)
-	}
-	var rows [][]string
-	if err := json.Unmarshal([]byte(v.String()), &rows); err != nil {
-		t.Fatalf("reading the Polecats heading row: %v", err)
-	}
-	if len(rows) == 0 {
-		t.Fatal("the Polecats panel drew no heading row")
-	}
-	return rows[0]
 }
 
 // TestTheWorkPanelMovesItsAgesBetweenPolls redraws an unchanged reading ten
