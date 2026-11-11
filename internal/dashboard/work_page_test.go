@@ -144,7 +144,7 @@ func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("the panel drew %d rows (%v), want a header and two seats", len(rows), rows)
 	}
-	if got := rows[0]; strings.Join(got, " ") != "Polecat Agent Bead State Age" {
+	if got := rows[0]; strings.Join(got, " ") != "Polecat Model Bead State Age" {
 		t.Errorf("the header row reads %v", got)
 	}
 	busy := rows[1]
@@ -1279,6 +1279,34 @@ func workCells(t *testing.T, dom *pageDOM, cls string) []drawn {
 		t.Fatalf("reading the %s cells: %v", cls, err)
 	}
 	return out
+}
+
+// TestTheWorkPanelColumnIsModel: a seat holding a bead draws the model its agent
+// names, and a seat with a session that recorded no agent draws "–" with the
+// tooltip saying so (gt-gl6o0v). The Model heading is asserted by
+// TestTheWorkPanelDrawsARowPerSeat.
+func TestTheWorkPanelColumnIsModel(t *testing.T) {
+	t.Parallel()
+
+	withAgent := seat("gastown", "nux", "working", "gt-gl6o0v", "a seat keeps its model", "claude-sonnet", time.Minute)
+	noAgent := seat("gastown", "dementus", "working", "gt-wkqzj8", "a seat that recorded no agent", "", time.Minute)
+
+	dom := newPageDOM(t)
+	callWork(t, dom, workState([]any{withAgent, noAgent}, workQueueReading(1, 0, 0, 0)))
+
+	agents := workCells(t, dom, "wagent")
+	if len(agents) != 2 {
+		t.Fatalf("the panel drew %d agent cells, want 2", len(agents))
+	}
+	if agents[0].Text != "–" {
+		t.Errorf("a seat whose session recorded no agent draws %q, want the dash", agents[0].Text)
+	}
+	if want := "its session recorded no agent"; !strings.Contains(agents[0].Title, want) {
+		t.Errorf("the dash does not say why it is blank: %q", agents[0].Title)
+	}
+	if agents[1].Text != "sonnet" {
+		t.Errorf("a seat holding a bead draws %q, want the model name sonnet", agents[1].Text)
+	}
 }
 
 // TestTheWorkPanelMovesItsAgesBetweenPolls redraws an unchanged reading ten
