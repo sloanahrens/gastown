@@ -401,6 +401,43 @@ func TestRecentLandingsFillTitlesOverPolls(t *testing.T) {
 	}
 }
 
+// TestRecentLandingsConvergeOnFullPage: a page of recentLandingRows rows, the
+// most the dashboard shows, takes every title over polls from a reader sized
+// for that page. Each bead is read once, and every row is titled once the
+// fill has had the polls it needs at recentExtraTitleLookups a poll. A reader
+// bounded below the page evicts the titles it fetched and never settles
+// (gt-bjhc3r).
+func TestRecentLandingsConvergeOnFullPage(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 3, 18, 0, 0, 0, time.UTC)
+	shown := map[string]int{}
+	reads := titleReads(shown)
+	reads.max = dashboardTitleCacheSize
+	title := func(rig, id string) string { return reads.title(rig, id) }
+	cached := func(rig, id string) (string, bool) { return reads.cachedTitle(id) }
+	// Seconds apart, so the whole page sits inside the day the dashboard keeps.
+	var recs []omRecord
+	for i := 0; i < recentLandingRows; i++ {
+		recs = append(recs, omRecord{Record: landings.Record{Bead: fmt.Sprintf("gt-%d", i), Rig: "gastown", OMVerdict: "approve", LandedAt: now.Add(-time.Duration(i) * time.Second)}})
+	}
+	polls := recentLandingRows/recentExtraTitleLookups + 1
+	var rows []dashboard.LandingRow
+	for poll := 0; poll < polls; poll++ {
+		rows = buildRecentLandings(now, recs, nil, nil, nil, nil, title, landingNames{}, nil, nil, nil, cached, recentLandingRows)
+	}
+	if len(rows) != recentLandingRows {
+		t.Fatalf("rows = %d, want %d", len(rows), recentLandingRows)
+	}
+	for _, r := range rows {
+		if r.Title != "title of "+r.Bead {
+			t.Fatalf("row %s title = %q after %d polls, want its title", r.Bead, r.Title, polls)
+		}
+	}
+	if n := shownTotal(shown); n != recentLandingRows {
+		t.Errorf("bd reads = %d, want %d: each bead is read once", n, recentLandingRows)
+	}
+}
+
 // TestRecentLandingsFailedLookupIsNotRetriedInPoll: a title read that fails
 // leaves the row's title empty, and the bead is asked once in the poll even
 // when a second row names the same bead.

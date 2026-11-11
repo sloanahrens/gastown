@@ -390,6 +390,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		return nil, nil, fmt.Errorf("dashboard: reading town settings: %w", err)
 	}
 	beadReads := openTailBeads(townRoot)
+	beadReads.max = dashboardTitleCacheSize
 	rigOfBead := landingRig(townRoot)
 	// Who submitted a bead, for a landing on the operator's reserved ops branch:
 	// gt done records it as the author of the bead's newest "Submitted for

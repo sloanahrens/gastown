@@ -40,6 +40,13 @@ type tailOnce struct{ last string }
 // line prints without one, which is what a failed read does too.
 const tailTitleCacheSize = 512
 
+// dashboardTitleCacheSize bounds the titles the dashboard's reader keeps. The
+// landings page fills each row's title over polls, a few at a time, so a bound
+// under the page's row count evicts each title before the next poll reads it
+// and the fill never settles (gt-bjhc3r). Twice the page leaves room for the
+// running landings that sit above the row bound.
+const dashboardTitleCacheSize = 2 * recentLandingRows
+
 // tailMissingCacheSize bounds the not-found ids one run remembers. A bead
 // deleted a moment after it was created is asked about once per journal record
 // that names it, and every ask is a bd show that fails slowly, so the ids are
