@@ -240,9 +240,13 @@ func TestTailGitAncestry_LogsAnUnreadableDeployRepo(t *testing.T) {
 		lines = append(lines, fmt.Sprintf(format, args...))
 	})
 
-	ancestor := tailGitAncestryIn(townRoot, why, tailStatFails(fs.ErrPermission), run)
-	if ok, known := ancestor("c1", "c2"); ok || known {
-		t.Errorf("ancestor(c1, c2) = (%v, %v), want unknown (false, false)", ok, known)
+	// Two ancestry builds are two polls of the same unreadable repo: the failure
+	// is logged once, not on each.
+	for range 2 {
+		ancestor := tailGitAncestryIn(townRoot, why, tailStatFails(fs.ErrPermission), run)
+		if ok, known := ancestor("c1", "c2"); ok || known {
+			t.Errorf("ancestor(c1, c2) = (%v, %v), want unknown (false, false)", ok, known)
+		}
 	}
 	if ran {
 		t.Error("git ran with no deploy repo to ask, want no run")
