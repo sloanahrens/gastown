@@ -72,17 +72,17 @@ func tailRepoRig(t *testing.T) (townRoot, binary, second, tip string) {
 	return townRoot, binary, second, tip
 }
 
-// TestTailMainPicture_ReadsTheBareReposMainNotTheStaleCheckout: the main picture
-// is the bare repo's main, the installed commit is the binary's, and behind is
-// counted between them. The checkout beside the bare repo still sits at the
-// binary, so reading it would say the binary is current.
+// TestIntegrationTailMainPicture_ReadsTheBareReposMainNotTheStaleCheckout: the main
+// picture is the bare repo's main, the installed commit is the binary's, and
+// behind is counted between them. The checkout beside the bare repo still sits
+// at the binary, so reading it would say the binary is current.
 func TestIntegrationTailMainPicture_ReadsTheBareReposMainNotTheStaleCheckout(t *testing.T) {
 	t.Parallel()
 	townRoot, binary, _, tip := tailRepoRig(t)
 
-	gotTip, installed, behind, err := tailMainPictureOf(townRoot, binary, nil)
+	gotTip, installed, behind, err := tailMainPictureIn(townRoot, binary, nil, os.Stat, version.CheckStaleBinaryOf)
 	if err != nil {
-		t.Fatalf("tailMainPictureOf: %v", err)
+		t.Fatalf("tailMainPictureIn: %v", err)
 	}
 	if want := version.ShortCommit(tip); gotTip != want {
 		t.Errorf("main tip = %s, want the bare repo's main %s", gotTip, want)
@@ -96,13 +96,12 @@ func TestIntegrationTailMainPicture_ReadsTheBareReposMainNotTheStaleCheckout(t *
 }
 
 // TestIntegrationTailMainPicture_WithoutABareRepoReadsTheCheckoutAndSaysSo: a
-// town with no .repo.git reads the checkout, and the why-log names the checkout
-// that answered. The log is written through tailMainPictureOf, so the call that
-// logs is tested.
+// town with no .repo.git reads the gt source checkout at mayor/rig, the layout a
+// real town has, and the why-log names the checkout that answered.
 func TestIntegrationTailMainPicture_WithoutABareRepoReadsTheCheckoutAndSaysSo(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	checkout := filepath.Join(townRoot, "gastown")
+	checkout := filepath.Join(townRoot, "gastown", "mayor", "rig")
 	if err := os.MkdirAll(filepath.Join(checkout, "cmd", "gt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -119,9 +118,9 @@ func TestIntegrationTailMainPicture_WithoutABareRepoReadsTheCheckoutAndSaysSo(t 
 	why := newDashWhyLog(func(format string, args ...any) {
 		lines = append(lines, fmt.Sprintf(format, args...))
 	})
-	gotTip, installed, behind, err := tailMainPictureOf(townRoot, binary, why)
+	gotTip, installed, behind, err := tailMainPictureIn(townRoot, binary, why, os.Stat, version.CheckStaleBinaryOf)
 	if err != nil {
-		t.Fatalf("tailMainPictureOf: %v", err)
+		t.Fatalf("tailMainPictureIn: %v", err)
 	}
 	if want := version.ShortCommit(binary); gotTip != want || installed != want || behind != 0 {
 		t.Errorf("picture = (%s, %s, %d), want the checkout's own commit %s, current", gotTip, installed, behind, want)
@@ -132,13 +131,13 @@ func TestIntegrationTailMainPicture_WithoutABareRepoReadsTheCheckoutAndSaysSo(t 
 	}
 }
 
-// TestTailGitAncestry_AnswersFromTheBareRepo: a commit only the bare repo holds
-// is an ancestor of its main, which the stale checkout cannot answer at all, and
-// a commit past the tip is not an ancestor of an earlier one.
+// TestIntegrationTailGitAncestry_AnswersFromTheBareRepo: a commit only the bare
+// repo holds is an ancestor of its main, which the stale checkout cannot answer
+// at all, and a commit past the tip is not an ancestor of an earlier one.
 func TestIntegrationTailGitAncestry_AnswersFromTheBareRepo(t *testing.T) {
 	t.Parallel()
 	townRoot, binary, second, tip := tailRepoRig(t)
-	ancestor := tailGitAncestry(townRoot)
+	ancestor := tailGitAncestry(townRoot, nil)
 
 	if ok, known := ancestor(second, tip); !ok || !known {
 		t.Errorf("second is ancestor of tip = (%v, %v), want (true, true) from the bare repo", ok, known)

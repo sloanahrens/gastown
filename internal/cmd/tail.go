@@ -219,7 +219,7 @@ func runTail(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	beadReads := openTailBeads(townRoot, tailTitleCacheSize)
-	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot), cutoff)
+	deploys := newTailDeploys(time.Now, tailGitAncestry(townRoot, nil), cutoff)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, rig: tailRig, kinds: kinds, cutoff: cutoff, loc: loc, now: time.Now,
 		rigNames: knownRigNames, journalFor: openTailJournal, beads: beadReads, deploys: deploys,
