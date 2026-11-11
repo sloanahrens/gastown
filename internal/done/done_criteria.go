@@ -24,7 +24,7 @@ func refuseUncheckedCriteria(issueID string, issue *beads.Issue) error {
 	for _, line := range unchecked {
 		fmt.Fprintf(&b, "  %s\n", line)
 	}
-	fmt.Fprintf(&b, "Tick each one your work satisfies, naming the box by its text (what follows '[ ] '); bd show %s prints the criteria:\n", issueID)
+	fmt.Fprintf(&b, "Tick each one your work satisfies (bd show %s prints the criteria):\n", issueID)
 	fmt.Fprintf(&b, "  gt bead tick %s \"<the box text>\"\n", issueID)
 	fmt.Fprintf(&b, "Then run gt done again. A criterion the work does not satisfy is unfinished work: finish it, or gt escalate.")
 	return fmt.Errorf("%s", b.String())
