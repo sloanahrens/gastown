@@ -548,8 +548,8 @@ func TestForgejoSizeStaleTempFromACrashedRunDoesNotBlock(t *testing.T) {
 // failure: the first refused create latches the writer and logs one line, the
 // writer stops trying until the dashboard restarts, and the pane keeps its
 // in-memory data. The load series is covered in internal/cmd, where its writer
-// lives. The overseer's report files are written by internal/daemon, not here, so
-// this package has no case for them.
+// lives. The report files are written by internal/daemon, not this package, so it
+// has no case for them.
 func TestWriterReadOnly(t *testing.T) {
 	t.Parallel()
 

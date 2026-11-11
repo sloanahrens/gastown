@@ -1850,8 +1850,8 @@ func TestDashboardLandingsNoRowAfterNow(t *testing.T) {
 // the filesystem refuses latches the writer and logs one line, the writer stops
 // trying until the dashboard restarts, and the in-memory history keeps serving
 // the page. The load series is the dashboard writer this package holds; the size
-// reports and the spend watch file are covered in internal/dashboard. The
-// overseer's report files are written by internal/daemon and have no case yet.
+// reports and the spend watch file are covered in internal/dashboard. The report
+// files are written by internal/daemon, not this package, so it has no case for them.
 func TestWriterReadOnly(t *testing.T) {
 	t.Parallel()
 
