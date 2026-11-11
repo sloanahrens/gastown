@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/sandbox"
@@ -192,8 +193,10 @@ func TestSeatEndUsageFailureNeverBlocks(t *testing.T) {
 		wantIncomplete int
 	}{
 		{
-			name:  "a seat with no transcript writes no record and logs nothing",
-			files: func(*testing.T, string) []string { return nil },
+			name:           "a seat with no transcript writes no record and logs the reason once",
+			files:          func(*testing.T, string) []string { return nil },
+			wantWrites:     0,
+			wantNotWritten: 1,
 		},
 		{
 			name: "a transcript with no session id is logged once and writes nothing",
@@ -731,4 +734,153 @@ func TestSeatEndUsageRefusesAStartItCannotMatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSeatEndUsageLogsOneLineForItsOutcome: every seat end logs exactly one line
+// about its usage record. A record that is written names its path; a seat whose
+// transcripts cannot be counted names the reason, and the seat is removed all the
+// same.
+func TestSeatEndUsageLogsOneLineForItsOutcome(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		// list names the seat's transcripts; nil is none on the host.
+		list func(t *testing.T, town string) []string
+		// wantLine is the one usage line the seat end logs, as a substring, given the town.
+		wantLine func(town string) string
+		// wantWrite is whether the usage writer is called.
+		wantWrite bool
+	}{
+		{
+			name: "a written record logs its path",
+			list: func(t *testing.T, town string) []string {
+				path := filepath.Join(town, "transcripts", "seat.jsonl")
+				writeUsageTranscript(t, path, start.Add(time.Hour), seatCallLine("ok", 1, 0, 1))
+				return []string{path}
+			},
+			wantLine: func(town string) string {
+				return "wrote its usage record " + usageattrib.WorkRecordPath(filepath.Join(town, ".runtime", "usage"), endBead) + " for bead " + endBead
+			},
+			wantWrite: true,
+		},
+		{
+			name: "transcripts the daemon cannot reach log the reason",
+			list: func(*testing.T, string) []string { return nil },
+			wantLine: func(string) string {
+				return "its usage record is not written: no transcript of its sessions is on the host"
+			},
+		},
+		{
+			name: "transcripts all written before the seat started log the reason",
+			list: func(t *testing.T, town string) []string {
+				path := filepath.Join(town, "transcripts", "predecessor.jsonl")
+				writeUsageTranscript(t, path, start.Add(-time.Hour), seatCallLine("old", 1, 0, 1))
+				return []string{path}
+			},
+			wantLine: func(string) string {
+				return "its usage record is not written: none of its 1 transcripts was written since it started"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newSeatEndFake(t)
+			f.seedAgent()
+			f.retire(intent.DesiredStop)
+			f.host.d.clock = clockwork.NewFakeClockAt(end)
+			f.writeSeatRecordAt(start)
+			dirs := f.seatDirs()
+			var logs bytes.Buffer
+			f.host.d.logger = log.New(&logs, "", 0)
+			writes := 0
+			f.host.seatUsage = seatUsageHook{
+				list: func(_, _ string) ([]string, error) { return tt.list(t, f.town), nil },
+				write: func(string, dashboard.UsageRecord, []string) error {
+					writes++
+					return nil
+				},
+			}
+
+			finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+			if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+				t.Fatal("the finished seat was not removed")
+			}
+			if dirExists(t, dirs.PolecatDir) {
+				t.Error("the seat's directories are still there after the removal")
+			}
+			if (writes == 1) != tt.wantWrite {
+				t.Errorf("usage writes = %d, want written %v", writes, tt.wantWrite)
+			}
+			lines := usageLogLines(logs.String())
+			if len(lines) != 1 {
+				t.Fatalf("usage lines = %d, want exactly 1; log:\n%s", len(lines), logs.String())
+			}
+			if want := tt.wantLine(f.town); !strings.Contains(lines[0], want) {
+				t.Errorf("usage line %q does not contain %q", lines[0], want)
+			}
+		})
+	}
+}
+
+// TestSeatEndUsageUnreachableFromTheDaemonSaysSo runs the production transcript
+// lister against a seat whose sessions wrote their transcripts inside the sandbox:
+// the host's Claude config and home hold none for the seat, so nothing is read.
+// The end must log the reason, naming where the transcripts are and how they
+// would come in, not stay silent.
+func TestSeatEndUsageUnreachableFromTheDaemonSaysSo(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	f := newSeatEndFake(t)
+	f.seedAgent()
+	f.retire(intent.DesiredStop)
+	dirs := f.seatDirs()
+	f.host.d.clock = clockwork.NewFakeClockAt(end)
+	f.writeSeatRecordAt(start)
+	emptyConfig := filepath.Join(f.town, "no-claude-config")
+	emptyHome := filepath.Join(f.town, "no-home")
+	f.host.seatUsage = seatUsageHook{
+		list: func(townRoot, workDir string) ([]string, error) {
+			return agentlog.ProjectTranscriptsFrom(townRoot, workDir,
+				func() (string, error) { return emptyConfig, nil },
+				func() (string, error) { return emptyHome, nil })
+		},
+		write: func(string, dashboard.UsageRecord, []string) error {
+			t.Error("a seat whose transcripts are unreachable wrote a record")
+			return nil
+		},
+	}
+	var logs bytes.Buffer
+	f.host.d.logger = log.New(&logs, "", 0)
+
+	finished := sandboxSeatLanding{BeadID: endBead, Branch: endBranch, Landed: true}
+	if !f.host.endFinishedSandboxSeat(endRig, endPolecat, finished) {
+		t.Fatal("the seat with unreachable transcripts was not removed")
+	}
+	if dirExists(t, dirs.PolecatDir) {
+		t.Error("the seat's directories are still there after the removal")
+	}
+	lines := usageLogLines(logs.String())
+	if len(lines) != 1 {
+		t.Fatalf("usage lines = %d, want exactly 1; log:\n%s", len(lines), logs.String())
+	}
+	for _, want := range []string{"usage record is not written", "/sandbox/.claude/projects", "copy"} {
+		if !strings.Contains(lines[0], want) {
+			t.Errorf("usage line %q does not contain %q", lines[0], want)
+		}
+	}
+}
+
+// usageLogLines returns the log lines about a usage record.
+func usageLogLines(log string) []string {
+	var out []string
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "usage record") {
+			out = append(out, line)
+		}
+	}
+	return out
 }
