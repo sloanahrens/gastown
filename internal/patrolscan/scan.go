@@ -521,6 +521,11 @@ func firstBlocker(blockers []WorkRef) (WorkRef, bool) {
 // because a blocking dependency holds it: what holds it, the exit the seat's
 // last turn ended on, and what lets the bead resume. It carries no time, so a
 // retried release writes the same line and the tick can tell it is there.
+//
+// Deferral is the bead's resting place, not a wait the patrol retries: nothing
+// reopens the bead when the blocker lands, because the patrol cannot know what
+// the blocker's landing means for the work. The line names the blocker so a
+// human can undefer it then (gt-otb5m3).
 func DeferredBlockerNote(blocker WorkRef, exit string) string {
 	return fmt.Sprintf("patrol_scan: deferred: blocked by unresolved dependency %s (%s); the seat's last turn exited %s and was released instead of restarted. Undefer this bead once %s lands.",
 		blocker.ID, blockerStatus(blocker), exit, blocker.ID)
@@ -567,14 +572,15 @@ type Env interface {
 	WorkBead(rig, id string) (*Work, error)
 	// BlockingDeps returns the bead's unresolved blocking dependencies — the
 	// edges the dispatcher's own admission refuses the bead for — each with
-	// the status the read reported. An error means the read could not answer,
-	// and the tick acts on nothing.
+	// the status the read reported. An error, including a bead the read cannot
+	// find, means the read could not answer, and the tick acts on nothing.
 	BlockingDeps(rig, beadID string) ([]WorkRef, error)
-	// DeferBlocked defers a bead whose seat cannot proceed on it: it appends
-	// note to the bead's notes (when note is not empty), then sets the bead
-	// deferred and clears its assignment, but only while it is still assigned
-	// to assignee. It reports whether the bead changed; false with no error
-	// means another actor took the bead since the read.
+	// DeferBlocked defers a bead whose seat cannot proceed on it: it sets the
+	// bead deferred and clears its assignment, but only while it is still
+	// assigned to assignee, then appends note to the bead's notes (when note is
+	// not empty). It reports whether the bead changed; false with no error
+	// means another actor took the bead since the read. An error with true
+	// means the bead is deferred but its note was not recorded.
 	DeferBlocked(rig, beadID, assignee, note string) (bool, error)
 	// ClearSubmission ends a submitted seat's wait whose work bead is no
 	// longer submitted for landing, so the ordinary path can decide what the
@@ -1270,9 +1276,11 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 // so the pool can allocate it again, and the bead is deferred to nobody with a
 // note naming the blocker, so a human reading it knows why it sits.
 //
-// Every write fails closed. The note goes in with the deferral so a deferral
-// that lands always carries its reason; a guarded deferral that no longer holds
-// means another actor took the bead, and the seat is left to that actor.
+// Every write fails closed. A guarded deferral that no longer holds means
+// another actor took the bead, and the seat is left to that actor. The note is
+// appended only once the deferral landed, so it never sits on a bead we did not
+// defer; a note write that fails after it is reported as the failed step it is,
+// and the seat is left for the next tick, which sees the bead is nobody's.
 func (s *Scanner) releaseBlocked(rig, name string, work *Work, exit string, blocker WorkRef, spanNote string) (Finding, bool) {
 	f := Finding{Kind: "seat", Subject: name}
 	note := DeferredBlockerNote(blocker, exit)
@@ -1281,7 +1289,12 @@ func (s *Scanner) releaseBlocked(rig, name string, work *Work, exit string, bloc
 	}
 	moved, err := s.env.DeferBlocked(rig, work.ID, work.Assignee, note)
 	if err != nil {
-		f.Outcome, f.Detail = OutcomeFailed, "deferring "+work.ID+": "+err.Error()+spanNote
+		f.Outcome = OutcomeFailed
+		if moved {
+			f.Detail = work.ID + " is deferred, but " + err.Error() + spanNote
+		} else {
+			f.Detail = "deferring " + work.ID + ": " + err.Error() + spanNote
+		}
 		return f, true
 	}
 	if !moved {

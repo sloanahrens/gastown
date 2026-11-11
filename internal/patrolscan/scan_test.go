@@ -114,12 +114,15 @@ type fakeEnv struct {
 	blockers     map[string][]WorkRef
 	blockerErr   map[string]error
 	blockerReads []string // beads BlockingDeps was asked about
-	// deferErr makes DeferBlocked fail for a bead, and deferStale names beads
-	// whose guarded deferral no longer holds (another actor took them).
-	deferErr   map[string]error
-	deferStale map[string]bool
-	deferred   []string // "bead=assignee" per DeferBlocked
-	deferNotes []string // the note handed to each successful deferral
+	// deferErr makes DeferBlocked fail before any write for a bead, and
+	// deferStale names beads whose guarded deferral no longer holds (another
+	// actor took them). deferNoteErr names beads whose transfer lands but whose
+	// note write fails afterwards.
+	deferErr     map[string]error
+	deferStale   map[string]bool
+	deferNoteErr map[string]bool
+	deferred     []string // "bead=assignee" per DeferBlocked
+	deferNotes   []string // the note handed to each deferral that recorded one
 
 	// raised are the escalation records the rig's polecats raised, and
 	// raisedErr makes the read fail.
@@ -172,6 +175,7 @@ func newFake() *fakeEnv {
 		clearSeatErr: map[string]error{},
 		blockers:     map[string][]WorkRef{}, blockerErr: map[string]error{},
 		deferErr: map[string]error{}, deferStale: map[string]bool{},
+		deferNoteErr: map[string]bool{},
 	}
 }
 
@@ -216,8 +220,9 @@ func (f *fakeEnv) BlockingDeps(_, id string) ([]WorkRef, error) {
 	return f.blockers[id], nil
 }
 
-// DeferBlocked mirrors the host's write: the note lands on the bead, then the
-// guarded transfer sets it deferred and clears its assignment.
+// DeferBlocked mirrors the host's write: the guarded transfer sets the bead
+// deferred and clears its assignment, and the note lands only after it, so a
+// bead the deferral never touched carries no note.
 func (f *fakeEnv) DeferBlocked(_, id, assignee, note string) (bool, error) {
 	if err := f.deferErr[id]; err != nil {
 		return false, err
@@ -225,14 +230,21 @@ func (f *fakeEnv) DeferBlocked(_, id, assignee, note string) (bool, error) {
 	if f.deferStale[id] {
 		return false, nil
 	}
-	f.deferred = append(f.deferred, id+"="+assignee)
-	f.deferNotes = append(f.deferNotes, note)
 	for _, w := range f.work {
-		if w.ID != id {
-			continue
+		if w.ID == id {
+			w.Status, w.Assignee = "deferred", ""
 		}
-		w.Status, w.Assignee = "deferred", ""
-		if note != "" {
+	}
+	f.deferred = append(f.deferred, id+"="+assignee)
+	if f.deferNoteErr[id] {
+		return true, errors.New("appending the deferral note: bd update: exit status 1")
+	}
+	f.deferNotes = append(f.deferNotes, note)
+	if note != "" {
+		for _, w := range f.work {
+			if w.ID != id {
+				continue
+			}
 			if w.Notes != "" {
 				w.Notes += "\n"
 			}

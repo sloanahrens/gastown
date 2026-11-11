@@ -221,6 +221,15 @@ func TestBlockedReleaseFailures(t *testing.T) {
 			deferred: true,
 			detail:   "releasing the seat",
 		},
+		{
+			// The transfer landed, so the bead is deferred; the note did not,
+			// and the tick reports the missing reason rather than a release.
+			name:     "a deferral whose note fails is reported as deferred without its reason",
+			setup:    func(env *fakeEnv) { env.deferNoteErr["gt-ruby"] = true },
+			outcome:  OutcomeFailed,
+			deferred: true,
+			detail:   "is deferred, but appending the deferral note",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

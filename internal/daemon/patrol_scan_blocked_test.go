@@ -56,8 +56,9 @@ func TestPatrolScanBlockingDeps(t *testing.T) {
 			want: []string{"myr-b=open"},
 		},
 		{
-			name: "a bead bd says is gone has nothing blocking it",
-			show: map[string]*beads.Issue{},
+			name:    "a bead bd says is not found is an unanswered read, not an unblocked bead",
+			show:    map[string]*beads.Issue{},
+			wantErr: true,
 		},
 		{
 			name:    "an unreadable bead is an error",
@@ -146,7 +147,7 @@ func TestPatrolScanDeferBlocked(t *testing.T) {
 		}
 	})
 
-	t.Run("a bead another actor holds is left to it", func(t *testing.T) {
+	t.Run("a bead another actor holds is left to it, note and all", func(t *testing.T) {
 		t.Parallel()
 		h, db := newHost()
 		pearl := "myr/polecats/pearl"
@@ -154,7 +155,9 @@ func TestPatrolScanDeferBlocked(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		moved, err := h.DeferBlocked("myr", "myr-a", seat, "")
+		// The note must not land on a bead the deferral never touched: only a
+		// landed guarded transfer earns it (gt-otb5m3 rework).
+		moved, err := h.DeferBlocked("myr", "myr-a", seat, "deferred: blocked by myr-b")
 		if err != nil || moved {
 			t.Fatalf("DeferBlocked with a stale guard = %v, %v; want false, nil", moved, err)
 		}
@@ -164,6 +167,9 @@ func TestPatrolScanDeferBlocked(t *testing.T) {
 		}
 		if is.Status != "hooked" || is.Assignee != "myr/polecats/pearl" {
 			t.Fatalf("bead = %s/%q, want the new holder's", is.Status, is.Assignee)
+		}
+		if is.Notes != "" {
+			t.Fatalf("notes = %q; a bead another actor holds must not get our note", is.Notes)
 		}
 	})
 
@@ -183,7 +189,7 @@ func TestPatrolScanDeferBlocked(t *testing.T) {
 		}
 	})
 
-	t.Run("a failed note write leaves the bead hooked", func(t *testing.T) {
+	t.Run("a failed note write after the deferral reports moved with the error", func(t *testing.T) {
 		t.Parallel()
 		db := beadsfake.New()
 		db.Seed(beads.Issue{ID: "myr-a", Status: "hooked", Assignee: seat})
@@ -194,15 +200,21 @@ func TestPatrolScanDeferBlocked(t *testing.T) {
 			},
 		}
 
-		if _, err := h.DeferBlocked("myr", "myr-a", seat, "note"); err == nil {
-			t.Fatal("DeferBlocked with a failed note write = nil; want an error")
+		// The transfer ran first and landed, so the bead is deferred; only its
+		// reason is missing. moved=true tells the caller the bead changed.
+		moved, err := h.DeferBlocked("myr", "myr-a", seat, "note")
+		if err == nil || !moved {
+			t.Fatalf("DeferBlocked with a failed note write = %v, %v; want true and an error", moved, err)
 		}
 		is, err := db.Show("myr-a")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if is.Status != "hooked" || is.Assignee != seat {
-			t.Fatalf("bead = %s/%q, want it left hooked", is.Status, is.Assignee)
+		if is.Status != string(beads.StatusDeferred) || is.Assignee != "" {
+			t.Fatalf("bead = %s/%q, want deferred and unassigned", is.Status, is.Assignee)
+		}
+		if is.Notes != "" {
+			t.Fatalf("notes = %q, want none written", is.Notes)
 		}
 	})
 
@@ -217,7 +229,9 @@ func TestPatrolScanDeferBlocked(t *testing.T) {
 			},
 		}
 
-		moved, err := h.DeferBlocked("myr", "myr-a", seat, "")
+		// The note must not land when the status write it describes did not:
+		// the transfer runs first and nothing else is written after it fails.
+		moved, err := h.DeferBlocked("myr", "myr-a", seat, "deferred: blocked by myr-b")
 		if err == nil || moved {
 			t.Fatalf("DeferBlocked with a failed transfer = %v, %v; want false and an error", moved, err)
 		}
@@ -227,6 +241,9 @@ func TestPatrolScanDeferBlocked(t *testing.T) {
 		}
 		if is.Status != "hooked" {
 			t.Fatalf("bead status = %s, want it left hooked", is.Status)
+		}
+		if is.Notes != "" {
+			t.Fatalf("notes = %q; a failed status write must leave no note claiming a deferral", is.Notes)
 		}
 	})
 }

@@ -591,15 +591,14 @@ func (h *patrolScanHost) WorkBead(rig, id string) (*patrolscan.Work, error) {
 // BlockingDeps reads the bead's unresolved blocking dependencies through the
 // dispatcher's own admission rule (sling.Admit and spec's blocked check both
 // ask beads.UnresolvedBlockerIDs), so the tick releases a seat for exactly the
-// edges a sling would refuse the bead over. A bead bd says is not found has
-// nothing blocking it: the seat's work read that named it is older than this
-// one, and a later tick sees the bead is gone.
+// edges a sling would refuse the bead over. The tick's own work read named the
+// bead on this reader, so a Show that cannot answer — not found included — is
+// an inconsistent read, not proof of an unblocked bead: it is returned as an
+// error so the tick acts on nothing rather than resuming a blocked seat
+// (gt-otb5m3 rework).
 func (h *patrolScanHost) BlockingDeps(rig, id string) ([]patrolscan.WorkRef, error) {
 	issue, err := h.readBeads(rig).Show(id)
 	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			return nil, nil
-		}
 		return nil, fmt.Errorf("bd show %s: %w", id, err)
 	}
 	if issue == nil {
