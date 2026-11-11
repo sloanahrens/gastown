@@ -41,13 +41,14 @@ type tailOnce struct{ last string }
 // the next time its title is asked for.
 const tailTitleCacheSize = 512
 
-// dashboardTitleCacheSize bounds the titles the dashboard's reader keeps. The
-// landings page shows up to recentLandingRows rows and needs a title for each,
-// so a bound under that row count evicts titles the page still shows before the
-// fill reads them, and the fill never settles (gt-bjhc3r). The bound is twice
-// the row count because the same reader serves the dashboard's event feed, and
-// the feed's titles share the cache with the page's rows.
-const dashboardTitleCacheSize = 2 * recentLandingRows
+// dashboardTitleCacheSize bounds the titles the dashboard's reader keeps. One
+// reader serves two readers of titles: the landings page, which shows up to
+// recentLandingRows rows and needs a title for each, and the event feed, whose
+// working set is what tailTitleCacheSize was sized for (a gt tail run keeps the
+// same stream). A bound under the page's row count evicts titles the page still
+// shows before the fill reads them, and the fill never settles (gt-bjhc3r), so
+// the bound is the page's rows plus the feed's own share.
+const dashboardTitleCacheSize = recentLandingRows + tailTitleCacheSize
 
 // tailMissingCacheSize bounds the not-found ids one run remembers. A bead
 // deleted a moment after it was created is asked about once per journal record

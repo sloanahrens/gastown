@@ -409,7 +409,8 @@ func TestRecentLandingsFillTitlesOverPolls(t *testing.T) {
 // TestDashboardTitleCacheHoldsAFullPage: the dashboard's reader is bounded at
 // least at recentLandingRows, so the titles of a full page all fit and the fill
 // can settle. A reader bounded lower evicts titles the page still shows
-// (gt-bjhc3r).
+// (gt-bjhc3r). TestDashboardHubReadsTitlesThroughOpenDashboardBeads guards
+// that newDashboardHub builds this reader and no other.
 func TestDashboardTitleCacheHoldsAFullPage(t *testing.T) {
 	t.Parallel()
 	if got := openDashboardBeads(t.TempDir()).max; got < recentLandingRows {
