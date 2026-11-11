@@ -3,8 +3,6 @@ package testpolicy
 import (
 	"fmt"
 	"go/ast"
-	"go/build"
-	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -37,21 +35,22 @@ func StartsContainers(dir string) ([]token.Position, error) {
 	if err != nil {
 		return nil, err
 	}
-	fset := token.NewFileSet()
+	src := sourcesFor(dir)
+	fset := src.fset
 	var calls []token.Position
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		ok, err := build.Default.MatchFile(dir, name)
+		ok, err := src.matches(dir, name)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
+			return nil, err
 		}
 		if !ok {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		f, err := src.parse(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}
@@ -131,21 +130,22 @@ func exportedEntryWrappers(dir string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	fset := token.NewFileSet()
+	src := sourcesFor(dir)
+	fset := src.fset
 	var out []string
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		ok, err := build.Default.MatchFile(dir, name)
+		ok, err := src.matches(dir, name)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
+			return nil, err
 		}
 		if !ok {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		f, err := src.parse(filepath.Join(dir, name))
 		if err != nil {
 			return nil, err
 		}

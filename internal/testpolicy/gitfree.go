@@ -3,8 +3,6 @@ package testpolicy
 import (
 	"fmt"
 	"go/ast"
-	"go/build"
-	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -105,21 +103,22 @@ func unitTierTestFiles(dir string) (*token.FileSet, []*ast.File, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	fset := token.NewFileSet()
+	src := sourcesFor(dir)
+	fset := src.fset
 	var files []*ast.File
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		ok, err := build.Default.MatchFile(dir, name)
+		ok, err := src.matches(dir, name)
 		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", filepath.Join(dir, name), err)
+			return nil, nil, err
 		}
 		if !ok {
 			continue
 		}
-		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.ParseComments)
+		f, err := src.parse(filepath.Join(dir, name))
 		if err != nil {
 			return nil, nil, err
 		}
