@@ -1,0 +1,64 @@
+{
+  "hours": [
+    {
+      "hour": "2026-11-11T14:00:00Z",
+      "points": 13,
+      "weighted": 4,
+      "unweighted": 1,
+      "rejected_points": 3,
+      "rejected_unweighted": 1,
+      "smoothed": 2.5,
+      "d1": -0.5,
+      "d2": 0.25,
+      "d1_state": "signal",
+      "d2_state": "noise"
+    },
+    {
+      "hour": "2026-11-11T15:00:00Z",
+      "points": 5,
+      "weighted": 2,
+      "unweighted": 0,
+      "rejected_points": 0,
+      "rejected_unweighted": 0,
+      "d1_state": "insufficient",
+      "d2_state": "insufficient"
+    }
+  ],
+  "classes": {
+    "all": [
+      {
+        "hour": "2026-11-11T14:00:00Z",
+        "points": 13,
+        "weighted": 4,
+        "unweighted": 1,
+        "rejected_points": 3,
+        "rejected_unweighted": 1,
+        "smoothed": 2.5,
+        "d1": -0.5,
+        "d2": 0.25,
+        "d1_state": "signal",
+        "d2_state": "noise"
+      }
+    ],
+    "haiku": [
+      {
+        "hour": "2026-11-11T14:00:00Z",
+        "points": 8,
+        "weighted": 2,
+        "unweighted": 1,
+        "rejected_points": 0,
+        "rejected_unweighted": 0,
+        "smoothed": 1.5,
+        "d1_state": "noise",
+        "d2_state": "insufficient"
+      }
+    ]
+  },
+  "figures": {
+    "points_24h": 21,
+    "unweighted_24h": 1,
+    "now_per_hour": 3,
+    "avg_per_hour": 2.5,
+    "median_per_landing": 5
+  }
+}
