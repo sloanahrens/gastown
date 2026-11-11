@@ -669,6 +669,43 @@ func TestAttentionCollector_ReviewRejectedTitle(t *testing.T) {
 	}
 }
 
+// TestAttentionCollector_ReviewRejectedReadFailure: a failed read is the
+// collector's error, so the queue keeps the previous tick's items rather than
+// reading a bead it could not see as clean.
+func TestAttentionCollector_ReviewRejectedReadFailure(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name  string
+		setup func(f *attentionFixture)
+	}{
+		{name: "the rework list fails", setup: func(f *attentionFixture) {
+			f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+				return nil, errors.New("bd list failed")
+			}
+		}},
+		{name: "a bead's notes cannot be read", setup: func(f *attentionFixture) {
+			f.src.rework = func(context.Context, string) ([]*beads.Issue, error) {
+				return []*beads.Issue{{ID: "gt-r", Status: "open", UpdatedAt: "t1", CreatedBy: "town/crew/dipper"}}, nil
+			}
+			f.src.reworkNote = func(context.Context, string, string) (string, error) {
+				return "", errors.New("bd show failed")
+			}
+		}},
+	}
+	for _, c := range cases {
+		f := newAttentionFixture(t, now)
+		c.setup(f)
+		items, err := f.src.collectReviewRejected(context.Background())
+		if err == nil {
+			t.Errorf("%s: err nil with items %+v, want the read error", c.name, items)
+		}
+		if len(items) != 0 {
+			t.Errorf("%s: items %+v, want none on a failed read", c.name, items)
+		}
+	}
+}
+
 func TestAttentionCollector_RejectedTwice(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
