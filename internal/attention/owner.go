@@ -122,6 +122,9 @@ var ruleOwners = map[string]Owner{
 	// look at: the overseer re-runs it or finds what stopped it before a person
 	// is woken (gt-3vafwr).
 	RuleImagesFailed: OwnerOverseer,
+	// A green commit whose build status could not be read is the overseer's to
+	// look at, the same as the unreadable pair check (gt-3vafwr).
+	RuleImagesUnknown: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

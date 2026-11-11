@@ -940,6 +940,7 @@ func TestImagesFailedRaisesAnItemForAFailedRun(t *testing.T) {
 			require.NotEmpty(t, fx.api.runsQueries, "the images runs were not read")
 			assert.Equal(t, pairReadyImagesWorkflow, fx.api.runsQueries[0].WorkflowID)
 			assert.Equal(t, pairGreen, fx.api.runsQueries[0].HeadSHA)
+			assert.Empty(t, fx.api.runsQueries[0].Event, "the run was looked up for one event, not every event")
 		})
 	}
 }
@@ -1004,12 +1005,12 @@ func TestImagesFailedWithAnUnreadableLogStillRaises(t *testing.T) {
 		{
 			name:  "the run's jobs cannot be listed",
 			apply: func(fx *pairFixture) { fx.api.jobsErr = errors.New("forgejo answered 500 on the job list") },
-			want:  "the job log could not be read: forgejo answered 500 on the job list",
+			want:  `the job log could not be read: log: "forgejo answered 500 on the job list"`,
 		},
 		{
 			name:  "the job's log cannot be read",
 			apply: func(fx *pairFixture) { fx.api.logErr = errors.New("forgejo answered 404 on the log") },
-			want:  "the job log could not be read: forgejo answered 404 on the log",
+			want:  `the job log could not be read: log: "forgejo answered 404 on the log"`,
 		},
 		{
 			name:  "the run names no job",
@@ -1088,10 +1089,11 @@ func TestImagesFailedAbsentRunKeepsItsItem(t *testing.T) {
 	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
 }
 
-// TestImagesFailedRunListErrorSkipsOnlyThatCheck: a run list that cannot be read
-// says nothing about the commit. The check logs it once and keeps what it held
-// for the commit; it does not mark the rig unreadable, so the pass still answers.
-func TestImagesFailedRunListErrorSkipsOnlyThatCheck(t *testing.T) {
+// TestImagesUnknownRaisesWhenTheRunListCannotBeRead: a run list that cannot be
+// read says nothing about the commit, and it is not a clean commit. The commit
+// gets one images-unknown item naming the error as quoted data; the rig is not
+// marked unreadable, so the pass still answers for its other commits.
+func TestImagesUnknownRaisesWhenTheRunListCannotBeRead(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name  string
@@ -1101,12 +1103,12 @@ func TestImagesFailedRunListErrorSkipsOnlyThatCheck(t *testing.T) {
 		{
 			name:  "the run list fails",
 			apply: func(fx *pairFixture) { fx.api.runErr = errors.New("forgejo answered 500 on the run list") },
-			want:  "forgejo answered 500 on the run list",
+			want:  `log: "forgejo answered 500 on the run list"`,
 		},
 		{
 			name:  "the run list answers nothing",
 			apply: func(fx *pairFixture) { fx.api.nilList = true },
-			want:  "the list is not there",
+			want:  `log: "the list is not there"`,
 		},
 	}
 	for _, tc := range cases {
@@ -1118,16 +1120,22 @@ func TestImagesFailedRunListErrorSkipsOnlyThatCheck(t *testing.T) {
 
 			fx.run(pairT0)
 
-			assert.Empty(t, fx.check.observed(), "an unreadable run list raised an item or marked the rig unreadable")
-			require.Len(t, fx.logs, 1, "the unreadable run list was not logged once")
-			assert.Contains(t, fx.logs[0], tc.want)
-			assert.Contains(t, fx.logs[0], pairGreen12)
+			items := fx.check.observed()
+			require.Len(t, items, 1, "an unreadable run list did not raise one unknown item")
+			it := items[0]
+			assert.Equal(t, attention.KindImagesUnknown, it.Kind)
+			assert.Equal(t, "images-unknown:gastown:"+pairGreen12, it.Key)
+			assert.Equal(t, pairGreen, it.SHA)
+			assert.Equal(t, attention.RuleImagesUnknown, attention.RuleFor(it))
+			assert.Contains(t, it.Summary, "images status unknown for "+pairGreen12+": the run list could not be read")
+			assert.Contains(t, it.Summary, tc.want)
 		})
 	}
 }
 
 // TestImagesFailedRunListErrorKeepsWhatItHeld: after a failed run raised its
-// item, a run list that then fails keeps that item rather than clearing it.
+// item, a run list that then fails keeps that failed item, since the failure is
+// still known, and raises the unknown item beside it, since the status is not.
 func TestImagesFailedRunListErrorKeepsWhatItHeld(t *testing.T) {
 	t.Parallel()
 	fx := newPairFixture(t)
@@ -1139,8 +1147,141 @@ func TestImagesFailedRunListErrorKeepsWhatItHeld(t *testing.T) {
 	fx.api.runErr = errors.New("forgejo answered 500 on the run list")
 	fx.run(pairT0.Add(pairReadyInterval))
 
+	// observed is ordered by key, so the failed item (images-failed:) precedes
+	// the unknown one (images-unknown:).
 	items := fx.check.observed()
-	require.Len(t, items, 1, "an unreadable run list cleared the failure it had raised")
+	require.Len(t, items, 2, "an unreadable run list cleared the failure it had raised, or raised no unknown item")
+	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+	assert.Equal(t, attention.KindImagesUnknown, items[1].Kind)
+}
+
+// TestImagesUnknownLogsOncePerStreak: a run list that keeps failing is logged
+// when the streak starts and not on each read it stays failed. A readable list
+// ends the streak, so the next failure is logged again.
+func TestImagesUnknownLogsOncePerStreak(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.api.runErr = errors.New("forgejo answered 500 on the run list")
+
+	fx.run(pairT0)
+	fx.run(pairT0.Add(pairReadyInterval))
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+	require.Len(t, fx.logs, 1, "a failing run list was logged on every read of its streak")
+	require.Len(t, fx.check.observed(), 1, "the streak did not hold one unknown item")
+
+	fx.api.runErr = nil
+	fx.run(pairT0.Add(3 * pairReadyInterval))
+	assert.Empty(t, fx.check.observed(), "a readable run list with no run for the commit did not clear the unknown item")
+
+	fx.api.runErr = errors.New("forgejo answered 503 on the run list")
+	fx.run(pairT0.Add(4 * pairReadyInterval))
+	require.Len(t, fx.logs, 2, "a new streak after a readable list was not logged")
+	assert.Contains(t, fx.logs[1], "503")
+	require.Len(t, fx.check.observed(), 1)
+}
+
+// TestImagesUnknownIsClearedByAReadableList: the first readable run list answers
+// the commit, whatever it says, so the unknown item goes: a succeeded run and an
+// absent run clear it, and a failed run replaces it with the failed item.
+func TestImagesUnknownIsClearedByAReadableList(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		apply func(fx *pairFixture)
+		want  attention.Kind
+	}{
+		{
+			name:  "a succeeded run",
+			apply: func(fx *pairFixture) { fx.setImagesRun(pairGreen, deployRunSucceeded) },
+		},
+		{
+			name:  "no run for the commit",
+			apply: func(fx *pairFixture) { fx.api.runs = nil },
+		},
+		{
+			name:  "a failed run",
+			apply: func(fx *pairFixture) { fx.setImagesRun(pairGreen, deployRunFailed) },
+			want:  attention.KindImagesFailed,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newPairFixture(t)
+			fx.reg = &fakePairRegistry{}
+			fx.api.runErr = errors.New("forgejo answered 500 on the run list")
+			fx.run(pairT0)
+			require.Len(t, fx.check.observed(), 1)
+
+			fx.api.runErr = nil
+			tc.apply(fx)
+			fx.run(pairT0.Add(pairReadyInterval))
+
+			items := fx.check.observed()
+			if tc.want == "" {
+				assert.Empty(t, items, "a readable run list left the unknown item standing")
+				return
+			}
+			require.Len(t, items, 1, "the unknown item was not replaced by the readable answer")
+			assert.Equal(t, tc.want, items[0].Kind)
+		})
+	}
+}
+
+// TestImagesFailedKeptByAnUnreadableRigIsNotReRead: a rig whose read fails keeps
+// the failed item it held, and the failed run's answer with it, so the next
+// readable read reuses the item instead of reading the job and its log again.
+func TestImagesFailedKeptByAnUnreadableRigIsNotReRead(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+	reads := fx.api.jobReads
+	require.NotZero(t, reads, "the failed run's log was not read")
+
+	fx.rigErr = errors.New("the rig's settings are unreadable")
+	fx.run(pairT0.Add(pairReadyInterval))
+	require.NotEmpty(t, fx.check.observed())
+
+	fx.rigErr = nil
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+
+	assert.Equal(t, reads, fx.api.jobReads, "a failed run kept through an unreadable read had its job or log read again")
+	items := fx.check.observed()
+	require.Len(t, items, 1)
+	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
+	assert.Contains(t, items[0].Summary, pairImagesLine)
+}
+
+// TestImagesFailedKeptByAPartialScanIsNotReRead: a scan that stops before the
+// green commit keeps the failed item it held for that commit, and the failed
+// run's answer with it, so the next full scan reuses the item instead of reading
+// the job and its log again.
+func TestImagesFailedKeptByAPartialScanIsNotReRead(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.reg = &fakePairRegistry{}
+	fx.setImagesRun(pairGreen, deployRunFailed)
+	fx.run(pairT0)
+	require.Len(t, fx.check.observed(), 1)
+	reads := fx.api.jobReads
+	require.NotZero(t, reads, "the failed run's log was not read")
+
+	// Without the comparison the scan cannot judge the green commit, so it stops
+	// there and keeps what it held for that commit.
+	delete(fx.api.compares, pairGreen+"..."+pairRunning)
+	fx.run(pairT0.Add(pairReadyInterval))
+	require.NotEmpty(t, fx.check.observed(), "the partial scan dropped the failed item it could not judge")
+
+	fx.api.compares[pairGreen+"..."+pairRunning] = 0
+	fx.run(pairT0.Add(2 * pairReadyInterval))
+
+	assert.Equal(t, reads, fx.api.jobReads, "a failed run kept through a partial scan had its job or log read again")
+	items := fx.check.observed()
+	require.Len(t, items, 1)
 	assert.Equal(t, attention.KindImagesFailed, items[0].Kind)
 }
 

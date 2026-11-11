@@ -20,7 +20,9 @@ package daemon
 // scan raises an item for it naming the commit and the first "Error:" line of the
 // job it ran (images.failed). One item per commit: a re-scan keeps it, and a
 // later green run for the commit clears it (gt-3vafwr). A failed run's answer is
-// reused while it stays the commit's newest run, so its job log is read once.
+// reused while it stays the commit's newest run, so its job log is read once. A
+// run list the scan cannot read raises images.unknown for that commit, since a
+// failure to look is not a clean commit; the next readable list clears it.
 //
 // It reads through the viewer's credential and never rolls, pulls or changes a
 // branch, so it is not a lifecycle step.
@@ -86,6 +88,9 @@ const (
 	// imagesFailedKeyPrefix keys one item: images-failed:<rig>:<sha12>, one per
 	// commit.
 	imagesFailedKeyPrefix = "images-failed:"
+	// imagesUnknownKeyPrefix keys one item: images-unknown:<rig>:<sha12>, one per
+	// commit whose run list could not be read.
+	imagesUnknownKeyPrefix = "images-unknown:"
 )
 
 // pairReadyAPI is the viewer's read of a rig's Forgejo repository: its green
@@ -137,9 +142,10 @@ type pairReadyCheck struct {
 	// fails counts a rig's consecutive failed reads, keyed like held, with
 	// pairReadyTownState for the reads made for every rig at once.
 	fails map[string]int
-	// failed holds, per images-failed key, the failed run the last read found for
-	// that commit. A read that finds the same run as the commit's newest one reuses
-	// its item rather than reading the job and its log again.
+	// failed holds, per images-failed key, the failed run that answers the item the
+	// rig holds for that commit: the run the last read found, or the one an
+	// unreadable read kept. A read that finds the same run as the commit's newest
+	// one reuses its item rather than reading the job and its log again.
 	failed map[string]pairReadyFailedRun
 	next   time.Time
 }
@@ -177,6 +183,7 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 			logf("deploy pair check: %s: %v", r.Rig, r.Err)
 			next[r.Rig] = fails[r.Rig] + 1
 			out[r.Rig] = pairReadyKept(prev[r.Rig], next[r.Rig], pairReadyUnreadableItem(r.Rig, r.Err))
+			carryFailedRuns(nextFailed, failed, out[r.Rig])
 			continue
 		}
 		items, found, scanErr, err := pairReadyItems(ctx, r, running, prev[r.Rig], failed, logf)
@@ -195,6 +202,7 @@ func (c *pairReadyCheck) run(ctx context.Context, townRoot string, now time.Time
 		default:
 			out[r.Rig] = items
 		}
+		carryFailedRuns(nextFailed, failed, out[r.Rig])
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -226,10 +234,26 @@ func (c *pairReadyCheck) townFailed(key string, err error) {
 }
 
 // pairReadyCommitItem reports whether kind is one of the per-commit items the
-// check raises: a pair ready to roll, or an image build that failed for the
-// commit.
+// check raises: a pair ready to roll, or an image build that failed or whose
+// status is unknown for the commit.
 func pairReadyCommitItem(kind attention.Kind) bool {
-	return kind == attention.KindDeployPairReady || kind == attention.KindImagesFailed
+	return kind == attention.KindDeployPairReady || kind == attention.KindImagesFailed ||
+		kind == attention.KindImagesUnknown
+}
+
+// carryFailedRuns keeps the failed-run answer of each images-failed item a rig
+// keeps after its read, so a read that did not reach the commit does not make
+// the next read fetch the job and its log again. An answer the read settled this
+// pass is already in next and wins.
+func carryFailedRuns(next, failed map[string]pairReadyFailedRun, items []attention.Item) {
+	for _, it := range items {
+		if _, done := next[it.Key]; done || it.Kind != attention.KindImagesFailed {
+			continue
+		}
+		if f, ok := failed[it.Key]; ok {
+			next[it.Key] = f
+		}
+	}
 }
 
 // pairReadyKept is what a rig holds after a read that did not answer: what the
@@ -298,8 +322,8 @@ type pairReadyGreen struct {
 // could not read a branch cannot say its pair is gone, and one branch's failure
 // does not discard the pass. An image that is not there is not an error: one
 // image alone raises nothing. A failed run list does not stop the pass either:
-// that commit keeps the item it held and the read is logged. found is the failed
-// runs this read found, for the next read to reuse.
+// that commit raises its images-unknown item and the pass goes on. found is the
+// failed runs this read settled, for the next read to reuse.
 func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []attention.Item, runs map[string]pairReadyFailedRun, logf func(string, ...any)) (items []attention.Item, found map[string]pairReadyFailedRun, scanErr error, err error) {
 	scan, err := pairReadyGreenCommits(ctx, r)
 	if err != nil {
@@ -307,14 +331,15 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 	}
 	var out []attention.Item
 	found = make(map[string]pairReadyFailedRun)
-	// seen holds the items this pass judged: both the pair and the failed build
-	// of a commit it read to a verdict. A branch a failed read stopped at is not
+	// seen holds the items this pass judged: the pair and the build items of a
+	// commit it read to a verdict. A branch a failed read stopped at is not
 	// seen, so its previous items are kept and a stale one is only cleared by a
 	// read that looked at it.
 	seen := make(map[string]bool, len(scan.greens)*2)
 	mark := func(sha12 string) {
 		seen[pairReadyKey(r.Rig, sha12)] = true
 		seen[imagesFailedKey(r.Rig, sha12)] = true
+		seen[imagesUnknownKey(r.Rig, sha12)] = true
 	}
 	incomplete := scan.err
 	for _, g := range scan.greens {
@@ -359,14 +384,12 @@ func pairReadyItems(ctx context.Context, r pairReadyRig, running string, prev []
 		}
 		// The pair is missing, so the commit's images run is what says whether one
 		// can still arrive. Only such a commit asks Forgejo about its run. The
-		// check settles the commit's failed-build item here, so the incomplete
-		// path below never has to.
-		failed, failedRun := pairReadyImagesFailed(ctx, r, g, prev, runs, logf)
-		if failed != nil {
-			out = append(out, *failed)
-		}
-		if failedRun != 0 {
-			found[imagesFailedKey(r.Rig, g.sha12)] = pairReadyFailedRun{runID: failedRun, item: *failed}
+		// check settles the commit's build items here, so the incomplete path below
+		// never has to.
+		items, settled := pairReadyImagesFailed(ctx, r, g, prev, runs, logf)
+		out = append(out, items...)
+		if settled != nil {
+			found[imagesFailedKey(r.Rig, g.sha12)] = *settled
 		}
 	}
 	if incomplete != nil {
@@ -447,36 +470,75 @@ func imagesFailedKey(rig, sha12 string) string {
 	return imagesFailedKeyPrefix + rig + ":" + sha12
 }
 
+// imagesUnknownKey is one unknown build status's key:
+// images-unknown:<rig>:<sha12>. It is one per commit, like the failed item, and
+// the next list that can be read replaces or clears it.
+func imagesUnknownKey(rig, sha12 string) string {
+	return imagesUnknownKeyPrefix + rig + ":" + sha12
+}
+
+// pairReadyHeld is the item of kind at key that prev holds, or nil.
+func pairReadyHeld(prev []attention.Item, key string, kind attention.Kind) *attention.Item {
+	for i := range prev {
+		if prev[i].Key == key && prev[i].Kind == kind {
+			it := prev[i]
+			return &it
+		}
+	}
+	return nil
+}
+
+// pairReadyImagesUnknownItem is the item for a commit whose run list could not
+// be read. The error is quoted as data, since it is text Forgejo or a proxy
+// wrote.
+func pairReadyImagesUnknownItem(rig string, g pairReadyGreen, err error) attention.Item {
+	return attention.Item{
+		Key:      imagesUnknownKey(rig, g.sha12),
+		Kind:     attention.KindImagesUnknown,
+		Severity: attention.SeverityLow,
+		Rig:      rig,
+		SHA:      g.sha,
+		Summary:  fmt.Sprintf("images status unknown for %s: the run list could not be read: %s", g.sha12, imagesLogText(err.Error())),
+	}
+}
+
 // pairReadyImagesFailed judges the images workflow's newest run for a green
 // commit whose pair is missing. A run that ended failed or canceled raises the
 // item naming the commit and the first "Error:" line of the job it ran; a
 // successful run raises nothing, which is what clears an item raised for the
-// commit before. A run still in flight is no answer, and neither is a run list
-// the check could not read or a commit with no run in the list: in each case the
-// item the check last raised for the commit stands. A failed run whose log the
-// check read is returned with its run ID, so the next read reuses the item; the
-// ID is 0 otherwise.
-func pairReadyImagesFailed(ctx context.Context, r pairReadyRig, g pairReadyGreen, prev []attention.Item, runs map[string]pairReadyFailedRun, logf func(string, ...any)) (item *attention.Item, runID int64) {
+// commit before. A run still in flight is no answer, and neither is a commit
+// with no run in the list: the failed item the check last raised for the commit
+// stands. A run list the check cannot read is no answer either, and it is not a
+// clean commit: the commit gets an images-unknown item naming the error, and the
+// failed item it held stands beside that, since the failure is still known. The
+// unknown item is logged when it starts, not on each read it stays. settled is
+// the failed run the read judged, with its run ID, for the next read to reuse;
+// it is nil when the read settled no failed run.
+func pairReadyImagesFailed(ctx context.Context, r pairReadyRig, g pairReadyGreen, prev []attention.Item, runs map[string]pairReadyFailedRun, logf func(string, ...any)) (items []attention.Item, settled *pairReadyFailedRun) {
 	key := imagesFailedKey(r.Rig, g.sha12)
-	kept := func() *attention.Item {
-		for i := range prev {
-			if prev[i].Key == key && prev[i].Kind == attention.KindImagesFailed {
-				it := prev[i]
-				return &it
-			}
+	unknownKey := imagesUnknownKey(r.Rig, g.sha12)
+	// kept is the failed item the check held for the commit, if any: what a read
+	// with no answer leaves standing.
+	kept := func() []attention.Item {
+		if it := pairReadyHeld(prev, key, attention.KindImagesFailed); it != nil {
+			return []attention.Item{*it}
 		}
 		return nil
 	}
 	list, err := r.API.ListRuns(ctx, r.Owner, r.Repo, forgejo.RunFilter{
-		Event: []string{"push"}, WorkflowID: pairReadyImagesWorkflow, HeadSHA: g.sha, Limit: pairReadyRunLimit,
+		WorkflowID: pairReadyImagesWorkflow, HeadSHA: g.sha, Limit: pairReadyRunLimit,
 	})
 	if err == nil && list == nil {
 		err = errors.New("the list is not there")
 	}
 	if err != nil {
-		logf("deploy pair check: %s: reading the %s runs for green/%s, the failed-build check keeps what it held for that commit: %v",
-			r.Rig, pairReadyImagesWorkflow, g.sha12, err)
-		return kept(), 0
+		// The streak logs once: a commit that already holds the unknown item has
+		// been logged for this failing read, and the next readable list ends it.
+		if pairReadyHeld(prev, unknownKey, attention.KindImagesUnknown) == nil {
+			logf("deploy pair check: %s: reading the %s runs for green/%s: %v",
+				r.Rig, pairReadyImagesWorkflow, g.sha12, err)
+		}
+		return append(kept(), pairReadyImagesUnknownItem(r.Rig, g, err)), nil
 	}
 	// The route lists runs newest first, so the first one carrying this commit
 	// is the run that decides it. The filter asks for the commit and the run's
@@ -490,15 +552,15 @@ func pairReadyImagesFailed(ctx context.Context, r pairReadyRig, g pairReadyGreen
 		}
 	}
 	if run == nil {
-		return kept(), 0
+		return kept(), nil
 	}
 	switch run.Status {
 	case deployRunFailed, deployRunCancelled:
 		if c, ok := runs[key]; ok && c.runID == run.ID {
 			it := c.item
-			return &it, run.ID
+			return []attention.Item{it}, &c
 		}
-		line, settled := pairReadyImagesErrorLine(ctx, r, *run)
+		line, lineSettled := pairReadyImagesErrorLine(ctx, r, *run)
 		it := attention.Item{
 			Key:      key,
 			Kind:     attention.KindImagesFailed,
@@ -507,14 +569,14 @@ func pairReadyImagesFailed(ctx context.Context, r pairReadyRig, g pairReadyGreen
 			SHA:      g.sha,
 			Summary:  fmt.Sprintf("images workflow failed for %s: %s", g.sha12, line),
 		}
-		if !settled {
-			return &it, 0
+		if !lineSettled {
+			return []attention.Item{it}, nil
 		}
-		return &it, run.ID
+		return []attention.Item{it}, &pairReadyFailedRun{runID: run.ID, item: it}
 	case deployRunSucceeded:
-		return nil, 0
+		return nil, nil
 	}
-	return kept(), 0
+	return kept(), nil
 }
 
 // pairReadyImagesErrorLine is what a failed images run says went wrong: the
@@ -526,7 +588,7 @@ func pairReadyImagesFailed(ctx context.Context, r pairReadyRig, g pairReadyGreen
 func pairReadyImagesErrorLine(ctx context.Context, r pairReadyRig, run forgejo.ActionRun) (line string, settled bool) {
 	jobs, err := r.API.ListRunJobs(ctx, r.Owner, r.Repo, run.ID)
 	if err != nil {
-		return "the job log could not be read: " + oneLine(err.Error()), false
+		return "the job log could not be read: " + imagesLogText(err.Error()), false
 	}
 	jobID, ok := pairReadyFailedJob(jobs)
 	if !ok {
@@ -534,7 +596,7 @@ func pairReadyImagesErrorLine(ctx context.Context, r pairReadyRig, run forgejo.A
 	}
 	log, err := r.API.JobLogs(ctx, r.Owner, r.Repo, jobID)
 	if err != nil {
-		return "the job log could not be read: " + oneLine(err.Error()), false
+		return "the job log could not be read: " + imagesLogText(err.Error()), false
 	}
 	if errLine := imagesErrorLine(log); errLine != "" {
 		return imagesLogText(errLine), true
@@ -542,11 +604,12 @@ func pairReadyImagesErrorLine(ctx context.Context, r pairReadyRig, run forgejo.A
 	return "the job log names no Error: line", true
 }
 
-// imagesLogText is a job-log line as the summary states it. The log is text a
-// build writes, so it is untrusted: whitespace becomes a space, other control and
-// non-printing characters are dropped, the line keeps the 160-character cap, and
-// it is quoted as CI output so it reads as data. A double quote in the line
-// becomes a single one, so the quoting stays unambiguous.
+// imagesLogText is a line of CI output as the summary states it: a job-log line,
+// or the text of an error read from the job list or the log. That text is
+// untrusted, so whitespace becomes a space, other control and non-printing
+// characters are dropped, the line keeps the 160-character cap, and it is quoted
+// as CI output so it reads as data. A double quote in the line becomes a single
+// one, so the quoting stays unambiguous.
 func imagesLogText(line string) string {
 	clean := strings.Map(func(r rune) rune {
 		switch {
@@ -776,6 +839,13 @@ func (s *attentionSources) collectPairUnreadable(context.Context) ([]attention.I
 // of its own for the same reason the pair's two kinds are.
 func (s *attentionSources) collectImagesFailed(context.Context) ([]attention.Item, error) {
 	return s.pairReadyItemsOfKind(attention.KindImagesFailed), nil
+}
+
+// collectImagesUnknown returns the commits whose run list the same read could
+// not read, so their build status is unknown. It is a collector of its own, like
+// the failed builds (gt-3vafwr).
+func (s *attentionSources) collectImagesUnknown(context.Context) ([]attention.Item, error) {
+	return s.pairReadyItemsOfKind(attention.KindImagesUnknown), nil
 }
 
 // pairReadyItemsOfKind is the pair check's held items of one kind.

@@ -132,6 +132,10 @@ const (
 	// finished failed or canceled, so that commit's daemon and polecat images
 	// were never published and no roll can start from it (gt-3vafwr).
 	KindImagesFailed Kind = "images-failed"
+	// KindImagesUnknown: the images workflow's run list for a green commit whose
+	// pair is missing could not be read, so whether its build failed is unknown
+	// (gt-3vafwr). It is not a clean commit, and the next readable list clears it.
+	KindImagesUnknown Kind = "images-unknown"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -147,7 +151,7 @@ func Kinds() []Kind {
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
-		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed,
+		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
 	}
 }
 

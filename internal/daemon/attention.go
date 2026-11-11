@@ -671,6 +671,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// collector of their own keeps them when only this one fails
 		// (gt-3vafwr).
 		{kind: attention.KindImagesFailed, collect: s.collectImagesFailed},
+		// The unknown build status is a fourth kind from the same read, with a
+		// collector of its own for the same reason (gt-3vafwr).
+		{kind: attention.KindImagesUnknown, collect: s.collectImagesUnknown},
 	}, s.questionCollectors()...)
 }
 
