@@ -34,6 +34,9 @@ const (
 	// ciCacheTestNpmCapKiB is the npm volume's cap, 1 GiB in KiB, as the capped
 	// script's argv carries it.
 	ciCacheTestNpmCapKiB = "1048576"
+	// ciCacheTestGomodCapKiB is the ci-gomod volume's cap, 5 GiB in KiB, as the
+	// module script's argv carries it.
+	ciCacheTestGomodCapKiB = "5242880"
 )
 
 // ciCacheTestStart is the fixture's first instant: midday, outside the daily
@@ -61,26 +64,28 @@ type ciCacheFixture struct {
 	// pending holds the passes the patrol dispatched and the test has not run.
 	pending []func()
 	// pods is the reply the pod list gets. exec is the reply the exec into the
-	// ci-gocache volume gets, and npmExec the one into the ci-npm volume; each
-	// exec is answered by the root it names.
-	pods    cliReply
-	exec    cliReply
-	npmExec cliReply
+	// ci-gocache volume gets, and npmExec and gomodExec the ones into the ci-npm
+	// and ci-gomod volumes; each exec is answered by the root it names.
+	pods      cliReply
+	exec      cliReply
+	npmExec   cliReply
+	gomodExec cliReply
 }
 
 // newCICacheFixture builds the fixture for mode: a running runner pod and a
 // reply of an apply's figures, which a test may replace before it ticks. The npm
-// volume reads under its cap by default, so it raises no item unless a test
-// makes it.
+// and module volumes read under their caps by default, so they raise no item
+// unless a test makes them.
 func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 	t.Helper()
 	var logs bytes.Buffer
 	f := &ciCacheFixture{
-		logs:    &logs,
-		now:     ciCacheTestStart,
-		pods:    cliReply{stdout: ciCachePodsRunningJSON},
-		exec:    ciCacheReply(40<<20, 3, 10<<20),
-		npmExec: ciCacheReply(512<<10, 0, 512<<10),
+		logs:      &logs,
+		now:       ciCacheTestStart,
+		pods:      cliReply{stdout: ciCachePodsRunningJSON},
+		exec:      ciCacheReply(40<<20, 3, 10<<20),
+		npmExec:   ciCacheReply(512<<10, 0, 512<<10),
+		gomodExec: ciCacheReply(512<<10, 0, 512<<10),
 	}
 	f.cli = newFakeCLIFor(func(c cliCall) cliReply {
 		verb := cacheTrimVerb(c.args)
@@ -88,8 +93,11 @@ func newCICacheFixture(t *testing.T, mode string) *ciCacheFixture {
 		case strings.HasPrefix(verb, "get pods "):
 			return f.pods
 		case strings.HasPrefix(verb, "exec "):
-			if slices.Contains(c.args, ciCacheVolumeRoot(ciCacheNpmVolume)) {
+			switch {
+			case slices.Contains(c.args, ciCacheVolumeRoot(ciCacheNpmVolume)):
 				return f.npmExec
+			case slices.Contains(c.args, ciCacheVolumeRoot(ciCacheGomodVolume)):
+				return f.gomodExec
 			}
 			return f.exec
 		}
@@ -947,6 +955,140 @@ func TestCICacheTrimNoopItemPerVolume(t *testing.T) {
 		f.drain()
 		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
 			t.Errorf("a capped volume that removed files raised %+v", items)
+		}
+	})
+}
+
+// gomodRow is the table's ci-gomod row, which the module tests read.
+func gomodRow(t *testing.T) ciCacheVolume {
+	t.Helper()
+	i := slices.IndexFunc(ciCacheVolumes, func(v ciCacheVolume) bool { return v.name == ciCacheGomodVolume })
+	if i < 0 {
+		t.Fatalf("the table has no %s row", ciCacheGomodVolume)
+	}
+	return ciCacheVolumes[i]
+}
+
+// TestCICacheTrimGomodRowIsCappedAtFiveGiB: the ci-gomod row carries the 5 GiB
+// cap, and its apply execs the module script with the volume root, the age and
+// that cap as its argv; its dry run execs the module listing with the same cap.
+func TestCICacheTrimGomodRowIsCappedAtFiveGiB(t *testing.T) {
+	t.Parallel()
+	row := gomodRow(t)
+	if row.capKiB != 5<<20 {
+		t.Errorf("%s cap = %d KiB, want 5 GiB (%d KiB)", ciCacheGomodVolume, row.capKiB, 5<<20)
+	}
+
+	t.Run("apply runs the module script with the cap", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.tick()
+		f.drain()
+
+		var gomod []string
+		for _, c := range f.execs() {
+			if slices.Contains(c.args, row.root) {
+				gomod = c.args
+			}
+		}
+		if gomod == nil {
+			t.Fatalf("the pass ran no exec into %s", ciCacheGomodVolume)
+		}
+		want := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+			"sh", "-c", ciCacheModuleTrimScript, "ci-cache-trim", row.root, ciCacheTestMinutes, ciCacheTestGomodCapKiB}
+		if !slices.Equal(gomod[4:], want) {
+			t.Errorf("gomod exec argv = %q\nwant %q", gomod[4:], want)
+		}
+	})
+
+	t.Run("dry run lists with the same cap and sends no deletion", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeDryRun)
+		f.tick()
+		f.drain()
+
+		var gomod []string
+		for _, c := range f.execs() {
+			if slices.Contains(c.args, row.root) {
+				gomod = c.args
+			}
+		}
+		if gomod == nil {
+			t.Fatalf("the pass ran no exec into %s", ciCacheGomodVolume)
+		}
+		want := []string{"exec", "-n", ciCacheNamespace, ciCacheTestPod, "-c", ciCacheContainer, "--",
+			"sh", "-c", ciCacheModuleListScript, "ci-cache-trim", row.root, ciCacheTestMinutes, ciCacheTestGomodCapKiB}
+		if !slices.Equal(gomod[4:], want) {
+			t.Errorf("gomod dry-run argv = %q\nwant %q", gomod[4:], want)
+		}
+	})
+}
+
+// TestCICacheTrimModuleScriptNeverNamesTheDownloadCache: both module programs
+// prune ./cache before they match a module directory, and every rm they run is
+// rm -rf, so none removes a single file. The integration tier runs the text.
+func TestCICacheTrimModuleScriptNeverNamesTheDownloadCache(t *testing.T) {
+	t.Parallel()
+	for name, script := range map[string]string{
+		"apply":   ciCacheModuleTrimScript,
+		"dry run": ciCacheModuleListScript,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			prune := strings.Index(script, "-path ./cache -prune")
+			match := strings.Index(script, "-name '*@*'")
+			if prune < 0 || match < 0 || prune > match {
+				t.Errorf("the walk does not prune ./cache before it matches a module: prune at %d, match at %d", prune, match)
+			}
+			for rest := script; ; {
+				i := strings.Index(rest, "rm ")
+				if i < 0 {
+					break
+				}
+				if !strings.HasPrefix(rest[i:], "rm -rf ") {
+					t.Errorf("the script runs %q, want only rm -rf", rest[i:min(i+12, len(rest))])
+				}
+				rest = rest[i+len("rm "):]
+			}
+		})
+	}
+}
+
+// TestCICacheTrimModuleVolumeReadings: the module volume's apply logs the count
+// of module directories it removed, and raises its own no-op item over its cap
+// when it removed none, keyed apart from the other volumes' items.
+func TestCICacheTrimModuleVolumeReadings(t *testing.T) {
+	t.Parallel()
+	row := gomodRow(t)
+	key := ciCacheNoOpKeyOf(row)
+
+	t.Run("the apply logs the module directories it removed", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.gomodExec = ciCacheReply(6<<20, 2, 5<<20)
+		f.tick()
+		f.drain()
+		if want := ciCacheGomodVolume + ": removed 2 module directories"; !strings.Contains(f.logs.String(), want) {
+			t.Errorf("logs do not carry %q:\n%s", want, f.logs.String())
+		}
+	})
+
+	t.Run("over the cap with nothing removed raises the item, under the cap clears it", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.gomodExec = ciCacheReply(6<<20, 0, 6<<20)
+		f.tick()
+		f.drain()
+		if got := noopKeys(f.d.cacheTrimNoOp.observed()); !slices.Equal(got, []string{key}) {
+			t.Fatalf("items = %v, want one item keyed %q", got, key)
+		}
+
+		f.at(time.Hour)
+		f.gomodExec = ciCacheReply(5<<20, 0, 5<<20)
+		f.tick()
+		f.drain()
+		if got := noopKeys(f.d.cacheTrimNoOp.observed()); len(got) != 0 {
+			t.Errorf("items after the module volume is at its cap = %v, want none", got)
 		}
 	})
 }

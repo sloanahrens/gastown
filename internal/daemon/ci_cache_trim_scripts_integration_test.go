@@ -306,6 +306,8 @@ func TestIntegrationCICacheTrimScripts(t *testing.T) {
 			{name: "the dry run", script: ciCacheListScript},
 			{name: "the apply", script: ciCacheTrimScript},
 			{name: "the capped apply", script: ciCacheCappedTrimScript, extra: []string{"1024"}},
+			{name: "the module dry run", script: ciCacheModuleListScript, extra: []string{"1024"}},
+			{name: "the module apply", script: ciCacheModuleTrimScript, extra: []string{"1024"}},
 		} {
 			t.Run(tt.name, func(t *testing.T) {
 				t.Parallel()
@@ -319,6 +321,184 @@ func TestIntegrationCICacheTrimScripts(t *testing.T) {
 				}
 				if !strings.Contains(stderr, "volume path not found") {
 					t.Errorf("a missing root said %q, want the script's own line", stderr)
+				}
+			})
+		}
+	})
+}
+
+// ciCacheModuleDir is a module directory the module tree writes, relative to the
+// volume root, and whether its time is dated before the age.
+type ciCacheModuleDir struct {
+	path string
+	old  bool
+}
+
+// ciCacheModuleDirs is the module tree. The three old module directories the
+// apply removes whole are the first three: two at depth 3 and one at depth 8,
+// the deepest the walk reaches. The rest are kept: a fresh module; an old module
+// at depth 9, past the walk; and the download cache's @v directory, which matches
+// the module pattern and is old, so only the ./cache prune keeps it.
+var ciCacheModuleDirs = []ciCacheModuleDir{
+	{filepath.Join("pkg", "mod", "github.com", "old", "one@v1.0.0"), true},
+	{filepath.Join("pkg", "mod", "golang.org", "x", "old@v0.1.0"), true},
+	{filepath.Join("pkg", "mod", "a", "b", "c", "d", "e", "f", "g", "h@v1.0.0"), true},
+	{filepath.Join("pkg", "mod", "github.com", "new", "two@v1.0.0"), false},
+	{filepath.Join("pkg", "mod", "p", "q", "r", "s", "t", "u", "v", "w", "x@v1.0.0"), true},
+	{filepath.Join("pkg", "mod", "cache", "download", "github.com", "old", "one", "@v"), true},
+}
+
+// ciCacheModuleRemoved is what the module apply removes, relative to the volume
+// root: the old module directories the walk reaches.
+var ciCacheModuleRemoved = ciCacheModuleDirs[:3]
+
+// ciCacheModuleTree writes the module tree under root: each module directory
+// with one file, the top-level file of pkg/mod, which is old and is never a
+// candidate, and each directory dated after its file is written, so the directory's
+// own time is the one the walk reads.
+func ciCacheModuleTree(t *testing.T, root string) {
+	t.Helper()
+	now := time.Now()
+	for _, d := range ciCacheModuleDirs {
+		full := filepath.Join(root, d.path)
+		if err := os.MkdirAll(full, 0o755); err != nil {
+			t.Fatalf("making %s: %v", d.path, err)
+		}
+		if err := os.WriteFile(filepath.Join(full, "file.go"), []byte(d.path+"\n"), 0o644); err != nil {
+			t.Fatalf("writing into %s: %v", d.path, err)
+		}
+	}
+	top := filepath.Join(root, "pkg", "mod", "trim.txt")
+	if err := os.WriteFile(top, []byte("trim.txt\n"), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", top, err)
+	}
+	if err := os.Chtimes(top, now.Add(-ciCacheScriptOldAge), now.Add(-ciCacheScriptOldAge)); err != nil {
+		t.Fatalf("dating %s: %v", top, err)
+	}
+	for _, d := range ciCacheModuleDirs {
+		mtime := now.Add(-time.Minute)
+		if d.old {
+			mtime = now.Add(-ciCacheScriptOldAge)
+		}
+		full := filepath.Join(root, d.path)
+		if err := os.Chtimes(full, mtime, mtime); err != nil {
+			t.Fatalf("dating %s: %v", d.path, err)
+		}
+	}
+}
+
+// ciCacheModuleKept is what the module apply keeps: the file of each module
+// directory it does not remove, the pkg/mod top-level file, and nothing else.
+func ciCacheModuleKept() []string {
+	kept := []string{filepath.Join("pkg", "mod", "trim.txt")}
+	for _, d := range ciCacheModuleDirs[len(ciCacheModuleRemoved):] {
+		kept = append(kept, filepath.Join(d.path, "file.go"))
+	}
+	slices.Sort(kept)
+	return kept
+}
+
+// TestIntegrationCICacheTrimModuleScripts runs the module programs against a
+// temporary pkg/mod tree: the dry run reports the old module directories and
+// removes none; the apply removes exactly those, whole, and keeps the fresh
+// module, the module past the depth walk, the download cache's @v directory and
+// the top-level file; and at or under the cap the apply removes nothing.
+//
+// Expected to fail under these changes to the module program, each run by hand on
+// its bead: dropping the ./cache prune (the old @v directory goes); moving the
+// depth limit from 8 to 9 (the module at depth 9 goes); flipping the age test to
+// newer-than (the fresh module goes).
+func TestIntegrationCICacheTrimModuleScripts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the dry run reports the old module directories and removes none", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheModuleTree(t, root)
+		before := ciCacheScriptFiles(t, root)
+
+		// A cap of 1 KiB: the tree is over it, so the walk runs.
+		stdout, stderr, status := ciCacheScriptRun(t, ciCacheModuleListScript, root, ciCacheScriptAgeMinutes, "1")
+		if status != 0 {
+			t.Fatalf("the dry run exited %d: %s", status, stderr)
+		}
+		reply, err := parseCICacheTrimReply([]byte(stdout))
+		if err != nil {
+			t.Fatalf("the dry run's reply does not parse: %v:\n%s", err, stdout)
+		}
+		if want := int64(len(ciCacheModuleRemoved)); reply.removed != want {
+			t.Errorf("the dry run reports %d module directories to remove, want %d:\n%s", reply.removed, want, stdout)
+		}
+		if reply.afterKiB != reply.beforeKiB {
+			t.Errorf("the dry run reports the volume changing, %d to %d KiB", reply.beforeKiB, reply.afterKiB)
+		}
+		if after := ciCacheScriptFiles(t, root); !slices.Equal(after, before) {
+			t.Errorf("the dry run removed files: %v, before %v", after, before)
+		}
+	})
+
+	t.Run("the apply removes the old module directories whole and keeps the rest", func(t *testing.T) {
+		t.Parallel()
+		root := t.TempDir()
+		ciCacheModuleTree(t, root)
+
+		stdout, stderr, status := ciCacheScriptRun(t, ciCacheModuleTrimScript, root, ciCacheScriptAgeMinutes, "1")
+		if status != 0 {
+			t.Fatalf("the apply exited %d: %s", status, stderr)
+		}
+		reply, err := parseCICacheTrimReply([]byte(stdout))
+		if err != nil {
+			t.Fatalf("the apply's reply does not parse: %v:\n%s", err, stdout)
+		}
+		if want := int64(len(ciCacheModuleRemoved)); reply.removed != want {
+			t.Errorf("the apply reports %d module directories removed, want %d:\n%s", reply.removed, want, stdout)
+		}
+		if got, want := ciCacheScriptFiles(t, root), ciCacheModuleKept(); !slices.Equal(got, want) {
+			t.Errorf("the volume holds %v after the apply, want %v", got, want)
+		}
+		for _, d := range ciCacheModuleRemoved {
+			if _, err := os.Stat(filepath.Join(root, d.path)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the old module directory %s is still present (stat error %v)", d.path, err)
+			}
+		}
+	})
+
+	t.Run("at or under the cap the apply removes nothing", func(t *testing.T) {
+		t.Parallel()
+		// The cap is the tree's size as the dry run reads it, and one KiB more.
+		for name, capOf := range map[string]func(before int64) int64{
+			"at the cap":    func(before int64) int64 { return before },
+			"under the cap": func(before int64) int64 { return before + 1 },
+		} {
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				root := t.TempDir()
+				ciCacheModuleTree(t, root)
+				before := ciCacheScriptFiles(t, root)
+
+				listed, stderr, status := ciCacheScriptRun(t, ciCacheModuleListScript, root, ciCacheScriptAgeMinutes, "1")
+				if status != 0 {
+					t.Fatalf("the dry run exited %d: %s", status, stderr)
+				}
+				listedReply, err := parseCICacheTrimReply([]byte(listed))
+				if err != nil {
+					t.Fatalf("the dry run's reply does not parse: %v:\n%s", err, listed)
+				}
+
+				stdout, stderr, status := ciCacheScriptRun(t, ciCacheModuleTrimScript, root, ciCacheScriptAgeMinutes,
+					strconv.FormatInt(capOf(listedReply.beforeKiB), 10))
+				if status != 0 {
+					t.Fatalf("the module apply exited %d: %s", status, stderr)
+				}
+				reply, err := parseCICacheTrimReply([]byte(stdout))
+				if err != nil {
+					t.Fatalf("the module apply's reply does not parse: %v:\n%s", err, stdout)
+				}
+				if reply.removed != 0 {
+					t.Errorf("the module apply reports %d directories removed under its cap, want 0:\n%s", reply.removed, stdout)
+				}
+				if got := ciCacheScriptFiles(t, root); !slices.Equal(got, before) {
+					t.Errorf("the module apply removed files under its cap: %v, before %v", got, before)
 				}
 			})
 		}

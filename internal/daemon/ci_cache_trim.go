@@ -14,9 +14,11 @@ package daemon
 // with no cap (ci-gocache) gets the age rule alone: a constant script removes the
 // volume's entries that have gone unwritten for ci_cache_max_age. A capped volume
 // (ci-npm) gets the same removal only while it is over its cap; at or under the
-// cap the script removes nothing. Each exec reports the volume's size before and
-// after. ci-gomod is not in the table: its trim is a sibling's. Nothing outside a
-// table root is named by an exec.
+// cap the script removes nothing. ci-gomod is capped the same way, but its entries
+// are whole module directories under pkg/mod and never single files: a module with
+// files missing breaks the next build. Its script removes a module directory whole,
+// by the directory's time, and never touches pkg/mod/cache. Each exec reports the
+// volume's size before and after. Nothing outside a table root is named by an exec.
 //
 // Dry run is the patrol's default, as for every maintenance target: the exec runs
 // a script that lists what it would remove and removes nothing.
@@ -57,10 +59,15 @@ const (
 	// runner's rendered config.
 	ciCacheGocacheVolume = "ci-gocache"
 	ciCacheNpmVolume     = "ci-npm"
+	ciCacheGomodVolume   = "ci-gomod"
 
 	// ciCacheNpmCapKiB is the size above which the npm cache is trimmed: 1 GiB. It
 	// is a constant: no setting names it.
 	ciCacheNpmCapKiB = 1 << 20
+
+	// ciCacheGomodCapKiB is the size above which the Go module cache is trimmed:
+	// 5 GiB. It is a constant: no setting names it.
+	ciCacheGomodCapKiB = 5 << 20
 
 	// ciCacheMissingPathExit is the status the script exits with when the volume
 	// path is not in the container. kubectl exec passes a remote command's status
@@ -80,17 +87,30 @@ const (
 // ciCacheVolume is one named volume the trim runs over. root is the one path the
 // exec reads and removes under: a constant, with no path built from a setting or
 // from a reply. capKiB is the size above which the volume is trimmed; 0 means no
-// cap, so the age rule alone applies.
+// cap, so the age rule alone applies. modules marks a volume whose entries are
+// whole module directories under pkg/mod, trimmed by the module programs, not
+// single files; such a volume is always capped.
 type ciCacheVolume struct {
-	name   string
-	root   string
-	capKiB int64
+	name    string
+	root    string
+	capKiB  int64
+	modules bool
 }
 
-// ciCacheVolumes is the table a pass runs, in order.
+// unit names what a volume's trim removes, for its log lines.
+func (v ciCacheVolume) unit() string {
+	if v.modules {
+		return "module directories"
+	}
+	return "files"
+}
+
+// ciCacheVolumes is the table a pass runs, in order. ci-gomod is last, so the
+// order the first two volumes run in is unchanged.
 var ciCacheVolumes = []ciCacheVolume{
 	{name: ciCacheGocacheVolume, root: ciCacheVolumeRoot(ciCacheGocacheVolume)},
 	{name: ciCacheNpmVolume, root: ciCacheVolumeRoot(ciCacheNpmVolume), capKiB: ciCacheNpmCapKiB},
+	{name: ciCacheGomodVolume, root: ciCacheVolumeRoot(ciCacheGomodVolume), capKiB: ciCacheGomodCapKiB, modules: true},
 }
 
 // ciCacheVolumeRoot is the data path of the named volume in the dind container's
@@ -200,6 +220,59 @@ echo "after_kib=$before"
 exit 0
 fi
 ` + ciCacheAgeRemoval
+
+// ciCacheModuleOpen opens both module programs. Their arguments are the volume
+// root, the age in minutes and the cap in KiB. The module path is the constant
+// pkg/mod under the root, and the program refuses a root or module path that is
+// not there. At or under the cap it reports the size and stops, as the capped
+// script does: the walk below runs only over the cap.
+const ciCacheModuleOpen = `set -eu
+root=$1; age=$2; cap=$3
+mod="$root/pkg/mod"
+[ -d "$mod" ] || { echo "volume path not found" >&2; exit 3; }
+before=$(du -sk "$root" | cut -f1)
+if [ "$before" -le "$cap" ]; then
+echo "before_kib=$before"
+echo "removed=0"
+echo "after_kib=$before"
+exit 0
+fi
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cd "$mod"
+`
+
+// ciCacheModuleFind is the walk both module programs share, run from pkg/mod. It
+// prunes ./cache before anything is matched, so the download cache is never
+// walked. A directory named '*@*' is a module: the walk prunes it whether or not
+// it is old, so nothing inside a module is a candidate, and it prints only an old
+// one. The walk stops eight levels below pkg/mod.
+const ciCacheModuleFind = `find . -maxdepth 8 -path ./cache -prune -o -type d -name '*@*' -prune -a -mmin +"$age" -print`
+
+// ciCacheModuleListScript is the module volume's dry run: it lists the module
+// directories the apply would remove and removes nothing.
+const ciCacheModuleListScript = ciCacheModuleOpen + ciCacheModuleFind + ` > "$tmp/list"
+removed=$(wc -l < "$tmp/list" | tr -d ' ')
+echo "before_kib=$before"
+echo "removed=$removed"
+echo "after_kib=$before"
+`
+
+// ciCacheModuleTrimScript is the module volume's apply program: over the cap it
+// removes each old module directory whole, with rm -rf, and reports the number
+// of directories it removed. A removed module is re-extracted from the download
+// cache (pkg/mod/cache) on its next use, so removing it whole costs a re-extract
+// and nothing else; removing one of its files would leave a module that breaks
+// the next build. That is why the age is the module directory's own time and not
+// its files': the directory's time is when a build last extracted into it.
+const ciCacheModuleTrimScript = ciCacheModuleOpen + ciCacheModuleFind + ` > "$tmp/list"
+while IFS= read -r dir; do rm -rf "$dir"; done < "$tmp/list"
+removed=$(wc -l < "$tmp/list" | tr -d ' ')
+after=$(du -sk "$root" | cut -f1)
+echo "before_kib=$before"
+echo "removed=$removed"
+echo "after_kib=$after"
+`
 
 // errCICacheTrimNoContext is the refusal for a runner that names no control
 // cluster context: the trim cannot say which cluster to exec into.
@@ -392,15 +465,22 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 }
 
 // ciCacheTrimProgram is the program a volume's exec runs, and the arguments that
-// follow its root and age. A dry run lists for every volume. An apply on a capped
-// volume passes the cap, and an apply on an uncapped volume runs the age rule
-// alone, exactly as the trim always has.
+// follow its root and age. A dry run lists for every volume. A module volume runs
+// its module programs, which take the cap in both modes, since the module dry run
+// lists only what the apply would remove. An apply on a capped file volume passes
+// the cap, and an apply on an uncapped volume runs the age rule alone, exactly as
+// the trim always has.
 func ciCacheTrimProgram(mode string, v ciCacheVolume) (string, []string) {
+	capArg := []string{strconv.FormatInt(v.capKiB, 10)}
 	switch {
+	case v.modules && mode != agentconfig.DiskMaintenanceModeApply:
+		return ciCacheModuleListScript, capArg
+	case v.modules:
+		return ciCacheModuleTrimScript, capArg
 	case mode != agentconfig.DiskMaintenanceModeApply:
 		return ciCacheListScript, nil
 	case v.capKiB > 0:
-		return ciCacheCappedTrimScript, []string{strconv.FormatInt(v.capKiB, 10)}
+		return ciCacheCappedTrimScript, capArg
 	default:
 		return ciCacheTrimScript, nil
 	}
@@ -436,14 +516,14 @@ func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheE
 	ageText := ciCacheAgeText(time.Duration(minutes) * time.Minute)
 	switch {
 	case mode == agentconfig.DiskMaintenanceModeApply:
-		d.logger.Printf("disk_maintenance: ci cache trim: %s: removed %d files, %s to %s (older than %s)",
-			v.name, reply.removed, before, after, ageText)
+		d.logger.Printf("disk_maintenance: ci cache trim: %s: removed %d %s, %s to %s (older than %s)",
+			v.name, reply.removed, v.unit(), before, after, ageText)
 	case v.capKiB > 0:
-		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d files, of %s (older than %s) while it is over its cap of %s; nothing removed",
-			v.name, reply.removed, before, ageText, polecatimage.Human(v.capKiB*1024))
+		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, of %s (older than %s) while it is over its cap of %s; nothing removed",
+			v.name, reply.removed, v.unit(), before, ageText, polecatimage.Human(v.capKiB*1024))
 	default:
-		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d files, of %s (older than %s); nothing removed",
-			v.name, reply.removed, before, ageText)
+		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d %s, of %s (older than %s); nothing removed",
+			v.name, reply.removed, v.unit(), before, ageText)
 	}
 	d.ciCacheTrimMeasure(mode, v, reply, warn)
 	return true
@@ -474,7 +554,7 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 	}
 	holder := "CI cache trim removed no file while the Go build cache holds"
 	if v.capKiB > 0 {
-		holder = "CI cache trim of " + v.name + " removed no file while the volume holds"
+		holder = "CI cache trim of " + v.name + " removed no " + v.unit() + " while the volume holds"
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
 		Key:      key,
