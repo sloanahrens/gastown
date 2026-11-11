@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io/fs"
 	"log"
 	"os"
@@ -1224,5 +1225,20 @@ func TestRebuildGTUnchangedWhenUpdateDisabled(t *testing.T) {
 
 	if got := len(gtInstallerCalls(cli)); got != 1 {
 		t.Fatalf("install calls = %d with the update trigger off, want 1", got)
+	}
+}
+
+func TestRebuildGTGitCtxNamesItsBound(t *testing.T) {
+	t.Parallel()
+	d, _ := daemonWithRecorder(t)
+	d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) { return nil, nil, errors.New("signal: killed") }
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	<-ctx.Done()
+
+	_, err := d.rebuildGTGitCtx(ctx, t.TempDir(), "fetch", "origin")
+	if err == nil || !strings.Contains(err.Error(), "git fetch origin: context deadline exceeded") {
+		t.Fatalf("err = %v, want the expired bound named", err)
 	}
 }
