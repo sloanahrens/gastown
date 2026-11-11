@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -289,5 +290,47 @@ func TestCloudCheckRefusesAnIntervalItCannotSchedule(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "cloud_check: not running") {
 		t.Errorf("log = %q, want the interval refusal named", logs.String())
+	}
+}
+
+// cloudCheckExitErr is a child's failure that reports its exit status, as an
+// *exec.ExitError does.
+type cloudCheckExitErr int
+
+func (e cloudCheckExitErr) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e cloudCheckExitErr) ExitCode() int { return int(e) }
+
+// TestCloudCheckFailedRunEscalatesWithItsExitStatus: the production run path
+// turns a child's non-zero exit into one escalation that names the command and
+// its exit status. The child's output, which can carry an app URL with a
+// credential, reaches neither the escalation nor the log.
+func TestCloudCheckFailedRunEscalatesWithItsExitStatus(t *testing.T) {
+	t.Parallel()
+	const command = "/usr/local/bin/cloudcheck"
+	const leak = "user:app-credential@app.example.test"
+	key := filepath.Join(t.TempDir(), "gcp-key")
+	if err := os.WriteFile(key, []byte("key"), 0o600); err != nil {
+		t.Fatalf("writing the key file: %v", err)
+	}
+	d, logs, f := cloudCheckTestDaemon(t, cloudCheckConfig(true, "10m", command, key),
+		func(*agentconfig.CloudCheckConfig) string { return key }, os.Stat)
+	// Drop the fake run so the production cloudCheckRun executes over the exec seam.
+	d.cloudCheck.run = nil
+	d.execCmd = func(*exec.Cmd) ([]byte, []byte, error) {
+		return []byte("app https://" + leak + " is down"), nil, cloudCheckExitErr(3)
+	}
+
+	d.runCloudCheckPatrol()
+
+	if len(f.escalations) != 1 || !slices.Equal(f.escalationKeys, []string{cloudCheckAlertKey}) {
+		t.Fatalf("escalations = %q under keys %q, want one under %q", f.escalations, f.escalationKeys, cloudCheckAlertKey)
+	}
+	if want := command + " exit 3"; !strings.Contains(f.escalations[0], want) {
+		t.Errorf("escalation = %q, want it to name %q", f.escalations[0], want)
+	}
+	for _, s := range append([]string{logs.String()}, f.escalations...) {
+		if strings.Contains(s, leak) {
+			t.Errorf("the child's output reached %q", s)
+		}
 	}
 }

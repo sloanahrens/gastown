@@ -38,6 +38,10 @@ type checkout struct {
 type toolsGit struct {
 	checkouts map[string]checkout
 	adds      []worktreeAdd
+	// showErr is what a `git show` returns instead of the app list; onShow runs
+	// first, so a test can change the build context before the list is staged.
+	showErr error
+	onShow  func()
 }
 
 func (g *toolsGit) git(dir string, args ...string) ([]byte, error) {
@@ -52,6 +56,12 @@ func (g *toolsGit) git(dir string, args ...string) ([]byte, error) {
 		}
 		return nil, nil
 	case args[0] == "show":
+		if g.onShow != nil {
+			g.onShow()
+		}
+		if g.showErr != nil {
+			return nil, g.showErr
+		}
 		if strings.HasSuffix(args[1], ":"+CloudCheckAppsPath) {
 			return []byte("fractals-prod=https://example.test app=fractals\n"), nil
 		}
@@ -325,6 +335,64 @@ func TestDeployBuildFailureLeavesNothing(t *testing.T) {
 	}
 	if got := outEntries(t, b.Out); len(got) != 0 {
 		t.Errorf("a failed build left %v in the build context", got)
+	}
+}
+
+// TestDeployRefusesAnAppListItCannotReadAtItsPin: a pin that holds no app list
+// is refused, the error names the path, and no tool is left in the context.
+func TestDeployRefusesAnAppListItCannotReadAtItsPin(t *testing.T) {
+	t.Parallel()
+	b, _, g := toolsBuilder(t)
+	g.showErr = errors.New("fatal: path 'ops/cloud-check.apps' does not exist in the commit")
+	paths, err := b.BuildTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cannot read "+CloudCheckAppsPath) {
+		t.Fatalf("BuildTools = %q, %v; want an error naming the app list", paths, err)
+	}
+	if paths != nil {
+		t.Errorf("a refused app list returned paths %q", paths)
+	}
+	if got := outEntries(t, b.Out); len(got) != 0 {
+		t.Errorf("a refused app list left %v in the build context", got)
+	}
+}
+
+// TestDeployNamesAnAppListItCannotStage: a staging path that is already a
+// directory cannot take the app list, and the error names the file.
+func TestDeployNamesAnAppListItCannotStage(t *testing.T) {
+	t.Parallel()
+	b, _, g := toolsBuilder(t)
+	g.onShow = func() {
+		stages, err := filepath.Glob(filepath.Join(b.Out, ".daemonimage-tools-*"))
+		if err != nil || len(stages) != 1 {
+			t.Fatalf("staging directories = %q, %v; want the one build stage", stages, err)
+		}
+		if err := os.Mkdir(filepath.Join(stages[0], CloudCheckAppsName), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	paths, err := b.BuildTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cannot stage "+CloudCheckAppsName) {
+		t.Fatalf("BuildTools = %q, %v; want an error naming the staged app list", paths, err)
+	}
+	if paths != nil {
+		t.Errorf("an unstaged app list returned paths %q", paths)
+	}
+}
+
+// TestDeployNamesAnAppListItCannotMoveIntoTheContext: a path already holding a
+// directory cannot take the app list, and the error names the file.
+func TestDeployNamesAnAppListItCannotMoveIntoTheContext(t *testing.T) {
+	t.Parallel()
+	b, _, _ := toolsBuilder(t)
+	if err := os.Mkdir(filepath.Join(b.Out, CloudCheckAppsName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths, err := b.BuildTools(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "cannot move "+CloudCheckAppsName+" into") {
+		t.Fatalf("BuildTools = %q, %v; want an error naming the app list's move", paths, err)
+	}
+	if paths != nil {
+		t.Errorf("a failed move returned paths %q", paths)
 	}
 }
 
