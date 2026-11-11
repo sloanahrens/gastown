@@ -24,6 +24,10 @@ import (
 // MaxFileBytes is the largest seed file the command sends. A larger file is refused by name.
 const MaxFileBytes = 1 << 20
 
+// MaxSeedBytes is the largest total size of the files in one seed commit, before base64. A
+// larger seed is refused rather than sent.
+const MaxSeedBytes = 32 << 20
+
 // Branch is the default branch the repository is created with and the seed commit lands on.
 const Branch = "main"
 
@@ -46,12 +50,8 @@ func ValidateRepo(repo string) (owner, name string, err error) {
 	return owner, name, nil
 }
 
-// LoadSeed reads every file under dir, in lexical order, for the seed commit. It refuses a
-// relative dir, a dir that cannot be opened as a directory (a file, or a missing path), a dir
-// that holds no files, an entry that is not a regular file (a symlink inside dir is refused,
-// not followed), and a file over MaxFileBytes. A symlink that is dir itself is followed by
-// the open. Every read goes through an os.Root, so no read leaves dir. Each refusal names the
-// path it refused, and nothing is written before LoadSeed returns.
+// LoadSeed returns the files under the absolute directory dir in lexical order, or the error that
+// refused the directory as a seed.
 func LoadSeed(dir string) ([]File, error) {
 	if !filepath.IsAbs(dir) {
 		return nil, fmt.Errorf("seed directory %q is relative; give an absolute path", dir)
@@ -64,11 +64,14 @@ func LoadSeed(dir string) ([]File, error) {
 	return collectSeed(dir, seedRoot.FS())
 }
 
-// collectSeed walks fsys and returns its files in lexical order, applying LoadSeed's refusals.
-// dir names the directory in the messages. It takes an fs.FS, not a path, so a test can hand it
-// a filesystem that fails an open or a read.
+// collectSeed walks fsys and returns its files in lexical order. It refuses an entry that is
+// not a regular file (a symlink is refused, not followed), a file over MaxFileBytes, a seed
+// whose files total more than MaxSeedBytes, and a directory that holds no files. dir names the
+// directory in the messages. It takes an fs.FS, not a path, so a test can hand it a filesystem
+// that fails an open or a read.
 func collectSeed(dir string, fsys fs.FS) ([]File, error) {
 	var files []File
+	var total int64
 	err := fs.WalkDir(fsys, ".", func(name string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return fmt.Errorf("seed path %s: %w", name, err)
@@ -82,6 +85,10 @@ func collectSeed(dir string, fsys fs.FS) ([]File, error) {
 		data, err := readSeedFile(fsys, name)
 		if err != nil {
 			return fmt.Errorf("seed file %s: %w", name, err)
+		}
+		total += int64(len(data))
+		if total > MaxSeedBytes {
+			return fmt.Errorf("seed file %s: the seed is over the total limit of %d bytes (32 MiB)", name, MaxSeedBytes)
 		}
 		files = append(files, File{Path: name, Data: data})
 		return nil
@@ -162,10 +169,26 @@ type commitReply struct {
 	} `json:"commit"`
 }
 
-// Seed commits every file to Branch of owner/name as one commit through the contents API. The
-// author and the committer are both named author. It returns the SHA of the commit. File bytes
-// travel base64-encoded, so text and binary files are sent the same way.
+// checkSeedTotal refuses files whose bytes total more than MaxSeedBytes.
+func checkSeedTotal(files []File) error {
+	var total int64
+	for _, f := range files {
+		total += int64(len(f.Data))
+	}
+	if total > MaxSeedBytes {
+		return fmt.Errorf("seed totals %d bytes, over the total limit of %d bytes (32 MiB)", total, MaxSeedBytes)
+	}
+	return nil
+}
+
+// Seed commits every file to Branch of owner/name as one commit through the contents API, as
+// author for both author and committer, and returns the commit's SHA; a seed whose files total
+// more than MaxSeedBytes is refused before any request, and file bytes travel base64-encoded,
+// so text and binary files are sent the same way.
 func Seed(c *forgejoprov.Client, owner, name, author string, files []File) (string, error) {
+	if err := checkSeedTotal(files); err != nil {
+		return "", err
+	}
 	ops := make([]map[string]any, 0, len(files))
 	for _, f := range files {
 		ops = append(ops, map[string]any{

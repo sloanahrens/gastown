@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -160,6 +161,17 @@ func seedDir(t *testing.T, files map[string][]byte) string {
 	return dir
 }
 
+// seedOfSize returns a seed directory of n files of size bytes each, named so they sort in
+// creation order.
+func seedOfSize(t *testing.T, n, size int) string {
+	t.Helper()
+	files := make(map[string][]byte, n)
+	for i := range n {
+		files[fmt.Sprintf("f%04d", i)] = make([]byte, size)
+	}
+	return seedDir(t, files)
+}
+
 func TestValidateRepo(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -302,6 +314,35 @@ func TestLoadSeedAcceptsExactlyTheLimit(t *testing.T) {
 	}
 }
 
+// TestLoadSeedRefusesASeedOverTheTotalLimit: a seed over MaxSeedBytes is refused, and the file
+// that crossed the limit is named.
+func TestLoadSeedRefusesASeedOverTheTotalLimit(t *testing.T) {
+	t.Parallel()
+	files, err := LoadSeed(seedOfSize(t, MaxSeedBytes/MaxFileBytes+1, MaxFileBytes))
+	if err == nil {
+		t.Fatalf("LoadSeed succeeded with %d files; want a refusal", len(files))
+	}
+	if !strings.Contains(err.Error(), "total limit") {
+		t.Fatalf("LoadSeed error %q does not name the total limit", err)
+	}
+	if want := fmt.Sprintf("f%04d", MaxSeedBytes/MaxFileBytes); !strings.Contains(err.Error(), want) {
+		t.Fatalf("LoadSeed error %q does not name %s", err, want)
+	}
+}
+
+// TestLoadSeedAcceptsExactlyTheTotalLimit pins the boundary: files totalling MaxSeedBytes are
+// sent.
+func TestLoadSeedAcceptsExactlyTheTotalLimit(t *testing.T) {
+	t.Parallel()
+	files, err := LoadSeed(seedOfSize(t, MaxSeedBytes/MaxFileBytes, MaxFileBytes))
+	if err != nil {
+		t.Fatalf("LoadSeed refused files of exactly the total limit: %v", err)
+	}
+	if len(files) != MaxSeedBytes/MaxFileBytes {
+		t.Fatalf("LoadSeed = %d files, want %d", len(files), MaxSeedBytes/MaxFileBytes)
+	}
+}
+
 func TestCreateRepoSendsPrivateEmptyMainRepository(t *testing.T) {
 	t.Parallel()
 	f := newFake(t, nil)
@@ -431,6 +472,25 @@ func TestSeedRefusesReplyWithoutACommit(t *testing.T) {
 	_, err := Seed(f.client(t), testOwner, testName, testAuthor, []File{{Path: "a", Data: []byte("a")}})
 	if err == nil || !strings.Contains(err.Error(), "no commit") {
 		t.Fatalf("Seed error = %v, want a refusal naming the missing commit", err)
+	}
+}
+
+// TestSeedRefusesASeedOverTheTotalLimitBeforeAnyRequest: the body is never built for a seed the
+// total cap refuses.
+func TestSeedRefusesASeedOverTheTotalLimitBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
+	f := newFake(t, nil)
+	buf := make([]byte, MaxFileBytes)
+	files := make([]File, 0, MaxSeedBytes/MaxFileBytes+1)
+	for i := 0; i <= MaxSeedBytes/MaxFileBytes; i++ {
+		files = append(files, File{Path: fmt.Sprintf("f%04d", i), Data: buf})
+	}
+	_, err := Seed(f.client(t), testOwner, testName, testAuthor, files)
+	if err == nil || !strings.Contains(err.Error(), "total limit") {
+		t.Fatalf("Seed error = %v, want a refusal naming the total limit", err)
+	}
+	if w := f.writes(); len(w) != 0 {
+		t.Fatalf("Seed sent %d writes for a seed over the total limit: %+v", len(w), w)
 	}
 }
 
