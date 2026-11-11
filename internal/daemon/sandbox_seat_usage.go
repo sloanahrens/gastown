@@ -54,7 +54,10 @@ func (h *patrolScanHost) seatStartedAt(rig, name string, submitted time.Time) (t
 	if ok {
 		return rec.CreatedAt, nil
 	}
-	start, _, err := session.SandboxSeatStartFromLedger(h.town(), sessionName, submitted)
+	start, _, skipped, err := session.SandboxSeatStartFromLedger(h.town(), sessionName, submitted)
+	for _, s := range skipped {
+		h.d.logger.Printf("sandbox seat end %s/%s: skipped %v: it names no seat, so the other seats' starts still stand", rig, name, s)
+	}
 	if err != nil {
 		return time.Time{}, fmt.Errorf("reading its start from the seat-end ledger: %w", err)
 	}
@@ -65,12 +68,15 @@ func (h *patrolScanHost) seatStartedAt(rig, name string, submitted time.Time) (t
 // and started at start, before its directories are removed. startErr is what
 // seatStartedAt reported. A seat with no transcript written since it started
 // writes nothing. A seat with no lister wired is refused before anything is
-// read. It returns the path of the record when one was written, and the error for
-// the caller to log once: the removal goes on either way.
-func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLanding, start time.Time, startErr error) (string, error) {
+// read. It returns the path of the record when one was written, and incomplete:
+// the reasons some transcript could not be read in full, which the record already
+// says its totals may understate. err is the reason no record was written. The
+// caller logs err as not written, or incomplete as written but not read in full,
+// once; the removal goes on either way.
+func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLanding, start time.Time, startErr error) (written string, incomplete, err error) {
 	list := h.seatUsage.list
 	if list == nil {
-		return "", errSeatUsageUnlisted
+		return "", nil, errSeatUsageUnlisted
 	}
 	write := h.seatUsage.write
 	if write == nil {
@@ -79,16 +85,16 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 	clone := polecat.SandboxSeatHostDirsFor(filepath.Join(h.town(), rig), rig, name).ClonePath
 	paths, err := list(h.town(), clone)
 	if err != nil {
-		return "", fmt.Errorf("listing its transcripts: %w", err)
+		return "", nil, fmt.Errorf("listing its transcripts: %w", err)
 	}
 	if len(paths) == 0 {
-		return "", startErr
+		return "", nil, startErr
 	}
 	if startErr != nil {
-		return "", startErr
+		return "", nil, startErr
 	}
 	if start.IsZero() {
-		return "", errNoSeatStart
+		return "", nil, errNoSeatStart
 	}
 
 	var sessions []usageattrib.SessionUsage
@@ -103,11 +109,11 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 		}
 	}
 	if len(sessions) == 0 {
-		return "", errors.Join(readErrs...)
+		return "", nil, errors.Join(readErrs...)
 	}
 	workspace, err := usageattrib.WorkspaceOf(h.town(), landing.BeadID)
 	if err != nil {
-		return "", errors.Join(err, errors.Join(readErrs...))
+		return "", nil, errors.Join(err, errors.Join(readErrs...))
 	}
 	ids := make([]string, 0, len(sessions))
 	for _, s := range sessions {
@@ -127,9 +133,9 @@ func (h *patrolScanHost) writeSeatUsage(rig, name string, landing sandboxSeatLan
 	}, sessions)
 	usageDir := filepath.Join(constants.TownRuntimePath(h.town()), "usage")
 	if err := write(usageDir, rec, ids); err != nil {
-		return "", errors.Join(err, errors.Join(readErrs...))
+		return "", nil, errors.Join(err, errors.Join(readErrs...))
 	}
-	return usageattrib.WorkRecordPath(usageDir, landing.BeadID), errors.Join(readErrs...)
+	return usageattrib.WorkRecordPath(usageDir, landing.BeadID), errors.Join(readErrs...), nil
 }
 
 // seatSession reads one transcript the seat's sessions wrote, with the messages

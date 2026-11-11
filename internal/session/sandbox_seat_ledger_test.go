@@ -92,7 +92,7 @@ func TestSeatLineEndedAtIsTheInjectedClock(t *testing.T) {
 	if err := WriteSandboxRecord(town, rec); err != nil {
 		t.Fatalf("writing the record: %v", err)
 	}
-	if err := removeSandboxRecord(town, rec.Session, func() time.Time { return ended }); err != nil {
+	if err := RemoveSandboxRecordAt(town, rec.Session, func() time.Time { return ended }); err != nil {
 		t.Fatalf("removing the record: %v", err)
 	}
 	raw, err := os.ReadFile(SandboxSeatLedgerPath(town))

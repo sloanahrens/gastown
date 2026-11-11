@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,10 +44,11 @@ func TestSandboxSeatStartFromLedgerMatchesTheRecordAliveAtSubmission(t *testing.
 		name      string
 		lines     []sandboxSeatEndLine
 		raw       string
-		submitted time.Time
-		wantStart time.Time
-		wantOK    bool
-		wantErr   bool
+		submitted   time.Time
+		wantStart   time.Time
+		wantOK      bool
+		wantSkipped int
+		wantErr     bool
 	}{
 		{
 			name:      "the line alive at the submission gives its start",
@@ -82,8 +84,23 @@ func TestSandboxSeatStartFromLedgerMatchesTheRecordAliveAtSubmission(t *testing.
 			wantErr:   true,
 		},
 		{
-			name:      "a line that does not parse is an error, never an absent record",
-			raw:       "not json\n",
+			name:        "a line that does not parse and names no seat is skipped, the seat's own line still counts",
+			lines:       []sandboxSeatEndLine{{Session: name, CreatedAt: created, EndedAt: created.Add(2 * time.Hour)}},
+			raw:         "not json\n",
+			submitted:   submitted,
+			wantStart:   created,
+			wantOK:      true,
+			wantSkipped: 1,
+		},
+		{
+			name:        "a line that does not parse and names no seat, with no own line, is skipped as no record",
+			raw:         "not json\n",
+			submitted:   submitted,
+			wantSkipped: 1,
+		},
+		{
+			name:      "a line that does not parse and names this seat is an error, never an absent record",
+			raw:       `{"session":"gt-gastown-box",` + "\n",
 			submitted: submitted,
 			wantErr:   true,
 		},
@@ -99,7 +116,7 @@ func TestSandboxSeatStartFromLedgerMatchesTheRecordAliveAtSubmission(t *testing.
 			t.Parallel()
 			town := t.TempDir()
 			writeSeatLedger(t, town, tt.lines, tt.raw)
-			start, ok, err := SandboxSeatStartFromLedger(town, name, tt.submitted)
+			start, ok, skipped, err := SandboxSeatStartFromLedger(town, name, tt.submitted)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("error = %v, want an error: %v", err, tt.wantErr)
 			}
@@ -109,6 +126,9 @@ func TestSandboxSeatStartFromLedgerMatchesTheRecordAliveAtSubmission(t *testing.
 			if !start.Equal(tt.wantStart) {
 				t.Errorf("start = %v, want %v", start, tt.wantStart)
 			}
+			if len(skipped) != tt.wantSkipped {
+				t.Errorf("skipped = %d lines (%v), want %d", len(skipped), skipped, tt.wantSkipped)
+			}
 		})
 	}
 }
@@ -117,9 +137,24 @@ func TestSandboxSeatStartFromLedgerMatchesTheRecordAliveAtSubmission(t *testing.
 // written has no record of any seat to hand on.
 func TestSandboxSeatStartFromLedgerNoLedgerIsNoRecord(t *testing.T) {
 	t.Parallel()
-	_, ok, err := SandboxSeatStartFromLedger(t.TempDir(), "gt-gastown-box", time.Now())
+	_, ok, _, err := SandboxSeatStartFromLedger(t.TempDir(), "gt-gastown-box", time.Now())
 	if err != nil || ok {
 		t.Fatalf("ok=%v err=%v, want no record and no error", ok, err)
+	}
+}
+
+// TestSandboxSeatStartFromLedgerNamesTheSkippedLine: a skipped line is reported
+// with its line number, so the daemon's log points an operator at it.
+func TestSandboxSeatStartFromLedgerNamesTheSkippedLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeSeatLedger(t, town, nil, "{}\nnot json\n")
+	_, _, skipped, err := SandboxSeatStartFromLedger(town, "gt-gastown-box", time.Now())
+	if err != nil {
+		t.Fatalf("err = %v, want the unrelated bad line skipped", err)
+	}
+	if len(skipped) != 1 || !strings.Contains(skipped[0].Error(), "line 2") {
+		t.Fatalf("skipped = %v, want one error naming line 2", skipped)
 	}
 }
 
@@ -131,7 +166,7 @@ func TestSandboxSeatStartFromLedgerReportsAnUnreadableLedger(t *testing.T) {
 	if err := os.MkdirAll(SandboxSeatLedgerPath(town), 0o755); err != nil {
 		t.Fatalf("putting a directory at the ledger path: %v", err)
 	}
-	_, ok, err := SandboxSeatStartFromLedger(town, "gt-gastown-box", time.Now())
+	_, ok, _, err := SandboxSeatStartFromLedger(town, "gt-gastown-box", time.Now())
 	if err == nil || ok {
 		t.Fatalf("ok=%v err=%v, want an unreadable ledger reported as an error", ok, err)
 	}
@@ -153,7 +188,7 @@ func TestSandboxSeatStartSurvivesTheRemoval(t *testing.T) {
 	if err := RemoveSandboxRecord(town, name); err != nil {
 		t.Fatalf("removing the record: %v", err)
 	}
-	start, ok, err := SandboxSeatStartFromLedger(town, name, submitted)
+	start, ok, _, err := SandboxSeatStartFromLedger(town, name, submitted)
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v, want the removed record's start", ok, err)
 	}

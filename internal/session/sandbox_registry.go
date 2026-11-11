@@ -138,19 +138,22 @@ func writeSeatLine(f *os.File, line []byte) error {
 // whose record was alive when the seat submitted at submitted (created at or
 // before it, ended at or after it). A line for an earlier seat of the same name
 // ended before the submission and is left out. ok is false when no line matches,
-// which is a record that never existed. A stamp-less submission, a line that
-// does not parse, and two matches that name different records are errors: the
-// start is unknown, never guessed.
-func SandboxSeatStartFromLedger(townRoot, session string, submitted time.Time) (start time.Time, ok bool, err error) {
+// which is a record that never existed. A line that does not parse is skipped
+// and returned in skipped, one error a line naming its line number: it cannot be
+// attributed to any seat, so the other seats still get their starts. Unless it
+// names session: such a line may be this seat's own, so the seat is refused
+// rather than matched past it. A stamp-less submission is refused, and so are two
+// matches that name different records: the start is unknown, never guessed.
+func SandboxSeatStartFromLedger(townRoot, session string, submitted time.Time) (start time.Time, ok bool, skipped []error, err error) {
 	if submitted.IsZero() {
-		return time.Time{}, false, errors.New("its submission has no stamp, so its record cannot be told from a predecessor's")
+		return time.Time{}, false, nil, errors.New("its submission has no stamp, so its record cannot be told from a predecessor's")
 	}
 	data, err := os.ReadFile(SandboxSeatLedgerPath(townRoot))
 	if errors.Is(err, os.ErrNotExist) {
-		return time.Time{}, false, nil
+		return time.Time{}, false, nil, nil
 	}
 	if err != nil {
-		return time.Time{}, false, fmt.Errorf("reading the seat-end ledger: %w", err)
+		return time.Time{}, false, nil, fmt.Errorf("reading the seat-end ledger: %w", err)
 	}
 	var found []time.Time
 	for i, raw := range bytes.Split(data, []byte("\n")) {
@@ -159,7 +162,12 @@ func SandboxSeatStartFromLedger(townRoot, session string, submitted time.Time) (
 		}
 		var line sandboxSeatEndLine
 		if err := json.Unmarshal(raw, &line); err != nil {
-			return time.Time{}, false, fmt.Errorf("seat-end ledger line %d does not parse: %w", i+1, err)
+			bad := fmt.Errorf("seat-end ledger line %d does not parse: %w", i+1, err)
+			if bytes.Contains(raw, []byte(session)) {
+				return time.Time{}, false, nil, fmt.Errorf("%w; it names %s, so it may be its own record", bad, session)
+			}
+			skipped = append(skipped, bad)
+			continue
 		}
 		if line.Session != session || line.CreatedAt.After(submitted) || line.EndedAt.Before(submitted) {
 			continue
@@ -168,11 +176,11 @@ func SandboxSeatStartFromLedger(townRoot, session string, submitted time.Time) (
 	}
 	switch {
 	case len(found) == 0:
-		return time.Time{}, false, nil
+		return time.Time{}, false, skipped, nil
 	case len(found) > 1 && !allSameTime(found):
-		return time.Time{}, false, fmt.Errorf("seat-end ledger names %d records of %s alive at its submission", len(found), session)
+		return time.Time{}, false, skipped, fmt.Errorf("seat-end ledger names %d records of %s alive at its submission", len(found), session)
 	}
-	return found[0], true, nil
+	return found[0], true, skipped, nil
 }
 
 // allSameTime reports whether every stamp in ts is the same instant.
@@ -271,16 +279,16 @@ func ReadSandboxRecord(townRoot, session string) (r SandboxRecord, ok bool, err 
 // (plan row M5). A seat whose bead cannot be read gets its line without the bead,
 // and that error is joined the same way.
 func RemoveSandboxRecord(townRoot, session string) error {
-	return removeSandboxRecord(townRoot, session, time.Now)
+	return RemoveSandboxRecordAt(townRoot, session, time.Now)
 }
 
-// removeSandboxRecord is RemoveSandboxRecord with its clock injected, so a
-// test pins the line's ended_at.
-func removeSandboxRecord(townRoot, session string, now func() time.Time) error {
+// RemoveSandboxRecordAt is RemoveSandboxRecord with its clock injected: the
+// line's ended_at is now(), so a caller with a clock of its own pins it.
+func RemoveSandboxRecordAt(townRoot, session string, now func() time.Time) error {
 	return removeSandboxRecordWith(townRoot, session, now, os.Remove)
 }
 
-// removeSandboxRecordWith is removeSandboxRecord with the unlink injected, so
+// removeSandboxRecordWith is RemoveSandboxRecordAt with the unlink injected, so
 // a test can fail a removal and drive its retry.
 func removeSandboxRecordWith(townRoot, session string, now func() time.Time, remove func(string) error) error {
 	if !validSessionName(session) {
