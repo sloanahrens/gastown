@@ -489,6 +489,11 @@ func (s *healthSources) NewestBackup() (time.Time, bool, error) {
 	if err != nil {
 		return time.Time{}, false, err
 	}
+	// doltbackup.List reads a missing root as having no backups, which would
+	// show a dead backup mount as "none". Only a readable root can be empty.
+	if _, err := os.ReadDir(root); err != nil {
+		return time.Time{}, false, fmt.Errorf("backup root %s not readable: %w", root, err)
+	}
 	b, ok, err := doltbackup.Newest(root)
 	if err != nil || !ok {
 		return time.Time{}, ok, err
