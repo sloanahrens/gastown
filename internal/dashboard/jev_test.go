@@ -843,14 +843,6 @@ const jevFindClassJS = `function jevFindClass(n, cls) {
   return null;
 }`
 
-// jevFindAllJS collects every element under n whose class is cls, in the order
-// the panel drew them.
-const jevFindAllJS = `function jevFindAll(n, cls, out) {
-  if (n.className === cls) out.push(n);
-  for (var i = 0; i < n.children.length; i++) jevFindAll(n.children[i], cls, out);
-  return out;
-}`
-
 // jevSummaryState is the three-battery panel with the server's summary over it:
 // finding's earning question and its watching question, three stuck questions
 // under their causes, targets' no-signal question for retirement, and a battery
@@ -924,34 +916,30 @@ func jevEarnCells(t *testing.T, dom *pageDOM) [][]jevDrawn {
 	return out
 }
 
-// jevWrapDrawn is one fold the panel draws: the chip that opens it, whether its
-// list is hidden, and the text of each item the list holds.
-type jevWrapDrawn struct {
-	Button string   `json:"button"`
-	Hidden bool     `json:"hidden"`
-	Items  []string `json:"items"`
+// jevInnerFoldTitle reads the title a JEV inner fold's heading was created
+// with. The heading is the h2 the shared foldable adds its caret and summary to,
+// so the title is the heading's own text, not its textContent.
+func jevInnerFoldTitle(t *testing.T, dom *pageDOM, key string) string {
+	t.Helper()
+	v, err := dom.vm.RunString(`String(panelFolds[` + quoteJS(key) + `].head._text || "")`)
+	if err != nil {
+		t.Fatalf("reading the %s fold's title: %v", key, err)
+	}
+	return v.String()
 }
 
-// jevWrap reads the idx-th fold of class cls, clicking its chip first when click
-// is set. A fold is a wrapper: its chip is the first child, its list the second.
-func jevWrap(t *testing.T, dom *pageDOM, cls string, idx int, click bool) jevWrapDrawn {
+// jevInnerClick clicks the heading of the JEV inner fold under key, as a reader
+// opens it, and fails when the panel keeps no such fold.
+func jevInnerClick(t *testing.T, dom *pageDOM, key string) {
 	t.Helper()
-	v, err := dom.vm.RunString(fmt.Sprintf(`JSON.stringify((function () {
-  `+jevFindAllJS+`
-  var w = jevFindAll(__byId["jev"], %s, [])[%d];
-  if (%t) __click(w.children[0]);
-  var list = w.children[1], items = [];
-  for (var i = 0; i < list.children.length; i++) items.push(list.children[i].textContent);
-  return {button: w.children[0].textContent, hidden: !!list.hidden, items: items};
-})())`, strconv.Quote(cls), idx, click))
-	if err != nil {
-		t.Fatalf("reading the JEV panel's %s fold %d: %v", cls, idx, err)
+	if _, err := dom.vm.RunString(`(function () {
+  const f = folds.filter(x => x.key === ` + quoteJS(key) + `)[0];
+  if (!f) throw new Error("the JEV panel keeps no fold under " + ` + quoteJS(key) + `);
+  const h = __find(f.el, ":scope > h2");
+  __fireOn(h, "click", {type: "click", target: h});
+})()`); err != nil {
+		t.Fatalf("clicking the %s fold: %v", key, err)
 	}
-	var got jevWrapDrawn
-	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
-		t.Fatalf("reading the JEV panel's %s fold %d: %v", cls, idx, err)
-	}
-	return got
 }
 
 // The header line says when the scores were computed, how many batteries are ok
@@ -1003,10 +991,10 @@ func TestJevPageShowsHeaderSpendAndEarningTable(t *testing.T) {
 	}
 }
 
-// The battery table is folded under "all batteries" and closed until it is
-// opened. The STUCK causes list their questions only when their own count is
-// opened, and a choice survives the redraw the panel gets on every event. The
-// WATCHING group is not folded.
+// The battery table is folded under "all batteries" through the page's shared
+// foldable and closed until it is opened. The STUCK causes are folds of the
+// same mechanism, their counts in the heading, and a choice survives the redraw
+// the panel gets on every event. The WATCHING group is not folded.
 func TestJevPageFoldsTheBatteryTableAndNotYetGroups(t *testing.T) {
 	t.Parallel()
 
@@ -1015,30 +1003,47 @@ func TestJevPageFoldsTheBatteryTableAndNotYetGroups(t *testing.T) {
 	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
 	drawJevIn(t, dom, jevSummaryState(now))
 
-	if all := jevWrap(t, dom, "jvall", 0, false); !all.Hidden || all.Button != "all batteries" {
+	if all := readPanelFold(t, dom, "jev.batteries"); !all.Closed || all.Summary != "3 batteries" {
 		t.Errorf("the battery table's fold = %+v, want closed under all batteries", all)
 	}
-	for i, want := range []string{"1 no label rule", "0 only positive labels", "2 zero positives"} {
-		if got := jevWrap(t, dom, "jvcause", i, false); got.Button != want || !got.Hidden {
-			t.Errorf("STUCK cause %d = %+v, want %q with its list folded", i, got, want)
+	if got := jevInnerFoldTitle(t, dom, "jev.batteries"); got != "all batteries" {
+		t.Errorf("the battery table's fold is titled %q, want all batteries", got)
+	}
+	for i, want := range []struct{ key, label, count string }{
+		{"jev.cause.no_label_rule", "no label rule", " · 1"},
+		{"jev.cause.only_positive", "only positive labels", " · 0"},
+		{"jev.cause.zero_positives", "zero positives", " · 2"},
+	} {
+		got := readPanelFold(t, dom, want.key)
+		if !got.Closed || got.Bits != want.count {
+			t.Errorf("STUCK cause %d = %+v, want closed with the count %q", i, got, want.count)
+		}
+		if label := jevInnerFoldTitle(t, dom, want.key); label != want.label {
+			t.Errorf("STUCK cause %d is titled %q, want %q", i, label, want.label)
 		}
 	}
 
-	if got := jevWrap(t, dom, "jvcause", 2, true); got.Hidden || !reflect.DeepEqual(got.Items, []string{"rework.all_no", "rework.dup"}) {
-		t.Errorf("zero positives opened to %+v, want its two questions", got)
+	jevInnerClick(t, dom, "jev.cause.zero_positives")
+	if got := readPanelFold(t, dom, "jev.cause.zero_positives"); got.Closed {
+		t.Error("clicking zero positives did not open its question list")
 	}
-	if got := jevWrap(t, dom, "jvcause", 0, false); !got.Hidden {
+	if lines := panelFoldLines(t, dom, "jev.cause.zero_positives"); len(lines) != 2 || lines[0].Text != "rework.all_no" || lines[1].Text != "rework.dup" {
+		t.Errorf("zero positives opened to %+v, want its two questions", lines)
+	}
+	if got := readPanelFold(t, dom, "jev.cause.no_label_rule"); !got.Closed {
 		t.Error("opening zero positives also opened no label rule")
 	}
 
 	drawJevIn(t, dom, jevSummaryState(now))
-	if got := jevWrap(t, dom, "jvcause", 2, false); got.Hidden {
+	if got := readPanelFold(t, dom, "jev.cause.zero_positives"); got.Closed {
 		t.Error("the zero positives list folded itself back on the next draw")
 	}
-	if all := jevWrap(t, dom, "jvall", 0, true); all.Hidden {
+	jevInnerClick(t, dom, "jev.batteries")
+	if all := readPanelFold(t, dom, "jev.batteries"); all.Closed {
 		t.Error("clicking all batteries did not open the battery table")
 	}
-	if all := jevWrap(t, dom, "jvall", 0, false); all.Hidden {
+	drawJevIn(t, dom, jevSummaryState(now))
+	if all := readPanelFold(t, dom, "jev.batteries"); all.Closed {
 		t.Error("the battery table folded itself back on the next draw")
 	}
 
@@ -1137,8 +1142,8 @@ func TestJevPageDrawsAReusedBatteryAsUnchangedNotStale(t *testing.T) {
 }
 
 // Without the summary the groups are left out and the page says so, while the
-// battery table still draws from the scorecard, and the header and spend line
-// fall back to what the reads carry.
+// battery table still draws from the scorecard, the header says the summary is
+// unavailable, and the spend line falls back to what the reads carry.
 func TestJevPageWithoutTheSummaryLeavesTheGroupsOut(t *testing.T) {
 	t.Parallel()
 
@@ -1150,13 +1155,13 @@ func TestJevPageWithoutTheSummaryLeavesTheGroupsOut(t *testing.T) {
 	if got := jevClassText(t, dom, "jvearn"); got != "<none>" {
 		t.Errorf("the earning table is drawn without a summary: %q", got)
 	}
-	if got := jevClassText(t, dom, "jvall"); got == "<none>" {
-		t.Error("the battery table is left out without a summary")
+	if all := readPanelFold(t, dom, "jev.batteries"); all.Summary != "3 batteries" {
+		t.Errorf("the battery table's fold = %+v, want the three batteries without a summary", all)
 	}
 	if len(rows) != 3 {
 		t.Errorf("the battery table drew %d rows, want the three batteries", len(rows))
 	}
-	if got, want := jevClassText(t, dom, "jvtitle"), "score time unknown · 3 batteries ok · 0 off"; got != want {
+	if got, want := jevClassText(t, dom, "jvtitle"), "Jev summary unavailable"; got != want {
 		t.Errorf("the header line = %q, want %q", got, want)
 	}
 	if got, want := jevClassText(t, dom, "jvspend"), "$1.75 in 24h · top caller overseer (10 calls)"; got != want {
@@ -1164,6 +1169,57 @@ func TestJevPageWithoutTheSummaryLeavesTheGroupsOut(t *testing.T) {
 	}
 	if v, err := dom.vm.RunString(`__byId["jev"].textContent`); err != nil || !strings.Contains(v.String(), "the JEV summary could not be read: the groups are left out") {
 		t.Errorf("the panel does not say the summary is missing: %v %q", err, v)
+	}
+}
+
+// A summary the server did not send is said on the header line, and no battery
+// is counted: the off list is the summary's, so counting every battery ok and
+// none off would draw a healthy town out of a missing read.
+func TestJevPageSaysSummaryUnavailableWithNoCountsWhenSummaryIsAbsent(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	drawJevIn(t, dom, jevScorecardState(now, nil))
+
+	title := jevClassText(t, dom, "jvtitle")
+	if title != "Jev summary unavailable" {
+		t.Errorf("the header line = %q, want it to say the summary is unavailable", title)
+	}
+	for _, word := range []string{"battery ok", "batteries ok", " off"} {
+		if strings.Contains(title, word) {
+			t.Errorf("the header line counts a battery without a summary: %q", title)
+		}
+	}
+}
+
+// A cap that is zero or missing is no cap at all: the spend line says so rather
+// than dividing by zero and drawing a red bar filled to nothing.
+func TestJevPageDrawsNoCapLineForAZeroOrMissingCap(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := map[string]func(map[string]any){
+		"zero cap":    func(sp map[string]any) { sp["cap_usd"] = 0 },
+		"missing cap": func(sp map[string]any) { delete(sp, "cap_usd") },
+	}
+	for name, setCap := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			s := jevSummaryState(now)
+			setCap(s["jev_summary"].(map[string]any)["spend"].(map[string]any))
+			dom := newPageDOM(t)
+			pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+			drawJevIn(t, dom, s)
+
+			if got, want := jevClassText(t, dom, "jvspend"), "$0.55 today · no cap set · top caller overseer (10 calls)"; got != want {
+				t.Errorf("the spend line = %q, want %q", got, want)
+			}
+			if got := jevClassText(t, dom, "jvbar"); got != "<none>" {
+				t.Errorf("a spend bar is drawn for a cap that is not set: %q", got)
+			}
+		})
 	}
 }
 

@@ -270,10 +270,9 @@ button.jvfold:hover{color:var(--text)}
 .jvearn th,.jvearn td{padding:2px 10px 2px 0;text-align:left;vertical-align:top;overflow-wrap:anywhere}
 .jvearn th.n,.jvearn td.n{text-align:right}
 .jvcauses{display:flex;flex-wrap:wrap;gap:2px 8px}
-.jvcause{display:inline-block;max-width:100%}
+.jvcauses>section>h2{padding:2px 8px;border-bottom:0;text-transform:none;letter-spacing:0;font-size:11px}
 .jvretire{margin-top:2px;overflow-wrap:anywhere}
-.jvall{margin-top:8px}
-.jvall .jvmore{overflow-x:auto}
+section[data-fold="jev.batteries"]>.body{overflow-x:auto}
 @media (max-width:640px){.jvbar{width:100px}.jvtable td,.jvearn td{overflow-wrap:anywhere}}
 /* A Mango row is a multi-line block, so every cell aligns to its top and only
    the first body row drops the rule under the header. */
@@ -3571,10 +3570,10 @@ function costUsage(box, u, s) {
 }
 
 // panelFolds keeps each folded block of a panel by its key — the Cost panel's
-// usage blocks and the om review panel's rework table — built once like the
-// chart folds: a redraw refills the fold's body and its heading's chip and date,
-// so a reading that arrives every few seconds does not stack a second fold on
-// the same key.
+// usage blocks, the om review panel's rework table, and the JEV panel's battery
+// table and STUCK causes — built once like the chart folds: a redraw refills the
+// fold's body and its heading's chip and date, so a reading that arrives every
+// few seconds does not stack a second fold on the same key.
 const panelFolds = {};
 // panelFold draws a closed fold under key into box, titled title, with line as
 // the one line its heading shows while closed, and returns it. Its heading holds
@@ -3770,11 +3769,8 @@ const JV_VERDICTS = ["earning", "no-signal", "not-yet"];
 const JV_CLASS = {earning: "jv-earning", "no-signal": "jv-nosignal", "not-yet": "jv-notyet"};
 // The batteries whose not-yet questions the operator opened. The panel is drawn
 // again on every event, so a row that folded itself back would lose the place
-// the operator had opened it at. The same holds for the STUCK causes and for
-// the battery table itself.
+// the operator had opened it at.
 const jevOpened = new Set();
-const jevCauseOpened = new Set();
-let jevAllOpen = false;
 // The STUCK causes, in the order the panel draws them.
 const JV_CAUSES = [
   {key: "no_label_rule", label: "no label rule"},
@@ -3879,7 +3875,7 @@ function jevSpendLine(sum, jev) {
   const win = sp.window_usd != null ? sp.window_usd : (jev ? jev.usd : null);
   if (sp.cap_unreadable) {
     line.append(el("span", "badc", "the daily cap could not be read"));
-  } else if (sp.today_usd != null && sp.cap_usd != null) {
+  } else if (sp.today_usd != null && sp.cap_usd != null && sp.cap_usd > 0) {
     const over = sp.today_usd >= sp.cap_usd;
     const bar = el("span", "jvbar" + (over ? " over" : ""));
     const fill = el("i");
@@ -3903,12 +3899,20 @@ function jevSpendLine(sum, jev) {
 
 // jevHeader draws the header line: when the scores were computed, the batteries
 // that are ok, and how many are off. A battery that is off is not counted as ok.
+// The off list is the summary's, so without a summary the header says it is
+// unavailable rather than counting every battery as ok and reporting none off,
+// which would read as a healthy town.
 function jevHeader(sum, sc, off, jev) {
   const box = el("div", "jvhead");
-  const at = sum && sum.refreshed ? sum.refreshed : sc.scored_at;
-  const ok = (sc.batteries || []).filter(b => !off.has(b.name) && !b.failed).length;
-  const line = (at ? "scored " + age(at) + " ago" : "score time unknown") +
-    " · " + ok + (ok === 1 ? " battery ok" : " batteries ok") + " · " + off.size + " off";
+  let line;
+  if (!sum) {
+    line = "Jev summary unavailable";
+  } else {
+    const at = sum.refreshed ? sum.refreshed : sc.scored_at;
+    const ok = (sc.batteries || []).filter(b => !off.has(b.name) && !b.failed).length;
+    line = (at ? "scored " + age(at) + " ago" : "score time unknown") +
+      " · " + ok + (ok === 1 ? " battery ok" : " batteries ok") + " · " + off.size + " off";
+  }
   box.append(el("div", "jvtitle", line));
   box.append(jevSpendLine(sum, jev));
   return box;
@@ -3967,24 +3971,14 @@ function jevWatchingGroup(list) {
   return g;
 }
 
-// jevCauseFold draws one STUCK cause: a count chip that opens the names of the
-// questions it holds. The list starts folded, and the choice survives a redraw.
-function jevCauseFold(c, cause) {
-  const wrap = el("div", "jvcause");
-  const btn = el("button", "jvchip jv-notyet jvfold", (cause.count || 0) + " " + c.label);
-  btn.type = "button";
-  const list = el("div", "jvmore");
-  list.hidden = !jevCauseOpened.has(c.key);
-  for (const n of cause.names || []) list.append(el("div", "empty", n));
-  const word = () => { btn.title = (jevCauseOpened.has(c.key) ? "hide" : "show") + " the questions with " + c.label; };
-  word();
-  btn.onclick = () => {
-    if (jevCauseOpened.has(c.key)) jevCauseOpened.delete(c.key); else jevCauseOpened.add(c.key);
-    list.hidden = !jevCauseOpened.has(c.key);
-    word();
-  };
-  wrap.append(btn, list);
-  return wrap;
+// jevCauseFold draws one STUCK cause as the page's shared fold: its count in
+// the heading and the names of the questions it holds in the body. It starts
+// folded, and the foldable remembers the reader's choice across a redraw.
+function jevCauseFold(box, c, cause) {
+  const n = cause.count || 0;
+  const f = panelFold(box, "jev.cause." + c.key, c.label, "");
+  f.bits.textContent = " · " + n;
+  for (const name of cause.names || []) f.body.append(el("div", "empty", name));
 }
 
 // jevStuckGroup draws STUCK: the not-yet questions that cannot earn for want of
@@ -3992,7 +3986,7 @@ function jevCauseFold(c, cause) {
 function jevStuckGroup(stuck) {
   const g = jevGroup("STUCK");
   const line = el("div", "jvcauses");
-  for (const c of JV_CAUSES) line.append(jevCauseFold(c, (stuck && stuck[c.key]) || {}));
+  for (const c of JV_CAUSES) jevCauseFold(line, c, (stuck && stuck[c.key]) || {});
   g.append(line);
   return g;
 }
@@ -4030,23 +4024,11 @@ function jevBatteryTable(batteries, off, reused) {
 }
 
 // jevAllBatteries folds the battery table under "all batteries", closed until
-// it is opened.
-function jevAllBatteries(table) {
-  const wrap = el("div", "jvall");
-  const btn = el("button", "jvchip jv-notyet jvfold", "all batteries");
-  btn.type = "button";
-  const body = el("div", "jvmore");
-  body.hidden = !jevAllOpen;
-  body.append(table);
-  const word = () => { btn.title = (jevAllOpen ? "hide" : "show") + " the battery table"; };
-  word();
-  btn.onclick = () => {
-    jevAllOpen = !jevAllOpen;
-    body.hidden = !jevAllOpen;
-    word();
-  };
-  wrap.append(btn, body);
-  return wrap;
+// it is opened, as the page's shared fold so its caret, saved choice and header
+// behave as every other panel fold.
+function jevAllBatteries(box, table, n) {
+  const f = panelFold(box, "jev.batteries", "all batteries", n + (n === 1 ? " battery" : " batteries"));
+  f.body.append(table);
 }
 
 // renderJev draws the JEV panel: the title line with the scorecard's totals,
@@ -4091,7 +4073,8 @@ function renderJev(s) {
   } else {
     box.append(el("div", "warnc", "the JEV summary could not be read: the groups are left out"));
   }
-  box.append(jevAllBatteries(jevBatteryTable(sc.batteries || [], off, reused)));
+  const batteries = sc.batteries || [];
+  jevAllBatteries(box, jevBatteryTable(batteries, off, reused), batteries.filter(b => !off.has(b.name)).length);
 }
 
 // MG_WORDS gives the title line a word to count each verdict by, where a target
