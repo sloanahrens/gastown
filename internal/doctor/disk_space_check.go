@@ -12,7 +12,7 @@ import (
 type DiskSpaceCheck struct {
 	BaseCheck
 	// diskSpace measures the filesystem holding a path; nil is
-	// util.GetDiskSpace (statfs, and diskutil on macOS APFS).
+	// util.GetDiskSpace.
 	diskSpace func(path string) (*util.DiskSpaceInfo, error)
 }
 

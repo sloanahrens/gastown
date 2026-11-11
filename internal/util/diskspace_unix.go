@@ -1,4 +1,4 @@
-//go:build !windows && !darwin
+//go:build !windows
 
 package util
 
@@ -7,14 +7,10 @@ import (
 	"syscall"
 )
 
-// GetDiskSpace returns filesystem space information for the given path.
+// GetDiskSpace returns filesystem space information for the given path from
+// statfs on every OS. Available space is Bavail blocks; APFS purgeable space
+// is not counted on macOS, which gt no longer supports for spawns.
 func GetDiskSpace(path string) (*DiskSpaceInfo, error) {
-	return getDiskSpace(path, nil)
-}
-
-// getDiskSpace is GetDiskSpace; only darwin consults the APFS container
-// query, so it is ignored here.
-func getDiskSpace(path string, _ apfsSpaceFunc) (*DiskSpaceInfo, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return nil, fmt.Errorf("statfs %s: %w", path, err)

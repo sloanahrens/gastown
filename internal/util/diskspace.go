@@ -114,10 +114,6 @@ func (d *DiskSpaceInfo) Level() (DiskSpaceLevel, string) {
 	return diskSpaceLevel(d)
 }
 
-// apfsSpaceFunc reports an APFS container's free and total bytes for the
-// volume mounted at mountPoint.
-type apfsSpaceFunc func(mountPoint string) (free, total uint64, err error)
-
 // diskSpaceLevel is CheckDiskSpace's verdict on measured space.
 func diskSpaceLevel(info *DiskSpaceInfo) (DiskSpaceLevel, string) {
 	availMB := info.AvailableMB()

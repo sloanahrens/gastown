@@ -290,7 +290,9 @@ func newTestManager(r *rig.Rig, w *world, tm sessionProbe, db *polecatDB) *Manag
 	}
 	m := newManager(r, w.repo(r.Path), tm, open)
 	m.gits = w.opener()
-	// util.CheckDiskSpace runs diskutil on macOS; the disk is never full.
+	// util.CheckDiskSpace reads statfs only on every OS (APFS purgeable space
+	// is not counted on macOS, which gt no longer supports for spawns), so
+	// the fake reports OK.
 	m.diskSpace = func(string) (util.DiskSpaceLevel, string, error) { return util.DiskSpaceOK, "", nil }
 	return m
 }
