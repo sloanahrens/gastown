@@ -177,6 +177,17 @@ func (d *Daemon) triggerJsonlGitBackup() {
 	}()
 }
 
+// JsonlBackupRepo is the offsite backup repository the jsonl_git_backup patrol
+// writes: the git_repo setting when one is set, else the default under the town
+// root. fromSetting reports which of the two it is. The patrol and the doctor
+// check both resolve through it, so they name the same repository.
+func JsonlBackupRepo(townRoot string, cfg *DaemonPatrolConfig) (path string, fromSetting bool) {
+	if cfg != nil && cfg.Patrols != nil && cfg.Patrols.JsonlGitBackup != nil && cfg.Patrols.JsonlGitBackup.GitRepo != "" {
+		return cfg.Patrols.JsonlGitBackup.GitRepo, true
+	}
+	return filepath.Join(townRoot, ".dolt-archive", "git"), false
+}
+
 // syncJsonlGitBackup exports issues from each database to JSONL, scrubs ephemeral data,
 // and commits/pushes to a git repository.
 // Non-fatal: errors are logged but don't stop the daemon.
@@ -208,10 +219,14 @@ func (d *Daemon) syncJsonlGitBackup() {
 	// silently diverges from TownRoot whenever the town isn't rooted at
 	// $HOME/gt directly, leaving this patrol permanently unable to find its
 	// own target directory (gt-kme).
-	gitRepo := config.GitRepo
-	if gitRepo == "" {
-		gitRepo = filepath.Join(d.config.TownRoot, ".dolt-archive", "git")
-	}
+	gitRepo, fromSetting := JsonlBackupRepo(d.config.TownRoot, d.patrolConfig)
+	d.jsonlRepoLogOnce.Do(func() {
+		source := "default"
+		if fromSetting {
+			source = "set"
+		}
+		d.logger.Printf("jsonl_git_backup: repo %s (git_repo setting %s)", gitRepo, source)
+	})
 
 	// Ensure the backup repo exists, initializing it on first run instead of
 	// silently no-op'ing forever. A missing repo used to mean this patrol
@@ -1364,7 +1379,7 @@ func (d *Daemon) pushJsonlBackup(gitRepo string, committed bool, msg string) err
 	// silently "succeeding" forever (gt-kme).
 	local := d.backupGitAt(gitRepo, gitCmdTimeout)
 	if _, err := local.RemoteURL("origin"); err != nil {
-		return fmt.Errorf("no 'origin' remote configured — offsite backup cannot push")
+		return fmt.Errorf("backup repo %s has no 'origin' remote — an origin must be added to that repo; offsite backup cannot push", gitRepo)
 	}
 
 	// Detect current branch name for push (master vs main).

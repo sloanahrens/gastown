@@ -285,6 +285,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewTownGitCheck())
 	d.Register(doctor.NewTownRootBranchCheck())
 	d.Register(doctor.NewForeignRemoteCheck())
+	d.Register(doctor.NewJsonlBackupOriginCheck())
 	d.Register(doctor.NewPreCheckoutHookCheck())
 	// Claude settings must be fixed BEFORE the daemon starts, so sessions
 	// launched by the daemon find correct settings files. If daemon runs first,
