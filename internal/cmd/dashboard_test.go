@@ -174,6 +174,23 @@ func TestDashboardSpendLedgerStates(t *testing.T) {
 		t.Errorf("empty ledger: report %s, want a zero report with no balance", out)
 	}
 
+	// A ledger present at startup and deleted before a later poll is no spend
+	// source again (nil), not a failed read: the host stopped offering one.
+	gone := t.TempDir()
+	if err := os.WriteFile(filepath.Join(gone, spendLedgerName), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	poll := dashboardSpendLedger(gone, nil)
+	if first := poll(); first == nil {
+		t.Fatalf("ledger present: poll gave nil, want the zero report")
+	}
+	if err := os.Remove(filepath.Join(gone, spendLedgerName)); err != nil {
+		t.Fatal(err)
+	}
+	if out := poll(); out != nil {
+		t.Errorf("ledger deleted after startup: poll gave %s, want nil (no spend source)", out)
+	}
+
 	failed := t.TempDir()
 	if err := os.Mkdir(filepath.Join(failed, spendLedgerName), 0o755); err != nil {
 		t.Fatal(err)

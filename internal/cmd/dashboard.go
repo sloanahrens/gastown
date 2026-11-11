@@ -1307,6 +1307,12 @@ func dashboardSpendLedger(dir string, whyLog *dashWhyLog) func() json.RawMessage
 	reader := deepseekspend.NewReader(filepath.Join(dir, spendLedgerName), filepath.Join(dir, spendEventsName), time.Local, deepseekspend.CurrentConstants(time.Local), deepseekspend.DefaultDays, deepseekspend.OpenFile)
 	return func() json.RawMessage {
 		out, err := spendLedgerPoll(reader, time.Now())
+		if errors.Is(err, fs.ErrNotExist) {
+			// The ledger was there at startup and is gone now: the host no
+			// longer offers a spend source, which is not a failed read.
+			whyLog.note(dashboard.SourceSpend, "the balance ledger was removed; no spend source")
+			return nil
+		}
 		whyLog.note(dashboard.SourceSpend, dashWhy(err))
 		if err != nil {
 			return spendUnavailable(err)
