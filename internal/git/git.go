@@ -2017,6 +2017,40 @@ func (g *Git) DiffNameOnly(base, head string) ([]string, error) {
 	return splitGitPathLines(strings.TrimSpace(out)), nil
 }
 
+// DiffLineChanges returns the lines base..head added and removed in paths
+// (git diff -U0 --no-renames). Each returned line is its content without the
+// leading + or -, so a caller can ask whether the change survives in another
+// revision's copy of the path without parsing a diff itself. Each path is
+// matched literally, so a name with glob characters names only itself.
+func (g *Git) DiffLineChanges(base, head string, paths []string) (added, removed []string, err error) {
+	args := []string{"diff", "-U0", "--no-renames", base, head, "--"}
+	for _, p := range paths {
+		args = append(args, ":(literal)"+p)
+	}
+	out, err := g.runOutput(args...)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Only lines inside a hunk are changes: before the first @@ of each file
+	// the ---/+++ headers also carry a sign, and an added line whose content
+	// starts with "--" or "++" is not a header.
+	inHunk := false
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			inHunk = false
+		case strings.HasPrefix(line, "@@"):
+			inHunk = true
+		case !inHunk:
+		case strings.HasPrefix(line, "+"):
+			added = append(added, line[1:])
+		case strings.HasPrefix(line, "-"):
+			removed = append(removed, line[1:])
+		}
+	}
+	return added, removed, nil
+}
+
 // DiffPathsNameOnly returns the subset of paths whose content differs between
 // a and b. The diff is direct (two refs compared as they stand), not
 // DiffNameOnly's merge-base range: a landing comparison asks whether this

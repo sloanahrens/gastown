@@ -60,6 +60,16 @@ type fakeDivergedPushGit struct {
 	excluded     map[[2]string]string
 	excludedErrs map[[2]string]error
 
+	// lineChanges backs DiffLineChanges, keyed by [base, head, path]: the lines
+	// one commit added and removed in that path. An unset key changed nothing.
+	lineChanges map[[3]string]fakeLineChange
+	lineErrs    map[[3]string]error
+
+	// files backs ShowFileBytesAtRev, keyed by [rev, path]. An unset key is
+	// ErrNotAtRef: the path is not in that revision's tree.
+	files    map[[2]string]string
+	fileErrs map[[2]string]error
+
 	// summaryErrs fails FirstParentCommitSummaries for one [base, head] pair.
 	summaryErrs map[[2]string]error
 
@@ -179,6 +189,38 @@ func (f *fakeDivergedPushGit) PatchIDExcluding(base, head string, _ []string) (s
 		return "", err
 	}
 	return f.excluded[[2]string{base, head}], nil
+}
+
+// fakeLineChange is the added and removed lines one commit made in one path.
+type fakeLineChange struct {
+	added   []string
+	removed []string
+}
+
+// DiffLineChanges answers for the one path each caller asks about; a call for
+// several paths would hide which path's content the check reads.
+func (f *fakeDivergedPushGit) DiffLineChanges(base, head string, paths []string) (added, removed []string, err error) {
+	if len(paths) != 1 {
+		return nil, nil, fmt.Errorf("fakeDivergedPushGit: DiffLineChanges wants one path, got %v", paths)
+	}
+	key := [3]string{base, head, paths[0]}
+	if err := f.lineErrs[key]; err != nil {
+		return nil, nil, err
+	}
+	c := f.lineChanges[key]
+	return c.added, c.removed, nil
+}
+
+func (f *fakeDivergedPushGit) ShowFileBytesAtRev(ref, path string) ([]byte, error) {
+	key := [2]string{ref, path}
+	if err := f.fileErrs[key]; err != nil {
+		return nil, err
+	}
+	content, ok := f.files[key]
+	if !ok {
+		return nil, gitpkg.ErrNotAtRef
+	}
+	return []byte(content), nil
 }
 
 func (f *fakeDivergedPushGit) FullRangeCommitSummaries(base, head string) ([]gitpkg.CommitSummary, error) {
@@ -560,8 +602,11 @@ func TestRecoverDivergedPush_PatchIDsErrorAborts(t *testing.T) {
 
 // conflictRebaseFake is origin holding one feature commit o1, and local holding
 // its rebase l1: same author and subject, same changed path, which main also
-// moved, and nothing outside that path. Each row changes one thing from it.
+// moved, and nothing outside that path. o1 added "delta", and the resolution
+// kept it on top of main's rewrite of line two. Each row changes one thing from
+// it.
 func conflictRebaseFake() *fakeDivergedPushGit {
+	const allow = "allow.txt"
 	return &fakeDivergedPushGit{
 		revs: map[string]string{
 			"origin/feature": "origSHA",
@@ -580,13 +625,20 @@ func conflictRebaseFake() *fakeDivergedPushGit {
 			{"base2", "localSHA"}: {{SHA: "l1", Email: "a@example.com", Subject: "feature work"}},
 		},
 		diffPaths: map[[2]string][]string{
-			{"base1", "base2"}: {"allow.txt"},
-			{"o1^", "o1"}:      {"allow.txt"},
-			{"l1^", "l1"}:      {"allow.txt"},
+			{"base1", "base2"}: {allow},
+			{"o1^", "o1"}:      {allow},
+			{"l1^", "l1"}:      {allow},
 		},
 		excluded: map[[2]string]string{
 			{"o1^", "o1"}: "",
 			{"l1^", "l1"}: "",
+		},
+		lineChanges: map[[3]string]fakeLineChange{
+			{"o1^", "o1", allow}: {added: []string{"delta"}},
+		},
+		files: map[[2]string]string{
+			{"base2", allow}:    "one\ntwo main\nthree\nfour\n",
+			{"localSHA", allow}: "one\ntwo main\nthree\nfour\ndelta\n",
 		},
 	}
 }
@@ -603,9 +655,39 @@ func TestRecoverDivergedPush_ConflictResolvedRebase(t *testing.T) {
 		wantErr       bool
 	}{
 		{
+			// The accepted boundary: inside the path main moved the resolution
+			// differs from origin's commit, but it keeps the line origin added.
 			name:          "resolved line in a path main moved is recovered",
 			mutate:        func(*fakeDivergedPushGit) {},
 			wantRecovered: true,
+		},
+		{
+			name: "origin's added line is not in the local result",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.files[[2]string{"localSHA", "allow.txt"}] = "one\ntwo main\nthree\nfour\n"
+			},
+		},
+		{
+			name: "origin's removed line is still in the local result",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.lineChanges[[3]string{"o1^", "o1", "allow.txt"}] = fakeLineChange{added: []string{"delta"}, removed: []string{"four"}}
+			},
+		},
+		{
+			// main removed the line too, so the absence is main's change and
+			// the resolution keeping it is not origin's work lost.
+			name: "main already removed the line origin removed",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.lineChanges[[3]string{"o1^", "o1", "allow.txt"}] = fakeLineChange{added: []string{"delta"}, removed: []string{"four"}}
+				f.files[[2]string{"base2", "allow.txt"}] = "one\ntwo main\nthree\n"
+			},
+			wantRecovered: true,
+		},
+		{
+			name: "local copy of the moved path is absent",
+			mutate: func(f *fakeDivergedPushGit) {
+				delete(f.files, [2]string{"localSHA", "allow.txt"})
+			},
 		},
 		{
 			name: "origin holds a second commit local lacks",
@@ -701,6 +783,27 @@ func TestRecoverDivergedPush_ConflictResolvedRebase(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "listing the lines a commit changed in the moved path fails",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.lineErrs = map[[3]string]error{{"o1^", "o1", "allow.txt"}: errors.New("diff failed")}
+			},
+			wantErr: true,
+		},
+		{
+			name: "reading the local copy of the moved path fails",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.fileErrs = map[[2]string]error{{"localSHA", "allow.txt"}: errors.New("show failed")}
+			},
+			wantErr: true,
+		},
+		{
+			name: "reading the base copy of the moved path fails",
+			mutate: func(f *fakeDivergedPushGit) {
+				f.fileErrs = map[[2]string]error{{"base2", "allow.txt"}: errors.New("show failed")}
+			},
+			wantErr: true,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -714,6 +817,11 @@ func TestRecoverDivergedPush_ConflictResolvedRebase(t *testing.T) {
 				}
 				if recovered || f.leaseCalls != 0 {
 					t.Errorf("an error must not push: recovered=%v lease calls=%d", recovered, f.leaseCalls)
+				}
+				// A failed check is still a refusal: the commit-level diagnosis
+				// travels with the error rather than being replaced by it.
+				if !strings.Contains(diagnosis, "real divergence") || !strings.Contains(diagnosis, "p-origin") {
+					t.Errorf("diagnosis = %q, want the refusal naming the missing commit's patch-id", diagnosis)
 				}
 				return
 			}

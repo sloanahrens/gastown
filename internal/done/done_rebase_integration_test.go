@@ -369,8 +369,9 @@ func testRebaseStopsOnConflict(t *testing.T, dir, onto string) {
 // conflictResolvedRebaseFixture is the gt-2kerwq shape. Origin holds the
 // feature branch's one commit, which rewrites line three of allow.txt; main
 // then rewrites the same line. The work clone rebases the branch over main,
-// resolves the conflict, and leaves the rebase unpushed. Returns the work clone.
-func conflictResolvedRebaseFixture(t *testing.T) string {
+// resolves the conflict by writing resolved to allow.txt, and leaves the rebase
+// unpushed. Returns the work clone.
+func conflictResolvedRebaseFixture(t *testing.T, resolved string) string {
 	t.Helper()
 	tmp := t.TempDir()
 	remote := filepath.Join(tmp, "remote.git")
@@ -402,19 +403,26 @@ func conflictResolvedRebaseFixture(t *testing.T) string {
 	testRunGit(t, work, "config", "user.name", "Test")
 	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
 	testRebaseStopsOnConflict(t, work, "origin/main")
-	writeRepoFile(t, work, "allow.txt", "one\ntwo\nthree merged\nfour\nfive\n")
+	writeRepoFile(t, work, "allow.txt", resolved)
 	testRunGit(t, work, "add", "allow.txt")
 	testRunGit(t, work, "-c", "core.editor=true", "rebase", "--continue")
 	return work
 }
 
+// resolveKeepingOriginLine is the conflict resolution that keeps the line
+// origin's commit added ("three feature") on top of main's rewrite of the same
+// line ("three main"). The file differs from origin's version inside the moved
+// path, which is the one difference a conflict-resolving rebase may make.
+const resolveKeepingOriginLine = "one\ntwo\nthree feature\nthree main\nfour\nfive\n"
+
 // A rebase that resolved a conflict in a file main rewrote is a rebase, not
-// divergence: the resolved commit's patch-id changed, but origin holds nothing
-// local lacks outside the paths main itself moved. Recovery leases local HEAD
-// over origin's tip. (gt-d8rpw0)
+// divergence: the resolved commit's patch-id changed, but its added line
+// survives in the local file and origin holds nothing local lacks outside the
+// paths main itself moved. Recovery leases local HEAD over origin's tip.
+// (gt-d8rpw0)
 func TestIntegrationRecoverDivergedPush_RealRepoConflictResolvedOverMovedMain(t *testing.T) {
 	t.Parallel()
-	work := conflictResolvedRebaseFixture(t)
+	work := conflictResolvedRebaseFixture(t, resolveKeepingOriginLine)
 	originBefore := gitpkgRev(t, work, "origin/feature")
 	localBefore := gitpkgRev(t, work, "HEAD")
 
@@ -428,7 +436,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoConflictResolvedOverMovedMain(t 
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !recovered {
-		t.Fatalf("must recover: the rebase only resolved a line main rewrote, diagnosis = %q", diagnosis)
+		t.Fatalf("must recover: the resolution kept origin's line on top of main's rewrite, diagnosis = %q", diagnosis)
 	}
 	for _, sha := range []string{originBefore, localBefore} {
 		if !strings.Contains(diagnosis, ShortSHA(sha)) {
@@ -442,12 +450,43 @@ func TestIntegrationRecoverDivergedPush_RealRepoConflictResolvedOverMovedMain(t 
 	}
 }
 
+// A conflict resolution that drops the line origin's commit added is real
+// divergence: the lease would overwrite origin's work with a rewrite that does
+// not contain it. The commit is the same author, subject and path, so only the
+// line comparison inside the moved path can tell the two apart. (gt-d8rpw0)
+func TestIntegrationRecoverDivergedPush_RealRepoRefusesResolutionDroppingOriginLine(t *testing.T) {
+	t.Parallel()
+	work := conflictResolvedRebaseFixture(t, "one\ntwo\nthree merged\nfour\nfive\n")
+	originBefore := gitpkgRev(t, work, "origin/feature")
+
+	g := gitpkg.NewGit(work)
+	if err := g.Push("origin", "feature:feature", false); err == nil {
+		t.Fatal("expected plain push to fail non-fast-forward after the conflicted rebase")
+	}
+
+	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recovered {
+		t.Fatal("must not recover: the resolution dropped the line origin's commit added")
+	}
+	if !strings.Contains(diagnosis, "real divergence") {
+		t.Errorf("diagnosis = %q, want mention of real divergence", diagnosis)
+	}
+
+	testRunGit(t, work, "fetch", "origin")
+	if got := gitpkgRev(t, work, "origin/feature"); got != originBefore {
+		t.Errorf("origin/feature was modified: got %s, want %s (untouched)", got, originBefore)
+	}
+}
+
 // A commit only origin holds is still refused when the rebase resolved a
 // conflict: origin pushed a second commit that edits the same allowlist file,
 // and the local rebase never carries it. (gt-d8rpw0)
 func TestIntegrationRecoverDivergedPush_RealRepoRefusesOriginOnlyCommitOnMovedPath(t *testing.T) {
 	t.Parallel()
-	work := conflictResolvedRebaseFixture(t)
+	work := conflictResolvedRebaseFixture(t, resolveKeepingOriginLine)
 
 	tmp := filepath.Dir(work)
 	other := filepath.Join(tmp, "other")
@@ -488,7 +527,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoRefusesOriginOnlyCommitOnMovedPa
 // (gt-d8rpw0)
 func TestIntegrationRecoverDivergedPush_RealRepoRefusesOriginCommitWithDifferentLocalCounterpart(t *testing.T) {
 	t.Parallel()
-	work := conflictResolvedRebaseFixture(t)
+	work := conflictResolvedRebaseFixture(t, resolveKeepingOriginLine)
 
 	tmp := filepath.Dir(work)
 	other := filepath.Join(tmp, "other")

@@ -241,6 +241,17 @@ func (f *fakeDoneRepo) PatchIDExcluding(base, head string, exclude []string) (st
 	return "", nil
 }
 
+// DiffLineChanges and ShowFileBytesAtRev report no lines and no file. A commit
+// with no changed paths never reaches them, and if one did, no line would be
+// found locally, keeping the divergence refused.
+func (f *fakeDoneRepo) DiffLineChanges(base, head string, paths []string) ([]string, []string, error) {
+	return nil, nil, nil
+}
+
+func (f *fakeDoneRepo) ShowFileBytesAtRev(ref, path string) ([]byte, error) {
+	return nil, git.ErrNotAtRef
+}
+
 // FullRangeCommitSummaries answers from its own map. A test that takes the
 // full-range path records what that walk returns; the first-parent listing is
 // not substituted for it, or the fake could not tell the two walks apart. An

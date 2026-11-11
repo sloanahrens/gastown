@@ -631,3 +631,73 @@ func TestAuthorEmailReadsTheWorktreeIdentity(t *testing.T) {
 		t.Errorf("AuthorEmail = %q, want %s", got, seatEmail)
 	}
 }
+
+// DiffLineChanges reads only the hunk lines of a -U0 diff: a file's ---/+++
+// headers come before its first @@ and must not read as changes, a line whose
+// own content starts with -- or ++ is a change, and a second file's headers
+// after the first file's hunk are headers again. The literal pathspec keeps a
+// path with glob characters naming only itself. (gt-d8rpw0)
+func TestDiffLineChangesReturnsOnlyHunkLines(t *testing.T) {
+	t.Parallel()
+	const diff = "diff --git a/allow[1].txt b/allow[1].txt\n" +
+		"index 1111111..2222222 100644\n" +
+		"--- a/allow[1].txt\n" +
+		"+++ b/allow[1].txt\n" +
+		"@@ -3 +3,2 @@\n" +
+		"-three\n" +
+		"+three feature\n" +
+		"+-- not a header\n" +
+		"diff --git a/other.txt b/other.txt\n" +
+		"index 3333333..4444444 100644\n" +
+		"--- a/other.txt\n" +
+		"+++ b/other.txt\n" +
+		"@@ -1 +1 @@\n" +
+		"-old\n" +
+		"+new\n"
+	s := newScripted(map[string]reply{
+		"diff -U0 --no-renames a b -- :(literal)allow[1].txt": ok(diff),
+	})
+	added, removed, err := newTestGit(t, s).DiffLineChanges("a", "b", []string{"allow[1].txt"})
+	if err != nil {
+		t.Fatalf("DiffLineChanges: %v", err)
+	}
+	if want := []string{"three feature", "-- not a header", "new"}; !reflect.DeepEqual(added, want) {
+		t.Errorf("added = %q, want %q", added, want)
+	}
+	if want := []string{"three", "old"}; !reflect.DeepEqual(removed, want) {
+		t.Errorf("removed = %q, want %q", removed, want)
+	}
+}
+
+// An unchanged path has an empty diff: no lines, and no error. A failed diff
+// returns its error rather than an empty change set. (gt-d8rpw0)
+func TestDiffLineChangesEmptyAndFailure(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		answer  reply
+		wantErr string
+	}{
+		{name: "no change", answer: ok("")},
+		{name: "diff fails", answer: fail(128, "bad revision"), wantErr: "bad revision"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newScripted(map[string]reply{"diff -U0 --no-renames a b -- :(literal)x.txt": tc.answer})
+			added, removed, err := newTestGit(t, s).DiffLineChanges("a", "b", []string{"x.txt"})
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("DiffLineChanges = %q, %q, %v; want an error naming %q", added, removed, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DiffLineChanges: %v", err)
+			}
+			if len(added) != 0 || len(removed) != 0 {
+				t.Fatalf("DiffLineChanges = %q, %q; want no lines", added, removed)
+			}
+		})
+	}
+}

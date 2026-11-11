@@ -3,6 +3,7 @@ package done
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +20,8 @@ type divergedPushGit interface {
 	PatchID(base, head string) (string, error)
 	PatchIDExcluding(base, head string, exclude []string) (string, error)
 	DiffNameOnly(base, head string) ([]string, error)
+	DiffLineChanges(base, head string, paths []string) (added, removed []string, err error)
+	ShowFileBytesAtRev(ref, path string) ([]byte, error)
 	FirstParentPatchIDs(base, head string) ([]git.PatchIDCommit, error)
 	FirstParentCommitSummaries(base, head string) ([]git.CommitSummary, error)
 	FullRangeCommitSummaries(base, head string) ([]git.CommitSummary, error)
@@ -79,7 +82,8 @@ type divergedPushGit interface {
 // missing. It is still the same work when every origin commit that is missing
 // locally has a local counterpart with the same author, subject and changed
 // paths, and the same diff outside the paths main changed between the two
-// bases (see rebasedKeepingContent). Only paths main itself changed may differ.
+// bases; inside those paths the origin commit's own lines must survive in
+// local HEAD's copy of the file (see rebasedKeepingContent).
 //
 // Returns recovered=true only when the leased push actually landed.
 // diagnosis is set whenever the comparison could be made, for inclusion in
@@ -162,9 +166,15 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 	rebased := false
 	if refused {
 		localOnly := missingCommits(localPairs, originIDs)
-		rebased, err = rebasedKeepingContent(g, originBase, localBase, localSHA, missing, localOnly, originSummaries)
-		if err != nil {
-			return false, "", err
+		var checkErr error
+		rebased, checkErr = rebasedKeepingContent(g, originBase, localBase, localSHA, missing, localOnly, originSummaries)
+		if checkErr != nil {
+			// The check that would clear the refusal could not finish, so the
+			// origin commits stay missing and nothing is pushed. Keep the
+			// commit-level refusal and add the failure: a bare git error would
+			// leave the reader without the commits that are at risk.
+			return false, divergenceRefusal(originSHA, localSHA, missing, originSummaries),
+				fmt.Errorf("conflict-resolved rebase check for origin=%s local=%s: %w", ShortSHA(originSHA), ShortSHA(localSHA), checkErr)
 		}
 		refused = !rebased
 	}
@@ -271,11 +281,12 @@ func missingCommits(want []git.PatchIDCommit, have []string) []git.PatchIDCommit
 // one a conflict-resolving rebase would have made from a local-only commit. A
 // rebase keeps a commit's author and subject, but a resolution changes its diff,
 // so its patch-id no longer matches. A match therefore needs the same author,
-// subject and changed paths, and the same diff outside the paths main changed
-// between oldBase and newBase: a resolution may differ only inside those paths.
-// Matching is one-to-one, so one local commit never covers two origin commits.
-// A commit with no recorded summary or no changed paths matches nothing, so the
-// check fails closed.
+// subject and changed paths, the same diff outside the paths main changed
+// between oldBase and newBase, and — inside those paths — the origin commit's
+// own lines still in local HEAD's copy (movedLinesSurvive). Matching is
+// one-to-one, so one local commit never covers two origin commits. A commit with
+// no recorded summary or no changed paths matches nothing, so the check fails
+// closed.
 func rebasedKeepingContent(g divergedPushGit, oldBase, newBase, localSHA string, missing, localOnly []git.PatchIDCommit, originSummaries []git.CommitSummary) (bool, error) {
 	if len(missing) == 0 || len(missing) > len(localOnly) {
 		return false, nil
@@ -294,14 +305,14 @@ func rebasedKeepingContent(g divergedPushGit, oldBase, newBase, localSHA string,
 	local := make([]string, len(localOnly))
 	localOK := make([]bool, len(localOnly))
 	for i, l := range localOnly {
-		local[i], localOK[i], err = rebasedShape(g, l.Commit, localBy, moved)
+		local[i], _, localOK[i], err = rebasedShape(g, l.Commit, localBy, moved)
 		if err != nil {
 			return false, err
 		}
 	}
 	used := make([]bool, len(localOnly))
 	for _, m := range missing {
-		shape, ok, err := rebasedShape(g, m.Commit, originBy, moved)
+		shape, paths, ok, err := rebasedShape(g, m.Commit, originBy, moved)
 		if err != nil {
 			return false, err
 		}
@@ -319,31 +330,113 @@ func rebasedKeepingContent(g divergedPushGit, oldBase, newBase, localSHA string,
 		if !matched {
 			return false, nil
 		}
+		keeps, err := movedLinesSurvive(g, m.Commit, newBase, localSHA, paths, moved)
+		if err != nil {
+			return false, err
+		}
+		if !keeps {
+			return false, nil
+		}
 	}
 	return true, nil
 }
 
 // rebasedShape is what a rebase keeps of one commit, as a comparable key: the
 // author, the subject, the changed paths, and the diff outside the paths main
-// changed (moved). ok is false when the commit has no summary or no changed
-// paths, so it can match nothing.
-func rebasedShape(g divergedPushGit, sha string, bySHA map[string]git.CommitSummary, moved []string) (shape string, ok bool, err error) {
+// changed (moved). paths is the commit's own changed-path list, which the
+// moved-path content check reads. ok is false when the commit has no summary or
+// no changed paths, so it can match nothing.
+func rebasedShape(g divergedPushGit, sha string, bySHA map[string]git.CommitSummary, moved []string) (shape string, paths []string, ok bool, err error) {
 	summary, found := bySHA[sha]
 	if !found {
-		return "", false, nil
+		return "", nil, false, nil
 	}
-	paths, err := g.DiffNameOnly(sha+"^", sha)
+	paths, err = g.DiffNameOnly(sha+"^", sha)
 	if err != nil {
-		return "", false, fmt.Errorf("changed paths of commit %s: %w", ShortSHA(sha), err)
+		return "", nil, false, fmt.Errorf("changed paths of commit %s: %w", ShortSHA(sha), err)
 	}
 	if len(paths) == 0 {
-		return "", false, nil
+		return "", nil, false, nil
 	}
 	outside, err := g.PatchIDExcluding(sha+"^", sha, moved)
 	if err != nil {
-		return "", false, fmt.Errorf("diff of commit %s outside main's changes: %w", ShortSHA(sha), err)
+		return "", nil, false, fmt.Errorf("diff of commit %s outside main's changes: %w", ShortSHA(sha), err)
 	}
-	return strings.Join([]string{summary.Email, summary.Subject, strings.Join(paths, "\n"), outside}, "\x00"), true, nil
+	return strings.Join([]string{summary.Email, summary.Subject, strings.Join(paths, "\n"), outside}, "\x00"), paths, true, nil
+}
+
+// movedLinesSurvive reports whether the content the origin commit changed in
+// the paths main also changed is still in local HEAD's copy of them. Those are
+// the only paths where a rebase's conflict resolution may legitimately differ
+// from the origin commit, and a resolution that drops the origin commit's work
+// is real divergence: every line it added must be in the local file, and every
+// line it removed must be gone, unless main had already removed that line — the
+// same change, so the absence is main's and not the resolution's.
+func movedLinesSurvive(g divergedPushGit, sha, newBase, localSHA string, paths, moved []string) (bool, error) {
+	for _, path := range paths {
+		if !slices.Contains(moved, path) {
+			continue
+		}
+		added, removed, err := g.DiffLineChanges(sha+"^", sha, []string{path})
+		if err != nil {
+			return false, fmt.Errorf("lines commit %s changed in %s: %w", ShortSHA(sha), path, err)
+		}
+		local, err := revisionLines(g, localSHA, path)
+		if err != nil {
+			return false, err
+		}
+		base, err := revisionLines(g, newBase, path)
+		if err != nil {
+			return false, err
+		}
+		localSet := lineSet(local)
+		baseSet := lineSet(base)
+		for _, line := range added {
+			if _, ok := localSet[line]; !ok {
+				return false, nil
+			}
+		}
+		for _, line := range removed {
+			if _, ok := localSet[line]; !ok {
+				continue
+			}
+			if _, ok := baseSet[line]; !ok {
+				continue
+			}
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// revisionLines is one file's lines at rev, or no lines when the path is not in
+// that revision's tree. Any other failure — an unresolvable rev, an unreadable
+// object — is returned, never read as an empty file.
+func revisionLines(g divergedPushGit, rev, path string) ([]string, error) {
+	data, err := g.ShowFileBytesAtRev(rev, path)
+	if errors.Is(err, git.ErrNotAtRef) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("content of %s at %s: %w", path, ShortSHA(rev), err)
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+	lines := strings.Split(string(data), "\n")
+	if lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines, nil
+}
+
+// lineSet indexes lines for the presence checks; a repeated line counts once.
+func lineSet(lines []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(lines))
+	for _, line := range lines {
+		set[line] = struct{}{}
+	}
+	return set
 }
 
 // summariesBySHA indexes commit summaries by full sha.
