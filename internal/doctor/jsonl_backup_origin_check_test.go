@@ -80,6 +80,24 @@ func TestJsonlBackupOriginCheck_NoOriginReportsConfiguredPath(t *testing.T) {
 	}
 }
 
+func TestJsonlBackupOriginCheck_FixHintQuotesRepoPath(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A space and a command substitution: unquoted, the hint would split the path
+	// into two words and run the substitution when pasted into a shell.
+	repo := filepath.Join(town, "offsite backup $(touch pwned)", "git")
+	writePatrolConfig(t, town, `{"type":"daemon-patrol-config","version":1,"patrols":{"jsonl_git_backup":{"enabled":true,"git_repo":"`+repo+`"}}}`)
+	f := gitfake.New()
+	backupRepoAt(t, f, repo)
+
+	result := NewJsonlBackupOriginCheck().Run(withGit(&CheckContext{TownRoot: town}, f))
+
+	want := "Add an origin to " + repo + ": git -C '" + repo + "' remote add origin <url>"
+	if result.FixHint != want {
+		t.Errorf("FixHint = %q, want %q", result.FixHint, want)
+	}
+}
+
 func TestJsonlBackupOriginCheck_OriginPresentIsOK(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
