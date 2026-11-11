@@ -9,6 +9,7 @@ import (
 )
 
 func TestFormatRigDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		rigName string
@@ -76,6 +77,7 @@ func TestFormatRigDescription(t *testing.T) {
 }
 
 func TestParseRigFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		desc string
@@ -142,6 +144,7 @@ state: active`,
 }
 
 func TestRigFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &RigFields{
 		Repo:   "git@github.com:user/gastown.git",
 		Prefix: "gt",
@@ -163,6 +166,7 @@ func TestRigFieldsRoundTrip(t *testing.T) {
 }
 
 func TestRigBeadID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want string
@@ -182,6 +186,7 @@ func TestRigBeadID(t *testing.T) {
 }
 
 func TestRigBeadIDWithPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		prefix string
 		name   string
@@ -202,6 +207,7 @@ func TestRigBeadIDWithPrefix(t *testing.T) {
 }
 
 func TestValidRigState(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		state RigState
 		want  bool
@@ -404,6 +410,7 @@ exit 0
 
 // TestInvalidateTypeConfigCache verifies both cache levels are dropped.
 func TestInvalidateTypeConfigCache(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	sentinel := filepath.Join(beadsDir, ".gt-types-configured")
 	if err := os.WriteFile(sentinel, []byte(TypeConfigSentinelValue()+"\n"), 0644); err != nil {

@@ -86,6 +86,7 @@ exit 0
 `
 
 func TestFormulaWispIDs_FiltersToAttachedFormula(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		issues []*Issue
@@ -134,6 +135,7 @@ func TestFormulaWispIDs_FiltersToAttachedFormula(t *testing.T) {
 }
 
 func TestFirstFormulaWisp(t *testing.T) {
+	t.Parallel()
 	if got := FirstFormulaWisp(nil); got != nil {
 		t.Errorf("FirstFormulaWisp(nil) = %v, want nil", got)
 	}
@@ -338,6 +340,7 @@ const machineChildrenEnvelopeShuffled = `{"error":null,"data":{"gt-wisp-root":[{
 // are visited in sorted order, so the cases that put the envelope's other
 // members first and last in the bytes answer identically.
 func TestParseChildrenJSON_RefusesUnknownShape(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		body    string
@@ -437,6 +440,7 @@ func TestParseChildrenJSON_RefusesUnknownShape(t *testing.T) {
 // before reading its dependents), so ChildrenOf must read it, find no
 // children, and drop it — not refuse the whole payload (gt-8f6m4).
 func TestParseChildrenMapJSON_ChildlessParent(t *testing.T) {
+	t.Parallel()
 	const withChildren = `{"id":"gt-wisp-a.1","status":"open"}`
 	for _, tt := range []struct{ name, body string }{
 		{"metadata last", `{"gt-wisp-a":[` + withChildren + `],"gt-wisp-b":[],"schema_version":1}`},
@@ -464,6 +468,7 @@ func TestParseChildrenMapJSON_ChildlessParent(t *testing.T) {
 // multi-parent reader: bd's envelope members that carry no child list are
 // errors naming the member, never silently dropped (gt-8f6m4).
 func TestParseChildrenMapJSON_RefusesUnknownShape(t *testing.T) {
+	t.Parallel()
 	for _, tt := range []struct{ name, body, wantKey string }{
 		{"machine envelope", machineChildrenEnvelope, "contract_version"},
 		{"null member", `{"gt-wisp-root":null}`, "gt-wisp-root"},

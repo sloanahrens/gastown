@@ -19,6 +19,7 @@ import (
 // because the shared container stalls calls under gate load (gt-elvf4); an
 // explicit operational.session.bd_subprocess_timeout wins over all of them.
 func TestSubprocessTimeoutForBudget(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		args      []string
@@ -55,6 +56,7 @@ func sessionWith(bdSubprocessTimeout string) *config.SessionThresholds {
 
 // TestSubprocessBudgetValues pins the three budgets the spec fixes.
 func TestSubprocessBudgetValues(t *testing.T) {
+	t.Parallel()
 	if bdSubprocessTimeout != 60*time.Second {
 		t.Errorf("bdSubprocessTimeout = %v, want 60s", bdSubprocessTimeout)
 	}
@@ -69,6 +71,7 @@ func TestSubprocessBudgetValues(t *testing.T) {
 // TestBeadsSubprocessTimeoutScope pins who gets the container budget: only a
 // wrapper aimed at the test Dolt container. Real-town wrappers keep 60s.
 func TestBeadsSubprocessTimeoutScope(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	tests := []struct {
 		name     string

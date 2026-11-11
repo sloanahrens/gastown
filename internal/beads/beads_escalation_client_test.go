@@ -67,6 +67,7 @@ func escalationContains(issues []*beads.Issue, id string) bool {
 // fingerprint label and the formatted multi-line description all land on one
 // bead, and the listings find it.
 func TestEscalationHelpersOverClientCreateFilesAWispWithItsLabels(t *testing.T) {
+	t.Parallel()
 	f, issue := escalationOnFake(t, "escalation-fp:abc123")
 
 	for _, label := range []string{"gt:escalation", "severity:high", "escalation-fp:abc123"} {
@@ -116,6 +117,7 @@ func TestEscalationHelpersOverClientCreateFilesAWispWithItsLabels(t *testing.T) 
 // is what makes `gt escalate list` and the re-escalation flow agree on how
 // many escalations there are (gt-9k2bx).
 func TestEscalationHelpersOverClientListSkipsMailCarriers(t *testing.T) {
+	t.Parallel()
 	f, issue := escalationOnFake(t, "escalation-fp:abc123")
 
 	if _, err := f.Create(beads.CreateOptions{
@@ -147,6 +149,7 @@ func TestEscalationHelpersOverClientListSkipsMailCarriers(t *testing.T) {
 // property over the Client path: a second firing of the same alert updates the
 // bead that already represents it instead of minting another.
 func TestEscalationHelpersOverClientBumpRecordsRepeatOnTheOneBead(t *testing.T) {
+	t.Parallel()
 	f, issue := escalationOnFake(t, "escalation-fp:abc123")
 
 	occurrences, renotify, err := beads.BumpEscalation(f, issue.ID, "high", "still failing", "main_branch_test", time.Hour)
@@ -176,6 +179,7 @@ func TestEscalationHelpersOverClientBumpRecordsRepeatOnTheOneBead(t *testing.T) 
 // TestEscalationHelpersOverClientAckThenClose walks the ack-then-close
 // lifecycle the way `gt escalate ack` and `gt escalate close` drive it.
 func TestEscalationHelpersOverClientAckThenClose(t *testing.T) {
+	t.Parallel()
 	f, issue := escalationOnFake(t, "escalation-fp:abc123")
 
 	if err := beads.AckEscalation(f, issue.ID, crewTestActor); err != nil {
@@ -222,6 +226,7 @@ func TestEscalationHelpersOverClientAckThenClose(t *testing.T) {
 // clear half: a producer clearing its own key must not reach another
 // condition's alert.
 func TestEscalationHelpersOverClientClearClosesOnlyTheClearedKey(t *testing.T) {
+	t.Parallel()
 	f := beadsfake.New(beadsfake.WithActor("daemon"))
 	mine := fileEscalationOnFake(t, f, "escalation-fp:aaa111", "high")
 	other := fileEscalationOnFake(t, f, "escalation-fp:bbb222", "high")
@@ -249,6 +254,7 @@ func TestEscalationHelpersOverClientClearClosesOnlyTheClearedKey(t *testing.T) {
 // TestEscalationHelpersOverClientReescalateBumpsSeverity covers the
 // threshold-driven bump `gt escalate stale` runs.
 func TestEscalationHelpersOverClientReescalateBumpsSeverity(t *testing.T) {
+	t.Parallel()
 	f, issue := escalationOnFake(t, "escalation-fp:abc123")
 
 	result, err := beads.ReescalateEscalation(f, issue.ID, "deacon", 3)
@@ -279,6 +285,7 @@ func TestEscalationHelpersOverClientReescalateBumpsSeverity(t *testing.T) {
 // Client, and keeps an acknowledged escalation out of it: an ack means a human
 // is already on it, so re-escalating it would page them twice.
 func TestEscalationHelpersOverClientListStaleEscalations(t *testing.T) {
+	t.Parallel()
 	f, issue := escalationOnFake(t, "escalation-fp:abc123")
 
 	// The fake's clock starts at its epoch, well before now, so an escalation
@@ -307,6 +314,7 @@ func TestEscalationHelpersOverClientListStaleEscalations(t *testing.T) {
 // mutating paths share: a bead without the family label is not something these
 // helpers will touch.
 func TestEscalationHelpersOverClientRefuseNonEscalationBeads(t *testing.T) {
+	t.Parallel()
 	f := beadsfake.New()
 	plain, err := f.Create(beads.CreateOptions{Title: "ordinary work", Labels: []string{"gt:task"}, Priority: -1})
 	if err != nil {
@@ -336,6 +344,7 @@ func TestEscalationHelpersOverClientRefuseNonEscalationBeads(t *testing.T) {
 // TestEscalationHelpersOverClientRefuseFlagLikeTitles keeps the gt-e0kx5 guard
 // on the free function, not only on *Beads.
 func TestEscalationHelpersOverClientRefuseFlagLikeTitles(t *testing.T) {
+	t.Parallel()
 	f := beadsfake.New()
 	if _, err := beads.CreateEscalationBead(f, "--help", &beads.EscalationFields{Severity: "low"}); err == nil {
 		t.Fatal("CreateEscalationBead accepted a flag-like title")

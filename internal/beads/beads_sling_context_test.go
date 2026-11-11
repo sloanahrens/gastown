@@ -7,6 +7,7 @@ import (
 )
 
 func TestFormatParseSlingContextRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &capacity.SlingContextFields{
 		Version:          1,
 		WorkBeadID:       "gt-abc123",
@@ -84,6 +85,7 @@ func TestFormatParseSlingContextRoundTrip(t *testing.T) {
 }
 
 func TestFormatParseSlingContext_MinimalFields(t *testing.T) {
+	t.Parallel()
 	original := &capacity.SlingContextFields{
 		WorkBeadID: "gt-abc",
 		TargetRig:  "myrig",
@@ -112,6 +114,7 @@ func TestFormatParseSlingContext_MinimalFields(t *testing.T) {
 }
 
 func TestParseSlingContextFields_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	result := ParseSlingContextFields("not json at all")
 	if result != nil {
 		t.Errorf("expected nil for invalid JSON, got %+v", result)
@@ -119,6 +122,7 @@ func TestParseSlingContextFields_InvalidJSON(t *testing.T) {
 }
 
 func TestParseSlingContextFields_EmptyString(t *testing.T) {
+	t.Parallel()
 	result := ParseSlingContextFields("")
 	if result != nil {
 		t.Errorf("expected nil for empty string, got %+v", result)
@@ -126,6 +130,7 @@ func TestParseSlingContextFields_EmptyString(t *testing.T) {
 }
 
 func TestFormatSlingContextDescription_SpecialChars(t *testing.T) {
+	t.Parallel()
 	fields := &capacity.SlingContextFields{
 		WorkBeadID:  "gt-abc",
 		TargetRig:   "myrig",

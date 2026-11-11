@@ -6,6 +6,7 @@ import (
 )
 
 func TestFormatReassignmentNote(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		from      string
@@ -75,6 +76,7 @@ func TestFormatReassignmentNote(t *testing.T) {
 }
 
 func TestFormatReassignmentNoteListsEveryBranch(t *testing.T) {
+	t.Parallel()
 	got := formatReassignmentNote("a/polecats/one", "a/polecats/two", "mayor", []string{
 		"polecat/one/a-x+mu2",
 		"polecat/one/a-x+mu1",

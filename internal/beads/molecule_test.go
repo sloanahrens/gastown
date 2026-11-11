@@ -7,6 +7,7 @@ import (
 )
 
 func TestParseMoleculeSteps_EmptyDescription(t *testing.T) {
+	t.Parallel()
 	steps, err := ParseMoleculeSteps("")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -17,6 +18,7 @@ func TestParseMoleculeSteps_EmptyDescription(t *testing.T) {
 }
 
 func TestParseMoleculeSteps_NoSteps(t *testing.T) {
+	t.Parallel()
 	desc := `This is a molecule description without any steps.
 Just some prose text.`
 
@@ -30,6 +32,7 @@ Just some prose text.`
 }
 
 func TestParseMoleculeSteps_SingleStep(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: implement
 Write the code carefully.
 Follow existing patterns.`
@@ -58,6 +61,7 @@ Follow existing patterns.`
 }
 
 func TestParseMoleculeSteps_MultipleSteps(t *testing.T) {
+	t.Parallel()
 	desc := `This workflow takes a task through multiple stages.
 
 ## Step: design
@@ -118,6 +122,7 @@ Needs: implement, test`
 }
 
 func TestParseMoleculeSteps_WithTier(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: quick-task
 Do something simple.
 Tier: haiku
@@ -144,6 +149,7 @@ Tier: opus`
 }
 
 func TestParseMoleculeSteps_WithWaitsFor(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: survey
 Discover work items.
 
@@ -182,6 +188,7 @@ Needs: aggregate`
 }
 
 func TestParseMoleculeSteps_CaseInsensitive(t *testing.T) {
+	t.Parallel()
 	desc := `## STEP: Design
 Plan the work.
 NEEDS: nothing
@@ -226,6 +233,7 @@ waitsfor: some-condition`
 }
 
 func TestParseMoleculeSteps_Shiny(t *testing.T) {
+	t.Parallel()
 	// The canonical example from the design doc
 	desc := `This workflow takes a task from design to merge.
 
@@ -283,6 +291,7 @@ Needs: review, test`
 }
 
 func TestParseMoleculeSteps_WithTemplateVars(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: implement
 Implement {{feature_name}} in {{target_file}}.
 Follow the existing patterns.`
@@ -302,6 +311,7 @@ Follow the existing patterns.`
 }
 
 func TestValidateMolecule_Valid(t *testing.T) {
+	t.Parallel()
 	mol := &Issue{
 		ID:   "mol-xyz",
 		Type: "molecule",
@@ -320,6 +330,7 @@ Needs: design`,
 }
 
 func TestValidateMolecule_WrongType(t *testing.T) {
+	t.Parallel()
 	mol := &Issue{
 		ID:          "task-xyz",
 		Type:        "task",
@@ -333,6 +344,7 @@ func TestValidateMolecule_WrongType(t *testing.T) {
 }
 
 func TestValidateMolecule_NoSteps(t *testing.T) {
+	t.Parallel()
 	mol := &Issue{
 		ID:          "mol-xyz",
 		Type:        "molecule",
@@ -346,6 +358,7 @@ func TestValidateMolecule_NoSteps(t *testing.T) {
 }
 
 func TestValidateMolecule_DuplicateRef(t *testing.T) {
+	t.Parallel()
 	mol := &Issue{
 		ID:   "mol-xyz",
 		Type: "molecule",
@@ -363,6 +376,7 @@ Plan again.`,
 }
 
 func TestValidateMolecule_UnknownDependency(t *testing.T) {
+	t.Parallel()
 	mol := &Issue{
 		ID:   "mol-xyz",
 		Type: "molecule",
@@ -378,6 +392,7 @@ Needs: nonexistent`,
 }
 
 func TestValidateMolecule_SelfDependency(t *testing.T) {
+	t.Parallel()
 	mol := &Issue{
 		ID:   "mol-xyz",
 		Type: "molecule",
@@ -393,6 +408,7 @@ Needs: implement`,
 }
 
 func TestValidateMolecule_Nil(t *testing.T) {
+	t.Parallel()
 	err := ValidateMolecule(nil)
 	if err == nil {
 		t.Error("ValidateMolecule(nil) = nil, want error")
@@ -400,6 +416,7 @@ func TestValidateMolecule_Nil(t *testing.T) {
 }
 
 func TestParseMoleculeSteps_WhitespaceHandling(t *testing.T) {
+	t.Parallel()
 	desc := `## Step:   spaced
   Indented instructions.
 
@@ -434,6 +451,7 @@ Tier:   opus  `
 }
 
 func TestParseMoleculeSteps_EmptyInstructions(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: empty
 
 ## Step: next
@@ -462,6 +480,7 @@ Has content.`
 }
 
 func TestValidateMolecule_SimpleCycle(t *testing.T) {
+	t.Parallel()
 	// A -> B -> A (simple 2-node cycle)
 	mol := &Issue{
 		ID:   "mol-xyz",
@@ -485,6 +504,7 @@ Needs: a`,
 }
 
 func TestValidateMolecule_LongerCycle(t *testing.T) {
+	t.Parallel()
 	// A -> B -> C -> A (3-node cycle)
 	mol := &Issue{
 		ID:   "mol-xyz",
@@ -512,6 +532,7 @@ Needs: b`,
 }
 
 func TestValidateMolecule_DiamondNoCycle(t *testing.T) {
+	t.Parallel()
 	// Diamond pattern: A -> B, A -> C, B -> D, C -> D
 	// This has no cycle, should pass
 	mol := &Issue{
@@ -540,6 +561,7 @@ Needs: b, c`,
 }
 
 func TestValidateMolecule_CycleInSubgraph(t *testing.T) {
+	t.Parallel()
 	// Root -> A, A -> B -> C -> A (cycle not involving root)
 	mol := &Issue{
 		ID:   "mol-xyz",
@@ -567,6 +589,7 @@ Needs: b`,
 }
 
 func TestParseMoleculeSteps_WithType(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: await-signal
 Wait for a wake signal before proceeding.
 Type: wait
@@ -605,6 +628,7 @@ Needs: check-reality`
 }
 
 func TestParseMoleculeSteps_WithBackoff(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: await-signal
 Wait for a wake signal with exponential backoff.
 Type: wait
@@ -643,6 +667,7 @@ Needs: await-signal`
 }
 
 func TestParseMoleculeSteps_BackoffDefaultMultiplier(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: wait-step
 Simple wait.
 Type: wait
@@ -666,6 +691,7 @@ Backoff: base=1m, max=30m`
 }
 
 func TestParseMoleculeSteps_BackoffIncomplete(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: bad-backoff
 Missing base.
 Backoff: multiplier=3, max=1h`
@@ -685,6 +711,7 @@ Backoff: multiplier=3, max=1h`
 }
 
 func TestParseMoleculeSteps_TypeCaseInsensitive(t *testing.T) {
+	t.Parallel()
 	desc := `## Step: step1
 First step.
 TYPE: WAIT

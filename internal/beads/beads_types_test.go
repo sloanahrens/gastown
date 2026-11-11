@@ -158,6 +158,7 @@ func readMockBDLog(t *testing.T, logPath string) string {
 }
 
 func TestFindTownRoot(t *testing.T) {
+	t.Parallel()
 	// Create a temporary town structure
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")
@@ -235,6 +236,7 @@ func TestFindTownRoot(t *testing.T) {
 // directory, but a town root is defined by mayor/town.json, so such a tree has
 // no town root at all. Nested towns still resolve to the outermost one.
 func TestFindTownRootRequiresPrimaryMarker(t *testing.T) {
+	t.Parallel()
 	bare := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(bare, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
@@ -265,6 +267,7 @@ func TestFindTownRootRequiresPrimaryMarker(t *testing.T) {
 }
 
 func TestResolveRoutingTarget(t *testing.T) {
+	t.Parallel()
 	// Create a temporary town with routes
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -587,6 +590,7 @@ func TestEnsureCustomTypes_LockNarrowed(t *testing.T) {
 }
 
 func TestEnsureCustomTypesConfigYAML(t *testing.T) {
+	t.Parallel()
 	ResetEnsuredDirs()
 
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -617,6 +621,7 @@ func TestEnsureCustomTypesConfigYAML(t *testing.T) {
 }
 
 func TestEnsureCustomTypesConfigYAMLIgnoresDBCache(t *testing.T) {
+	t.Parallel()
 	ResetEnsuredDirs()
 
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
@@ -974,6 +979,7 @@ esac
 }
 
 func TestParseConfigOutput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -1092,6 +1098,7 @@ func mustReadFile(t *testing.T, path string) []byte {
 }
 
 func TestDetectPrefix(t *testing.T) {
+	t.Parallel()
 	t.Run("config.yaml unquoted prefix", func(t *testing.T) {
 		beadsDir := filepath.Join(t.TempDir(), ".beads")
 		os.MkdirAll(beadsDir, 0755)
@@ -1215,6 +1222,7 @@ func TestDetectPrefix(t *testing.T) {
 }
 
 func TestStripYAMLQuotes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		expected string
@@ -1236,6 +1244,7 @@ func TestStripYAMLQuotes(t *testing.T) {
 }
 
 func TestBeads_getTownRoot(t *testing.T) {
+	t.Parallel()
 	// Create a temporary town
 	tmpDir := t.TempDir()
 	mayorDir := filepath.Join(tmpDir, "mayor")

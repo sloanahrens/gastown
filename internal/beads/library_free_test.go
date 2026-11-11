@@ -3,13 +3,14 @@ package beads
 import (
 	"fmt"
 	"go/parser"
-	"go/token"
 	"io/fs"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/gosrc"
 )
 
 // beadsModulePath is the in-process beads library gastown no longer links.
@@ -38,7 +39,8 @@ func TestNoGoFileImportsBeadsLibrary(t *testing.T) {
 	root := moduleRoot(t)
 
 	var offenders []string
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	tree := gosrc.For(root)
+	err := tree.Walk(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -51,7 +53,7 @@ func TestNoGoFileImportsBeadsLibrary(t *testing.T) {
 		if !strings.HasSuffix(d.Name(), ".go") {
 			return nil
 		}
-		f, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		f, err := tree.Parse(path, parser.ImportsOnly)
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", path, err)
 		}

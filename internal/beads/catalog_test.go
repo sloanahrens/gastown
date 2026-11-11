@@ -7,6 +7,7 @@ import (
 )
 
 func TestNewMoleculeCatalog(t *testing.T) {
+	t.Parallel()
 	cat := NewMoleculeCatalog()
 	if cat == nil {
 		t.Fatal("expected non-nil catalog")
@@ -20,6 +21,7 @@ func TestNewMoleculeCatalog(t *testing.T) {
 }
 
 func TestCatalogAddAndGet(t *testing.T) {
+	t.Parallel()
 	cat := NewMoleculeCatalog()
 
 	mol := &CatalogMolecule{
@@ -53,6 +55,7 @@ func TestCatalogAddAndGet(t *testing.T) {
 }
 
 func TestCatalogGetNotFound(t *testing.T) {
+	t.Parallel()
 	cat := NewMoleculeCatalog()
 	if got := cat.Get("nonexistent"); got != nil {
 		t.Errorf("expected nil for missing molecule, got %+v", got)
@@ -60,6 +63,7 @@ func TestCatalogGetNotFound(t *testing.T) {
 }
 
 func TestCatalogAddOverride(t *testing.T) {
+	t.Parallel()
 	cat := NewMoleculeCatalog()
 
 	mol1 := &CatalogMolecule{ID: "review", Title: "Town Review", Source: "town"}
@@ -84,6 +88,7 @@ func TestCatalogAddOverride(t *testing.T) {
 }
 
 func TestCatalogListOrder(t *testing.T) {
+	t.Parallel()
 	cat := NewMoleculeCatalog()
 
 	cat.Add(&CatalogMolecule{ID: "alpha", Title: "Alpha"})
@@ -105,6 +110,7 @@ func TestCatalogListOrder(t *testing.T) {
 }
 
 func TestCatalogListOrderAfterOverride(t *testing.T) {
+	t.Parallel()
 	cat := NewMoleculeCatalog()
 
 	cat.Add(&CatalogMolecule{ID: "first", Title: "First v1"})
@@ -126,6 +132,7 @@ func TestCatalogListOrderAfterOverride(t *testing.T) {
 }
 
 func TestCatalogLoadFromFile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	molsPath := filepath.Join(dir, "molecules.jsonl")
 
@@ -166,6 +173,7 @@ func TestCatalogLoadFromFile(t *testing.T) {
 }
 
 func TestCatalogLoadFromFileSkipsCommentsAndBlanks(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	molsPath := filepath.Join(dir, "molecules.jsonl")
 
@@ -190,6 +198,7 @@ func TestCatalogLoadFromFileSkipsCommentsAndBlanks(t *testing.T) {
 }
 
 func TestCatalogLoadFromFileMissingID(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	molsPath := filepath.Join(dir, "molecules.jsonl")
 
@@ -206,6 +215,7 @@ func TestCatalogLoadFromFileMissingID(t *testing.T) {
 }
 
 func TestCatalogLoadFromFileInvalidJSON(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	molsPath := filepath.Join(dir, "molecules.jsonl")
 
@@ -222,6 +232,7 @@ func TestCatalogLoadFromFileInvalidJSON(t *testing.T) {
 }
 
 func TestCatalogLoadFromFileNotFound(t *testing.T) {
+	t.Parallel()
 	cat := NewMoleculeCatalog()
 	err := cat.LoadFromFile("/nonexistent/path/molecules.jsonl", "test")
 	if err == nil {
@@ -233,6 +244,7 @@ func TestCatalogLoadFromFileNotFound(t *testing.T) {
 }
 
 func TestCatalogSaveToFile(t *testing.T) {
+	t.Parallel()
 	cat := NewMoleculeCatalog()
 	cat.Add(&CatalogMolecule{ID: "alpha", Title: "Alpha", Description: "First", Source: "town"})
 	cat.Add(&CatalogMolecule{ID: "beta", Title: "Beta", Description: "Second", Source: "rig"})
@@ -268,6 +280,7 @@ func TestCatalogSaveToFile(t *testing.T) {
 }
 
 func TestCatalogMoleculeToIssue(t *testing.T) {
+	t.Parallel()
 	mol := &CatalogMolecule{
 		ID:          "test-mol",
 		Title:       "Test Molecule",

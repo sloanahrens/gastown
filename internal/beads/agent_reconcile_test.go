@@ -22,6 +22,7 @@ func agentIssue(desc string, updated time.Time) *Issue {
 // timestamps with second-precision RFC3339, which is the one shape that never
 // exercises the RFC3339Nano branch.
 func TestParseIssueTime(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		in   string
@@ -67,6 +68,7 @@ func TestParseIssueTime(t *testing.T) {
 // cleanup_status is deliberately excluded here — it reconciles by severity,
 // not recency (see TestMergeLegacyAgentBead_CleanupStatusReconcilesBySeverityNotRecency).
 func TestMergeLegacyAgentBead_NewerRowWinsPerField(t *testing.T) {
+	t.Parallel()
 	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
 	rig := agentIssue("agent_state: spawning\nhook_bead: gt-911\nbranch: polecat/old\n", older)
 	town := agentIssue("agent_state: done\nhook_bead: null\nbranch: polecat/new\n", newer)
@@ -88,6 +90,7 @@ func TestMergeLegacyAgentBead_NewerRowWinsPerField(t *testing.T) {
 }
 
 func TestMergeLegacyAgentBead_GhostReferencesAreClearedNeverCopied(t *testing.T) {
+	t.Parallel()
 	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
 	// rig row is NEWER and carries a ghost active_mr; town says null.
 	rig := agentIssue("agent_state: done\nactive_mr: gt-wisp-0yhh\n", newer)
@@ -107,6 +110,7 @@ func TestMergeLegacyAgentBead_GhostReferencesAreClearedNeverCopied(t *testing.T)
 // gt-14a, gt-hsg, gt-ido). Recency must never promote a blocking value to a
 // clearing one; severity decides.
 func TestMergeLegacyAgentBead_CleanupStatusReconcilesBySeverityNotRecency(t *testing.T) {
+	t.Parallel()
 	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
 	exists := func(string) (bool, error) { return true, nil }
 
@@ -139,6 +143,7 @@ func TestMergeLegacyAgentBead_CleanupStatusReconcilesBySeverityNotRecency(t *tes
 }
 
 func TestMergeLegacyAgentBead_IdenticalRowsProduceNoUpdates(t *testing.T) {
+	t.Parallel()
 	ts := time.Date(2026, 9, 9, 4, 43, 0, 0, time.UTC)
 	rig := agentIssue("agent_state: done\ncleanup_status: clean\n", ts)
 	town := agentIssue("agent_state: done\ncleanup_status: clean\n", ts)
@@ -151,6 +156,7 @@ func TestMergeLegacyAgentBead_IdenticalRowsProduceNoUpdates(t *testing.T) {
 // A bd read error is not evidence that the bead is gone: the merge produces
 // no updates, marks the field unknown, and returns an ErrUnavailable error.
 func TestMergeLegacyAgentBead_ExistenceErrorProducesNoUpdates(t *testing.T) {
+	t.Parallel()
 	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
 	// A differing agent_state alongside the ref proves the whole merge is
 	// refused, not only the unanswerable field.
@@ -182,6 +188,7 @@ func TestMergeLegacyAgentBead_ExistenceErrorProducesNoUpdates(t *testing.T) {
 // Not-found is an answer, so the reference is cleared; the error from a
 // different reference still refuses the merge.
 func TestMergeLegacyAgentBead_ErrorNeverMasksBehindAnAbsentAnswer(t *testing.T) {
+	t.Parallel()
 	older, newer := time.Date(2026, 9, 8, 18, 55, 0, 0, time.UTC), time.Date(2026, 9, 9, 1, 7, 0, 0, time.UTC)
 	rig := agentIssue("hook_bead: gt-gone\nactive_mr: gt-unreadable\n", newer)
 	town := agentIssue("hook_bead: null\nactive_mr: null\n", older)

@@ -29,6 +29,7 @@ import (
 // through newBeads (beads.go), never through a &Beads{} composite literal of
 // its own — the same guard pattern applied here.
 func TestNoBeadsLiteralsOutsideConstructor(t *testing.T) {
+	t.Parallel()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -106,6 +107,7 @@ func isBeadsType(expr ast.Expr) bool {
 // non-fallback half proves the change is a no-op for rigs that are actually
 // checked out.
 func TestSafeWorkDirForBeadsDir(t *testing.T) {
+	t.Parallel()
 	townRoot, rigDir := newTestTown(t)
 	b := New(rigDir)
 
@@ -137,6 +139,7 @@ func TestSafeWorkDirForBeadsDir(t *testing.T) {
 // gap noted on gt-9i6z, exercising the method directly rather than only its
 // extracted helper.
 func TestPinnedToBeadsDir(t *testing.T) {
+	t.Parallel()
 	townRoot, rigDir := newTestTown(t)
 
 	t.Run("existing beadsDir parent is used as-is", func(t *testing.T) {
@@ -185,6 +188,7 @@ func TestPinnedToBeadsDir(t *testing.T) {
 // such file or directory" — the exact failure gt-3vh2 fixed for
 // pinnedToBeadsDir but left reachable here.
 func TestForIssueIDFallsBackToTownRoot(t *testing.T) {
+	t.Parallel()
 	townRoot, rigDir := newTestTown(t)
 	routesDir := filepath.Join(townRoot, ".beads")
 

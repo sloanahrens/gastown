@@ -82,6 +82,7 @@ func budgetFor(row censusCopyRow) float64 {
 // counted sixteen rows would pass while naming the wrong sixteen or holding a
 // budget the baseline never allowed.
 func TestCensusBudgetsAreTheBaseline(t *testing.T) {
+	t.Parallel()
 	baseline := readCensusBaseline(t)
 	rebased := readCensusRebase(t)
 	if len(baseline) != 16 {
@@ -126,6 +127,7 @@ func TestCensusBudgetsAreTheBaseline(t *testing.T) {
 // rate fails the gate on the day it lands, so no row may be tightened until a
 // census measures the cut.
 func TestCensusBudgetsNeverFallBelowTheBaseline(t *testing.T) {
+	t.Parallel()
 	baseline := readCensusBaseline(t)
 	budgets := CensusBudgets()
 	for i := range baseline {
@@ -141,6 +143,7 @@ func TestCensusBudgetsNeverFallBelowTheBaseline(t *testing.T) {
 // count, the override file carries that count, and the shipped budget equals it
 // (gt-1rub5).
 func TestCensusBudgetScanRowIsTheMeasuredScan(t *testing.T) {
+	t.Parallel()
 	const caller = "schedulerrun.listAllSlingContextRecords"
 	counts := recordedCallerCounts(t, "testdata/census-recorded-20261101.txt", caller)
 	if len(counts) == 0 {
@@ -203,6 +206,7 @@ func recordedCallerCounts(t *testing.T, path, caller string) []int {
 // measured ABOVE the baseline budget; one at or below it is an edit that cuts a
 // budget past the shrink-only guard, so it fails here (gt-1rub5).
 func TestCensusRebaseRowsOnlyRise(t *testing.T) {
+	t.Parallel()
 	baselineBudget := map[string]float64{}
 	for _, row := range readCensusBaseline(t) {
 		baselineBudget[row.Caller] = budgetFor(row)
@@ -222,6 +226,7 @@ func TestCensusRebaseRowsOnlyRise(t *testing.T) {
 // TestCensusBudgetsNameEachCallerOnce: a repeated caller would shadow its own
 // row in the gate's lookup, so the data must not hold one.
 func TestCensusBudgetsNameEachCallerOnce(t *testing.T) {
+	t.Parallel()
 	seen := map[string]bool{}
 	for _, b := range CensusBudgets() {
 		if b.Caller == "" {
@@ -243,6 +248,7 @@ func TestCensusBudgetsNameEachCallerOnce(t *testing.T) {
 // a caller "package.Func" from the frame that started the call, so a value
 // receiver carries no "(*T)" and a method on a pointer receiver does.
 func TestCensusBudgetCallerNamesMatchTheCensus(t *testing.T) {
+	t.Parallel()
 	for _, b := range CensusBudgets() {
 		pkg, fn, ok := strings.Cut(b.Caller, ".")
 		if !ok || pkg == "" || fn == "" {
@@ -257,6 +263,7 @@ func TestCensusBudgetCallerNamesMatchTheCensus(t *testing.T) {
 // TestCensusBudgetsReturnACopy: the gate measures against the shipped data, so
 // a caller editing the returned slice must not change the table.
 func TestCensusBudgetsReturnACopy(t *testing.T) {
+	t.Parallel()
 	budgets := CensusBudgets()
 	budgets[0].CallsPerMinute = 1e9
 	if CensusBudgets()[0].CallsPerMinute == 1e9 {
@@ -268,6 +275,7 @@ func TestCensusBudgetsReturnACopy(t *testing.T) {
 // retry wrapper, so a wrapper budget row with no read counting against it is
 // dead data the gate can never apply (gt-krmal).
 func TestCensusWrapperReadsCoverEveryWrapperRow(t *testing.T) {
+	t.Parallel()
 	budgeted := map[string]bool{}
 	for _, b := range CensusBudgets() {
 		budgeted[b.Caller] = true
@@ -300,6 +308,7 @@ func TestCensusWrapperReadsCoverEveryWrapperRow(t *testing.T) {
 // its calls charged to both budgets, and one of them is a number nobody
 // measured.
 func TestCensusWrapperReadsChargeEachReadOnce(t *testing.T) {
+	t.Parallel()
 	seen := map[CensusRead]string{}
 	for row, rs := range CensusWrapperReads() {
 		for _, r := range rs {
@@ -314,6 +323,7 @@ func TestCensusWrapperReadsChargeEachReadOnce(t *testing.T) {
 // TestCensusWrapperReadsReturnACopy: the gate measures against the shipped
 // reads, so a caller editing the returned slices must not change them.
 func TestCensusWrapperReadsReturnACopy(t *testing.T) {
+	t.Parallel()
 	for row := range CensusWrapperReads() {
 		reads := CensusWrapperReads()
 		reads[row][0].Caller = "mutated"

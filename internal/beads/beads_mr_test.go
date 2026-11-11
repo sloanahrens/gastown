@@ -11,6 +11,7 @@ import (
 )
 
 func TestMatchesMRSourceIssue(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -85,6 +86,7 @@ func TestMatchesMRSourceIssue(t *testing.T) {
 }
 
 func TestUnresolvedBlockingDependencyIDs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		deps []IssueDep
@@ -160,6 +162,7 @@ func TestUnresolvedBlockingDependencyIDs(t *testing.T) {
 }
 
 func TestIssueDepUnmarshalRelationTypeFallbackFeedsBlockerSemantics(t *testing.T) {
+	t.Parallel()
 	issue := unmarshalIssueForTest(t, `{
 		"id":"gt-target",
 		"status":"open",
@@ -184,6 +187,7 @@ func TestIssueDepUnmarshalRelationTypeFallbackFeedsBlockerSemantics(t *testing.T
 }
 
 func TestIssueDepUnmarshalDependencyTypeTakesPrecedenceOverType(t *testing.T) {
+	t.Parallel()
 	issue := unmarshalIssueForTest(t, `{
 		"id":"gt-target",
 		"status":"open",
@@ -209,6 +213,7 @@ func TestIssueDepUnmarshalDependencyTypeTakesPrecedenceOverType(t *testing.T) {
 }
 
 func TestIssueDepUnmarshalPreservesIssueTypeSeparatelyFromRelationType(t *testing.T) {
+	t.Parallel()
 	issue := unmarshalIssueForTest(t, `{
 		"id":"gt-target",
 		"status":"open",
@@ -228,6 +233,7 @@ func TestIssueDepUnmarshalPreservesIssueTypeSeparatelyFromRelationType(t *testin
 }
 
 func TestIssueDepUnmarshalPreservesNonblockingRelationTypes(t *testing.T) {
+	t.Parallel()
 	issue := unmarshalIssueForTest(t, `{
 		"id":"gt-target",
 		"status":"open",
@@ -253,6 +259,7 @@ func TestIssueDepUnmarshalPreservesNonblockingRelationTypes(t *testing.T) {
 }
 
 func TestIssueDepUnmarshalMergeBlocksRequireMergedCloseReason(t *testing.T) {
+	t.Parallel()
 	issue := unmarshalIssueForTest(t, `{
 		"id":"gt-target",
 		"status":"open",
@@ -281,6 +288,7 @@ func unmarshalIssueForTest(t *testing.T, data string) *Issue {
 }
 
 func TestHasUnresolvedBlockersFallsBackToListFields(t *testing.T) {
+	t.Parallel()
 	if !HasUnresolvedBlockers(&Issue{BlockedByCount: 1}) {
 		t.Fatal("BlockedByCount fallback should block when detailed dependencies are absent")
 	}

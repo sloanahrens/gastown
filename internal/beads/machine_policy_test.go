@@ -2,7 +2,6 @@ package beads
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -10,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/gosrc"
 )
 
 // machineExemptCallers are the only functions that run a bd call outside
@@ -29,11 +30,13 @@ var machineExemptCallers = map[string]string{
 // subprocess machine mode (gt-fd2cu.5); an opt-out is a decision to make in
 // review, not a line to add quietly.
 func TestMachineModeOptOutsAreEnumerated(t *testing.T) {
+	t.Parallel()
 	repoRoot := repoRootFromCaller(t)
 
 	var found []string
 	var badValues []string
-	err := filepath.WalkDir(filepath.Join(repoRoot, "internal"), func(path string, d os.DirEntry, err error) error {
+	tree := gosrc.For(repoRoot)
+	err := tree.Walk(filepath.Join(repoRoot, "internal"), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -41,8 +44,8 @@ func TestMachineModeOptOutsAreEnumerated(t *testing.T) {
 		if d.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			return nil
 		}
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, path, nil, 0)
+		fset := tree.FileSet()
+		file, err := tree.Parse(path, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}

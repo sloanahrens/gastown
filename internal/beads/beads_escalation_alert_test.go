@@ -292,6 +292,7 @@ func TestBumpEscalation_RenotifiesAfterWindowElapses(t *testing.T) {
 }
 
 func TestShouldRenotify(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	tests := []struct {
 		name   string
@@ -414,6 +415,7 @@ func TestCloseEscalationsByFingerprints_NoKeysIsANoOp(t *testing.T) {
 // occurrence count and last-seen stamp have to survive Format -> Parse, since
 // BumpEscalation reads what a previous firing wrote.
 func TestEscalationFieldsOccurrenceRoundTrip(t *testing.T) {
+	t.Parallel()
 	fields := &EscalationFields{
 		Severity:    "high",
 		Reason:      "spike",
@@ -436,6 +438,7 @@ func TestEscalationFieldsOccurrenceRoundTrip(t *testing.T) {
 // line, and must parse as "never bumped" rather than as a parse failure that
 // would make every bump restart the tally.
 func TestEscalationFieldsWithoutOccurrencesParsesAsZero(t *testing.T) {
+	t.Parallel()
 	legacy := "jsonl spike\n\nseverity: high\nreason: spike\nsource: jsonl_git_backup\n" +
 		"escalated_by: daemon\nescalated_at: 2026-09-21T00:00:00Z\nfingerprint: escalation-fp:abc123\n"
 	fields := ParseEscalationFields(legacy)

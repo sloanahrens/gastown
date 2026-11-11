@@ -8,6 +8,7 @@ import (
 // --- parseIntField (not covered in beads_test.go) ---
 
 func TestParseIntField(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input   string
 		want    int
@@ -37,6 +38,7 @@ func TestParseIntField(t *testing.T) {
 // --- AttachmentFields Mode round-trip ---
 
 func TestAttachmentFieldsModeRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &AttachmentFields{
 		AttachedMolecule: "gt-wisp-123",
 		AttachedAt:       "2026-02-18T12:00:00Z",
@@ -62,6 +64,7 @@ func TestAttachmentFieldsModeRoundTrip(t *testing.T) {
 }
 
 func TestSetAttachmentFieldsPreservesMode(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{
 		Description: "mode: ralph\nattached_molecule: gt-wisp-old\nSome other content",
 	}
@@ -82,6 +85,7 @@ func TestSetAttachmentFieldsPreservesMode(t *testing.T) {
 }
 
 func TestAttachmentFormulaVarsRoundTrip(t *testing.T) {
+	t.Parallel()
 	fields := &AttachmentFields{
 		AttachedFormula: "mol-polecat-work",
 		FormulaVars:     "feature=Bug to fix\nissue=gt-abc123\nbase_branch=main",
@@ -106,6 +110,7 @@ func TestAttachmentFormulaVarsRoundTrip(t *testing.T) {
 }
 
 func TestAttachmentArgsMultilineRoundTrip(t *testing.T) {
+	t.Parallel()
 	args := "Step 1: do X\nno_merge: true\nmode: ralph\n  \"quoted\" <b> & tail"
 	formatted := FormatAttachmentFields(&AttachmentFields{AttachedFormula: "mol-polecat-work", AttachedArgs: args})
 	if strings.Count(formatted, "\n") != 1 {
@@ -125,6 +130,7 @@ func TestAttachmentArgsMultilineRoundTrip(t *testing.T) {
 }
 
 func TestSetAttachmentFieldsReplacesMultilineArgs(t *testing.T) {
+	t.Parallel()
 	first := SetAttachmentFields(&Issue{Description: "Body text"}, &AttachmentFields{
 		AttachedMolecule: "gt-wisp-1",
 		AttachedArgs:     "Step 1: do X\nStep 2: do Y\nno_merge: true",
@@ -149,6 +155,7 @@ func TestSetAttachmentFieldsReplacesMultilineArgs(t *testing.T) {
 }
 
 func TestParseAttachmentArgsLegacyRawLine(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{
 		"Fix the flaky test",
 		`"half quoted and then more`,
@@ -163,6 +170,7 @@ func TestParseAttachmentArgsLegacyRawLine(t *testing.T) {
 }
 
 func TestAttachmentArgsSingleLineStaysRaw(t *testing.T) {
+	t.Parallel()
 	formatted := FormatAttachmentFields(&AttachmentFields{AttachedArgs: "plain args"})
 	if formatted != "attached_args: plain args" {
 		t.Fatalf("single-line args should stay raw, got %q", formatted)
@@ -175,6 +183,7 @@ func TestAttachmentArgsSingleLineStaysRaw(t *testing.T) {
 }
 
 func TestParseAttachmentFieldsDoesNotConsumeAdjacentKeyValueLines(t *testing.T) {
+	t.Parallel()
 	desc := "formula_vars: feature=Bug to fix\nissue=gt-abc123\nbase_branch=main\nexample=value\nmode: ralph"
 	fields := ParseAttachmentFields(&Issue{Description: desc})
 	if fields == nil {
@@ -195,6 +204,7 @@ func TestParseAttachmentFieldsDoesNotConsumeAdjacentKeyValueLines(t *testing.T) 
 }
 
 func TestSetAttachmentFieldsPreservesAdjacentKeyValueLines(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{Description: "formula_vars: old=1\nissue=old\nbase_branch=old\nexample=value\n\nBody"}
 	fields := &AttachmentFields{FormulaVars: "feature=New\nissue=gt-new"}
 
@@ -215,6 +225,7 @@ func TestSetAttachmentFieldsPreservesAdjacentKeyValueLines(t *testing.T) {
 // --- AgentFields Mode round-trip ---
 
 func TestAgentFieldsModeRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
@@ -238,6 +249,7 @@ func TestAgentFieldsModeRoundTrip(t *testing.T) {
 }
 
 func TestAgentFieldsModeOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
 	fields := &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
@@ -252,6 +264,7 @@ func TestAgentFieldsModeOmittedWhenEmpty(t *testing.T) {
 }
 
 func TestMRFieldsSubmitter(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name          string
 		description   string
@@ -310,6 +323,7 @@ func TestMRFieldsSubmitter(t *testing.T) {
 }
 
 func TestMRFieldsSubmitterRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &MRFields{
 		Branch:      "crew/operator/ci",
 		Target:      "main",
@@ -330,6 +344,7 @@ func TestMRFieldsSubmitterRoundTrip(t *testing.T) {
 }
 
 func TestFormatMRFieldsOmitsEmptySubmitter(t *testing.T) {
+	t.Parallel()
 	got := FormatMRFields(&MRFields{Branch: "docs/design", Target: "main"})
 	if strings.Contains(got, "submitter") {
 		t.Errorf("FormatMRFields should not include submitter when empty, got:\n%s", got)
@@ -337,6 +352,7 @@ func TestFormatMRFieldsOmitsEmptySubmitter(t *testing.T) {
 }
 
 func TestParseAgentFields_AllFields(t *testing.T) {
+	t.Parallel()
 	desc := "role_type: polecat\nrig: gastown\nagent_state: working\nhook_bead: gt-abc\ncleanup_status: clean\nactive_mr: gt-mr1\nlast_source_issue: gt-src\nnotification_level: verbose"
 	got := ParseAgentFields(desc)
 	if got.RoleType != "polecat" {
@@ -368,6 +384,7 @@ func TestParseAgentFields_AllFields(t *testing.T) {
 // --- Completion metadata fields (gt-x7t9) ---
 
 func TestAgentFieldsCompletionMetadataRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &AgentFields{
 		RoleType:        "polecat",
 		Rig:             "gastown",
@@ -434,6 +451,7 @@ func TestAgentFieldsCompletionMetadataRoundTrip(t *testing.T) {
 }
 
 func TestAgentFieldsMRFailedTrue(t *testing.T) {
+	t.Parallel()
 	fields := &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
@@ -454,6 +472,7 @@ func TestAgentFieldsMRFailedTrue(t *testing.T) {
 }
 
 func TestAgentFieldsCompletionOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
 	fields := &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
@@ -470,6 +489,7 @@ func TestAgentFieldsCompletionOmittedWhenEmpty(t *testing.T) {
 }
 
 func TestParseAgentFields_WithCompletionMetadata(t *testing.T) {
+	t.Parallel()
 	desc := "role_type: polecat\nrig: gastown\nagent_state: done\nhook_bead: gt-abc\nexit_type: ESCALATED\nbranch: polecat/nux/gt-abc@hash\nlast_source_issue: gt-abc\nmr_failed: true\ncompletion_time: 2026-02-28T02:00:00Z"
 	got := ParseAgentFields(desc)
 	if got.ExitType != "ESCALATED" {
@@ -496,6 +516,7 @@ func TestParseAgentFields_WithCompletionMetadata(t *testing.T) {
 // multi-line attached_args (one JSON string line) goes with its key, and the
 // bead's own text stays (gt-dhc6o).
 func TestStripAttachmentFields(t *testing.T) {
+	t.Parallel()
 	block := FormatAttachmentFields(&AttachmentFields{
 		AttachedMolecule: "gt-wisp-1",
 		AttachedFormula:  "mol-polecat-work",
@@ -524,6 +545,7 @@ func TestStripAttachmentFields(t *testing.T) {
 // TestAttachmentKeySpellings: every spelling of every attachment key is
 // stripped by both entry points, and a near-miss key is kept.
 func TestAttachmentKeySpellings(t *testing.T) {
+	t.Parallel()
 	var keys []string
 	for _, base := range []string{
 		"attached_molecule", "attached_formula", "attached_at", "attached_args",
@@ -560,6 +582,7 @@ func TestAttachmentKeySpellings(t *testing.T) {
 // --- AgentFields Agent round-trip (gt-y6cja) ---
 
 func TestAgentFieldsAgentRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &AgentFields{
 		RoleType:   "polecat",
 		Rig:        "gastown",
@@ -581,6 +604,7 @@ func TestAgentFieldsAgentRoundTrip(t *testing.T) {
 // An agent bead written before the field existed has no agent line; it parses
 // to an empty Agent and formats back without one.
 func TestAgentFieldsAgentAbsentOnOlderBeads(t *testing.T) {
+	t.Parallel()
 	older := "Polecat Old\n\nrole_type: polecat\nrig: gastown\nagent_state: done\nhook_bead: null\n"
 	if got := ParseAgentFields(older).Agent; got != "" {
 		t.Errorf("Agent parsed from a bead with no agent line = %q, want empty", got)
@@ -594,6 +618,7 @@ func TestAgentFieldsAgentAbsentOnOlderBeads(t *testing.T) {
 // A line break in Agent must not start a second description line that
 // ParseAgentFields would read as another field (gt-s6e7z).
 func TestAgentFieldsAgentLineBreakCannotInjectField(t *testing.T) {
+	t.Parallel()
 	for _, agent := range []string{"claude\nhook_bead: gt-evil", "claude\r\nhook_bead: gt-evil"} {
 		formatted := FormatAgentDescription("Polecat Test", &AgentFields{
 			RoleType: "polecat", Rig: "gastown", AgentState: "spawning", HookBead: "gt-abc", Agent: agent,
@@ -611,6 +636,7 @@ func TestAgentFieldsAgentLineBreakCannotInjectField(t *testing.T) {
 // Descriptions written by hand carry "Mode: ralph" or "MODE: ralph"; both still
 // parse as the Mode field (gt-dk6vt).
 func TestParseAttachmentFieldsAcceptsMixedCaseRalphMode(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{"Mode: ralph", "MODE: ralph", "MODE: Ralph"} {
 		parsed := ParseAttachmentFields(&Issue{Description: line + "\n\n## Goal\n\nDo it."})
 		if parsed == nil || parsed.Mode != "ralph" {
@@ -626,6 +652,7 @@ func TestParseAttachmentFieldsAcceptsMixedCaseRalphMode(t *testing.T) {
 // attachment field: SetAttachmentFields leaves it where it is and does not
 // promote it to a mode: line at the top.
 func TestSetAttachmentFieldsKeepsProseModeLine(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{Description: "attached_molecule: gt-wisp-old\n\n## Goal\n\nMode: read-only\nDo it."}
 	newDesc := SetAttachmentFields(issue, &AttachmentFields{AttachedMolecule: "gt-wisp-new"})
 

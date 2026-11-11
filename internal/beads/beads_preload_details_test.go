@@ -119,6 +119,7 @@ func mergeRequestsByID(t *testing.T, b *Beads) map[string]*Issue {
 // at all. The stub fails every read the preloads were supposed to make
 // unnecessary, so a fallback is a visible failure rather than a silent one.
 func TestMergeRequestHydrationReadsPreloadedDependencies(t *testing.T) {
+	t.Parallel()
 	b, r := newPreloadBeads(t)
 	warmPreloads(t, b)
 
@@ -174,6 +175,7 @@ func TestMergeRequestHydrationReadsPreloadedDependencies(t *testing.T) {
 // wisp merge requests included, rather than mixing a preloaded answer with a
 // remembered one.
 func TestMergeRequestHydrationFallsBackWhenNotCovered(t *testing.T) {
+	t.Parallel()
 	// The read was scoped to gt:agent, so the listing's issues half comes from
 	// `bd list` — gt-mr-issue among them — and that is a row no snapshot
 	// covered. One uncovered id is enough to send the whole set to bd show.
@@ -209,6 +211,7 @@ func TestMergeRequestHydrationFallsBackWhenNotCovered(t *testing.T) {
 // not return is unknown either way. That distinction is what the fallback
 // rests on, so it is pinned directly.
 func TestPreloadDetailsCoverAnIDOnlyByItsRow(t *testing.T) {
+	t.Parallel()
 	details := newPreloadDetails(
 		[]*Issue{{ID: "gt-a"}, {ID: "gt-b"}},
 		[]bdSQLIssueRow{

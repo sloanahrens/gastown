@@ -12,6 +12,7 @@ import (
 // silently once already: .beads/PRIME.md gained "Filing a work bead" in
 // f214b34f and primeContent did not (gt-lq5kw). Edit both to the same text.
 func TestPrimeContentMatchesTrackedPRIME(t *testing.T) {
+	t.Parallel()
 	tracked := filepath.Join(repoRootFromCaller(t), ".beads", "PRIME.md")
 	want, err := os.ReadFile(tracked)
 	if err != nil {
@@ -38,6 +39,7 @@ Edit both to the same text. ProvisionPrimeMD writes primeContent only into a rig
 // drop. The fallback exists for a polecat whose SessionStart hook failed, and
 // `gt done` is that worker's only way to signal completion (gt-lq5kw).
 func TestPrimeContentKeepsGTDone(t *testing.T) {
+	t.Parallel()
 	closeAt := strings.Index(primeContent, "## Session Close Protocol")
 	if closeAt < 0 {
 		t.Fatal("primeContent has no Session Close Protocol section (gt-lq5kw)")
