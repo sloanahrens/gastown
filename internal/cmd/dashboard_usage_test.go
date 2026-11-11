@@ -257,7 +257,7 @@ func TestDashboardUsageAbsentSaysNotInCluster(t *testing.T) {
 	if !u.Unavailable || u.Reason != dashboard.NotInClusterReason {
 		t.Errorf("absent records: %+v, want unavailable with the reason", u)
 	}
-	plan := newDashboardClaudePlanReader(root, newDashUsageReader(root), 0).Read(usageReaderNow)
+	plan := newDashboardClaudePlanReader(dashboardClaudePlanPath(root), newDashUsageReader(root), 0).Read(usageReaderNow)
 	if !plan.Unavailable || plan.Reason != dashboard.NotInClusterReason {
 		t.Errorf("absent series and records: plan %+v, want unavailable with the reason", plan)
 	}
@@ -275,7 +275,7 @@ func TestDashboardUsageAbsentSaysNotInCluster(t *testing.T) {
 	if !u.Unavailable || u.Reason != "" {
 		t.Errorf("unreadable records: %+v, want unavailable and no reason", u)
 	}
-	plan = newDashboardClaudePlanReader(root, newDashUsageReader(root), 0).Read(usageReaderNow)
+	plan = newDashboardClaudePlanReader(dashboardClaudePlanPath(root), newDashUsageReader(root), 0).Read(usageReaderNow)
 	if !plan.Unavailable || plan.Reason != "" {
 		t.Errorf("unreadable records: plan %+v, want unavailable and no reason", plan)
 	}

@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +14,90 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
-// The plan meter's flag defaults to the price the status line's percentages are
-// drawn against, and the reader the command wires reads the town's own series.
+// TestResolveClaudePlanPath checks that the plan meter reads the status line's
+// series under the home directory when it exists and the town's own series when
+// it does not, falling back to the town's series when the home lookup or the
+// file check fails, and that the why-log names the one that answered. The home
+// lookup, the file check and the log are injected, so no case reads the real
+// home.
+func TestResolveClaudePlanPath(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	home := t.TempDir()
+	homePath := filepath.Join(home, ".claude", ".runtime", "claude-plan", "samples.jsonl")
+	townPath := dashboardClaudePlanPath(town)
+	homeFn := func() (string, error) { return home, nil }
+	// onlyHome reports the home series present and everything else absent.
+	onlyHome := func(p string) (fs.FileInfo, error) {
+		if p == homePath {
+			return nil, nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	allAbsent := func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+
+	cases := []struct {
+		name    string
+		home    func() (string, error)
+		stat    func(string) (fs.FileInfo, error)
+		want    string
+		logWant string
+	}{
+		{"the home series exists", homeFn, onlyHome, homePath, homePath},
+		{"no home series yet", homeFn, allAbsent, townPath, townPath},
+		{"the home lookup fails", func() (string, error) { return "", errors.New("$HOME is not defined") }, allAbsent, townPath, "no home directory: $HOME is not defined"},
+		{"the check fails for another reason", homeFn, func(string) (fs.FileInfo, error) { return nil, errors.New("permission denied") }, townPath, "permission denied"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			var logged []string
+			whyLog := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+			if got := resolveClaudePlanPath(town, tc.home, tc.stat, whyLog); got != tc.want {
+				t.Errorf("the plan meter reads %q, want %q", got, tc.want)
+			}
+			if len(logged) != 1 || !strings.Contains(logged[0], tc.logWant) {
+				t.Errorf("the why-log says %q, want one line naming %q", logged, tc.logWant)
+			}
+		})
+	}
+}
+
+// emptyHome is a home lookup over a fresh directory, so a hub built in a test
+// finds no series under the real home.
+func emptyHome(t *testing.T) func() (string, error) {
+	t.Helper()
+	home := t.TempDir()
+	return func() (string, error) { return home, nil }
+}
+
+// TestNewDashboardHubLooksUpHomeThroughTheSeam checks that the hub takes the
+// home lookup from its caller: a lookup that fails is logged on the hub's output
+// with the town's series it fell back to, which only happens when the hub reads
+// the lookup it was given rather than the real home.
+func TestNewDashboardHubLooksUpHomeThroughTheSeam(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	var out bytes.Buffer
+	noHome := func() (string, error) { return "", errors.New("$HOME is not defined") }
+	_, closeSources, err := newDashboardHub(root, time.Now(), time.UTC, "", nil, 0, 0, "", noHome, &out)
+	if err != nil {
+		t.Fatalf("building the dashboard's hub: %v", err)
+	}
+	defer closeSources()
+
+	want := dashboardClaudePlanPath(root) + " (no home directory: $HOME is not defined)"
+	if !strings.Contains(out.String(), want) {
+		t.Errorf("the hub's log is %q, want the plan series fallback %q", out.String(), want)
+	}
+}
+
+// TestDashboardClaudePlanWiring checks that the plan meter's flag defaults to the
+// price the status line's percentages are drawn against, and that a reader over
+// the town's fallback series reads that price's reading from the file.
 func TestDashboardClaudePlanWiring(t *testing.T) {
 	t.Parallel()
 
@@ -52,12 +137,18 @@ const claudePlanSeriesResets = 48 * time.Hour
 // the status line appends it, and returns the series path.
 func writeClaudePlanSeries(t *testing.T, root string, now time.Time) string {
 	t.Helper()
-	path := dashboardClaudePlanPath(root)
+	return writeClaudePlanSampleAt(t, dashboardClaudePlanPath(root), now, 38)
+}
+
+// writeClaudePlanSampleAt writes one status line sample at path, with the weekly
+// percentage sevenDay, the way the status line appends it, and returns path.
+func writeClaudePlanSampleAt(t *testing.T, path string, now time.Time, sevenDay int) string {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	line := fmt.Sprintf(`{"t":%d,"five_hour":8,"five_hour_resets_at":%d,"seven_day":38,"seven_day_resets_at":%d}`,
-		now.Unix(), now.Add(time.Hour).Unix(), now.Add(claudePlanSeriesResets).Unix())
+	line := fmt.Sprintf(`{"t":%d,"five_hour":8,"five_hour_resets_at":%d,"seven_day":%d,"seven_day_resets_at":%d}`,
+		now.Unix(), now.Add(time.Hour).Unix(), sevenDay, now.Add(claudePlanSeriesResets).Unix())
 	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +181,7 @@ func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p := newDashboardClaudePlanReader(root, newDashUsageReader(root), dashboardClaudePlanUSD).Read(now)
+	p := newDashboardClaudePlanReader(dashboardClaudePlanPath(root), newDashUsageReader(root), dashboardClaudePlanUSD).Read(now)
 
 	prices, err := dashboard.EmbeddedClaudePrices()
 	if err != nil {
@@ -117,7 +208,7 @@ func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
 	// month at $0.00. Its series is there, so the plan line is still drawn.
 	noRecords := t.TempDir()
 	writeClaudePlanSeries(t, noRecords, now)
-	unread := newDashboardClaudePlanReader(noRecords, newDashUsageReader(noRecords), dashboardClaudePlanUSD).Read(now)
+	unread := newDashboardClaudePlanReader(dashboardClaudePlanPath(noRecords), newDashUsageReader(noRecords), dashboardClaudePlanUSD).Read(now)
 	if unread.APIEquivalentWeekUSD != nil || unread.APIEquivalentMonthUSD != nil {
 		t.Errorf("records that could not be read gave %+v, want no figures", unread)
 	}
@@ -129,7 +220,7 @@ func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(emptyRoot, ".runtime", "usage", usageRecordsSubdir), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	empty := newDashboardClaudePlanReader(emptyRoot, newDashUsageReader(emptyRoot), dashboardClaudePlanUSD).Read(now)
+	empty := newDashboardClaudePlanReader(dashboardClaudePlanPath(emptyRoot), newDashUsageReader(emptyRoot), dashboardClaudePlanUSD).Read(now)
 	if empty.APIEquivalentWeekUSD == nil || *empty.APIEquivalentWeekUSD != 0 {
 		t.Errorf("an empty records directory gave %v, want a figure of zero", empty.APIEquivalentWeekUSD)
 	}
@@ -182,5 +273,64 @@ func TestDashboardClaudePlanReaderHandsTheSamplesToTheCharts(t *testing.T) {
 	missing := dashboard.NewClaudePlanReader(filepath.Join(root, "absent.jsonl"), dashboardClaudePlanUSD).Read(now).Samples
 	if !missing.Read || missing.Failed || len(missing.Samples) != 0 {
 		t.Errorf("a series the status line has not written yet = %+v, want a read with no samples and no failure", missing)
+	}
+}
+
+// TestClaudePlanReadFollowsTheHomeSeriesAppearing checks that the plan meter picks
+// its series on every poll: the town's copy answers while the home file is absent,
+// the home file answers from the first poll after the status line starts writing
+// it, and the why-log logs the change once. The status line writes the home file
+// while the hub runs, so a meter resolved once at build would keep the town's copy.
+func TestClaudePlanReadFollowsTheHomeSeriesAppearing(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	home := t.TempDir()
+	now := time.Now()
+	writeClaudePlanSeries(t, town, now)
+	homePath := filepath.Join(home, ".claude", ".runtime", "claude-plan", "samples.jsonl")
+
+	var logged []string
+	whyLog := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	homeFn := func() (string, error) { return home, nil }
+	read := newDashboardClaudePlanRead(town, homeFn, os.Stat, whyLog, newDashUsageReader(town), dashboardClaudePlanUSD, dashboard.ClaudePlanDefaultRenewalDay)
+
+	if p := read(); p.WeeklyPct != 38 {
+		t.Fatalf("before the home series exists the meter reads %v%%, want the town's 38%%", p.WeeklyPct)
+	}
+	writeClaudePlanSampleAt(t, homePath, now, 7)
+	if p := read(); p.WeeklyPct != 7 {
+		t.Errorf("after the home series appears the meter reads %v%%, want the home series' 7%%", p.WeeklyPct)
+	}
+	read()
+	if len(logged) != 2 || !strings.Contains(logged[1], homePath) {
+		t.Errorf("the why-log = %q, want the town's series named at build and then one line naming %s for the change", logged, homePath)
+	}
+}
+
+// TestClaudePlanReadPodShapeReadsTheMountedSeries drives the pod's shape through the
+// production stat and the home seam: the home holds the status line's series, the
+// town holds an older copy, and the meter reads the home file and the log names
+// it. The temporary directory stands for /root, the home the pod mounts the Mac's
+// ~/.claude under; no test reads the real home.
+func TestClaudePlanReadPodShapeReadsTheMountedSeries(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	podHome := t.TempDir()
+	now := time.Now()
+	writeClaudePlanSeries(t, town, now)
+	homePath := writeClaudePlanSampleAt(t, filepath.Join(podHome, ".claude", ".runtime", "claude-plan", "samples.jsonl"), now, 7)
+
+	var logged []string
+	whyLog := newDashWhyLog(func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) })
+	homeFn := func() (string, error) { return podHome, nil }
+	read := newDashboardClaudePlanRead(town, homeFn, os.Stat, whyLog, newDashUsageReader(town), dashboardClaudePlanUSD, dashboard.ClaudePlanDefaultRenewalDay)
+
+	if p := read(); p.WeeklyPct != 7 {
+		t.Errorf("the pod's meter reads %v%%, want the mounted series' 7%%", p.WeeklyPct)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], homePath) {
+		t.Errorf("the why-log = %q, want one line naming %s", logged, homePath)
 	}
 }
