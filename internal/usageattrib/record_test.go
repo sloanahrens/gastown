@@ -366,6 +366,71 @@ func TestMarkIncompleteKeepsCountedSessions(t *testing.T) {
 	}
 }
 
+// MarkIncomplete refuses a run with no workspace, and a file it cannot merge into:
+// one it did not write, one with no sessions list, one of another workspace, or a
+// path it cannot read. Each refusal leaves the file as it was.
+func TestMarkIncompleteRefusesWhatItCannotMerge(t *testing.T) {
+	t.Parallel()
+	t.Run("run with no workspace", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := MarkIncomplete(dir, factsIn(""), "boom"); err == nil {
+			t.Fatal("mark of a run with no workspace: no error")
+		}
+		if _, err := os.Stat(recordPathFor(t, dir)); !os.IsNotExist(err) {
+			t.Errorf("refused mark created the record (stat error %v)", err)
+		}
+	})
+	for _, c := range []struct{ name, content string }{
+		{"file this package did not write", "{not json"},
+		{"file with no sessions list", "{}"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := recordPathFor(t, dir)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(c.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := MarkIncomplete(dir, factsIn("ws-a"), "boom"); err == nil {
+				t.Error("mark over the file: no error")
+			}
+			if got := mustRead(t, path); string(got) != c.content {
+				t.Errorf("refused mark changed the file to %q", got)
+			}
+		})
+	}
+	t.Run("file of another workspace", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		if err := Write(dir, Build(factsIn("ws-a"), []SessionUsage{sessA}), []string{"s-a"}); err != nil {
+			t.Fatalf("first write: %v", err)
+		}
+		path := recordPathFor(t, dir)
+		before := mustRead(t, path)
+		if err := MarkIncomplete(dir, factsIn("ws-b"), "boom"); err == nil {
+			t.Error("mark of another workspace's record: no error")
+		}
+		if got := mustRead(t, path); string(got) != string(before) {
+			t.Error("refused mark changed another workspace's record")
+		}
+	})
+	t.Run("path that cannot be read", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		path := recordPathFor(t, dir)
+		if err := os.MkdirAll(path, 0o755); err != nil { // a directory where the record file goes
+			t.Fatal(err)
+		}
+		if err := MarkIncomplete(dir, factsIn("ws-a"), "boom"); err == nil {
+			t.Error("mark over an unreadable path: no error")
+		}
+	})
+}
+
 // Eight runs for one bead end at once. Each merges into the file the others have just
 // written, so the lock must hold every read-merge-write whole: all eight sessions counted.
 func TestWriteConcurrentSessionsAllCounted(t *testing.T) {

@@ -3396,6 +3396,7 @@ func TestReviewUsageWindowIsInjectedClock(t *testing.T) {
 	l.Now = func() time.Time { return now }
 	var got []ReviewUsage
 	l.UsageSink = func(_ context.Context, u ReviewUsage) { got = append(got, u) }
+	// The landing's own result is not asserted here: the hook's window is.
 	_, _ = l.Land(context.Background(), f.work)
 	if len(got) != 1 {
 		t.Fatalf("usage hook calls = %d, want 1", len(got))
