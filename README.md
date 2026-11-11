@@ -609,7 +609,7 @@ For deeper technical details, see the design docs in `docs/`:
 
 | Topic | Document |
 |-------|----------|
-| Architecture | [docs/design/architecture.md](docs/design/architecture.md) |
+| Architecture | [docs/architecture.md](docs/architecture.md) |
 | Glossary | [docs/glossary.md](docs/glossary.md) |
 | Molecules | [docs/concepts/molecules.md](docs/concepts/molecules.md) |
 | Escalation | [docs/design/escalation.md](docs/design/escalation.md) |

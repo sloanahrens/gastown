@@ -2,7 +2,7 @@
 
 Technical reference for Gas Town internals. Read the README first.
 
-> For directory structure details, see [architecture.md](design/architecture.md).
+> For directory structure details, see [architecture.md](architecture.md).
 
 ## Beads Routing
 
@@ -2799,4 +2799,4 @@ bd formula list          # Lists formulas
 | Stuck worker | `gt nudge`, then `gt peek` |
 | Dirty git state | Commit or discard, then `gt handoff` |
 
-> For architecture details (bare repo pattern, beads as control plane, nondeterministic idempotence), see [architecture.md](design/architecture.md).
+> For architecture details (bare repo pattern, beads as control plane, nondeterministic idempotence), see [architecture.md](architecture.md).
