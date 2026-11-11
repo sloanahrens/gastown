@@ -69,3 +69,14 @@ func TestBeadsFileDatabase(t *testing.T) {
 		}
 	})
 }
+
+// TestRigBeadsDirsOrder pins the candidate list, relative to the town root: the
+// legacy mayor/rig/.beads first, then the rig's own .beads.
+func TestRigBeadsDirsOrder(t *testing.T) {
+	t.Parallel()
+	want := []string{"gastown/mayor/rig/.beads", "gastown/.beads"}
+	got := RigBeadsDirs("gastown")
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("RigBeadsDirs(gastown) = %v, want %v", got, want)
+	}
+}

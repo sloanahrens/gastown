@@ -309,9 +309,62 @@ func RigMayorPath(rigPath string) string {
 	return rigPath + "/" + DirMayor + "/" + DirRig
 }
 
-// RigBeadsPath returns the path to mayor/rig/.beads within a rig.
+// RigBeadsPath returns the rig's beads directory. It is <rig>/.beads once that
+// directory holds metadata.json and no redirect file, and the legacy
+// mayor/rig/.beads otherwise. A Stat error other than not-exist answers with
+// <rig>/.beads, so the caller's read fails in the directory that should hold
+// the data rather than silently reading the legacy copy.
 func RigBeadsPath(rigPath string) string {
-	return rigPath + "/" + DirMayor + "/" + DirRig + "/" + DirBeads
+	newDir := RigBeadsWritePath(rigPath)
+	if rigBeadsDirOwnsData(newDir) {
+		return newDir
+	}
+	return rigPath + "/" + RigLegacyBeadsRelPath()
+}
+
+// RigBeadsWritePath returns <rig>/.beads, the directory a rig's beads move to.
+// It is for creating the directory only; readers use RigBeadsPath.
+func RigBeadsWritePath(rigPath string) string {
+	return rigPath + "/" + DirBeads
+}
+
+// RigLegacyBeadsRelPath returns mayor/rig/.beads relative to the rig root: the
+// form a redirect file carries. It reads no filesystem state, so it is safe to
+// call with "." from any working directory, where RigBeadsPath(".") would Stat
+// the working directory's own .beads.
+func RigLegacyBeadsRelPath() string {
+	return DirMayor + "/" + DirRig + "/" + DirBeads
+}
+
+// rigBeadsDirOwnsData reports whether dir holds the real beads files: it has
+// metadata.json and no redirect file. An unreadable entry counts as owned, for
+// the reason RigBeadsPath gives.
+func rigBeadsDirOwnsData(dir string) bool {
+	hasMetadata, err := beadsEntryExists(dir + "/metadata.json")
+	if err != nil {
+		return true
+	}
+	if !hasMetadata {
+		return false
+	}
+	hasRedirect, err := beadsEntryExists(dir + "/redirect")
+	if err != nil {
+		return true
+	}
+	return !hasRedirect
+}
+
+// beadsEntryExists reports whether path exists. A not-exist error is a clean
+// false; any other Stat error is returned so the caller can decide.
+func beadsEntryExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // RigPolecatsPath returns the path to polecats/ within a rig.

@@ -546,7 +546,7 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		{name: skeletonRoot + "/", dir: true},
 		{name: path.Join(skeletonRoot, ".beads") + "/", dir: true},
 		{name: path.Join(skeletonRoot, s.Rig, ".beads") + "/", dir: true},
-		{name: path.Join(skeletonRoot, constants.RigBeadsPath(s.Rig)) + "/", dir: true},
+		{name: path.Join(skeletonRoot, s.Rig, constants.RigLegacyBeadsRelPath()) + "/", dir: true},
 	}
 	add := func(rel string, data []byte) {
 		entries = append(entries, skeletonEntry{name: path.Join(skeletonRoot, rel), data: data})
@@ -606,10 +606,10 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: %s: %w", configRel, err)
 	}
-	add(constants.RigBeadsPath(s.Rig)+"/config.yaml", beadsConfig)
+	add(s.Rig+"/"+constants.RigLegacyBeadsRelPath()+"/config.yaml", beadsConfig)
 
 	// Both beads metadata files point at the control plane's Dolt server.
-	for _, rel := range []string{".beads/metadata.json", constants.RigBeadsPath(s.Rig) + "/metadata.json"} {
+	for _, rel := range []string{".beads/metadata.json", s.Rig + "/" + constants.RigLegacyBeadsRelPath() + "/metadata.json"} {
 		raw, err := town.read(rel)
 		if err != nil {
 			return nil, err

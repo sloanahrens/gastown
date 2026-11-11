@@ -4850,8 +4850,10 @@ func buildDatabaseToRigMap(townRoot string) map[string]string {
 
 // FindRigBeadsDir returns the .beads directory path for a rig (read-only lookup).
 // For "hq", returns <townRoot>/.beads.
-// For other rigs, returns <townRoot>/<rigName>/mayor/rig/.beads if it exists,
-// otherwise <townRoot>/<rigName>/.beads if it exists (following a redirect
+// For other rigs, returns the constants.RigBeadsPath candidate if it exists
+// (<townRoot>/<rigName>/.beads once that holds the beads files, otherwise
+// <townRoot>/<rigName>/mayor/rig/.beads), otherwise
+// <townRoot>/<rigName>/.beads if it exists (following a redirect
 // file if one is present, rather than returning the redirect directory
 // itself — see gt-3sck),
 // otherwise <townRoot>/<rigName>/.beads (for creation by caller).
@@ -4868,7 +4870,8 @@ func FindRigBeadsDir(townRoot, rigName string) string {
 		return filepath.Join(townRoot, ".beads")
 	}
 
-	// Prefer mayor/rig/.beads (canonical location for tracked beads)
+	// Prefer the RigBeadsPath candidate: <rig>/.beads once it holds the beads
+	// files, otherwise mayor/rig/.beads (the tracked-beads location until then)
 	mayorBeads := constants.RigBeadsPath(filepath.Join(townRoot, rigName))
 	if _, err := os.Stat(mayorBeads); err == nil {
 		return mayorBeads

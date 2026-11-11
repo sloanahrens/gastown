@@ -902,6 +902,27 @@ func TestFindRigBeadsDir(t *testing.T) {
 	}
 }
 
+// TestFindRigBeadsDirNewLocation: a rig whose <rig>/.beads holds the beads
+// files is found there, even when the legacy mayor/rig/.beads also exists.
+func TestFindRigBeadsDirNewLocation(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	newBeads := filepath.Join(townRoot, "newrig", ".beads")
+	if err := os.MkdirAll(newBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newBeads, "metadata.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	legacy := filepath.Join(townRoot, "newrig", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(legacy, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if dir := FindRigBeadsDir(townRoot, "newrig"); dir != newBeads {
+		t.Errorf("newrig beads dir = %q, want new location %q", dir, newBeads)
+	}
+}
+
 func TestFindOrCreateRigBeadsDir(t *testing.T) {
 	t.Parallel()
 	t.Run("empty rigName returns error", func(t *testing.T) {

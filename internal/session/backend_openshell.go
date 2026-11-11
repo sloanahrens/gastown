@@ -1297,7 +1297,7 @@ func sandboxRel(spec SpawnSpec) (string, error) {
 // gastown/polecats/<name>/gastown it is ../../../mayor/rig/.beads, the same
 // string the host worktree's .beads/redirect carries.
 func redirectTarget(rel string) string {
-	return strings.Repeat("../", strings.Count(rel, "/")) + strings.TrimPrefix(constants.RigBeadsPath("."), "./")
+	return strings.Repeat("../", strings.Count(rel, "/")) + constants.RigLegacyBeadsRelPath()
 }
 
 // cacheVolumeName is the rig's cache volume. {rig} in the profile's name
