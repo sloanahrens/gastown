@@ -66,10 +66,10 @@ const (
 	// with the reason it judged the test slow, which can run long.
 	tierSweepFindingLineLen = 160
 
-	// tierSweepFailureLines caps the failing-test excerpt of one package. A
-	// failing test takes two lines (its --- FAIL line and its assertion), so a
-	// package with more failing tests than this is cut, and the bead says so
-	// (gt-1comao).
+	// tierSweepFailureLines caps the failing-test excerpt of one package, in
+	// lines. A failing test takes two lines (its --- FAIL line and its assertion),
+	// so a package whose excerpt runs past this many lines is cut, and the bead
+	// says so (gt-1comao).
 	tierSweepFailureLines = 40
 
 	// tierSweepAssertionLineLen caps each quoted assertion line, the way
@@ -290,8 +290,11 @@ type tierSweepFailure struct {
 }
 
 // tierSweepAssertionRE is the line go test prints for a failed check:
-// "file.go:line: message", indented under the test that logged it.
-var tierSweepAssertionRE = regexp.MustCompile(`^\s*[^\s:]+\.go:\d+: \S`)
+// "file.go:line: message", indented under the test that logged it. testify
+// prints the location alone on its header line, "file.go:line: ", with the
+// message on the lines after it, so a header with nothing after the colon is a
+// match too.
+var tierSweepAssertionRE = regexp.MustCompile(`^\s*[^\s:]+\.go:\d+:(\s|$)`)
 
 // tierSweepLogFailures reads the failing top-level tests a unit's own log names,
 // in log order, each with the first assertion line under it. go test prints a
@@ -669,6 +672,9 @@ func tierSweepFailuresBlock(tier string, red tierSweepUnitRed) string {
 	for _, f := range red.Failures {
 		lines = append(lines, "  --- FAIL: "+f.Name)
 		assertion := "no file:line assertion line in the unit's log"
+		if !red.LogRead {
+			assertion = "the unit's log could not be read"
+		}
 		if f.Assertion != "" {
 			assertion = tierSweepClip(f.Assertion, tierSweepAssertionLineLen)
 		}
@@ -679,7 +685,7 @@ func tierSweepFailuresBlock(tier string, red tierSweepUnitRed) string {
 	if len(lines) > tierSweepFailureLines {
 		cut := len(lines) - tierSweepFailureLines
 		lines = lines[:tierSweepFailureLines]
-		lines = append(lines, fmt.Sprintf("  ... excerpt cut at %d lines: %d more not shown", tierSweepFailureLines, cut))
+		lines = append(lines, fmt.Sprintf("  ... excerpt cut at %d lines: %d more lines not shown", tierSweepFailureLines, cut))
 	}
 	for _, line := range lines {
 		b.WriteString(line + "\n")

@@ -865,8 +865,70 @@ func TestTierSweepBead_FailureExcerptIsCapped(t *testing.T) {
 	if !strings.Contains(desc, "  --- FAIL: TestMany20\n") || strings.Contains(desc, "TestMany21") {
 		t.Errorf("excerpt does not stop at the twentieth failing test:\n%s", desc)
 	}
-	if want := "excerpt cut at 40 lines: 20 more not shown"; !strings.Contains(desc, want) {
+	if want := "excerpt cut at 40 lines: 20 more lines not shown"; !strings.Contains(desc, want) {
 		t.Errorf("description does not say the excerpt was cut (%q):\n%s", want, desc)
+	}
+}
+
+// testify prints a failed check as a bare "file.go:line: " header, with the
+// message on the lines after it, so the bead quotes that header as the failing
+// test's assertion (gt-bejn1a).
+func TestTierSweepBead_QuotesATestifyAssertion(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/testify"
+	unitLog := "=== RUN   TestTestify\n" +
+		"    testify_test.go:14: \n" +
+		"        \tError Trace:\t/src/testify_test.go:14\n" +
+		"        \tError:      \tNot equal: \n" +
+		"--- FAIL: TestTestify (0.00s)\n"
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, tiersweep.LogName("integration", pkg)), []byte(unitLog), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stageLog := tierSweepWriteTestLog(t, "tier-sweep: integration "+pkg+" ...\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 0, Failed: 1, FailedNames: []string{pkg}, Log: stageLog, LogDir: dir},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	desc := bd.created[0].Description
+	if want := "  --- FAIL: TestTestify\n      testify_test.go:14:"; !strings.Contains(desc, want) {
+		t.Errorf("description lacks the testify assertion %q:\n%s", want, desc)
+	}
+}
+
+// A failing test whose unit log is unreadable quotes no assertion, and the bead
+// says the log could not be read, not that the log holds no assertion line
+// (gt-bejn1a).
+func TestTierSweepBead_UnreadLogNamesNoAssertionAsMissing(t *testing.T) {
+	t.Parallel()
+	const pkg = "./internal/cmd"
+	stageLog := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration "+pkg+" ...\n"+
+		"    --- FAIL: TestAlpha (0.01s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 0, Failed: 1, FailedNames: []string{pkg}, Log: stageLog, LogDir: t.TempDir()},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	desc := bd.created[0].Description
+	if want := "  --- FAIL: TestAlpha\n      the unit's log could not be read"; !strings.Contains(desc, want) {
+		t.Errorf("description lacks %q:\n%s", want, desc)
+	}
+	if strings.Contains(desc, "no file:line assertion line") {
+		t.Errorf("description says the log holds no assertion, though it was never read:\n%s", desc)
 	}
 }
 
