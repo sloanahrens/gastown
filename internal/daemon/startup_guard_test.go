@@ -205,6 +205,26 @@ func TestGuardStartup(t *testing.T) {
 			probe:    unreachableProbe,
 			wantErr:  "does not parse",
 		},
+		{
+			// No settings name a container, so no owner is a candidate. A takeover
+			// has nothing to probe and refuses before reading any owner.
+			name: "a takeover with no container named refuses a leftover lock with no state",
+			setup: func(t *testing.T, town string) {
+				writeGuardFile(t, town, "daemon.lock", nil)
+			},
+			takeover: true,
+			probe:    unreachableProbe,
+			wantErr:  "no owner kinds were named to probe",
+		},
+		{
+			name: "a takeover with no container named refuses an ownerless legacy state",
+			setup: func(t *testing.T, town string) {
+				seedGuardState(t, town, State{Running: true, LastHeartbeat: guardNow.Add(-time.Hour)})
+			},
+			takeover: true,
+			probe:    unreachableProbe,
+			wantErr:  "no owner kinds were named to probe",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
