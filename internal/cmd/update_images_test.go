@@ -73,6 +73,60 @@ type fakeRegistryImage struct {
 	Status       int
 	BlobStatus   int
 	MissingTag   bool
+	// Children, when set, makes the tag an index over these platform images.
+	Children []fakeIndexChild
+}
+
+// fakeIndexChild is one platform entry an index names. A zero Digest names the
+// digest of the child's bytes; a set one names that instead, so the bytes served
+// for it do not hash to what the index names.
+type fakeIndexChild struct {
+	OS     string
+	Arch   string
+	Digest string
+	Image  *fakeRegistryImage
+}
+
+// named is the digest the index names for this entry.
+func (c fakeIndexChild) named() string {
+	if c.Digest != "" {
+		return c.Digest
+	}
+	return testDigestOf(fakeManifestBytes(c.Image))
+}
+
+// childNamed is the child an index names at digest, or nil.
+func (img *fakeRegistryImage) childNamed(digest string) *fakeRegistryImage {
+	for _, c := range img.Children {
+		if c.named() == digest {
+			return c.Image
+		}
+	}
+	return nil
+}
+
+// childWithConfig is the child whose config blob hashes to digest, or nil.
+func (img *fakeRegistryImage) childWithConfig(digest string) *fakeRegistryImage {
+	for _, c := range img.Children {
+		if fakeConfigDigest(c.Image) == digest {
+			return c.Image
+		}
+	}
+	return nil
+}
+
+// fakeIndexBytes is the index body that names children, one entry each.
+func fakeIndexBytes(children []fakeIndexChild) []byte {
+	entries := make([]string, 0, len(children))
+	for _, c := range children {
+		entries = append(entries, `{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"`+c.named()+`","platform":{"os":"`+c.OS+`","architecture":"`+c.Arch+`"}}`)
+	}
+	return []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[` + strings.Join(entries, ",") + `]}`)
+}
+
+// linuxChild is an index entry for linux/arm64 whose bytes are an image at commit.
+func linuxChild(commit string) fakeIndexChild {
+	return fakeIndexChild{OS: "linux", Arch: "arm64", Image: matchingContents(commit)}
 }
 
 // matchingImage is an image with digest and commit label set.
@@ -104,6 +158,9 @@ func fakeConfigDigest(img *fakeRegistryImage) string {
 func fakeManifestBytes(img *fakeRegistryImage) []byte {
 	if img.ManifestBody != "" {
 		return []byte(img.ManifestBody)
+	}
+	if len(img.Children) > 0 {
+		return fakeIndexBytes(img.Children)
 	}
 	annotation := ""
 	if img.Marker != "" {
@@ -174,6 +231,17 @@ func (f *fakeRegistry) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch endpoint {
 	case "manifests":
+		if child := img.childNamed(ref); child != nil {
+			if child.Status != 0 {
+				w.WriteHeader(child.Status)
+				return
+			}
+			body := fakeManifestBytes(child)
+			w.Header().Set("Docker-Content-Digest", testDigestOf(body))
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = w.Write(body)
+			return
+		}
 		if ref != testUpdateImagesTag || img.MissingTag {
 			http.NotFound(w, r)
 			return
@@ -200,8 +268,12 @@ func (f *fakeRegistry) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(img.BlobStatus)
 			return
 		}
+		commit := img.Commit
+		if child := img.childWithConfig(ref); child != nil {
+			commit = child.Commit
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
-		_, _ = w.Write(fakeConfigBytes(img.Commit))
+		_, _ = w.Write(fakeConfigBytes(commit))
 	default:
 		http.NotFound(w, r)
 	}
@@ -296,12 +368,51 @@ func TestUpdateImagesWritesTheValuesForAMatchingPair(t *testing.T) {
 	}
 }
 
+// TestUpdateImagesResolvesAnIndexToItsLinuxChild holds the shape the CI
+// publishes: each tag is an index over a linux/amd64 and a linux/arm64 child.
+// The values file records each index's own digest, and the commit comes from
+// the linux/arm64 child's config, not the amd64 child's.
+func TestUpdateImagesResolvesAnIndexToItsLinuxChild(t *testing.T) {
+	t.Parallel()
+	amd64 := fakeIndexChild{OS: "linux", Arch: "amd64", Image: matchingContents(testUpdateImagesOtherSHA)}
+	daemon := &fakeRegistryImage{Children: []fakeIndexChild{amd64, linuxChild(testUpdateImagesSHA)}}
+	polecat := &fakeRegistryImage{Children: []fakeIndexChild{amd64, linuxChild(testUpdateImagesSHA)}}
+	_, server := startFakeRegistry(t, map[string]*fakeRegistryImage{
+		imagevalues.DaemonImage:  daemon,
+		imagevalues.PolecatImage: polecat,
+	})
+	writes := 0
+	out := filepath.Join(t.TempDir(), "deploy", "values", "images.yaml")
+
+	_, stderr, err := runUpdateImagesCommand(t, testUpdateImagesSeams(t, server, &writes), "--sha", testUpdateImagesSHA, "--out", out)
+	if err != nil {
+		t.Fatalf("gt update images: %v (stderr %q)", err, stderr)
+	}
+	address := testRegistryFor(t, server)
+	want := imagevalues.Values{
+		Daemon:  address.Ref(imagevalues.DaemonImage, testDigestOf(fakeManifestBytes(daemon))),
+		Polecat: address.Ref(imagevalues.PolecatImage, testDigestOf(fakeManifestBytes(polecat))),
+		Commit:  testUpdateImagesSHA,
+	}
+	got, err := imagevalues.Load(out)
+	if err != nil {
+		t.Fatalf("reading the values file: %v", err)
+	}
+	if got != want {
+		t.Errorf("the values file = %+v, want %+v", got, want)
+	}
+	if writes != 1 {
+		t.Errorf("the values file was written %d times, want once", writes)
+	}
+}
+
 // TestUpdateImagesRefusesAPairThatDoesNotBelongTogether holds every refusal
 // the registry read can make: the error names the image and no values file is
 // written.
 func TestUpdateImagesRefusesAPairThatDoesNotBelongTogether(t *testing.T) {
 	t.Parallel()
-	indexBody := `{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"` + "sha256:" + strings.Repeat("5e", 32) + `"}]}`
+	indexBody := `{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"` + "sha256:" + strings.Repeat("5e", 32) + `","platform":{"os":"linux","architecture":"amd64"}}]}`
+	amd64Child := fakeIndexChild{OS: "linux", Arch: "amd64", Image: matchingContents(testUpdateImagesSHA)}
 	rows := []struct {
 		name    string
 		daemon  *fakeRegistryImage
@@ -359,10 +470,46 @@ func TestUpdateImagesRefusesAPairThatDoesNotBelongTogether(t *testing.T) {
 			want:    []string{"gastown-daemon", "does not parse"},
 		},
 		{
-			name:    "an index rather than an image",
+			name:    "an index with no linux/arm64 child",
 			daemon:  &fakeRegistryImage{ManifestBody: indexBody, Commit: testUpdateImagesSHA},
 			polecat: matchingContents(testUpdateImagesSHA),
-			want:    []string{"gastown-daemon", "is an index"},
+			want:    []string{"gastown-daemon", testUpdateImagesTag, "linux/arm64", "linux/amd64"},
+		},
+		{
+			name:    "an index with no linux/arm64 child among others",
+			daemon:  &fakeRegistryImage{Children: []fakeIndexChild{amd64Child}},
+			polecat: matchingContents(testUpdateImagesSHA),
+			want:    []string{"gastown-daemon", testUpdateImagesTag, "linux/arm64", "linux/amd64"},
+		},
+		{
+			name:    "an index with two linux/arm64 children",
+			daemon:  &fakeRegistryImage{Children: []fakeIndexChild{linuxChild(testUpdateImagesSHA), linuxChild(testUpdateImagesSHA)}},
+			polecat: matchingContents(testUpdateImagesSHA),
+			want:    []string{"gastown-daemon", testUpdateImagesTag, "2 linux/arm64 entries", "linux/arm64"},
+		},
+		{
+			name:    "an index child whose bytes do not hash to the digest the index names",
+			daemon:  &fakeRegistryImage{Children: []fakeIndexChild{{OS: "linux", Arch: "arm64", Digest: testUpdateImagesRebuiltDigest, Image: matchingContents(testUpdateImagesSHA)}}},
+			polecat: matchingContents(testUpdateImagesSHA),
+			want:    []string{"gastown-daemon", "manifest bytes that hash to"},
+		},
+		{
+			name:    "an index child the registry does not serve",
+			daemon:  &fakeRegistryImage{Children: []fakeIndexChild{{OS: "linux", Arch: "arm64", Image: &fakeRegistryImage{Commit: testUpdateImagesSHA, Status: http.StatusNotFound}}}},
+			polecat: matchingContents(testUpdateImagesSHA),
+			want:    []string{"gastown-daemon", "has no child manifest"},
+		},
+		{
+			name:    "an index whose child is itself an index",
+			daemon:  &fakeRegistryImage{Children: []fakeIndexChild{{OS: "linux", Arch: "arm64", Image: &fakeRegistryImage{Children: []fakeIndexChild{linuxChild(testUpdateImagesSHA)}}}}},
+			polecat: matchingContents(testUpdateImagesSHA),
+			want:    []string{"gastown-daemon", "is an index, not an image"},
+		},
+		{
+			name:    "an index whose linux/arm64 child carries another commit",
+			daemon:  &fakeRegistryImage{Children: []fakeIndexChild{linuxChild(testUpdateImagesOtherSHA)}},
+			polecat: matchingContents(testUpdateImagesSHA),
+			want:    []string{"gastown-daemon", testUpdateImagesOtherSHA},
 		},
 		{
 			name:    "no digest header",

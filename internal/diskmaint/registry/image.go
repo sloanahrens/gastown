@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strings"
 )
 
 // ImageInfo is what a pull-by-digest consumer needs to know about an image the
@@ -60,15 +62,9 @@ func (c *Client) InspectImage(ctx context.Context, repo, ref, osName, arch strin
 		return ImageInfo{}, fmt.Errorf("GET %s: decode: %w", path, err)
 	}
 	if doc.isIndex() {
-		child := ""
-		for _, m := range doc.Manifests {
-			if m.Platform.OS == osName && m.Platform.Architecture == arch {
-				child = m.Digest
-				break
-			}
-		}
-		if !ValidDigest(child) {
-			return ImageInfo{}, fmt.Errorf("manifest %s in %q holds no %s/%s entry", ref, repo, osName, arch)
+		child, err := ChildForPlatform(ref, body, osName, arch)
+		if err != nil {
+			return ImageInfo{}, fmt.Errorf("in %q: %w", repo, err)
 		}
 		childPath := "/v2/" + repo + "/manifests/" + child
 		_, childBody, err := c.getBody(ctx, childPath, manifestAccept, walk)
@@ -104,6 +100,45 @@ func (c *Client) InspectImage(ctx context.Context, repo, ref, osName, arch strin
 	}
 	info.Labels = cfg.Config.Labels
 	return info, nil
+}
+
+// ChildForPlatform is the digest of the one child an index body names for
+// osName/arch. ref is the reference the body was read by and names the image in
+// every refusal. An index with no child for the platform, or with two, is an
+// error that lists every platform the index holds, so a caller refuses a tag it
+// cannot resolve to one image rather than picking one. Every reader that
+// resolves an index calls this function.
+func ChildForPlatform(ref string, body []byte, osName, arch string) (string, error) {
+	var doc manifestDoc
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return "", fmt.Errorf("the index at %s does not parse: %w", ref, err)
+	}
+	want := osName + "/" + arch
+	var matches []string
+	var seen []string
+	for _, m := range doc.Manifests {
+		platform := m.Platform.OS + "/" + m.Platform.Architecture
+		if !slices.Contains(seen, platform) {
+			seen = append(seen, platform)
+		}
+		if platform == want {
+			matches = append(matches, m.Digest)
+		}
+	}
+	held := "no platforms"
+	if len(seen) > 0 {
+		held = strings.Join(seen, ", ")
+	}
+	switch {
+	case len(matches) == 0:
+		return "", fmt.Errorf("the index at %s holds no %s entry; the platforms it holds are %s", ref, want, held)
+	case len(matches) > 1:
+		return "", fmt.Errorf("the index at %s holds %d %s entries; the platforms it holds are %s", ref, len(matches), want, held)
+	}
+	if !ValidDigest(matches[0]) {
+		return "", fmt.Errorf("the index at %s names a %s child digest %q, not sha256:<64 lowercase hex>", ref, want, matches[0])
+	}
+	return matches[0], nil
 }
 
 // hashOf is the sha256 digest of body in the registry's form.
