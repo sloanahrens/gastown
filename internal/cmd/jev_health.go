@@ -209,7 +209,8 @@ func jevReadCopy(townRoot string, cfg health.Config, stat jevStatFunc, only stri
 // notes or beads it has not asked about yet, an event battery writes when its
 // event arrives, and a landing battery writes when the town lands, so none of
 // them bounds a live copy's age and none is counted. ok is false when no enabled
-// battery is a quarter-hour one, and then no age makes the copy stale.
+// battery is a quarter-hour one; the bool is then false, and no age makes the
+// copy stale.
 func jevCopyStaleAfter(cfg health.Config) (time.Duration, bool) {
 	for _, b := range health.Batteries {
 		if cfg.Enabled[b.ConfigKey] && b.Cadence == health.QuarterHour {
