@@ -50,7 +50,8 @@ func Ready(r Report, now time.Time, staleAfter time.Duration) (ok bool, reason s
 // the daemon cannot serve: a bead waiting under a person label, or an open
 // escalation. Such a row stays in the status line but does not fail readiness
 // (gt-pittz6). Every other name is a serving row, and one this function does
-// not know is not excused.
+// not know is not excused. An UNKNOWN attention row is not excused either: its
+// read failed, and an unknown field is not ready.
 func attention(f Field) bool {
 	switch f.Name {
 	case FieldNeedsOverseer, FieldNeedsOperator, FieldNeedsHuman, FieldEscalation:
