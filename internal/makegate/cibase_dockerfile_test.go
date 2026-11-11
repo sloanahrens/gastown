@@ -168,18 +168,41 @@ func checkCIBaseJQ(text string) error {
 }
 
 // golangciLintModule marks the RUN that installs golangci-lint, and goCacheClean
-// is the segment of that RUN that empties the Go caches the install wrote.
+// names the segment of that RUN that empties the Go caches the install wrote.
 const (
 	golangciLintModule = "cmd/golangci-lint@"
 	goCacheClean       = "go clean -cache -modcache"
 )
 
+// isGoCacheClean reports whether one && segment of a RUN is a go clean of both
+// the build cache and the module cache. The two flags may come in either order
+// and with any spacing. Any other word refuses it, so a dry run (-n) or a
+// fallback (|| true) is not a clean.
+func isGoCacheClean(step string) bool {
+	fields := strings.Fields(step)
+	if len(fields) < 2 || fields[0] != "go" || fields[1] != "clean" {
+		return false
+	}
+	cache, modcache := false, false
+	for _, word := range fields[2:] {
+		switch word {
+		case "-cache":
+			cache = true
+		case "-modcache":
+			modcache = true
+		default:
+			return false
+		}
+	}
+	return cache && modcache
+}
+
 // checkCIBaseGoCaches reports why the golangci-lint layer of a ci-base
 // Dockerfile leaves the Go module and build caches in the image. The layer is
-// the one RUN that installs golangci-lint. Its && steps must include
-// `go clean -cache -modcache` after the install step, so the caches the install
-// writes under GOPATH and GOCACHE are removed in the same layer, before it
-// closes. It returns nil when that holds.
+// the one RUN that installs golangci-lint. Its && steps must include a go clean
+// of both caches (goCacheClean, in any flag order) after the install step, so
+// the caches the install writes under GOPATH and GOCACHE are removed in the
+// same layer, before it closes. It returns nil when that holds.
 func checkCIBaseGoCaches(text string) error {
 	ins := parseDockerfile(text)
 	var layer string
@@ -199,7 +222,7 @@ func checkCIBaseGoCaches(text string) error {
 		if strings.Contains(step, golangciLintModule) {
 			install = i
 		}
-		if step == goCacheClean {
+		if isGoCacheClean(step) {
 			clean = i
 		}
 	}
@@ -381,7 +404,12 @@ func TestCIBaseDockerfileCleansGoCaches(t *testing.T) {
 		{name: "shipped file"},
 		{name: "clean removed from the lint layer", old: " && " + goCacheClean, wantErr: true},
 		{name: "build cache only, module cache kept", old: goCacheClean, new: "go clean -cache", wantErr: true},
+		{name: "module cache only, build cache kept", old: goCacheClean, new: "go clean -modcache", wantErr: true},
+		{name: "not a go clean", old: goCacheClean, new: "rm -rf /home/ci/go -cache -modcache", wantErr: true},
 		{name: "clean may fail silently", old: goCacheClean, new: goCacheClean + " || true", wantErr: true},
+		{name: "clean with the flags in the other order", old: goCacheClean, new: "go clean -modcache -cache"},
+		{name: "clean with extra spacing between words", old: goCacheClean, new: "go  clean\t-cache   -modcache"},
+		{name: "clean is a dry run", old: goCacheClean, new: "go clean -n -cache -modcache", wantErr: true},
 		{name: "clean in the install layer", text: "FROM base\nRUN " + lintInstallStep + " && " + goCacheClean + "\n"},
 		{name: "clean in a separate RUN after the layer closed", text: "FROM base\nRUN " + lintInstallStep + "\nRUN " + goCacheClean + "\n", wantErr: true},
 		{name: "clean before the install", text: "FROM base\nRUN " + goCacheClean + " && " + lintInstallStep + "\n", wantErr: true},
