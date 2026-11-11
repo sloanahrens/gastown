@@ -3,7 +3,6 @@ package testpolicy
 import (
 	"go/ast"
 	"go/build/constraint"
-	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -22,7 +21,6 @@ var contractName = regexp.MustCompile(`^Run[A-Z]\w*Contract$`)
 // function, that some integration-tagged file calls it, and that integration
 // tests are named TestIntegration….
 func CheckContracts(root string, dirs []string) ([]Violation, error) {
-	fset := token.NewFileSet()
 	want := map[string]token.Position{} // "fakepkg.RunXContract" -> declaration
 	called := map[string]bool{}
 	var vs []Violation
@@ -31,6 +29,8 @@ func CheckContracts(root string, dirs []string) ([]Violation, error) {
 		if err != nil {
 			return nil, err
 		}
+		src := sourcesFor(dir)
+		fset := src.fset
 		isFake := strings.HasSuffix(filepath.Base(dir), "fake")
 		for _, e := range entries {
 			name := e.Name()
@@ -38,7 +38,7 @@ func CheckContracts(root string, dirs []string) ([]Violation, error) {
 				continue
 			}
 			path := filepath.Join(dir, name)
-			f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
+			f, err := src.parse(path)
 			if err != nil {
 				return nil, err
 			}
