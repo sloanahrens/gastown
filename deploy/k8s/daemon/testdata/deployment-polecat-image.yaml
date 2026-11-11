@@ -52,6 +52,8 @@ spec:
               value: container
             - name: TZ
               value: America/Chicago
+            - name: FORGEJO_API_URL
+              value: http://forgejo:3000/api/v1
             - name: AWS_REGION
               value: us-east-1
           resources:

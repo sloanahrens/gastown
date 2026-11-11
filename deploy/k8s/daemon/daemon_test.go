@@ -286,6 +286,8 @@ func TestRenderRefusesBadValues(t *testing.T) {
 		{"an env key the pod sets itself", func(v *Values) { v.Env[timeZoneEnv] = "Europe/Berlin" }, `Values.Env["TZ"]`, ""},
 		{"an env key the pod drops", func(v *Values) { v.Env[cloudReportsEnv] = "/Users/Shared/gt-cloud/reports" }, `Values.Env["GT_CLOUD_REPORTS_DIR"]`, "drops"},
 		{"an env name with no decision", func(v *Values) { v.Env["SOME_UNDECIDED"] = "x" }, `Values.Env["SOME_UNDECIDED"]`, "no decision"},
+		{"the forge API root with a forge host", func(v *Values) { v.Env[forgejoAPIURLEnv] = "http://elsewhere:3000/api/v1" }, `Values.Env["FORGEJO_API_URL"]`, "from Values.ForgeHost when one is given"},
+		{"the forge API root with no forge host", func(v *Values) { v.ForgeHost = ""; v.Env[forgejoAPIURLEnv] = "http://elsewhere:3000/api/v1" }, `Values.Env["FORGEJO_API_URL"]`, "from Values.ForgeHost when one is given"},
 		{"a Dolt host the alias does not map", func(v *Values) { v.Env[doltServerHostEnv] = "localhost" }, `Values.Env["BEADS_DOLT_SERVER_HOST"]`, ""},
 		{"a backup root away from the claim", func(v *Values) { v.Env[doltBackupRootEnv] = "/elsewhere/dolt" }, `Values.Env["GT_DOLT_BACKUP_ROOT"]`, ""},
 		{"an env value that looks like a secret", func(v *Values) { v.Env[awsRegionEnv] = "ghp_0123456789abcdefghijklmnopqrstuvwxyz" }, `Values.Env["AWS_REGION"]`, ""},
@@ -1420,6 +1422,49 @@ func podEnvMap(pod Container) map[string]string {
 	return out
 }
 
+// envValuesNamed returns every value the container carries under name, in order,
+// so a name the container sets twice shows as two values.
+func envValuesNamed(pod Container, name string) []string {
+	var out []string
+	for _, e := range pod.Env {
+		if e.Name == name {
+			out = append(out, e.Value)
+		}
+	}
+	return out
+}
+
+// TestForgejoAPIURLFollowsTheForgeHost holds the forge API root to the forge
+// host in both render modes: with a ForgeHost the container carries the one
+// entry the forge-reading children read, the host the git credential helper
+// reads; with none it carries no FORGEJO_API_URL (gt-s0homy).
+func TestForgejoAPIURLFollowsTheForgeHost(t *testing.T) {
+	t.Parallel()
+
+	for _, mode := range []struct {
+		name   string
+		values func(*testing.T) Values
+	}{
+		{"the live pod", goldenValues},
+		{"a rehearsal", rehearsalValues},
+	} {
+		withHost := mode.values(t)
+		if withHost.ForgeHost == "" {
+			t.Fatalf("%s: the fixture carries no ForgeHost, so the check reads nothing", mode.name)
+		}
+		got := envValuesNamed(mustBuild(t, withHost).Deployment.Spec.Template.Spec.Containers[0], forgejoAPIURLEnv)
+		if want := []string{"http://" + withHost.ForgeHost + "/api/v1"}; !slices.Equal(got, want) {
+			t.Errorf("%s with ForgeHost %q: the pod's %s = %q, want exactly %q", mode.name, withHost.ForgeHost, forgejoAPIURLEnv, got, want)
+		}
+
+		noHost := mode.values(t)
+		noHost.ForgeHost = ""
+		if got := envValuesNamed(mustBuild(t, noHost).Deployment.Spec.Template.Spec.Containers[0], forgejoAPIURLEnv); len(got) != 0 {
+			t.Errorf("%s with no ForgeHost carries %s = %q, want none", mode.name, forgejoAPIURLEnv, got)
+		}
+	}
+}
+
 // TestPodEnvDecisions holds the decision table to the live name set: every name
 // the compose writer or daemon.env carries has exactly one decision, the golden
 // records the decided pod environment, and a name with no decision is refused
@@ -1518,6 +1563,16 @@ func TestPodEnvEqualsTheComposeEnv(t *testing.T) {
 		delete(composeEnv, name)
 		delete(podEnv, name)
 	}
+
+	// The forge API root is set from ForgeHost, and the compose file carries no
+	// such name (the compose renderer is out of scope, gt-s0homy). The pod's value
+	// is checked against the host it reads, then removed as a difference the
+	// render sets itself.
+	if got, want := podEnv[forgejoAPIURLEnv], "http://"+v.ForgeHost+"/api/v1"; got != want {
+		t.Errorf("the pod's %s = %q, want %q: the forge-reading children read the host the git credential helper reads", forgejoAPIURLEnv, got, want)
+	}
+	delete(podEnv, forgejoAPIURLEnv)
+
 	switch got := composeFileEnv[ContainerNameEnv]; got {
 	case "":
 		t.Errorf("the compose service carries no %s, so the changed decision reads nothing", ContainerNameEnv)
