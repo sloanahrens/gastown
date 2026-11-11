@@ -37,7 +37,7 @@ type TownCopyRow struct {
 // settings/themes stays out with the rest of the directory.
 func TownCopyRows(rigs []string) []TownCopyRow {
 	rows := []TownCopyRow{
-		{Path: path.Join(constants.DirMayor, constants.FileTownJSON), Owner: OwnerDaemon, Why: "the town config internal/config loads and the daemon reads; the registry may sit under its registry section"},
+		{Path: "mayor/" + constants.FileTownJSON, Owner: OwnerDaemon, Why: "the town config internal/config loads and the daemon reads; the registry may sit under its registry section"},
 		{Path: path.Join(constants.DirSettings, "config.json"), Owner: OwnerShared, Why: "the town's behavioral settings internal/config reads, sent with the daemon supervisor removed"},
 		{Path: path.Join(constants.DirSettings, "models.json"), Owner: OwnerShared, Why: "the role model table internal/models reads for gt model and the dashboard"},
 		{Path: path.Join(constants.DirSettings, "placement.json"), Owner: OwnerShared, Why: "the component placement table internal/metrics reads for its report sources"},
