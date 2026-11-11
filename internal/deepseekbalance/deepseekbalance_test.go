@@ -8,11 +8,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // apiURL is the base URL the fake API answers under. No socket is opened: the
 // client's transport is in-process.
 const apiURL = "http://deepseek.test"
+
+// tenMinutes is the sample spacing the rule tables pass to Evaluate.
+const tenMinutes = 10 * time.Minute
 
 // balanceJSON is a GET /user/balance body with two entries: Fetch must take the
 // first and ignore the second.
@@ -55,6 +59,18 @@ func unreachableAPI() *http.Client {
 		return nil, errors.New("dial tcp: connection refused")
 	})}
 }
+
+// balanceWith returns a one-entry balance body with field set to value and the
+// other two amounts at a valid decimal.
+func balanceWith(field, value string) string {
+	amounts := map[string]string{"total_balance": "1.00", "granted_balance": "0.00", "topped_up_balance": "1.00"}
+	amounts[field] = value
+	return fmt.Sprintf(`{"balance_infos":[{"total_balance":%q,"granted_balance":%q,"topped_up_balance":%q}]}`,
+		amounts["total_balance"], amounts["granted_balance"], amounts["topped_up_balance"])
+}
+
+// amountFields are the three decimal-string amounts a balance entry carries.
+var amountFields = []string{"total_balance", "granted_balance", "topped_up_balance"}
 
 func TestFetchParsesTheFirstBalanceInfo(t *testing.T) {
 	t.Parallel()
@@ -105,14 +121,10 @@ func TestFetchParsesTheFirstBalanceInfo(t *testing.T) {
 
 	// Each amount field has its own refusal: a non-decimal value in any of them
 	// fails the read and names that field.
-	for _, field := range []string{"total_balance", "granted_balance", "topped_up_balance"} {
+	for _, field := range amountFields {
 		t.Run("a non-decimal "+field+" names the field", func(t *testing.T) {
 			t.Parallel()
-			amounts := map[string]string{"total_balance": "1.00", "granted_balance": "0.00", "topped_up_balance": "1.00"}
-			amounts[field] = "ten"
-			body := fmt.Sprintf(`{"balance_infos":[{"total_balance":%q,"granted_balance":%q,"topped_up_balance":%q}]}`,
-				amounts["total_balance"], amounts["granted_balance"], amounts["topped_up_balance"])
-			_, err := Fetch(context.Background(), balanceAPI("Bearer "+key, http.StatusOK, body), apiURL, key)
+			_, err := Fetch(context.Background(), balanceAPI("Bearer "+key, http.StatusOK, balanceWith(field, "ten")), apiURL, key)
 			if err == nil || !strings.Contains(err.Error(), field) {
 				t.Errorf("Fetch error = %v; want one naming %s", err, field)
 			}
@@ -125,6 +137,48 @@ func TestFetchParsesTheFirstBalanceInfo(t *testing.T) {
 			t.Error("Fetch with nil client: want an error")
 		}
 	})
+}
+
+func TestFetchRejectsNonFiniteBalance(t *testing.T) {
+	t.Parallel()
+	const key = "sk-nonfinite-test-key"
+
+	for _, field := range amountFields {
+		for _, value := range []string{"NaN", "Inf", "-Inf", "1e999"} {
+			t.Run(field+" "+value, func(t *testing.T) {
+				t.Parallel()
+				got, err := Fetch(context.Background(), balanceAPI("Bearer "+key, http.StatusOK, balanceWith(field, value)), apiURL, key)
+				if err == nil || !strings.Contains(err.Error(), field) {
+					t.Fatalf("Fetch error = %v; want one naming %s", err, field)
+				}
+				if got != (Sample{}) {
+					t.Errorf("Fetch returned %+v alongside an error; want no sample", got)
+				}
+			})
+		}
+	}
+}
+
+func TestFetchHonoursContextDeadline(t *testing.T) {
+	t.Parallel()
+	// The test sets the deadline; the transport stands in for a hung endpoint and
+	// waits on the request's context. A request that carries a different deadline,
+	// or none, fails at once instead of waiting, so a regression cannot hang here.
+	deadline := time.Unix(0, 0)
+	hung := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got, ok := r.Context().Deadline(); !ok || !got.Equal(deadline) {
+			return nil, errors.New("request does not carry the caller's deadline")
+		}
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+
+	_, err := Fetch(ctx, hung, apiURL, "sk-deadline-test-key")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Fetch error = %v; want one wrapping context.DeadlineExceeded", err)
+	}
 }
 
 func TestEvaluateRules(t *testing.T) {
@@ -158,7 +212,7 @@ func TestEvaluateRules(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := Evaluate(tc.prev, tc.cur, tc.failures)
+			got := Evaluate(tc.prev, tc.cur, tc.failures, tenMinutes)
 			if len(got) != tc.wantAlerts {
 				t.Fatalf("Evaluate = %q; want %d alert(s)", got, tc.wantAlerts)
 			}
@@ -168,6 +222,53 @@ func TestEvaluateRules(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestEvaluateUsesTheIntervalArgument(t *testing.T) {
+	t.Parallel()
+	prev, cur := &Sample{Total: 50}, Sample{Total: 45}
+
+	ten := Evaluate(prev, cur, 0, tenMinutes)
+	thirty := Evaluate(prev, cur, 0, 30*time.Minute)
+	if len(ten) != 1 || len(thirty) != 1 {
+		t.Fatalf("Evaluate = %q and %q; want one spend alert each", ten, thirty)
+	}
+	if !strings.Contains(ten[0], "in the last 10 min") || !strings.Contains(ten[0], "$30.00/h") {
+		t.Errorf("10-minute alert = %q; want a 10 min window and a $30.00/h pace", ten[0])
+	}
+	if !strings.Contains(thirty[0], "in the last 30 min") || !strings.Contains(thirty[0], "$10.00/h") {
+		t.Errorf("30-minute alert = %q; want a 30 min window and a $10.00/h pace", thirty[0])
+	}
+}
+
+func TestEvaluateRefusesANonPositiveInterval(t *testing.T) {
+	t.Parallel()
+	for _, interval := range []time.Duration{0, -tenMinutes} {
+		t.Run(interval.String(), func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				if recover() == nil {
+					t.Errorf("Evaluate with interval %v: want a panic", interval)
+				}
+			}()
+			Evaluate(&Sample{Total: 50}, Sample{Total: 40}, 0, interval)
+		})
+	}
+}
+
+func TestEvaluateComparesBeforeRounding(t *testing.T) {
+	t.Parallel()
+	// 50.000 - 48.996 = 1.004: over the threshold, and the message shows it to the
+	// cent as $1.00.
+	over := Evaluate(&Sample{Total: 50}, Sample{Total: 48.996}, 0, tenMinutes)
+	if len(over) != 1 || !strings.Contains(over[0], "spent $1.00 in the last") {
+		t.Errorf("Evaluate(50.000 -> 48.996) = %q; want one alert showing $1.00", over)
+	}
+	// 50.000 - 49.004 = 0.996: under the threshold, so no alert.
+	under := Evaluate(&Sample{Total: 50}, Sample{Total: 49.004}, 0, tenMinutes)
+	if len(under) != 0 {
+		t.Errorf("Evaluate(50.000 -> 49.004) = %q; want no alert", under)
 	}
 }
 
@@ -194,8 +295,8 @@ func TestKeyNeverAppears(t *testing.T) {
 		}
 		texts = append(texts, err.Error())
 	}
-	texts = append(texts, Evaluate(nil, Sample{Total: 5}, 3)...)
-	texts = append(texts, Evaluate(&Sample{Total: 50}, Sample{Total: 40}, 0)...)
+	texts = append(texts, Evaluate(nil, Sample{Total: 5}, 3, tenMinutes)...)
+	texts = append(texts, Evaluate(&Sample{Total: 50}, Sample{Total: 40}, 0, tenMinutes)...)
 
 	for _, text := range texts {
 		if strings.Contains(text, key) {

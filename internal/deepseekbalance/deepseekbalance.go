@@ -21,13 +21,14 @@ import (
 	"time"
 )
 
-// Interval is the spacing between the two samples a spend alert compares. The
-// pace in the alert is the spend scaled to an hour at this interval.
-const Interval = 10 * time.Minute
-
 // spendAlertAbove is the spend between two samples that raises an alert. A spend
 // of exactly this amount does not.
 const spendAlertAbove = 1.00
+
+// spendTolerance absorbs binary floating-point error in the difference of two
+// decimal balances, so that two readings exactly one dollar apart do not read as
+// a hair over it. It is not cent rounding: 1.004 still alerts and 0.996 does not.
+const spendTolerance = 1e-9
 
 // lowBalanceBelow is the total balance that raises a low-balance alert. A total
 // of exactly this amount does not.
@@ -61,7 +62,8 @@ type balanceInfo struct {
 
 // Fetch reads the balance at baseURL/user/balance with key as the bearer token
 // and returns the first balance_infos entry. A non-200 status, a body that does
-// not parse, or an empty balance_infos is an error.
+// not parse, an empty balance_infos, or a non-finite amount is an error. Fetch
+// sets no deadline of its own: the caller's context bounds the call.
 func Fetch(ctx context.Context, client *http.Client, baseURL, key string) (Sample, error) {
 	if client == nil {
 		return Sample{}, errors.New("deepseekbalance: nil http client")
@@ -106,32 +108,42 @@ func Fetch(ctx context.Context, client *http.Client, baseURL, key string) (Sampl
 	return Sample{Total: total, Granted: granted, ToppedUp: toppedUp}, nil
 }
 
-// parseAmount reads one decimal-string amount, naming the field on failure.
+// parseAmount reads one decimal-string amount, naming the field on failure. A
+// value that parses to NaN or an infinity is refused: it would make every
+// comparison false and suppress the alerts it should raise.
 func parseAmount(field, text string) (float64, error) {
 	v, err := strconv.ParseFloat(text, 64)
 	if err != nil {
 		return 0, fmt.Errorf("deepseekbalance: parse balance response: %s: %w", field, err)
 	}
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("deepseekbalance: parse balance response: %s: not a finite amount", field)
+	}
 	return v, nil
 }
 
 // Evaluate returns the alert lines for the readings. prev is the last good
-// sample, or nil on the first run, which never alerts on spend. cur is judged
+// sample, or nil on the first run, which never alerts on spend. interval is the
+// spacing between prev and cur; the spend pace is scaled to an hour at it, and
+// it must be positive or Evaluate panics, as time.NewTicker does. cur is judged
 // only when consecutiveFailures is zero: after a failed fetch cur is not a
 // reading, so only the unreachable rule applies, and it fires on failure
 // unreachableAt only.
-func Evaluate(prev *Sample, cur Sample, consecutiveFailures int) []string {
+func Evaluate(prev *Sample, cur Sample, consecutiveFailures int, interval time.Duration) []string {
+	if interval <= 0 {
+		panic("deepseekbalance: Evaluate interval must be positive")
+	}
 	var alerts []string
 	if consecutiveFailures == 0 {
 		if prev != nil {
-			// Cents, so a difference of two decimal balances that is exactly one
-			// dollar is not read as a hair over it.
-			spend := math.Round((prev.Total-cur.Total)*100) / 100
-			if spend > spendAlertAbove {
-				perHour := spend * float64(time.Hour/Interval)
+			// The threshold compares the unrounded difference; cents appear only in
+			// the message.
+			spend := prev.Total - cur.Total
+			if spend > spendAlertAbove+spendTolerance {
+				perHour := spend * float64(time.Hour) / float64(interval)
 				alerts = append(alerts, fmt.Sprintf(
 					"DeepSeek spent $%.2f in the last %d min, a pace of $%.2f/h",
-					spend, int(Interval/time.Minute), perHour))
+					spend, int(interval/time.Minute), perHour))
 			}
 		}
 		if cur.Total < lowBalanceBelow {
