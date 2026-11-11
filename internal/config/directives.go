@@ -317,19 +317,13 @@ func oldRigDirectiveDir(townRoot, rig string) string {
 // the line names both paths, and says where the files belong (gt-3lvcjz.11).
 func warnOldRigDirectory(townRoot, rig string) {
 	oldDir, newDir := oldRigDirectiveDir(townRoot, rig), RigDirectiveDir(townRoot, rig)
-	if !dirExists(oldDir) || dirExists(newDir) {
+	if !directiveFileExists(oldDir) || directiveFileExists(newDir) {
 		return
 	}
 	if _, done := legacyDirectiveWarned.LoadOrStore(oldDir, true); done {
 		return
 	}
 	log.Printf("directive directory %s is no longer read; move its files to %s (gt-3lvcjz.11)", oldDir, newDir)
-}
-
-// dirExists reports whether path is a directory that stat can see.
-func dirExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }
 
 // layerDirectivePath is the file for name in one layer. The new directory's file
@@ -348,9 +342,10 @@ func layerDirectivePath(newDir, legacyDir, name string) string {
 	return newPath
 }
 
-// directiveFileExists reports whether a directive file is there to read. Any
-// stat failure other than absence counts as there, so the read reports it and a
-// caller fails closed.
+// directiveFileExists reports whether a directive path, file or directory, is
+// there. Any stat failure other than absence counts as there, so the read reports
+// it and a caller fails closed; the old-directory warning uses it for the same
+// reason, so it does not call a directory it cannot stat absent.
 func directiveFileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil || !errors.Is(err, fs.ErrNotExist)

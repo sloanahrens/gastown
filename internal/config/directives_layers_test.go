@@ -228,13 +228,15 @@ func TestDirectiveLegacyReadWarnsOncePerFile(t *testing.T) {
 func TestDirectiveOldRigDirectoryWarnsOnce(t *testing.T) {
 	const rig = "alpha"
 	rows := []struct {
-		name     string
-		writeOld bool
-		writeNew bool
-		wantText []string
-		wantWarn bool
+		name      string
+		writeOld  bool
+		oldIsFile bool
+		writeNew  bool
+		wantText  []string
+		wantWarn  bool
 	}{
 		{name: "old only is dropped and warned", writeOld: true, wantWarn: true},
+		{name: "old is a regular file: still warned", oldIsFile: true, wantWarn: true},
 		{name: "old and new: new wins, no warning", writeOld: true, writeNew: true, wantText: []string{"new"}},
 		{name: "new only: no warning", writeNew: true, wantText: []string{"new"}},
 		{name: "neither: no warning"},
@@ -246,6 +248,9 @@ func TestDirectiveOldRigDirectoryWarnsOnce(t *testing.T) {
 			newDir := RigDirectiveDir(town, rig)
 			if row.writeOld {
 				writeDirective(t, filepath.Join(oldDir, "polecat.md"), "old")
+			}
+			if row.oldIsFile {
+				writeDirective(t, oldDir, "not a directory")
 			}
 			if row.writeNew {
 				writeDirective(t, filepath.Join(newDir, "polecat.md"), "new")
