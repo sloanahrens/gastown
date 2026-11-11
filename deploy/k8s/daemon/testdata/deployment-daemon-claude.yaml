@@ -124,6 +124,10 @@ spec:
               mountPath: /run/gt/xdg/gt/dolt-archive.key
               subPath: dolt-archive.key
               readOnly: true
+            - name: daemon-gcp-key
+              mountPath: /run/gt/xdg/gt/gcp-key
+              subPath: gcp-key
+              readOnly: true
             - name: daemon-om-daemon-token
               mountPath: /run/secrets/om-token
               subPath: om-daemon-token
@@ -251,6 +255,10 @@ spec:
         - name: daemon-dolt-archive-key
           secret:
             secretName: daemon-dolt-archive.key
+            defaultMode: 384
+        - name: daemon-gcp-key
+          secret:
+            secretName: daemon-gcp-key
             defaultMode: 384
         - name: daemon-claude
           hostPath:

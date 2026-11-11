@@ -28,6 +28,13 @@ import (
 // mounts.
 var secretsManifestRelPath = filepath.Join("deploy", "daemon", "secrets.yaml")
 
+// cloudCheckKeyFile is the deploy/daemon/secrets.yaml entry the cloud_check
+// patrol's GCP key comes from. The patrol runs without it and says so once, and
+// a pod that mounts a Secret that was never created stays in ContainerCreating,
+// so the render mounts the entry and prints its create line only when the
+// operator's config directory holds the file (gt-c57pax).
+const cloudCheckKeyFile = "gcp-key"
+
 var townClusterCmd = &cobra.Command{
 	Use:   "cluster",
 	Short: "Render the daemon's control-cluster manifests",
@@ -97,6 +104,7 @@ type clusterRenderDeps struct {
 	findTown     func() (string, error)
 	containerEnv func(townRoot string) (map[string]string, error)
 	readFile     func(path string) ([]byte, error)
+	lstat        func(path string) (fs.FileInfo, error)
 	getenv       func(key string) string
 	userHome     func() (string, error)
 	build        func(k8sdaemon.Values) (k8sdaemon.Manifests, error)
@@ -115,6 +123,7 @@ func realClusterRenderDeps(out io.Writer) clusterRenderDeps {
 		findTown:     workspace.FindFromCwdOrError,
 		containerEnv: realDaemonComposeDeps(out).containerEnv,
 		readFile:     os.ReadFile,
+		lstat:        os.Lstat,
 		getenv:       os.Getenv,
 		userHome:     os.UserHomeDir,
 		build:        k8sdaemon.Build,
@@ -298,6 +307,10 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	}) {
 		return fmt.Errorf("--dashboard needs the %s entry in %s: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating; no file was written", k8sdaemon.ViewerTokenFile, manifestPath)
 	}
+	secretFiles, err := withoutAnAbsentCloudCheckKey(secrets.Files, f.configDir, d.lstat)
+	if err != nil {
+		return err
+	}
 	namespace := f.namespace
 	if namespace == "" {
 		namespace = k8sdaemon.DefaultNamespace
@@ -305,7 +318,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	v := k8sdaemon.Values{
 		Namespace:               f.namespace,
 		Rehearsal:               f.rehearsal,
-		Secrets:                 secrets.Files,
+		Secrets:                 secretFiles,
 		Image:                   pair.Daemon,
 		ProxyImage:              f.proxyImage,
 		PolecatImage:            f.polecatImage,
@@ -396,6 +409,28 @@ type applyObject struct {
 	name string
 	file string
 	body []byte
+}
+
+// withoutAnAbsentCloudCheckKey drops the cloud-check key entry when the
+// operator's config directory does not hold it: the patrol runs without the key
+// and a Secret the render mounts but the operator cannot create would hold the
+// pod in ContainerCreating. A path that cannot be read for any other reason
+// refuses the render rather than guessing the file away.
+func withoutAnAbsentCloudCheckKey(files []manifestdata.SecretFile, configDir string, lstat func(string) (fs.FileInfo, error)) ([]manifestdata.SecretFile, error) {
+	out := make([]manifestdata.SecretFile, 0, len(files))
+	for _, file := range files {
+		if file.Name == cloudCheckKeyFile {
+			path := filepath.Join(configDir, file.Name)
+			switch _, err := lstat(path); {
+			case errors.Is(err, fs.ErrNotExist):
+				continue
+			case err != nil:
+				return nil, fmt.Errorf("the cloud check's key file %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
+			}
+		}
+		out = append(out, file)
+	}
+	return out, nil
 }
 
 // applyObjects splits a rendered stream into its documents, dropping the Secrets:
