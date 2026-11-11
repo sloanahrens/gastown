@@ -77,6 +77,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -213,6 +214,27 @@ const (
 	PolecatImageVolume     = "polecat-image"
 	PolecatImageFile       = "polecat-image"
 	PolecatImagePath       = "/run/gt/image/" + PolecatImageFile
+)
+
+// The dashboard is a second Deployment on the town-state claim, reached through a
+// loopback port-forward (gt-wl06ex). Its pod carries its own labels, so the
+// daemon's selector never matches it.
+const (
+	DashboardName         = "dashboard"
+	DashboardPort         = 8787
+	DashboardTmpVolume    = "dashboard-tmp"
+	DashboardTmpPath      = "/tmp"
+	DashboardClaudeVolume = "dashboard-claude"
+	// DashboardClaudePath is the Mac's ~/.claude as the dashboard reads it: the
+	// image's HOME is /root, so the transcripts and the spend ledger sit there.
+	DashboardClaudePath = "/root/.claude"
+	// ViewerTokenFile is the read-only Forgejo token the dashboard page reads from
+	// $XDG_CONFIG_HOME/gt, the same Secret entry a rehearsal mounts.
+	ViewerTokenFile = RehearsalForgeTokenFile
+	// dashboardViewerPath is where the dashboard container mounts the viewer token:
+	// the file the page reads, which the daemon container's Secrets loop also
+	// mounts at this path.
+	dashboardViewerPath = manifestdata.LiveConfigDirPath + "/" + ViewerTokenFile
 )
 
 var (
@@ -571,9 +593,22 @@ type Values struct {
 	// that is not an address are refused: none names another machine. Empty, or
 	// a rehearsal, renders no alias, and the Deployment says so in a comment.
 	HostGatewayIP string
+	// Dashboard renders the dashboard beside the daemon: a Deployment named
+	// DashboardName on the town-state claim, read-only, and a ClusterIP Service on
+	// DashboardPort. It mounts the viewer token, so Secrets must name the
+	// forgejo-viewer.env entry. A rehearsal refuses it: the dashboard is a
+	// live-pod piece.
+	Dashboard bool
+	// DashboardClaudeDir is the Mac's ~/.claude directory the dashboard container
+	// mounts read-only at DashboardClaudePath, as a hostPath of type Directory so a
+	// missing directory fails the pod rather than creating one. Empty mounts
+	// nothing. Set, it must be absolute and Dashboard must be set. The mount is the
+	// whole directory, wider than the panes read; a narrower list is a later bead.
+	DashboardClaudeDir string
 }
 
-// Manifests is what Build returns, in the order Render writes it.
+// Manifests is what Build returns, in the order Render writes it. The dashboard
+// objects are zero unless Values.Dashboard is set.
 type Manifests struct {
 	Namespace            Namespace
 	ServiceAccount       ServiceAccount
@@ -581,8 +616,10 @@ type Manifests struct {
 	LandingWorkClaim     PersistentVolumeClaim
 	DoltBackupClaim      PersistentVolumeClaim
 	ForgejoService       Service
+	DashboardService     Service
 	Secrets              []Secret
 	Deployment           Deployment
+	DashboardDeployment  Deployment
 	SweepRoleBinding     RoleBinding
 	CacheTrimRoleBinding RoleBinding
 	SweepReaderBinding   ClusterRoleBinding
@@ -602,6 +639,16 @@ func Build(v Values) (Manifests, error) {
 		v.Secrets = rehearsalFiles(v.Secrets)
 	}
 
+	// The dashboard is built before the daemon's Deployment, so a viewer entry the
+	// pod cannot mount is refused as the dashboard's, naming the entry.
+	var dashboard Deployment
+	if v.Dashboard {
+		dash, err := dashboardDeployment(v, namespace)
+		if err != nil {
+			return Manifests{}, err
+		}
+		dashboard = dash
+	}
 	deploy, err := deployment(v, namespace)
 	if err != nil {
 		return Manifests{}, err
@@ -628,6 +675,10 @@ func Build(v Values) (Manifests, error) {
 		},
 		Secrets:    make([]Secret, 0, len(v.Secrets)),
 		Deployment: deploy,
+	}
+	if v.Dashboard {
+		m.DashboardService = dashboardService(namespace)
+		m.DashboardDeployment = dashboard
 	}
 	// A host path replaces the dolt-backup claim, so the claim is not rendered:
 	// the pod mounts the directory the backups are written to (gt-cbsx3k).
@@ -826,9 +877,7 @@ func deployment(v Values, namespace string) (Deployment, error) {
 		Containers:                    append([]Container{daemonContainer(v)}, proxyContainers(v)...),
 		Volumes:                       vols,
 	}
-	if v.HostGatewayIP != "" && !v.Rehearsal {
-		pod.HostAliases = []HostAlias{{IP: v.HostGatewayIP, Hostnames: []string{DoltHostName}}}
-	}
+	pod.HostAliases = hostAliases(v)
 	template := PodTemplateMeta{Labels: labels()}
 	if v.PolecatImage != "" {
 		template.Annotations = map[string]string{PolecatImageAnnotation: v.PolecatImage}
@@ -1010,6 +1059,152 @@ func containerEnvironment(v Values) []EnvVar {
 	return env
 }
 
+// hostAliases is the Dolt name the pod resolves to the host gateway: the live
+// pods carry it, and a rehearsal or an unset gateway carries none.
+func hostAliases(v Values) []HostAlias {
+	if v.HostGatewayIP == "" || v.Rehearsal {
+		return nil
+	}
+	return []HostAlias{{IP: v.HostGatewayIP, Hostnames: []string{DoltHostName}}}
+}
+
+// dashboardService publishes the dashboard's port inside the cluster. Its selector
+// is the dashboard pod's own label, so the daemon's pods are not published.
+func dashboardService(namespace string) Service {
+	return Service{
+		TypeMeta: TypeMeta{APIVersion: "v1", Kind: "Service"},
+		Metadata: ObjectMeta{Name: DashboardName, Namespace: namespace, Labels: dashboardLabels()},
+		Spec: ServiceSpec{
+			Type:     "ClusterIP",
+			Selector: dashboardSelectorLabels(),
+			Ports:    []ServicePort{{Name: "http", Port: DashboardPort, Protocol: "TCP"}},
+		},
+	}
+}
+
+// dashboardDeployment is the dashboard's pod: one container running `gt dashboard`,
+// the town-state claim read-only, and the viewer token. The pod takes no
+// ServiceAccount token, and its only writable volume is an emptyDir at /tmp; the
+// claude directory is the only host path, and it is read-only.
+func dashboardDeployment(v Values, namespace string) (Deployment, error) {
+	vols, err := dashboardVolumes(v)
+	if err != nil {
+		return Deployment{}, err
+	}
+	automount := false
+	return Deployment{
+		TypeMeta: TypeMeta{APIVersion: "apps/v1", Kind: "Deployment"},
+		Metadata: ObjectMeta{Name: DashboardName, Namespace: namespace, Labels: dashboardLabels()},
+		Spec: DeploymentSpec{
+			Replicas: 1,
+			Strategy: DeploymentStrategy{Type: "Recreate"},
+			Selector: LabelSelector{MatchLabels: dashboardSelectorLabels()},
+			Template: PodTemplate{
+				Metadata: PodTemplateMeta{Labels: dashboardLabels()},
+				Spec: PodSpec{
+					AutomountServiceAccountToken: &automount,
+					HostAliases:                  hostAliases(v),
+					Containers:                   []Container{dashboardContainer(v)},
+					Volumes:                      vols,
+				},
+			},
+		},
+	}, nil
+}
+
+// dashboardContainer runs `gt dashboard` on loopback: the command replaces the
+// image's entrypoint, which is the daemon's, and no --bind is passed, so the page
+// listens on 127.0.0.1 where a port-forward reaches it. Its environment is the
+// daemon container's, from the same helper, so GT_DAEMON_SUPERVISOR resolves Dolt
+// to the container host here as it does in the daemon.
+//
+// Its probes are curl on the index. The index is static HTML that reads no Dolt
+// (internal/dashboard/server.go), so a Dolt outage on the Mac does not restart the
+// pod.
+func dashboardContainer(v Values) Container {
+	return Container{
+		Name:           DashboardName,
+		Image:          v.Image,
+		Command:        []string{"gt"},
+		Args:           []string{"dashboard", "--port", strconv.Itoa(DashboardPort)},
+		WorkingDir:     TownRootPath,
+		Env:            containerEnvironment(v),
+		VolumeMounts:   dashboardMounts(v),
+		ReadinessProbe: dashboardProbe(20, 15, 10, 3),
+		// Liveness is no stricter than readiness: every number is at least the
+		// readiness number, and the longer delay and threshold keep one slow read
+		// from restarting the pod.
+		LivenessProbe: dashboardProbe(60, 60, 15, 5),
+	}
+}
+
+// dashboardProbe is an exec of curl -fsS on the index. -f makes an error status
+// exit non-zero, and a refused connection exits non-zero too, so both keep the pod
+// not Ready.
+func dashboardProbe(initialDelay, period, timeout, failures int32) *Probe {
+	return &Probe{
+		Exec: &ExecAction{Command: []string{
+			"curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:" + strconv.Itoa(DashboardPort) + "/",
+		}},
+		InitialDelaySeconds: initialDelay,
+		PeriodSeconds:       period,
+		TimeoutSeconds:      timeout,
+		FailureThreshold:    failures,
+	}
+}
+
+// dashboardMounts are the dashboard's paths: the town state read-only, the viewer
+// token as one read-only file where the page reads it, the /tmp emptyDir, and
+// the claude directory read-only when one is set.
+func dashboardMounts(v Values) []VolumeMount {
+	m := []VolumeMount{
+		{Name: TownStateClaim, MountPath: TownRootPath, ReadOnly: true},
+		{Name: secretVolumeName(ViewerTokenFile), MountPath: dashboardViewerPath, SubPath: ViewerTokenFile, ReadOnly: true},
+		{Name: DashboardTmpVolume, MountPath: DashboardTmpPath},
+	}
+	if v.DashboardClaudeDir != "" {
+		m = append(m, VolumeMount{Name: DashboardClaudeVolume, MountPath: DashboardClaudePath, ReadOnly: true})
+	}
+	return m
+}
+
+// dashboardVolumes are the dashboard's volumes: the town-state claim, the /tmp
+// emptyDir, the viewer Secret at the entry's manifest mode, and the claude
+// directory as a hostPath of type Directory when one is set.
+func dashboardVolumes(v Values) ([]Volume, error) {
+	viewer, ok := v.viewerEntry()
+	if !ok {
+		return nil, fmt.Errorf("Values.Secrets holds no %s entry the dashboard can mount", ViewerTokenFile)
+	}
+	token, err := secretVolume(viewer)
+	if err != nil {
+		return nil, fmt.Errorf("Values.Secrets %q: %w", viewer.Name, err)
+	}
+	vols := []Volume{
+		{Name: TownStateClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: TownStateClaim}},
+		{Name: DashboardTmpVolume, EmptyDir: &EmptyDirVolumeSource{}},
+		token,
+	}
+	if v.DashboardClaudeDir != "" {
+		vols = append(vols, Volume{Name: DashboardClaudeVolume, HostPath: &HostPathVolumeSource{Path: v.DashboardClaudeDir, Type: hostPathDirectory}})
+	}
+	return vols, nil
+}
+
+// dashboardSelectorLabels are what the dashboard's Deployment and Service select
+// its pods by: its own name, which the daemon's pods do not carry.
+func dashboardSelectorLabels() map[string]string {
+	return map[string]string{"app.kubernetes.io/name": DashboardName}
+}
+
+// dashboardLabels are the labels on every dashboard object and its pod.
+func dashboardLabels() map[string]string {
+	return map[string]string{
+		"app.kubernetes.io/name":       DashboardName,
+		"app.kubernetes.io/managed-by": "gt",
+	}
+}
+
 // resourceList is the container's CPU and memory share.
 func resourceList(v Values) map[string]string {
 	return map[string]string{"cpu": v.CPU, "memory": v.Memory}
@@ -1037,14 +1232,11 @@ func volumes(v Values) ([]Volume, error) {
 		Volume{Name: TempVolume, EmptyDir: &EmptyDirVolumeSource{}},
 	)
 	for i, file := range v.Secrets {
-		mode, err := secretFileMode(file)
+		vol, err := secretVolume(file)
 		if err != nil {
 			return nil, fmt.Errorf("Values.Secrets[%d] %q: %w", i, file.Name, err)
 		}
-		vols = append(vols, Volume{
-			Name:   secretVolumeName(file.Name),
-			Secret: &SecretVolumeSource{SecretName: SecretNamePrefix + file.Name, DefaultMode: &mode},
-		})
+		vols = append(vols, vol)
 	}
 	if v.PolecatImage != "" {
 		vols = append(vols, polecatImageVolume())
@@ -1064,6 +1256,19 @@ func doltBackupVolume(v Values) Volume {
 		return Volume{Name: DoltBackupClaim, HostPath: &HostPathVolumeSource{Path: v.DoltBackupHostPath, Type: hostPathDirectory}}
 	}
 	return Volume{Name: DoltBackupClaim, PersistentVolumeClaim: &PVCVolumeSource{ClaimName: DoltBackupClaim}}
+}
+
+// secretVolume is the pod volume that carries file's Secret, at the entry's
+// manifest mode.
+func secretVolume(file manifestdata.SecretFile) (Volume, error) {
+	mode, err := secretFileMode(file)
+	if err != nil {
+		return Volume{}, err
+	}
+	return Volume{
+		Name:   secretVolumeName(file.Name),
+		Secret: &SecretVolumeSource{SecretName: SecretNamePrefix + file.Name, DefaultMode: &mode},
+	}, nil
 }
 
 // polecatImageVolume projects the pod template's polecat-image annotation to the
@@ -1266,7 +1471,45 @@ func (v Values) validate() error {
 	if err := v.validateSecrets(); err != nil {
 		return err
 	}
+	if err := v.validateDashboard(); err != nil {
+		return err
+	}
 	return v.validateDaemon()
+}
+
+// validateDashboard refuses the dashboard values the pair cannot render. The
+// viewer token is the dashboard's only credential, so its Secret entry must be
+// in Secrets: a pod that mounts a Secret that does not exist stays in
+// ContainerCreating. The claude directory mount belongs to the dashboard, so it
+// needs Dashboard, and it must be a path the pod can name.
+func (v Values) validateDashboard() error {
+	if v.DashboardClaudeDir != "" && !v.Dashboard {
+		return fmt.Errorf("Values.DashboardClaudeDir %q is set but Values.Dashboard is not: the mount belongs to the dashboard container", v.DashboardClaudeDir)
+	}
+	if v.DashboardClaudeDir != "" && !filepath.IsAbs(v.DashboardClaudeDir) {
+		return fmt.Errorf("Values.DashboardClaudeDir %q: want an absolute path, since the pod names the host directory", v.DashboardClaudeDir)
+	}
+	if !v.Dashboard {
+		return nil
+	}
+	if v.Rehearsal {
+		return errors.New("Values.Dashboard is set with Values.Rehearsal: the dashboard is a live-pod piece, and a rehearsal has its own claim")
+	}
+	if _, ok := v.viewerEntry(); !ok {
+		return fmt.Errorf("Values.Dashboard is set but Values.Secrets holds no %s entry: the dashboard reads its Forgejo token from that Secret, and a pod that mounts a missing Secret stays in ContainerCreating", ViewerTokenFile)
+	}
+	return nil
+}
+
+// viewerEntry is the Secrets entry of the read-only Forgejo token the dashboard
+// mounts, and whether Secrets names it.
+func (v Values) viewerEntry() (manifestdata.SecretFile, bool) {
+	for _, file := range v.Secrets {
+		if file.Name == ViewerTokenFile {
+			return file, true
+		}
+	}
+	return manifestdata.SecretFile{}, false
 }
 
 // validateDoltBackupHostPath refuses a host path the pod could not use in
@@ -1663,10 +1906,18 @@ func Render(w io.Writer, m Manifests) error {
 		docs = append(docs, m.DoltBackupClaim)
 	}
 	docs = append(docs, m.ForgejoService)
+	// Build leaves the dashboard objects zero unless Values.Dashboard is set, so a
+	// zero object is one that was not rendered and is not written.
+	if m.DashboardService.Kind != "" {
+		docs = append(docs, m.DashboardService)
+	}
 	for _, s := range m.Secrets {
 		docs = append(docs, s)
 	}
 	docs = append(docs, m.Deployment)
+	if m.DashboardDeployment.Kind != "" {
+		docs = append(docs, m.DashboardDeployment)
+	}
 	// Build leaves a binding zero in a rehearsal, so a zero binding is one that
 	// was not rendered and is not written.
 	if m.SweepRoleBinding.Kind != "" {
@@ -1756,11 +2007,14 @@ type Service struct {
 
 // ServiceSpec is the subset of a Service's spec the builder sets. An
 // ExternalName Service answers with the target's DNS record, so it selects no
-// pod; the ports are published for a reader, not forwarded.
+// pod, and the ports are published for a reader, not forwarded. A ClusterIP
+// Service forwards its ports to the pods its selector names, and carries no
+// external name.
 type ServiceSpec struct {
-	Type         string        `yaml:"type"`
-	ExternalName string        `yaml:"externalName"`
-	Ports        []ServicePort `yaml:"ports"`
+	Type         string            `yaml:"type"`
+	ExternalName string            `yaml:"externalName,omitempty"`
+	Selector     map[string]string `yaml:"selector,omitempty"`
+	Ports        []ServicePort     `yaml:"ports"`
 }
 
 // ServicePort is one port the Service publishes.

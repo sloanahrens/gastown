@@ -1,0 +1,101 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: gt
+  labels:
+    app.kubernetes.io/managed-by: gt
+    app.kubernetes.io/name: dashboard
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: dashboard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: gt
+        app.kubernetes.io/name: dashboard
+    spec:
+      automountServiceAccountToken: false
+      hostAliases:
+        - ip: 192.168.5.2
+          hostnames:
+            - host.docker.internal
+      containers:
+        - name: dashboard
+          image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+          command:
+            - gt
+          args:
+            - dashboard
+            - --port
+            - "8787"
+          workingDir: /Users/sloan/gt
+          env:
+            - name: GT_TOWN_ROOT
+              value: /Users/sloan/gt
+            - name: XDG_CONFIG_HOME
+              value: /run/gt/xdg
+            - name: GT_DAEMON_CONTAINER_NAME
+              value: daemon
+            - name: GT_DAEMON_SUPERVISOR
+              value: container
+            - name: TZ
+              value: America/Chicago
+            - name: FORGEJO_API_URL
+              value: http://forgejo:3000/api/v1
+            - name: AWS_REGION
+              value: us-east-1
+            - name: BEADS_DOLT_SERVER_HOST
+              value: host.docker.internal
+            - name: BEADS_DOLT_SERVER_PORT
+              value: "3307"
+            - name: GT_DOLT_BACKUP_ROOT
+              value: /Users/sloan/gt-backups/dolt
+          volumeMounts:
+            - name: town-state
+              mountPath: /Users/sloan/gt
+              readOnly: true
+            - name: daemon-forgejo-viewer-env
+              mountPath: /run/gt/xdg/gt/forgejo-viewer.env
+              subPath: forgejo-viewer.env
+              readOnly: true
+            - name: dashboard-tmp
+              mountPath: /tmp
+          readinessProbe:
+            exec:
+              command:
+                - curl
+                - -fsS
+                - -o
+                - /dev/null
+                - http://127.0.0.1:8787/
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - curl
+                - -fsS
+                - -o
+                - /dev/null
+                - http://127.0.0.1:8787/
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            timeoutSeconds: 15
+            failureThreshold: 5
+      volumes:
+        - name: town-state
+          persistentVolumeClaim:
+            claimName: town-state
+        - name: dashboard-tmp
+          emptyDir: {}
+        - name: daemon-forgejo-viewer-env
+          secret:
+            secretName: daemon-forgejo-viewer.env
+            defaultMode: 384

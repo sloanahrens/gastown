@@ -1003,3 +1003,193 @@ func TestTownClusterRenderLiveMountsTheDoltBackupHostPath(t *testing.T) {
 		})
 	}
 }
+
+// renderedHostPaths is the path and type of each hostPath volume in the rendered
+// Deployment whose file name ends in suffix, as "path type" strings.
+func renderedHostPaths(t *testing.T, out, suffix string) []string {
+	t.Helper()
+	for _, name := range dirNames(t, out) {
+		if !strings.HasSuffix(name, suffix) {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		var dep struct {
+			Spec struct {
+				Template struct {
+					Spec struct {
+						Volumes []struct {
+							HostPath *struct {
+								Path string `yaml:"path"`
+								Type string `yaml:"type"`
+							} `yaml:"hostPath"`
+						} `yaml:"volumes"`
+					} `yaml:"spec"`
+				} `yaml:"template"`
+			} `yaml:"spec"`
+		}
+		if err := yaml.Unmarshal(data, &dep); err != nil {
+			t.Fatalf("%s does not parse back: %v", name, err)
+		}
+		var got []string
+		for _, vol := range dep.Spec.Template.Spec.Volumes {
+			if vol.HostPath != nil {
+				got = append(got, vol.HostPath.Path+" "+vol.HostPath.Type)
+			}
+		}
+		return got
+	}
+	t.Fatalf("no file ending %s in %s", suffix, out)
+	return nil
+}
+
+// TestTownClusterRenderDashboardFlag holds --dashboard and --dashboard-claude-dir:
+// the pair is written in apply order, the flag off leaves the file names and the
+// Secret lines as they were, each refusal writes nothing, and the claude directory
+// is the dashboard's only host path.
+func TestTownClusterRenderDashboardFlag(t *testing.T) {
+	t.Parallel()
+
+	t.Run("the pair is written in apply order", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.dashboard = true
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		want := []string{
+			"01-namespace-gt.yaml",
+			"02-persistentvolumeclaim-town-state.yaml",
+			"03-persistentvolumeclaim-landing-work.yaml",
+			"04-persistentvolumeclaim-dolt-backup.yaml",
+			"05-serviceaccount-daemon.yaml",
+			"06-service-forgejo.yaml",
+			"07-service-dashboard.yaml",
+			"08-rolebinding-daemon-sweep-runner.yaml",
+			"09-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"10-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"11-deployment-daemon.yaml",
+			"12-deployment-dashboard.yaml",
+		}
+		if got := dirNames(t, f.out); !slices.Equal(got, want) {
+			t.Fatalf("file names = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("the flag off leaves the names and the Secret lines as they were", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		var off bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(&off), f); err != nil {
+			t.Fatalf("render without the flag: %v", err)
+		}
+		want := []string{
+			"01-namespace-gt.yaml",
+			"02-persistentvolumeclaim-town-state.yaml",
+			"03-persistentvolumeclaim-landing-work.yaml",
+			"04-persistentvolumeclaim-dolt-backup.yaml",
+			"05-serviceaccount-daemon.yaml",
+			"06-service-forgejo.yaml",
+			"07-rolebinding-daemon-sweep-runner.yaml",
+			"08-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"09-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"10-deployment-daemon.yaml",
+		}
+		if got := dirNames(t, f.out); !slices.Equal(got, want) {
+			t.Fatalf("file names without the flag = %v, want %v", got, want)
+		}
+		// The same fixture with the flag on writes to a second directory, so the
+		// Secret lines compare with the same config paths.
+		on := f
+		on.dashboard = true
+		on.out = filepath.Join(t.TempDir(), "out-with-dashboard")
+		var with bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(&with), on); err != nil {
+			t.Fatalf("render with the flag: %v", err)
+		}
+		if got, want := createLines(with.String()), createLines(off.String()); !slices.Equal(got, want) {
+			t.Errorf("the Secret lines with the flag = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("a missing viewer entry refuses before a write", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.dashboard = true
+		// Renaming the entry leaves the manifest with no forgejo-viewer.env.
+		writeClusterRenderManifest(t, f.dir, strings.Replace(clusterRenderSecretsManifest, "name: forgejo-viewer.env", "name: forgejo-viewer-retired.env", 1))
+		var out bytes.Buffer
+		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		requireErrorNames(t, err, k8sdaemon.ViewerTokenFile, "--dashboard")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left %s: %s", f.out, got)
+		}
+	})
+
+	t.Run("the dashboard with a rehearsal refuses before a write", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.rehearsal = true
+		f.forgeHost = ""
+		f.namespace = "gt-rehearsal"
+		f.dashboard = true
+		var out bytes.Buffer
+		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		requireErrorNames(t, err, "--dashboard", "--rehearsal")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left %s: %s", f.out, got)
+		}
+	})
+
+	t.Run("a relative claude directory refuses before a write", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.dashboard = true
+		f.dashboardClaudeDir = "Users/sloan/.claude"
+		var out bytes.Buffer
+		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		requireErrorNames(t, err, "--dashboard-claude-dir", "absolute")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left %s: %s", f.out, got)
+		}
+	})
+
+	t.Run("the claude directory without the dashboard refuses before a write", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.dashboardClaudeDir = "/Users/sloan/.claude"
+		var out bytes.Buffer
+		err := runClusterRender(clusterRenderTestDeps(&out), f)
+		requireErrorNames(t, err, "--dashboard-claude-dir", "--dashboard")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left %s: %s", f.out, got)
+		}
+	})
+
+	t.Run("the claude directory is the dashboard's only host path", func(t *testing.T) {
+		f := clusterRenderFixture(t)
+		f.dashboard = true
+		f.dashboardClaudeDir = "/Users/sloan/.claude"
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(&out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		if got, want := renderedHostPaths(t, f.out, "-deployment-dashboard.yaml"), []string{"/Users/sloan/.claude Directory"}; !slices.Equal(got, want) {
+			t.Errorf("the dashboard's host paths = %q, want %q", got, want)
+		}
+		if got := renderedHostPaths(t, f.out, "-deployment-daemon.yaml"); len(got) != 0 {
+			t.Errorf("the daemon's host paths = %q, want none", got)
+		}
+	})
+}
+
+// requireErrorNames fails the test unless err is non-nil and its text names each
+// of want.
+func requireErrorNames(t *testing.T, err error, want ...string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("the render succeeded, want a refusal naming %q", want)
+	}
+	for _, w := range want {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("the refusal %q does not name %q", err, w)
+		}
+	}
+}
