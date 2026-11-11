@@ -595,8 +595,12 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		RigTheme:       newDashRigThemes(townRoot),
 		Trend: func() *dashboard.Trend {
 			now := time.Now()
-			stages, rejects := om.trendInputs(trendWindowStart(now))
-			tr := buildTrend(now, recs.get(), stages, rejects, loads.points())
+			// One scan serves both windows: the trend buckets the last 24
+			// hours, the velocity series the last 72. Asking for the wider
+			// window means the series' rejected hours older than a day are
+			// read, not drawn as zero because the reader stopped at a day.
+			stages, rejects := om.trendInputs(velocityWindowStart(now))
+			tr := buildTrendWithVelocity(now, recs.get(), stages, rejects, loads.points(), polecatTimes)
 			names := landingNames{who: submitters.get(), submitter: submittedBy}
 			crew := submitters.crewLookup()
 			live := runningRows(om.running(now.Add(-trendHours*time.Hour)), rigOfBead, livePolecatName(polecatFor, names.who))

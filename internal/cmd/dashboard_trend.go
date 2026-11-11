@@ -37,9 +37,15 @@ func localHour(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.Local)
 }
 
+// windowStart is the oldest hour of a window of hours buckets that ends with
+// the hour now falls in.
+func windowStart(now time.Time, hours int) time.Time {
+	return localHour(now).Add(-time.Duration(hours-1) * time.Hour)
+}
+
 // trendWindowStart is the oldest moment the 24 hourly buckets cover.
 func trendWindowStart(now time.Time) time.Time {
-	return localHour(now).Add(-time.Duration(trendHours-1) * time.Hour)
+	return windowStart(now, trendHours)
 }
 
 // buildTrend folds the landings, the landing worker's stage lines and
