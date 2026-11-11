@@ -99,6 +99,11 @@ func Run(ctx context.Context, opts *Options, env Env) int {
 // protection steps for every repository. A failure stops the run where it is: each
 // step converges on its own, so a repeat picks up where this one stopped.
 func provision(p *Provisioner, opts *Options) error {
+	// --rotate mints a token and --skip-tokens mints none, so the pair cannot both be
+	// honored; refuse it before any request rather than drop the rotation silently.
+	if opts.Rotate && opts.SkipTokens {
+		return fmt.Errorf("--rotate and --skip-tokens cannot be combined: --skip-tokens mints no token, so the rotation would be ignored; drop one of them")
+	}
 	if opts.SkipTokens {
 		p.logf("tokens: skipped (--skip-tokens)")
 	}

@@ -578,6 +578,44 @@ func TestRunSkipTokensRefusesAMissingBot(t *testing.T) {
 	}
 }
 
+// TestRunRotateWithSkipTokensRefuses: --rotate asks for a new token and --skip-tokens
+// asks for none, so the run refuses both together before any request, dry run or not;
+// it never reports a plan that drops the rotation silently.
+func TestRunRotateWithSkipTokensRefuses(t *testing.T) {
+	t.Parallel()
+	for name, args := range map[string][]string{
+		"live run": {"--rotate", "--skip-tokens"},
+		"dry run":  {"--rotate", "--skip-tokens", "--dry-run"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			f := forgejotest.New()
+			f.AddRepo(protectionRepo)
+			for _, role := range []string{"polecat", "landing", "registry"} {
+				user := DefaultBotPrefix + role
+				f.SeedUser(user, user+"@"+DefaultBotEmailDomain)
+			}
+			files := newMemFiles()
+
+			res := runProvisioning(t, f, files, nil, append([]string{"--repo", protectionRepo}, args...)...)
+			if res.code != ExitFailure {
+				t.Fatalf("run = %d, want %d (logs: %s)", res.code, ExitFailure, res.shown())
+			}
+			for _, want := range []string{"--rotate", "--skip-tokens"} {
+				if !strings.Contains(res.logs, want) {
+					t.Errorf("logs = %q, want the refusal to name %s", res.shown(), want)
+				}
+			}
+			if calls := f.CallLog(); len(calls) != 0 {
+				t.Errorf("run sent %d requests, want none before the refusal", len(calls))
+			}
+			if got := len(files.files); got != 0 {
+				t.Errorf("run wrote %d token files, want none", got)
+			}
+		})
+	}
+}
+
 // TestRunSkipTokensDryRunPlanNamesTheSkippedStep: a dry run with --skip-tokens
 // prints the token step as skipped and still plans the repository writes.
 func TestRunSkipTokensDryRunPlanNamesTheSkippedStep(t *testing.T) {
