@@ -621,6 +621,70 @@ func TestCatchUpGCSkipsWhileAGCCycleIsRunning(t *testing.T) {
 	}
 }
 
+// A missed backup is taken against an external server too: the server writes
+// the copy into the backup root, and its databases are listed through the
+// server, since the data dir is not this host's.
+func TestBackupCatchUpRunsAgainstAnExternalServer(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	f.sizes = map[string]gcMeasure{} // nothing in the local data dir
+	f.serverDBs = []string{"gt", "hq"}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+
+	d.runScheduledMaintenance()
+
+	if strings.Join(f.backupCalls, ",") != "gt,hq" {
+		t.Errorf("backup calls = %v, want gt,hq listed through the server", f.backupCalls)
+	}
+	if f.serverCalls != 1 {
+		t.Errorf("server listed %d times, want 1", f.serverCalls)
+	}
+	if b, ok, err := doltbackup.Newest(f.backupRoot); err != nil || !ok || !b.Has("gt") {
+		t.Errorf("no catch-up night holding gt: %+v (ok %v, err %v)", b, ok, err)
+	}
+	if len(f.gcCalls) != 0 {
+		t.Errorf("catch-up gc ran against an external server: %v", f.gcCalls)
+	}
+}
+
+// A server that cannot list its databases takes no catch-up backup, the data dir
+// is not read in its place, and the failure escalates once.
+func TestBackupCatchUpExternalServerListFailureTakesNoBackup(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	f.sizes = map[string]gcMeasure{"hq": {1 * mib, 0}}
+	f.serverErr = errors.New("dolt is not answering")
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 0 {
+		t.Errorf("catch-up backup ran with no server list: %v", f.backupCalls)
+	}
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "listing the databases the Dolt server serves: dolt is not answering") {
+		t.Errorf("escalations = %v, want one naming the list failure", f.escalations)
+	}
+}
+
+// A server that serves no database takes no catch-up backup and escalates; the
+// throttle is set, so the next tick does not repeat the escalation.
+func TestBackupCatchUpExternalServerWithNoDatabasesEscalatesOnce(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	f.sizes = map[string]gcMeasure{"hq": {1 * mib, 0}}
+	d.maint.gcExternal = func(*Daemon) (bool, string) { return true, "Dolt server is externally managed" }
+
+	d.runScheduledMaintenance()
+	d.runScheduledMaintenance()
+
+	if len(f.backupCalls) != 0 {
+		t.Errorf("catch-up backup ran against a server with no databases: %v", f.backupCalls)
+	}
+	if len(f.escalations) != 1 || !strings.Contains(f.escalations[0], "the Dolt server serves no databases") {
+		t.Errorf("escalations = %v, want one naming the empty server", f.escalations)
+	}
+}
+
 // An externally managed server, or one off this host, has a data dir this host
 // cannot measure: no catch-up gc.
 func TestCatchUpGCSkipsWithAnExternalServer(t *testing.T) {

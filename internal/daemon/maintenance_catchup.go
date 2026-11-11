@@ -31,13 +31,14 @@ const maintenanceCatchUpRetry = 6 * time.Hour
 // schedule (gt-uux5b).
 const maintenanceCatchUpGCAge = 8 * 24 * time.Hour
 
-// maybeCatchUpBackup takes a missed nightly backup outside the window. It waits
-// for a moment when no hard daemon work is in flight and no
-// container-gate slot is held, so it never runs beside a landing gate; a
-// working polecat — or a soft hold the next tick reruns — does not block it, or
-// a town busy with its own ticks would never catch up. It runs on the gc
-// cycle's goroutine and flag, so it cannot overlap a window run.
-func (d *Daemon) maybeCatchUpBackup(now time.Time) {
+// maybeCatchUpBackup takes a missed nightly backup outside the window, against a
+// local or an external Dolt server. It waits for a moment when no hard daemon
+// work is in flight and no container-gate slot is held, so it never runs beside
+// a landing gate; a working polecat — or a soft hold the next tick reruns — does
+// not block it, or a town busy with its own ticks would never catch up. It runs
+// on the gc cycle's goroutine and flag, so it cannot overlap a window run.
+// external is the tick's one gcExternal answer.
+func (d *Daemon) maybeCatchUpBackup(now time.Time, external bool) {
 	if d.maintenanceGCRunning.Load() {
 		return
 	}
@@ -62,12 +63,20 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 		d.logCatchUpDeferral(now, why)
 		return
 	}
-	if external, why := s.gcExternal(d); external {
-		// CALL dolt_backup writes file:// on the server's host, not this one.
-		d.logger.Printf("scheduled_maintenance: catch-up skipped: %s — backup needs a local server", why)
-		return
+	// The backup runs whether the server is local or external: the server writes
+	// the copy into the backup root, and backupDatabases lists the databases
+	// from wherever the server's data is.
+	databases, err := d.backupDatabases(external)
+	if external {
+		// An external server that cannot list, or serves none, fails the
+		// catch-up and escalates. The throttle is set as catchUpUnknown sets it,
+		// so the escalation repeats once per retry gap, not once per tick.
+		if err = externalDatabasesError(databases, err); err != nil {
+			d.catchUpAttemptAt.Store(now.UnixNano())
+			d.maintenanceBackupFailed(err, "")
+			return
+		}
 	}
-	databases, err := s.gcDatabases(d.maintenanceDataDir())
 	if err != nil || len(databases) == 0 {
 		d.logger.Printf("scheduled_maintenance: catch-up: no databases discovered (err=%v)", err)
 		return
@@ -188,7 +197,7 @@ func catchUpBackedUp(now time.Time, root string, due []string) (ready, unbacked 
 // Nothing here counts toward the skipped-window streak and nothing sets the
 // cycle-completion time the window folds into lastMaintenanceRun: the next
 // window still takes its own backup and runs its own gc.
-func (d *Daemon) maybeCatchUpGC(now time.Time) {
+func (d *Daemon) maybeCatchUpGC(now time.Time, external bool) {
 	if d.maintenanceGCRunning.Load() {
 		// A window run, a catch-up backup or a catch-up gc holds the cycle.
 		return
@@ -205,8 +214,10 @@ func (d *Daemon) maybeCatchUpGC(now time.Time) {
 	}
 	// Every condition below is one maybeCatchUpBackup looks at on this same
 	// tick and reports itself — a backup root it cannot read, a backup list it
-	// cannot parse, a backup too old, an external server, no databases — so the
-	// gc fails closed in silence rather than repeating it every 5 minutes.
+	// cannot parse, a backup too old, no databases — so the gc fails closed in
+	// silence rather than repeating it every 5 minutes. The external-server gate
+	// below is the gc's own: the catch-up backup still runs against an external
+	// server, but its data dir cannot be measured for a gc.
 	s := d.maintenance()
 	root, err := s.backupRoot()
 	if err != nil {
@@ -221,7 +232,7 @@ func (d *Daemon) maybeCatchUpGC(now time.Time) {
 		// runs on its own goroutine, so the gc waits for a later tick.
 		return
 	}
-	if external, _ := s.gcExternal(d); external {
+	if external {
 		return
 	}
 	dataDir := d.maintenanceDataDir()

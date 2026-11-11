@@ -237,6 +237,11 @@ func (d *Daemon) runScheduledMaintenance() {
 		d.closeDeferredGCWindow(now)
 	}
 
+	// The external-server answer is read once per tick, here, and every branch
+	// below takes this one answer: the gc gate, the backup's database list and
+	// the catch-ups cannot disagree about where the Dolt server is.
+	external, why := d.maintenance().gcExternal(d)
+
 	// A request runs the cycle at any time of day, so it skips the window and
 	// the gap since the last cycle; the catch-up work is for a tick without
 	// one, and a requested cycle replaces it.
@@ -248,11 +253,11 @@ func (d *Daemon) runScheduledMaintenance() {
 		// A malformed window also reads as "outside"; it must not enable
 		// catch-ups and hide that the window (and its gc) never runs.
 		if _, _, err := maintenanceWindowBounds(now, window); err == nil {
-			d.maybeCatchUpBackup(now)
+			d.maybeCatchUpBackup(now, external)
 			// The gc's own freshness check still wants a backup, so a
 			// catch-up one dispatched just above defers the gc to a later
 			// tick rather than letting it run uncovered.
-			d.maybeCatchUpGC(now)
+			d.maybeCatchUpGC(now, external)
 		}
 		return
 	}
@@ -286,7 +291,7 @@ func (d *Daemon) runScheduledMaintenance() {
 			d.deferRequest(request, reason)
 		}
 		if window != "" {
-			d.startStandbyBackup(window)
+			d.startStandbyBackup(window, "standby backup", external)
 		}
 		return
 	}
@@ -301,18 +306,20 @@ func (d *Daemon) runScheduledMaintenance() {
 		}
 		return
 	}
-	if external, why := d.maintenance().gcExternal(d); external {
+	if external {
 		// The old-gen trigger reads the server's data dir from this host's
-		// disk; against a remote server it would read the wrong one. The skip
-		// is the scheduled window's, so only a scheduled tick consumes it: a
+		// disk; against a remote server it would read the wrong one, so the
+		// gc is skipped. The night's backup does not read that disk: the
+		// server writes it into the backup root, so a scheduled tick still
+		// takes it (startStandbyBackup) and consumes the window once it ends. A
 		// request that fails here changed nothing a later request must wait
 		// on.
 		d.logger.Printf("scheduled_maintenance: skipped: %s — gc needs a local server", why)
 		if requested {
 			d.answerRequest(request, gcOutcomeFailed, "no local server can run the cycle: "+why)
-		} else {
-			d.lastMaintenanceRun = now
+			return
 		}
+		d.startStandbyBackup(window, "backup", external)
 		return
 	}
 	dataDir := d.maintenanceDataDir()

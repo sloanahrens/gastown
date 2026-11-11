@@ -206,6 +206,12 @@ type gcFakes struct {
 	backupCalls []string
 	backupErr   map[string]error
 
+	// serverDBs is what an external server's SHOW DATABASES returns (serverErr
+	// fails it); serverCalls counts the listings.
+	serverDBs   []string
+	serverErr   error
+	serverCalls int
+
 	// The pause marker: events records "write <db>", "gc <db>" and
 	// "remove" in order; marker is the one on "disk".
 	events       []string
@@ -231,6 +237,10 @@ func withGCFakes(t *testing.T, d *Daemon) *gcFakes {
 		return dbs, nil
 	}
 	d.maint.gcExternal = func(*Daemon) (bool, string) { return false, "" }
+	d.maint.serverDatabases = func(*Daemon) ([]string, error) {
+		f.serverCalls++
+		return f.serverDBs, f.serverErr
+	}
 	d.maint.now = func() time.Time { return gcTestNow }
 	d.maint.pauseCurrent = func(string, time.Time) *doltpause.Marker { return f.foreignPause }
 	d.maint.pauseWrite = func(_ string, m doltpause.Marker) error {

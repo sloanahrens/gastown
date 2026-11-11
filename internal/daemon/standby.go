@@ -37,19 +37,31 @@ func (d *Daemon) bootReason() string {
 }
 
 // startStandbyBackup takes the window's backup, and no gc, while a standby
-// holds the window's cycle (gt-6mlik.6). maintenanceBackup is idempotent per
-// day, and a deferral retries on the next tick. Any other end consumes the
-// window through maintenanceGCFinishedAt, as a finished cycle does, so a
-// failed backup escalates once per window rather than once per tick.
-func (d *Daemon) startStandbyBackup(window string) {
+// holds the window's cycle (gt-6mlik.6), and while an external Dolt server keeps
+// the gc from running on this host. external is the tick's one gcExternal
+// answer, which picks the database list. source names the caller in the log.
+// maintenanceBackup is idempotent per day, and a deferral retries on the next
+// tick. Any other end consumes the window through maintenanceGCFinishedAt, as
+// a finished cycle does, so a failed backup escalates once per window rather
+// than once per tick. A list the external server cannot give, or an empty one,
+// ends the backup failed and leaves the window open.
+func (d *Daemon) startStandbyBackup(window, source string, external bool) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		return
 	}
-	dataDir := d.maintenanceDataDir()
-	databases, err := d.maintenance().gcDatabases(dataDir)
+	databases, err := d.backupDatabases(external)
+	if external {
+		// The external server's list is the whole backup's database set, so a
+		// failed or empty one fails the night and escalates.
+		if err = externalDatabasesError(databases, err); err != nil {
+			d.maintenanceGCRunning.Store(false)
+			d.maintenanceBackupFailed(err, "")
+			return
+		}
+	}
 	if err != nil {
 		d.maintenanceGCRunning.Store(false)
-		d.logger.Printf("scheduled_maintenance: standby backup for window %s skipped: discovering databases in %s: %v", window, dataDir, err)
+		d.logger.Printf("scheduled_maintenance: %s for window %s skipped: listing databases: %v", source, window, err)
 		return
 	}
 	if len(databases) == 0 {
@@ -59,7 +71,7 @@ func (d *Daemon) startStandbyBackup(window string) {
 	d.maintenance().dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
 		res := d.maintenanceBackup(databases)
-		d.logger.Printf("scheduled_maintenance: standby backup %s (window %s)", res.outcome, window)
+		d.logger.Printf("scheduled_maintenance: %s %s (window %s)", source, res.outcome, window)
 		if res.outcome == gcOutcomeDeferred || res.outcome == gcOutcomeInterrupted {
 			return
 		}
