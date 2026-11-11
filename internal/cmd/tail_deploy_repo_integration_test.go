@@ -3,6 +3,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,7 +76,7 @@ func tailRepoRig(t *testing.T) (townRoot, binary, second, tip string) {
 // is the bare repo's main, the installed commit is the binary's, and behind is
 // counted between them. The checkout beside the bare repo still sits at the
 // binary, so reading it would say the binary is current.
-func TestTailMainPicture_ReadsTheBareReposMainNotTheStaleCheckout(t *testing.T) {
+func TestIntegrationTailMainPicture_ReadsTheBareReposMainNotTheStaleCheckout(t *testing.T) {
 	t.Parallel()
 	townRoot, binary, _, tip := tailRepoRig(t)
 
@@ -94,10 +95,47 @@ func TestTailMainPicture_ReadsTheBareReposMainNotTheStaleCheckout(t *testing.T) 
 	}
 }
 
+// TestIntegrationTailMainPicture_WithoutABareRepoReadsTheCheckoutAndSaysSo: a
+// town with no .repo.git reads the checkout, and the why-log names the checkout
+// that answered. The log is written through tailMainPictureOf, so the call that
+// logs is tested.
+func TestIntegrationTailMainPicture_WithoutABareRepoReadsTheCheckoutAndSaysSo(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	checkout := filepath.Join(townRoot, "gastown")
+	if err := os.MkdirAll(filepath.Join(checkout, "cmd", "gt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "cmd", "gt", "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tailRepoGit(t, checkout, "init", "-q")
+	tailRepoGit(t, checkout, "symbolic-ref", "HEAD", "refs/heads/main")
+	tailRepoGit(t, checkout, "add", "-A")
+	tailRepoGit(t, checkout, "commit", "-q", "-m", "c-main")
+	binary := tailRepoGit(t, checkout, "rev-parse", "HEAD")
+
+	var lines []string
+	why := newDashWhyLog(func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	})
+	gotTip, installed, behind, err := tailMainPictureOf(townRoot, binary, why)
+	if err != nil {
+		t.Fatalf("tailMainPictureOf: %v", err)
+	}
+	if want := version.ShortCommit(binary); gotTip != want || installed != want || behind != 0 {
+		t.Errorf("picture = (%s, %s, %d), want the checkout's own commit %s, current", gotTip, installed, behind, want)
+	}
+	want := "deploy repo: " + filepath.Join(townRoot, "gastown", ".repo.git") + " is absent; reading the source checkout " + checkout
+	if len(lines) != 1 || lines[0] != want {
+		t.Errorf("why-log = %q, want exactly %q", lines, want)
+	}
+}
+
 // TestTailGitAncestry_AnswersFromTheBareRepo: a commit only the bare repo holds
 // is an ancestor of its main, which the stale checkout cannot answer at all, and
 // a commit past the tip is not an ancestor of an earlier one.
-func TestTailGitAncestry_AnswersFromTheBareRepo(t *testing.T) {
+func TestIntegrationTailGitAncestry_AnswersFromTheBareRepo(t *testing.T) {
 	t.Parallel()
 	townRoot, binary, second, tip := tailRepoRig(t)
 	ancestor := tailGitAncestry(townRoot)
