@@ -2,6 +2,7 @@ package scorecard
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
@@ -227,4 +229,255 @@ func (c Cache) Read(path string) (CacheDoc, error) {
 		}
 	}
 	return doc, nil
+}
+
+// ErrNoHistory is what ReadHistory reports when the history file is absent: no
+// refresh has run yet.
+var ErrNoHistory = errors.New("no scorecard history yet")
+
+// ErrCorruptHistory is what ReadHistory reports when a line of the history file
+// does not parse as a history row.
+var ErrCorruptHistory = errors.New("corrupt scorecard history")
+
+// HistoryRetention is how long a history row is kept. A row older than this is
+// dropped the next time a refresh writes the file.
+const HistoryRetention = 90 * 24 * time.Hour
+
+// HistoryPath returns the town's refresh history, one JSON row per line:
+// <town>/.runtime/jev/scorecard.history.jsonl.
+func HistoryPath(townRoot string) string {
+	return filepath.Join(townRoot, constants.DirRuntime, "jev", "scorecard.history.jsonl")
+}
+
+// HistoryRow is one refresh's line in the history: when it ran, the window it
+// scored, and each freshly scored battery's per-question counts and verdicts.
+// A battery reused unchanged or kept from a failed refresh has no entry, so a
+// reader never takes a reused block for growth.
+type HistoryRow struct {
+	At        time.Time        `json:"at"`
+	Since     string           `json:"since"`
+	Batteries []HistoryBattery `json:"batteries"`
+}
+
+// HistoryBattery is one battery's part of a history row.
+type HistoryBattery struct {
+	Name      string            `json:"name"`
+	Questions []HistoryQuestion `json:"questions"`
+}
+
+// HistoryQuestion is one question's labeled count, positives and verdict as
+// the refresh scored them.
+type HistoryQuestion struct {
+	ID        string `json:"id"`
+	Labeled   int    `json:"labeled"`
+	Positives int    `json:"positives"`
+	Verdict   string `json:"verdict"`
+}
+
+// HistoryRowFor returns the row a refresh at at over window appends. Only the
+// blocks named in fresh, the batteries this refresh scored, are recorded. A
+// block that is kept from a failed refresh, or that has no report, is skipped
+// even when named, so a failure never reads as growth.
+func HistoryRowFor(at time.Time, window string, doc CacheDoc, fresh map[string]bool) HistoryRow {
+	row := HistoryRow{At: at, Since: window, Batteries: []HistoryBattery{}}
+	for _, b := range doc.Batteries {
+		if !fresh[b.Name] || b.Kept || b.Failed || b.Report == nil {
+			continue
+		}
+		hb := HistoryBattery{Name: b.Name, Questions: make([]HistoryQuestion, 0, len(b.Report.Questions))}
+		for _, q := range b.Report.Questions {
+			hb.Questions = append(hb.Questions, HistoryQuestion{
+				ID:        q.ID,
+				Labeled:   q.Labeled,
+				Positives: q.Positives,
+				Verdict:   q.Verdict,
+			})
+		}
+		row.Batteries = append(row.Batteries, hb)
+	}
+	return row
+}
+
+// AppendHistory appends row to the history at path and drops every row older
+// than HistoryRetention at now. A line that does not parse as a dated row is
+// kept as it was written, so the writer never destroys what it cannot read.
+//
+// A failure is written to log as one line and is not returned: the refresh
+// that calls this has already written the cache, and a history that cannot be
+// written must not fail that refresh. A file that cannot be read is left
+// untouched rather than rewritten from nothing.
+func (c Cache) AppendHistory(path string, row HistoryRow, now time.Time, log io.Writer) {
+	if err := c.appendHistory(path, row, now); err != nil {
+		if log != nil {
+			fmt.Fprintf(log, "scorecard history not appended: %v\n", err)
+		}
+	}
+}
+
+func (c Cache) appendHistory(path string, row HistoryRow, now time.Time) error {
+	read := c.ReadFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("reading the scorecard history %s: %w", path, err)
+	}
+	cutoff := now.Add(-HistoryRetention)
+	var out bytes.Buffer
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var dated struct {
+			At time.Time `json:"at"`
+		}
+		if json.Unmarshal(line, &dated) == nil && !dated.At.IsZero() && dated.At.Before(cutoff) {
+			continue
+		}
+		out.Write(line)
+		out.WriteByte('\n')
+	}
+	encoded, err := json.Marshal(row)
+	if err != nil {
+		return fmt.Errorf("encoding the scorecard history row: %w", err)
+	}
+	out.Write(encoded)
+	out.WriteByte('\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating the scorecard history directory for %s: %w", path, err)
+	}
+	write := c.WriteFile
+	if write == nil {
+		write = atomicfile.WriteFile
+	}
+	if err := write(path, out.Bytes(), 0o644); err != nil {
+		return fmt.Errorf("writing the scorecard history %s: %w", path, err)
+	}
+	return nil
+}
+
+// ReadHistory loads every row of the history at path, oldest first. A missing
+// file is ErrNoHistory; a line that does not parse is ErrCorruptHistory naming
+// the line, so the view never shows a history with a row silently missing.
+func (c Cache) ReadHistory(path string) ([]HistoryRow, error) {
+	read := c.ReadFile
+	if read == nil {
+		read = os.ReadFile
+	}
+	data, err := read(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("reading the scorecard history %s: %w", path, ErrNoHistory)
+		}
+		return nil, fmt.Errorf("reading the scorecard history %s: %w", path, err)
+	}
+	var rows []HistoryRow
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row HistoryRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			return nil, fmt.Errorf("%w %s: line %d: %w", ErrCorruptHistory, path, i+1, err)
+		}
+		if row.At.IsZero() {
+			return nil, fmt.Errorf("%w %s: line %d has no at", ErrCorruptHistory, path, i+1)
+		}
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// noGrowthRuns is how many trailing refreshes must share a labeled count before
+// the history says the question has not grown.
+const noGrowthRuns = 3
+
+// WriteHistory prints each question's series from rows, one block per battery
+// and question, in the order they first appear. An empty battery or question
+// matches every one. A row's date, labeled count, positives and verdict print
+// with the change in labeled since the previous row. When the last noGrowthRuns
+// or more rows share a labeled count, the block ends by saying how many
+// refreshes saw no growth.
+func WriteHistory(w io.Writer, rows []HistoryRow, battery, question string) error {
+	type point struct {
+		at        time.Time
+		labeled   int
+		positives int
+		verdict   string
+	}
+	type series struct {
+		battery, question string
+		points            []point
+	}
+	var order []*series
+	index := map[[2]string]*series{}
+	for _, row := range rows {
+		for _, b := range row.Batteries {
+			if battery != "" && b.Name != battery {
+				continue
+			}
+			for _, q := range b.Questions {
+				if question != "" && q.ID != question {
+					continue
+				}
+				key := [2]string{b.Name, q.ID}
+				s := index[key]
+				if s == nil {
+					s = &series{battery: b.Name, question: q.ID}
+					index[key] = s
+					order = append(order, s)
+				}
+				s.points = append(s.points, point{row.At, q.Labeled, q.Positives, q.Verdict})
+			}
+		}
+	}
+	ew := &errWriter{w: w}
+	if len(order) == 0 {
+		ew.printf("no refresh history for %s\n", historyFilterText(battery, question))
+		return ew.err
+	}
+	for _, s := range order {
+		ew.printf("%s %s\n", s.battery, s.question)
+		ew.printf("  %-16s  %7s  %9s  %-9s  %7s\n", "date", "labeled", "positives", "verdict", "change")
+		for i, p := range s.points {
+			change := "-"
+			if i > 0 {
+				change = fmt.Sprintf("%+d", p.labeled-s.points[i-1].labeled)
+			}
+			ew.printf("  %-16s  %7d  %9d  %-9s  %7s\n", p.at.Local().Format("2006-01-02 15:04"), p.labeled, p.positives, p.verdict, change)
+		}
+		if n := trailingSameLabeled(len(s.points), func(i int) int { return s.points[i].labeled }); n >= noGrowthRuns {
+			ew.printf("no growth in %d refreshes\n", n)
+		}
+		ew.printf("\n")
+	}
+	return ew.err
+}
+
+// trailingSameLabeled counts the rows at the end of a series that share the
+// last row's labeled count.
+func trailingSameLabeled(n int, labeled func(i int) int) int {
+	if n == 0 {
+		return 0
+	}
+	run := 1
+	for i := n - 1; i > 0 && labeled(i) == labeled(i-1); i-- {
+		run++
+	}
+	return run
+}
+
+// historyFilterText names the filter a history view was asked for.
+func historyFilterText(battery, question string) string {
+	switch {
+	case battery != "" && question != "":
+		return fmt.Sprintf("battery %s question %s", battery, question)
+	case battery != "":
+		return "battery " + battery
+	case question != "":
+		return "question " + question
+	default:
+		return "any battery or question"
+	}
 }
