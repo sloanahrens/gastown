@@ -29,6 +29,24 @@ repository, copy its `town-state/` tree over the claim's town root, then copy
 the Secrets in from the operator's own copy. The restore is done when
 `gt config validate` passes against the claim.
 
+## Mac crew and bird clones
+
+A crew or bird clone on the Mac is a plain git clone, not `gt crew add`. The
+pod claim is the only town copy, so the Mac keeps no town state the pod could
+lack. `gt crew add` runs in the pod through the wrapper, so the plain clone is the
+Mac form.
+
+```bash
+git clone http://forgejo:3000/sloan/<repo>.git ~/gt/<rig>/crew/<name>
+git -C ~/gt/<rig>/crew/<name> config user.name <name>
+git -C ~/gt/<rig>/crew/<name> config user.email <name>@gastown.local
+```
+
+`<repo>` is the rig's Forgejo repository and `<name>` is the agent. A bird clone
+takes the same commands at the path its rig gives it. To list each town file the
+claim lacks, run `gt doctor --check mac-town-state --pod-town <listing>`;
+`gt doctor --help` gives the listing's format.
+
 ## L1: the scratch town
 
 L1 proves four things, and only these four are the result:
