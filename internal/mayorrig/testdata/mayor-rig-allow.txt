@@ -16,6 +16,7 @@ internal/beads/beads_redirect.go	4	pending-retirement	beads redirect: writes and
 internal/beads/sling_context_scan.go	1	pending-retirement	sling context scan: looks for the mayor/rig checkout under a rig directory
 internal/cmd/crew_fresh.go	1	pending-retirement	gt crew fresh: help text saying where the fetch runs, in mayor/rig or a polecat worktree
 internal/cmd/daemon_image.go	2	pending-retirement	gt daemon image: refuses a canonical mayor/rig clone as a source, in the flag help and the error text
+internal/cmd/directive.go	1	pending-retirement	gt directive help: the legacy fallback paragraph names the old gastown/mayor/rig/directives layer (landed by gt-3lvcjz.11)
 internal/cmd/doctor.go	1	pending-retirement	gt doctor: the check list text that names the mayor-clone-exists check's mayor/rig clone
 internal/cmd/gitinit.go	1	pending-retirement	gt init: the .gitignore template entry for mayor/rig
 internal/cmd/hooks_install.go	1	pending-retirement	gt hooks install: skips the constants.DirMayor directory name when it walks the rig directories
@@ -28,7 +29,7 @@ internal/cmd/rig_dock.go	1	pending-retirement	gt rig dock: the mayor/rig checkou
 internal/cmd/rig_helpers.go	1	pending-retirement	rig helpers: the mayor/rig beads path the rig commands open
 internal/cmd/sling_helpers.go	1	pending-retirement	gt sling: the mayor/rig path used as a rig's work directory
 internal/config/bd_metadata.go	1	pending-retirement	bd metadata: the beads directory list that names rig/mayor/rig/.beads
-internal/config/directives.go	4	pending-retirement	directives loader: reads the central and per-rig directives under mayor/rig
+internal/config/directives.go	3	pending-retirement	directives loader: reads the central and per-rig directives under mayor/rig
 internal/config/loader.go	1	pending-retirement	config loader: the daemon patrol config path under constants.DirMayor
 internal/constants/constants.go	12	pending-retirement	constants: the DirMayor and DirRig definitions and the RigMayorPath and RigBeadsPath helpers built from them
 internal/crew/manager.go	1	pending-retirement	crew manager: the rig's mayor/rig path as the crew's git base
