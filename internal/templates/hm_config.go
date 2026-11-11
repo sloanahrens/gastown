@@ -36,15 +36,34 @@ const hmContainerHost = "host.docker.internal"
 // hmConfigEnv is the variable hm reads its config file's path from.
 const hmConfigEnv = "HM_CONFIG"
 
+// The embedder and reranker blocks hm dials, as hm reads them at the pinned
+// commit 7f2647bd (internal/config/config.go): embed.url (Provider.URL, :19 and
+// :91), rerank.url (:92) and rerank.rerank_fallback.url (:27). The embedder and
+// the local reranker default to a loopback address on the Mac, so a block that
+// names no URL for them is written with that default rewritten, never left for
+// the container to dial. A hosted reranker has no loopback default to write.
+const (
+	hmEmbedField        = "embed"
+	hmRerankField       = "rerank"
+	hmRerankFallbackKey = "rerank_fallback"
+	hmDefaultEmbedURL   = "http://localhost:11434" // config.go:128, the Ollama embedder
+	hmDefaultRerankURL  = "http://localhost:8012"  // config.go:41, the llama-server reranker
+	hmJevLlamacpp       = "jev+llamacpp"           // config.go:36, the composite reranker
+	hmLocalRerankerName = "llamacpp"               // config.go:40, the local reranker's provider
+)
+
 // hmConfigFileMode is the mode the derived hm config is written with: its
 // database URL holds the database password, so its owner alone reads it.
 const hmConfigFileMode fs.FileMode = 0o600
 
 // RenderHMConfig derives the live container's hm config from the Mac's: the
 // database URL's loopback host becomes hmContainerHost with its port, user and
-// database kept, and every other field's value is copied unchanged. The result
-// holds the database password, so the command writes it to a file and never
-// prints it.
+// database kept, the embedder's and the reranker's loopback URLs become it too,
+// and every other field's value is copied unchanged. Where the Mac's file names
+// no URL for the embedder or the local reranker, hm would dial its loopback
+// default, so the derived file names that default with the host rewritten. The
+// result holds the database password, so the command writes it to a file and
+// never prints it.
 func RenderHMConfig(host []byte) ([]byte, error) {
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(host, &doc); err != nil {
@@ -61,6 +80,12 @@ func RenderHMConfig(host []byte) ([]byte, error) {
 	rewritten, err := containerHMURL(databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("hm config: %s %s; the Mac's hm config is left as it is", hmDatabaseField, err)
+	}
+	if doc[hmEmbedField], err = rewriteHMEmbed(doc[hmEmbedField]); err != nil {
+		return nil, err
+	}
+	if doc[hmRerankField], err = rewriteHMRerank(doc[hmRerankField]); err != nil {
+		return nil, err
 	}
 	names := make([]string, 0, len(doc))
 	for name := range doc {
@@ -343,6 +368,187 @@ func containerHMKeyValue(s string) (string, error) {
 	}
 	b.WriteString(s[last:])
 	return b.String(), nil
+}
+
+// hmBlock decodes one config block to its fields. An absent or null block is an
+// empty one, which hm reads as its defaults.
+func hmBlock(raw json.RawMessage, what string) (map[string]json.RawMessage, error) {
+	block := map[string]json.RawMessage{}
+	if raw == nil || string(raw) == "null" {
+		return block, nil
+	}
+	if err := json.Unmarshal(raw, &block); err != nil {
+		return nil, fmt.Errorf("hm config: %s is not an object, so its URL cannot be rewritten", what)
+	}
+	return block, nil
+}
+
+// jsonString is s as a JSON string. It cannot fail: a quote, a backslash and a
+// control character are escaped, and every other character is written as it is,
+// so the render has no encoder error to refuse (as RenderHMConfig writes its
+// fields by hand).
+func jsonString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"':
+			b.WriteString(`\"`)
+		case r == '\\':
+			b.WriteString(`\\`)
+		case r < 0x20:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// hmBlockJSON writes a config block back as a JSON object: its fields sorted,
+// each value the bytes the Mac's file carried. A field name holding a control
+// character is refused, since a JSON string cannot carry it.
+func hmBlockJSON(block map[string]json.RawMessage) (json.RawMessage, error) {
+	names := make([]string, 0, len(block))
+	for name := range block {
+		if strings.ContainsFunc(name, hmControl) {
+			return nil, errors.New("hm config: a field name in a service block holds a control character, which a JSON string cannot carry")
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("{")
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString(jsonString(name))
+		b.WriteString(":")
+		b.Write(block[name])
+	}
+	b.WriteString("}")
+	return json.RawMessage(b.String()), nil
+}
+
+// containerHMServiceURL returns the address a container reaches a service URL
+// by: a loopback host becomes hmContainerHost with its port and path kept, and
+// any other host is kept. An empty URL is kept. A URL that does not parse is
+// refused; the error never quotes it.
+func containerHMServiceURL(raw string) (string, error) {
+	if raw == "" {
+		return raw, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "", errors.New("does not parse as a URL with a host")
+	}
+	if !hmLoopback(u.Hostname()) {
+		return raw, nil
+	}
+	if port := u.Port(); port != "" {
+		u.Host = net.JoinHostPort(hmContainerHost, port)
+	} else {
+		u.Host = hmContainerHost
+	}
+	return u.String(), nil
+}
+
+// rewriteHMURL rewrites block's url field to the container's address. A block
+// that names no url takes def, rewritten, when def is set; with no def it is left
+// without one, since hm then reads no URL from it.
+func rewriteHMURL(block map[string]json.RawMessage, what, def string) error {
+	current, named := def, false
+	if raw, ok := block["url"]; ok && string(raw) != "null" {
+		named = true
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return fmt.Errorf("hm config: %s url is not a string, so there is no URL to rewrite", what)
+		}
+	}
+	if !named && def == "" {
+		return nil
+	}
+	rewritten, err := containerHMServiceURL(current)
+	if err != nil {
+		return fmt.Errorf("hm config: %s url %s; the Mac's hm config is left as it is", what, err)
+	}
+	block["url"] = json.RawMessage(jsonString(rewritten))
+	return nil
+}
+
+// rewriteHMEmbed returns the embed block with its url in the container's address.
+// hm reads the embed block over its defaults, so a block that names no url gains
+// the default one, rewritten.
+func rewriteHMEmbed(raw json.RawMessage) (json.RawMessage, error) {
+	block, err := hmBlock(raw, hmEmbedField)
+	if err != nil {
+		return nil, err
+	}
+	if err := rewriteHMURL(block, hmEmbedField, hmDefaultEmbedURL); err != nil {
+		return nil, err
+	}
+	return hmBlockJSON(block)
+}
+
+// rewriteHMRerank returns the rerank block with its URLs in the container's
+// address, reading the block the way hm does (decodeRerank, config.go:208-235):
+// a block that names no provider, or jev+llamacpp, has the llamacpp reranker as
+// its fallback, and a llamacpp block is the local reranker itself. An absent
+// block is hm's default, jev+llamacpp. Only the local reranker's URL gains a
+// default; a hosted provider's URL is its own and is never given one here.
+func rewriteHMRerank(raw json.RawMessage) (json.RawMessage, error) {
+	block, err := hmBlock(raw, hmRerankField)
+	if err != nil {
+		return nil, err
+	}
+	var name string
+	if v, ok := block["provider"]; ok {
+		if err := json.Unmarshal(v, &name); err != nil {
+			return nil, errors.New("hm config: rerank.provider is not a string, so the reranker cannot be read")
+		}
+	}
+	_, hasFallback := block[hmRerankFallbackKey]
+	absent := raw == nil || string(raw) == "null"
+	switch {
+	case absent, name == hmJevLlamacpp, name == "" && hasFallback:
+		fb, err := hmBlock(block[hmRerankFallbackKey], "rerank.rerank_fallback")
+		if err != nil {
+			return nil, err
+		}
+		fbName := ""
+		if v, ok := fb["provider"]; ok {
+			if err := json.Unmarshal(v, &fbName); err != nil {
+				return nil, errors.New("hm config: rerank.rerank_fallback.provider is not a string, so the fallback cannot be read")
+			}
+		}
+		fbDefault := ""
+		if fbName == "" || fbName == hmLocalRerankerName {
+			fbDefault = hmDefaultRerankURL
+		}
+		if err := rewriteHMURL(fb, "rerank.rerank_fallback", fbDefault); err != nil {
+			return nil, err
+		}
+		enc, err := hmBlockJSON(fb)
+		if err != nil {
+			return nil, err
+		}
+		block[hmRerankFallbackKey] = enc
+		// The jev primary names its own URL, which is hosted; only a loopback one
+		// is rewritten, and none is added.
+		if err := rewriteHMURL(block, hmRerankField, ""); err != nil {
+			return nil, err
+		}
+	case name == "", name == hmLocalRerankerName:
+		if err := rewriteHMURL(block, hmRerankField, hmDefaultRerankURL); err != nil {
+			return nil, err
+		}
+	default:
+		if err := rewriteHMURL(block, hmRerankField, ""); err != nil {
+			return nil, err
+		}
+	}
+	return hmBlockJSON(block)
 }
 
 // hmConfigTemp is the temporary file WriteHMConfigFile writes through. *os.File

@@ -56,8 +56,8 @@ type composeRig struct {
 // database URL is loopback, as the live one's is.
 const hostHMConfig = `{
   "database_url": "postgres://hm:test-password@localhost:5433/hm?sslmode=disable",
-  "embed_url": "http://host.docker.internal:8080/embed",
-  "rerank_url": "http://host.docker.internal:8080/rerank"
+  "embed": {"provider": "ollama", "url": "http://localhost:11434"},
+  "rerank": {"provider": "llamacpp", "url": "http://localhost:8012"}
 }`
 
 // newComposeRig is a town that names both container fields and reaches its Dolt
@@ -1119,15 +1119,33 @@ func TestDaemonComposeWriteDerivesTheHMConfig(t *testing.T) {
 	if !slices.Equal(r.privateWrote, []string{path}) {
 		t.Fatalf("owner-only writes %v, want the hm config at %s", r.privateWrote, path)
 	}
-	var derived map[string]string
+	var derived struct {
+		DatabaseURL string `json:"database_url"`
+	}
 	if err := json.Unmarshal(r.disk[path], &derived); err != nil {
 		t.Fatalf("the derived hm config does not parse: %v", err)
 	}
-	if want := "postgres://hm:test-password@host.docker.internal:5433/hm?sslmode=disable"; derived["database_url"] != want {
-		t.Errorf("database_url = %q, want the loopback host rewritten: %q", derived["database_url"], want)
+	if want := "postgres://hm:test-password@host.docker.internal:5433/hm?sslmode=disable"; derived.DatabaseURL != want {
+		t.Errorf("database_url = %q, want the loopback host rewritten: %q", derived.DatabaseURL, want)
 	}
-	if want := "http://host.docker.internal:8080/embed"; derived["embed_url"] != want {
-		t.Errorf("embed_url = %q, want it copied unchanged: %q", derived["embed_url"], want)
+	// The embedder and the reranker are read from the blocks hm reads, so the
+	// container reaches them at the host, not at its own loopback.
+	var derivedBlocks struct {
+		Embed struct {
+			URL string `json:"url"`
+		} `json:"embed"`
+		Rerank struct {
+			URL string `json:"url"`
+		} `json:"rerank"`
+	}
+	if err := json.Unmarshal(r.disk[path], &derivedBlocks); err != nil {
+		t.Fatalf("the derived hm config's service blocks do not parse: %v", err)
+	}
+	if want := "http://host.docker.internal:11434"; derivedBlocks.Embed.URL != want {
+		t.Errorf("embed.url = %q, want the loopback host rewritten: %q", derivedBlocks.Embed.URL, want)
+	}
+	if want := "http://host.docker.internal:8012"; derivedBlocks.Rerank.URL != want {
+		t.Errorf("rerank.url = %q, want the loopback host rewritten: %q", derivedBlocks.Rerank.URL, want)
 	}
 	compose := string(r.disk[r.composePath()])
 	for _, want := range []string{

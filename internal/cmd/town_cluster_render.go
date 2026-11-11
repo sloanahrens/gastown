@@ -304,6 +304,13 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	if err != nil {
 		return err
 	}
+	hmConfigPath := filepath.Join(townRoot, filepath.FromSlash(k8sdaemon.HMConfigSource))
+	hmConfig := false
+	if !f.rehearsal {
+		if hmConfig, err = hmConfigConfigured(hmConfigPath, d.lstat); err != nil {
+			return err
+		}
+	}
 	namespace := f.namespace
 	if namespace == "" {
 		namespace = k8sdaemon.DefaultNamespace
@@ -313,6 +320,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		Rehearsal:               f.rehearsal,
 		Secrets:                 secrets.Files,
 		CloudCheckKey:           cloudCheckKey,
+		HMConfig:                hmConfig,
 		Image:                   pair.Daemon,
 		ProxyImage:              f.proxyImage,
 		PolecatImage:            f.polecatImage,
@@ -356,7 +364,7 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		objects = append(objects, applyObject{rank: applyRank["Pod"], kind: "Pod", name: k8sdaemon.HelperName, body: body.Bytes()})
 	}
 	sort.SliceStable(objects, func(i, j int) bool { return objects[i].rank < objects[j].rank })
-	lines, err := secretCreateLines(m, namespace, f.configDir, f.openShellConfigDir)
+	lines, err := secretCreateLines(m, namespace, f.configDir, f.openShellConfigDir, townRoot)
 	if err != nil {
 		return err
 	}
@@ -375,6 +383,9 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		fmt.Fprintf(d.out, "  %s\n", o.file)
 	}
 	fmt.Fprintf(d.out, "Values: commit %s, daemon image %s\n", pair.Commit, pair.Daemon)
+	if !f.rehearsal && !hmConfig {
+		fmt.Fprintf(d.out, "No derived hm config at %s, so the pod mounts none and hm falls back to its defaults, which name the pod's own loopback: run gt daemon compose write first.\n", hmConfigPath)
+	}
 	fmt.Fprintln(d.out, "Apply the namespace file first so it exists. Then create each Secret from its file, and apply the rest in the order listed:")
 	for _, l := range lines {
 		fmt.Fprintf(d.out, "  %s\n", l)
@@ -422,6 +433,22 @@ func cloudCheckKeyConfigured(configDir string, lstat func(string) (fs.FileInfo, 
 	return true, nil
 }
 
+// hmConfigConfigured reports whether the derived hm config exists under the town
+// root, the file the Secret gt-hm-config is created from. The pod reads its
+// database and its embedder and reranker from that file, so the render mounts it
+// and sets HM_CONFIG only when the file is there; without it hm reads its
+// defaults, which name the pod's own loopback. A path that cannot be read for
+// any other reason refuses the render, as cloudCheckKeyConfigured does (gt-7vrjuo).
+func hmConfigConfigured(path string, lstat func(string) (fs.FileInfo, error)) (bool, error) {
+	switch _, err := lstat(path); {
+	case errors.Is(err, fs.ErrNotExist):
+		return false, nil
+	case err != nil:
+		return false, fmt.Errorf("the derived hm config %s cannot be read, so the render cannot tell whether to mount it: %w", path, err)
+	}
+	return true, nil
+}
+
 // applyObjects splits a rendered stream into its documents, dropping the Secrets:
 // an applied placeholder would make the operator's `kubectl create secret` fail
 // with AlreadyExists, so the Secrets are created from the operator's files.
@@ -465,9 +492,10 @@ func applyObjects(stream []byte, marshal func(any) ([]byte, error)) ([]applyObje
 // secretCreateLines prints one `kubectl create secret generic` line for each
 // Secret the Deployment mounts, in the Deployment's volume order. A config
 // entry's source is its file in configDir; the openshell tree's keys are each
-// file under openShellDir, named by the volume's items. A mounted Secret the
-// render did not write is refused, since its line could not be printed.
-func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir string) ([]string, error) {
+// file under openShellDir, named by the volume's items. The hm config's source
+// is the derived file under townRoot. A mounted Secret the render did not write
+// is refused, since its line could not be printed.
+func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir, townRoot string) ([]string, error) {
 	secrets := make(map[string]k8sdaemon.Secret, len(m.Secrets))
 	for _, s := range m.Secrets {
 		secrets[s.Metadata.Name] = s
@@ -498,6 +526,10 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 			// The Secret's data key is the file name the pod mounts, not the
 			// operator's config-directory file name it is created from.
 			froms = append(froms, fromFileArg(k8sdaemon.CloudCheckKeyKey, filepath.Join(configDir, source)))
+		} else if source == k8sdaemon.HMConfigSource {
+			// The Secret's data key is the file name the pod mounts; the source is
+			// the derived file the compose write leaves under the town root.
+			froms = append(froms, fromFileArg(k8sdaemon.HMConfigKey, filepath.Join(townRoot, filepath.FromSlash(source))))
 		} else {
 			froms = append(froms, fromFileArg(source, filepath.Join(configDir, source)))
 		}

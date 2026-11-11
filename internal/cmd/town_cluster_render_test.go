@@ -15,6 +15,7 @@ import (
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // clusterRenderSecretsManifest is the secrets manifest the render reads from the
@@ -396,6 +397,124 @@ func TestTownClusterRenderMountsTheCloudCheckKeyOnlyWhenPresent(t *testing.T) {
 		requireErrorNames(t, err, k8sdaemon.CloudCheckKeyFile, "cannot be read")
 		if got := outState(f.out); got != "absent" {
 			t.Errorf("the refused render left --out %s, want it untouched", got)
+		}
+	})
+}
+
+// TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived: hm reads its database
+// and its embedder and reranker from the derived hm config, so the render mounts
+// the gt-hm-config Secret, sets HM_CONFIG to it, and prints the create line that
+// fills the Secret from the derived file under the town root, only when that file
+// exists and the render is live. The manifest never carries its content
+// (gt-7vrjuo).
+func TestTownClusterRenderMountsTheHMConfigOnlyWhenDerived(t *testing.T) {
+	t.Parallel()
+	derivedPath := func(town string) string {
+		return filepath.Join(town, filepath.FromSlash(templates.ContainerHMConfigRP))
+	}
+	render := func(t *testing.T, derived, rehearsal bool) (body, town, out string, lines []string) {
+		t.Helper()
+		f := clusterRenderFixture(t)
+		town = t.TempDir()
+		if derived {
+			if err := os.MkdirAll(filepath.Dir(derivedPath(town)), 0o755); err != nil {
+				t.Fatalf("making the derived config directory: %v", err)
+			}
+			if err := os.WriteFile(derivedPath(town), []byte(`{"database_url": "postgres://hm:x@host.docker.internal:5433/hm"}`), 0o600); err != nil {
+				t.Fatalf("writing the derived config: %v", err)
+			}
+		}
+		if rehearsal {
+			f.rehearsal = true
+			f.forgeHost = ""
+			f.confirmStopped = false
+			f.namespace = "gt-rehearsal"
+		}
+		var buf bytes.Buffer
+		deps := clusterRenderTestDeps(&buf)
+		deps.findTown = func() (string, error) { return town, nil }
+		if err := runClusterRender(deps, f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		return deploymentBody(t, f.out), town, buf.String(), createLines(buf.String())
+	}
+
+	t.Run("derived", func(t *testing.T) {
+		t.Parallel()
+		body, town, out, lines := render(t, true, false)
+		for _, want := range []string{
+			"secretName: " + k8sdaemon.HMConfigSecretName,
+			"mountPath: " + k8sdaemon.HMConfigPath,
+			"subPath: " + k8sdaemon.HMConfigKey,
+			"value: " + k8sdaemon.HMConfigPath,
+		} {
+			if !strings.Contains(body, want) {
+				t.Errorf("the Deployment does not carry %q:\n%s", want, body)
+			}
+		}
+		want := "kubectl -n gt create secret generic " + k8sdaemon.HMConfigSecretName +
+			" --from-file=" + k8sdaemon.HMConfigKey + "=" + shellQuote(derivedPath(town))
+		if !slices.Contains(lines, want) {
+			t.Errorf("create lines do not carry %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+		if strings.Contains(out, "No derived hm config") {
+			t.Errorf("the render reports no derived hm config though one exists:\n%s", out)
+		}
+	})
+
+	t.Run("absent", func(t *testing.T) {
+		t.Parallel()
+		body, town, out, lines := render(t, false, false)
+		if strings.Contains(body, k8sdaemon.HMConfigSecretName) || strings.Contains(body, "HM_CONFIG") {
+			t.Errorf("the Deployment names the hm config with no derived file at %s:\n%s", derivedPath(town), body)
+		}
+		for _, line := range lines {
+			if strings.Contains(line, k8sdaemon.HMConfigSecretName) {
+				t.Errorf("a create line names %s with no derived file: %s", k8sdaemon.HMConfigSecretName, line)
+			}
+		}
+		if !strings.Contains(out, "No derived hm config at "+derivedPath(town)) {
+			t.Errorf("the render does not say the derived config is missing:\n%s", out)
+		}
+	})
+
+	t.Run("a rehearsal mounts none", func(t *testing.T) {
+		t.Parallel()
+		body, _, _, lines := render(t, true, true)
+		if strings.Contains(body, k8sdaemon.HMConfigSecretName) || strings.Contains(body, "HM_CONFIG") {
+			t.Errorf("the rehearsal names the hm config:\n%s", body)
+		}
+		for _, line := range lines {
+			if strings.Contains(line, k8sdaemon.HMConfigSecretName) {
+				t.Errorf("the rehearsal prints a create line for %s: %s", k8sdaemon.HMConfigSecretName, line)
+			}
+		}
+	})
+
+	t.Run("an unreadable path refuses before a write", func(t *testing.T) {
+		t.Parallel()
+		f := clusterRenderFixture(t)
+		town := t.TempDir()
+		var buf bytes.Buffer
+		deps := clusterRenderTestDeps(&buf)
+		deps.findTown = func() (string, error) { return town, nil }
+		deps.lstat = func(path string) (fs.FileInfo, error) {
+			if strings.HasSuffix(path, "hm-config.json") {
+				return nil, fs.ErrPermission
+			}
+			return os.Lstat(path)
+		}
+		err := runClusterRender(deps, f)
+		requireErrorNames(t, err, "derived hm config", "cannot be read")
+		if got := outState(f.out); got != "absent" {
+			t.Errorf("the refused render left --out %s, want it untouched", got)
+		}
+	})
+
+	t.Run("the source path is the one compose write derives", func(t *testing.T) {
+		t.Parallel()
+		if k8sdaemon.HMConfigSource != templates.ContainerHMConfigRP {
+			t.Errorf("HMConfigSource = %q, want the compose write's %q", k8sdaemon.HMConfigSource, templates.ContainerHMConfigRP)
 		}
 	})
 }
@@ -811,7 +930,7 @@ func TestSecretCreateLinesRefusesAVolumeItCannotName(t *testing.T) {
 	}
 	t.Run("no Secret was written for the volume", func(t *testing.T) {
 		t.Parallel()
-		_, err := secretCreateLines(mounts("daemon-x", nil), "gt", "/cfg", "/ossl")
+		_, err := secretCreateLines(mounts("daemon-x", nil), "gt", "/cfg", "/ossl", "/town")
 		if err == nil || !strings.Contains(err.Error(), "did not write") {
 			t.Fatalf("secretCreateLines = %v, want a refusal naming the unwritten Secret", err)
 		}
@@ -823,7 +942,7 @@ func TestSecretCreateLinesRefusesAVolumeItCannotName(t *testing.T) {
 			Name:        "daemon-openshell",
 			Annotations: map[string]string{k8sdaemon.SourceFileAnnotation: "openshell"},
 		}}}
-		_, err := secretCreateLines(m, "gt", "/cfg", "/ossl")
+		_, err := secretCreateLines(m, "gt", "/cfg", "/ossl", "/town")
 		if err == nil || !strings.Contains(err.Error(), "names no files") {
 			t.Fatalf("secretCreateLines = %v, want a refusal naming the empty openshell volume", err)
 		}
@@ -832,7 +951,7 @@ func TestSecretCreateLinesRefusesAVolumeItCannotName(t *testing.T) {
 		t.Parallel()
 		m := mounts("daemon-x", nil)
 		m.Secrets = []k8sdaemon.Secret{{Metadata: k8sdaemon.ObjectMeta{Name: "daemon-x"}}}
-		lines, err := secretCreateLines(m, "gt", "/cfg", "/ossl")
+		lines, err := secretCreateLines(m, "gt", "/cfg", "/ossl", "/town")
 		if err == nil || !strings.Contains(err.Error(), "no source file annotation") {
 			t.Fatalf("secretCreateLines = %q, %v; want a refusal naming the missing source annotation", lines, err)
 		}
@@ -855,7 +974,7 @@ func TestSecretCreateLinesQuotesEachWord(t *testing.T) {
 		Name:        "daemon x",
 		Annotations: map[string]string{k8sdaemon.SourceFileAnnotation: "my config.toml"},
 	}}}
-	lines, err := secretCreateLines(m, "gt ns", "/cfg", "/ossl")
+	lines, err := secretCreateLines(m, "gt ns", "/cfg", "/ossl", "/town")
 	if err != nil {
 		t.Fatalf("secretCreateLines: %v", err)
 	}
