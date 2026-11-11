@@ -199,9 +199,9 @@ func deleteArgs(name string) []string {
 }
 
 // listProviders returns the name of every provider the gateway lists, in the
-// order it prints them. --output json is what internal/doctor/openshell_gateway_check.go
-// already reads, so a listing this package cannot decode is an error rather than
-// an empty list that reads as a clean gateway.
+// order it prints them. --output json is the format this function decodes, so a
+// listing it cannot decode is an error rather than an empty list that reads as a
+// clean gateway.
 func listProviders(ctx context.Context, r Runner) ([]string, error) {
 	out, err := r.Run(ctx, []string{"provider", "list", "--output", "json"}, nil)
 	if err != nil {

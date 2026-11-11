@@ -206,7 +206,7 @@ entries:
   - path: .runtime/openshell
     owner: daemon
     private: true
-    why: the OpenShell gateway's log directory; the gt-installer gateway step that made it is deleted (gt-a2uug4.18); the gateway holds provider credentials (internal/doctor/openshell_gateway_check.go lists them), so the directory is private
+    why: the OpenShell gateway's log directory; the gt-installer gateway step that made it is deleted (gt-a2uug4.18); the gateway holds the provider credentials internal/seatprovider/seatprovider.go registers, so the directory is private
   - path: .runtime/patrol_scan
     owner: daemon
     why: the witness patrol's ledger internal/patrolscan/ledger.go writes and the daemon's patrol_scan step reads
