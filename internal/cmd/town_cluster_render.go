@@ -165,7 +165,7 @@ func init() {
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.dashboardClaudeDir, "dashboard-claude-dir", "",
 		"the Mac's ~/.claude directory, an absolute path, mounted read-only in the dashboard at /root/.claude; it needs --dashboard")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonClaudeDir, "daemon-claude-dir", "",
-		"the Mac's ~/.claude directory, an absolute path, mounted read-only in the daemon at /root/.claude, where the usage scan reads the transcripts")
+		"the Mac's ~/.claude directory, an absolute path, whose projects directory is mounted read-only in the daemon at /root/.claude/projects, where the usage scan reads the transcripts")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)

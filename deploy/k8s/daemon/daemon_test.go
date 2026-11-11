@@ -348,14 +348,15 @@ func TestDashboardMountsTheClaimReadOnly(t *testing.T) {
 	if host == nil || host.Path != v.DashboardClaudeDir || host.Type != "Directory" {
 		t.Fatalf("the claude host path = %+v, want %s of type Directory, never DirectoryOrCreate", host, v.DashboardClaudeDir)
 	}
-	if m := volumeMountAt(ctr.VolumeMounts, DashboardClaudePath); m == nil || !m.ReadOnly {
-		t.Errorf("the claude mount = %+v, want %s read-only", m, DashboardClaudePath)
+	if m := volumeMountAt(ctr.VolumeMounts, ClaudeHomePath); m == nil || !m.ReadOnly {
+		t.Errorf("the claude mount = %+v, want %s read-only", m, ClaudeHomePath)
 	}
 }
 
 // TestDaemonClaudeMountIsReadOnlyDirectory holds the daemon's claude directory to
-// the golden that shows it: one host path, the Mac's ~/.claude as a Directory, mounted
-// read-only at /root/.claude in the daemon container, and no other host path.
+// the golden that shows it: one host path, the Mac's ~/.claude as a Directory, and
+// in the daemon container only its projects subtree, mounted read-only at
+// /root/.claude/projects. No other host path exists.
 func TestDaemonClaudeMountIsReadOnlyDirectory(t *testing.T) {
 	t.Parallel()
 	v := goldenValues(t)
@@ -375,8 +376,12 @@ func TestDaemonClaudeMountIsReadOnlyDirectory(t *testing.T) {
 	if hostPaths != 1 || host.Name != DaemonClaudeVolume || host.HostPath.Path != v.DaemonClaudeDir || host.HostPath.Type != "Directory" {
 		t.Fatalf("the daemon pod has %d host paths, want the claude directory alone: %s of type Directory", hostPaths, v.DaemonClaudeDir)
 	}
-	if m := volumeMountAt(pod.Containers[0].VolumeMounts, DaemonClaudePath); m == nil || m.Name != DaemonClaudeVolume || !m.ReadOnly {
-		t.Errorf("the claude mount = %+v, want %s from %s read-only", m, DaemonClaudePath, DaemonClaudeVolume)
+	m := volumeMountAt(pod.Containers[0].VolumeMounts, DaemonClaudeProjectsPath)
+	if m == nil || m.Name != DaemonClaudeVolume || m.SubPath != DaemonClaudeProjectsSub || !m.ReadOnly {
+		t.Errorf("the claude mount = %+v, want %s from %s subPath %s read-only", m, DaemonClaudeProjectsPath, DaemonClaudeVolume, DaemonClaudeProjectsSub)
+	}
+	if whole := volumeMountAt(pod.Containers[0].VolumeMounts, ClaudeHomePath); whole != nil {
+		t.Errorf("the daemon mounts %s as a whole (%+v), want only its projects subtree", ClaudeHomePath, whole)
 	}
 }
 
