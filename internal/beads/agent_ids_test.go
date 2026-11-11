@@ -6,6 +6,7 @@ import (
 
 // TestAgentBeadIDWithPrefix tests agent bead ID generation, including dedup when prefix == rig.
 func TestAgentBeadIDWithPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		prefix string
@@ -41,6 +42,7 @@ func TestAgentBeadIDWithPrefix(t *testing.T) {
 
 // TestExtractAgentPrefix tests prefix extraction from agent IDs.
 func TestExtractAgentPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		id         string

@@ -124,6 +124,7 @@ func TestRunTestContainerInitLeasesItsDatabaseToItsDir(t *testing.T) {
 }
 
 func TestServerPortAndDatabaseArgs(t *testing.T) {
+	t.Parallel()
 	if p := serverPortArg([]string{"init", "--server-port", "4242"}); p != 4242 {
 		t.Errorf("serverPortArg = %d, want 4242", p)
 	}

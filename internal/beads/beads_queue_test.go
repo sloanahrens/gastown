@@ -6,6 +6,7 @@ import (
 )
 
 func TestMatchClaimPattern(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		pattern  string
@@ -129,6 +130,7 @@ func TestMatchClaimPattern(t *testing.T) {
 // The prefix and suffix meet inside the identity, so there is no wildcard
 // segment for the pattern to consume (gt-p252t).
 func TestMatchClaimPattern_OverlappingPrefixSuffix(t *testing.T) {
+	t.Parallel()
 	if MatchClaimPattern("gastown/*/x", "gastown/x") {
 		t.Error(`MatchClaimPattern("gastown/*/x", "gastown/x") = true, want false`)
 	}
@@ -138,6 +140,7 @@ func TestMatchClaimPattern_OverlappingPrefixSuffix(t *testing.T) {
 // middle is empty. A glob star consumes nothing there; the zero-length slice
 // must not panic (gt-p252t).
 func TestMatchClaimPattern_EmptyMiddle(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		pattern  string
@@ -182,6 +185,7 @@ func TestMatchClaimPattern_EmptyMiddle(t *testing.T) {
 }
 
 func TestFormatQueueDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		title  string
@@ -258,6 +262,7 @@ func TestFormatQueueDescription(t *testing.T) {
 }
 
 func TestParseQueueFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -324,6 +329,7 @@ processing_count: 2`,
 }
 
 func TestQueueBeadID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		queueName   string

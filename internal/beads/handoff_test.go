@@ -7,6 +7,7 @@ import (
 )
 
 func TestHandoffBeadTitle(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		role string
 		want string
@@ -29,6 +30,7 @@ func TestHandoffBeadTitle(t *testing.T) {
 }
 
 func TestStatusConstants(t *testing.T) {
+	t.Parallel()
 	// Verify the status constants haven't changed (these are used in protocol)
 	if StatusPinned != "pinned" {
 		t.Errorf("StatusPinned = %q, want %q", StatusPinned, "pinned")
@@ -39,6 +41,7 @@ func TestStatusConstants(t *testing.T) {
 }
 
 func TestCurrentTimestamp(t *testing.T) {
+	t.Parallel()
 	ts := currentTimestamp()
 	if ts == "" {
 		t.Fatal("currentTimestamp() returned empty string")
@@ -61,6 +64,7 @@ func TestCurrentTimestamp(t *testing.T) {
 }
 
 func TestClearMailResultZeroValues(t *testing.T) {
+	t.Parallel()
 	// Verify zero-value struct is safe to use
 	result := &ClearMailResult{}
 	if result.Closed != 0 || result.Cleared != 0 {

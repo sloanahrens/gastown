@@ -8,6 +8,7 @@ import (
 )
 
 func TestEnsureConfigYAMLIfMissing_DoesNotOverwriteExisting(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	original := "prefix: keep\nissue-prefix: keep\n"
@@ -29,6 +30,7 @@ func TestEnsureConfigYAMLIfMissing_DoesNotOverwriteExisting(t *testing.T) {
 }
 
 func TestEnsureConfigYAMLFromMetadataIfMissing_UsesMetadataPrefix(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	metadata := `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq","issue_prefix":"foo"}`
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
@@ -56,6 +58,7 @@ func TestEnsureConfigYAMLFromMetadataIfMissing_UsesMetadataPrefix(t *testing.T) 
 }
 
 func TestConfigDefaultsFromMetadata_FallsBackToDoltDatabase(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	metadata := `{"backend":"dolt","dolt_mode":"server","dolt_database":"hq-custom"}`
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
@@ -69,6 +72,7 @@ func TestConfigDefaultsFromMetadata_FallsBackToDoltDatabase(t *testing.T) {
 }
 
 func TestConfigDefaultsFromMetadata_StripsLegacyBeadsPrefixFromDoltDatabase(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	metadata := `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_hq"}`
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
@@ -82,6 +86,7 @@ func TestConfigDefaultsFromMetadata_StripsLegacyBeadsPrefixFromDoltDatabase(t *t
 }
 
 func TestEnsureConfigYAMLFromMetadataIfMissing_StripsLegacyBeadsPrefixFromDoltDatabase(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	metadata := `{"backend":"dolt","dolt_mode":"server","dolt_database":"beads_hq"}`
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
@@ -106,6 +111,7 @@ func TestEnsureConfigYAMLFromMetadataIfMissing_StripsLegacyBeadsPrefixFromDoltDa
 }
 
 func TestEnsureConfigYAML_DisablesAutoExport(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	original := "prefix: old\nissue-prefix: old\ndolt.idle-timeout: \"30\"\nexport.auto: true\nsync.mode: dolt-native\n"
@@ -136,6 +142,7 @@ func TestEnsureConfigYAML_DisablesAutoExport(t *testing.T) {
 }
 
 func TestEnsureConfigYAMLValue(t *testing.T) {
+	t.Parallel()
 	beadsDir := t.TempDir()
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte("prefix: hq\ntypes.custom: old\n"), 0644); err != nil {
@@ -169,6 +176,7 @@ func TestEnsureConfigYAMLValue(t *testing.T) {
 }
 
 func TestConfigYAMLValue(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		content string
@@ -195,6 +203,7 @@ func TestConfigYAMLValue(t *testing.T) {
 }
 
 func TestConfigYAMLDisablesAutoExport(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		content string

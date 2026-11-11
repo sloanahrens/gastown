@@ -133,6 +133,7 @@ func TestCensusSnapshotSortsAndResets(t *testing.T) {
 // TestCensusVerb checks the verb is the first argument that is neither a flag
 // nor a flag's value, and that two-word verbs keep their second word.
 func TestCensusVerb(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
@@ -164,6 +165,7 @@ func TestCensusVerb(t *testing.T) {
 // TestCensusCallerFromFrames checks the caller walk skips this package, trims
 // the module prefix, and strips closure suffixes.
 func TestCensusCallerFromFrames(t *testing.T) {
+	t.Parallel()
 	seam := func(names ...string) []string {
 		out := make([]string, 0, len(names))
 		for _, name := range names {
@@ -231,6 +233,7 @@ func TestCensusCallerFromFrames(t *testing.T) {
 // landing worker's retry wrapper to name the function that decided to read,
 // and keeps the wrapper's name when no frame above it can name one (gt-krmal).
 func TestCensusCallerSkipsWrapperFrames(t *testing.T) {
+	t.Parallel()
 	seam := censusPkgPath + ".(*Beads).run"
 	frame := func(name string) string { return censusModulePath + "/internal/" + name }
 	tests := []struct {

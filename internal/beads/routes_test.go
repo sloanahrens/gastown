@@ -10,6 +10,7 @@ import (
 )
 
 func TestGetPrefixForRig(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory with routes.jsonl
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -46,6 +47,7 @@ func TestGetPrefixForRig(t *testing.T) {
 }
 
 func TestGetPrefixForRig_NoRoutesFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// No routes.jsonl file
 
@@ -56,6 +58,7 @@ func TestGetPrefixForRig_NoRoutesFile(t *testing.T) {
 }
 
 func TestGetPrefixForRig_RigsConfigFallback(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 
 	// Write rigs.json with a non-gt prefix
@@ -85,6 +88,7 @@ func TestGetPrefixForRig_RigsConfigFallback(t *testing.T) {
 // GetPrefixForRig keeps its "gt" default when rigs.json is unreadable: its
 // callers build ids from the result without an empty check (gt-71dgi).
 func TestGetPrefixForRig_CorruptRigsJSONKeepsDefault(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	rigsPath := filepath.Join(tmpDir, "mayor", "rigs.json")
 	if err := os.MkdirAll(filepath.Dir(rigsPath), 0755); err != nil {
@@ -100,6 +104,7 @@ func TestGetPrefixForRig_CorruptRigsJSONKeepsDefault(t *testing.T) {
 }
 
 func TestExtractPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		beadID   string
 		expected string
@@ -126,6 +131,7 @@ func TestExtractPrefix(t *testing.T) {
 }
 
 func TestGetRigPathForPrefix(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory with routes.jsonl
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -163,6 +169,7 @@ func TestGetRigPathForPrefix(t *testing.T) {
 }
 
 func TestGetRigPathForPrefix_NoRoutesFile(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// No routes.jsonl file
 
@@ -173,6 +180,7 @@ func TestGetRigPathForPrefix_NoRoutesFile(t *testing.T) {
 }
 
 func TestResolveHookDir(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory with routes.jsonl
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -237,6 +245,7 @@ func TestResolveHookDir(t *testing.T) {
 }
 
 func TestResolveBeadsDirForID(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -305,6 +314,7 @@ func TestResolveBeadsDirForID(t *testing.T) {
 }
 
 func TestResolveBeadsDirForID_NoRoutes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -318,6 +328,7 @@ func TestResolveBeadsDirForID_NoRoutes(t *testing.T) {
 }
 
 func TestResolveBeadsDirForID_UsesTownRoutesFromWorktreeBeadsDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	townBeadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(townBeadsDir, 0755); err != nil {
@@ -356,6 +367,7 @@ func TestResolveBeadsDirForID_UsesTownRoutesFromWorktreeBeadsDir(t *testing.T) {
 }
 
 func TestGetRigNameForPrefix(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -392,6 +404,7 @@ func TestGetRigNameForPrefix(t *testing.T) {
 }
 
 func TestGetRigDirForName(t *testing.T) {
+	t.Parallel()
 	// pathWithin resolves symlinks on the root but the rig dirs never exist,
 	// so a symlinked TempDir (macOS /var -> /private/var) would make every
 	// existing-root/nonexistent-path comparison fail. Canonicalize up front.
@@ -433,6 +446,7 @@ func TestGetRigDirForName(t *testing.T) {
 }
 
 func TestGetRigDirForName_TownLevelNotReturned(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -451,6 +465,7 @@ func TestGetRigDirForName_TownLevelNotReturned(t *testing.T) {
 }
 
 func TestResolveRepoAliasBeadsDir(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	townBeads := filepath.Join(townRoot, ".beads")
 	rigRoot := filepath.Join(townRoot, "gastown")
@@ -785,6 +800,7 @@ func TestParseRoutesSkipsMalformedLines(t *testing.T) {
 }
 
 func TestRewriteBDCreateRepoAlias(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	townBeads := filepath.Join(townRoot, ".beads")
 	canonicalBeads := filepath.Join(townRoot, "gastown", "mayor", "rig", ".beads")
@@ -858,6 +874,7 @@ func TestRewriteBDCreateRepoAlias(t *testing.T) {
 }
 
 func TestCheckPrefixAvailable(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -928,6 +945,7 @@ func TestCheckPrefixAvailable(t *testing.T) {
 }
 
 func TestCheckPrefixAvailable_NoRoutes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	// No .beads directory — all prefixes should be available
 	err := CheckPrefixAvailable(tmpDir, "gt-", "gastown")
@@ -941,6 +959,7 @@ func TestCheckPrefixAvailable_NoRoutes(t *testing.T) {
 // prefix naming a registered rig's database has to be refused even when no
 // route carries it.
 func TestCheckPrefixAvailableRejectsExistingRigName(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -994,6 +1013,7 @@ func TestCheckPrefixAvailableRejectsExistingRigName(t *testing.T) {
 }
 
 func TestAgentBeadIDsWithPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		fn       func() string
@@ -1022,6 +1042,7 @@ func TestAgentBeadIDsWithPrefix(t *testing.T) {
 
 // TestValidateRigPrefix verifies the post-creation prefix guard (gt-gpy).
 func TestValidateRigPrefix(t *testing.T) {
+	t.Parallel()
 	// Set up a town root with routes.jsonl.
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")

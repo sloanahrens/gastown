@@ -18,6 +18,7 @@ import (
 
 // TestNew verifies the constructor.
 func TestNew(t *testing.T) {
+	t.Parallel()
 	b := New("/some/path")
 	if b == nil {
 		t.Fatal("New returned nil")
@@ -29,6 +30,7 @@ func TestNew(t *testing.T) {
 
 // TestListOptions verifies ListOptions defaults.
 func TestListOptions(t *testing.T) {
+	t.Parallel()
 	opts := ListOptions{
 		Status:   "open",
 		Label:    "gt:task",
@@ -67,6 +69,7 @@ func TestListOptions(t *testing.T) {
 
 // TestListOptionsEphemeral verifies that Ephemeral flag is preserved.
 func TestListOptionsEphemeral(t *testing.T) {
+	t.Parallel()
 	opts := ListOptions{
 		Label:     "gt:merge-request",
 		Status:    "open",
@@ -343,6 +346,7 @@ func TestListOmitsPriorityArgumentWhenUnset(t *testing.T) {
 
 // TestCreateOptions verifies CreateOptions fields.
 func TestCreateOptions(t *testing.T) {
+	t.Parallel()
 	opts := CreateOptions{
 		Title:       "Test issue",
 		Labels:      []string{"gt:task"},
@@ -363,6 +367,7 @@ func TestCreateOptions(t *testing.T) {
 // set Rig on CreateOptions so the MR bead lands in the polecat's rig database,
 // not the town-level database where the source bead lives.
 func TestCreateOptionsRig(t *testing.T) {
+	t.Parallel()
 	opts := CreateOptions{
 		Title:     "Merge: hq-abc",
 		Labels:    []string{"gt:merge-request"},
@@ -381,6 +386,7 @@ func TestCreateOptionsRig(t *testing.T) {
 }
 
 func TestBuildPinnedBDEnvUsesSelectedConnectionMetadata(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -429,6 +435,7 @@ func TestBuildPinnedBDEnvUsesSelectedConnectionMetadata(t *testing.T) {
 }
 
 func TestBuildPinnedBDEnvPinsRigDatabaseInsideTown(t *testing.T) {
+	t.Parallel()
 	townDir := t.TempDir()
 	beadsDir := filepath.Join(townDir, "minime", ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -459,6 +466,7 @@ func TestBuildPinnedBDEnvPinsRigDatabaseInsideTown(t *testing.T) {
 }
 
 func TestBuildPinnedBDEnvFollowsRedirectBeforeMetadata(t *testing.T) {
+	t.Parallel()
 	rigRoot := t.TempDir()
 	rigBeadsDir := filepath.Join(rigRoot, ".beads")
 	canonicalBeadsDir := filepath.Join(rigRoot, "mayor", "rig", ".beads")
@@ -516,6 +524,7 @@ func TestBuildPinnedBDEnvFollowsRedirectBeforeMetadata(t *testing.T) {
 }
 
 func TestBuildBDEnvConnectionOverridesAndDoesNotRestoreDataDir(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -577,6 +586,7 @@ func TestBuildBDEnvConnectionOverridesAndDoesNotRestoreDataDir(t *testing.T) {
 }
 
 func TestBuildBDEnvDoesNotRestoreGTDoltDataDir(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -714,6 +724,7 @@ func TestBuildPinnedBDEnvStripsCaseVariantTargetEnvWhenKeysAreCaseInsensitive(t 
 // The town's endpoint beats both the inherited endpoint and metadata.json;
 // outside a town the inherited endpoint beats metadata.json (gt-y3pgh.3).
 func TestBuildPinnedBDEnvEndpointPrecedence(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatal(err)
@@ -763,6 +774,7 @@ func TestBuildPinnedBDEnvEndpointPrecedence(t *testing.T) {
 }
 
 func TestBuildRoutingBDEnvStripsDatabaseButKeepsSelectedConnection(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -790,6 +802,7 @@ func TestBuildRoutingBDEnvStripsDatabaseButKeepsSelectedConnection(t *testing.T)
 
 // GT_DOLT_* is never translated into bd's endpoint variables (gt-y3pgh.3).
 func TestBuildPinnedBDEnvIgnoresGTDoltEndpoint(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -819,6 +832,7 @@ func TestBuildPinnedBDEnvIgnoresGTDoltEndpoint(t *testing.T) {
 // that exists but does not load rather than falling back to config.yaml
 // (gt-8txy8).
 func TestResolvedDoltEndpointEnvTownConfig(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		town    string // mayor/town.json body; "" writes no file
@@ -856,6 +870,7 @@ func TestResolvedDoltEndpointEnvTownConfig(t *testing.T) {
 }
 
 func TestSuppressBDSideEffectsOverridesInherited(t *testing.T) {
+	t.Parallel()
 	env := SuppressBDSideEffects([]string{
 		"PATH=/usr/bin",
 		"BD_EXPORT_AUTO=true",
@@ -884,6 +899,7 @@ func TestSuppressBDSideEffectsOverridesInherited(t *testing.T) {
 }
 
 func TestBuildReadOnlyBDEnvForcesReadOnly(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -912,6 +928,7 @@ func TestBuildReadOnlyBDEnvForcesReadOnly(t *testing.T) {
 }
 
 func TestBuildMutationBDEnvForcesWritableCommit(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
 		t.Fatal(err)
@@ -996,6 +1013,7 @@ func TestDeleteBeadsUseSupportedBdDeleteFlags(t *testing.T) {
 }
 
 func TestArgsAreReadOnlyClassifiesKnownReadCommands(t *testing.T) {
+	t.Parallel()
 	cases := [][]string{
 		{"--version"},
 		{"--help"},
@@ -1029,6 +1047,7 @@ func TestArgsAreReadOnlyClassifiesKnownReadCommands(t *testing.T) {
 }
 
 func TestArgsAreReadOnlyFailsClosedForMutations(t *testing.T) {
+	t.Parallel()
 	cases := [][]string{
 		{"--db", "hq", "show", "gt-123"},
 		{"--directory", "/tmp", "list"},
@@ -1383,6 +1402,7 @@ exit 0
 }
 
 func TestConcreteWorkIssueRejectReason(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		issue *Issue
@@ -1422,6 +1442,7 @@ func TestConcreteWorkIssueRejectReason(t *testing.T) {
 // "not work a polecat can take": every type and label the dispatcher skips is
 // also refused by gt done and the landing policy.
 func TestConcreteWorkRejectCoversNonDispatchableLists(t *testing.T) {
+	t.Parallel()
 	// Each entry is also checked in uppercase and padded form: the dispatcher
 	// matches case-insensitively, so the reject check must too.
 	for _, typ := range constants.NonDispatchableBeadTypes {
@@ -1620,6 +1641,7 @@ printf '{}\n'
 }
 
 func TestCreateWithUnknownRigErrors(t *testing.T) {
+	t.Parallel()
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
 		t.Fatalf("mkdir mayor: %v", err)
@@ -1648,6 +1670,7 @@ func TestCreateWithUnknownRigErrors(t *testing.T) {
 
 // TestIsFlagLikeTitle verifies flag-like title detection (gt-e0kx5).
 func TestIsFlagLikeTitle(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		title string
 		want  bool
@@ -2069,6 +2092,7 @@ exit 0
 
 // TestUpdateOptions verifies UpdateOptions pointer fields.
 func TestUpdateOptions(t *testing.T) {
+	t.Parallel()
 	status := "in_progress"
 	priority := 1
 	opts := UpdateOptions{
@@ -2378,6 +2402,7 @@ exit 0
 
 // TestIsBeadsRepo tests repository detection.
 func TestIsBeadsRepo(t *testing.T) {
+	t.Parallel()
 	// Test with a non-beads directory
 	tmpDir, err := os.MkdirTemp("", "beads-test-*")
 	if err != nil {
@@ -2479,6 +2504,7 @@ func TestIntegration(t *testing.T) {
 
 // TestParseMRFields tests parsing MR fields from issue descriptions.
 func TestParseMRFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		issue      *Issue
@@ -2718,6 +2744,7 @@ conflict_task_id: null`,
 
 // TestFormatMRFields tests formatting MR fields to string.
 func TestFormatMRFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		fields *MRFields
@@ -2816,6 +2843,7 @@ pr_number: 4474`,
 
 // TestMRFieldsRoundTrip tests that parse/format round-trips correctly.
 func TestMRFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &MRFields{
 		Branch:      "polecat/Nux/gt-xyz",
 		Target:      "main",
@@ -2846,6 +2874,7 @@ func TestMRFieldsRoundTrip(t *testing.T) {
 // pre-verification stamp: PreVerifiedGates/Exit/Log must survive a
 // format/parse round trip alongside the existing PreVerified fields.
 func TestPreVerifiedGatesFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &MRFields{
 		Branch:           "polecat/flint/gt-3s52",
 		Target:           "main",
@@ -2878,6 +2907,7 @@ func TestPreVerifiedGatesFieldsRoundTrip(t *testing.T) {
 
 // TestParseMRFieldsFromDesignDoc tests the example from the design doc.
 func TestParseMRFieldsFromDesignDoc(t *testing.T) {
+	t.Parallel()
 	// Example from docs/merge-queue-design.md
 	description := `branch: polecat/Nux/gt-xyz
 target: main
@@ -2912,6 +2942,7 @@ rig: gastown`
 
 // TestParseAttachmentFields tests parsing attachment fields from issue descriptions.
 func TestParseAttachmentFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		issue      *Issue
@@ -3032,6 +3063,7 @@ attached_vars: ["version=1.2.3","channel=stable"]`,
 
 // TestFormatAttachmentFields tests formatting attachment fields to string.
 func TestFormatAttachmentFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		fields *AttachmentFields
@@ -3085,6 +3117,7 @@ attached_at: 2025-12-21T15:30:00Z`,
 
 // TestSetAttachmentFields tests updating issue descriptions with attachment fields.
 func TestSetAttachmentFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		issue  *Issue
@@ -3166,6 +3199,7 @@ Some existing prose content.`,
 
 // TestAttachmentFieldsRoundTrip tests that parse/format round-trips correctly.
 func TestAttachmentFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &AttachmentFields{
 		AttachedMolecule: "mol-roundtrip",
 		AttachedAt:       "2025-12-21T15:30:00Z",
@@ -3190,6 +3224,7 @@ func TestAttachmentFieldsRoundTrip(t *testing.T) {
 // TestNoMergeField tests the no_merge field in AttachmentFields.
 // The no_merge flag tells gt done to skip the merge queue and keep work on a feature branch.
 func TestNoMergeField(t *testing.T) {
+	t.Parallel()
 	t.Run("parse no_merge true", func(t *testing.T) {
 		issue := &Issue{Description: "no_merge: true\ndispatched_by: mayor"}
 		fields := ParseAttachmentFields(issue)
@@ -3263,6 +3298,7 @@ func TestNoMergeField(t *testing.T) {
 
 // TestResolveBeadsDir tests the redirect following logic.
 func TestResolveBeadsDir(t *testing.T) {
+	t.Parallel()
 	// Create temp directory structure
 	tmpDir, err := os.MkdirTemp("", "beads-redirect-test-*")
 	if err != nil {
@@ -3426,6 +3462,7 @@ func TestResolveBeadsDir(t *testing.T) {
 }
 
 func TestParseAgentBeadID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input    string
 		wantRig  string
@@ -3502,6 +3539,7 @@ func TestParseAgentBeadID(t *testing.T) {
 
 // TestParseRoleConfig tests parsing role configuration from descriptions.
 func TestParseRoleConfig(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -3635,6 +3673,7 @@ needs_pre_sync: false`,
 
 // TestExpandRolePattern tests pattern expansion with placeholders.
 func TestExpandRolePattern(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		pattern  string
 		townRoot string
@@ -3700,6 +3739,7 @@ func TestExpandRolePattern(t *testing.T) {
 
 // TestFormatRoleConfig tests formatting role config to string.
 func TestFormatRoleConfig(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		config *RoleConfig
@@ -3751,6 +3791,7 @@ start_command: exec claude`,
 
 // TestRoleConfigRoundTrip tests that parse/format round-trips correctly.
 func TestRoleConfigRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &RoleConfig{
 		SessionPattern: "gt-{rig}-{name}",
 		WorkDirPattern: "{town}/{rig}/polecats/{name}",
@@ -3785,6 +3826,7 @@ func TestRoleConfigRoundTrip(t *testing.T) {
 
 // TestParseRoleConfigWispTTLs tests parsing wisp_ttl_* fields from role config.
 func TestParseRoleConfigWispTTLs(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -3885,6 +3927,7 @@ Wisp_TTL_Error: 336h`,
 
 // TestFormatRoleConfigWispTTLs tests that wisp TTLs are included in format output.
 func TestFormatRoleConfigWispTTLs(t *testing.T) {
+	t.Parallel()
 	config := &RoleConfig{
 		SessionPattern: "gt-{rig}-{name}",
 		EnvVars:        map[string]string{},
@@ -3909,6 +3952,7 @@ func TestFormatRoleConfigWispTTLs(t *testing.T) {
 
 // TestRoleConfigWispTTLRoundTrip tests that wisp TTLs survive parse/format round-trip.
 func TestRoleConfigWispTTLRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &RoleConfig{
 		SessionPattern: "gt-{rig}-{name}",
 		EnvVars:        map[string]string{},
@@ -3938,6 +3982,7 @@ func TestRoleConfigWispTTLRoundTrip(t *testing.T) {
 
 // TestParseWispTTLKey tests the wisp TTL key parser directly.
 func TestParseWispTTLKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		key      string
 		wantType string
@@ -4704,6 +4749,7 @@ func TestResetAgentBeadForReuse_NukeRespawnCycle(t *testing.T) {
 // TestIsAgentBead verifies the IsAgentBead function correctly identifies agent
 // beads by checking both the gt:agent label (preferred) and the legacy type field.
 func TestIsAgentBead(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		issue *Issue
@@ -4782,6 +4828,7 @@ func TestIsAgentBead(t *testing.T) {
 
 // TestFilterBeadsEnv_NilInput verifies filterBeadsEnv does not panic on nil.
 func TestFilterBeadsEnv_NilInput(t *testing.T) {
+	t.Parallel()
 	got := filterBeadsEnv(nil)
 	if got == nil {
 		t.Fatal("filterBeadsEnv(nil) returned nil, want empty slice")
@@ -4793,6 +4840,7 @@ func TestFilterBeadsEnv_NilInput(t *testing.T) {
 
 // TestFilterBeadsEnv_EmptyInput verifies filterBeadsEnv on empty slice.
 func TestFilterBeadsEnv_EmptyInput(t *testing.T) {
+	t.Parallel()
 	got := filterBeadsEnv([]string{})
 	if len(got) != 0 {
 		t.Errorf("filterBeadsEnv([]) returned %d items, want 0", len(got))
@@ -4803,6 +4851,7 @@ func TestFilterBeadsEnv_EmptyInput(t *testing.T) {
 // BEADS_DOLT_PORT are preserved by filterBeadsEnv even though BEADS_* vars
 // are otherwise stripped. Tests need these to reach test Dolt servers.
 func TestFilterBeadsEnv_PreservesDoltPortVars(t *testing.T) {
+	t.Parallel()
 	environ := []string{
 		"BD_ACTOR=test-actor",
 		"BEADS_DIR=/tmp/beads",
@@ -4864,6 +4913,7 @@ func TestFilterBeadsEnv_StripsCaseVariantBeadsEnv(t *testing.T) {
 
 // TestNewIsolatedWithPort verifies the constructor sets serverPort.
 func TestNewIsolatedWithPort(t *testing.T) {
+	t.Parallel()
 	b := NewIsolatedWithPort("/tmp/test", 13307)
 	if !b.isolated {
 		t.Error("expected isolated=true")
@@ -5083,6 +5133,7 @@ exit 0
 
 // TestStripEnvPrefixes verifies the generic prefix stripping used by runWithRouting.
 func TestStripEnvPrefixes(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		environ  []string
@@ -5145,6 +5196,7 @@ func TestStripEnvPrefixes(t *testing.T) {
 
 // TestStripEnvPrefixes_PreservesOrder verifies output ordering is stable.
 func TestStripEnvPrefixes_PreservesOrder(t *testing.T) {
+	t.Parallel()
 	environ := []string{"A=1", "BEADS_DIR=/tmp", "B=2", "BD_ACTOR=x", "C=3"}
 	got := stripEnvPrefixes(environ, "BEADS_DIR=", "BD_ACTOR=")
 	want := []string{"A=1", "B=2", "C=3"}
@@ -5197,6 +5249,7 @@ const bdDoltAutoStartNoticeText = "Warning: Dolt server endpoint changed: port 5
 	"  To pin a port: set dolt.port in .beads/config.yaml\n"
 
 func TestStripDoltAutoStartNotice(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		stderr string
@@ -5250,6 +5303,7 @@ func TestStripDoltAutoStartNotice(t *testing.T) {
 // the notice's variable-width first line: a different bd warning that opens the
 // same way must keep counting as a failure.
 func TestDoltAutoStartNoticePrefixDoesNotSwallowOtherWarnings(t *testing.T) {
+	t.Parallel()
 	const other = "Warning: Dolt server endpoint changed: port 57403 → 58444 (retarget rejected)\n"
 	if got := stripDoltAutoStartNotice(other); got != other {
 		t.Errorf("stripDoltAutoStartNotice(%q) = %q, want it left alone", other, got)
@@ -5260,6 +5314,7 @@ func TestDoltAutoStartNoticePrefixDoesNotSwallowOtherWarnings(t *testing.T) {
 }
 
 func TestStripFirstRunMetricsNotice(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		stderr string
@@ -5300,6 +5355,7 @@ func TestStripFirstRunMetricsNotice(t *testing.T) {
 }
 
 func TestBdEmptyOutputIsError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		stderr string
@@ -5762,6 +5818,7 @@ printf 'unknown\n'
 }
 
 func TestIsSubprocessCrash(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -5793,6 +5850,7 @@ func TestIsSubprocessCrash(t *testing.T) {
 // TestRoleConfigRoundTripKeepsHealthFields: the health thresholds survive a
 // format and parse, and the env_var lines come out in sorted order.
 func TestRoleConfigRoundTripKeepsHealthFields(t *testing.T) {
+	t.Parallel()
 	original := &RoleConfig{
 		SessionPattern:      "gt-{rig}-{name}",
 		EnvVars:             map[string]string{"ZED": "1", "ALPHA": "2", "MIKE": "3", "BRAVO": "4"},

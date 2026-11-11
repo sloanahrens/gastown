@@ -44,6 +44,7 @@ func openMRIndex(mrs ...*Issue) map[string]*Issue {
 // resolving merge status instead of trusting the `bd list`-sourced hookedBead
 // directly.
 func TestBlockingDependenciesDropBareListShapeRelations(t *testing.T) {
+	t.Parallel()
 	issue := unmarshalIssueForTest(t, `{
 		"id":"gt-target",
 		"status":"open",
@@ -67,6 +68,7 @@ func TestBlockingDependenciesDropBareListShapeRelations(t *testing.T) {
 // a dependent is not dispatchable while its blocker's merge request is still in
 // the queue, and becomes dispatchable the moment that MR merges.
 func TestDependentStaysBlockedWhileBlockerMRIsOpen(t *testing.T) {
+	t.Parallel()
 	// The dependent: one blocking dependency, on a blocker that has closed
 	// (submitted) but whose work has not landed.
 	dependent := &Issue{
@@ -103,6 +105,7 @@ func TestDependentStaysBlockedWhileBlockerMRIsOpen(t *testing.T) {
 // that never produced a merge request — docs-only, decision bead, superseded —
 // satisfies its dependents on close rather than deadlocking them.
 func TestBlockerWithNoMRStillSatisfiesOnClose(t *testing.T) {
+	t.Parallel()
 	dependent := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",
@@ -125,6 +128,7 @@ func TestBlockerWithNoMRStillSatisfiesOnClose(t *testing.T) {
 // only thing that holds a dependent back is an OPEN merge request. A rejected,
 // abandoned, or superseded MR is closed, so its dependents unblock.
 func TestRejectedOrSupersededMRDoesNotBlockForever(t *testing.T) {
+	t.Parallel()
 	dependent := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",
@@ -146,6 +150,7 @@ func TestRejectedOrSupersededMRDoesNotBlockForever(t *testing.T) {
 // blocker that has not even been closed yet blocks its dependents for the
 // ordinary reason, with or without an MR in flight.
 func TestOpenBlockerStillBlocks(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",
@@ -171,6 +176,7 @@ func TestOpenBlockerStillBlocks(t *testing.T) {
 // level: a bead that declares no blocking dependencies costs nothing and
 // behaves exactly as before — no MR lookup can change its readiness.
 func TestNoDependenciesIsUnaffected(t *testing.T) {
+	t.Parallel()
 	plain := &Issue{ID: "gt-plain", Status: "open"}
 
 	if got := BlockingDependencies(plain); got != nil {
@@ -192,6 +198,7 @@ func TestNoDependenciesIsUnaffected(t *testing.T) {
 // and `parent-child` relations do not become blocking just because an MR is
 // open.
 func TestNonBlockingDependenciesAreIgnored(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",
@@ -215,6 +222,7 @@ func TestNonBlockingDependenciesAreIgnored(t *testing.T) {
 // "not landed yet" signal in the close reason. Both signals must agree that the
 // blocker is unresolved; neither may mask the other.
 func TestUnmergedBlockerWinsOverStaleCloseReason(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",
@@ -245,6 +253,7 @@ func TestUnmergedBlockerWinsOverStaleCloseReason(t *testing.T) {
 // the same dependency graph must always render the same line, so a worker's
 // starting context does not churn between dispatches.
 func TestDependencyMergeStatusesAreSortedAndDeduped(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",
@@ -270,6 +279,7 @@ func TestDependencyMergeStatusesAreSortedAndDeduped(t *testing.T) {
 // TestOpenMRsBySourceIssuePicksDeterministicMR: if a source issue somehow has
 // two open MRs, the same one must win every time, so the gate does not flap.
 func TestOpenMRsBySourceIssuePicksDeterministicMR(t *testing.T) {
+	t.Parallel()
 	bySource := openMRIndex(
 		openMRForIssue("gt-wisp-mr2", "gt-blocker", "b2"),
 		openMRForIssue("gt-wisp-mr1", "gt-blocker", "b1"),
@@ -298,6 +308,7 @@ func TestOpenMRsBySourceIssuePicksDeterministicMR(t *testing.T) {
 // half of acceptance criterion 2: a bead with no blocking dependencies returns
 // before any merge-queue query is attempted, so it costs nothing.
 func TestResolveDependencyMergeStatusesNoDependenciesIsFree(t *testing.T) {
+	t.Parallel()
 	// A town directory that does not exist: if the resolver queried anything
 	// here it would have to fail, so a nil result proves it never looked.
 	if got := ResolveDependencyMergeStatuses("/nonexistent/town/.beads", &Issue{ID: "gt-plain", Status: "open"}); got != nil {
@@ -310,6 +321,7 @@ func TestResolveDependencyMergeStatusesNoDependenciesIsFree(t *testing.T) {
 // must never be reported as landed. A worker told "landed" would build on work
 // that may not be there — which is the entire bug this feature exists to stop.
 func TestResolveDependencyMergeStatusesReportsUnknownWhenUnqueryable(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",
@@ -334,6 +346,7 @@ func TestResolveDependencyMergeStatusesReportsUnknownWhenUnqueryable(t *testing.
 // TestResolveDependencyMergeStatusesIgnoresNonBlockingDeps: the resolver must
 // not reach for the merge queue on relations that never gate readiness.
 func TestResolveDependencyMergeStatusesIgnoresNonBlockingDeps(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",
@@ -352,6 +365,7 @@ func TestResolveDependencyMergeStatusesIgnoresNonBlockingDeps(t *testing.T) {
 // downgrade that definite answer to "unknown" — unknown is for questions we
 // could not answer, not for ones we already did.
 func TestResolveDependencyMergeStatusesKeepsOpenBlockerDefinite(t *testing.T) {
+	t.Parallel()
 	issue := &Issue{
 		ID:     "gt-dependent",
 		Status: "open",

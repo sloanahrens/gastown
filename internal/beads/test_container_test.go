@@ -40,6 +40,7 @@ func watchBlocked(s *initSlots) <-chan struct{} {
 // lacked: the channel holds its tokens before anyone acquires, so the first
 // acquire returns instead of blocking forever.
 func TestProcessInitPoolStartsFull(t *testing.T) {
+	t.Parallel()
 	s := testContainerInitSlots.Load()
 	if s == nil {
 		t.Fatal("process init pool is nil; package init did not build it")
@@ -53,6 +54,7 @@ func TestProcessInitPoolStartsFull(t *testing.T) {
 }
 
 func TestParseTestDoltInitConcurrency(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		raw      string
 		want     int
@@ -239,6 +241,7 @@ func TestInitSlotsFourHoldersTwelveWaiters(t *testing.T) {
 }
 
 func TestInitSlotsCancelledContextTakesNoToken(t *testing.T) {
+	t.Parallel()
 	s := newInitSlots(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -255,6 +258,7 @@ func TestInitSlotsCancelledContextTakesNoToken(t *testing.T) {
 }
 
 func TestInitSlotsReleaseIsIdempotent(t *testing.T) {
+	t.Parallel()
 	s := newInitSlots(1)
 	release, err := s.acquire(context.Background())
 	if err != nil {
@@ -278,6 +282,7 @@ func TestInitSlotsReleaseIsIdempotent(t *testing.T) {
 }
 
 func TestInitSlotsPanicReleases(t *testing.T) {
+	t.Parallel()
 	s := newInitSlots(1)
 	func() {
 		defer func() {
@@ -302,6 +307,7 @@ func TestInitSlotsPanicReleases(t *testing.T) {
 }
 
 func TestAcquireTestContainerInitSlotUsesProcessPool(t *testing.T) {
+	t.Parallel()
 	s := useTestContainerInitSlots(t, 1)
 	release, err := AcquireTestContainerInitSlot(context.Background())
 	if err != nil {
@@ -317,6 +323,7 @@ func TestAcquireTestContainerInitSlotUsesProcessPool(t *testing.T) {
 }
 
 func TestTestContainerEnv(t *testing.T) {
+	t.Parallel()
 	got := testContainerEnv()
 	if len(got) != 1 || got[0] != "BD_ALLOW_REMOTE_MIGRATE=1" {
 		t.Fatalf("testContainerEnv() = %q, want [BD_ALLOW_REMOTE_MIGRATE=1]", got)
@@ -608,6 +615,7 @@ func TestRunTestContainerInitWaitIsBounded(t *testing.T) {
 }
 
 func TestRunTestContainerInitRejectsNonInit(t *testing.T) {
+	t.Parallel()
 	useTestContainerInitSlots(t, 1)
 	for _, args := range [][]string{nil, {"list", "--json"}} {
 		if _, err := RunTestContainerInit(context.Background(), t.TempDir(), args, nil); err == nil {

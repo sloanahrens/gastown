@@ -6,6 +6,7 @@ import (
 )
 
 func TestGetIntegrationBranchField(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -54,6 +55,7 @@ func TestGetIntegrationBranchField(t *testing.T) {
 }
 
 func TestSanitizeBranchSegment(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -95,6 +97,7 @@ func TestSanitizeBranchSegment(t *testing.T) {
 }
 
 func TestBuildIntegrationBranchName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		template  string
@@ -171,6 +174,7 @@ func TestBuildIntegrationBranchName(t *testing.T) {
 }
 
 func TestExtractEpicPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		epicID string
 		want   string
@@ -228,6 +232,7 @@ func (m *mockIssueShower) Show(id string) (*Issue, error) {
 }
 
 func TestDetectIntegrationBranch(t *testing.T) {
+	t.Parallel()
 	t.Run("child of epic with metadata and remote branch", func(t *testing.T) {
 		shower := &mockIssueShower{issues: map[string]*Issue{
 			"gt-task": {ID: "gt-task", Type: "task", Parent: "gt-epic"},

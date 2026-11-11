@@ -6,6 +6,7 @@ import (
 )
 
 func TestFormatGroupDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		title  string
@@ -75,6 +76,7 @@ func TestFormatGroupDescription(t *testing.T) {
 }
 
 func TestParseGroupFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -159,6 +161,7 @@ members: a, b , c`,
 }
 
 func TestGroupBeadIDWithPrefix(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		prefix string
 		name   string
@@ -179,6 +182,7 @@ func TestGroupBeadIDWithPrefix(t *testing.T) {
 }
 
 func TestGroupBeadID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want string
@@ -198,6 +202,7 @@ func TestGroupBeadID(t *testing.T) {
 }
 
 func TestRoundTrip(t *testing.T) {
+	t.Parallel()
 	// Test that Format -> Parse preserves data
 	original := &GroupFields{
 		Name:      "test-group",
@@ -229,6 +234,7 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestValidateGroupName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		wantErr bool

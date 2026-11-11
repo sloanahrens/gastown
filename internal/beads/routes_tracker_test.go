@@ -11,6 +11,7 @@ import (
 // table that cannot be read is an error rather than a rig with nothing to
 // revoke.
 func TestRigOnTracker(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	beadsDir := filepath.Join(town, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {

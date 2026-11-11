@@ -11,7 +11,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/gosrc"
 )
 
 // hardenedPackages route their bd subprocesses through the policy constructors
@@ -46,6 +49,7 @@ var passThroughConstructors = map[string]bool{
 // TestBdSubprocessPolicyInHardenedPackages requires hardenedPackages to reach bd
 // only through policyConstructors.
 func TestBdSubprocessPolicyInHardenedPackages(t *testing.T) {
+	t.Parallel()
 	repoRoot := repoRootFromCaller(t)
 
 	var violations []string
@@ -76,6 +80,7 @@ func TestBdSubprocessPolicyInHardenedPackages(t *testing.T) {
 // deleting a constructor breaks this test rather than leaving a dead name in the
 // guidance (gt-vlw61).
 func TestPassThroughConstructorsMatchExec(t *testing.T) {
+	t.Parallel()
 	declared := exportedCommandFuncs(t, filepath.Join(repoRootFromCaller(t), "internal", "beads", "exec.go"))
 	if fmt.Sprint(sortedNames(declared)) != fmt.Sprint(sortedNames(passThroughConstructors)) {
 		t.Errorf("exec.go declares func Command* %v, but the guidance names %v",
@@ -109,6 +114,7 @@ func exportedCommandFuncs(t *testing.T, path string) map[string]bool {
 // not, so both the empty allowlist and the Client route the caller is meant to
 // take are exercised (gt-vlw61).
 func TestBdSubprocessPolicyDrivesTheFailingBranch(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		src  string
@@ -157,10 +163,11 @@ func sortedNames(set map[string]bool) []string {
 // TestNoAdHocBdSubprocessesOutsideBeads scans every package outside the
 // constructors' own implementation for a hand-built bd exec.Cmd.
 func TestNoAdHocBdSubprocessesOutsideBeads(t *testing.T) {
+	t.Parallel()
 	repoRoot := repoRootFromCaller(t)
 
 	var violations []string
-	err := filepath.WalkDir(filepath.Join(repoRoot, "internal"), func(path string, d os.DirEntry, err error) error {
+	err := gosrc.For(repoRoot).Walk(filepath.Join(repoRoot, "internal"), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -204,8 +211,7 @@ func repoRootFromCaller(t *testing.T) string {
 // file do not be mistaken for each other.
 func scanBDSubprocesses(t *testing.T, repoRoot, path string, flag func(*ast.CallExpr, map[string]bool) bool) []string {
 	t.Helper()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, nil, 0)
+	file, fset, err := parseSource(repoRoot, path)
 	if err != nil {
 		t.Fatalf("parse %s: %v", path, err)
 	}
@@ -363,4 +369,24 @@ func unquoteString(lit string) string {
 		return ""
 	}
 	return value
+}
+
+// checkoutRoot is the repository this package is checked out in.
+var checkoutRoot = sync.OnceValue(func() string {
+	_, thisFile, _, _ := runtime.Caller(0)
+	return filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+})
+
+// parseSource parses path. A file of the checkout comes from the shared read
+// (gosrc), so the scans of one run parse it once; a file under a test's own
+// fixture root is parsed fresh, since a test may rewrite it.
+func parseSource(root, path string) (*ast.File, *token.FileSet, error) {
+	if filepath.Clean(root) == checkoutRoot() {
+		tree := gosrc.For(root)
+		file, err := tree.Parse(path, 0)
+		return file, tree.FileSet(), err
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, 0)
+	return file, fset, err
 }

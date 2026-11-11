@@ -150,6 +150,7 @@ func TestCensusLogLogsOneLinePerWindow(t *testing.T) {
 }
 
 func TestCensusLogSilentWindowLogsNothing(t *testing.T) {
+	t.Parallel()
 	run := startCensusLog(t)
 	base := time.Now()
 
@@ -263,6 +264,7 @@ func TestParseCensusLineReadsWhatTheLoggerWrites(t *testing.T) {
 // rows are a sample of the window's calls, so a row sum above the record's
 // total means the line was torn (gt-gojo0).
 func TestParseCensusLineRejectsWhatItCannotTrust(t *testing.T) {
+	t.Parallel()
 	for _, line := range []string{
 		"2026/10/30 12:36:00 patrol: nothing to do",
 		"2026/10/30 12:36:00 bd census: total=2 window=60s",
@@ -283,6 +285,7 @@ func TestParseCensusLineRejectsWhatItCannotTrust(t *testing.T) {
 // its eight rows leave out, so a row sum at the total parses and both numbers
 // survive for a reader that wants them (gt-gojo0).
 func TestParseCensusLineKeepsTheCallsItsRowsDoNot(t *testing.T) {
+	t.Parallel()
 	window, ok := ParseCensusLine("2026/10/30 12:36:00 bd census: total=9 window=60s top: list@a=4 show@b=3 create@c=2")
 	if !ok {
 		t.Fatal("parser rejected a well-formed record")
@@ -293,6 +296,7 @@ func TestParseCensusLineKeepsTheCallsItsRowsDoNot(t *testing.T) {
 }
 
 func TestCensusLogStopsOnCancelAndChannelClose(t *testing.T) {
+	t.Parallel()
 	t.Run("cancel", func(t *testing.T) {
 		run := startCensusLog(t)
 		run.stop(t)

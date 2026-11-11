@@ -25,6 +25,7 @@ func molEnvelope(steps ...string) string {
 // step entry that carries no issue is an error — a shape this parser does not
 // understand must not read as an empty molecule.
 func TestParseReadyMolOutput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		in      string

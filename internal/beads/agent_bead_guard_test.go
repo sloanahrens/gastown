@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/testutil/gosrc"
 )
 
 // agentBeadIdentRE matches expressions that carry an agent-bead ID.
@@ -33,6 +35,7 @@ var agentBeadHelpers = map[string]bool{
 // arbitrary cwd resolves local-first and wrote the legacy town row for months
 // (hq-kt9y1). This test fails the build when that pattern reappears.
 func TestNoShellBdWritesToAgentBeads(t *testing.T) {
+	t.Parallel()
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("runtime.Caller failed")
@@ -54,7 +57,7 @@ func TestNoShellBdWritesToAgentBeads(t *testing.T) {
 			if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 				continue
 			}
-			src, err := os.ReadFile(filepath.Join(dir, name))
+			src, err := gosrc.For(repoRoot).Source(filepath.Join(dir, name))
 			if err != nil {
 				t.Fatalf("read %s: %v", name, err)
 			}
@@ -141,6 +144,7 @@ func exprString(e ast.Expr) string {
 
 // TestAgentBeadGuardDetectsEachPattern proves the guard is not vacuous.
 func TestAgentBeadGuardDetectsEachPattern(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"bd.Run":       `package x; func f(bd *BdCli, workDir, agentBeadID string) { _ = bd.Run(workDir, "update", agentBeadID, "--description", "d") }`,
 		"BdCmd":        `package x; func f(agentID string) { _ = BdCmd("update", agentID, "--status=open") }`,

@@ -11,6 +11,7 @@ import (
 // legacy bare array are not, and garbage is an error, never a silent empty
 // board.
 func TestParseReadyOutput(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		in         string

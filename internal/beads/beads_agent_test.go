@@ -334,6 +334,7 @@ func TestUpdateAgentState_UsesExplicitBeadsDir(t *testing.T) {
 }
 
 func TestIsAgentBeadByID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		id   string
@@ -378,6 +379,7 @@ func TestIsAgentBeadByID(t *testing.T) {
 }
 
 func TestMergeAgentBeadSources(t *testing.T) {
+	t.Parallel()
 	t.Run("issues override duplicate wisp ids", func(t *testing.T) {
 		issuesByID := map[string]*Issue{
 			"hq-deacon": {ID: "hq-deacon", Type: "agent", Labels: []string{"gt:agent"}},
@@ -427,6 +429,7 @@ func TestMergeAgentBeadSources(t *testing.T) {
 }
 
 func TestLabelsForAgentBeadReusePreservesOnlySafetyStop(t *testing.T) {
+	t.Parallel()
 	got := labelsForAgentBeadReuse([]string{
 		"gt:agent",
 		"heartbeat:123",
@@ -606,6 +609,7 @@ func TestCreateAgentBead_CreatesTownBeadForTownPrefix(t *testing.T) {
 }
 
 func TestCreateAgentBead_ParsesMockCreateOutput(t *testing.T) {
+	t.Parallel()
 	raw := []byte(`{"id":"pt-imported-polecat-shiny","title":"shiny","status":"open"}`)
 	var issue Issue
 	if err := json.Unmarshal(raw, &issue); err != nil {

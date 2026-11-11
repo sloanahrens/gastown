@@ -340,6 +340,7 @@ exit 1
 // one that keeps a wedged bd from being retried five times: a subprocess killed
 // at its own deadline has already spent its whole budget.
 func TestRetryableBdConnectionFailure(t *testing.T) {
+	t.Parallel()
 	container := NewIsolatedWithPort(t.TempDir(), 3306)
 	noContainer := New(t.TempDir())
 
@@ -384,6 +385,7 @@ func TestRetryableBdConnectionFailure(t *testing.T) {
 // markers that already had a class stay in that one, and no class reaches a
 // wrapper that is not pointed at the container (gt-unq4l).
 func TestRetryableBdCatalogRace(t *testing.T) {
+	t.Parallel()
 	container := NewIsolatedWithPort(t.TempDir(), 55069)
 	noContainer := New(t.TempDir())
 
@@ -436,6 +438,7 @@ func TestRetryableBdCatalogRace(t *testing.T) {
 // neither wider class absorbs them — a suite that reported one as a lost
 // container would skip a run that should stay red.
 func TestRetryableBdInitSchemaRace(t *testing.T) {
+	t.Parallel()
 	container := NewIsolatedWithPort(t.TempDir(), 55069)
 	noContainer := New(t.TempDir())
 
@@ -508,6 +511,7 @@ func TestRetryableBdInitSchemaRace(t *testing.T) {
 // whole of its blast radius: only Init passes a testdb_ --database, and only
 // against the container (gt-w4sxk).
 func TestBdInitOnTestDatabase(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		args []string
@@ -535,6 +539,7 @@ func TestBdInitOnTestDatabase(t *testing.T) {
 // caller's own slice is left alone, and an argv with no minted name comes back
 // unchanged (gt-o8i9f).
 func TestRemintTestDatabase(t *testing.T) {
+	t.Parallel()
 	const original = "testdb_1a13842eb92b6edf"
 
 	tests := []struct {
@@ -575,6 +580,7 @@ func TestRemintTestDatabase(t *testing.T) {
 // exhausting the retries on one leaves the suite red rather than skipping it
 // green.
 func TestCatalogRaceIsNotAContainerGoneSkip(t *testing.T) {
+	t.Parallel()
 	container := NewIsolatedWithPort(t.TempDir(), 55069)
 	race := fmt.Errorf("bd init: %s", observedCatalogRaceStderr)
 
@@ -591,6 +597,7 @@ func TestCatalogRaceIsNotAContainerGoneSkip(t *testing.T) {
 // to a wrapper built for a test container, so no production caller can turn a
 // real failure into a skip.
 func TestContainerUnavailableNeverExcusesAProductionFailure(t *testing.T) {
+	t.Parallel()
 	lost := fmt.Errorf("bd init: %s\n%s", observedIoTimeoutStderr, observedOpenFailureStderr)
 
 	production := New(t.TempDir())
@@ -631,6 +638,7 @@ func TestBdContainerRetryWindowStopsTheLoop(t *testing.T) {
 // must grow, stay under the cap, and stay close to the nominal delay so five
 // attempts cannot silently become a multi-minute stall.
 func TestBdContainerRetryBackoffBounds(t *testing.T) {
+	t.Parallel()
 	total := time.Duration(0)
 	prev := time.Duration(0)
 	for attempt := 1; attempt < bdContainerRetryAttempts; attempt++ {

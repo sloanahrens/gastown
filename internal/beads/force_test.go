@@ -3,6 +3,7 @@ package beads
 import "testing"
 
 func TestNeedsForceForID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		id   string
 		want bool

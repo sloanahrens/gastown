@@ -6,6 +6,7 @@ import (
 )
 
 func TestFormatChannelDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		title  string
@@ -93,6 +94,7 @@ func TestFormatChannelDescription(t *testing.T) {
 }
 
 func TestParseChannelFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		description string
@@ -209,6 +211,7 @@ status: closed`,
 }
 
 func TestChannelBeadID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		want string
@@ -228,6 +231,7 @@ func TestChannelBeadID(t *testing.T) {
 }
 
 func TestChannelRoundTrip(t *testing.T) {
+	t.Parallel()
 	// Test that Format -> Parse preserves data
 	original := &ChannelFields{
 		Name:           "test-channel",

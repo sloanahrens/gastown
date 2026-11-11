@@ -41,6 +41,7 @@ func readMetadata(t *testing.T, beadsDir string) map[string]any {
 // gt-170zk: gt names the database a bd init is about to create, or it does not
 // run one.
 func TestInitDatabaseTargetRefusesAnUnnamedWorkspace(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		fields map[string]any
@@ -73,6 +74,7 @@ func TestInitDatabaseTargetRefusesAnUnnamedWorkspace(t *testing.T) {
 // actually initializes: metadata.json that names the database the rig was
 // provisioned with (the rig-add path writes it before this runs).
 func TestInitDatabaseTargetReadsTheConfiguredName(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
 	writeMetadata(t, beadsDir, map[string]any{"dolt_mode": "server", "dolt_database": "zzrig"})
 
@@ -88,6 +90,7 @@ func TestInitDatabaseTargetReadsTheConfiguredName(t *testing.T) {
 // TestInitDatabaseTargetReadsLegacyConfigJSON keeps pre-metadata workspaces
 // initializable: bd still reads the config.json field it migrates from.
 func TestInitDatabaseTargetReadsLegacyConfigJSON(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -111,6 +114,7 @@ func TestInitDatabaseTargetReadsLegacyConfigJSON(t *testing.T) {
 // beside it. The name metadata.json would hold is unknown, so bd init is refused
 // rather than run against a database read from the other file (gt-b3ar38).
 func TestInitDatabaseTargetRefusesAnUnreadableMetadata(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
 	// A directory named metadata.json exists but cannot be read as a file.
 	if err := os.MkdirAll(filepath.Join(beadsDir, "metadata.json"), 0o755); err != nil {
@@ -132,6 +136,7 @@ func TestInitDatabaseTargetRefusesAnUnreadableMetadata(t *testing.T) {
 // dolt_database, which leaves the workspace naming no database at all, and
 // every later bd open in it falls back to the default "beads".
 func TestEnsureMetadataDatabaseNamesTheDatabase(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
 	writeMetadata(t, beadsDir, map[string]any{
 		"backend": "dolt", "database": "dolt", "dolt_mode": "server",
@@ -171,6 +176,7 @@ func TestEnsureMetadataDatabaseNamesTheDatabase(t *testing.T) {
 // TestEnsureMetadataDatabaseCreatesMissingFile covers the fresh workspace: gt
 // records the database it initialized so the workspace starts out named.
 func TestEnsureMetadataDatabaseCreatesMissingFile(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -188,6 +194,7 @@ func TestEnsureMetadataDatabaseCreatesMissingFile(t *testing.T) {
 // git-tracked metadata.json, which would show up as a mode change in the rig
 // worktree.
 func TestEnsureMetadataDatabasePreservesMode(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
 	writeMetadata(t, beadsDir, map[string]any{"dolt_mode": "server"})
 	path := filepath.Join(beadsDir, "metadata.json")
@@ -212,6 +219,7 @@ func TestEnsureMetadataDatabasePreservesMode(t *testing.T) {
 // present-but-corrupt metadata.json is a config problem, and rewriting it
 // would discard whatever the operator or a newer bd put there.
 func TestEnsureMetadataDatabaseRefusesToClobberUnparseableMetadata(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -237,6 +245,7 @@ func TestEnsureMetadataDatabaseRefusesToClobberUnparseableMetadata(t *testing.T)
 // TestEnsureMetadataDatabaseRejectsEmptyName keeps the repair from writing a
 // database-less metadata.json in the name of naming one.
 func TestEnsureMetadataDatabaseRejectsEmptyName(t *testing.T) {
+	t.Parallel()
 	beadsDir := filepath.Join(t.TempDir(), "rig", ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -250,6 +259,7 @@ func TestEnsureMetadataDatabaseRejectsEmptyName(t *testing.T) {
 // subprocess carries exactly the database gt chose, whatever the calling
 // process happened to have inherited.
 func TestWithDatabaseTargetReplacesInheritedSelector(t *testing.T) {
+	t.Parallel()
 	env := withDatabaseTarget([]string{"PATH=/bin", "BEADS_DOLT_SERVER_DATABASE=someoneelse"}, "zzrig")
 
 	count := 0

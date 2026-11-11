@@ -11,6 +11,7 @@ import (
 )
 
 func TestFormatEscalationDescription(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		title  string
@@ -149,6 +150,7 @@ func TestFormatEscalationDescription(t *testing.T) {
 }
 
 func TestParseEscalationFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		desc string
@@ -268,6 +270,7 @@ fingerprint: escalation-fp:abc123def456`,
 }
 
 func TestEscalationFieldsRoundTrip(t *testing.T) {
+	t.Parallel()
 	original := &EscalationFields{
 		Severity:          "high",
 		Reason:            "Agent stuck for 1h",
@@ -329,6 +332,7 @@ func TestEscalationFieldsRoundTrip(t *testing.T) {
 }
 
 func TestFilterEscalationRecordsSkipsMailMessages(t *testing.T) {
+	t.Parallel()
 	issues := []*Issue{
 		{ID: "hq-root", Labels: []string{"gt:escalation"}},
 		{ID: "hq-mail", Labels: []string{"gt:escalation", "gt:message"}},
@@ -706,6 +710,7 @@ func TestListAllEscalationsAcrossRigsKeepsMessages(t *testing.T) {
 }
 
 func TestBumpSeverity(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input string
 		want  string

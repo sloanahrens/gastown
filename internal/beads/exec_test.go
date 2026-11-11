@@ -11,6 +11,7 @@ import (
 )
 
 func TestCommandWithEnvPreservesCallerEnv(t *testing.T) {
+	t.Parallel()
 	env := append(append([]string{}, os.Environ()...), "GT_TEST_MARKER=1")
 	cmd := CommandWithEnv("/tmp", env, "show", "gt-1")
 	if cmd.Dir != "/tmp" {
@@ -37,6 +38,7 @@ func TestCommandWithEnvPreservesCallerEnv(t *testing.T) {
 }
 
 func TestCommandContextWithEnvPreservesCallerEnv(t *testing.T) {
+	t.Parallel()
 	env := []string{"PATH=/usr/bin", "GT_TEST_MARKER=2"}
 	cmd := CommandContextWithEnv(context.Background(), "/work", env, "list", "--json")
 	if cmd.Dir != "/work" {
@@ -51,6 +53,7 @@ func TestCommandContextWithEnvPreservesCallerEnv(t *testing.T) {
 }
 
 func TestCommandWithPathUsesGivenArgv0(t *testing.T) {
+	t.Parallel()
 	env := []string{"PATH=/usr/bin"}
 	cmd := CommandWithPath("/opt/bin/bd", "/work", env, "show", "gt-1")
 	if len(cmd.Args) == 0 || cmd.Args[0] != "/opt/bin/bd" {
@@ -78,6 +81,7 @@ func TestConfigureCommandAppliesPolicy(t *testing.T) {
 // TestNilEnvCarriesPWD pins the contract call sites rely on: bd locates its
 // database through PWD, and os/exec supplies it only while Env is nil. (gt-sz0s)
 func TestNilEnvCarriesPWD(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		cmd  *Cmd
@@ -96,6 +100,7 @@ func TestNilEnvCarriesPWD(t *testing.T) {
 // TestExplicitEnvLeavesPWDtoCaller states the other half of the contract, so a
 // call site passing os.Environ() can see it is handing bd the parent's PWD.
 func TestExplicitEnvLeavesPWDtoCaller(t *testing.T) {
+	t.Parallel()
 	cmd := CommandWithEnv("/work", []string{"PATH=/usr/bin"}, "list")
 	if hasEnvEntry(cmd.Environ(), "PWD=/work") {
 		t.Fatalf("Environ() = %v, want no injected PWD", cmd.Environ())
@@ -116,6 +121,7 @@ func hasEnvEntry(env []string, want string) bool {
 // removes a call site's timeout: a bd subprocess that used to be killed by
 // cmdTimeout then runs unbounded. (gt-sz0s)
 func TestContextConstructorsAreContextBound(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	tests := []struct {
 		name string
