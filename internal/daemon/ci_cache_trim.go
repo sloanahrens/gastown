@@ -7,14 +7,16 @@ package daemon
 //
 // The disk_maintenance patrol runs this trim on its own interval
 // (ci_cache_trim_interval), in any window and whether or not the town is busy,
-// as the shared cache trim does (gt-gg9hv.48). Each run lists the runner's pod
-// once, then execs once per volume in ciCacheVolumes, in table order, into the
-// pod's dind container. A volume with no cap (ci-gocache) gets the age rule
-// alone: a constant script removes the volume's entries that have gone unwritten
-// for ci_cache_max_age. A capped volume (ci-npm) gets the same removal only while
-// it is over its cap; at or under the cap the script removes nothing. Each exec
-// reports the volume's size before and after. ci-gomod is not in the table: its
-// trim is a sibling's. Nothing outside a table root is named by an exec.
+// as the shared cache trim does (gt-gg9hv.48). Each volume in ciCacheVolumes keeps
+// its own interval and retry, so a failure on one volume does not move another's
+// cadence (gt-4q3qfb). Each run lists the runner's pod once, then execs once per
+// volume that is due, in table order, into the pod's dind container. A volume
+// with no cap (ci-gocache) gets the age rule alone: a constant script removes the
+// volume's entries that have gone unwritten for ci_cache_max_age. A capped volume
+// (ci-npm) gets the same removal only while it is over its cap; at or under the
+// cap the script removes nothing. Each exec reports the volume's size before and
+// after. ci-gomod is not in the table: its trim is a sibling's. Nothing outside a
+// table root is named by an exec.
 //
 // Dry run is the patrol's default, as for every maintenance target: the exec runs
 // a script that lists what it would remove and removes nothing.
@@ -65,7 +67,7 @@ const (
 	// through, so this is told apart from a failure of kubectl itself.
 	ciCacheMissingPathExit = 3
 
-	// ciCacheTrimName is the schedule key the CI trim's last run is recorded under.
+	// ciCacheTrimName prefixes each volume's schedule key (ciCacheVolumeSchedule).
 	// It is not a target name, so it cannot collide with one.
 	ciCacheTrimName = "ci_cache_trim"
 
@@ -95,6 +97,32 @@ var ciCacheVolumes = []ciCacheVolume{
 // Docker data root.
 func ciCacheVolumeRoot(name string) string {
 	return ciCacheDindMount + "/volumes/" + name + "/_data"
+}
+
+// ciCacheVolumeSchedule is the schedule key a volume's last verdict and retry are
+// kept under. Each volume has its own, so one volume's failure does not move
+// another volume's cadence (gt-4q3qfb).
+func ciCacheVolumeSchedule(v ciCacheVolume) string {
+	return ciCacheTrimName + "/" + v.name
+}
+
+// ciCacheDueVolumes returns the volumes whose trim is due at now, in table order.
+func (d *Daemon) ciCacheDueVolumes(now time.Time, every time.Duration) []ciCacheVolume {
+	var due []ciCacheVolume
+	for _, v := range ciCacheVolumes {
+		if d.diskMaintSchedule.trimDue(ciCacheVolumeSchedule(v), now, every) {
+			due = append(due, v)
+		}
+	}
+	return due
+}
+
+// ciCacheRetryDue asks each volume in due to be tried again in a retry interval,
+// for a pass that reached none of them.
+func (d *Daemon) ciCacheRetryDue(due []ciCacheVolume, concluded time.Time) {
+	for _, v := range due {
+		d.diskMaintSchedule.recordRetry(ciCacheVolumeSchedule(v), concluded.Add(cacheTrimRetryInterval))
+	}
 }
 
 // ciCacheNoOpKeyOf is the attention item key of a volume's no-op reading. The
@@ -130,18 +158,15 @@ echo "removed=$removed"
 echo "after_kib=$before"
 `
 
-// ciCacheTrimScript is the apply's program: the same listing as the dry run's,
-// with the removal, then the empty directories the removal left below the top
-// level, and the size after. Its arguments are the volume root and the age in
-// minutes. The top level's own directories are the cache's 256 two-hex-digit
-// shards, which Go creates once and does not recreate: removing an emptied one
-// loses every write that hashes into it (gt-qaqvf4).
-const ciCacheTrimScript = `set -eu
-root=$1; age=$2
-[ -d "$root" ] || { echo "volume path not found" >&2; exit 3; }
-list=$(mktemp)
+// ciCacheAgeRemoval is the removal both apply programs share. It reads root and
+// age, and before, the size before the removal, which the program that includes
+// it sets: it removes the files past the age, then the empty directories the
+// removal left below the top level, and reports the count and the size after.
+// The top level's own directories are the cache's 256 two-hex-digit shards,
+// which Go creates once and does not recreate: removing an emptied one loses
+// every write that hashes into it (gt-qaqvf4).
+const ciCacheAgeRemoval = `list=$(mktemp)
 trap 'rm -f "$list"' EXIT
-before=$(du -sk "$root" | cut -f1)
 find "$root" -mindepth 2 -type f -mmin +"$age" -print -delete > "$list"
 find "$root" -mindepth 2 -type d -empty -delete
 removed=$(wc -l < "$list" | tr -d ' ')
@@ -151,10 +176,19 @@ echo "removed=$removed"
 echo "after_kib=$after"
 `
 
+// ciCacheTrimScript is the apply's program for an uncapped volume: the size
+// before, then the age rule's removal. Its arguments are the volume root and the
+// age in minutes.
+const ciCacheTrimScript = `set -eu
+root=$1; age=$2
+[ -d "$root" ] || { echo "volume path not found" >&2; exit 3; }
+before=$(du -sk "$root" | cut -f1)
+` + ciCacheAgeRemoval
+
 // ciCacheCappedTrimScript is the capped volume's apply program. Its arguments are
 // the volume root, the age in minutes and the cap in KiB. At or under the cap it
-// removes nothing and reports the size as before and after; over the cap it does
-// what ciCacheTrimScript does, and reports the same three lines.
+// removes nothing and reports the size as before and after; over the cap it runs
+// the age rule's removal, and reports the same three lines.
 const ciCacheCappedTrimScript = `set -eu
 root=$1; age=$2; cap=$3
 [ -d "$root" ] || { echo "volume path not found" >&2; exit 3; }
@@ -165,16 +199,7 @@ echo "removed=0"
 echo "after_kib=$before"
 exit 0
 fi
-list=$(mktemp)
-trap 'rm -f "$list"' EXIT
-find "$root" -mindepth 2 -type f -mmin +"$age" -print -delete > "$list"
-find "$root" -mindepth 2 -type d -empty -delete
-removed=$(wc -l < "$list" | tr -d ' ')
-after=$(du -sk "$root" | cut -f1)
-echo "before_kib=$before"
-echo "removed=$removed"
-echo "after_kib=$after"
-`
+` + ciCacheAgeRemoval
 
 // errCICacheTrimNoContext is the refusal for a runner that names no control
 // cluster context: the trim cannot say which cluster to exec into.
@@ -283,7 +308,7 @@ func (d *Daemon) runCICacheTrimTick() {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	if !d.diskMaintSchedule.trimDue(ciCacheTrimName, now, every) {
+	if len(d.ciCacheDueVolumes(now, every)) == 0 {
 		return
 	}
 	mode, err := diskMaintenanceMode(d.patrolConfig)
@@ -300,49 +325,43 @@ func (d *Daemon) runCICacheTrimTick() {
 	})
 }
 
-// runCICacheTrimPass is the pass the tick dispatches. The due check is read again
-// here: a run that concluded after the tick's decision has spent the interval, so
-// the trim must not run a second time in it.
+// runCICacheTrimPass is the pass the tick dispatches. ciCacheTrim reads each
+// volume's due check again when it starts: a run that concluded after the tick's
+// decision has spent the interval, so the trim must not run a second time in it.
 func (d *Daemon) runCICacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
-	s := d.diskMaintenanceSeams()
-	every, _, _, err := ciCacheTrimSettings(d.patrolConfig)
-	if err != nil {
+	if _, _, _, err := ciCacheTrimSettings(d.patrolConfig); err != nil {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	if !d.diskMaintSchedule.trimDue(ciCacheTrimName, s.now(), every) {
-		return
-	}
-	verdict := d.ciCacheTrim(ctx, mode)
-	concluded := s.now()
-	if verdict {
-		d.diskMaintSchedule.record(ciCacheTrimName, concluded)
-		return
-	}
-	// A run that could not reach a verdict is tried again soon, not after the
-	// full interval, as the cache trim's failed run is (gt-gg9hv.24.6).
-	d.diskMaintSchedule.recordRetry(ciCacheTrimName, concluded.Add(cacheTrimRetryInterval))
+	d.ciCacheTrim(ctx, mode)
 }
 
-// ciCacheTrim runs one pass over the volume table and reports whether every volume
-// reached a verdict. The runner's pod is listed once; each volume then gets its
-// own exec, in table order, so a failure on one volume is logged under that
-// volume and does not stop the next. A run that removed files, or found nothing
-// to remove, is a verdict. A volume whose exec or reply failed is a failed run
-// that says why and removes nothing: a missing path or a stopped container is
-// never read as a volume with nothing to trim.
+// ciCacheTrim runs one pass over the volumes that are due and reports whether
+// every one of them reached a verdict. The runner's pod is listed once; each due
+// volume then gets its own exec, in table order, so a failure on one volume is
+// logged under that volume and does not stop the next. A volume's verdict is
+// kept under its own schedule key, so a failed volume is retried in its own
+// fifteen minutes and the others keep their cadence. A run that removed files,
+// or found nothing to remove, is a verdict. A volume whose exec or reply failed
+// is a failed run that says why and removes nothing: a missing path or a stopped
+// container is never read as a volume with nothing to trim.
 func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
-	_, maxAge, warn, err := ciCacheTrimSettings(d.patrolConfig)
+	every, maxAge, warn, err := ciCacheTrimSettings(d.patrolConfig)
 	if err != nil {
 		d.ciCacheTrimLogf("settings", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		return false
 	}
+	due := d.ciCacheDueVolumes(s.now(), every)
+	if len(due) == 0 {
+		return true
+	}
 	kubeContext, _, err := ciCacheTrimContext(d.patrolConfig)
 	if err != nil {
 		d.ciCacheTrimLogf("context", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
+		d.ciCacheRetryDue(due, s.now())
 		return false
 	}
 	kubeconfig := diskMaintKubeconfig(d.config.TownRoot, s.getenv)
@@ -353,15 +372,21 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 			kind = "pod not running"
 		}
 		d.ciCacheTrimLogf(kind, "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
+		d.ciCacheRetryDue(due, s.now())
 		return false
 	}
 
 	at := ciCacheExecTarget{kubeconfig: kubeconfig, kubeContext: kubeContext, pod: pod}
 	verdict := true
-	for _, v := range ciCacheVolumes {
-		if !d.ciCacheTrimVolume(ctx, mode, at, v, maxAge, warn) {
-			verdict = false
+	for _, v := range due {
+		// A run that could not reach a verdict is tried again soon, not after the
+		// full interval, as the cache trim's failed run is (gt-gg9hv.24.6).
+		if d.ciCacheTrimVolume(ctx, mode, at, v, maxAge, warn) {
+			d.diskMaintSchedule.record(ciCacheVolumeSchedule(v), s.now())
+			continue
 		}
+		verdict = false
+		d.ciCacheRetryDue([]ciCacheVolume{v}, s.now())
 	}
 	return verdict
 }
@@ -447,12 +472,16 @@ func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheT
 	if reply.removed != 0 {
 		return
 	}
+	holder := "CI cache trim removed no file while the Go build cache holds"
+	if v.capKiB > 0 {
+		holder = "CI cache trim of " + v.name + " removed no file while the volume holds"
+	}
 	d.cacheTrimNoOp.raise(attention.Item{
 		Key:      key,
 		Kind:     attention.KindCacheTrimNoOp,
 		Severity: attention.SeverityLow,
-		Summary: fmt.Sprintf("CI cache trim of %s removed no file while the volume holds %s, over %s%s: nothing there is older than the max age, or the trim is not reaching it",
-			v.name, polecatimage.Human(after), limit, polecatimage.Human(threshold)),
+		Summary: fmt.Sprintf("%s %s, over %s%s: nothing there is older than the max age, or the trim is not reaching it",
+			holder, polecatimage.Human(after), limit, polecatimage.Human(threshold)),
 	})
 }
 

@@ -18,6 +18,7 @@ import (
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/diskmaint"
 	"github.com/steveyegge/gastown/internal/diskmaint/disks"
+	"github.com/steveyegge/gastown/internal/polecatimage"
 )
 
 const (
@@ -171,6 +172,17 @@ func (f *ciCacheFixture) callsWith(prefix string) []cliCall {
 		}
 	}
 	return out
+}
+
+// volumeExecs counts the execs the fixture recorded into the named volume.
+func volumeExecs(f *ciCacheFixture, name string) int {
+	n := 0
+	for _, c := range f.execs() {
+		if slices.Contains(c.args, ciCacheVolumeRoot(name)) {
+			n++
+		}
+	}
+	return n
 }
 
 // TestCICacheTrimArgv: each volume's exec names the runner's dind container, the
@@ -369,8 +381,10 @@ func TestCICacheTrimSchedule(t *testing.T) {
 		t.Parallel()
 		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
 		f.tick()
-		// Another pass concludes the trim after this tick's decision.
-		f.d.diskMaintSchedule.record(ciCacheTrimName, ciCacheTestStart)
+		// Another pass concludes every volume's trim after this tick's decision.
+		for _, v := range ciCacheVolumes {
+			f.d.diskMaintSchedule.record(ciCacheVolumeSchedule(v), ciCacheTestStart)
+		}
 		f.drain()
 		if n := len(f.execs()); n != 0 {
 			t.Fatalf("a pass that found the trim spent ran %d execs, want 0", n)
@@ -393,6 +407,42 @@ func TestCICacheTrimSchedule(t *testing.T) {
 		f.tick()
 		if len(f.pending) != 1 {
 			t.Fatalf("a failed run was not retried at 15m: dispatched %d", len(f.pending))
+		}
+	})
+
+	t.Run("a failed ci-npm does not move ci-gocache's cadence", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.npmExec = cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
+		f.tick()
+		f.drain()
+
+		f.at(15 * time.Minute)
+		f.tick()
+		f.drain()
+		if n := volumeExecs(f, ciCacheGocacheVolume); n != 1 {
+			t.Fatalf("ci-gocache ran %d times, want 1: its verdict at 0m stands, and ci-npm's failure must not retry it at 15m", n)
+		}
+		if n := volumeExecs(f, ciCacheNpmVolume); n != 2 {
+			t.Fatalf("ci-npm ran %d times, want 2: the failed volume is retried in fifteen minutes", n)
+		}
+	})
+
+	t.Run("a failed ci-gocache does not move ci-npm's cadence", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.exec = cliReply{stderr: "error: unable to upgrade connection\n", code: 1}
+		f.tick()
+		f.drain()
+
+		f.at(15 * time.Minute)
+		f.tick()
+		f.drain()
+		if n := volumeExecs(f, ciCacheNpmVolume); n != 1 {
+			t.Fatalf("ci-npm ran %d times, want 1: its verdict at 0m stands, and ci-gocache's failure must not retry it at 15m", n)
+		}
+		if n := volumeExecs(f, ciCacheGocacheVolume); n != 2 {
+			t.Fatalf("ci-gocache ran %d times, want 2: the failed volume is retried in fifteen minutes", n)
 		}
 	})
 }
@@ -482,7 +532,7 @@ func TestCICacheTrimFailuresAreFailedRuns(t *testing.T) {
 			if n := len(f.d.cacheTrimNoOp.observed()); n != 0 {
 				t.Errorf("a failed run raised %d attention item(s): a failure is not a reading", n)
 			}
-			if got, want := f.d.diskMaintSchedule.retryAtOf(ciCacheTrimName), ciCacheTestStart.Add(cacheTrimRetryInterval); !got.Equal(want) {
+			if got, want := f.d.diskMaintSchedule.retryAtOf(ciCacheVolumeSchedule(ciCacheVolumes[0])), ciCacheTestStart.Add(cacheTrimRetryInterval); !got.Equal(want) {
 				t.Errorf("retry at %v, want %v: a failed run is retried in fifteen minutes", got, want)
 			}
 
@@ -514,8 +564,9 @@ func TestCICacheTrimHoldsAFailureWhoseTextVaries(t *testing.T) {
 	f.tick()
 	f.drain()
 
-	if n := len(f.execs()); n != 2*len(ciCacheVolumes) {
-		t.Fatalf("ran %d execs, want %d: the retry must run", n, 2*len(ciCacheVolumes))
+	// Only the failed volume is due at the retry: ci-npm keeps its verdict.
+	if n := volumeExecs(f, ciCacheGocacheVolume); n != 2 {
+		t.Fatalf("ci-gocache ran %d execs, want 2: the retry must run", n)
 	}
 	if n := strings.Count(f.logs.String(), want); n != 1 {
 		t.Errorf("the failure was logged %d times across two attempts with different output, want once an hour:\n%s", n, f.logs.String())
@@ -665,6 +716,28 @@ func TestCICacheTrimNoopItem(t *testing.T) {
 		f.drain()
 		if items := f.d.cacheTrimNoOp.observed(); len(items) != 0 {
 			t.Errorf("items after a reading under the figure = %+v, want none", items)
+		}
+	})
+
+	t.Run("the uncapped volume's item keeps its summary text", func(t *testing.T) {
+		t.Parallel()
+		f := newCICacheFixture(t, agentconfig.DiskMaintenanceModeApply)
+		f.exec = ciCacheReply(overWarn, 0, overWarn)
+		f.tick()
+		f.drain()
+
+		_, _, warn, err := ciCacheTrimSettings(f.d.patrolConfig)
+		if err != nil {
+			t.Fatalf("reading the settings: %v", err)
+		}
+		items := f.d.cacheTrimNoOp.observed()
+		if len(items) != 1 {
+			t.Fatalf("items = %+v, want one item", items)
+		}
+		want := fmt.Sprintf("CI cache trim removed no file while the Go build cache holds %s, over the warn figure of %s: nothing there is older than the max age, or the trim is not reaching it",
+			polecatimage.Human(overWarn*1024), polecatimage.Human(warn))
+		if items[0].Summary != want {
+			t.Errorf("summary = %q\nwant %q: the uncapped volume's item text is unchanged", items[0].Summary, want)
 		}
 	})
 
