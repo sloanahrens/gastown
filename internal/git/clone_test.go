@@ -254,6 +254,61 @@ func TestInitSubmodules(t *testing.T) {
 	})
 }
 
+// TestSubmoduleReferencePath pins that no rig's retired mayor/rig is offered
+// as a --reference clone, even when it is a valid reference on disk: a tracked
+// .gitmodules that is not shallow.
+func TestSubmoduleReferencePath(t *testing.T) {
+	t.Parallel()
+	// newRig lays out <rig>/.repo.git and a polecat workdir under it, and
+	// optionally a valid <rig>/mayor/rig with the git answers that make it one.
+	newRig := func(t *testing.T, withMayorRig bool) (string, *scripted) {
+		t.Helper()
+		rig := t.TempDir()
+		if err := os.Mkdir(filepath.Join(rig, ".repo.git"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(rig, "polecats", "furiosa"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		s := newScripted(nil)
+		if withMayorRig {
+			mayorRig := filepath.Join(rig, "mayor", "rig")
+			if err := os.MkdirAll(mayorRig, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeGitmodules(t, mayorRig)
+			s.on("-C "+mayorRig+" ls-files --error-unmatch .gitmodules", ok(".gitmodules\n"))
+			s.on("-C "+mayorRig+" rev-parse --is-shallow-repository", ok("false\n"))
+		}
+		return rig, s
+	}
+	gitDirAt := func(rig string, s *scripted) *Git {
+		return &Git{gitDir: filepath.Join(rig, ".repo.git"), exec: s.run}
+	}
+	workDirAt := func(rig string, s *scripted) *Git {
+		return &Git{workDir: filepath.Join(rig, "polecats", "furiosa"), exec: s.run}
+	}
+	cases := []struct {
+		name       string
+		withMayor  bool
+		newGitFrom func(rig string, s *scripted) *Git
+	}{
+		{"git dir under a rig with a valid mayor/rig", true, gitDirAt},
+		{"workdir under a rig with a valid mayor/rig", true, workDirAt},
+		{"git dir under a rig without a mayor/rig", false, gitDirAt},
+		{"workdir under a rig without a mayor/rig", false, workDirAt},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rig, s := newRig(t, tc.withMayor)
+			if got := tc.newGitFrom(rig, s).submoduleReferencePath(); got != "" {
+				t.Fatalf("submoduleReferencePath = %q, want no reference", got)
+			}
+		})
+	}
+}
+
 // SubmoduleChanges reads gitlinks (mode 160000) from diff --raw, drops
 // .claude/ worktree pointers (gt-dg7), blanks null shas, and takes each URL
 // from .gitmodules at head.
