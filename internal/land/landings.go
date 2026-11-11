@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/durable"
 	"github.com/steveyegge/gastown/internal/polecat/spans"
 )
 
@@ -364,7 +365,7 @@ func appendJSONLine(path string, line []byte, write func(*os.File, []byte) (int,
 	if err := appendRecord(fh, write, line, start, size); err != nil {
 		return err
 	}
-	if err := fh.Sync(); err != nil {
+	if err := durable.File(fh); err != nil {
 		return fmt.Errorf("syncing landings file: %w", err)
 	}
 	return fh.Close()

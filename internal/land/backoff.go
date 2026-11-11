@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/durable"
 )
 
 // BackoffRecord is one bead whose landing is failing and waiting for its next
@@ -88,7 +89,7 @@ func (f *BackoffFile) Write(st BackoffState) error {
 		_ = tmp.Close()
 		return fmt.Errorf("writing backoff state: %w", err)
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := durable.File(tmp); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("syncing backoff state: %w", err)
 	}

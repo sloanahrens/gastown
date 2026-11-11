@@ -12,8 +12,9 @@
 //		os.Exit(unittier.Main(m))
 //	}
 //
-// The package imports nothing from the module, so any package can use it,
-// including the ones testutil itself imports. TestUnitTierMain in
+// The package imports from the module only the leaf durable, which imports
+// nothing from it, so any package can use it, including the ones testutil itself
+// imports. TestUnitTierMain in
 // internal/testpolicy holds every package to one or the other. The checks are
 // off in the integration tier (the integration build tag) and in a run that
 // opted in to container tests (GT_TEST_DOCKER=1), whose tests drive real
@@ -26,6 +27,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/durable"
 )
 
 // Main runs the tests and returns the exit code for os.Exit: m.Run's code,
@@ -81,6 +84,13 @@ func Start(opts ...Option) (*Run, error) {
 	if !enforced || os.Getenv(dockerTestsEnv) == "1" {
 		return nil, nil
 	}
+	// The unit tier proves what a write holds, not that the disk kept it: its fsyncs
+	// are no-ops (durable), which on a busy disk were most of a package's wall time.
+	// The switch is process-wide on purpose: a test binary is one process and the
+	// unit tier is a property of the binary, not of one test; the guard inside
+	// SkipForUnitTier, which panics outside a test binary, is what keeps it out of
+	// shipped code. The real fsync is not run by the gate's unit tier, by design.
+	durable.SkipForUnitTier()
 	r := &Run{}
 	dir, err := installRefusingTools(cfg.allowed)
 	if err != nil {
