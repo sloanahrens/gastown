@@ -36,9 +36,10 @@ const (
 	devTagOtherCommit = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 )
 
-// devTagRevision is the source tag of the running commit: its first 12
-// characters, the tag the images workflow gives the source image.
-var devTagRevision = devTagRunningCommit[:polecatDevTagSourceLen]
+// devTagRevision is the source tag the images workflow gives the running
+// commit's source image: the commit's first 12 characters, written out so the
+// tests fail if the step slices the commit to any other length.
+const devTagRevision = "0123456789ab"
 
 // devTagViewer is the viewer's login the source is read with in these tests.
 var devTagViewer = registry.Credential{User: "viewer", Token: "devtag-viewer-token"}
