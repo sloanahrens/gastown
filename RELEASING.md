@@ -35,9 +35,8 @@ argument is refused by `Parse` in `internal/bumpversion/options.go`.
 ### Option C: Manual
 
 1. Update CHANGELOG.md `[Unreleased]` section
-2. Update `internal/cmd/info.go` `versionChanges` slice
-3. Run `go run ./cmd/bump-version X.Y.Z` (updates version.go, package.json, CHANGELOG header)
-4. Commit, tag, push:
+2. Run `go run ./cmd/bump-version X.Y.Z` (updates version.go, package.json, CHANGELOG header)
+3. Commit, tag, push:
 
 ```bash
 git add -A
@@ -47,7 +46,7 @@ git push origin main
 git push origin vX.Y.Z
 ```
 
-5. Rebuild locally:
+4. Rebuild locally:
 
 ```bash
 make install        # installs origin/main into the town (the Go installer, cmd/gt-installer); the daemon restarts itself when idle
@@ -157,7 +156,6 @@ gt version
 | File | What changes |
 |------|-------------|
 | `CHANGELOG.md` | New version section with date |
-| `internal/cmd/info.go` | `versionChanges` entry for `gt info --whats-new` |
 | `internal/cmd/version.go` | `Version` constant |
 | `npm-package/package.json` | `version` field |
 | `flake.nix` | version + vendorHash (only if `nix` is in PATH) |
