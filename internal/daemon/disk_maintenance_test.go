@@ -2343,3 +2343,16 @@ func TestDiskMaintContainerModeRegistryCollectUnavailable(t *testing.T) {
 		})
 	}
 }
+
+// TestDiskMaintCollectMessage pins what the container's skipped-collect reason
+// tells the operator: no job runs the registry's garbage collect. It must not
+// name the Mac's registry-collect job, which was never installed.
+func TestDiskMaintCollectMessage(t *testing.T) {
+	t.Parallel()
+	if strings.Contains(diskMaintCollectUnavailable, "registry-collect") {
+		t.Errorf("collect message %q names the registry-collect job, which no job runs", diskMaintCollectUnavailable)
+	}
+	if !strings.Contains(diskMaintCollectUnavailable, "no job runs the registry's garbage collect") {
+		t.Errorf("collect message %q does not say no job runs the garbage collect", diskMaintCollectUnavailable)
+	}
+}

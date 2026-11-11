@@ -5,7 +5,7 @@ The daemon runs in a pod and cannot measure the Mac it sits on. This page record
 ## Decision
 
 1. **One Mac binary, in devops.** `gt-mac-watch` (devops dv-dgnb, launchd job dv-7opa) reads the Mac volume and the Docker Desktop disk and publishes `probes.json` into the daemon pod with `kubectl exec` into the daemon container (`cmd/gt-mac-watch/watch.go`, in the devops repository). It is extended there with the daily prune of old images on the sandbox cluster's nodes; devops files that work, reading gastown's `gt maint apply nodes` (`internal/cmd/maint.go`, target in `internal/diskmaint/nodes`).
-2. **gastown has no Mac binary.** There is no `gt-host`. The Mac host agent in gt (`gt host agent`, `internal/cmd/host_agent.go`) is deleted after gt-mac-watch is installed and the pod's file is fresh.
+2. **gastown has no Mac binary.** There is no `gt-host`. The Mac host agent that gt used to run (`internal/cmd/host_agent.go`) was deleted once gt-mac-watch was installed and the pod's file was fresh.
 3. **The contract stays in gt.** `internal/hostprobe` keeps the schema, `Read`, `Write`, `Path` and the output parsers (`probes.go`, `memory.go`). The schema version stays 3 and gt-mac-watch writes the same document. The daemon's readers do not change: `attention_host_file.go` and `disk_maintenance_disks.go` read it with the 180 second bound (`fileHostProbeMaxAge`), which stays as the alarm for a stopped publisher (`errProbeFileRefused`).
 4. **macOS-only code leaves gt.** Not only no new code: the existing launchd supervisor, installer, `gt power`, the cmux bird spawner and the diskutil read each get a removal bead, and a guard in `internal/hosttools` keeps new macOS-only files out, with the existing ones listed so the list only shrinks.
 
