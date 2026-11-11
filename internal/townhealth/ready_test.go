@@ -137,6 +137,24 @@ func TestReadyAttentionRowDoesNotMaskAServingFault(t *testing.T) {
 	}
 }
 
+// TestReadyUnknownAttentionRowBlocks: an attention row whose read failed is
+// UNKNOWN, and an unknown field is not ready, so the person-row exemption does
+// not reach it. The reason names the row.
+func TestReadyUnknownAttentionRowBlocks(t *testing.T) {
+	t.Parallel()
+	report := Report{At: ago(time.Minute), Verdict: Red, Fields: []Field{
+		{Name: FieldDispatch, Tag: Recorded, Verdict: Red, Value: "off"},
+		{Name: FieldNeedsOverseer, Tag: Unknown, Verdict: VerdictUnknown, Value: "?"},
+	}}
+	ok, reason := Ready(report, now, DefaultStaleAfter)
+	if ok {
+		t.Fatal("Ready = true, want not ready: an UNKNOWN attention row is an unknown field")
+	}
+	if !strings.Contains(reason, FieldNeedsOverseer) {
+		t.Errorf("reason = %q, want it to name %s", reason, FieldNeedsOverseer)
+	}
+}
+
 // TestReadyFieldTable names every health row and whether a non-green one
 // blocks the readiness answer (gt-pittz6). The tag is the one Compute gives
 // the row. A RECORDED row is a state the readiness rule accepts; a LIVE row
@@ -183,9 +201,15 @@ func TestReadyFieldTable(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			report := Report{At: ago(time.Minute), Verdict: tt.verdict, Fields: []Field{
-				{Name: tt.name, Tag: tt.tag, Verdict: tt.verdict, Value: "non-green"},
-			}}
+			fields := []Field{{Name: tt.name, Tag: tt.tag, Verdict: tt.verdict, Value: "non-green"}}
+			verdict := tt.verdict
+			if verdict == Green {
+				// A green report is ready before Ready reads any field, so a
+				// green row only tests something beside a recorded red cause.
+				verdict = Red
+				fields = append(fields, Field{Name: FieldDispatch, Tag: Recorded, Verdict: Red, Value: "off"})
+			}
+			report := Report{At: ago(time.Minute), Verdict: verdict, Fields: fields}
 			ok, reason := Ready(report, now, DefaultStaleAfter)
 			if ok != tt.wantOK {
 				t.Fatalf("Ready = %v (%q), want %v: %s", ok, reason, tt.wantOK, tt.why)
