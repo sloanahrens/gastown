@@ -622,7 +622,68 @@ type Trend struct {
 	Stages []TrendPoint `json:"stages,omitempty"`
 	// Recent is the newest landings and rejections, newest first.
 	Recent []LandingRow `json:"recent,omitempty"`
+	// Velocity is the story-point velocity the Landings pane shows, nil until
+	// its reader reports.
+	Velocity *Velocity `json:"velocity,omitempty"`
 }
+
+// Velocity is the story-point velocity of the landings: points landed per hour,
+// their smoothed first and second differences, and the headline figures. Hours
+// is the whole town's series; Classes holds the same series per seat class,
+// keyed by class name, with storypoints.AllClass for the total. A
+// difference that could not be computed is nil, and its state says why
+// (gt-vd91ny.3). A nil pointer is left out of the JSON, never shown as zero.
+type Velocity struct {
+	Hours   []VelocityHour            `json:"hours"`
+	Classes map[string][]VelocityHour `json:"classes"`
+	Figures VelocityFigures           `json:"figures"`
+}
+
+// VelocityHour is one hour of the velocity series. Points is the weighted
+// points that landed in the hour and Weighted counts the landings carrying
+// them; Unweighted counts landings with no measured time, which add no points
+// and are never counted as zero. RejectedPoints and RejectedUnweighted are the
+// same for work rejected after landing, counted apart from the landed points.
+type VelocityHour struct {
+	Hour               time.Time `json:"hour"`
+	Points             int       `json:"points"`
+	Weighted           int       `json:"weighted"`
+	Unweighted         int       `json:"unweighted"`
+	RejectedPoints     int       `json:"rejected_points"`
+	RejectedUnweighted int       `json:"rejected_unweighted"`
+	// Smoothed is the mean weighted points per hour over its window; D1 and D2
+	// are its first and second differences per hour. A nil value is not
+	// defined: the hour is partial, its window holds too few weighted
+	// landings, a value it needs is undefined, or it has too few defined
+	// values to judge. Each state is one of the VelocityState constants.
+	Smoothed *float64 `json:"smoothed,omitempty"`
+	D1       *float64 `json:"d1,omitempty"`
+	D2       *float64 `json:"d2,omitempty"`
+	D1State  string   `json:"d1_state"`
+	D2State  string   `json:"d2_state"`
+}
+
+// VelocityFigures are the Landings pane's headline figures. Points24h and
+// Unweighted24h are the last 24 hours; NowPerHour and AvgPerHour are the
+// current and 24-hour mean rate, and MedianPerLanding the median points a
+// landing carried. A nil figure is not defined — there is too little data to
+// compute it — and is left out of the JSON rather than shown as zero.
+type VelocityFigures struct {
+	Points24h        int      `json:"points_24h"`
+	Unweighted24h    int      `json:"unweighted_24h"`
+	NowPerHour       *float64 `json:"now_per_hour,omitempty"`
+	AvgPerHour       *float64 `json:"avg_per_hour,omitempty"`
+	MedianPerLanding *int     `json:"median_per_landing,omitempty"`
+}
+
+// The states a velocity difference can be in, as the strings the feed carries;
+// they match StateSignal, StateNoise and StateInsufficient of
+// internal/storypoints (gt-vd91ny.3).
+const (
+	VelocityStateSignal       = "signal"
+	VelocityStateNoise        = "noise"
+	VelocityStateInsufficient = "insufficient"
+)
 
 // TierSweepStage is one tier's verdict inside a sweep row. Failed names the
 // failing units the sweep's own record kept, and is empty for every row but the
