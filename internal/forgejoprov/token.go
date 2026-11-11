@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/forgejo"
 )
 
 // tokenFileMode is the mode of a role's token file: the owner alone reads it.
@@ -153,6 +155,12 @@ func (p *Provisioner) EnsureToken(role string) error {
 	}
 	user := p.BotPrefix + role
 	path := p.tokenFilePath(role)
+	// The name is written into the token file as a TOKEN_NAME line and sent in a
+	// JSON body. One outside plainName could add a line to the file, so it is
+	// refused before the mint that would make it the only record of a live token.
+	if !plainName.MatchString(p.TokenName) {
+		return fmt.Errorf("token name %q must match [A-Za-z0-9._-]+: it is written into %s as a %s line; nothing was minted or written", p.TokenName, path, tokenNameKey)
+	}
 
 	exists, err := p.tokenFileExists(path)
 	if err != nil {
@@ -322,7 +330,7 @@ func (p *Provisioner) recordedTokenName(path string, exists bool) (string, error
 	if err != nil {
 		return "", fmt.Errorf("cannot read %s to find the token it records (%w); nothing was revoked", path, err)
 	}
-	name, ok := envValue(string(data), tokenNameKey)
+	name, ok := forgejo.ParseKey(string(data), tokenNameKey)
 	if !ok {
 		return "", nil
 	}
@@ -332,40 +340,17 @@ func (p *Provisioner) recordedTokenName(path string, exists bool) (string, error
 	return name, nil
 }
 
-// envValue returns the value of the first key=value line for key in data, with a
-// leading "export " and one pair of surrounding quotes stripped. It reads a line the
-// way the token file readers in internal/forgejo do, so a key they read is the one
-// this reads.
-func envValue(data, key string) (string, bool) {
-	for _, line := range strings.Split(data, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		line = strings.TrimPrefix(line, "export ")
-		k, v, ok := strings.Cut(line, "=")
-		if !ok || strings.TrimSpace(k) != key {
-			continue
-		}
-		v = strings.TrimSpace(v)
-		if len(v) >= 2 && (v[0] == '"' && v[len(v)-1] == '"' || v[0] == '\'' && v[len(v)-1] == '\'') {
-			v = v[1 : len(v)-1]
-		}
-		return v, true
-	}
-	return "", false
-}
-
 // revokeOldToken removes the user's token named old so a rotation does not leave
-// the previous credential live, then names every other token the user still holds:
-// the operator revokes those by hand. Every failure to list or delete is a warning,
-// not an abort: the file may hold a token the operator made by hand, replacing the
-// file is what matters, and the mint is still attempted. The one refusal is a mint
-// the server would collide with: a token already holds the new name, so nothing is
-// revoked and the error says why.
+// the previous credential live, then names every other token whose name it could
+// read: the operator revokes those by hand. Every failure to list or delete is a
+// warning, not an abort: the file may hold a token the operator made by hand,
+// replacing the file is what matters, and the mint is still attempted. The one
+// refusal is a mint the server would collide with: a token already holds the new
+// name, so nothing is revoked and the error says why.
 func (p *Provisioner) revokeOldToken(user, old string) (revokeOutcome, error) {
 	base := "/admin/users/" + url.PathEscape(user) + "/tokens"
 	var names []string
+	unreadable := false
 	complete := false
 	for page := 1; page <= maxTokenPages && !complete; page++ {
 		status, resp, err := p.Client.Do(http.MethodGet, fmt.Sprintf("%s?page=%d&limit=%d", base, page, tokenPageSize), nil)
@@ -385,8 +370,11 @@ func (p *Provisioner) revokeOldToken(user, old string) (revokeOutcome, error) {
 		for _, item := range items {
 			name, ok := tokenItemName(item)
 			if !ok {
-				p.logf("warning: cannot read the name of a token of %s; revoke the old '%s' token by hand", user, old)
-				return revokeFailed, nil
+				// One unreadable item does not hide the items around it: warn,
+				// then name every token whose name could be read.
+				p.logf("warning: cannot read the name of a token of %s; this run cannot name or revoke it, so check the token list in the web UI", user)
+				unreadable = true
+				continue
 			}
 			names = append(names, name)
 		}
@@ -401,11 +389,17 @@ func (p *Provisioner) revokeOldToken(user, old string) (revokeOutcome, error) {
 		return revokeNone, fmt.Errorf("a '%s' token for %s already exists and is not the one the token file records ('%s'); nothing was revoked: revoke the '%s' token in the web UI, then run again with --rotate", p.TokenName, user, old, p.TokenName)
 	}
 	outcome := revokeNone
-	if found {
+	switch {
+	case found:
 		outcome = p.deleteToken(base, old)
-	} else if old == p.TokenName {
+	case unreadable:
+		// An item whose name could not be read may be the old token, so this run
+		// cannot say it is gone: the outcome says it may still be live.
+		p.logf("warning: no readable token of %s is named '%s', and at least one name could not be read; the old '%s' token may still be live, so revoke it by hand in the web UI", user, old, old)
+		outcome = revokeFailed
+	case old == p.TokenName:
 		p.logf("no token named '%s' to revoke; if the file held a token minted under another name, revoke it in the web UI", old)
-	} else {
+	default:
 		p.logf("no token named '%s' to revoke, though the token file records that name; it may already be revoked", old)
 	}
 	if !complete {
