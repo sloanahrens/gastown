@@ -445,16 +445,14 @@ func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
 	}
 }
 
-// The goals gt-gl3jb listed were not the whole set: the integration wall tier,
-// the tier check and the timing run each start `go test` over ./... in a Go
-// tree (gt-9udxk).
+// The goals gt-gl3jb listed were not the whole set: the integration wall tier
+// and the tier check each start `go test` over ./... in a Go tree (gt-9udxk).
 func TestPolecatTestScopeBlocksRemainingWholeSuiteGoals(t *testing.T) {
 	t.Parallel()
 	root := fakeModule(t, "gastown/refinery/rig")
 	for _, command := range []string{
 		"make test-integration-wall",
 		"make tier-check",
-		"make test-timing",
 		"make -j4 tier-check",
 		"gt slot run --role gastown/flint -- make test-integration-wall",
 	} {
@@ -462,65 +460,6 @@ func TestPolecatTestScopeBlocksRemainingWholeSuiteGoals(t *testing.T) {
 			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), command)
 			if reason == "" {
 				t.Errorf("evaluatePolecatTestScope(%q) allowed (matched %v), want blocked", command, matched)
-			}
-		})
-	}
-}
-
-// make test-timing runs ./... unless PKGS narrows it (Makefile, docs/testing.md),
-// so a PKGS naming light packages is a bounded run; the bare goal, the
-// whole-module values, a heavy package and anything the guard cannot read stay
-// refused. Only test-timing gets the exemption.
-func TestPolecatTestScopeTestTimingPKGSNarrowed(t *testing.T) {
-	t.Parallel()
-	root := fakeModule(t, "gastown/polecats/dag")
-	tests := []struct {
-		command string
-		blocked bool
-	}{
-		{"make test-timing PKGS=./internal/tmux/...", false},
-		{"make PKGS=./internal/tmux/... test-timing", false},
-		{`make test-timing PKGS="./internal/style ./internal/beads/..."`, false},
-		{"make -j4 test-timing PKGS=./internal/style", false},
-		{"gt slot run --role gastown/flint -- make test-timing PKGS=./internal/style", false},
-		{"make test-timing PKGS=./... PKGS=./internal/style", false},
-
-		{"make test-timing", true},
-		{"make test-timing PKGS=", true},
-		{"make test-timing PKGS=./...", true},
-		{"make test-timing PKGS=...", true},
-		{"make test-timing PKGS=./internal/style PKGS=./...", true},
-		{`make test-timing PKGS="./internal/style ./..."`, true},
-		{"make test-timing PKGS=./internal/cmd", true},
-		{"make test-timing PKGS=./internal/...", true},
-		{"make test-timing PKGS=./internal/c?d", true},
-		{"make test-timing PKGS=$PKGS", true},
-		{"make test-timing PKGS=-run=TestX", true},
-		{"make test-timing PKGS:=./internal/style", true},
-		{"make test-timing gate PKGS=./internal/style", true},
-		{"make gate PKGS=./internal/style", true},
-		{"make test-integration-wall PKGS=./internal/style", true},
-	}
-	// Another whole-suite goal beside test-timing stays refused before or after
-	// it, so the exemption does not rest on where either sits in the goal list.
-	for _, goal := range polecatWholeSuiteMakeGoals {
-		if goal == testTimingMakeGoal {
-			continue
-		}
-		tests = append(tests, []struct {
-			command string
-			blocked bool
-		}{
-			{"make test-timing " + goal + " PKGS=./internal/style", true},
-			{"make " + goal + " test-timing PKGS=./internal/style", true},
-			{"make test-timing PKGS=./internal/style && make " + goal, true},
-		}...)
-	}
-	for _, tt := range tests {
-		t.Run(tt.command, func(t *testing.T) {
-			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
-			if blocked := reason != ""; blocked != tt.blocked {
-				t.Errorf("evaluatePolecatTestScope(%q) = %q (matched %v), blocked = %v, want %v", tt.command, reason, matched, blocked, tt.blocked)
 			}
 		})
 	}

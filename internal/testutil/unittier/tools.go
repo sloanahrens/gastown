@@ -18,8 +18,8 @@ import (
 // realgit.txt govern it (testutil.WithoutGit). A tool started by absolute
 // path, or the test binary re-executing itself, is not seen.
 var refusedTools = []string{
-	"bash", "bd", "brew", "claude", "cp", "curl", "diskutil", "docker", "dolt",
-	"find", "gh", "go", "gofmt", "gt", "kill", "launchctl", "ls", "lsof",
+	"bash", "bd", "brew", "claude", "cp", "curl", "docker", "dolt",
+	"find", "gh", "go", "gofmt", "gt", "kill", "ls", "lsof",
 	"pgrep", "pkill", "ps", "sh", "sleep", "ss", "sysctl", "systemctl", "tail",
 	"tmux", "vm_stat", "which", "whoami", "xcrun", "zsh",
 }

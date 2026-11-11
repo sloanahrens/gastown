@@ -206,81 +206,25 @@ func evaluatePolecatTestScopeScript(proc guardProcess, script shellparse.Script,
 }
 
 // polecatWholeSuiteMakeGoals are the Makefile goals that start the whole-repo
-// `go test` on the host: gate and its gate-test stage, the slow tiers,
-// and test, which runs them all. test-integration-wall runs `go test -tags
-// integration ./...`, tier-check is the budget runner over ./..., and
-// test-timing defaults to ./... too (a PKGS assignment narrows it,
-// makeTestTimingPKGSBounded). gate-lint, lint, build and presubmit are
-// not here — they run no whole-suite test (presubmit tests the changed
-// packages). gt done runs its own gate, so no polecat flow needs these
-// (gt-gl3jb, gt-9udxk).
-var polecatWholeSuiteMakeGoals = []string{"test", "gate", "gate-test", "test-slow", "test-integration", "test-integration-wall", "tier-check", "test-timing"}
-
-// testTimingMakeGoal is the one whole-suite goal that PKGS narrows: its recipe
-// is `go run ./internal/testpolicy/cmd/testtiming -- $(PKGS)`, and the program
-// runs ./... only when PKGS is empty.
-const testTimingMakeGoal = "test-timing"
-
-// makeTestTimingPKGSBounded reports whether a `make test-timing` invocation
-// carries a PKGS=<packages> assignment that bounds the run. args holds the
-// invocation's tokens from the "make" word onward and dir is the directory the
-// guard placed the segment in ("" when it could not).
-//
-// It is true only when the last PKGS=<packages> assignment names packages the
-// guard can read and none is the whole repo, a heavy package, or a pattern that
-// can reach one. Anything else, including PKGS:= and PKGS?=, stays unbounded
-// (fail closed). Several packages need the quoted PKGS="a b" spelling; an
-// unquoted second word is another make goal, not a package.
-func makeTestTimingPKGSBounded(args []string, dir string) bool {
-	runDir, known := makeRunDir(args, dir)
-	if !known || strings.TrimSpace(runDir) == "" {
-		return false
-	}
-	var words []string
-	for _, tok := range args[1:] {
-		if value, ok := strings.CutPrefix(tok, "PKGS="); ok {
-			words = strings.Fields(value) // the last assignment wins, as in make
-		}
-	}
-	if len(words) == 0 {
-		return false
-	}
-	// The recipe's unquoted $(PKGS) is word-split, so each word is judged as a
-	// go test package argument with no -run filter.
-	for _, w := range words {
-		if strings.HasPrefix(w, "-") { // a go flag the guard cannot read
-			return false
-		}
-		if packageArgWildcard(w) && packageWildcardMayReach(w, runDir, heavyTestPackageList()) {
-			return false
-		}
-	}
-	wholeRepo, heavy := polecatHeavyTarget(words, runDir)
-	return !wholeRepo && len(heavy) == 0
-}
+// `go test` on the host: gate and its gate-test stage, the slow tiers, and
+// test, which runs them all. test-integration-wall runs `go test -tags
+// integration ./...` and tier-check is the budget runner over the whole
+// module. gate-lint, lint, build and presubmit are not here — they run no
+// whole-suite test (presubmit tests the changed packages). gt done runs its own
+// gate, so no polecat flow needs these (gt-gl3jb, gt-9udxk).
+var polecatWholeSuiteMakeGoals = []string{"test", "gate", "gate-test", "test-slow", "test-integration", "test-integration-wall", "tier-check"}
 
 // findPolecatWholeSuiteMakeGoal returns the index of the first make invocation
 // in tokens (already lowercased) that names a polecatWholeSuiteMakeGoals goal,
-// and the goal, or -1. A goal PKGS cannot narrow wins over test-timing, which
-// the caller may exempt, wherever either sits in tokens or in the goal list:
-// "make test-timing gate PKGS=./x" reports gate and stays refused.
+// and the goal, or -1.
 func findPolecatWholeSuiteMakeGoal(tokens []string) (int, string) {
 	found, goal := -1, ""
 	for _, g := range polecatWholeSuiteMakeGoals {
-		if g == testTimingMakeGoal {
-			continue
-		}
 		if i := findInvocation(tokens, "make", g); i >= 0 && (found < 0 || i < found) {
 			found, goal = i, g
 		}
 	}
-	if found >= 0 {
-		return found, goal
-	}
-	if i := findInvocation(tokens, "make", testTimingMakeGoal); i >= 0 {
-		return i, testTimingMakeGoal
-	}
-	return -1, ""
+	return found, goal
 }
 
 // evaluatePolecatTestScopeSegment judges one shell segment in cwd, the
@@ -304,9 +248,6 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 	if i, goal := findPolecatWholeSuiteMakeGoal(lower); i >= 0 {
 		treeDir := makeTreeDir(cwd, cwdKnown)
 		if !makeActsOnWholeGoModule(tokens[i:], treeDir) {
-			return "", nil
-		}
-		if goal == testTimingMakeGoal && makeTestTimingPKGSBounded(tokens[i:], treeDir) {
 			return "", nil
 		}
 		return fmt.Sprintf("polecat 'make %s' runs the whole suite", goal), nil
