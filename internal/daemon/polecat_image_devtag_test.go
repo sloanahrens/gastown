@@ -44,6 +44,7 @@ var devTagRevision = devTagRunningCommit[:buildstamp.Len]
 // registry API does, and records every request the step makes.
 type devTagRegistry struct {
 	mu     sync.Mutex
+	repo   string // the repository the fake serves
 	tags   map[string][]byte
 	blobs  map[string][]byte
 	gets   []string
@@ -51,15 +52,33 @@ type devTagRegistry struct {
 	status int // when non-zero, every PUT answers it and stores nothing
 	// onPut, when set, decides the bytes a PUT stores under its tag.
 	onPut func(tag string, body []byte) []byte
+	// uploads counts the blob uploads the fake completed.
+	uploads int
+	// uploadStatus, when set, is the status every blob upload answers, and nothing
+	// is stored.
+	uploadStatus int
 }
 
 // devTagHost is the registry's host:port, the form image_registry carries. The
 // fake answers in process, so nothing listens on it.
 const devTagHost = "registry.test:5001"
 
-// newDevTagRegistry returns an empty fake registry.
+// newDevTagRegistry returns an empty fake registry for the polecat image.
 func newDevTagRegistry() *devTagRegistry {
-	return &devTagRegistry{tags: map[string][]byte{}, blobs: map[string][]byte{}}
+	return newDevTagRegistryAt(imagevalues.PolecatImage)
+}
+
+// newDevTagRegistryAt returns an empty fake registry that serves repo.
+func newDevTagRegistryAt(repo string) *devTagRegistry {
+	return &devTagRegistry{repo: repo, tags: map[string][]byte{}, blobs: map[string][]byte{}}
+}
+
+// hasBlob reports whether the fake holds the blob digest.
+func (r *devTagRegistry) hasBlob(digest string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.blobs[digest]
+	return ok
 }
 
 // devTagTransport serves requests from handler in process: no listener, no
@@ -104,13 +123,37 @@ func (r *devTagRegistry) requests() (gets, puts []string) {
 func (r *devTagRegistry) serve(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	const prefix = "/v2/" + imagevalues.PolecatImage + "/"
+	prefix := "/v2/" + r.repo + "/"
 	path, ok := strings.CutPrefix(req.URL.Path, prefix)
 	if !ok {
 		http.NotFound(w, req)
 		return
 	}
 	switch {
+	case req.Method == http.MethodHead && strings.HasPrefix(path, "blobs/"):
+		if _, found := r.blobs[strings.TrimPrefix(path, "blobs/")]; !found {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	case req.Method == http.MethodPost && path == "blobs/uploads/":
+		// The fake never mounts: every upload opens a session the bytes go to.
+		w.Header().Set("Location", prefix+"blobs/uploads/session")
+		w.WriteHeader(http.StatusAccepted)
+	case req.Method == http.MethodPut && path == "blobs/uploads/session":
+		if r.uploadStatus != 0 {
+			w.WriteHeader(r.uploadStatus)
+			return
+		}
+		body, _ := io.ReadAll(req.Body)
+		digest := req.URL.Query().Get("digest")
+		if devTagDigest(body) != digest {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		r.blobs[digest] = body
+		r.uploads++
+		w.WriteHeader(http.StatusCreated)
 	case req.Method == http.MethodGet && strings.HasPrefix(path, "manifests/"):
 		r.gets = append(r.gets, req.URL.Path)
 		body, found := r.tags[strings.TrimPrefix(path, "manifests/")]
@@ -195,6 +238,9 @@ func devTagDaemon(t *testing.T, reg *devTagRegistry) (*Daemon, *devTagNotifier, 
 	t.Helper()
 	d, _, _, logs := newTierSweepDaemon(t, time.Now(), "gastown")
 	d.patrolConfig.Patrols.TierSweep.Runner = &config.TierSweepRunnerConfig{ImageRegistry: devTagHost}
+	// The CI source is the same fake here, so these tests keep one registry; the
+	// tests in polecat_image_devtag_source_test.go split the two.
+	d.patrolConfig.PolecatImageSourceSetting = devTagHost + "/" + imagevalues.PolecatImage
 	d.buildCommitFn = func() string { return devTagRevision }
 	d.polecatDevTagSeams.runningCommit = func() string { return devTagRunningCommit }
 	d.polecatDevTagSeams.http = &http.Client{Transport: devTagTransport(reg.serve)}

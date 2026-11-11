@@ -1544,6 +1544,54 @@ func TestDaemonPatrolConfig_ValidateContainerNamesNilConfig(t *testing.T) {
 	}
 }
 
+// The dev-tag step reads the polecat image from the CI registry the setting names.
+// Unset, the setting is the images workflow's repository; set, it must be a bare
+// host:port and a repository path, never a URL (gt-f1igu0).
+func TestDaemonPatrolConfig_PolecatImageSource(t *testing.T) {
+	t.Parallel()
+	if got := (&DaemonPatrolConfig{}).PolecatImageSource(); got != DefaultPolecatImageSource {
+		t.Errorf("PolecatImageSource() unset = %q, want the default %q", got, DefaultPolecatImageSource)
+	}
+	var nilCfg *DaemonPatrolConfig
+	if got := nilCfg.PolecatImageSource(); got != DefaultPolecatImageSource {
+		t.Errorf("PolecatImageSource() on nil = %q, want the default", got)
+	}
+	if DefaultPolecatImageSource != "forgejo:3000/bot-registry/gastown-polecat" {
+		t.Errorf("DefaultPolecatImageSource = %q, want forgejo:3000/bot-registry/gastown-polecat", DefaultPolecatImageSource)
+	}
+	for _, tt := range []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{"unset", `{}`, ""},
+		{"host and repository", `{"polecat_image_source":"registry.internal:5000/owner/gastown-polecat"}`, ""},
+		{"scheme", `{"polecat_image_source":"https://forgejo:3000/bot-registry/gastown-polecat"}`, "not a URL with a scheme"},
+		{"no repository path", `{"polecat_image_source":"forgejo:3000"}`, "want a repository path after host:port"},
+		{"no port", `{"polecat_image_source":"forgejo/bot-registry/gastown-polecat"}`, "want host:port"},
+		{"uppercase repository", `{"polecat_image_source":"forgejo:3000/Bot-Registry/gastown-polecat"}`, "want a repository path of lowercase"},
+		{"whitespace", `{"polecat_image_source":"forgejo:3000/bot registry/gastown-polecat"}`, "want no whitespace"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(tt.body), &cfg); err != nil {
+				t.Fatalf("decode %s = %v", tt.body, err)
+			}
+			err := ValidateDaemonPatrolConfig(&cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateDaemonPatrolConfig() = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ValidateDaemonPatrolConfig() = %v, want an error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // A town carries the container compose file only when it was set up as a
 // container town, and the answer reads no settings, so it holds when they
 // cannot be read. A compose file that cannot be statted for a reason other than

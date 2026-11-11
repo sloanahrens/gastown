@@ -41,13 +41,14 @@ func (c *Client) ReadManifestBody(ctx context.Context, repo, ref string) (Manife
 }
 
 // PutManifestBody stores body as the manifest of tag in repo, sent as
-// contentType. The registry answers 2xx once it holds the bytes. A repo or tag
+// contentType. tag may be a digest, which is how an index's child manifests are
+// stored. The registry answers 2xx once it holds the bytes. A repo or tag
 // that fails validation returns ErrBadName and sends no request.
 func (c *Client) PutManifestBody(ctx context.Context, repo, tag, contentType string, body []byte) error {
 	if !ValidRepo(repo) {
 		return fmt.Errorf("put %q: %w", repo, ErrBadName)
 	}
-	if !ValidTag(tag) {
+	if !ValidTag(tag) && !ValidDigest(tag) {
 		return fmt.Errorf("put %q: %w", tag, ErrBadName)
 	}
 	path := "/v2/" + repo + "/manifests/" + tag

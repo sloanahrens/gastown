@@ -107,12 +107,13 @@ func readDevTag(ctx context.Context, c *registry.Client, repo string) devTagStat
 
 // copyPolecatDevTag moves dev in host to the running commit. It returns nil when
 // dev already carries the running commit, and when it moved the tag and read the
-// label back, logging the one line for a move. The source is the registry's tag
-// named by the build's own revision, never dev, and its label must be the running
-// commit before anything is written. The write is a manifest PUT under the dev
-// tag: the source and dev share the repository, so no layer moves. The result is
-// read back, and a dev tag that does not read back as the source is put back as
-// it was.
+// label back, logging the one line for a move. The source is the polecat image in
+// the CI registry (daemon.polecat_image_source), read by the build's own revision
+// and never by dev; the digest the values file names stands in only when that tag
+// is absent. The source's label must be the running commit before anything is
+// written. The source's blobs are copied into host, then a manifest PUT under the
+// dev tag. The result is read back, and a dev tag that does not read back as the
+// source is put back as it was.
 func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 	repo := imagevalues.PolecatImage
 	running := d.polecatDevTagRunningCommit()
@@ -151,16 +152,30 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 		}
 	}
 
-	src, err := c.InspectImage(ctx, repo, rev, polecatDevTagOS, polecatDevTagArch)
+	// The source is the CI registry's copy of the image, not the sandbox's: the
+	// images workflow pushes it there, tagged with the build stamp.
+	// The setting is checked here as well as at load: its host and path reach a
+	// request URL, so a value the validator refuses is never sent.
+	if err := d.patrolConfig.ValidatePolecatImageSource(); err != nil {
+		return devTagFailure(host, running, dev, err.Error())
+	}
+	ciRepo := d.patrolConfig.PolecatImageSource()
+	// The validator above refuses a setting with no repository path, so the split
+	// always has one.
+	ciHost, ciPath, _ := strings.Cut(ciRepo, "/")
+	ci := &registry.Client{Base: config.ImageRegistryBase(ciHost), HTTP: d.polecatDevTagSeams.http}
+	ref, src, err := d.readPolecatDevTagSource(ctx, ci, ciPath, rev, running)
 	if err != nil {
-		return devTagFailure(host, running, dev, fmt.Sprintf("cannot read the source tag %s: %v", rev, err))
+		return devTagFailure(host, running, dev, fmt.Sprintf("cannot read the source tag %s from %s: %v", rev, ciRepo, err))
 	}
 	if got := src.Labels[imagevalues.CommitLabel]; got != running {
-		return devTagFailure(host, running, dev, fmt.Sprintf("the source tag %s carries gt commit %s, not the running commit, so it is not copied", rev, got))
+		return devTagFailure(host, running, dev, fmt.Sprintf("the source %s at %s carries gt commit %s, not the running commit, so it is not copied", ciRepo, ref, got))
 	}
-	source, err := c.ReadManifestBody(ctx, repo, rev)
+	// The blobs go first, so the tag written below never names a blob the sandbox
+	// lacks. The source manifest is the one the copy returns, digest-checked.
+	source, err := ci.CopyManifestTo(ctx, c, ciPath, ref, repo)
 	if err != nil {
-		return devTagFailure(host, running, dev, fmt.Sprintf("cannot read the source manifest %s: %v", rev, err))
+		return devTagFailure(host, running, dev, fmt.Sprintf("the copy of %s from %s to %s failed: %v", ref, ciRepo, host, err))
 	}
 
 	// The dev tag as it stands is kept, so a copy that does not read back can be
@@ -178,7 +193,7 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 	after := readDevTag(ctx, c, repo)
 	if putErr == nil && after.readErr == nil && after.present && after.digest == source.Digest && after.label == running {
 		d.logger.Printf("polecat image: %s/%s:%s moved to gt commit %s from %s, copied from %s; the label reads back %s",
-			host, repo, polecatDevTagName, running, dev.describe(), rev, after.label)
+			host, repo, polecatDevTagName, running, dev.describe(), ciRepo+":"+ref, after.label)
 		return nil
 	}
 
@@ -197,6 +212,39 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 		}
 	}
 	return devTagFailure(host, running, dev, why)
+}
+
+// readPolecatDevTagSource inspects the source image in the CI registry. It asks
+// for the tag named by the build stamp rev. Only when that tag is absent does it
+// fall back to the digest deploy/values/images.yaml pairs with the running commit,
+// when the town has that file and it names the running commit; any other answer
+// keeps the 404 as the error. It returns the reference it read and the image.
+func (d *Daemon) readPolecatDevTagSource(ctx context.Context, ci *registry.Client, repo, rev, running string) (string, registry.ImageInfo, error) {
+	src, err := ci.InspectImage(ctx, repo, rev, polecatDevTagOS, polecatDevTagArch)
+	if !errors.Is(err, registry.ErrNotFound) {
+		return rev, src, err
+	}
+	digest, ok, verr := d.valuesPolecatDigest(running)
+	if verr != nil {
+		return rev, registry.ImageInfo{}, fmt.Errorf("%w; the values file could not answer for the fallback: %v", err, verr)
+	}
+	if !ok {
+		return rev, registry.ImageInfo{}, err
+	}
+	src, err = ci.InspectImage(ctx, repo, digest, polecatDevTagOS, polecatDevTagArch)
+	return digest, src, err
+}
+
+// valuesPolecatDigest is the digest of the polecat image deploy/values/images.yaml
+// names for the running commit. It reports false when the town has no such file
+// or the file pairs another commit, and an error when the file cannot be read.
+func (d *Daemon) valuesPolecatDigest(running string) (string, bool, error) {
+	v, ok, err := imagevalues.LoadIn(filepath.Join(d.config.TownRoot, "gastown"))
+	if err != nil || !ok || v.Commit != running {
+		return "", false, err
+	}
+	_, digest, found := strings.Cut(v.Polecat, "@")
+	return digest, found, nil
 }
 
 // polecatDevTagAncestor reports whether ancestor is an ancestor of descendant in
