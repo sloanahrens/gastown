@@ -1,18 +1,20 @@
 package daemon
 
-// The CI runner's Go build cache trim (gt-gg9hv.57). The forgejo runner runs the
-// CI gate jobs inside its dind container, and their Go build cache is the named
-// volume ci-gocache in that container's Docker data root. Nothing trimmed that
-// volume, and a full control-VM data disk got the runner evicted with the rest
-// of the node's pods.
+// The CI runner's cache trim (gt-gg9hv.57). The forgejo runner runs the CI gate
+// jobs inside its dind container, and their caches are named volumes in that
+// container's Docker data root. Nothing trimmed those volumes, and a full
+// control-VM data disk got the runner evicted with the rest of the node's pods.
 //
 // The disk_maintenance patrol runs this trim on its own interval
 // (ci_cache_trim_interval), in any window and whether or not the town is busy,
-// as the shared cache trim does (gt-gg9hv.48). Each run is one exec into the
-// runner's dind container: a constant script removes the volume's entries that
-// have gone unwritten for ci_cache_max_age, and reports the volume's size before
-// and after. ci-gomod and ci-npm are not touched, and nothing outside the one
-// volume path is named by the exec.
+// as the shared cache trim does (gt-gg9hv.48). Each run lists the runner's pod
+// once, then execs once per volume in ciCacheVolumes, in table order, into the
+// pod's dind container. A volume with no cap (ci-gocache) gets the age rule
+// alone: a constant script removes the volume's entries that have gone unwritten
+// for ci_cache_max_age. A capped volume (ci-npm) gets the same removal only while
+// it is over its cap; at or under the cap the script removes nothing. Each exec
+// reports the volume's size before and after. ci-gomod is not in the table: its
+// trim is a sibling's. Nothing outside a table root is named by an exec.
 //
 // Dry run is the patrol's default, as for every maintenance target: the exec runs
 // a script that lists what it would remove and removes nothing.
@@ -47,13 +49,16 @@ const (
 	// Docker data root the named volumes live under.
 	ciCacheDindMount = "/var/lib/docker"
 
-	// ciCacheVolume is the named volume the CI gate's Go build cache lives in
-	// (gocacheVolume in deploy/k8s/forgejo-runner/runner.go).
-	ciCacheVolume = "ci-gocache"
+	// The named volumes the trim runs over, as the runner names them
+	// (gocacheVolume and npmCacheVolume in deploy/k8s/forgejo-runner/runner.go).
+	// TestCICacheTrimConstantsMatchTheRunnerManifest holds them equal to the
+	// runner's rendered config.
+	ciCacheGocacheVolume = "ci-gocache"
+	ciCacheNpmVolume     = "ci-npm"
 
-	// ciCacheRoot is the one path the trim reads and removes under. It is a
-	// constant: no path is built from a setting or from the reply.
-	ciCacheRoot = ciCacheDindMount + "/volumes/" + ciCacheVolume + "/_data"
+	// ciCacheNpmCapKiB is the size above which the npm cache is trimmed: 1 GiB. It
+	// is a constant: no setting names it.
+	ciCacheNpmCapKiB = 1 << 20
 
 	// ciCacheMissingPathExit is the status the script exits with when the volume
 	// path is not in the container. kubectl exec passes a remote command's status
@@ -64,10 +69,49 @@ const (
 	// It is not a target name, so it cannot collide with one.
 	ciCacheTrimName = "ci_cache_trim"
 
-	// ciCacheNoOpKey is the attention item key of a trim that removed no file while
-	// the volume stayed over ci_cache_warn_bytes.
+	// ciCacheNoOpKey is the attention item key of the uncapped volume's trim that
+	// removed no file while the volume stayed over ci_cache_warn_bytes. A capped
+	// volume's key is this one with its name after it (ciCacheNoOpKeyOf).
 	ciCacheNoOpKey = "ci-cache-trim-noop"
 )
+
+// ciCacheVolume is one named volume the trim runs over. root is the one path the
+// exec reads and removes under: a constant, with no path built from a setting or
+// from a reply. capKiB is the size above which the volume is trimmed; 0 means no
+// cap, so the age rule alone applies.
+type ciCacheVolume struct {
+	name   string
+	root   string
+	capKiB int64
+}
+
+// ciCacheVolumes is the table a pass runs, in order.
+var ciCacheVolumes = []ciCacheVolume{
+	{name: ciCacheGocacheVolume, root: ciCacheVolumeRoot(ciCacheGocacheVolume)},
+	{name: ciCacheNpmVolume, root: ciCacheVolumeRoot(ciCacheNpmVolume), capKiB: ciCacheNpmCapKiB},
+}
+
+// ciCacheVolumeRoot is the data path of the named volume in the dind container's
+// Docker data root.
+func ciCacheVolumeRoot(name string) string {
+	return ciCacheDindMount + "/volumes/" + name + "/_data"
+}
+
+// ciCacheNoOpKeyOf is the attention item key of a volume's no-op reading. The
+// uncapped volume keeps the key it has always had; a capped volume names itself.
+func ciCacheNoOpKeyOf(v ciCacheVolume) string {
+	if v.capKiB == 0 {
+		return ciCacheNoOpKey
+	}
+	return ciCacheNoOpKey + "-" + v.name
+}
+
+// ciCacheExecTarget is the cluster and the runner pod a pass's execs go to.
+type ciCacheExecTarget struct {
+	kubeconfig  string
+	kubeContext string
+	pod         string
+}
 
 // ciCacheListScript is the dry run's program: it lists the files the apply would
 // remove and removes nothing. Its arguments are the volume root and the age in
@@ -98,6 +142,31 @@ root=$1; age=$2
 list=$(mktemp)
 trap 'rm -f "$list"' EXIT
 before=$(du -sk "$root" | cut -f1)
+find "$root" -mindepth 2 -type f -mmin +"$age" -print -delete > "$list"
+find "$root" -mindepth 2 -type d -empty -delete
+removed=$(wc -l < "$list" | tr -d ' ')
+after=$(du -sk "$root" | cut -f1)
+echo "before_kib=$before"
+echo "removed=$removed"
+echo "after_kib=$after"
+`
+
+// ciCacheCappedTrimScript is the capped volume's apply program. Its arguments are
+// the volume root, the age in minutes and the cap in KiB. At or under the cap it
+// removes nothing and reports the size as before and after; over the cap it does
+// what ciCacheTrimScript does, and reports the same three lines.
+const ciCacheCappedTrimScript = `set -eu
+root=$1; age=$2; cap=$3
+[ -d "$root" ] || { echo "volume path not found" >&2; exit 3; }
+before=$(du -sk "$root" | cut -f1)
+if [ "$before" -le "$cap" ]; then
+echo "before_kib=$before"
+echo "removed=0"
+echo "after_kib=$before"
+exit 0
+fi
+list=$(mktemp)
+trap 'rm -f "$list"' EXIT
 find "$root" -mindepth 2 -type f -mmin +"$age" -print -delete > "$list"
 find "$root" -mindepth 2 -type d -empty -delete
 removed=$(wc -l < "$list" | tr -d ' ')
@@ -257,11 +326,13 @@ func (d *Daemon) runCICacheTrimPass(mode string) {
 	d.diskMaintSchedule.recordRetry(ciCacheTrimName, concluded.Add(cacheTrimRetryInterval))
 }
 
-// ciCacheTrim runs the trim once and reports whether it reached a verdict. A run
-// that removed files, or found nothing to remove, is a verdict. A run that could
-// not start, or whose exec or reply failed, is a failed run that says why and
-// removes nothing: a missing path or a stopped container is never read as a
-// volume with nothing to trim.
+// ciCacheTrim runs one pass over the volume table and reports whether every volume
+// reached a verdict. The runner's pod is listed once; each volume then gets its
+// own exec, in table order, so a failure on one volume is logged under that
+// volume and does not stop the next. A run that removed files, or found nothing
+// to remove, is a verdict. A volume whose exec or reply failed is a failed run
+// that says why and removes nothing: a missing path or a stopped container is
+// never read as a volume with nothing to trim.
 func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
 	_, maxAge, warn, err := ciCacheTrimSettings(d.patrolConfig)
@@ -285,67 +356,103 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 		return false
 	}
 
-	script := ciCacheListScript
-	if mode == agentconfig.DiskMaintenanceModeApply {
-		script = ciCacheTrimScript
+	at := ciCacheExecTarget{kubeconfig: kubeconfig, kubeContext: kubeContext, pod: pod}
+	verdict := true
+	for _, v := range ciCacheVolumes {
+		if !d.ciCacheTrimVolume(ctx, mode, at, v, maxAge, warn) {
+			verdict = false
+		}
 	}
+	return verdict
+}
+
+// ciCacheTrimProgram is the program a volume's exec runs, and the arguments that
+// follow its root and age. A dry run lists for every volume. An apply on a capped
+// volume passes the cap, and an apply on an uncapped volume runs the age rule
+// alone, exactly as the trim always has.
+func ciCacheTrimProgram(mode string, v ciCacheVolume) (string, []string) {
+	switch {
+	case mode != agentconfig.DiskMaintenanceModeApply:
+		return ciCacheListScript, nil
+	case v.capKiB > 0:
+		return ciCacheCappedTrimScript, []string{strconv.FormatInt(v.capKiB, 10)}
+	default:
+		return ciCacheTrimScript, nil
+	}
+}
+
+// ciCacheTrimVolume runs the trim over one volume and reports whether it reached a
+// verdict. A volume whose exec or reply failed is a failed run that names the
+// volume and removes nothing.
+func (d *Daemon) ciCacheTrimVolume(ctx context.Context, mode string, at ciCacheExecTarget, v ciCacheVolume, maxAge time.Duration, warn int64) bool {
 	minutes := int64(maxAge / time.Minute)
-	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, kubeconfig, kubeContext,
-		"exec", "-n", ciCacheNamespace, pod, "-c", ciCacheContainer, "--",
-		"sh", "-c", script, "ci-cache-trim", ciCacheRoot, strconv.FormatInt(minutes, 10))
+	script, extra := ciCacheTrimProgram(mode, v)
+	args := append([]string{"exec", "-n", ciCacheNamespace, at.pod, "-c", ciCacheContainer, "--",
+		"sh", "-c", script, "ci-cache-trim", v.root, strconv.FormatInt(minutes, 10)}, extra...)
+	stdout, stderr, err := d.ciCacheTrimKubectlRun(ctx, at.kubeconfig, at.kubeContext, args...)
 	if err != nil {
 		var status interface{ ExitCode() int }
 		if errors.As(err, &status) && status.ExitCode() == ciCacheMissingPathExit {
-			d.ciCacheTrimLogf("volume path missing", "disk_maintenance: ci cache trim: the volume path %s is not in the %s container; nothing trimmed", ciCacheRoot, ciCacheContainer)
+			d.ciCacheTrimLogf("volume path missing "+v.name, "disk_maintenance: ci cache trim: %s: the volume path %s is not in the %s container; nothing trimmed", v.name, v.root, ciCacheContainer)
 			return false
 		}
-		d.ciCacheTrimLogf("exec failed", "disk_maintenance: ci cache trim: the exec into the %s container failed: %v: %s; nothing trimmed",
-			ciCacheContainer, err, lastLine(string(stderr)))
+		d.ciCacheTrimLogf("exec failed "+v.name, "disk_maintenance: ci cache trim: %s: the exec into the %s container failed: %v: %s; nothing trimmed",
+			v.name, ciCacheContainer, err, lastLine(string(stderr)))
 		return false
 	}
 	reply, err := parseCICacheTrimReply(stdout)
 	if err != nil {
-		d.ciCacheTrimLogf("reply unreadable", "disk_maintenance: ci cache trim: the volume's reply could not be read: %v; nothing trimmed", err)
+		d.ciCacheTrimLogf("reply unreadable "+v.name, "disk_maintenance: ci cache trim: %s: the volume's reply could not be read: %v; nothing trimmed", v.name, err)
 		return false
 	}
 
 	before := polecatimage.Human(reply.beforeKiB * 1024)
 	after := polecatimage.Human(reply.afterKiB * 1024)
 	ageText := ciCacheAgeText(time.Duration(minutes) * time.Minute)
-	if mode == agentconfig.DiskMaintenanceModeApply {
-		d.logger.Printf("disk_maintenance: ci cache trim: removed %d files, %s to %s (older than %s)",
-			reply.removed, before, after, ageText)
-	} else {
-		d.logger.Printf("disk_maintenance: ci cache trim dry_run: would remove %d files, of %s (older than %s); nothing removed",
-			reply.removed, before, ageText)
+	switch {
+	case mode == agentconfig.DiskMaintenanceModeApply:
+		d.logger.Printf("disk_maintenance: ci cache trim: %s: removed %d files, %s to %s (older than %s)",
+			v.name, reply.removed, before, after, ageText)
+	case v.capKiB > 0:
+		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d files, of %s (older than %s) while it is over its cap of %s; nothing removed",
+			v.name, reply.removed, before, ageText, polecatimage.Human(v.capKiB*1024))
+	default:
+		d.logger.Printf("disk_maintenance: ci cache trim dry_run: %s: would remove %d files, of %s (older than %s); nothing removed",
+			v.name, reply.removed, before, ageText)
 	}
-	d.ciCacheTrimMeasure(mode, reply, warn)
+	d.ciCacheTrimMeasure(mode, v, reply, warn)
 	return true
 }
 
-// ciCacheTrimMeasure raises or clears the no-op item from a trim's reading: a
-// trim that removed no file while the volume is over the warn figure raises it,
-// and a reading under the figure clears it. A reading over the figure after
-// removals leaves the item as it is. A dry run measures nothing, since it
-// removes nothing by design.
-func (d *Daemon) ciCacheTrimMeasure(mode string, reply ciCacheTrimReply, warn int64) {
+// ciCacheTrimMeasure raises or clears the volume's no-op item from a trim's
+// reading. The threshold is the warn figure for an uncapped volume and the
+// volume's cap for a capped one. A trim that removed no file while the volume is
+// over the threshold raises the item, and a reading at or under it clears the
+// item. A reading over the threshold after removals leaves the item as it is. A
+// dry run measures nothing, since it removes nothing by design.
+func (d *Daemon) ciCacheTrimMeasure(mode string, v ciCacheVolume, reply ciCacheTrimReply, warn int64) {
 	if mode != agentconfig.DiskMaintenanceModeApply {
 		return
 	}
+	key := ciCacheNoOpKeyOf(v)
+	threshold, limit := warn, "the warn figure of "
+	if v.capKiB > 0 {
+		threshold, limit = v.capKiB*1024, "its cap of "
+	}
 	after := reply.afterKiB * 1024
-	if after <= warn {
-		d.cacheTrimNoOp.clear(ciCacheNoOpKey)
+	if after <= threshold {
+		d.cacheTrimNoOp.clear(key)
 		return
 	}
 	if reply.removed != 0 {
 		return
 	}
 	d.cacheTrimNoOp.raise(attention.Item{
-		Key:      ciCacheNoOpKey,
+		Key:      key,
 		Kind:     attention.KindCacheTrimNoOp,
 		Severity: attention.SeverityLow,
-		Summary: fmt.Sprintf("CI cache trim removed no file while the Go build cache holds %s, over the warn figure of %s: nothing there is older than the max age, or the trim is not reaching it",
-			polecatimage.Human(after), polecatimage.Human(warn)),
+		Summary: fmt.Sprintf("CI cache trim of %s removed no file while the volume holds %s, over %s%s: nothing there is older than the max age, or the trim is not reaching it",
+			v.name, polecatimage.Human(after), limit, polecatimage.Human(threshold)),
 	})
 }
 
