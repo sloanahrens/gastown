@@ -66,8 +66,16 @@ func (d *Daemon) runHeartbeat(sigChan <-chan os.Signal, run func()) os.Signal {
 				continue
 			}
 			d.logSignalDuringHeartbeat(sig)
+			// A SIGTERM drains the landing pass in flight before the cancel, so
+			// the cancel never cuts a landing step; a second signal during that
+			// wait ends it at once (shutdown_drain.go).
+			second := isDrainSignal(sig) && d.drainForShutdown(sigChan) != nil
 			if d.cancel != nil {
 				d.cancel()
+			}
+			if second {
+				d.logger.Printf("Second signal during the drain: not waiting for heartbeat step %q", d.heartbeatStepName())
+				return sig
 			}
 			grace := d.signalGrace()
 			wait := time.NewTimer(grace)

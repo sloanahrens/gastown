@@ -23,3 +23,9 @@ func isLifecycleSignal(sig os.Signal) bool {
 func isReloadRestartSignal(sig os.Signal) bool {
 	return sig == syscall.SIGUSR2
 }
+
+// isDrainSignal reports whether sig is the orchestrator's stop, which drains the
+// landing pass in flight before the daemon shuts down (shutdown_drain.go).
+func isDrainSignal(sig os.Signal) bool {
+	return sig == syscall.SIGTERM
+}

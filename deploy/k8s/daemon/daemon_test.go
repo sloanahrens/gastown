@@ -1853,6 +1853,27 @@ func TestDeploymentRendersAZeroGracePeriod(t *testing.T) {
 	}
 }
 
+// TestShutdownDrainFitsTheRenderedGrace holds the SIGTERM drain's bound to the
+// rendered grace period. The drain waits ShutdownDrainBound for the landing step
+// in flight, then ShutdownBudget to stop Dolt and save the state, and a heartbeat
+// in flight gets heartbeatSignalGrace after that; the grace must outlast all three
+// or the kubelet's SIGKILL lands mid-drain (gt-99ys4n).
+func TestShutdownDrainFitsTheRenderedGrace(t *testing.T) {
+	t.Parallel()
+
+	drainBound := daemonDuration(t, "shutdown_drain.go", "ShutdownDrainBound")
+	if drainBound != landingPassDrainBound {
+		t.Errorf("internal/daemon ShutdownDrainBound is %s, but landingPassDrainBound is %s: the pod's grace is sized for the second", drainBound, landingPassDrainBound)
+	}
+	drain := drainBound + daemonDuration(t, "dolt.go", "ShutdownBudget") + daemonDuration(t, "heartbeat_signal.go", "heartbeatSignalGrace")
+
+	m := mustBuild(t, goldenValues(t))
+	grace := *m.Deployment.Spec.Template.Spec.TerminationGracePeriodSeconds
+	if grace <= int64(drain/time.Second) {
+		t.Errorf("the pod's grace period = %ds, want more than the drain's %s (the drain bound, the shutdown budget and the heartbeat grace)", grace, drain)
+	}
+}
+
 // TestPodHasNoPreStopAndGraceCoversTheDrain holds the shutdown contract: the pod
 // carries no preStop hook, so SIGTERM plus the grace period is the drain, and
 // the grace period is at least the drain bound the package computes from the

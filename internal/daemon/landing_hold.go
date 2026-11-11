@@ -8,6 +8,9 @@ import "sync"
 const (
 	landingHoldUpgradeRestart = "upgrade-restart"
 	landingHoldRebuildOM      = "rebuild-om"
+	// landingHoldShutdownDrain is the SIGTERM drain's hold (shutdown_drain.go):
+	// the pass in flight finishes and no new one starts while the daemon stops.
+	landingHoldShutdownDrain = "shutdown-drain"
 )
 
 // landingHolds is the daemon's set of holds on new landing passes: the landing

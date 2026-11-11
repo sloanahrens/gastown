@@ -688,6 +688,11 @@ type tierSweepBeadStore interface {
 // is due: a cycle runs the shell tier and then the integration suite, so
 // inline it would stall the heartbeat.
 func (d *Daemon) triggerTierSweep() {
+	// A SIGTERM drain starts no new sweep: the daemon is stopping
+	// (shutdown_drain.go).
+	if d.draining.Load() {
+		return
+	}
 	now := d.clk().Now()
 	// The guard's state is checked before any reason can return: a cycle past
 	// its bound holds every later trigger off, and that is the state a silent
