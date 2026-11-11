@@ -111,7 +111,6 @@ func TestManifestMirrorMatches(t *testing.T) {
 // and TestManifestHasNoOverlappingRows holds the set to one owner per path.
 var newManifestRows = []manifestRow{
 	// Town-root state.
-	{path: "power-state", owner: OwnerDaemon},
 	{path: ".events.jsonl.lock", owner: OwnerDaemon},
 	{path: ".dolt-archive", owner: OwnerDaemon},
 	{path: ".beads-wisp", owner: OwnerDaemon},

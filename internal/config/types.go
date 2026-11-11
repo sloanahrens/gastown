@@ -246,8 +246,8 @@ type TownSettings struct {
 	// fails closed, and the overseer sets it before the install that reads it.
 	Operator *OperatorConfig `json:"operator,omitempty"`
 
-	// ForgejoStack locates the Forgejo compose stack gt power starts and
-	// stops.
+	// ForgejoStack locates the Forgejo compose stack. No gt command starts or
+	// stops it since gt power was removed (gt-a2uug4.17).
 	ForgejoStack *ForgejoStackConfig `json:"forgejo,omitempty"`
 }
 

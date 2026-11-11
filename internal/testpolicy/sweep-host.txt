@@ -8,9 +8,9 @@
 # in that package's test files, not proof that the package cannot run in the
 # container. The first full runner run confirms or removes each line.
 #
-# Seven seed candidates are not listed because the integration tag adds no
+# Six seed candidates are not listed because the integration tag adds no
 # file to them at all, so no sweep ever runs them: internal/templates,
-# internal/resourcesampler, internal/procid, internal/power, internal/signing,
+# internal/resourcesampler, internal/procid, internal/signing,
 # cmd/gt-installer, and internal/ominstaller (whose only match is
 # "//go:build !integration"). Listing one of them fails
 # TestSweepHostNamesOnlyExistingPackages, so that paragraph is checked, not

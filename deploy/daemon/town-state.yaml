@@ -46,9 +46,6 @@ entries:
   - path: ESTOP.<rig>
     owner: shared
     why: the per-rig ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it
-  - path: power-state
-    owner: daemon
-    why: the last requested power state gt power writes and the daemon reads (internal/power/power.go StatePath)
   - path: .events.jsonl.lock
     owner: daemon
     why: the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave
