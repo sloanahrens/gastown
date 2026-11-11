@@ -50,7 +50,7 @@ const (
 	cloudCheckKeyEnv = "GOOGLE_APPLICATION_CREDENTIALS"
 
 	// cloudCheckAlertKey is the one escalation a failing run raises. A repeated
-	// failure refreshes it instead of opening another; a good run clears it.
+	// failure refreshes it, not a second one; a run exiting 0 that wrote clears it.
 	cloudCheckAlertKey = "cloud_check:failed"
 )
 
@@ -146,6 +146,17 @@ func cloudCheckCommand(cfg *DaemonPatrolConfig) string {
 	return agentconfig.CloudCheckDefaultCommand
 }
 
+// errCloudCheckNoStatus marks a run that exited 0 without writing its status file.
+var errCloudCheckNoStatus = errors.New("exit 0 without writing the status file")
+
+// cloudCheckWritten reports whether the run that started at started wrote the
+// status file at path. A file an earlier run left is older than started, and a
+// file that cannot be read after the run was not written by it.
+func cloudCheckWritten(path string, started time.Time) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.ModTime().Before(started)
+}
+
 // cloudCheckStatusPath is the status file for a town: the path the dashboard
 // reads.
 func cloudCheckStatusPath(townRoot string) string {
@@ -201,7 +212,8 @@ func (d *Daemon) runCloudCheckPatrol() {
 // cloudCheckPass runs one check and logs its outcome: after a run, one line with
 // the exit status and the duration. The completion time is recorded whether the
 // check succeeded or not, so a failing run is retried at the next interval
-// rather than on every check tick.
+// rather than on every check tick. An exit 0 that wrote no status is a failed
+// run: the status the dashboard shows is then an earlier run's, not this one's.
 func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	keyFile := s.keyFile(cloudCheckSettings(d.patrolConfig))
 	// The check cannot reach the cloud without the key, and a run without it
@@ -226,6 +238,10 @@ func (d *Daemon) cloudCheckPass(s cloudCheckSeams, started time.Time) {
 	d.cloudCheckLastRun.Store(s.now().UnixNano())
 
 	status := runExitStatus(err)
+	if err == nil && !cloudCheckWritten(statusPath, started) {
+		err = errCloudCheckNoStatus
+		status = "exit 0 without a new status"
+	}
 	if err != nil {
 		// The message names the command, its exit status and the status file.
 		// It never carries the child's output, which is the check's report and
