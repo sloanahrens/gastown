@@ -399,6 +399,96 @@ func TestSeatsBackendAndSandbox(t *testing.T) {
 	}
 }
 
+// A profile no seat runs on is still a profile in the town's settings, so it
+// must name its gateway: nothing else validates it, and no defaults apply. A
+// profile a seat runs on keeps the behaviour it had, gateway default included
+// (gt-rb4sf4).
+func TestSeatsSandboxProfileGateway(t *testing.T) {
+	t.Parallel()
+
+	seats := map[string]SeatConfig{"deepseek-flash": {Cap: 1, Backend: BackendOpenShell, Sandbox: "polecat-default"}}
+	cases := []struct {
+		name     string
+		profiles map[string]SandboxProfile
+		wantErr  string
+	}{
+		{
+			name: "a profile outside every seat must name its gateway",
+			profiles: map[string]SandboxProfile{
+				"polecat-default": {Gateway: "k8s", Image: "i", Policy: "deploy/p.yaml"},
+				"orphan":          {Image: "i", Policy: "deploy/p.yaml"},
+			},
+			wantErr: "sandboxes.orphan.gateway: required; name the gateway the profile runs on",
+		},
+		{
+			name: "a seat's profile that names no gateway still runs where it did",
+			profiles: map[string]SandboxProfile{
+				"polecat-default": {Image: "i", Policy: "deploy/p.yaml"},
+			},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ts := &TownSettings{PolecatPool: &PolecatPool{Seats: seats}, Sandboxes: c.profiles}
+			got, err := Seats(ts, nil)
+			if c.wantErr != "" {
+				if err == nil || err.Error() != c.wantErr {
+					t.Fatalf("err = %v, want %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Seats: %v", err)
+			}
+			if len(got) != 1 || got[0].Sandbox != "polecat-default" {
+				t.Fatalf("seats = %+v", got)
+			}
+		})
+	}
+}
+
+// With no polecat pool there are no seats, but a profile still must name its
+// gateway: the refusal reaches the nil-pool path too (gt-rb4sf4).
+func TestSeatsNoPoolSandboxProfileGateway(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		profiles map[string]SandboxProfile
+		wantErr  string
+	}{
+		{
+			name:     "a profile with no pool must name its gateway",
+			profiles: map[string]SandboxProfile{"orphan": {Image: "i", Policy: "deploy/p.yaml"}},
+			wantErr:  "sandboxes.orphan.gateway: required; name the gateway the profile runs on",
+		},
+		{
+			name:     "a profile with no pool that names its gateway is accepted",
+			profiles: map[string]SandboxProfile{"orphan": {Gateway: "k8s", Image: "i", Policy: "deploy/p.yaml"}},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ts := &TownSettings{Sandboxes: c.profiles}
+			got, err := Seats(ts, nil)
+			if c.wantErr != "" {
+				if err == nil || err.Error() != c.wantErr {
+					t.Fatalf("err = %v, want %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Seats: %v", err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("seats = %+v, want none", got)
+			}
+		})
+	}
+}
+
 // pinned_only decodes from a seat entry as a boolean and defaults to false, so
 // a seat map without it reads as it did before the key existed (gt-zor86).
 func TestSeatsPinnedOnlyFromSettingsFile(t *testing.T) {
@@ -466,7 +556,7 @@ func TestSandboxesFromSettingsFile(t *testing.T) {
 		t.Parallel()
 		var ts TownSettings
 		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
-			"sandboxes":{"polecat-default":{"image":"gastown-polecat:dev","policy":"deploy/polecat/policy.yaml",
+			"sandboxes":{"polecat-default":{"gateway":"k8s","image":"gastown-polecat:dev","policy":"deploy/polecat/policy.yaml",
 				"driver":"kubernetes","node_selector":{"gt.dev/pool":"sandbox"},
 				"tolerations":[{"key":"gt.dev/sandbox","operator":"Equal","value":"true","effect":"NoSchedule"}],
 				"priority_class":"gt-sandbox","runtime_class":"gvisor",
@@ -523,7 +613,7 @@ func TestSandboxProfileWithDefaults(t *testing.T) {
 func TestSandboxProfileValidate(t *testing.T) {
 	t.Parallel()
 
-	ok := SandboxProfile{Image: "i", Policy: "deploy/p.yaml"}
+	ok := SandboxProfile{Image: "i", Policy: "deploy/p.yaml", Gateway: "k8s"}
 	cases := []struct {
 		name    string
 		mutate  func(*SandboxProfile)
@@ -534,6 +624,8 @@ func TestSandboxProfileValidate(t *testing.T) {
 		{"fractional cpu", func(p *SandboxProfile) { p.CPU = "1.5" }, ""},
 		{"missing image", func(p *SandboxProfile) { p.Image = "" }, "sandboxes.p.image: required"},
 		{"missing policy", func(p *SandboxProfile) { p.Policy = "" }, "sandboxes.p.policy: required"},
+		{"missing gateway", func(p *SandboxProfile) { p.Gateway = "" }, "sandboxes.p.gateway: required; name the gateway the profile runs on"},
+		{"missing gateway with no image", func(p *SandboxProfile) { p.Gateway = ""; p.Image = "" }, "sandboxes.p.image: required"},
 		{"absolute policy", func(p *SandboxProfile) { p.Policy = "/etc/policy.yaml" }, `sandboxes.p.policy "/etc/policy.yaml": want a path inside the rig repo root`},
 		{"parent-escaping policy", func(p *SandboxProfile) { p.Policy = "../policy.yaml" }, `sandboxes.p.policy "../policy.yaml": want a path inside the rig repo root`},
 		{"policy escaping after a subdir", func(p *SandboxProfile) { p.Policy = "deploy/../../policy.yaml" }, `sandboxes.p.policy "deploy/../../policy.yaml": want a path inside the rig repo root`},

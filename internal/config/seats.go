@@ -57,8 +57,11 @@ type Window struct {
 // Seats returns the town's seats sorted by agent name; known reports whether an
 // agent name resolves. A nil known accepts every name.
 func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
-	if ts == nil || ts.PolecatPool == nil {
+	if ts == nil {
 		return nil, nil
+	}
+	if ts.PolecatPool == nil {
+		return nil, validateUnseatedSandboxProfiles(ts)
 	}
 	if known == nil {
 		known = func(string) bool { return true }
@@ -106,7 +109,9 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 			if !ok {
 				return nil, fmt.Errorf("polecat_pool.seats.%s.sandbox %q: no such entry in sandboxes", a, c.Sandbox)
 			}
-			if err := p.Validate(c.Sandbox); err != nil {
+			// Validated as the seat runs it, defaults included, so a seat
+			// profile that names no gateway keeps the one it had (gt-rb4sf4).
+			if err := p.WithDefaults().Validate(c.Sandbox); err != nil {
 				return nil, err
 			}
 		} else if c.Sandbox != "" {
@@ -141,7 +146,42 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 		}
 		out = append(out, s)
 	}
+	// A profile no seat runs on must name its gateway: nothing else validates
+	// it, and no defaults apply, so one that names none would be left pointing
+	// at the retired Mac gateway (gt-rb4sf4). The seats are checked first so a
+	// seat's own refusal still comes first.
+	if err := validateUnseatedSandboxProfiles(ts); err != nil {
+		return nil, err
+	}
 	return out, nil
+}
+
+// validateUnseatedSandboxProfiles refuses the first profile no seat runs on
+// that Validate rejects, so a profile outside every seat names its gateway
+// (gt-rb4sf4). Seats checks a seat's profile itself, defaults applied.
+func validateUnseatedSandboxProfiles(ts *TownSettings) error {
+	seated := map[string]bool{}
+	if ts.PolecatPool != nil {
+		for _, c := range ts.PolecatPool.Seats {
+			if c.Sandbox != "" {
+				seated[c.Sandbox] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(ts.Sandboxes))
+	for name := range ts.Sandboxes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if seated[name] {
+			continue
+		}
+		if err := ts.Sandboxes[name].Validate(name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SeatsKnownTo returns the known callback for Seats under settings s: an agent

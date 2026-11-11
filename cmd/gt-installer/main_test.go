@@ -261,6 +261,47 @@ func TestRunWithoutABuildCheckout(t *testing.T) {
 	}
 }
 
+// A run that sets a directory variable the retired Mac gateway step read says
+// the variable is ignored, once and by name, rather than taking it silently
+// (gt-rb4sf4).
+func TestRunWarnsOnARetiredGatewayVariable(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"INSTALL_GT_GATEWAY_HOME", "INSTALL_GT_LAUNCHD_DIR"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			env, _ := testEnv(t)
+			getenv := env.getenv
+			env.getenv = func(key string) string {
+				if key == name {
+					return "/unused"
+				}
+				return getenv(key)
+			}
+			var out, errOut strings.Builder
+
+			runWith(nil, &out, &errOut, env)
+
+			want := "[install-gt] WARNING: " + name + " is ignored: the Mac OpenShell gateway is retired (gt-2kerwq)\n"
+			if got := strings.Count(errOut.String(), want); got != 1 {
+				t.Errorf("stderr carries the warning %d times, want once; stderr = %q", got, errOut.String())
+			}
+		})
+	}
+}
+
+// A run that sets neither retired variable says nothing about them.
+func TestRunSaysNothingAboutRetiredVariablesWhenNoneIsSet(t *testing.T) {
+	t.Parallel()
+	env, _ := testEnv(t)
+	var out, errOut strings.Builder
+
+	runWith(nil, &out, &errOut, env)
+
+	if strings.Contains(errOut.String(), "is ignored: the Mac OpenShell gateway is retired") {
+		t.Errorf("stderr = %q, want no retired-variable warning", errOut.String())
+	}
+}
+
 // --dry-run changes nothing, not even a receipt: it states its own result and
 // exits 0.
 func TestRunDryRunTouchesNothing(t *testing.T) {
