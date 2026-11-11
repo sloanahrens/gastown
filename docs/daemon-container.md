@@ -21,10 +21,8 @@ below is a summary.
 
 The `town_state_backup` patrol copies the town's configuration into the JSONL
 backup repository, under `town-state/`, and pushes that commit to the backup
-repository's origin. The copy holds `mayor/town.json`,
-`settings/config.json`, `settings/models.json`, `settings/placement.json`,
-`settings/regime-events.json`, the files in `settings/themes/`, and each
-registered rig's `settings/config.json` and `.beads/config.yaml`. It never holds
+repository's origin. The files it copies are the rows of the `townStateExports`
+table in `internal/daemon/town_state_backup.go`. It never holds
 `settings/daemon.env` or any `*.env`, `*.key` or `*token*` file: those are the
 Secrets. To seed a claim whose configuration is gone, clone the backup
 repository, copy its `town-state/` tree over the claim's town root, then copy
