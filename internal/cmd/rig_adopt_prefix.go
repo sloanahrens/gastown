@@ -48,7 +48,7 @@ func detectAdoptBeadsPrefix(rigPath, flagPrefix string, configGet func(workDir s
 	var undetected error
 	for _, beadsDir := range []string{
 		filepath.Join(rigPath, ".beads"),
-		constants.RigBeadsPath(rigPath),
+		constants.LegacyRigBeadsPath(rigPath),
 	} {
 		if _, err := os.Stat(beadsDir); err != nil {
 			continue
@@ -162,9 +162,14 @@ func adoptRegisterIn(townRoot string, req rigAdoptRequest, configGet func(workDi
 
 	// Add route to town-level routes.jsonl for prefix-based routing
 	if result.BeadsPrefix != "" {
+		// The route names mayor/rig only when that is where the rig's beads are.
+		// Beads at <rig>/.beads are routed at the rig root.
 		routePath := req.name
-		if _, err := os.Stat(constants.RigBeadsPath(filepath.Join(townRoot, req.name))); err == nil {
-			routePath = req.name + "/mayor/rig"
+		rigDir := filepath.Join(townRoot, req.name)
+		if constants.RigBeadsPath(rigDir) == constants.LegacyRigBeadsPath(rigDir) {
+			if _, err := os.Stat(constants.LegacyRigBeadsPath(rigDir)); err == nil {
+				routePath = req.name + "/mayor/rig"
+			}
 		}
 		route := beads.Route{
 			Prefix: result.BeadsPrefix + "-",

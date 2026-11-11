@@ -14,7 +14,7 @@ import (
 // rigBeadsRelPath is the rig's tracked beads directory relative to the rig
 // root, the form a redirect file carries (e.g. "mayor/rig/.beads").
 func rigBeadsRelPath() string {
-	return strings.TrimPrefix(constants.RigBeadsPath("."), "./")
+	return constants.RigLegacyBeadsRelPath()
 }
 
 // ResolveBeadsDir returns the actual beads directory, following any redirect.

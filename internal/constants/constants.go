@@ -4,6 +4,7 @@ package constants
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"sync/atomic"
 	"time"
@@ -309,9 +310,83 @@ func RigMayorPath(rigPath string) string {
 	return rigPath + "/" + DirMayor + "/" + DirRig
 }
 
-// RigBeadsPath returns the path to mayor/rig/.beads within a rig.
+// RigBeadsPath returns the rig's beads directory. It is <rig>/.beads once that
+// directory holds metadata.json and no redirect file, and the legacy
+// mayor/rig/.beads otherwise. A Stat error other than not-exist answers with
+// <rig>/.beads, so the caller's read fails in the directory that should hold
+// the data rather than silently reading the legacy copy; a warning names the
+// error on stderr.
 func RigBeadsPath(rigPath string) string {
-	return rigPath + "/" + DirMayor + "/" + DirRig + "/" + DirBeads
+	return rigBeadsPath(rigPath, os.Stderr)
+}
+
+// rigBeadsPath is RigBeadsPath with the stream its warning goes to injected.
+func rigBeadsPath(rigPath string, warn io.Writer) string {
+	newDir := RigBeadsWritePath(rigPath)
+	if rigBeadsDirOwnsData(newDir, warn) {
+		return newDir
+	}
+	return LegacyRigBeadsPath(rigPath)
+}
+
+// RigBeadsWritePath returns <rig>/.beads, the directory a rig's beads move to.
+// It is for creating the directory only; readers use RigBeadsPath.
+func RigBeadsWritePath(rigPath string) string {
+	return rigPath + "/" + DirBeads
+}
+
+// LegacyRigBeadsPath returns the legacy mayor/rig/.beads of a rig, whether or
+// not RigBeadsPath answers with it. A caller that tries both locations pairs it
+// with RigBeadsWritePath, since RigBeadsPath returns only one of the two.
+func LegacyRigBeadsPath(rigPath string) string {
+	return rigPath + "/" + RigLegacyBeadsRelPath()
+}
+
+// RigLegacyBeadsRelPath returns mayor/rig/.beads relative to the rig root: the
+// form a redirect file carries. It reads no filesystem state, so it is safe to
+// call with "." from any working directory, where RigBeadsPath(".") would Stat
+// the working directory's own .beads.
+func RigLegacyBeadsRelPath() string {
+	return DirMayor + "/" + DirRig + "/" + DirBeads
+}
+
+// rigBeadsDirOwnsData reports whether dir holds the real beads files: it has
+// metadata.json and no redirect file. An unreadable entry counts as owned, for
+// the reason RigBeadsPath gives, and is reported on warn.
+func rigBeadsDirOwnsData(dir string, warn io.Writer) bool {
+	hasMetadata, err := beadsEntryExists(dir + "/metadata.json")
+	if err != nil {
+		reportUnreadableRigBeads(warn, err)
+		return true
+	}
+	if !hasMetadata {
+		return false
+	}
+	hasRedirect, err := beadsEntryExists(dir + "/redirect")
+	if err != nil {
+		reportUnreadableRigBeads(warn, err)
+		return true
+	}
+	return !hasRedirect
+}
+
+// reportUnreadableRigBeads writes the warning for a beads entry whose state
+// could not be read. The error is the os.Stat failure, which names that path.
+func reportUnreadableRigBeads(warn io.Writer, err error) {
+	fmt.Fprintf(warn, "Warning: cannot read rig beads state, using the new beads directory: %v\n", err)
+}
+
+// beadsEntryExists reports whether path exists. A not-exist error is a clean
+// false; any other Stat error is returned so the caller can decide.
+func beadsEntryExists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // RigPolecatsPath returns the path to polecats/ within a rig.

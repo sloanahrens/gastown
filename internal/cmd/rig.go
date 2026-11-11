@@ -1062,7 +1062,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 	rigPath := filepath.Join(townRoot, name)
 	beadsDirCandidates := []string{
 		filepath.Join(rigPath, ".beads"),
-		constants.RigBeadsPath(rigPath),
+		constants.LegacyRigBeadsPath(rigPath),
 	}
 	foundBeadsCandidate := false
 	for _, beadsDir := range beadsDirCandidates {

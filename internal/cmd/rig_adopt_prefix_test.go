@@ -82,6 +82,49 @@ func TestAdoptDetectedPrefixRegistered(t *testing.T) {
 	}
 }
 
+// The route names the rig directory that holds the rig's beads: the rig root
+// when they are at <rig>/.beads, and mayor/rig when they are at the legacy
+// mayor/rig/.beads.
+func TestAdoptRouteNamesTheDirectoryHoldingTheBeads(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		legacy   bool
+		wantPath string
+	}{
+		{name: "beads at the rig level", wantPath: "my_project"},
+		{name: "beads at the legacy mayor/rig", legacy: true, wantPath: "my_project/mayor/rig"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := adoptPrefixTown(t, "my_project", "xx")
+			if tt.legacy {
+				rigDir := filepath.Join(town, "my_project")
+				if err := os.MkdirAll(filepath.Join(rigDir, "mayor", "rig"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(rigDir, ".beads"), filepath.Join(rigDir, "mayor", "rig", ".beads")); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			_, _, err := adoptRegisterIn(town, rigAdoptRequest{
+				name:   "my_project",
+				gitURL: "file:///nonexistent",
+			}, noBdPrefix)
+			if err != nil {
+				t.Fatalf("adoptRegisterIn: %v", err)
+			}
+
+			routes := readIfPresent(t, filepath.Join(town, ".beads", "routes.jsonl"))
+			if want := `"path":"` + tt.wantPath + `"`; !strings.Contains(routes, want) {
+				t.Errorf("routes.jsonl = %q, want the route %s", routes, want)
+			}
+		})
+	}
+}
+
 // bd's issue_prefix answer wins over the database name in metadata.json.
 func TestAdoptPrefixPrefersBdOverMetadataName(t *testing.T) {
 	t.Parallel()

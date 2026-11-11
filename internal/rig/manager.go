@@ -1635,7 +1635,7 @@ func (m *Manager) InitBeads(rigPath, prefix, rigName string) error {
 			return err
 		}
 		redirectPath := filepath.Join(beadsDir, "redirect")
-		if err := os.WriteFile(redirectPath, []byte(strings.TrimPrefix(constants.RigBeadsPath("."), "./")+"\n"), 0644); err != nil {
+		if err := os.WriteFile(redirectPath, []byte(constants.RigLegacyBeadsRelPath()+"\n"), 0644); err != nil {
 			return fmt.Errorf("creating redirect file: %w", err)
 		}
 		return nil

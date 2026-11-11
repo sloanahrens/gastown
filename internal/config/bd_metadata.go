@@ -51,7 +51,7 @@ func BeadsFileDatabase(path string) (db string, err error) {
 // bd workspace keeps metadata.json, in the order gastown looks:
 // <rig>/mayor/rig/.beads (the tracked workspace), then <rig>/.beads.
 func RigBeadsDirs(rig string) []string {
-	return []string{constants.RigBeadsPath(rig), rig + "/.beads"}
+	return []string{rig + "/" + constants.RigLegacyBeadsRelPath(), rig + "/.beads"}
 }
 
 // RigMetadataDatabase is the dolt_database of the first of rig's

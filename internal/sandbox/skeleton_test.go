@@ -1059,6 +1059,29 @@ func TestSkeletonRequiresTheBeadsMetadata(t *testing.T) {
 	})
 }
 
+// TestSkeletonRequiresTheRigBeadsMetadata: the rig's metadata.json is read from
+// the directory holding the rig's data, and a render without it, or with it
+// malformed, stops rather than ship a workspace with no identity.
+func TestSkeletonRequiresTheRigBeadsMetadata(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing", func(t *testing.T) {
+		t.Parallel()
+		_, err := renderRigWithout(t, []string{"gastown/mayor/rig/.beads/metadata.json"}, nil)
+		if err == nil || !strings.Contains(err.Error(), "gastown/mayor/rig/.beads/metadata.json") {
+			t.Fatalf("RenderSkeleton error = %v, want it to name the missing rig metadata", err)
+		}
+	})
+
+	t.Run("malformed", func(t *testing.T) {
+		t.Parallel()
+		_, err := renderRigWithout(t, nil, map[string]string{"gastown/mayor/rig/.beads/metadata.json": "not json\n"})
+		if err == nil || !strings.Contains(err.Error(), "gastown/mayor/rig/.beads/metadata.json") {
+			t.Fatalf("RenderSkeleton error = %v, want it to name the malformed rig metadata", err)
+		}
+	})
+}
+
 // renderTown renders the skeleton for rig gastown from townRoot and returns the
 // archive's entries.
 func renderTown(t *testing.T, townRoot string) (map[string][]byte, error) {
@@ -1095,6 +1118,28 @@ func TestSkeletonRigConfigFromTheRigBeadsDir(t *testing.T) {
 	}
 	if _, ok := got["gt/gastown/.beads/config.yaml"]; ok {
 		t.Error("the config was also written under the rig .beads, where the redirect already points away")
+	}
+}
+
+// TestSkeletonCarriesTheRigBeadsThatHoldTheData: once the rig's data sits in
+// <rig>/.beads (metadata.json and no redirect, as constants.RigBeadsPath reads
+// it), the sandbox carries that metadata and config, not the legacy copy.
+func TestSkeletonCarriesTheRigBeadsThatHoldTheData(t *testing.T) {
+	t.Parallel()
+
+	got, err := renderRigWithout(t, nil, map[string]string{
+		"gastown/.beads/metadata.json": `{"dolt_database": "moved", "dolt_server_host": "127.0.0.1", "dolt_server_port": 3307}`,
+		"gastown/.beads/config.yaml":   "issue_prefix: mv\n",
+	})
+	if err != nil {
+		t.Fatalf("RenderSkeleton: %v", err)
+	}
+	meta := decodeJSON(t, got["gt/gastown/mayor/rig/.beads/metadata.json"])
+	if db := at(t, meta, "dolt_database"); db != "moved" {
+		t.Errorf("workspace dolt_database = %v, want the rig .beads metadata's", db)
+	}
+	if c := string(got["gt/gastown/mayor/rig/.beads/config.yaml"]); !strings.Contains(c, "issue_prefix: mv") {
+		t.Errorf("workspace config = %q, want the rig .beads config", c)
 	}
 }
 

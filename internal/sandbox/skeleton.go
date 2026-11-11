@@ -471,7 +471,7 @@ func addRoutedRigBeads(town townReader, s SkeletonSpec, routes []beads.Route, ad
 		// A rig with no config.yaml is still carried: bd opens the database
 		// without one, and the seat's own rig stays the only rig whose config
 		// the render requires (gt-z7ut1).
-		_, rawConfig, found, err := rigBeadsConfigFound(town, rig)
+		_, rawConfig, found, err := rigBeadsConfigFound(town, config.RigBeadsDirs(rig))
 		if err != nil {
 			return err
 		}
@@ -502,10 +502,22 @@ func routedRigMetadata(town townReader, rig, routePath string) ([]byte, error) {
 	return nil, fmt.Errorf("sandbox: rig %s has no beads metadata.json: %w", rig, fs.ErrNotExist)
 }
 
+// rigBeadsHolder returns the town-relative beads directory of rig that holds the
+// rig's real beads files, as constants.RigBeadsPath decides it on the host: the
+// rig's own .beads or the legacy mayor/rig/.beads.
+func rigBeadsHolder(townRoot, rig string) string {
+	rigPath := filepath.Join(townRoot, rig)
+	if constants.RigBeadsPath(rigPath) == constants.RigBeadsWritePath(rigPath) {
+		return rig + "/" + constants.DirBeads
+	}
+	return rig + "/" + constants.RigLegacyBeadsRelPath()
+}
+
 // rigBeadsConfig returns the town-relative path and the contents of the rig's
-// beads config.yaml: the first of the rig's beads directories that holds one.
-func rigBeadsConfig(town townReader, rig string) (string, []byte, error) {
-	rel, data, found, err := rigBeadsConfigFound(town, rig)
+// beads config.yaml: the first of the rig's beads directories that holds one,
+// the holder before the other.
+func rigBeadsConfig(town townReader, rig, holder string) (string, []byte, error) {
+	rel, data, found, err := rigBeadsConfigFound(town, rigBeadsDirsFrom(rig, holder))
 	if err != nil {
 		return "", nil, err
 	}
@@ -515,10 +527,23 @@ func rigBeadsConfig(town townReader, rig string) (string, []byte, error) {
 	return rel, data, nil
 }
 
+// rigBeadsDirsFrom returns the rig's beads directories with holder first and
+// the other candidate after it, so a config read follows the directory that
+// holds the data.
+func rigBeadsDirsFrom(rig, holder string) []string {
+	dirs := []string{holder}
+	for _, dir := range config.RigBeadsDirs(rig) {
+		if dir != holder {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
 // rigBeadsConfigFound is rigBeadsConfig that reports a missing config as not
 // found, for a caller that may go on without one.
-func rigBeadsConfigFound(town townReader, rig string) (string, []byte, bool, error) {
-	for _, dir := range config.RigBeadsDirs(rig) {
+func rigBeadsConfigFound(town townReader, dirs []string) (string, []byte, bool, error) {
+	for _, dir := range dirs {
 		rel := dir + "/config.yaml"
 		if data, err := town.read(rel); err == nil {
 			return rel, data, true, nil
@@ -539,6 +564,7 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	}
 	defer func() { _ = root.Close() }()
 	town := townReader{root: root}
+	holder := rigBeadsHolder(s.TownRoot, s.Rig)
 
 	// The beads directories are listed so they extract 0700; left implicit,
 	// tar makes them 0755 and bd warns on every call.
@@ -546,7 +572,7 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		{name: skeletonRoot + "/", dir: true},
 		{name: path.Join(skeletonRoot, ".beads") + "/", dir: true},
 		{name: path.Join(skeletonRoot, s.Rig, ".beads") + "/", dir: true},
-		{name: path.Join(skeletonRoot, constants.RigBeadsPath(s.Rig)) + "/", dir: true},
+		{name: path.Join(skeletonRoot, s.Rig, constants.RigLegacyBeadsRelPath()) + "/", dir: true},
 	}
 	add := func(rel string, data []byte) {
 		entries = append(entries, skeletonEntry{name: path.Join(skeletonRoot, rel), data: data})
@@ -593,12 +619,13 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		add(rel, data)
 	}
 
-	// The rig's beads config sits in the tracked workspace or, for a rig whose
-	// mayor/rig/.beads holds only metadata.json and a redirect (devops, fractals,
-	// beaver, agentlab), in <rig>/.beads. Either way it lands at the tracked
-	// workspace, which is where the sandbox's bd looks; a rig with neither stops
-	// the render, since bd would run with no prefix (gt-z7ut1).
-	configRel, rawConfig, err := rigBeadsConfig(town, s.Rig)
+	// The rig's beads config is read from the holder first, then the other
+	// candidate: a rig whose mayor/rig/.beads holds only metadata.json and a
+	// redirect (devops, fractals, beaver, agentlab) keeps it in <rig>/.beads
+	// (gt-z7ut1). It lands at the sandbox's workspace, the legacy spelling the
+	// seat's bd and its worktree redirect look at; a rig with no config stops
+	// the render, since bd would run with no prefix.
+	configRel, rawConfig, err := rigBeadsConfig(town, s.Rig, holder)
 	if err != nil {
 		return nil, err
 	}
@@ -606,20 +633,29 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: %s: %w", configRel, err)
 	}
-	add(constants.RigBeadsPath(s.Rig)+"/config.yaml", beadsConfig)
+	add(s.Rig+"/"+constants.RigLegacyBeadsRelPath()+"/config.yaml", beadsConfig)
 
-	// Both beads metadata files point at the control plane's Dolt server.
-	for _, rel := range []string{".beads/metadata.json", constants.RigBeadsPath(s.Rig) + "/metadata.json"} {
-		raw, err := town.read(rel)
-		if err != nil {
-			return nil, err
-		}
-		out, err := sandboxBeadsMetadata(rel, raw, s.ControlPlaneHost)
-		if err != nil {
-			return nil, err
-		}
-		add(rel, out)
+	// Both beads metadata files point at the control plane's Dolt server. The
+	// rig's is read from the holder, so the workspace carries the rig's real
+	// identity whichever directory the data is in.
+	townMeta, err := town.read(".beads/metadata.json")
+	if err != nil {
+		return nil, err
 	}
+	townOut, err := sandboxBeadsMetadata(".beads/metadata.json", townMeta, s.ControlPlaneHost)
+	if err != nil {
+		return nil, err
+	}
+	add(".beads/metadata.json", townOut)
+	rigMeta, err := town.read(holder + "/metadata.json")
+	if err != nil {
+		return nil, err
+	}
+	rigOut, err := sandboxBeadsMetadata(holder+"/metadata.json", rigMeta, s.ControlPlaneHost)
+	if err != nil {
+		return nil, err
+	}
+	add(s.Rig+"/"+constants.RigLegacyBeadsRelPath()+"/metadata.json", rigOut)
 
 	// A polecat files a bead in another rig with `gt bead create --rig <rig>`,
 	// and bd opens that rig's database only through a workspace whose
