@@ -36,6 +36,11 @@
 // do not change: a series the tool cannot write, or a run it finds no town
 // for, is reported on stderr and fails nothing, because the gate's verdict is
 // go test's alone.
+//
+// The last line of the report, `tierwall: cpus: NumCPU=<n> GOMAXPROCS=<n>
+// cgroup=<value>`, says what CPUs the run had: the count Go saw, the Go scheduler
+// width, and the cgroup CPU quota, so a gate log shows the limits it ran under
+// (gt-50ujsx). It prints on every run and fails nothing.
 package main
 
 import (
@@ -50,6 +55,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,19 +91,23 @@ type event struct {
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, host{
-		now:   time.Now,
-		load1: hostLoad1,
-		town:  townRoot,
-		mkdir: mkdirAll,
-		open:  openAppend,
+		now:      time.Now,
+		load1:    hostLoad1,
+		town:     townRoot,
+		mkdir:    mkdirAll,
+		open:     openAppend,
+		numCPU:   runtime.NumCPU,
+		maxProcs: func() int { return runtime.GOMAXPROCS(0) },
+		readFile: os.ReadFile,
 	}))
 }
 
 // host is what run reads outside the stream: the clock a stream with no
 // timestamps is stamped from, the load a series line carries, the town a
-// relative series path is taken from, and the directory and file the series
-// appends through. main wires the real ones; a test injects them, so no test
-// reads the host and every path the series can take has a case.
+// relative series path is taken from, the directory and file the series
+// appends through, and the CPU facts the report's cpus line prints. main wires
+// the real ones; a test injects them, so no test reads the host and every path
+// the series can take has a case.
 type host struct {
 	now   func() time.Time
 	load1 func() (float64, bool)
@@ -106,6 +116,12 @@ type host struct {
 	town  func() string
 	mkdir func(dir string) error
 	open  func(path string) (io.WriteCloser, error)
+	// numCPU and maxProcs are runtime.NumCPU and runtime.GOMAXPROCS(0).
+	numCPU   func() int
+	maxProcs func() int
+	// readFile reads the cgroup quota files; any read error counts the file as
+	// unreadable, and the cpus line says so.
+	readFile func(path string) ([]byte, error)
 }
 
 // run reads a go test -json stream from stdin and writes the report to
@@ -170,7 +186,7 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer, h host) int {
 			seriesFailed = true
 		}
 	}
-	if err := r.print(*bar); err != nil {
+	if err := r.print(*bar, cpuLine(h)); err != nil {
 		fmt.Fprintln(stderr, "tierwall:", err)
 		return 2
 	}
@@ -334,9 +350,10 @@ func (r *report) verdict(e event) {
 	delete(r.builds, e.FailedBuild)
 }
 
-// print writes the per-package lines, slowest first, then the tier line. Ties
-// go by package name, so one stream always prints one report.
-func (r *report) print(bar time.Duration) error {
+// print writes the per-package lines, slowest first, then the tier line, then
+// cpus, the line cpuLine renders. Ties go by package name, so one stream always
+// prints one report.
+func (r *report) print(bar time.Duration, cpus string) error {
 	pkgs := make([]string, 0, len(r.elapsed))
 	for pkg := range r.elapsed {
 		pkgs = append(pkgs, pkg)
@@ -364,7 +381,50 @@ func (r *report) print(bar time.Duration) error {
 		verdict = "OVER"
 	}
 	r.write(fmt.Sprintf("tierwall: tier %s bar %s %s\n", secs(r.tier()), secs(bar), verdict))
+	r.write(cpus)
 	return r.err
+}
+
+// cgroup quota files: the v2 unified file, then the v1 CPU controller's quota
+// and period. A missing or empty file is not a quota.
+const (
+	cgroupV2Max    = "/sys/fs/cgroup/cpu.max"
+	cgroupV1Quota  = "/sys/fs/cgroup/cpu/cpu.cfs_quota_us"
+	cgroupV1Period = "/sys/fs/cgroup/cpu/cpu.cfs_period_us"
+)
+
+// cpuLine is the report's last line: the CPUs the run had, as Go counts them
+// (NumCPU and GOMAXPROCS) and as the cgroup quota states them.
+func cpuLine(h host) string {
+	return fmt.Sprintf("tierwall: cpus: NumCPU=%d GOMAXPROCS=%d cgroup=%s\n",
+		h.numCPU(), h.maxProcs(), cgroupCPU(h.readFile))
+}
+
+// cgroupCPU is the CPU quota the cgroup gives, as the file states it: the v2
+// cpu.max content, else the v1 quota and period joined by a space, else
+// "unreadable". A read that fails or comes back empty falls through to the
+// next source.
+func cgroupCPU(read func(path string) ([]byte, error)) string {
+	if v, ok := readField(read, cgroupV2Max); ok {
+		return v
+	}
+	quota, qok := readField(read, cgroupV1Quota)
+	period, pok := readField(read, cgroupV1Period)
+	if qok && pok {
+		return quota + " " + period
+	}
+	return "unreadable"
+}
+
+// readField reads one file and returns its content trimmed, and whether there
+// was any content to read.
+func readField(read func(path string) ([]byte, error), path string) (string, bool) {
+	b, err := read(path)
+	if err != nil {
+		return "", false
+	}
+	v := strings.TrimSpace(string(b))
+	return v, v != ""
 }
 
 // phasesShown is how many of the slowest packages -slow-tests splits into a
