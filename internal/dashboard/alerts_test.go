@@ -545,8 +545,48 @@ func servedKeys(t *testing.T, h *Hub) []string {
 	return keys
 }
 
-// State.Alerts keeps the last alertsKept arrivals, served newest first.
+// State.Alerts keeps the alertsKept newest alerts by time, served newest first.
+// An alert takes the clock's time when it is raised, so an alert raised after
+// the clock steps back is older than every alert kept, and it is the one left
+// out, even though it arrived last.
 func TestHubCapsRecentAlerts(t *testing.T) {
+	t.Parallel()
+	var now time.Time
+	var entries []Entry
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		Feed: func() []Entry {
+			out := entries
+			entries = nil
+			return out
+		},
+	})
+	page, _ := h.Subscribe()
+	defer h.Unsubscribe(page)
+
+	raise := func(at time.Time, bead string) {
+		now = at
+		entries = []Entry{{At: at, Kind: "landings",
+			Text: fmt.Sprintf("[land] %s: rejected (gate): failed", bead)}}
+		h.pollFeed()
+	}
+	for i := 1; i <= alertsKept; i++ {
+		raise(alertBase.Add(time.Duration(i)*time.Second), fmt.Sprintf("gt-%d", i))
+	}
+	raise(alertBase, "gt-0")
+
+	var want []string
+	for i := alertsKept; i >= 1; i-- {
+		want = append(want, fmt.Sprintf("reject:gt-%d:gate", i))
+	}
+	if got := servedKeys(t, h); !slices.Equal(got, want) {
+		t.Errorf("/api/state serves the alerts %v, want the %d newest by time, newest first %v", got, alertsKept, want)
+	}
+}
+
+// Alerts that tie on time came from one instant, and the cap keeps the later
+// arrivals. Equal times keep their source order when served.
+func TestHubCapKeepsTheLaterArrivalOnATie(t *testing.T) {
 	t.Parallel()
 	var entries []Entry
 	for i := 0; i < alertsKept+2; i++ {
@@ -561,12 +601,129 @@ func TestHubCapsRecentAlerts(t *testing.T) {
 	defer h.Unsubscribe(page)
 
 	h.pollFeed()
-	st := h.State()
-	if len(st.Alerts) != alertsKept {
-		t.Fatalf("State.Alerts holds %d, want %d", len(st.Alerts), alertsKept)
+	var want []string
+	for i := 2; i < alertsKept+2; i++ {
+		want = append(want, fmt.Sprintf("reject:gt-%d:gate", i))
 	}
-	if !strings.Contains(st.Alerts[len(st.Alerts)-1].Text, fmt.Sprintf("gt-%d", alertsKept+1)) {
-		t.Errorf("the newest alert was dropped: %+v", st.Alerts[len(st.Alerts)-1])
+	if got := servedKeys(t, h); !slices.Equal(got, want) {
+		t.Errorf("/api/state serves the alerts %v, want the later arrivals %v", got, want)
+	}
+}
+
+// feedReasons is the reason cell of each EVENTS row, top to bottom.
+func feedReasons(t *testing.T, dom *pageDOM) []string {
+	t.Helper()
+
+	var out []string
+	for _, l := range feedLines(t, dom) {
+		out = append(out, l.Cells[3])
+	}
+	return out
+}
+
+// The EVENTS feed is in time order whichever of the stream and the state brings
+// an alert first. A stream alert newer than the state's recent list is drawn
+// above it, not below.
+func TestAStateRefreshKeepsStreamAlertsInTimeOrder(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	stateAlerts(t, dom) // the baseline: nothing in it is news
+	streamAlert(t, dom, rejectedAlert(4, "gt-x"))
+	stateAlerts(t, dom, rejectedAlert(3, "gt-y"), rejectedAlert(2, "gt-z"))
+
+	want := []string{"reason 4", "reason 3", "reason 2"}
+	if got := feedReasons(t, dom); !slices.Equal(got, want) {
+		t.Errorf("the feed reads %v, want newest first %v", got, want)
+	}
+}
+
+// A stream alert goes to its place by its time, so one that arrives after a newer
+// alert is drawn below it.
+func TestAStreamAlertIsPlacedByItsTime(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	stateAlerts(t, dom)
+	streamAlert(t, dom, rejectedAlert(5, "gt-x"))
+	streamAlert(t, dom, rejectedAlert(4, "gt-y"))
+
+	want := []string{"reason 5", "reason 4"}
+	if got := feedReasons(t, dom); !slices.Equal(got, want) {
+		t.Errorf("the feed reads %v, want newest first %v", got, want)
+	}
+}
+
+// alertNewer is the EVENTS order: an alert with a time comes before one without,
+// of two timed alerts the newer comes first, and a tie is neither newer.
+func TestAlertNewerIsTheEventsOrder(t *testing.T) {
+	t.Parallel()
+	timed := alertBase
+	later := alertBase.Add(time.Minute)
+	cases := []struct {
+		name string
+		a, b Alert
+		want bool
+	}{
+		{"a newer timed alert comes first", Alert{At: later}, Alert{At: timed}, true},
+		{"an older timed alert comes after", Alert{At: timed}, Alert{At: later}, false},
+		{"a tie in time is not newer", Alert{At: timed}, Alert{At: timed}, false},
+		{"a timed alert comes before an untimed one", Alert{At: timed}, Alert{}, true},
+		{"an untimed alert comes after a timed one", Alert{}, Alert{At: timed}, false},
+		{"two untimed alerts are not newer", Alert{}, Alert{}, false},
+	}
+	for _, tc := range cases {
+		if got := alertNewer(tc.a, tc.b); got != tc.want {
+			t.Errorf("%s: alertNewer = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// sortAlertsNewestFirst puts the timed alerts newest first, then the untimed
+// ones, and keeps the source order where two alerts tie.
+func TestSortAlertsNewestFirstKeepsSourceOrderOnTies(t *testing.T) {
+	t.Parallel()
+	alerts := []Alert{
+		{ID: "a", At: alertBase},
+		{ID: "u1"},
+		{ID: "b", At: alertBase.Add(time.Minute)},
+		{ID: "c", At: alertBase},
+		{ID: "u2"},
+	}
+	sortAlertsNewestFirst(alerts)
+	var got []string
+	for _, a := range alerts {
+		got = append(got, a.ID)
+	}
+	if want := []string{"b", "a", "c", "u1", "u2"}; !slices.Equal(got, want) {
+		t.Errorf("sorted to %v, want %v", got, want)
+	}
+}
+
+// keepNewestAlerts keeps the n newest alerts by time, in the order they arrived.
+func TestKeepNewestAlertsKeepsTheNewestByTime(t *testing.T) {
+	t.Parallel()
+	at := func(m int) time.Time { return alertBase.Add(time.Duration(m) * time.Minute) }
+	cases := []struct {
+		name    string
+		arrived []Alert
+		n       int
+		want    []string
+	}{
+		{"fewer than n are all kept", []Alert{{ID: "a", At: at(1)}, {ID: "b", At: at(2)}}, 3, []string{"a", "b"}},
+		{"a late arrival older than the kept ones is dropped", []Alert{{ID: "a", At: at(5)}, {ID: "b", At: at(3)}}, 1, []string{"a"}},
+		{"a tie keeps the later arrival", []Alert{{ID: "a", At: at(5)}, {ID: "b", At: at(5)}}, 1, []string{"b"}},
+		{"a timed alert outranks an untimed one", []Alert{{ID: "u"}, {ID: "t", At: at(1)}}, 1, []string{"t"}},
+		{"kept alerts stay in arrival order", []Alert{{ID: "a", At: at(3)}, {ID: "b", At: at(5)}, {ID: "c", At: at(4)}}, 2, []string{"b", "c"}},
+	}
+	for _, tc := range cases {
+		var got []string
+		for _, a := range keepNewestAlerts(tc.arrived, tc.n) {
+			got = append(got, a.ID)
+		}
+		if !slices.Equal(got, tc.want) {
+			t.Errorf("%s: kept %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
 

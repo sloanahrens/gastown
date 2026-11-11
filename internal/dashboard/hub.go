@@ -617,13 +617,12 @@ func (h *Hub) observeLocked(entries []Entry) int {
 
 // addAlertLocked keeps al among the recent alerts and tells the open pages. The
 // alerts of the three sources meet here, so this is where the recent list is put
-// in order: the last alertsKept arrivals, sorted newest first. The list is built
-// fresh each time, so a state a reader already holds is not sorted under it.
+// in order: the alertsKept newest by time, sorted newest first. An alert that
+// arrives late with an older time than those kept is the one left out. The list
+// is built fresh each time, so a state a reader already holds is not sorted under
+// it.
 func (h *Hub) addAlertLocked(al Alert) {
-	recent := append(append([]Alert(nil), h.state.Alerts...), al)
-	if n := len(recent); n > alertsKept {
-		recent = recent[n-alertsKept:]
-	}
+	recent := keepNewestAlerts(append(append([]Alert(nil), h.state.Alerts...), al), alertsKept)
 	sortAlertsNewestFirst(recent)
 	h.state.Alerts = recent
 	h.sendLocked("alert", al)
