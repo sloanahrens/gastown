@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/lock"
@@ -121,17 +123,29 @@ func lockRig(ctx context.Context, try func(string) (func(), bool, error), path, 
 	}
 }
 
-// ensureClone clones bare into dir when dir is not a checkout yet. A directory
-// without a .git is a clone that died part-way, which would make the next clone
-// fail on a non-empty destination, so it is removed first. A clone that fails is
-// removed too, and the next call clones again.
+// cloneMarkerSuffix names the marker beside a checkout directory. ensureClone
+// writes it once a clone returns, and clears it before any clone starts.
+const cloneMarkerSuffix = ".cloned"
+
+// ensureClone clones bare into dir unless dir already holds a finished clone. A
+// clone is finished when dir has a .git and the marker beside it. A .git alone
+// does not say so: a clone killed after git made the .git leaves one behind. Any
+// other directory is a clone that died part-way, so it is removed first, which
+// would otherwise make the next clone fail on a non-empty destination. A clone
+// that fails is removed too, and the next call clones again.
 func ensureClone(ctx context.Context, run gitFunc, bare, dir string) error {
-	_, err := os.Stat(filepath.Join(dir, ".git"))
-	switch {
-	case err == nil:
-		return nil
-	case !errors.Is(err, fs.ErrNotExist):
+	marker := dir + cloneMarkerSuffix
+	finished, err := cloneFinished(dir, marker)
+	if err != nil {
 		return fmt.Errorf("the build checkout at %s: %w", dir, err)
+	}
+	if finished {
+		return nil
+	}
+	// The marker goes first. If it cannot be cleared the call refuses, because a
+	// stale marker over a killed clone would make that clone look finished.
+	if err := os.Remove(marker); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("clearing the clone marker of %s: %w", dir, err)
 	}
 	// The clone is attempted even if clearing failed: git refuses a non-empty
 	// destination, and the clearing error is reported with the clone's.
@@ -141,7 +155,27 @@ func ensureClone(ctx context.Context, run gitFunc, bare, dir string) error {
 		// A clone that failed is removed, so the next call clones again.
 		return fmt.Errorf("cloning %s into %s: %w", bare, dir, errors.Join(err, os.RemoveAll(dir)))
 	}
+	// The marker is written last, so a clone killed before this point has none.
+	if err := os.WriteFile(marker, nil, 0o644); err != nil {
+		return fmt.Errorf("marking the clone of %s in %s finished: %w", bare, dir, err)
+	}
 	return nil
+}
+
+// cloneFinished reports whether dir has a .git and marker is present: the state
+// ensureClone leaves only when a clone has returned. A stat error other than
+// not-exist is returned, not read as unfinished.
+func cloneFinished(dir, marker string) (bool, error) {
+	for _, p := range []string{filepath.Join(dir, ".git"), marker} {
+		_, err := os.Stat(p)
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // rigNameOK reports whether rig can be joined under the town root as one
@@ -174,16 +208,50 @@ func fullSHA(s string) bool {
 	return true
 }
 
-// execGit runs git in dir, bounded by timeout. Its error names the failed call
-// by verb and exit status only: captured output can carry a credential (a url
-// with a token, say), so it is never put in an error.
+// repoEnvVars are the variables git reads to find a repository, its objects and
+// its config: the names `git rev-parse --local-env-vars` prints. A caller's value
+// for one would point a build call at another repo, so gitEnv drops them.
+var repoEnvVars = []string{
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_COMMON_DIR",
+	"GIT_CONFIG",
+	"GIT_CONFIG_COUNT",
+	"GIT_CONFIG_PARAMETERS",
+	"GIT_DIR",
+	"GIT_GRAFT_FILE",
+	"GIT_IMPLICIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_NO_REPLACE_OBJECTS",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_PREFIX",
+	"GIT_REPLACE_REF_BASE",
+	"GIT_SHALLOW_FILE",
+	"GIT_WORK_TREE",
+}
+
+// gitEnv returns environ without the repoEnvVars, plus GIT_TERMINAL_PROMPT=0.
+// A background call must never sit on a credential prompt.
+func gitEnv(environ []string) []string {
+	env := make([]string, 0, len(environ)+1)
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains(repoEnvVars, name) {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "GIT_TERMINAL_PROMPT=0")
+}
+
+// execGit runs git in dir, bounded by timeout, with the caller's repo variables
+// dropped (see gitEnv). Its error names the failed call by verb and exit status
+// only: captured output can carry a credential (a url with a token, say), so it
+// is never put in an error.
 func execGit(ctx context.Context, timeout time.Duration, dir string, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	// A background call must never sit on a credential prompt.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = gitEnv(os.Environ())
 	if _, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git %s: %w", args[0], err)
 	}
