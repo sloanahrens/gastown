@@ -141,7 +141,7 @@ var scriptsAreDebtEarlierEntries = []omCriterion{
 	{Name: "security", Weight: ptrTo(3.0), Guidance: "Untrusted input (bead text, mail, transcripts, tool-call strings, git refs, filenames, env) reaching a shell command, filesystem path, SQL, URL fetch, or subprocess environment without validation or canonicalisation; secrets, tokens or API keys written to logs, beads, commits, notes or transcripts; any weakening or bypass of the town guards (dangerous-command, polecat-path, container-suite, pr-workflow) or of gt done/refinery verification; fail-open error handling in a guard or gate. A confirmed finding here outranks style and mergeability and should block on its own."},
 	{Name: "fail-open-branch", Weight: ptrTo(2.0), Guidance: "Any check, gate, guard, or measurement whose failure path emits the same value as its success path is a finding, even when the local change is correct."},
 	{Name: "alarming-branch", Weight: ptrTo(3.0), Guidance: "Any check, guard, probe or alarm needs a test that drives its failing branch and asserts the alarm is observable: coverage of the passing path is not evidence, and a check whose failure is indistinguishable from its success is not a check. Scope is code whose purpose is to detect or report a condition — doctor checks, gates, probes, alarms, escalation paths, liveness tests, and the counters feeding them; a change reporting no verdict is out of scope, so this is not a coverage mandate. Can this check's failing branch produce the same value as its succeeding branch? If so it is not shippable; if you cannot tell, the test that answers it is missing. Rejected example: a doctor check returning OK when its probe cannot run, tested only on the healthy verdict — a broken probe reads exactly like a clean town. A confirmed finding blocks on its own; name the missing assertion."},
-	{Name: "docs-and-comments", Weight: ptrTo(2.0), Guidance: "A change that alters behaviour updates every doc and comment that describes it. New or edited docs and comments follow every rule in the repository context (docs/writing-for-agents.md); cite the rule id in a finding. A stale or contradicted line in an agent-facing file (AGENTS.md, internal/templates/polecat-CLAUDE.md, a directive, a formula description, a plugin.md, docs/HOOKS.md) is major; elsewhere minor. This criterion moves the score; it does not block alone."},
+	{Name: "docs-and-comments", Weight: ptrTo(2.0), Guidance: "A change that alters behaviour updates every doc and comment that describes it. New or edited docs and comments follow every rule in the repository context (docs/writing-for-agents.md); cite the rule id in a finding. A stale or contradicted line in an agent-facing file (AGENTS.md, internal/templates/polecat-CLAUDE.md, a directive, a formula description, a plugin.md, docs/HOOKS.md) is major; elsewhere minor. This criterion moves the score; it does not block alone. A landing that changes what docs/architecture.md describes (a deployed component, a namespace, a Secret or mount, a landing or roll step, an agent role, a rig, or a security control) must update that page in the same landing; a change that touches none of these needs no edit to it."},
 	{Name: "instruction-proliferation", Weight: ptrTo(2.0), Guidance: "An added statement of a fact or instruction already stated in an agent-facing file (the list docs-and-comments names) is a finding even when the copies agree today: the offence is the second copy, and the drift it permits is otherwise charged to whichever later change touches one of them. The finding does not stand when the new copy links to the existing one as its source of truth. R2 in docs/writing-for-agents.md is the rule this enforces; cite it, the existing copy, and whether the new one points at it. In an agent-facing file this is major; the criterion moves the score and does not block alone."},
 }
 
@@ -196,6 +196,29 @@ func TestShippedOMRubricCarriesScriptsAreDebtCriterion(t *testing.T) {
 			t.Errorf("%s guidance no longer carries %q: %q", scriptsAreDebtCriterion, want, c.Guidance)
 		}
 	}
+}
+
+// docsAndCommentsArchitecturePage is the page the docs-and-comments guidance
+// requires a landing to update when it changes what the page describes. The
+// guidance must keep naming it: without the name, om is not told which page a
+// landing that changes the architecture must update.
+const docsAndCommentsArchitecturePage = "docs/architecture.md"
+
+// TestShippedOMRubricDocsAndCommentsNamesArchitecturePage pins the reference
+// in the docs-and-comments guidance so a reword that drops the page fails here.
+func TestShippedOMRubricDocsAndCommentsNamesArchitecturePage(t *testing.T) {
+	t.Parallel()
+	r := shippedRubric(t)
+	for _, c := range r.Rubric {
+		if c.Name != "docs-and-comments" {
+			continue
+		}
+		if !strings.Contains(c.Guidance, docsAndCommentsArchitecturePage) {
+			t.Errorf("docs-and-comments guidance no longer names %s, so a landing that changes the page is not required to update it: %q", docsAndCommentsArchitecturePage, c.Guidance)
+		}
+		return
+	}
+	t.Fatalf("the shipped rubric %s carries no docs-and-comments criterion to name %s", shippedRubricPath(t), docsAndCommentsArchitecturePage)
 }
 
 // TestShippedOMThresholdIsGastownBar pins the approval bar the landing worker
