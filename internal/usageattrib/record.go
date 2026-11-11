@@ -383,7 +383,7 @@ func mergeRecords(a, b dashboard.UsageRecord) dashboard.UsageRecord {
 	m.WallS += b.WallS
 	m.EstCostUSD += b.EstCostUSD
 	// A stored record may lack a models map (an older file, or one the Python tool wrote):
-	// it is read with the map initialised, and its totals are kept rather than rebuilt from
+	// it is read with the map initialized, and its totals are kept rather than rebuilt from
 	// the models, which it does not have.
 	m.Models = maps.Clone(a.Models)
 	if m.Models == nil {
