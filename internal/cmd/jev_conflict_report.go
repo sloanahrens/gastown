@@ -34,15 +34,33 @@ const jevConflictDefaultSince = "14d"
 // jevWilsonZ is the two-sided 95% z-score, the one the metrics panel uses.
 const jevWilsonZ = 1.96
 
-var (
-	jevConflictReportSince string
-	jevConflictReportJSON  bool
-)
+// jevConflictReportDeps is what the conflict-report subcommand takes from the
+// host: the town whose logs it reads and the environment lookup that decides
+// whether the session is in the daemon pod. A test supplies both.
+type jevConflictReportDeps struct {
+	findTownRoot func() (string, error)
+	getenv       func(string) string
+}
 
-var jevConflictReportCmd = &cobra.Command{
-	Use:   "conflict-report",
-	Short: "Measure the conflict battery's same-files answers as a dispatch warning would have",
-	Long: `Read the conflict battery's log and count its same_files answers as a
+// realJevConflictReportDeps is jevConflictReportDeps on this host.
+func realJevConflictReportDeps() jevConflictReportDeps {
+	return jevConflictReportDeps{findTownRoot: workspace.FindFromCwdOrError, getenv: os.Getenv}
+}
+
+// jevConflictReportFlags is one conflict-report command's flags; a command owns
+// its own so a later run never inherits an earlier run's values.
+type jevConflictReportFlags struct {
+	since  string
+	asJSON bool
+}
+
+// newJevConflictReportCmd builds `gt jev conflict-report`.
+func newJevConflictReportCmd(d jevConflictReportDeps) *cobra.Command {
+	var f jevConflictReportFlags
+	cmd := &cobra.Command{
+		Use:   "conflict-report",
+		Short: "Measure the conflict battery's same-files answers as a dispatch warning would have",
+		Long: `Read the conflict battery's log and count its same_files answers as a
 dispatch advisory would have warned about them. Each bead pair counts once, at
 its newest answer logged before the later of its two beads landed, so an answer
 logged after the outcome is never used. A pair with a bead that never landed
@@ -59,34 +77,42 @@ It makes no Jev call, changes no bead and never fetches. The labels come from
 the conflict adapter, which reads the rig's landings and the bare clone as it
 stands. A pair whose commits the clone does not hold is counted as unlabeled,
 and so is a pair whose answer stays below 0.6, which no cut reaches.
+` + jevPodHelp + `
 
 Examples:
   gt jev conflict-report
   gt jev conflict-report --since 7d --json`,
-	Args: cobra.NoArgs,
-	RunE: runJevConflictReport,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return jevConflictReportRun(cmd, cmd.OutOrStdout(), d.findTownRoot,
+				f.since, f.asJSON, time.Now(), d.getenv)
+		},
+	}
+	fl := cmd.Flags()
+	fl.StringVar(&f.since, "since", jevConflictDefaultSince, "Count answers logged in this window ending now: Nd or a Go duration such as 36h")
+	fl.BoolVar(&f.asJSON, "json", false, "Print the report as JSON")
+	return cmd
 }
 
+var jevConflictReportCmd = newJevConflictReportCmd(realJevConflictReportDeps())
+
 func init() {
-	f := jevConflictReportCmd.Flags()
-	f.StringVar(&jevConflictReportSince, "since", jevConflictDefaultSince, "Count answers logged in this window ending now: Nd or a Go duration such as 36h")
-	f.BoolVar(&jevConflictReportJSON, "json", false, "Print the report as JSON")
 	jevCmd.AddCommand(jevConflictReportCmd)
 }
 
-func runJevConflictReport(cmd *cobra.Command, _ []string) error {
-	return jevConflictReportRun(cmd.Context(), cmd.OutOrStdout(), workspace.FindFromCwdOrError,
-		jevConflictReportSince, jevConflictReportJSON, time.Now())
-}
-
-// jevConflictReportRun finds the town and runs the report in it. findTown is a
-// parameter so a test can stand in for a cwd outside any town.
-func jevConflictReportRun(ctx context.Context, w io.Writer, findTown func() (string, error), since string, asJSON bool, now time.Time) error {
+// jevConflictReportRun refuses outside the daemon pod, whose logs the report
+// reads, then finds the town and runs the report in it. findTown and getenv are
+// parameters so a test can stand in for a cwd outside any town and for the pod's
+// environment.
+func jevConflictReportRun(cmd *cobra.Command, w io.Writer, findTown func() (string, error), since string, asJSON bool, now time.Time, getenv func(string) string) error {
+	if err := jevRequirePod(getenv, cmd); err != nil {
+		return err
+	}
 	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevConflictReportWith(ctx, w, townRoot, since, asJSON, now, scorecard.OpenReadOnly, jevConflictLandings)
+	return jevConflictReportWith(cmd.Context(), w, townRoot, since, asJSON, now, scorecard.OpenReadOnly, jevConflictLandings)
 }
 
 // jevConflictOpener opens a battery's adapter. It is a parameter so a test can

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,15 +15,17 @@ import (
 )
 
 // jevNoiseDeps is what the noise subcommand takes from the host: the town
-// whose batteries it reads. A test supplies the lookup, so no unit test needs a
+// whose batteries it reads and the environment lookup that decides whether the
+// session is in the daemon pod. A test supplies both, so no unit test needs a
 // working directory inside a town.
 type jevNoiseDeps struct {
 	findTownRoot func() (string, error)
+	getenv       func(string) string
 }
 
 // realJevNoiseDeps is jevNoiseDeps on this host.
 func realJevNoiseDeps() jevNoiseDeps {
-	return jevNoiseDeps{findTownRoot: workspace.FindFromCwdOrError}
+	return jevNoiseDeps{findTownRoot: workspace.FindFromCwdOrError, getenv: os.Getenv}
 }
 
 // jevNoiseFlags is one noise command's flags; a command owns its own so a later
@@ -57,12 +60,16 @@ items whose picked option changed in some repeat.
 keeps only the items whose original falls in the window ending now, given as Nd
 for days or a Go duration such as 36h. --json prints the same rows as JSON. The
 command is read-only.
+` + jevPodHelp + `
 
 Examples:
   gt jev noise
   gt jev noise --since 7d --cut 0.5 --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := jevRequirePod(d.getenv, cmd); err != nil {
+				return err
+			}
 			return runJevNoise(cmd.OutOrStdout(), d, f, time.Now())
 		},
 	}

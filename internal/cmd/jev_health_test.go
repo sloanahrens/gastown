@@ -99,7 +99,7 @@ func runJevHealthCommand(t *testing.T, town string, now time.Time, asJSON bool) 
 func runJevHealthCommandWithStat(t *testing.T, town string, now time.Time, asJSON bool, stat jevStatFunc) (string, error) {
 	t.Helper()
 	var out bytes.Buffer
-	cmd := newJevHealthCmd(townFinder(town), func() time.Time { return now }, stat)
+	cmd := newJevHealthCmd(townFinder(town), func() time.Time { return now }, stat, inPodEnv())
 	cmd.SetOut(&out)
 	cmd.SetErr(&bytes.Buffer{})
 	if asJSON {
@@ -119,7 +119,7 @@ func runJevHealthError(t *testing.T, findTown func() (string, error), out io.Wri
 	if out == nil {
 		out = &bytes.Buffer{}
 	}
-	cmd := newJevHealthCmd(findTown, jevHealthFixedNow, os.Stat)
+	cmd := newJevHealthCmd(findTown, jevHealthFixedNow, os.Stat, inPodEnv())
 	cmd.SetOut(out)
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs(args)

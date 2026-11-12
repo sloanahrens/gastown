@@ -16,12 +16,6 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-var (
-	jevSpendJSON       bool
-	jevSpendHours      int
-	jevSpendUSDPerBTok float64
-)
-
 var jevCmd = &cobra.Command{
 	Use:     "jev",
 	GroupID: GroupDiag,
@@ -31,14 +25,39 @@ where every answered Jev call appends its token counts and the caller that
 spent them, and the request log, where every call that reaches the network
 appends what it sent as sizes and a hash. The calls record themselves; gt jev
 only reads. The health subcommand judges the batteries from the files they
-write; it reads nothing else.`,
+write; it reads nothing else. The subcommands that read these logs run in the
+daemon pod.`,
 	RunE: requireSubcommand,
 }
 
-var jevSpendCmd = &cobra.Command{
-	Use:   "spend",
-	Short: "Print Jev spend for a window, by caller",
-	Long: `Sum the ledger lines stamped in the --hours window ending now and price
+// jevSpendDeps is what the spend subcommand takes from the host: the town whose
+// ledger it reads and the environment lookup that decides whether the session
+// is in the daemon pod. A test supplies both.
+type jevSpendDeps struct {
+	findTownRoot func() (string, error)
+	getenv       func(string) string
+}
+
+// realJevSpendDeps is jevSpendDeps on this host.
+func realJevSpendDeps() jevSpendDeps {
+	return jevSpendDeps{findTownRoot: workspace.FindFromCwdOrError, getenv: os.Getenv}
+}
+
+// jevSpendFlags is one spend command's flags; a command owns its own so a later
+// run never inherits an earlier run's values.
+type jevSpendFlags struct {
+	asJSON        bool
+	hours         int
+	usdPerBillion float64
+}
+
+// newJevSpendCmd builds `gt jev spend`.
+func newJevSpendCmd(d jevSpendDeps) *cobra.Command {
+	var f jevSpendFlags
+	cmd := &cobra.Command{
+		Use:   "spend",
+		Short: "Print Jev spend for a window, by caller",
+		Long: `Sum the ledger lines stamped in the --hours window ending now and price
 their tokens at --usd-per-billion-tokens, which is required because the
 ledger stores tokens and never dollars. A missing ledger prints zeros; a line
 that does not parse is skipped and counted in lines_skipped.
@@ -54,30 +73,42 @@ today (since local midnight), yesterday and the last 168 hours, for a dashboard
 that draws Jev spend beside DeepSeek's and Claude's. copy_newest_write is {at,
 path} of the copy's newest write, null when nothing has been written.
 copy_warning is set only when the copy could not be read, naming why.
+` + jevPodHelp + `
 
 Examples:
   gt jev spend --usd-per-billion-tokens 3 --json
   gt jev spend --hours 168 --usd-per-billion-tokens 3`,
-	Args: cobra.NoArgs,
-	RunE: runJevSpend,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return jevSpendRun(cmd, d, f)
+		},
+	}
+	fl := cmd.Flags()
+	fl.BoolVar(&f.asJSON, "json", false, "Print the report as JSON")
+	fl.IntVar(&f.hours, "hours", 24, "Length of the window ending now, in hours")
+	fl.Float64Var(&f.usdPerBillion, "usd-per-billion-tokens", 0,
+		"Price of input and output tokens, in US dollars per billion (required: the ledger stores tokens, not dollars)")
+	return cmd
 }
 
+var jevSpendCmd = newJevSpendCmd(realJevSpendDeps())
+
 func init() {
-	f := jevSpendCmd.Flags()
-	f.BoolVar(&jevSpendJSON, "json", false, "Print the report as JSON")
-	f.IntVar(&jevSpendHours, "hours", 24, "Length of the window ending now, in hours")
-	f.Float64Var(&jevSpendUSDPerBTok, "usd-per-billion-tokens", 0,
-		"Price of input and output tokens, in US dollars per billion (required: the ledger stores tokens, not dollars)")
 	jevCmd.AddCommand(jevSpendCmd)
 	rootCmd.AddCommand(jevCmd)
 }
 
-func runJevSpend(cmd *cobra.Command, _ []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
+// jevSpendRun refuses outside the daemon pod, whose logs the command reads,
+// then finds the town and reports its ledger.
+func jevSpendRun(cmd *cobra.Command, d jevSpendDeps, f jevSpendFlags) error {
+	if err := jevRequirePod(d.getenv, cmd); err != nil {
+		return err
+	}
+	townRoot, err := d.findTownRoot()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevSpendWithFlags(cmd.OutOrStdout(), townRoot, jevSpendHours, jevSpendUSDPerBTok, jevSpendJSON, time.Now())
+	return jevSpendWithFlags(cmd.OutOrStdout(), townRoot, f.hours, f.usdPerBillion, f.asJSON, time.Now())
 }
 
 // jevSpendWithFlags validates the window and the price, then reports the

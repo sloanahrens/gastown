@@ -144,7 +144,7 @@ func TestJevNoiseCutFlag(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	noiseFixtureOriginal(t, town, "k", 0.43, 0.53, 0.43, 0.53)
-	deps := jevNoiseDeps{findTownRoot: func() (string, error) { return town, nil }}
+	deps := jevNoiseDeps{findTownRoot: func() (string, error) { return town, nil }, getenv: inPodEnv()}
 
 	cmd := newJevNoiseCmd(deps)
 	var out bytes.Buffer

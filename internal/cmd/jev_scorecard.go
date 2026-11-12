@@ -17,20 +17,38 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-var (
-	jevScorecardBattery  string
-	jevScorecardSince    string
-	jevScorecardJSON     bool
-	jevScorecardLines    bool
-	jevScorecardRefresh  bool
-	jevScorecardHistory  bool
-	jevScorecardQuestion string
-)
+// jevScorecardDeps is what the scorecard subcommand takes from the host: the
+// town whose batteries it scores and the environment lookup that decides
+// whether the session is in the daemon pod. A test supplies both.
+type jevScorecardDeps struct {
+	findTownRoot func() (string, error)
+	getenv       func(string) string
+}
 
-var jevScorecardCmd = &cobra.Command{
-	Use:   "scorecard",
-	Short: "Score a battery's answers against its labels",
-	Long: `Read a battery's JSONL log through its registered adapter and print, for each
+// realJevScorecardDeps is jevScorecardDeps on this host.
+func realJevScorecardDeps() jevScorecardDeps {
+	return jevScorecardDeps{findTownRoot: workspace.FindFromCwdOrError, getenv: os.Getenv}
+}
+
+// jevScorecardFlags is one scorecard command's flags; a command owns its own so
+// a later run never inherits an earlier run's values.
+type jevScorecardFlags struct {
+	battery  string
+	since    string
+	question string
+	asJSON   bool
+	lines    bool
+	refresh  bool
+	history  bool
+}
+
+// newJevScorecardCmd builds `gt jev scorecard`.
+func newJevScorecardCmd(d jevScorecardDeps) *cobra.Command {
+	var f jevScorecardFlags
+	cmd := &cobra.Command{
+		Use:   "scorecard",
+		Short: "Score a battery's answers against its labels",
+		Long: `Read a battery's JSONL log through its registered adapter and print, for each
 question, how Jev's answers agree with the labels the adapter finds: lines
 logged and labeled, positives and negatives, precision and recall (at 0.5 for a
 noul, at the chosen option for a choice), the cut with the best F1, five
@@ -75,43 +93,54 @@ scored it: the date, labeled, positives, verdict, and the change in labeled sinc
 the previous row. It ends a question with "no growth in N refreshes" when the
 last N or more rows share a labeled count. --history takes no other flag but
 --battery and --question.
+` + jevPodHelp + `
 
 Examples:
   gt jev scorecard --battery fixture
   gt jev scorecard --battery fixture --since 14d --json
   gt jev scorecard --refresh
   gt jev scorecard --history --battery logtriage --question severity`,
-	Args: cobra.NoArgs,
-	RunE: runJevScorecard,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return jevScorecardCommand(cmd, d, jevScorecardOptions{
+				Battery:  f.battery,
+				Since:    f.since,
+				JSON:     f.asJSON,
+				Lines:    f.lines,
+				Refresh:  f.refresh,
+				History:  f.history,
+				Question: f.question,
+			}, scoreJevBattery, scorecard.Cache{})
+		},
+	}
+	fl := cmd.Flags()
+	fl.StringVar(&f.battery, "battery", "", "Battery to score (required unless --refresh)")
+	fl.StringVar(&f.since, "since", "", "Score only lines from this window ending now: Nd or a Go duration (default: all time, or 7d with --refresh)")
+	fl.BoolVar(&f.asJSON, "json", false, "Print the report as JSON")
+	fl.BoolVar(&f.lines, "lines", false, "With --json, print every item's labeling for a battery that leaves them out by default")
+	fl.BoolVar(&f.refresh, "refresh", false, "Score every registered battery and write <town>/.runtime/jev/scorecard.json")
+	fl.BoolVar(&f.history, "history", false, "Print each question's counts and verdicts across the refreshes in <town>/.runtime/jev/scorecard.history.jsonl")
+	fl.StringVar(&f.question, "question", "", "With --history, show only this question")
+	return cmd
 }
 
+var jevScorecardCmd = newJevScorecardCmd(realJevScorecardDeps())
+
 func init() {
-	f := jevScorecardCmd.Flags()
-	f.StringVar(&jevScorecardBattery, "battery", "", "Battery to score (required unless --refresh)")
-	f.StringVar(&jevScorecardSince, "since", "", "Score only lines from this window ending now: Nd or a Go duration (default: all time, or 7d with --refresh)")
-	f.BoolVar(&jevScorecardJSON, "json", false, "Print the report as JSON")
-	f.BoolVar(&jevScorecardLines, "lines", false, "With --json, print every item's labeling for a battery that leaves them out by default")
-	f.BoolVar(&jevScorecardRefresh, "refresh", false, "Score every registered battery and write <town>/.runtime/jev/scorecard.json")
-	f.BoolVar(&jevScorecardHistory, "history", false, "Print each question's counts and verdicts across the refreshes in <town>/.runtime/jev/scorecard.history.jsonl")
-	f.StringVar(&jevScorecardQuestion, "question", "", "With --history, show only this question")
 	jevCmd.AddCommand(jevScorecardCmd)
 }
 
-func runJevScorecard(cmd *cobra.Command, _ []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
+// jevScorecardCommand refuses outside the daemon pod, whose logs the command
+// reads, then finds the town and runs the flags the command parsed.
+func jevScorecardCommand(cmd *cobra.Command, d jevScorecardDeps, o jevScorecardOptions, score jevBatteryScorer, cache scorecard.Cache) error {
+	if err := jevRequirePod(d.getenv, cmd); err != nil {
+		return err
+	}
+	townRoot, err := d.findTownRoot()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	o := jevScorecardOptions{
-		Battery:  jevScorecardBattery,
-		Since:    jevScorecardSince,
-		JSON:     jevScorecardJSON,
-		Lines:    jevScorecardLines,
-		Refresh:  jevScorecardRefresh,
-		History:  jevScorecardHistory,
-		Question: jevScorecardQuestion,
-	}
-	return jevScorecardRun(cmd.Context(), cmd.OutOrStdout(), townRoot, o, time.Now(), scoreJevBattery, scorecard.Cache{})
+	return jevScorecardRun(cmd.Context(), cmd.OutOrStdout(), townRoot, o, time.Now(), score, cache)
 }
 
 // jevScorecardOptions is the command's flags, passed as values so the dispatch
