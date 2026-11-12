@@ -101,3 +101,20 @@ func TestForgejoBlockIsRefusedAsUnknownKey(t *testing.T) {
 		t.Errorf("Keys = %v, want %v", pe.Keys, want)
 	}
 }
+
+// A tolerated daemon section beside a misspelled top-level key is refused, and
+// only the misspelling is named: the tolerated keys load, so they are not
+// reported.
+func TestToleratedBlockBesideAMisspelledKeyIsRefused(t *testing.T) {
+	t.Parallel()
+	body := `{"type":"town-settings","version":1,"daemon":` + toleratedTierSweepDoc + `,"forgjo":{}}`
+	var s TownSettings
+	err := DecodeJSONFile("settings/config.json", []byte(body), &s)
+	var pe *ParseError
+	if !errors.As(err, &pe) {
+		t.Fatalf("DecodeJSONFile = %v, want a ParseError for the misspelt key", err)
+	}
+	if want := []string{"forgjo"}; !slices.Equal(pe.Keys, want) {
+		t.Errorf("Keys = %v, want only the misspelling %v", pe.Keys, want)
+	}
+}
