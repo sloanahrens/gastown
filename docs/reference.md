@@ -1107,11 +1107,14 @@ consumers:
 |-------------|--------|--------|
 | `name`      | string | rig name |
 | `status`    | string | operational / stopped / … |
-| `repo_path` | string or null | `Rig.RepoPath()` — the first of the rig root, `<rig>/mayor/rig`, `<rig>/refinery/rig` that is a git worktree root; `null` if none |
+| `repo_path` | string | The first of the rig root and `<rig>/refinery/rig` that is a git worktree root (`Rig.RepoPath()`); else the rig's shared `<rig>/.repo.git` (`Rig.BareRepoPath()`) when it has one; else `""` |
 
 `repo_path` is the field a script that runs git in each rig's repository
-consumes. When it is `null` or missing, such a script must fail loudly rather
-than no-op (gt-chqi, gt-xxwx). The daemon's git_hygiene patrol resolves its
+consumes. When it is empty or missing, such a script must fail loudly rather
+than no-op (gt-chqi, gt-xxwx). A rig whose only working clone is at
+`<rig>/mayor/rig` has no `.repo.git` in this rule and reports `""`: the
+`mayor/rig` clone is no longer a candidate. Such a rig needs its clone moved
+under `<rig>/refinery/rig` or a bare `.repo.git` added (gt-3lvcjz.30). The daemon's git_hygiene patrol resolves its
 repository through `gitHygieneRepoPath` in `internal/daemon/git_hygiene.go`,
 which prefers the rig's shared bare repo (`.repo.git/`) to what this field
 reports.

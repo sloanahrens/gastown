@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,8 +27,8 @@ var initCmd = &cobra.Command{
 	Short:   "Initialize current directory as a Gas Town rig",
 	Long: `Initialize the current directory for use as a Gas Town rig.
 
-This creates the standard agent directories (polecats/, witness/, refinery/,
-mayor/) and updates .git/info/exclude to ignore them.
+This creates the standard agent directories (polecats/ and crew/) and updates
+.git/info/exclude to ignore them.
 
 The current directory must be a git repository. Use --force to reinitialize
 an existing rig structure.`,
@@ -61,21 +62,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 		style.Bold.Render("⚙️"), style.Dim.Render(cwd))
 
 	// Create agent directories
-	created := 0
-	for _, dir := range rig.AgentDirs {
-		dirPath := filepath.Join(cwd, dir)
-		if err := os.MkdirAll(dirPath, 0755); err != nil {
-			return fmt.Errorf("creating %s: %w", dir, err)
-		}
-
-		// Create .gitkeep to ensure directory is tracked if needed (non-fatal)
-		gitkeep := filepath.Join(dirPath, ".gitkeep")
-		if _, err := os.Stat(gitkeep); os.IsNotExist(err) {
-			_ = os.WriteFile(gitkeep, []byte(""), 0644)
-		}
-
-		fmt.Printf("   ✓ Created %s/\n", dir)
-		created++
+	created, err := createAgentDirs(cwd, os.Stdout)
+	if err != nil {
+		return err
 	}
 
 	// Update .git/info/exclude
@@ -121,6 +110,28 @@ func runInit(cmd *cobra.Command, args []string) error {
 		style.Dim.Render("gt polecat identity add <rig> <name>"))
 
 	return nil
+}
+
+// createAgentDirs creates each rig.AgentDirs directory under cwd, with a
+// .gitkeep in it, and reports each one to out. It returns how many it created.
+func createAgentDirs(cwd string, out io.Writer) (int, error) {
+	created := 0
+	for _, dir := range rig.AgentDirs {
+		dirPath := filepath.Join(cwd, dir)
+		if err := os.MkdirAll(dirPath, 0755); err != nil {
+			return created, fmt.Errorf("creating %s: %w", dir, err)
+		}
+
+		// Create .gitkeep to ensure directory is tracked if needed (non-fatal)
+		gitkeep := filepath.Join(dirPath, ".gitkeep")
+		if _, err := os.Stat(gitkeep); os.IsNotExist(err) {
+			_ = os.WriteFile(gitkeep, []byte(""), 0644)
+		}
+
+		fmt.Fprintf(out, "   ✓ Created %s/\n", dir)
+		created++
+	}
+	return created, nil
 }
 
 func updateGitExclude(repoPath string) error {

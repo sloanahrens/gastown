@@ -39,7 +39,8 @@ type Rig struct {
 	// Crew workers are user-managed persistent workspaces.
 	Crew []string `json:"crew,omitempty"`
 
-	// HasMayor indicates if the rig has a mayor clone.
+	// HasMayor reports a legacy mayor clone in the rig. RepoPath does not offer
+	// that clone as a candidate.
 	HasMayor bool `json:"has_mayor"`
 
 	// IdentityBeads, when set, answers the reads this Rig makes itself (the

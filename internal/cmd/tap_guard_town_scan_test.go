@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -882,5 +883,23 @@ func TestScanRootHazard(t *testing.T) {
 					tt.token, tt.root, suggestion)
 			}
 		})
+	}
+}
+
+// TestRigAggregateDirsSet: the rig directories that are aggregates are exactly
+// mayor (the legacy layout a rig keeps until it is renamed), polecats and crew.
+// mayor is named here, not derived from rig.AgentDirs, so the scan guard does
+// not loosen when mayor/rig leaves AgentDirs (gt-3lvcjz.30).
+func TestRigAggregateDirsSet(t *testing.T) {
+	t.Parallel()
+
+	got := rigAggregateDirs()
+	var names []string
+	for name := range got {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if want := "crew,mayor,polecats"; strings.Join(names, ",") != want {
+		t.Errorf("rigAggregateDirs() = %v, want exactly %s", names, want)
 	}
 }
