@@ -1,8 +1,10 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -84,6 +86,40 @@ func TestUnrequestedStopLogLineDoesNotPromiseARelaunch(t *testing.T) {
 		if !strings.Contains(unrequestedStopLogLine, want) {
 			t.Errorf("the unrequested-stop line lacks %q:\n%s", want, unrequestedStopLogLine)
 		}
+	}
+}
+
+// The daemon logs unrequestedStopLogLine on its signal branch only when gt did
+// not ask for the stop: that line is the operator's clue to a bootout (gt-2gctr).
+// This drives shutdownForSignal, the production caller, and reads the logger.
+func TestSignalShutdownLogsTheUnrequestedStopLineOnlyWhenUnrequested(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		requested bool // StopDaemon left a marker for this pid before the signal
+		wantErr   error
+		wantLog   bool
+	}{
+		{name: "a stop gt requested exits 0 and is not logged as unrequested", requested: true},
+		{name: "an unrequested signal exits 75 and is logged as unrequested", wantErr: ErrUnrequestedStop, wantLog: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, logs := signalTestDaemon(t)
+			if tc.requested {
+				if err := writeStopRequested(d.config.TownRoot, os.Getpid(), time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err := d.shutdownForSignal(syscall.SIGTERM, &State{Running: true}, make(chan os.Signal))
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("shutdownForSignal = %v, want %v", err, tc.wantErr)
+			}
+			if got := strings.Contains(logs.String(), unrequestedStopLogLine); got != tc.wantLog {
+				t.Errorf("unrequested-stop line logged = %v, want %v:\n%s", got, tc.wantLog, logs.String())
+			}
+		})
 	}
 }
 
