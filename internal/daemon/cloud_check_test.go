@@ -76,8 +76,9 @@ func cloudCheckTestDaemon(t *testing.T, cfg *DaemonPatrolConfig, keyFile func(*a
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatalf("writing the status: %v", err)
 			}
-			// The file's mtime is the fake clock's, so "written this run" is
-			// decided by the test's clock, not the host's.
+			// The file's mtime is the fake clock's, so each run's write leaves a
+			// known mtime that moves with the clock, and the test does not depend
+			// on the host's timestamp resolution.
 			if err := os.Chtimes(path, f.now, f.now); err != nil {
 				t.Fatalf("stamping the status: %v", err)
 			}
@@ -363,38 +364,78 @@ func TestCloudCheckExitZeroWithoutANewStatusKeepsTheAlert(t *testing.T) {
 }
 
 // TestCloudCheckStatusWrittenByARun: the status file counts as written by a run
-// only when it reads back and its modification time is not before the run's
-// start.
+// when it is present afterward and either was absent before or its state
+// changed. A file the run left as it was, or removed, was not written by it.
 func TestCloudCheckStatusWrittenByARun(t *testing.T) {
 	t.Parallel()
-	start := cloudCheckNow
+	old := time.Unix(1_000_000, 0)
+	// put writes body and stamps it with mod, so the state the run starts with
+	// is known, whatever the host's clock says.
+	put := func(body string, mod time.Time) func(path string) error {
+		return func(path string) error {
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				return err
+			}
+			return os.Chtimes(path, mod, mod)
+		}
+	}
+	nothing := func(string) error { return nil }
+	remove := func(path string) error { return os.Remove(path) }
 	cases := []struct {
-		name    string
-		modTime time.Time
-		absent  bool
-		want    bool
+		name string
+		// before sets up the status file the run starts with; nil leaves it absent.
+		before func(path string) error
+		// run is what the run does to the status file.
+		run  func(path string) error
+		want bool
 	}{
-		{"absent", time.Time{}, true, false},
-		{"left by an earlier run", start.Add(-time.Minute), false, false},
-		{"written at the start", start, false, true},
-		{"written after the start", start.Add(time.Second), false, true},
+		{"absent before, written by the run", nil, put("{}", cloudCheckNow), true},
+		{"absent before and after", nil, nothing, false},
+		{"left by an earlier run, not rewritten", put("{}", old), nothing, false},
+		{"left by an earlier run, rewritten", put("{}", old), put("{}", cloudCheckNow), true},
+		{"rewritten with the same modification time", put("{}", old), put(`{"at":1}`, old), true},
+		{"left by an earlier run, removed", put("{}", old), remove, false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "status.json")
-			if !tt.absent {
-				if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
-					t.Fatalf("writing the status: %v", err)
-				}
-				if err := os.Chtimes(path, tt.modTime, tt.modTime); err != nil {
-					t.Fatalf("stamping the status: %v", err)
+			if tt.before != nil {
+				if err := tt.before(path); err != nil {
+					t.Fatalf("setting up the status: %v", err)
 				}
 			}
-			if got := cloudCheckWritten(path, start); got != tt.want {
+			before := cloudCheckStatusFileOf(path)
+			if err := tt.run(path); err != nil {
+				t.Fatalf("running: %v", err)
+			}
+			if got := cloudCheckWritten(before, cloudCheckStatusFileOf(path)); got != tt.want {
 				t.Errorf("cloudCheckWritten = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCloudCheckUnreadableStatusBeforeTheRunIsNotAWrite: a status file the daemon
+// cannot stat before the run has no known state to compare against, so a run
+// that leaves it readable does not count as having written it.
+func TestCloudCheckUnreadableStatusBeforeTheRunIsNotAWrite(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	blocker := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+		t.Fatalf("writing the blocker: %v", err)
+	}
+	before := cloudCheckStatusFileOf(filepath.Join(blocker, "status.json"))
+	if before.err == nil || errors.Is(before.err, fs.ErrNotExist) {
+		t.Fatalf("setup: stat before the run = %v, want an unreadable file", before.err)
+	}
+	path := filepath.Join(dir, "status.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("writing the status: %v", err)
+	}
+	if cloudCheckWritten(before, cloudCheckStatusFileOf(path)) {
+		t.Errorf("cloudCheckWritten = true for a status unreadable before the run, want false")
 	}
 }
 
