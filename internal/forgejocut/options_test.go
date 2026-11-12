@@ -3,7 +3,6 @@ package forgejocut
 import (
 	"errors"
 	"os"
-	"slices"
 	"strings"
 	"testing"
 
@@ -35,19 +34,8 @@ func isTownDir(p string) bool {
 	return false
 }
 
-// testBinary is the path of the running binary the test seams report: at the root
-// of testRepo, as a build without bin/ puts it.
-const (
-	testBinary = "/repo/forgejo-cutover"
-	testProbe  = "/repo/scripts/forgejo-probe.sh"
-)
-
-// isTownFile reports whether p is a test town's marker, the test repository's
-// probe, or a probe under scripts/.
+// isTownFile reports whether p is a test town's marker.
 func isTownFile(p string) bool {
-	if strings.HasPrefix(p, "scripts/") || p == testProbe {
-		return true
-	}
 	for _, t := range testTowns {
 		if p == t+"/mayor/town.json" {
 			return true
@@ -65,12 +53,11 @@ const githubOrigin = "https://example.com/acme/gastown.git"
 // reads as "" unless a test sets it.
 func testEnv(vars map[string]string) Env {
 	return Env{
-		Getenv:     func(key string) string { return vars[key] },
-		IsDir:      isTownDir,
-		IsFile:     isTownFile,
-		Town:       func() string { return "" },
-		Executable: func() (string, error) { return testBinary, nil },
-		Git:        fakeGit{origin: githubOrigin},
+		Getenv: func(key string) string { return vars[key] },
+		IsDir:  isTownDir,
+		IsFile: isTownFile,
+		Town:   func() string { return "" },
+		Git:    fakeGit{origin: githubOrigin},
 	}
 }
 
@@ -108,7 +95,6 @@ func baseOptions() Options {
 		BotPrefix:     "bot-",
 		APIURL:        "http://127.0.0.1:3000/api/v1",
 		WebURL:        "http://127.0.0.1:3000",
-		Probe:         testProbe,
 		GT:            "gt",
 	}
 }
@@ -254,11 +240,6 @@ func TestParseDefaultsTable(t *testing.T) {
 			change: func(o *Options) { o.MainBranch = "release/1" },
 		},
 		{
-			name:   "--probe names the probe",
-			args:   []string{"--probe", "scripts/other-probe.sh"},
-			change: func(o *Options) { o.Probe = "scripts/other-probe.sh" },
-		},
-		{
 			name:   "--gt names the gt binary",
 			args:   []string{"--gt", "/opt/gt/bin/gt"},
 			change: func(o *Options) { o.GT = "/opt/gt/bin/gt" },
@@ -353,72 +334,6 @@ func TestParseTownRootChain(t *testing.T) {
 				t.Errorf("TownRoot = %q, want %q", got.TownRoot, tc.want)
 			}
 		})
-	}
-}
-
-// TestParseProbeDefaultIsBesideTheBinary: with no --probe, the probe is the one
-// under the repository the binary sits in, the binary's directory or its parent.
-// Where the binary's location names no probe, the path under its directory is
-// named, so the refusal shows what was looked at.
-func TestParseProbeDefaultIsBesideTheBinary(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name       string
-		executable string
-		err        error
-		probes     []string // files beside the binary, besides the test repository's probe
-		want       string   // the probe path the command names
-		refused    bool     // the probe is missing, so the parse refuses it
-	}{
-		{name: "the binary at the repository root", executable: "/repo/forgejo-cutover", want: "/repo/scripts/forgejo-probe.sh"},
-		{name: "the binary in bin/", executable: "/repo/bin/forgejo-cutover", want: "/repo/scripts/forgejo-probe.sh"},
-		{name: "the binary's own directory wins", executable: "/repo/bin/forgejo-cutover", probes: []string{"/repo/bin/scripts/forgejo-probe.sh"}, want: "/repo/bin/scripts/forgejo-probe.sh"},
-		{name: "no probe beside the binary names the binary's directory", executable: "/usr/local/libexec/forgejo-cutover", want: "/usr/local/libexec/scripts/forgejo-probe.sh", refused: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			env := testEnv(homeVars(nil))
-			env.Executable = func() (string, error) { return tc.executable, tc.err }
-			env.IsFile = func(p string) bool {
-				return isTownFile(p) || slices.Contains(tc.probes, p)
-			}
-			got, err := Parse(withRig(), env)
-			if tc.refused {
-				var refused *UsageError
-				if !errors.As(err, &refused) || !strings.Contains(refused.Message, "--probe '"+tc.want+"' is not a file") {
-					t.Fatalf("Parse error = %v, want a usage error naming probe %q", err, tc.want)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("Parse error = %v, want none", err)
-			}
-			if got.Probe != tc.want {
-				t.Errorf("Probe = %q, want %q", got.Probe, tc.want)
-			}
-		})
-	}
-}
-
-// TestParseNoExecutablePathNeedsAProbeFlag: with no path for the binary there is no
-// repository to look in, so the default probe is not guessed from the working
-// directory: the parse is refused until --probe names one.
-func TestParseNoExecutablePathNeedsAProbeFlag(t *testing.T) {
-	t.Parallel()
-	env := testEnv(homeVars(nil))
-	env.Executable = func() (string, error) { return "", errors.New("no executable") }
-	env.IsFile = func(p string) bool { return isTownFile(p) || p == "/probes/forgejo-probe.sh" }
-	_, err := Parse(withRig(), env)
-	var refused *UsageError
-	if !errors.As(err, &refused) || !strings.Contains(refused.Message, "--probe is required") {
-		t.Fatalf("Parse error = %v, want a usage error saying --probe is required", err)
-	}
-	got, err := Parse(withRig("--probe", "/probes/forgejo-probe.sh"), env)
-	if err != nil {
-		t.Fatalf("Parse with --probe error = %v, want none", err)
-	}
-	if got.Probe != "/probes/forgejo-probe.sh" {
-		t.Errorf("Probe = %q, want the --probe value", got.Probe)
 	}
 }
 
@@ -518,8 +433,7 @@ func TestParseRejectsBadValues(t *testing.T) {
 		"town-root empty":                     {args: withRig("--town-root", ""), message: "--town-root '' is not a directory"},
 		"no HOME and no town root":            {args: withRig(), vars: map[string]string{"HOME": ""}, message: "--town-root '' is not a directory"},
 		"town-root with no value":             {args: []string{"gastown", "--repo", "acme/gastown", "--town-root"}, message: "--town-root needs a value"},
-		"probe that is not a file":            {args: withRig("--probe", "nope.sh"), message: "--probe 'nope.sh' is not a file"},
-		"probe with no value":                 {args: []string{"gastown", "--repo", "acme/gastown", "--probe"}, message: "--probe needs a value"},
+		"the removed --probe flag":            {args: withRig("--probe", "/usr/bin/probe"), message: "unknown option: --probe"},
 		"unknown option":                      {args: withRig("--nope"), message: "unknown option: --nope"},
 		"the dropped --mirror flag":           {args: withRig("--mirror"), message: "unknown option: --mirror"},
 		"the dropped --mirror-target flag":    {args: withRig("--mirror-target", "git@x:y/z.git"), message: "unknown option: --mirror-target"},

@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/forgejoprobe"
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/forgejoresync"
 )
@@ -16,7 +17,7 @@ import (
 // goes through, and the two streams the script wrote its progress and its notes
 // to. A nil seam takes its in-process default, except Runner and
 // ProvisionEnv.Getenv, which the run refuses without: a cutover that cannot read
-// its landing queue, start the probe or resolve the admin token must fail rather
+// its landing queue, run its children or resolve the admin token must fail rather
 // than skip those steps.
 type RunEnv struct {
 	// Git runs the cutover's git calls; nil runs the git binary.
@@ -26,9 +27,11 @@ type RunEnv struct {
 	Files Files
 	// Now stamps the backup and replace names; nil is time.Now.
 	Now func() time.Time
-	// Runner runs the children that are not git: the landing-queue read, the probe,
-	// ssh-keygen and the daemon restart. A test injects a fake.
+	// Runner runs the children that are not git: the landing-queue read, ssh-keygen
+	// and the daemon restart. A test injects a fake.
 	Runner Runner
+	// ProbeRun is step 1's probe run; nil runs forgejoprobe.Run in this process.
+	ProbeRun ProbeFunc
 	// MkdirTemp and RemoveAll make and remove the import's scratch directory; nil is
 	// os.MkdirTemp and os.RemoveAll.
 	MkdirTemp func(dir, pattern string) (string, error)
@@ -76,8 +79,8 @@ type runStep struct {
 // env.Stderr, as the script's note and log did. The admin token is resolved here,
 // before the first step, exactly as the script resolved it before step 1: a run
 // with no token sends no request and runs no probe. The value is kept only to
-// hand to the probe when no token file was named — the probe resolves it from its
-// environment — and the provisioning run resolves it again through the same seam.
+// hand to the probe, in process, when no token file was named, and the
+// provisioning run resolves it again through the same seam.
 func Run(ctx context.Context, opts *Options, env RunEnv) int {
 	stdout, stderr := env.stdout(), env.stderr()
 	if opts == nil {
@@ -88,7 +91,7 @@ func Run(ctx context.Context, opts *Options, env RunEnv) int {
 		ctx = context.Background()
 	}
 	if env.Runner == nil {
-		fmt.Fprintln(stderr, "forgejo-cutover: the exec seam is not wired: no runner for the landing queue, the probe, ssh-keygen or the daemon restart")
+		fmt.Fprintln(stderr, "forgejo-cutover: the exec seam is not wired: no runner for the landing queue, ssh-keygen or the daemon restart")
 		return ExitFailure
 	}
 	if env.ProvisionEnv.Getenv == nil {
@@ -125,7 +128,11 @@ func Run(ctx context.Context, opts *Options, env RunEnv) int {
 			return RefuseIfLandingInFlight(env.Runner, opts, log)
 		}},
 		{"step 1 (the probe)", func() error {
-			return ProbeGreen(env.Runner, opts, token, log)
+			probe := env.ProbeRun
+			if probe == nil {
+				probe = runProbe
+			}
+			return ProbeGreen(ctx, probe, opts, token, env.ProvisionEnv.Getenv, forgejoprobe.Streams{Stdout: stdout, Stderr: stderr}, log)
 		}},
 		{"step 2 (the ref import)", func() error { return c.ImportRefs() }},
 		{"step 3 (provisioning)", func() error { return c.Provision() }},
@@ -170,8 +177,8 @@ func Run(ctx context.Context, opts *Options, env RunEnv) int {
 
 // checkAdminToken resolves the admin token the way the script's
 // resolve_admin_token did, before any step runs. The value goes back to the run
-// for one purpose: the probe, when no token file was named, resolves it from the
-// environment the run hands that one child. A run with no token is refused with
+// for one purpose: the probe, when no token file was named, is handed it in
+// process. A run with no token is refused with
 // the cutover's own broker rule; a token that was found and refused keeps the
 // provisioner's message, which names the rule and never the value.
 func (c *Cutover) checkAdminToken() (forgejoprov.Secret, error) {

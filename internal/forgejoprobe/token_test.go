@@ -86,8 +86,8 @@ func TestResolveTokenOrder(t *testing.T) {
 // The no-token refusal, in full, with and without a named file. The probe's own
 // wording must reach the operator: the provisioner's text is never shown.
 const (
-	noTokenNoFile   = "no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run forgejo-probe -- <its arguments>), or set FORGEJO_ADMIN_TOKEN for a stand-in"
-	noTokenWithFile = "no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run forgejo-probe -- <its arguments>), or set FORGEJO_ADMIN_TOKEN (or FORGEJO_ADMIN_TOKEN= in <file>) for a stand-in"
+	noTokenNoFile   = "no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run forgejo-probe-go -- <its arguments>), or set FORGEJO_ADMIN_TOKEN for a stand-in"
+	noTokenWithFile = "no admin token: run forgejo-probe through the auth broker (sudo -u gt-forge gt-approve run forgejo-probe-go -- <its arguments>), or set FORGEJO_ADMIN_TOKEN (or FORGEJO_ADMIN_TOKEN= in <file>) for a stand-in"
 )
 
 // TestResolveTokenNoTokenMessage drives the no-source case with and without a

@@ -5,8 +5,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/gastown/internal/forgejoprov"
 )
 
 // restartRunner is step 7's Runner seam: the bd landing count answers Output, the
@@ -28,13 +26,6 @@ func (f *restartRunner) Output(argv []string) ([]byte, error) {
 func (f *restartRunner) Run(argv []string) error {
 	f.runs = append(f.runs, argv)
 	return f.runErr
-}
-
-// RunWithToken is not this step's child: no step 7 child carries the admin token,
-// so a call here is a bug and is recorded as one.
-func (f *restartRunner) RunWithToken(argv []string, _ forgejoprov.Secret) error {
-	f.runs = append(f.runs, argv)
-	return errors.New("step 7 handed a child the admin token")
 }
 
 // restartCutover is a cutover of the rig at queueRoot, dry or not, logging into

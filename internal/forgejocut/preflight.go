@@ -1,27 +1,26 @@
 package forgejocut
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/forgejoprobe"
 	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
 // Runner is the exec seam the run's child processes go through. argv[0] is the
-// program. A test injects a fake; the command injects the real exec.
+// program. A test injects a fake; the command injects the real exec. No child
+// receives the admin token: the probe runs in this process, through ProbeFunc.
 type Runner interface {
 	// Output runs argv and returns its stdout: the answer a read needs.
 	Output(argv []string) ([]byte, error)
-	// Run runs argv with the run's own stdout and stderr, so the probe's log
-	// reaches the operator.
+	// Run runs argv with the run's own stdout and stderr, so a child's log reaches
+	// the operator. The token variables are removed from its environment.
 	Run(argv []string) error
-	// RunWithToken runs argv with the admin token in its environment. The probe
-	// is the one child that resolves the token that way; every other child runs
-	// with the token variables removed from its environment.
-	RunWithToken(argv []string, token forgejoprov.Secret) error
 }
 
 // countPattern is what the bd count prints: digits and nothing else.
@@ -66,18 +65,38 @@ func RefuseIfLandingInFlight(run Runner, o *Options, log func(string)) error {
 	return nil
 }
 
+// ProbeFunc is one probe run: forgejoprobe.Run, and a test's stand-in for it,
+// which records the arguments and the environment it is handed and forces the
+// exit code.
+type ProbeFunc func(ctx context.Context, args []string, getenv func(string) string, s forgejoprobe.Streams) int
+
+// runProbe is the production ProbeFunc: the probe in this process, on the
+// operating system's seams.
+func runProbe(ctx context.Context, args []string, getenv func(string) string, s forgejoprobe.Streams) int {
+	return forgejoprobe.Run(ctx, args, getenv, s, forgejoprobe.SystemDeps())
+}
+
+// adminTokenEnv is the stand-in variable the admin token may arrive in. Its name
+// only, not a credential.
+const adminTokenEnv = "FORGEJO_ADMIN_TOKEN" //nolint:gosec // G101: the variable's name, not a credential
+
 // ProbeGreen is step 1's second half. The probe pushes the rig's main through its
 // real runner and waits for the gate, so a green run is the evidence the landing
 // path works. Under a dry run the probe is printed and not run.
 //
-// The probe carries --town-root so it pushes from a worktree of the rig's bare
-// repository and the rig's hooks run. Its push rides the admin git URL, because it
-// happens before provisioning, when the bots have no access yet. The admin token
-// is handed over as a file path when one was named, and otherwise in the probe's
-// environment and no other child's: the probe is a separate script until it has
-// its own port, and it resolves the token the same way the old shell cutover did.
-func ProbeGreen(run Runner, o *Options, token forgejoprov.Secret, log func(string)) error {
-	argv := []string{"bash", o.Probe, o.Rig,
+// The probe runs in this process, through probe, with the flags the shell probe
+// took, so no child process starts for it. It carries --town-root so it pushes from
+// a worktree of the rig's bare repository and the rig's hooks run. Its push rides
+// the admin git URL, because it happens before provisioning, when the bots have no
+// access yet.
+//
+// The probe reads its token through getenv, which is base with the token variables
+// replaced: with no token file named, the resolved token is answered under the
+// broker's name; with one named, both token variables are empty and the probe reads
+// the file itself. The token is in no argv word, no log line and no child
+// environment.
+func ProbeGreen(ctx context.Context, probe ProbeFunc, o *Options, token forgejoprov.Secret, base func(string) string, s forgejoprobe.Streams, log func(string)) error {
+	args := []string{o.Rig,
 		"--repo", o.Repo,
 		"--main-branch", o.MainBranch,
 		"--town-root", o.TownRoot,
@@ -85,31 +104,43 @@ func ProbeGreen(run Runner, o *Options, token forgejoprov.Secret, log func(strin
 		"--web-url", o.WebURL,
 	}
 	if o.AdminTokenFile != "" {
-		argv = append(argv, "--admin-token-file", o.AdminTokenFile)
+		args = append(args, "--admin-token-file", o.AdminTokenFile)
 	}
-	argv = append(argv,
+	args = append(args,
 		"--github-url", o.GitHubURL,
 		"--git-url", o.AdminGitURL,
 	)
 	if o.DryRun {
-		log("+ " + commandText(argv))
+		log("+ " + commandText(append([]string{"forgejo-probe"}, args...)))
 		log("(dry run: the probe was not run)")
 		return nil
 	}
 	log("probing " + o.Rig + " through its real runner before the cutover")
-	var err error
-	if o.AdminTokenFile != "" {
-		// The probe reads the named file itself; no token goes in its environment.
-		err = run.Run(argv)
-	} else {
-		err = run.RunWithToken(argv, token)
-	}
-	if err != nil {
-		// The probe's own output already reached the operator, and err is only the
-		// exit status, so the message does not repeat either.
+	if rc := probe(ctx, args, probeGetenv(base, o.AdminTokenFile, token), s); rc != forgejoprobe.ExitOK {
+		// The probe's own output already reached the operator, and rc is only its exit
+		// code, so the message does not repeat either.
 		return fmt.Errorf("the probe of %s is not green; fix the runner or the gate workflow and re-run", o.Rig)
 	}
 	return nil
+}
+
+// probeGetenv is the environment the probe reads: base, except the two token
+// variables. With no token file the resolved token is answered under the broker's
+// name, which the probe resolves first; with a token file both are empty, so the
+// probe reads the file and no other token source.
+func probeGetenv(base func(string) string, tokenFile string, token forgejoprov.Secret) func(string) string {
+	return func(name string) string {
+		switch name {
+		case forgejoprov.BrokerTokenEnv:
+			if tokenFile == "" {
+				return token.Reveal()
+			}
+			return ""
+		case adminTokenEnv:
+			return ""
+		}
+		return base(name)
+	}
 }
 
 // commandText is argv as one line, for an error or a log line.

@@ -45,9 +45,6 @@ const (
 	DefaultGateWorkflow = "gate"
 	// DefaultBotPrefix is the bot login prefix; each role gets one bot.
 	DefaultBotPrefix = "bot-"
-	// DefaultProbe is the probe run before the cutover, relative to the repository
-	// the binary sits in. defaultProbe resolves it.
-	DefaultProbe = "scripts/forgejo-probe.sh"
 	// DefaultGT is the gt binary the daemon restart runs. The run resolves the name
 	// with exec.LookPath; no environment variable names another binary.
 	DefaultGT = "gt"
@@ -93,7 +90,6 @@ type Options struct {
 	APIURL         string // --api-url: API root, trailing slash trimmed
 	WebURL         string // --web-url, else APIURL less /api/v1: the web root
 	AdminTokenFile string // --admin-token-file: file holding FORGEJO_ADMIN_TOKEN=
-	Probe          string // --probe: probe run before the cutover
 	GT             string // --gt: gt binary for the daemon restart
 	DryRun         bool   // --dry-run: read and print, never write
 }
@@ -123,10 +119,7 @@ type Env struct {
 	// Town is the town root the working directory is in, "" when there is none. It
 	// is read only when neither --town-root nor GT_TOWN_ROOT names one.
 	Town func() string
-	// Executable is the path of the running binary. The probe default is found
-	// beside it.
-	Executable func() (string, error)
-	Git        Git
+	Git  Git
 }
 
 // valueFlags maps each flag that reads the next word to where the word goes, so
@@ -144,7 +137,6 @@ var valueFlags = map[string]func(*Options, string){
 	"--api-url":          func(o *Options, v string) { o.APIURL = v },
 	"--web-url":          func(o *Options, v string) { o.WebURL = v },
 	"--admin-token-file": func(o *Options, v string) { o.AdminTokenFile = v },
-	"--probe":            func(o *Options, v string) { o.Probe = v },
 	"--gt":               func(o *Options, v string) { o.GT = v },
 }
 
@@ -161,7 +153,6 @@ func Parse(args []string, env Env) (*Options, error) {
 		MainBranch:     DefaultMainBranch,
 		GateWorkflow:   DefaultGateWorkflow,
 		BotPrefix:      DefaultBotPrefix,
-		Probe:          defaultProbe(env),
 		GT:             DefaultGT,
 	}
 	town, err := o.parseFlags(args)
@@ -319,8 +310,8 @@ func checkRemoteURL(flag, raw string) error {
 	return nil
 }
 
-// resolveTown settles the town root and checks the files a parse can see: the
-// town directory and the probe. The town root is the --town-root flag, then
+// resolveTown settles the town root and checks the town directory a parse can
+// see. The town root is the --town-root flag, then
 // GT_TOWN_ROOT, then the town the working directory is in, then $HOME/gt. GT_ROOT
 // and GT_BIN are not read.
 func (o *Options) resolveTown(town *string, env Env) error {
@@ -336,12 +327,6 @@ func (o *Options) resolveTown(town *string, env Env) error {
 	}
 	if !env.IsDir(o.TownRoot) {
 		return usagef("--town-root '%s' is not a directory", o.TownRoot)
-	}
-	if o.Probe == "" {
-		return usagef("--probe is required: the binary's own path is unknown, so the default probe cannot be found")
-	}
-	if !env.IsFile(o.Probe) {
-		return usagef("--probe '%s' is not a file", o.Probe)
 	}
 	return nil
 }
@@ -411,29 +396,6 @@ func (o *Options) derive(env Env) error {
 		return usagef("--github-url does not name OWNER/NAME")
 	}
 	return nil
-}
-
-// defaultProbe is the probe --probe names when it names none: scripts/forgejo-probe.sh
-// in the repository the binary sits in. A build puts the binary at the repository
-// root or in bin/, so the binary's directory and its parent are the candidates. The
-// shell script found the probe beside itself; a binary has no such file, so when no
-// candidate holds one, the path under the binary's directory is named, and the
-// refusal shows the operator the path that was looked at. When the binary's own
-// path is unknown there is no repository to look in, and the result is empty: a
-// path relative to the working directory would name whatever directory the
-// operator stands in.
-func defaultProbe(env Env) string {
-	exe, err := env.Executable()
-	if err != nil {
-		return ""
-	}
-	dir := filepath.Dir(exe)
-	for _, root := range []string{dir, filepath.Dir(dir)} {
-		if probe := filepath.Join(root, DefaultProbe); env.IsFile(probe) {
-			return probe
-		}
-	}
-	return filepath.Join(dir, DefaultProbe)
 }
 
 // branchNameProblem names the first rule of git check-ref-format --branch the name
