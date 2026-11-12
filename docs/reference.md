@@ -2087,8 +2087,8 @@ it: the battery dropped the question at set 2.
 
 An item still standing with no disposition is `clears_on_its_own` false once its
 15-minute self-clear window has passed (`still-open-past-window`), and unlabeled
-inside it; one whose life the queue files no longer hold is unlabeled. A bead read that fails for any reason other
-than not-found fails the report.
+inside it; one whose life the queue files no longer hold is unlabeled. A bead
+read that fails for any reason other than not-found fails the report.
 
 The `landing` battery reads `.runtime/jev/landing.jsonl`. A landing's label
 comes from a review of its logged head, and every label records its source,
