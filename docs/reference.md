@@ -2297,13 +2297,8 @@ it scores anything — the error names the file, and the remedy is to delete it
 and run `gt jev scorecard --refresh` again. The dashboard's JEV panel reads this
 cache and starts no process (gt-0kw0a0).
 
-Each refresh also appends one line to `<town>/.runtime/jev/scorecard.history.jsonl`:
-the refresh time, the window, and each freshly scored battery's labeled count,
-positives and verdict per question. A battery reused from the cache or kept from
-a failed refresh has no entry, so a reused block never reads as growth. The file
-keeps 90 days. `gt jev scorecard --history [--battery B] [--question Q]` prints
-each question's rows (date, labeled, positives, verdict, change in labeled) and
-ends with `no growth in N refreshes` when the last N rows share a labeled count.
+Each refresh also appends to the scorecard history file. Before reading or
+changing that file or its `--history` view, run `gt jev scorecard --help`.
 
 The daemon patrol `jev_scorecard` (heartbeat step `jev-scorecard`) keeps the
 cache fresh. It is off unless `daemon.json` enables it:
