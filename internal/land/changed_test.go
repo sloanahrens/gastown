@@ -1,10 +1,15 @@
 package land
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -211,6 +216,10 @@ var guardTriggers = []struct {
 	{"internal/testdb", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
 	{"internal/land", "M\x00.om.json\x00"},
+	// The always entries run on any non-empty diff; a docs-only path is the
+	// change no predicate names (gt-t4rchq).
+	{"internal/mayorrig", unguarded},
+	{"internal/podengine", unguarded},
 	{"internal/gtwrap", "M\x00docs/design/gt-in-container-cutover.md\x00"},
 	{"internal/repoguard", "A\x00scripts/new.sh\x00"},
 	{"internal/repoguard", "D\x00scripts/gone.sh\x00"},
@@ -222,9 +231,21 @@ var guardTriggers = []struct {
 	{"internal/shelltier", "M\x00internal/shelltier/manifest.go\x00"},
 }
 
-// unguarded is a changed path no guard reads: a doc outside every guard's
-// inputs, so a branch holding only this one triggers nothing.
+// unguarded is a changed path no guard predicate reads: a doc outside every
+// guard's inputs, so a branch holding only this one triggers no path guard.
+// The always entries still run (gt-t4rchq).
 const unguarded = "M\x00docs/testing.md\x00"
+
+// alwaysGuards is the selection an unguarded, non-empty diff returns: the
+// table's always entries, sorted by package.
+var alwaysGuards = []GuardSelect{
+	{Package: "internal/mayorrig", Tests: []string{"TestRepoMayorRig"}},
+	{Package: "internal/podengine", Tests: []string{"TestEveryEngineSiteHasARowPerFunction"}},
+	{Package: "internal/testpolicy", Tests: []string{
+		"TestAllowedTools", "TestDockerTier", "TestGitFree", "TestPolicy",
+		"TestRealGit", "TestUnionMergeOnlyOnGrowOnlyLists", "TestUnitTierMain",
+	}},
+}
 
 func TestChangedPaths(t *testing.T) {
 	t.Parallel()
@@ -243,8 +264,10 @@ func TestGuardSelects(t *testing.T) {
 	t.Parallel()
 	hasGo := func(string) bool { return true }
 
-	if got, err := GuardSelects(unguarded, hasGo); err != nil || got != nil {
-		t.Errorf("GuardSelects(%q) = %v, %v, want nil", unguarded, got, err)
+	// A docs-only diff trips no predicate, but the always entries run on any
+	// non-empty diff (gt-t4rchq).
+	if got, err := GuardSelects(unguarded, hasGo); err != nil || !reflect.DeepEqual(got, alwaysGuards) {
+		t.Errorf("GuardSelects(%q) = %v, %v, want the always guards %v", unguarded, got, err, alwaysGuards)
 	}
 	if got, err := GuardSelects("", hasGo); err != nil || got != nil {
 		t.Errorf("GuardSelects(empty) = %v, %v, want nil", got, err)
@@ -309,6 +332,51 @@ func TestEveryGuardIsSampled(t *testing.T) {
 	}
 }
 
+// TestAlwaysGuardsNameTestsTheirPackageHolds fails when an always entry names
+// a test function its package does not hold: a rename would otherwise turn the
+// guard into a silent no-op that presubmit runs on every diff (gt-t4rchq).
+func TestAlwaysGuardsNameTestsTheirPackageHolds(t *testing.T) {
+	t.Parallel()
+	held := map[string]map[string]bool{}
+	for _, g := range treeWideGuards {
+		if !g.always {
+			continue
+		}
+		if held[g.pkg] == nil {
+			held[g.pkg] = testFunctionsIn(t, g.pkg)
+		}
+		for _, name := range g.tests {
+			if !held[g.pkg][name] {
+				t.Errorf("%s is always and names %s, which its test files do not hold", g.pkg, name)
+			}
+		}
+	}
+}
+
+// testFunctionsIn returns the top-level functions the package's _test.go files
+// declare, parsed from the tree the test runs in.
+func testFunctionsIn(t *testing.T, pkg string) map[string]bool {
+	t.Helper()
+	dir := filepath.Join("..", "..", filepath.FromSlash(pkg))
+	parsed, err := parser.ParseDir(token.NewFileSet(), dir, func(fi fs.FileInfo) bool {
+		return strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parsing the test files of %s: %v", pkg, err)
+	}
+	names := map[string]bool{}
+	for _, p := range parsed {
+		for _, file := range p.Files {
+			for _, decl := range file.Decls {
+				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+					names[fn.Name.Name] = true
+				}
+			}
+		}
+	}
+	return names
+}
+
 func TestGuardSelectsRemovals(t *testing.T) {
 	t.Parallel()
 	hasGo := func(string) bool { return true }
@@ -324,13 +392,8 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			"D\x00internal/crew/manager.go\x00",
 			"internal/bdgate",
 		},
-		{
-			// The lists testpolicy ratchets go stale when a listed package's
-			// last test file goes with it.
-			"deleting a test file selects testpolicy",
-			"D\x00internal/land/old_test.go\x00",
-			"internal/testpolicy",
-		},
+		// A deleted test file selects testpolicy through its always entry, not
+		// its removal predicate, so TestGuardSelects asserts it there (gt-t4rchq).
 		{
 			// The session policy tests read the file, so its removal fails them.
 			"deleting the polecat policy selects session",
@@ -338,7 +401,8 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			"internal/session",
 		},
 		{
-			"deleting a doc selects nothing",
+			// The always entries still run; no path predicate selects the doc.
+			"deleting a doc selects no path guard",
 			"D\x00docs/old.md\x00",
 			"",
 		},
@@ -350,6 +414,14 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			"internal/cmdtree",
 		},
 	}
+	// The always entries run on every diff, so the rows below assert on the
+	// guards the removal itself triggers.
+	always := map[string]bool{}
+	for _, g := range treeWideGuards {
+		if g.always {
+			always[g.pkg] = true
+		}
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
@@ -359,6 +431,9 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			}
 			var pkgs []string
 			for _, s := range sel {
+				if always[s.Package] {
+					continue
+				}
 				pkgs = append(pkgs, s.Package)
 			}
 			sort.Strings(pkgs)

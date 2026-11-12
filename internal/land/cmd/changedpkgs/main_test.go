@@ -92,6 +92,52 @@ func TestRunRefusesAnInventoryWithNoRows(t *testing.T) {
 	}
 }
 
+// TestRunGuardsPrintsTheAlwaysGuardsOnADocsOnlyDiff pins the command line
+// presubmit runs for a branch that trips no path predicate: the union of the
+// always entries' tests and their packages, and nothing for an empty diff
+// (gt-t4rchq).
+func TestRunGuardsPrintsTheAlwaysGuardsOnADocsOnlyDiff(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		nameStatus string
+		want       string
+	}{
+		{
+			// The three always entries: internal/mayorrig, internal/podengine
+			// and internal/testpolicy, with their tests in one -run union.
+			name:       "a docs-only diff still runs the always guards",
+			nameStatus: nameStatus("M docs/testing.md"),
+			want: "-run ^(TestAllowedTools|TestDockerTier|TestEveryEngineSiteHasARowPerFunction|" +
+				"TestGitFree|TestPolicy|TestRealGit|TestRepoMayorRig|" +
+				"TestUnionMergeOnlyOnGrowOnlyLists|TestUnitTierMain)$ " +
+				"./internal/mayorrig ./internal/podengine ./internal/testpolicy\n",
+		},
+		{
+			// An empty diff changes nothing, so presubmit has nothing to run.
+			name:       "an empty diff prints nothing",
+			nameStatus: "",
+			want:       "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakeSeams{doc: testDoc}
+			var stdout, stderr bytes.Buffer
+			if code := run(options{guards: true}, tt.nameStatus, f.seams(), &stdout, &stderr); code != 0 {
+				t.Fatalf("run = %d, stderr %q; want 0", code, stderr.String())
+			}
+			if stdout.String() != tt.want {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), tt.want)
+			}
+			if f.runs != 0 {
+				t.Fatalf("the guards mode ran the inventory %d times, want 0", f.runs)
+			}
+		})
+	}
+}
+
 func TestRunPrintsThePodEnginePackageOnlyWhenAPinnedFileChanges(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

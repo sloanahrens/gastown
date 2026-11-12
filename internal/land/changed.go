@@ -67,8 +67,8 @@ type GuardSelect struct {
 }
 
 // GuardSelects returns the tree-wide guard tests whose inputs nameStatus
-// changed, sorted by package. A branch that changes no guard's input returns
-// nil.
+// changed and the guards every non-empty diff runs, sorted by package. An
+// empty diff returns nil, and a guard whose package holds no Go is left out.
 func GuardSelects(nameStatus string, hasGo func(dir string) bool) ([]GuardSelect, error) {
 	triggered := map[string]bool{}
 	err := eachChange(nameStatus, func(_, now, gone []string) {
@@ -76,7 +76,7 @@ func GuardSelects(nameStatus string, hasGo func(dir string) bool) ([]GuardSelect
 			if triggered[g.pkg] || !hasGo(g.pkg) {
 				continue
 			}
-			if anyJudged(g, now) || (g.removal && anyJudged(g, gone)) {
+			if g.always || anyJudged(g, now) || (g.removal && anyJudged(g, gone)) {
 				triggered[g.pkg] = true
 			}
 		}
@@ -269,6 +269,20 @@ func inNestedModule(repoRoot, dir string) bool {
 // the paths it reads. Err wide: a predicate wider than the test only costs a
 // guard run, while a narrower one is the miss this table exists to close.
 //
+// A guard that scans the whole tree has no path predicate that can stand for
+// it — every file is its input, and the file that breaks it may be new — so an
+// always entry runs on every non-empty diff whatever the branch touched
+// (gt-t4rchq). Every presubmit pays that cost, so an entry earns its place
+// only with a landing miss the path predicates could not catch.
+//
+// Left out on purpose: internal/guardlint, docs-lint and repo-guards (make
+// lint already runs them before presubmit tests anything); internal/config's
+// env-read guard, which the table triggers by path, so widen it only if a bead
+// shows a miss; the internal/cmd guard tests, slow to compile and not shown to
+// be tree-wide; the repoguard and docslint integration tests (build tag
+// integration, covered by lint). None of the always entries needs Docker, the
+// network or the Dolt container.
+//
 // removal marks a guard a deletion can fail: one that ratchets a baseline
 // down (a vanished entry is stale) or opens a path that must exist. A guard
 // that judges only the new content of a file cannot fail on a removal.
@@ -282,6 +296,38 @@ var treeWideGuards = []treeWideGuard{
 		judges:  func(rel string) bool { return rel == "deploy/polecat/policy.yaml" },
 		removal: true,
 	},
+	// The always entries: guards that scan the whole tree, so no path
+	// predicate can name their input, and a new file is exactly the change
+	// that breaks them. Every non-empty diff runs them.
+	{
+		// TestRepoMayorRig walks every non-test Go file in the repo and holds
+		// the <rig>/mayor/rig uses it finds equal to the allowlist (gt-pyh5p6
+		// was gate-rejected for one added in internal/done). A deleted file
+		// counts: its allowlist entry is stale once the use is gone. The
+		// allowlist itself is its input too.
+		pkg:   "internal/mayorrig",
+		tests: []string{"TestRepoMayorRig"},
+		judges: func(rel string) bool {
+			return nonTestGo(rel) || rel == "internal/mayorrig/testdata/mayor-rig-allow.txt"
+		},
+		removal: true,
+		always:  true,
+	},
+	{
+		// TestEveryEngineSiteHasARowPerFunction scans every non-test Go file
+		// under internal/ for a docker exec site and holds
+		// docs/design/pod-engine.md's inventory to one row per site
+		// (gt-o9p1s1 was gate-rejected for a new site in
+		// internal/gtwrap/native.go the doc did not list). A deletion counts:
+		// the guard opens each file the inventory cites.
+		pkg:   "internal/podengine",
+		tests: []string{"TestEveryEngineSiteHasARowPerFunction"},
+		judges: func(rel string) bool {
+			return underInternal(rel) || rel == "docs/design/pod-engine.md"
+		},
+		removal: true,
+		always:  true,
+	},
 	{
 		// TestPolicy, TestUnitTierMain, TestDockerTier and friends walk every
 		// package directory in the module, so they judge test files the
@@ -291,6 +337,9 @@ var treeWideGuards = []treeWideGuard{
 		//
 		// TestUnionMergeOnlyOnGrowOnlyLists reads the repo-root .gitattributes
 		// and the lists it marks merge=union, so those paths are inputs too.
+		//
+		// always: its input is every test file in the tree, and the predicate
+		// below only names the ones a branch edits (gt-t4rchq).
 		pkg: "internal/testpolicy",
 		tests: []string{"TestPolicy", "TestUnitTierMain", "TestAllowedTools", "TestRealGit",
 			"TestGitFree", "TestDockerTier", "TestUnionMergeOnlyOnGrowOnlyLists"},
@@ -299,6 +348,7 @@ var treeWideGuards = []treeWideGuard{
 				rel == "internal/testpolicy/gitfree.txt"
 		},
 		removal: true,
+		always:  true,
 	},
 	{
 		// The agent prose allowlist scans templates, formula prose and the
@@ -524,12 +574,14 @@ var treeWideGuards = []treeWideGuard{
 }
 
 // treeWideGuard is one guard package's inputs: the test functions to run and
-// a predicate over a repo-relative changed path.
+// a predicate over a repo-relative changed path. always marks a guard every
+// non-empty diff runs, whatever paths changed.
 type treeWideGuard struct {
 	pkg     string
 	tests   []string
 	judges  func(rel string) bool
 	removal bool
+	always  bool
 }
 
 // sessionStartFiles are the session-start functions TestEverySessionStartCallsTheGate
