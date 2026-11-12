@@ -644,10 +644,10 @@ func runRigListIn(townRoot string, out io.Writer, asJSON bool, listSessions func
 	type rigInfo struct {
 		Name        string `json:"name"`
 		BeadsPrefix string `json:"beads_prefix"`
-		// RepoPath is the rig's git working clone (usually <rig>/refinery/rig),
-		// or the shared <rig>/.repo.git when the rig has no working clone, not
-		// the rig root. Plugins enumerate rigs through this list to run git
-		// against each repository; an empty value means the rig has neither.
+		// RepoPath is the rig's git working clone (usually <rig>/refinery/rig, or
+		// the rig root for an adopted layout), else the shared <rig>/.repo.git.
+		// Plugins enumerate rigs through this list to run git against each
+		// repository; an empty value means the rig has neither.
 		// See rig.Rig.RepoPath and rig.Rig.BareRepoPath.
 		RepoPath string `json:"repo_path"`
 		Status   string `json:"status"`
