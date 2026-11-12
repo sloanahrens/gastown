@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -18,10 +17,171 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/landing"
+	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
 var updateLandingGolden = flag.Bool("update-landing-golden", false, "rewrite testdata/landing.golden")
+
+// verdictAt is when the first attempt's om verdict is recorded in the labeling
+// tests; a line logged before it is judged on that verdict.
+var verdictAt = time.Date(2026, 10, 19, 10, 0, 0, 0, time.UTC)
+
+// landingItemAt is the item a landing line for bead, logged at logged, parses to.
+func landingItemAt(t *testing.T, a Adapter, bead string, logged time.Time) Item {
+	t.Helper()
+	raw := `{"ts":"` + logged.Format(time.RFC3339) + `","bead":"` + bead + `","head":"a1a1a1a"}`
+	it, err := a.Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return it
+}
+
+// wantRiskLabels asserts that lab labels needs_review_now and risk both as
+// rejected, by rule, with no source: the landing adapter has one source.
+func wantRiskLabels(t *testing.T, lab Labeling, rejected bool, rule string) {
+	t.Helper()
+	if !lab.Labeled {
+		t.Fatalf("labeling = %+v, want labeled by %q", lab, rule)
+	}
+	if lab.Rule != rule {
+		t.Errorf("rule = %q, want %q", lab.Rule, rule)
+	}
+	want := map[QuestionID]bool{QuestionID(landing.QNeedsReviewNow): rejected, QuestionID(landing.QRisk): rejected}
+	if !maps.Equal(lab.Labels, want) {
+		t.Errorf("labels = %v, want %v", lab.Labels, want)
+	}
+	if lab.Source != "" {
+		t.Errorf("source = %q, want none", lab.Source)
+	}
+}
+
+// TestLandingRiskLabeledTrueOnAFirstAttemptRejection labels needs_review_now and
+// risk true for a landing logged before a first attempt that rejected the work:
+// a request_changes verdict, and an approval the landing refused on its findings.
+func TestLandingRiskLabeledTrueOnAFirstAttemptRejection(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		row  land.ReviewRecord
+	}{
+		{
+			name: "request_changes",
+			row:  review("gt-a", 1, land.VerdictRequestChanges, verdictAt),
+		},
+		{
+			name: "approval the landing rejected",
+			row:  land.ReviewRecord{BeadID: "gt-a", Attempt: 1, Verdict: land.VerdictApprove, Rejected: true, At: verdictAt},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := &landingAdapter{reviews: &land.ReviewsFile{Path: reviewFile(t, tc.row)}}
+			lab, err := a.Label(context.Background(), landingItemAt(t, a, "gt-a", verdictAt.Add(-time.Hour)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRiskLabels(t, lab, true, ruleLandingFirstAttemptRejected)
+		})
+	}
+}
+
+// TestLandingRiskLabeledFalseOnAFirstAttemptApproval labels needs_review_now and
+// risk false for a landing logged before a first attempt that approved the work
+// and was not rejected. A later attempt's rejection does not change that.
+func TestLandingRiskLabeledFalseOnAFirstAttemptApproval(t *testing.T) {
+	t.Parallel()
+	a := &landingAdapter{reviews: &land.ReviewsFile{Path: reviewFile(t,
+		review("gt-a", 1, land.VerdictApprove, verdictAt),
+		review("gt-a", 2, land.VerdictRequestChanges, verdictAt.Add(time.Hour)),
+	)}}
+	lab, err := a.Label(context.Background(), landingItemAt(t, a, "gt-a", verdictAt.Add(-time.Hour)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRiskLabels(t, lab, false, ruleLandingFirstAttemptApproved)
+}
+
+// TestRiskLabelIgnoresALineLoggedAfterTheVerdict leaves a line unlabeled for
+// risk when it was logged at or after the first attempt's verdict: the line
+// cannot have been judged on that verdict. The landing and the submission
+// adapters both refuse it.
+func TestRiskLabelIgnoresALineLoggedAfterTheVerdict(t *testing.T) {
+	t.Parallel()
+	rows := []land.ReviewRecord{review("gt-a", 1, land.VerdictRequestChanges, verdictAt)}
+	for _, logged := range []time.Time{verdictAt, verdictAt.Add(time.Hour)} {
+		t.Run("landing at "+logged.Format(time.RFC3339), func(t *testing.T) {
+			t.Parallel()
+			a := &landingAdapter{reviews: &land.ReviewsFile{Path: reviewFile(t, rows...)}}
+			lab, err := a.Label(context.Background(), landingItemAt(t, a, "gt-a", logged))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lab.Labeled {
+				t.Errorf("labeling = %+v, want unlabeled for a line logged at or after the verdict", lab)
+			}
+		})
+		t.Run("submission at "+logged.Format(time.RFC3339), func(t *testing.T) {
+			t.Parallel()
+			a := &submissionAdapter{reviews: &land.ReviewsFile{Path: reviewFile(t, rows...)}, notes: &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}}}
+			lab, err := a.Label(context.Background(), submissionItem(t, a, "gt-a", logged))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The window join may still label will_pass_review from the same row,
+			// so the check is on risk alone.
+			if _, ok := lab.Labels[QuestionID(submission.QRisk)]; ok {
+				t.Errorf("labels = %v, want no risk label for a submission logged at or after the verdict", lab.Labels)
+			}
+		})
+	}
+}
+
+// TestLandingRiskUnlabeledWithoutAFirstAttemptVerdict leaves a landing unlabeled
+// when the review log holds no first attempt for its bead, or the first attempt
+// is neither an approval nor a rejection.
+func TestLandingRiskUnlabeledWithoutAFirstAttemptVerdict(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		rows []land.ReviewRecord
+	}{
+		{name: "no review row for the bead", rows: nil},
+		{name: "only a later attempt", rows: []land.ReviewRecord{review("gt-a", 2, land.VerdictRequestChanges, verdictAt)}},
+		{name: "a first attempt for another bead", rows: []land.ReviewRecord{review("gt-b", 1, land.VerdictApprove, verdictAt)}},
+		{name: "a first attempt with no approval or rejection", rows: []land.ReviewRecord{review("gt-a", 1, "skipped", verdictAt)}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := &landingAdapter{reviews: &land.ReviewsFile{Path: reviewFile(t, tc.rows...)}}
+			lab, err := a.Label(context.Background(), landingItemAt(t, a, "gt-a", verdictAt.Add(-time.Hour)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lab.Labeled {
+				t.Errorf("labeling = %+v, want unlabeled", lab)
+			}
+		})
+	}
+}
+
+// TestLandingLabelFailsWhenTheReviewLogCannotBeRead fails the label rather than
+// reading an unreadable review log as no verdict, which would pass as unlabeled.
+func TestLandingLabelFailsWhenTheReviewLogCannotBeRead(t *testing.T) {
+	t.Parallel()
+	// A directory where the log file should be opens, but its read fails.
+	path := filepath.Join(t.TempDir(), land.ReviewsFileName)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	a := &landingAdapter{reviews: &land.ReviewsFile{Path: path}}
+	if _, err := a.Label(context.Background(), landingItemAt(t, a, "gt-a", verdictAt)); err == nil {
+		t.Error("Label succeeded over an unreadable review log, want an error")
+	}
+}
 
 // fakeLandingNotes returns scripted notes per bead and records every read.
 type fakeLandingNotes struct {
@@ -40,265 +200,6 @@ func (f *fakeLandingNotes) Notes(rig, bead string) (string, error) {
 		return "", errors.New("no bead " + bead)
 	}
 	return notes, nil
-}
-
-// fakeReviewDocs returns scripted polecat verdicts per bead and head.
-type fakeReviewDocs struct {
-	byBead map[string]map[string]string
-	err    error
-	reads  []string
-}
-
-func (f *fakeReviewDocs) Verdict(_ context.Context, bead, head string) (string, bool, error) {
-	f.reads = append(f.reads, bead+"/"+head)
-	if f.err != nil {
-		return "", false, f.err
-	}
-	verdict, ok := f.byBead[bead][head]
-	return verdict, ok, nil
-}
-
-func landingItem(bead, head string) Item {
-	return Item{
-		ID:   bead,
-		Time: time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC),
-		Refs: map[string]string{refRig: landing.RigName, refHead: head},
-	}
-}
-
-// TestLandingLabelReadsTheReviewVerdicts labels one landing from each source
-// the scorecard reads: the overseer's note on the bead and the polecat's
-// review document, the overseer's verdict winning when both name the head
-// (gt-b9j3o.1).
-func TestLandingLabelReadsTheReviewVerdicts(t *testing.T) {
-	t.Parallel()
-	head := "a1a1a1a"
-	other := "b2b2b2b"
-	cases := []struct {
-		name     string
-		notes    string
-		docs     map[string]string
-		labeled  bool
-		failed   bool
-		source   string
-		findings []string
-	}{
-		{
-			name:    "a PASS for the logged head labels both questions false",
-			notes:   land.OverseerReviewMarker + " " + head + " PASS",
-			labeled: true,
-			source:  landingSourceOverseer,
-		},
-		{
-			name:    "a FAIL labels both true",
-			notes:   land.OverseerReviewMarker + " " + head + " FAIL",
-			labeled: true,
-			failed:  true,
-			source:  landingSourceOverseer,
-		},
-		{
-			name:     "a FAIL's finding beads are kept for the context",
-			notes:    land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f1,gt-f2",
-			labeled:  true,
-			failed:   true,
-			source:   landingSourceOverseer,
-			findings: []string{"gt-f1", "gt-f2"},
-		},
-		{
-			name:    "no review line is unlabeled",
-			notes:   "",
-			labeled: false,
-		},
-		{
-			name:    "a WAIVED line is unlabeled",
-			notes:   land.OverseerReviewMarker + " " + head + " WAIVED: docs only",
-			labeled: false,
-		},
-		{
-			name:    "an AUDITED line is unlabeled",
-			notes:   land.OverseerReviewMarker + " " + head + " AUDITED: file-level audit",
-			labeled: false,
-		},
-		{
-			name:    "a verdict for another head is unlabeled",
-			notes:   land.OverseerReviewMarker + " " + other + " PASS",
-			labeled: false,
-		},
-		{
-			name:    "a PASS after a FAIL supersedes it",
-			notes:   land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f1\n" + land.OverseerReviewMarker + " " + head + " PASS",
-			labeled: true,
-			source:  landingSourceOverseer,
-		},
-		{
-			name:    "a polecat PASS labels both questions false",
-			docs:    map[string]string{head: land.OverseerReviewPass},
-			labeled: true,
-			source:  landingSourcePolecat,
-		},
-		{
-			name:    "a polecat FAIL labels both true",
-			docs:    map[string]string{head: land.OverseerReviewFail},
-			labeled: true,
-			failed:  true,
-			source:  landingSourcePolecat,
-		},
-		{
-			name:    "the overseer's verdict wins over the polecat's document",
-			notes:   land.OverseerReviewMarker + " " + head + " PASS",
-			docs:    map[string]string{head: land.OverseerReviewFail},
-			labeled: true,
-			source:  landingSourceOverseer,
-		},
-		{
-			name:    "a WAIVED note falls through to the polecat's document",
-			notes:   land.OverseerReviewMarker + " " + head + " WAIVED: docs only",
-			docs:    map[string]string{head: land.OverseerReviewPass},
-			labeled: true,
-			source:  landingSourcePolecat,
-		},
-		{
-			name:    "a polecat review of another head is unlabeled",
-			docs:    map[string]string{other: land.OverseerReviewPass},
-			labeled: false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			notes := &fakeLandingNotes{byBead: map[string]string{"gt-a": tc.notes}}
-			docs := &fakeReviewDocs{byBead: map[string]map[string]string{"gt-a": tc.docs}}
-			a := &landingAdapter{notes: notes, reviews: docs}
-			lab, err := a.Label(context.Background(), landingItem("gt-a", head))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if lab.Labeled != tc.labeled {
-				t.Fatalf("labeled = %v, want %v (labels %v)", lab.Labeled, tc.labeled, lab.Labels)
-			}
-			if !tc.labeled {
-				if lab.Labels != nil || lab.Rule != "" || lab.Source != "" {
-					t.Errorf("unlabeled item returned labels %v rule %q source %q, want none", lab.Labels, lab.Rule, lab.Source)
-				}
-				if got := a.Context(); got != nil {
-					t.Errorf("unlabeled item reported context %q, want none", got)
-				}
-				return
-			}
-			want := map[QuestionID]bool{
-				QuestionID(landing.QNeedsReviewNow): tc.failed,
-				QuestionID(landing.QRisk):           tc.failed,
-			}
-			if !maps.Equal(lab.Labels, want) {
-				t.Errorf("labels = %v, want %v", lab.Labels, want)
-			}
-			wantRule := ruleLandingReviewPass
-			if tc.failed {
-				wantRule = ruleLandingReviewFail
-			}
-			if lab.Rule != wantRule {
-				t.Errorf("rule = %q, want %q", lab.Rule, wantRule)
-			}
-			if lab.Source != tc.source {
-				t.Errorf("source = %q, want %q", lab.Source, tc.source)
-			}
-			got := a.Context()
-			if len(tc.findings) == 0 {
-				if got != nil {
-					t.Errorf("context = %q, want none without findings", got)
-				}
-				return
-			}
-			wantLine := fmt.Sprintf("FAIL review notes named %d finding bead(s): %s",
-				len(tc.findings), strings.Join(tc.findings, ", "))
-			if len(got) != 1 || got[0] != wantLine {
-				t.Errorf("context = %q, want %q", got, wantLine)
-			}
-		})
-	}
-}
-
-func TestLandingLabelFailsWhenTheReviewDocsCannotBeRead(t *testing.T) {
-	t.Parallel()
-	a := &landingAdapter{
-		notes:   &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}},
-		reviews: &fakeReviewDocs{err: errors.New("clone unavailable")},
-	}
-	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
-	if err == nil || !strings.Contains(err.Error(), "clone unavailable") {
-		t.Fatalf("Label error = %v, want the review document failure", err)
-	}
-}
-
-func TestLandingLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
-	t.Parallel()
-	a := &landingAdapter{notes: &fakeLandingNotes{err: errors.New("bead store unavailable")}}
-	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
-	if err == nil || !strings.Contains(err.Error(), "bead store unavailable") {
-		t.Fatalf("Label error = %v, want the store failure", err)
-	}
-}
-
-// TestLandingLabelFailsWithNoReviewSource fails a landing that has no overseer
-// verdict and no review source to ask, rather than reading it as unreviewed
-// with a clean exit (gt-b9j3o.1).
-func TestLandingLabelFailsWithNoReviewSource(t *testing.T) {
-	t.Parallel()
-	a := &landingAdapter{notes: &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}}}
-	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
-	if err == nil || !strings.Contains(err.Error(), "no review source") {
-		t.Fatalf("Label error = %v, want the missing review source", err)
-	}
-}
-
-// TestLandingReviewsReadFromTheTownClone drives the review source the battery
-// builds: a landing with no overseer verdict is read from the review documents
-// in the town's clone, so a clone that cannot be opened fails the report and
-// names the town it was opened for (gt-b9j3o.1).
-func TestLandingReviewsReadFromTheTownClone(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	a := newLandingAdapter(town, &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}})
-	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
-	if err == nil {
-		t.Fatal("Label succeeded, want the unopenable clone to fail it")
-	}
-	if want := filepath.Join(town, "mayor", "rigs.json"); !strings.Contains(err.Error(), want) {
-		t.Fatalf("Label error = %v, want it to name the town's clone source %s", err, want)
-	}
-}
-
-// TestLandingLabelLeavesAMissingBeadUnlabeled drives the real notes store over
-// a rig that has a beads directory, with bd stubbed on PATH to answer not
-// found, so the bead's absence comes through the store rather than a fake.
-//
-//testpolicy:allow parallel — t.Setenv puts the bd stub first on PATH, and a parallel test would share that PATH
-func TestLandingLabelLeavesAMissingBeadUnlabeled(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		//testpolicy:allow no-skip — the bd stub is a POSIX shell script, which Windows cannot run
-		t.Skip("POSIX bd stub")
-	}
-	town := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(town, landing.RigName, ".beads"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	binDir := t.TempDir()
-	// Exit 20 is bd's own not-found status; beads reads it as ErrNotFound.
-	//testpolicy:allow no-exec-files — the test is the process boundary: beads execs bd, and this stub is the bd it finds on PATH
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 20\n"), 0o755); err != nil { //nolint:gosec // G306: the bd stub must be executable
-		t.Fatal(err)
-	}
-	//testpolicy:allow no-env — the stub reaches beads only through PATH, which is process-wide; the test restores it at cleanup
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	a := &landingAdapter{notes: &townNotes{town: town, stores: map[string]*beads.Beads{}}}
-	lab, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
-	if err != nil {
-		t.Fatalf("Label error = %v, want a missing bead to read as unlabeled", err)
-	}
-	if lab.Labeled || lab.Labels != nil || lab.Rule != "" {
-		t.Errorf("labeling = %+v, want none", lab)
-	}
 }
 
 // TestTownNotesCommentsReadsOneQuery decodes bd sql's CSV answer into comments
@@ -509,104 +410,6 @@ func TestTownNotesCommentsRefusesAnUnexpectedAnswer(t *testing.T) {
 	}
 }
 
-// TestLandingBuildFailsWhenTheRigHasNoBeadsDirectory drives the real notes
-// reader over a town with no rig directories: every landing of such a rig
-// would read as unlabeled, so the report fails rather than exit clean.
-func TestLandingBuildFailsWhenTheRigHasNoBeadsDirectory(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	logPath := landing.LogPath(town)
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte(landingLog[0]+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := &landingAdapter{log: logPath, notes: &townNotes{town: town, stores: map[string]*beads.Beads{}}}
-
-	_, err := Build(context.Background(), a, time.Time{})
-	if err == nil || !errors.Is(err, errNoRigBeads) {
-		t.Fatalf("Build error = %v, want the missing rig beads directory", err)
-	}
-}
-
-func TestLandingContextClearsTheTallyForTheNextBuild(t *testing.T) {
-	t.Parallel()
-	head := "a1a1a1a"
-	notes := &fakeLandingNotes{byBead: map[string]string{
-		"gt-a": land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f2,gt-f1",
-		"gt-b": land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f1",
-	}}
-	a := &landingAdapter{notes: notes}
-	for _, bead := range []string{"gt-a", "gt-b"} {
-		if _, err := a.Label(context.Background(), landingItem(bead, head)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want := "FAIL review notes named 2 finding bead(s): gt-f1, gt-f2"
-	if got := a.Context(); len(got) != 1 || got[0] != want {
-		t.Fatalf("first context = %q, want %q", got, want)
-	}
-	if got := a.Context(); got != nil {
-		t.Errorf("second context = %q, want the tally cleared", got)
-	}
-}
-
-// TestLandingScorecardReportsLabelSourcesApart counts each question's labeled
-// lines by the source of their label, so a polecat's review and the overseer's
-// are never read as one (gt-b9j3o.1).
-func TestLandingScorecardReportsLabelSourcesApart(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	logPath := landing.LogPath(town)
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	lines := []string{
-		`{"ts":"2026-10-19T09:00:00Z","bead":"gt-a","head":"a1a1a1a","answers":{"risk":{"score":1}},"question_version":1}`,
-		`{"ts":"2026-10-19T10:00:00Z","bead":"gt-b","head":"b2b2b2b","answers":{"risk":{"score":3}},"question_version":1}`,
-	}
-	if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	a := &landingAdapter{
-		log:     logPath,
-		notes:   &fakeLandingNotes{byBead: map[string]string{"gt-a": land.OverseerReviewMarker + " a1a1a1a PASS", "gt-b": ""}},
-		reviews: &fakeReviewDocs{byBead: map[string]map[string]string{"gt-b": {"b2b2b2b": land.OverseerReviewFail}}},
-	}
-	rep, err := Build(context.Background(), a, time.Time{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var risk *QuestionReport
-	for i := range rep.Questions {
-		if rep.Questions[i].ID == landing.QRisk {
-			risk = &rep.Questions[i]
-		}
-	}
-	if risk == nil {
-		t.Fatalf("questions = %+v, want the risk question", rep.Questions)
-	}
-	want := []SourceCount{
-		{Source: landingSourceOverseer, Labeled: 1},
-		{Source: landingSourcePolecat, Labeled: 1, Positives: 1},
-	}
-	if !slices.Equal(risk.Sources, want) {
-		t.Errorf("sources = %+v, want %+v", risk.Sources, want)
-	}
-	if rep.Lines[1].Source != landingSourcePolecat {
-		t.Errorf("line source = %q, want %q", rep.Lines[1].Source, landingSourcePolecat)
-	}
-
-	var out strings.Builder
-	if err := WriteText(&out, rep); err != nil {
-		t.Fatal(err)
-	}
-	if wantLine := "  labels by source: overseer 1 label, 0 positives; polecat 1 label, 1 positive\n"; !strings.Contains(out.String(), wantLine) {
-		t.Errorf("text report lacks %q:\n%s", wantLine, out.String())
-	}
-}
-
 func TestLandingParseReadsTheLogLine(t *testing.T) {
 	t.Parallel()
 	a := &landingAdapter{}
@@ -651,8 +454,7 @@ func TestLandingParseDefaultsTheRigAndRejectsIncompleteLines(t *testing.T) {
 	}
 }
 
-// landingLog is the fixture log: three labeled-or-not landings, one WAIVED and
-// one line that does not parse.
+// landingLog is the fixture log: four landings, and one line that does not parse.
 var landingLog = []string{
 	`{"ts":"2026-10-19T09:00:00Z","bead":"gt-a","rig":"gastown","head":"a1a1a1a","answers":{"needs_review_now":{"noul":0.9},"touches_town_machinery":{"noul":0.8},"beyond_goal":{"noul":0.1},"tests_cover_change":{"noul":0.7},"risk":{"score":3,"confidence":0.6}},"question_version":1,"model":"jev-1.13.0"}`,
 	`{"ts":"2026-10-19T10:00:00Z","bead":"gt-b","rig":"gastown","head":"b2b2b2b","answers":{"needs_review_now":{"noul":0.8},"touches_town_machinery":{"noul":0.9},"beyond_goal":{"noul":0.2},"tests_cover_change":{"noul":0.4},"risk":{"score":2,"confidence":0.5}},"question_version":1,"model":"jev-1.13.0"}`,
@@ -661,13 +463,16 @@ var landingLog = []string{
 	`not json`,
 }
 
-// landingNotesByBead is the fake notes the fixture log is labeled from: a
-// PASS, a FAIL naming two findings, no line yet, and a WAIVED.
-var landingNotesByBead = map[string]string{
-	"gt-a": land.OverseerReviewMarker + " a1a1a1a PASS",
-	"gt-b": land.OverseerReviewMarker + " b2b2b2b FAIL findings=gt-f1,gt-f2",
-	"gt-c": "",
-	"gt-d": land.OverseerReviewMarker + " d4d4d4d WAIVED: docs only",
+// landingReviews is the fixture review log the landings are labeled from: gt-a
+// was approved on its first attempt before it landed, gt-b's first attempt was
+// rejected, gt-c has no review, and gt-d's approval came after it landed, so
+// gt-d is unlabeled.
+func landingReviews() []land.ReviewRecord {
+	return []land.ReviewRecord{
+		review("gt-a", 1, land.VerdictApprove, time.Date(2026, 10, 19, 9, 30, 0, 0, time.UTC)),
+		review("gt-b", 1, land.VerdictRequestChanges, time.Date(2026, 10, 19, 11, 0, 0, 0, time.UTC)),
+		review("gt-d", 1, land.VerdictApprove, time.Date(2026, 10, 19, 11, 30, 0, 0, time.UTC)),
+	}
 }
 
 func TestLandingBatteryIsRegistered(t *testing.T) {
@@ -683,14 +488,10 @@ func TestLandingBatteryIsRegistered(t *testing.T) {
 	if got := a.LogPath(); got != landing.LogPath(town) {
 		t.Errorf("log = %q, want the landing log %q", got, landing.LogPath(town))
 	}
-	if _, ok := a.(Contextual); !ok {
-		t.Error("the landing adapter does not report context")
-	}
 }
 
-// TestLandingScorecardPrintsPerQuestionBlocks drives the registered battery's
-// adapter with fake notes: the registry factory builds a live beads store, so
-// the adapter is constructed with the fake its labeling reads instead.
+// TestLandingScorecardPrintsPerQuestionBlocks builds the report over the fixture
+// log, labeled from the fixture review log, and compares the text with its golden.
 func TestLandingScorecardPrintsPerQuestionBlocks(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -703,8 +504,7 @@ func TestLandingScorecardPrintsPerQuestionBlocks(t *testing.T) {
 	}
 	a := &landingAdapter{
 		log:     logPath,
-		notes:   &fakeLandingNotes{byBead: landingNotesByBead},
-		reviews: &fakeReviewDocs{},
+		reviews: &land.ReviewsFile{Path: reviewFile(t, landingReviews()...)},
 	}
 
 	rep, err := Build(context.Background(), a, time.Time{})
@@ -713,10 +513,6 @@ func TestLandingScorecardPrintsPerQuestionBlocks(t *testing.T) {
 	}
 	if rep.Items != 4 || rep.LinesSkipped != 1 {
 		t.Fatalf("items %d skipped %d, want 4 and 1", rep.Items, rep.LinesSkipped)
-	}
-	wantContext := "FAIL review notes named 2 finding bead(s): gt-f1, gt-f2"
-	if len(rep.Context) != 1 || rep.Context[0] != wantContext {
-		t.Errorf("context = %q, want %q", rep.Context, wantContext)
 	}
 
 	var out strings.Builder

@@ -8,8 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"slices"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -33,34 +31,25 @@ const (
 	refHead = "head"
 )
 
-// Rules the landing adapter names in the --json report's lines.
+// Rules the landing adapter names in the --json report's lines. Each names the
+// first attempt's om verdict that set needs_review_now and risk.
 const (
-	ruleLandingReviewPass = "landing:review-pass"
-	ruleLandingReviewFail = "landing:review-fail"
-)
-
-// The sources a landing label comes from. The report counts them apart so a
-// polecat's second look and the overseer's review are never read as one.
-const (
-	landingSourcePolecat  = "polecat"
-	landingSourceOverseer = "overseer"
+	ruleLandingFirstAttemptRejected = "landing:first-attempt-rejected"
+	ruleLandingFirstAttemptApproved = "landing:first-attempt-approved"
 )
 
 func init() {
 	Register(LandingBattery, func(townRoot string) Adapter {
-		return newLandingAdapter(townRoot, &townNotes{town: townRoot, stores: map[string]*beads.Beads{}})
+		return newLandingAdapter(townRoot)
 	})
 }
 
-// newLandingAdapter builds the landing adapter for the town at townRoot, with
-// notes as its bead reader: the town's own store in the battery, a fake in a
-// test. Its review documents always come from the town's bare clone, so the
-// source a build reads is the one a test drives.
-func newLandingAdapter(townRoot string, notes landingNotes) *landingAdapter {
+// newLandingAdapter builds the landing adapter for the town at townRoot. Its
+// labels come from the town's om review log.
+func newLandingAdapter(townRoot string) *landingAdapter {
 	return &landingAdapter{
 		log:     landing.LogPath(townRoot),
-		notes:   notes,
-		reviews: &cloneReviews{git: &townClone{town: townRoot}},
+		reviews: land.TownReviewsFile(townRoot),
 	}
 }
 
@@ -195,90 +184,18 @@ func (t *townNotes) store(rig string) (*beads.Beads, error) {
 	return b, nil
 }
 
-// landingAdapter labels each logged landing from a review of the head it
-// logged: the overseer's note on the bead, or failing that a polecat's review
-// document. The landing log writes landing.Line, whose answers carry the fields
-// Answer reads; its confidence is not scored.
+// landingAdapter labels each logged landing from the om verdict its bead's first
+// attempt drew: needs_review_now and risk are both true when that attempt
+// rejected the work and both false when it approved it. The landing log writes
+// landing.Line, whose answers carry the fields Answer reads; its confidence is
+// not scored.
 type landingAdapter struct {
-	log   string
-	notes landingNotes
-	// reviews reads the polecat review documents. A nil source fails the
-	// report: an item without an overseer verdict would otherwise read as
-	// unreviewed with a clean exit.
-	reviews reviewDocs
-
-	// findings gathers the finding beads Label sees, for Context.
-	findings findingTally
-
-	// batched holds the notes Prefetch read in one batch per rig, by rig and
-	// bead. Label reads a bead missing from it the one-at-a-time way.
-	batched map[string]string
-}
-
-// Prefetch reads the notes of every landed bead in one call per rig.
-func (a *landingAdapter) Prefetch(_ context.Context, items []Item) {
-	a.batched = nil
-	all, ok := a.notes.(rigShowAller)
-	if !ok {
-		return
-	}
-	byRig := map[string][]string{}
-	for _, it := range items {
-		byRig[landingRig(it)] = append(byRig[landingRig(it)], it.ID)
-	}
-	a.batched = map[string]string{}
-	for rig, ids := range byRig {
-		got, err := all.ShowAll(rig, ids)
-		if err != nil {
-			warnf("reading %s's landed beads in a batch: %v", rig, err)
-		}
-		for id, issue := range got {
-			a.batched[rig+"/"+id] = issue.Notes
-		}
-	}
-}
-
-// landingRig is the rig a landing item's bead lives in.
-func landingRig(item Item) string {
-	if rig := item.Refs[refRig]; rig != "" {
-		return rig
-	}
-	return landing.RigName
-}
-
-// findingTally is the finding beads the FAIL lines named, each once. Label adds
-// to it as it walks the items and Context drains it, so one Build reports the
-// findings of its own labeling and no earlier one.
-type findingTally struct {
-	mu  sync.Mutex
-	ids map[string]bool
-}
-
-func (t *findingTally) add(ids []string) {
-	if len(ids) == 0 {
-		return
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.ids == nil {
-		t.ids = map[string]bool{}
-	}
-	for _, id := range ids {
-		t.ids[id] = true
-	}
-}
-
-// drain returns the sorted ids and empties the tally.
-func (t *findingTally) drain() []string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	ids := make([]string, 0, len(t.ids))
-	for id := range t.ids {
-		ids = append(ids, id)
-	}
-	t.ids = nil
-	slices.Sort(ids)
-	return ids
+	log string
+	// reviews is the town's om review log, which Label reads once.
+	reviews *land.ReviewsFile
+	// rows is the review log grouped by bead, in log order. It is loaded on the
+	// first label.
+	rows map[string][]land.ReviewRecord
 }
 
 func (a *landingAdapter) Battery() string { return LandingBattery }
@@ -315,93 +232,81 @@ func (a *landingAdapter) Parse(raw []byte) (Item, error) {
 	}, nil
 }
 
-// Label reads the work bead's notes and, when they hold no verdict, the
-// bead's polecat review document. A PASS of the logged head labels
-// needs_review_now and risk false: a reviewer read the diff and let it stand.
-// A FAIL labels both true: the diff should have been read before the wake, and
-// the landing was at least level 2 risk. The overseer's note wins over the
-// polecat's document, and its WAIVED or AUDITED line falls through to the
-// document: the note records that head as unreviewed, so the document is the
-// only review it has. No verdict at all leaves the item unlabeled, and so does
-// a landing whose bead no longer exists in its rig. A rig with no beads
-// directory fails the report, like any other failure to read the notes: it
-// would otherwise leave every landing of that rig unlabeled with a clean exit.
-// A FAIL's finding beads are collected for Context.
-func (a *landingAdapter) Label(ctx context.Context, item Item) (Labeling, error) {
-	rig := landingRig(item)
-	notes, batched := a.batched[rig+"/"+item.ID]
-	if !batched {
-		var err error
-		notes, err = a.notes.Notes(rig, item.ID)
-		if errors.Is(err, beads.ErrNotFound) && !errors.Is(err, errNoRigBeads) {
-			return Labeling{}, nil
-		}
-		if err != nil {
-			return Labeling{}, fmt.Errorf("reading %s's notes: %w", item.ID, err)
-		}
-	}
-	head := item.Refs[refHead]
-	verdict, source, ok, err := a.reviewVerdict(ctx, notes, item.ID, head)
-	if err != nil {
+// Label labels needs_review_now and risk from the om verdict of the bead's
+// first attempt, as firstAttemptRejected reads it: a rejection labels both
+// true, an approval both false. A landing logged at or after that verdict, a
+// bead with no first attempt in the review log and a first attempt that is
+// neither an approval nor a rejection are unlabeled. A review log that cannot
+// be read fails the report, which would otherwise read every landing as
+// unlabeled with a clean exit.
+func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
+	if err := a.loadReviews(); err != nil {
 		return Labeling{}, err
 	}
+	rejected, ok := firstAttemptRejected(a.rows[item.ID], item.Time)
 	if !ok {
 		return Labeling{}, nil
 	}
-	failed := verdict == land.OverseerReviewFail
-	rule := ruleLandingReviewPass
-	if failed {
-		rule = ruleLandingReviewFail
-		a.findings.add(land.OverseerReviewFindings(notes, head))
+	rule := ruleLandingFirstAttemptApproved
+	if rejected {
+		rule = ruleLandingFirstAttemptRejected
 	}
 	return Labeling{
 		Labeled: true,
 		Labels: map[QuestionID]bool{
-			QuestionID(landing.QNeedsReviewNow): failed,
-			QuestionID(landing.QRisk):           failed,
+			QuestionID(landing.QNeedsReviewNow): rejected,
+			QuestionID(landing.QRisk):           rejected,
 		},
-		Rule:   rule,
-		Source: source,
+		Rule: rule,
 	}, nil
 }
 
-// reviewVerdict returns the verdict recorded for head and the source that
-// records it: the overseer's note on the bead, else the bead's polecat review
-// documents. It reports no verdict when neither holds one.
-func (a *landingAdapter) reviewVerdict(ctx context.Context, notes, bead, head string) (verdict, source string, ok bool, err error) {
-	if v, found := land.OverseerReviewVerdict(notes, head); found && (v == land.OverseerReviewPass || v == land.OverseerReviewFail) {
-		return v, landingSourceOverseer, true, nil
-	}
-	v, found, err := a.polecatVerdict(ctx, bead, head)
-	if err != nil {
-		return "", "", false, err
-	}
-	return v, landingSourcePolecat, found, nil
-}
-
-// polecatVerdict returns the verdict the bead's polecat review documents record
-// for head, in the review lines' words (PASS or FAIL). No review source is an
-// error, not an unlabeled item: it would pass as unreviewed with a clean exit.
-func (a *landingAdapter) polecatVerdict(ctx context.Context, bead, head string) (string, bool, error) {
-	if a.reviews == nil {
-		return "", false, fmt.Errorf("reading %s's polecat review: no review source", bead)
-	}
-	verdict, ok, err := a.reviews.Verdict(ctx, bead, head)
-	if err != nil {
-		return "", false, fmt.Errorf("reading %s's polecat review: %w", bead, err)
-	}
-	if !ok || (verdict != land.OverseerReviewPass && verdict != land.OverseerReviewFail) {
-		return "", false, nil
-	}
-	return verdict, true, nil
-}
-
-// Context reports the finding beads the FAIL lines named, each once, and
-// clears the tally so the next build starts fresh.
-func (a *landingAdapter) Context() []string {
-	ids := a.findings.drain()
-	if len(ids) == 0 {
+// loadReviews reads the review log once, grouped by bead.
+func (a *landingAdapter) loadReviews() error {
+	if a.rows != nil {
 		return nil
 	}
-	return []string{fmt.Sprintf("FAIL review notes named %d finding bead(s): %s", len(ids), strings.Join(ids, ", "))}
+	rows, err := reviewsByBead(a.reviews)
+	if err != nil {
+		return err
+	}
+	a.rows = rows
+	return nil
+}
+
+// reviewsByBead reads the whole review log, grouped by bead in log order.
+func reviewsByBead(reviews *land.ReviewsFile) (map[string][]land.ReviewRecord, error) {
+	recs, err := reviews.Since(time.Time{})
+	if err != nil {
+		return nil, fmt.Errorf("reading the om reviews: %w", err)
+	}
+	rows := make(map[string][]land.ReviewRecord, len(recs))
+	for _, rec := range recs {
+		rows[rec.BeadID] = append(rows[rec.BeadID], rec)
+	}
+	return rows, nil
+}
+
+// firstAttemptRejected reports whether the bead's first attempt rejected the
+// work, for a line logged at logged. rows are the bead's review records in log
+// order. ok is false when the line is unlabeled: the bead has no first attempt,
+// the line was logged at or after that verdict (so the line cannot have been
+// judged on it), or the verdict is neither an approval nor a rejection.
+func firstAttemptRejected(rows []land.ReviewRecord, logged time.Time) (rejected, ok bool) {
+	for _, r := range rows {
+		if r.Attempt != 1 {
+			continue
+		}
+		if !logged.Before(r.At) {
+			return false, false
+		}
+		if r.IsRejection() {
+			return true, true
+		}
+		if r.Verdict == land.VerdictApprove {
+			return false, true
+		}
+		return false, false
+	}
+	return false, false
 }

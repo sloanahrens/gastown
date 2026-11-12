@@ -1,6 +1,5 @@
 Scorecard for battery landing, all time
 Items: 4 parsed, 1 line(s) skipped
-FAIL review notes named 2 finding bead(s): gt-f1, gt-f2
 
 beyond_goal (noul)
   logged 4, labeled 0, positives 0, negatives 0, base rate n/a
@@ -16,7 +15,6 @@ beyond_goal (noul)
 
 needs_review_now (noul)
   logged 4, labeled 2, positives 1, negatives 1, base rate 50.0%
-  labels by source: overseer 2 labels, 1 positive
   at 0.5: precision 50.0%, recall 100.0%
   best F1 0.667 at threshold 0.800
   precision at the best F1 cut: 50.0% over 2 flagged
@@ -31,7 +29,6 @@ needs_review_now (noul)
 
 risk (score)
   logged 4, labeled 2, positives 1, negatives 1, base rate 50.0%
-  labels by source: overseer 2 labels, 1 positive
   mean score: positives 2.000, negatives 3.000
   best F1 0.667 at threshold 2.000
   verdict: not-yet

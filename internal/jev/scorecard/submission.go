@@ -56,12 +56,14 @@ var (
 // submission:no-rejection-block, the missing block a request_changes verdict
 // should have left; a line can carry several, space-separated.
 const (
-	ruleSubmissionApprove        = "submission:om-approve"
-	ruleSubmissionRequestChanges = "submission:om-request-changes"
-	ruleSubmissionGateRejected   = "submission:gate-rejected"
-	ruleSubmissionOmMajor        = "submission:om-major"
-	ruleSubmissionFirstTry       = "submission:first-try-landing"
-	ruleSubmissionNoBlock        = "submission:no-rejection-block"
+	ruleSubmissionApprove              = "submission:om-approve"
+	ruleSubmissionRequestChanges       = "submission:om-request-changes"
+	ruleSubmissionGateRejected         = "submission:gate-rejected"
+	ruleSubmissionOmMajor              = "submission:om-major"
+	ruleSubmissionFirstTry             = "submission:first-try-landing"
+	ruleSubmissionNoBlock              = "submission:no-rejection-block"
+	ruleSubmissionFirstAttemptRejected = "submission:first-attempt-rejected"
+	ruleSubmissionFirstAttemptApproved = "submission:first-attempt-approved"
 )
 
 var (
@@ -104,7 +106,9 @@ func init() {
 // beyond_goal from its findings, boxes_credible false when the gate refused it,
 // and claims_verified false when om refused it on a major. An approval the
 // first attempt landed, with its LANDING RECORD on the bead, sets claims_verified,
-// boxes_credible and the outcome choice's positive option.
+// boxes_credible and the outcome choice's positive option. risk comes from the
+// bead's first attempt alone, by the rule firstAttemptRejected states, whichever
+// review the join picked.
 type submissionAdapter struct {
 	log     string
 	reviews *land.ReviewsFile
@@ -161,11 +165,11 @@ func (a *submissionAdapter) Parse(raw []byte) (Item, error) {
 	}, nil
 }
 
-// Label joins item to its om review and labels it from the verdict and the
-// rejection block the review's attempt names. No review row for the submission
-// leaves it unlabeled, and so does a row whose verdict is neither approve nor
-// request_changes. An error reading the review log or the bead's notes fails
-// the whole report.
+// Label labels the item from the om review its submission joins, and risk from
+// the bead's first attempt. Each part is labeled on its own: a submission with no
+// joined review still carries the risk label its first attempt sets, and a
+// first-attempt verdict that is neither approve nor a rejection sets none. An
+// error reading the review log or the bead's notes fails the whole report.
 func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	submitted, err := time.Parse(time.RFC3339Nano, item.Refs[refSubmitted])
 	if err != nil {
@@ -174,7 +178,44 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 	if err := a.loadReviews(); err != nil {
 		return Labeling{}, err
 	}
-	row, ok := a.joinReview(item.ID, submitted)
+	joined, err := a.labelJoin(item.ID, item.Refs[refHead], submitted)
+	if err != nil {
+		return Labeling{}, err
+	}
+	risk := a.labelRisk(item)
+	switch {
+	case !risk.Labeled:
+		return joined, nil
+	case !joined.Labeled:
+		return risk, nil
+	}
+	for id, v := range risk.Labels {
+		joined.Labels[id] = v
+	}
+	joined.Rule = strings.TrimSpace(joined.Rule + " " + risk.Rule)
+	return joined, nil
+}
+
+// labelRisk labels risk from the bead's first attempt, by the rule
+// firstAttemptRejected states; the landing adapter labels its questions by it too.
+func (a *submissionAdapter) labelRisk(item Item) Labeling {
+	rejected, ok := firstAttemptRejected(a.rows[item.ID], item.Time)
+	if !ok {
+		return Labeling{}
+	}
+	rule := ruleSubmissionFirstAttemptApproved
+	if rejected {
+		rule = ruleSubmissionFirstAttemptRejected
+	}
+	return Labeling{Labeled: true, Labels: map[QuestionID]bool{QuestionID(submission.QRisk): rejected}, Rule: rule}
+}
+
+// labelJoin labels the item from the review its submission joins: the verdict,
+// and the rejection block the review's attempt names. No review row for the
+// submission leaves it unlabeled, and so does a row whose verdict is neither
+// approve nor request_changes.
+func (a *submissionAdapter) labelJoin(bead, head string, submitted time.Time) (Labeling, error) {
+	row, ok := a.joinReview(bead, submitted)
 	if !ok {
 		return Labeling{}, nil
 	}
@@ -194,7 +235,7 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 	a.joined++
 	a.findings += row.Findings
 
-	notes, err := a.notesFor(item.ID)
+	notes, err := a.notesFor(bead)
 	if err != nil {
 		return Labeling{}, err
 	}
@@ -221,7 +262,7 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 			// one the findings could not be read, which is not the same as none.
 			rules = append(rules, ruleSubmissionNoBlock)
 		case land.VerdictApprove:
-			if row.Attempt == 1 && landedAs(notes, item.Refs[refHead]) {
+			if row.Attempt == 1 && landedAs(notes, head) {
 				labels[QuestionID(submission.QClaimsVerified)] = true
 				labels[QuestionID(submission.QBoxesCredible)] = true
 				labels[QuestionID(submission.QOutcome)] = true
@@ -281,13 +322,9 @@ func (a *submissionAdapter) loadReviews() error {
 	if a.rows != nil {
 		return nil
 	}
-	recs, err := a.reviews.Since(time.Time{})
+	rows, err := reviewsByBead(a.reviews)
 	if err != nil {
-		return fmt.Errorf("reading the om reviews: %w", err)
-	}
-	rows := make(map[string][]land.ReviewRecord, len(recs))
-	for _, rec := range recs {
-		rows[rec.BeadID] = append(rows[rec.BeadID], rec)
+		return err
 	}
 	a.rows = rows
 	return nil
