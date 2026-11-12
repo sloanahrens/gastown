@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/buildsrc"
 )
 
 // The staleness tests run against fakeGit (fakegit_test.go): an in-memory
@@ -834,44 +836,79 @@ func TestLiveRefVerdict(t *testing.T) {
 
 // TestGetRepoRootForTown_ReadsOnlyTheTown keeps a caller reporting one town's
 // build drift from resolving — and, to report freshness, fetching — whichever
-// checkout the process happens to sit near (gt-vxjz).
+// checkout the process happens to sit near (gt-vxjz). The checkout it resolves
+// is the gastown rig's build checkout.
 func TestGetRepoRootForTown_ReadsOnlyTheTown(t *testing.T) {
 	t.Parallel()
 	// GetRepoRootForTown reads no environment and no working directory; the
-	// town root is its only input.
+	// town root is its only input. A town with no build checkout is an error,
+	// not an empty answer.
 	empty := t.TempDir()
-	if _, err := GetRepoRootForTown(empty); err == nil {
-		t.Error("resolved a checkout for a town with no gastown/ below it")
+	if _, err := GetRepoRootForTown(empty); err == nil || !strings.Contains(err.Error(), "no gt source checkout") {
+		t.Fatalf("GetRepoRootForTown(empty town) = %v, want the no gt source checkout error", err)
 	}
 
-	tests := []struct {
-		name string
-		rel  string
-	}{
-		{"canonical", "gastown"},
-		{"mayor's rig worktree", filepath.Join("gastown", "mayor", "rig")},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			town := t.TempDir()
-			source := filepath.Join(town, tt.rel)
-			main := filepath.Join(source, "cmd", "gt", "main.go")
-			if err := os.MkdirAll(filepath.Dir(main), 0o755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(main, []byte("package main\n"), 0o644); err != nil {
-				t.Fatal(err)
-			}
+	town := t.TempDir()
+	source := filepath.Join(town, buildsrc.BaseDirRel(), "gastown")
+	writeGtSource(t, source)
 
-			got, err := GetRepoRootForTown(town)
-			if err != nil {
-				t.Fatalf("GetRepoRootForTown: %v", err)
-			}
-			if got != source {
-				t.Errorf("GetRepoRootForTown = %q, want %q", got, source)
-			}
-		})
+	got, err := GetRepoRootForTown(town)
+	if err != nil {
+		t.Fatalf("GetRepoRootForTown: %v", err)
+	}
+	if got != source {
+		t.Errorf("GetRepoRootForTown = %q, want %q", got, source)
+	}
+}
+
+// TestGetRepoRootForTown_RefusesTheGastownRigTreeAlone: a town whose gastown rig
+// directory still holds the gt source, but which has no build checkout, has no
+// source of drift. The retired rig tree is not a fallback.
+func TestGetRepoRootForTown_RefusesTheGastownRigTreeAlone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeGtSource(t, filepath.Join(town, "gastown"))
+
+	if got, err := GetRepoRootForTown(town); err == nil {
+		t.Errorf("GetRepoRootForTown = %q, want the no gt source checkout error", got)
+	}
+}
+
+// TestGetRepoRootForTownBranch_KeepsTheBranchCheckouts pins the lookup the
+// retired installer path reads until gt-yjzepk deletes it: the gastown rig
+// directory, or the mayor's worktree under it, and never a town with neither.
+func TestGetRepoRootForTownBranch_KeepsTheBranchCheckouts(t *testing.T) {
+	t.Parallel()
+	for _, rel := range []string{
+		"gastown",
+		filepath.Join("gastown", "mayor", "rig"),
+	} {
+		town := t.TempDir()
+		source := filepath.Join(town, rel)
+		writeGtSource(t, source)
+
+		got, err := GetRepoRootForTownBranch(town)
+		if err != nil {
+			t.Fatalf("GetRepoRootForTownBranch(%s): %v", rel, err)
+		}
+		if got != source {
+			t.Errorf("GetRepoRootForTownBranch = %q, want %q", got, source)
+		}
+	}
+	if _, err := GetRepoRootForTownBranch(t.TempDir()); err == nil {
+		t.Error("GetRepoRootForTownBranch(town without a checkout) = nil error, want a refusal")
+	}
+}
+
+// writeGtSource puts the marker every lookup reads — cmd/gt/main.go — under dir.
+func writeGtSource(t *testing.T, dir string) {
+	t.Helper()
+	main := filepath.Join(dir, "cmd", "gt", "main.go")
+	if err := os.MkdirAll(filepath.Dir(main), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(main, []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 

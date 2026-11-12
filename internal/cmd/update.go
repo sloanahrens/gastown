@@ -605,7 +605,7 @@ func updateHeartbeatError(w io.Writer) func(error) {
 // request, all under one clock.
 func realUpdateDeps(townRoot string) (update.Deps, error) {
 	clock := updateClock{}
-	repoRoot, err := version.GetRepoRootForTown(townRoot)
+	repoRoot, err := version.GetRepoRootForTownBranch(townRoot)
 	if err != nil {
 		return update.Deps{}, err
 	}

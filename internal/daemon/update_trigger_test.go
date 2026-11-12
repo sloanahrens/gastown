@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
@@ -770,11 +771,12 @@ func setUpdateSource(t *testing.T, d *Daemon) {
 	}
 }
 
-// createUpdateSource makes town/gastown look like a gt source checkout, which
-// is what makes updateFacts reach the staleness and landing-record reads.
+// createUpdateSource makes the gastown rig's build checkout look like a gt
+// source checkout, which is what makes updateFacts reach the staleness and
+// landing-record reads.
 func createUpdateSource(t *testing.T, town string) string {
 	t.Helper()
-	source := filepath.Join(town, "gastown")
+	source := filepath.Join(town, buildsrc.BaseDirRel(), "gastown")
 	dir := filepath.Join(source, "cmd", "gt")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("create source tree: %v", err)

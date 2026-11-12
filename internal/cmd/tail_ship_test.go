@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
@@ -217,7 +218,9 @@ func TestTailRestartRig_ReadsTheTownsCheckout(t *testing.T) {
 	if rig := tailRestartRig(town); rig != "" {
 		t.Fatalf("restart rig = %q; want none without a checkout", rig)
 	}
-	dir := filepath.Join(town, "gastown", "cmd", "gt")
+	// The source is the gastown rig's build checkout; its rig is the
+	// checkout's own directory name, not the ".runtime" segment above it.
+	dir := filepath.Join(town, buildsrc.BaseDirRel(), "gastown", "cmd", "gt")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}

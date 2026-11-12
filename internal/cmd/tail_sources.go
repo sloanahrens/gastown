@@ -20,6 +20,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/daemonlog"
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -1665,6 +1666,12 @@ func tailRestartRig(townRoot string) string {
 	repo, err := version.GetRepoRootForTown(townRoot)
 	if err != nil {
 		return ""
+	}
+	// A build checkout is <town>/.runtime/build-src/<rig>, so the rig is the
+	// checkout's own directory name. Any other checkout is named by its first
+	// path segment under the town.
+	if buildsrc.IsBuildCheckout(repo) {
+		return filepath.Base(repo)
 	}
 	rel, err := filepath.Rel(townRoot, repo)
 	if err != nil {

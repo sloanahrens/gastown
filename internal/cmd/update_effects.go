@@ -230,13 +230,15 @@ func newRunFunc(output commandOutput) update.RunFunc {
 	}
 }
 
-// newExecInstaller returns the real installer the update job runs. It builds
-// and runs in the town's own gt source checkout, the root the daemon's rebuild
-// job uses, and hands the installer the polecat-image trim context the daemon
-// passes when the tier sweep runs off-host. An unreadable root or an invalid
-// sweep context is an error, never an installer that trims the wrong engine.
+// newExecInstaller returns the real installer the update job runs. The
+// installer builds and runs in a gt source checkout on main and fast-forwards
+// it, so it takes the branch checkout GetRepoRootForTownBranch returns, not the
+// detached build checkout the drift and staleness readers use. It also hands
+// the installer the polecat-image trim context the daemon passes when the tier
+// sweep runs off-host. An unreadable root or an invalid sweep context is an
+// error, never an installer that trims the wrong engine.
 func newExecInstaller(townRoot string, run update.RunFunc, cfg *daemon.DaemonPatrolConfig) (update.Installer, error) {
-	repoRoot, err := version.GetRepoRootForTown(townRoot)
+	repoRoot, err := version.GetRepoRootForTownBranch(townRoot)
 	if err != nil {
 		return nil, err
 	}

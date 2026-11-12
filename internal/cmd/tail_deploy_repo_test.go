@@ -10,16 +10,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/version"
 )
 
-// tailDeployTown makes a town root with a gastown source checkout under
-// mayor/rig, the marker GetRepoRootForTown looks for, and no bare repo. The
-// checkout is plain files: nothing here runs git.
+// tailDeployTown makes a town root with the gastown rig's build checkout, the
+// marker GetRepoRootForTown looks for, and no bare repo. The checkout is plain
+// files: nothing here runs git.
 func tailDeployTown(t *testing.T) (townRoot, checkout string) {
 	t.Helper()
 	townRoot = t.TempDir()
-	checkout = filepath.Join(townRoot, "gastown", "mayor", "rig")
+	// The rig directory exists whether or not its bare repo does; the source
+	// checkout lives under the build-checkout base instead.
+	if err := os.MkdirAll(filepath.Join(townRoot, "gastown"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	checkout = filepath.Join(townRoot, buildsrc.BaseDirRel(), "gastown")
 	if err := os.MkdirAll(filepath.Join(checkout, "cmd", "gt"), 0o755); err != nil {
 		t.Fatal(err)
 	}

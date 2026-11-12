@@ -17,6 +17,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/forgejo"
@@ -442,6 +443,11 @@ func (d *Daemon) landingOwnsGTSource(rigName string) bool {
 	repoRoot, err := version.GetRepoRootForTown(d.config.TownRoot)
 	if err != nil {
 		return false
+	}
+	// The source is the rig's build checkout, <town>/.runtime/build-src/<rig>,
+	// so the rig that owns it is the checkout's own directory name.
+	if buildsrc.IsBuildCheckout(repoRoot) {
+		return rigName == filepath.Base(repoRoot)
 	}
 	return landingPathWithin(repoRoot, filepath.Join(d.config.TownRoot, rigName))
 }

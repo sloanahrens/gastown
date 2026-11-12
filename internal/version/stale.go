@@ -220,22 +220,23 @@ func (c checker) checkStale(repoDir string) *StaleBinaryInfo {
 
 	// Decide which ref to compare the binary against.
 	//
-	// GetRepoRoot resolves to $GT_TOWN_ROOT/gastown/mayor/rig, a worktree that
-	// normally sits on a feature branch (that's where the Mayor does git work).
-	// Diffing the binary against that worktree's HEAD compares it to unmerged
-	// feature work and produces a false "N commits behind" warning advising a
-	// rebuild from the feature branch (GH#4034). Staleness is only meaningful
-	// relative to a *build branch*.
+	// The source is normally the town's job-owned build checkout, which is
+	// detached and judged against the bare repo's main above. A checkout that
+	// sits on a feature branch — a developer clone — must not be judged by its
+	// HEAD: that compares the binary to unmerged feature work and produces a
+	// false "N commits behind" warning advising a rebuild from the feature
+	// branch (GH#4034). Staleness is only meaningful relative to a *build
+	// branch*.
 	var compareCommit string
 	if info.OnMainBranch {
-		// Prefer the remote-tracking ref over this worktree's local branch
-		// pointer. A worktree like mayor/rig can sit unfetched for a long
-		// time; if its local main lags origin/main and the binary was last
-		// built from that same stale local tip, comparing against local HEAD
-		// makes binary and compare-ref match and the check reports "fresh"
-		// even though origin/main has since moved on (gt-h8s8). Comparing
-		// against the remote-tracking ref instead — kept current by
-		// CheckStaleBinaryFresh's explicit fetch — catches that case.
+		// Prefer the remote-tracking ref over the checkout's local branch
+		// pointer. A developer clone can sit unfetched for a long time; if its
+		// local main lags origin/main and the binary was last built from that
+		// same stale local tip, comparing against local HEAD makes binary and
+		// compare-ref match and the check reports "fresh" even though
+		// origin/main has since moved on (gt-h8s8). Comparing against the
+		// remote-tracking ref instead — kept current by CheckStaleBinaryFresh's
+		// explicit fetch — catches that case.
 		if detached {
 			// The bare repo's main is the build checkout's origin/main, read here
 			// from the repo itself so the verdict needs no fetch.
@@ -332,14 +333,16 @@ const remoteFetchTimeout = 5 * time.Second
 // origin/upstream remote-tracking refs before trusting one of them to say
 // the binary is current.
 //
-// repoDir is normally $GT_TOWN_ROOT/gastown/mayor/rig — a shared worktree nobody
-// guarantees to keep fetched — so refs/remotes/origin/main there can lag the
-// true tip. CheckStaleBinary compared against it as-is: if the binary
-// happened to match that stale cached ref, it reported "fresh" even though
-// the real origin/main had moved on (gt-cq0). A false "stale" is just noisy;
-// a false "fresh" silently permits running an outdated binary, so when the
-// live refresh can't confirm the ref it landed on, this fails closed to
-// Skipped rather than trusting an unverified "fresh".
+// repoDir is normally the town's job-owned build checkout, which is detached
+// and judged against the bare repo's main; that path fetches nothing. A
+// checkout sitting on a branch — a developer clone — keeps
+// refs/remotes/origin/main that nobody guarantees to keep fetched, so the
+// cached ref there can lag the true tip. CheckStaleBinary compared against it
+// as-is: if the binary happened to match that stale cached ref, it reported
+// "fresh" even though the real origin/main had moved on (gt-cq0). A false
+// "stale" is just noisy; a false "fresh" silently permits running an outdated
+// binary, so when the live refresh can't confirm the ref it landed on, this
+// fails closed to Skipped rather than trusting an unverified "fresh".
 //
 // The refresh runs only for a verdict that needs it (liveRefVerdict); a
 // result the cached refs already settle is returned untouched.
@@ -478,9 +481,9 @@ func (c checker) fetchRemoteBranch(repoDir, remote, branch string) bool {
 }
 
 // resolveBuildBranchRef finds a build-branch ref to compare the binary against
-// when the resolved source worktree is parked on a non-build branch (the normal
-// state for $GT_TOWN_ROOT/gastown/mayor/rig). Without this, staleness would be
-// computed against unmerged feature work (GH#4034).
+// when the resolved source checkout is parked on a non-build branch (a
+// developer clone doing work). Without this, staleness would be computed
+// against unmerged feature work (GH#4034).
 //
 // Candidate refs are fully qualified to avoid branch/tag shadowing. Among refs
 // that contain the binary commit, choose the freshest descendant; only use the
@@ -589,33 +592,35 @@ func (c checker) singleBranchRef(repoDir, pattern string) (buildBranchRef, bool)
 	return buildBranchRef{ref: refs[0], display: display}, true
 }
 
-// townSourceCandidates lists where a town keeps its gt source checkout:
-// <townRoot>/gastown canonically, or <townRoot>/gastown/mayor/rig when the
-// source lives in the mayor's rig worktree.
+// townSourceCandidates lists where a town keeps its gt source checkout: the
+// gastown rig's job-owned build checkout, <townRoot>/.runtime/build-src/gastown,
+// which buildsrc.Ensure keeps at the rig's bare main.
 func townSourceCandidates(townRoot string) []string {
-	return []string{
-		filepath.Join(townRoot, "gastown"),
-		filepath.Join(townRoot, "gastown", "mayor", "rig"),
-	}
+	return []string{filepath.Join(townRoot, buildsrc.BaseDirRel(), "gastown")}
 }
 
 // GetRepoRootForTown returns the gt source checkout belonging to the town at
 // townRoot, so a caller reporting one town's build drift cannot pick up another
 // checkout's. It reads nothing outside townRoot, unlike GetRepoRoot, which
 // falls back to $HOME and the working directory.
+//
+// The checkout is the gastown rig's build checkout. It is read, never created,
+// so a town without one is an error, not a source of drift.
 func GetRepoRootForTown(townRoot string) (string, error) {
 	for _, candidate := range townSourceCandidates(townRoot) {
 		if hasGtSource(candidate) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("town %s has no gt source checkout (no gastown/cmd/gt/main.go below it)", townRoot)
+	return "", fmt.Errorf("town %s has no gt source checkout (no %s below it)", townRoot,
+		filepath.Join(buildsrc.BaseDirRel(), "gastown", "cmd", "gt", "main.go"))
 }
 
-// GetRepoRoot returns the git repository root for the gt source code.
-// The canonical source is the gastown repo itself ($GT_TOWN_ROOT/gastown).
-// Crew rigs also contain cmd/gt/main.go but have different HEADs,
-// so we prefer the gastown repo over CWD-based git toplevel detection.
+// GetRepoRoot returns the checkout holding the gt source code: the town's
+// gastown build checkout under $GT_TOWN_ROOT, a developer clone under $HOME, or
+// the working directory's repository when that holds the source. Crew rigs and
+// polecat worktrees also contain cmd/gt/main.go but have different HEADs, so the
+// town's own checkout is preferred over CWD-based git toplevel detection.
 func GetRepoRoot() (string, error) {
 	// The town root the session was spawned with (agents always have it)
 	if gtRoot := workspace.TownRootFromEnv(os.Getenv); gtRoot != "" {
@@ -631,11 +636,9 @@ func GetRepoRoot() (string, error) {
 	if home != "" {
 		candidates := []string{
 			home + "/gt/gastown",
-			home + "/gt/gastown/mayor/rig",
+			filepath.Join(home, "gt", buildsrc.BaseDirRel(), "gastown"),
 			home + "/gastown",
-			home + "/gastown/mayor/rig",
 			home + "/src/gastown",
-			home + "/src/gastown/mayor/rig",
 		}
 		for _, candidate := range candidates {
 			if hasGtSource(candidate) {

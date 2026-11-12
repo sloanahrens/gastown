@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/version"
 )
 
@@ -32,10 +33,10 @@ func tailRepoGit(t *testing.T, dir string, args ...string) string {
 }
 
 // tailRepoRig makes a town whose gastown rig has the rig's bare repo, with main
-// at binary, and a source checkout at mayor/rig cloned at binary. The bare repo
-// then moves on to a second and third commit, which only it holds: the stale
-// checkout is what a pod's unfetched mayor/rig looks like. It returns the town
-// root, the binary's commit, the second commit and main's tip.
+// at binary, and the rig's build checkout cloned at binary. The bare repo then
+// moves on to a second and third commit, which only it holds: the stale
+// checkout is what a build checkout nobody has moved looks like. It returns the
+// town root, the binary's commit, the second commit and main's tip.
 func tailRepoRig(t *testing.T) (townRoot, binary, second, tip string) {
 	t.Helper()
 	townRoot = t.TempDir()
@@ -60,7 +61,7 @@ func tailRepoRig(t *testing.T) (townRoot, binary, second, tip string) {
 	binary = commit("a.go")
 	tailRepoGit(t, work, "push", "-q", bare, "main")
 
-	checkout := filepath.Join(townRoot, "gastown", "mayor", "rig")
+	checkout := filepath.Join(townRoot, buildsrc.BaseDirRel(), "gastown")
 	if err := os.MkdirAll(filepath.Dir(checkout), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -96,12 +97,12 @@ func TestIntegrationTailMainPicture_ReadsTheBareReposMainNotTheStaleCheckout(t *
 }
 
 // TestIntegrationTailMainPicture_WithoutABareRepoReadsTheCheckoutAndSaysSo: a
-// town with no .repo.git reads the gt source checkout at mayor/rig, the layout a
-// real town has, and the why-log names the checkout that answered.
+// town with no .repo.git reads the gt build checkout, and the why-log names the
+// checkout that answered.
 func TestIntegrationTailMainPicture_WithoutABareRepoReadsTheCheckoutAndSaysSo(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	checkout := filepath.Join(townRoot, "gastown", "mayor", "rig")
+	checkout := filepath.Join(townRoot, buildsrc.BaseDirRel(), "gastown")
 	if err := os.MkdirAll(filepath.Join(checkout, "cmd", "gt"), 0o755); err != nil {
 		t.Fatal(err)
 	}

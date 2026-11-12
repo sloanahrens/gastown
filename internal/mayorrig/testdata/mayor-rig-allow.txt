@@ -67,4 +67,4 @@ internal/townstate/daycheck.go	1	pending-retirement	townstate daycheck: the cons
 internal/townstate/townstate.go	2	pending-retirement	townstate: the constants.DirMayor and constants.DirRig names in its path table
 internal/townstate/verify.go	2	pending-retirement	townstate verify: the constants.DirMayor/constants.DirRig path it verifies
 internal/townstatus/townstatus.go	1	pending-retirement	townstatus: the rig's mayor/rig checkout path it reports
-internal/version/stale.go	4	pending-retirement	version stale check: the gastown mayor/rig paths it searches for a stale binary
+internal/version/repo_branch.go	1	pending-retirement	version branch lookup: the branch checkouts gt update's installer still builds from, deleted with gt-yjzepk

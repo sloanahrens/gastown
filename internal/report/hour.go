@@ -158,12 +158,11 @@ func NewHourRun(townRoot string, until time.Time, version, commit string, rigs f
 	}
 }
 
-// reportMainTip reads origin/main's tip for the town's gt source checkout
-// with git ls-remote — never a fetch, because the canonical clone at
-// <town>/<rig>/mayor/rig is what install-gt builds from and fetching it
-// behind the installer's back races the build — and counts the commits the
-// installed build commit is behind it. The returned reading carries the tip
-// and the count, not the installed build's identity; the caller adds that.
+// reportMainTip reads origin/main's tip for the town's gt build checkout with
+// git ls-remote — never a fetch, so the read leaves the remote-tracking refs
+// the rebuild job follows untouched — and counts the commits the installed
+// build commit is behind it. The returned reading carries the tip and the
+// count, not the installed build's identity; the caller adds that.
 func reportMainTip(townRoot, installed string) (Mains, error) {
 	repo, err := version.GetRepoRootForTown(townRoot)
 	if err != nil {
