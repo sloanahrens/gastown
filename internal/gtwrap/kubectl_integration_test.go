@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -37,11 +36,12 @@ func TestIntegrationKubernetesTargetReachesTheDaemonPod(t *testing.T) {
 	if diag.Rung != RungExec {
 		t.Fatalf("the doctor reports rung %s, want exec: %s", diag.Rung, diag.Reason)
 	}
-	// A directory the pod lacks is refused by the wrapper before the tool runs.
+	// A directory the pod lacks runs in the nearest existing ancestor, the town
+	// root, and the tool is told the caller's Mac directory there.
 	missing := filepath.Join(kubeTown, "gt-wrap-integration-missing")
-	exit, err := k.Launch(Call{Argv: []string{"gt", "status", "--line"}, Dir: missing})
-	if exit != exitDown || err == nil || !strings.Contains(err.Error(), "is not a directory") {
-		t.Fatalf("Launch of a missing directory = %d, %v; want %d with the wrapper's refusal", exit, err, exitDown)
+	exit, err := k.Launch(Call{Argv: []string{"sh", "-c", `test "$GT_CALLER_CWD" = "$1"`, "sh", missing}, Dir: missing})
+	if err != nil || exit != 0 {
+		t.Fatalf("a call from a missing directory = %d, %v; want 0, nil with GT_CALLER_CWD naming it", exit, err)
 	}
 	exit, err = k.Launch(Call{Argv: []string{"gt", "status", "--line"}, Dir: kubeTown})
 	if err != nil || exit != 0 {
