@@ -703,23 +703,30 @@ func TestIsLoopbackHostDoesNotLookUpLiterals(t *testing.T) {
 func TestBoundedLookupHostAppliesItsDeadline(t *testing.T) {
 	t.Parallel()
 	const timeout = 50 * time.Millisecond
-	var sawDeadline bool
+	var before, after time.Time
 	lookup := func(ctx context.Context, host string) ([]string, error) {
+		after = time.Now()
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			return nil, errors.New("lookup context carries no deadline")
 		}
-		if left := time.Until(deadline); left <= 0 || left > timeout {
-			return nil, fmt.Errorf("lookup deadline %v is outside the %v bound", left, timeout)
+		// The call happened somewhere in [before, after], so a deadline set
+		// to timeout from that instant falls in [before+timeout,
+		// after+timeout]. Comparing instants, rather than the time left, keeps
+		// the result independent of how long the goroutine waits to run.
+		if deadline.Before(before.Add(timeout)) || deadline.After(after.Add(timeout)) {
+			return nil, fmt.Errorf("lookup deadline %v is not %v after a call between %v and %v",
+				deadline, timeout, before, after)
 		}
-		sawDeadline = true
 		return nil, context.DeadlineExceeded
 	}
-	if _, err := boundedLookupHost(timeout, lookup, "dolt.invalid"); err == nil {
-		t.Error("a timed-out lookup reported no error")
+	before = time.Now()
+	_, err := boundedLookupHost(timeout, lookup, "dolt.invalid")
+	if err == nil {
+		t.Fatal("a timed-out lookup reported no error")
 	}
-	if !sawDeadline {
-		t.Error("lookup ran without a bounded deadline")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("lookup did not run under a bounded deadline: %v", err)
 	}
 }
 
