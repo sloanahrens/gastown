@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -16,15 +17,17 @@ import (
 )
 
 // jevScrubcheckDeps is what the scrubcheck subcommand takes from the host: the
-// town whose check log it reads. A test supplies the lookup, so no unit test
-// needs a working directory inside a town.
+// town whose check log it reads and the environment lookup that decides whether
+// the session is in the daemon pod. A test supplies both, so no unit test needs
+// a working directory inside a town.
 type jevScrubcheckDeps struct {
 	findTownRoot func() (string, error)
+	getenv       func(string) string
 }
 
 // realJevScrubcheckDeps is jevScrubcheckDeps on this host.
 func realJevScrubcheckDeps() jevScrubcheckDeps {
-	return jevScrubcheckDeps{findTownRoot: workspace.FindFromCwdOrError}
+	return jevScrubcheckDeps{findTownRoot: workspace.FindFromCwdOrError, getenv: os.Getenv}
 }
 
 // jevScrubcheckFlags is one scrubcheck command's flags; a command owns its own
@@ -68,12 +71,16 @@ internal/jev/scrubcheck, which the operator reviews.
 now, given as Nd for days or a Go duration such as 36h, and the baseline reads
 the same window. --json prints the same
 rows as JSON. The command is read-only and prints no state text.
+` + jevPodHelp + `
 
 Examples:
   gt jev scrubcheck
   gt jev scrubcheck --caller jev-logtriage --since 7d --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := jevRequirePod(d.getenv, cmd); err != nil {
+				return err
+			}
 			return runJevScrubcheck(cmd.OutOrStdout(), d, f, time.Now())
 		},
 	}

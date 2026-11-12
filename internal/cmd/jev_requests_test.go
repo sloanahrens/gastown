@@ -49,7 +49,7 @@ func jevRequestLine(ts time.Time, caller, bodySHA string) string {
 // filesystem.
 func runRequests(t *testing.T, town string, args ...string) (out, notes string, err error) {
 	t.Helper()
-	deps := jevRequestsDeps{findTownRoot: func() (string, error) { return town, nil }}
+	deps := jevRequestsDeps{findTownRoot: func() (string, error) { return town, nil }, getenv: inPodEnv()}
 	cmd := newJevRequestsCmd(deps)
 	var outBuf, notesBuf bytes.Buffer
 	cmd.SetOut(&outBuf)
@@ -136,7 +136,7 @@ func TestJevRequestsCommand(t *testing.T) {
 // in.
 func TestJevRequestsOutsideATown(t *testing.T) {
 	t.Parallel()
-	deps := jevRequestsDeps{findTownRoot: func() (string, error) { return "", errors.New("no town here") }}
+	deps := jevRequestsDeps{findTownRoot: func() (string, error) { return "", errors.New("no town here") }, getenv: inPodEnv()}
 	cmd := newJevRequestsCmd(deps)
 	cmd.SilenceUsage = true
 	var out, notes bytes.Buffer

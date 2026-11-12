@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -12,15 +13,17 @@ import (
 )
 
 // jevRequestsDeps is what the requests subcommand takes from the host: the
-// town it reads. A test supplies the town, so no unit test needs a working
-// directory inside one.
+// town it reads and the environment lookup that decides whether the session is
+// in the daemon pod. A test supplies both, so no unit test needs a working
+// directory inside a town.
 type jevRequestsDeps struct {
 	findTownRoot func() (string, error)
+	getenv       func(string) string
 }
 
 // realJevRequestsDeps is jevRequestsDeps on this host.
 func realJevRequestsDeps() jevRequestsDeps {
-	return jevRequestsDeps{findTownRoot: workspace.FindFromCwdOrError}
+	return jevRequestsDeps{findTownRoot: workspace.FindFromCwdOrError, getenv: os.Getenv}
 }
 
 // jevRequestsFlags is one requests command's flags; a command owns its own so
@@ -44,9 +47,12 @@ text, the body or the key, so it proves what a battery sent without storing it.
 
 --caller keeps one caller's lines and --recent sets how many to print, oldest
 first. A missing log is not an error. Lines that do not parse are skipped, and
-their count goes to standard error.`,
+their count goes to standard error.` + jevPodHelp,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := jevRequirePod(d.getenv, cmd); err != nil {
+				return err
+			}
 			return runJevRequests(cmd.OutOrStdout(), cmd.ErrOrStderr(), d, f)
 		},
 	}

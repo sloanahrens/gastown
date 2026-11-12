@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 )
 
@@ -29,14 +28,63 @@ func inPodEnv() func(string) string {
 	}
 }
 
-// outsidePodEnv is the environment lookup of a session on the Mac, where
-// KUBERNETES_SERVICE_HOST is unset.
+// outsidePodEnv is the environment lookup of a session outside the daemon pod,
+// where KUBERNETES_SERVICE_HOST is unset.
 func outsidePodEnv() func(string) string {
 	return func(string) string { return "" }
 }
 
-// jevPodTestTown is a town root the finder resolves, for a test that chdirs
-// into it and runs a command's production entry point.
+// jevGuardedCommands is every gt jev subcommand that reads the town's log
+// directory, with a constructor over a town lookup and an environment lookup so
+// each test case gets a command of its own. The patrol writers are not here:
+// they run in the pod and are named in jevPatrolWriters.
+var jevGuardedCommands = []struct {
+	name        string
+	refusalArgs []string
+	newCmd      func(findTown func() (string, error), getenv func(string) string) *cobra.Command
+}{
+	{"health", []string{"--json"}, func(findTown func() (string, error), getenv func(string) string) *cobra.Command {
+		return newJevHealthCmd(findTown, jevHealthFixedNow, os.Stat, getenv)
+	}},
+	{"spend", []string{"--usd-per-billion-tokens", "3", "--json"}, func(findTown func() (string, error), getenv func(string) string) *cobra.Command {
+		return newJevSpendCmd(jevSpendDeps{findTownRoot: findTown, getenv: getenv})
+	}},
+	{"scorecard", []string{"--battery", scorecard.FixtureBattery, "--json"}, func(findTown func() (string, error), getenv func(string) string) *cobra.Command {
+		return newJevScorecardCmd(jevScorecardDeps{findTownRoot: findTown, getenv: getenv})
+	}},
+	{"conflict-report", []string{"--json"}, func(findTown func() (string, error), getenv func(string) string) *cobra.Command {
+		return newJevConflictReportCmd(jevConflictReportDeps{findTownRoot: findTown, getenv: getenv})
+	}},
+	{"dataset", []string{"--all"}, func(findTown func() (string, error), getenv func(string) string) *cobra.Command {
+		return newJevDatasetCmd(jevDatasetDeps{findTownRoot: findTown, getenv: getenv})
+	}},
+	{"noise", []string{"--json"}, func(findTown func() (string, error), getenv func(string) string) *cobra.Command {
+		return newJevNoiseCmd(jevNoiseDeps{findTownRoot: findTown, getenv: getenv})
+	}},
+	{"requests", nil, func(findTown func() (string, error), getenv func(string) string) *cobra.Command {
+		return newJevRequestsCmd(jevRequestsDeps{findTownRoot: findTown, getenv: getenv})
+	}},
+	{"scrubcheck", []string{"--json"}, func(findTown func() (string, error), getenv func(string) string) *cobra.Command {
+		return newJevScrubcheckCmd(jevScrubcheckDeps{findTownRoot: findTown, getenv: getenv})
+	}},
+}
+
+// jevPatrolWriters is every gt jev subcommand that writes the logs instead of
+// reading them. They run as the daemon's patrols inside the pod, so they are
+// not guarded. A new writer added to gt jev must be listed here, and a new
+// reader must be in jevGuardedCommands, or the enumeration test fails.
+var jevPatrolWriters = map[string]bool{
+	"attention":      true,
+	"dedupe":         true,
+	"dispatch":       true,
+	"landing":        true,
+	"submission":     true,
+	"review-targets": true,
+}
+
+// jevPodTestTown is a town root a command's tests resolve through their town
+// lookup, with no chdir and no other file: a command that needs logs writes
+// them under it.
 func jevPodTestTown(t *testing.T) string {
 	t.Helper()
 	town := t.TempDir()
@@ -51,28 +99,9 @@ const jevPodCommandLine = "kubectl --context colima-gt-control -n gt exec deploy
 // TestJevRequirePodRefusesOutsideThePodAndNamesThePodCommand holds the refusal
 // text: the logs' home, and the pod command that runs the same subcommand with
 // the flags the caller gave.
-//
-//testpolicy:allow parallel — the spend, scorecard and conflict-report flag sets are process-wide
 func TestJevRequirePodRefusesOutsideThePodAndNamesThePodCommand(t *testing.T) {
-	newHealth := func(args ...string) *cobra.Command {
-		cmd := newJevHealthCmd(townFinder(""), jevHealthFixedNow, os.Stat, outsidePodEnv())
-		cmd.SetArgs(args)
-		cmd.SetOut(io.Discard)
-		cmd.SetErr(io.Discard)
-		cmd.SilenceUsage = true
-		return cmd
-	}
-	newDataset := func(args ...string) *cobra.Command {
-		cmd := newJevDatasetCmd(jevDatasetDeps{findTownRoot: townFinder(""), getenv: outsidePodEnv()})
-		cmd.SetArgs(args)
-		cmd.SetOut(io.Discard)
-		cmd.SetErr(io.Discard)
-		cmd.SilenceUsage = true
-		return cmd
-	}
-
 	t.Run("the message states where the logs live and names the command", func(t *testing.T) {
-		err := newHealth().Execute()
+		err := runJevPodCase(t, "health", nil)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
 		assert.True(t, strings.HasSuffix(err.Error(), jevPodCommandLine+"health"),
@@ -80,10 +109,11 @@ func TestJevRequirePodRefusesOutsideThePodAndNamesThePodCommand(t *testing.T) {
 	})
 
 	t.Run("the subcommand's flags are the caller's", func(t *testing.T) {
-		assert.True(t, strings.HasSuffix(mustExecute(t, newHealth("--json")), jevPodCommandLine+"health --json"))
+		assert.True(t, strings.HasSuffix(runJevPodCase(t, "health", []string{"--json"}).Error(),
+			jevPodCommandLine+"health --json"))
 
-		got := mustExecute(t, newDataset("--battery", scorecard.FixtureBattery,
-			"--question", "needs", "--since", "30d"))
+		got := runJevPodCase(t, "dataset", []string{"--battery", scorecard.FixtureBattery,
+			"--question", "needs", "--since", "30d"}).Error()
 		assert.True(t, strings.HasSuffix(got, jevPodCommandLine+"dataset --battery=fixture --question=needs --since=30d"),
 			"the refusal = %q, want the caller's flags in the pod command", got)
 
@@ -92,30 +122,15 @@ func TestJevRequirePodRefusesOutsideThePodAndNamesThePodCommand(t *testing.T) {
 		assert.NotContains(t, got, "--out=")
 	})
 
-	t.Run("the other three commands name their own subcommand", func(t *testing.T) {
-		require.NoError(t, jevSpendCmd.ParseFlags([]string{"--hours", "168", "--usd-per-billion-tokens", "3", "--json"}))
-		spendErr := jevSpendRun(jevSpendCmd, outsidePodEnv())
-		require.Error(t, spendErr)
-		assert.Contains(t, spendErr.Error(), jevPodCommandLine+"spend ")
-		assert.Contains(t, spendErr.Error(), "--hours=168")
-		assert.Contains(t, spendErr.Error(), "--usd-per-billion-tokens=3")
-		assert.Contains(t, spendErr.Error(), "--json")
-
-		require.NoError(t, jevScorecardCmd.ParseFlags([]string{"--battery", scorecard.FixtureBattery}))
-		scoreErr := jevScorecardCommand(jevScorecardCmd, outsidePodEnv(), scoreJevBattery, scorecard.Cache{})
-		require.Error(t, scoreErr)
-		assert.Contains(t, scoreErr.Error(), jevPodCommandLine+"scorecard ")
-		assert.Contains(t, scoreErr.Error(), "--battery=fixture")
-
-		require.NoError(t, jevConflictReportCmd.ParseFlags([]string{"--since", "7d", "--json"}))
-		var out bytes.Buffer
-		conflictErr := jevConflictReportRun(jevConflictReportCmd, &out, townFinder(""),
-			"7d", true, jevConflictNow, outsidePodEnv())
-		require.Error(t, conflictErr)
-		assert.Contains(t, conflictErr.Error(), jevPodCommandLine+"conflict-report ")
-		assert.Contains(t, conflictErr.Error(), "--since=7d")
-		assert.Contains(t, conflictErr.Error(), "--json")
-		assert.Zero(t, out.Len())
+	t.Run("every log-reading subcommand names its own name", func(t *testing.T) {
+		for _, c := range jevGuardedCommands {
+			t.Run(c.name, func(t *testing.T) {
+				err := runJevPodCase(t, c.name, nil)
+				require.Error(t, err)
+				assert.True(t, strings.HasSuffix(err.Error(), jevPodCommandLine+c.name),
+					"the refusal = %q, want it to end with gt jev %s", err, c.name)
+			})
+		}
 	})
 
 	t.Run("inside the pod the guard passes", func(t *testing.T) {
@@ -123,7 +138,7 @@ func TestJevRequirePodRefusesOutsideThePodAndNamesThePodCommand(t *testing.T) {
 		assert.NoError(t, jevRequirePod(inPodEnv(), cmd))
 	})
 
-	t.Run("an unwired lookup refuses rather than reading the copy", func(t *testing.T) {
+	t.Run("an unwired lookup refuses rather than reading a copy", func(t *testing.T) {
 		cmd := newJevHealthCmd(townFinder(""), jevHealthFixedNow, os.Stat, nil)
 		err := jevRequirePod(nil, cmd)
 		require.Error(t, err)
@@ -131,136 +146,149 @@ func TestJevRequirePodRefusesOutsideThePodAndNamesThePodCommand(t *testing.T) {
 	})
 }
 
-// mustExecute runs cmd and returns the refusal an outside-pod run must exit
-// with.
-func mustExecute(t *testing.T, cmd *cobra.Command) string {
+// runJevPodCase builds the named guarded command for an outside-pod session and
+// executes it with args, returning the refusal it must fail with.
+func runJevPodCase(t *testing.T, name string, args []string) error {
 	t.Helper()
-	err := cmd.Execute()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
-	return err.Error()
+	cmd := jevGuardedCommand(t, name, townFinder(""), outsidePodEnv())
+	cmd.SetArgs(args)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	return cmd.Execute()
 }
 
-// TestJevHealthSpendAndScorecardRefuseOutsideThePodBeforeReadingAnyFile drives
-// each command's production entry point on an outside-pod environment, with a
-// town whose logs cannot be read, so reaching a read would return a different
-// error.
-//
-//testpolicy:allow parallel — the cwd and the spend and scorecard flag sets are process-wide
-func TestJevHealthSpendAndScorecardRefuseOutsideThePodBeforeReadingAnyFile(t *testing.T) {
-	t.Run("health", func(t *testing.T) {
-		townCalled := false
-		cmd := newJevHealthCmd(func() (string, error) {
-			townCalled = true
-			return "", errors.New("the town lookup must not run")
-		}, jevHealthFixedNow, os.Stat, outsidePodEnv())
-		cmd.SetArgs([]string{"--json"})
-		var out bytes.Buffer
-		cmd.SetOut(&out)
-		cmd.SetErr(io.Discard)
-		cmd.SilenceUsage = true
-
-		err := cmd.Execute()
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
-		assert.False(t, townCalled, "the guard refused after the town lookup")
-		assert.Zero(t, out.Len(), "the refusal wrote to stdout")
-	})
-
-	t.Run("spend", func(t *testing.T) {
-		town := jevPodTestTown(t)
-		// A directory where the ledger belongs: a command that read the ledger
-		// would fail naming it instead of refusing.
-		require.NoError(t, os.MkdirAll(jev.UsageLedgerPath(town), 0o700))
-		//testpolicy:allow no-chdir — the cwd is the input under test: jevSpendRun finds the town from it
-		t.Chdir(town)
-		require.NoError(t, jevSpendCmd.ParseFlags([]string{"--usd-per-billion-tokens", "3"}))
-		var out bytes.Buffer
-		jevSpendCmd.SetOut(&out)
-
-		err := jevSpendRun(jevSpendCmd, outsidePodEnv())
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
-		assert.NotContains(t, err.Error(), "usage ledger")
-		assert.Zero(t, out.Len(), "the refusal wrote to stdout")
-	})
-
-	t.Run("scorecard", func(t *testing.T) {
-		town := jevPodTestTown(t)
-		writeScorecardFixture(t, town)
-		logPath := scorecard.FixtureLogPath(town)
-		require.NoError(t, os.Remove(logPath))
-		// A directory where the battery's log belongs: a command that read it
-		// would fail naming it instead of refusing.
-		require.NoError(t, os.Mkdir(logPath, 0o700))
-		//testpolicy:allow no-chdir — the cwd is the input under test: jevScorecardCommand finds the town from it
-		t.Chdir(town)
-		require.NoError(t, jevScorecardCmd.ParseFlags([]string{"--battery", scorecard.FixtureBattery, "--json"}))
-		var out bytes.Buffer
-		jevScorecardCmd.SetOut(&out)
-
-		err := jevScorecardCommand(jevScorecardCmd, outsidePodEnv(), scoreJevBattery, scorecard.Cache{})
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
-		assert.Zero(t, out.Len(), "the refusal wrote to stdout")
-	})
-}
-
-// TestJevConflictReportAndDatasetRefuseOutsideThePodBeforeReadingAnyFile holds
-// the same rule for the two commands whose town lookup is injected.
-//
-//testpolicy:allow parallel — the conflict-report command's flag set is process-wide
-func TestJevConflictReportAndDatasetRefuseOutsideThePodBeforeReadingAnyFile(t *testing.T) {
-	t.Run("conflict-report", func(t *testing.T) {
-		townCalled := false
-		findTown := func() (string, error) {
-			townCalled = true
-			return "", errors.New("the town lookup must not run")
+// jevGuardedCommand builds the named guarded command over findTown and getenv.
+func jevGuardedCommand(t *testing.T, name string, findTown func() (string, error), getenv func(string) string) *cobra.Command {
+	t.Helper()
+	for _, c := range jevGuardedCommands {
+		if c.name == name {
+			return c.newCmd(findTown, getenv)
 		}
-		var out bytes.Buffer
+	}
+	t.Fatalf("no guarded command named %q", name)
+	return nil
+}
 
-		err := jevConflictReportRun(jevConflictReportCmd, &out, findTown, "", true, jevConflictNow, outsidePodEnv())
-
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
-		assert.False(t, townCalled, "the guard refused after the town lookup")
-		assert.Zero(t, out.Len(), "the refusal wrote to stdout")
-	})
-
-	t.Run("dataset", func(t *testing.T) {
-		townCalled := false
-		cmd := newJevDatasetCmd(jevDatasetDeps{
-			findTownRoot: func() (string, error) {
+// TestJevLogReadingCommandsRefuseOutsideThePodBeforeReadingAnyFile drives each
+// guarded command's production entry point on an outside-pod environment with a
+// town lookup that fails, so a command that reached its lookup would return a
+// different error.
+func TestJevLogReadingCommandsRefuseOutsideThePodBeforeReadingAnyFile(t *testing.T) {
+	for _, c := range jevGuardedCommands {
+		t.Run(c.name, func(t *testing.T) {
+			townCalled := false
+			cmd := c.newCmd(func() (string, error) {
 				townCalled = true
 				return "", errors.New("the town lookup must not run")
-			},
-			getenv: outsidePodEnv(),
+			}, outsidePodEnv())
+			cmd.SetArgs(c.refusalArgs)
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(io.Discard)
+			cmd.SilenceUsage, cmd.SilenceErrors = true, true
+
+			err := cmd.Execute()
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
+			assert.False(t, townCalled, "the guard refused after the town lookup")
+			assert.Zero(t, out.Len(), "the refusal wrote to stdout")
 		})
-		cmd.SetArgs([]string{"--all"})
-		var out bytes.Buffer
-		cmd.SetOut(&out)
-		cmd.SetErr(io.Discard)
-		cmd.SilenceUsage = true
+	}
+}
 
-		err := cmd.Execute()
+// TestEveryJevSubcommandIsGuardedOrListedAsAPatrolWriter fails when a gt jev
+// subcommand is neither in the guarded list nor listed as a patrol writer, so a
+// new reader cannot ship unguarded. It reads the subcommand names only; no test
+// parses a flag on the shared command.
+func TestEveryJevSubcommandIsGuardedOrListedAsAPatrolWriter(t *testing.T) {
+	guarded := map[string]bool{}
+	for _, c := range jevGuardedCommands {
+		guarded[c.name] = true
+	}
+	patrol := jevPatrolWriters
 
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
-		assert.False(t, townCalled, "the guard refused after the town lookup")
-		assert.Zero(t, out.Len(), "the refusal wrote to stdout")
+	seen := map[string]bool{}
+	for _, sub := range jevCmd.Commands() {
+		name := sub.Name()
+		// cobra adds its own help command to a command it executes.
+		if name == "help" || name == "completion" {
+			continue
+		}
+		seen[name] = true
+		switch {
+		case guarded[name] && patrol[name]:
+			t.Errorf("gt jev %s is both guarded and listed as a patrol writer; it can be only one", name)
+		case !guarded[name] && !patrol[name]:
+			t.Errorf("gt jev %s is neither guarded by jevRequirePod nor listed as a patrol writer: guard it, or list it in jevPatrolWriters", name)
+		}
+	}
+	for name := range guarded {
+		if !seen[name] {
+			t.Errorf("the guarded list names %q, which gt jev does not register", name)
+		}
+	}
+	for name := range patrol {
+		if !seen[name] {
+			t.Errorf("the patrol-writer list names %q, which gt jev does not register", name)
+		}
+	}
+	assert.Len(t, guarded, 8, "the bead names eight log-reading subcommands")
+	assert.Len(t, patrol, 6, "the bead names six patrol writers")
+}
+
+// TestJevPodCommandQuotesFlagValues holds the pod line's shell quoting: a value
+// holding a space, quote, dollar sign or backtick reaches the pod command as
+// one word, and a value the shell reads plainly stays bare.
+func TestJevPodCommandQuotesFlagValues(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"one plain word", []string{"--since", "7d"}, "--since=7d"},
+		{"a space", []string{"--since", "30 days"}, "--since='30 days'"},
+		{"a single quote", []string{"--out", "/tmp/it's here"}, `--out='/tmp/it'\''s here'`},
+		{"a dollar sign", []string{"--since", "$HOME"}, "--since='$HOME'"},
+		{"a backtick", []string{"--since", "a`b"}, "--since='a`b'"},
+		{"a double quote", []string{"--since", `a"b`}, `--since='a"b'`},
+		{"a bare bool", []string{"--json"}, "--json"},
+		{"a false bool", []string{"--json=false"}, "--json=false"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newJevPodFlagCmd(t, tc.args)
+			argv := jevPodArgv(cmd)
+			assert.Equal(t, []string{"gt", "jev", "probe", tc.want}, argv)
+		})
+	}
+
+	t.Run("a flag left at its default is not printed", func(t *testing.T) {
+		cmd := newJevPodFlagCmd(t, nil)
+		assert.Equal(t, []string{"gt", "jev", "probe"}, jevPodArgv(cmd))
 	})
 }
 
-// TestJevCommandsRunUnchangedInsideThePod runs all five commands with
+// newJevPodFlagCmd builds a command with the flags the quoting cases set, so
+// each case parses into fresh flag values of its own.
+func newJevPodFlagCmd(t *testing.T, args []string) *cobra.Command {
+	t.Helper()
+	var since, out string
+	var asJSON bool
+	cmd := &cobra.Command{Use: "probe"}
+	cmd.Flags().StringVar(&since, "since", "14d", "")
+	cmd.Flags().StringVar(&out, "out", "", "")
+	cmd.Flags().BoolVar(&asJSON, "json", false, "")
+	require.NoError(t, cmd.ParseFlags(args))
+	return cmd
+}
+
+// TestJevCommandsRunUnchangedInsideThePod runs every guarded command with
 // KUBERNETES_SERVICE_HOST set: each reaches its normal path and no refusal
 // appears.
-//
-//testpolicy:allow parallel — the cwd and the spend and scorecard flag sets are process-wide
 func TestJevCommandsRunUnchangedInsideThePod(t *testing.T) {
-
 	t.Run("health", func(t *testing.T) {
 		now := jevHealthFixedNow()
 		out, err := runJevHealthCommand(t, newJevHealthTown(t, now, 5*time.Minute), now, false)
@@ -271,13 +299,12 @@ func TestJevCommandsRunUnchangedInsideThePod(t *testing.T) {
 	t.Run("spend", func(t *testing.T) {
 		town := jevPodTestTown(t)
 		writeJevSpendLedger(t, town, jevSpendLine(time.Now().Add(-time.Minute), "triage", 1000, 500))
-		//testpolicy:allow no-chdir — the cwd is the input under test: jevSpendRun finds the town from it
-		t.Chdir(town)
-		require.NoError(t, jevSpendCmd.ParseFlags([]string{"--hours", "1", "--usd-per-billion-tokens", "3", "--json"}))
 		var out bytes.Buffer
-		jevSpendCmd.SetOut(&out)
+		cmd := newJevSpendCmd(jevSpendDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"--hours", "1", "--usd-per-billion-tokens", "3", "--json"})
 
-		require.NoError(t, jevSpendRun(jevSpendCmd, inPodEnv()))
+		require.NoError(t, cmd.Execute())
 
 		assert.Contains(t, out.String(), "triage")
 	})
@@ -285,40 +312,39 @@ func TestJevCommandsRunUnchangedInsideThePod(t *testing.T) {
 	t.Run("scorecard", func(t *testing.T) {
 		town := jevPodTestTown(t)
 		writeScorecardFixture(t, town)
-		//testpolicy:allow no-chdir — the cwd is the input under test: jevScorecardCommand finds the town from it
-		t.Chdir(town)
-		require.NoError(t, jevScorecardCmd.ParseFlags([]string{"--battery", scorecard.FixtureBattery, "--json=false"}))
 		var out bytes.Buffer
-		jevScorecardCmd.SetOut(&out)
+		cmd := newJevScorecardCmd(jevScorecardDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"--battery", scorecard.FixtureBattery, "--json"})
 
-		require.NoError(t, jevScorecardCommand(jevScorecardCmd, inPodEnv(), scoreJevBattery, scorecard.Cache{}))
+		require.NoError(t, cmd.Execute())
 
 		assert.Contains(t, out.String(), scorecard.FixtureBattery)
 	})
 
 	t.Run("conflict-report", func(t *testing.T) {
 		town := jevPodTestTown(t)
-		writeJevConflictLog(t, town, jevConflictLogLine(t, "a", "b", jevConflictNow.Add(-time.Hour), 0.9))
+		writeJevConflictLog(t, town, jevConflictLogLine(t, "a", "b", time.Now().Add(-time.Hour), 0.9))
 		// The landings file exists and records no landing, so the pair is
 		// unlabeled and the report needs no clone.
 		require.NoError(t, os.WriteFile(jevConflictLandingsPath(t, town), nil, 0o644))
 		var out bytes.Buffer
+		cmd := newJevConflictReportCmd(jevConflictReportDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
+		cmd.SetOut(&out)
 
-		require.NoError(t, jevConflictReportRun(jevConflictReportCmd, &out, townFinder(town), "", false, jevConflictNow, inPodEnv()))
+		require.NoError(t, cmd.Execute())
 
-		assert.Contains(t, out.String(), "0.6")
+		assert.Contains(t, out.String(), "cut 0.6")
 	})
 
 	t.Run("dataset", func(t *testing.T) {
 		town := jevPodTestTown(t)
 		writeScorecardFixture(t, town)
 		outDir := filepath.Join(town, "dataset")
-		cmd := newJevDatasetCmd(jevDatasetDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
-		cmd.SetArgs([]string{"--battery", scorecard.FixtureBattery, "--question", "needs", "--out", outDir})
 		var out bytes.Buffer
+		cmd := newJevDatasetCmd(jevDatasetDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
 		cmd.SetOut(&out)
-		cmd.SetErr(io.Discard)
-		cmd.SilenceUsage = true
+		cmd.SetArgs([]string{"--battery", scorecard.FixtureBattery, "--question", "needs", "--out", outDir})
 
 		require.NoError(t, cmd.Execute())
 
@@ -326,54 +352,78 @@ func TestJevCommandsRunUnchangedInsideThePod(t *testing.T) {
 		_, err := os.Stat(filepath.Join(outDir, "fixture.needs.csv"))
 		assert.NoError(t, err)
 	})
+
+	t.Run("noise", func(t *testing.T) {
+		town := jevPodTestTown(t)
+		var out bytes.Buffer
+		cmd := newJevNoiseCmd(jevNoiseDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
+		cmd.SetOut(&out)
+
+		require.NoError(t, cmd.Execute())
+
+		assert.Contains(t, out.String(), "no repeat log")
+	})
+
+	t.Run("requests", func(t *testing.T) {
+		town := jevPodTestTown(t)
+		var out bytes.Buffer
+		cmd := newJevRequestsCmd(jevRequestsDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
+		cmd.SetOut(&out)
+		cmd.SetErr(io.Discard)
+
+		require.NoError(t, cmd.Execute())
+
+		assert.Contains(t, out.String(), "no requests logged yet")
+	})
+
+	t.Run("scrubcheck", func(t *testing.T) {
+		town := jevPodTestTown(t)
+		var out bytes.Buffer
+		cmd := newJevScrubcheckCmd(jevScrubcheckDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
+		cmd.SetOut(&out)
+
+		require.NoError(t, cmd.Execute())
+
+		assert.Contains(t, out.String(), "no scrub check log")
+	})
 }
 
 // TestJevRefusalKeepsJSONStdoutEmptyAndExitsOne holds the --json contract: the
 // refusal is a plain error with exit status 1, and no JSON document reaches
-// stdout.
-//
-//testpolicy:allow parallel — the spend, scorecard and conflict-report flag sets are process-wide
+// stdout. requests has no --json flag, so it is driven plain.
 func TestJevRefusalKeepsJSONStdoutEmptyAndExitsOne(t *testing.T) {
-	cases := []struct {
-		name string
-		run  func(t *testing.T) (string, error)
-	}{
-		{"health", func(t *testing.T) (string, error) {
-			cmd := newJevHealthCmd(townFinder(""), jevHealthFixedNow, os.Stat, outsidePodEnv())
-			cmd.SetArgs([]string{"--json"})
+	for _, c := range jevGuardedCommands {
+		t.Run(c.name, func(t *testing.T) {
+			cmd := c.newCmd(townFinder(""), outsidePodEnv())
+			cmd.SetArgs(c.refusalArgs)
 			var out bytes.Buffer
 			cmd.SetOut(&out)
 			cmd.SetErr(io.Discard)
-			cmd.SilenceUsage = true
-			return out.String(), cmd.Execute()
-		}},
-		{"spend", func(t *testing.T) (string, error) {
-			require.NoError(t, jevSpendCmd.ParseFlags([]string{"--usd-per-billion-tokens", "3", "--json"}))
-			var out bytes.Buffer
-			jevSpendCmd.SetOut(&out)
-			return out.String(), jevSpendRun(jevSpendCmd, outsidePodEnv())
-		}},
-		{"scorecard", func(t *testing.T) (string, error) {
-			require.NoError(t, jevScorecardCmd.ParseFlags([]string{"--battery", scorecard.FixtureBattery, "--json"}))
-			var out bytes.Buffer
-			jevScorecardCmd.SetOut(&out)
-			return out.String(), jevScorecardCommand(jevScorecardCmd, outsidePodEnv(), scoreJevBattery, scorecard.Cache{})
-		}},
-		{"conflict-report", func(t *testing.T) (string, error) {
-			var out bytes.Buffer
-			err := jevConflictReportRun(jevConflictReportCmd, &out, townFinder(""),
-				"", true, jevConflictNow, outsidePodEnv())
-			return out.String(), err
-		}},
-	}
+			cmd.SilenceUsage, cmd.SilenceErrors = true, true
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			out, err := tc.run(t)
+			err := cmd.Execute()
+
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), "the Jev logs live in the daemon pod")
-			assert.Empty(t, strings.TrimSpace(out), "the refusal wrote a document to stdout")
+			assert.Empty(t, strings.TrimSpace(out.String()), "the refusal wrote a document to stdout")
 			assert.Equal(t, 1, exitCodeForError(err))
 		})
+	}
+}
+
+// TestJevPodHelpNamesNoHostOrDate holds the help paragraph to the invariant
+// that it cannot go stale: no host, install, date or build is named.
+func TestJevPodHelpNamesNoHostOrDate(t *testing.T) {
+	for _, stale := range []string{"Mac", "cut-over", "2026", "colima", "launchd"} {
+		assert.NotContains(t, jevPodHelp, stale)
+	}
+}
+
+// TestJevRefusalNamesNoHostOrDate holds the refusal to the same invariant.
+func TestJevRefusalNamesNoHostOrDate(t *testing.T) {
+	err := runJevPodCase(t, "health", nil)
+	require.Error(t, err)
+	for _, stale := range []string{"Mac", "cut-over", "2026", "launchd"} {
+		assert.NotContains(t, err.Error(), stale)
 	}
 }

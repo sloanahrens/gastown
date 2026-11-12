@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -142,17 +143,10 @@ func TestJevSpendTableNamesEveryCaller(t *testing.T) {
 
 // TestJevSpendCommandRefusesBadFlags runs the cobra command, not the helper, so
 // the flag wiring and the town lookup are covered too: a price or window the
-// helper refuses must come back from "gt jev spend" naming the flag. Parsing
-// the flags and then calling jevSpendRun stands in for Execute, which would
-// also run the root command's pre-run hooks.
-//
-//testpolicy:allow parallel — the spend command's flag variables are process-wide
+// helper refuses must come back from "gt jev spend" naming the flag. Each case
+// builds a command of its own, so no case sees another's flag values.
 func TestJevSpendCommandRefusesBadFlags(t *testing.T) {
 	town := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(town, "mayor"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(town, "mayor", "town.json"), []byte("{}\n"), 0o600))
-	//testpolicy:allow no-chdir — the cwd is the input under test: runJevSpend finds the town from the working directory
-	t.Chdir(town)
 
 	cases := []struct {
 		name string
@@ -167,8 +161,14 @@ func TestJevSpendCommandRefusesBadFlags(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			require.NoError(t, jevSpendCmd.ParseFlags(tc.args))
-			err := jevSpendRun(jevSpendCmd, inPodEnv())
+			cmd := newJevSpendCmd(jevSpendDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SilenceUsage, cmd.SilenceErrors = true, true
+
+			err := cmd.Execute()
+
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.flag)
 		})
@@ -179,9 +179,12 @@ func TestJevSpendCommandRefusesBadFlags(t *testing.T) {
 			jevSpendLine(time.Now().Add(-30*time.Minute), "triage", 1000, 500),
 		)
 		var buf bytes.Buffer
-		jevSpendCmd.SetOut(&buf)
-		require.NoError(t, jevSpendCmd.ParseFlags([]string{"--hours", "1", "--usd-per-billion-tokens", "3", "--json"}))
-		require.NoError(t, jevSpendRun(jevSpendCmd, inPodEnv()))
+		cmd := newJevSpendCmd(jevSpendDeps{findTownRoot: townFinder(town), getenv: inPodEnv()})
+		cmd.SetOut(&buf)
+		cmd.SetErr(io.Discard)
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+		cmd.SetArgs([]string{"--hours", "1", "--usd-per-billion-tokens", "3", "--json"})
+		require.NoError(t, cmd.Execute())
 
 		var got jev.SpendReport
 		require.NoError(t, json.Unmarshal(buf.Bytes(), &got))

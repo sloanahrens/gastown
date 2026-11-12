@@ -18,36 +18,31 @@ import (
 const (
 	jevPodContext      = "colima-gt-control"
 	jevPodNamespace    = k8sdaemon.DefaultNamespace
-	jevPodDeployment   = k8sdaemon.Name
 	jevPodContainer    = k8sdaemon.Name
 	jevPodExecResource = "deploy/" + k8sdaemon.Name
 )
 
 // jevPodHelp is the paragraph every command that reads the log directory
 // carries in its help. They share one refusal, so they share one statement of
-// it.
+// it. It names no host, install, date or build, so it cannot go stale.
 const jevPodHelp = `
-The Jev logs live in the daemon pod since the cluster cut-over. Outside it the
-command refuses before reading any file and prints the kubectl exec line that
-runs the same command in the pod; the Mac's .runtime/jev copy is frozen at the
-cut-over, so its numbers would look live and be stale.`
+The Jev logs live in the daemon pod. Outside it this command refuses before
+reading any file and prints the kubectl exec line that runs it in the pod.`
 
 // jevRequirePod refuses a Jev command that reads the town's log directory when
-// it runs outside the daemon pod. Since the cluster cut-over the pod is the
-// only place the logs are written, and the Mac's .runtime/jev holds a copy
-// frozen then, so a command that read it would print stale numbers as if they
-// were live (gt-8mjyqc).
+// it runs outside the daemon pod. The pod is the only place the logs are
+// written, so a copy anywhere else can be stale and a command that read one
+// would print stale numbers as if they were live (gt-8mjyqc).
 //
 // getenv is the environment lookup; the commands pass os.Getenv and a test
 // passes a lookup of its own. A nil lookup is unknown, and an unknown
-// environment refuses: a guard whose input is not wired must never read the
-// copy.
+// environment refuses: a guard whose input is not wired must never read a copy.
 func jevRequirePod(getenv func(string) string, cmd *cobra.Command) error {
 	if getenv != nil && getenv(podEnv) != "" {
 		return nil
 	}
-	return fmt.Errorf("the Jev logs live in the daemon pod, and gt jev reads them there; this Mac holds a copy frozen at the cluster cut-over. Run %s in the pod:\n\n  %s",
-		strings.Join(jevPodArgv(cmd), " "), jevPodCommand(cmd))
+	return fmt.Errorf("the Jev logs live in the daemon pod, so this command refuses to read them outside it. Run it in the pod:\n\n  %s",
+		jevPodCommand(cmd))
 }
 
 // jevPodCommand is the kubectl line the refusal prints: an exec into the daemon
@@ -76,15 +71,22 @@ func jevPodArgv(cmd *cobra.Command) []string {
 	return argv
 }
 
-// jevPodFlag renders one changed flag as the reader would type it: a true bool
-// as the bare name, anything else as name=value so a value with a space still
-// reads whole.
+// jevPodFlag renders one changed flag as the caller would type it: a true bool
+// as the bare name, anything else as name=value with the value shell-quoted so
+// the line pastes as one command.
 func jevPodFlag(f *pflag.Flag) string {
-	if f.Value.Type() == "bool" {
-		if f.Value.String() == "true" {
-			return "--" + f.Name
-		}
-		return "--" + f.Name + "=" + f.Value.String()
+	if f.Value.Type() == "bool" && f.Value.String() == "true" {
+		return "--" + f.Name
 	}
-	return "--" + f.Name + "=" + f.Value.String()
+	return "--" + f.Name + "=" + jevShellQuote(f.Value.String())
+}
+
+// jevShellQuote renders s as one POSIX shell word when a bare word would not
+// reach the command unchanged: when it is empty or holds a character the shell
+// reads. A single quote inside the value is closed, escaped and reopened.
+func jevShellQuote(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n'\"$`\\!*?[]{}();&|<>#~") {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

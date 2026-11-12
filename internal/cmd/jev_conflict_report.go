@@ -34,15 +34,33 @@ const jevConflictDefaultSince = "14d"
 // jevWilsonZ is the two-sided 95% z-score, the one the metrics panel uses.
 const jevWilsonZ = 1.96
 
-var (
-	jevConflictReportSince string
-	jevConflictReportJSON  bool
-)
+// jevConflictReportDeps is what the conflict-report subcommand takes from the
+// host: the town whose logs it reads and the environment lookup that decides
+// whether the session is in the daemon pod. A test supplies both.
+type jevConflictReportDeps struct {
+	findTownRoot func() (string, error)
+	getenv       func(string) string
+}
 
-var jevConflictReportCmd = &cobra.Command{
-	Use:   "conflict-report",
-	Short: "Measure the conflict battery's same-files answers as a dispatch warning would have",
-	Long: `Read the conflict battery's log and count its same_files answers as a
+// realJevConflictReportDeps is jevConflictReportDeps on this host.
+func realJevConflictReportDeps() jevConflictReportDeps {
+	return jevConflictReportDeps{findTownRoot: workspace.FindFromCwdOrError, getenv: os.Getenv}
+}
+
+// jevConflictReportFlags is one conflict-report command's flags; a command owns
+// its own so a later run never inherits an earlier run's values.
+type jevConflictReportFlags struct {
+	since  string
+	asJSON bool
+}
+
+// newJevConflictReportCmd builds `gt jev conflict-report`.
+func newJevConflictReportCmd(d jevConflictReportDeps) *cobra.Command {
+	var f jevConflictReportFlags
+	cmd := &cobra.Command{
+		Use:   "conflict-report",
+		Short: "Measure the conflict battery's same-files answers as a dispatch warning would have",
+		Long: `Read the conflict battery's log and count its same_files answers as a
 dispatch advisory would have warned about them. Each bead pair counts once, at
 its newest answer logged before the later of its two beads landed, so an answer
 logged after the outcome is never used. A pair with a bead that never landed
@@ -64,20 +82,22 @@ and so is a pair whose answer stays below 0.6, which no cut reaches.
 Examples:
   gt jev conflict-report
   gt jev conflict-report --since 7d --json`,
-	Args: cobra.NoArgs,
-	RunE: runJevConflictReport,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return jevConflictReportRun(cmd, cmd.OutOrStdout(), d.findTownRoot,
+				f.since, f.asJSON, time.Now(), d.getenv)
+		},
+	}
+	fl := cmd.Flags()
+	fl.StringVar(&f.since, "since", jevConflictDefaultSince, "Count answers logged in this window ending now: Nd or a Go duration such as 36h")
+	fl.BoolVar(&f.asJSON, "json", false, "Print the report as JSON")
+	return cmd
 }
+
+var jevConflictReportCmd = newJevConflictReportCmd(realJevConflictReportDeps())
 
 func init() {
-	f := jevConflictReportCmd.Flags()
-	f.StringVar(&jevConflictReportSince, "since", jevConflictDefaultSince, "Count answers logged in this window ending now: Nd or a Go duration such as 36h")
-	f.BoolVar(&jevConflictReportJSON, "json", false, "Print the report as JSON")
 	jevCmd.AddCommand(jevConflictReportCmd)
-}
-
-func runJevConflictReport(cmd *cobra.Command, _ []string) error {
-	return jevConflictReportRun(cmd, cmd.OutOrStdout(), workspace.FindFromCwdOrError,
-		jevConflictReportSince, jevConflictReportJSON, time.Now(), os.Getenv)
 }
 
 // jevConflictReportRun refuses outside the daemon pod, whose logs the report
