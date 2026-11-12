@@ -1090,8 +1090,9 @@ func specForLint(townRoot, beadID string, show func(string) (specdispatch.Spec, 
 		return spec, err
 	}
 	// The rig list is read here and not defaulted: a registry that will not
-	// load refuses the lint, since the other-rig check cannot answer without it
-	// (gt-qotsst).
+	// load refuses the lint, since the advisory cannot tell which names are
+	// rigs without it, and a town with an unreadable registry is not an empty
+	// one (gt-qotsst).
 	rigs, err := specTownRigs(townRoot)
 	if err != nil {
 		return spec, fmt.Errorf("cannot read the town's rig list: %w", err)
@@ -1111,8 +1112,8 @@ func specBeadRig(townRoot, beadID string) string {
 
 // specTownRigs is the town's rig names, sorted, from the rig registry. A town
 // with no registry has none; a registry that will not load is an error, never
-// an empty list, so the other-rig check does not pass for want of one
-// (gt-qotsst).
+// an empty list, so the rig names the other-rig check narrows to are not read
+// as absent (gt-qotsst).
 func specTownRigs(townRoot string) ([]string, error) {
 	rc, err := config.LoadRigsConfigOrEmpty(constants.MayorRigsPath(townRoot))
 	if err != nil {

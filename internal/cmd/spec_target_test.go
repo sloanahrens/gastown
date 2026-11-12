@@ -189,9 +189,35 @@ func TestSpecDispatchSlingsABeadWhosePathsAreOnTheTarget(t *testing.T) {
 	}
 }
 
-// gt spec lint asks for the bead's rig inventory, and a town bead or a bead
-// with no rig is held with the error named rather than passed as clean
-// (gt-7t1im).
+// TestSpecDispatchHoldsAnOtherRigPathWhenTheRegistryIsMissing pins the tick's
+// other-rig check over a town with no rig registry: the registry reads as an
+// empty list, and a bead whose Constraints name another rig's path is refused,
+// not slung (gt-qotsst).
+func TestSpecDispatchHoldsAnOtherRigPathWhenTheRegistryIsMissing(t *testing.T) {
+	t.Parallel()
+	body := "Change ~/gt/om/internal/cli/cli.go to read the flag."
+	spec := cleanSpec("gt-other", 2, "2026-09-29T12:00:00Z")
+	spec.Description = specConstraints(&body)
+	townRigs, err := specTownRigs(t.TempDir())
+	if err != nil {
+		t.Fatalf("specTownRigs over a town with no registry: %v", err)
+	}
+	if len(townRigs) != 0 {
+		t.Fatalf("specTownRigs over a town with no registry = %q, want none", townRigs)
+	}
+
+	f := newFakeSpecTown(spec)
+	env := f.env()
+	env.TownRigs = townRigs
+	report := runSpecDispatchCycle(env)
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v with no rig registry, want the other-rig path held", f.slung)
+	}
+	if len(report.Refused) != 1 || !strings.Contains(report.Refused[0].Line, "om") {
+		t.Errorf("refused %+v, want gt-other refused naming the om path", report.Refused)
+	}
+}
+
 // TestSpecForLintNamesTheBeadsRigAndTheTownsRigs pins the other-rig inputs the
 // lint reads: the bead's own rig from its prefix, and the registry's rig names.
 // A registry that will not load fails the lint rather than passing it
@@ -239,6 +265,9 @@ func TestSpecForLintNamesTheBeadsRigAndTheTownsRigs(t *testing.T) {
 	}
 }
 
+// gt spec lint asks for the bead's rig inventory, and a town bead or a bead
+// with no rig is held with the error named rather than passed as clean
+// (gt-7t1im).
 func TestSpecForLintCarriesTheBeadsTargetInventory(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()

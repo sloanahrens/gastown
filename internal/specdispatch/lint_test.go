@@ -834,14 +834,38 @@ func TestOtherRigMatchesWholeRigName(t *testing.T) {
 	}
 }
 
-// TestOtherRigEmptyListRefusesNothing pins that a rig-name list the caller did
-// not read refuses no path, however many other rigs the bead names.
-func TestOtherRigEmptyListRefusesNothing(t *testing.T) {
+// TestOtherRigEmptyListStillRefusesPath pins that a rig-name list the caller did
+// not read (an absent registry) still refuses a path into another rig: the
+// refusal compares the path's rig segment with the bead's own rig, not with the
+// list. A path into the bead's own rig still passes.
+func TestOtherRigEmptyListStillRefusesPath(t *testing.T) {
 	t.Parallel()
 	for name, rigs := range map[string][]string{"nil": nil, "empty": {}, "blank": {" ", ""}} {
 		s := otherRigSpec("Change ~/gt/om/internal/cli/cli.go to read the flag.", rigs...)
-		if v := LintShape(s, defaultTemplate()); !v.Clean() {
-			t.Errorf("%s rig list refused a path: %s", name, v.Line("gt-good"))
+		v := Lint(s, defaultTemplate())
+		if v.Route != RouteRefuse {
+			t.Errorf("%s rig list passed a path into om: %s", name, v.Line("gt-good"))
 		}
+		if _, ok := refusalNaming(v, "om", "~/gt/om/internal/cli/cli.go"); !ok {
+			t.Errorf("%s rig list: no refusal names om and the path: %+v", name, v.Refusals)
+		}
+		own := otherRigSpec("Change ~/gt/gastown/internal/cli/cli.go to read the flag.", rigs...)
+		if v := Lint(own, defaultTemplate()); !v.Clean() {
+			t.Errorf("%s rig list refused a path into the bead's own rig: %s", name, v.Line("gt-good"))
+		}
+	}
+}
+
+// TestOtherRigListNarrowsTheSegments pins that with the town's list a segment
+// that is not a rig passes, so a path under the town root's own directories is
+// not named a rig; with no list every other segment is refused.
+func TestOtherRigListNarrowsTheSegments(t *testing.T) {
+	t.Parallel()
+	const path = "/sandbox/gt/docs/AGENT-ERGONOMICS.md"
+	if v := LintShape(otherRigSpec("Read "+path+" first.", "gastown", "om"), defaultTemplate()); !v.Clean() {
+		t.Errorf("a town directory that is no rig refused with the list: %s", v.Line("gt-good"))
+	}
+	if v := LintShape(otherRigSpec("Read "+path+" first."), defaultTemplate()); v.Route != RouteRefuse {
+		t.Errorf("a town directory passed with no list: %s", v.Line("gt-good"))
 	}
 }

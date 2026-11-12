@@ -160,22 +160,34 @@ func TestOtherRigAdviceIgnoresOutOfScopeAndPartialNames(t *testing.T) {
 	}
 }
 
-// TestOtherRigAdviceSaysWhenTheListIsUnread pins that a bead naming another
-// rig's path or read, with no rig list passed, gets one line saying the check
-// did not run, and a bead naming no other rig gets none.
+// TestOtherRigAdviceSaysWhenTheListIsUnread pins that a prose read in another
+// rig, with no rig list passed, gets one line saying the check did not run. A
+// path is refused rather than advised, so it gets no advice line.
 func TestOtherRigAdviceSaysWhenTheListIsUnread(t *testing.T) {
 	t.Parallel()
-	for _, constraints := range []string{
-		"Read ~/gt/om/internal/cli/cli.go for the flag.",
-		"Read the code in the om rig.",
-	} {
-		got := Advice(otherRigAdviceSpec(constraints))
-		if len(got) != 1 || got[0] != adviceRigUncheckedText {
-			t.Errorf("Advice(%q) = %q, want the not-checked line", constraints, got)
-		}
+	got := Advice(otherRigAdviceSpec("Read the code in the om rig."))
+	if len(got) != 1 || got[0] != adviceRigUncheckedText {
+		t.Errorf("Advice() = %q, want the not-checked line", got)
 	}
-	if got := Advice(otherRigAdviceSpec("Read the parser source.")); len(got) != 0 {
-		t.Errorf("Advice() = %q, want none for a bead naming no rig", got)
+	if got := Advice(otherRigAdviceSpec("Read ~/gt/om/internal/cli/cli.go for the flag.")); len(got) != 0 {
+		t.Errorf("Advice() = %q, want none for a path the refusal names", got)
+	}
+}
+
+// TestOtherRigAdviceUnlistedSilentForOwnRigAndProse pins the no-list silences:
+// a read in the bead's own rig, and ordinary prose such as "the project repo"
+// that names no rig.
+func TestOtherRigAdviceUnlistedSilentForOwnRigAndProse(t *testing.T) {
+	t.Parallel()
+	for _, constraints := range []string{
+		"Read the code in the gastown rig.",
+		"Read the code in the project repo.",
+		"Read the parser source in the repo before you change it.",
+		"Run om review from the command line.",
+	} {
+		if got := Advice(otherRigAdviceSpec(constraints)); len(got) != 0 {
+			t.Errorf("Advice(%q) with no list = %q, want none", constraints, got)
+		}
 	}
 }
 

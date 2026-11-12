@@ -268,9 +268,10 @@ type Spec struct {
 	// bead with no rig, so every known rig counts as another (gt-qotsst).
 	Rig string
 	// TownRigs is the town's rig names, filled by the caller from the rig
-	// registry. Nil or empty is a list the caller did not read: the other-rig
-	// check refuses nothing, and Advice says it did not run when the bead names
-	// another rig's path or read (gt-qotsst).
+	// registry. Nil or empty is a list the caller did not read: a path into a
+	// rig-shaped directory other than the bead's own is still refused, and
+	// Advice says the prose check did not run when the bead names another rig's
+	// read (gt-qotsst).
 	TownRigs []string
 }
 
@@ -602,9 +603,9 @@ func rigAlternation(rigs []string) string {
 	return "(?:" + strings.Join(quoted, "|") + ")"
 }
 
-// genericRigName matches any rig-shaped name. The other-rig advice falls back to
-// it when the town's rig list is unread, so a cross-rig path is still named as
-// not checked. A dotted name (".beads") is not a rig.
+// genericRigName matches any rig-shaped name. The other-rig check falls back to
+// it when the town's rig list is unread, so a path into any rig is still refused
+// rather than passed for want of the list. A dotted name (".beads") is not a rig.
 const genericRigName = `[A-Za-z][A-Za-z0-9_-]*`
 
 // otherRigPathPatterns are the two forms a path into a rig's directory takes in
@@ -649,14 +650,21 @@ func otherRigPaths(text, rigAlt, own string) []otherRigPath {
 // bead cannot read that path; the refusal says to split the work or to write the
 // fact into the bead. The Goal, Constraints, Gate and acceptance text is read,
 // one refusal per section that names such a path. Out of scope is not read: a
-// bead may say what it leaves to another rig. Nothing is refused when the
-// caller passed no rig list (gt-qotsst).
+// bead may say what it leaves to another rig.
+//
+// With the town's rig list the rig segment must be one of the other rigs. With
+// no list (an absent registry reads as an empty one) every rig-shaped segment
+// other than the bead's own is refused, so a town that cannot name its rigs
+// still holds a bead that sends a polecat into another rig (gt-qotsst).
 func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
-	others := otherRigs(s)
-	if len(others) == 0 {
-		return nil
+	alt := genericRigName
+	if len(knownRigs(s)) > 0 {
+		others := otherRigs(s)
+		if len(others) == 0 {
+			return nil
+		}
+		alt = rigAlternation(others)
 	}
-	alt := rigAlternation(others)
 	fields := []struct{ field, text string }{
 		{"## Goal", sections["goal"]},
 		{"## Constraints", sections["constraints"]},
@@ -705,8 +713,9 @@ func otherRigRefusals(s Spec, sections map[string]string) []Refusal {
 //     need not, and a section that does not parse is refused
 //     (gt-7t1im, gt-hgt9j.10)
 //  7. no Goal, Constraints, Gate or acceptance text names a path inside another
-//     rig's directory, when the caller passed the town's rig list: a polecat's
-//     sandbox holds only its own rig (gt-qotsst)
+//     rig's directory: a polecat's sandbox holds only its own rig. The rig list
+//     narrows the segments read as rigs; without it every other rig-shaped
+//     segment is refused (gt-qotsst)
 //  8. size: needs-planning label, a Size that says planning, or more than
 //     MaxAcceptance items route to the planner; a Size that does not say one
 //     worker is refused. A bead labeled overseer-only or operator-only may

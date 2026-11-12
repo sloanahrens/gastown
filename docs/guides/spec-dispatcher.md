@@ -31,11 +31,28 @@ lessons the lint cannot check.
 | every `## ` section in the template, present and non-empty (Goal, Constraints, Out of scope, Gate, Size) | `## <section>` |
 | 1-6 acceptance items (3-6 preferred) | `acceptance` |
 | every repo file the `## Files` section names, or without one the Constraints names, as a file it changes exists on the target branch | `## Files`, or `## Constraints` without one |
+| no Goal, Constraints, Gate or acceptance text names a path inside another rig's directory (`~/gt/<rig>/`, `/Users/<user>/gt/<rig>/`, `/sandbox/gt/<rig>/`, `<rig>/mayor/rig`) | `## Goal`, `## Constraints`, `## Gate` or `acceptance`, naming the rig and the path |
 | Size says one worker, one MR | `size` |
 
 A non-work bead is refused before any shape is read: no sections are required
 of an epic, and the reason names what the bead is (`type epic`, `label
 gt:agent`, `type wisp`).
+
+The other-rig check holds a bead that sends a polecat into a second repository,
+because a polecat's sandbox holds only its own rig. A path into the bead's own
+rig passes, and Out of scope is not read: a bead may say what it leaves to
+another rig. The check does not need the town's rig list: a path is refused
+when its rig segment is not the bead's own rig. The list only narrows which
+segments count as rigs, so with it a town directory that is no rig (such as
+`/sandbox/gt/docs/`) passes. An absent rig registry reads as an empty list, and
+the check still refuses (gt-qotsst).
+
+The other-rig advisory is one `advice:` line, never a refusal: a Goal or
+Constraints line that reads something "in the `<rig>` rig" for another rig asks
+for that read to be split into a bead for that rig, or written into this bead
+with repo, commit, file and line. With no rig list it says the other-rig check
+did not run, and fires only on that "in the `<name>` rig" form, so "the project
+repo" and a rig named as a tool (`om review`) do not match.
 
 The path check reads its paths from the `## Files` section when the bead has
 one, and that section is its only source (gt-hgt9j.10). A bead without one

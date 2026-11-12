@@ -72,8 +72,9 @@ var otherRigVerbRe = regexp.MustCompile(`(?i)\b(?:read|reads|reading|check|check
 //
 // The other-rig advisory: a Goal or Constraints line that reads something "in
 // the <rig> rig" for another rig gets one line, since the rig's repository is
-// not in this sandbox. With no rig list passed, a text that names another rig
-// gets one line saying the check did not run.
+// not in this sandbox. With no rig list passed, a line that reads "in the <name>
+// rig" for a name other than the bead's own gets one line saying the check did
+// not run; "the project repo" is not a rig. Paths are refused, not advised.
 func Advice(s Spec) []string {
 	sections := Sections(s.Description)
 	trigger := strings.Join([]string{sections["goal"], sections["constraints"]}, "\n")
@@ -123,14 +124,35 @@ func rigReadLine(text, rigAlt string) bool {
 	return false
 }
 
+// unlistedRigReadRe matches a read placed in a rig by name: "in the om rig",
+// "from the om rig". Only the word "rig" counts without the list, since "the
+// project repo" is as likely a repo as a rig.
+var unlistedRigReadRe = regexp.MustCompile(`(?i)\b(?:in|from)\s+the\s+(` + genericRigName + `)\s+rig\b`)
+
+// unlistedRigRead reports whether a line of text reads in a rig named "in the
+// <name> rig" for a name other than own, when the caller passed no rig list.
+// A read word must share the line, as it does with the list.
+func unlistedRigRead(text, own string) bool {
+	for _, line := range strings.Split(text, "\n") {
+		if !otherRigVerbRe.MatchString(line) {
+			continue
+		}
+		for _, m := range unlistedRigReadRe.FindAllStringSubmatch(line, -1) {
+			if !strings.EqualFold(m[1], own) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // otherRigAdvice is the other-rig advisory: one line per other rig the Goal or
 // Constraints reads in, or one line saying the check did not run when the rig
-// list was not passed and the bead names another rig's path or read.
+// list was not passed and the bead reads in a rig other than its own.
 func otherRigAdvice(s Spec, sections map[string]string) []string {
 	readText := sections["goal"] + "\n" + sections["constraints"]
 	if len(knownRigs(s)) == 0 {
-		refusedText := strings.Join([]string{sections["goal"], sections["constraints"], sections["gate"], acceptanceText(s, sections)}, "\n")
-		if len(otherRigPaths(refusedText, genericRigName, s.Rig)) > 0 || rigReadLine(readText, genericRigName) {
+		if unlistedRigRead(readText, s.Rig) {
 			return []string{adviceRigUncheckedText}
 		}
 		return nil
