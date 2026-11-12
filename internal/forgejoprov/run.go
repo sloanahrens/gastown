@@ -151,5 +151,8 @@ func provisionRepo(p *Provisioner, repo string, opts *Options) error {
 	if err := p.EnsureRule(repo, *opts); err != nil {
 		return err
 	}
-	return p.EnsureNoRule(repo, opts.LandBranch)
+	if err := p.EnsureNoRule(repo, opts.LandBranch); err != nil {
+		return err
+	}
+	return p.EnsureWorkflowProtected(repo, opts.WorkflowList)
 }

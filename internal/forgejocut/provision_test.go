@@ -260,21 +260,38 @@ func TestProvisionRefusesAnUnwiredEnvironment(t *testing.T) {
 // files through: each path written, with the data and the mode it was given.
 type provisionFiles struct {
 	written map[string][]byte
-	modes   map[string]fs.FileMode
+	// lists holds the workflow-file hook list, which a run with a repository appends to.
+	// It is kept apart from written, so written holds only the token files.
+	lists map[string][]byte
+	modes map[string]fs.FileMode
 }
 
+// newProvisionFiles starts with a neutral hook list, so a run with a repository has one to
+// append to.
 func newProvisionFiles() *provisionFiles {
-	return &provisionFiles{written: map[string][]byte{}, modes: map[string]fs.FileMode{}}
+	return &provisionFiles{
+		written: map[string][]byte{},
+		lists:   map[string][]byte{forgejoprov.DefaultWorkflowList: []byte("forge/other\n")},
+		modes:   map[string]fs.FileMode{forgejoprov.DefaultWorkflowList: 0o640},
+	}
+}
+
+// store is the map path lives in: the hook list's, or the token files'.
+func (f *provisionFiles) store(path string) map[string][]byte {
+	if path == forgejoprov.DefaultWorkflowList {
+		return f.lists
+	}
+	return f.written
 }
 
 func (f *provisionFiles) WriteFileAtomic(path string, data []byte, mode fs.FileMode) error {
-	f.written[path] = append([]byte(nil), data...)
+	f.store(path)[path] = append([]byte(nil), data...)
 	f.modes[path] = mode
 	return nil
 }
 
 func (f *provisionFiles) Chmod(path string, mode fs.FileMode) error {
-	if _, ok := f.written[path]; !ok {
+	if _, ok := f.store(path)[path]; !ok {
 		return &fs.PathError{Op: "chmod", Path: path, Err: fs.ErrNotExist}
 	}
 	f.modes[path] = mode
@@ -282,14 +299,14 @@ func (f *provisionFiles) Chmod(path string, mode fs.FileMode) error {
 }
 
 func (f *provisionFiles) Stat(path string) (fs.FileInfo, error) {
-	if _, ok := f.written[path]; !ok {
+	if _, ok := f.store(path)[path]; !ok {
 		return nil, &fs.PathError{Op: "stat", Path: path, Err: fs.ErrNotExist}
 	}
 	return provisionInfo{mode: f.modes[path]}, nil
 }
 
 func (f *provisionFiles) ReadFile(path string) ([]byte, error) {
-	data, ok := f.written[path]
+	data, ok := f.store(path)[path]
 	if !ok {
 		return nil, &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}
 	}
