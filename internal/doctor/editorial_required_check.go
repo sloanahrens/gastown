@@ -50,15 +50,25 @@ func (c *EditorialRequiredCheck) Run(ctx *CheckContext) *CheckResult {
 			FixHint: "Verify the rig repo is readable; until then this check cannot tell whether the rig has a rubric",
 		}
 	}
+	mq := rig.ResolveMergeQueueConfigIn(ctx.rigRepoOpener(), ctx.TownRoot, ctx.RigName)
+	required := mq != nil && mq.Editorial != nil && mq.Editorial.Required
 	if !rubric.Found {
+		// Editorial review is required but main carries no rubric: reviews are
+		// not enforced, so this must not read as a clean rig.
+		if required {
+			return &CheckResult{
+				Name:    c.Name(),
+				Status:  StatusWarning,
+				Message: fmt.Sprintf("rig %s requires editorial review but its repo main has no .om.json rubric", ctx.RigName),
+				FixHint: "Land .om.json on the rig's main, or set merge_queue.editorial.required=false in config.json",
+			}
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
 			Message: "No .om.json rubric in rig repo",
 		}
 	}
-	mq := rig.ResolveMergeQueueConfigIn(ctx.rigRepoOpener(), ctx.TownRoot, ctx.RigName)
-	required := mq != nil && mq.Editorial != nil && mq.Editorial.Required
 	if required {
 		return &CheckResult{
 			Name:    c.Name(),
