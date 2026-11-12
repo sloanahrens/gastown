@@ -19,7 +19,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/imagevalues"
 )
 
@@ -59,6 +61,9 @@ type fakePairAPI struct {
 	// green, so the listing never ends.
 	endless  bool
 	compares map[string]int
+	// compareCalls counts the comparisons made, so a test can assert the check
+	// judged a commit without asking Forgejo.
+	compareCalls int
 	// runs is what a run listing returns, filtered by the commit and workflow
 	// the filter names. runErr fails every run listing, and the listing an
 	// ignored filter returns is modelled by filling runs with another commit's.
@@ -102,6 +107,7 @@ func (f *fakePairAPI) ListBranches(_ context.Context, _, _ string, page, limit i
 }
 
 func (f *fakePairAPI) CompareCommits(_ context.Context, _, _, base, head string) (*forgejo.CompareInfo, error) {
+	f.compareCalls++
 	total, ok := f.compares[base+"..."+head]
 	if !ok {
 		return nil, fmt.Errorf("no comparison fixture for %s...%s", base, head)
@@ -179,12 +185,15 @@ type pairFixture struct {
 	// production client, so a test can drive the wiring a rig resolves to.
 	apiOverride pairReadyAPI
 	reg         pairReadyRegistry
-	rigErr      error
-	rigsErr     error
-	check       pairReadyCheck
-	logs        []string
-	daemon      string
-	polecat     string
+	// git is the rig's bare clone. The default holds no commits, so every commit
+	// is missing and the check falls back to the API's comparisons.
+	git     pairReadyGit
+	rigErr  error
+	rigsErr error
+	check   pairReadyCheck
+	logs    []string
+	daemon  string
+	polecat string
 }
 
 // newPairFixture is the case that raises: running at pairRunning, green at
@@ -196,6 +205,10 @@ func newPairFixture(t *testing.T) *pairFixture {
 		daemon:  digestOf([]byte("daemon manifest")),
 		polecat: digestOf([]byte("polecat manifest")),
 	}
+	world := gitfake.New()
+	bare := t.TempDir()
+	world.InitBare(t, bare)
+	fx.git = world.Open(bare).(pairReadyGit)
 	fx.api = &fakePairAPI{
 		branches: []forgejo.Branch{pairBranch(pairGreen)},
 		compares: map[string]int{
@@ -247,7 +260,7 @@ func (fx *pairFixture) run(now time.Time) {
 		}
 		return []pairReadyRig{{
 			Rig: "gastown", Owner: pairOwner, Repo: pairRepo,
-			API: api, Registry: fx.reg, Err: fx.rigErr,
+			API: api, Registry: fx.reg, Git: fx.git, Err: fx.rigErr,
 		}}, nil
 	}
 	logf := func(format string, args ...any) { fx.logs = append(fx.logs, fmt.Sprintf(format, args...)) }
@@ -275,6 +288,230 @@ func TestPairReadyRaisesOneItemForBothImages(t *testing.T) {
 	assert.Contains(t, it.Summary, fx.polecat)
 	assert.Contains(t, it.Summary, "3 commits ahead")
 	assert.Empty(t, fx.logs)
+}
+
+// pairCloneHistory is a rig's bare clone as a gitfake repository, holding three
+// commits on main, oldest first. The check judges green commits against it and
+// never fetches into it.
+func pairCloneHistory(t *testing.T) (pairReadyGit, []string) {
+	t.Helper()
+	world := gitfake.New()
+	bare := t.TempDir()
+	world.InitBare(t, bare)
+	var commits []string
+	for i, msg := range []string{"first", "second", "third"} {
+		commits = append(commits, world.Commit(t, bare, "main", msg, map[string]string{"f": strconv.Itoa(i)}))
+	}
+	return world.Open(bare).(pairReadyGit), commits
+}
+
+// newPairCloneFixture is the raising case with clone as the rig's bare clone:
+// running and green are the commits the test names, and both images are published
+// at green's stamp. The Forgejo comparisons are empty, so a comparison that
+// reaches Forgejo fails the read and the test sees it.
+func newPairCloneFixture(t *testing.T, clone pairReadyGit, running, green string) *pairFixture {
+	t.Helper()
+	fx := newPairFixture(t)
+	fx.git = clone
+	fx.writeRunning(t, running)
+	fx.api.branches = []forgejo.Branch{pairBranch(green)}
+	fx.api.compares = map[string]int{}
+	fx.reg = &fakePairRegistry{digests: map[string]string{
+		imagevalues.DaemonImage + "@" + green[:12]:  fx.daemon,
+		imagevalues.PolecatImage + "@" + green[:12]: fx.polecat,
+	}}
+	return fx
+}
+
+// TestPairReadyOlderGreenIsSkippedWithoutForgejo: a green commit that is an
+// ancestor of the running one is not newer. The clone says so with no
+// comparison made.
+func TestPairReadyOlderGreenIsSkippedWithoutForgejo(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	fx := newPairCloneFixture(t, clone, c[2], c[0])
+	fx.run(pairT0)
+
+	assert.Empty(t, fx.check.observed(), "an older green commit raised an item")
+	assert.Zero(t, fx.api.compareCalls, "an older green commit was compared with Forgejo")
+}
+
+// TestPairReadyNewerGreenIsJudgedFromTheClone: a green commit ahead of the running
+// one is newer by the clone alone. The item is raised, and no comparison is made.
+func TestPairReadyNewerGreenIsJudgedFromTheClone(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	fx := newPairCloneFixture(t, clone, c[0], c[2])
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "a newer green commit raised %d items, want one", len(items))
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
+	assert.Contains(t, items[0].Summary, "newer than the running commit "+c[0][:12]+", judged from the local clone")
+	assert.NotContains(t, items[0].Summary, "read from Forgejo")
+	assert.Zero(t, fx.api.compareCalls, "a newer green commit was compared with Forgejo")
+}
+
+// TestPairReadyMissingCommitFallsBackToForgejoAndSaysSo: a commit the clone lacks
+// is judged by the Forgejo comparisons, and the item names the commit the clone
+// did not hold.
+func TestPairReadyMissingCommitFallsBackToForgejoAndSaysSo(t *testing.T) {
+	t.Parallel()
+	clone, c := pairCloneHistory(t)
+	cases := []struct {
+		name     string
+		running  string
+		green    string
+		compares map[string]int
+		ahead    string
+		note     string
+	}{
+		{
+			name: "green missing", running: c[0], green: pairGreen,
+			compares: map[string]int{pairGreen + "..." + c[0]: 0, c[0] + "..." + pairGreen: 3},
+			ahead:    "3 commits ahead of the running commit " + c[0][:12],
+			note:     "; the comparison was read from Forgejo, since commit " + pairGreen12 + " is not in the local clone",
+		},
+		{
+			name: "running missing", running: pairRunning, green: c[2],
+			compares: map[string]int{c[2] + "..." + pairRunning: 0, pairRunning + "..." + c[2]: 2},
+			ahead:    "2 commits ahead of the running commit " + pairRunning[:12],
+			note:     "; the comparison was read from Forgejo, since commit " + pairRunning[:12] + " is not in the local clone",
+		},
+	}
+	for _, tc := range cases {
+		fx := newPairCloneFixture(t, clone, tc.running, tc.green)
+		fx.api.compares = tc.compares
+		fx.run(pairT0)
+
+		items := fx.check.observed()
+		require.Len(t, items, 1, "%s: the check raised %d items, want one", tc.name, len(items))
+		assert.Equal(t, attention.KindDeployPairReady, items[0].Kind, tc.name)
+		assert.Contains(t, items[0].Summary, tc.ahead, tc.name)
+		assert.Contains(t, items[0].Summary, tc.note, "%s: the item does not say the comparison came from Forgejo", tc.name)
+		assert.Equal(t, 2, fx.api.compareCalls, "%s: the fallback made %d comparisons, want 2", tc.name, fx.api.compareCalls)
+	}
+}
+
+// pairCloneStub is a clone whose reads fail, so the check must not read it as
+// no pair.
+type pairCloneStub struct {
+	hasErr error
+	ancErr error
+}
+
+func (s pairCloneStub) HasObject(string) (bool, error) {
+	return s.hasErr == nil, s.hasErr
+}
+
+func (s pairCloneStub) IsAncestor(string, string) (bool, error) {
+	return false, s.ancErr
+}
+
+// TestPairReadyUnreadableCloneRaisesTheUnreadableItem: a clone the check cannot
+// read raises the check's unreadable item and no pair, and falls back to no
+// Forgejo comparison.
+func TestPairReadyUnreadableCloneRaisesTheUnreadableItem(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		clone pairCloneStub
+		want  string
+	}{
+		{"object read fails", pairCloneStub{hasErr: errors.New("not a git repository")}, "reading the local clone"},
+		{"ancestry read fails", pairCloneStub{ancErr: errors.New("exit status 128")}, "judging green/" + pairGreen12 + " against the running commit"},
+	}
+	for _, tc := range cases {
+		fx := newPairCloneFixture(t, tc.clone, pairRunning, pairGreen)
+		fx.run(pairT0)
+
+		items := fx.check.observed()
+		require.Len(t, items, 1, "%s: the check raised %d items, want the unreadable item only", tc.name, len(items))
+		assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind, tc.name)
+		assert.Contains(t, items[0].Summary, tc.want, tc.name)
+		assert.Zero(t, fx.api.compareCalls, "%s: an unreadable clone fell back to Forgejo", tc.name)
+	}
+}
+
+// pairReadyTownDaemon is a daemon over town whose git seam records every
+// directory it opens.
+func pairReadyTownDaemon(town string) (*Daemon, map[string]daemonGit) {
+	f := gitfake.New()
+	opened := map[string]daemonGit{}
+	d := &Daemon{config: &Config{TownRoot: town}}
+	d.openGitFn = func(dir string) daemonGit {
+		g := f.Open(dir).(daemonGit)
+		opened[dir] = g
+		return g
+	}
+	return d, opened
+}
+
+// TestPairReadyRigReadsTheRigBareClone: the production rig resolver reads the
+// rig's bare clone at the one name for it, so the judge reads the daemon's own
+// repository rather than one opened somewhere else.
+func TestPairReadyRigReadsTheRigBareClone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	require.NoError(t, os.MkdirAll(constants.RigBareRepoPath(filepath.Join(town, "gastown")), 0o755))
+	d, opened := pairReadyTownDaemon(town)
+
+	got := d.pairReadyRig("gastown", town, nil)
+
+	bare := constants.RigBareRepoPath(filepath.Join(town, "gastown"))
+	require.NotNil(t, got.Git, "the rig's bare clone was not opened")
+	assert.Equal(t, opened[bare], got.Git, "the rig does not read its bare clone")
+}
+
+// TestPairReadyRigWithoutABareCloneHasNoClone: a rig the daemon keeps no clone
+// for resolves with no clone, so the check compares through the API instead of
+// calling every green unreadable.
+func TestPairReadyRigWithoutABareCloneHasNoClone(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d, opened := pairReadyTownDaemon(town)
+
+	got := d.pairReadyRig("gastown", town, nil)
+
+	bare := constants.RigBareRepoPath(filepath.Join(town, "gastown"))
+	assert.Nil(t, got.Git, "a rig with no bare clone resolved to one")
+	_, openedClone := opened[bare]
+	assert.False(t, openedClone, "a rig with no bare clone had its clone opened")
+}
+
+// TestPairReadyJudgesThroughForgejoWithNoClone: a rig with no local clone is
+// judged by the Forgejo comparison, and the item says the comparison was read
+// there.
+func TestPairReadyJudgesThroughForgejoWithNoClone(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.git = nil
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "the check raised %d items, want one", len(items))
+	assert.Equal(t, attention.KindDeployPairReady, items[0].Kind)
+	assert.Contains(t, items[0].Summary, "3 commits ahead of the running commit")
+	assert.Contains(t, items[0].Summary, pairReadyNoCloneNote, "the item does not say it was compared with Forgejo")
+	assert.Equal(t, 2, fx.api.compareCalls, "the fallback made %d comparisons, want 2", fx.api.compareCalls)
+}
+
+// TestPairReadyNoCloneComparisonFailureRaisesTheUnreadableItem: a rig with no
+// clone whose Forgejo comparison fails is unreadable, not read as no pair.
+func TestPairReadyNoCloneComparisonFailureRaisesTheUnreadableItem(t *testing.T) {
+	t.Parallel()
+	fx := newPairFixture(t)
+	fx.git = nil
+	fx.api.compares = nil // no comparison fixture: every comparison fails
+
+	fx.run(pairT0)
+
+	items := fx.check.observed()
+	require.Len(t, items, 1, "the check raised %d items, want the unreadable item only", len(items))
+	assert.Equal(t, attention.KindDeployPairUnreadable, items[0].Kind)
+	assert.Contains(t, items[0].Summary, "comparing green/"+pairGreen12+" with the running commit")
+	assert.Equal(t, 1, fx.api.compareCalls, "a failed comparison was made %d times, want one", fx.api.compareCalls)
 }
 
 // TestPairReadyOneImageAloneRaisesNothing: a green commit with only one of its
