@@ -37,7 +37,7 @@ lack. `gt crew add` runs in the pod through the wrapper, so the plain clone is t
 Mac form.
 
 ```bash
-git clone http://forgejo:3000/sloan/<repo>.git ~/gt/<rig>/crew/<name>
+git clone http://forgejo:3000/<owner>/<repo>.git ~/gt/<rig>/crew/<name>
 git -C ~/gt/<rig>/crew/<name> config user.name <name>
 git -C ~/gt/<rig>/crew/<name> config user.email <name>@gastown.local
 ```
