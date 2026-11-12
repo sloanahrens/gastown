@@ -75,7 +75,7 @@ type Options struct {
 	// so Branch and Head are the whole submission and nothing in the worktree
 	// is read (the pod case).
 	WorktreeAbsent bool
-	// CloneRepo opens the git surface of the rig's canonical clone for a
+	// CloneRepo opens the git surface of the rig's shared bare repository for a
 	// Branch/Head submission, which reads and writes nothing in the caller's
 	// worktree. Nil is the real git.
 	CloneRepo func(dir string) doneRepo

@@ -7,6 +7,7 @@ import (
 	"unicode"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -122,7 +123,9 @@ func runDoneCrewFromFlags(opts Options, getenv func(string) string) error {
 		return fmt.Errorf("gt done: no rig names bead %s; set GT_RIG to the rig", issueID)
 	}
 
-	cloneDir := filepath.Join(townRoot, rigName, "mayor", "rig")
+	// The rig's shared bare repository is the one clone every town copy holds
+	// (a pod has no canonical working clone), and it carries origin.
+	cloneDir := constants.RigBareRepoPath(filepath.Join(townRoot, rigName))
 	var repo doneRepo = git.NewGit(cloneDir)
 	if opts.CloneRepo != nil {
 		repo = opts.CloneRepo(cloneDir)
