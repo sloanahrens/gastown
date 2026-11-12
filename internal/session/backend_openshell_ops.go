@@ -372,6 +372,38 @@ func parseTranscriptStat(out string) (string, time.Time, int64, error) {
 	return fields[2], time.Unix(epoch, 0), size, nil
 }
 
+// endedMarkerScript prints "present" when the ended marker is under the sandbox
+// home and "absent" when it is not. The test runs inside the sandbox's shell, so
+// a missing marker is an answer, and only a failed exec is an error.
+const endedMarkerScript = `if test -e "` + sandboxHome + `/` + sandboxEndedMarker + `"; then echo present; else echo absent; fi`
+
+// SandboxEndedMarkerPresent reports whether the sandbox called name on gateway
+// has the ended marker its main script writes once its agent's session has ended
+// (gt-yck7hz). It is one exec, bounded by sandboxPhaseTimeout. A failed exec, or
+// an answer that is neither word, is an error and never "absent": a caller that
+// cannot tell keeps the sandbox.
+func SandboxEndedMarkerPresent(gateway, name string) (bool, error) {
+	return sandboxEndedMarkerPresentWith(&sandbox.CLI{Gateway: gateway}, name)
+}
+
+// sandboxEndedMarkerPresentWith is SandboxEndedMarkerPresent over the CLI the
+// caller built, so a test can answer the exec.
+func sandboxEndedMarkerPresentWith(cli *sandbox.CLI, name string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), sandboxPhaseTimeout)
+	defer cancel()
+	out, _, err := cli.Exec(ctx, name, nil, []string{"sh", "-c", endedMarkerScript}, nil)
+	if err != nil {
+		return false, fmt.Errorf("asking sandbox %s for its ended marker: %w", name, err)
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "present":
+		return true, nil
+	case "absent":
+		return false, nil
+	}
+	return false, fmt.Errorf("sandbox %s gave an unrecognized answer to the ended marker question", name)
+}
+
 // Stop stops the sandbox, keeping its workspace and record.
 func (b *openshellBackend) Stop(session string) error {
 	return b.cli.Stop(context.Background(), session)

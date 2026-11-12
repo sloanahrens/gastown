@@ -29,6 +29,15 @@ const (
 //   - the gateway the record names reports no sandbox of that name (an
 //     unreachable gateway or any other error is not "gone").
 //
+// A sandbox the gateway still has is held: its seat ended and its sandbox stays
+// up for the hold, with an ended marker in it (gt-yck7hz). Such a record is
+// ended here only when the sandbox answers that the marker is set, and then
+// through the record deleter, which copies the seat's transcripts before it
+// deletes the sandbox. A marker that is absent, an exec that fails, and a
+// deleter that fails each keep the record, so a seat still starting is never
+// deleted by this path. A finish whose stop deletes the sandbox removes the
+// record too, so by then there is no record for this path to find.
+//
 // At most the budget (sandboxRecordsPerTick) of records is checked per tick,
 // live ones included, so a tick makes at most that many tmux probes and gateway
 // questions, and records the gateway still has cannot starve the ones behind
@@ -73,7 +82,7 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			h.d.logger.Printf("patrol_scan: sandbox record %s kept: cannot ask gateway %q: %v", name, rec.Gateway, err)
 			continue
 		}
-		if exists {
+		if exists && !h.endHeldSandbox(name, rec) {
 			continue
 		}
 		// A nil deleter drops the record and the routed client and leaves the
@@ -82,8 +91,46 @@ func (h *patrolScanHost) patrolScanSandboxRecords() {
 			h.d.logger.Printf("patrol_scan: sandbox record %s: removing it failed: %v", name, err)
 			continue
 		}
-		h.d.logger.Printf("patrol_scan: sandbox record %s removed: the gateway has no such sandbox (%s/%s)", name, rec.Rig, rec.Polecat)
+		if !exists {
+			h.d.logger.Printf("patrol_scan: sandbox record %s removed: the gateway has no such sandbox (%s/%s)", name, rec.Rig, rec.Polecat)
+		}
 	}
+}
+
+// endHeldSandbox ends a held sandbox the gateway still has, whose seat has
+// ended: the sandbox answers whether its ended marker is set, and when it is,
+// the record deleter copies the seat's transcripts and deletes the sandbox and
+// its seat token. It reports whether the record may now be dropped. Every answer
+// short of a set marker, and every failure, keeps the sandbox and its record, so
+// a seat still starting or crashed is never deleted here.
+func (h *patrolScanHost) endHeldSandbox(name string, rec session.SandboxRecord) bool {
+	ended, err := h.sandboxEndedMarkerSet(rec.Gateway, name)
+	if err != nil {
+		h.d.logger.Printf("patrol_scan: sandbox record %s kept: cannot ask sandbox for its ended marker: %v", name, err)
+		return false
+	}
+	if !ended {
+		return false
+	}
+	deleter := h.sandboxDeleter
+	if deleter == nil {
+		deleter = session.SandboxDeleter
+	}
+	if err := deleter(h.town(), rec); err != nil {
+		h.d.logger.Printf("patrol_scan: sandbox record %s kept: its ended sandbox could not be deleted: %v", name, err)
+		return false
+	}
+	h.d.logger.Printf("patrol_scan: sandbox record %s deleted: its seat ended and the sandbox's ended marker is set; its transcripts are copied before the delete, and a failed copy is warned (%s/%s)", name, rec.Rig, rec.Polecat)
+	return true
+}
+
+// sandboxEndedMarkerSet asks the sandbox called name on gateway whether its
+// ended marker is set: session.SandboxEndedMarkerPresent when no seam is set.
+func (h *patrolScanHost) sandboxEndedMarkerSet(gateway, name string) (bool, error) {
+	if h.sandboxEndedMarker != nil {
+		return h.sandboxEndedMarker(gateway, name)
+	}
+	return session.SandboxEndedMarkerPresent(gateway, name)
 }
 
 // removeRecord drops a sandbox's registry record and routed client.
