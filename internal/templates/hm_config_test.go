@@ -3,6 +3,8 @@ package templates_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,11 @@ const hmHostConfig = `{
   "rerank": {"provider": "llamacpp", "url": "http://localhost:8012"},
   "top_k": 6
 }`
+
+// containerHost is the name a container reaches the Mac by. The expected URLs
+// are built from this one const, and TestHMContainerConfigPinsTheHostTheURLsCarry
+// fails if the derived URLs carry any other host.
+const containerHost = "host.docker.internal"
 
 // decodeHMConfig is a derived config's fields, as hm reads them.
 func decodeHMConfig(t *testing.T, content []byte) map[string]any {
@@ -46,7 +53,7 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 		{
 			name:    "localhost",
 			config:  `{"database_url": "postgres://hm:s3cret@localhost:5433/hm?sslmode=disable"}`,
-			wantURL: "postgres://hm:s3cret@" + "host" + ".docker.internal" + ":5433/hm?sslmode=disable",
+			wantURL: fmt.Sprintf("postgres://hm:s3cret@%s:5433/hm?sslmode=disable", containerHost),
 		},
 		{
 			name:    "127.0.0.1",
@@ -56,7 +63,7 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 		{
 			name:    "a loopback host with no port",
 			config:  `{"database_url": "postgres://hm@localhost/hm"}`,
-			wantURL: "postgres://hm@" + "host" + ".docker.internal" + "/hm",
+			wantURL: fmt.Sprintf("postgres://hm@%s/hm", containerHost),
 		},
 		{
 			name:    "a remote database is unchanged",
@@ -73,7 +80,7 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 		// never the URL, whose password would otherwise reach a log.
 		{name: "database_url does not parse", config: `{"database_url": "postgres://hm:s3 cret@localhost:5433/hm"}`,
 			wantReason: "database_url (URL form) does not parse"},
-		{name: "a field name holds a control character", config: `{"database_url": "postgres://hm@` + "host" + ".docker.internal" + `:5433/hm", "\u0001x": 1}`,
+		{name: "a field name holds a control character", config: `{"database_url": "postgres://hm@localhost:5433/hm", "\u0001x": 1}`,
 			wantReason: "field name holds a control character"},
 	}
 	for _, tc := range cases {
@@ -113,6 +120,28 @@ func TestHMContainerConfigRewritesTheLocalHost(t *testing.T) {
 	}
 }
 
+// The expected URLs in these tests are built from containerHost, so this test
+// holds the const to the host the derivation writes: a loopback database URL is
+// rewritten to a URL whose host is exactly containerHost.
+func TestHMContainerConfigPinsTheHostTheURLsCarry(t *testing.T) {
+	t.Parallel()
+	out, err := templates.RenderHMConfig([]byte(`{"database_url": "postgres://hm@localhost:5433/hm"}`))
+	if err != nil {
+		t.Fatalf("RenderHMConfig: %v", err)
+	}
+	dbURL, ok := decodeHMConfig(t, out)["database_url"].(string)
+	if !ok {
+		t.Fatalf("the derived database_url is not a string")
+	}
+	u, err := url.Parse(dbURL)
+	if err != nil {
+		t.Fatalf("the derived database_url does not parse: %v", err)
+	}
+	if got := u.Hostname(); got != containerHost {
+		t.Errorf("the derived database_url carries host %q, want containerHost %q", got, containerHost)
+	}
+}
+
 // hmField reads the value at path in a decoded config, and whether it is there.
 func hmField(got map[string]any, path ...string) (any, bool) {
 	var cur any = got
@@ -135,7 +164,7 @@ func hmField(got map[string]any, path ...string) (any, bool) {
 // URL is kept. A block the derivation cannot read is refused naming the field.
 func TestHMContainerConfigRewritesServiceURLs(t *testing.T) {
 	t.Parallel()
-	const db = `"database_url": "postgres://hm@` + "host" + ".docker.internal" + `:5433/hm"`
+	const db = `"database_url": "postgres://hm@localhost:5433/hm"`
 	cases := []struct {
 		name   string
 		config string
@@ -414,10 +443,10 @@ func TestHMContainerConfigRewritesBothDSNForms(t *testing.T) {
 			want: "host=db.example.test port=5433 password=s3cret dbname=hm"},
 		{name: "URL, IPv6 loopback in brackets",
 			dsn:  "postgres://hm:s3cret@[::1]:5433/hm",
-			want: "postgres://hm:s3cret@" + "host" + ".docker.internal" + ":5433/hm"},
+			want: fmt.Sprintf("postgres://hm:s3cret@%s:5433/hm", containerHost)},
 		{name: "URL, 127.0.0.2 is loopback too",
 			dsn:  "postgresql://hm@127.0.0.2:5433/hm",
-			want: "postgresql://hm@" + "host" + ".docker.internal" + ":5433/hm"},
+			want: fmt.Sprintf("postgresql://hm@%s:5433/hm", containerHost)},
 		{name: "URL, the host query parameter overrides the authority",
 			dsn:  "postgres://hm@/hm?host=localhost&port=5433",
 			want: "postgres://hm@/hm?host=host.docker.internal&port=5433"},
