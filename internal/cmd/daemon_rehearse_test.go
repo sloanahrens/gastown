@@ -901,7 +901,7 @@ func TestDaemonRehearsePluginsFailureListsTheEntriesToAdd(t *testing.T) {
 // probed.
 func TestDaemonRehearsePathsNamesTheSettingKey(t *testing.T) {
 	t.Parallel()
-	const claude = "/Users/sloan/.claude"
+	claude := filepath.Join(t.TempDir(), ".claude")
 	settings := []byte(`{"daemon":{"container_off":` + offJSON() + `,"patrols":{"wisp_reaper":{"extra_beads_roots":["` + claude + `"]}}}}`)
 
 	missing := newRehearseHost()

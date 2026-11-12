@@ -229,6 +229,9 @@ func TestPolecatPathGuardFileTargets(t *testing.T) {
 	t.Parallel()
 	p := newPolecatTestTown(t)
 	configDir := p.env["CLAUDE_CONFIG_DIR"]
+	// Claude Code names a session's transcript directory after the working
+	// directory it ran in, with each separator turned into a dash.
+	transcriptSlug := strings.ReplaceAll(p.town, string(filepath.Separator), "-")
 
 	cases := []struct {
 		name      string
@@ -250,7 +253,7 @@ func TestPolecatPathGuardFileTargets(t *testing.T) {
 		{"CLAUDE_CONFIG_DIR/plans", "Write", fileInput(filepath.Join(configDir, "plans", "x.md")), false},
 		{"CLAUDE_CONFIG_DIR/todos", "Write", fileInput(filepath.Join(configDir, "todos", "x.md")), false},
 		{"CLAUDE_CONFIG_DIR/projects", "Write", fileInput(filepath.Join(configDir, "projects", "x.md")), false},
-		{"CLAUDE_CONFIG_DIR session transcripts", "Write", fileInput(filepath.Join(configDir, "projects", "-Users-sloan-gt", "sess-id", "memory", "note.md")), false},
+		{"CLAUDE_CONFIG_DIR session transcripts", "Write", fileInput(filepath.Join(configDir, "projects", transcriptSlug, "sess-id", "memory", "note.md")), false},
 		// ...and the rest of it is live harness config: deny (gt-ovo1).
 		{"CLAUDE_CONFIG_DIR/settings.json", "Write", fileInput(filepath.Join(configDir, "settings.json")), true},
 		{"CLAUDE_CONFIG_DIR/settings.json, Edit", "Edit", fileInput(filepath.Join(configDir, "settings.json")), true},
@@ -1344,7 +1347,7 @@ func TestIsWithinPath(t *testing.T) {
 		{"", "/worktree", false},
 		{"/worktree", "", false},
 		// macOS folds case; a differently-cased twin must not slip through.
-		{"/Users/User/gt/x", "/users/user/gt", true},
+		{"/Srv/Gt/x", "/srv/gt", true},
 	}
 	for _, tc := range cases {
 		if got := isWithinPath(tc.target, tc.root); got != tc.want {
