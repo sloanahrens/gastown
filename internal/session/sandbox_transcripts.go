@@ -161,7 +161,7 @@ func (b *openshellBackend) downloadSeatTranscripts(ctx context.Context, rec Sand
 		// A download that wrote no file where it was asked to fails here, not later
 		// as a seat that reads a partial copy.
 		if err := os.Chtimes(local, f.mtime, f.mtime); err != nil {
-			return 0, fmt.Errorf("keeping the sandbox mtime of %s: %w", f.remote, err)
+			return 0, fmt.Errorf("keeping the sandbox mtime of a copied transcript: %w", err)
 		}
 	}
 	if skipped > 0 {
@@ -182,9 +182,10 @@ func parseSandboxListing(out string) ([]sandboxTranscript, error) {
 		if line == "" {
 			continue
 		}
+		// The listing is captured sandbox output, so an error names the field, not its value.
 		fields := strings.SplitN(line, " ", 3)
 		if len(fields) != 3 {
-			return nil, fmt.Errorf("sandbox transcript listing line %q: want \"<mtime> <size> <path>\"", line)
+			return nil, errors.New(`sandbox transcript listing has a line that is not "<mtime> <size> <path>"`)
 		}
 		mtime, err := parseListingTime(fields[0])
 		if err != nil {
@@ -192,11 +193,11 @@ func parseSandboxListing(out string) ([]sandboxTranscript, error) {
 		}
 		size, err := strconv.ParseInt(fields[1], 10, 64)
 		if err != nil || size < 0 {
-			return nil, fmt.Errorf("sandbox transcript listing size %q: not a byte count", fields[1])
+			return nil, errors.New("sandbox transcript listing has a size that is not a byte count")
 		}
 		rel, ok := strings.CutPrefix(fields[2], sandboxProjectsDir+"/")
 		if !ok || !plainTranscriptPath(rel) {
-			return nil, fmt.Errorf("sandbox transcript listing path %q is not a transcript under %s", fields[2], sandboxProjectsDir)
+			return nil, fmt.Errorf("sandbox transcript listing has a path that is not a transcript under %s", sandboxProjectsDir)
 		}
 		files = append(files, sandboxTranscript{remote: fields[2], rel: rel, size: size, mtime: mtime})
 	}
@@ -205,16 +206,17 @@ func parseSandboxListing(out string) ([]sandboxTranscript, error) {
 
 // parseListingTime reads find's %T@ stamp, "<seconds>.<fraction>", to the nanosecond.
 func parseListingTime(s string) (time.Time, error) {
+	bad := errors.New("sandbox transcript listing has an mtime that is not a time")
 	secs, frac, _ := strings.Cut(s, ".")
 	sec, err := strconv.ParseInt(secs, 10, 64)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("sandbox transcript listing mtime %q: %w", s, err)
+		return time.Time{}, bad
 	}
 	var nsec int64
 	if frac != "" {
 		nsec, err = strconv.ParseInt((frac + "000000000")[:9], 10, 64)
 		if err != nil {
-			return time.Time{}, fmt.Errorf("sandbox transcript listing mtime %q: %w", s, err)
+			return time.Time{}, bad
 		}
 	}
 	return time.Unix(sec, nsec), nil
