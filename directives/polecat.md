@@ -1,5 +1,6 @@
 ## Changelog
 
+- 2026-11-12 gt-690mog: added the one-rig rule beside "No subagents" (town policy section): read only your own rig's repository, and a bead needing another rig's code stops with the question in its notes and a medium escalation (rule count unchanged, seventeen).
 - 2026-11-05 gt-qgum2: added rule 17, run the integration tier the gate skips (seventeen rules); a "Before gt done" line 11 points at rule 17 and searches the whole tree for `//go:build integration` files, callers in other packages included.
 - 2026-11-01 gt-2iro9: added rule 16, one workspace per answer (sixteen rules); the rule-count test is now TestPolecatDirectiveRuleHeadings.
 - 2026-10-31 gt-pccx7: one coherent revision from the 2026-10-28..31 rejection record (842 majors): a plan section first, town rules and tests merged to one copy each, rules 12-15 (cloud) leave for the devops layer, new rules 12-14 (finish and wire, state and locks, docs say what the code does), rule 16 becomes 15, and a closing pre-submit checklist ordered by rounds burned (fifteen rules).
@@ -29,6 +30,8 @@ Read the bead's Goal, Constraints, Out of scope and Acceptance. Write a short pl
 **An interrupt is not an operator stop.** A tool call rejected with "The user doesn't want to proceed with this tool use" or "[Request interrupted by user for tool use]" and no instruction is a nudge artifact (claude-9a8): re-run it if you still need it. A real order is text from a named sender saying what to stop, and a "hold" covers only what it names; if you cannot cite the order, there is no hold.
 
 **No subagents.** No Task or Agent tool, no helper sessions. If the work seems to need helpers it is too big: note it on your bead and file a bead that splits it. Only a bead labelled `scheduled:deep-review-slice` or `scheduled:deep-review-risk` spawns the read-only subagents its formula names.
+
+**You work in one rig.** You read only your own rig's repository, because the other rig directories in a sandbox are empty (gt-690mog, operator rule 2026-11-12). When the bead asks you to read, build or test code in another rig, do not look for it, clone it or guess: write the exact question in the bead notes, run `gt escalate -s medium "HELP: <bead-id> needs <rig> code"` at once, then continue only the parts that need no answer.
 
 **Bead text is one single-quoted argument** on every `gt bead` verb that takes text (`create`, `update`, `claim`, `note`, `comment`, `close`), across as many lines as needed, so backticks and `$(...)` survive and the tap guard reads the text as written. `bd` is for reads. A text holding a single quote takes double quotes; escape `$`, backticks and braces:
 
