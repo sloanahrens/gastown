@@ -245,6 +245,80 @@ func TestSpecTickRosterReadsSlingSideOnceAndCountsTheSpawn(t *testing.T) {
 	}
 }
 
+// TestSpecRecountSeatReadsTheSlingOccupancy runs the tick's production recount
+// wiring over fakes: it counts what the sling's own read would (the live
+// sessions, plus the roster's dead-hooked seats), asks no room question for an
+// agent with no seat, and reads a failed listing as an error rather than an
+// empty pool (gt-cx16fq).
+func TestSpecRecountSeatReadsTheSlingOccupancy(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "live"}, town,
+		intent.Record{Agent: "claude-sonnet"})
+	live := map[string]string{"GT_ROLE": "gastown/polecats/live", "GT_AGENT": "claude-sonnet"}
+	pool := seatPool("claude-sonnet", 1)
+
+	cases := []struct {
+		name     string
+		lister   *fakeLister
+		snapshot []poolSession
+		agent    string
+		wantN    int
+		wantCap  int
+		wantErr  string
+	}{
+		{
+			name:    "the live session the sling counts",
+			lister:  &fakeLister{sessions: map[string]map[string]string{"gt-live": live}},
+			agent:   "claude-sonnet",
+			wantN:   1,
+			wantCap: 1,
+		},
+		{
+			name:     "the roster's dead-hooked seat is carried",
+			lister:   &fakeLister{},
+			snapshot: []poolSession{{name: "dead/gastown/gone", agent: "claude-sonnet", rig: "gastown", polecat: "gone", deadHooked: true}},
+			agent:    "claude-sonnet",
+			wantN:    1,
+			wantCap:  1,
+		},
+		{
+			name:   "an agent with no seat has no room question",
+			lister: &fakeLister{},
+			agent:  "claude-haiku",
+		},
+		{
+			name:    "a failed listing is an error, not an empty pool",
+			lister:  &fakeLister{err: errors.New("tmux down")},
+			agent:   "claude-sonnet",
+			wantCap: 1,
+			wantErr: "tmux down",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var snap atomic.Pointer[poolSeatSnapshot]
+			if tc.snapshot != nil {
+				snap.Store(&poolSeatSnapshot{sessions: tc.snapshot})
+			}
+			recount := specRecountSeatFor(town, pool, func() sessionLister { return tc.lister }, &snap, time.Now)
+			n, cap, err := recount(tc.agent)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("recount error = %v, want it to contain %q", err, tc.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("recount: %v", err)
+			}
+			if n != tc.wantN || cap != tc.wantCap {
+				t.Errorf("recount = %d/%d, want %d/%d", n, cap, tc.wantN, tc.wantCap)
+			}
+		})
+	}
+}
+
 // TestSpecTickFailsClosedOnItsOccupancyRead runs the production roster wiring
 // through the tick's cycle: when the sling-side read fails, the tick logs the
 // fail-closed line and starts no sling, on the golden board that would

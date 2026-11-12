@@ -84,6 +84,10 @@ type poolSession struct {
 	// landing marks a seat mid-landing: its polecat ran gt done and the
 	// landing worker has not closed its bead (poolLandingSessions).
 	landing bool
+	// claim marks a seat another sling reserved before its session existed
+	// (poolSeatLedger.claimSessions). It holds the seat like a session does, and
+	// a refusal names it as a source of its count (gt-cx16fq).
+	claim bool
 }
 
 // poolHeldCount counts the sessions that hold a pool seat: every session but a
@@ -367,7 +371,7 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 	}
 	if total := pool.GetMaxTotal(); total > 0 && poolHeldCount(sessions) >= total {
 		agent = poolRefusalAgent(pool, requested)
-		return agent, fmt.Sprintf("pool: total full (%d/%d across every seat) -> no seat for %s", poolHeldCount(sessions), total, agent), true, "polecat_pool.max_total"
+		return agent, fmt.Sprintf("pool: total full (%d/%d across every seat%s) -> no seat for %s", poolHeldCount(sessions), total, poolCountSources("", sessions), agent), true, "polecat_pool.max_total"
 	}
 	switch {
 	case len(pool.Seats) == 0:
@@ -396,7 +400,7 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 		return agent, fmt.Sprintf("pool: closed (cap 0) -> no seat for %s", agent), true, poolSeatCapKey(agent)
 	}
 	if n >= seat.Cap {
-		return agent, fmt.Sprintf("pool: full (%d/%d%s) -> no seat for %s", n, seat.Cap, deadHookedNote(agent, sessions), agent), true, poolSeatCapKey(agent)
+		return agent, fmt.Sprintf("pool: full (%d/%d%s) -> no seat for %s", n, seat.Cap, poolCountSources(agent, sessions), agent), true, poolSeatCapKey(agent)
 	}
 	return agent, fmt.Sprintf("pool: seat %d/%d -> %s", n+1, seat.Cap, agent), false, ""
 }
@@ -418,22 +422,53 @@ func poolRefusalAgent(pool *config.PolecatPool, requested string) string {
 	return "the default agent"
 }
 
-// deadHookedNote names the dead-hooked seats inside an agent's live count, so a
-// full-seat refusal says when a crashed seat waiting for its supervised restart
-// is what filled it: the operator otherwise sees "3/3" with fewer than three
-// live sessions and no reason (gt-tldj4). Empty when no dead-hooked seat holds
-// a seat, so the common refusal keeps its wording.
-func deadHookedNote(agent string, sessions []poolSession) string {
-	n := 0
+// poolCountSources names where a full count came from: the live sessions,
+// dead-hooked seats, seats mid-landing and claims inside it, e.g.
+// ": 5 sessions, 1 dead-hooked, 2 claims". The operator otherwise sees "8/8"
+// with no way to tell which sessions, crashed seats or other slings filled it
+// (gt-cx16fq). The breakdown appears when a dead-hooked seat or a claim is
+// inside, so a count of live sessions alone keeps the short wording it has
+// always had. agent "" counts every agent's seats, for the town's total.
+func poolCountSources(agent string, sessions []poolSession) string {
+	var live, dead, landing, claims int
 	for _, s := range sessions {
-		if s.deadHooked && s.agent == agent {
-			n++
+		if s.parkedStale || (agent != "" && s.agent != agent) {
+			continue
+		}
+		switch {
+		case s.claim:
+			claims++
+		case s.deadHooked:
+			dead++
+		case s.landing:
+			landing++
+		default:
+			live++
 		}
 	}
-	if n == 0 {
+	if dead == 0 && claims == 0 {
 		return ""
 	}
-	return ", " + deadHookedCount(n)
+	count := func(n int, one, many string) string {
+		if n == 1 {
+			return "1 " + one
+		}
+		return fmt.Sprintf("%d %s", n, many)
+	}
+	var parts []string
+	if live > 0 {
+		parts = append(parts, count(live, "session", "sessions"))
+	}
+	if dead > 0 {
+		parts = append(parts, deadHookedCount(dead))
+	}
+	if landing > 0 {
+		parts = append(parts, fmt.Sprintf("%d mid-landing", landing))
+	}
+	if claims > 0 {
+		parts = append(parts, count(claims, "claim", "claims"))
+	}
+	return ": " + strings.Join(parts, ", ")
 }
 
 // deadHookedCount names the seats inside a count that no tmux session holds:
@@ -1335,7 +1370,7 @@ func (l *poolSeatLedger) claimSessions(ownID string) ([]poolSession, error) {
 		if c.ID == ownID || c.Agent == "" || l.stale(c, now) {
 			continue
 		}
-		out = append(out, poolSession{name: "pool-claim/" + c.ID, agent: c.Agent, created: c.CreatedAt})
+		out = append(out, poolSession{name: "pool-claim/" + c.ID, agent: c.Agent, created: c.CreatedAt, claim: true})
 	}
 	return out, nil
 }

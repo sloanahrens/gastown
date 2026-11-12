@@ -1617,6 +1617,13 @@ type specDispatchEnv struct {
 	// that rig's red-main beads, never any other bead (gt-zkdwt).
 	RevertInFlight func(rig string) *specdispatch.Revert
 	Roster         func() (specRoster, error)
+	// RecountSeat recounts the seat agent's sling would take, just before the
+	// sling starts: the occupancy read the sling itself passes to routeWith, so
+	// a seat that appeared since the roster read is seen before the sling spends
+	// its setup on a refusal (gt-cx16fq). It returns the seats occupied now and
+	// the agent's cap; a cap of 0 leaves the sling's own check to decide. Nil
+	// recounts nothing, which is a tick with no seat picture to re-read.
+	RecountSeat func(agent string) (n, cap int, err error)
 	// Annotate adds text as a comment unless the bead already carries a
 	// comment starting with key, so each kind of note lands once.
 	Annotate func(beadID, key, text string) error
@@ -2446,7 +2453,10 @@ type specSlingOutcome struct {
 	// rolled its spawn back: its charged seat is handed back. Any other sling
 	// that did not succeed keeps the charge for the tick (gt-pto2f).
 	refused bool
-	took    time.Duration
+	// recountErr is the error line a seat recount left when it could not read
+	// the seats: the tick reports it, and the sling still runs.
+	recountErr string
+	took       time.Duration
 }
 
 type specSlingKind int
@@ -2469,6 +2479,10 @@ const (
 // each one reads is the tick's snapshot plus the live sessions and claims of
 // the moment (snapshotOccupied).
 //
+// Each sling recounts its seat just before it starts (specSlingWithRecount), so
+// a seat taken since the roster read skips the sling instead of refusing it
+// after its setup (gt-cx16fq).
+//
 // A refused sling gives its charged seat back (gt-9x16z): the tick charged the
 // seat when it collected the candidate, and the charge stays in the budget only
 // while a sling of this tick may still fill it. A sling that failed in any
@@ -2486,7 +2500,7 @@ func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, repor
 			defer wg.Done()
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			outcomes[i] = specSlingOne(env, pending[i])
+			outcomes[i] = specSlingWithRecount(env, pending[i])
 		}(i)
 	}
 	wg.Wait()
@@ -2494,6 +2508,11 @@ func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, repor
 	for _, o := range outcomes {
 		if o.took > slowest {
 			slowest = o.took
+		}
+		// The recount ran on the sling's goroutine, so the report is written
+		// here, in candidate order.
+		if o.recountErr != "" {
+			report.Errors = append(report.Errors, o.recountErr)
 		}
 		specApplyOutcome(env, report, o)
 		// Only a refusal proves the sling spawned nothing. A failure or an
@@ -2542,6 +2561,31 @@ func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSli
 			report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", o.entry.Bead, err))
 		}
 	}
+}
+
+// specSlingWithRecount recounts the seat the planned sling will take, then
+// starts it. The roster is a snapshot read 15 to 25 s before the slings, so a
+// seat it showed free can be taken by the time the sling counts: the sling then
+// spends its setup and is refused at the pool check (gt-cx16fq). A recount that
+// finds the seat gone skips the sling before it starts, and the skip hands the
+// charged seat back. A recount that cannot read the seats is reported and the
+// sling runs as before, since the sling's own pool check still counts.
+func specSlingWithRecount(env specDispatchEnv, p specPendingSling) specSlingOutcome {
+	start := env.Now()
+	if env.RecountSeat != nil {
+		n, cap, err := env.RecountSeat(p.seat.Agent)
+		switch {
+		case err != nil:
+			o := specSlingOne(env, p)
+			o.recountErr = fmt.Sprintf("%s: cannot list the seats before the sling (%v); dispatching anyway", p.id, err)
+			return o
+		case cap > 0 && n >= cap:
+			entry := p.entry
+			entry.Line = fmt.Sprintf("%s: no seat (recounted %d/%d before the sling)", p.id, n, cap)
+			return specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true, took: env.Now().Sub(start)}
+		}
+	}
+	return specSlingOne(env, p)
 }
 
 // specSlingOne is one sling with its contention retries; the last-moment
@@ -2889,6 +2933,30 @@ func specDispatchRoster(reads *specTickReads, townRoot string, ts *config.TownSe
 	}
 }
 
+// specRecountSeatFor is the tick's seat recount over one town: the occupancy read
+// a sling passes to routeWith (snapshotOccupied over the picture
+// specDispatchRoster kept), taken again just before each planned sling starts
+// (specSlingWithRecount, gt-cx16fq). It returns the seats the agent holds now and
+// its cap; an agent with no seat, or one whose cap is 0, has no room question to
+// ask here, and the sling's own check answers it.
+func specRecountSeatFor(townRoot string, pool *config.PolecatPool, lister func() sessionLister, snapshot *atomic.Pointer[poolSeatSnapshot], now func() time.Time) func(agent string) (int, int, error) {
+	return func(agent string) (int, int, error) {
+		seat, ok := poolSeatOf(pool, agent)
+		if !ok || seat.Cap <= 0 {
+			return 0, 0, nil
+		}
+		seats := poolSeatSnapshot{}
+		if kept := snapshot.Load(); kept != nil {
+			seats = *kept
+		}
+		sessions, err := snapshotOccupied(seats, poolSeatAgentFor(townRoot), lister, sandboxSeatDeathsFor(townRoot), now)()
+		if err != nil {
+			return 0, seat.Cap, err
+		}
+		return poolSeatCount(agent, sessions), seat.Cap, nil
+	}
+}
+
 // specDrainingSessions is the sling-side occupancy beyond the roster: each held
 // session the roster did not already count. Both reads name an occupancy the
 // same way (specOccupancyKey), so one occupancy is counted once however many
@@ -3152,8 +3220,9 @@ func runSpecDispatchAtWith(townRoot, owner string, dryRun bool) (specDispatchRep
 		// live sessions, in-flight claims, and seats mid-landing. Two
 		// pictures of one pool is how the dispatcher ends up slinging into
 		// a seat the nudge just called free (gt-thy6r).
-		Roster:   specDispatchRoster(reads, townRoot, ts, newPoolSessionLister, func(dir string) beads.Client { return beads.New(dir) }, &snapshot),
-		Annotate: annotations.annotate,
+		Roster:      specDispatchRoster(reads, townRoot, ts, newPoolSessionLister, func(dir string) beads.Client { return beads.New(dir) }, &snapshot),
+		RecountSeat: specRecountSeatFor(townRoot, ts.PolecatPool, newPoolSessionLister, &snapshot, time.Now),
+		Annotate:    annotations.annotate,
 		AddLabel: func(id, label string) error {
 			return poolBeadLabelAdd(townRoot, id, label)
 		},
