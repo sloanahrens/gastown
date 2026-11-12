@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
 )
 
@@ -449,6 +450,51 @@ func TestPatrolScanRestartQuietScanBreaksTheRun(t *testing.T) {
 		_ = h.Restart("gastown", "goose", "patrol scan: dead")
 		if got := patrolRestartEscalations(rec, key); len(got) != 1 {
 			t.Errorf("escalations = %d, want 1: a scan of another rig broke the run", len(got))
+		}
+	})
+}
+
+// A restart the sandbox refused for a diverged branch opens the escalation on
+// its first failed scan, naming the seat, the branch and both heads: a second
+// scan may never come, and the seat cannot land until someone reads the heads.
+// Any other cause still waits for its second scan (gt-mqxa26).
+func TestPatrolRestartDivergedEscalatesOnFirstScan(t *testing.T) {
+	t.Parallel()
+	const key = "patrol-restart:gastown/goose"
+	diverged := &session.BranchDivergedError{
+		Branch: "gt-pyh5p6", Local: "92c60530", Remote: "7ef1e3fa", MergeBase: "e573d406",
+		LocalOnly: 1, RemoteOnly: 17, Refusal: errors.New(" ! [rejected]"),
+	}
+
+	t.Run("a diverged branch escalates on the first failed scan", func(t *testing.T) {
+		t.Parallel()
+		failure := errors.New("gt session restart gastown/goose: exit status 1: " + diverged.Error())
+		d, rec := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error { return failure })
+		h := &patrolScanHost{d: d}
+		_ = h.Restart("gastown", "goose", "patrol scan: dead")
+		got := patrolRestartEscalations(rec, key)
+		if len(got) != 1 {
+			t.Fatalf("escalations after one failed scan = %d, want 1", len(got))
+		}
+		for _, want := range []string{"gastown/goose", "gt-pyh5p6", "local 92c60530", "origin 7ef1e3fa"} {
+			if !strings.Contains(got[0].Escalation.Reason, want) {
+				t.Errorf("escalation = %q, want it to name %q", got[0].Escalation.Reason, want)
+			}
+		}
+	})
+
+	t.Run("another cause escalates on its second scan", func(t *testing.T) {
+		t.Parallel()
+		failure := errors.New("restarting gastown/goose: exit status 1: push refused")
+		d, rec := newPatrolRestartDaemon(t, 10, func(supervisor.Seat) error { return failure })
+		h := &patrolScanHost{d: d}
+		_ = h.Restart("gastown", "goose", "patrol scan: dead")
+		if got := patrolRestartEscalations(rec, key); len(got) != 0 {
+			t.Fatalf("escalations after one failed scan = %d, want 0", len(got))
+		}
+		_ = h.Restart("gastown", "goose", "patrol scan: dead")
+		if got := patrolRestartEscalations(rec, key); len(got) != 1 {
+			t.Errorf("escalations after two failed scans = %d, want 1", len(got))
 		}
 	})
 }

@@ -72,9 +72,15 @@ type BranchDivergedError struct {
 	Refusal    error
 }
 
+// BranchDivergedMarker is the text that follows the branch name in every
+// BranchDivergedError.Error. A restart reports its failure as text only, so the
+// daemon matches this constant to tell a diverged branch from any other cause,
+// and the two cannot drift apart.
+const BranchDivergedMarker = "diverged from origin:"
+
 func (e *BranchDivergedError) Error() string {
-	return fmt.Sprintf("branch %s diverged from origin: local %s, origin %s, merge-base %s; local holds %d commits origin lacks, origin holds %d local lacks; nothing is forced: %s",
-		e.Branch, e.Local, e.Remote, e.MergeBase, e.LocalOnly, e.RemoteOnly, refusalLine(e.Refusal.Error()))
+	return fmt.Sprintf("branch %s %s local %s, origin %s, merge-base %s; local holds %d commits origin lacks, origin holds %d local lacks; nothing is forced: %s",
+		e.Branch, BranchDivergedMarker, e.Local, e.Remote, e.MergeBase, e.LocalOnly, e.RemoteOnly, refusalLine(e.Refusal.Error()))
 }
 
 func (e *BranchDivergedError) Unwrap() error { return e.Refusal }
