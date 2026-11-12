@@ -1831,7 +1831,10 @@ function renderTrend(s) {
   // The seat class picked above the points row sets both the points row and the
   // differences (gt-vd91ny.8).
   const vel = t.velocity ? velocityRows(t.velocity, hours, hhmm) : null;
-  if (vel) lhbody.append(vel.pick, vel.points);
+  if (vel) {
+    if (vel.pick) lhbody.append(vel.pick);
+    lhbody.append(vel.points);
+  }
   lhbody.append(timeAxis(t0, t1));
 
   // The differences draw over the feed's whole window, up to 72 hours, not the
@@ -1859,11 +1862,13 @@ function renderTrend(s) {
 // velocityRows draws the velocity rows under the landings bars for one seat
 // class at a time: the buttons that pick the class, the points row, and the two
 // difference rows. A feed with no class beside the whole town draws that series
-// and no buttons. A class with no landing with time draws its text in place of
-// the rows, never empty rows (gt-vd91ny.8).
+// and no buttons, and a feed with one class or none draws no pick row. The whole
+// town's button is offered only when the feed carries its series; otherwise the
+// first class is pressed. A class with no landing with time draws its text in
+// place of the rows, never empty rows (gt-vd91ny.8, gt-xmkhfu).
 function velocityRows(velocity, hours, hhmm) {
   const classes = velocity.classes || null;
-  const names = classes ? ["all"].concat(Object.keys(classes).filter(k => k !== "all").sort()) : [];
+  const names = classes ? (classes.all ? ["all"] : []).concat(Object.keys(classes).filter(k => k !== "all").sort()) : [];
   const feed = name => classes ? (classes[name] || []) : (velocity.hours || []);
   const pick = el("div", "vpick");
   const points = el("div", "vpoints");
@@ -1906,8 +1911,8 @@ function velocityRows(velocity, hours, hhmm) {
       pick.append(b);
     }
   }
-  draw(classes && names.includes(velocityClassChoice) ? velocityClassChoice : "all");
-  return {pick, points, diff};
+  draw(classes && names.includes(velocityClassChoice) ? velocityClassChoice : (names[0] || "all"));
+  return {pick: names.length > 1 ? pick : null, points, diff};
 }
 
 // velocityBars draws the points per hour under the landings bars: one column per

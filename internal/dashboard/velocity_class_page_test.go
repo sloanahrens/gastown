@@ -358,3 +358,67 @@ func TestVelocityRejectedTooltipNamesRejectedPointsAndRejections(t *testing.T) {
 		t.Errorf("the 14:00 tooltip is %q, want %q", cols[0].Title, want)
 	}
 }
+
+// readPickRows counts the seat class rows the pane draws. A row is drawn only
+// when the feed holds a class to pick, so a feed with none draws no row at all.
+func readPickRows(t *testing.T, p *pageDOM) int {
+	t.Helper()
+
+	v, err := p.vm.RunString(`(function () {
+  var n = 0;
+  __walk(document.getElementById("trend"), function (e) {
+    if (e.className === "vpick") n++;
+  });
+  return n;
+})()`)
+	if err != nil {
+		t.Fatalf("counting the seat class rows: %v", err)
+	}
+	return int(v.ToInteger())
+}
+
+// A feed whose classes do not carry the whole town's series offers no "all"
+// button: the pane presses the first class it holds and draws that class's rows.
+func TestVelocityClassButtonsOmitAllWhenTheFeedHasNoAllSeries(t *testing.T) {
+	t.Parallel()
+
+	haiku := []map[string]any{velocityClassHour(0, 2, 1, 0), velocityClassHour(1, 1, 1, 0)}
+	sonnet := []map[string]any{velocityClassHour(0, 4, 2, 0), velocityClassHour(1, 8, 3, 0)}
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", velocityClassPane(sonnet, map[string][]map[string]any{"haiku": haiku, "sonnet": sonnet}))
+
+	want := []seatClassButton{{"haiku", true}, {"sonnet", false}}
+	if got := readSeatClassButtons(t, p); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("the class buttons are %+v, want %+v", got, want)
+	}
+	if got := pointsHeights(t, p); fmt.Sprint(got) != fmt.Sprint([][]string{{"hpts 100%"}, {"hpts 50%"}, nil}) {
+		t.Errorf("the points row draws %v, want haiku's series", got)
+	}
+}
+
+// A feed with no seat classes draws no pick row: there is no button to show, so
+// an empty row would only add its margin under the landings bars.
+func TestVelocityFeedWithoutClassesDrawsNoPickRow(t *testing.T) {
+	t.Parallel()
+
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", velocityPaneReading())
+
+	if got := readPickRows(t, p); got != 0 {
+		t.Errorf("a feed with no seat classes draws %d pick rows, want none", got)
+	}
+}
+
+// A feed with a single class draws no pick row either: one button chooses
+// nothing, so the row is left out as it is for a feed with no classes.
+func TestVelocityFeedWithOneClassDrawsNoPickRow(t *testing.T) {
+	t.Parallel()
+
+	all := []map[string]any{velocityClassHour(0, 4, 2, 0), velocityClassHour(1, 8, 3, 0)}
+	p := newPageDOM(t)
+	p.call(t, "renderTrend", velocityClassPane(all, map[string][]map[string]any{"all": all}))
+
+	if got := readPickRows(t, p); got != 0 {
+		t.Errorf("a feed with one seat class draws %d pick rows, want none", got)
+	}
+}
