@@ -436,3 +436,21 @@ func TestJevScorecardReportsAWriteFailure(t *testing.T) {
 		t.Fatal("want the writer's failure")
 	}
 }
+
+// The help text states every count floor the verdict applies, so a reader can
+// tell why a question reads not-yet. Wrapping is folded away first, so a floor
+// split across two lines still matches.
+func TestJevScorecardHelpStatesTheVerdictFloors(t *testing.T) {
+	t.Parallel()
+	help := strings.Join(strings.Fields(jevScorecardCmd.Long), " ")
+	for _, floor := range []string{
+		"below 30 labeled lines",
+		"below 10 positives",
+		"below 10 negatives",
+		"below 10 labeled lines flagged",
+	} {
+		if !strings.Contains(help, floor) {
+			t.Errorf("help text does not state the verdict floor %q", floor)
+		}
+	}
+}
