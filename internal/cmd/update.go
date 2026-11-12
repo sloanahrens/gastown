@@ -21,9 +21,9 @@ import (
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/imagevalues"
+	"github.com/steveyegge/gastown/internal/installer"
 	"github.com/steveyegge/gastown/internal/notify"
 	"github.com/steveyegge/gastown/internal/update"
-	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -605,7 +605,7 @@ func updateHeartbeatError(w io.Writer) func(error) {
 // request, all under one clock.
 func realUpdateDeps(townRoot string) (update.Deps, error) {
 	clock := updateClock{}
-	repoRoot, err := version.GetRepoRootForTown(townRoot)
+	repoRoot, err := installer.SourceCheckout(townRoot)
 	if err != nil {
 		return update.Deps{}, err
 	}

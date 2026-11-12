@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/update"
@@ -415,9 +416,15 @@ func (d *Daemon) updateLandingsWaiting(repoRoot, binaryCommit string) (int, erro
 	return waiting, nil
 }
 
-// updateSourceRig is the rig directory holding repoRoot, empty when it is not
-// a rig directly under the town.
+// updateSourceRig is the rig whose checkout repoRoot is: the checkout's own
+// directory name when it is a build checkout, else the rig directory holding
+// it. Empty when repoRoot is not under a rig.
 func (d *Daemon) updateSourceRig(repoRoot string) string {
+	// A build checkout is <town>/.runtime/build-src/<rig>; its first segment
+	// under the town is the base directory, not the rig.
+	if buildsrc.IsBuildCheckout(repoRoot) {
+		return filepath.Base(filepath.Clean(repoRoot))
+	}
 	rel, err := filepath.Rel(filepath.Clean(d.config.TownRoot), filepath.Clean(repoRoot))
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return ""

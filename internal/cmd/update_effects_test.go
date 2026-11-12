@@ -630,8 +630,8 @@ func TestNewExecInstallerRepoRootAndTrimEnv(t *testing.T) {
 	})
 }
 
-// townWithGtSource is a town whose gastown rig is a gt source checkout, the
-// tree version.GetRepoRootForTown looks for.
+// townWithGtSource is a town whose gastown rig directory is a gt source
+// checkout, the tree installer.SourceCheckout looks for.
 func townWithGtSource(t *testing.T) string {
 	t.Helper()
 	townRoot := t.TempDir()

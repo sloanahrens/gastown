@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/buildsrc"
 	"github.com/steveyegge/gastown/internal/landworker"
 	"github.com/steveyegge/gastown/internal/version"
 )
@@ -80,8 +81,10 @@ func landingDrainDaemon(t *testing.T) (*Daemon, *syncBuffer) {
 		mkdirs(t, filepath.Join(rigPath, ".beads"))
 		writeFile(t, filepath.Join(rigPath, "config.json"), fmt.Sprintf(`{"beads":{"prefix":%q}}`, rigName[:2]))
 	}
-	mkdirs(t, filepath.Join(townRoot, src, "cmd", "gt"))
-	writeFile(t, filepath.Join(townRoot, src, "cmd", "gt", "main.go"), "package main\n")
+	// The town's gt source is the gastown rig's build checkout, not a checkout
+	// in the rig tree.
+	mkdirs(t, filepath.Join(townRoot, buildsrc.BaseDirRel(), src, "cmd", "gt"))
+	writeFile(t, filepath.Join(townRoot, buildsrc.BaseDirRel(), src, "cmd", "gt", "main.go"), "package main\n")
 	registerTestRigs(t, townRoot, map[string]string{src: src[:2], other: other[:2]})
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -336,8 +339,8 @@ func TestLandingIdleAfterIdleNeverRequestsAnInstall(t *testing.T) {
 }
 
 // TestLandingOwnsGTSourceOnlyMatchesTheSourceRig pins the rig lookup both
-// landing loop tests lean on: the source checkout is inside the gastown rig,
-// and nothing about another rig's path is inside it.
+// landing loop tests lean on: the source checkout is the gastown rig's build
+// checkout, and no other rig owns it.
 func TestLandingOwnsGTSourceOnlyMatchesTheSourceRig(t *testing.T) {
 	t.Parallel()
 	d, _ := landingDrainDaemon(t)

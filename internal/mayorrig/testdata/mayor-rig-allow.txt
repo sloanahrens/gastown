@@ -52,7 +52,7 @@ internal/doctor/unregistered_beads_check.go	1	pending-retirement	doctor unregist
 internal/doltserver/doltserver.go	4	pending-retirement	dolt server: reads the rig's mayor/rig/.beads database and port
 internal/done/done.go	1	pending-retirement	gt done: the rig work directory under mayor/rig
 internal/forgejocut/repoint.go	2	pending-retirement	forgejo cutover repoint: rewrites remotes in the rig's mayor/rig checkout
-internal/installer/paths.go	1	pending-retirement	installer: the gastown rig directory default under mayor/rig
+internal/installer/paths.go	1	pending-retirement	installer: the branch checkout default and the source lookup it builds in, deleted with gt-yjzepk
 internal/jev/rework/wire.go	2	pending-retirement	rework wiring: the git base candidates .repo.git and mayor/rig, and the error text
 internal/jev/scorecard/finding.go	2	pending-retirement	scorecard finding: the git base candidates .repo.git and mayor/rig, and the error text
 internal/mail/address_policy.go	2	pending-retirement	mail address policy: the constants.DirMayor address prefix, which is not the clone path
@@ -67,4 +67,3 @@ internal/townstate/daycheck.go	1	pending-retirement	townstate daycheck: the cons
 internal/townstate/townstate.go	2	pending-retirement	townstate: the constants.DirMayor and constants.DirRig names in its path table
 internal/townstate/verify.go	2	pending-retirement	townstate verify: the constants.DirMayor/constants.DirRig path it verifies
 internal/townstatus/townstatus.go	1	pending-retirement	townstatus: the rig's mayor/rig checkout path it reports
-internal/version/stale.go	4	pending-retirement	version stale check: the gastown mayor/rig paths it searches for a stale binary
