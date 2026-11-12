@@ -236,15 +236,49 @@ var guardTriggers = []struct {
 // The always entries still run (gt-t4rchq).
 const unguarded = "M\x00docs/testing.md\x00"
 
-// alwaysGuards is the selection an unguarded, non-empty diff returns: the
-// table's always entries, sorted by package.
-var alwaysGuards = []GuardSelect{
-	{Package: "internal/mayorrig", Tests: []string{"TestRepoMayorRig"}},
-	{Package: "internal/podengine", Tests: []string{"TestEveryEngineSiteHasARowPerFunction"}},
-	{Package: "internal/testpolicy", Tests: []string{
-		"TestAllowedTools", "TestDockerTier", "TestGitFree", "TestPolicy",
-		"TestRealGit", "TestUnionMergeOnlyOnGrowOnlyLists", "TestUnitTierMain",
-	}},
+// alwaysPackages are the guards every non-empty diff must run: no path
+// predicate can stand for any of them (gt-t4rchq). The tests each one runs
+// come from treeWideGuards, so a rename there needs no edit here.
+var alwaysPackages = []string{"internal/mayorrig", "internal/podengine", "internal/testpolicy"}
+
+// alwaysSelection is the selection a non-empty diff that trips no path
+// predicate returns: alwaysPackages, each with the tests treeWideGuards gives
+// it, sorted by package and test. It fails when the table's always entries and
+// alwaysPackages disagree, so neither can drop one unnoticed (gt-uo398m).
+func alwaysSelection(t *testing.T) []GuardSelect {
+	t.Helper()
+	marked := map[string]bool{}
+	byPkg := map[string][]string{}
+	for _, g := range treeWideGuards {
+		if !g.always {
+			continue
+		}
+		marked[g.pkg] = true
+		byPkg[g.pkg] = append(byPkg[g.pkg], g.tests...)
+	}
+	required := map[string]bool{}
+	for _, pkg := range alwaysPackages {
+		required[pkg] = true
+		if !marked[pkg] {
+			t.Errorf("treeWideGuards does not mark %s always", pkg)
+		}
+	}
+	for pkg := range marked {
+		if !required[pkg] {
+			t.Errorf("treeWideGuards marks %s always; alwaysPackages does not name it", pkg)
+		}
+	}
+	sel := make([]GuardSelect, 0, len(byPkg))
+	for _, pkg := range alwaysPackages {
+		tests, ok := byPkg[pkg]
+		if !ok {
+			continue
+		}
+		sort.Strings(tests)
+		sel = append(sel, GuardSelect{Package: pkg, Tests: tests})
+	}
+	sort.Slice(sel, func(i, j int) bool { return sel[i].Package < sel[j].Package })
+	return sel
 }
 
 func TestChangedPaths(t *testing.T) {
@@ -266,8 +300,26 @@ func TestGuardSelects(t *testing.T) {
 
 	// A docs-only diff trips no predicate, but the always entries run on any
 	// non-empty diff (gt-t4rchq).
-	if got, err := GuardSelects(unguarded, hasGo); err != nil || !reflect.DeepEqual(got, alwaysGuards) {
-		t.Errorf("GuardSelects(%q) = %v, %v, want the always guards %v", unguarded, got, err, alwaysGuards)
+	want := alwaysSelection(t)
+	if got, err := GuardSelects(unguarded, hasGo); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("GuardSelects(%q) = %v, %v, want the always guards %v", unguarded, got, err, want)
+	}
+	// A deletion is a change record too: a test file that goes still runs
+	// testpolicy, through its always entry (gt-uo398m). Other guards can fire
+	// on the path as well, so only the always package is asserted.
+	deleted, err := GuardSelects("D\x00internal/land/old_test.go\x00", hasGo)
+	if err != nil {
+		t.Fatalf("GuardSelects(deleted test file): %v", err)
+	}
+	found := false
+	for _, s := range deleted {
+		if s.Package == "internal/testpolicy" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("GuardSelects(deleted test file) = %v, want internal/testpolicy among them", deleted)
 	}
 	if got, err := GuardSelects("", hasGo); err != nil || got != nil {
 		t.Errorf("GuardSelects(empty) = %v, %v, want nil", got, err)
@@ -318,7 +370,7 @@ func TestShellScriptAllowlistChangeRunsTheAllowlistControl(t *testing.T) {
 }
 
 // TestEveryGuardIsSampled keeps the two lists in step: a guard package the
-// sampler does not name has a predicate no test exercises.
+// sampler does not name has a selection path no test exercises.
 func TestEveryGuardIsSampled(t *testing.T) {
 	t.Parallel()
 	sampled := map[string]bool{}
@@ -328,6 +380,18 @@ func TestEveryGuardIsSampled(t *testing.T) {
 	for _, g := range treeWideGuards {
 		if !sampled[g.pkg] {
 			t.Errorf("treeWideGuards names %s, which guardTriggers does not sample", g.pkg)
+		}
+	}
+}
+
+// TestEveryPathGuardHasAPredicate: a non-always entry needs a judges predicate
+// to be selected, or presubmit never runs it. The always entries carry none by
+// design (gt-uo398m).
+func TestEveryPathGuardHasAPredicate(t *testing.T) {
+	t.Parallel()
+	for _, g := range treeWideGuards {
+		if !g.always && g.judges == nil {
+			t.Errorf("%s is not always and judges no path", g.pkg)
 		}
 	}
 }
@@ -392,8 +456,9 @@ func TestGuardSelectsRemovals(t *testing.T) {
 			"D\x00internal/crew/manager.go\x00",
 			"internal/bdgate",
 		},
-		// A deleted test file selects testpolicy through its always entry, not
-		// its removal predicate, so TestGuardSelects asserts it there (gt-t4rchq).
+		// A deleted test file runs testpolicy through its always entry, now
+		// that the entry carries no removal predicate. TestGuardSelects asserts
+		// it on a deletion record (gt-uo398m).
 		{
 			// The session policy tests read the file, so its removal fails them.
 			"deleting the polecat policy selects session",
