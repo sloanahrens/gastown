@@ -147,6 +147,37 @@ func TestReport_BarIsALabelAndMaxWallIsTheFailure(t *testing.T) {
 	}
 }
 
+// TestReport_MaxWallBoundary pins the -max-wall comparison at its edge: a tier
+// exactly at the wall is not over it, and a tier a millisecond past it is. The
+// stream runs exactly one minute, so the two rows sit one millisecond apart.
+// Mutation: compare with >=, and the equal row exits 3.
+func TestReport_MaxWallBoundary(t *testing.T) {
+	t.Parallel()
+	const stream = `{"Time":"2026-11-01T14:00:00Z","Action":"start","Package":"example.com/fx/a"}
+{"Time":"2026-11-01T14:01:00Z","Action":"pass","Package":"example.com/fx/a","Elapsed":60}
+`
+	for _, tc := range []struct {
+		name    string
+		maxWall string
+		want    int
+	}{
+		{name: "a tier equal to the wall is not over", maxWall: "60s", want: 0},
+		{name: "a tier a millisecond over the wall exits 3", maxWall: "59.999s", want: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out, errOut bytes.Buffer
+			code := run([]string{"-max-wall", tc.maxWall}, strings.NewReader(stream), &out, &errOut, fixedHost())
+			if code != tc.want {
+				t.Errorf("exit code = %d, want %d", code, tc.want)
+			}
+			if want := "tierwall: tier 60s bar 90s OK\n"; !strings.Contains(out.String(), want) {
+				t.Errorf("stdout = %q, want it to hold %q", out.String(), want)
+			}
+		})
+	}
+}
+
 // TestReport_MaxWallDoesNotOutrankATestFailure pins the precedence: -max-wall
 // is a request about wall time, and a run whose tests failed is red for the
 // reason go test gave, not for the wall.
@@ -502,6 +533,35 @@ func TestTownRootAtReadsTheOutermostTown(t *testing.T) {
 	}
 }
 
+// TestOpenAppendAppendsAcrossOpens pins the series file's open mode: every run
+// appends to the wall series, so two opens of one path leave the second run's
+// lines after the first run's. Every other case opens the file once, so a
+// truncating open costs nothing there. Mutation: os.O_APPEND to os.O_TRUNC, and
+// the second open erases the first run's line.
+func TestOpenAppendAppendsAcrossOpens(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "gate-walls.jsonl")
+	for _, line := range []string{"first run\n", "second run\n"} {
+		f, err := openAppend(path)
+		if err != nil {
+			t.Fatalf("openAppend(%s) = %v", path, err)
+		}
+		if _, err := io.WriteString(f, line); err != nil {
+			t.Fatalf("write %q: %v", line, err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("close after %q: %v", line, err)
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the two opens wrote no file: %v", err)
+	}
+	if want := "first run\nsecond run\n"; string(data) != want {
+		t.Errorf("file = %q, want %q: each run appends, never truncates the series", data, want)
+	}
+}
+
 // TestAppendSeries_UnencodableLineIsAnError checks that a line the encoder
 // cannot render is refused by the appending call site, not written without its
 // time and not reported as a series it recorded.
@@ -632,6 +692,37 @@ func TestSlowTestsListedFromTheStream(t *testing.T) {
 	}, "\n")
 	if stdout != want {
 		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+// TestSlowTestsHeaderPrintsWithNoSlowTest pins the header's contract: a
+// -slow-tests run that found nothing of 5s or more still prints
+// `tierwall: slow tests`, so the gate log reads as a check that ran and found
+// nothing, not as a flag left off. Mutation: print the header only for a
+// non-empty list, and the line goes.
+func TestSlowTestsHeaderPrintsWithNoSlowTest(t *testing.T) {
+	t.Parallel()
+	stream := strings.Join([]string{
+		`{"Action":"pass","Package":"example.com/fx/a","Test":"TestQuick","Elapsed":1}`,
+		`{"Action":"pass","Package":"example.com/fx/a","Elapsed":2}`,
+		"",
+	}, "\n")
+	var out, errOut bytes.Buffer
+	if code := run([]string{"-slow-tests"}, strings.NewReader(stream), &out, &errOut, fixedHost()); code != 0 {
+		t.Fatalf("exit code = %d, want 0; stderr %q", code, errOut.String())
+	}
+	lines := strings.Split(out.String(), "\n")
+	header := -1
+	for i, line := range lines {
+		if line == "tierwall: slow tests" {
+			header = i
+		}
+	}
+	if header < 0 {
+		t.Fatalf("stdout = %q, want the slow-test header even with no slow test", out.String())
+	}
+	if next := lines[header+1]; strings.HasPrefix(next, "tierwall:   ") {
+		t.Errorf("stdout = %q, want no test line under the header, got %q", out.String(), next)
 	}
 }
 
