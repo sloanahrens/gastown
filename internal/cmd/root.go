@@ -19,7 +19,6 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/ui"
-	"github.com/steveyegge/gastown/internal/version"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -150,11 +149,6 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 
 	beadsExempt := isCommandOrAncestorExempt(cmd, beadsExemptCommands)
 	branchExempt := isCommandOrAncestorExempt(cmd, branchCheckExemptCommands)
-
-	// Check for stale binary (warning only, doesn't block)
-	if !beadsExempt {
-		checkStaleBinaryWarning()
-	}
 
 	// Check town root branch (warning only, non-blocking)
 	if !branchExempt {
@@ -312,45 +306,6 @@ func warnIfTownRootOffMain() {
 		style.Bold.Render("⚠️  WARNING:"), branch)
 	fmt.Fprintf(os.Stderr, "   This can cause gt commands to fail. Run: %s\n\n",
 		style.Dim.Render("gt doctor fix town-root-branch"))
-}
-
-// staleBinaryWarned tracks if we've already warned about stale binary in this session.
-// We use an environment variable since the binary restarts on each command.
-var staleBinaryWarned = os.Getenv("GT_STALE_WARNED") == "1"
-
-// checkStaleBinaryWarning checks if the installed binary is stale and prints a warning.
-// This is a non-blocking check - errors are silently ignored.
-func checkStaleBinaryWarning() {
-	// Only warn once per shell session
-	if staleBinaryWarned {
-		return
-	}
-
-	repoRoot, err := version.GetRepoRoot()
-	if err != nil {
-		// Can't find repo - silently skip (might be running from non-dev environment)
-		return
-	}
-
-	info := version.CheckStaleBinary(repoRoot)
-	if info.Error != nil {
-		// Check failed - silently skip
-		return
-	}
-
-	if info.IsStale {
-		staleBinaryWarned = true
-		//testpolicy:allow prod-no-setenv — every gt this one spawns inherits the marker, so a nested gt does not repeat the warning
-		_ = os.Setenv("GT_STALE_WARNED", "1")
-
-		msg := info.Describe("gt binary")
-		fmt.Fprintf(os.Stderr, "%s %s\n", style.WarningPrefix, msg)
-		if info.IsForward && info.OnMainBranch {
-			fmt.Fprintf(os.Stderr, "    %s Run 'make install' in gastown repo to update\n", style.ArrowPrefix)
-		} else {
-			fmt.Fprintf(os.Stderr, "    %s Run 'gt stale' for details; switch to a build branch before rebuilding\n", style.ArrowPrefix)
-		}
-	}
 }
 
 // Execute runs the root command and returns an exit code.

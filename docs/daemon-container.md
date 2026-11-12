@@ -210,10 +210,7 @@ gt daemon scratch up --live-root <live-town> --root <scratch-root> \
   --project gt-scratch --container gt-scratch-daemon-1
 ```
 
-`render` prints the compose file to stdout and writes nothing. It also prints
-the stale-binary warning on stderr when the `gt` is not at the tip of `main`
-(its wording is `Describe` in `internal/version/stale.go`); that is not a
-failure. Expected in it,
+`render` prints the compose file to stdout and writes nothing. Expected in it,
 by the names of the rendered golden `internal/templates/testdata/daemon-compose-scratch.golden.yml`:
 the three services `daemon`, `scratch-dind` and `scratch-dolt`, the container
 name `gt-scratch-daemon-1`, the command in the golden (`--scratch-town`, `--dolt-host` and `--dolt-port` for the scratch Dolt), a `scratch-dolt`
