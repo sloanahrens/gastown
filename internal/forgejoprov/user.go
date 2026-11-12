@@ -49,6 +49,10 @@ type Provisioner struct {
 	// Files is the filesystem the token files are written through; nil means
 	// the real one.
 	Files Files
+	// ListLock takes the lock the workflow-file hook list's read-modify-write runs
+	// under and returns the func that releases it; nil means a flock on the list's
+	// sibling .lock file.
+	ListLock func(listPath string) (unlock func() error, err error)
 }
 
 // EnsureUser creates the bot account of role when it is missing and leaves an

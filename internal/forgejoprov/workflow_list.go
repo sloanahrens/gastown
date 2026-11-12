@@ -2,8 +2,11 @@ package forgejoprov
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/gofrs/flock"
 )
 
 // DefaultWorkflowList is the pre-receive list the workflow-file hook reads: the
@@ -16,10 +19,22 @@ const DefaultWorkflowList = "/data/gitea/home/hooks/pre-receive.d/gt-protected-w
 // again. Any other is appended once, after every existing line. A list that cannot be
 // read, or holds nothing, fails the call: a hook reading an empty list protects nothing,
 // so passing would hide the gap.
-func (p *Provisioner) EnsureWorkflowProtected(repo, listPath string) error {
+//
+// The read and the write run under the list's lock, so two provisions appending at
+// once cannot each read the list before the other writes and drop the other's line.
+func (p *Provisioner) EnsureWorkflowProtected(repo, listPath string) (err error) {
 	if _, _, err := splitRepo(repo); err != nil {
 		return err
 	}
+	unlock, err := p.lockWorkflowList(listPath)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if uerr := unlock(); uerr != nil {
+			err = errors.Join(err, fmt.Errorf("unlock the workflow-file hook list %s: %w", listPath, uerr))
+		}
+	}()
 	files := p.files()
 	data, err := files.ReadFile(listPath)
 	if err != nil {
@@ -52,4 +67,19 @@ func (p *Provisioner) EnsureWorkflowProtected(repo, listPath string) error {
 	}
 	p.logf("appended %s to the workflow-file hook list %s", repo, listPath)
 	return nil
+}
+
+// lockWorkflowList takes the exclusive lock that serializes the list's read-modify-write
+// across processes. The lock is the sibling listPath+".lock", never the list itself: the
+// list is replaced by a rename on every write, so a lock held on the old file would not
+// stop a second provision reading the list it is about to replace.
+func (p *Provisioner) lockWorkflowList(listPath string) (func() error, error) {
+	if p.ListLock != nil {
+		return p.ListLock(listPath)
+	}
+	fl := flock.New(listPath + ".lock")
+	if err := fl.Lock(); err != nil {
+		return nil, fmt.Errorf("lock the workflow-file hook list %s: %w", listPath, err)
+	}
+	return fl.Unlock, nil
 }

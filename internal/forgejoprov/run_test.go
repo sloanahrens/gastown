@@ -117,6 +117,8 @@ func runProvisioningCtx(ctx context.Context, t *testing.T, rt http.RoundTripper,
 		HTTP:     &http.Client{Transport: rt},
 		Files:    files,
 		Random:   &countingRandom{},
+		// The list is an in-memory fixture, so its lock is taken in memory too.
+		ListLock: (&listLock{}).lock,
 	})
 	return runResult{code: code, logs: logs.String(), reads: reads}
 }
