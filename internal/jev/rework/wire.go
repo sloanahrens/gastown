@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
@@ -152,9 +153,9 @@ func (t *townRigs) differ(rig string) (gitDiffer, error) {
 	if d, ok := t.differs[rig]; ok {
 		return d, nil
 	}
-	repo := rigRepo(filepath.Join(t.townRoot, rig))
-	if repo == "" {
-		return gitDiffer{}, fmt.Errorf("rig %s has no git repo (neither .repo.git nor mayor/rig)", rig)
+	repo, err := rigRepo(filepath.Join(t.townRoot, rig))
+	if err != nil {
+		return gitDiffer{}, err
 	}
 	if t.differs == nil {
 		t.differs = map[string]gitDiffer{}
@@ -164,16 +165,14 @@ func (t *townRigs) differ(rig string) (gitDiffer, error) {
 	return d, nil
 }
 
-// rigRepo is the rig's git repo: the shared bare .repo.git, else mayor/rig.
-// It is empty when the rig has neither.
-func rigRepo(rigRoot string) string {
-	for _, rel := range []string{".repo.git", filepath.Join("mayor", "rig")} {
-		dir := filepath.Join(rigRoot, rel)
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			return dir
-		}
+// rigRepo is the rig's git repo: the shared bare .repo.git, and nothing else.
+// A rig without one has no git base, and the error names it.
+func rigRepo(rigRoot string) (string, error) {
+	dir := constants.RigBareRepoPath(rigRoot)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("rig %s has no .repo.git", rigRoot)
 	}
-	return ""
+	return dir, nil
 }
 
 // gitDiffer runs git diff in the rig's repo.

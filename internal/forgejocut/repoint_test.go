@@ -192,8 +192,9 @@ const (
 	oldURL     = "https://github.example/acme/rig.git"
 )
 
-// repointTown is a rig with a bare repository, a mayor clone and crew clones, a
-// hidden crew entry and a file in crew/, each clone at the old origin.
+// repointTown is a rig with a bare repository, crew clones, a hidden crew entry
+// and a file in crew/, each clone at the old origin. A mayor clone is present
+// too, so a test can prove the step leaves it alone.
 func repointTown() (*memFiles, *repointGit) {
 	fsys := newMemFiles()
 	git := &repointGit{origins: map[string]string{}, bare: map[string]bool{"/town/rig/.repo.git": true}, inside: map[string]string{}}
@@ -222,13 +223,13 @@ func repointCutover(fsys *memFiles, git *repointGit, dry bool) (*Cutover, *[]str
 	}, &log
 }
 
-// The step sets the bare repository, the mayor clone and every crew clone, in that
-// order, and nothing else: not a hidden crew entry, not a file. Skipping the crew
-// clones turns this red.
-func TestRepointVisitsBareMayorAndEveryCrew(t *testing.T) {
+// The step sets the bare repository and every crew clone, in that order, and
+// nothing else: not the mayor clone, not a hidden crew entry, not a file.
+// Skipping the crew clones or reaching the mayor clone turns this red.
+func TestRepointVisitsBareAndEveryCrew(t *testing.T) {
 	t.Parallel()
 	fsys, git := repointTown()
-	c, _ := repointCutover(fsys, git, false)
+	c, log := repointCutover(fsys, git, false)
 
 	if err := c.RepointRemotes(); err != nil {
 		t.Fatalf("RepointRemotes: %v", err)
@@ -236,21 +237,22 @@ func TestRepointVisitsBareMayorAndEveryCrew(t *testing.T) {
 
 	want := []string{
 		"/town/rig/.repo.git " + forgejoURL,
-		"/town/rig/mayor/rig " + forgejoURL,
 		"/town/rig/crew/ann " + forgejoURL,
 		"/town/rig/crew/bob " + forgejoURL,
 	}
 	if !slices.Equal(git.setURLs, want) {
 		t.Errorf("set-url calls = %q, want %q", git.setURLs, want)
 	}
+	if joined := strings.Join(*log, "\n"); strings.Contains(joined, "/town/rig/mayor/rig") {
+		t.Errorf("the log names the mayor clone:\n%s", joined)
+	}
 }
 
-// A directory already at the URL is reported and not touched, a directory that is
-// not a repository is skipped, and a second run changes nothing.
+// A crew directory that is not a repository is reported and skipped, and a
+// second run changes nothing.
 func TestRepointSkipsAlreadyCorrect(t *testing.T) {
 	t.Parallel()
 	fsys, git := repointTown()
-	git.origins["/town/rig/mayor/rig"] = forgejoURL
 	delete(git.origins, "/town/rig/crew/bob")
 	c, log := repointCutover(fsys, git, false)
 
@@ -261,10 +263,8 @@ func TestRepointSkipsAlreadyCorrect(t *testing.T) {
 		t.Errorf("set-url calls = %q, want %q", git.setURLs, want)
 	}
 	joined := strings.Join(*log, "\n")
-	for _, line := range []string{"/town/rig/mayor/rig: origin is already " + forgejoURL, "skip /town/rig/crew/bob (not a git repository of its own)"} {
-		if !strings.Contains(joined, line) {
-			t.Errorf("log lacks %q:\n%s", line, joined)
-		}
+	if want := "skip /town/rig/crew/bob (not a git repository of its own)"; !strings.Contains(joined, want) {
+		t.Errorf("log lacks %q:\n%s", want, joined)
 	}
 
 	git.setURLs = nil
@@ -276,12 +276,14 @@ func TestRepointSkipsAlreadyCorrect(t *testing.T) {
 	}
 }
 
-// A rig with no mayor clone and no crew directory repoints its bare repository
-// alone; a clone with no origin is set, not skipped.
+// A rig with no crew directory repoints its bare repository alone, even when a
+// mayor directory exists: it is not a repository here, so visiting it would fail
+// the step. A repository with no origin is set, not skipped.
 func TestRepointNeedsOnlyTheBareRepository(t *testing.T) {
 	t.Parallel()
 	fsys := newMemFiles()
 	fsys.addDir("/town/rig/.repo.git")
+	fsys.addDir("/town/rig/mayor/rig")
 	git := &repointGit{origins: map[string]string{"/town/rig/.repo.git": ""}, bare: map[string]bool{"/town/rig/.repo.git": true}}
 	c, _ := repointCutover(fsys, git, false)
 
@@ -685,25 +687,21 @@ func TestJSONPathRefusesWhatItCannotWalk(t *testing.T) {
 	}
 }
 
-// The bare repository and the mayor's clone must be repositories: a step that
-// skipped them would report success with origin still at GitHub. A crew entry that
-// is not a repository is still skipped (TestRepointSkipsAlreadyCorrect).
-func TestRepointFailsWhenTheBareOrMayorIsNotARepository(t *testing.T) {
+// The bare repository must be a repository: a step that skipped it would report
+// success with origin still at GitHub. A crew entry that is not a repository is
+// still skipped (TestRepointSkipsAlreadyCorrect).
+func TestRepointFailsWhenTheBareIsNotARepository(t *testing.T) {
 	t.Parallel()
-	for name, dir := range map[string]string{"bare": "/town/rig/.repo.git", "mayor": "/town/rig/mayor/rig"} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			fsys, git := repointTown()
-			delete(git.origins, dir)
-			delete(git.bare, dir)
-			c, _ := repointCutover(fsys, git, false)
+	const dir = "/town/rig/.repo.git"
+	fsys, git := repointTown()
+	delete(git.origins, dir)
+	delete(git.bare, dir)
+	c, _ := repointCutover(fsys, git, false)
 
-			err := c.RepointRemotes()
+	err := c.RepointRemotes()
 
-			if err == nil || !strings.Contains(err.Error(), dir+" is not a git repository of its own") {
-				t.Errorf("RepointRemotes error = %v, want one naming %s", err, dir)
-			}
-		})
+	if err == nil || !strings.Contains(err.Error(), dir+" is not a git repository of its own") {
+		t.Errorf("RepointRemotes error = %v, want one naming %s", err, dir)
 	}
 }
 
@@ -763,38 +761,28 @@ func TestTownGitURLReindentsACompactFile(t *testing.T) {
 }
 
 // A folder that sits inside another repository answers rev-parse for that
-// repository, so the step must not read it as a clone: the crew folder is skipped,
-// the mayor folder fails the step, and the enclosing repository's origin is never
-// read or set. Checking only that git finds some repository turns this red.
+// repository, so the step must not read it as a clone: the crew folder is
+// skipped and the enclosing repository's origin is never read or set. Checking
+// only that git finds some repository turns this red.
 func TestRepointDoesNotReachIntoAnEnclosingRepository(t *testing.T) {
 	t.Parallel()
-	const town = "/town"
-	for name, dir := range map[string]string{"crew": "/town/rig/crew/bob", "mayor": "/town/rig/mayor/rig"} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			fsys, git := repointTown()
-			delete(git.origins, dir)
-			git.inside[dir] = town
-			git.origins[town] = oldURL
-			c, _ := repointCutover(fsys, git, false)
+	const town, dir = "/town", "/town/rig/crew/bob"
+	fsys, git := repointTown()
+	delete(git.origins, dir)
+	git.inside[dir] = town
+	git.origins[town] = oldURL
+	c, _ := repointCutover(fsys, git, false)
 
-			err := c.RepointRemotes()
-
-			if name == "mayor" && (err == nil || !strings.Contains(err.Error(), dir+" is not a git repository of its own")) {
-				t.Errorf("RepointRemotes error = %v, want the mayor refused", err)
-			}
-			if name == "crew" && err != nil {
-				t.Errorf("RepointRemotes: %v", err)
-			}
-			for _, call := range git.calls {
-				if call[2] == dir && slices.Contains(call, "set-url") {
-					t.Errorf("set-url ran on %s: %q", dir, call)
-				}
-			}
-			if git.origins[town] != oldURL {
-				t.Errorf("the enclosing repository's origin became %q", git.origins[town])
-			}
-		})
+	if err := c.RepointRemotes(); err != nil {
+		t.Fatalf("RepointRemotes: %v", err)
+	}
+	for _, call := range git.calls {
+		if call[2] == dir && slices.Contains(call, "set-url") {
+			t.Errorf("set-url ran on %s: %q", dir, call)
+		}
+	}
+	if git.origins[town] != oldURL {
+		t.Errorf("the enclosing repository's origin became %q", git.origins[town])
 	}
 }
 

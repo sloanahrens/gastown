@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 )
@@ -404,10 +405,15 @@ const prefetchChunk = 200
 // cat-file --batch-check that finds which the repo holds, and one log --numstat
 // over those. It records nothing for a commit it cannot answer for, which
 // ChangedLines then asks git about by itself and reports as it always did; it
-// says on stderr when a git call failed, since that costs two calls per commit.
+// says on stderr when a git call failed or the rig has no git base, since that
+// costs two calls per commit.
 func (r rigDiffs) PrefetchLines(ctx context.Context, commits []string) {
-	repo := rigRepo(filepath.Join(r.town, dedupe.RigName))
-	if repo == "" || r.sizes == nil {
+	if r.sizes == nil {
+		return
+	}
+	repo, err := rigRepo(filepath.Join(r.town, dedupe.RigName))
+	if err != nil {
+		warnf("sizing landed commits in a batch: %v", err)
 		return
 	}
 	var names []string
@@ -503,9 +509,9 @@ func (r rigDiffs) ChangedLines(ctx context.Context, commit string) (int, error) 
 			return 0, ErrNoCommit
 		}
 	}
-	repo := rigRepo(filepath.Join(r.town, dedupe.RigName))
-	if repo == "" {
-		return 0, fmt.Errorf("rig %s has no git repo (neither .repo.git nor mayor/rig)", dedupe.RigName)
+	repo, err := rigRepo(filepath.Join(r.town, dedupe.RigName))
+	if err != nil {
+		return 0, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
@@ -513,7 +519,7 @@ func (r rigDiffs) ChangedLines(ctx context.Context, commit string) (int, error) 
 	// rev-parse exits 1 for a commit the repo does not hold, and 128 for a
 	// repo it cannot read, which must fail the report. cat-file -e exits 128
 	// for both, so it cannot tell them apart.
-	_, err := r.git(ctx, "", "-C", repo, "rev-parse", "--verify", "--quiet", commit+"^{commit}")
+	_, err = r.git(ctx, "", "-C", repo, "rev-parse", "--verify", "--quiet", commit+"^{commit}")
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return 0, ErrNoCommit
@@ -545,14 +551,12 @@ func numstatLines(out string) int {
 	return total
 }
 
-// rigRepo is the rig's git repo: the shared bare .repo.git, else mayor/rig.
-// It is empty when the rig has neither.
-func rigRepo(rigRoot string) string {
-	for _, rel := range []string{".repo.git", filepath.Join("mayor", "rig")} {
-		dir := filepath.Join(rigRoot, rel)
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			return dir
-		}
+// rigRepo is the rig's git repo: the shared bare .repo.git, and nothing else.
+// A rig without one has no git base, and the error names it.
+func rigRepo(rigRoot string) (string, error) {
+	dir := constants.RigBareRepoPath(rigRoot)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("rig %s has no .repo.git", rigRoot)
 	}
-	return ""
+	return dir, nil
 }
