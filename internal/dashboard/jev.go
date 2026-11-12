@@ -262,7 +262,7 @@ var jevOffBatteries = map[string]bool{"dedupe": true, "testsel": true}
 // jevPatrolBatteries is the patrol's list. A battery with a report of no items
 // that is not on it is off; one that is on it keeps its row while its log is
 // empty, so the page shows it as quiet rather than as off.
-var jevPatrolBatteries = map[string]bool{"finding": true, "notes": true, "targets": true, "testsel": true}
+var jevPatrolBatteries = map[string]bool{"finding": true, "notes": true, "targets": true}
 
 // jevUsedBy names what reads a question's answer, keyed battery.question. A
 // question not named here is read by none.
@@ -372,15 +372,16 @@ type JevSpendCap struct {
 	TodayUSD *float64 `json:"today_usd,omitempty"`
 	// CapUSD is the configured daily cap.
 	CapUSD *float64 `json:"cap_usd,omitempty"`
-	// CapUnreadable says the cap could not be read this poll, so CapUSD is
-	// absent because the read failed, not because no cap is set.
+	// CapUnreadable says the cap is not known this poll, so CapUSD is absent
+	// because the read failed or the configured cap is negative, not because no
+	// cap is set.
 	CapUnreadable bool `json:"cap_unreadable,omitempty"`
 }
 
 // BuildJevSummary folds the cached scorecard, the Jev spend row and the
 // configured daily cap into the page's summary. It returns nil when there is
-// no scorecard to summarize. capUSD is nil when no cap is configured, and a
-// cap of zero or less is read the same way.
+// no scorecard to summarize. capUSD is nil when no cap is configured, a cap of
+// zero is read the same way, and a negative cap is unreadable.
 func BuildJevSummary(sc *JevScorecard, spend *JevSpend, capUSD *float64) *JevSummary {
 	if sc == nil {
 		return nil
@@ -404,7 +405,7 @@ func BuildJevSummary(sc *JevScorecard, spend *JevSpend, capUSD *float64) *JevSum
 		if off[b.Name] {
 			continue
 		}
-		if sc.ScoredAt != nil && !b.Failed && b.ScoredAt != nil && sc.ScoredAt.Sub(*b.ScoredAt) > jevReusedAfter {
+		if sc.ScoredAt != nil && b.ScoredAt != nil && sc.ScoredAt.Sub(*b.ScoredAt) > jevReusedAfter {
 			s.Reused = append(s.Reused, JevReused{Battery: b.Name, ScoredAt: *b.ScoredAt, Reason: jevLogUnchanged})
 		}
 		var retire []string
@@ -467,11 +468,14 @@ func jevEarningOf(battery string, q JevQuestion) JevEarning {
 }
 
 // jevSpendAgainstCap is the spend row and the cap as the summary's figures. A
-// missing spend row leaves every spend figure absent, and so does a cap that is
-// not above zero.
+// missing spend row leaves every spend figure absent. A zero cap leaves the cap
+// absent, and a negative cap leaves it absent and marks it unreadable.
 func jevSpendAgainstCap(spend *JevSpend, capUSD *float64) JevSpendCap {
 	var c JevSpendCap
-	if capUSD != nil && *capUSD > 0 {
+	switch {
+	case capUSD != nil && *capUSD < 0:
+		c.CapUnreadable = true
+	case capUSD != nil && *capUSD > 0:
 		limit := *capUSD
 		c.CapUSD = &limit
 	}

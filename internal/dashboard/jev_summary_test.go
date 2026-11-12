@@ -140,6 +140,7 @@ func TestJevSummaryNamesReusedBlocksAndDoesNotCallThemOld(t *testing.T) {
 		JevBattery{Name: "targets", Items: 5, ScoredAt: ago(time.Hour)},
 		JevBattery{Name: "rules", Items: 5, ScoredAt: ago(61 * time.Minute)},
 		JevBattery{Name: "landing", Items: 5, ScoredAt: ago(3 * time.Hour), Failed: true, Kept: true},
+		JevBattery{Name: "drift", Items: 5, Failed: true},
 	)
 	s := BuildJevSummary(sc, nil, nil)
 	if s == nil {
@@ -152,9 +153,10 @@ func TestJevSummaryNamesReusedBlocksAndDoesNotCallThemOld(t *testing.T) {
 	want := []JevReused{
 		{Battery: "finding", ScoredAt: now.Add(-2 * time.Hour), Reason: "log unchanged"},
 		{Battery: "rules", ScoredAt: now.Add(-61 * time.Minute), Reason: "log unchanged"},
+		{Battery: "landing", ScoredAt: now.Add(-3 * time.Hour), Reason: "log unchanged"},
 	}
 	if !reflect.DeepEqual(s.Reused, want) {
-		t.Errorf("Reused = %+v, want %+v: a block within the hour is this refresh's, and a failed block is not reused", s.Reused, want)
+		t.Errorf("Reused = %+v, want %+v: a block within the hour is this refresh's, and a failed battery with no block is not reused", s.Reused, want)
 	}
 
 	out, err := json.Marshal(s)
@@ -189,6 +191,13 @@ func TestJevSummarySpendAgainstTheCapOrAbsent(t *testing.T) {
 	}
 	if s.Spend.CapUSD != nil {
 		t.Errorf("a zero cap is drawn as %v, want absent", *s.Spend.CapUSD)
+	}
+
+	// A negative cap is configured but has no usable figure, so the page must
+	// say the cap is unknown rather than unset.
+	s = BuildJevSummary(sc, spend, ptrFloat(-3))
+	if s.Spend.CapUSD != nil || !s.Spend.CapUnreadable {
+		t.Errorf("a negative cap = %+v, want no figure and the cap marked unreadable", s.Spend)
 	}
 
 	// With no spend row and no cap, every figure is absent from the JSON too.
