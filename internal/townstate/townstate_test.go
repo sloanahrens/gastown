@@ -425,18 +425,22 @@ func TestTownStateRigPathsAreTheProductionNames(t *testing.T) {
 	}
 	r := &rig.Rig{Name: "gastown", Path: rigDir}
 	entries := m.Expand([]string{"gastown"}, nil)
-	for what, got := range map[string]string{"rig.BareRepoPath": r.BareRepoPath(), "rig.RepoPath": r.RepoPath()} {
-		if got == "" {
-			t.Fatalf("%s found nothing in a rig built from the constants", what)
-		}
-		rel, err := filepath.Rel(town, got)
-		if err != nil {
-			t.Fatal(err)
-		}
-		e, ok := Lookup(entries, filepath.ToSlash(rel))
-		if !ok || e.Owner != OwnerDaemon {
-			t.Errorf("%s resolves %s, which the manifest does not class daemon (covered %v, owner %q)", what, rel, ok, e.Owner)
-		}
+	// RepoPath returns a working tree only, so the mayor clone is not a
+	// candidate; the repository the daemon runs git in is the bare one.
+	if got := r.RepoPath(); got != "" {
+		t.Errorf("rig.RepoPath = %q for a rig whose only clone is %s; the mayor clone must not be a candidate", got, clone)
+	}
+	got := r.BareRepoPath()
+	if got == "" {
+		t.Fatal("rig.BareRepoPath found nothing in a rig built from the constants")
+	}
+	rel, err := filepath.Rel(town, got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := Lookup(entries, filepath.ToSlash(rel))
+	if !ok || e.Owner != OwnerDaemon {
+		t.Errorf("rig.BareRepoPath resolves %s, which the manifest does not class daemon (covered %v, owner %q)", rel, ok, e.Owner)
 	}
 
 	// No code that runs git in a rig repository spells the directory itself.
