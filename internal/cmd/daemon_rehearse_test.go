@@ -901,14 +901,18 @@ func TestDaemonRehearsePluginsFailureListsTheEntriesToAdd(t *testing.T) {
 // probed.
 func TestDaemonRehearsePathsNamesTheSettingKey(t *testing.T) {
 	t.Parallel()
-	claude := filepath.Join(t.TempDir(), ".claude")
-	settings := []byte(`{"daemon":{"container_off":` + offJSON() + `,"patrols":{"wisp_reaper":{"extra_beads_roots":["` + claude + `"]}}}}`)
+	claude := filepath.Join(t.TempDir(), `.cl"aude`)
+	roots, err := json.Marshal([]string{claude})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := []byte(`{"daemon":{"container_off":` + offJSON() + `,"patrols":{"wisp_reaper":{"extra_beads_roots":` + string(roots) + `}}}}`)
 
 	missing := newRehearseHost()
 	missing.files[rehearseLive+"/settings/config.json"] = settings
 	missing.failing = []string{"-e " + claude}
 	var out bytes.Buffer
-	err := runDaemonRehearse(context.Background(), rehearseFlagsFor(), missing.deps(&out))
+	err = runDaemonRehearse(context.Background(), rehearseFlagsFor(), missing.deps(&out))
 	row := checkRowOf(out.String(), "paths")
 	if err == nil || len(row) == 0 || !strings.HasPrefix(row[0], "paths            FAIL") {
 		t.Fatalf("err=%v\n%s", err, out.String())
