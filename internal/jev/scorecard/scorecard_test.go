@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -348,7 +349,10 @@ func TestVerdictRealLiftStillEarns(t *testing.T) {
 }
 
 // The protocol page states the policy the operator confirmed on 2026-11-11,
-// and protocol step 3 names the lift rule the verdict applies.
+// and protocol step 3 names the floors the verdict reads. The test finds the
+// heading and step by structure and matches the floors by their code
+// identifiers, so rewording a sentence does not break it; dropping a floor
+// from step 3 does.
 func TestJevExperimentsDocStatesTheConfirmedPolicy(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "jev-experiments.md"))
@@ -356,24 +360,33 @@ func TestJevExperimentsDocStatesTheConfirmedPolicy(t *testing.T) {
 		t.Fatalf("reading the protocol page: %v", err)
 	}
 	doc := string(raw)
-	const heading = "### Acting-threshold policy (confirmed by the operator, 2026-11-11)"
-	if !strings.Contains(doc, heading) {
-		t.Errorf("protocol page has no heading %q", heading)
+	if !regexp.MustCompile(`(?mi)^#+ .*acting-threshold policy`).MatchString(doc) {
+		t.Errorf("protocol page has no acting-threshold policy heading")
 	}
 	if strings.Contains(doc, "need the operator's confirmation") {
 		t.Errorf("protocol page still says the bars need the operator's confirmation")
 	}
+	protocol := regexp.MustCompile(`(?m)^## .*protocol\s*$`).FindStringIndex(doc)
+	if protocol == nil {
+		t.Fatalf("protocol page has no protocol section")
+	}
+	section := doc[protocol[1]:]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end]
+	}
 	var step3 string
-	for line := range strings.SplitSeq(doc, "\n") {
-		if strings.HasPrefix(line, "3. **Metric and floor.**") {
+	for line := range strings.SplitSeq(section, "\n") {
+		if strings.HasPrefix(line, "3. ") {
 			step3 = line
 		}
 	}
-	if !strings.Contains(step3, "earns on lift") {
-		t.Errorf("protocol step 3 does not name the lift rule: %q", step3)
+	for _, floor := range []string{"minLift", "liftRatio", "rareBase", "flaggedShare", "earnMargin"} {
+		if !strings.Contains(step3, "`"+floor+"`") {
+			t.Errorf("protocol step 3 does not name the floor %s the verdict reads: %q", floor, step3)
+		}
 	}
-	if strings.Contains(step3, "minPrecisionAtBest") {
-		t.Errorf("protocol step 3 still names the removed minPrecisionAtBest floor: %q", step3)
+	if strings.Contains(doc, "minPrecisionAtBest") {
+		t.Errorf("protocol page still names the removed minPrecisionAtBest floor")
 	}
 }
 
