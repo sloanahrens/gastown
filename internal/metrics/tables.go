@@ -8,6 +8,7 @@ import (
 	"io"
 	"strconv"
 
+	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/storypoints"
 )
 
@@ -37,10 +38,12 @@ type DiffSource interface {
 // A landing whose diff cannot be read keeps its row, with empty size and spread
 // cells and unreadable=1, and is named in dropped. A landing with no rework
 // entry is a first attempt. A stage stamp or model no source supplies is an
-// empty cell, counted in the extract's footer rather than dropped.
+// empty cell, counted in the extract's footer rather than dropped. A landing
+// whose bead has no line in jev keeps empty Jev cells.
 func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Rework, diffs DiffSource,
 	beadsByID map[string]BeadRow, usage map[string]Usage, overrun map[string]bool,
-	eras map[string][]OMEra, shapedIDs map[string]bool, stamps StageStamps, dropped *Dropped) ([]Row, error) {
+	eras map[string][]OMEra, shapedIDs map[string]bool, stamps StageStamps,
+	jev map[string]dispatch.Line, dropped *Dropped) ([]Row, error) {
 	rows := make([]Row, 0, len(ledger))
 	for _, l := range ledger {
 		rw, ok := rework[l.Bead]
@@ -74,6 +77,7 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 
 		b := beadsByID[l.Bead]
 		model := landingModel(l, usage, stamps.Seats)
+		jevFits, jevSize := jevCells(jev, l.Bead)
 		createdAt := stampCell(b.CreatedAt)
 		dispatchedAt := stampCell(stamps.Dispatched[l.Bead])
 		submittedAt := landingSubmitted(l.Bead, b, stamps, landed)
@@ -122,6 +126,8 @@ func BuildLandings(ctx context.Context, ledger []LedgerRow, rework map[string]Re
 			"agent":                   l.Agent,
 			"seat_class":              storypoints.SeatClass(l.Agent),
 			"sp_actual":               spActualCell(l),
+			"jev_fits20":              jevFits,
+			"jev_size":                jevSize,
 		})
 	}
 	return rows, nil

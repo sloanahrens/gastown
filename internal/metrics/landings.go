@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,11 +35,17 @@ var appendedLandingColumns = []string{
 	"polecat_secs", "polecat_lower_bound", "agent", "seat_class", "sp_actual",
 }
 
+// jevLandingColumns are the Jev dispatch answers a landing carries, from the
+// first line the dispatch log holds for its bead. They are not in
+// appendedLandingColumns: Jev answers before the landing, so they stay
+// predictors and are not explain-only.
+var jevLandingColumns = []string{"jev_fits20", "jev_size"}
+
 // landingColumns is the header landings.csv is written with: the legacy header
-// then the appended columns. Columns are append-only: an existing column keeps
-// its name and its place, so a reader of an older file reads the new one under
-// the same names.
-var landingColumns = append(append([]string{}, legacyLandingColumns...), appendedLandingColumns...)
+// then the appended columns, then the Jev columns. Columns are append-only: an
+// existing column keeps its name and its place, so a reader of an older file
+// reads the new one under the same names.
+var landingColumns = slices.Concat(legacyLandingColumns, appendedLandingColumns, jevLandingColumns)
 
 // polecatSecsCell is a landing's polecat time in seconds, "" when the ledger
 // line carries none. The writer omits a zero time, so a zero or negative value

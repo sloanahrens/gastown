@@ -60,7 +60,7 @@ func (fakeDiffSource) Stats(_ context.Context, _, commit string) (DiffStat, erro
 func buildTablesLandings(t *testing.T, dropped *Dropped) []Row {
 	t.Helper()
 	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, dropped)
+		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, nil, dropped)
 	if err != nil {
 		t.Fatalf("BuildLandings: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestBuildLandingsDiffErrorOtherThanUnavailableFails(t *testing.T) {
 	t.Parallel()
 	boom := errors.New("boom")
 	rows, err := BuildLandings(context.Background(), tablesLedger, tablesRework, failingDiffSource{err: boom},
-		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, tablesEras, tablesShaped, StageStamps{}, nil, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error, want the diff's error to stop the build")
 	}
@@ -166,7 +166,7 @@ func TestBuildLandingsBadLandedAtFails(t *testing.T) {
 	// No eras: EraOf never reads the timestamp, so only WeekOf can fail here.
 	ledger := []LedgerRow{{Bead: "gt-9", Rig: "gastown", LandedCommit: "c1", LandedAt: "not-a-time", Route: "daemon"}}
 	rows, err := BuildLandings(context.Background(), ledger, tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesShaped, StageStamps{}, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, nil, tablesShaped, StageStamps{}, nil, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error for an unparsable landed_at")
 	}
@@ -182,7 +182,7 @@ func TestBuildLandingsBadEraStartFails(t *testing.T) {
 	t.Parallel()
 	eras := map[string][]OMEra{"gastown": {{Start: "not-a-time", Threshold: 0.7}}}
 	rows, err := BuildLandings(context.Background(), tablesLedger[:1], tablesRework, fakeDiffSource{},
-		tablesBeads(), tablesUsage, tablesOverrun, eras, tablesShaped, StageStamps{}, &Dropped{})
+		tablesBeads(), tablesUsage, tablesOverrun, eras, tablesShaped, StageStamps{}, nil, &Dropped{})
 	if err == nil {
 		t.Fatal("BuildLandings: no error for an unparsable era start")
 	}

@@ -51,6 +51,7 @@ func commandExtract(t *testing.T, outDir string) ExtractEnv {
 		}},
 		OutDir: outDir,
 		Today:  commandToday,
+		JevLog: jevLogFile(t),
 	}
 }
 

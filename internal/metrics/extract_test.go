@@ -159,6 +159,8 @@ func extractCase(t *testing.T) (ExtractEnv, *extractFiles) {
 		Today:    "2026-10-23",
 		MkdirAll: files.mkdirAll,
 		Create:   files.create,
+		// An empty log is read and has no answers, so it adds no footer gap.
+		JevLog: jevLogFile(t),
 	}, files
 }
 
@@ -1022,6 +1024,7 @@ func TestExtractRefusesAnEnvWithNoOutputOrDiffSource(t *testing.T) {
 		{"no output directory", func(env *ExtractEnv) { env.OutDir = "" }, "OutDir"},
 		{"no diff source", func(env *ExtractEnv) { env.Diffs = nil }, "Diffs"},
 		{"no bd runner", func(env *ExtractEnv) { env.RunBd = nil }, "RunBd"},
+		{"no Jev log path", func(env *ExtractEnv) { env.JevLog = "" }, "JevLog"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
