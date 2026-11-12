@@ -4,9 +4,18 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"path"
 	"slices"
 	"strings"
 	"testing"
+	"time"
+
+	"mvdan.cc/sh/v3/expand"
+	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/syntax"
 
 	k8sdaemon "github.com/steveyegge/gastown/deploy/k8s/daemon"
 )
@@ -37,8 +46,6 @@ type fakeKube struct {
 	toolOut      string
 	toolExit     int
 	toolErr      error
-	dirExit      int
-	dirErr       error
 	attachExit   int
 	attachErr    error
 
@@ -71,8 +78,6 @@ func (f *fakeKube) Capture(_ context.Context, argv []string) (string, int, error
 		return f.selectorOut, f.selectorExit, f.selectorErr
 	case strings.Contains(line, " pods "):
 		return f.podsOut, f.podsExit, f.podsErr
-	case strings.Contains(line, " -- test -d "):
-		return "", f.dirExit, f.dirErr
 	case strings.Contains(line, " exec "):
 		return f.toolOut, f.toolExit, f.toolErr
 	}
@@ -140,8 +145,9 @@ func TestKubectlExecArgvUnderTheTown(t *testing.T) {
 			}
 			want := append(execPrefix(tty),
 				"env", "GT_ROLE=polecat", "TERM=xterm-256color", testDolt,
-				"sh", "-c", `cd "$1" && shift && exec "$@"`, "sh",
-				"/Users/sloan/gt/rig/polecats", "gt", "status", "--line")
+				"sh", "-c", podWalkUpScript, "sh",
+				"/Users/sloan/gt/rig/polecats", podTownRoot, "/Users/sloan/gt/rig/polecats",
+				"gt", "status", "--line")
 			if !slices.Equal(f.attached[0], want) {
 				t.Fatalf("attached argv\n got %q\nwant %q", f.attached[0], want)
 			}
@@ -161,10 +167,14 @@ func TestKubectlExecArgvOutsideTheTown(t *testing.T) {
 	if err != nil || exit != 0 {
 		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
 	}
-	// The tool and its arguments end the argv, so the directory is the fourth from the end.
+	// The walk-up's three parameters precede the tool and its arguments, and a
+	// directory outside the town maps onto the pod town root.
 	argv := f.attached[0]
-	if got := argv[len(argv)-4]; got != podTownRoot {
-		t.Fatalf("the directory argument is %q, want the pod town root %q", got, podTownRoot)
+	if got := argv[len(argv)-6]; got != podTownRoot {
+		t.Fatalf("the mapped directory argument is %q, want the pod town root %q", got, podTownRoot)
+	}
+	if got := argv[len(argv)-4]; got != outside {
+		t.Fatalf("the caller's directory argument is %q, want %q", got, outside)
 	}
 	if !strings.Contains(note.String(), outside) || !strings.Contains(note.String(), podTownRoot) {
 		t.Fatalf("note %q does not name the caller's directory and the pod town root", note.String())
@@ -222,48 +232,224 @@ func TestKubectlRefusesAnEnvEntryWithNoValue(t *testing.T) {
 	}
 }
 
-// TestKubectlChecksTheMappedDirectoryInThePod: before the tool runs, the directory
-// the call maps onto is checked as a directory in the pod's container.
-func TestKubectlChecksTheMappedDirectoryInThePod(t *testing.T) {
-	t.Parallel()
-	f := healthyKube()
-	var note bytes.Buffer
-	if _, err := testKubectl(f, &note).Launch(kubeCall(t, kubeTown+"/rig/polecats", false)); err != nil {
-		t.Fatalf("Launch returned an error: %v", err)
+// podRun is one tool exec the walk-up script started.
+type podRun struct {
+	dir string
+	env map[string]string
+}
+
+// podShell is the fake shell of the daemon pod. Capture answers the ladder's
+// read-only probes as the healthy cluster does. Attach runs the sh -c script the
+// target emits through an in-process POSIX interpreter whose stat handler reports
+// only the directories the fake pod has, so a test reads the directory and the
+// environment the tool would get in the pod.
+type podShell struct {
+	*fakeKube
+	// dirs are the pod directories that exist.
+	dirs map[string]bool
+	// runs records the tool execs the script started.
+	runs []podRun
+	// stderr holds what the script wrote to the pod's standard error.
+	stderr bytes.Buffer
+}
+
+func (p *podShell) Attach(argv []string, _ []string) (int, error) {
+	p.attached = append(p.attached, argv)
+	script, params, env, err := shellInvocation(argv)
+	if err != nil {
+		return 0, err
 	}
-	want := []string{"kubectl", "--context", kubeContext, "-n", kubeNamespace, "exec", kubePod, "-c", kubeContainer, "--", "test", "-d", podTownRoot + "/rig/polecats"}
-	if len(f.captured) == 0 || !slices.Equal(f.captured[len(f.captured)-1], want) {
-		t.Fatalf("the last probe was %q, want the directory check %q", f.captured, want)
+	runner, err := interp.New(
+		interp.Env(expand.ListEnviron(env...)),
+		interp.Dir("/"),
+		interp.Params(params...),
+		interp.StatHandler(p.stat),
+		interp.AccessHandler(func(context.Context, string, interp.AccessMode) error { return nil }),
+		interp.ExecHandler(p.exec),
+		interp.StdIO(nil, io.Discard, &p.stderr),
+	)
+	if err != nil {
+		return 0, err
+	}
+	node, err := syntax.NewParser().Parse(strings.NewReader(script), "")
+	if err != nil {
+		return 0, err
+	}
+	if err := runner.Run(context.Background(), node); err != nil {
+		var status interp.ExitStatus
+		if errors.As(err, &status) {
+			return int(status), nil
+		}
+		return 0, err
+	}
+	return 0, nil
+}
+
+// shellInvocation takes the script, the positional parameters after $0 and the
+// forwarded environment out of an exec command line.
+func shellInvocation(argv []string) (script string, params, env []string, err error) {
+	i := slices.Index(argv, "--")
+	if i < 0 || i+2 >= len(argv) || argv[i+1] != "env" {
+		return "", nil, nil, fmt.Errorf("the exec command line does not run env after --: %q", argv)
+	}
+	rest := argv[i+2:]
+	for len(rest) > 0 && strings.Contains(rest[0], "=") {
+		env = append(env, rest[0])
+		rest = rest[1:]
+	}
+	if len(rest) < 7 || rest[0] != "sh" || rest[1] != "-c" || rest[3] != "sh" {
+		return "", nil, nil, fmt.Errorf("the exec command line does not run a shell script: %q", rest)
+	}
+	return rest[2], rest[4:], env, nil
+}
+
+// stat reports a directory the fake pod has, and absence for everything else.
+func (p *podShell) stat(_ context.Context, name string, _ bool) (fs.FileInfo, error) {
+	if p.dirs[path.Clean(name)] {
+		return podDirInfo{}, nil
+	}
+	return nil, fs.ErrNotExist
+}
+
+// podDirInfo is a directory in the fake pod.
+type podDirInfo struct{}
+
+func (podDirInfo) Name() string      { return "" }
+func (podDirInfo) Size() int64       { return 0 }
+func (podDirInfo) Mode() fs.FileMode { return fs.ModeDir | 0o755 }
+func (podDirInfo) ModTime() time.Time {
+	return time.Time{}
+}
+func (podDirInfo) IsDir() bool { return true }
+func (podDirInfo) Sys() any    { return nil }
+
+// exec answers dirname, as the pod's shell needs to walk up, and records every
+// other command as the tool exec.
+func (p *podShell) exec(ctx context.Context, args []string) error {
+	hc := interp.HandlerCtx(ctx)
+	if args[0] == "dirname" {
+		fmt.Fprintln(hc.Stdout, path.Dir(args[1]))
+		return nil
+	}
+	p.runs = append(p.runs, podRun{dir: hc.Dir, env: envMap(hc.Env)})
+	return nil
+}
+
+// envMap renders an interpreter environment as a map, so a test reads one
+// variable without depending on order.
+func envMap(env expand.Environ) map[string]string {
+	m := make(map[string]string)
+	env.Each(func(name string, vr expand.Variable) bool {
+		if vr.Kind == expand.String {
+			m[name] = vr.Str
+		}
+		return true
+	})
+	return m
+}
+
+// TestPodLaunchWalksToNearestExistingAncestor: a mapped directory the pod lacks
+// runs in the nearest existing ancestor under the pod town root, through the one
+// exec that runs the tool, with no separate directory probe.
+func TestPodLaunchWalksToNearestExistingAncestor(t *testing.T) {
+	t.Parallel()
+	pod := &podShell{fakeKube: healthyKube(), dirs: map[string]bool{
+		podTownRoot:              true,
+		podTownRoot + "/gastown": true,
+	}}
+	var note bytes.Buffer
+	exit, err := testKubectl(pod, &note).Launch(kubeCall(t, kubeTown+"/gastown/crew/x", false))
+	if err != nil || exit != 0 {
+		t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
+	}
+	if len(pod.runs) != 1 {
+		t.Fatalf("the tool ran %d times, want once; stderr: %q", len(pod.runs), pod.stderr.String())
+	}
+	if got, want := pod.runs[0].dir, podTownRoot+"/gastown"; got != want {
+		t.Fatalf("the tool ran in %q, want the nearest existing ancestor %q", got, want)
+	}
+	for _, argv := range pod.captured {
+		if line := strings.Join(argv, " "); strings.Contains(line, "test -d") {
+			t.Fatalf("the target ran a separate directory probe: %q", line)
+		}
 	}
 }
 
-// TestKubectlRefusesAMappedDirectoryMissingInThePod: a directory the pod does not
-// have is the wrapper's refusal with exit 1, and the tool never runs. A check that
-// does not run refuses too.
-func TestKubectlRefusesAMappedDirectoryMissingInThePod(t *testing.T) {
+// TestPodLaunchSetsCallerCwdOnlyWhenWalked: the tool is told the Mac directory
+// only when the pod directory differs from the mapped path. A directory that maps
+// to itself, and one outside the town, keep the forwarded environment unchanged.
+func TestPodLaunchSetsCallerCwdOnlyWhenWalked(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		setup     func(*fakeKube)
-		wantError string
+		name    string
+		dir     string
+		dirs    map[string]bool
+		wantSet bool
 	}{
-		{name: "the directory is missing", setup: func(f *fakeKube) { f.dirExit = 1 }, wantError: "is not a directory in container daemon"},
-		{name: "the directory check does not run", setup: func(f *fakeKube) { f.dirErr = errors.New("exec: refused") }, wantError: "check that"},
+		{
+			name:    "walked to an ancestor",
+			dir:     kubeTown + "/gastown/crew/x",
+			dirs:    map[string]bool{podTownRoot: true, podTownRoot + "/gastown": true},
+			wantSet: true,
+		},
+		{
+			name:    "the directory maps to itself",
+			dir:     kubeTown + "/gastown/crew/x",
+			dirs:    map[string]bool{podTownRoot: true, podTownRoot + "/gastown/crew/x": true},
+			wantSet: false,
+		},
+		{
+			name:    "outside the town",
+			dir:     "/Users/sloan/Documents/scratch",
+			dirs:    map[string]bool{podTownRoot: true},
+			wantSet: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			f := healthyKube()
-			tt.setup(f)
+			pod := &podShell{fakeKube: healthyKube(), dirs: tt.dirs}
 			var note bytes.Buffer
-			exit, err := testKubectl(f, &note).Launch(kubeCall(t, kubeTown+"/rig/gone", false))
-			if exit != 1 || err == nil || !strings.Contains(err.Error(), tt.wantError) {
-				t.Fatalf("Launch = %d, %v; want 1 with an error containing %q", exit, err, tt.wantError)
+			exit, err := testKubectl(pod, &note).Launch(kubeCall(t, tt.dir, false))
+			if err != nil || exit != 0 {
+				t.Fatalf("Launch = %d, %v; want 0, nil", exit, err)
 			}
-			if len(f.attached) != 0 {
-				t.Fatalf("a call with a missing directory attached %q", f.attached)
+			if len(pod.runs) != 1 {
+				t.Fatalf("the tool ran %d times, want once; stderr: %q", len(pod.runs), pod.stderr.String())
+			}
+			got, set := pod.runs[0].env["GT_CALLER_CWD"]
+			if set != tt.wantSet {
+				t.Fatalf("GT_CALLER_CWD = %q, set = %v; want set = %v", got, set, tt.wantSet)
+			}
+			if tt.wantSet && got != tt.dir {
+				t.Fatalf("GT_CALLER_CWD = %q, want the caller's directory %q", got, tt.dir)
 			}
 		})
+	}
+}
+
+// TestPodLaunchRefusesWhenTownRootAbsent: when even the pod town root is absent,
+// the wrapper refuses in one line naming it, exits 125, and the tool does not start.
+func TestPodLaunchRefusesWhenTownRootAbsent(t *testing.T) {
+	t.Parallel()
+	pod := &podShell{fakeKube: healthyKube(), dirs: map[string]bool{}}
+	var note bytes.Buffer
+	exit, err := testKubectl(pod, &note).Launch(kubeCall(t, kubeTown+"/gastown/crew/x", false))
+	if err != nil {
+		t.Fatalf("Launch returned an error: %v", err)
+	}
+	if exit != 125 {
+		t.Fatalf("Launch = %d, want 125", exit)
+	}
+	if len(pod.runs) != 0 {
+		t.Fatalf("the tool ran in %q, want it not to start", pod.runs[0].dir)
+	}
+	line := strings.TrimSuffix(pod.stderr.String(), "\n")
+	if strings.Contains(line, "\n") {
+		t.Fatalf("the refusal is more than one line: %q", line)
+	}
+	if !strings.Contains(line, podTownRoot) {
+		t.Fatalf("the refusal %q does not name the pod town root %q", line, podTownRoot)
 	}
 }
 

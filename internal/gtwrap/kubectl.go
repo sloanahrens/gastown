@@ -65,8 +65,9 @@ type kubeLadder struct {
 
 // Launch runs call by exec into the pod the ladder finds, and refuses with the
 // doctor's reason when no rung holds. A working directory the pod cannot see is
-// mapped onto podTownRoot with a note on Note. A directory the pod does not have
-// is refused here, before the tool runs, and a credential in the environment is
+// mapped onto podTownRoot with a note on Note. A mapped directory the pod lacks
+// runs in the nearest existing ancestor under podTownRoot, and the tool is told
+// the caller's directory in GT_CALLER_CWD. A credential in the environment is
 // dropped with a note, since the environment travels in the kubectl argv.
 func (k Kubectl) Launch(call Call) (int, error) {
 	if err := k.validate(); err != nil {
@@ -84,9 +85,6 @@ func (k Kubectl) Launch(call Call) (int, error) {
 		return exitDown, err
 	}
 	dir, under := podDir(k.Town, call.Dir)
-	if err := k.checkDir(l.pod, dir); err != nil {
-		return exitDown, err
-	}
 	if !under {
 		fmt.Fprintf(k.Note, "gt-wrap: %s is outside the town %s, which the pod cannot see, so the tool runs in %s\n", call.Dir, k.Town, podTownRoot)
 	}
@@ -124,20 +122,6 @@ func screenEnv(env []string) (kept, dropped []string, err error) {
 // GT_DOLT_PASSWORD is dropped although the GT_ family forwards it for docker.
 func isCredential(name string) bool {
 	return slices.Contains(config.UnforwardedCredentialEnvVars(), name) || containsCredentialWord(strings.ToUpper(name))
-}
-
-// checkDir runs one check that dir is a directory in the pod's container. A
-// directory the pod lacks is refused by the wrapper, so the tool never starts in a
-// directory the pod does not have; a check that does not run refuses too.
-func (k Kubectl) checkDir(pod, dir string) error {
-	_, exit, err := k.probe("-n", k.Namespace, "exec", pod, "-c", k.Container, "--", "test", "-d", dir)
-	if err != nil {
-		return fmt.Errorf("gtwrap: check that %s is a directory in container %s of pod %s: %w", dir, k.Container, pod, err)
-	}
-	if exit != 0 {
-		return fmt.Errorf("gtwrap: %s is not a directory in container %s of pod %s, so the tool did not run", dir, k.Container, pod)
-	}
-	return nil
 }
 
 // Doctor reports the rungs of the ladder for the tool the wrapper was invoked as:
@@ -233,9 +217,47 @@ func (k Kubectl) checkTool(pod string) error {
 	return nil
 }
 
+// podWalkUpScript runs the tool in the nearest directory the pod has at or above
+// the caller's mapped directory, and never above podTownRoot. A target outside the
+// root, a target with a .. step, an absent root, a walk that finds no directory,
+// and a directory the shell cannot enter each refuse in one line and exit 125, so
+// the tool did not start; otherwise the tool's own exit status passes through. A
+// walk that ends anywhere but the mapped directory names the caller's Mac directory
+// in GT_CALLER_CWD, since the tool reads its identity there and the process
+// directory is only an ancestor. Every directory crosses as a positional parameter,
+// so a path holding a space or a quote stays one word.
+const podWalkUpScript = `target=$1; root=$2; caller=$3; shift 3
+refuse() { echo "gtwrap: $1, so the tool did not run" >&2; exit 125; }
+case $target in
+  "$root"|"$root"/*) ;;
+  *) refuse "$target is not under the pod town root $root" ;;
+esac
+case $target in
+  */..|*/../*) refuse "$target has a .. step" ;;
+esac
+if [ ! -d "$root" ]; then
+  refuse "the pod town root $root is not a directory"
+fi
+d=$target
+while [ ! -d "$d" ]; do
+  p=$(dirname "$d")
+  if [ -z "$p" ] || [ "$p" = "$d" ]; then
+    refuse "no directory at or above $target is in the pod"
+  fi
+  d=$p
+done
+if [ "$d" != "$target" ]; then
+  GT_CALLER_CWD=$caller
+  export GT_CALLER_CWD
+fi
+cd "$d" 2>/dev/null || refuse "cannot enter $d"
+exec "$@"`
+
 // execArgv is the kubectl command line that runs call in pod, in dir. The env
 // assignments travel as an env command's arguments, since kubectl exec forwards no
 // environment; the Dolt host is set last so a forwarded value cannot override it.
+// The shell then walks up from dir to the nearest directory the pod has, and runs
+// the tool there.
 func (k Kubectl) execArgv(pod string, call Call, dir string) []string {
 	argv := k.kubectlArgv("-n", k.Namespace, "exec")
 	argv = append(argv, stdioFlags(call)...)
@@ -248,7 +270,7 @@ func (k Kubectl) execArgv(pod string, call Call, dir string) []string {
 		argv = append(argv, entry)
 	}
 	argv = append(argv, doltHostVar+"="+doltHostGateway)
-	argv = append(argv, "sh", "-c", `cd "$1" && shift && exec "$@"`, "sh", dir)
+	argv = append(argv, "sh", "-c", podWalkUpScript, "sh", dir, podTownRoot, call.Dir)
 	return append(argv, call.Argv...)
 }
 
