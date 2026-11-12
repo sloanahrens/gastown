@@ -1,0 +1,244 @@
+package metrics
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+// The backfill: the regime changes the town made while the runtime record did
+// not exist, written to regime-events-backfill-<day>.jsonl for the reader to
+// merge beside it. The install events are not here: RecordInstallReceipts
+// records them from the receipts into the record itself, and the file holds
+// what no receipt carries — the moves of the seats and the daemon, and the seat
+// models the settings put in force at the move.
+//
+// The file is named for the UTC day it is written. Running the backfill again
+// writes the same day's file again with the same events; running it on a later
+// day writes a new file that restates them, and the reader counts a record
+// repeated across the runtime files once (same kind, ts and after_ref).
+
+// regimeBackfillDayLayout is the day form the backfill file's name carries.
+const regimeBackfillDayLayout = "20060102"
+
+// regimeSandboxMoveAt is the day the seats moved from the host into sandboxes.
+// It is when the sbx seats in settings/config.json came into force, so it is
+// the instant their seat_model events are placed at: the settings hold the
+// seats in force, not the day each was configured.
+var regimeSandboxMoveAt = time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+
+// regimeBackfillMoves are the moves the town made before the runtime record
+// existed, so the analysis can cut a series at them. The record holds every
+// change `gt regime record` wrote since; a later move is recorded there live
+// and is not added to this table. A move is known by its day, so its instant is
+// that day's UTC midnight, the instant a settings event is placed at.
+var regimeBackfillMoves = []RegimeEventRecord{
+	{
+		TS:     regimeSandboxMoveAt,
+		Kind:   "platform",
+		Reason: "seats moved from the host into sandboxes",
+		Source: "mango-evaluation review",
+	},
+	{
+		TS:     time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC),
+		Kind:   "platform",
+		Reason: "daemon moved from the host into the control cluster",
+		Source: "mango-evaluation review",
+	},
+}
+
+// backfillPath is the backfill file for the UTC day of day under town: the
+// name the reader merges with the runtime record.
+func backfillPath(town string, day time.Time) string {
+	return filepath.Join(town, regimeEventsRuntimeDir,
+		regimeEventsBackfillPrefix+day.UTC().Format(regimeBackfillDayLayout)+regimeEventsBackfillSuffix)
+}
+
+// RegimeBackfill writes town's backfill file for the day of now and returns its
+// path and how many events it holds: the moves in regimeBackfillMoves and one
+// seat_model event per seat the town's settings put in force at the sandbox
+// move, each naming the model its agent config names. A town with no settings
+// file has no seats to name and still gets the moves; a settings file that is
+// there and cannot be read or parsed fails the call, so a seat list the town
+// cannot read is never written as a town with no seats.
+func RegimeBackfill(env Env, now time.Time, actor string) (string, int, error) {
+	actor = strings.TrimSpace(actor)
+	if actor == "" {
+		return "", 0, errors.New("regime backfill: no actor to record the events under")
+	}
+	if env.ReadFile == nil {
+		return "", 0, errors.New("regime backfill: Env.ReadFile is unset")
+	}
+	seats, err := seatModelRecords(env, actor)
+	if err != nil {
+		return "", 0, fmt.Errorf("regime backfill: %w", err)
+	}
+	records := make([]RegimeEventRecord, 0, len(regimeBackfillMoves)+len(seats))
+	for _, move := range regimeBackfillMoves {
+		move.Actor = actor
+		records = append(records, move)
+	}
+	records = append(records, seats...)
+	path := backfillPath(env.Town, now)
+	n, err := writeRegimeBackfill(path, records)
+	if err != nil {
+		return path, 0, err
+	}
+	return path, n, nil
+}
+
+// seatModelRecords is one seat_model event per seat in settings/config.json
+// whose town agent config names a model, at the sandbox move. A seat whose
+// agent names no model is left out, as the snapshot's seat_models column leaves
+// it out: its default is the agent's, not a value the settings state.
+//
+// The event's after_ref is the seat and its model ("agent=model"), not the model
+// alone: the reader counts two records with one kind, ts and after_ref once, so
+// two seats on one model would otherwise collapse into one event.
+func seatModelRecords(env Env, actor string) ([]RegimeEventRecord, error) {
+	settings, err := configReadSettings(env)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if settings.PolecatPool == nil || len(settings.PolecatPool.Seats) == 0 {
+		return nil, nil
+	}
+	agents := make([]string, 0, len(settings.PolecatPool.Seats))
+	for agent := range settings.PolecatPool.Seats {
+		agents = append(agents, agent)
+	}
+	sort.Strings(agents)
+	records := make([]RegimeEventRecord, 0, len(agents))
+	for _, agent := range agents {
+		model := configSeatModel(settings, agent)
+		if model == "" {
+			continue
+		}
+		records = append(records, RegimeEventRecord{
+			TS:       regimeSandboxMoveAt,
+			Kind:     "seat_model",
+			AfterRef: agent + "=" + model,
+			Reason:   agent + " seat runs " + model,
+			Actor:    actor,
+			Source:   filepath.ToSlash(configSettingsFile),
+		})
+	}
+	return records, nil
+}
+
+// backfillFile is what writing the backfill needs of the file it writes: one
+// write and a close.
+type backfillFile interface {
+	Write([]byte) (int, error)
+	Close() error
+}
+
+// backfillWrite is the file's way to the disk: it encodes the lines, opens the
+// file and renames it into place. The production values are json.Marshal,
+// os.OpenFile and os.Rename. The struct exists so a test drives the encode,
+// write, short-write, close and rename failures a host cannot be made to produce.
+type backfillWrite struct {
+	encode func(any) ([]byte, error)
+	open   func(name string, flag int, perm os.FileMode) (backfillFile, error)
+	rename func(oldpath, newpath string) error
+}
+
+// hostBackfillWrite is the process's own encoder and filesystem.
+func hostBackfillWrite() backfillWrite {
+	return backfillWrite{encode: json.Marshal, open: openBackfillFile, rename: os.Rename}
+}
+
+// openBackfillFile opens the backfill file for writing.
+func openBackfillFile(name string, flag int, perm os.FileMode) (backfillFile, error) {
+	return os.OpenFile(name, flag, perm)
+}
+
+// writeRegimeBackfill writes records to path as the backfill file: the events
+// trimmed and validated like the writer's, oldest first, a record repeated in
+// records counted once, and one JSON line each. The file is created 0600 and its
+// directory 0700, and an existing file is replaced, so the same day's file holds
+// the same events however often the backfill runs. It returns the number of
+// lines written.
+func writeRegimeBackfill(path string, records []RegimeEventRecord) (int, error) {
+	return writeRegimeBackfillWith(path, records, hostBackfillWrite())
+}
+
+// writeRegimeBackfillWith is writeRegimeBackfill through seams. The lines go to
+// path plus ".tmp", which is renamed over path only once they are written and
+// closed, so a failed write leaves the day's file as it was. A failed write
+// leaves the .tmp behind; the reader reads only names ending in ".jsonl", and the
+// next run truncates it. A failed write still closes the file, and a close
+// failure is an error so a backfill the host did not keep is not reported as
+// written.
+func writeRegimeBackfillWith(path string, records []RegimeEventRecord, seams backfillWrite) (int, error) {
+	lines, n, err := backfillLines(records, seams.encode)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return 0, fmt.Errorf("regime backfill: creating %s: %w", filepath.Dir(path), err)
+	}
+	tmp := path + ".tmp"
+	f, err := seams.open(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return 0, fmt.Errorf("regime backfill: opening %s: %w", tmp, err)
+	}
+	written, werr := f.Write(lines)
+	cerr := f.Close()
+	if werr != nil {
+		return 0, fmt.Errorf("regime backfill: writing %s: %w", tmp, werr)
+	}
+	if written != len(lines) {
+		return 0, fmt.Errorf("regime backfill: writing %s: %w", tmp, io.ErrShortWrite)
+	}
+	if cerr != nil {
+		return 0, fmt.Errorf("regime backfill: closing %s: %w", tmp, cerr)
+	}
+	if err := seams.rename(tmp, path); err != nil {
+		return 0, fmt.Errorf("regime backfill: replacing %s: %w", path, err)
+	}
+	return n, nil
+}
+
+// backfillLines encodes records as the file holds them and returns the bytes and
+// the line count.
+func backfillLines(records []RegimeEventRecord, encode func(any) ([]byte, error)) ([]byte, int, error) {
+	sorted := make([]RegimeEventRecord, len(records))
+	copy(sorted, records)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].TS.Before(sorted[j].TS) })
+	var buf bytes.Buffer
+	seen := make(map[regimeRecordKey]struct{}, len(sorted))
+	n := 0
+	for _, rec := range sorted {
+		rec.Kind = strings.TrimSpace(rec.Kind)
+		rec.Reason = strings.TrimSpace(rec.Reason)
+		rec.Actor = strings.TrimSpace(rec.Actor)
+		if err := rec.validate(); err != nil {
+			return nil, 0, fmt.Errorf("regime backfill: %w", err)
+		}
+		key := regimeRecordKeyOf(rec)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		line, err := encode(rec)
+		if err != nil {
+			return nil, 0, fmt.Errorf("regime backfill: encoding: %w", err)
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+		n++
+	}
+	return buf.Bytes(), n, nil
+}

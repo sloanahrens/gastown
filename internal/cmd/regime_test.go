@@ -250,3 +250,150 @@ func TestRegimeCheckOutsideATown(t *testing.T) {
 		t.Fatalf("err = %v; want the workspace refusal", err)
 	}
 }
+
+// regimeBackfillRun runs gt regime backfill over town and returns what it
+// printed beside the error.
+func regimeBackfillRun(t *testing.T, town string, args ...string) (string, error) {
+	t.Helper()
+	cmd := newRegimeCommand(
+		func() (string, error) { return town, nil },
+		func() time.Time { return regimeTestNow },
+		func() string { return "gastown/polecats/capable" },
+	)
+	var out bytes.Buffer
+	cmd.SetArgs(args)
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	err := cmd.Execute()
+	return out.String(), err
+}
+
+// writeRegimeTownFile writes content at the town-relative path under town.
+func writeRegimeTownFile(t *testing.T, town, rel, content string) {
+	t.Helper()
+	path := filepath.Join(town, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gt regime backfill records the install receipts into the runtime record and
+// writes the day's backfill file with the moves and the seat model; a second run
+// records no install event again.
+func TestRegimeBackfillRecordsTheReceiptsAndWritesTheFile(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRegimeTownFile(t, town, "daemon/install-receipts.jsonl",
+		`{"commit":"abc123","event":"installed","prev_commit":"def456","ts":"2026-10-31T09:00:00Z"}`+"\n")
+	writeRegimeTownFile(t, town, "settings/config.json",
+		`{"agents":{"sbx-flash":{"command":"claude","args":["--model","deepseek-flash[1m]"]}},`+
+			`"polecat_pool":{"seats":{"sbx-flash":{}}}}`)
+
+	out, err := regimeBackfillRun(t, town, "backfill")
+	if err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	if !strings.Contains(out, "recorded 1 install events (0 already recorded)") {
+		t.Fatalf("output = %q, want the install receipt counted", out)
+	}
+	wantPath := filepath.Join(town, ".runtime", "metrics", "regime-events-backfill-20261101.jsonl")
+	if !strings.Contains(out, wantPath) {
+		t.Fatalf("output = %q, want the backfill path %s", out, wantPath)
+	}
+
+	record, err := os.ReadFile(metrics.RegimeEventsPath(town))
+	if err != nil {
+		t.Fatalf("reading the runtime record: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(record), "\n"), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("%d install lines, want 1: %q", len(lines), record)
+	}
+	var install metrics.RegimeEventRecord
+	if err := json.Unmarshal([]byte(lines[0]), &install); err != nil {
+		t.Fatalf("decoding the install event: %v", err)
+	}
+	if install.Kind != "install" || install.AfterRef != "abc123" || install.Actor != "gastown/polecats/capable" {
+		t.Fatalf("install event = %#v, want the receipt's commit under the session actor", install)
+	}
+
+	backfill, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatalf("reading the backfill file: %v", err)
+	}
+	for _, want := range []string{
+		`"ts":"2026-10-29T00:00:00Z","kind":"platform"`,
+		`"ts":"2026-11-10T00:00:00Z","kind":"platform"`,
+		`"reason":"sbx-flash seat runs deepseek-flash[1m]"`,
+	} {
+		if !strings.Contains(string(backfill), want) {
+			t.Errorf("backfill file = %q, want it to hold %s", backfill, want)
+		}
+	}
+
+	out, err = regimeBackfillRun(t, town, "backfill")
+	if err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if !strings.Contains(out, "recorded 0 install events (1 already recorded)") {
+		t.Fatalf("second output = %q, want no new install event", out)
+	}
+	record, err = os.ReadFile(metrics.RegimeEventsPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(strings.TrimSuffix(string(record), "\n"), "\n") + 1; got != 1 {
+		t.Fatalf("second run left %d install lines, want 1: %q", got, record)
+	}
+}
+
+// A runtime record the backfill cannot read fails the command before it records
+// or writes anything.
+func TestRegimeBackfillReturnsTheReceiptsError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRegimeTownFile(t, town, ".runtime/metrics/regime-events.jsonl", "not a record\n")
+	writeRegimeTownFile(t, town, "daemon/install-receipts.jsonl",
+		`{"commit":"abc123","event":"installed","ts":"2026-10-31T09:00:00Z"}`+"\n")
+
+	_, err := regimeBackfillRun(t, town, "backfill")
+	if err == nil || !strings.Contains(err.Error(), metrics.RegimeEventsPath(town)) {
+		t.Fatalf("err = %v, want the unreadable record named", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(town, ".runtime", "metrics", "regime-events-backfill-20261101.jsonl")); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("a refused backfill left a backfill file behind (%v)", statErr)
+	}
+}
+
+// A settings file the backfill cannot read fails the command with the reader's
+// reason.
+func TestRegimeBackfillReturnsTheBackfillError(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeRegimeTownFile(t, town, "settings/config.json", `{"polecat_pool": `)
+
+	_, err := regimeBackfillRun(t, town, "backfill")
+	if err == nil || !strings.Contains(err.Error(), "settings/config.json") {
+		t.Fatalf("err = %v, want the unreadable settings file named", err)
+	}
+}
+
+// gt regime backfill outside a town refuses and writes nothing.
+func TestRegimeBackfillOutsideATown(t *testing.T) {
+	t.Parallel()
+	cmd := newRegimeCommand(
+		func() (string, error) { return "", errors.New("no workspace") },
+		func() time.Time { return regimeTestNow },
+		func() string { return "gastown/polecats/capable" },
+	)
+	cmd.SetArgs([]string{"backfill"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "Gas Town workspace") {
+		t.Fatalf("err = %v; want the workspace refusal", err)
+	}
+}

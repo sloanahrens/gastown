@@ -33,9 +33,9 @@ process to `gt metrics run` (gt-hg64t), so the hour has one implementation, and
 the runner starts it here with `GT_TOWN_ROOT` set, which is where that command
 resolves the town from. Everything the hour does is Go:
 `internal/cmd/metrics_run.go` (the hour), `internal/metrics/townlock.go` (the
-lock), and the two steps in `internal/cmd/metrics_snapshot.go` and
-`internal/cmd/metrics_analysis.go`. `gt metrics run` does three things and
-nothing more:
+lock), and the steps in `internal/cmd/metrics_snapshot.go`,
+`internal/metrics/receipts.go` and `internal/cmd/metrics_analysis.go`.
+`gt metrics run` does five things and nothing more:
 
 1. Takes the single-flight lock `<town>/.runtime/town-metrics.lock` with a
    non-blocking `flock(2)`. The file holds the pid of the run that owns it. The
@@ -43,18 +43,24 @@ nothing more:
    daemon killed leaves nothing to take over and there is no stale-lock path. A
    lock a live run holds prints a skipped line and exits 0, which records the
    run as skipped rather than as an overlap failure.
-2. Runs the snapshot, then the analysis, and passes both outputs through
-   unchanged. The snapshot's receipt line is the hour's record. The snapshot
-   step also appends each rig's line for the local day that just ended to
+2. Runs the snapshot and passes its output through unchanged. The snapshot's
+   receipt line is the hour's record. The snapshot step also appends each rig's
+   line for the local day that just ended to
    `<town>/.runtime/metrics/bd-daily.jsonl`, so the tracker's counts, ages and
    shape outlive the Dolt history flatten; `internal/metrics/bdsnap.go` holds
-   what a line carries and what a gap means. The analysis prints either
+   what a line carries and what a gap means.
+3. Records the applied install receipts into the regime log under the actor
+   `town-metrics` (`internal/metrics/receipts.go`; the rules are in
+   `docs/metrics.md`).
+4. Runs the analysis and prints either
    `analyse <ts>: <n> landings, <t> targets -> <panel>` or a not-due line, which
    is what an hour that is not a day's boundary looks like.
-3. Exits with the first failing step's error, so both steps always run. A source
-   that fails inside the snapshot is an `errors` entry in the record, not a
-   failure here; only a failed append exits non-zero, and the daemon escalates
-   that once under `plugin:town-metrics:failed`, which the next good run closes.
+5. Exits with the first failing step's error, so every step always runs. A
+   source that fails inside the snapshot is an `errors` entry in the record, not
+   a failure here; only a failed step exits non-zero (a failed append, an
+   unreadable receipts file, or a regime record the log cannot take), and the
+   daemon escalates that once under
+   `plugin:town-metrics:failed`, which the next good run closes.
 
 The analysis is a no-op on most hours: it reads a stamp, and a stamp younger
 than a day (gt-xfx1k) ends the run after one line. The timeout is 15m because
@@ -69,6 +75,7 @@ Run it directly, from inside the town or with `GT_TOWN_ROOT` set:
 
 Its tests are Go: `internal/metrics/townlock_test.go` (the lock is held until
 released, records the holder's pid, and is not blocked by a dead run's leftover),
-`internal/cmd/metrics_run_test.go` (a held lock skips the hour and appends
-nothing), and `main_test.go` here (the entry point runs `gt metrics run`, and a
-gt missing from PATH fails the hour instead of skipping it).
+`internal/metrics/receipts_test.go` (the receipt step), `internal/cmd/metrics_run_test.go`
+(a held lock skips the hour and appends nothing), and
+`main_test.go` here (the entry point runs `gt metrics run`, and a gt missing from
+PATH fails the hour instead of skipping it).
