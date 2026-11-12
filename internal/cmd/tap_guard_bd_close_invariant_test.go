@@ -229,6 +229,16 @@ func TestParseBdCloseInvocations(t *testing.T) {
 		// nothing to judge.
 		{name: "a substitution the parser cannot read is an unknown close", command: `echo $(bd close gt-arno) "unterminated`, want: []bdCloseInvocation{{IDsUnreadable: true}}},
 		{name: "a line the parser cannot read with no substitution is not a close", command: `echo "unterminated`, want: nil},
+		// Each opening that may hold a substitution makes an unreadable line an
+		// unknown close on its own, so each is pinned alone.
+		{name: "an unclosed backquote is an unknown close", command: "echo `bd close gt-arno", want: []bdCloseInvocation{{IDsUnreadable: true}}},
+		{name: "an unclosed process input is an unknown close", command: "cat <(bd close gt-arno", want: []bdCloseInvocation{{IDsUnreadable: true}}},
+		{name: "an unclosed process output is an unknown close", command: "tee >(bd close gt-arno", want: []bdCloseInvocation{{IDsUnreadable: true}}},
+		{name: "an unreadable line that holds only a variable is not a close", command: `echo "a $b`, want: nil},
+		// A quoted heredoc body is literal to the parser, so a close in it is
+		// data even with an unterminated quote in the body. The same body unquoted
+		// is judged (see the block-path table).
+		{name: "a close in a quoted heredoc body with an unterminated quote is data", command: "cat <<'EOF'\n$(bd close gt-arno) \"unterminated\nEOF", want: nil},
 		{
 			// A variable id is unreadable, so it cannot match a branch and
 			// cannot be judged. It is still reported as an invocation, so
@@ -578,6 +588,15 @@ func TestBdCloseInvariantBlockPath_NewForms(t *testing.T) {
 		{"env with flags", "env -u FOO bd close gt-arno", "gt-arno"},
 		{"repeated reason leaves this id unoverridden", "bd close gt-arno gt-other --reason x --reason 'supersede: y'", "gt-arno"},
 		{"reason file without an override", "bd close gt-arno --reason-file " + dir + "/missing.txt", "gt-arno"},
+		// A line the parser cannot read is refused for its close only when it
+		// may hold a substitution: each opening alone is enough.
+		{"unclosed backquote holding a close", "echo `bd close gt-arno", "gt-arno"},
+		{"unclosed process input holding a close", "cat <(bd close gt-arno", "gt-arno"},
+		{"unclosed process output holding a close", "tee >(bd close gt-arno", "gt-arno"},
+		// The same heredoc body as the parse table, unquoted: the shell expands
+		// its substitution, so the close is judged.
+		{"a close in an unquoted heredoc body with an unterminated quote", "cat <<EOF\n$(bd close gt-arno) \"unterminated\nEOF", "gt-arno"},
+		{"the same heredoc body quoted is data", "cat <<'EOF'\n$(bd close gt-arno) \"unterminated\nEOF", ""},
 
 		{"substitution with a supersede reason", "echo $(bd close gt-arno --reason 'supersede: dup')", ""},
 		{"xargs fed by echo with a supersede reason", "echo gt-arno | xargs bd close --reason 'cancel: x'", ""},
@@ -1117,5 +1136,32 @@ func TestBdClosePrefixedDashedName(t *testing.T) {
 		if got := bdClosePrefixedDashedName(tt.tok); got != tt.want {
 			t.Errorf("bdClosePrefixedDashedName(%q) = %v, want %v", tt.tok, got, tt.want)
 		}
+	}
+}
+
+// TestMayHoldSubstitution pins the four openings the fail-closed test reads.
+// An unreadable command that holds any one of them may hold a substitution the
+// guards must judge; one that holds none has nothing to judge.
+func TestMayHoldSubstitution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{name: "a backquote", command: "echo `date`", want: true},
+		{name: "a dollar-paren", command: "echo $(date)", want: true},
+		{name: "a process input", command: "diff <(ls a) b", want: true},
+		{name: "a process output", command: "tee >(cat)", want: true},
+		{name: "a variable opens no substitution", command: `echo "a $b"`, want: false},
+		{name: "a redirect and a compare open no substitution", command: "cat a < b > c", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mayHoldSubstitution(tt.command); got != tt.want {
+				t.Errorf("mayHoldSubstitution(%q) = %t, want %t", tt.command, got, tt.want)
+			}
+		})
 	}
 }
