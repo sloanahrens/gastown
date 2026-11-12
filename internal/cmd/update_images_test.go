@@ -1258,13 +1258,13 @@ func TestTownImageRegistryReadsTheTownsForgejo(t *testing.T) {
 		townRoot := writeTownFixture(t, map[string]string{
 			"mayor/rigs.json":     rigsJSON,
 			"mayor/daemon.json":   daemon,
-			"gastown/config.json": rigConfig("http://forgejo:3000/sloan/gastown"),
+			"gastown/config.json": rigConfig("http://forgejo:3000/acme/gastown"),
 		})
 		got, err := townImageRegistry(townRoot)
 		if err != nil {
 			t.Fatalf("townImageRegistry: %v", err)
 		}
-		want := imagevalues.Registry{Scheme: "http", Host: "forgejo:3000", Owner: "sloan"}
+		want := imagevalues.Registry{Scheme: "http", Host: "forgejo:3000", Owner: "acme"}
 		if got != want {
 			t.Errorf("townImageRegistry = %+v, want %+v", got, want)
 		}
@@ -1297,7 +1297,7 @@ func TestTownImageRegistryReadsTheTownsForgejo(t *testing.T) {
 			files: map[string]string{
 				"mayor/rigs.json":     rigsJSON,
 				"mayor/daemon.json":   `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"enabled":true}}}`,
-				"gastown/config.json": rigConfig("http://forgejo:3000/sloan/gastown"),
+				"gastown/config.json": rigConfig("http://forgejo:3000/acme/gastown"),
 			},
 			want: "image_rigs",
 		},
@@ -1306,7 +1306,7 @@ func TestTownImageRegistryReadsTheTownsForgejo(t *testing.T) {
 			files: map[string]string{
 				"mayor/rigs.json":     rigsJSON,
 				"mayor/daemon.json":   `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"enabled":true,"image_rigs":["gastwon"]}}}`,
-				"gastown/config.json": rigConfig("http://forgejo:3000/sloan/gastown"),
+				"gastown/config.json": rigConfig("http://forgejo:3000/acme/gastown"),
 			},
 			want: "gastwon",
 		},
@@ -1391,7 +1391,7 @@ func TestTownImageRegistryReadsTheRegistryOwner(t *testing.T) {
 	const (
 		rigsJSON = `{"version":1,"rigs":{"gastown":{"git_url":"https://github.com/example/gastown.git"}}}`
 		daemon   = `{"type":"daemon-patrol-config","version":1,"patrols":{"tier_sweep":{"enabled":true,"image_rigs":["gastown"]}}}`
-		remote   = "http://forgejo:3000/sloan/gastown"
+		remote   = "http://forgejo:3000/acme/gastown"
 	)
 	rigConfig := func(registryOwner string) string {
 		return `{"type":"rig","version":1,"name":"gastown","git_url":"https://github.com/example/gastown.git","merge_queue":{"forgejo":{"remote_url":"` + remote + `","registry_owner":"` + registryOwner + `"}}}`
@@ -1411,8 +1411,8 @@ func TestTownImageRegistryReadsTheRegistryOwner(t *testing.T) {
 	}{
 		{name: "a set owner replaces the remote's owner", registryOwner: "bot-registry", wantOwner: "bot-registry"},
 		{name: "a set owner is trimmed", registryOwner: "  bot-registry  ", wantOwner: "bot-registry"},
-		{name: "an empty owner is the remote's owner", registryOwner: "", wantOwner: "sloan"},
-		{name: "a whitespace-only owner is the remote's owner", registryOwner: ` \t `, wantOwner: "sloan"},
+		{name: "an empty owner is the remote's owner", registryOwner: "", wantOwner: "acme"},
+		{name: "a whitespace-only owner is the remote's owner", registryOwner: ` \t `, wantOwner: "acme"},
 	}
 	for _, row := range ok {
 		t.Run(row.name, func(t *testing.T) {

@@ -1125,7 +1125,7 @@ func TestDaemonComposeWriteDerivesTheHMConfig(t *testing.T) {
 	if err := json.Unmarshal(r.disk[path], &derived); err != nil {
 		t.Fatalf("the derived hm config does not parse: %v", err)
 	}
-	if want := "postgres://hm:test-password@host.docker.internal:5433/hm?sslmode=disable"; derived.DatabaseURL != want {
+	if want := fmt.Sprintf("postgres://hm:test-password@%s:5433/hm?sslmode=disable", composeTestDoltHost); derived.DatabaseURL != want {
 		t.Errorf("database_url = %q, want the loopback host rewritten: %q", derived.DatabaseURL, want)
 	}
 	// The embedder and the reranker are read from the blocks hm reads, so the
