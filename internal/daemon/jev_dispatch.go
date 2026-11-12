@@ -51,7 +51,7 @@ func (d *Daemon) triggerJevDispatch() {
 // one per heartbeat.
 func (d *Daemon) runJevDispatch() {
 	var settings jevdispatch.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevDispatch != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevDispatch != nil {
 		settings = jevdispatch.Settings{
 			MaxUSDPerDay:        c.Patrols.JevDispatch.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevDispatch.USDPerBillionTokens,

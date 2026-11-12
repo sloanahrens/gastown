@@ -36,6 +36,18 @@ type daemonSeams struct {
 	// time.LoadLocation; the unit tier replaces it so no test reads a zone
 	// database.
 	loadZone func(string) (*time.Location, error)
+	// readPatrolConfig reads the patrol config the heartbeat reload parses when
+	// a file's stamp changed. nil is ReadPatrolConfig; the unit tier counts the
+	// reads through it to pin that an unchanged file is not reparsed.
+	readPatrolConfig func(townRoot string) (*DaemonPatrolConfig, error)
+}
+
+// readPatrol reads the patrol config for the heartbeat reload.
+func (s daemonSeams) readPatrol(townRoot string) (*DaemonPatrolConfig, error) {
+	if s.readPatrolConfig != nil {
+		return s.readPatrolConfig(townRoot)
+	}
+	return ReadPatrolConfig(townRoot)
 }
 
 // zoneLoader returns the loader the start-up zone line resolves TZ through.

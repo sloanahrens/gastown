@@ -47,7 +47,7 @@ func (d *Daemon) pruneEventsLog() {
 	if !d.isPatrolActive("events_prune") {
 		return
 	}
-	interval, opts := eventsPruneSettings(d.patrolConfig)
+	interval, opts := eventsPruneSettings(d.patrol())
 	now := d.clk().Now()
 	dec := evaluatePatrolDue(d.config.TownRoot, "events_prune", d.eventsPruneRun.last(), now, interval)
 	if !dec.due {

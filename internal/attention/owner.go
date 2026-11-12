@@ -128,6 +128,9 @@ var ruleOwners = map[string]Owner{
 	// A stale daemon.env entry the container shadows is the overseer's to
 	// remove from settings; the person is not woken for it (gt-ih19g6).
 	RuleConfigEnvShadowed: OwnerOverseer,
+	// The settings file is the overseer's to fix, the same as the stale
+	// daemon.env entry above (gt-6frjqf).
+	RuleConfigParseFailed: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

@@ -100,7 +100,7 @@ func (d *Daemon) triggerRebuildOM() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "rebuild_om", d.rebuildOMRun.last(), now, rebuildOMInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "rebuild_om", d.rebuildOMRun.last(), now, rebuildOMInterval(d.patrol()))
 	if !dec.due {
 		return
 	}
@@ -359,7 +359,7 @@ func (d *Daemon) noteRebuildOMDrain() {
 // is not a positive duration takes the default and says so, because a block
 // nobody drains is the starvation this wait exists to end (gt-0hsf6).
 func (d *Daemon) rebuildOMDrainAfter() time.Duration {
-	cfg := d.patrolConfig
+	cfg := d.patrol()
 	if cfg == nil || cfg.Patrols == nil || cfg.Patrols.RebuildOM == nil {
 		return defaultRebuildOMDrainAfter
 	}

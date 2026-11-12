@@ -140,6 +140,10 @@ const (
 	// start, because the container's environment already sets it to another
 	// value (gt-ih19g6).
 	KindConfigEnvShadowed Kind = "config-env-shadowed"
+	// KindConfigParseFailed: the patrol config file does not load on a
+	// heartbeat reload, so the daemon runs on the config it had before the
+	// edit (gt-6frjqf).
+	KindConfigParseFailed Kind = "config-parse-failed"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -156,7 +160,7 @@ func Kinds() []Kind {
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
-		KindConfigEnvShadowed,
+		KindConfigEnvShadowed, KindConfigParseFailed,
 	}
 }
 

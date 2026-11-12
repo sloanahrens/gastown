@@ -50,7 +50,7 @@ func (d *Daemon) triggerJevConflict() {
 // heartbeat.
 func (d *Daemon) runJevConflict() {
 	var settings jevconflict.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevConflict != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevConflict != nil {
 		settings = jevconflict.Settings{
 			MaxUSDPerDay:        c.Patrols.JevConflict.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevConflict.USDPerBillionTokens,

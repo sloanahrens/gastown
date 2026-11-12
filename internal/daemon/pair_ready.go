@@ -812,7 +812,7 @@ func (d *Daemon) productionPairReadyRigs() ([]pairReadyRig, error) {
 	if err != nil {
 		return nil, err
 	}
-	tokenDir, tokenErr := pairReadyTokenDir(d.patrolConfig)
+	tokenDir, tokenErr := pairReadyTokenDir(d.patrol())
 	out := make([]pairReadyRig, 0, len(names))
 	for _, name := range names {
 		out = append(out, d.pairReadyRig(name, tokenDir, tokenErr))

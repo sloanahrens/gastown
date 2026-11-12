@@ -127,6 +127,11 @@ const (
 	// environment shadowed at start: the pod's value is kept, and the stale
 	// settings entry is what the overseer removes (gt-ih19g6).
 	RuleConfigEnvShadowed = "config.env_shadowed"
+
+	// RuleConfigParseFailed is the patrol config file that does not load on a
+	// heartbeat reload: the daemon keeps the config it had, and the overseer
+	// fixes the file (gt-6frjqf).
+	RuleConfigParseFailed = "config.parse_failed"
 )
 
 var (
@@ -216,6 +221,9 @@ var ruleFlags = map[string]RuleFlags{
 	// The pod's value is already in force, so nothing is broken; the stale
 	// settings entry is for the overseer's next look (gt-ih19g6).
 	RuleConfigEnvShadowed: flagsAsk,
+	// The daemon runs on the config it had, so the edit is not in force: the
+	// overseer is woken to fix the file (gt-6frjqf).
+	RuleConfigParseFailed: flagsWake,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -307,6 +315,7 @@ var kindRules = map[Kind]string{
 	KindHostMem:                  RuleHostMemLow,
 	KindHostForgejo:              RuleHostForgejoDown,
 	KindConfigEnvShadowed:        RuleConfigEnvShadowed,
+	KindConfigParseFailed:        RuleConfigParseFailed,
 	KindHostProbe:                RuleHostProbe,
 	KindQuestionNew:              RuleQuestionNew,
 	KindQuestionAnswered:         RuleQuestionAnswered,

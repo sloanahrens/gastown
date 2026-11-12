@@ -240,6 +240,10 @@ type attentionSources struct {
 	// at start (applyDaemonEnv), which the config.env_shadowed collector names.
 	envShadowed []string
 
+	// patrolFailure is the reload failure in force, which the
+	// config.parse_failed collector names (patrol_reload.go, gt-6frjqf).
+	patrolFailure *patrolLoadFailure
+
 	// refusals is gt done's refusal ledger; refusalBead reads one refused
 	// bead in its own rig.
 	refusals    func() ([]attention.Refusal, error)
@@ -679,6 +683,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// collector of its own for the same reason (gt-3vafwr).
 		{kind: attention.KindImagesUnknown, collect: s.collectImagesUnknown},
 		{kind: attention.KindConfigEnvShadowed, collect: s.collectConfigEnvShadowed},
+		// The patrol config that does not load is raised beside the env item
+		// (gt-6frjqf).
+		{kind: attention.KindConfigParseFailed, collect: s.collectConfigParseFailed},
 	}, s.questionCollectors()...)
 }
 
@@ -687,12 +694,13 @@ func (s *attentionSources) collectors() []attentionCollector {
 // beads; the slot picture and the bd timing are the daemon's own probes.
 func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s := &attentionSources{
-		d:           d,
-		now:         now,
-		report:      d.lastTownHealth,
-		reworkNotes: map[string]reworkNote{},
-		host:        d.hostProbes,
-		envShadowed: d.envShadowed,
+		d:             d,
+		now:           now,
+		report:        d.lastTownHealth,
+		reworkNotes:   map[string]reworkNote{},
+		host:          d.hostProbes,
+		envShadowed:   d.envShadowed,
+		patrolFailure: d.currentPatrolFailure(),
 	}
 	if s.host == nil {
 		forgejoBaseURL := d.forgejoBaseURL
@@ -783,7 +791,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		if !d.isPatrolActive("tier_sweep") {
 			return nil
 		}
-		return tierSweepRigs(d.patrolConfig, d.getKnownRigs())
+		return tierSweepRigs(d.patrol(), d.getKnownRigs())
 	}
 	s.seats = func() ([]townhealth.Seat, error) { return d.attentionSeats(now) }
 	s.seatWork = d.attentionSeatWork
@@ -930,7 +938,7 @@ func (d *Daemon) attentionLandingLimits() townhealth.Limits {
 // timeout for, the fast work before om runs, is judged against the whole
 // landing budget instead.
 func (d *Daemon) attentionLandingStuckBudget(stage string) time.Duration {
-	cfg := landingWorkerConfig(d.patrolConfig)
+	cfg := landingWorkerConfig(d.patrol())
 	switch stage {
 	case land.StageCI:
 		return landingCIBudget() + townhealth.LandingPassInterval
@@ -1000,7 +1008,7 @@ func (d *Daemon) attentionLandingRigs() []string {
 	if !d.isPatrolActive("landing_worker") {
 		return nil
 	}
-	return landingWorkerRigs(d.patrolConfig, d.getKnownRigs())
+	return landingWorkerRigs(d.patrol(), d.getKnownRigs())
 }
 
 func (d *Daemon) rigWorkBeads(rig string) workBeadReader {

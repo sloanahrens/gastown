@@ -52,7 +52,7 @@ func (d *Daemon) triggerJevDedupe() {
 // heartbeat.
 func (d *Daemon) runJevDedupe() {
 	var settings dedupe.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevDedupe != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevDedupe != nil {
 		settings = dedupe.Settings{
 			MaxUSDPerDay:        c.Patrols.JevDedupe.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevDedupe.USDPerBillionTokens,

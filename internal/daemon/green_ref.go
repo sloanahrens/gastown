@@ -395,7 +395,7 @@ func (d *Daemon) greenRefLine(rigName, reason, message string) {
 // fully green cycle publishes a ref for, or the refusal of a name the town
 // does not register.
 func (d *Daemon) greenRefImageRigs() ([]string, error) {
-	return tierSweepConfig(d.patrolConfig).TierSweepImageRigs(d.getKnownRigs())
+	return tierSweepConfig(d.patrol()).TierSweepImageRigs(d.getKnownRigs())
 }
 
 // greenRefRemoteError is a landing-remote resolution failure. reason is what a

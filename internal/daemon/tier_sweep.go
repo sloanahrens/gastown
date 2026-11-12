@@ -359,7 +359,7 @@ func tierSweepStaleAfter(config *DaemonPatrolConfig) time.Duration {
 // sweep: a disabled sweep that still held the promotion would leave the rig
 // promoting nowhere.
 func (d *Daemon) tierSweepCoversRig(rig string) bool {
-	return tierSweepCovers(d.patrolConfig, d.disabledPatrols, d.getKnownRigs(), rig)
+	return tierSweepCovers(d.patrol(), d.disabledPatrols, d.getKnownRigs(), rig)
 }
 
 // tierSweepCovers is the one predicate for "the sweep owns this rig": the
@@ -719,7 +719,7 @@ func (d *Daemon) triggerTierSweep() {
 		})
 		return
 	}
-	interval := tierSweepInterval(d.patrolConfig)
+	interval := tierSweepInterval(d.patrol())
 	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last(), now, interval)
 	// Inside the interval, a rig whose last cycle was red may still be due early
 	// (gt-giai1). The state files pick the candidates; the bead store and
@@ -861,7 +861,7 @@ func tierSweepEarlyDue(st tierSweepState, now time.Time) bool {
 // tierSweepEarlyDue.
 func (d *Daemon) tierSweepEarlyCandidates(now time.Time) []string {
 	var out []string
-	for _, rig := range tierSweepRigs(d.patrolConfig, d.getKnownRigs()) {
+	for _, rig := range tierSweepRigs(d.patrol(), d.getKnownRigs()) {
 		st, err := readTierSweepState(d.config.TownRoot, rig)
 		if err != nil {
 			continue
@@ -982,7 +982,7 @@ func (d *Daemon) tierSweepDeferForRestart(now time.Time) bool {
 	for _, o := range owed {
 		d.tierSweepStampOwed(o.rig, o.since)
 	}
-	bound := tierSweepStaleAfter(d.patrolConfig)
+	bound := tierSweepStaleAfter(d.patrol())
 	switch {
 	case swept && age >= bound:
 		if d.tierSweepStaleLogged.CompareAndSwap(false, true) {
@@ -1037,7 +1037,7 @@ func (d *Daemon) tierSweepAge(now time.Time) (time.Duration, bool, []tierSweepOw
 	var age time.Duration
 	var owed []tierSweepOwed
 	found := false
-	for _, rig := range tierSweepRigs(d.patrolConfig, d.getKnownRigs()) {
+	for _, rig := range tierSweepRigs(d.patrol(), d.getKnownRigs()) {
 		st, err := readTierSweepState(d.config.TownRoot, rig)
 		if err != nil || st.LastRun.IsZero() {
 			continue
@@ -1115,6 +1115,7 @@ func (d *Daemon) tierSweepStampOwed(rig string, since time.Time) {
 // so the restart does not cost the hour, and a run of landings cannot cost the
 // tiers their gate.
 func (d *Daemon) runTierSweep() bool {
+	pc := d.patrol()
 	if d.tierSweepDeferForRestart(d.clk().Now()) {
 		return false
 	}
@@ -1122,9 +1123,9 @@ func (d *Daemon) runTierSweep() bool {
 	// what asked it to start, and a reader dating the silence has the
 	// due-ness the trigger used (gt-gg9hv.37).
 	dec := evaluatePatrolDue(d.config.TownRoot, "tier_sweep", d.tierSweepRun.last(),
-		d.clk().Now(), tierSweepInterval(d.patrolConfig))
+		d.clk().Now(), tierSweepInterval(pc))
 	d.logger.Printf("tier_sweep: cycle started (due: %s)", dec.note)
-	rigs := tierSweepRigs(d.patrolConfig, d.getKnownRigs())
+	rigs := tierSweepRigs(pc, d.getKnownRigs())
 	if len(rigs) == 0 {
 		d.logger.Printf("tier_sweep: no rig configured to sweep; nothing to do")
 		return true
@@ -1229,7 +1230,7 @@ func (d *Daemon) tierSweepJudgedByADeferredCycle(state tierSweepState) bool {
 	if state.EarlyRun {
 		return false
 	}
-	if d.clk().Now().Sub(state.LastRun) >= tierSweepStaleAfter(d.patrolConfig) {
+	if d.clk().Now().Sub(state.LastRun) >= tierSweepStaleAfter(d.patrol()) {
 		return false
 	}
 	// The clock is read the way the trigger reads it, with the completion this
@@ -1711,7 +1712,7 @@ func tierSweepVerdictSummary(results map[string]tierSweepTierResult, stages []ti
 // refuses a worktree there).
 func (d *Daemon) tierSweepWorkDir(rig string) (string, error) {
 	configured := ""
-	if c := landingWorkerConfig(d.patrolConfig); c != nil {
+	if c := landingWorkerConfig(d.patrol()); c != nil {
 		configured = c.WorkRoot
 	}
 	root, err := landingWorkRoot(configured, d.config.TownRoot, rig)
@@ -1913,7 +1914,7 @@ func tierSweepRunnerRunID(rig, sha string, tiers []string) string {
 // An error is a runner the config names whose Spec cannot be rendered: the
 // stage is then RED, never run on the host instead.
 func (d *Daemon) tierSweepRunnerSpec(st tierSweepStage) (sweeprunner.Spec, bool, error) {
-	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil || !(st.slot || (st.shell && cfg.Shell)) {
 		return sweeprunner.Spec{}, false, nil
 	}
@@ -2032,7 +2033,7 @@ func (d *Daemon) withPolecatImageTrimContext(env []string) []string {
 	if !d.isPatrolActive("tier_sweep") {
 		return env
 	}
-	entry, err := PolecatImageTrimEnv(d.patrolConfig)
+	entry, err := PolecatImageTrimEnv(d.patrol())
 	if err != nil {
 		d.logger.Printf("%v", err)
 		return env
@@ -2169,7 +2170,7 @@ func tierSweepIsDigestRef(ref string) bool {
 // confirm is never assumed present, and a load that fails is never answered
 // with an older image.
 func (d *Daemon) tierSweepEnsureRunnerImage(ctx context.Context, spec sweeprunner.Spec) (string, error) {
-	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil {
 		return "", nil
 	}
@@ -2570,7 +2571,7 @@ func (d *Daemon) tierSweepRunRunner(ctx context.Context, st tierSweepStage, spec
 			}
 			d.tierSweepBusyEscalate(spec.Rig, busy.Name, st.budget)
 			d.logger.Printf("tier_sweep: %s: sweep job %s is still running after %s; deferring the cycle, the next run is due %s (no verdict recorded)",
-				spec.Rig, busy.Name, st.budget, d.clk().Now().Add(tierSweepInterval(d.patrolConfig)).Format(time.RFC3339))
+				spec.Rig, busy.Name, st.budget, d.clk().Now().Add(tierSweepInterval(d.patrol())).Format(time.RFC3339))
 			return tierSweepStageResult{exitCode: -1, err: busy}
 		}
 		// The launch got past the foreign Job, so the escalation raised for one
@@ -2884,7 +2885,7 @@ var errTierSweepStatusUnread = errors.New("the run's status cannot be read")
 // read reports errTierSweepStatusUnread; any other error, a failed copy or a
 // config the daemon cannot render, is one the caller judges RED.
 func (d *Daemon) tierSweepRunnerCollect(ctx context.Context, spec sweeprunner.Spec) (bool, error) {
-	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil {
 		return false, errors.New("no runner is configured")
 	}
@@ -3050,7 +3051,7 @@ func tierSweepRunnerBackend(name string) (sweeprunner.Backend, error) {
 // the result. A start that failed still returns the teardown, so a network,
 // volume or sidecar an earlier step made is removed.
 func (d *Daemon) tierSweepLaunchRunner(ctx context.Context, st tierSweepStage, spec sweeprunner.Spec) tierSweepLaunch {
-	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil {
 		return tierSweepLaunch{exitCode: -1, err: errors.New("no runner is configured")}
 	}
@@ -3295,7 +3296,7 @@ func (r *tierSweepGuardReads) get(rig string) *sweeprunner.GuardUnreadable {
 // teardown that fails is logged with its last lines and retried by the next
 // cycle, which still finds the record (gt-z4ppb).
 func (d *Daemon) tierSweepRunnerStop(ctx context.Context, spec sweeprunner.Spec) {
-	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil {
 		return
 	}

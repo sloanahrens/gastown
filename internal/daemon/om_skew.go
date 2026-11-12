@@ -126,7 +126,7 @@ func (d *Daemon) runOMSkewMonitor() {
 // landings — so it stands down while that patrol is off or its review is
 // disabled, leaving the alert state as it found it.
 func (d *Daemon) omSkewOnce() {
-	if d.config == nil || !d.isPatrolActive("landing_worker") || !landingReviewEnabled(d.patrolConfig) {
+	if d.config == nil || !d.isPatrolActive("landing_worker") || !landingReviewEnabled(d.patrol()) {
 		return
 	}
 	d.omSkewJudge(d.omSkewRead(d.config.TownRoot))
@@ -511,7 +511,7 @@ func shortOMSHA(sha string) string {
 // configured om, else om on the daemon's PATH, else the go install location.
 func (d *Daemon) omSkewPath() string {
 	configured := ""
-	if cfg := landingWorkerConfig(d.patrolConfig); cfg != nil {
+	if cfg := landingWorkerConfig(d.patrol()); cfg != nil {
 		configured = cfg.OMPath
 	}
 	home, _ := os.UserHomeDir()

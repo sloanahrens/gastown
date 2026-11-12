@@ -68,7 +68,7 @@ func (d *Daemon) triggerGitHygiene() {
 	if !d.isPatrolActive("git_hygiene") {
 		return
 	}
-	dec := evaluatePatrolDue(d.config.TownRoot, "git_hygiene", d.gitHygieneRun.last(), d.clk().Now(), gitHygieneInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "git_hygiene", d.gitHygieneRun.last(), d.clk().Now(), gitHygieneInterval(d.patrol()))
 	if !dec.due {
 		return
 	}

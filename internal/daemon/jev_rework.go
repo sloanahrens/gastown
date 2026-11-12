@@ -49,7 +49,7 @@ func (d *Daemon) triggerJevRework() {
 // down Dolt costs one line per interval rather than one per heartbeat.
 func (d *Daemon) runJevRework() {
 	var settings rework.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevRework != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevRework != nil {
 		settings = rework.Settings{
 			MaxUSDPerDay:        c.Patrols.JevRework.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevRework.USDPerBillionTokens,

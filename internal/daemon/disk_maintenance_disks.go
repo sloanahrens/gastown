@@ -186,7 +186,7 @@ func diskMaintKubectl(kubectl []string, args ...string) []string {
 // reading is alert-only: its unreadable or full state neither tightens the keep
 // nor refuses a plan.
 func (d *Daemon) diskMaintControl(kubeconfig string) (diskMaintDisk, bool) {
-	runner := tierSweepRunnerConfig(d.patrolConfig)
+	runner := tierSweepRunnerConfig(d.patrol())
 	if runner == nil || runner.Backend != agentconfig.TierSweepRunnerKubernetes || runner.Context == "" {
 		if d.diskMaintSchedule.firstRefusal("control:unconfigured") {
 			d.logger.Printf("disk_maintenance: control disk not read: patrols.tier_sweep.runner names no kubernetes context")

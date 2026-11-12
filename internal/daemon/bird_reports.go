@@ -216,7 +216,7 @@ func (d *Daemon) runBirdReports() {
 	if loc == nil {
 		loc = time.Local
 	}
-	reads, err := birdReportsReadsOf(d.patrolConfig, d.config.TownRoot, loc)
+	reads, err := birdReportsReadsOf(d.patrol(), d.config.TownRoot, loc)
 	if err != nil {
 		d.birdReportStale.mark([]attention.Item{birdReportCheckFailedItem(err)})
 		d.logger.Printf("bird_reports: not checking: %v", err)

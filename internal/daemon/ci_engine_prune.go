@@ -541,9 +541,10 @@ func ciEnginePruneSettings(cfg *DaemonPatrolConfig) (time.Duration, time.Duratio
 // guard keeps one pass in flight, and the pass re-reads the due check when it
 // starts.
 func (d *Daemon) runCIEnginePruneTick() {
+	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
 	now := s.now()
-	_, configured, err := ciCacheTrimContext(d.patrolConfig)
+	_, configured, err := ciCacheTrimContext(pc)
 	if !configured {
 		return
 	}
@@ -551,7 +552,7 @@ func (d *Daemon) runCIEnginePruneTick() {
 		d.refuseDiskMaintenance(err)
 		return
 	}
-	every, _, _, err := ciEnginePruneSettings(d.patrolConfig)
+	every, _, _, err := ciEnginePruneSettings(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -559,7 +560,7 @@ func (d *Daemon) runCIEnginePruneTick() {
 	if !d.diskMaintSchedule.trimDue(ciEnginePruneName, now, every) {
 		return
 	}
-	mode, err := diskMaintenanceMode(d.patrolConfig)
+	mode, err := diskMaintenanceMode(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -579,7 +580,7 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
 	s := d.diskMaintenanceSeams()
-	every, _, _, err := ciEnginePruneSettings(d.patrolConfig)
+	every, _, _, err := ciEnginePruneSettings(d.patrol())
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -605,13 +606,14 @@ func (d *Daemon) runCIEnginePrunePass(mode string) {
 // checked, fails the run after the rest have run, and the next run plans again
 // from what is left.
 func (d *Daemon) ciEnginePrune(ctx context.Context, mode string) bool {
+	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
-	_, maxAge, keepRepos, err := ciEnginePruneSettings(d.patrolConfig)
+	_, maxAge, keepRepos, err := ciEnginePruneSettings(pc)
 	if err != nil {
 		d.ciEnginePruneLogf("settings", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false
 	}
-	kubeContext, _, err := ciCacheTrimContext(d.patrolConfig)
+	kubeContext, _, err := ciCacheTrimContext(pc)
 	if err != nil {
 		d.ciEnginePruneLogf("context", "disk_maintenance: ci engine prune: %v; nothing pruned", err)
 		return false

@@ -657,7 +657,7 @@ func (d *Daemon) patrolOffReason(patrol string) string {
 		return "disabled_patrols"
 	case d.offInContainer(patrol):
 		return "container_off"
-	case !IsPatrolEnabled(d.patrolConfig, patrol):
+	case !IsPatrolEnabled(d.patrol(), patrol):
 		return "enabled=false"
 	}
 	return ""
@@ -675,7 +675,7 @@ func (d *Daemon) isPatrolActive(patrol string) bool {
 // only the container daemon skips daemon.container_off, and the launchd daemon
 // runs every name as before (gt-1oz0t).
 func (d *Daemon) offInContainer(name string) bool {
-	return d.containerMode && slices.Contains(d.patrolConfig.ContainerOff(), name)
+	return d.containerMode && slices.Contains(d.patrol().ContainerOff(), name)
 }
 
 // LifecycleAction represents a lifecycle request action.

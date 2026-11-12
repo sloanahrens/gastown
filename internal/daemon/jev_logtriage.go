@@ -51,7 +51,7 @@ func (d *Daemon) triggerJevLogtriage() {
 // costs one line per interval rather than one per heartbeat.
 func (d *Daemon) runJevLogtriage() {
 	var settings logtriage.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevLogtriage != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevLogtriage != nil {
 		settings = logtriage.Settings{
 			MaxUSDPerDay:        c.Patrols.JevLogtriage.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevLogtriage.USDPerBillionTokens,

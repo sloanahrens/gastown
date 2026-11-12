@@ -372,14 +372,15 @@ func ciCacheAgeText(age time.Duration) string {
 // the pass re-reads the due check when it starts. A setting the patrol cannot act
 // on is refused once and runs nothing.
 func (d *Daemon) runCICacheTrimTick() {
+	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
 	now := s.now()
 	// A town with no kubernetes runner has no control cluster to trim, so the
 	// trim is not configured here and says nothing.
-	if _, configured, _ := ciCacheTrimContext(d.patrolConfig); !configured {
+	if _, configured, _ := ciCacheTrimContext(pc); !configured {
 		return
 	}
-	every, _, _, err := ciCacheTrimSettings(d.patrolConfig)
+	every, _, _, err := ciCacheTrimSettings(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -387,7 +388,7 @@ func (d *Daemon) runCICacheTrimTick() {
 	if len(d.ciCacheDueVolumes(now, every)) == 0 {
 		return
 	}
-	mode, err := diskMaintenanceMode(d.patrolConfig)
+	mode, err := diskMaintenanceMode(pc)
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -407,7 +408,7 @@ func (d *Daemon) runCICacheTrimTick() {
 func (d *Daemon) runCICacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
-	if _, _, _, err := ciCacheTrimSettings(d.patrolConfig); err != nil {
+	if _, _, _, err := ciCacheTrimSettings(d.patrol()); err != nil {
 		d.refuseDiskMaintenance(err)
 		return
 	}
@@ -424,8 +425,9 @@ func (d *Daemon) runCICacheTrimPass(mode string) {
 // is a failed run that says why and removes nothing: a missing path or a stopped
 // container is never read as a volume with nothing to trim.
 func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
+	pc := d.patrol()
 	s := d.diskMaintenanceSeams()
-	every, maxAge, warn, err := ciCacheTrimSettings(d.patrolConfig)
+	every, maxAge, warn, err := ciCacheTrimSettings(pc)
 	if err != nil {
 		d.ciCacheTrimLogf("settings", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		return false
@@ -434,7 +436,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	if len(due) == 0 {
 		return true
 	}
-	kubeContext, _, err := ciCacheTrimContext(d.patrolConfig)
+	kubeContext, _, err := ciCacheTrimContext(pc)
 	if err != nil {
 		d.ciCacheTrimLogf("context", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		d.ciCacheRetryDue(due, s.now())

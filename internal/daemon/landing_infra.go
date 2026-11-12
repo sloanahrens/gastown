@@ -108,12 +108,13 @@ type landingInfraTarget struct {
 // GitHub and has no CI queue to watch (gt-fn9e6.11). A rig outside the
 // allowlist lands through nothing here, so it is not watched either (gt-mbw6s).
 func (d *Daemon) landingInfraTargets() []landingInfraTarget {
+	pc := d.patrol()
 	if d.landingInfraRigs != nil {
 		return d.landingInfraRigs()
 	}
-	tokenDir, dirErr := landingWorkerConfig(d.patrolConfig).ForgejoTokenDir()
+	tokenDir, dirErr := landingWorkerConfig(pc).ForgejoTokenDir()
 	var out []landingInfraTarget
-	for _, name := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
+	for _, name := range landingWorkerRigs(pc, d.getKnownRigs()) {
 		fj := rig.ResolveForgejoConfigIn(d.repoFileOpener(), d.config.TownRoot, name)
 		if fj == nil {
 			continue

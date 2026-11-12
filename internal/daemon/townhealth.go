@@ -52,7 +52,7 @@ func (d *Daemon) writeTownHealth() {
 	}
 	// The patrol's own death threshold, so the health line calls a seat dead
 	// at the count the patrol acts on (gt-4rxdi).
-	th.DeadSamples = PatrolScanDeadSamples(d.patrolConfig)
+	th.DeadSamples = PatrolScanDeadSamples(d.patrol())
 	src := &healthSources{d: d, evidence: th.SeatEvidence}
 	if d.townHealthSources != nil {
 		d.townHealthSources(src)
@@ -232,7 +232,7 @@ func (s *healthSources) Heartbeat() (townhealth.HeartbeatRecord, error) {
 // Ticks lists the enabled patrols whose last run the daemon persists
 // (patrol_last_run.json, gt-ima2), each with its run interval.
 func (s *healthSources) Ticks() ([]townhealth.Tick, error) {
-	cfg := s.d.patrolConfig
+	cfg := s.d.patrol()
 	pruneEvery, _ := eventsPruneSettings(cfg)
 	all := []struct {
 		name     string
@@ -265,7 +265,7 @@ func (s *healthSources) landingRigs() []string {
 	if !s.d.isPatrolActive("landing_worker") {
 		return nil
 	}
-	return landingWorkerRigs(s.d.patrolConfig, s.d.getKnownRigs())
+	return landingWorkerRigs(s.d.patrol(), s.d.getKnownRigs())
 }
 
 func (s *healthSources) Landings(ctx context.Context, since time.Time) ([]townhealth.RigLandings, error) {

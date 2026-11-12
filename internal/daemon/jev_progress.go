@@ -75,7 +75,7 @@ func (d *Daemon) triggerJevProgress() {
 // line per nudge, not a growing queue.
 func (d *Daemon) runJevProgress() {
 	var settings progress.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevProgress != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevProgress != nil {
 		settings = progress.Settings{
 			MaxUSDPerDay:        c.Patrols.JevProgress.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevProgress.USDPerBillionTokens,

@@ -198,7 +198,7 @@ func (d *Daemon) diskMaintenanceSeams() diskMaintSeams {
 		s.actionsRepos = d.actionsRetentionRepos
 	}
 	if s.actionsTokenDir == nil {
-		s.actionsTokenDir = func() (string, error) { return landingWorkerConfig(d.patrolConfig).ForgejoTokenDir() }
+		s.actionsTokenDir = func() (string, error) { return landingWorkerConfig(d.patrol()).ForgejoTokenDir() }
 	}
 	return s
 }
@@ -463,9 +463,10 @@ func (due diskMaintDue) selection(targets map[string]diskmaint.Target) []string 
 // runs nothing rather than quietly on a clock the town never asked for
 // (gt-kdbzb).
 func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
+	pc := d.patrol()
 	due := diskMaintDue{scheduled: map[string]bool{}}
 	var errs []error
-	if cfg := diskMaintenanceSettings(d.patrolConfig); cfg != nil {
+	if cfg := diskMaintenanceSettings(pc); cfg != nil {
 		for _, name := range slices.Sorted(maps.Keys(cfg.Targets)) {
 			// A target given a cadence never runs on the daily window, whether
 			// that cadence is due or unreadable: falling back would run it on a
@@ -489,7 +490,7 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 	// The cache trim is due from its own last run in any window, or from a
 	// failed run's retry. A malformed setting is refused and the trim runs
 	// nothing, as a target's would (gt-gg9hv.24.2).
-	if every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig); err != nil {
+	if every, err := diskMaintenanceCacheTrimEvery(pc); err != nil {
 		errs = append(errs, err)
 	} else if d.diskMaintSchedule.cacheTrimDue(now, every) {
 		due.cacheTrim = true
@@ -497,7 +498,7 @@ func (d *Daemon) diskMaintenanceDue(now time.Time) (diskMaintDue, []error) {
 	if !shouldRunMaintenanceCycle(now, d.diskMaintenanceSettledAt()) {
 		return due, errs
 	}
-	window := diskMaintenanceWindow(d.patrolConfig)
+	window := diskMaintenanceWindow(pc)
 	if isInMaintenanceWindow(now, window) {
 		due.daily = true
 		return due, errs
@@ -534,7 +535,7 @@ func (d *Daemon) runDiskMaintenance() {
 		d.refuseDiskMaintenance(err)
 	}
 
-	mode, err := diskMaintenanceMode(d.patrolConfig)
+	mode, err := diskMaintenanceMode(d.patrol())
 	if err != nil {
 		// A mode the patrol cannot act on runs nothing, and that holds for the
 		// alert-only pass a tick with nothing due runs: the refusal is reported
@@ -664,7 +665,7 @@ func (d *Daemon) runDiskMaintenanceTrim(mode string, due diskMaintDue, why strin
 // setting the patrol cannot act on is refused once, and runs nothing early; the
 // interval trim is unaffected.
 func (d *Daemon) runCacheTrimEarlyTick(mode string, now time.Time) {
-	percent, err := diskMaintenanceCacheTrimEarlyPercent(d.patrolConfig)
+	percent, err := diskMaintenanceCacheTrimEarlyPercent(d.patrol())
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -755,7 +756,7 @@ func (d *Daemon) runCacheTrimPass(mode string, releaseTrim func(), early bool) {
 // due set its tick found, and a trim that concluded after that tick (the other
 // pass's) has spent the interval, so the trim must not run a second time in it.
 func (d *Daemon) cacheTrimStillDue() bool {
-	every, err := diskMaintenanceCacheTrimEvery(d.patrolConfig)
+	every, err := diskMaintenanceCacheTrimEvery(d.patrol())
 	if err != nil {
 		d.refuseDiskMaintenance(err) // said once, as the tick does
 		return false

@@ -169,7 +169,7 @@ func (d *Daemon) actionsRetentionRepos() ([]actionsRetentionRepo, error) {
 		return nil, fmt.Errorf("the landing bot token directory could not be resolved: %w", err)
 	}
 	var out []actionsRetentionRepo
-	for _, name := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
+	for _, name := range landingWorkerRigs(d.patrol(), d.getKnownRigs()) {
 		fj, err := rig.ResolveForgejoConfigWithError(d.repoFileOpener(), d.config.TownRoot, name)
 		if err != nil {
 			return nil, fmt.Errorf("rig %s: its merge_queue.forgejo settings could not be read: %w", name, err)
@@ -202,7 +202,7 @@ func (d *Daemon) actionsRetentionRepos() ([]actionsRetentionRepo, error) {
 // refuses the step. It deletes only when the block is enabled and patrolApply,
 // the patrol's own mode, is apply; otherwise it logs the plan.
 func (d *Daemon) runActionsRetention(now time.Time, patrolApply bool) {
-	cfg := diskMaintenanceSettings(d.patrolConfig)
+	cfg := diskMaintenanceSettings(d.patrol())
 	if cfg == nil || cfg.ActionsRetention == nil {
 		return
 	}

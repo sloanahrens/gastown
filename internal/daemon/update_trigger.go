@@ -132,9 +132,10 @@ func (d *Daemon) triggerUpdate() {
 // logged once per distinct message and read as off, so the heartbeat never
 // launches on settings it could not understand.
 func (d *Daemon) updateSettings() (config.UpdateSettings, bool) {
+	pc := d.patrol()
 	var updateCfg *config.UpdateConfig
-	if d.patrolConfig != nil && d.patrolConfig.Patrols != nil {
-		updateCfg = d.patrolConfig.Patrols.Update
+	if pc != nil && pc.Patrols != nil {
+		updateCfg = pc.Patrols.Update
 	}
 	settings, err := updateCfg.Settings()
 	if err != nil {

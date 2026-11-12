@@ -49,7 +49,7 @@ func (d *Daemon) triggerCheckpointDog() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "checkpoint_dog", d.checkpointDogRun.last(), time.Now(), checkpointDogInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "checkpoint_dog", d.checkpointDogRun.last(), time.Now(), checkpointDogInterval(d.patrol()))
 	if !dec.due {
 		d.logger.Printf("checkpoint_dog: not due — %s", dec.note)
 		return

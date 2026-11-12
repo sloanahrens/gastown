@@ -122,6 +122,19 @@ type Daemon struct {
 	cancel       context.CancelFunc
 	doltServer   *DoltServerManager
 
+	// patrolMu guards patrolConfig and patrolFailure, which the patrol-config
+	// heartbeat step swaps on an edit (patrol_reload.go). Readers take the
+	// config through patrol(), never the field.
+	patrolMu      sync.RWMutex
+	patrolFailure *patrolLoadFailure
+	// patrolStamp is what the patrol config's files looked like when they were
+	// last read. Heartbeat goroutine only, and New.
+	patrolStamp patrolStamp
+	// onPatrolRead is a test seam: it runs after each patrol() read, outside
+	// the lock, so a test can swap the config between a reader's check and its
+	// next read.
+	onPatrolRead func()
+
 	// disabledPatrols is loaded from town settings (disabled_patrols field).
 	// Provides a simple way to disable individual patrol dogs without editing
 	// the daemon patrol config (settings/config.json's "daemon" section; the
@@ -1478,6 +1491,9 @@ func New(config *Config) (*Daemon, error) {
 		}
 		logger.Printf("Warning: failed to ensure lifecycle config: %v", err)
 	}
+	// The stamp is taken before the load, so an edit made while the daemon
+	// starts is reparsed by the first heartbeat (gt-6frjqf).
+	startStamp := takePatrolStamp(config.TownRoot)
 	patrolConfig := LoadPatrolConfig(config.TownRoot)
 	var envShadowed []string
 	if patrolConfig != nil {
@@ -1544,6 +1560,7 @@ func New(config *Config) (*Daemon, error) {
 	d := &Daemon{
 		config:          config,
 		patrolConfig:    patrolConfig,
+		patrolStamp:     startStamp,
 		disabledPatrols: disabledPatrols,
 		tmux:            tmux.NewTmux(),
 		logger:          logger,
@@ -1686,6 +1703,7 @@ func acquireDaemonLock(clk clockwork.Clock, lockPath string, budget, poll time.D
 
 // Run starts the daemon main loop.
 func (d *Daemon) Run() (err error) {
+	pc := d.patrol()
 	pid := os.Getpid()
 	startupComplete := false
 	defer func() {
@@ -1845,7 +1863,7 @@ func (d *Daemon) Run() (err error) {
 	var jsonlGitBackupTicker *time.Ticker
 	var jsonlGitBackupChan <-chan time.Time
 	if d.isPatrolActive("jsonl_git_backup") {
-		interval := jsonlGitBackupInterval(d.patrolConfig)
+		interval := jsonlGitBackupInterval(pc)
 		jsonlGitBackupTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		jsonlGitBackupChan = jsonlGitBackupTicker.C
 		defer jsonlGitBackupTicker.Stop()
@@ -1861,7 +1879,7 @@ func (d *Daemon) Run() (err error) {
 	// shape as jsonl_git_backup: due-ness comes from the persisted last run.
 	var townStateBackupChan <-chan time.Time
 	if d.isPatrolActive("town_state_backup") {
-		interval := townStateBackupInterval(d.patrolConfig)
+		interval := townStateBackupInterval(pc)
 		townStateTicker := time.NewTicker(shortPatrolCheckTick(interval))
 		townStateBackupChan = townStateTicker.C
 		defer townStateTicker.Stop()
@@ -1878,7 +1896,7 @@ func (d *Daemon) Run() (err error) {
 	var wispReaperTicker *time.Ticker
 	var wispReaperChan <-chan time.Time
 	if d.isPatrolActive("wisp_reaper") {
-		interval := wispReaperInterval(d.patrolConfig)
+		interval := wispReaperInterval(pc)
 		wispReaperTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		wispReaperChan = wispReaperTicker.C
 		defer wispReaperTicker.Stop()
@@ -1893,7 +1911,7 @@ func (d *Daemon) Run() (err error) {
 	var doctorDogTicker *time.Ticker
 	var doctorDogChan <-chan time.Time
 	if d.isPatrolActive("doctor_dog") {
-		interval := doctorDogInterval(d.patrolConfig)
+		interval := doctorDogInterval(pc)
 		doctorDogTicker = time.NewTicker(interval)
 		doctorDogChan = doctorDogTicker.C
 		defer doctorDogTicker.Stop()
@@ -1908,7 +1926,7 @@ func (d *Daemon) Run() (err error) {
 	var compactorDogTicker *time.Ticker
 	var compactorDogChan <-chan time.Time
 	if d.isPatrolActive("compactor_dog") {
-		interval := compactorDogInterval(d.patrolConfig)
+		interval := compactorDogInterval(pc)
 		compactorDogTicker = time.NewTicker(compactorDogTickInterval)
 		compactorDogChan = compactorDogTicker.C
 		defer compactorDogTicker.Stop()
@@ -1930,7 +1948,7 @@ func (d *Daemon) Run() (err error) {
 	var checkpointDogTicker *time.Ticker
 	var checkpointDogChan <-chan time.Time
 	if d.isPatrolActive("checkpoint_dog") {
-		interval := checkpointDogInterval(d.patrolConfig)
+		interval := checkpointDogInterval(pc)
 		checkpointDogTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		checkpointDogChan = checkpointDogTicker.C
 		defer checkpointDogTicker.Stop()
@@ -1946,7 +1964,7 @@ func (d *Daemon) Run() (err error) {
 	var overrunGuardTicker *time.Ticker
 	var overrunGuardChan <-chan time.Time
 	if d.isPatrolActive("overrun_guard") {
-		interval := overrunGuardInterval(d.patrolConfig)
+		interval := overrunGuardInterval(pc)
 		overrunGuardTicker = time.NewTicker(shortPatrolCheckTick(interval))
 		overrunGuardChan = overrunGuardTicker.C
 		defer overrunGuardTicker.Stop()
@@ -1963,7 +1981,7 @@ func (d *Daemon) Run() (err error) {
 	var landingInfraTicker *time.Ticker
 	var landingInfraChan <-chan time.Time
 	if d.isPatrolActive("landing_infra") {
-		interval := landingInfraInterval(d.patrolConfig)
+		interval := landingInfraInterval(pc)
 		landingInfraTicker = time.NewTicker(interval)
 		landingInfraChan = landingInfraTicker.C
 		defer landingInfraTicker.Stop()
@@ -1980,11 +1998,11 @@ func (d *Daemon) Run() (err error) {
 	var scheduledMaintenanceTicker *time.Ticker
 	var scheduledMaintenanceChan <-chan time.Time
 	if d.isPatrolActive("scheduled_maintenance") {
-		interval := maintenanceCheckInterval(d.patrolConfig)
+		interval := maintenanceCheckInterval(pc)
 		scheduledMaintenanceTicker = time.NewTicker(interval)
 		scheduledMaintenanceChan = scheduledMaintenanceTicker.C
 		defer scheduledMaintenanceTicker.Stop()
-		window := maintenanceWindow(d.patrolConfig)
+		window := maintenanceWindow(pc)
 		d.logger.Printf("Scheduled maintenance ticker started (check interval %v, window %s)", interval, window)
 	}
 
@@ -1999,7 +2017,7 @@ func (d *Daemon) Run() (err error) {
 		diskMaintChan = diskMaintTicker.C
 		defer diskMaintTicker.Stop()
 		d.logger.Printf("Disk maintenance ticker started (check interval %v, window %s, mode %s)",
-			diskMaintCheckInterval, diskMaintenanceWindow(d.patrolConfig), diskMaintenanceModeOrDefault(d.patrolConfig))
+			diskMaintCheckInterval, diskMaintenanceWindow(pc), diskMaintenanceModeOrDefault(pc))
 	}
 
 	// Start the hm_sync ticker if configured. It runs the town's `hm sync`
@@ -2039,7 +2057,7 @@ func (d *Daemon) Run() (err error) {
 		scheduledSlingsTicker = time.NewTicker(scheduledSlingsTickInterval)
 		scheduledSlingsChan = scheduledSlingsTicker.C
 		defer scheduledSlingsTicker.Stop()
-		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(d.patrolConfig.Patrols.ScheduledSlings.Entries))
+		d.logger.Printf("Scheduled slings ticker started (tick %v, %d entries)", scheduledSlingsTickInterval, len(pc.Patrols.ScheduledSlings.Entries))
 		// Catch up at startup rather than waiting for the first tick: the
 		// ticker is fresh on every start, so restarts closer together than
 		// scheduledSlingsTickInterval would otherwise never evaluate a
@@ -2054,7 +2072,7 @@ func (d *Daemon) Run() (err error) {
 	var specDispatchTicker *time.Ticker
 	var specDispatchChan <-chan time.Time
 	if d.isPatrolActive("spec_dispatch") {
-		interval := specDispatchInterval(d.patrolConfig)
+		interval := specDispatchInterval(pc)
 		// The idle rule's consecutive-tick gap is a multiple of the cadence the
 		// ticker actually runs at (gt-icmdq).
 		d.dispatchIdle.setInterval(interval)
@@ -2074,7 +2092,7 @@ func (d *Daemon) Run() (err error) {
 	var overseerReportTicker *time.Ticker
 	var overseerReportChan <-chan time.Time
 	if d.isPatrolActive("overseer_report") {
-		interval := overseerReportInterval(d.patrolConfig)
+		interval := overseerReportInterval(pc)
 		overseerReportTicker = time.NewTicker(overseerReportTickEvery(interval))
 		overseerReportChan = overseerReportTicker.C
 		defer overseerReportTicker.Stop()
@@ -2102,7 +2120,7 @@ func (d *Daemon) Run() (err error) {
 	var findingsFilerTicker *time.Ticker
 	var findingsFilerChan <-chan time.Time
 	if d.isPatrolActive("findings_filer") {
-		interval := findingsFilerInterval(d.patrolConfig)
+		interval := findingsFilerInterval(pc)
 		findingsFilerTicker = time.NewTicker(interval)
 		findingsFilerChan = findingsFilerTicker.C
 		defer findingsFilerTicker.Stop()
@@ -2114,7 +2132,7 @@ func (d *Daemon) Run() (err error) {
 	var patrolScanTicker *time.Ticker
 	var patrolScanChan <-chan time.Time
 	if d.isPatrolActive("patrol_scan") {
-		interval := patrolScanInterval(d.patrolConfig)
+		interval := patrolScanInterval(pc)
 		patrolScanTicker = time.NewTicker(interval)
 		patrolScanChan = patrolScanTicker.C
 		defer patrolScanTicker.Stop()
@@ -2127,7 +2145,7 @@ func (d *Daemon) Run() (err error) {
 	var resourceSamplerTicker *time.Ticker
 	var resourceSamplerChan <-chan time.Time
 	if d.isPatrolActive("resource_sampler") {
-		interval := resourceSamplerInterval(d.patrolConfig)
+		interval := resourceSamplerInterval(pc)
 		resourceSamplerTicker = time.NewTicker(interval)
 		resourceSamplerChan = resourceSamplerTicker.C
 		defer resourceSamplerTicker.Stop()
@@ -2417,6 +2435,11 @@ type heartbeatStep struct {
 
 // heartbeatSteps is the recovery work of one heartbeat, in order.
 var heartbeatSteps = []heartbeatStep{
+	// Reload the patrol config when its file changed (gt-6frjqf). It runs first,
+	// so the rest of the heartbeat reads the edit. It only reads, so it is not
+	// lifecycle: an E-stopped town still picks the config up.
+	{name: "patrol-config", run: (*Daemon).reloadPatrolConfig},
+
 	// Invalidate the per-tick rigs cache so this heartbeat re-reads from disk.
 	// Within a tick the cache coalesces the ~10 getKnownRigs() call sites into
 	// a single read; invalidating here ensures we pick up rigs.json changes
@@ -3083,7 +3106,7 @@ func (d *Daemon) readKnownRigsFromDisk() []string {
 // Otherwise, all known rigs are returned. In both cases, non-operational
 // rigs (parked/docked) are filtered out at list-building time. (Fixes upstream #2082)
 func (d *Daemon) getPatrolRigs(patrol string) []string {
-	configRigs := GetPatrolRigs(d.patrolConfig, patrol)
+	configRigs := GetPatrolRigs(d.patrol(), patrol)
 	var candidates []string
 	if len(configRigs) > 0 {
 		candidates = configRigs
