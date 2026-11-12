@@ -102,7 +102,8 @@ type Daemon struct {
 	// draining is set by a SIGTERM drain (shutdown_drain.go): no spec-dispatch
 	// tick or tier sweep starts while the landing pass in flight finishes.
 	// drainBound and onDrainHold are test seams on the drain (drainBound
-	// overrides ShutdownDrainBound; onDrainHold runs once the hold is taken).
+	// overrides ShutdownDrainBound; onDrainHold runs once the hold is taken and
+	// the in-flight counts are read).
 	draining    atomic.Bool
 	drainBound  time.Duration
 	onDrainHold func()

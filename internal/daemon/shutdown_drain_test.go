@@ -231,6 +231,29 @@ func TestShutdownDrainRunLoopSigtermWaitsForThePass(t *testing.T) {
 	}
 }
 
+// The seam runs after the drain has read the in-flight counts. A pass that ends
+// inside the seam is therefore one the drain saw and waited for: the drain logs
+// that the pass finished, and never that no pass was in flight (gt-uwwd2u).
+func TestShutdownDrainSeamRunsAfterTheInFlightReads(t *testing.T) {
+	t.Parallel()
+	d, logs := signalTestDaemon(t)
+	d.drainBound = time.Hour
+	if !d.beginLandingPass() {
+		t.Fatalf("%s: no landing pass could start before the signal", t.Name())
+	}
+	d.onDrainHold = d.landingPassEnded
+	drained := make(chan os.Signal, 1)
+	go func() { drained <- d.drainForShutdown(make(chan os.Signal)) }()
+
+	within(t, signalWait, "the drain after its landing pass ends in the seam", drained)
+	if strings.Contains(logs.String(), "no landing pass in flight") {
+		t.Errorf("%s: the drain read no in-flight pass, though one was in flight when it took its hold:\n%s", t.Name(), logs)
+	}
+	if !strings.Contains(logs.String(), "landing pass finished") {
+		t.Errorf("%s: the drain did not log that the pass finished:\n%s", t.Name(), logs)
+	}
+}
+
 // A tier sweep triggered while the daemon drains starts no cycle and records no
 // run, so the next daemon's first trigger still owes the sweep.
 func TestShutdownDrainTierSweepStartsNoCycle(t *testing.T) {
