@@ -574,7 +574,8 @@ func (d *Daemon) omSkewRemoteSHA(townRoot string) (string, error) {
 	if url == "" {
 		return "", fmt.Errorf("git --git-dir=%s remote get-url origin: no url", bare)
 	}
-	out, err := d.omSkewGit("ls-remote", url, omSkewRemoteRef)
+	// The "--" keeps a url that begins with "-" from being read as an option.
+	out, err := d.omSkewGit("ls-remote", "--", url, omSkewRemoteRef)
 	if err != nil {
 		return "", err
 	}
