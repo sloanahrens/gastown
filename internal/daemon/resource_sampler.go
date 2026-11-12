@@ -87,7 +87,7 @@ func (d *Daemon) triggerResourceSampler() {
 
 // resourceSampler returns the patrol, building the sampler on first use.
 func (d *Daemon) resourceSampler() *resourceSamplerPatrol {
-	interval := resourceSamplerInterval(d.patrolConfig)
+	interval := resourceSamplerInterval(d.patrol())
 
 	d.resourceSamplerMu.Lock()
 	defer d.resourceSamplerMu.Unlock()

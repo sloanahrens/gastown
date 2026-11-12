@@ -104,7 +104,7 @@ func (d *Daemon) triggerRebuildHM() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "rebuild_hm", d.rebuildHMRun.last(), now, rebuildHMInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "rebuild_hm", d.rebuildHMRun.last(), now, rebuildHMInterval(d.patrol()))
 	if !dec.due {
 		return
 	}

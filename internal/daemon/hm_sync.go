@@ -97,7 +97,7 @@ func hmSyncCommand(cfg *DaemonPatrolConfig) string {
 // ticker and says why once, here: an interval the town cannot have is a config
 // error to read, not a patrol that quietly never runs.
 func (d *Daemon) startHMSyncTicker() *time.Ticker {
-	every, err := hmSyncInterval(d.patrolConfig)
+	every, err := hmSyncInterval(d.patrol())
 	if err != nil {
 		// runHMSync makes the same refusal on every tick, so a ticker that
 		// outlived this one could not start a sync either.
@@ -119,7 +119,7 @@ func (d *Daemon) runHMSync() {
 	s := d.hmSyncSeamsOf()
 	now := s.now()
 
-	every, err := hmSyncInterval(d.patrolConfig)
+	every, err := hmSyncInterval(d.patrol())
 	if err != nil {
 		// A setting the patrol cannot schedule runs nothing: syncing on the
 		// default would use a cadence the town never asked for.
@@ -152,7 +152,7 @@ func (d *Daemon) hmSyncPass(s hmSyncSeams, started time.Time) {
 	// the sources are most likely stale (hm_sync_alert.go).
 	defer d.checkHMSyncHealth()
 
-	command := hmSyncCommand(d.patrolConfig)
+	command := hmSyncCommand(d.patrol())
 	_, err := s.run(ctx, command, "sync")
 	elapsed := s.now().Sub(started).Round(time.Millisecond)
 	d.hmSyncLastRun.Store(s.now().UnixNano())

@@ -252,14 +252,14 @@ func (d *Daemon) startLandingWorkers() {
 }
 
 func (d *Daemon) runLandingWorkerManager(lw *landingWorkers) {
-	interval := landingWorkerInterval(d.patrolConfig)
+	interval := landingWorkerInterval(d.patrol())
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	announced := false
 	for {
 		if d.isPatrolActive("landing_worker") {
 			if !announced {
-				d.logger.Printf("landing_worker: enabled (pass interval %v, land timeout %v)", interval, landingRigLandTimeout(d.patrolConfig))
+				d.logger.Printf("landing_worker: enabled (pass interval %v, land timeout %v)", interval, landingRigLandTimeout(d.patrol()))
 				announced = true
 			}
 			// The om the workers review with is a per-daemon reading, not a
@@ -270,7 +270,7 @@ func (d *Daemon) runLandingWorkerManager(lw *landingWorkers) {
 			// So is the watch over the deploys that run after these landings
 			// (deploy_watch.go): it polls the same rigs' repositories.
 			d.startDeployWatch()
-			for _, rigName := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
+			for _, rigName := range landingWorkerRigs(d.patrol(), d.getKnownRigs()) {
 				lw.mu.Lock()
 				if !lw.running[rigName] {
 					lw.running[rigName] = true
@@ -545,7 +545,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	}
 	bd := landworker.RetryBeads{Inner: beads.NewWithBeadsDir(rigPath, beads.ResolveBeadsDir(rigPath))}
 	out := landingLogWriter{logf: d.logger.Printf}
-	cfg := landingWorkerConfig(d.patrolConfig)
+	cfg := landingWorkerConfig(d.patrol())
 	if cfg == nil {
 		cfg = &LandingWorkerConfig{}
 	}
@@ -563,7 +563,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// The rig's om directory holds the transient verdict files and the rounds
 	// ledgers that outlive them, both named after the work bead (gt-yphcl).
 	omDir := filepath.Join(townRoot, ".runtime", "landing-om", rigName)
-	if landingReviewEnabled(d.patrolConfig) {
+	if landingReviewEnabled(d.patrol()) {
 		home, _ := os.UserHomeDir()
 		omPath := resolveOMPath(cfg.OMPath, exec.LookPath, home)
 		if _, err := os.Stat(omPath); err != nil && filepath.IsAbs(omPath) {
@@ -759,7 +759,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Reverts:           redMain,
 		WatchTarget:       watchBranch,
 		MainState:         mainState,
-		LandTimeout:       landingRigLandTimeout(d.patrolConfig),
+		LandTimeout:       landingRigLandTimeout(d.patrol()),
 		Logf:              d.logger.Printf,
 		Escalate: func(beadID, message string) {
 			d.escalateAlert(landingPersonKey(bd, beadID), "landing_worker", message)

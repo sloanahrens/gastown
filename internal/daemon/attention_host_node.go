@@ -200,7 +200,7 @@ func parseControlNodeNames(out []byte) ([]string, error) {
 // Nothing the kubectl run printed to stderr enters an error, so a credential or
 // a path in it never reaches the queue.
 func (d *Daemon) controlNodeDisk(ctx context.Context) ([]hostNodeRead, error) {
-	kubeContext, configured, err := ciCacheTrimContext(d.patrolConfig)
+	kubeContext, configured, err := ciCacheTrimContext(d.patrol())
 	if !configured {
 		return nil, errHostNodeNotConfigured
 	}

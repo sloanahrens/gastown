@@ -62,7 +62,7 @@ type polecatDevTagSeams struct {
 // A daemon with no image_registry has no registry to move, so the step does
 // nothing.
 func (d *Daemon) publishPolecatDevTag() {
-	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil || cfg.ImageRegistry == "" {
 		return
 	}
@@ -161,10 +161,10 @@ func (d *Daemon) copyPolecatDevTag(ctx context.Context, host string) error {
 	// commit.
 	// The setting is checked here as well as at load: its host and path reach a
 	// request URL, so a value the validator refuses is never sent.
-	if err := d.patrolConfig.ValidatePolecatImageSource(); err != nil {
+	if err := d.patrol().ValidatePolecatImageSource(); err != nil {
 		return devTagFailure(host, running, dev, err.Error())
 	}
-	ciRepo := d.patrolConfig.PolecatImageSource()
+	ciRepo := d.patrol().PolecatImageSource()
 	// The validator above refuses a setting with no repository path, so the split
 	// always has one.
 	ciHost, ciPath, _ := strings.Cut(ciRepo, "/")
@@ -326,7 +326,7 @@ func (d *Daemon) polecatDevTagTokenDir() (string, error) {
 	if d.polecatDevTagSeams.tokenDir != nil {
 		return d.polecatDevTagSeams.tokenDir()
 	}
-	return landingWorkerConfig(d.patrolConfig).ForgejoTokenDir()
+	return landingWorkerConfig(d.patrol()).ForgejoTokenDir()
 }
 
 // devTagFailure is the escalation for a dev tag the step did not move. It names

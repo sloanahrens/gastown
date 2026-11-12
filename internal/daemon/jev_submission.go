@@ -49,7 +49,7 @@ func (d *Daemon) triggerJevSubmission() {
 // or a down clone costs one line per interval rather than one per heartbeat.
 func (d *Daemon) runJevSubmission() {
 	var settings submission.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevSubmission != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevSubmission != nil {
 		settings = submission.Settings{
 			MaxUSDPerDay:        c.Patrols.JevSubmission.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevSubmission.USDPerBillionTokens,

@@ -111,9 +111,9 @@ func (d *Daemon) landingInfraTargets() []landingInfraTarget {
 	if d.landingInfraRigs != nil {
 		return d.landingInfraRigs()
 	}
-	tokenDir, dirErr := landingWorkerConfig(d.patrolConfig).ForgejoTokenDir()
+	tokenDir, dirErr := landingWorkerConfig(d.patrol()).ForgejoTokenDir()
 	var out []landingInfraTarget
-	for _, name := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
+	for _, name := range landingWorkerRigs(d.patrol(), d.getKnownRigs()) {
 		fj := rig.ResolveForgejoConfigIn(d.repoFileOpener(), d.config.TownRoot, name)
 		if fj == nil {
 			continue

@@ -463,7 +463,7 @@ func (d *Daemon) runScheduledSlings() {
 	if holdReason != "" {
 		return
 	}
-	cfg := d.patrolConfig.Patrols.ScheduledSlings
+	cfg := d.patrol().Patrols.ScheduledSlings
 	if d.scheduledSlingFailures == nil {
 		d.scheduledSlingFailures = map[string]int{}
 	}

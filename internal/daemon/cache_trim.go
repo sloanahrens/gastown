@@ -436,7 +436,7 @@ func (d *Daemon) cacheTrimImage(ctx context.Context) (string, bool, error) {
 		d.cacheTrimClearAlert(ctx, cacheTrimNoMirrorKey, "no values file names a polecat image to mirror")
 		return "", false, nil
 	}
-	cfg := tierSweepRunnerConfig(d.patrolConfig)
+	cfg := tierSweepRunnerConfig(d.patrol())
 	if cfg == nil || cfg.ImageRegistry == "" {
 		d.cacheTrimReportNoMirror(ctx, values.Polecat)
 		return "", false, nil

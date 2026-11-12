@@ -57,7 +57,7 @@ func (d *Daemon) triggerJevStale() {
 // heartbeat.
 func (d *Daemon) runJevStale() bool {
 	var settings stale.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevStale != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevStale != nil {
 		settings = stale.Settings{
 			MaxUSDPerDay:        c.Patrols.JevStale.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevStale.USDPerBillionTokens,

@@ -297,7 +297,7 @@ func (d *Daemon) runDoctorDog() {
 	}
 	defer release()
 
-	latencyMs, orphanCount, backupStaleSec := doctorDogThresholds(d.patrolConfig)
+	latencyMs, orphanCount, backupStaleSec := doctorDogThresholds(d.patrol())
 	r := doctorDogFindings(doctorDogProbes(d.config.TownRoot, slot.Reap), doctorLimits{
 		latency:     time.Duration(latencyMs) * time.Millisecond,
 		orphans:     orphanCount,

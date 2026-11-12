@@ -224,7 +224,7 @@ func (d *Daemon) triggerJevScorecard() {
 	}
 	s := d.jevScorecardSeamsOf()
 	now := s.now()
-	settings, err := jevScorecardSettingsOf(d.patrolConfig)
+	settings, err := jevScorecardSettingsOf(d.patrol())
 	if err != nil {
 		if d.jevScorecardLogs.allow("refused:"+err.Error(), now) {
 			d.logger.Printf("jev_scorecard: not refreshing: %v", err)

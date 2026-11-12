@@ -327,7 +327,7 @@ func (d *Daemon) triggerOverrunGuard() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "overrun_guard", d.overrunGuardRun.last(), time.Now(), overrunGuardInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "overrun_guard", d.overrunGuardRun.last(), time.Now(), overrunGuardInterval(d.patrol()))
 	if !dec.due {
 		return
 	}
@@ -368,10 +368,10 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if s.now == nil {
 		s.now = time.Now
 	}
-	nudgeAfter, stopAfter := overrunGuardThresholds(d.patrolConfig)
-	scheduledStopAfter := overrunScheduledStopAfter(d.patrolConfig)
+	nudgeAfter, stopAfter := overrunGuardThresholds(d.patrol())
+	scheduledStopAfter := overrunScheduledStopAfter(d.patrol())
 	dry := false
-	if cfg := overrunGuardConfig(d.patrolConfig); cfg != nil {
+	if cfg := overrunGuardConfig(d.patrol()); cfg != nil {
 		dry = cfg.DryRun
 	}
 	// An unset gate seam is no exemption: every seat's time counts.
@@ -384,7 +384,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if escalationWaiting == nil {
 		escalationWaiting = func(overrunSeat) (bool, error) { return false, nil }
 	}
-	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(d.patrolConfig))
+	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(d.patrol()))
 	maxGateTotal := overrunMaxGateTotal(stopAfter)
 	maxEscalationTotal := overrunMaxEscalationTotal(stopAfter)
 	// The escalation read is logged once per tick, not once per seat: a failed

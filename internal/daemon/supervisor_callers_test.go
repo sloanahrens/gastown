@@ -391,7 +391,7 @@ func TestHeartbeat_EstopStillEnsuresDoltRefusesRestarts(t *testing.T) {
 			t.Errorf("lifecycle step %q ran under the town e-stop", step.name)
 		}
 	}
-	if want := []string{"rigs-cache", "prefix-registry", "dolt", "dolt-image", "pair-ready", "branch-prune", "sandbox-seat-ends", "log-rotation", "events-prune", "git-hygiene", "update-alerts", "tier-sweep", "landing-hold-file", "townhealth", "attention", "unhandled-escalations"}; !slices.Equal(ran, want) {
+	if want := []string{"patrol-config", "rigs-cache", "prefix-registry", "dolt", "dolt-image", "pair-ready", "branch-prune", "sandbox-seat-ends", "log-rotation", "events-prune", "git-hygiene", "update-alerts", "tier-sweep", "landing-hold-file", "townhealth", "attention", "unhandled-escalations"}; !slices.Equal(ran, want) {
 		t.Errorf("steps under the e-stop = %v, want %v", ran, want)
 	}
 	if state.HeartbeatCount != 1 {

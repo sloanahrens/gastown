@@ -224,7 +224,7 @@ func (d *Daemon) runScheduledMaintenance() {
 	// run too.
 	cycleDeferred := !requested && d.updateTriggerEnabled()
 
-	window := maintenanceWindow(d.patrolConfig)
+	window := maintenanceWindow(d.patrol())
 	if window == "" && !requested {
 		d.logger.Printf("scheduled_maintenance: no window configured, skipping")
 		return
@@ -346,7 +346,7 @@ func (d *Daemon) runScheduledMaintenance() {
 		}
 	}
 	d.logger.Printf("scheduled_maintenance: %s, %d database(s) discovered", where, len(databases))
-	if keys := deprecatedMaintenanceKeys(d.patrolConfig); len(keys) > 0 {
+	if keys := deprecatedMaintenanceKeys(d.patrol()); len(keys) > 0 {
 		d.logger.Printf("scheduled_maintenance: WARNING: deprecated config ignored — patrols.scheduled_maintenance.{%s} "+
 			"have no effect; the schedule is weekly gc plus the old-gen trigger (gt-8z769.3)", strings.Join(keys, ","))
 	}

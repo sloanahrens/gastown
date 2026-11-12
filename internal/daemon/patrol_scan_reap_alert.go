@@ -173,7 +173,7 @@ func (d *Daemon) alertTownRoot() string {
 // of one unchanged alert, the same window patrol_scan uses for its recovery
 // comments. It defaults to 24h.
 func (d *Daemon) reapReportWindow() time.Duration {
-	if c := patrolScanConfig(d.patrolConfig); c != nil && c.ReportWindow != "" {
+	if c := patrolScanConfig(d.patrol()); c != nil && c.ReportWindow != "" {
 		if parsed, err := time.ParseDuration(c.ReportWindow); err == nil && parsed > 0 {
 			return parsed
 		}
@@ -196,7 +196,7 @@ func reapCleanupConfig(config *DaemonPatrolConfig) *agentconfig.WorktreeCleanupC
 // it might have alerted on was never observed. ledger is the tick's persisted
 // patrolscan ledger, where the throttle records the keys it raised.
 func (d *Daemon) reapAlertsIfEnabled(rig string, r patrolscan.Report, ledger patrolscan.Ledger) {
-	c := reapCleanupConfig(d.patrolConfig)
+	c := reapCleanupConfig(d.patrol())
 	if !c.IsEnabled() || !c.CoversRig(rig) {
 		return
 	}

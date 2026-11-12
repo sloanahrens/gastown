@@ -262,7 +262,7 @@ func (d *Daemon) triggerTownStateBackup() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "town_state_backup", d.townStateBackupRun.last(), time.Now(), townStateBackupInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "town_state_backup", d.townStateBackupRun.last(), time.Now(), townStateBackupInterval(d.patrol()))
 	if !dec.due {
 		return
 	}
@@ -305,7 +305,7 @@ func (d *Daemon) syncTownStateBackup() {
 	now := time.Now()
 	defer d.recordPatrolRun(&d.townStateBackupRun, "town_state_backup", now)
 
-	gitRepo, _ := JsonlBackupRepo(d.config.TownRoot, d.patrolConfig)
+	gitRepo, _ := JsonlBackupRepo(d.config.TownRoot, d.patrol())
 	if err := d.runTownStateBackup(gitRepo); err != nil {
 		d.logger.Printf("town_state_backup: %v", err)
 		d.escalateAlert(alertKeyTownStateBackup, "town_state_backup", fmt.Sprintf("the town's configuration is not backed up to %s: %v", gitRepo, err))

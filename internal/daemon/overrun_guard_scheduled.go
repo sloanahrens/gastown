@@ -137,7 +137,7 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 		}
 	}
 
-	limit := overrunScheduledStopAfter(d.patrolConfig)
+	limit := overrunScheduledStopAfter(d.patrol())
 	target := seat
 	target.Bead = st.Bead
 

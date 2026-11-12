@@ -548,7 +548,7 @@ func (d *Daemon) runFindingsFiler() {
 		Rigs:      rigs,
 		KnownRigs: known,
 		Now:       d.clk().Now(),
-		MaxPerRun: findingsFilerMaxPerRun(d.patrolConfig),
+		MaxPerRun: findingsFilerMaxPerRun(d.patrol()),
 		Template:  tmpl,
 		Open:      open,
 		Logf:      d.logger.Printf,

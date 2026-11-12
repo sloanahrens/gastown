@@ -128,7 +128,7 @@ func (d *Daemon) hmSyncVerdict() (hmsync.Verdict, bool) {
 	ctx, cancel := d.hmSyncStatusContext()
 	defer cancel()
 
-	command := hmSyncCommand(d.patrolConfig)
+	command := hmSyncCommand(d.patrol())
 	out, err := d.hmSyncSeamsOf().run(ctx, command, hmSyncStatusArg, hmSyncStatusJSON)
 	if err != nil && d.shuttingDown() {
 		// The daemon is stopping, so the run was cut short, not failed. Raising

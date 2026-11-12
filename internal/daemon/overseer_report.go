@@ -163,7 +163,7 @@ func (d *Daemon) runOverseerReport() {
 	if seams == nil {
 		seams = d.overseerReportProdSeams()
 	}
-	path, err := writeOverseerReport(d.config.TownRoot, overseerReportInterval(d.patrolConfig), seams)
+	path, err := writeOverseerReport(d.config.TownRoot, overseerReportInterval(d.patrol()), seams)
 	switch {
 	case err != nil:
 		d.logger.Printf("overseer_report: %v", err)
@@ -754,7 +754,7 @@ func (d *Daemon) overseerReportProdSeams() *overseerReportSeams {
 	return &overseerReportSeams{
 		now:         time.Now,
 		logf:        d.logger.Printf,
-		staleCrewOn: overseerReportStaleCrewOn(d.patrolConfig),
+		staleCrewOn: overseerReportStaleCrewOn(d.patrol()),
 		// staleCrew reads the crew clones under the town over the real disk
 		// and git. It only reads: no clone is fetched or moved.
 		staleCrew: func() ([]crewfresh.Clone, error) {

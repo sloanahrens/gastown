@@ -49,7 +49,7 @@ func (d *Daemon) triggerJevDrift() {
 // one line per interval rather than one per heartbeat.
 func (d *Daemon) runJevDrift() {
 	var settings drift.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevDrift != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevDrift != nil {
 		settings = drift.Settings{
 			MaxUSDPerDay:        c.Patrols.JevDrift.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevDrift.USDPerBillionTokens,

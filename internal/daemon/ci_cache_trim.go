@@ -376,10 +376,10 @@ func (d *Daemon) runCICacheTrimTick() {
 	now := s.now()
 	// A town with no kubernetes runner has no control cluster to trim, so the
 	// trim is not configured here and says nothing.
-	if _, configured, _ := ciCacheTrimContext(d.patrolConfig); !configured {
+	if _, configured, _ := ciCacheTrimContext(d.patrol()); !configured {
 		return
 	}
-	every, _, _, err := ciCacheTrimSettings(d.patrolConfig)
+	every, _, _, err := ciCacheTrimSettings(d.patrol())
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -387,7 +387,7 @@ func (d *Daemon) runCICacheTrimTick() {
 	if len(d.ciCacheDueVolumes(now, every)) == 0 {
 		return
 	}
-	mode, err := diskMaintenanceMode(d.patrolConfig)
+	mode, err := diskMaintenanceMode(d.patrol())
 	if err != nil {
 		d.refuseDiskMaintenance(err)
 		return
@@ -407,7 +407,7 @@ func (d *Daemon) runCICacheTrimTick() {
 func (d *Daemon) runCICacheTrimPass(mode string) {
 	ctx, cancel := d.diskMaintenanceContext()
 	defer cancel()
-	if _, _, _, err := ciCacheTrimSettings(d.patrolConfig); err != nil {
+	if _, _, _, err := ciCacheTrimSettings(d.patrol()); err != nil {
 		d.refuseDiskMaintenance(err)
 		return
 	}
@@ -425,7 +425,7 @@ func (d *Daemon) runCICacheTrimPass(mode string) {
 // container is never read as a volume with nothing to trim.
 func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	s := d.diskMaintenanceSeams()
-	every, maxAge, warn, err := ciCacheTrimSettings(d.patrolConfig)
+	every, maxAge, warn, err := ciCacheTrimSettings(d.patrol())
 	if err != nil {
 		d.ciCacheTrimLogf("settings", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		return false
@@ -434,7 +434,7 @@ func (d *Daemon) ciCacheTrim(ctx context.Context, mode string) bool {
 	if len(due) == 0 {
 		return true
 	}
-	kubeContext, _, err := ciCacheTrimContext(d.patrolConfig)
+	kubeContext, _, err := ciCacheTrimContext(d.patrol())
 	if err != nil {
 		d.ciCacheTrimLogf("context", "disk_maintenance: ci cache trim: %v; nothing trimmed", err)
 		d.ciCacheRetryDue(due, s.now())

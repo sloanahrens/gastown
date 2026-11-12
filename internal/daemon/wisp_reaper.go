@@ -134,7 +134,7 @@ func (d *Daemon) triggerWispReaper() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "wisp_reaper", d.wispReaperRun.last(), time.Now(), wispReaperInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "wisp_reaper", d.wispReaperRun.last(), time.Now(), wispReaperInterval(d.patrol()))
 	if !dec.due {
 		d.logger.Printf("wisp_reaper: not due — %s", dec.note)
 		return
@@ -175,10 +175,10 @@ func (d *Daemon) reapWisps() {
 		d.recordPatrolRun(&d.wispReaperRun, "wisp_reaper", time.Now())
 	}()
 
-	config := d.patrolConfig.Patrols.WispReaper
-	maxAge := wispReaperMaxAge(d.patrolConfig)
-	deleteAge := wispDeleteAge(d.patrolConfig)
-	staleIssueAge := wispReaperStaleIssueAge(d.patrolConfig)
+	config := d.patrol().Patrols.WispReaper
+	maxAge := wispReaperMaxAge(d.patrol())
+	deleteAge := wispDeleteAge(d.patrol())
+	staleIssueAge := wispReaperStaleIssueAge(d.patrol())
 
 	cycle := d.startDogCycle("wisp_reaper")
 	defer cycle.close()
@@ -547,7 +547,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	// Auto-close requires patrols.wisp_reaper.auto_close to be explicitly true
 	// (see wispReaperAutoCloseEnabled) — `dry_run` is not the disarm, because
 	// that knob also stops reap and purge.
-	if !wispReaperAutoCloseEnabled(d.patrolConfig) {
+	if !wispReaperAutoCloseEnabled(d.patrol()) {
 		d.logger.Printf("wisp_reaper: auto-close skipped (set patrols.wisp_reaper.auto_close=true to allow)")
 		cycle.skipStep("auto-close", "patrols.wisp_reaper.auto_close is not true")
 	} else {

@@ -568,20 +568,20 @@ func (d *Daemon) gcDatabasesAfterArchive(databases []string, unarchived map[stri
 // maintenanceArchiveDir returns the configured archive directory, empty when
 // archiving is off.
 func (d *Daemon) maintenanceArchiveDir() (string, error) {
-	if d.patrolConfig == nil || d.patrolConfig.Patrols == nil {
+	if d.patrol() == nil || d.patrol().Patrols == nil {
 		return "", nil
 	}
-	return d.patrolConfig.Patrols.ScheduledMaintenance.ParseArchiveDir()
+	return d.patrol().Patrols.ScheduledMaintenance.ParseArchiveDir()
 }
 
 // maintenanceArchiveLimits returns the configured per-run bounds for the
 // dolt_log and events reads. An absent config section reads the defaults, so an
 // unset setting behaves as before the settings existed (gt-s6srv).
 func (d *Daemon) maintenanceArchiveLimits() (commit, events int, err error) {
-	if d.patrolConfig == nil || d.patrolConfig.Patrols == nil {
+	if d.patrol() == nil || d.patrol().Patrols == nil {
 		return config.DefaultArchiveCommitLimit, config.DefaultArchiveEventsLimit, nil
 	}
-	c := d.patrolConfig.Patrols.ScheduledMaintenance
+	c := d.patrol().Patrols.ScheduledMaintenance
 	if commit, err = c.ParseArchiveCommitLimit(); err != nil {
 		return 0, 0, err
 	}
@@ -594,10 +594,10 @@ func (d *Daemon) maintenanceArchiveLimits() (commit, events int, err error) {
 // maintenanceArchiveBudget returns the configured time budget for one archive
 // step. An absent config section reads the default, like the batch bounds.
 func (d *Daemon) maintenanceArchiveBudget() (time.Duration, error) {
-	if d.patrolConfig == nil || d.patrolConfig.Patrols == nil {
+	if d.patrol() == nil || d.patrol().Patrols == nil {
 		return config.DefaultArchiveBudget, nil
 	}
-	return d.patrolConfig.Patrols.ScheduledMaintenance.ParseArchiveBudget()
+	return d.patrol().Patrols.ScheduledMaintenance.ParseArchiveBudget()
 }
 
 // maintenanceArchiveMaxBatchesPerExport bounds one export's batches in a cycle

@@ -1150,7 +1150,7 @@ func (c *deployClients) client(apiBase string) (deployRunAPI, error) {
 func (d *Daemon) productionDeployWatch() (*deployWatch, string) {
 	townRoot := d.config.TownRoot
 	clients := &deployClients{}
-	if cfg := landingWorkerConfig(d.patrolConfig); cfg != nil {
+	if cfg := landingWorkerConfig(d.patrol()); cfg != nil {
 		dir, err := cfg.ForgejoTokenDir()
 		if err != nil {
 			return nil, fmt.Sprintf("the configured Forgejo token dir: %v", err)
@@ -1190,7 +1190,7 @@ func (d *Daemon) productionDeployWatch() (*deployWatch, string) {
 func (d *Daemon) deployRepos() []deployRepo {
 	townRoot := d.config.TownRoot
 	var out []deployRepo
-	for _, name := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
+	for _, name := range landingWorkerRigs(d.patrol(), d.getKnownRigs()) {
 		fc := rig.ResolveForgejoConfigIn(d.repoFileOpener(), townRoot, name)
 		if fc == nil || fc.RemoteURL == "" {
 			continue

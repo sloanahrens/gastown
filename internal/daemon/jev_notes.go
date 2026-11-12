@@ -59,7 +59,7 @@ func (d *Daemon) triggerJevNotes() {
 // a week rather than one per heartbeat.
 func (d *Daemon) runJevNotes() bool {
 	var settings jevnotes.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevNotes != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevNotes != nil {
 		settings = jevnotes.Settings{
 			MaxUSDPerDay:        c.Patrols.JevNotes.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevNotes.USDPerBillionTokens,

@@ -164,7 +164,7 @@ func (d *Daemon) triggerJsonlGitBackup() {
 		return
 	}
 
-	dec := evaluatePatrolDue(d.config.TownRoot, "jsonl_git_backup", d.jsonlGitBackupRun.last(), time.Now(), jsonlGitBackupInterval(d.patrolConfig))
+	dec := evaluatePatrolDue(d.config.TownRoot, "jsonl_git_backup", d.jsonlGitBackupRun.last(), time.Now(), jsonlGitBackupInterval(d.patrol()))
 	if !dec.due {
 		d.logger.Printf("jsonl_git_backup: not due — %s", dec.note)
 		return
@@ -222,14 +222,14 @@ func (d *Daemon) syncJsonlGitBackup() {
 	cycle := d.startDogCycle("jsonl_git_backup")
 	defer cycle.close()
 
-	config := d.patrolConfig.Patrols.JsonlGitBackup
+	config := d.patrol().Patrols.JsonlGitBackup
 
 	// Resolve git repo path. Default lives under TownRoot (matches vitals.go's
 	// display path and where JSONL exports actually land) — NOT $HOME, which
 	// silently diverges from TownRoot whenever the town isn't rooted at
 	// $HOME/gt directly, leaving this patrol permanently unable to find its
 	// own target directory (gt-kme).
-	gitRepo, fromSetting := JsonlBackupRepo(d.config.TownRoot, d.patrolConfig)
+	gitRepo, fromSetting := JsonlBackupRepo(d.config.TownRoot, d.patrol())
 	d.jsonlRepoLogOnce.Do(func() {
 		source := "default"
 		if fromSetting {

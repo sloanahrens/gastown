@@ -50,7 +50,7 @@ func (d *Daemon) triggerJevThrash() {
 // heartbeat.
 func (d *Daemon) runJevThrash() {
 	var settings jevthrash.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevThrash != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevThrash != nil {
 		settings = jevthrash.Settings{
 			MaxUSDPerDay:        c.Patrols.JevThrash.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevThrash.USDPerBillionTokens,

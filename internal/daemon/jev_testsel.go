@@ -14,7 +14,7 @@ func (d *Daemon) jevTestselCandidate(rigName string, gate *land.CandidateGate) l
 		return gate
 	}
 	var settings testsel.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevTestsel != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevTestsel != nil {
 		settings = testsel.Settings{
 			MaxUSDPerDay:        c.Patrols.JevTestsel.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevTestsel.USDPerBillionTokens,

@@ -119,7 +119,7 @@ func patrolScanOptions(config *DaemonPatrolConfig, op *agentconfig.OperatorConfi
 // the readings that need the host.
 func (d *Daemon) patrolScanRunOptions(env *patrolScanHost) patrolscan.Options {
 	op, opErr := env.operatorIdentities()
-	opts := patrolScanOptions(d.patrolConfig, op, opErr, d.clk().Now)
+	opts := patrolScanOptions(d.patrol(), op, opErr, d.clk().Now)
 	// The pool's cap, read here rather than in patrolScanOptions: it needs the
 	// host's tmux reading, and it is the same cap a sling answers to
 	// (gt-02tcp).
@@ -137,7 +137,7 @@ func (d *Daemon) patrolScanActiveForRig(rigName string) bool {
 	if !d.isPatrolActive("patrol_scan") {
 		return false
 	}
-	rigs := GetPatrolRigs(d.patrolConfig, "patrol_scan")
+	rigs := GetPatrolRigs(d.patrol(), "patrol_scan")
 	if len(rigs) == 0 {
 		return true
 	}

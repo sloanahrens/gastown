@@ -117,7 +117,7 @@ func (d *Daemon) triggerCompactorDog() {
 		return
 	}
 
-	dec := d.compactorDogDue(d.clk().Now(), compactorDogInterval(d.patrolConfig))
+	dec := d.compactorDogDue(d.clk().Now(), compactorDogInterval(d.patrol()))
 
 	// The first evaluation of each process is logged either way: "the patrol is
 	// alive and not due" is what an operator needs after a restart, and it is
@@ -428,11 +428,11 @@ func (d *Daemon) runCompactorDogWith(p compactorProbes) bool {
 		return true
 	}
 
-	commitThreshold := compactorDogThreshold(d.patrolConfig)
+	commitThreshold := compactorDogThreshold(d.patrol())
 	d.logger.Printf("compactor_dog: starting monitoring cycle (commit_threshold=%d size_threshold=%s)",
 		commitThreshold, formatBytes(compactorSizeThreshold))
 
-	warnDeprecatedCompactorConfig(d, compactorDogConfig(d.patrolConfig))
+	warnDeprecatedCompactorConfig(d, compactorDogConfig(d.patrol()))
 
 	cycle := d.startDogCycle("compactor_dog")
 	defer cycle.close()
@@ -598,7 +598,7 @@ func warnDeprecatedCompactorConfig(d *Daemon, cd *CompactorDogConfig) {
 // checked, which is how a 31,335-commit database went unreported (gt-7yejc).
 // It is the same walk gc does, so both patrols hold the same database set.
 func (d *Daemon) compactorDatabases() ([]string, error) {
-	if configured := compactorConfiguredDatabases(d.patrolConfig); len(configured) > 0 {
+	if configured := compactorConfiguredDatabases(d.patrol()); len(configured) > 0 {
 		return configured, nil
 	}
 
@@ -626,7 +626,7 @@ func compactorConfiguredDatabases(config *DaemonPatrolConfig) []string {
 // over SQL. It is the source when the server's data directory is not on this
 // host; a remote server answers here where a directory walk cannot.
 func (d *Daemon) compactorServerDatabases() ([]string, error) {
-	if configured := compactorConfiguredDatabases(d.patrolConfig); len(configured) > 0 {
+	if configured := compactorConfiguredDatabases(d.patrol()); len(configured) > 0 {
 		return configured, nil
 	}
 

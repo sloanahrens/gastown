@@ -354,7 +354,7 @@ func allDigits(s string) bool {
 func (d *Daemon) townForgejoBaseURL() (string, error) {
 	// The worker's own list when it has no allowlist is the daemon's cached
 	// one, so sort a copy.
-	rigs := append([]string(nil), landingWorkerRigs(d.patrolConfig, d.getKnownRigs())...)
+	rigs := append([]string(nil), landingWorkerRigs(d.patrol(), d.getKnownRigs())...)
 	sort.Strings(rigs)
 	if len(rigs) == 0 {
 		return "", errForgejoRigListUnknown

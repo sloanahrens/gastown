@@ -14,7 +14,7 @@ func (d *Daemon) jevFailcauseCandidate(rigName string, gate land.Candidate) land
 		return gate
 	}
 	var settings failcause.Settings
-	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevFailcause != nil {
+	if c := d.patrol(); c != nil && c.Patrols != nil && c.Patrols.JevFailcause != nil {
 		settings = failcause.Settings{
 			MaxUSDPerDay:        c.Patrols.JevFailcause.MaxUSDPerDay,
 			USDPerBillionTokens: c.Patrols.JevFailcause.USDPerBillionTokens,

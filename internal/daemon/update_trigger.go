@@ -133,8 +133,8 @@ func (d *Daemon) triggerUpdate() {
 // launches on settings it could not understand.
 func (d *Daemon) updateSettings() (config.UpdateSettings, bool) {
 	var updateCfg *config.UpdateConfig
-	if d.patrolConfig != nil && d.patrolConfig.Patrols != nil {
-		updateCfg = d.patrolConfig.Patrols.Update
+	if d.patrol() != nil && d.patrol().Patrols != nil {
+		updateCfg = d.patrol().Patrols.Update
 	}
 	settings, err := updateCfg.Settings()
 	if err != nil {
