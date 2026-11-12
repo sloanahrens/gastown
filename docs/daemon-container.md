@@ -1138,15 +1138,16 @@ day.
       modified in the last 180 seconds. The container daemon refuses a probe
       file older than 180 seconds, so that check is the alarm when gt-mac-watch
       stops. gt does not start or stop the job.
-- [ ] **The dispatch hold is on.** The operator creates it, never an agent:
-      `<live-town>/seat-refill.hold` exists. It is a shared row
-      (`deploy/daemon/town-state.yaml`): the operator writes it on the Mac, and
-      the pod reads it each tick. The cutover only reads it. The ESTOP files
-      (`ESTOP` and `ESTOP.<rig>`) are shared rows the same way: the operator
-      writes them on the Mac, the pod reads them, and the cutover neither creates,
-      removes nor edits them.
-      The Mac writes both into the claim, the pod's town root, through the
-      writer bead gt-4obt95, which reads each write back.
+- [ ] **The dispatch hold is on.** The overseer places it, never an agent:
+      `seat-refill.hold` is in the pod's town root. It is a shared row
+      (`deploy/daemon/town-state.yaml`): the pod reads the file in its own
+      town-state claim each tick, and a copy in the Mac town directory has no
+      effect on the pod. The Docker compose container binds the host town, so
+      there a Mac write is seen directly. The cutover only reads it. The ESTOP
+      files (`ESTOP` and `ESTOP.<rig>`) are shared rows the same way: the pod
+      reads each from its own claim, `gt estop` writes the sentinel into the
+      claim as well as the Mac's tree and reads each write back, and the cutover
+      neither creates, removes nor edits them.
 - [ ] **No install is pending.** `ls <live-town>/daemon/install-pending.json`
       reports no such file. The marker is written while an install is in flight
       and removed when the cycle reaches a verdict (`docs/INSTALLING.md`); a

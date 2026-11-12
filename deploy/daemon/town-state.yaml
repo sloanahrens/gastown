@@ -39,13 +39,13 @@ entries:
     why: edited by gt config daemon, read by the daemon (gt-yjzepk.4)
   - path: seat-refill.hold
     owner: shared
-    why: the operator's dispatch hold, written on the Mac and read by the pod each tick; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it
+    why: the overseer's dispatch hold, placed in the pod's town root; the pod reads the file in its own town-state claim each tick; a copy in the Mac town directory has no effect on the pod, and the Docker compose container, which binds the host town, sees a Mac write; internal/dispatch/hold.go HoldFilePath is its path and OperatorHold reads it
   - path: ESTOP
     owner: shared
-    why: the town-wide ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it
+    why: the town-wide ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; the pod reads the file in its own claim each tick; a copy in the Mac town directory has no effect on the pod, and the Docker compose container, which binds the host town, sees a Mac write; internal/estop/estop.go FilePath is its path and internal/dispatch/hold.go estopHold reads it
   - path: ESTOP.<rig>
     owner: shared
-    why: the per-rig ESTOP sentinel, written on the Mac and read by the pod each tick; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it
+    why: the per-rig ESTOP sentinel, which gt estop writes into the pod's town-state claim as well as the Mac's tree and reads each write back; the pod reads the file in its own claim each tick; a copy in the Mac town directory has no effect on the pod, and the Docker compose container, which binds the host town, sees a Mac write; internal/estop/estop.go RigFilePath is its path and internal/dispatch/hold.go RigHold reads it
   - path: .events.jsonl.lock
     owner: daemon
     why: the flock internal/events/events.go takes beside .events.jsonl before an append, so two writers cannot interleave
