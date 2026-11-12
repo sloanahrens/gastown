@@ -3,21 +3,21 @@ package storypoints
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
+	"slices"
 	"testing"
 )
 
 const initialWeightsPath = "../../docs/plans/2026-11-11-story-points-initial-weights.json"
 
-// trainingMeanIsHaiku is the mean of is_haiku in the checked-in weights file.
-const trainingMeanIsHaiku = 0.389538
-
 func TestDefaultLoadsEmbeddedWeights(t *testing.T) {
 	t.Parallel()
+	want := initialShapeMean(t, "is_haiku")
 	w := Default()
-	if got, ok := w.ShapeMean("is_haiku"); !ok || got != trainingMeanIsHaiku {
-		t.Errorf("ShapeMean(is_haiku) = %v, %v; want %v, true", got, ok, trainingMeanIsHaiku)
+	if got, ok := w.ShapeMean("is_haiku"); !ok || got != want {
+		t.Errorf("ShapeMean(is_haiku) = %v, %v; want %v, true", got, ok, want)
 	}
 	if _, ok := w.ShapeMean("not_a_feature"); ok {
 		t.Errorf("ShapeMean(not_a_feature) reports ok; want false")
@@ -63,7 +63,10 @@ func TestShapeMinutesMatchFixtures(t *testing.T) {
 			if fx.SeatClass == "haiku" {
 				seat = SeatHaiku
 			}
-			got := w.ShapeMinutes(Features(fx.Text, fx.Rig, seat))
+			got, err := w.ShapeMinutes(Features(fx.Text, fx.Rig, seat))
+			if err != nil {
+				t.Fatalf("ShapeMinutes: %v", err)
+			}
 			if math.Abs(got-fx.PredictedMinutes) > 0.01 {
 				t.Errorf("ShapeMinutes = %v, want %v within 0.01", got, fx.PredictedMinutes)
 			}
@@ -105,10 +108,22 @@ func TestShapeMinutesIsExpOfLinearPredictor(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			w := loadWeightsFrom(t, weightsWith(t, tc.mut))
-			if got := w.ShapeMinutes(tc.shape); math.Abs(got-tc.want) > 1e-9 {
+			got, err := w.ShapeMinutes(tc.shape)
+			if err != nil {
+				t.Fatalf("ShapeMinutes: %v", err)
+			}
+			if math.Abs(got-tc.want) > 1e-9 {
 				t.Errorf("ShapeMinutes = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestShapeMinutesZeroWeightsReturnsError(t *testing.T) {
+	t.Parallel()
+	got, err := (Weights{}).ShapeMinutes(Shape{Boxes: 3})
+	if !errors.Is(err, ErrNoWeights) {
+		t.Fatalf("ShapeMinutes(zero Weights) = %v, %v; want ErrNoWeights", got, err)
 	}
 }
 
@@ -147,9 +162,6 @@ func TestLoadWeightsRejects(t *testing.T) {
 		}},
 		{"negative scale", func(t *testing.T) []byte {
 			return weightsWith(t, func(f *weightsFile) { f.Shape.Scale[3] = -1 })
-		}},
-		{"NaN in the file", func(t *testing.T) []byte {
-			return replaceOnce(t, `"intercept": 2.16992`, `"intercept": NaN`)
 		}},
 		{"number out of float64 range", func(t *testing.T) []byte {
 			return replaceOnce(t, `"intercept": 2.16992`, `"intercept": 1e400`)
@@ -195,6 +207,44 @@ func TestLoadWeightsRejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoadWeightsRejectsBareNaN pins why a NaN in the file is refused:
+// encoding/json cannot represent NaN, so the decoder stops on the bare literal
+// as a syntax error before any NaN check could run. The assertion is on that
+// observed reason, not on a NaN check the code does not make.
+func TestLoadWeightsRejectsBareNaN(t *testing.T) {
+	t.Parallel()
+	data := replaceOnce(t, `"intercept": 2.16992`, `"intercept": NaN`)
+	var syntax *json.SyntaxError
+	if _, err := LoadWeights(bytes.NewReader(data)); !errors.As(err, &syntax) {
+		t.Fatalf("LoadWeights(bare NaN) = %v, want a JSON syntax error", err)
+	}
+}
+
+// initialShapeMean returns the mean of feature in the checked-in initial
+// weights file, so the test compares against the file itself rather than a
+// second copy of the number.
+func initialShapeMean(t *testing.T, feature string) float64 {
+	t.Helper()
+	raw, err := os.ReadFile(initialWeightsPath)
+	if err != nil {
+		t.Fatalf("read initial weights: %v", err)
+	}
+	var f struct {
+		Shape struct {
+			Features []string  `json:"features"`
+			Mean     []float64 `json:"mean"`
+		} `json:"shape"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("parse initial weights: %v", err)
+	}
+	i := slices.Index(f.Shape.Features, feature)
+	if i < 0 || i >= len(f.Shape.Mean) {
+		t.Fatalf("initial weights have no mean for %q", feature)
+	}
+	return f.Shape.Mean[i]
 }
 
 // weightsWith returns the embedded weights file after mutate has changed its

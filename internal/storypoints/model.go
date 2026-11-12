@@ -57,9 +57,9 @@ type embeddingBlock struct {
 }
 
 // Weights is a validated weights file: the shape model, the fits-to-minutes
-// table and the embedding ridge. The zero value has no model, so make one with
-// LoadWeights or Default. The slices are shared with the Default value, so
-// callers must not modify them.
+// table and the embedding ridge. Make one with LoadWeights or Default; the
+// zero value has no model, so ShapeMinutes returns ErrNoWeights. The slices
+// are shared with the Default value, so callers must not modify them.
 type Weights struct {
 	shapeMean      []float64
 	shapeScale     []float64
@@ -177,14 +177,22 @@ func (f weightsFile) check() (Weights, error) {
 	}, nil
 }
 
+// ErrNoWeights reports a Weights with no shape model, such as the zero value.
+var ErrNoWeights = errors.New("storypoints: weights are not loaded")
+
 // ShapeMinutes is the shape model's predicted polecat minutes for s:
-// exp(intercept + sum of coef_i * (x_i - mean_i) / scale_i).
-func (w Weights) ShapeMinutes(s Shape) float64 {
+// exp(intercept + sum of coef_i * (x_i - mean_i) / scale_i). It returns
+// ErrNoWeights when w has no shape model.
+func (w Weights) ShapeMinutes(s Shape) (float64, error) {
+	n := len(shapeFeatureNames)
+	if len(w.shapeMean) != n || len(w.shapeScale) != n || len(w.shapeCoef) != n {
+		return 0, ErrNoWeights
+	}
 	z := w.shapeIntercept
 	for i, x := range s.vector() {
 		z += w.shapeCoef[i] * (x - w.shapeMean[i]) / w.shapeScale[i]
 	}
-	return math.Exp(z)
+	return math.Exp(z), nil
 }
 
 // ShapeMean returns the training mean of the named shape feature. ok is false
