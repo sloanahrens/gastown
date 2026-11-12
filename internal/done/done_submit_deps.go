@@ -25,6 +25,10 @@ type doneRepo interface {
 	ForkBackedRemote(remote string) bool
 	VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error
 	VerifyPushedCommit(remote, branch, commit string) error
+	// FetchBranch brings the named branch's objects into this repository. The
+	// absent-worktree crew submit calls it after the push check: the rig's bare
+	// repository in the pod holds nothing a Mac clone pushed until it is fetched.
+	FetchBranch(remote, branch string) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
 	AuthorEmail() (string, error)
