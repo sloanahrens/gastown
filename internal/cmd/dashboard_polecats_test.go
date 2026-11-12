@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dashboard"
 	gtevents "github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/landings"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -536,6 +537,59 @@ func TestDashSeatsReportsAnUnreadableDispatchRecord(t *testing.T) {
 	}
 	if _, err := dashSeats(town, nil, false, newDashSeatCache(), gtevents.NewDispatchReader(town), fakeSessionLister{}, nil); err == nil {
 		t.Fatal("dashSeats read an unreadable dispatch record as a town with no dispatches")
+	}
+}
+
+// TestDashSeatsReadsSeatAgentFromIntentRecord is gt-5pl4gi (finding
+// f74e687d7a56): the dashboard's seat list names a seat's agent from its intent
+// record, re-read on every poll, so a model switch shows as soon as the new
+// sling records it rather than when the classification cache expires. The test
+// drives dashSeatsWith, the body dashSeats runs, with the rig's bead store
+// answered by a stub; the second poll reuses the cached classification, so
+// only the per-poll record read can name the new agent.
+func TestDashSeatsReadsSeatAgentFromIntentRecord(t *testing.T) {
+	t.Parallel()
+	rigPath := routeRigTown(t, beads.BackendTracker)
+	townRoot := filepath.Dir(rigPath)
+	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", "ember"), 0o755); err != nil {
+		t.Fatalf("lay out the polecat: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), []byte(`{"version":1,"rigs":{"gastown":{}}}`), 0o644); err != nil {
+		t.Fatalf("register the rig: %v", err)
+	}
+	cache := newDashSeatCache()
+	seatAgent := func() string {
+		// The unit tier starts no bd, so the rig's store is answered through
+		// the same seam the production call fills with beads.New.
+		openBeads := func(rigPath string) *beads.Beads {
+			return beads.New(rigPath, beads.WithDirRunner((&seatCallLog{}).run))
+		}
+		seats, err := dashSeatsWith(townRoot, nil, true, cache, gtevents.NewDispatchReader(townRoot), fakeSessionLister{}, nil, openBeads)
+		if err != nil {
+			t.Fatalf("dashSeats: %v", err)
+		}
+		for _, seat := range seats {
+			if seat.Rig == "gastown" && seat.Name == "ember" {
+				return seat.Item.Agent
+			}
+		}
+		t.Fatalf("dashSeats reported no gastown/ember seat: %+v", seats)
+		return ""
+	}
+
+	seat := polecatIntentSeat("gastown", "ember")
+	if err := intent.MarkSlung(townRoot, seat, "sbx-haiku", "test", time.Now()); err != nil {
+		t.Fatalf("record the sling: %v", err)
+	}
+	if got := seatAgent(); got != "sbx-haiku" {
+		t.Fatalf("dashSeats names agent %q for ember, want the record's sbx-haiku", got)
+	}
+
+	if err := intent.MarkSlung(townRoot, seat, "claude-sonnet", "test", time.Now()); err != nil {
+		t.Fatalf("record the model switch: %v", err)
+	}
+	if got := seatAgent(); got != "claude-sonnet" {
+		t.Fatalf("dashSeats names agent %q for ember after the switch, want claude-sonnet from the record", got)
 	}
 }
 
