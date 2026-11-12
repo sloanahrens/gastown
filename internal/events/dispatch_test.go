@@ -3,20 +3,25 @@ package events
 import (
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/role"
 )
 
 // dispatchEv builds one log line for the dispatch clock's tests: a sling when
-// the type is a sling, a done event otherwise.
+// the type is a sling, a done event otherwise. The sling's actor is a seat, so
+// the line is a seat-to-seat handoff and keeps the bead's run; a test that
+// needs a sling by anyone else builds it with dispatchSlingEv.
 func dispatchEv(typ, at, bead string) Event {
-	e := Event{Timestamp: at, Type: typ, Payload: map[string]interface{}{"bead": bead}}
+	e := Event{Timestamp: at, Type: typ, Actor: "gastown/polecats/nux", Payload: map[string]interface{}{"bead": bead}}
 	if typ == TypeSling {
 		e.Payload["target"] = "gastown/polecats/" + bead
 	}
 	return e
 }
 
-// dispatchSlingEv builds a sling line written by actor to the seat it names,
-// so a test can tell the spec dispatcher's slings from anyone else's.
+// dispatchSlingEv builds a sling line written by actor to the seat it names, so
+// a test can choose the actor that decides whether the sling is a seat-to-seat
+// handoff or starts a new run.
 func dispatchSlingEv(at, bead, actor, seat string) Event {
 	return Event{
 		Timestamp: at,
@@ -52,9 +57,9 @@ func mustTime(t *testing.T, s string) time.Time {
 	return ts
 }
 
-// The clock belongs to the bead, not the seat: a bead slung again — to the
+// A seat-to-seat handoff is the same run: a bead slung again by a seat — to the
 // same seat or another one — keeps the dispatch it first went out on, and a
-// done event ends the run so the dispatch after it starts over.
+// done event ends the run so the dispatch after it starts over (gt-m14shr).
 func TestDispatchStartCountsTheBeadsFirstDispatch(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -68,7 +73,7 @@ func TestDispatchStartCountsTheBeadsFirstDispatch(t *testing.T) {
 			want: t9,
 		},
 		{
-			name: "re-slung to a second seat keeps the first dispatch",
+			name: "re-slung by a seat keeps the first dispatch",
 			evs: []Event{
 				dispatchEv(TypeSling, t9, "gt-a"),
 				dispatchEv(TypeSling, t11, "gt-a"),
@@ -361,18 +366,123 @@ func TestDispatchClockSpecDispatchSlingStartsNewRun(t *testing.T) {
 	}
 }
 
-// Anyone but the spec dispatcher keeps today's rule: a bead slung from one
-// seat to another keeps the dispatch it first went out on, so moving between
-// seats cannot restart its clock.
-func TestDispatchClockOtherActorSlingKeepsTheRun(t *testing.T) {
+// A sling by a hand — the overseer, a crew member, a sling whose actor the log
+// could not name — starts a new run, even to the seat that already holds the
+// bead (gt-m14shr): the overseer hand-slung gt-8r17fp with actor "unknown" and
+// the seat was stopped 35s into its run on the clock of the run before it.
+func TestDispatchClockAHandSlingStartsANewRun(t *testing.T) {
+	t.Parallel()
+	const second = "2026-10-27T12:00:00Z" // three hours after the first sling
+	for _, tt := range []struct {
+		name   string
+		actor  string
+		target string
+	}{
+		{name: "a hand sling the log could not name, to the same seat", actor: "unknown", target: "gastown/polecats/nux"},
+		{name: "a hand sling the log could not name, to another seat", actor: "unknown", target: "gastown/polecats/capable"},
+		{name: "the overseer", actor: "town/crew/overseer", target: "gastown/polecats/nux"},
+		{name: "a crew actor", actor: "gastown/crew/egret", target: "gastown/polecats/nux"},
+		{name: "an empty actor", actor: "", target: "gastown/polecats/nux"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := NewDispatchClock()
+			clock.Add([]Event{
+				dispatchSlingEv(t9, "gt-a", SpecDispatchActor, "gastown/polecats/nux"),
+				dispatchSlingEv(second, "gt-a", tt.actor, tt.target),
+			})
+			if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, second)) {
+				t.Errorf("start = %v (%t), want %s: a hand sling starts a new run", got, ok, second)
+			}
+		})
+	}
+}
+
+// Only the exact "<rig>/polecats/<name>" form is a seat. Anything else is not
+// one, and its sling starts a new run rather than inheriting the old clock
+// (gt-m14shr): a two-segment name, an empty rig or polecat, an extra segment,
+// the crew form, the bare role, or a casing role.Actor never writes.
+func TestDispatchClockAFormThatMerelyResemblesASeatStartsANewRun(t *testing.T) {
+	t.Parallel()
+	const second = "2026-10-27T12:00:00Z" // three hours after the first sling
+	for _, actor := range []string{
+		"gastown/capable",
+		"gastown/polecats/",
+		"/polecats/capable",
+		"gastown/polecats/capable/x",
+		"gastown/crew/capable",
+		"gastown/POLECATS/capable",
+		"polecat",
+	} {
+		t.Run(actor, func(t *testing.T) {
+			t.Parallel()
+			clock := NewDispatchClock()
+			clock.Add([]Event{
+				dispatchSlingEv(t9, "gt-a", SpecDispatchActor, "gastown/polecats/nux"),
+				dispatchSlingEv(second, "gt-a", actor, "gastown/polecats/nux"),
+			})
+			if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, second)) {
+				t.Errorf("start = %v (%t), want %s: %q is not a seat, so it starts a new run", got, ok, second, actor)
+			}
+		})
+	}
+}
+
+// The seat forms internal/role writes keep the run: role.Actor(role.Polecat,
+// rig, name) is "<rig>/polecats/<name>" for any rig, and a seat-to-seat handoff
+// is the same run whatever rig it moves to (gt-m14shr). The forms role.Actor
+// falls back to when the rig or the name is missing are not seats.
+func TestDispatchClockRoleActorSeatForms(t *testing.T) {
+	t.Parallel()
+	for _, rig := range []string{"gastown", "longeye"} {
+		rig := rig
+		t.Run("a seat in "+rig, func(t *testing.T) {
+			t.Parallel()
+			actor := role.Actor(role.Polecat, rig, "capable")
+			clock := NewDispatchClock()
+			clock.Add([]Event{
+				dispatchSlingEv(t9, "gt-a", SpecDispatchActor, "gastown/polecats/nux"),
+				dispatchSlingEv(t11, "gt-a", actor, "gastown/polecats/rictus"),
+			})
+			if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, t9)) {
+				t.Errorf("start = %v (%t), want %s: %q is a seat, so its handoff keeps the run", got, ok, t9, actor)
+			}
+		})
+	}
+	for _, tt := range []struct {
+		name  string
+		actor string
+	}{
+		{name: "the crew role", actor: role.Actor(role.Crew, "gastown", "capable")},
+		{name: "a polecat with no rig", actor: role.Actor(role.Polecat, "", "capable")},
+		{name: "a polecat with no name", actor: role.Actor(role.Polecat, "gastown", "")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := NewDispatchClock()
+			clock.Add([]Event{
+				dispatchSlingEv(t9, "gt-a", SpecDispatchActor, "gastown/polecats/nux"),
+				dispatchSlingEv(t11, "gt-a", tt.actor, "gastown/polecats/nux"),
+			})
+			if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, t11)) {
+				t.Errorf("start = %v (%t), want %s: %q is not a seat, so it starts a new run", got, ok, t11, tt.actor)
+			}
+		})
+	}
+}
+
+// A seat that slings the bead on keeps the run its dispatcher began: the seat
+// hands over a run that is still the bead's, and the earlier dispatch stays its
+// clock (gt-m14shr).
+func TestDispatchClockSeatSlingKeepsTheEarlierStart(t *testing.T) {
 	t.Parallel()
 	clock := NewDispatchClock()
 	clock.Add([]Event{
-		dispatchSlingEv(t9, "gt-a", "hq-crew-egret", "gastown/nux"),
-		dispatchSlingEv(t11, "gt-a", "hq-crew-egret", "gastown/capable"),
+		dispatchSlingEv(t9, "gt-a", "unknown", "gastown/capable"),
+		dispatchSlingEv(t11, "gt-a", "gastown/polecats/capable", "gastown/polecats/rictus"),
 	})
 	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, t9)) {
-		t.Errorf("start = %v (%t), want %s: a seat-to-seat sling keeps the first dispatch", got, ok, t9)
+		t.Errorf("start = %v (%t), want %s: a seat's handoff keeps the run the dispatch began", got, ok, t9)
 	}
 }
 
@@ -415,18 +525,63 @@ func TestDispatchClockSpecDispatchSlingIsReplaySafe(t *testing.T) {
 	}
 }
 
+// The incident fixture is order and replay safe: folding the two slings in at
+// any chunk boundary, or folding the same lines in twice, dates the run from
+// the hand sling (gt-m14shr).
+func TestDispatchClockNonSeatSlingIsReplaySafe(t *testing.T) {
+	t.Parallel()
+	first := dispatchSlingEv("2026-11-12T09:00:00Z", "gt-a", SpecDispatchActor, "gastown/nux")
+	second := dispatchSlingEv("2026-11-12T12:00:00Z", "gt-a", "unknown", "gastown/nux")
+	run := []Event{first, second}
+	want := mustTime(t, "2026-11-12T12:00:00Z")
+	for cut := 0; cut <= len(run); cut++ {
+		clock := NewDispatchClock()
+		clock.Add(run[:cut])
+		clock.Add(run[cut:])
+		if got, ok := clock.Start("gt-a"); !ok || !got.Equal(want) {
+			t.Errorf("cut %d: start = %v (%t), want %v", cut, got, ok, want)
+		}
+	}
+	clock := NewDispatchClock()
+	clock.Add(run)
+	clock.Add(run)
+	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(want) {
+		t.Errorf("the lines folded twice: start = %v (%t), want %v", got, ok, want)
+	}
+}
+
 // A repeat spec-dispatch sling to the seat that already holds the bead is the
 // same run: it must not restart the clock, or a repeated sling could keep a
-// runaway bead from ever being stopped.
-func TestDispatchClockSpecDispatchRepeatToTheSameSeatKeepsTheRun(t *testing.T) {
+// runaway bead from ever being stopped (gt-3ga5l). A sling to another seat
+// means the bead went back to the pool, and the run the earlier seat held is
+// not the new seat's to answer for (gt-m14shr).
+func TestDispatchClockSpecDispatchSlingTargetDecidesTheRun(t *testing.T) {
 	t.Parallel()
-	clock := NewDispatchClock()
-	clock.Add([]Event{
-		dispatchSlingEv("2026-10-30T12:00:00Z", "gt-a", SpecDispatchActor, "gastown/nux"),
-		dispatchSlingEv("2026-10-30T12:10:00Z", "gt-a", SpecDispatchActor, "gastown/nux"),
-	})
-	if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, "2026-10-30T12:00:00Z")) {
-		t.Errorf("start = %v (%t), want 12:00:00Z: a repeat to the same seat keeps the first dispatch", got, ok)
+	const first = "2026-10-30T12:00:00Z"
+	const second = "2026-10-30T12:10:00Z"
+	for _, tt := range []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{name: "a repeat to the same seat keeps the run", target: "gastown/polecats/nux", want: first},
+		{name: "a sling to another seat starts a new run", target: "gastown/polecats/capable", want: second},
+		// A sling that names no seat cannot show the bead moved, so it keeps
+		// the run: the dispatcher's repeat protection fails toward the clock
+		// that stops a runaway bead, not toward a fresh one.
+		{name: "a sling naming no seat keeps the run", target: "", want: first},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			clock := NewDispatchClock()
+			clock.Add([]Event{
+				dispatchSlingEv(first, "gt-a", SpecDispatchActor, "gastown/polecats/nux"),
+				dispatchSlingEv(second, "gt-a", SpecDispatchActor, tt.target),
+			})
+			if got, ok := clock.Start("gt-a"); !ok || !got.Equal(mustTime(t, tt.want)) {
+				t.Errorf("start = %v (%t), want %s", got, ok, tt.want)
+			}
+		})
 	}
 }
 

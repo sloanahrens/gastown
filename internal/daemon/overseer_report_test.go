@@ -881,14 +881,16 @@ func TestTriggerOverseerReport(t *testing.T) {
 }
 
 // The report's seat rows are dated from the bead's dispatch clock, the one the
-// overrun guard judges: a bead that moved to a second seat is dated from its
+// overrun guard judges: a bead a seat handed to a second seat is dated from its
 // first sling, not from the sling that reached the seat holding it, and a seat
-// holding no bead has no row (gt-tzbtf).
+// holding no bead has no row (gt-tzbtf). The fixture stamps a seat actor
+// because a sling by a seat is a handoff; a sling by a hand actor starts a new
+// run (gt-m14shr).
 func TestOverseerSeatWorkDatesTheBeadsDispatch(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0)}
 	line := func(ts, typ, bead, target string) string {
-		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"x","payload":{"bead":%q,"target":%q}}`, ts, typ, bead, target)
+		return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":"gastown/polecats/capable","payload":{"bead":%q,"target":%q}}`, ts, typ, bead, target)
 	}
 	body := strings.Join([]string{
 		line("2026-10-27T09:00:00Z", events.TypeSling, "gt-a", "gastown/polecats/capable"),
