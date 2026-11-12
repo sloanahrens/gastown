@@ -4,6 +4,6 @@
 # pin that is not an ancestor of the source's origin/main, more than 40 commits
 # behind it, or more than 7 days older than its tip.
 bd http://forgejo:3000/sloan/beads.git b7e5e9ceefaf49a701f3e2c1487a72aa0feb077f
-om http://forgejo:3000/sloan/organic-mechanic.git 08ae32d0fa20bd6220d01b8171875123d318808c
+om http://forgejo:3000/sloan/organic-mechanic.git 50bb8fb1964dda98a22697a6396a75a1fd7b000f
 hm http://forgejo:3000/sloan/history-man.git 7f2647bd257e6cc86b0c1c9958f7a3f1e5438cfb
 devops http://forgejo:3000/sloan/devops.git 776251cd1d4e7ba228eee81cd348f945c22ef49f
