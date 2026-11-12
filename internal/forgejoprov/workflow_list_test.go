@@ -463,6 +463,19 @@ func TestEnsureWorkflowProtectedLocksSiblingFile(t *testing.T) {
 	}
 }
 
+// TestEnsureWorkflowProtectedRefusesWhenSiblingLockCannotBeMade: without a ListLock, a lock
+// file that cannot be created fails the provision as a lock failure, before the list is read.
+func TestEnsureWorkflowProtectedRefusesWhenSiblingLockCannotBeMade(t *testing.T) {
+	t.Parallel()
+	list := filepath.Join(t.TempDir(), "absent-dir", "gt-protected-workflow-repos")
+	p := &Provisioner{Client: &Client{Log: func(string) {}}}
+
+	err := p.EnsureWorkflowProtected(protectionRepo, list)
+	if err == nil || !strings.Contains(err.Error(), "lock the workflow-file hook list") {
+		t.Fatalf("EnsureWorkflowProtected = %v, want the lock refused", err)
+	}
+}
+
 // TestEnsureWorkflowProtectedAppendsOnce: a second provision of the same repository finds it
 // named by the first, so the list holds one line for it and the second call sends no write.
 func TestEnsureWorkflowProtectedAppendsOnce(t *testing.T) {
