@@ -1,0 +1,217 @@
+package session
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
+)
+
+// The fakes stand in for tmux and sleep, so the script runs its real poll loop
+// and its real hold without any real time passing. The fake sleep records each
+// call and whether the marker existed at that moment, then returns at once.
+const (
+	fakeMainSession = "gt-test-polecat"
+	fakeMainPollSec = "2"
+)
+
+// mainScriptFakes is what one run of the script sees.
+type mainScriptFakes struct {
+	newSessionFails bool // the holder session cannot start
+	hasSession      bool // the agent's session exists
+	paneDead        bool // the agent's pane reads dead
+	waitSeconds     string
+	home            string // $4: where the marker goes
+}
+
+// runMainScript runs sandboxMainScript under /bin/sh with the fakes on PATH and
+// returns its exit code, its sleep log, and whether the marker exists under home.
+// The PATH holds only the fake bin and the system directories for grep.
+func runMainScript(t *testing.T, f mainScriptFakes, hold string) (exit int, sleeps []string, marked bool) {
+	t.Helper()
+	root := t.TempDir()
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "sleeps.log")
+	marker := filepath.Join(f.home, sandboxEndedMarker)
+	writeFakeTool(t, filepath.Join(bin, "tmux"), fakeTmux(f))
+	writeFakeTool(t, filepath.Join(bin, "sleep"), fakeSleep(logPath, marker))
+
+	args := []string{"-c", sandboxMainScript, "sh", fakeMainSession, f.waitSeconds, fakeMainPollSec, f.home, "", hold}
+	cmd := exec.Command("/bin/sh", args...)
+	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	switch {
+	case err == nil:
+		exit = 0
+	case errors.As(err, &ee):
+		exit = ee.ExitCode()
+	default:
+		t.Fatalf("running the script: %v: %s", err, out)
+	}
+
+	if data, rerr := os.ReadFile(logPath); rerr == nil {
+		sleeps = strings.Split(strings.TrimSpace(string(data)), "\n")
+	} else if !errors.Is(rerr, os.ErrNotExist) {
+		t.Fatal(rerr)
+	}
+	_, serr := os.Stat(marker)
+	marked = serr == nil
+	return exit, sleeps, marked
+}
+
+func writeFakeTool(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil { //nolint:gosec // G306: a fake tool the test runs
+		t.Fatal(err)
+	}
+}
+
+// fakeTmux answers the script's calls from f: the holder starts or fails, the
+// agent's session exists or not, and its pane reads dead or alive.
+func fakeTmux(f mainScriptFakes) string {
+	newSession := "exit 0"
+	if f.newSessionFails {
+		newSession = "exit 1"
+	}
+	has := "exit 1"
+	if f.hasSession {
+		has = "exit 0"
+	}
+	pane := "echo 0"
+	if f.paneDead {
+		pane = "echo 1"
+	}
+	return "#!/bin/sh\n" +
+		"case \"$*\" in\n" +
+		"  *new-session*) " + newSession + " ;;\n" +
+		"  *has-session*) " + has + " ;;\n" +
+		"  *list-panes*) " + pane + " ;;\n" +
+		"  *list-sessions*) exit 0 ;;\n" +
+		"esac\n"
+}
+
+// fakeSleep logs its argument and whether the marker exists when it is called.
+func fakeSleep(logPath, marker string) string {
+	return "#!/bin/sh\n" +
+		"m=no; [ -e '" + marker + "' ] && m=yes\n" +
+		"echo \"$1 marker=$m\" >> '" + logPath + "'\n"
+}
+
+// The agent's session ends with a dead pane: the script writes the marker,
+// holds for the bound, and exits 0.
+func TestSandboxMainScriptHoldsAfterTheAgentEnds(t *testing.T) {
+	t.Parallel()
+	home := t.TempDir()
+	exit, sleeps, marked := runMainScript(t, mainScriptFakes{hasSession: true, paneDead: true, waitSeconds: "5", home: home}, "1800")
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0 after the agent's session ended", exit)
+	}
+	if !marked {
+		t.Fatalf("no %s under %s after the agent's session ended", sandboxEndedMarker, home)
+	}
+	// The poll loop sleeps for the poll interval between polls; the last sleep is
+	// the hold, taken with the marker already written.
+	if last := sleeps[len(sleeps)-1]; last != "1800 marker=yes" {
+		t.Fatalf("last sleep = %q, want the hold %q with the marker already written; sleeps %q", last, "1800 marker=yes", sleeps)
+	}
+	holds := 0
+	for _, s := range sleeps {
+		if strings.HasPrefix(s, "1800 ") {
+			holds++
+		}
+	}
+	if holds != 1 {
+		t.Fatalf("the script waited the hold %d times, want once; sleeps %q", holds, sleeps)
+	}
+}
+
+// Each abnormal exit ends without the marker and without the hold: a holder that
+// never started, a session that never appeared, and a marker the script cannot
+// write. Each returns exit 1 and holds nothing.
+func TestSandboxMainScriptAbnormalExitsDoNotHold(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		f    mainScriptFakes
+	}{
+		{
+			name: "the holder session fails to start",
+			f:    mainScriptFakes{newSessionFails: true, hasSession: true, paneDead: true, waitSeconds: "5"},
+		},
+		{
+			name: "the agent's session never appears",
+			f:    mainScriptFakes{hasSession: false, waitSeconds: "2"},
+		},
+		{
+			name: "the marker directory does not exist",
+			f:    mainScriptFakes{hasSession: true, paneDead: true, waitSeconds: "5"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tt.f.home = t.TempDir()
+			if tt.name == "the marker directory does not exist" {
+				tt.f.home = filepath.Join(tt.f.home, "missing")
+			}
+			exit, sleeps, marked := runMainScript(t, tt.f, "1800")
+			if exit != 1 {
+				t.Fatalf("exit = %d, want 1", exit)
+			}
+			if marked {
+				t.Fatalf("the abnormal exit wrote %s", sandboxEndedMarker)
+			}
+			for _, s := range sleeps {
+				if strings.HasPrefix(s, "1800 ") {
+					t.Fatalf("the abnormal exit waited the hold: sleeps %q", sleeps)
+				}
+			}
+		})
+	}
+}
+
+// The hold $6 is the profile's bound, and the production argv carries it in
+// the position the script reads it from.
+func TestSandboxMainScriptHoldDefaultMatchesConfig(t *testing.T) {
+	t.Parallel()
+	if sandboxEndedHoldDefault != strconv.Itoa(config.DefaultSandboxEndedHoldSeconds) {
+		t.Fatalf("sandboxEndedHoldDefault = %q, config default = %d: they must match", sandboxEndedHoldDefault, config.DefaultSandboxEndedHoldSeconds)
+	}
+	want := []string{"sh", "-c", sandboxMainScript, "sh", fakeMainSession, "", "", "", "", "600"}
+	if got := sandboxMainArgs(fakeMainSession, 600); !reflect.DeepEqual(got, want) {
+		t.Fatalf("sandboxMainArgs = %q, want %q", got, want)
+	}
+}
+
+// A profile that was never converted from settings holds for the config default,
+// not for zero: a zero hold would reproduce the deletion that loses transcripts.
+func TestOpenShellEndedHoldFallsBackToTheDefault(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		profile int
+		want    int
+	}{
+		{name: "an unset profile holds for the default", profile: 0, want: config.DefaultSandboxEndedHoldSeconds},
+		{name: "a set profile holds for its own bound", profile: 3600, want: 3600},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			b := &openshellBackend{profile: Profile{EndedHoldSeconds: tt.profile}}
+			if got := b.endedHold(); got != tt.want {
+				t.Fatalf("endedHold() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
