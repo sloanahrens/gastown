@@ -799,6 +799,18 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		// has nothing to name, and stays as it was.
 		{"a substitution in a line the parser cannot read", `echo $(date) "unterminated`, true},
 		{"a line the parser cannot read with no substitution", `echo "unterminated`, false},
+		// Each opening that may hold a substitution refuses an unreadable line on
+		// its own, so each is pinned alone; a line holding only a variable is not.
+		{"a backquote in a line the parser cannot read", "echo `date", true},
+		{"a process input in a line the parser cannot read", "cat <(date", true},
+		{"a process output in a line the parser cannot read", "tee >(cat", true},
+		{"a variable in a line the parser cannot read", `echo "a $b`, false},
+		// A quoted heredoc body is literal to the parser, so a write in its
+		// substitution is data even with an unterminated quote in the body. The
+		// same body unquoted is judged.
+		{"writing into a sibling in a quoted heredoc body with an unterminated quote", "cat <<'EOF'\n$(cp a.go " + sib + ") \"unterminated\nEOF", false},
+		{"writing into a sibling in an unquoted heredoc body with an unterminated quote", "cat <<EOF\n$(cp a.go " + sib + ") \"unterminated\nEOF", true},
+		{"removing an outside path in a quoted heredoc body with an unterminated quote", "cat <<'EOF'\n$(rm -rf " + sib + ") \"unterminated\nEOF", false},
 		// A body holding a parenthesis is cut whole, not at the first ")"
 		// (gt-d1mlb).
 		{"writing after a quoted paren in a substitution", `echo "$(grep -E '(a|b)' f; cp a.go ` + sib + `)"`, true},

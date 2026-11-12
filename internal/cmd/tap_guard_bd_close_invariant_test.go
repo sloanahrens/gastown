@@ -229,6 +229,16 @@ func TestParseBdCloseInvocations(t *testing.T) {
 		// nothing to judge.
 		{name: "a substitution the parser cannot read is an unknown close", command: `echo $(bd close gt-arno) "unterminated`, want: []bdCloseInvocation{{IDsUnreadable: true}}},
 		{name: "a line the parser cannot read with no substitution is not a close", command: `echo "unterminated`, want: nil},
+		// Each opening that may hold a substitution makes an unreadable line an
+		// unknown close on its own, so each is pinned alone.
+		{name: "an unclosed backquote is an unknown close", command: "echo `bd close gt-arno", want: []bdCloseInvocation{{IDsUnreadable: true}}},
+		{name: "an unclosed process input is an unknown close", command: "cat <(bd close gt-arno", want: []bdCloseInvocation{{IDsUnreadable: true}}},
+		{name: "an unclosed process output is an unknown close", command: "tee >(bd close gt-arno", want: []bdCloseInvocation{{IDsUnreadable: true}}},
+		{name: "an unreadable line that holds only a variable is not a close", command: `echo "a $b`, want: nil},
+		// A quoted heredoc body is literal to the parser, so a close in it is
+		// data even with an unterminated quote in the body. The same body unquoted
+		// is judged (TestParseBdCloseInvocationsBlockPathSubstitutions).
+		{name: "a close in a quoted heredoc body with an unterminated quote is data", command: "cat <<'EOF'\n$(bd close gt-arno) \"unterminated\nEOF", want: nil},
 		{
 			// A variable id is unreadable, so it cannot match a branch and
 			// cannot be judged. It is still reported as an invocation, so
@@ -610,6 +620,48 @@ func TestBdCloseInvariantBlockPath_NewForms(t *testing.T) {
 			t.Errorf("a branch cut for no bead has nothing to judge, but %q was refused: %s", id, refusal)
 		}
 	})
+}
+
+// TestParseBdCloseInvocationsBlockPathSubstitutions drives the decision the
+// guard turns into exit 2 (firstBdCloseRefusal) for the substitution and
+// heredoc shapes the parse-level rows pin: parsing them is not enough if the
+// refusal never sees them. An unreadable line is the branch's own close only
+// when it may hold a substitution, so each opening alone makes the close the
+// bead; a quoted heredoc body is literal data, and the same body unquoted is
+// judged.
+func TestParseBdCloseInvocationsBlockPathSubstitutions(t *testing.T) {
+	t.Parallel()
+	scope := bdCloseInvariantScope{
+		branch:  "polecat/malachite/gt-arno+muck73gu",
+		target:  "origin/main",
+		counter: fakeCloseTimeCommitCounter{count: 3},
+	}
+	tests := []struct {
+		name, command string
+		wantID        string // the id the guard refuses; "" when the close passes
+	}{
+		{"unclosed backquote holding a close", "echo `bd close gt-arno", "gt-arno"},
+		{"unclosed process input holding a close", "cat <(bd close gt-arno", "gt-arno"},
+		{"unclosed process output holding a close", "tee >(bd close gt-arno", "gt-arno"},
+		{"an unclosed line holding no substitution passes", `echo "a $b`, ""},
+		{"a close in an unquoted heredoc body with an unterminated quote", "cat <<EOF\n$(bd close gt-arno) \"unterminated\nEOF", "gt-arno"},
+		{"the same heredoc body quoted is data", "cat <<'EOF'\n$(bd close gt-arno) \"unterminated\nEOF", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			id, refusal := firstBdCloseRefusal(scope, parseBdCloseInvocations(tt.command), "")
+			if tt.wantID == "" {
+				if refusal != "" {
+					t.Errorf("%q refused %q (%s), want it allowed", tt.command, id, refusal)
+				}
+				return
+			}
+			if id != tt.wantID || refusal == "" {
+				t.Errorf("%q refused (%q, %q), want %s refused", tt.command, id, refusal, tt.wantID)
+			}
+		})
+	}
 }
 
 // TestBranchBeadID: the bead a polecat branch was cut for, and nothing for any
@@ -1117,5 +1169,32 @@ func TestBdClosePrefixedDashedName(t *testing.T) {
 		if got := bdClosePrefixedDashedName(tt.tok); got != tt.want {
 			t.Errorf("bdClosePrefixedDashedName(%q) = %v, want %v", tt.tok, got, tt.want)
 		}
+	}
+}
+
+// TestMayHoldSubstitution pins the four openings the fail-closed test reads.
+// An unreadable command that holds any one of them may hold a substitution the
+// guards must judge; one that holds none has nothing to judge.
+func TestMayHoldSubstitution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{name: "a backquote", command: "echo `date`", want: true},
+		{name: "a dollar-paren", command: "echo $(date)", want: true},
+		{name: "a process input", command: "diff <(ls a) b", want: true},
+		{name: "a process output", command: "tee >(cat)", want: true},
+		{name: "a variable opens no substitution", command: `echo "a $b"`, want: false},
+		{name: "a redirect and a compare open no substitution", command: "cat a < b > c", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mayHoldSubstitution(tt.command); got != tt.want {
+				t.Errorf("mayHoldSubstitution(%q) = %t, want %t", tt.command, got, tt.want)
+			}
+		})
 	}
 }
