@@ -597,7 +597,7 @@ func TestDefaultRigAgentRegistryPath(t *testing.T) {
 		rigPath      string
 		expectedPath string
 	}{
-		{"/Users/alice/gt/myproject", "/Users/alice/gt/myproject/settings/agents.json"},
+		{"/srv/town/myproject", "/srv/town/myproject/settings/agents.json"},
 		{"/tmp/my-rig", "/tmp/my-rig/settings/agents.json"},
 		{"relative/path", "relative/path/settings/agents.json"},
 	}

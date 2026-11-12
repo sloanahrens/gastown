@@ -20,7 +20,7 @@ func TestParseRefusesInvalidManifests(t *testing.T) {
 		{"malformed YAML", "entries: [unclosed\n", "reading the town-state manifest"},
 		{"unknown owner", "entries:\n  - path: logs\n    owner: root\n    why: who is root\n", `unknown owner "root"`},
 		{"empty path", "entries:\n  - path: \"\"\n    owner: daemon\n    why: no path\n", "has an empty path"},
-		{"absolute path", "entries:\n  - path: /Users/sloan/gt/settings\n    owner: daemon\n    why: absolute\n", "relative to the town root"},
+		{"absolute path", "entries:\n  - path: /srv/town/settings\n    owner: daemon\n    why: absolute\n", "relative to the town root"},
 		{"empty why", "entries:\n  - path: logs\n    owner: daemon\n    why: \"\"\n", "why is empty"},
 		{"rollback on a session row", "entries:\n  - path: gastown/crew\n    owner: session\n    why: a tree\n    rollback: true\n", "rollback: true needs a daemon owner"},
 		{"private on a shared row", "entries:\n  - path: settings\n    owner: shared\n    why: edited\n    private: true\n", "private: true needs a daemon owner"},

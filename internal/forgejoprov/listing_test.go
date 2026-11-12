@@ -46,7 +46,7 @@ func TestListRepoSecretNamesReturnsNamesOnly(t *testing.T) {
 func TestListRepoSecretNamesRefusesAPathPart(t *testing.T) {
 	t.Parallel()
 	cases := map[string][2]string{
-		"owner holds a slash": {"sloan/x", secretRepoName},
+		"owner holds a slash": {"someone/x", secretRepoName},
 		"repo holds a slash":  {secretOwner, "gastown/x"},
 		"owner is empty":      {"", secretRepoName},
 		"repo is a traversal": {secretOwner, ".."},
