@@ -579,8 +579,9 @@ tier-check:
 # drift guard and the shell tests. Judged by exit code alone, like the gate. A
 # package the branch deleted is not tested: there is nothing to run.
 #
-# It then runs the tree-wide guard tests the branch's changed paths trigger,
-# under -run so the whole suite of the package hosting one stays out of it:
+# It then runs the tree-wide guard tests the branch's changed paths trigger and
+# the guards that always run (gt-t4rchq), under -run so the whole suite of the
+# package hosting one stays out of it:
 # internal/cmd and internal/polecat take minutes each, the guard test inside
 # them a second. Otherwise a branch that breaks a guard learns it from the
 # landing gate minutes later, which is what gt-ydzwb exists to stop.

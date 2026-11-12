@@ -4,8 +4,9 @@
 // own commits, never by what landed on the base after it branched.
 //
 // -guards prints instead the arguments for a second `go test` run over the
-// tree-wide guard tests the branch's changed paths trigger (gt-ydzwb),
-// "-run <union of test names> ./pkg ...", and nothing when it triggers none.
+// tree-wide guard tests the branch's changed paths trigger and the guards that
+// always run (gt-ydzwb, gt-t4rchq), "-run <union of test names> ./pkg ...",
+// and nothing for an empty diff.
 // The guard tests run under -run so presubmit does not pay for the whole
 // suite of the package that hosts one: internal/cmd and internal/polecat take
 // minutes each, and the guard test inside them takes a second.
