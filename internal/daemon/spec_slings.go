@@ -77,7 +77,19 @@ type specSlings struct {
 	flights map[string]specSlingFlight
 	queue   []specSlingFlight // enqueued and waiting for a slot, oldest first
 	running map[string]bool   // beads a chain claimed and has not ended
+	// stopped is set by the SIGTERM drain (stop): from then on no sling is
+	// queued or claimed, so the set only empties.
+	stopped bool
+	// idle are the channels a drain waits on, each closed once the set is empty.
+	idle []chan struct{}
 }
+
+// errSpecSlingHeld is why enqueue refuses a bead that already has a sling in the
+// set; errSpecSlingsStopped is why it refuses every sling once the drain stops.
+var (
+	errSpecSlingHeld     = errors.New("one is already running for it")
+	errSpecSlingsStopped = errors.New("the daemon is shutting down; the bead stays ready for the next daemon")
+)
 
 // begin adds f to the set unless its bead already has a sling running, and
 // reports whether it was added.
@@ -94,20 +106,48 @@ func (s *specSlings) begin(f specSlingFlight) bool {
 	return true
 }
 
-// enqueue adds f to the set and queues it for a slot; false when the bead
-// already has a sling in the set.
-func (s *specSlings) enqueue(f specSlingFlight) bool {
+// enqueue adds f to the set and queues it for a slot. It refuses a bead that
+// already has a sling in the set, and every sling once the set is stopped. The
+// check and the add share one lock, so a drain's stop never misses a sling that
+// was added before it.
+func (s *specSlings) enqueue(f specSlingFlight) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.stopped {
+		return errSpecSlingsStopped
+	}
 	if _, held := s.flights[f.Bead]; held {
-		return false
+		return errSpecSlingHeld
 	}
 	if s.flights == nil {
 		s.flights = map[string]specSlingFlight{}
 	}
 	s.flights[f.Bead] = f
 	s.queue = append(s.queue, f)
-	return true
+	return nil
+}
+
+// stop is the SIGTERM drain's refusal of new slings. Under the lock it drops the
+// slings still waiting for a slot, so no chain claims one after it, and it
+// refuses every later enqueue. It returns the dropped slings, for the drain to
+// report back as not started, and a channel closed once no sling is in flight:
+// at once when none is, else when the last one ends (shutdown_drain.go).
+func (s *specSlings) stop() ([]specSlingFlight, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = true
+	dropped := append([]specSlingFlight(nil), s.queue...)
+	for _, f := range dropped {
+		delete(s.flights, f.Bead)
+	}
+	s.queue = nil
+	idle := make(chan struct{})
+	if len(s.flights) == 0 {
+		close(idle)
+		return dropped, idle
+	}
+	s.idle = append(s.idle, idle)
+	return dropped, idle
 }
 
 // claim takes the oldest queued sling when fewer than limit slings run, and
@@ -140,7 +180,20 @@ func (s *specSlings) dropQueued() []specSlingFlight {
 		delete(s.flights, f.Bead)
 	}
 	s.queue = nil
+	s.wakeIdleLocked()
 	return out
+}
+
+// wakeIdleLocked closes the drain's channels once no sling is in flight. The
+// caller holds mu.
+func (s *specSlings) wakeIdleLocked() {
+	if len(s.flights) > 0 {
+		return
+	}
+	for _, idle := range s.idle {
+		close(idle)
+	}
+	s.idle = nil
 }
 
 // queuedBeads names the slings waiting for a slot, in the order they will run.
@@ -160,6 +213,7 @@ func (s *specSlings) end(bead string) {
 	defer s.mu.Unlock()
 	delete(s.flights, bead)
 	delete(s.running, bead)
+	s.wakeIdleLocked()
 }
 
 // list is the running slings in bead order.
@@ -282,8 +336,8 @@ func (d *Daemon) startSpecSlings(jobs []json.RawMessage, tickSeq uint64) {
 			continue
 		}
 		f.job = raw
-		if !d.specSlings.enqueue(f) {
-			reason := "one is already running for it"
+		if err := d.specSlings.enqueue(f); err != nil {
+			reason := err.Error()
 			d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
 			d.feedSpecSlingOutcome(f, specSlingNotStarted, specSlingNotStartedEntry(f.Bead, reason))
 			continue
@@ -337,7 +391,13 @@ func (d *Daemon) runSpecSlingChain(f specSlingFlight, limit int) {
 // job it handed over as dispatched (gt-pk2q8), and a shutdown ran none of them,
 // so their beads stay ready for the next daemon's tick (gt-16pqa).
 func (d *Daemon) releaseQueuedSpecSlings() {
-	for _, f := range d.specSlings.dropQueued() {
+	d.reportNotStartedSlings(d.specSlings.dropQueued())
+}
+
+// reportNotStartedSlings feeds each sling that never ran back to its tick as not
+// started, because the daemon shut down before it had a slot.
+func (d *Daemon) reportNotStartedSlings(slings []specSlingFlight) {
+	for _, f := range slings {
 		reason := "the daemon shut down before the sling had a slot"
 		d.logger.Printf("spec_dispatch: %s: sling not started: %s", f.Bead, reason)
 		d.feedSpecSlingOutcome(f, specSlingNotStarted, specSlingNotStartedEntry(f.Bead, reason))

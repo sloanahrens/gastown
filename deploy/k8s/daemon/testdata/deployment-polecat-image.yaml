@@ -30,6 +30,33 @@ spec:
           hostnames:
             - host.docker.internal
       terminationGracePeriodSeconds: 185
+      initContainers:
+        - name: registry-proxy
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          args:
+            - TCP-LISTEN:5001,fork,reuseaddr,bind=127.0.0.1
+            - TCP:192.168.5.2:5001
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 10m
+              memory: 64Mi
+          restartPolicy: Always
+        - name: gateway-proxy
+          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+          args:
+            - TCP-LISTEN:28443,fork,reuseaddr,bind=127.0.0.1
+            - TCP:192.168.5.2:28443
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 10m
+              memory: 64Mi
+          restartPolicy: Always
       containers:
         - name: daemon
           image: registry.example.com/gt/gastown-daemon@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -170,30 +197,6 @@ spec:
             periodSeconds: 60
             timeoutSeconds: 15
             failureThreshold: 5
-        - name: registry-proxy
-          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
-          args:
-            - TCP-LISTEN:5001,fork,reuseaddr,bind=127.0.0.1
-            - TCP:192.168.5.2:5001
-          resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              cpu: 10m
-              memory: 64Mi
-        - name: gateway-proxy
-          image: registry.example.com/gt/socat@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
-          args:
-            - TCP-LISTEN:28443,fork,reuseaddr,bind=127.0.0.1
-            - TCP:192.168.5.2:28443
-          resources:
-            requests:
-              cpu: 10m
-              memory: 64Mi
-            limits:
-              cpu: 10m
-              memory: 64Mi
       volumes:
         - name: town-state
           persistentVolumeClaim:

@@ -970,14 +970,14 @@ func TestProxySidecars(t *testing.T) {
 
 	pod := mustBuild(t, goldenValues(t)).Deployment.Spec.Template.Spec
 	host := goldenValues(t).HostGatewayIP
-	if len(pod.Containers) != 3 {
-		t.Fatalf("the pod carries %d containers, want the daemon and its two relays", len(pod.Containers))
+	if len(pod.Containers) != 1 || pod.Containers[0].Name != Name {
+		t.Fatalf("the pod carries %d regular containers, want the daemon alone", len(pod.Containers))
 	}
-	if got := pod.Containers[0].Name; got != Name {
-		t.Errorf("the first container is %q, want the daemon %q", got, Name)
+	if len(pod.InitContainers) != 2 {
+		t.Fatalf("the pod carries %d native sidecars, want its two relays", len(pod.InitContainers))
 	}
-	byName := make(map[string]Container, len(pod.Containers))
-	for _, c := range pod.Containers {
+	byName := make(map[string]Container, len(pod.InitContainers))
+	for _, c := range pod.InitContainers {
 		byName[c.Name] = c
 	}
 	for _, tc := range []struct {
@@ -989,7 +989,10 @@ func TestProxySidecars(t *testing.T) {
 	} {
 		c, ok := byName[tc.name]
 		if !ok {
-			t.Fatalf("the pod carries no %s container", tc.name)
+			t.Fatalf("the pod carries no %s native sidecar", tc.name)
+		}
+		if c.RestartPolicy != "Always" {
+			t.Errorf("%s restartPolicy = %q, want Always: a native sidecar outlives the daemon's drain", tc.name, c.RestartPolicy)
 		}
 		if c.Image != testProxyImage {
 			t.Errorf("%s image = %q, want the proxy digest %q", tc.name, c.Image, testProxyImage)
@@ -1054,6 +1057,45 @@ func TestProxySidecars(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Values.HostGatewayIP") {
 		t.Errorf("Build refused with %q, want Values.HostGatewayIP named", err)
+	}
+}
+
+// TestProxySidecarsStopAfterTheDaemon holds the rendered pod's shutdown order in
+// the YAML the cluster reads. The kubelet stops the regular containers at SIGTERM
+// and a native sidecar (an init container with restartPolicy Always) only after
+// they have exited, so the daemon is the only regular container and the two
+// relays are the native sidecars. The daemon's SIGTERM drain then reaches the
+// gateway while it runs (gt-d4jrdc).
+func TestProxySidecarsStopAfterTheDaemon(t *testing.T) {
+	t.Parallel()
+	type container struct {
+		Name          string `yaml:"name"`
+		RestartPolicy string `yaml:"restartPolicy"`
+	}
+	var doc struct {
+		Spec struct {
+			Template struct {
+				Spec struct {
+					InitContainers []container `yaml:"initContainers"`
+					Containers     []container `yaml:"containers"`
+				} `yaml:"spec"`
+			} `yaml:"template"`
+		} `yaml:"spec"`
+	}
+	if err := yaml.Unmarshal(document(t, mustBuild(t, goldenValues(t)).Deployment), &doc); err != nil {
+		t.Fatalf("the rendered Deployment does not parse: %v", err)
+	}
+	regular := doc.Spec.Template.Spec.Containers
+	if len(regular) != 1 || regular[0].Name != Name {
+		t.Errorf("the rendered pod's regular containers = %+v, want the daemon alone: a relay there stops with the SIGTERM", regular)
+	}
+	sidecars := doc.Spec.Template.Spec.InitContainers
+	want := []container{
+		{Name: RegistryProxyContainer, RestartPolicy: "Always"},
+		{Name: GatewayProxyContainer, RestartPolicy: "Always"},
+	}
+	if !slices.Equal(sidecars, want) {
+		t.Errorf("the rendered pod's native sidecars = %+v, want %+v", sidecars, want)
 	}
 }
 

@@ -974,7 +974,8 @@ func deployment(v Values, namespace string) (Deployment, error) {
 	pod := PodSpec{
 		ServiceAccountName:            ServiceAccountName,
 		TerminationGracePeriodSeconds: &grace,
-		Containers:                    append([]Container{daemonContainer(v)}, proxyContainers(v)...),
+		InitContainers:                proxyContainers(v),
+		Containers:                    []Container{daemonContainer(v)},
 		Volumes:                       vols,
 	}
 	pod.HostAliases = hostAliases(v)
@@ -1015,6 +1016,13 @@ func deployment(v Values, namespace string) (Deployment, error) {
 // listens on 127.0.0.1 where the daemon reaches it and forwards to the host
 // gateway. A rehearsal reaches neither the live gateway nor the registry, so it
 // renders no relay even when Values.ProxyImage is set.
+//
+// The relays are native sidecars (init containers with restartPolicy Always), not
+// regular containers: the kubelet sends a regular container the daemon's SIGTERM
+// at once, so the gateway can go away while the daemon still drains its slings
+// (gt-d4jrdc). The kubelet stops a native sidecar only after every regular
+// container has exited, so the relays outlive the drain. The control cluster runs
+// Kubernetes 1.35, where the form is GA.
 func proxyContainers(v Values) []Container {
 	if v.Rehearsal || v.ProxyImage == "" {
 		return nil
@@ -1026,7 +1034,8 @@ func proxyContainers(v Values) []Container {
 }
 
 // proxyContainer is one relay: its socat addresses, the same fixed share every
-// relay carries, and no volume or environment of its own.
+// relay carries, and no volume or environment of its own. It is a native sidecar,
+// restartPolicy Always, so the kubelet stops it after the daemon container.
 func proxyContainer(name, image, host string, port int) Container {
 	return Container{
 		Name:  name,
@@ -1039,6 +1048,7 @@ func proxyContainer(name, image, host string, port int) Container {
 			Requests: proxyResourceList(),
 			Limits:   proxyResourceList(),
 		},
+		RestartPolicy: "Always",
 	}
 }
 
@@ -2329,8 +2339,11 @@ type PodSpec struct {
 	SecurityContext               *PodSecurityContext `yaml:"securityContext,omitempty"`
 	HostAliases                   []HostAlias         `yaml:"hostAliases,omitempty"`
 	TerminationGracePeriodSeconds *int64              `yaml:"terminationGracePeriodSeconds,omitempty"`
-	Containers                    []Container         `yaml:"containers"`
-	Volumes                       []Volume            `yaml:"volumes,omitempty"`
+	// InitContainers carries the native sidecars: a container with restartPolicy
+	// Always, which the kubelet stops only after every regular container has exited.
+	InitContainers []Container `yaml:"initContainers,omitempty"`
+	Containers     []Container `yaml:"containers"`
+	Volumes        []Volume    `yaml:"volumes,omitempty"`
 }
 
 // PodSecurityContext is the identity a pod runs as when the builder pins it. The
@@ -2365,6 +2378,9 @@ type Container struct {
 	VolumeMounts   []VolumeMount       `yaml:"volumeMounts,omitempty"`
 	ReadinessProbe *Probe              `yaml:"readinessProbe,omitempty"`
 	LivenessProbe  *Probe              `yaml:"livenessProbe,omitempty"`
+	// RestartPolicy is Always on a native sidecar (an init container), and empty on
+	// every other container.
+	RestartPolicy string `yaml:"restartPolicy,omitempty"`
 }
 
 // EnvVar is one environment entry.
