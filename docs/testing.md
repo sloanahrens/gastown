@@ -62,7 +62,6 @@ A package whose unit-tier test files call a container entry point is Docker-back
 | unit | in-process only: fakes, fake clock, `t.TempDir`, `git` (not in a package listed in `gitfree.txt`) | none | `TestX` | `make gate` |
 | integration | real tmux, Docker, bd, Dolt, the gt binary, real processes | `//go:build integration` | `TestIntegrationX` in a converted package (`integration-name` fails any other `Test…` name except `TestMain`; packages in `unconverted.txt` are exempt until converted). The tier run has no name filter: the build tag alone selects it | `make test-integration` |
 
-
 ### The time budget
 
 `make tier-check` runs the budget runner over the unit tier, and the runner fails a converted package whose tests use more than 10 s of **user CPU**. It counts the test binary and every process the binary waited for, such as `git`, `bd` or a re-exec'd helper. The runner runs each test binary through itself (`go test -exec`), waits for the binary, and reads the CPU time that `wait4` reports.
