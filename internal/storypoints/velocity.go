@@ -137,13 +137,9 @@ func classesOf(agent string) []string {
 	return []string{AllClass}
 }
 
-// hourStart truncates t to the start of the local hour that contains it. The
-// hour is the wall-clock hour in the UTC offset in force at t, so a time in the
-// second occurrence of a repeated hour stays in that occurrence. localHour in
-// internal/cmd/dashboard_trend.go rebuilds the hour with time.Date, which picks
-// the first occurrence instead. hourStart steps back from t a minute at a time,
-// and stops at the first wall-clock :00 or at the first minute of the offset,
-// which comes after :00 when the change falls at :30 (Australia/Lord_Howe).
+// hourStart returns the start of t's wall-clock hour in the UTC offset in
+// force at t, or that offset's change when it falls mid-hour, so a repeated
+// fall-back hour keeps the occurrence t is in (gt-0kzzuz).
 func hourStart(t time.Time, loc *time.Location) time.Time {
 	t = t.In(loc)
 	_, off := t.Zone()
