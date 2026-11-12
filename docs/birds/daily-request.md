@@ -11,7 +11,7 @@ Write the report in these eight sections, in this order:
 7. Filed — beads filed, closed, rejected or reassigned since your last report.
 8. Next — what you will do next, in the order you will do it.
 
-Write the page as HTML to daily.html, build the sidecar with jq, and pipe both to the publisher, which writes them under <RUNTIME_DIR>/reports/<NAME>/, the daemon pod's runtime directory:
+Write the page as HTML to daily.html, build the sidecar with jq, and pipe both to the publisher, which writes them under <RUNTIME_DIR>/reports/<NAME>/:
 
   jq -n --arg bird "<NAME>" --arg written_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg title "<the report's headline>" --arg summary "<the report in three sentences>" \
     '{bird:$bird,written_at:$written_at,title:$title,summary:$summary,needs_operator:false,decisions:0}' > sidecar.json
