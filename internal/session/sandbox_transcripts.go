@@ -117,47 +117,54 @@ func readSkippedByCap(copyDir string) (int, error) {
 }
 
 // copySeatTranscripts copies the transcripts rec's seat wrote into the seat's
-// copy directory, before the sandbox is deleted, and prunes the copies past their
-// keep first. It is best effort: a failed copy warns once, naming the sandbox, and
-// the delete goes on. A record that names no plain rig and polecat has no seat to
-// copy for.
+// copy directory before the sandbox is deleted. It is best effort: a failed copy
+// warns once, naming the sandbox, and the delete goes on. A record that names no
+// plain rig and polecat has no seat to copy for.
 func (b *openshellBackend) copySeatTranscripts(rec SandboxRecord) {
+	if err := b.saveSeatTranscripts(rec); err != nil {
+		b.warn("%v", err)
+	}
+}
+
+// saveSeatTranscripts is the copy copySeatTranscripts makes, with the failure
+// that stopped it returned instead of warned. A caller that must not delete a
+// sandbox whose transcripts it could not save fails on that error; a failure to
+// prune the copies past their keep is still only warned, since it loses no
+// transcript of this seat.
+func (b *openshellBackend) saveSeatTranscripts(rec SandboxRecord) error {
 	if !plainPathName(rec.Rig) || !plainPathName(rec.Polecat) {
-		return
+		return nil
 	}
 	dest := SandboxTranscriptCopyDir(b.townRoot, rec.Rig, rec.Polecat)
 	if err := pruneTranscriptCopies(filepath.Dir(filepath.Dir(dest)), b.clock()); err != nil {
 		b.warn("sandbox %s: pruning old transcript copies failed: %v", rec.Session, err)
 	}
 	if err := os.RemoveAll(dest); err != nil {
-		b.warn("sandbox %s: clearing its transcript copy failed, so it is not copied: %v", rec.Session, err)
-		return
+		return fmt.Errorf("sandbox %s: clearing its transcript copy failed, so it is not copied: %w", rec.Session, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sandboxDownloadTimeout)
 	defer cancel()
 	listed, err := b.listSeatTranscripts(ctx, rec)
 	if isSandboxNotFound(err) {
-		// A sandbox that is already gone has no transcripts to copy: its delete goes on.
-		return
+		// A sandbox that is already gone has no transcripts to copy.
+		return nil
 	}
 	if err != nil {
-		b.warn("sandbox %s: copying its transcripts out failed, so its seat end cannot read them: %v", rec.Session, err)
-		return
+		return fmt.Errorf("sandbox %s: copying its transcripts out failed, so its seat end cannot read them: %w", rec.Session, err)
 	}
 	if err := os.MkdirAll(dest, 0o755); err != nil {
-		b.warn("sandbox %s: creating its transcript copy failed, so it is not copied: %v", rec.Session, err)
-		return
+		return fmt.Errorf("sandbox %s: creating its transcript copy failed, so it is not copied: %w", rec.Session, err)
 	}
 	skipped, err := b.downloadSeatTranscripts(ctx, rec, listed, dest)
 	if err != nil {
 		// A partial copy would read as the seat's whole transcript set.
 		err = errors.Join(err, os.RemoveAll(dest))
-		b.warn("sandbox %s: copying its transcripts out failed, so its seat end cannot read them: %v", rec.Session, err)
-		return
+		return fmt.Errorf("sandbox %s: copying its transcripts out failed, so its seat end cannot read them: %w", rec.Session, err)
 	}
 	if skipped > 0 {
 		b.warn("sandbox %s: its transcript copy stopped at the %d-byte cap, so %d older files were left out", rec.Session, b.capLimit(), skipped)
 	}
+	return nil
 }
 
 // capLimit is the most a seat's transcript copy keeps, in bytes.

@@ -952,7 +952,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 		}
 	}
 
-	if err := spec.Trace.Phase("create", func() error { return b.cli.Create(ctx, create) }); err != nil {
+	if err := spec.Trace.Phase("create", func() error { return b.createOrReplaceEndedSeat(ctx, create) }); err != nil {
 		return nil, fmt.Errorf("creating sandbox %s: %w", spec.Session, err)
 	}
 
@@ -963,6 +963,64 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 
 	b.tmux = tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(b.profile.Gateway, spec.Session)).Routed()
 	return &Prepared{WorkDir: workDir, Env: b.agentEnv(spec, workDir, tracker), OmitSecretPrefix: true}, nil
+}
+
+// createOrReplaceEndedSeat creates the sandbox, and a create the gateway
+// refuses because the seat name is held by a sandbox whose seat has ended
+// deletes that sandbox and creates once more (gt-vgm971). A finished seat's
+// sandbox stays up, with its ended marker set, for the profile's hold until the
+// daemon's record patrol deletes it, and a rework sling of the same seat inside
+// that window must not fail. The gateway answers whether the name is taken: the
+// create error's text is not read for it. Nothing is deleted, and the create's
+// own error stands, when no sandbox holds the name or the one that does is live.
+func (b *openshellBackend) createOrReplaceEndedSeat(ctx context.Context, create sandbox.CreateSpec) error {
+	createErr := b.cli.Create(ctx, create)
+	if createErr == nil {
+		return nil
+	}
+	exists, err := b.cli.Exists(ctx, create.Name)
+	if err != nil {
+		return fmt.Errorf("%w; asking the gateway whether an ended sandbox holds the name: %v", createErr, err)
+	}
+	if !exists {
+		return createErr
+	}
+	rec, ok, err := ReadSandboxRecord(b.townRoot, create.Name)
+	if err != nil {
+		return fmt.Errorf("%w; reading the record of the sandbox holding the name: %v", createErr, err)
+	}
+	if !ok {
+		return fmt.Errorf("%w; the gateway has a sandbox of that name but no record of it, so its seat is unknown and its sandbox is left alone", createErr)
+	}
+	// The record's gateway is the one the patrol deletes through. A record that
+	// names another gateway describes a sandbox elsewhere, and deleting through
+	// it could delete a different sandbox that shares the name.
+	if rec.Gateway != b.profile.Gateway {
+		return fmt.Errorf("%w; the record of the sandbox holding the name names gateway %q, not this spawn's %q, so it is left alone", createErr, rec.Gateway, b.profile.Gateway)
+	}
+	ended, err := sandboxEndedMarkerPresentWith(b.cli, create.Name)
+	if err != nil {
+		return fmt.Errorf("%w; asking the sandbox holding the name for its ended marker: %v", createErr, err)
+	}
+	if !ended {
+		return createErr
+	}
+	// The old seat's transcripts are saved before the delete, and a copy or a
+	// delete that fails stops the spawn: the sandbox is left for the patrol
+	// rather than deleted with the transcript it held unrecovered.
+	if err := b.saveSeatTranscripts(rec); err != nil {
+		return fmt.Errorf("%w; %v", createErr, err)
+	}
+	if err := b.deleteSandbox(create.Name); err != nil {
+		return fmt.Errorf("%w; deleting the ended sandbox holding the name: %v", createErr, err)
+	}
+	// The seat token is not ended: Prepare's trackerFor already ensured this
+	// seat's token for the new sandbox, and ending it here would revoke the
+	// token the new sandbox is about to use (gt-p85pw.84).
+	if err := CleanupSandboxWithRecord(nil, b.townRoot, create.Name, rec); err != nil {
+		return fmt.Errorf("%w; removing the record of the ended sandbox holding the name: %v", createErr, err)
+	}
+	return b.cli.Create(ctx, create)
 }
 
 // stagedArchives are the host files Prepare uploads. workspace is empty when

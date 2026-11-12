@@ -1528,18 +1528,25 @@ func TestOpenShellCheckSandboxGTRefusesWhenTheSourceCheckoutIsUnknown(t *testing
 	}
 }
 
-func TestOpenShellPrepareCreateFailureMakesNoFurtherCalls(t *testing.T) {
+// A create the gateway refuses asks whether the name is held, and a name no
+// sandbox holds leaves the create's own failure standing: nothing is deleted and
+// nothing further runs (gt-vgm971).
+func TestOpenShellPrepareCreateFailureWithTheNameFreeMakesNoFurtherCalls(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	fake := &sandbox.Fake{Err: map[string]error{"create": errors.New("gateway unreachable")}}
+	fake := &sandbox.Fake{
+		Err:    map[string]error{"create": errors.New("gateway unreachable")},
+		Stderr: map[string]string{"get": `Error:   × code: 'Some requested entity was not found', message: "sandbox not found"`},
+	}
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 
 	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
 	if err == nil || !strings.Contains(err.Error(), "creating sandbox") {
 		t.Fatalf("err = %v, want creating sandbox", err)
 	}
-	if len(fake.Calls()) != 1 || fake.Calls()[0][2] != "create" {
-		t.Fatalf("calls = %q, want only the create", fake.Calls())
+	calls := fake.Calls()
+	if len(calls) != 2 || calls[0][2] != "create" || calls[1][2] != "get" {
+		t.Fatalf("calls = %q, want the create and the question whether the name is held", calls)
 	}
 	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
 		t.Fatal("a failed Prepare left a sandbox record behind")
