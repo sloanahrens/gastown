@@ -80,8 +80,8 @@ const paneTreeJS = `(function () {
 var clockText = regexp.MustCompile(`\d{2}:\d{2}`)
 
 // TestVelocityAbsentPaneDrawsWhatItDrew: with no velocity in the reading the
-// pane draws the same tree it drew before the velocity figures and points row
-// existed. The golden was taken from the page before the feed was drawn.
+// pane draws the tree pinned in the golden file. The golden is a snapshot of
+// that tree, and rewriting it with the flag accepts whatever the page draws.
 func TestVelocityAbsentPaneDrawsWhatItDrew(t *testing.T) {
 	t.Parallel()
 
