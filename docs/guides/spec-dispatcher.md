@@ -31,7 +31,7 @@ lessons the lint cannot check.
 | every `## ` section in the template, present and non-empty (Goal, Constraints, Out of scope, Gate, Size) | `## <section>` |
 | 1-6 acceptance items (3-6 preferred) | `acceptance` |
 | every repo file the `## Files` section names, or without one the Constraints names, as a file it changes exists on the target branch | `## Files`, or `## Constraints` without one |
-| no Goal, Constraints, Gate or acceptance text names a path inside another rig's directory (`~/gt/<rig>/`, `/Users/<user>/gt/<rig>/`, `/sandbox/gt/<rig>/`, `<rig>/mayor/rig`) | `## Goal`, `## Constraints`, `## Gate` or `acceptance`, naming the rig and the path |
+| no Goal, Constraints, Gate or acceptance text names a path inside another rig's directory (`~/gt/<rig>/`, `/Users/<user>/gt/<rig>/`, `/sandbox/gt/<rig>/`) | `## Goal`, `## Constraints`, `## Gate` or `acceptance`, naming the rig and the path |
 | Size says one worker, one MR | `size` |
 
 A non-work bead is refused before any shape is read: no sections are required

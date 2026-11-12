@@ -608,15 +608,14 @@ func rigAlternation(rigs []string) string {
 // rather than passed for want of the list. A dotted name (".beads") is not a rig.
 const genericRigName = `[A-Za-z][A-Za-z0-9_-]*`
 
-// otherRigPathPatterns are the two forms a path into a rig's directory takes in
+// otherRigPathPatterns is the form a path into a rig's directory takes in
 // prose: a checkout under the town (~/gt/<rig>/, /Users/<user>/gt/<rig>/,
-// /sandbox/gt/<rig>/) and the rig's mayor checkout (<rig>/mayor/rig). Group 1
-// of each is the path and group 2 the rig. The mayor form needs a boundary
-// before the rig name, so "xom/mayor/rig" is not "om".
+// /sandbox/gt/<rig>/). Group 1 is the path and group 2 the rig. The rig's
+// retired per-rig clone is not a form of its own: a path to it under the town
+// root already matches, and the retirement guard allows no new name for it.
 func otherRigPathPatterns(rigAlt string) []*regexp.Regexp {
 	return []*regexp.Regexp{
 		regexp.MustCompile("((?:~/gt|/Users/[^/\\s]+/gt|/sandbox/gt)/(" + rigAlt + ")/[^\\s`'\"<>()\\[\\],;]*)"),
-		regexp.MustCompile("(?:^|[^\\w./-])((" + rigAlt + ")/mayor/rig(?:/[^\\s`'\"<>()\\[\\],;]*|\\b))"),
 	}
 }
 

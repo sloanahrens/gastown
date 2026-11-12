@@ -759,7 +759,6 @@ func TestOtherRigRefusesPathInAnotherRig(t *testing.T) {
 		{"town checkout", "~/gt/om/internal/cli/cli.go"},
 		{"sandbox checkout", "/sandbox/gt/om/"},
 		{"macOS checkout", "/Users/alice/gt/om/internal/cli/cli.go"},
-		{"mayor checkout", "om/mayor/rig/internal/cli/cli.go"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -828,7 +827,7 @@ func TestOtherRigIgnoresOutOfScope(t *testing.T) {
 // or the word "command", names no rig: "omega" and "xom" are not "om".
 func TestOtherRigMatchesWholeRigName(t *testing.T) {
 	t.Parallel()
-	s := otherRigSpec("Read the command output in /sandbox/gt/omega/ and xom/mayor/rig, not om/mayor/rigs.", "gastown", "om")
+	s := otherRigSpec("Read the command output in /sandbox/gt/omega/ and ~/gt/omnibus/notes.md, not /sandbox/gt/xom/.", "gastown", "om")
 	if v := LintShape(s, defaultTemplate()); !v.Clean() {
 		t.Fatalf("longer names refused as om: %s", v.Line("gt-good"))
 	}
