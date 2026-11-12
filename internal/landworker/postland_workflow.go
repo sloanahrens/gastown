@@ -12,17 +12,34 @@ import (
 // pushContextSuffix ends every commit status context a workflow posts on a push.
 const pushContextSuffix = " (push)"
 
-// WorkflowsPostContext reports whether one of the workflow files posts the
-// commit-status context on a push to main. files maps each workflow's path to
-// its bytes; when none does, why gives each file's miss so the health field can
-// say what to fix.
-func WorkflowsPostContext(files map[string][]byte, context string) (found bool, why string) {
-	wantName, wantJob, ok := splitPostContext(context)
+// emptyTriggerWhy names an on: trigger with no events: it fires on no push.
+const emptyTriggerWhy = "has no push trigger: the `on:` trigger is empty"
+
+// PostVerdict says how far a rig's workflows post a push-to-main status context.
+// The values rise from weakest to strongest.
+type PostVerdict int
+
+const (
+	// DoesNotPost means no workflow posts the context on a push to main.
+	DoesNotPost PostVerdict = iota
+	// PostsForSomeCommits means a workflow posts the context only for pushes whose
+	// commits touch a paths or paths-ignore filter.
+	PostsForSomeCommits
+	// PostsOnEveryPush means a workflow posts the context on every push to main.
+	PostsOnEveryPush
+)
+
+// WorkflowsPostContext reports whether the workflow files post the commit-status
+// context on a push to main. files maps each workflow's path to its bytes. The
+// verdict is the strongest any file gives. why names that file when one posts;
+// when none does, it gives each file's miss so the health field can say what to fix.
+func WorkflowsPostContext(files map[string][]byte, context string) (verdict PostVerdict, why string) {
+	want, ok := parsePostContext(context)
 	if !ok {
-		return false, fmt.Sprintf("%q is not a status context of the form \"<name> / <job>%s\"", context, pushContextSuffix)
+		return DoesNotPost, fmt.Sprintf("%q is not a status context of the form \"<name> / <job>%s\"", context, pushContextSuffix)
 	}
 	if len(files) == 0 {
-		return false, fmt.Sprintf("no workflow files under .forgejo/workflows/, so none posts %q", context)
+		return DoesNotPost, fmt.Sprintf("no workflow files under .forgejo/workflows/, so none posts %q", context)
 	}
 	paths := make([]string, 0, len(files))
 	for file := range files {
@@ -30,55 +47,59 @@ func WorkflowsPostContext(files map[string][]byte, context string) (found bool, 
 	}
 	sort.Strings(paths)
 
-	var matches, reasons, malformed []string
+	var reasons, malformed []string
 	for _, file := range paths {
-		posts, reason, broken := workflowPostsOnPush(file, files[file], wantName, wantJob)
+		v, reason, broken := workflowPostsOnPush(file, files[file], want)
 		switch {
-		case posts:
-			matches = append(matches, file)
 		case broken:
 			malformed = append(malformed, reason)
-		default:
+		case v == DoesNotPost:
 			reasons = append(reasons, reason)
+		case v > verdict:
+			verdict, why = v, reason
 		}
 	}
-	if len(matches) > 0 {
-		why = fmt.Sprintf("%s posts %q on a push to main", matches[0], context)
+	if verdict != DoesNotPost {
 		for _, m := range malformed {
 			why += "; " + m
 		}
-		return true, why
+		return verdict, why
 	}
 	reasons = append(reasons, malformed...)
-	return false, fmt.Sprintf("no workflow posts %q: %s", context, strings.Join(reasons, "; "))
+	return DoesNotPost, fmt.Sprintf("no workflow posts %q: %s", context, strings.Join(reasons, "; "))
 }
 
-// splitPostContext splits "<name> / <job> (push)" at its last " / ". ok is false
+// postContext is a status context split into the workflow name and job key it is
+// built from.
+type postContext struct {
+	full, name, job string
+}
+
+// parsePostContext splits "<name> / <job> (push)" at its last " / ". ok is false
 // when the context has no push suffix or no separator.
-func splitPostContext(context string) (name, job string, ok bool) {
+func parsePostContext(context string) (postContext, bool) {
 	trimmed, hasSuffix := strings.CutSuffix(context, pushContextSuffix)
 	if !hasSuffix {
-		return "", "", false
+		return postContext{}, false
 	}
 	i := strings.LastIndex(trimmed, " / ")
 	if i < 0 {
-		return "", "", false
+		return postContext{}, false
 	}
-	return trimmed[:i], trimmed[i+len(" / "):], true
+	return postContext{full: context, name: trimmed[:i], job: trimmed[i+len(" / "):]}, true
 }
 
-// workflowPostsOnPush reports whether one workflow file posts the wanted context
-// on a push to main. When it does not, reason says which part failed. broken is
-// set when the file cannot be read as a workflow, such as malformed YAML: that
-// is a miss for this file only.
-func workflowPostsOnPush(file string, data []byte, wantName, wantJob string) (posts bool, reason string, broken bool) {
+// workflowPostsOnPush gives the verdict one workflow file reaches for the context.
+// For DoesNotPost, reason is the file's miss; otherwise it says how the file posts.
+// broken is set when the file is not readable YAML: that is a miss for this file only.
+func workflowPostsOnPush(file string, data []byte, want postContext) (verdict PostVerdict, reason string, broken bool) {
 	var doc struct {
 		Name string               `yaml:"name"`
 		On   yaml.Node            `yaml:"on"`
 		Jobs map[string]yaml.Node `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return false, fmt.Sprintf("%s is not a readable workflow: %v", file, err), true
+		return DoesNotPost, fmt.Sprintf("%s is not a readable workflow: %v", file, err), true
 	}
 	name := strings.TrimSpace(doc.Name)
 	if name == "" {
@@ -86,88 +107,149 @@ func workflowPostsOnPush(file string, data []byte, wantName, wantJob string) (po
 		base := path.Base(file)
 		name = strings.TrimSuffix(base, path.Ext(base))
 	}
-	if name != wantName {
-		return false, fmt.Sprintf("%s is named %q, not %q", file, name, wantName), false
+	if name != want.name {
+		return DoesNotPost, fmt.Sprintf("%s is named %q, not %q", file, name, want.name), false
 	}
-	if _, ok := doc.Jobs[wantJob]; !ok {
-		return false, fmt.Sprintf("%s has no job %q (its jobs are %s)", file, wantJob, quotedKeys(doc.Jobs)), false
+	if _, ok := doc.Jobs[want.job]; !ok {
+		return DoesNotPost, fmt.Sprintf("%s has no job %q (its jobs are %s)", file, want.job, quotedKeys(doc.Jobs)), false
 	}
-	if ok, why := pushTriggerRunsOnMain(&doc.On); !ok {
-		return false, fmt.Sprintf("%s %s", file, why), false
+	v, detail := pushTriggerVerdict(&doc.On)
+	switch v {
+	case DoesNotPost:
+		return DoesNotPost, fmt.Sprintf("%s %s", file, detail), false
+	case PostsForSomeCommits:
+		return v, fmt.Sprintf("%s posts %q only for commits touching the filtered paths (%s)", file, want.full, detail), false
 	}
-	return true, "", false
+	return v, fmt.Sprintf("%s posts %q on every push to main", file, want.full), false
 }
 
-// pushTriggerRunsOnMain reports whether the on: trigger fires on a push to main.
-// why is the reason it does not, phrased to follow the file name.
-func pushTriggerRunsOnMain(on *yaml.Node) (ok bool, why string) {
+// pushTriggerVerdict reads an on: trigger. detail is the paths filter behind a
+// PostsForSomeCommits verdict, and otherwise says why the trigger misses, in words
+// that follow the file name.
+func pushTriggerVerdict(on *yaml.Node) (verdict PostVerdict, detail string) {
 	switch on.Kind {
 	case 0:
-		return false, "has no on: trigger"
+		return DoesNotPost, "has no on: trigger"
 	case yaml.ScalarNode:
-		if on.Value == "push" {
-			return true, ""
+		if isNull(on) {
+			return DoesNotPost, emptyTriggerWhy
 		}
-		return false, fmt.Sprintf("is not triggered by push (on: %s)", quotedList([]string{on.Value}))
+		if on.Value == "push" {
+			return PostsOnEveryPush, ""
+		}
+		return DoesNotPost, fmt.Sprintf("is not triggered by push (on: %s)", quotedList([]string{on.Value}))
 	case yaml.SequenceNode:
+		if len(on.Content) == 0 {
+			return DoesNotPost, emptyTriggerWhy
+		}
 		var events []string
 		for _, item := range on.Content {
 			if item.Kind != yaml.ScalarNode {
 				continue
 			}
 			if item.Value == "push" {
-				return true, ""
+				return PostsOnEveryPush, ""
 			}
 			events = append(events, item.Value)
 		}
-		return false, fmt.Sprintf("is not triggered by push (on: %s)", quotedList(events))
+		return DoesNotPost, fmt.Sprintf("is not triggered by push (on: %s)", quotedList(events))
 	case yaml.MappingNode:
+		if len(on.Content) == 0 {
+			return DoesNotPost, emptyTriggerWhy
+		}
 		var events []string
 		for i := 0; i+1 < len(on.Content); i += 2 {
 			event := on.Content[i].Value
 			if event == "push" {
-				return pushFilterRunsOnMain(on.Content[i+1])
+				return pushFilterVerdict(on.Content[i+1])
 			}
 			events = append(events, event)
 		}
-		return false, fmt.Sprintf("is not triggered by push (on: %s)", quotedList(events))
+		return DoesNotPost, fmt.Sprintf("is not triggered by push (on: %s)", quotedList(events))
 	}
-	return false, "has an on: trigger that is not an event name, a list or a map"
+	return DoesNotPost, "has an on: trigger that is not an event name, a list or a map"
 }
 
-// pushFilterRunsOnMain checks the value under push: for a branch filter that
-// leaves main out. A push: with no value, or with no branch filter, runs on
-// every branch.
-func pushFilterRunsOnMain(filter *yaml.Node) (ok bool, why string) {
-	if filter.Kind == yaml.ScalarNode && filter.Tag == "!!null" {
-		return true, ""
+// pushFilterVerdict reads the value under push:. A push: with no value, or with no
+// branch filter, fires on every branch, so main is selected; a paths filter then
+// narrows which commits post.
+func pushFilterVerdict(filter *yaml.Node) (verdict PostVerdict, detail string) {
+	if isNull(filter) {
+		return PostsOnEveryPush, ""
 	}
 	if filter.Kind != yaml.MappingNode {
-		return false, "has a push: trigger that is not a map of filters"
+		return DoesNotPost, "has a push: trigger that is not a map of filters"
 	}
+	filters := make(map[string]*yaml.Node, len(filter.Content)/2)
 	for i := 0; i+1 < len(filter.Content); i += 2 {
-		key, value := filter.Content[i].Value, filter.Content[i+1]
-		switch key {
-		case "branches":
-			patterns := scalarValues(value)
-			hit, err := anyPatternMatches(patterns, "main")
+		filters[filter.Content[i].Value] = filter.Content[i+1]
+	}
+	if ok, why := branchFilterSelectsMain(filters["branches"], filters["branches-ignore"]); !ok {
+		return DoesNotPost, why
+	}
+	for _, key := range []string{"paths", "paths-ignore"} {
+		if !absent(filters[key]) {
+			return PostsForSomeCommits, fmt.Sprintf("%s: %s", key, quotedList(scalarValues(filters[key])))
+		}
+	}
+	return PostsOnEveryPush, ""
+}
+
+// branchFilterSelectsMain applies a push branch filter to main with Actions rules.
+// A pattern selects the branches it matches. A pattern starting with ! removes the
+// branches it matches from those selected so far. A list holding only ! patterns
+// selects every branch except those. branches-ignore then removes what it matches.
+func branchFilterSelectsMain(branches, ignored *yaml.Node) (ok bool, why string) {
+	selected := true
+	if !absent(branches) {
+		patterns := scalarValues(branches)
+		selected = !hasPositivePattern(patterns)
+		for _, p := range patterns {
+			hit, err := path.Match(strings.TrimPrefix(p, "!"), "main")
 			if err != nil {
 				return false, fmt.Sprintf("has a push branch filter that is not a valid pattern: %v", err)
 			}
 			if !hit {
-				return false, fmt.Sprintf("runs on push to branches %s, not main", quotedList(patterns))
+				continue
 			}
-		case "branches-ignore":
-			hit, err := anyPatternMatches(scalarValues(value), "main")
-			if err != nil {
-				return false, fmt.Sprintf("has a push branches-ignore filter that is not a valid pattern: %v", err)
-			}
-			if hit {
-				return false, "ignores push to main"
-			}
+			selected = !strings.HasPrefix(p, "!")
+		}
+		if !selected {
+			return false, fmt.Sprintf("runs on push to branches %s, not main", quotedList(patterns))
+		}
+	}
+	if !absent(ignored) {
+		patterns := scalarValues(ignored)
+		hit, err := anyPatternMatches(patterns, "main")
+		if err != nil {
+			return false, fmt.Sprintf("has a push branches-ignore filter that is not a valid pattern: %v", err)
+		}
+		if hit {
+			return false, fmt.Sprintf("ignores main on push (branches-ignore: %s)", quotedList(patterns))
 		}
 	}
 	return true, ""
+}
+
+// hasPositivePattern reports whether any pattern selects branches rather than
+// removing them.
+func hasPositivePattern(patterns []string) bool {
+	for _, p := range patterns {
+		if !strings.HasPrefix(p, "!") {
+			return true
+		}
+	}
+	return false
+}
+
+// absent reports whether a filter key is missing or has no value.
+func absent(node *yaml.Node) bool {
+	return node == nil || isNull(node)
+}
+
+// isNull reports whether a node is a bare null, such as an on: or push: with no value.
+func isNull(node *yaml.Node) bool {
+	return node.Kind == yaml.ScalarNode && node.Tag == "!!null"
 }
 
 // scalarValues returns the strings a node holds: a scalar is one, a sequence
