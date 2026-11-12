@@ -394,6 +394,8 @@ func TestCloudCheckStatusWrittenByARun(t *testing.T) {
 		{"left by an earlier run, not rewritten", put("{}", old), nothing, false},
 		{"left by an earlier run, rewritten", put("{}", old), put("{}", cloudCheckNow), true},
 		{"rewritten with the same modification time", put("{}", old), put(`{"at":1}`, old), true},
+		{"rewritten with the same size and modification time", put(`{"at":1}`, old), put(`{"at":2}`, old), true},
+		{"rewritten with the same bytes, size and modification time", put(`{"at":1}`, old), put(`{"at":1}`, old), false},
 		{"left by an earlier run, removed", put("{}", old), remove, false},
 	}
 	for _, tt := range cases {

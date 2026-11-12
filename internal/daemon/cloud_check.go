@@ -149,24 +149,31 @@ func cloudCheckCommand(cfg *DaemonPatrolConfig) string {
 // errCloudCheckNoStatus marks a run that exited 0 without writing its status file.
 var errCloudCheckNoStatus = errors.New("exit 0 without writing the status file")
 
-// cloudCheckStatusFile is the status file's state at one moment: its info when
-// it is present, or the stat error that says it is absent or unreadable.
+// cloudCheckStatusFile is the status file's state at one moment: its info and
+// bytes when it is readable, or the error that says it is absent or unreadable.
 type cloudCheckStatusFile struct {
 	info fs.FileInfo
+	body string
 	err  error
 }
 
 // cloudCheckStatusFileOf reads the state of the status file at path.
 func cloudCheckStatusFileOf(path string) cloudCheckStatusFile {
 	info, err := os.Stat(path)
-	return cloudCheckStatusFile{info: info, err: err}
+	if err != nil {
+		return cloudCheckStatusFile{err: err}
+	}
+	body, err := os.ReadFile(path)
+	return cloudCheckStatusFile{info: info, body: string(body), err: err}
 }
 
 // cloudCheckWritten reports whether the run wrote the status file, from its
 // state before the run and after it. The file is written when it is present
-// afterward and was absent before, or its modification time or size changed.
-// Both sides are the filesystem's own record, so the decision does not depend on
-// the daemon's clock. A file unreadable before the run is unknown, not written.
+// afterward and was absent before, or when its modification time, size or bytes
+// changed. The bytes are compared because a same-size rewrite within one
+// modification-time tick leaves the first two unchanged. A rewrite that leaves
+// all three as they were reads as not written, so the alert stays. A file
+// unreadable before the run is unknown, not written.
 func cloudCheckWritten(before, after cloudCheckStatusFile) bool {
 	if after.err != nil {
 		return false
@@ -177,7 +184,9 @@ func cloudCheckWritten(before, after cloudCheckStatusFile) bool {
 	if before.err != nil {
 		return false
 	}
-	return !after.info.ModTime().Equal(before.info.ModTime()) || after.info.Size() != before.info.Size()
+	return !after.info.ModTime().Equal(before.info.ModTime()) ||
+		after.info.Size() != before.info.Size() ||
+		before.body != after.body
 }
 
 // cloudCheckStatusPath is the status file for a town: the path the dashboard
