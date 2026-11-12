@@ -245,17 +245,6 @@ type TownSettings struct {
 	// (operator.names, gt-ywuip). Absent, no name is entitled: the setting
 	// fails closed, and the overseer sets it before the install that reads it.
 	Operator *OperatorConfig `json:"operator,omitempty"`
-
-	// ForgejoStack locates the Forgejo compose stack. No gt command starts or
-	// stops it since gt power was removed (gt-a2uug4.17).
-	ForgejoStack *ForgejoStackConfig `json:"forgejo,omitempty"`
-}
-
-// ForgejoStackConfig is where the Forgejo compose stack lives.
-type ForgejoStackConfig struct {
-	// Dir is the stack's directory, the one docker compose runs in. Empty
-	// means ~/forgejo.
-	Dir string `json:"dir,omitempty"`
 }
 
 // DashboardConfig is gt dashboard's own settings.

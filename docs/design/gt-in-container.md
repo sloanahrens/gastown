@@ -26,7 +26,7 @@ Ladder, in order:
 2. If the container is not running, `docker run --rm` of the same image tag with the same mounts, so `gt` still answers while the daemon is down.
 3. If Docker itself is down, print what is down (Docker Desktop, a Colima VM, the container) and the command that starts it, and exit non-zero. There is no native fallback binary.
 
-Rung 2 must be an allowlist, because a throwaway container can run beside a daemon the probe missed. The wrapper may run a rung-2 call only when its arguments match a command the allowlist names as read-only: `gt status`, `gt prime`, `gt hook`, `gt mail inbox`, `bd show`, `bd list` and `bd ready`. Every other call must be refused under rung 2 with the rung-3 start command, and the refusal exits non-zero. Commands that start, stop, restart or repair the daemon or Dolt must never be on the list, for example `gt daemon`, `gt dolt`, `gt up`, `gt down`, `gt power`, and the start and stop verbs of rigs, crews and sessions. A command added later is refused under rung 2 until the list names it.
+Rung 2 must be an allowlist, because a throwaway container can run beside a daemon the probe missed. The wrapper may run a rung-2 call only when its arguments match a command the allowlist names as read-only: `gt status`, `gt prime`, `gt hook`, `gt mail inbox`, `bd show`, `bd list` and `bd ready`. Every other call must be refused under rung 2 with the rung-3 start command, and the refusal exits non-zero. Commands that start, stop, restart or repair the daemon or Dolt must never be on the list, for example `gt daemon`, `gt dolt`, `gt up`, `gt down`, and the start and stop verbs of rigs, crews and sessions. A command added later is refused under rung 2 until the list names it.
 
 Not yet enforced: `internal/gtwrap` `Launch` still runs any call under rung 2. The allowlist is a separate code change, decided by gt-6dob1b; until it lands, this paragraph is the required behaviour, not the current one.
 
@@ -72,7 +72,7 @@ Decided by the operator at 10:35 on 2026-11-11: the persistent claim is the one 
 | Colima VM disks | `colima ssh` | kubelet node stats, as the sandbox and control disk alerts already read them |
 | Host CPU idle share | host agent probes (`top` on the Mac) | read from the container's own cgroup: `cpu.stat` `usage_usec` sampled over one second, against the cores `cpu.max` allows |
 | Mac memory, exec tax, kalloc, launchd job state | host agent probes | dropped: the town's limits are the VMs, which the container and the kubelet see |
-| Stop and start the town | `gt power` and launchd | `docker compose down` and `up -d`, documented; the Mac keeps one launchd job that starts the Colima VMs |
+| Stop and start the town | the power states (removed, gt-a2uug4.17) and launchd | `docker compose down` and `up -d`, documented; the Mac keeps one launchd job that starts the Colima VMs |
 
 ## What is deleted
 
@@ -80,7 +80,7 @@ Each item is a candidate sized on main at design time; each deletion bead proves
 
 - The launchd-era daemon checks (`internal/doctor` daemon, job and respawn checks, `internal/templates` supervisor state and the launchd plist templates).
 - The host agent and `probes.json` (`internal/cmd` host agent, `internal/hostprobe`, about 3,200 lines with tests). `gt host load` and `internal/hostload` are already deleted (gt-yjzepk.17).
-- `gt power` (`internal/power`, about 3,900 lines with tests).
+- The power states (`internal/power`, about 3,900 lines with tests; gt-a2uug4.17).
 - The installer and update commands (`internal/installer`, about 8,800 lines with tests; the install is an image rollout).
 - The `cmux` bird spawner: deleted with its `gt bird spawn` command and the name-picking helpers it alone used (gt-a2uug4.19). The rest of `internal/bird` stays; `gt` never calls `cmux`.
 - The `lsof` orphan sweeps (`internal/util`), since polecats live in sandboxes. `diskutil` disk-space reads become portable `df`.

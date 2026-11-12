@@ -24,6 +24,10 @@ var toleratedKeys = map[string]bool{
 	// The sweep's idle wait went with its own Docker engine (gt-qpeei.8).
 	"daemon.patrols.tier_sweep.runner_idle_command": true,
 	"daemon.patrols.tier_sweep.runner_idle_wait":    true,
+	// Temporary: the Forgejo stack's directory was read only by the power
+	// states, which left gt (gt-a2uug4.17). The live settings file still
+	// carries the block; gt-x4wnny removes this entry once no file does.
+	"forgejo": true,
 }
 
 // toleratedKeyPath returns path in the form toleratedKeys writes it, and
