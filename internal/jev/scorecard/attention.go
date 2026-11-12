@@ -34,6 +34,7 @@ const (
 	ruleRejectedSuperseded    = "rejected-twice:superseded"
 	ruleRejectedLandedRoutine = "rejected-twice:landed-routine"
 	ruleClearedWithinWindow   = "cleared-within-15m"
+	ruleStillOpenPastWindow   = "still-open-past-window"
 )
 
 // beadShower reads one bead by id. *beads.Beads is one.
@@ -43,7 +44,7 @@ type beadShower interface {
 
 func init() {
 	Register(AttentionBattery, func(townRoot string) Adapter {
-		return &attentionAdapter{town: townRoot, beads: beads.New(townRoot), lines: map[string]jevattention.Line{}}
+		return &attentionAdapter{town: townRoot, beads: beads.New(townRoot), lines: map[string]jevattention.Line{}, now: time.Now}
 	})
 }
 
@@ -53,6 +54,8 @@ func init() {
 type attentionAdapter struct {
 	town  string
 	beads beadShower
+	// now is the clock a standing item's window is read against.
+	now func() time.Time
 	// lines holds each parsed line by item ID, so Label has the line's key,
 	// kind, bead and commit. Build parses every line before it labels any.
 	lines map[string]jevattention.Line
@@ -115,7 +118,8 @@ func (a *attentionAdapter) Parse(raw []byte) (Item, error) {
 // Label finds the labels for one logged item, in order: a disposition a human
 // gave it in the acks history, which wins over everything else; else the
 // clearing mechanism of its kind; else the self-clear window. An item still
-// standing with no disposition is unlabeled.
+// standing with no disposition is false once its self-clear window has passed
+// (still-open-past-window) and unlabeled inside it.
 func (a *attentionAdapter) Label(ctx context.Context, item Item) (Labeling, error) {
 	line, ok := a.lines[item.ID]
 	if !ok {
@@ -135,6 +139,11 @@ func (a *attentionAdapter) Label(ctx context.Context, item Item) (Labeling, erro
 		return askedLabels(item, dispositionLabeling(d)), nil
 	}
 	if rec.ClearedAt == nil {
+		// Still standing: nothing cleared it, so once its window has passed it
+		// did not clear on its own. An ack of any kind does not change that.
+		if a.now().Sub(rec.FirstSeen) > selfClearWindow {
+			return askedLabels(item, Labeling{Labeled: true, Labels: map[QuestionID]bool{jevattention.QClearsOnItsOwn: false}, Rule: ruleStillOpenPastWindow}), nil
+		}
 		return Labeling{}, nil
 	}
 
