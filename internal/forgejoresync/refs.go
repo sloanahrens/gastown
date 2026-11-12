@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/forgejoprov"
 	"github.com/steveyegge/gastown/internal/util"
 )
 
@@ -160,11 +162,34 @@ func gitRunnerWith(bound time.Duration, start func(ctx context.Context, name str
 // and ctx ending kills the whole group, so a remote helper git spawned goes too;
 // WaitDelay then stops Output waiting on a pipe a helper outside the group holds.
 func gitCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return gitCommandIn(ctx, os.Environ(), name, args...)
+}
+
+// gitCommandIn is gitCommand over the environment it is handed, so a test pins
+// what a git child inherits without starting git.
+func gitCommandIn(ctx context.Context, environ []string, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	util.SetProcessGroup(cmd)
 	cmd.WaitDelay = gitWaitDelay
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(gitChildEnv(environ), "GIT_TERMINAL_PROMPT=0")
 	return cmd
+}
+
+// adminTokenEnvs are the variables the admin token arrives in. No git child the
+// cutover starts inherits either: git and its helpers need HOME and PATH, not the
+// token, and a child that is handed it is a second place the token can leak.
+var adminTokenEnvs = []string{forgejoprov.BrokerTokenEnv, "FORGEJO_ADMIN_TOKEN"} //nolint:gosec // G101: the variables' names, not credentials
+
+// gitChildEnv drops the admin token variables from environ, and keeps the rest.
+func gitChildEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		key, _, _ := strings.Cut(kv, "=")
+		if !slices.Contains(adminTokenEnvs, key) {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // execRunner wraps a process starter as a Runner. Its error names the program
