@@ -68,7 +68,7 @@ var gitEnvOverrides = []string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"}
 
 // OSGit runs git on the host, in dir, with args as an argument list and no shell.
 // It is bounded by gitTimeout. The subprocess answers in English, so the refusal
-// of a directory outside any repository is recognised, and it does not inherit
+// of a directory outside any repository is recognized, and it does not inherit
 // the variables that would point it elsewhere than dir. An error names the
 // subcommand and the first line of what git said, so a refusal such as
 // "dubious ownership" reaches the caller.
