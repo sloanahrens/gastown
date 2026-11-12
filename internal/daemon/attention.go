@@ -686,6 +686,9 @@ func (s *attentionSources) collectors() []attentionCollector {
 		// The patrol config that does not load is raised beside the env item
 		// (gt-6frjqf).
 		{kind: attention.KindConfigParseFailed, collect: s.collectConfigParseFailed},
+		// A kept sandbox seat past its window (gt-l38v7r). The owns predicate
+		// keeps only its own items when the read fails.
+		{kind: attention.KindSandboxSeatKept, collect: s.collectKeptSandboxSeats, owns: keptSandboxSeatItem},
 	}, s.questionCollectors()...)
 }
 

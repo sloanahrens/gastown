@@ -144,6 +144,10 @@ const (
 	// heartbeat reload, so the daemon runs on the config it had before the
 	// edit (gt-6frjqf).
 	KindConfigParseFailed Kind = "config-parse-failed"
+	// KindSandboxSeatKept: the daemon has kept a sandbox seat for a reason other
+	// than the jev_rules ask for longer than the window, so the seat holds its
+	// pool slot and worktree while the reason stands (gt-l38v7r).
+	KindSandboxSeatKept Kind = "sandbox-seat-kept"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -160,7 +164,7 @@ func Kinds() []Kind {
 		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 		KindBirdReportStale, KindPostLandUnknown, KindGreenRef, KindDoltImageBehind,
 		KindDeployPairReady, KindDeployPairUnreadable, KindImagesFailed, KindImagesUnknown,
-		KindConfigEnvShadowed, KindConfigParseFailed,
+		KindConfigEnvShadowed, KindConfigParseFailed, KindSandboxSeatKept,
 	}
 }
 
