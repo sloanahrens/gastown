@@ -43,7 +43,9 @@ var townClusterRenderCmd = &cobra.Command{
 	Long: `Write one numbered file per object into --out, in apply order: the namespace,
 the claims, the service account, the Forgejo Service, the bindings, the seed
 helper Pod (with --with-helper) and the Deployment. With --dashboard, the
-dashboard's Service and Deployment are written too, in the same order.
+dashboard's Service and Deployment are written too, in the same order. With
+--tracker, trackerd's Service and Deployment follow the same way; the render
+names the Secret holding its DSN and never reads the DSN.
 
 Secret documents are not written. The command prints, for each Secret the
 Deployment mounts, one kubectl line that creates it from the operator's existing
@@ -90,6 +92,8 @@ type clusterRenderFlags struct {
 	dashboard          bool
 	dashboardClaudeDir string
 	daemonClaudeDir    string
+	tracker            bool
+	trackerDSNSecret   string
 }
 
 var clusterRender clusterRenderFlags
@@ -174,6 +178,10 @@ func init() {
 		"the Mac's ~/.claude directory, an absolute path, mounted read-only in the dashboard at /root/.claude; it needs --dashboard")
 	townClusterRenderCmd.Flags().StringVar(&clusterRender.daemonClaudeDir, "daemon-claude-dir", "",
 		"the Mac's ~/.claude directory, an absolute path, whose projects directory is mounted read-only in the daemon at /root/.claude-host/projects, beside the pod's own /root/.claude, where the usage scan reads the host's transcripts")
+	townClusterRenderCmd.Flags().BoolVar(&clusterRender.tracker, "tracker", false,
+		"also write trackerd's Service and Deployment beside the daemon's; it needs --tracker-dsn-secret and --proxy-image (a live render only)")
+	townClusterRenderCmd.Flags().StringVar(&clusterRender.trackerDSNSecret, "tracker-dsn-secret", "",
+		"the name of the Secret whose dsn key holds the tracker's connection string; the render prints the name and never reads the DSN; it needs --tracker")
 
 	townClusterCmd.AddCommand(townClusterRenderCmd)
 	townCmd.AddCommand(townClusterCmd)
@@ -228,6 +236,14 @@ func (f clusterRenderFlags) validate() error {
 		return fmt.Errorf("--dashboard-claude-dir %q must be an absolute path: the pod names the host directory", f.dashboardClaudeDir)
 	case f.daemonClaudeDir != "" && !filepath.IsAbs(f.daemonClaudeDir):
 		return fmt.Errorf("--daemon-claude-dir %q must be an absolute path: the pod names the host directory", f.daemonClaudeDir)
+	case f.rehearsal && f.tracker:
+		return errors.New("--tracker is for a live render: a rehearsal never runs trackerd, so drop --rehearsal or --tracker")
+	case f.tracker && strings.TrimSpace(f.trackerDSNSecret) == "":
+		return errors.New("--tracker needs --tracker-dsn-secret: name the Secret whose dsn key holds the tracker's connection string, or trackerd starts with no DSN")
+	case f.tracker && strings.TrimSpace(f.proxyImage) == "":
+		return errors.New("--tracker needs --proxy-image: the socat relay that publishes trackerd runs that image, and an empty one has nothing to run")
+	case !f.tracker && strings.TrimSpace(f.trackerDSNSecret) != "":
+		return errors.New("--tracker-dsn-secret is for the tracker: name --tracker with it, or drop the flag")
 	case !filepath.IsAbs(f.configDir):
 		return fmt.Errorf("--config-dir %q must be an absolute path: the create commands are run from another directory", f.configDir)
 	case !filepath.IsAbs(f.openShellConfigDir):
@@ -345,6 +361,8 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 		Dashboard:               f.dashboard,
 		DashboardClaudeDir:      f.dashboardClaudeDir,
 		DaemonClaudeDir:         f.daemonClaudeDir,
+		Tracker:                 f.tracker,
+		TrackerDSNSecret:        strings.TrimSpace(f.trackerDSNSecret),
 	}
 	if !f.rehearsal {
 		// The live pod's arguments equal the live compose command's: the om token
@@ -408,6 +426,12 @@ func runClusterRender(d clusterRenderDeps, f clusterRenderFlags) error {
 	fmt.Fprintln(d.out, "Apply the namespace file first so it exists. Then create each Secret from its file, and apply the rest in the order listed:")
 	for _, l := range lines {
 		fmt.Fprintf(d.out, "  %s\n", l)
+	}
+	// The DSN Secret is read by trackerd as an environment variable, so no volume
+	// names it and no create line above covers it. The render names it and never
+	// reads its value.
+	if f.tracker {
+		fmt.Fprintf(d.out, "  %s\n", trackerSecretLine(strings.TrimSpace(f.trackerDSNSecret)))
 	}
 	if !f.rehearsal {
 		fmt.Fprintf(d.out, "Wrote the running values file to %s. The daemon pod reads its own town copy, so copy it there too:\n", townValues)
@@ -575,6 +599,13 @@ func secretCreateLines(m k8sdaemon.Manifests, namespace, configDir, openShellDir
 		lines = append(lines, fmt.Sprintf("kubectl -n %s create secret generic %s %s", shellQuote(namespace), shellQuote(name), strings.Join(froms, " ")))
 	}
 	return lines, nil
+}
+
+// trackerSecretLine names the Secret trackerd reads its DSN from, and the key.
+// It is a note, not a create command: the operator creates the Secret, and the
+// render never sees the DSN.
+func trackerSecretLine(name string) string {
+	return fmt.Sprintf("trackerd reads its DSN from Secret %s under key %s: create it yourself before the apply; this render does not read it", name, k8sdaemon.TrackerDSNKey)
 }
 
 // fromFileArg is one --from-file argument: the Secret key and the operator's

@@ -1500,6 +1500,122 @@ func requireErrorNames(t *testing.T, err error, want ...string) {
 	}
 }
 
+// TestTownClusterRenderTrackerFlag holds --tracker: trackerd's Service and
+// Deployment follow the daemon's in apply order, each refusal names the flag it
+// is about before anything is written, and the DSN Secret is named, never read.
+func TestTownClusterRenderTrackerFlag(t *testing.T) {
+	t.Parallel()
+
+	trackerFixture := func(t *testing.T) clusterRenderFlags {
+		t.Helper()
+		f := clusterRenderFixture(t)
+		f.tracker = true
+		f.trackerDSNSecret = "gt-trackerd-dsn"
+		f.proxyImage = clusterRenderDaemonDigest
+		f.hostGateway = "192.168.64.1"
+		return f
+	}
+
+	t.Run("the pair is written after the daemon objects in apply order", func(t *testing.T) {
+		f := trackerFixture(t)
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		want := []string{
+			"01-namespace-gt.yaml",
+			"02-persistentvolumeclaim-town-state.yaml",
+			"03-persistentvolumeclaim-landing-work.yaml",
+			"04-persistentvolumeclaim-dolt-backup.yaml",
+			"05-serviceaccount-daemon.yaml",
+			"06-service-forgejo.yaml",
+			"07-service-trackerd.yaml",
+			"08-rolebinding-daemon-sweep-runner.yaml",
+			"09-rolebinding-daemon-gt-ci-cache-trim.yaml",
+			"10-clusterrolebinding-daemon-gt-sweep-reader.yaml",
+			"11-deployment-daemon.yaml",
+			"12-deployment-trackerd.yaml",
+		}
+		if got := dirNames(t, f.out); !slices.Equal(got, want) {
+			t.Fatalf("file names = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("each refusal names its flag and writes nothing", func(t *testing.T) {
+		tests := []struct {
+			name   string
+			mutate func(f *clusterRenderFlags)
+			names  []string
+		}{
+			{
+				name: "with a rehearsal",
+				mutate: func(f *clusterRenderFlags) {
+					f.rehearsal = true
+					f.namespace = "gt-rehearsal"
+					f.forgeHost = ""
+				},
+				names: []string{"--tracker", "--rehearsal"},
+			},
+			{
+				name:   "without the DSN Secret name",
+				mutate: func(f *clusterRenderFlags) { f.trackerDSNSecret = "  " },
+				names:  []string{"--tracker-dsn-secret"},
+			},
+			{
+				name:   "without a proxy image",
+				mutate: func(f *clusterRenderFlags) { f.proxyImage = "" },
+				names:  []string{"--proxy-image"},
+			},
+			{
+				name:   "the DSN Secret without the tracker",
+				mutate: func(f *clusterRenderFlags) { f.tracker = false },
+				names:  []string{"--tracker-dsn-secret", "--tracker"},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				f := trackerFixture(t)
+				tt.mutate(&f)
+				var out bytes.Buffer
+				requireErrorNames(t, runClusterRender(clusterRenderTestDeps(t, &out), f), tt.names...)
+				if _, err := os.Stat(f.out); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("--out was created by a refused render: stat = %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("the DSN Secret is named and its value is never printed or written", func(t *testing.T) {
+		f := trackerFixture(t)
+		var out bytes.Buffer
+		if err := runClusterRender(clusterRenderTestDeps(t, &out), f); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		if !strings.Contains(out.String(), "reads its DSN from Secret gt-trackerd-dsn under key dsn") {
+			t.Fatalf("the output does not name the DSN Secret and its key:\n%s", out.String())
+		}
+		// The DSN Secret is read as an environment variable, so no create line
+		// names it: a create line would need a value the render does not have.
+		for _, l := range createLines(out.String()) {
+			if strings.Contains(l, "gt-trackerd-dsn") {
+				t.Errorf("a create line names the DSN Secret: %s", l)
+			}
+		}
+		if strings.Contains(out.String(), "postgres://") {
+			t.Errorf("the output holds a DSN-shaped string:\n%s", out.String())
+		}
+		for _, name := range dirNames(t, f.out) {
+			data, err := os.ReadFile(filepath.Join(f.out, name))
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+			if strings.Contains(string(data), "postgres://") {
+				t.Errorf("%s holds a DSN-shaped string", name)
+			}
+		}
+	})
+}
+
 // TestTownClusterRenderWritesTheRunningValuesFile holds a live render to the
 // town's own values file, the one the pair-ready check reads the running commit
 // from (gt-tju7oo).
