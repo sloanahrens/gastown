@@ -814,6 +814,36 @@ type patrolRestartFailure struct {
 	scans int
 }
 
+// patrolRestartDiverged marks a failed patrol restart whose cause is a refused
+// push of a branch that diverged from origin. The restart's child reports its
+// failure as text only, so restartPolecatSession sets this where it reads that
+// text, and notePatrolRestart decides on the type rather than on the text
+// (gt-qoqxzi). Its text is the failure the executor built, unchanged, so an
+// alert names the cause the child gave.
+type patrolRestartDiverged struct{ err error }
+
+func (e *patrolRestartDiverged) Error() string { return e.err.Error() }
+func (e *patrolRestartDiverged) Unwrap() error { return e.err }
+
+// patrolRestartChildDiverged reports whether a failed restart's child error
+// block names a branch that diverged from origin. A failure can mention
+// session.BranchDivergedMarker without being the divergence, so the match also
+// requires the word "branch" two fields before the marker: the shape
+// session.BranchDivergedError renders is "branch <ref> <marker>", and a git ref
+// holds no whitespace (gt-qoqxzi).
+func patrolRestartChildDiverged(childErr string) bool {
+	for {
+		before, rest, ok := strings.Cut(childErr, session.BranchDivergedMarker)
+		if !ok {
+			return false
+		}
+		if fields := strings.Fields(before); len(fields) >= 2 && fields[len(fields)-2] == "branch" {
+			return true
+		}
+		childErr = rest
+	}
+}
+
 // patrolRestartKey is the alert key a seat's repeated restart failure is
 // filed under. One key per seat, so a condition that lasts across many
 // scans leaves one open escalation behind, as the stable keys of the other
@@ -824,8 +854,8 @@ func patrolRestartKey(rig, name string) string {
 
 // notePatrolRestart records how one patrol scan's restart attempt ended for a
 // seat and escalates a seat whose restart has failed with the same cause on
-// two consecutive scans, naming the seat and the cause (gt-6hhp8). A cause that
-// carries the diverged-branch marker escalates on its first failed scan
+// two consecutive scans, naming the seat and the cause (gt-6hhp8). A failure
+// holding a patrolRestartDiverged escalates on its first failed scan
 // (gt-mqxa26).
 //
 // The alert clears on the first restart that succeeds, and only that clears
@@ -844,6 +874,8 @@ func patrolRestartKey(rig, name string) string {
 // with nothing open under it clears with no error. A clear the town refuses is
 // not remembered, so the next success tries it again (gt-7tz5f).
 func (d *Daemon) notePatrolRestart(rig, name string, err error) {
+	var diverged *patrolRestartDiverged
+	divergedRestart := errors.As(err, &diverged)
 	key := patrolRestartKey(rig, name)
 	d.patrolRestartFailsMu.Lock()
 	if d.patrolRestartTried == nil {
@@ -885,18 +917,26 @@ func (d *Daemon) notePatrolRestart(rig, name string, err error) {
 	// land until someone reads the two heads, and a second scan may never come
 	// (gt-mqxa26). Any other cause waits for its second scan.
 	threshold := 2
-	if strings.Contains(cause, session.BranchDivergedMarker) {
+	if divergedRestart {
 		threshold = 1
 	}
 	escalate := last.scans == threshold
 	delete(d.patrolRestartCleared, key)
 	d.patrolRestartFailsMu.Unlock()
 
-	if escalate {
-		d.escalateAlert(key, "patrol-restart", fmt.Sprintf(
-			"%s/%s: the patrol scan could not restart the seat on %d consecutive scan(s), same cause: %s",
-			rig, name, last.scans, cause))
+	if !escalate {
+		return
 	}
+	if last.scans == 1 {
+		// A cause escalated on its first failed scan has no run of consecutive
+		// scans to name (gt-qoqxzi).
+		d.escalateAlert(key, "patrol-restart", fmt.Sprintf(
+			"%s/%s: the patrol scan could not restart the seat: %s", rig, name, cause))
+		return
+	}
+	d.escalateAlert(key, "patrol-restart", fmt.Sprintf(
+		"%s/%s: the patrol scan could not restart the seat on %d consecutive scans, same cause: %s",
+		rig, name, last.scans, cause))
 }
 
 // endPatrolRestartScan closes one rig's patrol scan for the restart runs. A
@@ -1149,7 +1189,9 @@ func (h *patrolScanHost) Comment(beadID, text string) error {
 // the seat has and starts a fresh one in the preserved worktree. It runs
 // only after the supervisor's guards passed. The daemon never restarts a
 // polecat outside the patrol_scan tick, so a restart for a rig the tick does
-// not cover is declined.
+// not cover is declined. A failure whose child error block reads as a branch
+// that diverged from origin is returned as a patrolRestartDiverged, which the
+// patrol escalates on its first scan (gt-mqxa26).
 func (d *Daemon) restartPolecatSession(seat supervisor.Seat) error {
 	if !d.patrolScanActiveForRig(seat.Rig) {
 		return fmt.Errorf("%w: patrol_scan does not cover rig %s", supervisor.ErrDeclined, seat.Rig)
@@ -1165,7 +1207,12 @@ func (d *Daemon) restartPolecatSession(seat supervisor.Seat) error {
 	cmd.Env = daemonGTEnv(os.Environ())
 	out, err := d.combinedOutput(cmd)
 	if err != nil {
-		return fmt.Errorf("gt session restart %s/%s: %w: %s", seat.Rig, seat.Name, err, childErrorLine(string(out)))
+		cause := childErrorLine(string(out))
+		failure := fmt.Errorf("gt session restart %s/%s: %w: %s", seat.Rig, seat.Name, err, cause)
+		if patrolRestartChildDiverged(cause) {
+			return &patrolRestartDiverged{err: failure}
+		}
+		return failure
 	}
 	return nil
 }
