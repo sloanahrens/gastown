@@ -1216,7 +1216,7 @@ func TestDoltEndpointContainerHost(t *testing.T) {
 	}{
 		{"container mode uses container_host", withContainerHost, "", containerMode, containerHost},
 		{"outside container mode keeps dolt.host", withContainerHost, "", nil, localHost},
-		{"another supervisor kind keeps dolt.host", withContainerHost, "", []string{ContainerModeEnv, SupervisorLaunchd}, localHost},
+		{"another supervisor kind keeps dolt.host", withContainerHost, "", []string{ContainerModeEnv, "launchd"}, localHost},
 		{"container mode without container_host keeps dolt.host", withoutContainerHost, "", containerMode, localHost},
 		{"container mode with a blank container_host keeps dolt.host", blankContainerHost, "", containerMode, localHost},
 		{"container mode leaves the config.yaml fallback alone", testTownJSON + `}`, "listener:\n  host: 127.0.0.2\n  port: 3309\n", containerMode, "127.0.0.2"},

@@ -365,37 +365,8 @@ func TestStartDaemon_UnsupportedOSSpawnsDirectly(t *testing.T) {
 	}
 }
 
-// A macOS town has no supervisor kind gt can drive, so its start is a hand
-// spawn. A launchd job the operator left loaded would run beside that spawn,
-// so the start refuses and names the job; an unreadable job is refused too,
-// since an unknown state is not a clean one.
-func TestStartDaemon_DarwinRefusesALeftoverLaunchdJob(t *testing.T) {
-	t.Parallel()
-	for _, row := range []struct {
-		name  string
-		state templates.SupervisorState
-	}{
-		{"loaded", templates.SupervisorState{Loaded: true, LastExit: -1}},
-		{"unreadable", templates.SupervisorState{LastExit: -1, Err: errors.New("launchctl print failed")}},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			t.Parallel()
-			c, calls := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"), row.state, nil)
-
-			_, _, err := c.startDaemon(t.TempDir())
-
-			if err == nil || !strings.Contains(err.Error(), templates.LaunchdLabel) {
-				t.Fatalf("startDaemon = %v, want a refusal naming the leftover %s job", err, templates.LaunchdLabel)
-			}
-			if calls.spawned || len(calls.argv) != 0 {
-				t.Fatalf("spawned=%v argv=%v, want nothing launched beside the job", calls.spawned, calls.argv)
-			}
-		})
-	}
-}
-
-// With no launchd job left behind, a macOS start is the hand spawn it has
-// always been.
+// A macOS start is the hand spawn it has always been: no supervisor kind gt
+// drives there, and no launchd job is read first.
 func TestStartDaemon_DarwinSpawnsWhenNoLaunchdJobIsLoaded(t *testing.T) {
 	t.Parallel()
 	c, calls := stubSupervisor(t, "darwin", filepath.Join(t.TempDir(), "absent.plist"),
@@ -1484,7 +1455,7 @@ func TestDaemonStatus_UnreadableSettings(t *testing.T) {
 			if !strings.Contains(out.String(), "Supervised: unknown (unverified - ") {
 				t.Errorf("status output = %q, want the supervisor line unverified", out.String())
 			}
-			if strings.Contains(out.String(), config.SupervisorLaunchd) {
+			if strings.Contains(out.String(), "launchd") {
 				t.Errorf("status output = %q, reads the host's supervisor for a town whose settings could not be read", out.String())
 			}
 			if !tt.container {
@@ -2017,15 +1988,15 @@ func TestEnableSupervisorOn_RefusesAHostWithoutASupervisor(t *testing.T) {
 	}
 }
 
-// A setting this host has no manager for is refused rather than answered with
-// the host's own: driving systemd for a town that asked for launchd is not
-// what the setting says.
+// A setting gt does not run is refused rather than answered with the host's
+// own: driving systemd for a town that asked for launchd is not what the
+// setting says, and launchd is no longer an accepted kind (gt-o17leb).
 func TestDetectDaemonSupervisor_RefusesAKindThisHostCannotRun(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	c, _ := stubSupervisor(t, "linux", filepath.Join(t.TempDir(), "gastown-daemon.service"), loadedJob(), nil)
 	c.patrolConfig = func(string) (*config.DaemonPatrolConfig, error) {
-		return &config.DaemonPatrolConfig{Supervisor: config.SupervisorLaunchd}, nil
+		return &config.DaemonPatrolConfig{Supervisor: "launchd"}, nil
 	}
 
 	sup, err := c.detectDaemonSupervisor(town)
@@ -2254,7 +2225,7 @@ func TestRestartDaemon_ContainerRestartIsNotProvenByAnythingLess(t *testing.T) {
 	good := stateReading{state: containerOwnerState(later, true)}
 	baseline := stateReading{state: containerOwnerState(restartBaselineStart, true)}
 	otherOwner := containerOwnerState(later, true)
-	other := daemon.Owner{Kind: config.SupervisorLaunchd, ID: templates.LaunchdLabel}
+	other := daemon.Owner{Kind: "launchd", ID: templates.LaunchdLabel}
 	otherOwner.Owner = &other
 	cases := []struct {
 		name      string

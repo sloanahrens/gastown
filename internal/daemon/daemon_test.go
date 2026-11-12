@@ -742,9 +742,11 @@ func TestDetectSelf(t *testing.T) {
 			want: Owner{Kind: "container", ID: "scratch-town-daemon-1"},
 		},
 		{
-			name: "a launchd job",
+			// The town's launchd label is no owner kind any more (gt-o17leb):
+			// a daemon carrying it is a hand-run daemon.
+			name: "the town's launchd label is not an owner",
 			env:  map[string]string{"XPC_SERVICE_NAME": "com.gastown.daemon"},
-			want: Owner{Kind: "launchd", ID: "com.gastown.daemon"},
+			want: Owner{Kind: "manual", ID: fmt.Sprintf("fixture-host:%d", os.Getpid())},
 		},
 		{
 			// An app-launched process carries its own XPC service name, which
@@ -786,9 +788,9 @@ func TestDetectSelf(t *testing.T) {
 			want: Owner{Kind: "container", ID: "scratch-town-daemon-1"},
 		},
 		{
-			name: "launchd outranks systemd",
+			name: "a launchd label does not outrank systemd",
 			env:  map[string]string{"XPC_SERVICE_NAME": "com.gastown.daemon", "INVOCATION_ID": "9f2c4d1e"},
-			want: Owner{Kind: "launchd", ID: "com.gastown.daemon"},
+			want: Owner{Kind: "systemd", ID: "9f2c4d1e"},
 		},
 	}
 	for _, tc := range cases {
@@ -805,8 +807,8 @@ func TestDetectSelf(t *testing.T) {
 	}
 
 	// Only the manual owner's id carries the host name, so only that path may
-	// read it: a launchd, systemd or container start that failed here would be
-	// refused for an id it never writes (gt-qpeei.12).
+	// read it: a systemd or container start that failed here would be refused
+	// for an id it never writes (gt-qpeei.12).
 	t.Run("the service managers never read the hostname", func(t *testing.T) {
 		t.Parallel()
 		unreadable := func() (string, error) {
@@ -818,11 +820,6 @@ func TestDetectSelf(t *testing.T) {
 			env  map[string]string
 			want Owner
 		}{
-			{
-				name: "launchd",
-				env:  map[string]string{"XPC_SERVICE_NAME": "com.gastown.daemon"},
-				want: Owner{Kind: "launchd", ID: "com.gastown.daemon"},
-			},
 			{
 				name: "systemd",
 				env:  map[string]string{"INVOCATION_ID": "9f2c4d1e"},
@@ -994,36 +991,6 @@ func TestDaemonStartWithoutBuildCommitSaysSo(t *testing.T) {
 	}
 	if len(warnings) != 1 {
 		t.Fatalf("warning lines = %q, want one naming the unknown build commit", warnings)
-	}
-}
-
-// TestRunWritesLaunchdOwner pins the owner at the call site that gives it
-// meaning: a daemon launchd started records the job label as its id, at start
-// and again at the shutdown save (gt-qpeei.12).
-func TestRunWritesLaunchdOwner(t *testing.T) {
-	t.Parallel()
-	cfg, finish := startParkedRun(t, map[string]string{"XPC_SERVICE_NAME": "com.gastown.daemon"})
-
-	state, err := LoadState(cfg.TownRoot)
-	if err != nil {
-		t.Fatalf("LoadState after the start-time writes = %v", err)
-	}
-	if want := (Owner{Kind: "launchd", ID: "com.gastown.daemon"}); state.Owner == nil || *state.Owner != want {
-		t.Fatalf("state.json owner = %+v, want %+v", state.Owner, want)
-	}
-
-	if err := finish(); err != nil {
-		t.Fatalf("Run after the daemon context ended = %v, want a clean shutdown", err)
-	}
-	stopped, err := LoadState(cfg.TownRoot)
-	if err != nil {
-		t.Fatalf("LoadState after the shutdown save = %v", err)
-	}
-	if stopped.Running {
-		t.Errorf("state.json running = true after Run returned, want the shutdown's clean stop")
-	}
-	if want := (Owner{Kind: "launchd", ID: "com.gastown.daemon"}); stopped.Owner == nil || *stopped.Owner != want {
-		t.Errorf("state.json owner after the shutdown save = %+v, want %+v: the clean stop must name who left it", stopped.Owner, want)
 	}
 }
 

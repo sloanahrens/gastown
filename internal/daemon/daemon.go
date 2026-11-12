@@ -2687,8 +2687,8 @@ var heartbeatSteps = []heartbeatStep{
 const OwnerKindManual = "manual"
 
 // DetectSelf names the owner of a daemon started from this process: the
-// container (ContainerNameEnv), the launchd job (LaunchdJobEnv), the systemd
-// unit (SystemdInvocationEnv), or manual ("hostname:pid"). Every environment
+// container (ContainerNameEnv), the systemd unit (SystemdInvocationEnv), or
+// manual ("hostname:pid"). Every environment
 // read goes through env so a test sets the fixture.
 //
 // hostname is read only for the manual owner: the other kinds name themselves
@@ -2703,9 +2703,6 @@ func DetectSelf(env func(string) string, hostname func() (string, error)) (Owner
 		}
 		return Owner{Kind: agentconfig.SupervisorContainer, ID: name}, nil
 	}
-	if label := launchdJob(env); label != "" {
-		return Owner{Kind: agentconfig.SupervisorLaunchd, ID: label}, nil
-	}
 	if invocation := env(agentconfig.SystemdInvocationEnv); invocation != "" {
 		return Owner{Kind: agentconfig.SupervisorSystemd, ID: invocation}, nil
 	}
@@ -2714,19 +2711,6 @@ func DetectSelf(env func(string) string, hostname func() (string, error)) (Owner
 		return Owner{}, fmt.Errorf("naming the daemon's owner: %w", err)
 	}
 	return Owner{Kind: OwnerKindManual, ID: fmt.Sprintf("%s:%d", host, os.Getpid())}, nil
-}
-
-// launchdJob returns the launchd job label that started this process, or ""
-// when launchd did not start it. Only the town's own job counts: macOS sets
-// LaunchdJobEnv to "0" in an ordinary user session, and an app-launched
-// process carries its own XPC service name, so either one recorded as a
-// launchd owner would name a job that is not the daemon's (gt-qpeei.27).
-func launchdJob(env func(string) string) string {
-	label := env(agentconfig.LaunchdJobEnv)
-	if label != templates.LaunchdLabel {
-		return ""
-	}
-	return label
 }
 
 // containerMode reports whether the compose file started this process as the

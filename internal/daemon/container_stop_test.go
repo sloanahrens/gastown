@@ -307,7 +307,7 @@ func TestIsRunningUnknownSettingsKeepsTheHostPath(t *testing.T) {
 // processes on this host, and a town that sets no kind is one of them.
 func TestIsRunningHostKindsStillNameThePIDFilePID(t *testing.T) {
 	t.Parallel()
-	for _, kind := range []string{agentconfig.SupervisorLaunchd, agentconfig.SupervisorSystemd, ""} {
+	for _, kind := range []string{"launchd", agentconfig.SupervisorSystemd, ""} {
 		name := kind
 		if name == "" {
 			name = "no kind set"

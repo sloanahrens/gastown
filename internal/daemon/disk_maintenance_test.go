@@ -2229,7 +2229,7 @@ func TestDiskMaintKubeconfigInContainerMode(t *testing.T) {
 	}{
 		{"container mode", agentconfig.SupervisorContainer, filepath.Join(town, ".runtime", "container", "kubeconfig.yaml")},
 		{"host, unset", "", filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig")},
-		{"launchd owner", agentconfig.SupervisorLaunchd, filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig")},
+		{"launchd owner", "launchd", filepath.Join(town, ".runtime", "sbx-k8s", "kubeconfig")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2309,7 +2309,7 @@ func TestDiskMaintContainerModeRegistryCollectUnavailable(t *testing.T) {
 	}{
 		{"container mode", agentconfig.SupervisorContainer, diskMaintCollectUnavailable},
 		{"host, unset", "", ""},
-		{"launchd owner", agentconfig.SupervisorLaunchd, ""},
+		{"launchd owner", "launchd", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
