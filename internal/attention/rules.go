@@ -132,6 +132,11 @@ const (
 	// heartbeat reload: the daemon keeps the config it had, and the overseer
 	// fixes the file (gt-6frjqf).
 	RuleConfigParseFailed = "config.parse_failed"
+
+	// RuleSandboxSeatKept is a sandbox seat the daemon keeps past its window: the
+	// seat holds its pool slot and worktree, and the reason the keep gave is the
+	// one the overseer has to act on (gt-l38v7r).
+	RuleSandboxSeatKept = "sandbox.seat_kept"
 )
 
 var (
@@ -224,6 +229,9 @@ var ruleFlags = map[string]RuleFlags{
 	// The daemon runs on the config it had, so the edit is not in force: the
 	// overseer is woken to fix the file (gt-6frjqf).
 	RuleConfigParseFailed: flagsWake,
+	// A kept seat past its window holds a pool slot and a worktree while its
+	// reason stands: the overseer is woken to act on the reason (gt-l38v7r).
+	RuleSandboxSeatKept: flagsWake,
 	// A question is waiting on the operator, or the operator has answered and
 	// the overseer has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -332,6 +340,7 @@ var kindRules = map[Kind]string{
 	KindDeployPairUnreadable:     RuleDeployPairUnreadable,
 	KindImagesFailed:             RuleImagesFailed,
 	KindImagesUnknown:            RuleImagesUnknown,
+	KindSandboxSeatKept:          RuleSandboxSeatKept,
 }
 
 // RuleFor is the rule id of an item. A disk collector's key is its rule

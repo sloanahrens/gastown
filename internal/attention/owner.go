@@ -131,6 +131,9 @@ var ruleOwners = map[string]Owner{
 	// The settings file is the overseer's to fix, the same as the stale
 	// daemon.env entry above (gt-6frjqf).
 	RuleConfigParseFailed: OwnerOverseer,
+	// A kept sandbox seat is the town's own seat to look at: the overseer reads
+	// the keep reason and acts on it before a person is woken (gt-l38v7r).
+	RuleSandboxSeatKept: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:
